@@ -52,7 +52,8 @@ def pending(device=Depends(device_auth)):
         if permitted:
             commands.append(command)
         else:
-            queue.cancel(command['id'], session_id)
+            # This claimed row never left the server; do not preserve a delivery claim.
+            queue.cancel(command['id'], session_id, undelivered=True)
     return {'commands': commands}
 
 

@@ -91,16 +91,17 @@ def get_working_dir_for_project(
     worktree_id: Optional[str] = None,
     session_id: Optional[str] = None,
 ) -> str:
-    """Get the working directory for a project, its worktree, or a v2 branch
-    session's own checkout (sessions.branch + project_v2_id).
+    """Resolve the session cwd first (chat lane, worktree or v2 branch).
+
+    Project-only callers retain the legacy project/workspace fallback.
     """
-    if not worktree_id and session_id:
-        from app.core.project_resolver import resolve_existing_cwd
+    if session_id:
+        from app.core.project_resolver import resolve_session_cwd
         from app.db import database
 
         session = database.get_session(session_id)
         if session:
-            cwd = resolve_existing_cwd(session)
+            cwd = resolve_session_cwd(session)
             if cwd:
                 return cwd
     result = resolve_project_path(
@@ -311,7 +312,9 @@ async def get_rewind_checkpoints(session_id: str, http_request: Request = None):
             )
 
         # Get working directory for project
-        working_dir = get_working_dir_for_project(session.get("project_id"))
+        working_dir = get_working_dir_for_project(
+            session.get("project_id"), session.get("worktree_id"), session_id
+        )
 
         # Get checkpoints from JSONL rewind service
         checkpoints = _get_checkpoints(sdk_session_id, working_dir)
@@ -655,7 +658,10 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
 
     working_dir = None
     if session.get("sdk_session_id") and not request.target_uuid.startswith("db-"):
-        working_dir = await run_sync(get_working_dir_for_project, session.get("project_id"))
+        working_dir = await run_sync(
+            get_working_dir_for_project,
+            session.get("project_id"), session.get("worktree_id"), session_id,
+        )
 
     sdk_session_id = session.get("sdk_session_id")
     if not sdk_session_id:
@@ -679,6 +685,31 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
     # rewind instead. Prefix-gated probe: a legacy session never queries.
     from app.core.provider.fluid_transcript import is_fluid_session
     fluid_session = await asyncio.to_thread(is_fluid_session, sdk_session_id)
+
+    def _would_reseed_without_checkout() -> bool:
+        from app.core.project_resolver import resolve_session_cwd
+        from app.core.provider.fluid_transcript import get_cli_session_id
+
+        bound_checkout = any(session.get(key) for key in (
+            "project_id", "project_v2_id", "worktree_id", "branch", "worktree_branch",
+        ))
+        return bool(
+            bound_checkout and get_cli_session_id(sdk_session_id)
+            and resolve_session_cwd(session) is None
+        )
+
+    # A native rewind only moves the Fluid head; it needs no checkout. Refuse
+    # ONLY a delegated write that would otherwise reseed in the fallback/base
+    # folder. Do it before any transcript/event/pool mutation, and use the
+    # existing response contract so the UI shows the explanation, not Unknown error.
+    if request.restore_chat and fluid_session and await run_sync(_would_reseed_without_checkout):
+        return RewindResponseV2(
+            success=False,
+            message="Cannot execute rewind",
+            error=("Session checkout is unavailable or on another branch. "
+                   "Send a message to recover a missing checkout, or restore the bound branch, "
+                   "then retry rewind."),
+        )
 
     logger.info(
         f"Rewind requested: session={session_id}, sdk_session={sdk_session_id}, "
@@ -824,6 +855,7 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
             request.target_uuid,
             request.include_response,
             request.target_role,
+            reset_session_id=session_id,
         )
         if fluid_result.success:
             chat_rewound = True
@@ -928,6 +960,7 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
                 target_uuid=request.target_uuid,
                 include_response=request.include_response,
                 target_role=request.target_role,
+                reset_session_id=session_id,
             )
             store_truncated = True
         except RewindTargetNotFound as store_nf:
@@ -1131,6 +1164,17 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
     else:
         message = "Rewind failed"
 
+    # The failure the rewound transcript showed went with it (#1032): the rewind's
+    # own transaction recorded that. Tell the sidebar now it has committed.
+    if request.restore_chat and chat_rewound:
+        spawn_detached(
+            sync_engine.broadcast_user_session_updated(
+                user_id=session.get("api_user_id") or "admin",
+                session_id=session_id,
+                updates={"last_turn_failed": False},
+            )
+        )
+
     # v2 event log: fold the successful chat rewind into the append-only log
     # (unfenced — a rewind happens between turns, with no owning run). A
     # resolved-but-tail target (rewound_from_seq is None) appends nothing.
@@ -1228,7 +1272,9 @@ async def execute_rewind_legacy(session_id: str, request: RewindRequest, http_re
         if http_request is not None:
             check_session_access(http_request, session)
 
-        working_dir = get_working_dir_for_project(session.get("project_id"))
+        working_dir = get_working_dir_for_project(
+            session.get("project_id"), session.get("worktree_id"), session_id
+        )
         return _get_checkpoints(session.get("sdk_session_id"), working_dir)
 
     checkpoints = await run_sync(_load_checkpoints)

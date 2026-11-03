@@ -194,6 +194,9 @@ const ROW_PATCHABLE_FIELDS: ReadonlySet<string> = new Set([
 	// A task chip was suggested or acted on (any chat, any device): sidebars
 	// are not watching that chat, so this is what lifts the row to Needs you.
 	'pending_task_chips',
+	// A turn started or ended: a sidebar not watching that chat learns here
+	// whether its latest turn failed.
+	'last_turn_failed',
 	'work_ms',
 	'work_started_at',
 	// A context-window pick made on another tab or device (#1895).

@@ -242,6 +242,6 @@ class ShuffleAccessibilityService : AccessibilityService() {
             for (i in 0 until node.childCount) { val child = node.getChild(i) ?: continue; visit(child, depth + 1); child.recycle() }
         }
         visit(root, 0); snapshot = Snapshot(pkg, root.windowId, fingerprint, SystemClock.elapsedRealtime(), refs)
-        return JSONObject().put("ok", true).put("package", pkg).put("snapshot", token).put("nodes", rows)
+        return ToolResultBounds.fit(JSONObject().put("ok", true).put("package", pkg).put("snapshot", token).put("nodes", rows))
     }
 }

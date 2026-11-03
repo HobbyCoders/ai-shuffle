@@ -427,28 +427,32 @@ class ChatActivity : NativeScreen() {
         WebViewCompat.addWebMessageListener(web, MobileUi.SHELL_BRIDGE, setOf(PairingInput.origin(server.baseUrl))) { _, message, origin, mainFrame, _ ->
             if (isFinishing || isDestroyed || message.type != WebMessageCompat.TYPE_STRING ||
                 !ChatAccessPolicy.message(server.baseUrl, web.url, origin.toString(), mainFrame, authorized())) return@addWebMessageListener
-            when (val parsed = MobileUi.shellMessage(message.data)) {
-                is MobileUi.ShellMessage.WorkerBar -> applyPageWorkerBar(parsed.shown)
-                is MobileUi.ShellMessage.OpenWorkers, is MobileUi.ShellMessage.OpenAppSettings ->
-                    ShellNavigation.intent(this, parsed)?.let { startActivity(it) }
-                is MobileUi.ShellMessage.VoiceCall -> {
-                    if (parsed.active) {
-                        if (voiceRouting == null) voiceRouting = VoiceAudioRouting(this) {
-                            if (validDocument()) web.evaluateJavascript("window.dispatchEvent(new Event('voiceaudiochange'))", null)
-                        }
-                        voiceRouting?.start()
-                        voiceCall.started(document)
-                        callKeptAlive()
-                    } else endVoiceCall()
-                }
-                is MobileUi.ShellMessage.VoiceCallState -> {
-                    voiceCall.update(document, parsed)
-                    if (parsed.status == "live") askForCallNotifications()
-                }
-                null -> Unit
-            }
+            handleShellMessage(MobileUi.shellMessage(message.data))
         }
         shellBridgeInstalled = true
+    }
+    /** Called only after the bridge has checked the paired origin, main frame and authorization. */
+    internal fun handleShellMessage(parsed: MobileUi.ShellMessage?) {
+        when (parsed) {
+            is MobileUi.ShellMessage.WorkerBar -> applyPageWorkerBar(parsed.shown)
+            is MobileUi.ShellMessage.OpenWorkers, is MobileUi.ShellMessage.OpenAppSettings ->
+                ShellNavigation.intent(this, parsed)?.let { startActivity(it) }
+            is MobileUi.ShellMessage.VoiceCall -> {
+                if (parsed.active) {
+                    if (voiceRouting == null) voiceRouting = VoiceAudioRouting(this) {
+                        if (validDocument()) web.evaluateJavascript("window.dispatchEvent(new Event('voiceaudiochange'))", null)
+                    }
+                    voiceRouting?.start()
+                    voiceCall.started(document)
+                    callKeptAlive()
+                } else endVoiceCall()
+            }
+            is MobileUi.ShellMessage.VoiceCallState -> {
+                voiceCall.update(document, parsed)
+                if (parsed.status == "live") askForCallNotifications()
+            }
+            null -> Unit
+        }
     }
     private fun applyPageWorkerBar(shown: Boolean) {
         pageRendersWorkerBar = shown

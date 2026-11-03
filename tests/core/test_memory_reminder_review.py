@@ -134,6 +134,7 @@ async def test_idle_compaction_restores_memory_before_current_frame(monkeypatch,
             })
             if put_back:
                 restored = await loop._cli_session_start({"source": "compact"})
+                await loop._acknowledge_note()  # the answer reached the CLI
                 assert mr.wrap(memory["section"]) in restored["hookSpecificOutput"]["additionalContext"]
             await loop._keep_between_turn_compaction({
                 "type": "system", "subtype": "status", "status": None,

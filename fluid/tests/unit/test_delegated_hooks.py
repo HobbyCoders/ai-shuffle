@@ -7,6 +7,8 @@ HookBus event the native loop emits at the same point.
 
 from __future__ import annotations
 
+import asyncio
+
 import json
 import sys
 from pathlib import Path
@@ -606,22 +608,28 @@ async def test_a_slow_note_is_skipped_at_its_deadline(tmp_path, monkeypatch) -> 
     assert output["hookSpecificOutput"]["additionalContext"] == expected_ledger
 
 
-async def test_the_note_is_capped(tmp_path) -> None:
-    from fluid.engine.delegated import COMPACT_CONTEXT_MAX_CHARS
+async def test_the_note_goes_back_in_parts_small_enough_to_reach_the_model(tmp_path) -> None:
+    """Claude Code keeps hook context over 10,000 characters in a file and shows
+    the model a 2 KB preview, so one answer stays under that, and the whole note
+    stays under its cap: the end of an overlong one is cut and says so."""
+    from fluid.engine.delegated import COMPACT_CONTEXT_MAX_CHARS, HOOK_CONTEXT_INLINE_CHARS
 
+    assert HOOK_CONTEXT_INLINE_CHARS < 10_000
     loop, written = await _loop(
         tmp_path, hooks=HookBus(), compact_context=_note_provider("x" * 100_000),
     )
     output = await _fire_main_compact(loop, written)
-    context = output["hookSpecificOutput"]["additionalContext"]
-    assert len(context) == COMPACT_CONTEXT_MAX_CHARS
-    assert context.endswith(
-        f"\n[note cut: it was longer than {COMPACT_CONTEXT_MAX_CHARS} characters]"
-    )
-    # A note at the cap goes out whole.
-    loop.compact_context = _note_provider("y" * COMPACT_CONTEXT_MAX_CHARS)
+    first = output["hookSpecificOutput"]["additionalContext"]
+    assert first.startswith("xxx") and len(first) <= HOOK_CONTEXT_INLINE_CHARS
+    assert first.endswith("\n[note continues in a later note]")
+    rest = await loop._finish_restoration()
+    assert len(rest) <= COMPACT_CONTEXT_MAX_CHARS
+    assert f"[note cut: it was longer than {COMPACT_CONTEXT_MAX_CHARS} characters]" in rest
+    # A note that fits one answer goes out whole, and is over at once.
+    loop.compact_context = _note_provider("y" * HOOK_CONTEXT_INLINE_CHARS)
     output = await _fire_main_compact(loop, written)
-    assert output["hookSpecificOutput"]["additionalContext"] == "y" * COMPACT_CONTEXT_MAX_CHARS
+    assert output["hookSpecificOutput"]["additionalContext"] == "y" * HOOK_CONTEXT_INLINE_CHARS
+    assert loop._restoration is None
 
 
 def _restorations(loop: DelegatedLoop) -> list:
@@ -636,24 +644,40 @@ def _boundary(loop: DelegatedLoop) -> None:
 
 
 async def test_a_cut_note_is_not_credited_as_restored(tmp_path) -> None:
-    """#755: a note cut at the cap went out only in part; the boundary leaves
-    the put-back pending for the next turn instead of crediting it."""
-    from fluid.engine.delegated import COMPACT_CONTEXT_MAX_CHARS
+    """#755: a note that went out only in part leaves the put-back pending, and
+    the next turn's tail sends what is missing, without repeating what went."""
+    from fluid.engine.delegated import COMPACT_CONTEXT_MAX_CHARS, HOOK_CONTEXT_INLINE_CHARS
 
-    loop, written = await _loop(
-        tmp_path, hooks=HookBus(),
-        compact_context=_note_provider("x" * (COMPACT_CONTEXT_MAX_CHARS + 1)),
-    )
-    await _fire_main_compact(loop, written)
+    size = COMPACT_CONTEXT_MAX_CHARS + 1
+    note = "".join(f"line {i:06d}\n" for i in range(size // 12 + 1))[:size]
+    loop, written = await _loop(tmp_path, hooks=HookBus(), compact_context=_note_provider(note))
+    output = await _fire_main_compact(loop, written)
     _boundary(loop)
     assert loop._context_restore_pending is True
     [record] = _restorations(loop)
     assert record.data["complete"] is False
-    assert record.data["sections"] == [{
-        "name": "note", "status": "cut", "chars": COMPACT_CONTEXT_MAX_CHARS,
-        "original_chars": COMPACT_CONTEXT_MAX_CHARS + 1,
-    }]
+    [section] = record.data["sections"]
+    assert section["name"] == "note" and section["status"] == "pending"
+    assert 0 < section["chars"] <= HOOK_CONTEXT_INLINE_CHARS
+    assert section["original_chars"] == len(note.strip())
+    rest = await loop._finish_restoration()
+    await loop._acknowledge_note()
+    # All of it went out, across the two, with no line sent twice.
+    first = output["hookSpecificOutput"]["additionalContext"].split("\n[note continues")[0]
+    rest = rest.removeprefix("[note, continued]\n")
+    assert (first + "\n" + rest).split() == note.split()
+    assert loop.last_restoration["complete"] is True
+    assert loop._context_restore_pending is False
+    # Past the bound even the rest cannot all go: it ends cut and is not credited.
+    loop.compact_context = _note_provider("x" * 100_000)
+    await _fire_main_compact(loop, written)
+    _boundary(loop)
+    await loop._finish_restoration()
+    await loop._acknowledge_note()
+    assert loop.last_restoration["complete"] is False
+    assert loop.last_restoration["sections"][0]["status"] == "cut"
     # A whole note is credited: nothing is left pending.
+    loop._context_restore_pending = False
     loop.compact_context = _note_provider()
     await _fire_main_compact(loop, written)
     _boundary(loop)
@@ -662,10 +686,10 @@ async def test_a_cut_note_is_not_credited_as_restored(tmp_path) -> None:
 
 
 async def test_sections_go_back_by_priority_and_only_whole_ones_are_credited(tmp_path) -> None:
-    """The host's sections claim the bounded note by priority, keep their
-    order in it, and only a section that went out whole calls back."""
+    """The host's sections claim the note by priority, keep their order in it,
+    and a section calls back only when the last of it went out."""
     from fluid.engine.compact_restore import RestorationSection
-    from fluid.engine.delegated import COMPACT_CONTEXT_MAX_CHARS
+    from fluid.engine.delegated import COMPACT_CONTEXT_MAX_CHARS, HOOK_CONTEXT_INLINE_CHARS
 
     delivered: list[str] = []
     big = "m" * COMPACT_CONTEXT_MAX_CHARS
@@ -685,24 +709,194 @@ async def test_sections_go_back_by_priority_and_only_whole_ones_are_credited(tmp
     loop, written = await _loop(tmp_path, hooks=HookBus(), compact_context=provide)
     output = await _fire_main_compact(loop, written)
     context = output["hookSpecificOutput"]["additionalContext"]
-    assert len(context) <= COMPACT_CONTEXT_MAX_CHARS
+    assert len(context) <= HOOK_CONTEXT_INLINE_CHARS
     assert context.startswith("today is 2026-10-28\n\nmmm")
     assert context.endswith("owner is away")
-    assert "[memory cut:" in context and "record" not in context
+    assert "[memory continues" in context and "record" not in context
     assert delivered == ["environment", "away"]
     statuses = {s["name"]: s["status"] for s in _restorations(loop)[-1].data["sections"]}
-    assert statuses == {"environment": "delivered", "memory": "cut",
+    assert statuses == {"environment": "delivered", "memory": "pending",
                         "working_record": "omitted", "away": "delivered"}
     assert loop.last_restoration["complete"] is False
     _boundary(loop)
     assert loop._context_restore_pending is True
+    # What is left goes on the next turn's tail, and only then is it credited.
+    rest = await loop._finish_restoration()
+    assert "record" in rest and rest.count("m") + context.count("m") >= COMPACT_CONTEXT_MAX_CHARS
+    assert delivered == ["environment", "away"]  # nothing counts before the turn is written
+    await loop._acknowledge_note()
+    assert delivered == ["environment", "away", "memory", "working_record"]
+    assert loop.last_restoration["complete"] is True
+
+
+def _tool(tool_use_id: str = "t1") -> dict:
+    return {"tool_name": "Read", "tool_input": {}, "tool_use_id": tool_use_id}
+
+
+async def test_a_long_turn_gets_the_rest_of_the_note_at_its_next_tool_results(tmp_path) -> None:
+    """A subagent can work one turn for hours: the rest of the note goes out at
+    its main thread's tool results, a part each, and then nothing more."""
+    from fluid.engine.delegated import HOOK_CONTEXT_INLINE_CHARS
+
+    note = "\n".join(f"line {i:05d}" for i in range(1_800))
+    loop, written = await _loop(tmp_path, hooks=HookBus(), compact_context=_note_provider(note))
+    mapper = _peer_ready(loop, main_ids=("t1", "t2", "t3", "t4"))
+    loop._pending_peers = []
+    loop._active_turn_id = mapper.turn_id
+    output = await _fire_main_compact(loop, written)
+    parts = [output["hookSpecificOutput"]["additionalContext"]]
+    assert not loop.last_restoration["complete"]
+
+    # A subagent's result, and a tool the main thread did not call, carry nothing.
+    other = await _fire_at_boundary(loop, written, "PostToolUse", {
+        **_tool(), "agent_id": "sub-1",
+    }, mapper)
+    assert "additionalContext" not in other.get("hookSpecificOutput", {})
+    stranger = await _fire_at_boundary(loop, written, "PostToolUse", _tool("not-main"), mapper)
+    assert "additionalContext" not in stranger.get("hookSpecificOutput", {})
+
+    for tool_use_id in ("t1", "t2", "t3", "t4"):
+        out = await _fire_at_boundary(loop, written, "PostToolUse", _tool(tool_use_id), mapper)
+        context = out.get("hookSpecificOutput", {}).get("additionalContext")
+        if context:
+            assert len(context) <= HOOK_CONTEXT_INLINE_CHARS
+            parts.append(context)
+    assert 2 <= len(parts) <= 3  # it ends, and no result repeats a part
+    lines = [ln for part in parts for ln in part.splitlines() if ln.startswith("line ")]
+    assert lines == note.splitlines()
+    assert loop.last_restoration["complete"] is True and loop._restoration is None
+    # The second compaction's own note, later, is a new one under a new id.
+    assert await _fire_at_boundary(loop, written, "PostToolUse", _tool("t1"), mapper) == {}
+
+
+async def test_a_provider_past_its_limit_joins_the_queue_instead_of_vanishing(
+    tmp_path, monkeypatch,
+) -> None:
+    """#755: a note not ready in time was skipped without a word and credited."""
+    from fluid.engine import delegated
+
+    monkeypatch.setattr(delegated, "COMPACT_CONTEXT_TIMEOUT", 0.01)
+    release = asyncio.Event()
+
+    async def slow() -> str:
+        await release.wait()
+        return "the late note"
+
+    loop, written = await _loop(tmp_path, hooks=HookBus(), compact_context=slow)
+    mapper = _peer_ready(loop)
+    loop._pending_peers = []
+    loop._active_turn_id = mapper.turn_id
+    output = await _fire_main_compact(loop, written)
+    assert "additionalContext" not in output.get("hookSpecificOutput", {})
+    assert loop.last_restoration["complete"] is False
+    assert loop.last_restoration["provider"] == "late"
+    _boundary(loop)
+    assert loop._context_restore_pending is True
+
+    release.set()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    out = await _fire_at_boundary(loop, written, "PostToolUse", _tool(), mapper)
+    assert out["hookSpecificOutput"]["additionalContext"] == "the late note"
+    assert loop.last_restoration["complete"] is True
+
+
+async def test_a_provider_still_late_at_the_next_turn_is_given_up_and_not_credited(
+    tmp_path, monkeypatch,
+) -> None:
+    from fluid.engine import delegated
+
+    monkeypatch.setattr(delegated, "COMPACT_CONTEXT_TIMEOUT", 0.01)
+
+    async def never() -> str:
+        await asyncio.Event().wait()
+        return "never"
+
+    loop, written = await _loop(tmp_path, hooks=HookBus(), compact_context=never)
+    await _fire_main_compact(loop, written)
+    late = loop._restoration_late
+    assert await loop._finish_restoration() == ""
+    await asyncio.sleep(0)
+    assert late.cancelled()
+
+
+async def test_a_batch_of_messages_stays_under_the_inline_limit(tmp_path) -> None:
+    """Over the limit the model would read a 2 KB preview of the whole batch, so
+    what does not fit waits for the next result: nothing is lost or previewed."""
+    from fluid.engine.delegated import HOOK_CONTEXT_INLINE_CHARS
+    from fluid.events.ops import AgentMessage
+
+    loop, written = await _loop(tmp_path)
+    mapper = _peer_ready(loop, main_ids=("t1", "t2"))
+    loop._pending_peers = [
+        AgentMessage(sender="reviewer", text=f"{name} " + "x" * 6_000, id=name, wake=False)
+        for name in ("p1", "p2")
+    ]
+    loop._turn_peer_ids = {"p1", "p2"}
+    first = await _fire_at_boundary(loop, written, "PostToolUse", _tool("t1"), mapper)
+    text = first["hookSpecificOutput"]["additionalContext"]
+    assert "p1 x" in text and "p2 x" not in text and len(text) <= HOOK_CONTEXT_INLINE_CHARS
+    assert [p.id for p in loop._pending_peers] == ["p2"]
+    second = await _fire_at_boundary(loop, written, "PostToolUse", _tool("t2"), mapper)
+    assert "p2 x" in second["hookSpecificOutput"]["additionalContext"]
+    assert loop._pending_peers == []
+
+
+async def test_one_message_over_the_limit_is_still_delivered(tmp_path) -> None:
+    """Holding it would lose it; the model gets the preview and the file path."""
+    from fluid.events.ops import AgentMessage
+
+    loop, written = await _loop(tmp_path)
+    mapper = _peer_ready(loop)
+    loop._pending_peers = [AgentMessage(sender="reviewer", text="y" * 20_000, id="p1", wake=False)]
+    out = await _fire_at_boundary(loop, written, "PostToolUse", _tool(), mapper)
+    assert "y" * 20_000 in out["hookSpecificOutput"]["additionalContext"]
+    assert loop._pending_peers == []
+
+
+async def test_a_delivered_message_is_repeated_only_when_the_answer_dropped_it(tmp_path) -> None:
+    """#996: on the Fluid path only what the answer no longer shows comes back,
+    so a compaction that kept it adds nothing."""
+    from fluid.context.compaction import INSTRUCTIONS_LEAD
+    from fluid.engine.delegated import _CompactionTxn
+    from fluid.messages.content import SteerDelivery
+
+    loop, _ = await _loop(tmp_path, hooks=HookBus())
+    steer = SteerDelivery(id="p1", text="hold the merge", origin="peer", sender="reviewer")
+    loop._delivered_on("t1", [steer])
+    rendered = steer.render().strip()
+
+    def answer(**fields: Any) -> _CompactionTxn:
+        base: dict[str, Any] = {"rows": [], "handles": ()}
+        return _CompactionTxn(compaction_id="cmp_1", checkpoint=None, **{**base, **fields})
+
+    dropped = await loop._instructions_section(answer())
+    assert dropped is not None and rendered in dropped.text and INSTRUCTIONS_LEAD in dropped.text
+    # Its row went back by handle, so Claude Code keeps the attachment on it.
+    assert await loop._instructions_section(answer(rows=[
+        {"handle": "h1", "toolResults": [{"tool_use_id": "t1", "content": "body"}]},
+    ], handles=("h1",))) is None
+    # The answer's own text shows it.
+    assert await loop._instructions_section(answer(rows=[
+        {"text": f"earlier: {rendered}"},
+    ])) is None
+    # With no answer Claude Code's summarizer may have paraphrased it: all repeat.
+    assert rendered in (await loop._instructions_section(None)).text
+
+
+async def test_harness_notices_are_not_repeated_as_instructions(tmp_path) -> None:
+    from fluid.messages.content import SteerDelivery
+
+    loop, _ = await _loop(tmp_path, hooks=HookBus())
+    loop._delivered_on(None, [SteerDelivery(text="a background job ended", origin="system")])
+    assert await loop._instructions_section(None) is None
 
 
 async def test_a_note_alone_registers_session_start(tmp_path) -> None:
     """With neither a HookBus nor a deny policy, a note provider still has
     the CLI ask the loop at SessionStart, and the answer needs no bus."""
     loop, written = await _loop(tmp_path, compact_context=_note_provider())
-    assert loop._cli_hook_events() == ("PreToolUse", "SessionStart")
+    assert loop._cli_hook_events() == ("PreToolUse", "SessionStart", "PreCompact")
     output = await _fire_main_compact(loop, written)
     assert output["hookSpecificOutput"]["additionalContext"] == _NOTE
 
@@ -723,6 +917,8 @@ async def test_the_note_comes_back_in_stream_order_end_to_end(tmp_path, trigger)
     """The frame order 2.1.289 writes, against the scripted fake CLI: a
     subagent's compaction (no status frame) gets the ledger only; the main
     thread's, automatic mid-turn or manual, gets the ledger and then the note."""
+    from fluid.context.compaction import INSTRUCTIONS_LEAD
+
     status_on = {"type": "system", "subtype": "status", "status": "compacting",
                  "session_id": "cli-sess"}
     status_off = {"type": "system", "subtype": "status", "status": None,
@@ -773,9 +969,12 @@ async def test_the_note_comes_back_in_stream_order_end_to_end(tmp_path, trigger)
         await loop.aclose()
 
     assert isinstance(events[-1], TurnComplete)
+    # With no Fluid answer, Claude Code's summarizer wrote this compaction and may
+    # have dropped the brief, so it goes back too (#996). "/compact" is no brief.
+    brief = "" if trigger == "manual" else f"{INSTRUCTIONS_LEAD}\nYour original brief:\ngo\n\n"
     assert answers == {
         "cli_hook_sub": expected_ledger,
-        "cli_hook_main": f"{expected_ledger}\n\n{_NOTE}",
+        "cli_hook_main": f"{expected_ledger}\n\n{brief}{_NOTE}",
         "cli_hook_late": expected_ledger,
     }
     assert calls == [1]
@@ -957,3 +1156,325 @@ async def test_the_ledger_reminder_names_the_bridged_ledger_tool(tmp_path) -> No
         loop._socket_server = None
     context = output["hookSpecificOutput"]["additionalContext"]
     assert "curate with the mcp__fluid_bundled__Ledger tool" in context
+
+
+# ─── nothing counts until it is written; identity is the delivery (review of #1050) ──
+
+
+def _compact_request(request_id: str = "cli_hook_c") -> HookCallbackRequest:
+    return HookCallbackRequest(
+        cli_request_id=request_id, callback_id="fluid_SessionStart",
+        input={"hook_event_name": "SessionStart", "session_id": "cli-sess",
+               "transcript_path": "/t/cli.jsonl", "cwd": ".", "source": "compact"},
+    )
+
+
+def _rules_provider(delivered: list[str], *extra: Any):
+    from fluid.engine.compact_restore import RestorationSection
+
+    async def provide() -> list:
+        return [
+            RestorationSection(name="rules", text="never push to main", priority=0,
+                               on_delivered=lambda: delivered.append("rules")),
+            *extra,
+        ]
+
+    return provide
+
+
+async def test_a_put_back_is_not_credited_when_its_answer_cannot_be_written(tmp_path) -> None:
+    """The handler forgets peers on a failed write, and restoration does the same:
+    no callback, no completion, and the same words go out at the next chance."""
+    delivered: list[str] = []
+    loop, written = await _loop(
+        tmp_path, hooks=HookBus(), compact_context=_rules_provider(delivered),
+    )
+    capture = loop._write_frame
+
+    async def closed(_frame: dict) -> None:
+        raise OSError("stdin closed")
+
+    loop._write_frame = closed  # type: ignore[method-assign]
+    loop._track_main_compaction({"type": "system", "subtype": "status", "status": "compacting"})
+    await loop._answer_hook_request(_compact_request())
+    assert delivered == []
+    assert not loop._compaction_context_restored
+    assert loop._context_restore_pending is True
+    assert not any(r.data.get("complete") for r in _restorations(loop))
+
+    loop._write_frame = capture  # type: ignore[method-assign]
+    mapper = _peer_ready(loop)
+    loop._pending_peers = []
+    loop._active_turn_id = mapper.turn_id
+    output = await _fire_at_boundary(loop, written, "PostToolUse", _tool(), mapper)
+    assert "never push to main" in output["hookSpecificOutput"]["additionalContext"]
+    assert delivered == ["rules"] and loop.last_restoration["complete"] is True
+
+
+async def test_a_cancelled_answer_keeps_the_part_and_the_message(tmp_path) -> None:
+    delivered: list[str] = []
+    loop, _ = await _loop(tmp_path, hooks=HookBus(), compact_context=_rules_provider(delivered))
+
+    async def cancelled(_frame: dict) -> None:
+        raise asyncio.CancelledError
+
+    loop._write_frame = cancelled  # type: ignore[method-assign]
+    loop._track_main_compaction({"type": "system", "subtype": "status", "status": "compacting"})
+    with pytest.raises(asyncio.CancelledError):
+        await loop._answer_hook_request(_compact_request())
+    assert delivered == [] and loop._context_restore_pending is True
+
+
+async def test_an_error_answer_receipts_no_peer_and_credits_no_part(tmp_path) -> None:
+    """The CLI drops a failed hook's context, so neither reached the model."""
+    loop, written = await _loop(tmp_path, hooks=HookBus())
+    mapper = _peer_ready(loop)
+    receipts: list = []
+    keep = loop._receipt_boundary
+
+    async def receipt(peers: list, carrier: Any) -> None:
+        receipts.append(peers)
+        await keep(peers, carrier)
+
+    async def broken(*_: Any) -> None:
+        raise RuntimeError("the put-back blew up")
+
+    loop._receipt_boundary = receipt  # type: ignore[method-assign]
+    loop._restoration_boundary = broken  # type: ignore[method-assign]
+    await loop._answer_hook_request(HookCallbackRequest(
+        cli_request_id="cli_hook_e", callback_id="fluid_PostToolUse",
+        input={"hook_event_name": "PostToolUse", "session_id": "cli-sess",
+               "transcript_path": "/t/cli.jsonl", "cwd": ".", **_tool()},
+        tool_use_id="t1",
+    ), mapper=mapper)
+    assert written[-1]["response"]["subtype"] == "error"
+    assert receipts == [] and loop._delivered == []
+
+
+async def test_a_turn_tail_that_was_not_written_goes_out_with_the_next_turn(tmp_path) -> None:
+    """A real turn through the CLI's stdin: the tail counts when its frame is
+    written, and a turn that could not write it leaves it owed."""
+    from fluid.engine.compact_restore import RestorationSection
+    from fluid.engine.delegated import HOOK_CONTEXT_INLINE_CHARS
+
+    delivered: list[str] = []
+    long = "\n".join(f"line {i:05d}" for i in range(1_400))
+    loop = DelegatedLoop(
+        store=MemoryStore(), model="claude-fake", hooks=HookBus(),
+        ctx=ToolCtx(cwd=str(tmp_path)), claude_cmd=[sys.executable, FAKE],
+        compact_context=_rules_provider(delivered, RestorationSection(
+            name="record", text=long, priority=1, cuttable=True,
+            on_delivered=lambda: delivered.append("record"),
+        )),
+    )
+    assert len(long) > HOOK_CONTEXT_INLINE_CHARS
+    try:
+        await loop._ensure_session()
+        await loop.submit(UserTurn(content="one"))
+        await loop.wait_turn()
+        loop._track_main_compaction(
+            {"type": "system", "subtype": "status", "status": "compacting"})
+        await loop._answer_hook_request(_compact_request())
+        loop._track_main_compaction({
+            "type": "system", "subtype": "status", "status": None, "compact_result": "success",
+        })
+        assert delivered == ["rules"] and not loop.last_restoration["complete"]
+
+        frames: list[dict] = []
+        real = loop._write_frame
+
+        async def refused(frame: dict) -> None:
+            if frame.get("type") == "user":
+                raise OSError("stdin closed")
+            await real(frame)
+
+        async def seen(frame: dict) -> None:
+            frames.append(frame)
+            await real(frame)
+
+        loop._write_frame = refused  # type: ignore[method-assign]
+        await loop.submit(UserTurn(content="two"))
+        await loop.wait_turn()
+        assert delivered == ["rules"] and not loop.last_restoration["complete"]
+        assert loop._context_restore_pending is True
+
+        loop._write_frame = seen  # type: ignore[method-assign]
+        await loop.submit(UserTurn(content="three"))
+        await loop.wait_turn()
+        assert delivered == ["rules", "record"] and loop.last_restoration["complete"] is True
+        sent = json.dumps([f for f in frames if f.get("type") == "user"][-1])
+        assert "line 01399" in sent and sent.count("line 01399") == 1
+    finally:
+        await loop.aclose()
+
+
+async def test_the_same_words_delivered_again_are_an_instruction_of_their_own(tmp_path) -> None:
+    """"Do not deploy" / "You may deploy now" / "Do not deploy": what stands is the
+    last, so all three come back in order, however they reached the agent."""
+    import re
+
+    from fluid.engine.delegated import _CompactionTxn
+    from fluid.messages import Message, ToolResultBlock
+    from fluid.messages.content import SteerDelivery
+    from fluid.store.base import SessionNode
+
+    said = ["Do not deploy", "You may deploy now", "Do not deploy"]
+    words = re.compile("|".join(said[:2]))
+    steers = [SteerDelivery(id=f"p{i}", text=text, origin="peer", sender="lead")
+              for i, text in enumerate(said)]
+
+    def order(section: Any) -> list[str]:
+        return words.findall(section.text)
+
+    # All live: the CLI compacted before any of their results was stored.
+    loop, _ = await _loop(tmp_path, hooks=HookBus())
+    for i, steer in enumerate(steers):
+        loop._delivered_on(f"t{i}", [steer])
+    assert order(await loop._instructions_section(None)) == said
+
+    # The first is on the stored path as well: still three, not four.
+    await loop.store.append(loop.session_id, SessionNode(
+        node_id="n1", parent_id=None, message=Message(role="user", content=[ToolResultBlock(
+            tool_use_id="t0", content=[], delivered_steers=[steers[0]],
+        )]),
+    ))
+    assert order(await loop._instructions_section(None)) == said
+
+    # An answer that shows only the first copy: what follows comes back, in order.
+    def answer(*shown: SteerDelivery) -> _CompactionTxn:
+        rows = [{"text": steer.render()} for steer in shown]
+        return _CompactionTxn(compaction_id="cmp_1", checkpoint=None, rows=rows, handles=())
+
+    assert order(await loop._instructions_section(answer(steers[0]))) == said[1:]
+    # One copy of the words accounts for one delivery only.
+    assert order(await loop._instructions_section(answer(steers[0], steers[1]))) == said[2:]
+    assert await loop._instructions_section(answer(*steers)) is None
+
+
+async def test_peers_are_budgeted_against_the_whole_hook_answer(tmp_path) -> None:
+    """What the hook said counts, and the separators too: over the CLI's limit the
+    model reads a preview, so the peer waits for a boundary where it fits."""
+    from fluid.engine.delegated import HOOK_CONTEXT_INLINE_CHARS
+    from fluid.events.ops import AgentMessage
+
+    hook_said = "h" * 5_000
+    rec = _Recorder({POST_TOOL_USE: HookDecision(additional_context=hook_said)})
+    loop, written = await _loop(tmp_path, hooks=rec.bus)
+    mapper = _peer_ready(loop)
+    big = AgentMessage(sender="reviewer", text="y" * 6_000, id="p1", wake=False)
+    loop._pending_peers = [big]
+    output = await _fire_at_boundary(loop, written, "PostToolUse", _tool(), mapper)
+    context = output["hookSpecificOutput"]["additionalContext"]
+    assert context == hook_said and loop._pending_peers == [big]
+
+    # Exactly the limit, separators included, still goes; one more does not.
+    overhead = len(loop._boundary_text([AgentMessage(
+        sender="reviewer", text="", id="p1", wake=False,
+    )]))
+    room = HOOK_CONTEXT_INLINE_CHARS - len(hook_said) - 2 - overhead
+    over = AgentMessage(sender="reviewer", text="z" * (room + 1), id="p1", wake=False)
+    loop._pending_peers = [over]
+    output = await _fire_at_boundary(loop, written, "PostToolUse", _tool(), mapper)
+    assert output["hookSpecificOutput"]["additionalContext"] == hook_said
+    assert loop._pending_peers == [over]
+    fits = AgentMessage(sender="reviewer", text="z" * room, id="p1", wake=False)
+    loop._pending_peers = [fits]
+    output = await _fire_at_boundary(loop, written, "PostToolUse", _tool(), mapper)
+    context = output["hookSpecificOutput"]["additionalContext"]
+    assert len(context) == HOOK_CONTEXT_INLINE_CHARS and loop._pending_peers == []
+    assert context.startswith(f"{hook_said}\n\n")
+
+
+# ─ the CLI's limit is in UTF-16 units: an emoji is two of them ─
+
+_EMOJI = "\U0001F600"
+
+
+def _units(text: str) -> int:
+    return len(text.encode("utf-16-le", "surrogatepass")) // 2
+
+
+async def test_a_session_start_note_of_emoji_is_not_credited_past_the_cli_limit(tmp_path) -> None:
+    """6,008 Python characters are 12,008 to Claude Code's ``e.length <= 10000``: it
+    would save them to a file and show a preview, so they go out in parts, and the
+    note is complete only when the last part did."""
+    from fluid.engine.delegated import HOOK_CONTEXT_INLINE_CHARS
+
+    note = _EMOJI * 6_000 + "TAIL-END"
+    loop, written = await _loop(tmp_path, hooks=HookBus(), compact_context=_note_provider(note))
+    output = await _fire_main_compact(loop, written)
+    _boundary(loop)
+    first = output["hookSpecificOutput"]["additionalContext"]
+    assert _units(first) <= HOOK_CONTEXT_INLINE_CHARS
+    assert "TAIL-END" not in first and first.encode("utf-8")
+    assert loop.last_restoration["complete"] is False
+    assert loop._restoration is not None and loop._context_restore_pending is True
+    mapper = _peer_ready(loop, main_ids=("t1",))
+    loop._pending_peers = []
+    loop._active_turn_id = mapper.turn_id
+    second = await _fire_at_boundary(loop, written, "PostToolUse", _tool("t1"), mapper)
+    rest = second["hookSpecificOutput"]["additionalContext"]
+    assert _units(rest) <= HOOK_CONTEXT_INLINE_CHARS and rest.endswith("TAIL-END")
+    assert (first + rest).count(_EMOJI) == 6_000
+    assert loop.last_restoration["complete"] is True
+
+
+async def test_session_start_counts_what_else_it_carries_in_those_units(tmp_path) -> None:
+    """Existing hook context and the separators count too, in the same units."""
+    from fluid.engine.delegated import HOOK_CONTEXT_INLINE_CHARS
+
+    rec = _Recorder({SESSION_START: HookDecision(additional_context=_EMOJI * 2_500)})
+    note = "\n".join(f"line {i:05d}" for i in range(900))
+    loop, written = await _loop(tmp_path, hooks=rec.bus, compact_context=_note_provider(note))
+    output = await _fire_main_compact(loop, written)
+    text = output["hookSpecificOutput"]["additionalContext"]
+    assert text.count(_EMOJI) == 2_500 and "line 00000" in text
+    assert _units(text) <= HOOK_CONTEXT_INLINE_CHARS
+    assert len(text) < _units(text) - 2_000  # the measure the old check used
+
+
+async def test_post_tool_use_budgets_peers_and_existing_context_in_those_units(tmp_path) -> None:
+    """Two messages of 3,000 emoji look like 6,000 characters and are 12,000 to the
+    CLI. The second waits for the next result, and existing context counts."""
+    from fluid.engine.delegated import HOOK_CONTEXT_INLINE_CHARS
+    from fluid.events.ops import AgentMessage
+
+    loop, written = await _loop(tmp_path)
+    mapper = _peer_ready(loop, main_ids=("t1", "t2"))
+    loop._pending_peers = [
+        AgentMessage(sender="reviewer", text=name + _EMOJI * 3_000, id=name, wake=False)
+        for name in ("p1", "p2")
+    ]
+    loop._turn_peer_ids = {"p1", "p2"}
+    first = await _fire_at_boundary(loop, written, "PostToolUse", _tool("t1"), mapper)
+    text = first["hookSpecificOutput"]["additionalContext"]
+    assert "p1" in text and "p2" not in text and _units(text) <= HOOK_CONTEXT_INLINE_CHARS
+    assert [p.id for p in loop._pending_peers] == ["p2"]
+    second = await _fire_at_boundary(loop, written, "PostToolUse", _tool("t2"), mapper)
+    assert "p2" in second["hookSpecificOutput"]["additionalContext"]
+
+    rec = _Recorder({POST_TOOL_USE: HookDecision(additional_context=_EMOJI * 2_500)})
+    loop, written = await _loop(tmp_path, hooks=rec.bus)
+    mapper = _peer_ready(loop)
+    loop._pending_peers = [AgentMessage(sender="r", text=_EMOJI * 2_500, id="p1", wake=False)]
+    output = await _fire_at_boundary(loop, written, "PostToolUse", _tool("t1"), mapper)
+    assert output["hookSpecificOutput"]["additionalContext"] == _EMOJI * 2_500
+    assert [p.id for p in loop._pending_peers] == ["p1"]
+
+
+async def test_post_tool_use_fits_a_put_back_beside_emoji_context(tmp_path) -> None:
+    """A part of the note goes beside what the hook said, within the limit as a whole."""
+    from fluid.engine.delegated import HOOK_CONTEXT_INLINE_CHARS
+
+    note = "\n".join(f"line {i:05d}" for i in range(1_800))
+    rec = _Recorder({POST_TOOL_USE: HookDecision(additional_context=_EMOJI * 2_000)})
+    loop, written = await _loop(tmp_path, hooks=rec.bus, compact_context=_note_provider(note))
+    await _fire_main_compact(loop, written)
+    _boundary(loop)
+    mapper = _peer_ready(loop, main_ids=("t1",))
+    loop._pending_peers = []
+    loop._active_turn_id = mapper.turn_id
+    output = await _fire_at_boundary(loop, written, "PostToolUse", _tool("t1"), mapper)
+    text = output["hookSpecificOutput"]["additionalContext"]
+    assert text.startswith(_EMOJI) and "line " in text
+    assert _units(text) <= HOOK_CONTEXT_INLINE_CHARS

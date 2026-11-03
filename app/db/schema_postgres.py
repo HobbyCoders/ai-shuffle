@@ -348,6 +348,11 @@ def create_postgres_schema(cursor: Any) -> None:
             -- (NULL when no turn holds the live slot). See app/db/turns.py.
             work_ms BIGINT DEFAULT 0,
             work_started_at TIMESTAMP WITH TIME ZONE,
+            -- Turns up to this insert_order no longer speak for the chat's outcome
+            -- (reset, or moved here), and outcome_baseline_failed stands in for
+            -- them until a newer turn ends. Never replicated. See app/db/turns.py.
+            outcome_baseline_order BIGINT,
+            outcome_baseline_failed BOOLEAN NOT NULL DEFAULT FALSE,
             last_user_message_at TIMESTAMP WITH TIME ZONE,
             last_user_message_seq BIGINT,
             last_user_message_epoch TEXT,

@@ -89,7 +89,7 @@ export const entries: SettingEntry[] = [
 		section: 'Memory',
 		label: 'Memory health',
 		hint: 'Checks itself every hour',
-		help: 'This worker checks its saved facts without using a model: whether learning works, what sessions get to see, and whether anything was lost. It archives exact duplicates and unconfirmed facts nobody used; Recall still finds them there. Facts you asked to keep are never removed.',
+		help: 'This worker checks saved facts every hour without using a model. It can move unused or duplicate facts into an archive that Recall can search. Older facts may later be permanently deleted when that archive fills or they expire; Recall cannot find deleted facts. Facts you asked to keep are excluded from automatic archive cleanup. There is no retention setting yet.',
 		keywords: ['long-term memory', 'saved facts', 'remember', 'recall', 'learner', 'duplicates', 'prune', 'archive']
 	},
 	{

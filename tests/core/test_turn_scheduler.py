@@ -25,6 +25,7 @@ from app.core import session_runtime, turn_manager, turn_scheduler
 from app.core.task_registry import task_registry
 from app.core.compact_continue import AUTO_CONTINUE_PROMPT
 from app.db import session_events as se_db
+from app.db import sessions as sessions_db
 from app.db import turns as turns_db
 
 
@@ -1235,6 +1236,7 @@ async def test_synchronous_subagent_at_rest_no_unpark(mock_db):
 
 
 async def test_parent_owned_terminal_still_fires_unpark(mock_db):
+    sessions_db.create_session("sg4", None)
     # The parent's OWN background work is unchanged — it still fires the unpark
     # regardless of whether any background agent is currently running.
     frame = _terminal_frame("own-1", "parent bg done")
@@ -1404,6 +1406,7 @@ async def test_owner_own_lane_completion_one_notification(mock_db):
 
 
 async def test_own_lane_unaffected_by_active_agent(mock_db):
+    sessions_db.create_session("oa1", None)
     # #690 does NOT touch the OWN lane: the parent's own background work still
     # fires its rich unpark even while a background sub-agent is running.
     task_registry.start_task("oa1", "subagent-1", "agent", "spawning")
@@ -1470,6 +1473,7 @@ async def test_empty_frame_dropped_at_choke_point(mock_db):
 
 
 async def test_content_bearing_frame_not_dropped_by_guard(mock_db):
+    sessions_db.create_session("cb1", None)
     # The guard must NOT drop a bare TaskUpdated frame (task_id + tool_use_id,
     # no summary/result) -- that is a legitimate OWN-lane wake (later upgraded by
     # its rich frame, #688 A-2). Here it is the parent's own work -> one unpark.
@@ -1713,6 +1717,7 @@ async def test_bare_then_rich_frame_upgrades_prompt(mock_db):
 # ---------------------------------------------------------------------------
 
 async def test_late_rich_frame_after_wake_ran_does_not_reenqueue(mock_db):
+    sessions_db.create_session("lf1", None)
     # The bare frame enqueues + latches the wake; the wake then STARTS (leaves the
     # queue). A late frame for the same task finds the latch set → it must NOT
     # enqueue a fresh duplicate wake.
@@ -1740,6 +1745,7 @@ async def test_late_rich_frame_after_wake_ran_does_not_reenqueue(mock_db):
 
 
 async def test_resumed_agent_can_wake_again(mock_db):
+    sessions_db.create_session("ra1", None)
     # A-3 clear-on-revival: once a task has woken, the latch blocks re-wakes — until
     # a genuine RESUME (completed→running revival) clears it, after which the
     # re-run agent may drive a fresh wake.
@@ -1984,6 +1990,7 @@ async def test_kick_shutdown_guard_leaves_turn_queued(mock_db):
 
 
 async def test_unpark_enqueue_survives_shutdown_kick_suppression(mock_db):
+    sessions_db.create_session("k2", None)
     # on_task_terminal still records the wake durably; only the START is
     # suppressed while shutting down.
     frame = {"task_id": "task-1", "status": "completed", "tool_use_id": "tu-1",
@@ -2175,6 +2182,7 @@ async def test_a_repeat_frame_never_doubles_the_stored_wake(mock_db):
     """Payload-level dedupe: the wake turn's pending_frames is what a later
     merge rebuilds the prompt from, so a duplicate stored there outlives the
     call that made it."""
+    sessions_db.create_session("dr1", None)
     frame = _terminal_frame("task-r", "done")
     wake = await turn_scheduler._enqueue_context_wake(
         "dr1", "unpark", [frame, dict(frame)], ["task-r", "task-r"], "<x/>",

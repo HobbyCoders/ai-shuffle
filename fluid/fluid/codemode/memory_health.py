@@ -317,13 +317,14 @@ def check(store, *, now: float | None = None, learning_enabled: bool = True,
     learner = _learner_signal(store, now, learning_enabled, previous)
     samples = learner.pop("samples", previous.get("journal_loss_samples") or [])
     kind_samples = learner.pop("kind_samples", previous.get("journal_loss_kind_samples") or [])
+    archive_samples, archive_loss = _archive_loss_samples(doc, now, previous)
     signals = [
         learner,
         _usage_signal(live, plans, now),
         _unconfirmed_signal(live, now),
         _duplicates_signal(live),
         # Capacity is the whole document, every worker's facts included.
-        _capacity_signal(store, doc["entries"], doc["archived"]),
+        _capacity_signal(store, doc["entries"], doc["archived"], archive_loss, now=now),
         _snapshot_signal(plans),
         _curation_signal(store, now),
     ]
@@ -341,6 +342,7 @@ def check(store, *, now: float | None = None, learning_enabled: bool = True,
         "lost_protected": lost,
         "journal_loss_samples": samples,
         "journal_loss_kind_samples": kind_samples,
+        "archive_loss_samples": archive_samples,
     }
 
 
@@ -630,7 +632,84 @@ def _duplicates_signal(live) -> dict:
     return _signal("duplicates", False, "No duplicates to merge.", **detail)
 
 
-def _capacity_signal(store, live, archived) -> dict:
+def _archive_loss_samples(doc, now, previous):
+    """Bounded local observations of overflow AND expiry deletion events.
+
+    Events are not distinct facts: a replica may replay a previously deleted
+    copy. Never present this counter as an upper bound on historical loss.
+    """
+    losses = doc.get("losses") or {}
+    overflow = max(0, int(losses.get("archive_dropped", 0) or 0))
+    expired = max(0, int(losses.get("expired_archived", 0) or 0))
+    total = overflow + expired
+    stamps = [float(losses.get("last_" + name + "_at", 0) or 0)
+              for name in ("archive_dropped", "expired_archived")]
+    last = max(stamps)
+    samples = []
+    for sample in previous.get("archive_loss_samples", []):
+        if (not isinstance(sample, list) or len(sample) not in (2, 3)
+                or not all(isinstance(v, (int, float)) for v in sample)
+                or not now - COVERAGE_WINDOW <= sample[0] < now):
+            continue
+        # Legacy samples counted overflow alone. They remain comparable only
+        # when no expiry counter exists; otherwise start an unknown window.
+        if len(sample) == 2:
+            if expired:
+                continue
+            sample = [sample[0], sample[1], 0]
+        samples.append(sample)
+    reset = bool(samples and (overflow < samples[-1][1] or expired < samples[-1][2]))
+    if reset:
+        samples = []
+    growth = max(0, total - sum(samples[0][1:])) if samples else None
+    if not samples or now - samples[-1][0] >= LOSS_SAMPLE_EVERY:
+        samples.append([now, overflow, expired])
+    samples = samples[-LOSS_SAMPLES_KEPT:]
+    # Read-side expiry cleanup can stamp a loss just after this check's
+    # caller captured `now`; a small clock/processing margin keeps it recent.
+    unknown = bool((overflow and (not stamps[0] or stamps[0] > now + 60))
+                   or (expired and (not stamps[1] or stamps[1] > now + 60)))
+    return samples, {
+        "archive_dropped_total": overflow, "archive_expired_total": expired,
+        "archive_deleted_total": total, "archive_dropped_in_window": growth,
+        "archive_loss_window_days": COVERAGE_WINDOW / DAY,
+        "archive_loss_counter_reset": reset, "last_archive_dropped_at": last or None,
+        "archive_loss_recent": bool(total and (growth or now - COVERAGE_WINDOW <= last <= now + 60)),
+        "archive_loss_time_unknown": unknown,
+    }
+
+
+def _archive_loss_reason(detail):
+    """Describe recorded events without claiming distinct or all-time loss."""
+    overflow = detail.get("archive_dropped_total", 0)
+    expired = detail.get("archive_expired_total", 0)
+    total = overflow + expired
+    reset = detail.get("archive_loss_counter_reset")
+    parts = []
+    if reset:
+        parts.append("The deletion record restarted, so earlier losses are unknown.")
+    if total:
+        parts.append(f"Automatic cleanup has recorded {_plural(total, 'permanent deletion')} of older facts "
+                     f"({overflow} at the archive limit; {expired} on expiry). "
+                     "Some facts may be counted more than once; this is not the number of distinct facts lost. "
+                     "Recall cannot recover a deleted copy.")
+        if detail.get("archive_loss_time_unknown"):
+            parts.append("Some older deletion times are unknown.")
+        if detail.get("archive_loss_recent"):
+            parts.append(f"Deletions were recorded within the past {COVERAGE_WINDOW / DAY:g} days.")
+        elif not reset and not detail.get("archive_loss_time_unknown"):
+            parts.append(f"No further archive deletions were recorded in the past {COVERAGE_WINDOW / DAY:g} days.")
+    elif reset:
+        parts.append("No automatic archive deletions are recorded since the restart.")
+    parts.append("Facts you asked to keep are excluded from this automatic cleanup.")
+    parts.append("There is no retention setting yet.")
+    return " ".join(parts)
+
+
+def _capacity_signal(store, live, archived, archive_loss=None, *, now=None) -> dict:
+    from fluid.codemode import skills
+
+    now = time.time() if now is None else now
     tiers = {name: sum(1 for e in live if facts.tier(e) == name) for name in ("explicit", "durable", "inferred")}
     archived_explicit = sum(1 for e in archived if e.get("protected"))
     try:
@@ -641,20 +720,40 @@ def _capacity_signal(store, live, archived) -> dict:
     detail = {**tiers, "explicit_cap": facts.MAX_EXPLICIT, "durable_cap": facts.MAX_DURABLE,
               "inferred_cap": MAX_MEMORIES, "archived": len(archived),
               "archived_explicit": archived_explicit, "user_saved": user_saved,
-              "bytes": size, "bytes_cap": facts.MAX_DOCUMENT_BYTES}
+              "bytes": size, "bytes_cap": facts.MAX_DOCUMENT_BYTES,
+              "archive_cap": skills.MAX_ARCHIVED_MEMORIES, **(archive_loss or {})}
+    loss_reason = (_archive_loss_reason(detail)
+                   if detail.get("archive_deleted_total") or detail.get("archive_dropped_total")
+                   or detail.get("archive_expired_total") or detail.get("archive_loss_counter_reset") else "")
+    record = store.memory_save_failures()
+    failed = [t for t in record.get("storage_times", [])
+              if isinstance(t, (int, float)) and 0 <= now - t < SAVE_WINDOW]
+    primary = ""
+    if failed:
+        primary = "Recent memory saves failed; check available storage and the saved-fact limits."
+        detail["refusal_event"] = f"storage:{record.get('storage', 0)}:{max(failed)}"
     if size >= DOCUMENT_FULL_SHARE * facts.MAX_DOCUMENT_BYTES:
         share = round(100 * size / facts.MAX_DOCUMENT_BYTES)
-        return _signal("capacity", True, f"The memory file is {share}% full; saves fail at the limit.",
-                       alert=True, **detail)
+        primary = (primary + " " if primary else "") + f"The memory file is {share}% full; saves fail at the limit."
     if user_saved >= facts.MAX_EXPLICIT:
-        return _signal("capacity", True,
-                       f"Memory is full: {user_saved} user-saved facts; new ones are refused "
-                       "until one is forgotten or merged.", alert=True, **detail)
-    if user_saved >= FULL_SHARE * facts.MAX_EXPLICIT:
-        return _signal("capacity", True,
-                       f"User-saved facts are at {user_saved} of {facts.MAX_EXPLICIT}; "
-                       "at the limit new ones are refused.", alert=True, **detail)
-    return _signal("capacity", False, f"{_plural(len(live), 'live fact')}; room to spare.", **detail)
+        primary += (" " if primary else "") + (
+            f"Memory is full: {user_saved} user-saved facts; new ones are refused until one is forgotten or merged.")
+        rejected_at = float(record.get("last_rejected_at") or 0)
+        if 0 <= now - rejected_at < SAVE_WINDOW:
+            detail["refusal_event"] = f"full:{record.get('rejected', 0)}:{rejected_at}"
+    elif user_saved >= FULL_SHARE * facts.MAX_EXPLICIT:
+        primary += (" " if primary else "") + (
+            f"User-saved facts are at {user_saved} of {facts.MAX_EXPLICIT}; at the limit new ones are refused.")
+    if primary:
+        return _signal("capacity", True, " ".join(p for p in (primary, loss_reason) if p), alert=True, **detail)
+    if detail.get("archive_loss_recent"):
+        return _signal("capacity", True, loss_reason, alert=True, **detail)
+    # Full automatic tiers are normal bounded operation, not a permanent alarm.
+    # Historical, unknown and reset observations remain visible without a bell.
+    reason = f"{_plural(len(live), 'live fact')}; saves have room."
+    if loss_reason:
+        reason += " " + loss_reason
+    return _signal("capacity", False, reason, **detail)
 
 
 def _snapshot_signal(plans) -> dict:
@@ -731,6 +830,7 @@ def _saves_signal(store, now) -> dict:
     recent = [t for t in record.get("storage_times", []) if isinstance(t, (int, float)) and now - t < SAVE_WINDOW]
     detail = {"failed_7d": len(recent), "rejected_total": int(record.get("rejected") or 0)}
     if recent:
+        detail["refusal_event"] = f"storage:{record.get('storage', 0)}:{max(recent)}"
         return _signal("saves", True, f"{_plural(len(recent), 'save')} failed to write this week.",
                        alert=True, **detail)
     return _signal("saves", False, "Saves are writing normally.", **detail)
@@ -794,7 +894,13 @@ def run(store, *, now: float | None = None, learning_enabled: bool = True) -> di
                   if isinstance(s, dict) and s.get("state") == "attention"}
         if {(s["id"], s["reason"]) for s in alerting} <= before:
             alert_since = previous.get("attention_since")
-    if alerting:
+    prior_refusals = {s.get("detail", {}).get("refusal_event")
+                      for s in alert_signals(previous)}
+    new_refusal = any(s.get("detail", {}).get("refusal_event")
+                      and s["detail"]["refusal_event"] not in prior_refusals for s in alerting)
+    if new_refusal:
+        alert_since = now  # a refused save is new news inside an old loss stretch
+    elif alerting:
         alert_since = alert_since or now
     state = {
         "schema": 1,
@@ -809,7 +915,7 @@ def run(store, *, now: float | None = None, learning_enabled: bool = True) -> di
     notified_at = float(state.get("notified_at") or 0)
     state["notify"] = bool(
         alert_since and state.get("notified_for") != alert_since
-        and now - notified_at >= RENOTIFY_AFTER
+        and (new_refusal or now - notified_at >= RENOTIFY_AFTER)
     )
     return state
 

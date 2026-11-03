@@ -99,9 +99,10 @@ def capabilities(device_id, enabled, tools):
             RETURNING device_id""", (device_id, enabled, json.dumps(tools), at))
         if cur.fetchone() is None:
             return
-        # Capability changes invalidate outstanding deliveries, including already claimed work.
+        # Only undelivered work can be cancelled safely. A claimed command may
+        # already have launched another app; accept its result until expires_at.
         cur.execute("""UPDATE mobile_tool_commands SET status='cancelled', arguments='{}', result=NULL
-            WHERE device_id=%s AND status IN ('pending','claimed') AND expires_at>%s""", (device_id, at))
+            WHERE device_id=%s AND status='pending' AND expires_at>%s""", (device_id, at))
 
 
 def state(device_id):
@@ -196,7 +197,28 @@ def outcome(command_id, session_id):
         return {'status': row['status'], 'result': row['result']}
 
 
-def cancel(command_id, session_id):
+def cancel(command_id, session_id, *, undelivered=False):
+    """Atomically stop delivery and return the prior outcome, including durable claim history.
+
+    The row lock serializes with claim() and submit_result(): a pending cancellation
+    cannot race into delivery, and a completed result winning the deadline is preserved.
+    claimed_at survives expiry/capability cancellation, so only delivered work is uncertain.
+    Only the pending endpoint may pass undelivered=True, before returning a denied
+    claim to the phone. Completed work always retains its result and claim history.
+    """
     with get_db() as conn:
-        conn.cursor().execute("""UPDATE mobile_tool_commands SET status='cancelled', arguments='{}'
-            WHERE id=%s AND session_id=%s AND status IN ('pending','claimed')""", (command_id, session_id))
+        cur = conn.cursor()
+        cur.execute("""SELECT status,result,claimed_at FROM mobile_tool_commands
+            WHERE id=%s AND session_id=%s FOR UPDATE""", (command_id, session_id))
+        row = cur.fetchone()
+        if row is None:
+            return None
+        unsent_claim = undelivered and row['status'] != 'completed'
+        previous = {'status': row['status'], 'result': row['result'],
+                    'claimed': row['claimed_at'] is not None and not unsent_claim}
+        if row['status'] in ('pending', 'claimed') or unsent_claim:
+            cur.execute("""UPDATE mobile_tool_commands SET
+                status=CASE WHEN status IN ('pending','claimed') THEN 'cancelled' ELSE status END,
+                arguments='{}', claimed_at=CASE WHEN %s THEN NULL ELSE claimed_at END
+                WHERE id=%s AND session_id=%s""", (unsent_claim, command_id, session_id))
+        return previous

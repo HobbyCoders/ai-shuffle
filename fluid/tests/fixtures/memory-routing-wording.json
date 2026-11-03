@@ -1,0 +1,283 @@
+[
+  {
+    "text": "Since last week UI work goes to Sol.",
+    "job": "frontend",
+    "candidate": true,
+    "rank": 1,
+    "accepted_models": [
+      "sol"
+    ]
+  },
+  {
+    "text": "UI work goes to Sol, previously Opus.",
+    "job": "frontend",
+    "candidate": true,
+    "rank": 1,
+    "accepted_models": [
+      "opus",
+      "sol"
+    ]
+  },
+  {
+    "text": "As of last month, UI work runs on Sol.",
+    "job": "frontend",
+    "candidate": true,
+    "rank": 1,
+    "accepted_models": [
+      "sol"
+    ]
+  },
+  {
+    "text": "Starting yesterday, UI work goes to Sol.",
+    "job": "frontend",
+    "candidate": true,
+    "rank": 1,
+    "accepted_models": [
+      "sol"
+    ]
+  },
+  {
+    "text": "We tried Opus, UI work goes to Sol.",
+    "job": "frontend",
+    "candidate": true,
+    "rank": 1,
+    "accepted_models": [
+      "opus",
+      "sol"
+    ]
+  },
+  {
+    "text": "We evaluated both, UI work goes to Sol.",
+    "job": "frontend",
+    "candidate": true,
+    "rank": 1,
+    "accepted_models": [
+      "sol"
+    ]
+  },
+  {
+    "text": "Having tested both, use Sol for UI work.",
+    "job": "frontend",
+    "candidate": true,
+    "rank": 1,
+    "accepted_models": [
+      "sol"
+    ]
+  },
+  {
+    "text": "UI work goes to Sol until the model is evaluated again.",
+    "job": "frontend",
+    "candidate": true,
+    "rank": 1,
+    "accepted_models": [
+      "sol"
+    ]
+  },
+  {
+    "text": "Use Sol for UI work, tested code only.",
+    "job": "frontend",
+    "candidate": true,
+    "rank": 1,
+    "accepted_models": [
+      "sol"
+    ]
+  },
+  {
+    "text": "Sol should be used for UI work.",
+    "job": "frontend",
+    "candidate": true,
+    "rank": 1,
+    "accepted_models": [
+      "sol"
+    ]
+  },
+  {
+    "text": "The model used for UI work is Sol.",
+    "job": "frontend",
+    "candidate": true,
+    "rank": 1,
+    "accepted_models": [
+      "sol"
+    ]
+  },
+  {
+    "text": "We tried Opus and now UI work goes to Sol.",
+    "job": "frontend",
+    "candidate": true,
+    "rank": 1,
+    "accepted_models": [
+      "opus",
+      "sol"
+    ]
+  },
+  {
+    "text": "Sol for UI work from now on.",
+    "job": "frontend",
+    "candidate": true,
+    "rank": 1,
+    "accepted_models": [
+      "sol"
+    ]
+  },
+  {
+    "text": "UI work moved to Sol.",
+    "job": "frontend",
+    "candidate": true,
+    "rank": 1,
+    "accepted_models": [
+      "sol"
+    ]
+  },
+  {
+    "text": "Switch UI work to Sol.",
+    "job": "frontend",
+    "candidate": true,
+    "rank": 1,
+    "accepted_models": [
+      "sol"
+    ]
+  },
+  {
+    "text": "Sol handles all UI work now.",
+    "job": "frontend",
+    "candidate": true,
+    "rank": 1,
+    "accepted_models": [
+      "sol"
+    ]
+  },
+  {
+    "text": "For UI work, switch to Sol.",
+    "job": "frontend",
+    "candidate": true,
+    "rank": 1,
+    "accepted_models": [
+      "sol"
+    ]
+  },
+  {
+    "text": "For UI work, move to Sol.",
+    "job": "frontend",
+    "candidate": true,
+    "rank": 1,
+    "accepted_models": [
+      "sol"
+    ]
+  },
+  {
+    "text": "Sol was slow on UI work.",
+    "job": "frontend",
+    "candidate": true,
+    "rank": 0,
+    "accepted_models": [
+      "sol"
+    ]
+  },
+  {
+    "text": "Sol missed a race in the UI work.",
+    "job": "frontend",
+    "candidate": true,
+    "rank": 0,
+    "accepted_models": [
+      "sol"
+    ]
+  },
+  {
+    "text": "Sol struggled with the UI work.",
+    "job": "frontend",
+    "candidate": true,
+    "rank": 0,
+    "accepted_models": [
+      "sol"
+    ]
+  },
+  {
+    "text": "Earlier today Sol broke the UI work.",
+    "job": "frontend",
+    "candidate": true,
+    "rank": 0,
+    "accepted_models": [
+      "sol"
+    ]
+  },
+  {
+    "text": "Sol wrote the UI work in PR 12.",
+    "job": "frontend",
+    "candidate": true,
+    "rank": 0,
+    "accepted_models": [
+      "sol"
+    ]
+  },
+  {
+    "text": "Sol reviewed the UI work and found nothing.",
+    "job": "frontend",
+    "candidate": true,
+    "rank": 0,
+    "accepted_models": [
+      "sol"
+    ]
+  },
+  {
+    "text": "The UI work bug was caused by Sol.",
+    "job": "frontend",
+    "candidate": true,
+    "rank": 0,
+    "accepted_models": [
+      "sol"
+    ]
+  },
+  {
+    "text": "Compare Sol's UI work output with Opus before merging.",
+    "job": "frontend",
+    "candidate": true,
+    "rank": 0,
+    "accepted_models": [
+      "opus",
+      "sol"
+    ]
+  },
+  {
+    "text": "Sol found the bug during code work.",
+    "job": "code",
+    "candidate": true,
+    "rank": 0,
+    "accepted_models": [
+      "sol"
+    ]
+  },
+  {
+    "text": "GPT 6.1 Sol wrote bad backend code last sprint.",
+    "job": "code",
+    "candidate": true,
+    "rank": 0,
+    "accepted_models": [
+      "sol"
+    ]
+  },
+  {
+    "text": "The owner tried Sol on a review last week and it missed a race.",
+    "job": "review",
+    "candidate": true,
+    "rank": 0,
+    "accepted_models": [
+      "sol"
+    ]
+  },
+  {
+    "text": "We tried code work on Sol yesterday and it was slow.",
+    "job": "code",
+    "candidate": true,
+    "rank": 0,
+    "accepted_models": [
+      "sol"
+    ]
+  },
+  {
+    "text": "Never use Sol for UI work.",
+    "job": "frontend",
+    "candidate": false,
+    "rank": 0,
+    "accepted_models": []
+  }
+]

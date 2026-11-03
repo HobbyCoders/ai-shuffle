@@ -266,22 +266,126 @@ async def test_execute_handoff_status(wired, result, status):
     assert out["result"].get("status") == (status or result.get("status"))
 
 
-@pytest.mark.parametrize("row", [None, {"status": "expired"}, {"status": "cancelled"}])
+@pytest.mark.parametrize("row", [{"status": "expired"}, {"status": "cancelled"}])
 async def test_execute_expired_or_cancelled(wired, monkeypatch, row):
     monkeypatch.setattr(service.queue, "outcome", lambda cid, sid: row)
-    assert await service.execute("s", "dev", "read_screen", {}, timeout=5) == {
-        "error": "command_expired_or_cancelled",
-    }
+    def cancel(cid, sid):
+        wired["cancelled"].append(cid)
+        return dict(row, result=None, claimed=True)
+    monkeypatch.setattr(service.queue, "cancel", cancel)
+    result = await service.execute("s", "dev", "read_screen", {}, timeout=5)
+    assert result["error"] == "command_expired_or_cancelled"
+    assert result["success"] is False
+    assert result["outcome_unknown"] is True
+    assert "verify" in result["message"].lower()
     assert wired["cancelled"] == ["cmd-1"]
 
 
-async def test_execute_revocation_during_wait(wired, monkeypatch):
+@pytest.mark.parametrize("status", ["pending", "cancelled", "expired"])
+async def test_never_delivered_commands_are_safe_to_retry(wired, monkeypatch, status):
+    monkeypatch.setattr(service.queue, "outcome", lambda *a: {"status": status})
+    monkeypatch.setattr(service.queue, "cancel", lambda *a: {"status": status, "claimed": False})
+    result = await service.execute("s", "dev", "read_screen", {}, timeout=0.01)
+    assert result["error"] == "command_not_delivered"
+    assert result["outcome_unknown"] is False
+    assert result["safe_to_retry"] is True
+    assert "safe to retry" in result["message"].lower()
+
+
+@pytest.mark.parametrize("last_status", [None, "pending"])
+async def test_missing_command_history_is_unknown_not_safe_to_retry(wired, monkeypatch, last_status):
+    monkeypatch.setattr(service.queue, "outcome", lambda *a: {"status": last_status} if last_status else None)
+    result = await service.execute("s", "dev", "read_screen", {}, timeout=0.01)
+    assert result["outcome_unknown"] is True
+    assert result.get("safe_to_retry") is not True
+    assert "verify" in result["message"].lower()
+
+
+async def test_timeout_uses_atomic_cancel_not_the_last_poll(wired, monkeypatch):
+    # The phone can claim between the last read and timeout cancellation.
+    monkeypatch.setattr(service.queue, "outcome", lambda *a: {"status": "pending"})
+    monkeypatch.setattr(service.queue, "cancel", lambda *a: {"status": "claimed", "claimed": True})
+    result = await service.execute("s", "dev", "read_screen", {}, timeout=0.01)
+    assert result["error"] == "device_timeout"
+    assert result["outcome_unknown"] is True
+
+
+@pytest.mark.parametrize("last_status", ["pending", "expired", "cancelled"])
+async def test_completed_result_winning_timeout_is_returned(wired, monkeypatch, last_status):
+    monkeypatch.setattr(service.queue, "outcome", lambda *a: {"status": last_status})
+    monkeypatch.setattr(service.queue, "cancel", lambda *a: {
+        "status": "completed", "claimed": True, "result": '{"ok":true,"status":"launched_confirmation"}',
+    })
+    result = await service.execute("s", "dev", "set_timer", {"seconds": 5}, timeout=0.01)
+    assert result == {"command_id": "cmd-1", "result": {"ok": True, "status": "launched_confirmation"}}
+
+
+@pytest.mark.parametrize("exit_path", ["poll", "cancel", "timeout"])
+@pytest.mark.parametrize("lookup_failure", [False, True])
+async def test_every_completed_exit_rechecks_authorization_after_the_row_read(wired, monkeypatch, exit_path, lookup_failure):
+    completed = {"status": "completed", "claimed": True, "result": '{"ok":true,"secret":"private-data"}'}
+    lookups = []
+    confirmation = {"available": True}
+    def authorized(sid):
+        lookups.append(sid)
+        if not confirmation["available"]:
+            if lookup_failure:
+                raise RuntimeError("temporary database error")
+            return []
+        return [{"device_id": "dev"}]
+    def lose_confirmation():
+        confirmation["available"] = False
+        if not lookup_failure:
+            wired["authorized"] = []
+        return completed
+    def outcome(*args):
+        if exit_path == "poll":
+            return lose_confirmation()  # Authorization changes after the completed row is read.
+        return {"status": "cancelled" if exit_path == "cancel" else "pending"}
+    monkeypatch.setattr(service, "authorized_devices", authorized)
+    monkeypatch.setattr(service.queue, "outcome", outcome)
+    monkeypatch.setattr(service.queue, "cancel", lambda *a: lose_confirmation())
+    result = await service.execute("s", "dev", "read_screen", {}, timeout=0.01)
+    assert result["error"] == "device_not_authorized"
+    assert result["completed_on_device"] is True
+    assert "authorization could not be confirmed" in result["message"].lower()
+    assert "result" not in result
+    assert "private-data" not in json.dumps(result)
+    assert len(lookups) >= 3  # Enqueue, poll and the completed-result boundary.
+    if lookup_failure:
+        assert wired["authorized"] == ["dev"]  # A failed lookup did not actually revoke membership.
+
+
+@pytest.mark.parametrize("status", ["pending", "claimed", "completed"])
+@pytest.mark.parametrize("authorization_error", [False, True])
+async def test_execute_revocation_during_wait_settles_atomic_outcome(wired, monkeypatch, status, authorization_error):
     calls = {"n": 0}
 
     def authorized(sid):
         calls["n"] += 1
-        return [{"device_id": "dev"}] if calls["n"] == 1 else []
+        if calls["n"] == 1:
+            return [{"device_id": "dev"}]
+        if authorization_error:
+            raise CommandError("controller_context_missing")
+        return []
+
+    def cancel(cid, sid):
+        wired["cancelled"].append(cid)
+        return {"status": status, "claimed": status != "pending",
+                "result": '{"ok":true,"status":"launched_confirmation"}' if status == "completed" else None}
 
     monkeypatch.setattr(service, "authorized_devices", authorized)
-    assert await service.execute("s", "dev", "read_screen", {}, timeout=5) == {"error": "device_not_authorized"}
+    monkeypatch.setattr(service.queue, "cancel", cancel)
+    result = await service.execute("s", "dev", "set_timer", {"seconds": 5}, timeout=5)
+    if status == "completed":
+        assert result == {"command_id": "cmd-1", "result": {"ok": True, "status": "launched_confirmation"}}
+    else:
+        reason = "controller_context_missing" if authorization_error else "device_not_authorized"
+        assert result["outcome_unknown"] is (status == "claimed")
+        if status == "claimed":
+            assert result["error"] == reason
+            assert "verify" in result["message"].lower()
+        else:
+            assert result["reason"] == reason
+            assert result["safe_to_retry"] is True
     assert wired["cancelled"] == ["cmd-1"]

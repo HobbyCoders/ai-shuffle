@@ -662,6 +662,7 @@ def android_play(ctx: Context) -> None:
         run([ctx.python, "android/ci/test-play-workflow.py"])
     else:
         ctx.notes.append("Play workflow shell checks not run: they need /bin/bash (a Linux worker).")
+    run([ctx.python, "android/ci/test-robolectric-dependencies.py"])
 
 
 def update_reach(ctx: Context, *, head: str = "HEAD", branch: str | None = None) -> None:

@@ -24,6 +24,8 @@ import {
 	chatHeaderTitle,
 	classifyTranscriptRender,
 	createChatLayoutTracker,
+	initialChatLayout,
+	settledEmptyChat,
 	type ChatSurface,
 	type ChatSurfaceInput
 } from './chat-empty-state';
@@ -399,5 +401,36 @@ describe('chatHeroKind', () => {
 		// Held in the hero by a load: still the loading hero, never the new one.
 		expect(chatHeroKind({ surface: 'active', mirrorSyncPending: false })).toBe('loading');
 		expect(chatHeroKind({ surface: 'cleared', mirrorSyncPending: true })).toBe('syncing');
+	});
+});
+
+/**
+ * #1049: the composer paints before a reload knows whether the chat is empty.
+ * A chat this tab last saw empty starts in the hero, so it never moves there.
+ */
+describe('the first layout after a reload', () => {
+	const moves = (layouts: string[]) => layouts.filter((l, i) => i > 0 && l !== layouts[i - 1]).length;
+	const reload = (lastSeenEmpty: boolean, surfaces: ChatSurface[]) => {
+		const layout = createChatLayoutTracker(initialChatLayout(lastSeenEmpty));
+		return surfaces.map((surface) => layout(surface));
+	};
+
+	it('keeps a chat last seen empty centred, and a chat with history docked', () => {
+		expect(moves(reload(true, ['loading', 'cleared']))).toBe(0);
+		expect(reload(true, ['loading'])).toEqual(['hero']);
+		expect(moves(reload(false, ['loading', 'active']))).toBe(0);
+		expect(reload(false, ['loading'])).toEqual(['column']);
+	});
+
+	it('still moves once when the chat changed since this tab saw it', () => {
+		expect(moves(reload(true, ['loading', 'active']))).toBe(1);
+		expect(moves(reload(false, ['loading', 'cleared']))).toBe(1);
+	});
+
+	it('remembers only what a settled surface proved', () => {
+		expect(settledEmptyChat('loading', 'chat')).toBeUndefined();
+		expect(settledEmptyChat('cleared', 'chat')).toBe('chat');
+		expect(settledEmptyChat('active', 'chat')).toBeNull();
+		expect(settledEmptyChat('new', null)).toBeNull();
 	});
 });

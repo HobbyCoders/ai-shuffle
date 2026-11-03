@@ -17,9 +17,14 @@ describe('ui-signature', () => {
 	});
 
 	it('places the composer', () => {
-		expect(uiComposer({ archived: false, emptyHero: true })).toBe('centre');
-		expect(uiComposer({ archived: false, emptyHero: false })).toBe('bottom');
-		expect(uiComposer({ archived: true, emptyHero: true })).toBe('hidden');
+		expect(uiComposer({ archived: false, emptyHero: true, mobile: false })).toBe('centre');
+		expect(uiComposer({ archived: false, emptyHero: false, mobile: false })).toBe('bottom');
+		expect(uiComposer({ archived: true, emptyHero: true, mobile: false })).toBe('hidden');
+	});
+
+	it('reads as docked under the phone shell hero, where the composer stays at the bottom', () => {
+		expect(uiComposer({ archived: false, emptyHero: true, mobile: true })).toBe('bottom');
+		expect(uiComposer({ archived: true, emptyHero: true, mobile: true })).toBe('hidden');
 	});
 
 	it('spells flags as strings and names the mount markers', () => {

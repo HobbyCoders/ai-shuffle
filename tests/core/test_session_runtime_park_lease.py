@@ -20,6 +20,7 @@ from tests.core.helpers import make_pump
 from tests.core.test_session_runtime import (  # noqa: F401 — autouse fixture
     _clean_module_state,
     _runtime_env,
+    _seed_session,
 )
 
 DONE = [{"type": "done", "metadata": {}}]
@@ -34,6 +35,7 @@ async def test_park_then_unpark_settles_the_parked_row_and_logs_it(mock_db, capl
     """The ordinary unpark resumes and completes the original parked turn,
     rather than completing an old row and starting a separate logical turn."""
     sid = "park-unpark"
+    _seed_session(sid, "active")
     first = turns_db.enqueue_turn(sid, "user", prompt="launch a worker")
     with _runtime_env(pump=make_pump(DONE), bg_work=[{"id": "worker-1"}]) as env:
         assert await session_runtime.SessionRuntime(first).execute() == "parked"
@@ -65,6 +67,7 @@ async def test_unpark_while_other_work_still_runs_leaves_the_park(mock_db, caplo
     """A wake for ONE finished task resumes the same turn, then parks it
     again on the remaining work instead of creating a second parked row."""
     sid = "park-partial"
+    _seed_session(sid, "active")
     first = turns_db.enqueue_turn(sid, "user", prompt="launch two")
     with _runtime_env(pump=make_pump(DONE), bg_work=[{"id": "a"}, {"id": "b"}]):
         assert await session_runtime.SessionRuntime(first).execute() == "parked"

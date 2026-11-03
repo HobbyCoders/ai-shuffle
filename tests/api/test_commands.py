@@ -98,6 +98,7 @@ def mock_sync_engine():
     """Mock the sync engine."""
     with patch("app.api.commands.sync_engine") as mock_se:
         mock_se.broadcast_session_rewound = AsyncMock()
+        mock_se.broadcast_user_session_updated = AsyncMock()
         yield mock_se
 
 
@@ -559,6 +560,82 @@ class TestExecuteRewindEndpoint:
         await asyncio.sleep(0.1)
 
         mock_sync_engine.broadcast_session_rewound.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_rewind_forgets_the_failure_it_removed_and_tells_the_sidebars(
+        self, mock_database, mock_jsonl_rewind_service, mock_sync_engine, mock_settings,
+        mock_session_store_truncation,
+    ):
+        """The transcript that showed the failure is gone, so the row stops saying Failed."""
+        from app.api.commands import execute_rewind, RewindRequestV2
+        import asyncio
+
+        mock_database.get_session.return_value = {
+            "id": "session-1", "sdk_session_id": "sdk-session-1", "project_id": None,
+            "api_user_id": "user-1",
+        }
+        mock_database.get_project.return_value = None
+        mock_jsonl_rewind_service.truncate_to_checkpoint.return_value = MockRewindResult(
+            success=True, message="Rewind successful", chat_rewound=True, messages_removed=3
+        )
+
+        await execute_rewind("session-1", RewindRequestV2(target_uuid="uuid-1"))
+        await asyncio.sleep(0.1)
+
+        # The cut itself records the reset, in one transaction.
+        assert mock_session_store_truncation.call_args.kwargs["reset_session_id"] == "session-1"
+        mock_sync_engine.broadcast_user_session_updated.assert_called_once_with(
+            user_id="user-1", session_id="session-1", updates={"last_turn_failed": False},
+        )
+
+    @pytest.mark.asyncio
+    async def test_rewind_the_database_refused_fails_and_leaves_nothing_running(
+        self, mock_database, mock_jsonl_rewind_service, mock_sync_engine, mock_settings,
+        mock_session_store_truncation,
+    ):
+        """No success over a chat still Failed, and no retry a restart would lose."""
+        from app.api.commands import execute_rewind, RewindRequestV2
+        import asyncio
+
+        mock_database.get_session.return_value = {
+            "id": "session-1", "sdk_session_id": "sdk-session-1", "project_id": None,
+        }
+        mock_database.get_project.return_value = None
+        mock_jsonl_rewind_service.truncate_to_checkpoint.return_value = MockRewindResult(
+            success=False, message="Rewind failed", error="no transcript file"
+        )
+        mock_session_store_truncation.side_effect = RuntimeError("database away")
+        running = asyncio.all_tasks()
+
+        response = await execute_rewind("session-1", RewindRequestV2(target_uuid="uuid-1"))
+        await asyncio.sleep(0.1)
+
+        assert response.success is False
+        assert response.chat_rewound is False
+        assert asyncio.all_tasks() == running
+        mock_sync_engine.broadcast_user_session_updated.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_rewind_that_did_not_touch_the_chat_keeps_the_failure(
+        self, mock_database, mock_jsonl_rewind_service, mock_sync_engine, mock_settings,
+        mock_session_store_truncation,
+    ):
+        from app.api.commands import execute_rewind, RewindRequestV2
+        import asyncio
+
+        mock_database.get_session.return_value = {
+            "id": "session-1", "sdk_session_id": "sdk-session-1", "project_id": None,
+        }
+        mock_database.get_project.return_value = None
+
+        await execute_rewind(
+            "session-1",
+            RewindRequestV2(target_uuid="uuid-1", restore_chat=False, restore_files=True),
+        )
+        await asyncio.sleep(0.1)
+
+        mock_session_store_truncation.assert_not_called()
+        mock_sync_engine.broadcast_user_session_updated.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_rewind_evicts_live_pooled_client_before_truncation(

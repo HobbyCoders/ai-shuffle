@@ -153,6 +153,8 @@ async def test_late_sessionstart_credit_is_cleared_when_next_compaction_starts(m
         # but before the status interval closes. Credit only this interval.
         result = await loop._cli_session_start({"source": "compact"})
         assert mr.wrap(memory["section"]) in result["hookSpecificOutput"]["additionalContext"]
+        assert not loop._compaction_context_restored  # composed, not yet written
+        await loop._acknowledge_note()
         assert loop._compaction_context_restored
         assert not loop._context_restore_pending
         loop._track_main_compaction({"type": "system", "subtype": "status", "status": None})
@@ -176,6 +178,8 @@ async def test_a_memory_snapshot_cut_from_the_put_back_is_not_credited(monkeypat
     try:
         loop._track_main_compaction(compacting)
         await loop._cli_session_start({"source": "compact"})
+        assert adapter._memory_put_back is None  # composed, not yet written
+        await loop._acknowledge_note()
         assert adapter._memory_put_back is not None
         assert adapter._memory_put_back[0] == memory["section"]
         assert loop._compaction_context_restored
@@ -186,10 +190,108 @@ async def test_a_memory_snapshot_cut_from_the_put_back_is_not_credited(monkeypat
         loop._track_main_compaction(compacting)
         result = await loop._cli_session_start({"source": "compact"})
         context = result["hookSpecificOutput"]["additionalContext"]
-        assert "[memory cut:" in context and "Today's date" in context
+        assert "[memory continues" in context and "Today's date" in context
+        await loop._acknowledge_note()
         assert adapter._memory_put_back is None
         assert not loop._compaction_context_restored
         statuses = {s["name"]: s["status"] for s in loop.last_restoration["sections"]}
+        assert statuses["memory"] == "pending" and statuses["environment"] == "delivered"
+        # Too long to ever go out whole: it stays uncredited for the next message.
+        await loop._finish_restoration()
+        await loop._acknowledge_note()
+        assert adapter._memory_put_back is None
+        statuses = {s["name"]: s["status"] for s in loop.last_restoration["sections"]}
         assert statuses["memory"] == "cut" and statuses["environment"] == "delivered"
+    finally:
+        await adapter.disconnect()
+
+
+def _session_start() -> "HookCallbackRequest":
+    from fluid.engine.delegated_proto import HookCallbackRequest
+
+    return HookCallbackRequest(
+        cli_request_id="cli_hook_c", callback_id="fluid_SessionStart",
+        input={"hook_event_name": "SessionStart", "session_id": "cli", "transcript_path": "",
+               "cwd": ".", "source": "compact"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_turn_with_its_own_memory_and_a_put_back_tail_is_not_sent_memory_again(monkeypatch, tmp_path):
+    """The hook answer failed, so the next turn carries its own snapshot and the
+    rest of the put-back as a tail. The pin must cover both: pinned to the tail
+    alone, the snapshot reads as not held and the turn after sends it again."""
+    from tests.core.test_memory_reminder import _delegated_turn, _memory_kinds
+
+    compacting = {"type": "system", "subtype": "status", "status": "compacting"}
+    done = {"type": "system", "subtype": "status", "status": None, "compact_result": "success"}
+    adapter, loop = await _make(monkeypatch, tmp_path, "delegated", {"section": _section(*FACTS)})
+    try:
+        await _delegated_turn(adapter)
+        await _delegated_turn(adapter, "go on [compact-now]")  # the adapter sees this one
+        real = loop._write_frame
+
+        async def refuse_the_answer(frame: dict) -> None:
+            if frame.get("type") == "control_response":
+                raise OSError("broken pipe")
+            await real(frame)
+
+        loop._write_frame = refuse_the_answer
+        loop._track_main_compaction(compacting)
+        await loop._answer_hook_request(_session_start())
+        loop._write_frame = real
+        loop._track_main_compaction(done)
+
+        await _delegated_turn(adapter)
+        statuses = {s["name"]: s["status"] for s in loop.last_restoration["sections"]}
+        assert statuses["memory"] == "replaced" and loop.last_restoration["complete"]
+        kinds = await _memory_kinds(loop)
+        assert kinds[-1] == "full"
+        nodes = await loop.store.load_path(loop.session_id)
+        assert "What you were told" in [n for n in nodes if n.message.role == "user"][-1].message.pinned_text()
+        for _ in range(2):
+            await _delegated_turn(adapter)
+        assert (await _memory_kinds(loop))[len(kinds):] == [None, None]
+    finally:
+        await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_a_slash_command_turn_neither_carries_nor_finishes_partial_memory(monkeypatch, tmp_path):
+    """17,000 characters of memory fit the put-back's total but not one answer. A
+    slash turn stays verbatim, because the CLI reads its command from the last text
+    block. It holds no snapshot, so memory stays owed until a turn that does."""
+    from tests.core.test_memory_reminder import _delegated_turn, _memory_kinds
+
+    compacting = {"type": "system", "subtype": "status", "status": "compacting"}
+    done = {"type": "system", "subtype": "status", "status": None, "compact_result": "success"}
+    memory = {"section": _section(*FACTS, "- [m98 r1; user] " + "long fact " * 1_700)}
+    adapter, loop = await _make(monkeypatch, tmp_path, "delegated", memory)
+    try:
+        await _delegated_turn(adapter)
+        loop._track_main_compaction(compacting)
+        await loop._answer_hook_request(_session_start())
+        loop._track_main_compaction(done)
+        statuses = {s["name"]: s["status"] for s in loop.last_restoration["sections"]}
+        assert statuses["memory"] == "pending"
+
+        frames: list[dict] = []
+        real = loop._write_frame
+
+        async def seen(frame: dict) -> None:
+            frames.append(frame)
+            await real(frame)
+
+        loop._write_frame = seen
+        await _delegated_turn(adapter, "/help")
+        [sent] = [f for f in frames if f.get("type") == "user"]
+        assert [b.get("text") for b in sent["message"]["content"] if b.get("type") == "text"][-1] == "/help"
+        assert not loop.last_restoration["complete"]
+        assert adapter._memory_put_back is None
+
+        await _delegated_turn(adapter)
+        statuses = {s["name"]: s["status"] for s in loop.last_restoration["sections"]}
+        assert statuses["memory"] == "replaced" and loop.last_restoration["complete"]
+        assert (await _memory_kinds(loop))[-1] == "full"
     finally:
         await adapter.disconnect()

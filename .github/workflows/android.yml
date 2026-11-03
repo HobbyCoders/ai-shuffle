@@ -104,12 +104,20 @@ jobs:
           npm ci
           bash ../android/scripts/sync-offline-demo.sh
 
+      # Gradle caches these jars under ~/.gradle (covered by setup-java), not
+      # Robolectric's uncached ~/.m2 runtime fetcher. Cold caches work too.
+      # android/gradle.properties supplies the transient-transfer retry budget
+      # for preparation AND all subsequent Gradle invocations (including Play).
+      # No test, compiler or lint task is retried.
+      - name: Resolve pinned Robolectric dependencies
+        run: ./gradlew :app:prepareRobolectricDependencies --stacktrace
+
       - name: Unit tests and Android lint
         run: |
           python3 ci/test-apk-download.py
           python3 ci/test-publish-apk.py
           python3 ci/test-mobile-apk.py
-          ./gradlew testDebugUnitTest lintDebug --stacktrace
+          ./gradlew testDebugUnitTest lintDebug --stacktrace --info
 
       - name: Build and verify debug APK
         run: |

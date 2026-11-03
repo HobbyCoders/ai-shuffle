@@ -19,6 +19,7 @@ export type SessionCardStatus =
 	| 'needs_permission'
 	| 'has_question'
 	| 'await'
+	| 'failed'
 	| 'pr'
 	| 'pr_merged'
 	| 'done'
@@ -32,6 +33,7 @@ export const STATUS_LABELS: Record<SessionCardStatus, string> = {
 	needs_permission: 'Needs Permission',
 	has_question: 'Has Question',
 	await: 'Awaiting input',
+	failed: 'Failed',
 	pr: 'PR Opened',
 	pr_merged: 'PR Merged',
 	done: 'Done',
@@ -47,7 +49,7 @@ export const STATUS_LABELS: Record<SessionCardStatus, string> = {
  * segment. `pr` / `pr_merged` are PR facts rather than runtime facts, so they
  * read as plain "Done" here and let the PR segment say the rest.
  */
-export type StatusTone = 'accent' | 'amber' | 'muted';
+export type StatusTone = 'accent' | 'amber' | 'danger' | 'muted';
 
 export const RUNTIME_STATUS_WORDS: Record<SessionCardStatus, string> = {
 	working: 'Working',
@@ -55,6 +57,7 @@ export const RUNTIME_STATUS_WORDS: Record<SessionCardStatus, string> = {
 	needs_permission: 'Needs permission',
 	has_question: 'Has question',
 	await: 'Awaiting input',
+	failed: 'Failed',
 	pr: 'Done',
 	pr_merged: 'Done',
 	done: 'Done',
@@ -75,6 +78,7 @@ export const RUNTIME_STATUS_TONES: Record<SessionCardStatus, StatusTone> = {
 	needs_permission: 'amber',
 	has_question: 'amber',
 	await: 'amber',
+	failed: 'danger',
 	pr: 'muted',
 	pr_merged: 'muted',
 	done: 'muted',
@@ -89,13 +93,20 @@ export function isAttentionStatus(status: SessionCardStatus): boolean {
 	return status === 'needs_permission' || status === 'has_question' || status === 'await';
 }
 
+/** The latest turn ended in a failure, or the chat could not start at all. The
+ *  owner's turns are read for it on the server, and a mirror is told. */
+export function lastWorkFailed(s: Pick<Session, 'status'> & Partial<Pick<Session, 'last_turn_failed'>>): boolean {
+	return !!s.last_turn_failed || s.status === 'failed';
+}
+
 /** Which sidebar lane a row belongs to. An active row parked on a prompt, or
- *  holding a task chip only the owner can act on, goes to "Needs you"; a settled
+ *  whose work failed, or holding a task chip only the owner can act on, goes to
+ *  "Needs you": nothing more happens there without them. A settled
  *  row always goes to Settled, even if the server still reports a wait (#2324)
  *  — settling is the user saying "not now". */
 export function sidebarGroup(status: SessionCardStatus, isActive: boolean, taskChips = 0): 'needs' | 'active' | 'settled' {
 	if (!isActive) return 'settled';
-	return isAttentionStatus(status) || taskChips > 0 ? 'needs' : 'active';
+	return isAttentionStatus(status) || status === 'failed' || taskChips > 0 ? 'needs' : 'active';
 }
 
 /** Task chips waiting on the owner. Kept apart from the runtime status, which
@@ -244,6 +255,8 @@ export function deriveStatus(input: {
 	prState?: 'open' | 'merged' | 'closed' | null;
 	isActive: boolean;
 	open?: OpenSessionNeeds | null;
+	/** The latest turn ended in a failure (see `lastWorkFailed`). */
+	failed?: boolean;
 }): SessionCardStatus {
 	// A private-access request blocks the agent on the owner like a permission
 	// prompt. It is tracked apart from the run state, so it also outranks a
@@ -284,6 +297,8 @@ export function deriveStatus(input: {
 	// is best-effort.
 	if (input.streaming) return 'working';
 	if (input.parked || input.backgroundWork) return 'parked';
+	// A failure is what happened last, so no earlier question or PR speaks over it.
+	if (input.failed) return 'failed';
 	if (proseQuestion) return 'await';
 	if (input.prState === 'open' || (!input.prState && input.openPr)) return 'pr';
 	if (input.prState === 'merged') return 'pr_merged';
@@ -713,13 +728,20 @@ export function branchLabel(s: Session): string | null {
 export const UNGROUPED_PROJECT = '__ungrouped__';
 
 /**
- * The link group wins over the session's own origin, as in the backend's
- * catalog (`_catalog_origin`): a chat started before its project was linked to
- * a git remote keeps the old `local:` origin, and would otherwise sit apart
- * from the same project's chats on another worker.
+ * What makes two things the same project, for the sidebar's Filter and the
+ * project picker alike (#948, #876). The link group wins over a row's own origin,
+ * as in the backend's catalog (`_catalog_origin`): a chat started before its
+ * project was linked to a git remote keeps the old `local:` origin, and a local
+ * project can still have an old `local:` catalog row. A project with neither
+ * goes by `local:<id>`, the origin it is catalogued under.
  */
+export function projectIdentity(p: { link_group_id?: string | null; origin?: string | null; id?: string | null }): string | null {
+	return p.link_group_id || p.origin || (p.id ? `local:${p.id}` : null);
+}
+
+/** A session's project, or the ungrouped key for a chat with none. */
 export function projectKey(s: Session): string {
-	return s.link_group_id || s.origin || s.project_id || UNGROUPED_PROJECT;
+	return projectIdentity({ link_group_id: s.link_group_id, origin: s.origin, id: s.project_id }) || UNGROUPED_PROJECT;
 }
 
 /** Identity tokens for a still-present local project. */

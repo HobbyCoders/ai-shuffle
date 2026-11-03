@@ -13,6 +13,7 @@ importable, so the fixtures cannot silently drift from what the harness writes.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -219,6 +220,70 @@ def test_entries_empty_for_unknown_session(mock_db):
 
 
 # ─── rewind ──────────────────────────────────────────────────────────────────
+
+def _failed_chat(session_id):
+    """A chat on this transcript whose last turn failed."""
+    from app.db import database, turns
+
+    database.create_session(session_id="chat", profile_id="default")
+    database.update_session("chat", sdk_session_id=session_id)
+    turn = turns.enqueue_turn("chat", "user", prompt="go")
+    turns.start_turn(turn["id"])
+    return turns.settle_turn(turn["id"], "aborted", "error", error="boom")["id"]
+
+
+def _rewind_in_a_process_that_then_ends(session_id):
+    """Drive the real route in its own event loop, which dies with everything on it."""
+    from unittest.mock import AsyncMock, patch
+
+    from app.api import commands
+
+    async def rewind():
+        with patch.object(commands, "sync_engine") as sync_engine:
+            sync_engine.broadcast_user_session_updated = AsyncMock()
+            sync_engine.broadcast_session_rewound = AsyncMock()
+            try:
+                return await commands.execute_rewind(
+                    "chat", commands.RewindRequestV2(target_uuid="n6", include_response=False),
+                ), sync_engine
+            finally:
+                await asyncio.sleep(0)
+
+    return asyncio.run(rewind())
+
+
+def test_a_rewind_and_its_reset_survive_a_restart_together(mock_db, monkeypatch):
+    """The database goes while recording the reset; the process dies; it comes back."""
+    from app.db import turns
+
+    session_id = _seed()
+    turn_id = _failed_chat(session_id)
+    assert turns.sessions_with_failed_latest_turn(["chat"]) == {"chat"}
+
+    def refused(*args, **kwargs):
+        raise RuntimeError("database away")
+
+    with monkeypatch.context() as outage:
+        outage.setattr(turns, "set_outcome_baseline", refused)
+        with pytest.raises(RuntimeError, match="database away"):
+            _rewind_in_a_process_that_then_ends(session_id)
+
+    # Back up, nothing in-process left: the rewind did not happen, and says so. The
+    # transcript still shows the failure and the row still reads Failed. They agree.
+    assert _head(session_id) == "n7"
+    assert turns.sessions_with_failed_latest_turn(["chat"]) == {"chat"}
+
+    # Trying again finishes both, and the row reads right in the next process too.
+    response, sync_engine = _rewind_in_a_process_that_then_ends(session_id)
+    assert response.success is True
+    assert _head(session_id) == "n5"
+    assert turns.sessions_with_failed_latest_turn(["chat"]) == set()
+    sync_engine.broadcast_user_session_updated.assert_called_once()
+
+    # What happened stays what happened.
+    turn = turns.get_turn(turn_id)
+    assert (turn["state"], turn["stop_reason"], turn["error"]) == ("aborted", "error", "boom")
+
 
 def test_rewind_keeping_response_moves_head_to_end_of_turn(mock_db):
     session_id = _seed()
@@ -1167,6 +1232,18 @@ def _reseeded_lines(session_id, tmp_path):
     return _read_jsonl(Path(result.path))
 
 
+def _reseeded_with_repeated_brief(session_id, tmp_path):
+    """The re-seed's rows, minus the one row that repeats the brief a compaction
+    folded away (#996). It stands right after the first row and is bounded, so
+    what the tests below say of the rest still holds: no full-size history."""
+    lines = _reseeded_lines(session_id, tmp_path)
+    note = lines.pop(1)
+    assert note["type"] == "user" and "first prompt" in note["message"]["content"]
+    assert "first reply" not in note["message"]["content"]
+    assert lines[-1]["type"] == "assistant"  # the file ends as it did
+    return lines
+
+
 def test_reseed_starts_from_the_cli_compaction_summary(mock_db, tmp_path):
     """A session that compacted on one worker and moved to another must not
     come back at full size: the CLI gets the summary and what followed."""
@@ -1174,7 +1251,7 @@ def test_reseed_starts_from_the_cli_compaction_summary(mock_db, tmp_path):
     _insert_events(session_id, [
         _cli_compaction(node_id="n5", summary="SUMMARY of the first turn", ts=1004.5),
     ])
-    lines = _reseeded_lines(session_id, tmp_path)
+    lines = _reseeded_with_repeated_brief(session_id, tmp_path)
     assert [(line["type"], line["message"]["content"]) for line in lines] == [
         ("user", "SUMMARY of the first turn"),
         ("user", "second prompt"),
@@ -1194,7 +1271,7 @@ def test_reseed_takes_the_latest_compaction_with_a_summary(mock_db, tmp_path):
         # it still applies.
         _cli_compaction(node_id="n6", summary=""),
     ])
-    lines = _reseeded_lines(session_id, tmp_path)
+    lines = _reseeded_with_repeated_brief(session_id, tmp_path)
     assert lines[0]["message"]["content"] == "NEW summary"
     assert [line["type"] for line in lines] == ["user", "user", "assistant"]
 
@@ -1222,7 +1299,7 @@ def test_reseed_places_a_between_turn_compaction_by_its_time(mock_db, tmp_path):
     after the event's timestamp follow the summary."""
     session_id = _seed()  # node ts 1000.0 (n1) .. 1006.0 (n7)
     _insert_events(session_id, [_cli_compaction(summary="IDLE summary", ts=1004.5)])
-    lines = _reseeded_lines(session_id, tmp_path)
+    lines = _reseeded_with_repeated_brief(session_id, tmp_path)
     assert [line["message"]["content"] for line in lines][:2] == [
         "IDLE summary", "second prompt",
     ]
@@ -1251,7 +1328,7 @@ def test_reseed_starts_from_a_mechanical_compaction_checkpoint(mock_db, tmp_path
         _cli_compaction(node_id="n5", summary=""),
         _checkpoint(ts=1004.5),
     ])
-    lines = _reseeded_lines(session_id, tmp_path)
+    lines = _reseeded_with_repeated_brief(session_id, tmp_path)
     assert [(line["type"], line["message"]["content"]) for line in lines] == [
         ("user", '[epoch n1..n2 — 1 older turns folded; HistoryExpand("n1..n2")]'),
         ("assistant", [{"type": "tool_use", "id": "t1", "name": "Read",

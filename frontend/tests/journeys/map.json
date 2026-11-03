@@ -65,6 +65,37 @@
 	],
 	"rules": [
 		{
+			"why": "what a sidebar row says is true: one row's failed change undoes only that change, a failed turn reads Failed on every producer, a project is listed once in the Filter",
+			"journeys": ["sidebar-truth"],
+			"globs": [
+				"frontend/src/lib/stores/app-data*",
+				"frontend/src/lib/components/layout/Sidebar.svelte",
+				"frontend/src/lib/components/layout/SessionCard*",
+				"frontend/src/lib/components/layout/session-card-data*",
+				"frontend/src/lib/components/layout/workspace-catalog*",
+				"app/db/turns.py",
+				"app/core/lifecycle_events.py",
+				"app/core/session_runtime.py",
+				"app/api/sessions_helpers.py",
+				"app/network/session_runtime.py",
+				"scripts/devloop/fake_claude/**"
+			]
+		},
+		{
+			"why": "rewind and fork must reseed Claude Code in the same session cwd used for resume",
+			"journeys": ["claude-rewind-cwd"],
+			"globs": [
+				"frontend/tests/journeys/claude-rewind-cwd.journey.mjs",
+				"app/api/commands.py",
+				"app/api/command_context.py",
+				"app/api/sessions_fork.py",
+				"app/core/project_resolver.py",
+				"app/core/message_resolver.py",
+				"app/core/jsonl_rewind.py",
+				"app/core/provider/fluid_transcript.py"
+			]
+		},
+		{
 			"why": "bounded transcript windows and live text selection",
 			"journeys": ["transcript-reader", "transcript-boundary"],
 			"globs": [
@@ -95,6 +126,17 @@
 				"frontend/src/lib/api/worker-settings.ts",
 				"app/core/worker_settings.py",
 				"app/api/settings_workers.py"
+			]
+		},
+		{
+			"why": "rewinding a message: its dialog, its request and what the transcript does through it",
+			"journeys": ["rewind-transcript"],
+			"globs": [
+				"frontend/tests/journeys/rewind-transcript.journey.mjs",
+				"frontend/src/lib/components/chat/MessageActions.svelte",
+				"frontend/src/lib/api/rewind.ts",
+				"app/api/commands.py",
+				"app/api/rewind_owner.py"
 			]
 		},
 		{
@@ -131,6 +173,14 @@
 				"frontend/src/lib/components/layout/NewSessionSentence.svelte",
 				"frontend/src/lib/components/layout/WorkspaceSelector.svelte",
 				"frontend/src/lib/components/chat/WorkspaceFolderSelector.svelte"
+			]
+		},
+		{
+			"why": "a cold reload paints the composer where the chat will settle",
+			"journeys": ["composer-reload"],
+			"globs": [
+				"frontend/tests/journeys/composer-reload.journey.mjs",
+				"frontend/src/lib/stores/session/empty-chat-memory*"
 			]
 		},
 		{
@@ -307,6 +357,21 @@
 				"fluid/fluid/engine/delegated_proto.py",
 				"fluid/fluid/engine/claude_mod_compaction.py",
 				"fluid/fluid/engine/claude_mod/**"
+			]
+		},
+		{
+			"why": "keep the existing Fast-mode journey reachable when its own test changes",
+			"journeys": ["fast-midturn"],
+			"globs": ["frontend/tests/journeys/fast-midturn.journey.mjs"]
+		},
+		{
+			"why": "owner memory questions and their replicated keep-both answers reach real session prompts",
+			"journeys": ["owner-memory-question"],
+			"globs": [
+				"fluid/fluid/codemode/preferences.py",
+				"fluid/fluid/codemode/routing.py",
+				"fluid/fluid/codemode/skills.py",
+				"fluid/fluid/tools/builtins/recall.py"
 			]
 		},
 		{
