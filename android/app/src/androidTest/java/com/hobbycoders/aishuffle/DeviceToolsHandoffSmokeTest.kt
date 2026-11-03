@@ -61,9 +61,11 @@ class DeviceToolsHandoffSmokeTest {
             ToolsPreferences(context).setEnabled(false)
             val store = ServerStore.get(context)
             store.getAll().forEach { store.remove(it.id) }
+            // setEnabled calls preferencesChanged: enable BEFORE selecting the target so attach
+            // cannot retire a phantom prior target and cancel its in-flight key renewal.
+            ToolsPreferences(context).setEnabled(true)
             store.add(target)
             store.selectedToolsServerId = target.id
-            ToolsPreferences(context).setEnabled(true)
         }
         // A unique id permits assertions across repeated test runs without clearing secure storage.
         val id = "handoff-${System.nanoTime()}"
