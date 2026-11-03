@@ -730,6 +730,61 @@ async def test_a_note_that_leaned_on_an_unapplied_answer_is_made_good():
         await loop.aclose()
 
 
+async def test_the_brief_comes_back_when_the_note_had_filled_the_budget():
+    """The note trusted the answer and filled the budget with about 14 KB each of
+    delivered messages and memory. The boundary disproves the answer: the replaced
+    section gives its unsent room back, the brief and the messages take memory's
+    too, and they reach the model at the next tool results, in the same total."""
+    from fluid.engine.compact_restore import CUT, OMITTED, PENDING, RestorationSection, utf16_len
+    from fluid.engine.delegated import COMPACT_CONTEXT_MAX_CHARS, HOOK_CONTEXT_INLINE_CHARS
+    from fluid.messages.content import SteerDelivery
+
+    chat = Chat()
+    chat.grow(24)
+    loop, sid = await _loop_with(chat)
+    written = await _answering(loop)
+    brief = chat.stored[0].message.text()
+    told = [f"told {i} " + "t" * 2_000 for i in range(6)]
+    loop._delivered.extend((None, SteerDelivery(id=f"d{i}", text=text), time.time())
+                           for i, text in enumerate(told))
+
+    async def note() -> list:
+        return [RestorationSection(name="memory", text="m" * 14_000, priority=3, cuttable=True)]
+
+    loop.compact_context = note
+    try:
+        await _request(loop, {'v': 1, 'trigger': 'auto', 'messages': chat.cli})
+        loop._track_main_compaction(COMPACTING)
+        await loop._answer_hook_request(_hook_request('SessionStart', source='compact'))
+        parts = [_answer(written)]
+        assert brief not in parts[0]
+        await _read(loop, sid, [_summarizer_boundary()])
+        sections = {r.name: r for r in loop._restoration.receipts()}
+        assert sections['instructions'].status == PENDING, sections
+        assert sections['memory'].status in (PENDING, CUT, OMITTED)
+
+        mapper = StreamJsonMapper(session_id=sid, turn_id='turn_1', model='m', user_node_id='n0')
+        mapper.main_tool_use_ids.update({'t1', 't2', 't3'})
+        loop._peer_admission_open = True
+        loop._active_turn_id = 'turn_1'
+        for tool in ('t1', 't2', 't3'):
+            await loop._answer_hook_request(
+                _hook_request('PostToolUse', tool_name='Read', tool_input={}, tool_use_id=tool),
+                mapper=mapper,
+            )
+            output = written[-1]['response']['response'].get('hookSpecificOutput') or {}
+            if output.get('additionalContext'):
+                parts.append(output['additionalContext'])
+        assert all(utf16_len(part) <= HOOK_CONTEXT_INLINE_CHARS for part in parts)
+        after = '\n'.join(parts[1:])
+        assert brief in after and all(text[:40] in after for text in told)
+        assert after.index(brief) < (after.index('mmmm') if 'mmmm' in after else len(after))
+        # The total is what it was: the part markers aside, no more than the cap went out.
+        assert sum(utf16_len(part) for part in parts) <= COMPACT_CONTEXT_MAX_CHARS + 200
+    finally:
+        await loop.aclose()
+
+
 async def test_a_note_beside_an_applied_answer_stays_as_it_was():
     """The other side: the boundary applied the answer, so nothing comes back."""
     chat = Chat()

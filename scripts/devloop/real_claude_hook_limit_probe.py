@@ -16,6 +16,9 @@ never run by CI.
 
 Prints one JSON line per case. ``model_saw_tail`` true means the whole answer
 reached the model; ``order`` is what the CLI did, in the order this script read it.
+Each size runs with plain ASCII filler and with emoji filler: the CLI's check is
+JavaScript's ``length``, in UTF-16 units, so emoji reach it with about half as many
+Python characters. ``python_chars`` and ``utf16_units`` say both measures of a case.
 """
 
 from __future__ import annotations
@@ -36,10 +39,19 @@ TURN_SECONDS = 180
 TAIL = "TAILTOKEN="
 
 
-def _context(size: int, token: str) -> str:
-    """Exactly ``size`` chars, with the token only at the very end."""
+def _units(text: str) -> int:
+    return len(text.encode("utf-16-le", "surrogatepass")) // 2
+
+
+def _context(size: int, token: str, filler: str = "ascii") -> str:
+    """Exactly ``size`` UTF-16 units, with the token only at the very end."""
     tail = f" {TAIL}{token}"
-    return ("filler text " * (size // 12 + 1))[: size - len(tail)] + tail
+    room = size - len(tail)
+    if filler == "emoji":  # three units each: the pair and a space
+        body = "\U0001F600 " * (room // 3) + "x" * (room % 3)
+    else:
+        body = ("filler text " * (room // 12 + 1))[:room]
+    return body + tail
 
 
 class _Cli:
@@ -118,9 +130,9 @@ def _turn(cli: _Cli, event: str, context: str, order: list[str]) -> str:
     return "(no result in time)"
 
 
-def probe(claude: str, model: str, event: str, size: int) -> dict[str, Any]:
+def probe(claude: str, model: str, event: str, size: int, filler: str = "ascii") -> dict[str, Any]:
     token = secrets.token_hex(6)
-    context = _context(size, token)
+    context = _context(size, token, filler)
     cwd = tempfile.mkdtemp(prefix="hook-limit-probe-")
     order: list[str] = []
     ask = (f"Reply with one line only: the value after the literal text '{TAIL}' if your "
@@ -139,7 +151,8 @@ def probe(claude: str, model: str, event: str, size: int) -> dict[str, Any]:
     finally:
         cli.close()
         shutil.rmtree(cwd, ignore_errors=True)
-    return {"event": event, "chars": size, "model_saw_tail": token in reply,
+    return {"event": event, "filler": filler, "utf16_units": _units(context),
+            "python_chars": len(context), "model_saw_tail": token in reply,
             "reply_is_none": reply.strip() == "NONE", "order": order}
 
 
@@ -147,13 +160,15 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--claude", default=shutil.which("claude") or "claude")
     parser.add_argument("--model", default="haiku")
-    parser.add_argument("--sizes", default="9000,10000,10001")
+    parser.add_argument("--sizes", default="9000,10000,10001", help="in UTF-16 units")
+    parser.add_argument("--fillers", default="ascii,emoji")
     args = parser.parse_args()
     version = subprocess.run([args.claude, "--version"], capture_output=True, text=True, timeout=30)
     print(json.dumps({"cli": version.stdout.strip()}), flush=True)
     for event in ("SessionStart", "PostToolUse"):
-        for size in (int(s) for s in args.sizes.split(",")):
-            print(json.dumps(probe(args.claude, args.model, event, size)), flush=True)
+        for filler in args.fillers.split(","):
+            for size in (int(s) for s in args.sizes.split(",")):
+                print(json.dumps(probe(args.claude, args.model, event, size, filler)), flush=True)
 
 
 if __name__ == "__main__":

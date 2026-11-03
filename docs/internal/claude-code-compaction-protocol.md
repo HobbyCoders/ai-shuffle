@@ -106,10 +106,16 @@ events, then the next call (`scenarios/compact-after-tool.json` plays it).
 - That hook context reaches the model whole. Over 10,000 characters it is saved
   to a file and the model gets a 2 KB preview. Exactly 10,000 arrives whole and
   10,001 does not, on SessionStart after a real `/compact` and on PostToolUse
-  (2.1.316, `scripts/devloop/real_claude_hook_limit_probe.py`). So the leg never
-  answers with more than 9,500: an overlong restoration note goes out in parts, on
-  later tool results or the next turn, and peers are batched against the whole
-  answer, separators and what a hook already said included. One peer message over
+  (2.1.316, `scripts/devloop/real_claude_hook_limit_probe.py`). The check is
+  JavaScript's `e.length`, so these are UTF-16 units: an emoji counts two. With
+  emoji filler, 10,000 units (6,675 Python characters) arrive whole, and 10,001
+  units (also 6,675 characters) and 12,008 (8,013 characters) do not, on the same two
+  events, though all three pass a Python `len()` check. So the leg never answers with more
+  than 9,500 units, and never cuts inside a surrogate pair: an overlong restoration
+  note goes out in parts, on later tool results or the next turn, and peers are
+  batched against the whole answer, separators and what a hook already said
+  included. `permissionDecisionReason` does not pass through this check, so a
+  deny's message has no such budget. One peer message over
   the limit still goes out on an answer of its own, as holding it would lose it,
   and the preview names the file.
 - That an open Fluid answer was applied. `PreCompact` runs only for Claude Code's
@@ -117,7 +123,10 @@ events, then the next call (`scenarios/compact-after-tool.json` plays it).
   `PreCompact`, `SessionStart(compact)`, closing status, boundary, in that order. So
   `PreCompact` closes every open answer. A note written while one is still open
   leans on it, so if the boundary then shows it did not apply, what the note left
-  out is queued again under the same id.
+  out is queued again under the same id. The replacement takes back what the old
+  copy had not sent and the room of lower-priority text still waiting, ahead of it.
+  What already went out stays counted, so the note's total never rises, and what no
+  longer fits waits for the next turn's tail.
 - That a turn can carry extra text whatever it is. The CLI reads a slash command
   from the last text block, so text after `/help` breaks it. Such a turn stays
   verbatim, and what restoration still owes waits for the next turn the model reads.

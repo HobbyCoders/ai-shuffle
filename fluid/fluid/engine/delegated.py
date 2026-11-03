@@ -93,7 +93,7 @@ from fluid.context.compaction import (
 )
 from fluid.context.recall import HistoryRecall
 from fluid.engine.compact_restore import (
-    SEPARATOR, RestorationQueue, RestorationSection, as_sections,
+    SEPARATOR, RestorationQueue, RestorationSection, as_sections, utf16_len,
 )
 from fluid.engine.delegated_proto import (
     FORCED_CHILD_ENV,
@@ -250,8 +250,9 @@ _COMPACT_HOOK_EVENTS = ("SessionStart", "PreCompact")
 COMPACT_CONTEXT_TIMEOUT = 5.0
 COMPACT_CONTEXT_MAX_CHARS = 24_000
 # Claude Code saves hook context over 10,000 characters to a file and shows the
-# model a 2 KB preview (2.1.316, ``USe``), so one answer stays under that. A note
-# longer than this goes out in parts (``RestorationQueue``).
+# model a 2 KB preview (2.1.316, ``USe``), so one answer stays under that. It checks
+# JavaScript's ``length``, so this is in UTF-16 units (``utf16_len``), not Python
+# characters. A note longer than this goes out in parts (``RestorationQueue``).
 HOOK_CONTEXT_INLINE_CHARS = 9_500
 # What the "instructions" section may repeat: the brief, then messages, newest first.
 # Delivered messages a running leg remembers for that section.
@@ -3368,7 +3369,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         peers: list[AgentMessage | Steer] = []
         for op in self._pending_peers:
             if (peers or lead) and (
-                len(lead) + len(self._boundary_text([*peers, op])) > HOOK_CONTEXT_INLINE_CHARS
+                utf16_len(lead + self._boundary_text([*peers, op])) > HOOK_CONTEXT_INLINE_CHARS
             ):
                 break
             peers.append(op)
@@ -5056,7 +5057,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             hook_context = decision.additional_context or ""
         if source == "compact" and self._main_compaction_running() and not data.get("agent_id"):
             # Last, as it fits in what the rest of this answer leaves.
-            taken = sum(len(part) + 2 for part in [*parts, hook_context] if part)
+            taken = sum(utf16_len(part) + 2 for part in [*parts, hook_context] if part)
             note = await self._compact_context_note(HOOK_CONTEXT_INLINE_CHARS - taken)
             if note:
                 parts.append(note)
@@ -5458,8 +5459,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         queue = self._restoration
         if queue is None:
             queue = self._restoration = RestorationQueue(compaction_id, COMPACT_CONTEXT_MAX_CHARS)
-        queue.drop(instructions.name)
-        queue.add([instructions])
+        queue.drop(instructions.name)  # what it had not sent is free again
+        queue.add([instructions])  # ahead of memory and the record, within the total
         queue.settled = False
         self._compaction_context_restored = False
 
@@ -5489,10 +5490,10 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         self.last_restoration = record
         summary = ", ".join(f"{r.name}={r.status}" for r in receipts)
         if complete:
-            logger.info("put back after the compaction (%d chars): %s", len(text), summary)
+            logger.info("put back after the compaction (%d units): %s", utf16_len(text), summary)
         else:
-            logger.warning("put back after the compaction only in part (%d chars this time, "
-                           "%d limit): %s; the rest follows", len(text),
+            logger.warning("put back after the compaction only in part (%d units this time, "
+                           "%d limit): %s; the rest follows", utf16_len(text),
                            HOOK_CONTEXT_INLINE_CHARS, summary)
         await self._record_restoration(record)
         queue.settled = not queue.waiting and not late
@@ -5546,7 +5547,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             specific = {"hookEventName": event}
             output["hookSpecificOutput"] = specific
         existing = specific.get("additionalContext") or ""
-        taken = len(existing) + 2 if existing else 0
+        taken = utf16_len(existing) + 2 if existing else 0
         part = queue.take(HOOK_CONTEXT_INLINE_CHARS - taken)
         if not part:
             return

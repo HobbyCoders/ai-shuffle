@@ -210,6 +210,11 @@ def bind(value: Any, ctx: dict[str, Any]) -> Any:
 # ─── MCP (stdio servers from --mcp-config) ──────────────────────────────────
 
 
+def _js_length(text: str) -> int:
+    """What the CLI's limits count: JavaScript's length, where an emoji is two units."""
+    return len(text.encode("utf-16-le", "surrogatepass")) // 2
+
+
 class McpServer:
     """One stdio MCP server, as Claude Code connects it: initialize, list, call."""
 
@@ -498,7 +503,7 @@ class DevClaude(script.Fake):
         for answer in answers:
             text = (answer.get("hookSpecificOutput") or {}).get("additionalContext")
             if isinstance(text, str) and text:
-                if len(text) > HOOK_CONTEXT_INLINE_CHARS:
+                if _js_length(text) > HOOK_CONTEXT_INLINE_CHARS:
                     text = self.persisted(f"hook-{uuid.uuid4().hex[:12]}-additionalContext", text)
                 found.append({"event": event, "text": text})
         return found
@@ -933,7 +938,7 @@ class DevClaude(script.Fake):
         else:
             text, is_error = (f"(fake claude CLI: {name} was not run; dev-loop scenarios "
                               "script tool output with \"result\")"), False
-        if name.startswith("mcp__") and len(text) > PERSIST_OVER:
+        if name.startswith("mcp__") and _js_length(text) > PERSIST_OVER:
             text = self.persisted(call["id"], text)
         return text, is_error
 

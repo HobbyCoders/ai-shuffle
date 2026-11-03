@@ -14,6 +14,8 @@ from fluid.engine.compact_restore import (
     RestorationSection,
     as_sections,
     pack_sections,
+    utf16_index,
+    utf16_len,
 )
 
 
@@ -285,3 +287,104 @@ def test_a_section_cut_to_its_bound_does_not_start_over_in_the_tail():
     lines = re.findall(r"record line \d{5}", joined)
     assert lines == sorted(set(lines))
     assert _status(queue) == {"working_record": CUT}
+
+
+def _units(text: str) -> int:
+    return len(text.encode("utf-16-le", "surrogatepass")) // 2
+
+
+def test_every_budget_is_in_the_units_the_cli_counts() -> None:
+    """Claude Code checks JavaScript's length, where an emoji is two units: 6,008
+    Python characters of them are 12,008 to it, so they do not fit one answer."""
+    text = "\U0001F600" * 6_000 + "TAIL-END"
+    queue = RestorationQueue("cmp_1", 24_000)
+    queue.add([RestorationSection(name="note", text=text, cuttable=True)])
+    part = queue.take(9_500)
+    queue.acknowledge()
+    assert _units(part) <= 9_500 and "TAIL-END" not in part
+    assert not queue.complete and _status(queue) == {"note": PENDING}
+    assert part.encode("utf-8")  # no half of a pair: that would not encode
+    rest = queue.take(9_500)
+    queue.acknowledge()
+    assert _units(rest) <= 9_500 and rest.endswith("TAIL-END") and queue.complete
+    assert (part + rest).count("\U0001F600") == 6_000
+
+
+def test_a_note_is_cut_to_its_bound_in_those_units() -> None:
+    note, [receipt] = pack_sections(
+        [RestorationSection(name="note", text="\U0001F600" * 3_000, cuttable=True)], 2_000,
+    )
+    assert receipt.status == CUT and _units(note) <= 2_000
+    note, [receipt] = pack_sections(
+        [RestorationSection(name="env", text="\U0001F600" * 1_500)], 2_000,
+    )
+    assert receipt.status == OMITTED and note == ""
+
+
+def test_a_budget_never_lands_inside_a_surrogate_pair() -> None:
+    assert [utf16_index("\U0001F600\U0001F600x", units) for units in range(6)] == [0, 0, 1, 1, 2, 3]
+    assert utf16_len("\U0001F600éx") == 4 and utf16_len("") == 0
+    # Two separate surrogates become one pair where the CLI reads them.
+    assert utf16_index("a😀b", 2) == 1 and utf16_len("a😀b") == 4
+    assert utf16_index("\ud83dx", 1) == 1  # one on its own is one unit, and can end a part
+
+
+def test_a_replaced_section_gives_back_what_it_had_not_sent() -> None:
+    """The budget is full and the section to be replaced has only partly gone out:
+    the new copy takes its unsent room and memory's, ahead of memory, and the total
+    (what went out plus what is pending) never rises."""
+    first = "i" * 14_000
+    memory = "m" * 14_000
+    queue = RestorationQueue("cmp_1", 24_000)
+    queue.add([
+        RestorationSection(name="instructions", text=first, cuttable=True),
+        RestorationSection(name="memory", text=memory, priority=3, cuttable=True),
+    ])
+    sent = queue.take(9_500)
+    queue.acknowledge()
+    assert "m" not in sent.split("\n")[0]
+    again = "BRIEF " + "b" * 12_000
+    queue.drop("instructions")
+    queue.add([RestorationSection(name="instructions", text=again, cuttable=True)])
+    assert _status(queue)["instructions"] == PENDING
+    parts = [sent]
+    while queue.waiting:
+        part = queue.take(9_500)
+        assert part, "a pending part must fit an empty answer"
+        queue.acknowledge()
+        parts.append(part)
+    assert again in "".join(parts[1:]).replace("\n[instructions continues in a later note]", "")\
+        .replace("[instructions, continued]\n", "")
+    assert sum(_units(part) for part in parts) <= 24_000 + 200  # part markers are not budgeted
+    assert _status(queue)["instructions"] == DELIVERED
+    # Memory got what was left, marked as cut: it is not credited, and goes on the tail.
+    assert _status(queue)["memory"] in (CUT, OMITTED)
+    assert "m" in queue.finish(24_000)
+
+
+def test_a_section_put_ahead_comes_first_on_the_wire_and_nothing_is_kept_for_it_twice() -> None:
+    queue = RestorationQueue("cmp_1", 2_000)
+    queue.add([RestorationSection(name="memory", text="MEMORY", priority=3)])
+    queue.add([RestorationSection(name="instructions", text="BRIEF", priority=0)])
+    assert queue.take(1_000) == "BRIEF\n\nMEMORY"
+    queue.rollback()
+    for _ in range(50):  # replacing it over and over never eats the budget
+        queue.drop("instructions")
+        queue.add([RestorationSection(name="instructions", text="B" * 1_500, cuttable=True)])
+    assert _status(queue)["instructions"] == PENDING
+    assert _status(queue)["memory"] == PENDING
+    assert queue.take(2_000) == "B" * 1_500 + "\n\nMEMORY"
+
+
+def test_a_partly_sent_lower_section_keeps_its_cursor_when_it_yields() -> None:
+    record = "".join(f"record line {i:05d}\n" for i in range(800))
+    queue = RestorationQueue("cmp_1", 20_000)
+    queue.add([RestorationSection(name="record", text=record, priority=4, cuttable=True)])
+    sent = queue.take(9_000).split("\n[record continues")[0]
+    queue.acknowledge()
+    queue.add([RestorationSection(name="instructions", text="i" * 15_000, cuttable=True)])
+    tail = queue.finish(40_000)
+    assert "i" * 100 in tail
+    # The record resumes where it really stopped: no line twice, none skipped.
+    lines = re.findall(r"record line \d{5}", sent + tail)
+    assert lines == [f"record line {i:05d}" for i in range(800)]

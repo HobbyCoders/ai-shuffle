@@ -1383,3 +1383,98 @@ async def test_peers_are_budgeted_against_the_whole_hook_answer(tmp_path) -> Non
     context = output["hookSpecificOutput"]["additionalContext"]
     assert len(context) == HOOK_CONTEXT_INLINE_CHARS and loop._pending_peers == []
     assert context.startswith(f"{hook_said}\n\n")
+
+
+# ─ the CLI's limit is in UTF-16 units: an emoji is two of them ─
+
+_EMOJI = "\U0001F600"
+
+
+def _units(text: str) -> int:
+    return len(text.encode("utf-16-le", "surrogatepass")) // 2
+
+
+async def test_a_session_start_note_of_emoji_is_not_credited_past_the_cli_limit(tmp_path) -> None:
+    """6,008 Python characters are 12,008 to Claude Code's ``e.length <= 10000``: it
+    would save them to a file and show a preview, so they go out in parts, and the
+    note is complete only when the last part did."""
+    from fluid.engine.delegated import HOOK_CONTEXT_INLINE_CHARS
+
+    note = _EMOJI * 6_000 + "TAIL-END"
+    loop, written = await _loop(tmp_path, hooks=HookBus(), compact_context=_note_provider(note))
+    output = await _fire_main_compact(loop, written)
+    _boundary(loop)
+    first = output["hookSpecificOutput"]["additionalContext"]
+    assert _units(first) <= HOOK_CONTEXT_INLINE_CHARS
+    assert "TAIL-END" not in first and first.encode("utf-8")
+    assert loop.last_restoration["complete"] is False
+    assert loop._restoration is not None and loop._context_restore_pending is True
+    mapper = _peer_ready(loop, main_ids=("t1",))
+    loop._pending_peers = []
+    loop._active_turn_id = mapper.turn_id
+    second = await _fire_at_boundary(loop, written, "PostToolUse", _tool("t1"), mapper)
+    rest = second["hookSpecificOutput"]["additionalContext"]
+    assert _units(rest) <= HOOK_CONTEXT_INLINE_CHARS and rest.endswith("TAIL-END")
+    assert (first + rest).count(_EMOJI) == 6_000
+    assert loop.last_restoration["complete"] is True
+
+
+async def test_session_start_counts_what_else_it_carries_in_those_units(tmp_path) -> None:
+    """Existing hook context and the separators count too, in the same units."""
+    from fluid.engine.delegated import HOOK_CONTEXT_INLINE_CHARS
+
+    rec = _Recorder({SESSION_START: HookDecision(additional_context=_EMOJI * 2_500)})
+    note = "\n".join(f"line {i:05d}" for i in range(900))
+    loop, written = await _loop(tmp_path, hooks=rec.bus, compact_context=_note_provider(note))
+    output = await _fire_main_compact(loop, written)
+    text = output["hookSpecificOutput"]["additionalContext"]
+    assert text.count(_EMOJI) == 2_500 and "line 00000" in text
+    assert _units(text) <= HOOK_CONTEXT_INLINE_CHARS
+    assert len(text) < _units(text) - 2_000  # the measure the old check used
+
+
+async def test_post_tool_use_budgets_peers_and_existing_context_in_those_units(tmp_path) -> None:
+    """Two messages of 3,000 emoji look like 6,000 characters and are 12,000 to the
+    CLI. The second waits for the next result, and existing context counts."""
+    from fluid.engine.delegated import HOOK_CONTEXT_INLINE_CHARS
+    from fluid.events.ops import AgentMessage
+
+    loop, written = await _loop(tmp_path)
+    mapper = _peer_ready(loop, main_ids=("t1", "t2"))
+    loop._pending_peers = [
+        AgentMessage(sender="reviewer", text=name + _EMOJI * 3_000, id=name, wake=False)
+        for name in ("p1", "p2")
+    ]
+    loop._turn_peer_ids = {"p1", "p2"}
+    first = await _fire_at_boundary(loop, written, "PostToolUse", _tool("t1"), mapper)
+    text = first["hookSpecificOutput"]["additionalContext"]
+    assert "p1" in text and "p2" not in text and _units(text) <= HOOK_CONTEXT_INLINE_CHARS
+    assert [p.id for p in loop._pending_peers] == ["p2"]
+    second = await _fire_at_boundary(loop, written, "PostToolUse", _tool("t2"), mapper)
+    assert "p2" in second["hookSpecificOutput"]["additionalContext"]
+
+    rec = _Recorder({POST_TOOL_USE: HookDecision(additional_context=_EMOJI * 2_500)})
+    loop, written = await _loop(tmp_path, hooks=rec.bus)
+    mapper = _peer_ready(loop)
+    loop._pending_peers = [AgentMessage(sender="r", text=_EMOJI * 2_500, id="p1", wake=False)]
+    output = await _fire_at_boundary(loop, written, "PostToolUse", _tool("t1"), mapper)
+    assert output["hookSpecificOutput"]["additionalContext"] == _EMOJI * 2_500
+    assert [p.id for p in loop._pending_peers] == ["p1"]
+
+
+async def test_post_tool_use_fits_a_put_back_beside_emoji_context(tmp_path) -> None:
+    """A part of the note goes beside what the hook said, within the limit as a whole."""
+    from fluid.engine.delegated import HOOK_CONTEXT_INLINE_CHARS
+
+    note = "\n".join(f"line {i:05d}" for i in range(1_800))
+    rec = _Recorder({POST_TOOL_USE: HookDecision(additional_context=_EMOJI * 2_000)})
+    loop, written = await _loop(tmp_path, hooks=rec.bus, compact_context=_note_provider(note))
+    await _fire_main_compact(loop, written)
+    _boundary(loop)
+    mapper = _peer_ready(loop, main_ids=("t1",))
+    loop._pending_peers = []
+    loop._active_turn_id = mapper.turn_id
+    output = await _fire_at_boundary(loop, written, "PostToolUse", _tool("t1"), mapper)
+    text = output["hookSpecificOutput"]["additionalContext"]
+    assert text.startswith(_EMOJI) and "line " in text
+    assert _units(text) <= HOOK_CONTEXT_INLINE_CHARS

@@ -14,7 +14,9 @@ list says which, so the leg credits only what really went out.
 
 One hook answer cannot carry the whole note: Claude Code saves hook context over
 10,000 characters to a file and shows the model a 2 KB preview, so a longer note
-only looked restored. :class:`RestorationQueue` sends the note in parts that fit,
+only looked restored. It measures JavaScript string length, UTF-16 code units, so
+every budget here is in those units (:func:`utf16_len`), where an emoji counts two.
+Positions in a text stay Python indexes. :class:`RestorationQueue` sends the note in parts that fit,
 one per hook answer. Handing a part out only stages it: the caller says whether
 the answer carrying it was written (:meth:`RestorationQueue.acknowledge`) or not
 (:meth:`RestorationQueue.rollback`), and only an acknowledged last part credits a
@@ -24,7 +26,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -45,6 +47,31 @@ _CUT_NOTE = "\n[{name} cut: it was longer than {limit} characters]"
 _SPLIT_NOTE = "\n[{name} continues in a later note]"
 
 
+def utf16_len(text: str) -> int:
+    """How long ``text`` is to the CLI: JavaScript's ``length``, in UTF-16 code units."""
+    return len(text) if text.isascii() else len(text.encode("utf-16-le", "surrogatepass")) // 2
+
+
+def utf16_index(text: str, units: int) -> int:
+    """The Python index where the longest start of ``text`` within ``units`` UTF-16
+    code units ends. It never falls inside a surrogate pair."""
+    if units <= 0:
+        return 0
+    if text.isascii():
+        return min(len(text), units)
+    used = 0
+    at = len(text)
+    for i, char in enumerate(text):
+        used += 2 if char > "\uffff" else 1
+        if used > units:
+            at = i
+            break
+    # A pair can also be two separate surrogates, joined into one where it is read.
+    if 0 < at < len(text) and "\ud800" <= text[at - 1] <= "\udbff" and "\udc00" <= text[at] <= "\udfff":
+        at -= 1
+    return at
+
+
 @dataclass(frozen=True)
 class RestorationSection:
     """One part of the note a host puts back after a compaction.
@@ -63,7 +90,7 @@ class RestorationSection:
     name: str
     text: str
     priority: int = 0
-    max_chars: int | None = None
+    max_chars: int | None = None  # UTF-16 units, like every budget here
     cuttable: bool = False
     on_delivered: Callable[[], None] | None = None
     replaced_by: Callable[[str], bool] | None = None
@@ -132,16 +159,16 @@ def _fit(
         separator = len(SEPARATOR) if chosen else 0
         room = budget - separator
         bound = min(room, section.max_chars) if section.max_chars else room
-        if len(text) <= bound:
+        if utf16_len(text) <= bound:
             chosen[i], statuses[i] = text, DELIVERED
         elif section.cuttable and bound >= MIN_CUT_CHARS:
             cut = _CUT_NOTE.format(name=section.name, limit=bound)
-            chosen[i] = text[: bound - len(cut)].rstrip() + cut
+            chosen[i] = text[: utf16_index(text, bound - utf16_len(cut))].rstrip() + cut
             statuses[i] = CUT
         else:
             statuses[i] = OMITTED
             continue
-        budget -= separator + len(chosen[i])
+        budget -= separator + utf16_len(chosen[i])
     return chosen, statuses, entries
 
 
@@ -153,7 +180,7 @@ class _Sending:
     whole: str  # the section's own text, uncut
     final: str  # the status it ends with once ``left`` is out: delivered or cut
     left: str  # what has not gone out
-    order: int = 0  # where the host put it: a part keeps the host's order
+    order: float = 0  # where the host put it: a part keeps the host's order
     sent: int = 0  # how much of ``left`` as first queued has gone out
     parts: int = 0
     body: int = 0  # how much of ``whole`` that holds (not a cut's closing note)
@@ -189,23 +216,69 @@ class RestorationQueue:
         self.settled = False  # the leg has said how it ended, nothing is on the way
 
     def add(self, sections: Sequence[RestorationSection]) -> None:
-        """Queue ``sections`` in priority order, within what ``total`` leaves."""
-        chosen, statuses, entries = _fit(sections, self.total - self._used)
-        by_order = {i: at for at, (i, _, _) in enumerate(entries)}
-        base = self._next
-        for i, section, text in sorted(entries, key=lambda e: (e[1].priority, e[0])):
-            self._next = base + by_order[i]
+        """Queue ``sections`` in priority order, within what ``total`` leaves.
+
+        They claim the budget ahead of pending text of a lower priority, which is
+        cut or left out for them by its own rules (:func:`_fit`) and goes first on
+        the wire after them. What already went out stays counted, so a later
+        section never raises the total: what it cannot get waits for the turn's
+        tail (:meth:`finish`), as a cut section does.
+        """
+        self.rollback()
+        given = [s for s in sections if s.text.strip()]
+        claim = min((s.priority for s in given), default=None)
+        yielding = [] if claim is None else [
+            item for item in self._sending
+            if item.left.strip() and item.section.priority > claim
+        ]
+        for item in yielding:
+            self._release(item)
+        offers = [*sections, *(replace(item.section, text=item.left) for item in yielding)]
+        chosen, statuses, entries = _fit(offers, self.total - self._used)
+        placed = [e for e in entries if e[0] < len(sections)]
+        # After what the host gave so far or, with text yielding, just ahead of it.
+        start = min((item.order for item in yielding), default=None)
+        spaced = [self._next + at for at in range(len(placed))] if start is None else [
+            start - 1 + (at + 1) / (len(placed) + 1) for at in range(len(placed))
+        ]
+        by_order = {e[0]: at for e, at in zip(placed, spaced)}
+        for i, section, text in sorted(placed, key=lambda e: (e[1].priority, e[0])):
             if statuses[i] == OMITTED:
-                self._omitted.append(_Sending(section, text, OMITTED, "", order=self._next))
+                self._omitted.append(_Sending(section, text, OMITTED, "", order=by_order[i]))
                 continue
-            self._used += len(chosen[i]) + len(SEPARATOR)
-            self._sending.append(_Sending(section, text, statuses[i], chosen[i], order=self._next,
+            self._used += utf16_len(chosen[i]) + len(SEPARATOR)
+            self._sending.append(_Sending(section, text, statuses[i], chosen[i], order=by_order[i],
                                           body=_body_chars(section.name, chosen[i], statuses[i])))
-        self._next = base + len(entries)
+        if start is None:
+            self._next += len(placed)
+        for at, item in enumerate(yielding, start=len(sections)):
+            self._replan(item, chosen.get(at), statuses.get(at, OMITTED))
+        self._sending.sort(key=lambda item: item.section.priority)
+
+    def _release(self, item: _Sending) -> None:
+        """Give back what ``item`` reserved and has not sent. What it sent stays
+        counted: that text is in the conversation, whatever becomes of the item."""
+        if item.left:
+            self._used -= utf16_len(item.left) + (len(SEPARATOR) if not item.parts else 0)
+
+    def _replan(self, item: _Sending, text: str | None, status: str) -> None:
+        """``item``, which released its reservation, with what it could claim back."""
+        if text is None:
+            item.left, item.final = "", CUT if item.sent else OMITTED
+            return
+        self._used += utf16_len(text) + (len(SEPARATOR) if not item.parts else 0)
+        item.left = text
+        if status == CUT:
+            item.body = item.sent + _body_chars(item.section.name, text, CUT)
+            item.final = CUT
 
     def drop(self, name: str) -> None:
-        """Forget the section called ``name``, about to be queued again."""
+        """Forget the section called ``name``, about to be queued again, and give
+        back what it reserved."""
         self.rollback()
+        for item in self._sending:
+            if item.section.name == name:
+                self._release(item)
         self._sending = [item for item in self._sending if item.section.name != name]
         self._omitted = [item for item in self._omitted if item.section.name != name]
 
@@ -223,7 +296,7 @@ class RestorationQueue:
         )
 
     def take(self, room: int) -> str:
-        """Stage the next part, at most ``room`` characters; "" when nothing fits.
+        """Stage the next part, at most ``room`` UTF-16 units; "" when nothing fits.
 
         Whole sections go first. A section longer than the room left is split
         at a line break only when it is cuttable (a small one that sets
@@ -237,7 +310,7 @@ class RestorationQueue:
                 continue
             gap = len(SEPARATOR) if parts else 0
             lead = f"[{item.section.name}, continued]\n" if item.parts else ""
-            size = len(lead) + len(item.left)
+            size = utf16_len(lead) + utf16_len(item.left)
             if size + gap <= left:
                 self._stage(item)
                 parts.append((item.order, lead + item.left))
@@ -245,15 +318,16 @@ class RestorationQueue:
                 item.sent, item.left, item.parts = item.sent + len(item.left), "", item.parts + 1
                 continue
             tail = _SPLIT_NOTE.format(name=item.section.name)
-            fits = left - gap - len(lead) - len(tail)
+            fits = left - gap - utf16_len(lead) - utf16_len(tail)
             if not item.section.cuttable or fits < MIN_CUT_CHARS:
                 continue
-            cut = item.left.rfind("\n", MIN_CUT_CHARS // 2, fits + 1)
-            cut = cut if cut > 0 else fits
+            end = utf16_index(item.left, fits)
+            cut = item.left.rfind("\n", MIN_CUT_CHARS // 2, end + 1)
+            cut = cut if cut > 0 else end
             piece = item.left[:cut].rstrip()
             self._stage(item)
             parts.append((item.order, lead + piece + tail))
-            left -= gap + len(lead) + len(piece) + len(tail)
+            left -= gap + utf16_len(lead) + utf16_len(piece) + utf16_len(tail)
             rest = item.left[cut:].lstrip("\n")
             item.sent, item.left, item.parts = (
                 item.sent + len(item.left) - len(rest), rest, item.parts + 1,

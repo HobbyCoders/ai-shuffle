@@ -248,6 +248,21 @@ def test_a_pre_tool_use_hook_deny_wins(tmp_path):
     cli.close()
 
 
+def test_the_hook_context_limit_is_counted_as_javascript_counts_it():
+    """Claude Code checks ``e.length``: an emoji is two units, so the fake must not
+    pass what the real CLI would save to a file and show as a preview."""
+    claude = object.__new__(fake_cli.DevClaude)
+    claude.persisted = lambda _name, _text: "STUB"
+    limit = fake_cli.HOOK_CONTEXT_INLINE_CHARS
+
+    def shown(text: str) -> str:
+        answer = {"hookSpecificOutput": {"additionalContext": text}}
+        return claude.hook_context("PostToolUse", [answer])[0]["text"]
+
+    assert shown("\U0001F600" * (limit // 2)) != "STUB"
+    assert shown("\U0001F600" * (limit // 2) + "x") == "STUB"
+
+
 def test_a_long_mcp_result_is_persisted_as_a_stub(tmp_path):
     cli = Cli(tmp_path, "--permission-mode", "bypassPermissions")
     frames = cli.turn("[script:long-result]")
