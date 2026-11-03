@@ -12,6 +12,7 @@ from dataclasses import replace
 from fluid.context.compaction import (
     CompactionConfig,
     Compactor,
+    newest_pinned_block,
     pinned_reminder_chain,
 )
 from fluid.messages import Message
@@ -163,3 +164,49 @@ def test_a_resumed_compactor_renders_the_same_pins():
     legacy = Compactor(config=config)
     legacy.rehydrate(promotions)
     assert FULL2 in _view_text(legacy, nodes)
+
+
+# ---------------------------------------------------------------------------
+# pinned_blocks: reminders sent once with no change lists (# Harness scratch)
+# ---------------------------------------------------------------------------
+
+SCRATCH_OPEN = FULL.split("# Memory")[0]
+SCRATCH_CLOSE = "\n" + FULL.rsplit("\n", 1)[1]
+SCRATCH = f"{SCRATCH_OPEN}# Harness scratch\nUse /a for temporary briefs.{SCRATCH_CLOSE}"
+SCRATCH2 = f"{SCRATCH_OPEN}# Harness scratch\nUse /b for temporary briefs.{SCRATCH_CLOSE}"
+BLOCK_HEADER = "# Harness scratch\n"
+
+
+def test_newest_pinned_block_reads_only_the_host_range():
+    nodes = _path(f"a\n\n{SCRATCH}", f"b\n\n{SCRATCH2}", "c")
+    assert newest_pinned_block(nodes, BLOCK_HEADER) == SCRATCH2
+    assert newest_pinned_block(nodes[:2], BLOCK_HEADER) == SCRATCH
+    quoted = SessionNode(node_id="q", parent_id=None, message=Message(
+        role="user", content=[Text(f"quoting {SCRATCH}")]))
+    assert newest_pinned_block([quoted], BLOCK_HEADER) is None
+    assert newest_pinned_block(_path("a"), BLOCK_HEADER) is None
+
+
+def test_a_digest_carries_the_block_on_its_own_and_beside_the_chain():
+    for first in (f"a\n\n{SCRATCH}", f"a\n\n{FULL}\n\n{SCRATCH}"):
+        compactor, nodes = _digested(first, "b", "c", "d")
+        assert compactor._digest_by_start or compactor._epoch_by_start
+        view = _view_text(compactor, nodes)
+        assert view.count(SCRATCH) == 1
+        assert view.count(FULL) == first.count(FULL)
+    off = replace(compactor.config, pinned_blocks=None)
+    compactor.config = off
+    assert _view_text(compactor, nodes).count(SCRATCH) == 0
+
+
+def test_a_fold_spanning_two_blocks_carries_only_the_newer_one():
+    compactor, nodes = _digested(f"a\n\n{SCRATCH}", f"b\n\n{SCRATCH2}", "c", "d")
+    assert compactor._digest_by_start or compactor._epoch_by_start
+    view = _view_text(compactor, nodes)
+    assert view.count(SCRATCH2) == 1
+    assert view.count(SCRATCH) == 0
+
+
+def test_a_live_block_is_not_duplicated():
+    nodes = _path(f"a\n\n{SCRATCH}", "b")
+    assert _view_text(Compactor(config=CompactionConfig()), nodes).count(SCRATCH) == 1
