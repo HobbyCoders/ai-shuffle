@@ -640,6 +640,15 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
     - restore_files: Not supported; reported as an error while the chat rewind still runs
     - include_response: Keep Claude's response to target message
     """
+    # Authorize and route before inspecting local provider state or resolving a
+    # checkout. A mirrored session intentionally has no local resume pointer, and
+    # this install runs nothing for it, so a forwarded rewind holds no lease here.
+    session = await run_sync(_load_session_for_rewind, session_id, http_request)
+    from app.api.rewind_owner import forward_rewind
+    remote = await forward_rewind(session, "execute", request.model_dump())
+    if remote is not None:
+        return RewindResponseV2.model_validate(remote)
+
     async def rewind() -> Any:
         lease = await session_admission.begin_rewind(session_id)
         try:
@@ -652,29 +661,23 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
     return await session_admission.finish_unattended(rewind())
 
 
+def _load_session_for_rewind(session_id: str, http_request: Optional[Request]) -> dict:
+    session = database.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if http_request is not None:
+        check_session_access(http_request, session)
+    return session
+
+
 async def _execute_rewind(
     session_id: str,
     request: RewindRequestV2,
     http_request: Optional[Request],
     lease: session_admission.Lease,
 ):
-    # Authorize and route before inspecting local provider state or resolving a
-    # checkout. A mirrored session intentionally has no local resume pointer.
-    def _load_session():
-        session = database.get_session(session_id)
-        if not session:
-            raise HTTPException(status_code=404, detail="Session not found")
-
-        if http_request is not None:
-            check_session_access(http_request, session)
-
-        return session
-
-    session = await run_sync(_load_session)
-    from app.api.rewind_owner import forward_rewind
-    remote = await forward_rewind(session, "execute", request.model_dump())
-    if remote is not None:
-        return RewindResponseV2.model_validate(remote)
+    # Read again: an earlier rewind may have finished while this one waited.
+    session = await run_sync(_load_session_for_rewind, session_id, http_request)
 
     if request.target_not_sent_id:
         return await run_sync(_restore_unsent_message, session_id, request.target_not_sent_id)

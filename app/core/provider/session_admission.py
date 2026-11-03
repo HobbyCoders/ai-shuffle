@@ -148,10 +148,10 @@ def turn_ended(lease: Lease) -> None:
 def holds_chat(lease: Lease) -> bool:
     """Whether session-wide cleanup is still this turn's to do.
 
-    A rewind that took the chat allows it only while it is running: after that, a
-    new turn may own what the cleanup would remove.
+    Only a rewind takes a chat from its turn. It allows the cleanup only while it
+    is running: after that, a new turn may own what the cleanup would remove.
     """
-    return _holders.get(lease.session_id) is lease or lease.session_id in _rewinds
+    return not lease.stopped or lease.session_id in _rewinds
 
 
 def close(lease: Lease) -> None:
