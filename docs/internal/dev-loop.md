@@ -426,6 +426,9 @@ fake AI's:
 | `bulk-read` | a 45,000-character Read result (no prompt), to grow the context quickly |
 | `compact` | automatic compaction mid-turn, then the answer |
 | `compact-after-tool` | a big Read, then automatic compaction before the model call that reads its result |
+| `message-then-compact` | a tool that takes 2.5 s (type a message meanwhile: it rides that result), then automatic compaction at once; a summarizer standing in keeps no rows |
+| `message-then-summarize` | the same, with no answer from the mod: Claude Code's summarizer runs and keeps no rows |
+| `compact-then-tools` | automatic compaction first, then four tool calls in the same turn, for a restoration note that goes out in parts |
 | `/compact` | manual compaction: the app's compaction route, then the boundary and the conversation replayed as fresh frames (#679) |
 
 Every compaction plays a replay fixture from `scripts/devloop/fake_claude/compaction/`
@@ -450,11 +453,16 @@ example `[script:fast-multi fast_refused=free]`. `refuse_first=CATEGORY` decline
 turn's first request on the safety check; the request re-sent after Continue
 runs standard, which is the one way a Claude Code turn comes out partly Fast.
 
-A step may add `"result": "..."` or `"result_chars": N` to a tool call,
-`"compact": true`, or `"exit": {"code": 1, "stderr": "..."}`. An MCP call
+A step may add `"result": "..."`, `"result_chars": N` or `"delay_ms": N` to a tool
+call, `"compact": true` (with `"summarizer": true` for no answer from the mod, and
+`"summarizer_keep": N`, the rows Claude Code's summarizer keeps beside its summary), or `"exit": {"code": 1, "stderr": "..."}`. An MCP call
 without `result` really runs on the bridge. Every run is logged with its argv,
-the names of its environment variables (never their values), hooks, tools and
-compactions in `fake-claude.jsonl` in the scratch directory. What it cannot
+the names of its environment variables (never their values), hooks, tools,
+compactions and each model call's context size in `fake-claude.jsonl` in the
+scratch directory; `fake-claude-context.txt` beside it holds what the newest model
+call could read. Hook context is an attachment on the row before it, kept through
+a compaction only with that row, and over 10,000 characters a 2 KB preview, as in
+Claude Code 2.1.316. What it cannot
 model: a real model's choices; built-in tools (Bash, Read and the rest) do not
 run; the Claude Code summarizer is a canned summary (sized like a real one,
 keeping the newest rows as the CLI does); and there is no

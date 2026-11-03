@@ -8,7 +8,7 @@ import pytest
 from app.core import session_runtime as sr, turn_scheduler as ts
 from app.core.task_registry import TaskRegistry
 from app.db import turns
-from tests.core.test_session_runtime import _runtime_env, _clean_module_state  # noqa: F401
+from tests.core.test_session_runtime import _runtime_env, _clean_module_state, _seed_session  # noqa: F401
 
 
 @pytest.mark.parametrize("restart_at_start,legacy,held", [
@@ -19,6 +19,7 @@ async def test_queued_delivery_rechecks_frames_and_actual_prompt(
     mock_db, monkeypatch, restart_at_start, legacy, held,
 ):
     sid = "delivery-fence"
+    _seed_session(sid, "active")
     reg = TaskRegistry()
     monkeypatch.setattr("app.core.task_registry.task_registry", reg)
     reg.start_task(sid, "A", "shell", "first")

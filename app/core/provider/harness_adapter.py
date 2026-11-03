@@ -247,6 +247,13 @@ def _is_cli_command(prompt: str) -> bool:
     return is_slash_command_prompt((prompt or "").strip())
 
 
+def _holds_full_memory(text: str) -> bool:
+    """Whether what a turn pins for the model holds a whole # Memory snapshot."""
+    from app.core.memory_reminder import memory_blocks
+
+    return any(kind == "full" for kind, _ in memory_blocks(text))
+
+
 # app permission_mode → fluid PermissionEngine approval policy: fluid's own
 # mode table, policy only. The app's native leg deliberately does NOT install
 # fluid's ``acceptEdits`` edit-tool allow rules (``fluid.permissions.modes``):
@@ -376,6 +383,13 @@ class HarnessAdapter(ProviderAdapter):
         # Whether that node was looked up in the stored log yet (once per
         # adapter: a park/wake builds a fresh adapter over the same history).
         self._memory_rehydrated: bool = False
+        # Native scratch reminder: what the path proves the model holds for the
+        # turn being built, what that turn then sends, and whether a model
+        # change asks for a fresh copy (see _native_scratch_held).
+        self._native_scratch_held_for_turn: str | None = None
+        self._native_scratch_turn: str | None = None
+        self._native_scratch_stale: bool = False
+        self._native_scratch_identity: tuple[str, str] | None = None
         self._memory_initial_task: str = ""  # ephemeral; restored from owner text
         self._memory_identity: Optional[Tuple[str, str]] = None
         # What the model holds for the turn being built, and what the turn's
@@ -669,6 +683,7 @@ class HarnessAdapter(ProviderAdapter):
                 delegated_system = await asyncio.to_thread(
                     self._compile_prompt, system, append_system, options,
                     self._worker_identity, self._workspace_card,
+                    suggest_task_available=_delegated_offered(options, self._registry)("SuggestTask"),
                 )
                 delegated_append = None
             else:
@@ -1783,6 +1798,7 @@ class HarnessAdapter(ProviderAdapter):
         self._memory_plan = None
         self._memory_turn_section = None
         self._working_record_turn = None
+        self._native_scratch_turn = None
         task_before = self._memory_initial_task
         if command and self._is_delegated and not _COMPACT_COMMAND.match(prompt.strip()):
             # Any other Claude Code command (a typed /clear, say) may reset the
@@ -1794,6 +1810,7 @@ class HarnessAdapter(ProviderAdapter):
             note = None
         else:
             self._memory_held_for_turn = await self._memory_held()
+            self._native_scratch_held_for_turn = await self._native_scratch_held()
             task_before = self._memory_initial_task
             try:
                 if source == "user":
@@ -1802,6 +1819,7 @@ class HarnessAdapter(ProviderAdapter):
                     note = await asyncio.to_thread(self._turn_context_note)
             finally:
                 self._memory_held_for_turn = None
+                self._native_scratch_held_for_turn = None
         content = f"{prompt}\n\n{note}" if note else prompt
         if command and _COMPACT_COMMAND.match(prompt.strip()):
             # Who asked, for the card: the owner typed it, or a wake the app
@@ -1827,6 +1845,7 @@ class HarnessAdapter(ProviderAdapter):
         self._pending_away_turn = None
         # Held only once the model is seen reading this turn (see receive_events).
         self._working_record_pending, self._working_record_turn = self._working_record_turn, None
+        self._native_scratch_commit()
         plan, self._memory_plan = self._memory_plan, None
         if plan is not None and plan.kind == "full":
             # Trusted once TurnStarted names the node that carries it.
@@ -2051,8 +2070,13 @@ class HarnessAdapter(ProviderAdapter):
             getattr(self._options, "extra", None) or {}
         ).get("one_shot"):
             return None
-        blocks = [self._env_note(), self._memory_turn_note(query), self._working_record_note(),
-                  self._away_note(), self._scratch_note()]
+        if self._is_delegated:
+            blocks = [self._env_note(), self._memory_turn_note(query), self._working_record_note(),
+                      self._away_note(), self._scratch_note()]
+        else:
+            # Scratch sits right after memory: one message has one pinned range.
+            blocks = [self._env_note(), self._memory_turn_note(query), self._native_scratch_note(),
+                      self._working_record_note(), self._away_note()]
         present = [block for block in blocks if block]
         return "\n\n".join(present) if present else None
 
@@ -2125,9 +2149,48 @@ class HarnessAdapter(ProviderAdapter):
     def _memory_context_pin(self, content: str) -> Optional[Tuple[int, int]]:
         # Only the plan this adapter appended can confer provenance. The
         # owner/voice/peer/command bytes before it remain exactly as supplied.
-        note = getattr(self._memory_plan, "note", None)
+        parts = (getattr(self._memory_plan, "note", None), self._native_scratch_turn)
+        note = "\n\n".join(part for part in parts if part)
         start = content.rfind(note) if note else -1
         return (start, start + len(note)) if start >= 0 else None
+
+    async def _native_scratch_held(self) -> str | None:
+        """The scratch block the model holds on this native session's active
+        path, or None when it must get one.
+
+        Read from the stored path rather than remembered, so a rewind, a fork,
+        a failed submit and a fresh adapter all answer correctly: whatever the
+        host pinned on the path is in the model's view, live or folded
+        (``CompactionConfig.pinned_blocks``). A change of model or provider
+        asks for a fresh copy, as it does for # Memory. Never raises.
+        """
+        engine = self._engine
+        holds = getattr(engine, "holds_pinned_block", None)
+        sid = self._sdk_session_id
+        if self._is_delegated or not sid or not callable(holds):
+            return None
+        from fluid.state import SCRATCH_HEADER
+
+        identity = self._memory_engine_identity()
+        if self._native_scratch_identity not in (None, identity):
+            self._native_scratch_stale = True
+        self._native_scratch_identity = identity
+        if self._native_scratch_stale:
+            return None
+        return await holds(sid, SCRATCH_HEADER)
+
+    def _native_scratch_note(self) -> str | None:
+        """The scratch block unless the path shows this exact text is held; a
+        changed path (a moved state root, say) goes out again."""
+        note = self._scratch_note() or None
+        self._native_scratch_turn = None if note == self._native_scratch_held_for_turn else note
+        return self._native_scratch_turn
+
+    def _native_scratch_commit(self) -> None:
+        """The engine took the turn: a copy it carries answers a model change."""
+        if self._native_scratch_turn:
+            self._native_scratch_stale = False
+        self._native_scratch_turn = None
 
     async def _fresh_memory_note(
         self, content: List[Any], context_pin: Optional[Tuple[int, int]] = None,
@@ -2384,7 +2447,9 @@ class HarnessAdapter(ProviderAdapter):
         ]
         return [
             RestorationSection(name=name, text=text, priority=priority,
-                               max_chars=bound, cuttable=cuttable)
+                               max_chars=bound, cuttable=cuttable,
+                               # The turn's own whole snapshot (_fresh_memory_note).
+                               replaced_by=_holds_full_memory if name == "memory" else None)
             for name, text, priority, bound, cuttable in parts if text
         ]
 
@@ -2509,14 +2574,22 @@ class HarnessAdapter(ProviderAdapter):
             await self.send_query("Resume the unfinished request above, using the current Away mode.")
             return
         self._memory_held_for_turn = await self._memory_held()
+        self._native_scratch_held_for_turn = await self._native_scratch_held()
         try:
             memory_note = await asyncio.to_thread(self._memory_turn_note)
+            scratch_note = (
+                None if self._is_delegated
+                else await asyncio.to_thread(self._native_scratch_note)
+            )
         finally:
             self._memory_held_for_turn = None
+            self._native_scratch_held_for_turn = None
         self._mark_turn_floor()
         await self._engine.submit(Resume(
-            source=self._take_turn_source(), context_note=memory_note,
+            source=self._take_turn_source(),
+            context_note="\n\n".join(n for n in (memory_note, scratch_note) if n) or None,
         ))
+        self._native_scratch_commit()
         plan, self._memory_plan = self._memory_plan, None
         if plan is not None and plan.kind == "full":
             self._memory_trusted_node = None
@@ -3791,6 +3864,7 @@ class HarnessAdapter(ProviderAdapter):
         self._memory_trusted_node = None
         self._memory_put_back = None
         self._memory_rehydrated = True
+        self._native_scratch_stale = True
         self._working_record_held = None
         if request_extra is not None:
             self._engine.request_extra = request_extra
@@ -4973,6 +5047,7 @@ class HarnessAdapter(ProviderAdapter):
         wired: Optional[frozenset] = None,
         workspace_card: Optional[str] = None,
         worker: Optional[str] = None,
+        suggest_task_available: Optional[bool] = None,
     ) -> Any:
         """Run the fluid prompt compiler, keeping the labeled sections.
 
@@ -4985,6 +5060,9 @@ class HarnessAdapter(ProviderAdapter):
         (:func:`app.core.environment.workspace_facts_card`), rendered once at
         connect. It is slotted as an ``environment`` section right after the
         compiler's own env block.
+
+        ``suggest_task_available`` is what the delegated bridge serves, for a
+        leg with no ``registry`` or ``wired`` here to infer that from.
 
         ``wired`` is the set of host capabilities on the leg's tool context
         (``ctx.extra`` keys plus the ones NativeLoop wires itself). Given it,
@@ -5056,7 +5134,9 @@ class HarnessAdapter(ProviderAdapter):
                 PromptInputs(
                     base=system,
                     extra_blocks=([append_system] if append_system else [])
-                    + _workflow_prompt_blocks(options, permitted),
+                    + _workflow_prompt_blocks(
+                        options, permitted, suggest_task_available=suggest_task_available,
+                    ),
                     cwd=options.cwd or ".",
                     include_env=True,
                     worker=worker,
@@ -5285,6 +5365,8 @@ class HarnessAdapter(ProviderAdapter):
         options: SessionOptions,
         worker: Optional[str] = None,
         workspace_card: Optional[str] = None,
+        *,
+        suggest_task_available: Optional[bool] = None,
     ) -> Optional[str]:
         """Run the fluid prompt compiler over the app's system-prompt parts.
 
@@ -5303,7 +5385,7 @@ class HarnessAdapter(ProviderAdapter):
         """
         compiled = HarnessAdapter._compile_prompt_sections(
             system, append_system, options, native=False, worker=worker,
-            workspace_card=workspace_card,
+            workspace_card=workspace_card, suggest_task_available=suggest_task_available,
         )
         if compiled is None:
             return system if system is not None else append_system
@@ -5701,6 +5783,7 @@ def _workflow_prompt_blocks(
     swarm_available: Optional[bool] = None,
     task_available: Optional[bool] = None,
     monitor_available: Optional[bool] = None,
+    suggest_task_available: Optional[bool] = None,
 ) -> List[str]:
     """App-owned additions, generated from the same final manifest as schemas.
 
@@ -5709,7 +5792,7 @@ def _workflow_prompt_blocks(
     surface, while delegated compilation supplies its CLI permission surface.
     ``permitted=None`` means every tool is available. The keyword overrides,
     when given, replace that inference for one tool: the delegated leg decides
-    Swarm, Task and Monitor from what its bridge serves.
+    Swarm, Task, Monitor and SuggestTask from what its bridge serves.
     """
     extra = getattr(options, "extra", None) or {}
     if not extra.get("automatic_workflows", False):
@@ -5720,6 +5803,7 @@ def _workflow_prompt_blocks(
     leaves = None if permitted is None else {name.rsplit("__", 1)[-1] for name in permitted}
     overrides = {
         "Swarm": swarm_available, "Task": task_available, "Monitor": monitor_available,
+        "SuggestTask": suggest_task_available,
     }
 
     def available(name):
@@ -5736,7 +5820,8 @@ def _workflow_prompt_blocks(
         )),
     )
     worker = subagent_system_prompt(
-        extra.get("app_session_id"), task_available=available("Task")
+        extra.get("app_session_id"), task_available=available("Task"),
+        suggest_task_available=available("SuggestTask"),
     )
     return [text for text in (parent, worker) if text]
 
@@ -8034,6 +8119,7 @@ def _delegated_append_text(
         options, _delegated_permitted_names(options, registry),
         swarm_available=offered("Swarm"), task_available=task_offered,
         monitor_available=offered("Monitor"),
+        suggest_task_available=offered("SuggestTask"),
     ))
     parts.extend(_delegated_fluid_context(options))
     parts.extend(_learned_guidance_blocks(options.model))

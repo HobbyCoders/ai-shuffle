@@ -1357,12 +1357,16 @@ def find_cli_transcript(
 ) -> Optional[Path]:
     """The ``<handle>.jsonl`` file ``--resume <handle>`` would load, or None.
 
-    Claude Code 2.1.285 looks in the cwd's project dir first. Failing that it
-    scans every project dir under the root for ``<handle>.jsonl`` and gives up
-    when more than one dir holds it (its "transcript_id_scan_fallback"). This
-    follows the same order: ``working_dir``'s dir (under its absolute and its
-    resolved path), then the scan, which must find exactly one file. Returns
-    None when the CLI would not find the file, or the handle is not a plain id.
+    With a runtime cwd, only accept that cwd's project dirs (absolute or
+    resolved); for hashed long names, the handle must uniquely identify a
+    file within the encoded-cwd prefix. A newly reseeded handle has no CLI
+    index yet: even a UNIQUE
+    global match can fail its first --resume from another folder. Accepting
+    that match masks cwd changes and prevents connect-time self-healing.
+    Already-indexed handles may work cross-folder; conservatively reseeding
+    those from Fluid is safer than silently starting with empty context.
+    Without a cwd, a diagnostic lookup can scan for a unique global match.
+    Returns None for an unavailable file or a handle that is not a plain id.
     """
     if not cli_session_id or not set(cli_session_id) <= _CLI_HANDLE_CHARS:
         return None
@@ -1374,9 +1378,17 @@ def find_cli_transcript(
         for cwd in dict.fromkeys(
             (os.path.abspath(working_dir), os.path.realpath(working_dir))
         ):
-            candidate = _cli_project_dir(root, cwd) / name
-            if candidate.is_file():
-                return candidate
+            encoded = cli_project_dir_name(cwd)
+            if len(encoded) > CLI_PROJECT_DIR_MAX:
+                # Unlike a writer choosing a folder for a new handle, a reader
+                # can disambiguate hashed siblings by the exact existing handle.
+                candidates = root.glob(f"{encoded[:CLI_PROJECT_DIR_MAX]}*/{name}")
+            else:
+                candidates = [root / encoded / name]
+            found = [candidate for candidate in candidates if candidate.is_file()]
+            if found:
+                return found[0] if len(found) == 1 else None
+        return None
     found = [c for c in root.glob(f"*/{name}") if c.is_file()]
     return found[0] if len(found) == 1 else None
 
@@ -1831,6 +1843,7 @@ def _native_view(
             summary_text=str(event.get("summary") or ""),
             path_end=event.get("node_id"),
             intent_pin_tokens=event.get("intent_pin_tokens"),
+            summary_pin=event.get("summary_pin"),
         )
         for event in events
     )
@@ -2165,6 +2178,57 @@ def _append_archive(sdk_session_id: str, archive: Sequence[Dict[str, str]]) -> N
     raise RuntimeError("no free event seq for the re-seed archive")
 
 
+def _shown_text(content: Any) -> List[str]:
+    """Every text in an entry's content, tool results' included."""
+    if isinstance(content, str):
+        return [content]
+    if isinstance(content, list):
+        return [text for item in content for text in _shown_text(item)]
+    if isinstance(content, dict):
+        return [*_shown_text(content.get("text")), *_shown_text(content.get("content"))]
+    return []
+
+
+def _with_what_it_was_told(
+    sdk_session_id: str,
+    entries: List[Dict[str, Any]],
+    nodes: Optional[Sequence[Any]],
+) -> List[Dict[str, Any]]:
+    """``entries``, with a row repeating the brief and delivered messages they no
+    longer show (#996).
+
+    A message delivered on a tool result reached the model through Claude Code's
+    hook lane, so it is in no entry, and a compaction can have folded away the
+    brief. Added after :func:`_fit_window`, which would archive a row the path
+    does not hold. Bounded (``render_told``), and never raises.
+    """
+    if not nodes or not entries:
+        return entries
+    try:
+        from fluid.context.compaction import flat_text, render_told, still_missing, told_on_path
+
+        shown = flat_text(" ".join(
+            text for entry in entries
+            for text in _shown_text(entry.get("message", {}).get("content"))
+        ))
+        brief, told = told_on_path(list(nodes))
+        note = render_told(
+            brief if brief and flat_text(brief) not in shown else "",
+            still_missing(told, shown),
+        )
+    except Exception as exc:  # noqa: BLE001 — the re-seed still works without it
+        logger.warning("could not repeat instructions in the re-seed of %s: %s", sdk_session_id, exc)
+        return entries
+    if note is None:
+        return entries
+    row = {"type": "user", "message": {"role": "user", "content": note}}
+    # Behind the first row, so the file still ends as it did: Claude Code can read
+    # a last user row as a turn that never got its answer. A first assistant row
+    # may hold a call whose result must come next, so then it goes last.
+    at = 1 if entries[0].get("type") == "user" else len(entries)
+    return [*entries[:at], row, *entries[at:]]
+
+
 def _fit_window(
     sdk_session_id: str,
     entries: List[Dict[str, Any]],
@@ -2301,6 +2365,7 @@ def reseed_delegated_cli_session(
                 sdk_session_id, entries, nodes,
                 context_window or delegated_window_for(sdk_session_id),
             )
+            entries = _with_what_it_was_told(sdk_session_id, entries, nodes)
         new_cli_session_id = str(_uuid.uuid4())
         lines = build_cli_transcript_entries(
             entries, new_cli_session_id, working_dir

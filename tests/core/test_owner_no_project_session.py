@@ -45,6 +45,20 @@ def _build(session_id: str, **kwargs: Any) -> Any:
     options, _ = query_options.build_options_from_profile(
         database.get_profile("agent"), session_id=session_id, **kwargs,
     )
+    # The real spawn producer and every rewind/JSONL reader must agree. In
+    # particular neither chat lane may silently fall back to workspace root.
+    from app.api.command_context import command_context
+    from app.api.commands import get_working_dir_for_project
+    from app.core.message_resolver import resolve_working_dir
+    from app.core.project_resolver import resolve_session_cwd
+
+    session = database.get_session(session_id)
+    assert resolve_working_dir(session) == options.cwd
+    assert get_working_dir_for_project(
+        session.get("project_id"), session.get("worktree_id"), session_id
+    ) == options.cwd
+    if resolve_session_cwd(session) is not None:
+        assert command_context(None, None, None, session_id)[0] == options.cwd
     return options
 
 
@@ -214,7 +228,7 @@ def test_ceiling_chat_worker_keeps_the_default_cwd(
     )
     assert not runs_in_owner_chat_folder(worker)
     assert runtime_session_mode(worker) == "chat"
-
+    assert _build(worker["id"]).cwd == str(chat_uploads_dir())
 
 
 async def _session_options(session_id: str) -> Tuple[Any, Any]:

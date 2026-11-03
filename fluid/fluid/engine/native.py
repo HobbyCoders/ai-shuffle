@@ -96,6 +96,7 @@ from fluid.context.compaction import (
     Promotion,
     describe_promotions,
     measurement_scale,
+    newest_pinned_block,
 )
 
 # ``NativeLoop._last_call_state`` for a measurement recovered from the
@@ -2707,10 +2708,15 @@ class NativeLoop(BackgroundLifecycleMixin):
         if reminder is not None:
             content.append(Text(reminder))
         # Standalone CLI context only: embedded bare loops own their prompt.
+        scratch_note: str | None = None
         if "cli_host" in self.ctx.extra and "harness_state_root" not in self.ctx.extra:
-            from fluid.state import scratch_prompt
+            from fluid.state import SCRATCH_HEADER, scratch_prompt
 
-            content.append(Text(scratch_prompt(self.ctx)))
+            scratch_note = scratch_prompt(self.ctx)
+            if await self.holds_pinned_block(sid, SCRATCH_HEADER, op.parent_node_id) == scratch_note:
+                scratch_note = None
+            else:
+                content.append(Text(scratch_note))
         ledger = self._ledger_reminder()
         if ledger is not None:
             content.append(Text(ledger))
@@ -2743,6 +2749,8 @@ class NativeLoop(BackgroundLifecycleMixin):
             parent_id=op.parent_node_id or meta.head_node_id,
             message=Message(role="user", content=content, context_pin=op.context_pin),
         )
+        if scratch_note and op.context_pin is None:
+            user_node.message.pin_context(scratch_note)
         await self._append_node(sid, user_node)
         await self._mark_questions_delivered(question_ids)
         await self._mark_background_woken(op, sid, user_node.node_id, turn_id)
@@ -2752,6 +2760,29 @@ class NativeLoop(BackgroundLifecycleMixin):
         elif self._journal is not None:
             self._journal.record_event("user", _plain_text(content))
         await self._start_and_loop(sid, turn_id, user_node)
+
+    async def holds_pinned_block(
+        self, sid: str, header: str, leaf_node_id: str | None = None,
+    ) -> str | None:
+        """The block under ``header`` the model holds on the path to the leaf.
+
+        None when it does not, or when that cannot be shown: the compactor
+        must pin the header, or a fold could hide the copy. An unreadable
+        store is None too, so the caller sends it again.
+        """
+        if header not in (self._compactor.config.pinned_blocks or ()):
+            return None
+        try:
+            # The window keeps the newest block's node (Compactor.frozen_prefix).
+            load_window = getattr(self.store, "load_window", None)
+            nodes = (
+                (await load_window(sid, leaf_node_id))[0] if callable(load_window)
+                else await self.store.load_path(sid, leaf_node_id)
+            )
+            return newest_pinned_block(nodes, header)
+        except Exception:  # unknown history: the caller re-sends
+            log.warning("pinned block lookup failed", exc_info=True)
+            return None
 
     def _summary_scale(self, nodes: list[SessionNode], measured: int | None) -> float:
         estimate = self._compactor.estimate_view_tokens(nodes, self._context_overhead_tokens())
@@ -3511,6 +3542,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                 summary_text=e.summary,
                 path_end=e.node_id,
                 intent_pin_tokens=e.intent_pin_tokens,
+                summary_pin=e.summary_pin,
             )
             for e in events
             if isinstance(e, ContextCompaction)
@@ -3636,6 +3668,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             spans=[list(s) for s in promo.spans],
             summary=promo.summary_text,
             intent_pin_tokens=promo.intent_pin_tokens,
+            summary_pin=promo.summary_pin,
             reclaimed_chars=promo.reclaimed_chars,
             before_tokens=promo.before_tokens, after_tokens=promo.after_tokens,
             batch_final=batch_final, context_window=self.context_window or 0,
@@ -3645,10 +3678,10 @@ class NativeLoop(BackgroundLifecycleMixin):
             first_changed_message=promo.first_changed_message,
             token_basis=promo.token_basis,
             measured_prompt_tokens=promo.measured_prompt_tokens,
-            # The compactor's version, not promo.render_version: apply and
-            # escalate build their promotions without the field. Resume reads
-            # it back, so a session renders the same bytes after a restart.
-            render_version=self._compactor.render_version,
+            # Capped at the compactor's version: apply and escalate build most
+            # promotions without the field, and its default is the newest. Resume
+            # reads it back, so a session renders the same bytes after a restart.
+            render_version=min(promo.render_version, self._compactor.render_version),
             **(schedule or {}),
             rewrite_tail_tokens_est=(
                 rewrite_tail_tokens_est
