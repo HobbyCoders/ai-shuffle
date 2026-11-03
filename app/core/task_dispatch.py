@@ -2471,7 +2471,9 @@ def make_fluid_dispatcher(
     return _dispatch
 
 
-def subagent_system_prompt(session_id: Optional[str], *, task_available: bool = True) -> Optional[str]:
+def subagent_system_prompt(
+    session_id: Optional[str], *, task_available: bool = True, suggest_task_available: bool = True,
+) -> Optional[str]:
     """Return the model-facing role block for a Task-created worker."""
     if not session_id or not _is_worker_session(session_id):
         return None
@@ -2491,6 +2493,13 @@ def subagent_system_prompt(session_id: Optional[str], *, task_available: bool = 
             f"You are at the maximum subagent depth ({max_depth}) and cannot "
             "delegate further."
         )
+    # This worker cannot see the parent's request, so it cannot rule out that the
+    # parent needs what it found; the parent decides, not an owner-click chip.
+    chip_rule = (
+        " Return anything the parent's request may need there, never as a "
+        "SuggestTask chip; still suggest what is clearly separate from it."
+        if suggest_task_available else ""
+    )
     return (
         "# Subagent context\n"
         "You are a subagent, not the main agent. The first user message is your "
@@ -2501,7 +2510,7 @@ def subagent_system_prompt(session_id: Optional[str], *, task_available: bool = 
         "result. Do not start a conversation with the user or take unrelated "
         "side work. Your final response is returned to the parent, so report "
         "concise accomplishments, findings, changed files, verification, and "
-        "blockers.\n"
+        f"blockers.{chip_rule}\n"
         "Background completion wakes this worker too. If tests or builds are "
         "running, end the current turn so the runtime parks you and resumes "
         "you with their results; do not poll or hold the turn open. Parking "
