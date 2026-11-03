@@ -69,13 +69,33 @@ async def _bounded_long_history(chats, monkeypatch, padding):
 
     def timed(*args, **kwargs):
         started = time.perf_counter()
-        evidence = scan(*args, **kwargs)
-        measured.append(time.perf_counter() - started)
-        return evidence
+        try:
+            return scan(*args, **kwargs)
+        finally:
+            measured.append(time.perf_counter() - started)
 
     monkeypatch.setattr(mo, "_find_named", timed)
     result = await _start({**ARGS, "model": "opus"})
-    assert not result.is_error and not chats[2], result.text
+    if measured[0] >= 5:
+        assert result.is_error and len(chats[2]) == 1 and not chats[1], result.text
+        assert "history" in result.text
+    else:
+        assert not result.is_error and not chats[2], result.text
     assert len(measured) == 1 and measured[0] < 5.5
     print(f"1601-turn history ({len(paste)} chars/row): scan={measured[0]:.4f}s "
           f"(5s budget plus one row); receipt={result.text}", flush=True)
+
+@pytest.mark.parametrize("text", [
+    ("a-" * 32000),
+    ("3f2a9c1e-7b1d-4e8a-9f00-1a2b3c4d5e6f-" * 1800)[:64000],
+    ("1." * 32000),
+], ids=["hyphenated", "joined-uuids", "dotted-numbers"])
+async def _bounded_quadratic_shapes(chats, text):
+    _save("Risky/cross-cutting code and all UI work: Opus.")
+    _turn("caller", "user", text, profile="agent")
+    started = time.perf_counter()
+    result = await _start({**ARGS, "model": "opus"})
+    elapsed = time.perf_counter() - started
+    assert not result.is_error and not chats[2], result.text
+    assert elapsed < 1, f"64k structured token took {elapsed:.4f}s"
+    print(f"64k structured token: {elapsed:.4f}s", flush=True)

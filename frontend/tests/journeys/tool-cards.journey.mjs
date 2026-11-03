@@ -133,7 +133,7 @@ const nativeModel = {
 	async act({ page, mark, variant, log }) {
 		const token = `native-model-${uniq()}`;
 		await mark('refuse native version pins and accept the native family name');
-		await typeAndSend(page, `${token}\nUse opus, 2 reviewers.\n${fakeAiTag(variant, 'tool-native-model-override')}`);
+		await typeAndSend(page, `${token}\nUse opus for this as it needs to be buyllet proof no gpt for this.\n${fakeAiTag(variant, 'tool-native-model-override')}`);
 		await waitTurnSettled(page, { text: 'Native model checks complete.', messagesAtLeast: 2 });
 		const parent = await api(page, 'GET', `/sessions/${await chatIdByToken(page, token)}`);
 		const results = parent.messages.filter((m) => m.tool_name === 'StartSession' && m.toolResult);
@@ -161,7 +161,7 @@ const nativePinRetry = {
 	async act({ page, mark, variant, log }) {
 		const token = `native-pin-retry-${uniq()}`;
 		await mark('request a specific native version, then retry its family');
-		await typeAndSend(page, `${token}\nCan you use Opus (4.7) for the review?\n${fakeAiTag(variant, 'tool-native-model-override')}`);
+		await typeAndSend(page, `${token}\nCan you use Opus version 4?\n${fakeAiTag(variant, 'tool-native-model-override')}`);
 		await page.getByText('Reply yes or no in the message box.', { exact: false }).waitFor({ timeout: 20_000 });
 		await mark('decline the current-family substitution');
 		await typeAndSend(page, 'no');
@@ -188,7 +188,7 @@ const nativePrecedence = {
 		await typeAndSend(page, `${token}\nUse opus.\n${fakeAiTag(variant, 'tool-native-model-override')}`);
 		await waitTurnSettled(page, { text: 'Native model checks complete.', messagesAtLeast: 2 });
 		await mark('a newer version request supersedes the saved plain-family naming');
-		await typeAndSend(page, `Can you use Opus (4.7) for the review?\n${fakeAiTag(variant, 'tool-native-model-precedence')}`);
+		await typeAndSend(page, `Can you use Opus version 4?\n${fakeAiTag(variant, 'tool-native-model-precedence')}`);
 		await page.getByText('Reply yes or no in the message box.', { exact: false }).waitFor({ timeout: 20_000 });
 		await typeAndSend(page, 'no');
 		await waitTurnSettled(page, { text: 'Newer native request checks complete.', messagesAtLeast: 4 });
@@ -198,7 +198,23 @@ const nativePrecedence = {
 		expect(results[3].toolStatus !== 'error', 'earlier plain-family consent started its chat');
 		expect(results[4].toolStatus === 'error' && results[5].toolStatus === 'error', 'newer pin and family substitution did not start');
 		expect(/owner declined/.test(results[5].toolResult), 'saved naming did not skip the new owner agreement');
-		log('newer version request overrides older chat naming and its durable receipt');
+		await mark('a command word in a different clause cannot restore consent');
+		await typeAndSend(page, `the opus agent stopped, try again
+${fakeAiTag(variant, 'tool-native-model-precedence')}`);
+		await page.getByText('Reply yes or no in the message box.', { exact: false }).waitFor({ timeout: 20_000 });
+		await typeAndSend(page, 'no');
+		await waitTurnSettled(page, { text: 'Newer native request checks complete.', messagesAtLeast: 6 });
+		const narrative = await api(page, 'GET', `/sessions/${await chatIdByToken(page, token)}`);
+		const narrativeResults = narrative.messages.filter((m) => m.tool_name === 'StartSession' && m.toolResult);
+		expect(narrativeResults.length === 8 && narrativeResults.slice(-2).every((r) => r.toolStatus === 'error'), 'narrative did not override the version request');
+		await mark('a short family correction restores plain consent');
+		await typeAndSend(page, `go with opus
+${fakeAiTag(variant, 'tool-native-model-precedence')}`);
+		await waitTurnSettled(page, { text: 'Newer native request checks complete.', messagesAtLeast: 8 });
+		const corrected = await api(page, 'GET', `/sessions/${await chatIdByToken(page, token)}`);
+		const correctedResults = corrected.messages.filter((m) => m.tool_name === 'StartSession' && m.toolResult);
+		expect(correctedResults.length === 10 && correctedResults.at(-1).toolStatus !== 'error', 'short correction started without another prompt');
+		log('newer version request overrides older naming; narrative cannot restore it, a short instruction can');
 	}
 };
 

@@ -27,7 +27,7 @@ async def test_adjacent_qualification_requires_agreement(chats, text):
     "use 4 opus agents", "use opus for the 2026 report", "run opus on port 8000",
     "Use opus. 3 files changed", "Opus please - 4 agents", "use opus with 2 agents",
     "Run this on Opus, one agent per PR", "use opus at 5pm", "use opus #1040",
-    "PR 1040: opus", "Use GPT 6.1 → Opus", "opus, 2 reviewers", "Opus, four", "Use Opus version 4",
+    "PR 1040: opus", "Use GPT 6.1 → Opus", "opus, 2 reviewers",
 ])
 @pytest.mark.parametrize("routing_memory", [False, True])
 async def test_numbers_elsewhere_allow_start_and_receipt_names_actual_model(chats, text, routing_memory):
@@ -138,3 +138,91 @@ async def test_question_does_not_replace_a_newer_qualified_owner_request(chats):
     result = await _start({**ARGS, "request_id": "instruction", "model": "opus"})
     assert not result.is_error, result.text
     assert json.loads(result.text)["model"] == "opus" and len(chats[2]) == 1
+
+@pytest.mark.parametrize("text", [
+    "Use opus for this as it needs to be buyllet proof no gpt for this",
+    "Use opus not sonnet", "use opus no gpt", "use opus and don't touch the db",
+    "Use opus for this since it's not simple", "we use opus no gpt",
+])
+@pytest.mark.parametrize("memory", [False, True])
+async def test_positive_instruction_survives_a_later_negation(chats, text, memory):
+    if memory:
+        _save("Risky/cross-cutting code and all UI work: Opus.")
+    _turn("caller", "user", text, profile="agent")
+    result = await _start({**ARGS, "model": "opus"})
+    assert not result.is_error and not chats[2], result.text
+
+
+@pytest.mark.parametrize("text", ["don't use opus", "opus not working", "use sonnet not opus"])
+async def test_negated_family_does_not_count_as_a_positive_request(chats, text):
+    _turn("caller", "user", text, profile="agent")
+    result = await _start({**ARGS, "model": "opus"})
+    assert result.is_error and len(chats[2]) == 1 and not chats[1]
+
+
+@pytest.mark.parametrize("text", [
+    "Use Opus version 4", "Use Opus version four", "Can you use Opus version 4?",
+    "Opus model 4", "Opus build 4", "Opus, 4", "Use Opus (4)", "Use Opus: 4",
+    "use opus4.7", "use opus4", "Opus, four",
+])
+async def test_labeled_or_clause_terminal_number_is_a_version(chats, text):
+    _save("Risky/cross-cutting code and all UI work: Opus.")
+    _turn("caller", "user", text, profile="agent")
+    result = await _start({**ARGS, "model": "opus"})
+    assert result.is_error and len(chats[2]) == 1 and not chats[1], result.text
+
+
+@pytest.mark.parametrize("text, restores", [
+    ("the opus agent stopped, try again", False),
+    ("the opus run used up the default budget", False),
+    ("just opus", True), ("opus please", True), ("go with opus", True),
+    ("would you use opus for this?", False),
+    ("can you explain why we use opus?", False),
+    ("can you use opus?", True), ("could you run this on opus?", True),
+])
+async def test_only_a_directive_in_the_model_clause_restores_consent(chats, text, restores):
+    _turn("caller", "user", "Use Opus 4.7 for the review", profile="agent")
+    _turn("caller", "user", text, profile="agent")
+    result = await _start({**ARGS, "model": "opus"})
+    assert (not result.is_error) is restores, result.text
+    assert len(chats[2]) == int(not restores)
+
+
+@pytest.mark.parametrize("text", ["would you use opus for this?", "can you explain why we use opus?"])
+async def test_opinion_question_alone_does_not_authorize(chats, text):
+    _turn("caller", "user", text, profile="agent")
+    result = await _start({**ARGS, "model": "opus"})
+    assert result.is_error and len(chats[2]) == 1 and not chats[1]
+
+
+@pytest.mark.parametrize("failure", ["exception", "deadline"])
+async def test_incomplete_native_search_requires_fresh_agreement(chats, monkeypatch, failure):
+    import time
+    _save("Risky/cross-cutting code and all UI work: Opus.")
+    _turn("caller", "user", "Use Opus 4.7 for the review", profile="agent")
+    original = mo._typed
+    def incomplete(*args, **kwargs):
+        if failure == "exception":
+            raise RuntimeError("test read failure")
+        time.sleep(5.01)
+        return original(*args, **kwargs)
+    monkeypatch.setattr(mo, "_typed", incomplete)
+    result = await _start({**ARGS, "model": "opus"})
+    assert result.is_error and len(chats[2]) == 1 and not chats[1], result.text
+
+
+async def test_incomplete_search_cannot_reuse_or_persist_an_approval(chats, monkeypatch):
+    from app.core.agent_types import PermissionResultAllow
+    chats[3]["result"] = PermissionResultAllow(updated_input={})
+    _turn("caller", "user", "start the review", profile="agent")
+    assert not (await _start({**ARGS, "request_id": "earlier-yes", "model": "opus"})).is_error
+    assert len(chats[2]) == 1
+    _turn("caller", "user", "Use Opus 4.7", profile="agent")
+    def failed_read(*args, **kwargs):
+        raise RuntimeError("test incomplete history")
+    monkeypatch.setattr(mo, "_typed", failed_read)
+    for index in range(2):
+        result = await _start({**ARGS, "request_id": f"incomplete-{index}", "model": "opus"})
+        assert not result.is_error, result.text
+        assert len(chats[2]) == index + 2
+    assert not any("incomplete" in key for key in mo._APPROVED)

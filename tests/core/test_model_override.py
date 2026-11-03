@@ -1046,7 +1046,7 @@ ARGS = {"title": "Review", "prompt": "Review the change", "request_id": "r1"}
 VERSION_WORDINGS = [
     "claude-3-opus", "claude-3-opus-latest", "claude-opus-latest", "use 4.7 opus",
     "Route reviews to claude-3-opus", "use opus 2 reviewers", "Use Opus 4 as the reviewer",
-    "Use Opus four", "use old opus", "use the previous opus",
+    "Use Opus four", "use old opus", "use the previous opus", "Opus version 4", "Opus, four",
     "Use the 4.7 version of Opus", "Opus model 4.7",
     "opus at version 4.7", "opus with 1m context", "Reviews: Opus, 4.7",
     "Reviews go on the 4.7 version of Opus", "opus build 4.7", "opus release 4.7",
@@ -1056,9 +1056,9 @@ PLAIN_WORDINGS = [
     "Use opus. 3 files changed", "use opus. Version 4.7 of the lib is broken",
     "Use opus\n\n2 things to check", "Opus please - 4 agents",
     "use opus for PR 1040", "use opus for step 2",
-    "Use opus instead of Sol 6.1", "use 4 opus agents", "Opus version 4", "use opus, 2 reviewers",
+    "Use opus instead of Sol 6.1", "use 4 opus agents", "use opus, 2 reviewers",
     "use opus with 2 agents", "Run this on Opus, one agent per PR", "use opus at 5pm",
-    "use opus #1040", "PR 1040: opus", "Use GPT 6.1 → Opus", "Opus, four",
+    "use opus #1040", "PR 1040: opus", "Use GPT 6.1 → Opus",
 ]
 
 
@@ -1150,7 +1150,7 @@ async def _native_call(entry, model, request_id):
 def _native_request(chats, entry, source, wording):
     chats[0].create_profile("native-retry", "Native retry", None, {"model": "sonnet"})
     sid = "caller" if entry == "start" else "parent"
-    text = f"Use {wording} for the review"
+    text = wording  # Preserve clause endings and the owner's actual wording.
     if source == "memory":
         from tests.core.test_model_override_memory import _save
         _save(f"Route reviews to {wording}")
@@ -1301,7 +1301,7 @@ def test_native_receipts_reuse_the_sentence_matcher(chats, text, consent):
     assert mo._remember_named(sid, "opus", mo._user_evidence(sid)[0])
     assert mo._has_named(sid, "opus") is consent
     receipt = interactions.get_interaction(mo._named_id(sid, "opus"))
-    assert receipt["payload"]["text"] == f"Use {text} for the review"
+    assert receipt["payload"]["text"] == text
 
 
 @pytest.mark.parametrize("wording", ["gpt 6 astra", "prov:lane:GPT-6-ASTRA"])

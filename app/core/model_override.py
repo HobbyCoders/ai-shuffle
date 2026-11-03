@@ -360,26 +360,40 @@ def _mentions(text_tokens: Sequence[str], name: str) -> bool:
                                 for start in boundaries)
 
 
-def _directed(text: str) -> bool:
-    return bool(re.search(r"\b(?:use|run|route|send|prefer|pick|choose|try|start|switch|default)\b", text, re.I))
+def _instruction(text: str) -> bool:
+    """An instruction starts its own clause, not a narrative mentioning a verb."""
+    return bool(re.match(
+        r"\s*(?:(?:and|or|but|then|now|please|we)\s+)*"
+        r"(?:(?:can|could)\s+(?:you|we)\s+)?"
+        r"(?:use|run|route|send|prefer|pick|choose|try|start|switch|default"
+        r"|go\s+(?:with|to)|move\s+to)\b", text, re.I))
+
+
+def _directed(text: str, model: str) -> bool:
+    name = re.escape(model)
+    for part in re.split(r"[,:;\n]|(?<=[.!?])\s+", text):
+        if re.search(rf"(?<![\w-]){name}(?![\w-])", part, re.I) and (
+                _instruction(part) or re.fullmatch(
+                    rf"\s*(?:just\s+)?{name}(?:\s+please)?[.!]?\s*", part, re.I)):
+            return True
+    return False
 
 
 def _family_consent(model: str, text: str) -> Optional[bool]:
-    """Plain consent, qualification, or no request. Qualifiers aren't exhaustive;
-    the start receipt naming the actual model is the backstop for missed wording.
-    """
+    """Plain consent, qualification, or no request, within the model's clause."""
     name = re.escape(model)
     gap = r"(?:[\W_]|\b(?:model|version|build|release|at|with)\b)*"
-    number = r"(?:v?\d+|zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand)\b"
+    number = r"(?:v?\d+(?:\.\d+)?|zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand)\b"
     qualified = (rf"\b(?:old|older|previous|prior|legacy|last|earlier|original|\d+\.\d+|\d{{4}})\s+{name}\b|"
-                 rf"\b(?:claude\s+\d+(?:\.\d+)*|\d+(?:\.\d+)*\s+version\s+of)\s+{name}\b|"
-                 rf"\b[\w-]+-{name}\b|\b{name}(?:-[\w-]+|\s+{number}|{gap}(?:v?\d+\.\d+|1m)\b)")
+                 rf"\b(?:claude\s+\d+(?:\.\d+)?|\d+(?:\.\d+)?\s+version\s+of)\s+{name}\b|"
+                 rf"(?<=[\w-])-{name}\b|\b{name}(?:-[\w-]+|{number}|"
+                 rf"\s+(?:(?:model|version|build|release)\s+)?{number}|"
+                 rf"{gap}(?:v?\d+\.\d+|1m)\b|[\s,:/()\[\]{{}}—–-]+{number}(?=[\s)\]}}]*(?:$|[.,;:!?])))")
     mentioned = False
     for sentence in re.split(r"(?<=[.!?])\s+|\n", str(text or "")):
         plain, pins = re.subn(qualified, "", sentence, flags=re.I)
-        if sentence.rstrip().endswith("?") and (pins or not (_directed(sentence) and (
-                re.match(r"\s*(?:can|could|would|will)\s+(?:you|we)\b", sentence, re.I) or _AFFIRM.match(sentence)))):
-            mentioned |= bool(pins)
+        mentioned |= bool(pins)
+        if sentence.rstrip().endswith("?") and (pins or not _directed(sentence, model)):
             continue
         mentioned |= bool(re.search(rf"\b{name}\b", sentence, re.I))
         if any(re.search(rf"(?<![\w-]){name}(?![\w-])", part, re.I) for part in affirmed_clauses(plain)):
@@ -583,6 +597,10 @@ def _user_evidence(session_id: str) -> List[Dict[str, Any]]:
         return []
 
 
+class _NativeSearchIncomplete(RuntimeError):
+    """Unknown newest native request: saved routing cannot grant consent."""
+
+
 def _find_named(session_id: str, model: str, *, recent: bool = True,
                 older: bool = True) -> Optional[Dict[str, Any]]:
     """The user's message naming ``model``: ``recent`` searches the bounded
@@ -641,12 +659,16 @@ def _find_named(session_id: str, model: str, *, recent: bool = True,
                         break
                     for turn in rows:
                         if time.monotonic() >= deadline:
+                            if native:
+                                raise _NativeSearchIncomplete
                             return None
                         texts = _typed(cursor, current, [turn], session=session)
+                        if time.monotonic() >= deadline and native:
+                            raise _NativeSearchIncomplete
                         if mentions(texts):
                             evidence = {"turn_id": turn["id"], "session_id": current,
                                         "api_user_id": principal, "text": texts[0]}
-                            if native and _family_consent(model, texts[0]) is True and not _directed(texts[0]):
+                            if native and _family_consent(model, texts[0]) is True and not _directed(texts[0], model):
                                 # Narrative naming cannot supersede an older qualified request.
                                 plain_evidence = plain_evidence or evidence
                                 continue
@@ -660,10 +682,21 @@ def _find_named(session_id: str, model: str, *, recent: bool = True,
                 if payload.get("orchestration_remote_origin") or not payload.get("orchestration_sender"):
                     break
                 current = chat_of(payload["orchestration_sender"])
-    except Exception:  # noqa: BLE001 — a failed search never grants consent
+            else:
+                if native:
+                    raise _NativeSearchIncomplete
+    except _NativeSearchIncomplete:
+        raise
+    except Exception as exc:  # noqa: BLE001 — a failed search never grants consent
         logger.warning("Could not search old model naming for %s", session_id, exc_info=True)
+        if native:
+            raise _NativeSearchIncomplete from exc
         return None
-    return plain_evidence if time.monotonic() < deadline else None
+    if time.monotonic() >= deadline:
+        if native:
+            raise _NativeSearchIncomplete
+        return None
+    return plain_evidence
 
 
 def user_texts(session_id: str) -> List[str]:
@@ -680,7 +713,8 @@ def user_texts(session_id: str) -> List[str]:
 # before a space, so "prov:lane:astra" stays whole) separate list parts.
 _SENTENCE_BREAK = re.compile(r"[;\n—–]|[.!?](?=\s|$)")
 _PART_BREAK = re.compile(r"[,:](?=\s|$)")
-# A part with one of these says what NOT to use: every model in it is left out.
+# A negation rejects what follows it; only a leading instruction can retain
+# the positive prefix ("use Opus, not Sol"), never a narrative ("Opus not working").
 _NEGATION = re.compile(
     r"\b(?:never|not|no|dont|don't|do\s+not|avoid|stop\s+using|\w+n't)\b"
     r"|\b(?:is|are|was|were)\s+(?:\w+\s+)?(?:poor|bad|crap)\b", re.I)
@@ -689,9 +723,6 @@ _NEGATION = re.compile(
 # a fresh instruction to use something: a part that starts with an imperative
 # ("use Opus ..."). Only that ends it, not "anything using Grok", so the rule errs
 # toward caution: an ambiguous start falls back to the owner's prompt.
-_AFFIRM = re.compile(
-    r"^\s*(?:(?:and|or|but|then)\s+)?(?:use|run|route|send|prefer|pick|default"
-    r"|go\s+to|switch\s+to|move\s+to)\b", re.I)
 # "Use Opus instead of Sol": the words after the cue are the rejected ones.
 _CONTRAST = re.compile(r"\b(?:instead\s+of|rather\s+than)\b", re.I)
 # The roster's block of saved routing (see routing_block).
@@ -708,26 +739,29 @@ def affirmed_clauses(text: str) -> List[str]:
     """The parts of ``text`` that may name a model to use.
 
     Sentences split on ``.``/``!``/``?``/``;``/dashes/newlines, then into parts
-    on ``,``/``:``. A part with a negation (never, not, no, don't, do not,
-    avoid, stop using, "X is poor|bad|crap") is dropped, and so is every later
-    part of that sentence until one starts with an instruction to use something
-    (use, run, route, send, prefer, pick, default, go to, switch to, move to). "instead of"/"rather than"
-    drops the words after it, and the rest of the sentence's list.
+    on ``,``/``:``. A negation (never, not, no, don't, do not, avoid, stop
+    using, "X is poor|bad|crap") drops its suffix and later list parts until a
+    fresh instruction. Its prefix survives only if that part starts with an
+    instruction. "instead of"/"rather than" likewise drops the rejected suffix.
     """
     clauses = []
     for sentence in _SENTENCE_BREAK.split(str(text or "").replace("’", "'")):
         negated = False
         for part in _PART_BREAK.split(sentence):
-            if negated and _AFFIRM.search(part) and not _NEGATION.search(part):
+            if negated and _instruction(part) and not _NEGATION.search(part):
                 negated = False
             if negated:
                 continue
             contrast = _CONTRAST.search(part)
             if contrast:
                 part, negated = part[:contrast.start()], True
-            if _NEGATION.search(part):
+            negative = _NEGATION.search(part)
+            if negative:
+                prefix = part[:negative.start()]
                 negated = True
-                continue
+                if not _instruction(prefix):
+                    continue
+                part = prefix
             if part.strip():
                 clauses.append(part)
     return clauses
@@ -1001,7 +1035,14 @@ async def accept(session_id: str, profile_id: Optional[str], *, model: str,
 
     key = (await asyncio.to_thread(chat_of, session_id), model)
     native = model in model_values()
-    evidence = await asyncio.to_thread(_find_named, session_id, model) if native else None
+    try:
+        evidence = await asyncio.to_thread(_find_named, session_id, model) if native else None
+    except _NativeSearchIncomplete:
+        # An unseen newer pin may supersede any saved routing or old approval.
+        # This answer covers only this attempt, not another incomplete search.
+        cache_key = (*key, "incomplete", await asyncio.to_thread(viewer_api_user_id, key[0]))
+        return Acceptance(await _approve(session_id, profile_id, model=model, baseline=baseline,
+            action=action, cache_key=cache_key, key=key, incomplete=True))
     qualified = evidence is not None and not named_by_user(model, [evidence.get("text", "")])
     if qualified:
         # A fresh pin supersedes every older source, including a previous Yes.
@@ -1036,12 +1077,16 @@ async def accept(session_id: str, profile_id: Optional[str], *, model: str,
 
 async def _approve(session_id: str, profile_id: Optional[str], *, model: str,
                    baseline: Optional[str], action: str, cache_key: Tuple[Any, ...],
-                   key: Tuple[str, ...], check_memory: bool = False) -> str:
+                   key: Tuple[str, ...], check_memory: bool = False,
+                   incomplete: bool = False) -> str:
     """:data:`APPROVED` from the owner's prompt (shared by concurrent starts),
     else ``PermissionError`` with the refusal."""
     import asyncio
 
-    why = "the current model request did not establish consent and no applicable chat approval was found"
+    why = ("no owner message named it and no applicable chat approval was found" if model.startswith("prov:")
+           else "the current model request did not establish consent and no applicable chat approval was found")
+    if incomplete:
+        why = "the model history search failed or exceeded its five-second budget; a fresh owner answer is required"
     if check_memory and any(_family_consent(model, entry.text) is False
             for entry in await asyncio.to_thread(owner_memories, session_id)):
         why = (f"a saved memory mentioned {label(model)} but was not honored; "
@@ -1054,10 +1099,9 @@ async def _approve(session_id: str, profile_id: Optional[str], *, model: str,
         outcome = await asyncio.shield(pending)
         if outcome is None:
             continue  # that prompt was abandoned before an answer
-        if outcome != APPROVED:
-            raise PermissionError(_refusal(
-                model, baseline,
-                f"{why}; {outcome}"))
+        if outcome == APPROVED:
+            return APPROVED
+        raise PermissionError(_refusal(model, baseline, f"{why}; {outcome}"))
     if cache_key in _APPROVED:
         return APPROVED
     future = asyncio.get_running_loop().create_future()
@@ -1065,7 +1109,7 @@ async def _approve(session_id: str, profile_id: Optional[str], *, model: str,
     outcome = None
     try:
         outcome = await _ask_owner(session_id, profile_id, model=model, baseline=baseline, action=action)
-        if outcome == APPROVED:
+        if outcome == APPROVED and not incomplete:
             if await asyncio.to_thread(_remember_approval, *key):
                 _APPROVED.add(cache_key)
             else:
