@@ -239,6 +239,19 @@ class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
                 )
 
     def pressure_stats(self):
+        stats = self._read_pressure()
+        due = self._claim_hold_check()
+        if due:
+            try:
+                threading.Thread(target=self._check_holds, args=(due,),
+                                 name="db-hold-check", daemon=True).start()
+            except RuntimeError:  # Out of threads: the same as any other lack of an answer.
+                with self._pressure_lock:
+                    self._record_no_answer()
+                stats = self._read_pressure()  # That just ended any idle answer.
+        return stats
+
+    def _read_pressure(self):
         now = time.monotonic()
         with self._pressure_lock:
             stats = dict(self._pressure)
@@ -252,23 +265,21 @@ class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
             ), default=0.0)
             stats["retained_holds"] = sum(h.silent(now) for h in self._holds.values())
             stats["maintenance_holds"] = sum(h.maintenance for h in self._holds.values())
+        return stats
+
+    def _claim_hold_check(self):
+        """The checkouts to ask about, if a check should start now."""
+        now = time.monotonic()
+        with self._pressure_lock:
+            if self._hold_check_running or self._closing or now < self._next_hold_check:
+                return None
             due = {
                 key: hold for key, hold in self._holds.items()
                 if now - self._held_since[key] >= _HOLD_CHECK_SECONDS
                 and hold.backend and not hold.maintenance and not hold.exited
             }
-            check = (bool(due) and not self._hold_check_running and not self._closing
-                     and now >= self._next_hold_check)
-            if check:
-                self._hold_check_running = True
-        if check:
-            try:
-                threading.Thread(target=self._check_holds, args=(due,),
-                                 name="db-hold-check", daemon=True).start()
-            except RuntimeError:  # Out of threads: the same as any other lack of an answer.
-                with self._pressure_lock:
-                    self._record_no_answer()
-        return stats
+            self._hold_check_running = bool(due)
+            return due
 
     def abandoned_holds(self):
         """Connection ids PostgreSQL shows no work for; see _HOLD_CHECK_SECONDS."""

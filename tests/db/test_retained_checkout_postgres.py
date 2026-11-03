@@ -27,6 +27,7 @@ from app.db import turns as turns_db
 from app.db.schema_postgres import create_postgres_schema
 from tests.core.helpers import make_pump
 from tests.core.test_session_runtime import _runtime_env
+from tests.db.test_backend_probe import strand_replies
 from tests.db.test_commit_deadline_postgres import private_db, private_pool  # noqa: F401
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="replaces raw socket descriptors")
@@ -674,6 +675,96 @@ async def test_a_probe_that_cannot_start_is_no_answer_and_backs_off(
         assert private_pool._next_hold_check > time.monotonic()
     assert quick_gate._pressured(time.monotonic())
     private_pool.putconn(resumed)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_thread_start_holds_the_turn_in_that_same_admission_call(
+    private_pool, quick_gate, monkeypatch,  # noqa: F811
+) -> None:
+    """A real resumed query with an old idle answer: the failure must not admit from it."""
+    monkeypatch.setattr(base, "_HOLD_CHECK_SECONDS", 0.1)
+    resumed = private_pool.getconn()
+    await _until(lambda: base.pressure_stats()["retained_holds"] == 1)
+    monkeypatch.setattr(base, "_HOLD_RECHECK_SECONDS", 60.0)
+    await _until(lambda: not private_pool._hold_check_running)
+    cursor = resumed.cursor()
+    worker = threading.Thread(target=lambda: cursor.execute("SELECT pg_sleep(1.5)"), daemon=True)
+    worker.start()
+    attempts: list[int] = []
+
+    def refuse(*args: Any, **kwargs: Any) -> None:
+        attempts.append(1)
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(start_admission.settings, "db_start_wait_seconds", 0.2)
+    private_pool._next_hold_check = 0.0
+    with monkeypatch.context() as broken:
+        broken.setattr(base.threading.Thread, "start", refuse)
+        assert private_pool._holds[id(resumed)].silent(time.monotonic()), "old idle answer"
+        assert await _admit(quick_gate, "t-launch-failed") == "deferred"
+    assert len(attempts) == 1, "the fifteen-second backoff still holds"
+    assert private_pool._next_hold_check > time.monotonic()
+    assert worker.is_alive(), "the query was still running through that call"
+    worker.join(5)
+    resumed.rollback()
+    private_pool.putconn(resumed)
+
+
+@pytest.mark.asyncio
+async def test_a_stranded_reply_cannot_stop_checks_and_its_late_answer_is_ignored(
+    private_pool, quick_gate, monkeypatch,  # noqa: F811
+) -> None:
+    """The real child on real PostgreSQL, with the read stuck on a real blocking socket."""
+    monkeypatch.setattr(base, "_HOLD_CHECK_SECONDS", 0.1)
+    monkeypatch.setattr(base, "_HOLD_PROBE_SECONDS", 2.0)
+    monkeypatch.setattr(backend_probe, "_REAP_SECONDS", 0.1)
+    forgotten = private_pool.getconn()
+    children, peers = strand_replies(private_pool._backend_probe, monkeypatch)
+    try:
+        await _until(lambda: len(peers) >= 3, 15)
+        assert all(child.returncode is not None for child in children[:2]), "each one reaped"
+        assert base.pressure_stats()["retained_holds"] == 0
+        assert quick_gate._pressured(time.monotonic()), "no answer must not release anything"
+        for peer in peers:
+            peer.sendall(b'{"rows": []}')
+    finally:
+        for peer in peers:
+            peer.close()
+    await asyncio.sleep(0.3)
+    hold = private_pool._holds[id(forgotten)]
+    assert not hold.exited and not hold.silent(time.monotonic()), "a late answer speaks for nobody"
+    private_pool.putconn(forgotten)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reply", ['{"rows": {}}', '{"rows": ""}'])
+async def test_a_malformed_reply_does_not_release_a_working_checkout(
+    private_pool, quick_gate, monkeypatch, reply, tmp_path,  # noqa: F811
+) -> None:
+    monkeypatch.setattr(base, "_HOLD_CHECK_SECONDS", 0.1)
+    script = tmp_path / "child.py"
+    script.write_text(f"import sys\nsys.stdout.write({reply!r})\n")
+    monkeypatch.setattr(backend_probe, "_CHILD", script)
+    working = private_pool.getconn()
+    cursor = working.cursor()
+    worker = threading.Thread(target=lambda: cursor.execute("SELECT pg_sleep(1.0)"), daemon=True)
+    worker.start()
+    asked: list[int] = []
+    real_read = private_pool._backend_probe.read
+
+    def read(*args: Any) -> dict:
+        asked.append(1)
+        return real_read(*args)
+
+    monkeypatch.setattr(private_pool._backend_probe, "read", read)
+    await _until(lambda: len(asked) >= 2)
+    assert worker.is_alive(), "the statement was still running throughout"
+    assert not private_pool._holds[id(working)].exited
+    assert base.pressure_stats()["retained_holds"] == 0
+    assert quick_gate._pressured(time.monotonic())
+    worker.join(5)
+    working.rollback()
+    private_pool.putconn(working)
 
 
 def test_shutting_down_kills_a_running_probe_and_starts_no_more(

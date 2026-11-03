@@ -9,6 +9,7 @@ import os
 import socket
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, Iterator
@@ -39,6 +40,130 @@ def _gone(pid: int) -> bool:
     if os.name == "nt":
         return True  # Popen.returncode is the evidence there.
     return not Path(f"/proc/{pid}").exists()
+
+
+def strand_replies(
+    probe: backend_probe.BackendProbe, monkeypatch: pytest.MonkeyPatch,
+) -> tuple[list[subprocess.Popen], list[socket.socket]]:
+    """Each child's pipe number really becomes a blocking socket just before the real read."""
+    children: list[subprocess.Popen] = []
+    peers: list[socket.socket] = []
+    real_start, real_read = probe._start, os.read
+
+    def start(seconds: float) -> subprocess.Popen:
+        children.append(real_start(seconds))
+        return children[-1]
+
+    def read(fd: int, size: int) -> bytes:
+        child = children[-1] if children else None
+        if child and child.stdout and not child.stdout.closed and fd == child.stdout.fileno():
+            stranger, peer = socket.socketpair()
+            os.dup2(stranger.fileno(), fd)
+            stranger.close()
+            peers.append(peer)
+        return real_read(fd, size)
+
+    monkeypatch.setattr(probe, "_start", start)
+    monkeypatch.setattr(os, "read", read)
+    return children, peers
+
+
+def _read_within(probe: backend_probe.BackendProbe, port: int, seconds: float, bound: float) -> str:
+    """The exception's name; a read that never returns fails here and cannot hang the suite."""
+    outcome: list[str] = []
+
+    def run() -> None:
+        try:
+            probe.read([1], (), _silent_kwargs(port), seconds)
+        except Exception as exc:  # noqa: BLE001 - the caller asserts on it
+            outcome.append(type(exc).__name__)
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(bound)
+    assert outcome, "read() must return even with its pipe's read stranded"
+    return outcome[0]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="replaces a raw socket descriptor")
+@pytest.mark.parametrize("server", ["answers at once", "silent"])
+def test_a_stranded_reply_read_cannot_delay_the_kill_the_reap_or_the_return(
+    server: str, silent_server: int, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(backend_probe, "_REAP_SECONDS", 0.2)
+    probe = backend_probe.BackendProbe()
+    children, peers = strand_replies(probe, monkeypatch)
+    if server == "silent":
+        port = silent_server
+    else:
+        with socket.create_server(("127.0.0.1", 0)) as refusing:
+            port = refusing.getsockname()[1]
+    try:
+        outcome = _read_within(probe, port, 15 if server != "silent" else 0.5, 8)
+        assert outcome == ("NoAnswer" if server != "silent" else "TimeoutError")
+        assert peers, "the read really was stranded"
+        assert children[0].returncode is not None and _gone(children[0].pid)
+        assert probe._child is None
+    finally:
+        for peer in peers:
+            peer.close()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="replaces a raw socket descriptor")
+def test_stranded_reads_are_bounded_and_the_slots_come_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(backend_probe, "_REAP_SECONDS", 0.1)
+    monkeypatch.setattr(backend_probe, "_MAX_STRANDED_EXCHANGES", 2)
+    probe = backend_probe.BackendProbe()
+    with socket.create_server(("127.0.0.1", 0)) as refusing:
+        port = refusing.getsockname()[1]
+    with monkeypatch.context() as stranded:
+        children, peers = strand_replies(probe, stranded)
+        try:
+            assert _read_within(probe, port, 15, 8) == "NoAnswer"
+            assert _read_within(probe, port, 15, 8) == "NoAnswer"
+            assert _read_within(probe, port, 15, 8) == "NoAnswer"
+            assert len(children) == 2, "no child and no thread beyond the bound"
+        finally:
+            for peer in peers:
+                peer.close()
+    deadline = time.monotonic() + 5
+    while True:  # Their reads are over: the probe works again without a restart.
+        with pytest.raises(backend_probe.NoAnswer) as caught:
+            probe.read([1], (), _silent_kwargs(port), 15)
+        if str(caught.value) == "OperationalError" or time.monotonic() > deadline:
+            break
+        time.sleep(0.01)
+    assert str(caught.value) == "OperationalError"
+
+
+@pytest.mark.parametrize("reply", [
+    '{"rows": {}}', '{"rows": ""}', '{"rows": null}', '{"rows": 0}', '{"rows": false}',
+    '[]', '""', '7', 'null', 'not json', '{"rows": []} {"rows": []}',
+    '{"rows": [[1]]}', '{"rows": [{}]}', '{"rows": [""]}', '{"rows": [null]}',
+    '{"rows": [[1, "idle", null, null, "tag"]]}',
+    '{"rows": [[1, "idle", null, null, "tag", 0.0, 0]]}',
+    '{"rows": [["1", "idle", null, null, "tag", 0.0]]}',
+    '{"rows": [[true, "idle", null, null, "tag", 0.0]]}',
+    '{"rows": [[1.0, "idle", null, null, "tag", 0.0]]}',
+    '{"rows": [[2, "idle", null, null, "tag", 0.0]]}',
+    '{"rows": [[1, 5, null, null, "tag", 0.0]]}',
+    '{"rows": [[1, "idle", 5, null, "tag", 0.0]]}',
+    '{"rows": [[1, "idle", null, [], "tag", 0.0]]}',
+    '{"rows": [[1, "idle", null, null, {}, 0.0]]}',
+    '{"rows": [[1, "idle", null, null, "tag", "90"]]}',
+    '{"rows": [[1, "idle", null, null, "tag", true]]}',
+    '{"rows": [[1, "idle", null, null, "tag", Infinity]]}',
+    '{"rows": [[1, "idle", null, null, "tag", NaN]]}',
+])
+def test_a_malformed_reply_is_no_answer_not_an_exit(reply: str, tmp_path: Path, monkeypatch) -> None:
+    """Through the real pipe. An empty answer means the backends exited, so nothing else may."""
+    script = tmp_path / "child.py"
+    script.write_text(f"import sys\nsys.stdout.write({reply!r})\n")
+    monkeypatch.setattr(backend_probe, "_CHILD", script)
+    with pytest.raises(backend_probe.NoAnswer):
+        backend_probe.BackendProbe().read([1], (), {}, 15)
 
 
 def test_a_silent_server_ends_in_a_kill_and_a_reap(silent_server: int) -> None:
