@@ -9,6 +9,7 @@ import pytest
 import app.core.query_background as qb
 import app.core.query_engine as qe
 from app.core import query_session_lifecycle as lifecycle
+from app.core.provider import session_admission
 from app.core.provider.events import AssistantMessage, ResultMessage, TextBlock
 from tests.core.engine_harness import collect, make_state, stream_response
 from tests.core.query_engine_flow_harness import RecordingPool, engine_patches, scripted_events
@@ -115,9 +116,19 @@ def _background_patches(stack, boundaries, pool):
 
 
 async def _background():
-    await qb._run_background_query(
-        SID, "hello", {"id": "claude-code"}, None, None, None, None, None,
-    )
+    lease = await session_admission.acquire(SID)
+    try:
+        await qb._run_background_query(
+            SID, "hello", {"id": "claude-code"}, None, None, None, None, None, lease=lease,
+        )
+    finally:
+        session_admission.close(lease)
+
+
+async def _start():
+    """``POST /conversation/start`` until its background task has ended."""
+    await qb.start_background_query("hello", "claude-code", session_id=SID)
+    await qb._pending_background_tasks[SID]
 
 
 def _assert_saved(boundaries, interrupted):
@@ -269,3 +280,175 @@ async def test_busy_turn_keeps_its_stop(tmp_path, background):
         assert state.interrupt_requested is True
         assert state.is_streaming is True
         state.adapter.send_query.assert_not_awaited()
+
+
+# ── Whose Stop is it? The chat's lease decides ────────────────────────────────
+
+ANSWER = AssistantMessage(content=[TextBlock(text="answer")], model="m")
+
+
+@pytest.fixture
+def chat(tmp_path):
+    """An idle pooled chat with both routes ready, and a clean turn to answer."""
+    state = make_state(interrupt=AsyncMock())
+    pool = RecordingPool(state)
+    with ExitStack() as stack:
+        b = engine_patches(stack, cwd=str(tmp_path), session_row={"id": SID}, pool=pool)
+        b.recorder = _background_patches(stack, b, pool)
+        stack.enter_context(patch.object(qb, "get_profile", return_value={"id": "claude-code"}))
+        stack.enter_context(patch.object(lifecycle, "get_session_pool", return_value=pool))
+        b.state = state
+        state.adapter.receive_events = stream_response([ANSWER, ResultMessage(subtype="success")])
+        yield b
+
+
+def _ended_as(b, route, events=None):
+    return events[-1]["type"] if route == "stream" else b.recorder.on_event.await_args.args[0]["type"]
+
+
+async def _run(route):
+    return await _turn() if route == "stream" else await _start()
+
+
+async def _arrived(count=1):
+    while session_admission._arriving.get(SID, 0) < count:
+        await asyncio.sleep(0)
+
+
+async def _a_holder(waiting_on):
+    """Something a turn has to wait for, and how to let it go."""
+    if waiting_on == "turn-ending":
+        lease = await session_admission.acquire(SID)
+        session_admission.turn_ended(lease)
+    else:
+        lease = await session_admission.begin_rewind(SID)
+    return lease
+
+
+@pytest.mark.parametrize("route", ["stream", "start"])
+@pytest.mark.parametrize("waiting_on", ["turn-ending", "rewind"])
+async def test_a_stop_while_a_turn_waits_for_the_chat_is_that_turns(chat, route, waiting_on):
+    holder = await _a_holder(waiting_on)
+    turn = asyncio.create_task(_run(route))
+    await _arrived()
+    assert await lifecycle.interrupt_session(SID)
+    session_admission.close(holder)
+    assert _ended_as(chat, route, await turn) == "interrupted"
+    _assert_saved(chat, True)
+    assert chat.state.interrupt_requested is False
+
+
+@pytest.mark.parametrize("route", ["stream", "start"])
+async def test_a_stop_before_a_waiting_turn_arrived_is_not_its_stop(chat, route):
+    holder = await _a_holder("turn-ending")
+    assert await lifecycle.interrupt_session(SID)
+    turn = asyncio.create_task(_run(route))
+    await _arrived()
+    assert chat.state.interrupt_requested is False
+    session_admission.close(holder)
+    assert _ended_as(chat, route, await turn) == "done"
+    _assert_saved(chat, False)
+
+
+async def test_a_later_arrival_leaves_a_waiting_turns_stop(chat):
+    holder = await _a_holder("turn-ending")
+    first = asyncio.create_task(_turn())
+    await _arrived()
+    assert await lifecycle.interrupt_session(SID)
+    second = asyncio.create_task(_turn())
+    await _arrived(2)
+    assert chat.state.interrupt_requested is True
+    session_admission.close(holder)
+    assert (await first)[-1]["type"] == "interrupted"
+    assert [e["message"] for e in await second] == [session_admission.SessionBusyError.MESSAGE]
+
+
+@pytest.mark.parametrize("left_by", ["cancelled", "timed-out"])
+async def test_a_turn_that_stopped_waiting_owns_no_stop(chat, monkeypatch, left_by):
+    monkeypatch.setattr(session_admission, "_ENDING_WAIT_SECONDS", 0.05)
+    holder = await _a_holder("turn-ending")
+    waiter = asyncio.create_task(session_admission.acquire(SID))
+    await _arrived()
+    if left_by == "cancelled":
+        waiter.cancel()
+    with pytest.raises(asyncio.CancelledError if left_by == "cancelled" else session_admission.SessionBusyError):
+        await waiter
+    session_admission.close(holder)
+    assert await lifecycle.interrupt_session(SID)
+    assert (await _turn())[-1]["type"] == "done"
+    _assert_saved(chat, False)
+
+
+async def test_a_rewind_holding_the_chat_owns_no_stop(chat):
+    rewind = await _a_holder("rewind")
+    session_admission.take_for_rewind(rewind)
+    assert await lifecycle.interrupt_session(SID)
+    turn = asyncio.create_task(_turn())
+    await _arrived()
+    session_admission.close(rewind)
+    assert (await turn)[-1]["type"] == "done"
+    _assert_saved(chat, False)
+
+
+async def test_a_stop_after_the_background_route_took_the_chat_is_its_own(chat):
+    """Between the lease and the task's first step, where a reset at the task's top erases it."""
+    reads = qb.run_sync
+
+    async def read(fn, *args, **kwargs):
+        if fn.__name__ == "get_session" and not chat.state.interrupt_requested:
+            assert await lifecycle.interrupt_session(SID)
+        return await reads(fn, *args, **kwargs)
+
+    with patch.object(qb, "run_sync", new=read):
+        await _start()
+    assert _ended_as(chat, "start") == "interrupted"
+    _assert_saved(chat, True)
+
+
+@pytest.mark.parametrize("first", ["stream", "start"])
+@pytest.mark.parametrize("second", ["stream", "start"])
+async def test_a_second_turn_during_setup_leaves_the_first_turns_stop(chat, first, second):
+    """Issue 1107's related case: the lease refuses the second turn before any reset."""
+    in_setup, go_on = asyncio.Event(), asyncio.Event()
+
+    async def setup(*args, **kwargs):
+        in_setup.set()
+        await go_on.wait()
+
+    with patch("app.core.query_options.ensure_pending_checkout", side_effect=setup):
+        turn = asyncio.create_task(_run(first))
+        await in_setup.wait()
+        assert chat.state.is_streaming is False
+        assert await lifecycle.interrupt_session(SID)
+
+        if second == "stream":
+            assert [e["message"] for e in await _turn()] == [session_admission.SessionBusyError.MESSAGE]
+        else:
+            with pytest.raises(session_admission.SessionBusyError):
+                await qb.start_background_query("hello", "claude-code", session_id=SID)
+        assert chat.state.interrupt_requested is True
+
+        go_on.set()
+        assert _ended_as(chat, first, await turn) == "interrupted"
+    _assert_saved(chat, True)
+    assert chat.state.interrupt_requested is False
+
+    # The Stop went with its turn: the next one answers.
+    assert (await _turn())[-1]["type"] == "done"
+    _assert_saved(chat, False)
+
+
+async def test_a_stop_goes_with_the_engine_a_rewind_removes(chat):
+    """The flag lives on the engine, and that engine never runs the waiting turn."""
+    rewind = await _a_holder("rewind")
+    turn = asyncio.create_task(_turn())
+    await _arrived()
+    assert await lifecycle.interrupt_session(SID)
+    await chat.pool.remove(SID)
+    chat.make_adapter.return_value.receive_events = stream_response(
+        [ANSWER, ResultMessage(subtype="success")]
+    )
+    session_admission.close(rewind)
+    assert (await turn)[-1]["type"] == "done"
+    _assert_saved(chat, False)
+    chat.make_adapter.assert_called_once()

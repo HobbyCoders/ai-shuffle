@@ -255,6 +255,8 @@ curl -X POST http://localhost:8000/api/v1/session/sess_abc123/interrupt \
 }
 ```
 
+A Stop applies to the turn running the session or waiting for it, including one still setting up. A Stop sent when no turn is running or waiting has nothing to stop, and it does not carry over to the next turn.
+
 ### GET /api/v1/streaming/active
 
 List the sessions that are currently streaming (actively generating a response).
