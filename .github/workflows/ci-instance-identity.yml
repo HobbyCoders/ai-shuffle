@@ -72,7 +72,7 @@ jobs:
       - name: Start the runner's PostgreSQL for the database probe
         if: runner.os == 'Windows'
         shell: pwsh
-        run: Get-Service -Name 'postgresql*' | Start-Service
+        run: Get-Service -Name 'postgresql*' | Set-Service -StartupType Manual -PassThru | Start-Service
       - name: Exercise the database probe's native child process
         # A real child, kill and venv start. The runner sets PGPASSWORD; libpq reads it.
         if: runner.os == 'Windows'
