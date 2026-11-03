@@ -80,7 +80,7 @@ await runJourney({
 			if (name === 'first-send-late-tags') {
 				await page.waitForFunction(() => window.__journeyLateTags?.releasedAt != null, null, { timeout: 5000 });
 			}
-			// Boot can still await init after the HTTP responses have arrived (#984).
+			// Boot can still await init after the HTTP responses have arrived.
 			// Observe reconciliation itself; its hosted delay is not yet attributed.
 			await waitForCreatedChat(page);
 			expect(ctx.closed.length === 0, `boot must not send close_session: ${JSON.stringify(ctx.closed)}`);

@@ -20,8 +20,8 @@ export function installSwitchGraceClock({ graceMs }) {
 			return realSetTimeout(handler, delay, ...args);
 		}
 		const gated = gate.armed;
-		const entry = { at: performance.now(), firedAt: null, cleared: false };
-		const run = () => { entry.firedAt = performance.now(); handler(...args); };
+		const entry = { at: performance.now(), cleared: false };
+		const run = () => handler(...args);
 		entry.id = realSetTimeout(() => {
 			if (gated && gate.armed) gate.deferred.set(entry.id, run);
 			else run();

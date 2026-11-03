@@ -38,7 +38,6 @@ describe('the switch sampler follows the production grace clock (#941)', () => {
 		f.at(600); // Layout blocked the main thread beyond the deadline.
 		f.fire(id);
 		assert.equal(received, 'real callback');
-		assert.equal(f.window.__switchGraceClock.timers[0].firedAt, 600);
 	});
 
 	it('does not restart grace at a late first rAF or use its stale frame timestamp', () => {

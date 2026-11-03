@@ -24,13 +24,16 @@ async function waitForBootState(page, label, predicate, timeout) {
 	traceNote(page, `${label}: ${JSON.stringify(await page.evaluate(bootState))}`);
 }
 
-// Preserve the first-send check's historical two-second post-load bound. A
-// stuck/slow reconciliation fails with its view and bootstrap timing attached.
-export async function waitForBootReconciled(page, { timeout = 2000 } = {}) {
+// Reconciliation-only checks use their caller's boot-hold deadline: an unsent
+// draft surviving boot is not a created-chat view-speed check.
+export async function waitForBootReconciled(page, { timeout }) {
 	await waitForBootState(page, 'boot reconciliation', () =>
 		performance.getEntriesByName('shuffle:boot.reconciled').length > 0, timeout);
 }
 
+// Created-chat view checks keep the two-second bound. With explicit boot holds
+// this starts at release, before fetch completes; first-send-late-tags instead
+// waits for its deliberately delayed response before starting this view check.
 export async function waitForCreatedChat(page, { timeout = 2000 } = {}) {
 	await waitForBootState(page, 'layout follows the created chat', () => {
 		const view = JSON.parse(localStorage.getItem('ai-shuffle-layout') || 'null')?.activeView;
