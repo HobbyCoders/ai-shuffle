@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import uuid
 
 import pytest
 
@@ -45,9 +46,11 @@ def pg_pool():
 @pytest.fixture(scope="module", autouse=True)
 def _schema(pg_pool):
     from app.db.base import get_db
+    from app.db.schema_postgres import create_postgres_schema
 
     with get_db() as conn:
         cur = conn.cursor()
+        create_postgres_schema(cur)
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS session_store_entries (
@@ -159,6 +162,47 @@ class TestTruncatePrimitive:
         from app.core.pg_session_store import _load_entries_by_session_id_sync
         sub = _load_entries_by_session_id_sync(_SID, "agent-xyz")
         assert [e.get("uuid") for e in sub] == ["sub1"]
+
+
+class TestRewindResetCommitsWithTheCut:
+    """A failed chat's rewind and its reset land together: no in-memory repair exists."""
+
+    def _failed_chat(self):
+        from app.db import database, turns
+
+        chat = f"chat-{uuid.uuid4().hex}"
+        database.create_profile("rewind-reset", "Rewind reset", None, {}, if_absent=True)
+        database.create_session(session_id=chat, profile_id="rewind-reset")
+        turn = turns.enqueue_turn(chat, "user", prompt="go")
+        turns.start_turn(turn["id"])
+        turns.settle_turn(turn["id"], "aborted", "error", error="boom")
+        return chat, turn["id"]
+
+    def test_a_refused_reset_takes_the_cut_back_with_it_and_a_retry_finishes_both(self, monkeypatch):
+        from app.core.pg_session_store import _truncate_main_transcript_to_keep_count_sync
+        from app.db import database, turns
+
+        _insert([_user("u1"), _assistant("a1"), _user("u2"), _assistant("a2")])
+        chat, turn_id = self._failed_chat()
+        try:
+            def refused(*args, **kwargs):
+                raise RuntimeError("database away")
+
+            with monkeypatch.context() as outage:
+                outage.setattr(turns, "set_outcome_baseline", refused)
+                with pytest.raises(RuntimeError, match="database away"):
+                    _truncate_main_transcript_to_keep_count_sync(_SID, 2, reset_session_id=chat)
+
+            assert len(_load()) == 4
+            assert turns.sessions_with_failed_latest_turn([chat]) == {chat}
+
+            assert _truncate_main_transcript_to_keep_count_sync(_SID, 2, reset_session_id=chat) == 2
+            assert [e.get("uuid") for e in _load()] == ["u1", "a1"]
+            assert turns.sessions_with_failed_latest_turn([chat]) == set()
+            turn = turns.get_turn(turn_id)
+            assert (turn["state"], turn["error"]) == ("aborted", "boom")
+        finally:
+            database.delete_session(chat)
 
 
 # ─── truncate_session_store_to_checkpoint (async, via compute_rewind_keep_count)

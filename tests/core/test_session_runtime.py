@@ -980,6 +980,7 @@ async def test_monitor_exit_racing_park_queues_exactly_one_wake(
     from app.core.task_registry import task_registry
 
     sid = "s-spawn"
+    _seed_session(sid, "active")
     task, frames = spawner_harness
     terminal_done = asyncio.Event()
     monkeypatch.setattr(monitor_spawn, "_WATCH_POLL_SECONDS", 0.001)
@@ -1166,6 +1167,7 @@ async def test_stopping_one_monitor_keeps_the_park_for_anothers_pending_wake(
     from tests.core.test_monitor_spawn import _FakeTask
 
     sid = "s-two-monitors"
+    _seed_session(sid, "active")
     tasks = {"a": _FakeTask("t-a"), "b": _FakeTask("t-b")}
     order = iter(["a", "b"])
     handoff_pending = asyncio.Event()
@@ -1985,7 +1987,43 @@ async def test_run_pump_broadcast_trims_render_frames(mock_db):
     assert all(e["session_id"] == "s11" for e in broadcast_events)
 
 
+@pytest.mark.parametrize("persistent", [False, True])
+async def test_unpark_session_lookup_error_is_not_treated_as_deletion(mock_db, caplog, persistent):
+    from app.db import database
+
+    sid = "wake-placement-read-error"
+    _seed_session(sid, "active")
+    wake = turns_db.enqueue_turn(sid, "unpark", prompt="task result")
+    get_session = database.get_session
+    reads = 0
+
+    def failed_lookup(session_id):
+        nonlocal reads
+        reads += 1
+        if reads == 1 or persistent:
+            raise OSError("temporary placement lookup failure")
+        return get_session(session_id)
+
+    with _runtime_env(pump=make_pump([{"type": "done", "metadata": {}}])) as env, patch(
+        "app.db.database.get_session", side_effect=failed_lookup,
+    ):
+        outcome = await session_runtime.SessionRuntime(wake).execute()
+    if persistent:
+        # The independent principal gate stays fail-closed: preserve the wake
+        # queued for recovery, rather than aborting it as a deleted chat.
+        assert outcome is None
+        env["recorder"].start.assert_not_awaited()
+        assert turns_db.get_turn(wake["id"])["state"] == "queued"
+    else:
+        assert outcome == "completed"
+        env["recorder"].start.assert_awaited_once()
+        assert turns_db.get_turn(wake["id"])["state"] == "completed"
+    assert "placement resolution failed" in caplog.text
+    assert "dropped task notification for deleted session" not in caplog.text
+
+
 async def test_unpark_turn_threads_completion_frames_to_provider_overrides(mock_db):
+    _seed_session("s12", "active")
     frames = [{
         "task_id": "worker-1",
         "status": "completed",
@@ -2014,6 +2052,7 @@ async def test_unpark_turn_threads_completion_frames_to_provider_overrides(mock_
 @pytest.mark.parametrize("source", ["user", "unpark", "agent_message", "wakeup", "promotion"])
 async def test_turn_source_threads_to_provider_overrides(mock_db, source):
     """Fluid records the source on TurnStarted; it reaches the adapter here."""
+    _seed_session("s12s", "active")
     turn = turns_db.enqueue_turn("s12s", source, prompt="go")
     captured = {}
 
@@ -2070,6 +2109,7 @@ async def test_unpark_turn_records_terminal_task_events_after_start(mock_db):
     between turns, so it must write the terminal task.updated to the event log —
     right after turn.started, before the pump runs (the FE no longer
     force-settles background shells at turn end, #991)."""
+    _seed_session("s12t", "active")
     frames = [
         {"task_id": "shell-1", "status": "completed", "kind": "shell"},
         {"task_id": "shell-2", "status": "failed", "kind": "shell"},
@@ -2107,6 +2147,7 @@ async def test_plain_turn_records_no_terminal_task_events(mock_db):
 async def test_terminal_task_event_failure_never_kills_the_wake_turn(mock_db):
     """Best-effort: a recorder that blows up on the terminal append still lets
     the wake turn run and settle."""
+    _seed_session("s12v", "active")
     frames = [{"task_id": "shell-9", "status": "completed"}]
     turn = turns_db.enqueue_turn(
         "s12v",
@@ -2452,6 +2493,7 @@ async def test_wake_turn_latches_terminal_notified(mock_db):
     """The other delivery path: a wake turn carrying pending_frames IS the
     delivery of those completions, so it latches terminal_notified too. The flag
     used to stay False forever for every clean completion."""
+    _seed_session("sn5", "active")
     frames = [{"task_id": "shell-5", "status": "completed"}]
     turn = turns_db.enqueue_turn(
         "sn5", "unpark", prompt="background task completed",

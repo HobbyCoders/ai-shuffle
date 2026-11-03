@@ -70,7 +70,13 @@ async def test_stop_cancels_detached_supervisor_during_backoff():
 
 
 @pytest.mark.parametrize("stop_at", ["count", "drop", "enqueue"])
-async def test_failed_wake_stop_race_never_kicks(monkeypatch, stop_at):
+async def test_failed_wake_stop_race_never_kicks(mock_db, monkeypatch, stop_at):
+    from app.db import sessions
+    sessions.create_session("s", "default")
+    turn = ts.turns_db.enqueue_turn("s", "unpark")
+    ts.turns_db.start_turn(turn["id"])
+    settled = ts.turns_db.settle_turn(turn["id"], "aborted", stop_reason="error")
+
     def stop_resume():
         task_registry.mark_user_stopped("s")
         task_registry.clear_user_stop("s")
@@ -92,8 +98,7 @@ async def test_failed_wake_stop_race_never_kicks(monkeypatch, stop_at):
     monkeypatch.setattr(ts, "_enqueue", enqueue)
     monkeypatch.setattr(ts.turns_db, "remove_queued_turn", removed.append)
     monkeypatch.setattr(ts, "kick", kicked.append)
-    result = await ts._maybe_recover_failed_wake("s", {
-        "id": "dead", "source": "unpark", "state": "aborted", "stop_reason": "error"})
+    result = await ts._maybe_recover_failed_wake("s", settled)
     assert result is False
     assert kicked == []
     assert removed == (["stale"] if stop_at == "enqueue" else [])

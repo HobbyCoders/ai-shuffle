@@ -35,6 +35,22 @@
       ]
     },
     {
+      "name": "memory-retention",
+      "intro": "Real-worker repair and retention follow-up for PR 1039, tracked by issues 958 and 956. CI and synthetic previews cannot establish the state of existing private worker stores or genuine cross-machine replication. Use approved disposable candidate installs and private copies only; never mutate a production store.",
+      "rows": [
+        {
+          "id": "memory-retention.pr1039-owner-repair",
+          "check": "Legacy owner replacements survive upgrade repair and real replica exchange",
+          "kind": "owner",
+          "needs": ["install", "device"],
+          "two_worker": true,
+          "how": "On an approved disposable candidate pair, use private pre-upgrade store copies under isolated homes with sync disabled for the first read. Record only counts publicly. Check an explicit A-to-B replacement followed by an unrelated learner B-to-C link: A stays retired and confirmed, B stays usable, and no owner fact is deleted. Inspect every owner ID the dry run would revive or hide privately with the owner before allowing real migration. Enable only candidate-to-candidate sync, deliver a stale proposal and race withdrawal against owner confirmation in both orders, then restart both candidates. Verify confirmed replacements win and no false link returns. Show both texts and ask for a genuine same-key or typed-routing contradiction without linking it; neither fact may authorize a model automatically. In the next weekly audit count false protected-fact conflicts for issue 958. Keep issue 956 open for the owner's archive-retention choice.",
+          "pass_when": "The private before/after owner-ID review approves every authority change; explicit predecessors never revive; both replica orders converge to the confirmed edge without a conflict; missing unconfirmed successors leave the original rule usable. A genuine owner contradiction remains a non-link question with no automatic routing authority. The next real weekly audit finds zero false protected-fact conflicts. Synthetic fixtures, one copied worker or green CI alone do not complete this real-worker row.",
+          "past_bug": "A learner chain downgraded an explicit owner replacement, then repair resurrected the retired predecessor and made it routing authority. False conflicts hid unrelated owner rules, while archive cleanup loss was reported healthy."
+        }
+      ]
+    },
+    {
       "name": "mirror-cache",
       "intro": "Use an approved disposable candidate worker pair, synthetic long history and throwaway chats only. Never restart a production worker.",
       "rows": [
@@ -660,6 +676,16 @@
           "how": "On two paired workers that both reach each other over HTTPS, turn on network_peer_terminals in owner policy. On worker A open the Terminal panel, choose + > Target and check each peer row's reason (offline, older version, turned off on the peer, no HTTPS). Request approval for worker B, compare the six-character code with B's Terminal requests list, tick the match box and approve one shell on B while signed in there as the owner. Open it on A; run a command, resize the panel, reload the page and reconnect, then close the tab. Repeat with a revoke on B, a sign-out on B and a two-minute unapproved request. Attempt the routes with an API key and a preview link. Read both workers' app logs.",
           "pass_when": "Output and resize reach B's real shell, and reload reconnects to the same shell with its recent output. Close, revoke, sign-out and expiry end the shell on both workers and reopening needs a new approval. Unusable peers show their reason and cannot be requested. API keys and preview links are refused. Both workers log request, open and close, with no lease, credential or terminal text. Record the tested revision on #196.",
           "past_bug": "#196: peer terminals were only verified in-process; no real two-worker run had been recorded."
+        },
+        {
+          "id": "two-worker-smoke.phone-notification-prompt-connect",
+          "check": "On a first launch with notifications unanswered, Android waits for the answer before connecting or failing over, then continues without a tap",
+          "kind": "owner",
+          "needs": ["device", "install"],
+          "two_worker": true,
+          "how": "Use a real Android phone with the candidate APK and two disposable candidate workers A and B; never interrupt production workers. Clear the app's notification permission state before each case. Launcher: start the app from the launcher with A last used and reachable, leave the prompt up for ten seconds, then Allow; repeat with Deny, and repeat with notifications set to don't ask again. Manual: at the prompt answer, tap B straight away, press Back before its page loads, and confirm A does not open. Failover: restore directly into a chat on A while the prompt is up, stop A so it answers 503 through its proxy, wait ten seconds, then answer. Save the logcat for each case.",
+          "pass_when": "The prompt stays up with no worker opening behind it for as long as it is unanswered. After Allow, Deny or an immediate don't-ask-again, the reachable worker opens with no tap. Back from a manually chosen worker returns to the list and no other worker opens by itself, while Back with no manual choice behaves as before. In the failover case B opens only after the answer. Logcat shows no ActivityTaskManager line finishing the list or chat while the permission controller is on top.",
+          "past_bug": "Issue 1067: auto-connect could open a worker and finish the list about 160 ms after the launch prompt started, so the prompt lost its owner. Direct chat failover had the same race, and a manual choice left automatic connecting armed. The JVM tests drive the real launcher and failover code, but only a real phone shows the real permission dialog and its timing."
         },
         {
           "id": "two-worker-smoke.phone-startup-presence",

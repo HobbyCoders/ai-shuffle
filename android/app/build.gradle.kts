@@ -148,3 +148,5 @@ dependencies {
     androidTestImplementation("androidx.test.espresso:espresso-core:3.6.1")
     testImplementation("org.json:json:20240303")
 }
+
+apply(from = "../ci/robolectric.gradle.kts")

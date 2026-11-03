@@ -11,7 +11,7 @@ from app.core.task_registry import TaskRegistry
 from app.db import turns
 from tests.core.helpers import make_pump
 from tests.core.test_provider_agent import dispatch_env  # noqa: F401
-from tests.core.test_session_runtime import _runtime_env, _clean_module_state  # noqa: F401
+from tests.core.test_session_runtime import _runtime_env, _clean_module_state, _seed_session  # noqa: F401
 
 REAL_TERMINAL = ts.on_task_terminal
 REAL_REPORT = pa.final_assistant_text
@@ -328,6 +328,7 @@ async def test_explicit_monitor_restart_needs_its_own_wake_and_delivery(
 
 async def test_queued_monitor_completions_keep_incarnations_separate(mock_db, monkeypatch):
     sid, tid = "queued-monitor-incarnations", "job"
+    _seed_session(sid, "active")
     reg = TaskRegistry()
     monkeypatch.setattr("app.core.task_registry.task_registry", reg)
     monkeypatch.setattr(ts, "_kick_after_batch_window", lambda sid: None)

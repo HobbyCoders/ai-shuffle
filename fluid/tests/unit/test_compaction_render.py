@@ -7,8 +7,12 @@ is trimmed, digested or folded; user and peer steers stay verbatim.
 """
 
 import asyncio
+import json
 import re
 from dataclasses import replace
+from typing import Any
+
+import pytest
 
 from fluid.context.compaction import (
     OUTRANK_LINE,
@@ -20,8 +24,9 @@ from fluid.context.compaction import (
     render_span_digest,
     split_spans,
 )
+from fluid.context.peer import PEER_OPEN_PREFIX
 from fluid.context.recall import expand_ref
-from fluid.context.steer_render import render_steers
+from fluid.context.steer_render import CURRENT_RENDER_VERSION, RENDER_VERSION_V2, render_steers
 from fluid.context.trim import TrimConfig, summarize_cell
 from fluid.events import ContextCompaction
 from fluid.events.model import event_from_dict, event_to_dict
@@ -223,7 +228,7 @@ def test_v1_decisions_resume_byte_identical_under_a_v2_compactor() -> None:
     resumed = Compactor(config=CompactionConfig(
         trim=TrimConfig(keep_recent_tool_results=0, min_result_chars=500),
     ))
-    assert resumed.render_version == 2
+    assert resumed.render_version == CURRENT_RENDER_VERSION
     resumed.rehydrate(legacy_rows)
     assert resumed.view(nodes) == before
 
@@ -348,11 +353,21 @@ def test_wake_text_does_not_evict_the_governing_or_recent_requests() -> None:
     for text in _wake_texts(8_000) * 2:
         nodes += _pair(t, text)
         t += 1
+    # Decisions already persisted at v2 render as they always did.
+    v2 = _epoch_text(render_epoch_stub(
+        split_spans(nodes), CompactionConfig(render_version=RENDER_VERSION_V2),
+    ))
+    assert BRIEF in v2 and GATE in v2
+    assert "worker report line" not in v2
+    assert "<task-notification>" not in v2 and PEER_OPEN_PREFIX not in v2
+    assert v2.index(BRIEF) < v2.index(GATE)
+    # Now an agent's message counts as an instruction (#996), in its own bounded
+    # place after the requests. Harness wakes stay out, and nothing is evicted.
     stub = _epoch_text(render_epoch_stub(split_spans(nodes), CompactionConfig()))
-    assert BRIEF in stub and GATE in stub
-    assert "worker report line" not in stub
-    assert "<task-notification>" not in stub and "[agent message" not in stub
     assert stub.index(BRIEF) < stub.index(GATE)
+    assert "<task-notification>" not in stub and "Background work completed" not in stub
+    assert stub.index(GATE) < stub.index("worker report line")
+    assert len(stub) < len(v2) + CompactionConfig().peer_pin_chars + 200
 
 
 def test_pin_orders_later_requests_newest_first_within_budget() -> None:
@@ -367,10 +382,20 @@ def test_pin_orders_later_requests_newest_first_within_budget() -> None:
     assert pinned == ["node_07a", "node_06a"]
     assert "(5 older request(s) not pinned for space" in stub
     assert BRIEF in stub
-    # Overlong requests are clipped with their size, never silently cut.
-    long_config = CompactionConfig(user_turn_text_cap=200)
+    # Overlong requests are clipped with their size, never silently cut. At v2
+    # that includes the brief; now it has its own larger cap (#996).
+    long_config = CompactionConfig(user_turn_text_cap=200, render_version=RENDER_VERSION_V2)
     long_stub = _epoch_text(render_epoch_stub(split_spans(_pair(0, BRIEF)), long_config))
     assert f"… (+{len(BRIEF) - 200} chars)" in long_stub
+    kept = _epoch_text(render_epoch_stub(split_spans(_pair(0, BRIEF)), CompactionConfig(user_turn_text_cap=200)))
+    assert BRIEF in kept
+    capped = CompactionConfig(user_turn_text_cap=200, brief_text_cap=300)
+    capped_stub = _epoch_text(render_epoch_stub(split_spans(_pair(0, BRIEF)), capped))
+    assert f"… (+{len(BRIEF) - 300} chars)" in capped_stub
+    later = _pair(0, BRIEF) + _pair(1, "a later request " + "detail " * 200)
+    later_stub = _epoch_text(render_epoch_stub(split_spans(later), CompactionConfig(user_turn_text_cap=200)))
+    assert f"… (+{len(' '.join(('a later request ' + 'detail ' * 200).split())) - 200} chars)" in later_stub
+    assert BRIEF in later_stub
 
 
 def test_digest_keeps_real_user_turn_text_to_the_turn_cap() -> None:
@@ -786,3 +811,256 @@ async def test_engine_retries_a_payload_rejection_once(tmp_path) -> None:
         assert images(provider.requests[2]) == 0
         assert any(isinstance(e, ErrorEvent) for e in events) is not recovers
         await loop.aclose()
+
+
+# ─── #996: what an agent was told survives every fold ──────────────────────
+
+
+def _told(t: int, text: str) -> list[SessionNode]:
+    """A turn whose one tool result carried a message from a running peer."""
+    return [
+        _node(f"node_{t:02d}a", "user", [Text(f"step {t}")]),
+        _node(f"node_{t:02d}b", "assistant", [ToolUseBlock(id=f"c{t}", name="Read", input={})]),
+        _node(f"node_{t:02d}c", "user", [ToolResultBlock(
+            tool_use_id=f"c{t}", content=[Text("x" * 3000)],
+            delivered_steers=[SteerDelivery(text=text, origin="peer", sender="lead")],
+        )]),
+        _node(f"node_{t:02d}d", "assistant", [Text("done")]),
+    ]
+
+
+def _peer_wake(t: int, text: str) -> list[SessionNode]:
+    from fluid.context.peer import format_peer_message
+
+    return _pair(t, format_peer_message("lead", text).strip())
+
+
+LONG_BRIEF = "Build the thing. " * 300 + "Never push to main."  # past every old cap
+RULE = "Stop using the staging key and report what used it."
+
+
+def test_a_brief_longer_than_the_old_caps_survives_digest_and_epoch() -> None:
+    """Both ends stay, line breaks included, up to its own cap."""
+    brief = "First line.\n\n" + LONG_BRIEF
+    assert len(brief) > CompactionConfig().user_turn_text_cap
+    nodes = _pair(0, brief)
+    digest = render_span_digest(nodes, CompactionConfig()).content[0].text
+    stub = _epoch_text(render_epoch_stub(split_spans(nodes), CompactionConfig()))
+    assert brief in digest and brief in stub
+    # At v2 the same brief lost its end, which is what persisted sessions keep showing.
+    v2 = _epoch_text(render_epoch_stub(
+        split_spans(nodes), CompactionConfig(render_version=RENDER_VERSION_V2),
+    ))
+    assert "Never push to main." not in v2
+
+
+def test_a_brief_sent_by_an_agent_is_still_the_brief() -> None:
+    from fluid.context.peer import format_peer_message
+
+    brief = format_peer_message("lead", LONG_BRIEF).strip()
+    nodes = _pair(0, brief) + _pair(1, "and also this")
+    stub = _epoch_text(render_epoch_stub(split_spans(nodes), CompactionConfig()))
+    assert "Never push to main." in stub
+    assert stub.index("Never push to main.") < stub.index("and also this")
+    assert stub.count("Never push to main.") == 1  # not pinned again as a message
+
+
+def test_an_agents_message_that_opened_a_turn_survives_digest_and_epoch() -> None:
+    nodes = _pair(0, BRIEF) + _peer_wake(1, RULE + " " + "because " * 400)
+    assert RULE in render_span_digest(nodes[2:], CompactionConfig()).content[0].text
+    stub = _epoch_text(render_epoch_stub(split_spans(nodes), CompactionConfig()))
+    assert RULE in stub
+    # Before this version the turn was wake text: clipped, and in no epoch.
+    v2 = _epoch_text(render_epoch_stub(
+        split_spans(nodes), CompactionConfig(render_version=RENDER_VERSION_V2),
+    ))
+    assert RULE not in v2
+
+
+def test_agents_messages_are_kept_newest_first_in_their_own_budget() -> None:
+    config = CompactionConfig(peer_pin_chars=1_500)
+    nodes = _pair(0, BRIEF)
+    for t in range(1, 6):
+        nodes += _peer_wake(t, f"message {t} " + "word " * 180)
+    stub = _epoch_text(render_epoch_stub(split_spans(nodes), config))
+    assert "message 5 " in stub and "message 1 " not in stub
+    assert "message(s) not kept here for space" in stub
+    assert BRIEF in stub and len(stub) < len(BRIEF) + config.peer_pin_chars + 1_000
+
+
+def test_a_model_written_checkpoint_keeps_the_brief_and_messages_verbatim() -> None:
+    """The model may paraphrase them, and this is the deepest tier native has."""
+    nodes = _pair(0, LONG_BRIEF) + _told(1, RULE)
+    nodes += [_node("node_01e", "user", [ToolResultBlock(
+        tool_use_id="c9", content=[Text("x")],
+        delivered_steers=[SteerDelivery(text="background job finished", origin="system")],
+    )])]
+    compactor = Compactor(config=CompactionConfig())
+    start, end = nodes[0].node_id, nodes[-1].node_id
+    pin = compactor._checkpoint_pin(start, end, nodes)
+    message = compactor._summary_message(start, end, "the model's checkpoint", pin)
+    text = message.content[0].text
+    assert "the model's checkpoint" in text
+    assert "Never push to main." in text and RULE in text
+    assert "background job finished" not in text
+    # A checkpoint decided before this version renders as it always did.
+    compactor._span_versions[(nodes[0].node_id, nodes[-1].node_id)] = RENDER_VERSION_V2
+    old = compactor._summary_message(start, end, "the model's checkpoint", pin).content[0].text
+    assert "Never push to main." not in old and RULE not in old
+    assert old.endswith("the model's checkpoint")
+
+
+def test_repeat_folds_do_not_grow_what_is_kept() -> None:
+    """The pin is rendered from the nodes, so a second fold holds one copy."""
+    nodes = _pair(0, LONG_BRIEF) + _peer_wake(1, RULE)
+    first = _epoch_text(render_epoch_stub(split_spans(nodes), CompactionConfig()))
+    for t in range(2, 30):
+        nodes += _pair(t, f"step {t}")
+    later = _epoch_text(render_epoch_stub(split_spans(nodes), CompactionConfig()))
+    assert first.count(RULE) == later.count(RULE) == 1
+    assert later.count("Never push to main.") == 1
+
+
+def test_a_message_delivered_on_a_tool_result_survives_digest_and_epoch() -> None:
+    """Native records these on the result, and delegated now does too."""
+    nodes = _pair(0, BRIEF) + _told(1, RULE)
+    assert RULE in render_span_digest(nodes[2:], CompactionConfig()).content[0].text
+    stub = render_epoch_stub(split_spans(nodes), CompactionConfig())
+    assert RULE in "".join(block.text for block in stub.content)
+
+
+# ─── the pin stays with the checkpoint, and every lane is bounded (review of #1050) ──
+
+
+def _flat_view(messages: list[Message]) -> str:
+    return "\n".join(block.text for m in messages for block in m.content if isinstance(block, Text))
+
+
+def _checkpointed() -> tuple[Compactor, list[SessionNode], Any]:
+    nodes = _pair(0, "Build the thing. Never push to main.") + _told(1, RULE)
+    for t in range(2, 24):
+        nodes += _pair(t, f"step {t}")
+    compactor = Compactor(config=CompactionConfig(summary_enabled=True))
+    end = nodes[-5].node_id
+    promo = compactor.apply_summary(nodes, (nodes[0].node_id, end, "the model's checkpoint"))
+    assert promo is not None
+    return compactor, nodes, promo
+
+
+def test_a_checkpoint_keeps_its_instructions_when_a_window_drops_the_run() -> None:
+    """A window starts at the checkpoint and drops the nodes it replaced, and the
+    prefix must render the same bytes with them gone."""
+    compactor, nodes, promo = _checkpointed()
+    whole = compactor.view(nodes)
+    window = compactor.window(nodes)
+    assert not {"node_01a", "node_01c"} & {n.node_id for n in window}  # the run has left
+    assert RULE in _flat_view(whole) and "Never push to main." in _flat_view(whole)
+    assert _flat_view(compactor.view(window)) == _flat_view(whole)
+
+    # Resumed from the event alone, over either path: byte for byte.
+    resumed = Compactor(config=CompactionConfig(summary_enabled=True))
+    resumed.rehydrate([replace(promo, summary_pin=json.loads(json.dumps(promo.summary_pin)))])
+    assert _flat_view(resumed.view(nodes)) == _flat_view(whole)
+    resumed = Compactor(config=CompactionConfig(summary_enabled=True))
+    resumed.rehydrate([promo])
+    assert _flat_view(resumed.view(window)) == _flat_view(whole)
+
+
+def test_a_later_checkpoint_over_a_window_rolls_the_pin_forward() -> None:
+    compactor, nodes, _ = _checkpointed()
+    later_rule = "Report the build number when you finish."
+    nodes = nodes + _told(30, later_rule) + [
+        node for t in range(31, 50) for node in _pair(t, f"step {t}")
+    ]
+    window = compactor.window(nodes)
+    assert "node_01c" not in {n.node_id for n in window}
+    second = compactor.apply_summary(
+        window, (window[0].node_id, window[-5].node_id, "the second checkpoint"),
+    )
+    assert second is not None
+    text = _flat_view(compactor.view(window))
+    assert RULE in text and later_rule in text and "Never push to main." in text
+    assert text.index(RULE) < text.index(later_rule)
+    assert text.count(RULE) == 1
+    assert len(second.summary_pin["messages"]) == 2
+
+
+def test_a_checkpoint_decided_before_the_pin_renders_as_it_did() -> None:
+    compactor, nodes, promo = _checkpointed()
+    old = Compactor(config=CompactionConfig(summary_enabled=True))
+    old.rehydrate([replace(promo, render_version=RENDER_VERSION_V2, summary_pin=None)])
+    text = _flat_view(old.view(nodes))
+    assert RULE not in text.split("the model's checkpoint")[1].split("[compacted")[0]
+
+
+def _flood(count: int) -> list[SessionNode]:
+    """One turn of ``count`` tool results, each carrying a 5,000-char message from
+    a running peer, as when a long agent is steered over and over."""
+    nodes = [_node("node_00a", "user", [Text("the brief")])]
+    for i in range(count):
+        nodes += [
+            _node(f"node_c{i:03d}", "assistant", [ToolUseBlock(id=f"t{i}", name="Read", input={})]),
+            _node(f"node_r{i:03d}", "user", [ToolResultBlock(
+                tool_use_id=f"t{i}", content=[Text("x")],
+                delivered_steers=[SteerDelivery(
+                    text=f"instruction {i:03d} " + "w" * 5_000, origin="peer", sender="lead",
+                )],
+            )]),
+        ]
+    return [*nodes, _node("node_zz", "assistant", [Text("done")])]
+
+
+@pytest.mark.parametrize("count", [10, 100, 200])
+def test_tool_delivered_messages_stay_within_the_pin_budget(count: int) -> None:
+    """Delivered on tool results, they rode outside the bounded pin, so a long run
+    of steers made a fold bigger than what it folded."""
+    config = CompactionConfig()
+    nodes = _flood(count)
+    silent = _flood(count)
+    for node in silent:
+        for block in node.message.content:
+            if isinstance(block, ToolResultBlock):
+                block.delivered_steers = []
+    for name, render in (
+        ("digest", lambda path: render_span_digest(path, config)),
+        ("epoch", lambda path: render_epoch_stub(split_spans(path), config)),
+    ):
+        text = _flat_view([render(nodes)])
+        # All that delivered messages add, whatever the number of them; the same
+        # run's calls take their own lines either way.
+        added = len(text) - len(_flat_view([render(silent)]))
+        assert added <= config.peer_pin_chars + 500, name
+        newest = f"instruction {count - 1:03d}"
+        oldest = "instruction 000"
+        assert text.count(newest) == 1 and oldest not in text, name
+        assert "message(s) not kept here for space" in text, name
+        assert "HistoryExpand" in text, name
+        # Delivery order, so the last thing read is the last thing said.
+        kept = re.findall(r"instruction (\d{3})", text)
+        assert kept == sorted(kept) and kept[-1] == f"{count - 1:03d}", name
+
+
+def test_the_pin_keeps_delivery_order_across_turn_and_tool_lanes() -> None:
+    nodes = _told(0, "first on a tool result") + _peer_wake(1, "second, its own turn")
+    nodes += _told(2, "third on a tool result")
+    text = _epoch_text(render_epoch_stub(split_spans(nodes), CompactionConfig()))
+    assert (text.index("first on a tool") < text.index("second, its own")
+            < text.index("third on a tool"))
+    for said in ("first on a tool", "second, its own", "third on a tool"):
+        assert text.count(said) == 1
+
+
+def test_the_newest_message_is_clipped_rather_than_lost() -> None:
+    """It decides what stands, so it is never the one the budget drops."""
+    nodes = _told(0, "older, and short") + _told(1, "NEWEST " + "n" * 30_000)
+    text = _flat_view([render_epoch_stub(split_spans(nodes), CompactionConfig())])
+    assert "NEWEST nnn" in text and len(text) < CompactionConfig().peer_pin_chars + 2_000
+
+
+def test_older_decisions_keep_every_delivery_verbatim() -> None:
+    """Version 2 and below stay byte for byte, however large."""
+    nodes = _flood(10)
+    config = CompactionConfig(render_version=RENDER_VERSION_V2)
+    for rendered in (render_span_digest(nodes, config),
+                     render_epoch_stub(split_spans(nodes), config)):
+        assert len(re.findall(r"instruction \d{3}", _flat_view([rendered]))) == 10

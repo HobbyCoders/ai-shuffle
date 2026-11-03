@@ -104,14 +104,13 @@ describe('ConnectedWorkerBar in the Android app', () => {
 		expect(posted().at(-1)).toEqual({ type: 'app-settings' });
 	});
 
-	it('sends an app from before App settings to its Workers screen, which has the Settings button', async () => {
+	it('keeps older apps connected to a healthy worker able to reach native Settings', async () => {
 		inApp(['worker-switch']);
 		render(ConnectedWorkerBar);
 		await fireEvent.click(await chip());
-		expect(document.getElementById('conn-app-settings')?.textContent).toBe('Workers > Settings');
+		expect(screen.getByText('Via app Workers')).toBeTruthy();
 		await fireEvent.click(screen.getByRole('button', { name: 'App settings' }));
 		expect(posted().at(-1)).toEqual({ type: 'workers' });
-		expect(posted()).not.toContainEqual({ type: 'app-settings' });
 	});
 
 	it('gives the bar back when the app does not switch', async () => {

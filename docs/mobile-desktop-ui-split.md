@@ -304,9 +304,13 @@ says so over the `shuffleShell` web-message bridge, which is scoped like
 - In the app, the sheet's App settings row sends `{"type":"app-settings"}`,
   which opens the app's own Settings screen (account, sign out, trusted
   devices, phone tools, delete account) above chat. The hidden native bar
-  was the only other way there while connected. An app without the
-  `app-settings` capability gets `{"type":"workers"}` instead; its Workers
-  screen has the Settings button. Browsers never see the row.
+  was the only other way there while connected. The Settings intent uses
+  SINGLE_TOP, so repeated messages do not stack the same screen. Browsers do
+  not show the row. Older app builds without `app-settings` retain the labelled
+  "Via app Workers" fallback, including while connected to a healthy worker:
+  the native Workers screen has a Settings button. Its CLEAR_TOP navigation
+  cannot preserve chat's Back stack. Removing or hiding that fallback still
+  waits for an enforced minimum app build with direct settings support (#964).
 - `{"type":"voice-call","active":…}` and `{"type":"voice-call-state",…}`
   from the voice call (`frontend/src/lib/services/voiceCall.ts` and
   `voiceCallNative.ts`): the app follows headset routes and keeps the call

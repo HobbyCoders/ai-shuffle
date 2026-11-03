@@ -29,7 +29,7 @@ These workflows retain manual dispatch and also run on unfiltered
   credentials; it never installs or updates a production CLI.
 - `ci-frontend.yml`: four full frontend Vitest shards, production build (including
   mobile postbuild), frontend/mobile typechecks, mobile tests, contracts/docs/audit,
-  tools/WebCrypto vectors, Browser MCP, the five `UI journeys (N/5)` shards
+  tools/WebCrypto vectors, Browser MCP, the six `UI journeys (N/6)` shards
   and `Visual regression (4 viewports)` run in parallel. The stable
   `JavaScript package checks` aggregate requires every branch to succeed, so
   the journeys and the visual comparison are required for merge (see
@@ -113,8 +113,8 @@ three desktop shards, not the separate stable-release portability matrix.
 | docs | `android-and-docs` → exact local docs-copy helper; JavaScript contracts also compare copies |
 | desktop | `desktop` → existing typecheck and all unit tests |
 | android-bridge | `android-and-docs` → existing local Node download-bridge tests |
-| android-play | `android-and-docs` → all six local Python/workflow-shell test scripts |
-| workflows/policy | `policy` → artifact/cost scripts and the complete local seven-file policy set, plus parity regressions |
+| android-play | `android-and-docs` → all local Python/workflow-shell test scripts |
+| workflows/policy | `policy` → artifact/cost scripts and the complete local eight-file policy set, plus parity regressions |
 | update-reach | `update-reach` → regression set and strict signed-publication/merged-PR readiness (not advisory) |
 | full preflight security | `supply-chain` → offline secret scan and identical report-only dependency audit, including source-publisher |
 | android-app (SDK optional) | Explicitly not covered by the reference Linux attestation; remains separate `android.yml` Gradle/native checks |
@@ -232,6 +232,16 @@ Python public and voice-lock audits, pinned workflow syntax/action lint, and the
 full workflow/publication/security/docs policy regression suite. Required flags,
 Python permission hardening and 35-minute heavy-job timeouts are retained. Every
 hosted pytest phase emits `--durations=50` and JUnit; artifacts expire in seven days.
+Both Python audits use `scripts/pip_audit_retry.py`: only a final PyPI
+`requests.exceptions.ReadTimeout` before response headers, with no findings/output,
+is retried, at most three attempts with 2s/4s backoff. Connect timeouts and
+body-read timeouts wrapped as `ConnectionError` fail closed without retry.
+Each audit has a shared 180s
+subprocess/backoff budget and a 30s HTTP timeout. Timed-out resolver descendants
+are terminated too, with separate bounded cleanup (up to 30s on Windows).
+Findings, other errors, exhausted retries and process deadlines fail the job;
+both output streams are preserved.
+The audit step (including tool installation and both audits) is capped at eight minutes.
 
 The stable `Backend tests` gate uses `if: always()` and depends on all shards,
 contracts and security. `scripts/ci/backend_gate.py` requires every dependency to
@@ -668,6 +678,9 @@ scripts/source-publisher, browser-mcp, desktop and tools when their lockfiles ex
 dev dependencies, without installing node_modules or changing lockfiles. Each
 manifest prints one summary; PyPI advisory severity is reported as unknown
 because pip-audit does not provide it. No dependency is upgraded automatically.
+Python reports use the same bounded PyPI-timeout retry helper as hosted audits
+(three attempts, 2s/4s backoff, 30s HTTP timeout, 180s total per manifest).
+Raw registry diagnostics remain redacted from local summaries.
 
 Findings and unavailable/timed-out audits **warn by default** until triaged.
 `python scripts/local_ci.py check --strict-audit` fails on any Python advisory,
@@ -866,17 +879,17 @@ path filter (no frontend job does).
 
 ### UI journeys
 
-`UI journeys (N/5)`: each shard installs the Python and JavaScript
+`UI journeys (N/6)`: each shard installs the Python and JavaScript
 dependencies (pip/npm caches) and Chromium (browser-mcp's pinned
 playwright-core build, cached), builds and stamps the desktop UI, then runs
-`python -m scripts.devloop.ci journeys --shard N/5 --retry-failures`. That starts a fresh dev
+`python -m scripts.devloop.ci journeys --shard N/6 --retry-failures`. That starts a fresh dev
 instance (`python -m scripts.devloop up --ci`: real app, its own throwaway
 PostgreSQL 16 from the runner's `/usr/lib/postgresql/16/bin`, seed data, the
 scripted fake AI, loopback only), waits for its ready line and `status`, runs
 the shard's `frontend/tests/journeys/*.journey.mjs` files in Chromium, then
-`down`. The plan step splits the journey files across the five shards by
+`down`. The plan step splits the journey files across the six shards by
 measured hosted runtime, longest first, each file exactly once
-(`python -m scripts.devloop.ci plan --shards 5`). The checked-in medians are
+(`python -m scripts.devloop.ci plan --shards 6`). The checked-in medians are
 in `scripts/devloop/journey_weights.json`; an unmeasured journey uses its
 `--list` case count times the measured median seconds per case. Adding short
 cases to a measured journey therefore cannot reshuffle all the slow journeys

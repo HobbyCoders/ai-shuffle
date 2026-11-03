@@ -58,6 +58,30 @@ def _enrich(sessions, install_settings, *, users=None, tags=None, forks=None):
     return result, mock_tags, mock_forks, mock_users
 
 
+class TestBothListProducersCarryTheFailure:
+    """The list and search read the same fact, so a row cannot change its mind (#1032)."""
+
+    def _failed_turn(self, session_id):
+        from app.db import database, turns
+
+        database.create_session(session_id=session_id, profile_id="default")
+        turn = turns.enqueue_turn(session_id, "user", prompt="go")
+        turns.start_turn(turn["id"])
+        turns.settle_turn(turn["id"], "aborted", "error", error="HTTP 400")
+
+    def test_list_rows(self, install_settings, mock_db):
+        self._failed_turn("s0")
+        result, *_ = _enrich(_sessions(2), install_settings)
+        assert [row["last_turn_failed"] for row in result] == [True, False]
+
+    def test_search_results(self, install_settings, mock_db):
+        self._failed_turn("s0")
+        with patch.object(sessions_helpers.database, "get_installs_map",
+                          return_value={"me-install": {"device_name": "Mine", "online": True}}):
+            result = sessions_helpers.enrich_search_results_with_tags(_sessions(2))
+        assert [row["last_turn_failed"] for row in result] == [True, False]
+
+
 class TestEnrichmentOutputIsUnchanged:
     """Golden shape: every field the sessions board reads, byte for byte."""
 
@@ -94,6 +118,7 @@ class TestEnrichmentOutputIsUnchanged:
             "api_user_name": "Ada",
             "has_running_tasks": False,
             "pending_task_chips": 0,
+            "last_turn_failed": False,
             "tags": [{"id": "t1", "name": "Bug"}],
             "has_forks": True,
             "is_remote": False,

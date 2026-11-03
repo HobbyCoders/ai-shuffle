@@ -48,7 +48,12 @@ abstract class NativeScreen : AppCompatActivity() {
         navigation("Shuffle")
     }
     override fun onResume() { super.onResume(); com.hobbycoders.aishuffle.tools.ToolApprovals.attach(this) }
-    override fun onPause() { com.hobbycoders.aishuffle.tools.ToolApprovals.detach(this); super.onPause() }
+    override fun onPause() {
+        // Clear the execution host and preserve result delivery BEFORE consent can resume inline.
+        com.hobbycoders.aishuffle.tools.DeviceToolsRuntime.detach(this)
+        com.hobbycoders.aishuffle.tools.ToolApprovals.detach(this)
+        super.onPause()
+    }
     protected fun navigation(title: String, back: Boolean = true) {
         toolbar.removeAllViews()
         if (back) toolbar.addView(iconButton(R.drawable.ic_back, "Back") { onBackPressedDispatcher.onBackPressed() })

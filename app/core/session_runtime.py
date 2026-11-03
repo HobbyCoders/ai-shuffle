@@ -634,10 +634,17 @@ async def _broadcast_work_time(session_id: str) -> None:
         started = row.get("work_started_at")
         if hasattr(started, "isoformat"):
             started = started.isoformat()
+        # Every turn start and end comes through here, and a sidebar not watching
+        # the chat has no other way to learn that its latest turn failed (#1032).
+        failed = await asyncio.to_thread(turns_db.sessions_with_failed_latest_turn, [session_id])
         await sync_engine.broadcast_user_session_updated(
             user_id=row.get("api_user_id") or "admin",
             session_id=session_id,
-            updates={"work_ms": int(row.get("work_ms") or 0), "work_started_at": started},
+            updates={
+                "work_ms": int(row.get("work_ms") or 0),
+                "work_started_at": started,
+                "last_turn_failed": session_id in failed,
+            },
         )
     except Exception:  # noqa: BLE001
         logger.debug(
@@ -935,11 +942,13 @@ class SessionRuntime:
         #    returns or the reap sweep routes it.
         session_row: Optional[Dict[str, Any]] = None
         decision = None
+        session_loaded = False
         try:
             from app.core import placement as placement_mod
             from app.db import database as database_mod
 
             session_row = await asyncio.to_thread(database_mod.get_session, sid)
+            session_loaded = True
             if session_row is not None:
                 decision = placement_mod.resolve_placement(session_row)
         except Exception:
@@ -947,6 +956,18 @@ class SessionRuntime:
                 "SessionRuntime: placement resolution failed for %s — "
                 "failing open to local execution", sid, exc_info=True,
             )
+        if session_loaded and session_row is None and self.source == "unpark":
+            # Task producers outlive their chat (including a queued wake whose
+            # admission raced deletion). Missing is terminal, not a provider
+            # failure. A lookup error above must not be mistaken for deletion.
+            logger.info(
+                "SessionRuntime: dropped task notification for deleted session %s (turn %s)",
+                sid, tid,
+            )
+            await asyncio.to_thread(turns_db.remove_queued_turn, tid)
+            from app.core import turn_scheduler
+            turn_scheduler._clear_wake_pending(sid)
+            return None
         if decision is not None and decision.kind == "runner" and decision.runner_id != runner_id:
             logger.info(
                 "SessionRuntime: session %s is placed on %s (%s) — turn %s stays "
@@ -2152,8 +2173,8 @@ class SessionRuntime:
           (``turns.interrupt_turn``) happens at the command layer BEFORE the
           runtime is told, and that gap is exactly where the observed race
           lived, so the in-process latch alone is not enough. Anything other
-          than ``running`` (interrupting, draining, or already settled) cannot
-          take a steer.
+          than ``running`` (interrupting, draining, already settled or deleted)
+          cannot take a steer.
 
         Fails OPEN (False) on a read error: a transient DB hiccup must not turn
         every send into a queued turn.
@@ -2168,7 +2189,9 @@ class SessionRuntime:
                 self.turn_id, exc_info=True,
             )
             return False
-        return row is not None and row.get("state") != "running"
+        # Deletion removes the durable turn before its runtime necessarily
+        # disappears from memory. Such a runtime cannot receive a late steer.
+        return row is None or row.get("state") != "running"
 
     def _live_adapter(self) -> Optional[Any]:
         """The provider adapter behind this session's pooled client, or None."""
@@ -2861,6 +2884,7 @@ class SessionRuntime:
                 self._lease_finalizing = True
                 parked = await asyncio.to_thread(
                     turns_db.park_turn, tid, task_ids, usage=usage, run_id=self._run_id,
+                    error=self._failure_text(),
                 )
             except Exception:
                 logger.warning("SessionRuntime: park_turn failed for %s", tid, exc_info=True)
@@ -2960,7 +2984,7 @@ class SessionRuntime:
         settled = None
         try:
             settled = await asyncio.to_thread(
-                turns_db.settle_turn, tid, "completed", run_id=owned_run,
+                turns_db.settle_turn, tid, "completed", error=self._failure_text(), run_id=owned_run,
             )
         except Exception:
             logger.warning("SessionRuntime: settle_turn(completed) failed for %s", tid, exc_info=True)
@@ -2977,6 +3001,14 @@ class SessionRuntime:
                 )
         await self._snapshot_working_set(sid)
         return "completed", settled is not None
+
+    def _failure_text(self) -> Optional[str]:
+        """What went wrong, for a row that settles completed or parks instead of aborting."""
+        if self._terminal == "error":
+            return self._terminal_error or "Turn failed"
+        if self._terminal == "done":
+            return turns_db.provider_result_error((self._pending_done or {}).get("metadata"))
+        return None
 
     async def _requeue_stranded_steers(self, sid: str) -> None:
         """Put back every steered message this turn swallowed but never answered.
