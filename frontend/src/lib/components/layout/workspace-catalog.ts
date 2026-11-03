@@ -9,6 +9,7 @@
 
 import type { ClusterProject } from '$lib/api/installs';
 import type { Project } from '$lib/stores/types';
+import { projectIdentity } from './session-card-data';
 
 export interface WorkspacePickerItem {
 	id: string;
@@ -51,9 +52,11 @@ export function buildWorkspacePickerItems(
 
 	const localById = new Map(localProjects.map((project) => [project.id, project]));
 	const identityFor = (project: LocalProject): string =>
-		catalogByLocalId.get(project.id)?.origin ||
-		project.link_group_id ||
-		`local:${project.id}`;
+		projectIdentity({
+			link_group_id: project.link_group_id,
+			origin: catalogByLocalId.get(project.id)?.origin,
+			id: project.id
+		}) as string;
 
 	const items: WorkspacePickerItem[] = [];
 	const includedIdentities = new Set<string>();
@@ -84,6 +87,8 @@ export function buildWorkspacePickerItems(
 	for (const row of catalog) {
 		if (!row.eligible.some((install) => install.online)) continue;
 		if (includedIdentities.has(row.origin)) continue;
+		// A row of a project listed above, under the origin it had before its link.
+		if (row.local_project_id && localById.has(row.local_project_id)) continue;
 		items.push({
 			id: row.project_v2_id,
 			name: row.name,

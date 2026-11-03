@@ -1700,7 +1700,7 @@ This route replaced `GET /api/v1/tools`, `/api/v1/tools/builtin` and `/api/v1/to
 
 ### GET /api/v1/memory/health
 
-Owner only. The state of the installation owner's long-term memory on this worker. The worker checks itself once an hour and after each curation pass, without model calls, and repairs what it safely can: it moves exact duplicates and unconfirmed harvested facts nobody recalled or saw for a month into the archive, where Recall still finds them. Facts the user asked to keep are never removed. This route only reads; with no recent check it computes one without repairs. A worker with no saved facts reports `healthy` with empty lists.
+Owner only. The state of the installation owner's long-term memory on this worker. The worker checks itself once an hour and after each curation pass, without model calls, and repairs what it safely can: it moves exact duplicates and unconfirmed harvested facts nobody recalled or saw for a month into an archive that Recall can search. Older facts may later be permanently deleted when the archive fills or they expire; Recall cannot find deleted facts. Facts the user asked to keep are excluded from automatic archive cleanup. There is no retention setting yet. This route only reads; with no recent check it computes one without repairs. A worker with no saved facts reports `healthy` with empty lists.
 
 **Response:**
 

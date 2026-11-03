@@ -37,6 +37,12 @@ describe('settings registry', () => {
 		}
 	});
 
+	it('explains that the archive is searchable only until automatic deletion', () => {
+		expect(getEntry('system.memoryHealth')?.help).toBe(
+			"This worker checks saved facts every hour without using a model. It can move unused or duplicate facts into an archive that Recall can search. Older facts may later be permanently deleted when that archive fills or they expire; Recall cannot find deleted facts. Facts you asked to keep are excluded from automatic archive cleanup. There is no retention setting yet."
+		);
+	});
+
 	describe('validateEntries', () => {
 		const ok: SettingEntry = { id: 'voice.cues', category: 'voice', section: 'Dictation', label: 'Sound cues' };
 

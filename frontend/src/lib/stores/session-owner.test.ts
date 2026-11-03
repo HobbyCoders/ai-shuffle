@@ -3,6 +3,7 @@ import { bindSessionOwner, sessionOwnerBoundary, sessionOwnerEpoch, TAB_SESSION_
 import { TAB_ACTIVE_SESSION_KEY } from './device-id';
 import { sessionEphemeralCache, type SessionEphemeral } from './session-cache';
 import { readDraft, writeDraft } from './session/draft-persistence';
+import { EMPTY_CHAT_KEY, rememberEmptyChat } from './session/empty-chat-memory';
 
 function seedPrivateState() {
  sessionStorage.setItem(TAB_ACTIVE_SESSION_KEY, JSON.stringify({ sessionId: 'alice-session' }));
@@ -10,6 +11,7 @@ function seedPrivateState() {
  writeDraft(null, 'private new draft');
  writeDraft('alice-session', 'private session draft');
  writeDraft(null, 'private new draft');
+ rememberEmptyChat('alice-session');
 }
 beforeEach(() => { sessionStorage.clear(); sessionEphemeralCache.clear(); });
 afterEach(() => vi.restoreAllMocks());
@@ -36,6 +38,7 @@ describe('session owner boundary', () => {
   expect(readDraft(null)).toBeNull(); expect(readDraft('alice-session')).toBeNull();
   expect(sessionEphemeralCache.restore('__new_chat__')).toBeNull();
   expect(sessionStorage.getItem(TAB_ACTIVE_SESSION_KEY)).toBeNull();
+  expect(sessionStorage.getItem(EMPTY_CHAT_KEY)).toBeNull();
   expect(sessionStorage.getItem('unrelated')).toBe('keep');
   expect(remount).toHaveBeenCalledOnce();
   bindSessionOwner('account:bob', 'account:bob');

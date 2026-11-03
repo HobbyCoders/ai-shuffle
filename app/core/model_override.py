@@ -80,6 +80,8 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from fluid.codemode.routing import affirmed_clauses, is_instruction
+
 logger = logging.getLogger(__name__)
 
 # How the prompt and the receipts name the ways a model is accepted.
@@ -360,20 +362,11 @@ def _mentions(text_tokens: Sequence[str], name: str) -> bool:
                                 for start in boundaries)
 
 
-def _instruction(text: str) -> bool:
-    """An instruction starts its own clause, not a narrative mentioning a verb."""
-    return bool(re.match(
-        r"\s*(?:(?:and|or|but|then|now|please|we)\s+)*"
-        r"(?:(?:can|could)\s+(?:you|we)\s+)?"
-        r"(?:use|run|route|send|prefer|pick|choose|try|start|switch|default"
-        r"|go\s+(?:with|to)|move\s+to)\b", text, re.I))
-
-
 def _directed(text: str, model: str) -> bool:
     name = re.escape(model)
     for part in re.split(r"[,:;\n]|(?<=[.!?])\s+", text):
         if re.search(rf"(?<![\w-]){name}(?![\w-])", part, re.I) and (
-                _instruction(part) or re.fullmatch(
+                is_instruction(part) or re.fullmatch(
                     rf"\s*(?:just\s+)?{name}(?:\s+please)?[.!]?\s*", part, re.I)):
             return True
     return False
@@ -708,23 +701,6 @@ def user_texts(session_id: str) -> List[str]:
 # What the owner saved
 # ---------------------------------------------------------------------------
 
-# Sentence breaks: ; newline and dashes anywhere; . ! ? only before a space or
-# the end, so "GPT 6.1 Sol" stays whole. Within a sentence, , and : (again only
-# before a space, so "prov:lane:astra" stays whole) separate list parts.
-_SENTENCE_BREAK = re.compile(r"[;\n—–]|[.!?](?=\s|$)")
-_PART_BREAK = re.compile(r"[,:](?=\s|$)")
-# A negation rejects what follows it; only a leading instruction can retain
-# the positive prefix ("use Opus, not Sol"), never a narrative ("Opus not working").
-_NEGATION = re.compile(
-    r"\b(?:never|not|no|dont|don't|do\s+not|avoid|stop\s+using|\w+n't)\b"
-    r"|\b(?:is|are|was|were)\s+(?:\w+\s+)?(?:poor|bad|crap)\b", re.I)
-# A negation carries into the following parts of its sentence ("NEVER use
-# Fable, Mythos or Grok"; "Models to avoid: Fable, Mythos") until a part names
-# a fresh instruction to use something: a part that starts with an imperative
-# ("use Opus ..."). Only that ends it, not "anything using Grok", so the rule errs
-# toward caution: an ambiguous start falls back to the owner's prompt.
-# "Use Opus instead of Sol": the words after the cue are the rejected ones.
-_CONTRAST = re.compile(r"\b(?:instead\s+of|rather\s+than)\b", re.I)
 # The roster's block of saved routing (see routing_block).
 ROUTING_BUDGET = 1200
 ROUTING_HEADER = ("Saved owner model routing (the host accepts models these name; "
@@ -733,38 +709,6 @@ ROUTING_HEADER = ("Saved owner model routing (the host accepts models these name
 # revision change together, so a correction is a new key.
 _ROUTING_CACHE: Dict[Tuple[str, int, int], Tuple[str, ...]] = {}
 _ROUTING_CACHE_LIMIT = 2048
-
-
-def affirmed_clauses(text: str) -> List[str]:
-    """The parts of ``text`` that may name a model to use.
-
-    Sentences split on ``.``/``!``/``?``/``;``/dashes/newlines, then into parts
-    on ``,``/``:``. A negation (never, not, no, don't, do not, avoid, stop
-    using, "X is poor|bad|crap") drops its suffix and later list parts until a
-    fresh instruction. Its prefix survives only if that part starts with an
-    instruction. "instead of"/"rather than" likewise drops the rejected suffix.
-    """
-    clauses = []
-    for sentence in _SENTENCE_BREAK.split(str(text or "").replace("’", "'")):
-        negated = False
-        for part in _PART_BREAK.split(sentence):
-            if negated and _instruction(part) and not _NEGATION.search(part):
-                negated = False
-            if negated:
-                continue
-            contrast = _CONTRAST.search(part)
-            if contrast:
-                part, negated = part[:contrast.start()], True
-            negative = _NEGATION.search(part)
-            if negative:
-                prefix = part[:negative.start()]
-                negated = True
-                if not _instruction(prefix):
-                    continue
-                part = prefix
-            if part.strip():
-                clauses.append(part)
-    return clauses
 
 
 def memory_names(model: str, text: str,
@@ -803,7 +747,7 @@ def owner_memories(session_id: str, cwd: Optional[str] = None) -> List[Any]:
         from app.core.api_user_scope import session_api_user_id
         from app.core.fluid_memory import owner_root, store_for_owner
         from app.db import database
-        from fluid.codemode.facts import usefulness, visible_on
+        from fluid.codemode.facts import is_superseded, usefulness, visible_on
         from fluid.context.screening import screen_findings
 
         row = database.get_session(session_id)
@@ -820,12 +764,14 @@ def owner_memories(session_id: str, cwd: Optional[str] = None) -> List[Any]:
         live = [entry for entry in doc["entries"]
                 if entry.get("protected") is True
                 and entry.get("provenance", "session") != "tool"
-                and not entry.get("superseded_by") and not entry.get("conflicted")
+                and not is_superseded(entry) and not entry.get("conflicted")
                 and not entry.get("retired_at")
                 and visible_on(entry, local)
                 and entry.get("scope", "global") in scopes
                 and isinstance(entry.get("text"), str) and entry["text"].strip()
                 and not screen_findings(entry["text"])]
+        # A non-link question never revokes an owner's words: both facts
+        # remain usable authority. The prompt asks which applies to the job.
         live.sort(key=lambda entry: (-usefulness(entry), str(entry.get("id"))))
         return [store._facts._entry(entry) for entry in live]
     except Exception:  # noqa: BLE001 — an unreadable store authorizes nothing

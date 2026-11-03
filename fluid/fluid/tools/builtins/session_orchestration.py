@@ -134,8 +134,14 @@ def suggest_task_spec(model_examples=(), current_model=None) -> ToolSpec:
     ``current_model`` is for a surface whose prompt does not name the agent's model."""
     examples = list(dict.fromkeys(str(value) for value in model_examples if value))
     return ToolSpec(name="SuggestTask", description=(
-        "Show the owner a chip for work outside your task; one click starts it in a separate chat with "
-        "its own worktree. Starts nothing now: do not fix it here, carry on."),
+        "Show the owner a chip for separate, nonblocking work outside the user's request; one click "
+        "starts it in a separate chat with its own worktree. Starts nothing now: do not fix it here, "
+        "carry on. Never use it to defer what the request needs (deliverables, necessary fixes or "
+        "investigation, verification, review, authorized merge) or to replace Task/Swarm delegation; "
+        "a subagent returns such work to its parent. Unrelated discoveries still earn a chip, no check "
+        "needed. For work related to the request or its root cause, first check existing tracking and "
+        "active owners you can reach; in the brief, name same-root work and say why this is separate "
+        "and nonblocking."),
         input_schema={"type": "object", "properties": {
             "title": {"type": "string", "maxLength": 80},
             "summary": {"type": "string", "maxLength": 240, "description": "What is wrong and why it matters."},

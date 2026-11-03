@@ -282,4 +282,3 @@ async def test_native_family_only_on_each_orchestration_surface(chats, monkeypat
             assert seen[0]["model_id"] == "opus" and seen[0]["provider_id"] is None
         task_registry.clear_session(caller)
     assert not prompts
-

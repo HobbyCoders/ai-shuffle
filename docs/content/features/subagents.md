@@ -78,9 +78,13 @@ A subagent runs on the model set in its agent's **Models** section. If that is e
 
 You can ask for a specific model, for example "run the reviewer on a faster model". The agent then starts that subagent on the model you named.
 
+For native Claude models, request the family name, such as **Opus** or **Sonnet**. It selects the runtime's current version, not a fixed release. An old model ID or version-qualified request does not authorize a silent switch to the current family: the agent must get your agreement. Plain corrections such as "go with Opus" can replace an earlier version request; a narrative mention or an opinion question cannot. "Use Opus not Sonnet" still asks for Opus, not Sonnet.
+
 You can also save standing model routing as a memory, for example "Remember: reviews on Sonnet, backend coding on GPT 6.1 Sol, never Fable". The agent sees these memories next to your subagent default and picks a model per job, and AI Shuffle accepts a model such a memory names without asking you again in each chat. Only memories saved at your request count, not facts an agent saved or learned on its own. A model named only as something to avoid ("never", "not", "instead of", "is poor at") does not count. Correcting or forgetting the memory takes effect at the next start. Each start's receipt names the memory that allowed it. Ask for the rule to apply in every chat and the agent saves it to always load in full. Other memories are listed by when they apply, and the agent reads one in full when it is relevant.
 
 An agent cannot switch to a model on its own. If it wants a model you did not name or save in a memory, AI Shuffle asks you first, in every permission mode. A yes covers that model for the rest of the chat. Unknown model names are refused with a list of the models you can use, and nothing falls back to another model.
+
+If reading the chat's model requests fails or exceeds its five-second search budget, AI Shuffle asks again even if you saved routing memory or approved an earlier start. This prevents an unseen newer request from being overridden. A yes after an incomplete search covers only that start, not later attempts whose history cannot be checked.
 
 ## After a restart
 

@@ -168,6 +168,11 @@ async def test_fresh_cli_uses_current_turn_plan_not_previous_snapshot(monkeypatc
     adapter._memory_plan = plan_memory_note(section, held)
     assert adapter._memory_plan.kind == "changes"
     monkeypatch.setattr(adapter, "_memory_section", lambda: base)
+    adapter._is_delegated = True
+    scratch = "<system-reminder>\n# Harness scratch\nSynthetic scratch location.\n</system-reminder>"
+    monkeypatch.setattr(adapter, "_scratch_note", lambda: scratch)
     note = await adapter._fresh_memory_note([Text(text="Suggest vegetarian recipes")])
     assert "without mushrooms" in note
-    assert note == wrap(section)
+    # A fresh CLI now also restores scratch. Keep the exact current-task
+    # snapshot assertion: it must remain intact at the message tail.
+    assert note == scratch + "\n\n" + wrap(section)

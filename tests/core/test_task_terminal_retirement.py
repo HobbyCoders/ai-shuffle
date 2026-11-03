@@ -25,6 +25,7 @@ import pytest
 
 from app.core import provider_agent, provider_agent_supervisor, turn_scheduler
 from app.core.task_registry import TaskRegistry, task_registry
+from app.db import sessions as sessions_db
 from app.db import turns as turns_db
 
 
@@ -91,6 +92,7 @@ def _seed_own_background_task(session_id: str, task_id: str, **kwargs) -> None:
 
 
 def _user_turn(session_id: str) -> dict:
+    sessions_db.create_session(session_id, None)
     return turns_db.enqueue_turn(
         session_id, "user", prompt="do the thing", profile_id="p1",
     )

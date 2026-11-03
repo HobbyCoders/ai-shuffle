@@ -12,12 +12,13 @@ from __future__ import annotations
 import json
 import logging
 from contextlib import contextmanager
+from dataclasses import replace
 
 import pytest
 
 from app.core.provider.fluid_pg_store import PgFluidStore
 
-from fluid.events.model import TextDelta
+from fluid.events.model import ContextCompaction, TextDelta
 from fluid.messages.content import Message, Text
 from fluid.store.base import SessionNode, SessionSearchHit
 
@@ -83,8 +84,19 @@ async def test_memory_pin_is_rebased_after_pg_scrubbing(mock_db, odd, location):
     promotion = first.apply_summary([node, reply, recent], ("pinned", "reply", "Summary."))
     assert promotion is not None
     before = "\n".join(m.text() for m in first.view([node, reply, recent]))
+    # The decision comes back from the store, as a resume reads it: it now holds
+    # delivered text of its own (the checkpoint's pin), so it is scrubbed as well.
+    await store.append_event("ses_pg_scrubbed_pin", ContextCompaction(
+        session_id="ses_pg_scrubbed_pin", tier=promotion.tier, reason=promotion.reason, seq=1,
+        spans=[list(span) for span in promotion.spans], summary=promotion.summary_text,
+        summary_pin=promotion.summary_pin,
+    ))
+    stored = [event async for event in PgFluidStore().iter_events("ses_pg_scrubbed_pin", 0)][0]
+    assert stored.summary_pin == clean(promotion.summary_pin)
+    assert "synthetic-password" not in json.dumps(stored.summary_pin)
+    assert "\x00" not in json.dumps(stored.summary_pin, ensure_ascii=False)
     restored = Compactor(config=CompactionConfig(summary_enabled=True, keep_recent_turns=1))
-    restored.rehydrate([promotion])
+    restored.rehydrate([replace(promotion, summary_text=stored.summary, summary_pin=stored.summary_pin)])
     after = "\n".join(m.text() for m in restored.view(path))
     assert after == clean(before)
     assert clean(note) in after

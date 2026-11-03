@@ -13,7 +13,7 @@ import uuid
 from app.core import checkout_transfer, project_resolver, checkout_manager
 from app.core.config import settings
 from app.core.worktree_manager import WorktreeError
-from app.db import database, runs, checkouts
+from app.db import database, runs, checkouts, turns as turns_db
 from app.db.base import get_db
 from app.db.async_database import run_sync
 from app.network import control, crypto, engine
@@ -874,6 +874,8 @@ def _begin(sid, target, remote, note, wake_barrier, timing, plain: bool = False)
         data = dict(checkout=state, history=_history(session), sdk_session_id=session.get("sdk_session_id"),
                     project_id=project["id"] if project else None, token=run["id"],
                     wakes=wakes, wake_barrier=barrier, handoff_receipt=1,
+                    # Settled turns stay behind, so their outcome travels on its own.
+                    last_turn_failed=sid in turns_db.sessions_with_failed_latest_turn([sid]),
                     resume_wake_id=resume_wake["id"] if resume_wake else None,
                     **({"plain_folder": True} if plain else {}))
         raw = json.dumps(data, default=str).encode()
@@ -1362,14 +1364,15 @@ def _publish_history(cur, sid, token):
     return (parse_jsonb(header["rows"]) or {}) if header else {}
 
 
-def _mark_commit_sent(sid, token, source, receipt_required=True):
+def _mark_commit_sent(sid, token, source, receipt_required=True, last_turn_failed=None):
     """Persist uncertainty before sending a commit that may lose its reply."""
     with get_db() as conn:
         cur = conn.cursor()
         cur.execute("UPDATE handoff_history_chunks SET rows=%s WHERE token=%s AND session_id=%s "
                     "AND table_name='' AND batch_no=0",
                     (json.dumps({"commit_sent": True, "source_id": source,
-                                 "receipt_required": receipt_required}), token, sid))
+                                 "receipt_required": receipt_required,
+                                 "last_turn_failed": last_turn_failed}), token, sid))
         if not cur.rowcount:
             raise ValueError("The staged hand-off expired before commit; ownership was not moved.")
 
@@ -1682,6 +1685,19 @@ def _accept_owner_row(cur, sid, device_id, branch, token=None):
         _discard_superseded_history(cur, sid, token)
 
 
+def _adopt_outcome(cur, sid, failed):
+    """Take the chat's outcome from its previous owner, over any turns kept here.
+
+    An older source sends none: its published summary is the best word left, and
+    it reports no failure, so such a chat reads as it did before.
+    """
+    if failed is None:
+        cur.execute("SELECT state FROM network_session_runtime WHERE session_id=%s", (sid,))
+        row = cur.fetchone()
+        failed = bool(row and row["state"] == "failed")
+    turns_db.set_outcome_baseline(cur, sid, bool(failed))
+
+
 def _lock_published_owner(cur, sid, device_id, token, previous, metadata):
     """Revalidate after the expensive delta, with only a short session lock.
 
@@ -1731,6 +1747,8 @@ def _accept_owner(sid, device_id, branch=None, token=None, held_messages=None, *
         if held_messages is None:
             held_messages = receipt.get("held_messages", 0) if receipt.get("token") == token else 0
         _accept_owner_row(cur, sid, device_id, branch, token)
+        if metadata is not None:
+            _adopt_outcome(cur, sid, metadata.get("last_turn_failed"))
         for staged in staged_rows:
             wakes = parse_jsonb(staged["wakes"]) or []
             kept = [w for w in wakes if w.get("source") != "handoff_resume"]
@@ -1993,7 +2011,8 @@ async def _pull_steps(session, owner, ctx, project, base, remote, held, holder, 
                 await run_sync(_stage_wakes, sid, owner, data, None)
             timing.step("install_history", tables=json.dumps(data.get("_history_metrics", {}), separators=(",", ":")))
             timing.waiting("owner_commit")
-            await run_sync(_mark_commit_sent, sid, token, owner, data.get("handoff_receipt") == 1)
+            await run_sync(_mark_commit_sent, sid, token, owner, data.get("handoff_receipt") == 1,
+                           data.get("last_turn_failed"))
             result = await _owner_commit(owner, {"session_id": sid,
                 "phase": "commit", "token": token,
                 "fingerprint": None, "branch": None, "session_branch": None,
@@ -2038,7 +2057,8 @@ async def _pull_steps(session, owner, ctx, project, base, remote, held, holder, 
         if data.get("wake_barrier"):
             await run_sync(_stage_wakes, sid, owner, data, session_branch)
         timing.waiting("owner_commit")
-        await run_sync(_mark_commit_sent, sid, token, owner, data.get("handoff_receipt") == 1)
+        await run_sync(_mark_commit_sent, sid, token, owner, data.get("handoff_receipt") == 1,
+                           data.get("last_turn_failed"))
         result = await _owner_commit(owner, {"session_id": sid,
             "phase": "commit", "token": token,
             "fingerprint": state["fingerprint"],

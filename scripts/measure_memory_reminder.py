@@ -282,6 +282,7 @@ async def _delegated(store, legacy: bool, cwd: str, prefix_chars: int) -> list[d
     from app.core.provider import harness_adapter as ha
     from app.core.provider.events import ResultMessage
     from app.core.provider.types import SessionOptions
+    from fluid.engine.delegated_proto import HookCallbackRequest
     from fluid.tools.registry import ToolRegistry
 
     fake = ROOT / "fluid" / "tests" / "fixtures" / "fake_claude.py"
@@ -336,10 +337,14 @@ async def _delegated(store, legacy: bool, cwd: str, prefix_chars: int) -> list[d
                 if turn == COMPACT_BEFORE:
                     compacted_at = turn
                     # The fake CLI does not call the hook itself; the real one
-                    # does on every main-conversation compaction.
+                    # does on every main-conversation compaction. Answer it the
+                    # way the loop does: the note counts once its answer is written.
                     loop._track_main_compaction({"type": "system", "subtype": "status",
                                                  "status": "compacting"})
-                    await session_start({"source": "compact", "transcript_path": ""})
+                    await loop._answer_hook_request(HookCallbackRequest(
+                        cli_request_id="measure-compact", callback_id="fluid_SessionStart",
+                        input={"source": "compact", "transcript_path": ""},
+                    ))
         finally:
             await adapter.disconnect()
     # Model the CLI's request for each turn's first model call.

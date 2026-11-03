@@ -40,7 +40,7 @@ describe('native shell messages', () => {
 		expect(postMessage.mock.calls.map(([raw]) => JSON.parse(raw))).toEqual([{ type: 'app-settings' }]);
 	});
 
-	it('falls back to the Workers screen in an app from before app-settings', () => {
+	it('keeps the Workers-to-Settings fallback until a minimum app build is enforced', () => {
 		const postMessage = vi.fn();
 		inApp({ postMessage }, ['worker-switch']);
 		expect(nativeAppSettingsRoute()).toBe('workers');

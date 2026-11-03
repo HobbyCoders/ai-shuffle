@@ -13,6 +13,8 @@ import {
 	attentionTitle,
 	deriveGitStage,
 	deriveStatus,
+	projectIdentity,
+	lastWorkFailed,
 	diffCounts,
 	isAttentionStatus,
 	sidebarGroup,
@@ -131,10 +133,33 @@ describe('projectKey', () => {
 		expect(projectKey(there)).toBe('git:ee50');
 	});
 
-	it('falls back to origin, then project id, then ungrouped', () => {
+	it('falls back to origin, then the local origin of the project id, then ungrouped', () => {
 		expect(projectKey(session({ origin: 'local:p', project_id: 'p' }))).toBe('local:p');
-		expect(projectKey(session({ project_id: 'p' }))).toBe('p');
+		expect(projectKey(session({ project_id: 'p' }))).toBe('local:p');
 		expect(projectKey(session({ project_id: null }))).toBe('__ungrouped__');
+	});
+});
+
+describe('projectIdentity, the one rule the Filter and the picker share', () => {
+	it('lets the link group win over an old local origin', () => {
+		expect(projectIdentity({ link_group_id: 'git:abc', origin: 'local:p1', id: 'p1' })).toBe('git:abc');
+	});
+
+	it('goes by the origin a project is catalogued under when it has no link', () => {
+		expect(projectIdentity({ origin: 'git:abc', id: 'p1' })).toBe('git:abc');
+		expect(projectIdentity({ id: 'p1' })).toBe('local:p1');
+		expect(projectIdentity({})).toBeNull();
+	});
+
+	it('puts every chat of a project under one key, whatever each row carries', () => {
+		expect(new Set([
+			projectKey(session({ project_id: 'p1', origin: 'local:p1' })),
+			projectKey(session({ project_id: 'p1' }))
+		]).size).toBe(1);
+		expect(new Set([
+			projectKey(session({ project_id: 'p1', link_group_id: 'git:abc', origin: 'local:p1' })),
+			projectKey(session({ project_id: 'p1', link_group_id: 'git:abc', origin: 'git:abc' }))
+		]).size).toBe(1);
 	});
 });
 
@@ -232,6 +257,50 @@ describe('sessionDeviceId', () => {
 	it('keys a remote session with neither id as an unknown remote device', () => {
 		expect(sessionDeviceId(session({ is_remote: true, instance_id: null, owner_device_id: null })))
 			.toBe(UNKNOWN_REMOTE_DEVICE);
+	});
+});
+
+describe('a turn that failed', () => {
+	const base = { streaming: false, attention: null as { count: number; kind: 'permission' | 'question' } | null, isActive: true };
+
+	it('says Failed, not Done, in red', () => {
+		expect(deriveStatus({ ...base })).toBe('done');
+		expect(deriveStatus({ ...base, failed: true })).toBe('failed');
+		expect(STATUS_LABELS.failed).toBe('Failed');
+		expect(runtimeStatusWord('failed')).toBe('Failed');
+		expect(RUNTIME_STATUS_TONES.failed).toBe('danger');
+	});
+
+	it('gives way to whatever is happening now', () => {
+		expect(deriveStatus({ ...base, failed: true, streaming: true })).toBe('working');
+		expect(deriveStatus({ ...base, failed: true, parked: true })).toBe('parked');
+		expect(deriveStatus({ ...base, failed: true, backgroundWork: true })).toBe('parked');
+		expect(deriveStatus({ ...base, failed: true, attention: { count: 1, kind: 'permission' } })).toBe('needs_permission');
+	});
+
+	it('is what happened last, so an older question or PR does not speak over it', () => {
+		expect(deriveStatus({ ...base, failed: true, open: REMEMBERED_PROSE_NEEDS })).toBe('failed');
+		expect(deriveStatus({ ...base, failed: true, prState: 'open' })).toBe('failed');
+		expect(deriveStatus({ ...base, failed: true, prState: 'merged' })).toBe('failed');
+	});
+
+	it('holds on a chat that runs elsewhere, while the owner is at rest', () => {
+		expect(deriveStatus({ ...base, remoteRuntimeState: 'idle', failed: true })).toBe('failed');
+		expect(deriveStatus({ ...base, remoteRuntimeState: 'working', failed: true })).toBe('working');
+		expect(deriveStatus({ ...base, remoteRuntimeState: 'offline', failed: true })).toBe('offline');
+	});
+
+	it('goes to Needs you while active, and stays with Settled once settled', () => {
+		expect(sidebarGroup('failed', true)).toBe('needs');
+		expect(sidebarGroup('failed', false)).toBe('settled');
+		expect(sidebarGroup('done', true)).toBe('active');
+	});
+
+	it('is read from the turn or from a chat that could not start', () => {
+		expect(lastWorkFailed({ status: 'active', last_turn_failed: true })).toBe(true);
+		expect(lastWorkFailed({ status: 'failed' })).toBe(true);
+		expect(lastWorkFailed({ status: 'active', last_turn_failed: false })).toBe(false);
+		expect(lastWorkFailed({ status: 'active' })).toBe(false);
 	});
 });
 

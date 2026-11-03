@@ -113,6 +113,8 @@ def live_sessions(exclude: str | None = None) -> list[dict[str, Any]]:
         state = row.get("peer_state") if not local else (
             "question" if row["waiting"] else "working" if row["working"] else
             "parked" if row["background"] or row.get("parked_task_kind") else "idle")
+        # A mirror's "failed" is an owner at rest, as far as this record goes.
+        state = "idle" if state == "failed" else state
         needs = state in ("permission", "question") or (
             state == "idle" and row.get("last_assistant_question_seq") is not None)
         result.append({"session": row["id"], "goal": row.get("title") or "Untitled",

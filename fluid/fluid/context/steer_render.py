@@ -35,10 +35,14 @@ from fluid.store.base import SessionNode
 # stub's pinned intent block and the longer cap on a real user's turn-start
 # text in span digests, plus the outrank line, code-cell summaries and the
 # epoch stub's list of files read and tools loaded (fluid.context.trim's
-# summarize_cell). Persisted decisions carry the version they
+# summarize_cell). Version 3 keeps what an agent was told (#996): the session's
+# opening request pins and digests at the longer ``brief_text_cap``, whoever sent
+# it, and an agent's message that opened a turn stays verbatim in span digests
+# and epoch stubs. Persisted decisions carry the version they
 # were made under, so an old session keeps rendering exactly as it did.
 RENDER_VERSION_LEGACY = 1
-CURRENT_RENDER_VERSION = 2
+RENDER_VERSION_V2 = 2
+CURRENT_RENDER_VERSION = 3
 
 
 @dataclass(frozen=True, kw_only=True)

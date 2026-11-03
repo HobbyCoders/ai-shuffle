@@ -71,9 +71,12 @@ export function createDraftManager(deps: DraftManagerDeps) {
 			update(s => ({ ...s, worktreeError: null }));
 		},
 
-		/** Clear all messages (e.g. before reloading after rewind). */
-		clearMessages() {
-			update(s => ({ ...s, messages: [] }));
+		/** The log just gained an event this view must show now: read on from the
+		 * cursor. Rows stay on screen, nothing reloads, and the reducer folds what
+		 * arrives exactly as a replay would. Without a bound session, a no-op. */
+		catchUpTranscript() {
+			const state = getState();
+			if (state.sessionId) feedRevive(state.sessionId);
 		},
 
 		/** A rewrite invalidates the transcript; mirror freshness does not.
@@ -106,7 +109,8 @@ export function createDraftManager(deps: DraftManagerDeps) {
 		 * externally (via MessageActions → executeRewind HTTP), and the backend
 		 * emits a `rewound` event on the session's SSE event log; the live feed's
 		 * reducer folds that truncation into the transcript. No client-side
-		 * truncation or reload is required here. */
+		 * truncation or reload is required here (catchUpTranscript covers a
+		 * feed that went quiet). */
 		rewindToMessage(_messageId: string) {
 			// Intentionally a no-op: truncation arrives via the live SSE `rewound`
 			// event. Kept for API compatibility.

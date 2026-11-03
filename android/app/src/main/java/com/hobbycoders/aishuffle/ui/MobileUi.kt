@@ -36,8 +36,9 @@ object MobileUi {
 
     /**
      * The shell opens the app's own Settings (account, sign out, phone tools)
-     * on `{"type":"app-settings"}`. Without it the page sends `workers`, whose
-     * screen has the Settings button.
+     * on `{"type":"app-settings"}`. Older builds without this capability keep
+     * the labelled Workers > Settings fallback until a minimum supporting build
+     * is enforced. That legacy CLEAR_TOP route cannot preserve chat's Back stack.
      */
     const val APP_SETTINGS = "app-settings"
     val CAPABILITIES = listOf("file-save", "file-chooser", "microphone", "device-tools", "voice-routing", VOICE_CALL_CONTROLS,

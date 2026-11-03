@@ -8806,6 +8806,11 @@ async def test_one_shot_generation_reaches_the_cli_with_nothing_of_ours(monkeypa
     # No settings file loads, so a project's local hooks cannot add context.
     assert captured["setting_sources"] == ()
     assert adapter._turn_context_note("hello") is None
+    from fluid.messages import Text
+    callback = captured["fresh_context"]
+    assert await callback([Text(text="Write a commit message")], None) is None
+    assert await callback([Text(text="Name this branch")], None) is None
+    assert await callback([Text(text="Suggest a reply")], None) is None
 
 
 @pytest.mark.asyncio

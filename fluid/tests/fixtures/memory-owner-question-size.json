@@ -1,0 +1,9 @@
+{
+  "texts": [
+    "Risky code and all UI work: Opus; bounded backend on GPT 6.1 Sol.",
+    "Speed sprint: code tasks in the perf branch run on Sol."
+  ],
+  "footer_chars": 616,
+  "section_chars": 1134,
+  "allowance_chars": 80
+}
