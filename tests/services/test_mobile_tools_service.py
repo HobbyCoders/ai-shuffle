@@ -320,6 +320,42 @@ async def test_completed_result_winning_timeout_is_returned(wired, monkeypatch, 
     assert result == {"command_id": "cmd-1", "result": {"ok": True, "status": "launched_confirmation"}}
 
 
+@pytest.mark.parametrize("exit_path", ["poll", "cancel", "timeout"])
+@pytest.mark.parametrize("lookup_failure", [False, True])
+async def test_every_completed_exit_rechecks_authorization_after_the_row_read(wired, monkeypatch, exit_path, lookup_failure):
+    completed = {"status": "completed", "claimed": True, "result": '{"ok":true,"secret":"private-data"}'}
+    lookups = []
+    confirmation = {"available": True}
+    def authorized(sid):
+        lookups.append(sid)
+        if not confirmation["available"]:
+            if lookup_failure:
+                raise RuntimeError("temporary database error")
+            return []
+        return [{"device_id": "dev"}]
+    def lose_confirmation():
+        confirmation["available"] = False
+        if not lookup_failure:
+            wired["authorized"] = []
+        return completed
+    def outcome(*args):
+        if exit_path == "poll":
+            return lose_confirmation()  # Authorization changes after the completed row is read.
+        return {"status": "cancelled" if exit_path == "cancel" else "pending"}
+    monkeypatch.setattr(service, "authorized_devices", authorized)
+    monkeypatch.setattr(service.queue, "outcome", outcome)
+    monkeypatch.setattr(service.queue, "cancel", lambda *a: lose_confirmation())
+    result = await service.execute("s", "dev", "read_screen", {}, timeout=0.01)
+    assert result["error"] == "device_not_authorized"
+    assert result["completed_on_device"] is True
+    assert "authorization could not be confirmed" in result["message"].lower()
+    assert "result" not in result
+    assert "private-data" not in json.dumps(result)
+    assert len(lookups) >= 3  # Enqueue, poll and the completed-result boundary.
+    if lookup_failure:
+        assert wired["authorized"] == ["dev"]  # A failed lookup did not actually revoke membership.
+
+
 @pytest.mark.parametrize("status", ["pending", "claimed", "completed"])
 @pytest.mark.parametrize("authorization_error", [False, True])
 async def test_execute_revocation_during_wait_settles_atomic_outcome(wired, monkeypatch, status, authorization_error):

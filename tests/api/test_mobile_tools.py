@@ -428,6 +428,75 @@ async def test_revoked_controller_cannot_receive_sensitive_result_posted_after_r
         assert field not in json.dumps(result)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize('name', ['read_screen', 'get_location'])
+async def test_private_result_posted_during_final_sleep_is_withheld_after_revocation(isolated, monkeypatch, name):
+    queue.capabilities('a', True, [name])
+    queue.claim('a')
+    original_enqueue = queue.enqueue
+    original_authorizer = service.device_authorizer
+    membership = {'active': True}
+    monkeypatch.setattr(service, 'device_authorizer',
+                        lambda session: original_authorizer(session) if membership['active'] else [])
+    observed = []
+    def deliver(*args):
+        queued = original_enqueue(*args)
+        observed.append(queued['id'])
+        assert [command['id'] for command in api.pending(device=isolated[1]['a'])['commands']] == observed
+        return queued
+    monkeypatch.setattr(queue, 'enqueue', deliver)
+    real_sleep = asyncio.sleep
+    async def revoke_and_post_during_final_sleep(delay):
+        # The last loop authorization check passed, but this wait consumes its remaining deadline.
+        membership['active'] = False
+        assert queue.submit_result('a', observed[0], '{"ok":true,"secret":"private-data"}') is None
+        await real_sleep(delay)
+    monkeypatch.setattr(service.asyncio, 'sleep', revoke_and_post_during_final_sleep)
+    result = await service.execute('sa', 'a', name, {}, timeout=0.05)
+    assert service.authorized_devices('sa') == []
+    # outcome() correctly reports expiry after the deadline; the accepted stored result
+    # is still returned by atomic cancellation and must pass the authorization boundary.
+    assert isolated[0].execute('SELECT status FROM mobile_tool_commands WHERE id=?',
+                               (observed[0],)).fetchone()['status'] == 'completed'
+    assert result['error'] == 'device_not_authorized'
+    assert result['completed_on_device'] is True
+    assert 'authorization could not be confirmed' in result['message'].lower()
+    assert 'result' not in result
+    assert 'private-data' not in json.dumps(result)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('name,args', [('tap_node', {'ref': 'snapshot:node'}), ('get_location', {})])
+@pytest.mark.parametrize('refusal', [
+    {'ok': False, 'status': 'denied', 'error': 'private-denial-details'},
+    {'ok': False, 'status': 'denied'},
+    {'success': False, 'status': 'failed'},
+    {'error': 'private-error-details'},
+])
+async def test_withheld_device_refusal_is_not_reported_as_successful_completion(isolated, monkeypatch, name, args, refusal):
+    queue.capabilities('a', True, [name])
+    queue.claim('a')
+    original_enqueue = queue.enqueue
+    original_authorizer = service.device_authorizer
+    membership = {'active': True}
+    monkeypatch.setattr(service, 'device_authorizer',
+                        lambda session: original_authorizer(session) if membership['active'] else [])
+    def refuse_then_revoke(*arguments):
+        queued = original_enqueue(*arguments)
+        assert [command['id'] for command in api.pending(device=isolated[1]['a'])['commands']] == [queued['id']]
+        assert queue.submit_result('a', queued['id'], json.dumps(refusal)) is None
+        membership['active'] = False
+        return queued
+    monkeypatch.setattr(queue, 'enqueue', refuse_then_revoke)
+    result = await service.execute('sa', 'a', name, args)
+    assert result['error'] == 'device_not_authorized'
+    assert result.get('completed_on_device') is not True
+    assert 'refused or failed' in result['message'].lower()
+    assert 'authorization could not be confirmed' in result['message'].lower()
+    assert 'result' not in result
+    assert 'private-' not in json.dumps(result)
+
+
 def test_undelivered_cancellation_preserves_completed_history(isolated):
     enable()
     cmd = enqueue()
