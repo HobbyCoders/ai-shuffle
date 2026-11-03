@@ -719,6 +719,217 @@ async def test_a_stop_overtaken_by_a_newer_turn_does_not_signal_or_halt_it(monke
     halt.assert_not_called()
 
 
+async def test_a_stop_overtaken_after_its_latch_does_not_latch_again(monkeypatch, stop_env):
+    """The first cleanup step can block; the next message lifts the latch meanwhile."""
+    from app.core import query_session_lifecycle as qsl
+    from app.core import turn_scheduler
+    from app.core.task_registry import task_registry
+    from app.db import turns as turns_db
+    from app.db import wakeups as wakeups_db
+
+    real = turn_scheduler.discard_queued_task_wakes
+    next_turn: list[str] = []
+
+    def discard(*args, **kwargs):
+        changed = real(*args, **kwargs)
+        next_turn.append(_next_message_arrives())
+        return changed
+
+    monkeypatch.setattr(turn_scheduler, "discard_queued_task_wakes", discard)
+    await qsl.stop_all_background_tasks(SID, user_stop=True)
+
+    assert not task_registry.is_user_stopped(SID)
+    assert turns_db.get_turn(next_turn[0])["state"] == "queued"
+    assert wakeups_db.get_session_wakeups(SID)
+    assert stop_env == ["old-task"]
+
+
+async def test_an_interrupt_overtaken_during_its_read_does_not_latch_again(monkeypatch, stop_env):
+    """The runtime re-runs the WebSocket's Stop; the next message can land before that."""
+    from app.core import session_runtime as sr
+    from app.core.task_registry import task_registry
+    from app.db import turns as turns_db
+
+    monkeypatch.setattr(sr, "INTERRUPT_STEP_WAIT_SECONDS", 0.01)
+    turn = turns_db.enqueue_turn(SID, "user", prompt="hi", profile_id="default")
+    turns_db.start_turn(turn["id"], None, "runner")
+    turns_db.interrupt_turn(SID, "stop", stop_background=True, source="user_stop")
+    reached, resume = _pause_first_call(monkeypatch, turns_db, "get_turn")
+
+    async def provider_stops(_sid):
+        turns_db.settle_turn(turn["id"], "aborted", "interrupted")
+
+    signal = AsyncMock(side_effect=provider_stops)
+    with patch("app.core.query_session_lifecycle.interrupt_session", new=signal):
+        interrupt = asyncio.create_task(sr.SessionRuntime(turn).interrupt("stop", escalation_timeout=1))
+        await asyncio.to_thread(reached.wait, 5)
+        task_registry.mark_user_stopped(SID)
+        next_turn = _next_message_arrives()
+        resume.set()
+        await interrupt
+    await tr.drain_event_writes(5)
+
+    signal.assert_awaited_once()
+    assert not task_registry.is_user_stopped(SID)
+    assert turns_db.get_turn(next_turn)["state"] == "queued"
+    assert stop_env == []
+
+
+@pytest.fixture
+def real_worker():
+    """A live worker of the session, with nothing about its teardown faked."""
+    from app.core import provider_agent_supervisor as sup
+    from app.core.task_registry import task_registry
+
+    task_registry.clear_user_stop(SID)
+    task_registry.start_task(SID, "worker-a", "agent", "worker-a")
+    record = sup.register_worker(sup.WorkerRecord(
+        parent_session_id=SID, worker_session_id="worker-a", task_id="worker-a",
+        tool_use_id="worker-a", background=True,
+    ))
+    yield record
+    sup.reset()
+    task_registry.clear_user_stop(SID)
+    task_registry.clear_session(SID)
+
+
+@pytest.mark.parametrize("message_lifts_latch", [True, False])
+async def test_a_stop_leaves_a_worker_resumed_while_it_waited(monkeypatch, real_worker, message_lifts_latch):
+    from app.core import provider_agent_supervisor as sup
+    from app.core import query_session_lifecycle as qsl
+    from app.core.task_registry import task_registry
+    from app.db import turns as turns_db
+
+    reached, resume = _pause_first_call(monkeypatch, turns_db, "get_queued_turns")
+    stop = asyncio.create_task(qsl.stop_all_background_tasks(SID, user_stop=True))
+    await asyncio.to_thread(reached.wait, 5)
+
+    # The old run finishes, and a continuation resumes the same task id.
+    if message_lifts_latch:
+        _next_message_arrives()
+    task_registry.complete_task(SID, "worker-a", "completed")
+    await asyncio.sleep(0.002)
+    task_registry.resume_task(SID, "worker-a")
+    resumed = task_registry.task_incarnation(SID, "worker-a")
+    resume.set()
+    results = await stop
+
+    assert real_worker.torn_down is False
+    assert sup.get_worker(SID, "worker-a") is real_worker
+    assert task_registry.get_task(SID, "worker-a")["status"] == "running"
+    assert task_registry.task_incarnation(SID, "worker-a") == resumed
+    assert {"ok": True, "kind": "agent", "task_id": "worker-a", "skipped": "resumed"} in results
+
+
+async def test_a_stop_still_ends_the_worker_run_it_named(monkeypatch, real_worker):
+    from app.core import provider_agent_supervisor as sup
+    from app.core import query_session_lifecycle as qsl
+    from app.core.task_registry import task_registry
+    from app.db import turns as turns_db
+
+    reached, resume = _pause_first_call(monkeypatch, turns_db, "get_queued_turns")
+    stop = asyncio.create_task(qsl.stop_all_background_tasks(SID, user_stop=True))
+    await asyncio.to_thread(reached.wait, 5)
+    _next_message_arrives()
+    resume.set()
+    await stop
+
+    assert real_worker.torn_down is True
+    assert sup.get_worker(SID, "worker-a") is None
+    assert task_registry.get_task(SID, "worker-a")["status"] == "killed"
+
+
+def _stage_handoff_wake():
+    with base.get_db() as conn:
+        conn.cursor().execute(
+            "INSERT INTO handoff_wakes (token,session_id,source_id,branch,wakes,created_at) "
+            "VALUES (%s,%s,%s,%s,%s,%s)",
+            ("staged", SID, "source", None, "[]", time.time()),
+        )
+
+
+def _handoff_wake() -> dict:
+    with base.get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT superseded, keep_peer FROM handoff_wakes WHERE token=%s", ("staged",))
+        return dict(cursor.fetchone())
+
+
+@pytest.mark.parametrize("has_wake", [True, False])
+def test_a_refused_wake_cancel_leaves_the_staged_wake_alone(has_wake):
+    from app.db import wakeups as wakeups_db
+
+    _stage_handoff_wake()
+    if has_wake:
+        wakeups_db.create_wakeup(
+            id="older-wake", session_id=SID, prompt="older wake", fire_at=time.time() + 60,
+        )
+    answers = iter([True, False])
+
+    assert wakeups_db.pop_session_wakeups(SID, can_pop=lambda: next(answers)) == []
+    assert not _handoff_wake()["superseded"]
+    assert bool(wakeups_db.get_session_wakeups(SID)) is has_wake
+
+
+def test_an_allowed_wake_cancel_still_supersedes_the_staged_wake():
+    from app.db import wakeups as wakeups_db
+
+    _stage_handoff_wake()
+
+    assert wakeups_db.pop_session_wakeups(SID, can_pop=lambda: True) == []
+    assert _handoff_wake()["superseded"]
+
+
+def _parked_turn() -> str:
+    from app.db import turns as turns_db
+
+    turn = turns_db.enqueue_turn(SID, "user", prompt="park", profile_id="default")
+    turns_db.start_turn(turn["id"], None, "runner")
+    assert turns_db.park_turn(turn["id"], ["task"])
+    return turn["id"]
+
+
+async def _stop_paused_at_its_park_write(monkeypatch, while_paused):
+    """A real Stop whose park write waits, as one behind the admission lock does."""
+    from app.core import query_session_lifecycle as qsl
+    from app.db import turns as turns_db
+
+    reached, resume = _pause_first_call(monkeypatch, turns_db, "settle_parked_turns")
+    stop = asyncio.create_task(qsl.enter_user_stop(SID))
+    await asyncio.to_thread(reached.wait, 5)
+    result = while_paused()
+    resume.set()
+    await stop
+    return result
+
+
+async def test_a_stop_waiting_to_settle_a_park_spares_the_next_turns_park(monkeypatch, stop_env):
+    from app.db import turns as turns_db
+
+    older = _parked_turn()
+
+    def next_message_runs_to_a_park():
+        queued = _next_message_arrives()
+        turns_db.start_turn(queued, None, "runner")
+        assert turns_db.park_turn(queued, ["task"])
+        return queued
+
+    newer = await _stop_paused_at_its_park_write(monkeypatch, next_message_runs_to_a_park)
+
+    assert turns_db.get_turn(newer)["state"] == "parked"
+    assert turns_db.get_turn(older)["state"] == "parked"
+
+
+async def test_a_stop_settles_only_the_parks_it_observed(monkeypatch, stop_env):
+    from app.db import turns as turns_db
+
+    older = _parked_turn()
+    later = await _stop_paused_at_its_park_write(monkeypatch, _parked_turn)
+
+    assert turns_db.get_turn(older)["state"] == "completed"
+    assert turns_db.get_turn(later)["state"] == "parked"
+
+
 async def test_a_lock_timeout_from_the_question_projection_rolls_back_and_resends(
     monkeypatch, no_backoff,
 ):

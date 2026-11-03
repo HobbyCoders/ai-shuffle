@@ -109,7 +109,9 @@ def pop_session_wakeups(
     the note-bearing handoff_resume. Stop/delete use no exclusion and retire it.
 
     ``can_pop`` lets a Stop that may have outlived its turn step aside. It is
-    asked again after the read, because a wake seen there can be a newer turn's.
+    asked again after the read, because a wake seen there can be a newer turn's,
+    and a refusal undoes the supersession as well. It needs ``exclude_source``
+    to be unset, which no Stop sets.
     """
     _ph = ph()
     if can_pop is not None and not can_pop():
@@ -148,7 +150,10 @@ def pop_session_wakeups(
                 (session_id, source),
             )
         ids = [r["id"] for r in rows_to_list(list(cursor.fetchall() or []))]
-        if not ids or (can_pop is not None and not can_pop()):
+        if can_pop is not None and not can_pop():
+            conn.rollback()
+            return []
+        if not ids:
             return []
         for wakeup_id in ids:
             cursor.execute(f"DELETE FROM pending_wakeups WHERE id = {_ph}", (wakeup_id,))

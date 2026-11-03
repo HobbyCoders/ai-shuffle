@@ -1915,6 +1915,16 @@ def get_queued_turns(session_id: str) -> List[Dict[str, Any]]:
     return _rows(rows)
 
 
+def get_parked_turns(session_id: str) -> List[Dict[str, Any]]:
+    """Return a session's ``parked`` turns, each one an ``observed_park`` for
+    :func:`settle_parked_turns`."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM turns WHERE session_id=%s AND state='parked'", (session_id,))
+        rows = cursor.fetchall()
+    return _rows(rows)
+
+
 def session_waiting_to_start(session_id: str) -> bool:
     """Queued work with no live turn, from ONE statement/snapshot.
 

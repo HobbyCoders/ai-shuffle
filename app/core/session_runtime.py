@@ -3186,6 +3186,10 @@ class SessionRuntime:
         # durable row says (the chat Stop, a usage limit). None stays unknown,
         # never a guessed user Stop.
         recorded_source: Optional[str] = None
+        from app.core.task_registry import task_registry
+
+        latched_before = task_registry.is_user_stopped(sid)
+        generation_before = task_registry.stop_generation(sid)
         try:
             interrupted_row = await asyncio.to_thread(turns_db.get_turn, tid)
             recorded_source = ((interrupted_row or {}).get("payload") or {}).get("interrupt_source")
@@ -3212,12 +3216,20 @@ class SessionRuntime:
                 # the provider signal below, fixes what it will end.
                 source = (interrupted_row.get("payload") or {}).get("interrupt_source", "user_stop")
                 user_stop = source in {"user_stop", "user_stopped"}
-                await self._run_interrupt_step(
-                    stop_all_background_tasks(sid, user_stop=user_stop,
-                                              **({"source": source} if not user_stop else {})),
-                    "background-task stop",
-                )
-                logger.info("SessionRuntime: background teardown for %s source=%s", sid, source)
+                if (user_stop and not task_registry.is_user_stopped(sid)
+                        and (latched_before or task_registry.stop_generation(sid) != generation_before)):
+                    # The WebSocket's Stop already ran and the next message lifted
+                    # its latch during that read. Latching again would stop that
+                    # message; this turn still gets its signal below.
+                    logger.info("SessionRuntime: a newer message reached %s; "
+                                "leaving its work alone", sid)
+                else:
+                    await self._run_interrupt_step(
+                        stop_all_background_tasks(sid, user_stop=user_stop,
+                                                  **({"source": source} if not user_stop else {})),
+                        "background-task stop",
+                    )
+                    logger.info("SessionRuntime: background teardown for %s source=%s", sid, source)
         except Exception:
             logger.warning(
                 "SessionRuntime: background-task stop failed for %s", sid,

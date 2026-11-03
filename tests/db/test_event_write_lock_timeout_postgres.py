@@ -504,3 +504,62 @@ async def test_a_lease_renewal_lands_between_retries(connect, session_id, monkey
     assert True in outcomes
     await recorder.close()
     assert not recorder.recording_failed
+
+
+def _parked_turn(session_id: str) -> str:
+    from app.db import turns as turns_db
+
+    turn = turns_db.enqueue_turn(session_id, "user", prompt="park", profile_id="default")
+    turns_db.start_turn(turn["id"], None, "runner")
+    assert turns_db.park_turn(turn["id"], ["task"])
+    return turn["id"]
+
+
+async def test_a_stop_settles_the_park_it_read(session_id):
+    """The observed interval's timestamp has to match on a real timestamp column."""
+    from app.core.query_session_lifecycle import enter_user_stop
+    from app.core.task_registry import task_registry
+    from app.db import turns as turns_db
+
+    parked = _parked_turn(session_id)
+    try:
+        assert (await enter_user_stop(session_id))["parked_settled"] == 1
+    finally:
+        task_registry.clear_user_stop(session_id)
+
+    assert turns_db.get_turn(parked)["state"] == "completed"
+
+
+async def test_a_stop_behind_the_admission_lock_asks_again_before_settling(connect, session_id):
+    from app.core.query_session_lifecycle import enter_user_stop
+    from app.core.task_registry import task_registry
+    from app.db import turns as turns_db
+
+    parked = _parked_turn(session_id)
+    admission = connect()
+    admission.cursor().execute("SELECT 1 FROM sessions WHERE id = %s FOR UPDATE", (session_id,))
+    stop = asyncio.create_task(enter_user_stop(session_id))
+    await asyncio.sleep(0.5)
+    assert not stop.done()  # its park write is waiting for the lock
+    task_registry.clear_user_stop(session_id)
+    admission.rollback()
+
+    assert (await stop)["parked_settled"] == 0
+    assert turns_db.get_turn(parked)["state"] == "parked"
+
+
+def test_a_refused_wake_cancel_rolls_back_the_supersession(session_id):
+    from app.db import base, wakeups as wakeups_db
+
+    with base.get_db() as conn:
+        conn.cursor().execute(
+            "INSERT INTO handoff_wakes (token,session_id,source_id,branch,wakes,created_at) "
+            "VALUES (%s,%s,%s,%s,%s,%s)", (session_id, session_id, "source", None, "[]", time.time()),
+        )
+    answers = iter([True, False])
+
+    assert wakeups_db.pop_session_wakeups(session_id, can_pop=lambda: next(answers)) == []
+    with base.get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT superseded FROM handoff_wakes WHERE token = %s", (session_id,))
+        assert cursor.fetchone()["superseded"] is False

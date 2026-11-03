@@ -45,7 +45,7 @@ class _StopPatches:
             self.stopped.append(task_id)
             return {"ok": True, "task_id": task_id}
 
-        async def _enter_user_stop(sid):
+        async def _enter_user_stop(sid, **_kwargs):
             # The real one also drops wakeups / aborts queued turns / settles
             # parked rows, all of which need a DB. The latch is the half these
             # unit tests are about, so keep that and stub the rest.
