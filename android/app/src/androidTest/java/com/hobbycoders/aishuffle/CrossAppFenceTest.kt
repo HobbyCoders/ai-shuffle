@@ -23,6 +23,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 
 /**
@@ -31,7 +32,8 @@ import java.util.concurrent.atomic.AtomicReference
  * A "blip" is a genuine move that undoes itself: it gives the fence the same shape as Android's
  * one bad read (bounds differ, then match again), on demand. Blips must survive; a move that lasts
  * or any content change must be refused, under the panel and after it has gone. So must a screen
- * that reads the same from different views, and one too slow to read in time.
+ * that reads the same from different views, and one too slow to read in time. An event landing after
+ * the final read must force another read, and a target stalling after it must not hold the main thread.
  */
 @RunWith(AndroidJUnit4::class)
 class CrossAppFenceTest {
@@ -74,6 +76,35 @@ class CrossAppFenceTest {
     }
     private fun onceClosed(command: String) {
         ShuffleAccessibilityService.afterConsentClosed = { withContext(Dispatchers.IO) { fixture(command) } }
+    }
+    /** Runs [step] off the main thread once, after the next final whole-screen read, and says how many such reads there were. */
+    private fun afterFinalRead(step: () -> Unit): AtomicInteger {
+        val reads = AtomicInteger()
+        ShuffleAccessibilityService.afterFinalRead = { if (reads.incrementAndGet() == 1) step() }
+        return reads
+    }
+    /** Applies [command] and returns once an accessibility event has reached the service. Stops the event fence's own check getting there first. */
+    private fun fixtureWithEvent(command: String) {
+        val service = requireNotNull(ShuffleAccessibilityService.current)
+        val seen = service.eventsSeen
+        fixture(command)
+        await("No event reached the service after $command") { service.eventsSeen > seen }
+    }
+    private fun holdEventChecks() { ShuffleAccessibilityService.eventCheckDelayMs = 1_500 }
+    /** How long the app's main thread took to run something posted now. */
+    private fun mainThreadDelay(): Long {
+        val ran = CountDownLatch(1); val started = android.os.SystemClock.uptimeMillis()
+        android.os.Handler(android.os.Looper.getMainLooper()).post { ran.countDown() }
+        assertTrue("Main thread did not respond", ran.await(10, TimeUnit.SECONDS))
+        return android.os.SystemClock.uptimeMillis() - started
+    }
+    private fun assertStopIsResponsive() {
+        val held = mainThreadDelay()
+        assertTrue("Main thread was held for $held ms", held < 1_000)
+        val started = System.currentTimeMillis()
+        assertTrue(touch("Stop app control"))
+        await("Stop did not take effect", 2_000) { !ToolsPreferences(context).crossAppEnabled }
+        assertTrue("Stop took ${System.currentTimeMillis() - started} ms", System.currentTimeMillis() - started < 2_000)
     }
     private fun shows(text: String) = automation.rootInActiveWindow?.findAccessibilityNodeInfosByText(text)?.any { it.text?.toString() == text } == true
     private fun request(name: String, args: JSONObject = JSONObject(), deadlineMs: Long = 20_000): Pair<CountDownLatch, AtomicReference<JSONObject>> {
@@ -132,6 +163,8 @@ class CrossAppFenceTest {
     }
     @After fun disarm() {
         ShuffleAccessibilityService.afterConsentClosed = null
+        ShuffleAccessibilityService.afterFinalRead = null
+        ShuffleAccessibilityService.eventCheckDelayMs = 0
         instrumentation.runOnMainSync {
             ToolsPreferences(context).setEnabled(false); DeviceToolsRuntime.stop()
             ServerStore.get(context).remove(server.id); ServerStore.get(context).selectedToolsServerId = null
@@ -340,5 +373,85 @@ class CrossAppFenceTest {
         ShuffleAccessibilityService.afterConsentClosed = { delay(21_000) }
         val reading = request("read_screen", deadlineMs = 40_000); allow()
         assertEquals("stale_ref", status(reading, 30).getString("status"))
+    }
+    @Test fun eventAfterTheFinalReadWithOtherContentChangedRefusesTheTap() {
+        val ref = read()
+        holdEventChecks()
+        val reads = afterFinalRead { fixtureWithEvent("text") }
+        val tapping = tap(ref); allow()
+        assertEquals("stale_ref", status(tapping).getString("status"))
+        assertTrue("A second read must have refused it", reads.get() >= 2)
+        assertTrue("The target must not have been tapped", shows("Different content"))
+    }
+    @Test fun eventAfterTheFinalReadWithNothingChangedStillTaps() {
+        val ref = read()
+        holdEventChecks()
+        val reads = afterFinalRead { fixtureWithEvent("notify") }
+        val tapping = tap(ref); allow()
+        assertEquals("performed", status(tapping).getString("status"))
+        assertTrue("The event must have forced a second read", reads.get() >= 2)
+        assertTapped(1)
+    }
+    @Test fun eventAfterTheFinalReadWithOtherContentChangedPublishesNoRefs() {
+        holdEventChecks()
+        afterFinalRead { fixtureWithEvent("text") }
+        val reading = request("read_screen"); allow()
+        assertEquals("stale_ref", status(reading).getString("status"))
+    }
+    @Test fun eventAfterTheFinalReadWithNothingChangedStillReads() {
+        holdEventChecks()
+        val reads = afterFinalRead { fixtureWithEvent("notify") }
+        read()
+        assertTrue("The event must have forced a second read", reads.get() >= 2)
+    }
+    @Test fun screenFiringEventsWithNothingChangedIsStillApproved() {
+        fixture("noisy:150")
+        val tapping = tap(read()); allow()
+        assertEquals("performed", status(tapping).getString("status"))
+        assertTapped(1)
+    }
+    @Test fun screenTooBusyForAnyReadToFinishQuietlyIsRefusedAtItsLimit() {
+        fixture("dense:100")
+        val ref = read(waitSeconds = 15)
+        fixture("delay:5"); fixture("noisy:120") // Each read takes over 500 ms, and an event lands in every one.
+        val tapping = tap(ref); allow()
+        val started = System.currentTimeMillis()
+        assertEquals("stale_ref", status(tapping, 15).getString("status"))
+        assertTrue("Took ${System.currentTimeMillis() - started} ms", System.currentTimeMillis() - started < 6_000)
+        fixture("noisy:0"); fixture("delay:0")
+        assertNotTapped()
+    }
+    @Test fun targetStallingAfterTheFinalReadLeavesStopResponsive() {
+        val ref = read()
+        val stalled = CountDownLatch(1)
+        afterFinalRead { fixture("stallread:3500"); stalled.countDown() }
+        val tapping = tap(ref); allow()
+        assertTrue(stalled.await(5, TimeUnit.SECONDS)); Thread.sleep(200)
+        assertStopIsResponsive()
+        assertEquals("stale_ref", status(tapping).getString("status"))
+        Thread.sleep(3_500)
+        assertNotTapped()
+    }
+    @Test fun targetAnsweringAfterTheWaitEndedIsNeverTapped() {
+        val ref = read()
+        afterFinalRead { fixture("stallread:3500") } // Longer than one attempt's 2 s; nothing else refuses it, so only the abandoned attempt can.
+        val tapping = tap(ref); allow()
+        val started = System.currentTimeMillis()
+        assertEquals("stale_ref", status(tapping).getString("status"))
+        assertTrue("Took ${System.currentTimeMillis() - started} ms", System.currentTimeMillis() - started < 3_000)
+        Thread.sleep(3_500)
+        assertNotTapped()
+    }
+    @Test fun targetStallingOnTheTapLeavesStopResponsiveAndIsNotASuccess() {
+        val ref = read()
+        val stalled = CountDownLatch(1)
+        afterFinalRead { fixture("stallaction:3500"); stalled.countDown() }
+        val tapping = tap(ref); allow()
+        assertTrue(stalled.await(5, TimeUnit.SECONDS)); Thread.sleep(200)
+        assertStopIsResponsive()
+        val result = status(tapping)
+        assertEquals("unconfirmed", result.getString("status"))
+        assertFalse(result.optBoolean("ok"))
+        assertTapped(1) // A sent action can't be recalled, which is why this isn't reported as not having happened.
     }
 }

@@ -10,6 +10,15 @@ public class CoveredTargetActivity extends android.app.Activity {
     private android.widget.TextView status;
     /** Every dense row takes this long to answer each accessibility read, and the last row this long on top. */
     private volatile int rowDelay = 0, lastRowDelay = 0;
+    /** The target answers no read until this uptime, and takes this long over its next action. */
+    private volatile long stallReadsUntil = 0;
+    private volatile int stallAction = 0;
+    private int noiseEvery = 0;
+    /** An accessibility event with nothing changed, as a busy app sends. */
+    private void sendNoise() { status.sendAccessibilityEvent(android.view.accessibility.AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED); }
+    private final Runnable noise = new Runnable() {
+        @Override public void run() { sendNoise(); if (noiseEvery > 0) status.postDelayed(this, noiseEvery); }
+    };
     /** Replies only once the change has been laid out, so the sender knows accessibility can see it. */
     private final android.content.BroadcastReceiver commands = new android.content.BroadcastReceiver() {
         @Override public void onReceive(android.content.Context context, android.content.Intent intent) {
@@ -25,6 +34,10 @@ public class CoveredTargetActivity extends android.app.Activity {
                 case "dense": addRows(value); break;
                 case "delay": rowDelay = value; break;
                 case "hang": lastRowDelay = value; break;
+                case "notify": sendNoise(); break;
+                case "noisy": noiseEvery = value; status.removeCallbacks(noise); if (value > 0) noise.run(); break;
+                case "stallread": stallReadsUntil = android.os.SystemClock.uptimeMillis() + value; break;
+                case "stallaction": stallAction = value; break;
                 default: layout.setPadding(32, MOVED_TOP, 32, 32);
             }
             layout.getViewTreeObserver().addOnPreDrawListener(new android.view.ViewTreeObserver.OnPreDrawListener() {
@@ -83,6 +96,17 @@ public class CoveredTargetActivity extends android.app.Activity {
         android.widget.Button target = new android.widget.Button(this);
         target.setText("Covered target"); target.setAllCaps(false);
         target.setOnClickListener(v -> status.setText("Taps: " + ++taps));
+        target.setAccessibilityDelegate(new android.view.View.AccessibilityDelegate() {
+            @Override public void onInitializeAccessibilityNodeInfo(android.view.View host, android.view.accessibility.AccessibilityNodeInfo info) {
+                super.onInitializeAccessibilityNodeInfo(host, info);
+                android.os.SystemClock.sleep(Math.max(0, stallReadsUntil - android.os.SystemClock.uptimeMillis()));
+            }
+            @Override public boolean performAccessibilityAction(android.view.View host, int action, android.os.Bundle args) {
+                int stall = stallAction; stallAction = 0;
+                android.os.SystemClock.sleep(stall);
+                return super.performAccessibilityAction(host, action, args);
+            }
+        });
         layout.addView(target);
         tracks = new android.widget.LinearLayout(this);
         tracks.setOrientation(android.widget.LinearLayout.VERTICAL);

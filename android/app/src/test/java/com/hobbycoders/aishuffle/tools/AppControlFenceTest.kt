@@ -73,6 +73,53 @@ class AppControlFenceTest {
         val reads = ArrayDeque(listOf(1_000L to FenceRead.UNCONFIRMED, 100L to FenceRead.SAME))
         assertTrue(settle(limit = 20_000) { val (took, verdict) = reads.removeFirst(); clock += took; verdict })
     }
+    @Test fun exactReadWithAnEventInItIsReadAgain() {
+        val reads = ArrayDeque(listOf(FenceRead.PENDING, FenceRead.SAME))
+        assertTrue(settle { reads.removeFirst() })
+        assertEquals(listOf(25L), waits)
+    }
+    @Test fun eventThenARealChangeIsRefused() {
+        val reads = ArrayDeque(listOf(FenceRead.PENDING, FenceRead.CHANGED))
+        assertFalse(settle { reads.removeFirst() })
+    }
+    @Test fun screenNeverQuietIsRefusedWhenItsWindowEnds() {
+        var reads = 0
+        assertFalse(settle(limit = 20_000) { reads++; FenceRead.PENDING })
+        assertEquals(AppControlFence.QUIET_MS, clock)
+        assertEquals(100, reads)
+    }
+    @Test fun quietWindowNeverOutlivesTheLimit() {
+        assertFalse(settle(limit = 40) { FenceRead.PENDING })
+        assertEquals(40L, clock)
+    }
+    @Test fun quietReadFinishingPastItsWindowIsRefused() {
+        var reads = 0
+        assertFalse(settle(limit = 20_000) {
+            reads++
+            if (reads == 1) FenceRead.PENDING else { clock += AppControlFence.QUIET_MS; FenceRead.SAME }
+        })
+    }
+    @Test fun exactReadInTimeLetsALaterQuietReadPassTheBadReadWindow() {
+        val reads = ArrayDeque(listOf(300L to FenceRead.UNCONFIRMED, 300L to FenceRead.PENDING, 300L to FenceRead.SAME))
+        assertTrue(settle(limit = 20_000) { val (took, verdict) = reads.removeFirst(); clock += took; verdict })
+    }
+    @Test fun exactReadWithAnEventPastTheBadReadWindowIsRefused() {
+        val reads = ArrayDeque(listOf(1L to FenceRead.UNCONFIRMED, AppControlFence.SETTLE_MS to FenceRead.PENDING, 1L to FenceRead.SAME))
+        assertFalse(settle(limit = 20_000) { val (took, verdict) = reads.removeFirst(); clock += took; verdict })
+    }
+
+    @Test fun gateSentCanNotBeAbandoned() {
+        val gate = DispatchGate()
+        assertTrue(gate.send()); assertFalse(gate.abandon()); assertTrue(gate.sent)
+    }
+    @Test fun gateAbandonedCanNotSend() {
+        val gate = DispatchGate()
+        assertTrue(gate.abandon()); assertFalse(gate.send()); assertFalse(gate.sent)
+    }
+    @Test fun gateSendsOnce() {
+        val gate = DispatchGate()
+        assertTrue(gate.send()); assertFalse(gate.send())
+    }
 
     @Test fun baselineIsTwoIdenticalSamples() {
         val samples = ArrayDeque(listOf("bad", "good", "good"))

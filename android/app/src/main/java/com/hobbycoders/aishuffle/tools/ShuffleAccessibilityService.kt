@@ -27,8 +27,17 @@ class ShuffleAccessibilityService : AccessibilityService() {
     private data class Snapshot(val pkg: String, val window: Int, val fingerprint: ScreenPrint, val created: Long, val nodes: Map<String, Target>)
     private class Watch(val key: Any, val read: (Boolean) -> FenceRead)
     private class Captured(val verdict: FenceRead, val token: String, val refs: Map<String, Target>, val rows: JSONArray)
-    private var snapshot: Snapshot? = null
+    /** [performed] is set only once the final checks all passed. */
+    private class Attempt(val verdict: FenceRead, val why: String, val performed: Boolean? = null)
+    /** The action's final checks read this off the main thread; only the main thread writes it. */
+    @Volatile private var snapshot: Snapshot? = null
     @Volatile private var revision = 0L
+    /**
+     * Every event delivered, with no check needed first, so a proving read can tell if one landed
+     * since it started. Not filtered by package: Android keeps one pending event per type across all
+     * apps, so the event that reaches us may have replaced the target's own.
+     */
+    @Volatile private var events = 0L
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     /** Not tied to the service: an abandoned read only ever ends by itself, and nothing awaits it. */
     private val reads = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -43,14 +52,24 @@ class ShuffleAccessibilityService : AccessibilityService() {
             private set
         /** Test observer between the panel closing and the final fence read; it never authorizes anything. */
         @androidx.annotation.VisibleForTesting @Volatile internal var afterConsentClosed: (suspend () -> Unit)? = null
+        /** Test observer off the main thread, once a final whole-screen read has finished and before the checks after it. */
+        @androidx.annotation.VisibleForTesting @Volatile internal var afterFinalRead: (() -> Unit)? = null
+        /** Test delay on the event fence's own check, so a test can show what holds without it. */
+        @androidx.annotation.VisibleForTesting @Volatile internal var eventCheckDelayMs = 0L
         internal val sensitive = Regex("password|passcode|sign.?in|log.?in|permission|allow access|credential|payment|purchase|checkout|credit card|verify|verification|one.time|security|pin code|unlock|biometric|fingerprint|account number|routing number|card number|cvv|cvc|send money|transfer money|pay now", RegexOption.IGNORE_CASE)
     }
     override fun onServiceConnected() { current = this; ToolsPreferences(this).setCrossAppEnabled(false) }
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        if (event == null || sentinel() == null) return
+        if (event == null) return
+        events++
+        if (sentinel() == null) return
         sentinelEvent = "event=${event.eventType} ownPackage=${event.packageName == packageName}"
-        if (sentinelCheck?.isActive != true) sentinelCheck = scope.launch { checkSentinel() }
+        if (sentinelCheck?.isActive != true) sentinelCheck = scope.launch {
+            if (com.hobbycoders.aishuffle.BuildConfig.DEBUG) delay(eventCheckDelayMs)
+            checkSentinel()
+        }
     }
+    @androidx.annotation.VisibleForTesting internal val eventsSeen get() = events
     /**
      * Off the main thread too: a cached read still calls into the target on a cache miss, which can
      * block for seconds on a hung app. Events during a check are folded into one more check.
@@ -285,7 +304,7 @@ class ShuffleAccessibilityService : AccessibilityService() {
             } finally { root.recycle() }
         }
         suspend fun readFresh(limit: Long, onNode: NodeVisitor? = null) = offMain(limit) { read(true, limit, onNode) } ?: FenceRead.CHANGED
-        /** Everything the off-main read could not promise, checked on the main thread with nothing suspending before the caller acts. */
+        /** What a read could not promise once it finished, checked on the main thread with nothing suspending before refs are published. */
         fun authorized(limit: Long) = revision == version && System.currentTimeMillis() < limit && withActiveApp { it.id == window } == true
         if (ref != null && !(valid(before, pkg, window, fingerprint, ref) && settled(deadline) { if (snapshot !== before) FenceRead.CHANGED else readFresh(deadline) })) {
             fenceTrace("reference_precheck snapshot=${before != null} revision=$revision")
@@ -302,8 +321,15 @@ class ShuffleAccessibilityService : AccessibilityService() {
         if (name == "read_screen") {
             var captured: Captured? = null
             val proved = settled(limit) {
-                captured = offMain(limit) { capture { read(true, limit, it) } }
-                captured?.verdict ?: FenceRead.CHANGED
+                val started = events
+                val result = offMain(limit) {
+                    capture { read(true, limit, it) }.also { if (com.hobbycoders.aishuffle.BuildConfig.DEBUG) afterFinalRead?.invoke() }
+                }
+                // Events reach this thread, so none can land between this check and the publish below.
+                if (result != null && result.verdict == FenceRead.SAME && events != started) {
+                    result.refs.values.forEach { it.node.recycle() }
+                    FenceRead.PENDING
+                } else { captured = result; result?.verdict ?: FenceRead.CHANGED }
             }
             val result = captured
             if (!proved || result == null || !authorized(limit)) {
@@ -313,39 +339,69 @@ class ShuffleAccessibilityService : AccessibilityService() {
             clearSnapshot(); snapshot = Snapshot(pkg, window, fingerprint, SystemClock.elapsedRealtime(), result.refs)
             return JSONObject().put("ok", true).put("package", pkg).put("snapshot", result.token).put("nodes", result.rows)
         }
-        var refusal = ""
         val target = before!!.nodes[ref]!!
-        // Off the main thread: the whole screen, and that this reference is still the source node it
-        // was bound to, in the same place, with the same contents. Back on it: the target itself once
-        // more, then the checks in authorized(), with no suspension before the action.
-        val ready = settled(limit) {
-            refusal = "Screen changed while awaiting approval."
-            if (snapshot !== before || !valid(before, pkg, window, fingerprint, ref!!)) return@settled FenceRead.CHANGED
+        if (snapshot !== before) return ToolRegistry.error("stale_ref", "Screen changed while awaiting approval.")
+        // Its own copy: the snapshot's can be recycled the moment the fence invalidates it.
+        val node = AccessibilityNodeInfo.obtain(target.node)
+        /**
+         * One attempt, on one thread with no hop before the action, so a stalled target can't hold
+         * the main thread. In order: the whole screen; this reference is still the source node it was
+         * bound to, in the same place; the target re-read; window, service and lock state; then, in
+         * memory only, no event since this attempt started, the revision, the expiry and the snapshot.
+         */
+        fun attempt(gate: DispatchGate): Attempt {
+            val started = events
             var bound = false
-            val screen = readFresh(limit) { node, _, ordinal, row ->
-                if (ordinal == target.ordinal) bound = node == target.node && row == target.row
+            val screen = read(true, limit) { seen, _, ordinal, row ->
+                if (ordinal == target.ordinal) bound = seen == node && row == target.row
                 true
             }
-            if (screen != FenceRead.SAME) { refusal = "The screen changed or the command expired."; return@settled screen }
-            if (snapshot !== before || !valid(before, pkg, window, fingerprint, ref)) return@settled FenceRead.CHANGED
-            refusal = "Target is no longer safe or available."
-            if (!bound || !target.node.refresh() || blocked(target.node) || target.node.packageName?.toString() != pkg) FenceRead.CHANGED
-            else AppControlFence.compare(target.row, rowOf(target.node))
+            if (com.hobbycoders.aishuffle.BuildConfig.DEBUG) afterFinalRead?.invoke()
+            if (screen != FenceRead.SAME) return Attempt(screen, "The screen changed or the command expired.")
+            if (!bound || !node.refresh() || blocked(node) || node.packageName?.toString() != pkg) return Attempt(FenceRead.CHANGED, "Target is no longer safe or available.")
+            val own = AppControlFence.compare(target.row, rowOf(node))
+            if (own != FenceRead.SAME) return Attempt(own, "Target is no longer safe or available.")
+            if (withActiveApp { it.id == window } != true) return Attempt(FenceRead.CHANGED, "The screen changed or the command expired.")
+            if (events != started) return Attempt(FenceRead.PENDING, "The screen did not stay quiet long enough to prove.")
+            if (revision != version || System.currentTimeMillis() >= limit || snapshot !== before || !valid(before, pkg, window, fingerprint, ref!!)) return Attempt(FenceRead.CHANGED, "The screen changed or the command expired.")
+            val performed = when (name) {
+                "tap_node" -> node.isClickable && gate.send() && node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                "scroll" -> node.isScrollable && gate.send() && node.performAction(when (direction) {
+                    "up" -> AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_UP.id
+                    "down" -> AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_DOWN.id
+                    "left" -> AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_LEFT.id
+                    else -> AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_RIGHT.id
+                })
+                "go_back" -> gate.send() && performGlobalAction(GLOBAL_ACTION_BACK)
+                else -> false
+            }
+            return Attempt(FenceRead.SAME, "", performed)
         }
-        if (!ready) return ToolRegistry.error("stale_ref", refusal)
-        if (!authorized(limit)) return ToolRegistry.error("stale_ref", "The screen changed or the command expired.")
-        val node = target.node
-        val performed = when (name) {
-            "tap_node" -> node.isClickable && node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-            "scroll" -> node.isScrollable && node.performAction(when (direction) {
-                "up" -> AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_UP.id
-                "down" -> AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_DOWN.id
-                "left" -> AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_LEFT.id
-                else -> AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_RIGHT.id
-            })
-            "go_back" -> performGlobalAction(GLOBAL_ACTION_BACK)
-            else -> false
+        var refusal = "Screen changed while awaiting approval."
+        var finished: Attempt? = null
+        var sent = false
+        var running = false
+        try {
+            settled(limit) {
+                val gate = DispatchGate()
+                running = true
+                val result = try { offMain(limit) { attempt(gate) } } finally {
+                    // Also on cancellation. From here this attempt can't send anything it hasn't already.
+                    gate.abandon(); sent = gate.sent
+                }
+                running = result == null
+                if (result == null) refusal = "The screen changed or the command expired."
+                else { refusal = result.why; finished = result }
+                result?.verdict ?: FenceRead.CHANGED
+            }
+        } finally {
+            if (sent) clearSnapshot()
+            if (!running) node.recycle() // A running attempt still holds it; once abandoned it is left to the garbage collector.
         }
+        // Sent, but its answer missed the limit: it can't be called a success, or said not to have happened.
+        val performed = finished?.performed
+        if (sent && (performed == null || System.currentTimeMillis() >= limit)) return ToolRegistry.error("unconfirmed", "The app did not answer in time, so the action may or may not have happened. Read the screen before trying again.")
+        if (performed == null) return ToolRegistry.error("stale_ref", refusal)
         clearSnapshot()
         return JSONObject().put("ok", performed).put("status", if (performed) "performed" else "unavailable")
     }

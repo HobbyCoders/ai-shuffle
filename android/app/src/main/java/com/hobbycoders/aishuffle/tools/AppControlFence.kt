@@ -5,7 +5,20 @@ import kotlinx.coroutines.delay
 /** One full read of the target's accessibility tree: every field, and the same rows without bounds or visibility. */
 internal data class ScreenPrint(val exact: String, val identity: String)
 
-internal enum class FenceRead { SAME, UNCONFIRMED, CHANGED }
+/** PENDING: the read matched exactly, but an event arrived during it, so it does not prove the screen as it is now. */
+internal enum class FenceRead { SAME, UNCONFIRMED, PENDING, CHANGED }
+
+/**
+ * Settles who decides an attempt whose wait can end while it is still running: it either sends its
+ * action or is abandoned first, never both, so the waiter knows whether an action may have gone out.
+ */
+internal class DispatchGate {
+    private val state = java.util.concurrent.atomic.AtomicInteger(OPEN)
+    val sent get() = state.get() == SENT
+    fun send() = state.compareAndSet(OPEN, SENT)
+    fun abandon() = state.compareAndSet(OPEN, ABANDONED)
+    private companion object { const val OPEN = 0; const val SENT = 1; const val ABANDONED = 2 }
+}
 
 /**
  * Bounds one read of the target's tree. Once [admit] has refused, the read is over and must count
@@ -33,6 +46,8 @@ internal object AppControlFence {
     const val SETTLE_MS = 500L
     /** One fresh read of a tree, which costs a call into the target app per node. */
     const val READ_MS = 2_000L
+    /** Room for several reads to find a gap between events, the same time a baseline gets for two slow reads. */
+    const val QUIET_MS = READ_MS + SETTLE_MS
     const val MAX_NODES = 300
     const val MAX_DEPTH = 20
     private const val STEP_MS = 25L
@@ -50,18 +65,25 @@ internal object AppControlFence {
      * finishing past it counts. The first read that is not exact opens a retry window of
      * [windowMs]. A clean first read has tolerated nothing and needs only the hard limit, so a
      * large screen is not refused for being large; each read is bounded by [ReadLimit].
+     *
+     * The first PENDING read opens a separate window of [QUIET_MS] to find a read no event landed
+     * in. Its exact match, in time, ends the [windowMs] window, since whatever opened that has reverted.
      */
     suspend fun settle(limitMs: Long, now: () -> Long, windowMs: Long = SETTLE_MS, wait: suspend (Long) -> Unit = { delay(it) }, read: suspend () -> FenceRead): Boolean {
         if (limitMs <= 0) return false
         val end = now() + limitMs
         var retryEnd = Long.MAX_VALUE
+        var quietEnd = Long.MAX_VALUE
         while (true) {
             val verdict = read()
             val finished = now()
-            if (verdict == FenceRead.CHANGED || finished >= end || finished >= retryEnd) return false
+            if (verdict == FenceRead.CHANGED || finished >= minOf(end, retryEnd, quietEnd)) return false
             if (verdict == FenceRead.SAME) return true
-            if (retryEnd == Long.MAX_VALUE) retryEnd = finished + windowMs
-            val until = minOf(end, retryEnd)
+            if (verdict == FenceRead.PENDING) {
+                retryEnd = Long.MAX_VALUE
+                if (quietEnd == Long.MAX_VALUE) quietEnd = finished + QUIET_MS
+            } else if (retryEnd == Long.MAX_VALUE) retryEnd = finished + windowMs
+            val until = minOf(end, retryEnd, quietEnd)
             wait(minOf(STEP_MS, until - finished))
             if (now() >= until) return false // A late wake-up does not earn another read.
         }
@@ -73,7 +95,7 @@ internal object AppControlFence {
      */
     suspend fun <T : Any> stable(limitMs: Long, now: () -> Long, wait: suspend (Long) -> Unit = { delay(it) }, sample: suspend () -> T?): T? {
         var last: T? = null
-        val settled = settle(limitMs, now, READ_MS + SETTLE_MS, wait) {
+        val settled = settle(limitMs, now, QUIET_MS, wait) {
             val next = sample()
             val repeated = next != null && next == last
             last = next
