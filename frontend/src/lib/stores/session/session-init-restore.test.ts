@@ -10,7 +10,7 @@ vi.mock('./v2/feed-controller', () => ({
 	},
 }));
 
-import { bumpInitGeneration, claimBootSend, createSessionInit, finishBootReconciliation, getInitGeneration, hasBootSendClaim, releaseBootSend, setSkipRestore, tabWillRestoreChat, type SessionInitDeps } from './session-init';
+import { bumpInitGeneration, claimBootSend, createSessionInit, finishBootReconciliation, getInitGeneration, hasBootSendClaim, releaseBootSend, setSkipRestore, tabRestoreTarget, tabWillRestoreChat, type SessionInitDeps } from './session-init';
 import { feedController } from './v2/feed-controller';
 import { holdPendingDraft, releasePendingDraft, writeDraft } from './draft-persistence';
 import { bindSessionOwner } from '../session-owner';
@@ -648,6 +648,17 @@ describe('session-init · the restore window from the first frame', () => {
 		expect(tabWillRestoreChat()).toBe(false);
 		sessionStorage.setItem('ai-shuffle-active-session', JSON.stringify({ sessionId: 'tab-chat' }));
 		expect(tabWillRestoreChat()).toBe(true);
+	});
+
+	it('names the chat it will reopen, with the saved title only for that chat', () => {
+		sessionStorage.setItem('ai-shuffle-active-session', JSON.stringify({ sessionId: 'tab-chat', title: 'Saved' }));
+		expect(tabRestoreTarget()).toEqual({ sessionId: 'tab-chat', title: 'Saved' });
+		window.history.replaceState(null, '', '/?session=tab-chat');
+		expect(tabRestoreTarget()).toEqual({ sessionId: 'tab-chat', title: 'Saved' });
+		window.history.replaceState(null, '', '/?session=other');
+		expect(tabRestoreTarget()).toEqual({ sessionId: 'other', title: '' });
+		sessionStorage.setItem('ai-shuffle-active-session', '{not json');
+		expect(tabRestoreTarget()).toEqual({ sessionId: 'other', title: '' });
 	});
 
 	it('expects none for an unsent new chat, a saved compose or a corrupt slot', () => {

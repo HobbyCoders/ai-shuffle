@@ -678,6 +678,16 @@
           "past_bug": "#196: peer terminals were only verified in-process; no real two-worker run had been recorded."
         },
         {
+          "id": "two-worker-smoke.phone-notification-prompt-connect",
+          "check": "On a first launch with notifications unanswered, Android waits for the answer before connecting or failing over, then continues without a tap",
+          "kind": "owner",
+          "needs": ["device", "install"],
+          "two_worker": true,
+          "how": "Use a real Android phone with the candidate APK and two disposable candidate workers A and B; never interrupt production workers. Clear the app's notification permission state before each case. Launcher: start the app from the launcher with A last used and reachable, leave the prompt up for ten seconds, then Allow; repeat with Deny, and repeat with notifications set to don't ask again. Manual: at the prompt answer, tap B straight away, press Back before its page loads, and confirm A does not open. Failover: restore directly into a chat on A while the prompt is up, stop A so it answers 503 through its proxy, wait ten seconds, then answer. Save the logcat for each case.",
+          "pass_when": "The prompt stays up with no worker opening behind it for as long as it is unanswered. After Allow, Deny or an immediate don't-ask-again, the reachable worker opens with no tap. Back from a manually chosen worker returns to the list and no other worker opens by itself, while Back with no manual choice behaves as before. In the failover case B opens only after the answer. Logcat shows no ActivityTaskManager line finishing the list or chat while the permission controller is on top.",
+          "past_bug": "Issue 1067: auto-connect could open a worker and finish the list about 160 ms after the launch prompt started, so the prompt lost its owner. Direct chat failover had the same race, and a manual choice left automatic connecting armed. The JVM tests drive the real launcher and failover code, but only a real phone shows the real permission dialog and its timing."
+        },
+        {
           "id": "two-worker-smoke.phone-startup-presence",
           "check": "Android startup shares one bounded presence sweep and cancels obsolete probes on stop or resume",
           "kind": "owner",
