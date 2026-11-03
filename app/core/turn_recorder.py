@@ -1718,7 +1718,16 @@ async def _append_unfenced(session_id: str, events: List[Dict[str, Any]]) -> Non
     _unfenced_tails[session_id] = write
     task.add_done_callback(
         lambda _: _unfenced_tails.pop(session_id) if _unfenced_tails.get(session_id) is write else None)
-    await asyncio.wait({task, caller_released}, return_when=asyncio.FIRST_COMPLETED)
+    try:
+        await asyncio.wait({task, caller_released}, return_when=asyncio.FIRST_COMPLETED)
+    except asyncio.CancelledError:
+        # No caller is left to hear how this ends, so the writer has to say.
+        if not caller_released.done():
+            caller_released.set_result(None)
+        if task.done() and not task.cancelled() and task.exception() is not None:
+            logger.error("[TurnRecorder] %d between-turns event(s) for %s lost",
+                         len(events), session_id, exc_info=task.exception())
+        raise
     if task.done():
         task.result()
 

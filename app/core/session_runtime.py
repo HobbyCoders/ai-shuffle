@@ -1052,6 +1052,7 @@ class SessionRuntime:
         # done-frame cleanup.
         _notify_run_change(sid, force=True)
 
+        recorder: Optional[TurnRecorder] = None
         renew_task = asyncio.create_task(self._renew_loop(run_id, runner_id, fence_token))
         renew_task.add_done_callback(lambda t: t.cancelled() or t.exception())
 
@@ -1353,6 +1354,37 @@ class SessionRuntime:
                 # Invalidate workers that outlived cancellation before re-arming.
                 from app.mcp.computer_use import abort as cu_abort
                 cu_abort.request_stop(sid, reason="completed")
+            # Cancelling execute() must not cancel this, and neither may it hurry
+            # it: a write still being re-sent needs the lease it was fenced on.
+            await asyncio.shield(start_detached(
+                self._release_lease_after_writes(recorder, renew_task, run_id, fence_token)
+            ))
+
+        # 8. Settlement callback (the scheduler seam) — after the lease is free,
+        #    and ONLY when finalize actually performed the DB transition. A racer
+        #    (interrupt escalation, reap) that settled first already fired it.
+        if outcome is not None and settled_here:
+            await _fire_on_turn_settled(sid, tid, outcome)
+        return outcome
+
+    async def _release_lease_after_writes(
+        self, recorder: Optional[TurnRecorder], renew_task: asyncio.Task,
+        run_id: str, fence_token: int,
+    ) -> None:
+        """Give up the run, in the one order that loses nothing, on every exit.
+
+        Writes first, while the heartbeat still holds the lease: the fence refuses
+        a re-send once the run is released. They are bounded by the lock retry
+        budget, and shutdown gives this task its last chance like any write.
+        """
+        sid = self.session_id
+        try:
+            if recorder is not None:
+                await recorder.writes_settled()
+        except Exception:
+            logger.warning("SessionRuntime: waiting for event writes failed for %s", sid,
+                           exc_info=True)
+        finally:
             # Stop the heartbeat, then release the run lease — always. In that
             # order: a beat landing after the release would read the released
             # run as a lost lease and interrupt a turn that already ended.
@@ -1376,13 +1408,6 @@ class SessionRuntime:
             # the lease on EVERY exit, without requiring another owner send.
             from app.core import session_handoff
             session_handoff.schedule(sid)
-
-        # 8. Settlement callback (the scheduler seam) — after the lease is free,
-        #    and ONLY when finalize actually performed the DB transition. A racer
-        #    (interrupt escalation, reap) that settled first already fired it.
-        if outcome is not None and settled_here:
-            await _fire_on_turn_settled(sid, tid, outcome)
-        return outcome
 
     # ------------------------------------------------------------------
     # pump — WRAPS _stream_to_websocket_impl (internals untouched)
@@ -3164,6 +3189,11 @@ class SessionRuntime:
         try:
             interrupted_row = await asyncio.to_thread(turns_db.get_turn, tid)
             recorded_source = ((interrupted_row or {}).get("payload") or {}).get("interrupt_source")
+            if self._replaced_by_newer_runtime():
+                # That read let the turn end and the next one start. This Stop
+                # was for the turn that ended; what is running now is not its.
+                logger.info("SessionRuntime: a newer turn runs on %s; not stopping it", sid)
+                return "interrupting"
             if interrupted_row and interrupted_row.get("stop_background"):
                 from app.core.query_session_lifecycle import stop_all_background_tasks
 
@@ -3178,6 +3208,8 @@ class SessionRuntime:
                 # this is the runner that actually owns them. Deliberately
                 # idempotent — the second call finds no active tasks and simply
                 # re-asserts the latch. See handle_stop's STOP SEMANTICS note.
+                # This may outlive the turn. Its first step, which runs before
+                # the provider signal below, fixes what it will end.
                 source = (interrupted_row.get("payload") or {}).get("interrupt_source", "user_stop")
                 user_stop = source in {"user_stop", "user_stopped"}
                 await self._run_interrupt_step(
@@ -3191,6 +3223,12 @@ class SessionRuntime:
                 "SessionRuntime: background-task stop failed for %s", sid,
                 exc_info=True,
             )
+
+        # Each step below answers to this session as it is when the step runs,
+        # and the one above may have used its wait.
+        if self._replaced_by_newer_runtime():
+            logger.info("SessionRuntime: a newer turn runs on %s; not stopping it", sid)
+            return "interrupting"
 
         # A Stop kills the agent AND its computer-use control together: halt
         # synthetic input for this session and drop its access grants, so
@@ -3223,7 +3261,7 @@ class SessionRuntime:
         # then ``notify_changed``-es the session's waiters.
         # Settlement already resolved its captured identities atomically.
         # A session-wide sweep here would deny prompts from a newer turn.
-        if recorded_source != "session_settled":
+        if recorded_source != "session_settled" and not self._replaced_by_newer_runtime():
             await self._run_interrupt_step(
                 permission_handler.cancel_all_requests(sid), "pending prompt cancellation",
             )
@@ -3231,6 +3269,9 @@ class SessionRuntime:
         try:
             from app.core.query_session_lifecycle import interrupt_session
 
+            if self._replaced_by_newer_runtime():
+                logger.info("SessionRuntime: a newer turn runs on %s; not signalling it", sid)
+                return "interrupting"
             logger.info("SessionRuntime: signalling provider to stop for %s mode=%s", sid, mode)
             await interrupt_session(sid)
         except Exception:
@@ -3276,6 +3317,10 @@ class SessionRuntime:
         self._drain_after_cancel = True
         self._cancel_pump()
         return "draining"
+
+    def _replaced_by_newer_runtime(self) -> bool:
+        live = _live_runtimes.get(self.session_id)
+        return live is not None and live is not self
 
     async def _run_interrupt_step(self, step: Coroutine[Any, Any, Any], what: str) -> None:
         """Start a step ahead of the provider signal; wait only briefly for it."""

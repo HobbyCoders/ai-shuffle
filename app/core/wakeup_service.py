@@ -38,7 +38,7 @@ import asyncio
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from app.core.config import settings
 from app.db import wakeups as wakeups_db
@@ -544,12 +544,19 @@ def cancel_session_wakeups(
 
 
 async def cancel_session_wakeups_async(
-    session_id: str, source: Optional[str] = None
+    session_id: str, source: Optional[str] = None,
+    *,
+    can_cancel: Optional[Callable[[], bool]] = None,
 ) -> int:
-    """Async form of :func:`cancel_session_wakeups` (DB hit off the loop)."""
+    """Async form of :func:`cancel_session_wakeups` (DB hit off the loop).
+
+    ``can_cancel`` is asked in the delete's own transaction: see
+    :func:`app.db.wakeups.pop_session_wakeups`.
+    """
     try:
         ids = await asyncio.to_thread(
-            wakeups_db.pop_session_wakeups, session_id, source
+            wakeups_db.pop_session_wakeups, session_id, source,
+            **({"can_pop": can_cancel} if can_cancel is not None else {}),
         )
     except Exception:  # noqa: BLE001
         logger.exception(

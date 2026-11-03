@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import nullcontext
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from app.db.base import get_db, get_cursor, rows_to_list
 from app.db.compat import ph
@@ -91,6 +91,7 @@ def pop_session_wakeups(
     source: Optional[str] = None,
     *,
     exclude_source: Optional[str] = None,
+    can_pop: Optional[Callable[[], bool]] = None,
 ) -> List[str]:
     """Delete a session's pending wakeups and return the deleted row ids.
 
@@ -106,8 +107,13 @@ def pop_session_wakeups(
     ``exclude_source`` keeps that source's rows when ``source`` is None.
     A human input (which excludes held_peer_promotion) supersedes timers, not
     the note-bearing handoff_resume. Stop/delete use no exclusion and retire it.
+
+    ``can_pop`` lets a Stop that may have outlived its turn step aside. It is
+    asked again after the read, because a wake seen there can be a newer turn's.
     """
     _ph = ph()
+    if can_pop is not None and not can_pop():
+        return []
     with get_db() as conn:
         cursor = get_cursor(conn)
         if source is None:
@@ -142,19 +148,10 @@ def pop_session_wakeups(
                 (session_id, source),
             )
         ids = [r["id"] for r in rows_to_list(list(cursor.fetchall() or []))]
-        if not ids:
+        if not ids or (can_pop is not None and not can_pop()):
             return []
-        if source is None:
-            cursor.execute(
-                f"DELETE FROM pending_wakeups WHERE session_id = {_ph}",
-                (session_id,),
-            )
-        else:
-            cursor.execute(
-                f"DELETE FROM pending_wakeups WHERE session_id = {_ph} "
-                f"AND source = {_ph}",
-                (session_id, source),
-            )
+        for wakeup_id in ids:
+            cursor.execute(f"DELETE FROM pending_wakeups WHERE id = {_ph}", (wakeup_id,))
     return ids
 
 
