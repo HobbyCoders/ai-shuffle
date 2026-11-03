@@ -3511,6 +3511,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                 summary_text=e.summary,
                 path_end=e.node_id,
                 intent_pin_tokens=e.intent_pin_tokens,
+                summary_pin=e.summary_pin,
             )
             for e in events
             if isinstance(e, ContextCompaction)
@@ -3636,6 +3637,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             spans=[list(s) for s in promo.spans],
             summary=promo.summary_text,
             intent_pin_tokens=promo.intent_pin_tokens,
+            summary_pin=promo.summary_pin,
             reclaimed_chars=promo.reclaimed_chars,
             before_tokens=promo.before_tokens, after_tokens=promo.after_tokens,
             batch_final=batch_final, context_window=self.context_window or 0,

@@ -470,6 +470,7 @@ async def _delegated_turn(adapter, text="next", *, put_back=False):
         loop = adapter._engine
         loop._track_main_compaction({"type": "system", "subtype": "status", "status": "compacting"})
         await loop._cli_session_start({"source": "compact", "transcript_path": ""})
+        await loop._acknowledge_note()  # the answer reached the CLI
 
 
 @pytest.mark.asyncio

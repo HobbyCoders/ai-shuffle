@@ -270,3 +270,59 @@ async def test_repeating_what_it_was_told_does_not_add_up(monkeypatch, tmp_path)
         assert len(restored) <= 3 * len(compactions), "restoration is looping"
     finally:
         await adapter.disconnect()
+
+
+def test_a_re_seed_restores_a_repeated_instruction_in_its_place():
+    """The rows show one "Do not deploy". The later one is what stands, so it comes
+    back with what came between, in order. Dedupe by text would have dropped both."""
+    import re
+
+    from fluid.messages.content import SteerDelivery, Text
+    from fluid.store.base import SessionNode
+
+    from app.core.provider.fluid_transcript import _with_what_it_was_told
+    from fluid.messages import Message
+
+    said = ["Do not deploy", "You may deploy now", "Do not deploy"]
+    steers = [SteerDelivery(id=f"p{i}", text=text, origin="peer", sender="lead")
+              for i, text in enumerate(said)]
+    nodes = [SessionNode(node_id="n0", parent_id=None,
+                         message=Message(role="user", content=[Text("the brief")]))]
+    for i, steer in enumerate(steers):
+        nodes.append(SessionNode(
+            node_id=f"n{i + 1}", parent_id=None,
+            message=Message(role="user", content=[ToolResultBlock(
+                tool_use_id=f"t{i}", content=[Text("x")], delivered_steers=[steer],
+            )]),
+        ))
+    entries = [
+        {"type": "user", "message": {"role": "user", "content": "the brief"}},
+        {"type": "user", "message": {"role": "user", "content": steers[0].render()}},
+    ]
+    out = _with_what_it_was_told("sid", entries, nodes)
+    notes = [e["message"]["content"] for e in out if INSTRUCTIONS_LEAD in str(e["message"]["content"])]
+    assert len(notes) == 1
+    assert re.findall("|".join(said[:2]), notes[0]) == said[1:]
+    assert "the brief" not in notes[0]  # it still shows
+
+
+@pytest.mark.asyncio
+async def test_summary_pin_survives_the_re_seed_replay(tmp_path):
+    """What a native checkpoint stored comes back through the re-seed's replay of
+    its event, so a re-seed over a window shows the same checkpoint."""
+    from fluid.context.compaction import CompactionConfig, Compactor, Promotion
+    from fluid.messages import Message
+    from fluid.messages.content import SteerDelivery, Text
+    from fluid.store.base import SessionNode
+
+    pin = {"brief": ["n0", "the brief"], "messages": [["n1", "a kept rule"]], "left_out": 0}
+    nodes = [SessionNode(node_id=f"n{i}", parent_id=None if i == 0 else f"n{i - 1}",
+                         message=Message(role="user", content=[Text("x" * 500)]))
+             for i in range(4)]
+    compactor = Compactor(config=CompactionConfig())
+    compactor.rehydrate([Promotion(
+        tier=4, reason="summary", summary_text="checkpoint", spans=(("n0", "n2", "summary"),),
+        summary_pin=pin,
+    )])
+    text = str(compactor.view(nodes)[0].content[0].text)
+    assert "a kept rule" in text and "the brief" in text

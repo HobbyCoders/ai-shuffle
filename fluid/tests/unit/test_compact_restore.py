@@ -9,6 +9,7 @@ from fluid.engine.compact_restore import (
     MIN_CUT_CHARS,
     OMITTED,
     PENDING,
+    REPLACED,
     RestorationQueue,
     RestorationSection,
     as_sections,
@@ -108,6 +109,8 @@ def test_a_section_is_credited_only_when_its_last_part_is_out():
     first = queue.take(9_500)
     assert len(first) <= 9_500 and first.startswith("today\n\nmemory line 00000")
     assert first.endswith("[memory continues in a later note]")
+    assert credited == []  # composed is not delivered: nothing counts before the write
+    queue.acknowledge()
     assert credited == ["environment"]
     assert _status(queue) == {"environment": DELIVERED, "memory": PENDING}
     assert queue.waiting and not queue.complete
@@ -115,6 +118,7 @@ def test_a_section_is_credited_only_when_its_last_part_is_out():
     while queue.waiting:
         part = queue.take(9_500)
         assert part and len(part) <= 9_500
+        queue.acknowledge()
         parts.append(part)
     assert credited == ["environment", "memory"] and queue.complete
     assert _status(queue) == {"environment": DELIVERED, "memory": DELIVERED}
@@ -128,10 +132,12 @@ def test_parts_keep_the_hosts_order_and_a_small_section_waits_for_room():
     # Priority picks who goes, the host's order is how they read.
     part = queue.take(3_200)
     assert part.startswith("sss") and part.endswith("ttt")
+    queue.acknowledge()
     # A small section is never split: it stays whole for the next answer.
     assert _status(queue)["first"] == PENDING
     assert queue.take(100) == ""
     assert queue.take(3_000) == "f" * 3_000
+    queue.acknowledge()
     assert queue.complete
 
 
@@ -142,6 +148,7 @@ def test_the_queue_always_ends_and_never_exceeds_its_total():
         if not queue.waiting:
             break
         parts.append(queue.take(9_500))
+        queue.acknowledge()
     assert not queue.waiting and len(parts) == 3
     assert sum(len(p) for p in parts) <= 24_000 + 200
     assert parts[-1].endswith("characters]")  # says it was cut
@@ -153,7 +160,10 @@ def test_the_tail_sends_what_is_missing_without_repeating():
     text = "\n".join(f"line {i:05d}" for i in range(2_000))
     queue = _queue(_s("record", text, 0, cuttable=True, on_delivered=lambda: credited.append("record")))
     first = queue.take(9_500).removesuffix("\n[record continues in a later note]")
-    rest = queue.finish(24_000)
+    queue.acknowledge()
+    rest = queue.finish(24_000).removeprefix("[record, continued]\n")
+    assert credited == []
+    queue.acknowledge()
     assert (first + "\n" + rest).split("\n") == text.split("\n")
     assert credited == ["record"] and queue.complete
 
@@ -161,12 +171,13 @@ def test_the_tail_sends_what_is_missing_without_repeating():
 def test_the_tail_keeps_a_sections_bound_and_skips_what_the_host_covers():
     queue = _queue(
         _s("away", "a" * 50, 0, max_chars=40),
-        _s("memory", "m" * 30_000, 1, cuttable=True, next_turn_covers=True),
+        _s("memory", "m" * 30_000, 1, cuttable=True, replaced_by=lambda turn: "FULL" in turn),
         total=24_000,
     )
     queue.take(9_500)
-    assert queue.finish(24_000) == ""
-    assert _status(queue)["away"] == OMITTED and not queue.waiting
+    queue.acknowledge()
+    assert queue.finish(24_000, "the turn's FULL memory") == ""
+    assert _status(queue) == {"away": OMITTED, "memory": REPLACED} and not queue.waiting
 
 
 def test_what_the_tail_cannot_fit_is_not_credited():
@@ -174,6 +185,103 @@ def test_what_the_tail_cannot_fit_is_not_credited():
     queue = _queue(_s("note", "n" * 100_000, 0, cuttable=True,
                       on_delivered=lambda: credited.append("note")))
     queue.take(9_500)
+    queue.acknowledge()
     rest = queue.finish(24_000)
+    queue.acknowledge()
     assert len(rest) <= 24_000 and credited == []
     assert _status(queue) == {"note": CUT} and not queue.complete
+
+
+# ─── nothing counts until it is written (review of #1050, finding 3) ──────────
+
+
+def test_a_part_that_was_never_written_is_offered_again_whole():
+    credited: list[str] = []
+    queue = _queue(_s("rules", "r" * 2_000, 0, on_delivered=lambda: credited.append("rules")),
+                   _s("note", "n" * 20_000, 1, cuttable=True))
+    first = queue.take(9_500)
+    queue.rollback()
+    assert credited == [] and not queue.complete
+    assert _status(queue) == {"rules": PENDING, "note": PENDING}
+    assert queue.take(9_500) == first  # the same bytes, so no part is lost or doubled
+    queue.acknowledge()
+    assert credited == ["rules"]
+
+
+def test_a_new_take_rolls_back_what_was_not_acknowledged():
+    queue = _queue(_s("note", "\n".join(f"line {i:05d}" for i in range(3_000)), 0, cuttable=True))
+    first = queue.take(9_500)
+    assert queue.take(9_500) == first
+
+
+def test_a_tail_that_was_not_written_can_be_composed_again():
+    credited: list[str] = []
+    queue = _queue(_s("rules", "r" * 2_000, 0, on_delivered=lambda: credited.append("rules")))
+    text = queue.finish(24_000)
+    queue.rollback()
+    assert credited == [] and queue.waiting
+    assert queue.finish(24_000) == text
+    queue.acknowledge()
+    assert credited == ["rules"] and queue.complete
+
+
+# ─── the tail credits only what the turn confirms (finding 4) ─────────────────
+
+
+def test_a_partial_section_is_not_replaced_by_a_turn_that_does_not_hold_it_all():
+    """A turn with no full snapshot leaves the rest of the memory owed."""
+    queue = _queue(_s("memory", "m" * 17_000, 0, cuttable=True,
+                      replaced_by=lambda turn: "FULL SNAPSHOT" in turn))
+    queue.take(9_500)
+    queue.acknowledge()
+    rest = queue.finish(24_000, "only a delta here")
+    assert rest.startswith("[memory, continued]\n") and "m" * 100 in rest
+    queue.acknowledge()
+    assert _status(queue) == {"memory": DELIVERED} and queue.complete
+
+
+def test_the_tail_goes_on_from_the_true_cursor_of_a_cut_section():
+    """A cut section's prefix never goes out twice: the marker a part ends with
+    is not part of the section, so the cursor is counted in source characters."""
+    record = "RECORD_START\n" + "\n".join(f"record line {i:05d}" for i in range(4_000))
+    queue = _queue(_s("working_record", record, 0, cuttable=True))
+    parts = [queue.take(9_500)]
+    queue.acknowledge()
+    parts.append(queue.finish(9_500))
+    queue.acknowledge()
+    assert _status(queue) == {"working_record": CUT}
+    joined = "\n".join(parts)
+    assert joined.count("RECORD_START") == 1
+    lines = re.findall(r"record line \d{5}", joined)
+    assert lines == sorted(set(lines))  # nothing twice, nothing out of order
+
+
+def test_drop_forgets_a_section_so_it_can_be_queued_afresh():
+    queue = _queue(_s("rules", "old", 0))
+    queue.take(1_000)
+    queue.acknowledge()
+    queue.drop("rules")
+    queue.add([_s("rules", "new", 0)])
+    assert queue.waiting and queue.take(1_000) == "new"
+
+
+def test_a_section_cut_to_its_bound_does_not_start_over_in_the_tail():
+    """Every bounded part of an oversized record went out, then the turn's tail:
+    the next lines, or nothing, never the start of the record again."""
+    record = "RECORD_START\n" + "\n".join(f"record line {i:05d}" for i in range(8_000))
+    queue = _queue(_s("working_record", record, 0, cuttable=True))
+    parts = []
+    while queue.waiting:
+        part = queue.take(9_500)
+        if not part:
+            break
+        queue.acknowledge()
+        parts.append(part)
+    assert len(parts) >= 2
+    parts.append(queue.finish(24_000))
+    queue.acknowledge()
+    joined = "\n".join(parts)
+    assert joined.count("RECORD_START") == 1
+    lines = re.findall(r"record line \d{5}", joined)
+    assert lines == sorted(set(lines))
+    assert _status(queue) == {"working_record": CUT}

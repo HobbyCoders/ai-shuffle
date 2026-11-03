@@ -634,3 +634,118 @@ def test_superseded_hook_context_leaves_first_and_a_miss_is_reported():
                      archive=[], report=tight)
     assert not tight['met'] and set(tight['contributors']) == {
         'claude_code_rows', 'stored_kept', 'fluid_built'}
+
+
+# ─── a Fluid answer that stayed open says nothing about what was applied ──────
+
+
+def _hook_request(event: str, **data: Any) -> Any:
+    from fluid.engine.delegated_proto import HookCallbackRequest
+
+    return HookCallbackRequest(
+        cli_request_id=f'cli_hook_{event}', callback_id=f'fluid_{event}',
+        input={'hook_event_name': event, 'session_id': 'cli', 'transcript_path': '/t/cli.jsonl',
+               'cwd': '.', **data},
+    )
+
+
+def _summarizer_boundary() -> dict:
+    return {**_boundary('not-a-posted-row'), 'compact_metadata': {
+        **BOUNDARY['compact_metadata'], 'preserved_segment': {'head_uuid': 'a', 'tail_uuid': 'b'},
+    }}
+
+
+async def _answering(loop: DelegatedLoop) -> list[dict]:
+    """The loop with a note to put back, and what it answers the CLI."""
+    written: list[dict] = []
+
+    async def capture(frame: dict) -> None:
+        written.append(frame)
+
+    async def note() -> str:
+        return 'host note'
+
+    loop.compact_context = note
+    loop._write_frame = capture  # type: ignore[method-assign]
+    return written
+
+
+def _answer(written: list[dict]) -> str:
+    return written[-1]['response']['response']['hookSpecificOutput']['additionalContext']
+
+
+async def test_precompact_means_the_open_answer_will_not_apply():
+    """Claude Code runs PreCompact only for its own summarizer, so the note
+    written after it cannot lean on the open answer: the brief goes back, and the
+    note and the boundary carry one id."""
+    chat = Chat()
+    chat.grow(24)
+    loop, sid = await _loop_with(chat)
+    written = await _answering(loop)
+    brief = chat.stored[0].message.text()
+    try:
+        status, body = await _request(loop, {'v': 1, 'trigger': 'auto', 'messages': chat.cli})
+        assert status == 200 and loop._open_txns
+        loop._track_main_compaction(COMPACTING)
+        await loop._answer_hook_request(_hook_request('PreCompact', trigger='auto'))
+        assert loop._open_txns == []
+        await loop._answer_hook_request(_hook_request('SessionStart', source='compact'))
+        assert brief in _answer(written)
+        note_id = loop.last_restoration['compaction_id']
+        assert note_id != body['compaction_id']
+        emitted = await _read(loop, sid, [_summarizer_boundary()])
+        [event] = [e for e in emitted if isinstance(e, ContextCompaction)]
+        assert event.compaction_id == note_id
+        assert not [e for e in emitted if isinstance(e, CompactionCheckpoint)]
+    finally:
+        await loop.aclose()
+
+
+async def test_a_note_that_leaned_on_an_unapplied_answer_is_made_good():
+    """No PreCompact seen (a CLI that does not send it): the note left the brief
+    to the answer. The boundary shows the summarizer wrote this compaction, so
+    the brief goes back, under the id the note already carried."""
+    chat = Chat()
+    chat.grow(24)
+    loop, sid = await _loop_with(chat)
+    written = await _answering(loop)
+    brief = chat.stored[0].message.text()
+    try:
+        status, body = await _request(loop, {'v': 1, 'trigger': 'auto', 'messages': chat.cli})
+        assert status == 200
+        loop._track_main_compaction(COMPACTING)
+        await loop._answer_hook_request(_hook_request('SessionStart', source='compact'))
+        assert 'host note' in _answer(written)
+        assert brief not in _answer(written)  # the answer's rows still showed it
+        note_id = loop.last_restoration['compaction_id']
+        assert note_id == body['compaction_id']
+        emitted = await _read(loop, sid, [_summarizer_boundary()])
+        [event] = [e for e in emitted if isinstance(e, ContextCompaction)]
+        assert event.compaction_id == note_id  # one compaction, one id
+        assert not [e for e in emitted if isinstance(e, CompactionCheckpoint)]
+        assert loop._open_txns == []
+        content, _ = await loop._fresh_turn_content([Text('next')], None)
+        assert brief in ' '.join(b.text for b in content if isinstance(b, Text))
+    finally:
+        await loop.aclose()
+
+
+async def test_a_note_beside_an_applied_answer_stays_as_it_was():
+    """The other side: the boundary applied the answer, so nothing comes back."""
+    chat = Chat()
+    chat.grow(24)
+    loop, sid = await _loop_with(chat)
+    written = await _answering(loop)
+    brief = chat.stored[0].message.text()
+    try:
+        _, body = await _request(loop, {'v': 1, 'trigger': 'auto', 'messages': chat.cli})
+        loop._track_main_compaction(COMPACTING)
+        await loop._answer_hook_request(_hook_request('SessionStart', source='compact'))
+        assert brief not in _answer(written)
+        emitted = await _read(loop, sid, [_boundary('an-attachment-entry')])
+        cid = body['compaction_id']
+        assert _pairs(emitted) == [('ContextCompaction', cid), ('CompactionCheckpoint', cid)]
+        content, _ = await loop._fresh_turn_content([Text('next')], None)
+        assert brief not in ' '.join(b.text for b in content if isinstance(b, Text))
+    finally:
+        await loop.aclose()

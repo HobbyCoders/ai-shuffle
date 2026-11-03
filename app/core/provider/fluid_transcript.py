@@ -1831,6 +1831,7 @@ def _native_view(
             summary_text=str(event.get("summary") or ""),
             path_end=event.get("node_id"),
             intent_pin_tokens=event.get("intent_pin_tokens"),
+            summary_pin=event.get("summary_pin"),
         )
         for event in events
     )
@@ -2192,20 +2193,16 @@ def _with_what_it_was_told(
     if not nodes or not entries:
         return entries
     try:
-        from fluid.context.compaction import render_told, told_on_path
+        from fluid.context.compaction import flat_text, render_told, still_missing, told_on_path
 
-        shown = " ".join(" ".join(
+        shown = flat_text(" ".join(
             text for entry in entries
             for text in _shown_text(entry.get("message", {}).get("content"))
-        ).split())
-
-        def missing(text: str) -> bool:
-            return " ".join(text.split()) not in shown
-
+        ))
         brief, told = told_on_path(list(nodes))
         note = render_told(
-            brief if brief and missing(brief) else "",
-            [text for _, text in told if missing(text)],
+            brief if brief and flat_text(brief) not in shown else "",
+            still_missing(told, shown),
         )
     except Exception as exc:  # noqa: BLE001 — the re-seed still works without it
         logger.warning("could not repeat instructions in the re-seed of %s: %s", sdk_session_id, exc)
