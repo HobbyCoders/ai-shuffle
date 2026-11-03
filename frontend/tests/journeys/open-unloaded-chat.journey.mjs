@@ -21,6 +21,11 @@
 //   past-ceiling-*         #913: the history outlives the hydration ceiling
 //                          (from a chat, the new-session screen or a link;
 //                          held, or answered with a server error then Retry)
+//   first-message-reveal   the column's reveal and the composer's slide play
+//                          when a first message leaves the hero
+//   mirror-pane-during-live-reveal
+//                          #916: the mirror pane stays anchored when a chat of
+//                          unknown owner opens while that reveal runs
 //
 // Each case's `verify` names the composer positions it is designed to take,
 // read on every painted frame: one entry per position, so a second move, or
@@ -28,7 +33,7 @@
 // count as a layout shift.
 import { runJourney } from './runner.mjs';
 import { readFileSync } from 'node:fs';
-import { SEEDED, PROJECT, expect, gotoApp, openFromSidebar, showSidebar, seededChatId, waitChat, waitChatOpen, pickAgent, pickProject, pickAccess, typeAndSend, scriptTag, waitTurnSettled, scrollTranscriptTo, transcriptScroll, uniq } from './lib/app.mjs';
+import { SEEDED, PROJECT, expect, gotoApp, openFromSidebar, showSidebar, seededChatId, waitChat, waitChatOpen, pickAgent, pickProject, pickAccess, typeAndSend, scriptTag, waitTurnSettled, scrollTranscriptTo, transcriptScroll, uniq, api, chatIdByToken } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 import { anyFrame, expectComposerPositions } from './lib/timeline.mjs';
 
@@ -369,6 +374,118 @@ const deepLinkLateIdentity = async ({ page, status, mark, variant, log }) => {
 	log(`mirror pane: ${frames.length} painted frames; ${frames.filter(frame => frame.transitioning).length} during a reveal`);
 	expect(frames.every(frame => !frame.transitioning), 'a cold link opens on the message column without playing the reveal from a hero');
 	expect(frames.every(frame => frame.wrapperParent), 'the mirror pane must keep the message wrapper as its containing block');
+};
+
+// The other half of #916: the reveal itself. A first message from an empty chat
+// plays messageAreaReveal and inputSlideDown (a cold link must not, above), and
+// the overlays that sit on the message wrapper stay anchored to it throughout.
+const sampleReveal = (ctx) => ctx.page.addInitScript(() => {
+	const probe = window.__reveal = { frames: [], armed: false, stop: false, clicked: false };
+	const near = (a, b) => Math.abs(a - b) < 1;
+	const sample = () => {
+		if (probe.stop) return;
+		const wrapper = document.querySelector('.message-area-wrapper');
+		const transitioning = !!document.querySelector('.chat-view.transitioning-from-empty');
+		if (probe.armed && wrapper) {
+			const pane = document.querySelector('.mirror-sync');
+			const box = wrapper.getBoundingClientRect();
+			const rect = pane?.getBoundingClientRect();
+			probe.frames.push({
+				transitioning,
+				pane: !!pane,
+				reveal: wrapper.getAnimations().some(a => a.animationName.includes('messageAreaReveal') && a.playState === 'running'),
+				slide: !!document.querySelector('.input-wrapper')?.getAnimations().some(a => a.animationName.includes('inputSlideDown') && a.playState === 'running'),
+				overlayAnchored: document.querySelector('.reconnect-status-slot')?.offsetParent === wrapper,
+				paneAnchored: pane ? pane.offsetParent === wrapper : null,
+				paneFills: rect ? near(rect.left, box.left) && near(rect.top, box.top) && near(rect.width, box.width) && near(rect.height, box.height) : null
+			});
+		}
+		// The switch lands inside the reveal, a frame after the reveal has been seen.
+		if (probe.armed && transitioning && !probe.clicked && probe.frames.length) {
+			const link = document.querySelector('.started-from a');
+			if (link) { probe.clicked = true; link.click(); }
+		}
+		requestAnimationFrame(sample);
+	};
+	requestAnimationFrame(sample);
+});
+
+const firstMessageReveal = async ({ page, mark }) => {
+	await mark('send the first message from a new chat');
+	await page.evaluate(() => { window.__reveal.armed = true; window.__reveal.clicked = true; });
+	await typeAndSend(page, `reveal ${uniq()}`);
+	await page.waitForFunction(() => {
+		const { frames } = window.__reveal;
+		return frames.some(frame => frame.transitioning) && !frames.at(-1).transitioning;
+	});
+	await waitTurnSettled(page, { messagesAtLeast: 2 });
+	const frames = await page.evaluate(() => { window.__reveal.stop = true; return window.__reveal.frames; });
+	const revealing = frames.filter(frame => frame.transitioning);
+	expect(revealing.some(frame => frame.reveal), 'the message column must play its reveal on a first message');
+	expect(revealing.some(frame => frame.slide), 'the composer must slide down from the hero on a first message');
+	expect(frames.every(frame => frame.overlayAnchored), 'the column overlays must keep the message wrapper as their containing block through the reveal');
+	expect(frames.filter(frame => !frame.transitioning).every(frame => !frame.reveal && !frame.slide), 'the reveal must end with its class');
+};
+
+// The mirror pane during a live reveal (#916): an empty chat whose "Started from"
+// link names a chat outside the catalog. Sending the first message starts the
+// reveal; following the link switches to a chat of unknown owner (so a mirrored
+// one, until /live answers) while the reveal runs. The pane cannot exist before
+// the reveal, which starts as the message wrapper mounts, so "before" is the
+// wrapper's other overlay on the frames ahead of the pane.
+const mirrorDuringReveal = async (ctx) => {
+	await sampleReveal(ctx);
+	await ctx.page.addInitScript((id) => {
+		const original = window.fetch.bind(window);
+		const released = new Promise(resolve => { window.__releaseOpeningIdentity = resolve; });
+		window.fetch = async (input, init) => {
+			const url = new URL(typeof input === 'string' ? input : input.url, location.href);
+			if (url.pathname.endsWith('/task-chips') && !url.pathname.includes(id)) {
+				const source = { session_id: id, title: 'Long chat', chip_id: 'chip-reveal' };
+				return new Response(JSON.stringify({ chips: [], source }), { status: 200, headers: { 'content-type': 'application/json' } });
+			}
+			const response = await original(input, init);
+			const identity = url.pathname === `/api/v1/sessions/${id}/live` && url.searchParams.get('owner_fields') === 'true';
+			if (identity || url.pathname === `/api/v1/sessions/${id}/sync-status`) await released;
+			return response;
+		};
+	}, seededChatId(ctx.status, 'long'));
+	await offCatalogLong(ctx);
+	const { page } = ctx;
+	const token = `empty ${uniq()}`;
+	await typeAndSend(page, token);
+	await waitTurnSettled(page, { messagesAtLeast: 2, hold: 800 });
+	const chatId = await chatIdByToken(page, token);
+	await api(page, 'POST', `/sessions/${encodeURIComponent(chatId)}/clear`);
+	await waitChat(page, { surface: 'cleared', loading: 'false', composer: 'centre' });
+	await page.locator('.started-from a').waitFor();
+	await page.waitForTimeout(600);
+};
+
+const switchDuringReveal = async ({ page, mark, log }) => {
+	await mark('send a first message, then follow a link to an off-catalog chat during the reveal');
+	await page.evaluate(() => { window.__reveal.armed = true; });
+	await typeAndSend(page, `reveal ${uniq()}`);
+	// Identity stays held until the pane has outlived the reveal.
+	await page.waitForFunction(() => {
+		const panes = window.__reveal.frames.filter(frame => frame.pane);
+		return panes.some(frame => frame.transitioning) && panes.filter(frame => !frame.transitioning).length > 5;
+	});
+	const frames = await page.evaluate(() => {
+		window.__reveal.stop = true;
+		window.__releaseOpeningIdentity();
+		return window.__reveal.frames;
+	});
+	await OPENED.long(page);
+	const before = frames.filter(frame => !frame.pane);
+	const during = frames.filter(frame => frame.pane && frame.transitioning);
+	const after = frames.filter(frame => frame.pane && !frame.transitioning);
+	log(`reveal frames before the pane: ${before.length}; pane during the reveal: ${during.length}; pane after it: ${after.length}`);
+	expect(before.length > 0, 'the column must be seen before the pane mounts');
+	expect(during.some(frame => frame.reveal), 'the pane must be measured while the reveal is really playing');
+	expect(frames.every(frame => frame.overlayAnchored), 'the column overlays must keep the message wrapper as their containing block before, during and after the reveal');
+	expect(during.concat(after).every(frame => frame.paneAnchored), 'the mirror pane must keep the message wrapper as its containing block during and after the reveal');
+	expect(during.concat(after).every(frame => frame.paneFills), 'the mirror pane must fill the message wrapper during and after the reveal');
 };
 
 const offCatalogIdentity = async ({ page, variant }) => {
@@ -784,6 +901,16 @@ await runJourney({
 			setup: offCatalogLateIdentity,
 			act: deepLinkLateIdentity,
 			verify: offCatalogIdentity
+		},
+		{
+			name: 'first-message-reveal',
+			async setup(ctx) { await sampleReveal(ctx); await fromNew(ctx); },
+			act: firstMessageReveal
+		},
+		{
+			name: 'mirror-pane-during-live-reveal',
+			setup: mirrorDuringReveal,
+			act: switchDuringReveal
 		},
 		{
 			name: 'cleared-deep-link',
