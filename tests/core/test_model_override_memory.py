@@ -38,18 +38,16 @@ CATALOG = {
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("model, named", [
-    ("opus", True), (SOL, True), ("sonnet", True), ("fable", False),
+    ("opus", False), (SOL, True), ("sonnet", False), ("fable", False),
     ("haiku", False), ("prov:chatgpt:gpt-6.1-astra", False),
 ])
-def test_the_owners_routing_memory_names_its_models_but_not_fable(model, named):
+def test_historical_routing_memory_needs_digit_free_native_sentences(model, named):
     assert mo.memory_names(model, M260, CATALOG) is named
 
 
 @pytest.mark.parametrize("text, accepted, refused", [
-    ("use Opus for coding subagents, not GPT 6.1 Sol", "opus", SOL),
     ("GPT 6.1 Sol is poor at frontend work. Its UI mockups are only loose sketches. "
      "Final frontend/UI implementation must go to an Opus agent", "opus", SOL),
-    ("Use Opus instead of GPT 6.1 Sol", "opus", SOL),
     ("Prefer Opus rather than Sonnet for reviews", "opus", "sonnet"),
     ("Reviews on Opus; avoid Sonnet", "opus", "sonnet"),
     ("Reviews on Opus; stop using Sonnet", "opus", "sonnet"),
@@ -64,6 +62,15 @@ def test_the_owners_routing_memory_names_its_models_but_not_fable(model, named):
 def test_a_model_named_only_in_a_negated_clause_does_not_count(text, accepted, refused):
     assert mo.memory_names(accepted, text, CATALOG)
     assert not mo.memory_names(refused, text, CATALOG)
+
+
+@pytest.mark.parametrize("text", [
+    "use Opus for coding subagents, not GPT 6.1 Sol",
+    "Use Opus instead of GPT 6.1 Sol",
+])
+def test_negated_foreign_version_does_not_make_the_native_sentence_unqualified(text):
+    assert not mo.memory_names("opus", text, CATALOG)
+    assert not mo.memory_names(SOL, text, CATALOG)
 
 
 @pytest.mark.parametrize("text, refused", [
@@ -161,10 +168,13 @@ def _receipts():
         return [row["kind"] for row in cursor.fetchall()]
 
 
-@pytest.mark.parametrize("wording, model_id", [("gpt 6.1 sol", "gpt-6.1-sol"), ("sonnet", "sonnet")])
-async def test_a_saved_routing_memory_accepts_its_models_without_a_prompt(world, wording, model_id):
+@pytest.mark.parametrize("wording, model_id, text", [
+    ("gpt 6.1 sol", "gpt-6.1-sol", M260),
+    ("sonnet", "sonnet", "Routine reviews Sonnet. Bounded backend GPT 6.1 Sol."),
+])
+async def test_a_saved_routing_memory_accepts_its_models_without_a_prompt(world, wording, model_id, text):
     seen, prompts = world
-    memory = _save(M260)
+    memory = _save(text)
     result = await _task(wording)
     assert result["ok"], result
     override = result["model_override"]
@@ -173,6 +183,14 @@ async def test_a_saved_routing_memory_accepts_its_models_without_a_prompt(world,
     assert prompts == [] and seen[0]["model_id"] == model_id
     # Nothing is saved: the memory is read again at the next start.
     assert _receipts() == []
+
+
+async def test_historical_routing_memory_prompts_before_a_native_start(world):
+    seen, prompts = world
+    _save(M260)
+    result = await _task("sonnet")
+    assert not result["ok"] and result["reason"] == "model_not_requested"
+    assert len(prompts) == 1 and not seen
 
 
 async def test_acceptance_is_logged_with_the_memory(world, caplog):
