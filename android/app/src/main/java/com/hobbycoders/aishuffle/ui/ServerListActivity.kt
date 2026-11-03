@@ -22,17 +22,28 @@ import com.hobbycoders.aishuffle.presence.WorkerPresenceMonitor
 
 class ServerListActivity : NativeScreen() {
     private var autoConnectPending = false
+    /** Saved like [autoConnectPending]: the answer can reach a recreated activity, and a relaunch resumes under the prompt. */
+    private var notificationDialogOpen = false
     private var connectionJob: Job? = null
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         autoConnectPending = savedInstanceState?.getBoolean("auto_connect_pending") ?: (intent.action == Intent.ACTION_MAIN)
+        notificationDialogOpen = savedInstanceState?.getBoolean("notification_dialog_open") ?: false
     }
     override fun onSaveInstanceState(outState: Bundle) {
         outState.putBoolean("auto_connect_pending", autoConnectPending)
+        outState.putBoolean("notification_dialog_open", notificationDialogOpen)
         super.onSaveInstanceState(outState)
     }
     private val pushPermission = registerForActivityResult(androidx.activity.result.contract.ActivityResultContracts.RequestPermission()) {
         com.hobbycoders.aishuffle.push.PushRegistration.schedule(this)
+        notificationRequestEnded()
+    }
+    private fun notificationRequestEnded() {
+        notificationDialogOpen = false
+        // An answer usually comes before onResume, whose render sweeps again. An immediate one
+        // can come while already resumed, after the sweep this request held back, with no resume to follow.
+        if (autoConnectPending && lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) refreshPresence()
     }
     private class StatusRow(val server: Server, val label: TextView, val dot: View)
     private val statusRows = mutableMapOf<String, StatusRow>()
@@ -56,10 +67,12 @@ class ServerListActivity : NativeScreen() {
     }
     private fun refreshPresence() {
         presence.start(statusRows.values.map { it.server }, AccountRepository(this).store.session()) { observations ->
-            if (autoConnectPending && connectionJob?.isActive != true) {
+            if (autoConnectPending && !notificationDialogOpen && connectionJob?.isActive != true) {
                 connectionJob = lifecycleScope.launch {
-                    val target = WorkerConnections.reachable(this@ServerListActivity, observations = observations)
-                    if (isFinishing || !lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) return@launch
+                    val target = reachableFixture?.invoke(observations) ?: WorkerConnections.reachable(this@ServerListActivity, observations = observations)
+                    // A request may have started during the search. The lifecycle cannot show it: Android
+                    // can report RESUMED after the request, before it pauses this activity for the prompt.
+                    if (isFinishing || notificationDialogOpen || !lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) return@launch
                     autoConnectPending = false
                     if (target != null) {
                         openWorker(target)
@@ -80,7 +93,10 @@ class ServerListActivity : NativeScreen() {
     override fun onResume() {
         super.onResume()
         render()
-        com.hobbycoders.aishuffle.push.PushPermission.ask(this) { pushPermission.launch(it) }
+        // A second request while one is open would come back as a cancellation and end the wait early.
+        if (!notificationDialogOpen) com.hobbycoders.aishuffle.push.PushPermission.ask(this, dialogOpen = { notificationDialogOpen = it }) {
+            runCatching { pushPermission.launch(it) }.onFailure { notificationRequestEnded() }
+        }
         com.hobbycoders.aishuffle.push.PushRegistration.schedule(this)
         if (intent.getBooleanExtra("auth_expired", false)) {
             status.text = "Your sign-in expired. Sign in again to restore your workers."
@@ -220,5 +236,9 @@ class ServerListActivity : NativeScreen() {
             link("Use another device") { openAccount("pair") }
         }
         refreshPresence()
+    }
+    companion object {
+        /** Lets a test hold the search for a worker open; probes and worker policy have their own tests. */
+        @androidx.annotation.VisibleForTesting @Volatile internal var reachableFixture: (suspend (Map<Server, com.hobbycoders.aishuffle.presence.ProbeResult>) -> Server?)? = null
     }
 }
