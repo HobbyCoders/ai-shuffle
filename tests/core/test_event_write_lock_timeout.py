@@ -684,7 +684,7 @@ async def test_a_stop_overtaken_by_a_newer_turn_does_not_signal_or_halt_it(monke
     from app.core import session_runtime as sr
     from app.db import turns as turns_db
 
-    monkeypatch.setattr(sr, "INTERRUPT_STEP_WAIT_SECONDS", 0.01)
+    monkeypatch.setattr(sr, "INTERRUPT_STEP_WAIT_SECONDS", 5)  # ends with the step
     turn = turns_db.enqueue_turn(SID, "user", prompt="hi", profile_id="default")
     turns_db.start_turn(turn["id"], None, "runner")
     turns_db.interrupt_turn(SID, "stop", stop_background=True, source="user_stop")
@@ -781,6 +781,35 @@ def real_worker():
     sup.reset()
     task_registry.clear_user_stop(SID)
     task_registry.clear_session(SID)
+
+
+async def test_a_held_first_read_does_not_hold_the_provider_signal(monkeypatch):
+    from app.core import session_runtime as sr
+    from app.db import turns as turns_db
+
+    turn = turns_db.enqueue_turn(SID, "user", prompt="hi", profile_id="default")
+    turns_db.start_turn(turn["id"], None, "runner")
+    turns_db.interrupt_turn(SID, "stop", stop_background=True, source="user_stop")
+    reached, resume = _pause_first_call(monkeypatch, turns_db, "get_turn")
+    runtime = sr.SessionRuntime(turn)
+    sr._live_runtimes[SID] = runtime
+    signalled = asyncio.Event()
+
+    async def signal(_sid):
+        signalled.set()
+
+    try:
+        with patch("app.core.query_session_lifecycle.interrupt_session", new=signal):
+            interrupt = asyncio.create_task(runtime.interrupt("stop", escalation_timeout=0.05))
+            try:
+                await asyncio.wait_for(signalled.wait(), 3)
+                assert reached.is_set() and not resume.is_set()
+            finally:
+                resume.set()
+            await interrupt
+            await tr.drain_event_writes(5)
+    finally:
+        sr._live_runtimes.pop(SID, None)
 
 
 async def test_a_stop_paused_at_its_first_read_still_ends_the_older_worker(monkeypatch, real_worker):
