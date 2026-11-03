@@ -1843,6 +1843,7 @@ def _native_view(
             summary_text=str(event.get("summary") or ""),
             path_end=event.get("node_id"),
             intent_pin_tokens=event.get("intent_pin_tokens"),
+            summary_pin=event.get("summary_pin"),
         )
         for event in events
     )
@@ -2177,6 +2178,57 @@ def _append_archive(sdk_session_id: str, archive: Sequence[Dict[str, str]]) -> N
     raise RuntimeError("no free event seq for the re-seed archive")
 
 
+def _shown_text(content: Any) -> List[str]:
+    """Every text in an entry's content, tool results' included."""
+    if isinstance(content, str):
+        return [content]
+    if isinstance(content, list):
+        return [text for item in content for text in _shown_text(item)]
+    if isinstance(content, dict):
+        return [*_shown_text(content.get("text")), *_shown_text(content.get("content"))]
+    return []
+
+
+def _with_what_it_was_told(
+    sdk_session_id: str,
+    entries: List[Dict[str, Any]],
+    nodes: Optional[Sequence[Any]],
+) -> List[Dict[str, Any]]:
+    """``entries``, with a row repeating the brief and delivered messages they no
+    longer show (#996).
+
+    A message delivered on a tool result reached the model through Claude Code's
+    hook lane, so it is in no entry, and a compaction can have folded away the
+    brief. Added after :func:`_fit_window`, which would archive a row the path
+    does not hold. Bounded (``render_told``), and never raises.
+    """
+    if not nodes or not entries:
+        return entries
+    try:
+        from fluid.context.compaction import flat_text, render_told, still_missing, told_on_path
+
+        shown = flat_text(" ".join(
+            text for entry in entries
+            for text in _shown_text(entry.get("message", {}).get("content"))
+        ))
+        brief, told = told_on_path(list(nodes))
+        note = render_told(
+            brief if brief and flat_text(brief) not in shown else "",
+            still_missing(told, shown),
+        )
+    except Exception as exc:  # noqa: BLE001 — the re-seed still works without it
+        logger.warning("could not repeat instructions in the re-seed of %s: %s", sdk_session_id, exc)
+        return entries
+    if note is None:
+        return entries
+    row = {"type": "user", "message": {"role": "user", "content": note}}
+    # Behind the first row, so the file still ends as it did: Claude Code can read
+    # a last user row as a turn that never got its answer. A first assistant row
+    # may hold a call whose result must come next, so then it goes last.
+    at = 1 if entries[0].get("type") == "user" else len(entries)
+    return [*entries[:at], row, *entries[at:]]
+
+
 def _fit_window(
     sdk_session_id: str,
     entries: List[Dict[str, Any]],
@@ -2313,6 +2365,7 @@ def reseed_delegated_cli_session(
                 sdk_session_id, entries, nodes,
                 context_window or delegated_window_for(sdk_session_id),
             )
+            entries = _with_what_it_was_told(sdk_session_id, entries, nodes)
         new_cli_session_id = str(_uuid.uuid4())
         lines = build_cli_transcript_entries(
             entries, new_cli_session_id, working_dir
