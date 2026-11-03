@@ -53,6 +53,15 @@ internal object AppControlFence {
     const val MAX_DEPTH = 20
     private const val STEP_MS = 25L
 
+    /**
+     * How long a screen gets to read exact again after a read that was not. The proving read has to
+     * fit inside, or a screen slower to read than [SETTLE_MS] could never recover from one bad read.
+     * So it is the moment itself plus two reads at the pace just measured, since reads of one screen
+     * vary by about that much, and never more than [QUIET_MS]. A retry far slower than the screen's
+     * own pace still misses it, and it is enforced up to the dispatch gate like any other deadline.
+     */
+    fun retryWindow(windowMs: Long, readMs: Long): Long = maxOf(windowMs, SETTLE_MS + minOf(READ_MS, 2 * readMs))
+
     fun compare(expected: ScreenPrint, actual: ScreenPrint): FenceRead = when {
         expected.exact == actual.exact -> FenceRead.SAME
         expected.identity == actual.identity -> FenceRead.UNCONFIRMED
@@ -63,9 +72,10 @@ internal object AppControlFence {
      * True only if a read returned SAME and finished in time.
      *
      * [limitMs] is the caller's hard limit, the command deadline or consent expiry: nothing
-     * finishing past it counts. The first read that is not exact opens a retry window of
-     * [windowMs]. A clean first read has tolerated nothing and needs only the hard limit, so a
+     * finishing past it counts. The first read that is not exact opens a retry window, see
+     * [retryWindow]. A clean first read has tolerated nothing and needs only the hard limit, so a
      * large screen is not refused for being large; each read is bounded by [ReadLimit].
+     * [lastReadMs] is how long the read just finished spent reading, if the caller measured it.
      *
      * The first PENDING read opens a separate window of [QUIET_MS] to find a read no event landed
      * in. Its exact match, in time, ends the [windowMs] window, since whatever opened that has reverted.
@@ -73,12 +83,13 @@ internal object AppControlFence {
      * [read] is given the time on [now]'s clock it must finish by, the earliest of all of these, so
      * anything it does that can't be undone is held to the same deadline as its verdict.
      */
-    suspend fun settle(limitMs: Long, now: () -> Long, windowMs: Long = SETTLE_MS, wait: suspend (Long) -> Unit = { delay(it) }, read: suspend (until: Long) -> FenceRead): Boolean {
+    suspend fun settle(limitMs: Long, now: () -> Long, windowMs: Long = SETTLE_MS, wait: suspend (Long) -> Unit = { delay(it) }, lastReadMs: () -> Long? = { null }, read: suspend (until: Long) -> FenceRead): Boolean {
         if (limitMs <= 0) return false
         val end = now() + limitMs
         var retryEnd = Long.MAX_VALUE
         var quietEnd = Long.MAX_VALUE
         while (true) {
+            val started = now()
             val verdict = read(minOf(end, retryEnd, quietEnd))
             val finished = now()
             if (verdict == FenceRead.CHANGED || finished >= minOf(end, retryEnd, quietEnd)) return false
@@ -86,7 +97,7 @@ internal object AppControlFence {
             if (verdict == FenceRead.PENDING) {
                 retryEnd = Long.MAX_VALUE
                 if (quietEnd == Long.MAX_VALUE) quietEnd = finished + QUIET_MS
-            } else if (retryEnd == Long.MAX_VALUE) retryEnd = finished + windowMs
+            } else if (retryEnd == Long.MAX_VALUE) retryEnd = finished + retryWindow(windowMs, lastReadMs() ?: (finished - started))
             val until = minOf(end, retryEnd, quietEnd)
             wait(minOf(STEP_MS, until - finished))
             if (now() >= until) return false // A late wake-up does not earn another read.

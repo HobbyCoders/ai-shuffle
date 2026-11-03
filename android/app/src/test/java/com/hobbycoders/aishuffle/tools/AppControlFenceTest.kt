@@ -76,6 +76,36 @@ class AppControlFenceTest {
         val reads = ArrayDeque(listOf(1_000L to FenceRead.UNCONFIRMED, 100L to FenceRead.SAME))
         assertTrue(settle(limit = 20_000) { val (took, verdict) = reads.removeFirst(); clock += took; verdict })
     }
+    @Test fun retryWindowIsTheMomentPlusTwoReadsAtTheMeasuredPace() {
+        assertEquals(AppControlFence.SETTLE_MS, AppControlFence.retryWindow(AppControlFence.SETTLE_MS, 0))
+        assertEquals(AppControlFence.SETTLE_MS + 1_200, AppControlFence.retryWindow(AppControlFence.SETTLE_MS, 600))
+    }
+    @Test fun retryWindowIsCapped() =
+        assertEquals(AppControlFence.QUIET_MS, AppControlFence.retryWindow(AppControlFence.SETTLE_MS, 60_000))
+    @Test fun slowScreenRecoversFromOneBadRead() { // The 1150 ms bad read, then a retry of the same pace, from the failing run.
+        val reads = ArrayDeque(listOf(1_150L to FenceRead.UNCONFIRMED, 1_183L to FenceRead.SAME))
+        assertTrue(settle(limit = 20_000) { val (took, verdict) = reads.removeFirst(); clock += took; verdict })
+    }
+    @Test fun slowScreenLastingDifferenceIsStillRefusedAtItsWindow() {
+        var reads = 0
+        assertFalse(settle(limit = 20_000) { reads++; clock += 1_000; FenceRead.UNCONFIRMED })
+        assertTrue("Refused at $clock", clock <= 1_000 + AppControlFence.QUIET_MS + 1_000)
+    }
+    @Test fun slowScreenRetryFarSlowerThanItsPaceIsRefused() {
+        val reads = ArrayDeque(listOf(300L to FenceRead.UNCONFIRMED, 1_200L to FenceRead.SAME))
+        assertFalse(settle(limit = 20_000) { val (took, verdict) = reads.removeFirst(); clock += took; verdict })
+    }
+    @Test fun slowScreenRetryNeverOutlivesTheLimit() {
+        val reads = ArrayDeque(listOf(1_000L to FenceRead.UNCONFIRMED, 1_000L to FenceRead.SAME))
+        assertFalse(settle(limit = 1_900) { val (took, verdict) = reads.removeFirst(); clock += took; verdict })
+    }
+    @Test fun measuredReadTimeSizesTheWindowNotTimeAroundIt() { // Time outside the read earns no extra window.
+        val seen = mutableListOf<Long>()
+        runBlocking { AppControlFence.settle(20_000, { clock }, wait = wait, lastReadMs = { 100 }) { until ->
+            seen += until; clock += 1_000; if (seen.size == 1) FenceRead.UNCONFIRMED else FenceRead.SAME
+        } }
+        assertEquals(1_000 + AppControlFence.retryWindow(AppControlFence.SETTLE_MS, 100), seen[1])
+    }
     @Test fun exactReadWithAnEventInItIsReadAgain() {
         val reads = ArrayDeque(listOf(FenceRead.PENDING, FenceRead.SAME))
         assertTrue(settle { reads.removeFirst() })
@@ -114,7 +144,7 @@ class AppControlFenceTest {
     @Test fun readIsToldTheBadReadWindowItMustFinishBy() {
         val seen = mutableListOf<Long>()
         assertFalse(settleBy(limit = 20_000) { until -> seen += until; clock += 100; if (seen.size == 1) FenceRead.UNCONFIRMED else { clock += 700; FenceRead.SAME } })
-        assertEquals(listOf(20_000L, 100 + AppControlFence.SETTLE_MS), seen)
+        assertEquals(listOf(20_000L, 100 + AppControlFence.retryWindow(AppControlFence.SETTLE_MS, 100)), seen)
     }
     @Test fun readIsToldTheQuietWindowItMustFinishBy() {
         val seen = mutableListOf<Long>()

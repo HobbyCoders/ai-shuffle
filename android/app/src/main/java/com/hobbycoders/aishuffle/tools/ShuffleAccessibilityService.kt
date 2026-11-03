@@ -81,7 +81,7 @@ class ShuffleAccessibilityService : AccessibilityService() {
             val watch = sentinel() ?: continue
             fun watched() = sentinel()?.key === watch.key
             val cached = offMain(System.currentTimeMillis() + AppControlFence.READ_MS) { watch.read(false) } ?: FenceRead.UNCONFIRMED
-            val holds = cached == FenceRead.SAME || (cached == FenceRead.UNCONFIRMED && AppControlFence.settle(AppControlFence.READ_MS + AppControlFence.SETTLE_MS, SystemClock::elapsedRealtime) {
+            val holds = cached == FenceRead.SAME || (cached == FenceRead.UNCONFIRMED && AppControlFence.settle(AppControlFence.READ_MS + AppControlFence.QUIET_MS, SystemClock::elapsedRealtime, lastReadMs = { lastReadMs }) {
                 if (!watched()) FenceRead.SAME else offMain(System.currentTimeMillis() + AppControlFence.READ_MS) { watch.read(true) } ?: FenceRead.CHANGED
             })
             // A verdict on something no longer vouched for must not cancel what replaced it, which gets its own check.
@@ -97,6 +97,8 @@ class ShuffleAccessibilityService : AccessibilityService() {
             if (root.windowId == captured.window && root.packageName?.toString() == captured.pkg) compare(captured.fingerprint, root, fresh, ReadLimit(until, System::currentTimeMillis)) else FenceRead.CHANGED
         } finally { root.recycle() }
     } }
+    /** The time spent reading in the latest read, for sizing a retry window. Another check's read can overwrite it, which only moves the window within its cap. */
+    @Volatile private var lastReadMs = 0L
     private fun readUntil(limit: Long) = minOf(limit, System.currentTimeMillis() + AppControlFence.READ_MS)
     /**
      * One read off the main thread, so Deny, Stop, expiry and the event fence keep running through
@@ -260,6 +262,7 @@ class ShuffleAccessibilityService : AccessibilityService() {
     private fun compare(expected: ScreenPrint, root: AccessibilityNodeInfo, fresh: Boolean, limit: ReadLimit, onNode: NodeVisitor? = null): FenceRead {
         val started = SystemClock.elapsedRealtime()
         val actual = fingerprint(root, fresh, limit, onNode)
+        lastReadMs = SystemClock.elapsedRealtime() - started
         val verdict = if (actual == null) FenceRead.CHANGED else AppControlFence.compare(expected, actual)
         if (com.hobbycoders.aishuffle.BuildConfig.DEBUG && (fresh || verdict != FenceRead.SAME)) {
             fenceTrace("fingerprint $verdict fresh=$fresh nodes=${limit.nodes} ms=${SystemClock.elapsedRealtime() - started} ${if (actual == null) "stopped" else fingerprintChange(expected.exact, actual.exact)}")
@@ -267,7 +270,7 @@ class ShuffleAccessibilityService : AccessibilityService() {
         return verdict
     }
     private suspend fun settled(limit: Long, read: suspend (until: Long) -> FenceRead): Boolean =
-        AppControlFence.settle(limit - System.currentTimeMillis(), SystemClock::elapsedRealtime, read = read)
+        AppControlFence.settle(limit - System.currentTimeMillis(), SystemClock::elapsedRealtime, lastReadMs = { lastReadMs }, read = read)
     /** A baseline must not be one bad read, or the exact match would later refuse a screen that never changed. */
     private suspend fun stableFingerprint(pkg: String, window: Int, deadline: Long): ScreenPrint? =
         AppControlFence.stable(deadline - System.currentTimeMillis(), SystemClock::elapsedRealtime) {

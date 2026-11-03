@@ -337,10 +337,58 @@ class CrossAppFenceTest {
         assertNotTapped()
     }
     @Test fun denseSlowScreenIsApprovedOnACleanRead() {
-        fixture("dense:100"); fixture("delay:5") // Each read outlasts the retry window; a clean one must still count.
+        fixture("dense:100"); fixture("delay:5") // Each read takes over 500 ms; a clean one must still count.
         val tapping = tap(read(waitSeconds = 15)); allow()
         assertEquals("performed", status(tapping, 15).getString("status"))
         assertTapped(1)
+    }
+    /** A screen where every read takes over 500 ms, and a reference to its target. */
+    private fun denseSlowRef(): String {
+        fixture("dense:100"); fixture("delay:5")
+        return read(waitSeconds = 15)
+    }
+    @Test fun denseSlowScreenTapRecoversFromABadRead() {
+        val ref = denseSlowRef()
+        holdEventChecks()
+        onceClosed("move") // The first final read isn't exact, so the retry that proves it must fit its window.
+        afterFinalRead { undoMoveAndLetEventsArrive() }
+        val tapping = tap(ref); allow()
+        assertEquals("performed", status(tapping, 15).getString("status"))
+        assertTapped(1)
+    }
+    @Test fun denseSlowScreenReadRecoversFromABadRead() {
+        fixture("dense:100"); fixture("delay:5")
+        holdEventChecks()
+        onceClosed("move")
+        afterFinalRead { undoMoveAndLetEventsArrive() }
+        read(waitSeconds = 15) // Asserts ok, and that the target is still among the captured nodes.
+    }
+    @Test fun denseSlowScreenKeepsItsPanelThroughABlip() {
+        val tapping = tap(denseSlowRef())
+        panelUp()
+        fixtureWithEvent("move")
+        Thread.sleep(400) // The event's check has started a read by now, and any row it has read shows the move.
+        fixture("back")
+        Thread.sleep(4_000) // That check has finished by now, either way.
+        allow()
+        assertEquals("performed", status(tapping, 15).getString("status"))
+        assertTapped(1)
+    }
+    @Test fun denseSlowScreenLastingMoveAfterThePanelClosesIsRefused() {
+        val ref = denseSlowRef()
+        onceClosed("move")
+        val tapping = tap(ref); allow()
+        assertEquals("stale_ref", status(tapping, 15).getString("status"))
+        fixture("delay:0")
+        assertNotTapped()
+    }
+    @Test fun denseSlowScreenLastingMoveUnderThePanelCancelsIt() {
+        val tapping = tap(denseSlowRef())
+        panelUp()
+        fixtureWithEvent("move")
+        assertEquals("denied", status(tapping, 15).getString("status"))
+        fixture("delay:0")
+        assertNotTapped()
     }
     @Test fun denseScreenAtTheLimitIsApproved() {
         fixture("dense:250")
