@@ -176,7 +176,7 @@ class ArtifactPolicyTests(unittest.TestCase):
             self.assertNotIn("continue-on-error", step)
         self.assertEqual(jobs["publish"]["needs"], ["build", "android-ui"])
 
-    def test_both_api36_readiness_callers_use_the_stock_google_image(self):
+    def test_both_api36_readiness_callers_cache_and_verify_the_alternate_provider(self):
         for filename, jobname in (("android.yml", "android-ui"), ("ci-android-minified.yml", "smoke")):
             with self.subTest(workflow=filename):
                 job = workflow(filename)["jobs"][jobname]
@@ -186,9 +186,19 @@ class ArtifactPolicyTests(unittest.TestCase):
                 emulator = next(s for s in steps if s.get("uses", "").startswith("reactivecircus/android-emulator-runner@"))
                 self.assertEqual("${{ matrix.target }}", emulator["with"]["target"])
                 self.assertEqual("${{ runner.temp }}/ci-webview.apk", emulator["env"]["CI_WEBVIEW_APK"])
-                download = next(s for s in steps if s.get("name") == "Download verified official AOSP WebView for API 36")
+                # Select the executable contract, not the prose step label.
+                downloads = [s for s in steps if s.get("run") == 'python3 ci/ci_webview.py "$RUNNER_TEMP/ci-webview.apk"']
+                self.assertEqual(1, len(downloads))
+                download = downloads[0]
                 self.assertEqual("matrix.api == 36", download["if"])
                 self.assertEqual('python3 ci/ci_webview.py "$RUNNER_TEMP/ci-webview.apk"', download["run"])
+                caches = [s for s in steps if s.get("uses", "").startswith("actions/cache@")]
+                self.assertEqual(1, len(caches))
+                cache = caches[0]
+                self.assertEqual("matrix.api == 36", cache["if"])
+                self.assertEqual("${{ runner.temp }}/ci-webview.apk", cache["with"]["path"])
+                self.assertEqual("aosp-webview-x86_64-8da41a8692c64870dc875a0fa656c59a678aa09902935c5095e7de6fd7c55a87", cache["with"]["key"])
+                self.assertLess(steps.index(cache), steps.index(download))
                 self.assertLess(steps.index(download), steps.index(emulator))
                 avd = next(s for s in steps if "avdmanager create avd" in s.get("run", ""))
                 self.assertIn(";${{ matrix.target }};x86_64", avd["run"])
