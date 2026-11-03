@@ -1,0 +1,8 @@
+{
+  "description": "A long reply of fixed length for rewind-transcript. Unlike default it does not list the scenarios, so its height on a phone cannot change when a scenario is added or removed.",
+  "steps": [
+    {
+      "text": "Fake Claude Code CLI here (no model, no network). You said: “{summary}”\n\nSend `[script:NAME]` to play a scenario. This reply stays the same length on every run, whichever scenarios this instance happens to ship, so a rewind always removes the same amount of transcript. It reads like an ordinary answer: one paragraph with nothing to click and nothing that streams once the turn has finished. On a phone it wraps to more than twenty lines, so the turn is taller than the room between the header and the composer, and the turn before it sits out of view until a rewind brings it back. Nothing here depends on the model, the network or the folder the chat runs in, and these words carry no instruction for the next turn. Rewinding this turn removes the message, this reply and everything after them, then returns your words to the composer. The earlier turn stays on screen and the chat takes the next message as usual. A shorter reply closes up differently on a narrow screen, so keep this one at this length unless the case that uses it is measured again. `/compact` compacts the conversation."
+    }
+  ]
+}
