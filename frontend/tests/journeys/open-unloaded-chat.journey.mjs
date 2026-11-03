@@ -47,11 +47,8 @@ const HYDRATION_CEILING_MS = Number(feedSource.match(/export const HYDRATION_CEI
 expect(Number.isFinite(HYDRATION_CEILING_MS), 'read the production hydration ceiling');
 const SHORT_CEILING_MS = 2_000;
 
-/** The phone shell docks the composer under its hero, so it never leaves the bottom. */
-const inPhoneShell = (variant) => mobileShell && variant.viewport === 'phone';
-
 /** The composer takes exactly these positions over the case. */
-const composer = (...positions) => ({ recording, variant }) => expectComposerPositions(recording, inPhoneShell(variant) ? ['bottom'] : positions);
+const composer = (...positions) => ({ recording }) => expectComposerPositions(recording, positions);
 
 /** What each target looks like once open. */
 const OPENED = {
@@ -317,8 +314,9 @@ const offCatalogLong = async (ctx) => {
 };
 
 // #916: an unknown owner shows the mirror pane on a cold deep link. Keep
-// actual identity/sync/catalog responses pending across the column's reveal
-// animation: its transform must not be the pane's only containing block.
+// actual identity/sync/catalog responses pending for longer than the column's
+// reveal animation would run: the pane keeps its containing block, and a cold
+// link plays no reveal, because it has not moved from a hero (#1049).
 const offCatalogLateIdentity = async (ctx) => {
 	await offCatalogLong(ctx);
 	await ctx.page.addInitScript((id) => {
@@ -342,6 +340,7 @@ const offCatalogLateIdentity = async (ctx) => {
 			const pane = document.querySelector('.mirror-sync');
 			const wrapper = document.querySelector('.message-area-wrapper');
 			if (pane && wrapper) probe.frames.push({
+				t: performance.now(),
 				transitioning: document.querySelector('.chat-view').classList.contains('transitioning-from-empty'),
 				wrapperParent: pane.offsetParent === wrapper
 			});
@@ -352,13 +351,13 @@ const offCatalogLateIdentity = async (ctx) => {
 };
 
 const deepLinkLateIdentity = async ({ page, status, mark, variant, log }) => {
-	await mark('load an off-catalog link with identity pending across the column reveal');
+	await mark('load an off-catalog link with identity pending past the length of a column reveal');
 	const prefix = mobileShell && variant.viewport === 'phone' ? '/mobile/' : '/';
 	await page.goto(new URL(`${prefix}?session=${encodeURIComponent(seededChatId(status, 'long'))}`, status.urls.ui).toString());
 	await page.waitForFunction(() => {
 		const probe = window.__openingIdentity;
-		return probe.metadata && probe.sync && probe.frames.some(frame => frame.transitioning)
-			&& probe.frames.slice(-2).length === 2 && probe.frames.slice(-2).every(frame => !frame.transitioning);
+		const painted = probe.frames.at(-1)?.t - probe.frames[0]?.t;
+		return probe.metadata && probe.sync && painted > 500;
 	});
 	const frames = await page.evaluate(() => {
 		const probe = window.__openingIdentity;
@@ -367,8 +366,9 @@ const deepLinkLateIdentity = async ({ page, status, mark, variant, log }) => {
 		return probe.frames;
 	});
 	await OPENED.long(page);
-	log(`mirror pane: ${frames.length} painted frames across the reveal; ${frames.filter(frame => frame.transitioning).length} during its animation`);
-	expect(frames.every(frame => frame.wrapperParent), 'the mirror pane must keep the message wrapper as its containing block before and after the reveal');
+	log(`mirror pane: ${frames.length} painted frames; ${frames.filter(frame => frame.transitioning).length} during a reveal`);
+	expect(frames.every(frame => !frame.transitioning), 'a cold link opens on the message column without playing the reveal from a hero');
+	expect(frames.every(frame => frame.wrapperParent), 'the mirror pane must keep the message wrapper as its containing block');
 };
 
 const offCatalogIdentity = async ({ page, variant }) => {
@@ -442,13 +442,13 @@ async function waitPastCeiling(page, kind) {
 	await page.waitForTimeout(600);
 }
 
-const neverCleared = (...positions) => ({ recording, variant }) => {
+const neverCleared = (...positions) => ({ recording }) => {
 	// A case may start on the new-session screen; from the open on, the chat
 	// must never read as new, and never as cleared at all.
 	const opened = (recording?.timeline || []).find(entry => entry.kind === 'mark')?.t ?? 0;
 	expect(!anyFrame(recording, s => s.surface === 'cleared'), 'an unconfirmed history never painted as a cleared chat');
 	expect(!anyFrame(recording, s => s.surface === 'new', { from: opened }), 'an opened chat never painted as a new chat');
-	expectComposerPositions(recording, inPhoneShell(variant) ? ['bottom'] : positions);
+	expectComposerPositions(recording, positions);
 };
 
 const pastCeilingSwitch = ({ fail = false } = {}) => ({
@@ -787,6 +787,7 @@ await runJourney({
 		},
 		{
 			name: 'cleared-deep-link',
+			...(mobileShell ? { viewports: ['desktop'] } : {}),
 			setup: fromNew,
 			act: viaDeepLink('cleared'),
 			// The new page docks the composer for its load, then the cleared
@@ -801,7 +802,10 @@ await runJourney({
 						'a page opened by a link starts loading with the composer docked, the layout of the usual outcome (a transcript); a cleared chat then centres it once (createChatLayoutTracker), with no input on the page'
 				}
 			]
-		}
+		},
+		// The link lands in /mobile/, which docks the composer under the hero, so
+		// it stays there and there is no move to declare.
+		...(mobileShell ? [{ name: 'cleared-deep-link-phone-shell', viewports: ['phone'], setup: fromNew, act: viaDeepLink('cleared'), verify: composer('centre', 'bottom') }] : [])
 	],
 	allow: [...DEV_INSTANCE_NOISE]
 });
