@@ -1289,9 +1289,7 @@ def sessions_with_failed_latest_turn(session_ids: List[str]) -> set:
     return failed
 
 
-def set_outcome_baseline(
-    cursor: Any, session_id: str, failed: bool, *, before: Optional[datetime] = None,
-) -> None:
+def set_outcome_baseline(cursor: Any, session_id: str, failed: bool) -> None:
     """From here on, the turns that have closed no longer speak for this chat.
 
     ``failed`` is what the chat's outcome reads as until a newer turn ends. The turn
@@ -1299,33 +1297,29 @@ def set_outcome_baseline(
     queued reads them. Local to this database, as turn order is, so it never replicates.
 
     A live or queued row stays above the baseline, because it has yet to end.
-    ``before`` limits it to turns created earlier, for a write that had to wait: a
-    newer turn must not lose its outcome to it. A baseline never moves back.
+    A baseline never moves back.
     """
     cursor.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (session_id,))
     # Numbering the legacy group later would lift its rows back over the baseline.
     _initialize_insert_order(cursor, session_id)
-    newer_only = "AND created_at <= %s " if before is not None else ""
     cursor.execute(
         "UPDATE sessions SET outcome_baseline_failed=%s, outcome_baseline_order=GREATEST("
         "  COALESCE(outcome_baseline_order, -1), COALESCE(("
         "    SELECT MAX(insert_order) FROM turns WHERE session_id=%s "
-        f"    AND state IN ('completed', 'aborted', 'parked') {newer_only}"
+        "    AND state IN ('completed', 'aborted', 'parked')"
         "  ), -1)"
         ") WHERE id=%s",
-        (failed, session_id, *((before,) if before is not None else ()), session_id),
+        (failed, session_id, session_id),
     )
 
 
-def mark_conversation_reset(
-    session_id: str, *, cursor: Any = None, before: Optional[datetime] = None,
-) -> None:
+def mark_conversation_reset(session_id: str, *, cursor: Any = None) -> None:
     """The transcript that showed a failure is gone (cleared, rewound): stop saying so."""
     if cursor is not None:
-        set_outcome_baseline(cursor, session_id, False, before=before)
+        set_outcome_baseline(cursor, session_id, False)
         return
     with get_db() as conn:
-        set_outcome_baseline(conn.cursor(), session_id, False, before=before)
+        set_outcome_baseline(conn.cursor(), session_id, False)
 
 
 def settle_turn(

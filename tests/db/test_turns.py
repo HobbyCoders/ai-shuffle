@@ -949,24 +949,24 @@ def test_a_reset_of_legacy_rows_holds_when_the_next_turn_numbers_them(mock_db):
     assert _failed("s1") == set()
 
 
-def test_a_late_reset_leaves_a_newer_turn_its_outcome_and_never_moves_back(mock_db):
-    from datetime import datetime, timedelta, timezone
-
-    _ended("s1", "aborted", "error", "boom")
-    rewound_at = datetime.now(timezone.utc) + timedelta(seconds=1)
-    newer = _ended("s1", "aborted", "error", "boom again")
+def test_a_baseline_never_moves_back(mock_db):
     from app.db.base import get_db
-    with get_db() as conn:
-        conn.cursor().execute("UPDATE turns SET created_at=%s WHERE id=%s",
-                              (rewound_at + timedelta(seconds=1), newer["id"]))
 
-    turns.mark_conversation_reset("s1", before=rewound_at)
-    assert _failed("s1") == {"s1"}
+    def baseline():
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT outcome_baseline_order FROM sessions WHERE id=%s", ("s1",))
+            return cursor.fetchone()["outcome_baseline_order"]
 
+    _ended("s1", "completed")
+    newest = _ended("s1", "aborted", "error", "boom")
     turns.mark_conversation_reset("s1")
-    assert _failed("s1") == set()
-    turns.mark_conversation_reset("s1", before=rewound_at)
-    assert _failed("s1") == set()
+    reached = baseline()
+    assert reached >= 1
+    with get_db() as conn:
+        conn.cursor().execute("DELETE FROM turns WHERE id=%s", (newest["id"],))
+    turns.mark_conversation_reset("s1")
+    assert baseline() == reached
 
 
 def test_a_baseline_carries_a_failure_until_a_newer_turn_ends(mock_db):
@@ -976,60 +976,6 @@ def test_a_baseline_carries_a_failure_until_a_newer_turn_ends(mock_db):
     with get_db() as conn:
         turns.set_outcome_baseline(conn.cursor(), "s1", True)
     assert _failed("s1") == {"s1"}
-    _ended("s1", "completed")
-    assert _failed("s1") == set()
-
-
-@pytest.mark.asyncio
-async def test_a_rewind_reset_the_database_refused_is_repaired_once_it_is_back(mock_db, monkeypatch):
-    """The rewind stayed successful; the row must not say Failed for good."""
-    from datetime import datetime, timezone
-    from unittest.mock import AsyncMock, patch
-
-    from app.api import commands
-
-    _ended("s1", "aborted", "error", "boom")
-    rewound_at = datetime.now(timezone.utc)
-    real = turns.mark_conversation_reset
-    tries = []
-
-    def recovers_on_the_third_try(*args, **kwargs):
-        tries.append(kwargs)
-        if len(tries) < 3:
-            raise RuntimeError("database away")
-        return real(*args, **kwargs)
-
-    monkeypatch.setattr(commands, "_REWIND_RESET_RETRY_SECONDS", (0, 0, 0, 0))
-    monkeypatch.setattr(turns, "mark_conversation_reset", recovers_on_the_third_try)
-    with patch.object(commands, "sync_engine") as sync_engine:
-        sync_engine.broadcast_user_session_updated = AsyncMock()
-        assert await commands._record_rewind_reset("s1", "admin") is False
-        assert _failed("s1") == {"s1"}
-        await commands._retry_rewind_reset("s1", "admin", rewound_at)
-        await asyncio.sleep(0)
-
-    assert len(tries) == 3
-    assert _failed("s1") == set()
-    sync_engine.broadcast_user_session_updated.assert_called_once_with(
-        user_id="admin", session_id="s1", updates={"last_turn_failed": False},
-    )
-
-
-@pytest.mark.asyncio
-async def test_a_rewind_reset_that_never_lands_gives_up_and_the_next_turn_still_decides(mock_db, monkeypatch):
-    from datetime import datetime, timezone
-    from unittest.mock import AsyncMock, patch
-
-    from app.api import commands
-
-    _ended("s1", "aborted", "error", "boom")
-    monkeypatch.setattr(commands, "_REWIND_RESET_RETRY_SECONDS", (0, 0))
-    with patch.object(turns, "mark_conversation_reset", side_effect=RuntimeError("database away")) as mark, \
-            patch.object(commands, "sync_engine") as sync_engine:
-        sync_engine.broadcast_user_session_updated = AsyncMock()
-        await commands._retry_rewind_reset("s1", "admin", datetime.now(timezone.utc))
-    assert mark.call_count == 2
-    sync_engine.broadcast_user_session_updated.assert_not_called()
     _ended("s1", "completed")
     assert _failed("s1") == set()
 
