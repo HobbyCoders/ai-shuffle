@@ -98,6 +98,17 @@
 			]
 		},
 		{
+			"why": "rewinding a message: its dialog, its request and what the transcript does through it",
+			"journeys": ["rewind-transcript"],
+			"globs": [
+				"frontend/tests/journeys/rewind-transcript.journey.mjs",
+				"frontend/src/lib/components/chat/MessageActions.svelte",
+				"frontend/src/lib/api/rewind.ts",
+				"app/api/commands.py",
+				"app/api/rewind_owner.py"
+			]
+		},
+		{
 			"why": "mirrored chats: the sync check ChatView runs and the gate that shows it",
 			"journeys": ["mirrored-chat", "open-unloaded-chat"],
 			"globs": [

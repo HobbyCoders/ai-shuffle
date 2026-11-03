@@ -33,6 +33,7 @@
 	import { X } from 'lucide-svelte';
 	import { derived as derivedStore, get } from 'svelte/store';
 	import { activeSession as liveActiveSession, backgroundPermissions } from '$lib/stores/active-session';
+	import { notify } from '$lib/stores/notifications';
 	import { TRANSCRIPT_PRESENTATION, type TranscriptPresentation } from './TranscriptHydrationBoundary.svelte';
 	import TranscriptLoadingSkeleton from './TranscriptLoadingSkeleton.svelte';
 	import { sessionEphemeralCache } from '$lib/stores/session-cache';
@@ -168,20 +169,21 @@
 	}
 
 	/**
-	 * Reload the session after a rewind completes.
-	 * Clears stale messages and cache first so the reload shows the correct
-	 * post-rewind state (which may be empty if all messages were rewound).
+	 * Finish a rewind the server has done. The transcript is the feed's: it folds
+	 * the appended `transcript.rewound` like any other event, so this only hands
+	 * back what the event log does not carry.
 	 * @param warning - Optional warning message for partial success (e.g., file restore failed)
 	 */
 	function handleRewindComplete(warning?: string, rewoundPrompt?: string, uploadPaths?: string[], unsentRestored = false) {
-		// If there's a warning (partial success), show it as a system message
+		// A partial success says so only in this answer, and the feed's next fold
+		// replaces the store's rows, so it cannot be a transcript row.
 		if (warning) {
-			liveActiveSession.addSystemMessage(warning, 'rewind_warning');
+			notify.banner(warning, { severity: 'warning', persist: true, duration_ms: 12000 });
 		}
 
 		// A rewind to a user message removed that very message — queue its text
-		// so ChatInput refills the composer after the reload settles, letting the
-		// user edit or resend what they rewound away.
+		// so ChatInput refills the composer, letting the user edit or resend what
+		// they rewound away.
 		if (rewoundPrompt || uploadPaths?.length) {
 			liveActiveSession.setPendingRestorePrompt(rewoundPrompt ?? '', uploadPaths);
 		}
@@ -190,12 +192,9 @@
 		// removes the row, so the transcript stays on screen.
 		if (unsentRestored) return;
 
-		// Clear stale messages from the store before reloading.
-		// Without this, the defensive check in the history handler would
-		// preserve old (broken) messages when the reload returns fewer/zero.
-		liveActiveSession.clearMessages();
-
-		liveActiveSession.reloadSession(true);
+		// The event was appended before this answer. Usually the feed already
+		// folded it; a half-open feed would not until its stall watchdog fires.
+		liveActiveSession.catchUpTranscript();
 	}
 
 	// Capture the originating session when the callback is handed to a row, not
