@@ -217,6 +217,46 @@ def _session_start() -> "HookCallbackRequest":
 
 
 @pytest.mark.asyncio
+async def test_a_turn_with_its_own_memory_and_a_put_back_tail_is_not_sent_memory_again(monkeypatch, tmp_path):
+    """The hook answer failed, so the next turn carries its own snapshot and the
+    rest of the put-back as a tail. The pin must cover both: pinned to the tail
+    alone, the snapshot reads as not held and the turn after sends it again."""
+    from tests.core.test_memory_reminder import _delegated_turn, _memory_kinds
+
+    compacting = {"type": "system", "subtype": "status", "status": "compacting"}
+    done = {"type": "system", "subtype": "status", "status": None, "compact_result": "success"}
+    adapter, loop = await _make(monkeypatch, tmp_path, "delegated", {"section": _section(*FACTS)})
+    try:
+        await _delegated_turn(adapter)
+        await _delegated_turn(adapter, "go on [compact-now]")  # the adapter sees this one
+        real = loop._write_frame
+
+        async def refuse_the_answer(frame: dict) -> None:
+            if frame.get("type") == "control_response":
+                raise OSError("broken pipe")
+            await real(frame)
+
+        loop._write_frame = refuse_the_answer
+        loop._track_main_compaction(compacting)
+        await loop._answer_hook_request(_session_start())
+        loop._write_frame = real
+        loop._track_main_compaction(done)
+
+        await _delegated_turn(adapter)
+        statuses = {s["name"]: s["status"] for s in loop.last_restoration["sections"]}
+        assert statuses["memory"] == "replaced" and loop.last_restoration["complete"]
+        kinds = await _memory_kinds(loop)
+        assert kinds[-1] == "full"
+        nodes = await loop.store.load_path(loop.session_id)
+        assert "What you were told" in [n for n in nodes if n.message.role == "user"][-1].message.pinned_text()
+        for _ in range(2):
+            await _delegated_turn(adapter)
+        assert (await _memory_kinds(loop))[len(kinds):] == [None, None]
+    finally:
+        await adapter.disconnect()
+
+
+@pytest.mark.asyncio
 async def test_a_slash_command_turn_neither_carries_nor_finishes_partial_memory(monkeypatch, tmp_path):
     """17,000 characters of memory fit the put-back's total but not one answer. A
     slash turn stays verbatim, because the CLI reads its command from the last text

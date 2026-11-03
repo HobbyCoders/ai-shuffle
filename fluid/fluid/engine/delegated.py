@@ -2814,12 +2814,14 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 self._staged_note = _StagedNote(None, "")
         if self._staged_note is not None:
             self._staged_note.turn = (content, context_pin)
+        if note:  # the fresh note replaces what the host pinned, as it always has
+            context_pin = None
         note = SEPARATOR.join(part for part in (note, rest) if part)
         if not note:
             return content, context_pin
         restored = [*content, Text(note)]
-        pin = Message(role="user", content=restored).pin_context(note).context_pin
-        return restored, pin
+        message = Message(role="user", content=restored).pin_context(note)
+        return restored, _pin_with_host_note(message, context_pin)
 
     async def _drive_turn(
         self, sid: str, turn_id: str, user_node: SessionNode, content: list[Any],
@@ -6155,6 +6157,19 @@ def _hook_text(value: Any) -> str:
         return json.dumps(value, default=str)
     except (TypeError, ValueError):
         return str(value)
+
+
+def _pin_with_host_note(message: Message, host_pin: tuple[int, int] | None) -> tuple[int, int] | None:
+    """The pin of a turn given a tail: the tail alone, or from the note the host
+    already pinned when the tail follows it directly. Pinned to the tail alone,
+    a turn's own # Memory snapshot would read as not held and go out again. Text
+    between the two is not the host's, so it never gains a pin."""
+    pin = message.context_pin
+    if pin is None or host_pin is None:
+        return pin or host_pin
+    if message.text()[host_pin[1]:pin[0]].strip():
+        return host_pin
+    return host_pin[0], pin[1]
 
 
 def _is_slash_command(content: list[Any]) -> bool:
