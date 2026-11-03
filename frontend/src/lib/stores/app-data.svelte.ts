@@ -230,6 +230,8 @@ interface RemovedRow {
 	index: number;
 	/** Fields of the row's edit the removal's tombstone replaced. */
 	heldPatch: Partial<Session> | null;
+	/** Fields a push has set since, which a read started earlier knows less about. */
+	pushed: Set<string>;
 }
 
 /** Requests out, oldest first. Rarely more than a few, so a plain list is enough. */
@@ -260,6 +262,7 @@ function beginRowRemoval(sessionId: string): RowChange {
 			afterId: index > 0 ? _state.sessions[index - 1].id : null,
 			index,
 			heldPatch: _pendingEdits.get(sessionId)?.patch ?? null,
+			pushed: new Set(),
 		},
 	};
 	_rowChanges.push(change);
@@ -368,7 +371,10 @@ function notePushedFields(sessionId: string, fields: Partial<Session>): void {
 				change.pushed.add(field);
 			}
 		}
-		if (change.removal?.row) change.removal.row = { ...change.removal.row, ...fields };
+		if (change.removal?.row) {
+			change.removal.row = { ...change.removal.row, ...fields };
+			for (const field of Object.keys(fields)) change.removal.pushed.add(field);
+		}
 	}
 }
 
@@ -385,8 +391,11 @@ function noteServerRows(rows: Session[], { complete }: { complete: boolean }): v
 	for (const change of _rowChanges) {
 		const row = byId.get(change.sessionId) as unknown as Record<string, unknown> | undefined;
 		if (change.removal) {
-			if (row) change.removal.row = { ...change.removal.row, ...(row as unknown as Session) };
-			else if (complete) change.removal.row = null;
+			if (row) {
+				const { pushed } = change.removal;
+				const known = Object.entries(row).filter(([field]) => !pushed.has(field));
+				change.removal.row = { ...change.removal.row, ...Object.fromEntries(known) } as Session;
+			} else if (complete) change.removal.row = null;
 		}
 		if (!row) continue;
 		for (const field of Object.keys(change.before)) {

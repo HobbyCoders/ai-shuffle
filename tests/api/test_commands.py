@@ -578,11 +578,11 @@ class TestExecuteRewindEndpoint:
             success=True, message="Rewind successful", chat_rewound=True, messages_removed=3
         )
 
-        with patch("app.db.turns.forget_failures") as forget:
+        with patch("app.db.turns.mark_conversation_reset") as forget:
             await execute_rewind("session-1", RewindRequestV2(target_uuid="uuid-1"))
             await asyncio.sleep(0.1)
 
-        forget.assert_called_once_with("session-1")
+        forget.assert_called_once_with("session-1", before=None)
         mock_sync_engine.broadcast_user_session_updated.assert_called_once_with(
             user_id="user-1", session_id="session-1", updates={"last_turn_failed": False},
         )
@@ -603,11 +603,15 @@ class TestExecuteRewindEndpoint:
             success=True, message="Rewind successful", chat_rewound=True, messages_removed=3
         )
 
-        with patch("app.db.turns.forget_failures", side_effect=RuntimeError("database away")):
+        with patch("app.api.commands._REWIND_RESET_RETRY_SECONDS", (0, 0)), patch(
+            "app.db.turns.mark_conversation_reset", side_effect=RuntimeError("database away")
+        ) as mark:
             response = await execute_rewind("session-1", RewindRequestV2(target_uuid="uuid-1"))
             await asyncio.sleep(0.1)
 
         assert response.success is True
+        # It kept trying: the first write, then the two retries.
+        assert mark.call_count == 3
         mock_sync_engine.broadcast_user_session_updated.assert_not_called()
 
     @pytest.mark.asyncio
@@ -622,7 +626,7 @@ class TestExecuteRewindEndpoint:
         }
         mock_database.get_project.return_value = None
 
-        with patch("app.db.turns.forget_failures") as forget:
+        with patch("app.db.turns.mark_conversation_reset") as forget:
             await execute_rewind(
                 "session-1",
                 RewindRequestV2(target_uuid="uuid-1", restore_chat=False, restore_files=True),

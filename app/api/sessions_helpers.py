@@ -788,14 +788,14 @@ def _annotate_cluster_fields(sessions: List[dict]) -> None:
             session["controllable"] = bool(online and install)
             summary = runtime.get(session["id"], {})
             state = summary.get("state")
+            reported = state if summary.get("owner_device_id") == owner_device and state in STATES else None
+            # Any turns kept here predate the move: the owner's summary alone says how
+            # its latest ended, failed or not. An older owner never reports a failure.
+            session["last_turn_failed"] = reported == "failed"
             session["remote_runtime_state"] = (
                 "offline" if not online else
-                state if summary.get("owner_device_id") == owner_device and state in STATES else "unknown"
+                "idle" if reported == "failed" else reported or "unknown"
             )
-            # The owner's turns are not here: its summary is what knows.
-            if session["remote_runtime_state"] == "failed":
-                session["remote_runtime_state"] = "idle"
-                session["last_turn_failed"] = True
         else:
             # Local or legacy (NULL instance_id): always controllable from here.
             session["device_name"] = my_install.get("device_name") if my_install else None

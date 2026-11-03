@@ -693,6 +693,34 @@ describe('a refused change gives back only what it touched (#1034)', () => {
 			await failing;
 		});
 
+		it("keeps a push through an older read and a failed reload, and still takes the read's other fields", async () => {
+			const lists = mocks.get.getMockImplementation()!;
+			let release!: () => void;
+			const gate = new Promise<void>((resolve) => { release = resolve; });
+			mocks.get.mockImplementation(async (url: string) => {
+				const page = (await lists(url)) as { items: Row[]; has_more: boolean };
+				const items = page.items.map((r) => (r.id === 's0' ? { ...r, is_active: true, model: 'from-the-read' } : r));
+				await gate;
+				return { ...page, items };
+			});
+			const olderRead = appData.loadSessions(null);
+			await new Promise((r) => setTimeout(r, 0));
+
+			const held = hold(mocks.delete);
+			const failing = appData.deleteSession('s0').catch(() => undefined);
+			expect(appData.mergeSessionPatch('s0', { title: 'From another device' })).toBe(false);
+			release();
+			await olderRead;
+
+			mocks.get.mockImplementation(async () => { throw new Error('offline'); });
+			held.refuse();
+			await failing;
+
+			expect(row('s0')?.title).toBe('From another device');
+			expect((row('s0') as Row & { model?: string })?.model).toBe('from-the-read');
+			mocks.get.mockImplementation(lists);
+		});
+
 		it('does not bring back a row a complete read has shown is gone', async () => {
 			const lists = mocks.get.getMockImplementation()!;
 			const held = hold(mocks.delete);

@@ -168,3 +168,30 @@ def test_terminal_payload_uses_turn_identity_and_distinguishes_failure(monkeypat
         if event == "session.complete":
             assert result[1]["input_tokens"] == 7
             assert result[1]["duration_seconds"] == 1.2
+
+
+@pytest.mark.parametrize("reset", ["mark_conversation_reset", "clear_session_conversation"])
+@pytest.mark.parametrize("outcome,reason,error", [
+    ("aborted", "error", "HTTP 400"),
+    ("completed", None, "Provider execution failed"),
+])
+def test_a_reset_does_not_lose_the_error_of_a_delivery_still_queued(monkeypatch, mock_db, reset, outcome, reason, error):
+    """Clearing the sidebar's failure must not rewrite what a connector is told."""
+    from app.db import database
+    monkeypatch.setattr(lifecycle_events.database, "get_connector_sessions_for_ai_session", lambda sid: [])
+    database.create_session(session_id="queued-delivery", profile_id="default")
+    turn = turns.enqueue_turn("queued-delivery", "user", prompt="go")
+    turns.start_turn(turn["id"])
+    turns.settle_turn(turn["id"], outcome, reason, error=error)
+    assert "queued-delivery" in turns.sessions_with_failed_latest_turn(["queued-delivery"])
+
+    if reset == "mark_conversation_reset":
+        turns.mark_conversation_reset("queued-delivery")
+    else:
+        database.clear_session_conversation("queued-delivery")
+
+    assert turns.sessions_with_failed_latest_turn(["queued-delivery"]) == set()
+    event, data = lifecycle_events._payload(outcome, "queued-delivery", turn["id"], {})
+    assert event == "session.error"
+    assert data["error_message"] == error
+

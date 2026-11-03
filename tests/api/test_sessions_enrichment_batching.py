@@ -62,8 +62,9 @@ class TestBothListProducersCarryTheFailure:
     """The list and search read the same fact, so a row cannot change its mind (#1032)."""
 
     def _failed_turn(self, session_id):
-        from app.db import turns
+        from app.db import database, turns
 
+        database.create_session(session_id=session_id, profile_id="default")
         turn = turns.enqueue_turn(session_id, "user", prompt="go")
         turns.start_turn(turn["id"])
         turns.settle_turn(turn["id"], "aborted", "error", error="HTTP 400")

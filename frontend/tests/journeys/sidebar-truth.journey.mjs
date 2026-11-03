@@ -23,6 +23,7 @@
 //   failed-cleared    clearing a failed chat takes the failure with it, here
 //                     and after a reload
 //   stopped           the user's own Stop is not a failure
+//   project-choice-survives  choosing a project and a branch holds while it gains a remote (#1078)
 //   project-once      a project is listed once after its first worktree chat
 //
 // Hosted journeys build only the shared desktop UI and run it at desktop and
@@ -516,55 +517,141 @@ function giveProjectARemote(status, projectId) {
 	git(dir, 'push', '-q', '-u', 'origin', 'main');
 }
 
+const PROJECT_ALLOW = [
+	{ kind: 'failed_requests', status: 409, url: /\/git\/(status|diff-stats|fetch)(\?|$)/, reason: 'the new-session screen asks a just-linked project for a checkout it has not got yet (see new-worktree-session)' },
+	{ kind: 'errors', text: /No matching Git checkout exists/, reason: 'the same refused read, logged' },
+	{ kind: 'layout_shift', reason: 'the first send moves the composer down' }
+];
+
+const NO_PROJECT_DROP = /the chosen project was dropped/;
+
+const noProjectChosen = (hero) => hero.getByRole('button', { name: /^No project/ });
+
+/** Choose the project unless the screen already holds it (it keeps the last one chosen). */
+async function chooseProject(page, hero, name) {
+	if (await noProjectChosen(hero).isVisible()) await pickProject(page, hero, name);
+}
+
+/**
+ * A project that worked without a remote, a chat in it, then a remote: what the app
+ * links the next time it looks. Leaves the new-session screen open, which opens on
+ * the project last chosen: the choice under test.
+ *
+ * `rememberCatalogRow` stages the state #1078 needs instead of waiting for it to come
+ * up by chance: a catalog load between the first chat and the link, which remembers
+ * the project by the catalog row its remote then retires.
+ */
+async function projectGainingARemote(ctx, { rememberCatalogRow = false } = {}) {
+	const { page, status } = ctx;
+	let remembered = false;
+	const rememberWrite = (request) => {
+		if (request.method() === 'PUT' && /\/preferences\/composer\.project(\?|$)/.test(request.url()) && /pv2-/.test(request.postData() || '')) remembered = true;
+	};
+	if (rememberCatalogRow) page.on('request', rememberWrite);
+	const hero = await openNewChat(ctx);
+	const id = `linked-late-${uniq()}`.toLowerCase().replace(/[^a-z0-9-]/g, '-');
+	ctx.project = { id, name: `Linked late ${id.slice(-6)}` };
+	await api(page, 'POST', '/projects', { id, name: ctx.project.name });
+	await pickProject(page, hero, ctx.project.name);
+	await pickAccess(page, 'Bypass');
+	ctx.older = `older-${uniq()}`;
+	await typeAndSend(page, `a chat from before the link ${ctx.older}`);
+	await waitTurnSettled(page);
+	ctx.olderId = await chatIdByToken(page, ctx.older);
+
+	if (rememberCatalogRow) {
+		// Adding any project makes the app load the catalog again.
+		ctx.nudge = `${id}-nudge`;
+		if (!remembered) await api(page, 'POST', '/projects', { id: ctx.nudge, name: `Nudge ${id.slice(-6)}` });
+		const deadline = Date.now() + 15_000;
+		while (!remembered && Date.now() < deadline) await page.waitForTimeout(100);
+		if (!remembered) throw new Error('the app never remembered the project by its catalog row');
+		page.off('request', rememberWrite);
+	}
+
+	giveProjectARemote(status, id);
+	await backToNew(page);
+}
+
+/** The worktree toggle, a new branch, and the composer showing it. Drop gets its own error. */
+async function chooseNewWorktreeBranch(page, hero, branch) {
+	try {
+		await hero.getByRole('button', { name: /Switch to a worktree$/ }).click({ timeout: 10_000 });
+		await hero.getByRole('button', { name: /^Worktree branch:/ }).click({ timeout: 10_000 });
+		const menu = page.getByRole('dialog', { name: 'Worktree branch' });
+		await menu.getByRole('button', { name: /New branch/ }).click({ timeout: 10_000 });
+		await page.getByPlaceholder('Enter a branch name').fill(branch, { timeout: 10_000 });
+		await page.getByRole('button', { name: 'Continue', exact: true }).click({ timeout: 10_000 });
+		await hero.getByRole('button', { name: `Worktree branch: ${branch}` }).waitFor({ timeout: 10_000 });
+	} catch (error) {
+		if (await noProjectChosen(hero).isVisible()) throw new Error(`the chosen project was dropped while choosing its worktree branch (#1078): ${error.message.split('\n')[0]}`);
+		throw error;
+	}
+}
+
+// Issue 1078, on its own so nothing else has to step around it: the owner's choice of a
+// project survives the project gaining a remote and the catalog refreshes that follow.
+const PROJECT_CHOICE_SURVIVES = {
+	name: 'project-choice-survives',
+	// The drop waits for the app to look at the project and link it, which the desktop
+	// screen does at once. A phone had not got there by the end of this case, so it would
+	// only say the choice holds up to the link. The store under test is the same one.
+	viewports: ['desktop'],
+	allow: PROJECT_ALLOW,
+	knownBug: {
+		issue: 1078,
+		error: NO_PROJECT_DROP,
+		reason: 'the app remembers a project by its catalog row, and gaining a remote retires that row, so it reads the project as gone'
+	},
+	setup: (ctx) => projectGainingARemote(ctx, { rememberCatalogRow: true }),
+	async cleanup({ page, project, nudge }) {
+		if (project) await api(page, 'DELETE', `/projects/${project.id}`).catch(() => {});
+		if (nudge) await api(page, 'DELETE', `/projects/${nudge}`).catch(() => {});
+	},
+	async act({ page, mark, project }) {
+		const hero = page.getByRole('region', { name: 'New session' });
+		const holds = async (when) => {
+			const deadline = Date.now() + 4_000;
+			while (Date.now() < deadline) {
+				if (await noProjectChosen(hero).isVisible()) throw new Error(`the chosen project was dropped ${when} (#1078)`);
+				await page.waitForTimeout(100);
+			}
+		};
+		await mark('the screen keeps the project while it links to its remote');
+		await holds('while it linked to its remote');
+		await hero.getByRole('button', { name: `Workspace folders: ${project.name}` }).waitFor({ timeout: 5_000 });
+
+		await mark('a worktree on a new branch, and that holds too');
+		const branch = `journey/${uniq()}`;
+		await chooseNewWorktreeBranch(page, hero, branch);
+		await holds('after its worktree branch was chosen');
+		expect(await hero.getByRole('button', { name: `Worktree branch: ${branch}` }).isVisible(), 'the worktree branch is still chosen');
+	}
+};
+
 const PROJECT_ONCE = {
 	name: 'project-once',
-	allow: [
-		{ kind: 'failed_requests', status: 409, url: /\/git\/(status|diff-stats|fetch)(\?|$)/, reason: 'the new-session screen asks a just-linked project for a checkout it has not got yet (see new-worktree-session)' },
-		{ kind: 'errors', text: /No matching Git checkout exists/, reason: 'the same refused read, logged' },
-		{ kind: 'layout_shift', reason: 'the first send moves the composer down' }
-	],
-	async setup(ctx) {
-		const { page, status } = ctx;
-		const hero = await openNewChat(ctx);
-		const id = `linked-late-${uniq()}`.toLowerCase().replace(/[^a-z0-9-]/g, '-');
-		ctx.project = { id, name: `Linked late ${id.slice(-6)}` };
-		await api(page, 'POST', '/projects', { id, name: ctx.project.name });
-		await pickProject(page, hero, ctx.project.name);
-		await pickAccess(page, 'Bypass');
-		ctx.older = `older-${uniq()}`;
-		await typeAndSend(page, `a chat from before the link ${ctx.older}`);
-		await waitTurnSettled(page);
-		ctx.olderId = await chatIdByToken(page, ctx.older);
-
-		giveProjectARemote(status, id);
-		await backToNew(page);
-		await pickProject(page, page.getByRole('region', { name: 'New session' }), ctx.project.name)
-			.catch(() => { /* the new-session screen kept the project */ });
-	},
+	allow: PROJECT_ALLOW,
+	setup: projectGainingARemote,
 	async cleanup({ page, project }) {
 		if (project) await api(page, 'DELETE', `/projects/${project.id}`).catch(() => {});
 	},
 	async act({ page, mark, log, project, olderId }) {
 		const hero = page.getByRole('region', { name: 'New session' });
 		await mark('a worktree on a new branch, then the first message');
-		// Giving a project a remote changes what the catalog calls it, and the screen can
-		// drop the chosen project while that settles (a finding of this journey, not what
-		// it is here for): choose again until the worktree branch holds.
+		// This case is about the listing. Losing the choice has its own case above
+		// (#1078), so step around that one failure here and nothing else: the screen
+		// saying "No project" is the only thing that sends it round again.
 		const branch = `journey/${uniq()}`;
 		for (let attempt = 1; ; attempt++) {
 			try {
-				await pickProject(page, hero, project.name).catch(() => {});
-				await hero.getByRole('button', { name: /Switch to a worktree$/ }).click({ timeout: 10_000 });
-				await hero.getByRole('button', { name: /^Worktree branch:/ }).click({ timeout: 10_000 });
-				const menu = page.getByRole('dialog', { name: 'Worktree branch' });
-				await menu.getByRole('button', { name: /New branch/ }).click({ timeout: 10_000 });
-				await page.getByPlaceholder('Enter a branch name').fill(branch, { timeout: 10_000 });
-				await page.getByRole('button', { name: 'Continue', exact: true }).click({ timeout: 10_000 });
-				await hero.getByRole('button', { name: `Worktree branch: ${branch}` }).waitFor({ timeout: 10_000 });
+				if (await noProjectChosen(hero).isVisible()) log('known bug #1078: the screen dropped the project; choosing it again');
+				await chooseProject(page, hero, project.name);
+				await chooseNewWorktreeBranch(page, hero, branch);
 				break;
 			} catch (error) {
-				if (attempt === 3) throw error;
-				log(`the worktree choice did not hold (attempt ${attempt}): choosing again`);
+				if (attempt === 3 || !NO_PROJECT_DROP.test(error.message)) throw error;
+				log(`known bug #1078 on attempt ${attempt}: choosing the project again`);
 				await page.keyboard.press('Escape');
 			}
 		}
@@ -600,5 +687,5 @@ const PROJECT_ONCE = {
 await runJourney({
 	name: 'sidebar-truth',
 	allow: [...DEV_INSTANCE_NOISE],
-	cases: [ROLLBACK_SETTLE, ROLLBACK_ARCHIVE, ROLLBACK_RENAME, ROLLBACK_DELETE, FAILED_OPEN, FAILED_UNOPENED, FAILED_CLAUDE, FAILED_SETTLED, FAILED_CLEARED, STOPPED, PROJECT_ONCE]
+	cases: [ROLLBACK_SETTLE, ROLLBACK_ARCHIVE, ROLLBACK_RENAME, ROLLBACK_DELETE, FAILED_OPEN, FAILED_UNOPENED, FAILED_CLAUDE, FAILED_SETTLED, FAILED_CLEARED, STOPPED, PROJECT_CHOICE_SURVIVES, PROJECT_ONCE]
 });

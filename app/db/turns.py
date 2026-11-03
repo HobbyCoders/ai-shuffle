@@ -1221,7 +1221,7 @@ def abort_was_failure(stop_reason: Optional[str]) -> bool:
     """Whether an aborted turn went wrong, as opposed to the user ending it."""
     reason = stop_reason or ""
     return not (reason.startswith("interrupt")
-                or reason in ("user_stopped", "conversation_reset")
+                or reason == "user_stopped"
                 or reason in _NEVER_ANSWERED_STOP_REASONS)
 
 
@@ -1257,7 +1257,9 @@ def sessions_with_failed_latest_turn(session_ids: List[str]) -> set:
 
     Read from ``turns`` because every way a turn ends writes there, including the
     ones no client watches: the reap sweep, a dead worker, a chat nobody has open.
-    Ordered like :func:`get_latest_run_turn`.
+    Ordered like :func:`get_latest_run_turn`. Only turns past the session's outcome
+    baseline speak; with none, the baseline's own outcome stands. See
+    :func:`set_outcome_baseline`.
     """
     failed: set = set()
     skip = ", ".join(["%s"] * len(_NEVER_ANSWERED_STOP_REASONS))
@@ -1265,37 +1267,65 @@ def sessions_with_failed_latest_turn(session_ids: List[str]) -> set:
         cursor = conn.cursor()
         for start in range(0, len(session_ids), _FAILED_READ_CHUNK):
             chunk = list(session_ids[start:start + _FAILED_READ_CHUNK])
+            ids = ", ".join(["%s"] * len(chunk))
             cursor.execute(
-                "SELECT session_id, state, stop_reason, error FROM ("
-                "  SELECT session_id, state, stop_reason, error, ROW_NUMBER() OVER ("
-                "    PARTITION BY session_id "
-                "    ORDER BY insert_order DESC, created_at DESC, position DESC, id DESC"
-                "  ) AS newest FROM turns "
-                f"  WHERE session_id IN ({', '.join(['%s'] * len(chunk))}) "
-                f"  AND NOT (state IN ('aborted', 'completed') AND COALESCE(stop_reason, '') IN ({skip}))"
-                ") ranked WHERE newest = 1",
-                (*chunk, *_NEVER_ANSWERED_STOP_REASONS),
+                "SELECT s.id AS session_id, s.outcome_baseline_failed, "
+                "ranked.state, ranked.stop_reason, ranked.error FROM sessions s LEFT JOIN ("
+                "  SELECT t.session_id, t.state, t.stop_reason, t.error, ROW_NUMBER() OVER ("
+                "    PARTITION BY t.session_id "
+                "    ORDER BY t.insert_order DESC, t.created_at DESC, t.position DESC, t.id DESC"
+                "  ) AS newest FROM turns t JOIN sessions b ON b.id = t.session_id "
+                f"  WHERE t.session_id IN ({ids}) "
+                "  AND t.insert_order > COALESCE(b.outcome_baseline_order, -1) "
+                f"  AND NOT (t.state IN ('aborted', 'completed') AND COALESCE(t.stop_reason, '') IN ({skip}))"
+                ") ranked ON ranked.session_id = s.id AND ranked.newest = 1 "
+                f"WHERE s.id IN ({ids})",
+                (*chunk, *_NEVER_ANSWERED_STOP_REASONS, *chunk),
             )
-            failed.update(row["session_id"] for row in cursor.fetchall() if turn_failed(row))
+            failed.update(
+                row["session_id"] for row in cursor.fetchall()
+                if (turn_failed(row) if row["state"] else row["outcome_baseline_failed"])
+            )
     return failed
 
 
-def forget_failures(session_id: str, *, cursor: Any = None) -> None:
-    """The transcript that showed a failure is gone (cleared, rewound): stop saying so."""
-    keep = ", ".join(["%s"] * len(_NEVER_ANSWERED_STOP_REASONS))
-    sql = (
-        "UPDATE turns SET error=NULL, "
-        "stop_reason=CASE WHEN state='aborted' THEN 'conversation_reset' ELSE stop_reason END "
-        "WHERE session_id=%s AND ((state IN ('completed', 'parked') AND error IS NOT NULL) OR ("
-        f"state='aborted' AND COALESCE(stop_reason, '') NOT IN ({keep}, 'user_stopped') "
-        "AND COALESCE(stop_reason, '') NOT LIKE 'interrupt%%'))"
+def set_outcome_baseline(
+    cursor: Any, session_id: str, failed: bool, *, before: Optional[datetime] = None,
+) -> None:
+    """From here on, the turns that have closed no longer speak for this chat.
+
+    ``failed`` is what the chat's outcome reads as until a newer turn ends. The turn
+    rows keep what really happened: they are history, and a connector delivery still
+    queued reads them. Local to this database, as turn order is, so it never replicates.
+
+    A live or queued row stays above the baseline, because it has yet to end.
+    ``before`` limits it to turns created earlier, for a write that had to wait: a
+    newer turn must not lose its outcome to it. A baseline never moves back.
+    """
+    cursor.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (session_id,))
+    # Numbering the legacy group later would lift its rows back over the baseline.
+    _initialize_insert_order(cursor, session_id)
+    newer_only = "AND created_at <= %s " if before is not None else ""
+    cursor.execute(
+        "UPDATE sessions SET outcome_baseline_failed=%s, outcome_baseline_order=GREATEST("
+        "  COALESCE(outcome_baseline_order, -1), COALESCE(("
+        "    SELECT MAX(insert_order) FROM turns WHERE session_id=%s "
+        f"    AND state IN ('completed', 'aborted', 'parked') {newer_only}"
+        "  ), -1)"
+        ") WHERE id=%s",
+        (failed, session_id, *((before,) if before is not None else ()), session_id),
     )
-    params = (session_id, *_NEVER_ANSWERED_STOP_REASONS)
+
+
+def mark_conversation_reset(
+    session_id: str, *, cursor: Any = None, before: Optional[datetime] = None,
+) -> None:
+    """The transcript that showed a failure is gone (cleared, rewound): stop saying so."""
     if cursor is not None:
-        cursor.execute(sql, params)
+        set_outcome_baseline(cursor, session_id, False, before=before)
         return
     with get_db() as conn:
-        conn.cursor().execute(sql, params)
+        set_outcome_baseline(conn.cursor(), session_id, False, before=before)
 
 
 def settle_turn(

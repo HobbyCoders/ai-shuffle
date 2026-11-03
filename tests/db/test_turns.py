@@ -4,6 +4,7 @@ machine (v2 core, Phase 2)."""
 from sqlite3 import Connection
 
 import pytest
+import asyncio
 
 from app.db import turns
 from app.db import runs
@@ -808,7 +809,15 @@ def test_claimable_targeted_deduplicates_repeated_ids(mock_db):
 # Whether a chat's latest turn failed (#1032)
 # ---------------------------------------------------------------------------
 
+def _chat(session_id):
+    from app.db import database
+
+    if not database.get_session(session_id):
+        database.create_session(session_id=session_id, profile_id="default")
+
+
 def _ended(session_id, outcome="completed", stop_reason=None, error=None):
+    _chat(session_id)
     turn = turns.enqueue_turn(session_id, "user", prompt="go")
     turns.start_turn(turn["id"])
     return turns.settle_turn(turn["id"], outcome, stop_reason, error=error)
@@ -860,6 +869,7 @@ def test_a_message_withdrawn_from_the_queue_does_not_hide_the_failure(mock_db):
 
 
 def test_a_parked_turn_keeps_its_failure_until_and_after_it_settles(mock_db):
+    _chat("s1")
     turn = turns.enqueue_turn("s1", "user", prompt="go")
     turns.start_turn(turn["id"])
     assert turns.park_turn(turn["id"], ["task-1"], error="HTTP 500")
@@ -883,13 +893,145 @@ def test_forgetting_failures_leaves_other_facts_of_the_rows_alone(mock_db):
     aborted = turns.get_latest_run_turn("s1")
     assert _failed("s1") == {"s1"}
 
-    turns.forget_failures("s1")
+    turns.mark_conversation_reset("s1")
 
     assert _failed("s1") == set()
     assert turns.get_turn(stopped["id"])["stop_reason"] == "interrupted"
     assert turns.get_turn(kept["id"])["stop_reason"] == "parked_settled"
-    assert turns.get_turn(kept["id"])["error"] is None
-    assert turns.get_turn(aborted["id"])["stop_reason"] == "conversation_reset"
+    assert turns.get_turn(kept["id"])["error"] == "Provider execution failed"
+    assert turns.get_turn(aborted["id"])["state"] == "aborted"
+    assert turns.get_turn(aborted["id"])["stop_reason"] == "error"
+    assert turns.get_turn(aborted["id"])["error"] == "boom"
+
+
+def test_a_reset_only_speaks_until_a_newer_turn_ends(mock_db):
+    _ended("s1", "aborted", "error", "boom")
+    turns.mark_conversation_reset("s1")
+    _ended("s1", "aborted", "error", "boom again")
+    assert _failed("s1") == {"s1"}
+    turns.mark_conversation_reset("s1")
+    _ended("s1", "completed")
+    assert _failed("s1") == set()
+
+
+def test_a_message_queued_before_a_reset_still_speaks_when_it_ends(mock_db):
+    _ended("s1", "aborted", "error", "boom")
+    queued = turns.enqueue_turn("s1", "user", prompt="waiting")
+    turns.mark_conversation_reset("s1")
+    assert _failed("s1") == set()
+    turns.start_turn(queued["id"])
+    turns.settle_turn(queued["id"], "aborted", "error", error="boom again")
+    assert _failed("s1") == {"s1"}
+
+
+def test_a_parked_failure_a_reset_covered_stays_covered_when_it_settles(mock_db):
+    _chat("s1")
+    turn = turns.enqueue_turn("s1", "user", prompt="go")
+    turns.start_turn(turn["id"])
+    turns.park_turn(turn["id"], ["task"], error="Provider execution failed")
+    assert _failed("s1") == {"s1"}
+    turns.mark_conversation_reset("s1")
+    turns.settle_parked_turns("s1")
+    assert _failed("s1") == set()
+
+
+def test_a_reset_of_legacy_rows_holds_when_the_next_turn_numbers_them(mock_db):
+    from app.db.base import get_db
+
+    _ended("s1", "aborted", "error", "boom")
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE turns SET insert_order=0 WHERE session_id=%s", ("s1",))
+    turns.mark_conversation_reset("s1")
+    queued = turns.enqueue_turn("s1", "user", prompt="next")
+    assert _failed("s1") == set()
+    turns.start_turn(queued["id"])
+    turns.settle_turn(queued["id"], "completed")
+    assert _failed("s1") == set()
+
+
+def test_a_late_reset_leaves_a_newer_turn_its_outcome_and_never_moves_back(mock_db):
+    from datetime import datetime, timedelta, timezone
+
+    _ended("s1", "aborted", "error", "boom")
+    rewound_at = datetime.now(timezone.utc) + timedelta(seconds=1)
+    newer = _ended("s1", "aborted", "error", "boom again")
+    from app.db.base import get_db
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE turns SET created_at=%s WHERE id=%s",
+                              (rewound_at + timedelta(seconds=1), newer["id"]))
+
+    turns.mark_conversation_reset("s1", before=rewound_at)
+    assert _failed("s1") == {"s1"}
+
+    turns.mark_conversation_reset("s1")
+    assert _failed("s1") == set()
+    turns.mark_conversation_reset("s1", before=rewound_at)
+    assert _failed("s1") == set()
+
+
+def test_a_baseline_carries_a_failure_until_a_newer_turn_ends(mock_db):
+    from app.db.base import get_db
+
+    _ended("s1", "completed")
+    with get_db() as conn:
+        turns.set_outcome_baseline(conn.cursor(), "s1", True)
+    assert _failed("s1") == {"s1"}
+    _ended("s1", "completed")
+    assert _failed("s1") == set()
+
+
+@pytest.mark.asyncio
+async def test_a_rewind_reset_the_database_refused_is_repaired_once_it_is_back(mock_db, monkeypatch):
+    """The rewind stayed successful; the row must not say Failed for good."""
+    from datetime import datetime, timezone
+    from unittest.mock import AsyncMock, patch
+
+    from app.api import commands
+
+    _ended("s1", "aborted", "error", "boom")
+    rewound_at = datetime.now(timezone.utc)
+    real = turns.mark_conversation_reset
+    tries = []
+
+    def recovers_on_the_third_try(*args, **kwargs):
+        tries.append(kwargs)
+        if len(tries) < 3:
+            raise RuntimeError("database away")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(commands, "_REWIND_RESET_RETRY_SECONDS", (0, 0, 0, 0))
+    monkeypatch.setattr(turns, "mark_conversation_reset", recovers_on_the_third_try)
+    with patch.object(commands, "sync_engine") as sync_engine:
+        sync_engine.broadcast_user_session_updated = AsyncMock()
+        assert await commands._record_rewind_reset("s1", "admin") is False
+        assert _failed("s1") == {"s1"}
+        await commands._retry_rewind_reset("s1", "admin", rewound_at)
+        await asyncio.sleep(0)
+
+    assert len(tries) == 3
+    assert _failed("s1") == set()
+    sync_engine.broadcast_user_session_updated.assert_called_once_with(
+        user_id="admin", session_id="s1", updates={"last_turn_failed": False},
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_rewind_reset_that_never_lands_gives_up_and_the_next_turn_still_decides(mock_db, monkeypatch):
+    from datetime import datetime, timezone
+    from unittest.mock import AsyncMock, patch
+
+    from app.api import commands
+
+    _ended("s1", "aborted", "error", "boom")
+    monkeypatch.setattr(commands, "_REWIND_RESET_RETRY_SECONDS", (0, 0))
+    with patch.object(turns, "mark_conversation_reset", side_effect=RuntimeError("database away")) as mark, \
+            patch.object(commands, "sync_engine") as sync_engine:
+        sync_engine.broadcast_user_session_updated = AsyncMock()
+        await commands._retry_rewind_reset("s1", "admin", datetime.now(timezone.utc))
+    assert mark.call_count == 2
+    sync_engine.broadcast_user_session_updated.assert_not_called()
+    _ended("s1", "completed")
+    assert _failed("s1") == set()
 
 
 def test_clearing_a_conversation_forgets_its_failure(mock_db):

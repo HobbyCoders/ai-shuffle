@@ -11,6 +11,7 @@ Rewind uses persisted transcript/checkpoint services rather than terminal parsin
 
 import asyncio
 import logging
+from datetime import datetime, timezone
 from typing import Optional, List
 from fastapi import APIRouter, HTTPException, Depends, Request
 from pydantic import BaseModel
@@ -614,6 +615,40 @@ def _restore_unsent_message(session_id: str, message_id: str) -> RewindResponseV
                             restored_upload_paths=payload.get("upload_paths") or [])
 
 
+# Seconds between further tries when a rewound chat's reset could not be written.
+_REWIND_RESET_RETRY_SECONDS = (1, 5, 15, 60, 300, 900)
+
+
+async def _record_rewind_reset(
+    session_id: str, user_id: str, *, before: Optional[datetime] = None,
+) -> bool:
+    """Record that the rewound transcript's failure is gone, and tell the sidebar."""
+    from app.db import turns as turns_db
+
+    try:
+        await asyncio.to_thread(turns_db.mark_conversation_reset, session_id, before=before)
+    except Exception:  # noqa: BLE001
+        logger.warning("Could not record the reset of rewound session %s", session_id, exc_info=True)
+        return False
+    spawn_detached(
+        sync_engine.broadcast_user_session_updated(
+            user_id=user_id,
+            session_id=session_id,
+            updates={"last_turn_failed": False},
+        )
+    )
+    return True
+
+
+async def _retry_rewind_reset(session_id: str, user_id: str, rewound_at: datetime) -> None:
+    """Repair the reset once the database is back, without touching any newer turn."""
+    for delay in _REWIND_RESET_RETRY_SECONDS:
+        await asyncio.sleep(delay)
+        if await _record_rewind_reset(session_id, user_id, before=rewound_at):
+            return
+    logger.error("Gave up recording the reset of rewound session %s: its next turn replaces it", session_id)
+
+
 @router.post("/rewind/execute/{session_id}")
 async def execute_rewind(session_id: str, request: RewindRequestV2, http_request: Request = None):
     """
@@ -1131,23 +1166,13 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
     else:
         message = "Rewind failed"
 
-    # The failure the rewound transcript showed is gone with it (#1032).
-    # The rewind has already happened, so a miss here must not report it as failed.
+    # The failure the rewound transcript showed is gone with it (#1032). The rewind
+    # has already happened, so a miss here must not report it as failed: keep trying.
     if request.restore_chat and chat_rewound:
-        from app.db import turns as turns_db
-
-        try:
-            await asyncio.to_thread(turns_db.forget_failures, session_id)
-        except Exception:  # noqa: BLE001
-            logger.warning("Could not forget the failures of rewound session %s", session_id, exc_info=True)
-        else:
-            spawn_detached(
-                sync_engine.broadcast_user_session_updated(
-                    user_id=session.get("api_user_id") or "admin",
-                    session_id=session_id,
-                    updates={"last_turn_failed": False},
-                )
-            )
+        user_id = session.get("api_user_id") or "admin"
+        rewound_at = datetime.now(timezone.utc)
+        if not await _record_rewind_reset(session_id, user_id):
+            spawn_detached(_retry_rewind_reset(session_id, user_id, rewound_at))
 
     # v2 event log: fold the successful chat rewind into the append-only log
     # (unfenced — a rewind happens between turns, with no owning run). A

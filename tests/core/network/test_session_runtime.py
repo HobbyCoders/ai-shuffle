@@ -158,3 +158,34 @@ def test_a_failed_latest_turn_reaches_the_mirror_as_a_failure_on_an_idle_owner(w
     converge([a, b])
     assert seen_on_the_mirror()["remote_runtime_state"] == "idle"
     assert not seen_on_the_mirror().get("last_turn_failed")
+
+
+def test_the_owners_idle_summary_overrides_a_failure_kept_on_the_mirror(workers):
+    """A chat moved away leaves its failed turn behind on the worker it left."""
+    from app.db import turns
+
+    a, b = workers("clearing-owner"), workers("clearing-viewer")
+    with a.active():
+        engine.create_network("Runtime")
+    join(a, b)
+    with a.active():
+        from app.db.projects_v2 import upsert_project
+        project = upsert_project(origin="https://github.com/example/clearing.git", name="Clearing")
+        database.create_session(session_id="moved-away", profile_id="default", project_id=None,
+                                title="Moved away", project_v2_id=project["id"], is_active=True)
+        catalog.publish_owned()
+        engine.scan_all()
+    converge([a, b])
+    with b.active():
+        turn = turns.enqueue_turn("moved-away", "user", prompt="ran here before the move")
+        turns.start_turn(turn["id"])
+        turns.settle_turn(turn["id"], "aborted", "error", error="HTTP 400")
+        assert turns.sessions_with_failed_latest_turn(["moved-away"]) == {"moved-away"}
+        rows = [dict(database.get_session("moved-away"))]
+        rows[0]["last_turn_failed"] = True  # what the list's own read of the turns says
+        with patch.object(database, "get_installs_map", return_value={
+            a.device_id: {"device_name": "Owner", "online": True, "approved": True},
+        }):
+            _annotate_cluster_fields(rows)
+    assert rows[0]["remote_runtime_state"] == "idle"
+    assert rows[0]["last_turn_failed"] is False
