@@ -73,15 +73,32 @@ class NotificationPermissionSmokeTest {
         return matches
     }
 
+    private fun permissionBounds(node: AccessibilityNodeInfo): Rect? {
+        if (!node.refresh() || !node.isEnabled || !node.isVisibleToUser || !node.isClickable) return null
+        val window = node.window ?: return null
+        try {
+            if (!window.isFocused || !window.isActive) return null
+            val bounds = Rect().also { node.getBoundsInScreen(it) }
+            val windowBounds = Rect().also { window.getBoundsInScreen(it) }
+            // A visible cached node can describe a point outside the actual
+            // controller window. Android sends that tap to a no-input backdrop.
+            return bounds.takeIf { bounds.intersect(windowBounds) && !bounds.isEmpty }
+        } finally { window.recycle() }
+    }
+
     private fun tap(text: String, permission: Boolean = false, beforeTap: () -> Unit = {}) {
         var target: AccessibilityNodeInfo? = null
+        var targetBounds: Rect? = null
+        var stableGeometry: List<Int>? = null
+        var stableSince = 0L
         await("Missing ${if (permission) "system notification permission" else "chat"} control: $text") {
-            val root = automation.rootInActiveWindow ?: return@await false
+            val root = automation.rootInActiveWindow
+            if (root == null) { stableGeometry = null; return@await false }
             try {
                 // A native app rationale must not satisfy the system-dialog assertion.
                 val system = root.packageName?.toString() in setOf(
                     "com.android.permissioncontroller", "com.google.android.permissioncontroller")
-                if (permission && !system) return@await false
+                if (permission && !system) { stableGeometry = null; return@await false }
                 if (!permission && root.packageName?.toString() != context.packageName) return@await false
                 // Android transforms permission-button labels (including all caps).
                 // Match the controller's semantic resource ID, not rendered English.
@@ -103,15 +120,28 @@ class NotificationPermissionSmokeTest {
                     found?.recycle()
                     found = null
                 }
+                if (permission) {
+                    val candidate = found
+                    val fresh = candidate?.let { permissionBounds(it) }
+                    val geometry = fresh?.let { listOf(requireNotNull(candidate).windowId, it.left, it.top, it.right, it.bottom) }
+                    val now = SystemClock.uptimeMillis()
+                    if (geometry != stableGeometry) { stableGeometry = geometry; stableSince = now }
+                    // Readiness polling before ONE tap, never retry after input.
+                    if (geometry == null || now - stableSince < 100L) {
+                        candidate?.recycle()
+                        found = null
+                    } else targetBounds = fresh
+                }
                 target = found
                 nodes.forEach { it.recycle() }
                 found != null
             } finally { root.recycle() }
         }
         val node = requireNotNull(target)
-        if (permission) println("NOTIFICATION_PERMISSION_CONTROLLER: package=${node.packageName}; button=${node.viewIdResourceName}")
-        val bounds = Rect()
-        try { node.getBoundsInScreen(bounds) } finally { node.recycle() }
+        val bounds = targetBounds ?: Rect().also { node.getBoundsInScreen(it) }
+        try {
+            if (permission) println("NOTIFICATION_PERMISSION_CONTROLLER: package=${node.packageName}; button=${node.viewIdResourceName}; window=${node.windowId}; bounds=$bounds")
+        } finally { node.recycle() }
         beforeTap()
         val now = SystemClock.uptimeMillis()
         for ((action, time) in listOf(MotionEvent.ACTION_DOWN to now, MotionEvent.ACTION_UP to now + 50)) {
@@ -158,9 +188,7 @@ class NotificationPermissionSmokeTest {
         assertEquals("The runner must not pre-grant notifications", PackageManager.PERMISSION_DENIED,
             context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS))
         assertFalse(NotificationManagerCompat.from(context).areNotificationsEnabled())
-        automation.serviceInfo = automation.serviceInfo.apply {
-            flags = flags or android.accessibilityservice.AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS
-        }
+        val originalAutomationFlags = automation.serviceInfo.flags
         context.getSharedPreferences("needs_you_permission", 0).edit().clear().commit()
         val server = Server.create("Notification fixture", "https://notification-fixture.example", "fixture-key")
         val sessions = AtomicInteger()
@@ -199,6 +227,10 @@ class NotificationPermissionSmokeTest {
             WebResourceResponse("text/html", "utf-8", ByteArrayInputStream(html.toByteArray()))
         }
         try {
+            automation.serviceInfo = automation.serviceInfo.apply {
+                flags = flags or android.accessibilityservice.AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS or
+                    android.accessibilityservice.AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
+            }
             val intent = if (launcher) {
                 requireNotNull(context.packageManager.getLaunchIntentForPackage(context.packageName)).also {
                     assertEquals("Must exercise the manifest launcher", ServerListActivity::class.java.name, it.component?.className)
@@ -229,6 +261,7 @@ class NotificationPermissionSmokeTest {
                 println("NOTIFICATION_PERMISSION_PROOF: entry=${if (launcher) "launcher" else "chat"}; decision=${if (allow) "allow" else "deny"}; real_system_prompt=true; chat_refresh=ok")
             }
         } finally {
+            automation.serviceInfo = automation.serviceInfo.apply { flags = originalAutomationFlags }
             // Closing the launcher scenario does not own the chat it auto-opened.
             instrumentation.runOnMainSync {
                 val monitor = ActivityLifecycleMonitorRegistry.getInstance()

@@ -207,6 +207,20 @@ class PlayWorkflowTests(unittest.TestCase):
         self.assertEqual(apk["uses"], "./.github/workflows/android.yml")
         self.assertNotIn("continue-on-error", apk)
 
+    def test_notification_permission_input_requires_fresh_focused_window_bounds(self):
+        source = (ROOT / "android/app/src/notificationSmokeTest/java/com/hobbycoders/aishuffle/NotificationPermissionSmokeTest.kt").read_text()
+        # The API 36 controller exposed a button before a usable physical target:
+        # InputDispatcher routed the old coordinate to its NO_INPUT_CHANNEL sink.
+        self.assertIn("FLAG_RETRIEVE_INTERACTIVE_WINDOWS", source)
+        self.assertIn("flags = originalAutomationFlags", source)
+        for guard in ("node.refresh()", "node.window", "window.isFocused", "window.isActive",
+                      "bounds.intersect(windowBounds)", "stableGeometry", "stableSince"):
+            with self.subTest(guard=guard):
+                self.assertIn(guard, source)
+        self.assertIn("bounds=$bounds", source)
+        self.assertEqual(1, source.count("automation.injectInputEvent(event, true)"))
+        self.assertNotIn("performAction(AccessibilityNodeInfo.ACTION_CLICK)", source)
+
     def test_all_inline_shell_parses(self):
         for job in self.jobs.values():
             for step in job["steps"]:
