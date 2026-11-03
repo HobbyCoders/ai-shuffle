@@ -93,7 +93,9 @@ object DeviceToolsRuntime {
     }
     internal fun hasCrossAppHost(): Boolean = context?.let { ToolsPreferences(it).crossAppEnabled && ToolsPreferences(it).accessibilityEnabled && ShuffleAccessibilityService.current != null } == true
     internal fun selectedServerName(): String? = server?.name
-    internal fun hasForegroundActivity(): Boolean = activity.get()?.let { !it.isFinishing && !it.isDestroyed && it.hasWindowFocus() } == true
+    // Consent temporarily owns window focus without pausing/detaching its host activity.
+    internal fun hasAttachedActivity(): Boolean = activity.get()?.let { !it.isFinishing && !it.isDestroyed } == true
+    internal fun hasForegroundActivity(): Boolean = hasAttachedActivity() && activity.get()?.hasWindowFocus() == true
     internal suspend fun launch(intent: Intent, deadline: Long): JSONObject {
         val host = activity.get() ?: return ToolRegistry.error("foreground_required", "Open AI Shuffle and retry; no action was performed.")
         val target = server ?: return ToolRegistry.error("authorization_revoked", "Reconnect the selected server; no action was performed.")

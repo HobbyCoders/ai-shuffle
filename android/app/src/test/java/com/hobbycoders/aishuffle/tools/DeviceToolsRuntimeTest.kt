@@ -55,6 +55,16 @@ class DeviceToolsRuntimeTest {
         field("server").set(null, target)
         field("polling").set(null, it)
     }
+    @Test fun dialogFocusLossDoesNotMeanTheApprovalHostWasDetached() {
+        Robolectric.buildActivity(HandoffActivity::class.java).setup().visible().use { controller ->
+            host(controller.get())
+            controller.windowFocusChanged(false)
+            assertTrue(DeviceToolsRuntime.hasAttachedActivity())
+            assertFalse(DeviceToolsRuntime.hasForegroundActivity())
+            DeviceToolsRuntime.detach(controller.get())
+            assertFalse(DeviceToolsRuntime.hasAttachedActivity())
+        }
+    }
     @Test fun ownHandoffDoesNotCancelTheCommandBeforeItsResultCanBePosted() = runBlocking {
         Robolectric.buildActivity(HandoffActivity::class.java).setup().visible().use { controller ->
             controller.windowFocusChanged(true)

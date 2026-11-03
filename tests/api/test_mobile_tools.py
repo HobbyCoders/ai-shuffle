@@ -219,10 +219,27 @@ def test_revoked_expired_device_not_listed(isolated, field, value):
 
 
 @pytest.mark.asyncio
-async def test_timeout_and_cancellation(isolated):
+@pytest.mark.parametrize('claimed', [False, True])
+async def test_timeout_and_cancellation(isolated, monkeypatch, claimed):
     enable()
+    original_enqueue = queue.enqueue
+
+    def enqueue_and_maybe_claim(*args):
+        queued = original_enqueue(*args)
+        if claimed:
+            assert [row['id'] for row in queue.claim('a')] == [queued['id']]
+        return queued
+
+    monkeypatch.setattr(queue, 'enqueue', enqueue_and_maybe_claim)
     start = asyncio.get_running_loop().time()
-    assert (await service.execute('sa', 'a', 'read_screen', {}, timeout=0.03))['error'] == 'device_timeout'
+    result = await service.execute('sa', 'a', 'read_screen', {}, timeout=0.03)
+    assert result['error'] == ('device_timeout' if claimed else 'command_not_delivered')
+    assert result['outcome_unknown'] is claimed
+    if claimed:
+        assert 'safe_to_retry' not in result
+    else:
+        assert result['reason'] == 'device_timeout'
+        assert result['safe_to_retry'] is True
     assert asyncio.get_running_loop().time() - start < 1
     task = asyncio.create_task(service.execute('sa', 'a', 'read_screen', {}))
     await asyncio.sleep(0.03)

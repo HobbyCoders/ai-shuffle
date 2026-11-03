@@ -11,6 +11,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.hobbycoders.aishuffle.data.ServerStore
 import com.hobbycoders.aishuffle.model.Server
+import com.hobbycoders.aishuffle.net.ApiClient
 import com.hobbycoders.aishuffle.tools.*
 import com.hobbycoders.aishuffle.ui.SettingsActivity
 import kotlinx.coroutines.Job
@@ -46,14 +47,14 @@ class DeviceToolsHandoffSmokeTest {
             if (satisfied) return
             SystemClock.sleep(25)
         } while (SystemClock.elapsedRealtime() < deadline)
-        fail(message)
+        fail("$message (runtime availability: ${DeviceToolsRuntime.availability.value})")
     }
     @Test fun successfulHandoffPostsBeforeRealPollingShutdown() = exercise(false, false)
     @Test fun offlineHandoffKeepsResultThroughRealPollingShutdown() = exercise(true, false)
     @Test fun ordinaryPauseDuringApprovalReportsNoActionWithoutWaitingForExpiry() = exercise(false, true)
 
     private fun exercise(offline: Boolean, pauseDuringApproval: Boolean) {
-        val target = Server("handoff-smoke", "Handoff fixture", "https://handoff.invalid", "fixture-key", "fixture-device")
+        val target = Server("handoff-smoke-${System.nanoTime()}", "Handoff fixture", "https://handoff.invalid", "fixture-key", "fixture-device")
         val scope = "${target.id}|${target.baseUrl}|${target.deviceId}"
         instrumentation.runOnMainSync {
             DeviceToolsRuntime.stop()
@@ -79,6 +80,15 @@ class DeviceToolsHandoffSmokeTest {
                 return null // Do NOT intercept: Android must really pause the original activity.
             }
         }
+        // Tools first renew through ApiClient's separate transport. Model that HTTP peer too;
+        // do not seed the renewal cache or bypass its validation/persistence producing path.
+        val renewals = AtomicInteger()
+        val apiField = ApiClient::class.java.getDeclaredField("client\$delegate").apply { isAccessible = true }
+        val previousApi = apiField.get(null)
+        val api = OkHttpClient.Builder().addInterceptor { chain ->
+            renewals.incrementAndGet()
+            PresenceFixture.renewDeviceKey(chain.request(), target)
+        }.build()
         val clientField = DeviceToolsApi::class.java.getDeclaredField("client").apply { isAccessible = true }
         val original = clientField.get(null) as OkHttpClient
         val fixture = original.newBuilder().addInterceptor { chain ->
@@ -113,6 +123,7 @@ class DeviceToolsHandoffSmokeTest {
         }.build()
         instrumentation.addMonitor(monitor)
         clientField.set(null, fixture)
+        apiField.set(null, lazyOf(api))
         try {
             ActivityScenario.launch<SettingsActivity>(Intent(context, SettingsActivity::class.java)).use { scenario ->
                 instrumentation.waitForIdleSync()
@@ -121,6 +132,7 @@ class DeviceToolsHandoffSmokeTest {
                 awaitMain("Settings never gained focus") { host?.hasWindowFocus() == true }
                 scenario.onActivity { DeviceToolsRuntime.attach(it, target) }
                 awaitMain("Real executor never requested approval") { ToolApprovals.pending.value != null }
+                assertEquals("The actual renewal producer must validate the HTTP receipt first", 1, renewals.get())
                 if (pauseDuringApproval) instrumentation.uiAutomation.executeShellCommand("input keyevent KEYCODE_HOME").close()
                 else onView(withText("Allow once")).perform(click())
                 assertTrue("Result did not reach the HTTP peer promptly", enteredPost.await(10, TimeUnit.SECONDS))
@@ -153,6 +165,7 @@ class DeviceToolsHandoffSmokeTest {
             instrumentation.runOnMainSync { DeviceToolsRuntime.stop(); ToolsPreferences(context).setEnabled(false) }
             instrumentation.removeMonitor(monitor)
             clientField.set(null, original)
+            apiField.set(null, previousApi)
         }
     }
 }
