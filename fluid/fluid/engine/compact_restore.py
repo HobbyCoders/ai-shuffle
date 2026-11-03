@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -150,8 +150,23 @@ def _fit(
 ) -> tuple[dict[int, str], dict[int, str], list[tuple[int, RestorationSection, str]]]:
     """:func:`pack_sections`'s choice: the text and status of each section by
     its position, and the non-empty sections."""
-    texts = [(s, s.text.strip()) for s in sections]
-    entries = [(i, s, text) for i, (s, text) in enumerate(texts) if text]
+    return _claim(_normalized(sections), limit)
+
+
+def _normalized(
+    sections: Sequence[RestorationSection],
+) -> list[tuple[int, RestorationSection, str]]:
+    """The non-empty ``sections`` by position, each with its text trimmed. This is
+    for text arriving from a host, once: the rest of a queued section is the source's
+    own text from a cursor, and trimming it again would move the text off its cursor."""
+    entries = [(i, s, s.text.strip()) for i, s in enumerate(sections)]
+    return [entry for entry in entries if entry[2]]
+
+
+def _claim(
+    entries: list[tuple[int, RestorationSection, str]], limit: int,
+) -> tuple[dict[int, str], dict[int, str], list[tuple[int, RestorationSection, str]]]:
+    """Share ``limit`` out among ``entries`` by priority, using each text as given."""
     budget = max(0, int(limit))
     chosen: dict[int, str] = {}
     statuses: dict[int, str] = {}
@@ -225,17 +240,19 @@ class RestorationQueue:
         tail (:meth:`finish`), as a cut section does.
         """
         self.rollback()
-        given = [s for s in sections if s.text.strip()]
-        claim = min((s.priority for s in given), default=None)
+        placed = _normalized(sections)
+        claim = min((e[1].priority for e in placed), default=None)
         yielding = [] if claim is None else [
             item for item in self._sending
             if item.left.strip() and item.section.priority > claim
         ]
         for item in yielding:
             self._release(item)
-        offers = [*sections, *(replace(item.section, text=item.left) for item in yielding)]
-        chosen, statuses, entries = _fit(offers, self.total - self._used)
-        placed = [e for e in entries if e[0] < len(sections)]
+        chosen, statuses, _ = _claim(
+            [*placed, *((at, item.section, item.left)
+                        for at, item in enumerate(yielding, start=len(sections)))],
+            self.total - self._used,
+        )
         # After what the host gave so far or, with text yielding, just ahead of it.
         start = min((item.order for item in yielding), default=None)
         spaced = [self._next + at for at in range(len(placed))] if start is None else [
@@ -355,13 +372,15 @@ class RestorationQueue:
             if item.whole[item.cursor:].strip():
                 again.append(item)
         leads = [f"[{item.section.name}, continued]\n" if item.cursor else "" for item in again]
+        rests = [item.whole[item.cursor:] for item in again]
+        bodies = [rest.lstrip("\n") for rest in rests]
         chosen, statuses, _ = _fit(
             [RestorationSection(name=item.section.name,
-                                text=lead + item.whole[item.cursor:].lstrip("\n"),
+                                text=lead + body,
                                 priority=item.section.priority,
                                 max_chars=item.section.max_chars,
                                 cuttable=item.section.cuttable)
-             for item, lead in zip(again, leads)], limit,
+             for item, lead, body in zip(again, leads, bodies)], limit,
         )
         for i, item in enumerate(again):
             self._stage(item)
@@ -371,7 +390,9 @@ class RestorationQueue:
                 item.left, item.final = "", DELIVERED
             elif status == CUT:
                 body = _body_chars(item.section.name, chosen[i], CUT) - len(leads[i])
-                item.sent = item.body = item.cursor + max(0, body)
+                # The line breaks skipped above count: the cursor is on ``whole``.
+                moved = body + len(rests[i]) - len(bodies[i]) if body > 0 else 0
+                item.sent = item.body = item.cursor + moved
                 item.left, item.final = "", CUT
             else:
                 item.left, item.final = "", CUT if item.cursor else OMITTED

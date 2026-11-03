@@ -377,14 +377,105 @@ def test_a_section_put_ahead_comes_first_on_the_wire_and_nothing_is_kept_for_it_
 
 
 def test_a_partly_sent_lower_section_keeps_its_cursor_when_it_yields() -> None:
-    record = "".join(f"record line {i:05d}\n" for i in range(800))
+    whole = _INDENTED.strip()
     queue = RestorationQueue("cmp_1", 20_000)
-    queue.add([RestorationSection(name="record", text=record, priority=4, cuttable=True)])
-    sent = queue.take(9_000).split("\n[record continues")[0]
+    queue.add([RestorationSection(name="memory", text=_INDENTED, priority=4, cuttable=True)])
+    pieces = _memory_pieces(queue.take(9_000))
     queue.acknowledge()
     queue.add([RestorationSection(name="instructions", text="i" * 15_000, cuttable=True)])
+    # The instructions take all the room left, so the rest of memory waits for the tail.
+    assert _status(queue)["memory"] == CUT
     tail = queue.finish(40_000)
     assert "i" * 100 in tail
-    # The record resumes where it really stopped: no line twice, none skipped.
-    lines = re.findall(r"record line \d{5}", sent + tail)
+    # The record resumes where it really stopped: byte for byte, not just line numbers.
+    pieces += _memory_pieces(tail)
+    _delivered(whole, pieces)
+    lines = re.findall(r"record line \d{5}", "".join(pieces))
     assert lines == [f"record line {i:05d}" for i in range(800)]
+
+
+# Indented lines: a split leaves the rest of the text starting with spaces that belong to it.
+_INDENTED = "".join(f"        record line {i:05d}\n" for i in range(800))
+
+
+def _delivered(whole: str, pieces: list[str]) -> None:
+    """``pieces`` are ``whole`` in order, byte for byte: nothing repeated or skipped
+    and only blank text between them (what a split or a cut trims at its edge)."""
+    at = 0
+    for piece in pieces:
+        found = whole.find(piece, at)
+        assert found >= 0, f"not the source's own text from {at}: {piece[:40]!r}"
+        assert not whole[at:found].strip(), f"skipped text at {at}: {whole[at:found][:40]!r}"
+        at = found + len(piece)
+    assert not whole[at:].strip(), f"never sent, from {at}: {whole[at:at + 40]!r}"
+
+
+def _memory_pieces(text: str) -> list[str]:
+    """The memory text in one hook answer or tail, without what the queue wraps it in."""
+    pieces = []
+    for part in text.split("\n\n"):
+        if part.startswith("i"):
+            continue
+        part = part.removeprefix("[memory, continued]\n")
+        part = re.sub(r"\n\[memory (continues in a later note|cut: [^\]]*)\]$", "", part)
+        pieces.append(part)
+    return pieces
+
+
+def test_a_section_that_yields_keeps_its_indentation_through_to_delivery() -> None:
+    whole = _INDENTED.strip()
+    credited: list[str] = []
+    queue = RestorationQueue("cmp_1", 30_000)
+    queue.add([RestorationSection(name="memory", text=_INDENTED, priority=3, cuttable=True,
+                                  on_delivered=lambda: credited.append("memory"))])
+    pieces = _memory_pieces(queue.take(9_000))
+    queue.acknowledge()
+    stopped = next(r.chars for r in queue.receipts() if r.name == "memory")
+    assert whole[stopped:].startswith("        record line ")
+    queue.add([RestorationSection(name="instructions", text="i" * 2_000)])
+    while queue.waiting:
+        part = queue.take(9_000)
+        assert part, "a pending part must fit an empty answer"
+        queue.acknowledge()
+        pieces += _memory_pieces(part)
+    memory = next(r for r in queue.receipts() if r.name == "memory")
+    assert (memory.status, memory.chars, memory.original_chars) == (DELIVERED, len(whole), len(whole))
+    assert pieces[1].startswith("        record line ")  # the suffix went out as it was queued
+    _delivered(whole, pieces)
+    assert credited == ["memory"]
+    assert queue.complete
+
+
+def test_a_section_cut_when_it_yields_resumes_on_the_tail_at_its_own_source_text() -> None:
+    whole = _INDENTED.strip()
+    queue = RestorationQueue("cmp_1", 22_000)
+    queue.add([RestorationSection(name="memory", text=_INDENTED, priority=3, cuttable=True)])
+    pieces = _memory_pieces(queue.take(9_000))
+    queue.acknowledge()
+    queue.add([RestorationSection(name="instructions", text="i" * 8_000)])
+    while queue.waiting:
+        part = queue.take(9_000)
+        assert part, "a pending part must fit an empty answer"
+        queue.acknowledge()
+        pieces += _memory_pieces(part)
+    memory = next(r for r in queue.receipts() if r.name == "memory")
+    assert memory.status == CUT
+    tail = queue.finish(40_000)
+    queue.acknowledge()
+    pieces += _memory_pieces(tail)
+    _delivered(whole, pieces)
+    assert next(r for r in queue.receipts() if r.name == "memory").chars == len(whole)
+
+
+def test_a_section_cut_on_the_tail_resumes_from_there_on_the_next_tail() -> None:
+    whole = _INDENTED.strip()
+    queue = RestorationQueue("cmp_1", 5_000)
+    queue.add([RestorationSection(name="memory", text=_INDENTED, priority=3, cuttable=True)])
+    pieces: list[str] = []
+    for _ in range(12):
+        tail = queue.finish(4_000)
+        queue.acknowledge()
+        if not tail:
+            break
+        pieces += _memory_pieces(tail)
+    _delivered(whole, pieces)

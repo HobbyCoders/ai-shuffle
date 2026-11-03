@@ -125,6 +125,8 @@ events, then the next call (`scenarios/compact-after-tool.json` plays it).
   leans on it, so if the boundary then shows it did not apply, what the note left
   out is queued again under the same id. The replacement takes back what the old
   copy had not sent and the room of lower-priority text still waiting, ahead of it.
+  Text that gives way keeps its exact bytes and its position in the source, leading
+  indentation included, so it is credited correctly and never repeats when it resumes.
   What already went out stays counted, so the note's total never rises, and what no
   longer fits waits for the next turn's tail.
 - That a turn can carry extra text whatever it is. The CLI reads a slash command
