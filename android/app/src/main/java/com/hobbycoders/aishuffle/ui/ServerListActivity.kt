@@ -3,6 +3,7 @@ package com.hobbycoders.aishuffle.ui
 import android.content.Intent
 import android.content.res.ColorStateList
 import android.os.Bundle
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import android.widget.ImageView
@@ -68,7 +69,9 @@ class ServerListActivity : NativeScreen() {
     private fun refreshPresence() {
         presence.start(statusRows.values.map { it.server }, AccountRepository(this).store.session()) { observations ->
             if (autoConnectPending && !notificationDialogOpen && connectionJob?.isActive != true) {
-                connectionJob = lifecycleScope.launch {
+                // Always posted: a sweep can end inside onResume, before RESUMED, and this job would
+                // then give up with nothing left to retry it. A worker that is reachable must still open.
+                connectionJob = lifecycleScope.launch(Dispatchers.Main) {
                     val target = reachableFixture?.invoke(observations) ?: WorkerConnections.reachable(this@ServerListActivity, observations = observations)
                     // A request may have started during the search. The lifecycle cannot show it: Android
                     // can report RESUMED after the request, before it pauses this activity for the prompt.
@@ -92,11 +95,12 @@ class ServerListActivity : NativeScreen() {
     }
     override fun onResume() {
         super.onResume()
-        render()
-        // A second request while one is open would come back as a cancellation and end the wait early.
+        // Before render: its sweep must already see the request. A second request while
+        // one is open would come back as a cancellation and end the wait early.
         if (!notificationDialogOpen) com.hobbycoders.aishuffle.push.PushPermission.ask(this, dialogOpen = { notificationDialogOpen = it }) {
             runCatching { pushPermission.launch(it) }.onFailure { notificationRequestEnded() }
         }
+        render()
         com.hobbycoders.aishuffle.push.PushRegistration.schedule(this)
         if (intent.getBooleanExtra("auth_expired", false)) {
             status.text = "Your sign-in expired. Sign in again to restore your workers."

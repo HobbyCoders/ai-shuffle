@@ -60,8 +60,8 @@ import javax.crypto.spec.SecretKeySpec
 @Config(sdk = [34])
 class ServerListAutoConnectTest {
     private val context: android.app.Application get() = RuntimeEnvironment.getApplication()
-    // The real probe runs on OkHttp's threads, as on a phone, so its sweep always ends after
-    // onResume. Nothing listens on this local port, so it fails at once and leaves the machine.
+    // The real probe runs on OkHttp's threads, as on a phone. Nothing listens on this local
+    // port, so it fails at once and never leaves the machine.
     private val worker = Server("worker", "Home", "https://127.0.0.1:1", "aim_key", "phone")
     private val probes = (WorkerPresenceProbe::class.java.getDeclaredField("client").apply { isAccessible = true }.get(null) as OkHttpClient).dispatcher
     private val opened = mutableListOf<String?>()
@@ -129,6 +129,28 @@ class ServerListAutoConnectTest {
         notifications(enabled = true)
         val list = launcher().setup()
         assertNull(shadowOf(list.get()).lastRequestedPermission)
+        assertOpenedOnce(list)
+    }
+
+    /**
+     * A probe that cannot build its request never suspends, so the whole sweep ends inside
+     * onResume, before the lifecycle reports RESUMED. A probe that fails at once can do the same.
+     */
+    private fun sweepEndsInsideTheResume() = ServerStore.get(context).add(worker.copy(baseUrl = "not a url"))
+
+    @Test fun aSweepThatEndsInsideTheResumeStillConnects() {
+        sweepEndsInsideTheResume()
+        notifications(enabled = true)
+        assertOpenedOnce(launcher().setup())
+    }
+
+    @Test fun aSweepThatEndsInsideTheResumeAlreadySeesTheRequest() {
+        sweepEndsInsideTheResume()
+        val list = launcher().setup()
+        val code = requestCode(list)
+        assertWaitingForTheAnswer(list)
+        assertEquals("the request starts before the sweep", 0, searches)
+        answer(list, code, granted = true)
         assertOpenedOnce(list)
     }
 
