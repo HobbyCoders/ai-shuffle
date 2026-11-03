@@ -65,6 +65,20 @@
 	],
 	"rules": [
 		{
+			"why": "rewind and fork must reseed Claude Code in the same session cwd used for resume",
+			"journeys": ["claude-rewind-cwd"],
+			"globs": [
+				"frontend/tests/journeys/claude-rewind-cwd.journey.mjs",
+				"app/api/commands.py",
+				"app/api/command_context.py",
+				"app/api/sessions_fork.py",
+				"app/core/project_resolver.py",
+				"app/core/message_resolver.py",
+				"app/core/jsonl_rewind.py",
+				"app/core/provider/fluid_transcript.py"
+			]
+		},
+		{
 			"why": "bounded transcript windows and live text selection",
 			"journeys": ["transcript-reader", "transcript-boundary"],
 			"globs": [
