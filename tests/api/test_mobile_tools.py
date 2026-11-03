@@ -466,12 +466,21 @@ async def test_private_result_posted_during_final_sleep_is_withheld_after_revoca
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('name,args', [('tap_node', {'ref': 'snapshot:node'}), ('get_location', {})])
+@pytest.mark.parametrize('name,args', [
+    ('tap_node', {'ref': 'snapshot:node'}), ('scroll', {'ref': 'snapshot:node', 'direction': 'down'}),
+    ('go_back', {'ref': 'snapshot:node'}), ('get_location', {}),
+])
 @pytest.mark.parametrize('refusal', [
     {'ok': False, 'status': 'denied', 'error': 'private-denial-details'},
     {'ok': False, 'status': 'denied'},
     {'success': False, 'status': 'failed'},
     {'error': 'private-error-details'},
+    {'ok': False, 'status': 'interrupted', 'error': 'Execution was interrupted after a durable claim. '
+     'It will not be repeated; verify the device before requesting another action.'},
+    {'ok': False, 'status': 'expired', 'error': 'Execution deadline elapsed. Verify device state; '
+     'this command will not be repeated.'},
+    {'ok': False, 'status': 'result_too_large', 'error': 'Device output exceeded the delivery limit. '
+     'The action may have run; verify device state before retrying.'},
 ])
 async def test_withheld_device_refusal_is_not_reported_as_successful_completion(isolated, monkeypatch, name, args, refusal):
     queue.capabilities('a', True, [name])
@@ -491,7 +500,15 @@ async def test_withheld_device_refusal_is_not_reported_as_successful_completion(
     result = await service.execute('sa', 'a', name, args)
     assert result['error'] == 'device_not_authorized'
     assert result.get('completed_on_device') is not True
-    assert 'refused or failed' in result['message'].lower()
+    if refusal.get('status') in ('interrupted', 'expired', 'result_too_large'):
+        assert 'refused or failed' not in result['message'].lower()
+        assert result['outcome_unknown'] is True
+        assert result.get('safe_to_retry') is not True
+        assert 'may have performed' in result['message'].lower()
+        assert 'verify device state before retrying' in result['message'].lower()
+    else:
+        assert 'refused or failed' in result['message'].lower()
+        assert result.get('outcome_unknown') is not True
     assert 'authorization could not be confirmed' in result['message'].lower()
     assert 'result' not in result
     assert 'private-' not in json.dumps(result)

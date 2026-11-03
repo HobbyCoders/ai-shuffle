@@ -182,6 +182,12 @@ async def _completed_outcome(session_id, device_id, command_id, name, row):
     except Exception:
         authorized = False
     if not authorized and name not in HANDOFFS:
+        # These receipts can follow a side effect; an error is not proof of non-execution.
+        # `expired` also covers pre-execution expiry, so conservatively preserve uncertainty.
+        if result.get('status') in ('interrupted', 'expired', 'result_too_large'):
+            withheld = {'command_id': command_id, **_unknown_outcome('device_not_authorized')}
+            withheld['message'] += ' Its result is withheld because authorization could not be confirmed.'
+            return withheld
         failed = (bool(result.get('error')) or result.get('ok') is False
                   or result.get('success') is False or result.get('status') in ('denied', 'failed', 'error'))
         withheld = {'command_id': command_id, 'success': False, 'error': 'device_not_authorized',
