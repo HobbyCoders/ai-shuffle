@@ -12,6 +12,7 @@ import logging
 import os
 import re
 import socket
+import subprocess
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -21,7 +22,7 @@ import psycopg2
 import pytest
 
 from app.core import session_runtime, start_admission
-from app.db import base, commit_deadline, database, history_indexing
+from app.db import backend_probe, base, commit_deadline, database, history_indexing
 from app.db import turns as turns_db
 from app.db.schema_postgres import create_postgres_schema
 from tests.core.helpers import make_pump
@@ -261,9 +262,9 @@ async def test_no_answer_from_postgres_keeps_the_checkout_counted(
 
     def unreachable(*args: Any, **kwargs: Any) -> None:
         asked.set()
-        raise psycopg2.OperationalError("connection refused")
+        raise backend_probe.NoAnswer("OperationalError")
 
-    monkeypatch.setattr(base.psycopg2, "connect", unreachable)
+    monkeypatch.setattr(private_pool._backend_probe, "read", unreachable)
     await _until(asked.is_set)
     await asyncio.sleep(0.2)
     assert base.pressure_stats()["retained_holds"] == 0
@@ -304,7 +305,8 @@ async def test_a_backend_that_exited_is_final_and_never_asked_about_again(
     private_pool.putconn(killer)
     await _until(lambda: base.pressure_stats()["retained_holds"] == 1)
     asked = threading.Event()
-    monkeypatch.setattr(base, "_read_backend_states", lambda *a, **k: asked.set() or {})
+    monkeypatch.setattr(private_pool._backend_probe, "read",
+                        lambda *a, **k: asked.set() or {})
     deadline = time.monotonic() + 0.3
     while time.monotonic() < deadline:
         base.pressure_stats()
@@ -346,13 +348,14 @@ async def test_a_producing_turn_runs_on_the_real_pool_beside_a_wedged_checkout(
     monkeypatch.setattr(start_admission, "admission", quick_gate)
     # PostgreSQL's answer waits for the test: the gate's order is then fixed, not timed.
     may_answer = threading.Event()
-    real_read = base._read_backend_states
+    probe = base._pg_pool._backend_probe
+    real_read = probe.read
 
     def read_when_allowed(*args: Any) -> dict:
         assert may_answer.wait(15)
         return real_read(*args)
 
-    monkeypatch.setattr(base, "_read_backend_states", read_when_allowed)
+    monkeypatch.setattr(probe, "read", read_when_allowed)
     wedge.steal(libpq_fd=True, duplicate=True)
     wedge.start()
     await asyncio.sleep(0.1)
@@ -605,7 +608,7 @@ def test_a_deadline_with_a_retained_borrower_names_it_without_private_values(
 
 
 # ---------------------------------------------------------------------------
-# The probe itself can never become the barrier
+# Any failure of the probe means no answer, and no answer keeps the checkout counted
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
@@ -615,155 +618,99 @@ def silent_server() -> Iterator[int]:
         yield server.getsockname()[1]
 
 
-def _params(pool: base._RetainingThreadedConnectionPool) -> dict[str, Any]:
-    return {k: v for k, v in pool._kwargs.items() if k != "application_name"}
-
-
 @pytest.mark.asyncio
-async def test_a_probe_that_fails_and_cannot_even_log_does_not_stop_later_probes(
-    private_pool, quick_gate, monkeypatch,  # noqa: F811
-) -> None:
-    monkeypatch.setattr(base, "_HOLD_CHECK_SECONDS", 0.1)
-    forgotten = private_pool.getconn()
-    asked = threading.Event()
-
-    def unreachable(*args: Any, **kwargs: Any) -> None:
-        asked.set()
-        raise psycopg2.OperationalError("connection refused")
-
-    def broken_log(*args: Any, **kwargs: Any) -> None:
-        raise RuntimeError("log sink failed")
-
-    with monkeypatch.context() as broken:
-        broken.setattr(base.psycopg2, "connect", unreachable)
-        broken.setattr(base.logger, "log", broken_log)
-        await _until(asked.is_set)
-        await _until(lambda: not private_pool._hold_check_running)
-    await asyncio.sleep(0.3)  # It must age past the check age to be idle enough to release.
-    await _until(lambda: base.pressure_stats()["retained_holds"] == 1)
-    private_pool.putconn(forgotten)
-
-
-def test_a_silent_server_cannot_hold_the_probe_past_its_deadline(
-    private_pool, silent_server, monkeypatch,  # noqa: F811
-) -> None:
-    monkeypatch.setattr(base, "_HOLD_PROBE_SECONDS", 0.3)
-    params = {**_params(private_pool), "host": "127.0.0.1", "port": silent_server}
-    started = time.monotonic()
-    with pytest.raises(TimeoutError):
-        base._read_backend_states([1], (), params, "127.0.0.1")
-    assert time.monotonic() - started < 2
-
-
-@pytest.mark.asyncio
-async def test_a_stuck_probe_ends_and_the_next_one_recovers_the_checkout(
+async def test_a_probe_that_is_killed_keeps_the_checkout_counted_and_the_next_one_recovers(
     private_pool, quick_gate, silent_server, monkeypatch,  # noqa: F811
 ) -> None:
-    """The review's wedge: without a wall clock this held the flag, and every turn, forever."""
+    """The real child, really killed at its deadline, then a real answer."""
     monkeypatch.setattr(base, "_HOLD_CHECK_SECONDS", 0.1)
-    monkeypatch.setattr(base, "_HOLD_PROBE_SECONDS", 0.2)
+    monkeypatch.setattr(base, "_HOLD_PROBE_SECONDS", 0.5)
+    monkeypatch.setattr(base, "_HOLD_RECHECK_SECONDS", 0.0)
     forgotten = private_pool.getconn()
-    real = private_pool._kwargs, private_pool._server_address
-    private_pool._kwargs = {**real[0], "host": "127.0.0.1", "port": silent_server}
-    private_pool._server_address = "127.0.0.1"
-    await _until(lambda: private_pool._hold_check_running)
-    await _until(lambda: not private_pool._hold_check_running, 2)
+    real = private_pool._kwargs
+    private_pool._kwargs = {**real, "host": "127.0.0.1", "hostaddr": "127.0.0.1",
+                            "port": silent_server}
+    await _until(lambda: base.pressure_stats() and private_pool._hold_check_running)
+    await _until(lambda: private_pool._backend_probe._child is not None)
+    child = private_pool._backend_probe._child
+    await _until(lambda: child.returncode is not None, 3)
+    assert child.returncode != 0, "the deadline, not the child, must have ended it"
     assert base.pressure_stats()["retained_holds"] == 0
     assert quick_gate._pressured(time.monotonic()), "no answer must not release anything"
-    private_pool._kwargs, private_pool._server_address = real
-    await asyncio.sleep(0.2)
+    private_pool._kwargs = real
     await _until(lambda: base.pressure_stats()["retained_holds"] == 1)
     private_pool.putconn(forgotten)
 
 
-@pytest.mark.parametrize("steal_at", ["before_the_query", "while_waiting_for_the_answer"])
-def test_a_probe_whose_number_changed_hands_never_touches_the_new_owner(
-    private_pool, monkeypatch, steal_at,  # noqa: F811
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["thread", "process"])
+async def test_a_probe_that_cannot_start_is_no_answer_and_backs_off(
+    private_pool, quick_gate, monkeypatch, failure,  # noqa: F811
 ) -> None:
-    """No query, no read, no goodbye and no close on someone else's socket."""
-    stranger, stranger_peer = socket.socketpair()
-    stranger_peer.setblocking(False)
-    kept: list[Any] = []
-    monkeypatch.setattr(base, "_probes_kept_open", kept)
-    real_wait = base._BackendProbe.wait
+    """A working borrower must not keep an earlier idle answer because nothing could ask."""
+    monkeypatch.setattr(base, "_HOLD_CHECK_SECONDS", 0.1)
+    resumed = private_pool.getconn()
+    await _until(lambda: base.pressure_stats()["retained_holds"] == 1)
+    monkeypatch.setattr(base, "_HOLD_RECHECK_SECONDS", 60.0)
+    attempts: list[int] = []
 
-    def wait(self: Any, connecting: bool = False) -> None:
-        if connecting:
-            real_wait(self, connecting)
-            if steal_at == "before_the_query":
-                os.dup2(stranger.fileno(), self.conn.fileno())
-            return
-        os.dup2(stranger.fileno(), self.conn.fileno())
-        real_wait(self)
+    def refuse(*args: Any, **kwargs: Any) -> None:
+        attempts.append(1)
+        raise (RuntimeError if failure == "thread" else OSError)("cannot start")
 
-    monkeypatch.setattr(base._BackendProbe, "wait", wait)
-    with pytest.raises(OSError, match="changed hands"):
-        base._read_backend_states(
-            [1], (), _params(private_pool), private_pool._server_address)
-    assert len(kept) == 1 and not kept[0].closed
-    number = kept[0].fileno()
-    assert commit_deadline._identity(number) == commit_deadline._identity(stranger.fileno())
-    if steal_at == "before_the_query":
-        # The while-waiting case sent its query before the number changed hands.
-        with pytest.raises(BlockingIOError):
-            stranger_peer.recv(1)
-    _peer_still_works(stranger, stranger_peer)
-    _STOLEN_PROBES.extend(kept)  # Freed, it would close the number it no longer owns.
-    stranger.close()
-    stranger_peer.close()
+    private_pool._next_hold_check = 0.0
+    with monkeypatch.context() as broken:
+        if failure == "thread":
+            broken.setattr(base.threading.Thread, "start", refuse)
+        else:
+            broken.setattr(subprocess, "Popen", refuse)
+        await _until(lambda: base.pressure_stats() and attempts)
+        await _until(lambda: not private_pool._hold_check_running)
+        assert not private_pool._holds[id(resumed)].silent(time.monotonic())
+        for _ in range(20):
+            base.pressure_stats()
+            await asyncio.sleep(0.01)
+        assert len(attempts) == 1, "a failure to start must wait for the next check"
+        assert private_pool._next_hold_check > time.monotonic()
+    assert quick_gate._pressured(time.monotonic())
+    private_pool.putconn(resumed)
 
 
-_STOLEN_PROBES: list[Any] = []
-
-
-def test_the_probe_stays_bounded_when_it_cannot_see_the_number_was_replaced(
-    private_pool, monkeypatch,  # noqa: F811
+def test_shutting_down_kills_a_running_probe_and_starts_no_more(
+    private_db, silent_server,  # noqa: F811
 ) -> None:
-    """The check can lose a race, and Windows has none: the clock must hold regardless."""
-    stranger, stranger_peer = socket.socketpair()
-    monkeypatch.setattr(base, "_HOLD_PROBE_SECONDS", 0.3)
-    monkeypatch.setattr(base, "_identity", lambda fd: None)
-    real_wait = base._BackendProbe.wait
-
-    def wait(self: Any, connecting: bool = False) -> None:
-        real_wait(self, connecting)
-        if connecting:
-            os.dup2(stranger.fileno(), self.conn.fileno())
-
-    monkeypatch.setattr(base._BackendProbe, "wait", wait)
-    started = time.monotonic()
-    with pytest.raises(TimeoutError):
-        base._read_backend_states(
-            [1], (), _params(private_pool), private_pool._server_address)
-    assert time.monotonic() - started < 2
-    stranger.close()
-    stranger_peer.close()
+    params = {k: private_db[k] for k in ("host", "port", "user", "password")}
+    pool = base._RetainingThreadedConnectionPool(
+        1, 3, reserved=1, dbname=private_db["database"], **params)
+    probe = pool._backend_probe
+    worker = threading.Thread(target=lambda: _expect_no_answer(probe, silent_server), daemon=True)
+    worker.start()
+    deadline = time.monotonic() + 5
+    while probe._child is None and time.monotonic() < deadline:
+        time.sleep(0.01)
+    child = probe._child
+    pool.shutdown(timeout=1)
+    worker.join(3)
+    assert not worker.is_alive() and child.returncode is not None
+    with pytest.raises(backend_probe.NoAnswer):
+        probe.read([1], (), {}, 1)
 
 
-def test_the_probe_never_looks_up_a_name_inside_libpq(monkeypatch) -> None:
-    """A lookup would block where no clock reaches: it waits for a known address."""
-    monkeypatch.setattr(base.psycopg2, "connect", lambda *a, **k: pytest.fail("connected"))
-    with pytest.raises(LookupError):
-        base._read_backend_states([1], (), {"host": "db.example"}, None)
+def _expect_no_answer(probe: backend_probe.BackendProbe, port: int) -> None:
+    with pytest.raises(Exception):
+        probe.read([1], (), {"host": "127.0.0.1", "hostaddr": "127.0.0.1", "port": port,
+                             "connect_timeout": 30}, 30)
 
 
-def test_the_probe_connects_to_the_address_the_pool_already_uses(
-    private_pool, monkeypatch,  # noqa: F811
+def test_the_probe_reads_real_backends_through_its_own_process(
+    private_pool,  # noqa: F811
 ) -> None:
-    connections: list[dict[str, Any]] = []
-    real = base.psycopg2.connect
-
-    def spy(*args: Any, **kwargs: Any) -> Any:
-        connections.append(kwargs)
-        return real(*args, **kwargs)
-
-    monkeypatch.setattr(base.psycopg2, "connect", spy)
     held = private_pool.getconn()
     pid = held.info.backend_pid
-    answer = base._read_backend_states(
-        [pid], (), _params(private_pool), private_pool._server_address)
+    kwargs = {k: v for k, v in private_pool._kwargs.items() if k != "application_name"}
+    answer = private_pool._backend_probe.read([pid], private_pool._args, kwargs, 15)
     assert answer[pid]["tag"].startswith("ai-shuffle-pool-")
-    assert connections[-1].get("hostaddr") == private_pool._server_address
+    assert answer[pid]["state"] == "idle"
     private_pool.putconn(held)
 
 
@@ -780,9 +727,9 @@ async def test_a_failed_recheck_ends_an_idle_answer_for_a_checkout_that_resumed(
     await _until(lambda: base.pressure_stats()["retained_holds"] == 1)
 
     def unreachable(*args: Any, **kwargs: Any) -> None:
-        raise psycopg2.OperationalError("connection refused")
+        raise backend_probe.NoAnswer("OperationalError")
 
-    monkeypatch.setattr(base.psycopg2, "connect", unreachable)
+    monkeypatch.setattr(private_pool._backend_probe, "read", unreachable)
     cursor = resumed.cursor()
     worker = threading.Thread(target=lambda: cursor.execute("SELECT pg_sleep(0.8)"), daemon=True)
     worker.start()
@@ -811,7 +758,7 @@ async def test_a_stalled_recheck_lets_the_idle_answer_lapse_without_a_replacemen
         assert release.wait(10)
         raise psycopg2.OperationalError("gave up")
 
-    monkeypatch.setattr(base, "_read_backend_states", stalled)
+    monkeypatch.setattr(private_pool._backend_probe, "read", stalled)
     await _until(lambda: base.pressure_stats()["retained_holds"] == 0)
     assert start_admission.snapshot()["oldest"] >= 0.1
     assert private_pool._hold_check_running and len(calls) == 1
@@ -829,8 +776,8 @@ async def test_a_confirmed_exit_stays_final_when_later_probes_fail(
     private_pool._holds[id(gone)].exited = True
     young = private_pool.getconn()
     private_pool._holds[id(young)].idle_until = time.monotonic() + 60
+    monkeypatch.setattr(private_pool._backend_probe, "read", lambda *a: 1 / 0)
     private_pool._check_holds({})  # What every failed probe does, whichever checkout it was for.
-    monkeypatch.setattr(base, "_read_backend_states", lambda *a: 1 / 0)
     private_pool._check_holds({id(young): private_pool._holds[id(young)]})
     assert private_pool._holds[id(gone)].exited
     assert private_pool._holds[id(young)].idle_until == 0.0
@@ -859,15 +806,15 @@ async def test_a_pid_reused_before_any_absence_is_seen_is_not_charged_to_the_dea
     busy_pid = busy.info.backend_pid
     cursor = busy.cursor()
     worker = threading.Thread(target=lambda: cursor.execute("SELECT pg_sleep(1.0)"), daemon=True)
-    real_read = base._read_backend_states
+    real_read = private_pool._backend_probe.read
     answers: list[dict] = []
 
-    def read(pids: list[int], args: Any, kwargs: Any, address: Any) -> dict:
-        rows = real_read([busy_pid], args, kwargs, address)
+    def read(pids: list[int], args: Any, kwargs: Any, seconds: float) -> dict:
+        rows = real_read([busy_pid], args, kwargs, seconds)
         answers.append(rows[busy_pid])
         return {dead_pid: rows[busy_pid], busy_pid: rows[busy_pid]}
 
-    monkeypatch.setattr(base, "_read_backend_states", read)
+    monkeypatch.setattr(private_pool._backend_probe, "read", read)
     worker.start()
     await _until(lambda: private_pool._holds[id(dead)].exited)
     assert answers[0]["state"] == "active"
@@ -894,37 +841,3 @@ def test_a_commit_whose_number_was_closed_fails_as_a_lost_connection(
             os.close(conn.fileno())
     assert not private_pool._used
     _serve_healthy_reads()
-
-
-@pytest.mark.asyncio
-async def test_a_probe_stuck_inside_libpq_is_replaced_a_limited_number_of_times(
-    private_pool, quick_gate, monkeypatch,  # noqa: F811
-) -> None:
-    """No clock reaches a thread inside libpq, so one stuck thread must not end checking."""
-    monkeypatch.setattr(base, "_HOLD_CHECK_SECONDS", 0.1)
-    monkeypatch.setattr(base, "_HOLD_PROBE_SECONDS", 0.05)
-    monkeypatch.setattr(base, "_HOLD_RECHECK_SECONDS", 0.0)
-    forgotten = private_pool.getconn()
-    release = threading.Event()
-    calls: list[int] = []
-
-    def stuck(*args: Any, **kwargs: Any) -> None:
-        calls.append(1)
-        release.wait(10)
-        return {forgotten.info.backend_pid: {
-            "state": "idle", "wait_type": None, "wait": None, "state_age": 60.0,
-            "tag": private_pool._holds[id(forgotten)].backend[1]}}
-
-    with monkeypatch.context() as stalled:
-        stalled.setattr(base, "_read_backend_states", stuck)
-        await _until(lambda: base.pressure_stats() and len(calls) == 1 + base._HOLD_STUCK_PROBES)
-        for _ in range(20):
-            base.pressure_stats()
-            await asyncio.sleep(0.02)
-        assert len(calls) == 1 + base._HOLD_STUCK_PROBES, "replacements must be bounded"
-        monkeypatch.setattr(base, "_HOLD_RECHECK_SECONDS", 60.0)
-        release.set()
-    # Replaced probes that return late speak for nothing; the newest one still does.
-    await _until(lambda: not private_pool._hold_check_running)
-    assert private_pool._holds[id(forgotten)].silent(time.monotonic())
-    private_pool.putconn(forgotten)

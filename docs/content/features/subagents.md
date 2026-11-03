@@ -57,10 +57,12 @@ increase pool capacity or allow starts to borrow lease-reserved connections.
 An old checkout keeps holding new turns for as long as it could be doing database
 work, however long that takes: the 30-second statement limit bounds each statement,
 not the whole transaction. Once a checkout passes 60 seconds the worker asks
-PostgreSQL about it on a separate connection and logs a warning naming the thread and
-the backend's state. The checkout stops counting only if its backend has exited or
-has run nothing for 60 seconds. Exiting is final; an idle answer lasts 30 seconds unless
-a newer one renews it. If PostgreSQL does not answer, the checkout counts again.
+PostgreSQL about it from a short-lived separate process, killed after 5 seconds, and
+logs a warning naming the thread and the backend's state. The checkout stops counting
+only if its backend has exited or has run nothing for 60 seconds. Exiting is final; an
+idle answer lasts 30 seconds unless a newer one renews it. If the worker cannot get an
+answer for any reason, including that process failing to start, the checkout counts
+again and it asks again 15 seconds later.
 Once it stops counting, new turns can start again and its slot still counts toward
 utilization. VACUUM, ANALYZE and online history index builds are declared maintenance
 and never count this way, though slow database latency still holds new turns.
