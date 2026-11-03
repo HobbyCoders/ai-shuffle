@@ -141,11 +141,55 @@ def test_spoken_model_id_resolves_to_registry_spelling(world):
 
 
 @pytest.mark.parametrize("wording, expected", [("opus", "opus"), ("OPUS", "opus"),
-                                              ("Claude Opus", "opus"), ("claude-opus-5", "opus"),
                                               ("prov:lane:astra", "prov:lane:astra")])
 @pytest.mark.parametrize("remote", [False, True])
-def test_spoken_resolution_preserves_claude_and_exact_composites(world, wording, expected, remote):
+def test_spoken_resolution_accepts_family_names_and_exact_provider_composites(world, wording, expected, remote):
     assert mo.resolve(wording, "lane", runs_here=not remote).model == expected
+
+
+@pytest.mark.parametrize("wording", ["claude-opus-4-7", "claude-sonnet-4-6", "opus[1m]",
+                                     "claude-opus-5[1m]", "Claude Opus"])
+@pytest.mark.parametrize("remote", [False, True])
+def test_explicit_native_legacy_ids_are_refused_not_migrated(world, wording, remote):
+    with pytest.raises(ValueError, match="family name") as refused:
+        mo.resolve(wording, runs_here=not remote)
+    assert "Choose one of:" in str(refused.value)
+
+
+@pytest.mark.parametrize("legacy, expected", [("claude-opus-4-7", "opus"),
+    ("claude-sonnet-4-6", "sonnet"), ("opus[1m]", "opus"), ("claude-opus-5[1m]", "opus")])
+async def test_stored_legacy_settings_and_profile_pins_still_start_without_an_override(world, legacy, expected):
+    db, seen, prompts, _ = world
+    # Seed the historical stored value, not write(), which already normalizes.
+    db.set_system_setting(subagent_default.SETTING_KEY, json.dumps({"model": legacy}))
+    assert subagent_default.effective().model == expected
+    from app.core.agent_provider_models import leg_model_id
+    assert leg_model_id(None, legacy) == expected
+    for key, config in (("top", {"model": legacy}),
+                        ("map", {"provider_models": {"__native__": legacy}})):
+        pid = "legacy-" + key
+        db.create_profile(pid, pid, None, config)
+        result = await _task({"agent": pid})
+        assert result["ok"], result
+        assert seen[-1]["model_id"] == expected
+    assert prompts == []
+
+
+def test_public_model_rules_offer_native_families_not_version_pins(world):
+    from fluid.tools.builtins.session_orchestration import start_session_spec, suggest_task_spec
+    from fluid.tools.builtins import swarm
+    from app.core.agent_provider_models import build_task_contract
+    for description in (start_session_spec().input_schema["properties"]["model"]["description"],
+                        build_task_contract("caller", None).input_schema["properties"]["model"]["description"]):
+        assert "For native Claude use a family name: haiku, sonnet or opus" in description
+        assert "never pass a version pin, legacy id or [1m] form" in description
+        assert "For provider models, pass the id or display name" in description
+        assert "explicit providers stay scoped" in description
+        assert "model IDs and display names match" not in description
+    chip = suggest_task_spec().input_schema["properties"]["model"]["description"]
+    assert "Claude: opus, sonnet or haiku, never a full id" in chip
+    assert "Others: display name or prov:<providerId>:<modelId>" in chip
+    assert "See Task.model" in swarm.input_schema()["properties"]["tasks"]["items"]["properties"]["model"]["description"]
 
 
 def test_spoken_resolution_never_uses_a_partial_or_fuzzy_name(world):

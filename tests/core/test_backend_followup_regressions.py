@@ -16,8 +16,10 @@ from tests.shared_fixtures import foreign_keys_off, pin_runner, clean_task_regis
 
 @pytest.mark.parametrize("wording", ["claude-opus-5", "Opus 5", "CLAUDE OPUS 5", "opus-5"])
 @pytest.mark.parametrize("remote", [False, True])
-def test_versioned_native_override_uses_existing_alias(mock_db, wording, remote):
-    assert model_override.resolve(wording, runs_here=not remote).model == "opus"
+def test_versioned_native_override_is_refused_with_family_choices(mock_db, wording, remote):
+    with pytest.raises(ValueError, match="family name") as refused:
+        model_override.resolve(wording, runs_here=not remote)
+    assert "Choose one of:" in str(refused.value) and "opus" in str(refused.value)
 
 
 def bind_worker(repo, sid="followup"):

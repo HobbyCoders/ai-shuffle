@@ -186,21 +186,6 @@ def display_provider_model_label(
     return rest or label
 
 
-def native_override_names() -> Dict[str, Tuple[str, ...]]:
-    """Names for current native routes, never aliases for a different version.
-
-    Overrides can select existing aliases, not arbitrary native pins. Legacy
-    storage migrations deliberately remain separate from explicit requests.
-    """
-    names = {}
-    for option in MODELS:
-        actual = delegated_model_aliases()[option.value]
-        versioned = actual.removeprefix("claude-")
-        names[option.value] = (option.value, option.label, f"claude {option.value}",
-                               actual, versioned, versioned.replace("-", " "))
-    return names
-
-
 def get_model_family(value: Optional[str]) -> Optional[ModelFamily]:
     """Resolved family, or ``None`` for unknown/custom values."""
     match = get_model(value)

@@ -1,21 +1,60 @@
 {
-  "description": "StartSession resolves a full native Claude id into the existing native model without a provider override.",
+  "description": "Native Claude accepts only family names; versioned and legacy explicit requests refuse without creating a chat.",
   "steps": [
     {
       "tool_calls": [
         {
           "name": "StartSession",
           "input": {
-            "title": "Native model override",
+            "title": "Refuse native pin",
             "prompt": "[script:tool-bash]",
-            "request_id": "native-versioned-model",
+            "request_id": "native-refuse-0",
             "model": "claude-opus-5"
           }
         }
       ]
     },
     {
-      "text": "Native model chat created."
+      "tool_calls": [
+        {
+          "name": "StartSession",
+          "input": {
+            "title": "Refuse native pin",
+            "prompt": "[script:tool-bash]",
+            "request_id": "native-refuse-1",
+            "model": "Opus 5.5"
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "StartSession",
+          "input": {
+            "title": "Refuse native pin",
+            "prompt": "[script:tool-bash]",
+            "request_id": "native-refuse-2",
+            "model": "opus[1m]"
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "StartSession",
+          "input": {
+            "title": "Native family override",
+            "prompt": "[script:tool-bash]",
+            "request_id": "native-family-model",
+            "model": "opus"
+          }
+        }
+      ]
+    },
+    {
+      "text": "Native model checks complete."
     }
   ]
 }

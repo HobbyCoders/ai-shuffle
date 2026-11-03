@@ -132,12 +132,18 @@ const nativeModel = {
 	},
 	async act({ page, mark, variant, log }) {
 		const token = `native-model-${uniq()}`;
-		await mark('resolve an explicit native Claude model through StartSession');
-		await typeAndSend(page, `${token} Use claude-opus-5 for the new chat. ${fakeAiTag(variant, 'tool-native-model-override')}`);
-		await waitTurnSettled(page, { text: 'Native model chat created.', messagesAtLeast: 2 });
+		await mark('refuse native version pins and accept the native family name');
+		await typeAndSend(page, `${token} Use opus for the new chat. ${fakeAiTag(variant, 'tool-native-model-override')}`);
+		await waitTurnSettled(page, { text: 'Native model checks complete.', messagesAtLeast: 2 });
 		const parent = await api(page, 'GET', `/sessions/${await chatIdByToken(page, token)}`);
-		const result = parent.messages.find((m) => m.tool_name === 'StartSession' && m.toolResult);
-		expect(result?.toolStatus !== 'error' && !!result?.toolResult, `StartSession succeeded: ${JSON.stringify(result)}`);
+		const results = parent.messages.filter((m) => m.tool_name === 'StartSession' && m.toolResult);
+		expect(results.length === 4, `three pin refusals and one family start: ${JSON.stringify(results)}`);
+		for (const refused of results.slice(0, 3)) {
+			expect(refused.toolStatus === 'error' && /family name/.test(refused.toolResult)
+				&& /Choose one of:/.test(refused.toolResult), `pin refused with real choices: ${JSON.stringify(refused)}`);
+		}
+		const result = results[3];
+		expect(result?.toolStatus !== 'error', `family StartSession succeeded: ${JSON.stringify(result)}`);
 		const created = JSON.parse(result.toolResult);
 		const child = await api(page, 'GET', `/sessions/${created.session_id}`);
 		expect(child.model === 'opus' && !child.provider_id, `native routing retained: ${JSON.stringify({ model: child.model, provider: child.provider_id })}`);

@@ -94,14 +94,17 @@ async def test_limit_resume_refusal_is_dropped_and_reported(mock_db, monkeypatch
 def test_native_version_names_never_substitute(mock_db, monkeypatch, cloud, family, version, runs_here):
     from app.core import claude_auth_mode
     monkeypatch.setattr(claude_auth_mode, "current_mode", lambda: claude_auth_mode.MODE_CLOUD if cloud else "first_party")
-    requested = f"claude-{family}-{version}"
-    actual = model_registry.delegated_model_aliases()[family]
-    for wording in (requested, family.title() + " " + version.replace("-", ".")):
-        if requested == actual:
-            assert model_override.resolve(wording, runs_here=runs_here).model == family
-        else:
-            with pytest.raises(ValueError, match="Choose one of"):
-                model_override.resolve(wording, runs_here=runs_here)
+    # The CLI owns its aliases and may change them independently of our API
+    # table. Never derive the expectation from either table.
+    monkeypatch.setattr(model_registry, "delegated_model_aliases", lambda: {
+        "haiku": "claude-haiku-99", "sonnet": "claude-sonnet-99",
+        "opus": "claude-opus-99", "fable": "claude-fable-99"})
+    assert model_override.resolve(family.upper(), runs_here=runs_here).model == family
+    for wording in (f"claude-{family}-{version}", family.title() + " " + version.replace("-", "."),
+                    f"claude-{family}-99"):
+        with pytest.raises(ValueError, match="family name") as refused:
+            model_override.resolve(wording, runs_here=runs_here)
+        assert "Choose one of:" in str(refused.value)
 
 
 @pytest.mark.parametrize("queued", [False, True])
@@ -181,5 +184,68 @@ async def test_restore_runs_in_the_dedicated_provisioning_pool(mock_db, monkeypa
         seen.append(threading.current_thread().name)
         return True, None
     monkeypatch.setattr(worker_checkout, "restore_worker_checkout", restore)
+    monkeypatch.setattr("app.db.database.get_session", lambda _: {
+        "branch": "chore/task-child", "worktree_path": "/disposable/child"})
     assert await worker_checkout.restore_worker_checkout_async("child") == (True, None)
     assert seen[0].startswith("task-start")
+
+
+async def test_plain_peer_message_bypasses_saturated_provisioning_pool(mock_db, monkeypatch):
+    import asyncio
+    import threading
+    from app.db import database
+    database.create_profile("plain", "Plain", "", {})
+    database.create_session("plain", "plain")
+    monkeypatch.setattr(turn_scheduler, "_enqueue_context_wake", AsyncMock(return_value={"id": "queued"}))
+    release = threading.Event()
+    occupied = [remote_task._start_executor.submit(release.wait, 5) for _ in range(8)]
+    try:
+        assert await asyncio.wait_for(turn_scheduler.on_agent_message("plain", "parent", "continue"), 2) == "queued"
+    finally:
+        release.set()
+        for future in occupied:
+            future.result(timeout=3)
+
+
+@pytest.mark.parametrize("branch", ["chore/task-other", "task/other"])
+async def test_foreign_worker_branch_preflight_claims_queued_op(repo, monkeypatch, branch):
+    from app.core import git_ops_runner, query_options
+    from app.core.config import settings
+    from app.db import database, git_ops
+    row = repo[0]
+    database.create_session("other-chat", "coder", project_v2_id=row["project_v2_id"],
+                            worktree_path="/missing/foreign-checkout", worktree_branch=branch)
+    database.set_session_branch("other-chat", branch, row["project_v2_id"])
+    op = git_ops.insert_op(settings.effective_instance_id, "ensure_worktree",
+        project_v2_id=row["project_v2_id"], params={"branch": branch})
+    ran = []
+    monkeypatch.setattr(git_ops_runner, "execute_ensure_worktree", lambda value: ran.append(value) or {"ok": True})
+    assert await query_options.ensure_pending_checkout(database.get_session("other-chat"))
+    assert git_ops.get_op(op["id"])["status"] == "done"
+    assert len(ran) == 1
+
+
+@pytest.mark.parametrize("branch", ["chore/task-child", "task/child"])
+async def test_owned_worker_preflight_restores_then_still_claims_queued_op(mock_db, monkeypatch, branch):
+    from app.core import git_ops_runner, query_options
+    from app.core.config import settings
+    from app.db import git_ops
+    restore = AsyncMock(return_value=(True, None))
+    monkeypatch.setattr(worker_checkout, "restore_worker_checkout_async", restore)
+    op = git_ops.insert_op(settings.effective_instance_id, "ensure_worktree", params={"branch": branch})
+    monkeypatch.setattr(git_ops_runner, "execute_ensure_worktree", lambda _: {"ok": True})
+    assert await query_options.ensure_pending_checkout({"id": "child", "branch": branch,
+                                                       "worktree_path": "/missing/owned-checkout"})
+    restore.assert_awaited_once_with("child", follow_live_switch=False)
+    assert git_ops.get_op(op["id"])["status"] == "done"
+
+
+async def test_plain_limit_resume_refusal_uses_default_status_wording(mock_db, monkeypatch):
+    from app.core import limit_resume
+    monkeypatch.setattr(turn_scheduler, "on_agent_message", AsyncMock(return_value=None))
+    record = AsyncMock()
+    monkeypatch.setattr(limit_resume, "_record", record)
+    assert await limit_resume._resume_worker("child", "parent", {"limit_key": "limit"}) is None
+    assert record.await_count == 2
+    assert all(call.args[2]["reason"] == "refused" and "content" not in call.args[2]
+               for call in record.await_args_list)

@@ -4,8 +4,9 @@ An agent may pass ``model`` to run one new chat or subagent on a model other
 than the one it would get anyway (the agent's pin, else the owner's subagent
 default; for a new chat, the caller's own model). Any model this install can
 run is eligible: a Claude registry alias or a model on an enabled provider's
-curated list. Pass the owner's wording: full ids and display names match with
-case and separators ignored, without fuzzy or distinctive-word guesses.
+curated list. Native Claude overrides accept family names only, never version
+pins or legacy ids. Provider ids and display names match with case and separators
+ignored, without fuzzy or distinctive-word guesses.
 Exact app ids (``sonnet``, ``prov:<providerId>:<modelId>``) still work;
 ambiguous names require an exact id and never choose catalog order.
 
@@ -265,6 +266,10 @@ def resolve(value: Any, leg: Optional[str] = None, *, runs_here: bool = True) ->
         hint = ("Choose one of: " + ", ".join(available) + " (at most 20 shown)."
                 if available else "No eligible models are configured in this scope.")
         location = "on this worker" if runs_here else "from this worker's enabled registry"
+        words = _tokens(text)
+        if not explicit and words and words[0] in {"claude", *model_values()}:
+            reason = ("For native Claude, use a family name (haiku, sonnet or opus). "
+                      "Explicit version pins, legacy ids and [1m] forms are not supported.")
         raise ValueError(f"Model '{text}' cannot run {location}: "
                          f"{(reason or 'No matching model id or display name.')[:500]} {hint}")
     decoded = decode_provider_model(normalized)
@@ -304,9 +309,12 @@ def _entries(row: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 def _catalog() -> Dict[str, Tuple[str, ...]]:
     """Every eligible model's app id and the names it goes by."""
-    from app.core.model_registry import native_override_names
+    from app.core.model_registry import MODELS
 
-    names = native_override_names()
+    # CLI aliases are owned by the CLI and can differ from the native API ids.
+    # Do not infer a native version pin from either table. Stored configuration
+    # migrations use normalize_model separately, not this explicit-request list.
+    names = {option.value: (option.value, option.label) for option in MODELS}
     for row in _provider_rows():
         for entry in _entries(row):
             model_id = str(entry["id"])
