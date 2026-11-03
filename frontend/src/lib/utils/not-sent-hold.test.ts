@@ -51,6 +51,43 @@ describe('holdNotSentRows', () => {
 });
 
 describe('createNotSentHold', () => {
+	const waiting = (id: string) => ({ id, content: id, queuedAt: 0 });
+
+	it('keeps the rows as bubbles past turn end while a later message waits below them', () => {
+		const hold = createNotSentHold();
+		const messages = [reply, row('1', 'live')];
+		expect(hold(messages, 'live', [waiting('later')]).bubbles).toHaveLength(1);
+		const carried = hold(messages, null, [waiting('later')]);
+		expect(carried.bubbles).toHaveLength(1);
+		expect(carried.messages).toEqual([reply]);
+		expect(hold(messages, null, []).messages).toBe(messages);
+	});
+
+	it('does not count a late copy of a held message as one waiting', () => {
+		const hold = createNotSentHold();
+		const messages = [reply, row('1', 'live')];
+		const { bubbles } = hold(messages, 'live', []);
+		expect(hold(messages, null, [waiting(bubbles[0].id)]).messages).toBe(messages);
+	});
+
+	it('never turns rows already showing back into bubbles', () => {
+		const hold = createNotSentHold();
+		const messages = [reply, row('1', 'earlier')];
+		expect(hold(messages, null, [waiting('later')]).messages).toBe(messages);
+		const stopped = [reply, row('1', 'live')];
+		hold(stopped, 'live', []);
+		expect(hold(stopped, null, []).messages).toBe(stopped);
+		expect(hold(stopped, null, [waiting('later')]).messages).toBe(stopped);
+	});
+
+	it('lets go as soon as the next turn is live', () => {
+		const hold = createNotSentHold();
+		const messages = [reply, row('1', 'live')];
+		hold(messages, 'live', [waiting('later')]);
+		hold(messages, null, [waiting('later')]);
+		expect(hold(messages, 'next', [waiting('later')]).messages).toBe(messages);
+	});
+
 	it('keeps the same transcript array until its input changes', () => {
 		const hold = createNotSentHold();
 		const messages = [reply, row('1', 'live')];

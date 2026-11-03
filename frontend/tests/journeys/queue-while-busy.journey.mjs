@@ -82,6 +82,7 @@ async function watchStopFrames(page, texts) {
 					at: Math.round(performance.now() - watch.startedAt),
 					scrollTop: Math.round(log.scrollTop),
 					anchorTop: anchor ? topOf(anchor) : null,
+					replyHeight: rows().at(-1)?.getBoundingClientRect().height ?? null,
 					messages: texts.map((text) => {
 						const has = (el) => (el.textContent || '').includes(text);
 						const bubbles = [...document.querySelectorAll('.pending-messages [role="article"]')].filter(has);
@@ -110,9 +111,6 @@ async function watchStopFrames(page, texts) {
 
 /** One more line of the stopped reply can still arrive and nudge what is below it. */
 const REPLY_LINE_PX = 30;
-
-/** Under half a line of the reply: a follow a frame late drops the bubbles about a full line. */
-const MOST_A_BUBBLE_MAY_BOUNCE_PX = 12;
 
 /**
  * The stopped turn settles 1.2s after it ends (settle-hold.ts). The reader once
@@ -152,8 +150,11 @@ async function stopEverything(page) {
 /** Send a slow turn and queue messages the server has confirmed, so only Stop can change them from here. */
 async function queueDuringASlowTurn(page, mark, variant, queued, opening = `stream tok-${uniq()}`) {
 	await mark('send');
+	// A second turn in this chat: its reply, not the last one with the same words.
+	const replies = page.getByText(SLOW_REPLY.start, { exact: false });
+	const repliesBefore = await replies.count();
 	await typeAndSend(page, `${opening} ${scriptTag(variant, 'slow', { tps: 2 })}`);
-	await page.getByText(SLOW_REPLY.start, { exact: false }).last().waitFor({ timeout: 60_000 });
+	await replies.nth(repliesBefore).waitFor({ timeout: 60_000 });
 	await waitChat(page, { streaming: 'true' });
 
 	await mark('queue');
@@ -237,7 +238,7 @@ function stopReadingPosition({ scrolled, queued = 3, overflows = false, rounds =
 						if (!previous || !previous.bubbles !== !message.bubbles) return;
 						// Changing from bubble to row is the one move Stop is meant to make.
 						const moved = Math.abs(message.top - previous.top);
-						expect(moved <= REPLY_LINE_PX, `queued message ${m} did not jump in frame ${i}: moved ${moved}px as a ${message.bubbles ? 'bubble' : 'row'}`);
+						expect(moved <= REPLY_LINE_PX, `queued message ${m} did not jump in frame ${i}: moved ${moved}px as a ${message.bubbles ? 'bubble' : 'row'}; around it ${JSON.stringify(frames.slice(Math.max(0, i - 2), i + 2).map((f) => [f.at, f.scrollTop, f.anchorTop, f.replyHeight, f.messages[m].top]))}`);
 					});
 				});
 				const kinds = new Set(frames.map((f) => f.messages.map((m) => (m.bubbles ? 'bubble' : 'row')).join()));
@@ -541,7 +542,7 @@ await runJourney({
 				}
 				log(`biggest bubble bounce: ${bounce}px over ${tops.length} frames`);
 				expect(tops.length > 5, `watched the bubbles while the reply ran (${tops.length} frames)`);
-				expect(bounce <= MOST_A_BUBBLE_MAY_BOUNCE_PX, `the bubbles did not drop and come back in one frame: ${bounce}px`);
+				expect(bounce <= REPLY_LINE_PX, `the bubbles did not drop and come back in one frame: ${bounce}px; [at, scrollTop, top] ${JSON.stringify(frames.map((f) => [f.at, f.scrollTop, f.messages[0].top]))}`);
 			}
 		},
 		{
@@ -574,6 +575,42 @@ await runJourney({
 					expect(message.notSent === 0, `the new message is a not-sent row in frame ${i} (${frames[i].at}ms)`);
 					expect(message.bubbles <= 1, `the new message shows once in frame ${i}: ${JSON.stringify(message)}`);
 				});
+				for (const text of texts) {
+					expect((await page.locator('[data-not-sent="true"]').filter({ hasText: text }).count()) === 1, 'what was queued at Stop is a not-sent row');
+				}
+			}
+		},
+		{
+			// The rows run past the fold, which would release a reader who only pressed
+			// Stop. This one also sent a message, so they asked to see it run.
+			name: 'stop-then-send-in-a-long-chat-shows-the-new-reply',
+			async setup(ctx) {
+				await openStopChat(ctx);
+				await ctx.page.waitForTimeout(800);
+			},
+			async act({ page, mark, variant }) {
+				await mark('history');
+				await typeAndSend(page, `history tok-${uniq()} ${scriptTag(variant, 'long', { tps: 400 })}`);
+				await waitTurnSettled(page, { text: 'Here is a long answer', messagesAtLeast: 2, timeout: 90_000 });
+				const texts = await queueDuringASlowTurn(page, mark, variant, 2);
+				const fresh = `tok-${uniq()}`;
+				const box = composer(page);
+				await box.click();
+				await box.fill(`fresh ${fresh} ${scriptTag(variant, 'default')}`);
+				await mark('stop');
+				await stopButton(page).click();
+				await sendButton(page).click();
+				const reply = page.getByText(`You said: “fresh ${fresh}`, { exact: false }).first();
+				await reply.waitFor({ timeout: 60_000 });
+				await waitTurnSettled(page, { text: `You said: “fresh ${fresh}`, timeout: 60_000 });
+				await page.waitForTimeout(1500);
+				const shown = await reply.evaluate((el) => {
+					const log = document.querySelector('[role="log"][aria-label="Conversation messages"]');
+					const box = el.getBoundingClientRect();
+					const view = log.getBoundingClientRect();
+					return { top: box.top, bottom: box.bottom, viewTop: view.top, viewBottom: view.bottom };
+				});
+				expect(shown.top < shown.viewBottom && shown.bottom > shown.viewTop, `the new reply is on screen: ${JSON.stringify(shown)}`);
 				for (const text of texts) {
 					expect((await page.locator('[data-not-sent="true"]').filter({ hasText: text }).count()) === 1, 'what was queued at Stop is a not-sent row');
 				}
@@ -949,6 +986,11 @@ await runJourney({
 				const { title } = await api(page, 'GET', `/sessions/${await chatIdByToken(page, opening)}`);
 				await mark('stop');
 				await stopButton(page).click();
+				// The chat counts the rows the moment the server writes them, about 100ms
+				// after Stop and well inside the hold. Leaving before that would count as
+				// 2, 4, 2 messages across two different chats, which is not this chat going
+				// backwards. That order behaves the same on main.
+				await waitChat(page, { messagesAtLeast: 4 }, { timeout: 5000 });
 				await mark('leave');
 				await openFromSidebar(page, SEEDED.no_project);
 				await waitChatOpen(page, { messagesAtLeast: 2, hold: 500 });

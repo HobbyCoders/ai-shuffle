@@ -406,7 +406,11 @@
 			? $activeSession.liveTurnId
 			: null
 	);
-	const notSentHold = $derived(notSentRows($activeSession.messages, holdingTurnId));
+	const notSentHold = $derived(notSentRows(
+		$activeSession.messages,
+		holdingTurnId,
+		$activeSession.stopTimedOutTurnId ? [] : $activeSession.queuedMessages ?? []
+	));
 
 	const assistantQuestion = $derived(currentAssistantQuestion($activeSession.pendingPermissions ?? []));
 	const activeApprovalId = $derived(assistantQuestion?.request.request_id ?? null);
@@ -1314,25 +1318,24 @@
 	 * screen". Shrinks one-for-one as the response grows, bottoming out at the
 	 * normal breathing-room reserve.
 	 */
-	function refreshLatestTurnTailReserve() {
-		if (!containerRef || !tailSpacerRef || currentTurnAnchorId) return;
+	function latestTurnTailNow(): number | null {
+		if (!containerRef || !tailSpacerRef || currentTurnAnchorId) return null;
 		const latestTurnId = transcript.latestUserTurnId;
-		if (!latestTurnId) {
-			if (latestTurnTailPx !== MIN_TRANSCRIPT_TAIL_RESERVE) latestTurnTailPx = MIN_TRANSCRIPT_TAIL_RESERVE;
-			return;
-		}
+		if (!latestTurnId) return MIN_TRANSCRIPT_TAIL_RESERVE;
 		const anchor = document.getElementById(turnAnchorId(latestTurnId));
-		if (!anchor || !containerRef.contains(anchor)) {
-			if (latestTurnTailPx !== MIN_TRANSCRIPT_TAIL_RESERVE) latestTurnTailPx = MIN_TRANSCRIPT_TAIL_RESERVE;
-			return;
-		}
+		if (!anchor || !containerRef.contains(anchor)) return MIN_TRANSCRIPT_TAIL_RESERVE;
 		const containerBox = containerRef.getBoundingClientRect();
 		const anchorTop = containerRef.scrollTop + anchor.getBoundingClientRect().top - containerBox.top;
 		const contentEnd = containerRef.scrollTop + tailSpacerRef.getBoundingClientRect().top - containerBox.top;
-		latestTurnTailPx = resolveAnchoredTailReserve({
+		return resolveAnchoredTailReserve({
 			clientHeight: containerRef.clientHeight,
 			contentAfterAnchor: Math.max(0, contentEnd - anchorTop)
 		});
+	}
+
+	function refreshLatestTurnTailReserve() {
+		const tail = latestTurnTailNow();
+		if (tail !== null && tail !== latestTurnTailPx) latestTurnTailPx = tail;
 	}
 
 	function scheduleLatestTurnTailRefresh() {
@@ -1400,7 +1403,14 @@
 			const preSH = containerRef.scrollHeight;
 			const preST = containerRef.scrollTop;
 			const preCH = containerRef.clientHeight;
-			containerRef.scrollTop = containerRef.scrollHeight;
+			// Content that grew has not shrunk the reserve below it yet. The bottom of
+			// that stale reserve is too far: the next refresh would pull the reader
+			// straight back, a one-frame bounce of everything on screen.
+			const tailNow = latestTurnTailNow();
+			const staleTail = tailNow === null
+				? 0
+				: Math.max(0, Math.max(tailReservePx, latestTurnTailPx) - Math.max(tailReservePx, tailNow));
+			containerRef.scrollTop = containerRef.scrollHeight - containerRef.clientHeight - staleTail;
 			lastKnownScrollTop = containerRef.scrollTop;
 			// Refresh the scroll-direction baseline so a later genuine user scroll
 			// is measured against where WE left the viewport (the bottom), not a
