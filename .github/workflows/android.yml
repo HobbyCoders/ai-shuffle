@@ -121,17 +121,6 @@ jobs:
           python3 ci/test-mobile-apk.py
           ./gradlew testDebugUnitTest lintDebug --stacktrace
 
-      - name: Keep unit-test failure reports
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: android-unit-test-failure
-          retention-days: 3
-          if-no-files-found: warn
-          path: |
-            android/app/build/test-results/testDebugUnitTest/
-            android/app/build/reports/tests/testDebugUnitTest/
-
       - name: Build and verify debug APK
         run: |
           ./gradlew assembleDebug --max-workers=2 --stacktrace

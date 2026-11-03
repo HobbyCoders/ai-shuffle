@@ -58,6 +58,14 @@ tasks.withType<Test>().configureEach {
     dependsOn(prepareRobolectricDependencies)
     systemProperty("robolectric.offline", "true")
     systemProperty("robolectric.dependency.dir", robolectricDependencyDir.get().asFile.absolutePath)
+    // SHORT drops exception messages: FULL preserves HTTP status and URL from
+    // HttpURLConnection through Robolectric's ExecutionException/AssertionError.
+    testLogging {
+        exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+        showExceptions = true
+        showCauses = true
+        showStackTraces = true
+    }
     doFirst {
         logger.lifecycle("Robolectric offline=true; dependency.dir=${robolectricDependencyDir.get().asFile}")
     }

@@ -23,6 +23,9 @@ class RobolectricDependenciesTests(unittest.TestCase):
         self.assertIn('robolectricJars.flatMap { it.resolve() }', script)
         self.assertIn('java.security.MessageDigest.getInstance("SHA-256")', script)
         self.assertIn('check(actual == expected)', script)
+        self.assertIn('TestExceptionFormat.FULL', script)
+        self.assertIn('showExceptions = true', script)
+        self.assertIn('showCauses = true', script)
         # Validation must happen on cache hits too, not just on downloads.
         self.assertNotIn('outputs.', script)
         self.assertLess(script.index('check(actual == expected)'), script.index('copy {'))

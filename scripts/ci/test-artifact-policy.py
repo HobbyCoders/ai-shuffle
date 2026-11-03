@@ -149,15 +149,7 @@ class ArtifactPolicyTests(unittest.TestCase):
         jobs = workflow("android.yml")["jobs"]
         build = jobs["build"]
         exported = {s["with"]["name"]: s for s in uploads(build)}
-        self.assertEqual(set(exported), {"android-instrumentation-apks", "android-download", "android-unit-test-failure"})
-        reports = exported["android-unit-test-failure"]
-        self.assertEqual(reports["if"], "failure()")
-        self.assertEqual(reports["with"]["retention-days"], "3")
-        self.assertEqual(reports["with"]["if-no-files-found"], "warn")
-        self.assertEqual(reports["with"]["path"].splitlines(), [
-            "android/app/build/test-results/testDebugUnitTest/",
-            "android/app/build/reports/tests/testDebugUnitTest/",
-        ])
+        self.assertEqual(set(exported), {"android-instrumentation-apks", "android-download"})
         self.assertEqual(exported["android-instrumentation-apks"]["with"]["retention-days"], "1")
         self.assertNotIn("if", exported["android-instrumentation-apks"])
         for name in ["Decode release keystore", "Build release APK", "Verify APK is signed with the release key", "Prepare public APK download", "Upload public download files"]:
