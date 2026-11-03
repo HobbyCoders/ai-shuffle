@@ -24,6 +24,8 @@ object DeviceToolsRuntime {
     private var retiring: Job? = null
     private var unavailable: Job? = null
     private var generation = 0L
+    // A launch or locally cancelled approval may defer pause shutdown only through result delivery.
+    private var handoffInFlight = false
     private val mutableAvailability = MutableStateFlow("foreground_required")
     val availability: StateFlow<String> = mutableAvailability
 
@@ -31,7 +33,11 @@ object DeviceToolsRuntime {
     fun attach(activity: Activity, server: Server) {
         check(android.os.Looper.myLooper() == android.os.Looper.getMainLooper())
         if (!authorizedTarget(activity, server)) { stop(); mutableAvailability.value = "authorization_revoked"; return }
-        if (this.activity.get() === activity && this.server == server && polling?.isActive == true) return
+        if (this.server == server && polling?.isActive == true) {
+            this.activity = WeakReference(activity)
+            ToolApprovals.attach(activity)
+            return
+        }
         val store = com.hobbycoders.aishuffle.data.ServerStore.get(activity)
         if (store.selectedToolsServerId != null && store.selectedToolsServerId != server.id) ToolsPreferences(activity).setCrossAppEnabled(false)
         deactivate()
@@ -56,8 +62,14 @@ object DeviceToolsRuntime {
     }
     fun detach(activity: Activity) {
         if (this.activity.get() !== activity) return
-        ToolApprovals.detach(activity)
+        // Clear the execution host BEFORE resolving consent: the continuation may resume inline.
         this.activity.clear()
+        if (ToolApprovals.pending.value != null) handoffInFlight = true
+        ToolApprovals.detach(activity)
+        if (handoffInFlight) {
+            mutableAvailability.value = "handoff_result_pending"
+            return
+        }
         if (hasCrossAppHost()) {
             mutableAvailability.value = "cross_app_consent_required"
             ShuffleAccessibilityService.current?.updateIndicator()
@@ -81,7 +93,9 @@ object DeviceToolsRuntime {
     }
     internal fun hasCrossAppHost(): Boolean = context?.let { ToolsPreferences(it).crossAppEnabled && ToolsPreferences(it).accessibilityEnabled && ShuffleAccessibilityService.current != null } == true
     internal fun selectedServerName(): String? = server?.name
-    internal fun hasForegroundActivity(): Boolean = activity.get()?.let { !it.isFinishing && !it.isDestroyed && it.hasWindowFocus() } == true
+    // Consent temporarily owns window focus without pausing/detaching its host activity.
+    internal fun hasAttachedActivity(): Boolean = activity.get()?.let { !it.isFinishing && !it.isDestroyed } == true
+    internal fun hasForegroundActivity(): Boolean = hasAttachedActivity() && activity.get()?.hasWindowFocus() == true
     internal suspend fun launch(intent: Intent, deadline: Long): JSONObject {
         val host = activity.get() ?: return ToolRegistry.error("foreground_required", "Open AI Shuffle and retry; no action was performed.")
         val target = server ?: return ToolRegistry.error("authorization_revoked", "Reconnect the selected server; no action was performed.")
@@ -96,11 +110,24 @@ object DeviceToolsRuntime {
             delay(16)
         }
         if (System.currentTimeMillis() >= deadline) return ToolRegistry.error("expired", "Command expired; no action was performed.")
-        host.startActivity(intent)
+        handoffInFlight = true
+        try { host.startActivity(intent) }
+        catch (failure: Exception) { handoffInFlight = false; throw failure }
         return JSONObject().put("ok", true).put("status", "launched_confirmation")
             .put("message", "Opened Android UI. Completion/save/send is controlled by the user and has not been verified.")
     }
+    /** Runs after the bounded result POST (or failure), never permits another foreground action off screen. */
+    internal fun finishHandoff(epoch: Long) {
+        if (generation != epoch || !handoffInFlight) return
+        handoffInFlight = false
+        if (activity.get() == null && !hasCrossAppHost()) {
+            deactivate()
+            server = null
+            mutableAvailability.value = "foreground_required"
+        }
+    }
     private fun deactivate() {
+        handoffInFlight = false
         generation++
         polling?.let { it.cancel(); retiring = it }
         polling = null
@@ -124,6 +151,23 @@ object DeviceToolsRuntime {
         session != null && session.accountId == target.accountId && session.hub == target.hubUrl
     }.getOrDefault(false)
 
+    // Shared by the production poller and lifecycle-ordering regression tests.
+    internal fun canExecute(epoch: Long): Boolean =
+        generation == epoch && !handoffInFlight && (activity.get() != null || hasCrossAppHost())
+
+    /** The production poller wiring and handoff boundary, also used by JVM lifecycle tests. */
+    internal suspend fun pollCommands(
+        journal: CommandJournal, scopeId: String, epoch: Long, enabled: Boolean,
+        executor: DeviceToolExecutor, request: suspend (String, JSONObject?) -> JSONObject,
+    ) {
+        try {
+            DeviceCommandPoller(journal, scopeId, request, { canExecute(epoch) },
+                executor::execute, { mutableAvailability.value = "queue_full" }).pollOnce(enabled)
+        } finally {
+            finishHandoff(epoch)
+        }
+    }
+
     private fun startPolling() {
         val app = context ?: return
         val target = server ?: return
@@ -144,39 +188,8 @@ object DeviceToolsRuntime {
                     val enabled = ToolsPreferences(app).enabled
                     DeviceToolsApi.request(target, "capabilities", capabilities(enabled))
                     mutableAvailability.value = if (!enabled) "disabled" else if (activity.get() != null) "foreground_only" else "cross_app_consent_required"
-                    // Deliver durable results first; a network failure never repeats execution.
-                    for ((key, entry) in withContext(Dispatchers.IO) { journal.pending(scopeId, System.currentTimeMillis()) }) {
-                        val response = DeviceToolsApi.request(target, "${entry.getString("id")}/result", JSONObject().put("result", entry.getJSONObject("result")))
-                        check(response.optBoolean("ok"))
-                        withContext(Dispatchers.IO) { journal.posted(key) }
-                    }
-                    val commands = DeviceToolsApi.request(target, "pending").optJSONArray("commands") ?: JSONArray()
-                    for (i in 0 until minOf(commands.length(), 32)) {
-                        ensureActive()
-                        if (generation != currentGeneration) break
-                        val command = commands.optJSONObject(i) ?: continue
-                        val id = command.optString("id")
-                        if (!id.matches(Regex("[A-Za-z0-9_-]{1,128}"))) continue
-                        val key = CommandJournal.key(scopeId, id)
-                        if (withContext(Dispatchers.IO) { journal.get(key) } != null) continue
-                        val now = System.currentTimeMillis()
-                        val expires = CommandJournal.expiry(command.opt("expires_at"))
-                        // Claim even expired/unsupported/disabled requests so they receive one factual result.
-                        val claimed = withContext(Dispatchers.IO) { journal.claim(key, id, scopeId, expires.coerceAtLeast(now), now) }
-                        if (!claimed) { mutableAvailability.value = "queue_full"; continue }
-                        val result = when {
-                            !CommandJournal.validExpiry(expires, now) -> ToolRegistry.error("expired", "Command expired or has an invalid expiry (maximum lifetime: five minutes).")
-                            !enabled -> ToolRegistry.error("disabled", "Android tools are disabled.")
-                            command.optJSONObject("arguments") == null -> ToolRegistry.error("invalid_arguments", "arguments must be an object.")
-                            else -> withTimeoutOrNull((expires - now).coerceAtMost(30_000)) {
-                                executor.execute(command.optString("name"), command.getJSONObject("arguments"), expires)
-                            } ?: ToolRegistry.error("expired", "Execution deadline elapsed. Verify device state; this command will not be repeated.")
-                        }
-                        withContext(NonCancellable + Dispatchers.IO) { journal.finish(key, result) }
-                        ensureActive()
-                        val response = DeviceToolsApi.request(target, "$id/result", JSONObject().put("result", result))
-                        check(response.optBoolean("ok"))
-                        withContext(Dispatchers.IO) { journal.posted(key) }
+                    pollCommands(journal, scopeId, currentGeneration, enabled, executor) { path, body ->
+                        DeviceToolsApi.request(target, path, body)
                     }
                 } catch (e: CancellationException) { throw e }
                 catch (_: ToolsAuthorizationRevoked) { stop(); mutableAvailability.value = "authorization_revoked"; return@launch }

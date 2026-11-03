@@ -33,10 +33,22 @@ class ShellNavigationTest {
             activity.startActivity(requireNotNull(intent) { "app-settings must open a screen" })
             val started = shadowOf(activity).nextStartedActivity
             assertEquals(SettingsActivity::class.java.name, started.component?.className)
+            assertNotEquals(0, started.flags and Intent.FLAG_ACTIVITY_SINGLE_TOP)
             // Opened on top of chat, so Back from Settings (or after closing Account) returns to it.
             assertEquals(0, started.flags and (Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK))
             assertNull(shadowOf(activity).nextStartedActivity)
         }
+    }
+
+    @Test fun chatActivityRoutesAppSettingsToItsOwnSettingsScreen() {
+        // No onCreate: this exercises ChatActivity's message branch without connecting to a worker.
+        val activity = Robolectric.buildActivity(ChatActivity::class.java).get()
+        activity.handleShellMessage(MobileUi.shellMessage("{\"type\":\"app-settings\"}"))
+        val started = shadowOf(activity).nextStartedActivity
+        assertEquals(SettingsActivity::class.java.name, started.component?.className)
+        assertNotEquals(0, started.flags and Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        assertEquals(0, started.flags and Intent.FLAG_ACTIVITY_CLEAR_TOP)
+        assertNull(shadowOf(activity).nextStartedActivity)
     }
 
     @Test fun workersStillOpensTheWorkersScreenForRecovery() {
