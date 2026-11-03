@@ -193,7 +193,7 @@
 		},
 		{
 			"why": "sending, streaming and rendering a reply",
-			"journeys": ["chat-send-stream", "send-during-init", "stop-midstream", "queue-while-busy", "reload-midstream"],
+			"journeys": ["chat-send-stream", "send-during-init", "stop-midstream", "queue-while-busy", "stop-holds-the-reader", "reload-midstream"],
 			"globs": [
 				"frontend/src/lib/components/chat/AssistantMessage*",
 				"frontend/src/lib/components/chat/UserMessage*",
@@ -243,13 +243,13 @@
 		},
 		{
 			"why": "stopping a turn",
-			"journeys": ["stop-midstream", "chat-send-stream"],
+			"journeys": ["stop-midstream", "chat-send-stream", "stop-holds-the-reader", "stop-with-queued-messages"],
 			"globs": ["frontend/src/lib/components/chat/StopButton*", "frontend/src/lib/components/chat/BackgroundWorkStrip*"]
 		},
 		{
 			"why": "queued (pending) messages",
-			"journeys": ["queue-while-busy"],
-			"globs": ["frontend/src/lib/components/chat/Pending*", "frontend/src/lib/components/chat/pending-*"]
+			"journeys": ["queue-while-busy", "stop-holds-the-reader", "stop-with-queued-messages"],
+			"globs": ["frontend/src/lib/components/chat/Pending*", "frontend/src/lib/components/chat/pending-*", "frontend/src/lib/utils/not-sent-hold*"]
 		},
 		{
 			"why": "errors and banners shown to the user",
