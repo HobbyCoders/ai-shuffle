@@ -99,8 +99,10 @@ def _projects(tmp_path: Path) -> Path:
 
 def _write_cli_jsonl(
     tmp_path: Path, handle: str, entries: List[dict],
-    project: str = "some-other-project",
+    project: Optional[str] = None,
 ) -> Path:
+    if project is None:
+        project = cli_project_dir_name(str(tmp_path / "work_space.dir"))
     path = _projects(tmp_path) / project / f"{handle}.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -216,6 +218,56 @@ async def test_session_id_alone_still_resolves_the_handle(monkeypatch, tmp_path)
     )
     assert captured["cli_session_id"] == "new-uuid"
     assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("from_preview", [False, True])
+async def test_caller_lane_change_reseeds_in_the_produced_runtime_cwd(mock_db, monkeypatch, tmp_path, from_preview):
+    from unittest.mock import AsyncMock
+    from app.core import config, query_options, session_orchestration
+    from app.core.provider.fluid_pg_store import PgFluidStore
+    from app.db import database
+
+    database.create_profile("lane-agent", "Agent", None, {"model": "sonnet"})
+    database.create_session("lane-chat", "lane-agent", mode="chat")
+    database.update_session("lane-chat", sdk_session_id=SID)
+    monkeypatch.setitem(config._runtime_overrides, "workspace_dir", tmp_path / "workspace")
+    monkeypatch.setattr(query_options, "get_security_instructions", lambda *a, **kw: "")
+    principal = {"owner": "install-admin", "kind": "admin", "principal_id": "preview"}
+    caller = {"preview": from_preview}
+    monkeypatch.setattr(session_orchestration, "_principal", lambda sid: principal if caller["preview"] else None)
+
+    async def produced_options():
+        # Real option producer AND adapter conversion, not a manually selected cwd.
+        sdk_options, _ = query_options.build_options_from_profile(
+            database.get_profile("lane-agent"), session_id="lane-chat", resume_session_id=SID,
+        )
+        adapter = ha.HarnessAdapter()
+        adapter.connect = AsyncMock()
+        await adapter.connect_with_sdk_options(sdk_options)
+        return adapter.connect.await_args.args[0]
+
+    store = PgFluidStore()
+    await _seed(store, PELICAN, handle="old-handle")
+    old = await produced_options()
+    root = fluid_transcript.cli_projects_root(old.env)
+    old_file = fluid_transcript._write_cli_transcript(
+        fluid_transcript.build_cli_transcript_entries(
+            fluid_transcript.fluid_transcript_entries(SID), "old-handle", old.cwd,
+        ), "old-handle", old.cwd, root,
+    )
+    caller["preview"] = not from_preview
+    current = await produced_options()
+    assert current.cwd != old.cwd
+    captured = await _connect(monkeypatch, store, current)
+    handle = captured["cli_session_id"]
+    assert handle and handle != "old-handle"
+    target = fluid_transcript._cli_project_dir(root, current.cwd) / f"{handle}.jsonl"
+    entries = [json.loads(line) for line in target.read_text().splitlines()]
+    assert old_file.is_file() and len(entries) == 2
+    assert {entry["cwd"] for entry in entries} == {current.cwd}
+    assert "PELICAN" in entries[0]["message"]["content"]
+    assert fluid_transcript.get_cli_session_id(SID) == handle
 
 
 @pytest.mark.asyncio
@@ -388,12 +440,16 @@ async def test_a_slash_command_turn_is_not_staleness(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_a_transcript_the_cli_would_not_pick_is_reseeded(monkeypatch, tmp_path):
-    """Outside the cwd's project dir the CLI takes a transcript only when one
-    dir holds it; with two it gives up."""
+@pytest.mark.parametrize("projects", [("project-a",), ("project-a", "project-b")])
+async def test_a_transcript_the_cli_would_not_pick_is_reseeded(monkeypatch, tmp_path, projects):
+    """A first resume cannot load even a unique file outside its cwd folder.
+
+    Already-indexed CLI handles may work cross-folder, but reseeded handles
+    have no CLI index yet. Never assume a global match is safe at connect.
+    """
     store = MemoryStore()
     await _seed(store, PELICAN, handle="cli-handle")
-    for project in ("project-a", "project-b"):
+    for project in projects:
         _write_cli_jsonl(tmp_path, "cli-handle", _cli_turns("My codename is PELICAN"), project)
     calls = _fake_reseed(monkeypatch, ReseedResult(status="reseeded", cli_session_id="new-uuid"))
 
@@ -534,6 +590,45 @@ def test_a_long_cwd_reuses_the_cli_hashed_project_dir(tmp_path, _short_dir_limit
         [{"type": "user"}], "cli-uuid", long_cwd, tmp_path,
     )
     assert path.parent == hashed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sibling_count", [1, 2])
+async def test_long_cwd_lookup_uses_the_handle_within_its_prefix(
+    tmp_path, monkeypatch, _short_dir_limit, sibling_count,
+):
+    options = _options(tmp_path)
+    prefix = cli_project_dir_name(os.path.abspath(options.cwd))[:20]
+    transcript = _write_cli_jsonl(tmp_path, "cli-handle", [
+        _user("My codename is PELICAN"), _assistant("Noted: PELICAN"),
+    ], project=prefix + "-hash-one")
+    if sibling_count == 2:
+        _write_cli_jsonl(tmp_path, "other-handle", [_user("other chat")],
+                         project=prefix + "-hash-two")
+    # An unrelated cwd with the same handle must not participate in lookup.
+    _write_cli_jsonl(tmp_path, "cli-handle", [_user("unrelated")], project="unrelated")
+    assert fluid_transcript.find_cli_transcript(
+        "cli-handle", _projects(tmp_path), options.cwd,
+    ) == transcript
+    store = MemoryStore()
+    await _seed(store, PELICAN, handle="cli-handle")
+    _no_reseed(monkeypatch)
+    captured = await _connect(monkeypatch, store, options)
+    assert captured["cli_session_id"] == "cli-handle"
+
+
+def test_long_cwd_lookup_refuses_a_handle_in_two_prefix_siblings(tmp_path, _short_dir_limit):
+    options = _options(tmp_path)
+    prefix = cli_project_dir_name(os.path.abspath(options.cwd))[:20]
+    for suffix in ("-hash-one", "-hash-two"):
+        _write_cli_jsonl(tmp_path, "cli-handle", [_user("copied handle")], project=prefix + suffix)
+    assert fluid_transcript.find_cli_transcript("cli-handle", _projects(tmp_path), options.cwd) is None
+
+
+def test_long_cwd_lookup_does_not_scan_an_unrelated_prefix(tmp_path, _short_dir_limit):
+    options = _options(tmp_path)
+    _write_cli_jsonl(tmp_path, "cli-handle", [_user("wrong cwd")], project="unrelated")
+    assert fluid_transcript.find_cli_transcript("cli-handle", _projects(tmp_path), options.cwd) is None
 
 
 def test_a_long_cwd_without_a_cli_dir_keeps_the_old_name(tmp_path, _short_dir_limit):

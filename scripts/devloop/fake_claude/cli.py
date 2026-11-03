@@ -416,9 +416,24 @@ class DevClaude(script.Fake):
                 rows = [{"role": "user", "text": content if isinstance(content, str) else "",
                          "toolUses": [], "handle": entry.get("uuid")}, *kept]
                 self.last_uuid = (kept[-1]["handle"] if kept else entry.get("uuid"))
-            elif isinstance(entry.get("fakeRow"), dict):
-                rows.append(entry["fakeRow"])
-                by_uuid[entry.get("uuid")] = entry["fakeRow"]
+            elif entry.get("type") in ("user", "assistant"):
+                row = entry.get("fakeRow")
+                if not isinstance(row, dict):
+                    # App rewinds reseed ordinary CLI JSONL, not the fake's
+                    # private fakeRow field. Read the real message shape too.
+                    message = entry.get("message") or {}
+                    content = message.get("content")
+                    blocks = [b for b in content if isinstance(b, dict)] if isinstance(content, list) else []
+                    text = content if isinstance(content, str) else "\n".join(
+                        str(b.get("text") or "") for b in blocks if b.get("type") == "text"
+                    )
+                    row = {"role": message.get("role") or entry["type"], "text": text,
+                           "toolUses": [{"tool_use_id": b.get("id"), "tool": b.get("name"),
+                                         "input": b.get("input") or {}}
+                                        for b in blocks if b.get("type") == "tool_use"],
+                           "handle": entry.get("uuid")}
+                rows.append(row)
+                by_uuid[entry.get("uuid")] = row
                 self.last_uuid = entry.get("uuid") or self.last_uuid
         self.rows = rows
 
@@ -499,6 +514,7 @@ class DevClaude(script.Fake):
             os.path.join(plugin_dir, ".claude-plugin", "plugin.json"))
         self.mcp = connect_mcp(_flag("--mcp-config"))
         log("init", session_id=self.sid, resumed=self.resume is not None, rows=len(self.rows),
+            history=[{"role": row["role"], "text": row.get("text", "")[:300]} for row in self.rows],
             mcp={s.name: {"status": s.status, "error": s.error, "tools": s.tools}
                  for s in self.mcp.values()},
             mod=self.mod_loaded)

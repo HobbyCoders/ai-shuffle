@@ -1357,12 +1357,16 @@ def find_cli_transcript(
 ) -> Optional[Path]:
     """The ``<handle>.jsonl`` file ``--resume <handle>`` would load, or None.
 
-    Claude Code 2.1.285 looks in the cwd's project dir first. Failing that it
-    scans every project dir under the root for ``<handle>.jsonl`` and gives up
-    when more than one dir holds it (its "transcript_id_scan_fallback"). This
-    follows the same order: ``working_dir``'s dir (under its absolute and its
-    resolved path), then the scan, which must find exactly one file. Returns
-    None when the CLI would not find the file, or the handle is not a plain id.
+    With a runtime cwd, only accept that cwd's project dirs (absolute or
+    resolved); for hashed long names, the handle must uniquely identify a
+    file within the encoded-cwd prefix. A newly reseeded handle has no CLI
+    index yet: even a UNIQUE
+    global match can fail its first --resume from another folder. Accepting
+    that match masks cwd changes and prevents connect-time self-healing.
+    Already-indexed handles may work cross-folder; conservatively reseeding
+    those from Fluid is safer than silently starting with empty context.
+    Without a cwd, a diagnostic lookup can scan for a unique global match.
+    Returns None for an unavailable file or a handle that is not a plain id.
     """
     if not cli_session_id or not set(cli_session_id) <= _CLI_HANDLE_CHARS:
         return None
@@ -1374,9 +1378,17 @@ def find_cli_transcript(
         for cwd in dict.fromkeys(
             (os.path.abspath(working_dir), os.path.realpath(working_dir))
         ):
-            candidate = _cli_project_dir(root, cwd) / name
-            if candidate.is_file():
-                return candidate
+            encoded = cli_project_dir_name(cwd)
+            if len(encoded) > CLI_PROJECT_DIR_MAX:
+                # Unlike a writer choosing a folder for a new handle, a reader
+                # can disambiguate hashed siblings by the exact existing handle.
+                candidates = root.glob(f"{encoded[:CLI_PROJECT_DIR_MAX]}*/{name}")
+            else:
+                candidates = [root / encoded / name]
+            found = [candidate for candidate in candidates if candidate.is_file()]
+            if found:
+                return found[0] if len(found) == 1 else None
+        return None
     found = [c for c in root.glob(f"*/{name}") if c.is_file()]
     return found[0] if len(found) == 1 else None
 
