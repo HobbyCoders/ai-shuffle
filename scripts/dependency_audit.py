@@ -11,6 +11,8 @@ import tempfile
 import tomllib
 from pathlib import Path
 
+from pip_audit_retry import run_audit
+
 ROOT = Path(__file__).resolve().parents[1]
 PIP_AUDIT_VERSION = "2.9.0"
 NPM_PACKAGES = ("frontend", "scripts/source-publisher", "browser-mcp", "desktop", "tools")
@@ -82,11 +84,12 @@ def audit(strict=False):
             try:
                 if python is None:
                     raise RuntimeError("pip-audit unavailable")
-                result = command([str(python), "-m", "pip_audit", "-r", str(path),
-                                  "--format=json", "--progress-spinner=off", "--timeout=30"])
+                result = run_audit(["-r", str(path), "--format=json"], python=python, cwd=ROOT)
                 if result.returncode not in (0, 1):
                     raise RuntimeError("audit failed")
                 summary, problem = pip_summary(json.loads(result.stdout))
+                if result.returncode and not problem:
+                    raise RuntimeError("audit failed without a findings report")
             except (OSError, RuntimeError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired):
                 summary, problem = "UNAVAILABLE (tool, resolver or advisory service failed; no clean bill of health)", True
             failed |= problem
