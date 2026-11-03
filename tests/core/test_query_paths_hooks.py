@@ -246,10 +246,11 @@ async def test_background_query_attaches_hooks():
     class SentinelStop(Exception):
         pass
 
-    def poisoned_pool():
-        # First pool access comes AFTER the option-build block — hooks must
-        # already be attached when the session machinery starts.
-        raise SentinelStop()
+    # Turn entry may peek before options setup to discard an idle Stop. Hooks
+    # must still be attached before acquiring/using the adapter after setup.
+    pool = MagicMock()
+    pool.peek.return_value = None
+    pool.get.side_effect = SentinelStop
 
     with patch.object(qb, "database") as mock_db, patch("app.core.sdk_options.build_options_from_profile", return_value=(options, {})
     ), patch.object(
@@ -257,7 +258,7 @@ async def test_background_query_attaches_hooks():
     ), patch.object(
         qb, "sync_engine"
     ) as mock_sync, patch.object(
-        qb, "get_session_pool", poisoned_pool
+        qb, "get_session_pool", return_value=pool
     ), patch.object(
         hook_service, "build_hooks_config", return_value=SENTINEL_HOOKS
     ) as mock_build:
@@ -276,6 +277,8 @@ async def test_background_query_attaches_hooks():
                 api_user_id=None,
             )
 
+    pool.peek.assert_called_once_with(APP_SESSION_ID)
+    pool.get.assert_called_once_with(APP_SESSION_ID)
     assert options.hooks == SENTINEL_HOOKS, (
         "_run_background_query never attached hooks — DB PreToolUse guards "
         "do not fire on POST /api/v1/conversation/start"

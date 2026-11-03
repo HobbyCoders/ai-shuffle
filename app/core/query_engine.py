@@ -984,6 +984,12 @@ async def stream_query(
     pooled or the options require a reconnect.
     """
 
+    # Drop only an unowned Stop, before the first await. A Stop received during
+    # this turn's async setup must survive, even before is_streaming is claimed.
+    idle_state = get_session_pool().peek(session_id) if session_id else None
+    if idle_state is not None and not idle_state.is_streaming:
+        idle_state.interrupt_requested = False
+
     # Get profile. Log at ERROR: consumers may have no surface for this yield
     # (headless path has no 'error' dispatch handler and force-cleans the live
     # store), so the log line can be the only trace of the refusal.
@@ -1605,6 +1611,10 @@ async def stream_query(
 
     finally:
         clear_turn_context(session_id, expected=bound_generation_context)
+        # Consume this turn's Stop before releasing the pooled state. A later
+        # reset (after async setup) could erase a real Stop for this turn.
+        sdk_interrupted = not interrupted and state.interrupt_requested
+        state.interrupt_requested = False
         # Mark as not streaming — keep in pool for reuse
         state.is_streaming = False
         state.streaming_started_at = None
@@ -1617,11 +1627,8 @@ async def stream_query(
 
     # Persist session data to database in a batched write (single transaction
     # for all tool messages + assistant response, instead of N+1 individual writes).
-    # Detect an adapter-level interrupt: adapter.interrupt() causes receive_events()
-    # to end naturally (no CancelledError), so `interrupted` is still False here.
-    # Check the flag to correctly mark this turn as interrupted for persistence
-    # and to yield the right terminal event to the frontend.
-    sdk_interrupted = not interrupted and state.interrupt_requested
+    # An adapter interrupt ends receive_events() naturally, without CancelledError.
+    # Use the flag captured before releasing the pooled state for the next turn.
     if sdk_interrupted:
         interrupted = True
 
