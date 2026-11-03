@@ -81,7 +81,7 @@ def test_version_qualified_family_words_do_not_name_the_current_alias(family, sp
     assert mo._tokens(text) == [*before, family, *after]
     assert not mo.named_by_user(family, [f"Use {text} for the review"], CATALOG)
     assert not mo.memory_names(family, f"Route reviews to {text}", CATALOG)
-    assert not mo.named_by_user(family, [f"Use {text}; use {family} for this instead"], CATALOG)
+    assert mo.named_by_user(family, [f"Use {text}; use {family} for this instead"], CATALOG)
     assert mo.named_by_user(family, [text, f"use {family} instead"], CATALOG)
 
 
@@ -1045,14 +1045,18 @@ ARGS = {"title": "Review", "prompt": "Review the change", "request_id": "r1"}
 
 VERSION_WORDINGS = [
     "claude-3-opus", "claude-3-opus-latest", "claude-opus-latest", "use 4.7 opus",
-    "Use the 4.7 version of Opus", "Opus model 4.7", "opus at version 4.7",
-    "opus with 1m context", "Route reviews to claude-3-opus", "Reviews: Opus, 4.7",
-    "Reviews go on the 4.7 version of Opus", "opus build 4.7", "opus release 4.7",
+    "Route reviews to claude-3-opus", "use opus 2 reviewers", "Use Opus 4 as the reviewer",
+    "Use Opus four", "use old opus", "use the previous opus", "Opus version 4",
 ]
 PLAIN_WORDINGS = [
     "Use opus.\n1. Fix the bug\n2. Review it", "use opus, 2 reviewers",
     "Use opus. 3 files changed", "use opus. Version 4.7 of the lib is broken",
-    "Use opus\n\n2 things to check", "use opus 2 reviewers", "Opus please - 4 agents",
+    "Use opus\n\n2 things to check", "Opus please - 4 agents",
+    # Retain earlier spellings: only adjacent qualifications count under the new rule.
+    "Use the 4.7 version of Opus", "Opus model 4.7", "opus at version 4.7",
+    "opus with 1m context", "Reviews: Opus, 4.7", "Reviews go on the 4.7 version of Opus",
+    "opus build 4.7", "opus release 4.7", "use opus for PR 1040", "use opus for step 2",
+    "Use opus instead of Sol 6.1", "use 4 opus agents",
 ]
 
 
@@ -1079,9 +1083,16 @@ def test_historical_sonnet_name_is_not_current_family_consent():
                          + [(s, True) for s in PLAIN_WORDINGS])
 async def test_sentence_rule_through_real_native_start(chats, entry, source, wording, consent):
     _native_request(chats, entry, source, wording)
+    # The memory writer collapses blank paragraphs: the saved number is now
+    # adjacent to Opus, unlike the owner's original newline-delimited message.
+    if source == "memory" and wording == "Use opus\n\n2 things to check":
+        consent = False
     ok, error = await _native_call(entry, "opus", "sentence-consent")
     assert ok is consent, error
     assert len(chats[2]) == int(not consent)
+    if ok and entry == "start":
+        receipt = json.loads(error)
+        assert receipt["model"] == sessions.get_session(receipt["session_id"])["model"] == "opus"
 
 
 @pytest.mark.parametrize("entry", ["start", "task"])

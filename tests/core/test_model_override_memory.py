@@ -38,10 +38,10 @@ CATALOG = {
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("model, named", [
-    ("opus", False), (SOL, True), ("sonnet", False), ("fable", False),
+    ("opus", True), (SOL, True), ("sonnet", True), ("fable", False),
     ("haiku", False), ("prov:chatgpt:gpt-6.1-astra", False),
 ])
-def test_historical_routing_memory_needs_digit_free_native_sentences(model, named):
+def test_the_owners_routing_memory_names_its_models_but_not_fable(model, named):
     assert mo.memory_names(model, M260, CATALOG) is named
 
 
@@ -68,8 +68,8 @@ def test_a_model_named_only_in_a_negated_clause_does_not_count(text, accepted, r
     "use Opus for coding subagents, not GPT 6.1 Sol",
     "Use Opus instead of GPT 6.1 Sol",
 ])
-def test_negated_foreign_version_does_not_make_the_native_sentence_unqualified(text):
-    assert not mo.memory_names("opus", text, CATALOG)
+def test_negated_foreign_version_does_not_qualify_the_native_family(text):
+    assert mo.memory_names("opus", text, CATALOG)
     assert not mo.memory_names(SOL, text, CATALOG)
 
 
@@ -170,7 +170,7 @@ def _receipts():
 
 @pytest.mark.parametrize("wording, model_id, text", [
     ("gpt 6.1 sol", "gpt-6.1-sol", M260),
-    ("sonnet", "sonnet", "Routine reviews Sonnet. Bounded backend GPT 6.1 Sol."),
+    ("sonnet", "sonnet", M260),
 ])
 async def test_a_saved_routing_memory_accepts_its_models_without_a_prompt(world, wording, model_id, text):
     seen, prompts = world
@@ -185,12 +185,12 @@ async def test_a_saved_routing_memory_accepts_its_models_without_a_prompt(world,
     assert _receipts() == []
 
 
-async def test_historical_routing_memory_prompts_before_a_native_start(world):
+async def test_historical_routing_memory_authorizes_a_native_start(world):
     seen, prompts = world
     _save(M260)
     result = await _task("sonnet")
-    assert not result["ok"] and result["reason"] == "model_not_requested"
-    assert len(prompts) == 1 and not seen
+    assert result["ok"] and result["model_override"]["source"] == mo.REMEMBERED
+    assert not prompts and seen[0]["model_id"] == "sonnet"
 
 
 async def test_acceptance_is_logged_with_the_memory(world, caplog):

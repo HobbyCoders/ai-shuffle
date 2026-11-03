@@ -27,7 +27,7 @@ def native(mock_db, monkeypatch, tmp_path):
     db.create_project("task-project", "Task project", None, str(tmp_path))
     db.create_session(session_id="parent", profile_id="caller", title="Parent", project_id="task-project")
     from tests.core.test_task_model_choices import _user_says
-    _user_says("parent", "Try haiku, opus or fable. Or use gpt-5.6-sol for this.")
+    _user_says("parent", "Try haiku, opus, fable or gpt-5.6-sol for this.")
     monkeypatch.setattr(td, "_credential_gap", lambda provider: None)
     monkeypatch.setattr(project_resolver, "resolve_existing_cwd", lambda row: str(tmp_path))
     seen = []
@@ -40,7 +40,7 @@ def native(mock_db, monkeypatch, tmp_path):
     return db, seen
 
 
-async def test_a_native_family_beside_a_provider_version_requires_fresh_owner_agreement(native, monkeypatch):
+async def test_a_native_family_beside_a_provider_version_keeps_owner_consent(native, monkeypatch):
     from app.core.agent_types import PermissionResultDeny
     from app.core.permission_handler import permission_handler
     from tests.core.test_task_model_choices import _user_says
@@ -58,8 +58,8 @@ async def test_a_native_family_beside_a_provider_version_requires_fresh_owner_ag
         {"agent": "helper", "prompt": "go", "model": "haiku", "mode": "sync"},
         caller_session_id="parent", caller_provider_id=None,
     )
-    assert not result["ok"] and result["reason"] == "model_not_requested"
-    assert len(prompts) == 1 and not seen
+    assert result["ok"] and result["model_override"]["source"] == "named_by_user"
+    assert not prompts and seen[0]["model_id"] == "haiku"
 
 
 def test_native_caller_contract_takes_any_model_string(native):

@@ -361,18 +361,15 @@ def _mentions(text_tokens: Sequence[str], name: str) -> bool:
 
 
 def _family_consent(model: str, text: str) -> Optional[bool]:
-    """None: not mentioned; False: qualified/ambiguous; True: plain consent."""
+    """A plain, affirmative mention counts; questions and adjacent qualifiers don't."""
     name = re.escape(model)
-    sentences = [s for s in re.split(r"\n|[.!?](?=\s)", str(text or ""))
-                 if re.search(rf"(?<![a-z]){name}(?![a-z])", s, re.I)]
-    for sentence in sentences:
-        positive = " ".join(affirmed_clauses(sentence))
-        if not re.search(rf"(?<![\w-]){name}(?![\w-])", positive, re.I):
-            return False
-        uncounted = re.sub(rf"(?<![\w.])\d+\s+(?!{name}\b)[a-z]+s\b", "", sentence, flags=re.I)
-        if re.search(r"\d", uncounted):
-            return False
-    return True if sentences else None
+    text = "\n".join(s for s in re.split(r"(?<=[.!?])\s+|\n", str(text or "")) if not s.rstrip().endswith("?"))
+    number = r"(?:v?\d|(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand)\b)"
+    qualified = (rf"\b(?:old|older|previous|prior|legacy|last|\d+\.\d+)\s+{name}\b|"
+                 rf"\b[\w-]+-{name}\b|\b{name}(?:-[\w-]+|\[\d|\s+(?:version\s+)?{number})")
+    plain = " ".join(re.sub(qualified, "", clause, flags=re.I) for clause in affirmed_clauses(text))
+    return (True if re.search(rf"(?<![\w-]){name}(?![\w-])", plain, re.I)
+            else False if re.search(rf"\b{name}\b", text, re.I) else None)
 
 
 def named_by_user(model: str, texts: Iterable[str],
