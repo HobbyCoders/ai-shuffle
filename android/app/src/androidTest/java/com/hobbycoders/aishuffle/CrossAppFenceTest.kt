@@ -33,7 +33,8 @@ import java.util.concurrent.atomic.AtomicReference
  * A "blip" is a genuine move that undoes itself: it gives the fence the same shape as Android's
  * one bad read (bounds differ, then match again), on demand. Blips must survive; a move that lasts
  * or any content change must be refused, under the panel and after it has gone. So must a screen
- * that reads the same from different views, and one too slow to read in time. An event landing after
+ * that reads the same from different views, a view whose fields differ but would concatenate alike,
+ * a view advertising a child it can't return, and a screen too slow to read in time. An event landing after
  * the final read must force another read, and a target stalling after it must not hold the main thread.
  */
 @RunWith(AndroidJUnit4::class)
@@ -179,6 +180,7 @@ class CrossAppFenceTest {
         ShuffleAccessibilityService.afterConsentClosed = null
         ShuffleAccessibilityService.afterFinalRead = null
         ShuffleAccessibilityService.eventCheckDelayMs = 0
+        ShuffleAccessibilityService.afterEventCheckRead = null
         instrumentation.runOnMainSync {
             ToolsPreferences(context).setEnabled(false); DeviceToolsRuntime.stop()
             ServerStore.get(context).remove(server.id); ServerStore.get(context).selectedToolsServerId = null
@@ -319,6 +321,45 @@ class CrossAppFenceTest {
         assertEquals("stale_ref", status(tapping).getString("status"))
         assertNotTapped()
     }
+    /** The first track reads text `A|B`, description `C`; "rebind" makes it `A`, `B|C`, on the same node with nothing else different. */
+    private fun collidingRef(): String {
+        fixture("collide")
+        return read("A|B")
+    }
+    @Test fun sameNodeRebindAsThePanelClosesIsRefused() {
+        val ref = collidingRef()
+        onceClosed("rebind")
+        val tapping = tap(ref); allow()
+        assertEquals("stale_ref", status(tapping).getString("status"))
+        assertNotTapped()
+    }
+    @Test fun sameNodeRebindUnderThePanelIsRefused() {
+        val tapping = tap(collidingRef())
+        panelUp(); fixture("rebind")
+        touchIfStillUp("Allow once")
+        assertEquals("denied", status(tapping).getString("status"))
+        assertNotTapped()
+    }
+    @Test fun sameNodeRebindBeforeTheNextCommandStaleTheReference() {
+        val ref = collidingRef()
+        fixture("rebind")
+        assertEquals("stale_ref", status(tap(ref)).getString("status"))
+        assertNotTapped()
+    }
+    @Test fun sameNodeRebindAsItsReadPanelClosesPublishesNoRefs() {
+        fixture("collide")
+        onceClosed("rebind")
+        val reading = request("read_screen"); allow()
+        assertEquals("stale_ref", status(reading).getString("status"))
+    }
+    @Test fun readRefusedOnAChildItCannotGet() {
+        fixture("ghost:1")
+        assertEquals("protected_screen", status(request("read_screen")).getString("status"))
+    }
+    @Test fun readRefusedOnAParentAdvertisingThousandsOfMissingChildren() {
+        fixture("ghost:1000")
+        assertEquals("protected_screen", status(request("read_screen")).getString("status"))
+    }
     @Test fun contentBlipUnderThePanelIsRefused() {
         val tapping = tap(read())
         panelUp(); fixture("textblip")
@@ -366,10 +407,16 @@ class CrossAppFenceTest {
     @Test fun denseSlowScreenKeepsItsPanelThroughABlip() {
         val tapping = tap(denseSlowRef())
         panelUp()
+        // The move lasts until a fresh read by the event fence has seen it, so this can't pass with nothing to recover from.
+        // Undone before that read's verdict is acted on, so the retry reads only the reverted screen.
+        val mismatched = CountDownLatch(1); val recovered = CountDownLatch(1)
+        ShuffleAccessibilityService.afterEventCheckRead = { fresh, verdict ->
+            if (fresh && verdict == FenceRead.UNCONFIRMED && mismatched.count == 1L) { runCatching { fixture("back") }; mismatched.countDown() }
+            else if (fresh && verdict == FenceRead.SAME && mismatched.count == 0L) recovered.countDown()
+        }
         fixtureWithEvent("move")
-        Thread.sleep(400) // The event's check has started a read by now, and any row it has read shows the move.
-        fixture("back")
-        Thread.sleep(4_000) // That check has finished by now, either way.
+        assertTrue("The event fence never read the move", mismatched.await(10, TimeUnit.SECONDS))
+        assertTrue("The event fence never read the screen exact again", recovered.await(10, TimeUnit.SECONDS))
         allow()
         assertEquals("performed", status(tapping, 15).getString("status"))
         assertTapped(1)

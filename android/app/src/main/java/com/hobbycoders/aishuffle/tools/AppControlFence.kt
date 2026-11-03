@@ -2,11 +2,39 @@ package com.hobbycoders.aishuffle.tools
 
 import kotlinx.coroutines.delay
 
-/** One full read of the target's accessibility tree: every field, and the same rows without bounds or visibility. */
-internal data class ScreenPrint(val exact: String, val identity: String)
+/**
+ * One node as read, field by field. Compared as typed values, never joined into a string: a
+ * button going from text `A|B` and description `C` to text `A` and description `B|C` is a different
+ * button, however its values happen to concatenate.
+ */
+internal data class ScreenRow(
+    val source: Int, val window: Int, val viewId: String?, val className: String?, val text: String?, val description: String?,
+    val bounds: List<Int>, val clickable: Boolean, val scrollable: Boolean, val editable: Boolean, val visible: Boolean, val children: Int,
+) {
+    /** Everything but bounds and visibility, the only two fields a bad read can get wrong. */
+    val identity: ScreenRow get() = copy(bounds = emptyList(), visible = false)
+    /** The names of the fields that differ, never their values: this goes to logs. */
+    fun changedFields(other: ScreenRow): List<String> = listOfNotNull(
+        "source".takeIf { source != other.source }, "window".takeIf { window != other.window },
+        "viewId".takeIf { viewId != other.viewId }, "class".takeIf { className != other.className },
+        "text".takeIf { text != other.text }, "description".takeIf { description != other.description },
+        "bounds".takeIf { bounds != other.bounds }, "clickable".takeIf { clickable != other.clickable },
+        "scrollable".takeIf { scrollable != other.scrollable }, "editable".takeIf { editable != other.editable },
+        "visible".takeIf { visible != other.visible }, "children".takeIf { children != other.children },
+    )
+}
+
+/** One full read of the target's accessibility tree. */
+internal data class ScreenPrint(val rows: List<ScreenRow>)
 
 /** PENDING: the read matched exactly, but an event arrived during it, so it does not prove the screen as it is now. */
 internal enum class FenceRead { SAME, UNCONFIRMED, PENDING, CHANGED }
+
+/**
+ * A verdict and the time its own read spent reading, if measured. Reads run concurrently, so the
+ * time has to travel with its verdict: anywhere shared, a fast check could overwrite a slow read's.
+ */
+internal data class Reading(val verdict: FenceRead, val readMs: Long? = null)
 
 /**
  * Settles who decides an attempt whose wait can end while it is still running: it either sends its
@@ -28,7 +56,22 @@ internal class DispatchGate(private val sendBy: Long, private val now: () -> Lon
 internal class ReadLimit(private val until: Long, private val now: () -> Long, private val stop: () -> Boolean = { false }) {
     var nodes = 0
         private set
-    fun admit(depth: Int): Boolean = !(++nodes > AppControlFence.MAX_NODES || depth > AppControlFence.MAX_DEPTH || now() >= until || stop())
+    fun admit(depth: Int): Boolean = !(++nodes > AppControlFence.MAX_NODES || depth > AppControlFence.MAX_DEPTH || !live())
+    fun live(): Boolean = now() < until && !stop()
+    /**
+     * Each of [count] advertised children, until [visit] says stop. False unless all were visited:
+     * a read that missed a child never proved the whole screen. Checks the limits before every
+     * query, so a read that has ended, or a parent advertising far more than it has, asks the
+     * target for nothing further.
+     */
+    inline fun <N : Any> eachChild(count: Int, query: (Int) -> N?, visit: (N) -> Boolean): Boolean {
+        for (i in 0 until count) {
+            if (!live() || nodes >= AppControlFence.MAX_NODES) return false
+            val child = query(i) ?: return false
+            if (!visit(child)) return false
+        }
+        return true
+    }
 }
 
 /**
@@ -63,10 +106,11 @@ internal object AppControlFence {
     fun retryWindow(windowMs: Long, readMs: Long): Long = maxOf(windowMs, SETTLE_MS + minOf(READ_MS, 2 * readMs))
 
     fun compare(expected: ScreenPrint, actual: ScreenPrint): FenceRead = when {
-        expected.exact == actual.exact -> FenceRead.SAME
-        expected.identity == actual.identity -> FenceRead.UNCONFIRMED
+        expected == actual -> FenceRead.SAME
+        expected.rows.map { it.identity } == actual.rows.map { it.identity } -> FenceRead.UNCONFIRMED
         else -> FenceRead.CHANGED
     }
+    fun compare(expected: ScreenRow, actual: ScreenRow): FenceRead = compare(ScreenPrint(listOf(expected)), ScreenPrint(listOf(actual)))
 
     /**
      * True only if a read returned SAME and finished in time.
@@ -74,8 +118,8 @@ internal object AppControlFence {
      * [limitMs] is the caller's hard limit, the command deadline or consent expiry: nothing
      * finishing past it counts. The first read that is not exact opens a retry window, see
      * [retryWindow]. A clean first read has tolerated nothing and needs only the hard limit, so a
-     * large screen is not refused for being large; each read is bounded by [ReadLimit].
-     * [lastReadMs] is how long the read just finished spent reading, if the caller measured it.
+     * large screen is not refused for being large; each read is bounded by [ReadLimit]. The window
+     * is sized from the [Reading.readMs] of the read that opened it.
      *
      * The first PENDING read opens a separate window of [QUIET_MS] to find a read no event landed
      * in. Its exact match, in time, ends the [windowMs] window, since whatever opened that has reverted.
@@ -83,21 +127,22 @@ internal object AppControlFence {
      * [read] is given the time on [now]'s clock it must finish by, the earliest of all of these, so
      * anything it does that can't be undone is held to the same deadline as its verdict.
      */
-    suspend fun settle(limitMs: Long, now: () -> Long, windowMs: Long = SETTLE_MS, wait: suspend (Long) -> Unit = { delay(it) }, lastReadMs: () -> Long? = { null }, read: suspend (until: Long) -> FenceRead): Boolean {
+    suspend fun settle(limitMs: Long, now: () -> Long, windowMs: Long = SETTLE_MS, wait: suspend (Long) -> Unit = { delay(it) }, read: suspend (until: Long) -> Reading): Boolean {
         if (limitMs <= 0) return false
         val end = now() + limitMs
         var retryEnd = Long.MAX_VALUE
         var quietEnd = Long.MAX_VALUE
         while (true) {
             val started = now()
-            val verdict = read(minOf(end, retryEnd, quietEnd))
+            val reading = read(minOf(end, retryEnd, quietEnd))
+            val verdict = reading.verdict
             val finished = now()
             if (verdict == FenceRead.CHANGED || finished >= minOf(end, retryEnd, quietEnd)) return false
             if (verdict == FenceRead.SAME) return true
             if (verdict == FenceRead.PENDING) {
                 retryEnd = Long.MAX_VALUE
                 if (quietEnd == Long.MAX_VALUE) quietEnd = finished + QUIET_MS
-            } else if (retryEnd == Long.MAX_VALUE) retryEnd = finished + retryWindow(windowMs, lastReadMs() ?: (finished - started))
+            } else if (retryEnd == Long.MAX_VALUE) retryEnd = finished + retryWindow(windowMs, reading.readMs ?: (finished - started))
             val until = minOf(end, retryEnd, quietEnd)
             wait(minOf(STEP_MS, until - finished))
             if (now() >= until) return false // A late wake-up does not earn another read.
@@ -114,7 +159,7 @@ internal object AppControlFence {
             val next = sample()
             val repeated = next != null && next == last
             last = next
-            when { next == null -> FenceRead.CHANGED; repeated -> FenceRead.SAME; else -> FenceRead.UNCONFIRMED }
+            Reading(when { next == null -> FenceRead.CHANGED; repeated -> FenceRead.SAME; else -> FenceRead.UNCONFIRMED })
         }
         return last.takeIf { settled }
     }

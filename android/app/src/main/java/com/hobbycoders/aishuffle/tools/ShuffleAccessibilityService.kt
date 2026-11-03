@@ -18,17 +18,17 @@ import org.json.JSONObject
 import java.util.UUID
 
 /** Sees each node of a proving read: the node, its depth, its place in the traversal and its row. False skips collecting below it. */
-private typealias NodeVisitor = (AccessibilityNodeInfo, Int, Int, ScreenPrint) -> Boolean
+private typealias NodeVisitor = (AccessibilityNodeInfo, Int, Int, ScreenRow) -> Boolean
 
 /** OS-managed, explicitly armed per process; no boot receiver, wake word or overlay permission. */
 class ShuffleAccessibilityService : AccessibilityService() {
     /** A reference is bound to one source node at one place in the tree, with the exact contents it had when captured. */
-    private class Target(val node: AccessibilityNodeInfo, val ordinal: Int, val row: ScreenPrint)
+    private class Target(val node: AccessibilityNodeInfo, val ordinal: Int, val row: ScreenRow)
     private data class Snapshot(val pkg: String, val window: Int, val fingerprint: ScreenPrint, val created: Long, val nodes: Map<String, Target>)
-    private class Watch(val key: Any, val read: (Boolean) -> FenceRead)
-    private class Captured(val verdict: FenceRead, val token: String, val refs: Map<String, Target>, val rows: JSONArray)
+    private class Watch(val key: Any, val read: (Boolean) -> Reading)
+    private class Captured(val reading: Reading, val token: String, val refs: Map<String, Target>, val rows: JSONArray)
     /** [performed] is set only once the final checks all passed. */
-    private class Attempt(val verdict: FenceRead, val why: String, val performed: Boolean? = null)
+    private class Attempt(val reading: Reading, val why: String, val performed: Boolean? = null)
     /** The action's final checks read this off the main thread; only the main thread writes it. */
     @Volatile private var snapshot: Snapshot? = null
     @Volatile private var revision = 0L
@@ -44,7 +44,7 @@ class ShuffleAccessibilityService : AccessibilityService() {
     private var overlay: LinearLayout? = null
     private var consent: CompletableDeferred<Boolean>? = null
     private var consentId: String? = null
-    private var consentTargetValid: ((Boolean) -> FenceRead)? = null
+    private var consentTargetValid: ((Boolean) -> Reading)? = null
     private var sentinelCheck: Job? = null
     private var sentinelEvent: String? = null
     companion object {
@@ -56,6 +56,8 @@ class ShuffleAccessibilityService : AccessibilityService() {
         @androidx.annotation.VisibleForTesting @Volatile internal var afterFinalRead: (() -> Unit)? = null
         /** Test delay on the event fence's own check, so a test can show what holds without it. */
         @androidx.annotation.VisibleForTesting @Volatile internal var eventCheckDelayMs = 0L
+        /** Test observer off the main thread, after each read by the event fence's own check: whether it was fresh, and its verdict. */
+        @androidx.annotation.VisibleForTesting @Volatile internal var afterEventCheckRead: ((Boolean, FenceRead) -> Unit)? = null
         internal val sensitive = Regex("password|passcode|sign.?in|log.?in|permission|allow access|credential|payment|purchase|checkout|credit card|verify|verification|one.time|security|pin code|unlock|biometric|fingerprint|account number|routing number|card number|cvv|cvc|send money|transfer money|pay now", RegexOption.IGNORE_CASE)
     }
     override fun onServiceConnected() { current = this; ToolsPreferences(this).setCrossAppEnabled(false) }
@@ -80,9 +82,10 @@ class ShuffleAccessibilityService : AccessibilityService() {
             sentinelEvent = null
             val watch = sentinel() ?: continue
             fun watched() = sentinel()?.key === watch.key
-            val cached = offMain(System.currentTimeMillis() + AppControlFence.READ_MS) { watch.read(false) } ?: FenceRead.UNCONFIRMED
-            val holds = cached == FenceRead.SAME || (cached == FenceRead.UNCONFIRMED && AppControlFence.settle(AppControlFence.READ_MS + AppControlFence.QUIET_MS, SystemClock::elapsedRealtime, lastReadMs = { lastReadMs }) {
-                if (!watched()) FenceRead.SAME else offMain(System.currentTimeMillis() + AppControlFence.READ_MS) { watch.read(true) } ?: FenceRead.CHANGED
+            fun checked(fresh: Boolean) = watch.read(fresh).also { if (com.hobbycoders.aishuffle.BuildConfig.DEBUG) afterEventCheckRead?.invoke(fresh, it.verdict) }
+            val cached = offMain(System.currentTimeMillis() + AppControlFence.READ_MS) { checked(false) }?.verdict ?: FenceRead.UNCONFIRMED
+            val holds = cached == FenceRead.SAME || (cached == FenceRead.UNCONFIRMED && AppControlFence.settle(AppControlFence.READ_MS + AppControlFence.QUIET_MS, SystemClock::elapsedRealtime) {
+                if (!watched()) Reading(FenceRead.SAME) else offMain(System.currentTimeMillis() + AppControlFence.READ_MS) { checked(true) } ?: Reading(FenceRead.CHANGED)
             })
             // A verdict on something no longer vouched for must not cancel what replaced it, which gets its own check.
             if (!watched()) { if (sentinelEvent == null) sentinelEvent = cause }
@@ -93,12 +96,10 @@ class ShuffleAccessibilityService : AccessibilityService() {
     private fun sentinel(): Watch? = consentTargetValid?.let { Watch(it, it) } ?: snapshot?.let { captured -> Watch(captured) { fresh ->
         val until = readUntil(Long.MAX_VALUE)
         val root = allowedRoot()
-        if (root == null) FenceRead.CHANGED else try {
-            if (root.windowId == captured.window && root.packageName?.toString() == captured.pkg) compare(captured.fingerprint, root, fresh, ReadLimit(until, System::currentTimeMillis)) else FenceRead.CHANGED
+        if (root == null) Reading(FenceRead.CHANGED) else try {
+            if (root.windowId == captured.window && root.packageName?.toString() == captured.pkg) compare(captured.fingerprint, root, fresh, ReadLimit(until, System::currentTimeMillis)) else Reading(FenceRead.CHANGED)
         } finally { root.recycle() }
     } }
-    /** The time spent reading in the latest read, for sizing a retry window. Another check's read can overwrite it, which only moves the window within its cap. */
-    @Volatile private var lastReadMs = 0L
     private fun readUntil(limit: Long) = minOf(limit, System.currentTimeMillis() + AppControlFence.READ_MS)
     /**
      * One read off the main thread, so Deny, Stop, expiry and the event fence keep running through
@@ -156,7 +157,7 @@ class ShuffleAccessibilityService : AccessibilityService() {
     } catch (_: Exception) { overlay = null; false }
 
     /** Returns the effective expiry when approved, which is then the limit on everything that follows; null otherwise. */
-    private suspend fun approve(detail: String, deadline: Long, targetStillValid: (Boolean, Long) -> FenceRead): Long? {
+    private suspend fun approve(detail: String, deadline: Long, targetStillValid: (Boolean, Long) -> Reading): Long? {
         if (!enabled() || consent != null) return null
         val expires = minOf(deadline, System.currentTimeMillis() + 20_000)
         if (expires <= System.currentTimeMillis()) return null
@@ -164,9 +165,9 @@ class ShuffleAccessibilityService : AccessibilityService() {
         consentId = id; consent = reply; consentTargetValid = { targetStillValid(it, expires) }; removeOverlay()
         fun pending() = current === this && consentId == id && enabled() && System.currentTimeMillis() < expires
         suspend fun confirmed() = settled(expires) {
-            if (!pending()) return@settled FenceRead.CHANGED
-            val verdict = offMain(expires) { targetStillValid(true, expires) } ?: FenceRead.CHANGED
-            if (pending()) verdict else FenceRead.CHANGED
+            if (!pending()) return@settled Reading(FenceRead.CHANGED)
+            val reading = offMain(expires) { targetStillValid(true, expires) } ?: Reading(FenceRead.CHANGED)
+            if (pending()) reading else Reading(FenceRead.CHANGED)
         }
         val panel = panel(); val text = label(detail)
         val proposal = android.widget.ScrollView(this).apply { addView(text) }
@@ -214,63 +215,52 @@ class ShuffleAccessibilityService : AccessibilityService() {
         sensitive.containsMatchIn("${node.text?.toString().orEmpty()} ${node.contentDescription?.toString().orEmpty()}")
     private fun unsafe(node: AccessibilityNodeInfo, depth: Int, limit: ReadLimit): Boolean {
         if (!limit.admit(depth) || blocked(node)) return true
-        for (i in 0 until node.childCount) {
-            val child = node.getChild(i) ?: continue
-            val stop = unsafe(child, depth + 1, limit); child.recycle(); if (stop) return true
+        return !limit.eachChild(node.childCount, { node.getChild(it) }) { child ->
+            val safe = !unsafe(child, depth + 1, limit); child.recycle(); safe
         }
-        return false
     }
     /** The source node's hash stands for its identity: rows that read alike from different views must not compare alike. */
-    private fun rowOf(node: AccessibilityNodeInfo): ScreenPrint {
+    private fun rowOf(node: AccessibilityNodeInfo): ScreenRow {
         val bounds = android.graphics.Rect(); node.getBoundsInScreen(bounds)
-        val labels = "${node.hashCode()}|${node.windowId}|${node.viewIdResourceName}|${node.className}|${node.text}|${node.contentDescription}"
-        val traits = "${node.isClickable}|${node.isScrollable}|${node.isEditable}"
-        return ScreenPrint("$labels|$bounds|$traits|${node.isVisibleToUser}|${node.childCount}", "$labels|$traits|${node.childCount}")
+        return ScreenRow(node.hashCode(), node.windowId, node.viewIdResourceName, node.className?.toString(), node.text?.toString(), node.contentDescription?.toString(),
+            listOf(bounds.left, bounds.top, bounds.right, bounds.bottom), node.isClickable, node.isScrollable, node.isEditable, node.isVisibleToUser, node.childCount)
     }
     /**
      * With [fresh], every node is re-read past the accessibility cache, which can retain a bad read
-     * until the next event. Null if [limit] ended the read, a node has gone, or anything unsafe has
-     * appeared: none of those proved the screen.
+     * until the next event. Null if [limit] ended the read, a node or an advertised child has gone,
+     * or anything unsafe has appeared: none of those proved the screen.
      */
     private fun fingerprint(root: AccessibilityNodeInfo, fresh: Boolean, limit: ReadLimit, onNode: NodeVisitor? = null): ScreenPrint? {
-        val exact = StringBuilder(); val identity = StringBuilder(); var ordinal = 0
+        val rows = ArrayList<ScreenRow>(); var ordinal = 0
         fun visit(node: AccessibilityNodeInfo, depth: Int, collect: Boolean): Boolean {
             if (!limit.admit(depth) || (fresh && !node.refresh()) || blocked(node)) return false
             val row = rowOf(node)
-            exact.append(row.exact).append(';'); identity.append(row.identity).append(';')
+            rows += row
             val collectChildren = collect && onNode?.invoke(node, depth, ordinal, row) == true
             ordinal++
-            for (i in 0 until node.childCount) {
-                val child = node.getChild(i) ?: continue
-                val proved = visit(child, depth + 1, collectChildren); child.recycle(); if (!proved) return false
+            return limit.eachChild(node.childCount, { node.getChild(it) }) { child ->
+                val proved = visit(child, depth + 1, collectChildren); child.recycle(); proved
             }
-            return true
         }
-        return if (visit(root, 0, true)) ScreenPrint(exact.toString(), identity.toString()) else null
+        return if (visit(root, 0, true)) ScreenPrint(rows) else null
     }
     /** Debug diagnostics report only changed field names/counts, never screen values. */
-    private fun fingerprintChange(expected: String, actual: String): String {
-        val fields = listOf("source", "window", "viewId", "class", "text", "description", "bounds", "clickable", "scrollable", "editable", "visible", "children")
-        val before = expected.split(';'); val after = actual.split(';')
-        val changed = before.zip(after).flatMap { (left, right) ->
-            left.split('|').zip(right.split('|')).mapIndexedNotNull { index, (a, b) ->
-                if (a != b) fields.getOrNull(index) ?: "structure" else null
-            }
-        }.toSet()
-        return "rows=${before.size}->${after.size} fields=$changed"
+    private fun fingerprintChange(expected: ScreenPrint, actual: ScreenPrint): String {
+        val changed = expected.rows.zip(actual.rows).flatMap { (left, right) -> left.changedFields(right) }.toSet()
+        return "rows=${expected.rows.size}->${actual.rows.size} fields=$changed"
     }
-    private fun compare(expected: ScreenPrint, root: AccessibilityNodeInfo, fresh: Boolean, limit: ReadLimit, onNode: NodeVisitor? = null): FenceRead {
+    private fun compare(expected: ScreenPrint, root: AccessibilityNodeInfo, fresh: Boolean, limit: ReadLimit, onNode: NodeVisitor? = null): Reading {
         val started = SystemClock.elapsedRealtime()
         val actual = fingerprint(root, fresh, limit, onNode)
-        lastReadMs = SystemClock.elapsedRealtime() - started
+        val readMs = SystemClock.elapsedRealtime() - started
         val verdict = if (actual == null) FenceRead.CHANGED else AppControlFence.compare(expected, actual)
         if (com.hobbycoders.aishuffle.BuildConfig.DEBUG && (fresh || verdict != FenceRead.SAME)) {
-            fenceTrace("fingerprint $verdict fresh=$fresh nodes=${limit.nodes} ms=${SystemClock.elapsedRealtime() - started} ${if (actual == null) "stopped" else fingerprintChange(expected.exact, actual.exact)}")
+            fenceTrace("fingerprint $verdict fresh=$fresh nodes=${limit.nodes} ms=$readMs ${if (actual == null) "stopped" else fingerprintChange(expected, actual)}")
         }
-        return verdict
+        return Reading(verdict, readMs)
     }
-    private suspend fun settled(limit: Long, read: suspend (until: Long) -> FenceRead): Boolean =
-        AppControlFence.settle(limit - System.currentTimeMillis(), SystemClock::elapsedRealtime, lastReadMs = { lastReadMs }, read = read)
+    private suspend fun settled(limit: Long, read: suspend (until: Long) -> Reading): Boolean =
+        AppControlFence.settle(limit - System.currentTimeMillis(), SystemClock::elapsedRealtime, read = read)
     /** A baseline must not be one bad read, or the exact match would later refuse a screen that never changed. */
     private suspend fun stableFingerprint(pkg: String, window: Int, deadline: Long): ScreenPrint? =
         AppControlFence.stable(deadline - System.currentTimeMillis(), SystemClock::elapsedRealtime) {
@@ -295,21 +285,21 @@ class ShuffleAccessibilityService : AccessibilityService() {
         // After the baseline wait: a fence check already running on an older snapshot must not cancel this fresh read.
         val version = revision
         // Always off the main thread.
-        fun read(fresh: Boolean, limit: Long, onNode: NodeVisitor? = null): FenceRead {
+        fun read(fresh: Boolean, limit: Long, onNode: NodeVisitor? = null): Reading {
             if (revision != version || System.currentTimeMillis() >= limit) {
                 fenceTrace("command=$name revision=$version->$revision expired=${System.currentTimeMillis() >= limit}")
-                return FenceRead.CHANGED
+                return Reading(FenceRead.CHANGED)
             }
             val until = readUntil(limit)
-            val root = allowedRoot() ?: return FenceRead.CHANGED
+            val root = allowedRoot() ?: return Reading(FenceRead.CHANGED)
             return try {
-                if (root.windowId == window && root.packageName?.toString() == pkg) compare(fingerprint, root, fresh, ReadLimit(until, System::currentTimeMillis) { revision != version }, onNode) else FenceRead.CHANGED
+                if (root.windowId == window && root.packageName?.toString() == pkg) compare(fingerprint, root, fresh, ReadLimit(until, System::currentTimeMillis) { revision != version }, onNode) else Reading(FenceRead.CHANGED)
             } finally { root.recycle() }
         }
-        suspend fun readFresh(limit: Long, onNode: NodeVisitor? = null) = offMain(limit) { read(true, limit, onNode) } ?: FenceRead.CHANGED
+        suspend fun readFresh(limit: Long, onNode: NodeVisitor? = null) = offMain(limit) { read(true, limit, onNode) } ?: Reading(FenceRead.CHANGED)
         /** What a read could not promise once it finished, checked on the main thread with nothing suspending before refs are published. */
         fun authorized(limit: Long) = revision == version && System.currentTimeMillis() < limit && withActiveApp { it.id == window } == true
-        if (ref != null && !(valid(before, pkg, window, fingerprint, ref) && settled(deadline) { if (snapshot !== before) FenceRead.CHANGED else readFresh(deadline) })) {
+        if (ref != null && !(valid(before, pkg, window, fingerprint, ref) && settled(deadline) { if (snapshot !== before) Reading(FenceRead.CHANGED) else readFresh(deadline) })) {
             fenceTrace("reference_precheck snapshot=${before != null} revision=$revision")
             return ToolRegistry.error("stale_ref", "Read the current screen again; this reference is stale.")
         }
@@ -329,10 +319,10 @@ class ShuffleAccessibilityService : AccessibilityService() {
                     capture { read(true, limit, it) }.also { if (com.hobbycoders.aishuffle.BuildConfig.DEBUG) afterFinalRead?.invoke() }
                 }
                 // Events reach this thread, so none can land between this check and the publish below.
-                if (result != null && result.verdict == FenceRead.SAME && events != started) {
+                if (result != null && result.reading.verdict == FenceRead.SAME && events != started) {
                     result.refs.values.forEach { it.node.recycle() }
-                    FenceRead.PENDING
-                } else { captured = result; result?.verdict ?: FenceRead.CHANGED }
+                    result.reading.copy(verdict = FenceRead.PENDING)
+                } else { captured = result; result?.reading ?: Reading(FenceRead.CHANGED) }
             }
             val result = captured
             if (!proved || result == null || !authorized(limit)) {
@@ -361,13 +351,13 @@ class ShuffleAccessibilityService : AccessibilityService() {
                 true
             }
             if (com.hobbycoders.aishuffle.BuildConfig.DEBUG) afterFinalRead?.invoke()
-            if (screen != FenceRead.SAME) return Attempt(screen, "The screen changed or the command expired.")
-            if (!bound || !node.refresh() || blocked(node) || node.packageName?.toString() != pkg) return Attempt(FenceRead.CHANGED, "Target is no longer safe or available.")
+            if (screen.verdict != FenceRead.SAME) return Attempt(screen, "The screen changed or the command expired.")
+            if (!bound || !node.refresh() || blocked(node) || node.packageName?.toString() != pkg) return Attempt(Reading(FenceRead.CHANGED), "Target is no longer safe or available.")
             val own = AppControlFence.compare(target.row, rowOf(node))
-            if (own != FenceRead.SAME) return Attempt(own, "Target is no longer safe or available.")
-            if (withActiveApp { it.id == window } != true) return Attempt(FenceRead.CHANGED, "The screen changed or the command expired.")
-            if (events != started) return Attempt(FenceRead.PENDING, "The screen did not stay quiet long enough to prove.")
-            if (revision != version || System.currentTimeMillis() >= until || snapshot !== before || !valid(before, pkg, window, fingerprint, ref!!)) return Attempt(FenceRead.CHANGED, "The screen changed or the command expired.")
+            if (own != FenceRead.SAME) return Attempt(screen.copy(verdict = own), "Target is no longer safe or available.")
+            if (withActiveApp { it.id == window } != true) return Attempt(Reading(FenceRead.CHANGED), "The screen changed or the command expired.")
+            if (events != started) return Attempt(screen.copy(verdict = FenceRead.PENDING), "The screen did not stay quiet long enough to prove.")
+            if (revision != version || System.currentTimeMillis() >= until || snapshot !== before || !valid(before, pkg, window, fingerprint, ref!!)) return Attempt(Reading(FenceRead.CHANGED), "The screen changed or the command expired.")
             val performed = when (name) {
                 "tap_node" -> node.isClickable && gate.send() && node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
                 "scroll" -> node.isScrollable && gate.send() && node.performAction(when (direction) {
@@ -379,7 +369,7 @@ class ShuffleAccessibilityService : AccessibilityService() {
                 "go_back" -> gate.send() && performGlobalAction(GLOBAL_ACTION_BACK)
                 else -> false
             }
-            return Attempt(FenceRead.SAME, "The screen changed or the command expired.", performed)
+            return Attempt(screen, "The screen changed or the command expired.", performed)
         }
         var refusal = "Screen changed while awaiting approval."
         var finished: Attempt? = null
@@ -397,7 +387,7 @@ class ShuffleAccessibilityService : AccessibilityService() {
                 running = result == null
                 if (result == null) refusal = "The screen changed or the command expired."
                 else { refusal = result.why; finished = result }
-                result?.verdict ?: FenceRead.CHANGED
+                result?.reading ?: Reading(FenceRead.CHANGED)
             }
         } finally {
             if (sent) clearSnapshot()
@@ -413,9 +403,9 @@ class ShuffleAccessibilityService : AccessibilityService() {
     private fun valid(s: Snapshot?, pkg: String, window: Int, fingerprint: ScreenPrint, ref: String): Boolean = s != null && s.pkg == pkg && s.window == window && s.fingerprint == fingerprint &&
         SystemClock.elapsedRealtime() - s.created < 60_000 && s.nodes.containsKey(ref)
     /** Collects refs during the read that proves the exact match, so a bad read can never drop or hide a node. Holds no refs unless it did. */
-    private fun capture(read: (NodeVisitor) -> FenceRead): Captured {
+    private fun capture(read: (NodeVisitor) -> Reading): Captured {
         val token = UUID.randomUUID().toString(); val refs = linkedMapOf<String, Target>(); val rows = JSONArray()
-        val verdict = read { node, depth, ordinal, row ->
+        val reading = read { node, depth, ordinal, row ->
             if (rows.length() >= 80 || !node.isVisibleToUser) false else {
                 if (!node.isEditable && (node.isClickable || node.isScrollable || node.text != null || depth == 0)) {
                     val ref = "$token:${refs.size}"; refs[ref] = Target(AccessibilityNodeInfo.obtain(node), ordinal, row)
@@ -425,7 +415,7 @@ class ShuffleAccessibilityService : AccessibilityService() {
                 true
             }
         }
-        if (verdict != FenceRead.SAME) { refs.values.forEach { it.node.recycle() }; refs.clear() }
-        return Captured(verdict, token, refs, rows)
+        if (reading.verdict != FenceRead.SAME) { refs.values.forEach { it.node.recycle() }; refs.clear() }
+        return Captured(reading, token, refs, rows)
     }
 }

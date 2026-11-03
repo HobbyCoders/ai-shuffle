@@ -32,6 +32,9 @@ public class CoveredTargetActivity extends android.app.Activity {
                 case "back": layout.setPadding(32, TOP, 32, 32); break;
                 case "swap": swapTracks(); break;
                 case "replace": replaceFirstTrack(); break;
+                case "collide": setFirstTrack("A|B", "C"); break;
+                case "rebind": setFirstTrack("A", "B|C"); break;
+                case "ghost": addGhost(value); break;
                 case "dense": addRows(value); break;
                 case "longrows": for (int i = 0; i < rows.getChildCount(); i++) ((android.widget.TextView) rows.getChildAt(i)).setText(new String(new char[200]).replace('\0', '\u00e9')); break;
                 case "delay": rowDelay = value; break;
@@ -71,6 +74,29 @@ public class CoveredTargetActivity extends android.app.Activity {
         CharSequence label = ((android.widget.Button) tracks.getChildAt(0)).getText();
         tracks.removeViewAt(0);
         tracks.addView(track(label.toString()), 0);
+    }
+    /** The same view at the same place and size, with whatever it says changed. */
+    private void setFirstTrack(String text, String description) {
+        android.widget.Button first = (android.widget.Button) tracks.getChildAt(0);
+        first.setText(text); first.setContentDescription(description);
+    }
+    /** A view advertising children it cannot return. */
+    private void addGhost(int children) {
+        android.view.View host = new android.view.View(this);
+        host.setImportantForAccessibility(android.view.View.IMPORTANT_FOR_ACCESSIBILITY_YES);
+        android.view.accessibility.AccessibilityNodeProvider provider = new android.view.accessibility.AccessibilityNodeProvider() {
+            @Override public android.view.accessibility.AccessibilityNodeInfo createAccessibilityNodeInfo(int id) {
+                if (id != HOST_VIEW_ID) return null;
+                android.view.accessibility.AccessibilityNodeInfo info = android.view.accessibility.AccessibilityNodeInfo.obtain(host);
+                host.onInitializeAccessibilityNodeInfo(info);
+                for (int i = 0; i < children; i++) info.addChild(host, i);
+                return info;
+            }
+        };
+        host.setAccessibilityDelegate(new android.view.View.AccessibilityDelegate() {
+            @Override public android.view.accessibility.AccessibilityNodeProvider getAccessibilityNodeProvider(android.view.View ignored) { return provider; }
+        });
+        rows.addView(host, new android.widget.LinearLayout.LayoutParams(-1, 1));
     }
     private void addRows(int count) {
         for (int i = 0; i < count; i++) {

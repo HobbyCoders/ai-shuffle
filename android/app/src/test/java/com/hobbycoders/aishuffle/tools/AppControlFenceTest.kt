@@ -1,28 +1,53 @@
 package com.hobbycoders.aishuffle.tools
 
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.*
 import org.junit.Test
 
 class AppControlFenceTest {
-    private val approved = ScreenPrint("Play|[0,0][10,10]|visible;", "Play;")
+    private val row = ScreenRow(7, 1, "id/play", "android.widget.Button", "Play", null, listOf(0, 0, 10, 10), true, false, false, true, 0)
+    private val approved = ScreenPrint(listOf(row))
+    private fun printOf(changed: ScreenRow) = ScreenPrint(listOf(changed))
     private var clock = 0L
     private val waits = mutableListOf<Long>()
     private var lateBy = 0L
     private val wait: suspend (Long) -> Unit = { waits += it; clock += it + lateBy }
     private fun settle(limit: Long = AppControlFence.SETTLE_MS, read: () -> FenceRead) =
-        runBlocking { AppControlFence.settle(limit, { clock }, wait = wait) { read() } }
+        runBlocking { AppControlFence.settle(limit, { clock }, wait = wait) { Reading(read()) } }
     private fun settleBy(limit: Long, read: (Long) -> FenceRead) =
-        runBlocking { AppControlFence.settle(limit, { clock }, wait = wait) { read(it) } }
+        runBlocking { AppControlFence.settle(limit, { clock }, wait = wait) { Reading(read(it)) } }
     private fun openGate() = DispatchGate(Long.MAX_VALUE) { clock }
     private fun stable(limit: Long = 20_000, sample: () -> String?) =
         runBlocking { AppControlFence.stable(limit, { clock }, wait) { sample() } }
 
-    @Test fun onlyAnExactMatchIsSame() = assertEquals(FenceRead.SAME, AppControlFence.compare(approved, approved.copy()))
+    @Test fun onlyAnExactMatchIsSame() = assertEquals(FenceRead.SAME, AppControlFence.compare(approved, ScreenPrint(listOf(row.copy()))))
     @Test fun geometryOnlyDifferenceIsUnconfirmedNotAccepted() =
-        assertEquals(FenceRead.UNCONFIRMED, AppControlFence.compare(approved, ScreenPrint("Play|[0,128][10,138]|hidden;", "Play;")))
+        assertEquals(FenceRead.UNCONFIRMED, AppControlFence.compare(approved, printOf(row.copy(bounds = listOf(0, 128, 10, 138), visible = false))))
     @Test fun anyOtherDifferenceIsChangedEvenWithIdenticalGeometry() =
-        assertEquals(FenceRead.CHANGED, AppControlFence.compare(approved, ScreenPrint("Pay|[0,0][10,10]|visible;", "Pay;")))
+        assertEquals(FenceRead.CHANGED, AppControlFence.compare(approved, printOf(row.copy(text = "Pay"))))
+    @Test fun rowsWhoseValuesWouldJoinAlikeAreDifferent() { // Same node, place, bounds and traits: only the split between fields moved.
+        val before = row.copy(text = "A|B", description = "C")
+        val after = row.copy(text = "A", description = "B|C")
+        assertEquals(FenceRead.CHANGED, AppControlFence.compare(before, after))
+        assertEquals(FenceRead.CHANGED, AppControlFence.compare(printOf(before), printOf(after)))
+        assertEquals(listOf("text", "description"), before.changedFields(after))
+    }
+    @Test fun rowsSplitAcrossAnyOtherPairOfFieldsAreDifferent() {
+        val joined = listOf(row.copy(viewId = "a;b", className = "c") to row.copy(viewId = "a", className = "b;c"),
+            row.copy(description = "x;", text = null) to row.copy(description = null, text = "x;"),
+            row.copy(text = "null", description = null) to row.copy(text = null, description = "null"))
+        joined.forEach { (before, after) -> assertEquals(FenceRead.CHANGED, AppControlFence.compare(before, after)) }
+    }
+    @Test fun rowsSpilledAcrossNodesAreDifferent() { // A row boundary inside a value is not a row.
+        val one = printOf(row.copy(text = "A;B"))
+        val two = ScreenPrint(listOf(row.copy(text = "A"), row.copy(text = "B")))
+        assertEquals(FenceRead.CHANGED, AppControlFence.compare(one, two))
+    }
+    @Test fun anotherSourceNodeWithIdenticalContentsIsChanged() =
+        assertEquals(FenceRead.CHANGED, AppControlFence.compare(approved, printOf(row.copy(source = 8))))
 
     @Test fun exactMatchProceedsWithoutWaiting() {
         assertTrue(settle { FenceRead.SAME })
@@ -101,10 +126,27 @@ class AppControlFenceTest {
     }
     @Test fun measuredReadTimeSizesTheWindowNotTimeAroundIt() { // Time outside the read earns no extra window.
         val seen = mutableListOf<Long>()
-        runBlocking { AppControlFence.settle(20_000, { clock }, wait = wait, lastReadMs = { 100 }) { until ->
-            seen += until; clock += 1_000; if (seen.size == 1) FenceRead.UNCONFIRMED else FenceRead.SAME
+        runBlocking { AppControlFence.settle(20_000, { clock }, wait = wait) { until ->
+            seen += until; clock += 1_000; Reading(if (seen.size == 1) FenceRead.UNCONFIRMED else FenceRead.SAME, 100)
         } }
         assertEquals(1_000 + AppControlFence.retryWindow(AppControlFence.SETTLE_MS, 100), seen[1])
+    }
+    @Test fun fastCheckFinishingBetweenASlowReadAndItsWindowDoesNotShrinkIt() = runBlocking {
+        val seen = mutableListOf<Long>()
+        val fastCheckDone = CompletableDeferred<Unit>()
+        val slow = async {
+            AppControlFence.settle(20_000, { clock }, wait = wait) { until ->
+                seen += until
+                if (seen.size == 1) { clock += 1_000; fastCheckDone.await(); Reading(FenceRead.UNCONFIRMED, 1_000) }
+                else { clock += 1_183; Reading(FenceRead.SAME, 1_183) }
+            }
+        }
+        launch {
+            assertTrue(AppControlFence.settle(20_000, { clock }, wait = wait) { Reading(FenceRead.SAME, 1) })
+            fastCheckDone.complete(Unit)
+        }
+        assertTrue("The unchanged slow screen was refused", slow.await())
+        assertEquals(1_000 + AppControlFence.READ_MS + AppControlFence.SETTLE_MS, seen[1])
     }
     @Test fun exactReadWithAnEventInItIsReadAgain() {
         val reads = ArrayDeque(listOf(FenceRead.PENDING, FenceRead.SAME))
@@ -230,5 +272,63 @@ class AppControlFenceTest {
         assertTrue(limit.admit(0))
         stopped = true
         assertFalse(limit.admit(0))
+    }
+
+    /** Runs [limit] over [count] children, each answered by [answer], and says what was asked of the target. */
+    private class Children(val answer: (Int) -> String? = { "child $it" }) {
+        val asked = mutableListOf<Int>()
+        fun walk(limit: ReadLimit, count: Int, visit: (String) -> Boolean = { true }) =
+            limit.eachChild(count, { asked += it; answer(it) }, visit)
+    }
+    private fun openLimit() = ReadLimit(Long.MAX_VALUE, { clock })
+
+    @Test fun everyAdvertisedChildPresentIsProved() {
+        val children = Children()
+        assertTrue(children.walk(openLimit(), 3))
+        assertEquals(listOf(0, 1, 2), children.asked)
+    }
+    @Test fun missingChildFailsTheReadAndAsksForNothingMore() {
+        val children = Children { if (it == 1) null else "child $it" }
+        assertFalse(children.walk(openLimit(), 5))
+        assertEquals(listOf(0, 1), children.asked)
+    }
+    @Test fun parentAdvertisingThousandsOfMissingChildrenCostsOneQuery() {
+        val children = Children { null }
+        assertFalse(children.walk(openLimit(), 1_000))
+        assertEquals(listOf(0), children.asked)
+    }
+    @Test fun readStoppedDuringAChildAsksForNoFurtherChild() {
+        var stopped = false
+        val children = Children()
+        assertFalse(children.walk(ReadLimit(Long.MAX_VALUE, { clock }, { stopped }), 5) { stopped = true; true })
+        assertEquals(listOf(0), children.asked)
+    }
+    @Test fun readStoppedBeforeItsChildrenAsksForNone() {
+        val children = Children()
+        assertFalse(children.walk(ReadLimit(Long.MAX_VALUE, { clock }, { true }), 5))
+        assertEquals(emptyList<Int>(), children.asked)
+    }
+    @Test fun readPastItsTimeAsksForNoFurtherChild() {
+        val children = Children()
+        assertFalse(children.walk(ReadLimit(100, { clock }), 5) { clock = 100; true })
+        assertEquals(listOf(0), children.asked)
+    }
+    @Test fun readWithItsNodesSpentAsksForNoFurtherChild() {
+        val limit = openLimit()
+        repeat(AppControlFence.MAX_NODES) { assertTrue(limit.admit(0)) }
+        val children = Children()
+        assertFalse(children.walk(limit, 1))
+        assertEquals(emptyList<Int>(), children.asked)
+    }
+    @Test fun treeOfExactlyTheNodeLimitIsProved() {
+        val limit = openLimit()
+        assertTrue(limit.admit(0))
+        assertTrue(Children().walk(limit, AppControlFence.MAX_NODES - 1) { limit.admit(1) })
+        assertEquals(AppControlFence.MAX_NODES, limit.nodes)
+    }
+    @Test fun childThatFailsItsOwnReadEndsTheWalk() {
+        val children = Children()
+        assertFalse(children.walk(openLimit(), 5) { false })
+        assertEquals(listOf(0), children.asked)
     }
 }
