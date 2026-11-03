@@ -88,8 +88,8 @@ _START_DESCRIPTION = (
 # says so rather than asking the model to police itself.
 MODEL_OVERRIDE_RULE = (
     "Only for when the user named a model for this work in this chat, or saved owner "
-    "model-routing memory directs it; otherwise omit. The host checks chat/memory "
-    "or asks the owner; refusals start nothing. Never fabricate a model id or substitute after refusal. "
+    "model-routing memory directs it; otherwise omit. The host checks that the user asked "
+    "in chat/memory or asks the owner; refusals start nothing. Never fabricate a model id or substitute after refusal. "
     "For native Claude use a family name: haiku, sonnet or opus; "
     "never pass a version pin, legacy id or [1m] form. Families select runtime aliases. "
     "For provider models, pass the id or display name (case, spaces and dashes ignored). "

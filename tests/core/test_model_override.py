@@ -191,6 +191,7 @@ def test_public_model_rules_offer_native_families_not_version_pins(world):
         assert "never pass a version pin, legacy id or [1m] form" in description
         assert "For provider models, pass the id or display name" in description
         assert "explicit providers stay scoped" in description
+        assert "The host checks that the user asked" in description
         assert "model IDs and display names match" not in description
     chip = suggest_task_spec().input_schema["properties"]["model"]["description"]
     assert "Claude: opus, sonnet or haiku, never a full id" in chip
