@@ -1194,6 +1194,21 @@ async def test_omitted_model_inherits_and_the_receipt_names_it(chats):
     assert "model_override" not in result
 
 
+@pytest.mark.parametrize("legacy, expected", [("claude-opus-4-7", "opus"),
+    ("claude-sonnet-4-6", "sonnet"), ("opus[1m]", "opus"), ("claude-opus-5[1m]", "opus")])
+async def test_startsession_inherits_stored_legacy_model_without_explicit_resolution(chats, legacy, expected):
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE sessions SET model=%s WHERE id='caller'", (legacy,))
+    _turn("caller", "user", "start the review", profile="agent")
+    outcome = await _start(ARGS)
+    assert not outcome.is_error, outcome.text
+    child = sessions.get_session(json.loads(outcome.text)["session_id"])
+    assert child["model"] == legacy and child["provider_id"] is None
+    from app.core.agent_provider_models import leg_model_id
+    assert leg_model_id(None, child["model"]) == expected
+    assert not chats[2]
+
+
 async def test_the_inherited_model_named_again_needs_no_prompt(chats):
     _, _, prompts, _ = chats
     _turn("caller", "user", "work", profile="agent")
