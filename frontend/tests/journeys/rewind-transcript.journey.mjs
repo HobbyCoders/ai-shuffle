@@ -51,8 +51,13 @@ async function startClaudeChat({ page, status, variant }) {
 	expect(await hero.getByRole('button', { name: /^No project/ }).isVisible(), 'fresh chat has no project');
 }
 
+/**
+ * `rewind` is a long reply of fixed length. `expectShift` budgets the move a
+ * rewind makes for that turn height, and `default` lists every scenario, so its
+ * height follows whatever scenarios exist. A short reply is not covered here.
+ */
 async function sendTurn(page, variant, words, messagesAtLeast) {
-	await typeAndSend(page, `${words} ${scriptTag(variant, 'default')}`);
+	await typeAndSend(page, `${words} ${scriptTag(variant, 'rewind')}`);
 	await waitTurnSettled(page, { messagesAtLeast, text: `You said: “${words}` });
 }
 

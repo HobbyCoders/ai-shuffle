@@ -495,6 +495,14 @@ describe('agent deliveries in settled work', () => {
 	});
 });
 
+describe('a SuggestTask call in an old transcript', () => {
+	it('counts as a plain tool call', () => {
+		const old = workEntries([tool({ toolName: 'mcp__builtins__SuggestTask' })]);
+		expect(summarizeWork(old)).toBe('Used 1 tool');
+		expect(summarizeWorkCompact(old)).toBe('Tools 1');
+	});
+});
+
 describe('Swarm workflow visibility', () => {
  it.each(['Swarm', 'mcp__fluid__Swarm'])('keeps %s outside settled work folds', (toolName) => {
   const workflow = tool({ toolName });

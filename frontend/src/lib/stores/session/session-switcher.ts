@@ -590,8 +590,8 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 
 	function persistSession() {
 		// Only the server write waits: a reload just after switching chats must
-		// reopen the chat on screen, not the one before it (found by the
-		// task-chips journey, reloading 620ms after a switch).
+		// reopen the chat on screen, not the one before it (a reload 620ms after
+		// a switch used to land on the old chat).
 		writeTabSlot();
 		if (persistTimer) clearTimeout(persistTimer);
 		persistTimer = setTimeout(doPersist, PERSIST_DEBOUNCE_MS);

@@ -131,7 +131,6 @@ BUILTINS_RISK_MAP: Mapping[str, str] = {
     "ListSessions": "safe",
     "MessageSession": "write",
     "StartSession": "write",
-    "SuggestTask": "safe",
     "SettleSession": "write",
     "HandOffSession": "write",
     "WorkingRecord": "write",
@@ -303,7 +302,7 @@ DEFERRED_SDK_SERVERS: frozenset[str] = frozenset({
 NATIVE_SHADOWED_BUILTINS: frozenset[str] = frozenset({
     "Task", "Swarm", "Monitor", "ToolSearch", "GetUsage",
     "Remember", "Recall", "Forget", "SessionSearch", "SessionView",
-    "ListSessions", "MessageSession", "StartSession", "SuggestTask",
+    "ListSessions", "MessageSession", "StartSession",
     "SettleSession", "UnsettleSession", "ArchiveSession",
     "ListAgents", "SendMessage",
 })
@@ -327,8 +326,6 @@ NATIVE_EAGER_TOOLS: frozenset[str] = frozenset({
     # rules (user_requested for corrections, Recall's id/revision before a
     # correction, never a secret) must be in front of the model when it calls.
     "Remember", "Recall",
-    # The prompt's rule points here; a deferred tool would not get reached for.
-    "SuggestTask",
 })
 
 # Also eager when the session runs JSON tool calls (no code mode). There a
@@ -360,8 +357,6 @@ NATIVE_JSON_EAGER_TOOLS: frozenset[str] = frozenset({
 DELEGATED_LOADED_TOOLS: frozenset[str] = frozenset({
     "mcp__builtins__Task",
     "mcp__builtins__Monitor",
-    # The prompt's rule points here; a deferred tool would not get reached for.
-    "mcp__builtins__SuggestTask",
     # app.core.attachment_read.DELEGATED_READ: the chat lane's only reader.
     "mcp__attachments__Read",
 })

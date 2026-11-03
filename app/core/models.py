@@ -379,8 +379,6 @@ class Session(SessionBase):
     is_active: bool = False
     parked_task_kind: Optional[str] = None
     has_running_tasks: bool = False
-    # Sidebar rows read this from the list and search; null where it was not read.
-    pending_task_chips: Optional[int] = None
     remote_runtime_state: Optional[str] = None
     # The latest turn that ran ended in a failure, so the row says so (#1032).
     # Like the chips: read for the list and search, null where it was not read.

@@ -15,7 +15,7 @@ from fluid.codemode.bridge import HostBridge
 from fluid.codemode.projection import Projection
 from fluid.codemode.session import CodeModeSession, register_code_mode_tools
 from fluid.engine.native import NativeLoop
-from fluid.permissions.engine import PermissionEngine
+from fluid.permissions.engine import PermissionEngine, Rule
 from fluid.providers.base import ProviderCaps, ProviderRequest, StreamChunk
 from fluid.store.base import MemoryStore
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolRegistry, ToolSpec
@@ -214,6 +214,121 @@ def test_explicit_deny_still_removes_a_code_mode_tool() -> None:
     assert "read_tool_docs" not in names
     assert names == _CODE_MODE_SURFACE - {"read_tool_docs"}
     assert loop._tool_permitted("read_tool_docs") is False
+
+
+# ── a tool code mode may not call keeps its direct schema ───────
+
+
+_JSON_ONLY = "mcp__acme__Danger"
+
+
+def _registry_with_json_only(*, requires_extra: tuple[str, ...] = ()) -> tuple[ToolRegistry, list[dict]]:
+    """A loaded ``code_mode_allowed=False`` tool beside the ordinary ones.
+
+    The second value records every call that actually reached the handler.
+    """
+    ran: list[dict] = []
+
+    async def _danger(input: dict, _ctx: ToolCtx) -> ToolOutcome:
+        ran.append(dict(input))
+        return ToolOutcome(text="danger ran")
+
+    registry = _registry()
+    registry.register_builtin(
+        ToolSpec(
+            name=_JSON_ONLY, description="Escape hatch the kernel may not reach.",
+            input_schema={"type": "object", "properties": {"target": {"type": "string"}}},
+            risk="destructive", source="inproc", code_mode_allowed=False,
+            requires_extra=requires_extra,
+        ),
+        _danger,
+    )
+    return registry, ran
+
+
+async def test_a_json_only_tool_stays_advertised_and_callable_under_code_mode() -> None:
+    """Regression: the HostBridge refuses this tool from Python and points the
+    model at the JSON interface, so dropping its schema from the code-mode
+    surface left a permitted tool with no way in at all."""
+    registry, ran = _registry_with_json_only()
+    loop = NativeLoop(
+        provider=_IdleProvider(), store=MemoryStore(), model="claude-sonnet-5",
+        registry=registry, codemode=CodeModeSession(registry),
+        permissions=PermissionEngine("never_ask"),
+    )
+    try:
+        # The ordinary work tools still reach the model only through Python.
+        assert {t["name"] for t in loop._tools_api()} == _CODE_MODE_SURFACE | {_JSON_ONLY}
+
+        meta = await loop._ensure_session()
+        direct = await loop._gated_call(meta.session_id, "turn", _JSON_ONLY, "call", {"target": "x"})
+        assert not direct.is_error
+        assert direct.text == "danger ran"
+        assert ran == [{"target": "x"}]
+    finally:
+        await loop.aclose()
+
+
+async def test_a_json_only_tool_stays_blocked_from_python() -> None:
+    registry, ran = _registry_with_json_only()
+    bridge = HostBridge(registry, PermissionEngine("never_ask"))
+
+    refused = await bridge.on_host_call(_JSON_ONLY, {"target": "x"})
+
+    assert refused.denied
+    assert "JSON tool interface" in refused.message
+    assert ran == []
+
+
+async def test_a_json_only_tool_still_obeys_the_session_surface() -> None:
+    """Keeping the schema is no grant: a tool outside the surface stays out of
+    the request and is refused if the model names it anyway."""
+    for restriction in ({"allowed_tools": ["Read"]}, {"disallowed_tools": [_JSON_ONLY]}):
+        registry, ran = _registry_with_json_only()
+        loop = NativeLoop(
+            provider=_IdleProvider(), store=MemoryStore(), model="claude-sonnet-5",
+            registry=registry, codemode=CodeModeSession(registry),
+            permissions=PermissionEngine("never_ask"), **restriction,
+        )
+        try:
+            assert {t["name"] for t in loop._tools_api()} == _CODE_MODE_SURFACE
+            assert loop._tool_permitted(_JSON_ONLY) is False
+            meta = await loop._ensure_session()
+            refused = await loop._gated_call(meta.session_id, "turn", _JSON_ONLY, "call", {})
+            assert refused.is_error
+            assert ran == []
+        finally:
+            await loop.aclose()
+
+
+async def test_a_json_only_tool_still_goes_through_the_permission_gate() -> None:
+    registry, ran = _registry_with_json_only()
+    rules = [Rule(tool=_JSON_ONLY, decision="deny")]
+    loop = NativeLoop(
+        provider=_IdleProvider(), store=MemoryStore(), model="claude-sonnet-5",
+        registry=registry, codemode=CodeModeSession(registry),
+        permissions=PermissionEngine("never_ask", rules),
+    )
+    try:
+        meta = await loop._ensure_session()
+        denied = await loop._gated_call(meta.session_id, "turn", _JSON_ONLY, "call", {"target": "x"})
+        assert denied.is_error
+        assert ran == []
+    finally:
+        await loop.aclose()
+
+
+def test_a_json_only_tool_needs_its_capability_wired() -> None:
+    def names(extra: dict) -> set[str]:
+        registry, _ran = _registry_with_json_only(requires_extra=("acme_client",))
+        loop = NativeLoop(
+            provider=_IdleProvider(), store=MemoryStore(), model="claude-sonnet-5",
+            registry=registry, codemode=CodeModeSession(registry), ctx=ToolCtx(extra=extra),
+        )
+        return {t["name"] for t in loop._tools_api()}
+
+    assert _JSON_ONLY not in names({})
+    assert _JSON_ONLY in names({"acme_client": object()})
 
 
 def test_native_loop_hands_code_mode_its_tool_surface() -> None:

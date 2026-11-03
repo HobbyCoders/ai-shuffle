@@ -365,12 +365,9 @@ const FAILED_OPEN = {
 	async act(ctx) {
 		const { page, mark, variant, chat } = ctx;
 		await mark('the provider fails the turn');
-		await typeAndSend(page, `fail ${scriptTag(variant, 'tool-suggest-task-then-fail')}`);
-		await page.getByRole('log', { name: 'Conversation messages' }).getByRole('alert').filter({ hasText: /HTTP 400/ }).first().waitFor({ timeout: 90_000 });
+		await typeAndSend(page, `fail ${scriptTag(variant, 'error-500')}`);
+		await page.getByRole('log', { name: 'Conversation messages' }).getByRole('alert').filter({ hasText: /HTTP 500/ }).first().waitFor({ timeout: 90_000 });
 		await waitChat(page, { streaming: 'false' }, { timeout: 30_000 });
-		// A new step: the journey dismissing the chip is not the chip flickering.
-		await mark('dismiss the task the agent suggested');
-		await page.getByRole('button', { name: 'Dismiss Check after a failure', exact: true }).click();
 		await page.waitForTimeout(800);
 		await expectFailedRow(ctx, chat.id);
 
@@ -382,7 +379,7 @@ const FAILED_OPEN = {
 		await waitStatus(page, chat.id, 'Done');
 		await waitLane(page, chat.id, 'active');
 	},
-	allow: [{ kind: 'layout_shift', reason: 'the chip tray, the error and the row changing lane all move the layout, which is what this case sets up' }]
+	allow: [{ kind: 'layout_shift', reason: 'the error and the row changing lane both move the layout, which is what this case sets up' }]
 };
 
 const FAILED_UNOPENED = {

@@ -44,7 +44,6 @@ const TOOL_FIELDS: Record<string, string[]> = {
 	Glob: ['pattern', 'glob'],
 	WebFetch: ['url'],
 	WebSearch: ['query'],
-	SuggestTask: ['title'],
 	Task: ['description', 'prompt'],
 	Agent: ['description', 'prompt'],
 	Skill: ['skill', 'name'],
@@ -214,7 +213,6 @@ export function liveToolLabel(
 	if (['Read', 'BashOutput', 'TaskOutput', 'TaskGet'].includes(bare)) return 'Reading';
 	if (['Write', 'Edit', 'NotebookEdit'].includes(bare)) return 'Editing';
 	if (['Grep', 'Glob', 'ToolSearch', 'LSP'].includes(bare)) return 'Searching code';
-	if (bare === 'SuggestTask') return 'Suggesting a task';
 	if (bare === 'WebSearch') return 'Searching the web';
 	if (bare === 'WebFetch') return 'Fetching page';
 	// Media generation is the long-tail family: a video can run for minutes, and

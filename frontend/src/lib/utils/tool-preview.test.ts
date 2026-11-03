@@ -59,6 +59,10 @@ describe('toolPreview', () => {
 });
 
 describe('live tool labels and state', () => {
+	it('labels a SuggestTask call in an old transcript as a plain tool', () => {
+		expect(liveToolLabel('mcp__builtins__SuggestTask')).toBe('Using SuggestTask');
+	});
+
 	it('names command programs without exposing the full command', () => {
 		expect(liveToolLabel('Bash', { command: 'pnpm test -- --run' })).toBe('Running pnpm');
 		expect(liveToolLabel('Bash', { command: 'sudo -u web env NODE_ENV=test npm run build' })).toBe('Running npm');

@@ -44,28 +44,15 @@ from scripts.measure_prompt_catalog import compile_fixture, measure
 # Emulator and sandbox removal (Oct 2026): remeasured the combined tree with
 # scripts/measure_prompt_catalog.py on 2026-10-29, without the retired Android
 # tools. Folder file-only/SSH-command guidance replaces the sandbox promises.
-# Background-task chips (Nov 2026): the owner asked for SuggestTask to be
-# always loaded and for one adjacent-work rule on both lanes, so agents stop
-# fixing unrelated problems mid-task. Wording was tightened first; what is left
-# is one tool (a direct schema on the native surface, so it costs the first
-# request rather than the code-mode catalog; 919 chars as a delegated bridge
-# schema) and the rule (318 chars). combined_full 133,634 -> 133,952, eager
-# 53,138 -> 53,456, delegated append 14,877 -> 15,195, delegated loaded
-# 7,327 -> 8,246. Then the owner made the suggesting agent choose the new chat's
-# model, so model routing still holds for chips: a required ``model`` and the
-# shared optional ``effort`` on that one always-loaded schema. Delegated loaded
-# 8,246 -> 8,853; nothing else in these numbers moved.
-# Anti-offloading limits (Nov 2026, owner approved): SuggestTask's description
-# now owns what a chip may never defer, because it is the one text every caller
-# reads (161 -> 659 chars); the shared rule says necessary work stays with this
-# chat (316 -> 399). combined_full 133,952 -> 134,035, eager 53,456 -> 53,539,
-# delegated append 15,195 -> 15,278, delegated loaded 8,881 -> 9,379 measured.
-# The input schema did not change.
+# Suggested tasks removed (Nov 2026, owner decision): the tool, its always-loaded
+# delegated schema and its adjacent-work rule left, back to the numbers from before
+# them, remeasured: combined_full 134,035 -> 133,634, eager 53,539 -> 53,138,
+# delegated append 15,278 -> 14,877, delegated loaded 9,379 -> 7,327.
 # These are actual character counts, not tokenizer or provider billing counts.
-MEASURED_FULL = 134_035
-MEASURED_EAGER = 53_539
-MEASURED_DELEGATED_APPEND = 15_278
-MEASURED_DELEGATED_LOADED_TOOLS = 9_379
+MEASURED_FULL = 133_634
+MEASURED_EAGER = 53_138
+MEASURED_DELEGATED_APPEND = 14_877
+MEASURED_DELEGATED_LOADED_TOOLS = 7_327
 
 
 @pytest.mark.parametrize("native", [True, False])
@@ -80,42 +67,6 @@ def test_source_provenance_guidance_is_bounded_and_not_duplicated(native):
     phrase = "Before diagnosis, compare checkout HEAD/dirty with runtime revision"
     assert combined.count(phrase) == 1
     assert phrase not in compiled.text  # remains deferred on both legs
-
-
-@pytest.mark.parametrize("native", [True, False], ids=["native-code", "delegated-cli"])
-def test_adjacent_work_wording_is_bounded_and_not_duplicated(native):
-    from fluid.cli.prompt import ADJACENT_WORK_RULE
-    from fluid.tools.builtins.session_orchestration import suggest_task_spec
-
-    rule = ADJACENT_WORK_RULE
-    description = suggest_task_spec().description
-    # Shipped wording, measured Nov 2026; allow at most 1% local drift.
-    # A longer wording candidate did not improve chip use and was rejected; the
-    # later growth is the owner-approved limits, not a second attempt at that.
-    assert len(rule) <= 399 * 101 // 100
-    assert len(description) <= 659 * 101 // 100
-    for phrase in (
-        "does not block it, do not fix it",
-        "call SuggestTask with a self-contained brief and keep going",
-        "If it blocks, make the smallest fix and say so",
-        "not nitpicks or work that is part of the request",
-        "What the request needs stays with this chat",
-    ):
-        assert phrase in rule
-    assert "one click starts it in a separate chat with its own worktree" in description
-    assert "Starts nothing now: do not fix it here, carry on" in description
-
-    compiled, catalog, _ = compile_fixture(native=native)
-    combined = compiled.text + "\n\n" + "\n\n".join(text for text, _ in catalog)
-    # The rule owns the paragraph, not a second copy in a tool description.
-    assert combined.count(rule) == 1
-    paragraphs = [" ".join(p.split()) for p in combined.split("\n\n")]
-    adjacent = [p for p in paragraphs if "Work outside the user's request:" in p]
-    assert len(adjacent) == len(set(adjacent)) == 1
-    # The limits belong to the tool description alone: not the prompt, nor
-    # another tool's docs. (SuggestTask is a direct schema, outside this catalog.)
-    assert description.count("Never use it to defer what the request needs") == 1
-    assert "Never use it to defer" not in combined
 
 
 def test_prompt_catalog_budget():
@@ -255,7 +206,7 @@ def test_measurement_is_repeatable_and_deferred_catalog_is_not_sent() -> None:
     assert measure() == first
     compiled, catalog, specs = compile_fixture()
     # Project tools remain deferred; the two Android emulator schemas are gone.
-    assert len(specs) == 112
+    assert len(specs) == 111
     for leaf in (
         "CreateWatch", "ListWatches", "PauseWatch", "StopWatch", "WorkingRecord",
         "generationPreferences", "listProjects", "createProject",

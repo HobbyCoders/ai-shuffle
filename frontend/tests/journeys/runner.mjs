@@ -201,8 +201,7 @@ function parseArgs(argv) {
  *              maxValue, reason }]` for a composer move the product makes on
  *              purpose without user input (lib/verdict.mjs designedShifts):
  *              that step must move the composer from → to exactly once, and
- *              only that move's own shift, up to maxValue, is excused. `chips:
- *              [from, to]` replaces `composer` for a chip tray lifting the composer.
+ *              only that move's own shift, up to maxValue, is excused.
  *   viewports  default DEFAULT_VIEWPORTS
  *   throttles  default Object.keys(THROTTLES)
  *   recorder   extra withRecording options (a case's `recorder` adds to it;
