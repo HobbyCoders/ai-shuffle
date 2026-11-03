@@ -1,0 +1,24 @@
+{
+  "description": "The same as message-then-compact, with no answer from the mod: Claude Code's own summarizer runs and keeps no rows.",
+  "steps": [
+    {
+      "text": "Working through the long file.",
+      "tool_calls": [
+        {
+          "name": "Read",
+          "input": {
+            "file_path": "/fake/big-file.txt"
+          },
+          "result_chars": 3000,
+          "delay_ms": 2500
+        }
+      ]
+    },
+    {
+      "compact": true,
+      "text": "Compacted right after that tool result.",
+      "summarizer_keep": 0,
+      "summarizer": true
+    }
+  ]
+}

@@ -926,11 +926,13 @@ class SessionRuntime:
         #    returns or the reap sweep routes it.
         session_row: Optional[Dict[str, Any]] = None
         decision = None
+        session_loaded = False
         try:
             from app.core import placement as placement_mod
             from app.db import database as database_mod
 
             session_row = await asyncio.to_thread(database_mod.get_session, sid)
+            session_loaded = True
             if session_row is not None:
                 decision = placement_mod.resolve_placement(session_row)
         except Exception:
@@ -938,6 +940,18 @@ class SessionRuntime:
                 "SessionRuntime: placement resolution failed for %s — "
                 "failing open to local execution", sid, exc_info=True,
             )
+        if session_loaded and session_row is None and self.source == "unpark":
+            # Task producers outlive their chat (including a queued wake whose
+            # admission raced deletion). Missing is terminal, not a provider
+            # failure. A lookup error above must not be mistaken for deletion.
+            logger.info(
+                "SessionRuntime: dropped task notification for deleted session %s (turn %s)",
+                sid, tid,
+            )
+            await asyncio.to_thread(turns_db.remove_queued_turn, tid)
+            from app.core import turn_scheduler
+            turn_scheduler._clear_wake_pending(sid)
+            return None
         if decision is not None and decision.kind == "runner" and decision.runner_id != runner_id:
             logger.info(
                 "SessionRuntime: session %s is placed on %s (%s) — turn %s stays "
@@ -2118,8 +2132,8 @@ class SessionRuntime:
           (``turns.interrupt_turn``) happens at the command layer BEFORE the
           runtime is told, and that gap is exactly where the observed race
           lived, so the in-process latch alone is not enough. Anything other
-          than ``running`` (interrupting, draining, or already settled) cannot
-          take a steer.
+          than ``running`` (interrupting, draining, already settled or deleted)
+          cannot take a steer.
 
         Fails OPEN (False) on a read error: a transient DB hiccup must not turn
         every send into a queued turn.
@@ -2134,7 +2148,9 @@ class SessionRuntime:
                 self.turn_id, exc_info=True,
             )
             return False
-        return row is not None and row.get("state") != "running"
+        # Deletion removes the durable turn before its runtime necessarily
+        # disappears from memory. Such a runtime cannot receive a late steer.
+        return row is None or row.get("state") != "running"
 
     def _live_adapter(self) -> Optional[Any]:
         """The provider adapter behind this session's pooled client, or None."""

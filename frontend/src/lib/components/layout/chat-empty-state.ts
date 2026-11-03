@@ -91,7 +91,8 @@ export function settledChatLayout(surface: Exclude<ChatSurface, 'loading'>): Cha
  *   active      → loading (column) → active (column) | cleared (hero)
  *
  * `initial` is the layout of a view that starts in 'loading' (boot restore or
- * a deep link): the column, whose skeleton is the usual outcome.
+ * a deep link). A chat this tab last saw empty starts in the hero; any other
+ * starts in the column, whose skeleton is the usual outcome (initialChatLayout).
  *
  * Returns a function to call with the current surface on every change; it
  * remembers the last settled layout between calls.
@@ -103,6 +104,25 @@ export function createChatLayoutTracker(initial: ChatLayout = 'column'): (surfac
 		settled = settledChatLayout(surface);
 		return settled;
 	};
+}
+
+/**
+ * The layout a view starts in before it knows whether the chat it opens has a
+ * transcript. A chat last seen empty keeps the hero through a reload, so its
+ * composer does not paint at the bottom and then move to the centre (#1049).
+ */
+export function initialChatLayout(lastSeenEmpty: boolean): ChatLayout {
+	return lastSeenEmpty ? 'hero' : 'column';
+}
+
+/**
+ * What to remember about the surface once it has settled: the chat's id when it
+ * is empty, null when it is not, undefined while still loading (a load has not
+ * proved anything, #913).
+ */
+export function settledEmptyChat(surface: ChatSurface, sessionId: string | null | undefined): string | null | undefined {
+	if (surface === 'loading') return undefined;
+	return surface === 'cleared' ? sessionId ?? null : null;
 }
 
 /**

@@ -21,6 +21,11 @@
 //   past-ceiling-*         #913: the history outlives the hydration ceiling
 //                          (from a chat, the new-session screen or a link;
 //                          held, or answered with a server error then Retry)
+//   first-message-reveal   the column's reveal and the composer's slide play
+//                          when a first message leaves the hero
+//   mirror-pane-during-live-reveal
+//                          #916: the mirror pane stays anchored when a chat of
+//                          unknown owner opens while that reveal runs
 //
 // Each case's `verify` names the composer positions it is designed to take,
 // read on every painted frame: one entry per position, so a second move, or
@@ -28,9 +33,10 @@
 // count as a layout shift.
 import { runJourney } from './runner.mjs';
 import { readFileSync } from 'node:fs';
-import { SEEDED, PROJECT, expect, gotoApp, openFromSidebar, showSidebar, seededChatId, waitChat, waitChatOpen, pickAgent, pickProject, pickAccess, typeAndSend, scriptTag, waitTurnSettled, scrollTranscriptTo, transcriptScroll, uniq } from './lib/app.mjs';
+import { SEEDED, PROJECT, expect, gotoApp, openFromSidebar, showSidebar, seededChatId, waitChat, waitChatOpen, pickAgent, pickProject, pickAccess, typeAndSend, scriptTag, waitTurnSettled, scrollTranscriptTo, transcriptScroll, uniq, api, chatIdByToken } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 import { anyFrame, expectComposerPositions } from './lib/timeline.mjs';
+import { installSwitchGraceClock, framesDuringSwitchGrace } from './lib/switch-grace.mjs';
 
 // Hosted journeys build shared desktop UI only. Explicitly opt into the native
 // phone shell locally, matching transcript-reader's --mobile-shell convention.
@@ -54,7 +60,7 @@ const composer = (...positions) => ({ recording }) => expectComposerPositions(re
 const OPENED = {
 	long: (page) => waitChatOpen(page, { messagesAtLeast: 50 }),
 	cleared: async (page) => {
-		await waitChat(page, { surface: 'cleared', loading: 'false', composer: 'centre', session: /^s:/ });
+		await waitChat(page, { surface: 'cleared', loading: 'false', composer: mobileShell ? /^(centre|bottom)$/ : 'centre', session: /^s:/ });
 		await page.getByText('Conversation cleared', { exact: false }).waitFor();
 		await page.waitForTimeout(1500);
 	}
@@ -89,48 +95,8 @@ const viaDeepLink = (target) => async ({ page, status, mark, variant }) => {
 // --mobile-shell they open the REAL /mobile/ app instead. Hold only delivery of
 // an actual native SSE response: no reducer, content or loading flag is fabricated.
 async function holdIncomingHistory(page, target, delayMs) {
-	await page.addInitScript(({ target, delayMs, graceMs }) => {
-		// The product's notice deadline is a real setTimeout(graceMs). A case that
-		// must act "within the grace" arms this gate: grace-length timers created
-		// while armed still run their real clock, but a callback that comes due
-		// before release() waits for it. The deadline therefore cannot pass
-		// before the case's own action, however slow the runner. Each gated
-		// timer records whether the product cleared it, so the case can check
-		// the product cancelled it. Other delays, and every timer while disarmed,
-		// are untouched.
-		const realSetTimeout = window.setTimeout.bind(window);
-		const realClearTimeout = window.clearTimeout.bind(window);
-		const gate = window.__switchGraceGate = {
-			armed: false, registered: [], deferred: new Map(),
-			arm() { this.armed = true; this.registered = []; },
-			release() {
-				this.armed = false;
-				const due = [...this.deferred.values()];
-				this.deferred.clear();
-				for (const run of due) realSetTimeout(run, 0);
-				return due.length;
-			}
-		};
-		window.setTimeout = function (handler, delay, ...args) {
-			if (!gate.armed || typeof handler !== 'function' || Number(delay) !== graceMs) {
-				return realSetTimeout(handler, delay, ...args);
-			}
-			const entry = { at: performance.now() };
-			const run = () => handler(...args);
-			const id = realSetTimeout(() => {
-				if (gate.armed) gate.deferred.set(id, run);
-				else run();
-			}, delay);
-			entry.id = id;
-			entry.cleared = false;
-			gate.registered.push(entry);
-			return id;
-		};
-		window.clearTimeout = function (id) {
-			gate.deferred.delete(id);
-			for (const entry of gate.registered) if (entry.id === id) entry.cleared = true;
-			return realClearTimeout(id);
-		};
+	await page.addInitScript(installSwitchGraceClock, { graceMs: SWITCH_GRACE_MS });
+	await page.addInitScript(({ target, delayMs }) => {
 		const fetchOriginal = window.fetch.bind(window);
 		const hold = window.__switchHydrationHold = { started: null, released: null };
 		window.fetch = async (input, init) => {
@@ -143,7 +109,7 @@ async function holdIncomingHistory(page, target, delayMs) {
 			}
 			return response;
 		};
-	}, { target, delayMs, graceMs: SWITCH_GRACE_MS });
+	}, { target, delayMs });
 }
 
 // #913: hold B's first native history response until the case releases it, or
@@ -151,6 +117,7 @@ async function holdIncomingHistory(page, target, delayMs) {
 // hydration ceiling through the app's test hook so the case runs in seconds.
 // Requests after the release pass through untouched (a Retry, a reconnect).
 async function holdHistoryPastCeiling(page, target, { fail = false } = {}) {
+	await page.addInitScript(installSwitchGraceClock, { graceMs: SWITCH_GRACE_MS });
 	await page.addInitScript(({ target, fail, ceilingMs }) => {
 		window.__SHUFFLE_HYDRATION_CEILING_MS__ = ceilingMs;
 		const fetchOriginal = window.fetch.bind(window);
@@ -208,17 +175,21 @@ async function sampleSwitchFrames(page) {
 		const log = document.querySelector('[role="log"][aria-label="Conversation messages"]');
 		const firstRow = log?.querySelector('.msg-virtualized');
 		window.__switchHydrationFrames = [];
+		window.__switchGraceClock.timers = [];
 		window.__switchHydrationSampling = true;
-		let loadingStarted = null;
-		const sample = t => {
+		const record = rafTime => {
 			if (!window.__switchHydrationSampling) return;
+			// rAF's timestamp precedes earlier callbacks/layout work in the same
+			// frame. Read the clock when the DOM is actually sampled (#941).
+			const t = performance.now();
+			const grace = window.__switchGraceClock.timers.at(-1);
+			const loadingStarted = grace?.at ?? null;
 			const chat = document.querySelector('[data-ui-state="chat"]');
-			if (chat?.dataset.uiLoading === 'true' && loadingStarted === null) loadingStarted = t;
 			const pending = !!document.querySelector('[data-transcript-pending="true"]');
 			const loader = document.querySelector('.loading-transcript');
 			const rows = [...document.querySelectorAll('[role="log"] .msg-virtualized')];
 			window.__switchHydrationFrames.push({
-				t, pending, loadingStarted, heldAt: window.__switchHydrationHold.started,
+				t, rafTime, pending, loadingStarted, heldAt: window.__switchHydrationHold.started,
 				loader: !!loader && getComputedStyle(loader).visibility !== 'hidden',
 				visibleRows: rows.filter(row => getComputedStyle(row).visibility !== 'hidden').length,
 				outgoingConnected: !!firstRow?.isConnected,
@@ -234,6 +205,26 @@ async function sampleSwitchFrames(page) {
 				target: chat?.dataset.uiTargetSession,
 				loading: chat?.dataset.uiLoading
 			});
+		};
+		// Observe the real loading DOM commit as well as painted frames. A slow
+		// style/layout pass may consume the entire grace before the first rAF;
+		// that must not reset the clock or make the positive observation vacuous.
+		let committedGrace = null;
+		const observer = new MutationObserver(() => {
+			if (!window.__switchHydrationSampling) { observer.disconnect(); return; }
+			const grace = window.__switchGraceClock.timers.at(-1);
+			if (grace && grace !== committedGrace
+				&& document.querySelector('[data-ui-state="chat"]')?.dataset.uiLoading === 'true') {
+				committedGrace = grace;
+				record(null);
+			}
+		});
+		observer.observe(document.querySelector('[data-ui-state="chat"]'), {
+			attributes: true, attributeFilter: ['data-ui-loading', 'data-ui-target-session']
+		});
+		const sample = rafTime => {
+			if (!window.__switchHydrationSampling) { observer.disconnect(); return; }
+			record(rafTime);
 			requestAnimationFrame(sample);
 		};
 		requestAnimationFrame(sample);
@@ -245,13 +236,13 @@ async function finishSwitchFrames(page, log, { slow = false } = {}) {
 		window.__switchHydrationSampling = false;
 		return window.__switchHydrationFrames;
 	});
-	// Use the pre-existing live loading signature, not the new wrapper's pending
-	// attribute, so this ratchet also measures (and fails on) the rollback build.
+	// The live loading signature identifies the incoming load. Positive grace
+	// observation also requires its real timer; the rollback fails that check.
 	const pending = frames.filter(frame => frame.loading === 'true' && frame.loadingStarted !== null);
-	// Time starts at the first painted loading frame, not response headers: a
-	// slow network can deliver headers after the production grace has elapsed.
-	const underGrace = pending.filter(frame => frame.t - frame.loadingStarted < 100);
-	const ready = frames.find(frame => frame.loadingStarted !== null && frame.loading === 'false');
+	// Check all commits/frames inside the actual production grace, not an
+	// invented 100 ms window starting at a late first rAF. Timers are unchanged.
+	const underGrace = framesDuringSwitchGrace(frames, SWITCH_GRACE_MS);
+	const ready = frames.find(frame => frame.rafTime !== null && frame.loadingStarted !== null && frame.loading === 'false');
 	const duration = predicate => frames.reduce((sum, frame, index) => sum +
 		(predicate(frame) ? Math.max(0, (frames[index + 1]?.t ?? frame.t) - frame.t) : 0), 0);
 	log(`switch-metric ${JSON.stringify({
@@ -314,8 +305,9 @@ const offCatalogLong = async (ctx) => {
 };
 
 // #916: an unknown owner shows the mirror pane on a cold deep link. Keep
-// actual identity/sync/catalog responses pending across the column's reveal
-// animation: its transform must not be the pane's only containing block.
+// actual identity/sync/catalog responses pending for longer than the column's
+// reveal animation would run: the pane keeps its containing block, and a cold
+// link plays no reveal, because it has not moved from a hero (#1049).
 const offCatalogLateIdentity = async (ctx) => {
 	await offCatalogLong(ctx);
 	await ctx.page.addInitScript((id) => {
@@ -339,6 +331,7 @@ const offCatalogLateIdentity = async (ctx) => {
 			const pane = document.querySelector('.mirror-sync');
 			const wrapper = document.querySelector('.message-area-wrapper');
 			if (pane && wrapper) probe.frames.push({
+				t: performance.now(),
 				transitioning: document.querySelector('.chat-view').classList.contains('transitioning-from-empty'),
 				wrapperParent: pane.offsetParent === wrapper
 			});
@@ -349,13 +342,13 @@ const offCatalogLateIdentity = async (ctx) => {
 };
 
 const deepLinkLateIdentity = async ({ page, status, mark, variant, log }) => {
-	await mark('load an off-catalog link with identity pending across the column reveal');
+	await mark('load an off-catalog link with identity pending past the length of a column reveal');
 	const prefix = mobileShell && variant.viewport === 'phone' ? '/mobile/' : '/';
 	await page.goto(new URL(`${prefix}?session=${encodeURIComponent(seededChatId(status, 'long'))}`, status.urls.ui).toString());
 	await page.waitForFunction(() => {
 		const probe = window.__openingIdentity;
-		return probe.metadata && probe.sync && probe.frames.some(frame => frame.transitioning)
-			&& probe.frames.slice(-2).length === 2 && probe.frames.slice(-2).every(frame => !frame.transitioning);
+		const painted = probe.frames.at(-1)?.t - probe.frames[0]?.t;
+		return probe.metadata && probe.sync && painted > 500;
 	});
 	const frames = await page.evaluate(() => {
 		const probe = window.__openingIdentity;
@@ -364,8 +357,121 @@ const deepLinkLateIdentity = async ({ page, status, mark, variant, log }) => {
 		return probe.frames;
 	});
 	await OPENED.long(page);
-	log(`mirror pane: ${frames.length} painted frames across the reveal; ${frames.filter(frame => frame.transitioning).length} during its animation`);
-	expect(frames.every(frame => frame.wrapperParent), 'the mirror pane must keep the message wrapper as its containing block before and after the reveal');
+	log(`mirror pane: ${frames.length} painted frames; ${frames.filter(frame => frame.transitioning).length} during a reveal`);
+	expect(frames.every(frame => !frame.transitioning), 'a cold link opens on the message column without playing the reveal from a hero');
+	expect(frames.every(frame => frame.wrapperParent), 'the mirror pane must keep the message wrapper as its containing block');
+};
+
+// The other half of #916: the reveal itself. A first message from an empty chat
+// plays messageAreaReveal and inputSlideDown (a cold link must not, above), and
+// the overlays that sit on the message wrapper stay anchored to it throughout.
+const sampleReveal = (ctx) => ctx.page.addInitScript(() => {
+	const probe = window.__reveal = { frames: [], armed: false, stop: false, clicked: false };
+	const near = (a, b) => Math.abs(a - b) < 1;
+	const sample = () => {
+		if (probe.stop) return;
+		const wrapper = document.querySelector('.message-area-wrapper');
+		const transitioning = !!document.querySelector('.chat-view.transitioning-from-empty');
+		if (probe.armed && wrapper) {
+			const pane = document.querySelector('.mirror-sync');
+			const box = wrapper.getBoundingClientRect();
+			const rect = pane?.getBoundingClientRect();
+			probe.frames.push({
+				transitioning,
+				pane: !!pane,
+				reveal: wrapper.getAnimations().some(a => a.animationName.includes('messageAreaReveal') && a.playState === 'running'),
+				slide: !!document.querySelector('.input-wrapper')?.getAnimations().some(a => a.animationName.includes('inputSlideDown') && a.playState === 'running'),
+				overlayAnchored: document.querySelector('.reconnect-status-slot')?.offsetParent === wrapper,
+				paneAnchored: pane ? pane.offsetParent === wrapper : null,
+				paneFills: rect ? near(rect.left, box.left) && near(rect.top, box.top) && near(rect.width, box.width) && near(rect.height, box.height) : null
+			});
+		}
+		// The switch lands inside the reveal, a frame after the reveal has been seen.
+		if (probe.armed && transitioning && !probe.clicked && probe.frames.length) {
+			const link = document.querySelector('.started-from a');
+			if (link) { probe.clicked = true; link.click(); }
+		}
+		requestAnimationFrame(sample);
+	};
+	requestAnimationFrame(sample);
+});
+
+const firstMessageReveal = async ({ page, mark }) => {
+	await mark('send the first message from a new chat');
+	await page.evaluate(() => { window.__reveal.armed = true; window.__reveal.clicked = true; });
+	await typeAndSend(page, `reveal ${uniq()}`);
+	await page.waitForFunction(() => {
+		const { frames } = window.__reveal;
+		return frames.some(frame => frame.transitioning) && !frames.at(-1).transitioning;
+	});
+	await waitTurnSettled(page, { messagesAtLeast: 2 });
+	const frames = await page.evaluate(() => { window.__reveal.stop = true; return window.__reveal.frames; });
+	const revealing = frames.filter(frame => frame.transitioning);
+	expect(revealing.some(frame => frame.reveal), 'the message column must play its reveal on a first message');
+	expect(revealing.some(frame => frame.slide), 'the composer must slide down from the hero on a first message');
+	expect(frames.every(frame => frame.overlayAnchored), 'the column overlays must keep the message wrapper as their containing block through the reveal');
+	expect(frames.filter(frame => !frame.transitioning).every(frame => !frame.reveal && !frame.slide), 'the reveal must end with its class');
+};
+
+// The mirror pane during a live reveal (#916): an empty chat whose "Started from"
+// link names a chat outside the catalog. Sending the first message starts the
+// reveal; following the link switches to a chat of unknown owner (so a mirrored
+// one, until /live answers) while the reveal runs. The pane cannot exist before
+// the reveal, which starts as the message wrapper mounts, so "before" is the
+// wrapper's other overlay on the frames ahead of the pane.
+const mirrorDuringReveal = async (ctx) => {
+	await sampleReveal(ctx);
+	await ctx.page.addInitScript((id) => {
+		const original = window.fetch.bind(window);
+		const released = new Promise(resolve => { window.__releaseOpeningIdentity = resolve; });
+		window.fetch = async (input, init) => {
+			const url = new URL(typeof input === 'string' ? input : input.url, location.href);
+			if (url.pathname.endsWith('/task-chips') && !url.pathname.includes(id)) {
+				const source = { session_id: id, title: 'Long chat', chip_id: 'chip-reveal' };
+				return new Response(JSON.stringify({ chips: [], source }), { status: 200, headers: { 'content-type': 'application/json' } });
+			}
+			const response = await original(input, init);
+			const identity = url.pathname === `/api/v1/sessions/${id}/live` && url.searchParams.get('owner_fields') === 'true';
+			if (identity || url.pathname === `/api/v1/sessions/${id}/sync-status`) await released;
+			return response;
+		};
+	}, seededChatId(ctx.status, 'long'));
+	await offCatalogLong(ctx);
+	const { page } = ctx;
+	const token = `empty ${uniq()}`;
+	await typeAndSend(page, token);
+	await waitTurnSettled(page, { messagesAtLeast: 2, hold: 800 });
+	const chatId = await chatIdByToken(page, token);
+	await api(page, 'POST', `/sessions/${encodeURIComponent(chatId)}/clear`);
+	await waitChat(page, { surface: 'cleared', loading: 'false', composer: 'centre' });
+	await page.locator('.started-from a').waitFor();
+	await page.waitForTimeout(600);
+};
+
+const switchDuringReveal = async ({ page, mark, log }) => {
+	await mark('send a first message, then follow a link to an off-catalog chat during the reveal');
+	await page.evaluate(() => { window.__reveal.armed = true; });
+	await typeAndSend(page, `reveal ${uniq()}`);
+	// Identity stays held until the pane has outlived the reveal.
+	await page.waitForFunction(() => {
+		const panes = window.__reveal.frames.filter(frame => frame.pane);
+		return panes.some(frame => frame.transitioning) && panes.filter(frame => !frame.transitioning).length > 5;
+	});
+	const frames = await page.evaluate(() => {
+		window.__reveal.stop = true;
+		window.__releaseOpeningIdentity();
+		return window.__reveal.frames;
+	});
+	await OPENED.long(page);
+	const before = frames.filter(frame => !frame.pane);
+	const during = frames.filter(frame => frame.pane && frame.transitioning);
+	const after = frames.filter(frame => frame.pane && !frame.transitioning);
+	log(`reveal frames before the pane: ${before.length}; pane during the reveal: ${during.length}; pane after it: ${after.length}`);
+	expect(before.length > 0, 'the column must be seen before the pane mounts');
+	expect(during.some(frame => frame.reveal), 'the pane must be measured while the reveal is really playing');
+	expect(frames.every(frame => frame.overlayAnchored), 'the column overlays must keep the message wrapper as their containing block before, during and after the reveal');
+	expect(during.concat(after).every(frame => frame.paneAnchored), 'the mirror pane must keep the message wrapper as its containing block during and after the reveal');
+	expect(during.concat(after).every(frame => frame.paneFills), 'the mirror pane must fill the message wrapper during and after the reveal');
 };
 
 const offCatalogIdentity = async ({ page, variant }) => {
@@ -783,7 +889,18 @@ await runJourney({
 			verify: offCatalogIdentity
 		},
 		{
+			name: 'first-message-reveal',
+			async setup(ctx) { await sampleReveal(ctx); await fromNew(ctx); },
+			act: firstMessageReveal
+		},
+		{
+			name: 'mirror-pane-during-live-reveal',
+			setup: mirrorDuringReveal,
+			act: switchDuringReveal
+		},
+		{
 			name: 'cleared-deep-link',
+			...(mobileShell ? { viewports: ['desktop'] } : {}),
 			setup: fromNew,
 			act: viaDeepLink('cleared'),
 			// The new page docks the composer for its load, then the cleared
@@ -798,7 +915,10 @@ await runJourney({
 						'a page opened by a link starts loading with the composer docked, the layout of the usual outcome (a transcript); a cleared chat then centres it once (createChatLayoutTracker), with no input on the page'
 				}
 			]
-		}
+		},
+		// The link lands in /mobile/, which docks the composer under the hero, so
+		// it stays there and there is no move to declare.
+		...(mobileShell ? [{ name: 'cleared-deep-link-phone-shell', viewports: ['phone'], setup: fromNew, act: viaDeepLink('cleared'), verify: composer('centre', 'bottom') }] : [])
 	],
 	allow: [...DEV_INSTANCE_NOISE]
 });

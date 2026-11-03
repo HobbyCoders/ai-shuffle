@@ -23,8 +23,8 @@ async def forward_rewind(session: dict, operation: str, params: Optional[dict] =
                             "Check that it is online and updated. " + str(exc)) from exc
     target_seq = result.pop("_rewind_seq", None)
     if (result.get("chat_rewound") or result.get("unsent_restored")) and target_seq is not None:
-        # The UI reloads immediately on success. Pull signed owner operations
-        # before returning so it does not reload the old mirror. Sync is bounded
+        # The UI reads on from its cursor immediately on success. Pull signed owner
+        # operations before returning so that read finds the rewind. Sync is bounded
         # and never replays the mutating RPC if replication is temporarily down.
         try:
             await _sync_rewind(owner, session["id"], int(target_seq))

@@ -16,8 +16,13 @@
 //   manual      two big reads, then a typed /compact
 //   after-tool  one big read, then [script:compact-after-tool]: the compaction
 //               falls between a tool's result and the model call that reads it
+//   message-before-compact
+//               a message typed while a tool runs, then an automatic compaction
+//               at once: the fake's next model call can still read it (#996)
 //   reload-after-auto, reload-after-manual
 //               the chat of `auto` or `manual`, built in setup, then reloaded
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { runJourney } from './runner.mjs';
 import {
 	PROJECT,
@@ -229,6 +234,42 @@ const AUTO = {
 };
 const MANUAL = { reads: 2, compact: () => '/compact', settledText: 'Context was compacted manually' };
 
+/**
+ * #996: a message delivered on a tool result, then the compaction, with no
+ * assistant turn between. What the fake's newest model call could read decides.
+ */
+// The message rides a tool result, then the conversation compacts at once. With a Fluid
+// answer the row keeps it; Claude Code's own summarizer does not, and the app must repeat it.
+const messageBeforeCompact = (name, script) => ({
+	name,
+	setup: openClaudeChat,
+	async act({ page, status, mark, log }) {
+		const token = uniq();
+		const message = `Use the new table ${token}`;
+		await mark('read');
+		await typeAndSend(page, `read ${token} [script:bulk-read]`);
+		await waitTurnSettled(page, { text: READ_REPLY, messagesAtLeast: 2 });
+
+		await mark('send a message while the tool runs');
+		await typeAndSend(page, `carry on ${token} [script:${script}]`);
+		await page.getByText('Working through the long file.').first().waitFor({ timeout: 30_000 });
+		await typeAndSend(page, message);
+		await waitTurnSettled(page, { text: 'Compacted right after that tool result.', messagesAtLeast: 2 });
+		await expectOneCompaction(page);
+
+		await mark('follow-up turn');
+		const follow = `after it ${token}`;
+		await typeAndSend(page, follow);
+		await waitTurnSettled(page, { text: `You said: “${follow}”`, messagesAtLeast: 4 });
+
+		const seen = readFileSync(join(status.scratch_dir, 'fake-claude-context.txt'), 'utf8');
+		log(`context the model can read: ${seen.length} characters`);
+		expect(seen.includes(message), 'the message is still in what the model can read');
+		const n = await countUserRows(page, message);
+		expect(n <= 1, `the message shows at most once as a user's row (${n})`);
+	}
+});
+
 await runJourney({
 	name: 'compaction',
 	cases: [
@@ -241,6 +282,8 @@ await runJourney({
 			// The turn reads another 45,000 characters before it compacts.
 			meterAtMost: true
 		}),
+		messageBeforeCompact('message-before-compact', 'message-then-compact'),
+		messageBeforeCompact('message-before-summarizer', 'message-then-summarize'),
 		reloadCase('reload-after-auto', AUTO),
 		reloadCase('reload-after-manual', MANUAL)
 	],

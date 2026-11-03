@@ -17,6 +17,7 @@ from fluid.context.compaction import (
     split_spans,
     strip_system_reminders,
 )
+from fluid.context.steer_render import CURRENT_RENDER_VERSION, RENDER_VERSION_V2
 from fluid.context.trim import TrimConfig
 from fluid.engine.native import NativeLoop, repair_dangling_tool_calls
 from fluid.events import ContextCompaction, UserTurn
@@ -1713,6 +1714,9 @@ async def test_provider_overflow_runs_the_unguarded_rungs_and_recovers(tmp_path)
     assert "B" * 6_000 not in _request_texts(provider.requests[2])
     # digest(0): the in-flight turn itself, turn-start node included.
     assert rungs[1].spans[0][0] == nodes[0].node_id
+    # Its bulk is the brief, so this last rung clips it rather than fail.
+    assert rungs[0].render_version == CURRENT_RENDER_VERSION
+    assert rungs[1].render_version == RENDER_VERSION_V2
     final = provider.requests[3]
     assert "compacted turn" in _request_texts(final)
     assert repair_dangling_tool_calls(final.messages) is final.messages

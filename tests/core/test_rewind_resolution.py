@@ -356,7 +356,7 @@ def rewind_env(mock_db, monkeypatch):
         update_session=lambda *a, **k: state.update_calls.append((a, k)),
         get_session_messages=lambda sid: [],
     ))
-    monkeypatch.setattr(cmd, "get_working_dir_for_project", lambda pid, worktree_id=None: WD)
+    monkeypatch.setattr(cmd, "get_working_dir_for_project", lambda pid, worktree_id=None, session_id=None: WD)
 
     class _Pool:
         def contains(self, sid):

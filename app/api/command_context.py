@@ -37,8 +37,8 @@ def command_context(
                 require_origin_access(request=request, project_v2_id=session["project_v2_id"])
             elif not session.get("project_id"):
                 raise HTTPException(403, "Access denied to this session")
-        from app.core.project_resolver import resolve_existing_cwd
-        cwd = resolve_existing_cwd(session)
+        from app.core.project_resolver import resolve_session_cwd
+        cwd = resolve_session_cwd(session)
         if not cwd:
             raise HTTPException(404, "Session checkout is not available on this device")
         return str(cwd), session

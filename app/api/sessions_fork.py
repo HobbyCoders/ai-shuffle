@@ -151,13 +151,24 @@ async def _fork_fluid_session(
     original_title = original_session.get("title") or "Untitled"
     fork_title = f"Fork of {original_title}"
 
+    fork_fields = dict(
+        profile_id=original_session.get("profile_id"),
+        project_id=original_session.get("project_id"),
+        title=fork_title,
+        api_user_id=api_user_id,
+        parent_session_id=session_id,
+        fork_point_message_index=fork_message_index,
+        is_active=True,
+        **_fork_inherited_fields(original_session),
+    )
     # Copy the ancestry FIRST: if it fails there is no orphan session row to
-    # clean up (the JSONL fork below has to delete the row it already created).
-    # working_dir lets a delegated parent mint a fresh CLI transcript from the
-    # copied path so the fork's next --resume is not an empty conversation.
+    # clean up. Reseed for the prospective FORK's runtime row, not its parent:
+    # parent_session_id / api_user_id / the absent mode can select another cwd.
+    # Keep the creation fields shared so this cannot drift from create_session.
     from app.core.message_resolver import resolve_working_dir
 
-    working_dir = resolve_working_dir(original_session)
+    parent_branch = (original_session.get("branch") or "").strip()
+    working_dir = resolve_working_dir({"id": new_session_id, "branch": parent_branch, **fork_fields})
     try:
         new_sdk_session_id, node_count = await run_sync(
             fork_fluid_session,
@@ -175,14 +186,7 @@ async def _fork_fluid_session(
     await run_sync(
         database.create_session,
         session_id=new_session_id,
-        profile_id=original_session.get("profile_id"),
-        project_id=original_session.get("project_id"),
-        title=fork_title,
-        api_user_id=api_user_id,
-        parent_session_id=session_id,
-        fork_point_message_index=fork_message_index,
-        is_active=True,
-        **_fork_inherited_fields(original_session),
+        **fork_fields,
     )
 
     # The fork is the caller's chat: a paired device keeps it (#1877).
@@ -191,7 +195,6 @@ async def _fork_fluid_session(
     # create_session cannot carry the logical v2 branch (no parameter) — a
     # branch-bound parent must hand it to the fork or the fork resolves its cwd
     # to the base checkout.
-    parent_branch = (original_session.get("branch") or "").strip()
     if parent_branch:
         await run_sync(_restore_fork_branch, new_session_id, parent_branch)
 

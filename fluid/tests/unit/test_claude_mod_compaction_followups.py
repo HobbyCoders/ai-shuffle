@@ -446,18 +446,37 @@ def _pairs(emitted: list) -> list[tuple[str, str]]:
 
 
 async def test_no_checkpoint_for_an_answer_claude_code_did_not_apply():
-    """A boundary that names another conversation was not this answer's (it
-    fell back, or another compaction ran), so nothing is written."""
+    """Rows kept beside a summary are Claude Code's summarizer standing in: it
+    fell back, so nothing is written and the answer closes."""
     chat = Chat()
     chat.grow(24)
     loop, sid = await _loop_with(chat)
     try:
         status, body = await _request(loop, {'v': 1, 'trigger': 'manual', 'messages': chat.cli})
         assert status == 200
-        emitted = await _read(loop, sid, [COMPACTING, _boundary('not-a-posted-row')])
+        fell_back = {**_boundary('not-a-posted-row'), 'compact_metadata': {
+            **BOUNDARY['compact_metadata'], 'preserved_segment': {'head_uuid': 'a', 'tail_uuid': 'b'},
+        }}
+        emitted = await _read(loop, sid, [COMPACTING, fell_back])
         [event] = [e for e in emitted if isinstance(e, ContextCompaction)]
         assert event.compaction_id.startswith('cmp_') and event.compaction_id != body['compaction_id']
         assert not [e for e in emitted if isinstance(e, CompactionCheckpoint)]
+        assert loop._open_txns == []
+    finally:
+        await loop.aclose()
+
+
+async def test_a_boundary_naming_a_row_the_mod_never_posted_applied_the_answer():
+    """#755: real boundaries name an attachment or a stop-hook entry (97 of 105,
+    2.1.312-2.1.316), so an unknown parent says nothing about whose it was."""
+    chat = Chat()
+    chat.grow(24)
+    loop, sid = await _loop_with(chat)
+    try:
+        _, body = await _request(loop, {'v': 1, 'trigger': 'auto', 'messages': chat.cli})
+        emitted = await _read(loop, sid, [COMPACTING, _boundary('an-attachment-entry')])
+        cid = body['compaction_id']
+        assert _pairs(emitted) == [('ContextCompaction', cid), ('CompactionCheckpoint', cid)]
     finally:
         await loop.aclose()
 
@@ -615,3 +634,173 @@ def test_superseded_hook_context_leaves_first_and_a_miss_is_reported():
                      archive=[], report=tight)
     assert not tight['met'] and set(tight['contributors']) == {
         'claude_code_rows', 'stored_kept', 'fluid_built'}
+
+
+# ─── a Fluid answer that stayed open says nothing about what was applied ──────
+
+
+def _hook_request(event: str, **data: Any) -> Any:
+    from fluid.engine.delegated_proto import HookCallbackRequest
+
+    return HookCallbackRequest(
+        cli_request_id=f'cli_hook_{event}', callback_id=f'fluid_{event}',
+        input={'hook_event_name': event, 'session_id': 'cli', 'transcript_path': '/t/cli.jsonl',
+               'cwd': '.', **data},
+    )
+
+
+def _summarizer_boundary() -> dict:
+    return {**_boundary('not-a-posted-row'), 'compact_metadata': {
+        **BOUNDARY['compact_metadata'], 'preserved_segment': {'head_uuid': 'a', 'tail_uuid': 'b'},
+    }}
+
+
+async def _answering(loop: DelegatedLoop) -> list[dict]:
+    """The loop with a note to put back, and what it answers the CLI."""
+    written: list[dict] = []
+
+    async def capture(frame: dict) -> None:
+        written.append(frame)
+
+    async def note() -> str:
+        return 'host note'
+
+    loop.compact_context = note
+    loop._write_frame = capture  # type: ignore[method-assign]
+    return written
+
+
+def _answer(written: list[dict]) -> str:
+    return written[-1]['response']['response']['hookSpecificOutput']['additionalContext']
+
+
+async def test_precompact_means_the_open_answer_will_not_apply():
+    """Claude Code runs PreCompact only for its own summarizer, so the note
+    written after it cannot lean on the open answer: the brief goes back, and the
+    note and the boundary carry one id."""
+    chat = Chat()
+    chat.grow(24)
+    loop, sid = await _loop_with(chat)
+    written = await _answering(loop)
+    brief = chat.stored[0].message.text()
+    try:
+        status, body = await _request(loop, {'v': 1, 'trigger': 'auto', 'messages': chat.cli})
+        assert status == 200 and loop._open_txns
+        loop._track_main_compaction(COMPACTING)
+        await loop._answer_hook_request(_hook_request('PreCompact', trigger='auto'))
+        assert loop._open_txns == []
+        await loop._answer_hook_request(_hook_request('SessionStart', source='compact'))
+        assert brief in _answer(written)
+        note_id = loop.last_restoration['compaction_id']
+        assert note_id != body['compaction_id']
+        emitted = await _read(loop, sid, [_summarizer_boundary()])
+        [event] = [e for e in emitted if isinstance(e, ContextCompaction)]
+        assert event.compaction_id == note_id
+        assert not [e for e in emitted if isinstance(e, CompactionCheckpoint)]
+    finally:
+        await loop.aclose()
+
+
+async def test_a_note_that_leaned_on_an_unapplied_answer_is_made_good():
+    """No PreCompact seen (a CLI that does not send it): the note left the brief
+    to the answer. The boundary shows the summarizer wrote this compaction, so
+    the brief goes back, under the id the note already carried."""
+    chat = Chat()
+    chat.grow(24)
+    loop, sid = await _loop_with(chat)
+    written = await _answering(loop)
+    brief = chat.stored[0].message.text()
+    try:
+        status, body = await _request(loop, {'v': 1, 'trigger': 'auto', 'messages': chat.cli})
+        assert status == 200
+        loop._track_main_compaction(COMPACTING)
+        await loop._answer_hook_request(_hook_request('SessionStart', source='compact'))
+        assert 'host note' in _answer(written)
+        assert brief not in _answer(written)  # the answer's rows still showed it
+        note_id = loop.last_restoration['compaction_id']
+        assert note_id == body['compaction_id']
+        emitted = await _read(loop, sid, [_summarizer_boundary()])
+        [event] = [e for e in emitted if isinstance(e, ContextCompaction)]
+        assert event.compaction_id == note_id  # one compaction, one id
+        assert not [e for e in emitted if isinstance(e, CompactionCheckpoint)]
+        assert loop._open_txns == []
+        content, _ = await loop._fresh_turn_content([Text('next')], None)
+        assert brief in ' '.join(b.text for b in content if isinstance(b, Text))
+    finally:
+        await loop.aclose()
+
+
+async def test_the_brief_comes_back_when_the_note_had_filled_the_budget():
+    """The note trusted the answer and filled the budget with about 14 KB each of
+    delivered messages and memory. The boundary disproves the answer: the replaced
+    section gives its unsent room back, the brief and the messages take memory's
+    too, and they reach the model at the next tool results, in the same total."""
+    from fluid.engine.compact_restore import CUT, OMITTED, PENDING, RestorationSection, utf16_len
+    from fluid.engine.delegated import COMPACT_CONTEXT_MAX_CHARS, HOOK_CONTEXT_INLINE_CHARS
+    from fluid.messages.content import SteerDelivery
+
+    chat = Chat()
+    chat.grow(24)
+    loop, sid = await _loop_with(chat)
+    written = await _answering(loop)
+    brief = chat.stored[0].message.text()
+    told = [f"told {i} " + "t" * 2_000 for i in range(6)]
+    loop._delivered.extend((None, SteerDelivery(id=f"d{i}", text=text), time.time())
+                           for i, text in enumerate(told))
+
+    async def note() -> list:
+        return [RestorationSection(name="memory", text="m" * 14_000, priority=3, cuttable=True)]
+
+    loop.compact_context = note
+    try:
+        await _request(loop, {'v': 1, 'trigger': 'auto', 'messages': chat.cli})
+        loop._track_main_compaction(COMPACTING)
+        await loop._answer_hook_request(_hook_request('SessionStart', source='compact'))
+        parts = [_answer(written)]
+        assert brief not in parts[0]
+        await _read(loop, sid, [_summarizer_boundary()])
+        sections = {r.name: r for r in loop._restoration.receipts()}
+        assert sections['instructions'].status == PENDING, sections
+        assert sections['memory'].status in (PENDING, CUT, OMITTED)
+
+        mapper = StreamJsonMapper(session_id=sid, turn_id='turn_1', model='m', user_node_id='n0')
+        mapper.main_tool_use_ids.update({'t1', 't2', 't3'})
+        loop._peer_admission_open = True
+        loop._active_turn_id = 'turn_1'
+        for tool in ('t1', 't2', 't3'):
+            await loop._answer_hook_request(
+                _hook_request('PostToolUse', tool_name='Read', tool_input={}, tool_use_id=tool),
+                mapper=mapper,
+            )
+            output = written[-1]['response']['response'].get('hookSpecificOutput') or {}
+            if output.get('additionalContext'):
+                parts.append(output['additionalContext'])
+        assert all(utf16_len(part) <= HOOK_CONTEXT_INLINE_CHARS for part in parts)
+        after = '\n'.join(parts[1:])
+        assert brief in after and all(text[:40] in after for text in told)
+        assert after.index(brief) < (after.index('mmmm') if 'mmmm' in after else len(after))
+        # The total is what it was: the part markers aside, no more than the cap went out.
+        assert sum(utf16_len(part) for part in parts) <= COMPACT_CONTEXT_MAX_CHARS + 200
+    finally:
+        await loop.aclose()
+
+
+async def test_a_note_beside_an_applied_answer_stays_as_it_was():
+    """The other side: the boundary applied the answer, so nothing comes back."""
+    chat = Chat()
+    chat.grow(24)
+    loop, sid = await _loop_with(chat)
+    written = await _answering(loop)
+    brief = chat.stored[0].message.text()
+    try:
+        _, body = await _request(loop, {'v': 1, 'trigger': 'auto', 'messages': chat.cli})
+        loop._track_main_compaction(COMPACTING)
+        await loop._answer_hook_request(_hook_request('SessionStart', source='compact'))
+        assert brief not in _answer(written)
+        emitted = await _read(loop, sid, [_boundary('an-attachment-entry')])
+        cid = body['compaction_id']
+        assert _pairs(emitted) == [('ContextCompaction', cid), ('CompactionCheckpoint', cid)]
+        content, _ = await loop._fresh_turn_content([Text('next')], None)
+        assert brief not in ' '.join(b.text for b in content if isinstance(b, Text))
+    finally:
+        await loop.aclose()
