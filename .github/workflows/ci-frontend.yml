@@ -83,7 +83,9 @@ jobs:
       # --check uses git ls-files (the index), so the shallow checkout is sufficient.
       - name: Validate UI journey map
         working-directory: .
-        run: node frontend/tests/journeys/select.mjs --check
+        run: |
+          node --test frontend/tests/journeys/select.test.mjs
+          node frontend/tests/journeys/select.mjs --check
       - run: npm ci
       - run: npx svelte-kit sync
       - name: Frontend tests and contract consistency

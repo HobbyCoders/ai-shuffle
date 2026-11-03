@@ -41,7 +41,10 @@ files no rule covers (docs, unrelated backend) select nothing. `--check`
 fails when a glob matches no file or a journey has no rule, so a rename
 cannot silently drop coverage; run it when you add a journey or move files.
 The `JavaScript contracts, docs and frontend audit` CI job enforces this check
-on every PR, independently of the shards that run every journey.
+on every PR, independently of the shards that run every journey. It also runs
+`select.test.mjs`, which checks the exported validator and real CLI with valid
+and invalid temporary maps. `--check --map <path>` validates an alternative
+map against the same checkout without changing `map.json`.
 
 ## Run one
 

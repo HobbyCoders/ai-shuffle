@@ -871,6 +871,11 @@ The `JavaScript contracts, docs and frontend audit` job runs
 every PR. It fails if a journey lacks its own rule in `map.json`, a rule names
 an unknown journey, or a glob matches no tracked file. The default shallow
 checkout is sufficient: validation uses `git ls-files`, not commit history.
+Before checking the checkout's map, the same required job runs
+`node --test frontend/tests/journeys/select.test.mjs`: temporary maps exercise
+the exported validator and real CLI, requiring exit 0 for a valid map and exit 2
+for both an unmatched glob and a journey with no rule. The policy test rejects
+job- or step-level conditions and `continue-on-error` on this check.
 This validates selection metadata; the journey shards still run every journey.
 
 `UI journeys (N/5)`: each shard installs the Python and JavaScript

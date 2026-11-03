@@ -163,9 +163,14 @@ class CostPolicyTests(unittest.TestCase):
 
     def test_journey_map_is_validated_by_javascript_contracts(self):
         job = workflow("ci-frontend.yml")["jobs"]["contracts"]
+        self.assertNotIn("if", job)
+        self.assertNotIn("continue-on-error", job)
         step = next(step for step in job["steps"]
                     if step.get("name") == "Validate UI journey map")
-        self.assertEqual(step["run"], "node frontend/tests/journeys/select.mjs --check")
+        self.assertEqual(step["run"].splitlines(), [
+            "node --test frontend/tests/journeys/select.test.mjs",
+            "node frontend/tests/journeys/select.mjs --check",
+        ])
         self.assertEqual(step.get("working-directory", job["defaults"]["run"]["working-directory"]), ".")
         self.assertNotIn("if", step)
         self.assertNotIn("continue-on-error", step)
