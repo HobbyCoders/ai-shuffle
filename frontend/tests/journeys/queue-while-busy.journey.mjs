@@ -67,12 +67,14 @@ async function watchStopFrames(page, texts) {
 		const logTop = log.getBoundingClientRect().top;
 		const rows = () => [...log.querySelectorAll('.chat-column > .msg-virtualized')];
 		const key = rows().find((el) => el.getBoundingClientRect().bottom > logTop + 1)?.dataset.transcriptKey;
-		const watch = (window.__stopFrames = { frames: [], running: true, startedAt: performance.now() });
+		const watch = (window.__stopFrames = { frames: [], next: 0, running: true, startedAt: performance.now() });
+		const slot = document.querySelector('.input-slot');
 		const bubblesAndRows = () => [
 			...document.querySelectorAll('.pending-messages [role="article"], [data-not-sent="true"]')
 		];
 		const frame = () => {
 			if (!watch.running) return;
+			const order = watch.next++;
 			const seen = new IntersectionObserver((entries) => {
 				seen.disconnect();
 				const painted = new Map(entries.map((entry) => [entry.target, entry.boundingClientRect.top]));
@@ -80,11 +82,12 @@ async function watchStopFrames(page, texts) {
 					Math.round((painted.get(el) ?? el.getBoundingClientRect().top) * 10) / 10;
 				const anchor = rows().find((el) => el.dataset.transcriptKey === key);
 				watch.frames.push({
+					order,
 					at: Math.round(performance.now() - watch.startedAt),
 					scrollTop: Math.round(log.scrollTop),
 					anchorTop: anchor ? topOf(anchor) : null,
 					replyHeight: rows().at(-1)?.getBoundingClientRect().height ?? null,
-					composerTop: document.querySelector('.input-slot')?.getBoundingClientRect().top ?? 0,
+					composerTop: slot ? topOf(slot) : 0,
 					messages: texts.map((text) => {
 						const has = (el) => (el.textContent || '').includes(text);
 						const bubbles = [...document.querySelectorAll('.pending-messages [role="article"]')].filter(has);
@@ -98,7 +101,7 @@ async function watchStopFrames(page, texts) {
 					})
 				});
 			});
-			for (const el of [log, ...rows(), ...bubblesAndRows()]) seen.observe(el);
+			for (const el of [log, slot, ...rows(), ...bubblesAndRows()].filter(Boolean)) seen.observe(el);
 			requestAnimationFrame(frame);
 		};
 		requestAnimationFrame(frame);
@@ -107,7 +110,8 @@ async function watchStopFrames(page, texts) {
 		page.evaluate(() => {
 			const watch = window.__stopFrames;
 			watch.running = false;
-			return watch.frames;
+			// After a slow frame the browser delivers several of these together, in no set order.
+			return watch.frames.sort((a, b) => a.order - b.order);
 		});
 }
 
@@ -544,15 +548,21 @@ await runJourney({
 				}
 				const frames = await collect();
 				// Growth may push the bubbles down and leave them there. Down and straight back is the fault.
-				// Against the composer: typing and sending resize it, which moves them both.
-				const tops = frames.filter((f) => f.messages[0].bubbles === 1).map((f) => f.messages[0].top - f.composerTop);
+				// Typing and sending resize the composer, which moves them too: that is the person's own
+				// input, which the recorder scores, so only frames with a still composer count here.
+				const held = frames.filter((f) => f.messages[0].bubbles === 1);
+				const still = (a, b) => Math.abs(a.composerTop - b.composerTop) < 1;
 				let bounce = 0;
-				for (let i = 2; i < tops.length; i++) {
-					bounce = Math.max(bounce, Math.min(tops[i - 1] - tops[i - 2], tops[i - 1] - tops[i]));
+				let judged = 0;
+				for (let i = 2; i < held.length; i++) {
+					if (!still(held[i - 2], held[i - 1]) || !still(held[i - 1], held[i])) continue;
+					judged++;
+					const top = held[i - 1].messages[0].top;
+					bounce = Math.max(bounce, Math.min(top - held[i - 2].messages[0].top, top - held[i].messages[0].top));
 				}
-				log(`biggest bubble bounce: ${bounce}px over ${tops.length} frames`);
-				expect(tops.length > 5, `watched the bubbles while the reply ran (${tops.length} frames)`);
-				expect(bounce <= REPLY_LINE_PX, `the bubbles did not drop and come back in one frame: ${bounce}px; [at, scrollTop, top] ${JSON.stringify(frames.map((f) => [f.at, f.scrollTop, f.messages[0].top]))}`);
+				log(`biggest bubble bounce: ${bounce}px over ${judged} of ${held.length} frames`);
+				expect(judged > 5, `watched the bubbles while the reply ran (${judged} frames)`);
+				expect(bounce <= REPLY_LINE_PX, `the bubbles did not drop and come back in one frame: ${bounce}px; [at, scrollTop, top, composer] ${JSON.stringify(frames.map((f) => [f.at, f.scrollTop, f.messages[0].top, f.composerTop]))}`);
 			}
 		},
 		{
