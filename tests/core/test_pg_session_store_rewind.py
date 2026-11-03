@@ -205,6 +205,81 @@ class TestRewindResetCommitsWithTheCut:
             database.delete_session(chat)
 
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("refusal", ["reset", "target"])
+    async def test_refused_store_leaves_jsonl_and_legacy_rows_untouched(
+        self, monkeypatch, tmp_path, refusal,
+    ):
+        """A readable/writable JSONL copy is not permission to cut a refused chat."""
+        import asyncio
+        from unittest.mock import AsyncMock, Mock
+
+        from app.api import commands
+        from app.core.pg_session_store import RewindTargetNotFound
+        from app.db import database, turns
+
+        entries = [_user("u1", "first"), _assistant("a1"),
+                   _user("u2", "second"), _assistant("a2")]
+        _insert(entries)
+        chat, turn_id = self._failed_chat()
+        database.update_session(chat, sdk_session_id=_SID)
+        for entry in entries:
+            database.add_session_message(
+                chat, entry["type"], entry["message"]["content"], jsonl_uuid=entry["uuid"],
+            )
+        transcript = tmp_path / "transcript.jsonl"
+        original = "".join(json.dumps(entry) + "\n" for entry in entries).encode()
+        transcript.write_bytes(original)
+        before_rows = database.get_session_messages(chat)
+        monkeypatch.setattr(commands, "get_working_dir_for_project", lambda *args: str(tmp_path))
+        monkeypatch.setattr(commands.jsonl_rewind_service, "_get_jsonl_path", lambda *args: transcript)
+        sync = Mock(broadcast_user_session_updated=AsyncMock(), broadcast_session_rewound=AsyncMock())
+        monkeypatch.setattr(commands, "sync_engine", sync)
+
+        def refused(*args, **kwargs):
+            raise RuntimeError("database away")
+
+        try:
+            with monkeypatch.context() as outage:
+                if refusal == "reset":
+                    # Fail after the DELETE, while writing the reset in that transaction.
+                    outage.setattr(turns, "set_outcome_baseline", refused)
+                else:
+                    outage.setattr(commands, "truncate_session_store_to_checkpoint", AsyncMock(
+                        side_effect=RewindTargetNotFound("no store target"),
+                    ))
+                response = await commands.execute_rewind(chat, commands.RewindRequestV2(
+                    target_uuid="u2", include_response=False,
+                ))
+                await asyncio.sleep(0)
+
+            assert response.success is False
+            assert response.message == "Rewind failed"
+            assert response.chat_rewound is False
+            assert _load() == entries
+            assert (transcript.read_bytes(), database.get_session_messages(chat)) == (original, before_rows)
+            assert response.messages_removed == 0
+            assert "Store rewind failed:" in response.error
+            assert turns.sessions_with_failed_latest_turn([chat]) == {chat}
+            sync.broadcast_user_session_updated.assert_not_called()
+            sync.broadcast_session_rewound.assert_not_called()
+
+            # Retrying after the refusal is gone cuts all three copies and resets together.
+            response = await commands.execute_rewind(chat, commands.RewindRequestV2(
+                target_uuid="u2", include_response=False,
+            ))
+            await asyncio.sleep(0)
+            assert response.success is True
+            assert _load() == entries[:2]
+            assert [json.loads(line) for line in transcript.read_text().splitlines()] == entries[:2]
+            assert [row["jsonl_uuid"] for row in database.get_session_messages(chat)] == ["u1", "a1"]
+            assert turns.sessions_with_failed_latest_turn([chat]) == set()
+            turn = turns.get_turn(turn_id)
+            assert (turn["state"], turn["error"]) == ("aborted", "boom")
+        finally:
+            database.delete_session(chat)
+
+
 # ─── truncate_session_store_to_checkpoint (async, via compute_rewind_keep_count)
 
 @pytest.mark.asyncio
