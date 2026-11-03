@@ -695,6 +695,24 @@ async def _drop_pooled_client(session_id: str) -> None:
         )
 
 
+async def _wake_turn_deleted(session_id: str, turn_id: Optional[str]) -> bool:
+    """Only a successful missing-row read proves a wake was deleted."""
+    try:
+        deleted = await asyncio.to_thread(turns_db.get_turn, turn_id) is None
+    except Exception:  # noqa: BLE001 — this admission read must fail open.
+        logger.warning(
+            "turn_scheduler: could not check deletion of wake %s for %s — "
+            "preserving wake recovery", turn_id, session_id, exc_info=True,
+        )
+        return False
+    if deleted:
+        logger.info(
+            "turn_scheduler: dropped task notification for deleted session %s (turn %s)",
+            session_id, turn_id,
+        )
+    return deleted
+
+
 async def _maybe_recover_failed_wake(
     session_id: str, settled: Dict[str, Any]
 ) -> bool:
@@ -743,11 +761,7 @@ async def _maybe_recover_failed_wake(
 
     payload = dict(settled.get("payload") or {})
     turn_id = settled.get("id")
-    if await asyncio.to_thread(turns_db.get_turn, turn_id) is None:
-        logger.info(
-            "turn_scheduler: dropped task notification for deleted session %s (turn %s)",
-            session_id, turn_id,
-        )
+    if await _wake_turn_deleted(session_id, turn_id):
         return False
     if payload.get(WAKE_RETRY_KEY):
         logger.warning(
@@ -773,11 +787,7 @@ async def _maybe_recover_failed_wake(
         return False
     # Deletion removes the settled turn too. The client teardown above awaits
     # external work, so the settlement we read can have disappeared meanwhile.
-    if await asyncio.to_thread(turns_db.get_turn, turn_id) is None:
-        logger.info(
-            "turn_scheduler: dropped task notification for deleted session %s (turn %s)",
-            session_id, turn_id,
-        )
+    if await _wake_turn_deleted(session_id, turn_id):
         return False
     payload[WAKE_RETRY_KEY] = True
     retry = await asyncio.to_thread(

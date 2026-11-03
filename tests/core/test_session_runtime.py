@@ -1985,6 +1985,41 @@ async def test_run_pump_broadcast_trims_render_frames(mock_db):
     assert all(e["session_id"] == "s11" for e in broadcast_events)
 
 
+@pytest.mark.parametrize("persistent", [False, True])
+async def test_unpark_session_lookup_error_is_not_treated_as_deletion(mock_db, caplog, persistent):
+    from app.db import database
+
+    sid = "wake-placement-read-error"
+    _seed_session(sid, "active")
+    wake = turns_db.enqueue_turn(sid, "unpark", prompt="task result")
+    get_session = database.get_session
+    reads = 0
+
+    def failed_lookup(session_id):
+        nonlocal reads
+        reads += 1
+        if reads == 1 or persistent:
+            raise OSError("temporary placement lookup failure")
+        return get_session(session_id)
+
+    with _runtime_env(pump=make_pump([{"type": "done", "metadata": {}}])) as env, patch(
+        "app.db.database.get_session", side_effect=failed_lookup,
+    ):
+        outcome = await session_runtime.SessionRuntime(wake).execute()
+    if persistent:
+        # The independent principal gate stays fail-closed: preserve the wake
+        # queued for recovery, rather than aborting it as a deleted chat.
+        assert outcome is None
+        env["recorder"].start.assert_not_awaited()
+        assert turns_db.get_turn(wake["id"])["state"] == "queued"
+    else:
+        assert outcome == "completed"
+        env["recorder"].start.assert_awaited_once()
+        assert turns_db.get_turn(wake["id"])["state"] == "completed"
+    assert "placement resolution failed" in caplog.text
+    assert "dropped task notification for deleted session" not in caplog.text
+
+
 async def test_unpark_turn_threads_completion_frames_to_provider_overrides(mock_db):
     _seed_session("s12", "active")
     frames = [{

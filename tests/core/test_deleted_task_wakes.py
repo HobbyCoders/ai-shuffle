@@ -188,3 +188,44 @@ async def test_deleted_retry_failure_does_not_surface_a_dead_chat(mock_db, monke
     notify.assert_not_awaited()
     assert sum("deleted session" in r.getMessage() for r in caplog.records) == 1
     assert not any(r.exc_info for r in caplog.records)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failed_read", [1, 2])
+async def test_failed_wake_existence_read_error_preserves_retry(
+    mock_db, monkeypatch, caplog, failed_read,
+):
+    sid = "wake-read-error"
+    sessions.create_session(sid, "default")
+    wake = turns.enqueue_turn(sid, "unpark", prompt="task result", profile_id="default")
+    turns.start_turn(wake["id"])
+    settled = turns.settle_turn(wake["id"], "aborted", stop_reason="error", error="client closed")
+    queued_message = turns.enqueue_turn(sid, "user", prompt="next message", profile_id="default")
+    get_turn = turns.get_turn
+    reads = 0
+
+    def flaky_get_turn(turn_id):
+        nonlocal reads
+        if turn_id == wake["id"]:
+            reads += 1
+            if reads == failed_read:
+                raise OSError("temporary existence lookup failure")
+        return get_turn(turn_id)
+
+    monkeypatch.setattr(turns, "get_turn", flaky_get_turn)
+    monkeypatch.setattr(turn_scheduler, "_drop_pooled_client", AsyncMock())
+    kick = Mock()
+    monkeypatch.setattr(turn_scheduler, "kick", kick)
+    with caplog.at_level(logging.INFO):
+        assert await turn_scheduler._maybe_recover_failed_wake(sid, settled)
+    assert reads == 2
+    retry, next_message = turns.get_queued_turns(sid)
+    assert retry["payload"][turn_scheduler.WAKE_RETRY_KEY] is True
+    assert retry["prompt"] == settled["prompt"]
+    assert next_message["id"] == queued_message["id"]
+    assert sessions.get_session(sid) is not None
+    kick.assert_called_once_with(sid)
+    read_errors = [r for r in caplog.records if "could not check deletion of wake" in r.getMessage()]
+    assert len(read_errors) == 1
+    assert read_errors[0].levelno == logging.WARNING and read_errors[0].exc_info
+    assert "dropped task notification for deleted session" not in caplog.text
