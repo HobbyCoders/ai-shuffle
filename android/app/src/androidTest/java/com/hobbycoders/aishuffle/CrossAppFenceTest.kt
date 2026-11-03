@@ -30,7 +30,8 @@ import java.util.concurrent.atomic.AtomicReference
  *
  * A "blip" is a genuine move that undoes itself: it gives the fence the same shape as Android's
  * one bad read (bounds differ, then match again), on demand. Blips must survive; a move that lasts
- * or any content change must be refused, under the panel and after it has gone.
+ * or any content change must be refused, under the panel and after it has gone. So must a screen
+ * that reads the same from different views, and one too slow to read in time.
  */
 @RunWith(AndroidJUnit4::class)
 class CrossAppFenceTest {
@@ -75,27 +76,24 @@ class CrossAppFenceTest {
         ShuffleAccessibilityService.afterConsentClosed = { withContext(Dispatchers.IO) { fixture(command) } }
     }
     private fun shows(text: String) = automation.rootInActiveWindow?.findAccessibilityNodeInfosByText(text)?.any { it.text?.toString() == text } == true
-    private fun request(name: String, args: JSONObject = JSONObject()): Pair<CountDownLatch, AtomicReference<JSONObject>> {
+    private fun request(name: String, args: JSONObject = JSONObject(), deadlineMs: Long = 20_000): Pair<CountDownLatch, AtomicReference<JSONObject>> {
         val result = AtomicReference<JSONObject>(); val done = CountDownLatch(1)
         CoroutineScope(Dispatchers.Main).launch {
-            try { result.set(DeviceToolExecutor(context).execute(name, args, System.currentTimeMillis() + 20_000)) } finally { done.countDown() }
+            try { result.set(DeviceToolExecutor(context).execute(name, args, System.currentTimeMillis() + deadlineMs)) } finally { done.countDown() }
         }
         return done to result
     }
     /** Well inside the 20 s approval window, so a refusal here is the fence and not the expiry. */
-    private fun status(request: Pair<CountDownLatch, AtomicReference<JSONObject>>): JSONObject {
-        assertTrue("Cross-app request did not finish", request.first.await(7, TimeUnit.SECONDS))
+    private fun status(request: Pair<CountDownLatch, AtomicReference<JSONObject>>, waitSeconds: Long = 7): JSONObject {
+        assertTrue("Cross-app request did not finish", request.first.await(waitSeconds, TimeUnit.SECONDS))
         return requireNotNull(request.second.get())
     }
-    private fun read(): String {
+    private fun read(item: String = "Covered target", waitSeconds: Long = 7): String {
         val reading = request("read_screen"); allow()
-        val screen = status(reading)
+        val screen = status(reading, waitSeconds)
         assertTrue(screen.toString(), screen.optBoolean("ok"))
-        return targetRef(screen)
-    }
-    private fun targetRef(screen: JSONObject): String {
         val nodes = screen.getJSONArray("nodes")
-        return (0 until nodes.length()).map { nodes.getJSONObject(it) }.single { it.optString("text") == "Covered target" }.getString("ref")
+        return (0 until nodes.length()).map { nodes.getJSONObject(it) }.single { it.optString("text") == item }.getString("ref")
     }
     private fun tap(ref: String) = request("tap_node", JSONObject().put("ref", ref))
     private fun assertNotTapped() = assertTrue("The target must not have been tapped", shows(CoveredTargetActivity.RESTING))
@@ -242,5 +240,96 @@ class CrossAppFenceTest {
         onceClosed("move")
         val reading = request("read_screen"); allow()
         assertEquals("stale_ref", status(reading).getString("status"))
+    }
+    @Test fun readRefusedOnScreenTooLargeToProve() {
+        fixture("dense:320")
+        assertEquals("protected_screen", status(request("read_screen")).getString("status"))
+    }
+    @Test fun rowsSwappedAsThePanelClosesAreRefused() {
+        val ref = read("Track One")
+        onceClosed("swap")
+        val tapping = tap(ref); allow()
+        assertEquals("stale_ref", status(tapping).getString("status"))
+        assertNotTapped()
+    }
+    @Test fun rowsSwappedUnderThePanelAreRefused() {
+        val tapping = tap(read("Track One"))
+        panelUp(); fixture("swap")
+        touch("Allow once")
+        assertEquals("denied", status(tapping).getString("status"))
+        assertNotTapped()
+    }
+    @Test fun rowsSwappedBeforeTheNextCommandStaleTheReference() {
+        val ref = read("Track One")
+        fixture("swap")
+        assertEquals("stale_ref", status(tap(ref)).getString("status"))
+        assertNotTapped()
+    }
+    @Test fun viewReplacedAsThePanelClosesIsRefused() {
+        val ref = read("Track One")
+        onceClosed("replace")
+        val tapping = tap(ref); allow()
+        assertEquals("stale_ref", status(tapping).getString("status"))
+        assertNotTapped()
+    }
+    @Test fun denyStillWorksDuringASlowRead() {
+        fixture("dense:100"); fixture("delay:10") // About a second per read, every one of them off the main thread.
+        val tapping = tap(read(waitSeconds = 15))
+        allow()
+        assertTrue(touch("Deny"))
+        assertEquals("denied", status(tapping, 15).getString("status"))
+        assertNotTapped()
+    }
+    @Test fun denseSlowScreenIsApprovedOnACleanRead() {
+        fixture("dense:100"); fixture("delay:8") // Each read outlasts the retry window; a clean one must still count.
+        val tapping = tap(read(waitSeconds = 15)); allow()
+        assertEquals("performed", status(tapping, 15).getString("status"))
+        assertTapped(1)
+    }
+    @Test fun denseScreenAtTheLimitIsApproved() {
+        fixture("dense:250")
+        val tapping = tap(read(waitSeconds = 15)); allow()
+        assertEquals("performed", status(tapping, 15).getString("status"))
+        assertTapped(1)
+    }
+    @Test fun screenTooSlowToReadIsRefusedWithinTheReadLimit() {
+        fixture("dense:150")
+        val tapping = tap(read(waitSeconds = 15))
+        panelUp(); fixture("delay:60") // A full read would take 9 s.
+        touch("Allow once")
+        val started = System.currentTimeMillis()
+        assertEquals("denied", status(tapping, 15).getString("status"))
+        assertTrue("Took ${System.currentTimeMillis() - started} ms", System.currentTimeMillis() - started < 5_000)
+        fixture("delay:0")
+        assertNotTapped()
+    }
+    @Test fun hungTargetIsRefusedWithoutWaitingForIt() {
+        fixture("dense:20")
+        val tapping = tap(read())
+        panelUp(); fixture("hang:4000") // One call blocks past the read limit, and no check runs inside a call.
+        touch("Allow once")
+        val started = System.currentTimeMillis()
+        assertEquals("denied", status(tapping, 15).getString("status"))
+        assertTrue("Took ${System.currentTimeMillis() - started} ms", System.currentTimeMillis() - started < 3_800)
+        await("The target was tapped, or never recovered") { shows(CoveredTargetActivity.RESTING) }
+    }
+    @Test fun actionCannotOutliveItsCommandDeadline() {
+        val ref = read()
+        ShuffleAccessibilityService.afterConsentClosed = { delay(4_500) }
+        val tapping = request("tap_node", JSONObject().put("ref", ref), deadlineMs = 4_000); allow()
+        assertEquals("stale_ref", status(tapping, 10).getString("status"))
+        assertNotTapped()
+    }
+    @Test fun actionCannotOutliveItsConsentExpiry() {
+        val ref = read()
+        ShuffleAccessibilityService.afterConsentClosed = { delay(21_000) } // Past the panel's 20 s, inside the command's 40 s.
+        val tapping = request("tap_node", JSONObject().put("ref", ref), deadlineMs = 40_000); allow()
+        assertEquals("stale_ref", status(tapping, 30).getString("status"))
+        assertNotTapped()
+    }
+    @Test fun readCannotOutliveItsConsentExpiry() {
+        ShuffleAccessibilityService.afterConsentClosed = { delay(21_000) }
+        val reading = request("read_screen", deadlineMs = 40_000); allow()
+        assertEquals("stale_ref", status(reading, 30).getString("status"))
     }
 }
