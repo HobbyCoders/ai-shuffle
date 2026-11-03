@@ -298,7 +298,7 @@ def test_the_roster_lists_routing_memories_under_the_subagent_default(world):
 
 
 def test_a_subagent_sees_the_same_routing_as_its_parent(world):
-    """SuggestTask tells a subagent to follow saved routing, so its roster has it."""
+    """A subagent picking a model for its own children follows saved routing too."""
     from app.db import database as db
 
     memory = _save(M260)

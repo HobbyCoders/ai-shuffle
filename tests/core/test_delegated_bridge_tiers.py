@@ -37,12 +37,8 @@ CLI_PREFIX = "mcp__fluid_bundled__"
 # view of each tool. The CLI's tokenizer counts the tier at ~1.33x that. The
 # 23-tool tier measured ~8.9k here (the CLI counted 12.1k); the core-only
 # tier (Task, Monitor) measures ~2.55k here (Oct 2026), budgeted with a
-# small margin for roster text that varies by install. SuggestTask (Nov 2026,
-# ~380) sits in this tier on purpose: an agent must have it at hand the moment
-# it notices adjacent work, without first searching for a tool it does not know.
-# Its anti-offloading limits (Nov 2026, owner approved) add 124: the tier measures
-# 2,902 -> 3,026 here, so the margin for roster text stays about the same.
-LOADED_BUDGET = 3_100
+# small margin for roster text that varies by install.
+LOADED_BUDGET = 2_800
 
 
 @pytest.fixture(autouse=True)

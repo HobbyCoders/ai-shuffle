@@ -2508,13 +2508,6 @@ def clear_session_conversation(session_id: str) -> Optional[str]:
             (session_id,),
         )
 
-        # Clearing rewinds past every turn: chips still pending go with them.
-        from app.db import task_chips
-        if task_chips.remove_all_pending(conn, session_id):
-            from app.core.task_chips import notify_changed
-            from app.db.base import after_commit
-            after_commit(conn, lambda: notify_changed(session_id))
-
         # Drop the v2 event log AND its seq counter — in this same transaction.
         # The SSE feed replays ``session_events`` from seq 0 as the transcript
         # authority, so rows left here resurrect the "cleared" conversation on

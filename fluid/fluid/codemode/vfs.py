@@ -83,7 +83,6 @@ CAPABILITY_TOOL_REASONS: dict[str, str] = {
     "ListSessions": "no top-level session orchestration capability",
     "MessageSession": "no top-level session orchestration capability",
     "StartSession": "no top-level session orchestration capability",
-    "SuggestTask": "no suggested-task capability",
     "SettleSession": "no top-level session orchestration capability",
     "UnsettleSession": "no top-level session orchestration capability",
     "ArchiveSession": "no top-level session orchestration capability",

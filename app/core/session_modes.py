@@ -94,7 +94,7 @@ CHAT_MODE_BASIC_TOOL_SURFACE: List[str] = [
 
 # Owner top-level chats coordinate work without acquiring worker execution.
 CHAT_MODE_ORCHESTRATION_TOOLS = [
-    "ListSessions", "SessionView", "SessionSearch", "StartSession", "SuggestTask", "MessageSession",
+    "ListSessions", "SessionView", "SessionSearch", "StartSession", "MessageSession",
     "SettleSession", "UnsettleSession", "ArchiveSession", "HandOffSession",
     "ListAgents", "Task", "TaskGet", "TaskList", "TaskOutput", "TaskStop", "SendMessage",
 ]
@@ -724,7 +724,7 @@ def chat_mode_read_permitted(tool_name: str, tool_input: Any) -> bool:
 PROACTIVE_TOOL_SURFACE = ["WebSearch", "WebFetch"]
 PROACTIVE_DENIED_TOOLS = [
     "Bash", "Monitor", "Write", "Edit", "NotebookEdit", "Read", "Grep", "Glob",
-    "Task", "Agent", "Swarm", "StartSession", "SuggestTask", "MessageSession", "RemoteTrigger",
+    "Task", "Agent", "Swarm", "StartSession", "MessageSession", "RemoteTrigger",
     "SettleSession", "UnsettleSession", "ArchiveSession",
     "TaskStop", "Remember", "Forget", "NotifyDevices", "ScheduleWakeup",
     "CronCreate", "CronDelete", "RequestChatAccess", "ChatRunCommand",
@@ -825,25 +825,6 @@ def turn_tool_surface(allowed: Optional[List[str]], disallowed: Optional[List[st
         current = list(disallowed or [])
         disallowed = current + [t for t in denied if t not in current]
     return surface, disallowed
-
-
-def turn_tool_access(config: Optional[Mapping[str, Any]], overrides: Optional[Mapping[str, Any]], session_mode: Any,
-                     *, owner_session: bool = False) -> ToolAccess:
-    """The tools a turn may use, as ``build_options_from_profile`` resolves them.
-
-    For code that has to say what a turn would run with. Leaves out the deny
-    entries that are about how a run is hosted and not what it was granted: the
-    worker lifecycle tools, and the ``claude-api`` skill on other providers.
-    """
-    access = lane_tool_access(config, session_mode, owner_session=owner_session,
-                              proactive=(overrides or {}).get("_assistant_proactive"))
-    surface, disallowed = turn_tool_surface(access.allowed, access.disallowed, overrides)
-    return ToolAccess(allowed=surface, disallowed=disallowed)
-
-
-def lane_baseline_tools(session_mode: Any, *, owner_session: bool = False) -> ToolAccess:
-    """What :func:`turn_tool_access` gives an agent with nothing restricted on this lane."""
-    return turn_tool_access({"tool_selection_mode": "all"}, None, session_mode, owner_session=owner_session)
 
 
 def install_proactive_registry_guard(

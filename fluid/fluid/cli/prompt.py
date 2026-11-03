@@ -62,14 +62,14 @@ BUILTIN_TOOL_NAMES: tuple[str, ...] = (
     "Monitor", "ToolSearch", "HistoryExpand", "HistorySearch", "Ledger",
     "AskUser", "SessionSearch", "SessionView", "WebFetch", "WebSearch",
     "Remember", "Recall", "Forget", "ListAgents", "SendMessage", "Swarm", "GetUsage",
-    "ListSessions", "MessageSession", "StartSession", "SuggestTask",
+    "ListSessions", "MessageSession", "StartSession",
     "SettleSession", "UnsettleSession", "ArchiveSession",
 )
 
 # These require the embedding app's owner/session database. Standalone Fluid
 # has no such authority on either leg; a host must explicitly wire it.
 HOST_ONLY_TOOL_NAMES = frozenset({
-    "ListSessions", "MessageSession", "StartSession", "SuggestTask",
+    "ListSessions", "MessageSession", "StartSession",
     "SettleSession", "UnsettleSession", "ArchiveSession",
 })
 _FULL_TOOLSET = frozenset(BUILTIN_TOOL_NAMES) - HOST_ONLY_TOOL_NAMES
@@ -104,7 +104,6 @@ TOOL_CAPABILITIES: dict[str, tuple[str, ...]] = {
     "ListSessions": ("session_orchestration",),
     "MessageSession": ("session_orchestration",),
     "StartSession": ("session_orchestration",),
-    "SuggestTask": ("task_chips",),
     "SettleSession": ("session_orchestration",),
     "UnsettleSession": ("session_orchestration",),
     "ArchiveSession": ("session_orchestration",),
@@ -675,23 +674,6 @@ loop, about three attempts on the same file is the cap: stop and ask.
 quietly working around it."""
 
 
-# The one wording of the rule; the delegated leg's guidance appends this too.
-# SuggestTask's description owns what a chip may never defer: every caller reads
-# that, including a custom-prompt delegated agent that never receives this rule.
-ADJACENT_WORK_RULE = """\
-Work outside the user's request: if a problem or improvement you notice does \
-not block it, do not fix it; call SuggestTask with a self-contained brief and \
-keep going. If it blocks, make the smallest fix and say so. Use SuggestTask for \
-concrete things worth a separate chat, not nitpicks or work that is part of the \
-request. What the request needs stays with this chat, even when it takes its \
-own PR."""
-
-
-def _adjacent_work_section(p: PromptProfile) -> str | None:
-    """Keeps a session on its task; the owner starts the side work, if wanted."""
-    return ADJACENT_WORK_RULE if "SuggestTask" in p.tools else None
-
-
 def _tools_section(p: PromptProfile) -> str | None:
     t = p.tools
     bullets: list[str] = []
@@ -1051,7 +1033,6 @@ def compose_base_prompt(profile: PromptProfile | None = None) -> str:
         (p.identity.rstrip() if p.identity else DEFAULT_IDENTITY_BLOCK),
         _communication_section(p),
         _work_section(p),
-        _adjacent_work_section(p),
         _tools_section(p),
         _permissions_section(p),
         _instructions_section(p),

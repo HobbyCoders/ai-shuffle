@@ -32,24 +32,16 @@ from fluid.store.base import MemoryStore
 # Reported "System tools" + "MCP tools" (what every first request pays for tool
 # docs or schemas). Measured ~8.4k (code mode) / ~9.6k (JSON path, which
 # also keeps the frequently used tools loaded: NATIVE_JSON_EAGER_TOOLS).
-# SuggestTask (background-task chips, always loaded at the owner's request) adds
-# ~220 of these and ~80 prompt tokens for its rule: 13,626 -> 13,926 (code mode),
-# 13,759 -> 14,060 (JSON path) pinned to Linux. The owner then made the suggesting
-# agent choose the new chat's model (required ``model``, optional shared ``effort``),
-# which adds ~147 more on that one schema: JSON path 14,060 -> 14,207.
-# Its anti-offloading limits (Nov 2026, owner approved) add 125 to that schema and
-# 20 to the rule, measured. Largest tool rows (JSON path pinned to Windows): 10,197
-# -> 10,322. Whole JSON path pinned to Linux: 14,377.
-TOOL_ROWS_BUDGET = 10_350
+TOOL_ROWS_BUDGET = 10_000
 # Budget the priced prefix separately from the first turn's own content.
 # The latter contains host paths, so measure its real producers with fixed
 # path inputs rather than making a whole-request ceiling depend on the host.
-# Together these retain a ceiling of about 14.6k without a path-length margin.
+# Together these retain the previous 14.3k ceiling without a path-length margin.
 # The prefix's host facts are pinned per platform (_pin_host). A Windows host
 # also carries its Git Bash notes in the Bash tool and the shell line: ~155
 # tokens measured (JSON path 13,694 pinned to Linux, 13,849 to Windows).
 WINDOWS_GUIDANCE_BUDGET = 160
-FIRST_REQUEST_BUDGET = {"linux": 14_400, "windows": 14_400 + WINDOWS_GUIDANCE_BUDGET}
+FIRST_REQUEST_BUDGET = {"linux": 13_800, "windows": 13_800 + WINDOWS_GUIDANCE_BUDGET}
 TURN_REMINDERS_BUDGET = 500
 # The breakdown before the first turn prices everything the first request
 # carries except the turn itself: the user's text, the host's note appended to

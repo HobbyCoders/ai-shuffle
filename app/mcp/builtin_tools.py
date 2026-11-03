@@ -1662,7 +1662,6 @@ def create_builtin_tools_server(
     provider_id: Optional[str] = None,
     cwd: Optional[str] = None,
     workflow_guidance: bool = False,
-    suggest_task: bool = True,
 ) -> Optional[Any]:
     """
     Build the ``mcp__builtins__*`` MCP server for a session.
@@ -1687,8 +1686,6 @@ def create_builtin_tools_server(
             without it those agents are advertised but not dispatchable.
         workflow_guidance: The host prompt supplies delegation/checkout rules;
             omit those duplicates from Task. False keeps standalone callers safe.
-        suggest_task: List SuggestTask. The caller decides from the session row
-            it already holds; the host still checks every call.
 
     Returns:
         In-process MCP server config, or ``None`` if the tool helpers are
@@ -1918,23 +1915,19 @@ def create_builtin_tools_server(
     from fluid.tools.builtins.session_orchestration import SPECS as orchestration_specs
     from fluid.tools.registry import ToolCtx
     from app.core.session_orchestration import make_handler as orchestration_handler
-    from app.core.session_orchestration import start_session_spec, suggest_task_spec
+    from app.core.session_orchestration import start_session_spec
 
     def _orchestration_bridge(spec, handler):
         if spec.name == "StartSession":
             spec = start_session_spec()  # names the subagent default as an example (#1830)
-        elif spec.name == "SuggestTask":
-            spec = suggest_task_spec()
         async def invoke(args: dict) -> dict:
             ctx = ToolCtx(cwd=cwd or ".", session_id=session_id)
             ctx.extra["session_orchestration"] = orchestration_handler(lambda: session_id)
-            ctx.extra["task_chips"] = ctx.extra["session_orchestration"]
             return _fluid_outcome_result(await handler(args, ctx))
         return tool(spec.name, spec.description, spec.input_schema)(invoke)
 
     all_tools.extend(_orchestration_bridge(spec, handler)
-                     for spec, handler in orchestration_specs
-                     if spec.name != "SuggestTask" or suggest_task)
+                     for spec, handler in orchestration_specs)
 
     # ListAgents / SendMessage — talk to this session's Task workers (and,
     # from a worker, to the parent as `main`). The native leg wires fluid's
@@ -3044,7 +3037,6 @@ def get_builtin_tool_names() -> List[str]:
         "mcp__builtins__ListSessions",
         "mcp__builtins__MessageSession",
         "mcp__builtins__StartSession",
-        "mcp__builtins__SuggestTask",
         "mcp__builtins__SettleSession",
         "mcp__builtins__UnsettleSession",
         "mcp__builtins__ArchiveSession",

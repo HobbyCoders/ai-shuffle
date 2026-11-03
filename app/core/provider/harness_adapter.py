@@ -676,7 +676,6 @@ class HarnessAdapter(ProviderAdapter):
                 delegated_system = await asyncio.to_thread(
                     self._compile_prompt, system, append_system, options,
                     self._worker_identity, self._workspace_card,
-                    suggest_task_available=_delegated_offered(options, self._registry)("SuggestTask"),
                 )
                 delegated_append = None
             else:
@@ -906,9 +905,6 @@ class HarnessAdapter(ProviderAdapter):
                 native_ctx.extra["agent_message"] = make_message(self._resolve_app_session_id)
                 from app.core.session_orchestration import make_handler as session_orchestration_handler
                 native_ctx.extra["session_orchestration"] = session_orchestration_handler(self._resolve_app_session_id)
-                from app.core.task_chips import offered_to as task_chips_offered
-                if task_chips_offered(self._resolve_app_session_id()):
-                    native_ctx.extra["task_chips"] = native_ctx.extra["session_orchestration"]
                 native_ctx.extra["task_dispatch"] = make_fluid_dispatcher(
                     self._resolve_app_session_id,
                     profile_id=(options.extra or {}).get("profile_id"),
@@ -3859,8 +3855,6 @@ class HarnessAdapter(ProviderAdapter):
         self._working_record_held = None
         if request_extra is not None:
             self._engine.request_extra = request_extra
-        if self._registry is not None and self._options is not None:
-            _amend_suggest_task_spec(self._registry, self._options, requested)
         self._record_applied("model", requested)
 
     async def set_run_settings(self, *, effort: Optional[str], fast: bool) -> dict:
@@ -5038,7 +5032,6 @@ class HarnessAdapter(ProviderAdapter):
         wired: Optional[frozenset] = None,
         workspace_card: Optional[str] = None,
         worker: Optional[str] = None,
-        suggest_task_available: Optional[bool] = None,
     ) -> Any:
         """Run the fluid prompt compiler, keeping the labeled sections.
 
@@ -5051,9 +5044,6 @@ class HarnessAdapter(ProviderAdapter):
         (:func:`app.core.environment.workspace_facts_card`), rendered once at
         connect. It is slotted as an ``environment`` section right after the
         compiler's own env block.
-
-        ``suggest_task_available`` is what the delegated bridge serves, for a
-        leg with no ``registry`` or ``wired`` here to infer that from.
 
         ``wired`` is the set of host capabilities on the leg's tool context
         (``ctx.extra`` keys plus the ones NativeLoop wires itself). Given it,
@@ -5125,9 +5115,7 @@ class HarnessAdapter(ProviderAdapter):
                 PromptInputs(
                     base=system,
                     extra_blocks=([append_system] if append_system else [])
-                    + _workflow_prompt_blocks(
-                        options, permitted, suggest_task_available=suggest_task_available,
-                    ),
+                    + _workflow_prompt_blocks(options, permitted),
                     cwd=options.cwd or ".",
                     include_env=True,
                     worker=worker,
@@ -5238,12 +5226,6 @@ class HarnessAdapter(ProviderAdapter):
                 sections.append(
                     PromptSection(kind="extra", text=_context_section(permitted))
                 )
-                # Same reason for the adjacent-work rule: only where SuggestTask
-                # is callable, so API-user and automation chats never read it.
-                if _suggest_task_offered(registry, permitted):
-                    from fluid.cli.prompt import ADJACENT_WORK_RULE
-
-                    sections.append(PromptSection(kind="extra", text=ADJACENT_WORK_RULE))
                 # fluid's model-family guidance ("Act, don't narrate",
                 # "## Execution discipline"). fluid only ever emits these from
                 # its own ``compose_base_prompt``, which the app replaces with
@@ -5356,8 +5338,6 @@ class HarnessAdapter(ProviderAdapter):
         options: SessionOptions,
         worker: Optional[str] = None,
         workspace_card: Optional[str] = None,
-        *,
-        suggest_task_available: Optional[bool] = None,
     ) -> Optional[str]:
         """Run the fluid prompt compiler over the app's system-prompt parts.
 
@@ -5376,7 +5356,7 @@ class HarnessAdapter(ProviderAdapter):
         """
         compiled = HarnessAdapter._compile_prompt_sections(
             system, append_system, options, native=False, worker=worker,
-            workspace_card=workspace_card, suggest_task_available=suggest_task_available,
+            workspace_card=workspace_card,
         )
         if compiled is None:
             return system if system is not None else append_system
@@ -5483,7 +5463,6 @@ class HarnessAdapter(ProviderAdapter):
             except ImportError:
                 pass  # older vendored fluid without the refinement seam
             self._task_roster_signature = _amend_native_task_spec(registry, options)
-            _amend_suggest_task_spec(registry, options)
             # Same split for Monitor: fluid owns its shape, the app owns
             # its supervision — and `wait_seconds` (the inline settle window)
             # is supervision, so the parameter is spliced onto the vendor spec
@@ -5774,7 +5753,6 @@ def _workflow_prompt_blocks(
     swarm_available: Optional[bool] = None,
     task_available: Optional[bool] = None,
     monitor_available: Optional[bool] = None,
-    suggest_task_available: Optional[bool] = None,
 ) -> List[str]:
     """App-owned additions, generated from the same final manifest as schemas.
 
@@ -5783,7 +5761,7 @@ def _workflow_prompt_blocks(
     surface, while delegated compilation supplies its CLI permission surface.
     ``permitted=None`` means every tool is available. The keyword overrides,
     when given, replace that inference for one tool: the delegated leg decides
-    Swarm, Task, Monitor and SuggestTask from what its bridge serves.
+    Swarm, Task and Monitor from what its bridge serves.
     """
     extra = getattr(options, "extra", None) or {}
     if not extra.get("automatic_workflows", False):
@@ -5794,7 +5772,6 @@ def _workflow_prompt_blocks(
     leaves = None if permitted is None else {name.rsplit("__", 1)[-1] for name in permitted}
     overrides = {
         "Swarm": swarm_available, "Task": task_available, "Monitor": monitor_available,
-        "SuggestTask": suggest_task_available,
     }
 
     def available(name):
@@ -5811,8 +5788,7 @@ def _workflow_prompt_blocks(
         )),
     )
     worker = subagent_system_prompt(
-        extra.get("app_session_id"), task_available=available("Task"),
-        suggest_task_available=available("SuggestTask"),
+        extra.get("app_session_id"), task_available=available("Task")
     )
     return [text for text in (parent, worker) if text]
 
@@ -7074,8 +7050,6 @@ _CODE_MODE_CATALOG_SKIP = frozenset({
     # Loads schemas for the JSON-tool path; under code mode every deferred
     # tool is already importable and read_tool_docs serves its docs.
     "ToolSearch",
-    # Sent as its own schema even under code mode, so docs here would repeat it.
-    "SuggestTask",
 })
 
 
@@ -7636,15 +7610,6 @@ CONTEXT_BLOCK_NO_RECALL = """# Context window
 - The latest user message outranks any digest."""
 
 
-def _suggest_task_offered(registry: Any, permitted: Optional[frozenset]) -> bool:
-    """Whether this native surface can call SuggestTask."""
-    if permitted is not None:
-        return "SuggestTask" in permitted
-    return registry is not None and any(
-        spec.name == "SuggestTask" for spec in registry.list_tools(loaded_only=False)
-    )
-
-
 def _context_section(tools: Optional[frozenset[str]] = None) -> str:
     """The context note for this tool surface (None means unrestricted)."""
     if tools is None or {"HistoryExpand", "HistorySearch"} <= tools:
@@ -7944,9 +7909,6 @@ def _delegated_guidance_blocks(options: SessionOptions, registry: Any) -> List[s
             )
     if notes:
         blocks.append("# App tools on this session\n" + "\n".join(notes))
-    if offered("SuggestTask"):
-        from fluid.cli.prompt import ADJACENT_WORK_RULE
-        blocks.append(ADJACENT_WORK_RULE)
     if recall:
         blocks.append(RECALL_BLOCK)
     if memory:
@@ -8110,7 +8072,6 @@ def _delegated_append_text(
         options, _delegated_permitted_names(options, registry),
         swarm_available=offered("Swarm"), task_available=task_offered,
         monitor_available=offered("Monitor"),
-        suggest_task_available=offered("SuggestTask"),
     ))
     parts.extend(_delegated_fluid_context(options))
     parts.extend(_learned_guidance_blocks(options.model))
@@ -8405,25 +8366,6 @@ def _install_task_contract(registry: ToolRegistry, contract: Any) -> None:
     registry.amend_spec(
         "StartSession", description=spec.description, input_schema=spec.input_schema,
     )
-
-
-def _amend_suggest_task_spec(
-    registry: ToolRegistry, options: SessionOptions, model: Optional[str] = None,
-) -> None:
-    """Name this agent's own model in SuggestTask's ``model`` input.
-
-    The tool tells the agent to name its current model when nothing directs a
-    choice, and this lane's system prompt does not state it (the Claude CLI's
-    does). A no-op when this session has no SuggestTask tool.
-    """
-    try:
-        from app.core.model_override import app_id
-        from app.core.session_orchestration import suggest_task_spec
-
-        current = app_id((options.extra or {}).get("provider_id"), model or options.model)
-        registry.amend_spec("SuggestTask", input_schema=suggest_task_spec(current).input_schema)
-    except Exception:  # noqa: BLE001 — the name is advisory; never break connect
-        logger.debug("[HarnessAdapter] could not amend SuggestTask", exc_info=True)
 
 
 def _amend_native_task_spec(

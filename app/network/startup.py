@@ -459,9 +459,6 @@ def _on_applied(touched) -> None:
             except Exception:  # noqa: BLE001
                 pass
             continue
-        if collection == "session_task_chips":
-            from app.core.task_chips import notify_mirrored
-            notify_mirrored(record_id)
         if collection == "system_settings":
             database.invalidate_system_setting_memo(record_id)
             if record_id == "allow_updates":

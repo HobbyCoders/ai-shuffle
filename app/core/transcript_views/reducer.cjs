@@ -2301,7 +2301,7 @@ function materializeProjection(body, records, epoch, runtime) {
 }
 
 // scripts/transcript-reducer-node.ts
-var REDUCER_FINGERPRINT = "94f3dd580678fa42f3d6da3cd6774e089d172c94e8d40e5684f52605f88fddc6";
+var REDUCER_FINGERPRINT = "ba6d21be408241aa29c812b8766e6eba11d268c8971d2a48e5e269d0a520f3e3";
 var RPC_VERSION = 1;
 var MAX_PACKET_BYTES = 24 * 1024 * 1024;
 function dispatch(method, params) {

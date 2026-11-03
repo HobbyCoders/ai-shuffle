@@ -85,10 +85,7 @@ logger = logging.getLogger(__name__)
 NAMED = "named_by_user"
 REMEMBERED = "remembered_by_owner"
 APPROVED = "approved_by_owner"
-# A background-task chip the owner clicked while it showed this model. The click
-# is the approval, so it never reaches :func:`accept`; no later start inherits it.
-CHIP_APPROVED = "approved_by_owner_chip"
-SOURCES = (NAMED, REMEMBERED, APPROVED, CHIP_APPROVED)
+SOURCES = (NAMED, REMEMBERED, APPROVED)
 
 # The pseudo-tool the owner's prompt is raised under. Its own name keeps a
 # remembered "always" answer on this prompt from ever approving the

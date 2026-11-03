@@ -403,8 +403,6 @@ async def start_services() -> None:
     global_events.start()
     from app.core import composer_suggestions
     composer_suggestions.start()
-    from app.core import task_chips
-    await run_sync(task_chips.fail_interrupted_starts)
     from app.core.connectors.manager import connector_manager
     await connector_manager.start_all()
     connector_manager.start_event_relay()
