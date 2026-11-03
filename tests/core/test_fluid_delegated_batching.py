@@ -60,9 +60,10 @@ def _record_transactions(monkeypatch) -> list:
     calls: list = []
     original = module._append_events_sync
 
-    def record(sid, events):
-        original(sid, events)
+    def record(sid, events, **kwargs):
+        accepted = original(sid, events, **kwargs)
         calls.append(list(events))
+        return accepted
 
     monkeypatch.setattr(module, "_append_events_sync", record)
     return calls
@@ -204,13 +205,13 @@ async def test_delegated_transient_commit_failure_surfaces_and_retries_batch(moc
     original = module._append_events_sync
     failures = []
 
-    def fail_first_full_batch(sid, events):
+    def fail_first_full_batch(sid, events, **kwargs):
         if not failures and len(events) == store.STREAM_BATCH_LIMIT:
             failures.append([e.seq for e in events])
             if committed:
-                original(sid, events)  # The commit landed; only its acknowledgement was lost.
+                original(sid, events, **kwargs)  # The commit landed; only its acknowledgement was lost.
             raise RuntimeError("commit rejected")
-        original(sid, events)
+        return original(sid, events, **kwargs)
 
     monkeypatch.setattr(module, "_append_events_sync", fail_first_full_batch)
     loop = _loop(store)
@@ -237,11 +238,11 @@ async def test_delegated_persistent_commit_failure_leaves_no_phantom_events(mock
     original = module._append_events_sync
     broken = []
 
-    def fail_from_first_batch(sid, events):
+    def fail_from_first_batch(sid, events, **kwargs):
         if broken or len(events) == store.STREAM_BATCH_LIMIT:
             broken.append(len(events))
             raise RuntimeError("database unavailable")
-        original(sid, events)
+        return original(sid, events, **kwargs)
 
     monkeypatch.setattr(module, "_append_events_sync", fail_from_first_batch)
     loop = _loop(store)

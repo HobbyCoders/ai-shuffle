@@ -55,6 +55,8 @@ class RewindResult:
     messages_removed: int = 0
     remaining_user_turns: Optional[int] = None  # User message count after truncation
     error: Optional[str] = None
+    # A fluid rewind's claim on the session, for the re-seed that completes it.
+    writer_generation: Optional[int] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

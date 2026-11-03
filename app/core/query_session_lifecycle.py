@@ -8,6 +8,7 @@ import asyncio
 import logging
 from typing import Optional
 
+from app.core.provider import session_admission
 from app.core.session_pool import get_session_pool
 
 logger = logging.getLogger(__name__)
@@ -48,12 +49,18 @@ def _reap_task_killed(session_id: str, task_id: str, *, source: str | None = Non
 
 
 async def interrupt_session(session_id: str) -> bool:
-    """Interrupt an active streaming session.
+    """Interrupt an active streaming session, or the turn waiting for the chat.
 
-    This calls the adapter's interrupt(), which signals the provider to stop
+    True means a turn has this Stop. A waiting turn keeps it wherever it ends up
+    running, and needs no engine yet, unless the turn holding the chat is the one to stop.
+
+    Otherwise this calls the adapter's interrupt(), which signals the provider to stop
     processing. This is more reliable than just cancelling the
     asyncio task, which only takes effect at the next await point.
     """
+    if session_admission.stop_waiting_turn(session_id):
+        return True
+
     # Use peek() to avoid promoting to MRU — interrupt is a read-only check
     state = get_session_pool().peek(session_id)
     if not state:

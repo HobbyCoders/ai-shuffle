@@ -11,13 +11,14 @@ Rewind uses persisted transcript/checkpoint services rather than terminal parsin
 
 import asyncio
 import logging
-from typing import Optional, List
+from typing import Any, Optional, List
 from fastapi import APIRouter, HTTPException, Depends, Request
 from pydantic import BaseModel
 
 from app.core.detached_tasks import spawn_detached
+from app.core.provider import session_admission
 from app.db import database
-from app.db.async_database import run_sync
+from app.db.async_database import run_maintenance, run_sync
 from app.api.auth import require_auth
 from app.api.sessions import check_session_access, check_transcript_access
 from app.api.common import resolve_project_path
@@ -46,6 +47,10 @@ from app.core.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+# How long a rewind waits for the reply it stopped to finish saving. Past this the
+# turn is stuck (a slow client holding its stream, a connect that has not returned).
+_REWIND_STOP_WAIT_SECONDS = 15.0
 
 router = APIRouter(
     prefix="/api/v1/commands",
@@ -636,22 +641,50 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
     - include_response: Keep Claude's response to target message
     """
     # Authorize and route before inspecting local provider state or resolving a
-    # checkout. A mirrored session intentionally has no local resume pointer.
-    def _load_session():
-        session = database.get_session(session_id)
-        if not session:
-            raise HTTPException(status_code=404, detail="Session not found")
-
-        if http_request is not None:
-            check_session_access(http_request, session)
-
-        return session
-
-    session = await run_sync(_load_session)
+    # checkout. A mirrored session intentionally has no local resume pointer, and
+    # this install runs nothing for it, so a forwarded rewind holds no lease here.
+    session = await run_sync(_load_session_for_rewind, session_id, http_request)
     from app.api.rewind_owner import forward_rewind
     remote = await forward_rewind(session, "execute", request.model_dump())
     if remote is not None:
         return RewindResponseV2.model_validate(remote)
+
+    async def rewind() -> Any:
+        try:
+            lease = await session_admission.begin_rewind(session_id)
+        except session_admission.SessionBusyError:
+            return RewindResponseV2(
+                success=False,
+                message="Rewind refused",
+                error="Another rewind of this chat is still running. Try again in a moment.",
+            )
+        try:
+            return await _execute_rewind(session_id, request, http_request, lease)
+        finally:
+            session_admission.close(lease)
+
+    # Its writes run on threads a cancelled request cannot stop, so a rewind holds
+    # the chat until it has finished, even if the caller has gone.
+    return await session_admission.finish_unattended(rewind())
+
+
+def _load_session_for_rewind(session_id: str, http_request: Optional[Request]) -> dict:
+    session = database.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if http_request is not None:
+        check_session_access(http_request, session)
+    return session
+
+
+async def _execute_rewind(
+    session_id: str,
+    request: RewindRequestV2,
+    http_request: Optional[Request],
+    lease: session_admission.Lease,
+):
+    # Read again: an earlier rewind may have finished while this one waited.
+    session = await run_sync(_load_session_for_rewind, session_id, http_request)
 
     if request.target_not_sent_id:
         return await run_sync(_restore_unsent_message, session_id, request.target_not_sent_id)
@@ -791,7 +824,12 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
     # pool entry first guarantees the transcript is quiescent; the next turn
     # resumes a fresh client from the truncated file. Best-effort: an eviction hiccup must not
     # abort a rewind the user explicitly requested.
+    #
+    # A running reply is stopped by this, as it always was. The lease keeps a new
+    # turn from starting meanwhile, and the wait below lets the stopped turn save
+    # what it has first, or the rows it saves would land after the rewind's cut.
     if request.restore_chat or request.restore_files:
+        stopping = session_admission.take_for_rewind(lease)
         try:
             pool = get_session_pool()
             if pool.contains(session_id):
@@ -805,6 +843,12 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
                 f"Rewind pool eviction failed for session {session_id}: {evict_err}",
                 exc_info=True,
             )
+        if stopping is not None:
+            try:
+                await asyncio.wait_for(stopping.exited.wait(), timeout=_REWIND_STOP_WAIT_SECONDS)
+            except asyncio.TimeoutError:
+                # Its writes are fenced by the claim below, so going on is safe.
+                logger.warning(f"Rewind of session {session_id} went on without the turn ending")
 
     # File restore is not supported. It relied on the Agent SDK resuming the
     # session to replay file checkpoints, and nothing drives the CLI through the
@@ -849,7 +893,7 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
                 exc_info=True,
             )
 
-        fluid_result = await asyncio.to_thread(
+        fluid_result = await run_maintenance(
             rewind_fluid_session,
             sdk_session_id,
             request.target_uuid,
@@ -904,7 +948,8 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
             # (nothing stored to re-seed). Best-effort: a failure downgrades to
             # the divergence warning below, it never fails the rewind.
             reseed_result = await asyncio.to_thread(
-                reseed_delegated_cli_session, sdk_session_id, working_dir
+                reseed_delegated_cli_session, sdk_session_id, working_dir,
+                generation=fluid_result.writer_generation,
             )
             logger.info(
                 f"Fluid rewind CLI re-seed: session={session_id}, "

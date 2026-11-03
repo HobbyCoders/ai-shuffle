@@ -1,4 +1,5 @@
 """Reproduce a local-only resume ID disappearing at the sync boundary."""
+import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
@@ -6,6 +7,7 @@ import pytest
 from fastapi import HTTPException
 
 from app.api import commands, rewind_owner
+from app.core.provider import session_admission
 from app.db import database, session_events
 from app.network import catalog, control, engine
 from tests.core.network.harness import converge, join
@@ -145,6 +147,35 @@ async def test_access_checked_before_forwarding(pair, monkeypatch):
         with pytest.raises(HTTPException):
             await commands.execute_rewind("s-rewind", commands.RewindRequestV2(), http_request=object())
     call.assert_not_awaited()
+
+
+async def test_a_rewind_forwarded_to_its_owner_holds_nothing_here(pair, monkeypatch):
+    owner, mirror, sdk, served = pair
+    held = []
+    async def forward(session, operation, params=None):
+        held.append(("s-rewind" in session_admission._rewinds, "s-rewind" in session_admission._holders))
+        return commands.RewindResponseV2(success=True, message="done by the owner").model_dump()
+    monkeypatch.setattr(rewind_owner, "forward_rewind", forward)
+    with mirror.active():
+        result = await commands.execute_rewind("s-rewind", commands.RewindRequestV2(target_uuid="n6"))
+    assert result.success and result.message == "done by the owner"
+    assert held == [(False, False)]
+
+
+async def test_a_rewind_that_waited_acts_on_the_chat_as_it_is_then(pair):
+    owner, mirror, sdk, served = pair
+    with owner.active():
+        earlier = await session_admission.begin_rewind("s-rewind")
+        waiting = asyncio.ensure_future(commands.execute_rewind(
+            "s-rewind", commands.RewindRequestV2(target_uuid="n6", include_response=False)))
+        await asyncio.sleep(0.05)
+        assert not waiting.done()
+        database.delete_session("s-rewind")
+        session_admission.close(earlier)
+        with pytest.raises(HTTPException) as gone:
+            await waiting
+        assert gone.value.status_code == 404
+        assert load_fluid_path(sdk)[-1]["node_id"] == "n7"
 
 
 async def test_replication_failure_does_not_repeat_successful_rewind(pair, monkeypatch):

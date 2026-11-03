@@ -403,6 +403,8 @@ async def lifespan(app: FastAPI):
             pass
         except Exception:
             logger.exception("Background task %s failed during shutdown", task.get_name())
+    from app.core.provider import session_admission
+    await session_admission.stop_unattended()
     if plugin_task is not None:
         await stop_plugin_auto_update(plugin_task)
     if monitor_task is not None:

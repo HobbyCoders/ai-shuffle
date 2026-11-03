@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import app.core.query_engine as qe
+from app.core.provider import session_admission
 from tests.core.engine_harness import StubPool, stream_response
 
 
@@ -121,6 +122,7 @@ def engine_patches(
     if profile is ...:
         profile = {"id": "claude-code", "config": {}}
     stack.enter_context(patch.object(qe, "get_profile", return_value=profile))
+    stack.enter_context(patch.object(session_admission, "get_session_pool", return_value=pool))
 
     calls: List[tuple] = []
 

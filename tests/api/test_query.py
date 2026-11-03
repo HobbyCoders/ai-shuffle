@@ -15,6 +15,8 @@ import json
 import pytest
 from unittest.mock import AsyncMock, patch
 
+from app.core.provider.session_admission import SessionBusyError, SessionReplacedError
+
 
 # =============================================================================
 # Test Module Imports
@@ -1530,3 +1532,78 @@ class TestErrorResponseFormat:
         assert exc.status_code == 500
         assert "Query execution failed" in exc.detail
         assert "Connection timeout" in exc.detail
+
+
+# =============================================================================
+# A chat that is busy, or was taken over, is the caller's next step
+# =============================================================================
+
+
+class TestSessionConflicts:
+    """Each is a 409 with the explanation, never a bare 500."""
+
+    @pytest.mark.parametrize("failure", [
+        SessionBusyError(),
+        SessionReplacedError(),
+        SessionReplacedError(SessionReplacedError.REWOUND),
+    ], ids=["busy", "another-copy", "rewound"])
+    @pytest.mark.asyncio
+    async def test_one_shot_query(self, failure):
+        from fastapi import HTTPException
+        from app.api.query import one_shot_query
+        from app.core.models import QueryRequest
+
+        with patch("app.api.query.require_api_key"), \
+                patch("app.api.query.require_claude_auth"), \
+                patch("app.core.query_engine.execute_query", new=AsyncMock(side_effect=failure)):
+            with pytest.raises(HTTPException) as exc_info:
+                await one_shot_query(
+                    QueryRequest(prompt="Hi", profile="p"), {"id": "u", "profile_ids": ["p"]},
+                )
+        assert exc_info.value.status_code == 409
+        assert exc_info.value.detail == str(failure)
+
+    @pytest.mark.asyncio
+    async def test_background_start_refused_while_busy(self):
+        from fastapi import HTTPException
+        from app.api.query import start_conversation
+        from app.core.models import ConversationRequest
+
+        with patch("app.api.query.require_api_key"), \
+                patch("app.api.query.require_claude_auth"), \
+                patch("app.api.query._check_continued_session", new=AsyncMock()), \
+                patch("app.api.query.start_background_query",
+                      new=AsyncMock(side_effect=SessionBusyError())):
+            with pytest.raises(HTTPException) as exc_info:
+                await start_conversation(
+                    ConversationRequest(prompt="Hi", profile="p", session_id="s"),
+                    {"id": "u", "profile_ids": ["p"]},
+                )
+        assert exc_info.value.status_code == 409
+        assert exc_info.value.detail == SessionBusyError.MESSAGE
+
+    @pytest.mark.parametrize("error,code,detail", [
+        (SessionReplacedError.ANOTHER_COPY, 409, SessionReplacedError.ANOTHER_COPY),
+        (SessionReplacedError.REWOUND, 409, SessionReplacedError.REWOUND),
+        (SessionBusyError.MESSAGE, 409, SessionBusyError.MESSAGE),
+        ("the model refused", 500, "Conversation failed"),
+    ], ids=["another-copy", "rewound", "busy", "other-failure-stays-private"])
+    @pytest.mark.asyncio
+    async def test_conversation_reads_it_from_the_recorded_turn(self, mock_db, error, code, detail):
+        from fastapi import HTTPException
+        from app.api.query import conversation
+        from app.core.models import ConversationRequest
+
+        with patch("app.api.query.require_api_key"), \
+                patch("app.api.query.require_claude_auth"), \
+                patch("app.core.turn_manager.submit_async", new=AsyncMock(return_value="t")), \
+                patch("app.core.turn_manager.wait_session_idle", new=AsyncMock(return_value=True)), \
+                patch("app.core.turn_outcome.final_turn_outcome",
+                      return_value={"usage": {}, "error": error, "interrupted": False}):
+            with pytest.raises(HTTPException) as exc_info:
+                await conversation(
+                    ConversationRequest(prompt="Hi", profile="default"),
+                    {"id": None, "profile_ids": ["default"]},
+                )
+        assert exc_info.value.status_code == code
+        assert exc_info.value.detail == detail
