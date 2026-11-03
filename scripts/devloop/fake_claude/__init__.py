@@ -85,6 +85,11 @@ def log_path(directory: Path) -> Path:
     return Path(directory) / "fake-claude.jsonl"
 
 
+def context_path(directory: Path) -> Path:
+    """The conversation as the fake's newest model call could read it."""
+    return Path(directory) / "fake-claude-context.txt"
+
+
 def is_fake(path: str | os.PathLike) -> bool:
     """Whether ``path`` is a shim :func:`install` wrote."""
     try:

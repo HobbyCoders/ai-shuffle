@@ -440,6 +440,10 @@ class ContextCompaction(Event):
     # Epoch intent budget frozen against the chosen session window. None on
     # legacy events; replay must not resize old folds when the limit changes.
     intent_pin_tokens: int | None = None
+    # What a model-written checkpoint keeps verbatim (the brief and delivered
+    # messages, bounded). Stored here because the nodes it came from can leave the
+    # path. None on every other event and on events from before render version 3.
+    summary_pin: dict[str, Any] | None = None
     # The delegated leg only: the compaction's stable transaction id. When
     # Fluid answered the compaction through the Claude mod's bridge, it is the
     # id that answer carried, and the ``CompactionCheckpoint`` written for it

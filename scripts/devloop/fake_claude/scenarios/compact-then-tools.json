@@ -1,0 +1,14 @@
+{
+  "description": "Claude Code compacts automatically early in one long turn, then the turn goes on through several tool calls: what did not fit the first restoration note has to arrive on those results.",
+  "steps": [
+    {
+      "compact": true,
+      "text": "Compacted first; more tools now.",
+      "tool_calls": [{"name": "Read", "input": {"file_path": "/fake/a.txt"}, "result_chars": 200}]
+    },
+    {"text": "Next.", "tool_calls": [{"name": "Read", "input": {"file_path": "/fake/b.txt"}, "result_chars": 200}]},
+    {"text": "Next.", "tool_calls": [{"name": "Read", "input": {"file_path": "/fake/c.txt"}, "result_chars": 200}]},
+    {"text": "Next.", "tool_calls": [{"name": "Read", "input": {"file_path": "/fake/d.txt"}, "result_chars": 200}]},
+    {"text": "Done."}
+  ]
+}

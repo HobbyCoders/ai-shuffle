@@ -247,6 +247,13 @@ def _is_cli_command(prompt: str) -> bool:
     return is_slash_command_prompt((prompt or "").strip())
 
 
+def _holds_full_memory(text: str) -> bool:
+    """Whether what a turn pins for the model holds a whole # Memory snapshot."""
+    from app.core.memory_reminder import memory_blocks
+
+    return any(kind == "full" for kind, _ in memory_blocks(text))
+
+
 # app permission_mode → fluid PermissionEngine approval policy: fluid's own
 # mode table, policy only. The app's native leg deliberately does NOT install
 # fluid's ``acceptEdits`` edit-tool allow rules (``fluid.permissions.modes``):
@@ -2478,7 +2485,9 @@ class HarnessAdapter(ProviderAdapter):
         ]
         return [
             RestorationSection(name=name, text=text, priority=priority,
-                               max_chars=bound, cuttable=cuttable)
+                               max_chars=bound, cuttable=cuttable,
+                               # The turn's own whole snapshot (_fresh_memory_note).
+                               replaced_by=_holds_full_memory if name == "memory" else None)
             for name, text, priority, bound, cuttable in parts if text
         ]
 
