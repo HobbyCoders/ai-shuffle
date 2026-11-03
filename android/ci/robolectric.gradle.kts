@@ -18,6 +18,11 @@ val robolectricJars = robolectricPins.keys.map { coordinate ->
         isTransitive = false
     }
 }
+// This executes inside the Gradle daemon, after systemProp.* installation.
+// Keep proof of the effective shared policy in debug and Play build logs.
+val downloadAttempts = System.getProperty("org.gradle.internal.repository.max.tentatives")
+val downloadBackoff = System.getProperty("org.gradle.internal.repository.initial.backoff")
+logger.lifecycle("Gradle dependency-download policy (daemon): max.tentatives=$downloadAttempts; initial.backoff=$downloadBackoff ms")
 val robolectricDependencyDir = layout.buildDirectory.dir("robolectric")
 val prepareRobolectricDependencies = tasks.register("prepareRobolectricDependencies") {
     group = "verification"

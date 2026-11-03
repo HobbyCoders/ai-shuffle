@@ -106,20 +106,18 @@ jobs:
 
       # Gradle caches these jars under ~/.gradle (covered by setup-java), not
       # Robolectric's uncached ~/.m2 runtime fetcher. Cold caches work too.
-      # Gradle 8.11.1 retries only transient HTTP/network failures: 5 attempts,
-      # 10/20/40/80s backoff. No test, compiler or lint task is retried.
+      # android/gradle.properties supplies the transient-transfer retry budget
+      # for preparation AND all subsequent Gradle invocations (including Play).
+      # No test, compiler or lint task is retried.
       - name: Resolve pinned Robolectric dependencies
-        run: >-
-          ./gradlew :app:prepareRobolectricDependencies
-          -Dorg.gradle.internal.repository.max.tentatives=5
-          -Dorg.gradle.internal.repository.initial.backoff=10000 --stacktrace
+        run: ./gradlew :app:prepareRobolectricDependencies --stacktrace
 
       - name: Unit tests and Android lint
         run: |
           python3 ci/test-apk-download.py
           python3 ci/test-publish-apk.py
           python3 ci/test-mobile-apk.py
-          ./gradlew testDebugUnitTest lintDebug --stacktrace
+          ./gradlew testDebugUnitTest lintDebug --stacktrace --info
 
       - name: Build and verify debug APK
         run: |

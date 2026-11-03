@@ -52,10 +52,22 @@ class RobolectricDependenciesTests(unittest.TestCase):
         self.assertLess(steps.index(prepare), steps.index(tests))
         self.assertNotIn("if", prepare)
         self.assertIn(":app:prepareRobolectricDependencies", prepare["run"])
-        self.assertIn("-Dorg.gradle.internal.repository.max.tentatives=5", prepare["run"])
-        self.assertIn("-Dorg.gradle.internal.repository.initial.backoff=10000", prepare["run"])
+        # Root systemProp settings reach every Gradle daemon, including the
+        # classpath downloads in debug tests/lint and signed Play bundle builds.
+        properties = (ROOT / "android/gradle.properties").read_text()
+        self.assertRegex(properties, r"(?m)^systemProp\.org\.gradle\.internal\.repository\.max\.tentatives=5$")
+        self.assertRegex(properties, r"(?m)^systemProp\.org\.gradle\.internal\.repository\.initial\.backoff=10000$")
+        script = (ROOT / "android/ci/robolectric.gradle.kts").read_text()
+        self.assertIn('System.getProperty("org.gradle.internal.repository.max.tentatives")', script)
+        self.assertIn('System.getProperty("org.gradle.internal.repository.initial.backoff")', script)
+        self.assertIn("Gradle dependency-download policy (daemon):", script)
+        play = (ROOT / ".github/workflows/android-play.yml").read_text()
+        self.assertIn("testDebugUnitTest lintDebug bundleRelease", play)
         self.assertNotIn("testDebugUnitTest", prepare["run"])
-        self.assertEqual(tests["run"].count("./gradlew testDebugUnitTest lintDebug --stacktrace"), 1)
+        self.assertEqual(tests["run"].count("testDebugUnitTest lintDebug"), 1)
+        self.assertIn("--info", tests["run"])  # Logs actual test-JVM properties and transfers.
+        self.assertIn('run([ctx.python, "android/ci/test-robolectric-dependencies.py"])',
+                      (ROOT / "scripts/local_ci.py").read_text())
         for step in (prepare, tests):
             self.assertNotIn("continue-on-error", step)
             self.assertNotIn("||", step["run"])

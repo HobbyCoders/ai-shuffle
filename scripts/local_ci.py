@@ -655,13 +655,14 @@ def workflows(ctx: Context) -> None:
 
 def android_play(ctx: Context) -> None:
     for script in ("test-version-name.py", "test-mobile-apk.py", "test-emulator-readiness.py",
-                   "test-instrumentation-parser.py", "test-ui-runner.py", "test-robolectric-dependencies.py"):
+                   "test-instrumentation-parser.py", "test-ui-runner.py"):
         run([ctx.python, f"android/ci/{script}"])
     # The workflow test parses each inline step with /bin/bash -n.
     if Path("/bin/bash").exists():
         run([ctx.python, "android/ci/test-play-workflow.py"])
     else:
         ctx.notes.append("Play workflow shell checks not run: they need /bin/bash (a Linux worker).")
+    run([ctx.python, "android/ci/test-robolectric-dependencies.py"])
 
 
 def update_reach(ctx: Context, *, head: str = "HEAD", branch: str | None = None) -> None:
