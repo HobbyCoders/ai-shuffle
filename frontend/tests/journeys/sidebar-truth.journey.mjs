@@ -20,6 +20,8 @@
 //   failed-claude     the delegated Claude engine: its CLI reports the error as
 //                     an ordinary end of turn
 //   failed-settled    settling a failed chat keeps Failed in the Settled lane
+//   failed-cleared    clearing a failed chat takes the failure with it, here
+//                     and after a reload
 //   stopped           the user's own Stop is not a failure
 //   project-once      a project is listed once after its first worktree chat
 //
@@ -391,6 +393,8 @@ const FAILED_UNOPENED = {
 		const { page, mark, variant, chat } = ctx;
 		await mark('start a turn that will fail, and leave the chat before it does');
 		await typeAndSend(page, `fail ${scriptTag(variant, 'error-500')}`);
+		// The send has left for this chat: pressing New any sooner sends it from there instead.
+		await waitChat(page, { streaming: 'true', messagesAtLeast: 3 }, { timeout: 30_000 });
 		await backToNew(page);
 		await mark('the error lands on a chat that is not open');
 		await expectFailedRow(ctx, chat.id);
@@ -444,6 +448,36 @@ const FAILED_SETTLED = {
 	allow: [{ kind: 'layout_shift', reason: 'the row changes lane, which is what this case sets up' }]
 };
 
+const FAILED_CLEARED = {
+	name: 'failed-cleared',
+	setup: failedSetup,
+	async act(ctx) {
+		const { page, mark, variant, chat } = ctx;
+		await typeAndSend(page, `fail ${scriptTag(variant, 'error-500')}`);
+		await waitStatus(page, chat.id, 'Failed');
+		await waitLane(page, chat.id, 'needs-you');
+		await mark('clear it: the error it showed is gone with the conversation');
+		await api(page, 'POST', `/sessions/${encodeURIComponent(chat.id)}/clear`);
+		await page.waitForFunction((selector) => {
+			const row = document.querySelector(selector);
+			return row && row.querySelector('.st')?.textContent?.trim() !== 'Failed' && !row.querySelector('.title .warn.failed');
+		}, CARD(chat.id), { timeout: 30_000 });
+		expect(await laneOf(page, chat.id) !== 'needs-you', 'a cleared chat no longer needs you');
+		await mark('reload');
+		await page.reload({ waitUntil: 'domcontentloaded' });
+		await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(() => done()))));
+		await mark('page reloaded: the list read agrees');
+		await page.locator('[data-ui-state="chat"]').waitFor({ timeout: 90_000 });
+		await showSidebar(page);
+		await page.locator(CARD(chat.id)).waitFor({ timeout: 30_000 });
+		expect(await statusWord(page, chat.id).catch(() => '') !== 'Failed', 'the reload does not bring the failure back');
+		expect(await laneOf(page, chat.id) !== 'needs-you', 'nor the lane');
+	},
+	allow: [
+		{ kind: 'layout_shift', reason: 'the row changes lane and the composer centres in the cleared chat, which is what this case sets up' }
+	]
+};
+
 const STOPPED = {
 	name: 'stopped',
 	setup: failedSetup,
@@ -485,7 +519,7 @@ function giveProjectARemote(status, projectId) {
 const PROJECT_ONCE = {
 	name: 'project-once',
 	allow: [
-		{ kind: 'failed_requests', status: 409, url: /\/git\/status(\?|$)/, reason: 'the new-session screen asks a just-linked project for a checkout it has not got yet (see new-worktree-session)' },
+		{ kind: 'failed_requests', status: 409, url: /\/git\/(status|diff-stats|fetch)(\?|$)/, reason: 'the new-session screen asks a just-linked project for a checkout it has not got yet (see new-worktree-session)' },
 		{ kind: 'errors', text: /No matching Git checkout exists/, reason: 'the same refused read, logged' },
 		{ kind: 'layout_shift', reason: 'the first send moves the composer down' }
 	],
@@ -513,14 +547,27 @@ const PROJECT_ONCE = {
 	async act({ page, mark, log, project, olderId }) {
 		const hero = page.getByRole('region', { name: 'New session' });
 		await mark('a worktree on a new branch, then the first message');
-		await hero.getByRole('button', { name: /Switch to a worktree$/ }).click();
-		await hero.getByRole('button', { name: /^Worktree branch:/ }).click();
-		const menu = page.getByRole('dialog', { name: 'Worktree branch' });
-		await menu.getByRole('button', { name: /New branch/ }).click();
+		// Giving a project a remote changes what the catalog calls it, and the screen can
+		// drop the chosen project while that settles (a finding of this journey, not what
+		// it is here for): choose again until the worktree branch holds.
 		const branch = `journey/${uniq()}`;
-		await page.getByPlaceholder('Enter a branch name').fill(branch);
-		await page.getByRole('button', { name: 'Continue', exact: true }).click();
-		await hero.getByRole('button', { name: `Worktree branch: ${branch}` }).waitFor({ timeout: 20_000 });
+		for (let attempt = 1; ; attempt++) {
+			try {
+				await pickProject(page, hero, project.name).catch(() => {});
+				await hero.getByRole('button', { name: /Switch to a worktree$/ }).click({ timeout: 10_000 });
+				await hero.getByRole('button', { name: /^Worktree branch:/ }).click({ timeout: 10_000 });
+				const menu = page.getByRole('dialog', { name: 'Worktree branch' });
+				await menu.getByRole('button', { name: /New branch/ }).click({ timeout: 10_000 });
+				await page.getByPlaceholder('Enter a branch name').fill(branch, { timeout: 10_000 });
+				await page.getByRole('button', { name: 'Continue', exact: true }).click({ timeout: 10_000 });
+				await hero.getByRole('button', { name: `Worktree branch: ${branch}` }).waitFor({ timeout: 10_000 });
+				break;
+			} catch (error) {
+				if (attempt === 3) throw error;
+				log(`the worktree choice did not hold (attempt ${attempt}): choosing again`);
+				await page.keyboard.press('Escape');
+			}
+		}
 		const token = `once-${uniq()}`;
 		await typeAndSend(page, `first message ${token}`);
 		await waitTurnSettled(page, { timeout: 120_000 });
@@ -553,5 +600,5 @@ const PROJECT_ONCE = {
 await runJourney({
 	name: 'sidebar-truth',
 	allow: [...DEV_INSTANCE_NOISE],
-	cases: [ROLLBACK_SETTLE, ROLLBACK_ARCHIVE, ROLLBACK_RENAME, ROLLBACK_DELETE, FAILED_OPEN, FAILED_UNOPENED, FAILED_CLAUDE, FAILED_SETTLED, STOPPED, PROJECT_ONCE]
+	cases: [ROLLBACK_SETTLE, ROLLBACK_ARCHIVE, ROLLBACK_RENAME, ROLLBACK_DELETE, FAILED_OPEN, FAILED_UNOPENED, FAILED_CLAUDE, FAILED_SETTLED, FAILED_CLEARED, STOPPED, PROJECT_ONCE]
 });

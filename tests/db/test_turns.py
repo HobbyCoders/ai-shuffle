@@ -892,6 +892,18 @@ def test_forgetting_failures_leaves_other_facts_of_the_rows_alone(mock_db):
     assert turns.get_turn(aborted["id"])["stop_reason"] == "conversation_reset"
 
 
+def test_clearing_a_conversation_forgets_its_failure(mock_db):
+    from app.db import database
+
+    database.create_session(session_id="cleared-chat", profile_id="default")
+    _ended("cleared-chat", "aborted", "error", "boom")
+    assert _failed("cleared-chat") == {"cleared-chat"}
+
+    database.clear_session_conversation("cleared-chat")
+
+    assert _failed("cleared-chat") == set()
+
+
 @pytest.mark.parametrize("result, expected", [
     ({"api_error_status": 529, "is_error": True}, "Provider returned status 529"),
     ({"is_error": True}, "Provider execution failed"),

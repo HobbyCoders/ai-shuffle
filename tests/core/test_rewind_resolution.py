@@ -394,7 +394,10 @@ def rewind_env(mock_db, monkeypatch):
     async def _broadcast(**kw):
         return None
     monkeypatch.setattr(
-        cmd, "sync_engine", SimpleNamespace(broadcast_session_rewound=_broadcast)
+        cmd, "sync_engine", SimpleNamespace(
+            broadcast_session_rewound=_broadcast,
+            broadcast_user_session_updated=_broadcast,
+        )
     )
     return state
 
