@@ -151,11 +151,36 @@ const nativeModel = {
 	}
 };
 
+const nativePinRetry = {
+	name: 'native-pin-retry',
+	viewports: ['desktop'],
+	async setup(ctx) {
+		await openNewChat(ctx, { project: PROJECT });
+		await pickAccess(ctx.page, 'Bypass');
+	},
+	async act({ page, mark, variant, log }) {
+		const token = `native-pin-retry-${uniq()}`;
+		await mark('request a specific native version, then retry its family');
+		await typeAndSend(page, `${token} Use Opus 4.7 for the new chat. ${fakeAiTag(variant, 'tool-native-model-override')}`);
+		await page.getByText('Reply yes or no in the message box.', { exact: false }).waitFor({ timeout: 20_000 });
+		await mark('decline the current-family substitution');
+		await typeAndSend(page, 'no');
+		await waitTurnSettled(page, { text: 'Native model checks complete.', messagesAtLeast: 2 });
+		const parent = await api(page, 'GET', `/sessions/${await chatIdByToken(page, token)}`);
+		const results = parent.messages.filter((m) => m.tool_name === 'StartSession' && m.toolResult);
+		expect(results.length === 4, `three pin refusals and one denied family retry: ${JSON.stringify(results)}`);
+		expect(results.every((r) => r.toolStatus === 'error'), 'no start bypassed the owner prompt');
+		expect(/owner declined/.test(results[3].toolResult), 'the family retry required the owner agreement');
+		expect(/current version/.test(results[0].toolResult) && /agreement/.test(results[0].toolResult), 'pin refusal explains current-family substitution');
+		log('a version-pinned owner request did not silently authorize the current family');
+	}
+};
+
 await runJourney({
 	name: 'tool-cards',
 	recorder: {
 		selectors: [STOP_SELECTOR, 'worklog=[role="region"][aria-label="Work log"]']
 	},
-	cases: [toolCase('bash'), toolCase('multi'), workerFollowup, nativeModel],
+	cases: [toolCase('bash'), toolCase('multi'), workerFollowup, nativeModel, nativePinRetry],
 	allow: [...DEV_INSTANCE_NOISE]
 });

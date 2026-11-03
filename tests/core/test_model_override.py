@@ -67,6 +67,22 @@ def test_full_names_count_even_when_a_word_is_shared(model, text):
     assert mo.named_by_user(model, [text], CATALOG)
 
 
+@pytest.mark.parametrize("family", ["opus", "sonnet", "haiku", "fable"])
+@pytest.mark.parametrize("spelling, before, after", [
+    ("{family} 4.7", [], ["4", "7"]),
+    ("{family}-4-7", [], ["4", "7"]),
+    ("claude-{family}-4-7", ["claude"], ["4", "7"]),
+    ("{family}[1m]", [], ["1m"]),
+    ("{family} v4.7", [], ["v4", "7"]),
+])
+def test_version_qualified_family_words_do_not_name_the_current_alias(family, spelling, before, after):
+    text = spelling.format(family=family)
+    assert mo._tokens(text) == [*before, family, *after]
+    assert not mo.named_by_user(family, [f"Use {text} for the review"], CATALOG)
+    assert not mo.memory_names(family, f"Route reviews to {text}", CATALOG)
+    assert mo.named_by_user(family, [f"Use {text}; use {family} for this instead"], CATALOG)
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -179,6 +195,17 @@ async def test_stored_legacy_settings_and_profile_pins_still_start_without_an_ov
         from app.core.model_registry import resolve_api_model_id
         assert resolve_api_model_id(stored) == {"opus": "claude-opus-5", "sonnet": "claude-sonnet-5"}[expected]
     assert prompts == []
+
+
+@pytest.mark.parametrize("wording", ["claude-opus-4-7", "Claude Opus 4.7"])
+def test_native_shaped_provider_names_keep_the_credential_refusal(world, monkeypatch, wording):
+    world[0].create_model_provider("relay", "Relay", "openai", "https://example.invalid/v1",
+        models=[{"id": "claude-opus-4-7", "label": "Claude Opus 4.7"}])
+    monkeypatch.setattr(td, "_credential_gap", lambda provider:
+                        "Relay has no working credential." if provider == "relay" else None)
+    with pytest.raises(ValueError, match="Relay has no working credential") as refused:
+        mo.resolve(wording)
+    assert "For native Claude" not in str(refused.value)
 
 
 def test_public_model_rules_offer_native_families_not_version_pins(world):
@@ -649,17 +676,17 @@ async def test_the_owners_sentence_names_opus_for_an_unpinned_agent(unpinned, so
     assert prompts == []
 
 
-@pytest.mark.parametrize("text", [
-    OWNER_SENTENCE,
-    "use opus",
-    "run them on Opus 4",
-    "OPUS sub-agents please",
-    "spin up opus-powered agents",
-    "Claude Opus for the reviewers",
-    "claude-opus-5",
+@pytest.mark.parametrize("text, named", [
+    (OWNER_SENTENCE, True),
+    ("use opus", True),
+    ("run them on Opus 4", False),
+    ("OPUS sub-agents please", True),
+    ("spin up opus-powered agents", True),
+    ("Claude Opus for the reviewers", True),
+    ("claude-opus-5", False),
 ])
-def test_ordinary_phrasings_of_opus_count_as_named(unpinned, text):
-    assert mo.named_by_user("opus", [text])
+def test_opus_phrasings_distinguish_the_current_family_from_a_pin(unpinned, text, named):
+    assert mo.named_by_user("opus", [text]) is named
 
 
 @pytest.mark.parametrize("text", [
@@ -1012,6 +1039,133 @@ async def _start(args, sender="caller"):
 
 
 ARGS = {"title": "Review", "prompt": "Review the change", "request_id": "r1"}
+
+
+async def _native_call(entry, model, request_id):
+    if entry == "start":
+        outcome = await _start({**ARGS, "model": model, "request_id": request_id})
+        return not outcome.is_error, outcome.text
+    result = await _task({"agent": "native-retry", "model": model})
+    return result["ok"], result.get("error", "")
+
+
+def _native_request(chats, entry, source, wording):
+    chats[0].create_profile("native-retry", "Native retry", None, {"model": "sonnet"})
+    sid = "caller" if entry == "start" else "parent"
+    text = f"Use {wording} for the review"
+    if source == "memory":
+        from tests.core.test_model_override_memory import _save
+        _save(f"Route reviews to {wording}")
+        text = "Start the review"
+    _turn(sid, "user", text, profile="agent" if entry == "start" else "caller")
+    return sid
+
+
+@pytest.mark.parametrize("entry", ["start", "task"])
+@pytest.mark.parametrize("source", ["owner", "memory"])
+@pytest.mark.parametrize("wording", ["Opus 4.7", "opus-4-7", "claude-opus-4-7", "opus[1m]"])
+async def test_refused_pin_then_family_retry_requires_owner_agreement(chats, entry, source, wording):
+    _, seen, prompts, answer = chats
+    _native_request(chats, entry, source, wording)
+    before = len(sessions.get_sessions(limit=100))
+    ok, error = await _native_call(entry, "claude-opus-4-7", "pin")
+    assert not ok and "current version" in error and "agreement" in error
+    assert not prompts and not seen
+    ok, error = await _native_call(entry, "opus", "family-denied")
+    assert not ok, error
+    assert len(prompts) == 1 and not seen
+    assert len(sessions.get_sessions(limit=100)) == before
+    answer["result"] = PermissionResultAllow(updated_input={})
+    ok, error = await _native_call(entry, "opus", "family-approved")
+    assert ok, error
+    assert len(prompts) == 2
+    if entry == "task":
+        assert seen[0]["model_id"] == "opus"
+    else:
+        assert sessions.get_session(json.loads(error)["session_id"])["model"] == "opus"
+
+
+@pytest.mark.parametrize("entry", ["start", "task"])
+@pytest.mark.parametrize("source", ["owner", "memory"])
+@pytest.mark.parametrize("wording", ["Opus", "opus"])
+async def test_unqualified_family_still_authorizes_the_real_start(chats, entry, source, wording):
+    _native_request(chats, entry, source, wording)
+    ok, error = await _native_call(entry, "opus", "plain-family")
+    assert ok, error
+    assert not chats[2]
+
+
+@pytest.mark.parametrize("source", ["owner", "memory"])
+@pytest.mark.parametrize("wording, needs_prompt", [("claude-opus-4-7", True), ("Opus 4.7", True), ("opus", False)])
+async def test_swarm_pin_refusal_does_not_authorize_a_family_retry(chats, monkeypatch, source, wording, needs_prompt):
+    from unittest.mock import AsyncMock
+    from app.core import swarm, provider_agent, turn_scheduler
+    from app.core.task_registry import task_registry
+
+    _, seen, prompts, _ = chats
+    _native_request(chats, "task", source, wording)
+    for name in ("coordinators", "workers", "worker_jobs", "_locks"):
+        monkeypatch.setattr(swarm, name, {})
+    monkeypatch.setattr(swarm, "persist", AsyncMock())
+    monkeypatch.setattr(turn_scheduler, "on_task_terminal", AsyncMock())
+    monkeypatch.setattr(td, "_await_worker_registration", AsyncMock(return_value=True))
+
+    async def worker(**kwargs):
+        seen.append(kwargs)
+        wid = kwargs["worker_session_id"]
+        await provider_agent._notify_caller_terminal("parent", wid, wid, "completed", "done")
+        return WorkerOutcome(ok=True, session_id=wid, report="done")
+
+    monkeypatch.setattr(provider_agent, "dispatch_worker", worker)
+    ctx = ToolCtx(extra={"task_dispatch": td.make_fluid_dispatcher("parent", "caller", None)})
+
+    async def run(model):
+        outcome = await swarm.make_handler(lambda: "parent")({"action": "start", "tasks": [
+            {"id": "review", "agent": "native-retry", "prompt": "go", "model": model}]}, ctx)
+        assert not outcome.is_error, outcome.text
+        coordinator = swarm.coordinators["parent"]
+        key = outcome.background_task.task_id
+        await coordinator.jobs[key]
+        return coordinator.snapshot(key)
+
+    try:
+        first = await run("claude-opus-4-7")
+        assert first["status"] == "failed" and not prompts and not seen
+        retry = await run("opus")
+        assert retry["status"] == ("failed" if needs_prompt else "completed"), retry
+        assert len(prompts) == int(needs_prompt)
+        assert len(seen) == int(not needs_prompt)
+    finally:
+        task_registry.clear_session("parent")
+
+
+@pytest.mark.parametrize("entry", ["start", "task"])
+async def test_new_unversioned_family_receipts_still_survive_history_retention(chats, monkeypatch, entry):
+    sid = _native_request(chats, entry, "owner", "opus")
+    assert (await _native_call(entry, "opus", "first-family"))[0]
+    assert mo._has_named(sid, "opus")
+    monkeypatch.setattr(mo, "_find_named", lambda *args, **kwargs:
+                        pytest.fail("a repaired naming receipt must not re-scan retained history"))
+    ok, error = await _native_call(entry, "opus", "saved-family")
+    assert ok, error
+    assert not chats[2]
+
+
+@pytest.mark.parametrize("entry", ["start", "task"])
+async def test_old_native_naming_receipt_cannot_bypass_pin_agreement(chats, entry):
+    from app.db import interactions
+
+    sid = _native_request(chats, entry, "owner", "claude-opus-4-7")
+    assert mo._remember_named(sid, "opus", mo._user_evidence(sid)[0])
+    receipt = interactions.get_interaction(mo._named_id(sid, "opus"))
+    payload = receipt["payload"]
+    payload.pop("native_family_policy", None)  # receipt written by the old matcher
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE pending_interactions SET payload=%s WHERE id=%s",
+                              (json.dumps(payload), receipt["id"]))
+    ok, error = await _native_call(entry, "opus", "old-naming-receipt")
+    assert not ok, error
+    assert len(chats[2]) == 1 and not chats[1]
 
 
 @pytest.mark.parametrize("wording", ["gpt 6 astra", "prov:lane:GPT-6-ASTRA"])

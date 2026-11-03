@@ -267,9 +267,11 @@ def resolve(value: Any, leg: Optional[str] = None, *, runs_here: bool = True) ->
                 if available else "No eligible models are configured in this scope.")
         location = "on this worker" if runs_here else "from this worker's enabled registry"
         words = _tokens(text)
-        if not explicit and words and words[0] in {"claude", *model_values()}:
-            reason = ("For native Claude, use a family name (haiku, sonnet or opus). "
-                      "Explicit version pins, legacy ids and [1m] forms are not supported.")
+        if reason is None and not explicit and words and words[0] in {"claude", *model_values()}:
+            reason = ("For native Claude, use a family name (haiku, sonnet or opus); it runs "
+                      "that family's current version. Explicit version pins, legacy ids and [1m] "
+                      "forms are not supported. If the owner asked for a specific version, get "
+                      "their agreement before using a family name; never substitute after refusal.")
         raise ValueError(f"Model '{text}' cannot run {location}: "
                          f"{(reason or 'No matching model id or display name.')[:500]} {hint}")
     decoded = decode_provider_model(normalized)
@@ -347,8 +349,8 @@ def names_for(model: str, catalog: Optional[Dict[str, Tuple[str, ...]]] = None) 
     return tuple(full), tuple(words)
 
 
-def _mentions(text_tokens: Sequence[str], name: str) -> bool:
-    """Whether ``name`` (separators ignored) spans whole words of the text."""
+def _mentions(text_tokens: Sequence[str], name: str, *, unversioned: bool = False) -> bool:
+    """Whether ``name`` spans whole words, optionally without a version suffix."""
     target = "".join(_tokens(name))
     if not target:
         return False
@@ -359,6 +361,14 @@ def _mentions(text_tokens: Sequence[str], name: str) -> bool:
             if len(joined) >= len(target):
                 break
         if joined == target:
+            following = text_tokens[index + 1:index + 3]
+            if unversioned and following:
+                if following[0] in {"v", "version"}:
+                    following = following[1:]
+                # _tokens splits 4.7 / -4-7 into ["4", "7"], and [1m]
+                # into ["1m"]. Do not turn any of these into family consent.
+                if following and re.match(r"v?\d", following[0]):
+                    continue
             return True
     return False
 
@@ -366,10 +376,18 @@ def _mentions(text_tokens: Sequence[str], name: str) -> bool:
 def named_by_user(model: str, texts: Iterable[str],
                   catalog: Optional[Dict[str, Tuple[str, ...]]] = None) -> bool:
     """Whether any of ``texts`` names ``model``."""
+    from app.core.model_registry import model_values
+
+    native_family = model in model_values()
     full, words = names_for(model, catalog)
     for text in texts:
         tokens = _tokens(text)
-        if any(_mentions(tokens, name) for name in full) or any(word in tokens for word in words):
+        if native_family:
+            # Neither full legacy ids nor their distinctive family word can
+            # authorize silently replacing a version the owner actually named.
+            if _mentions(tokens, model, unversioned=True):
+                return True
+        elif any(_mentions(tokens, name) for name in full) or any(word in tokens for word in words):
             return True
     return False
 
@@ -838,6 +856,7 @@ def _named_id(chat_id: str, model: str) -> str:
 
 def _has_named(chat_id: str, model: str) -> bool:
     from app.core.api_user_scope import viewer_api_user_id
+    from app.core.model_registry import model_values
     from app.db import interactions
 
     try:
@@ -847,6 +866,10 @@ def _has_named(chat_id: str, model: str) -> bool:
                 and row.get("state") == "answered" and row.get("answer") == {"decision": "allow"}
                 and isinstance(payload, dict) and payload.get("model") == model
                 and payload.get("source") == "own_message"
+                # Old native receipts may have mistaken a version pin for
+                # family consent. Re-scan history once under the repaired rule.
+                and (model not in model_values()
+                     or payload.get("native_family_policy") == "unversioned-v1")
                 and payload.get("api_user_id") == viewer_api_user_id(chat_id)
                 and bool(payload.get("turn_id")) and bool(payload.get("session_id")))
     except Exception:  # noqa: BLE001 — missing evidence never grants a switch
@@ -859,8 +882,12 @@ def _remember_named(chat_id: str, model: str, evidence: Dict[str, Any]) -> bool:
     from app.db.base import get_db
     from app.db.session_events import notify_session_write
 
+    from app.core.model_registry import model_values
+
     payload = {k: evidence[k] for k in ("turn_id", "session_id", "api_user_id")}
     payload.update(model=model, source="own_message")
+    if model in model_values():
+        payload["native_family_policy"] = "unversioned-v1"
     try:
         with get_db() as conn:
             conn.cursor().execute(
