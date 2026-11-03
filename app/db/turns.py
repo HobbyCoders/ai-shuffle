@@ -604,6 +604,7 @@ STOP_RECEIPT_KEY = "stop_receipt"
 # row re-queued from it: only that lifts a Stop on the install that holds it.
 PERSON_INPUT_KEY = "person_input"
 PERSON_INPUT_SOURCES = ("user", "queue", "resume")
+USER_STOP_SOURCES = ("user_stop", "user_stopped")
 
 
 def _park_identity(row: Dict[str, Any]) -> Dict[str, Any]:
@@ -1244,7 +1245,8 @@ def interrupt_turn(
                 (mode, bool(stop_background), session_id),
             )
         row = cursor.fetchone()
-        receipt = mode == "stop" and stop_background
+        # Only a person's Stop reads it: other sources end work, not input.
+        receipt = mode == "stop" and stop_background and source in (None, *USER_STOP_SOURCES)
         if row is not None and (source or receipt):
             # The UPDATE above owns the row lock. Publish provenance and what a
             # Stop applies to in this same transaction, before another runner

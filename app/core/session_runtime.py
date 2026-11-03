@@ -902,7 +902,7 @@ class SessionRuntime:
         from app.core.task_registry import task_registry
         self._stop_generation = task_registry.stop_generation(sid)
         self._claimed_turn = self.turn
-        if task_registry.is_user_stopped(sid) and self._stop_applies():
+        if task_registry.is_user_stopped(sid) and self._stop_reaches_this_turn():
             await asyncio.to_thread(turns_db.remove_queued_turn, tid, keep_unsent_words=True)
             return None
 
@@ -3353,6 +3353,12 @@ class SessionRuntime:
         if (self._stop_generation is None
                 or not task_registry.stop_invalidated(sid, self._stop_generation)):
             return False
+        return self._stop_reaches_this_turn()
+
+    def _stop_reaches_this_turn(self) -> bool:
+        from app.core.task_registry import task_registry
+
+        sid = self.session_id
         if not turns_db.outlives_stop(self._claimed_turn, task_registry.stop_input_cutoff(sid)):
             return True
         if task_registry.clear_user_stop(sid):

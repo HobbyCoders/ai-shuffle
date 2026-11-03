@@ -1842,8 +1842,8 @@ async def test_internal_interrupt_preserves_source_on_owning_runner(mock_db, sou
         "app.core.query_session_lifecycle.stop_all_background_tasks", new=stop_all,
     ):
         await session_runtime.SessionRuntime(turn).interrupt(escalation_timeout=0.02)
-    stop_all.assert_awaited_once_with("s9-internal", user_stop=user_stop, scope=ANY, receipt=ANY,
-                                      **({"source": source} if not user_stop else {}))
+    stop_all.assert_awaited_once_with("s9-internal", user_stop=user_stop, scope=ANY,
+                                      **({"source": source} if not user_stop else {"receipt": ANY}))
 
 
 async def test_interrupt_cancels_pending_prompts_before_signalling_the_sdk(mock_db):
