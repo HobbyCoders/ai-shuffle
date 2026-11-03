@@ -25,7 +25,7 @@
 	import { activeSession, backgroundPermissions } from '$lib/stores/active-session';
 	import { isTranscriptProseDismissed, observeSessionRows, proseQuestionDismissals, proseQuestionSessions } from '$lib/stores/session/prose-questions';
 	import { privateAccessPending } from '$lib/stores/chat-access';
-	import { needsYouCount as countNeedsYou, openSessionNeeds, sessionNeedsInput, attentionTitle, waitingTaskChips } from './session-card-data';
+	import { needsYouCount as countNeedsYou, openSessionNeeds, sessionNeedsInput, attentionTitle } from './session-card-data';
 	import { chatPreferences } from '$lib/stores/chatPreferences.svelte';
 	import { appMode } from '$lib/stores/sessionMode.svelte';
 	import { hasComposerDraft } from '$lib/stores/session/composer-suggestion';
@@ -511,9 +511,7 @@
 
 	// Everything waiting on you (spec §5: prompts, private access and the open
 	// session's prose question), shown in the tab title so a backgrounded tab
-	// still says when an agent is blocked on you. Task chips count on the rows
-	// the Needs you lane shows them for: a settled chat's chip is "not now", and
-	// a chip waits above the composer, so it adds no dot to the turn rail.
+	// still says when an agent is blocked on you.
 	// Other sessions count a prose question this tab saw when it left them.
 	// A list refresh carrying a newer user-message revision than the one seen
 	// when this tab left a questioning session means the user answered from
@@ -537,7 +535,7 @@
 				openNeeds,
 				groupToolCalls && $proseQuestionSessions.has(s.id)
 			)
-		) + (s.is_active ? waitingTaskChips(s) : 0)), 0)
+		)), 0)
 	);
 </script>
 

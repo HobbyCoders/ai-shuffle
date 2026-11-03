@@ -62,8 +62,6 @@
 		isLiveStatus,
 		isTurnLiveStatus,
 		isWorkCountingStatus,
-		taskChipWords,
-		waitingTaskChips,
 		sessionWorkMs,
 		formatElapsed,
 		formatAge,
@@ -154,12 +152,9 @@
 	const statusWord = $derived(runtimeStatusWord(status, compacting));
 	const statusTone = $derived(RUNTIME_STATUS_TONES[status]);
 	const attention = $derived(isAttentionStatus(status));
-	const taskChips = $derived(waitingTaskChips(session));
-	const taskChipText = $derived(taskChips > 0 ? taskChipWords(taskChips) : '');
 	// In-flight (working) rows that aren't the open session recede so the list
-	// triages at a glance; prompt-parked / PR / done rows, and a row holding a
-	// task chip for the owner, stay prominent.
-	const receded = $derived(status === 'working' && !active && taskChips === 0);
+	// triages at a glance; prompt-parked / PR / done rows stay prominent.
+	const receded = $derived(status === 'working' && !active);
 
 	// ── Git state ───────────────────────────────────────────────────────
 	// The session open in the main panel already has its checkout loaded by the
@@ -663,7 +658,7 @@
 				<span class="title">
 					{#if status === 'working'}
 						<span class="pip" aria-hidden="true"></span>
-					{:else if attention || taskChips > 0}
+					{:else if attention}
 						<TriangleAlert size={12} strokeWidth={2.2} class="warn" aria-hidden="true" />
 					{/if}{#if compact && (status === 'working' || attention)}<span class="sr-only">{`${statusWord}: `}</span>{/if}{title}
 				</span>
@@ -696,10 +691,6 @@
 					<span class="st {statusTone}">{statusWord}{#if status === 'working'}<span class="working-dots" aria-hidden="true">
 							<span></span><span></span><span></span>
 						</span>{/if}</span>
-					{#if taskChipText}
-						<span class="dot" aria-hidden="true"></span>
-						<span class="st amber" data-task-chip-count title={taskChipText}>{taskChipText}</span>
-					{/if}
 					{#if showPr}
 						<span class="dot" aria-hidden="true"></span>
 						{#if multiPr}
@@ -727,10 +718,6 @@
 				{#if !compact}
 					<span class="dot" aria-hidden="true"></span>
 					<span class="seg proj-seg"><span class="proj">{projectLabel}</span></span>
-				{/if}
-				{#if compact && taskChipText}
-					<span class="dot" aria-hidden="true"></span>
-					<span class="st amber" data-task-chip-count title={taskChipText}>{taskChipText}</span>
 				{/if}
 				{#if compact && stageWord}
 					<span class="dot" aria-hidden="true"></span>
@@ -994,9 +981,6 @@
 	/* A long PR label ellipsizes before it can push the timer off the line. */
 	.l2 .st.pr,
 	.l3 .st.pr { flex: 0 1 auto; min-width: 0; white-space: nowrap; }
-	/* So do a chip's words, or a live timer pushed out of view looks stopped.
-	   They give way first; the status word beside them is the row's truth. */
-	.st[data-task-chip-count] { flex: 0 1 auto; min-width: 0; }
 	/* Several PRs: each count keeps its state's tone; the chip opens the list. */
 	/* A button that reads as inline text: no box, no font or line-height of
 	   its own, so the row keeps its height in the normal and compact lines. */

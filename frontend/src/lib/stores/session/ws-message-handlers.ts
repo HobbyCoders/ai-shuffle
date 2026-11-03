@@ -26,7 +26,6 @@ import { feedController, OPTIMISTIC_STREAMING_ON } from './v2/feed-controller';
 import { pendingQueue, reconcilePendingPeerMessages } from './pending-queue';
 import { queueHydration } from './queue-hydration';
 import { composerSuggestion } from './composer-suggestion';
-import { taskChips } from './task-chips';
 import { swarms } from '../swarms';
 import { setPrivateAccessPending } from '../chat-access';
 import { contextChoiceFromWindow } from '$lib/constants/model-context';
@@ -191,9 +190,6 @@ const ROW_PATCHABLE_FIELDS: ReadonlySet<string> = new Set([
 	'pull_requests',
 	'parked_task_kind',
 	'has_running_tasks',
-	// A task chip was suggested or acted on (any chat, any device): sidebars
-	// are not watching that chat, so this is what lifts the row to Needs you.
-	'pending_task_chips',
 	'work_ms',
 	'work_started_at',
 	// A context-window pick made on another tab or device (#1895).
@@ -228,6 +224,13 @@ const STALE_COMPANION_FIELDS: ReadonlySet<string> = new Set([
 	// `is_remote` or pin, which the reload brings.
 	'owner_device_id',
 ]);
+
+/**
+ * A retired worker version can still send these. They mean nothing to this
+ * client: no patch, and no reload, since a change to one says nothing about the
+ * rest of the list.
+ */
+const RETIRED_ROW_FIELDS: ReadonlySet<string> = new Set(['pending_task_chips']);
 
 // ─── Factory ─────────────────────────────────────────────────────────────────
 
@@ -273,7 +276,8 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 	 * fields the frame does not carry (STALE_COMPANION_FIELDS).
 	 */
 	function applyRowUpdates(sessionId: string | undefined, updates: Record<string, unknown>): void {
-		const keys = Object.keys(updates);
+		const keys = Object.keys(updates).filter((key) => !RETIRED_ROW_FIELDS.has(key));
+		if (keys.length === 0 && Object.keys(updates).length > 0) return;
 		// Also for rows not loaded here: the remembered question is per session.
 		// Ordered by its `updated_at` when the server sent one, else in arrival
 		// order; a stamp from this tab's clock is excluded (noteLocalRowStamp).
@@ -478,10 +482,6 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 		const eventSessionId = data.session_id as string | undefined;
 		if (msgType === 'swarm.updated' || eventType === 'swarm.updated') {
 			swarms.receive(data.swarm ?? data.payload, eventSessionId);
-			return;
-		}
-		if (msgType === 'task_chips_changed') {
-			taskChips.receive(eventSessionId);
 			return;
 		}
 		if (msgType === 'composer_suggestion') {

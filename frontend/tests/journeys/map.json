@@ -167,17 +167,15 @@
 			]
 		},
 		{
-			"why": "background-task chips: the tray beside the composer, Start, failures, and chips across reloads and chat switches",
-			"journeys": ["task-chips"],
+			"why": "what waits on you: the Needs you lane and the tab title stay real prompts only, whatever an older worker still sends about suggested tasks",
+			"journeys": ["retired-task-chips"],
 			"globs": [
-				"frontend/src/lib/components/chat/TaskChipTray.svelte",
-				"frontend/src/lib/stores/session/task-chips.ts",
 				"frontend/src/lib/components/layout/session-card-data*",
 				"frontend/src/lib/components/layout/Sidebar.svelte",
 				"frontend/src/lib/components/layout/SessionCard.svelte",
-				"app/core/task_chips.py",
-				"app/db/task_chips.py",
-				"frontend/tests/journeys/task-chips.journey.mjs"
+				"frontend/src/lib/components/layout/AppPage.svelte",
+				"frontend/src/lib/stores/session/ws-message-handlers.ts",
+				"frontend/tests/journeys/retired-task-chips.journey.mjs"
 			]
 		},
 		{

@@ -190,53 +190,6 @@ describe('designedShifts (expectShift)', () => {
 		assert.deepEqual(designedShifts(recording([[0, 'state', 'bottom']]), [], [DESIGN], { partial: true }).problems, []);
 	});
 
-	describe('a chip arriving above the composer', () => {
-		const CHIP = { step: 'open', chips: [null, 'pending'], maxValue: 0.06, reason: 'designed' };
-		const arrival = [[0, 'state', 'bottom'], [10, 'mark', 'open'], [900, 'chips', 'pending'], [898, 'shift', { value: 0.05, sources: SLOT }]];
-
-		it('excuses that shift alone, though the composer stays docked', () => {
-			const judged = designedShifts(recording(arrival), [shiftAnomaly], [CHIP]);
-			assert.deepEqual(judged.problems, []);
-			assert.deepEqual(judged.anomalies, []);
-			assert.deepEqual([judged.excused[0].what, judged.excused[0].value], ['chips', 0.05]);
-		});
-
-		it('still flags shifts beside it that add up, however small each one is', () => {
-			const others = [1500, 1700, 1900, 2100, 2300, 2500].map((t) => [t, 'shift', { value: 0.049, sources: ['div.row in MessageArea'] }]);
-			const judged = designedShifts(recording([...arrival, ...others]), [shiftAnomaly], [CHIP]);
-			assert.equal(judged.anomalies.length, 1);
-			assert.match(judged.anomalies[0].message, /MessageArea/);
-		});
-
-		it('does not take a chat-layout shift away from the arrival', () => {
-			const late = [1500, 'shift', { value: 0.05, sources: SLOT }];
-			const judged = designedShifts(recording([...arrival, late]), [shiftAnomaly], [CHIP]);
-			assert.equal(judged.anomalies.length, 1);
-			assert.equal(judged.excused[0].value, 0.05);
-		});
-
-		it('fails an arrival larger than designed', () => {
-			const big = [[0, 'state', 'bottom'], [10, 'mark', 'open'], [900, 'chips', 'pending'], [902, 'shift', { value: 0.07, sources: SLOT }]];
-			const judged = designedShifts(recording(big), [shiftAnomaly], [CHIP]);
-			assert.match(judged.problems[0], /measured 0\.070/);
-			assert.equal(judged.anomalies.length, 1);
-		});
-
-		it('fails no arrival, and a tray that goes and comes back', () => {
-			assert.match(designedShifts(recording([[0, 'state', 'bottom'], [10, 'mark', 'open']]), [], [CHIP]).problems[0], /chips moved null → pending 0 times/);
-			const twice = [...arrival, [1000, 'chips', null], [1100, 'chips', 'pending']];
-			assert.match(designedShifts(recording(twice), [shiftAnomaly], [CHIP]).problems[0], /2 times/);
-		});
-
-		it('refuses a declaration naming no change, or both', () => {
-			checkExpectShift('c', [CHIP]);
-			assert.throws(() => checkExpectShift('c', [{ ...CHIP, chips: ['pending', 'pending'] }]), /composer or chips/);
-			assert.throws(() => checkExpectShift('c', [{ ...CHIP, chips: [null, null] }]), /composer or chips/);
-			assert.throws(() => checkExpectShift('c', [{ ...CHIP, composer: ['bottom', 'centre'] }]), /composer or chips/);
-			assert.throws(() => checkExpectShift('c', [{ step: 'open', maxValue: 0.06, reason: 'r' }]), /composer or chips/);
-		});
-	});
-
 	it('refuses a malformed declaration (no blanket allow through expectShift)', () => {
 		assert.throws(() => checkExpectShift('c', [{ step: 'open', composer: ['bottom', 'centre'], maxValue: 0.3 }]), /reason/);
 		assert.throws(() => checkExpectShift('c', [{ step: 'open', composer: ['bottom'], maxValue: 0.3, reason: 'r' }]), /composer/);

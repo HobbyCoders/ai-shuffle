@@ -234,36 +234,6 @@ function retireSupersededEdits(loadRequestId: number): void {
 	}
 }
 
-/**
- * The newest task chip count known for each chat, and when it was learned. Kept
- * apart from the row edits above, which are merged, re-applied and rolled back
- * with whole rows: any of that could bring back a count the server has moved on
- * from. Counts repeat (1, 0, 1), so only the order they were learned in says which
- * is newest. A list read started after a count knows more than it, because the
- * server reads the count after the change it reports. One started before knows less.
- * An entry never outranks a newer read, so old ones are harmless, and a rollback may
- * still need one for a row the list has since dropped. It holds one per chat seen.
- */
-const _chipCounts = new Map<string, { count: number | null; learnedAt: number }>();
-let _chipCountClock = 0;
-
-/** Rows as of `readAt`, each with the newest count known for it. */
-function withNewestChipCounts(rows: Session[], readAt: number): Session[] {
-	return rows.map(row => {
-		const known = _chipCounts.get(row.id);
-		if (known && known.learnedAt > readAt) {
-			return row.pending_task_chips === known.count ? row : { ...row, pending_task_chips: known.count };
-		}
-		_chipCounts.set(row.id, { count: row.pending_task_chips ?? null, learnedAt: readAt });
-		return row;
-	});
-}
-
-/** Put back a snapshot taken before a failed change, keeping the counts since. */
-function restoredRows(snapshot: Session[]): Session[] {
-	return withNewestChipCounts(snapshot, 0);
-}
-
 // ─── Commit Helpers ──────────────────────────────────────────────────────────
 
 function valueEqual(a: unknown, b: unknown): boolean {
@@ -434,7 +404,6 @@ function loadSessionsInternal(tagId?: string | null, pages?: number): Promise<vo
 
 async function fetchSessionList(tagId?: string | null, requestedPages?: number) {
 	const requestId = ++_loadSessionsRequestId;
-	const readAt = ++_chipCountClock;
 	// Resolved when the fetch starts, not when it was queued, so a page the
 	// user appended in between is included.
 	const pages = requestedPages ?? refreshPageCount(tagId ?? null);
@@ -491,7 +460,7 @@ async function fetchSessionList(tagId?: string | null, requestedPages?: number) 
 
 		// Re-apply optimistic local edits the server hasn't caught up with yet,
 		// then retire the ones this load is known to already carry.
-		const rows = applyPendingEdits(withNewestChipCounts(all, readAt));
+		const rows = applyPendingEdits(all);
 		retireSupersededEdits(requestId);
 
 		_loadedSessionPages = Math.max(INITIAL_SESSION_PAGES, pagesFetched);
@@ -528,7 +497,6 @@ async function loadMoreSessionsInternal() {
 	// "load more" is in flight (e.g. the settle reconciliation) invalidates the
 	// captured cursor, and appending the response would duplicate/stale rows.
 	const requestId = _loadSessionsRequestId;
-	const readAt = ++_chipCountClock;
 	_update(s => ({ ...s, sessionsLoadingMore: true }));
 	try {
 		let url = SESSION_LIST_BASE;
@@ -558,7 +526,7 @@ async function loadMoreSessionsInternal() {
 		// pulled in up front, ahead of its cursor position) are dropped —
 		// duplicate ids would break the sidebar's keyed lists.
 		const existingIds = new Set(_state.sessions.map(row => row.id));
-		const appended = applyPendingEdits(withNewestChipCounts(result.items.filter(row => !existingIds.has(row.id)), readAt));
+		const appended = applyPendingEdits(result.items.filter(row => !existingIds.has(row.id)));
 		_loadedSessionPages++;
 		// Same guard as the full load: a has_more without a cursor that moves
 		// would leave the shelf asking for the same page forever.
@@ -958,7 +926,7 @@ export const appData = {
 		} catch (err) {
 			// Rollback optimistic removal on error, then resync from server.
 			discardLocalEdits([sessionId]);
-			_update(s => ({ ...s, sessions: restoredRows(prevSessions), sessionsTotal: prevTotal }));
+			_update(s => ({ ...s, sessions: prevSessions, sessionsTotal: prevTotal }));
 			await appData.loadSessions();
 			throw err;
 		}
@@ -986,7 +954,7 @@ export const appData = {
 		} catch (err) {
 			// Roll the optimistic title change back and let the caller surface the error.
 			discardLocalEdits([sessionId]);
-			_update(s => ({ ...s, sessions: restoredRows(prevSessions) }));
+			_update(s => ({ ...s, sessions: prevSessions }));
 			throw err;
 		}
 	},
@@ -1004,15 +972,11 @@ export const appData = {
 				return { ...x, ...patch };
 			}),
 		}));
-		const { pending_task_chips: chipCount, ...fields } = patch;
-		if ('pending_task_chips' in patch) {
-			_chipCounts.set(sessionId, { count: chipCount ?? null, learnedAt: ++_chipCountClock });
-		}
-		if (found && Object.keys(fields).length > 0) {
+		if (found) {
 			// The push came FROM the server, so it is confirmed on arrival — but a
 			// list load that started before it must not commit the pre-patch row
 			// over it (W7). Re-applied until a load started from here on commits.
-			recordLocalEdit(sessionId, fields);
+			recordLocalEdit(sessionId, patch);
 			confirmLocalEdits([sessionId]);
 		}
 		return found;
@@ -1053,7 +1017,7 @@ export const appData = {
 		} catch (err) {
 			// Roll the optimistic change back and let the caller surface the error.
 			discardLocalEdits([sessionId]);
-			_update(s => ({ ...s, sessions: restoredRows(prevSessions) }));
+			_update(s => ({ ...s, sessions: prevSessions }));
 			throw err;
 		}
 	},
@@ -1081,7 +1045,7 @@ export const appData = {
 			await loadSessionsInternal(_state.sessionsTagFilter);
 		} catch (err) {
 			discardLocalEdits([sessionId]);
-			_update(s => ({ ...s, sessions: restoredRows(prevSessions) }));
+			_update(s => ({ ...s, sessions: prevSessions }));
 			archivedChats.mark(sessionId, !archived);
 			throw err;
 		}

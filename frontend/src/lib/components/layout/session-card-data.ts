@@ -89,25 +89,12 @@ export function isAttentionStatus(status: SessionCardStatus): boolean {
 	return status === 'needs_permission' || status === 'has_question' || status === 'await';
 }
 
-/** Which sidebar lane a row belongs to. An active row parked on a prompt, or
- *  holding a task chip only the owner can act on, goes to "Needs you"; a settled
- *  row always goes to Settled, even if the server still reports a wait (#2324)
- *  — settling is the user saying "not now". */
-export function sidebarGroup(status: SessionCardStatus, isActive: boolean, taskChips = 0): 'needs' | 'active' | 'settled' {
+/** Which sidebar lane a row belongs to. An active row parked on a prompt goes to
+ *  "Needs you"; a settled row always goes to Settled, even if the server still
+ *  reports a wait (#2324) — settling is the user saying "not now". */
+export function sidebarGroup(status: SessionCardStatus, isActive: boolean): 'needs' | 'active' | 'settled' {
 	if (!isActive) return 'settled';
-	return isAttentionStatus(status) || taskChips > 0 ? 'needs' : 'active';
-}
-
-/** Task chips waiting on the owner. Kept apart from the runtime status, which
- *  stays truthful (a chat with a chip is still Working or Done), and the chip
- *  list is the worker's, so a mirror reads the same count as the owner. */
-export function waitingTaskChips(s: Pick<Session, 'status'> & Partial<Pick<Session, 'pending_task_chips'>>): number {
-	return isArchived(s as Session) ? 0 : Math.max(0, s.pending_task_chips ?? 0);
-}
-
-/** The row's words for its waiting chips. */
-export function taskChipWords(count: number): string {
-	return count === 1 ? 'Task suggested' : `${count} tasks suggested`;
+	return isAttentionStatus(status) ? 'needs' : 'active';
 }
 
 /** The states that get a live-ticking timer — in-flight, including a session

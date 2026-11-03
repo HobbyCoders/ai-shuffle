@@ -67,7 +67,6 @@ import { ensureModelRegistryHydrated } from '$lib/constants/models.svelte';
 import { clampStandardCap, contextWindowForChoice, contextChoiceFromWindow, getModelContextControl, type ContextWindowChoice } from '$lib/constants/model-context';
 import { standardContextCap } from './session/context-window';
 import { clearSentQuestions } from './session/sent-questions';
-import { taskChips } from './session/task-chips';
 import { getDefaultModel, isFastModeCapable } from '$lib/constants/models';
 // Shared types
 import type {
@@ -577,9 +576,6 @@ const wsConn: WsConnection = createWsConnection({
 		// re-arms after a destroy()/init() cycle (disconnect() clears it) without ever
 		// creating a second interval.
 		startFeedReconcile();
-
-		// Chip frames are not replayed, so read the list again after any gap.
-		taskChips.refresh();
 
 		if (_state.sessionId) {
 			const sessionId = _state.sessionId;
