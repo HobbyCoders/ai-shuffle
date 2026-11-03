@@ -360,6 +360,21 @@
 			]
 		},
 		{
+			"why": "keep the existing Fast-mode journey reachable when its own test changes",
+			"journeys": ["fast-midturn"],
+			"globs": ["frontend/tests/journeys/fast-midturn.journey.mjs"]
+		},
+		{
+			"why": "owner memory questions and their replicated keep-both answers reach real session prompts",
+			"journeys": ["owner-memory-question"],
+			"globs": [
+				"fluid/fluid/codemode/preferences.py",
+				"fluid/fluid/codemode/routing.py",
+				"fluid/fluid/codemode/skills.py",
+				"fluid/fluid/tools/builtins/recall.py"
+			]
+		},
+		{
 			"why": "native harness context: the once-per-segment scratch reminder and the compactor's fold that keeps it",
 			"journeys": ["native-scratch-context"],
 			"globs": [
