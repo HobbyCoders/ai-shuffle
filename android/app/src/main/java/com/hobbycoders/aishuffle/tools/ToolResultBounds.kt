@@ -11,7 +11,7 @@ internal object ToolResultBounds {
     }
     fun fit(result: JSONObject): JSONObject {
         if (size(result) <= MAX_BYTES) return result
-        // Keep a useful, explicitly partial screen snapshot for queued AND realtime consumers.
+        // Keep a useful, explicitly partial screen snapshot for queued tool results.
         val nodes = result.optJSONArray("nodes")
         if (nodes != null && result.optBoolean("ok")) {
             result.put("truncated", true)

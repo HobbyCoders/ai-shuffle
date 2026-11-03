@@ -151,6 +151,10 @@ object DeviceToolsRuntime {
         session != null && session.accountId == target.accountId && session.hub == target.hubUrl
     }.getOrDefault(false)
 
+    // Shared by the production poller and lifecycle-ordering regression tests.
+    internal fun canExecute(epoch: Long): Boolean =
+        generation == epoch && !handoffInFlight && (activity.get() != null || hasCrossAppHost())
+
     private fun startPolling() {
         val app = context ?: return
         val target = server ?: return
@@ -174,7 +178,7 @@ object DeviceToolsRuntime {
                     try {
                         DeviceCommandPoller(journal, scopeId,
                             { path, body -> DeviceToolsApi.request(target, path, body) },
-                            { generation == currentGeneration && (activity.get() != null || hasCrossAppHost()) },
+                            { canExecute(currentGeneration) },
                             executor::execute, { mutableAvailability.value = "queue_full" }).pollOnce(enabled)
                     } finally {
                         finishHandoff(currentGeneration)

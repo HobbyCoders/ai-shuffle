@@ -217,6 +217,14 @@ async def execute(session_id, device_id, name, arguments, timeout=MAX_WAIT_SECON
             return _completed_outcome(settled_id, name, previous)
         return _stopped_outcome('device_timeout', previous)
     except CommandError as exc:
+        if command_id:
+            # Authorization can disappear after delivery or even after completion.
+            # Settle under the same row lock as timeout; never discard either fact.
+            previous = await asyncio.to_thread(queue.cancel, command_id, session_id)
+            settled_id, command_id = command_id, None
+            if previous and previous['status'] == 'completed':
+                return _completed_outcome(settled_id, name, previous)
+            return _stopped_outcome(str(exc), previous)
         return {'error': str(exc)}
     finally:
         if command_id:

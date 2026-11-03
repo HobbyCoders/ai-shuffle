@@ -197,12 +197,14 @@ def outcome(command_id, session_id):
         return {'status': row['status'], 'result': row['result']}
 
 
-def cancel(command_id, session_id):
+def cancel(command_id, session_id, *, undelivered=False):
     """Atomically stop delivery and return the prior outcome, including durable claim history.
 
     The row lock serializes with claim() and submit_result(): a pending cancellation
     cannot race into delivery, and a completed result winning the deadline is preserved.
     claimed_at survives expiry/capability cancellation, so only delivered work is uncertain.
+    Only the pending endpoint may pass undelivered=True, before returning a denied
+    claim to the phone. Completed work always retains its result and claim history.
     """
     with get_db() as conn:
         cur = conn.cursor()
@@ -211,9 +213,12 @@ def cancel(command_id, session_id):
         row = cur.fetchone()
         if row is None:
             return None
+        unsent_claim = undelivered and row['status'] != 'completed'
         previous = {'status': row['status'], 'result': row['result'],
-                    'claimed': row['claimed_at'] is not None}
-        if row['status'] in ('pending', 'claimed'):
-            cur.execute("""UPDATE mobile_tool_commands SET status='cancelled', arguments='{}'
-                WHERE id=%s AND session_id=%s""", (command_id, session_id))
+                    'claimed': row['claimed_at'] is not None and not unsent_claim}
+        if row['status'] in ('pending', 'claimed') or unsent_claim:
+            cur.execute("""UPDATE mobile_tool_commands SET
+                status=CASE WHEN status IN ('pending','claimed') THEN 'cancelled' ELSE status END,
+                arguments='{}', claimed_at=CASE WHEN %s THEN NULL ELSE claimed_at END
+                WHERE id=%s AND session_id=%s""", (unsent_claim, command_id, session_id))
         return previous

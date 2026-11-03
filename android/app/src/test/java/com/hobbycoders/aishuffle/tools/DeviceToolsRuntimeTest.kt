@@ -30,7 +30,10 @@ import java.lang.ref.WeakReference
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [28])
 class DeviceToolsRuntimeTest {
-    class ApprovalHost : NativeScreen()
+    class ApprovalHost : NativeScreen() {
+        var launches = 0
+        override fun startActivity(intent: Intent) { super.startActivity(intent); launches++ }
+    }
     class HandoffActivity : Activity() {
         override fun startActivity(intent: Intent) {
             super.startActivity(intent)
@@ -78,6 +81,72 @@ class DeviceToolsRuntimeTest {
             assertFalse(approved)
             assertFalse("NativeScreen must detach the execution host before resolving consent", stillAttached)
             assertTrue("The factual no-action result must survive pause shutdown", command.isActive)
+        }
+    }
+    private fun pumpUntil(condition: () -> Boolean) {
+        val until = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(5)
+        while (!condition() && System.nanoTime() < until) {
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            Thread.sleep(5)
+        }
+        assertTrue("Main-thread operation did not settle", condition())
+    }
+    @Test fun immediatePostBeforePauseBlocksTheBatchedCalendarEditor() = runBlocking {
+        Robolectric.buildActivity(ApprovalHost::class.java).also {
+            it.get().setTheme(R.style.Theme_AIShuffle)
+        }.setup().visible().use { controller ->
+            controller.windowFocusChanged(true)
+            host(controller.get())
+            val epoch = field("generation").getLong(null)
+            val expires = System.currentTimeMillis() + 20_000
+            val commands = JSONArray()
+                .put(JSONObject().put("id", "alarm").put("name", "set_alarm")
+                    .put("arguments", JSONObject().put("hour", 7).put("minute", 0)).put("expires_at", expires))
+                .put(JSONObject().put("id", "calendar").put("name", "create_calendar_event")
+                    .put("arguments", JSONObject().put("title", "Test").put("start_time", "2030-01-01T10:00:00Z"))
+                    .put("expires_at", expires))
+            val journal = CommandJournal(app.getSharedPreferences("post-before-pause", Context.MODE_PRIVATE))
+            val posted = mutableListOf<JSONObject>()
+            val poller = DeviceCommandPoller(journal, "scope", { path, body ->
+                if (path == "pending") JSONObject().put("commands", commands) else {
+                    assertTrue("This reproduction must POST before any lifecycle pause", DeviceToolsRuntime.hasAttachedActivity())
+                    posted.add(body!!.getJSONObject("result"))
+                    JSONObject().put("ok", true) // Immediate POST, no held response and no synchronous detach.
+                }
+            }, { DeviceToolsRuntime.canExecute(epoch) }, DeviceToolExecutor(app)::execute)
+            val work = CoroutineScope(Dispatchers.Main.immediate).async {
+                try { poller.pollOnce(true) } finally { DeviceToolsRuntime.finishHandoff(epoch) }
+            }
+            try {
+                pumpUntil { ToolApprovals.pending.value != null }
+                val dialog = org.robolectric.shadows.ShadowDialog.getLatestDialog() as androidx.appcompat.app.AlertDialog
+                val info = org.robolectric.util.ReflectionHelpers.getField<Any>(dialog.window!!.decorView, "mAttachInfo")
+                org.robolectric.util.ReflectionHelpers.setField(info, "mHasWindowFocus", true)
+                dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE).performClick()
+                controller.windowFocusChanged(true)
+                pumpUntil { work.isCompleted }
+                work.await()
+                assertEquals("Only the alarm UI may launch before onPause", 1, controller.get().launches)
+                assertEquals(listOf("launched_confirmation", "foreground_required"), posted.map { it.getString("status") })
+            } finally { work.cancel() }
+        }
+    }
+    @Test fun backgroundingLocationConsentIsNotAUserDenial() = runBlocking {
+        org.robolectric.Shadows.shadowOf(app).grantPermissions(android.Manifest.permission.ACCESS_COARSE_LOCATION)
+        Robolectric.buildActivity(ApprovalHost::class.java).also {
+            it.get().setTheme(R.style.Theme_AIShuffle)
+        }.setup().visible().use { controller ->
+            controller.windowFocusChanged(true)
+            host(controller.get())
+            val result = CoroutineScope(Dispatchers.Main.immediate).async {
+                DeviceToolExecutor(app).execute("get_location", JSONObject())
+            }
+            try {
+                pumpUntil { ToolApprovals.pending.value != null }
+                controller.pause()
+                pumpUntil { result.isCompleted }
+                assertEquals("foreground_required", result.await().getString("status"))
+            } finally { result.cancel() }
         }
     }
     @Test fun dialogFocusLossDoesNotMeanTheApprovalHostWasDetached() {

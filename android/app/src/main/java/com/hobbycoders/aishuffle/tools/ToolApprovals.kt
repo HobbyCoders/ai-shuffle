@@ -50,7 +50,14 @@ object ToolApprovals {
                     for ((which, approved) in listOf(AlertDialog.BUTTON_POSITIVE to true, AlertDialog.BUTTON_NEGATIVE to false)) {
                         shown.getButton(which).apply {
                             guardConsentTouch(this)
-                            setOnClickListener { resolve(activity, request.id, approved); shown.dismiss() }
+                            setOnClickListener {
+                                // An early Allow tap is not a denial. Wait for focus (or expiry)
+                                // rather than dismissing and letting onDismiss resolve false.
+                                if (resolve(activity, request.id, approved) ||
+                                    request.remainingMillis(System.currentTimeMillis(), SystemClock.elapsedRealtime()) == 0L) {
+                                    shown.dismiss()
+                                }
+                            }
                         }
                     }
                 }

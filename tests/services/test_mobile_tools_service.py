@@ -311,13 +311,36 @@ async def test_completed_result_winning_timeout_is_returned(wired, monkeypatch, 
     assert result == {"command_id": "cmd-1", "result": {"ok": True, "status": "launched_confirmation"}}
 
 
-async def test_execute_revocation_during_wait(wired, monkeypatch):
+@pytest.mark.parametrize("status", ["pending", "claimed", "completed"])
+@pytest.mark.parametrize("authorization_error", [False, True])
+async def test_execute_revocation_during_wait_settles_atomic_outcome(wired, monkeypatch, status, authorization_error):
     calls = {"n": 0}
 
     def authorized(sid):
         calls["n"] += 1
-        return [{"device_id": "dev"}] if calls["n"] == 1 else []
+        if calls["n"] == 1:
+            return [{"device_id": "dev"}]
+        if authorization_error:
+            raise CommandError("controller_context_missing")
+        return []
+
+    def cancel(cid, sid):
+        wired["cancelled"].append(cid)
+        return {"status": status, "claimed": status != "pending",
+                "result": '{"ok":true,"status":"launched_confirmation"}' if status == "completed" else None}
 
     monkeypatch.setattr(service, "authorized_devices", authorized)
-    assert await service.execute("s", "dev", "read_screen", {}, timeout=5) == {"error": "device_not_authorized"}
+    monkeypatch.setattr(service.queue, "cancel", cancel)
+    result = await service.execute("s", "dev", "set_timer", {"seconds": 5}, timeout=5)
+    if status == "completed":
+        assert result == {"command_id": "cmd-1", "result": {"ok": True, "status": "launched_confirmation"}}
+    else:
+        reason = "controller_context_missing" if authorization_error else "device_not_authorized"
+        assert result["outcome_unknown"] is (status == "claimed")
+        if status == "claimed":
+            assert result["error"] == reason
+            assert "verify" in result["message"].lower()
+        else:
+            assert result["reason"] == reason
+            assert result["safe_to_retry"] is True
     assert wired["cancelled"] == ["cmd-1"]

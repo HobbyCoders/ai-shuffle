@@ -18,7 +18,7 @@ import java.time.Instant
 import java.time.LocalDateTime
 import java.time.ZoneId
 
-/** Shared by the foreground command queue and realtime data-channel calls. */
+/** Executes DeviceToolsRuntime's foreground command queue; no production realtime caller. */
 class DeviceToolExecutor(context: Context) {
     private val app = context.applicationContext
     companion object { private val execution = Mutex() }
@@ -28,7 +28,7 @@ class DeviceToolExecutor(context: Context) {
             if (!ToolsPreferences(app).enabled) return@withLock ToolRegistry.error("disabled", "Android tools are disabled on this device.")
             if (name !in ToolRegistry.names) return@withLock ToolRegistry.error("unsupported", "Unsupported Android tool: $name")
             if (!DeviceToolsRuntime.hasForegroundActivity() && name !in setOf("read_screen", "tap_node", "scroll", "go_back")) return@withLock ToolRegistry.error("foreground_required", "Open AI Shuffle to use standard Android tools.")
-            // This field NEVER grants authorization, even for legacy realtime callers.
+            // Tool arguments NEVER grant authorization; consent is local to the device.
             if (name in setOf("read_screen", "tap_node", "scroll", "go_back")) {
                 return@withLock withContext(Dispatchers.Main) {
                     val service = ShuffleAccessibilityService.current
@@ -109,8 +109,10 @@ class DeviceToolExecutor(context: Context) {
         val fine = ContextCompat.checkSelfPermission(app, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
         val coarse = ContextCompat.checkSelfPermission(app, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
         if (!fine && !coarse) return ToolRegistry.error("permission_required", "Location is optional. Grant location while using the app, then retry.")
-        if (!ToolApprovals.request("Share device location?", "Send a recent location to the connected AI Shuffle server for this action.", deadline))
+        if (!ToolApprovals.request("Share device location?", "Send a recent location to the connected AI Shuffle server for this action.", deadline)) {
+            if (!DeviceToolsRuntime.hasAttachedActivity()) return ToolRegistry.error("foreground_required", "Open AI Shuffle and retry; no action was performed.")
             return ToolRegistry.error("denied", "Location sharing was denied, dismissed or expired.")
+        }
         return withContext(Dispatchers.IO) {
             if (System.currentTimeMillis() >= deadline || !ToolsPreferences(app).enabled) return@withContext ToolRegistry.error("expired", "Location request expired or was disabled.")
             val manager = app.getSystemService(Context.LOCATION_SERVICE) as LocationManager

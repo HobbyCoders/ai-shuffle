@@ -300,6 +300,78 @@ def test_api_contract(client, isolated):
     assert not queue.state('a')['enabled']
 
 
+@pytest.mark.parametrize('lookup_failure', [False, True])
+@pytest.mark.parametrize('intervening_status', ['claimed', 'cancelled', 'expired'])
+def test_rejected_poll_clears_unsent_claim_history(client, isolated, monkeypatch, lookup_failure, intervening_status):
+    enable()
+    cmd = enqueue()
+    def authorized(session):
+        # Another waiter/sweeper may settle the row while authorization is checked.
+        if intervening_status == 'cancelled':
+            queue.cancel(cmd, 'sa')
+        elif intervening_status == 'expired':
+            future = queue.now() + timedelta(seconds=21)
+            monkeypatch.setattr(queue, 'now', lambda: future)
+            queue.purge_requested_commands()
+        if lookup_failure:
+            raise RuntimeError('temporary authorization lookup failure')
+        return []
+    monkeypatch.setattr(service, 'authorized_devices', authorized)
+    assert client.get('/api/v1/mobile/tools/pending').json() == {'commands': []}
+    previous = queue.cancel(cmd, 'sa')
+    assert previous['status'] == ('expired' if intervening_status == 'expired' else 'cancelled')
+    assert previous['claimed'] is False
+    assert service._stopped_outcome('device_not_authorized', previous)['safe_to_retry'] is True
+    assert isolated[0].execute('SELECT claimed_at FROM mobile_tool_commands WHERE id=?', (cmd,)).fetchone()['claimed_at'] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('status', ['pending', 'claimed', 'completed'])
+@pytest.mark.parametrize('revocation', ['expired_key', 'membership'])
+async def test_revocation_settles_real_delivery_history(isolated, monkeypatch, status, revocation):
+    enable()
+    original_enqueue = queue.enqueue
+    original_authorizer = service.device_authorizer
+    membership = {'active': True}
+    monkeypatch.setattr(service, 'device_authorizer',
+                        lambda session: original_authorizer(session) if membership['active'] else [])
+    observed = []
+    def deliver_then_revoke(*args):
+        queued = original_enqueue(*args)
+        observed.append(queued['id'])
+        if status != 'pending':
+            delivered = api.pending(device=isolated[1]['a'])['commands']
+            assert [command['id'] for command in delivered] == observed
+            if status == 'completed':
+                assert queue.submit_result('a', queued['id'], '{"ok":true,"status":"launched_confirmation"}') is None
+        if revocation == 'expired_key':
+            isolated[1]['a']['api_key_expires_at'] = datetime.now(timezone.utc) - timedelta(seconds=1)
+        else:
+            membership['active'] = False
+        return queued
+    monkeypatch.setattr(queue, 'enqueue', deliver_then_revoke)
+    result = await service.execute('sa', 'a', 'open_url', {'url': 'https://example.com'})
+    if status == 'completed':
+        assert result == {'command_id': observed[0], 'result': {'ok': True, 'status': 'launched_confirmation'}}
+    elif status == 'claimed':
+        assert result['error'] == 'device_not_authorized'
+        assert result['outcome_unknown'] is True
+    else:
+        assert result['reason'] == 'device_not_authorized'
+        assert result['safe_to_retry'] is True
+    assert queue.outcome(observed[0], 'sa')['status'] == ('completed' if status == 'completed' else 'cancelled')
+
+
+def test_undelivered_cancellation_preserves_completed_history(isolated):
+    enable()
+    cmd = enqueue()
+    queue.claim('a')
+    assert queue.submit_result('a', cmd, '{"ok":true}') is None
+    previous = queue.cancel(cmd, 'sa', undelivered=True)
+    assert previous == {'status': 'completed', 'claimed': True, 'result': '{"ok":true}'}
+    assert queue.outcome(cmd, 'sa') == {'status': 'completed', 'result': '{"ok":true}'}
+
+
 def test_claim_rechecks_requesting_account(client, isolated, monkeypatch):
     enable()
     cmd = enqueue()
