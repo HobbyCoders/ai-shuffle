@@ -505,6 +505,13 @@ async def restore_worker_checkout_async(worker_session_id: str, *, follow_live_s
     import asyncio
     import contextvars
     import functools
+    from app.db import database
+
+    # Ordinary peer messages must not queue behind Git provisioning. The
+    # synchronous helper rechecks the binding after this cheap eligibility read.
+    row = await asyncio.to_thread(database.get_session, worker_session_id) or {}
+    if not is_worker_branch(row.get("branch") or "", worker_session_id) or not row.get("worktree_path"):
+        return True, None
     from app.core.remote_task import _start_executor
 
     kwargs = {} if follow_live_switch else {"follow_live_switch": False}

@@ -544,7 +544,8 @@ async def ensure_pending_checkout(
 
     One timeout budget for the whole preflight. Never calls ``ensure_checkout``
     unless this task won ``claim_op`` — the wait path must not double-add.
-    Returns False on timeout/error/nothing-to-do; the caller still runs
+    Returns True if an owned missing Task checkout was restored or a matching
+    op completed; False on timeout/error/nothing-to-do. The caller still runs
     ``build_session_options`` because cwd may already exist.
     """
     if not session_row:
@@ -556,13 +557,14 @@ async def ensure_pending_checkout(
     # Restore a reclaimed Task cwd at execution too, before either native or
     # delegated options resolve it. Refusals remain actionable checkout errors
     # from build_session_options, never permission to use another checkout.
-    path = session_row.get("worktree_path")
-    if branch.startswith("chore/task-") and path and not Path(path).is_dir():
-        from app.core.worker_checkout import restore_worker_checkout_async
+    from app.core.worker_checkout import is_worker_branch, restore_worker_checkout_async
 
+    path = session_row.get("worktree_path")
+    restored = False
+    if is_worker_branch(branch, session_row.get("id") or "") and path and not Path(path).is_dir():
         restored, _note = await restore_worker_checkout_async(session_row["id"], follow_live_switch=False)
-        if restored:
-            return True
+    # Even after restoration, claim/wait for a queued operation below. Another
+    # chat bound to this branch must not pretend it restored the owner's cwd.
     try:
         from app.core import git_ops_runner
         from app.core.config import settings as _settings
@@ -593,7 +595,7 @@ async def ensure_pending_checkout(
             )
             await run_sync(git_ops_db.fail_op, zombie["id"], "stale running")
         if pending is None:
-            return False
+            return restored
         if pending["status"] == "queued":
             claimed = await run_sync(git_ops_db.claim_op, pending["id"], me)
             if claimed is not None:

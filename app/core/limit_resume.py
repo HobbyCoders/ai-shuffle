@@ -1122,11 +1122,11 @@ async def _resume_worker(worker_id: str, owner: str, meta: Dict[str, Any]) -> Op
                                          "reset_at": meta.get("reset_at")}},
         )
     except WorkerCheckoutError as exc:
-        refusal, turn_id = str(exc), None
+        refusal, turn_id = str(exc) or "refused", None
     if not turn_id or turn_id == turn_scheduler.HELD:
         for sid, extra in ((worker_id, {}), (owner, {"task_id": worker_id})):
             await _record(sid, _STATUS_DROPPED, {"reason": refusal, **extra,
-                "content": f"Automatic resume dropped: {refusal}",
+                **({"content": f"Automatic resume dropped: {refusal}"} if refusal != "refused" else {}),
                 "limit_key": meta.get("limit_key")})
         if refusal != "refused":
             from app.core.task_registry import task_registry
