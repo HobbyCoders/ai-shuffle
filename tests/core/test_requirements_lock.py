@@ -192,8 +192,8 @@ def test_desktop_installs_only_from_the_locks():
 
 def test_optional_voice_lock_is_audited_and_shipped_for_explicit_retry():
     workflow = (ROOT / ".github/workflows/ci-backend.yml").read_text()
-    assert "python -m pip_audit --skip-editable" in workflow
-    assert "python -m pip_audit -r requirements-voice.lock" in workflow
+    assert "python scripts/pip_audit_retry.py --skip-editable" in workflow
+    assert "python scripts/pip_audit_retry.py -r requirements-voice.lock" in workflow
     runtime = (ROOT / "desktop/scripts/build-worker.mjs").read_text()
     build = (ROOT / "desktop/src/main/source-build.ts").read_text()
     assert "python.optionalVoiceInstalled === false ? null : await pythonDependencies(repoDir)" in runtime
