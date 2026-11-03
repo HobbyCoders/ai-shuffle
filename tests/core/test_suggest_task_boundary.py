@@ -221,3 +221,34 @@ async def test_a_real_delegated_connect_hands_the_cli_the_child_rule(monkeypatch
     tool = _suggest_task(listed["tools"])
     assert not _is_deferred(tool)
     _assert_tool_limits(tool["description"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("system_prompt", [
+    {"type": "preset", "preset": "claude_code", "append": "PROFILE"},
+    "CUSTOM AGENT",
+], ids=["preset-append", "custom-replace"])
+async def test_a_real_delegated_connect_names_no_tool_the_bridge_omits(monkeypatch, tmp_path, system_prompt):
+    """An API-user or automation chain's server does not list the tool, so that
+    worker's prompt must not tell it to suggest anything, on either prompt shape."""
+    from app.mcp.builtin_tools import create_builtin_tools_server
+
+    _worker(monkeypatch)
+    monkeypatch.setattr(ha, "_resolve_claude_cmd", lambda: ["claude"])
+    options = _connect_options(tmp_path, system_prompt)
+    options.mcp_servers["builtins"] = create_builtin_tools_server(
+        session_id="worker", profile_id="p", project_id=None, is_admin=True,
+        model="opus", provider_id=None, cwd=str(tmp_path), suggest_task=False,
+    )
+    adapter = ha.HarnessAdapter()
+    await adapter.connect(options)
+    try:
+        loop = adapter.engine
+        sent = "\n\n".join(part for part in (loop.system, loop.append_system_prompt) if part)
+        listed = await _answer(adapter._registry, loop.ctx, {"op": "list"},
+                               tool_filter=loop._bridge_tool_permitted, deferred=loop.bridge_deferred)
+    finally:
+        await adapter.disconnect()
+    assert not [tool for tool in listed["tools"] if tool["name"].endswith("SuggestTask")]
+    assert "# Subagent context" in sent
+    assert "SuggestTask" not in sent

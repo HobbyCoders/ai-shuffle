@@ -669,6 +669,7 @@ class HarnessAdapter(ProviderAdapter):
                 delegated_system = await asyncio.to_thread(
                     self._compile_prompt, system, append_system, options,
                     self._worker_identity, self._workspace_card,
+                    suggest_task_available=_delegated_offered(options, self._registry)("SuggestTask"),
                 )
                 delegated_append = None
             else:
@@ -4973,6 +4974,7 @@ class HarnessAdapter(ProviderAdapter):
         wired: Optional[frozenset] = None,
         workspace_card: Optional[str] = None,
         worker: Optional[str] = None,
+        suggest_task_available: Optional[bool] = None,
     ) -> Any:
         """Run the fluid prompt compiler, keeping the labeled sections.
 
@@ -4985,6 +4987,9 @@ class HarnessAdapter(ProviderAdapter):
         (:func:`app.core.environment.workspace_facts_card`), rendered once at
         connect. It is slotted as an ``environment`` section right after the
         compiler's own env block.
+
+        ``suggest_task_available`` is what the delegated bridge serves, for a
+        leg with no ``registry`` or ``wired`` here to infer that from.
 
         ``wired`` is the set of host capabilities on the leg's tool context
         (``ctx.extra`` keys plus the ones NativeLoop wires itself). Given it,
@@ -5056,7 +5061,9 @@ class HarnessAdapter(ProviderAdapter):
                 PromptInputs(
                     base=system,
                     extra_blocks=([append_system] if append_system else [])
-                    + _workflow_prompt_blocks(options, permitted),
+                    + _workflow_prompt_blocks(
+                        options, permitted, suggest_task_available=suggest_task_available,
+                    ),
                     cwd=options.cwd or ".",
                     include_env=True,
                     worker=worker,
@@ -5285,6 +5292,8 @@ class HarnessAdapter(ProviderAdapter):
         options: SessionOptions,
         worker: Optional[str] = None,
         workspace_card: Optional[str] = None,
+        *,
+        suggest_task_available: Optional[bool] = None,
     ) -> Optional[str]:
         """Run the fluid prompt compiler over the app's system-prompt parts.
 
@@ -5303,7 +5312,7 @@ class HarnessAdapter(ProviderAdapter):
         """
         compiled = HarnessAdapter._compile_prompt_sections(
             system, append_system, options, native=False, worker=worker,
-            workspace_card=workspace_card,
+            workspace_card=workspace_card, suggest_task_available=suggest_task_available,
         )
         if compiled is None:
             return system if system is not None else append_system
