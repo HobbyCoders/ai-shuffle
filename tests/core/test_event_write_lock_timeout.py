@@ -493,13 +493,14 @@ async def test_a_drained_event_is_not_resent_on_an_unknown_outcome(monkeypatch, 
     assert se.get_events(SID) == []
 
 
-async def test_a_drained_event_past_the_budget_never_raises(monkeypatch, no_backoff):
+async def test_a_drained_event_past_the_budget_never_raises(monkeypatch, no_backoff, caplog):
     calls = _fail_first(monkeypatch, [_lock_timeout() for _ in range(50)])
 
     await record_drained_event(SID, {"type": "system", "subtype": "note", "content": "drained"})
     await tr.drain_event_writes(5)
 
     assert calls.call_count == len(tr._LOCK_RETRY_DELAYS_SECONDS) + 1
+    assert any(record.levelname == "ERROR" and "lost" in record.getMessage() for record in caplog.records)
 
 
 def test_stable_ids_dedupe_rows_but_events_without_one_duplicate():

@@ -1691,8 +1691,8 @@ async def _write_unfenced(session_id: str, events: List[Dict[str, Any]],
     except Exception:
         # A caller still waiting gets this raised and logs it itself.
         if caller_released.done():
-            logger.warning("[TurnRecorder] %d between-turns event(s) for %s lost",
-                           len(events), session_id, exc_info=True)
+            logger.error("[TurnRecorder] %d between-turns event(s) for %s lost",
+                         len(events), session_id, exc_info=True)
         raise
 
 
