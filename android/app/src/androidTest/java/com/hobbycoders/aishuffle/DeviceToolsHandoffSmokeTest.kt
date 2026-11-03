@@ -4,7 +4,6 @@ import android.content.Intent
 import android.os.SystemClock
 import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
-import androidx.test.espresso.Espresso.onView
 import androidx.test.espresso.action.ViewActions.click
 import androidx.test.espresso.matcher.ViewMatchers.withText
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -136,10 +135,16 @@ class DeviceToolsHandoffSmokeTest {
                 scenario.onActivity { host = it }
                 awaitMain("Settings never gained focus") { host?.hasWindowFocus() == true }
                 scenario.onActivity { DeviceToolsRuntime.attach(it, target) }
-                awaitMain("Real executor never requested approval") { ToolApprovals.pending.value != null }
+                awaitMain("Real executor never presented a focused approval button") {
+                    ToolApprovals.pending.value != null && android.view.inspector.WindowInspector.getGlobalWindowViews().any { root ->
+                        root.hasWindowFocus() && root.findViewById<android.widget.Button>(android.R.id.button1)?.let {
+                            it.isShown && it.isEnabled && it.text.toString() == "Allow once"
+                        } == true
+                    }
+                }
                 assertEquals("The actual renewal producer must validate the HTTP receipt first", 1, renewals.get())
                 if (pauseDuringApproval) instrumentation.uiAutomation.executeShellCommand("input keyevent KEYCODE_HOME").close()
-                else onView(withText("Allow once")).perform(click())
+                else onDialogView(withText("Allow once")).perform(click())
                 assertTrue("Result did not reach the HTTP peer promptly", enteredPost.await(10, TimeUnit.SECONDS))
                 if (!pauseDuringApproval) awaitMain("External app did not actually open") {
                     val root = instrumentation.uiAutomation.rootInActiveWindow
