@@ -1386,7 +1386,7 @@ export const activeSession = {
 	setScrollTop: draftManager.setScrollTop,
 	clearError: draftManager.clearError,
 	clearWorktreeError: draftManager.clearWorktreeError,
-	clearMessages: draftManager.clearMessages,
+	catchUpTranscript: draftManager.catchUpTranscript,
 	reloadSession: draftManager.reloadSession,
 	addSystemMessage: draftManager.addSystemMessage,
 	rewindToMessage: draftManager.rewindToMessage,

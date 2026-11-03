@@ -4,8 +4,8 @@
 //   designedShifts()  the narrowly-scoped exception for a layout move the
 //                     product makes on purpose without user input (a cleared
 //                     chat's composer moving to the centre when it opens by
-//                     link or is cleared by the server, or a suggested-task
-//                     chip arriving above it). Never a blanket allow.
+//                     link or is cleared by the server, or the rows a rewind
+//                     removes leaving the transcript). Never a blanket allow.
 //   classifyKnownBug() whether a failing case marked `knownBug` may be reported
 //                     as KNOWN BUG instead of FAIL.
 import { detectLayoutShift } from '../../../../browser-mcp/src/recorder/analyze.js';
@@ -24,20 +24,28 @@ export const DESIGNED_SHIFT_WINDOW_MS = { before: 150, after: 400 };
  *  what that can cover. */
 export const COMPOSER_LAYOUT_SOURCE = /\sin ChatView$/;
 
+/** What transcript rows leaving moves: the rows that stay and the chat layout
+ *  around them. The step, the window, the single change and `maxValue` bound it
+ *  the same way. */
+export const TRANSCRIPT_LAYOUT_SOURCE = /\sin (?:ChatView|MessageArea)$/;
+
 /**
  * Check a case's `expectShift` declarations against a recording.
  *
  * expectShift: [{
  *   step:     the mark label of the step the move belongs to,
  *   composer: [from, to], the one data-ui-composer change the step designs,
+ *   messages: [from, to], or instead the one data-ui-messages change it designs,
+ *             for rows leaving the transcript when the server answers an action
  *   maxValue: the largest total layout shift that move may measure,
  *   reason:   why the product moves it without user input,
  * }]
  *
- * Each declaration must find EXACTLY one composer change from → to inside its
+ * Each declaration must find EXACTLY one such change from → to inside its
  * step (between its mark and the next one); none, or two, is a failure. Only
  * the layout-shift entries within DESIGNED_SHIFT_WINDOW_MS of that change that
- * moved the chat layout (COMPOSER_LAYOUT_SOURCE) are excused, and only up to `maxValue`
+ * moved the chat layout (COMPOSER_LAYOUT_SOURCE; for `messages`,
+ * TRANSCRIPT_LAYOUT_SOURCE) are excused, and only up to `maxValue`
  * in total: a larger move, a second move, a shift anywhere else or of anything
  * else still counts. The layout_shift anomaly is then recomputed without the
  * excused entries (same detector, same thresholds).
@@ -64,18 +72,20 @@ export function designedShifts(recording, anomalies, expectShift = [], { partial
 		}
 		const from = marks[markIndex].t;
 		const to = markIndex + 1 < marks.length ? marks[markIndex + 1].t : Infinity;
-		const [before, after] = design.composer;
+		const what = design.messages ? 'messages' : 'composer';
+		const layoutSource = what === 'messages' ? TRANSCRIPT_LAYOUT_SOURCE : COMPOSER_LAYOUT_SOURCE;
+		const [before, after] = design[what];
 		const moves = [];
 		for (let i = 1; i < states.length; i++) {
 			const { t, state } = states[i];
-			const previous = states[i - 1].state.composer ?? null;
-			const current = state.composer ?? null;
+			const previous = states[i - 1].state[what] ?? null;
+			const current = state[what] ?? null;
 			if (t < from || t >= to || current === previous) continue;
 			if (previous === before && current === after) moves.push(t);
 		}
 		if (partial && moves.length === 0 && markIndex === marks.length - 1) continue;
 		if (moves.length !== 1) {
-			problems.push(`expectShift "${design.step}": the composer moved ${before} → ${after} ${moves.length} times in that step, not once`);
+			problems.push(`expectShift "${design.step}": the ${what} moved ${before} → ${after} ${moves.length} times in that step, not once`);
 			continue;
 		}
 		const at = moves[0];
@@ -85,17 +95,17 @@ export function designedShifts(recording, anomalies, expectShift = [], { partial
 			if (entry.kind !== 'layout_shift' || entry.input || typeof entry.value !== 'number') return;
 			if (entry.t < at - DESIGNED_SHIFT_WINDOW_MS.before || entry.t > at + DESIGNED_SHIFT_WINDOW_MS.after) return;
 			const sources = Array.isArray(entry.sources) ? entry.sources : [];
-			if (!sources.some((s) => COMPOSER_LAYOUT_SOURCE.test(s))) return;
+			if (!sources.some((s) => layoutSource.test(s))) return;
 			own.push(index);
 			total += entry.value;
 		});
 		if (total > design.maxValue) {
 			// Too big to be the designed move: excuse none of it.
-			problems.push(`expectShift "${design.step}": the designed composer move measured ${total.toFixed(3)}, more than its ${design.maxValue}`);
+			problems.push(`expectShift "${design.step}": the designed ${what} move measured ${total.toFixed(3)}, more than its ${design.maxValue}`);
 			continue;
 		}
 		for (const index of own) excusedIndices.add(index);
-		excused.push({ step: design.step, value: Number(total.toFixed(4)), t: at, reason: design.reason });
+		excused.push({ step: design.step, what, value: Number(total.toFixed(4)), t: at, reason: design.reason });
 	}
 	if (!excusedIndices.size) return { anomalies, excused, problems };
 	const excusedTotal = [...excusedIndices].reduce((sum, i) => sum + timeline[i].value, 0);
@@ -121,13 +131,20 @@ export function designedShifts(recording, anomalies, expectShift = [], { partial
 export function checkExpectShift(caseName, expectShift) {
 	if (expectShift === undefined) return;
 	if (!Array.isArray(expectShift)) throw new Error(`case ${caseName}: expectShift must be a list`);
-	const change = (pair, values) =>
-		Array.isArray(pair) && pair.length === 2 && values(pair[0]) && typeof pair[1] === 'string' && pair[0] !== pair[1];
+	const isText = (v) => typeof v === 'string';
+	const change = (pair, from, to) => Array.isArray(pair) && pair.length === 2 && from(pair[0]) && to(pair[1]) && pair[0] !== pair[1];
+	const declares = {
+		composer: (pair) => change(pair, isText, isText),
+		// A frame's counts are numbers (see frames()).
+		messages: (pair) => change(pair, Number.isInteger, Number.isInteger)
+	};
+	const named = (design) => Object.keys(declares).filter((what) => design[what] !== undefined);
 	for (const design of expectShift) {
 		const ok =
 			design &&
 			typeof design.step === 'string' &&
-			change(design.composer, (v) => typeof v === 'string') &&
+			named(design).length === 1 &&
+			declares[named(design)[0]](design[named(design)[0]]) &&
 			typeof design.maxValue === 'number' &&
 			design.maxValue > 0 &&
 			design.maxValue <= 0.5 &&
@@ -135,7 +152,7 @@ export function checkExpectShift(caseName, expectShift) {
 			design.reason.length > 0;
 		if (!ok) {
 			throw new Error(
-				`case ${caseName}: expectShift needs { step: <mark label>, composer: [from, to], maxValue: (0, 0.5], reason } (got ${JSON.stringify(design)})`
+				`case ${caseName}: expectShift needs { step: <mark label>, composer or messages: [from, to], maxValue: (0, 0.5], reason } (got ${JSON.stringify(design)})`
 			);
 		}
 	}

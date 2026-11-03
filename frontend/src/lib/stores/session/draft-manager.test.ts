@@ -71,10 +71,17 @@ describe('draft manager — ephemeral state', () => {
 		expect(h.state.worktreeError).toBeNull();
 	});
 
-	it('clearMessages empties the transcript', () => {
-		const h = harness({ messages: [{ id: 'm1' }] } as unknown as Partial<ActiveSessionState>);
-		h.dm.clearMessages();
-		expect(h.state.messages).toEqual([]);
+	it('catchUpTranscript reads on at the cursor: rows stay and nothing reloads', () => {
+		const messages = [{ id: 'm1' }];
+		const h = harness({ sessionId: 'S1', messages } as unknown as Partial<ActiveSessionState>);
+		const before = h.state;
+		h.dm.catchUpTranscript();
+		expect(h.deps.feedRevive).toHaveBeenCalledWith('S1');
+		expect(h.deps.feedRestart).not.toHaveBeenCalled();
+		expect(h.state).toBe(before);
+		const none = harness({ sessionId: null } as unknown as Partial<ActiveSessionState>);
+		none.dm.catchUpTranscript();
+		expect(none.deps.feedRevive).not.toHaveBeenCalled();
 	});
 });
 

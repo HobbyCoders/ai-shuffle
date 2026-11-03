@@ -166,7 +166,11 @@ Conventions:
   fails). Only the layout-shift entries of the frames around that move
   (150 ms before to 400 ms after) that moved ChatView's own layout are
   excused, and only up to `maxValue` in total; a larger move, a second one,
-  or any other shift still fails ([`lib/verdict.mjs`](lib/verdict.mjs)). The
+  or any other shift still fails ([`lib/verdict.mjs`](lib/verdict.mjs)). Rows
+  leaving the transcript when the server answers an action (a rewind on a
+  phone) have no composer change to name, so they declare `messages: [4, 2]`
+  instead, whose excused entries may also be the transcript's own
+  (MessageArea), under the same rules. The
   report lists each excused move and its size. Pair it with a `verify` that
   names every composer position of the case (`expectComposerPositions`
   below), so an extra move too small or quick to be a shift fails too.
@@ -235,6 +239,7 @@ Conventions:
 | `mirrored-chat.journey.mjs` | A chat another worker owns (simulated in the page: its rows say `is_remote`, its sync status is scripted), opened from the new-session screen: the sync check runs while the hero holds ("Syncing from …"), no "Checking sync" pane replaces a shown transcript, the composer moves once (or not at all for an empty mirror, which is checked too). |
 | `reload-midstream.journey.mjs` | Reloading during a slow reply (plain, or after opening it by link) goes straight back to the chat (never the new-chat screen on the way), the reply finishes, and message and reply each show once. |
 | `cleared-chat.journey.mjs` | The seeded cleared chat shows its own title and "Conversation cleared", not the new-session hero, without moving the composer; a chat cleared while open moves it to the centre once (its designed move, `expectShift`) and a send in it works (intermittent known bug #797). |
+| `rewind-transcript.journey.mjs` | Rewinding the latest turn, an earlier one or the only one (and with the feed stalled, or a partial-success warning): the rows leave once with no reload, what stays stays on screen, the words come back to the composer and the chat takes the next message. Each rewind is held past the browser's input grace, so the move it makes (`expectShift`) is always measured. |
 | `new-chat-project.journey.mjs` | The new-session screen opens on the owner's last project choice: a picked project survives New session (on the screen itself and after opening a chat in another project) and a reload; a cleared project stays cleared through New session and a reload until one is picked again. |
 | `project-workers.journey.mjs` | Cross-worker project sync with three peers simulated in the page: an older worker (overview 404) keeps the plain list with no chips; a dashed chip sets the project up there, spins, then reads ready; a project only on other workers is listed, opens on the Workers tab with the local tabs disabled, and "Set up on all missing" sets it up here; a new chat on a worker without the project keeps it selectable (offline blocked), shows the callout and "Set up & send", and a failed setup shows the reason with the draft kept. |
 | `side-panels.journey.mjs` | Git panel, session side panel and Settings-and-back at desktop, phone and both Fold sizes: open and close in one move, same chat and transcript after, reading position kept. |
