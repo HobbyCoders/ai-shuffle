@@ -15,6 +15,7 @@ import {
 	gotoApp,
 	holdBootLoad,
 	openFromSidebar,
+	sidebarRow,
 	PROJECT,
 	chatState,
 	openNewChat,
@@ -83,6 +84,7 @@ async function watchStopFrames(page, texts) {
 					scrollTop: Math.round(log.scrollTop),
 					anchorTop: anchor ? topOf(anchor) : null,
 					replyHeight: rows().at(-1)?.getBoundingClientRect().height ?? null,
+					composerTop: document.querySelector('.input-slot')?.getBoundingClientRect().top ?? 0,
 					messages: texts.map((text) => {
 						const has = (el) => (el.textContent || '').includes(text);
 						const bubbles = [...document.querySelectorAll('.pending-messages [role="article"]')].filter(has);
@@ -107,6 +109,13 @@ async function watchStopFrames(page, texts) {
 			watch.running = false;
 			return watch.frames;
 		});
+}
+
+/** The phone shell has a drawer rather than the sidebar's show button. */
+async function openChatFromTheList(page, title) {
+	if (!new URL(page.url()).pathname.startsWith('/mobile/')) return openFromSidebar(page, title);
+	await page.getByRole('button', { name: /^Open menu/ }).click();
+	await sidebarRow(page, title).click();
 }
 
 /** One more line of the stopped reply can still arrive and nudge what is below it. */
@@ -535,7 +544,8 @@ await runJourney({
 				}
 				const frames = await collect();
 				// Growth may push the bubbles down and leave them there. Down and straight back is the fault.
-				const tops = frames.filter((f) => f.messages[0].bubbles === 1).map((f) => f.messages[0].top);
+				// Against the composer: typing and sending resize it, which moves them both.
+				const tops = frames.filter((f) => f.messages[0].bubbles === 1).map((f) => f.messages[0].top - f.composerTop);
 				let bounce = 0;
 				for (let i = 2; i < tops.length; i++) {
 					bounce = Math.max(bounce, Math.min(tops[i - 1] - tops[i - 2], tops[i - 1] - tops[i]));
@@ -992,11 +1002,11 @@ await runJourney({
 				// backwards. That order behaves the same on main.
 				await waitChat(page, { messagesAtLeast: 4 }, { timeout: 5000 });
 				await mark('leave');
-				await openFromSidebar(page, SEEDED.no_project);
+				await openChatFromTheList(page, SEEDED.no_project);
 				await waitChatOpen(page, { messagesAtLeast: 2, hold: 500 });
 				await mark('come back');
 				const collect = await watchStopFrames(page, texts);
-				await openFromSidebar(page, title);
+				await openChatFromTheList(page, title);
 				for (const text of texts) {
 					await notSent(text).getByRole('button', { name: 'Restore to composer' }).waitFor({ timeout: 15_000 });
 				}
