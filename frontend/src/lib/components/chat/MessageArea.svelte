@@ -1274,6 +1274,24 @@
 		updateCurrentTurnIndex();
 	}
 
+	/**
+	 * Follow growth from inside a ResizeObserver callback, which runs before this
+	 * frame paints. Waiting for the next frame would show everything below the
+	 * growth, queued bubbles included, one piece too low. Scroll only: changing the
+	 * reserve here would resize what is being observed, in the same frame.
+	 */
+	function followGrowthBeforePaint() {
+		if (!containerRef) return;
+		if (!currentTurnAnchorId) {
+			if (shouldAutoScroll) scrollToBottom();
+			return;
+		}
+		if (!tailSpacerRef) return;
+		const contentEnd = containerRef.scrollTop + tailSpacerRef.getBoundingClientRect().top - containerRef.getBoundingClientRect().top;
+		const delta = resolveAnchoredRevealDelta(containerRef.scrollTop, containerRef.clientHeight, contentEnd);
+		if (delta > 0) setProgrammaticScrollTop(containerRef.scrollTop + delta);
+	}
+
 	function scheduleCurrentTurnAnchorMaintenance(initial = false) {
 		if (!currentTurnAnchorId) return;
 		if (anchorMaintenanceRaf !== null) cancelAnimationFrame(anchorMaintenanceRaf);
@@ -1908,6 +1926,7 @@
 		if (!chatColumnRef || !containerRef || !isMounted) return;
 		let raf: number | null = null;
 		const observer = new ResizeObserver(() => {
+			followGrowthBeforePaint();
 			if (raf !== null) return;
 			raf = requestAnimationFrame(async () => {
 				raf = null;
@@ -2168,16 +2187,16 @@
 				tick().then(() => scheduleCurrentTurnAnchorMaintenance(true));
 			} else if (currentTurnAnchorId) {
 				// While the reserve remains, growth consumes blank room without moving
-				// the prompt. Once it is exhausted, reveal only the new overflow.
-				tick().then(() => scheduleCurrentTurnAnchorMaintenance());
+				// the prompt. Once it is exhausted, reveal only the new overflow. Before
+				// this frame paints: a batch folded inside a frame would otherwise show
+				// everything below it, queued bubbles included, a chunk too low.
+				tick().then(() => void maintainCurrentTurnAnchor());
 			} else {
-				// Normal streaming: single scroll is enough. Re-check shouldAutoScroll
-				// in the deferred callback — the user may have scrolled up (wheel/touch
-				// disengage) in the frames between scheduling this and it running, and
-				// we must not yank them back down after they've released.
-				tick().then(() => requestAnimationFrame(() => {
+				// Normal streaming: single scroll is enough, before this frame paints as
+				// above. Re-check shouldAutoScroll: the user may have released since.
+				tick().then(() => {
 					if (shouldAutoScroll) scrollToBottom();
-				}));
+				});
 			}
 		}
 		if (!currentTurnAnchorId && (hasNewMessage || hasContentChange)) {

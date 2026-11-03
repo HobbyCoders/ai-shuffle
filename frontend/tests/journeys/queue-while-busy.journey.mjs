@@ -55,7 +55,10 @@ async function openStopChat(ctx) {
  * Every painted frame from now until the returned function runs: where the row
  * being read sits and, per queued message, how many copies show and where. Rows
  * are read off the DOM, not the recorder's score, so a move under its threshold
- * still shows.
+ * still shows. Positions come from an IntersectionObserver made inside the frame:
+ * its entry holds the geometry the browser computed last before painting, after
+ * the app's own scroll for that frame. A read inside the frame comes too early and
+ * a read after it can catch a fold that has not painted yet.
  */
 async function watchStopFrames(page, texts) {
 	await page.evaluate((texts) => {
@@ -64,29 +67,38 @@ async function watchStopFrames(page, texts) {
 		const rows = () => [...log.querySelectorAll('.chat-column > .msg-virtualized')];
 		const key = rows().find((el) => el.getBoundingClientRect().bottom > logTop + 1)?.dataset.transcriptKey;
 		const watch = (window.__stopFrames = { frames: [], running: true, startedAt: performance.now() });
-		const topOf = (el) => Math.round(el.getBoundingClientRect().top * 10) / 10;
-		const tick = () => {
+		const bubblesAndRows = () => [
+			...document.querySelectorAll('.pending-messages [role="article"], [data-not-sent="true"]')
+		];
+		const frame = () => {
 			if (!watch.running) return;
-			const anchor = rows().find((el) => el.dataset.transcriptKey === key);
-			watch.frames.push({
-				at: Math.round(performance.now() - watch.startedAt),
-				scrollTop: Math.round(log.scrollTop),
-				anchorTop: anchor ? topOf(anchor) : null,
-				messages: texts.map((text) => {
-					const has = (el) => (el.textContent || '').includes(text);
-					const bubbles = [...document.querySelectorAll('.pending-messages [role="article"]')].filter(has);
-					const notSent = [...document.querySelectorAll('[data-not-sent="true"]')].filter(has);
-					return {
-						bubbles: bubbles.length,
-						notSent: notSent.length,
-						labelledNotSent: bubbles.filter((el) => el.dataset.queueStatus === 'stopped').length,
-						top: topOf(bubbles[0] ?? notSent[0] ?? log)
-					};
-				})
+			const seen = new IntersectionObserver((entries) => {
+				seen.disconnect();
+				const painted = new Map(entries.map((entry) => [entry.target, entry.boundingClientRect.top]));
+				const topOf = (el) =>
+					Math.round((painted.get(el) ?? el.getBoundingClientRect().top) * 10) / 10;
+				const anchor = rows().find((el) => el.dataset.transcriptKey === key);
+				watch.frames.push({
+					at: Math.round(performance.now() - watch.startedAt),
+					scrollTop: Math.round(log.scrollTop),
+					anchorTop: anchor ? topOf(anchor) : null,
+					messages: texts.map((text) => {
+						const has = (el) => (el.textContent || '').includes(text);
+						const bubbles = [...document.querySelectorAll('.pending-messages [role="article"]')].filter(has);
+						const notSent = [...document.querySelectorAll('[data-not-sent="true"]')].filter(has);
+						return {
+							bubbles: bubbles.length,
+							notSent: notSent.length,
+							labelledNotSent: bubbles.filter((el) => el.dataset.queueStatus === 'stopped').length,
+							top: topOf(bubbles[0] ?? notSent[0] ?? log)
+						};
+					})
+				});
 			});
-			requestAnimationFrame(tick);
+			for (const el of [log, ...rows(), ...bubblesAndRows()]) seen.observe(el);
+			requestAnimationFrame(frame);
 		};
-		requestAnimationFrame(tick);
+		requestAnimationFrame(frame);
 	}, texts);
 	return () =>
 		page.evaluate(() => {
@@ -98,6 +110,9 @@ async function watchStopFrames(page, texts) {
 
 /** One more line of the stopped reply can still arrive and nudge what is below it. */
 const REPLY_LINE_PX = 30;
+
+/** Under half a line of the reply: a follow a frame late drops the bubbles about a full line. */
+const MOST_A_BUBBLE_MAY_BOUNCE_PX = 12;
 
 /**
  * The stopped turn settles 1.2s after it ends (settle-hold.ts). The reader once
@@ -491,6 +506,44 @@ await runJourney({
 		// More of them, Stop after Stop in one chat with no filler in between.
 		{ name: 'stop-holds-the-reader-with-four-queued', ...stopReadingPosition({ scrolled: false, queued: 4, overflows: true, rounds: 2 }) },
 		{ name: 'stop-holds-the-reader-scrolled-up', ...stopReadingPosition({ scrolled: true }) },
+		{
+			// A reply arriving in large pieces, followed at the bottom. The follow has to
+			// land in the frame the piece does, or for one frame everything below the
+			// reply shows a piece too low: the bubbles drop and come straight back.
+			name: 'stop-during-a-fast-reply-keeps-the-bubbles-still',
+			async setup(ctx) {
+				await openStopChat(ctx);
+				await ctx.page.waitForTimeout(800);
+			},
+			async act({ page, mark, variant, log }) {
+				await mark('send');
+				await typeAndSend(page, `stream tok-${uniq()} ${scriptTag(variant, 'long', { tps: 300 })}`);
+				await page.getByText('Here is a long answer', { exact: false }).last().waitFor({ timeout: 60_000 });
+				await mark('queue');
+				const texts = [`tok-${uniq()}`, `tok-${uniq()}`];
+				const collect = await watchStopFrames(page, texts);
+				for (const text of texts) {
+					await typeAndSend(page, `queued ${text}`);
+					await page.locator('.pending-messages [role="article"]').filter({ hasText: text }).waitFor({ timeout: 5000 });
+				}
+				await mark('stop');
+				await stopButton(page).click({ timeout: 2000 });
+				await waitChat(page, { streaming: 'false' }, { timeout: 60_000 });
+				for (const text of texts) {
+					await page.locator('[data-not-sent="true"]').filter({ hasText: text }).waitFor({ timeout: 15_000 });
+				}
+				const frames = await collect();
+				// Growth may push the bubbles down and leave them there. Down and straight back is the fault.
+				const tops = frames.filter((f) => f.messages[0].bubbles === 1).map((f) => f.messages[0].top);
+				let bounce = 0;
+				for (let i = 2; i < tops.length; i++) {
+					bounce = Math.max(bounce, Math.min(tops[i - 1] - tops[i - 2], tops[i - 1] - tops[i]));
+				}
+				log(`biggest bubble bounce: ${bounce}px over ${tops.length} frames`);
+				expect(tops.length > 5, `watched the bubbles while the reply ran (${tops.length} frames)`);
+				expect(bounce <= MOST_A_BUBBLE_MAY_BOUNCE_PX, `the bubbles did not drop and come back in one frame: ${bounce}px`);
+			}
+		},
 		{
 			// Only what was queued when Stop was pressed can be not sent. A message
 			// sent right after Stop runs, and must never read "Not sent" on the way.
