@@ -6,6 +6,11 @@ import android.content.Intent
 import android.content.SharedPreferences
 import com.hobbycoders.aishuffle.data.ServerStore
 import com.hobbycoders.aishuffle.model.Server
+import com.hobbycoders.aishuffle.ui.NativeScreen
+import com.hobbycoders.aishuffle.R
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
@@ -25,6 +30,7 @@ import java.lang.ref.WeakReference
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [28])
 class DeviceToolsRuntimeTest {
+    class ApprovalHost : NativeScreen()
     class HandoffActivity : Activity() {
         override fun startActivity(intent: Intent) {
             super.startActivity(intent)
@@ -54,6 +60,25 @@ class DeviceToolsRuntimeTest {
         field("context").set(null, app)
         field("server").set(null, target)
         field("polling").set(null, it)
+    }
+    @Test fun nativeScreenClearsTheExecutionHostBeforeResolvingPausedConsent() = runBlocking {
+        Robolectric.buildActivity(ApprovalHost::class.java).also {
+            it.get().setTheme(R.style.Theme_AIShuffle)
+        }.setup().visible().use { controller ->
+            controller.windowFocusChanged(true)
+            val command = host(controller.get())
+            val decision = CoroutineScope(Dispatchers.Main.immediate).async {
+                ToolApprovals.request("Pause test", "No action may run") to DeviceToolsRuntime.hasAttachedActivity()
+            }
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            assertNotNull(ToolApprovals.pending.value)
+            controller.pause()
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            val (approved, stillAttached) = decision.await()
+            assertFalse(approved)
+            assertFalse("NativeScreen must detach the execution host before resolving consent", stillAttached)
+            assertTrue("The factual no-action result must survive pause shutdown", command.isActive)
+        }
     }
     @Test fun dialogFocusLossDoesNotMeanTheApprovalHostWasDetached() {
         Robolectric.buildActivity(HandoffActivity::class.java).setup().visible().use { controller ->
