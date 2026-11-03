@@ -27,11 +27,14 @@ mirroring tests/core/test_interrupt_send_now.py.
 """
 
 import asyncio
-from contextlib import ExitStack
+import gc
+from contextlib import ExitStack, aclosing
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import anyio
 import pytest
 
+from app.api.sse_utils import ClosingStreamingResponse
 import app.core.query_engine as qe
 import app.core.query_background as qb
 from app.core.provider import session_admission
@@ -934,6 +937,39 @@ async def test_the_chat_is_free_by_the_time_the_client_hears_the_turn_ended(mock
 
 
 # ─── Headless ───────────────────────────────────────────────────────────────
+
+
+async def test_a_client_that_leaves_during_send_frees_the_chat_at_once(mock_db):
+    """Nothing reaches a turn parked at its yield; the response has to close it."""
+    sessions_db.create_session("sess-left", "default")
+    world = _ConnectWorld()
+    blocked = asyncio.Event()
+
+    async def send(message):
+        if message["type"] == "http.response.body":
+            blocked.set()
+            await asyncio.Event().wait()
+
+    async def body():
+        async with aclosing(qe.stream_query("one", "claude-code", session_id="sess-left")) as events:
+            async for event in events:
+                yield str(event)
+
+    gc.disable()  # Only the close may free the chat, not a finalizer.
+    try:
+        with ExitStack() as stack:
+            world.patches(stack, "rest", StubPool())
+            response = ClosingStreamingResponse(body())
+            async with anyio.create_task_group() as group:
+                group.start_soon(response.stream_response, send)
+                await asyncio.wait_for(blocked.wait(), 10)
+                assert "sess-left" in session_admission._holders
+                group.cancel_scope.cancel()
+            assert "sess-left" not in session_admission._holders
+            frames = await asyncio.wait_for(collect(qe.stream_query("two", "claude-code", session_id="sess-left")), 10)
+    finally:
+        gc.enable()
+    assert not [f for f in frames if f.get("type") == "error"]
 
 
 def _headless_patches(stack: ExitStack, world: _ConnectWorld) -> None:

@@ -7,9 +7,9 @@ import json
 import logging
 import time
 import uuid
+from contextlib import aclosing
 
 from fastapi import APIRouter, HTTPException, Depends, Request, status
-from fastapi.responses import StreamingResponse
 from starlette.requests import ClientDisconnect
 
 from app.core.models import (
@@ -26,7 +26,7 @@ from app.api.auth import get_api_user_from_request, require_api_key, require_aut
 from app.api.sessions_helpers import (
     check_session_access_for_api_user, require_session, resolve_api_user_profile,
 )
-from app.api.sse_utils import is_client_disconnect
+from app.api.sse_utils import ClosingStreamingResponse, is_client_disconnect
 
 logger = logging.getLogger(__name__)
 
@@ -72,37 +72,38 @@ async def _stream_query_with_failover(
 
     sid = session_id
     held_api_error = None  # most-recent 429 api_error, held for the done decision
-    async for event in stream_query(
+    async with aclosing(stream_query(
         prompt=prompt, profile_id=profile_id, project_id=project_id,
         overrides=overrides, session_id=sid, api_user_id=api_user_id,
         device_id=device_id, persist_user_message=True,
-    ):
-        etype = event.get("type")
-        if etype == "init":
-            sid = event.get("session_id") or sid
-            yield event
-            continue
-        if etype == "api_error":
-            try:
-                is_429 = int(event.get("status")) == 429
-            except (TypeError, ValueError):
-                is_429 = False
-            if is_429:
-                held_api_error = event  # hold; decided at the done frame
-                continue
-            yield event  # non-429 errors pass through immediately
-            continue
-        if etype == "done":
-            if is_usage_limit_error(event.get("metadata")):
+    )) as events:
+        async for event in events:
+            etype = event.get("type")
+            if etype == "init":
                 sid = event.get("session_id") or sid
-                # OC-4: surface the rate-limited notification (native
-                # failover is retired, so nothing is retried).
-                await attempt_failover(sid, api_user_id)
-            if held_api_error is not None:
-                yield held_api_error
+                yield event
+                continue
+            if etype == "api_error":
+                try:
+                    is_429 = int(event.get("status")) == 429
+                except (TypeError, ValueError):
+                    is_429 = False
+                if is_429:
+                    held_api_error = event  # hold; decided at the done frame
+                    continue
+                yield event  # non-429 errors pass through immediately
+                continue
+            if etype == "done":
+                if is_usage_limit_error(event.get("metadata")):
+                    sid = event.get("session_id") or sid
+                    # OC-4: surface the rate-limited notification (native
+                    # failover is retired, so nothing is retried).
+                    await attempt_failover(sid, api_user_id)
+                if held_api_error is not None:
+                    yield held_api_error
+                yield event
+                return
             yield event
-            return
-        yield event
 
     # Stream ended without a done frame → flush any held api_error.
     if held_api_error is not None:
@@ -288,16 +289,17 @@ async def stream_one_shot_query(
 
     async def event_generator():
         try:
-            async for event in _stream_query_with_failover(
+            async with aclosing(_stream_query_with_failover(
                 prompt=request.prompt,
                 profile_id=profile_id,
                 project_id=project_id,
                 overrides=overrides,
                 api_user_id=api_user.get("id")
-            ):
-                event_type = event.get("type", "message")
-                data = json.dumps(event)
-                yield f"event: {event_type}\ndata: {data}\n\n"
+            )) as events:
+                async for event in events:
+                    event_type = event.get("type", "message")
+                    data = json.dumps(event)
+                    yield f"event: {event_type}\ndata: {data}\n\n"
 
         except (asyncio.CancelledError, ClientDisconnect, BaseExceptionGroup) as exc:
             # A normal SSE client disconnect must end the stream cleanly, NOT
@@ -315,7 +317,7 @@ async def stream_one_shot_query(
             error_data = json.dumps({"type": "error", "message": f"Error: {error_detail}"})
             yield f"event: error\ndata: {error_data}\n\n"
 
-    return StreamingResponse(
+    return ClosingStreamingResponse(
         event_generator(),
         media_type="text/event-stream",
         headers={
@@ -570,7 +572,7 @@ async def stream_conversation(
 
     async def event_generator():
         try:
-            async for event in _stream_query_with_failover(
+            async with aclosing(_stream_query_with_failover(
                 prompt=request.prompt,
                 profile_id=profile_id,
                 project_id=project_id,
@@ -578,10 +580,11 @@ async def stream_conversation(
                 session_id=request.session_id,
                 api_user_id=api_user_id,
                 device_id=request.device_id  # Pass device ID for cross-device sync
-            ):
-                event_type = event.get("type", "message")
-                data = json.dumps(event)
-                yield f"event: {event_type}\ndata: {data}\n\n"
+            )) as events:
+                async for event in events:
+                    event_type = event.get("type", "message")
+                    data = json.dumps(event)
+                    yield f"event: {event_type}\ndata: {data}\n\n"
 
         except (asyncio.CancelledError, ClientDisconnect, BaseExceptionGroup) as exc:
             # A normal SSE client disconnect must end the stream cleanly, NOT
@@ -599,7 +602,7 @@ async def stream_conversation(
             error_data = json.dumps({"type": "error", "message": f"Error: {error_detail}"})
             yield f"event: error\ndata: {error_data}\n\n"
 
-    return StreamingResponse(
+    return ClosingStreamingResponse(
         event_generator(),
         media_type="text/event-stream",
         headers={

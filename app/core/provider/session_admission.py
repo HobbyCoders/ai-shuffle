@@ -14,6 +14,11 @@ step is :func:`turn_ended`: when a turn's end is announced, the client may send
 its next message while the route is still saving, so the chat is free from then
 on. Closing afterwards is harmless, it only frees a lease that is still current.
 
+For a streaming route that outermost scope is a generator, and nothing resumes a
+generator its reader abandoned. So every reader closes it: ``aclosing`` in the
+routes, the pump's ``finally``, and ``ClosingStreamingResponse`` for a client that
+leaves between two frames. Otherwise the chat stays busy until garbage collection.
+
 A rewind on a running reply stops the reply, so :func:`take_for_rewind` takes the
 chat from the current holder rather than being refused. The holder's late
 release no longer frees anything, and turns wait for the rewind instead of being
