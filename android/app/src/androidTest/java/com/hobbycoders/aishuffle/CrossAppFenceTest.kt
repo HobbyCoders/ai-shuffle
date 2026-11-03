@@ -390,6 +390,18 @@ class CrossAppFenceTest {
         fixture("delay:0")
         assertNotTapped()
     }
+    @Test fun readTooLargeToDeliverIsCutDownAndItsReferencesStillWork() {
+        fixture("dense:100"); fixture("longrows")
+        val reading = request("read_screen"); allow()
+        val screen = status(reading, 15)
+        assertTrue(screen.toString(), screen.optBoolean("ok"))
+        assertTrue("A result this large must be cut down for delivery", screen.optBoolean("truncated"))
+        val nodes = screen.getJSONArray("nodes")
+        val ref = (0 until nodes.length()).map { nodes.getJSONObject(it) }.single { it.optString("text") == "Covered target" }.getString("ref")
+        val tapping = tap(ref); allow()
+        assertEquals("performed", status(tapping, 15).getString("status"))
+        assertTapped(1)
+    }
     @Test fun denseScreenAtTheLimitIsApproved() {
         fixture("dense:250")
         val tapping = tap(read(waitSeconds = 15)); allow()

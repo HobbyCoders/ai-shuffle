@@ -25,4 +25,5 @@ internal object ShellNavigation {
 
     /** The app's Settings screen; Back returns to chat. */
     fun appSettings(context: Context): Intent = Intent(context, SettingsActivity::class.java)
+        .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
 }

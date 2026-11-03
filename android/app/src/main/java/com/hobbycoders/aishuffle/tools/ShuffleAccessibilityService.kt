@@ -340,7 +340,7 @@ class ShuffleAccessibilityService : AccessibilityService() {
                 return ToolRegistry.error("stale_ref", "The screen changed or the command expired.")
             }
             clearSnapshot(); snapshot = Snapshot(pkg, window, fingerprint, SystemClock.elapsedRealtime(), result.refs)
-            return JSONObject().put("ok", true).put("package", pkg).put("snapshot", result.token).put("nodes", result.rows)
+            return ToolResultBounds.fit(JSONObject().put("ok", true).put("package", pkg).put("snapshot", result.token).put("nodes", result.rows))
         }
         val target = before!!.nodes[ref]!!
         if (snapshot !== before) return ToolRegistry.error("stale_ref", "Screen changed while awaiting approval.")

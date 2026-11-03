@@ -33,6 +33,7 @@ public class CoveredTargetActivity extends android.app.Activity {
                 case "swap": swapTracks(); break;
                 case "replace": replaceFirstTrack(); break;
                 case "dense": addRows(value); break;
+                case "longrows": for (int i = 0; i < rows.getChildCount(); i++) ((android.widget.TextView) rows.getChildAt(i)).setText(new String(new char[200]).replace('\0', '\u00e9')); break;
                 case "delay": rowDelay = value; break;
                 case "hang": lastRowDelay = value; break;
                 case "notify": sendNoise(); break;

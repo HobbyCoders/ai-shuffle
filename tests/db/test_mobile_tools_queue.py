@@ -156,6 +156,29 @@ def test_cancel_only_affects_live_commands_of_the_session(clock):
     assert _row(cid)["status"] == "cancelled"
 
 
+@pytest.mark.parametrize("claimed", [False, True])
+def test_cancel_returns_the_locked_prior_state_and_claim_history(clock, claimed):
+    _online()
+    cid = _enqueue()["id"]
+    if claimed:
+        queue.claim("a")
+    previous = queue.cancel(cid, "sess")
+    assert previous == {"status": "claimed" if claimed else "pending", "result": None, "claimed": claimed}
+    assert _row(cid)["status"] == "cancelled"
+    assert queue.claim("a") == []  # A cancelled pending command cannot race back into delivery.
+    assert queue.cancel(cid, "sess")["claimed"] is claimed
+    assert queue.cancel(cid, "other-session") is None
+
+
+def test_cancel_preserves_a_result_that_won_the_deadline_race(clock):
+    _online()
+    cid = _enqueue()["id"]
+    queue.claim("a")
+    assert queue.submit_result("a", cid, '{"ok":true}') is None
+    assert queue.cancel(cid, "sess") == {"status": "completed", "result": '{"ok":true}', "claimed": True}
+    assert _row(cid)["status"] == "completed"
+
+
 def test_purge_sweeps_and_is_throttled(clock):
     _online()
     old = _enqueue(ttl=1)["id"]
