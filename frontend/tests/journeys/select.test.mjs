@@ -30,6 +30,18 @@ for (const { name, change, problems, status } of [
 		change: (map) => { map.rules[0].journeys = journeys.slice(1); },
 		problems: [`journey "${journeys[0]}" has no rule of its own in map.json`],
 		status: 2
+	},
+	{
+		name: 'an unknown journey fails',
+		change: (map) => { map.rules[0].journeys.push('__selector_unknown_journey__'); },
+		problems: ['unknown journey "__selector_unknown_journey__" (selector contract fixture)'],
+		status: 2
+	},
+	{
+		name: 'a rule without why fails',
+		change: (map) => { delete map.rules[0].why; },
+		problems: ['a rule has no "why": ["frontend/tests/journeys/select.mjs"]'],
+		status: 2
 	}
 ]) {
 	test(name, (t) => {
