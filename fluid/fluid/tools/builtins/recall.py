@@ -120,6 +120,7 @@ def _fetch(ids: list[str], store: Any, project: str | None = None) -> ToolOutcom
     successor = _local_ids(store) if any(e.superseded_by for e, _ in hits) else {}
     lines: list[str] = []
     seen: set[str] = set()
+    answers = _answer_states(store, project) if any(_is_answer(e) for e, _ in hits) else {}
     for entry, archived in hits:
         seen.update({entry.id, f"{entry.origin}:{entry.id.split(':')[-1]}"})
         findings = screen_findings(entry.text) + screen_findings(entry.when or "")
@@ -128,12 +129,13 @@ def _fetch(ids: list[str], store: Any, project: str | None = None) -> ToolOutcom
                          f"{', '.join(dict.fromkeys(findings))}]")
             continue
         tags = _tags(entry, archived, successor)
-        if entry.when:
+        if entry.when and not _is_answer(entry):
             tags.insert(1, f"when: {entry.when}")
-        if entry.always:
+        if entry.always and not _is_answer(entry):
             tags.append("always applies")
-        lines.append(f"- [{entry.id}] {entry.text}  ({', '.join(tags)})")
-        if entry.conflicted:
+        label = _memory_label(entry, archived, answers)
+        lines.append(f"- [{label}] {entry.text}  ({', '.join(tags)})")
+        if entry.conflicted and not _is_answer(entry):
             lines.append(f"  Unresolved conflict; ask the user for the current fact, then correct "
                          f"[{entry.id}] revision {entry.revision} with Remember.")
     missing = [i for i in ids if i not in seen]
@@ -153,6 +155,26 @@ def _owner_questions(store, project, hits):
                if project is None or e.scope in ("global", project)]
     return [line for line in owner_conflict_lines(entries)
             if any(f"[{gid}]" in line for gid in ids)]
+
+
+def _is_answer(entry: Any) -> bool:
+    return str(entry.key or "").startswith("memory.coexist.")
+
+
+def _answer_states(store: Any, project: str | None) -> dict[str, bool]:
+    from fluid.codemode.preferences import coexistence_answer_states
+    return coexistence_answer_states([vars(e) for e in store.memories()
+                                     if project is None or e.scope in ("global", project)])
+
+
+def _memory_label(entry: Any, archived: bool, answers: dict[str, bool]) -> str:
+    if not _is_answer(entry):
+        return entry.id
+    state = ("current exact-pair coexistence answer; not a general owner rule"
+             if answers.get(entry.key) and not archived else
+             "stale coexistence answer; historical only; does not resolve any current question")
+    # Put validity BEFORE the historical answer, including if output is clipped.
+    return f"{entry.id}; {state}"
 
 
 def _tags(entry: Any, archived: bool, successor: dict[str, str]) -> list[str]:
@@ -208,7 +230,14 @@ def _lookup(query: str, limit: int, store: Any, project: str | None) -> ToolOutc
     conflicts = [e for e in store.memories() if e.conflicted and e.provenance != "tool"
                  and (project is None or e.scope in ("global", project))
                  and score(e.text + " " + (e.key or ""))]
+    # Concurrent owner wordings under one exact-pair key agree on closure.
+    # Make them retrievable, without the generic instruction to re-ask.
+    memory_hits.extend((e, False) for e in conflicts[:limit] if _is_answer(e)
+                       and all(found.id != e.id for found, _ in memory_hits))
+    answers = _answer_states(store, project) if any(_is_answer(e) for e, _ in memory_hits) else {}
     for entry in conflicts[:limit]:
+        if _is_answer(entry):
+            continue
         if entry.superseded_by:
             lines.append(f"- [{entry.id}] Unconfirmed replacement proposal [{entry.superseded_by}]; "
                          "both facts remain usable; neither overrides the other. "
@@ -228,12 +257,13 @@ def _lookup(query: str, limit: int, store: Any, project: str | None) -> ToolOutc
                 continue
             findings = screen_findings(entry.when or "")
             tags = _tags(entry, archived, successor)
-            if entry.when and not findings:
+            if entry.when and not findings and not _is_answer(entry):
                 tags.insert(1, f"when: {entry.when}")
-            if entry.always:
+            if entry.always and not _is_answer(entry):
                 tags.append("always applies")
             suffix = f"  ({', '.join(tags)})" if tags else ""
-            lines.append(f"- [{entry.id}] {entry.text}{suffix}")
+            label = _memory_label(entry, archived, answers)
+            lines.append(f"- [{label}] {entry.text}{suffix}")
         lines.extend(_owner_questions(store, project, memory_hits))
 
     skill_hits: list[tuple[int, Any, bool]] = []

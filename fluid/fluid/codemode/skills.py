@@ -1965,6 +1965,7 @@ class SkillStore:
 
         out_of_scope = 0
         held = 0
+        recall_only = 0
         other_checkout = 0
         checkout_leaf = re.split(r"[/\\]+", checkout.rstrip("/\\"))[-1] if checkout else None
         normalized_checkout = checkout_leaf.casefold() if checkout_leaf else None
@@ -2010,6 +2011,11 @@ class SkillStore:
                 out_of_scope += 1
                 continue
             if is_superseded(vars(entry)):
+                continue
+            # Pair answers are historical evidence, never general prompt rules.
+            # Recall labels their exact-pair validity explicitly.
+            if str(entry.key or "").startswith("memory.coexist."):
+                recall_only += 1
                 continue
             if entry.id in question_ids:
                 findings = screen_findings(entry.text) + screen_findings(entry.when or "")
@@ -2122,10 +2128,10 @@ class SkillStore:
             "always": len(shown_always),
             # An overflowed ALWAYS memory is in ``index`` now; count it once.
             "in_scope": (len(pinned) + len(shown_always) + len(identity) + len(index)
-                         + held + other_checkout),
+                         + held + other_checkout + recall_only),
             "over_budget": len(omitted),
             "out_of_scope": out_of_scope, "held": held, "other_checkout": other_checkout,
-            "archived": in_archive,
+            "archived": in_archive, "recall_only": recall_only,
             # Screened live facts only, as the snapshot renders them: callers
             # may retrieve omitted index lines, never withheld/conflicted/
             # foreign-checkout text via this field.

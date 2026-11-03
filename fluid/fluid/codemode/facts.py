@@ -778,7 +778,10 @@ class FactStore:
                 old = next((e for e in all_entries if e.get("scope", "global") == (scope or "global")
                             and ((e.get("worker") == local or (e.get("protected") and not e.get("worker")))
                                  if per_worker else visible_on(e, local))
-                            and ((key and e.get("key") == key) or fingerprint(e["text"]) == fp)), None)
+                            and ((key and e.get("key") == key) or (
+                                not str(key or "").startswith("memory.coexist.")
+                                and not str(e.get("key") or "").startswith("memory.coexist.")
+                                and fingerprint(e["text"]) == fp))), None)
             now = time.time()
             archived_old = bool(old) and any(e is old for e in doc["archived"])
             if replaces:

@@ -266,21 +266,23 @@ _JOB_WORDS: dict[str, frozenset[str]] = {
 # sentence's subject beside its positive parts ("backend: Sol"), then require
 # an actual assignment, not an anecdote that merely names a model and a job.
 _CLAUSE_RE = re.compile(r"[;\n—–]|[.!?](?=\s|$)")
-_ROUTING_STATEMENT = re.compile(
-    r"\b(?:use|uses|run|runs|route|routes|send|sends|prefer|prefers|pick|picks|default)\b"
-    r"|\bgo(?:es)?\s+to\b|(?:\bon\s+|:\s*)(?:"
-    + "|".join(sorted(_MODEL_NAMES)) + r")\b", re.I)
+# Noun phrases also assign models; exclude historical experiments instead of
+# restricting the vocabulary used to express an owner rule.
+_PAST_ROUTING_EVENT = re.compile(
+    r"\b(?:tried|tested|experimented|evaluated|used|ran|previously|formerly|yesterday)\b"
+    r"|\blast\s+(?:week|month|year|time|night)\b|\b\d+\s+\w+\s+ago\b", re.I)
+_CURRENT_BREAK = re.compile(r"\b(?:but|and)\s+(?=(?:now|currently|from\s+now|use|switch|move)\b)", re.I)
 
 
 def model_routing(text: str) -> dict[str, frozenset[str]]:
     """Positive routing statements only; mentioning a past model is not one."""
     routes: dict[str, frozenset[str]] = {}
-    for clause in _CLAUSE_RE.split((text or "").casefold()):
-        positive = " ".join(affirmed_clauses(clause))
-        if not _ROUTING_STATEMENT.search(positive) and not (
-                ":" in clause and _ROUTING_STATEMENT.search(clause)
-                and positive.strip()):
+    clauses = (part for sentence in _CLAUSE_RE.split((text or "").casefold())
+               for part in _CURRENT_BREAK.split(sentence))
+    for clause in clauses:
+        if _PAST_ROUTING_EVENT.search(clause):
             continue
+        positive = " ".join(affirmed_clauses(clause))
         # "code review" is a review, not code work.
         words = _words(re.sub(r"\bcode[\s-]+review", "review", positive))
         models = words & _MODEL_NAMES
@@ -353,11 +355,20 @@ COEXIST_KEY_PREFIX = "memory.coexist."
 
 
 def coexistence_key(old: dict, new: dict) -> str:
+    # Version 2 names independently hashed endpoints: answer validation is O(n),
+    # not a hash of every possible pair. The old opaque pair keys stay readable.
+    tokens = sorted(_coexistence_token(e) for e in (old, new))
+    return COEXIST_KEY_PREFIX + "v2." + ".".join(tokens)
+
+
+def _coexistence_value(e: dict) -> tuple:
     from fluid.codemode.facts import global_id
-    values = sorted((global_id(e), e["text"], e.get("when"), bool(e.get("always")),
-                     e.get("scope", "global"), e.get("worker")) for e in (old, new))
-    digest = hashlib.sha256(json.dumps(values, ensure_ascii=False).encode()).hexdigest()
-    return COEXIST_KEY_PREFIX + digest[:32]
+    return (global_id(e), e["text"], e.get("when"), bool(e.get("always")),
+            e.get("scope") or "global", e.get("worker"))
+
+
+def _coexistence_token(e: dict) -> str:
+    return hashlib.sha256(json.dumps(_coexistence_value(e), ensure_ascii=False).encode()).hexdigest()[:32]
 
 
 # This is a document-revision cache, NOT a time cache: sync, corrections,
@@ -372,9 +383,64 @@ def protected_conflicts(entries: list[dict], *, skip: set[str] | frozenset[str] 
                         limit: int = MAX_OPEN_CONFLICTS,
                         disjoint: bool = True) -> list[tuple[dict, dict, str]]:
     """Bounded questions for this exact snapshot; return the caller's rows."""
-    revision = tuple(tuple(e.get(f) for f in _CONFLICT_FIELDS) for e in entries)
-    refs = _cached_conflict_refs(revision, frozenset(skip), limit, disjoint)
+    refs = _cached_conflict_refs(_conflict_revision(entries), frozenset(skip), limit, disjoint)
     return [(entries[a], entries[b], reason) for a, b, reason in refs]
+
+
+def _conflict_revision(entries: list[dict]) -> tuple:
+    # Raw legacy rows and MemoryEntry rows must have identical scope semantics.
+    return tuple(tuple((e.get(f) or "global") if f == "scope" else e.get(f)
+                       for f in _CONFLICT_FIELDS) for e in entries)
+
+
+def coexistence_answer_states(entries: list[dict]) -> dict[str, bool]:
+    """Current exact-pair answers vs stale historical records (Recall only)."""
+    return dict(_cached_answer_matches(_conflict_revision(entries))[0])
+
+
+@lru_cache(maxsize=4)
+def _cached_answer_matches(revision: tuple) -> tuple:
+    from fluid.codemode.facts import global_id, is_superseded
+    from fluid.context.screening import screen_findings
+    rows = [dict(zip(_CONFLICT_FIELDS, values)) for values in revision]
+    active = [e for e in rows if e.get("protected") and not is_superseded(e)
+              and not e.get("retired_at") and e.get("provenance") != "tool" and e.get("text")]
+    answers = {e["key"] for e in active if str(e.get("key") or "").startswith(COEXIST_KEY_PREFIX)
+               and not screen_findings(e["text"]) and not screen_findings(e.get("when") or "")}
+    if not answers:
+        return (), frozenset()
+    # Replica-conflicted wordings of the same exact answer are both closure.
+    rules = [e for e in active if not e.get("conflicted")
+             and not str(e.get("key") or "").startswith(COEXIST_KEY_PREFIX)]
+    tokens = {_coexistence_token(e): e for e in rules}
+    states, pairs, legacy = {}, set(), set()
+    for key in answers:
+        parts = key[len(COEXIST_KEY_PREFIX):].split(".")
+        states[key] = False
+        if len(parts) == 3 and parts[0] == "v2":
+            a, b = (tokens.get(token) for token in parts[1:])
+            if a is not None and b is not None and a is not b:
+                states[key] = True
+                pairs.add(frozenset((global_id(a), global_id(b))))
+        else:
+            legacy.add(key)
+    # Compatibility with already issued opaque keys; serialize each endpoint
+    # once, not once for every candidate. No legacy record is rewritten/deleted.
+    if legacy:
+        values = sorted((_coexistence_value(e), global_id(e)) for e in rules)
+        encoded = [(json.dumps(value, ensure_ascii=False), gid) for value, gid in values]
+        for i, (first, a) in enumerate(encoded):
+            for second, b in encoded[i + 1:]:
+                key = COEXIST_KEY_PREFIX + hashlib.sha256(("[" + first + ", " + second + "]").encode()).hexdigest()[:32]
+                if key in legacy:
+                    states[key] = True
+                    pairs.add(frozenset((a, b)))
+                    legacy.remove(key)
+                    if not legacy:
+                        break
+            if not legacy:
+                break
+    return tuple(states.items()), frozenset(pairs)
 
 
 @lru_cache(maxsize=4)
@@ -409,9 +475,7 @@ def _find_protected_conflicts(entries: list[dict], *, skip: frozenset[str],
     owner = [e for e in entries
              if e.get("protected") and not is_superseded(e) and not e.get("conflicted")
              and not e.get("retired_at") and e.get("provenance") != "tool" and e.get("text")]
-    resolved = {e["key"] for e in owner
-                if str(e.get("key") or "").startswith(COEXIST_KEY_PREFIX)
-                and not screen_findings(e["text"])}
+    resolved_pairs = _cached_answer_matches(_conflict_revision(entries))[1]
     live = [e for e in owner
             if not str(e.get("key") or "").startswith((*_BIOGRAPHY_KEYS, COEXIST_KEY_PREFIX))]
     topics = {e["id"]: preference_topics(e["text"]) for e in live}
@@ -478,7 +542,7 @@ def _find_protected_conflicts(entries: list[dict], *, skip: frozenset[str],
             # replacement wording needed for automatic supersession.
             if not applicable[old["id"]] or not applicable[new["id"]]:
                 continue
-            if resolved and coexistence_key(old, new) in resolved:
+            if resolved_pairs and frozenset((global_id(old), global_id(new))) in resolved_pairs:
                 continue
             overlap = len(salient[old["id"]] & salient[new["id"]])
             candidates.append((strength, overlap, float(new.get("updated_at") or 0), old, new, reason))

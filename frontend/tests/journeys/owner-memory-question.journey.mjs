@@ -23,23 +23,30 @@ store = SkillStore(home / 'fluid' / 'skills')
 namespace = 'journey.owner_question.' + sys.argv[2] + '.'
 ctx = ToolCtx(extra={'memory_store': store})
 async def save(text, key):
+    # Replays deliberately restore only this disposable fixture's deleted
+    # identical answer; production deletion barriers remain unchanged.
     result = await handler({'text': text, 'key': key, 'user_requested': True,
+                            'restore': key.startswith('memory.coexist.'),
                             'when': 'When applying the synthetic journey owner rules'}, ctx)
     assert not result.is_error, result.text
 stage = sys.argv[3]
 if stage == 'seed':
-    asyncio.run(save(f'Synthetic journey owner rule {sys.argv[2]}: code work goes to Opus.', namespace + 'a'))
-    asyncio.run(save(f'Synthetic journey owner rule {sys.argv[2]}: code work goes to Sol.', namespace + 'b'))
+    for job in ('code', 'review'):
+        for model in ('Opus', 'Sol'):
+            asyncio.run(save(f'Synthetic journey owner rule {sys.argv[2]}: {job} work goes to {model}.',
+                             namespace + job + model))
 rows = [e for e in store._facts.snapshot()['entries'] if str(e.get('key') or '').startswith(namespace)]
-assert len(rows) == 2, 'only the two synthetic facts may be touched'
-key = coexistence_key(*rows)
+assert len(rows) == 4, 'only the four synthetic facts may be touched'
+keys = [coexistence_key(*(e for e in rows if e['key'].startswith(namespace + job)))
+        for job in ('code', 'review')]
 if stage == 'resolve':
-    asyncio.run(save(f'Both synthetic journey rules {sys.argv[2]} stand; ask which applies to the specific job.', key))
+    for key in keys:
+        asyncio.run(save('Both stand.', key))
 if stage == 'cleanup':
     for row in store._facts.snapshot()['entries']:
-        if row.get('key') == key or str(row.get('key') or '').startswith(namespace):
+        if row.get('key') in keys or str(row.get('key') or '').startswith(namespace):
             store.delete_memory(row['id'], expected_revision=row['revision'], explicit=True)
-print(json.dumps({'resolution_key': key}))
+print(json.dumps({'resolution_keys': keys}))
 `;
 
 function fixture(status, token, stage) {
@@ -85,8 +92,8 @@ await runJourney({
                 expect(before.includes('[owner question; unresolved conflict]'), 'the producing path must ask');
                 expect(before.includes('and model-routing authority'), 'both facts must remain usable');
                 expect(before.includes('do not silently choose a model for the contested job'), 'keep the ask rule');
-                const { resolution_key: key } = fixture(status, fixtureToken, 'resolve');
-                expect(before.includes(key), 'the prompt must offer the executable version-bound answer key');
+                const { resolution_keys: keys } = fixture(status, fixtureToken, 'resolve');
+                for (const key of keys) expect(before.includes(key), 'the prompt must offer both executable answer keys');
                 await mark('fresh session after owner answer');
                 // Reloading / restores the active chat. Use the real New session
                 // action instead of calling the fresh-context setup helper twice.
