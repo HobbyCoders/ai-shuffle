@@ -105,6 +105,10 @@ def _receipt_notes(receipt: dict[str, Any]) -> str:
                   + ", ".join(f"[{mid}]" for mid in receipt["replaced"]) + ".")
     for skipped in receipt.get("skipped") or ():
         notes += f"\nNot replaced: {skipped}."
+    if receipt.get("pair_answers"):
+        # These rows deliberately share prose but close different exact pairs;
+        # suggesting they replace each other would undo the job's answer.
+        return notes + f"\nCommitted all {len(receipt['pair_answers'])} exact-pair answers together."
     similar = receipt.get("similar") or ()
     if similar:
         # A hint only: nothing was changed. One retry with replaces folds them in.

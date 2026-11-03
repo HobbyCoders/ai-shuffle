@@ -10,7 +10,8 @@ import { PROJECT, expect, openNewChat, pickAccess, pickAgent, pickProject, typeA
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 
 const FIXTURE = String.raw`
-import asyncio, json, os, sys
+import asyncio, json, os, re, sys
+from itertools import combinations
 from pathlib import Path
 home = Path(sys.argv[1]).resolve()
 assert home.name == 'data' and home.parent.name.startswith('ai-shuffle-preview-')
@@ -29,7 +30,7 @@ async def save(text, key):
 stage = sys.argv[3]
 if stage == 'seed':
     for job in ('code', 'review'):
-        for model in ('Opus', 'Sol'):
+        for model in (('Opus', 'Sol', 'Sonnet', 'Haiku') if job == 'code' else ('Opus', 'Sol')):
             qualifier = 'Since last week ' if job == 'code' and model == 'Sol' else ''
             asyncio.run(save(f'Synthetic journey owner rule {sys.argv[2]}: {qualifier}{job} work goes to {model}.',
                              namespace + job + model))
@@ -40,15 +41,20 @@ if stage == 'seed':
     historical = next(e for e in store.memories() if e.key == historical_key)
     assert store.delete_memory(historical.id, expected_revision=historical.revision, explicit=True)
 rows = [e for e in store._facts.snapshot()['entries'] if str(e.get('key') or '').startswith(namespace)]
-assert len(rows) == 4, 'only the four synthetic facts may be touched'
-keys = [coexistence_key(*(e for e in rows if e['key'].startswith(namespace + job)))
-        for job in ('code', 'review')]
+assert len(rows) == 6, 'only the six synthetic facts may be touched'
+from fluid.codemode.preferences import owner_conflict_lines
+keys = re.findall(r"key='([^']+)'", '\n'.join(owner_conflict_lines(rows)))
+pair_keys = [coexistence_key(a, b) for job in ('code', 'review')
+             for a, b in combinations([e for e in rows if e['key'].startswith(namespace + job)], 2)]
 if stage == 'resolve':
+    assert len(keys) == 2, 'one owner answer per job, never six code questions'
     for key in keys:
         asyncio.run(save('Both stand.', key))
+    actual = {e.get('key') for e in store._facts.snapshot()['entries']}
+    assert set(pair_keys) <= actual, 'two Remember calls must commit all seven pair answers'
 if stage == 'cleanup':
     for row in store._facts.snapshot()['entries']:
-        if row.get('key') in keys or str(row.get('key') or '').startswith(namespace):
+        if row.get('key') in pair_keys or str(row.get('key') or '').startswith(namespace):
             store.delete_memory(row['id'], expected_revision=row['revision'], explicit=True)
 print(json.dumps({'resolution_keys': keys}))
 `;
@@ -93,7 +99,9 @@ await runJourney({
                 await typeAndSend(page, `${token}-before`);
                 await waitTurnSettled(page, { messagesAtLeast: 2 });
                 const before = await requestFor(status, `${token}-before`);
-                expect(before.includes('[owner question; unresolved conflict]'), 'the producing path must ask');
+                expect((before.match(/\[owner question; unresolved conflict\]/g) || []).length === 2,
+                    'four code rules and two review rules must produce two job questions');
+                expect(before.includes('review'), 'code questions must not crowd out the review job');
                 expect(before.includes('and model-routing authority'), 'both facts must remain usable');
                 expect(before.includes('do not silently choose a model for the contested job'), 'keep the ask rule');
                 const { resolution_keys: keys } = fixture(status, fixtureToken, 'keys');
