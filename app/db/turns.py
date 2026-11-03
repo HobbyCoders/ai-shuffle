@@ -1394,6 +1394,25 @@ def remove_queued_turn(
     return row
 
 
+def stop_queued_turns(session_id: str, turn_ids: List[str]) -> List[Dict[str, Any]]:
+    """Abort Stop's whole queue in one transaction, keeping each one's words.
+
+    The chat shows the rows one commit at a time. Written separately, each new
+    "Not sent" row would push the bubbles still waiting below it, so a reader
+    would see the transcript step down once per queued message.
+    """
+    removed: List[Dict[str, Any]] = []
+    with get_db() as conn:
+        for turn_id in turn_ids:
+            row = remove_queued_turn(turn_id, keep_unsent_words=True, _conn=conn)
+            if row is not None:
+                removed.append(row)
+    if removed:
+        from app.db import session_events
+        session_events.notify_session_write(session_id, "session_events")
+    return removed
+
+
 def retry_pair_compaction(
     continuation_id: str, attempt: int, *, emergency: bool = False,
 ) -> Optional[Dict[str, Any]]:

@@ -11,9 +11,11 @@ import {
 	chatIdByToken,
 	countUserRows,
 	expect,
+	gotoApp,
 	holdBootLoad,
 	openFromSidebar,
 	openNewChat,
+	pickAgent,
 	scriptTag,
 	scrollTranscriptTo,
 	seededChatId,
@@ -29,6 +31,139 @@ import {
 } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 import { STOP_SELECTOR, expectStopFollowsStreaming, markTime } from './lib/timeline.mjs';
+
+// Hosted journeys build shared desktop UI only. Explicitly opt into the native
+// phone shell locally, matching transcript-reader's --mobile-shell convention.
+const mobileShell = process.argv.includes('--mobile-shell');
+
+async function openStopChat(ctx) {
+	if (!mobileShell || ctx.variant.viewport !== 'phone') return openNewChat(ctx);
+	const { page, status } = ctx;
+	await gotoApp(page, status, '/mobile/');
+	await waitChat(page, { surface: 'new' }, { timeout: 90_000 });
+	const hero = page.getByRole('region', { name: 'New session' });
+	await hero.waitFor();
+	await pickAgent(page, hero);
+}
+
+/**
+ * Every painted frame from now until the returned function runs: where the row
+ * being read sits and, per queued message, how many copies show and where. Rows
+ * are read off the DOM, not the recorder's score, so a move under its threshold
+ * still shows.
+ */
+async function watchStopFrames(page, texts) {
+	await page.evaluate((texts) => {
+		const log = document.querySelector('[role="log"][aria-label="Conversation messages"]');
+		const logTop = log.getBoundingClientRect().top;
+		const rows = () => [...log.querySelectorAll('.chat-column > .msg-virtualized')];
+		const key = rows().find((el) => el.getBoundingClientRect().bottom > logTop + 1)?.dataset.transcriptKey;
+		const watch = (window.__stopFrames = { frames: [], running: true, startedAt: performance.now() });
+		const topOf = (el) => Math.round(el.getBoundingClientRect().top * 10) / 10;
+		const tick = () => {
+			if (!watch.running) return;
+			const anchor = rows().find((el) => el.dataset.transcriptKey === key);
+			watch.frames.push({
+				at: Math.round(performance.now() - watch.startedAt),
+				scrollTop: Math.round(log.scrollTop),
+				anchorTop: anchor ? topOf(anchor) : null,
+				messages: texts.map((text) => {
+					const has = (el) => (el.textContent || '').includes(text);
+					const bubbles = [...document.querySelectorAll('.pending-messages [role="article"]')].filter(has);
+					const notSent = [...document.querySelectorAll('[data-not-sent="true"]')].filter(has);
+					return { bubbles: bubbles.length, notSent: notSent.length, top: topOf(bubbles[0] ?? notSent[0] ?? log) };
+				})
+			});
+			requestAnimationFrame(tick);
+		};
+		requestAnimationFrame(tick);
+	}, texts);
+	return () =>
+		page.evaluate(() => {
+			const watch = window.__stopFrames;
+			watch.running = false;
+			return watch.frames;
+		});
+}
+
+/** One more line of the stopped reply can still arrive and nudge what is below it. */
+const REPLY_LINE_PX = 30;
+
+/** Stop with queued messages must not move what the person is reading. */
+function stopReadingPosition({ scrolled, queued = 3, overflows = false }) {
+	return {
+		async setup(ctx) {
+			await openStopChat(ctx);
+			await ctx.page.waitForTimeout(800);
+			await typeAndSend(ctx.page, `history tok-${uniq()} ${scriptTag(ctx.variant, 'long', { tps: 400 })}`);
+			await waitTurnSettled(ctx.page, { text: 'Here is a long answer', messagesAtLeast: 2, timeout: 90_000 });
+		},
+		async act({ page, mark, variant, log }) {
+			await mark('send');
+			await typeAndSend(page, `stream tok-${uniq()} ${scriptTag(variant, 'slow', { tps: 2 })}`);
+			await page.getByText(SLOW_REPLY.start, { exact: false }).first().waitFor({ timeout: 60_000 });
+			await waitChat(page, { streaming: 'true' });
+
+			await mark('queue');
+			const texts = Array.from({ length: queued }, () => `tok-${uniq()}`);
+			for (const text of texts) {
+				await typeAndSend(page, `queued ${text}`);
+				await page.locator('.pending-messages [role="article"]').filter({ hasText: text }).waitFor({ timeout: 5000 });
+			}
+			// Each one known to the server, so only Stop can change them from here.
+			await page.waitForFunction(
+				(n) => document.querySelectorAll('.pending-messages [data-queue-confirmed="true"]').length === n,
+				texts.length,
+				{ timeout: 30_000 }
+			);
+			if (scrolled) {
+				await mark('scroll up');
+				await scrollTranscriptTo(page, 0.2);
+				await page.waitForTimeout(400);
+			}
+			const before = await transcriptScroll(page);
+			expect(before.atBottom === !scrolled, `the reader starts ${scrolled ? 'scrolled up' : 'at the bottom'}: ${JSON.stringify(before)}`);
+
+			const collect = await watchStopFrames(page, texts);
+			await mark('stop');
+			await stopButton(page).click();
+			await waitChat(page, { streaming: 'false' }, { timeout: 15_000 });
+			for (const text of texts) {
+				await page.locator('[data-not-sent="true"]').filter({ hasText: text }).waitFor({ timeout: 5000 });
+			}
+			await page.getByText('[Stopped]', { exact: false }).first().waitFor({ timeout: 5000 });
+			await page.waitForTimeout(1000);
+			const frames = await collect();
+			const after = await transcriptScroll(page);
+
+			expect(frames.length > 10, `watched the frames across Stop (${frames.length})`);
+			const tops = frames.map((f) => f.anchorTop);
+			expect(tops.every((top) => top !== null), 'the row being read stayed mounted');
+			const anchorMoved = Math.max(...tops) - Math.min(...tops);
+			log(`row being read moved ${anchorMoved}px; scrollTop ${before.top} -> ${after.top}; ${frames.length} frames`);
+			const steps = frames.filter((f, i) => i === 0 || f.anchorTop !== frames[i - 1].anchorTop);
+			log(`row top by time: ${steps.map((f) => `${f.at}ms ${f.anchorTop} (scrollTop ${f.scrollTop})`).join(', ')}`);
+			expect(anchorMoved <= 1, `the row being read stayed put (moved ${anchorMoved}px)`);
+			expect(Math.abs(after.top - before.top) <= 1, `the scroll position held: ${before.top} -> ${after.top}`);
+			if (!overflows) {
+				expect(after.atBottom === !scrolled, `the reader is still ${scrolled ? 'scrolled up' : 'at the bottom'}: ${JSON.stringify(after)}`);
+			}
+
+			frames.forEach((frame, i) => {
+				frame.messages.forEach((message, m) => {
+					expect(message.bubbles + message.notSent === 1, `queued message ${m} shows exactly once in frame ${i}: ${JSON.stringify(message)}`);
+					const previous = frames[i - 1]?.messages[m];
+					if (!previous || !previous.bubbles !== !message.bubbles) return;
+					// Changing from bubble to row is the one move Stop is meant to make.
+					const moved = Math.abs(message.top - previous.top);
+					expect(moved <= REPLY_LINE_PX, `queued message ${m} did not jump in frame ${i}: moved ${moved}px as a ${message.bubbles ? 'bubble' : 'row'}`);
+				});
+			});
+			const kinds = new Set(frames.map((f) => f.messages.map((m) => (m.bubbles ? 'bubble' : 'row')).join()));
+			expect(kinds.size === 2, `all of them changed in the same frame, not one by one: ${[...kinds].join(' | ')}`);
+		}
+	};
+}
 
 await runJourney({
 	name: 'queue-while-busy',
@@ -209,6 +344,12 @@ await runJourney({
 				expectStopFollowsStreaming(recording, { from: markTime(recording, 'send') });
 			}
 		},
+		// Two rows fit under a pinned prompt, so the reader is still at the bottom.
+		{ name: 'stop-holds-the-reader-at-the-bottom', ...stopReadingPosition({ scrolled: false, queued: 2 }) },
+		// Three rows can run past a phone's fold. The settle pin keeps the prompt at
+		// the top, as at the end of any reply, so what the reader sees must not move.
+		{ name: 'stop-holds-the-reader-when-the-rows-overflow', ...stopReadingPosition({ scrolled: false, overflows: true }) },
+		{ name: 'stop-holds-the-reader-scrolled-up', ...stopReadingPosition({ scrolled: true }) },
 		{
 			// The server drops a restored row whether or not this page hears back, so
 			// the words must reach this chat's composer in every one of these cases.
