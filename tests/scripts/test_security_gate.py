@@ -365,6 +365,7 @@ def test_dependency_warnings_and_strict_failure(tmp_path, monkeypatch, capsys, s
         return subprocess.CompletedProcess(argv, 1, json.dumps(data), "")
 
     monkeypatch.setattr(dependency_audit, "command", run)
+    monkeypatch.setattr(dependency_audit, "run_audit", lambda args, **kwargs: run(["pip_audit", *args]))
     assert dependency_audit.audit(strict) == expected
     assert len(calls) == 2
     assert "--audit-level=high" in calls[1] and "--package-lock-only" in calls[1]
