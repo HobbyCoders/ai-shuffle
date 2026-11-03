@@ -11,6 +11,7 @@ import androidx.test.espresso.Espresso.onView
 import androidx.test.espresso.action.ViewActions.scrollTo
 import androidx.test.espresso.assertion.ViewAssertions.doesNotExist
 import androidx.test.espresso.assertion.ViewAssertions.matches
+import androidx.test.espresso.matcher.RootMatchers.withDecorView
 import androidx.test.espresso.matcher.ViewMatchers.isDisplayed
 import androidx.test.espresso.matcher.ViewMatchers.withContentDescription
 import androidx.test.espresso.matcher.ViewMatchers.withText
@@ -23,6 +24,8 @@ import com.hobbycoders.aishuffle.tools.DeviceToolsRuntime
 import com.hobbycoders.aishuffle.tools.ToolsPreferences
 import com.hobbycoders.aishuffle.ui.OfflineDemoActivity
 import com.hobbycoders.aishuffle.ui.ServerListActivity
+import com.hobbycoders.aishuffle.ui.SettingsActivity
+import org.hamcrest.Matchers.sameInstance
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -52,11 +55,42 @@ class OfflineDemoSmokeTest {
             while (evaluate(scenario, code) != "true") kotlinx.coroutines.delay(100)
         }
     }
+    /** Input delivery is not navigation completion: never let Espresso select the outgoing root. */
+    private inline fun <reified A : android.app.Activity> screenView(
+        matcher: org.hamcrest.Matcher<View>,
+    ): androidx.test.espresso.ViewInteraction {
+        val resumed = CountDownLatch(1)
+        val result = java.util.concurrent.atomic.AtomicReference<A>()
+        val monitor = androidx.test.runner.lifecycle.ActivityLifecycleMonitorRegistry.getInstance()
+        val callback = androidx.test.runner.lifecycle.ActivityLifecycleCallback { activity, stage ->
+            if (activity is A && stage == androidx.test.runner.lifecycle.Stage.RESUMED) {
+                result.set(activity)
+                resumed.countDown()
+            }
+        }
+        // Registration and initial inspection share the main thread, so an
+        // already-resumed destination or a later resume cannot be missed.
+        instrumentation.runOnMainSync {
+            monitor.addLifecycleCallback(callback)
+            monitor.getActivitiesInStage(androidx.test.runner.lifecycle.Stage.RESUMED)
+                .filterIsInstance<A>().singleOrNull()?.let { result.set(it); resumed.countDown() }
+        }
+        try {
+            assertTrue("The single navigation action did not resume ${A::class.java.simpleName}",
+                resumed.await(8, TimeUnit.SECONDS))
+        } finally {
+            instrumentation.runOnMainSync { monitor.removeLifecycleCallback(callback) }
+        }
+        val activity = requireNotNull(result.get())
+        awaitNativeWindow(activity)
+        android.util.Log.i("DemoNavigation", "Destination ${A::class.java.simpleName} resumed, focused and committed")
+        return onView(matcher).inRoot(withDecorView(sameInstance(activity.window.decorView)))
+    }
     private fun openSettings() {
         // Espresso's direct injector can beat WindowManager's input/surface
         // transaction even after focus. Reuse its acknowledged platform barrier
         // for one real tap, never a guessed quiet interval or a repeated gesture.
-        tapNative(onView(withContentDescription("Settings")))
+        tapNative(screenView<ServerListActivity>(withContentDescription("Settings")))
     }
     @Test fun settingsEntryNeedsNoAccountAndReturnsToSettings() {
         instrumentation.runOnMainSync {
@@ -65,16 +99,16 @@ class OfflineDemoSmokeTest {
             ServerStore.get(context).apply { getAll().forEach { remove(it.id) } }
         }
         ActivityScenario.launch<ServerListActivity>(Intent(context, ServerListActivity::class.java)).use {
-            onView(withText("Explore offline demo")).check(doesNotExist())
+            screenView<ServerListActivity>(withText("Explore offline demo")).check(doesNotExist())
             openSettings()
             repeat(2) {
-                tapNative(onView(withText("Explore offline demo")).perform(scrollTo()))
-                tapNative(onView(withText("Exit offline demo")))
-                onView(withText("Settings")).check(matches(isDisplayed()))
+                tapNative(screenView<SettingsActivity>(withText("Explore offline demo")).perform(scrollTo()))
+                tapNative(screenView<OfflineDemoActivity>(withText("Exit offline demo")))
+                screenView<SettingsActivity>(withText("Settings")).check(matches(isDisplayed()))
             }
-            tapNative(onView(withContentDescription("Back")))
-            onView(withText("Welcome to Shuffle")).check(matches(isDisplayed()))
-            onView(withText("Explore offline demo")).check(doesNotExist())
+            tapNative(screenView<SettingsActivity>(withContentDescription("Back")))
+            screenView<ServerListActivity>(withText("Welcome to Shuffle")).check(matches(isDisplayed()))
+            screenView<ServerListActivity>(withText("Explore offline demo")).check(doesNotExist())
         }
         assertNull(AccountStore(context).session())
         assertTrue(ServerStore.get(context).getAll().isEmpty())
@@ -122,12 +156,12 @@ class OfflineDemoSmokeTest {
                         ActivityScenario.launch<ServerListActivity>(Intent(context, ServerListActivity::class.java)).use { scenario ->
                             lateinit var workers: ServerListActivity
                             scenario.onActivity { workers = it }
-                            onView(withText("Workers")).check(matches(isDisplayed()))
-                            onView(withText("Explore offline demo")).check(doesNotExist())
+                            screenView<ServerListActivity>(withText("Workers")).check(matches(isDisplayed()))
+                            screenView<ServerListActivity>(withText("Explore offline demo")).check(doesNotExist())
                             openSettings()
                             assertEquals("Launch $launch must deliver one unobscured tap: $touches",
                                 listOf(android.view.MotionEvent.ACTION_DOWN to 0, android.view.MotionEvent.ACTION_UP to 0), gestures.toList())
-                            onView(withText("Settings")).check(matches(isDisplayed()))
+                            screenView<SettingsActivity>(withText("Settings")).check(matches(isDisplayed()))
                             if (launch == 0) {
                                 // Espresso can see Settings before the outgoing Workers
                                 // window is hidden. Do not ask that disappearing window
@@ -145,12 +179,12 @@ class OfflineDemoSmokeTest {
                                 }
                                 TestScreenshots.capture("offline-demo-after-settings-tap")
                             }
-                            tapNative(onView(withText("Explore offline demo")).perform(scrollTo()))
-                            tapNative(onView(withText("Exit offline demo")))
-                            onView(withText("Settings")).check(matches(isDisplayed()))
-                            tapNative(onView(withContentDescription("Back")))
-                            onView(withText("Workers")).check(matches(isDisplayed()))
-                            onView(withText("Explore offline demo")).check(doesNotExist())
+                            tapNative(screenView<SettingsActivity>(withText("Explore offline demo")).perform(scrollTo()))
+                            tapNative(screenView<OfflineDemoActivity>(withText("Exit offline demo")))
+                            screenView<SettingsActivity>(withText("Settings")).check(matches(isDisplayed()))
+                            tapNative(screenView<SettingsActivity>(withContentDescription("Back")))
+                            screenView<ServerListActivity>(withText("Workers")).check(matches(isDisplayed()))
+                            screenView<ServerListActivity>(withText("Explore offline demo")).check(doesNotExist())
                         }
                     }
                 } finally {

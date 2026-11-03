@@ -230,8 +230,8 @@ class PlayWorkflowTests(unittest.TestCase):
         self.assertNotIn("import androidx.test.espresso.action.ViewActions.click", source)
         self.assertNotIn(".perform(click())", source)
         self.assertNotIn("uiAutomation.waitForIdle(", source)
-        self.assertEqual(2, source.count('tapNative(onView(withText("Explore offline demo")).perform(scrollTo()))'))
-        self.assertEqual(2, source.count('tapNative(onView(withText("Exit offline demo")))'))
+        self.assertEqual(2, source.count('tapNative(screenView<SettingsActivity>(withText("Explore offline demo")).perform(scrollTo()))'))
+        self.assertEqual(2, source.count('tapNative(screenView<OfflineDemoActivity>(withText("Exit offline demo")))'))
         self.assertIn("repeat(10) { launch ->", source)
         self.assertIn("listOf(android.view.MotionEvent.ACTION_DOWN to 0, android.view.MotionEvent.ACTION_UP to 0)", source)
         helper = (ROOT / "android/app/src/androidTest/java/com/hobbycoders/aishuffle/NativeStateIdlingResource.kt").read_text()
@@ -243,6 +243,51 @@ class PlayWorkflowTests(unittest.TestCase):
             self.assertIn(f"automation.injectInputEvent({event}, true)", body)
         self.assertNotRegex(body, r"\b(?:click|performClick)\s*\(")
         self.assertNotIn("ACTION_CLICK", body)
+
+    def test_offline_demo_selects_only_the_resumed_focused_destination_root(self):
+        source = (ROOT / "android/app/src/androidTest/java/com/hobbycoders/aishuffle/OfflineDemoSmokeTest.kt").read_text()
+        # Input acknowledgement precedes a destination Activity's resume: API 34
+        # selected Workers at 07:03:40.443, before Settings resumed at .551.
+        signature = "private inline fun <reified A : android.app.Activity> screenView("
+        self.assertIn(signature, source, "Destination lookup must wait for its own Activity/root")
+        body = source.split(signature, 1)[1].split("    private fun openSettings()", 1)[0]
+        for guard in ("activity is A && stage == androidx.test.runner.lifecycle.Stage.RESUMED",
+                      "getActivitiesInStage(androidx.test.runner.lifecycle.Stage.RESUMED)",
+                      "resumed.await(8, TimeUnit.SECONDS)", "monitor.removeLifecycleCallback(callback)",
+                      "awaitNativeWindow(activity)",
+                      "onView(matcher).inRoot(withDecorView(sameInstance(activity.window.decorView)))"):
+            with self.subTest(guard=guard):
+                self.assertIn(guard, body)
+        self.assertLess(body.index("resumed.await("), body.index("awaitNativeWindow(activity)"))
+        self.assertLess(body.index("awaitNativeWindow(activity)"), body.index("onView(matcher)"))
+        self.assertEqual(1, source.count("onView("), "All navigation lookups must use screenView, not an outgoing default root")
+        for screen, target, count in (("ServerListActivity", 'withContentDescription("Settings")', 1),
+                                      ("SettingsActivity", 'withText("Explore offline demo")', 2),
+                                      ("OfflineDemoActivity", 'withText("Exit offline demo")', 2),
+                                      ("SettingsActivity", 'withText("Settings")', 3),
+                                      ("SettingsActivity", 'withContentDescription("Back")', 2)):
+            with self.subTest(screen=screen, target=target):
+                self.assertEqual(count, source.count(f"screenView<{screen}>({target})"))
+
+    def test_offline_demo_destination_guard_rejects_transition_mutations(self):
+        source = ROOT / "android/app/src/androidTest/java/com/hobbycoders/aishuffle/OfflineDemoSmokeTest.kt"
+        read_text = Path.read_text
+        original = source.read_text()
+        mutations = {
+            "missing focused frame": original.replace("awaitNativeWindow(activity)", "// missing focused frame"),
+            "wrong resumed stage": original.replace("Stage.RESUMED", "Stage.STARTED"),
+            "outgoing default root": original.replace(".inRoot(withDecorView(sameInstance(activity.window.decorView)))", ""),
+            "unscoped Back tap": original.replace('screenView<SettingsActivity>(withContentDescription("Back"))',
+                                                  'onView(withContentDescription("Back"))'),
+        }
+        for name, mutated in mutations.items():
+            with self.subTest(mutation=name):
+                self.assertNotEqual(original, mutated)
+                def read_source(path, *args, **kwargs):
+                    return mutated if path == source else read_text(path, *args, **kwargs)
+                with patch.object(Path, "read_text", new=read_source):
+                    with self.assertRaises(AssertionError):
+                        PlayWorkflowTests("test_offline_demo_selects_only_the_resumed_focused_destination_root").debug()
 
     def test_offline_demo_barrier_guard_rejects_helper_mutations(self):
         helper = ROOT / "android/app/src/androidTest/java/com/hobbycoders/aishuffle/NativeStateIdlingResource.kt"
