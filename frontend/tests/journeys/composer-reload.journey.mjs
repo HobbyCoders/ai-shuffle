@@ -12,7 +12,7 @@
 // --mobile-shell runs the phone variants in the built /mobile/ app (CI's hosted
 // journeys build only the shared UI).
 import { runJourney } from './runner.mjs';
-import { SEEDED, composer, expect, gotoApp, openFromSidebar, openNewChat, settleServiceWorker, waitChat, waitChatOpen } from './lib/app.mjs';
+import { SEEDED, composer, expect, gotoApp, openFromSidebar, openNewChat, settleServiceWorker, sidebarRow, waitChat, waitChatOpen } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 import { expectComposerPositions } from './lib/timeline.mjs';
 
@@ -37,14 +37,20 @@ const sampleComposerTop = () => {
 
 const openChat = (title) => async (ctx) => {
 	const { page, status, variant } = ctx;
-	if (mobileShell && variant.viewport === 'phone') {
+	const inMobileShell = mobileShell && variant.viewport === 'phone';
+	if (inMobileShell) {
 		await page.goto(new URL('/mobile/', status.urls.ui).toString());
 		await composer(page).waitFor({ timeout: 90_000 });
 	} else {
 		await openNewChat(ctx);
 	}
 	await settleServiceWorker(page, status);
-	if (title) {
+	if (!title) return;
+	if (inMobileShell) {
+		// The phone shell has a drawer rather than the sidebar's show button.
+		await page.getByRole('button', { name: /^Open menu/ }).click();
+		await sidebarRow(page, title).click();
+	} else {
 		await openFromSidebar(page, title);
 	}
 };
