@@ -214,14 +214,15 @@ def test_version_names_are_registry_exact_not_fuzzy(mock_db, wording):
 
 
 def test_native_name_matching_does_not_authorize_owner_forbidden_fable(mock_db):
-    choice = model_override.resolve("Claude Fable 5")
+    choice = model_override.resolve("FABLE")
     assert choice.model == "fable"  # eligibility is unchanged, not permission
     assert not model_override.memory_names(choice.model, "Never use any Fable model")
 
-@pytest.mark.parametrize("wording", ["claude-opus-5", "Opus 5"])
+@pytest.mark.parametrize("wording, refused", [("claude-opus-5", True), ("Opus 5.5", True),
+    ("claude-opus-4-7", True), ("opus[1m]", True), ("OPUS", False)])
 @pytest.mark.parametrize("surface", ["task", "swarm", "start"])
 @pytest.mark.asyncio
-async def test_versioned_name_reaches_each_orchestration_surface(chats, monkeypatch, wording, surface):
+async def test_native_family_only_on_each_orchestration_surface(chats, monkeypatch, wording, refused, surface):
     from fluid.tools.registry import ToolCtx
     from app.core import task_dispatch, session_orchestration, swarm, provider_agent
     from app.core.provider_agent import WorkerOutcome
@@ -235,6 +236,10 @@ async def test_versioned_name_reaches_each_orchestration_surface(chats, monkeypa
     if surface == "start":
         outcome = await session_orchestration.make_handler(lambda: caller)("start", {
             "title": "Review", "prompt": "Review", "request_id": "versioned", "model": wording}, ToolCtx())
+        if refused:
+            assert outcome.is_error and "family name" in outcome.text and "Choose one of:" in outcome.text
+            assert not seen and not prompts
+            return
         assert not outcome.is_error, outcome.text
         import json
         child = sessions.get_session(json.loads(outcome.text)["session_id"])
@@ -242,6 +247,10 @@ async def test_versioned_name_reaches_each_orchestration_surface(chats, monkeypa
     elif surface == "task":
         result = await task_dispatch.dispatch_task_tool({
             "agent": "pinned", "prompt": "go", "mode": "sync", "model": wording}, caller_session_id=caller)
+        if refused:
+            assert not result["ok"] and "family name" in result["error"] and "Choose one of:" in result["error"]
+            assert not seen and not prompts
+            return
         assert result["ok"], result
         assert seen[0]["model_id"] == "opus" and seen[0]["provider_id"] is None
     else:
@@ -263,8 +272,14 @@ async def test_versioned_name_reaches_each_orchestration_surface(chats, monkeypa
         coordinator = swarm.coordinators[caller]
         key = outcome.background_task.task_id
         await coordinator.jobs[key]
-        assert coordinator.snapshot(key)["status"] == "completed"
-        assert seen[0]["model_id"] == "opus" and seen[0]["provider_id"] is None
+        snapshot = coordinator.snapshot(key)
+        if refused:
+            assert snapshot["status"] == "failed"
+            assert "family name" in str(snapshot) and "Choose one of:" in str(snapshot)
+            assert not seen
+        else:
+            assert snapshot["status"] == "completed"
+            assert seen[0]["model_id"] == "opus" and seen[0]["provider_id"] is None
         task_registry.clear_session(caller)
     assert not prompts
 

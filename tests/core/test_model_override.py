@@ -171,7 +171,13 @@ async def test_stored_legacy_settings_and_profile_pins_still_start_without_an_ov
         db.create_profile(pid, pid, None, config)
         result = await _task({"agent": pid})
         assert result["ok"], result
-        assert seen[-1]["model_id"] == expected
+        # Saved profile values retain the existing storage path; explicit
+        # resolve() is never called. The execution leg migrates them separately.
+        stored = seen[-1]["model_id"]
+        assert stored == legacy
+        assert leg_model_id(None, stored) == expected
+        from app.core.model_registry import resolve_api_model_id
+        assert resolve_api_model_id(stored) == {"opus": "claude-opus-5", "sonnet": "claude-sonnet-5"}[expected]
     assert prompts == []
 
 
@@ -1191,7 +1197,7 @@ async def test_omitted_model_inherits_and_the_receipt_names_it(chats):
 async def test_the_inherited_model_named_again_needs_no_prompt(chats):
     _, _, prompts, _ = chats
     _turn("caller", "user", "work", profile="agent")
-    outcome = await _start({**ARGS, "model": "claude-sonnet-5"})
+    outcome = await _start({**ARGS, "model": "SONNET"})
     assert not outcome.is_error, outcome.text
     assert prompts == [] and "model_override" not in json.loads(outcome.text)
 
@@ -1305,10 +1311,10 @@ def test_startsession_spec_takes_a_string_and_states_the_rule(chats):
     assert "See Task.model for host validation and provider rules" in swarm_description
     assert "under the same rule as Task's model" in swarm_description
     for description in descriptions:
-        assert "Pass the model exactly as the user or memory named it" in description
+        assert "For native Claude use a family name" in description
         assert "saved owner model-routing memory" in description
         assert "Never fabricate a model id" in description
-        assert "model IDs and display names" in description
+        assert "For provider models, pass the id or display name" in description
         assert "case, spaces and dashes" in description
         assert "start nothing" in description and "ambiguous" in description
         assert "receiving worker's own eligibility" in description
