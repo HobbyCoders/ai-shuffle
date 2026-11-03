@@ -63,10 +63,14 @@ export function uiSessionTag(sessionId: string | null | undefined): string {
 	return `s:${hash.toString(36).padStart(6, '0').slice(-6)}`;
 }
 
-/** Where the composer sits: under the new-chat hero, docked at the bottom, or replaced (archived chat). */
-export function uiComposer(input: { archived: boolean; emptyHero: boolean }): UiComposer {
+/**
+ * Where the composer sits: under the new-chat hero, docked at the bottom, or
+ * replaced (archived chat). The phone shell docks it under its hero too
+ * (mobile.css), so there an empty chat reads as bottom.
+ */
+export function uiComposer(input: { archived: boolean; emptyHero: boolean; mobile: boolean }): UiComposer {
 	if (input.archived) return 'hidden';
-	return input.emptyHero ? 'centre' : 'bottom';
+	return input.emptyHero && !input.mobile ? 'centre' : 'bottom';
 }
 
 export function uiFlag(value: unknown): 'true' | 'false' {

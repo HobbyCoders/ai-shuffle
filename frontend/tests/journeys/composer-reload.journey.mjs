@@ -24,12 +24,15 @@ const longDraft = (token) => Array.from({ length: LONG_DRAFT_LINES }, (_, i) => 
 /** Plain text of the composer, without the newlines the editor adds between blocks. */
 const composerText = (page) => composer(page).innerText();
 
-/** Records the composer's rendered top each frame on the next page load. */
+/** Records the composer's rendered top and the empty chat hero's width each frame on the next page load. */
 const sampleComposerTop = () => {
 	window.__composerTops = [];
+	window.__heroWidths = [];
 	const sample = () => {
 		const slot = document.querySelector('.input-slot');
 		if (slot) window.__composerTops.push(slot.getBoundingClientRect().top);
+		const hero = document.querySelector('.cleared-hero');
+		if (hero) window.__heroWidths.push(hero.getBoundingClientRect().width);
 		requestAnimationFrame(sample);
 	};
 	requestAnimationFrame(sample);
@@ -92,6 +95,8 @@ const reloadCase = ({ name, title, settled, position, draft }) => ({
 			const tops = await page.evaluate(() => window.__composerTops);
 			const travel = Math.max(...tops) - Math.min(...tops);
 			expect(tops.length > 0 && travel <= 2, `the composer stayed put on screen over ${tops.length} frames (moved ${Math.round(travel)}px)`);
+			const widths = await page.evaluate(() => window.__heroWidths);
+			expect(widths.length === 0 || Math.max(...widths) - Math.min(...widths) <= 1, `the hero kept its width while the chat opened (${Math.round(Math.min(...widths))} to ${Math.round(Math.max(...widths))}px)`);
 		}
 		if (draft) {
 			expect((await composerText(page)).split(`${name} line 1\n`).length === 2, 'the saved draft came back once');
@@ -103,8 +108,9 @@ const reloadCase = ({ name, title, settled, position, draft }) => ({
 			await page.waitForTimeout(800);
 		}
 	},
-	verify({ recording }) {
-		expectComposerPositions(recording, [position]);
+	verify({ recording, variant }) {
+		// The phone shell docks the composer under its hero too.
+		expectComposerPositions(recording, [mobileShell && variant.viewport === 'phone' ? 'bottom' : position]);
 	}
 });
 

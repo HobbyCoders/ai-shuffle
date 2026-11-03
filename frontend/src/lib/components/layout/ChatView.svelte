@@ -262,7 +262,7 @@
 	// and 0 until then.
 	const uiSignature = $derived({
 		session: uiSessionTag($activeSession.sessionId),
-		composer: uiComposer({ archived: Boolean(archivedSessionId), emptyHero: showEmptyHero }),
+		composer: uiComposer({ archived: Boolean(archivedSessionId), emptyHero: showEmptyHero, mobile: platform.isMobile }),
 		messages: mirrorSync.waiting ? '0' : String($activeSession.messages.length + ($activeSession.pendingPeerMessages?.length ?? 0)),
 		loading: uiFlag(
 			$activeSession.isLoadingSession || $activeSession.isRestoringSession || historyUnconfirmed
@@ -930,6 +930,9 @@
 		display: flex;
 		flex-direction: column;
 		align-items: center;
+		/* Full width, not its content's: the title's web font and the hint both
+		   change while it opens, and that must not resize the hero (#1049). */
+		width: 100%;
 		gap: 8px;
 		padding: 2rem 2rem 1.25rem;
 		text-align: center;

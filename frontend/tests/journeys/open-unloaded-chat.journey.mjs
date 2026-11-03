@@ -47,14 +47,17 @@ const HYDRATION_CEILING_MS = Number(feedSource.match(/export const HYDRATION_CEI
 expect(Number.isFinite(HYDRATION_CEILING_MS), 'read the production hydration ceiling');
 const SHORT_CEILING_MS = 2_000;
 
+/** The phone shell docks the composer under its hero, so it never leaves the bottom. */
+const inPhoneShell = (variant) => mobileShell && variant.viewport === 'phone';
+
 /** The composer takes exactly these positions over the case. */
-const composer = (...positions) => ({ recording }) => expectComposerPositions(recording, positions);
+const composer = (...positions) => ({ recording, variant }) => expectComposerPositions(recording, inPhoneShell(variant) ? ['bottom'] : positions);
 
 /** What each target looks like once open. */
 const OPENED = {
 	long: (page) => waitChatOpen(page, { messagesAtLeast: 50 }),
 	cleared: async (page) => {
-		await waitChat(page, { surface: 'cleared', loading: 'false', composer: 'centre', session: /^s:/ });
+		await waitChat(page, { surface: 'cleared', loading: 'false', composer: mobileShell ? /^(centre|bottom)$/ : 'centre', session: /^s:/ });
 		await page.getByText('Conversation cleared', { exact: false }).waitFor();
 		await page.waitForTimeout(1500);
 	}
@@ -439,13 +442,13 @@ async function waitPastCeiling(page, kind) {
 	await page.waitForTimeout(600);
 }
 
-const neverCleared = (...positions) => ({ recording }) => {
+const neverCleared = (...positions) => ({ recording, variant }) => {
 	// A case may start on the new-session screen; from the open on, the chat
 	// must never read as new, and never as cleared at all.
 	const opened = (recording?.timeline || []).find(entry => entry.kind === 'mark')?.t ?? 0;
 	expect(!anyFrame(recording, s => s.surface === 'cleared'), 'an unconfirmed history never painted as a cleared chat');
 	expect(!anyFrame(recording, s => s.surface === 'new', { from: opened }), 'an opened chat never painted as a new chat');
-	expectComposerPositions(recording, positions);
+	expectComposerPositions(recording, inPhoneShell(variant) ? ['bottom'] : positions);
 };
 
 const pastCeilingSwitch = ({ fail = false } = {}) => ({
