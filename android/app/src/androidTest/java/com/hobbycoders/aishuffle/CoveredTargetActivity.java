@@ -4,7 +4,7 @@ package com.hobbycoders.aishuffle;
 public class CoveredTargetActivity extends android.app.Activity {
     static final String COMMAND = "com.hobbycoders.aishuffle.test.COVERED_TARGET";
     static final String RESTING = "Taps: 0";
-    private static final int TOP = 240, MOVED_TOP = 440, BLIP_MS = 150;
+    private static final int TOP = 240, MOVED_TOP = 440, BLIP_MS = 150, TEXT_BLIP_MS = 400;
     private int taps = 0;
     private android.widget.LinearLayout layout, tracks, rows;
     private android.widget.TextView status;
@@ -19,6 +19,7 @@ public class CoveredTargetActivity extends android.app.Activity {
             int value = parts.length > 1 ? Integer.parseInt(parts[1]) : 0;
             switch (parts[0]) {
                 case "text": status.setText("Different content"); break;
+                case "textblip": status.setText("Different content"); status.postDelayed(() -> status.setText(RESTING), TEXT_BLIP_MS); break;
                 case "swap": swapTracks(); break;
                 case "replace": replaceFirstTrack(); break;
                 case "dense": addRows(value); break;

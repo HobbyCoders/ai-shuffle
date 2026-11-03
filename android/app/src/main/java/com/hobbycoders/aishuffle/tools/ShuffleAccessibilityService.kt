@@ -25,6 +25,7 @@ class ShuffleAccessibilityService : AccessibilityService() {
     /** A reference is bound to one source node at one place in the tree, with the exact contents it had when captured. */
     private class Target(val node: AccessibilityNodeInfo, val ordinal: Int, val row: ScreenPrint)
     private data class Snapshot(val pkg: String, val window: Int, val fingerprint: ScreenPrint, val created: Long, val nodes: Map<String, Target>)
+    private class Watch(val key: Any, val read: (Boolean) -> FenceRead)
     private class Captured(val verdict: FenceRead, val token: String, val refs: Map<String, Target>, val rows: JSONArray)
     private var snapshot: Snapshot? = null
     @Volatile private var revision = 0L
@@ -36,6 +37,7 @@ class ShuffleAccessibilityService : AccessibilityService() {
     private var consentId: String? = null
     private var consentTargetValid: ((Boolean) -> FenceRead)? = null
     private var sentinelCheck: Job? = null
+    private var sentinelEvent: String? = null
     companion object {
         @Volatile var current: ShuffleAccessibilityService? = null
             private set
@@ -45,33 +47,38 @@ class ShuffleAccessibilityService : AccessibilityService() {
     }
     override fun onServiceConnected() { current = this; ToolsPreferences(this).setCrossAppEnabled(false) }
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        if (event == null) return
-        val read = sentinel() ?: return
-        // Cached first, on this thread: this runs on every event, and an exact cached match needs no IPC.
-        val started = System.currentTimeMillis()
-        val cached = read(false)
-        val verdict = if (System.currentTimeMillis() - started >= AppControlFence.EVENT_READ_MS) FenceRead.UNCONFIRMED else cached
-        when (verdict) {
-            FenceRead.SAME -> Unit
-            FenceRead.CHANGED -> invalidate("event=${event.eventType} ownPackage=${event.packageName == packageName}")
-            FenceRead.UNCONFIRMED -> if (sentinelCheck?.isActive != true) sentinelCheck = scope.launch {
-                val confirmed = AppControlFence.settle(AppControlFence.READ_MS + AppControlFence.SETTLE_MS, SystemClock::elapsedRealtime) {
-                    val watched = sentinel() ?: return@settle FenceRead.SAME
-                    offMain(System.currentTimeMillis() + AppControlFence.READ_MS) { watched(true) } ?: FenceRead.CHANGED
-                }
-                if (!confirmed) invalidate("settle")
-            }
+        if (event == null || sentinel() == null) return
+        sentinelEvent = "event=${event.eventType} ownPackage=${event.packageName == packageName}"
+        if (sentinelCheck?.isActive != true) sentinelCheck = scope.launch { checkSentinel() }
+    }
+    /**
+     * Off the main thread too: a cached read still calls into the target on a cache miss, which can
+     * block for seconds on a hung app. Events during a check are folded into one more check.
+     */
+    private suspend fun checkSentinel() {
+        while (true) {
+            val cause = sentinelEvent ?: return
+            sentinelEvent = null
+            val watch = sentinel() ?: continue
+            fun watched() = sentinel()?.key === watch.key
+            val cached = offMain(System.currentTimeMillis() + AppControlFence.READ_MS) { watch.read(false) } ?: FenceRead.UNCONFIRMED
+            val holds = cached == FenceRead.SAME || (cached == FenceRead.UNCONFIRMED && AppControlFence.settle(AppControlFence.READ_MS + AppControlFence.SETTLE_MS, SystemClock::elapsedRealtime) {
+                if (!watched()) FenceRead.SAME else offMain(System.currentTimeMillis() + AppControlFence.READ_MS) { watch.read(true) } ?: FenceRead.CHANGED
+            })
+            // A verdict on something no longer vouched for must not cancel what replaced it, which gets its own check.
+            if (!watched()) { if (sentinelEvent == null) sentinelEvent = cause }
+            else if (!holds) invalidate(if (cached == FenceRead.CHANGED) cause else "settle")
         }
     }
-    /** What this service is currently vouching for, if anything. Takes main-thread state; its result can read off it. */
-    private fun sentinel(): ((Boolean) -> FenceRead)? = consentTargetValid ?: snapshot?.let { captured -> { fresh ->
-        val until = readUntil(fresh, Long.MAX_VALUE)
-        val root = safeRoot(until)
+    /** What this service is currently vouching for, if anything. Takes main-thread state; its read runs off the main thread. */
+    private fun sentinel(): Watch? = consentTargetValid?.let { Watch(it, it) } ?: snapshot?.let { captured -> Watch(captured) { fresh ->
+        val until = readUntil(Long.MAX_VALUE)
+        val root = allowedRoot()
         if (root == null) FenceRead.CHANGED else try {
             if (root.windowId == captured.window && root.packageName?.toString() == captured.pkg) compare(captured.fingerprint, root, fresh, ReadLimit(until, System::currentTimeMillis)) else FenceRead.CHANGED
         } finally { root.recycle() }
     } }
-    private fun readUntil(fresh: Boolean, limit: Long) = minOf(limit, System.currentTimeMillis() + if (fresh) AppControlFence.READ_MS else AppControlFence.EVENT_READ_MS)
+    private fun readUntil(limit: Long) = minOf(limit, System.currentTimeMillis() + AppControlFence.READ_MS)
     /**
      * One read off the main thread, so Deny, Stop, expiry and the event fence keep running through
      * it, even if a single call into a hung target blocks for seconds. The wait ends at the read's
@@ -173,10 +180,14 @@ class ShuffleAccessibilityService : AccessibilityService() {
             return use(target)
         } finally { windowsNow.forEach { it.recycle() } }
     }
-    private fun safeRoot(until: Long = System.currentTimeMillis() + AppControlFence.READ_MS): AccessibilityNodeInfo? = withActiveApp { target ->
+    /** The active window's root, if it belongs to an allowed app. Proving reads run the safety checks on every node themselves. */
+    private fun allowedRoot(): AccessibilityNodeInfo? = withActiveApp { target ->
         val root = target.root ?: return@withActiveApp rejectedRoot("missing_window_root")
         val pkg = root.packageName?.toString()
-        if (pkg !in ToolsPreferences(this).allowedApps || pkg !in AppControlPolicy.candidates(this) || unsafe(root, 0, ReadLimit(until, System::currentTimeMillis))) { root.recycle(); rejectedRoot("not_allowed_or_unsafe") } else root
+        if (pkg !in ToolsPreferences(this).allowedApps || pkg !in AppControlPolicy.candidates(this)) { root.recycle(); rejectedRoot("not_allowed") } else root
+    }
+    private fun safeRoot(): AccessibilityNodeInfo? = allowedRoot()?.let { root ->
+        if (unsafe(root, 0, ReadLimit(readUntil(Long.MAX_VALUE), System::currentTimeMillis))) { root.recycle(); rejectedRoot("unsafe") } else root
     }
     private fun blocked(node: AccessibilityNodeInfo) = node.isPassword || // fail closed; never descend into a password subtree
         sensitive.containsMatchIn("${node.text?.toString().orEmpty()} ${node.contentDescription?.toString().orEmpty()}")
@@ -198,7 +209,7 @@ class ShuffleAccessibilityService : AccessibilityService() {
     /**
      * With [fresh], every node is re-read past the accessibility cache, which can retain a bad read
      * until the next event. Null if [limit] ended the read, a node has gone, or anything unsafe has
-     * appeared since the cached safety scan: none of those proved the screen.
+     * appeared: none of those proved the screen.
      */
     private fun fingerprint(root: AccessibilityNodeInfo, fresh: Boolean, limit: ReadLimit, onNode: NodeVisitor? = null): ScreenPrint? {
         val exact = StringBuilder(); val identity = StringBuilder(); var ordinal = 0
@@ -242,8 +253,8 @@ class ShuffleAccessibilityService : AccessibilityService() {
     private suspend fun stableFingerprint(pkg: String, window: Int, deadline: Long): ScreenPrint? =
         AppControlFence.stable(deadline - System.currentTimeMillis(), SystemClock::elapsedRealtime) {
             offMain(deadline) {
-                val until = readUntil(true, deadline)
-                val root = safeRoot(until)
+                val until = readUntil(deadline)
+                val root = allowedRoot()
                 if (root == null) null else try {
                     if (root.windowId != window || root.packageName?.toString() != pkg) null
                     else fingerprint(root, fresh = true, ReadLimit(until, System::currentTimeMillis))
@@ -261,14 +272,14 @@ class ShuffleAccessibilityService : AccessibilityService() {
             if (ref == null) "protected_screen" else "stale_ref", if (ref == null) "Screen is no longer available, or keeps changing." else "Read the current screen again; this reference is stale.")
         // After the baseline wait: a fence check already running on an older snapshot must not cancel this fresh read.
         val version = revision
-        // Runs off the main thread when fresh, except where a cached event read needs an answer at once.
+        // Always off the main thread.
         fun read(fresh: Boolean, limit: Long, onNode: NodeVisitor? = null): FenceRead {
             if (revision != version || System.currentTimeMillis() >= limit) {
                 fenceTrace("command=$name revision=$version->$revision expired=${System.currentTimeMillis() >= limit}")
                 return FenceRead.CHANGED
             }
-            val until = readUntil(fresh, limit)
-            val root = safeRoot(until) ?: return FenceRead.CHANGED
+            val until = readUntil(limit)
+            val root = allowedRoot() ?: return FenceRead.CHANGED
             return try {
                 if (root.windowId == window && root.packageName?.toString() == pkg) compare(fingerprint, root, fresh, ReadLimit(until, System::currentTimeMillis) { revision != version }, onNode) else FenceRead.CHANGED
             } finally { root.recycle() }

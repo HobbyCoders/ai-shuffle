@@ -272,16 +272,25 @@ class CrossAppFenceTest {
         assertEquals("stale_ref", status(tapping).getString("status"))
         assertNotTapped()
     }
-    @Test fun denyStillWorksDuringASlowRead() {
-        fixture("dense:100"); fixture("delay:10") // About a second per read, every one of them off the main thread.
-        val tapping = tap(read(waitSeconds = 15))
-        allow()
-        assertTrue(touch("Deny"))
-        assertEquals("denied", status(tapping, 15).getString("status"))
+    @Test fun contentBlipUnderThePanelIsRefused() {
+        val tapping = tap(read())
+        panelUp(); fixture("textblip")
+        assertEquals("denied", status(tapping).getString("status"))
+        assertNotTapped()
+    }
+    @Test fun denyWorksDuringASlowRead() {
+        fixture("dense:100")
+        val tapping = tap(read())
+        panelUp(); fixture("delay:25") // No read can finish, or reach its 2 s limit, before the assertion below.
+        assertTrue(touch("Allow once")); assertTrue(touch("Deny"))
+        val started = System.currentTimeMillis()
+        assertEquals("denied", status(tapping).getString("status"))
+        assertTrue("Took ${System.currentTimeMillis() - started} ms", System.currentTimeMillis() - started < 1_000)
+        fixture("delay:0")
         assertNotTapped()
     }
     @Test fun denseSlowScreenIsApprovedOnACleanRead() {
-        fixture("dense:100"); fixture("delay:8") // Each read outlasts the retry window; a clean one must still count.
+        fixture("dense:100"); fixture("delay:5") // Each read outlasts the retry window; a clean one must still count.
         val tapping = tap(read(waitSeconds = 15)); allow()
         assertEquals("performed", status(tapping, 15).getString("status"))
         assertTapped(1)

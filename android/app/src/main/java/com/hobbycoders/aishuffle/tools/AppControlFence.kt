@@ -33,8 +33,6 @@ internal object AppControlFence {
     const val SETTLE_MS = 500L
     /** One fresh read of a tree, which costs a call into the target app per node. */
     const val READ_MS = 2_000L
-    /** A cached read on the main thread for an accessibility event. Past this it is redone off the main thread. */
-    const val EVENT_READ_MS = 50L
     const val MAX_NODES = 300
     const val MAX_DEPTH = 20
     private const val STEP_MS = 25L
