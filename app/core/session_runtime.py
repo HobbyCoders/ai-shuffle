@@ -37,6 +37,7 @@ import asyncio
 import json
 import logging
 import time
+from datetime import datetime, timezone
 from weakref import WeakValueDictionary
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Coroutine, Dict, List, Optional, Set
@@ -859,6 +860,7 @@ class SessionRuntime:
         self._progress_watchdog: Optional[asyncio.Task] = None
         self._stop_generation: Optional[int] = None
         self._claimed_turn: Optional[Dict[str, Any]] = None
+        self.live_since: Optional[datetime] = None
 
     def _resolve_principal(self, session_row: Optional[Dict[str, Any]]) -> None:
         """Settle who this turn runs as. Synchronous (DB reads): run off-loop.
@@ -1096,6 +1098,7 @@ class SessionRuntime:
             # boot-wired executor → get_live_runtime(sid).interrupt(mode)) can
             # reach us. Self-guarded pop in the outer finally.
             _live_runtimes[sid] = self
+            self.live_since = datetime.now(timezone.utc)
             from app.core.lifecycle_events import enqueue
             if not (self.turn.get("payload") or {}).get("continued_turn"):
                 enqueue("started", sid, tid)
@@ -3190,12 +3193,14 @@ class SessionRuntime:
         recorded_source: Optional[str] = None
         from app.core.query_session_lifecycle import capture_stop_scope, stop_all_background_tasks
 
-        if self._replaced_by_newer_runtime():
-            logger.info("SessionRuntime: a newer turn runs on %s; not stopping it", sid)
-            return "interrupting"
         # What runs now is this turn's or older. The read below can outlast the
         # turn, and neither it nor the database may hold up the provider signal.
-        scope = capture_stop_scope(sid)
+        # With a newer turn already live, the older work still ends and its own
+        # does not. One whose start this cannot place spares everything.
+        successor = _live_runtimes.get(sid) if self._replaced_by_newer_runtime() else None
+        scope = capture_stop_scope(sid) if successor is None else capture_stop_scope(
+            sid, older_than=getattr(successor, "live_since", None) or datetime.min.replace(tzinfo=timezone.utc),
+        )
 
         async def read_row() -> Optional[Dict[str, Any]]:
             try:
@@ -3222,7 +3227,10 @@ class SessionRuntime:
                 return
             payload = row.get("payload") or {}
             stop_source = payload.get("interrupt_source", "user_stop")
-            user_stop = stop_source in {"user_stop", "user_stopped"}
+            # Without a receipt, a Stop this late could not tell the newer
+            # turn's input from what it applies to: it ends only named work.
+            user_stop = (stop_source in {"user_stop", "user_stopped"}
+                         and (successor is None or turns_db.STOP_RECEIPT_KEY in payload))
             await stop_all_background_tasks(
                 sid, user_stop=user_stop,
                 **({"source": stop_source} if not user_stop else {}),
@@ -3359,7 +3367,12 @@ class SessionRuntime:
         from app.core.task_registry import task_registry
 
         sid = self.session_id
-        if not turns_db.outlives_stop(self._claimed_turn, task_registry.stop_input_cutoff(sid)):
+        # With no known cutoff, a person's message is not refused: nothing says
+        # the Stop applies to it (``note_stop_incomplete``).
+        fresh = (bool(((self._claimed_turn or {}).get("payload") or {}).get(turns_db.PERSON_INPUT_KEY))
+                 if task_registry.stop_admission_incomplete(sid)
+                 else turns_db.outlives_stop(self._claimed_turn, task_registry.stop_input_cutoff(sid)))
+        if not fresh:
             return True
         if task_registry.clear_user_stop(sid):
             logger.info("SessionRuntime: turn %s came after the Stop on %s; released the latch",

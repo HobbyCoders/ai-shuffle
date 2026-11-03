@@ -1192,3 +1192,150 @@ def test_other_missing_terminals_keep_the_general_message(monkeypatch):
     message = pa._no_terminal_event_error("worker-1", "turn-1")
     assert message.startswith("The worker produced no terminal turn event")
     assert "database" not in message
+
+
+async def _late_stop_reaches_the_old_runtime(*, successor_since):
+    """The next turn is live here before this runtime sees the Stop on the old one."""
+    from app.core import session_runtime as sr
+    from app.db import turns as turns_db
+
+    turn = turns_db.enqueue_turn(SID, "user", prompt="hi", profile_id="default")
+    turns_db.start_turn(turn["id"], None, "runner")
+    turns_db.interrupt_turn(SID, "stop", stop_background=True, source="user_stop")
+    turns_db.enqueue_turn(SID, "user", prompt="next", profile_id="default",
+                          payload={turns_db.PERSON_INPUT_KEY: True})
+    old = sr.SessionRuntime(turn)
+    newer = sr.SessionRuntime(turn)
+    newer.live_since = successor_since
+    signal = AsyncMock()
+    sr._live_runtimes[SID] = newer
+    try:
+        with patch("app.core.query_session_lifecycle.interrupt_session", new=signal):
+            await old.interrupt("stop", escalation_timeout=0.01)
+            steps = [task for task in asyncio.all_tasks()
+                     if "_run_interrupt_step" in task.get_coro().__qualname__]
+            if steps:
+                await asyncio.wait(steps, timeout=20)
+    finally:
+        sr._live_runtimes.pop(SID, None)
+    return signal
+
+
+def _second_worker():
+    from app.core import provider_agent_supervisor as sup
+    from app.core.task_registry import task_registry
+
+    task_registry.start_task(SID, "worker-b", "agent", "worker-b")
+    return sup.register_worker(sup.WorkerRecord(
+        parent_session_id=SID, worker_session_id="worker-b", task_id="worker-b",
+        tool_use_id="worker-b", background=True,
+    ))
+
+
+async def test_a_stop_seen_after_the_next_turn_ends_only_the_older_worker(real_worker):
+    from datetime import datetime, timezone
+
+    from app.core.task_registry import task_registry
+
+    time.sleep(0.002)
+    since = datetime.now(timezone.utc)
+    time.sleep(0.002)
+    next_turns_worker = _second_worker()
+
+    signal = await _late_stop_reaches_the_old_runtime(successor_since=since)
+
+    assert real_worker.torn_down is True
+    assert task_registry.get_task(SID, "worker-a")["status"] == "killed"
+    assert next_turns_worker.torn_down is False
+    assert task_registry.get_task(SID, "worker-b")["status"] == "running"
+    signal.assert_not_awaited()
+    # The Stop's latch does not outlive its cleanup: the newer turn is the answer.
+    assert not task_registry.is_user_stopped(SID)
+
+
+async def test_a_stop_seen_after_the_next_turn_spares_a_worker_it_resumed(real_worker):
+    from datetime import datetime, timezone
+
+    from app.core.task_registry import task_registry
+
+    time.sleep(0.002)
+    since = datetime.now(timezone.utc)
+    time.sleep(0.002)
+    task_registry.complete_task(SID, "worker-a", "completed")
+    task_registry.resume_task(SID, "worker-a")
+
+    await _late_stop_reaches_the_old_runtime(successor_since=since)
+
+    assert real_worker.torn_down is False
+    assert task_registry.get_task(SID, "worker-a")["status"] == "running"
+
+
+async def test_a_stop_that_cannot_place_the_next_turn_ends_nothing(real_worker):
+    signal = await _late_stop_reaches_the_old_runtime(successor_since=None)
+
+    assert real_worker.torn_down is False
+    signal.assert_not_awaited()
+
+
+async def test_a_stop_retries_a_failed_receipt_read(monkeypatch):
+    from app.core import query_session_lifecycle as qsl
+    from app.core.task_registry import task_registry
+    from app.db import turns as turns_db
+
+    monkeypatch.setattr(qsl, "_STOP_RECEIPT_RETRY_DELAYS", (0,))
+    task_registry.clear_user_stop(SID)
+    real = turns_db.read_stop_receipt
+    answers = [RuntimeError("database away")]
+
+    def flaky(session_id):
+        if answers:
+            raise answers.pop()
+        return real(session_id)
+
+    try:
+        with patch.object(turns_db, "read_stop_receipt", new=flaky):
+            counts = await qsl.enter_user_stop(SID)
+        assert "incomplete" not in counts
+        assert task_registry.stop_input_cutoff(SID) is not None
+    finally:
+        task_registry.clear_user_stop(SID)
+
+
+async def test_a_stop_with_no_receipt_reports_it_and_ends_only_named_work(monkeypatch, real_worker):
+    from app.core import query_session_lifecycle as qsl
+    from app.core import remote_task
+    from app.core.task_registry import task_registry
+    from app.db import turns as turns_db
+
+    monkeypatch.setattr(qsl, "_STOP_RECEIPT_RETRY_DELAYS", ())
+    sweep = AsyncMock(return_value=[])
+    with patch.object(turns_db, "read_stop_receipt", side_effect=RuntimeError("database away")), \
+            patch.object(remote_task, "stop_noticed_children", new=sweep):
+        assert (await qsl.enter_user_stop(SID))["incomplete"] is True
+        task_registry.clear_user_stop(SID)
+        await qsl.stop_all_background_tasks(SID, user_stop=True)
+
+    assert task_registry.stop_admission_incomplete(SID)
+    assert real_worker.torn_down is True  # named when the Stop began
+    sweep.assert_not_awaited()  # read off the session as it is now
+
+
+def test_a_stop_with_no_cutoff_refuses_only_what_no_person_sent():
+    from app.core import session_runtime as sr
+    from app.core.task_registry import task_registry
+    from app.db import turns as turns_db
+
+    task_registry.clear_user_stop(SID)
+    task_registry.mark_user_stopped(SID)
+    runtime = sr.SessionRuntime({"id": "t", "session_id": SID, "payload": {}})
+    try:
+        runtime._claimed_turn = {"payload": {turns_db.PERSON_INPUT_KEY: True}, "insert_order": 1}
+        assert runtime._stop_reaches_this_turn() is True  # still reading it
+        task_registry.note_stop_incomplete(SID)
+        runtime._claimed_turn = {"payload": {}, "insert_order": 1}
+        assert runtime._stop_reaches_this_turn() is True
+        runtime._claimed_turn = {"payload": {turns_db.PERSON_INPUT_KEY: True}, "insert_order": 1}
+        assert runtime._stop_reaches_this_turn() is False
+        assert not task_registry.is_user_stopped(SID)
+    finally:
+        task_registry.clear_user_stop(SID)

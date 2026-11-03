@@ -7,6 +7,7 @@ Extracted from query_engine.py to isolate session lifecycle management.
 import asyncio
 import logging
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Optional
 
 from app.core.session_pool import get_session_pool
@@ -358,6 +359,73 @@ async def stop_session_task(session_id: str, task_id: str, *, source: str = "use
     return {"ok": False, "kind": "agent", "detail": "task not found"}
 
 
+_STOP_RECEIPT_RETRY_DELAYS = (0.2, 0.5)
+# Lifted by the sweep below at most this many a pass; a session outside it is still
+# lifted when anything acts on it (:func:`reconcile_user_stop`).
+_STOP_SWEEP_BATCH = 200
+
+
+async def reconcile_user_stop(session_id: str) -> bool:
+    """Whether nothing holds this session under a Stop, once the database is asked.
+
+    A person's message lifts the latch only on the install it was sent to. Any
+    other install holding the latch learns of it here, before refusing work. Only
+    a message above the Stop's cutoff counts; until the Stop has read its cutoff
+    the latch holds, and a Stop that could not read one has no grounds to refuse
+    a person's waiting message. Costs nothing unless the session is latched.
+    """
+    from app.core.task_registry import task_registry
+    from app.db import turns as turns_db
+
+    if not task_registry.is_user_stopped(session_id):
+        return True
+    generation = task_registry.stop_generation(session_id)
+    cutoff = task_registry.stop_input_cutoff(session_id)
+    try:
+        if cutoff is not None:
+            newer = await asyncio.to_thread(turns_db.person_input_after, session_id, cutoff)
+        elif task_registry.stop_admission_incomplete(session_id):
+            newer = await asyncio.to_thread(turns_db.person_input_queued, session_id)
+        else:
+            return False
+    except Exception:  # noqa: BLE001 — unanswered, the latch keeps holding.
+        logger.warning("Stop: reading newer input failed for %s", session_id, exc_info=True)
+        return False
+    if (newer and task_registry.stop_generation(session_id) == generation
+            and task_registry.clear_user_stop(session_id)):
+        logger.info("Stop: a newer message reached %s; released the latch", session_id)
+    return not task_registry.is_user_stopped(session_id)
+
+
+async def reconcile_user_stops() -> None:
+    """Lift this install's latches a person has answered on another install.
+
+    The latch's many synchronous readers cannot ask the database themselves, so
+    each answers correctly from the next pass on. Never raises.
+    """
+    from app.core.task_registry import task_registry
+    from app.db import turns as turns_db
+
+    sessions = task_registry.user_stopped_sessions()[-_STOP_SWEEP_BATCH:]
+    held = {sid: (task_registry.stop_input_cutoff(sid), task_registry.stop_generation(sid))
+            for sid in sessions}
+    try:
+        newer = await asyncio.to_thread(
+            turns_db.sessions_with_person_input_after,
+            {sid: cutoff for sid, (cutoff, _generation) in held.items() if cutoff is not None},
+        ) if any(cutoff is not None for cutoff, _generation in held.values()) else []
+    except Exception:  # noqa: BLE001 — the next pass asks again.
+        logger.warning("Stop: reading newer input failed", exc_info=True)
+        newer = []
+    for sid in newer:
+        if (task_registry.stop_generation(sid) == held[sid][1]
+                and task_registry.clear_user_stop(sid)):
+            logger.info("Stop: a newer message reached %s; released the latch", sid)
+    for sid in sessions:
+        if task_registry.stop_admission_incomplete(sid):
+            await reconcile_user_stop(sid)
+
+
 @dataclass
 class _UserStop:
     """One Stop and its receipt: what it applies to, fixed when it was admitted.
@@ -385,11 +453,22 @@ class _UserStop:
         from app.db import turns as turns_db
 
         if self.receipt is None:
-            try:
-                receipt = await asyncio.to_thread(turns_db.read_stop_receipt, self.session_id)
-            except Exception:  # noqa: BLE001 — the runtime gates still hold the queue.
-                logger.warning("Stop: reading what session %s holds failed", self.session_id,
-                               exc_info=True)
+            receipt: Optional[dict] = None
+            for delay in (*_STOP_RECEIPT_RETRY_DELAYS, None):
+                try:
+                    receipt = await asyncio.to_thread(turns_db.read_stop_receipt, self.session_id)
+                    break
+                except Exception:  # noqa: BLE001 — reported below if it never answers.
+                    logger.warning("Stop: reading what session %s holds failed", self.session_id,
+                                   exc_info=True)
+                if delay is not None:
+                    await asyncio.sleep(delay)
+            if receipt is None:
+                # Named work still ends, and only that. See ``overtaken``.
+                logger.error("Stop: session %s was stopped without knowing what it applies to: "
+                             "older queued turns, wakes and parks may survive it", self.session_id)
+                if self._latch_held():
+                    task_registry.note_stop_incomplete(self.session_id)
                 receipt = {}
             if not self._latch_held():
                 # A message lifted the latch during that read, and the read may
@@ -408,7 +487,7 @@ class _UserStop:
         from app.core.task_registry import task_registry
         from app.db import turns as turns_db
 
-        if not self._latch_held():
+        if not self._latch_held() or task_registry.stop_admission_incomplete(self.session_id):
             return True
         try:
             newer = await asyncio.to_thread(
@@ -441,10 +520,26 @@ class StopScope:
     worker_sessions: list[str]
     worker_shells: dict[str, set[str]]
     runs: dict[str, Any]
+    # Something newer already runs, so this names only what predates it, and
+    # nothing here may be read off the session as it is now.
+    older_only: bool = False
 
 
-def capture_stop_scope(session_id: str) -> StopScope:
-    """Synchronous, so nothing can start between the caller's check and this."""
+def _started_before(started_at: Any, moment: datetime) -> bool:
+    """Unknown is not older: what it cannot place, a Stop leaves running."""
+    try:
+        return datetime.fromisoformat(started_at) < moment
+    except (TypeError, ValueError):
+        return False
+
+
+def capture_stop_scope(session_id: str, *, older_than: Optional[datetime] = None) -> StopScope:
+    """Synchronous, so nothing can start between the caller's check and this.
+
+    ``older_than`` is when a newer turn took over this session on this install. A
+    run's start token (:meth:`TaskRegistry.task_incarnation`) comes from the same
+    clock and a resume renews it, so a run started before then is the old turn's.
+    """
     from app.core.task_registry import task_registry
 
     active = task_registry.get_active(session_id)
@@ -477,7 +572,16 @@ def capture_stop_scope(session_id: str) -> StopScope:
         task_id: task_registry.task_incarnation(session_id, task_id)
         for task_id in (*(t.get("id") for t in active if t.get("id")), *worker_sessions)
     }
-    return StopScope(active, worker_sessions, worker_shells, runs)
+    if older_than is None:
+        return StopScope(active, worker_sessions, worker_shells, runs)
+    older = {task_id for task_id, started in runs.items() if _started_before(started, older_than)}
+    return StopScope(
+        [task for task in active if task.get("id") in older],
+        [worker for worker in worker_sessions if worker in older],
+        {worker: shells for worker, shells in worker_shells.items() if worker in older},
+        {task_id: runs[task_id] for task_id in older},
+        older_only=True,
+    )
 
 
 async def enter_user_stop(session_id: str, *, stop: Optional[_UserStop] = None) -> dict:
@@ -585,11 +689,14 @@ async def enter_user_stop(session_id: str, *, stop: Optional[_UserStop] = None) 
             "parked=%d)",
             session_id, stop.first, wakeups_cancelled, queued_aborted, parked_settled,
         )
+    from app.core.task_registry import task_registry
+
     return {
         "latched": stop.first,
         "wakeups_cancelled": wakeups_cancelled,
         "queued_aborted": queued_aborted,
         "parked_settled": parked_settled,
+        **({"incomplete": True} if task_registry.stop_admission_incomplete(session_id) else {}),
     }
 
 
@@ -749,7 +856,9 @@ async def stop_all_background_tasks(
         return now is None or now == scope.runs.get(task_id)
 
     async def overtaken() -> bool:
-        return stop is not None and await stop.overtaken()
+        # Asked either way: this may be what lifts the latch this Stop just set.
+        newer = stop is not None and await stop.overtaken()
+        return newer or scope.older_only
 
     spared: list[dict] = []
     if not include_shells:

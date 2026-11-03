@@ -632,14 +632,38 @@ def _stop_receipt(cursor: Any, session_id: str) -> Dict[str, Any]:
     cursor.execute("SELECT token FROM handoff_wakes WHERE session_id=%s AND finalized=FALSE",
                    (session_id,))
     handoffs = [row["token"] for row in cursor.fetchall()]
+    cursor.execute("SELECT NOW() AS stopped_at")
+    stopped_at = cursor.fetchone()["stopped_at"]
     return {"input_cutoff": cutoff, "queued": queued, "parks": parks,
-            "wakes": wakes, "handoffs": handoffs}
+            "wakes": wakes, "handoffs": handoffs,
+            # The database's clock, which also stamps a wake's ``created_at``:
+            # a wake armed before this is cancelled however its delete went.
+            "stopped_at": stopped_at.isoformat() if hasattr(stopped_at, "isoformat") else stopped_at}
 
 
 def read_stop_receipt(session_id: str) -> Dict[str, Any]:
-    """The receipt of a Stop with no live turn to record it on."""
+    """The receipt of a Stop with no live turn to record it on.
+
+    Kept on the session's newest turn, however it ended, so a wake's claim can
+    honour it on any install. In its own transaction: a held row must not cost
+    the read, and the Stop still ends what it names here if this write fails.
+    """
     with get_db() as conn:
-        return _stop_receipt(conn.cursor(), session_id)
+        receipt = _stop_receipt(conn.cursor(), session_id)
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT id, payload FROM turns WHERE session_id=%s "
+                           "ORDER BY insert_order DESC, created_at DESC, id DESC LIMIT 1 FOR UPDATE",
+                           (session_id,))
+            newest = _row(cursor.fetchone())
+            if newest is not None:
+                cursor.execute("UPDATE turns SET payload=%s WHERE id=%s",
+                               (json.dumps({**newest["payload"], STOP_RECEIPT_KEY: receipt}), newest["id"]))
+    except Exception:  # noqa: BLE001 — the local latch still holds wakes on this install.
+        logger.warning("Stop: recording the receipt of session %s failed; another install "
+                       "could still fire a wake it could not cancel", session_id, exc_info=True)
+    return receipt
 
 
 def person_input_after(session_id: str, input_cutoff: Optional[int]) -> bool:
@@ -654,6 +678,33 @@ def person_input_after(session_id: str, input_cutoff: Optional[int]) -> bool:
             (session_id, input_cutoff),
         )
         return cursor.fetchone() is not None
+
+
+def person_input_queued(session_id: str) -> bool:
+    """A person's message still waiting, for a Stop that never learned its cutoff."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT 1 AS waiting FROM turns WHERE session_id=%s AND state='queued' "
+            "AND payload ->> 'person_input' IS NOT NULL LIMIT 1",
+            (session_id,),
+        )
+        return cursor.fetchone() is not None
+
+
+def sessions_with_person_input_after(cutoffs: Dict[str, int]) -> List[str]:
+    """Of these sessions, those where a person has sent anything above the cutoff."""
+    if not cutoffs:
+        return []
+    terms = " OR ".join(["(session_id=%s AND insert_order>%s)"] * len(cutoffs))
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"SELECT DISTINCT session_id FROM turns WHERE ({terms}) "
+            "AND payload ->> 'person_input' IS NOT NULL",
+            tuple(value for pair in cutoffs.items() for value in pair),
+        )
+        return [row["session_id"] for row in cursor.fetchall()]
 
 
 def outlives_stop(turn: Optional[Dict[str, Any]], input_cutoff: Optional[int]) -> bool:

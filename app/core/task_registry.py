@@ -380,6 +380,7 @@ class TaskRegistry:
         self._user_stopped: Dict[str, float] = {}
         self._stop_generations: Dict[str, int] = {}
         self._stop_cutoffs: Dict[str, int] = {}
+        self._stop_incomplete: set[str] = set()
         self._stop_supervisors: Dict[str, set] = {}
         # session_id -> {child_launch_tuid -> owner_launch_tuid} (B-1). A grand-
         # child background task's launch tool_use_id mapped to the launch
@@ -753,6 +754,7 @@ class TaskRegistry:
             self.note_stop_cutoff(session_id, input_cutoff)
             return False
         self._stop_cutoffs.pop(session_id, None)
+        self._stop_incomplete.discard(session_id)
         self.note_stop_cutoff(session_id, input_cutoff)
         self._stop_generations[session_id] = self.stop_generation(session_id) + 1
         # Bounded: the latch is normally released by the user's very next
@@ -775,9 +777,23 @@ class TaskRegistry:
         """The newest input the latest Stop applies to (``turns.STOP_RECEIPT_KEY``)."""
         if input_cutoff is not None:
             self._stop_cutoffs[session_id] = max(input_cutoff, self._stop_cutoffs.get(session_id, 0))
+            self._stop_incomplete.discard(session_id)
 
     def stop_input_cutoff(self, session_id: str) -> Optional[int]:
         return self._stop_cutoffs.get(session_id)
+
+    def note_stop_incomplete(self, session_id: str) -> None:
+        """This Stop could not read what it applies to. It holds what it named
+        locally, but with no cutoff it has no grounds to refuse a person's message."""
+        if session_id not in self._stop_cutoffs:
+            self._stop_incomplete.add(session_id)
+
+    def stop_admission_incomplete(self, session_id: str) -> bool:
+        return session_id in self._stop_incomplete
+
+    def user_stopped_sessions(self) -> List[str]:
+        """Oldest latch first."""
+        return list(self._user_stopped)
 
     def is_user_stopped(self, session_id: str) -> bool:
         """True while ``session_id`` is under a user Stop with no newer message."""
@@ -1913,6 +1929,7 @@ class TaskRegistry:
         self._user_stopped.clear()
         self._stop_generations.clear()
         self._stop_cutoffs.clear()
+        self._stop_incomplete.clear()
         self._stop_supervisors.clear()
         self._child_owner.clear()
         self._terminal_notified.clear()

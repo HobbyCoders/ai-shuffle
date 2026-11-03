@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import nullcontext
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from app.db.base import get_db, get_cursor, rows_to_list
@@ -38,11 +39,15 @@ def create_wakeup(
     model: Optional[str] = None,
     source: str = "schedule_wakeup",
     instance_id: Optional[str] = None,
+    created_at: Any = None,
 ) -> Dict[str, Any]:
     """Insert a pending wakeup and return the persisted row as a dict.
 
     ``model`` is the scheduling turn's effective model; the wake replays it as a
     query-level model override so it never fires on the profile default.
+
+    ``created_at`` is when the wake was first armed, for a retry of it: every rule
+    that sets a wake against a person's message or a Stop reads this.
     """
     _ph = ph()
     with get_db() as conn:
@@ -50,11 +55,14 @@ def create_wakeup(
         cursor.execute(
             f"""INSERT INTO pending_wakeups
                 (id, session_id, profile_id, project_id, prompt, reason, model,
-                 source, instance_id, fire_at)
-                VALUES ({_ph}, {_ph}, {_ph}, {_ph}, {_ph}, {_ph}, {_ph}, {_ph}, {_ph}, {_ph})""",
+                 source, instance_id, fire_at, created_at)
+                VALUES ({_ph}, {_ph}, {_ph}, {_ph}, {_ph}, {_ph}, {_ph}, {_ph}, {_ph}, {_ph},
+                        COALESCE({_ph}, NOW()))""",
             (id, session_id, profile_id, project_id, prompt, reason, model,
-             source, instance_id, float(fire_at)),
+             source, instance_id, float(fire_at), created_at),
         )
+        cursor.execute(f"SELECT created_at FROM pending_wakeups WHERE id = {_ph}", (id,))
+        created_at = cursor.fetchone()["created_at"]
     return {
         "id": id,
         "session_id": session_id,
@@ -66,6 +74,7 @@ def create_wakeup(
         "source": source,
         "instance_id": instance_id,
         "fire_at": float(fire_at),
+        "created_at": created_at,
     }
 
 
@@ -75,15 +84,54 @@ def claim_wakeup(wakeup_id: str) -> bool:
     Returns True iff this call won the delete (the row existed and is now gone).
     A losing caller (already fired / claimed by a peer install or a rehydrated
     timer) gets False and must NOT fire.
+
+    A wake armed before a Stop is gone too, and also gets False: the Stop's own
+    delete can time out behind a held row, and this is where any install meets
+    what it recorded. A profile-removed notice is not work, and still goes out.
     """
     _ph = ph()
     with get_db() as conn:
         cursor = get_cursor(conn)
         cursor.execute(
+            f"SELECT session_id, source, created_at FROM pending_wakeups WHERE id = {_ph}",
+            (wakeup_id,),
+        )
+        row = cursor.fetchone()
+        cursor.execute(
             f"DELETE FROM pending_wakeups WHERE id = {_ph}", (wakeup_id,)
         )
         deleted = cursor.rowcount
-    return bool(deleted and deleted > 0)
+        if not (deleted and deleted > 0):
+            return False
+        if row and row["source"] != "profile_cancelled" and _stopped_since(
+            cursor, row["session_id"], row["created_at"],
+        ):
+            logger.info("wakeup %s (session %s) dropped: a Stop since it was armed cancelled it",
+                        wakeup_id, row["session_id"])
+            return False
+    return True
+
+
+def _instant(value: Any) -> Optional[datetime]:
+    try:
+        moment = value if isinstance(value, datetime) else datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+    return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+
+
+def _stopped_since(cursor: Any, session_id: str, armed_at: Any) -> bool:
+    """Whether a recorded Stop (``turns.STOP_RECEIPT_KEY``) came after this moment."""
+    armed = _instant(armed_at)
+    if armed is None:
+        return False
+    cursor.execute(
+        f"SELECT payload -> 'stop_receipt' ->> 'stopped_at' AS stopped_at FROM turns "
+        f"WHERE session_id = {ph()} AND payload -> 'stop_receipt' ->> 'stopped_at' IS NOT NULL",
+        (session_id,),
+    )
+    return any((stopped := _instant(row["stopped_at"])) is not None and stopped > armed
+               for row in rows_to_list(list(cursor.fetchall() or [])))
 
 
 def pop_session_wakeups(
@@ -273,6 +321,8 @@ def merge_session_wakeup(
             (id, session_id, profile_id, project_id, text, reason, model,
              source, instance_id, float(fire_at)),
         )
+        cursor.execute(f"SELECT created_at FROM pending_wakeups WHERE id = {_ph}", (id,))
+        created_at = cursor.fetchone()["created_at"]
     row = {
         "id": id,
         "session_id": session_id,
@@ -284,6 +334,7 @@ def merge_session_wakeup(
         "source": source,
         "instance_id": instance_id,
         "fire_at": float(fire_at),
+        "created_at": created_at,
     }
     return row, [str(r["id"]) for r in kept]
 

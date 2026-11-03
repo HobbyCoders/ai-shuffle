@@ -275,6 +275,9 @@ async def _rearm_after_failed_submit(row: Dict[str, Any], reason: str) -> None:
             model=row.get("model"),
             source=row.get("source") or "schedule_wakeup",
             instance_id=row.get("instance_id") or settings.effective_instance_id,
+            # The same wake, so it stays older than what a person or a Stop did
+            # after it was armed, including while this submit was in flight.
+            created_at=row.get("created_at"),
         )
     except Exception:  # noqa: BLE001 — a re-arm failure is a real drop.
         logger.exception(
@@ -312,6 +315,15 @@ def _session_user_stopped(session_id: Optional[str]) -> bool:
     except Exception:  # noqa: BLE001 — never let the check break a wake.
         logger.debug("wakeup: stop-latch check failed", exc_info=True)
         return False
+
+
+async def _stays_stopped(session_id: Optional[str]) -> bool:
+    """The latch above, once it has asked whether a person spoke on another install."""
+    if not _session_user_stopped(session_id):
+        return False
+    from app.core.query_session_lifecycle import reconcile_user_stop
+
+    return not await reconcile_user_stop(session_id)
 
 
 async def _superseded_by_person(wakeup_id: Optional[str]) -> bool:
@@ -360,7 +372,7 @@ async def _fire(row: Dict[str, Any]) -> None:
     # for a timer that had already fired (or was mid-flight) when Stop landed.
     # Dropped rather than re-armed: the wake's premise — that the session should
     # pick work back up on its own — is exactly what the user just refused.
-    if _session_user_stopped(session_id):
+    if await _stays_stopped(session_id):
         logger.info(
             "wakeup %s (session %s, source %s) dropped — the user stopped this "
             "session and has not messaged it since",
