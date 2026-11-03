@@ -133,7 +133,7 @@ const nativeModel = {
 	async act({ page, mark, variant, log }) {
 		const token = `native-model-${uniq()}`;
 		await mark('refuse native version pins and accept the native family name');
-		await typeAndSend(page, `${token}\nUse opus, 2 reviewers.\n${fakeAiTag(variant, 'tool-native-model-override')}`);
+		await typeAndSend(page, `${token}\nUse opus for PR 1040.\n${fakeAiTag(variant, 'tool-native-model-override')}`);
 		await waitTurnSettled(page, { text: 'Native model checks complete.', messagesAtLeast: 2 });
 		const parent = await api(page, 'GET', `/sessions/${await chatIdByToken(page, token)}`);
 		const results = parent.messages.filter((m) => m.tool_name === 'StartSession' && m.toolResult);
@@ -161,7 +161,7 @@ const nativePinRetry = {
 	async act({ page, mark, variant, log }) {
 		const token = `native-pin-retry-${uniq()}`;
 		await mark('request a specific native version, then retry its family');
-		await typeAndSend(page, `${token}\nUse Opus four.\n${fakeAiTag(variant, 'tool-native-model-override')}`);
+		await typeAndSend(page, `${token}\nCan you use Opus (4.7) for the review?\n${fakeAiTag(variant, 'tool-native-model-override')}`);
 		await page.getByText('Reply yes or no in the message box.', { exact: false }).waitFor({ timeout: 20_000 });
 		await mark('decline the current-family substitution');
 		await typeAndSend(page, 'no');
@@ -188,7 +188,7 @@ const nativePrecedence = {
 		await typeAndSend(page, `${token}\nUse opus.\n${fakeAiTag(variant, 'tool-native-model-override')}`);
 		await waitTurnSettled(page, { text: 'Native model checks complete.', messagesAtLeast: 2 });
 		await mark('a newer version request supersedes the saved plain-family naming');
-		await typeAndSend(page, `Now use Opus 4.7 specifically.\n${fakeAiTag(variant, 'tool-native-model-precedence')}`);
+		await typeAndSend(page, `Can you use Opus (4.7) for the review?\n${fakeAiTag(variant, 'tool-native-model-precedence')}`);
 		await page.getByText('Reply yes or no in the message box.', { exact: false }).waitFor({ timeout: 20_000 });
 		await typeAndSend(page, 'no');
 		await waitTurnSettled(page, { text: 'Newer native request checks complete.', messagesAtLeast: 4 });

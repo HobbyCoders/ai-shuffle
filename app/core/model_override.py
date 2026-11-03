@@ -360,16 +360,34 @@ def _mentions(text_tokens: Sequence[str], name: str) -> bool:
                                 for start in boundaries)
 
 
+def _directed(text: str) -> bool:
+    return bool(re.search(r"\b(?:use|run|route|send|prefer|pick|choose|try|start|switch|default)\b", text, re.I))
+
+
 def _family_consent(model: str, text: str) -> Optional[bool]:
-    """A plain, affirmative mention counts; questions and adjacent qualifiers don't."""
+    """Plain consent, qualification, or no request. Qualifiers aren't exhaustive;
+    the start receipt naming the actual model is the backstop for missed wording.
+    """
     name = re.escape(model)
-    text = "\n".join(s for s in re.split(r"(?<=[.!?])\s+|\n", str(text or "")) if not s.rstrip().endswith("?"))
-    number = r"(?:v?\d|(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand)\b)"
-    qualified = (rf"\b(?:old|older|previous|prior|legacy|last|\d+\.\d+)\s+{name}\b|"
-                 rf"\b[\w-]+-{name}\b|\b{name}(?:-[\w-]+|\[\d|\s+(?:version\s+)?{number})")
-    plain = " ".join(re.sub(qualified, "", clause, flags=re.I) for clause in affirmed_clauses(text))
-    return (True if re.search(rf"(?<![\w-]){name}(?![\w-])", plain, re.I)
-            else False if re.search(rf"\b{name}\b", text, re.I) else None)
+    gap = r"(?:[\W_]+|\b(?:model|version|build|release|at|with)\b)*"
+    number = r"(?:v?\d[\w.]*|(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand)\b)"
+    qualified = (rf"\b(?:old|older|previous|prior|legacy|last|earlier|original|\d+\.\d+|\d{{4}}){gap}{name}\b|"
+                 rf"\b(?:claude{gap}{number}|{number}{gap}version{gap}of){gap}{name}\b|"
+                 rf"\b[\w-]+-{name}\b|\b{name}(?:-[\w-]+|{gap}{number})")
+    mentioned = False
+    for sentence in re.split(r"(?<=[.!?])\s+|\n", str(text or "")):
+        plain, pins = re.subn(qualified, "", sentence, flags=re.I)
+        if sentence.rstrip().endswith("?"):
+            if pins:
+                mentioned = True
+                continue
+            if not (_directed(sentence) and (re.match(r"\s*(?:can|could|would|will)\s+(?:you|we)\b", sentence, re.I)
+                                            or _AFFIRM.match(sentence))):
+                continue
+        mentioned |= bool(re.search(rf"\b{name}\b", sentence, re.I))
+        if any(re.search(rf"(?<![\w-]){name}(?![\w-])", part, re.I) for part in affirmed_clauses(plain)):
+            return True
+    return False if mentioned else None
 
 
 def named_by_user(model: str, texts: Iterable[str],
@@ -600,6 +618,7 @@ def _find_named(session_id: str, model: str, *, recent: bool = True,
     current = chat_of(session_id)
     principal = session_api_user_id(database.get_session(session_id))
     seen = set()
+    plain_evidence = None
     try:
         with get_db() as conn:
             cursor = conn.cursor()
@@ -628,8 +647,13 @@ def _find_named(session_id: str, model: str, *, recent: bool = True,
                             return None
                         texts = _typed(cursor, current, [turn], session=session)
                         if mentions(texts):
-                            return {"turn_id": turn["id"], "session_id": current,
-                                    "api_user_id": principal, "text": texts[0]}
+                            evidence = {"turn_id": turn["id"], "session_id": current,
+                                        "api_user_id": principal, "text": texts[0]}
+                            if native and _family_consent(model, texts[0]) is True and not _directed(texts[0]):
+                                # Narrative naming cannot supersede an older qualified request.
+                                plain_evidence = plain_evidence or evidence
+                                continue
+                            return evidence
                     before = rows[-1]["position"]
                 if time.monotonic() >= deadline:
                     break
@@ -641,7 +665,8 @@ def _find_named(session_id: str, model: str, *, recent: bool = True,
                 current = chat_of(payload["orchestration_sender"])
     except Exception:  # noqa: BLE001 — a failed search never grants consent
         logger.warning("Could not search old model naming for %s", session_id, exc_info=True)
-    return None
+        return None
+    return plain_evidence if time.monotonic() < deadline else None
 
 
 def user_texts(session_id: str) -> List[str]:
@@ -1018,7 +1043,13 @@ async def _approve(session_id: str, profile_id: Optional[str], *, model: str,
     """:data:`APPROVED` from the owner's prompt (shared by concurrent starts),
     else ``PermissionError`` with the refusal."""
     import asyncio
+    from app.core.model_registry import model_values
 
+    why = "no owner message named it and no prior chat approval was found"
+    if model in model_values() and any(_family_consent(model, entry.text) is False
+            for entry in await asyncio.to_thread(owner_memories, session_id)):
+        why = (f"a saved memory mentioned {label(model)} but was not honored; "
+               f'use plain wording such as "Use {label(model)} for reviews."')
     while cache_key not in _APPROVED:
         pending = _ASKING.get(cache_key)
         if pending is None:
@@ -1030,7 +1061,7 @@ async def _approve(session_id: str, profile_id: Optional[str], *, model: str,
         if outcome != APPROVED:
             raise PermissionError(_refusal(
                 model, baseline,
-                f"no owner message named it and no prior chat approval was found; {outcome}"))
+                f"{why}; {outcome}"))
     if cache_key in _APPROVED:
         return APPROVED
     future = asyncio.get_running_loop().create_future()
@@ -1050,7 +1081,7 @@ async def _approve(session_id: str, profile_id: Optional[str], *, model: str,
     if outcome != APPROVED:
         raise PermissionError(_refusal(
             model, baseline,
-            f"no owner message named it and no prior chat approval was found; {outcome}"))
+            f"{why}; {outcome}"))
     return APPROVED
 
 
