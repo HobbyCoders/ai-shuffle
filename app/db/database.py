@@ -2190,9 +2190,9 @@ def _run_column_migrations(cursor: Any) -> None:
     # Existing session-prefixed indexes cover these reads. Allocation of legacy
     # history is lazy, scoped to one session's admission lock (turns.py).
 
-    # Background-task chips: work an agent suggested and the owner may start.
-    # Mirrored like pending_interactions, so no FK: a mirror's row may land
-    # before its session, and delete_session removes them with its runtime rows.
+    # Retired suggested-task table. No code reads or writes it. It stays, with any
+    # rows it holds, so an older build keeps working after a rollback; a deleted
+    # chat's rows still go with its runtime rows (_SESSION_RUNTIME_TABLES).
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS session_task_chips (
             id TEXT PRIMARY KEY,

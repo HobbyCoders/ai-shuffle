@@ -237,11 +237,6 @@ def append_events(
             for rewind in rewinds:
                 cut = _parse_payload(rewind["payload"]).get("from_seq")
                 if isinstance(cut, int) and not isinstance(cut, bool):
-                    from app.db import task_chips
-                    from app.db.base import after_commit
-                    if task_chips.remove_rewound(conn, session_id, cut):
-                        from app.core.task_chips import notify_changed
-                        after_commit(conn, lambda: notify_changed(session_id))
                     cursor.execute(
                         "UPDATE sessions SET last_user_message_seq = NULL, last_user_message_epoch = NULL "
                         "WHERE id = %s AND last_user_message_seq >= %s AND last_user_message_seq < %s",

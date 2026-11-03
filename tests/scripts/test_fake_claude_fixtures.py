@@ -87,6 +87,19 @@ def test_a_fixture_carries_nothing_of_the_owner(path: Path):
     assert not _names_owner(text, OWNER_WORDS), f"{path.name} names the owner's setup"
 
 
+def test_the_rewind_reply_keeps_its_height_whatever_scenarios_exist():
+    """rewind-transcript budgets a rewind's move for this reply's turn height."""
+    scenario = fake_cli.load_scenario("rewind")
+    assert scenario is not None
+    (step,) = scenario["steps"]
+    text = step["text"]
+    assert text.startswith("Fake Claude Code CLI here (no model, no network). You said: “{summary}”\n\n")
+    # {summary} is the only thing filled in, so no scenario list can change it.
+    assert re.findall(r"\{(\w+)\}", text) == ["summary"]
+    # About the length of the long reply the budget was measured against.
+    assert 1_000 <= len(text) <= 1_200
+
+
 def _leaves(value):
     if isinstance(value, dict):
         for item in value.values():

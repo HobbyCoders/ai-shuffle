@@ -4,9 +4,8 @@
 //   designedShifts()  the narrowly-scoped exception for a layout move the
 //                     product makes on purpose without user input (a cleared
 //                     chat's composer moving to the centre when it opens by
-//                     link or is cleared by the server, or a suggested-task
-//                     chip arriving above it, or the rows a rewind removes
-//                     leaving the transcript). Never a blanket allow.
+//                     link or is cleared by the server, or the rows a rewind
+//                     removes leaving the transcript). Never a blanket allow.
 //   classifyKnownBug() whether a failing case marked `knownBug` may be reported
 //                     as KNOWN BUG instead of FAIL.
 import { detectLayoutShift } from '../../../../browser-mcp/src/recorder/analyze.js';
@@ -36,9 +35,6 @@ export const TRANSCRIPT_LAYOUT_SOURCE = /\sin (?:ChatView|MessageArea)$/;
  * expectShift: [{
  *   step:     the mark label of the step the move belongs to,
  *   composer: [from, to], the one data-ui-composer change the step designs,
- *   chips:    [from, to], or instead the one data-ui-chips change it designs, for
- *             a tray that lifts the docked composer without changing its position
- *             (from is null while the tray is not showing),
  *   messages: [from, to], or instead the one data-ui-messages change it designs,
  *             for rows leaving the transcript when the server answers an action
  *   maxValue: the largest total layout shift that move may measure,
@@ -76,7 +72,7 @@ export function designedShifts(recording, anomalies, expectShift = [], { partial
 		}
 		const from = marks[markIndex].t;
 		const to = markIndex + 1 < marks.length ? marks[markIndex + 1].t : Infinity;
-		const what = design.chips ? 'chips' : design.messages ? 'messages' : 'composer';
+		const what = design.messages ? 'messages' : 'composer';
 		const layoutSource = what === 'messages' ? TRANSCRIPT_LAYOUT_SOURCE : COMPOSER_LAYOUT_SOURCE;
 		const [before, after] = design[what];
 		const moves = [];
@@ -139,7 +135,6 @@ export function checkExpectShift(caseName, expectShift) {
 	const change = (pair, from, to) => Array.isArray(pair) && pair.length === 2 && from(pair[0]) && to(pair[1]) && pair[0] !== pair[1];
 	const declares = {
 		composer: (pair) => change(pair, isText, isText),
-		chips: (pair) => change(pair, (v) => v === null || isText(v), isText),
 		// A frame's counts are numbers (see frames()).
 		messages: (pair) => change(pair, Number.isInteger, Number.isInteger)
 	};
@@ -157,7 +152,7 @@ export function checkExpectShift(caseName, expectShift) {
 			design.reason.length > 0;
 		if (!ok) {
 			throw new Error(
-				`case ${caseName}: expectShift needs { step: <mark label>, composer or chips or messages: [from, to], maxValue: (0, 0.5], reason } (got ${JSON.stringify(design)})`
+				`case ${caseName}: expectShift needs { step: <mark label>, composer or messages: [from, to], maxValue: (0, 0.5], reason } (got ${JSON.stringify(design)})`
 			);
 		}
 	}

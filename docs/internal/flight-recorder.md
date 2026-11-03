@@ -64,14 +64,6 @@ marks it as a state carrier):
 | `data-ui-loading` | `true` while history loads (opening a chat, boot restore or a deep link) |
 | `data-ui-streaming` | `true` while a reply streams |
 
-The task-chip tray beside the composer (`TaskChipTray`) is a second carrier,
-`data-ui-state="task-chips"`, present only while it shows a chip:
-
-| Attribute | Values |
-| --- | --- |
-| `data-ui-chips` | one word per chip, oldest first: `pending`, `starting` (the worker says so, or a click is on its way), `not-sent` (the click never reached the worker, so the chip is still actionable), `started` or `failed` |
-| `data-ui-chip-session` | the `s:` hash of the chat the shown chips belong to; it must equal the chat's `data-ui-session` on every frame |
-
 `data-ui-mount` markers are on the root elements of `ChatView`, `ChatInput`
 (the composer), `NewSessionHero`, `MessageArea` (the transcript) and
 `SidePanel`. Every transcript message row carries `data-ui-row` set to its

@@ -1952,30 +1952,70 @@ describe('ws-message-handlers', () => {
 		});
 	});
 
-	describe.each(['session_updated', 'user_session_updated'])('%s handler (task chips)', (type) => {
-		it.each([2, 0])('patches pending_task_chips=%s without a list reload', async (count) => {
+	describe('frames from a worker that still has suggested tasks', () => {
+		const rowFrame = (type: string, updates: Record<string, unknown>) => (type === 'session_updated' ? {
+			event_type: type,
+			session_id: 'session-1',
+			data: { updates },
+		} : {
+			type,
+			session_id: 'session-1',
+			updates,
+		});
+
+		it.each(['session_updated', 'user_session_updated'])('%s with only the count changes nothing and reloads nothing', async (type) => {
 			vi.useFakeTimers();
 			try {
 				deps = createMockDeps();
 				handlers = createMessageHandlers(deps);
 
-				const updates = { pending_task_chips: count };
-				handlers.handleMessage(type === 'session_updated' ? {
-					event_type: type,
-					session_id: 'session-1',
-					data: { updates },
-				} : {
-					type,
-					session_id: 'session-1',
-					updates,
-				});
+				handlers.handleMessage(rowFrame(type, { pending_task_chips: 2 }));
 
-				expect(deps.mergeSessionPatch).toHaveBeenCalledWith('session-1', { pending_task_chips: count });
+				expect(deps.mergeSessionPatch).not.toHaveBeenCalled();
 				await vi.advanceTimersByTimeAsync(SESSION_LIST_RELOAD_DEBOUNCE_MS + 10);
 				expect(deps.appLoadSessions).not.toHaveBeenCalled();
 				expect(deps.appLoadApiUserSessions).not.toHaveBeenCalled();
 			} finally {
 				vi.useRealTimers();
+			}
+		});
+
+		it.each(['session_updated', 'user_session_updated'])('%s still applies the fields beside the count', async (type) => {
+			vi.useFakeTimers();
+			try {
+				deps = createMockDeps();
+				handlers = createMessageHandlers(deps);
+
+				handlers.handleMessage(rowFrame(type, { pending_task_chips: 1, title: 'Renamed' }));
+
+				expect(deps.mergeSessionPatch).toHaveBeenCalledWith('session-1', { title: 'Renamed' });
+				await vi.advanceTimersByTimeAsync(SESSION_LIST_RELOAD_DEBOUNCE_MS + 10);
+				expect(deps.appLoadSessions).not.toHaveBeenCalled();
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+
+		it.each([
+			['bare', { type: 'task_chips_changed', session_id: 'session-1' }],
+			['wrapped for a watching device', { event_type: 'stream_frame', session_id: 'session-1', data: { type: 'task_chips_changed', session_id: 'session-1' } }],
+		])('task_chips_changed (%s) reads nothing and touches no state', async (_label, frame) => {
+			const fetchSpy = vi.spyOn(globalThis, 'fetch');
+			vi.useFakeTimers();
+			try {
+				deps = createMockDeps();
+				handlers = createMessageHandlers(deps);
+
+				handlers.handleMessage(frame);
+
+				await vi.advanceTimersByTimeAsync(SESSION_LIST_RELOAD_DEBOUNCE_MS + 10);
+				expect(fetchSpy).not.toHaveBeenCalled();
+				expect(deps.update).not.toHaveBeenCalled();
+				expect(deps.mergeSessionPatch).not.toHaveBeenCalled();
+				expect(deps.appLoadSessions).not.toHaveBeenCalled();
+			} finally {
+				vi.useRealTimers();
+				fetchSpy.mockRestore();
 			}
 		});
 	});

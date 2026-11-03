@@ -18,8 +18,6 @@ import {
 	diffCounts,
 	isAttentionStatus,
 	sidebarGroup,
-	taskChipWords,
-	waitingTaskChips,
 	isLiveStatus,
 	isTurnLiveStatus,
 	isWorkCountingStatus,
@@ -626,25 +624,16 @@ describe('runtime status words', () => {
 		expect(sidebarGroup('has_question', false)).toBe('settled');
 		expect(sidebarGroup('await', false)).toBe('settled');
 		expect(sidebarGroup('idle', false)).toBe('settled');
-		// A chip waiting on the owner lifts an active row whatever it is doing,
-		// and settling still wins (#2324).
-		expect(sidebarGroup('done', true, 1)).toBe('needs');
-		expect(sidebarGroup('working', true, 2)).toBe('needs');
-		expect(sidebarGroup('done', true, 0)).toBe('active');
-		expect(sidebarGroup('done', false, 1)).toBe('settled');
 	});
 });
 
-describe('waiting task chips', () => {
-	it('reads the count from the row, and an archived chat waits on nobody', () => {
-		expect(waitingTaskChips({ status: 'active', pending_task_chips: 2 })).toBe(2);
-		expect(waitingTaskChips({ status: 'active' })).toBe(0);
-		expect(waitingTaskChips({ status: 'archived', pending_task_chips: 2 })).toBe(0);
-	});
-
-	it('says one or many', () => {
-		expect(taskChipWords(1)).toBe('Task suggested');
-		expect(taskChipWords(3)).toBe('3 tasks suggested');
+describe('a row from a worker that still counts suggested tasks', () => {
+	it('adds nothing to what waits on you', () => {
+		const row = { status: 'active', pending_task_chips: 3 } as unknown as Session;
+		expect(needsYouCount(row, null)).toBe(0);
+		expect(sessionNeedsYou(row, null)).toBe(false);
+		// A real prompt on the same row still counts, once.
+		expect(needsYouCount(row, { count: 1 })).toBe(1);
 	});
 });
 

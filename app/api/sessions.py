@@ -13,7 +13,7 @@ import uuid
 from typing import List, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Body, HTTPException, Depends, Query, Response, status, Request
-from pydantic import BaseModel, TypeAdapter
+from pydantic import TypeAdapter
 
 from app.core.cli_sessions import (
     rename_session as sdk_rename_session,
@@ -865,55 +865,6 @@ async def get_composer_suggestion(
     if hint and await _eligible(session_id, hint["turn_id"]):
         return hint
     return None
-
-
-@router.get("/{session_id}/task-chips")
-async def list_task_chips(
-    request: Request, session_id: str, token: str = Depends(require_auth),
-):
-    """This chat's suggested tasks, plus the chip that started this chat when one did."""
-    session = await require_transcript_session(request, session_id)
-    from app.core import task_chips
-
-    return await task_chips.list_view(session)
-
-
-async def _task_chip_action(request: Request, session_id: str, chip_id: str, action: str,
-                            access_fingerprint: Optional[str] = None) -> dict:
-    session = await require_transcript_session(request, session_id)
-    from app.core import task_chips
-
-    try:
-        return await task_chips.act(session, chip_id, action, access_fingerprint)
-    except task_chips.ChipError as exc:
-        raise HTTPException(status_code=exc.status, detail=exc.message) from exc
-
-
-class TaskChipStart(BaseModel):
-    """``access_fingerprint`` is the chip's ``access.fingerprint`` as shown when the owner clicked."""
-    access_fingerprint: Optional[str] = None
-
-
-@router.post("/{session_id}/task-chips/{chip_id}/start")
-async def start_task_chip(
-    request: Request, session_id: str, chip_id: str, body: Optional[TaskChipStart] = None,
-    token: str = Depends(require_auth),
-):
-    """Start this suggestion in its own chat. Idempotent: every caller gets the one chat.
-
-    A start that fails returns 200 with the chip in ``failed``: the reason is
-    chip state every client shows, and starting it again retries. So does one
-    whose access is no longer exactly what ``access_fingerprint`` says was shown.
-    """
-    return await _task_chip_action(request, session_id, chip_id, "start", body.access_fingerprint if body else None)
-
-
-@router.post("/{session_id}/task-chips/{chip_id}/dismiss")
-async def dismiss_task_chip(
-    request: Request, session_id: str, chip_id: str, token: str = Depends(require_auth),
-):
-    """Hide this suggestion. Idempotent; a started chip cannot be dismissed (409)."""
-    return await _task_chip_action(request, session_id, chip_id, "dismiss")
 
 
 @router.get("/{session_id}", response_model=SessionWithMessages)

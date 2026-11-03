@@ -39,8 +39,6 @@ export interface Session {
 	parked_task_kind?: string | null;
 	/** Running durable tasks, including non-park-gating Monitor commands. */
 	has_running_tasks?: boolean;
-	/** Task chips waiting on the owner to start, retry or dismiss. Null where the server did not read it. */
-	pending_task_chips?: number | null;
 	/** The latest turn that ran ended in a failure, so the row says so. */
 	last_turn_failed?: boolean | null;
 	/** Read-only state sampled on the owning worker, never local runner state. */
@@ -539,80 +537,4 @@ export interface ResumeSessionResponse {
  */
 export async function resumeSession(sessionId: string): Promise<ResumeSessionResponse> {
 	return api.post<ResumeSessionResponse>(`/sessions/${sessionId}/resume`);
-}
-
-// ============================================================================
-// Background-task chips
-// ============================================================================
-
-export type TaskChipState = 'pending' | 'starting' | 'started' | 'failed' | 'dismissed';
-
-/** What a chip's chat would run with, as the worker works it out on each read. */
-export interface TaskChipAccess {
-	/** Null when it could not be checked. */
-	mode: string | null;
-	summary: string;
-	/** Full permissions, or unknown: the chip says so more loudly. */
-	elevated: boolean;
-	wider_than_source: boolean;
-	source_note: string | null;
-	project_note: string | null;
-	/** Sent back on Start, so a click only approves what was on screen. Null when it could not be checked. */
-	fingerprint: string | null;
-}
-
-/** Work an agent suggested for a separate chat; the owner's click starts it. */
-export interface TaskChip {
-	id: string;
-	session_id: string;
-	origin_session_id: string;
-	/** The subagent that raised it; null when the main chat itself did. */
-	origin_label: string | null;
-	title: string;
-	summary: string;
-	prompt: string;
-	model: string;
-	provider_id: string | null;
-	model_label: string | null;
-	effort: string | null;
-	base: 'default' | 'current';
-	/** Only while the chip can still be started. */
-	access: TaskChipAccess | null;
-	state: TaskChipState;
-	error: string | null;
-	retryable: boolean;
-	started_session_id: string | null;
-	started_session_title: string | null;
-	created_at: string;
-	updated_at: string;
-}
-
-/** The chat a chip started this chat from. */
-export interface TaskChipSource {
-	chip_id: string;
-	session_id: string;
-	title: string | null;
-}
-
-export interface TaskChipList {
-	chips: TaskChip[];
-	source: TaskChipSource | null;
-}
-
-const taskChipsPath = (sessionId: string) => `/sessions/${encodeURIComponent(sessionId)}/task-chips`;
-
-export function listTaskChips(sessionId: string): Promise<TaskChipList> {
-	return api.get<TaskChipList>(taskChipsPath(sessionId));
-}
-
-/**
- * Idempotent. A start that could not happen resolves with the chip in `failed`.
- * `accessFingerprint` is `access.fingerprint` as the chip showed it: any change since, and nothing starts.
- */
-export function startTaskChip(sessionId: string, chipId: string, accessFingerprint: string | null): Promise<TaskChip> {
-	return api.post<TaskChip>(`${taskChipsPath(sessionId)}/${encodeURIComponent(chipId)}/start`, { access_fingerprint: accessFingerprint });
-}
-
-export function dismissTaskChip(sessionId: string, chipId: string): Promise<TaskChip> {
-	return api.post<TaskChip>(`${taskChipsPath(sessionId)}/${encodeURIComponent(chipId)}/dismiss`);
 }

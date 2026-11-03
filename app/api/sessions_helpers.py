@@ -17,7 +17,6 @@ from app.db.async_database import run_sync
 from app.db.api_users import get_api_users_by_ids
 from app.db.tags import get_tags_for_sessions
 from app.db.background_tasks import get_running_task_presence
-from app.db.task_chips import waiting_counts as task_chip_counts
 from app.db.turns import sessions_with_failed_latest_turn
 from app.db.sessions import get_fork_info_for_sessions
 from app.db.projects import get_projects_by_ids
@@ -863,14 +862,12 @@ def enrich_sessions_with_tags(sessions: List[dict]) -> List[dict]:
     # Batch: fork info for all sessions (2 queries instead of N)
     fork_info_by_session = get_fork_info_for_sessions(session_ids)
     presence = get_running_task_presence(session_ids)
-    chips = task_chip_counts(session_ids)
     failed = sessions_with_failed_latest_turn(session_ids)
 
     for session in sessions:
         sid = session["id"]
         session["tags"] = tags_by_session.get(sid, [])
         session["has_running_tasks"] = presence.get(sid, {}).get("has_running_tasks", False)
-        session["pending_task_chips"] = chips.get(sid, {}).get("pending_task_chips", 0)
         session["last_turn_failed"] = sid in failed
         fork_info = fork_info_by_session.get(sid)
         session["has_forks"] = fork_info["has_forks"] if fork_info else False
@@ -899,14 +896,12 @@ def enrich_search_results_with_tags(results: list) -> list:
     # Batch: fork info for all results (2 queries instead of N)
     fork_info_by_session = get_fork_info_for_sessions(session_ids)
     presence = get_running_task_presence(session_ids)
-    chips = task_chip_counts(session_ids)
     failed = sessions_with_failed_latest_turn(session_ids)
 
     for result in results:
         sid = result["id"]
         result["tags"] = tags_by_session.get(sid, [])
         result["has_running_tasks"] = presence.get(sid, {}).get("has_running_tasks", False)
-        result["pending_task_chips"] = chips.get(sid, {}).get("pending_task_chips", 0)
         result["last_turn_failed"] = sid in failed
         fork_info = fork_info_by_session.get(sid)
         result["has_forks"] = fork_info["has_forks"] if fork_info else False

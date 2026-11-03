@@ -1764,7 +1764,6 @@ def build_options_from_profile(
     # instead of firing on the profile default (which re-primes the prompt
     # cache on the wrong model).
     try:
-        from app.core.task_chips import row_offers as task_chips_offered
         from app.mcp.builtin_tools import create_builtin_tools_server
         builtins_srv = create_builtin_tools_server(
             session_id=session_id,
@@ -1778,7 +1777,6 @@ def build_options_from_profile(
             # delegated (CLI) leg has no engine to publish them (ruling CE6).
             cwd=working_dir,
             workflow_guidance=True,  # aih_automatic_workflows below supplies it
-            suggest_task=not api_user_id and task_chips_offered(session_row),
         )
         if builtins_srv:
             mcp_servers_dict["builtins"] = builtins_srv

@@ -194,12 +194,7 @@ It is chosen by the request alone, so it behaves the same after restarts:
 
 * Plain messages get a short streamed echo of what you wrote.
 * `[script:NAME]` anywhere in your message plays `scripts/devloop/scenarios/NAME.json`:
-  `default`, `long`, `slow`, `tool-bash`, `tool-multi`, `tool-background-stream`, `tool-suggest-task`,
-  `tool-suggest-task-slow`, `tool-suggest-task-other-model`, `tool-suggest-task-claude`,
-  `tool-suggest-task-current`, `tool-suggest-task-bad-model`, `tool-task-suggest-task`,
-  `tool-task-current-suggest-task`, `tool-task-nested-suggest-task`, `tool-task-denied-suggest-task`, `tool-task-late-suggest-task`,
-  `tool-task-late-suggest-task-streaming`, `tool-suggest-task-late`, `tool-suggest-task-crowded`, `tool-suggest-task-then-fail`,
-  `tool-task-fail-suggest-task`, `tool-task-stop-suggest-task`, `tool-swarm-suggest-task`, `error-500`,
+  `default`, `long`, `slow`, `tool-bash`, `tool-multi`, `tool-background-stream`, `error-500`,
   `rate-limit-429`, `cut`, `ask-question` and `ask-questions` (below), and
   for voice calls `voice-reply` (a three-paragraph reply) and `voice-wait`
   (an update, a background job and a wait; the job's output tags its wake
@@ -213,29 +208,6 @@ It is chosen by the request alone, so it behaves the same after restarts:
   reply are active. Stop or archive the session afterwards to reap the shell;
   otherwise it exits after two minutes. The usual tag options can stretch the
   stream further.
-* `[script:tool-suggest-task]` makes a real `SuggestTask` call, so the chat gets
-  a background-task chip through the real tool path (a repeat in the same chat
-  returns the same chip). `[script:tool-suggest-task-slow]` then keeps streaming
-  for about a minute, so the parent is still mid-turn when you click the chip.
-  `[script:tool-task-suggest-task]` makes the same call from a Task subagent, so
-  the chip attaches to the root chat. `tool-task-nested-suggest-task` does it from a
-  subagent's subagent (**Dev helper** then **Dev nested**), `tool-swarm-suggest-task` from a
-  Swarm task and `tool-task-current-suggest-task` from a subagent with `base="current"`. `tool-task-late-suggest-task` raises
-  it while the root chat is parked on the subagent, and `-streaming` while the root still streams.
-  `tool-task-denied-suggest-task` does it from **Dev denied**, whose agent denies Bash, Write and Edit,
-  so under a chat with all its tools the chip says the new chat has more than the subagent. The seeded
-  **Agent with no tools** chat runs on **Dev no tools** and already holds a chip, written by the seed
-  because an agent with no tools cannot call `SuggestTask`; its access line is worked out when read.
-  `tool-task-fail-suggest-task` has the subagent suggest and then fail, `tool-task-stop-suggest-task`
-  suggest and keep running until you stop it, so you can start the chip after either.
-  Every call names a model: `tool-suggest-task-other-model` names `fake-ai-safe`,
-  `tool-suggest-task-claude` crosses to the fake CLI's `sonnet` (a **Dev (Claude Code)** chat
-  plays `tool-suggest-task-fluid` to cross back), and `tool-suggest-task-bad-model` is refused
-  once and then corrects itself in the same turn. Read chips at
-  `GET /api/v1/sessions/{id}/task-chips`. Use a native **Dev agent** chat (its
-  Task target is the seeded **Dev helper** agent) or, for
-  `[script:tool-suggest-task]`, a **Dev (Claude Code)** chat, where the fake CLI calls the
-  tool on the app's MCP bridge; the new chat's fake reply is the default one.
 * `[script:ask-question]` asks one question in the question tray (`AskUser`,
   two options) and ends its turn; `[script:ask-questions]` asks two in one
   request. The app queues the answer as a user message (`Answer to your
