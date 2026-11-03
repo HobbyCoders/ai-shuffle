@@ -3,6 +3,7 @@ package com.hobbycoders.aishuffle.ui
 import android.content.Intent
 import android.content.res.ColorStateList
 import android.os.Bundle
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import android.widget.ImageView
@@ -22,17 +23,28 @@ import com.hobbycoders.aishuffle.presence.WorkerPresenceMonitor
 
 class ServerListActivity : NativeScreen() {
     private var autoConnectPending = false
+    /** Saved like [autoConnectPending]: the answer can reach a recreated activity, and a relaunch resumes under the prompt. */
+    private var notificationDialogOpen = false
     private var connectionJob: Job? = null
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         autoConnectPending = savedInstanceState?.getBoolean("auto_connect_pending") ?: (intent.action == Intent.ACTION_MAIN)
+        notificationDialogOpen = savedInstanceState?.getBoolean("notification_dialog_open") ?: false
     }
     override fun onSaveInstanceState(outState: Bundle) {
         outState.putBoolean("auto_connect_pending", autoConnectPending)
+        outState.putBoolean("notification_dialog_open", notificationDialogOpen)
         super.onSaveInstanceState(outState)
     }
     private val pushPermission = registerForActivityResult(androidx.activity.result.contract.ActivityResultContracts.RequestPermission()) {
         com.hobbycoders.aishuffle.push.PushRegistration.schedule(this)
+        notificationRequestEnded()
+    }
+    private fun notificationRequestEnded() {
+        notificationDialogOpen = false
+        // An answer usually comes before onResume, whose render sweeps again. An immediate one
+        // can come while already resumed, after the sweep this request held back, with no resume to follow.
+        if (autoConnectPending && lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) refreshPresence()
     }
     private class StatusRow(val server: Server, val label: TextView, val dot: View)
     private val statusRows = mutableMapOf<String, StatusRow>()
@@ -56,10 +68,14 @@ class ServerListActivity : NativeScreen() {
     }
     private fun refreshPresence() {
         presence.start(statusRows.values.map { it.server }, AccountRepository(this).store.session()) { observations ->
-            if (autoConnectPending && connectionJob?.isActive != true) {
-                connectionJob = lifecycleScope.launch {
-                    val target = WorkerConnections.reachable(this@ServerListActivity, observations = observations)
-                    if (isFinishing || !lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) return@launch
+            if (autoConnectPending && !notificationDialogOpen && connectionJob?.isActive != true) {
+                // Always posted: a sweep can end inside onResume, before RESUMED, and this job would
+                // then give up with nothing left to retry it. A worker that is reachable must still open.
+                connectionJob = lifecycleScope.launch(Dispatchers.Main) {
+                    val target = reachableFixture?.invoke(observations) ?: WorkerConnections.reachable(this@ServerListActivity, observations = observations)
+                    // A request may have started during the search. The lifecycle cannot show it: Android
+                    // can report RESUMED after the request, before it pauses this activity for the prompt.
+                    if (isFinishing || notificationDialogOpen || !autoConnectPending || !lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) return@launch
                     autoConnectPending = false
                     if (target != null) {
                         openWorker(target)
@@ -79,8 +95,12 @@ class ServerListActivity : NativeScreen() {
     }
     override fun onResume() {
         super.onResume()
+        // Before render: its sweep must already see the request. A second request while
+        // one is open would come back as a cancellation and end the wait early.
+        if (!notificationDialogOpen) com.hobbycoders.aishuffle.push.PushPermission.ask(this, dialogOpen = { notificationDialogOpen = it }) {
+            runCatching { pushPermission.launch(it) }.onFailure { notificationRequestEnded() }
+        }
         render()
-        com.hobbycoders.aishuffle.push.PushPermission.ask(this) { pushPermission.launch(it) }
         com.hobbycoders.aishuffle.push.PushRegistration.schedule(this)
         if (intent.getBooleanExtra("auth_expired", false)) {
             status.text = "Your sign-in expired. Sign in again to restore your workers."
@@ -99,6 +119,12 @@ class ServerListActivity : NativeScreen() {
                 if (updated != null && !updated.needsAccountAuthorization) openWorker(updated)
             }
         } else startActivity(Intent(this, ChatActivity::class.java).putExtra("server_id", server.id))
+    }
+    /** The owner chose a worker. Coming back from it must not open another one by itself. */
+    private fun chooseWorker(server: Server) {
+        autoConnectPending = false
+        connectionJob?.cancel()
+        openWorker(server)
     }
     private fun addWorker() { startActivity(Intent(this, AddServerActivity::class.java)) }
     private fun render() {
@@ -162,7 +188,7 @@ class ServerListActivity : NativeScreen() {
         }
         for (server in servers) {
             val workerRow = row(server.name, server.host, R.drawable.ic_worker) {
-                openWorker(server)
+                chooseWorker(server)
             }
             val labels = workerRow.getChildAt(1) as LinearLayout
             // Keep the existing row and its options; status has text as well as a color indicator.
@@ -181,7 +207,7 @@ class ServerListActivity : NativeScreen() {
             more.setOnClickListener {
                 if (!busy) PopupMenu(this, more).apply {
                     if (server.needsAccountAuthorization) {
-                        menu.add("Retry authorization").setOnMenuItemClickListener { openWorker(server); true }
+                        menu.add("Retry authorization").setOnMenuItemClickListener { chooseWorker(server); true }
                     } else {
                         menu.add("Phone tools").setOnMenuItemClickListener {
                             startActivity(Intent(this@ServerListActivity, ToolSettingsActivity::class.java).putExtra("server_id", server.id)); true
@@ -220,5 +246,9 @@ class ServerListActivity : NativeScreen() {
             link("Use another device") { openAccount("pair") }
         }
         refreshPresence()
+    }
+    companion object {
+        /** Lets a test hold the search for a worker open; probes and worker policy have their own tests. */
+        @androidx.annotation.VisibleForTesting @Volatile internal var reachableFixture: (suspend (Map<Server, com.hobbycoders.aishuffle.presence.ProbeResult>) -> Server?)? = null
     }
 }

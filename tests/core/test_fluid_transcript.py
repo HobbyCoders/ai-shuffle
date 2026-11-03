@@ -1167,6 +1167,18 @@ def _reseeded_lines(session_id, tmp_path):
     return _read_jsonl(Path(result.path))
 
 
+def _reseeded_with_repeated_brief(session_id, tmp_path):
+    """The re-seed's rows, minus the one row that repeats the brief a compaction
+    folded away (#996). It stands right after the first row and is bounded, so
+    what the tests below say of the rest still holds: no full-size history."""
+    lines = _reseeded_lines(session_id, tmp_path)
+    note = lines.pop(1)
+    assert note["type"] == "user" and "first prompt" in note["message"]["content"]
+    assert "first reply" not in note["message"]["content"]
+    assert lines[-1]["type"] == "assistant"  # the file ends as it did
+    return lines
+
+
 def test_reseed_starts_from_the_cli_compaction_summary(mock_db, tmp_path):
     """A session that compacted on one worker and moved to another must not
     come back at full size: the CLI gets the summary and what followed."""
@@ -1174,7 +1186,7 @@ def test_reseed_starts_from_the_cli_compaction_summary(mock_db, tmp_path):
     _insert_events(session_id, [
         _cli_compaction(node_id="n5", summary="SUMMARY of the first turn", ts=1004.5),
     ])
-    lines = _reseeded_lines(session_id, tmp_path)
+    lines = _reseeded_with_repeated_brief(session_id, tmp_path)
     assert [(line["type"], line["message"]["content"]) for line in lines] == [
         ("user", "SUMMARY of the first turn"),
         ("user", "second prompt"),
@@ -1194,7 +1206,7 @@ def test_reseed_takes_the_latest_compaction_with_a_summary(mock_db, tmp_path):
         # it still applies.
         _cli_compaction(node_id="n6", summary=""),
     ])
-    lines = _reseeded_lines(session_id, tmp_path)
+    lines = _reseeded_with_repeated_brief(session_id, tmp_path)
     assert lines[0]["message"]["content"] == "NEW summary"
     assert [line["type"] for line in lines] == ["user", "user", "assistant"]
 
@@ -1222,7 +1234,7 @@ def test_reseed_places_a_between_turn_compaction_by_its_time(mock_db, tmp_path):
     after the event's timestamp follow the summary."""
     session_id = _seed()  # node ts 1000.0 (n1) .. 1006.0 (n7)
     _insert_events(session_id, [_cli_compaction(summary="IDLE summary", ts=1004.5)])
-    lines = _reseeded_lines(session_id, tmp_path)
+    lines = _reseeded_with_repeated_brief(session_id, tmp_path)
     assert [line["message"]["content"] for line in lines][:2] == [
         "IDLE summary", "second prompt",
     ]
@@ -1251,7 +1263,7 @@ def test_reseed_starts_from_a_mechanical_compaction_checkpoint(mock_db, tmp_path
         _cli_compaction(node_id="n5", summary=""),
         _checkpoint(ts=1004.5),
     ])
-    lines = _reseeded_lines(session_id, tmp_path)
+    lines = _reseeded_with_repeated_brief(session_id, tmp_path)
     assert [(line["type"], line["message"]["content"]) for line in lines] == [
         ("user", '[epoch n1..n2 — 1 older turns folded; HistoryExpand("n1..n2")]'),
         ("assistant", [{"type": "tool_use", "id": "t1", "name": "Read",

@@ -241,8 +241,9 @@ async def test_a_fold_inside_a_turn_keeps_it_on_the_very_next_request(monkeypatc
     assert stored[0] == 1 and sum(stored) == 1
     assert [_copies(r) for r in provider.requests] == [1] * len(provider.requests)
     def folded(request):
-        # The end of the prompt: a digest keeps only an excerpt from its start.
-        return "FIRST-TURN-END" not in "\n".join(m.text() or "" for m in request.messages)
+        # By its marker: from render version 3 a fold keeps this opening prompt whole.
+        text = "\n".join(m.text() or "" for m in request.messages)
+        return "[compacted turn" in text or "[epoch " in text
     assert not folded(turn[0]), "the first turn was folded before the tool loop started"
     assert any(folded(r) for r in turn[1:]), "nothing folded the first turn mid-turn"
 

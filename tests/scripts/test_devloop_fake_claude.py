@@ -248,6 +248,21 @@ def test_a_pre_tool_use_hook_deny_wins(tmp_path):
     cli.close()
 
 
+def test_the_hook_context_limit_is_counted_as_javascript_counts_it():
+    """Claude Code checks ``e.length``: an emoji is two units, so the fake must not
+    pass what the real CLI would save to a file and show as a preview."""
+    claude = object.__new__(fake_cli.DevClaude)
+    claude.persisted = lambda _name, _text: "STUB"
+    limit = fake_cli.HOOK_CONTEXT_INLINE_CHARS
+
+    def shown(text: str) -> str:
+        answer = {"hookSpecificOutput": {"additionalContext": text}}
+        return claude.hook_context("PostToolUse", [answer])[0]["text"]
+
+    assert shown("\U0001F600" * (limit // 2)) != "STUB"
+    assert shown("\U0001F600" * (limit // 2) + "x") == "STUB"
+
+
 def test_a_long_mcp_result_is_persisted_as_a_stub(tmp_path):
     cli = Cli(tmp_path, "--permission-mode", "bypassPermissions")
     frames = cli.turn("[script:long-result]")
@@ -362,7 +377,8 @@ def test_compact_posts_to_the_bridge_then_replays_the_answer_with_fresh_uuids(tm
     statuses = [f.get("status") for f in frames if f.get("subtype") == "status"]
     assert statuses == ["compacting", None]
     boundary = next(f for f in frames if f.get("subtype") == "compact_boundary")
-    assert boundary["logical_parent_uuid"] == handles[-1]
+    # As on real CLIs, the boundary follows an entry the mod does not post.
+    assert boundary["logical_parent_uuid"] and boundary["logical_parent_uuid"] not in handles
     replayed = [f for f in frames[frames.index(boundary) + 1:] if f["type"] in ("user", "assistant")]
     assert [f["type"] for f in replayed] == ["user", "assistant", "assistant", "user", "assistant"]
     assert not {f["uuid"] for f in replayed} & set(handles)

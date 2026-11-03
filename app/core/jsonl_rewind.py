@@ -338,13 +338,18 @@ class JSONLRewindService:
         Returns:
             Path to the JSONL file, or None if not found
         """
-        # Try the expected project directory first
-        project_dir_name = get_project_dir_name(working_dir)
-        project_dir = self.claude_projects_dir / project_dir_name
+        # Match the CLI/reseed writer's cwd encoding (including punctuation
+        # and long-path hashing) before the legacy parser spelling. Otherwise
+        # a fallback scan can pick an older copy from a different checkout.
+        from app.core.provider.fluid_transcript import _cli_project_dir
 
-        if project_dir.exists():
+        project_dirs = (
+            _cli_project_dir(self.claude_projects_dir, working_dir),
+            self.claude_projects_dir / get_project_dir_name(working_dir),
+        )
+        for project_dir in dict.fromkeys(project_dirs):
             jsonl_path = project_dir / f"{sdk_session_id}.jsonl"
-            if jsonl_path.exists():
+            if jsonl_path.is_file():
                 return jsonl_path
 
         # Search all project directories as fallback

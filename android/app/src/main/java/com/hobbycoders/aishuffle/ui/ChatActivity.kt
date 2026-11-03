@@ -99,12 +99,19 @@ class ChatActivity : NativeScreen() {
         notificationDialogOpen = false
         if (VoiceCallService.notificationsShown(this)) voiceCall.refresh() else voiceCall.notificationsOff()
         com.hobbycoders.aishuffle.push.PushRegistration.schedule(this)
+        notificationRequestEnded()
     }
     private var notificationDialogOpen = false
     private val notificationPermission = registerForActivityResult(androidx.activity.result.contract.ActivityResultContracts.RequestPermission()) {
         notificationDialogOpen = false
         // Posted before the grant, the call's notification stayed hidden: post it again.
         if (VoiceCallService.notificationsShown(this)) voiceCall.refresh() else voiceCall.notificationsOff()
+        notificationRequestEnded()
+    }
+    /** An answer usually comes before onResume, which retries. One that comes while resumed, or a failed launch, has no resume to follow. */
+    private fun notificationRequestEnded() {
+        notificationDialogOpen = false
+        if (needsFailover) failOver()
     }
     /** Whether the loaded page said it draws its own "Connected to" bar. False until told. */
     @androidx.annotation.VisibleForTesting internal var pageRendersWorkerBar = false
@@ -135,8 +142,13 @@ class ChatActivity : NativeScreen() {
         override fun onReceive(context: Context?, intent: Intent?) { web.stopLoading(); web.loadUrl("about:blank"); finish() }
     }
     @SuppressLint("SetJavaScriptEnabled")
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putBoolean("notification_dialog_open", notificationDialogOpen)
+        super.onSaveInstanceState(outState)
+    }
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        notificationDialogOpen = savedInstanceState?.getBoolean("notification_dialog_open") ?: false
         server = ServerStore.get(this).getById(intent.getStringExtra(EXTRA_SERVER_ID).orEmpty()) ?: run { finish(); return }
         try { PairingInput.origin(server.baseUrl) } catch (_: Exception) { heading("HTTPS required", "Pair this server again using its HTTPS address. Existing insecure credentials will not be sent."); return }
         sessionOwner = ChatSessionOwner(this, server)
@@ -511,7 +523,7 @@ class ChatActivity : NativeScreen() {
                 notificationDialogOpen = true
                 runCatching { notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS) }
                     .onSuccess { callNotifications.launched() }
-                    .onFailure { notificationDialogOpen = false }
+                    .onFailure { notificationRequestEnded() }
             }
         }
     }
@@ -550,7 +562,7 @@ class ChatActivity : NativeScreen() {
                 DeviceToolsRuntime.attach(this, server)
                 if (!notificationDialogOpen && !microphoneDialogOpen && !voiceCall.keptAlive) {
                     com.hobbycoders.aishuffle.push.PushPermission.ask(this, dialogOpen = { notificationDialogOpen = it }) {
-                        runCatching { pushPermission.launch(it) }.onFailure { notificationDialogOpen = false }
+                        runCatching { pushPermission.launch(it) }.onFailure { notificationRequestEnded() }
                     }
                 }
                 com.hobbycoders.aishuffle.push.PushRegistration.schedule(this)
@@ -642,14 +654,18 @@ class ChatActivity : NativeScreen() {
             }
         }
     }
-    /** A failed worker is quarantined across activities, so two broken workers cannot bounce us back and forth. */
+    /**
+     * A failed worker is quarantined across activities, so two broken workers cannot bounce us back and forth.
+     * Waits for an open notification request: opening another worker would finish the activity that owns the prompt.
+     */
     private fun failOver() {
         needsFailover = true
-        if (switchJob?.isActive == true || isFinishing || isDestroyed || !authorized() ||
+        if (switchJob?.isActive == true || notificationDialogOpen || isFinishing || isDestroyed || !authorized() ||
             !lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) return
         switchJob = lifecycleScope.launch {
             val target = WorkerConnections.reachable(this@ChatActivity, server)
-            if (isFinishing || isDestroyed || !authorized() ||
+            // A request may have started during the probes. Its answer retries.
+            if (notificationDialogOpen || isFinishing || isDestroyed || !authorized() ||
                 !lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) return@launch
             needsFailover = false
             if (target != null) openChat(target, server.name)

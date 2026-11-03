@@ -345,7 +345,7 @@ function completeHydration(premature: boolean, stall: HistoryStall | null = null
 //       floor-driven (premature/partial) publish is never stored, so a degraded
 //       load can never become the base of a future resume.
 //   R2. `restart(sessionId)` drops the entry. That is the explicit "hydrate
-//       from zero again" path used by rewind / reload-session.
+//       from zero again" path used by reload-session (Retry) and a server reset.
 //   R3. `invalidate(sessionId)` drops it on demand — for session delete, fork,
 //       or any out-of-band signal that the log was rewritten. The
 //       `user_session_cleared` / `user_session_deleted` WS broadcasts
@@ -784,7 +784,7 @@ export interface FeedController {
 	 */
 	start: (sessionId: string) => void;
 	/** Explicitly discard reducer state AND the cached transcript, and hydrate
-	 *  this session again from seq 0 (rewind / reload-session path). */
+	 *  this session again from seq 0 (reload-session path; a rewind needs none). */
 	restart: (sessionId: string) => void;
 	/**
 	 * Nudge a possibly-half-open feed: abort the reader and reconnect at the
