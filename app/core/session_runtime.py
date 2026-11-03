@@ -3231,6 +3231,7 @@ class SessionRuntime:
         try:
             from app.core.query_session_lifecycle import interrupt_session
 
+            logger.info("SessionRuntime: signalling provider to stop for %s mode=%s", sid, mode)
             await interrupt_session(sid)
         except Exception:
             logger.warning("SessionRuntime: interrupt_session raised for %s", sid, exc_info=True)

@@ -474,3 +474,33 @@ async def test_a_cancelled_close_writes_its_final_batch_once_the_row_frees(conne
     assert types.index("assistant.text_delta") < types.index("turn.aborted")
     seqs = [row["seq"] for row in rows]
     assert seqs == list(range(1, len(seqs) + 1))
+
+
+async def test_a_lease_renewal_lands_between_retries(connect, session_id, monkeypatch):
+    """The fenced writer holds its run row while it waits, but only during attempts."""
+    from app.core import turn_recorder as tr
+    from app.core.turn_recorder import TurnRecorder
+    from app.db import runs as runs_db
+
+    monkeypatch.setattr(tr, "_LOCK_RETRY_DELAYS_SECONDS", (1.0, 1.0, 1.0, 1.0))
+    recorder = await TurnRecorder.maybe_create(session_id)
+    await recorder.start("hello")
+    outcomes = []
+
+    with held_counter_row(connect, session_id) as blocker:
+        writing = asyncio.create_task(recorder.on_event(_delta("A" * 4096)))
+        for _ in range(16):
+            try:
+                outcomes.append(await asyncio.to_thread(
+                    runs_db.renew_run, recorder.run_id, recorder.runner_id,
+                    recorder.fence_token, 60))
+            except LockNotAvailable:
+                outcomes.append("refused")
+            await asyncio.sleep(0.25)
+        blocker.rollback()
+        await writing
+
+    assert "refused" in outcomes  # the writer really was holding the run row
+    assert True in outcomes
+    await recorder.close()
+    assert not recorder.recording_failed

@@ -57,7 +57,10 @@ USAGE_COALESCE_SECONDS = 2.0   # at most one turn.usage append per window
 # rolled back, even when COMMIT raised it, so unlike a lost connection a re-send
 # cannot duplicate anything. Each attempt can also wait out lock_timeout (5 s on a
 # worker), which makes this about 43 s: longer than the server's 30 s statement
-# and idle-in-transaction limits let an ordinary lock holder last.
+# and idle-in-transaction limits let an ordinary lock holder last. lock_timeout
+# applies per lock, so an attempt queued behind another writer of the same row
+# can wait twice, for about 78 s in all. The fenced writer holds its run row only
+# during attempts: the longer waits here leave lease renewal room to land.
 _LOCK_RETRY_DELAYS_SECONDS = (0.1, 0.25, 0.5, 1.0, 2.0, 4.0)
 
 # turn.provider_alive: the first of a turn is always recorded; a later one only
@@ -1697,9 +1700,8 @@ async def _append_unfenced(session_id: str, events: List[Dict[str, Any]]) -> Non
     """Write a between-turns batch, in order per session.
 
     The caller waits for the first attempt, as it always has, and moves on at a
-    lock timeout while the batch is re-sent behind it. So no caller waits longer
-    for the log than one ``lock_timeout``, and a cancelled caller cannot lose
-    the batch.
+    lock timeout while the batch is re-sent behind it. So the retry adds nothing
+    to a caller's wait, and a cancelled caller cannot lose the batch.
     """
     if not events:
         return
