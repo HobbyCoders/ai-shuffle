@@ -248,3 +248,49 @@ def test_images_count_at_a_fixed_cost_not_their_base64_size():
     ]
     tokens = fluid_transcript._estimated_tokens(entries)
     assert 2 * fluid_transcript._RESEED_IMAGE_TOKENS <= tokens < 2 * fluid_transcript._RESEED_IMAGE_TOKENS + 200
+
+
+# ─── #996: what the agent was told survives a re-seed ─────────────────────
+
+
+def _told_session(session_id, brief, message):
+    """A brief, then a tool call whose result carried a running agent's message."""
+    _insert(session_id, [
+        ("n1", None, _user(brief)),
+        ("n2", "n1", fluid_message("assistant", [{
+            "kind": "tooluseblock", "id": "c1", "name": "Read", "input": {},
+        }])),
+        ("n3", "n2", fluid_message("user", [{
+            "kind": "toolresultblock", "tool_use_id": "c1", "is_error": False,
+            "content": [{"kind": "text", "text": "file text"}],
+            "delivered_steers": [{"text": message, "origin": "peer", "sender": "lead"}],
+        }])),
+        ("n4", "n3", fluid_message("assistant", [{"kind": "text", "text": "done"}])),
+    ])
+    return session_id
+
+
+def test_a_message_delivered_on_a_tool_result_comes_back_after_a_reseed(mock_db, tmp_path):
+    """The hook lane left it in no entry, so the re-seed says it again, once,
+    and a brief the entries still show is not repeated."""
+    sid = _told_session("ses_reseed_told", "The original brief.", "Stop using the staging key.")
+    lines = _reseed(sid, tmp_path)
+    text = _plain(lines)
+    assert text.count("Stop using the staging key.") == 1
+    assert text.count("The original brief.") == 1
+    # Behind the first row: the file must not end on a turn with no answer.
+    assert lines[-1]["type"] == "assistant"
+    assert "repeated because the compacted" in str(lines[1]["message"]["content"])
+
+
+def test_a_reseed_after_a_compaction_repeats_the_brief_it_folded(mock_db, tmp_path):
+    brief = "The original brief. " * 200 + "Never push to main."
+    sid = _told_session("ses_reseed_fold", brief, "Stop using the staging key.")
+    _insert_events(sid, [_native(node_id="n4", spans=[["n1", "n4", "epoch"]])])
+    text = _plain(_reseed(sid, tmp_path))
+    assert "Never push to main." in text and "Stop using the staging key." in text
+
+
+def test_a_reseed_with_nothing_lost_adds_nothing(mock_db, tmp_path):
+    session_id = _seed()
+    assert "repeated because" not in _plain(_reseed(session_id, tmp_path))

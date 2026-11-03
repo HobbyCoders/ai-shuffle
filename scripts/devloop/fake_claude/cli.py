@@ -78,6 +78,8 @@ READ_ONLY = {"Read", "Glob", "Grep", "TodoWrite", "ToolSearch", "BashOutput"}
 #: Claude Code 2.1 saves an MCP tool result longer than this to a file.
 PERSIST_OVER = 50_000
 PREVIEW_CHARS = 2_000
+HOOK_CONTEXT_INLINE_CHARS = 10_000  # Claude Code 2.1.316: longer hook context goes to a file
+CONTEXT_FILE = "fake-claude-context.txt"  # what the newest model call could read
 HOOK_TIMEOUT = 120.0
 MCP_START_TIMEOUT = 20.0
 MCP_CALL_TIMEOUT = 300.0
@@ -206,6 +208,11 @@ def bind(value: Any, ctx: dict[str, Any]) -> Any:
 
 
 # ─── MCP (stdio servers from --mcp-config) ──────────────────────────────────
+
+
+def _js_length(text: str) -> int:
+    """What the CLI's limits count: JavaScript's length, where an emoji is two units."""
+    return len(text.encode("utf-16-le", "surrogatepass")) // 2
 
 
 class McpServer:
@@ -362,6 +369,8 @@ class DevClaude(script.Fake):
         self.counter = 0
         self.model_calls = 0
         self.dropped_tokens = 0  # what compaction removed so far (cumulative_dropped_tokens)
+        self.summarizer_keep: int | None = None  # a scenario's rows beside the summary
+        self.no_answer = False  # a scenario's: the mod has no answer, so the summarizer runs
         self.mcp: dict[str, McpServer] = {}
         self.transcript = self._transcript_path()
         self.mod_loaded = False
@@ -371,6 +380,9 @@ class DevClaude(script.Fake):
         self.turn_fast = False
         self.turn_tag: dict[str, str] = {}
         self.refused_once = False
+        # Hook context the next model call reads, not yet on a row (SessionStart
+        # answers before the conversation it follows is replaced).
+        self.loose_context: list[dict] = []
 
     # ── transcript ──
     def _config_dir(self) -> Path:
@@ -477,6 +489,39 @@ class DevClaude(script.Fake):
 
     def context_tokens(self) -> int:
         return 12_000 + len(json.dumps(self.rows)) // 4
+
+    def visible_context(self) -> str:
+        """The conversation as the next model request carries it, hook context
+        included. The fake never calls a model: tests read this to assert what
+        the agent could still see."""
+        parts: list[str] = []
+        for row in self.rows:
+            parts.append(row.get("text") or "")
+            parts += [r.get("text") or "" for r in row.get("toolResults") or []]
+            parts += [a["text"] for a in row.get("attachments") or []]
+        return "\n".join(p for p in parts if p)
+
+    def report_model_call(self) -> None:
+        text = self.visible_context()
+        log("model_call", call=self.model_calls, context_chars=len(text),
+            context_tokens=self.context_tokens())
+        path = os.environ.get("FAKE_CLAUDE_LOG")
+        if path:
+            Path(path).with_name(CONTEXT_FILE).write_text(text, encoding="utf-8")
+
+    def hook_context(self, event: str, answers: list[dict]) -> list[dict]:
+        """What a hook answer's ``additionalContext`` becomes: an attachment,
+        never a row (``hook_additional_context``, Claude Code 2.1.316). The CLI
+        saves one over 10,000 characters to a file and shows a 2 KB preview
+        (``USe``), so a long note is not in the model's context whole."""
+        found = []
+        for answer in answers:
+            text = (answer.get("hookSpecificOutput") or {}).get("additionalContext")
+            if isinstance(text, str) and text:
+                if _js_length(text) > HOOK_CONTEXT_INLINE_CHARS:
+                    text = self.persisted(f"hook-{uuid.uuid4().hex[:12]}-additionalContext", text)
+                found.append({"event": event, "text": text})
+        return found
 
     def tools(self) -> list[str]:
         names = [n for n in BUILTIN_TOOLS if not self.removed(n)]
@@ -639,6 +684,15 @@ class DevClaude(script.Fake):
 
     def start_message(self) -> None:
         self.model_calls += 1
+        if self.loose_context and self.rows:
+            # Identical hook context is dropped, as the CLI drops a repeated
+            # SessionStart attachment (``nRe``).
+            held = {a["text"] for row in self.rows for a in row.get("attachments") or []}
+            fresh = [a for a in self.loose_context if a["text"] not in held]
+            if fresh:
+                self.rows[-1]["attachments"] = [*(self.rows[-1].get("attachments") or []), *fresh]
+            self.loose_context = []
+        self.report_model_call()
         self.message_id = "msg_fake_" + uuid.uuid4().hex[:20]
         self.block = 0
         self.stream({"type": "message_start", "message": {
@@ -786,6 +840,8 @@ class DevClaude(script.Fake):
             if self.interrupted:
                 break
             if step.get("compact"):
+                self.summarizer_keep = step.get("summarizer_keep")
+                self.no_answer = bool(step.get("summarizer"))
                 self.compact("auto", None)
             self.poll(latency / 1000 if latency else 0.01)
             self.start_message()
@@ -858,24 +914,31 @@ class DevClaude(script.Fake):
                 decision, reason = "deny", answer.get("message") or "The user denied this tool."
             elif isinstance(answer.get("updatedInput"), dict):
                 tool_input = answer["updatedInput"]
+        attachments: list[dict] = []
         if decision == "deny":
             text, is_error = str(reason), True
         else:
             text, is_error = self.execute(call, tool_input)
-            self.hook("PostToolUse", {"tool_name": name, "tool_input": tool_input,
-                                      "tool_response": text, "tool_use_id": tid}, tid)
+            attachments = self.hook_context("PostToolUse", self.hook(
+                "PostToolUse", {"tool_name": name, "tool_input": tool_input,
+                                "tool_response": text, "tool_use_id": tid}, tid))
         log("tool", name=name, denied=decision == "deny", chars=len(text), is_error=is_error)
         message = {"role": "user", "content": [{
             "type": "tool_result", "tool_use_id": tid,
             "content": [{"type": "text", "text": text}], "is_error": is_error}]}
+        # Hook context is grouped on the row before it: the mod never posts it, and
+        # it survives a compaction only with that row handed back by its handle.
         handle = self._add("user", message, {"role": "user", "text": "", "toolUses": [],
                                              "toolResults": [{"tool_use_id": tid, "text": text,
-                                                              "isError": is_error}]})
+                                                              "isError": is_error}],
+                                             **({"attachments": attachments} if attachments else {})})
         self.emit({"type": "user", "uuid": handle, "session_id": self.sid,
                    "parent_tool_use_id": None, "message": message})
 
     def execute(self, call: dict, tool_input: dict) -> tuple[str, bool]:
         spec, name = call["spec"], call["name"]
+        if spec.get("delay_ms"):  # a tool that takes a while: a message can arrive meanwhile
+            time.sleep(fake_ai._number(spec["delay_ms"], 0.0) / 1000)
         if "result" in spec:
             text, is_error = str(spec["result"]), bool(spec.get("is_error"))
         elif "result_chars" in spec:
@@ -891,7 +954,7 @@ class DevClaude(script.Fake):
         else:
             text, is_error = (f"(fake claude CLI: {name} was not run; dev-loop scenarios "
                               "script tool output with \"result\")"), False
-        if name.startswith("mcp__") and len(text) > PERSIST_OVER:
+        if name.startswith("mcp__") and _js_length(text) > PERSIST_OVER:
             text = self.persisted(call["id"], text)
         return text, is_error
 
@@ -925,7 +988,7 @@ class DevClaude(script.Fake):
         the turn (a skipped ``/compact`` prints its own result)."""
         started = time.monotonic()
         before = self.context_tokens()
-        ctx: dict[str, Any] = {"sid": self.sid, "logical_parent": self.last_uuid,
+        ctx: dict[str, Any] = {"sid": self.sid, "logical_parent": self.logical_parent(),
                                "pre_tokens": before, "instructions": instructions,
                                "boundary_uuid": _new_uuid(), "summary_uuid": _new_uuid()}
         outcome, answer = "summarizer", None
@@ -936,7 +999,7 @@ class DevClaude(script.Fake):
         # outcome of a trigger (a test checks it): the typed command's
         # "compacting" status; nothing for an automatic compaction.
         self.play_compaction(prelude, ctx)
-        if outcome != "skip":
+        if outcome != "skip" and not self.no_answer:
             try:
                 answer = self.ask_bridge(trigger)
             except BridgeError as exc:
@@ -956,12 +1019,25 @@ class DevClaude(script.Fake):
         log("compact", trigger=trigger, outcome=outcome, rows=len(self.rows))
         return outcome == "skip"
 
+    def logical_parent(self) -> str | None:
+        """The uuid a boundary names as its logical parent. On real workers
+        (2.1.312 to 2.1.316, 105 mechanical boundaries) it is almost never a row
+        the mod posted: an attachment or a stop-hook entry, or absent from the
+        transcript. So it is a transcript entry that is not a row here too."""
+        if self.last_uuid is None:
+            return None
+        handle = _new_uuid()
+        self._write({"type": "attachment", "uuid": handle, "parentUuid": self.last_uuid,
+                     "attachment": {"type": "silent_turn_reminder"}})
+        return handle
+
     def play_compaction(self, steps: list[dict], ctx: dict[str, Any]) -> None:
         """Run fixture steps: frames and transcript entries (placeholders bound
         from ``ctx``), hooks, the conversation's replacement, the replay."""
         for step in steps:
             if "hook" in step:
-                self.hook(step["hook"], bind(step.get("input") or {}, ctx))
+                answers = self.hook(step["hook"], bind(step.get("input") or {}, ctx))
+                self.loose_context += self.hook_context(step["hook"], answers)
             elif "frame" in step:
                 self.emit(bind(step["frame"], ctx))
             elif "transcript" in step:
@@ -969,7 +1045,9 @@ class DevClaude(script.Fake):
             elif "apply" in step:
                 self.apply(ctx["answer"], ctx)
             elif "summarize" in step:
-                self.summarize(ctx, **step["summarize"])
+                keep = self.summarizer_keep
+                self.summarize(ctx, **{**step["summarize"],
+                                       **({} if keep is None else {"keep": keep})})
             elif step.get("replay") == "answer":
                 for entry in ctx["replay_entries"]:
                     self._write(entry)
@@ -1030,8 +1108,16 @@ class DevClaude(script.Fake):
         boundary."""
         kept, frames, entries = [], [], []
         parent = ctx["boundary_uuid"]
+        originals = {r.get("handle"): r for r in self.rows}
         for row in rows:
+            # A row handed back by its handle with its content unchanged keeps
+            # the hook context grouped on it; any other row comes back without
+            # (``rowsOf``/``messagesOf``, Claude Code 2.1.316).
+            original = originals.get(row.get("handle")) or {}
             row = {k: v for k, v in row.items() if k != "handle"}
+            if original.get("attachments") and all(
+                    original.get(k) == row.get(k) for k in ("text", "toolUses", "toolResults")):
+                row["attachments"] = original["attachments"]
             if row["role"] == "assistant":
                 content = ([{"type": "text", "text": row["text"]}] if row["text"] else []) + [
                     {"type": "tool_use", "id": u["tool_use_id"], "name": u["tool"],
