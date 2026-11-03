@@ -1077,7 +1077,7 @@ def test_the_tool_is_safe_always_loaded_and_short():
     spec = next(spec for spec, _ in SPECS if spec.name == "SuggestTask")
     assert spec.risk == "safe" and spec.effective_risk({}) == "safe"
     assert spec.requires_extra == ("task_chips",)
-    assert len(spec.description) < 300
+    assert len(spec.description) <= 659 * 101 // 100
     assert bridge.NATIVE_EAGER_TOOLS >= {"SuggestTask"}
     assert "mcp__builtins__SuggestTask" in bridge.DELEGATED_LOADED_TOOLS
     assert "SuggestTask" in CHAT_MODE_ORCHESTRATION_TOOLS

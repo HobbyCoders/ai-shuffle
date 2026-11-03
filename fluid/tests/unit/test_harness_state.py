@@ -90,6 +90,32 @@ async def test_native_cli_scratch_reminder_is_scoped_to_cli_host(tmp_path, hoste
         await loop.aclose()
 
 
+async def test_native_cli_scratch_reminder_goes_out_once_and_stays_in_view(tmp_path):
+    from fluid.cli.host import CliHost
+    from fluid.config.model import HarnessConfig
+    from fluid.engine.native import NativeLoop
+    from fluid.events import UserTurn
+    from fluid.store.base import MemoryStore
+
+    provider, store = _OneReplyProvider(), MemoryStore()
+    loop = NativeLoop(provider=provider, model="fixture", store=store,
+                      ctx=ToolCtx(cwd=str(tmp_path)))
+    host = CliHost(HarnessConfig(cwd=str(tmp_path)), store).attach(loop)
+    try:
+        for text in ("one", "two", "three"):
+            await loop.submit(UserTurn(content=text))
+            await asyncio.wait_for(loop.wait_turn(), 5)
+        counts = ["\n".join(m.text() or "" for m in request.messages).count("# Harness scratch")
+                  for request in provider.requests]
+        assert counts == [1, 1, 1]
+        nodes = await store.load_path(loop.session_id)
+        pinned = [n.message.pinned_text() for n in nodes if n.message.role == "user"]
+        assert pinned[0].startswith(scratch_prompt(loop.ctx)[:40]) and pinned[1:] == ["", ""]
+    finally:
+        await host.aclose()
+        await loop.aclose()
+
+
 async def test_a_failed_state_root_never_strands_a_native_turn(tmp_path):
     """The host's root can raise (its session lookup failed). The turn goes on
     without the reminders; it must not die before its terminal event."""

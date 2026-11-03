@@ -40,7 +40,9 @@ CLI_PREFIX = "mcp__fluid_bundled__"
 # small margin for roster text that varies by install. SuggestTask (Nov 2026,
 # ~380) sits in this tier on purpose: an agent must have it at hand the moment
 # it notices adjacent work, without first searching for a tool it does not know.
-LOADED_BUDGET = 3_000
+# Its anti-offloading limits (Nov 2026, owner approved) add 124: the tier measures
+# 2,902 -> 3,026 here, so the margin for roster text stays about the same.
+LOADED_BUDGET = 3_100
 
 
 @pytest.fixture(autouse=True)

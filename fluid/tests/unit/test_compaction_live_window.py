@@ -84,6 +84,26 @@ def test_window_keeps_the_pinned_memory_chain_from_the_newest_full_block():
     assert "newer snapshot" in view[0].text() and "change after it" in view[0].text()
 
 
+def test_window_keeps_the_newest_pinned_block_with_no_memory_chain():
+    """# Harness scratch: the fold in the checkpoint reads this node, and so
+    does the host when it asks what the model holds."""
+    from fluid.context.compaction import newest_pinned_block
+
+    blocks = {
+        1: reminder("# Harness scratch\n", "Use /old"),
+        4: reminder("# Harness scratch\n", "Use /new"),
+    }
+    nodes = path(memory=blocks)
+    c, end = checkpointed(nodes)
+    _, keep = c.frozen_prefix(nodes)
+    assert keep == {nodes[0].node_id, end, "node_4_user"}
+    window = c.window(nodes)
+    view = c.view(window)
+    assert view == c.view(nodes)
+    assert "Use /new" in view[0].text() and "Use /old" not in view[0].text()
+    assert newest_pinned_block(window, "# Harness scratch\n") == blocks[4]
+
+
 async def test_engine_context_path_matches_the_full_path_view():
     """A store without load_window: the engine windows load_path itself."""
     nodes = path()
