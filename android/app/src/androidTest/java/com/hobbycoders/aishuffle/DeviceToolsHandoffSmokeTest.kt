@@ -176,6 +176,16 @@ class DeviceToolsHandoffSmokeTest {
             instrumentation.removeMonitor(monitor)
             clientField.set(null, original)
             apiField.set(null, previousApi)
+            if (launches.get() > 0) {
+                // The launched activity lives in the separate test APK/process, outside
+                // ActivityScenario's lifecycle. Retire its task just as CrossAppOverlayTest
+                // does, so subsequent stopped/resumed scenarios cannot inherit that task.
+                val fixturePackage = instrumentation.context.packageName
+                check(fixturePackage != context.packageName)
+                android.os.ParcelFileDescriptor.AutoCloseInputStream(
+                    instrumentation.uiAutomation.executeShellCommand("am force-stop $fixturePackage")
+                ).use { it.readBytes() }
+            }
         }
     }
 }
