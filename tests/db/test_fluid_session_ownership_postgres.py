@@ -921,8 +921,9 @@ async def test_rewind_blocked_past_the_lock_budget_fails_without_moving_the_head
             blocker.cursor().execute(
                 "SELECT 1 FROM fluid_sessions WHERE session_id=%s FOR UPDATE", (sid,),
             )
-            result = await asyncio.to_thread(
-                fluid_transcript.rewind_fluid_session, sid, "n1", False,
+            result = await asyncio.wait_for(
+                asyncio.to_thread(fluid_transcript.rewind_fluid_session, sid, "n1", False),
+                timeout=5,  # without the budget it waits on the blocker forever
             )
     assert result.success is False and "try the rewind again" in result.error.lower()
     assert _session_row(sid)["head_node_id"] == "n2"

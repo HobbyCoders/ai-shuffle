@@ -9,10 +9,7 @@ from __future__ import annotations
 
 import asyncio
 
-import anyio
-from fastapi.responses import StreamingResponse
 from starlette.requests import ClientDisconnect
-from starlette.types import Send
 
 
 def is_client_disconnect(exc: BaseException) -> bool:
@@ -35,21 +32,3 @@ def is_client_disconnect(exc: BaseException) -> bool:
             is_client_disconnect(sub) for sub in exc.exceptions
         )
     return False
-
-
-class ClosingStreamingResponse(StreamingResponse):
-    """A stream that closes its body as soon as the response ends.
-
-    A client that leaves while the response is blocked in ``send`` cancels the
-    response between two frames, so nothing reaches the generator parked at its
-    ``yield``. Left alone, its ``finally`` blocks wait for the garbage collector,
-    and a chat turn holds its chat until they run. The close is shielded because
-    the turn's cleanup awaits inside a scope that has already been cancelled.
-    """
-
-    async def stream_response(self, send: Send) -> None:
-        try:
-            await super().stream_response(send)
-        finally:
-            with anyio.CancelScope(shield=True):
-                await self.body_iterator.aclose()

@@ -255,6 +255,16 @@ def is_subprocess_alive(state: SessionState) -> bool:
     return state.adapter.is_alive()
 
 
+def is_mid_turn(state: "SessionState") -> bool:
+    """A route is running this client, or its engine still has a turn going.
+
+    The engine refuses a new turn in that state, and a route that hears that takes
+    the client for broken, so a request must be refused before it gets that far.
+    """
+    engine = getattr(state.adapter, "engine", None)
+    return state.is_streaming or getattr(engine, "turn_running", None) is True
+
+
 async def retire_if_replaced(pool: Any, session_id: str) -> None:
     """Before a reuse gate, close a pooled client another engine has replaced.
 

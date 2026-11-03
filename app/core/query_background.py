@@ -26,7 +26,7 @@ from app.core.session_title import derive_session_title
 from app.core.provider import session_admission
 from app.core.provider.session_admission import Lease
 from app.core.session_pool import (
-    SessionState, get_session_pool, is_subprocess_alive, retire_if_replaced,
+    SessionState, get_session_pool, is_mid_turn, is_subprocess_alive, retire_if_replaced,
     requires_reconnect,
     reconnect_option_names,
 )
@@ -227,7 +227,7 @@ async def _run_background_query_impl(
         # that is mid-turn (kills the CLI, loses the whole in-flight turn).
         # Fail safe like the connect-failure path — but do NOT cleanup the live
         # session store here: the active turn owns it and is still streaming.
-        if existing_state.is_streaming:
+        if is_mid_turn(existing_state):
             error_msg = (
                 "Session is busy with another response. "
                 "Wait for it to finish, then send your message again."
@@ -618,7 +618,6 @@ async def _run_background_query_impl(
         clear_turn_context(session_id, expected=bound_generation_context)
         # Mark as not streaming — keep in pool for reuse
         state.is_streaming = False
-        session_admission.turn_ended(lease)
         state.streaming_started_at = None
         state.last_activity = datetime.now(timezone.utc)
         state.background_task = None
@@ -628,34 +627,15 @@ async def _run_background_query_impl(
                 and state.generation_context is bound_generation_context):
             await pool.remove_dead(session_id)
 
-        # Record the terminal event so the turn closes cleanly in the event
-        # log (the wrapper's recorder.close() only appends a crash-path
-        # turn.aborted when NO terminal was recorded).
-        if recorder:
-            if interrupted:
-                await recorder.on_event({
-                    "type": "interrupted",
-                    "message": "Query was interrupted",
-                    "metadata": {"terminal_reason": metadata.get("terminal_reason")},
-                })
-            elif metadata.get("error"):
-                await recorder.on_event({
-                    "type": "error",
-                    "message": metadata["error"],
-                })
-            else:
-                await recorder.on_event({
-                    "type": "done",
-                    "session_id": session_id,
-                    "metadata": metadata,
-                })
+    # Durable end-of-turn writes (parked marker, branch resync, summary flush).
+    await persist_turn_end_state(session_id)
 
-        # Durable end-of-turn writes (parked marker, branch resync, summary flush).
-        await persist_turn_end_state(session_id)
-
-        # Clean up per-session state that is no longer needed.
-        # Permission rules and pending requests accumulate per session and are
-        # never cleared otherwise, causing unbounded memory growth.
+    # Clean up per-session state that is no longer needed.
+    # Permission rules and pending requests accumulate per session and are
+    # never cleared otherwise, causing unbounded memory growth. These act on the
+    # session as a whole, so a turn stopped by a rewind that has since finished
+    # leaves them to whatever runs now.
+    if session_admission.holds_chat(lease):
         permission_handler.clear_session_rules(session_id)
         await permission_handler.cancel_all_requests(session_id)
 
@@ -708,6 +688,30 @@ async def _run_background_query_impl(
         getattr(options, "cwd", None),
         memory_leg_for_options(options),
     )
+
+    session_admission.turn_ended(lease)
+
+    # Record the terminal event so the turn closes cleanly in the event log (the
+    # wrapper's recorder.close() only appends a crash-path turn.aborted when NO
+    # terminal was recorded).
+    if recorder:
+        if interrupted:
+            await recorder.on_event({
+                "type": "interrupted",
+                "message": "Query was interrupted",
+                "metadata": {"terminal_reason": metadata.get("terminal_reason")},
+            })
+        elif metadata.get("error"):
+            await recorder.on_event({
+                "type": "error",
+                "message": metadata["error"],
+            })
+        else:
+            await recorder.on_event({
+                "type": "done",
+                "session_id": session_id,
+                "metadata": metadata,
+            })
 
     logger.debug(f"[Background] Query completed for session {session_id}")
 
@@ -851,9 +855,6 @@ async def _start_background_turn(
             lease=lease,
         )
     )
-    # A callback, because a task cancelled before its first step runs no ``finally``.
-    task.add_done_callback(lambda _: session_admission.close(lease))
-
     # Store task reference for interrupt support
     # The background task picks this up after pool.put() creates the state entry
     _pending_background_tasks[session_id] = task
@@ -863,6 +864,9 @@ async def _start_background_turn(
     def _cleanup_pending(t: asyncio.Task):
         _pending_background_tasks.pop(session_id, None)
     task.add_done_callback(_cleanup_pending)
+
+    # A callback, because a task cancelled before its first step runs no ``finally``.
+    task.add_done_callback(lambda _: session_admission.close(lease))
 
     return {
         "session_id": session_id,

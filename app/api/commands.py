@@ -11,7 +11,7 @@ Rewind uses persisted transcript/checkpoint services rather than terminal parsin
 
 import asyncio
 import logging
-from typing import Optional, List
+from typing import Any, Optional, List
 from fastapi import APIRouter, HTTPException, Depends, Request
 from pydantic import BaseModel
 
@@ -640,11 +640,16 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
     - restore_files: Not supported; reported as an error while the chat rewind still runs
     - include_response: Keep Claude's response to target message
     """
-    lease = session_admission.Lease(session_id, is_rewind=True)
-    try:
-        return await _execute_rewind(session_id, request, http_request, lease)
-    finally:
-        session_admission.close(lease)
+    async def rewind() -> Any:
+        lease = await session_admission.begin_rewind(session_id)
+        try:
+            return await _execute_rewind(session_id, request, http_request, lease)
+        finally:
+            session_admission.close(lease)
+
+    # Its writes run on threads a cancelled request cannot stop, so a rewind holds
+    # the chat until it has finished, even if the caller has gone.
+    return await session_admission.finish_unattended(rewind())
 
 
 async def _execute_rewind(

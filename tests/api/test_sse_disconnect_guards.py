@@ -20,15 +20,12 @@ and inject the exact exception shapes at the live suspension point with
 """
 
 import asyncio
-import gc
 import json
 from unittest.mock import MagicMock, patch
 
-import anyio
 import pytest
 
 import app.api.query as query_mod
-from app.api.sse_utils import ClosingStreamingResponse
 
 
 def _inner_factory(*frames):
@@ -121,87 +118,3 @@ async def test_query_ordinary_error_still_yields_error_frame(route):
     payload = json.loads(frame.split("data: ", 1)[1].strip())
     assert payload["type"] == "error"
     assert "boom" in payload["message"]
-
-
-# ---------------------------------------------------------------------------
-# A client that leaves while the response is blocked in ``send``: the cancel lands
-# between two frames, so the generator hears nothing. Each test keeps the response
-# alive and the collector off, so only an explicit close can run the cleanup.
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-def no_collector():
-    gc.disable()
-    yield
-    gc.enable()
-
-
-async def _client_leaves_during_send(response):
-    blocked = asyncio.Event()
-
-    async def send(message):
-        if message["type"] == "http.response.body":
-            blocked.set()
-            await asyncio.Event().wait()
-
-    async with anyio.create_task_group() as group:
-        group.start_soon(response.stream_response, send)
-        await blocked.wait()
-        group.cancel_scope.cancel()
-
-
-async def test_a_response_closes_its_body_when_the_client_leaves_during_send(no_collector):
-    finished = []
-
-    async def body():
-        try:
-            yield "frame"
-        finally:
-            await asyncio.sleep(0)  # a cleanup that awaits, in a cancelled scope
-            finished.append(True)
-
-    response = ClosingStreamingResponse(body())
-    await _client_leaves_during_send(response)
-    assert finished == [True]
-
-
-@pytest.mark.parametrize(
-    "route",
-    [query_mod.stream_one_shot_query, query_mod.stream_conversation],
-)
-async def test_routes_close_the_turn_when_the_client_leaves_during_send(no_collector, route):
-    finished = []
-
-    async def turn(**_kwargs):
-        try:
-            yield {"type": "text", "content": "partial"}
-        finally:
-            await asyncio.sleep(0)
-            finished.append(True)
-
-    request = MagicMock()
-    request.prompt = "hi"
-    request.overrides = None
-    request.profile = "p1"
-    request.session_id = None
-    api_user = {"id": "u1", "profile_ids": ["p1"], "project_id": "proj1"}
-    with patch.object(query_mod, "stream_query", new=turn):
-        response = await route(request=request, api_user=api_user, _=None)
-        await _client_leaves_during_send(response)
-    assert finished == [True]
-
-
-async def test_failover_wrapper_closes_the_turn_it_stops_reading_at_done(no_collector):
-    finished = []
-
-    async def turn(**_kwargs):
-        try:
-            yield {"type": "done", "metadata": {}}
-        finally:
-            finished.append(True)
-
-    with patch.object(query_mod, "stream_query", new=turn):
-        frames = [f async for f in query_mod._stream_query_with_failover(prompt="hi", profile_id="p1")]
-    assert [f["type"] for f in frames] == ["done"]
-    assert finished == [True]

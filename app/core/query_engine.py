@@ -53,7 +53,7 @@ from app.core.config import settings
 from app.core.provider import session_admission
 from app.core.provider.session_admission import Lease, SessionReplacedError
 from app.core.session_pool import (
-    SessionState, get_session_pool, is_subprocess_alive, retire_if_replaced,
+    SessionState, get_session_pool, is_mid_turn, is_subprocess_alive, retire_if_replaced,
     requires_reconnect, reconnect_option_names, mark_subprocess_oom_killable,
     subprocess_pid,
 )
@@ -1015,9 +1015,12 @@ def stream_query(
     """Run one streamed turn under the chat's lease (see ``session_admission``)."""
     is_new_session = not session_id
     session_id = session_id or str(uuid.uuid4())
-    return session_admission.stream_turn(session_id, lambda lease: _stream_query_turn(
-        lease, is_new_session, prompt, profile_id, project_id, overrides,
-        session_id, api_user_id, device_id, persist_user_message,
+    return session_admission.outlive_reader(session_admission.stream_turn(
+        session_id,
+        lambda lease: _stream_query_turn(
+            lease, is_new_session, prompt, profile_id, project_id, overrides,
+            session_id, api_user_id, device_id, persist_user_message,
+        ),
     ))
 
 
@@ -1221,7 +1224,7 @@ async def _stream_query_turn(
     if existing_state and existing_state.is_connected and is_subprocess_alive(existing_state):
         # Busy-write guard backstop: never write a second prompt into a client
         # that is mid-turn (kills the CLI, loses the whole in-flight turn).
-        if existing_state.is_streaming:
+        if is_mid_turn(existing_state):
             logger.warning(
                 f"Pooled client for session {session_id} is mid-turn — "
                 f"refusing concurrent query (busy-write guard)"
@@ -1681,7 +1684,6 @@ async def _stream_query_turn(
         state.interrupt_requested = False
         # Mark as not streaming — keep in pool for reuse
         state.is_streaming = False
-        session_admission.turn_ended(lease)
         state.streaming_started_at = None
         state.last_activity = datetime.now(timezone.utc)
 
@@ -2081,7 +2083,7 @@ async def _stream_to_websocket_turn(
         # in message reader" and the whole in-flight turn is lost. The WS
         # handlers enqueue instead of racing us, but this gate is the last line
         # of defence for any caller (REST, background, unpark races).
-        if existing_state.is_streaming:
+        if is_mid_turn(existing_state):
             logger.warning(
                 f"[WS] Pooled client for session {session_id} is mid-turn — "
                 f"refusing concurrent query (busy-write guard)"
@@ -4226,7 +4228,6 @@ async def _stream_to_websocket_turn(
         clear_turn_context(session_id, expected=bound_generation_context)
         # Mark as not streaming and reset interrupt flag
         state.is_streaming = False
-        session_admission.turn_ended(lease)
         state.streaming_started_at = None
         state.interrupt_requested = False
         state.last_activity = datetime.now(timezone.utc)
@@ -4287,6 +4288,8 @@ async def _stream_to_websocket_turn(
             "subtype": "local_command",
             "data": {"content": f"Command {cmd_name} completed (no output)."}
         }
+
+    session_admission.turn_ended(lease)
 
     # Yield done or interrupted event. On a crash we've already emitted an
     # `error` frame above; emitting `done` too would mislead the frontend into

@@ -1688,8 +1688,8 @@ class SessionRuntime:
                         await self._broadcast(ws_event)
         finally:
             try:
-                # A pump that leaves early (cancelled, or its recording failed) must
-                # not leave the chat held by a turn parked at its yield.
+                # A pump that leaves early (cancelled, or its recording failed) hands
+                # a turn parked at its yield over to finish on its own task.
                 if turn_events is not None:
                     await turn_events.aclose()
             finally:

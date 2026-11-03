@@ -28,17 +28,17 @@ mirroring tests/core/test_interrupt_send_now.py.
 
 import asyncio
 import gc
-from contextlib import ExitStack, aclosing
+from contextlib import ExitStack
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import anyio
 import pytest
 
-from app.api.sse_utils import ClosingStreamingResponse
 import app.core.query_engine as qe
 import app.core.query_background as qb
 from app.core.provider import session_admission
 from app.core.provider.harness_adapter import HarnessAdapter
+from app.core.provider.events import AssistantMessage, TextBlock
 from app.core.provider.session_admission import SessionBusyError, SessionReplacedError
 from app.core.session_pool import SessionState
 from app.db import session_events as se
@@ -661,9 +661,9 @@ class _PausedConnect(HarnessAdapter):
         self.world.sent.append(prompt)
 
     async def receive_events(self):
+        for frame in self.world.frames_first:
+            yield frame
         await self.world.step("turn")
-        if False:  # pragma: no cover
-            yield None
 
     async def disconnect(self):
         self.world.disconnected.append(self)
@@ -677,6 +677,7 @@ class _ConnectWorld:
         self.connects: list = []
         self.sent: list = []
         self.disconnected: list = []
+        self.frames_first: list = []
 
     async def step(self, name: str) -> None:
         if name == self.stop_at:
@@ -771,7 +772,7 @@ async def test_background_conversation_then_immediate_continue_of_its_returned_i
     assert new_id not in session_admission._holders
 
 
-@pytest.mark.parametrize("route", ["chat", "rest", "background"])
+@pytest.mark.parametrize("route", ["chat", "background"])
 @pytest.mark.parametrize("step", ["connect", "prepare", "reconcile"])
 async def test_a_connect_cancelled_anywhere_in_its_boundary_lets_the_chat_go(mock_db, route, step):
     sessions_db.create_session("sess-cancel", "default")
@@ -840,7 +841,7 @@ async def test_a_rewind_during_connect_stops_the_turn_before_it_starts(mock_db, 
         turn = _start(route, "one", "sess-rw")
         await asyncio.wait_for(world.reached.wait(), 10)
 
-        rewind = session_admission.Lease("sess-rw", is_rewind=True)
+        rewind = await session_admission.begin_rewind("sess-rw")
         stopping = session_admission.take_for_rewind(rewind)
         world.proceed.set()
         await asyncio.wait_for(turn, 10)
@@ -858,9 +859,11 @@ async def test_a_turn_a_rewind_stopped_before_its_connect_never_claims(mock_db, 
     turn then connected, its claim would outrank the rewind and whatever follows."""
     sessions_db.create_session("sess-early", "default")
     world = _ConnectWorld()
-    rewind = session_admission.Lease("sess-early", is_rewind=True)
+    rewind = None
 
     async def rewound_meanwhile(*_args, **_kwargs):
+        nonlocal rewind
+        rewind = await session_admission.begin_rewind("sess-early")
         session_admission.take_for_rewind(rewind)
 
     with ExitStack() as stack:
@@ -905,19 +908,144 @@ async def test_a_turn_another_install_took_over_reports_it_and_never_says_done(m
     assert "sess-lost" not in session_admission._holders
 
 
+@pytest.mark.parametrize("step", ["connect", "prepare", "reconcile"])
+async def test_a_rest_client_leaving_during_connect_holds_the_chat_until_the_turn_is_over(mock_db, step):
+    """A client leaving cancels only its own wait: the turn goes on, as it does once running."""
+    sessions_db.create_session("sess-left", "default")
+    world = _ConnectWorld(step)
+    with ExitStack() as stack:
+        world.patches(stack, "rest", StubPool())
+        reader = _start("rest", "one", "sess-left")
+        await asyncio.wait_for(world.reached.wait(), 10)
+        reader.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await reader
+
+        await _second_is_refused("rest", "sess-left")
+
+        world.proceed.set()
+        await _until_free("sess-left")
+    assert "one" in " ".join(world.sent), "the turn the client left still ran"
+
+
+async def _until_free(session_id: str) -> None:
+    for _ in range(1000):
+        if session_id not in session_admission._holders:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("the chat was never freed")
+
+
+def _words():
+    return AssistantMessage(content=[TextBlock(text="partial")], model="m")
+
+
+def _reader(route: str, prompt: str, session_id: str):
+    if route == "chat":
+        return qe._stream_to_websocket_impl(prompt, session_id, "claude-code")
+    return qe.stream_query(prompt, "claude-code", session_id=session_id)
+
+
+@pytest.mark.parametrize("route, leaves", [("chat", "closed"), ("rest", "closed"), ("rest", "cancelled")])
+async def test_a_client_that_leaves_never_frees_a_running_engine_and_its_turn_is_saved(mock_db, route, leaves):
+    """The engine runs on, so the chat stays held until the turn ends and has been saved."""
+    sessions_db.create_session("sess-drop", "default")
+    world = _ConnectWorld("turn")
+    world.frames_first = [_words()]
+    saved = AsyncMock()
+    with ExitStack() as stack:
+        world.patches(stack, route, StubPool())
+        stack.enter_context(patch.object(qe, "_persist_turn_results", new=saved))
+        reader = _reader(route, "one", "sess-drop")
+        await asyncio.wait_for(reader.__anext__(), 10)
+        if leaves == "closed":
+            await reader.aclose()
+            await asyncio.wait_for(world.reached.wait(), 10)
+        else:
+            await asyncio.wait_for(world.reached.wait(), 10)
+            while True:  # read what the turn produced, then wait for more
+                waiting = asyncio.ensure_future(reader.__anext__())
+                await asyncio.sleep(0.01)
+                if not waiting.done():
+                    break
+            waiting.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await waiting
+
+        assert "sess-drop" in session_admission._holders, "the engine is still running"
+        saved.assert_not_awaited()
+        await _second_is_refused(route, "sess-drop")
+        assert world.disconnected == [], "a refused message removes nothing"
+
+        world.proceed.set()
+        await _until_free("sess-drop")
+        saved.assert_awaited_once()
+        assert saved.await_args.kwargs.get("interrupted") in (None, False)
+
+        world.stop_at = None
+        frames = await asyncio.wait_for(_start(route, "two", "sess-drop"), 10)
+    assert "two" in " ".join(world.sent), frames
+    assert not [e for e in frames if e.get("type") == "error"], frames
+
+
+async def test_a_failure_after_the_client_left_still_lets_the_chat_go(mock_db):
+    sessions_db.create_session("sess-drop-fail", "default")
+    world = _ConnectWorld("turn")
+    world.frames_first = [_words()]
+
+    async def fails(*_args, **_kwargs):
+        raise RuntimeError("database gone")
+
+    with ExitStack() as stack:
+        world.patches(stack, "chat", StubPool())
+        stack.enter_context(patch.object(qe, "_persist_turn_results", new=fails))
+        reader = _reader("chat", "one", "sess-drop-fail")
+        await asyncio.wait_for(reader.__anext__(), 10)
+        await reader.aclose()
+        await asyncio.wait_for(world.reached.wait(), 10)
+        world.proceed.set()
+        await _until_free("sess-drop-fail")
+
+
 @pytest.mark.parametrize("route", ["chat", "rest", "background"])
-async def test_the_chat_is_free_by_the_time_the_client_hears_the_turn_ended(mock_db, route):
-    """The client's next message can arrive while this route is still saving."""
+async def test_an_engine_still_running_refuses_the_next_message_without_being_removed(mock_db, route):
+    """The engine's own "a turn is already running" reads as a broken client, so a
+    request has to be refused before it gets that far."""
+    sessions_db.create_session("sess-mid", "default")
+    state = _fake_state(is_streaming=False, sdk_session_id="sdk-mid")
+    state.adapter.engine = MagicMock(turn_running=True)
+    pool = StubPool(state)
+    world = _ConnectWorld()
+    with ExitStack() as stack:
+        world.patches(stack, route, pool)
+        if route == "background":
+            await qb.start_background_query("two", "claude-code", session_id="sess-mid")
+            await asyncio.wait_for(qb._pending_background_tasks["sess-mid"], 10)
+        else:
+            await _second_is_refused(route, "sess-mid")
+    assert pool.peek("sess-mid") is state, "not removed as broken"
+    assert world.connects == []
+    state.adapter.send_query.assert_not_called()
+
+
+@pytest.mark.parametrize("route", ["chat", "rest", "background"])
+async def test_a_message_sent_on_hearing_the_end_waits_for_the_route_and_is_never_refused(mock_db, route):
+    """Everything the route still does happens before any successor exists."""
     from app.core.turn_recorder import TurnRecorder
 
     sessions_db.create_session("sess-end", "default")
     world = _ConnectWorld()
-    held_at_end: list = []
+    next_turns: list = []
     real_on_event = TurnRecorder.on_event
+
+    async def next_message():
+        next_turns.append(asyncio.ensure_future(session_admission.acquire("sess-end")))
+        await asyncio.sleep(0.01)
 
     async def on_event(self, event):
         if event.get("type") == "done":
-            held_at_end.append("sess-end" in session_admission._holders)
+            await next_message()
+            assert not next_turns[-1].done(), "the old route is still running"
         await real_on_event(self, event)
 
     with ExitStack() as stack:
@@ -926,50 +1054,67 @@ async def test_the_chat_is_free_by_the_time_the_client_hears_the_turn_ended(mock
         if route == "background":
             await asyncio.wait_for(_start(route, "one", "sess-end"), 10)
         else:
-            drive = (
-                qe._stream_to_websocket_impl("one", "sess-end", "claude-code") if route == "chat"
-                else qe.stream_query("one", "claude-code", session_id="sess-end")
-            )
-            async for event in drive:
+            async for event in _reader(route, "one", "sess-end"):
                 if event.get("type") == "done":
-                    held_at_end.append("sess-end" in session_admission._holders)
-    assert held_at_end == [False]
+                    await next_message()
+                    # REST relays through a queue, so its route can be over already.
+                    assert route == "rest" or not next_turns[-1].done(), "still running"
+    assert len(next_turns) == 1
+    session_admission.close(await asyncio.wait_for(next_turns[0], 5))
+
+
+async def test_a_background_turn_finishes_its_session_cleanup_before_any_successor(mock_db):
+    """A successor's permission request can only come after the old cleanup is over."""
+    sessions_db.create_session("sess-perm", "default")
+    world = _ConnectWorld()
+    reached, proceed = asyncio.Event(), asyncio.Event()
+    cancelled = AsyncMock()
+
+    async def end_state(_session_id, **_kwargs):
+        reached.set()
+        await proceed.wait()
+
+    with ExitStack() as stack:
+        world.patches(stack, "background", StubPool())
+        stack.enter_context(patch.object(qb, "persist_turn_end_state", new=end_state))
+        stack.enter_context(patch.object(qb.permission_handler, "cancel_all_requests", new=cancelled))
+        first = _start("background", "one", "sess-perm")
+        await asyncio.wait_for(reached.wait(), 10)
+        cancelled.assert_not_awaited()
+        await _second_is_refused("background", "sess-perm")
+        proceed.set()
+        await asyncio.wait_for(first, 10)
+        cancelled.assert_awaited_once_with("sess-perm")
+        await asyncio.sleep(0)
+        assert "sess-perm" not in session_admission._holders
+
+
+async def test_a_background_turn_a_rewind_outlasted_leaves_its_successors_permissions_alone(mock_db):
+    """A stopped turn can end after the rewind gave up waiting and a new turn began."""
+    sessions_db.create_session("sess-late", "default")
+    world = _ConnectWorld("turn")
+    cancelled, cleared = AsyncMock(), MagicMock()
+    with ExitStack() as stack:
+        world.patches(stack, "background", StubPool())
+        stack.enter_context(patch.object(qb.permission_handler, "cancel_all_requests", new=cancelled))
+        stack.enter_context(patch.object(qb.permission_handler, "clear_session_rules", new=cleared))
+        first = _start("background", "one", "sess-late")
+        await asyncio.wait_for(world.reached.wait(), 10)
+
+        rewind = await session_admission.begin_rewind("sess-late")
+        session_admission.take_for_rewind(rewind)
+        session_admission.close(rewind)
+        successor = await session_admission.acquire("sess-late")
+
+        world.proceed.set()
+        await asyncio.wait_for(first, 10)
+        cancelled.assert_not_awaited()
+        cleared.assert_not_called()
+        assert session_admission._holders["sess-late"] is successor
+        session_admission.close(successor)
 
 
 # ─── Headless ───────────────────────────────────────────────────────────────
-
-
-async def test_a_client_that_leaves_during_send_frees_the_chat_at_once(mock_db):
-    """Nothing reaches a turn parked at its yield; the response has to close it."""
-    sessions_db.create_session("sess-left", "default")
-    world = _ConnectWorld()
-    blocked = asyncio.Event()
-
-    async def send(message):
-        if message["type"] == "http.response.body":
-            blocked.set()
-            await asyncio.Event().wait()
-
-    async def body():
-        async with aclosing(qe.stream_query("one", "claude-code", session_id="sess-left")) as events:
-            async for event in events:
-                yield str(event)
-
-    gc.disable()  # Only the close may free the chat, not a finalizer.
-    try:
-        with ExitStack() as stack:
-            world.patches(stack, "rest", StubPool())
-            response = ClosingStreamingResponse(body())
-            async with anyio.create_task_group() as group:
-                group.start_soon(response.stream_response, send)
-                await asyncio.wait_for(blocked.wait(), 10)
-                assert "sess-left" in session_admission._holders
-                group.cancel_scope.cancel()
-            assert "sess-left" not in session_admission._holders
-            frames = await asyncio.wait_for(collect(qe.stream_query("two", "claude-code", session_id="sess-left")), 10)
-    finally:
-        gc.enable()
-    assert not [f for f in frames if f.get("type") == "error"]
 
 
 def _headless_patches(stack: ExitStack, world: _ConnectWorld) -> None:
@@ -1031,7 +1176,7 @@ async def test_a_headless_turn_a_rewind_took_says_it_was_rewound(mock_db):
         with patch.object(_PausedConnect, "receive_events", new=replaced):
             first = asyncio.ensure_future(_headless("one", "sess-rewound"))
             await asyncio.wait_for(world.reached.wait(), 10)
-            rewind = session_admission.Lease("sess-rewound", is_rewind=True)
+            rewind = await session_admission.begin_rewind("sess-rewound")
             session_admission.take_for_rewind(rewind)
             world.proceed.set()
             with pytest.raises(SessionReplacedError, match="rewound"):
@@ -1045,7 +1190,7 @@ async def test_a_rewind_during_a_headless_connect_stops_it_before_it_sends(mock_
         _headless_patches(stack, world)
         first = asyncio.ensure_future(_headless("one", "sess-headless-rw"))
         await asyncio.wait_for(world.reached.wait(), 10)
-        rewind = session_admission.Lease("sess-headless-rw", is_rewind=True)
+        rewind = await session_admission.begin_rewind("sess-headless-rw")
         session_admission.take_for_rewind(rewind)
         world.proceed.set()
         with pytest.raises(SessionReplacedError, match="rewound"):

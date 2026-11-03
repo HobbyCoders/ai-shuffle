@@ -8,21 +8,26 @@ pooled client gives. ``acquire`` has no await on its uncontended path, so two
 requests cannot both pass it.
 
 A lease has one lifetime rule: the route's outermost scope closes it,
-unconditionally. Nothing below that scope can leak it (a connect that fails or is
-cancelled, a cancelled teardown) because nothing below it owns it. The one early
-step is :func:`turn_ended`: when a turn's end is announced, the client may send
-its next message while the route is still saving, so the chat is free from then
-on. Closing afterwards is harmless, it only frees a lease that is still current.
+unconditionally, and nothing else frees the chat. Nothing below that scope can leak
+it (a connect that fails or is cancelled, a cancelled teardown) because nothing
+below it owns it, and nothing the route does can reach a successor, which does not
+exist yet. The client may send its next message as soon as it hears the turn's end,
+a moment before that scope closes, so :func:`turn_ended` makes that message wait for
+the close rather than be refused.
 
-For a streaming route that outermost scope is a generator, and nothing resumes a
-generator its reader abandoned. So every reader closes it: ``aclosing`` in the
-routes, the pump's ``finally``, and ``ClosingStreamingResponse`` for a client that
-leaves between two frames. Otherwise the chat stays busy until garbage collection.
+A turn outlives whoever is reading it. The engine runs on without a reader, so a
+chat must stay held until the turn has really finished, and what it produced must
+still be saved. :func:`outlive_reader` gives an HTTP stream its own task, because a
+client leaving cancels whatever the response is waiting on. A pump is an owned task
+already, so if it leaves early :func:`stream_turn` hands the turn to one.
 
 A rewind on a running reply stops the reply, so :func:`take_for_rewind` takes the
 chat from the current holder rather than being refused. The holder's late
-release no longer frees anything, and turns wait for the rewind instead of being
-refused: a message sent right after it must land on the rewound chat.
+release no longer frees anything. From :func:`begin_rewind` on, turns wait for the
+rewind instead of being refused: a message sent right after it must land on the
+rewound chat. Rewinds run one at a time and always finish
+(:func:`finish_unattended`), so none can act on a chat that a later rewind or turn
+has moved on from.
 
 Another install on the same database never passes through here, so a turn can
 still be lost that way. ``HarnessAdapter.receive_events`` raises
@@ -34,9 +39,18 @@ Every function runs on the event loop.
 from __future__ import annotations
 
 import asyncio
-from contextlib import aclosing
+import logging
 from dataclasses import dataclass, field
-from typing import Any, AsyncGenerator, Callable, Dict, Optional
+from typing import Any, AsyncGenerator, Awaitable, Callable, Dict, Optional, Set, TypeVar
+
+logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
+
+# How long a next message waits for a turn that has announced its end to close.
+_ENDING_WAIT_SECONDS = 15.0
+# How long a stopping app gives unfinished turns to save what they have.
+_SHUTDOWN_WAIT_SECONDS = 5.0
 
 
 class SessionBusyError(RuntimeError):
@@ -75,24 +89,45 @@ def is_conflict_message(message: object) -> bool:
 @dataclass(eq=False)
 class Lease:
     session_id: str
-    is_rewind: bool = False
     # A rewind took the chat: a turn still connecting must not start.
     stopped: bool = False
+    # The turn has announced its end: a next message waits rather than being refused.
+    ending: bool = False
     # Set when the route that held this lease has finished, saving included.
     exited: asyncio.Event = field(default_factory=asyncio.Event)
 
 
 _holders: Dict[str, Lease] = {}
+_rewinds: Dict[str, Lease] = {}
+# Turns and rewinds nobody is waiting on any more. Tasks need a strong reference.
+_unattended: Set[asyncio.Task] = set()
 
 
 async def acquire(session_id: str) -> Lease:
     """Hold the chat for one turn, or raise :class:`SessionBusyError`."""
-    while (holder := _holders.get(session_id)) is not None:
-        if not holder.is_rewind:
+    while True:
+        if (rewind := _rewinds.get(session_id)) is not None:
+            await rewind.exited.wait()
+        elif (holder := _holders.get(session_id)) is None:
+            break
+        elif not holder.ending:
             raise SessionBusyError()
-        await holder.exited.wait()
+        else:
+            try:
+                await asyncio.wait_for(holder.exited.wait(), _ENDING_WAIT_SECONDS)
+            except asyncio.TimeoutError:
+                raise SessionBusyError() from None
     lease = Lease(session_id)
     _holders[session_id] = lease
+    return lease
+
+
+async def begin_rewind(session_id: str) -> Lease:
+    """Wait for any other rewind of this chat, then hold new turns back from it."""
+    while (other := _rewinds.get(session_id)) is not None:
+        await other.exited.wait()
+    lease = Lease(session_id)
+    _rewinds[session_id] = lease
     return lease
 
 
@@ -106,15 +141,39 @@ def take_for_rewind(lease: Lease) -> Optional[Lease]:
 
 
 def turn_ended(lease: Lease) -> None:
-    """The turn's end is announced, so the client's next message may start."""
-    if _holders.get(lease.session_id) is lease:
-        del _holders[lease.session_id]
+    """The turn is about to announce its end, so a next message may come at once."""
+    lease.ending = True
+
+
+def holds_chat(lease: Lease) -> bool:
+    """Whether session-wide cleanup is still this turn's to do.
+
+    A rewind that took the chat allows it only while it is running: after that, a
+    new turn may own what the cleanup would remove.
+    """
+    return _holders.get(lease.session_id) is lease or lease.session_id in _rewinds
 
 
 def close(lease: Lease) -> None:
     """The route is done. Safe to repeat, and for a lease that was taken over."""
-    turn_ended(lease)
+    if _holders.get(lease.session_id) is lease:
+        del _holders[lease.session_id]
+    if _rewinds.get(lease.session_id) is lease:
+        del _rewinds[lease.session_id]
     lease.exited.set()
+
+
+def _own(work: Awaitable[T]) -> "asyncio.Task[T]":
+    task = asyncio.ensure_future(work)
+    _unattended.add(task)
+    task.add_done_callback(_disown)
+    return task
+
+
+def _disown(task: asyncio.Task) -> None:
+    _unattended.discard(task)
+    if not task.cancelled():
+        task.exception()  # whoever is still waiting has it; nobody else needs it
 
 
 async def stream_turn(
@@ -126,14 +185,74 @@ async def stream_turn(
     except SessionBusyError as busy:
         yield {"type": "error", "message": str(busy)}
         return
+    events = turn(lease)
+    handed_over = False
     try:
-        async with aclosing(turn(lease)) as events:
-            async for event in events:
-                yield event
+        async for event in events:
+            yield event
+    except GeneratorExit:
+        # The reader left with the turn parked at a frame, so it is still alive.
+        handed_over = True
+        _own(_finish_turn(events, lease))
+        raise
+    finally:
+        if not handed_over:
+            close(lease)
+
+
+async def _finish_turn(events: AsyncGenerator[Dict[str, Any], None], lease: Lease) -> None:
+    try:
+        async for _ in events:
+            pass
+    except Exception:
+        logger.exception("A turn nobody is reading failed for %s", lease.session_id)
     finally:
         close(lease)
+
+
+async def outlive_reader(
+    frames: AsyncGenerator[Dict[str, Any], None],
+) -> AsyncGenerator[Dict[str, Any], None]:
+    """Run ``frames`` in its own task, so the reader leaving does not stop it.
+
+    A client leaving cancels whatever the response is waiting on. Waiting here means
+    that is this queue, and the turn runs on to its end and saves, as it would have
+    with the client still there.
+    """
+    relayed: asyncio.Queue = asyncio.Queue()
+    finished = object()
+
+    async def run() -> None:
+        try:
+            async for frame in frames:
+                relayed.put_nowait(frame)
+        except Exception:
+            logger.exception("A turn failed with its reader's stream open or gone")
+            raise
+        finally:
+            relayed.put_nowait(finished)
+
+    running = _own(run())
+    while (frame := await relayed.get()) is not finished:
+        yield frame
+    await running
+
+
+def finish_unattended(work: Awaitable[T]) -> Awaitable[T]:
+    """Wait for ``work``; if the caller is cancelled, ``work`` finishes anyway."""
+    return asyncio.shield(_own(work))
+
+
+async def stop_unattended() -> None:
+    """The app is stopping: end what is left while it can still save."""
+    tasks = list(_unattended)
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.wait(tasks, timeout=_SHUTDOWN_WAIT_SECONDS)
 
 
 def clear() -> None:
     """Forget every holder. Tests only: each test starts with an empty process."""
     _holders.clear()
+    _rewinds.clear()

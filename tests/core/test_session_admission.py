@@ -28,7 +28,7 @@ SID = "ses_admission"
 async def test_a_second_turn_is_refused_until_the_first_is_over():
     first = await admission.acquire(SID)
     with pytest.raises(SessionBusyError):
-        await admission.acquire(SID)
+        await asyncio.wait_for(admission.acquire(SID), 1)  # at once, not after a wait
     admission.close(first)
     admission.close(await admission.acquire(SID))
 
@@ -49,16 +49,23 @@ async def test_chats_do_not_block_each_other():
     admission.close(held)
 
 
-async def test_a_turns_end_frees_the_chat_while_its_route_is_still_saving():
+async def test_a_message_after_a_turns_end_waits_for_its_route_to_finish():
     lease = await admission.acquire(SID)
     admission.turn_ended(lease)
-    assert not lease.exited.is_set()
-    next_turn = await admission.acquire(SID)
-    admission.close(lease)  # its save finishes during the next turn
-    assert lease.exited.is_set()
+    next_turn = asyncio.ensure_future(admission.acquire(SID))
+    await asyncio.sleep(0.01)
+    assert not next_turn.done(), "the old route may still be saving"
+    admission.close(lease)
+    admission.close(await asyncio.wait_for(next_turn, 5))
+
+
+async def test_a_route_stuck_after_its_end_refuses_the_next_message_after_a_while(monkeypatch):
+    monkeypatch.setattr(admission, "_ENDING_WAIT_SECONDS", 0.01)
+    lease = await admission.acquire(SID)
+    admission.turn_ended(lease)
     with pytest.raises(SessionBusyError):
         await admission.acquire(SID)
-    admission.close(next_turn)
+    admission.close(lease)
 
 
 async def test_closing_twice_cannot_free_a_later_holder():
@@ -73,7 +80,7 @@ async def test_closing_twice_cannot_free_a_later_holder():
 
 async def test_a_rewind_takes_the_chat_and_the_stopped_turn_cannot_free_it():
     turn = await admission.acquire(SID)
-    rewind = admission.Lease(SID, is_rewind=True)
+    rewind = await admission.begin_rewind(SID)
     assert admission.take_for_rewind(rewind) is turn
     assert turn.stopped is True
     admission.turn_ended(turn)
@@ -86,7 +93,7 @@ async def test_a_rewind_takes_the_chat_and_the_stopped_turn_cannot_free_it():
 
 
 async def test_a_turn_waiting_on_a_rewind_is_refused_if_another_turn_gets_there_first():
-    rewind = admission.Lease(SID, is_rewind=True)
+    rewind = await admission.begin_rewind(SID)
     admission.take_for_rewind(rewind)
     waiting = asyncio.ensure_future(admission.acquire(SID))
     await asyncio.sleep(0)
@@ -97,8 +104,31 @@ async def test_a_turn_waiting_on_a_rewind_is_refused_if_another_turn_gets_there_
     admission.close(winner)
 
 
+async def test_a_turn_waits_for_a_rewind_that_has_not_taken_the_chat_yet():
+    rewind = await admission.begin_rewind(SID)
+    waiting = asyncio.ensure_future(admission.acquire(SID))
+    await asyncio.sleep(0.01)
+    assert not waiting.done(), "it would be stopped by the rewind it raced"
+    admission.close(rewind)
+    admission.close(await asyncio.wait_for(waiting, 5))
+
+
+async def test_session_cleanup_is_a_turns_only_while_no_successor_can_exist():
+    turn = await admission.acquire(SID)
+    assert admission.holds_chat(turn)
+    rewind = await admission.begin_rewind(SID)
+    admission.take_for_rewind(rewind)
+    assert admission.holds_chat(turn), "the rewind is still running"
+    admission.close(rewind)
+    assert not admission.holds_chat(turn), "a new turn may start at any moment"
+    successor = await admission.acquire(SID)
+    assert not admission.holds_chat(turn)
+    assert admission.holds_chat(successor)
+    admission.close(successor)
+
+
 async def test_a_cancelled_wait_for_a_rewind_holds_nothing():
-    rewind = admission.Lease(SID, is_rewind=True)
+    rewind = await admission.begin_rewind(SID)
     admission.take_for_rewind(rewind)
     waiting = asyncio.ensure_future(admission.acquire(SID))
     await asyncio.sleep(0)
@@ -138,21 +168,112 @@ async def test_a_stream_that_fails_lets_the_chat_go(failure):
     admission.close(await admission.acquire(SID))
 
 
-async def test_a_client_that_walks_away_closes_the_turn_and_then_the_lease():
-    order = []
+async def test_a_turn_whose_reader_left_at_a_frame_runs_on_and_holds_the_chat():
+    proceed, order = asyncio.Event(), []
 
-    async def turn(lease):
-        try:
-            yield {"type": "init"}
-            yield {"type": "never reached"}
-        finally:
-            order.append(("turn saved", lease.exited.is_set()))
+    async def turn(_lease):
+        yield {"type": "init"}
+        await proceed.wait()
+        order.append("saved")
+        yield {"type": "done"}
 
     stream = admission.stream_turn(SID, turn)
     assert await stream.__anext__() == {"type": "init"}
     await stream.aclose()
-    assert order == [("turn saved", False)], "the lease outlives everything under it"
+
+    with pytest.raises(SessionBusyError):
+        await admission.acquire(SID)
+    proceed.set()
+    for _ in range(100):
+        if SID not in admission._holders:
+            break
+        await asyncio.sleep(0.01)
+    assert order == ["saved"]
     admission.close(await admission.acquire(SID))
+
+
+async def test_a_turn_that_fails_with_nobody_reading_still_lets_the_chat_go():
+    async def turn(_lease):
+        yield {"type": "init"}
+        raise RuntimeError("no")
+
+    stream = admission.stream_turn(SID, turn)
+    await stream.__anext__()
+    await stream.aclose()
+    for _ in range(100):
+        if SID not in admission._holders:
+            break
+        await asyncio.sleep(0.01)
+    admission.close(await admission.acquire(SID))
+
+
+async def _relayed(frames):
+    for frame in frames:
+        if isinstance(frame, Exception):
+            raise frame
+        if isinstance(frame, asyncio.Event):
+            await frame.wait()
+        else:
+            yield frame
+
+
+async def test_a_stream_relays_frames_and_failures_to_a_reader_that_stays():
+    assert await _events_of(admission.outlive_reader(_relayed([1, 2]))) == [1, 2]
+    stream = admission.outlive_reader(_relayed([1, RuntimeError("no")]))
+    assert await stream.__anext__() == 1
+    with pytest.raises(RuntimeError, match="no"):
+        await stream.__anext__()
+
+
+@pytest.mark.parametrize("leaves", ["cancelled", "closed"])
+async def test_a_stream_keeps_running_when_its_reader_leaves(leaves):
+    proceed, order = asyncio.Event(), []
+
+    async def frames():
+        yield 1
+        await proceed.wait()
+        order.append("reached the end")
+
+    stream = admission.outlive_reader(frames())
+    assert await stream.__anext__() == 1
+    if leaves == "closed":
+        await stream.aclose()
+    else:
+        waiting = asyncio.ensure_future(stream.__anext__())
+        await asyncio.sleep(0)
+        waiting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiting
+    proceed.set()
+    await asyncio.sleep(0.01)
+    assert order == ["reached the end"]
+
+
+def test_a_stopping_app_ends_those_turns_while_it_can_still_save():
+    import inspect
+
+    from app import main
+
+    source = inspect.getsource(main.lifespan)
+    assert source.index("session_admission.stop_unattended()") < source.index("await shutdown_services()")
+
+
+async def test_a_stopping_app_ends_turns_nobody_is_reading_so_they_save():
+    saved = []
+
+    async def turn(_lease):
+        try:
+            yield {"type": "init"}
+            await asyncio.Event().wait()
+        finally:
+            saved.append(True)
+
+    stream = admission.outlive_reader(admission.stream_turn(SID, turn))
+    await stream.__anext__()
+    await stream.aclose()
+    await admission.stop_unattended()
+    assert saved == [True]
+    assert SID not in admission._holders
 
 
 # ─── a turn another install takes over ───────────────────────────────────────
@@ -322,7 +443,7 @@ class _Rewinding:
         monkeypatch.setattr(commands, "database", MagicMock(get_session=MagicMock(return_value={
             "id": "app-id", "sdk_session_id": SID, "project_id": None, "turn_count": 0,
         })))
-        monkeypatch.setattr(commands, "get_working_dir_for_project", lambda _id: "/tmp")
+        monkeypatch.setattr(commands, "get_working_dir_for_project", lambda *_ids: "/tmp")
         monkeypatch.setattr(commands, "invalidate_parse_cache", lambda _id: None, raising=False)
         monkeypatch.setattr(fluid_transcript, "is_fluid_session", lambda _id: True)
         monkeypatch.setattr(fluid_transcript, "rewind_fluid_session", rewind or default_rewind)
@@ -409,7 +530,7 @@ async def test_rewind_holds_the_chat_until_its_reseed_is_done(monkeypatch):
     def reseed(*_args, **_kwargs):
         from app.core.provider.fluid_transcript import ReseedResult
 
-        seen.append(admission._holders["app-id"].is_rewind)
+        seen.append("app-id" in admission._rewinds)
         return ReseedResult(status="skipped")
 
     rewinding.reseed.side_effect = reseed
@@ -435,14 +556,16 @@ async def test_a_failing_rewind_still_lets_the_chat_go(monkeypatch):
     admission.close(await admission.acquire("app-id"))
 
 
-async def test_a_cancelled_rewind_tells_its_thread_before_it_frees_the_chat(monkeypatch):
+async def test_a_rewind_whose_caller_left_finishes_before_anything_else_touches_the_chat(monkeypatch):
     entered, proceed = threading.Event(), threading.Event()
-    stops = []
 
     def slow_rewind(*_args, stop):
-        stops.append(stop)
+        from app.core.jsonl_rewind import RewindResult
+
         entered.set()
         proceed.wait(5)
+        assert not stop.is_set(), "the rewind is not abandoned with its caller"
+        return RewindResult(success=True, message="moved", writer_generation=7, messages_removed=1)
 
     rewinding = _Rewinding(monkeypatch, pooled=False, rewind=slow_rewind)
     rewind = rewinding.start()
@@ -450,6 +573,67 @@ async def test_a_cancelled_rewind_tells_its_thread_before_it_frees_the_chat(monk
     rewind.cancel()
     with pytest.raises(asyncio.CancelledError):
         await rewind
-    assert stops[0].is_set(), "the abandoned thread's claim must not land"
+
+    next_turn = asyncio.ensure_future(admission.acquire("app-id"))
+    await asyncio.sleep(0.01)
+    assert not next_turn.done(), "it holds the chat until its claim, cut and re-seed are done"
+    rewinding.reseed.assert_not_called()
+
     proceed.set()
-    admission.close(await admission.acquire("app-id"))
+    admission.close(await asyncio.wait_for(next_turn, 5))
+    rewinding.reseed.assert_called_once()
+
+
+async def test_overlapping_rewinds_run_one_after_the_other_and_a_new_turn_comes_last(monkeypatch):
+    """The second validates against what the first left, and nothing of the first is
+    left to run once the second and a new turn have started."""
+    from app.core.jsonl_rewind import RewindResult
+
+    entered, proceed = threading.Event(), threading.Event()
+    order = []
+
+    def rewind_step(_sdk_id, target, *_args, stop):
+        order.append(f"{target} started")
+        if target == "first":
+            entered.set()
+            proceed.wait(5)
+        order.append(f"{target} done")
+        return RewindResult(success=True, message="moved", writer_generation=7, messages_removed=1)
+
+    rewinding = _Rewinding(monkeypatch, pooled=False, rewind=rewind_step)
+    # The second's wait for a stopped holder has run out: only taking turns holds it back.
+    monkeypatch.setattr("app.api.commands._REWIND_STOP_WAIT_SECONDS", 0.001)
+    first = asyncio.ensure_future(rewinding.run("first"))
+    await asyncio.to_thread(entered.wait, 5)
+    second = asyncio.ensure_future(rewinding.run("second"))
+    await asyncio.sleep(0.01)
+    next_turn = asyncio.ensure_future(admission.acquire("app-id"))
+    await asyncio.sleep(0.01)
+    assert not second.done() and not next_turn.done()
+    assert order == ["first started"], "the second has not even validated"
+
+    proceed.set()
+    await asyncio.wait_for(asyncio.gather(first, second), 5)
+    assert order == ["first started", "first done", "second started", "second done"]
+    admission.close(await asyncio.wait_for(next_turn, 5))
+    assert rewinding.reseed.call_count == 2
+
+
+async def test_a_stopping_app_abandons_a_rewind_before_its_claim(monkeypatch):
+    entered, proceed = threading.Event(), threading.Event()
+    stops = []
+
+    def stalled_rewind(*_args, stop):
+        stops.append(stop)
+        entered.set()
+        proceed.wait(5)
+
+    rewinding = _Rewinding(monkeypatch, pooled=False, rewind=stalled_rewind)
+    rewind = rewinding.start()
+    await asyncio.to_thread(entered.wait, 5)
+    stopping = asyncio.ensure_future(admission.stop_unattended())
+    with pytest.raises(asyncio.CancelledError):
+        await rewind
+    await asyncio.wait_for(stopping, 7)
+    assert stops[0].is_set(), "its thread must not claim the chat after this"
+    proceed.set()
