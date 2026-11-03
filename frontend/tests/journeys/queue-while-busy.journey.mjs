@@ -11,9 +11,11 @@ import {
 	chatIdByToken,
 	countUserRows,
 	expect,
+	gotoApp,
 	holdBootLoad,
 	openFromSidebar,
 	openNewChat,
+	pickAgent,
 	scriptTag,
 	scrollTranscriptTo,
 	seededChatId,
@@ -29,6 +31,20 @@ import {
 } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 import { STOP_SELECTOR, expectStopFollowsStreaming, markTime } from './lib/timeline.mjs';
+
+// Hosted journeys build shared desktop UI only. Explicitly opt into the native
+// phone shell locally, matching transcript-reader's --mobile-shell convention.
+const mobileShell = process.argv.includes('--mobile-shell');
+
+async function openStopChat(ctx) {
+	if (!mobileShell || ctx.variant.viewport !== 'phone') return openNewChat(ctx);
+	const { page, status } = ctx;
+	await gotoApp(page, status, '/mobile/');
+	await waitChat(page, { surface: 'new' }, { timeout: 90_000 });
+	const hero = page.getByRole('region', { name: 'New session' });
+	await hero.waitFor();
+	await pickAgent(page, hero);
+}
 
 /**
  * Every painted frame from now until the returned function runs: where the row
@@ -77,7 +93,7 @@ const REPLY_LINE_PX = 30;
 function stopReadingPosition({ scrolled, queued = 3, overflows = false }) {
 	return {
 		async setup(ctx) {
-			await openNewChat(ctx);
+			await openStopChat(ctx);
 			await ctx.page.waitForTimeout(800);
 			await typeAndSend(ctx.page, `history tok-${uniq()} ${scriptTag(ctx.variant, 'long', { tps: 400 })}`);
 			await waitTurnSettled(ctx.page, { text: 'Here is a long answer', messagesAtLeast: 2, timeout: 90_000 });
