@@ -124,6 +124,50 @@ def test_fork_inherits_worktree_and_run_binding(fork_client):
     assert [m.get("content") for m in msgs] == ["hello", "hi"]
 
 
+@pytest.mark.parametrize("preview", [False, True])
+def test_no_project_fork_reseeds_its_own_runtime_cwd(fork_client, monkeypatch, tmp_path, preview):
+    from app.core import config, query_options, session_orchestration
+    from app.core.provider import fluid_transcript
+    from app.db import database
+    from app.db.base import get_cursor, get_db
+
+    _seed_parent()
+    database.create_profile("fork-cwd-agent", "Agent", None, {"model": "sonnet"})
+    monkeypatch.setitem(config._runtime_overrides, "workspace_dir", tmp_path / "workspace")
+    monkeypatch.setattr(config.settings, "claude_projects_dir", tmp_path / "cli-projects")
+    monkeypatch.setattr(query_options, "get_security_instructions", lambda *a, **kw: "")
+    principal = {"owner": "install-admin", "kind": "admin", "principal_id": "preview"}
+    monkeypatch.setattr(session_orchestration, "_principal", lambda sid: principal if preview and sid == PARENT_SID else None)
+    with get_db() as conn:
+        get_cursor(conn).execute(
+            "UPDATE sessions SET profile_id='fork-cwd-agent', mode='chat', branch=NULL, worktree_id=NULL, "
+            "worktree_branch=NULL, worktree_path=NULL, model='sonnet', provider_id=NULL WHERE id=%s", (PARENT_SID,),
+        )
+    fluid_transcript._set_cli_session_id(PARENT_SDK, "parent-cli")
+    parent_options, _ = query_options.build_options_from_profile(
+        database.get_profile("fork-cwd-agent"), session_id=PARENT_SID,
+    )
+    response = fork_client.post(f"/{PARENT_SID}/fork", json={})
+    assert response.status_code == 200, response.text
+    fork_id = response.json()["session_id"]
+    row = database.get_session(fork_id)
+    options, _ = query_options.build_options_from_profile(
+        database.get_profile("fork-cwd-agent"), session_id=fork_id,
+    )
+    # Exercise the real creation shape and runtime producer. Do NOT copy the
+    # parent's mode to make this pass: fork privilege policy is separate work.
+    assert row["mode"] is None and row["parent_session_id"] == PARENT_SID
+    assert options.cwd != parent_options.cwd
+    handle = fluid_transcript.get_cli_session_id(row["sdk_session_id"])
+    assert handle
+    expected = fluid_transcript._cli_project_dir(tmp_path / "cli-projects", options.cwd) / f"{handle}.jsonl"
+    assert expected.is_file(), f"fork reseed must be where its runtime resumes: {expected}"
+    import json
+    entries = [json.loads(line) for line in expected.read_text().splitlines()]
+    assert {entry["cwd"] for entry in entries} == {options.cwd}
+    assert [entry["message"]["content"] for entry in entries if entry["type"] == "user"] == ["hello"]
+
+
 def test_fork_copies_app_event_log_with_turn_ids(fork_client):
     """Whole-session fork must replay the live session_events, not backfill.
 

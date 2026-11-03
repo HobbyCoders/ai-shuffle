@@ -104,11 +104,6 @@ def get_working_dir_for_project(
             cwd = resolve_session_cwd(session)
             if cwd:
                 return cwd
-            if session.get("project_id") or session.get("project_v2_id"):
-                # A refused/missing branch checkout is not its base checkout.
-                # Never write a reseed there just because the read resolver
-                # correctly declined the session's actual binding.
-                raise HTTPException(404, "Session checkout is not available on this device")
     result = resolve_project_path(
         project_id,
         check_access=False,
@@ -690,6 +685,31 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
     # rewind instead. Prefix-gated probe: a legacy session never queries.
     from app.core.provider.fluid_transcript import is_fluid_session
     fluid_session = await asyncio.to_thread(is_fluid_session, sdk_session_id)
+
+    def _would_reseed_without_checkout() -> bool:
+        from app.core.project_resolver import resolve_session_cwd
+        from app.core.provider.fluid_transcript import get_cli_session_id
+
+        bound_checkout = any(session.get(key) for key in (
+            "project_id", "project_v2_id", "worktree_id", "branch", "worktree_branch",
+        ))
+        return bool(
+            bound_checkout and get_cli_session_id(sdk_session_id)
+            and resolve_session_cwd(session) is None
+        )
+
+    # A native rewind only moves the Fluid head; it needs no checkout. Refuse
+    # ONLY a delegated write that would otherwise reseed in the fallback/base
+    # folder. Do it before any transcript/event/pool mutation, and use the
+    # existing response contract so the UI shows the explanation, not Unknown error.
+    if request.restore_chat and fluid_session and await run_sync(_would_reseed_without_checkout):
+        return RewindResponseV2(
+            success=False,
+            message="Cannot execute rewind",
+            error=("Session checkout is unavailable or on another branch. "
+                   "Send a message to recover a missing checkout, or restore the bound branch, "
+                   "then retry rewind."),
+        )
 
     logger.info(
         f"Rewind requested: session={session_id}, sdk_session={sdk_session_id}, "

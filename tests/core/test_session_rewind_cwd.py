@@ -97,6 +97,58 @@ async def test_checkpoint_discovery_uses_real_session_checkout(mock_db, monkeypa
     if binding != "base":
         git(worktree, "checkout", "-b", "wrong-branch")
         assert project_resolver.resolve_session_cwd(database.get_session("session")) is None
-        # A refused branch must never fall through to reseeding in base.
-        with pytest.raises(commands.HTTPException, match="checkout"):
-            commands.get_working_dir_for_project("project", row.get("worktree_id"), "session")
+        # Read-only history/command discovery keeps its historical fallback.
+        # The mutation boundary below, not this helper, protects CLI reseeds.
+        assert commands.get_working_dir_for_project("project", row.get("worktree_id"), "session")
+
+
+@pytest.mark.parametrize("kind", ["delegated", "native", "orphan-native"])
+async def test_only_delegated_reseed_refuses_unavailable_checkout(mock_db, monkeypatch, tmp_path, kind):
+    from app.core import config
+    from app.core.provider import fluid_transcript
+    from app.core.provider.fluid_pg_store import PgFluidStore
+    from fluid.messages.content import Message, Text
+    from fluid.store.base import SessionNode
+
+    hermetic_git_env(monkeypatch, tmp_path)
+    monkeypatch.setitem(config._runtime_overrides, "workspace_dir", tmp_path / "workspace")
+    monkeypatch.setattr(config.settings, "claude_projects_dir", tmp_path / "cli-projects")
+    base = init_repo(tmp_path / "base")
+    database.create_profile("agent", "Agent", None, {"model": "sonnet"})
+    database.create_project("project", "Project", None, str(base))
+    project = projects_v2.upsert_project("local:project", name="Project")
+    checkouts.upsert_checkout(project["id"], settings.effective_instance_id, str(base))
+    database.create_session("session", "agent", project_id="project", project_v2_id=project["id"])
+    # A branch with no checkout on this worker, or an orphan legacy project.
+    if kind == "orphan-native":
+        database.create_project("orphan", "Orphan", None, str(tmp_path / "gone"))
+        from app.db.base import get_cursor, get_db
+        with get_db() as conn:
+            get_cursor(conn).execute("UPDATE sessions SET project_id='orphan', project_v2_id=NULL WHERE id='session'")
+    else:
+        sessions.set_session_branch("session", "feature/missing", project["id"])
+    sdk = "ses_rewindcwd01"
+    store = PgFluidStore()
+    await store.create_session(sdk)
+    parent = None
+    for nid, role, text in [("u1", "user", "retain"), ("a1", "assistant", "answer"),
+                            ("u2", "user", "remove"), ("a2", "assistant", "answer two")]:
+        await store.append(sdk, SessionNode(node_id=nid, parent_id=parent,
+                                          message=Message(role=role, content=[Text(text)])))
+        parent = nid
+    database.update_session("session", sdk_session_id=sdk)
+    if kind == "delegated":
+        await store.set_cli_session_id(sdk, "cli-original")
+    # Discovery is read-only and can read the Fluid tree without a checkout.
+    checkpoints = await commands.get_rewind_checkpoints("session")
+    assert checkpoints.success and [cp.uuid for cp in checkpoints.checkpoints] == ["u1", "a1", "u2", "a2"]
+    result = await commands.execute_rewind("session", commands.RewindRequestV2(target_uuid="u2", include_response=False))
+    if kind == "delegated":
+        assert not result.success and not result.chat_rewound
+        assert "checkout" in result.error and "retry" in result.error
+        assert len(fluid_transcript.load_fluid_path(sdk)) == 4
+        assert fluid_transcript.get_cli_session_id(sdk) == "cli-original"
+        assert not (tmp_path / "cli-projects").exists()
+    else:
+        assert result.success and result.chat_rewound
+        assert len(fluid_transcript.load_fluid_path(sdk)) == 2
