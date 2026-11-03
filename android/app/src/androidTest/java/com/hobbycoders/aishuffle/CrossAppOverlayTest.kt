@@ -47,7 +47,11 @@ class CrossAppOverlayTest {
             if (root == null || root.packageName?.toString() != instrumentation.context.packageName) false
             else {
                 val nodes = root.findAccessibilityNodeInfosByText(text)
-                try { nodes.any { it.text?.toString() == text && it.isVisibleToUser } }
+                // Accessibility can expose the new text with the OLD measured
+                // bounds. Require the fixture's pre-draw acknowledgement too:
+                // otherwise the next consent correctly cancels on that relayout.
+                try { nodes.any { it.text?.toString() == text && it.isVisibleToUser &&
+                    it.contentDescription?.toString() == "Rendered: $text" } }
                 finally { nodes.forEach { it.recycle() } }
             }
         } finally { root?.recycle(); windows.forEach { it.recycle() } }

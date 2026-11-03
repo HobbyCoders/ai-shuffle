@@ -33,5 +33,12 @@ public class ControlTargetActivity extends android.app.Activity {
         });
         layout.addView(prepare);
         setContentView(layout);
+        // Text reaches accessibility before a TextView's new wrap-content bounds
+        // have been measured. Publish readiness only after that layout pass, not
+        // from the click callback. Consent must continue rejecting real movement.
+        status.getViewTreeObserver().addOnPreDrawListener(() -> {
+            status.setContentDescription("Rendered: " + status.getText());
+            return true;
+        });
     }
 }
