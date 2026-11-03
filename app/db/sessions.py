@@ -2550,6 +2550,11 @@ def clear_session_conversation(session_id: str) -> Optional[str]:
             (session_id,),
         )
 
+        # The failure a cleared transcript showed is gone with it (#1032).
+        from app.db import turns as turns_db
+
+        turns_db.forget_failures(session_id, cursor=cursor)
+
         # Unlink the SDK session and zero the persisted usage counters. Nulling
         # sdk_session_id makes the read path skip the transcript block entirely
         # (so even before the background JSONL cleanup runs, a reload is empty),

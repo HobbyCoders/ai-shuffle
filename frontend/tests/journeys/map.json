@@ -65,6 +65,23 @@
 	],
 	"rules": [
 		{
+			"why": "what a sidebar row says is true: one row's failed change undoes only that change, a failed turn reads Failed on every producer, a project is listed once in the Filter",
+			"journeys": ["sidebar-truth"],
+			"globs": [
+				"frontend/src/lib/stores/app-data*",
+				"frontend/src/lib/components/layout/Sidebar.svelte",
+				"frontend/src/lib/components/layout/SessionCard*",
+				"frontend/src/lib/components/layout/session-card-data*",
+				"frontend/src/lib/components/layout/workspace-catalog*",
+				"app/db/turns.py",
+				"app/core/lifecycle_events.py",
+				"app/core/session_runtime.py",
+				"app/api/sessions_helpers.py",
+				"app/network/session_runtime.py",
+				"scripts/devloop/fake_claude/**"
+			]
+		},
+		{
 			"why": "bounded transcript windows and live text selection",
 			"journeys": ["transcript-reader", "transcript-boundary"],
 			"globs": [

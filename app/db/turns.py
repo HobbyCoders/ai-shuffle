@@ -1205,6 +1205,99 @@ def escalate_to_draining(turn_id: str) -> Optional[Dict[str, Any]]:
     return _row(row)
 
 
+# Rows that closed without ever answering anything: a message withdrawn from the
+# queue, retired into a live turn, or moved aside. They say nothing about how the
+# chat's work went, so the turn before them still speaks for it.
+_NEVER_ANSWERED_STOP_REASONS = (
+    "removed_from_queue", "stopped", "archived", "profile_removed",
+    "steered", "held_progress", "drain_stale_result",
+)
+
+
+_FAILED_READ_CHUNK = 500
+
+
+def abort_was_failure(stop_reason: Optional[str]) -> bool:
+    """Whether an aborted turn went wrong, as opposed to the user ending it."""
+    reason = stop_reason or ""
+    return not (reason.startswith("interrupt")
+                or reason in ("user_stopped", "conversation_reset")
+                or reason in _NEVER_ANSWERED_STOP_REASONS)
+
+
+def provider_result_error(result: Optional[Dict[str, Any]]) -> Optional[str]:
+    """What went wrong, when a turn's final provider result reports a failure.
+
+    A delegated CLI ends such a turn normally: a result frame with ``is_error``,
+    not an error frame. The details stay out of this text on purpose, because it
+    reaches webhooks.
+    """
+    result = result or {}
+    if result.get("api_error_status"):
+        return f"Provider returned status {result['api_error_status']}"
+    if result.get("is_error") or result.get("errors"):
+        return "Provider execution failed"
+    return None
+
+
+def turn_failed(turn: Optional[Dict[str, Any]]) -> bool:
+    """Whether this turn ended in a failure the user has to know about.
+
+    A completed or parked row carries ``error`` only for a failure: see
+    :func:`provider_result_error` and the runtime's parked arm.
+    """
+    state = (turn or {}).get("state")
+    if state == "aborted":
+        return abort_was_failure(turn.get("stop_reason"))
+    return state in ("completed", "parked") and bool(turn.get("error"))
+
+
+def sessions_with_failed_latest_turn(session_ids: List[str]) -> set:
+    """Of ``session_ids``, those whose latest turn that ran ended in a failure.
+
+    Read from ``turns`` because every way a turn ends writes there, including the
+    ones no client watches: the reap sweep, a dead worker, a chat nobody has open.
+    Ordered like :func:`get_latest_run_turn`.
+    """
+    failed: set = set()
+    skip = ", ".join(["%s"] * len(_NEVER_ANSWERED_STOP_REASONS))
+    with get_db() as conn:
+        cursor = conn.cursor()
+        for start in range(0, len(session_ids), _FAILED_READ_CHUNK):
+            chunk = list(session_ids[start:start + _FAILED_READ_CHUNK])
+            cursor.execute(
+                "SELECT session_id, state, stop_reason, error FROM ("
+                "  SELECT session_id, state, stop_reason, error, ROW_NUMBER() OVER ("
+                "    PARTITION BY session_id "
+                "    ORDER BY insert_order DESC, created_at DESC, position DESC, id DESC"
+                "  ) AS newest FROM turns "
+                f"  WHERE session_id IN ({', '.join(['%s'] * len(chunk))}) "
+                f"  AND NOT (state IN ('aborted', 'completed') AND COALESCE(stop_reason, '') IN ({skip}))"
+                ") ranked WHERE newest = 1",
+                (*chunk, *_NEVER_ANSWERED_STOP_REASONS),
+            )
+            failed.update(row["session_id"] for row in cursor.fetchall() if turn_failed(row))
+    return failed
+
+
+def forget_failures(session_id: str, *, cursor: Any = None) -> None:
+    """The transcript that showed a failure is gone (cleared, rewound): stop saying so."""
+    keep = ", ".join(["%s"] * len(_NEVER_ANSWERED_STOP_REASONS))
+    sql = (
+        "UPDATE turns SET error=NULL, "
+        "stop_reason=CASE WHEN state='aborted' THEN 'conversation_reset' ELSE stop_reason END "
+        "WHERE session_id=%s AND ((state IN ('completed', 'parked') AND error IS NOT NULL) OR ("
+        f"state='aborted' AND COALESCE(stop_reason, '') NOT IN ({keep}, 'user_stopped') "
+        "AND COALESCE(stop_reason, '') NOT LIKE 'interrupt%%'))"
+    )
+    params = (session_id, *_NEVER_ANSWERED_STOP_REASONS)
+    if cursor is not None:
+        cursor.execute(sql, params)
+        return
+    with get_db() as conn:
+        conn.cursor().execute(sql, params)
+
+
 def settle_turn(
     turn_id: str,
     outcome: str,
@@ -1491,12 +1584,15 @@ def absorb_queued_turn(turn_id: str) -> bool:
 def park_turn(
     turn_id: str, task_ids: Optional[List[str]] = None, *,
     usage: Optional[Dict[str, Any]] = None, run_id: Optional[str] = None,
+    error: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Park a live turn (it finished the foreground stream but left background
     work running). Records the surviving ``task_ids`` in ``payload.task_ids``.
     Idempotent-ish: only a live turn parks; an already-terminal turn returns
     ``None``. ``run_id`` optionally narrows the write to that run, so an old
     runtime cannot park a turn that was requeued and started by a new owner.
+    ``error`` is what went wrong when the foreground stream ended in a failure:
+    the row stays parked on its background work, and still failed once that ends.
     """
     task_ids = list(task_ids or [])
     with get_db() as conn:
@@ -1510,10 +1606,10 @@ def park_turn(
         if usage is not None:
             payload["parked_usage"] = usage
         sql = (
-            "UPDATE turns SET state='parked', payload=%s, ended_at=NOW() "
+            "UPDATE turns SET state='parked', payload=%s, error=%s, ended_at=NOW() "
             "WHERE id=%s AND state IN ('running','interrupting','draining') "
         )
-        params: tuple = (json.dumps(payload), turn_id)
+        params: tuple = (json.dumps(payload), error, turn_id)
         if run_id is not None:
             sql += "AND run_id=%s "
             params += (run_id,)

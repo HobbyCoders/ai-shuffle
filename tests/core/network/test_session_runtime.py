@@ -117,3 +117,44 @@ def test_runtime_uses_live_owner_work_not_terminal_history(workers, mode, expect
                 runs.claim_run("case", "live-owner", 600)
         catalog.publish_owned()
         assert session_runtime.for_sessions(["case"])["case"]["state"] == expected
+
+
+def test_a_failed_latest_turn_reaches_the_mirror_as_a_failure_on_an_idle_owner(workers):
+    from app.db import turns
+
+    a, b = workers("failed-owner"), workers("failed-viewer")
+    with a.active():
+        engine.create_network("Runtime")
+    join(a, b)
+    with a.active():
+        from app.db.projects_v2 import upsert_project
+        project = upsert_project(origin="https://github.com/example/failed.git", name="Failed")
+        database.create_session(session_id="remote-failed", profile_id="default", project_id=None,
+                                title="Remote failure", project_v2_id=project["id"], is_active=True)
+        turn = turns.enqueue_turn("remote-failed", "user", prompt="go")
+        turns.start_turn(turn["id"])
+        turns.settle_turn(turn["id"], "aborted", "error", error="HTTP 400")
+        catalog.publish_owned()
+        engine.scan_all()
+    converge([a, b])
+
+    def seen_on_the_mirror():
+        with b.active():
+            rows = [dict(database.get_session("remote-failed"))]
+            with patch.object(database, "get_installs_map", return_value={
+                a.device_id: {"device_name": "Owner", "online": True, "approved": True},
+            }):
+                _annotate_cluster_fields(rows)
+            return rows[0]
+
+    assert seen_on_the_mirror()["remote_runtime_state"] == "idle"
+    assert seen_on_the_mirror()["last_turn_failed"] is True
+
+    with a.active():
+        turn = turns.enqueue_turn("remote-failed", "user", prompt="again")
+        turns.start_turn(turn["id"])
+        turns.settle_turn(turn["id"], "completed")
+        catalog.publish_owned()
+    converge([a, b])
+    assert seen_on_the_mirror()["remote_runtime_state"] == "idle"
+    assert not seen_on_the_mirror().get("last_turn_failed")

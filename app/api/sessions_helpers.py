@@ -18,6 +18,7 @@ from app.db.api_users import get_api_users_by_ids
 from app.db.tags import get_tags_for_sessions
 from app.db.background_tasks import get_running_task_presence
 from app.db.task_chips import waiting_counts as task_chip_counts
+from app.db.turns import sessions_with_failed_latest_turn
 from app.db.sessions import get_fork_info_for_sessions
 from app.db.projects import get_projects_by_ids
 from app.db.projects_v2 import (
@@ -791,6 +792,10 @@ def _annotate_cluster_fields(sessions: List[dict]) -> None:
                 "offline" if not online else
                 state if summary.get("owner_device_id") == owner_device and state in STATES else "unknown"
             )
+            # The owner's turns are not here: its summary is what knows.
+            if session["remote_runtime_state"] == "failed":
+                session["remote_runtime_state"] = "idle"
+                session["last_turn_failed"] = True
         else:
             # Local or legacy (NULL instance_id): always controllable from here.
             session["device_name"] = my_install.get("device_name") if my_install else None
@@ -859,12 +864,14 @@ def enrich_sessions_with_tags(sessions: List[dict]) -> List[dict]:
     fork_info_by_session = get_fork_info_for_sessions(session_ids)
     presence = get_running_task_presence(session_ids)
     chips = task_chip_counts(session_ids)
+    failed = sessions_with_failed_latest_turn(session_ids)
 
     for session in sessions:
         sid = session["id"]
         session["tags"] = tags_by_session.get(sid, [])
         session["has_running_tasks"] = presence.get(sid, {}).get("has_running_tasks", False)
         session["pending_task_chips"] = chips.get(sid, {}).get("pending_task_chips", 0)
+        session["last_turn_failed"] = sid in failed
         fork_info = fork_info_by_session.get(sid)
         session["has_forks"] = fork_info["has_forks"] if fork_info else False
         if session.get("api_user_id"):
@@ -893,12 +900,14 @@ def enrich_search_results_with_tags(results: list) -> list:
     fork_info_by_session = get_fork_info_for_sessions(session_ids)
     presence = get_running_task_presence(session_ids)
     chips = task_chip_counts(session_ids)
+    failed = sessions_with_failed_latest_turn(session_ids)
 
     for result in results:
         sid = result["id"]
         result["tags"] = tags_by_session.get(sid, [])
         result["has_running_tasks"] = presence.get(sid, {}).get("has_running_tasks", False)
         result["pending_task_chips"] = chips.get(sid, {}).get("pending_task_chips", 0)
+        result["last_turn_failed"] = sid in failed
         fork_info = fork_info_by_session.get(sid)
         result["has_forks"] = fork_info["has_forks"] if fork_info else False
 

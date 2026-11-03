@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { ClusterProject } from '$lib/api/installs';
+import type { Session } from '$lib/api/client';
+import { projectIdentity, projectKey } from './session-card-data';
 import {
 	buildWorkspacePickerItems,
 	pickerItemName,
@@ -127,6 +129,19 @@ describe('buildWorkspacePickerItems', () => {
 			]
 		);
 		expect(items).toEqual([]);
+	});
+});
+
+describe('the identity the picker and the sidebar Filter share', () => {
+	it('gives a project whose catalog row went stale when it was linked the same key as its chats', () => {
+		const local = { id: 'proj-1', name: 'Linked', link_group_id: 'git:abc' };
+		const items = buildWorkspacePickerItems([local], [
+			catalog({ project_v2_id: 'pv2-old', origin: 'local:proj-1', local_project_id: 'proj-1', remote_only: false, name: 'Linked' }),
+			catalog({ project_v2_id: 'pv2-new', origin: 'git:abc', local_project_id: null, remote_only: true, name: 'Linked' })
+		]);
+		expect(items.map((item) => item.id)).toEqual(['proj-1']);
+		expect(projectIdentity({ ...local, origin: 'local:proj-1' })).toBe('git:abc');
+		expect(projectKey({ id: 's', project_id: 'proj-1', link_group_id: 'git:abc', origin: 'local:proj-1' } as Session)).toBe('git:abc');
 	});
 });
 

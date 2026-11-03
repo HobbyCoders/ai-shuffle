@@ -1117,6 +1117,9 @@ async def get_session(
     from app.db.background_tasks import get_running_task_presence
     presence = await run_sync(get_running_task_presence, [session["id"]])
     session["has_running_tasks"] = presence.get(session["id"], {}).get("has_running_tasks", False)
+    from app.db.turns import sessions_with_failed_latest_turn
+    failed = await run_sync(sessions_with_failed_latest_turn, [session["id"]])
+    session["last_turn_failed"] = session["id"] in failed
 
     session["messages"] = messages
     session["tags"] = await run_sync(database.get_session_tags, session_id)
@@ -1988,6 +1991,12 @@ async def clear_session(
             user_id=existing.get("api_user_id") or "admin",
             session_id=session_id,
             source_device_id=None,
+        )
+        # The failure the cleared transcript showed went with it (#1032).
+        await sync_engine.broadcast_user_session_updated(
+            user_id=existing.get("api_user_id") or "admin",
+            session_id=session_id,
+            updates={"last_turn_failed": False},
         )
     except Exception:  # noqa: BLE001 — sync fan-out is best-effort
         logger.debug("session clear broadcast failed", exc_info=True)

@@ -1131,6 +1131,19 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
     else:
         message = "Rewind failed"
 
+    # The failure the rewound transcript showed is gone with it (#1032).
+    if request.restore_chat and chat_rewound:
+        from app.db import turns as turns_db
+
+        await asyncio.to_thread(turns_db.forget_failures, session_id)
+        spawn_detached(
+            sync_engine.broadcast_user_session_updated(
+                user_id=session.get("api_user_id") or "admin",
+                session_id=session_id,
+                updates={"last_turn_failed": False},
+            )
+        )
+
     # v2 event log: fold the successful chat rewind into the append-only log
     # (unfenced — a rewind happens between turns, with no owning run). A
     # resolved-but-tail target (rewound_from_seq is None) appends nothing.

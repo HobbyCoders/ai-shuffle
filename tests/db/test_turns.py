@@ -802,3 +802,102 @@ def test_claimable_targeted_deduplicates_repeated_ids(mock_db):
     assert turns.list_claimable_sessions(
         session_ids=["c-plain", "c-plain", "c-plain"]
     ) == ["c-plain"]
+
+
+# ---------------------------------------------------------------------------
+# Whether a chat's latest turn failed (#1032)
+# ---------------------------------------------------------------------------
+
+def _ended(session_id, outcome="completed", stop_reason=None, error=None):
+    turn = turns.enqueue_turn(session_id, "user", prompt="go")
+    turns.start_turn(turn["id"])
+    return turns.settle_turn(turn["id"], outcome, stop_reason, error=error)
+
+
+def _failed(*session_ids):
+    return turns.sessions_with_failed_latest_turn(list(session_ids))
+
+
+@pytest.mark.parametrize("stop_reason", ["error", "progress_timeout", "lease_expired", "recording_failed", "worker_update"])
+def test_an_abort_nobody_asked_for_is_a_failure(mock_db, stop_reason):
+    _ended("s1", "aborted", stop_reason, "HTTP 400")
+    assert _failed("s1") == {"s1"}
+
+
+@pytest.mark.parametrize("stop_reason", ["interrupted", "interrupt_escalation", "user_stopped", "stopped", "archived"])
+def test_an_abort_the_user_asked_for_is_not_a_failure(mock_db, stop_reason):
+    _ended("s1", "aborted", stop_reason)
+    assert _failed("s1") == set()
+
+
+def test_a_clean_finish_is_not_a_failure_and_one_with_an_error_is(mock_db):
+    _ended("clean")
+    _ended("errored", "completed", error="Provider returned status 529")
+    assert _failed("clean", "errored") == {"errored"}
+
+
+def test_the_next_turn_speaks_over_an_earlier_failure(mock_db):
+    _ended("s1", "aborted", "error", "boom")
+    _ended("s1")
+    assert _failed("s1") == set()
+    _ended("s1", "aborted", "error", "boom")
+    assert _failed("s1") == {"s1"}
+
+
+def test_a_turn_still_running_is_not_a_failure_yet(mock_db):
+    _ended("s1", "aborted", "error", "boom")
+    next_turn = turns.enqueue_turn("s1", "user", prompt="again")
+    assert _failed("s1") == set()  # queued: the owner already answered it
+    turns.start_turn(next_turn["id"])
+    assert _failed("s1") == set()
+
+
+def test_a_message_withdrawn_from_the_queue_does_not_hide_the_failure(mock_db):
+    _ended("s1", "aborted", "error", "boom")
+    queued = turns.enqueue_turn("s1", "user", prompt="never mind")
+    assert turns.remove_queued_turn(queued["id"])
+    assert _failed("s1") == {"s1"}
+
+
+def test_a_parked_turn_keeps_its_failure_until_and_after_it_settles(mock_db):
+    turn = turns.enqueue_turn("s1", "user", prompt="go")
+    turns.start_turn(turn["id"])
+    assert turns.park_turn(turn["id"], ["task-1"], error="HTTP 500")
+    assert _failed("s1") == {"s1"}
+    turns.settle_parked_turns("s1")
+    assert turns.get_turn(turn["id"])["state"] == "completed"
+    assert _failed("s1") == {"s1"}
+
+
+def test_a_session_without_turns_or_any_session_at_all_reads_clean(mock_db):
+    assert _failed("nobody") == set()
+    assert _failed() == set()
+
+
+def test_forgetting_failures_leaves_other_facts_of_the_rows_alone(mock_db):
+    _ended("s1", "aborted", "interrupted")
+    stopped = turns.get_latest_run_turn("s1")
+    _ended("s1", "completed", "parked_settled", error="Provider execution failed")
+    kept = turns.get_latest_run_turn("s1")
+    _ended("s1", "aborted", "error", "boom")
+    aborted = turns.get_latest_run_turn("s1")
+    assert _failed("s1") == {"s1"}
+
+    turns.forget_failures("s1")
+
+    assert _failed("s1") == set()
+    assert turns.get_turn(stopped["id"])["stop_reason"] == "interrupted"
+    assert turns.get_turn(kept["id"])["stop_reason"] == "parked_settled"
+    assert turns.get_turn(kept["id"])["error"] is None
+    assert turns.get_turn(aborted["id"])["stop_reason"] == "conversation_reset"
+
+
+@pytest.mark.parametrize("result, expected", [
+    ({"api_error_status": 529, "is_error": True}, "Provider returned status 529"),
+    ({"is_error": True}, "Provider execution failed"),
+    ({"errors": ["bad"]}, "Provider execution failed"),
+    ({"stop_reason": "end_turn"}, None),
+    (None, None),
+])
+def test_a_provider_result_says_whether_it_failed(result, expected):
+    assert turns.provider_result_error(result) == expected

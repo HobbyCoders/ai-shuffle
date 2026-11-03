@@ -41,6 +41,8 @@ export interface Session {
 	has_running_tasks?: boolean;
 	/** Task chips waiting on the owner to start, retry or dismiss. Null where the server did not read it. */
 	pending_task_chips?: number | null;
+	/** The latest turn that ran ended in a failure, so the row says so. */
+	last_turn_failed?: boolean;
 	/** Read-only state sampled on the owning worker, never local runner state. */
 	remote_runtime_state?: 'working' | 'parked' | 'permission' | 'question' | 'idle' | 'offline' | 'unknown' | null;
 	is_active: boolean;
