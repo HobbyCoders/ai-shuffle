@@ -1605,6 +1605,10 @@ async def stream_query(
 
     finally:
         clear_turn_context(session_id, expected=bound_generation_context)
+        # Consume this turn's Stop before releasing the pooled state. Resetting
+        # at startup could erase a real Stop received during async setup.
+        sdk_interrupted = not interrupted and state.interrupt_requested
+        state.interrupt_requested = False
         # Mark as not streaming — keep in pool for reuse
         state.is_streaming = False
         state.streaming_started_at = None
@@ -1617,11 +1621,8 @@ async def stream_query(
 
     # Persist session data to database in a batched write (single transaction
     # for all tool messages + assistant response, instead of N+1 individual writes).
-    # Detect an adapter-level interrupt: adapter.interrupt() causes receive_events()
-    # to end naturally (no CancelledError), so `interrupted` is still False here.
-    # Check the flag to correctly mark this turn as interrupted for persistence
-    # and to yield the right terminal event to the frontend.
-    sdk_interrupted = not interrupted and state.interrupt_requested
+    # An adapter interrupt ends receive_events() naturally, without CancelledError.
+    # Use the flag captured before releasing the pooled state for the next turn.
     if sdk_interrupted:
         interrupted = True
 
