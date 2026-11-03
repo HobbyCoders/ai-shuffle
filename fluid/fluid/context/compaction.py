@@ -773,7 +773,7 @@ def _delivered_on_path(
                     found.append((node.node_id, text))
             elif steers:
                 found.extend(
-                    (node.node_id, steer.render().strip())
+                    (node.node_id, steer.render())
                     for block in node.message.content if isinstance(block, ToolResultBlock)
                     for steer in block.delivered_steers if steer.origin != "system"
                 )

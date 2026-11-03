@@ -103,11 +103,28 @@ events, then the next call (`scenarios/compact-after-tool.json` plays it).
 - That a `compacting` frame read after a bridge answer means the answer was not
   applied. The answer comes over HTTP and frames over stdout, so the frame may
   have been printed first.
-- That hook context reaches the model whole. Over 10,000 characters (2.1.316,
-  `SIt` in the bundle) it is saved to a file and the model gets a 2 KB preview, so
-  the leg never answers with more than 9,500: an overlong restoration note goes
-  out in parts, on later tool results or the next turn. One peer message that
-  long still goes out, as holding it would lose it, and the preview names the file.
+- That hook context reaches the model whole. Over 10,000 characters it is saved
+  to a file and the model gets a 2 KB preview. Exactly 10,000 arrives whole and
+  10,001 does not, on SessionStart after a real `/compact` and on PostToolUse
+  (2.1.316, `scripts/devloop/real_claude_hook_limit_probe.py`). So the leg never
+  answers with more than 9,500: an overlong restoration note goes out in parts, on
+  later tool results or the next turn, and peers are batched against the whole
+  answer, separators and what a hook already said included. One peer message over
+  the limit still goes out on an answer of its own, as holding it would lose it,
+  and the preview names the file.
+- That an open Fluid answer was applied. `PreCompact` runs only for Claude Code's
+  own summarizer, and a real `/compact` was watched running `compacting`,
+  `PreCompact`, `SessionStart(compact)`, closing status, boundary, in that order. So
+  `PreCompact` closes every open answer. A note written while one is still open
+  leans on it, so if the boundary then shows it did not apply, what the note left
+  out is queued again under the same id.
+- That a turn can carry extra text whatever it is. The CLI reads a slash command
+  from the last text block, so text after `/help` breaks it. Such a turn stays
+  verbatim, and what restoration still owes waits for the next turn the model reads.
+- That the same words are the same message. "Do not deploy" said twice with "you
+  may deploy" between is three instructions, told apart by delivery id. A context
+  that lacks one gets it back with everything delivered after it, so the newest
+  instruction stays last.
 - That replayed rows are new work. They carry fresh uuids and old tool ids
   (the leg's `ReplayFilter`).
 
@@ -124,15 +141,26 @@ events, then the next call (`scenarios/compact-after-tool.json` plays it).
 Older persisted decisions keep their render version, so old sessions render
 byte for byte as they did.
 
+A model-written checkpoint stores its pin (brief and delivered messages, bounded)
+on its decision, because a window drops the nodes it came from. A later checkpoint
+rolls the earlier pin forward. In a fold or digest, messages from turns and from
+tool results share one budget, newest first in delivery order, with a recall
+reference for what stayed out.
+
 The restoration note is a queue under one `compaction_id`, which the boundary,
-the checkpoint and each `compaction_restoration` diagnostic share. A section is
-credited when its last part is in a hook answer; `pending`, `cut` and `omitted`
-stay uncredited and the rest is re-sent. It always ends: the queue holds a bounded
-total, and a section that cannot fit ends `cut` and uncredited.
+the checkpoint and each `compaction_restoration` diagnostic share. Text is only
+staged when composed. Cursors, callbacks and completion move once the hook answer
+or the turn's frame is written; a failed write, a cancellation or an error answer
+offers the same part again. A section is credited when its last part is written;
+`pending`, `cut` and `omitted` stay uncredited and the rest is re-sent, from where
+the section really stopped. Memory cut from the note is `replaced` only when the
+turn holds a full snapshot. It always ends: the queue holds a bounded total, and a
+section that cannot fit ends `cut` and uncredited.
 
 ## Not verified
 
-These were read from the bundle, not watched on a running CLI. The live smoke
+Unless noted above as watched, these were read from the bundle, not on a running
+CLI. The live smoke
 rows `claude-compaction-replay-and-move` and `compaction-limit-continues`
 ([live-smoke-scenarios.md](live-smoke-scenarios.md)) run a real CLI through
 compaction on a release candidate; that is where to confirm them:
@@ -140,9 +168,10 @@ compaction on a release candidate; that is where to confirm them:
 - whether the CLI prints the `@internal` `compact_progress` events in
   stream-json (the app ignores them either way);
 - the exact extra keys on the summary `user` frame;
-- the attachment rule and the 10,000-character limit above under a running fix:
-  they come from the 2.1.316 bundle and from transcripts, and one live note was
-  seen arriving as a 2 KB preview, but no real CLI has run this fix;
+- the attachment rule under a running fix. It comes from the 2.1.316 bundle and
+  from transcripts. The 10,000-character limit was watched, but only through a
+  probe answering the CLI's hooks, with no mod: no real CLI has run this fix or
+  applied a Fluid answer under it;
 - whether a typed `/compact` also prints its own `<command-name>` and
   `<local-command-stdout>` user lines, and whether the summarizer path of a
   typed `/compact` prints the kept tail again with the old uuids. The app
