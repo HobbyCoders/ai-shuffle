@@ -1,4 +1,5 @@
 import { TAB_ACTIVE_SESSION_KEY } from './device-id';
+import { EMPTY_CHAT_KEY } from './session/empty-chat-memory';
 import { sessionEphemeralCache } from './session-cache';
 import { writable } from 'svelte/store';
 
@@ -36,6 +37,7 @@ export function bindSessionOwner(
   sessionEphemeralCache.clear();
   try {
    sessionStorage.removeItem(TAB_ACTIVE_SESSION_KEY);
+   sessionStorage.removeItem(EMPTY_CHAT_KEY);
    // Drafts also have a per-tab reload mirror outside the ephemeral LRU.
    for (let i = sessionStorage.length - 1; i >= 0; i--) {
     const key = sessionStorage.key(i);

@@ -210,7 +210,8 @@ def resolve_working_dir(session: Dict[str, Any]) -> str:
 
     The origin resolver is the SINGLE cwd authority for every session, so this
     reader defers to it unconditionally — no legacy worktree/project walk. It is
-    resolver-FIRST (no ``project_v2_id`` gate): ``resolve_existing_cwd``
+    resolver-FIRST (no ``project_v2_id`` gate): ``resolve_session_cwd`` matches
+    the owner no-project / restricted-chat cwd before resolving a checkout. It
     self-heals the session's ``project_v2_id`` / ``branch`` off its legacy
     ``project_id`` / ``worktree_branch`` and returns this runner's checkout path
     when that dir exists on disk. Crucially it is a PURE READ — it NEVER
@@ -224,7 +225,7 @@ def resolve_working_dir(session: Dict[str, Any]) -> str:
     from app.core import project_resolver
 
     try:
-        v2_cwd = project_resolver.resolve_existing_cwd(session)
+        v2_cwd = project_resolver.resolve_session_cwd(session)
     except Exception:  # noqa: BLE001 — this reader must never break history reads
         logger.debug(
             "resolve_working_dir: resolver failed; using default workspace",
