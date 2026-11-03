@@ -582,7 +582,10 @@ async def _interrupted_with_older_queued(session_id: str):
 
     turn = turns_db.enqueue_turn(session_id, "user", prompt="hi", profile_id="default")
     turns_db.start_turn(turn["id"], None, "runner")
-    older = turns_db.enqueue_turn(session_id, "user", prompt="older", profile_id="default")["id"]
+    # Stamped like any message a person sends: only its place behind the Stop's
+    # cutoff says the Stop applies to it.
+    older = turns_db.enqueue_turn(session_id, "user", prompt="older", profile_id="default",
+                                  payload={turns_db.PERSON_INPUT_KEY: True})["id"]
     assert turns_db.interrupt_turn(session_id, "stop", stop_background=True, source="user_stop")
 
     async def provider_stops(_sid):
@@ -790,8 +793,10 @@ async def test_a_notified_peer_message_starts_under_the_latch_it_replaces(
     runtime, older, provider_stops = await _interrupted_with_older_queued(session_id)
     await _finish_interrupt(runtime, provider_stops)
     assert task_registry.is_user_stopped(session_id)
-    # A pass here can only come from the notification.
+    # A pass here can only come from the notification, and only its kick can
+    # lift the latch.
     monkeypatch.setattr(turn_claim, "CLAIM_POLL_SECONDS", 3600)
+    monkeypatch.setattr(turn_claim, "_next_stop_reconcile", float("inf"))
 
     async def peers_present():
         return True
@@ -841,19 +846,44 @@ def _peer_notifies(connection: dict, session_id: str) -> None:
     assert done.returncode == 0, done.stderr[-2000:]
 
 
-async def test_the_claim_pass_runs_a_peer_message_past_the_latch(cluster, session_id, stop_cleared):
+async def test_the_claim_pass_runs_a_peer_message_past_the_latch(
+    cluster, session_id, stop_cleared, monkeypatch,
+):
     from app.core import turn_claim
     from app.core.task_registry import task_registry
 
     runtime, _older, provider_stops = await _interrupted_with_older_queued(session_id)
     await _finish_interrupt(runtime, provider_stops)
     newer = await asyncio.to_thread(_peer_install_sends, cluster, session_id)
+    monkeypatch.setattr(turn_claim, "_next_stop_reconcile", float("inf"))  # the kick must ask
     executed: list = []
     with _this_install_runs_the_session(executed, session_id):
         await turn_claim.claim_once()
         await _kicks_finish()
 
     assert executed == [newer]
+    assert not task_registry.is_user_stopped(session_id)
+
+
+async def test_the_claim_pass_tells_this_install_of_a_message_the_peer_ran(
+    cluster, session_id, stop_cleared, monkeypatch,
+):
+    """Nothing is left to kick here, so only the sweep can lift the latch."""
+    from app.core import turn_claim
+    from app.core.task_registry import task_registry
+    from app.db import turns as turns_db
+
+    runtime, _older, provider_stops = await _interrupted_with_older_queued(session_id)
+    await _finish_interrupt(runtime, provider_stops)
+    newer = await asyncio.to_thread(_peer_install_sends, cluster, session_id)
+    assert turns_db.start_turn(newer, None, "runner")
+    monkeypatch.setattr(turn_claim, "_next_stop_reconcile", 0.0)
+    executed: list = []
+    with _this_install_runs_the_session(executed, session_id):
+        await turn_claim.claim_once()
+        await _kicks_finish()
+
+    assert executed == []
     assert not task_registry.is_user_stopped(session_id)
 
 
@@ -904,6 +934,19 @@ async def test_a_terminal_frame_producer_learns_of_a_peer_message(cluster, sessi
 
     await asyncio.to_thread(_peer_install_sends, cluster, session_id)
     assert not await turn_scheduler._user_stopped(session_id)
+    assert not task_registry.is_user_stopped(session_id)
+
+
+async def test_a_wake_learns_of_a_peer_message(cluster, session_id, stop_cleared):
+    from app.core import wakeup_service
+    from app.core.task_registry import task_registry
+
+    runtime, _older, provider_stops = await _interrupted_with_older_queued(session_id)
+    await _finish_interrupt(runtime, provider_stops)
+    assert await wakeup_service._stays_stopped(session_id)
+
+    await asyncio.to_thread(_peer_install_sends, cluster, session_id)
+    assert not await wakeup_service._stays_stopped(session_id)
     assert not task_registry.is_user_stopped(session_id)
 
 
