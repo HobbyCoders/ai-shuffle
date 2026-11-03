@@ -8,8 +8,11 @@ import com.hobbycoders.aishuffle.BuildConfig
 import com.hobbycoders.aishuffle.data.ServerStore
 
 object PushPermission {
+    /** The build's push setting. Unit tests turn it on to drive the real startup request without Firebase config. */
+    @androidx.annotation.VisibleForTesting internal var enabled = BuildConfig.PUSH_ENABLED
+
     fun ask(activity: AppCompatActivity, dialogOpen: (Boolean) -> Unit = {}, request: (String) -> Unit) {
-        if (!BuildConfig.PUSH_ENABLED || Build.VERSION.SDK_INT < 33 ||
+        if (!enabled || Build.VERSION.SDK_INT < 33 ||
             NotificationManagerCompat.from(activity).areNotificationsEnabled() ||
             ServerStore.get(activity).getAll().none { NeedsYouNotifications.authorized(activity, it) }) return
         val prefs = activity.getSharedPreferences("needs_you_permission", 0)

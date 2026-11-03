@@ -196,6 +196,10 @@
 		if (!$isAuthenticated) return;
 		// Navigation origin includes auth + JS loading. This is bootstrap settled,
 		// not proof that a restored transcript or all feature panels are ready.
+		// Bounded, content-free milestones cover boots whose paint sample is
+		// discarded after user activation/visibility changes: init vs reconcile.
+		performance.clearMarks?.('shuffle:boot.init.end');
+		performance.clearMarks?.('shuffle:boot.reconciled');
 		const bootstrapOrigin = claimNavigationOrigin();
 		if (bootstrapOrigin !== null) beginJourney('app.bootstrap', bootstrapKey, bootstrapOrigin);
 
@@ -231,6 +235,7 @@
 		const initializing = activeSession.init({ deepLinkSessionId });
 		const initGeneration = getInitGeneration();
 		await initializing;
+		performance.mark?.('shuffle:boot.init.end');
 		// The layout's explicit New Chat wins over an older backend session
 		// snapshot (see below). Settle that now, not after the loads: until then
 		// the composer was bound to the old session, so a send went there and the
@@ -317,6 +322,7 @@
 			followRestoredLane();
 		}
 		bootReconciled = true;
+		performance.mark?.('shuffle:boot.reconciled');
 		finishBootReconciliation(initGeneration);
 
 		// Deep-link: the Android shell opens `/?session=<id>` when a notification
