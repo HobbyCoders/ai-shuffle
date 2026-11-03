@@ -138,6 +138,13 @@ def test_new_storage_refusal_notifies_during_existing_loss_alert(tmp_path, monke
     assert result["notify"]
 
 
+def test_cleanup_just_after_check_start_is_recent_not_quiet(tmp_path):
+    now = time.time()
+    _, detail = memory_health._archive_loss_samples(
+        {"losses": {"expired_archived": 1, "last_expired_archived_at": now + 1}}, now, {})
+    assert detail["archive_loss_recent"] and not detail["archive_loss_time_unknown"]
+
+
 def test_archive_cleanup_excludes_live_and_archived_owner_kept_facts(tmp_path, monkeypatch):
     store = SkillStore(tmp_path)
     old = store.save_memory("The owner's earlier explicit rule", protected=True)

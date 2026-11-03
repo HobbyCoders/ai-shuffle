@@ -125,16 +125,16 @@ async def test_partial_hook_does_not_repeat_delivered_scratch(monkeypatch, tmp_p
 
 
 @pytest.mark.asyncio
-async def test_native_delivery_is_unchanged_and_fresh_adapter_replays_scratch(monkeypatch):
-    # Native digests currently do not pin scratch; this patch must not remove
-    # the active user message's guidance or change native Retry semantics.
+async def test_merged_native_path_pins_scratch_and_fresh_delegated_adapter_replays_it(monkeypatch):
+    # Main's native path-pinning and this PR's delegated segment credit must
+    # coexist; neither renderer may displace the other during integration.
     memory = {"section": "# Memory\n- fixture"}
     adapter, loop = await _adapter(monkeypatch, memory)
     monkeypatch.setattr(adapter, "_scratch_note", lambda: SCRATCH)
     try:
         await _turn(adapter)
         await _turn(adapter)
-        assert await copies(adapter) == [1, 1]
+        assert await copies(adapter) == [1, 0]
         fresh, _ = await _adapter(monkeypatch, memory, loop)
         fresh._is_delegated = True  # same resume-side renderer, no CLI spawn
         monkeypatch.setattr(fresh, "_scratch_note", lambda: SCRATCH)

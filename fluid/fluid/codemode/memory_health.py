@@ -665,13 +665,16 @@ def _archive_loss_samples(doc, now, previous):
     if not samples or now - samples[-1][0] >= LOSS_SAMPLE_EVERY:
         samples.append([now, overflow, expired])
     samples = samples[-LOSS_SAMPLES_KEPT:]
-    unknown = bool((overflow and not stamps[0]) or (expired and not stamps[1]))
+    # Read-side expiry cleanup can stamp a loss just after this check's
+    # caller captured `now`; a small clock/processing margin keeps it recent.
+    unknown = bool((overflow and (not stamps[0] or stamps[0] > now + 60))
+                   or (expired and (not stamps[1] or stamps[1] > now + 60)))
     return samples, {
         "archive_dropped_total": overflow, "archive_expired_total": expired,
         "archive_deleted_total": total, "archive_dropped_in_window": growth,
         "archive_loss_window_days": COVERAGE_WINDOW / DAY,
         "archive_loss_counter_reset": reset, "last_archive_dropped_at": last or None,
-        "archive_loss_recent": bool(total and (growth or now - COVERAGE_WINDOW <= last <= now)),
+        "archive_loss_recent": bool(total and (growth or now - COVERAGE_WINDOW <= last <= now + 60)),
         "archive_loss_time_unknown": unknown,
     }
 
