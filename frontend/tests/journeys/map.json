@@ -82,6 +82,20 @@
 			]
 		},
 		{
+			"why": "rewind and fork must reseed Claude Code in the same session cwd used for resume",
+			"journeys": ["claude-rewind-cwd"],
+			"globs": [
+				"frontend/tests/journeys/claude-rewind-cwd.journey.mjs",
+				"app/api/commands.py",
+				"app/api/command_context.py",
+				"app/api/sessions_fork.py",
+				"app/core/project_resolver.py",
+				"app/core/message_resolver.py",
+				"app/core/jsonl_rewind.py",
+				"app/core/provider/fluid_transcript.py"
+			]
+		},
+		{
 			"why": "bounded transcript windows and live text selection",
 			"journeys": ["transcript-reader", "transcript-boundary"],
 			"globs": [
@@ -112,6 +126,17 @@
 				"frontend/src/lib/api/worker-settings.ts",
 				"app/core/worker_settings.py",
 				"app/api/settings_workers.py"
+			]
+		},
+		{
+			"why": "rewinding a message: its dialog, its request and what the transcript does through it",
+			"journeys": ["rewind-transcript"],
+			"globs": [
+				"frontend/tests/journeys/rewind-transcript.journey.mjs",
+				"frontend/src/lib/components/chat/MessageActions.svelte",
+				"frontend/src/lib/api/rewind.ts",
+				"app/api/commands.py",
+				"app/api/rewind_owner.py"
 			]
 		},
 		{
@@ -148,6 +173,14 @@
 				"frontend/src/lib/components/layout/NewSessionSentence.svelte",
 				"frontend/src/lib/components/layout/WorkspaceSelector.svelte",
 				"frontend/src/lib/components/chat/WorkspaceFolderSelector.svelte"
+			]
+		},
+		{
+			"why": "a cold reload paints the composer where the chat will settle",
+			"journeys": ["composer-reload"],
+			"globs": [
+				"frontend/tests/journeys/composer-reload.journey.mjs",
+				"frontend/src/lib/stores/session/empty-chat-memory*"
 			]
 		},
 		{

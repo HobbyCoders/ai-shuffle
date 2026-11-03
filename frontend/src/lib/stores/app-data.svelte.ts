@@ -1125,8 +1125,7 @@ export const appData = {
 		// Clear a session's conversation IN PLACE — the backend wipes its
 		// transcript/messages but KEEPS the session row, so (unlike deleteSession)
 		// there is nothing to splice out of the list here. The row stays; only its
-		// conversation is reset. The caller updates the open chat's local message
-		// store separately (activeSession.clearMessages()) for instant feedback.
+		// conversation is reset.
 		await api.post(`/sessions/${sessionId}/clear`);
 		// R3, and load-bearing: the row survives with the same id but an emptied
 		// event log, so a resume at from_seq=lastSeq matches nothing and would

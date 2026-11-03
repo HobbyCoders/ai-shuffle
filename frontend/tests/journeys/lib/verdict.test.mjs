@@ -56,8 +56,8 @@ function recording(entries, statsTotal) {
 			? { t, kind, label: data }
 			: kind === 'state'
 				? { t, kind, changes: { composer: data } }
-				: kind === 'chips'
-					? { t, kind: 'state', changes: { chips: data } }
+				: kind === 'chips' || kind === 'messages'
+					? { t, kind: 'state', changes: { [kind]: data } }
 					: { t, kind: 'layout_shift', value: data.value, input: false, sources: data.sources }
 	);
 	const total = statsTotal ?? timeline.filter((e) => e.kind === 'layout_shift').reduce((s, e) => s + e.value, 0);
@@ -234,6 +234,49 @@ describe('designedShifts (expectShift)', () => {
 			assert.throws(() => checkExpectShift('c', [{ ...CHIP, chips: [null, null] }]), /composer or chips/);
 			assert.throws(() => checkExpectShift('c', [{ ...CHIP, composer: ['bottom', 'centre'] }]), /composer or chips/);
 			assert.throws(() => checkExpectShift('c', [{ step: 'open', maxValue: 0.06, reason: 'r' }]), /composer or chips/);
+		});
+	});
+
+	describe('rows leaving the transcript', () => {
+		const ROWS = { step: 'rewind', messages: [4, 2], maxValue: 0.12, reason: 'designed' };
+		const AREA = ['section.worklog in MessageArea', 'div.ameta in MessageArea'];
+		const start = [[0, 'messages', 4], [10, 'mark', 'rewind']];
+		const rewind = [...start, [900, 'messages', 2], [860, 'shift', { value: 0.02, sources: SLOT }], [890, 'shift', { value: 0.06, sources: AREA }]];
+
+		it('excuses the move the rows make, in the transcript as well as the chat layout', () => {
+			const judged = designedShifts(recording(rewind), [shiftAnomaly], [ROWS]);
+			assert.deepEqual(judged.problems, []);
+			assert.deepEqual(judged.anomalies, []);
+			assert.deepEqual([judged.excused[0].what, judged.excused[0].value], ['messages', 0.08]);
+		});
+
+		it('a composer move still does not excuse the transcript', () => {
+			const composerOnly = [[0, 'state', 'bottom'], [10, 'mark', 'open'], [900, 'state', 'centre'], [898, 'shift', { value: 0.06, sources: AREA }]];
+			const judged = designedShifts(recording(composerOnly), [shiftAnomaly], [DESIGN]);
+			assert.equal(judged.excused[0].value, 0);
+			assert.equal(judged.anomalies.length, 1);
+		});
+
+		it('fails a wipe on the way (the count never goes straight from → to)', () => {
+			const wipe = [...start, [800, 'messages', 0], [1200, 'messages', 2], [1190, 'shift', { value: 0.06, sources: AREA }]];
+			assert.match(designedShifts(recording(wipe), [shiftAnomaly], [ROWS]).problems[0], /messages moved 4 → 2 0 times/);
+		});
+
+		it('fails a move larger than declared, and leaves a shift elsewhere counted', () => {
+			const big = [...start, [900, 'messages', 2], [890, 'shift', { value: 0.2, sources: AREA }]];
+			assert.match(designedShifts(recording(big), [shiftAnomaly], [ROWS]).problems[0], /designed messages move measured 0\.200/);
+			const elsewhere = [...start, [900, 'messages', 2], [890, 'shift', { value: 0.2, sources: ['header.top in Layout'] }]];
+			const judged = designedShifts(recording(elsewhere), [shiftAnomaly], [ROWS]);
+			assert.equal(judged.excused[0].value, 0);
+			assert.equal(judged.anomalies.length, 1);
+		});
+
+		it('refuses a declaration naming two changes, or no row count', () => {
+			checkExpectShift('c', [ROWS]);
+			assert.throws(() => checkExpectShift('c', [{ ...ROWS, composer: ['bottom', 'centre'] }]), /messages/);
+			assert.throws(() => checkExpectShift('c', [{ ...ROWS, messages: [null, 2] }]), /messages/);
+			assert.throws(() => checkExpectShift('c', [{ ...ROWS, messages: ['4', '2'] }]), /messages/);
+			assert.throws(() => checkExpectShift('c', [{ ...ROWS, messages: [2, 2] }]), /messages/);
 		});
 	});
 
