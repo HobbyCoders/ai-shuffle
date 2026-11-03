@@ -114,7 +114,7 @@ three desktop shards, not the separate stable-release portability matrix.
 | desktop | `desktop` → existing typecheck and all unit tests |
 | android-bridge | `android-and-docs` → existing local Node download-bridge tests |
 | android-play | `android-and-docs` → all six local Python/workflow-shell test scripts |
-| workflows/policy | `policy` → artifact/cost scripts and the complete local seven-file policy set, plus parity regressions |
+| workflows/policy | `policy` → artifact/cost scripts and the complete local eight-file policy set, plus parity regressions |
 | update-reach | `update-reach` → regression set and strict signed-publication/merged-PR readiness (not advisory) |
 | full preflight security | `supply-chain` → offline secret scan and identical report-only dependency audit, including source-publisher |
 | android-app (SDK optional) | Explicitly not covered by the reference Linux attestation; remains separate `android.yml` Gradle/native checks |
@@ -232,6 +232,16 @@ Python public and voice-lock audits, pinned workflow syntax/action lint, and the
 full workflow/publication/security/docs policy regression suite. Required flags,
 Python permission hardening and 35-minute heavy-job timeouts are retained. Every
 hosted pytest phase emits `--durations=50` and JUnit; artifacts expire in seven days.
+Both Python audits use `scripts/pip_audit_retry.py`: only a final PyPI
+`requests.exceptions.ReadTimeout` before response headers, with no findings/output,
+is retried, at most three attempts with 2s/4s backoff. Connect timeouts and
+body-read timeouts wrapped as `ConnectionError` fail closed without retry.
+Each audit has a shared 180s
+subprocess/backoff budget and a 30s HTTP timeout. Timed-out resolver descendants
+are terminated too, with separate bounded cleanup (up to 30s on Windows).
+Findings, other errors, exhausted retries and process deadlines fail the job;
+both output streams are preserved.
+The audit step (including tool installation and both audits) is capped at eight minutes.
 
 The stable `Backend tests` gate uses `if: always()` and depends on all shards,
 contracts and security. `scripts/ci/backend_gate.py` requires every dependency to
@@ -668,6 +678,9 @@ scripts/source-publisher, browser-mcp, desktop and tools when their lockfiles ex
 dev dependencies, without installing node_modules or changing lockfiles. Each
 manifest prints one summary; PyPI advisory severity is reported as unknown
 because pip-audit does not provide it. No dependency is upgraded automatically.
+Python reports use the same bounded PyPI-timeout retry helper as hosted audits
+(three attempts, 2s/4s backoff, 30s HTTP timeout, 180s total per manifest).
+Raw registry diagnostics remain redacted from local summaries.
 
 Findings and unavailable/timed-out audits **warn by default** until triaged.
 `python scripts/local_ci.py check --strict-audit` fails on any Python advisory,

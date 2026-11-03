@@ -281,8 +281,10 @@ await runJourney({
 				});
 				await restoreButton(reloaded).click();
 				await page.waitForTimeout(1500);
-				await page.unrouteAll({ behavior: 'ignoreErrors' });
+				// Removing the route can deliver the held reply. Reload first so this
+				// page really leaves before the restore answers, as this step requires.
 				await page.reload({ waitUntil: 'domcontentloaded' });
+				await page.unrouteAll({ behavior: 'ignoreErrors' });
 				await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(() => done()))));
 				await mark('page reloaded');
 				await notSent(unheard).waitFor({ timeout: 60_000 });
