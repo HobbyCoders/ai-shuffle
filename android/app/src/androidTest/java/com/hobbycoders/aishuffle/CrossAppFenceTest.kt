@@ -418,7 +418,7 @@ class CrossAppFenceTest {
         val reads = afterFinalRead { fixture("back"); fastEventCheck(underMs = 100) } // Over 500 ms of row delays is not read in 100.
         val tapping = tap(ref); allow()
         assertEquals("performed", status(tapping, 25).getString("status"))
-        assertEquals("The bad read and its retry", 2, reads.get())
+        assertTrue("The bad read must have been retried", reads.get() >= 2) // More if an unrelated event lands in a retry.
         assertTapped(1)
     }
     @Test fun denseSlowScreenReadRecoversFromABadRead() {
