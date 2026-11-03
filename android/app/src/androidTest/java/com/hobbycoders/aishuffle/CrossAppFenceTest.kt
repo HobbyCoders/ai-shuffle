@@ -24,6 +24,7 @@ import org.junit.runner.RunWith
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 
 /**
@@ -414,10 +415,13 @@ class CrossAppFenceTest {
         fixture("dense:100")
         val ref = read(waitSeconds = 15)
         fixture("delay:5"); fixture("noisy:120") // Each read takes over 500 ms, and an event lands in every one.
+        val closed = AtomicLong()
+        ShuffleAccessibilityService.afterConsentClosed = { closed.set(System.currentTimeMillis()) }
         val tapping = tap(ref); allow()
-        val started = System.currentTimeMillis()
         assertEquals("stale_ref", status(tapping, 15).getString("status"))
-        assertTrue("Took ${System.currentTimeMillis() - started} ms", System.currentTimeMillis() - started < 6_000)
+        // From the panel closing: the read that opens the window, the window, and one read that started inside it.
+        val took = System.currentTimeMillis() - closed.get()
+        assertTrue("Took $took ms", took < 2 * AppControlFence.READ_MS + AppControlFence.QUIET_MS)
         fixture("noisy:0"); fixture("delay:0")
         assertNotTapped()
     }
