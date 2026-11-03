@@ -19,7 +19,7 @@ public class CoveredTargetActivity extends android.app.Activity {
             int value = parts.length > 1 ? Integer.parseInt(parts[1]) : 0;
             switch (parts[0]) {
                 case "text": status.setText("Different content"); break;
-                case "textblip": status.setText("Different content"); status.postDelayed(() -> status.setText(RESTING), TEXT_BLIP_MS); break;
+                case "textblip": status.setText("Different content"); status.postDelayed(() -> { if ("Different content".contentEquals(status.getText())) status.setText(RESTING); }, TEXT_BLIP_MS); break;
                 case "swap": swapTracks(); break;
                 case "replace": replaceFirstTrack(); break;
                 case "dense": addRows(value); break;

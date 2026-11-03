@@ -276,7 +276,7 @@ class CrossAppFenceTest {
         val tapping = tap(read())
         panelUp(); fixture("textblip")
         assertEquals("denied", status(tapping).getString("status"))
-        assertNotTapped()
+        await("The target was tapped, or the blip never reverted") { shows(CoveredTargetActivity.RESTING) } // A tap would have kept the blip from reverting.
     }
     @Test fun denyWorksDuringASlowRead() {
         fixture("dense:100")
