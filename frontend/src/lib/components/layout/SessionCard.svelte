@@ -658,9 +658,11 @@
 				<span class="title">
 					{#if status === 'working'}
 						<span class="pip" aria-hidden="true"></span>
+					{:else if status === 'failed'}
+						<TriangleAlert size={12} strokeWidth={2.2} class="warn failed" aria-hidden="true" />
 					{:else if attention}
 						<TriangleAlert size={12} strokeWidth={2.2} class="warn" aria-hidden="true" />
-					{/if}{#if compact && (status === 'working' || attention)}<span class="sr-only">{`${statusWord}: `}</span>{/if}{title}
+					{/if}{#if compact && (status === 'working' || status === 'failed' || attention)}<span class="sr-only">{`${statusWord}: `}</span>{/if}{title}
 				</span>
 			</span>
 
@@ -946,6 +948,11 @@
 		vertical-align: -2px;
 		animation: card-pulse 2.4s ease-in-out infinite;
 	}
+	/* What happened, not something still calling: the danger colour, held still. */
+	.title :global(.warn.failed) {
+		color: var(--destructive);
+		animation: none;
+	}
 
 	.dot {
 		width: 3px;
@@ -1040,6 +1047,7 @@
 	}
 	.st.accent { color: var(--primary); }
 	.st.amber { color: var(--warning); }
+	.st.danger { color: var(--destructive); }
 	.st.green { color: var(--success); }
 	.st.purple { color: var(--status-merged); }
 	.st.muted { color: var(--muted-foreground); }

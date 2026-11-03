@@ -158,6 +158,51 @@ def list_devices(session_id):
     return {'devices': result, **({'error': 'no_devices'} if not result else {})}
 
 
+def _unknown_outcome(error):
+    return {'success': False, 'error': error, 'outcome_unknown': True,
+            'message': 'The device may have performed this action. Verify device state before retrying; '
+                       'cancellation cannot undo an action already performed.'}
+
+
+def _stopped_outcome(error, previous):
+    # A deleted device cascades its command history. Absence cannot prove non-delivery.
+    if previous is None or previous.get('claimed'):
+        return _unknown_outcome(error)
+    return {'success': False, 'error': 'command_not_delivered', 'reason': error,
+            'outcome_unknown': False, 'safe_to_retry': True,
+            'message': 'The command was not delivered; no action was performed. It is safe to retry.'}
+
+
+async def _completed_outcome(session_id, device_id, command_id, name, row):
+    result = json.loads(row['result'])
+    # Every completion exit rechecks AFTER reading the result, including deadline/cancel races.
+    try:
+        devices = await asyncio.to_thread(authorized_devices, session_id)
+        authorized = any(device['device_id'] == device_id for device in devices)
+    except Exception:
+        authorized = False
+    if not authorized and name not in HANDOFFS:
+        # These receipts can follow a side effect; an error is not proof of non-execution.
+        # `expired` also covers pre-execution expiry, so conservatively preserve uncertainty.
+        if result.get('status') in ('interrupted', 'expired', 'result_too_large'):
+            withheld = {'command_id': command_id, **_unknown_outcome('device_not_authorized')}
+            withheld['message'] += ' Its result is withheld because authorization could not be confirmed.'
+            return withheld
+        failed = (bool(result.get('error')) or result.get('ok') is False
+                  or result.get('success') is False or result.get('status') in ('denied', 'failed', 'error'))
+        withheld = {'command_id': command_id, 'success': False, 'error': 'device_not_authorized',
+                    'message': ('The phone refused or failed this command. Its result is withheld '
+                                if failed else 'The command completed on the device, but its result is withheld ')
+                               + 'because authorization could not be confirmed.'}
+        if not failed:
+            withheld['completed_on_device'] = True
+        return withheld
+    # An OS intent proves only launch, not that the user saved/completed the action.
+    if name in HANDOFFS and not result.get('error') and (result.get('success') is True or result.get('status') in ('completed', 'launched', 'launched_confirmation')):
+        result = dict(result, status='launched_confirmation')
+    return {'command_id': command_id, 'result': result}
+
+
 async def execute(session_id, device_id, name, arguments, timeout=MAX_WAIT_SECONDS):
     command_id = None
     try:
@@ -181,16 +226,28 @@ async def execute(session_id, device_id, name, arguments, timeout=MAX_WAIT_SECON
                 raise CommandError('device_not_authorized')
             row = await asyncio.to_thread(queue.outcome, command_id, session_id)
             if row and row['status'] == 'completed':
-                result = json.loads(row['result'])
-                # OS intents only launch confirmation; they cannot prove an external action completed.
-                if name in HANDOFFS and not result.get('error') and (result.get('success') is True or result.get('status') in ('completed', 'launched', 'launched_confirmation')):
-                    result = dict(result, status='launched_confirmation')
-                return {'command_id': command_id, 'result': result}
+                return await _completed_outcome(session_id, device_id, command_id, name, row)
             if not row or row['status'] in ('expired', 'cancelled'):
-                return {'error': 'command_expired_or_cancelled'}
+                previous = await asyncio.to_thread(queue.cancel, command_id, session_id)
+                settled_id, command_id = command_id, None
+                if previous and previous['status'] == 'completed':
+                    return await _completed_outcome(session_id, device_id, settled_id, name, previous)
+                return _stopped_outcome('command_expired_or_cancelled', previous)
             await asyncio.sleep(min(0.25, max(0, deadline - asyncio.get_running_loop().time())))
-        return {'error': 'device_timeout'}
+        previous = await asyncio.to_thread(queue.cancel, command_id, session_id)
+        settled_id, command_id = command_id, None
+        if previous and previous['status'] == 'completed':
+            return await _completed_outcome(session_id, device_id, settled_id, name, previous)
+        return _stopped_outcome('device_timeout', previous)
     except CommandError as exc:
+        if command_id:
+            # Authorization can disappear after delivery or even after completion.
+            # Settle under the same row lock as timeout; never discard either fact.
+            previous = await asyncio.to_thread(queue.cancel, command_id, session_id)
+            settled_id, command_id = command_id, None
+            if previous and previous['status'] == 'completed':
+                return await _completed_outcome(session_id, device_id, settled_id, name, previous)
+            return _stopped_outcome(str(exc), previous)
         return {'error': str(exc)}
     finally:
         if command_id:

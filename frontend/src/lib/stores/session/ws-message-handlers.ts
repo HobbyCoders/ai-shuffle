@@ -190,6 +190,9 @@ const ROW_PATCHABLE_FIELDS: ReadonlySet<string> = new Set([
 	'pull_requests',
 	'parked_task_kind',
 	'has_running_tasks',
+	// A turn started or ended: a sidebar not watching that chat learns here
+	// whether its latest turn failed.
+	'last_turn_failed',
 	'work_ms',
 	'work_started_at',
 	// A context-window pick made on another tab or device (#1895).

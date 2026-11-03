@@ -6,10 +6,13 @@ The regular catalog pump publishes transitions (including returning to idle).
 """
 from typing import Dict, List, Optional
 
+from app.db import turns
 from app.db.base import get_db
 from app.network import engine
 
-STATES = frozenset({"working", "parked", "permission", "question", "idle"})
+# "failed" is "idle" whose latest turn ended in a failure: nothing is running, and
+# a mirror has no turns of its own to read that from.
+STATES = frozenset({"working", "parked", "permission", "question", "idle", "failed"})
 
 
 def prune_owned(*, stop=None, ctx=None, session_ids=None):
@@ -66,6 +69,14 @@ def publish_owned(ctx: engine.NetworkContext, *, session_ids: Optional[List[str]
                 (s.owner_device_id IS NULL AND s.instance_id = %s))
         """ + only("s.id"), (ctx.device_id, _my_instance_id(), *only_params))
         summaries = [dict(r) for r in cursor.fetchall()]
+
+    failed = turns.sessions_with_failed_latest_turn([r["id"] for r in summaries if r["state"] == "idle"])
+    for row in summaries:
+        if row["id"] in failed:
+            row["state"] = "failed"
+
+    with get_db() as conn:
+        cursor = conn.cursor()
         cursor.execute("SELECT session_id, owner_device_id, state FROM network_session_runtime WHERE 1 = 1" + only("session_id"),
                        only_params)
         previous = {r["session_id"]: dict(r) for r in cursor.fetchall()}

@@ -2486,6 +2486,15 @@ def _run_column_migrations(cursor: Any) -> None:
                 "ALTER TABLE sessions ADD COLUMN work_started_at TIMESTAMP WITH TIME ZONE"
             )
             migrations_applied.append("sessions.work_started_at")
+        # What a chat's turns no longer say about its outcome (turns.set_outcome_baseline).
+        if not column_exists(cursor, "sessions", "outcome_baseline_order"):
+            cursor.execute("ALTER TABLE sessions ADD COLUMN outcome_baseline_order BIGINT")
+            migrations_applied.append("sessions.outcome_baseline_order")
+        if not column_exists(cursor, "sessions", "outcome_baseline_failed"):
+            cursor.execute(
+                "ALTER TABLE sessions ADD COLUMN outcome_baseline_failed BOOLEAN NOT NULL DEFAULT FALSE"
+            )
+            migrations_applied.append("sessions.outcome_baseline_failed")
         backfilled = _backfill_sessions_work_ms(cursor)
         if backfilled is not None:
             migrations_applied.append(f"sessions.work_ms_backfill({backfilled} rows)")

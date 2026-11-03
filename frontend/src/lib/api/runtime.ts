@@ -25,7 +25,7 @@
  *     native: {                              // what this app build offers;
  *       platform: 'android',                 // absent before bridge 1
  *       bridge: 1,
- *       capabilities: ['file-save', 'file-chooser', 'microphone', 'device-tools', 'worker-switch']
+ *       capabilities: ['file-save', 'file-chooser', 'microphone', 'device-tools', 'worker-switch', 'voice-call-controls', 'app-settings']
  *     }
  *   };
  *   ```

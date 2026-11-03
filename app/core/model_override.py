@@ -79,6 +79,8 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from fluid.codemode.routing import affirmed_clauses
+
 logger = logging.getLogger(__name__)
 
 # How the prompt and the receipts name the ways a model is accepted.
@@ -624,25 +626,6 @@ def user_texts(session_id: str) -> List[str]:
 # What the owner saved
 # ---------------------------------------------------------------------------
 
-# Sentence breaks: ; newline and dashes anywhere; . ! ? only before a space or
-# the end, so "GPT 6.1 Sol" stays whole. Within a sentence, , and : (again only
-# before a space, so "prov:lane:astra" stays whole) separate list parts.
-_SENTENCE_BREAK = re.compile(r"[;\n—–]|[.!?](?=\s|$)")
-_PART_BREAK = re.compile(r"[,:](?=\s|$)")
-# A part with one of these says what NOT to use: every model in it is left out.
-_NEGATION = re.compile(
-    r"\b(?:never|not|no|dont|don't|do\s+not|avoid|stop\s+using|\w+n't)\b"
-    r"|\b(?:is|are|was|were)\s+(?:\w+\s+)?(?:poor|bad|crap)\b", re.I)
-# A negation carries into the following parts of its sentence ("NEVER use
-# Fable, Mythos or Grok"; "Models to avoid: Fable, Mythos") until a part names
-# a fresh instruction to use something: a part that starts with an imperative
-# ("use Opus ..."). Only that ends it, not "anything using Grok", so the rule errs
-# toward caution: an ambiguous start falls back to the owner's prompt.
-_AFFIRM = re.compile(
-    r"^\s*(?:(?:and|or|but|then)\s+)?(?:use|run|route|send|prefer|pick|default"
-    r"|go\s+to|switch\s+to|move\s+to)\b", re.I)
-# "Use Opus instead of Sol": the words after the cue are the rejected ones.
-_CONTRAST = re.compile(r"\b(?:instead\s+of|rather\s+than)\b", re.I)
 # The roster's block of saved routing (see routing_block).
 ROUTING_BUDGET = 1200
 ROUTING_HEADER = ("Saved owner model routing (the host accepts models these name; "
@@ -651,35 +634,6 @@ ROUTING_HEADER = ("Saved owner model routing (the host accepts models these name
 # revision change together, so a correction is a new key.
 _ROUTING_CACHE: Dict[Tuple[str, int, int], Tuple[str, ...]] = {}
 _ROUTING_CACHE_LIMIT = 2048
-
-
-def affirmed_clauses(text: str) -> List[str]:
-    """The parts of ``text`` that may name a model to use.
-
-    Sentences split on ``.``/``!``/``?``/``;``/dashes/newlines, then into parts
-    on ``,``/``:``. A part with a negation (never, not, no, don't, do not,
-    avoid, stop using, "X is poor|bad|crap") is dropped, and so is every later
-    part of that sentence until one starts with an instruction to use something
-    (use, run, route, send, prefer, pick, default, go to, switch to, move to). "instead of"/"rather than"
-    drops the words after it, and the rest of the sentence's list.
-    """
-    clauses = []
-    for sentence in _SENTENCE_BREAK.split(str(text or "").replace("’", "'")):
-        negated = False
-        for part in _PART_BREAK.split(sentence):
-            if negated and _AFFIRM.search(part) and not _NEGATION.search(part):
-                negated = False
-            if negated:
-                continue
-            contrast = _CONTRAST.search(part)
-            if contrast:
-                part, negated = part[:contrast.start()], True
-            if _NEGATION.search(part):
-                negated = True
-                continue
-            if part.strip():
-                clauses.append(part)
-    return clauses
 
 
 def memory_names(model: str, text: str,
@@ -716,7 +670,7 @@ def owner_memories(session_id: str, cwd: Optional[str] = None) -> List[Any]:
         from app.core.api_user_scope import session_api_user_id
         from app.core.fluid_memory import owner_root, store_for_owner
         from app.db import database
-        from fluid.codemode.facts import usefulness, visible_on
+        from fluid.codemode.facts import is_superseded, usefulness, visible_on
         from fluid.context.screening import screen_findings
 
         row = database.get_session(session_id)
@@ -733,12 +687,14 @@ def owner_memories(session_id: str, cwd: Optional[str] = None) -> List[Any]:
         live = [entry for entry in doc["entries"]
                 if entry.get("protected") is True
                 and entry.get("provenance", "session") != "tool"
-                and not entry.get("superseded_by") and not entry.get("conflicted")
+                and not is_superseded(entry) and not entry.get("conflicted")
                 and not entry.get("retired_at")
                 and visible_on(entry, local)
                 and entry.get("scope", "global") in scopes
                 and isinstance(entry.get("text"), str) and entry["text"].strip()
                 and not screen_findings(entry["text"])]
+        # A non-link question never revokes an owner's words: both facts
+        # remain usable authority. The prompt asks which applies to the job.
         live.sort(key=lambda entry: (-usefulness(entry), str(entry.get("id"))))
         return [store._facts._entry(entry) for entry in live]
     except Exception:  # noqa: BLE001 — an unreadable store authorizes nothing

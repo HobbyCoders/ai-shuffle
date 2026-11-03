@@ -17,6 +17,7 @@ from app.db.async_database import run_sync
 from app.db.api_users import get_api_users_by_ids
 from app.db.tags import get_tags_for_sessions
 from app.db.background_tasks import get_running_task_presence
+from app.db.turns import sessions_with_failed_latest_turn
 from app.db.sessions import get_fork_info_for_sessions
 from app.db.projects import get_projects_by_ids
 from app.db.projects_v2 import (
@@ -786,9 +787,13 @@ def _annotate_cluster_fields(sessions: List[dict]) -> None:
             session["controllable"] = bool(online and install)
             summary = runtime.get(session["id"], {})
             state = summary.get("state")
+            reported = state if summary.get("owner_device_id") == owner_device and state in STATES else None
+            # Any turns kept here predate the move: the owner's summary alone says how
+            # its latest ended, failed or not. An older owner never reports a failure.
+            session["last_turn_failed"] = reported == "failed"
             session["remote_runtime_state"] = (
                 "offline" if not online else
-                state if summary.get("owner_device_id") == owner_device and state in STATES else "unknown"
+                "idle" if reported == "failed" else reported or "unknown"
             )
         else:
             # Local or legacy (NULL instance_id): always controllable from here.
@@ -857,11 +862,13 @@ def enrich_sessions_with_tags(sessions: List[dict]) -> List[dict]:
     # Batch: fork info for all sessions (2 queries instead of N)
     fork_info_by_session = get_fork_info_for_sessions(session_ids)
     presence = get_running_task_presence(session_ids)
+    failed = sessions_with_failed_latest_turn(session_ids)
 
     for session in sessions:
         sid = session["id"]
         session["tags"] = tags_by_session.get(sid, [])
         session["has_running_tasks"] = presence.get(sid, {}).get("has_running_tasks", False)
+        session["last_turn_failed"] = sid in failed
         fork_info = fork_info_by_session.get(sid)
         session["has_forks"] = fork_info["has_forks"] if fork_info else False
         if session.get("api_user_id"):
@@ -889,11 +896,13 @@ def enrich_search_results_with_tags(results: list) -> list:
     # Batch: fork info for all results (2 queries instead of N)
     fork_info_by_session = get_fork_info_for_sessions(session_ids)
     presence = get_running_task_presence(session_ids)
+    failed = sessions_with_failed_latest_turn(session_ids)
 
     for result in results:
         sid = result["id"]
         result["tags"] = tags_by_session.get(sid, [])
         result["has_running_tasks"] = presence.get(sid, {}).get("has_running_tasks", False)
+        result["last_turn_failed"] = sid in failed
         fork_info = fork_info_by_session.get(sid)
         result["has_forks"] = fork_info["has_forks"] if fork_info else False
 

@@ -4,6 +4,7 @@ machine (v2 core, Phase 2)."""
 from sqlite3 import Connection
 
 import pytest
+import asyncio
 
 from app.db import turns
 from app.db import runs
@@ -802,3 +803,201 @@ def test_claimable_targeted_deduplicates_repeated_ids(mock_db):
     assert turns.list_claimable_sessions(
         session_ids=["c-plain", "c-plain", "c-plain"]
     ) == ["c-plain"]
+
+
+# ---------------------------------------------------------------------------
+# Whether a chat's latest turn failed (#1032)
+# ---------------------------------------------------------------------------
+
+def _chat(session_id):
+    from app.db import database
+
+    if not database.get_session(session_id):
+        database.create_session(session_id=session_id, profile_id="default")
+
+
+def _ended(session_id, outcome="completed", stop_reason=None, error=None):
+    _chat(session_id)
+    turn = turns.enqueue_turn(session_id, "user", prompt="go")
+    turns.start_turn(turn["id"])
+    return turns.settle_turn(turn["id"], outcome, stop_reason, error=error)
+
+
+def _failed(*session_ids):
+    return turns.sessions_with_failed_latest_turn(list(session_ids))
+
+
+@pytest.mark.parametrize("stop_reason", ["error", "progress_timeout", "lease_expired", "recording_failed", "worker_update"])
+def test_an_abort_nobody_asked_for_is_a_failure(mock_db, stop_reason):
+    _ended("s1", "aborted", stop_reason, "HTTP 400")
+    assert _failed("s1") == {"s1"}
+
+
+@pytest.mark.parametrize("stop_reason", ["interrupted", "interrupt_escalation", "user_stopped", "stopped", "archived"])
+def test_an_abort_the_user_asked_for_is_not_a_failure(mock_db, stop_reason):
+    _ended("s1", "aborted", stop_reason)
+    assert _failed("s1") == set()
+
+
+def test_a_clean_finish_is_not_a_failure_and_one_with_an_error_is(mock_db):
+    _ended("clean")
+    _ended("errored", "completed", error="Provider returned status 529")
+    assert _failed("clean", "errored") == {"errored"}
+
+
+def test_the_next_turn_speaks_over_an_earlier_failure(mock_db):
+    _ended("s1", "aborted", "error", "boom")
+    _ended("s1")
+    assert _failed("s1") == set()
+    _ended("s1", "aborted", "error", "boom")
+    assert _failed("s1") == {"s1"}
+
+
+def test_a_turn_still_running_is_not_a_failure_yet(mock_db):
+    _ended("s1", "aborted", "error", "boom")
+    next_turn = turns.enqueue_turn("s1", "user", prompt="again")
+    assert _failed("s1") == set()  # queued: the owner already answered it
+    turns.start_turn(next_turn["id"])
+    assert _failed("s1") == set()
+
+
+def test_a_message_withdrawn_from_the_queue_does_not_hide_the_failure(mock_db):
+    _ended("s1", "aborted", "error", "boom")
+    queued = turns.enqueue_turn("s1", "user", prompt="never mind")
+    assert turns.remove_queued_turn(queued["id"])
+    assert _failed("s1") == {"s1"}
+
+
+def test_a_parked_turn_keeps_its_failure_until_and_after_it_settles(mock_db):
+    _chat("s1")
+    turn = turns.enqueue_turn("s1", "user", prompt="go")
+    turns.start_turn(turn["id"])
+    assert turns.park_turn(turn["id"], ["task-1"], error="HTTP 500")
+    assert _failed("s1") == {"s1"}
+    turns.settle_parked_turns("s1")
+    assert turns.get_turn(turn["id"])["state"] == "completed"
+    assert _failed("s1") == {"s1"}
+
+
+def test_a_session_without_turns_or_any_session_at_all_reads_clean(mock_db):
+    assert _failed("nobody") == set()
+    assert _failed() == set()
+
+
+def test_forgetting_failures_leaves_other_facts_of_the_rows_alone(mock_db):
+    _ended("s1", "aborted", "interrupted")
+    stopped = turns.get_latest_run_turn("s1")
+    _ended("s1", "completed", "parked_settled", error="Provider execution failed")
+    kept = turns.get_latest_run_turn("s1")
+    _ended("s1", "aborted", "error", "boom")
+    aborted = turns.get_latest_run_turn("s1")
+    assert _failed("s1") == {"s1"}
+
+    turns.mark_conversation_reset("s1")
+
+    assert _failed("s1") == set()
+    assert turns.get_turn(stopped["id"])["stop_reason"] == "interrupted"
+    assert turns.get_turn(kept["id"])["stop_reason"] == "parked_settled"
+    assert turns.get_turn(kept["id"])["error"] == "Provider execution failed"
+    assert turns.get_turn(aborted["id"])["state"] == "aborted"
+    assert turns.get_turn(aborted["id"])["stop_reason"] == "error"
+    assert turns.get_turn(aborted["id"])["error"] == "boom"
+
+
+def test_a_reset_only_speaks_until_a_newer_turn_ends(mock_db):
+    _ended("s1", "aborted", "error", "boom")
+    turns.mark_conversation_reset("s1")
+    _ended("s1", "aborted", "error", "boom again")
+    assert _failed("s1") == {"s1"}
+    turns.mark_conversation_reset("s1")
+    _ended("s1", "completed")
+    assert _failed("s1") == set()
+
+
+def test_a_message_queued_before_a_reset_still_speaks_when_it_ends(mock_db):
+    _ended("s1", "aborted", "error", "boom")
+    queued = turns.enqueue_turn("s1", "user", prompt="waiting")
+    turns.mark_conversation_reset("s1")
+    assert _failed("s1") == set()
+    turns.start_turn(queued["id"])
+    turns.settle_turn(queued["id"], "aborted", "error", error="boom again")
+    assert _failed("s1") == {"s1"}
+
+
+def test_a_parked_failure_a_reset_covered_stays_covered_when_it_settles(mock_db):
+    _chat("s1")
+    turn = turns.enqueue_turn("s1", "user", prompt="go")
+    turns.start_turn(turn["id"])
+    turns.park_turn(turn["id"], ["task"], error="Provider execution failed")
+    assert _failed("s1") == {"s1"}
+    turns.mark_conversation_reset("s1")
+    turns.settle_parked_turns("s1")
+    assert _failed("s1") == set()
+
+
+def test_a_reset_of_legacy_rows_holds_when_the_next_turn_numbers_them(mock_db):
+    from app.db.base import get_db
+
+    _ended("s1", "aborted", "error", "boom")
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE turns SET insert_order=0 WHERE session_id=%s", ("s1",))
+    turns.mark_conversation_reset("s1")
+    queued = turns.enqueue_turn("s1", "user", prompt="next")
+    assert _failed("s1") == set()
+    turns.start_turn(queued["id"])
+    turns.settle_turn(queued["id"], "completed")
+    assert _failed("s1") == set()
+
+
+def test_a_baseline_never_moves_back(mock_db):
+    from app.db.base import get_db
+
+    def baseline():
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT outcome_baseline_order FROM sessions WHERE id=%s", ("s1",))
+            return cursor.fetchone()["outcome_baseline_order"]
+
+    _ended("s1", "completed")
+    newest = _ended("s1", "aborted", "error", "boom")
+    turns.mark_conversation_reset("s1")
+    reached = baseline()
+    assert reached >= 1
+    with get_db() as conn:
+        conn.cursor().execute("DELETE FROM turns WHERE id=%s", (newest["id"],))
+    turns.mark_conversation_reset("s1")
+    assert baseline() == reached
+
+
+def test_a_baseline_carries_a_failure_until_a_newer_turn_ends(mock_db):
+    from app.db.base import get_db
+
+    _ended("s1", "completed")
+    with get_db() as conn:
+        turns.set_outcome_baseline(conn.cursor(), "s1", True)
+    assert _failed("s1") == {"s1"}
+    _ended("s1", "completed")
+    assert _failed("s1") == set()
+
+
+def test_clearing_a_conversation_forgets_its_failure(mock_db):
+    from app.db import database
+
+    database.create_session(session_id="cleared-chat", profile_id="default")
+    _ended("cleared-chat", "aborted", "error", "boom")
+    assert _failed("cleared-chat") == {"cleared-chat"}
+
+    database.clear_session_conversation("cleared-chat")
+
+    assert _failed("cleared-chat") == set()
+
+
+@pytest.mark.parametrize("result, expected", [
+    ({"api_error_status": 529, "is_error": True}, "Provider returned status 529"),
+    ({"is_error": True}, "Provider execution failed"),
+    ({"errors": ["bad"]}, "Provider execution failed"),
+    ({"stop_reason": "end_turn"}, None),
+    (None, None),
+])
+def test_a_provider_result_says_whether_it_failed(result, expected):
+    assert turns.provider_result_error(result) == expected

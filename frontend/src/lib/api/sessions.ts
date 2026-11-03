@@ -39,6 +39,8 @@ export interface Session {
 	parked_task_kind?: string | null;
 	/** Running durable tasks, including non-park-gating Monitor commands. */
 	has_running_tasks?: boolean;
+	/** The latest turn that ran ended in a failure, so the row says so. */
+	last_turn_failed?: boolean | null;
 	/** Read-only state sampled on the owning worker, never local runner state. */
 	remote_runtime_state?: 'working' | 'parked' | 'permission' | 'question' | 'idle' | 'offline' | 'unknown' | null;
 	is_active: boolean;

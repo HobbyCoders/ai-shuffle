@@ -1511,6 +1511,31 @@ class TestClearSession:
         assert response.status_code == 200
         assert broadcasts == [("admin", "test-session-id")]
 
+    def test_clear_session_tells_every_sidebar_the_failure_is_gone(
+        self, client, mock_database, sample_session, monkeypatch
+    ):
+        """A sidebar not watching the chat has no other way to stop saying Failed."""
+        mock_database.get_session.return_value = sample_session
+        mock_database.clear_session_conversation.return_value = None
+
+        from app.core.sync_engine import sync_engine
+        seen = []
+
+        async def _cleared(user_id, session_id, source_device_id=None):
+            return None
+
+        async def _updated(user_id, session_id, updates=None, **kwargs):
+            seen.append((session_id, updates))
+
+        monkeypatch.setattr(sync_engine, "broadcast_user_session_cleared", _cleared)
+        monkeypatch.setattr(sync_engine, "broadcast_user_session_updated", _updated)
+
+        with patch("app.core.streaming_status.has_active_run", return_value=False):
+            response = client.post("/api/v1/sessions/test-session-id/clear")
+
+        assert response.status_code == 200
+        assert ("test-session-id", {"last_turn_failed": False}) in seen
+
     def test_clear_session_no_broadcast_when_blocked(
         self, client, mock_database, sample_session, monkeypatch
     ):

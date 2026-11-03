@@ -24,6 +24,12 @@ internal class ToolsUnsupported : IOException("This server does not support Andr
 internal object DeviceToolsApi {
     private val client = OkHttpClient.Builder().followRedirects(false).followSslRedirects(false)
         .connectTimeout(10, TimeUnit.SECONDS).readTimeout(15, TimeUnit.SECONDS).callTimeout(20, TimeUnit.SECONDS).build()
+    internal fun checkStatus(path: String, status: Int) {
+        if (status in setOf(401, 403)) throw ToolsAuthorizationRevoked()
+        // A missing command is final for that result, not an unsupported worker.
+        if ((status in setOf(404, 405) && !path.endsWith("/result")) || status == 501) throw ToolsUnsupported()
+        if (status !in 200..299) throw ToolsHttpFailure(status)
+    }
     suspend fun request(server: Server, path: String, body: JSONObject? = null): JSONObject {
         val current = when (val result = ApiClient.currentServer(server)) {
             is ApiResult.Success -> result.data
@@ -54,13 +60,12 @@ internal object DeviceToolsApi {
                 override fun onResponse(call: Call, response: Response) {
                     response.use {
                         try {
-                            if (response.code in setOf(401, 403)) throw ToolsAuthorizationRevoked()
-                            if (response.code in setOf(404, 405, 501)) throw ToolsUnsupported()
-                            check(response.isSuccessful) { "Device tools HTTP ${response.code}" }
+                            checkStatus(path, response.code)
                             val source = response.body?.source() ?: error("Empty response")
                             check(!source.request(262_145)) { "Response too large" }
                             val bytes = source.buffer.readByteArray()
                             if (!continuation.isCancelled) continuation.resume(JSONObject(String(bytes, Charsets.UTF_8)))
+                        } catch (e: ToolsHttpFailure) { if (!continuation.isCancelled) continuation.resumeWithException(e)
                         } catch (e: ToolsUnsupported) { if (!continuation.isCancelled) continuation.resumeWithException(e)
                         } catch (e: ToolsAuthorizationRevoked) { if (!continuation.isCancelled) continuation.resumeWithException(e)
                         } catch (_: Exception) { if (!continuation.isCancelled) continuation.resumeWithException(IOException("Invalid device tools response (HTTP ${response.code}).")) }

@@ -1940,6 +1940,12 @@ async def clear_session(
             session_id=session_id,
             source_device_id=None,
         )
+        # The failure the cleared transcript showed went with it (#1032).
+        await sync_engine.broadcast_user_session_updated(
+            user_id=existing.get("api_user_id") or "admin",
+            session_id=session_id,
+            updates={"last_turn_failed": False},
+        )
     except Exception:  # noqa: BLE001 — sync fan-out is best-effort
         logger.debug("session clear broadcast failed", exc_info=True)
 

@@ -185,13 +185,22 @@ def test_unchanged_capabilities_preserve_pending_and_claimed_commands(isolated):
     assert queue.submit_result('a', cmd, '{}') is None
 
 
-def test_disable_cancels_claimed(isolated):
+@pytest.mark.parametrize('enabled,tools', [(False, []), (True, ['read_screen'])])
+def test_capability_change_preserves_claimed_but_cancels_pending(client, isolated, enabled, tools):
     enable()
-    cmd = enqueue()
-    queue.claim('a')
-    queue.capabilities('a', False, [])
-    assert queue.submit_result('a', cmd, '{}') == 'not_claimed'
-    assert queue.outcome(cmd, 'sa')['status'] == 'cancelled'
+    claimed = enqueue()
+    assert client.get('/api/v1/mobile/tools/pending').json()['commands'][0]['id'] == claimed
+    pending = enqueue()
+    base = '/api/v1/mobile/tools'
+    assert client.post(base + '/capabilities', json={'enabled': enabled, 'tools': tools}).json() == {'ok': True}
+    assert queue.outcome(pending, 'sa')['status'] == 'cancelled'
+    assert queue.outcome(claimed, 'sa')['status'] == 'claimed'
+    result = {'ok': True, 'status': 'launched_confirmation'}
+    assert client.post(base + '/' + claimed + '/result', json={'result': result}).json() == {'ok': True}
+    assert queue.outcome(claimed, 'sa')['status'] == 'completed'
+    assert client.post(base + '/' + claimed + '/result', json={'result': result}).status_code == 200
+    assert client.post(base + '/' + claimed + '/result', json={'result': {}}).status_code == 409
+    assert client.get(base + '/pending').json() == {'commands': []}
 
 
 @pytest.mark.asyncio
@@ -210,10 +219,27 @@ def test_revoked_expired_device_not_listed(isolated, field, value):
 
 
 @pytest.mark.asyncio
-async def test_timeout_and_cancellation(isolated):
+@pytest.mark.parametrize('claimed', [False, True])
+async def test_timeout_and_cancellation(isolated, monkeypatch, claimed):
     enable()
+    original_enqueue = queue.enqueue
+
+    def enqueue_and_maybe_claim(*args):
+        queued = original_enqueue(*args)
+        if claimed:
+            assert [row['id'] for row in queue.claim('a')] == [queued['id']]
+        return queued
+
+    monkeypatch.setattr(queue, 'enqueue', enqueue_and_maybe_claim)
     start = asyncio.get_running_loop().time()
-    assert (await service.execute('sa', 'a', 'read_screen', {}, timeout=0.03))['error'] == 'device_timeout'
+    result = await service.execute('sa', 'a', 'read_screen', {}, timeout=0.03)
+    assert result['error'] == ('device_timeout' if claimed else 'command_not_delivered')
+    assert result['outcome_unknown'] is claimed
+    if claimed:
+        assert 'safe_to_retry' not in result
+    else:
+        assert result['reason'] == 'device_timeout'
+        assert result['safe_to_retry'] is True
     assert asyncio.get_running_loop().time() - start < 1
     task = asyncio.create_task(service.execute('sa', 'a', 'read_screen', {}))
     await asyncio.sleep(0.03)
@@ -274,6 +300,230 @@ def test_api_contract(client, isolated):
     assert not queue.state('a')['enabled']
 
 
+@pytest.mark.parametrize('lookup_failure', [False, True])
+@pytest.mark.parametrize('intervening_status', ['claimed', 'cancelled', 'expired'])
+def test_rejected_poll_clears_unsent_claim_history(client, isolated, monkeypatch, lookup_failure, intervening_status):
+    enable()
+    cmd = enqueue()
+    def authorized(session):
+        # Another waiter/sweeper may settle the row while authorization is checked.
+        if intervening_status == 'cancelled':
+            queue.cancel(cmd, 'sa')
+        elif intervening_status == 'expired':
+            future = queue.now() + timedelta(seconds=21)
+            monkeypatch.setattr(queue, 'now', lambda: future)
+            queue.purge_requested_commands()
+        if lookup_failure:
+            raise RuntimeError('temporary authorization lookup failure')
+        return []
+    monkeypatch.setattr(service, 'authorized_devices', authorized)
+    assert client.get('/api/v1/mobile/tools/pending').json() == {'commands': []}
+    previous = queue.cancel(cmd, 'sa')
+    assert previous['status'] == ('expired' if intervening_status == 'expired' else 'cancelled')
+    assert previous['claimed'] is False
+    assert service._stopped_outcome('device_not_authorized', previous)['safe_to_retry'] is True
+    assert isolated[0].execute('SELECT claimed_at FROM mobile_tool_commands WHERE id=?', (cmd,)).fetchone()['claimed_at'] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('status', ['pending', 'claimed', 'completed'])
+@pytest.mark.parametrize('revocation', ['expired_key', 'membership'])
+async def test_revocation_settles_real_delivery_history(isolated, monkeypatch, status, revocation):
+    enable()
+    original_enqueue = queue.enqueue
+    original_authorizer = service.device_authorizer
+    membership = {'active': True}
+    monkeypatch.setattr(service, 'device_authorizer',
+                        lambda session: original_authorizer(session) if membership['active'] else [])
+    observed = []
+    def deliver_then_revoke(*args):
+        queued = original_enqueue(*args)
+        observed.append(queued['id'])
+        if status != 'pending':
+            delivered = api.pending(device=isolated[1]['a'])['commands']
+            assert [command['id'] for command in delivered] == observed
+            if status == 'completed':
+                assert queue.submit_result('a', queued['id'], '{"ok":true,"status":"launched_confirmation"}') is None
+        if revocation == 'expired_key':
+            isolated[1]['a']['api_key_expires_at'] = datetime.now(timezone.utc) - timedelta(seconds=1)
+        else:
+            membership['active'] = False
+        return queued
+    monkeypatch.setattr(queue, 'enqueue', deliver_then_revoke)
+    result = await service.execute('sa', 'a', 'open_url', {'url': 'https://example.com'})
+    if status == 'completed':
+        assert result == {'command_id': observed[0], 'result': {'ok': True, 'status': 'launched_confirmation'}}
+    elif status == 'claimed':
+        assert result['error'] == 'device_not_authorized'
+        assert result['outcome_unknown'] is True
+    else:
+        assert result['reason'] == 'device_not_authorized'
+        assert result['safe_to_retry'] is True
+    assert queue.outcome(observed[0], 'sa')['status'] == ('completed' if status == 'completed' else 'cancelled')
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('delete_device', [False, True])
+async def test_delivered_command_with_deleted_history_has_unknown_outcome(isolated, monkeypatch, delete_device):
+    conn, devices = isolated
+    conn.execute('PRAGMA foreign_keys=ON')
+    enable()
+    original_enqueue = queue.enqueue
+    observed = []
+    def deliver_then_delete(*args):
+        queued = original_enqueue(*args)
+        observed.append(queued['id'])
+        assert [command['id'] for command in api.pending(device=devices['a'])['commands']] == observed
+        assert queue.outcome(queued['id'], 'sa')['status'] == 'claimed'
+        if delete_device:
+            # The same FK cascade as deleting a phone through the mobile API.
+            conn.execute('DELETE FROM mobile_devices WHERE device_id=?', ('a',))
+            devices.pop('a')
+        else:
+            # Keep authorization: exercise execute's independent `not row` branch.
+            conn.execute('DELETE FROM mobile_tool_commands WHERE id=?', (queued['id'],))
+        conn.commit()
+        assert queue.outcome(queued['id'], 'sa') is None
+        assert queue.cancel(queued['id'], 'sa') is None
+        return queued
+    monkeypatch.setattr(queue, 'enqueue', deliver_then_delete)
+    result = await service.execute('sa', 'a', 'open_url', {'url': 'https://example.com'})
+    assert result['error'] == ('device_not_authorized' if delete_device else 'command_expired_or_cancelled')
+    assert result['outcome_unknown'] is True
+    assert result.get('safe_to_retry') is not True
+    assert 'verify' in result['message'].lower()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('name,payload', [
+    ('read_screen', {'text': 'private-screen-content'}),
+    ('get_location', {'latitude': 26.7, 'longitude': -80.1}),
+])
+async def test_revoked_controller_cannot_receive_sensitive_result_posted_after_revocation(isolated, monkeypatch, name, payload):
+    queue.capabilities('a', True, [name])
+    queue.claim('a')
+    original_enqueue = queue.enqueue
+    original_authorizer = service.device_authorizer
+    membership = {'active': True}
+    monkeypatch.setattr(service, 'device_authorizer',
+                        lambda session: original_authorizer(session) if membership['active'] else [])
+    observed = []
+    def revoke_then_post(*args):
+        queued = original_enqueue(*args)
+        observed.append(queued['id'])
+        assert [command['id'] for command in api.pending(device=isolated[1]['a'])['commands']] == observed
+        membership['active'] = False
+        assert service.authorized_devices('sa') == []
+        # The phone's own key remains valid: it can finish in the next 250 ms poll gap.
+        assert queue.submit_result('a', queued['id'], json.dumps(payload)) is None
+        assert queue.outcome(queued['id'], 'sa')['status'] == 'completed'
+        return queued
+    monkeypatch.setattr(queue, 'enqueue', revoke_then_post)
+    result = await service.execute('sa', 'a', name, {})
+    assert result['error'] == 'device_not_authorized'
+    assert result['completed_on_device'] is True
+    assert 'completed on the device' in result['message'].lower()
+    assert 'result' not in result
+    for field in payload:
+        assert field not in json.dumps(result)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('name', ['read_screen', 'get_location'])
+async def test_private_result_posted_during_final_sleep_is_withheld_after_revocation(isolated, monkeypatch, name):
+    queue.capabilities('a', True, [name])
+    queue.claim('a')
+    original_enqueue = queue.enqueue
+    original_authorizer = service.device_authorizer
+    membership = {'active': True}
+    monkeypatch.setattr(service, 'device_authorizer',
+                        lambda session: original_authorizer(session) if membership['active'] else [])
+    observed = []
+    def deliver(*args):
+        queued = original_enqueue(*args)
+        observed.append(queued['id'])
+        assert [command['id'] for command in api.pending(device=isolated[1]['a'])['commands']] == observed
+        return queued
+    monkeypatch.setattr(queue, 'enqueue', deliver)
+    real_sleep = asyncio.sleep
+    async def revoke_and_post_during_final_sleep(delay):
+        # The last loop authorization check passed, but this wait consumes its remaining deadline.
+        membership['active'] = False
+        assert queue.submit_result('a', observed[0], '{"ok":true,"secret":"private-data"}') is None
+        await real_sleep(delay)
+    monkeypatch.setattr(service.asyncio, 'sleep', revoke_and_post_during_final_sleep)
+    result = await service.execute('sa', 'a', name, {}, timeout=0.05)
+    assert service.authorized_devices('sa') == []
+    # outcome() correctly reports expiry after the deadline; the accepted stored result
+    # is still returned by atomic cancellation and must pass the authorization boundary.
+    assert isolated[0].execute('SELECT status FROM mobile_tool_commands WHERE id=?',
+                               (observed[0],)).fetchone()['status'] == 'completed'
+    assert result['error'] == 'device_not_authorized'
+    assert result['completed_on_device'] is True
+    assert 'authorization could not be confirmed' in result['message'].lower()
+    assert 'result' not in result
+    assert 'private-data' not in json.dumps(result)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('name,args', [
+    ('tap_node', {'ref': 'snapshot:node'}), ('scroll', {'ref': 'snapshot:node', 'direction': 'down'}),
+    ('go_back', {'ref': 'snapshot:node'}), ('get_location', {}),
+])
+@pytest.mark.parametrize('refusal', [
+    {'ok': False, 'status': 'denied', 'error': 'private-denial-details'},
+    {'ok': False, 'status': 'denied'},
+    {'success': False, 'status': 'failed'},
+    {'error': 'private-error-details'},
+    {'ok': False, 'status': 'interrupted', 'error': 'Execution was interrupted after a durable claim. '
+     'It will not be repeated; verify the device before requesting another action.'},
+    {'ok': False, 'status': 'expired', 'error': 'Execution deadline elapsed. Verify device state; '
+     'this command will not be repeated.'},
+    {'ok': False, 'status': 'result_too_large', 'error': 'Device output exceeded the delivery limit. '
+     'The action may have run; verify device state before retrying.'},
+])
+async def test_withheld_device_refusal_is_not_reported_as_successful_completion(isolated, monkeypatch, name, args, refusal):
+    queue.capabilities('a', True, [name])
+    queue.claim('a')
+    original_enqueue = queue.enqueue
+    original_authorizer = service.device_authorizer
+    membership = {'active': True}
+    monkeypatch.setattr(service, 'device_authorizer',
+                        lambda session: original_authorizer(session) if membership['active'] else [])
+    def refuse_then_revoke(*arguments):
+        queued = original_enqueue(*arguments)
+        assert [command['id'] for command in api.pending(device=isolated[1]['a'])['commands']] == [queued['id']]
+        assert queue.submit_result('a', queued['id'], json.dumps(refusal)) is None
+        membership['active'] = False
+        return queued
+    monkeypatch.setattr(queue, 'enqueue', refuse_then_revoke)
+    result = await service.execute('sa', 'a', name, args)
+    assert result['error'] == 'device_not_authorized'
+    assert result.get('completed_on_device') is not True
+    if refusal.get('status') in ('interrupted', 'expired', 'result_too_large'):
+        assert 'refused or failed' not in result['message'].lower()
+        assert result['outcome_unknown'] is True
+        assert result.get('safe_to_retry') is not True
+        assert 'may have performed' in result['message'].lower()
+        assert 'verify device state before retrying' in result['message'].lower()
+    else:
+        assert 'refused or failed' in result['message'].lower()
+        assert result.get('outcome_unknown') is not True
+    assert 'authorization could not be confirmed' in result['message'].lower()
+    assert 'result' not in result
+    assert 'private-' not in json.dumps(result)
+
+
+def test_undelivered_cancellation_preserves_completed_history(isolated):
+    enable()
+    cmd = enqueue()
+    queue.claim('a')
+    assert queue.submit_result('a', cmd, '{"ok":true}') is None
+    previous = queue.cancel(cmd, 'sa', undelivered=True)
+    assert previous == {'status': 'completed', 'claimed': True, 'result': '{"ok":true}'}
+    assert queue.outcome(cmd, 'sa') == {'status': 'completed', 'result': '{"ok":true}'}
+
+
 def test_claim_rechecks_requesting_account(client, isolated, monkeypatch):
     enable()
     cmd = enqueue()
@@ -302,4 +552,12 @@ async def test_runtime_registration_discovery(monkeypatch):
     monkeypatch.setattr(service, 'device_authorizer', None)
     response = await tools['AndroidDevices'].handler({})
     assert 'controller_context_missing' in response['content'][0]['text']
+    for outcome in ({'error': 'device_timeout'}, {'result': {'ok': False, 'error': 'denied'}},
+                    {'result': {'ok': True, 'status': 'launched_confirmation'}}):
+        async def execute(*args):
+            return outcome
+        monkeypatch.setattr(service, 'execute', execute)
+        response = await tools['AndroidAction'].handler({'device_id': 'a', 'name': 'set_timer', 'arguments': {'seconds': 1}})
+        payload = json.loads(response['content'][0]['text'])
+        assert payload['success'] is (not outcome.get('error') and not outcome.get('result', {}).get('error'))
 

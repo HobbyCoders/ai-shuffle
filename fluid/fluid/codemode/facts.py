@@ -206,10 +206,21 @@ def validate_when(when: object) -> str:
     return when
 
 
+def is_superseded(entry: "dict | Any") -> bool:
+    """An unsupported owner proposal is not authority to suppress a rule.
+
+    Retired protected predecessors are durable evidence of an owner correction,
+    including legacy records whose direct confirmation was downgraded.
+    """
+    get = entry.get if isinstance(entry, dict) else (lambda k: getattr(entry, k, None))
+    return bool(get("superseded_by") and (not get("protected")
+                or get("supersession_confirmed") or get("retired_reason") == "superseded"))
+
+
 def always_applies(entry: "dict | Any") -> bool:
     """An ALWAYS memory: owner-saved, flagged always, live and current."""
     get = entry.get if isinstance(entry, dict) else (lambda k: getattr(entry, k, None))
-    return bool(get("always") and get("protected") and not get("superseded_by"))
+    return bool(get("always") and get("protected") and not is_superseded(entry))
 
 
 def fingerprint(text):
@@ -445,6 +456,14 @@ class FactStore:
             for old in records:
                 if not old.get("superseded_by"):
                     continue
+                # Only an explicit replacement/automatic evidenced correction
+                # retires a protected fact. Learner proposals keep it live.
+                # Old chain walks persisted a downgraded direct confirmation;
+                # recover that durable evidence before considering withdrawal.
+                if (old.get("protected") and old.get("retired_reason") == "superseded"
+                        and not old.get("supersession_confirmed")):
+                    plans.append((old, old["superseded_by"], True))
+                    continue
                 node, seen = old, {global_id(old)}
                 confirmed = bool(old.get("supersession_confirmed"))
                 while pointer := node.get("superseded_by"):
@@ -467,6 +486,15 @@ class FactStore:
                         break  # an intermediate retracted leaf is repaired first
                     if target is None:
                         break  # archive pruning is not a retraction
+                    # Legacy protected proposals used word overlap alone. On
+                    # every read/merge, withdraw unsupported metadata edges,
+                    # never either fact. Confirmed owner links remain binding.
+                    if (node.get("protected") and not node.get("supersession_confirmed")
+                            and node.get("retired_reason") != "superseded"
+                            and not replacement_evidence(dict(node, superseded_by=None), target,
+                                                         proposed=True)):
+                        plans.append((node, None, False))
+                        break
                     old_scope, target_scope = old.get("scope", "global"), target.get("scope", "global")
                     compatible_scope = old_scope == target_scope or (target_scope == "global" and old_scope.startswith("project:"))
                     if (not compatible_scope or old.get("worker") != target.get("worker")
@@ -483,7 +511,8 @@ class FactStore:
                                 or (confirmed and old.get("conflicted"))):
                             plans.append((old, old["superseded_by"], confirmed))
                         break
-                    confirmed = confirmed and bool(target.get("supersession_confirmed"))
+                    # Confirmation describes this direct edge, never every
+                    # descendant. A learner proposal on B cannot revoke A→B.
                     node = target
             if not plans:
                 break
@@ -733,13 +762,19 @@ class FactStore:
             # Scope-sensitive canonical keys and deletion barriers must use the
             # resolved correction scope, not the new-fact global default.
             key = key or (canonical_key(text) if scope in (None, "global") else None)
-            suppressed = barrier_contains(doc.get("forgotten", ""), "text:" + fp)
+            # Pair answers are separate decisions even when their prose is
+            # identical. Legacy Bloom/tombstone text fences must not poison a
+            # different pair; id/key fences still prevent restoring this one.
+            pair_answer = str(key or (old or {}).get("key") or "").startswith("memory.coexist.")
+            suppressed = not pair_answer and barrier_contains(doc.get("forgotten", ""), "text:" + fp)
             if key:
                 suppressed = suppressed or barrier_contains(doc.get("forgotten", ""), "key:" + (scope or "global") + ":" + key)
             if suppressed and not (protected and restore):
                 raise ValueError("This fact matches a deletion barrier; an explicit restore request is required")
             for t in doc["tombstones"]:
-                if fp in t.get("fingerprints", []) or (key and t.get("key") == key and t.get("scope") == (scope or "global")):
+                text_match = (not pair_answer and not str(t.get("key") or "").startswith("memory.coexist.")
+                              and fp in t.get("fingerprints", []))
+                if text_match or (key and t.get("key") == key and t.get("scope") == (scope or "global")):
                     if not (protected and restore):
                         raise ValueError("This fact was forgotten; an explicit restore request is required")
             if old is None:
@@ -749,7 +784,10 @@ class FactStore:
                 old = next((e for e in all_entries if e.get("scope", "global") == (scope or "global")
                             and ((e.get("worker") == local or (e.get("protected") and not e.get("worker")))
                                  if per_worker else visible_on(e, local))
-                            and ((key and e.get("key") == key) or fingerprint(e["text"]) == fp)), None)
+                            and ((key and e.get("key") == key) or (
+                                not str(key or "").startswith("memory.coexist.")
+                                and not str(e.get("key") or "").startswith("memory.coexist.")
+                                and fingerprint(e["text"]) == fp))), None)
             now = time.time()
             archived_old = bool(old) and any(e is old for e in doc["archived"])
             if replaces:
@@ -1299,7 +1337,8 @@ class FactStore:
             tombstone = {"id": old["id"], "origin": old.get("origin", doc["store_id"]),
                          "revision": old.get("revision", 1) + 1, "key": old.get("key"),
                          "scope": old.get("scope", "global"), "deleted_at": time.time(),
-                         "fingerprints": [fingerprint(h["text"]) for h in old.get("history", [])] + [fingerprint(old["text"])],
+                         "fingerprints": ([] if str(old.get("key") or "").startswith("memory.coexist.") else
+                                          [fingerprint(h["text"]) for h in old.get("history", [])] + [fingerprint(old["text"])]),
                          "source_session": old.get("source_session")}
             if old.get("superseded_by"):
                 # ID-only bridge: no forgotten text is retained here.
@@ -1484,6 +1523,22 @@ class FactStore:
                         old["supersession_confirmed"] = bool(old.get("supersession_confirmed") or entry.get("supersession_confirmed"))
                         old["conflicted"] = bool(old.get("conflicted") or entry.get("conflicted")) and not old["supersession_confirmed"]
                         old["alternatives"] = sorted(set(old.get("alternatives", []) + entry.get("alternatives", [])))[:2]
+                        continue
+                    # A repair withdrawing unsupported metadata cannot defeat
+                    # a concurrent explicit owner confirmation of the same fact.
+                    # A genuinely different text/scope/owner remains a conflict.
+                    value_claim = claim[:-2]
+                    confirmed_copies = [e for e in (old, entry)
+                                        if e.get("supersession_confirmed") and e.get("superseded_by")]
+                    if (old.get("protected") and len(confirmed_copies) == 1
+                            and all(old.get(k) == entry.get(k) for k in value_claim)):
+                        winner = dict(confirmed_copies[0])
+                        self._merge_metadata(winner, old, entry, prefer=winner)
+                        winner["clock"] = {k: max(local_clock.get(k, 0), incoming_clock.get(k, 0)) for k in actors}
+                        winner["revision"] = max(old.get("revision", 1), entry.get("revision", 1))
+                        winner.pop("conflicted", None)
+                        winner.pop("alternatives", None)
+                        entries[entry["id"]] = winner
                         continue
                     old["conflicted"] = True
                     old["clock"] = {k: max(local_clock.get(k, 0), incoming_clock.get(k, 0)) for k in actors}

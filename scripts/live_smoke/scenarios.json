@@ -35,6 +35,22 @@
       ]
     },
     {
+      "name": "memory-retention",
+      "intro": "Real-worker repair and retention follow-up for PR 1039, tracked by issues 958 and 956. CI and synthetic previews cannot establish the state of existing private worker stores or genuine cross-machine replication. Use approved disposable candidate installs and private copies only; never mutate a production store.",
+      "rows": [
+        {
+          "id": "memory-retention.pr1039-owner-repair",
+          "check": "Legacy owner replacements survive upgrade repair and real replica exchange",
+          "kind": "owner",
+          "needs": ["install", "device"],
+          "two_worker": true,
+          "how": "On an approved disposable candidate pair, use private pre-upgrade store copies under isolated homes with sync disabled for the first read. Record only counts publicly. Check an explicit A-to-B replacement followed by an unrelated learner B-to-C link: A stays retired and confirmed, B stays usable, and no owner fact is deleted. Inspect every owner ID the dry run would revive or hide privately with the owner before allowing real migration. Enable only candidate-to-candidate sync, deliver a stale proposal and race withdrawal against owner confirmation in both orders, then restart both candidates. Verify confirmed replacements win and no false link returns. Show both texts and ask for a genuine same-key or typed-routing contradiction without linking it; neither fact may authorize a model automatically. In the next weekly audit count false protected-fact conflicts for issue 958. Keep issue 956 open for the owner's archive-retention choice.",
+          "pass_when": "The private before/after owner-ID review approves every authority change; explicit predecessors never revive; both replica orders converge to the confirmed edge without a conflict; missing unconfirmed successors leave the original rule usable. A genuine owner contradiction remains a non-link question with no automatic routing authority. The next real weekly audit finds zero false protected-fact conflicts. Synthetic fixtures, one copied worker or green CI alone do not complete this real-worker row.",
+          "past_bug": "A learner chain downgraded an explicit owner replacement, then repair resurrected the retired predecessor and made it routing authority. False conflicts hid unrelated owner rules, while archive cleanup loss was reported healthy."
+        }
+      ]
+    },
+    {
       "name": "mirror-cache",
       "intro": "Use an approved disposable candidate worker pair, synthetic long history and throwaway chats only. Never restart a production worker.",
       "rows": [
