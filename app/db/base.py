@@ -153,6 +153,8 @@ class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
         self._server_address = None
         self._hold_check_running = False
         self._next_hold_check = 0.0
+        self._hold_check_started = 0.0
+        self._stuck_hold_checks = 0
         # When each connection last became idle in the pool. Read on checkout to
         # decide whether the socket is old enough to be worth probing; see
         # _get_pg_connection. Entries are dropped when a connection is discarded.
@@ -260,13 +262,21 @@ class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
                 if now - self._held_since[key] >= _HOLD_CHECK_SECONDS
                 and hold.backend and not hold.maintenance and not hold.exited
             }
-            check = (bool(due) and not self._hold_check_running and not self._closing
-                     and now >= self._next_hold_check)
+            # Inside libpq no clock reaches a probe that lost the race on a replaced
+            # number. Its thread cannot be stopped, so replace it, a few times at most.
+            stuck = (self._hold_check_running
+                     and now - self._hold_check_started >= 3 * _HOLD_PROBE_SECONDS
+                     and self._stuck_hold_checks < _HOLD_STUCK_PROBES)
+            check = (bool(due) and (stuck or not self._hold_check_running)
+                     and not self._closing and now >= self._next_hold_check)
             if check:
                 self._hold_check_running = True
+                self._hold_check_started = now
+                self._stuck_hold_checks += stuck
+                started = now
         if check:
             try:
-                threading.Thread(target=self._check_holds, args=(due,),
+                threading.Thread(target=self._check_holds, args=(due, started),
                                  name="db-hold-check", daemon=True).start()
             except RuntimeError:  # Out of threads: no answer, so any idle answer ages out.
                 with self._pressure_lock:
@@ -286,7 +296,7 @@ class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
             if hold is not None:
                 hold.maintenance = True
 
-    def _check_holds(self, due):
+    def _check_holds(self, due, started=None):
         """Ask PostgreSQL about long checkouts, on a thread and a connection of its own.
 
         No answer means no verdict, and it also ends any earlier idle answer: when
@@ -304,6 +314,9 @@ class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
                          type(exc).__name__)
         finally:
             with self._pressure_lock:
+                # A probe that was replaced and came back late speaks for nothing.
+                if started is not None and started != self._hold_check_started:
+                    return
                 self._hold_check_running = False
                 self._next_hold_check = time.monotonic() + _HOLD_RECHECK_SECONDS
                 if backends is None:
@@ -597,6 +610,7 @@ _HOLD_RECHECK_SECONDS = 15.0
 _HOLD_ANSWER_SECONDS = 30.0
 # The whole probe, connecting included, by this process's own clock.
 _HOLD_PROBE_SECONDS = 5.0
+_HOLD_STUCK_PROBES = 3
 # See _BackendProbe.close. Rare, at most one per probe, and each holds no descriptor.
 _probes_kept_open = []
 

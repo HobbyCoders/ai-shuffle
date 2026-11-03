@@ -894,3 +894,37 @@ def test_a_commit_whose_number_was_closed_fails_as_a_lost_connection(
             os.close(conn.fileno())
     assert not private_pool._used
     _serve_healthy_reads()
+
+
+@pytest.mark.asyncio
+async def test_a_probe_stuck_inside_libpq_is_replaced_a_limited_number_of_times(
+    private_pool, quick_gate, monkeypatch,  # noqa: F811
+) -> None:
+    """No clock reaches a thread inside libpq, so one stuck thread must not end checking."""
+    monkeypatch.setattr(base, "_HOLD_CHECK_SECONDS", 0.1)
+    monkeypatch.setattr(base, "_HOLD_PROBE_SECONDS", 0.05)
+    monkeypatch.setattr(base, "_HOLD_RECHECK_SECONDS", 0.0)
+    forgotten = private_pool.getconn()
+    release = threading.Event()
+    calls: list[int] = []
+
+    def stuck(*args: Any, **kwargs: Any) -> None:
+        calls.append(1)
+        release.wait(10)
+        return {forgotten.info.backend_pid: {
+            "state": "idle", "wait_type": None, "wait": None, "state_age": 60.0,
+            "tag": private_pool._holds[id(forgotten)].backend[1]}}
+
+    with monkeypatch.context() as stalled:
+        stalled.setattr(base, "_read_backend_states", stuck)
+        await _until(lambda: base.pressure_stats() and len(calls) == 1 + base._HOLD_STUCK_PROBES)
+        for _ in range(20):
+            base.pressure_stats()
+            await asyncio.sleep(0.02)
+        assert len(calls) == 1 + base._HOLD_STUCK_PROBES, "replacements must be bounded"
+        monkeypatch.setattr(base, "_HOLD_RECHECK_SECONDS", 60.0)
+        release.set()
+    # Replaced probes that return late speak for nothing; the newest one still does.
+    await _until(lambda: not private_pool._hold_check_running)
+    assert private_pool._holds[id(forgotten)].silent(time.monotonic())
+    private_pool.putconn(forgotten)
