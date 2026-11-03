@@ -3542,6 +3542,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                 summary_text=e.summary,
                 path_end=e.node_id,
                 intent_pin_tokens=e.intent_pin_tokens,
+                summary_pin=e.summary_pin,
             )
             for e in events
             if isinstance(e, ContextCompaction)
@@ -3667,6 +3668,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             spans=[list(s) for s in promo.spans],
             summary=promo.summary_text,
             intent_pin_tokens=promo.intent_pin_tokens,
+            summary_pin=promo.summary_pin,
             reclaimed_chars=promo.reclaimed_chars,
             before_tokens=promo.before_tokens, after_tokens=promo.after_tokens,
             batch_final=batch_final, context_window=self.context_window or 0,
@@ -3676,10 +3678,10 @@ class NativeLoop(BackgroundLifecycleMixin):
             first_changed_message=promo.first_changed_message,
             token_basis=promo.token_basis,
             measured_prompt_tokens=promo.measured_prompt_tokens,
-            # The compactor's version, not promo.render_version: apply and
-            # escalate build their promotions without the field. Resume reads
-            # it back, so a session renders the same bytes after a restart.
-            render_version=self._compactor.render_version,
+            # Capped at the compactor's version: apply and escalate build most
+            # promotions without the field, and its default is the newest. Resume
+            # reads it back, so a session renders the same bytes after a restart.
+            render_version=min(promo.render_version, self._compactor.render_version),
             **(schedule or {}),
             rewrite_tail_tokens_est=(
                 rewrite_tail_tokens_est
