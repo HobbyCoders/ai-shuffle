@@ -173,8 +173,24 @@ def _stopped_outcome(error, previous):
             'message': 'The command was not delivered; no action was performed. It is safe to retry.'}
 
 
-def _completed_outcome(command_id, name, row):
+async def _completed_outcome(session_id, device_id, command_id, name, row):
     result = json.loads(row['result'])
+    # Every completion exit rechecks AFTER reading the result, including deadline/cancel races.
+    try:
+        devices = await asyncio.to_thread(authorized_devices, session_id)
+        authorized = any(device['device_id'] == device_id for device in devices)
+    except Exception:
+        authorized = False
+    if not authorized and name not in HANDOFFS:
+        failed = (bool(result.get('error')) or result.get('ok') is False
+                  or result.get('success') is False or result.get('status') in ('denied', 'failed', 'error'))
+        withheld = {'command_id': command_id, 'success': False, 'error': 'device_not_authorized',
+                    'message': ('The phone refused or failed this command. Its result is withheld '
+                                if failed else 'The command completed on the device, but its result is withheld ')
+                               + 'because authorization could not be confirmed.'}
+        if not failed:
+            withheld['completed_on_device'] = True
+        return withheld
     # An OS intent proves only launch, not that the user saved/completed the action.
     if name in HANDOFFS and not result.get('error') and (result.get('success') is True or result.get('status') in ('completed', 'launched', 'launched_confirmation')):
         result = dict(result, status='launched_confirmation')
@@ -204,18 +220,18 @@ async def execute(session_id, device_id, name, arguments, timeout=MAX_WAIT_SECON
                 raise CommandError('device_not_authorized')
             row = await asyncio.to_thread(queue.outcome, command_id, session_id)
             if row and row['status'] == 'completed':
-                return _completed_outcome(command_id, name, row)
+                return await _completed_outcome(session_id, device_id, command_id, name, row)
             if not row or row['status'] in ('expired', 'cancelled'):
                 previous = await asyncio.to_thread(queue.cancel, command_id, session_id)
                 settled_id, command_id = command_id, None
                 if previous and previous['status'] == 'completed':
-                    return _completed_outcome(settled_id, name, previous)
+                    return await _completed_outcome(session_id, device_id, settled_id, name, previous)
                 return _stopped_outcome('command_expired_or_cancelled', previous)
             await asyncio.sleep(min(0.25, max(0, deadline - asyncio.get_running_loop().time())))
         previous = await asyncio.to_thread(queue.cancel, command_id, session_id)
         settled_id, command_id = command_id, None
         if previous and previous['status'] == 'completed':
-            return _completed_outcome(settled_id, name, previous)
+            return await _completed_outcome(session_id, device_id, settled_id, name, previous)
         return _stopped_outcome('device_timeout', previous)
     except CommandError as exc:
         if command_id:
@@ -224,13 +240,7 @@ async def execute(session_id, device_id, name, arguments, timeout=MAX_WAIT_SECON
             previous = await asyncio.to_thread(queue.cancel, command_id, session_id)
             settled_id, command_id = command_id, None
             if previous and previous['status'] == 'completed':
-                if name in HANDOFFS:
-                    return _completed_outcome(settled_id, name, previous)
-                # Completion is factual, but no screen/location data may cross revoked ownership.
-                return {'command_id': settled_id, 'success': False, 'error': str(exc),
-                        'completed_on_device': True,
-                        'message': 'The command completed on the device, but its result is withheld '
-                                   'because this session is no longer authorized.'}
+                return await _completed_outcome(session_id, device_id, settled_id, name, previous)
             return _stopped_outcome(str(exc), previous)
         return {'error': str(exc)}
     finally:
