@@ -1202,6 +1202,8 @@ function reduceInternal(state, event, observe) {
           ...event.not_sent ? {
             not_sent: true,
             not_sent_id: event.id,
+            // The turn still running when Stop wrote this row (see not-sent-hold).
+            ...state.liveTurnId ? { not_sent_during_turn: state.liveTurnId } : {},
             ...Array.isArray(event.upload_paths) && event.upload_paths.length ? { upload_paths: event.upload_paths } : {}
           } : {}
         } } : {},
@@ -2301,7 +2303,7 @@ function materializeProjection(body, records, epoch, runtime) {
 }
 
 // scripts/transcript-reducer-node.ts
-var REDUCER_FINGERPRINT = "94f3dd580678fa42f3d6da3cd6774e089d172c94e8d40e5684f52605f88fddc6";
+var REDUCER_FINGERPRINT = "9c2f45e26a4c38581ed0580c1891e75da91d6a81e6643d52d9310a4a71f8dc69";
 var RPC_VERSION = 1;
 var MAX_PACKET_BYTES = 24 * 1024 * 1024;
 function dispatch(method, params) {
