@@ -262,26 +262,34 @@ _JOB_WORDS: dict[str, frozenset[str]] = {
     "backend": frozenset("backend".split()),
     "docs": frozenset("docs documentation".split()),
 }
-# Use the authority path's exact negation/list/contrast screen. Keep the
-# sentence's subject beside its positive parts ("backend: Sol"), then require
-# an actual assignment, not an anecdote that merely names a model and a job.
+# Candidate eligibility uses authority's exact positive-clause screen, NOT a
+# prose classifier. A model mentioned in an anecdote can still authorize starts;
+# withholding its question would leave a contest the host silently accepts.
 _CLAUSE_RE = re.compile(r"[;\n—–]|[.!?](?=\s|$)")
-# Noun phrases also assign models; exclude historical experiments instead of
-# restricting the vocabulary used to express an owner rule.
-_PAST_ROUTING_EVENT = re.compile(
-    r"\b(?:tried|tested|experimented|evaluated|used|ran|previously|formerly|yesterday)\b"
-    r"|\blast\s+(?:week|month|year|time|night)\b|\b\d+\s+\w+\s+ago\b", re.I)
-_CURRENT_BREAK = re.compile(r"\b(?:but|and)\s+(?=(?:now|currently|from\s+now|use|switch|move)\b)", re.I)
+# Wording is only a ranking hint. A mistake may cost an extra question, but must
+# never remove a candidate. Keep nominal/imperative/current assignment shapes
+# ahead of narrative mentions; this is deliberately not a truth classifier.
+_ROUTING_PRIORITY = re.compile(
+    r"\b(?:use|switch|handles?)\b|\b(?:go(?:es)?|runs?|move[ds]?)\s+(?:to|on)\b"
+    r"|\b(?:should|must)\s+be\s+used\b|\bmodel\s+used\s+for\b"
+    r"|(?:\b(?:" + "|".join(sorted(_MODEL_NAMES)) + r")\s+for\b)"
+    r"|(?::\s*(?:" + "|".join(sorted(_MODEL_NAMES)) + r")\b)", re.I)
+
+
+def routing_priority(text: str) -> int:
+    """Present-assignment hints first; never an eligibility/authority decision."""
+    positive_models = _words(" ".join(affirmed_clauses(text))) & _MODEL_NAMES
+    return int(bool(positive_models) and bool(_ROUTING_PRIORITY.search(text)))
 
 
 def model_routing(text: str) -> dict[str, frozenset[str]]:
-    """Positive routing statements only; mentioning a past model is not one."""
+    """Jobs and models authority names positively, including ambiguous prose.
+
+    Never infer assignment vs anecdote here. The host accepts positive names in
+    both; :func:`routing_priority` may order questions, not withhold them.
+    """
     routes: dict[str, frozenset[str]] = {}
-    clauses = (part for sentence in _CLAUSE_RE.split((text or "").casefold())
-               for part in _CURRENT_BREAK.split(sentence))
-    for clause in clauses:
-        if _PAST_ROUTING_EVENT.search(clause):
-            continue
+    for clause in _CLAUSE_RE.split((text or "").casefold()):
         positive = " ".join(affirmed_clauses(clause))
         # "code review" is a review, not code work.
         words = _words(re.sub(r"\bcode[\s-]+review", "review", positive))
@@ -381,7 +389,7 @@ _CONFLICT_FIELDS = ("id", "origin", "revision", "text", "when", "always", "key",
 
 def protected_conflicts(entries: list[dict], *, skip: set[str] | frozenset[str] = frozenset(),
                         limit: int = MAX_OPEN_CONFLICTS,
-                        disjoint: bool = True) -> list[tuple[dict, dict, str]]:
+                        disjoint: bool = False) -> list[tuple[dict, dict, str]]:
     """Bounded questions for this exact snapshot; return the caller's rows."""
     refs = _cached_conflict_refs(_conflict_revision(entries), frozenset(skip), limit, disjoint)
     return [(entries[a], entries[b], reason) for a, b, reason in refs]
@@ -462,9 +470,10 @@ def _find_protected_conflicts(entries: list[dict], *, skip: frozenset[str],
     the same key and say different things, or route a job both
     name to different models (:func:`model_routing`), or are on one
     :data:`PREFERENCE_TOPICS` topic, name different value words for it and
-    share at least two other subject words. Each fact appears in at most one
-    pair, and each newer fact is paired only with the older fact closest to
-    it, so a cluster of three versions of one rule asks one question.
+    share at least two other subject words. Assignment-like pairs sort before
+    ambiguous narrative mentions. By default shared endpoints do not suppress
+    pairs: even a ranking mistake must not exclude the genuine contest.
+    The question cap still bounds prompt growth; no question revokes authority.
     ``skip`` holds pair keys already proposed once.
     """
     from fluid.codemode.facts import fingerprint, global_id, is_superseded
@@ -480,6 +489,7 @@ def _find_protected_conflicts(entries: list[dict], *, skip: frozenset[str],
             if not str(e.get("key") or "").startswith((*_BIOGRAPHY_KEYS, COEXIST_KEY_PREFIX))]
     topics = {e["id"]: preference_topics(e["text"]) for e in live}
     routes = {e["id"]: model_routing(e["text"]) for e in live}
+    priorities = {e["id"]: routing_priority(e["text"]) for e in live}
     salient = {e["id"]: _salient(e["text"]) for e in live}
     fingerprints = {e["id"]: fingerprint(e["text"]) for e in live}
     # These regex screens depend on each text, not on its O(n²) pairings.
@@ -501,7 +511,7 @@ def _find_protected_conflicts(entries: list[dict], *, skip: frozenset[str],
     live = [e for e in live if (keys.get(e.get("key"), 0) > 1 or global_id(e) in edges
             or changed_jobs.intersection(routes[e["id"]])
             or changed_topics.intersection(topics[e["id"]]))]
-    candidates: list[tuple[int, int, float, dict, dict, str]] = []
+    candidates: list[tuple[int, int, int, float, dict, dict, str]] = []
     for new in live:
         for old in live:
             if old is new or float(old.get("updated_at") or 0) >= float(new.get("updated_at") or 0):
@@ -545,11 +555,12 @@ def _find_protected_conflicts(entries: list[dict], *, skip: frozenset[str],
             if resolved_pairs and frozenset((global_id(old), global_id(new))) in resolved_pairs:
                 continue
             overlap = len(salient[old["id"]] & salient[new["id"]])
-            candidates.append((strength, overlap, float(new.get("updated_at") or 0), old, new, reason))
-    candidates.sort(key=lambda c: (-c[0], -c[2], -c[1]))
+            priority = min(priorities[old["id"]], priorities[new["id"]]) if moved else 1
+            candidates.append((priority, strength, overlap, float(new.get("updated_at") or 0), old, new, reason))
+    candidates.sort(key=lambda c: (-c[0], -c[1], -c[3], -c[2]))
     used: set[str] = set()
     out: list[tuple[dict, dict, str]] = []
-    for _strength, _overlap, _at, old, new, reason in candidates:
+    for _priority, _strength, _overlap, _at, old, new, reason in candidates:
         if len(out) >= limit:
             break
         if ((disjoint and (old["id"] in used or new["id"] in used))

@@ -23,18 +23,22 @@ store = SkillStore(home / 'fluid' / 'skills')
 namespace = 'journey.owner_question.' + sys.argv[2] + '.'
 ctx = ToolCtx(extra={'memory_store': store})
 async def save(text, key):
-    # Replays deliberately restore only this disposable fixture's deleted
-    # identical answer; production deletion barriers remain unchanged.
     result = await handler({'text': text, 'key': key, 'user_requested': True,
-                            'restore': key.startswith('memory.coexist.'),
                             'when': 'When applying the synthetic journey owner rules'}, ctx)
     assert not result.is_error, result.text
 stage = sys.argv[3]
 if stage == 'seed':
     for job in ('code', 'review'):
         for model in ('Opus', 'Sol'):
-            asyncio.run(save(f'Synthetic journey owner rule {sys.argv[2]}: {job} work goes to {model}.',
+            qualifier = 'Since last week ' if job == 'code' and model == 'Sol' else ''
+            asyncio.run(save(f'Synthetic journey owner rule {sys.argv[2]}: {qualifier}{job} work goes to {model}.',
                              namespace + job + model))
+    # Forget an unrelated historical answer. Identical prose must remain usable
+    # for these new pair keys, without asking Remember to bypass deletion fences.
+    historical_key = 'memory.coexist.journey.' + sys.argv[2]
+    asyncio.run(save('Both stand.', historical_key))
+    historical = next(e for e in store.memories() if e.key == historical_key)
+    assert store.delete_memory(historical.id, expected_revision=historical.revision, explicit=True)
 rows = [e for e in store._facts.snapshot()['entries'] if str(e.get('key') or '').startswith(namespace)]
 assert len(rows) == 4, 'only the four synthetic facts may be touched'
 keys = [coexistence_key(*(e for e in rows if e['key'].startswith(namespace + job)))
@@ -92,8 +96,9 @@ await runJourney({
                 expect(before.includes('[owner question; unresolved conflict]'), 'the producing path must ask');
                 expect(before.includes('and model-routing authority'), 'both facts must remain usable');
                 expect(before.includes('do not silently choose a model for the contested job'), 'keep the ask rule');
-                const { resolution_keys: keys } = fixture(status, fixtureToken, 'resolve');
+                const { resolution_keys: keys } = fixture(status, fixtureToken, 'keys');
                 for (const key of keys) expect(before.includes(key), 'the prompt must offer both executable answer keys');
+                fixture(status, fixtureToken, 'resolve');
                 await mark('fresh session after owner answer');
                 // Reloading / restores the active chat. Use the real New session
                 // action instead of calling the fresh-context setup helper twice.

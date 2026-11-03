@@ -118,11 +118,8 @@ def test_same_key_contradiction_is_a_non_link_owner_question(tmp_path):
     assert "Recall both and ask the owner" in section
 
 
-@pytest.mark.parametrize("note", [
-    "Never use Fable for code.",
-    "The owner tried Sol on a review last week and it missed a race.",
-])
-def test_negations_and_anecdotes_do_not_open_owner_questions(tmp_path, note):
+@pytest.mark.parametrize("note", ["Never use Fable for code."])
+def test_negated_models_do_not_open_owner_questions(tmp_path, note):
     from fluid.codemode.preferences import model_routing, protected_conflicts
     store = SkillStore(tmp_path)
     wide = store.save_memory("Risky code and all UI work: Opus; reviews go to Opus.", protected=True)
@@ -278,12 +275,16 @@ def test_noun_phrase_routing_assignments_open_questions(tmp_path):
     assert len(protected_conflicts(store._facts.snapshot()["entries"])) == 1
 
 
-def test_past_on_model_anecdote_does_not_take_question_slot(tmp_path):
-    from fluid.codemode.preferences import protected_conflicts
+def test_past_on_model_anecdote_is_a_low_ranked_authority_candidate(tmp_path):
+    from fluid.codemode.preferences import protected_conflicts, routing_priority
     store = SkillStore(tmp_path)
     store.save_memory("Code work goes to Opus.", protected=True)
-    store.save_memory("We tried code work on Sol yesterday and it was slow.", protected=True)
-    assert not protected_conflicts(store._facts.snapshot()["entries"])
+    text = "We tried code work on Sol yesterday and it was slow."
+    store.save_memory(text, protected=True)
+    # Authority accepts this positive mention. It must not silently disappear;
+    # the full matrix checks rank and non-displacement of a clearer assignment.
+    assert routing_priority(text) == 0
+    assert len(protected_conflicts(store._facts.snapshot()["entries"])) == 1
 
 
 @pytest.mark.asyncio

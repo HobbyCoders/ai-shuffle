@@ -5,6 +5,8 @@ The owner does not pin agents to models; they save routing as a memory
 model such a memory names positively is accepted without a prompt, only
 from facts saved at the user's request, read fresh on every start.
 """
+import json
+from pathlib import Path
 import pytest
 
 from app.core import model_override as mo, subagent_default, task_dispatch as td
@@ -291,7 +293,8 @@ async def test_facts_outside_question_cap_still_authorize_and_labels_match_healt
     assert len(mo.owner_memories("parent")) == 2 * (MAX_OPEN_CONFLICTS + 3)
     section = store.render_memory_section()
     assert section.count("[owner question; unresolved conflict]") == MAX_OPEN_CONFLICTS
-    assert section.count("; owner question]") == 2 * MAX_OPEN_CONFLICTS
+    selected_ids = {e["id"] for a, b, _ in pairs for e in (a, b)}
+    assert section.count("; owner question]") == len(selected_ids)
     signal = next(s for s in memory_health.check(store)["signals"] if s["id"] == "proposals")
     assert signal["detail"]["conflicts"] == MAX_OPEN_CONFLICTS
     assert (await _task("gpt 6.1 sol"))["ok"] and not prompts
@@ -440,3 +443,21 @@ def test_screened_keep_both_answer_does_not_dismiss_host_routing_question(world)
                       key=coexistence_key(vars(a), vars(b)))
     assert "owner question" in store.render_memory_section()
     assert {a.id, b.id} <= {e.id for e in mo.owner_memories("parent")}
+
+
+# Shared, explicit expected outcomes: every positive authority reading is a
+# candidate, including anecdotes; wording may rank it but never suppress it.
+_WORDING_MATRIX = json.loads((Path(__file__).parents[2] / "fluid/tests/fixtures/memory-routing-wording.json").read_text())
+
+
+@pytest.mark.parametrize("case", _WORDING_MATRIX, ids=lambda c: c["text"])
+def test_entire_wording_matrix_agrees_with_host_authority(world, case):
+    from fluid.codemode.preferences import model_routing
+    base = {"frontend": "UI work: Opus.", "code": "Code work goes to Opus.", "review": "Reviews go to Opus."}
+    _save(base[case["job"]])
+    _save(case["text"])
+    accepted = {label for label, model in (("opus", "opus"), ("sol", SOL))
+                if mo.memory_names(model, case["text"], CATALOG)}
+    assert accepted == set(case["accepted_models"])
+    assert set(model_routing(case["text"]).get(case["job"], ())) == accepted
+    assert ("owner question" in store_for_owner("local").render_memory_section()) is case["candidate"]

@@ -762,13 +762,19 @@ class FactStore:
             # Scope-sensitive canonical keys and deletion barriers must use the
             # resolved correction scope, not the new-fact global default.
             key = key or (canonical_key(text) if scope in (None, "global") else None)
-            suppressed = barrier_contains(doc.get("forgotten", ""), "text:" + fp)
+            # Pair answers are separate decisions even when their prose is
+            # identical. Legacy Bloom/tombstone text fences must not poison a
+            # different pair; id/key fences still prevent restoring this one.
+            pair_answer = str(key or (old or {}).get("key") or "").startswith("memory.coexist.")
+            suppressed = not pair_answer and barrier_contains(doc.get("forgotten", ""), "text:" + fp)
             if key:
                 suppressed = suppressed or barrier_contains(doc.get("forgotten", ""), "key:" + (scope or "global") + ":" + key)
             if suppressed and not (protected and restore):
                 raise ValueError("This fact matches a deletion barrier; an explicit restore request is required")
             for t in doc["tombstones"]:
-                if fp in t.get("fingerprints", []) or (key and t.get("key") == key and t.get("scope") == (scope or "global")):
+                text_match = (not pair_answer and not str(t.get("key") or "").startswith("memory.coexist.")
+                              and fp in t.get("fingerprints", []))
+                if text_match or (key and t.get("key") == key and t.get("scope") == (scope or "global")):
                     if not (protected and restore):
                         raise ValueError("This fact was forgotten; an explicit restore request is required")
             if old is None:
@@ -1331,7 +1337,8 @@ class FactStore:
             tombstone = {"id": old["id"], "origin": old.get("origin", doc["store_id"]),
                          "revision": old.get("revision", 1) + 1, "key": old.get("key"),
                          "scope": old.get("scope", "global"), "deleted_at": time.time(),
-                         "fingerprints": [fingerprint(h["text"]) for h in old.get("history", [])] + [fingerprint(old["text"])],
+                         "fingerprints": ([] if str(old.get("key") or "").startswith("memory.coexist.") else
+                                          [fingerprint(h["text"]) for h in old.get("history", [])] + [fingerprint(old["text"])]),
                          "source_session": old.get("source_session")}
             if old.get("superseded_by"):
                 # ID-only bridge: no forgotten text is retained here.
