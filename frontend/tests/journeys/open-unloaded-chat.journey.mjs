@@ -388,7 +388,7 @@ const sampleReveal = (ctx) => ctx.page.addInitScript(() => {
 		}
 		// The switch lands inside the reveal, a frame after the reveal has been seen.
 		if (probe.armed && transitioning && !probe.clicked && probe.frames.length) {
-			const link = document.querySelector('.started-from a');
+			const link = document.querySelector('a.crumb.parent');
 			if (link) { probe.clicked = true; link.click(); }
 		}
 		requestAnimationFrame(sample);
@@ -413,38 +413,67 @@ const firstMessageReveal = async ({ page, mark }) => {
 	expect(frames.filter(frame => !frame.transitioning).every(frame => !frame.reveal && !frame.slide), 'the reveal must end with its class');
 };
 
-// The mirror pane during a live reveal (#916): an empty chat whose "Started from"
-// link names a chat outside the catalog. Sending the first message starts the
-// reveal; following the link switches to a chat of unknown owner (so a mirrored
-// one, until /live answers) while the reveal runs. The pane cannot exist before
-// the reveal, which starts as the message wrapper mounts, so "before" is the
-// wrapper's other overlay on the frames ahead of the pane.
+// The mirror pane during a live reveal (#916): an empty chat whose parent
+// breadcrumb names a chat outside the catalog. Sending the first message starts
+// the reveal; following the link switches to a chat of unknown owner (so a
+// mirrored one, until /live answers) while the reveal runs. The pane cannot exist
+// before the reveal, which starts as the message wrapper mounts, so "before" is
+// the wrapper's other overlay on the frames ahead of the pane.
+//
+// Only a hidden chat draws that link, a hidden chat has no sidebar row, and no
+// API hides a chat, so this empty chat's identity is a controlled fixture: a
+// real chat, really cleared, with its row filtered out and `hidden` and
+// `parent_session_id` added to its /live answer. The parent's identity, the
+// link, what it opens and the owner read it holds are all the app's own.
+const asHiddenChildOf = (page, child, parent) => page.addInitScript(({ child, parent }) => {
+	const original = window.fetch.bind(window);
+	const rewritten = async (response, change) => {
+		const body = await response.json();
+		change(body);
+		return new Response(JSON.stringify(body), { status: response.status, headers: response.headers });
+	};
+	window.fetch = async (input, init) => {
+		const url = new URL(typeof input === 'string' ? input : input.url, location.href);
+		const response = await original(input, init);
+		if (!response.ok) return response;
+		if (url.pathname === '/api/v1/sessions/cursor') {
+			return rewritten(response, (body) => { body.items = body.items.filter(row => row.id !== child); });
+		}
+		if (url.pathname === `/api/v1/sessions/${child}/live` && url.searchParams.get('owner_fields') === 'true') {
+			return rewritten(response, (body) => { body.session_meta = { ...body.session_meta, hidden: true, parent_session_id: parent }; });
+		}
+		return response;
+	};
+}, { child, parent });
+
 const mirrorDuringReveal = async (ctx) => {
 	await sampleReveal(ctx);
+	const longId = seededChatId(ctx.status, 'long');
 	await ctx.page.addInitScript((id) => {
 		const original = window.fetch.bind(window);
 		const released = new Promise(resolve => { window.__releaseOpeningIdentity = resolve; });
 		window.fetch = async (input, init) => {
 			const url = new URL(typeof input === 'string' ? input : input.url, location.href);
-			if (url.pathname.endsWith('/task-chips') && !url.pathname.includes(id)) {
-				const source = { session_id: id, title: 'Long chat', chip_id: 'chip-reveal' };
-				return new Response(JSON.stringify({ chips: [], source }), { status: 200, headers: { 'content-type': 'application/json' } });
-			}
 			const response = await original(input, init);
 			const identity = url.pathname === `/api/v1/sessions/${id}/live` && url.searchParams.get('owner_fields') === 'true';
-			if (identity || url.pathname === `/api/v1/sessions/${id}/sync-status`) await released;
+			// The breadcrumb reads the parent's identity to draw its link, so the
+			// hold starts when the case arms, and that read has been answered.
+			if (window.__reveal.armed && (identity || url.pathname === `/api/v1/sessions/${id}/sync-status`)) await released;
 			return response;
 		};
-	}, seededChatId(ctx.status, 'long'));
+	}, longId);
 	await offCatalogLong(ctx);
-	const { page } = ctx;
+	const { page, status } = ctx;
 	const token = `empty ${uniq()}`;
 	await typeAndSend(page, token);
 	await waitTurnSettled(page, { messagesAtLeast: 2, hold: 800 });
 	const chatId = await chatIdByToken(page, token);
 	await api(page, 'POST', `/sessions/${encodeURIComponent(chatId)}/clear`);
 	await waitChat(page, { surface: 'cleared', loading: 'false', composer: 'centre' });
-	await page.locator('.started-from a').waitFor();
+	await asHiddenChildOf(page, chatId, longId);
+	await gotoApp(page, status, `/?session=${encodeURIComponent(chatId)}`);
+	await waitChat(page, { surface: 'cleared', loading: 'false', composer: 'centre' });
+	await page.getByRole('navigation', { name: 'Breadcrumb' }).getByRole('link', { name: `Open parent chat: ${SEEDED.long}` }).waitFor();
 	await page.waitForTimeout(600);
 };
 
