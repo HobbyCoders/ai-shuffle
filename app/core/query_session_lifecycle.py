@@ -421,15 +421,10 @@ async def enter_user_stop(session_id: str) -> dict:
         from app.db import turns as turns_db
 
         queued = await asyncio.to_thread(turns_db.get_queued_turns, session_id)
-        for turn in queued:
-            turn_id = turn.get("id")
-            if not turn_id:
-                continue
-            removed = await asyncio.to_thread(
-                turns_db.remove_queued_turn, turn_id, keep_unsent_words=True,
-            )
-            if removed is not None:
-                queued_aborted += 1
+        turn_ids = [turn["id"] for turn in queued if turn.get("id")]
+        if turn_ids:
+            removed = await asyncio.to_thread(turns_db.stop_queued_turns, session_id, turn_ids)
+            queued_aborted = len(removed)
     except Exception:  # noqa: BLE001
         logger.warning(
             "Stop: aborting queued turns failed for session %s", session_id,

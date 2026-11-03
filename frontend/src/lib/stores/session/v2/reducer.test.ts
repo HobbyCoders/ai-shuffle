@@ -41,6 +41,16 @@ function fold(events: WireEvent[]) {
 
 
 
+it('marks a not_sent row with the turn still running when Stop wrote it', () => {
+	const live = fold([
+		ev('turn.started', { turn_id: 'running' }),
+		ev('message.user', { content: 'queued words', not_sent: true }),
+	]);
+	expect(live.messages.at(-1)?.metadata?.not_sent_during_turn).toBe('running');
+	const idle = fold([ev('message.user', { content: 'queued words', not_sent: true })]);
+	expect(idle.messages[0].metadata?.not_sent_during_turn).toBeUndefined();
+});
+
 it('preserves not_sent metadata while keeping original user text', () => {
 	const state = fold([ev('message.user', { content: 'My original words', not_sent: true })]);
 	expect(state.messages[0].content).toBe('My original words');

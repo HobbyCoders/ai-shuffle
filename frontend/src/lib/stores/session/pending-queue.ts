@@ -64,7 +64,7 @@
  * empty queue, so parked bubbles stay up, marked stale, until one that is.
  */
 
-import type { ChatMessage, PendingPeerMessage } from '../types';
+import type { ChatMessage, PendingPeerMessage, QueuedMessage } from '../types';
 
 /** Peer delivery uses durable turn ids ONLY, never the user's text/unsend arbiter. */
 export function reconcilePendingPeerMessages(
@@ -87,7 +87,7 @@ export interface PendingEntry {
 	content: string;
 	queuedAt: number;
 	clientMessageId?: string;
-	status?: 'cancelling' | 'delivered';
+	status?: QueuedMessage['status'];
 }
 
 /** Legacy optimistic ids, retained for old snapshots/tests (new sends use client ids). */

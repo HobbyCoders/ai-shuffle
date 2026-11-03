@@ -50,6 +50,7 @@
 	import UserMessage from './UserMessage.svelte';
 	import { agentDelivery, agentSender, agentSenderNames } from '$lib/utils/agent-delivery';
 	import { createAgentMessageProjection } from '$lib/utils/agent-message-projection';
+	import { createNotSentHold, createStopBubbleHold, restingOnNotSentRows, withHeldBubbles } from '$lib/utils/not-sent-hold';
 	import AgentMessage from './AgentMessage.svelte';
 	import AssistantMessage from './AssistantMessage.svelte';
 	import TurnActivity from './TurnActivity.svelte';
@@ -397,6 +398,13 @@
 	// (assistant_confirm: the oldest still waiting). Its card sits in the
 	// transcript where it was raised, keyed by request id (#483); this only
 	// marks which card is the one being asked.
+	// Rows Stop just wrote stay bubbles until the stopped turn settles.
+	const notSentRows = createNotSentHold();
+	// isStreaming too: Stop's confirmation timeout ends it without a turn id
+	// change, and the words must not wait in a bubble with no restore controls.
+	const streamingTurnId = $derived($activeSession.isStreaming ? $activeSession.liveTurnId : null);
+	const notSentHold = $derived(notSentRows($activeSession.messages, streamingTurnId));
+
 	const assistantQuestion = $derived(currentAssistantQuestion($activeSession.pendingPermissions ?? []));
 	const activeApprovalId = $derived(assistantQuestion?.request.request_id ?? null);
 
@@ -404,7 +412,7 @@
 	const showGapIndicator = $derived(
 		!assistantQuestion
 		&& shouldShowGapIndicator(
-			$activeSession.messages,
+			notSentHold.messages,
 			$activeSession.isStreaming,
 			chatPrefs?.showThinkingBlocks !== false
 		)
@@ -470,6 +478,9 @@
 			parked: $activeSession.turnParked === true
 		});
 	});
+	const notSentRowsSettling = $derived(
+		restingOnNotSentRows($activeSession.messages, streamingTurnId, latestTurnUnsettled)
+	);
 	// That hold covers only the latest turn. A send during it opens a newer turn;
 	// the turn it interrupted keeps the rest of its hold rather than folding at once.
 	let handoffTick = $state(0);
@@ -522,7 +533,7 @@
 	const agentMessageProjection = createAgentMessageProjection();
 	const projectedMessages = $derived(agentMessageProjection.update({
 		sessionId: $activeSession.sessionId,
-		messages: $activeSession.messages,
+		messages: notSentHold.messages,
 		pendingPeerMessages: $activeSession.pendingPeerMessages ?? [],
 		cancelledTurnIds: $activeSession.cancelledPeerTurnIds,
 		sessionActive: rawLatestTurnUnsettled && $activeSession.turnParked !== true
@@ -1253,7 +1264,7 @@
 				containerRef.clientHeight,
 				contentEnd
 			);
-			if (delta > 0) setProgrammaticScrollTop(containerRef.scrollTop + delta);
+			if (delta > 0 && !notSentRowsSettling) setProgrammaticScrollTop(containerRef.scrollTop + delta);
 		}
 		updateJumpToLatestVisibility();
 		updateCurrentTurnIndex();
@@ -1329,6 +1340,7 @@
 	function scrollToBottom() {
 		// Deferred mount/resize/settle callbacks may outlive the user's release.
 		if (selectionBlocksNavigation || (!shouldAutoScroll && !pendingScrollToBottom)) return;
+		if (notSentRowsSettling && !pendingScrollToBottom) return;
 		if (containerRef) {
 			clearJumpRevealTimer();
 			showJumpToLatest = false;
@@ -1960,7 +1972,12 @@
 
 	// Prompts sent but not yet handed to the model — rendered as bubbles below the
 	// transcript (see PendingMessages).
-	const pendingMessages = $derived($activeSession.queuedMessages ?? []);
+	const stopBubbles = createStopBubbleHold();
+	const pendingMessages = $derived(stopBubbles(
+		$activeSession.sessionId,
+		withHeldBubbles(notSentHold.bubbles, $activeSession.queuedMessages ?? []),
+		!!streamingTurnId && $activeSession.stopRequestedTurnId === streamingTurnId
+	));
 	const pendingPeerMessages = $derived($activeSession.pendingPeerMessages ?? []);
 
 	// Keep a freshly-sent pending bubble in view. The content effect below tracks

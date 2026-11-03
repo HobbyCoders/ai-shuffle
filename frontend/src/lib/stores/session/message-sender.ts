@@ -756,6 +756,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 
 		stopGeneration() {
 			const _state = getState();
+			if (_state.liveTurnId) update(s => ({ ...s, stopRequestedTurnId: _state.liveTurnId }));
 			if (_state.sessionId) {
 				// The interrupt is always a full stop (the query-scoped SDK interrupt
 				// tears down in-flight background sub-agents too).

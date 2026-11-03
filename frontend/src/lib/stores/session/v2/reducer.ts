@@ -1781,6 +1781,8 @@ function reduceInternal(
 					...(startsAgentTurn ? { agent_wake: true } : {}),
 					...(event.not_sent ? {
 						not_sent: true, not_sent_id: event.id,
+						// The turn still running when Stop wrote this row (see not-sent-hold).
+						...(state.liveTurnId ? { not_sent_during_turn: state.liveTurnId } : {}),
 						...(Array.isArray(event.upload_paths) && event.upload_paths.length ? { upload_paths: event.upload_paths } : {}),
 					} : {}),
 				} } : {}),
