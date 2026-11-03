@@ -125,8 +125,8 @@ async function openChatFromTheList(page, title) {
 /** One more line of the stopped reply can still arrive and nudge what is below it. */
 const REPLY_LINE_PX = 30;
 
-/** Measured on a slow phone: at most 0.016 when the follow lands in the same task, 0.149 to 0.245 when it does not. */
-const BUBBLE_SHIFT_TOTAL = 0.1;
+/** Measured on a slow phone: at most 0.017 when the follow lands in the same task, 0.073 to 0.095 when it does not. */
+const BUBBLE_SHIFT_TOTAL = 0.05;
 
 /**
  * The stopped turn settles 1.2s after it ends (settle-hold.ts). The reader once
@@ -534,7 +534,8 @@ await runJourney({
 			},
 			async act({ page, mark, variant, log }) {
 				await mark('send');
-				await typeAndSend(page, `stream tok-${uniq()} ${scriptTag(variant, 'long', { tps: 300 })}`);
+				// Fast enough to arrive in large pieces, slow enough to outlast typing two messages on a slow device.
+				await typeAndSend(page, `stream tok-${uniq()} ${scriptTag(variant, 'long', { tps: 150 })}`);
 				await page.getByText('Here is a long answer', { exact: false }).last().waitFor({ timeout: 60_000 });
 				await mark('queue');
 				const texts = [`tok-${uniq()}`, `tok-${uniq()}`];
