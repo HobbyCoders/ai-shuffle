@@ -202,6 +202,14 @@ def test_deadline_is_shared_across_subprocesses_and_backoff(scenario, monkeypatc
     # Both real interpreter startups and the backoff share this roomy budget.
     monkeypatch.setattr(audit, "TOTAL_TIMEOUT", 3)
     monkeypatch.setattr(audit, "BACKOFF", (0.1, 0.2))
+    timeouts = []
+    run_once = audit._run_once
+
+    def record_timeout(*args, **kwargs):
+        timeouts.append(kwargs["timeout"])
+        return run_once(*args, **kwargs)
+
+    monkeypatch.setattr(audit, "_run_once", record_timeout)
     result, data, elapsed = invoke(scenario, [
         {"stderr": READ_TIMEOUT, "code": 1, "sleep": 0.1},
         {"stderr": "second attempt output\n", "sleep": 10},
@@ -209,6 +217,8 @@ def test_deadline_is_shared_across_subprocesses_and_backoff(scenario, monkeypatc
     assert result.returncode == 124 and data["attempts"] == 2
     assert READ_TIMEOUT in result.stderr and "second attempt output" in result.stderr
     assert data["starts"][1] - data["starts"][0] >= 0.2
+    assert len(timeouts) == 2
+    assert timeouts[1] <= audit.TOTAL_TIMEOUT - audit.BACKOFF[0]
     assert elapsed < 8
     print(f"shared deadline: attempts={data['attempts']}, elapsed={elapsed:.3f}s, budget=3s")
 
