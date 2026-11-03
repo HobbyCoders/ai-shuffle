@@ -17,6 +17,9 @@ import { resolvePersistedProject } from './session-project';
 import { normalizeSessionMode } from '../sessionMode.svelte';
 import { DEFAULT_CONTEXT_WINDOW_CHOICE } from '$lib/constants/model-context';
 import { ALL_BINDING_UNHYDRATED, restoreComposerBinding } from './composer-binding';
+import { hasComposerDraft } from './composer-suggestion';
+import { flushPendingDraft, readDraft } from './draft-persistence';
+import { joinDrafts } from '$lib/components/chat/tiptap/serialization';
 
 // ─── Interfaces ──────────────────────────────────────────────────────────────
 
@@ -162,6 +165,19 @@ export function finishBootReconciliation(generation: number): void {
 	if (bootSend?.generation === generation) bootSend = null;
 }
 
+/**
+ * The draft of a chat boot adopts under a composer that mounted first. Until
+ * now that composer had no chat, so the store holds only its own first state:
+ * an empty document once its debounced save has run, or words typed while boot
+ * loaded. Neither may hide this chat's saved draft, and neither may be lost
+ * (#1031).
+ */
+function draftForAdoptedChat(sessionId: string, composed: string): string {
+	const saved = readDraft(sessionId) ?? '';
+	if (!hasComposerDraft(composed)) return hasComposerDraft(saved) ? saved : '';
+	return hasComposerDraft(saved) ? joinDrafts(saved, composed) : composed;
+}
+
 // ─── Factory ─────────────────────────────────────────────────────────────────
 
 export function createSessionInit(deps: SessionInitDeps) {
@@ -188,9 +204,12 @@ export function createSessionInit(deps: SessionInitDeps) {
 		const skipRestore = getSkipRestore() || deepLinkSessionId !== null;
 
 		if (deepLinkSessionId) {
+			// What a mounted composer holds has to be in the store before it moves.
+			flushPendingDraft();
 			update(s => ({
 				...s,
 				sessionId: deepLinkSessionId,
+				...(s.sessionId ? {} : { draft: draftForAdoptedChat(deepLinkSessionId, s.draft) }),
 				// Unknown until /live answers; never the previous chat's title.
 				title: '',
 				messages: [],
@@ -273,9 +292,12 @@ export function createSessionInit(deps: SessionInitDeps) {
 					// user picked while this loaded (#930): keep that pick's lane
 					// and checkout. An existing session restores as before.
 					const keepPick = !persisted.sessionId && hasBootProjectPick(initGen);
+					// What a mounted composer holds has to be in the store before it moves.
+					if (persisted.sessionId) flushPendingDraft();
 					update(s => ({
 						...s,
 						sessionId: persisted.sessionId ?? null,
+						...(persisted.sessionId && !s.sessionId ? { draft: draftForAdoptedChat(persisted.sessionId, s.draft) } : {}),
 						// Lane. A restored EXISTING session must NOT inherit the
 						// lane the sidepanel happens to be showing: `appMode` is
 						// device-wide localStorage, so another tab moving the
