@@ -14,7 +14,7 @@ from tests.core.test_model_override import world, chats  # noqa: F401
 from tests.shared_fixtures import foreign_keys_off, pin_runner, clean_task_registry  # noqa: F401
 
 
-@pytest.mark.parametrize("wording", ["claude-opus-5-5", "Opus 5.5", "CLAUDE OPUS 5 5", "opus-5-5"])
+@pytest.mark.parametrize("wording", ["claude-opus-5", "Opus 5", "CLAUDE OPUS 5", "opus-5"])
 @pytest.mark.parametrize("remote", [False, True])
 def test_versioned_native_override_uses_existing_alias(mock_db, wording, remote):
     assert model_override.resolve(wording, runs_here=not remote).model == "opus"
@@ -216,7 +216,7 @@ def test_native_name_matching_does_not_authorize_owner_forbidden_fable(mock_db):
     assert choice.model == "fable"  # eligibility is unchanged, not permission
     assert not model_override.memory_names(choice.model, "Never use any Fable model")
 
-@pytest.mark.parametrize("wording", ["claude-opus-5-5", "Opus 5.5"])
+@pytest.mark.parametrize("wording", ["claude-opus-5", "Opus 5"])
 @pytest.mark.parametrize("surface", ["task", "swarm", "start"])
 @pytest.mark.asyncio
 async def test_versioned_name_reaches_each_orchestration_surface(chats, monkeypatch, wording, surface):

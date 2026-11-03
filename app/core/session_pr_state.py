@@ -578,7 +578,8 @@ async def reconcile_session_pr(session_id: str, *, force: bool = False) -> Optio
                         session_id=session_id, project_id=checkout_project_id,
                         bypass_negative_cache=force,
                     )
-            if pr is None and pr_number and (not branch or not checkout_available):
+            if (pr is None and pr_number and (not branch or not checkout_available)
+                    and _repo_owns_url(repo, session.get("pr_url"))):
                 # Discovery may miss a renamed branch. A known PR remains
                 # refreshable without consulting the refused checkout's HEAD.
                 pr = await asyncio.to_thread(github_service.get_pull, repo, int(pr_number))

@@ -552,6 +552,17 @@ async def ensure_pending_checkout(
     branch = session_row.get("branch") or session_row.get("worktree_branch")
     if not branch:
         return False
+    # MessageSession and user-typed turns do not use Task message admission.
+    # Restore a reclaimed Task cwd at execution too, before either native or
+    # delegated options resolve it. Refusals remain actionable checkout errors
+    # from build_session_options, never permission to use another checkout.
+    path = session_row.get("worktree_path")
+    if branch.startswith("chore/task-") and path and not Path(path).is_dir():
+        from app.core.worker_checkout import restore_worker_checkout_async
+
+        restored, _note = await restore_worker_checkout_async(session_row["id"], follow_live_switch=False)
+        if restored:
+            return True
     try:
         from app.core import git_ops_runner
         from app.core.config import settings as _settings

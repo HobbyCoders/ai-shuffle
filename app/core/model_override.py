@@ -216,10 +216,14 @@ def resolve(value: Any, leg: Optional[str] = None, *, runs_here: bool = True) ->
             error = gaps[pid]
         return (None, error) if error else (normalized, None)
 
-    # Preserve exact composites and the legacy Claude aliases. A provider id
-    # is opaque: never normalize it or escape its scope to find another match.
+    # Preserve exact composites and family aliases. A provider id is opaque:
+    # never normalize it or escape its scope to find another match.
     wanted = canonical(text, leg)
-    exact = explicit is not None or is_native_claude_model(text)
+    # Legacy normalization may intentionally migrate old stored versions onto
+    # today's alias. An explicit override must instead match the actual route.
+    from app.core.model_registry import model_values
+
+    exact = explicit is not None or text in model_values()
     normalized, reason = checked(wanted) if exact else (None, None)
     if not runs_here and explicit and wanted not in catalog:
         # Known spoken composites can be normalized locally, but a canonical

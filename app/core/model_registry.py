@@ -187,15 +187,18 @@ def display_provider_model_label(
 
 
 def native_override_names() -> Dict[str, Tuple[str, ...]]:
-    """Names for existing aliases; registered versions do not add runnable models."""
-    names = {option.value: [option.value, option.label, f"claude {option.value}",
-                            API_MODEL_IDS[option.value]] for option in MODELS}
-    for option in _VERSIONED_MODELS:
-        names[option.family].extend((option.value, option.label,
-                                     option.value.removeprefix("claude-")))
-    for value, alias in LEGACY_MODEL_MAP.items():
-        names[alias].append(value)
-    return {alias: tuple(dict.fromkeys(spellings)) for alias, spellings in names.items()}
+    """Names for current native routes, never aliases for a different version.
+
+    Overrides can select existing aliases, not arbitrary native pins. Legacy
+    storage migrations deliberately remain separate from explicit requests.
+    """
+    names = {}
+    for option in MODELS:
+        actual = delegated_model_aliases()[option.value]
+        versioned = actual.removeprefix("claude-")
+        names[option.value] = (option.value, option.label, f"claude {option.value}",
+                               actual, versioned, versioned.replace("-", " "))
+    return names
 
 
 def get_model_family(value: Optional[str]) -> Optional[ModelFamily]:

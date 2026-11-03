@@ -500,7 +500,20 @@ def restore_reclaimed_worker_checkout(worker_session_id: str) -> bool:
     return restore_worker_checkout(worker_session_id)[0]
 
 
-def restore_worker_checkout(worker_session_id: str) -> Tuple[bool, Optional[str]]:
+async def restore_worker_checkout_async(worker_session_id: str, *, follow_live_switch: bool = True) -> Tuple[bool, Optional[str]]:
+    """Git/project-lock waits use the provisioning pool, not short DB workers."""
+    import asyncio
+    import contextvars
+    import functools
+    from app.core.remote_task import _start_executor
+
+    kwargs = {} if follow_live_switch else {"follow_live_switch": False}
+    restore = functools.partial(contextvars.copy_context().run, restore_worker_checkout,
+                                worker_session_id, **kwargs)
+    return await asyncio.get_running_loop().run_in_executor(_start_executor, restore)
+
+
+def restore_worker_checkout(worker_session_id: str, *, follow_live_switch: bool = True) -> Tuple[bool, Optional[str]]:
     """:func:`restore_reclaimed_worker_checkout` with a note for the caller
     when it cannot restore (for example an archive that stopped part-way)."""
     from app.core import checkout_manager, project_resolver
@@ -514,6 +527,14 @@ def restore_worker_checkout(worker_session_id: str) -> Tuple[bool, Optional[str]
         path = row.get("worktree_path")
         if not is_worker_branch(branch, worker_session_id) or not path:
             return True, None
+        if follow_live_switch:
+            from app.db import turns
+
+            if turns.get_live_turn(worker_session_id) is not None:
+                # A CLI turn may legitimately be detached mid-rebase. Delivery
+                # must still reach it; only an idle worker needs restoration.
+                project_resolver.follow_own_branch_switch(row)
+                return True, None
         project = project_resolver.resolve_project_v2(dict(row))
         base_path = _base_checkout_path(project["id"]) if project else None
         if os.path.isdir(path):
@@ -1001,9 +1022,9 @@ def push_worker_commits(worker_session_id: str, *, mode: Optional[str],
     Only a ``chore/task-<worker id>`` checkout (mode ``branch``) has anything to
     push, and only commits past ``base_commit`` (the parent's HEAD it started
     from) are pushed, without force, to that same branch name on origin.
-    Uncommitted changes are counted, not committed. A checkout with no
-    commits and no changes is reclaimed, as a local worker's is. Never raises
-    for Git failures; the reason says what happened.
+    Uncommitted changes are counted, not committed. Settlement reclaims an
+    untouched checkout under the message-admission lock, never this synchronous
+    snapshot helper. Never raises for Git failures; the reason says what happened.
     """
     from app.core import checkout_transfer
     from app.db import database
@@ -1035,8 +1056,6 @@ def push_worker_commits(worker_session_id: str, *, mode: Optional[str],
     path = row.get("worktree_path")
     if path and os.path.isdir(path):
         block["uncommitted_files"] = checkout_transfer.uncommitted_files(path) or 0
-    if pushed["head"] == base and not block["uncommitted_files"]:
-        reclaim_untouched_worker_checkout(worker_session_id)
     return block
 
 

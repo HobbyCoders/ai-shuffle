@@ -449,13 +449,8 @@ async def resume_unavailable(target, row):
     error = (str(outcome.get("error") or "") + " " + str(terminal.get("errors") or "")).casefold()
     if any(marker in error for marker in ("cyber_policy", "content_policy", "policy rejection", "policy violation", "safety policy")):
         return "the provider rejected this work on policy grounds; ask the user, do not replay it"
-    # An untouched dedicated checkout is reclaimed when its worker finishes;
-    # the resumed turn reuses that saved cwd, so bring it back first.
-    from app.core.worker_checkout import restore_worker_checkout
-    async with turn_scheduler.message_resume_lock(target):
-        restored, note = await asyncio.to_thread(restore_worker_checkout, target)
-    if not restored:
-        return note or "its dedicated checkout could not be restored; dispatch a new Task instead"
+    # Checkout restoration belongs to actual admission, not this eligibility
+    # check: a progress note may be held without ever starting another turn.
     return None
 
 

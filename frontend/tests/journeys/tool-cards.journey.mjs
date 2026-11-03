@@ -133,7 +133,7 @@ const nativeModel = {
 	async act({ page, mark, variant, log }) {
 		const token = `native-model-${uniq()}`;
 		await mark('resolve an explicit native Claude model through StartSession');
-		await typeAndSend(page, `${token} Use claude-opus-5-5 for the new chat. ${fakeAiTag(variant, 'tool-native-model-override')}`);
+		await typeAndSend(page, `${token} Use claude-opus-5 for the new chat. ${fakeAiTag(variant, 'tool-native-model-override')}`);
 		await waitTurnSettled(page, { text: 'Native model chat created.', messagesAtLeast: 2 });
 		const parent = await api(page, 'GET', `/sessions/${await chatIdByToken(page, token)}`);
 		const result = parent.messages.find((m) => m.tool_name === 'StartSession' && m.toolResult);

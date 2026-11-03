@@ -9,7 +9,7 @@
             "title": "Native model override",
             "prompt": "[script:tool-bash]",
             "request_id": "native-versioned-model",
-            "model": "claude-opus-5-5"
+            "model": "claude-opus-5"
           }
         }
       ]

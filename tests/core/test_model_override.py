@@ -141,7 +141,7 @@ def test_spoken_model_id_resolves_to_registry_spelling(world):
 
 
 @pytest.mark.parametrize("wording, expected", [("opus", "opus"), ("OPUS", "opus"),
-                                              ("Claude Opus", "opus"), ("claude-opus-4-6", "opus"),
+                                              ("Claude Opus", "opus"), ("claude-opus-5", "opus"),
                                               ("prov:lane:astra", "prov:lane:astra")])
 @pytest.mark.parametrize("remote", [False, True])
 def test_spoken_resolution_preserves_claude_and_exact_composites(world, wording, expected, remote):
