@@ -272,6 +272,49 @@ async def test_no_answer_from_postgres_keeps_the_checkout_counted(
     private_pool.putconn(forgotten)
 
 
+@pytest.mark.asyncio
+async def test_a_checkout_that_resumes_work_counts_again(
+    private_pool, quick_gate, monkeypatch,  # noqa: F811
+) -> None:
+    """Idle is a verdict for now: only a backend that has exited is final."""
+    monkeypatch.setattr(base, "_HOLD_CHECK_SECONDS", 0.2)
+    resumed = private_pool.getconn()
+    await _until(lambda: base.pressure_stats()["retained_holds"] == 1)
+    cursor = resumed.cursor()
+    worker = threading.Thread(
+        target=lambda: cursor.execute("SELECT pg_sleep(0.8)"), daemon=True)
+    worker.start()
+    await _until(lambda: base.pressure_stats()["retained_holds"] == 0)
+    assert start_admission.snapshot()["oldest"] >= 0.2
+    worker.join(5)
+    resumed.rollback()
+    private_pool.putconn(resumed)
+
+
+@pytest.mark.asyncio
+async def test_a_backend_that_exited_is_final_and_never_asked_about_again(
+    private_pool, quick_gate, monkeypatch,  # noqa: F811
+) -> None:
+    """Its pid can be reused by another backend, whose work is not this checkout's."""
+    monkeypatch.setattr(base, "_HOLD_CHECK_SECONDS", 0.2)
+    gone = private_pool.getconn()
+    killer = private_pool.getconn()
+    killer.autocommit = True
+    killer.cursor().execute("SELECT pg_terminate_backend(%s)", (gone.info.backend_pid,))
+    private_pool.putconn(killer)
+    await _until(lambda: base.pressure_stats()["retained_holds"] == 1)
+    asked = threading.Event()
+    monkeypatch.setattr(base, "_read_backend_states", lambda *a, **k: asked.set() or {})
+    deadline = time.monotonic() + 0.3
+    while time.monotonic() < deadline:
+        base.pressure_stats()
+        await asyncio.sleep(0.01)
+    assert not asked.is_set()
+    assert base.pressure_stats()["retained_holds"] == 1
+    private_pool.putconn(gone, close=True)
+    assert base.pressure_stats()["retained_holds"] == 0
+
+
 # ---------------------------------------------------------------------------
 # A real turn on the real pool, and declared maintenance
 # ---------------------------------------------------------------------------
@@ -301,15 +344,28 @@ async def test_a_producing_turn_runs_on_the_real_pool_beside_a_wedged_checkout(
     """#1020 at the level it hurt: lease, turn store and events on real PostgreSQL."""
     monkeypatch.setattr(base, "_HOLD_CHECK_SECONDS", 1.0)
     monkeypatch.setattr(start_admission, "admission", quick_gate)
+    # PostgreSQL's answer waits for the test: the gate's order is then fixed, not timed.
+    may_answer = threading.Event()
+    real_read = base._read_backend_states
+
+    def read_when_allowed(*args: Any) -> dict:
+        assert may_answer.wait(15)
+        return real_read(*args)
+
+    monkeypatch.setattr(base, "_read_backend_states", read_when_allowed)
     wedge.steal(libpq_fd=True, duplicate=True)
     wedge.start()
+    await asyncio.sleep(0.1)
+    assert quick_gate._pressured(time.monotonic())
     with _runtime_env(pump=make_pump([{"type": "done"}])):
         with base.get_db() as conn:
             conn.cursor().execute("INSERT INTO sessions (id) VALUES ('retained-pg')")
         turn = turns_db.enqueue_turn("retained-pg", "user", prompt="hello")
         running = asyncio.create_task(session_runtime.SessionRuntime(turn).execute())
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(1.3)  # Past the check age, so only the answer can release it.
         assert not running.done(), "the gate must protect until PostgreSQL has answered"
+        assert base.pressure_stats()["retained_holds"] == 0
+        may_answer.set()
         assert await asyncio.wait_for(running, 15) == "completed"
     assert turns_db.get_turn(turn["id"])["state"] == "completed"
     assert base.pressure_stats()["retained_holds"] == 1

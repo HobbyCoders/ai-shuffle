@@ -124,6 +124,7 @@ class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
         self._held_by = {}
         self._backend_pids = {}
         self._abandoned_holds = set()
+        self._gone_holds = set()
         self._maintenance_holds = set()
         self._reported_holds = set()
         self._hold_check_running = False
@@ -234,7 +235,8 @@ class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
                 key: (self._backend_pids[key], started)
                 for key, started in self._held_since.items()
                 if now - started >= _HOLD_CHECK_SECONDS
-                and key not in self._maintenance_holds and self._backend_pids.get(key)
+                and key not in self._maintenance_holds and key not in self._gone_holds
+                and self._backend_pids.get(key)
             }
             check = (bool(due) and not self._hold_check_running and not self._closing
                      and now >= self._next_hold_check)
@@ -283,6 +285,9 @@ class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
                 backend = backends.get(pid)
                 silent = _backend_shows_no_work(backend)
                 (self._abandoned_holds.add if silent else self._abandoned_holds.discard)(key)
+                if backend is None:
+                    # Final: a backend never returns, and its pid may later be reused.
+                    self._gone_holds.add(key)
                 if (key, silent) not in self._reported_holds:
                     self._reported_holds.add((key, silent))
                     reports.append((silent, now - started, self._held_by.get(key), pid, backend))
@@ -365,6 +370,7 @@ class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
             started = self._held_since.pop(id(conn), None)
             self._held_by.pop(id(conn), None)
             self._abandoned_holds.discard(id(conn))
+            self._gone_holds.discard(id(conn))
             self._maintenance_holds.discard(id(conn))
             self._reported_holds.difference_update({(id(conn), True), (id(conn), False)})
             if started is not None:
