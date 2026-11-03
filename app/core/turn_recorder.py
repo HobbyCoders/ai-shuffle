@@ -28,7 +28,7 @@ import re
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Coroutine, Dict, List, NamedTuple, Optional, Set
 
 from psycopg2.errors import LockNotAvailable
 
@@ -59,6 +59,7 @@ USAGE_COALESCE_SECONDS = 2.0   # at most one turn.usage append per window
 # worker), which makes this about 43 s: longer than the server's 30 s statement
 # and idle-in-transaction limits let an ordinary lock holder last.
 _LOCK_RETRY_DELAYS_SECONDS = (0.1, 0.25, 0.5, 1.0, 2.0, 4.0)
+
 # turn.provider_alive: the first of a turn is always recorded; a later one only
 # after this long with nothing appended at all. A turn that streams content
 # therefore records one, and a silent reasoning stream one per window.
@@ -77,6 +78,43 @@ _ENVELOPE_FIELDS = {
     "id", "session_id", "seq", "run_id", "turn_id", "command_id",
     "created_at", "type",
 }
+
+
+class _UnfencedWrite(NamedTuple):
+    task: asyncio.Task
+    caller_released: asyncio.Future
+
+
+# Work that belongs to no caller: a batch known not to have committed must not
+# die with a caller that was cancelled or has moved on.
+_detached_tasks: Set[asyncio.Task] = set()
+# The newest between-turns write per session. Later writes queue behind it, so
+# a batch still being re-sent cannot be overtaken once its caller has moved on.
+_unfenced_tails: Dict[str, _UnfencedWrite] = {}
+
+
+def start_detached(work: Coroutine[Any, Any, None]) -> asyncio.Task:
+    """Run ``work`` on a task no caller's cancellation reaches. Shutdown drains it."""
+    task = asyncio.create_task(work)
+    _detached_tasks.add(task)
+    task.add_done_callback(_detached_tasks.discard)
+    task.add_done_callback(lambda done: done.cancelled() or done.exception())
+    return task
+
+
+def _live_unfenced_write(session_id: str) -> Optional[_UnfencedWrite]:
+    write = _unfenced_tails.get(session_id)
+    if write is None or write.task.done() or write.task.get_loop() is not asyncio.get_running_loop():
+        return None
+    return write
+
+
+async def drain_event_writes(timeout: float) -> None:
+    """Give writes that outlived their caller a bounded last chance at shutdown."""
+    loop = asyncio.get_running_loop()
+    pending = {task for task in _detached_tasks if task.get_loop() is loop}
+    if pending:
+        await asyncio.wait(pending, timeout=timeout)
 
 
 def _notify_run_change(session_id: str, *, force: bool = False) -> None:
@@ -633,9 +671,10 @@ class TurnRecorder:
         self._open_tool_use_id: str = ""  # from the last stream_block_start
         self._open_tool_use_name: str = ""
         self._flush_task: Optional[asyncio.Task] = None
-        # A batch known not to have committed, kept if Stop lands during its
-        # back-off. The next append writes it first, so nothing is lost or reordered.
-        self._lock_retry_batch: List[Dict[str, Any]] = []
+        # The newest batch's writer; each writer waits for the one before it.
+        self._write_task: Optional[asyncio.Task] = None
+        self._close_task: Optional[asyncio.Task] = None
+        self._recording_failure_announced = False
 
         # turn.usage coalescing.
         self._last_usage_at: float = float("-inf")
@@ -977,11 +1016,28 @@ class TurnRecorder:
     async def close(self, outcome: Optional[str] = None) -> None:
         """Flush, append crash-path terminal if needed, release lease.
 
-        Idempotent — a second close appends nothing and releases nothing.
+        Idempotent: a second close appends and releases nothing, and waits for
+        the first. Cancelling a caller does not cancel the close: the final
+        events and the lease release finish on their own task, bounded by the
+        lock retry budget (see :meth:`writes_settled`).
         """
-        if self._closed:
-            return
-        self._closed = True
+        if self._close_task is None:
+            self._closed = True
+            self._close_task = start_detached(self._close_once(outcome))
+        if self._close_task is not asyncio.current_task():
+            await asyncio.shield(self._close_task)
+
+    async def writes_settled(self) -> None:
+        """Wait for writes and cleanup that outlived a cancelled caller.
+
+        A turn's outcome must not be read before this: a write still being
+        re-sent can yet end in ``recording_failed``.
+        """
+        for task in (self._close_task, self._write_task):
+            if task is not None and not task.done():
+                await asyncio.wait({task})
+
+    async def _close_once(self, outcome: Optional[str]) -> None:
         if self._superseded:
             # Nothing here can be appended (the fence rejects it). Account for
             # what was still buffered, then say so ONCE.
@@ -994,6 +1050,7 @@ class TurnRecorder:
                 "runner; %d event(s) dropped for the rest of the turn",
                 self.session_id, self.run_id, self._superseded_dropped,
             )
+        handed_off = False
         try:
             async with self._lock:
                 if self._superseded:
@@ -1013,15 +1070,28 @@ class TurnRecorder:
                         )
                     )
                     self._terminal_recorded = True
+                handed_off = True
                 await self._append(events)
         except _Superseded:
             pass
+        except asyncio.CancelledError:
+            # Only process teardown cancels this task. Events not yet handed to
+            # a writer will never be written, so that has to be on the record.
+            if not handed_off:
+                self._fail_recording(int(not self._terminal_recorded), "close was cancelled")
+                self._announce_recording_failure()
+            raise
         except Exception:
             logger.warning(
                 "[TurnRecorder] close failed for %s", self.session_id,
                 exc_info=True,
             )
         finally:
+            # A writer whose caller was cancelled may still be re-sending, and
+            # the fence refuses it once the lease below is released.
+            write = self._write_task
+            if write is not None and not write.done():
+                await asyncio.wait({write})
             # Drain in-flight screenshot stores so the bytes are durable before
             # teardown. Errors are already swallowed inside each task.
             if self._artifact_tasks:
@@ -1385,23 +1455,44 @@ class TurnRecorder:
         )
 
     async def _append(self, events: List[Dict[str, Any]]) -> None:
-        """Append a batch under the fence (or unfenced). Never raises."""
-        if self._lock_retry_batch:
-            events = self._lock_retry_batch + events
-            self._lock_retry_batch = []
+        """Hand a batch to its writer and wait for it. Raises only on cancellation.
+
+        The batch has its own task, so a cancelled caller (Stop, an escalation,
+        a timeout around cleanup) can neither lose it nor leave a thread writing
+        it unwatched. Each writer waits for the one before it, so the order holds
+        whoever was cancelled.
+        """
         if not events:
             return
-        if self._recording_failed:
-            self._count_recording_drops(len(events))
-            return
-        if self._superseded:
-            self._superseded_dropped += len(events)
-            return
+        write = start_detached(self._write_batch(events, self._write_task))
+        self._write_task = write
         try:
+            await asyncio.shield(write)
+        except asyncio.CancelledError:
+            write.add_done_callback(lambda _: self._announce_recording_failure())
+            raise
+        self._announce_recording_failure()
+
+    async def _write_batch(self, events: List[Dict[str, Any]],
+                           previous: Optional[asyncio.Task]) -> None:
+        """Write one batch under the fence (or unfenced), or record that it was lost."""
+        try:
+            unfenced = _live_unfenced_write(self.session_id)
+            waits = {task for task in (previous, unfenced and unfenced.task)
+                     if task is not None and not task.done()}
+            if waits:
+                await asyncio.wait(waits)
+            if self._recording_failed:
+                self._count_recording_drops(len(events))
+                return
+            if self._superseded:
+                self._superseded_dropped += len(events)
+                return
+
             def append_current_events() -> None:
                 from app.core.task_registry import task_registry
 
-                # The recorder lock and executor admission can both yield.
+                # The writer queue and executor admission can both yield.
                 # Recheck HERE, not against the snapshot before either wait.
                 # append_events also fences against durable task incarnations
                 # under its counter lock: DB admission/SQL can still block after
@@ -1419,8 +1510,7 @@ class TurnRecorder:
                          if self.run_id is not None and self.fence_token is not None else {})
                 session_events_db.append_events(self.session_id, current, **fence)
 
-            # Callers hold self._lock, so no later batch of this turn can pass
-            # one waiting here. Each attempt re-runs both fence checks.
+            # Each attempt re-runs both fence checks.
             for delay in (*_LOCK_RETRY_DELAYS_SECONDS, None):
                 try:
                     await run_event_write(append_current_events)
@@ -1433,37 +1523,50 @@ class TurnRecorder:
                         "nothing committed, retrying in %.2fs",
                         len(events), self.session_id, delay,
                     )
-                    self._lock_retry_batch = events
                     await asyncio.sleep(delay)
-                    self._lock_retry_batch = []
             self._last_append_at = time.monotonic()
         except session_events_db.FenceViolation:
             self._mark_superseded(len(events))
+        except asyncio.CancelledError:
+            # Only process teardown cancels a writer; this batch is gone.
+            self._fail_recording(len(events), "its write was cancelled")
+            raise
         except Exception:
             # Outside a server-reported lock timeout the commit outcome is unknown,
             # and these events have no stable id, so a retry could duplicate them.
             # Never retry or retain this batch.
-            self._recording_failed = True
-            self._cancel_task(self._renew_task)
-            self._renew_task = None
-            self._count_recording_drops(len(events) + len(self._delta_buffers)
-                                        + int(self._pending_usage is not None))
-            self._delta_buffers.clear()
-            self._pending_usage = None
-            self._pending_context_usage = None
-            self._cancel_task(self._flush_task)
-            self._flush_task = None
-            logger.warning(
-                "[TurnRecorder] recording failed for %s run %s turn %s "
-                "(%d event(s) dropped; commit outcome unknown or lock wait exhausted)",
-                self.session_id, self.run_id, self.turn_id, len(events), exc_info=True,
-            )
-            if self.on_recording_failed is not None:
-                try:
-                    self.on_recording_failed()
-                except Exception:
-                    logger.warning("[TurnRecorder] on_recording_failed hook failed for %s",
-                                   self.session_id, exc_info=True)
+            self._fail_recording(len(events), "commit outcome unknown or lock wait exhausted")
+
+    def _fail_recording(self, dropped: int, why: str) -> None:
+        self._recording_failed = True
+        self._cancel_task(self._renew_task)
+        self._renew_task = None
+        self._count_recording_drops(dropped + len(self._delta_buffers)
+                                    + int(self._pending_usage is not None))
+        self._delta_buffers.clear()
+        self._pending_usage = None
+        self._pending_context_usage = None
+        self._cancel_task(self._flush_task)
+        self._flush_task = None
+        logger.warning(
+            "[TurnRecorder] recording failed for %s run %s turn %s (%d event(s) dropped; %s)",
+            self.session_id, self.run_id, self.turn_id, dropped, why, exc_info=True,
+        )
+
+    def _announce_recording_failure(self) -> None:
+        """Run ``on_recording_failed`` once, outside the writer's task when it can.
+
+        The owner tells its own pump apart from other tasks by the current task.
+        """
+        if not self._recording_failed or self._recording_failure_announced:
+            return
+        self._recording_failure_announced = True
+        if self.on_recording_failed is not None:
+            try:
+                self.on_recording_failed()
+            except Exception:
+                logger.warning("[TurnRecorder] on_recording_failed hook failed for %s",
+                               self.session_id, exc_info=True)
 
     def _count_recording_drops(self, count: int) -> None:
         # Saturation bounds diagnostics even for a long-lived direct recorder.
@@ -1558,17 +1661,64 @@ class TurnRecorder:
 # Module-level taps (between turns / stop / park) — all unfenced appends.
 # ----------------------------------------------------------------------
 
+async def _write_unfenced(session_id: str, events: List[Dict[str, Any]],
+                          previous: Optional[asyncio.Task], caller_released: asyncio.Future) -> None:
+    """Own one between-turns batch until it lands or is known to be lost."""
+    try:
+        if previous is not None:
+            await asyncio.wait({previous})
+        for delay in (*_LOCK_RETRY_DELAYS_SECONDS, None):
+            try:
+                await run_event_write(session_events_db.append_events, session_id, events)
+                return
+            except LockNotAvailable:
+                if delay is None:
+                    raise
+                if not caller_released.done():
+                    caller_released.set_result(None)
+                logger.warning(
+                    "[TurnRecorder] lock timeout writing %d between-turns event(s) for %s; "
+                    "nothing committed, retrying in %.2fs", len(events), session_id, delay,
+                )
+                await asyncio.sleep(delay)
+    except asyncio.CancelledError:
+        logger.error("[TurnRecorder] %d between-turns event(s) for %s lost: write cancelled",
+                     len(events), session_id)
+        raise
+    except Exception:
+        # A caller still waiting gets this raised and logs it itself.
+        if caller_released.done():
+            logger.warning("[TurnRecorder] %d between-turns event(s) for %s lost",
+                           len(events), session_id, exc_info=True)
+        raise
+
+
 async def _append_unfenced(session_id: str, events: List[Dict[str, Any]]) -> None:
+    """Write a between-turns batch, in order per session.
+
+    The caller waits for the first attempt, as it always has, and moves on at a
+    lock timeout while the batch is re-sent behind it. So no caller waits longer
+    for the log than one ``lock_timeout``, and a cancelled caller cannot lose
+    the batch.
+    """
     if not events:
         return
-    for delay in (*_LOCK_RETRY_DELAYS_SECONDS, None):
-        try:
-            await run_event_write(session_events_db.append_events, session_id, events)
-            return
-        except LockNotAvailable:
-            if delay is None:
-                raise
-            await asyncio.sleep(delay)
+    previous = _live_unfenced_write(session_id)
+    caller_released = asyncio.get_running_loop().create_future()
+    if previous is not None:
+        # Behind a batch being re-sent there is nothing to wait for: one lock
+        # timeout per hold, however many writes queue up.
+        previous.caller_released.add_done_callback(
+            lambda _: caller_released.done() or caller_released.set_result(None))
+    task = start_detached(_write_unfenced(
+        session_id, events, previous.task if previous else None, caller_released))
+    write = _UnfencedWrite(task, caller_released)
+    _unfenced_tails[session_id] = write
+    task.add_done_callback(
+        lambda _: _unfenced_tails.pop(session_id) if _unfenced_tails.get(session_id) is write else None)
+    await asyncio.wait({task, caller_released}, return_when=asyncio.FIRST_COMPLETED)
+    if task.done():
+        task.result()
 
 
 async def record_drained_event(session_id: str, event: Dict[str, Any]) -> None:

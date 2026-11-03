@@ -39,7 +39,7 @@ import logging
 import time
 from weakref import WeakValueDictionary
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
+from typing import Any, Awaitable, Callable, Coroutine, Dict, List, Optional, Set
 
 from app.core.config import settings
 from app.core.permission_handler import permission_handler
@@ -47,6 +47,7 @@ from app.core.turn_recorder import (
     TurnRecorder,
     record_interrupting,
     record_parked,
+    start_detached,
 )
 from app.db import runs as runs_db
 from app.db import turns as turns_db
@@ -92,6 +93,10 @@ def _notify_run_change(session_id: str, *, force: bool = False) -> None:
 # escalates (mirrors chat_ws_handler._INTERRUPT_DRAIN_TIMEOUT_SECONDS). Tests
 # shrink it.
 ESCALATION_TIMEOUT_SECONDS = 8.0
+# How long an interrupt stands behind each step ahead of the provider signal. A
+# step that outlasts this carries on beside the signal: Stop must reach the
+# provider whatever the event log's locks are doing (#1065).
+INTERRUPT_STEP_WAIT_SECONDS = 0.25
 _SETTLE_POLL_SECONDS = 0.05
 # How long an interrupt lets a pump finish on its own once another path has
 # already settled the turn (a stopped Task child's turn is settled by its
@@ -2659,6 +2664,10 @@ class SessionRuntime:
         under the current lease after all background work has come to rest.
         Aborts remain recorded by the pump/error/crash paths.
         """
+        # A close whose caller was cancelled may still be writing, and how that
+        # write ends decides this turn's outcome.
+        if recorder is not None:
+            await recorder.writes_settled()
         # The turn is over, so nothing is steerable into it any more. Anything
         # this runtime submitted but never saw receipted was dropped by the
         # engine at turn end; its row is still ``queued`` and the settle-drain
@@ -3171,8 +3180,11 @@ class SessionRuntime:
                 # re-asserts the latch. See handle_stop's STOP SEMANTICS note.
                 source = (interrupted_row.get("payload") or {}).get("interrupt_source", "user_stop")
                 user_stop = source in {"user_stop", "user_stopped"}
-                await stop_all_background_tasks(sid, user_stop=user_stop,
-                                                **({"source": source} if not user_stop else {}))
+                await self._run_interrupt_step(
+                    stop_all_background_tasks(sid, user_stop=user_stop,
+                                              **({"source": source} if not user_stop else {})),
+                    "background-task stop",
+                )
                 logger.info("SessionRuntime: background teardown for %s source=%s", sid, source)
         except Exception:
             logger.warning(
@@ -3199,10 +3211,7 @@ class SessionRuntime:
                     exc_info=True,
                 )
 
-        try:
-            await record_interrupting(sid, mode)  # turn.interrupting event
-        except Exception:
-            logger.debug("SessionRuntime: record_interrupting failed for %s", sid, exc_info=True)
+        await self._run_interrupt_step(record_interrupting(sid, mode), "turn.interrupting event")
 
         # Stop must also release anything BLOCKED ON THE USER. A pending
         # tool-approval prompt is awaited inside a DETACHED task sitting in
@@ -3212,14 +3221,11 @@ class SessionRuntime:
         # unstoppable. ``cancel_all_requests`` is the ONE correct unblock: it
         # flips each pending row via ``interactions.cancel_interaction`` and
         # then ``notify_changed``-es the session's waiters.
-        try:
-            # Settlement already resolved its captured identities atomically.
-            # A session-wide sweep here would deny prompts from a newer turn.
-            if recorded_source != "session_settled":
-                await permission_handler.cancel_all_requests(sid)
-        except Exception:
-            logger.warning(
-                "SessionRuntime: cancel_all_requests failed for %s", sid, exc_info=True
+        # Settlement already resolved its captured identities atomically.
+        # A session-wide sweep here would deny prompts from a newer turn.
+        if recorded_source != "session_settled":
+            await self._run_interrupt_step(
+                permission_handler.cancel_all_requests(sid), "pending prompt cancellation",
             )
 
         try:
@@ -3269,6 +3275,17 @@ class SessionRuntime:
         self._drain_after_cancel = True
         self._cancel_pump()
         return "draining"
+
+    async def _run_interrupt_step(self, step: Coroutine[Any, Any, Any], what: str) -> None:
+        """Start a step ahead of the provider signal; wait only briefly for it."""
+        async def guarded() -> None:
+            try:
+                await step
+            except Exception:
+                logger.warning("SessionRuntime: %s failed for %s", what, self.session_id,
+                               exc_info=True)
+
+        await asyncio.wait({start_detached(guarded())}, timeout=INTERRUPT_STEP_WAIT_SECONDS)
 
     def _on_recorder_recording_failed(self) -> None:
         """Stop generation without cancelling the task doing recorder cleanup."""

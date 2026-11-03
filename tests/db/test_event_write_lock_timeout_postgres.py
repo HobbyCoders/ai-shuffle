@@ -15,6 +15,7 @@ import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
+from unittest.mock import patch
 from uuid import uuid4
 
 import psycopg2
@@ -413,3 +414,63 @@ async def test_a_lost_connection_is_not_resent(connect, session_id, monkeypatch)
     assert recorder.recording_failed
     assert len(se.get_events(session_id)) == before
     await recorder.close()
+
+
+async def _start_interruptible_turn(session_id: str):
+    from app.core.session_runtime import SessionRuntime
+    from app.db import turns as turns_db
+
+    turn = turns_db.enqueue_turn(session_id, "user", prompt="hi")
+    turns_db.start_turn(turn["id"], None, "runner")
+    turns_db.interrupt_turn(session_id, "stop")
+    return turn, SessionRuntime(turn), turns_db
+
+
+async def test_stop_signals_the_provider_while_the_counter_row_is_held(connect, session_id):
+    """The review's scenario: every event write waits, and Stop must not."""
+    from app.core import turn_recorder as tr
+    from app.db import session_events as se
+
+    turn, runtime, turns_db = await _start_interruptible_turn(session_id)
+    signalled = []
+    began = time.monotonic()
+
+    async def signal(_sid):
+        signalled.append(time.monotonic() - began)
+        turns_db.settle_turn(turn["id"], "aborted", "racer")
+
+    with held_counter_row(connect, session_id) as blocker, \
+            patch("app.core.session_runtime._should_evict_after_escalation", return_value=False), \
+            patch("app.core.query_session_lifecycle.interrupt_session", new=signal):
+        await runtime.interrupt(escalation_timeout=2)
+        assert len(signalled) == 1
+        assert signalled[0] < 1, "Stop waited on the event log"
+        types = [row["event_type"] for row in se.get_events(session_id)]
+        assert "turn.interrupting" not in types  # still queued on the held row
+        blocker.rollback()
+        await tr.drain_event_writes(15)
+
+    assert "turn.interrupting" in [row["event_type"] for row in se.get_events(session_id)]
+
+
+async def test_a_cancelled_close_writes_its_final_batch_once_the_row_frees(connect, session_id):
+    from app.core.turn_recorder import TurnRecorder
+    from app.db import session_events as se
+
+    recorder = await TurnRecorder.maybe_create(session_id)
+    await recorder.start("hello")
+    await recorder.on_event(_delta("A"))
+    with held_counter_row(connect, session_id) as blocker:
+        closing = asyncio.create_task(recorder.close())
+        await asyncio.sleep(0.05)
+        closing.cancel()
+        await asyncio.gather(closing, return_exceptions=True)
+        blocker.rollback()
+        await recorder.writes_settled()
+
+    rows = se.get_events(session_id)
+    types = [row["event_type"] for row in rows]
+    assert not recorder.recording_failed
+    assert types.index("assistant.text_delta") < types.index("turn.aborted")
+    seqs = [row["seq"] for row in rows]
+    assert seqs == list(range(1, len(seqs) + 1))
