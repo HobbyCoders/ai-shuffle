@@ -1787,8 +1787,12 @@ class SkillStore:
         """The ``# Memory`` footer's lines for open learner proposals (see
         fluid.codemode.preferences): one line per proposed rule update,
         "" when none. Never raises."""
-        from fluid.codemode.preferences import preference_proposal_lines
+        from fluid.codemode.preferences import preference_proposal_lines, owner_conflict_lines
         lines = preference_proposal_lines(self, project, entries=entries)
+        rows = [e if isinstance(e, dict) else vars(e)
+                for e in (self.memories() if entries is None else entries)]
+        rows = [e for e in rows if project is None or e.get("scope", "global") in ("global", project)]
+        lines += owner_conflict_lines(rows)
         return "\n\n" + "\n".join(lines) if lines else ""
 
     def purge_forgotten_evidence(self) -> None:
@@ -1989,22 +1993,30 @@ class SkillStore:
         always: list[tuple[MemoryEntry, str]] = []
         identity: list[tuple[MemoryEntry, str]] = []
         index: list[tuple[MemoryEntry, str]] = []
+        from fluid.codemode.facts import is_superseded
+        from fluid.codemode.preferences import protected_conflicts
+        visible = [vars(e) for e in entries
+                   if project is None or e.scope in ("global", project)]
+        questions = protected_conflicts(visible)
+        question_ids = {e["id"] for old, new, _ in questions for e in (old, new)}
         for entry in entries:
             if project is not None and entry.scope not in ("global", project):
                 out_of_scope += 1
                 continue
-            if entry.superseded_by:
-                # Confirmed replacements omit the predecessor. An unconfirmed
-                # proposal is not authority to withhold an owner-kept fact.
-                if entry.protected and not entry.supersession_confirmed:
-                    findings = screen_findings(entry.text) + screen_findings(entry.when or "")
-                    text = "[withheld — suspected injection]" if findings else entry.text
-                    pinned.append((entry, (
-                        f"- [{entry.id} r{entry.revision}; conflict] {text} "
-                        f"(Unconfirmed replacement proposal [{entry.superseded_by}]; unresolved conflict. "
-                        "Both facts remain usable; neither overrides the other. "
-                        "Recall the pair and ask the owner to resolve it.)"
-                    )))
+            if is_superseded(vars(entry)):
+                continue
+            if entry.id in question_ids:
+                findings = screen_findings(entry.text) + screen_findings(entry.when or "")
+                text = "[withheld — suspected injection]" if findings else entry.text
+                pinned.append((entry, f"- [{entry.id} r{entry.revision}; owner question] {text}"))
+                continue
+            if entry.protected and entry.superseded_by:
+                # A dangling unconfirmed edge does not make a saved rule stale
+                # or remove routing authority; there is no available pair to ask.
+                findings = screen_findings(entry.text) + screen_findings(entry.when or "")
+                text = "[withheld — suspected injection]" if findings else entry.text
+                pinned.append((entry, f"- [{entry.id} r{entry.revision}; {entry.provenance}] {text} "
+                               "(Proposed successor unavailable; the original rule remains usable.)"))
                 continue
             if entry.conflicted:
                 held += 1

@@ -22,10 +22,10 @@ raise the question, both bounded so they cannot nag:
 
 * :func:`curate_protected_conflicts`: deterministic, model-free detection of
   two live user-kept facts about the same how-the-agent-works topic where
-  the newer one changes the rule. The pair is linked through the existing
-  supersession proposal, which keeps both texts and renders the snapshot's
-  conflict line ("Recall the pair and ask the owner to resolve it"). It never
-  archives or rewrites a user-kept fact. At most
+  the newer one changes the rule. A non-link question in the existing
+  memory footer shows both texts and asks the owner to resolve the pair.
+  Neither fact grants automatic model-routing authority while they disagree.
+  Curation never links, archives or rewrites a user-kept fact. At most
   :data:`MAX_OPEN_CONFLICTS` such questions are open at once, and a pair is
   proposed once: after the owner resolves it, it is not raised again.
 """
@@ -124,10 +124,14 @@ class PreferenceProposals:
                 entries = self._store.memories()
             except Exception:  # noqa: BLE001 — unreadable store: nothing resolves
                 entries = []
+        from fluid.codemode.facts import is_superseded
+        rows = [entry if isinstance(entry, dict) else vars(entry) for entry in entries]
+        blocked = conflicting_owner_ids(rows)
         out = []
-        for entry in entries:
-            get = entry.get if isinstance(entry, dict) else (lambda k, e=entry: getattr(e, k, None))
-            if get("protected") and not get("superseded_by"):
+        for entry in rows:
+            get = entry.get
+            if (get("protected") and not is_superseded(entry) and not get("conflicted")
+                    and not get("retired_at") and get("id") not in blocked):
                 text = str(get("text") or "")
                 out.append((str(get("key") or ""), str(get("scope") or "global"),
                             float(get("updated_at") or get("created_at") or 0.0),
@@ -325,7 +329,8 @@ def _pair_key(old: dict, new: dict) -> str:
 
 
 def protected_conflicts(entries: list[dict], *, skip: set[str] | frozenset[str] = frozenset(),
-                        limit: int = MAX_OPEN_CONFLICTS) -> list[tuple[dict, dict, str]]:
+                        limit: int = MAX_OPEN_CONFLICTS,
+                        disjoint: bool = True) -> list[tuple[dict, dict, str]]:
     """Same-topic pairs of live user-kept facts where the newer one changes
     the rule: ``[(old, new, reason)]``, strongest first, at most ``limit``.
 
@@ -340,11 +345,11 @@ def protected_conflicts(entries: list[dict], *, skip: set[str] | frozenset[str] 
     it, so a cluster of three versions of one rule asks one question.
     ``skip`` holds pair keys already proposed once.
     """
-    from fluid.codemode.facts import fingerprint
-    from fluid.codemode.supersession import replacement_evidence
+    from fluid.codemode.facts import fingerprint, global_id, is_superseded
+    from fluid.codemode.supersession import conflict_scope_evidence
 
     live = [e for e in entries
-            if e.get("protected") and not e.get("superseded_by") and not e.get("conflicted")
+            if e.get("protected") and not is_superseded(e) and not e.get("conflicted")
             and not e.get("retired_at") and e.get("provenance") != "tool" and e.get("text")
             and not str(e.get("key") or "").startswith(_BIOGRAPHY_KEYS)]
     topics = {e["id"]: preference_topics(e["text"]) for e in live}
@@ -363,13 +368,14 @@ def protected_conflicts(entries: list[dict], *, skip: set[str] | frozenset[str] 
             same_key = bool(old.get("key")) and old.get("key") == new.get("key")
             reason = ""
             strength = 0
-            # The newer routing must restate every job the older one routes:
-            # the conflict line hides the older fact, and a newer fact about
-            # reviews alone must not hide where code work goes.
+            # A question never hides the wider rule: any shared job with
+            # different typed routing is worth asking about, not superseding.
             old_routes, new_routes = routes[old["id"]], routes[new["id"]]
-            moved = sorted(job for job in old_routes if old_routes[job] != new_routes.get(job)) \
-                if old_routes and old_routes.keys() <= new_routes.keys() else []
-            if same_key:
+            moved = sorted(job for job in old_routes.keys() & new_routes.keys()
+                           if old_routes[job] != new_routes[job])
+            if old.get("superseded_by") == global_id(new) and not old.get("supersession_confirmed"):
+                reason, strength = "unconfirmed replacement proposal", 3
+            elif same_key:
                 reason, strength = f"same key {old['key']}", 2
             elif moved:
                 reason, strength = "model routing changed for " + ", ".join(moved), 1
@@ -385,9 +391,10 @@ def protected_conflicts(entries: list[dict], *, skip: set[str] | frozenset[str] 
                         break
             if not strength:
                 continue
-            # The supersession screens: newer, same subject, no exception or
-            # hedge in either text, scopes that may replace each other.
-            if not replacement_evidence(old, new, proposed=True):
+            # Typed disagreement is enough to ASK, never enough to link.
+            # Keep the scope/temporary/uncertain screens, not the stricter
+            # replacement wording needed for automatic supersession.
+            if not conflict_scope_evidence(old, new):
                 continue
             overlap = len(salient[old["id"]] & salient[new["id"]])
             candidates.append((strength, overlap, float(new.get("updated_at") or 0), old, new, reason))
@@ -397,17 +404,36 @@ def protected_conflicts(entries: list[dict], *, skip: set[str] | frozenset[str] 
     for _strength, _overlap, _at, old, new, reason in candidates:
         if len(out) >= limit:
             break
-        if old["id"] in used or new["id"] in used or _pair_key(old, new) in skip:
+        if ((disjoint and (old["id"] in used or new["id"] in used))
+                or _pair_key(old, new) in skip):
             continue
         used.update((old["id"], new["id"]))
         out.append((old, new, reason))
     return out
 
 
+def conflicting_owner_ids(entries: list[dict]) -> set[str]:
+    """Every side of every unresolved owner contradiction, not just the
+    bounded questions shown in a prompt. None grants routing authority."""
+    pairs = protected_conflicts(entries, limit=len(entries) ** 2, disjoint=False)
+    return {entry["id"] for old, new, _ in pairs for entry in (old, new)}
+
+
+def owner_conflict_lines(entries: list[dict]) -> list[str]:
+    """Existing memory-question footer; no link or fact mutation."""
+    from fluid.codemode.facts import global_id
+    return [
+        f"- [owner question; unresolved conflict] Saved facts [{global_id(old)}] and "
+        f"[{global_id(new)}] disagree ({reason}). Both facts remain usable as context; "
+        "neither grants automatic model-routing authority until resolved. "
+        "Recall both and ask the owner which rule applies; do not silently choose a model."
+        for old, new, reason in protected_conflicts(entries)
+    ]
+
+
 def open_conflicts(entries: list[dict]) -> int:
-    """User-kept facts waiting for the owner to resolve a replacement."""
-    return sum(1 for e in entries
-               if e.get("protected") and e.get("superseded_by") and not e.get("supersession_confirmed"))
+    """Bounded non-link owner questions, resolved by correction/replacement."""
+    return len(protected_conflicts(entries))
 
 
 def _load_curation(root: Path) -> dict:
@@ -419,9 +445,12 @@ def _load_curation(root: Path) -> dict:
 
 
 def curate_protected_conflicts(store: Any, *, now: float | None = None) -> list[str]:
-    """Propose the open conflicts :func:`protected_conflicts` finds, up to
-    :data:`MAX_OPEN_CONFLICTS` open at once; returns ``conflict-memory:<old>``
-    for each pair linked. Never raises; never archives or rewrites a fact."""
+    """Record which bounded owner questions were surfaced. Never link facts.
+
+    The existing question footer derives open pairs from the same live
+    snapshot. A confirmed replacement, correction or Forget closes a pair;
+    another candidate can then use its slot. No owner text is hidden.
+    """
     from fluid.codemode.facts import visible_on
     from fluid.codemode.skills import atomic_write_text
 
@@ -429,23 +458,16 @@ def curate_protected_conflicts(store: Any, *, now: float | None = None) -> list[
     try:
         doc = store._facts.snapshot()
         entries = [e for e in doc["entries"] if visible_on(e, doc.get("store_id"))]
-        room = MAX_OPEN_CONFLICTS - open_conflicts(entries)
-        if room <= 0:
-            return []
         root = Path(store.root)
         curation = _load_curation(root)
         proposed = [p for p in curation.get("proposed") or [] if isinstance(p, str)]
         changed: list[str] = []
-        for old, new, _reason in protected_conflicts(entries, skip=set(proposed), limit=room):
-            try:
-                linked = store.propose_memory_supersession(
-                    old["id"], new["id"], old_revision=old.get("revision", 1),
-                    new_revision=new.get("revision", 1), protected_conflict=True,
-                )
-            except ValueError:
-                continue  # changed since it was read; the next pass looks again
-            proposed.append(_pair_key(old, new))
-            if linked:
+        # Select the SAME capped questions the footer shows before skipping
+        # previously surfaced pairs; a second pass must not open another cap.
+        for old, new, _reason in protected_conflicts(entries):
+            pair = _pair_key(old, new)
+            if pair not in proposed:
+                proposed.append(pair)
                 changed.append(f"conflict-memory:{old['id']}")
         if proposed != list(curation.get("proposed") or []):
             curation["proposed"] = proposed[-MAX_REMEMBERED_PAIRS:]

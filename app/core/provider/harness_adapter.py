@@ -2150,6 +2150,8 @@ class HarnessAdapter(ProviderAdapter):
         The snapshot stays at the user-message tail. Slash commands must stay
         verbatim; invalidating trust makes their next normal turn carry it.
         """
+        if self._options and self._options.extra.get("one_shot"):
+            return None
         from app.core.memory_reminder import memory_blocks, wrap
 
         from fluid.messages import Message

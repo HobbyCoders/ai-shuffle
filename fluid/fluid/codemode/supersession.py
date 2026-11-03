@@ -21,6 +21,14 @@ def subject_terms(text: str) -> set[str]:
             for w in query_terms(text) if w not in _GENERIC}
 
 
+def conflict_scope_evidence(old: dict, new: dict) -> bool:
+    """A question may flag typed disagreement without inferring replacement."""
+    return (old.get("worker") == new.get("worker")
+            and old.get("scope", "global") == new.get("scope", "global")
+            and not (_EXCEPTION.search(old["text"]) or _EXCEPTION.search(new["text"])
+                     or _UNCERTAIN.search(old["text"]) or _UNCERTAIN.search(new["text"])))
+
+
 def replacement_evidence(old: dict, new: dict, *, proposed: bool = False) -> bool:
     """Only clear replacement text about the same subject, in compatible scopes.
 

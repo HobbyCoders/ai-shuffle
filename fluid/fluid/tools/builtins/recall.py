@@ -141,7 +141,18 @@ def _fetch(ids: list[str], store: Any, project: str | None = None) -> ToolOutcom
         where = " in this project" if project is not None else ""
         lines.append("No memory with id " + ", ".join(f"[{i}]" for i in missing) + where
                      + " (it may have been forgotten); search by keyword instead.")
+    lines.extend(_owner_questions(store, project, hits))
     return ToolOutcome(text="\n".join(lines), is_error=not hits)
+
+
+def _owner_questions(store, project, hits):
+    from fluid.codemode.facts import global_id
+    from fluid.codemode.preferences import owner_conflict_lines
+    ids = {global_id(vars(e)) for e, _ in hits}
+    entries = [vars(e) for e in store.memories()
+               if project is None or e.scope in ("global", project)]
+    return [line for line in owner_conflict_lines(entries)
+            if any(f"[{gid}]" in line for gid in ids)]
 
 
 def _tags(entry: Any, archived: bool, successor: dict[str, str]) -> list[str]:
@@ -160,7 +171,11 @@ def _tags(entry: Any, archived: bool, successor: dict[str, str]) -> list[str]:
     if entry.superseded_by:
         shown = successor.get(entry.superseded_by, entry.superseded_by)
         if entry.protected and not entry.supersession_confirmed:
-            tags.append(f"unconfirmed replacement proposal [{shown}]; both facts remain usable; ask the owner")
+            if entry.superseded_by in successor:
+                tags.append(f"unconfirmed replacement proposal [{shown}]; both facts remain usable as context; "
+                            "neither grants automatic model-routing authority; ask the owner")
+            else:
+                tags.append("proposed successor unavailable; the original rule remains usable")
         else:
             tags.append(f"superseded by [{shown}]; not current")
     if archived:
@@ -190,8 +205,7 @@ def _lookup(query: str, limit: int, store: Any, project: str | None) -> ToolOutc
         memory_hits = store.search_memories(query, limit=limit, project=project)
     except Exception as exc:
         return ToolOutcome(text=f"recall failed: {exc}", is_error=True)
-    conflicts = [e for e in store.memories() if (e.conflicted or (
-                     e.protected and e.superseded_by and not e.supersession_confirmed)) and e.provenance != "tool"
+    conflicts = [e for e in store.memories() if e.conflicted and e.provenance != "tool"
                  and (project is None or e.scope in ("global", project))
                  and score(e.text + " " + (e.key or ""))]
     for entry in conflicts[:limit]:
@@ -220,6 +234,7 @@ def _lookup(query: str, limit: int, store: Any, project: str | None) -> ToolOutc
                 tags.append("always applies")
             suffix = f"  ({', '.join(tags)})" if tags else ""
             lines.append(f"- [{entry.id}] {entry.text}{suffix}")
+        lines.extend(_owner_questions(store, project, memory_hits))
 
     skill_hits: list[tuple[int, Any, bool]] = []
     try:

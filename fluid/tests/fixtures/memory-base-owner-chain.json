@@ -1,0 +1,82 @@
+{
+  "archived": [
+    {
+      "alternatives": [],
+      "clock": {
+        "e362aa6efe254357a692ef7756a20f33": 3
+      },
+      "created_at": 1793668331.3321004,
+      "expires_at": 0,
+      "history": [],
+      "id": "m1",
+      "key": null,
+      "origin": "e362aa6efe254357a692ef7756a20f33",
+      "protected": true,
+      "provenance": "session",
+      "retired_at": 1793668331.34379,
+      "retired_reason": "superseded",
+      "revision": 3,
+      "saved_by": "user",
+      "scope": "global",
+      "source_session": null,
+      "superseded_by": "e362aa6efe254357a692ef7756a20f33:m2",
+      "supersession_confirmed": false,
+      "text": "Bounded backend work runs on GPT 6.1 Sol; reviews run on Opus; frontend work runs on Opus.",
+      "updated_at": 1793668331.3321004,
+      "uses": 0
+    }
+  ],
+  "entries": [
+    {
+      "alternatives": [],
+      "clock": {
+        "e362aa6efe254357a692ef7756a20f33": 2
+      },
+      "conflicted": false,
+      "created_at": 1793668331.3437462,
+      "expires_at": 0,
+      "history": [],
+      "id": "m2",
+      "key": null,
+      "origin": "e362aa6efe254357a692ef7756a20f33",
+      "protected": true,
+      "provenance": "session",
+      "revision": 2,
+      "saved_by": "user",
+      "scope": "global",
+      "source_session": null,
+      "superseded_by": "e362aa6efe254357a692ef7756a20f33:m3",
+      "supersession_confirmed": false,
+      "text": "Bounded backend work runs on Opus; reviews run on Sonnet; frontend work runs on Opus.",
+      "updated_at": 1793668331.3437462,
+      "uses": 0
+    },
+    {
+      "alternatives": [],
+      "clock": {
+        "e362aa6efe254357a692ef7756a20f33": 1
+      },
+      "conflicted": false,
+      "created_at": 1793668331.3590631,
+      "expires_at": 0,
+      "history": [],
+      "id": "m3",
+      "key": null,
+      "origin": "e362aa6efe254357a692ef7756a20f33",
+      "protected": true,
+      "provenance": "session",
+      "revision": 1,
+      "saved_by": "user",
+      "scope": "global",
+      "source_session": null,
+      "text": "Speed sprint frontend work and backend reviews run on Sol; Opus handles the review of every sprint.",
+      "updated_at": 1793668331.3590631,
+      "uses": 0
+    }
+  ],
+  "next_id": 4,
+  "owner": "local",
+  "schema": 2,
+  "store_id": "e362aa6efe254357a692ef7756a20f33",
+  "tombstones": []
+}

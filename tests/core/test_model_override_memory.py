@@ -239,6 +239,36 @@ async def test_unsupported_owner_link_does_not_remove_routing_authority(world):
     assert not current.superseded_by
 
 
+@pytest.mark.parametrize("model", ["gpt 6.1 sol", "opus", "sonnet"])
+async def test_unresolved_owner_contradictions_never_authorize_any_side(world, model):
+    _, prompts = world
+    _save("Bounded backend work runs on GPT 6.1 Sol")
+    _save("Bounded backend work runs on Opus")
+    _save("Bounded backend work runs on Sonnet")
+    assert all(not e.superseded_by for e in store_for_owner("local").memories())
+    # A pinned profile is independent authority; use a different default so
+    # none of these requests can be accepted for that unrelated reason.
+    from app.db import database as db
+    db.create_profile("not_conflicted", "Other default", None,
+                      {"provider_models": {"__native__": "haiku"}})
+    assert mo.owner_memories("parent") == []
+    result = await _task(model, agent="not_conflicted")
+    assert not result["ok"] and len(prompts) == 1
+    section = store_for_owner("local").render_memory_section()
+    assert "Recall both and ask the owner" in section
+    assert "neither grants automatic model-routing authority" in section
+
+
+async def test_missing_unconfirmed_successor_keeps_original_routing_authority(world):
+    _, prompts = world
+    memory = _save("Bounded backend work runs on GPT 6.1 Sol")
+    _edit(memory.id, superseded_by="f" * 32 + ":m99", supersession_confirmed=False)
+    assert "original rule remains usable" in store_for_owner("local").render_memory_section()
+    result = await _task("gpt 6.1 sol")
+    assert result["ok"] and not prompts
+    assert result["model_override"]["memory_id"] == memory.id
+
+
 @pytest.mark.parametrize("change", ["superseded", "archived", "conflicted", "other_worker", "injection"])
 async def test_a_memory_that_is_not_live_and_clean_does_not_count(world, change):
     _, prompts = world

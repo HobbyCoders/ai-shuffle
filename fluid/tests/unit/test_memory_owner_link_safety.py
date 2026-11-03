@@ -49,7 +49,7 @@ def test_explicit_owner_replaces_is_not_second_guessed(tmp_path):
     assert OLD not in store.render_memory_section()
 
 
-async def test_missing_successor_surfaces_both_usable_rule_and_owner_question(tmp_path):
+async def test_missing_successor_keeps_original_rule_usable_without_a_false_pair_question(tmp_path):
     from fluid.tools.builtins.recall import handler as recall
     from fluid.tools.registry import ToolCtx
     store = SkillStore(tmp_path)
@@ -59,13 +59,15 @@ async def test_missing_successor_surfaces_both_usable_rule_and_owner_question(tm
     store = SkillStore(tmp_path / "replica")
     store._facts.merge(packet)
     section = store.render_memory_section()
-    assert OLD in section and "Both facts remain usable" in section
+    assert OLD in section and "the original rule remains usable" in section
+    assert "unresolved conflict" not in section
     assert "do not use the old value" not in section
     ctx = ToolCtx(extra={"recall_store": store})
     restored = next(e for e in store.memories() if e.text == OLD)
     for request in ({"ids": [restored.id]}, {"query": "parity"}):
         text = (await recall(request, ctx)).text
-        assert OLD in text and "both facts remain usable" in text
+        assert OLD in text and "the original rule remains usable" in text
+        assert "Unresolved conflict" not in text
         assert "not current" not in text
 
 

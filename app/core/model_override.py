@@ -719,7 +719,8 @@ def owner_memories(session_id: str, cwd: Optional[str] = None) -> List[Any]:
         from app.core.api_user_scope import session_api_user_id
         from app.core.fluid_memory import owner_root, store_for_owner
         from app.db import database
-        from fluid.codemode.facts import usefulness, visible_on
+        from fluid.codemode.facts import is_superseded, usefulness, visible_on
+        from fluid.codemode.preferences import conflicting_owner_ids
         from fluid.context.screening import screen_findings
 
         row = database.get_session(session_id)
@@ -736,12 +737,16 @@ def owner_memories(session_id: str, cwd: Optional[str] = None) -> List[Any]:
         live = [entry for entry in doc["entries"]
                 if entry.get("protected") is True
                 and entry.get("provenance", "session") != "tool"
-                and not entry.get("superseded_by") and not entry.get("conflicted")
+                and not is_superseded(entry) and not entry.get("conflicted")
                 and not entry.get("retired_at")
                 and visible_on(entry, local)
                 and entry.get("scope", "global") in scopes
                 and isinstance(entry.get("text"), str) and entry["text"].strip()
                 and not screen_findings(entry["text"])]
+        # Contradictory owner facts remain available as context and questions,
+        # but neither silently authorizes a model until the owner resolves them.
+        blocked = conflicting_owner_ids(live)
+        live = [entry for entry in live if entry["id"] not in blocked]
         live.sort(key=lambda entry: (-usefulness(entry), str(entry.get("id"))))
         return [store._facts._entry(entry) for entry in live]
     except Exception:  # noqa: BLE001 — an unreadable store authorizes nothing

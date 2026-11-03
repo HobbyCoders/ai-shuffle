@@ -206,10 +206,21 @@ def validate_when(when: object) -> str:
     return when
 
 
+def is_superseded(entry: "dict | Any") -> bool:
+    """An unsupported owner proposal is not authority to suppress a rule.
+
+    Retired protected predecessors are durable evidence of an owner correction,
+    including legacy records whose direct confirmation was downgraded.
+    """
+    get = entry.get if isinstance(entry, dict) else (lambda k: getattr(entry, k, None))
+    return bool(get("superseded_by") and (not get("protected")
+                or get("supersession_confirmed") or get("retired_reason") == "superseded"))
+
+
 def always_applies(entry: "dict | Any") -> bool:
     """An ALWAYS memory: owner-saved, flagged always, live and current."""
     get = entry.get if isinstance(entry, dict) else (lambda k: getattr(entry, k, None))
-    return bool(get("always") and get("protected") and not get("superseded_by"))
+    return bool(get("always") and get("protected") and not is_superseded(entry))
 
 
 def fingerprint(text):
@@ -445,6 +456,14 @@ class FactStore:
             for old in records:
                 if not old.get("superseded_by"):
                     continue
+                # Only an explicit replacement/automatic evidenced correction
+                # retires a protected fact. Learner proposals keep it live.
+                # Old chain walks persisted a downgraded direct confirmation;
+                # recover that durable evidence before considering withdrawal.
+                if (old.get("protected") and old.get("retired_reason") == "superseded"
+                        and not old.get("supersession_confirmed")):
+                    plans.append((old, old["superseded_by"], True))
+                    continue
                 node, seen = old, {global_id(old)}
                 confirmed = bool(old.get("supersession_confirmed"))
                 while pointer := node.get("superseded_by"):
@@ -471,6 +490,7 @@ class FactStore:
                     # every read/merge, withdraw unsupported metadata edges,
                     # never either fact. Confirmed owner links remain binding.
                     if (node.get("protected") and not node.get("supersession_confirmed")
+                            and node.get("retired_reason") != "superseded"
                             and not replacement_evidence(dict(node, superseded_by=None), target,
                                                          proposed=True)):
                         plans.append((node, None, False))
@@ -491,7 +511,8 @@ class FactStore:
                                 or (confirmed and old.get("conflicted"))):
                             plans.append((old, old["superseded_by"], confirmed))
                         break
-                    confirmed = confirmed and bool(target.get("supersession_confirmed"))
+                    # Confirmation describes this direct edge, never every
+                    # descendant. A learner proposal on B cannot revoke A→B.
                     node = target
             if not plans:
                 break
@@ -1492,6 +1513,22 @@ class FactStore:
                         old["supersession_confirmed"] = bool(old.get("supersession_confirmed") or entry.get("supersession_confirmed"))
                         old["conflicted"] = bool(old.get("conflicted") or entry.get("conflicted")) and not old["supersession_confirmed"]
                         old["alternatives"] = sorted(set(old.get("alternatives", []) + entry.get("alternatives", [])))[:2]
+                        continue
+                    # A repair withdrawing unsupported metadata cannot defeat
+                    # a concurrent explicit owner confirmation of the same fact.
+                    # A genuinely different text/scope/owner remains a conflict.
+                    value_claim = claim[:-2]
+                    confirmed_copies = [e for e in (old, entry)
+                                        if e.get("supersession_confirmed") and e.get("superseded_by")]
+                    if (old.get("protected") and len(confirmed_copies) == 1
+                            and all(old.get(k) == entry.get(k) for k in value_claim)):
+                        winner = dict(confirmed_copies[0])
+                        self._merge_metadata(winner, old, entry, prefer=winner)
+                        winner["clock"] = {k: max(local_clock.get(k, 0), incoming_clock.get(k, 0)) for k in actors}
+                        winner["revision"] = max(old.get("revision", 1), entry.get("revision", 1))
+                        winner.pop("conflicted", None)
+                        winner.pop("alternatives", None)
+                        entries[entry["id"]] = winner
                         continue
                     old["conflicted"] = True
                     old["clock"] = {k: max(local_clock.get(k, 0), incoming_clock.get(k, 0)) for k in actors}
