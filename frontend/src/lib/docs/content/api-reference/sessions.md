@@ -175,7 +175,7 @@ With **Suggest next reply** enabled (**Settings → General**), the latest gener
 
 ## Suggested Tasks (Task Chips)
 
-An agent that spots work outside its task records a suggestion with its `SuggestTask` tool instead of doing it. The owner can start it in a separate chat with its own worktree; the chat it was suggested in keeps running undisturbed. A subagent's suggestion attaches to the top-level chat at the root of its ancestry.
+An agent that spots separate, nonblocking work outside the user's request records a suggestion with its `SuggestTask` tool instead of doing it; work the request needs stays with that chat. The owner can start it in a separate chat with its own worktree; the chat it was suggested in keeps running undisturbed. A subagent's suggestion attaches to the top-level chat at the root of its ancestry.
 
 A chip suggested by a subagent, at any depth, belongs to the top-level chat that subagent works under: `session_id` is that chat, its list returns the chip, and start and dismiss are authorised against it. The subagent's own list is empty, and the chip stays startable after the subagent ends. A session started with `StartSession` is its own top-level chat.
 

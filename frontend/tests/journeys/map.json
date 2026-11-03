@@ -327,6 +327,15 @@
 			]
 		},
 		{
+			"why": "native harness context: the once-per-segment scratch reminder and the compactor's fold that keeps it",
+			"journeys": ["native-scratch-context"],
+			"globs": [
+				"app/core/provider/harness_adapter.py",
+				"fluid/fluid/engine/native.py",
+				"fluid/fluid/context/compaction.py"
+			]
+		},
+		{
 			"why": "voice calls: the call button, call dock and client, and the server's call transports, bridge and hand-off to the chat agent",
 			"journeys": ["voice-call", "voice-provider-endings"],
 			"globs": [
