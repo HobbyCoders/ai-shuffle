@@ -64,6 +64,16 @@ await runJourney({
 			// it; the delayed case separately covers survival through a slow init.
 			await page.evaluate(() => window.__journeyBootHold.release());
 			await waitForBootReconciled(page, { timeout: BOOT_HOLD.ms });
+			if (initDelayMs) {
+				const timing = await page.evaluate(() => ({
+					releasedAt: window.__journeyBootHold?.releasedAt,
+					reconciledAt: performance.getEntriesByName('shuffle:boot.reconciled')[0]?.startTime
+				}));
+				const elapsed = timing.reconciledAt - timing.releasedAt;
+				log(`slow-boot timing: ${JSON.stringify({ ...timing, elapsed })}`);
+				expect(Number.isFinite(timing.releasedAt) && Number.isFinite(timing.reconciledAt) && elapsed > 2000,
+					`invalid slow-boot run: reconciliation must exceed 2000 ms after release: ${JSON.stringify({ ...timing, elapsed })}`);
+			}
 			const kept = ((await composer(page).innerText()) || '').trim();
 			expect(kept.includes(token), `the typed text survives boot finishing: composer shows ${JSON.stringify(kept)}`);
 			await mark('send');
