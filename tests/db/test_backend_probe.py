@@ -149,8 +149,12 @@ def test_credentials_reach_the_child_only_on_its_private_channel(
                 # It still permits only the owner, SYSTEM and administrators.
                 paths = ",".join("'" + str(p).replace("'", "''") + "'"
                                  for p in (source.parent, source, reply))
+                # Use .NET directly: PowerShell's Get-Acl module may be unavailable.
                 script = (
-                    f"foreach ($path in @({paths})) {{ $a = Get-Acl -LiteralPath $path; "
+                    "$ErrorActionPreference = 'Stop'; "
+                    f"foreach ($path in @({paths})) {{ $a = if ([IO.Directory]::Exists($path)) "
+                    "{ [IO.Directory]::GetAccessControl($path) } else "
+                    "{ [IO.File]::GetAccessControl($path) }; "
                     "$owner = $a.GetOwner([System.Security.Principal.SecurityIdentifier]).Value; "
                     "$a.GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier]) | "
                     "ForEach-Object { if ($_.IdentityReference.Value -notin "
