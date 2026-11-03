@@ -407,7 +407,7 @@ async def reconcile_user_stops() -> None:
     from app.db import turns as turns_db
 
     global _stop_sweep_start
-    stopped = task_registry.user_stopped_sessions()
+    stopped = list(task_registry.user_stopped_sessions())
     start = _stop_sweep_start % len(stopped) if stopped else 0
     sessions = (stopped[start:] + stopped[:start])[:_STOP_SWEEP_BATCH]
     _stop_sweep_start = start + len(sessions)

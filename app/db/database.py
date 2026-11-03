@@ -1591,8 +1591,8 @@ def _run_column_migrations(cursor: Any) -> None:
     if not column_exists(cursor, "pending_wakeups", "stop_seq"):
         # Rows here now read 0, so the next Stop cancels them. An older install
         # still writing to this database leaves it empty: see _cancelled_by_stop.
-        cursor.execute("ALTER TABLE pending_wakeups ADD COLUMN stop_seq BIGINT DEFAULT 0")
-        cursor.execute("ALTER TABLE pending_wakeups ALTER COLUMN stop_seq DROP DEFAULT")
+        cursor.execute("ALTER TABLE pending_wakeups ADD COLUMN stop_seq BIGINT")
+        cursor.execute("UPDATE pending_wakeups SET stop_seq = 0")
         migrations_applied.append("pending_wakeups.stop_seq")
 
     cursor.execute(
