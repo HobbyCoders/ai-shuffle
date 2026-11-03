@@ -592,11 +592,13 @@ async def _interrupted_with_older_queued(session_id: str):
 
 
 async def _finish_interrupt(runtime, provider_stops) -> None:
-    from app.core import turn_recorder as tr
-
+    """Includes the teardown, which outlives the interrupt call by design."""
+    _tasks_at_entry = asyncio.all_tasks()
     with patch("app.core.query_session_lifecycle.interrupt_session", new=provider_stops):
         await runtime.interrupt("stop", escalation_timeout=1)
-    await tr.drain_event_writes(5)
+        others = asyncio.all_tasks() - _tasks_at_entry - {asyncio.current_task()}
+        if others:
+            await asyncio.wait(others, timeout=20)
 
 
 @pytest.fixture

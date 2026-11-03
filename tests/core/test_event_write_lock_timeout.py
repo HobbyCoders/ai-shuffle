@@ -598,6 +598,13 @@ def _next_message_arrives() -> str:
                                  payload={turns_db.PERSON_INPUT_KEY: True})["id"]
 
 
+async def _detached_work_done() -> None:
+    """A Stop's teardown outlives the interrupt call by design, so wait for it."""
+    others = asyncio.all_tasks() - {asyncio.current_task()}
+    if others:
+        await asyncio.wait(others, timeout=15)
+
+
 async def test_a_stop_paused_at_the_wakeups_spares_the_next_turns_work(monkeypatch, stop_env):
     """The whole interrupt returns with its teardown still paused, as a held lock would."""
     from app.core import session_runtime as sr
@@ -616,11 +623,11 @@ async def test_a_stop_paused_at_the_wakeups_spares_the_next_turns_work(monkeypat
 
     with patch("app.core.query_session_lifecycle.interrupt_session", new=provider_stops):
         assert await sr.SessionRuntime(turn).interrupt("stop", escalation_timeout=1) == "aborted"
-    assert reached.is_set()
+    assert await asyncio.to_thread(reached.wait, 10)
 
     next_turn = _next_message_arrives()
     resume.set()
-    await tr.drain_event_writes(5)
+    await _detached_work_done()
 
     assert stop_env == ["old-task"]
     assert [row["id"] for row in wakeups_db.get_session_wakeups(SID)] == ["newer-wake"]
@@ -757,7 +764,7 @@ async def test_an_interrupt_overtaken_during_its_read_does_not_latch_again(monke
         next_turn = _next_message_arrives()
         resume.set()
         await interrupt
-    await tr.drain_event_writes(5)
+        await _detached_work_done()
 
     signal.assert_awaited_once()
     assert not task_registry.is_user_stopped(SID)
@@ -836,7 +843,7 @@ async def test_a_stop_paused_at_its_first_read_still_ends_the_older_worker(monke
             sr._live_runtimes[SID] = sr.SessionRuntime(turns_db.get_turn(next_turn))
             resume.set()
             assert await interrupt == "interrupting"
-            await tr.drain_event_writes(5)
+            await _detached_work_done()
     finally:
         sr._live_runtimes.pop(SID, None)
 
