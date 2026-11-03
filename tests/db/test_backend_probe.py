@@ -145,7 +145,8 @@ def test_credentials_reach_the_child_only_on_its_private_channel(
                 assert reply.stat().st_mode & 0o777 == 0o600
                 assert source.parent.stat().st_mode & 0o777 == 0o700
             else:
-                # Python 3.12.10+ gives mode-0700 mkdir an owner/SYSTEM/admin ACL.
+                # CPython uses OW (OWNER RIGHTS, S-1-3-4), not an expanded user SID.
+                # It still permits only the owner, SYSTEM and administrators.
                 paths = ",".join("'" + str(p).replace("'", "''") + "'"
                                  for p in (source.parent, source, reply))
                 script = (
@@ -153,12 +154,14 @@ def test_credentials_reach_the_child_only_on_its_private_channel(
                     "$owner = $a.GetOwner([System.Security.Principal.SecurityIdentifier]).Value; "
                     "$a.GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier]) | "
                     "ForEach-Object { if ($_.IdentityReference.Value -notin "
-                    "@($owner,'S-1-5-18','S-1-5-32-544')) { throw 'Non-private ACL' } } }"
+                    "@($owner,'S-1-3-4','S-1-5-18','S-1-5-32-544')) { "
+                    "throw ('Non-private ACL: ' + $_.IdentityReference.Value) } } }"
                 )
                 acl = real_popen(["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 _, error = acl.communicate(timeout=10)
-                assert acl.returncode == 0, error.decode(errors="replace")
+                captured["acl_returncode"] = acl.returncode
+                captured["acl_error"] = error.decode(errors="replace")
             super().__init__(args, **kwargs)
             if sys.platform == "linux":
                 captured["cmdline"] = Path(f"/proc/{self.pid}/cmdline").read_bytes()
@@ -167,6 +170,7 @@ def test_credentials_reach_the_child_only_on_its_private_channel(
     with pytest.raises(TimeoutError):
         seconds = 5 if os.name == "nt" else 0.5
         backend_probe.BackendProbe().read([1], (), _silent_kwargs(silent_server), seconds)
+    assert captured.get("acl_returncode", 0) == 0, captured.get("acl_error")
     assert _SECRET not in " ".join(captured["argv"])
     assert _SECRET.encode() not in captured.get("cmdline", b"")
     assert _SECRET not in json.dumps(captured["env"])
