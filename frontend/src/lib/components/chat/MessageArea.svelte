@@ -1274,21 +1274,26 @@
 	}
 
 	/**
-	 * Follow growth from inside a ResizeObserver callback, which runs before this
-	 * frame paints. Waiting for the next frame would show everything below the
-	 * growth, queued bubbles included, one piece too low. Scroll only: changing the
-	 * reserve here would resize what is being observed, in the same frame.
+	 * Follow growth in the task that caused it. Anything later lets the browser
+	 * paint or score everything below the growth, queued bubbles included, as
+	 * moved. Reveal overflow only: the blank reserve under the content is about to
+	 * be given back, and scrolling into it would come straight back. Scroll only:
+	 * changing the reserve here would mutate what is observed.
 	 */
-	function followGrowthBeforePaint() {
-		if (!containerRef) return;
-		if (!currentTurnAnchorId) {
-			if (shouldAutoScroll) scrollToBottom();
-			return;
-		}
-		if (!tailSpacerRef) return;
+	function followGrowthNow() {
+		if (!containerRef || !tailSpacerRef || selectionBlocksNavigation) return;
+		if (!currentTurnAnchorId && !shouldAutoScroll) return;
 		const contentEnd = containerRef.scrollTop + tailSpacerRef.getBoundingClientRect().top - containerRef.getBoundingClientRect().top;
 		const delta = resolveAnchoredRevealDelta(containerRef.scrollTop, containerRef.clientHeight, contentEnd);
 		if (delta > 0) setProgrammaticScrollTop(containerRef.scrollTop + delta);
+	}
+
+	/** Refresh the reserve first: at the bottom of a stale one, the next refresh scrolls the reader straight back. */
+	async function pinBelowCurrentReserve() {
+		if (!shouldAutoScroll) return;
+		refreshLatestTurnTailReserve();
+		await tick();
+		if (shouldAutoScroll) scrollToBottom();
 	}
 
 	function scheduleCurrentTurnAnchorMaintenance(initial = false) {
@@ -1925,7 +1930,6 @@
 		if (!chatColumnRef || !containerRef || !isMounted) return;
 		let raf: number | null = null;
 		const observer = new ResizeObserver(() => {
-			followGrowthBeforePaint();
 			if (raf !== null) return;
 			raf = requestAnimationFrame(async () => {
 				raf = null;
@@ -1948,6 +1952,17 @@
 			observer.disconnect();
 			if (raf !== null) cancelAnimationFrame(raf);
 		};
+	});
+
+	// While a turn streams, follow in the task that changed the transcript. A turn
+	// that has ended goes through the settle pin and the not-sent rows rule instead,
+	// so its last changes never reach this: disconnecting drops what is queued.
+	const turnStreaming = $derived($activeSession.isStreaming);
+	$effect(() => {
+		if (!chatColumnRef || !turnStreaming) return;
+		const observer = new MutationObserver(followGrowthNow);
+		observer.observe(chatColumnRef, { subtree: true, childList: true, characterData: true, attributes: true });
+		return () => observer.disconnect();
 	});
 
 	// Re-pin to the bottom once a late-loading image/video actually decodes.
@@ -2009,9 +2024,8 @@
 			tick().then(() => scheduleCurrentTurnAnchorMaintenance());
 			return;
 		}
-		tick().then(() => {
-			if (!shouldAutoScroll || !containerRef) return;
-			scrollToBottom();
+		tick().then(async () => {
+			await pinBelowCurrentReserve();
 			requestAnimationFrame(() => {
 				if (shouldAutoScroll) scrollToBottom();
 			});
@@ -2040,9 +2054,8 @@
 			tick().then(() => scheduleCurrentTurnAnchorMaintenance());
 			return;
 		}
-		tick().then(() => {
-			if (!shouldAutoScroll || !containerRef) return;
-			scrollToBottom();
+		tick().then(async () => {
+			await pinBelowCurrentReserve();
 			requestAnimationFrame(() => {
 				if (shouldAutoScroll) scrollToBottom();
 			});
@@ -2186,16 +2199,14 @@
 				tick().then(() => scheduleCurrentTurnAnchorMaintenance(true));
 			} else if (currentTurnAnchorId) {
 				// While the reserve remains, growth consumes blank room without moving
-				// the prompt. Once it is exhausted, reveal only the new overflow. Before
-				// this frame paints: a batch folded inside a frame would otherwise show
-				// everything below it, queued bubbles included, a chunk too low.
-				tick().then(() => void maintainCurrentTurnAnchor());
+				// the prompt. Once it is exhausted, reveal only the new overflow.
+				tick().then(() => scheduleCurrentTurnAnchorMaintenance());
 			} else {
-				// Normal streaming: single scroll is enough, before this frame paints as
-				// above. Re-check shouldAutoScroll: the user may have released since.
-				tick().then(() => {
-					if (shouldAutoScroll) scrollToBottom();
-				});
+				// Normal streaming: single scroll is enough. Re-check shouldAutoScroll
+				// in the deferred callback — the user may have scrolled up (wheel/touch
+				// disengage) in the frames between scheduling this and it running, and
+				// we must not yank them back down after they've released.
+				tick().then(() => requestAnimationFrame(pinBelowCurrentReserve));
 			}
 		}
 		if (!currentTurnAnchorId && (hasNewMessage || hasContentChange)) {
