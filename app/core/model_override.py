@@ -369,21 +369,18 @@ def _family_consent(model: str, text: str) -> Optional[bool]:
     the start receipt naming the actual model is the backstop for missed wording.
     """
     name = re.escape(model)
-    gap = r"(?:[\W_]+|\b(?:model|version|build|release|at|with)\b)*"
-    number = r"(?:v?\d[\w.]*|(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand)\b)"
-    qualified = (rf"\b(?:old|older|previous|prior|legacy|last|earlier|original|\d+\.\d+|\d{{4}}){gap}{name}\b|"
-                 rf"\b(?:claude{gap}{number}|{number}{gap}version{gap}of){gap}{name}\b|"
-                 rf"\b[\w-]+-{name}\b|\b{name}(?:-[\w-]+|{gap}{number})")
+    gap = r"(?:[\W_]|\b(?:model|version|build|release|at|with)\b)*"
+    number = r"(?:v?\d+|zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand)\b"
+    qualified = (rf"\b(?:old|older|previous|prior|legacy|last|earlier|original|\d+\.\d+|\d{{4}})\s+{name}\b|"
+                 rf"\b(?:claude\s+\d+(?:\.\d+)*|\d+(?:\.\d+)*\s+version\s+of)\s+{name}\b|"
+                 rf"\b[\w-]+-{name}\b|\b{name}(?:-[\w-]+|\s+{number}|{gap}(?:v?\d+\.\d+|1m)\b)")
     mentioned = False
     for sentence in re.split(r"(?<=[.!?])\s+|\n", str(text or "")):
         plain, pins = re.subn(qualified, "", sentence, flags=re.I)
-        if sentence.rstrip().endswith("?"):
-            if pins:
-                mentioned = True
-                continue
-            if not (_directed(sentence) and (re.match(r"\s*(?:can|could|would|will)\s+(?:you|we)\b", sentence, re.I)
-                                            or _AFFIRM.match(sentence))):
-                continue
+        if sentence.rstrip().endswith("?") and (pins or not (_directed(sentence) and (
+                re.match(r"\s*(?:can|could|would|will)\s+(?:you|we)\b", sentence, re.I) or _AFFIRM.match(sentence)))):
+            mentioned |= bool(pins)
+            continue
         mentioned |= bool(re.search(rf"\b{name}\b", sentence, re.I))
         if any(re.search(rf"(?<![\w-]){name}(?![\w-])", part, re.I) for part in affirmed_clauses(plain)):
             return True
@@ -1034,22 +1031,21 @@ async def accept(session_id: str, profile_id: Optional[str], *, model: str,
             await asyncio.to_thread(_remember_named, *key, evidence)
             return Acceptance(NAMED)
     return Acceptance(await _approve(session_id, profile_id, model=model, baseline=baseline,
-                                     action=action, cache_key=cache_key, key=key))
+                                     action=action, cache_key=cache_key, key=key, check_memory=native and not evidence))
 
 
 async def _approve(session_id: str, profile_id: Optional[str], *, model: str,
                    baseline: Optional[str], action: str, cache_key: Tuple[Any, ...],
-                   key: Tuple[str, ...]) -> str:
+                   key: Tuple[str, ...], check_memory: bool = False) -> str:
     """:data:`APPROVED` from the owner's prompt (shared by concurrent starts),
     else ``PermissionError`` with the refusal."""
     import asyncio
-    from app.core.model_registry import model_values
 
-    why = "no owner message named it and no prior chat approval was found"
-    if model in model_values() and any(_family_consent(model, entry.text) is False
+    why = "the current model request did not establish consent and no applicable chat approval was found"
+    if check_memory and any(_family_consent(model, entry.text) is False
             for entry in await asyncio.to_thread(owner_memories, session_id)):
         why = (f"a saved memory mentioned {label(model)} but was not honored; "
-               f'use plain wording such as "Use {label(model)} for reviews."')
+               f'the owner must reword it using plain wording such as "Use {label(model)} for reviews."')
     while cache_key not in _APPROVED:
         pending = _ASKING.get(cache_key)
         if pending is None:

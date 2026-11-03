@@ -133,7 +133,7 @@ const nativeModel = {
 	async act({ page, mark, variant, log }) {
 		const token = `native-model-${uniq()}`;
 		await mark('refuse native version pins and accept the native family name');
-		await typeAndSend(page, `${token}\nUse opus for PR 1040.\n${fakeAiTag(variant, 'tool-native-model-override')}`);
+		await typeAndSend(page, `${token}\nUse opus, 2 reviewers.\n${fakeAiTag(variant, 'tool-native-model-override')}`);
 		await waitTurnSettled(page, { text: 'Native model checks complete.', messagesAtLeast: 2 });
 		const parent = await api(page, 'GET', `/sessions/${await chatIdByToken(page, token)}`);
 		const results = parent.messages.filter((m) => m.tool_name === 'StartSession' && m.toolResult);

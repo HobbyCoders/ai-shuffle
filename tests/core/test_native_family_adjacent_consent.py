@@ -11,7 +11,7 @@ from tests.core.test_model_override_memory import M260, _save
 @pytest.mark.parametrize("text", [
     "Use Opus 4 as the reviewer", "Use Opus four", "use old opus",
     "use the previous opus", "use older opus", "use prior opus", "use legacy opus",
-    "use last opus", "Use Opus version 4", "use opus one", "use opus 1m",
+    "use last opus", "use opus one", "use opus 1m",
     "use 4.7 opus", "use claude-3-opus", "use opus-4-7", "use opus[1m]",
 ])
 async def test_adjacent_qualification_requires_agreement(chats, text):
@@ -25,9 +25,14 @@ async def test_adjacent_qualification_requires_agreement(chats, text):
 @pytest.mark.parametrize("text", [
     "use opus for PR 1040", "use opus for step 2", "Use opus instead of Sol 6.1",
     "use 4 opus agents", "use opus for the 2026 report", "run opus on port 8000",
-    "Use opus. 3 files changed", "Opus please - 4 agents",
+    "Use opus. 3 files changed", "Opus please - 4 agents", "use opus with 2 agents",
+    "Run this on Opus, one agent per PR", "use opus at 5pm", "use opus #1040",
+    "PR 1040: opus", "Use GPT 6.1 → Opus", "opus, 2 reviewers", "Opus, four", "Use Opus version 4",
 ])
-async def test_numbers_elsewhere_allow_start_and_receipt_names_actual_model(chats, text):
+@pytest.mark.parametrize("routing_memory", [False, True])
+async def test_numbers_elsewhere_allow_start_and_receipt_names_actual_model(chats, text, routing_memory):
+    if routing_memory:
+        _save("Risky/cross-cutting code and all UI work: Opus.")
     _turn("caller", "user", text, profile="agent")
     result = await _start({**ARGS, "model": "opus"})
     assert not result.is_error, result.text
@@ -108,6 +113,17 @@ async def test_saved_memory_whitespace_normalization_makes_a_number_adjacent(cha
     result = await _start({**ARGS, "model": "opus"})
     assert result.is_error and len(chats[2]) == 1 and not chats[1]
     assert "saved memory mentioned Opus" in result.text and "plain wording" in result.text
+    assert "the owner must reword" in result.text
+
+
+
+
+async def test_chat_qualification_does_not_blame_a_saved_memory(chats):
+    _save("Never go back to Opus 4.6.")
+    _turn("caller", "user", "Use Opus 4.7 now", profile="agent")
+    result = await _start({**ARGS, "model": "opus"})
+    assert result.is_error and len(chats[2]) == 1 and not chats[1]
+    assert "saved memory mentioned" not in result.text
 
 
 async def test_question_does_not_replace_a_newer_qualified_owner_request(chats):
