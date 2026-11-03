@@ -165,7 +165,8 @@ def _unknown_outcome(error):
 
 
 def _stopped_outcome(error, previous):
-    if previous and previous.get('claimed'):
+    # A deleted device cascades its command history. Absence cannot prove non-delivery.
+    if previous is None or previous.get('claimed'):
         return _unknown_outcome(error)
     return {'success': False, 'error': 'command_not_delivered', 'reason': error,
             'outcome_unknown': False, 'safe_to_retry': True,
@@ -223,7 +224,13 @@ async def execute(session_id, device_id, name, arguments, timeout=MAX_WAIT_SECON
             previous = await asyncio.to_thread(queue.cancel, command_id, session_id)
             settled_id, command_id = command_id, None
             if previous and previous['status'] == 'completed':
-                return _completed_outcome(settled_id, name, previous)
+                if name in HANDOFFS:
+                    return _completed_outcome(settled_id, name, previous)
+                # Completion is factual, but no screen/location data may cross revoked ownership.
+                return {'command_id': settled_id, 'success': False, 'error': str(exc),
+                        'completed_on_device': True,
+                        'message': 'The command completed on the device, but its result is withheld '
+                                   'because this session is no longer authorized.'}
             return _stopped_outcome(str(exc), previous)
         return {'error': str(exc)}
     finally:

@@ -91,7 +91,9 @@ class DeviceToolsRuntimeTest {
         }
         assertTrue("Main-thread operation did not settle", condition())
     }
-    @Test fun immediatePostBeforePauseBlocksTheBatchedCalendarEditor() = runBlocking {
+    @Test fun immediatePostBeforePauseBlocksTheBatchedCalendarEditor() = exerciseUnpausedHandoff(false)
+    @Test fun laterCommandRunsAfterAHandoffThatNeverPausedTheHost() = exerciseUnpausedHandoff(true)
+    private fun exerciseUnpausedHandoff(runLaterCommand: Boolean) = runBlocking {
         Robolectric.buildActivity(ApprovalHost::class.java).also {
             it.get().setTheme(R.style.Theme_AIShuffle)
         }.setup().visible().use { controller ->
@@ -99,7 +101,7 @@ class DeviceToolsRuntimeTest {
             host(controller.get())
             val epoch = field("generation").getLong(null)
             val expires = System.currentTimeMillis() + 20_000
-            val commands = JSONArray()
+            var commands = JSONArray()
                 .put(JSONObject().put("id", "alarm").put("name", "set_alarm")
                     .put("arguments", JSONObject().put("hour", 7).put("minute", 0)).put("expires_at", expires))
                 .put(JSONObject().put("id", "calendar").put("name", "create_calendar_event")
@@ -107,15 +109,17 @@ class DeviceToolsRuntimeTest {
                     .put("expires_at", expires))
             val journal = CommandJournal(app.getSharedPreferences("post-before-pause", Context.MODE_PRIVATE))
             val posted = mutableListOf<JSONObject>()
-            val poller = DeviceCommandPoller(journal, "scope", { path, body ->
+            val request: suspend (String, JSONObject?) -> JSONObject = { path, body ->
                 if (path == "pending") JSONObject().put("commands", commands) else {
                     assertTrue("This reproduction must POST before any lifecycle pause", DeviceToolsRuntime.hasAttachedActivity())
                     posted.add(body!!.getJSONObject("result"))
                     JSONObject().put("ok", true) // Immediate POST, no held response and no synchronous detach.
                 }
-            }, { DeviceToolsRuntime.canExecute(epoch) }, DeviceToolExecutor(app)::execute)
+            }
+            val executor = DeviceToolExecutor(app)
+            // Do not copy poller construction, its canExecute lambda or its finally boundary here.
             val work = CoroutineScope(Dispatchers.Main.immediate).async {
-                try { poller.pollOnce(true) } finally { DeviceToolsRuntime.finishHandoff(epoch) }
+                DeviceToolsRuntime.pollCommands(journal, "scope", epoch, true, executor, request)
             }
             try {
                 pumpUntil { ToolApprovals.pending.value != null }
@@ -128,6 +132,21 @@ class DeviceToolsRuntimeTest {
                 work.await()
                 assertEquals("Only the alarm UI may launch before onPause", 1, controller.get().launches)
                 assertEquals(listOf("launched_confirmation", "foreground_required"), posted.map { it.getString("status") })
+                if (runLaterCommand) {
+                    assertTrue(DeviceToolsRuntime.hasAttachedActivity())
+                    commands = JSONArray().put(JSONObject().put("id", "later-calendar").put("name", "create_calendar_event")
+                        .put("arguments", JSONObject().put("title", "Later").put("start_time", "2030-01-01T11:00:00Z"))
+                        .put("expires_at", expires))
+                    val later = CoroutineScope(Dispatchers.Main.immediate).async {
+                        DeviceToolsRuntime.pollCommands(journal, "scope", epoch, true, executor, request)
+                    }
+                    try {
+                        pumpUntil { later.isCompleted }
+                        later.await()
+                        assertEquals("An unpaused handoff must not block a later poll", 2, controller.get().launches)
+                        assertEquals("launched_confirmation", posted.last().getString("status"))
+                    } finally { later.cancel() }
+                }
             } finally { work.cancel() }
         }
     }

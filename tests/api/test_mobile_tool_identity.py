@@ -229,7 +229,7 @@ def test_concurrent_first_bind_no_rebind(world, monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('status,claimed', [('queued', False), ('claimed', True), ('completed', True)])
+@pytest.mark.parametrize('status,claimed', [('pending', False), ('claimed', True), ('completed', True)])
 async def test_revocation_during_action_wait_cancels(world, monkeypatch, status, claimed):
     create('running', identity.principal('paired', 'one', 'shc_one'))
     monkeypatch.setattr(mobile_tools.queue, 'state', lambda _: {'enabled': True, 'tools': '["read_screen"]'})
@@ -241,7 +241,9 @@ async def test_revocation_during_action_wait_cancels(world, monkeypatch, status,
     monkeypatch.setattr(mobile_tools.queue, 'cancel', cancel)
     result = await mobile_tools.execute('running', 'one', 'read_screen', {})
     if status == 'completed':
-        assert result == {'command_id': 'cmd', 'result': {'success': True}}
+        assert result['error'] == 'device_not_authorized'
+        assert result['completed_on_device'] is True
+        assert 'result' not in result
     elif claimed:
         assert result['error'] == 'device_not_authorized'
         assert result['outcome_unknown'] is True

@@ -155,6 +155,19 @@ object DeviceToolsRuntime {
     internal fun canExecute(epoch: Long): Boolean =
         generation == epoch && !handoffInFlight && (activity.get() != null || hasCrossAppHost())
 
+    /** The production poller wiring and handoff boundary, also used by JVM lifecycle tests. */
+    internal suspend fun pollCommands(
+        journal: CommandJournal, scopeId: String, epoch: Long, enabled: Boolean,
+        executor: DeviceToolExecutor, request: suspend (String, JSONObject?) -> JSONObject,
+    ) {
+        try {
+            DeviceCommandPoller(journal, scopeId, request, { canExecute(epoch) },
+                executor::execute, { mutableAvailability.value = "queue_full" }).pollOnce(enabled)
+        } finally {
+            finishHandoff(epoch)
+        }
+    }
+
     private fun startPolling() {
         val app = context ?: return
         val target = server ?: return
@@ -175,13 +188,8 @@ object DeviceToolsRuntime {
                     val enabled = ToolsPreferences(app).enabled
                     DeviceToolsApi.request(target, "capabilities", capabilities(enabled))
                     mutableAvailability.value = if (!enabled) "disabled" else if (activity.get() != null) "foreground_only" else "cross_app_consent_required"
-                    try {
-                        DeviceCommandPoller(journal, scopeId,
-                            { path, body -> DeviceToolsApi.request(target, path, body) },
-                            { canExecute(currentGeneration) },
-                            executor::execute, { mutableAvailability.value = "queue_full" }).pollOnce(enabled)
-                    } finally {
-                        finishHandoff(currentGeneration)
+                    pollCommands(journal, scopeId, currentGeneration, enabled, executor) { path, body ->
+                        DeviceToolsApi.request(target, path, body)
                     }
                 } catch (e: CancellationException) { throw e }
                 catch (_: ToolsAuthorizationRevoked) { stop(); mutableAvailability.value = "authorization_revoked"; return@launch }

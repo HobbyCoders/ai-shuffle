@@ -362,6 +362,72 @@ async def test_revocation_settles_real_delivery_history(isolated, monkeypatch, s
     assert queue.outcome(observed[0], 'sa')['status'] == ('completed' if status == 'completed' else 'cancelled')
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize('delete_device', [False, True])
+async def test_delivered_command_with_deleted_history_has_unknown_outcome(isolated, monkeypatch, delete_device):
+    conn, devices = isolated
+    conn.execute('PRAGMA foreign_keys=ON')
+    enable()
+    original_enqueue = queue.enqueue
+    observed = []
+    def deliver_then_delete(*args):
+        queued = original_enqueue(*args)
+        observed.append(queued['id'])
+        assert [command['id'] for command in api.pending(device=devices['a'])['commands']] == observed
+        assert queue.outcome(queued['id'], 'sa')['status'] == 'claimed'
+        if delete_device:
+            # The same FK cascade as deleting a phone through the mobile API.
+            conn.execute('DELETE FROM mobile_devices WHERE device_id=?', ('a',))
+            devices.pop('a')
+        else:
+            # Keep authorization: exercise execute's independent `not row` branch.
+            conn.execute('DELETE FROM mobile_tool_commands WHERE id=?', (queued['id'],))
+        conn.commit()
+        assert queue.outcome(queued['id'], 'sa') is None
+        assert queue.cancel(queued['id'], 'sa') is None
+        return queued
+    monkeypatch.setattr(queue, 'enqueue', deliver_then_delete)
+    result = await service.execute('sa', 'a', 'open_url', {'url': 'https://example.com'})
+    assert result['error'] == ('device_not_authorized' if delete_device else 'command_expired_or_cancelled')
+    assert result['outcome_unknown'] is True
+    assert result.get('safe_to_retry') is not True
+    assert 'verify' in result['message'].lower()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('name,payload', [
+    ('read_screen', {'text': 'private-screen-content'}),
+    ('get_location', {'latitude': 26.7, 'longitude': -80.1}),
+])
+async def test_revoked_controller_cannot_receive_sensitive_result_posted_after_revocation(isolated, monkeypatch, name, payload):
+    queue.capabilities('a', True, [name])
+    queue.claim('a')
+    original_enqueue = queue.enqueue
+    original_authorizer = service.device_authorizer
+    membership = {'active': True}
+    monkeypatch.setattr(service, 'device_authorizer',
+                        lambda session: original_authorizer(session) if membership['active'] else [])
+    observed = []
+    def revoke_then_post(*args):
+        queued = original_enqueue(*args)
+        observed.append(queued['id'])
+        assert [command['id'] for command in api.pending(device=isolated[1]['a'])['commands']] == observed
+        membership['active'] = False
+        assert service.authorized_devices('sa') == []
+        # The phone's own key remains valid: it can finish in the next 250 ms poll gap.
+        assert queue.submit_result('a', queued['id'], json.dumps(payload)) is None
+        assert queue.outcome(queued['id'], 'sa')['status'] == 'completed'
+        return queued
+    monkeypatch.setattr(queue, 'enqueue', revoke_then_post)
+    result = await service.execute('sa', 'a', name, {})
+    assert result['error'] == 'device_not_authorized'
+    assert result['completed_on_device'] is True
+    assert 'completed on the device' in result['message'].lower()
+    assert 'result' not in result
+    for field in payload:
+        assert field not in json.dumps(result)
+
+
 def test_undelivered_cancellation_preserves_completed_history(isolated):
     enable()
     cmd = enqueue()

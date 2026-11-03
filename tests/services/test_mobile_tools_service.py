@@ -281,15 +281,24 @@ async def test_execute_expired_or_cancelled(wired, monkeypatch, row):
     assert wired["cancelled"] == ["cmd-1"]
 
 
-@pytest.mark.parametrize("status", [None, "pending", "cancelled", "expired"])
+@pytest.mark.parametrize("status", ["pending", "cancelled", "expired"])
 async def test_never_delivered_commands_are_safe_to_retry(wired, monkeypatch, status):
-    monkeypatch.setattr(service.queue, "outcome", lambda *a: {"status": status} if status else None)
-    monkeypatch.setattr(service.queue, "cancel", lambda *a: {"status": status, "claimed": False} if status else None)
+    monkeypatch.setattr(service.queue, "outcome", lambda *a: {"status": status})
+    monkeypatch.setattr(service.queue, "cancel", lambda *a: {"status": status, "claimed": False})
     result = await service.execute("s", "dev", "read_screen", {}, timeout=0.01)
     assert result["error"] == "command_not_delivered"
     assert result["outcome_unknown"] is False
     assert result["safe_to_retry"] is True
     assert "safe to retry" in result["message"].lower()
+
+
+@pytest.mark.parametrize("last_status", [None, "pending"])
+async def test_missing_command_history_is_unknown_not_safe_to_retry(wired, monkeypatch, last_status):
+    monkeypatch.setattr(service.queue, "outcome", lambda *a: {"status": last_status} if last_status else None)
+    result = await service.execute("s", "dev", "read_screen", {}, timeout=0.01)
+    assert result["outcome_unknown"] is True
+    assert result.get("safe_to_retry") is not True
+    assert "verify" in result["message"].lower()
 
 
 async def test_timeout_uses_atomic_cancel_not_the_last_poll(wired, monkeypatch):
