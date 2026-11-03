@@ -655,7 +655,7 @@ def workflows(ctx: Context) -> None:
 
 def android_play(ctx: Context) -> None:
     for script in ("test-version-name.py", "test-mobile-apk.py", "test-emulator-readiness.py",
-                   "test-instrumentation-parser.py", "test-ui-runner.py"):
+                   "test-instrumentation-parser.py", "test-ui-runner.py", "test-robolectric-dependencies.py"):
         run([ctx.python, f"android/ci/{script}"])
     # The workflow test parses each inline step with /bin/bash -n.
     if Path("/bin/bash").exists():
