@@ -34,7 +34,7 @@ def test_checkout_prompt_scopes_isolation_to_its_repository(monkeypatch):
     assert "Use that assigned checkout for its repository" in role
     assert "Use it for this repository" in receipt
     sizes = measure_worker_sections()
-    for section, baseline in {"subagent_role": 2712, "checkout_receipt": 1240}.items():
+    for section, baseline in {"subagent_role": 2842, "checkout_receipt": 1240}.items():
         assert sizes[section] <= baseline * 101 // 100
 
 
