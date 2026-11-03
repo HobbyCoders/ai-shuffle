@@ -113,7 +113,7 @@ three desktop shards, not the separate stable-release portability matrix.
 | docs | `android-and-docs` → exact local docs-copy helper; JavaScript contracts also compare copies |
 | desktop | `desktop` → existing typecheck and all unit tests |
 | android-bridge | `android-and-docs` → existing local Node download-bridge tests |
-| android-play | `android-and-docs` → all six local Python/workflow-shell test scripts |
+| android-play | `android-and-docs` → all local Python/workflow-shell test scripts |
 | workflows/policy | `policy` → artifact/cost scripts and the complete local eight-file policy set, plus parity regressions |
 | update-reach | `update-reach` → regression set and strict signed-publication/merged-PR readiness (not advisory) |
 | full preflight security | `supply-chain` → offline secret scan and identical report-only dependency audit, including source-publisher |
