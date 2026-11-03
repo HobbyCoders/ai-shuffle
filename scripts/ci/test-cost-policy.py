@@ -161,6 +161,15 @@ class CostPolicyTests(unittest.TestCase):
             self.assertNotIn(forbidden, text)
         self.assertIn("CODE_SIGNING_ALLOWED=NO", text)
 
+    def test_journey_map_is_validated_by_javascript_contracts(self):
+        job = workflow("ci-frontend.yml")["jobs"]["contracts"]
+        step = next(step for step in job["steps"]
+                    if step.get("name") == "Validate UI journey map")
+        self.assertEqual(step["run"], "node frontend/tests/journeys/select.mjs --check")
+        self.assertEqual(step.get("working-directory", job["defaults"]["run"]["working-directory"]), ".")
+        self.assertNotIn("if", step)
+        self.assertNotIn("continue-on-error", step)
+
     def test_manual_checks_use_standard_runners_and_keep_backend_parallelism(self):
         backend = workflow("ci-backend.yml")
         javascript = workflow("ci-frontend.yml")

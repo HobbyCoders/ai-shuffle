@@ -40,6 +40,8 @@ run everything; the rest name the journeys they affect. Unit test files and
 files no rule covers (docs, unrelated backend) select nothing. `--check`
 fails when a glob matches no file or a journey has no rule, so a rename
 cannot silently drop coverage; run it when you add a journey or move files.
+The `JavaScript contracts, docs and frontend audit` CI job enforces this check
+on every PR, independently of the shards that run every journey.
 
 ## Run one
 

@@ -301,6 +301,7 @@
 			"journeys": ["fast-midturn"],
 			"globs": [
 				"frontend/tests/journeys/fast-midturn.journey.mjs",
+				"frontend/src/lib/constants/models.svelte.ts",
 				"frontend/src/lib/components/chat/ControlsDock.svelte",
 				"frontend/src/lib/components/chat/EffortPopoverCard.svelte",
 				"frontend/src/lib/components/SystemMessage.svelte",
