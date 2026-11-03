@@ -592,6 +592,45 @@ def test_a_long_cwd_reuses_the_cli_hashed_project_dir(tmp_path, _short_dir_limit
     assert path.parent == hashed
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sibling_count", [1, 2])
+async def test_long_cwd_lookup_uses_the_handle_within_its_prefix(
+    tmp_path, monkeypatch, _short_dir_limit, sibling_count,
+):
+    options = _options(tmp_path)
+    prefix = cli_project_dir_name(os.path.abspath(options.cwd))[:20]
+    transcript = _write_cli_jsonl(tmp_path, "cli-handle", [
+        _user("My codename is PELICAN"), _assistant("Noted: PELICAN"),
+    ], project=prefix + "-hash-one")
+    if sibling_count == 2:
+        _write_cli_jsonl(tmp_path, "other-handle", [_user("other chat")],
+                         project=prefix + "-hash-two")
+    # An unrelated cwd with the same handle must not participate in lookup.
+    _write_cli_jsonl(tmp_path, "cli-handle", [_user("unrelated")], project="unrelated")
+    assert fluid_transcript.find_cli_transcript(
+        "cli-handle", _projects(tmp_path), options.cwd,
+    ) == transcript
+    store = MemoryStore()
+    await _seed(store, PELICAN, handle="cli-handle")
+    _no_reseed(monkeypatch)
+    captured = await _connect(monkeypatch, store, options)
+    assert captured["cli_session_id"] == "cli-handle"
+
+
+def test_long_cwd_lookup_refuses_a_handle_in_two_prefix_siblings(tmp_path, _short_dir_limit):
+    options = _options(tmp_path)
+    prefix = cli_project_dir_name(os.path.abspath(options.cwd))[:20]
+    for suffix in ("-hash-one", "-hash-two"):
+        _write_cli_jsonl(tmp_path, "cli-handle", [_user("copied handle")], project=prefix + suffix)
+    assert fluid_transcript.find_cli_transcript("cli-handle", _projects(tmp_path), options.cwd) is None
+
+
+def test_long_cwd_lookup_does_not_scan_an_unrelated_prefix(tmp_path, _short_dir_limit):
+    options = _options(tmp_path)
+    _write_cli_jsonl(tmp_path, "cli-handle", [_user("wrong cwd")], project="unrelated")
+    assert fluid_transcript.find_cli_transcript("cli-handle", _projects(tmp_path), options.cwd) is None
+
+
 def test_a_long_cwd_without_a_cli_dir_keeps_the_old_name(tmp_path, _short_dir_limit):
     from app.core.jsonl_parser import get_project_dir_name
 

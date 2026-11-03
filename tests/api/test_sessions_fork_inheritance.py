@@ -154,8 +154,8 @@ def test_no_project_fork_reseeds_its_own_runtime_cwd(fork_client, monkeypatch, t
     options, _ = query_options.build_options_from_profile(
         database.get_profile("fork-cwd-agent"), session_id=fork_id,
     )
-    # Exercise the real creation shape and runtime producer. Do NOT copy the
-    # parent's mode to make this pass: fork privilege policy is separate work.
+    # Exercise the runtime producer against the exact persisted fork fields,
+    # including the absent mode and the recorded parent session.
     assert row["mode"] is None and row["parent_session_id"] == PARENT_SID
     assert options.cwd != parent_options.cwd
     handle = fluid_transcript.get_cli_session_id(row["sdk_session_id"])
