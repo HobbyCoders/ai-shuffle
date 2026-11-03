@@ -2020,6 +2020,39 @@ async def test_unpark_session_lookup_error_is_not_treated_as_deletion(mock_db, c
     assert "dropped task notification for deleted session" not in caplog.text
 
 
+@pytest.mark.parametrize("leaves", ["recording_failed", "cancelled"])
+async def test_a_pump_that_leaves_early_closes_its_turn_before_the_recorder(mock_db, leaves):
+    """The turn holds its chat until its generator closes, so don't leave it parked."""
+    turn = turns_db.enqueue_turn("s-leaves", "user", prompt="hi")
+    closed = []
+
+    async def pump(**_kwargs):
+        try:
+            yield {"type": "chunk", "content": "x"}
+            yield {"type": "done", "metadata": {}}
+        finally:
+            closed.append("turn")
+
+    with _runtime_env(pump=pump) as env:
+        rt = session_runtime.SessionRuntime(turn)
+
+        async def on_event(_event):
+            if leaves == "recording_failed":
+                rt._on_recorder_recording_failed()
+                return
+            rt._pump_task.cancel()
+            await asyncio.sleep(0)
+
+        async def close():
+            closed.append("recorder")
+
+        env["recorder"].on_event.side_effect = on_event
+        env["recorder"].close.side_effect = close
+        with patch("app.core.query_session_lifecycle.interrupt_session", new=AsyncMock()):
+            await asyncio.wait_for(rt.execute(), 5)
+    assert closed == ["turn", "recorder"]
+
+
 async def test_unpark_turn_threads_completion_frames_to_provider_overrides(mock_db):
     _seed_session("s12", "active")
     frames = [{

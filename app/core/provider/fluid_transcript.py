@@ -53,6 +53,7 @@ import logging
 import os
 import re
 import tempfile
+import threading
 import time
 import uuid as _uuid
 from dataclasses import dataclass
@@ -942,6 +943,7 @@ def rewind_fluid_session(
     target_role: str = "user",
     *,
     reset_session_id: Optional[str] = None,
+    stop: Optional[threading.Event] = None,
 ) -> RewindResult:
     """Rewind a fluid session by moving its head to an earlier node.
 
@@ -954,7 +956,24 @@ def rewind_fluid_session(
     WHERE it cuts is decided by :func:`compute_rewind_keep_count`, the same
     function the JSONL truncation and the session-store truncation use, so a
     rewind lands on the same message under fluid as it does on the legacy path.
+
+    ``stop`` says the request was cancelled. A claim from then on must not land:
+    the chat is free again, and it would take the session from a newer engine.
     """
+    # The pooled engine is evicted first, but its last writes can still be on their
+    # way and landing later would undo the rewind. The claim waits them out, so the
+    # path read below includes them, and refuses them from here on.
+    from app.core.provider.fluid_pg_store import _claim_session_sync
+
+    try:
+        generation = _claim_session_sync(sdk_session_id, stop=stop or threading.Event())
+    except Exception as exc:
+        logger.warning("Rewind of %s could not take the session: %r", sdk_session_id, exc)
+        return RewindResult(
+            success=False,
+            message="Fluid rewind failed",
+            error="A write to this chat is still finishing. Try the rewind again in a moment.",
+        )
     path = load_fluid_path(sdk_session_id)
     if not path:
         return RewindResult(
@@ -973,7 +992,12 @@ def rewind_fluid_session(
         )
 
     new_head = path[keep_count - 1]["node_id"] if keep_count > 0 else None
-    _set_head(sdk_session_id, new_head, reset_session_id=reset_session_id)
+    if not _set_head(sdk_session_id, new_head, generation, reset_session_id=reset_session_id):
+        return RewindResult(
+            success=False,
+            message="Fluid rewind failed",
+            error="The session was continued while this rewind was running.",
+        )
 
     return RewindResult(
         success=True,
@@ -981,12 +1005,19 @@ def rewind_fluid_session(
         checkpoint_uuid=target_uuid,
         messages_removed=len(entries) - keep_count,
         remaining_user_turns=_count_user_prompts(entries[:keep_count]),
+        writer_generation=generation,
     )
 
 
 def _set_head(
-    session_id: str, node_id: Optional[str], *, reset_session_id: Optional[str] = None,
-) -> None:
+    session_id: str, node_id: Optional[str], generation: Optional[int], *,
+    reset_session_id: Optional[str] = None,
+) -> bool:
+    """Move the head, unless another writer has claimed the session since.
+
+    A rewind's thread outlives its request, and a connect made in between owns
+    the session by then.
+    """
     from app.db import turns as turns_db
     from app.db.base import get_cursor, get_db
     from app.db.compat import ph
@@ -995,12 +1026,14 @@ def _set_head(
         cursor = get_cursor(conn)
         cursor.execute(
             f"UPDATE fluid_sessions SET head_node_id = {ph()} "
-            f"WHERE session_id = {ph()}",
-            (node_id, session_id),
+            f"WHERE session_id = {ph()} AND writer_generation = {ph()}",
+            (node_id, session_id, generation),
         )
-        if reset_session_id:
+        moved = bool(cursor.rowcount)
+        if moved and reset_session_id:
             # The move and "that failure no longer applies" land together or not at all.
             turns_db.mark_conversation_reset(reset_session_id, cursor=cursor)
+        return moved
 
 
 # ─── Deletion ────────────────────────────────────────────────────────────────
@@ -1085,6 +1118,8 @@ class ReseedResult:
       to re-seed and nothing to warn about.
     * ``"failed"``   — the materialization or the store write failed; the CLI
       still holds the old history and the caller must keep the #815 warning.
+    * ``"superseded"`` — another writer claimed the session during the re-seed.
+      Its handle and event numbers stand: this re-seed stored nothing more.
     """
 
     status: str
@@ -1122,7 +1157,32 @@ def get_cli_session_id(sdk_session_id: str) -> Optional[str]:
     return dict(row).get("cli_session_id")
 
 
-def _set_cli_session_id(sdk_session_id: str, cli_session_id: Optional[str]) -> None:
+class SessionSuperseded(Exception):
+    """Another writer claimed the session after this write's owner did."""
+
+
+def _require_owner(cursor: Any, session_id: str, generation: Optional[int]) -> None:
+    """Inside a write's transaction: hold the owner fixed until it commits, or raise.
+
+    A claim's update waits for this row lock, so the claim's reads include the
+    write. Without a ``generation`` the caller is the only writer there is.
+    """
+    from app.db.compat import ph
+
+    if generation is None:
+        return
+    cursor.execute(
+        f"SELECT 1 FROM fluid_sessions WHERE session_id = {ph()} "
+        f"AND writer_generation = {ph()} FOR SHARE",
+        (session_id, generation),
+    )
+    if cursor.fetchone() is None:
+        raise SessionSuperseded(session_id)
+
+
+def _set_cli_session_id(
+    sdk_session_id: str, cli_session_id: Optional[str], *, generation: Optional[int] = None,
+) -> None:
     """Store the handle the next turn will ``--resume``.
 
     Plain SQL for the same reason every other write here is (module docstring):
@@ -1136,6 +1196,7 @@ def _set_cli_session_id(sdk_session_id: str, cli_session_id: Optional[str]) -> N
 
     with get_db() as conn:
         cursor = get_cursor(conn)
+        _require_owner(cursor, sdk_session_id, generation)
         cursor.execute(
             f"UPDATE fluid_sessions SET cli_session_id = {ph()} "
             f"WHERE session_id = {ph()}",
@@ -2143,15 +2204,19 @@ def _entry_row(entry: Dict[str, Any], paired: set) -> Optional[Dict[str, Any]]:
     return row
 
 
-def _append_archive(sdk_session_id: str, archive: Sequence[Dict[str, str]]) -> None:
+def _append_archive(
+    sdk_session_id: str, archive: Sequence[Dict[str, str]], *, generation: Optional[int] = None,
+) -> None:
     """Persist the rows a re-seed's compaction took out of context that the
     stored path does not hold (``ContextArchived``), so the note's refs
     resolve through ``HistoryExpand`` / ``HistorySearch``. Raises on failure.
 
     The event takes the next ``seq``. A re-seed runs before the connect's
     engine seeds its bus from the stored maximum (rewind evicts the pooled
-    client first; a fork's session is new), so nothing else numbers events
-    for this session meanwhile; a collision anyway retries on the next seq.
+    client first; a fork's session is new), so its owner numbers no events
+    meanwhile; a collision anyway retries on the next seq. A re-seed left running
+    by a connect that gave up no longer owns the session and stops here, where it
+    could otherwise take a seq its replacement has already issued.
     """
     from fluid.events.model import ContextArchived, event_to_dict
     from psycopg2.extras import Json
@@ -2168,6 +2233,7 @@ def _append_archive(sdk_session_id: str, archive: Sequence[Dict[str, str]]) -> N
     for _ in range(5):
         with get_db() as conn:
             cursor = get_cursor(conn)
+            _require_owner(cursor, sdk_session_id, generation)
             cursor.execute(
                 f"SELECT seq FROM fluid_session_events WHERE session_id = {ph()} "
                 f"ORDER BY seq DESC LIMIT 1",
@@ -2242,6 +2308,8 @@ def _fit_window(
     entries: List[Dict[str, Any]],
     nodes: Optional[Sequence[Any]],
     context_window: int,
+    *,
+    generation: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """``entries``, compacted mechanically when they would hand Claude Code
     more than it compacts at (:func:`reseed_compaction_threshold`).
@@ -2259,7 +2327,8 @@ def _fit_window(
     through the compaction note after being archived, so everything trimmed
     stays recoverable through ``HistoryExpand`` / ``HistorySearch``. No model
     is called. Returns ``entries`` unchanged when they fit, when nothing can
-    be reclaimed, or on any failure (logged), and never raises.
+    be reclaimed, or on any failure (logged). Raises only
+    :class:`SessionSuperseded`: then nothing here may be stored at all.
     """
     threshold = reseed_compaction_threshold(context_window)
     before = _estimated_tokens(entries)
@@ -2286,7 +2355,9 @@ def _fit_window(
             archive=archive,
         )
         if archive:
-            _append_archive(sdk_session_id, archive)
+            _append_archive(sdk_session_id, archive, generation=generation)
+    except SessionSuperseded:
+        raise
     except Exception as exc:  # NothingToCompact is a ValueError
         logger.warning(
             "fluid re-seed: session %s is ~%d tokens, over the %d-token "
@@ -2319,6 +2390,7 @@ def reseed_delegated_cli_session(
     *,
     force: bool = False,
     context_window: Optional[int] = None,
+    generation: Optional[int] = None,
 ) -> ReseedResult:
     """Re-seed the delegated CLI from fluid's (already rewound) context.
 
@@ -2338,6 +2410,10 @@ def reseed_delegated_cli_session(
     when it would still exceed what Claude Code compacts at in
     ``context_window`` (:func:`_fit_window`; resolved from the bound app
     session when not given).
+
+    ``generation`` is the caller's claim on the session. Its thread can outlive
+    the caller, so with it every store write here is refused once a newer claim
+    exists. Only a fork omits it: nothing else can reach its brand-new session.
 
     Never raises: a failed re-seed is a degraded rewind (the store is still
     correct, only the CLI's own history is stale), and the caller reports that
@@ -2372,12 +2448,16 @@ def reseed_delegated_cli_session(
             entries = _fit_window(
                 sdk_session_id, entries, nodes,
                 context_window or delegated_window_for(sdk_session_id),
+                generation=generation,
             )
             entries = _with_what_it_was_told(sdk_session_id, entries, nodes)
         new_cli_session_id = str(_uuid.uuid4())
         lines = build_cli_transcript_entries(
             entries, new_cli_session_id, working_dir
         )
+    except SessionSuperseded:
+        logger.info("fluid re-seed for %s stopped: the session has a newer writer", sdk_session_id)
+        return ReseedResult(status="superseded")
     except Exception as exc:
         logger.error(
             "fluid re-seed could not materialize a CLI transcript for %s: %s",
@@ -2390,7 +2470,10 @@ def reseed_delegated_cli_session(
         # context, so drop the handle rather than writing an empty file the CLI
         # would refuse to resume.
         try:
-            _set_cli_session_id(sdk_session_id, None)
+            _set_cli_session_id(sdk_session_id, None, generation=generation)
+        except SessionSuperseded:
+            logger.info("fluid re-seed for %s stopped: the session has a newer writer", sdk_session_id)
+            return ReseedResult(status="superseded")
         except Exception as exc:
             logger.error(
                 "fluid re-seed could not clear the CLI handle for %s: %s",
@@ -2411,7 +2494,10 @@ def reseed_delegated_cli_session(
         return ReseedResult(status="failed", error=str(exc))
 
     try:
-        _set_cli_session_id(sdk_session_id, new_cli_session_id)
+        _set_cli_session_id(sdk_session_id, new_cli_session_id, generation=generation)
+    except SessionSuperseded:
+        logger.info("fluid re-seed for %s stopped: the session has a newer writer", sdk_session_id)
+        return ReseedResult(status="superseded")
     except Exception as exc:
         logger.error(
             "fluid re-seed wrote %s but could not store the handle for %s: %s",

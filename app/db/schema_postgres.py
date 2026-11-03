@@ -1021,13 +1021,16 @@ def create_postgres_schema(cursor: Any) -> None:
     # project_root: the project the session ran in, derived from its cwd
     # (fluid.store.base.project_root_for) — SessionSearch scopes cross-session
     # recall on it. NULL = unknown (legacy session), never "another project".
+    # writer_generation: bumped by each engine taking the session over, and checked
+    # by that engine's writes, so a replaced engine's late commit is refused.
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS fluid_sessions (
             session_id TEXT PRIMARY KEY,
             head_node_id TEXT,
             created_at DOUBLE PRECISION NOT NULL,
             cli_session_id TEXT,
-            project_root TEXT
+            project_root TEXT,
+            writer_generation BIGINT NOT NULL DEFAULT 0
         )
     """)
     cursor.execute("""

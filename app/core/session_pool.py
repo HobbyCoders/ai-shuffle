@@ -21,6 +21,7 @@ user messages, avoiding repeated subprocess spawns and JSONL history replays.
 """
 
 import asyncio
+import inspect
 import logging
 import os
 import time
@@ -252,6 +253,41 @@ class SessionState:
 def is_subprocess_alive(state: SessionState) -> bool:
     """Check if the subprocess for a session state is still running."""
     return state.adapter.is_alive()
+
+
+def is_mid_turn(state: "SessionState") -> bool:
+    """A route is running this client, or its engine still has a turn going.
+
+    The engine refuses a new turn in that state, and a route that hears that takes
+    the client for broken, so a request must be refused before it gets that far.
+    """
+    engine = getattr(state.adapter, "engine", None)
+    return state.is_streaming or getattr(engine, "turn_running", None) is True
+
+
+async def retire_if_replaced(pool: Any, session_id: str) -> None:
+    """Before a reuse gate, close a pooled client another engine has replaced.
+
+    A takeover normally removes the pooled client first, but a rewind whose
+    eviction failed or another install's engine can leave it here. Reusing it
+    would drop the whole turn's writes without a word, so the gate builds a new
+    one instead. A client mid-turn is left to finish, and a failed check keeps
+    the client: this must not be what fails a turn.
+    """
+    state = pool.get(session_id)
+    if state is None or state.is_streaming:
+        return
+    check = getattr(state.adapter, "replaced_by_another_engine", None)
+    if not inspect.iscoroutinefunction(check):
+        return
+    try:
+        replaced = await check()
+    except Exception:
+        logger.warning("Could not check who owns a pooled session", exc_info=True)
+        return
+    # A turn may have started on this client during that await.
+    if replaced is True and pool.get(session_id) is state and not state.is_streaming:
+        await pool.remove(session_id, preserve_session=True)
 
 
 def subprocess_pid(state: SessionState) -> Optional[int]:

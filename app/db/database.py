@@ -1602,6 +1602,20 @@ def _run_column_migrations(cursor: Any) -> None:
         cursor.execute("ALTER TABLE fluid_sessions ADD COLUMN project_root TEXT")
         migrations_applied.append("fluid_sessions.project_root")
 
+    # fluid_sessions.writer_generation. Bumped by each engine taking a session
+    # over and checked by that engine's writes, so a replaced engine's late commit
+    # is refused. 0 on every existing row, and the first new engine bumps it. A
+    # constant default adds no table rewrite. An older build ignores the column
+    # and writes unchecked, as it always did. No SCHEMA_VERSION bump: the
+    # migrations fingerprint re-runs this pass.
+    if table_exists(cursor, "fluid_sessions") and not column_exists(
+        cursor, "fluid_sessions", "writer_generation"
+    ):
+        cursor.execute(
+            "ALTER TABLE fluid_sessions ADD COLUMN writer_generation BIGINT NOT NULL DEFAULT 0"
+        )
+        migrations_applied.append("fluid_sessions.writer_generation")
+
     # Cross-session recall trigram indexes. SessionSearch's SQL prefilter is a
     # substring ILIKE over the raw JSON of both transcript stores; without an
     # index that is a sequential scan of every message row in the install, per

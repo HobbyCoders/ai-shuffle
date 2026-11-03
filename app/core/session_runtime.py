@@ -1491,6 +1491,7 @@ class SessionRuntime:
         ):
             await self._persist_user_message(prompt, source=app_source)
         done_event = None
+        turn_events = None
         try:
             turn_payload = self.turn.get("payload") or {}
             await recorder.start(
@@ -1598,7 +1599,7 @@ class SessionRuntime:
             from app.core import owner_confirm as _confirm
 
             _confirm.arm_pass(self.session_id, self.turn.get("payload"), self.turn_id)
-            async for event in _stream_to_websocket_impl(
+            turn_events = _stream_to_websocket_impl(
                 prompt=engine_prompt,
                 resume=resume,
                 session_id=self.session_id,
@@ -1629,7 +1630,8 @@ class SessionRuntime:
                     (self.turn.get("payload") or {}).get("connector_sender")
                     if self.source == "connector" else None
                 ),
-            ):
+            )
+            async for event in turn_events:
                 if held_peer and not engine_started:
                     # Same point the store counts them delivered (see the
                     # restore in ``finally``), so a turn that never starts
@@ -1685,20 +1687,26 @@ class SessionRuntime:
                     else:
                         await self._broadcast(ws_event)
         finally:
-            if held_peer and not engine_started:
-                # The engine never produced a frame, so it may never have had
-                # the prompt: the held messages wait for the next turn.
-                try:
-                    from app.core import turn_scheduler
+            try:
+                # A pump that leaves early (cancelled, or its recording failed) hands
+                # a turn parked at its yield over to finish on its own task.
+                if turn_events is not None:
+                    await turn_events.aclose()
+            finally:
+                if held_peer and not engine_started:
+                    # The engine never produced a frame, so it may never have had
+                    # the prompt: the held messages wait for the next turn.
+                    try:
+                        from app.core import turn_scheduler
 
-                    turn_scheduler.restore_held_peer_messages(self.session_id, held_peer)
-                except Exception:  # noqa: BLE001
-                    logger.warning(
-                        "SessionRuntime: could not restore held peer messages "
-                        "for %s", self.session_id, exc_info=True,
-                    )
-            self._recorder_closing = True
-            await recorder.close()
+                        turn_scheduler.restore_held_peer_messages(self.session_id, held_peer)
+                    except Exception:  # noqa: BLE001
+                        logger.warning(
+                            "SessionRuntime: could not restore held peer messages "
+                            "for %s", self.session_id, exc_info=True,
+                        )
+                self._recorder_closing = True
+                await recorder.close()
         if done_event is not None and self._abort_reason != "recording_failed":
             await self._broadcast(done_event)
 

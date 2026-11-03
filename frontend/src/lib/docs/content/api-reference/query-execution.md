@@ -155,6 +155,8 @@ data: {"type": "done", "session_id": "sess_abc123", "metadata": {...}}
 
 On failure the stream sends `event: error` with `{"type": "error", "message": "..."}`.
 
+The same `error` frame ends a stream whose client stops reading and falls about 8 MB behind. The reply keeps running and is saved, and fetching the session later returns it. A client that disconnects mid-reply gets the same result: the reply finishes and the session stays busy until then.
+
 ## Conversation Mode
 
 Stateful conversations that maintain context across multiple exchanges.
@@ -252,6 +254,8 @@ curl -X POST http://localhost:8000/api/v1/session/sess_abc123/interrupt \
   "session_id": "sess_abc123"
 }
 ```
+
+A Stop applies to the turn running the session. If what holds the session is something a Stop cannot reach (a `POST /api/v1/query` turn, a rewind, or a turn that has ended), the Stop applies to each turn waiting for the session at that moment. A turn with a Stop is saved and ends as `interrupted`. A waiting turn still runs its reply once it gets the session, and it keeps its Stop even if the session has no live connection, or a rewind replaces it. The Stop goes with the turns it was for, so a turn sent later does not get it. A turn still setting up keeps a Stop once the session has a live connection; before that the answer is `404`. A Stop sent when no turn is running or waiting has nothing to stop, and it does not carry over to the next turn. `POST /api/v1/query` turns do not use a pooled connection, so this route does not stop them.
 
 ### GET /api/v1/streaming/active
 

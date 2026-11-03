@@ -283,7 +283,7 @@ def main():
             with get_db() as conn:
                 cur = conn.cursor()
                 cur.execute("CREATE TABLE fluid_sessions (session_id TEXT PRIMARY KEY, head_node_id TEXT, "
-                            "created_at TEXT, cli_session_id TEXT, project_root TEXT)")
+                            "created_at TEXT, cli_session_id TEXT, project_root TEXT, writer_generation BIGINT NOT NULL DEFAULT 0)")
                 cur.execute("CREATE TABLE fluid_session_nodes (session_id TEXT, node_id TEXT, parent_id TEXT, "
                             "ts TEXT, message JSONB, PRIMARY KEY(session_id, node_id))")
                 cur.execute("CREATE TABLE fluid_session_events (session_id TEXT, seq BIGINT, event JSONB, "

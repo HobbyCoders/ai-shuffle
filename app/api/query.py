@@ -16,6 +16,9 @@ from app.core.models import (
     QueryRequest, QueryResponse, ConversationRequest, QueryMetadata
 )
 from app.core.query_engine import stream_query, interrupt_session, start_background_query
+from app.core.provider.session_admission import (
+    SessionBusyError, SessionReplacedError, is_conflict_message,
+)
 from app.core.session_title import derive_session_title
 from app.db import database
 from app.db.async_database import run_sync
@@ -245,6 +248,8 @@ async def one_shot_query(
             "metadata": QueryMetadata(**result["metadata"])
         }
 
+    except (SessionBusyError, SessionReplacedError) as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -494,6 +499,8 @@ async def conversation(
                 session_id,
                 outcome["error"],
             )
+            if is_conflict_message(outcome["error"]):
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=outcome["error"])
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Conversation failed"
@@ -657,6 +664,8 @@ async def start_conversation(
 
         return result
 
+    except SessionBusyError as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
