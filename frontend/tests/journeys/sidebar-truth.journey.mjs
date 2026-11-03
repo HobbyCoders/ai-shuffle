@@ -33,7 +33,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { runJourney } from './runner.mjs';
 import {
-	api, chatIdByToken, chatState, expect, openNewChat, pick, pickAccess, pickProject, scriptTag, showSidebar, stopButton, typeAndSend, uniq,
+	api, chatIdByToken, chatState, expect, openNewChat, pick, pickAccess, pickProject, scriptTag, showSidebar as showDesktopSidebar, stopButton, typeAndSend, uniq,
 	waitChat, waitTurnSettled
 } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
@@ -43,11 +43,21 @@ const mobileShell = process.argv.includes('--mobile-shell');
 const inMobileShell = (variant) => mobileShell && variant.viewport === 'phone';
 
 const CARD = (id) => `[data-session-card="${id}"]`;
+
+/** The list of chats, open: the shared UI's sidebar, or the /mobile/ shell's menu holding the same one. */
+async function showSidebar(page) {
+	if (!new URL(page.url()).pathname.startsWith('/mobile/')) return showDesktopSidebar(page);
+	const sessions = page.getByRole('complementary', { name: 'Sessions' });
+	if (await sessions.isVisible()) return sessions;
+	await page.getByRole('button', { name: /^Open menu/ }).click();
+	await sessions.waitFor({ timeout: 10_000 });
+	return sessions;
+}
 const laneOf = (page, id) => page.evaluate((selector) => document.querySelector(selector)?.closest('[data-group]')?.getAttribute('data-group') ?? null, CARD(id));
 
 async function waitLane(page, id, lane, timeout = 30_000) {
 	await page.getByRole('complementary', { name: 'Sessions' })
-		.or(page.getByRole('button', { name: 'Show sidebar' }))
+		.or(page.getByRole('button', { name: /^(Show sidebar|Open menu)/ }))
 		.first().waitFor({ timeout: 60_000 });
 	await showSidebar(page);
 	try {
@@ -417,9 +427,10 @@ const FAILED_SETTLED = {
 		await mark('settle it: not now, but still what happened');
 		await rowAction(page, chat.id, 'Settle session');
 		await waitLane(page, chat.id, 'settled');
-		// Settling the open chat leaves it (on a phone that closes the drawer too);
-		// read the row once that has happened, not while it is going.
-		await waitChat(page, { surface: 'new' }, { timeout: 30_000 });
+		// In the shared UI settling the open chat leaves it (on a phone that closes
+		// the drawer too), so read the row once that has happened, not while it is
+		// going. The /mobile/ shell stays on the chat.
+		if (!inMobileShell(variant)) await waitChat(page, { surface: 'new' }, { timeout: 30_000 });
 		await waitLane(page, chat.id, 'settled');
 		// A settled row is the compact one: no status word to read, but the alert
 		// sign is in the danger colour and assistive tech hears the word.
