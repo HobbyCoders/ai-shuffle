@@ -40,7 +40,7 @@ def worker(runtime, owner, worker_id, name="Helper", roster_name=None):
 async def test_actual_admission_preserves_archive_restore_note(runtime, monkeypatch):
     from unittest.mock import Mock
     from app.core import provider_agent, worker_checkout, worktree_reclaim
-    from app.db import sessions
+    from app.db import database, sessions
 
     target = "archived-worker"
     note = ("Its checkout could not be restored; " +
