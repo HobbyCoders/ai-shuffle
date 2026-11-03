@@ -59,12 +59,22 @@ class CrossAppFenceTest {
         .flatMap { it.findAccessibilityNodeInfosByText(text).asSequence() }.firstOrNull { it.text?.toString() == text && it.isClickable }
     private fun touch(text: String): Boolean {
         val bounds = Rect(); (button(text) ?: return false).getBoundsInScreen(bounds)
+        assertTrue(inject(bounds))
+        return true
+    }
+    /** For a panel the event fence may close at any moment, even mid-touch: both outcomes must refuse. */
+    private fun touchIfStillUp(text: String) {
+        val bounds = Rect(); (button(text) ?: return).getBoundsInScreen(bounds)
+        inject(bounds)
+    }
+    private fun inject(bounds: Rect): Boolean {
         val now = android.os.SystemClock.uptimeMillis()
         val down = android.view.MotionEvent.obtain(now, now, android.view.MotionEvent.ACTION_DOWN, bounds.exactCenterX(), bounds.exactCenterY(), 0)
         val up = android.view.MotionEvent.obtain(now, now + 50, android.view.MotionEvent.ACTION_UP, bounds.exactCenterX(), bounds.exactCenterY(), 0)
         down.source = android.view.InputDevice.SOURCE_TOUCHSCREEN; up.source = android.view.InputDevice.SOURCE_TOUCHSCREEN
-        assertTrue(automation.injectInputEvent(down, true)); assertTrue(automation.injectInputEvent(up, true)); down.recycle(); up.recycle()
-        return true
+        val injected = automation.injectInputEvent(down, true) && automation.injectInputEvent(up, true)
+        down.recycle(); up.recycle()
+        return injected
     }
     private fun panelUp() = await("Consent panel never appeared") { button("Allow once") != null }
     private fun allow() { panelUp(); assertTrue(touch("Allow once")) }
@@ -234,7 +244,7 @@ class CrossAppFenceTest {
     @Test fun lastingMoveUnderThePanelIsRefused() {
         val tapping = tap(read())
         panelUp(); fixture("move")
-        touch("Allow once") // May already be gone: the event fence can get there first. Both must refuse.
+        touchIfStillUp("Allow once")
         assertEquals("denied", status(tapping).getString("status"))
         assertNotTapped()
     }
@@ -289,7 +299,7 @@ class CrossAppFenceTest {
     @Test fun rowsSwappedUnderThePanelAreRefused() {
         val tapping = tap(read("Track One"))
         panelUp(); fixture("swap")
-        touch("Allow once")
+        touchIfStillUp("Allow once")
         assertEquals("denied", status(tapping).getString("status"))
         assertNotTapped()
     }
@@ -339,7 +349,7 @@ class CrossAppFenceTest {
         fixture("dense:150")
         val tapping = tap(read(waitSeconds = 15))
         panelUp(); fixture("delay:60") // A full read would take 9 s.
-        touch("Allow once")
+        touchIfStillUp("Allow once")
         val started = System.currentTimeMillis()
         assertEquals("denied", status(tapping, 15).getString("status"))
         assertTrue("Took ${System.currentTimeMillis() - started} ms", System.currentTimeMillis() - started < 5_000)
@@ -350,7 +360,7 @@ class CrossAppFenceTest {
         fixture("dense:20")
         val tapping = tap(read())
         panelUp(); fixture("hang:4000") // One call blocks past the read limit, and no check runs inside a call.
-        touch("Allow once")
+        touchIfStillUp("Allow once")
         val started = System.currentTimeMillis()
         assertEquals("denied", status(tapping, 15).getString("status"))
         assertTrue("Took ${System.currentTimeMillis() - started} ms", System.currentTimeMillis() - started < 3_800)
