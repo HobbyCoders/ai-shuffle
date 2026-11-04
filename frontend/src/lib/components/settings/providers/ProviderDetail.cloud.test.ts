@@ -127,18 +127,6 @@ it('picking Cloud opens the setup with the warning instead of switching the mode
 	expect(screen.getByRole('button', { name: 'Save and use for Claude' })).toHaveProperty('disabled', true);
 });
 
-it("the Cloud pick on Claude's account row opens the same setup and never sends the acknowledgement", async () => {
-	await show();
-	await fireEvent.click(screen.getByRole('button', { name: 'Claude runs on: Subscription' }));
-	await fireEvent.click(screen.getByRole('menuitemradio', { name: 'Cloud' }));
-	await flush();
-	expect(worker.sent('PUT', '/settings/claude-auth')).toHaveLength(0);
-	expect(worker.sent('PUT', '/settings/claude-auth/cloud')).toHaveLength(0);
-	expect(screen.getByRole('button', { name: 'Claude runs on: Subscription' })).toBeTruthy();
-	expect(screen.getByText(WARNING)).toBeTruthy();
-	expect(screen.getByRole('button', { name: 'Save and use for Claude' })).toHaveProperty('disabled', true);
-});
-
 it('saves a gateway, then phone Back recovers the removed setup draft to the list', async () => {
 	await show();
 	settingsNav.stacked = true;

@@ -15,7 +15,6 @@
 	import type { DangerAction } from '../shell/DangerZone.svelte';
 	import RowGroup from '../rows/RowGroup.svelte';
 	import SettingRow from '../rows/SettingRow.svelte';
-	import Segmented from '../rows/Segmented.svelte';
 	import CredentialControl from './CredentialControl.svelte';
 	import ValueText from '../rows/ValueText.svelte';
 	import LinkValue from '../rows/LinkValue.svelte';
@@ -23,16 +22,16 @@
 	import ProviderTile from './ProviderTile.svelte';
 	import ClaudeCliInstall from './setup/ClaudeCliInstall.svelte';
 	import ClaudeCompaction from './ClaudeCompaction.svelte';
+	import ClaudeModeRow from './ClaudeModeRow.svelte';
 	import { getSettingsAccess } from '$lib/settings/access.svelte';
 	import {
 		addableKinds,
 		claudeGateNotice,
 		claudeHeaderStatus,
-		MODE_OPTIONS,
 		type CredentialView,
 		type ProviderView
 	} from './providers-model';
-	import { pickClaudeMode, startSetup } from './provider-actions';
+	import { startSetup } from './provider-actions';
 
 	interface Props {
 		provider: ProviderView;
@@ -92,9 +91,6 @@
 				]
 	);
 
-	/** "Cloud" opens its page (the warning is there); the control stays on the current mode. */
-	const pickMode = (v: ClaudeAuthMode) => pickClaudeMode(provider, v);
-
 	function hintFor(c: CredentialView): string {
 		const models = c.row && c.on && c.flavor !== 'fal' ? `, ${c.row.models.length} in picker` : '';
 		return `${c.kind}${models}`;
@@ -119,16 +115,7 @@
 		{/if}
 	{/snippet}
 	{#if provider.claude}
-		<RowGroup title="Claude Code mode">
-			<SettingRow id="providers.claudeMode">
-				<Segmented
-					options={MODE_OPTIONS}
-					value={mode}
-					disabled={!claude}
-					onchange={pickMode}
-				/>
-			</SettingRow>
-		</RowGroup>
+		<ClaudeModeRow {provider} />
 		<ClaudeCliInstall manage isAdmin={!access.readOnly} />
 		<ClaudeCompaction />
 	{/if}

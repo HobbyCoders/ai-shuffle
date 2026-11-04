@@ -2,8 +2,8 @@
 	import { detailLine } from './credential-display';
 	/**
 	 * A provider with nothing connected: the kinds it supports, each with Set up.
-	 * Claude also shows the installed CLI (version, keep installed, Remove), so
-	 * an owner without a Claude sign-in can still manage or remove it.
+	 * Claude also shows its mode and the installed CLI (version, keep installed,
+	 * Remove), so an owner without a Claude sign-in can still change or remove them.
 	 */
 	import { providers } from '$lib/stores/providers.svelte';
 	import { getSettingsAccess } from '$lib/settings/access.svelte';
@@ -12,6 +12,7 @@
 	import SettingRow from '../rows/SettingRow.svelte';
 	import ProviderTile from './ProviderTile.svelte';
 	import ClaudeCliInstall from './setup/ClaudeCliInstall.svelte';
+	import ClaudeModeRow from './ClaudeModeRow.svelte';
 	import { kindsOf, type ProviderView } from './providers-model';
 	import { startSetup } from './provider-actions';
 
@@ -44,6 +45,7 @@
 	item={provider.item}
 >
 	{#snippet tile()}<ProviderTile {provider} size="lg" dashed />{/snippet}
+	{#if provider.claude}<ClaudeModeRow {provider} />{/if}
 	<RowGroup title="Connect" id="providers-connect">
 		{#each kinds as k (k.flavor)}
 			<SettingRow label={k.label} hint={k.hint}>

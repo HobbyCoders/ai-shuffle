@@ -4,13 +4,14 @@
 	 * one right column. The title area opens it; the switch (or "Use" on saved
 	 * Claude accounts) is its own on/off control, and a credential that cannot be
 	 * toggled says its state in words. A status dot only appears when something
-	 * needs attention. Claude's first row also carries what Claude runs on.
+	 * needs attention. A Claude row leads its summary with the kind, since Claude's
+	 * group mixes kinds; only the account after it gives way when the line is short.
+	 * What Claude runs on is set on Claude's own page.
 	 */
 	import { settingsNav } from '$lib/settings/navigation.svelte';
 	import { ChevronRight } from 'lucide-svelte';
 	import { moveListFocus } from '../rows/ListItem.svelte';
 	import StatusDot from '../rows/StatusDot.svelte';
-	import ClaudeModeMenu from './ClaudeModeMenu.svelte';
 	import CredentialControl from './CredentialControl.svelte';
 	import type { CredentialView, ProviderView } from './providers-model';
 
@@ -22,7 +23,6 @@
 	let { credential, provider }: Props = $props();
 
 	const selected = $derived(settingsNav.selectedItem('providers') === credential.item);
-	const showMode = $derived(provider.claude && provider.credentials[0] === credential);
 	const showDot = $derived(credential.status === 'warn' || credential.status === 'err' || credential.status === 'busy');
 	const stateText = $derived(
 		credential.status === 'ok' && (credential.flavor === 'cli' || credential.flavor === 'device') ? 'Signed in' : credential.statusText
@@ -52,12 +52,10 @@
 		onkeydown={moveListFocus}
 	>
 		<span class="nm">{credential.name}</span>
-		<span class="sm">{credential.summary}</span>
+		<span class="sm">
+			{#if provider.claude}<span class="sm-kind">{credential.kind} ·&nbsp;</span>{/if}<span class="sm-rest">{credential.summary}</span>
+		</span>
 	</button>
-	{#if showMode}
-		<!-- svelte-ignore a11y_no_static_element_interactions -->
-		<span class="mode" onclick={(e) => e.stopPropagation()}><ClaudeModeMenu {provider} /></span>
-	{/if}
 	{#if credential.switchable}
 		<!-- svelte-ignore a11y_no_static_element_interactions -->
 		<span class="sw" onclick={(e) => e.stopPropagation()}>
@@ -105,33 +103,23 @@
 		text-overflow: ellipsis;
 	}
 	.sm {
+		display: flex;
+		min-width: 0;
 		font-size: 13px;
 		color: var(--st-mfg);
 		white-space: nowrap;
+	}
+	.sm-kind {
+		flex: none;
+	}
+	.sm-rest {
+		min-width: 0;
 		overflow: hidden;
 		text-overflow: ellipsis;
-	}
-	.mode {
-		display: flex;
-		flex: none;
 	}
 	.cred :global(.chev) {
 		flex: none;
 		color: var(--st-subtle);
-	}
-	/* A stacked pane is too narrow for all of it: what Claude runs on takes its
-	   own line under the name. */
-	:global(.settings-shell[data-stacked]) .cred:has(.mode) {
-		flex-wrap: wrap;
-		row-gap: 2px;
-	}
-	:global(.settings-shell[data-stacked]) .main {
-		flex-basis: 0;
-	}
-	:global(.settings-shell[data-stacked]) .mode {
-		order: 3;
-		flex-basis: 100%;
-		margin-left: -8px;
 	}
 	.sw {
 		display: flex;

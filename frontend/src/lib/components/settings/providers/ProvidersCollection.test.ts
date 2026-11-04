@@ -115,7 +115,6 @@ describe('the list', () => {
 		await flush();
 		const claude = group('Claude');
 		expect(within(claude).getByRole('status').textContent).toBe('Checking…');
-		expect(screen.queryByRole('button', { name: /^Claude runs on/ })).toBeNull();
 		expect(screen.getAllByText('Claude')).toHaveLength(1);
 		release();
 		await flush();
@@ -228,22 +227,36 @@ describe('fal.ai', () => {
 });
 
 describe('Claude', () => {
-	it("turns Claude off from Claude's account row", async () => {
+	const openClaude = async () => {
+		await fireEvent.click(within(group('Claude')).getByRole('button', { name: 'Claude' }));
+		await flush();
+		return screen.getByRole('group', { name: 'Runs on' });
+	};
+
+	it("gives Claude's row the same one-tap shape as the others: no mode control on it", async () => {
 		await show();
-		await fireEvent.click(within(group('Claude')).getByRole('button', { name: 'Claude runs on: Subscription' }));
-		await fireEvent.click(screen.getByRole('menuitemradio', { name: 'Off' }));
+		const row = group('Claude').querySelector('.cred') as HTMLElement;
+		expect(within(row).getAllByRole('button')).toHaveLength(1);
+		expect(row.querySelector('.sm-kind')?.textContent).toContain('Subscription');
+		expect(row.textContent).toContain('Signed in');
+	});
+
+	it("turns Claude off from Claude's page", async () => {
+		await show();
+		await fireEvent.click(within(await openClaude()).getByRole('button', { name: 'Off' }));
 		await waitFor(() => expect(worker.sent('PUT', '/settings/claude-auth')).toHaveLength(1));
 		expect(worker.sent('PUT', '/settings/claude-auth')[0].body).toEqual({
 			mode: 'off'
 		});
-		await waitFor(() => within(group('Claude')).getByRole('button', { name: 'Claude runs on: Off' }));
+		await waitFor(() =>
+			expect(within(screen.getByRole('group', { name: 'Runs on' })).getByRole('button', { name: 'Off' }).getAttribute('aria-pressed')).toBe('true')
+		);
 		expect(credentialNames('Claude')).toEqual(['Claude Max subscription, Off', 'Anthropic API key, Off']);
 	});
 
 	it('does not save when the current mode is picked again', async () => {
 		await show();
-		await fireEvent.click(within(group('Claude')).getByRole('button', { name: 'Claude runs on: Subscription' }));
-		await fireEvent.click(screen.getByRole('menuitemradio', { name: 'Subscription' }));
+		await fireEvent.click(within(await openClaude()).getByRole('button', { name: 'Subscription' }));
 		await flush();
 		expect(worker.sent('PUT', '/settings/claude-auth')).toHaveLength(0);
 	});
@@ -308,7 +321,11 @@ describe('read-only', () => {
 	it('disables the switches, the modes, "+" and Add provider', async () => {
 		await show({ readOnly: true });
 		for (const sw of screen.getAllByRole('switch')) expect((sw as HTMLButtonElement).disabled).toBe(true);
-		expect((within(group('Claude')).getByRole('button', { name: /^Claude runs on/ }) as HTMLButtonElement).disabled).toBe(true);
+		await fireEvent.click(within(group('Claude')).getByRole('button', { name: 'Claude' }));
+		await flush();
+		for (const mode of within(screen.getByRole('group', { name: 'Runs on' })).getAllByRole('button')) {
+			expect((mode as HTMLButtonElement).disabled).toBe(true);
+		}
 		expect(
 			(
 				screen.getByRole('button', {
@@ -352,6 +369,23 @@ describe('Claude Code on the Not connected page', () => {
 		claude.cli = { ...claude.cli, signed_in: false, email: null, plan: null };
 		return claude;
 	}
+
+	it('keeps the mode control reachable with no Claude account row, in every mode', async () => {
+		for (const mode of ['subscription', 'off', 'api_key'] as const) {
+			cleanup();
+			providers.clear();
+			settingsNav.reset();
+			worker = fakeWorker({ claude: { ...notSignedIn(), mode }, cli: cliStatus({ signed_in: false }) });
+			worker.state.integrations = { ...worker.state.integrations, anthropic_api_key_set: false };
+			vi.stubGlobal('fetch', worker.fetch);
+			await providers.refreshAll();
+			settingsNav.go({ category: 'providers', item: 'provider:claude' });
+			render(ProvidersCollection);
+			await flush();
+			const runsOn = screen.getByRole('group', { name: 'Runs on' });
+			expect(within(runsOn).getByRole('button', { name: 'Off' })).toHaveProperty('disabled', false);
+		}
+	});
 
 	it('keeps the removed confirmation on screen until it is dismissed', async () => {
 		const removed = 'Claude Code removed. Your sign-in and settings were kept.';
