@@ -145,8 +145,8 @@
 			<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.6" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
 		</svg>
 		<span class="ctx-chip-label selector-text">{selectedProfileName}</span>
-		<svg class="ctx-chip-chev" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-			<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+		<svg class="ctx-chip-chev" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" aria-hidden="true">
+			<path stroke-linecap="round" stroke-linejoin="round" d="m6 9 6 6 6-6" />
 		</svg>
 	</button>
 	{/if}

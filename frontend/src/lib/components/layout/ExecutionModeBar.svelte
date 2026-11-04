@@ -722,7 +722,7 @@
 				{#if sheetMode}<FolderGit2 size={16} aria-hidden="true" />{/if}
 				{#if !sheetMode}<span class="ctx-chip-cb" class:checked={worktreeOn} aria-hidden="true"><WorktreeGlyph on={worktreeOn} /></span>{/if}
 				<span class="ctx-chip-label">Worktree</span>
-				{#if sheetMode}<span class="ctx-chip-cb" class:checked={worktreeOn} aria-hidden="true"><WorktreeGlyph on={worktreeOn} /></span>{/if}
+				{#if sheetMode}<span class="ctx-chip-cb" class:checked={worktreeOn} aria-hidden="true"></span>{/if}
 			</label>
 		{/if}
 		</div>

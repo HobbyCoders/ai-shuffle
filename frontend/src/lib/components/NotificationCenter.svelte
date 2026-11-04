@@ -207,15 +207,12 @@
 {/if}
 
 <style>
-	/* Phone top bar: a 44x48 target, a 16px bell and a 14px count. */
+	/* Phone top bar: a 44x48 target, a 16px bell and the one 16px count. */
 	.notif-center.bar .notif-btn { width: 44px; height: 48px; border-radius: 8px; opacity: 1; }
 	.notif-center.bar .notif-badge {
-		top: 8px;
+		top: 7px;
 		right: auto;
 		left: 23px;
-		min-width: 14px;
-		height: 14px;
-		padding: 0 3px;
 		border: 0;
 		box-shadow: 0 0 0 1.5px var(--background);
 	}
@@ -273,18 +270,22 @@
 		position: absolute;
 		top: -2px;
 		right: -2px;
-		min-width: 15px;
-		height: 15px;
+		box-sizing: content-box;
+		min-width: 10px;
+		height: 16px;
 		padding: 0 3px;
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
-		font-size: 0.625rem;
-		font-weight: 700;
+		font-size: 11px;
+		font-weight: 600;
+		font-variant-numeric: tabular-nums;
 		line-height: 1;
-		color: var(--destructive-foreground, #fff);
-		background: var(--destructive);
-		border: 1.5px solid var(--card, var(--background));
+		/* Unread is news, not an error: --destructive stays for real failures. */
+		color: var(--primary-foreground);
+		background: var(--primary);
+		border: 0;
+		box-shadow: 0 0 0 1.5px var(--card, var(--background));
 		border-radius: 999px;
 		pointer-events: none;
 	}

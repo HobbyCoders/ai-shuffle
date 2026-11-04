@@ -1099,7 +1099,7 @@ button.ctx-chip:disabled {
 	.sentence-tok,
 	.ctx-chip { transition: none; }
 }
-/* The worktree chip: a real (visually hidden) input drives WorktreeGlyph. */
+/* The worktree chip: a real (visually hidden) input drives its switch. */
 .ctx-chip input[type='checkbox'] {
 	position: absolute;
 	width: 1px;

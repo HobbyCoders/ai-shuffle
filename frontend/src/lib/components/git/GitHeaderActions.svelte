@@ -552,9 +552,8 @@
 				{#if summary.icon === 'alert'}<TriangleAlert size={20} strokeWidth={1.6} />
 				{:else if summary.icon === 'pr'}<GitPullRequest size={20} strokeWidth={1.6} />
 				{:else}<GitBranch size={20} strokeWidth={1.6} />{/if}
-				{#if compactBadge === '✓'}
-					<span class="cg-badge tone-{summary.tone}" aria-hidden="true"></span>
-				{:else if compactBadge}
+				<!-- A clean branch is the bare icon: green means worker status, nothing else. -->
+				{#if compactBadge && compactBadge !== '✓'}
 					<span class="cg-badge tone-{summary.tone}" aria-hidden="true">{compactBadge}</span>
 				{/if}
 				{#if prIsLastKnown}<span class="last-known-dot cg-last-known" aria-hidden="true"></span>{/if}
@@ -1727,7 +1726,6 @@
 	.cg-badge.tone-changes { background: var(--warning); color: var(--warning-foreground); }
 	.cg-badge.tone-push, .cg-badge.tone-behind { background: var(--info, var(--primary)); color: var(--background); }
 	.cg-badge.tone-blocked { background: var(--destructive); color: var(--destructive-foreground); }
-	.cg-badge.tone-idle { min-width: 8px; width: 8px; height: 8px; padding: 0; top: -3px; left: auto; right: -4px; border-radius: 50%; background: var(--success); color: var(--success-foreground); }
 	.cg-last-known { position: absolute; bottom: -3px; right: -4px; }
 
 	@media (prefers-reduced-motion: reduce) {

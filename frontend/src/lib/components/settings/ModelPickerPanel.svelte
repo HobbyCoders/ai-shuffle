@@ -601,7 +601,7 @@
 								title={fav ? 'Remove from favorites' : 'Add to favorites'}
 								onclick={(e) => toggleFavorite(e, o.value)}
 							>
-								<Star size={14} />
+								<Star size={14} strokeWidth={1.5} />
 							</button>
 							<span class="mpp-check" aria-hidden="true">{#if value === o.value}<Check size={16} />{/if}</span>
 						</div>
@@ -1065,13 +1065,14 @@
 	}
 	.mpp-fav.on {
 		opacity: 1;
-		color: var(--warning);
+		color: var(--primary);
 	}
-	/* No hover on a touch screen: the star stays visible and quiet, and thumb-sized. */
+	/* No hover on a touch screen, and a tap on the row selects the model: the star
+	   stays on every row as a quiet outline, and thumb-sized. */
 	@media (hover: none) {
 		.mpp-row { min-height: 48px; padding: 2px 8px; gap: 0; }
 		.mpp-row-label { font-size: 15px; font-weight: 400; }
-		.mpp-fav { width: 44px; height: 44px; margin: 0 4px 0 0; opacity: 0.6; }
+		.mpp-fav { width: 44px; height: 44px; margin: 0 4px 0 0; opacity: 1; }
 	}
 	.mpp-fav.on :global(svg) {
 		fill: currentColor;

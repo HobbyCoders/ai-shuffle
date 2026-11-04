@@ -201,7 +201,7 @@
 		{:else if isWorktreeMode || isStreaming}
 			<Lock size={10} strokeWidth={1.6} />
 		{:else if !branchLocked}
-			<ChevronDown size={11} strokeWidth={1.6} />
+			<ChevronDown size={12} strokeWidth={1.5} aria-hidden="true" />
 		{/if}
 	</button>
 	{/if}
@@ -333,12 +333,8 @@
 		margin-top: 6px;
 	}
 
-	/* The branch chip: `.ctx-chip` from app.css carries the metrics; only the
-	   locked state and the label widths are specific to this component. */
-	.pill.locked {
-		opacity: 0.85;
-	}
-
+	/* The branch chip: `.ctx-chip` from app.css carries the metrics and the
+	   muted colour, locked or not; only the label widths are specific here. */
 	.pill :global(svg) {
 		flex-shrink: 0;
 	}

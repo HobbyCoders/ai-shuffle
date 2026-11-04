@@ -1,8 +1,9 @@
 <script lang="ts">
 	/**
-	 * The worktree chip's state glyph, one 14px mark in every row: an empty
-	 * circle when the chat runs in the main checkout, a filled check circle when
-	 * it runs in a worktree. Decorative: each chip says the state in words too.
+	 * The worktree chip's on/off mark: the app's switch at the size of the row
+	 * under the composer. Decorative: the control around it carries the name and
+	 * the state, and it sits inside a button or label so it cannot be a second
+	 * button itself (settings/rows/Switch.svelte).
 	 */
 	interface Props {
 		on: boolean;
@@ -11,22 +12,40 @@
 	let { on }: Props = $props();
 </script>
 
-<svg
-	class="worktree-glyph"
-	width="14"
-	height="14"
-	viewBox="0 0 24 24"
-	fill="none"
-	stroke="currentColor"
-	stroke-width="2"
-	stroke-linecap="round"
-	stroke-linejoin="round"
-	aria-hidden="true"
->
-	{#if on}
-		<circle cx="12" cy="12" r="10" fill="currentColor" />
-		<path d="m8 12.5 2.8 2.8L16 9.5" stroke="var(--background)" stroke-width="2.4" />
-	{:else}
-		<circle cx="12" cy="12" r="9.5" />
-	{/if}
-</svg>
+<span class="worktree-switch" class:on aria-hidden="true"></span>
+
+<style>
+	.worktree-switch {
+		position: relative;
+		flex: none;
+		display: block;
+		width: 28px;
+		height: 16px;
+		/* The chip's gap is 6px; the label starts 8px after the track. */
+		margin-right: 2px;
+		border-radius: 999px;
+		background: var(--switch-off);
+		transition: background-color 0.15s;
+	}
+	.worktree-switch::after {
+		content: '';
+		position: absolute;
+		top: 2px;
+		left: 2px;
+		width: 12px;
+		height: 12px;
+		border-radius: 50%;
+		background: var(--switch-thumb);
+		box-shadow: 0 0 0 0.5px var(--switch-thumb-edge), 0 1px 2px var(--switch-thumb-edge);
+		transition: transform 0.15s;
+	}
+	.worktree-switch.on {
+		background: var(--switch-on);
+	}
+	.worktree-switch.on::after {
+		transform: translateX(12px);
+	}
+	@media (prefers-reduced-motion: reduce) {
+		.worktree-switch, .worktree-switch::after { transition: none; }
+	}
+</style>
