@@ -60,8 +60,10 @@ async function canWithholdTurnEnd(page, holdFeedTail = false) {
 		const withheld = () => sessionStorage.getItem('journey-withhold-turn-end') === '1';
 		const held = [];
 		let feedPaused = false;
+		let socketPaused = false;
 		window.__releaseHeldTurnEnds = () => {
 			feedPaused = false;
+			socketPaused = false;
 			held.splice(0).forEach(({ release }) => release());
 		};
 		window.__hasHeldFeedEnd = () => held.some((entry) => entry.feedEnd);
@@ -72,6 +74,7 @@ async function canWithholdTurnEnd(page, holdFeedTail = false) {
 		};
 		const feedTurnEnd = /"(?:type|event_type)"\s*:\s*"turn\.(?:completed|aborted)"/;
 		const socketTurnEnd = /"(?:type|event_type)"\s*:\s*"(?:stopped|interrupted|done|turn\.completed|turn\.aborted)"/;
+		const queueSnapshot = /"(?:type|event_type)"\s*:\s*"queue_updated"/;
 		const realFetch = window.fetch;
 		window.fetch = async (input, init) => {
 			const res = await realFetch(input, init);
@@ -103,8 +106,17 @@ async function canWithholdTurnEnd(page, holdFeedTail = false) {
 			set(handler) {
 				onmessage.set.call(this, (event) => {
 					const release = () => handler.call(this, event);
-					if (withheld() && typeof event.data === 'string' && socketTurnEnd.test(event.data)) held.push({ release, feedEnd: false });
-					else release();
+					const text = typeof event.data === 'string' ? event.data : '';
+					if (withheld() && (socketPaused || socketTurnEnd.test(text))) {
+						held.push({ release, feedEnd: false });
+						return;
+					}
+					release();
+					// The server starts the waiting message about 50ms after confirming it,
+					// and that snapshot takes its bubble away. Stop here so the confirmed
+					// bubble is still waiting however fast the server is.
+					const waitingFor = window.__pauseSocketOnceQueued;
+					if (withheld() && waitingFor && queueSnapshot.test(text) && text.includes(waitingFor)) socketPaused = true;
 				});
 			}
 		});
@@ -195,18 +207,19 @@ function stopAfterTimeout({ switchChat = false } = {}) {
 			// Separate Playwright clicks (or the async send preflight) can let Stop
 			// settle before Send even queues, missing the carry-over state entirely.
 			// Send the real commands in their original order after that queue paints.
-			await page.evaluate(() => {
+			await page.evaluate((token) => {
+				window.__pauseSocketOnceQueued = token;
 				const stop = document.querySelector('button[aria-label="Stop generating"]');
 				const send = document.querySelector('button[aria-label="Send"]');
 				if (!stop || !send || stop.disabled || send.disabled) throw new Error('Stop and Send must both be actionable');
 				window.__batchStopAndQuery = true;
 				stop.click();
 				send.click();
-			});
+			}, fresh);
 			await page.waitForFunction(() => window.__stopAndQueryReleased === true);
 			// Stop's empty snapshot can erase an unconfirmed send (#1052). Exercise
-			// this hold only after its fresh queue receipt, with the ordered feed tail
-			// still paused so the successor cannot consume that receipt first.
+			// this hold only after its fresh queue receipt, with the ordered feed and
+			// socket tails still paused so the successor cannot consume that receipt first.
 			await page.locator('.pending-messages [data-queue-confirmed="true"]').filter({ hasText: fresh }).waitFor();
 			await page.waitForFunction(() => window.__hasHeldFeedEnd());
 			await page.evaluate(() => window.__releaseFirstHeldFeedEnd());
