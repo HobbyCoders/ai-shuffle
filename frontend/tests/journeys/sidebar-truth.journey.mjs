@@ -37,7 +37,7 @@ import { pathToFileURL } from 'node:url';
 import { runJourney } from './runner.mjs';
 import {
 	api, chatIdByToken, chatState, expect, openNewChat, pick, pickAccess, pickProject, scriptTag, showSidebar as showDesktopSidebar, stopButton, typeAndSend, uniq,
-	waitChat, waitTurnSettled
+	waitChat, waitTurnSettled, withChatSetup
 } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 
@@ -576,13 +576,16 @@ async function projectGainingARemote(ctx, { rememberCatalogRow = false } = {}) {
 /** The worktree toggle, a new branch, and the composer showing it. Drop gets its own error. */
 async function chooseNewWorktreeBranch(page, hero, branch) {
 	try {
-		await hero.getByRole('button', { name: /Switch to a worktree$/ }).click({ timeout: 10_000 });
-		await hero.getByRole('button', { name: /^Worktree branch:/ }).click({ timeout: 10_000 });
-		const menu = page.getByRole('dialog', { name: 'Worktree branch' });
-		await menu.getByRole('button', { name: /New branch/ }).click({ timeout: 10_000 });
-		await page.getByPlaceholder('Enter a branch name').fill(branch, { timeout: 10_000 });
-		await page.getByRole('button', { name: 'Continue', exact: true }).click({ timeout: 10_000 });
-		await hero.getByRole('button', { name: `Worktree branch: ${branch}` }).waitFor({ timeout: 10_000 });
+		// A sentence word on a wide screen, a labelled switch in Chat controls on a phone.
+		await withChatSetup(page, async () => {
+			await hero.getByRole('button', { name: /Switch to a worktree$/ }).or(hero.locator('.wt-chip')).click({ timeout: 10_000 });
+			await hero.getByRole('button', { name: /^Worktree branch:/ }).click({ timeout: 10_000 });
+			const menu = page.getByRole('dialog', { name: 'Worktree branch' }).or(hero.locator('.branch-dropdown'));
+			await menu.getByRole('button', { name: /New branch/ }).click({ timeout: 10_000 });
+			await page.getByPlaceholder('Enter a branch name').fill(branch, { timeout: 10_000 });
+			await page.getByRole('button', { name: 'Continue', exact: true }).click({ timeout: 10_000 });
+			await hero.getByRole('button', { name: `Worktree branch: ${branch}` }).waitFor({ timeout: 10_000 });
+		});
 	} catch (error) {
 		if (await noProjectChosen(hero).isVisible()) throw new Error(`the chosen project was dropped while choosing its worktree branch (#1078): ${error.message.split('\n')[0]}`);
 		throw error;
@@ -665,7 +668,7 @@ const PROJECT_ONCE = {
 		await mark('the Filter lists the project once');
 		const sessions = await showSidebar(page);
 		await sessions.getByRole('button', { name: 'Filter', exact: true }).click();
-		const sheet = page.getByRole('dialog', { name: 'Filter sessions' });
+		const sheet = page.getByRole('dialog', { name: 'Filter chats' });
 		await sheet.waitFor({ timeout: 10_000 });
 		const entries = sheet.getByRole('button', { name: project.name, exact: true });
 		const count = await entries.count();
