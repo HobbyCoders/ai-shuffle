@@ -101,8 +101,8 @@
 {/snippet}
 {#snippet description()}
 	<textarea
-		class="st-area"
-		rows={2}
+		class="desc-area"
+		rows={3}
 		aria-label="Description"
 		placeholder="Cuts releases and drafts the changelog."
 		value={form.description}
@@ -188,7 +188,7 @@
 
 
 <style>
-	.st-area {
+	.desc-area {
 		font-family: inherit;
 		display: block;
 		width: 100%;
@@ -202,11 +202,11 @@
 		resize: vertical;
 		outline: none;
 	}
-	.st-area::placeholder,
+	.desc-area::placeholder,
 	.st-txt-local::placeholder {
 		color: var(--st-subtle);
 	}
-	.st-area:focus,
+	.desc-area:focus,
 	.st-txt-local:focus {
 		border-color: var(--st-primary);
 		box-shadow: 0 0 0 3px var(--st-primary-soft);

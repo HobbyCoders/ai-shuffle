@@ -291,7 +291,6 @@ From `frontend/package-lock.json`, all locked packages (the build bundles from t
 | @exodus/bytes | 1.8.0 | MIT | https://www.npmjs.com/package/@exodus/bytes/v/1.8.0 |
 | @fontsource-variable/inter | 5.3.0 | OFL-1.1 | https://www.npmjs.com/package/@fontsource-variable/inter/v/5.3.0 |
 | @fontsource-variable/jetbrains-mono | 5.3.0 | OFL-1.1 | https://www.npmjs.com/package/@fontsource-variable/jetbrains-mono/v/5.3.0 |
-| @fontsource/playfair-display | 5.2.8 | OFL-1.1 | https://www.npmjs.com/package/@fontsource/playfair-display/v/5.2.8 |
 | @jridgewell/gen-mapping | 0.3.13 | MIT | https://www.npmjs.com/package/@jridgewell/gen-mapping/v/0.3.13 |
 | @jridgewell/remapping | 2.3.5 | MIT | https://www.npmjs.com/package/@jridgewell/remapping/v/2.3.5 |
 | @jridgewell/resolve-uri | 3.1.2 | MIT | https://www.npmjs.com/package/@jridgewell/resolve-uri/v/3.1.2 |

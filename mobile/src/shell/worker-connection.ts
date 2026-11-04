@@ -65,7 +65,7 @@ export function connectionWorkers(
 		}).length;
 		return {
 			id: install.id,
-			name: workerDisplayName(install.device_name),
+			name: workerDisplayName(install.device_name, install.is_self ? 'Local' : 'Worker'),
 			online: install.is_self ? (currentOnline ?? install.online) : install.online,
 			current: !!install.is_self,
 			running,
