@@ -105,7 +105,7 @@ describe.each([false, true])('worktree indicator (sheetMode=%s)', (sheetMode) =>
 		(gitStatus as any).set({ current_branch: 'main', is_git_repo: true });
 		await tick();
 		expect(container.querySelector('.branch-name')?.textContent).toBe('main');
-		expect(container.querySelector('.wt-indicator')).not.toBeNull();
+		expect(container.querySelector('.wt-indicator') !== null).toBe(sheetMode);
 	});
 	it('keeps Git context visible when a plain-folder answer fails revalidation', async () => {
 		session.store.set(base);
@@ -545,37 +545,46 @@ describe.each([false, true])('worktree indicator (sheetMode=%s)', (sheetMode) =>
 		expect(execution).not.toHaveBeenCalled();
 	});
 
-	it('stays checked from auto naming through completed setup', async () => {
+	// A chat's checkout is fixed for life: a lock, a value and no switch.
+	const locked = (container: Element) => container.querySelector('[role="img"][title="Checkout is fixed for this chat"]' + (sheetMode ? '.wt-indicator' : '.checkout-lock'))!;
+	const reads = (container: Element) => locked(container).getAttribute('aria-label')!;
+	const inWorktree = (container: Element) =>
+		sheetMode
+			? locked(container).querySelector('.wt-value')!.textContent === 'On'
+			: locked(container).querySelector('.checkout-wt') !== null;
+
+	it('stays a worktree from auto naming through completed setup, with no switch', async () => {
 		session.store.set({ ...base, isCreatingWorktree: true });
 		const { container } = render(ContextPillBar, { sheetMode });
-		const checked = () => container.querySelector('.wt-indicator .ctx-chip-cb')!.classList.contains('checked');
-		expect(checked()).toBe(true);
-		expect(container.querySelector('.wt-indicator')!.getAttribute('title')).toBe('Runs in an isolated git worktree');
+		expect(inWorktree(container)).toBe(true);
+		expect(container.querySelector('.ctx-chip-cb')).toBeNull();
+		expect(locked(container).querySelector('svg.lucide-lock')).not.toBeNull();
 		session.store.set({ ...base, worktreeId: 'checkout', worktreeBranch: 'fix/bug' });
 		await tick();
-		expect(checked()).toBe(true);
+		expect(inWorktree(container)).toBe(true);
+		expect(reads(container)).toMatch(sheetMode ? /^Worktree on/ : /^Branch fix\/bug, in a worktree/);
 	});
 
 	it('does not treat a saved worktree preference as an existing worktree', () => {
 		session.store.set(base);
 		const { container } = render(ContextPillBar, { sheetMode });
-		expect(container.querySelector('.wt-indicator .checked')).toBeNull();
-		expect(container.querySelector('.wt-indicator')!.getAttribute('title')).toBe('Runs in the main checkout');
+		expect(inWorktree(container)).toBe(false);
+		expect(reads(container)).toMatch(sheetMode ? /^Worktree off/ : /^Branch main, in the main checkout/);
 	});
 
 	it('clears pending selection on failure or navigation to a local session', async () => {
 		session.store.set({ ...base, isCreatingWorktree: true });
 		const { container } = render(ContextPillBar, { sheetMode });
-		expect(container.querySelector('.wt-indicator .checked')).not.toBeNull();
+		expect(inWorktree(container)).toBe(true);
 		session.store.set({ ...base, worktreeError: 'Setup failed' });
 		await tick();
-		expect(container.querySelector('.wt-indicator .checked')).toBeNull();
+		expect(inWorktree(container)).toBe(false);
 	});
 
-	it('keeps cleaned-up worktree sessions checked', () => {
+	it('keeps cleaned-up worktree sessions marked as worktrees', () => {
 		session.store.set({ ...base, worktreeBranch: 'fix/bug', worktreeDeleted: true });
 		const { container } = render(ContextPillBar, { sheetMode });
-		expect(container.querySelector('.wt-indicator .checked')).not.toBeNull();
+		expect(inWorktree(container)).toBe(true);
 	});
 });
 
@@ -631,16 +640,17 @@ describe('a subagent’s chat (read and message only)', () => {
 		const { githubAuthenticated } = await import('$lib/stores/auth.svelte');
 		(githubAuthenticated as unknown as { set(v: boolean): void }).set(true);
 		const { subagentChats } = await import('$lib/stores/subagent-chats');
-		session.store.set({ ...base, worktreeBranch: 'task/49fa37fa', projectV2Id: 'pv2-project' });
+		session.store.set({ ...base, projectV2Id: 'pv2-project' });
 		appSessions.store.set([row]);
 		// A main chat: the interactive branch selector holds the slot and the runner opens the move menu.
 		const main = render(ContextPillBar, { sheetMode });
-		expect(main.container.querySelector('.ctx-chip.readonly[title^="Branch:"]')).toBeNull();
+		expect(main.container.querySelector('.ctx-chip.readonly[aria-label^="Branch"]')).toBeNull();
 		expect(main.container.querySelector('.ctx-chip.runner')).not.toBeNull();
 		cleanup();
+		session.store.set({ ...base, worktreeBranch: 'task/49fa37fa', projectV2Id: 'pv2-project' });
 		subagentChats.mark(base.sessionId, true);
 		const view = render(ContextPillBar, { sheetMode });
-		const branch = view.container.querySelector('.ctx-chip.readonly[title^="Branch:"]');
+		const branch = view.container.querySelector('.ctx-chip.readonly[aria-label^="Branch"]');
 		expect(branch?.textContent).toContain('task/49fa37fa');
 		expect(view.container.querySelector('.ctx-chip.runner')).toBeNull();
 		expect(view.queryByRole('button', { name: /^Runner:/ })).toBeNull();

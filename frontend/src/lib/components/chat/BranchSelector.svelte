@@ -199,7 +199,7 @@
 		{#if checkingOut}
 			<Loader2 size={11} strokeWidth={2} class="spin" />
 		{:else if isWorktreeMode || isStreaming}
-			<Lock size={10} strokeWidth={1.6} />
+			<Lock size={12} strokeWidth={1.6} aria-hidden="true" />
 		{:else if !branchLocked}
 			<ChevronDown size={12} strokeWidth={1.5} aria-hidden="true" />
 		{/if}

@@ -1637,8 +1637,8 @@
 		text-align: left;
 		box-shadow: none;
 	}
-	/* A locked row's value keeps the value column: 14px edge + 18px chevron slot + 12px gap. */
-	.mcp-setup :global(.sheet-mode .ctx-chip.readonly:not(.wt-indicator)) { padding-right: 44px; }
+	/* A row with no glyph keeps the value column: 14px edge + 18px chevron slot + 12px gap. */
+	.mcp-setup :global(.sheet-mode .ctx-chip.readonly:not(:has(> svg.lucide-lock))) { padding-right: 44px; }
 	.mcp-setup :global(.sheet-mode button.ctx-chip:not(:disabled)) { cursor: pointer; }
 	@media (hover: hover) {
 		.mcp-setup :global(.sheet-mode button.ctx-chip:hover:not(:disabled)) { background: var(--hover-overlay); }
@@ -1674,15 +1674,24 @@
 		color: var(--muted-foreground);
 		text-align: right;
 	}
-	/* The one chevron and lock slot: the same 18px glyph as the rows above. */
+	/* The one trailing slot, 18px wide: a chevron can change, a lock cannot. */
 	.mcp-setup :global(.sheet-mode .ctx-chip .ctx-chip-chev),
-	.mcp-setup :global(.sheet-mode .ctx-chip > svg.lucide-chevron-down),
-	.mcp-setup :global(.sheet-mode .ctx-chip > svg.lucide-lock) {
+	.mcp-setup :global(.sheet-mode .ctx-chip > svg.lucide-chevron-down) {
 		order: 3;
 		flex: none;
 		width: 18px;
 		height: 18px;
 		margin: 0;
+		stroke-width: 2;
+		color: var(--muted-foreground);
+		opacity: 0.75;
+	}
+	.mcp-setup :global(.sheet-mode .ctx-chip > svg.lucide-lock) {
+		order: 3;
+		flex: none;
+		width: 14px;
+		height: 14px;
+		margin: 0 2px;
 		stroke-width: 2;
 		color: var(--muted-foreground);
 		opacity: 0.75;
@@ -1698,9 +1707,10 @@
 	.mcp-setup :global(.sheet-mode .branch-btn::before),
 	.mcp-setup :global(.sheet-mode .branch-trigger::before),
 	.mcp-setup :global(.sheet-mode .ctx-chip.readonly:has(.branch-name)::before) { content: 'Branch'; }
-	/* Worktree: the same icon column and label as its neighbours, and on the
-	   right the switch the other on/off rows use. Its label is real text: the
-	   checkbox and the read-only chip both take their name from it. */
+	/* Worktree: the same icon column and label as its neighbours. On the right, a
+	   new chat has the switch the other on/off rows use; an existing chat has a
+	   static value and a lock. The label is real text: the checkbox takes its name
+	   from it. */
 	.mcp-setup :global(.sheet-mode :is(.wt-indicator, .wt-chip)::before) { content: none; }
 	.mcp-setup :global(.sheet-mode :is(.wt-indicator, .wt-chip) .ctx-chip-label) {
 		order: 1;
@@ -1709,6 +1719,11 @@
 		font-size: 15px;
 		color: var(--foreground);
 		text-align: left;
+	}
+	.mcp-setup :global(.sheet-mode .wt-indicator .wt-value) {
+		flex: none;
+		font-size: 14.5px;
+		color: var(--muted-foreground);
 	}
 	.mcp-setup :global(.sheet-mode .ctx-chip .ctx-chip-cb) {
 		order: 2;

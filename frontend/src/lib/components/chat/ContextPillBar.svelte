@@ -57,8 +57,7 @@
 	} from '$lib/api/sessions';
 	import { notify } from '$lib/stores/notifications';
 	import { menuHost } from '$lib/components/ui/menu-host';
-	import { ChevronDown, FolderGit2, GitBranch, Monitor, MonitorOff, Check, Loader2, X } from 'lucide-svelte';
-	import WorktreeGlyph from '$lib/components/ui/WorktreeGlyph.svelte';
+	import { ChevronDown, FolderGit2, GitBranch, Lock, Monitor, MonitorOff, Check, Loader2, X } from 'lucide-svelte';
 	import { checkoutEligibility, type EligibilityMap } from '$lib/components/layout/execution-mode-eligibility';
 
 	interface Props {
@@ -179,11 +178,26 @@
 	const readOnlyBranch = $derived.by(() => {
 		if (badge?.branch) return badge.branch;
 		if (isWorktreeSession) {
-			return $activeSession.selectedWorktreeBranch || $activeSession.worktreeBranch || null;
+			// A cleaned-up worktree's git store holds the main repo: never its branch.
+			return $activeSession.selectedWorktreeBranch || $activeSession.worktreeBranch
+				|| ($activeSession.worktreeDeleted ? null : $gitStatus?.current_branch ?? null);
 		}
 		if ($activeSession.project) return $gitStatus?.current_branch ?? null;
 		return null;
 	});
+
+	// A chevron means it can change and a lock means it cannot. A chat keeps its
+	// checkout for life, so a worktree is always locked; only the main checkout's
+	// branch can still be switched, and only where the interactive chip is offered.
+	const branchChangeable = $derived(showBranch && !isWorktreeSelected);
+	const CHECKOUT_FIXED = 'Checkout is fixed for this chat';
+	const checkoutName = $derived(
+		[
+			readOnlyBranch ? `Branch ${readOnlyBranch}` : null,
+			isWorktreeSelected ? 'in a worktree' : 'in the main checkout',
+			'fixed for this chat'
+		].filter(Boolean).join(', ')
+	);
 
 	let showCreateBranchModal = $state(false);
 
@@ -712,28 +726,40 @@
 
 		{#if isGitRepo}
 		<div class="branch-wt-row">
-		{#if showBranch}
+		{#if branchChangeable}
 			<BranchSelector
 				{sheetMode}
 				projectName={sheetMode ? projectName : null}
 				onClickNewBranch={() => (showCreateBranchModal = true)}
 			/>
-		{:else if readOnlyBranch}
-			<span class="ctx-chip readonly" title="Branch: {readOnlyBranch}">
+		{:else if sheetMode}
+			{#if readOnlyBranch}
+				<span class="ctx-chip readonly" role="img" aria-label="Branch {readOnlyBranch}, fixed for this chat" title={CHECKOUT_FIXED}>
+					<GitBranch size={12} strokeWidth={1.6} aria-hidden="true" />
+					<span class="ctx-chip-label branch-name">{readOnlyBranch}</span>
+					<Lock size={14} strokeWidth={1.6} aria-hidden="true" />
+				</span>
+			{/if}
+		{:else if readOnlyBranch || isWorktreeSelected}
+			<span class="ctx-chip readonly checkout-lock" role="img" aria-label={checkoutName} title={CHECKOUT_FIXED}>
 				<GitBranch size={12} strokeWidth={1.6} aria-hidden="true" />
-				<span class="ctx-chip-label branch-name">{readOnlyBranch}</span>
+				{#if readOnlyBranch}<span class="ctx-chip-label branch-name">{readOnlyBranch}</span>{/if}
+				{#if isWorktreeSelected}<span class="checkout-wt">{#if readOnlyBranch}<span class="checkout-dot">·</span>{/if}worktree</span>{/if}
+				<Lock size={12} strokeWidth={1.6} aria-hidden="true" />
 			</span>
 		{/if}
 
-		{#if $activeSession.project && !badge?.degraded}
+		{#if sheetMode && $activeSession.project && !badge?.degraded}
 			<span
 				class="ctx-chip readonly wt-indicator"
-				title={isWorktreeSelected ? 'Runs in an isolated git worktree' : 'Runs in the main checkout'}
+				role="img"
+				aria-label="Worktree {isWorktreeSelected ? 'on' : 'off'}, fixed for this chat"
+				title={CHECKOUT_FIXED}
 			>
-				{#if sheetMode}<FolderGit2 size={16} aria-hidden="true" />{/if}
-				{#if !sheetMode}<span class="ctx-chip-cb" class:checked={isWorktreeSelected} aria-hidden="true"><WorktreeGlyph on={isWorktreeSelected} /></span>{/if}
+				<FolderGit2 size={16} aria-hidden="true" />
 				<span class="ctx-chip-label">Worktree</span>
-				{#if sheetMode}<span class="ctx-chip-cb" class:checked={isWorktreeSelected} aria-hidden="true"></span>{/if}
+				<span class="wt-value">{isWorktreeSelected ? 'On' : 'Off'}</span>
+				<Lock size={14} strokeWidth={1.6} aria-hidden="true" />
 			</span>
 		{/if}
 		</div>
@@ -784,10 +810,8 @@
 	}
 
 	/* Who shrinks on a narrow row: the repository and branch names first, the
-	   agent's name less, the runner ("Local" or the worker's name) and the
-	   worktree box not at all. */
-	.context-pill-bar:not(.sheet-mode) > .runner-badge-wrap,
-	.context-pill-bar:not(.sheet-mode) .wt-indicator {
+	   agent's name less, the runner ("Local" or the worker's name) not at all. */
+	.context-pill-bar:not(.sheet-mode) > .runner-badge-wrap {
 		flex-shrink: 0;
 	}
 
@@ -798,9 +822,8 @@
 
 	/* A phone-width row stays one line of labelled items, each with its word and,
 	   when it opens something, its chevron. Leading icons go first, then the online
-	   dot (an offline worker keeps its dot beside its name). The worktree chip goes
-	   last: it is a read-only note that no longer fits, so it stays for screen
-	   readers and the repository and branch names give way before anything else. */
+	   dot (an offline worker keeps its dot beside its name). The repository and
+	   branch names give way before anything else. */
 	@media (max-width: 480px) {
 		/* The agent's short name reads whole; the repository and branch give way. */
 		.context-pill-bar:not(.sheet-mode) > :global(.selector-wrapper:first-child) {
@@ -811,15 +834,6 @@
 		.context-pill-bar:not(.sheet-mode) :global(.ctx-chip > :where(span, div):not(.ctx-chip-cb) > svg:not(.lucide-chevron-down):not(.ctx-chip-chev)),
 		.context-pill-bar:not(.sheet-mode) :global(.worker-status-dot.online) {
 			display: none;
-		}
-
-		.context-pill-bar:not(.sheet-mode) .wt-indicator {
-			position: absolute;
-			width: 1px;
-			height: 1px;
-			overflow: hidden;
-			clip: rect(0 0 0 0);
-			white-space: nowrap;
 		}
 	}
 
@@ -845,6 +859,20 @@
 	/* Read-only chips describe the context without inviting a click. */
 	.ctx-chip.readonly {
 		cursor: default;
+	}
+
+	/* An existing chat's checkout: "main · worktree" and a lock. The worktree word
+	   outlasts a long branch name, and the dot has the same space on both sides. */
+	.checkout-wt {
+		flex: none;
+		margin-left: -6px;
+		white-space: nowrap;
+	}
+	.checkout-wt:first-of-type {
+		margin-left: 0;
+	}
+	.checkout-dot {
+		margin: 0 4px;
 	}
 
 	.branch-name {
