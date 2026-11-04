@@ -1024,6 +1024,43 @@ describe('Stop timeout recovery', () => {
 		expect(test.getState().stopTimedOutTurnId).toBeNull();
 	});
 
+	it.each([['turn-1', 'turn-1'], [null, STOP_TURN_NOT_NAMED]] as const)(
+		'keeps the recovery when Stop is pressed again on the same turn (%s)',
+		(liveTurnId, marker) => {
+			const test = stopping(liveTurnId);
+			test.sender.stopGeneration();
+			vi.advanceTimersByTime(10000);
+			expect(test.getState().stopTimedOutTurnId).toBe(marker);
+
+			// A late event raises the Stop button again on a turn already given up on.
+			test.deps.update(s => ({ ...s, isStreaming: true }));
+			test.sender.stopGeneration();
+			const state = test.getState();
+			expect(state.stopTimedOutTurnId).toBe(marker);
+			expect(stopRecoveryAppliesToTurn(state.stopTimedOutTurnId, state.liveTurnId)).toBe(true);
+		}
+	);
+
+	it('still recovers when Stop could not leave the page, without recording a Stop', () => {
+		const test = stopping();
+		test.wsConn.send.mockReturnValue(false);
+		test.sender.stopGeneration();
+		expect(test.getState().stopRequestedTurnId ?? null).toBeNull();
+		vi.advanceTimersByTime(10000);
+		expect(test.getState().isStreaming).toBe(false);
+		expect(test.getState().stopTimedOutTurnId).toBe('turn-1');
+	});
+
+	it('does not let an unsent Stop recover a started successor', () => {
+		const test = stopping();
+		test.wsConn.send.mockReturnValue(false);
+		test.sender.stopGeneration();
+		test.deps.update(s => ({ ...s, liveTurnId: 'turn-2', isStreaming: true }));
+		vi.advanceTimersByTime(10000);
+		expect(test.getState().isStreaming).toBe(true);
+		expect(test.getState().stopTimedOutTurnId ?? null).toBeNull();
+	});
+
 	it.each(['switch', 'new'] as const)('clears timed-out recovery on %s navigation before another Stop', async mode => {
 		const test = stopping();
 		test.sender.stopGeneration();

@@ -212,8 +212,11 @@ function stopAfterTimeout({ switchChat = false } = {}) {
 			await page.evaluate(() => window.__releaseFirstHeldFeedEnd());
 			await waitChat(page, { streaming: 'false' });
 			await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
-			await withholdTurnEnd(page, false);
-			await page.evaluate(() => window.__releaseHeldTurnEnds());
+			// One task: a frame landing between the two would jump the held frames.
+			await page.evaluate(() => {
+				sessionStorage.setItem('journey-withhold-turn-end', '0');
+				window.__releaseHeldTurnEnds();
+			});
 			await page.getByText(`You said: “fresh ${fresh}`, { exact: false }).first().waitFor({ timeout: 60_000 });
 			await waitChat(page, { streaming: 'false' }, { timeout: 60_000 });
 			await page.waitForTimeout(500);
