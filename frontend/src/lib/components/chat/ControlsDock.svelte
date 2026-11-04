@@ -676,7 +676,7 @@
 				<div
 					class="dock-menu model-menu"
 					class:sheet={modelSheet}
-					style:bottom={!modelSheet && modelMenuAnchor?.bottom !== undefined ? `${modelMenuAnchor.bottom}px` : undefined}
+					style:bottom={modelSheet ? undefined : modelMenuAnchor?.top !== undefined ? 'auto' : modelMenuAnchor?.bottom !== undefined ? `${modelMenuAnchor.bottom}px` : undefined}
 					style:top={!modelSheet && modelMenuAnchor?.top !== undefined ? `${modelMenuAnchor.top}px` : undefined}
 					style:right={!modelSheet && modelMenuAnchor ? `${modelMenuAnchor.right}px` : undefined}
 					style:width={!modelSheet && modelMenuAnchor ? `${modelMenuAnchor.width}px` : undefined}
