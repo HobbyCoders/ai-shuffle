@@ -1,8 +1,8 @@
 <script lang="ts">
 	/**
-	 * One connected credential under its provider, on the connector line. The
-	 * line segment into a credential that is on is teal (`--primary`). Built-in
-	 * switches select a provider/kind slot; saved Claude keys have a Use action.
+	 * One connected credential in its provider's card. The switch (or "Use" on
+	 * saved Claude accounts) is the row's one on/off control, so the status dot
+	 * only appears when there is no control or something needs attention.
 	 */
 	import { settingsNav } from '$lib/settings/navigation.svelte';
 	import { moveListFocus } from '../rows/ListItem.svelte';
@@ -12,14 +12,14 @@
 
 	interface Props {
 		credential: CredentialView;
-		on: boolean;
-		nextOn: boolean;
-		last: boolean;
 	}
 
-	let { credential, on, nextOn, last }: Props = $props();
+	let { credential }: Props = $props();
 
 	const selected = $derived(settingsNav.selectedItem('providers') === credential.item);
+	const showDot = $derived(
+		!credential.switchable || credential.status === 'warn' || credential.status === 'err' || credential.status === 'busy'
+	);
 
 	function select() {
 		settingsNav.selectItem(credential.item, 'providers');
@@ -29,15 +29,10 @@
 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
 <div
 	class="cred"
-	class:on
-	class:nexton={nextOn}
-	class:last
 	aria-current={selected ? 'true' : undefined}
 	data-settings-item={credential.item}
 	onclick={select}
 >
-	<span class="tick" aria-hidden="true"></span>
-	<span class="cdot"><StatusDot tone={credential.status} /></span>
 	<button
 		type="button"
 		class="main"
@@ -49,33 +44,29 @@
 		}}
 		onkeydown={moveListFocus}
 	>
-		<span class="name-line"><span class="nm">{credential.name}</span>{#if credential.active && !credential.account && !credential.subscription}<span class="active">Active</span>{/if}</span>
+		<span class="nm">{credential.name}</span>
 		<span class="sm">{credential.summary}</span>
 	</button>
 	{#if credential.switchable}
 		<!-- svelte-ignore a11y_no_static_element_interactions -->
 		<span class="sw" onclick={(e) => e.stopPropagation()}>
-<CredentialControl {credential} size="sm" />
+			{#if showDot}<StatusDot tone={credential.status} />{/if}
+			<CredentialControl {credential} />
 		</span>
 	{:else}
-		<span></span>
+		<span class="sw">{#if showDot}<StatusDot tone={credential.status} />{/if}</span>
 	{/if}
 </div>
 
 <style>
 	.cred {
-		position: relative;
 		display: grid;
 		grid-template-columns: minmax(0, 1fr) auto;
 		align-items: center;
-		gap: 10px;
-		min-height: 50px;
-		padding: 0 10px 0 48px;
-		border-radius: var(--st-radius-md);
+		gap: 12px;
+		min-height: 56px;
+		padding: 0 16px 0 48px;
 		cursor: pointer;
-		--rt: var(--st-border-strong);
-		--rb: var(--st-border-strong);
-		--tk: var(--st-border-strong);
 	}
 	.cred:hover {
 		background: var(--st-hover);
@@ -83,48 +74,9 @@
 	.cred[aria-current='true'] {
 		background: var(--st-accent);
 	}
-	/* The vertical connector: top half leads into this row, bottom half into the next. */
-	.cred::before {
-		content: '';
-		position: absolute;
-		left: 25px;
-		top: 0;
-		bottom: 0;
-		width: var(--st-line);
-		margin-left: calc(var(--st-line) / -2);
-		background: linear-gradient(var(--rt) 50%, var(--rb) 50%);
-		transition: background 0.25s;
-	}
-	.cred.last::before {
-		bottom: 50%;
-		background: var(--rt);
-	}
-	.tick {
-		position: absolute;
-		left: 25px;
-		top: 50%;
-		width: 10px;
-		height: var(--st-line);
-		margin-top: calc(var(--st-line) / -2);
-		background: var(--tk);
-		transition: background 0.25s;
-	}
-	.cdot {
-		position: absolute;
-		left: 35px;
-		top: 50%;
-		transform: translateY(-50%);
-		display: flex;
-	}
-	.cred.on {
-		--rt: var(--st-primary);
-		--tk: var(--st-primary);
-	}
-	.cred.nexton {
-		--rb: var(--st-primary);
-	}
 	.main {
 		display: grid;
+		gap: 1px;
 		min-width: 0;
 		border: 0;
 		background: none;
@@ -133,20 +85,15 @@
 		color: inherit;
 		border-radius: var(--st-radius-sm);
 	}
-	.main:focus-visible {
-		outline-offset: 2px;
-	}
-	.name-line { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
-	.active { color: var(--st-primary); font-size: 10px; font-weight: 600; flex: none; }
 	.nm {
 		font-size: 13.5px;
-		font-weight: 500;
+		font-weight: 450;
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
 	}
 	.sm {
-		font-size: 12px;
+		font-size: 13px;
 		color: var(--st-mfg);
 		white-space: nowrap;
 		overflow: hidden;
@@ -154,11 +101,7 @@
 	}
 	.sw {
 		display: flex;
-	}
-	@media (prefers-reduced-motion: reduce) {
-		.cred::before,
-		.tick {
-			transition: none;
-		}
+		align-items: center;
+		gap: 10px;
 	}
 </style>

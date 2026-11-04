@@ -4,10 +4,12 @@
 	 * A category with something to look at shows a dot and count (the
 	 * module's `attention()`). Up/Down move between categories.
 	 */
-	import { ChevronRight } from 'lucide-svelte';
+	import { ArrowLeft, ChevronRight } from 'lucide-svelte';
 	import { CATEGORIES, CATEGORY_GROUPS } from '$lib/settings/categories';
 	import { MODULES } from '$lib/settings/registry';
 	import { settingsNav } from '$lib/settings/navigation.svelte';
+	import { backToChats } from '$lib/services/session-navigation';
+	import { platform } from '$lib/stores/platform.svelte';
 	import type { Attention, CategoryId } from '$lib/settings/types';
 	import StatusDot from '../rows/StatusDot.svelte';
 	import SettingsSearch from './SettingsSearch.svelte';
@@ -47,6 +49,12 @@
 </script>
 
 <nav class="st-index st-scroll" aria-label="Settings">
+	<!-- The phone app's own header carries the way back. -->
+	{#if !platform.isMobile}
+		<button type="button" class="st-chats" onclick={backToChats}>
+			<ArrowLeft /><span>Back to chats</span>
+		</button>
+	{/if}
 	<h1 class="st-ix-title">Settings</h1>
 	<SettingsSearch bind:query />
 	{#if !searching}
@@ -86,13 +94,33 @@
 		border-right: 1px solid var(--st-border);
 		display: flex;
 		flex-direction: column;
-		padding: 16px 10px 12px;
+		padding: 10px 10px 12px;
 		min-height: 0;
 		overflow-y: auto;
 		scrollbar-width: none;
+		background: var(--sidebar);
+	}
+	.st-chats {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		flex: none;
+		height: 36px;
+		padding: 0 10px;
+		margin-bottom: 10px;
+		border: 0;
+		border-radius: var(--st-radius-md);
+		background: none;
+		color: var(--st-mfg);
+		font-size: 13px;
+		text-align: left;
+	}
+	.st-chats:hover {
+		background: var(--st-hover);
+		color: var(--st-fg);
 	}
 	.st-ix-title {
-		font-size: 15px;
+		font-size: 16px;
 		font-weight: 600;
 		letter-spacing: -0.01em;
 		padding: 2px 10px 12px;
@@ -104,7 +132,7 @@
 		gap: 7px;
 		font-size: 12px;
 		color: var(--st-subtle);
-		padding: 14px 10px 5px;
+		padding: 16px 10px 6px;
 	}
 	.st-nav {
 		display: grid;
@@ -123,7 +151,8 @@
 		border: 0;
 		background: none;
 		color: var(--st-mfg);
-		font-size: 13.5px;
+		font-size: 13px;
+		font-weight: 450;
 		text-align: left;
 		width: 100%;
 	}

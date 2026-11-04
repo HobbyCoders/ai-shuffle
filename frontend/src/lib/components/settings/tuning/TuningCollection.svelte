@@ -117,7 +117,7 @@
 		{:else if selected && parseTuningItem(selected)}
 			<EmptyDetail icon={Gauge} title="Not in the picker" message="This model is no longer offered. Its saved choices stay on your account." />
 		{:else}
-			<EmptyDetail icon={Gauge} message="Select a model to see what new chats on it start with." />
+			<EmptyDetail icon={Gauge} message="Select a model to see what new chats on it start with." idle />
 		{/if}
 	{/snippet}
 </CollectionPage>

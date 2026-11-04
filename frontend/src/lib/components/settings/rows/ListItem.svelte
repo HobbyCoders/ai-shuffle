@@ -177,10 +177,9 @@
 		text-overflow: ellipsis;
 	}
 	.meta {
-		font-size: 11.5px;
+		font-size: 12px;
 		color: var(--st-subtle);
 		white-space: nowrap;
 		font-variant-numeric: tabular-nums;
-		font-family: var(--st-mono);
 	}
 </style>

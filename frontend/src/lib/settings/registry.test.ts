@@ -15,7 +15,7 @@ describe('settings registry', () => {
 		}
 	});
 
-	it('keeps every hint at 5 words or fewer', () => {
+	it('keeps every hint to one line', () => {
 		for (const entry of ENTRIES) {
 			if (entry.hint) expect(wordCount(entry.hint), entry.id).toBeLessThanOrEqual(HINT_MAX_WORDS);
 		}
@@ -52,7 +52,7 @@ describe('settings registry', () => {
 				{ ...ok },
 				{ ...ok, id: 'general.cues' },
 				{ ...ok, id: 'voice.nolabel', label: ' ' },
-				{ ...ok, id: 'voice.long', hint: 'one two three four five six' },
+				{ ...ok, id: 'voice.long', hint: 'one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen' },
 				{ ...ok, id: 'voice.caps', label: 'SOUND CUES' },
 				{ ...ok, id: 'voice.tab', tab: 'Usage' },
 				{ ...ok, id: 'nowhere.x', category: 'nowhere' as never }
@@ -60,13 +60,13 @@ describe('settings registry', () => {
 			expect(problems.join('\n')).toMatch(/voice\.cues: duplicate id/);
 			expect(problems.join('\n')).toMatch(/general\.cues: id must start with "voice\."/);
 			expect(problems.join('\n')).toMatch(/voice\.nolabel: missing label/);
-			expect(problems.join('\n')).toMatch(/voice\.long: hint .* over 5 words/);
+			expect(problems.join('\n')).toMatch(/voice\.long: hint .* over 14 words/);
 			expect(problems.join('\n')).toMatch(/voice\.caps: label is all caps/);
 			expect(problems.join('\n')).toMatch(/voice\.tab: tab without item/);
 			expect(problems.join('\n')).toMatch(/nowhere\.x: unknown category/);
 		});
 
-		it('accepts a 5-word hint', () => {
+		it('accepts a one-line hint', () => {
 			expect(validateEntries([{ ...ok, hint: 'Applies to new calls only' }])).toEqual([]);
 		});
 	});

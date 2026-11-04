@@ -179,7 +179,7 @@
 		{:else if selected && selected !== DRAFT_ID && model.loaded}
 			<EmptyDetail icon={Webhook} title="Not found" message="This hook was deleted, or belongs to another project." />
 		{:else}
-			<EmptyDetail icon={Webhook} message="Select a hook, or add one." />
+			<EmptyDetail icon={Webhook} message="Select a hook, or add one." idle />
 		{/if}
 	{/snippet}
 </CollectionPage>

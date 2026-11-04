@@ -149,7 +149,7 @@
 		{:else if selected && selected !== DRAFT_ID && !model.loading}
 			<EmptyDetail icon={Plug} title="Not found" message="This API user was deleted." />
 		{:else}
-			<EmptyDetail icon={Plug} message="Select GitHub or an API user." />
+			<EmptyDetail icon={Plug} message="Select GitHub or an API user." idle />
 		{/if}
 	{/snippet}
 </CollectionPage>

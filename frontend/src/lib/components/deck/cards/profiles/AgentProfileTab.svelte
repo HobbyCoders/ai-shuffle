@@ -189,6 +189,7 @@
 
 <style>
 	.st-area {
+		font-family: inherit;
 		display: block;
 		width: 100%;
 		padding: 8px 10px;

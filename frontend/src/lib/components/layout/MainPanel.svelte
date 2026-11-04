@@ -108,6 +108,8 @@
 		 * uses this for its one-bar AppTopBar; the web UI leaves it unset.
 		 */
 		header?: Snippet<[MainPanelHeaderContext]>;
+		/** The page on screen titles itself and the rail is its only chrome. */
+		hideTopBar?: boolean;
 		/** Desktop shell: sidebar state + toggle, surfaced in the top bar. */
 		sidebarCollapsed?: boolean;
 		onToggleSidebar?: () => void;
@@ -118,6 +120,7 @@
 	let {
 		onOpenSession,
 		header,
+		hideTopBar = false,
 		sidebarCollapsed = false,
 		navigationOverlayOpen,
 		onToggleSidebar
@@ -278,8 +281,8 @@
 		if (!type) return 'Sessions';
 		if (type === 'session') return headerTitle;
 		if (type === 'board') return 'Sessions';
-		if (isBuildView) return 'Agents';
-		if (type === 'plugins' || type === 'mcp' || type === 'hooks') return 'Settings';
+		// These pages title themselves: a crumb would say it twice.
+		if (isBuildView || type === 'settings' || type === 'plugins' || type === 'mcp' || type === 'hooks') return '';
 		return viewTitles[type] || '';
 	});
 
@@ -1011,7 +1014,7 @@
 			headerActions,
 			subagentChat: activeIsSubagent
 		})}
-	{:else}
+	{:else if !hideTopBar}
 		<!-- Desktop: one bar for the whole main panel — sidebar toggle,
 		     breadcrumbs, and the action cluster. -->
 		<StudioTopBar

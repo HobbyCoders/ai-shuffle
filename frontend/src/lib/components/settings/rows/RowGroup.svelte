@@ -42,7 +42,7 @@
 
 <style>
 	.st-grp {
-		margin-bottom: 28px;
+		margin-bottom: 32px;
 	}
 	.st-grp.detail {
 		margin: 22px 0 0;
@@ -51,14 +51,16 @@
 		display: flex;
 		align-items: baseline;
 		gap: 8px;
-		font-size: 13px;
-		font-weight: 500;
-		color: var(--st-mfg);
-		margin: 0 0 8px 2px;
+		font-size: 15px;
+		font-weight: 600;
+		letter-spacing: -0.005em;
+		color: var(--st-fg);
+		margin: 0 0 10px 2px;
 	}
 	.st-grp.detail .st-gt {
 		min-height: 26px;
 		align-items: center;
+		font-size: 14px;
 	}
 	.n {
 		font-weight: 400;

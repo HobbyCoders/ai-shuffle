@@ -8,12 +8,14 @@
 		message?: string;
 		icon?: SettingsIcon;
 		children?: Snippet;
+		/** Nothing is selected yet: the page folds this pane away (settings.css). */
+		idle?: boolean;
 	}
 
-	let { title, message = 'Select an item.', icon: Icon, children }: Props = $props();
+	let { title, message = 'Select an item.', icon: Icon, children, idle = false }: Props = $props();
 </script>
 
-<div class="st-empty-detail">
+<div class="st-empty-detail" data-idle={idle ? '' : undefined}>
 	{#if Icon}<span class="ic"><Icon /></span>{/if}
 	{#if title}<h2>{title}</h2>{/if}
 	<p>{message}</p>

@@ -22,7 +22,7 @@
 		id?: string;
 		/** Overrides the registry label (required without `id`). */
 		label?: string;
-		/** Overrides the registry hint, e.g. a hint that follows the value. At most 5 words. */
+		/** Overrides the registry hint, e.g. a hint that follows the value. One line. */
 		hint?: string;
 		help?: string;
 		hintMono?: boolean;
@@ -134,15 +134,15 @@
 		grid-template-columns: minmax(0, 1fr) auto;
 		align-items: center;
 		gap: 20px;
-		min-height: 52px;
-		padding: 9px 16px;
+		min-height: 56px;
+		padding: 10px 16px;
 	}
 	.st-rt {
 		min-width: 0;
 	}
 	.st-rl {
-		font-size: 14px;
-		font-weight: 450;
+		font-size: 13.5px;
+		font-weight: 500;
 		display: flex;
 		align-items: center;
 		gap: 8px;
@@ -154,9 +154,10 @@
 		text-overflow: ellipsis;
 	}
 	.st-rh {
-		font-size: 12.5px;
+		font-size: 13px;
+		font-weight: 400;
 		color: var(--st-mfg);
-		margin-top: 2px;
+		margin-top: 1px;
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;

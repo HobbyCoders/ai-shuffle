@@ -10,7 +10,7 @@
 	 * A touch long-press on any destination jumps straight to Customize, so
 	 * rearranging the rail never needs a trip through More.
 	 */
-	import { MoreHorizontal, SquarePen } from 'lucide-svelte';
+	import { MessagesSquare, MoreHorizontal, SquarePen } from 'lucide-svelte';
 	import type { ViewType } from '$lib/stores/layout.svelte';
 	import type { WorkspaceNavItem } from './workspace-items';
 
@@ -30,6 +30,8 @@
 		onPreload?: (type: ViewType) => void;
 		onMore: () => void;
 		onCustomize: () => void;
+		/** Set while the session column is hidden: the way back to it. */
+		onChats?: () => void;
 	}
 
 	let {
@@ -43,7 +45,8 @@
 		onPick,
 		onPreload,
 		onMore,
-		onCustomize
+		onCustomize,
+		onChats
 	}: Props = $props();
 
 	const LONG_PRESS_MS = 520;
@@ -91,6 +94,12 @@
 		<SquarePen size={18} strokeWidth={1.75} />
 		<span class="tip" aria-hidden="true">{newLabel}</span>
 	</button>
+	{#if onChats}
+		<button class="r-btn" type="button" aria-label="Chats" onclick={onChats}>
+			<MessagesSquare size={18} strokeWidth={1.75} />
+			<span class="tip" aria-hidden="true">Chats</span>
+		</button>
+	{/if}
 	<span class="r-sep" aria-hidden="true"></span>
 
 	{#each items as item (item.id)}

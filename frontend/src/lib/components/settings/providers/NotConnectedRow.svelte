@@ -27,27 +27,33 @@
 	onclick={() => settingsNav.selectItem(provider.item, 'providers')}
 	onkeydown={moveListFocus}
 >
-	<span class="tile"><ProviderTile {provider} dashed /></span>
-	<span class="nm">{provider.name}</span>
-	<span class="sm">{kinds}</span>
+	<span class="tile"><ProviderTile {provider} /></span>
+	<span class="tx">
+		<span class="nm">{provider.name}</span>
+		<span class="sm">{kinds}</span>
+	</span>
+	<span class="st-btn sm connect" aria-hidden="true">Connect</span>
 </button>
 
 <style>
 	.nc {
 		display: grid;
-		grid-template-columns: auto auto minmax(0, 1fr);
+		grid-template-columns: auto minmax(0, 1fr) auto;
 		align-items: center;
 		gap: 10px;
 		width: 100%;
-		min-height: 40px;
-		padding: 4px 10px 4px 14px;
+		min-height: 56px;
+		padding: 6px 12px;
 		border: 0;
-		border-radius: var(--st-radius-md);
 		background: none;
 		text-align: left;
 	}
 	.nc:hover {
 		background: var(--st-hover);
+	}
+	.nc:hover .connect {
+		color: var(--st-fg);
+		border-color: var(--st-mfg);
 	}
 	.nc[aria-current='true'] {
 		background: var(--st-accent);
@@ -55,28 +61,22 @@
 	.nc:focus-visible {
 		outline-offset: -2px;
 	}
-	.tile :global(.st-tile) {
-		width: 22px;
-		height: 22px;
-		font-size: 11px;
-		color: var(--st-mfg);
-	}
-	.tile :global(svg) {
-		width: 12px;
-		height: 12px;
-	}
 	.tile {
 		display: flex;
 	}
+	.tx {
+		display: grid;
+		gap: 1px;
+		min-width: 0;
+	}
 	.nm {
 		font-size: 13.5px;
-		font-weight: 450;
-		color: var(--st-mfg);
+		font-weight: 500;
 		white-space: nowrap;
 	}
 	.sm {
-		font-size: 11.5px;
-		color: var(--st-subtle);
+		font-size: 13px;
+		color: var(--st-mfg);
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;

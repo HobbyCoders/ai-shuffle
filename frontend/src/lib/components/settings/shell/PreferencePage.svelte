@@ -47,18 +47,19 @@
 		min-height: 0;
 	}
 	.st-page {
-		max-width: 760px;
+		max-width: 856px;
+		margin: 0 auto;
 		padding: 32px 48px 120px;
 	}
 	.st-page-h {
 		display: flex;
 		align-items: center;
 		gap: 12px;
-		margin-bottom: 26px;
+		margin-bottom: 28px;
 		min-height: 32px;
 	}
 	h1 {
-		font-size: 22px;
+		font-size: 20px;
 		font-weight: 600;
 		letter-spacing: -0.012em;
 		margin: 0;

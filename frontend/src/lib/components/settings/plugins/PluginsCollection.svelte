@@ -240,7 +240,7 @@
 		{:else if selected && parsed}
 			<EmptyDetail icon={Puzzle} title="Not found" message="This plugin is not available here." />
 		{:else}
-			<EmptyDetail icon={Puzzle} message="Select a plugin or app." />
+			<EmptyDetail icon={Puzzle} message="Select a plugin or app." idle />
 		{/if}
 	{/snippet}
 </CollectionPage>

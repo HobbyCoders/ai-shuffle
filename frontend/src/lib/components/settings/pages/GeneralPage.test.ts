@@ -41,16 +41,16 @@ describe('General page', () => {
 		render(GeneralPage);
 		const groups = screen.getAllByRole('heading', { level: 2 }).map((h) => h.textContent?.trim());
 		expect(groups).toEqual(['Appearance', 'Conversation', 'Thinking and tools', 'Region']);
-		expect(screen.getByText('Uses an extra model call')).toBeTruthy();
+		expect(screen.getByText(/uses an extra model call/i)).toBeTruthy();
 	});
 
 	it('saves a switch through the chat preferences store and shows the Saved tick', async () => {
 		render(GeneralPage);
-		const stamps = switchFor('Show timestamps');
-		expect(stamps.getAttribute('aria-checked')).toBe('false');
-		await fireEvent.click(stamps);
-		expect(chatPreferences.current.showMessageTimestamps).toBe(true);
-		expect(stamps.getAttribute('aria-checked')).toBe('true');
+		const expand = switchFor('Expand thinking by default');
+		expect(expand.getAttribute('aria-checked')).toBe('false');
+		await fireEvent.click(expand);
+		expect(chatPreferences.current.thinkingStartExpanded).toBe(true);
+		expect(expand.getAttribute('aria-checked')).toBe('true');
 		expect(saveStatus.visible).toBe(true);
 	});
 
@@ -74,8 +74,8 @@ describe('General page', () => {
 
 	it('follows a change that arrives through the store', async () => {
 		render(GeneralPage);
-		chatPreferences.updatePreference('compactMessageView', true);
+		chatPreferences.updatePreference('toolsStartExpanded', true);
 		await Promise.resolve();
-		expect(switchFor('Compact message view').getAttribute('aria-checked')).toBe('true');
+		expect(switchFor('Expand tool calls by default').getAttribute('aria-checked')).toBe('true');
 	});
 });

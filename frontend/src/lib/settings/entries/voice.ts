@@ -10,7 +10,7 @@ export const entries: SettingEntry[] = [
 		category: 'voice',
 		section: 'Dictation',
 		label: 'Global voice input',
-		hint: 'This device only',
+		hint: 'Dictate into any app with the hotkey. This device only',
 		keywords: ['dictation anywhere', 'speech to text', 'microphone'],
 		default: false
 	},
@@ -36,6 +36,7 @@ export const entries: SettingEntry[] = [
 		category: 'voice',
 		section: 'Dictation',
 		label: 'Stop after silence',
+		hint: 'How long a pause ends dictation',
 		keywords: ['silence timeout', 'seconds', 'pause'],
 		default: 5
 	},
@@ -44,7 +45,7 @@ export const entries: SettingEntry[] = [
 		category: 'voice',
 		section: 'Dictation',
 		label: 'Sound cues',
-		hint: 'This device only',
+		hint: 'Play a sound when dictation starts and stops. This device only',
 		keywords: ['beep', 'tone', 'audio feedback'],
 		default: true
 	},
@@ -79,6 +80,7 @@ export const entries: SettingEntry[] = [
 		category: 'voice',
 		section: 'Voice calls',
 		label: 'Voice',
+		hint: 'How the assistant sounds on calls',
 		keywords: ['choose a voice', 'preview', 'sample', 'marin', 'cedar'],
 		default: 'marin'
 	},
@@ -124,6 +126,7 @@ export const entries: SettingEntry[] = [
 		category: 'voice',
 		section: 'Voice calls',
 		label: 'Call prompts',
+		hint: 'Instructions the voice and chat agents get on a call',
 		keywords: ['conversation prompt', 'chat agent prompt', 'instructions', 'restore default']
 	}
 ];

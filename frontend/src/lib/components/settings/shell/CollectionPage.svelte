@@ -158,7 +158,7 @@
 		min-width: 0;
 	}
 	.st-lhead {
-		padding: 32px 14px 10px 16px;
+		padding: 32px 16px 12px 16px;
 		display: grid;
 		gap: 12px;
 	}
@@ -169,7 +169,7 @@
 		min-height: 32px;
 	}
 	h1 {
-		font-size: 22px;
+		font-size: 20px;
 		font-weight: 600;
 		letter-spacing: -0.012em;
 		margin: 0;
@@ -224,8 +224,8 @@
 		align-items: center;
 		gap: 8px;
 		height: 32px;
-		border: 1px solid var(--st-input);
-		background: var(--st-muted);
+		border: 1px solid var(--st-border);
+		background: var(--st-card);
 		border-radius: var(--st-radius-md);
 		padding: 0 10px;
 		color: var(--st-mfg);

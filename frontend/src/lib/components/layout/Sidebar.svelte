@@ -67,6 +67,7 @@
 	import NotificationCenter from '$lib/components/NotificationCenter.svelte';
 	import DesktopUpdateButton from './sidebar/DesktopUpdateButton.svelte';
 	import SessionCard from './SessionCard.svelte';
+	import { backToChats } from '$lib/services/session-navigation';
 	import SidebarRail from './sidebar/SidebarRail.svelte';
 	import SidebarSheet from './sidebar/SidebarSheet.svelte';
 	import WorkspaceCustomize from './sidebar/WorkspaceCustomize.svelte';
@@ -101,6 +102,8 @@
 		onSelectMode?: (mode: SessionMode) => void;
 		/** Extra control for the header row (the drawer's close button). */
 		headerAction?: Snippet;
+		/** Only the rail: the open page brings its own navigation column. */
+		railOnly?: boolean;
 	}
 
 	let {
@@ -111,7 +114,8 @@
 		onOpenFeature,
 		onOpenSpotlight,
 		onSelectMode,
-		headerAction
+		headerAction,
+		railOnly = false
 	}: Props = $props();
 
 	// Statuses whose elapsed timer ticks live (1s) rather than showing a coarse age.
@@ -737,9 +741,10 @@
 		onPreload={preloadPanelForView}
 		onMore={() => toggleSheet('more')}
 		onCustomize={openCustomize}
+		onChats={railOnly ? backToChats : undefined}
 	/>
 
-	<div class="col" class:selecting>
+	<div class="col" class:selecting class:rail-hidden={railOnly}>
 		<!-- Selection bar: slides over the header while rows are selected. -->
 		<div class="selbar" inert={!selecting} aria-hidden={selecting ? undefined : 'true'}>
 			<button class="icon-btn" type="button" aria-label="Cancel selection" onclick={cancelSelection}>
@@ -945,6 +950,9 @@
 		background: var(--sidebar);
 		color: var(--sidebar-foreground);
 	}
+
+	/* Hidden, not removed: coming back to chats stays instant. */
+	.col.rail-hidden { display: none; }
 
 	.col {
 		position: relative;

@@ -187,7 +187,7 @@
 		{:else if selectedTool && selectedTool.id === READ_ALOUD?.id}
 			<ToolDetail tool={selectedTool} />
 		{:else}
-			<EmptyDetail icon={Sparkles} message="Select a task." />
+			<EmptyDetail icon={Sparkles} message="Select a task." idle />
 		{/if}
 	{/snippet}
 </CollectionPage>

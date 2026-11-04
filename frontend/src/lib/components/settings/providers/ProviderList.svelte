@@ -1,13 +1,13 @@
 <script lang="ts">
 	/**
-	 * The Providers list: each connected provider with the credentials it has,
-	 * on the connector line, then the providers with nothing connected.
+	 * The Providers list: one card per connected provider with a row per
+	 * credential, then one card of the providers with nothing connected.
 	 */
 	import ListGroupLabel from '../rows/ListGroupLabel.svelte';
 	import CredentialRow from './CredentialRow.svelte';
 	import NotConnectedRow from './NotConnectedRow.svelte';
 	import ProviderGroupHeader from './ProviderGroupHeader.svelte';
-	import { filterProviders, lineState, splitProviders, type ProviderView } from './providers-model';
+	import { filterProviders, splitProviders, type ProviderView } from './providers-model';
 
 	interface Props {
 		views: ProviderView[];
@@ -20,20 +20,21 @@
 </script>
 
 {#each groups.connected as provider (provider.id)}
-	{@const line = lineState(provider.credentials)}
-	<div class="pg" role="group" aria-label={provider.name}>
-		<ProviderGroupHeader {provider} lit={line.lit} />
-		{#each provider.credentials as credential, i (credential.item)}
-			<CredentialRow {credential} on={line.rows[i].on} nextOn={line.rows[i].nextOn} last={line.rows[i].last} />
+	<div class="pg st-card" role="group" aria-label={provider.name}>
+		<ProviderGroupHeader {provider} />
+		{#each provider.credentials as credential (credential.item)}
+			<CredentialRow {credential} />
 		{/each}
 	</div>
 {/each}
 
 {#if groups.notConnected.length}
 	<ListGroupLabel label="Not connected" />
-	{#each groups.notConnected as provider (provider.id)}
-		<NotConnectedRow {provider} />
-	{/each}
+	<div class="pg st-card">
+		{#each groups.notConnected as provider (provider.id)}
+			<NotConnectedRow {provider} />
+		{/each}
+	</div>
 {/if}
 
 {#if !groups.connected.length && !groups.notConnected.length}
@@ -43,5 +44,10 @@
 <style>
 	.pg {
 		position: relative;
+		margin-bottom: 12px;
+	}
+	/* Hairline between every row in a card; the card's own edge ends each group. */
+	.pg > :global(* + *) {
+		border-top: 1px solid var(--st-border);
 	}
 </style>

@@ -20,6 +20,9 @@
 	--st-subtle: color-mix(in oklch, var(--muted-foreground) 72%, var(--background));
 	--st-primary: var(--primary);
 	--st-pfg: var(--primary-foreground);
+	--st-action: var(--action);
+	--st-action-fg: var(--action-foreground);
+	--st-action-hover: var(--action-hover);
 	--st-primary-soft: color-mix(in oklch, var(--primary) 13%, transparent);
 	--st-primary-line: color-mix(in oklch, var(--primary) 45%, transparent);
 	--st-destructive: var(--destructive);
@@ -37,11 +40,12 @@
 	--st-meter: color-mix(in oklch, var(--foreground) 42%, transparent);
 	--st-code-bg: var(--code-bg, var(--muted));
 	--st-shadow: 0 14px 40px color-mix(in oklch, var(--foreground) 14%, transparent), 0 0 0 1px var(--st-border-strong);
-	--st-radius: var(--radius, 10px);
-	--st-radius-md: calc(var(--radius, 10px) - 2px);
-	--st-radius-sm: calc(var(--radius, 10px) - 4px);
+	/* Cards 12, controls 8. */
+	--st-radius: calc(var(--radius, 8px) + 4px);
+	--st-radius-md: var(--radius, 8px);
+	--st-radius-sm: calc(var(--radius, 8px) - 2px);
 	--st-line: 1.5px;
-	--st-index-width: 224px;
+	--st-index-width: 240px;
 	--st-mono: var(--font-mono, ui-monospace, 'JetBrains Mono', monospace);
 
 	container: settings / inline-size;
@@ -113,6 +117,27 @@
 	overflow: hidden;
 }
 
+/*
+ * A master/detail page with nothing selected: no empty third pane. The list
+ * takes the page's centred column until something opens.
+ */
+.settings-shell:not([data-stacked]) .st-coll:has(> .st-dpane > .st-empty-detail[data-idle]) {
+	grid-template-columns: minmax(0, 1fr);
+	justify-items: center;
+}
+.settings-shell:not([data-stacked]) .st-coll:has(> .st-dpane > .st-empty-detail[data-idle]) > .st-divider,
+.settings-shell:not([data-stacked]) .st-coll:has(> .st-dpane > .st-empty-detail[data-idle]) > .st-dpane {
+	display: none;
+}
+.settings-shell:not([data-stacked]) .st-coll:has(> .st-dpane > .st-empty-detail[data-idle]) > .st-lcol {
+	width: min(100%, 856px);
+	border-right: 0;
+	padding: 0 32px;
+}
+.settings-shell:not([data-stacked]) .st-coll:has(> .st-dpane > .st-empty-detail[data-idle]) > .st-lcol .st-lscroll {
+	padding-inline: 16px;
+}
+
 /* ---------- row cards ---------- */
 /* The card rows sit in (RowGroup). Global so bare groups and custom lists
    reuse it. No overflow clipping: popovers inside rows must escape it. */
@@ -156,13 +181,12 @@
 	opacity: 0.45;
 }
 .settings-shell .st-btn.primary {
-	background: var(--st-primary);
-	color: var(--st-pfg);
+	background: var(--st-action);
+	color: var(--st-action-fg);
 	border-color: transparent;
 }
 .settings-shell .st-btn.primary:hover:not(:disabled) {
-	background: var(--st-primary);
-	filter: brightness(1.06);
+	background: var(--st-action-hover);
 }
 .settings-shell .st-btn.danger {
 	color: var(--st-destructive);
@@ -290,6 +314,7 @@
 .settings-shell[data-stacked] .st-index {
 	border-right: 0;
 	padding: 18px 14px 32px;
+	background: var(--st-bg);
 }
 .settings-shell[data-stacked] .st-ix-title {
 	font-size: 24px;

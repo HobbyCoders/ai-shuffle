@@ -141,7 +141,6 @@ describe('the list', () => {
 		expect(credentialNames('xAI Grok')).toEqual(['SuperGrok subscription, Reconnect needed']);
 		expect(credentialNames('fal.ai')).toEqual(['Media key, On']);
 		expect(credentialNames('ServerWorker vLLM')).toEqual(['Gateway key, On']);
-		expect(within(group('OpenAI')).getByText('2 on')).toBeTruthy();
 
 		expect(screen.getByText('Not connected')).toBeTruthy();
 		const openRouter = screen.getByRole('button', { name: /^OpenRouter/ });

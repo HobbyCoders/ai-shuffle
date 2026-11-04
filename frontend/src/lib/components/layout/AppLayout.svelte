@@ -16,7 +16,7 @@
 	 * wraps the same MainPanel. See docs/mobile-desktop-ui-split.md.
 	 */
 	import { onMount, onDestroy } from 'svelte';
-	import { layout, sidebarCollapsed } from '$lib/stores/layout.svelte';
+	import { activeView, layout, sidebarCollapsed } from '$lib/stores/layout.svelte';
 	import type { ViewType } from '$lib/stores/layout.svelte';
 	import { isNarrowViewportWidth } from '$lib/utils/viewport';
 	import MainPanel from './MainPanel.svelte';
@@ -102,7 +102,15 @@
 		}
 	});
 
-	const showSidebar = $derived(!$sidebarCollapsed);
+	/**
+	 * Settings and Agents bring their own navigation column, so the session
+	 * column gives way to it and only the rail stays. A narrow window keeps its
+	 * overlay sidebar, which never sits beside the page.
+	 */
+	const railOnly = $derived(
+		!narrow && ($activeView?.type === 'settings' || $activeView?.type === 'build' || $activeView?.type === 'profile')
+	);
+	const showSidebar = $derived(!$sidebarCollapsed || railOnly);
 	/** Narrow window: the open sidebar floats over the main panel. */
 	const sidebarFloating = $derived(showSidebar && narrow);
 
@@ -131,16 +139,22 @@
 			<div class="sidebar-scrim" onclick={closeFloatingSidebar}></div>
 		{/if}
 		{#if showSidebar}
-			<div class="sidebar-slot" class:floating={sidebarFloating} style:width="{sidebarWidth}px">
+			<div
+				class="sidebar-slot"
+				class:floating={sidebarFloating}
+				class:rail-only={railOnly}
+				style:width={railOnly ? undefined : `${sidebarWidth}px`}
+			>
 				<Sidebar
 					{isAdmin}
+					{railOnly}
 					onNewSession={sidebarNav.onNewSession}
 					onSettledOpenSession={sidebarNav.onSettledOpenSession}
 					onOpenSession={sidebarNav.onOpenSession}
 					onOpenFeature={sidebarNav.onOpenFeature}
 					onOpenSpotlight={sidebarNav.onOpenSpotlight}
 				/>
-				{#if !sidebarFloating}
+				{#if !sidebarFloating && !railOnly}
 					<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 					<div
 						class="resize-handle"
@@ -158,6 +172,7 @@
 
 		<MainPanel
 			{onOpenSession}
+			hideTopBar={railOnly}
 			sidebarCollapsed={$sidebarCollapsed}
 			onToggleSidebar={() => layout.toggleSidebar()}
 		/>
@@ -191,6 +206,12 @@
 		flex: none;
 		min-height: 0;
 		border-right: 1px solid var(--sidebar-border);
+	}
+
+	/* The rail alone, beside a page with its own navigation column. */
+	.sidebar-slot.rail-only {
+		width: 56px;
+		border-right-color: transparent;
 	}
 
 	/* Narrow window: the sidebar floats over the main panel instead of

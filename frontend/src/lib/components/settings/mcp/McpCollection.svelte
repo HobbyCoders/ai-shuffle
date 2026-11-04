@@ -124,7 +124,7 @@
 		{:else if selected && selected !== DRAFT_ID && model.loaded}
 			<EmptyDetail icon={Cable} title="Not found" message="This server was deleted." />
 		{:else}
-			<EmptyDetail icon={Cable} message="Select a server, or add one." />
+			<EmptyDetail icon={Cable} message="Select a server, or add one." idle />
 		{/if}
 	{/snippet}
 </CollectionPage>

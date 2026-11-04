@@ -1,8 +1,7 @@
 <script lang="ts">
 	/**
 	 * A connected provider's header: tile and name (opens the provider), then
-	 * Claude's "Subscription | API key | Cloud | Off" or the "N on" count with the "+".
-	 * The connector line starts under the tile.
+	 * Claude's "Subscription | API key | Cloud | Off" and the "+".
 	 */
 	import { settingsNav } from '$lib/settings/navigation.svelte';
 	import { providers } from '$lib/stores/providers.svelte';
@@ -16,18 +15,16 @@
 
 	interface Props {
 		provider: ProviderView;
-		/** The stub under the tile leads into a credential that is on. */
-		lit: boolean;
 	}
 
-	let { provider, lit }: Props = $props();
+	let { provider }: Props = $props();
 
 	const selected = $derived(settingsNav.selectedItem('providers') === provider.item);
 	const kinds = $derived(addableKinds(provider));
 	const mode = $derived(providers.current.claude?.mode ?? 'subscription');
 </script>
 
-<div class="pgh" class:lit class:claude={!!provider.claude} class:bare={provider.credentials.length === 0} aria-current={selected ? 'true' : undefined}>
+<div class="pgh" class:claude={!!provider.claude} aria-current={selected ? 'true' : undefined}>
 	<button
 		type="button"
 		class="pgn"
@@ -54,7 +51,7 @@
 		</span>
 		<AddKindMenu providerName={provider.name} {kinds} onpick={(k) => startSetup(provider, k.flavor)} />
 	{:else}
-		<span class="cnt">{provider.draft ? 'Setting up' : `${provider.onCount} on`}</span>
+		<span class="cnt">{provider.draft ? 'Setting up' : ''}</span>
 		<AddKindMenu
 			providerName={provider.name}
 			{kinds}
@@ -71,10 +68,8 @@
 		grid-template-columns: minmax(0, auto) minmax(0, 1fr) auto;
 		align-items: center;
 		gap: 8px;
-		height: 44px;
-		padding-right: 6px;
-		margin-top: 8px;
-		border-radius: var(--st-radius-md);
+		min-height: 48px;
+		padding-right: 8px;
 	}
 	.pgh[aria-current='true'] {
 		background: var(--st-accent);
@@ -82,37 +77,17 @@
 	.pgh:hover:not([aria-current='true']) {
 		background: var(--st-hover);
 	}
-	/* Connector stub from under the tile to the first credential. */
-	.pgh::after {
-		content: '';
-		position: absolute;
-		left: 25px;
-		top: 35px;
-		bottom: 0;
-		width: var(--st-line);
-		margin-left: calc(var(--st-line) / -2);
-		background: var(--st-border-strong);
-		transition: background 0.25s;
-	}
-	.pgh.lit::after {
-		background: var(--st-primary);
-	}
-	.pgh.bare::after {
-		display: none;
-	}
 	.pgn {
 		display: flex;
 		align-items: center;
 		gap: 10px;
-		height: 44px;
+		height: 48px;
 		padding: 0 4px 0 12px;
 		border: 0;
 		background: none;
 		min-width: 0;
 		text-align: left;
 		border-radius: var(--st-radius-md);
-		position: relative;
-		z-index: 1;
 	}
 	.pgn:focus-visible {
 		outline-offset: -2px;
@@ -137,20 +112,19 @@
 		min-width: 0;
 	}
 	/* A list up to phone width (280-420px) cannot hold the name, the mode
-	   switch and the "+" on one line: the switch moves under the name, the
-	   connector runs past it. */
+	   switch and the "+" on one line: the switch moves under the name. */
 	@container st-list (max-width: 419px) {
 		.pgh.claude:has(.mode) {
 			grid-template-columns: minmax(0, 1fr) auto;
 			height: auto;
-			padding-bottom: 6px;
+			padding-bottom: 8px;
 		}
 		.pgh.claude .pgn { grid-column: 1; }
 		.pgh.claude :global(.plus) { grid-column: 2; grid-row: 1; }
 		.pgh.claude .mode {
 			grid-column: 1 / -1;
 			justify-self: start;
-			padding-left: 46px;
+			padding-left: 12px;
 		}
 	}
 	.cnt {
@@ -169,9 +143,6 @@
 		}
 	}
 	@media (prefers-reduced-motion: reduce) {
-		.pgh::after {
-			transition: none;
-		}
 		.checking {
 			animation: none;
 		}

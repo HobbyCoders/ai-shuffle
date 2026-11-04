@@ -167,12 +167,10 @@
 		position: absolute;
 		right: 8px;
 		top: 7px;
-		font-family: var(--st-mono);
-		font-size: 10.5px;
+		font-family: inherit;
+		font-size: 12px;
 		color: var(--st-subtle);
-		border: 1px solid var(--st-border-strong);
-		border-radius: 4px;
-		padding: 0 5px;
+		padding: 0 2px;
 		line-height: 17px;
 	}
 	.st-results {

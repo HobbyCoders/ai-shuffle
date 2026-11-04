@@ -40,6 +40,7 @@ export const entries: SettingEntry[] = [
 	{
 		id: 'providers.cliKeepInstalled', category: 'providers', section: 'Claude Code CLI',
 		label: 'Keep Claude Code installed', item: CLAUDE_PROVIDER_ITEM,
+		hint: 'Reinstall the CLI at start if it is missing',
 		help: 'When on, this worker reinstalls the CLI at start if it is missing. When off, starting the worker never downloads it.',
 		keywords: ['claude cli', 'install', 'startup', 'download']
 	},
@@ -79,6 +80,7 @@ export const entries: SettingEntry[] = [
 		category: 'providers',
 		section: 'Loop guard',
 		label: 'Hold unattended turns',
+		hint: 'Past an hourly budget, unattended work waits for you',
 		help: LOOP_HELP,
 		item: CLAUDE_SUB_ITEM,
 		tab: 'Policy',

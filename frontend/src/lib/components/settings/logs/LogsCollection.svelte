@@ -145,7 +145,7 @@
 		{#if entry}
 			<LogDetail {entry} onSameLogger={sameLogger} />
 		{:else}
-			<EmptyDetail icon={ScrollText} message="Select a log entry." />
+			<EmptyDetail icon={ScrollText} message="Select a log entry." idle />
 		{/if}
 	{/snippet}
 </CollectionPage>

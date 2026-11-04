@@ -729,32 +729,6 @@ export function filterProviders(views: ProviderView[], query: string): ProviderV
 }
 
 // ============================================================================
-// Connector line
-// ============================================================================
-
-export interface LineState {
-	/** The header's stub into the first row is teal. */
-	lit: boolean;
-	rows: { on: boolean; nextOn: boolean; last: boolean }[];
-}
-
-/**
- * The connector line runs from the provider tile down through its credentials.
- * A segment is teal (`--primary`) where it leads into a credential that is on;
- * for Claude that is the active credential only.
- */
-export function lineState(credentials: Pick<CredentialView, 'on'>[]): LineState {
-	return {
-		lit: credentials[0]?.on ?? false,
-		rows: credentials.map((c, i) => ({
-			on: c.on,
-			nextOn: credentials[i + 1]?.on ?? false,
-			last: i === credentials.length - 1
-		}))
-	};
-}
-
-// ============================================================================
 // "+" menu and setup
 // ============================================================================
 

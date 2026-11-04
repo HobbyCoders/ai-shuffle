@@ -68,6 +68,7 @@ describe('SettingsShell index', () => {
 			.getAllByRole('button')
 			.map((b) => b.textContent?.trim());
 		expect(names).toEqual([
+			'Back to chats',
 			'General',
 			'Archived chats',
 			'Voice',

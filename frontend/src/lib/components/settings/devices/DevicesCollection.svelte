@@ -288,7 +288,7 @@
 		{:else if model.forbidden && !model.status}
 			<EmptyDetail icon={MonitorSmartphone} title="Devices" message={FORBIDDEN_TEXT} />
 		{:else}
-			<EmptyDetail icon={MonitorSmartphone} message="Select a device." />
+			<EmptyDetail icon={MonitorSmartphone} message="Select a device." idle />
 		{/if}
 	{/snippet}
 </CollectionPage>

@@ -137,7 +137,7 @@
 		{:else if selected && loading}
 			<EmptyDetail icon={KeyRound} message="Loading providers" />
 		{:else}
-			<EmptyDetail icon={KeyRound} message="Select a provider or credential." />
+			<EmptyDetail icon={KeyRound} message="Select a provider or credential." idle />
 		{/if}
 	{/snippet}
 </CollectionPage>
