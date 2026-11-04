@@ -6,14 +6,14 @@ import { resolve } from 'node:path';
 // bottom-aligned in the row, so the text shares their centre only when the
 // field is exactly as tall as a circle. A taller field lifted the text above
 // the circles' centre and left more room above them than below.
-const mobileCss = readFileSync(resolve(process.cwd(), 'src/mobile.css'), 'utf8');
-const MOBILE = "html:root[data-platform='mobile']";
+const phoneCss = readFileSync(resolve(process.cwd(), '../frontend/src/lib/components/chat/phone/phone-composer.css'), 'utf8');
+const PHONE = 'html:root .phone-composer';
 
 /** The declarations of the rule whose selector list starts with `head`. */
 function rule(head: string): string {
-	const start = mobileCss.indexOf(head);
+	const start = phoneCss.indexOf(head);
 	expect(start, `${head} rule`).toBeGreaterThan(-1);
-	return mobileCss.slice(start, mobileCss.indexOf('}', start));
+	return phoneCss.slice(start, phoneCss.indexOf('}', start));
 }
 
 function px(block: string, property: string): number[] {
@@ -29,10 +29,10 @@ function paddingBlock(values: number[]): [number, number] {
 
 describe('phone composer single-line row', () => {
 	it('centres the text line on the 40px circles with equal room above and below', () => {
-		const circle = px(rule(`${MOBILE} .send-btn,\n`), 'height')[0];
-		const line = px(rule(`${MOBILE} .chat-input-wrapper .tiptap-editor .ProseMirror,\n`), 'line-height')[0];
-		const area = rule(`${MOBILE} .input-area {`);
-		const [fieldTop, fieldBottom] = paddingBlock(px(rule(`${MOBILE} .input-area .textarea-wrapper {`), 'padding'));
+		const circle = px(rule(`${PHONE} .send-btn,\n`), 'height')[0];
+		const line = px(rule(`${PHONE} .tiptap-editor .ProseMirror,\n`), 'line-height')[0];
+		const area = rule(`${PHONE} .input-area {`);
+		const [fieldTop, fieldBottom] = paddingBlock(px(rule(`${PHONE} .input-area .textarea-wrapper {`), 'padding'));
 		const [rowTop, rowBottom] = paddingBlock(px(area, 'padding'));
 
 		expect(circle).toBe(40);

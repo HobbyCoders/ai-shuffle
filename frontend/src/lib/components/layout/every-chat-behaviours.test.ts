@@ -34,7 +34,7 @@ describe('no assistant mode anywhere', () => {
 			'src/lib/components/chat/MessageArea.svelte',
 			'src/lib/components/chat/composer-shell.ts',
 			'src/lib/components/layout/NoProjectPill.svelte',
-			'../mobile/src/shell/MobileComposerControlsSheet.svelte'
+			'src/lib/components/chat/phone/MobileComposerControlsSheet.svelte'
 		]) {
 			expect(read(rel), rel).not.toMatch(/assistantMode|isAssistantHome|home_session_id/);
 		}
@@ -56,8 +56,10 @@ describe('no assistant mode anywhere', () => {
 
 	it('keeps the context chips and the browser toggle in every composer', () => {
 		// A new session shows its own context row in their place until its first message.
-		expect(chatInput).toMatch(/\{#if !mobileViewport && !newSession\}\s*<ContextPillBar \/>\s*\{\/if\}/);
-		expect(chatInput).toMatch(/\{#if newSession\}\s*<NewSessionSentence \/>\s*\{\/if\}/);
+		expect(chatInput).toMatch(/\{#if !phone && !newSession\}\s*<ContextPillBar \/>\s*\{\/if\}/);
+		expect(chatInput).toMatch(/\{:else if newSession\}[\s\S]*?<NewSessionSentence \/>\s*\{\/if\}/);
+		// The phone composer says the same in one line and keeps them in Chat controls.
+		expect(chatInput).toMatch(/\{#if phone\}\s*<ComposerContextLine /);
 		expect(chatInput).toMatch(/<ControlsDock[\s\S]*?\{onBrowserToggle\}/);
 	});
 });

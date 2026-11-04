@@ -214,15 +214,50 @@ export async function openPopup(trigger, popup) {
 	throw new Error('popup never opened');
 }
 
+/**
+ * Phone width keeps the selectors in Chat controls, reached from the one line
+ * under the composer. Opens the sheet there; does nothing on a wider window.
+ * Returns whether it opened one, so the caller can close it again.
+ */
+export async function openChatSetup(page) {
+	const line = page.getByRole('button', { name: /^Chat context:/ });
+	if (!(await line.isVisible())) return false;
+	await line.click();
+	await page.getByRole('dialog', { name: 'Chat controls' }).waitFor({ timeout: 10_000 });
+	return true;
+}
+
+/** Close the sheet `openChatSetup` opened. */
+export async function closeChatSetup(page, opened) {
+	if (!opened) return;
+	await page.keyboard.press('Escape');
+	await page.getByRole('dialog', { name: 'Chat controls' }).waitFor({ state: 'hidden', timeout: 5000 });
+}
+
+/**
+ * A control of the composer's that phone width keeps in Chat controls (Browser,
+ * Terminal). Same name either way: opens the sheet first when it has to.
+ */
+export async function composerControl(page, name) {
+	const button = page.getByRole('button', { name });
+	if (!(await button.isVisible())) {
+		await page.getByRole('button', { name: /^All chat controls/ }).click();
+		await button.waitFor({ timeout: 10_000 });
+	}
+	return button;
+}
+
 /** Pick the seed's Dev agent on the new-session hero (the preview cookie cannot persist a default). */
 export async function pickAgent(page, hero) {
 	const agentMenu = page.getByRole('menu', { name: 'Agent selection' });
+	const sheet = await openChatSetup(page);
 	await pick(
 		hero.getByRole('button', { name: /^Agent:/ }),
 		agentMenu,
 		agentMenu.getByRole('button', { name: AGENT, exact: true }),
 		hero.getByRole('button', { name: `Agent: ${AGENT}` })
 	);
+	await closeChatSetup(page, sheet);
 }
 
 /**
@@ -268,18 +303,25 @@ export async function withoutSavedAgentPick(page) {
  * before every Python cell on all platforms.
  */
 export async function pickAccess(page, mode) {
+	// A menu at desktop width; phones share the composer sheet's small picker,
+	// which stays up after a pick so its help line can be read.
 	const menu = page.getByRole('menu', { name: 'Tool access' });
+	const picker = page.getByRole('dialog', { name: 'Tool access' });
+	const name = new RegExp(`^${mode}\\b`);
 	await pick(
 		page.getByRole('button', { name: /^Permission mode:/ }),
-		menu,
-		menu.getByRole('menuitemradio', { name: new RegExp(`^${mode}\\b`) }),
+		menu.or(picker),
+		menu.getByRole('menuitemradio', { name }).or(picker.getByRole('radio', { name })),
 		page.getByRole('button', { name: `Permission mode: ${mode}`, exact: true })
 	);
+	if (await picker.isVisible()) await page.keyboard.press('Escape');
 }
 
 export async function pickProject(page, hero, project = PROJECT) {
 	const item = page.getByRole('button', { name: project, exact: true });
+	const sheet = await openChatSetup(page);
 	await pick(hero.getByRole('button', { name: /^No project/ }), item, item, hero.getByRole('button', { name: `Workspace folders: ${project}` }));
+	await closeChatSetup(page, sheet);
 }
 
 /**

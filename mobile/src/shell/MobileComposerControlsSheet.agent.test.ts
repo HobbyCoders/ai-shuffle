@@ -7,7 +7,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, waitFor, within } from '@testing-library/svelte';
 import { writable } from 'svelte/store';
-import MobileComposerControlsSheet from './MobileComposerControlsSheet.svelte';
+import MobileComposerControlsSheet from '$lib/components/chat/phone/MobileComposerControlsSheet.svelte';
 
 const { session, setProfile } = vi.hoisted(() => ({ session: { store: null as any }, setProfile: vi.fn() }));
 vi.mock('$lib/stores/active-session', async () => {

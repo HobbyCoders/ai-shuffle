@@ -562,6 +562,13 @@
 	}
 
 	/* Compact and touch layouts: a narrower rail with taller tap targets. */
+	/* Inside a phone's 16px transcript margin, so it never sits on the text. */
+	@media (max-width: 640px) {
+		.turn-nav { left: 0; }
+		.turn-rail { padding-right: 0; }
+		.tick { width: 16px; }
+	}
+
 	@media (max-width: 639px), (pointer: coarse) {
 		.turn-rail {
 			gap: 0;

@@ -3,7 +3,7 @@ import { platform } from '$lib/stores/platform.svelte';
 import { composerShell, registerComposerShell } from '$lib/components/chat/composer-shell';
 import { installMobileShell } from './register';
 import { reconcileMobileComposerExpanded } from './mobile-composer-collapse';
-import MobileComposerControlsSheet from './MobileComposerControlsSheet.svelte';
+import MobileComposerControlsSheet from '$lib/components/chat/phone/MobileComposerControlsSheet.svelte';
 import MobilePromptDock from './MobilePromptDock.svelte';
 
 describe('installMobileShell', () => {

@@ -536,10 +536,12 @@ describe.each([false, true])('worktree indicator (sheetMode=%s)', (sheetMode) =>
 		await waitFor(() => expect(moveSession).toHaveBeenCalledExactlyOnceWith('chat', 'peer'));
 	});
 
-	it('keeps a new no-project chat free of runner and repository chips', () => {
+	it('gives a new no-project chat its worker and project rows, and no mode bar', () => {
 		session.store.set({ ...base, sessionId: null, project: null, projectV2Id: null, mode: 'chat', messages: [] });
 		const view = render(ContextPillBar, { sheetMode });
-		expect(view.container.querySelector('.ctx-chip.runner')).toBeNull();
+		// The phone's one context line sends you here: these are the row it replaced.
+		expect(view.container.querySelector('.ctx-chip.runner') !== null).toBe(sheetMode);
+		expect(view.container.querySelector('.ctx-chip.repo-chip') !== null).toBe(sheetMode);
 		expect(execution).not.toHaveBeenCalled();
 	});
 

@@ -70,7 +70,7 @@
 	} from './quick-controls';
 
 	let {
-		open, onClose, onOpenChange, panelId = 'mobile-composer-panel', inertToolbar = false,
+		open, newChat = false, onClose, onOpenChange, panelId = 'mobile-composer-panel', inertToolbar = false,
 		modelOptions, modelGroups, modelValue, modelLabel, modelNotice, onModelSelect, modelLocked = false,
 		contextChoice, onContextChoiceSelect, contextStandardTokens, onContextStandardChange, effortOptions, effortValue, onEffortSelect,
 		effortExplanation, effortKnown = true, effortDefaultValue = null,
@@ -83,13 +83,14 @@
 	const effortDefaultNoteId = `${uid}-effort-default`;
 
 	type Picker = 'access';
-	type Page = 'main' | 'model' | 'usage' | 'agent' | 'runner' | 'tasks' | 'export';
+	type Page = 'main' | 'model' | 'usage' | 'agent' | 'runner' | 'project' | 'tasks' | 'export';
 	const PAGE_TITLES: Record<Page, string> = {
 		main: 'Chat controls',
 		model: 'Model',
 		usage: 'Context and usage',
 		agent: 'Agent',
 		runner: 'Runs on',
+		project: 'Project',
 		tasks: 'Running tasks',
 		export: 'Export chat'
 	};
@@ -245,7 +246,8 @@
 	/** The Agent and "Runs on" pages host the shared selectors' own menus. */
 	let agentHost = $state<HTMLElement | null>(null);
 	let runnerHost = $state<HTMLElement | null>(null);
-	const menuHosts = $derived({ agent: agentHost, runner: runnerHost });
+	let projectHost = $state<HTMLElement | null>(null);
+	const menuHosts = $derived({ agent: agentHost, runner: runnerHost, project: projectHost });
 	/** Stays true through the closing slide so content does not vanish mid-move. */
 	let rendered = $state(false);
 	let renderTimer: ReturnType<typeof setTimeout> | undefined;
@@ -342,6 +344,8 @@
 		closeDropdown('sheet-profile');
 		closeDropdown('runner');
 		closeDropdown('sheet-mode-runner');
+		closeDropdown('sheet-new-runner');
+		closeDropdown('sheet-new-project');
 	}
 
 	/** The hosted menu, not a copy kept on screen while its page slides out. */
@@ -360,7 +364,7 @@
 	 */
 	function keepGhost(host: HTMLElement, removed: Node) {
 		if (!(removed instanceof HTMLElement) || removed.dataset.mcpGhost) return;
-		const hostPage: Page = host === agentHost ? 'agent' : 'runner';
+		const hostPage: Page = host === agentHost ? 'agent' : host === projectHost ? 'project' : 'runner';
 		const sliding = leaving === hostPage || ((closingPanel || !open) && pageName === hostPage);
 		if (!sliding) return;
 		removed.dataset.mcpGhost = 'true';
@@ -370,24 +374,26 @@
 	}
 
 	function clearGhosts() {
-		for (const host of [agentHost, runnerHost]) host?.querySelectorAll(':scope > [data-mcp-ghost]').forEach((n) => n.remove());
+		for (const host of [agentHost, runnerHost, projectHost]) host?.querySelectorAll(':scope > [data-mcp-ghost]').forEach((n) => n.remove());
 	}
 
 	/** A hosted menu opened (its row was tapped) or closed (a pick, Escape). */
 	function syncHostedPage() {
-		const hosted: Page | null = hostedMenuCount(runnerHost) ? 'runner' : hostedMenuCount(agentHost) ? 'agent' : null;
+		const hosted: Page | null = hostedMenuCount(runnerHost) ? 'runner' : hostedMenuCount(agentHost) ? 'agent' : hostedMenuCount(projectHost) ? 'project' : null;
 		if (hosted && pageName !== hosted) {
 			const row = panelRef?.querySelector<HTMLElement>(
-				hosted === 'agent' ? '.mcp-setup .context-selector-btn' : '.mcp-setup .ctx-chip.runner, .mcp-setup .mode-trigger'
+				hosted === 'agent' ? '.mcp-setup .context-selector-btn'
+					: hosted === 'project' ? '.mcp-setup .repo-chip'
+					: '.mcp-setup .ctx-chip.runner, .mcp-setup .mode-trigger'
 			);
 			goTo(hosted, row ?? null);
-		} else if (!hosted && (pageName === 'agent' || pageName === 'runner')) {
+		} else if (!hosted && (pageName === 'agent' || pageName === 'runner' || pageName === 'project')) {
 			backToMain();
 		}
 	}
 
 	$effect(() => {
-		const hosts = [agentHost, runnerHost].filter((h): h is HTMLElement => !!h);
+		const hosts = [agentHost, runnerHost, projectHost].filter((h): h is HTMLElement => !!h);
 		if (!hosts.length || typeof MutationObserver === 'undefined') return;
 		const observer = new MutationObserver((records) => {
 			// Sync first: a menu that closed on a pick starts its page's slide here.
@@ -774,7 +780,7 @@
 				aria-haspopup="dialog"
 				aria-expanded={picker === 'access'}
 				aria-busy={permissionUpdating || permissionPending || undefined}
-				aria-label={`Tool access: ${shownAccess ? (ACCESS_LABEL[shownAccess] ?? shownAccess) : 'loading'}${permissionUpdating ? ', saving' : ''}${awayOn ? ', Away mode on' : ''}`}
+				aria-label={`Permission mode: ${shownAccess ? (ACCESS_LABEL[shownAccess] ?? shownAccess) : 'loading'}${permissionUpdating ? ', saving' : ''}${awayOn ? ', Away mode on' : ''}`}
 				onclick={() => togglePicker('access')}
 			>
 				<span class="ql">{shownAccess ? (ACCESS_SHORT[shownAccess] ?? shownAccess) : 'Access'}</span>
@@ -817,6 +823,7 @@
 		>
 			<span class="ql">Controls</span>
 			{#if runningTasks.length}<span class="qcount" aria-hidden="true">{runningTasks.length}</span>{/if}
+			<ChevronDown size={14} class="qchev" aria-hidden="true" />
 		</button>
 	</div>
 
@@ -867,7 +874,7 @@
 		class:sub={onSubPage}
 		role="dialog"
 		aria-modal="true"
-		aria-label={PAGE_TITLE[pageName]}
+		aria-label={pageName === 'model' ? 'Choose model' : PAGE_TITLE[pageName]}
 		aria-hidden={!panelVisible}
 		inert={!open}
 		tabindex="-1"
@@ -965,7 +972,7 @@
 									<div class="mcp-rowhead">
 										<span class="mcp-ic" aria-hidden="true">{#if accessValue === BYPASS}<ShieldOff size={17} />{:else}<ShieldCheck size={17} />{/if}</span>
 										<span class="mcp-lbl"><span>Tool access</span></span>
-										<span class="mcp-val" class:danger={accessValue === BYPASS}>{accessValue ? (ACCESS_LABEL[accessValue] ?? accessValue) : 'Loading…'}</span>
+										{#if !accessValue}<span class="mcp-val">Loading…</span>{/if}
 									</div>
 									<div class="mcp-seg" role="radiogroup" aria-label="Tool access" aria-busy={permissionUpdating} style:--n={permissionOptions.length}>
 										{#each permissionOptions as option (option.value)}
@@ -993,7 +1000,7 @@
 
 						{#if showSetup && rendered}
 							<h3 class="mcp-glabel">Setup</h3>
-							<div class="mcp-group mcp-setup"><ContextPillBar sheetMode {menuHosts} /></div>
+							<section class="mcp-group mcp-setup" aria-label={newChat ? 'New session' : undefined}><ContextPillBar sheetMode {menuHosts} /></section>
 						{/if}
 					{/if}
 				</div>
@@ -1004,13 +1011,13 @@
 							<div class="act call-act">{@render callAction()}<span class="act-label" aria-hidden="true">Call</span></div>
 						{/if}
 						{#if onBrowserToggle}
-							<button type="button" class="act" aria-pressed={browserOpen} onpointerenter={onBrowserPreload} onfocus={onBrowserPreload} onclick={toggleBrowser} aria-label="Live browser view">
+							<button type="button" class="act" aria-pressed={browserOpen} onpointerenter={onBrowserPreload} onfocus={onBrowserPreload} onclick={toggleBrowser} aria-label="Toggle live browser view">
 								<Globe size={18} aria-hidden="true" /><span class="act-label">Browser</span>
 							</button>
 						{/if}
 						{#if terminal}
 							<button type="button" class="act" aria-pressed={terminal.open} onpointerenter={terminal.preload} onfocus={terminal.preload}
-								onclick={toggleTerminal} aria-label="Terminal" title={terminal.disabledReason ?? undefined}>
+								onclick={toggleTerminal} aria-label="Toggle terminal" title={terminal.disabledReason ?? undefined}>
 								<SquareTerminal size={18} aria-hidden="true" /><span class="act-label">Terminal</span>
 							</button>
 						{/if}
@@ -1061,6 +1068,12 @@
 				</div>
 			</section>
 
+			<section class="mcp-page" data-page="project" class:active={pageName === 'project'} inert={pageName !== 'project'} aria-label="Project">
+				<div class="mcp-scroll">
+					<div class="mcp-host project-host" bind:this={projectHost}></div>
+				</div>
+			</section>
+
 			<section class="mcp-page" data-page="tasks" class:active={pageName === 'tasks'} inert={pageName !== 'tasks'} aria-label="Running tasks">
 				{#if mounted('tasks')}
 					<RunningTasksList sessionId={$activeSession.sessionId} variant="page" onClose={closePanel} />
@@ -1078,8 +1091,7 @@
 
 <style>
 	/* ── Quick bar ───────────────────────────────────────────────────── */
-	.mobile-composer-controls { position: relative; display: none; min-width: 0; }
-	:global(html[data-platform='mobile']) .mobile-composer-controls { display: block; }
+	.mobile-composer-controls { position: relative; min-width: 0; }
 	/* One quiet line along the composer's bottom edge. */
 	.qbar {
 		position: relative;
@@ -1306,7 +1318,7 @@
 		left: 0;
 		right: 0;
 		bottom: 0;
-		top: max(48px, calc(env(safe-area-inset-top, 0px) + 48px));
+		top: max(24px, calc(env(safe-area-inset-top, 0px) + 12px));
 		z-index: 121;
 		display: flex;
 		flex-direction: column;
@@ -1325,9 +1337,9 @@
 	.mcp.dragging { transition: none; will-change: transform; }
 
 	/* Header: the grip, then one row with the title centred. */
-	.mcp-head { flex-shrink: 0; padding: 8px 12px 6px; touch-action: none; cursor: grab; user-select: none; -webkit-user-select: none; }
+	.mcp-head { flex-shrink: 0; padding: 8px 12px 0; touch-action: none; cursor: grab; user-select: none; -webkit-user-select: none; }
 	.mcp-grab { display: block; width: 38px; height: 5px; margin: 0 auto 6px; border-radius: 3px; background: var(--border-strong); transition: width 0.15s, background-color 0.15s; }
-	.mcp.dragging .mcp-grab, .mcp-head:hover .mcp-grab { width: 48px; background: var(--muted-foreground); }
+	.mcp.dragging .mcp-grab { width: 48px; background: var(--muted-foreground); }
 	.mcp.dragging .mcp-head { cursor: grabbing; }
 	.mcp-head-row { position: relative; display: grid; grid-template-columns: 44px minmax(0, 1fr) 44px; align-items: center; min-height: 44px; }
 	.mcp-title {
@@ -1361,7 +1373,9 @@
 		transition: opacity 0.2s ease, transform 0.3s var(--mcp-ease), background-color 0.15s;
 	}
 	.mcp.sub .mcp-back { opacity: 1; pointer-events: auto; transform: none; }
-	.mcp-back:hover { background: var(--hover-overlay); }
+	@media (hover: hover) {
+		.mcp-back:hover { background: var(--hover-overlay); }
+	}
 	.mcp-back:active { background: var(--active-overlay); }
 	/* Close: visually hidden until keyboard focus reaches it. */
 	.mcp-close {
@@ -1411,7 +1425,7 @@
 	.mcp-scroll {
 		flex: 1;
 		min-height: 0;
-		padding: 4px 14px 18px;
+		padding: 0 14px 16px;
 		overflow-x: hidden;
 		overflow-y: auto;
 		overscroll-behavior: contain;
@@ -1450,15 +1464,15 @@
 
 	/* Grouped list */
 	.mcp-glabel { margin: 0; padding: 4px 8px 7px; font-size: 13px; font-weight: 500; color: var(--muted-foreground); }
-	.mcp-group { margin-bottom: 18px; overflow: hidden; border: 1px solid var(--border); border-radius: var(--mcp-row-radius); background: var(--card); }
+	.mcp-group { margin-bottom: 20px; overflow: hidden; border: 1px solid var(--border); border-radius: var(--mcp-row-radius); background: var(--card); }
 	.mcp-group + .mcp-note { margin-top: -10px; }
 	.mcp-row {
 		display: flex;
 		align-items: center;
 		gap: 12px;
 		width: 100%;
-		min-height: 52px;
-		padding: 10px 14px;
+		min-height: 48px;
+		padding: 8px 14px;
 		border: 0;
 		background: transparent;
 		color: var(--foreground);
@@ -1469,7 +1483,9 @@
 		-webkit-tap-highlight-color: transparent;
 		transition: background-color 0.15s;
 	}
-	.mcp-row:hover:not(:disabled):not([aria-disabled='true']) { background: var(--hover-overlay); }
+	@media (hover: hover) {
+		.mcp-row:hover:not(:disabled):not([aria-disabled='true']) { background: var(--hover-overlay); }
+	}
 	.mcp-row:active:not(:disabled):not([aria-disabled='true']) { background: var(--muted); }
 	.mcp-row:disabled { cursor: default; }
 	.mcp-group > * + * { border-top: 1px solid var(--border); }
@@ -1578,8 +1594,8 @@
 
 	/* Focus */
 	.mcp-row:focus-visible, .mcp-seg button:focus-visible, .mcp-chip:focus-visible, .mcp-back:focus-visible, .act:focus-visible {
-		outline: 2px solid var(--ring);
-		outline-offset: -2px;
+		outline: 1px solid var(--ring);
+		outline-offset: -1px;
 	}
 	.mcp-back:focus-visible, .mcp-chip:focus-visible { outline-offset: 2px; }
 
@@ -1606,9 +1622,9 @@
 		gap: 12px;
 		width: 100%;
 		height: auto;
-		min-height: 52px;
+		min-height: 48px;
 		margin: 0;
-		padding: 10px 14px;
+		padding: 8px 14px;
 		border: 0;
 		border-top: 1px solid var(--border);
 		border-radius: 0;
@@ -1620,9 +1636,11 @@
 		box-shadow: none;
 	}
 	.mcp-setup :global(.sheet-mode button.ctx-chip:not(:disabled)) { cursor: pointer; }
-	.mcp-setup :global(.sheet-mode button.ctx-chip:hover:not(:disabled)) { background: var(--hover-overlay); }
+	@media (hover: hover) {
+		.mcp-setup :global(.sheet-mode button.ctx-chip:hover:not(:disabled)) { background: var(--hover-overlay); }
+	}
 	.mcp-setup :global(.sheet-mode button.ctx-chip:active:not(:disabled)) { background: var(--muted); }
-	.mcp-setup :global(.sheet-mode .ctx-chip:focus-visible) { outline: 2px solid var(--ring); outline-offset: -2px; }
+	.mcp-setup :global(.sheet-mode .ctx-chip:focus-visible) { outline: 1px solid var(--ring); outline-offset: -1px; }
 	/* Icon tile · name · value · chevron */
 	.mcp-setup :global(.sheet-mode .ctx-chip > svg:first-of-type) {
 		order: 0;
@@ -1657,7 +1675,7 @@
 		text-align: right;
 	}
 	.mcp-setup :global(.sheet-mode .ctx-chip .ctx-chip-chev),
-	.mcp-setup :global(.sheet-mode .ctx-chip > svg.lucide-chevron-down) { order: 3; transform: rotate(-90deg); width: 16px; height: 16px; color: var(--muted-foreground); }
+	.mcp-setup :global(.sheet-mode .ctx-chip > svg.lucide-chevron-down) { order: 3; transform: rotate(-90deg); width: 16px; height: 16px; margin-right: -3px; color: var(--muted-foreground); }
 	/* Agent and "Runs on" open a page: draw the list chevron. */
 	.mcp-setup :global(.sheet-mode :is(.context-selector-btn, .ctx-chip.runner, .mode-trigger)::after) {
 		content: '';
@@ -1681,8 +1699,41 @@
 	.mcp-setup :global(.sheet-mode .branch-btn::before),
 	.mcp-setup :global(.sheet-mode .branch-trigger::before),
 	.mcp-setup :global(.sheet-mode .ctx-chip.readonly:has(.branch-name)::before) { content: 'Branch'; }
-	.mcp-setup :global(.sheet-mode .wt-indicator::before),
-	.mcp-setup :global(.sheet-mode .wt-chip::before) { content: 'Worktree'; padding-left: 42px; }
+	/* Worktree: the same icon column and label as its neighbours, and on the
+	   right the switch the other on/off rows use. Its label is real text: the
+	   checkbox and the read-only chip both take their name from it. */
+	.mcp-setup :global(.sheet-mode :is(.wt-indicator, .wt-chip)::before) { content: none; }
+	.mcp-setup :global(.sheet-mode :is(.wt-indicator, .wt-chip) .ctx-chip-label) {
+		order: 1;
+		flex: 1;
+		max-width: none;
+		font-size: 15px;
+		color: var(--foreground);
+		text-align: left;
+	}
+	.mcp-setup :global(.sheet-mode .ctx-chip .ctx-chip-cb) {
+		order: 2;
+		position: relative;
+		width: 42px;
+		height: 25px;
+		border-radius: 999px;
+		background: var(--switch-off);
+		transition: background-color 0.2s;
+	}
+	.mcp-setup :global(.sheet-mode .ctx-chip .ctx-chip-cb > svg) { display: none; }
+	.mcp-setup :global(.sheet-mode .ctx-chip .ctx-chip-cb::after) {
+		content: '';
+		position: absolute;
+		top: 2px;
+		left: 2px;
+		width: 21px;
+		height: 21px;
+		border-radius: 50%;
+		background: var(--switch-thumb);
+		transition: transform 0.2s;
+	}
+	.mcp-setup :global(.sheet-mode .ctx-chip .ctx-chip-cb.checked) { background: var(--switch-on); }
+	.mcp-setup :global(.sheet-mode .ctx-chip .ctx-chip-cb.checked::after) { transform: translateX(17px); }
 	.mcp-setup :global(.sheet-mode .degraded::before) { content: 'Runs on'; }
 	/* The Project row names the project; the Branch row shows the branch alone. */
 	.mcp-setup :global(.sheet-mode .branch-btn .project-name),
@@ -1776,7 +1827,28 @@
 	.mcp-usage { padding: 14px; border: 1px solid var(--border); border-radius: var(--mcp-row-radius); background: var(--card); }
 
 	/* Pinned action bar */
-	.mcp-foot { flex-shrink: 0; padding: 10px 14px calc(12px + env(safe-area-inset-bottom, 0px)); border-top: 1px solid var(--border); background: var(--popover); }
+	/* The action bar lies over the list's end. The list scrolls clear of it (its
+	   height plus 16px), so its last row can always come fully into view, and
+	   anything passing under the bar's top edge fades out instead of being cut. */
+	.mcp-page[data-page='main'] { --mcp-foot-height: calc(78px + env(safe-area-inset-bottom, 0px)); }
+	.mcp-page[data-page='main'] > .mcp-scroll { padding-bottom: calc(var(--mcp-foot-height) + 16px); }
+	.mcp-foot {
+		position: absolute;
+		inset: auto 0 0;
+		z-index: 1;
+		min-height: var(--mcp-foot-height);
+		padding: 10px 14px calc(12px + env(safe-area-inset-bottom, 0px));
+		border-top: 1px solid var(--border);
+		background: var(--popover);
+	}
+	.mcp-foot::before {
+		content: '';
+		position: absolute;
+		inset: auto 0 100%;
+		height: 20px;
+		background: linear-gradient(to top, var(--popover), transparent);
+		pointer-events: none;
+	}
 	/* One equal column per action that is actually shown (Call hides itself when the composer has none). */
 	.actions { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 8px; }
 	.act {

@@ -80,10 +80,11 @@ const openSeededChat = async (ctx) => {
 /** Sheets the composer opens on a phone: the trigger and what it opens. */
 const SHEETS = [
 	{ trigger: /^Model: /, sheet: (page) => page.getByRole('dialog', { name: 'Choose model' }) },
-	{ trigger: /^Permission mode: /, sheet: (page) => page.getByRole('menu', { name: 'Tool access' }) },
+	{ trigger: /^Permission mode: /, sheet: (page) => page.getByRole('dialog', { name: 'Tool access' }) },
 	// Only for a model with effort levels to pick from: the dev instance's scripted AI has none.
 	{ trigger: /^Effort: /, optional: true, sheet: (page) => page.getByRole('dialog', { name: 'Reasoning effort' }) },
-	{ trigger: /^Context and usage/, sheet: (page) => page.getByRole('dialog', { name: 'Context and usage' }) }
+	// A chat with nothing used shows no ring on the composer: Chat controls keeps the row.
+	{ trigger: /^Context and usage/, inControls: true, sheet: (page) => page.getByRole('dialog', { name: 'Context and usage' }) }
 ];
 
 await runJourney({
@@ -122,9 +123,15 @@ await runJourney({
 			name: 'sheets',
 			setup: openSeededChat,
 			async act({ page, mark, start }) {
-				for (const [index, { trigger, optional, sheet }] of SHEETS.entries()) {
+				for (const [index, { trigger, optional, inControls, sheet }] of SHEETS.entries()) {
 					const label = String(trigger).replace(/[/^:]/g, '').trim();
-					const button = page.getByRole('region', { name: INPUT }).getByRole('button', { name: trigger }).first();
+					if (inControls) {
+						await mark(`open Chat controls for ${label}`);
+						await page.getByRole('button', { name: /^All chat controls/ }).tap();
+						await page.getByRole('dialog', { name: 'Chat controls' }).waitFor({ timeout: 5000 });
+					}
+					const scope = inControls ? page.getByRole('dialog', { name: 'Chat controls' }) : page.getByRole('region', { name: INPUT });
+					const button = scope.getByRole('button', { name: trigger }).first();
 					if (optional && !(await button.isVisible())) {
 						expect(
 							(await page.getByRole('region', { name: INPUT }).getByText('Unknown', { exact: true }).count()) === 0,
@@ -150,7 +157,9 @@ await runJourney({
 						await page.keyboard.press('Escape');
 					} else {
 						await mark(`close ${label} with a tap outside`);
-						await page.getByRole('log', { name: 'Conversation messages' }).tap({ position: { x: 20, y: 20 } });
+						// The tall sheet covers the transcript: outside is the strip above it.
+						if (inControls) await page.touchscreen.tap(vp.width / 2, 8);
+						else await page.getByRole('log', { name: 'Conversation messages' }).tap({ position: { x: 20, y: 20 } });
 					}
 					await opened.waitFor({ state: 'hidden', timeout: 5000 });
 					await page.waitForTimeout(400);

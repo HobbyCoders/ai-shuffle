@@ -31,8 +31,17 @@
 	} from './execution-mode-eligibility';
 	import WorkerMenuList, { type WorkerMenuRow } from '$lib/components/ui/WorkerMenuList.svelte';
 	import { floatingMenu } from '$lib/components/ui/floating-menu';
+	import { menuHost as hostMenu } from '$lib/components/ui/menu-host';
+	import { closeDropdown, openDropdown, openHeaderDropdown } from '$lib/stores/header-dropdowns';
 
 	const LOCAL_ROW_ID = '__local__';
+
+	interface Props {
+		/** The phone sheet's stacked row, with its menu on the sheet's own page. */
+		sheetMode?: boolean;
+		menuHost?: HTMLElement | null;
+	}
+	let { sheetMode = false, menuHost = null }: Props = $props();
 
 	let open = $state(false);
 	let triggerRef = $state<HTMLButtonElement | null>(null);
@@ -132,8 +141,17 @@
 		focusItem(list.find((el) => el.getAttribute('aria-checked') === 'true') ?? list[0]);
 	}
 
+	// In the sheet, its page's Back closes this menu through the shared coordinator.
+	$effect(() => {
+		if (sheetMode && open && $openHeaderDropdown !== 'sheet-new-runner') open = false;
+	});
+
 	function toggle() {
 		open = !open;
+		if (sheetMode) {
+			if (open) openDropdown('sheet-new-runner');
+			else closeDropdown('sheet-new-runner');
+		}
 		if (open) {
 			void load();
 			void focusOnOpen();
@@ -142,6 +160,7 @@
 
 	function closeMenu(focusTrigger: boolean) {
 		open = false;
+		if (sheetMode) closeDropdown('sheet-new-runner');
 		if (focusTrigger) triggerRef?.focus();
 	}
 
@@ -190,7 +209,7 @@
 			if (!install || isBlockedForNewChat(install, worktreeOn, hasProject ? eligibility : null, syncRow)) return;
 			activeSession.setDeviceIntent({ id: install.id, name: install.device_name });
 		}
-		open = false;
+		closeMenu(false);
 	}
 
 	function onWindowClick(e: MouseEvent) {
@@ -208,14 +227,14 @@
 	<button
 		bind:this={triggerRef}
 		type="button"
-		class="sentence-tok"
+		class={sheetMode ? 'ctx-chip runner' : 'sentence-tok'}
 		class:open
 		onclick={toggle}
 		aria-haspopup="menu"
 		aria-expanded={open}
 		aria-label="Runs on {label}{online === false ? ' (offline)' : ''}"
 		title={intent ? `This session will run on ${intent.name}` : 'This session will run on this worker'}
-	><Monitor size={14} strokeWidth={1.75} aria-hidden="true" /><span class="sentence-tok-label">{label}</span></button>
+	><Monitor size={sheetMode ? 16 : 14} strokeWidth={1.75} aria-hidden="true" /><span class={sheetMode ? 'ctx-chip-label' : 'sentence-tok-label'}>{label}</span></button>
 	{#if open}
 		<!-- Floats to <body>: the hero is its own stacking context, so an
 		     in-place menu painted under the composer below it. -->
@@ -226,7 +245,8 @@
 			aria-label="Where this session runs"
 			bind:this={menuRef}
 			onkeydown={onMenuKeydown}
-			use:floatingMenu={{ anchor: triggerRef, align: 'start' }}
+			use:hostMenu={sheetMode ? menuHost : null}
+			use:floatingMenu={{ anchor: triggerRef, align: 'start', enabled: !sheetMode }}
 		>
 			<WorkerMenuList
 				items={rows}
@@ -245,6 +265,7 @@
 	/* The look is `.sentence-tok` (app.css). */
 	/* inline-flex: the markup's own whitespace never shows beside the word. */
 	.runs-on-wrap { display: inline-flex; }
+	.runs-on-wrap:has(.ctx-chip) { display: flex; width: 100%; }
 	.runs-on-menu:focus { outline: none; }
 	/* Position, z-index and the viewport cap come from floatingMenu. */
 	.runs-on-menu {

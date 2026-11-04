@@ -24,6 +24,9 @@ type HeaderDropdownId =
 	// ExecutionModeBar's "Runs on" picker for a new chat (the sheet's copy apart).
 	| 'mode-runner'
 	| 'sheet-mode-runner'
+	// A new chat's Runs on and Project rows in Chat controls, before it has a project.
+	| 'sheet-new-runner'
+	| 'sheet-new-project'
 	| 'notifications'
 	// Bound-chat session title in the header breadcrumb (rename / fork / delete).
 	| 'session-title'

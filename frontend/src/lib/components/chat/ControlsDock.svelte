@@ -44,7 +44,7 @@
 	import { buildModelPickerCatalog } from '$lib/constants/model-picker';
 	import { resolveEffortModel, resolveModelEffort, reconcileModelEffort } from '$lib/constants/model-effort';
 	// The controls sheet is the mobile app's; the web build registers none.
-	import { composerShell } from './composer-shell';
+	import { phoneLayout } from './phone/phone-layout.svelte';
 	import { Globe, SlidersHorizontal, Lock, SquareTerminal } from 'lucide-svelte';
 	import type { TerminalToggle } from './composer-shell';
 	import {
@@ -116,42 +116,18 @@
 
 	/** Where the model picker hangs from, relative to its button's wrapper. */
 	let modelMenuAnchor = $state<{ bottom?: number; top?: number; right: number; width: number } | null>(null);
-	/** Phone width: the picker is a full-width sheet over a dimmed page. */
-	let modelSheet = $state(false);
 	let modelLayerRef = $state<HTMLDivElement | null>(null);
-	/** Held once the search field has focus, so filtering never moves it under the thumb. */
-	let sheetHeldHeight = $state<number | null>(null);
-
-	/** The sheet lives on the page body, so it and its dimming cover the chat's top bar too. */
-	function sheetLayer(node: HTMLElement, onBody: boolean) {
-		const home = node.parentNode;
-		const anchor = document.createComment('');
-		home?.insertBefore(anchor, node);
-		const place = (toBody: boolean) => {
-			if (toBody) document.body.appendChild(node);
-			else anchor.parentNode?.insertBefore(node, anchor);
-		};
-		place(onBody);
-		return {
-			update: place,
-			destroy() {
-				anchor.remove();
-				node.remove();
-			}
-		};
-	}
 
 	function measurePopoverRoom() {
 		if (!dockRef) return;
 		const dockTop = dockRef.getBoundingClientRect().top;
 		const card = dockRef.closest('.chat-island')?.getBoundingClientRect();
-		modelSheet = window.innerWidth <= 480;
 		const wrapBox = modelWrapRef?.getBoundingClientRect();
 		// A new chat has no transcript to protect but does have a headline above
 		// the composer. Whenever a usable list fits below, the picker hangs down
 		// over the empty page and at most the context row, leaving the headline whole.
 		const roomBelow = wrapBox ? window.innerHeight - wrapBox.bottom - 20 : 0;
-		if (newChat && !modelSheet && card && wrapBox && card.width > 0 && roomBelow >= MODEL_MENU_MIN_ROOM) {
+		if (newChat && card && wrapBox && card.width > 0 && roomBelow >= MODEL_MENU_MIN_ROOM) {
 			popoverRoom = Math.max(220, Math.floor(roomBelow));
 			modelMenuAnchor = { top: wrapBox.height + 8, right: wrapBox.right - card.right, width: Math.min(card.width, 380) };
 			return;
@@ -173,8 +149,6 @@
 	}
 
 	function togglePopover(kind: DockPopover) {
-		modelSheet = window.innerWidth <= 480;
-		sheetHeldHeight = null;
 		openPopover = openPopover === kind ? null : kind;
 		if (openPopover) void tick().then(measurePopoverRoom);
 	}
@@ -209,7 +183,11 @@
 
 	let mobileSheetOpen = $state(false);
 	const mobilePanelId = $props.id();
-	const ControlsSheet = composerShell().ControlsSheet;
+	const ControlsSheet = $derived(phoneLayout.ControlsSheet);
+	// A window widened past phone width drops the sheet: its open state goes too.
+	$effect(() => {
+		if (!ControlsSheet && mobileSheetOpen) setMobileSheetOpen(false);
+	});
 	export function setMobileSheetOpen(open: boolean) {
 		closePopover();
 		if (!open && document.activeElement?.closest('.mobile-composer-controls')) {
@@ -668,27 +646,17 @@
 			>{#if modelLocked}<Lock size={11} aria-hidden="true" />{/if}<span>{modelButtonLabel}</span></button>
 
 			{#if openPopover === 'model'}
-				<div class="model-layer" bind:this={modelLayerRef} use:sheetLayer={modelSheet} data-composer-owned-overlay="true">
-				{#if modelSheet}
-					<!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-					<div class="model-scrim" onclick={(e) => { e.stopPropagation(); closePopover(); }}></div>
-				{/if}
+				<div class="model-layer" bind:this={modelLayerRef} data-composer-owned-overlay="true">
 				<div
 					class="dock-menu model-menu"
-					class:sheet={modelSheet}
-					style:bottom={modelSheet ? undefined : modelMenuAnchor?.top !== undefined ? 'auto' : modelMenuAnchor?.bottom !== undefined ? `${modelMenuAnchor.bottom}px` : undefined}
-					style:top={!modelSheet && modelMenuAnchor?.top !== undefined ? `${modelMenuAnchor.top}px` : undefined}
-					style:right={!modelSheet && modelMenuAnchor ? `${modelMenuAnchor.right}px` : undefined}
-					style:width={!modelSheet && modelMenuAnchor ? `${modelMenuAnchor.width}px` : undefined}
-					style:min-height={modelSheet && sheetHeldHeight ? `${sheetHeldHeight}px` : undefined}
-					onfocusin={(e) => {
-						if (modelSheet && sheetHeldHeight === null) sheetHeldHeight = e.currentTarget.offsetHeight;
-					}}
+					style:bottom={modelMenuAnchor?.top !== undefined ? 'auto' : modelMenuAnchor?.bottom !== undefined ? `${modelMenuAnchor.bottom}px` : undefined}
+					style:top={modelMenuAnchor?.top !== undefined ? `${modelMenuAnchor.top}px` : undefined}
+					style:right={modelMenuAnchor ? `${modelMenuAnchor.right}px` : undefined}
+					style:width={modelMenuAnchor ? `${modelMenuAnchor.width}px` : undefined}
 					role="dialog"
 					aria-label="Choose model"
 					data-composer-owned-overlay="true"
 				>
-					{#if modelSheet}<h2 class="model-sheet-title">Model</h2>{/if}
 					<ModelPickerPanel
 						groups={modelCatalog.groups}
 						options={modelCatalog.options}
@@ -751,9 +719,14 @@
 	</div>
 </div>
 
+{#if phoneLayout.active && !ControlsSheet}
+	<!-- Holds the quick bar's height for the moment its code takes to arrive. -->
+	<div class="quick-bar-slot" aria-hidden="true"></div>
+{/if}
 {#if ControlsSheet}
 <ControlsSheet
 	open={mobileSheetOpen}
+	{newChat}
 	panelId={mobilePanelId}
 	{inertToolbar}
 	onClose={() => setMobileSheetOpen(false)}
@@ -802,6 +775,7 @@
 {/if}
 
 <style>
+	.quick-bar-slot { height: 44px; }
 	/* ===== CONTROLS ROW =====
 	   No surface of its own: the box provides the frame. */
 	.controls-dock {
@@ -979,39 +953,6 @@
 	.model-layer {
 		display: contents;
 	}
-	.model-scrim {
-		position: fixed;
-		inset: 0;
-		z-index: 59;
-		background: var(--modal-overlay, color-mix(in oklch, var(--background) 60%, transparent));
-		animation: model-scrim-in 0.16s ease-out;
-	}
-	@keyframes model-scrim-in { from { opacity: 0; } to { opacity: 1; } }
-	.model-menu.sheet {
-		position: fixed;
-		left: 0;
-		right: 0;
-		top: auto;
-		bottom: 0;
-		width: 100%;
-		max-height: min(82dvh, 640px);
-		padding: 16px 8px calc(8px + env(safe-area-inset-bottom, 0px));
-		border-width: 1px 0 0;
-		border-radius: 16px 16px 0 0;
-		display: flex;
-		flex-direction: column;
-		--mpp-height: min(calc(82dvh - 64px), 576px);
-		animation: model-sheet-in 0.22s cubic-bezier(0.16, 1, 0.3, 1);
-	}
-	@keyframes model-sheet-in { from { transform: translateY(32px); opacity: 0.6; } to { transform: none; opacity: 1; } }
-	.model-sheet-title {
-		margin: 0 0 8px;
-		padding: 0 8px;
-		font-size: 16px;
-		font-weight: 600;
-		color: var(--foreground);
-	}
-
 	.effort-menu {
 		right: -6px;
 		width: min(280px, calc(100vw - 24px));

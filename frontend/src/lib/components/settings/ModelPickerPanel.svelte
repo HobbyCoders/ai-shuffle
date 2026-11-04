@@ -173,6 +173,8 @@
 		...visibleTrailing.map((r) => r.value)
 	]);
 	let highlighted = $state<string | null>(null);
+	/** The arrow keys moved the cursor: only then does it draw an outline. */
+	let keyboardCursor = $state(false);
 	const effectiveHighlighted = $derived(
 		highlighted !== null && rowValues.includes(highlighted)
 			? highlighted
@@ -186,6 +188,7 @@
 		const idx = effectiveHighlighted ? rowValues.indexOf(effectiveHighlighted) : -1;
 		const next = (idx + delta + rowValues.length) % rowValues.length;
 		highlighted = rowValues[next];
+		keyboardCursor = true;
 		await tick();
 		[...(listEl?.querySelectorAll<HTMLElement>('[data-value]') ?? [])]
 			.find((row) => row.dataset.value === highlighted)
@@ -578,14 +581,14 @@
 						<div
 							class="mpp-row"
 							class:selected={value === o.value}
-							class:highlighted={effectiveHighlighted === o.value}
+							class:highlighted={keyboardCursor && effectiveHighlighted === o.value}
 							role="option"
 							aria-selected={value === o.value}
 							tabindex="-1"
 							data-value={o.value}
 							title={o.description}
 							onclick={() => onSelect(o.value)}
-							onmouseenter={() => (highlighted = o.value)}
+							onmouseenter={() => { highlighted = o.value; keyboardCursor = false; }}
 						>
 							<div class="mpp-row-copy">
 								<div class="mpp-row-label">{o.label}</div>
@@ -855,13 +858,13 @@
 	<div
 		class="mpp-row mpp-row-plain"
 		class:selected={value === r.value}
-		class:highlighted={effectiveHighlighted === r.value}
+		class:highlighted={keyboardCursor && effectiveHighlighted === r.value}
 		role="option"
 		aria-selected={value === r.value}
 		tabindex="-1"
 		data-value={r.value}
 		onclick={() => onSelect(r.value)}
-		onmouseenter={() => (highlighted = r.value)}
+		onmouseenter={() => { highlighted = r.value; keyboardCursor = false; }}
 	>
 		<div class="mpp-row-copy">
 			<div class="mpp-row-label">{r.label}</div>
@@ -993,10 +996,14 @@
 		user-select: none;
 		transition: background-color 0.1s ease;
 	}
-	.mpp-row.highlighted,
-	.mpp-row:hover {
-		background: var(--mpp-hover);
+	/* The chosen row keeps its fill and check. A hover fill needs a real pointer,
+	   so a tap on a phone never leaves a second row lit; the arrow keys draw a
+	   thin outline instead. */
+	.mpp-row.selected { background: var(--mpp-hover); }
+	@media (hover: hover) {
+		.mpp-row:hover { background: var(--mpp-hover); }
 	}
+	.mpp-row.highlighted { outline: 1px solid var(--ring); outline-offset: -1px; }
 	.mpp-row.selected .mpp-row-label { font-weight: 500; }
 	/* A fixed slot, so the star never shifts when the check appears. */
 	.mpp-check {
@@ -1042,9 +1049,9 @@
 		cursor: pointer;
 		transition: opacity 0.12s ease, color 0.12s ease;
 	}
-	.mpp-row:hover .mpp-fav,
-	.mpp-row.highlighted .mpp-fav {
-		opacity: 1;
+	.mpp-row.highlighted .mpp-fav { opacity: 1; }
+	@media (hover: hover) {
+		.mpp-row:hover .mpp-fav { opacity: 1; }
 	}
 	.mpp-fav:hover {
 		color: var(--foreground);

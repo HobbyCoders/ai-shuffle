@@ -1,0 +1,197 @@
+/*
+ * The phone composer, in one place: the phone app and a web window at phone
+ * width (ChatInput's `phone-composer`, from phone-layout.svelte.ts) are one
+ * layout. Its bottom edge is the quick bar in MobileComposerControlsSheet, and
+ * under the card sits ComposerContextLine.
+ */
+
+/* 12px either side of the card; the bottom clears the phone's own bar. */
+html:root .chat-input-wrapper.phone-composer {
+	padding: 12px 12px max(16px, env(safe-area-inset-bottom, 0px));
+	background: linear-gradient(to top, var(--background) 68%, transparent);
+}
+
+/* The composer card (issue #1816): + | text | mic · talk/send · stop, with
+   the quick bar (MobileComposerControlsSheet) as its bottom edge. */
+html:root .phone-composer .chat-island {
+	/* The composer buttons follow the theme's corners as on desktop, scaled
+	   to the 40px buttons: 0.5rem (8px here) and up makes a full circle,
+	   0.25-0.375rem a rounded square, 0 a square (2.5x, capped at half the
+	   button). */
+	--composer-btn-radius: min(calc(var(--radius, 10px) * 2.5), 20px);
+	border-radius: calc(var(--radius) * 1.6);
+	border-color: var(--border-strong);
+	background: var(--card);
+	box-shadow: var(--shadow-m);
+	transition:
+	border-radius 180ms ease,
+	border-color 180ms ease;
+}
+
+/* A 56px row: 8px of padding round a 40px band. The field is 40px tall too
+   (a 24px line plus 8px above and below), so the + circle, the first text
+   line and the right-hand circles share one centre, 8px from the card's top
+   and from the quick bar. The field's vertical padding must stay at
+   (40px - line) / 2: more lifts the text above the bottom-aligned circles and
+   leaves extra room above them. */
+html:root .phone-composer .input-area {
+	min-height: 0;
+	align-items: flex-end;
+	gap: 4px;
+	padding: 8px;
+	background: transparent;
+	border-radius: calc(var(--radius) * 1.6) calc(var(--radius) * 1.6) 0 0;
+}
+
+html:root .phone-composer .input-area .textarea-wrapper {
+	align-self: stretch;
+	padding: 8px 4px;
+}
+
+/* Attach and dictate: bare quiet icons in a 40px band, nothing behind them. The
+   one filled thing in the row is the action at the far right. Listening,
+   preparing and transcribing keep VoiceRecorder's own pill widths and tints. */
+html:root .phone-composer .composer-attach,
+html:root .phone-composer .send-cluster .voice-btn {
+	display: grid;
+	place-items: center;
+	height: 40px;
+	flex: none;
+	margin: 0;
+	padding: 0;
+	border: 0;
+	-webkit-tap-highlight-color: transparent;
+}
+html:root .phone-composer .composer-attach,
+html:root .phone-composer .send-cluster .voice-btn:not(.expanded):not(.preparing):not(.transcribing) {
+	position: relative;
+	width: 40px;
+	border-radius: var(--composer-btn-radius);
+}
+/* A 44px target round each 40px icon and circle. */
+html:root .phone-composer .composer-attach::after,
+html:root .phone-composer .send-cluster .voice-btn:not(.expanded):not(.preparing):not(.transcribing)::after,
+html:root .phone-composer .send-btn::after,
+html:root .phone-composer .send-cluster .call-circle::after,
+html:root .phone-composer .send-cluster .stop-btn::after {
+	content: '';
+	position: absolute;
+	inset: -2px;
+}
+html:root .phone-composer .composer-attach,
+html:root .phone-composer .send-cluster .voice-btn:not(.recording):not(.preparing):not(.transcribing) {
+	background: transparent;
+	color: var(--muted-foreground);
+	cursor: pointer;
+}
+
+@media (hover: hover) {
+	html:root .phone-composer .composer-attach:hover:not(:disabled),
+	html:root .phone-composer .send-cluster .voice-btn:not(.recording):not(.preparing):not(.transcribing):hover:not(:disabled) {
+		background: var(--hover-overlay);
+		color: var(--foreground);
+	}
+}
+
+html:root .phone-composer .composer-attach:active:not(:disabled) { background: var(--active-overlay); }
+html:root .phone-composer .composer-attach:disabled { opacity: 0.4; cursor: not-allowed; }
+html:root .phone-composer .composer-attach:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+html:root .phone-composer .composer-attach svg { width: 20px; height: 20px; }
+
+html:root .phone-composer .send-cluster .voice-btn-wrapper { margin-bottom: 0; border-radius: var(--composer-btn-radius); }
+html:root .phone-composer .send-cluster .voice-btn-wrapper .voice-btn { margin-bottom: 0; }
+html:root .phone-composer .send-cluster .voice-btn svg { width: 19px; height: 19px; }
+
+/* Drafts save and restore by themselves; the phone shows no stash control. */
+html:root .phone-composer .send-cluster .stash {
+	display: none;
+}
+
+/* Thumb-sized primary actions: 40px circles pinned to the bottom with + and
+   the mic. Talk turns into Send in the same slot; Stop follows while work
+   runs. */
+html:root .phone-composer .send-cluster {
+	align-self: flex-end;
+	gap: 6px;
+}
+
+html:root .phone-composer .send-btn,
+html:root .phone-composer .send-cluster .stop-btn,
+html:root .phone-composer .send-cluster .call-circle {
+	position: relative;
+	width: 40px;
+	height: 40px;
+	margin-bottom: 0;
+	border-radius: var(--composer-btn-radius);
+}
+
+html:root .phone-composer .send-btn svg { width: 19px; height: 19px; }
+html:root .phone-composer .send-cluster .call-circle svg { width: 19px; height: 19px; }
+html:root .phone-composer .send-cluster .stop-btn svg { width: 17px; height: 17px; }
+
+/* Wrapped text (Duet-style): the text takes the card's full width and +
+   moves to the bottom-left, the mic and the send slot to the bottom-right,
+   on their own row above the quick bar. Layout only: nothing remounts. */
+html:root .phone-composer .chat-island.wrapped .input-area {
+	display: grid;
+	grid-template-columns: auto minmax(0, 1fr) auto;
+	align-items: center;
+	row-gap: 2px;
+	padding: 8px 8px 8px;
+}
+html:root .phone-composer .chat-island.wrapped .textarea-wrapper {
+	grid-row: 1;
+	grid-column: 1 / -1;
+	padding: 8px 8px 4px;
+}
+html:root .phone-composer .chat-island.wrapped .composer-attach { grid-row: 2; grid-column: 1; }
+html:root .phone-composer .chat-island.wrapped .send-cluster { grid-row: 2; grid-column: 3; align-self: center; }
+
+@media (prefers-reduced-motion: reduce) {
+	html:root .phone-composer .composer-attach-spin { animation: none; }
+}
+
+/* Composer text at 16px: readable on a phone, and mobile browsers do not zoom
+   into an editor whose text is at least 16px. The suggestion ghost text sits
+   on the same line, so it follows. A 24px line keeps one line inside the
+   editor's 24px minimum: a taller line would make the idle editor a scroll
+   owner, and the swipe-to-open gesture yields to scroll owners. */
+html:root .phone-composer .tiptap-editor .ProseMirror,
+html:root .phone-composer .inline-suggestion {
+	font-size: 16px;
+	line-height: 24px;
+}
+
+/* At 16px a long placeholder can wrap on a narrow phone, which also turns the
+   idle editor into a scroll owner. Keep it on one line, truncated, the way the
+   editor already lays it out beside a suggestion. */
+html:root .phone-composer .ProseMirror p.is-editor-empty:first-child::before {
+	position: absolute;
+	inset-inline: 0;
+	float: none;
+	height: auto;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+/* At 360px and narrower the send cluster gives way before the text field. */
+@media (max-width: 360px) {
+	/* The mic stays beside send while there is a draft, so the cluster
+	   tightens its gap here and the text field keeps the room. */
+	html:root .phone-composer .send-cluster { gap: 4px; }
+}
+
+/* The field's padding makes the target; the editor grows to five lines. */
+html:root .phone-composer:not(.mobile-collapsed) .textarea-wrapper .tiptap-editor {
+	min-height: 24px;
+}
+
+/* The quick bar (MobileComposerControlsSheet) is the
+   composer's bottom edge. The dock stays mounted for its state (usage
+   polling, effort range, Away) but shows nothing: attach and the mic sit in
+   the input row, call and browser in Chat controls (issue #1816). */
+html:root .phone-composer .controls-dock {
+	display: none;
+}
+

@@ -714,15 +714,7 @@ await runJourney({
 				await hero.waitFor();
 				await pickAgent(page, hero);
 				await pickProject(page, hero, PROJECT);
-				if (mobileShell && variant.viewport === 'phone') {
-					// The production phone shell has a quick access picker, not the
-					// desktop Permission mode menu used by pickAccess.
-					await page.getByRole('button', { name: /^Tool access:/ }).click();
-					await page.getByRole('radiogroup', { name: 'Tool access', exact: true })
-						.getByRole('radio', { name: 'Bypass', exact: true }).click();
-					await page.getByRole('button', { name: 'Tool access: Bypass', exact: true }).waitFor();
-					await page.keyboard.press('Escape');
-				} else await pickAccess(page, 'Bypass');
+				await pickAccess(page, 'Bypass');
 				// Produce a scrollable history through the real provider pipeline,
 				// then a real standalone shell task; never seed activeTasks by hand.
 				await typeAndSend(page, `task-retention-${uniq()} ${scriptTag(variant, 'long', { tps: 0, latency_ms: 0 })}`);

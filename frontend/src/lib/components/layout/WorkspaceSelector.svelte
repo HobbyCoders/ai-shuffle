@@ -8,6 +8,8 @@
 	 */
 	import { ChevronDown, FolderClosed } from 'lucide-svelte';
 	import { floatingMenu } from '$lib/components/ui/floating-menu';
+	import { menuHost as hostMenu } from '$lib/components/ui/menu-host';
+	import { closeDropdown, openDropdown, openHeaderDropdown } from '$lib/stores/header-dropdowns';
 	import { isMobileUi } from '$lib/stores/platform.svelte';
 	import { appData, clusterProjects, profiles, profilesLoaded, projects } from '$lib/stores/app-data.svelte';
 	import AddProjectModal from '$lib/components/AddProjectModal.svelte';
@@ -28,9 +30,12 @@
 		 * picker drops down centred under it; picking one adds the project.
 		 */
 		variant?: 'hero' | 'sentence';
+		/** The phone sheet's stacked row, with its list on the sheet's own page. */
+		sheetMode?: boolean;
+		menuHost?: HTMLElement | null;
 	}
 
-	let { selectedProject, selectedProjectV2Id = null, onSelectProject, variant = 'hero' }: Props = $props();
+	let { selectedProject, selectedProjectV2Id = null, onSelectProject, variant = 'hero', sheetMode = false, menuHost = null }: Props = $props();
 
 	let showDropdown = $state(false);
 	let dropdownRef = $state<HTMLElement | null>(null);
@@ -44,6 +49,7 @@
 	// keyboard can clip this popup. The desktop shell keeps its anchored dropdown
 	// at every width.
 	function mobilePopup(node: HTMLDivElement) {
+		if (sheetMode) return;
 		const viewport = window.visualViewport;
 		const scrollport = dropdownRef?.closest<HTMLElement>('.chat-view');
 		let topLayer = false;
@@ -103,6 +109,14 @@
 		} };
 	}
 
+	// In the sheet, its page's Back closes this list through the shared coordinator.
+	$effect(() => {
+		if (sheetMode && showDropdown && $openHeaderDropdown !== 'sheet-new-project') showDropdown = false;
+	});
+	$effect(() => {
+		if (sheetMode && !showDropdown) closeDropdown('sheet-new-project');
+	});
+
 	function closeOnEscape(event: KeyboardEvent) {
 		if (event.key !== 'Escape' || !showDropdown) return;
 		event.preventDefault();
@@ -154,6 +168,7 @@
 	function toggleDropdown() {
 		showDropdown = !showDropdown;
 		if (showDropdown) {
+			if (sheetMode) openDropdown('sheet-new-project');
 			// Reset grouped selector to main panel when opening
 			groupedSelector?.reset();
 			void appData.loadClusterProjects();
@@ -168,21 +183,23 @@
 	<button
 		bind:this={sentenceTrigger}
 		type="button"
-		class="sentence-tok"
+		class={sheetMode ? 'ctx-chip repo-chip' : 'sentence-tok'}
 		aria-expanded={showDropdown}
 		aria-haspopup="dialog"
 		aria-controls={pickerId}
 		aria-label="No project. Add a project (optional: adds checkout, branch and git)"
 		title="Add a project (optional)"
 		onclick={toggleDropdown}
-	><FolderClosed size={14} strokeWidth={1.75} aria-hidden="true" /><span class="sentence-tok-label">No project</span></button>
+	><FolderClosed size={sheetMode ? 16 : 14} strokeWidth={1.75} aria-hidden="true" /><span class={sheetMode ? 'ctx-chip-label' : 'sentence-tok-label'}>No project</span>{#if sheetMode}<ChevronDown size={16} class="ctx-chip-chev" aria-hidden="true" />{/if}</button>
 	{#if showDropdown}
 		<div
 			id={pickerId}
 			class="picker-dropdown sentence-menu"
+			class:sheet-page={sheetMode}
 			bind:this={listRef}
 			use:mobilePopup
-			use:floatingMenu={{ anchor: sentenceTrigger, align: 'start', enabled: !isMobileUi() }}
+			use:hostMenu={sheetMode ? menuHost : null}
+			use:floatingMenu={{ anchor: sentenceTrigger, align: 'start', enabled: !isMobileUi() && !sheetMode }}
 		>
 			<GroupedSelector
 				bind:this={groupedSelector}
@@ -390,6 +407,18 @@
 	/* ===== Hero sentence word (variant="sentence") ===== */
 	.sentence-variant { display: inline-flex; position: static; }
 	/* floatingMenu owns its position on desktop; mobilePopup on the phone. */
+	/* On the sheet's Project page the list fills the page instead of floating. */
+	.picker-dropdown.sheet-page {
+		position: static;
+		width: 100%;
+		max-width: none;
+		margin: 0;
+		transform: none;
+		border: 0;
+		background: transparent;
+		box-shadow: none;
+		animation: none;
+	}
 	.picker-dropdown.sentence-menu {
 		transform: none;
 		width: 300px;

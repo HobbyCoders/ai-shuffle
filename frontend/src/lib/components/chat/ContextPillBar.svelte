@@ -24,6 +24,8 @@
 	import { onDestroy, untrack } from 'svelte';
 	import ProfileSelector from './ProfileSelector.svelte';
 	import WorkspaceFolderSelector from './WorkspaceFolderSelector.svelte';
+	import RunsOnPicker from '$lib/components/layout/RunsOnPicker.svelte';
+	import WorkspaceSelector from '$lib/components/layout/WorkspaceSelector.svelte';
 	import BranchSelector from './BranchSelector.svelte';
 	import ExecutionModeBar from '$lib/components/layout/ExecutionModeBar.svelte';
 	import CreateBranchModal from '$lib/components/git/CreateBranchModal.svelte';
@@ -55,7 +57,7 @@
 	} from '$lib/api/sessions';
 	import { notify } from '$lib/stores/notifications';
 	import { menuHost } from '$lib/components/ui/menu-host';
-	import { GitBranch, Monitor, MonitorOff, Check, Loader2, X } from 'lucide-svelte';
+	import { FolderGit2, GitBranch, Monitor, MonitorOff, Check, Loader2, X } from 'lucide-svelte';
 	import { checkoutEligibility, type EligibilityMap } from '$lib/components/layout/execution-mode-eligibility';
 
 	interface Props {
@@ -65,7 +67,7 @@
 		 * The phone sheet's pages: the Agent and "Runs on" menus open inside
 		 * these elements instead of under their rows (see menuHost).
 		 */
-		menuHosts?: { agent?: HTMLElement | null; runner?: HTMLElement | null };
+		menuHosts?: { agent?: HTMLElement | null; runner?: HTMLElement | null; project?: HTMLElement | null };
 	}
 
 	let { sheetMode = false, menuHosts }: Props = $props();
@@ -512,12 +514,28 @@
 
 {#snippet repoChip()}
 	{#if projectName}
-		<WorkspaceFolderSelector {projectName} {sheetMode} />
+		<WorkspaceFolderSelector
+			{projectName}
+			{sheetMode}
+			onClear={isEmptyState && sheetMode ? () => activeSession.clearProject({ user: true }) : undefined}
+		/>
 	{/if}
 {/snippet}
 
 <div class="context-pill-bar" class:sheet-mode={sheetMode} role="toolbar" aria-label="Session context">
 	<ProfileSelector {sheetMode} menuHost={menuHosts?.agent} />
+	<!-- A new chat with no project yet still picks its worker, and can add one. -->
+	{#if sheetMode && isEmptyState && !$activeSession.project && !$activeSession.projectV2Id}
+		<RunsOnPicker sheetMode menuHost={menuHosts?.runner} />
+		<WorkspaceSelector
+			variant="sentence"
+			sheetMode
+			menuHost={menuHosts?.project}
+			selectedProject={$activeSession.project}
+			selectedProjectV2Id={$activeSession.projectV2Id}
+			onSelectProject={(projectId, projectV2Id) => activeSession.setProject(projectId, projectV2Id ?? null, { user: true })}
+		/>
+	{/if}
 	<!-- A no-project chat has no repository or execution controls, but a saved
 	     one still shows its runner so it can move to another worker (#639). -->
 	{#if $activeSession.mode !== 'chat' || !isEmptyState}
@@ -709,10 +727,11 @@
 				class="ctx-chip readonly wt-indicator"
 				title={isWorktreeSelected ? 'Runs in an isolated git worktree' : 'Runs in the main checkout'}
 			>
-				<span class="ctx-chip-cb" class:checked={isWorktreeSelected} aria-hidden="true">
-					<Check size={9} strokeWidth={2.6} />
-				</span>
+				{#if sheetMode}<FolderGit2 size={16} aria-hidden="true" />{/if}
 				<span class="ctx-chip-label">Worktree</span>
+				<span class="ctx-chip-cb" class:checked={isWorktreeSelected} aria-hidden="true">
+					<Check size={14} strokeWidth={2.4} />
+				</span>
 			</span>
 		{/if}
 		</div>
@@ -1029,9 +1048,9 @@
 		color: var(--warning);
 	}
 
-	/* The tick inside the read-only worktree indicator must beat the generic
+	/* The check inside the read-only worktree indicator must beat the generic
 	   muted svg colour on chips. */
 	.wt-indicator :global(.ctx-chip-cb svg) {
-		color: var(--primary-foreground);
+		color: var(--foreground);
 	}
 </style>

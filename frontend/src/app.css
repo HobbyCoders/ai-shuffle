@@ -1096,26 +1096,20 @@ button.ctx-chip:disabled {
 .ctx-chip .ctx-chip-cb {
 	display: grid;
 	place-items: center;
-	width: 12px;
-	height: 12px;
-	border-radius: 3px;
-	box-shadow: inset 0 0 0 1px var(--subtle-foreground);
-	background: transparent;
 	flex-shrink: 0;
-	transition: background-color 0.12s ease, box-shadow 0.12s ease;
 }
 .ctx-chip .ctx-chip-cb > svg {
-	width: 9px;
-	height: 9px;
-	color: var(--primary-foreground);
+	width: 14px;
+	height: 14px;
+	color: var(--foreground);
 	display: none;
-}
-.ctx-chip .ctx-chip-cb.checked {
-	background: var(--primary);
-	box-shadow: none;
 }
 .ctx-chip .ctx-chip-cb.checked > svg {
 	display: block;
+}
+/* On, the chip reads like the chosen agent: full foreground beside its check. */
+.ctx-chip:has(.ctx-chip-cb.checked) {
+	color: var(--foreground);
 }
 /* ============================================================
    DESKTOP APP CHROME

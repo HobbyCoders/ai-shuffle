@@ -432,19 +432,19 @@
 	border-right: 0;
 }
 .settings-shell[data-stacked] .st-lhead {
-	padding: 10px 14px 10px 6px;
-	gap: 10px;
-	border-bottom: 1px solid var(--st-border);
+	padding: 12px 16px;
+	gap: 12px;
+	border-bottom: 0;
 }
 .settings-shell[data-stacked] .st-lhead .st-filter,
 .settings-shell[data-stacked] .st-lhead .st-ltools {
-	margin-left: 8px;
+	margin-left: 0;
 }
 .settings-shell[data-stacked] .st-lh-top h1 {
 	font-size: 20px;
 }
 .settings-shell[data-stacked] .st-lscroll {
-	padding: 0 6px 60px;
+	padding: 0 16px 60px;
 }
 .settings-shell[data-stacked] .st-it {
 	min-height: 54px;

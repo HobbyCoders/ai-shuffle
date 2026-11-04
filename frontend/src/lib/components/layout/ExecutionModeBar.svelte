@@ -35,7 +35,7 @@
 	// Local's row id; install ids are UUID-like, so this never collides.
 	const LOCAL_ROW_ID = '__local__';
 	import { worktrees as worktreeStore, branches as branchStore, git, currentBranch as gitCurrentBranch } from '$lib/stores/git.svelte';
-	import { ChevronDown, Server, GitBranch, Monitor, GitFork, Plus, Loader2, Check } from 'lucide-svelte';
+	import { ChevronDown, FolderGit2, Server, GitBranch, Monitor, GitFork, Plus, Loader2, Check } from 'lucide-svelte';
 	import { onDestroy, untrack, type Snippet } from 'svelte';
 	import { menuHost } from '$lib/components/ui/menu-host';
 	import { openHeaderDropdown, openDropdown, closeDropdown } from '$lib/stores/header-dropdowns';
@@ -720,10 +720,11 @@
 		{#if isGitRepo}
 			<label class="ctx-chip wt-chip" title="Run in an isolated git worktree.">
 				<input type="checkbox" checked={worktreeOn} onchange={toggleWorktree} />
-				<span class="ctx-chip-cb" class:checked={worktreeOn} aria-hidden="true">
-					<Check size={9} strokeWidth={2.6} />
-				</span>
+				{#if sheetMode}<FolderGit2 size={16} aria-hidden="true" />{/if}
 				<span class="ctx-chip-label">Worktree</span>
+				<span class="ctx-chip-cb" class:checked={worktreeOn} aria-hidden="true">
+					<Check size={14} strokeWidth={2.4} />
+				</span>
 			</label>
 		{/if}
 		</div>
@@ -883,9 +884,9 @@
 		color: var(--subtle-foreground);
 	}
 
-	/* The worktree checkbox chip's tick must beat the generic muted svg colour. */
+	/* The worktree chip's check must beat the generic muted svg colour. */
 	.wt-chip :global(.ctx-chip-cb svg) {
-		color: var(--primary-foreground);
+		color: var(--foreground);
 	}
 
 	.mode-trigger-label {

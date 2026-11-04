@@ -4,8 +4,8 @@ import { resolve } from 'node:path';
 
 // The phone composer's buttons follow the theme's corners like the desktop
 // ones (frontend ChatInput.button-radius.test.ts), scaled to 40px buttons.
-const mobileCss = readFileSync(resolve(process.cwd(), 'src/mobile.css'), 'utf8');
-const MOBILE = "html:root[data-platform='mobile']";
+const phoneCss = readFileSync(resolve(process.cwd(), '../frontend/src/lib/components/chat/phone/phone-composer.css'), 'utf8');
+const PHONE = 'html:root .phone-composer';
 
 function rule(css: string, selector: string): string {
 	const start = css.indexOf(`${selector} {`);
@@ -15,12 +15,12 @@ function rule(css: string, selector: string): string {
 
 describe('phone composer button corners follow the theme radius', () => {
 	it('scales the shared rule to the phone composer and its 40px buttons', () => {
-		expect(rule(mobileCss, `${MOBILE} .chat-island`)).toMatch(
+		expect(rule(phoneCss, `${PHONE} .chat-island`)).toMatch(
 			/--composer-btn-radius:\s*min\(calc\(var\(--radius, 10px\) \* 2\.5\), 20px\);/
 		);
-		const phone = mobileCss.slice(
-			mobileCss.indexOf(`${MOBILE} .chat-island {`),
-			mobileCss.indexOf(`${MOBILE} .chat-island.wrapped .input-area`)
+		const phone = phoneCss.slice(
+			phoneCss.indexOf(`${PHONE} .chat-island {`),
+			phoneCss.indexOf(`${PHONE} .chat-island.wrapped .input-area`)
 		);
 		expect(phone).not.toContain('border-radius: 50%');
 		expect(phone.match(/border-radius: var\(--composer-btn-radius\)/g)).toHaveLength(3);

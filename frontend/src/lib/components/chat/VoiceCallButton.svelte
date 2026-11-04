@@ -170,7 +170,7 @@
 	.voice-call-btn:focus-visible { outline:2px solid var(--ring); outline-offset:3px; }
 
 	/* Circle variant: the composer's one filled action while there is nothing
-	   to send. Its corners follow the composer's (--composer-btn-radius, set by ChatInput), so it is square
+	   to send, in the slot Send takes once there is. Its corners follow the composer's (--composer-btn-radius, set by ChatInput), so it is square
 	   on a square theme and round on the rest. */
 	.call-circle {
 		display: grid;
@@ -181,19 +181,18 @@
 		padding: 0;
 		border: none;
 		border-radius: var(--composer-btn-radius, 50%);
-		background: var(--muted);
-		color: var(--foreground);
+		background: var(--action);
+		color: var(--action-foreground);
 		cursor: pointer;
 		transition: background-color 150ms ease, transform 100ms ease;
 	}
 	.call-circle:hover:not(:disabled):not(.blocked) {
-		background: color-mix(in oklab, var(--foreground) 14%, var(--muted));
+		background: var(--action-hover);
 	}
 	.call-circle:active:not(:disabled):not(.blocked) { transform: scale(0.94); }
 	.call-circle:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
 	.call-circle:disabled, .call-circle.blocked { opacity: 0.4; cursor: not-allowed; }
-	/* The filled action colour is earned: a call on its way, or text to send. */
-	.call-circle.starting { background: var(--action); color: var(--action-foreground); cursor: progress; }
+	.call-circle.starting { cursor: progress; }
 	.call-circle.starting :global(svg) { animation: voice-call-pulse 1s ease-in-out infinite; }
 	@media (prefers-reduced-motion: reduce) {
 		.call-circle { transition: none; }

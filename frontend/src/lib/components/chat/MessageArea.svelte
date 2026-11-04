@@ -2651,7 +2651,7 @@
 
 	@media (max-width: 640px) {
 		.chat-column {
-			padding: 18px 14px 0;
+			padding: 18px 16px 0;
 			gap: 24px;
 		}
 	}
@@ -2666,9 +2666,9 @@
 		}
 	}
 
-	/* Compact and touch layouts use TurnNavigator's narrower rail; keep the
-	   text clear of it. */
-	@media (max-width: 639px), (pointer: coarse) {
+	/* A touch tablet keeps the text clear of TurnNavigator's narrower rail. On a
+	   phone the margin stays 16px either side and the rail fits inside it. */
+	@media (min-width: 641px) and (pointer: coarse) {
 		.has-turn-nav .chat-column { padding-left: 28px; }
 	}
 

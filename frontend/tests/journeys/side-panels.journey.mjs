@@ -12,6 +12,7 @@
 //                      sidebar: back at the same rows the reader had on screen
 import { DEFAULT_VIEWPORTS, FOLD_VIEWPORTS, runJourney } from './runner.mjs';
 import {
+	composerControl,
 	SEEDED,
 	chatState,
 	expect,
@@ -84,7 +85,7 @@ await runJourney({
 			async act({ page, mark, before }) {
 				const side = page.getByRole('complementary', { name: 'Session side panel' });
 				await mark('open the side panel');
-				await page.getByRole('button', { name: 'Toggle live browser view' }).click();
+				await (await composerControl(page, 'Toggle live browser view')).click();
 				await side.waitFor({ timeout: 10_000 });
 				await side.getByRole('button', { name: 'Close side panel' }).waitFor();
 				await page.waitForTimeout(1200);

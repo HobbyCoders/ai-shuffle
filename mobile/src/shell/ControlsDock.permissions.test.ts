@@ -60,7 +60,7 @@ describe('mobile tool-access persistence', () => {
 		await tick();
 		expect(panelAccess().getByRole('radio', { name: label }).getAttribute('aria-checked')).toBe('true');
 		// The quick bar names the same choice.
-		expect(screen.getByRole('button', { name: new RegExp(`^Tool access: ${label}`, 'i') })).toBeTruthy();
+		expect(document.querySelector('[data-cell="access"]')?.getAttribute('aria-label')).toMatch(new RegExp(`^Permission mode: ${label}`, 'i'));
 	});
 
 	it('offers Accept edits in the phone panel without a project too (#641)', async () => {

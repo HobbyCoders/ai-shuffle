@@ -62,6 +62,11 @@
 	// Collapse / gesture / sheet behaviour is the mobile app's; the web build
 	// gets the desktop no-op defaults (see composer-shell.ts).
 	import { composerShell } from './composer-shell';
+	import { phoneLayout } from './phone/phone-layout.svelte';
+	import ComposerContextLine from './phone/ComposerContextLine.svelte';
+	import NewChatSetupCallout from '$lib/components/layout/NewChatSetupCallout.svelte';
+	import { draftIsGitRepo } from './contextPills';
+	import './phone/phone-composer.css';
 	import { platform } from '$lib/stores/platform.svelte';
 	import Banner from '$lib/components/Banner.svelte';
 	import { detectProjectMismatch } from './project-mismatch';
@@ -702,7 +707,7 @@
 	$effect(() => {
 		const island = islandRef;
 		// Only the phone shell's layout moves with the text.
-		if (!island || !mobileViewport) return;
+		if (!island || !phone) return;
 		return wrapWatcher.observe(island, sendClusterRef);
 	});
 	onDestroy(() => wrapWatcher.destroy());
@@ -756,6 +761,15 @@
 	// `compact` means "not the empty-hero layout" and is true on desktop as soon
 	// as a session has messages. Collapse / toolbar-inert is mobile-shell only.
 	const mobileViewport = $derived(platform.isMobile);
+	/** The phone composer: the phone app, or a web window at phone width. */
+	const phone = $derived(phoneLayout.active);
+	// A draft in a non-git folder runs Local. The desktop row's mode bar enforces
+	// this while mounted; the phone's sits in the sheet, unmounted until opened.
+	$effect(() => {
+		if (phone && newSession && ($activeSession.project || $activeSession.projectV2Id) && !draftIsGitRepo($git, $activeSession) && $activeSession.worktreeIntent !== 'local') {
+			activeSession.setWorktreeIntent('local', { persist: false });
+		}
+	});
 	const mobileCollapsed = $derived(
 		composerShell().shouldCollapse({
 			compact,
@@ -1527,6 +1541,8 @@
 <div
 	class="chat-input-wrapper"
 	data-ui-mount={UI_MOUNT.chatInput}
+	class:phone-composer={phone}
+	class:desktop-composer={!phone}
 	class:has-draft={hasMessageContent}
 	class:dictating={isRecording || isTranscribing}
 	class:mobile-collapsed={mobileCollapsed}
@@ -1758,7 +1774,7 @@
 					{browserOpen}
 					{terminal}
 					inertToolbar={toolbarPointerBlocked}
-					callAction={mobileViewport && !newSession ? caller : undefined}
+					callAction={phone && !newSession ? caller : undefined}
 					onSheetOpenChange={(open) => {
 						mobileControlsOpen = open;
 						if (open) keepMobileComposerExpanded();
@@ -1769,16 +1785,23 @@
 
 			<!-- The context row under the box: a chat under way has its chips
 			     (ContextPillBar decides which are selectors and which are read-only).
-			     The phone shell carries them in its controls panel: a second, hidden
-			     copy would share their dropdown state. -->
-			{#if !mobileViewport && !newSession}
+			     The phone composer says the same in one line, and carries the
+			     selectors in Chat controls: a second, hidden copy would share their
+			     dropdown state. -->
+			{#if !phone && !newSession}
 				<ContextPillBar />
 			{/if}
 		</form>
 
-		<!-- A new session's row: the `New session` region. Outside the form, since
-		     its menus hold inputs and a modal of their own. -->
-		{#if newSession}
+		{#if phone}
+			<ComposerContextLine newChat={newSession} sheetOpen={mobileControlsOpen} onOpen={() => controlsDockRef?.setMobileSheetOpen(true)} />
+			{#if newSession && ($activeSession.project || $activeSession.projectV2Id)}
+				<!-- The picked worker lacks the project: say so, and that Send sets it up first. -->
+				<NewChatSetupCallout />
+			{/if}
+		{:else if newSession}
+			<!-- A new session's row: the `New session` region. Outside the form, since
+			     its menus hold inputs and a modal of their own. -->
 			<NewSessionSentence />
 		{/if}
 	</div>
@@ -1835,7 +1858,7 @@
 		flex-shrink: 0;
 	}
 
-	:global(html[data-platform='desktop']) .chat-input-wrapper {
+	.chat-input-wrapper.desktop-composer {
 		padding: 0 1.5rem 1.25rem;
 	}
 
@@ -1922,7 +1945,7 @@
 	}
 
 	/* An empty box still looks ready for a sentence or two. */
-	:global(html[data-platform='desktop']) .textarea-wrapper :global(.tiptap-editor) {
+	.desktop-composer .textarea-wrapper :global(.tiptap-editor) {
 		min-height: 2.6em;
 	}
 
@@ -1939,32 +1962,32 @@
 	   [+] [ access · browser · terminal      model · effort · ring ] [circles]
 	   The editor row's box steps aside (display: contents) so attach, the
 	   text and the circles are grid items of the box itself. */
-	:global(html[data-platform='desktop']) .chat-island {
+	.desktop-composer .chat-island {
 		display: grid;
 		grid-template-columns: auto minmax(0, 1fr) auto;
 		align-items: center;
 	}
-	:global(html[data-platform='desktop']) .input-area {
+	.desktop-composer .input-area {
 		display: contents;
 	}
-	:global(html[data-platform='desktop']) .textarea-wrapper {
+	.desktop-composer .textarea-wrapper {
 		grid-row: 1;
 		grid-column: 1 / -1;
 		z-index: 20;
 		padding: 14px 16px 2px;
 	}
-	:global(html[data-platform='desktop']) .composer-attach {
+	.desktop-composer .composer-attach {
 		grid-row: 2;
 		grid-column: 1;
 		margin: 0 0 8px 8px;
 	}
-	:global(html[data-platform='desktop']) .chat-island > :global(.controls-dock) {
+	.desktop-composer .chat-island > :global(.controls-dock) {
 		grid-row: 2;
 		grid-column: 2;
 		align-self: stretch;
 		padding: 0 4px 8px;
 	}
-	:global(html[data-platform='desktop']) .send-cluster {
+	.desktop-composer .send-cluster {
 		grid-row: 2;
 		grid-column: 3;
 		position: relative;
@@ -2094,18 +2117,16 @@
 		.send-btn--setup .send-btn-label { display: none; }
 	}
 
-	/* Nothing to send yet: a quiet circle. */
+	/* Nothing to send yet: still the one landing point, held back. */
 	.send-btn:disabled {
-		background: var(--muted);
-		color: var(--subtle-foreground);
+		opacity: 0.4;
 		cursor: default;
 	}
 
-	/* Creating worktree: keep the fill behind the spinner. */
+	/* Creating worktree: the full fill behind the spinner. */
 	.send-btn.creating-worktree,
 	.send-btn.creating-worktree:disabled {
-		background: var(--action);
-		color: var(--action-foreground);
+		opacity: 1;
 		cursor: wait;
 	}
 
@@ -2114,54 +2135,6 @@
 		width: 32px;
 		height: 32px;
 		border-radius: var(--composer-btn-radius);
-	}
-
-	/* ===== A PHONE-WIDTH WINDOW =====
-	   44px targets and 16px text (iOS zooms the page into anything smaller). */
-	@media (max-width: 480px) {
-		:global(html[data-platform='desktop']) .chat-input-wrapper {
-			padding: 0 0.75rem 0.5rem;
-		}
-		:global(html[data-platform='desktop']) .chat-island {
-			--composer-btn-radius: min(calc(var(--radius, 10px) * 22 / 7), 22px);
-		}
-		:global(html[data-platform='desktop']) .textarea-wrapper :global(.tiptap-editor),
-		:global(html[data-platform='desktop']) .textarea-wrapper :global(.ProseMirror) {
-			font-size: 16px;
-		}
-		:global(html[data-platform='desktop']) .composer-attach {
-			width: 44px;
-			height: 44px;
-			margin: 0 0 4px 2px;
-		}
-		:global(html[data-platform='desktop']) .chat-island > :global(.controls-dock) {
-			padding: 0 0 4px;
-			gap: 4px;
-		}
-		:global(html[data-platform='desktop']) .send-cluster {
-			gap: 2px;
-			margin: 0 6px 6px 0;
-		}
-		.send-cluster :global(.voice-btn:not(.expanded):not(.preparing):not(.transcribing)) {
-			width: 44px;
-		}
-		.input-area .send-cluster :global(.voice-btn) {
-			height: 44px;
-		}
-		.send-btn,
-		.send-cluster :global(.call-circle),
-		.input-area .send-cluster :global(.stop-btn) {
-			position: relative;
-			width: 40px;
-			height: 40px;
-		}
-		.send-btn::after,
-		.send-cluster :global(.call-circle::after),
-		.input-area .send-cluster :global(.stop-btn::after) {
-			content: '';
-			position: absolute;
-			inset: -2px;
-		}
 	}
 
 	@keyframes fadeIn {

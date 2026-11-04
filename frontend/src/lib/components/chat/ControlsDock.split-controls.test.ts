@@ -83,34 +83,6 @@ function renderDock(props: Record<string, unknown> = {}) {
 }
 
 describe('ControlsDock split controls', () => {
- it('opens the phone model sheet on the page body and leaves nothing behind when it closes', async () => {
-  const width = window.innerWidth;
-  Object.defineProperty(window, 'innerWidth', { configurable: true, writable: true, value: 390 });
-  try {
-   const { container } = render(ControlsDock);
-   const button = await screen.findByRole('button', { name: /^Model:/ });
-   await waitFor(() => expect((button as HTMLButtonElement).disabled).toBe(false));
-   const bodyChildren = document.body.children.length;
-
-   await fireEvent.click(button);
-   const sheet = await screen.findByRole('dialog', { name: 'Choose model' });
-   expect(sheet.parentElement?.parentElement).toBe(document.body);
-   expect(container.contains(sheet)).toBe(false);
-   expect(screen.getByRole('heading', { name: 'Model' })).toBeTruthy();
-
-   // A tap inside the sheet is not an outside click, even though it lives on the body.
-   await fireEvent.click(sheet);
-   expect(screen.getByRole('dialog', { name: 'Choose model' })).toBeTruthy();
-
-   await fireEvent.keyDown(window, { key: 'Escape' });
-   await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Choose model' })).toBeNull());
-   expect(document.body.children.length).toBe(bodyChildren);
-   expect(document.querySelector('.model-layer')).toBeNull();
-  } finally {
-   Object.defineProperty(window, 'innerWidth', { configurable: true, writable: true, value: width });
-  }
- });
-
  it.each([
   ['hangs down from the control', 900, { top: '40px', bottom: 'auto' }],
   ['falls back to above the composer in a short window', 700, { top: '', bottom: '110px' }]
@@ -139,25 +111,6 @@ describe('ControlsDock split controls', () => {
    cleanup();
    island.remove();
    Object.defineProperty(window, 'innerHeight', { configurable: true, writable: true, value: height });
-  }
- });
-
- it('holds the phone sheet at its height once its search has focus', async () => {
-  const width = window.innerWidth;
-  Object.defineProperty(window, 'innerWidth', { configurable: true, writable: true, value: 390 });
-  const height = vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(512);
-  try {
-   render(ControlsDock);
-   const button = await screen.findByRole('button', { name: /^Model:/ });
-   await waitFor(() => expect((button as HTMLButtonElement).disabled).toBe(false));
-   await fireEvent.click(button);
-   const sheet = await screen.findByRole('dialog', { name: 'Choose model' });
-   expect(sheet.style.minHeight).toBe('');
-   await fireEvent.focusIn(sheet.querySelector('input')!);
-   await waitFor(() => expect(sheet.style.minHeight).toBe('512px'));
-  } finally {
-   height.mockRestore();
-   Object.defineProperty(window, 'innerWidth', { configurable: true, writable: true, value: width });
   }
  });
 

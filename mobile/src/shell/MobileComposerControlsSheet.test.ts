@@ -9,7 +9,7 @@
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, createEvent, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import { tick } from 'svelte';
-import MobileComposerControlsSheet from './MobileComposerControlsSheet.svelte';
+import MobileComposerControlsSheet from '$lib/components/chat/phone/MobileComposerControlsSheet.svelte';
 import { platform } from '$lib/stores/platform.svelte';
 import '$lib/test-stubs/composer-dom';
 import { activeSession } from '$lib/stores/active-session';
@@ -100,7 +100,7 @@ describe('quick bar', () => {
 		expect(cell(/^Model: Opus, fast mode$/).textContent).toContain('Opus');
 		// Reasoning effort is not on the bar; it lives in the panel.
 		expect(bar().querySelector('[data-cell="effort"]')).toBeNull();
-		expect(cell(/^Tool access: Accept edits$/).textContent).toContain('Edits');
+		expect(cell(/^Permission mode: Accept edits$/).textContent).toContain('Edits');
 		expect(within(bar()).getByRole('button', { name: /^Context and usage/ })).toBeTruthy();
 		expect(cell(/^All chat controls, 2 running$/).textContent).toContain('Controls');
 		// No information lines and no drag handle: every cell is a word or two.
@@ -117,7 +117,7 @@ describe('quick bar', () => {
 
 	it('styles Bypass like every other mode and names saving', () => {
 		render(MobileComposerControlsSheet, { props: props({ permissionValue: 'bypassPermissions', permissionUpdating: true }) });
-		const access = cell(/^Tool access: Bypass, saving$/);
+		const access = cell(/^Permission mode: Bypass, saving$/);
 		// No mode-specific class: Bypass uses the same theme tokens as Ask or Edits.
 		expect([...access.classList].filter((c) => !c.startsWith('svelte-'))).toEqual(['qcell']);
 		expect(access.getAttribute('aria-busy')).toBe('true');
@@ -126,7 +126,7 @@ describe('quick bar', () => {
 	it('opens a compact tool-access picker, with Bypass reachable by a deliberate tap', async () => {
 		const onPermissionSelect = vi.fn();
 		render(MobileComposerControlsSheet, { props: props({ onPermissionSelect }) });
-		await fireEvent.click(cell(/^Tool access/));
+		await fireEvent.click(cell(/^Permission mode/));
 		const picker = screen.getByRole('dialog', { name: 'Tool access' });
 		expect(within(picker).getAllByRole('radio').map((r) => r.textContent?.trim())).toEqual(['Ask', 'Auto', 'Accept edits', 'Bypass']);
 		await fireEvent.click(within(picker).getByRole('radio', { name: 'Bypass' }));
@@ -135,10 +135,10 @@ describe('quick bar', () => {
 
 	it('closes a picker with Escape and on a tap elsewhere', async () => {
 		render(MobileComposerControlsSheet, { props: props() });
-		await fireEvent.click(cell(/^Tool access/));
+		await fireEvent.click(cell(/^Permission mode/));
 		await fireEvent.keyDown(window, { key: 'Escape' });
 		expect(screen.queryByRole('dialog', { name: 'Tool access' })).toBeNull();
-		await fireEvent.click(cell(/^Tool access/));
+		await fireEvent.click(cell(/^Permission mode/));
 		await fireEvent.pointerDown(document.body);
 		expect(screen.queryByRole('dialog', { name: 'Tool access' })).toBeNull();
 	});
@@ -146,11 +146,11 @@ describe('quick bar', () => {
 	it('steps tool access with a swipe but never onto Bypass', async () => {
 		const onPermissionSelect = vi.fn();
 		const view = render(MobileComposerControlsSheet, { props: props({ onPermissionSelect, permissionValue: 'auto' }) });
-		await drag(cell(/^Tool access/), 60, 0);
+		await drag(cell(/^Permission mode/), 60, 0);
 		expect(onPermissionSelect).toHaveBeenCalledExactlyOnceWith('acceptEdits');
 		onPermissionSelect.mockClear();
 		await view.rerender(props({ onPermissionSelect, permissionValue: 'acceptEdits' }));
-		await drag(cell(/^Tool access/), 120, 0);
+		await drag(cell(/^Permission mode/), 120, 0);
 		expect(onPermissionSelect).not.toHaveBeenCalled();
 		// The swipe did not open the picker either.
 		expect(screen.queryByRole('dialog', { name: 'Tool access' })).toBeNull();
@@ -432,13 +432,13 @@ describe('Chat controls panel', () => {
 
 	it('shows Away on the quick bar, as the desktop composer does, without opening the panel', async () => {
 		const view = render(MobileComposerControlsSheet, { props: props({ awayEnabled: true }) });
-		const access = cell(/^Tool access: Ask, Away mode on$/);
+		const access = cell(/^Permission mode: Ask, Away mode on$/);
 		expect(access.querySelector('[data-away-badge]')).toBeTruthy();
 		await view.rerender(props({ awayEnabled: false }));
-		expect(cell(/^Tool access: Ask$/).querySelector('[data-away-badge]')).toBeNull();
+		expect(cell(/^Permission mode: Ask$/).querySelector('[data-away-badge]')).toBeNull();
 		// Before the first message Away cannot be on, whatever the store says.
 		await view.rerender(props({ awayEnabled: true, awayAvailable: false }));
-		expect(cell(/^Tool access: Ask$/).querySelector('[data-away-badge]')).toBeNull();
+		expect(cell(/^Permission mode: Ask$/).querySelector('[data-away-badge]')).toBeNull();
 	});
 
 	it('offers fast mode only where the model supports it', async () => {
@@ -468,7 +468,7 @@ describe('Chat controls panel', () => {
 		// The row carries the provider's own mark, not a letter tile.
 		expect(row.querySelector('svg.provider-glyph')).toBeTruthy();
 		await fireEvent.click(row);
-		expect(screen.getByRole('dialog', { name: 'Model' })).toBe(panel());
+		expect(screen.getByRole('dialog', { name: 'Choose model' })).toBe(panel());
 		expect(panel().classList.contains('sub')).toBe(true);
 		expect(within(panel()).getByRole('button', { name: 'Back to chat controls' })).toBeTruthy();
 		expect(within(panel()).getByRole('textbox', { name: /Search models/i })).toBeTruthy();
@@ -529,10 +529,10 @@ describe('Chat controls panel', () => {
 		const onBrowserToggle = vi.fn();
 		render(MobileComposerControlsSheet, { props: props({ open: true, onBrowserToggle }) });
 		const actions = within(panel()).getByRole('group', { name: 'More actions' });
-		expect(within(actions).getByRole('button', { name: 'Live browser view' })).toBeTruthy();
+		expect(within(actions).getByRole('button', { name: 'Toggle live browser view' })).toBeTruthy();
 		expect(within(actions).getByRole('button', { name: 'Export chat' })).toBeTruthy();
 		expect(within(panel()).queryByRole('button', { name: /stash/i })).toBeNull();
-		await fireEvent.click(within(actions).getByRole('button', { name: 'Live browser view' }));
+		await fireEvent.click(within(actions).getByRole('button', { name: 'Toggle live browser view' }));
 		expect(onBrowserToggle).toHaveBeenCalledOnce();
 	});
 
@@ -540,18 +540,19 @@ describe('Chat controls panel', () => {
 		render(MobileComposerControlsSheet, { props: props({ open: true, onBrowserToggle: vi.fn(),
 			terminal: { open: false, disabledReason: null, toggle: vi.fn(), preload: vi.fn() } }) });
 		const actions = within(panel()).getByRole('group', { name: 'More actions' });
-		expect(within(actions).getByRole('button', { name: 'Terminal' })).toBeTruthy();
+		expect(within(actions).getByRole('button', { name: 'Toggle terminal' })).toBeTruthy();
 		expect(within(panel()).queryByRole('button', { name: /phone|emulator/i })).toBeNull();
 	});
 
-	it('draws Bypass in the destructive colour: value, selected segment and help line', () => {
+	it('draws Bypass in the destructive colour: selected segment and help line', () => {
 		render(MobileComposerControlsSheet, { props: props({ open: true, permissionValue: 'bypassPermissions' }) });
 		const access = within(panel()).getByRole('radiogroup', { name: 'Tool access' });
 		const bypass = within(access).getByRole('radio', { name: 'Bypass' });
 		expect(bypass.getAttribute('aria-checked')).toBe('true');
 		expect(bypass.classList.contains('danger')).toBe(true);
 		const stack = access.closest('.mcp-stack')!;
-		expect(stack.querySelector('.mcp-val')!.classList.contains('danger')).toBe(true);
+		// The selected segment says it: no second copy of the value above it.
+		expect(stack.querySelector('.mcp-val')).toBeNull();
 		expect(stack.querySelector('.access-help')!.classList.contains('danger')).toBe(true);
 	});
 
@@ -655,13 +656,13 @@ describe('Chat controls panel', () => {
 
 	it('shows a Terminal cell only when the worker offers terminals, and it closes the sheet', async () => {
 		const { unmount } = render(MobileComposerControlsSheet, { props: props({ open: true }) });
-		expect(within(panel()).queryByRole('button', { name: 'Terminal' })).toBeNull();
+		expect(within(panel()).queryByRole('button', { name: 'Toggle terminal' })).toBeNull();
 		unmount();
 		const toggle = vi.fn();
 		const onOpenChange = vi.fn();
 		render(MobileComposerControlsSheet, { props: props({ open: true, onOpenChange,
 			terminal: { open: false, disabledReason: 'That chat runs on DesktopWorker.', toggle, preload: vi.fn() } }) });
-		const button = within(panel()).getByRole('button', { name: 'Terminal' });
+		const button = within(panel()).getByRole('button', { name: 'Toggle terminal' });
 		expect(button.getAttribute('aria-pressed')).toBe('false');
 		expect(button.getAttribute('title')).toBe('That chat runs on DesktopWorker.');
 		await fireEvent.click(button);
@@ -675,7 +676,7 @@ describe('every chat (#371 step 5)', () => {
 		render(MobileComposerControlsSheet, { props: props({
 			open: true, showSetup: false, showEffort: false, fastSupported: true
 		}) });
-		expect(cell(/^Tool access: Ask$/)).toBeTruthy();
+		expect(cell(/^Permission mode: Ask$/)).toBeTruthy();
 		const dialog = panel();
 		expect(within(dialog).getByRole('switch', { name: 'Fast mode' })).toBeTruthy();
 		expect(within(dialog).getByRole('switch', { name: 'Away mode' })).toBeTruthy();

@@ -8,7 +8,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import { writable } from 'svelte/store';
-import MobileComposerControlsSheet from './MobileComposerControlsSheet.svelte';
+import MobileComposerControlsSheet from '$lib/components/chat/phone/MobileComposerControlsSheet.svelte';
 import { git } from '$lib/stores/git.svelte';
 import { tick } from 'svelte';
 import { getQueuedMove, queueMove, cancelQueuedMove, moveSession } from '$lib/api/sessions';
@@ -175,7 +175,9 @@ describe('Move to another worker on the phone (#645)', () => {
 		render(MobileComposerControlsSheet, { props: props() });
 		await tick();
 		const setup = document.querySelector<HTMLElement>('.mcp .mcp-setup')!;
-		expect(setup.querySelector('.ctx-chip.runner')).toBeNull();
+		// It picks where the chat will run (its own row since the phone's one line
+		// replaced the row under the composer); there is nothing to move yet.
+		expect(setup.querySelector('.ctx-chip.runner')?.getAttribute('aria-label') ?? '').not.toMatch(/move/i);
 		expect(setup.querySelector('.ctx-chip-sub')).toBeNull();
 	});
 });
