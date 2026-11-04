@@ -306,7 +306,6 @@
 	/* Scrollbar styling for dropdown */
 	/* ===== CARD VARIANT (new-session hero) ===== */
 	/* The agent reads as the row's subject; no agent is amber. */
-	.card-name { color: var(--foreground); }
 	.card-name.unset,
 	.card-name.unset:hover:not(:disabled) { color: var(--warning); }
 	/* The card sits above the composer: its menu floats to <body>

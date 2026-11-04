@@ -57,7 +57,8 @@
 	} from '$lib/api/sessions';
 	import { notify } from '$lib/stores/notifications';
 	import { menuHost } from '$lib/components/ui/menu-host';
-	import { FolderGit2, GitBranch, Monitor, MonitorOff, Check, Loader2, X } from 'lucide-svelte';
+	import { ChevronDown, FolderGit2, GitBranch, Monitor, MonitorOff, Check, Loader2, X } from 'lucide-svelte';
+	import WorktreeGlyph from '$lib/components/ui/WorktreeGlyph.svelte';
 	import { checkoutEligibility, type EligibilityMap } from '$lib/components/layout/execution-mode-eligibility';
 
 	interface Props {
@@ -592,18 +593,22 @@
 						<Check size={12} strokeWidth={2.2} aria-hidden="true" />
 						<span class="ctx-chip-label">{runnerDone.label}</span>
 					{:else}
-						{#if !badge?.runner || badge.runner.online}
+						<!-- The dot says the worker's status and replaces the icon. The
+						     phone sheet's rows keep their glyph column; it says the same. -->
+						{#if !sheetMode}
+							<WorkerStatusDot online={!badge?.runner || badge.runner.online} />
+						{:else if !badge?.runner || badge.runner.online}
 							<Monitor size={12} strokeWidth={1.6} aria-hidden="true" />
 						{:else}
 							<MonitorOff size={12} strokeWidth={1.6} aria-hidden="true" />
 						{/if}
-						<WorkerStatusDot online={!badge?.runner || badge.runner.online} />
 						<span class="ctx-chip-label" class:runner-here={!badge?.runner}>{badge?.runner?.deviceName ? workerDisplayName(badge.runner.deviceName) : selfName}</span>
 						{#if sheetMode}
 							<!-- The phone's Chat controls draw this row as "Runs on"; the
 							     caption says the row is where a chat moves (#645). -->
 							<span class="ctx-chip-sub" id={moveHintId}>Move to another worker</span>
 						{/if}
+						{#if !sheetMode}<ChevronDown size={12} strokeWidth={1.5} aria-hidden="true" />{/if}
 					{/if}
 				</button>
 				{#if canCancelQueued}
@@ -683,13 +688,12 @@
 					? `Runs on ${readOnlyOwner.name}, which is offline`
 					: `Runs on ${readOnlyOwner.name}`}
 			>
-				{#if readOnlyOwner.online === false}
+				{#if !sheetMode && readOnlyOwner.online !== null}
+					<WorkerStatusDot online={readOnlyOwner.online} />
+				{:else if readOnlyOwner.online === false}
 					<MonitorOff size={12} strokeWidth={1.6} aria-hidden="true" />
 				{:else}
 					<Monitor size={12} strokeWidth={1.6} aria-hidden="true" />
-				{/if}
-				{#if readOnlyOwner.online !== null}
-					<WorkerStatusDot online={readOnlyOwner.online} />
 				{/if}
 				<span class="ctx-chip-label">{readOnlyOwner.name}</span>
 				{#if readOnlyOwner.online === false}
@@ -698,8 +702,7 @@
 			</span>
 		{:else}
 			<span class="ctx-chip readonly" title="Runs on this device">
-				<Monitor size={12} strokeWidth={1.6} aria-hidden="true" />
-				<WorkerStatusDot online />
+				{#if sheetMode}<Monitor size={12} strokeWidth={1.6} aria-hidden="true" />{:else}<WorkerStatusDot online />{/if}
 				<span class="ctx-chip-label">{selfName}</span>
 			</span>
 		{/if}
@@ -728,10 +731,9 @@
 				title={isWorktreeSelected ? 'Runs in an isolated git worktree' : 'Runs in the main checkout'}
 			>
 				{#if sheetMode}<FolderGit2 size={16} aria-hidden="true" />{/if}
+				{#if !sheetMode}<span class="ctx-chip-cb" class:checked={isWorktreeSelected} aria-hidden="true"><WorktreeGlyph on={isWorktreeSelected} /></span>{/if}
 				<span class="ctx-chip-label">Worktree</span>
-				<span class="ctx-chip-cb" class:checked={isWorktreeSelected} aria-hidden="true">
-					<Check size={14} strokeWidth={2.4} />
-				</span>
+				{#if sheetMode}<span class="ctx-chip-cb" class:checked={isWorktreeSelected} aria-hidden="true"><WorktreeGlyph on={isWorktreeSelected} /></span>{/if}
 			</span>
 		{/if}
 		</div>

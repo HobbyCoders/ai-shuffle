@@ -128,8 +128,10 @@ describe('NewSessionSentence', () => {
 		for (const name of [/^Runs on office-pc$/, /^Workspace folders: ai-shuffle$/, /^Worktree branch: a new branch from main$/, /Runs in a worktree/]) {
 			expect(screen.getByRole('button', { name })).toBeTruthy();
 		}
-		// The online dot is the worker menu's, never the row's.
-		expect(document.querySelector('.ns-sentence .worker-status-dot, .ns-sentence [class*="dot"]')).toBeNull();
+		// The status dot replaces the worker's icon: one mark, never both.
+		const runsOn = screen.getByRole('button', { name: /^Runs on office-pc$/ });
+		expect(runsOn.querySelector('.worker-status-dot')).toBeTruthy();
+		expect(runsOn.querySelector('svg')).toBeNull();
 	});
 
 	it('names a picked branch instead of "a new branch"', async () => {
@@ -143,7 +145,7 @@ describe('NewSessionSentence', () => {
 		const wt = await screen.findByRole('button', { name: /Runs in a worktree/ });
 		await fireEvent.click(wt);
 		expect(m.setWorktreeIntent).toHaveBeenCalledWith('local');
-		await waitFor(() => expect(text()).toBe('office-pc ai-shuffle main Main checkout'));
+		await waitFor(() => expect(text()).toBe('office-pc ai-shuffle main Worktree'));
 	});
 
 	it('shows extra workspace folders as +N on the project control', async () => {

@@ -818,7 +818,7 @@
 	.dock-txt {
 		display: inline-flex;
 		align-items: center;
-		gap: 4px;
+		gap: 6px;
 		height: 28px;
 		max-width: 100%;
 		min-width: 0;

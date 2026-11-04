@@ -1,10 +1,11 @@
 <script lang="ts">
 	import { selfWorkerName, workerDisplayName } from '$lib/components/ui/worker-name';
 	import { Monitor } from 'lucide-svelte';
+	import WorkerStatusDot from '$lib/components/ui/WorkerStatusDot.svelte';
 	/**
 	 * RunsOnPicker — the worker control in the new-session row ("Runs on
 	 * <worker> in …", NewSessionSentence). The trigger is the worker's name as
-	 * a plain underlined word (no online dot: presence shows in the menu rows),
+	 * a quiet label led by its status dot, as in the row under a running chat,
 	 * and the menu drops down centred under it.
 	 *
 	 * Where a NEW session runs: this worker (the default) or another approved
@@ -234,7 +235,7 @@
 		aria-expanded={open}
 		aria-label="Runs on {label}{online === false ? ' (offline)' : ''}"
 		title={intent ? `This session will run on ${intent.name}` : 'This session will run on this worker'}
-	><Monitor size={sheetMode ? 16 : 14} strokeWidth={1.75} aria-hidden="true" /><span class={sheetMode ? 'ctx-chip-label' : 'sentence-tok-label'}>{label}</span></button>
+	>{#if sheetMode || online === null}<Monitor size={sheetMode ? 16 : 14} strokeWidth={1.75} aria-hidden="true" />{:else}<WorkerStatusDot {online} />{/if}<span class={sheetMode ? 'ctx-chip-label' : 'sentence-tok-label'}>{label}</span></button>
 	{#if open}
 		<!-- Floats to <body>: the hero is its own stacking context, so an
 		     in-place menu painted under the composer below it. -->

@@ -200,7 +200,7 @@
 			<Loader2 size={11} strokeWidth={2} class="spin" />
 		{:else if isWorktreeMode || isStreaming}
 			<Lock size={10} strokeWidth={1.6} />
-		{:else if sheetMode}
+		{:else if !branchLocked}
 			<ChevronDown size={11} strokeWidth={1.6} />
 		{/if}
 	</button>

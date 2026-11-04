@@ -35,7 +35,8 @@
 	// Local's row id; install ids are UUID-like, so this never collides.
 	const LOCAL_ROW_ID = '__local__';
 	import { worktrees as worktreeStore, branches as branchStore, git, currentBranch as gitCurrentBranch } from '$lib/stores/git.svelte';
-	import { ChevronDown, FolderGit2, Server, GitBranch, Monitor, GitFork, Plus, Loader2, Check } from 'lucide-svelte';
+	import { ChevronDown, FolderGit2, Server, GitBranch, Monitor, MonitorOff, GitFork, Plus, Loader2, Check } from 'lucide-svelte';
+	import WorktreeGlyph from '$lib/components/ui/WorktreeGlyph.svelte';
 	import { onDestroy, untrack, type Snippet } from 'svelte';
 	import { menuHost } from '$lib/components/ui/menu-host';
 	import { openHeaderDropdown, openDropdown, closeDropdown } from '$lib/stores/header-dropdowns';
@@ -627,7 +628,7 @@
 		onclick={toggleWorktree}
 		aria-label={worktreeOn ? 'Runs in a worktree. Switch to the main checkout' : 'Runs in the main checkout. Switch to a worktree'}
 		title={worktreeOn ? 'Runs in an isolated git worktree. Click for the main checkout.' : 'Runs in the main checkout. Click for an isolated worktree.'}
-	><GitFork size={14} strokeWidth={1.75} aria-hidden="true" /><span class="sentence-tok-label">{worktreeOn ? 'Worktree' : 'Main checkout'}</span>{#if worktreeOn}<Check size={14} strokeWidth={2.4} aria-hidden="true" />{/if}</button>
+	><WorktreeGlyph on={worktreeOn} /><span class="sentence-tok-label">Worktree</span></button>
 {/if}
 {:else}
 <div class="execution-mode-bar" class:sheet-mode={sheetMode}>
@@ -647,18 +648,18 @@
 				aria-haspopup="menu"
 				aria-expanded={showModeDropdown}
 			>
-				{#if deviceIntent}
+				<!-- The dot replaces the icon; the phone sheet's rows keep their glyph. -->
+				{#if !sheetMode && deviceIntentOnline !== null}
+					<WorkerStatusDot online={deviceIntentOnline} />
+				{:else if deviceIntentOnline === false}
+					<MonitorOff size={12} strokeWidth={1.6} />
+				{:else if deviceIntent}
 					<Server size={12} strokeWidth={1.6} />
 				{:else}
 					<Monitor size={12} strokeWidth={1.6} />
 				{/if}
-				{#if deviceIntentOnline !== null}
-					<WorkerStatusDot online={deviceIntentOnline} />
-				{/if}
 				<span class="ctx-chip-label mode-trigger-label">{deviceIntent ? workerDisplayName(deviceIntent.name) : selfName}</span>
-				{#if sheetMode}
-					<ChevronDown size={12} strokeWidth={1.5} />
-				{/if}
+				<ChevronDown size={12} strokeWidth={1.5} />
 			</button>
 
 			{#if showModeDropdown}
@@ -701,9 +702,7 @@
 			>
 				<GitBranch size={12} strokeWidth={1.6} />
 				<span class="ctx-chip-label branch-name">{branchChipLabel}</span>
-				{#if sheetMode}
-					<ChevronDown size={12} strokeWidth={1.5} />
-				{/if}
+				<ChevronDown size={12} strokeWidth={1.5} />
 			</button>
 
 			{#if showBranchDropdown}
@@ -721,10 +720,9 @@
 			<label class="ctx-chip wt-chip" title="Run in an isolated git worktree.">
 				<input type="checkbox" checked={worktreeOn} onchange={toggleWorktree} />
 				{#if sheetMode}<FolderGit2 size={16} aria-hidden="true" />{/if}
+				{#if !sheetMode}<span class="ctx-chip-cb" class:checked={worktreeOn} aria-hidden="true"><WorktreeGlyph on={worktreeOn} /></span>{/if}
 				<span class="ctx-chip-label">Worktree</span>
-				<span class="ctx-chip-cb" class:checked={worktreeOn} aria-hidden="true">
-					<Check size={14} strokeWidth={2.4} />
-				</span>
+				{#if sheetMode}<span class="ctx-chip-cb" class:checked={worktreeOn} aria-hidden="true"><WorktreeGlyph on={worktreeOn} /></span>{/if}
 			</label>
 		{/if}
 		</div>
@@ -882,11 +880,6 @@
 	.mode-trigger :global(svg) {
 		flex-shrink: 0;
 		color: var(--subtle-foreground);
-	}
-
-	/* The worktree chip's check must beat the generic muted svg colour. */
-	.wt-chip :global(.ctx-chip-cb svg) {
-		color: var(--foreground);
 	}
 
 	.mode-trigger-label {
