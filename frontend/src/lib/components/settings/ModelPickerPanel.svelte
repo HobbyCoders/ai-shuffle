@@ -95,7 +95,6 @@
 		onRequestClose
 	}: Props = $props();
 
-	const uid = crypto.randomUUID().slice(0, 8);
 	let query = $state('');
 	let searchEl = $state<HTMLInputElement | null>(null);
 	let listEl = $state<HTMLDivElement | null>(null);
@@ -569,8 +568,8 @@
 			{/each}
 
 			{#each sections as section (section.key)}
-				<div class="mpp-section" role="group" aria-labelledby={`${uid}-${section.key}`}>
-					<div class="mpp-group-name" id={`${uid}-${section.key}`} data-provider-heading>
+				<div class="mpp-section" role="group" aria-labelledby={`${editorId}-${section.key}`}>
+					<div class="mpp-group-name" id={`${editorId}-${section.key}`} data-provider-heading>
 						<span>{section.name}</span>{#if section.subtext}<small>{section.subtext}</small>{/if}
 					</div>
 					{#each section.options as o (o.value)}

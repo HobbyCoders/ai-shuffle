@@ -781,6 +781,11 @@
 	   last: it is a read-only note that no longer fits, so it stays for screen
 	   readers and the repository and branch names give way before anything else. */
 	@media (max-width: 480px) {
+		/* The agent's short name reads whole; the repository and branch give way. */
+		.context-pill-bar:not(.sheet-mode) > :global(.selector-wrapper:first-child) {
+			flex-shrink: 0;
+		}
+
 		.context-pill-bar:not(.sheet-mode) :global(.ctx-chip > svg:not(.lucide-chevron-down):not(.ctx-chip-chev)),
 		.context-pill-bar:not(.sheet-mode) :global(.ctx-chip > :where(span, div):not(.ctx-chip-cb) > svg:not(.lucide-chevron-down):not(.ctx-chip-chev)),
 		.context-pill-bar:not(.sheet-mode) :global(.worker-status-dot.online) {

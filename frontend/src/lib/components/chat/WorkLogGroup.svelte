@@ -65,7 +65,9 @@
 		compactSummary?: string | null;
 		gallery?: GalleryMedia[];
 		/** (message, index, gallery sources a prose row drops, generated media a tool row leaves to others) */
-		row: Snippet<[ChatMessage, number, ReadonlySet<string>?, ReadonlySet<string>?]>;
+		row: Snippet<[ChatMessage, number, ReadonlySet<string>?, ReadonlySet<string>?, boolean?]>;
+		/** The turn's name line. Set, it heads the settled turn, above its fold row. */
+		speaker?: Snippet<[ChatMessage]>;
 		observeTurnAnchor?: Action<HTMLElement>;
 		revealMessageId?: string | null;
 		pagingEnabled?: boolean;
@@ -85,6 +87,7 @@
 		summary = null,
 		compactSummary = null,
 		row,
+		speaker,
 		revealMessageId = null,
 		pagingEnabled = true,
 		observeTurnAnchor = () => {}
@@ -480,6 +483,13 @@
 	function isAssistantProse(entry: WorkLogSequenceEntry): boolean {
 		return entry.message.role === 'assistant' && (entry.message.type === 'text' || !entry.message.type);
 	}
+
+	/** The reply whose name line moves up to head the turn; it then leaves its own out. */
+	const namedReply = $derived(
+		speaker && mode === 'settled' && foldable
+			? sequence.find((entry) => isAssistantProse(entry) && entry.message.content?.trim() && rowVisible(entry))
+			: undefined
+	);
 </script>
 
 <!-- A failure in a summary is the one part of it worth colouring. -->
@@ -497,6 +507,7 @@
 	{#if sequence.length > 0}
 		<!-- One keyed row list for live and settled: settling must not remount rows. -->
 		{#if mode === 'settled' && foldable}
+			{#if namedReply && speaker}{@render speaker(namedReply.message)}{/if}
 			{#if open}
 				<button
 					type="button"
@@ -600,7 +611,7 @@
 						use:observeTurnAnchor
 						use:trackTouch={rowKey(entry)}
 					>
-						{@render row(entry.message, entry.index, mode === 'settled' && !open && entry.inGallery ? gallerySources : undefined, mediaShownElsewhere(entry))}
+						{@render row(entry.message, entry.index, mode === 'settled' && !open && entry.inGallery ? gallerySources : undefined, mediaShownElsewhere(entry), entry === namedReply)}
 					</div>
 				{/if}
 				{#if run && runEdges.last.get(run.index) === position && runOpen(run)}

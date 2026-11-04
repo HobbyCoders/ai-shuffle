@@ -83,6 +83,43 @@ const baseProps = {
 afterEach(cleanup);
 
 describe('WorkLogGroup', () => {
+	describe('the turn\'s name line', () => {
+		const reply = { id: 'reply-1', role: 'assistant', type: 'text', content: 'Done.' } as ChatMessage;
+		const entries = [
+			{ message, index: 0, hiddenWhenCollapsed: true },
+			{ message: reply, index: 1, hiddenWhenCollapsed: false }
+		];
+		const speaker = createRawSnippet<[ChatMessage]>(() => ({
+			render: () => '<div data-testid="speaker">Fake Ai</div>'
+		}));
+		const namingRow = createRawSnippet<[ChatMessage, number, ReadonlySet<string>?, ReadonlySet<string>?, boolean?]>(
+			(getMessage, _i, _g, _h, getNameAbove) => ({
+				render: () => `<div data-testid="row" data-name-above="${!!getNameAbove()}">${getMessage().id}</div>`
+			})
+		);
+		const settled = { ...baseProps, mode: 'settled' as const, sequence: entries, durationLabel: 'Worked', row: namingRow };
+		const rowOf = (id: string) => screen.getAllByTestId('row').find((el) => el.textContent === id);
+
+		it('heads a settled turn, above the fold row, and the reply leaves its own out', () => {
+			render(WorkLogGroup, { ...settled, speaker });
+			const line = screen.getByTestId('speaker');
+			const fold = screen.getByRole('button', { name: /Show work details/ });
+			expect(line.compareDocumentPosition(fold) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+			expect(rowOf('reply-1')?.dataset.nameAbove).toBe('true');
+		});
+
+		it('stays with the reply when the row is live', () => {
+			render(WorkLogGroup, { ...settled, mode: 'live', speaker });
+			expect(screen.queryByTestId('speaker')).toBeNull();
+			expect(rowOf('reply-1')?.dataset.nameAbove).toBe('false');
+		});
+
+		it('stays with the reply when the caller gives no name line', () => {
+			render(WorkLogGroup, settled);
+			expect(rowOf('reply-1')?.dataset.nameAbove).toBe('false');
+		});
+	});
+
 	it('reveals a distant protected user turn inside a giant group without exceeding the row cap', async () => {
 		const entries = Array.from({ length: 2000 }, (_, index) => ({
 			message: index === 500

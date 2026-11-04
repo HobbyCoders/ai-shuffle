@@ -83,6 +83,34 @@ function renderDock(props: Record<string, unknown> = {}) {
 }
 
 describe('ControlsDock split controls', () => {
+ it('opens the phone model sheet on the page body and leaves nothing behind when it closes', async () => {
+  const width = window.innerWidth;
+  Object.defineProperty(window, 'innerWidth', { configurable: true, writable: true, value: 390 });
+  try {
+   const { container } = render(ControlsDock);
+   const button = await screen.findByRole('button', { name: /^Model:/ });
+   await waitFor(() => expect((button as HTMLButtonElement).disabled).toBe(false));
+   const bodyChildren = document.body.children.length;
+
+   await fireEvent.click(button);
+   const sheet = await screen.findByRole('dialog', { name: 'Choose model' });
+   expect(sheet.parentElement?.parentElement).toBe(document.body);
+   expect(container.contains(sheet)).toBe(false);
+   expect(screen.getByRole('heading', { name: 'Model' })).toBeTruthy();
+
+   // A tap inside the sheet is not an outside click, even though it lives on the body.
+   await fireEvent.click(sheet);
+   expect(screen.getByRole('dialog', { name: 'Choose model' })).toBeTruthy();
+
+   await fireEvent.keyDown(window, { key: 'Escape' });
+   await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Choose model' })).toBeNull());
+   expect(document.body.children.length).toBe(bodyChildren);
+   expect(document.querySelector('.model-layer')).toBeNull();
+  } finally {
+   Object.defineProperty(window, 'innerWidth', { configurable: true, writable: true, value: width });
+  }
+ });
+
  it.each(['gpt-realtime-2.1', 'fal-ai/personaplex/realtime'])('locks the model block for %s', async model => {
   const request = vi.spyOn(api, 'get').mockImplementation(voiceBinding(model) as never);
   await loadVoiceSettings(true);

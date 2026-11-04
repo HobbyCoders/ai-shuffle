@@ -154,7 +154,8 @@
 }
 .settings-shell:not([data-stacked]) .st-coll[data-replace='detail'] .st-back {
 	display: inline-flex;
-	margin-left: -2px;
+	/* The chevron's stroke, not its 20px box, sits on the column's left edge. */
+	margin-left: -9px;
 }
 
 /* ---------- row cards ---------- */

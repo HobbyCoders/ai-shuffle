@@ -348,20 +348,6 @@
 	 * Prioritizes the message's own profileId, then falls back to session profile.
 	 * This enables per-query profile tracking while supporting legacy messages.
 	 */
-	/**
-	 * The reply a work-log row introduces: the next mounted row, when it renders
-	 * as assistant text. That turn's name line sits above the activity row, so
-	 * the two read as one turn; the reply then leaves its own name out.
-	 */
-	function replyAfterWorkLog(item: DisplayItem | undefined, next: DisplayItem | undefined): ChatMessage | null {
-		if (item?.kind !== 'work_log' || next?.kind !== 'message') return null;
-		const message = next.message;
-		if (message.role === 'user' || (message.type && message.type !== 'text')) return null;
-		if (handoffAnchors.has(message) || agentDelivery(message)) return null;
-		const isStreamAnchor = !!(message.streaming && next.index === lastStreamingMessageIndex);
-		return shouldRenderAssistantText(message.content, isStreamAnchor) ? message : null;
-	}
-
 	function getProfileName(message: ChatMessage): string {
 		// First check if the message has its own profileId
 		if (message.profileId) {
@@ -2270,7 +2256,6 @@
 				<!-- Bounded mounting, with real row geometry for scroll anchoring. -->
 				<div
 					class="msg-virtualized"
-					class:same-turn={!!replyAfterWorkLog(visibleItems[i - 1], item)}
 					data-transcript-index={mountedStart + i}
 					data-transcript-key={displayItemKey(item)}
 					data-ui-row={item.kind === 'message' ? item.message.id || undefined : displayItemKey(item)}
@@ -2281,15 +2266,6 @@
 				{#if item.kind === 'work_log'}
 					<!-- Routine steps of one turn, folded (see $lib/utils/work-log).
 					     Live and settled share the item key: settling only flips `mode`. -->
-					{@const reply = replyAfterWorkLog(item, visibleItems[i + 1])}
-					{#if reply}
-						<TurnSpeaker
-							name={getModelDisplayName(reply) || getProfileName(reply)}
-							timestamp={reply.timestamp}
-							streaming={!!reply.streaming}
-							tight
-						/>
-					{/if}
 					<WorkLogGroup
 						mode={item.mode}
 						folded={item.folded}
@@ -2303,6 +2279,7 @@
 						summary={item.summary}
 						compactSummary={item.compactSummary}
 						row={messageBody}
+						speaker={turnSpeaker}
 						revealMessageId={revealedTurnId}
 						pagingEnabled={!shouldAutoScroll}
 						{observeTurnAnchor}
@@ -2311,7 +2288,7 @@
 					<!-- Grouped system/hook messages (2+ consecutive low-signal events) -->
 					<SystemMessageGroup messages={item.messages} pagingEnabled={!shouldAutoScroll} />
 				{:else}
-					{@render messageBody(item.message, item.index, undefined, item.hiddenMedia, !!replyAfterWorkLog(visibleItems[i - 1], item))}
+					{@render messageBody(item.message, item.index, undefined, item.hiddenMedia)}
 				{/if}
 			</div>
 			{/each}
@@ -2421,6 +2398,14 @@
 			</button>
 		</span>
 	</div>
+{/snippet}
+
+{#snippet turnSpeaker(message: ChatMessage)}
+	<TurnSpeaker
+		name={getModelDisplayName(message) || getProfileName(message)}
+		timestamp={message.timestamp}
+		tight
+	/>
 {/snippet}
 
 {#snippet messageBody(message: ChatMessage, messageIndex: number, gallerySources?: ReadonlySet<string>, hiddenMedia?: ReadonlySet<string>, nameAbove = false)}
@@ -2722,11 +2707,6 @@
 	   after the tick and move the preserved reading row a second time. */
 	.msg-virtualized {
 		content-visibility: visible;
-	}
-
-	/* The reply under its turn's activity row reads as part of the same turn. */
-	.msg-virtualized.same-turn {
-		margin-top: -12px;
 	}
 
 	.transcript-tail-spacer {

@@ -56,7 +56,7 @@
 		font-weight: 600;
 		letter-spacing: -0.005em;
 		color: var(--st-fg);
-		margin: 0 0 10px 2px;
+		margin: 0 0 10px;
 	}
 	.st-grp.detail .st-gt {
 		min-height: 26px;

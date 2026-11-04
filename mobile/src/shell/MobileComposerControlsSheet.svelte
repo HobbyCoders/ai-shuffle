@@ -1319,10 +1319,10 @@
 		outline: none;
 		visibility: hidden;
 		transition: transform 0.36s var(--mcp-ease), visibility 0s linear 0.36s;
-		will-change: transform;
 	}
 	.mcp.shown { visibility: visible; transition: transform 0.36s var(--mcp-ease), visibility 0s; }
-	.mcp.dragging { transition: none; }
+	/* Only a dragged sheet keeps its own layer: a settled one's text stays crisp. */
+	.mcp.dragging { transition: none; will-change: transform; }
 
 	/* Header: the grip, then one row with the title centred. */
 	.mcp-head { flex-shrink: 0; padding: 8px 12px 6px; touch-action: none; cursor: grab; user-select: none; -webkit-user-select: none; }

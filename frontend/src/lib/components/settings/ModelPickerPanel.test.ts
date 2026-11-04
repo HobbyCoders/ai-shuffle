@@ -78,6 +78,16 @@ beforeEach(async () => {
 afterEach(() => cleanup());
 
 describe('ModelPickerPanel', () => {
+	it('opens on a plain-HTTP address, where the browser has no crypto.randomUUID', () => {
+		const original = crypto.randomUUID;
+		Object.defineProperty(crypto, 'randomUUID', { value: undefined, configurable: true });
+		try {
+			expect(() => render(ModelPickerPanel, { props: { ...buildModelPickerCatalog(), value: '', onSelect: vi.fn() } })).not.toThrow();
+		} finally {
+			Object.defineProperty(crypto, 'randomUUID', { value: original, configurable: true });
+		}
+	});
+
 	it('shows selectable 272K and 1M controls for Sol 6.1', async () => {
 		const onContextChoiceSelect = vi.fn();
 		render(ModelPickerPanel, { props: { ...buildModelPickerCatalog(),

@@ -118,6 +118,26 @@
 	let modelMenuAnchor = $state<{ bottom?: number; top?: number; right: number; width: number } | null>(null);
 	/** Phone width: the picker is a full-width sheet over a dimmed page. */
 	let modelSheet = $state(false);
+	let modelLayerRef = $state<HTMLDivElement | null>(null);
+
+	/** The sheet lives on the page body, so it and its dimming cover the chat's top bar too. */
+	function sheetLayer(node: HTMLElement, onBody: boolean) {
+		const home = node.parentNode;
+		const anchor = document.createComment('');
+		home?.insertBefore(anchor, node);
+		const place = (toBody: boolean) => {
+			if (toBody) document.body.appendChild(node);
+			else anchor.parentNode?.insertBefore(node, anchor);
+		};
+		place(onBody);
+		return {
+			update: place,
+			destroy() {
+				anchor.remove();
+				node.remove();
+			}
+		};
+	}
 
 	function measurePopoverRoom() {
 		if (!dockRef) return;
@@ -151,6 +171,7 @@
 	}
 
 	function togglePopover(kind: DockPopover) {
+		modelSheet = window.innerWidth <= 480;
 		openPopover = openPopover === kind ? null : kind;
 		if (openPopover) void tick().then(measurePopoverRoom);
 	}
@@ -162,7 +183,7 @@
 	function handleDocumentClick(e: MouseEvent) {
 		if (!openPopover) return;
 		const wrap = wrapFor(openPopover);
-		if (!wrap || !(e.target instanceof Node) || wrap.contains(e.target)) return;
+		if (!wrap || !(e.target instanceof Node) || wrap.contains(e.target) || modelLayerRef?.contains(e.target)) return;
 		openPopover = null;
 	}
 
@@ -644,6 +665,7 @@
 			>{#if modelLocked}<Lock size={11} aria-hidden="true" />{/if}<span>{modelButtonLabel}</span></button>
 
 			{#if openPopover === 'model'}
+				<div class="model-layer" bind:this={modelLayerRef} use:sheetLayer={modelSheet} data-composer-owned-overlay="true">
 				{#if modelSheet}
 					<!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
 					<div class="model-scrim" onclick={(e) => { e.stopPropagation(); closePopover(); }}></div>
@@ -676,6 +698,7 @@
 						onRequestClose={closePopover}
 					/>
 				</div>
+			</div>
 			{/if}
 		</div>
 
@@ -946,11 +969,14 @@
 	}
 
 	/* Phone width: a real sheet, the same shape the phone app's picker has. */
+	.model-layer {
+		display: contents;
+	}
 	.model-scrim {
 		position: fixed;
 		inset: 0;
 		z-index: 59;
-		background: color-mix(in oklab, var(--background) 45%, black 40%);
+		background: var(--modal-overlay, color-mix(in oklch, var(--background) 60%, transparent));
 		animation: model-scrim-in 0.16s ease-out;
 	}
 	@keyframes model-scrim-in { from { opacity: 0; } to { opacity: 1; } }
