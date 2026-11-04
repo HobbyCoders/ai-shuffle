@@ -111,9 +111,10 @@ const reloadCase = ({ name, title, settled, position, draft }) => ({
 			expect((await composerText(page)).split(`${name} line 1\n`).length === 2, 'the saved draft came back once');
 			// These are shared seeded chats: leave the composer as it was found.
 			await mark('clear the composer');
-			await composer(page).click();
-			await page.keyboard.press('ControlOrMeta+A');
-			await page.keyboard.press('Backspace');
+			// A long editor is clipped by its scroll box. Its geometric centre
+			// is not a clickable point in the phone shell; fill uses the same
+			// contenteditable input path as the journey send helper.
+			await composer(page).fill('');
 			await page.waitForTimeout(800);
 		}
 	},
