@@ -111,6 +111,25 @@ describe('ControlsDock split controls', () => {
   }
  });
 
+ it('holds the phone sheet at its height once its search has focus', async () => {
+  const width = window.innerWidth;
+  Object.defineProperty(window, 'innerWidth', { configurable: true, writable: true, value: 390 });
+  const height = vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(512);
+  try {
+   render(ControlsDock);
+   const button = await screen.findByRole('button', { name: /^Model:/ });
+   await waitFor(() => expect((button as HTMLButtonElement).disabled).toBe(false));
+   await fireEvent.click(button);
+   const sheet = await screen.findByRole('dialog', { name: 'Choose model' });
+   expect(sheet.style.minHeight).toBe('');
+   await fireEvent.focusIn(sheet.querySelector('input')!);
+   await waitFor(() => expect(sheet.style.minHeight).toBe('512px'));
+  } finally {
+   height.mockRestore();
+   Object.defineProperty(window, 'innerWidth', { configurable: true, writable: true, value: width });
+  }
+ });
+
  it.each(['gpt-realtime-2.1', 'fal-ai/personaplex/realtime'])('locks the model block for %s', async model => {
   const request = vi.spyOn(api, 'get').mockImplementation(voiceBinding(model) as never);
   await loadVoiceSettings(true);

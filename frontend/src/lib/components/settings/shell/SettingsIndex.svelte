@@ -34,6 +34,12 @@
 		return settingsNav.category === id && !(settingsNav.stacked && settingsNav.view === 'index');
 	}
 
+	/** Choosing the section already open returns to its list, leaving any open item. */
+	function openCategory(id: CategoryId) {
+		if (isCurrent(id) && !settingsNav.stacked) settingsNav.clearSelection(id);
+		settingsNav.selectCategory(id);
+	}
+
 	function onkeydown(event: KeyboardEvent) {
 		if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
 		const from = event.currentTarget as HTMLElement;
@@ -68,7 +74,7 @@
 							type="button"
 							class="st-nav-item"
 							aria-current={isCurrent(cat.id) ? 'page' : undefined}
-							onclick={() => settingsNav.selectCategory(cat.id)}
+							onclick={() => openCategory(cat.id)}
 							{onkeydown}
 						>
 							<cat.icon />

@@ -119,6 +119,8 @@
 	/** Phone width: the picker is a full-width sheet over a dimmed page. */
 	let modelSheet = $state(false);
 	let modelLayerRef = $state<HTMLDivElement | null>(null);
+	/** Held once the search field has focus, so filtering never moves it under the thumb. */
+	let sheetHeldHeight = $state<number | null>(null);
 
 	/** The sheet lives on the page body, so it and its dimming cover the chat's top bar too. */
 	function sheetLayer(node: HTMLElement, onBody: boolean) {
@@ -172,6 +174,7 @@
 
 	function togglePopover(kind: DockPopover) {
 		modelSheet = window.innerWidth <= 480;
+		sheetHeldHeight = null;
 		openPopover = openPopover === kind ? null : kind;
 		if (openPopover) void tick().then(measurePopoverRoom);
 	}
@@ -677,6 +680,10 @@
 					style:top={!modelSheet && modelMenuAnchor?.top !== undefined ? `${modelMenuAnchor.top}px` : undefined}
 					style:right={!modelSheet && modelMenuAnchor ? `${modelMenuAnchor.right}px` : undefined}
 					style:width={!modelSheet && modelMenuAnchor ? `${modelMenuAnchor.width}px` : undefined}
+					style:min-height={modelSheet && sheetHeldHeight ? `${sheetHeldHeight}px` : undefined}
+					onfocusin={(e) => {
+						if (modelSheet && sheetHeldHeight === null) sheetHeldHeight = e.currentTarget.offsetHeight;
+					}}
 					role="dialog"
 					aria-label="Choose model"
 					data-composer-owned-overlay="true"

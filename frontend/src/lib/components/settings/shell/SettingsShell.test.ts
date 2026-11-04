@@ -324,6 +324,24 @@ describe('SettingsShell deep links', () => {
 		);
 	});
 
+	it('returns to the list when the open section is chosen again', async () => {
+		render(SettingsShell);
+		settingsNav.selectCategory('hooks');
+		settingsNav.selectItem('some-hook', 'hooks');
+		await tick();
+		await fireEvent.click(within(nav()).getByRole('button', { name: 'Hooks' }));
+		expect(settingsNav.selectedItem('hooks')).toBeNull();
+	});
+
+	it('keeps the open item when another section is chosen and left again', async () => {
+		render(SettingsShell);
+		settingsNav.selectCategory('hooks');
+		settingsNav.selectItem('some-hook', 'hooks');
+		await tick();
+		await fireEvent.click(within(nav()).getByRole('button', { name: 'Voice' }));
+		expect(settingsNav.selectedItem('hooks')).toBe('some-hook');
+	});
+
 	it('lands legacy tab names', async () => {
 		settingsNav.selectCategory('voice');
 		render(SettingsShell, { initialItemId: 'logs' });
