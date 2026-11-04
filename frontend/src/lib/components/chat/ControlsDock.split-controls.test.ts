@@ -111,6 +111,37 @@ describe('ControlsDock split controls', () => {
   }
  });
 
+ it.each([
+  ['hangs down from the control', 900, { top: '40px', bottom: '' }],
+  ['falls back to above the composer in a short window', 700, { top: '', bottom: '110px' }]
+ ])('on a new chat, the picker %s', async (_name, windowHeight, expected) => {
+  const height = window.innerHeight;
+  Object.defineProperty(window, 'innerHeight', { configurable: true, writable: true, value: windowHeight });
+  // A composer low enough that above it is the roomier side, as on a 1440x900 window.
+  const rect = (top: number, bottom: number) => ({ top, bottom, left: 300, right: 900, width: 600, height: bottom - top, x: 300, y: top, toJSON: () => ({}) });
+  const box = vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (this: Element) {
+   if (this.classList.contains('model-wrap')) return rect(530, 562);
+   if (this.classList.contains('chat-island')) return rect(460, 570);
+   return rect(530, 570);
+  });
+  const island = document.body.appendChild(document.createElement('div'));
+  island.className = 'chat-island';
+  try {
+   render(ControlsDock, { target: island, props: { newChat: true } });
+   const button = await screen.findByRole('button', { name: /^Model:/ });
+   await waitFor(() => expect((button as HTMLButtonElement).disabled).toBe(false));
+   await fireEvent.click(button);
+   const menu = await screen.findByRole('dialog', { name: 'Choose model' });
+   await waitFor(() => expect(menu.style.top).toBe(expected.top));
+   expect(menu.style.bottom).toBe(expected.bottom);
+  } finally {
+   box.mockRestore();
+   cleanup();
+   island.remove();
+   Object.defineProperty(window, 'innerHeight', { configurable: true, writable: true, value: height });
+  }
+ });
+
  it('holds the phone sheet at its height once its search has focus', async () => {
   const width = window.innerWidth;
   Object.defineProperty(window, 'innerWidth', { configurable: true, writable: true, value: 390 });

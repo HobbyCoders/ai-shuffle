@@ -148,10 +148,10 @@
 		modelSheet = window.innerWidth <= 480;
 		const wrapBox = modelWrapRef?.getBoundingClientRect();
 		// A new chat has no transcript to protect but does have a headline above
-		// the composer. With more room below, the picker hangs down over the empty
-		// page and at most the context row, leaving the headline whole.
+		// the composer. Whenever a usable list fits below, the picker hangs down
+		// over the empty page and at most the context row, leaving the headline whole.
 		const roomBelow = wrapBox ? window.innerHeight - wrapBox.bottom - 20 : 0;
-		if (newChat && !modelSheet && card && wrapBox && card.width > 0 && roomBelow > dockTop - 22) {
+		if (newChat && !modelSheet && card && wrapBox && card.width > 0 && roomBelow >= MODEL_MENU_MIN_ROOM) {
 			popoverRoom = Math.max(220, Math.floor(roomBelow));
 			modelMenuAnchor = { top: wrapBox.height + 8, right: wrapBox.right - card.right, width: Math.min(card.width, 380) };
 			return;
