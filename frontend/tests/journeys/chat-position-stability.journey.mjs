@@ -197,7 +197,10 @@ async function pickNativeAgent({ page, variant }) {
 	const inMobileShell = mobile && variant.viewport === 'phone';
 	if (inMobileShell) await page.getByRole('button', { name: /^All chat controls/ }).click();
 	await pickAgent(page, page);
-	if (inMobileShell) await page.getByRole('button', { name: 'Close chat controls', exact: true }).click();
+	if (inMobileShell) {
+		await page.keyboard.press('Escape');
+		await page.getByRole('dialog', { name: 'Chat controls', exact: true }).waitFor({ state: 'hidden' });
+	}
 }
 
 const cases = [{
