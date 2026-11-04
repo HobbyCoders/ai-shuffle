@@ -136,15 +136,16 @@ async function openClaude(ctx, { history = false } = {}) {
 	await page.waitForTimeout(700);
 }
 
-async function ensureFast(page) {
+async function ensureFast(page, variant) {
+	const mobileShell = mobile && variant.viewport === 'phone';
 	// A mobile portal can already be open before its dialog semantics mount.
 	// Close it through the real control path before choosing the model.
 	await page.keyboard.press('Escape');
-	const models = page.getByRole('dialog', { name: mobile ? 'Model' : 'Choose model', exact: true });
+	const models = page.getByRole('dialog', { name: mobileShell ? 'Model' : 'Choose model', exact: true });
 	await openPopup(page.getByRole('button', { name: /^Model:/ }).first(), models);
 	await models.getByRole('textbox', { name: 'Search models' }).fill('Opus');
 	await models.getByRole('option', { name: /^Opus/ }).first().click();
-	if (mobile) {
+	if (mobileShell) {
 		await models.waitFor({ state: 'hidden' });
 		await page.getByRole('button', { name: /^All chat controls/ }).click();
 		const fast = page.getByRole('switch', { name: 'Fast mode', exact: true });
@@ -168,7 +169,7 @@ async function openHistory(ctx) {
 
 const cases = [{
 	name: 'fast-completion',
-	async setup(ctx) { await openClaude(ctx); await ensureFast(ctx.page); },
+	async setup(ctx) { await openClaude(ctx); await ensureFast(ctx.page, ctx.variant); },
 	async act({ page, mark, variant, log }) {
 		await mark('send a Fast reply and follow completion');
 		const stop = await watchFrames(page);
