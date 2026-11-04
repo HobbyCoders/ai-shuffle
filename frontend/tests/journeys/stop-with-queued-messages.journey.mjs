@@ -115,6 +115,29 @@ function stopAfterTimeout({ switchChat = false } = {}) {
 	return {
 		async setup(ctx) {
 			await canWithholdTurnEnd(ctx.page);
+			await ctx.page.addInitScript(() => {
+				const nativeSend = WebSocket.prototype.send;
+				let stop;
+				WebSocket.prototype.send = function (data) {
+					let type;
+					try { type = JSON.parse(data).type; } catch { /* non-JSON frame */ }
+					if (window.__batchStopAndQuery && type === 'stop') {
+						stop = () => nativeSend.call(this, data);
+						return;
+					}
+					if (window.__batchStopAndQuery && type === 'query') {
+						window.__batchStopAndQuery = false;
+						requestAnimationFrame(() => requestAnimationFrame(() => {
+							// Preserve wire order, after the optimistic queue has painted.
+							stop();
+							nativeSend.call(this, data);
+							window.__stopAndQueryReleased = true;
+						}));
+						return;
+					}
+					return nativeSend.call(this, data);
+				};
+			});
 			await openStopChat(ctx);
 			await ctx.page.waitForTimeout(800);
 		},
@@ -155,8 +178,18 @@ function stopAfterTimeout({ switchChat = false } = {}) {
 			await composer(page).fill(`fresh ${fresh} ${scriptTag(variant, 'default')}`);
 			const collect = await watchStopFrames(page, [...texts, fresh]);
 			await mark('a later Stop, immediately followed by Send');
-			await stopGenerating(page).click();
-			await sendButton(page).click();
+			// Separate Playwright clicks (or the async send preflight) can let Stop
+			// settle before Send even queues, missing the carry-over state entirely.
+			// Send the real commands in their original order after that queue paints.
+			await page.evaluate(() => {
+				const stop = document.querySelector('button[aria-label="Stop generating"]');
+				const send = document.querySelector('button[aria-label="Send"]');
+				if (!stop || !send || stop.disabled || send.disabled) throw new Error('Stop and Send must both be actionable');
+				window.__batchStopAndQuery = true;
+				stop.click();
+				send.click();
+			});
+			await page.waitForFunction(() => window.__stopAndQueryReleased === true);
 			await page.getByText(`You said: “fresh ${fresh}`, { exact: false }).first().waitFor({ timeout: 60_000 });
 			await waitChat(page, { streaming: 'false' }, { timeout: 60_000 });
 			await page.waitForTimeout(500);
