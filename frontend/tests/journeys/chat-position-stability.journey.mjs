@@ -15,19 +15,24 @@ const prefix = (variant) => mobile && variant.viewport === 'phone' ? '/mobile/' 
 /** IO entries are the browser's post-layout geometry, not an rAF read before
  * the app's own scroll callback. Keep chronological order at 4x CPU too. */
 async function watchFrames(page, { deferAssertions = false } = {}) {
-	await page.evaluate((deferAssertions) => {
+	await page.evaluate(({ deferAssertions, articleDiagnostics }) => {
 		const viewport = document.querySelector('[role="log"][aria-label="Conversation messages"]');
-		const anchor = [...document.querySelectorAll('[data-transcript-key]')].find(el => el.getBoundingClientRect().bottom > (viewport?.getBoundingClientRect().top ?? 0) + 1);
+		const pickAnchor = () => [...document.querySelectorAll('[data-transcript-key]')].find(el => el.getBoundingClientRect().bottom > (viewport?.getBoundingClientRect().top ?? 0) + 1);
+		let anchor = pickAnchor();
 		const watch = window.__chatFrames = { running: true, next: 0, frames: [], shifts: [], phase: 'before-stop', assertions: !deferAssertions };
+		// Early diagnostics must not change which visible row the original
+		// post-scroll assertion window protects.
+		watch.beginAssertions = () => { anchor = pickAnchor(); watch.assertions = true; };
 		const nodes = new WeakMap();
 		let nextNode = 0;
+		const textProbes = [];
 		const nodeId = el => {
 			if (!nodes.has(el)) nodes.set(el, nextNode++);
 			return nodes.get(el);
 		};
 		watch.shiftObserver = new PerformanceObserver(list => {
 			for (const entry of list.getEntries()) watch.shifts.push({ at: entry.startTime, value: entry.value, hadRecentInput: entry.hadRecentInput, lastInputTime: entry.lastInputTime,
-				sources: entry.sources.map(source => ({ html: source.node?.outerHTML?.slice(0, 500), previous: source.previousRect, current: source.currentRect })) });
+				sources: entry.sources.map(source => ({ node: source.node ? nodeId(source.node) : null, key: (source.node?.nodeType === Node.ELEMENT_NODE ? source.node : source.node?.parentElement)?.closest('[data-transcript-key]')?.dataset.transcriptKey, html: source.node?.outerHTML?.slice(0, 500), previous: source.previousRect, current: source.currentRect })) });
 		});
 		watch.shiftObserver.observe({ type: 'layout-shift' });
 		const sample = () => {
@@ -48,8 +53,25 @@ async function watchFrames(page, { deferAssertions = false } = {}) {
 				el, node: nodeId(el), key: el.dataset.transcriptKey ?? null,
 				pending: el.matches('.pending-messages .userrow'), status: el.dataset.queueStatus ?? null,
 				text: (el.querySelector('.bubble-text') ?? el).textContent.slice(0, 160),
-				bubble: el.querySelector('.bubble'), actions: el.querySelector('.pending-actions')
+				bubble: el.querySelector('.bubble'), actions: el.querySelector('.pending-actions'),
+				article: articleDiagnostics ? el.querySelector('.message-container') : null,
+				articleNode: articleDiagnostics && el.querySelector('.message-container') ? nodeId(el.querySelector('.message-container')) : null
 			})).filter((row, i, all) => row.pending || i >= all.length - 4);
+			if (articleDiagnostics && prose && log) {
+				const last = textProbes.at(-1);
+				const rect = last?.range.getBoundingClientRect();
+				const box = log.getBoundingClientRect();
+				if (!last?.textNode.isConnected || !rect?.height || rect.top < box.top || rect.bottom > box.bottom) {
+					const caret = document.caretRangeFromPoint(prose.getBoundingClientRect().left + 40, box.top + box.height / 2);
+					if (caret?.startContainer.nodeType === Node.TEXT_NODE && prose.contains(caret.startContainer)) {
+						const textNode = caret.startContainer;
+						const range = caret.cloneRange();
+						range.setEnd(textNode, Math.min(textNode.length, range.startOffset + 24));
+						textProbes.push({ range, textNode, node: nodeId(textNode), text: range.toString() });
+						if (textProbes.length > 8) textProbes.shift();
+					}
+				}
+			}
 			const frame = { order, at: performance.now(), assertion: watch.assertions, streaming: document.querySelector('[data-ui-state="chat"]')?.dataset.uiStreaming,
 				proseKey: prose?.closest('[data-transcript-key]')?.dataset.transcriptKey,
 				chars: prose?.textContent.length ?? 0, scroll: log?.scrollTop, height: log?.scrollHeight, viewport: log?.clientHeight,
@@ -62,17 +84,21 @@ async function watchFrames(page, { deferAssertions = false } = {}) {
 					return rect?.height > 0 ? { top: rect.top, bottom: rect.bottom, height: rect.height, left: rect.left, width: rect.width } : null;
 				};
 				for (const [key, el] of Object.entries(elements)) frame[key] = geometry(el);
-				frame.rows = rows.map(({ el, bubble, actions, ...identity }) => ({ ...identity, rect: geometry(el), bubble: geometry(bubble), actions: geometry(actions) }));
+				frame.rows = rows.map(({ el, bubble, actions, article, ...identity }) => ({ ...identity, rect: geometry(el), bubble: geometry(bubble), actions: geometry(actions), article: geometry(article) }));
+				if (articleDiagnostics) frame.textRanges = textProbes.map(({ range, textNode, node, text }) => {
+					const rect = range.getBoundingClientRect();
+					return { node, text, connected: textNode.isConnected, at: performance.now(), rect: { top: rect.top, bottom: rect.bottom, left: rect.left, width: rect.width, height: rect.height } };
+				});
 				frame.paintedAt = entries[0]?.time;
 				frame.deliveredAt = performance.now();
 				frame.phase = watch.phase;
 				watch.frames.push(frame);
 			});
-			for (const el of [...Object.values(elements), ...rows.flatMap(row => [row.el, row.bubble, row.actions])].filter(Boolean)) observer.observe(el);
+			for (const el of [...Object.values(elements), ...rows.flatMap(row => [row.el, row.bubble, row.actions, row.article])].filter(Boolean)) observer.observe(el);
 			requestAnimationFrame(sample);
 		};
 		requestAnimationFrame(sample);
-	}, deferAssertions);
+	}, { deferAssertions, articleDiagnostics: process.env.JOURNEY_TRACE_ARTICLE === '1' });
 	// Include the resting frame before the action, not just its aftermath.
 	await page.evaluate(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))));
 	return async () => {
@@ -167,6 +193,13 @@ async function openHistory(ctx) {
 	await waitChatOpen(ctx.page, { messagesAtLeast: 2 });
 }
 
+async function pickNativeAgent({ page, variant }) {
+	const inMobileShell = mobile && variant.viewport === 'phone';
+	if (inMobileShell) await page.getByRole('button', { name: /^All chat controls/ }).click();
+	await pickAgent(page, page);
+	if (inMobileShell) await page.getByRole('button', { name: 'Close chat controls', exact: true }).click();
+}
+
 const cases = [{
 	name: 'fast-completion',
 	async setup(ctx) { await openClaude(ctx); await ensureFast(ctx.page, ctx.variant); },
@@ -235,7 +268,7 @@ const cases = [{
 }, {
 	name: 'queue-handoff', async setup(ctx) {
 		await openHistory(ctx);
-		await pickAgent(ctx.page, ctx.page); // Dev native: CLI sends can become steers.
+		await pickNativeAgent(ctx); // Dev native: CLI sends can become steers.
 		// Keep the seed's explicit Fake AI provider model. A brand-new tab's
 		// remembered Claude override can otherwise turn this into a CLI steer.
 		await api(ctx.page, 'POST', `/sessions/${seededChatId(ctx.status, 'no_project')}/clear`, {});
@@ -263,7 +296,7 @@ const cases = [{
 }, {
 	name: 'queue-handoff-reader', async setup(ctx) {
 		await openHistory(ctx);
-		await pickAgent(ctx.page, ctx.page); // Exercise native auto-delivery, not CLI steer.
+		await pickNativeAgent(ctx); // Exercise native auto-delivery, not CLI steer.
 	},
 	async act({ page, mark, variant, log }) {
 		await typeAndSend(page, `reader handoff ${uniq()} ${scriptTag(variant, 'long', { tps: 120 })}`);
@@ -303,7 +336,7 @@ const cases = [{
 		}
 		// Preserve the original strict assertion window (confirmed queue and,
 		// for readers, after their deliberate scroll), plus its resting frame.
-		await page.evaluate(() => { window.__chatFrames.assertions = true; });
+		await page.evaluate(() => window.__chatFrames.beginAssertions());
 		await page.evaluate(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))));
 		await page.locator('.chat-error-banner').filter({ hasText: 'claude reported success: API Error: 500' }).waitFor({ timeout: 60_000 });
 		await mark('Stop the failed CLI turn with queued messages');
