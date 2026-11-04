@@ -14,13 +14,19 @@ const prefix = (variant) => mobile && variant.viewport === 'phone' ? '/mobile/' 
 
 /** IO entries are the browser's post-layout geometry, not an rAF read before
  * the app's own scroll callback. Keep chronological order at 4x CPU too. */
-async function watchFrames(page) {
-	await page.evaluate(() => {
+async function watchFrames(page, { deferAssertions = false } = {}) {
+	await page.evaluate((deferAssertions) => {
 		const viewport = document.querySelector('[role="log"][aria-label="Conversation messages"]');
 		const anchor = [...document.querySelectorAll('[data-transcript-key]')].find(el => el.getBoundingClientRect().bottom > (viewport?.getBoundingClientRect().top ?? 0) + 1);
-		const watch = window.__chatFrames = { running: true, next: 0, frames: [], shifts: [] };
+		const watch = window.__chatFrames = { running: true, next: 0, frames: [], shifts: [], phase: 'before-stop', assertions: !deferAssertions };
+		const nodes = new WeakMap();
+		let nextNode = 0;
+		const nodeId = el => {
+			if (!nodes.has(el)) nodes.set(el, nextNode++);
+			return nodes.get(el);
+		};
 		watch.shiftObserver = new PerformanceObserver(list => {
-			for (const entry of list.getEntries()) watch.shifts.push({ at: entry.startTime, value: entry.value,
+			for (const entry of list.getEntries()) watch.shifts.push({ at: entry.startTime, value: entry.value, hadRecentInput: entry.hadRecentInput, lastInputTime: entry.lastInputTime,
 				sources: entry.sources.map(source => ({ html: source.node?.outerHTML?.slice(0, 500), previous: source.previousRect, current: source.currentRect })) });
 		});
 		watch.shiftObserver.observe({ type: 'layout-shift' });
@@ -33,25 +39,40 @@ async function watchFrames(page) {
 				composer: document.querySelector('.input-slot'), rail: document.querySelector('nav.turn-nav'),
 				send: document.querySelector('.send-cluster'), prose, anchor,
 				banner: document.querySelector('.chat-error-banner'), pending: document.querySelector('.pending-messages .userrow:last-child'),
+				tailControls: document.querySelector('.tail-controls'), pendingList: document.querySelector('.pending-messages'),
+				tailError: document.querySelector('.tail-error'), tailSpacer: document.querySelector('.transcript-tail-spacer'),
 			};
-			const frame = { order, at: performance.now(), streaming: document.querySelector('[data-ui-state="chat"]')?.dataset.uiStreaming,
+			// Content identifies a prompt across queue -> transcript delivery; nodeId
+			// distinguishes a retained keyed row from a remount with the same text.
+			const rows = [...document.querySelectorAll('.pending-messages .userrow, .chat-column > .msg-virtualized')].map(el => ({
+				el, node: nodeId(el), key: el.dataset.transcriptKey ?? null,
+				pending: el.matches('.pending-messages .userrow'), status: el.dataset.queueStatus ?? null,
+				text: (el.querySelector('.bubble-text') ?? el).textContent.slice(0, 160),
+				bubble: el.querySelector('.bubble'), actions: el.querySelector('.pending-actions')
+			})).filter((row, i, all) => row.pending || i >= all.length - 4);
+			const frame = { order, at: performance.now(), assertion: watch.assertions, streaming: document.querySelector('[data-ui-state="chat"]')?.dataset.uiStreaming,
 				proseKey: prose?.closest('[data-transcript-key]')?.dataset.transcriptKey,
 				chars: prose?.textContent.length ?? 0, scroll: log?.scrollTop, height: log?.scrollHeight, viewport: log?.clientHeight,
 				tail: document.querySelector('.transcript-tail-spacer')?.getBoundingClientRect().height,
 				activity: !!document.querySelector('.turn-activity') };
 			const observer = new IntersectionObserver(entries => {
 				observer.disconnect();
-				for (const [key, el] of Object.entries(elements)) {
+				const geometry = el => {
 					const rect = entries.find(entry => entry.target === el)?.boundingClientRect;
-					frame[key] = rect?.height > 0 ? { top: rect.top, bottom: rect.bottom, height: rect.height, left: rect.left, width: rect.width } : null;
-				}
+					return rect?.height > 0 ? { top: rect.top, bottom: rect.bottom, height: rect.height, left: rect.left, width: rect.width } : null;
+				};
+				for (const [key, el] of Object.entries(elements)) frame[key] = geometry(el);
+				frame.rows = rows.map(({ el, bubble, actions, ...identity }) => ({ ...identity, rect: geometry(el), bubble: geometry(bubble), actions: geometry(actions) }));
+				frame.paintedAt = entries[0]?.time;
+				frame.deliveredAt = performance.now();
+				frame.phase = watch.phase;
 				watch.frames.push(frame);
 			});
-			for (const el of Object.values(elements).filter(Boolean)) observer.observe(el);
+			for (const el of [...Object.values(elements), ...rows.flatMap(row => [row.el, row.bubble, row.actions])].filter(Boolean)) observer.observe(el);
 			requestAnimationFrame(sample);
 		};
 		requestAnimationFrame(sample);
-	});
+	}, deferAssertions);
 	// Include the resting frame before the action, not just its aftermath.
 	await page.evaluate(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))));
 	return async () => {
@@ -64,7 +85,7 @@ async function watchFrames(page) {
 			writeFileSync(`${process.env.JOURNEY_OUT}/frames-${Date.now()}.json`, JSON.stringify(frames));
 			writeFileSync(`${process.env.JOURNEY_OUT}/shifts-${Date.now()}.json`, JSON.stringify(await page.evaluate(() => window.__chatFrames.shifts)));
 		}
-		return frames;
+		return frames.filter(frame => frame.assertion);
 	};
 }
 const travel = (frames, key, edge = 'top') => {
@@ -213,6 +234,7 @@ const cases = [{
 }, {
 	name: 'queue-handoff', async setup(ctx) {
 		await openHistory(ctx);
+		await pickAgent(ctx.page, ctx.page); // Dev native: CLI sends can become steers.
 		// Keep the seed's explicit Fake AI provider model. A brand-new tab's
 		// remembered Claude override can otherwise turn this into a CLI steer.
 		await api(ctx.page, 'POST', `/sessions/${seededChatId(ctx.status, 'no_project')}/clear`, {});
@@ -238,7 +260,10 @@ const cases = [{
 		}
 	}
 }, {
-	name: 'queue-handoff-reader', setup: openHistory,
+	name: 'queue-handoff-reader', async setup(ctx) {
+		await openHistory(ctx);
+		await pickAgent(ctx.page, ctx.page); // Exercise native auto-delivery, not CLI steer.
+	},
 	async act({ page, mark, variant, log }) {
 		await typeAndSend(page, `reader handoff ${uniq()} ${scriptTag(variant, 'long', { tps: 120 })}`);
 		await waitChat(page, { streaming: 'true' });
@@ -260,6 +285,9 @@ const cases = [{
 	name: scrolledUp ? 'long-cli-error-stop-reader' : 'long-cli-error-stop',
 	async setup(ctx) { await openClaude(ctx, { history: true }); },
 	async act({ page, mark, variant, log }) {
+		// Retain diagnostic paint history from before input too: CLS can name a
+		// wrapper's old rect even when the last pending child stays docked.
+		const stop = await watchFrames(page, { deferAssertions: true });
 		await mark('send a failing CLI turn');
 		await typeAndSend(page, `error ${uniq()} ${scriptTag(variant, 'error-500', { latency_ms: 4500 })}`);
 		await waitChat(page, { streaming: 'true' });
@@ -272,9 +300,13 @@ const cases = [{
 			await page.mouse.wheel(0, -500);
 			await page.waitForTimeout(300);
 		}
-		const stop = await watchFrames(page);
+		// Preserve the original strict assertion window (confirmed queue and,
+		// for readers, after their deliberate scroll), plus its resting frame.
+		await page.evaluate(() => { window.__chatFrames.assertions = true; });
+		await page.evaluate(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))));
 		await page.locator('.chat-error-banner').filter({ hasText: 'claude reported success: API Error: 500' }).waitFor({ timeout: 60_000 });
 		await mark('Stop the failed CLI turn with queued messages');
+		await page.evaluate(() => { window.__chatFrames.phase = 'stop-requested'; });
 		await page.getByRole('button', { name: 'Stop generating', exact: true }).click();
 		await waitTurnSettled(page, { hold: 4500 });
 		const frames = await stop();
