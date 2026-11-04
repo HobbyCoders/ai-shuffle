@@ -50,10 +50,23 @@ const FOLDED = /^Show work details: .*compacted the context/i;
 const cards = (page) => page.locator('[data-testid="compaction-card"]');
 const meter = (page) => page.getByRole('button', { name: /^Context and usage — / }).first();
 
+/** The meter's words: on the composer on a wide screen, a row in Chat controls on a phone. */
+async function meterLabel(page) {
+	const controls = page.getByRole('button', { name: /^All chat controls/ });
+	if (!(await controls.isVisible())) return (await meter(page).getAttribute('aria-label')) || '';
+	const sheet = page.getByRole('dialog', { name: 'Chat controls' });
+	await controls.click();
+	await sheet.waitFor({ timeout: 10_000 });
+	const label = (await sheet.getByRole('button', { name: /^Context and usage: / }).getAttribute('aria-label')) || '';
+	await page.keyboard.press('Escape');
+	await sheet.waitFor({ state: 'hidden', timeout: 5000 });
+	return label;
+}
+
 /** The context meter's reading as a number (percent, or tokens when the window is unknown). */
 async function meterReading(page) {
-	const label = (await meter(page).getAttribute('aria-label')) || '';
-	const percent = label.match(/(\d+)% of context window used/);
+	const label = await meterLabel(page);
+	const percent = label.match(/(\d+)% (?:of context window )?used/);
 	if (percent) return { label, value: Number(percent[1]) };
 	const tokens = label.match(/([\d.,]+)\s*([kKmM]?) tokens/);
 	if (!tokens) return { label, value: NaN };

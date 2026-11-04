@@ -2,7 +2,7 @@
 // Preview-cookie no-project chats intentionally use the restricted chat-uploads lane.
 import { readFileSync } from 'node:fs';
 import { runJourney } from './runner.mjs';
-import { chatState, composer, expect, gotoApp, pick, scriptTag, typeAndSend, uniq, waitChat, waitTurnSettled } from './lib/app.mjs';
+import { chatState, composer, expect, gotoApp, pick, scriptTag, typeAndSend, uniq, waitChat, waitTurnSettled, withChatSetup } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 
 function cliLog(status) {
@@ -24,7 +24,8 @@ await runJourney({
 			await pick(hero.getByRole('button', { name: /^Agent:/ }), menu,
 				menu.getByRole('button', { name: 'Dev (Claude Code)', exact: true }),
 				hero.getByRole('button', { name: 'Agent: Dev (Claude Code)' }));
-			expect(await hero.getByRole('button', { name: /^No project/ }).isVisible(), 'fresh chat has no project');
+			// In place on a wide screen, in Chat controls on a phone.
+			expect(await withChatSetup(page, () => hero.getByRole('button', { name: /^No project/ }).isVisible()), 'fresh chat has no project');
 			const retained = `retained-${uniq()}`;
 			const removed = `removed-${uniq()}`;
 			await typeAndSend(page, `${retained} ${scriptTag(variant, 'default')}`);
