@@ -73,9 +73,9 @@
 	.st-num {
 		display: inline-flex;
 		align-items: center;
-		height: 30px;
+		height: 32px;
 		border: 1px solid var(--st-input);
-		background: var(--st-card);
+		background: var(--st-field);
 		border-radius: var(--st-radius-md);
 		overflow: hidden;
 	}
@@ -111,7 +111,7 @@
 		padding-right: 8px;
 	}
 	.st-num:focus-within {
-		border-color: var(--st-primary);
+		border-color: var(--st-field-focus);
 		box-shadow: 0 0 0 3px var(--st-primary-soft);
 	}
 </style>

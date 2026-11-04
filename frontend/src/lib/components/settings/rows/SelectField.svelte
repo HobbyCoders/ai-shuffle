@@ -108,10 +108,10 @@
 	.st-sel {
 		width: 100%;
 		appearance: none;
-		height: 30px;
+		height: 32px;
 		border-radius: var(--st-radius-md);
 		border: 1px solid var(--st-input);
-		background-color: var(--st-card);
+		background-color: var(--st-field);
 		background-repeat: no-repeat;
 		padding: 0 30px 0 10px;
 		font-size: 13px;
@@ -129,7 +129,7 @@
 	}
 	.st-sel:focus {
 		outline: none;
-		border-color: var(--st-primary);
+		border-color: var(--st-field-focus);
 		box-shadow: 0 0 0 3px var(--st-primary-soft);
 	}
 	.st-sel:disabled {

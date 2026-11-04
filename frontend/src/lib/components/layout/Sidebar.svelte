@@ -1057,9 +1057,9 @@
 		gap: 9px;
 		height: 32px;
 		padding: 0 10px;
-		border: 1px solid var(--sidebar-border);
+		border: 1px solid var(--field-border);
 		border-radius: var(--radius-control);
-		background: transparent;
+		background: var(--field-bg);
 		color: var(--sidebar-muted);
 		font: inherit;
 		font-size: 13px;
@@ -1067,7 +1067,7 @@
 		cursor: pointer;
 		transition: border-color 0.13s ease, color 0.13s ease;
 	}
-	.search:hover:not(:disabled) { background: var(--row-hover); color: var(--sidebar-foreground); }
+	.search:hover:not(:disabled) { color: var(--sidebar-foreground); }
 	.search:disabled { cursor: default; }
 	.search :global(svg) { flex: none; }
 	/* No keyboard shortcut to advertise at phone width. */

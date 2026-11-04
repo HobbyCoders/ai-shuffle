@@ -141,10 +141,15 @@
 		--input: oklch(1 0 0 / 0.1);
 		--ring: oklch(0.72 0.11 175);
 
+		/* One field: every text field, search box and select. Only focus brightens it. */
+		--field-bg: var(--card);
+		--field-border: var(--input);
+		--field-border-focus: var(--ring);
+
 		/* Sidebar plane. The rail shares it. Row fills derive from the plane so a
 		   theme preset's sidebar keeps working. */
 		--row-hover: color-mix(in oklab, var(--sidebar-foreground) 5%, var(--sidebar));
-		--row-selected: color-mix(in oklab, var(--sidebar-foreground) 9%, var(--sidebar));
+		--row-selected: color-mix(in oklab, var(--sidebar-foreground) 14%, var(--sidebar));
 		--rail-selected: color-mix(in oklab, var(--sidebar-foreground) 17%, var(--sidebar));
 		--sidebar: oklch(0.185 0.004 265);
 		--sidebar-foreground: oklch(0.928 0.003 265);
@@ -239,10 +244,10 @@
 		--modal-overlay: oklch(0 0 0 / 0.6);
 
 		/* Input states - dark mode (derived from theme variables) */
-		--input-bg: color-mix(in oklch, var(--background) 70%, var(--muted) 30%);
+		--input-bg: var(--field-bg);
 		--input-bg-hover: color-mix(in oklch, var(--background) 50%, var(--muted) 50%);
-		--input-bg-focus: color-mix(in oklch, var(--background) 50%, var(--muted) 50%);
-		--input-border: var(--border);
+		--input-bg-focus: var(--field-bg);
+		--input-border: var(--field-border);
 		--input-border-hover: color-mix(in oklab, var(--border) 70%, var(--primary) 30%);
 
 		/* Typography - font families (can be overridden by theme presets) */
@@ -299,15 +304,15 @@
 		--switch-off: color-mix(in oklch, var(--foreground) 32%, transparent);
 
 		/* Secondary/Muted */
-		--secondary: oklch(0.955 0.003 258);
-		--secondary-foreground: oklch(0.28 0.006 250);
-		--muted: oklch(0.955 0.003 258);
-		--muted-foreground: oklch(0.488 0.011 258);
-		--subtle-foreground: oklch(0.525 0.011 258);
+		--secondary: oklch(0.95 0.004 90);
+		--secondary-foreground: oklch(0.28 0.006 90);
+		--muted: oklch(0.95 0.004 90);
+		--muted-foreground: oklch(0.488 0.008 90);
+		--subtle-foreground: oklch(0.525 0.008 90);
 
 		/* Accent for hover states */
-		--accent: oklch(0.94 0.004 258);
-		--accent-foreground: oklch(0.21 0.005 250);
+		--accent: oklch(0.93 0.004 90);
+		--accent-foreground: oklch(0.21 0.005 90);
 
 		/* Studio Noir accent set */
 		--emerald: oklch(0.55 0.14 155);
@@ -329,16 +334,21 @@
 		--input: oklch(0.21 0.01 250 / 0.14);
 		--ring: oklch(0.53 0.09 178);
 
+		/* One field: every text field, search box and select. Only focus brightens it. */
+		--field-bg: var(--card);
+		--field-border: var(--input);
+		--field-border-focus: var(--ring);
+
 		/* Sidebar plane. The rail shares it. */
 		--row-hover: color-mix(in oklab, var(--sidebar-foreground) 2.5%, var(--sidebar));
 		--row-selected: color-mix(in oklab, var(--sidebar-foreground) 4.5%, var(--sidebar));
 		--rail-selected: color-mix(in oklab, var(--sidebar-foreground) 11%, var(--sidebar));
 		--sidebar: oklch(0.955 0.003 90);
-		--sidebar-foreground: oklch(0.21 0.005 250);
+		--sidebar-foreground: oklch(0.21 0.008 90);
 		--sidebar-border: oklch(0.21 0.01 250 / 0.09);
 		--sidebar-accent: oklch(0.21 0.01 250 / 0.045);
 		--sidebar-accent-active: oklch(0.21 0.01 250 / 0.085);
-		--sidebar-muted: oklch(0.488 0.011 258);
+		--sidebar-muted: oklch(0.488 0.008 90);
 
 		/* Surface effects */
 		--code-bg: oklch(0.975 0.002 250);
@@ -416,10 +426,10 @@
 		--modal-overlay: oklch(0 0 0 / 0.5);
 
 		/* Input states - light mode (derived from theme variables) */
-		--input-bg: color-mix(in oklch, var(--background) 70%, var(--muted) 30%);
+		--input-bg: var(--field-bg);
 		--input-bg-hover: color-mix(in oklch, var(--background) 50%, var(--muted) 50%);
-		--input-bg-focus: var(--background);
-		--input-border: var(--border);
+		--input-bg-focus: var(--field-bg);
+		--input-border: var(--field-border);
 		--input-border-hover: color-mix(in oklab, var(--border) 70%, var(--primary) 30%);
 
 		/* Primary variations */

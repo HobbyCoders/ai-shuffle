@@ -137,7 +137,7 @@
 
 <style>
 	.plus {
-		height: 30px;
+		height: 32px;
 		display: inline-flex;
 		align-items: center;
 		gap: 4px;
@@ -145,7 +145,7 @@
 		background: none;
 		border-radius: var(--st-radius-sm);
 		color: var(--st-mfg);
-		font-size: 12px;
+		font-size: 13px;
 		font-weight: 500;
 		padding: 0 8px;
 		white-space: nowrap;

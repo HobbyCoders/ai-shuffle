@@ -91,7 +91,7 @@
 		height: 32px;
 		border-radius: var(--st-radius-md);
 		border: 1px solid var(--st-input);
-		background: var(--st-card);
+		background: var(--st-field);
 		color: var(--st-fg);
 		padding: 0 10px;
 		font-size: 13px;
@@ -106,7 +106,7 @@
 	}
 	.st-txt:focus {
 		outline: none;
-		border-color: var(--st-primary);
+		border-color: var(--st-field-focus);
 		box-shadow: 0 0 0 3px var(--st-primary-soft);
 	}
 	.st-txt:disabled {

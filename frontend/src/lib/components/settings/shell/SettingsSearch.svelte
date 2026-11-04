@@ -133,7 +133,7 @@
 	.st-search-icon {
 		position: absolute;
 		left: 10px;
-		top: 9px;
+		top: 8px;
 		display: flex;
 		color: var(--st-mfg);
 		pointer-events: none;
@@ -144,10 +144,10 @@
 	}
 	input {
 		width: 100%;
-		height: 33px;
+		height: 32px;
 		border-radius: var(--st-radius-md);
 		border: 1px solid var(--st-input);
-		background: var(--st-muted);
+		background: var(--st-field);
 		color: var(--st-fg);
 		padding: 0 52px 0 32px;
 		font-size: 13px;
@@ -160,13 +160,13 @@
 	}
 	input:focus {
 		outline: none;
-		border-color: var(--st-primary);
+		border-color: var(--st-field-focus);
 		box-shadow: 0 0 0 3px var(--st-primary-soft);
 	}
 	kbd {
 		position: absolute;
 		right: 8px;
-		top: 7px;
+		top: 6px;
 		font-family: inherit;
 		font-size: 12px;
 		color: var(--st-subtle);

@@ -257,8 +257,8 @@
 		align-items: center;
 		gap: 8px;
 		height: 32px;
-		border: 1px solid var(--st-border);
-		background: var(--st-card);
+		border: 1px solid var(--st-input);
+		background: var(--st-field);
 		border-radius: var(--st-radius-md);
 		padding: 0 10px;
 		color: var(--st-mfg);
@@ -285,7 +285,7 @@
 		color: var(--st-subtle);
 	}
 	.st-filter:focus-within {
-		border-color: var(--st-primary);
+		border-color: var(--st-field-focus);
 		box-shadow: 0 0 0 3px var(--st-primary-soft);
 	}
 	.st-lscroll {

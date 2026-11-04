@@ -41,7 +41,7 @@
 	min-height: 160px;
 	border: 1px solid var(--st-input);
 	border-radius: var(--st-radius-md);
-	background: var(--st-card);
+	background: var(--st-field);
 	color: var(--st-fg);
 	padding: 10px 12px;
 	font-family: var(--st-mono);
@@ -52,7 +52,7 @@
 }
 .settings-shell textarea.st-area:focus {
 	outline: none;
-	border-color: var(--st-primary);
+	border-color: var(--st-field-focus);
 	box-shadow: 0 0 0 3px var(--st-primary-soft);
 }
 .settings-shell textarea.st-area:disabled {

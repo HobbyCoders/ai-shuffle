@@ -423,13 +423,6 @@
 		background: var(--st-warning-soft);
 		color: var(--st-warning);
 	}
-	.agd :global(.st-dha .st-btn:not(.danger)) {
-		color: var(--st-mfg);
-	}
-	.agd :global(.st-dha .st-btn:not(.danger):hover:not(:disabled)) {
-		color: var(--st-fg);
-	}
-
 	/* 601-900px of page: compact header buttons. */
 	@container settings (max-width: 900px) {
 		.lbl {
