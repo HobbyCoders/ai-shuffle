@@ -343,7 +343,7 @@
 
 	<div class="tb-context">
 		<div class="tb-titleline">
-			<span class="tb-title" title={mobileTitle}>{mobileTitle}</span>
+			<span class="tb-title" class:new-chat={currentType === 'session' && mobileTitle === NEW_CHAT_LABEL} title={mobileTitle}>{mobileTitle}</span>
 			{#if boundChatId}
 				<SessionTitleMenu variant="sheet" title={mobileTitle} sessionId={boundChatId} {projectLabel} />
 			{/if}
@@ -504,6 +504,8 @@
 		overflow: hidden;
 		text-overflow: ellipsis;
 	}
+	/* An empty new chat has no name of its own: the title is a label. */
+	.tb-title.new-chat { font-size: 15px; font-weight: 500; }
 	.tb-sub {
 		position: absolute;
 		left: 4px;

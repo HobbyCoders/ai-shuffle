@@ -916,7 +916,7 @@
 								<span class="mcp-ic glyph" aria-hidden="true"><ProviderGlyph kind={modelGlyph} size={18} /></span>
 								<span class="mcp-lbl"><span>Model</span></span>
 								<span class="mcp-val">{modelLabel}</span>
-								{#if modelLocked}<Lock size={16} class="mcp-chev" aria-hidden="true" />{:else}<ChevronRight size={18} class="mcp-chev" aria-hidden="true" />{/if}
+								{#if modelLocked}<Lock size={18} class="mcp-chev" aria-hidden="true" />{:else}<ChevronRight size={18} class="mcp-chev" aria-hidden="true" />{/if}
 							</button>
 							<button type="button" class="mcp-row" onclick={(e) => goTo('usage', e.currentTarget)}
 								aria-label={`Context and usage: ${usageUnknownUsed != null ? `${usageUnknownUsed} tokens used` : usageOverLimit ? 'over the limit' : `${usagePercent}% used`}`}>
@@ -926,6 +926,7 @@
 										<circle class="ring-progress" cx="15" cy="15" r="11" fill="none" stroke-width="3.5" stroke-linecap="round"
 											stroke-dasharray={RING_C} stroke-dashoffset={RING_C * (1 - Math.min(100, Math.max(0, usagePercent)) / 100)} />
 									{/if}
+									{#if usageUnknownUsed == null && usagePercent <= 0 && !usageOverLimit}<circle class="ring-cap" cx="26" cy="15" r="2.5" />{/if}
 								</svg>
 								<span class="mcp-lbl"><span>Context and usage</span>{#if usageTokensLine}<small>{usageTokensLine}</small>{/if}</span>
 								<span class="mcp-val" class:warn={usageSeverity === 'warning'} class:danger={usageSeverity === 'danger' || usageOverLimit}>
@@ -1320,7 +1321,8 @@
 		left: 0;
 		right: 0;
 		bottom: 0;
-		top: max(24px, calc(env(safe-area-inset-top, 0px) + 12px));
+		/* Never over the 56px chat header, on either phone surface. */
+		top: calc(env(safe-area-inset-top, 0px) + 56px);
 		z-index: 121;
 		display: flex;
 		flex-direction: column;
@@ -1493,8 +1495,9 @@
 		color: var(--muted-foreground);
 	}
 	.mcp-lbl { flex: 1; min-width: 0; }
-	.mcp-lbl > span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-	.mcp-lbl small { display: block; margin-top: 1px; font-size: 12.5px; color: var(--muted-foreground); line-height: 1.3; }
+	/* 22 + 1 + 16: the two lines of a row sit 20px apart, centre to centre. */
+	.mcp-lbl > span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 22px; }
+	.mcp-lbl small { display: block; margin-top: 1px; font-size: 12.5px; color: var(--muted-foreground); line-height: 16px; }
 	.mcp-val { max-width: 48%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14.5px; color: var(--muted-foreground); font-variant-numeric: tabular-nums; }
 	.mcp-val.warn { color: var(--warning); }
 	.mcp-val.danger { color: var(--destructive); }
@@ -1503,8 +1506,10 @@
 
 	/* Usage ring */
 	.mcp-ring { display: block; flex: none; transform: rotate(-90deg); }
-	.mcp-ring .ring-track { stroke: var(--border-strong); }
+	.mcp-ring .ring-track { stroke: color-mix(in oklch, var(--foreground) 28%, transparent); }
 	.mcp-ring .ring-progress { stroke: var(--primary); transition: stroke-dashoffset 0.3s ease; }
+	/* Empty is still a meter: the arc's starting point at 12 o'clock. */
+	.mcp-ring .ring-cap { fill: var(--primary); }
 	.mcp-ring.warning .ring-progress { stroke: var(--warning); }
 	.mcp-ring.danger .ring-progress { stroke: var(--destructive); }
 	.mcp-ring.unknown .ring-track { stroke-dasharray: 3 2.7; }
@@ -1533,6 +1538,8 @@
 	/* Stacked rows: label over a segmented control */
 	.mcp-stack { padding: 12px 14px 14px; }
 	.mcp-rowhead { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; font-size: 15px; }
+	/* The row has no chevron: its value keeps the column the others end on. */
+	.mcp-rowhead .mcp-val { margin-right: 30px; }
 	.mcp-seg {
 		display: grid;
 		grid-template-columns: repeat(var(--n, 4), minmax(0, 1fr));
@@ -1540,7 +1547,7 @@
 		padding: 3px;
 		border: 1px solid var(--border);
 		border-radius: calc(var(--radius) * 0.9);
-		background: var(--background);
+		background: var(--muted);
 	}
 	.mcp-seg button {
 		min-width: 0;
@@ -1562,20 +1569,22 @@
 		transition: background-color 0.15s, color 0.15s, box-shadow 0.15s;
 	}
 	.mcp-seg button:hover:not(:disabled) { color: var(--foreground); }
+	/* Settings' Segmented, thumb-sized: a grey tray and a card-coloured selected
+	   segment with a hairline. */
 	.mcp-seg button[aria-checked='true'] {
-		background: var(--muted);
+		background: var(--card);
 		color: var(--foreground);
 		font-weight: 600;
-		box-shadow: inset 0 0 0 1px var(--border-strong);
+		box-shadow: 0 0 0 1px color-mix(in oklch, var(--foreground) 16%, transparent);
 	}
 	.mcp-seg.accent button[aria-checked='true'] {
-		background: color-mix(in oklab, var(--primary) 20%, var(--muted));
+		background: color-mix(in oklab, var(--primary) 20%, var(--card));
 		box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--primary) 55%, transparent);
 	}
 	/* No pinned level: the model's default is marked, not selected. */
 	.mcp-seg button.auto { box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--primary) 40%, transparent); color: var(--foreground); }
 	.mcp-seg button.danger[aria-checked='true'] {
-		background: color-mix(in oklab, var(--destructive) 18%, var(--muted));
+		background: color-mix(in oklab, var(--destructive) 18%, var(--card));
 		color: var(--destructive);
 		box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--destructive) 50%, transparent);
 	}
@@ -1628,8 +1637,8 @@
 		text-align: left;
 		box-shadow: none;
 	}
-	/* A locked row's value keeps the value column; only the chevron is missing. */
-	.mcp-setup :global(.sheet-mode .ctx-chip.readonly:not(.wt-indicator)) { padding-right: 38px; }
+	/* A locked row's value keeps the value column: 14px edge + 18px chevron slot + 12px gap. */
+	.mcp-setup :global(.sheet-mode .ctx-chip.readonly:not(.wt-indicator)) { padding-right: 44px; }
 	.mcp-setup :global(.sheet-mode button.ctx-chip:not(:disabled)) { cursor: pointer; }
 	@media (hover: hover) {
 		.mcp-setup :global(.sheet-mode button.ctx-chip:hover:not(:disabled)) { background: var(--hover-overlay); }
@@ -1665,22 +1674,21 @@
 		color: var(--muted-foreground);
 		text-align: right;
 	}
+	/* The one chevron and lock slot: the same 18px glyph as the rows above. */
 	.mcp-setup :global(.sheet-mode .ctx-chip .ctx-chip-chev),
-	.mcp-setup :global(.sheet-mode .ctx-chip > svg.lucide-chevron-down) { order: 3; transform: rotate(-90deg); width: 18px; height: 18px; margin: 0; color: var(--muted-foreground); opacity: 0.75; }
-	/* Agent and "Runs on" open a page: draw the list chevron. */
-	.mcp-setup :global(.sheet-mode :is(.context-selector-btn, .ctx-chip.runner, .mode-trigger)::after) {
-		content: '';
-		order: 4;
-		width: 6.4px;
-		height: 6.4px;
+	.mcp-setup :global(.sheet-mode .ctx-chip > svg.lucide-chevron-down),
+	.mcp-setup :global(.sheet-mode .ctx-chip > svg.lucide-lock) {
+		order: 3;
 		flex: none;
-		margin: 0 8px 0 -2px;
-		border-top: 1.5px solid var(--muted-foreground);
-		border-right: 1.5px solid var(--muted-foreground);
-		transform: rotate(45deg);
+		width: 18px;
+		height: 18px;
+		margin: 0;
+		stroke-width: 2;
+		color: var(--muted-foreground);
 		opacity: 0.75;
 	}
-	.mcp-setup :global(.sheet-mode :is(.context-selector-btn .ctx-chip-chev, .mode-trigger > svg.lucide-chevron-down)) { display: none; }
+	.mcp-setup :global(.sheet-mode .ctx-chip .ctx-chip-chev),
+	.mcp-setup :global(.sheet-mode .ctx-chip > svg.lucide-chevron-down) { transform: rotate(-90deg); }
 	.mcp-setup :global(.sheet-mode .context-selector-btn::before) { content: 'Agent'; }
 	.mcp-setup :global(.sheet-mode .ctx-chip.runner::before),
 	.mcp-setup :global(.sheet-mode .mode-trigger::before),
@@ -1711,7 +1719,6 @@
 		background: var(--switch-off);
 		transition: background-color 0.2s;
 	}
-	.mcp-setup :global(.sheet-mode .ctx-chip .ctx-chip-cb > svg) { display: none; }
 	.mcp-setup :global(.sheet-mode .ctx-chip .ctx-chip-cb::after) {
 		content: '';
 		position: absolute;
@@ -1730,7 +1737,6 @@
 	.mcp-setup :global(.sheet-mode .branch-btn .project-name),
 	.mcp-setup :global(.sheet-mode .branch-btn .separator) { display: none; }
 	.mcp-setup :global(.sheet-mode .ctx-chip.runner) { color: var(--foreground); }
-	.mcp-setup :global(.sheet-mode .ctx-chip.runner svg) { color: inherit; }
 	.mcp-setup :global(.sheet-mode .ctx-chip.runner.busy) { background: color-mix(in oklab, var(--warning) 12%, transparent); }
 	.mcp-setup :global(.sheet-mode .ctx-chip.runner.busy .ctx-chip-label) { color: var(--warning); white-space: normal; text-align: right; }
 	.mcp-setup :global(.sheet-mode .ctx-chip.degraded) { color: var(--warning); }
@@ -1747,7 +1753,7 @@
 		align-items: center;
 	}
 	.mcp-setup :global(.sheet-mode .ctx-chip.runner:has(.ctx-chip-sub) > svg:first-of-type) { grid-area: 1 / 1 / 3 / 2; }
-	.mcp-setup :global(.sheet-mode .ctx-chip.runner:has(.ctx-chip-sub)::before) { grid-area: 1 / 2; align-self: end; }
+	.mcp-setup :global(.sheet-mode .ctx-chip.runner:has(.ctx-chip-sub)::before) { grid-area: 1 / 2; align-self: end; line-height: 22px; }
 	.mcp-setup :global(.sheet-mode .ctx-chip.runner .ctx-chip-sub) {
 		grid-area: 2 / 2;
 		align-self: start;
@@ -1756,12 +1762,12 @@
 		text-overflow: ellipsis;
 		white-space: nowrap;
 		font-size: 12.5px;
-		line-height: 1.3;
+		line-height: 16px;
 		color: var(--muted-foreground);
 	}
 	.mcp-setup :global(.sheet-mode .ctx-chip.runner:has(.ctx-chip-sub) > .worker-status-dot) { grid-area: 1 / 3 / 3 / 4; margin-right: -6px; }
 	.mcp-setup :global(.sheet-mode .ctx-chip.runner:has(.ctx-chip-sub) > .ctx-chip-label) { grid-area: 1 / 4 / 3 / 5; max-width: 40vw; }
-	.mcp-setup :global(.sheet-mode .ctx-chip.runner:has(.ctx-chip-sub)::after) { grid-area: 1 / 5 / 3 / 6; margin: 0 8px 0 -2px; }
+	.mcp-setup :global(.sheet-mode .ctx-chip.runner:has(.ctx-chip-sub) > svg.lucide-chevron-down) { grid-area: 1 / 5 / 3 / 6; }
 	.mcp-setup :global(.sheet-mode .queued-cancel) { width: 44px; height: 44px; margin: 0 8px 0 0; border-radius: 50%; }
 	/* A selector that still opens in place (project, branch) drops below its row. */
 	.mcp-setup :global(.sheet-mode :is(.branch-dropdown, .selector-dropdown, .wf-menu)) { margin: 0 10px 10px; }
@@ -1814,7 +1820,7 @@
 	   from Chat controls it is a page of the same sheet; opened straight from the
 	   quick bar the sheet itself is only as tall as the picker, up to 85%. */
 	.mcp-model { display: flex; align-items: flex-start; flex: 1; min-height: 0; --mpp-width: 100%; --mpp-height: 100%; }
-	.mcp.fit { top: auto; max-height: 85dvh; padding-bottom: env(safe-area-inset-bottom, 0px); }
+	.mcp.fit { top: auto; max-height: min(85dvh, calc(100dvh - env(safe-area-inset-top, 0px) - 56px)); padding-bottom: env(safe-area-inset-bottom, 0px); }
 	.mcp.fit .mcp-pages { display: flex; flex: 0 1 auto; }
 	.mcp.fit .mcp-page[data-page='model'] { position: relative; inset: auto; flex: 1 1 auto; min-width: 0; min-height: 0; }
 	.mcp.fit .mcp-model { align-items: stretch; }

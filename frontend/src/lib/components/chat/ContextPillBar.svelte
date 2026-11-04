@@ -608,7 +608,7 @@
 							     caption says the row is where a chat moves (#645). -->
 							<span class="ctx-chip-sub" id={moveHintId}>Move to another worker</span>
 						{/if}
-						{#if !sheetMode}<ChevronDown size={12} strokeWidth={1.5} aria-hidden="true" />{/if}
+						<ChevronDown size={12} strokeWidth={1.5} aria-hidden="true" />
 					{/if}
 				</button>
 				{#if canCancelQueued}
@@ -733,7 +733,7 @@
 				{#if sheetMode}<FolderGit2 size={16} aria-hidden="true" />{/if}
 				{#if !sheetMode}<span class="ctx-chip-cb" class:checked={isWorktreeSelected} aria-hidden="true"><WorktreeGlyph on={isWorktreeSelected} /></span>{/if}
 				<span class="ctx-chip-label">Worktree</span>
-				{#if sheetMode}<span class="ctx-chip-cb" class:checked={isWorktreeSelected} aria-hidden="true"><WorktreeGlyph on={isWorktreeSelected} /></span>{/if}
+				{#if sheetMode}<span class="ctx-chip-cb" class:checked={isWorktreeSelected} aria-hidden="true"></span>{/if}
 			</span>
 		{/if}
 		</div>
@@ -1048,11 +1048,5 @@
 
 	.ctx-chip.degraded :global(svg) {
 		color: var(--warning);
-	}
-
-	/* The check inside the read-only worktree indicator must beat the generic
-	   muted svg colour on chips. */
-	.wt-indicator :global(.ctx-chip-cb svg) {
-		color: var(--foreground);
 	}
 </style>

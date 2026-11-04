@@ -19,6 +19,9 @@
 	import SessionBreadcrumbs from './SessionBreadcrumbs.svelte';
 	import NotificationCenter from '$lib/components/NotificationCenter.svelte';
 	import { unreadCount } from '$lib/stores/notifications';
+	import { NEW_CHAT_LABEL } from './chat-empty-state';
+	import { workerInstalls } from '$lib/stores/worker-presence';
+	import { selfWorkerName } from '$lib/components/ui/worker-name';
 
 	interface Props {
 		/** Left crumb — the project (or section) the current view belongs to. */
@@ -31,6 +34,8 @@
 		onToggleSidebar?: () => void;
 		/** Project crumb activation (returns to the sessions board). */
 		onOpenProject?: () => void;
+		/** The empty new chat: at phone width the bar titles it, like the phone app. */
+		newChat?: boolean;
 		/** Draw the rule under the bar. Off until a chat has a title of its own. */
 		rule?: boolean;
 		/** Right cluster contents supplied by MainPanel. */
@@ -44,6 +49,7 @@
 		sidebarCollapsed = false,
 		onToggleSidebar,
 		onOpenProject,
+		newChat = false,
 		rule = true,
 		actions
 	}: Props = $props();
@@ -79,7 +85,16 @@
 		</button>
 	{/if}
 
-	<SessionBreadcrumbs {projectLabel} {title} {sessionId} {onOpenProject} />
+	{#if phoneWidth && newChat}
+		<!-- The phone app's bar (AppTopBar): the title over the worker this page talks to.
+		     The worker is changed from Chat controls, under the composer. -->
+		<div class="tb-newchat">
+			<span class="tb-newchat-title">{NEW_CHAT_LABEL}</span>
+			<span class="tb-newchat-worker"><i aria-hidden="true"></i><b>{selfWorkerName($workerInstalls)}</b></span>
+		</div>
+	{:else}
+		<SessionBreadcrumbs {projectLabel} {title} {sessionId} {onOpenProject} />
+	{/if}
 
 	<div class="tb-right">
 		{#if actions}
@@ -127,6 +142,47 @@
 		align-items: center;
 		gap: 8px;
 		flex: none;
+	}
+
+	/* Same lines as AppTopBar: title from 8px down, worker 7px above the bar's edge. */
+	.tb-newchat {
+		flex: 1 1 auto;
+		align-self: stretch;
+		display: flex;
+		flex-direction: column;
+		min-width: 0;
+		padding: 8px 2px 0 4px;
+	}
+	.tb-newchat-title {
+		font-size: 15px;
+		line-height: 21px;
+		font-weight: 500;
+		letter-spacing: -0.018em;
+		color: var(--foreground);
+	}
+	.tb-newchat-worker {
+		display: flex;
+		align-items: center;
+		gap: 5px;
+		min-width: 0;
+		margin-top: 4px;
+		font-size: 11.5px;
+		line-height: 16px;
+		color: var(--muted-foreground);
+	}
+	.tb-newchat-worker i {
+		flex: none;
+		width: 6px;
+		height: 6px;
+		border-radius: 50%;
+		background: var(--success, var(--primary));
+	}
+	.tb-newchat-worker b {
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		font-weight: 600;
 	}
 
 	/* The phone app's bar: same height, same edges, no gaps between its 44px targets. */

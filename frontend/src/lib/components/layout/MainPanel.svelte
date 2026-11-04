@@ -1032,6 +1032,7 @@
 			projectLabel={crumbProject}
 			title={crumbTitle}
 			sessionId={activeTab?.sessionId ?? null}
+			newChat={onEmptyNewChat}
 			{sidebarCollapsed}
 			{onToggleSidebar}
 			rule={topBarRule}

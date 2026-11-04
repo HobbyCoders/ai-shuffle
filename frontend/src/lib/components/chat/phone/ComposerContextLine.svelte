@@ -1,7 +1,9 @@
 <script lang="ts">
 	/**
 	 * The one line under the phone composer: where this chat runs, in words.
-	 * "Dev sandbox · feature/second" with a project, "Dev agent · Local" without.
+	 * In a chat, "Dev sandbox · feature/second" with a project and "Dev agent ·
+	 * Local" without. On a new chat the header names the worker, so the line is
+	 * "Dev agent · Dev sandbox" or "Dev agent · No project".
 	 * Tapping it opens Chat controls, which hold the selectors themselves. Under
 	 * a new chat the line is the `New session` region until the sheet takes over.
 	 */
@@ -23,8 +25,13 @@
 
 	let { newChat, sheetOpen, onOpen }: Props = $props();
 
+	const selfName = $derived(selfWorkerName($workerInstalls));
+	const intentName = $derived(
+		$activeSession.deviceIntent?.name ? workerDisplayName($activeSession.deviceIntent.name) : null
+	);
 	const parts = $derived(
 		composerContextLine({
+			newChat,
 			projectName:
 				$projects.find((p) => p.id === $activeSession.project)?.name ??
 				$clusterProjects.find((p) => p.project_v2_id === $activeSession.projectV2Id)?.name ??
@@ -34,9 +41,8 @@
 				$activeSession.worktreeBranch ||
 				($activeSession.project ? ($gitStatus?.current_branch ?? null) : null),
 			agentName: $profiles.find((p) => p.id === $activeSession.profile)?.name ?? null,
-			workerName: $activeSession.deviceIntent?.name
-				? workerDisplayName($activeSession.deviceIntent.name)
-				: selfWorkerName($workerInstalls)
+			workerName: intentName ?? selfName,
+			pickedWorkerName: intentName !== selfName ? intentName : null
 		})
 	);
 	const label = $derived(parts.join(' · '));
@@ -99,10 +105,9 @@
 	}
 	.ccl-btn:active { color: var(--foreground); }
 	.ccl-btn:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
-	/* Whole names first. Only a name too long for the line gives way, the second
-	   one before the first, and it ellipsizes at its end rather than mid-word. */
-	.ccl-part { flex: 0 0 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-	.ccl-part:first-child { flex-shrink: 1; }
+	/* Whole names first. Only a name too long for the line gives way, the last
+	   one before the others, and it ellipsizes at its end rather than mid-word. */
+	.ccl-part { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 	.ccl-part.ccl-last { flex: 0 10 auto; }
 	.ccl-sep { flex: none; opacity: 0.7; }
 	.ccl-btn :global(.ccl-chev) { flex: none; opacity: 0.8; }
