@@ -187,7 +187,7 @@
 </script>
 
 <DetailPane
-	name={model.workerName}
+	name={model.workerLabel}
 	icon={Server}
 	status={TONE[model.uiState]}
 	statusText={NETWORK_STATE_LABELS[model.uiState]}

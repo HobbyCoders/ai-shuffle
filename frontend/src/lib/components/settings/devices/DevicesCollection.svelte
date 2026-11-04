@@ -118,7 +118,7 @@
 					? [
 							{
 								id: 'self',
-								name: model.workerName,
+								name: model.workerLabel,
 								summary: [
 									model.status.revision,
 									model.status.version,

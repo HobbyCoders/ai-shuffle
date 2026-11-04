@@ -361,6 +361,9 @@ export function sidebarRow(sessions, title) {
 /** Open a chat from the sidebar (opening the drawer first on a phone). */
 export async function openFromSidebar(page, title) {
 	const sessions = await showSidebar(page);
+	// Settings and Agents take the session column's room; the rail brings it back.
+	const chats = sessions.getByRole('navigation', { name: 'Workspace' }).getByRole('button', { name: 'Chats', exact: true });
+	if (await chats.isVisible()) await chats.click();
 	const row = sidebarRow(sessions, title);
 	await row.scrollIntoViewIfNeeded();
 	await row.click();
