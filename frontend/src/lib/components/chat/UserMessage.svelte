@@ -103,7 +103,7 @@
 		display: flex;
 		align-items: center;
 		gap: 5px;
-		margin-top: 4px;
+		margin-top: 8px;
 		opacity: 0;
 		pointer-events: none;
 		user-select: none;

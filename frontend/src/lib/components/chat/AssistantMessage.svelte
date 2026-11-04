@@ -62,6 +62,7 @@
 	import { extractHtmlPreviews, placeHtmlPreviews, streamingPreviewName, HTML_PREVIEW_INITIAL_HEIGHT } from '$lib/utils/htmlPreview';
 	import UsageEstimatedBadge from '$lib/components/UsageEstimatedBadge.svelte';
 	import { formatMessageTime, formatMessageTimeFull, messageTimeISO } from '$lib/utils/message-time';
+	import TurnSpeaker from './TurnSpeaker.svelte';
 	import { taskChecks, taskMessageKey, type TaskChecks } from '$lib/stores/task-checks';
 	import { terminals } from '$lib/stores/terminals.svelte';
 	import { lookupCommandBlock } from '$lib/terminal/commands';
@@ -83,6 +84,8 @@
 		profileName?: string;
 		/** Model display name for this specific message, when the turn reported one. */
 		modelLabel?: string | null;
+		/** The transcript already shows this turn's name above its activity row. */
+		nameAbove?: boolean;
 	}
 
 	let {
@@ -97,7 +100,8 @@
 		metadata,
 		onRewindComplete,
 		profileName = 'Assistant',
-		modelLabel = null
+		modelLabel = null,
+		nameAbove = false
 	}: Props = $props();
 
 	/** The name line's text: the model that produced this message when we know
@@ -746,12 +750,9 @@
 	role="article"
 >
 	<div class="min-w-0 max-w-full">
-		<div class="aname" title={formatMessageTimeFull(timestamp)}>
-			{#if streaming}
-				<span class="live" aria-label="Streaming"></span>
-			{/if}
-			<span class="aname-text">{speakerName}</span>
-		</div>
+		{#if !nameAbove}
+			<TurnSpeaker name={speakerName} {timestamp} {streaming} />
+		{/if}
 		<div class="overflow-hidden max-w-full">
 			<!-- svelte-ignore a11y_click_events_have_key_events -->
 			<!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -878,43 +879,6 @@
 	}
 	.message-container {
 		position: relative;
-	}
-
-	/* ── Name line ─────────────────────────────────────────────────────── */
-	.aname {
-		display: flex;
-		align-items: center;
-		gap: 7px;
-		font-size: 11.5px;
-		font-weight: 500;
-		letter-spacing: 0.02em;
-		color: var(--subtle-foreground);
-		margin-bottom: 9px;
-		min-height: 16px;
-	}
-
-	.aname-text {
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
-	}
-
-	.live {
-		width: 5px;
-		height: 5px;
-		flex: none;
-		border-radius: 50%;
-		background: var(--primary);
-		animation: aname-pulse 1.4s ease-in-out infinite;
-	}
-
-	@keyframes aname-pulse {
-		0%, 100% { opacity: 1; }
-		50% { opacity: 0.35; }
-	}
-
-	@media (prefers-reduced-motion: reduce) {
-		.live { animation: none; }
 	}
 
 	.ameta {

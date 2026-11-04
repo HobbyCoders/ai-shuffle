@@ -729,7 +729,10 @@
 		display: flex;
 		align-items: center;
 		gap: 7px;
-		width: 100%;
+		/* The chevron sits on the transcript's text edge; the hover fill bleeds
+		   past it by the row's own padding. */
+		width: calc(100% + 16px);
+		margin-inline: -8px;
 		padding: 6px 8px;
 		border: none;
 		background: transparent;
@@ -740,6 +743,11 @@
 		line-height: 1.5;
 		color: var(--muted-foreground);
 		transition: background-color 180ms ease-out, color 180ms ease-out;
+	}
+
+	.wlrow.fold > svg {
+		flex: none;
+		margin-left: -3px;
 	}
 
 	.fold-label {
@@ -759,7 +767,6 @@
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
-		font-size: var(--fs-label);
 		color: var(--subtle-foreground);
 	}
 
