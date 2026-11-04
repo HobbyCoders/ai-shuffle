@@ -904,7 +904,6 @@
 		flex: none;
 		border-radius: 50%;
 		background: var(--primary);
-		box-shadow: 0 0 8px 0 var(--glow);
 		animation: aname-pulse 1.4s ease-in-out infinite;
 	}
 

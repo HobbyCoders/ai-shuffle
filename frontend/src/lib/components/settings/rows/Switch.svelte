@@ -44,8 +44,8 @@
 
 <style>
 	.st-sw {
-		width: 36px;
-		height: 21px;
+		width: 32px;
+		height: 18px;
 		border-radius: 999px;
 		border: 0;
 		padding: 0;
@@ -57,36 +57,35 @@
 	.st-sw::after {
 		content: '';
 		position: absolute;
-		top: 2.5px;
-		left: 2.5px;
-		width: 16px;
-		height: 16px;
+		top: 2px;
+		left: 2px;
+		width: 14px;
+		height: 14px;
 		border-radius: 50%;
-		background: var(--st-knob);
-		box-shadow: 0 1px 2px color-mix(in oklch, var(--st-bg) 60%, transparent);
+		background: var(--switch-thumb);
+		box-shadow: 0 0 0 0.5px var(--switch-thumb-edge), 0 1px 2px var(--switch-thumb-edge);
 		transition: transform 0.15s;
 	}
 	.st-sw[aria-checked='true'] {
 		background: var(--st-primary);
 	}
-	/* On the primary track the knob takes primary-foreground: themes with a
-	   white primary in dark mode (Vercel) otherwise draw white on white. */
+	/* The thumb stays white in both states. Its edge keeps it visible on a theme
+	   whose primary is itself white (Vercel). */
 	.st-sw[aria-checked='true']::after {
-		transform: translateX(15px);
-		background: var(--st-pfg);
+		transform: translateX(14px);
 	}
 	.st-sw:disabled {
 		opacity: 0.4;
 	}
 	.st-sw.sm {
-		width: 30px;
-		height: 18px;
+		width: 26px;
+		height: 16px;
 	}
 	.st-sw.sm::after {
-		width: 13px;
-		height: 13px;
+		width: 12px;
+		height: 12px;
 	}
 	.st-sw.sm[aria-checked='true']::after {
-		transform: translateX(12px);
+		transform: translateX(10px);
 	}
 </style>

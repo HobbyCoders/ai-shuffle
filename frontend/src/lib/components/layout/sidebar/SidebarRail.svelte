@@ -161,7 +161,7 @@
 		gap: 4px;
 		padding: 10px 0 12px;
 		border-right: 1px solid var(--sidebar-border);
-		background: color-mix(in oklch, var(--sidebar) 70%, black);
+		background: var(--sidebar);
 	}
 	.rail.phone {
 		width: 60px;

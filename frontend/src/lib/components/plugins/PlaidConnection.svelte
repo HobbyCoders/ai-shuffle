@@ -58,7 +58,7 @@
         {#if connected}
             <p class="text-sm">This connection is saved. To replace an expired authorization, add a new connection and remove the old one. Removing a connection here does not revoke consent at your bank; you can revoke access in your institution’s settings or Plaid Portal.</p>
         {:else}
-            <button type="button" class="rounded bg-primary px-4 py-2 text-primary-foreground" disabled={busy} onclick={connect}>{busy ? 'Waiting for Plaid…' : 'Connect bank with Plaid'}</button>
+            <button type="button" class="rounded bg-action px-4 py-2 text-action-foreground" disabled={busy} onclick={connect}>{busy ? 'Waiting for Plaid…' : 'Connect bank with Plaid'}</button>
         {/if}
     {:else if status}
         <p class="text-sm">One-time administrator setup is required: create a Plaid app with Transactions enabled. Production access and institution OAuth approval may be required. This is not Stripe merchant access.</p>
@@ -72,7 +72,7 @@
             <label class="block text-sm">Country codes<input class="block w-full rounded border border-border bg-input p-2" bind:value={countries} placeholder="US,CA" /></label>
             <label class="block text-sm">OAuth return URI<input class="block w-full rounded border border-border bg-input p-2" bind:value={redirect} /></label>
             <p class="text-xs">Use this app’s HTTPS address ending in /plaid-link. Add the exact URI to the allowed redirect URIs in your Plaid dashboard. Secrets are encrypted on this installation.</p>
-            <button type="button" class="rounded bg-primary px-4 py-2 text-primary-foreground" disabled={busy || !clientId || !secret || !redirect} onclick={save}>Save Plaid app</button>
+            <button type="button" class="rounded bg-action px-4 py-2 text-action-foreground" disabled={busy || !clientId || !secret || !redirect} onclick={save}>Save Plaid app</button>
         </div>
     {/if}
 </section>

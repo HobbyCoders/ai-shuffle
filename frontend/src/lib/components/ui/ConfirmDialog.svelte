@@ -130,7 +130,7 @@
 					class="px-5 py-2.5 rounded-xl text-sm font-medium transition-all min-w-[96px]
 						{danger
 							? 'bg-destructive text-destructive-foreground hover:opacity-90'
-							: 'bg-primary text-primary-foreground hover:opacity-90'}"
+							: 'bg-action text-action-foreground hover:opacity-90'}"
 				>
 					{confirmLabel}
 				</button>

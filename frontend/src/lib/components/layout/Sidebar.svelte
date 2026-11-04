@@ -693,7 +693,7 @@
 	</button>
 {/snippet}
 
-<aside class="sidebar grain" class:phone aria-label="Sessions">
+<aside class="sidebar" class:phone aria-label="Sessions">
 	<SidebarRail
 		items={split.shown}
 		settings={settingsItem}

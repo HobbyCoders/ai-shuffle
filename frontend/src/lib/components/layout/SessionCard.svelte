@@ -859,7 +859,6 @@
 		width: 2.5px;
 		border-radius: 2px;
 		background: var(--primary);
-		box-shadow: 0 0 8px -1px var(--glow);
 	}
 	.scard.compact.active::before { top: 8px; bottom: 8px; }
 	.scard-frame.pressing .scard {
@@ -938,7 +937,6 @@
 		background: var(--primary);
 		margin-right: 6px;
 		vertical-align: 1px;
-		box-shadow: 0 0 6px -1px var(--glow);
 		animation: card-ping 1.8s ease-in-out infinite;
 	}
 	.title :global(.warn) {

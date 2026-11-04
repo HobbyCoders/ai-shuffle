@@ -36,7 +36,6 @@
 	--st-hover: color-mix(in oklch, var(--foreground) 4%, transparent);
 	--st-meter: color-mix(in oklch, var(--foreground) 42%, transparent);
 	--st-code-bg: var(--code-bg, var(--muted));
-	--st-knob: var(--card);
 	--st-shadow: 0 14px 40px color-mix(in oklch, var(--foreground) 14%, transparent), 0 0 0 1px var(--st-border-strong);
 	--st-radius: var(--radius, 10px);
 	--st-radius-md: calc(var(--radius, 10px) - 2px);
@@ -59,7 +58,6 @@
 }
 
 .dark .settings-shell {
-	--st-knob: var(--foreground);
 	--st-shadow: 0 14px 40px color-mix(in oklch, var(--background) 70%, transparent), 0 0 0 1px var(--st-border-strong);
 }
 
