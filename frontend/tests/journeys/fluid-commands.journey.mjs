@@ -187,13 +187,25 @@ await runJourney({
 					expect(body.type === type && body.content === null, `reserved /${command} has CLI details`);
 				}
 				await page.getByRole('listbox', { name: 'Commands' }).getByRole('button', { name: /^\/context(?:\s|$)/ }).click();
+				// Selection replaces the draft, then Tiptap returns focus on an
+				// animation frame. Wait for the selected editor before typing arguments.
+				await page.waitForFunction(() => {
+					const box = document.querySelector('[role="textbox"][aria-label="Message"]');
+					return box === document.activeElement && box.innerText.trim() === '/context';
+				});
 				const prompt = `/context ${scriptTag(variant, 'default')}`;
 				const before = requests(status.claude_cli.log).length;
-				await composer(page).fill(prompt);
+				// Replace through the editor's keyboard handling: under phone CPU
+				// throttling fill() appended to the selected draft instead of replacing it.
+				await composer(page).press('ControlOrMeta+A');
+				await composer(page).press('Backspace');
+				expect((await composer(page).innerText()).trim() === '', 'keyboard replacement clears the selected command draft');
+				await composer(page).pressSequentially(prompt);
+				expect((await composer(page).innerText()).trim() === prompt, 'composer contains exactly one /context invocation before submit');
 				await sendButton(page).click();
 				await waitTurnSettled(page, { text: 'Fake Claude Code CLI here' });
-				const turns = requests(status.claude_cli.log).slice(before);
-				expect(turns.some(row => row.kind === 'turn' && row.prompt === prompt), 'CLI receives /context unchanged, not the colliding Fluid file body');
+				const turns = requests(status.claude_cli.log).slice(before).filter(row => row.kind === 'turn');
+				expect(turns.some(row => row.prompt === prompt), `CLI receives /context unchanged, not the colliding Fluid file body: ${JSON.stringify(turns)}`);
 				log('produced colliding Fluid direct command and interactive skill; CLI ownership preserved through details and submit');
 			} finally {
 				seed(status, name, 'cleanup-reserved');
