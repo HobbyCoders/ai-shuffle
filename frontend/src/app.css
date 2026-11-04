@@ -305,7 +305,7 @@
 		--action-hover: color-mix(in oklab, var(--foreground) 86%, var(--background));
 		/* The off track is a light fill; its edge carries the 3:1 on a white card. */
 		--switch-off: color-mix(in oklch, var(--foreground) 15%, transparent);
-		--switch-off-edge: color-mix(in oklch, var(--foreground) 54%, transparent);
+		--switch-off-edge: color-mix(in oklch, var(--foreground) 44%, transparent);
 		--segment-selected: var(--card);
 
 		/* Secondary/Muted */

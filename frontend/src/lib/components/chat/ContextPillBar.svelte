@@ -874,6 +874,12 @@
 	.checkout-dot {
 		margin: 0 4px;
 	}
+	/* The row's lock is a size below its other icons, which app.css sets to 14px.
+	   The phone sheet's locks stay 14px. */
+	.context-pill-bar:not(.sheet-mode) :global(.ctx-chip > svg.lucide-lock) {
+		width: 12px;
+		height: 12px;
+	}
 
 	.branch-name {
 		max-width: min(180px, 38vw);
