@@ -943,7 +943,9 @@
 		max-width: min(320px, calc(100vw - 24px));
 		max-height: 320px;
 		background: var(--popover);
-		border-radius: calc(var(--radius, 0.75rem) * 0.83);
+		border-radius: var(--menu-radius);
+		box-shadow: var(--menu-shadow);
+		border: 1px solid var(--menu-border);
 	}
 
 	@keyframes branchDropdown {
@@ -965,12 +967,13 @@
 		padding: 8px 10px;
 		background: transparent;
 		border: none;
-		border-radius: 7px;
+		border-radius: var(--menu-row-radius);
 		color: var(--foreground);
-		font-size: 0.8125rem;
+		font-size: 13px;
 		cursor: pointer;
 		text-align: left;
 		transition: background-color 120ms ease;
+		min-height: var(--menu-row);
 	}
 
 	.branch-item:hover:not(:disabled) {

@@ -251,9 +251,9 @@
 		max-width: min(320px, calc(100vw - 24px));
 		padding: 6px;
 		background: var(--popover);
-		border: 1px solid var(--border);
-		border-radius: calc(var(--radius, 10px) * 0.83);
-		box-shadow: var(--shadow-l);
+		border: 1px solid var(--menu-border);
+		border-radius: var(--menu-radius);
+		box-shadow: var(--menu-shadow);
 		animation: runs-on-in 150ms cubic-bezier(0.16, 1, 0.3, 1);
 	}
 	.runs-on-menu:global([data-placement='top']) { animation-name: runs-on-in-up; }

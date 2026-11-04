@@ -115,17 +115,9 @@ describe('ModelPickerPanel', () => {
 				groupKey: '__claude__', group: 'Claude', groupSubtext: null }],
 			value: 'claude-haiku-4-5'
 		});
-		// One window: a group of one, selected, that never toggles.
-		const group = screen.getByRole('radiogroup', { name: 'Context window' });
-		const only = within(group).getByRole('radio');
-		expect(only.getAttribute('aria-label')).toBe('200K · Model limit');
-		expect(only.getAttribute('aria-checked')).toBe('true');
-		expect(only.tabIndex).toBe(0);
-		onContextChoiceSelect.mockClear();
-		await fireEvent.keyDown(only, { key: 'ArrowRight' });
-		await fireEvent.click(only);
-		expect(onContextChoiceSelect).not.toHaveBeenCalled();
-		expect(screen.getByText(/compacts near/i).textContent).toContain('~200K');
+		// One window: a quiet line, with nothing to choose between.
+		expect(screen.queryByRole('radiogroup')).toBeNull();
+		expect(document.querySelector('[data-context-summary]')?.textContent).toContain('Context limit 200K');
 	});
 
 	it('keeps Favorites first in the rail and persists functional row stars', async () => {
@@ -416,12 +408,10 @@ describe('ModelPickerPanel single and unknown windows', () => {
 		renderModel('prov:or:moonshotai/kimi-k3');
 		const control = document.querySelector('[data-model-context-control]');
 		expect(control?.getAttribute('data-context-kind')).toBe('single');
-		const radios = within(screen.getByRole('radiogroup', { name: 'Context window' })).getAllByRole('radio');
-		expect(radios).toHaveLength(1);
-		expect(radios[0].getAttribute('aria-label')).toBe('262K · Model limit');
-		const summary = screen.getByText(/compacts near/i);
-		expect(summary.textContent).toContain('~262K');
-		expect(summary.textContent).toContain('model limit');
+		expect(screen.queryByRole('radiogroup')).toBeNull();
+		const summary = document.querySelector('[data-context-summary]');
+		expect(summary?.textContent).toContain('Context limit 262K');
+		expect(summary?.textContent).toContain('compacts near it');
 		expect(screen.getByRole('button', { name: 'Adjust' })).toBeTruthy();
 	});
 
@@ -445,7 +435,7 @@ describe('ModelPickerPanel single and unknown windows', () => {
 		expect(sent[2]).toEqual(before[2]);
 		expect(sent[0]).toEqual({ ...before[0], context_window: 200_000 });
 		await vi.waitFor(() =>
-			expect(screen.getByRole('radio', { name: '200K · Model limit' })).toBeTruthy());
+			expect(document.querySelector('[data-context-summary]')?.textContent).toContain('Context limit 200K'));
 	});
 
 	it('reports a failed save and keeps the previous window', async () => {
@@ -464,15 +454,13 @@ describe('ModelPickerPanel single and unknown windows', () => {
 		await fireEvent.input(field, { target: { value: '128' } });
 		await fireEvent.keyDown(field, { key: 'Enter' });
 		await vi.waitFor(() => expect(screen.getByRole('alert').textContent).toContain('Could not save: offline'));
-		expect(screen.getByRole('radio', { name: '262K · Model limit' })).toBeTruthy();
+		expect(document.querySelector('[data-context-summary]')?.textContent).toContain('Context limit 262K');
 	});
 
 	it('shows Unknown for a model with no advertised window and never guesses one', async () => {
 		renderModel('prov:or:mystery/model');
 		const control = document.querySelector('[data-model-context-control]');
 		expect(control?.getAttribute('data-context-kind')).toBe('unknown');
-		const only = screen.getByRole('radio', { name: 'Unknown · Not advertised' });
-		expect(only.getAttribute('aria-checked')).toBe('true');
 		expect(control?.textContent).not.toContain('200K');
 		expect(screen.getByText(/no known limit/i)).toBeTruthy();
 		await fireEvent.click(screen.getByRole('button', { name: 'Set limit' }));
@@ -489,7 +477,7 @@ describe('ModelPickerPanel single and unknown windows', () => {
 
 	it('saves an explicit whole-K entry over a window that is not whole K', async () => {
 		renderModel('prov:or:deepseek/v4');
-		expect(screen.getByRole('radio', { name: '1.05M · Model limit' })).toBeTruthy();
+		expect(document.querySelector('[data-context-summary]')?.textContent).toContain('Context limit 1.05M');
 		await fireEvent.click(screen.getByRole('button', { name: 'Adjust' }));
 		const field = within(screen.getByRole('group', { name: 'Model context limit' }))
 			.getByRole('textbox') as HTMLInputElement;
@@ -523,11 +511,9 @@ describe('ModelPickerPanel single and unknown windows', () => {
 
 	it('points a known single window to Settings when the host cannot adjust', () => {
 		renderModel('prov:or:moonshotai/kimi-k3', { onContextStandardChange: undefined });
-		expect(screen.getByRole('radio', { name: '262K · Model limit' })).toBeTruthy();
+		expect(document.querySelector('[data-context-summary]')?.textContent).toContain('Context limit 262K');
 		expect(screen.queryByRole('button', { name: /adjust|set limit/i })).toBeNull();
-		const summary = screen.getByText(/compacts near/i);
-		expect(summary.textContent).toContain('~262K');
-		expect(summary.textContent).toContain('Settings → Providers');
+		expect(document.querySelector('[data-context-summary]')?.textContent).toContain('Settings → Providers');
 	});
 
 	it('points to Settings when the host cannot adjust and offers no editor', () => {

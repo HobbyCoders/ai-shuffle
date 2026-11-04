@@ -172,7 +172,7 @@
 	@media (prefers-reduced-motion: reduce) { .workspace-dropdown.floating { animation: none; } }
 	.repo-name { max-width: 140px; }
 	.folder-count { color: var(--muted-foreground); font-size: 0.6875rem; }
-	.workspace-dropdown { position: absolute; bottom: calc(100% + 6px); left: 0; width: 320px; max-width: calc(100vw - 32px); max-height: min(440px, 65dvh); overflow-y: auto; padding: 6px; background: var(--popover); border: 1px solid var(--border); border-radius: calc(var(--radius, 0.75rem) * 0.83); box-shadow: var(--shadow-l); z-index: 100; color: var(--foreground); }
+	.workspace-dropdown { position: absolute; bottom: calc(100% + 6px); left: 0; width: 320px; max-width: calc(100vw - 32px); max-height: min(440px, 65dvh); overflow-y: auto; padding: 6px; background: var(--popover); border: 1px solid var(--menu-border); border-radius: var(--menu-radius); box-shadow: var(--menu-shadow); z-index: 100; color: var(--foreground); }
 	.menu-heading { padding: 7px 9px; font-size: 0.75rem; font-weight: 600; }
 	.folder-list, .project-options { max-height: 180px; overflow-y: auto; }
 	.folder-row, .project-option { display: flex; align-items: center; gap: 9px; padding: 8px 9px; min-width: 0; }

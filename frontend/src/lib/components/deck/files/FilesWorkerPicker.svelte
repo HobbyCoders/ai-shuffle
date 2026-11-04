@@ -191,10 +191,10 @@
 	.fwp-menu {
 		position: absolute; top: calc(100% + 6px); left: 0; z-index: 40;
 		width: max-content; min-width: 240px; max-width: min(320px, calc(100vw - 32px));
-		padding: 6px; border-radius: var(--radius, 0.75rem);
+		padding: 6px; border-radius: var(--menu-radius);
 		background: var(--popover, var(--card)); color: var(--foreground);
-		border: 1px solid var(--border);
-		box-shadow: 0 12px 32px -12px rgb(0 0 0 / 0.35), 0 2px 6px rgb(0 0 0 / 0.08);
+		border: 1px solid var(--menu-border);
+		box-shadow: var(--menu-shadow);
 		animation: fwp-in 140ms cubic-bezier(0.2, 0.8, 0.2, 1);
 		transform-origin: top left;
 	}
@@ -204,9 +204,9 @@
 		text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted-foreground); font-weight: 600;
 	}
 	.fwp-item {
-		display: flex; align-items: center; gap: 10px; width: 100%; min-height: 44px;
-		padding: 6px 8px; border: none; border-radius: 8px; background: transparent;
-		color: inherit; text-align: left; cursor: pointer; font-size: 0.8125rem;
+		display: flex; align-items: center; gap: 10px; width: 100%; min-height: var(--menu-row);
+		padding: 6px 8px; border: none; border-radius: var(--menu-row-radius); background: transparent;
+		color: inherit; text-align: left; cursor: pointer; font-size: 13px;
 		transition: background-color 110ms ease;
 	}
 	.fwp-item:hover:not([aria-disabled='true']), .fwp-item:focus-visible { background: var(--hover-overlay); outline: none; }

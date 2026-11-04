@@ -283,9 +283,9 @@
 		overflow: hidden;
 		color: var(--popover-foreground);
 		background: var(--popover);
-		border: 1px solid var(--border-strong, var(--border));
-		border-radius: var(--radius);
-		box-shadow: var(--shadow-l, 0 14px 34px rgba(0, 0, 0, 0.3));
+		border: 1px solid var(--menu-border);
+		border-radius: var(--menu-radius);
+		box-shadow: var(--menu-shadow);
 		outline: none;
 		font-family: var(--font-sans);
 		transform-origin: top left;

@@ -265,8 +265,8 @@
 <style>
 	.picker { display: grid; gap: 12px; padding: 14px; width: min(320px, calc(100vw - 32px)); box-sizing: border-box; font-family: var(--font-sans); }
 	.picker:not(.inline) {
-		border: 1px solid var(--border-strong); border-radius: var(--radius); background: var(--popover);
-		box-shadow: 0 16px 40px oklch(0 0 0 / 0.38); animation: drop 0.18s cubic-bezier(0.2, 0.8, 0.2, 1);
+		border: 1px solid var(--menu-border); border-radius: var(--menu-radius); background: var(--popover);
+		box-shadow: var(--menu-shadow); animation: drop 0.18s cubic-bezier(0.2, 0.8, 0.2, 1);
 	}
 	.picker.inline { width: min(360px, 100%); padding: 0; }
 	.lede { display: flex; gap: 12px; align-items: flex-start; margin-bottom: 4px; }

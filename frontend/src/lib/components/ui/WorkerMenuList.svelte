@@ -125,12 +125,13 @@
 		padding: 7px 10px;
 		background: transparent;
 		border: none;
-		border-radius: calc(var(--radius, 0.75rem) * 0.58);
+		border-radius: var(--menu-row-radius);
 		color: var(--foreground);
-		font-size: 0.8125rem;
+		font-size: 13px;
 		cursor: pointer;
 		text-align: left;
 		transition: background-color 120ms ease;
+		min-height: var(--menu-row);
 	}
 
 	.runner-item:hover:not(:disabled):not(.disabled) {

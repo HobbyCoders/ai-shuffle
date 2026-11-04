@@ -881,9 +881,9 @@
 		max-height: 320px;
 		overflow-y: auto;
 		background: var(--popover);
-		border: 1px solid var(--border);
-		border-radius: calc(var(--radius, 0.75rem) * 0.83);
-		box-shadow: var(--shadow-l);
+		border: 1px solid var(--menu-border);
+		border-radius: var(--menu-radius);
+		box-shadow: var(--menu-shadow);
 		padding: 4px;
 		z-index: 100;
 	}
@@ -905,11 +905,12 @@
 		padding: 7px 10px;
 		background: transparent;
 		border: none;
-		border-radius: calc(var(--radius, 0.75rem) * 0.58);
+		border-radius: var(--menu-row-radius);
 		color: var(--foreground);
-		font-size: 0.8125rem;
+		font-size: 13px;
 		cursor: pointer;
 		text-align: left;
+		min-height: var(--menu-row);
 	}
 
 	.runner-item:hover:not(:disabled) {

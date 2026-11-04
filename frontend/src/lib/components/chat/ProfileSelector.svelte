@@ -284,9 +284,9 @@
 		max-height: 60vh;
 		overflow-y: auto;
 		background: var(--popover);
-		border: 1px solid var(--border);
-		border-radius: var(--radius, 0.75rem);
-		box-shadow: var(--shadow-l);
+		border: 1px solid var(--menu-border);
+		border-radius: var(--menu-radius);
+		box-shadow: var(--menu-shadow);
 		z-index: 50;
 		padding: 6px;
 		animation: dropdown-fade-in 0.15s ease;

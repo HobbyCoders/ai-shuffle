@@ -250,11 +250,11 @@
 	.tcm-menu {
 		min-width: 188px;
 		padding: 4px;
-		border: 1px solid var(--border);
-		border-radius: 9px;
+		border: 1px solid var(--menu-border);
+		border-radius: var(--menu-radius);
 		background: var(--popover);
 		color: var(--popover-foreground);
-		box-shadow: var(--shadow-l);
+		box-shadow: var(--menu-shadow);
 		outline: none;
 		animation: tcm-in 150ms cubic-bezier(0.2, 0.8, 0.2, 1);
 		transform-origin: top right;
@@ -267,15 +267,16 @@
 		align-items: center;
 		gap: 9px;
 		width: 100%;
-		min-height: 32px;
+		min-height: var(--menu-row);
 		padding: 0 10px;
 		border: 0;
-		border-radius: 6px;
+		border-radius: var(--menu-row-radius);
 		background: transparent;
 		color: inherit;
 		font: 500 12.5px/1.2 var(--font-sans);
 		text-align: left;
 		cursor: pointer;
+		font-size: 13px;
 	}
 	.tcm-item :global(svg) {
 		flex-shrink: 0;

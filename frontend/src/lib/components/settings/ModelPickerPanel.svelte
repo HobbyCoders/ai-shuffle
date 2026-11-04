@@ -23,12 +23,11 @@
 	 * trigger and no positioning — the parent owns the popover chrome and sizes
 	 * the panel via `--mpp-height` / `--mpp-width`.
 	 */
-	import { Check, CircleDashed, LayoutGrid, Lock, Search, Star } from 'lucide-svelte';
+	import { Check, LayoutGrid, Lock, Search, Star } from 'lucide-svelte';
 	import { onDestroy, tick } from 'svelte';
 	import ProviderGlyph from './ProviderGlyph.svelte';
 	import type { PickerGroup, PickerOption } from '$lib/constants/model-picker';
 	import { matchesPickerQuery } from '$lib/constants/model-picker';
-	import { getModelLabel } from '$lib/constants/models';
 	import {
 		CONTEXT_CAP_STEP,
 		CONTEXT_CAP_UNIT,
@@ -178,6 +177,9 @@
 	const showProviderLine = $derived(
 		isSearching || effectiveRailKey === FAVORITES || effectiveRailKey === ALL || !showRail
 	);
+
+	/** The provider whose models the list shows, named above them. */
+	const railGroup = $derived(groups.find((g) => g.key === effectiveRailKey) ?? null);
 
 	/** Rail tooltip: brand and auth subtext. */
 	function railLabel(g: PickerGroup): string {
@@ -640,6 +642,12 @@
 			<div class="mpp-notice">{notice}</div>
 		{/if}
 
+		{#if railGroup && !showProviderLine}
+			<div class="mpp-group-name" data-provider-heading>
+				<span>{railGroup.name}</span>{#if railGroup.subtext}<small>{railGroup.subtext}</small>{/if}
+			</div>
+		{/if}
+
 		<div class="mpp-list" role="listbox" aria-label={ariaLabel} bind:this={listEl}>
 			{#each visibleLeading as r (r.value)}
 				{@render plainRow(r)}
@@ -705,8 +713,7 @@
 	{#if contextControl && contextChoice && onContextChoiceSelect}
 		<div class="mpp-context" data-model-context-control>
 			<div class="mpp-context-copy">
-				<span>Context window</span>
-				<small title={getModelLabel(value)}>{getModelLabel(value)}</small>
+				<span>Context limit</span>
 			</div>
 			<div
 				class="mpp-context-toggle"
@@ -857,51 +864,10 @@
 		{@const known = shownWindow != null}
 		{@const windowText = shownWindow != null ? formatContextTokens(shownWindow) : 'Unknown'}
 		<div class="mpp-context" data-model-context-control data-context-kind={modelWindow.kind}>
-			<div class="mpp-context-copy">
-				<span>Context window</span>
-				<small title={getModelLabel(value)}>{getModelLabel(value)}</small>
-			</div>
-			<div
-				class="mpp-context-toggle single"
-				role="radiogroup"
-				aria-label="Context window"
-				tabindex="-1"
-				onkeydown={onContextKeydown}
-			>
-				<button
-					type="button"
-					role="radio"
-					aria-checked="true"
-					aria-label={known ? `${windowText} · Model limit` : 'Unknown · Not advertised'}
-					title={known ? "This model's one window." : 'The provider does not advertise this model\'s window.'}
-					tabindex="0"
-					data-context-choice="model"
-					class="on"
-					class:unknown={!known}
-					class:saving={winSaving}
-				>
-					<span class="mpp-context-option-copy">
-						<span class="mpp-context-value">{windowText}</span>
-						<span class="mpp-context-caption">
-							{#if known}
-								<Lock size={9} class="mpp-context-lock" aria-hidden="true" />Model limit
-							{:else}
-								Not advertised
-							{/if}
-						</span>
-					</span>
-					{#if known}
-						<Check size={14} class="mpp-context-check" aria-hidden="true" />
-					{:else}
-						<CircleDashed size={14} class="mpp-context-check" aria-hidden="true" />
-					{/if}
-				</button>
-			</div>
-
 			<div class="mpp-cap-summary" data-context-summary>
 				<p aria-live="polite">
 					{#if known}
-						Compacts near <strong>~{windowText}</strong> tokens<span class="mpp-cap-default">{' · model limit'}</span>{#if !winEditable}<span class="mpp-win-pointer">{' Change it in Settings → Providers.'}</span>{/if}
+						Context limit <strong class:saving={winSaving}>{windowText}</strong><span class="mpp-cap-default">{' · compacts near it'}</span>{#if !winEditable}<span class="mpp-win-pointer">{' Change it in Settings → Providers.'}</span>{/if}
 					{:else}
 						No known limit, so no usage percentage.{#if !winEditable}{' Set one in Settings → Providers.'}{/if}
 					{/if}
@@ -1003,8 +969,8 @@
 		flex-direction: column;
 		width: var(--mpp-width, 360px);
 		max-width: 100%;
-		height: var(--mpp-height, 346px);
-		max-height: 100%;
+		/* The list decides the height, up to what the host allows. */
+		max-height: var(--mpp-height, 346px);
 		min-height: 0;
 		overflow: hidden;
 		background: var(--popover);
@@ -1186,14 +1152,30 @@
 		scrollbar-gutter: stable;
 	}
 
+	.mpp-group-name {
+		display: flex;
+		align-items: baseline;
+		gap: 6px;
+		padding: 8px 16px 2px;
+		font-size: 12px;
+		font-weight: 500;
+		color: var(--muted-foreground);
+	}
+	.mpp-group-name small {
+		font-size: 12px;
+		font-weight: 400;
+		opacity: 0.8;
+	}
+
 	/* ---- rows ------------------------------------------------------------ */
 	.mpp-row {
 		display: flex;
 		align-items: center;
 		gap: 12px;
 		width: 100%;
-		padding: 8px 8px;
-		border-radius: 6px;
+		min-height: var(--menu-row);
+		padding: 5px 8px;
+		border-radius: var(--menu-row-radius);
 		cursor: pointer;
 		user-select: none;
 		transition: background-color 0.1s ease;
@@ -1221,7 +1203,7 @@
 		text-align: left;
 	}
 	.mpp-row-label {
-		font-size: 12.5px;
+		font-size: 13px;
 		font-weight: 500;
 		line-height: 1.35;
 		overflow: hidden;
@@ -1289,10 +1271,9 @@
 	.mpp-context {
 		display: flex;
 		flex-direction: column;
-		gap: 8px;
-		padding: 10px;
-		border-top: 1px solid color-mix(in srgb, var(--border) 75%, transparent);
-		background: color-mix(in srgb, var(--popover) 92%, var(--muted));
+		gap: 6px;
+		padding: 8px 10px 6px;
+		border-top: 1px solid var(--border-subtle);
 		flex-shrink: 0;
 	}
 	.mpp-context-copy {
@@ -1301,31 +1282,18 @@
 		justify-content: space-between;
 		min-width: 0;
 		gap: 12px;
-		color: var(--foreground);
-		font-size: 11px;
-		font-weight: 600;
+		color: var(--muted-foreground);
+		font-size: 12px;
+		font-weight: 400;
 		line-height: 1.4;
 	}
 	.mpp-context-copy > span {
 		flex-shrink: 0;
 	}
-	.mpp-context-copy small {
-		min-width: 0;
-		overflow: hidden;
-		color: var(--muted-foreground);
-		font-size: 10.5px;
-		font-weight: 400;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-	}
 	.mpp-context-toggle {
 		display: grid;
 		grid-template-columns: repeat(2, minmax(0, 1fr));
 		gap: 4px;
-		padding: 3px;
-		border: 1px solid var(--border);
-		border-radius: 10px;
-		background: color-mix(in srgb, var(--muted) 45%, transparent);
 	}
 	.mpp-context-toggle button {
 		display: inline-flex;
@@ -1333,10 +1301,10 @@
 		justify-content: space-between;
 		gap: 8px;
 		min-width: 0;
-		min-height: 44px;
-		padding: 6px 10px;
+		min-height: 40px;
+		padding: 4px 8px;
 		border: 1px solid transparent;
-		border-radius: 7px;
+		border-radius: var(--menu-row-radius);
 		background: transparent;
 		color: var(--muted-foreground);
 		font: inherit;
@@ -1371,10 +1339,8 @@
 		color: var(--foreground);
 	}
 	.mpp-context-toggle button.on {
-		border-color: color-mix(in srgb, var(--primary) 35%, var(--border));
-		background: color-mix(in srgb, var(--primary) 8%, var(--popover));
+		background: color-mix(in srgb, var(--foreground) 8%, transparent);
 		color: var(--foreground);
-		box-shadow: 0 1px 3px color-mix(in srgb, var(--foreground) 6%, transparent);
 	}
 	.mpp-context-toggle button.on :global(.mpp-context-check) {
 		opacity: 1;
@@ -1398,35 +1364,7 @@
 		opacity: 0.75;
 	}
 
-	/* A group of one: the model's only window, selected and not a toggle. */
-	.mpp-context-toggle.single {
-		grid-template-columns: minmax(0, 1fr);
-	}
-	.mpp-context-toggle.single button,
-	.mpp-context-toggle.single button:hover {
-		cursor: default;
-		border-color: color-mix(in srgb, var(--primary) 35%, var(--border));
-		background: color-mix(in srgb, var(--primary) 8%, var(--popover));
-		color: var(--foreground);
-	}
-	.mpp-context-toggle.single button.unknown,
-	.mpp-context-toggle.single button.unknown:hover {
-		border-style: dashed;
-		border-color: color-mix(in srgb, var(--muted-foreground) 45%, transparent);
-		background: repeating-linear-gradient(
-			-45deg,
-			transparent 0 4px,
-			color-mix(in srgb, var(--muted-foreground) 7%, transparent) 4px 6px
-		);
-		box-shadow: none;
-	}
-	.mpp-context-toggle.single button.unknown .mpp-context-value {
-		color: var(--muted-foreground);
-	}
-	.mpp-context-toggle.single button.unknown :global(.mpp-context-check) {
-		color: var(--muted-foreground);
-	}
-	.mpp-context-toggle.single button.saving .mpp-context-value {
+	.mpp-cap-summary strong.saving {
 		animation: mpp-win-saving 0.9s ease-in-out infinite alternate;
 	}
 	@keyframes mpp-win-saving {
@@ -1459,12 +1397,12 @@
 		min-width: 0;
 		margin: 0;
 		color: var(--muted-foreground);
-		font-size: 11px;
+		font-size: 12px;
 		line-height: 1.35;
 	}
 	.mpp-cap-summary strong {
 		color: var(--foreground);
-		font-weight: 600;
+		font-weight: 500;
 		font-variant-numeric: tabular-nums;
 	}
 	.mpp-cap-default {
@@ -1475,7 +1413,7 @@
 		height: 24px;
 		padding: 0 9px;
 		border: 1px solid var(--border);
-		border-radius: 999px;
+		border-radius: var(--menu-row-radius);
 		background: var(--popover);
 		color: var(--foreground);
 		font: inherit;
@@ -1739,9 +1677,6 @@
 		}
 		.mpp-cap-slider::-webkit-slider-thumb {
 			transition: none;
-		}
-		.mpp-context-toggle.single button.saving .mpp-context-value {
-			animation: none;
 		}
 	}
 

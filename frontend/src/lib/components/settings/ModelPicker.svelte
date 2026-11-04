@@ -269,9 +269,9 @@
 		   `.set-group` (overflow: hidden), so extra width must grow LEFTWARD. */
 		right: 0;
 		--mpp-width: min(360px, 92vw);
-		border: 1px solid var(--border);
-		border-radius: 10px;
-		box-shadow: 0 16px 40px -18px rgba(0, 0, 0, 0.55);
+		border: 1px solid var(--menu-border);
+		border-radius: var(--menu-radius);
+		box-shadow: var(--menu-shadow);
 		overflow: hidden;
 	}
 

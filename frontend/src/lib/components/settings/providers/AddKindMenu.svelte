@@ -165,9 +165,10 @@
 		z-index: 90;
 		width: 300px;
 		background: var(--st-popover);
-		box-shadow: var(--st-shadow);
-		border-radius: var(--st-radius);
+		box-shadow: var(--menu-shadow);
+		border-radius: var(--menu-radius);
 		padding: 6px;
+		border: 1px solid var(--menu-border);
 	}
 	.head {
 		font-size: 12px;
@@ -183,9 +184,10 @@
 		padding: 7px 8px;
 		border: 0;
 		background: none;
-		border-radius: var(--st-radius-sm);
+		border-radius: var(--menu-row-radius);
 		font-size: 13px;
 		text-align: left;
+		min-height: var(--menu-row);
 	}
 	.opt:hover,
 	.opt:focus-visible {

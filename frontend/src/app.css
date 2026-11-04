@@ -676,6 +676,16 @@ select {
 	color-scheme: light dark;
 }
 
+/* One menu surface: every popover and dropdown reads these. */
+:root {
+	--menu-radius: 10px;
+	--menu-row-radius: 6px;
+	--menu-row: 32px;
+	--menu-pad: 4px;
+	--menu-border: var(--border);
+	--menu-shadow: var(--shadow-l);
+}
+
 select option {
 	background-color: var(--popover);
 	color: var(--popover-foreground);

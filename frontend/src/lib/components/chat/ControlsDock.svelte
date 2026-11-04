@@ -96,6 +96,7 @@
 	// open upward, and in the new-chat state the box sits mid-screen, so a
 	// fixed height would push the tall ones past the top of the viewport.
 	let popoverRoom = $state<number | null>(null);
+	const MODEL_MENU_MIN_ROOM = 260;
 	let permissionWrapRef = $state<HTMLDivElement | null>(null);
 	let modelWrapRef = $state<HTMLDivElement | null>(null);
 	let effortWrapRef = $state<HTMLDivElement | null>(null);
@@ -111,10 +112,27 @@
 		}
 	}
 
+	/** Where the model picker hangs from, relative to its button's wrapper. */
+	let modelMenuAnchor = $state<{ bottom: number; right: number; width: number } | null>(null);
+
 	function measurePopoverRoom() {
 		if (!dockRef) return;
+		const dockTop = dockRef.getBoundingClientRect().top;
+		const card = dockRef.closest('.chat-island')?.getBoundingClientRect();
+		// The model picker clears the whole composer so it never covers what you
+		// are typing. With too little room above (a short window, an open phone
+		// keyboard) it falls back to hanging from the controls row.
+		const top = card && card.width > 0 && card.top - 22 >= MODEL_MENU_MIN_ROOM ? card.top : dockTop;
 		// Minus the 10px anchor gap and a 12px margin from the viewport edge.
-		popoverRoom = Math.max(220, Math.floor(dockRef.getBoundingClientRect().top - 22));
+		popoverRoom = Math.max(220, Math.floor(top - 22));
+		const wrap = modelWrapRef?.getBoundingClientRect();
+		modelMenuAnchor = card && wrap && card.width > 0
+			? {
+				bottom: wrap.bottom - top + 8,
+				right: wrap.right - card.right,
+				width: Math.min(card.width, window.innerWidth <= 520 ? card.width : 380)
+			}
+			: null;
 	}
 
 	function togglePopover(kind: DockPopover) {
@@ -613,6 +631,9 @@
 			{#if openPopover === 'model'}
 				<div
 					class="dock-menu model-menu"
+					style:bottom={modelMenuAnchor ? `${modelMenuAnchor.bottom}px` : undefined}
+					style:right={modelMenuAnchor ? `${modelMenuAnchor.right}px` : undefined}
+					style:width={modelMenuAnchor ? `${modelMenuAnchor.width}px` : undefined}
 					role="dialog"
 					aria-label="Choose model"
 					data-composer-owned-overlay="true"
@@ -880,9 +901,9 @@
 		position: absolute;
 		bottom: calc(100% + 10px);
 		background: var(--popover);
-		border: 1px solid var(--border);
-		border-radius: calc(var(--radius, 0.75rem) * 0.8);
-		box-shadow: var(--shadow-l);
+		border: 1px solid var(--menu-border);
+		border-radius: var(--menu-radius);
+		box-shadow: var(--menu-shadow);
 		z-index: 60;
 		animation: dock-popover-in 0.16s cubic-bezier(0.16, 1, 0.3, 1);
 	}
@@ -899,22 +920,7 @@
 		padding: 6px;
 		--mpp-width: 100%;
 		/* The list scrolls above the pinned context footer in short viewports. */
-		--mpp-height: min(400px, calc(var(--dock-pop-max, 454px) - 14px));
-	}
-
-	/* On a narrow screen the model button sits mid-row, so a 380px menu hung
-	   off its right edge spills past the left of the screen. Anchor it to the
-	   dock row instead and let it span the composer. */
-	@media (max-width: 520px) {
-		.model-wrap {
-			position: static;
-		}
-
-		.model-menu {
-			left: 0;
-			right: 0;
-			width: auto;
-		}
+		--mpp-height: min(420px, calc(var(--dock-pop-max, 454px) - 14px));
 	}
 
 	.effort-menu {
