@@ -33,6 +33,7 @@ import type { SdkContextUsage } from '$lib/api/sessions';
 import type { QueuedMessage, Task } from '../../types';
 import { browserPanel } from '../../browser-panel.svelte';
 import { pendingQueue, reconcilePendingPeerMessages } from '../pending-queue';
+import { nameStoppedTurn, nameStopRecovery, STOP_TURN_NOT_NAMED } from '$lib/utils/not-sent-hold';
 import { swarms } from '../../swarms';
 
 /** MCP browser-tool prefix — a live `tool.use` for one auto-opens the panel. */
@@ -525,6 +526,23 @@ function seedOptimistic(): void {
 	}
 }
 
+/**
+ * An unnamed Stop that timed out on the page's own send belongs to the turn that
+ * send's receipt names. Any turn the feed shows before that receipt came earlier,
+ * and a message with the same text can claim the optimistic row, so only the
+ * send's own command id counts.
+ */
+function nameRecoveryFrom(
+	s: Pick<ActiveSessionState, 'stopTimedOutTurnId' | 'stopTimedOutCommandId'>,
+	turnId: string | null
+): string | null {
+	const timedOut = s.stopTimedOutTurnId;
+	const command = s.stopTimedOutCommandId;
+	if (timedOut !== STOP_TURN_NOT_NAMED || !command) return nameStopRecovery(timedOut, turnId);
+	const receipt = reducerState.messages.find(m => m.commandId === command && reducerState.messageOriginSeq.has(m.id));
+	return receipt ? receipt.turnId || turnId || timedOut : timedOut;
+}
+
 // ─── Fold reducer state → activeSession (rAF-coalesced) ───────────────────────
 
 function deriveActiveTasks(summaries: Task[]): Task[] {
@@ -647,6 +665,8 @@ function fold(hydrationComplete = false): void {
 			? {
 					...s,
 					...patch,
+					stopRequestedTurnId: nameStoppedTurn(s.stopRequestedTurnId, reducerState.liveTurnId, patch.isStreaming === true),
+					stopTimedOutTurnId: nameRecoveryFrom(s, reducerState.liveTurnId),
 					queuedMessages: reconcileQueuedMessages(s.queuedMessages),
 					pendingPeerMessages: reconcilePendingPeerMessages(s.pendingPeerMessages ?? [], patch.messages ?? s.messages),
 				}
@@ -1075,6 +1095,12 @@ export const feedController: FeedController = {
 				if (ev.type === 'swarm.updated') swarms.receive(ev.swarm, sessionId);
 				if (typeof ev.command_id === 'string') clearCompactRetry(sessionId, ev.command_id);
 				reducerState = reduce(reducerState, ev);
+				// A replay can end a turn before any fold saw it live: name the unnamed
+				// Stop's recovery from that end, or it would bind to the next turn.
+				if ((ev.type === 'turn.completed' || ev.type === 'turn.aborted') && deps?.getState().stopTimedOutTurnId) {
+					const endedTurnId = typeof ev.turn_id === 'string' ? ev.turn_id : null;
+					deps.update(s => ({ ...s, stopTimedOutTurnId: nameRecoveryFrom(s, endedTurnId) }));
+				}
 				// A lagged mirror can replay an entire turn before the next fold.
 				// Consume optimism when the reducer confirms the turn, not only
 				// when a streaming frame paints; otherwise its completed replay

@@ -12,10 +12,12 @@
  * anchor. These tests pin the "phantom is transparent" contract.
  */
 
+import { holdNotSentRows } from '$lib/utils/not-sent-hold';
 import { describe, expect, it } from 'vitest';
 import type { ChatMessage } from '../types';
 import {
 	findStreamingAnchorIndex,
+	streamingAnchorId,
 	isEmptyStreamingAssistantText,
 	shouldRenderAssistantText,
 	shouldShowGapIndicator
@@ -66,6 +68,24 @@ describe('isEmptyStreamingAssistantText', () => {
 		expect(isEmptyStreamingAssistantText(finalText(''))).toBe(false);
 		expect(isEmptyStreamingAssistantText(msg({ role: 'user', streaming: true, content: '' }))).toBe(false);
 		expect(isEmptyStreamingAssistantText(streamingThinking(''))).toBe(false);
+	});
+});
+
+describe('streamingAnchorId', () => {
+	it('finds late output past a row Stop held back, in the array the transcript shows', () => {
+		const heldRow = msg({ id: 'row', role: 'user', content: 'queued', metadata: { not_sent: true, not_sent_during_turn: 'live' } });
+		const late = msg({ id: 'late', role: 'assistant', type: 'text', content: 'late words', streaming: true });
+		const raw = [userMsg(), heldRow, late];
+		const shown = holdNotSentRows(raw, 'live').messages;
+		expect(findStreamingAnchorIndex(raw)).toBe(2);
+		expect(findStreamingAnchorIndex(shown)).toBe(1);
+		// The same message either way, so its inline cursor shows instead of neither indicator.
+		expect(streamingAnchorId(shown)).toBe('late');
+		expect(shouldShowGapIndicator(shown, true, true)).toBe(false);
+	});
+
+	it('is null when nothing is streaming', () => {
+		expect(streamingAnchorId([userMsg(), finalText('done')])).toBeNull();
 	});
 });
 

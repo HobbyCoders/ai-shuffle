@@ -828,6 +828,24 @@ async def interrupt_async(
         _kick(session_id)
     return row
 
+
+def stop_reaches_background_work(
+    session_id: str, turn_id: Optional[str], flipped: Optional[Dict[str, Any]],
+) -> bool:
+    """Whether a Stop goes on to end the chat's background work and queue.
+
+    Turn-scoped so a delayed Stop for a finished turn spares its successor. A
+    turn parked on background work matched nothing to interrupt, but it is still
+    the chat's current turn and that work is what the person is stopping.
+    """
+    if flipped is not None or turn_id is None:
+        return True
+    # Queued/cancelled rows never owned the work. Only an actually started
+    # successor makes this Stop stale (#585); queue history must not hide P.
+    latest = turns.get_latest_started_turn(session_id)
+    return bool(latest and latest["id"] == turn_id and latest["state"] == "parked")
+
+
 # ---------------------------------------------------------------------------
 # Wait helpers (event-driven, with a backing-off poll as the safety net)
 # ---------------------------------------------------------------------------

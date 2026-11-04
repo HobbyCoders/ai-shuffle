@@ -1,4 +1,4 @@
-import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import { createMessageSender, type MessageSenderDeps } from './message-sender';
 import { reloadBlockers } from '$lib/services/app-update';
 import type { ActiveSessionState } from '../active-session';
@@ -7,6 +7,19 @@ import { reopenWorktree } from '$lib/api/git';
 import { api } from '$lib/api/client';
 import { ATTACHMENTS_NEED_LOCAL_CHECKOUT } from '$lib/components/chat/attach-disable';
 import { pendingQueue } from './pending-queue';
+import { STOP_TURN_NOT_NAMED, createNotSentHold, stopRecoveryAppliesToTurn } from '$lib/utils/not-sent-hold';
+import { feedController } from './v2/feed-controller';
+import { createSessionSwitcher } from './session-switcher';
+
+const feed = vi.hoisted(() => ({ onEvent: null as ((event: Record<string, unknown>) => void) | null }));
+// Navigation reads session-list metadata, not the real active-session singleton.
+vi.mock('../app-data.svelte', () => ({ appData: { current: { sessions: [] } } }));
+vi.mock('./v2/sse-feed', () => ({
+	createSseFeed: (_sessionId: string, opts: { onEvent: (event: Record<string, unknown>) => void }) => {
+		feed.onEvent = opts.onEvent;
+		return { running: true, lastSeq: 0, epoch: null, revive: vi.fn(), stop: vi.fn() };
+	},
+}));
 import { getPersistedDeviceIntent, setPersistedDeviceIntent } from '../worker-selection';
 import { composerPreferences } from '../composer-preferences';
 const voice = vi.hoisted(() => ({ isCallActiveFor: vi.fn(() => false), sendVoiceText: vi.fn(() => true) }));
@@ -99,6 +112,7 @@ function makeDeps(initial: ActiveSessionState) {
 	const createWorktree = vi.fn(async (): Promise<string | null> => null);
 	const innerSendMessage = vi.fn(async () => true);
 
+	let stopTimer: ReturnType<typeof setTimeout> | null = null;
 	const deps: MessageSenderDeps = {
 		update,
 		getState,
@@ -107,7 +121,7 @@ function makeDeps(initial: ActiveSessionState) {
 		sessionEphemeralCache: { remove: vi.fn() },
 		appData: { loadSessions: vi.fn(), loadApiUserSessions: vi.fn() },
 		persistSession: vi.fn(),
-		stopTimeout: { get: () => null, set: vi.fn() },
+		stopTimeout: { get: () => stopTimer, set: vi.fn(timer => { stopTimer = timer; }) },
 		getActiveSession: () => ({
 			sendMessage: innerSendMessage,
 			createWorktree,
@@ -874,6 +888,24 @@ describe('message-sender stopGeneration deferral', () => {
 		expect((sends[0][0] as any).turn_id).toBe('turn-9');
 	});
 
+	it('marks the turn only when the stop left this page', () => {
+		const live = baseState({ sessionId: 'sess-1', isStreaming: true, liveTurnId: 'turn-9' });
+		const sent = makeDeps(live);
+		createMessageSender(sent.deps).stopGeneration();
+		expect(sent.getState().stopRequestedTurnId).toBe('turn-9');
+
+		const failed = makeDeps(live);
+		failed.wsConn.send.mockImplementation(() => false);
+		createMessageSender(failed.deps).stopGeneration();
+		expect(failed.getState().stopRequestedTurnId ?? null).toBeNull();
+	});
+
+	it('still records a stop sent before the feed named the turn', () => {
+		const { deps, getState } = makeDeps(baseState({ sessionId: 'sess-1', isStreaming: true, liveTurnId: null }));
+		createMessageSender(deps).stopGeneration();
+		expect(getState().stopRequestedTurnId).toBe(STOP_TURN_NOT_NAMED);
+	});
+
 	it('omits turn_id when no live turn id is known (legacy session-scoped, #585)', () => {
 		const { deps, wsConn } = makeDeps(
 			baseState({ sessionId: 'sess-1', isStreaming: true, liveTurnId: null })
@@ -908,6 +940,296 @@ describe('message-sender stopGeneration deferral', () => {
 
 		expect(stopSends(wsConn)).toHaveLength(0);
 		expect(deps.internal.stopRequestedBeforeSession).toBe(false);
+	});
+});
+
+describe('Stop timeout recovery', () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+		vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({}) })));
+	});
+	afterEach(() => {
+		feedController.stop();
+		feedController.invalidate();
+		vi.clearAllTimers();
+		vi.useRealTimers();
+		vi.unstubAllGlobals();
+	});
+
+	function stopping(liveTurnId: string | null = 'turn-1') {
+		const test = makeDeps(baseState({ sessionId: 'sess-1', liveTurnId, isStreaming: true }));
+		feedController.attach({
+			update: test.deps.update,
+			getState: test.getState,
+			requestPendingQuestions: vi.fn(),
+			requestPendingPermissions: vi.fn(),
+			resolveInteractionByRequestId: vi.fn(),
+		});
+		return { ...test, sender: createMessageSender(test.deps) };
+	}
+
+	function navigator(test: ReturnType<typeof stopping>) {
+		return createSessionSwitcher({
+			update: test.deps.update,
+			getState: test.getState,
+			internal: test.internal,
+			wsSend: test.wsConn.send,
+			sessionEphemeralCache: { save: vi.fn(), restore: () => null },
+			onPersistTimerChanged: vi.fn(),
+		});
+	}
+
+	it('times out an unnamed Stop then releases Not-sent rows from the delayed feed without a terminal event', () => {
+		const test = stopping(null);
+		test.sender.stopGeneration();
+		vi.advanceTimersByTime(10000);
+		expect(test.getState().isStreaming).toBe(false);
+		expect(test.getState().stopTimedOutTurnId).toBe(STOP_TURN_NOT_NAMED);
+
+		// Start with an empty/quiet replay, then drive the producing reducer path:
+		// turn.started supplies the id and message.user produces not_sent_during_turn.
+		feedController.start('sess-1');
+		expect(test.getState().stopTimedOutTurnId).toBe(STOP_TURN_NOT_NAMED);
+		feed.onEvent!({ type: 'turn.started', id: 'start', seq: 1, session_id: 'sess-1', turn_id: 'turn-1', created_at: '2026-11-04T00:00:00Z' });
+		feed.onEvent!({ type: 'message.user', id: 'not-sent', seq: 2, session_id: 'sess-1', turn_id: 'queued-1', content: 'keep these words', not_sent: true, created_at: '2026-11-04T00:00:01Z' });
+		feed.onEvent!({ type: 'caught_up', seq: 2 });
+		vi.advanceTimersByTime(300);
+
+		const state = test.getState();
+		expect(state.isStreaming).toBe(true);
+		expect(state.liveTurnId).toBe('turn-1');
+		expect(state.stopTimedOutTurnId).toBe('turn-1');
+		expect(state.messages.find(m => m.id === 'not-sent')?.metadata?.not_sent_during_turn).toBe('turn-1');
+		const recovering = stopRecoveryAppliesToTurn(state.stopTimedOutTurnId, state.liveTurnId);
+		expect(recovering).toBe(true);
+		const rendered = createNotSentHold()(state.messages, recovering ? null : state.liveTurnId, recovering ? [] : state.queuedMessages);
+		expect(rendered.messages).toBe(state.messages);
+		expect(rendered.bubbles).toEqual([]);
+
+		feed.onEvent!({ type: 'turn.completed', id: 'end', seq: 3, session_id: 'sess-1', turn_id: 'turn-1', created_at: '2026-11-04T00:00:02Z' });
+		feed.onEvent!({ type: 'turn.started', id: 'successor', seq: 4, session_id: 'sess-1', turn_id: 'turn-2', created_at: '2026-11-04T00:00:03Z' });
+		vi.advanceTimersByTime(300);
+		expect(test.getState().liveTurnId).toBe('turn-2');
+		expect(test.getState().stopTimedOutTurnId).toBeNull();
+	});
+
+	it('clears the previous timeout when a later Stop leaves the page', () => {
+		const test = stopping();
+		test.sender.stopGeneration();
+		vi.advanceTimersByTime(10000);
+		expect(test.getState().stopTimedOutTurnId).toBe('turn-1');
+		test.deps.update(s => ({ ...s, liveTurnId: 'turn-2', isStreaming: true }));
+		test.sender.stopGeneration();
+		expect(test.getState().stopRequestedTurnId).toBe('turn-2');
+		expect(test.getState().stopTimedOutTurnId).toBeNull();
+	});
+
+	it('keeps the recovery when Stop is pressed again on the same turn', () => {
+		const test = stopping();
+		test.sender.stopGeneration();
+		vi.advanceTimersByTime(10000);
+		expect(test.getState().stopTimedOutTurnId).toBe('turn-1');
+
+		// A late event raises the Stop button again on a turn already given up on.
+		test.deps.update(s => ({ ...s, isStreaming: true }));
+		test.sender.stopGeneration();
+		const state = test.getState();
+		expect(state.stopTimedOutTurnId).toBe('turn-1');
+		expect(stopRecoveryAppliesToTurn(state.stopTimedOutTurnId, state.liveTurnId)).toBe(true);
+	});
+
+	it('does not carry an unnamed recovery into a Stop on a new send', () => {
+		const test = stopping(null);
+		test.sender.stopGeneration();
+		vi.advanceTimersByTime(10000);
+		expect(test.getState().stopTimedOutTurnId).toBe(STOP_TURN_NOT_NAMED);
+
+		test.deps.update(s => ({ ...s, isStreaming: true }));
+		test.sender.stopGeneration();
+		expect(test.getState().stopTimedOutTurnId).toBeNull();
+	});
+
+	it.each(['turn.completed', 'turn.aborted', 'turn.parked'])(
+		'ends an unnamed recovery with the turn when a replay delivers %s before any fold',
+		terminal => {
+			const test = stopping(null);
+			test.sender.stopGeneration();
+			vi.advanceTimersByTime(10000);
+
+			feedController.start('sess-1');
+			feed.onEvent!({ type: 'turn.started', id: 'start', seq: 1, session_id: 'sess-1', turn_id: 'turn-1', created_at: '2026-11-04T00:00:00Z' });
+			feed.onEvent!({ type: terminal, id: 'end', seq: 2, session_id: 'sess-1', turn_id: 'turn-1', created_at: '2026-11-04T00:00:01Z' });
+			feed.onEvent!({ type: 'caught_up', seq: 2 });
+			vi.advanceTimersByTime(300);
+			expect(test.getState().stopTimedOutTurnId).toBe('turn-1');
+
+			feed.onEvent!({ type: 'turn.started', id: 'next', seq: 3, session_id: 'sess-1', turn_id: 'turn-2', created_at: '2026-11-04T00:00:02Z' });
+			vi.advanceTimersByTime(300);
+			expect(test.getState().liveTurnId).toBe('turn-2');
+			expect(test.getState().stopTimedOutTurnId).toBeNull();
+		}
+	);
+
+	describe('when a stalled history replay ends an older turn first', () => {
+		function replaying() {
+			const test = stopping(null);
+			const optimistic = { id: 'optimistic-1', role: 'user', content: 'go', commandId: 'cmd-1' } as ActiveSessionState['messages'][number];
+			test.deps.update(s => ({ ...s, messages: [optimistic] }));
+			test.sender.stopGeneration();
+			vi.advanceTimersByTime(10000);
+			expect(test.getState().stopTimedOutTurnId).toBe(STOP_TURN_NOT_NAMED);
+			feedController.start('sess-1');
+			const event = (type: string, turn_id: string, seq: number, extra: Record<string, unknown> = {}) =>
+				feed.onEvent!({ type, id: `${type}-${seq}`, seq, session_id: 'sess-1', turn_id, created_at: '2026-11-04T00:00:00Z', ...extra });
+			return { test, event };
+		}
+
+		it('keeps the recovery for the stopped send, not the older turn', () => {
+			const { test, event } = replaying();
+			event('turn.completed', 'older', 1);
+			event('turn.started', 'turn-1', 2);
+			feed.onEvent!({ type: 'caught_up', seq: 2 });
+			vi.advanceTimersByTime(300);
+			let state = test.getState();
+			expect(state.liveTurnId).toBe('turn-1');
+			expect(stopRecoveryAppliesToTurn(state.stopTimedOutTurnId, state.liveTurnId)).toBe(true);
+
+			event('message.user', 'turn-1', 3, { command_id: 'cmd-1', content: 'go' });
+			vi.advanceTimersByTime(300);
+			state = test.getState();
+			expect(state.stopTimedOutTurnId).toBe('turn-1');
+			expect(stopRecoveryAppliesToTurn(state.stopTimedOutTurnId, state.liveTurnId)).toBe(true);
+		});
+
+		it('still ends the recovery with the stopped send once the feed has confirmed it', () => {
+			const { test, event } = replaying();
+			event('turn.completed', 'older', 1);
+			event('turn.started', 'turn-1', 2);
+			event('message.user', 'turn-1', 3, { command_id: 'cmd-1', content: 'go' });
+			event('turn.completed', 'turn-1', 4);
+			feed.onEvent!({ type: 'caught_up', seq: 4 });
+			vi.advanceTimersByTime(300);
+			expect(test.getState().stopTimedOutTurnId).toBe('turn-1');
+
+			event('turn.started', 'turn-2', 5);
+			vi.advanceTimersByTime(300);
+			expect(test.getState().liveTurnId).toBe('turn-2');
+			expect(test.getState().stopTimedOutTurnId).toBeNull();
+		});
+	});
+
+	describe('naming an unnamed Stop from the stopped send, not from what else is on the page', () => {
+		const event = (type: string, turn_id: string, seq: number, extra: Record<string, unknown> = {}) =>
+			feed.onEvent!({ type, id: `${type}-${seq}`, seq, session_id: 'sess-1', turn_id, created_at: '2026-11-04T00:00:00Z', ...extra });
+
+		function timedOutWith(...rows: Array<[string, string]>) {
+			const test = stopping(null);
+			const messages = rows.map(([content, commandId]) => ({ id: `optimistic-${commandId}`, role: 'user', content, commandId })) as ActiveSessionState['messages'];
+			test.deps.update(s => ({ ...s, messages }));
+			test.sender.stopGeneration();
+			vi.advanceTimersByTime(10000);
+			feedController.start('sess-1');
+			return test;
+		}
+
+		it('is not fooled by an older message with the same text claiming the optimistic row', () => {
+			const test = timedOutWith(['go', 'cmd-1']);
+			event('message.user', 'older', 1, { command_id: 'old', content: 'go' });
+			event('turn.completed', 'older', 2);
+			event('turn.started', 'turn-1', 3);
+			feed.onEvent!({ type: 'caught_up', seq: 3 });
+			vi.advanceTimersByTime(300);
+			let state = test.getState();
+			expect(state.liveTurnId).toBe('turn-1');
+			expect(stopRecoveryAppliesToTurn(state.stopTimedOutTurnId, state.liveTurnId)).toBe(true);
+
+			event('message.user', 'turn-1', 4, { command_id: 'cmd-1', content: 'go' });
+			vi.advanceTimersByTime(300);
+			state = test.getState();
+			expect(state.stopTimedOutTurnId).toBe('turn-1');
+			expect(stopRecoveryAppliesToTurn(state.stopTimedOutTurnId, state.liveTurnId)).toBe(true);
+		});
+
+		it('is not held open by an earlier failed send that never gets a receipt', () => {
+			const test = timedOutWith(['failed earlier', 'cmd-orphan'], ['go', 'cmd-1']);
+			event('turn.started', 'turn-1', 1);
+			event('message.user', 'turn-1', 2, { command_id: 'cmd-1', content: 'go' });
+			event('turn.completed', 'turn-1', 3);
+			feed.onEvent!({ type: 'caught_up', seq: 3 });
+			vi.advanceTimersByTime(300);
+			expect(test.getState().stopTimedOutTurnId).toBe('turn-1');
+
+			event('turn.started', 'turn-2', 4);
+			vi.advanceTimersByTime(300);
+			const state = test.getState();
+			expect(state.liveTurnId).toBe('turn-2');
+			expect(state.stopTimedOutTurnId).toBeNull();
+			expect(stopRecoveryAppliesToTurn(state.stopTimedOutTurnId, state.liveTurnId)).toBe(false);
+		});
+	});
+
+	it.each(['turn-1', null])('still recovers when a Stop on turn %s could not leave the page, without recording a Stop', liveTurnId => {
+		const test = stopping(liveTurnId);
+		test.wsConn.send.mockReturnValue(false);
+		test.sender.stopGeneration();
+		expect(test.getState().stopRequestedTurnId ?? null).toBeNull();
+		vi.advanceTimersByTime(10000);
+		expect(test.getState().isStreaming).toBe(false);
+		expect(test.getState().stopTimedOutTurnId).toBe(liveTurnId ?? STOP_TURN_NOT_NAMED);
+	});
+
+	it.each(['turn-1', null])('does not let an unsent Stop on turn %s recover a turn the feed named later', liveTurnId => {
+		const test = stopping(liveTurnId);
+		test.wsConn.send.mockReturnValue(false);
+		test.sender.stopGeneration();
+		test.deps.update(s => ({ ...s, liveTurnId: 'turn-2', isStreaming: true }));
+		vi.advanceTimersByTime(10000);
+		expect(test.getState().isStreaming).toBe(true);
+		expect(test.getState().stopTimedOutTurnId ?? null).toBeNull();
+	});
+
+	it.each(['switch', 'new'] as const)('clears timed-out recovery on %s navigation before another Stop', async mode => {
+		const test = stopping();
+		test.sender.stopGeneration();
+		vi.advanceTimersByTime(10000);
+		expect(test.getState().stopTimedOutTurnId).toBe('turn-1');
+		const switcher = navigator(test);
+		try {
+			if (mode === 'switch') await switcher.switchSession('sess-2');
+			else switcher.newChat();
+			expect(test.getState().stopRequestedTurnId).toBeNull();
+			expect(test.getState().stopTimedOutTurnId).toBeNull();
+			test.deps.update(s => ({ ...s, sessionId: 'sess-2', liveTurnId: 'turn-2', isStreaming: true }));
+			test.sender.stopGeneration();
+			expect(test.getState().stopRequestedTurnId).toBe('turn-2');
+			expect(test.getState().stopTimedOutTurnId).toBeNull();
+		} finally {
+			switcher.destroy();
+		}
+	});
+
+	it('does not let the old timer recover a chat opened while Stop was pending', async () => {
+		const test = stopping();
+		test.sender.stopGeneration();
+		const switcher = navigator(test);
+		try {
+			await switcher.switchSession('sess-2');
+			test.deps.update(s => ({ ...s, liveTurnId: 'turn-2', isStreaming: true }));
+			vi.advanceTimersByTime(10000);
+			expect(test.getState().isStreaming).toBe(true);
+			expect(test.getState().stopTimedOutTurnId).toBeNull();
+		} finally {
+			switcher.destroy();
+		}
+	});
+
+	it('does not let the old timer recover a started successor', () => {
+		const test = stopping();
+		test.sender.stopGeneration();
+		test.deps.update(s => ({ ...s, liveTurnId: 'turn-2', isStreaming: true }));
+		vi.advanceTimersByTime(10000);
+		expect(test.getState().isStreaming).toBe(true);
+		expect(test.getState().stopTimedOutTurnId ?? null).toBeNull();
 	});
 });
 

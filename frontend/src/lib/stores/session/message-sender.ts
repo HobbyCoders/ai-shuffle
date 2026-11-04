@@ -16,6 +16,7 @@ import { persistVoiceContext, voiceContextFor } from '$lib/services/voiceExecuti
 import { STREAM_DEBUG } from '$lib/utils/debug-log';
 import { generateBranchName, generateBranchNameLocal } from '$lib/api/git';
 import { ATTACHMENTS_NEED_LOCAL_CHECKOUT } from '$lib/components/chat/attach-disable';
+import { keepStopRecovery, STOP_TURN_NOT_NAMED, stopPressedOn } from '$lib/utils/not-sent-hold';
 import { parkedSendTurnId } from '$lib/utils/work-log';
 // V2 Phase 1: SSE-fed reducer — the transcript authority for a session.
 import { feedController, OPTIMISTIC_STREAMING_ON } from './v2/feed-controller';
@@ -756,6 +757,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 
 		stopGeneration() {
 			const _state = getState();
+			let recorded = false;
 			if (_state.sessionId) {
 				// The interrupt is always a full stop (the query-scoped SDK interrupt
 				// tears down in-flight background sub-agents too).
@@ -763,23 +765,40 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				// turn — a stop that lands after its turn settled then no-ops instead
 				// of interrupting the successor. Omitted when the FE knows no live turn
 				// (legacy session-scoped stop server-side).
-				wsConn.send({
+				recorded = wsConn.send({
 					type: 'stop',
 					session_id: _state.sessionId,
 					...(_state.liveTurnId ? { turn_id: _state.liveTurnId } : {}),
 				});
+				// Only a Stop that left this page can have refused anything.
+				if (recorded) update(s => ({
+					...s,
+					stopRequestedTurnId: s.liveTurnId ?? STOP_TURN_NOT_NAMED,
+					stopTimedOutTurnId: keepStopRecovery(s.stopTimedOutTurnId, s.liveTurnId),
+				}));
 			} else if (internal.awaitingNewSession) {
 				// Brand-new session whose id the backend hasn't minted yet, so we
 				// have nothing to address the stop to. Defer it: the session_created
 				// / start handlers send the stop once the id arrives, so the backend
 				// can discard the orphan turn instead of silently dropping the click.
 				internal.stopRequestedBeforeSession = true;
+				recorded = true;
+				update(s => ({ ...s, stopRequestedTurnId: STOP_TURN_NOT_NAMED, stopTimedOutTurnId: null }));
 			}
 
 			const current = stopTimeout.get();
 			if (current) clearTimeout(current);
 			stopTimeout.set(setTimeout(() => {
-				if (getState().isStreaming) {
+				const state = getState();
+				// A navigation or a started successor is not the Stop still waiting. A
+				// Stop that never left the page records nothing, so go by the turn it
+				// saw: this recovery is all that frees a page cut off offline, and a
+				// feed that has named a newer turn is not cut off.
+				if (state.isStreaming
+					&& (!_state.sessionId || state.sessionId === _state.sessionId)
+					&& (recorded
+						? stopPressedOn(state.stopRequestedTurnId, state.liveTurnId)
+						: state.liveTurnId === _state.liveTurnId)) {
 					console.warn('[ActiveSession] Stop confirmation timeout - forcing UI recovery');
 					// Deliberate override, not a competing writer: the stop was never
 					// confirmed, so this is the UI's last-resort recovery. Withdraw
@@ -792,7 +811,11 @@ export function createMessageSender(deps: MessageSenderDeps) {
 							return m.streaming ? { ...m, streaming: false } : m;
 						});
 						messages = messages.filter(m => !(m.type === 'text' && m.role === 'assistant' && !m.content));
-						return { ...s, messages, isStreaming: false, optimisticStreaming: false };
+						// A newest user row with no turn yet is the send this Stop was pressed on.
+						const newestUser = s.messages.findLast(m => m.role === 'user');
+						return { ...s, messages, isStreaming: false, optimisticStreaming: false,
+							stopTimedOutTurnId: s.liveTurnId ?? s.stopRequestedTurnId ?? STOP_TURN_NOT_NAMED,
+							stopTimedOutCommandId: newestUser && !newestUser.turnId ? newestUser.commandId ?? null : null };
 					});
 				}
 				stopTimeout.set(null);

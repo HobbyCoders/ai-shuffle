@@ -1511,6 +1511,25 @@ def remove_queued_turn(
     return row
 
 
+def stop_queued_turns(session_id: str, turn_ids: List[str]) -> List[Dict[str, Any]]:
+    """Abort Stop's whole queue in one transaction, keeping each one's words.
+
+    The chat shows the rows one commit at a time. Written separately, each new
+    "Not sent" row would push the bubbles still waiting below it, so a reader
+    would see the transcript step down once per queued message.
+    """
+    removed: List[Dict[str, Any]] = []
+    with get_db() as conn:
+        for turn_id in turn_ids:
+            row = remove_queued_turn(turn_id, keep_unsent_words=True, _conn=conn)
+            if row is not None:
+                removed.append(row)
+    if removed:
+        from app.db import session_events
+        session_events.notify_session_write(session_id, "session_events")
+    return removed
+
+
 def retry_pair_compaction(
     continuation_id: str, attempt: int, *, emergency: bool = False,
 ) -> Optional[Dict[str, Any]]:
@@ -2015,6 +2034,24 @@ def get_latest_run_turn(session_id: str) -> Optional[Dict[str, Any]]:
             # A progress note moved to the held store (#960) never runs.
             "AND NOT (state='aborted' AND COALESCE(stop_reason, '')='held_progress') "
             "ORDER BY insert_order DESC, created_at DESC, position DESC, id DESC LIMIT 1",
+            (session_id,),
+        )
+        row = cursor.fetchone()
+    return _row(row)
+
+
+def get_latest_started_turn(session_id: str) -> Optional[Dict[str, Any]]:
+    """The latest turn that actually executed, ignoring never-started queue rows.
+
+    Unlike :func:`get_latest_run_turn`, this is execution order, not queue/history
+    order. ``started_at`` is refreshed when a parked turn resumes, so that turn
+    is current again even if other rows were enqueued more recently.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM turns WHERE session_id=%s AND started_at IS NOT NULL "
+            "ORDER BY started_at DESC, insert_order DESC, created_at DESC, position DESC, id DESC LIMIT 1",
             (session_id,),
         )
         row = cursor.fetchone()

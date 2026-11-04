@@ -83,7 +83,8 @@ export interface QueuedMessage {
 	content: string;
 	queuedAt: number;
 	clientMessageId?: string;
-	status?: 'cancelling' | 'delivered';
+	/** `stopped`: Stop already turned it into a "Not sent" row (see not-sent-hold). */
+	status?: 'cancelling' | 'delivered' | 'stopped';
 }
 
 /** Attributed peer traffic; has no user unsend/interrupt controls. */

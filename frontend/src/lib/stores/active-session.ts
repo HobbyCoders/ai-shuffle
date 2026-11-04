@@ -153,6 +153,13 @@ export interface ActiveSessionState {
 	 *  targets that turn — a stop delivered after its turn settled then no-ops
 	 *  server-side instead of interrupting the successor turn (GitHub #585). */
 	liveTurnId: string | null;
+	/** The turn this device pressed Stop on, or STOP_TURN_NOT_NAMED before the feed names it (see not-sent-hold). */
+	stopRequestedTurnId?: string | null;
+	/** This Stop attempt timed out: its turn id, or STOP_TURN_NOT_NAMED until the feed names it.
+	 * Reset by another Stop, a successor, a refused command, or navigation. */
+	stopTimedOutTurnId?: string | null;
+	/** The send a timed-out Stop was pressed on; its receipt names STOP_TURN_NOT_NAMED's turn. */
+	stopTimedOutCommandId?: string | null;
 	/** The latest turn is parked on background work (v2 feed `turn.parked`,
 	 *  cleared by the next `turn.*`). Keeps the transcript from folding a parked
 	 *  turn in the moment between its last task finishing and the wake turn
@@ -395,6 +402,8 @@ function defaultState(): ActiveSessionState {
 		isStreaming: false,
 		optimisticStreaming: false,
 		liveTurnId: null,
+		stopRequestedTurnId: null,
+		stopTimedOutTurnId: null,
 		turnParked: false,
 		liveModel: null,
 		liveRequestedModel: null,

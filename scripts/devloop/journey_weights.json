@@ -1,6 +1,8 @@
 {
   "_comment": "Median hosted journey seconds, excluding instance setup/teardown. Refresh from green main-suite/ci-frontend runs: python -m scripts.devloop.ci refresh-weights RUN_ID [RUN_ID ...]. seconds_per_case is the median of seconds/cases per sample.",
   "_overrides": {
+    "stop-holds-the-reader.journey.mjs": "472s: its seven cases, each timed in hosted run 41692960194 before they moved out of queue-while-busy.",
+    "stop-with-queued-messages.journey.mjs": "850s: 544s from six of its ten cases timed in hosted run 41692960194 before they moved out of queue-while-busy (that shard hit its limit), plus about 75s each for the other four.",
     "send-during-init.journey.mjs": "120.68s: complete 12/12 first-pass file in run 41549557860 (the run failed only on unrelated queue-while-busy). Includes the added late-tags case."
   },
   "source_runs": [
@@ -29,7 +31,9 @@
     "send-during-init.journey.mjs": 120.68,
     "side-panels.journey.mjs": 183.69,
     "sidebar-truth.journey.mjs": 651.0,
+    "stop-holds-the-reader.journey.mjs": 472.0,
     "stop-midstream.journey.mjs": 52.84,
+    "stop-with-queued-messages.journey.mjs": 850.0,
     "switch-chats.journey.mjs": 132.83,
     "tool-cards.journey.mjs": 91.49,
     "transcript-boundary.journey.mjs": 30.71,

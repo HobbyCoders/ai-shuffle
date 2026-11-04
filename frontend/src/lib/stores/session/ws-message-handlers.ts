@@ -35,6 +35,7 @@ import { dismissSettledSessionPrompts } from './settle-prompts';
 import { sessionEphemeralCache } from '../session-cache';
 import { markBindingHydrated } from './composer-binding';
 import { unmarkQuestionSent } from './sent-questions';
+import { keepStopRecovery } from '$lib/utils/not-sent-hold';
 
 // ─── Interfaces ──────────────────────────────────────────────────────────────
 
@@ -1083,6 +1084,9 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 						isStreaming: false,
 						optimisticStreaming: false,
 						streamStartTime: null,
+						// A refused Stop refused nothing: its queue is not waiting on rows.
+						stopRequestedTurnId: null,
+						stopTimedOutTurnId: keepStopRecovery(s.stopTimedOutTurnId, s.liveTurnId),
 					}));
 				}
 				break;
