@@ -336,7 +336,7 @@
 	background: var(--st-bg);
 }
 .settings-shell[data-stacked] .st-ix-title {
-	font-size: 24px;
+	font-size: 20px;
 	padding: 6px 4px 16px;
 }
 .settings-shell[data-stacked] .st-search input {
@@ -375,7 +375,7 @@
 	gap: 4px;
 }
 .settings-shell[data-stacked] .st-page-h h1 {
-	font-size: 17px;
+	font-size: 20px;
 }
 /*
  * SettingRow on the phone: label and control share a line while they fit and
@@ -440,7 +440,7 @@
 	margin-left: 8px;
 }
 .settings-shell[data-stacked] .st-lh-top h1 {
-	font-size: 17px;
+	font-size: 20px;
 }
 .settings-shell[data-stacked] .st-lscroll {
 	padding: 0 6px 60px;

@@ -47,7 +47,8 @@
 	.ns-title {
 		margin: 0;
 		max-width: 100%;
-		color: var(--foreground);
+		/* One step softer than body text: the page's focus is the composer below. */
+		color: color-mix(in oklab, var(--foreground) 86%, var(--background));
 		font-size: var(--fs-display);
 		font-weight: 500;
 		line-height: 1.25;

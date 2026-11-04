@@ -145,7 +145,7 @@
 		   theme preset's sidebar keeps working. */
 		--row-hover: color-mix(in oklab, var(--sidebar-foreground) 5%, var(--sidebar));
 		--row-selected: color-mix(in oklab, var(--sidebar-foreground) 9%, var(--sidebar));
-		--sidebar: oklch(0.195 0.004 265);
+		--sidebar: oklch(0.185 0.004 265);
 		--sidebar-foreground: oklch(0.928 0.003 265);
 		--sidebar-border: oklch(1 0 0 / 0.085);
 		--sidebar-accent: oklch(1 0 0 / 0.05);
@@ -277,7 +277,7 @@
 	   ======================================== */
 	.light {
 		/* Background colors */
-		--background: oklch(0.995 0 0);
+		--background: oklch(0.98 0.003 90);
 		--foreground: oklch(0.21 0.005 250);
 
 		/* Elevated surfaces */
@@ -321,17 +321,17 @@
 		--info: oklch(0.55 0.16 255);
 
 		/* Borders and inputs */
-		--border: oklch(0.21 0.01 250 / 0.11);
-		--border-strong: oklch(0.21 0.01 250 / 0.20);
+		--border: oklch(0.21 0.01 250 / 0.09);
+		--border-strong: oklch(0.21 0.01 250 / 0.18);
 		--input: oklch(0.21 0.01 250 / 0.14);
 		--ring: oklch(0.53 0.09 178);
 
 		/* Sidebar plane. The rail shares it. */
 		--row-hover: color-mix(in oklab, var(--sidebar-foreground) 2.5%, var(--sidebar));
 		--row-selected: color-mix(in oklab, var(--sidebar-foreground) 4.5%, var(--sidebar));
-		--sidebar: oklch(0.97 0.002 250);
+		--sidebar: oklch(0.955 0.003 90);
 		--sidebar-foreground: oklch(0.21 0.005 250);
-		--sidebar-border: oklch(0.21 0.01 250 / 0.11);
+		--sidebar-border: oklch(0.21 0.01 250 / 0.09);
 		--sidebar-accent: oklch(0.21 0.01 250 / 0.045);
 		--sidebar-accent-active: oklch(0.21 0.01 250 / 0.085);
 		--sidebar-muted: oklch(0.488 0.011 258);
@@ -367,7 +367,7 @@
 		/* Interactive hover overlay */
 		--hover-overlay: oklch(0.21 0.01 250 / 0.045);
 		--active-overlay: oklch(0.21 0.01 250 / 0.075);
-		--border-subtle: oklch(0.21 0.01 250 / 0.07);
+		--border-subtle: oklch(0.21 0.01 250 / 0.055);
 
 		/* ========================================
 		   SEMANTIC UI COLORS - LIGHT THEME

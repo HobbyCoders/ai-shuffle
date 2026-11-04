@@ -181,18 +181,19 @@
 		padding: 0;
 		border: none;
 		border-radius: var(--composer-btn-radius, 50%);
-		background: var(--action);
-		color: var(--action-foreground);
+		background: var(--muted);
+		color: var(--foreground);
 		cursor: pointer;
 		transition: background-color 150ms ease, transform 100ms ease;
 	}
 	.call-circle:hover:not(:disabled):not(.blocked) {
-		background: var(--action-hover);
+		background: color-mix(in oklab, var(--foreground) 14%, var(--muted));
 	}
 	.call-circle:active:not(:disabled):not(.blocked) { transform: scale(0.94); }
 	.call-circle:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
 	.call-circle:disabled, .call-circle.blocked { opacity: 0.4; cursor: not-allowed; }
-	.call-circle.starting { cursor: progress; }
+	/* The filled action colour is earned: a call on its way, or text to send. */
+	.call-circle.starting { background: var(--action); color: var(--action-foreground); cursor: progress; }
 	.call-circle.starting :global(svg) { animation: voice-call-pulse 1s ease-in-out infinite; }
 	@media (prefers-reduced-motion: reduce) {
 		.call-circle { transition: none; }

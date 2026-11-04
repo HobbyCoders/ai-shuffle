@@ -1327,8 +1327,12 @@
 		grid-column: auto;
 		justify-content: flex-end;
 	}
+	/* Beside the detail pane this names a panel, like "Sessions" and "Settings". */
+	.settings-shell.agents-shell:not([data-stacked]) :global(.st-lh-top h1) {
+		font-size: 16px;
+	}
 	.settings-shell.agents-shell[data-stacked] :global(.st-lh-top h1) {
-		font-size: 22px;
+		font-size: 20px;
 	}
 
 	.sk-detail {
