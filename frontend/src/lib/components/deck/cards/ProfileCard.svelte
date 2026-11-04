@@ -1279,8 +1279,40 @@
 	.agents-shell :global(.st-coll) {
 		flex: 1;
 	}
+	/* The list's footer: a quiet line on the pane's text edge, not a second card. */
+	.agents-shell :global(.st-lscroll) {
+		display: flex;
+		flex-direction: column;
+	}
 	.starter-foot {
-		padding: 12px 0 4px;
+		flex: none;
+		margin-top: auto;
+		/* Ends 12px above the pane's edge, inside the scroller's 56px end padding. */
+		margin-bottom: -44px;
+		padding: 12px 0 0;
+	}
+	.starter-foot :global(.st-btn) {
+		height: 28px;
+		padding: 0 12px;
+		border: 0;
+		background: none;
+		box-shadow: none;
+		color: var(--st-mfg);
+		font-size: 13px;
+		font-weight: 400;
+	}
+	.starter-foot :global(.st-btn:hover:not(:disabled)) {
+		background: var(--st-hover);
+		color: var(--st-fg);
+	}
+	.starter-foot :global(.st-btn svg) {
+		display: none;
+	}
+	.settings-shell.agents-shell[data-stacked] .starter-foot :global(.st-btn) {
+		padding-inline: 0;
+	}
+	@media (pointer: coarse) {
+		.starter-foot :global(.st-btn) { min-height: 44px; }
 	}
 	.folder-filter {
 		display: inline-flex;
@@ -1299,6 +1331,17 @@
 	.settings-shell.agents-shell[data-stacked] :global(.st-dha) {
 		grid-column: auto;
 		justify-content: flex-end;
+	}
+	/* Chats' 52px header: the title and search stay put between rail destinations. */
+	.settings-shell.agents-shell:not([data-stacked]) :global(.st-lhead) {
+		padding-top: 0;
+		gap: 0;
+	}
+	.settings-shell.agents-shell:not([data-stacked]) :global(.st-lh-top) {
+		height: 52px;
+	}
+	.settings-shell.agents-shell:not([data-stacked]) :global(.st-lfilters) {
+		margin-top: 12px;
 	}
 	/* Beside the detail pane this names a panel, like "Sessions" and "Settings". */
 	.settings-shell.agents-shell:not([data-stacked]) :global(.st-lh-top h1) {

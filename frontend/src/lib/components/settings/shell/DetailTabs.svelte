@@ -260,8 +260,10 @@
 		outline-offset: -2px;
 	}
 	.n {
-		color: var(--st-subtle);
-		margin-left: 5px;
+		color: var(--st-mfg);
+		margin-left: 4px;
+		font-size: 11px;
+		font-weight: 500;
 		font-variant-numeric: tabular-nums;
 	}
 </style>

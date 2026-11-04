@@ -12,7 +12,7 @@
 	import NoteFileAutocomplete from './NoteFileAutocomplete.svelte';
 	import { resizeToFitContent } from './notes-textarea-resize';
 	import './card-design-system.css';
-	import { StickyNote, Search as SearchIcon, Plus, Pin, Trash2, Paperclip, X } from 'lucide-svelte';
+	import { Notebook, Search as SearchIcon, Plus, Pin, Trash2, Paperclip, X } from 'lucide-svelte';
 	import {
 		getNotes,
 		getNote,
@@ -838,7 +838,7 @@
 						<div class="ns-liststate ns-liststate--err">{error}</div>
 					{:else if notes.length === 0}
 						<div class="ns-listempty">
-							<StickyNote size={28} strokeWidth={1.25} />
+							<Notebook size={28} strokeWidth={1.25} />
 							<p>{searchQuery || selectedTag ? 'No notes match' : 'No notes yet'}</p>
 							<button class="ns-link" onclick={startNewNote}>Create your first note</button>
 						</div>
@@ -941,7 +941,7 @@
 					</div>
 				{:else}
 					<div class="ns-emptyeditor">
-						<StickyNote size={40} strokeWidth={1.1} />
+						<Notebook size={40} strokeWidth={1.1} />
 						<p class="ns-emptyeditor-title">Select a note</p>
 						<p class="ns-emptyeditor-sub">Pick a note on the left, or start a new one.</p>
 						<button class="ns-btn ns-btn--primary" onclick={startNewNote}><Plus size={15} strokeWidth={2} /><span>New note</span></button>

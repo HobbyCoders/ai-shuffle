@@ -777,7 +777,7 @@
 			<div class="mpp-cap-summary" data-context-summary>
 				<p aria-live="polite">
 					{#if known}
-						Context limit <strong class:saving={winSaving}>{windowText}</strong><span class="mpp-cap-default">{' · compacts near it'}</span>{#if !winEditable}<span class="mpp-win-pointer">{' Change it in Settings → Providers.'}</span>{/if}
+						Context limit <strong class:saving={winSaving}>{windowText}</strong><span class="mpp-cap-default">{'. The chat compacts near this limit.'}</span>{#if !winEditable}<span class="mpp-win-pointer">{' Change it in Settings → Providers.'}</span>{/if}
 					{:else}
 						No known limit, so no usage percentage.{#if !winEditable}{' Set one in Settings → Providers.'}{/if}
 					{/if}
@@ -975,7 +975,7 @@
 		padding: 12px 8px 4px;
 		font-size: 12px;
 		font-weight: 500;
-		color: var(--muted-foreground);
+		color: var(--secondary-foreground);
 	}
 	.mpp-section:first-child .mpp-group-name { padding-top: 4px; }
 	.mpp-group-name small {

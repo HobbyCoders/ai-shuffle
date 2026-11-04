@@ -225,10 +225,9 @@ describe('ChatInput attachments per lane', () => {
 	});
 });
 
-describe('narrow-phone placeholder', () => {
-	it('says the short line in every lane below 480px, from ChatInput itself', () => {
-		expect(chatInput).toMatch(/matchMedia\?\.\('\(max-width: 479\.98px\)'\)/);
-		expect(chatInput).toMatch(/composerMode !== 'chat' && !narrowComposer \? 'Describe a task or ask a question' : 'Ask anything'/);
+describe('composer placeholder', () => {
+	it('says the one short line in every lane, from ChatInput itself', () => {
+		expect(chatInput).toMatch(/moveWait \?\? 'Ask anything'/);
 		// No stylesheet rule overrides the placeholder any more.
 		expect(mobileStyles).not.toMatch(/data-placeholder='[^']+'\]::before/);
 	});

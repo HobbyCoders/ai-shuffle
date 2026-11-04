@@ -261,7 +261,7 @@ describe('ControlsDock split controls', () => {
 		const browser = screen.getByRole('button', { name: 'Toggle live browser view' });
 		expect(browser.getAttribute('aria-pressed')).toBe('false');
 		expect(browser.classList.contains('active')).toBe(false);
-		expect(browser.getAttribute('title')).toBe('Toggle live browser view');
+		expect(browser.getAttribute('title')).toBe('Live browser view: off. Click to show it.');
 		expect(browser.getAttribute('type')).toBe('button');
 		await fireEvent.pointerEnter(browser);
 		await fireEvent.focus(browser);

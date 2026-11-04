@@ -593,7 +593,7 @@
 				onpointerenter={onBrowserPreload}
 				onfocus={onBrowserPreload}
 				aria-label="Toggle live browser view"
-				title="Toggle live browser view"
+				title={browserOpen ? 'Live browser view: on. Click to hide it.' : 'Live browser view: off. Click to show it.'}
 				aria-pressed={browserOpen}
 			>
 				<Globe size={16} strokeWidth={1.75} aria-hidden="true" />

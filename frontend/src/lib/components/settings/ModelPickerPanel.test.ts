@@ -403,7 +403,7 @@ describe('ModelPickerPanel single and unknown windows', () => {
 		expect(screen.queryByRole('radiogroup')).toBeNull();
 		const summary = document.querySelector('[data-context-summary]');
 		expect(summary?.textContent).toContain('Context limit 262K');
-		expect(summary?.textContent).toContain('compacts near it');
+		expect(summary?.textContent).toContain('The chat compacts near this limit.');
 		expect(screen.getByRole('button', { name: 'Adjust' })).toBeTruthy();
 	});
 

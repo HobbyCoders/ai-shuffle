@@ -31,7 +31,7 @@
 		Archive,
 		Undo2,
 		Files,
-		StickyNote,
+		Notebook,
 		SquarePen,
 		Bot,
 		CalendarClock,
@@ -467,7 +467,7 @@
 	const destinations = $derived<WorkspaceNavItem[]>([
 		{ id: 'file-browser', label: 'Files', icon: Files, on: currentType === 'file-browser' },
 		// A notebook, not a second sheet of paper: this sits right under Files.
-		{ id: 'notes', label: 'Notes', icon: StickyNote, on: currentType === 'notes' },
+		{ id: 'notes', label: 'Notes', icon: Notebook, on: currentType === 'notes' },
 		{ id: 'build', label: 'Agents', icon: Bot, on: currentType ? BUILD_MEMBERS.includes(currentType) : false },
 		...(isAdmin
 			? [{ id: 'automations' as const, label: 'Automations', icon: CalendarClock, on: currentType === 'automations' }]

@@ -162,18 +162,8 @@
 	const agentName = $derived($profiles.find(profile => profile.id === $activeSession.profile)?.name?.trim() || null);
 	// The longer line does not fit a phone's field, and a cut-off hint reads as a
 	// bug. Below 480px every lane says the short one, on both phone shells.
-	let narrowComposer = $state(false);
-	$effect(() => {
-		const query = window.matchMedia?.('(max-width: 479.98px)');
-		if (!query) return;
-		narrowComposer = query.matches;
-		const change = (event: MediaQueryListEvent) => { narrowComposer = event.matches; };
-		query.addEventListener?.('change', change);
-		return () => query.removeEventListener?.('change', change);
-	});
-	const composerPlaceholder = $derived(
-		moveWait ?? (composerMode !== 'chat' && !narrowComposer ? 'Describe a task or ask a question' : 'Ask anything')
-	);
+	// One line everywhere; only a real waiting message speaks over it.
+	const composerPlaceholder = $derived(moveWait ?? 'Ask anything');
 
 	// Voice passes local file references to its worker rather than uploading
 	// binary data to the Realtime text channel.
