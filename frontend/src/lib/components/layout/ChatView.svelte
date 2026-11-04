@@ -502,8 +502,7 @@
 						</p>
 					</div>
 				{:else}
-					<!-- New session: the agent leads, then one sentence saying
-					     where it runs. Each part of it opens its menu. -->
+					<!-- New session: one question, directly above the composer. -->
 					<NewSessionHero />
 				{/if}
 			</div>
@@ -855,14 +854,13 @@
 		position: relative;
 	}
 
-	/* Same 768px measure as the transcript column and the composer dock, so the
-	   hero and the island below it share one edge. */
+	/* The transcript and composer's column, so hero and box share one edge. */
 	.empty-hero-content {
 		display: flex;
 		flex-direction: column;
 		align-items: center;
 		width: 100%;
-		max-width: 768px;
+		max-width: var(--column-width);
 	}
 
 	/* A composer-free surface can center its hero on desktop. */
@@ -871,8 +869,14 @@
 		padding-bottom: 1rem;
 	}
 
+	/* A little more room below than above: the pair sits at the optical centre. */
 	.empty-bottom-spacer {
-		flex: 1 1 auto;
+		flex: 1.35 1 auto;
+	}
+	/* A phone-width window keeps the composer under the thumb. */
+	@media (max-width: 480px) {
+		.empty-bottom-spacer { display: none; }
+		.empty-hero { justify-content: center; }
 	}
 
 	/* Overlay the error so it doesn't shift the vertically-centered content. */

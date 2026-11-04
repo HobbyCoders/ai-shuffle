@@ -122,31 +122,31 @@ afterEach(() => {
 });
 
 describe('NewSessionSentence', () => {
-	it('reads the whole sentence for a git project in a worktree, each part a button', async () => {
+	it('names every control for a git project in a worktree, each one a button', async () => {
 		render(NewSessionSentence);
-		await waitFor(() => expect(text()).toBe('Runs on office-pc in ai-shuffle on a new branch from main in a worktree.'));
+		await waitFor(() => expect(text()).toBe('office-pc ai-shuffle New branch from main Worktree'));
 		for (const name of [/^Runs on office-pc$/, /^Workspace folders: ai-shuffle$/, /^Worktree branch: a new branch from main$/, /Runs in a worktree/]) {
 			expect(screen.getByRole('button', { name })).toBeTruthy();
 		}
-		// The online dot is the worker menu's, never the sentence's.
+		// The online dot is the worker menu's, never the row's.
 		expect(document.querySelector('.ns-sentence .worker-status-dot, .ns-sentence [class*="dot"]')).toBeNull();
 	});
 
 	it('names a picked branch instead of "a new branch"', async () => {
 		session({ selectedWorktreeBranch: 'feat/redesign' });
 		render(NewSessionSentence);
-		await waitFor(() => expect(text()).toContain('on feat/redesign in a worktree.'));
+		await waitFor(() => expect(text()).toContain('feat/redesign Worktree'));
 	});
 
-	it('toggles the worktree word to the main checkout and shows the checkout branch', async () => {
+	it('toggles the worktree control to the main checkout and shows the checkout branch', async () => {
 		render(NewSessionSentence);
 		const wt = await screen.findByRole('button', { name: /Runs in a worktree/ });
 		await fireEvent.click(wt);
 		expect(m.setWorktreeIntent).toHaveBeenCalledWith('local');
-		await waitFor(() => expect(text()).toBe('Runs on office-pc in ai-shuffle on main in the main checkout.'));
+		await waitFor(() => expect(text()).toBe('office-pc ai-shuffle main Main checkout'));
 	});
 
-	it('shows extra workspace folders as +N on the project word', async () => {
+	it('shows extra workspace folders as +N on the project control', async () => {
 		session({ workspaceProjectIds: ['p2'] });
 		render(NewSessionSentence);
 		const project = await screen.findByRole('button', { name: /Workspace folders: ai-shuffle and 1 more/ });
@@ -157,13 +157,13 @@ describe('NewSessionSentence', () => {
 		session({ worktreeIntent: 'local' });
 		stores.git.set({ hydrated: true, projectId: 'p1', sessionId: null, worktreeId: null, status: { is_git_repo: false } });
 		render(NewSessionSentence);
-		await waitFor(() => expect(text()).toBe('Runs on office-pc in ai-shuffle.'));
+		await waitFor(() => expect(text()).toBe('office-pc ai-shuffle'));
 	});
 
-	it('reads "with no project" without one, and that word opens the project picker', async () => {
+	it('reads "No project" without one, and that control opens the project picker', async () => {
 		session({ project: '', projectV2Id: null });
 		render(NewSessionSentence);
-		await waitFor(() => expect(text()).toBe('Runs on office-pc with no project.'));
+		await waitFor(() => expect(text()).toBe('office-pc No project'));
 		const none = screen.getByRole('button', { name: /^No project\. Add a project/ });
 		await fireEvent.click(none);
 		await tick();

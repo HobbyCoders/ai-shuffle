@@ -10,18 +10,16 @@
 	 * ChatInput - the split-chips composer (mockup: docs/design/composer-split-chips.mockup.html).
 	 *
 	 * Two stacked parts, top to bottom:
-	 *   1. ContextPillBar — the loose row of context chips (agent / runner /
-	 *      repository / branch / worktree) floating ABOVE the box with a gap.
-	 *      A new session has none: the hero's "Runs on …" sentence stands in
-	 *      for it until the first message (`newSession`).
-	 *   2. The box — a flat hairline rectangle. Its first row is the attach
-	 *      circle, the Tiptap editor (with the @/slash autocomplete panels) and
-	 *      the circles on the right: dictate, then one slot that shows Talk
-	 *      while there is nothing to send and Send once there is (a spinner
-	 *      while a worktree is created), then Stop while work runs. Below it is the
-	 *      ControlsDock's bare-text controls row. Once the text wraps, the text
-	 *      takes the full width and attach and the circles move to the two ends
-	 *      of the controls row (composer-wrap.ts).
+	 *   1. The box — a raised filled surface. The Tiptap editor (with the
+	 *      @/slash autocomplete panels) across the top; under it attach, the
+	 *      ControlsDock's text controls and the circles on the right: dictate,
+	 *      then one slot that shows Talk while there is nothing to send and Send
+	 *      once there is (a spinner while a worktree is created), then Stop while
+	 *      work runs. In the phone shell the circles sit beside the text until it
+	 *      wraps (composer-wrap.ts).
+	 *   2. The context row under the box. ContextPillBar's chips (agent / runner /
+	 *      repository / branch / worktree) in a chat; NewSessionSentence's
+	 *      controls on a new session (`newSession`).
 	 *
 	 * Delegates voice recording to VoiceRecorder, calls to VoiceCallButton,
 	 * controls to ControlsDock, and drag-and-drop to the inline overlay.
@@ -77,6 +75,7 @@
 	import StopButton from './StopButton.svelte';
 	import ControlsDock from './ControlsDock.svelte';
 	import ContextPillBar from './ContextPillBar.svelte';
+	import NewSessionSentence from '$lib/components/layout/NewSessionSentence.svelte';
 	import { ArrowUp, Plus } from 'lucide-svelte';
 	import { composerCircles, createWrapWatcher } from './composer-wrap';
 	import { hasAtMention, findLastAtMentionIndex, extractAtMentionQuery, extractFileChips } from './tiptap/serialization';
@@ -155,12 +154,9 @@
 		const row = $sessions.find((session) => session.id === $activeSession.sessionId);
 		return handoffPlaceholder(pendingHandoff($activeSession.messages, row ? { deviceId: row.owner_device_id, deviceName: row.device_name } : null, $activeSession.sessionId, $activeSession.sessionId ? $handoffPending[$activeSession.sessionId] : null));
 	});
-	// The new-session screen addresses the agent by name.
 	const agentName = $derived($profiles.find(profile => profile.id === $activeSession.profile)?.name?.trim() || null);
 	const composerPlaceholder = $derived(
-		moveWait ??
-			(newSession && agentName ? `What should ${agentName} do?`
-				: composerMode !== 'chat' ? 'Describe a task or ask a question' : 'Ask anything')
+		moveWait ?? (composerMode !== 'chat' ? 'Describe a task or ask a question' : 'Ask anything')
 	);
 
 	// Voice passes local file references to its worker rather than uploading
@@ -694,7 +690,8 @@
 	});
 	$effect(() => {
 		const island = islandRef;
-		if (!island) return;
+		// Only the phone shell's layout moves with the text.
+		if (!island || !mobileViewport) return;
 		return wrapWatcher.observe(island, sendClusterRef);
 	});
 	onDestroy(() => wrapWatcher.destroy());
@@ -1607,25 +1604,11 @@
 			onsubmit={(e) => { e.preventDefault(); handleSubmit(); }}
 			onpointerdown={handleComposerPointerDown}
 		>
-			<!-- Context chips: agent · runner · repository · branch · worktree.
-			     A loose row floating ABOVE the box with a visible gap once a
-			     session is under way (ContextPillBar decides which chips are
-			     selectors and which are read-only).
-
-			     The phone shell carries these selectors in its controls panel; a
-			     second, hidden copy would share their dropdown state. A new
-			     session shows none: the hero's "Runs on …" sentence above the
-			     box says the same, and opens the same menus. -->
-			{#if !mobileViewport && !newSession}
-				<div class="context-pill-row"><ContextPillBar /></div>
-			{/if}
-
-			<!-- The box: a flat hairline rectangle holding the attach circle, the
-			     editor and the circles on the right, then the bare-text controls
-			     row. `wrapped`: the text needs a second line, so it takes the full
-			     width and attach and the circles sit at the controls row's ends.
-			     The move is layout only (CSS grid), never a remount: a dictation
-			     or a starting call in those circles carries straight on. -->
+			<!-- The box: the text across the top, and under it attach, the controls
+			     row and the circles. The text never changes the layout around it
+			     here. The phone shell keeps its own arrangement: its `wrapped`
+			     moves the circles down when the text needs a second line, layout
+			     only (CSS grid), so a dictation or a starting call carries on. -->
 			<div class="chat-island" class:wrapped={composerWrapped} bind:this={islandRef}>
 				<!-- The editor. The whole area forwards pointer events to the Tiptap
 				     editor so the padding around the text line is clickable too — an
@@ -1771,7 +1754,21 @@
 					}}
 				/>
 			</div>
+
+			<!-- The context row under the box: a chat under way has its chips
+			     (ContextPillBar decides which are selectors and which are read-only).
+			     The phone shell carries them in its controls panel: a second, hidden
+			     copy would share their dropdown state. -->
+			{#if !mobileViewport && !newSession}
+				<ContextPillBar />
+			{/if}
 		</form>
+
+		<!-- A new session's row: the `New session` region. Outside the form, since
+		     its menus hold inputs and a modal of their own. -->
+		{#if newSession}
+			<NewSessionSentence />
+		{/if}
 	</div>
 </div>
 
@@ -1830,18 +1827,11 @@
 		padding: 0 1.5rem 1.25rem;
 	}
 
-	/* Mockup `.composer` — shares the transcript column's 768px measure. Also
-	   the positioning context for the drag overlay. */
+	/* The transcript's column. Also the positioning context for the drag overlay. */
 	.chat-input-container {
 		position: relative;
-		max-width: 48rem;
+		max-width: var(--column-width);
 		margin: 0 auto;
-	}
-
-	/* The chip row floats above the box; ContextPillBar supplies the gap (its
-	   bottom margin) and the wrapping. */
-	.context-pill-row {
-		min-width: 0;
 	}
 
 	/* Drag overlay */
@@ -1877,15 +1867,13 @@
 		flex-shrink: 0;
 	}
 
-	/* ===== THE BOX (mockup `.box`) =====
-	   A flat rectangle: 1px hairline, the theme radius (10px), card fill, no
-	   glass. It deliberately establishes NO stacking context (no backdrop-filter,
-	   no z-index) so the rows order themselves against the chip row above:
-	   chip row (z 10, set in ContextPillBar) < input area (z 20; its @/slash
-	   panels open upward over the chips) < controls row (z 30, set in
-	   ControlsDock; its popovers paint over the message box). `overflow` stays
-	   VISIBLE: every popover in the composer opens out of these bounds, and
-	   clipping them would make them unreachable. */
+	/* ===== THE BOX =====
+	   A raised filled surface with a soft border. It deliberately establishes
+	   NO stacking context (no backdrop-filter, no z-index) so the rows order
+	   themselves: input area (z 20) < controls row (z 30, set in ControlsDock;
+	   its popovers paint over the text) < the context row under the box (z 40,
+	   set in ContextPillBar; its dropdowns open up over the box). `overflow`
+	   stays VISIBLE: every popover in the composer opens out of these bounds. */
 	.chat-island {
 		/* The composer's round buttons follow the theme's corners, capped at
 		   half the 32px button (a full circle). Themes write --radius in rem
@@ -1899,9 +1887,10 @@
 		position: relative;
 		display: flex;
 		flex-direction: column;
-		border-radius: var(--radius, 10px);
+		border-radius: var(--radius-composer);
 		border: 1px solid var(--border);
 		background: var(--card);
+		box-shadow: var(--shadow-s);
 		transition: border-color 0.2s ease;
 	}
 
@@ -1920,12 +1909,9 @@
 		min-height: 70px;
 	}
 
-	/* Desktop: give the empty editor a taller hit area. The caret and
-	   placeholder stay vertically centred in that box (TiptapEditor) so they
-	   line up with the circles. Don't stretch ProseMirror itself — that
-	   parked the caret at the top while the placeholder sat in the middle. */
+	/* An empty box still looks ready for a sentence or two. */
 	:global(html[data-platform='desktop']) .textarea-wrapper :global(.tiptap-editor) {
-		min-height: 3.4em;
+		min-height: 2.6em;
 	}
 
 	/* Textarea wrapper — the autocomplete panels anchor to this. */
@@ -1936,14 +1922,11 @@
 		background: transparent;
 	}
 
-	/* ===== DESKTOP LAYOUT: one grid, two arrangements =====
-	   Single line:   [+] [ text .............. ] [mic][talk|send][stop]
-	                  [ access · browser · terminal      model · effort · ring ]
-	   Wrapped:       [ text ............................................... ]
-	                  [+] [ access · browser · terminal   model · effort · ring ] [circles]
+	/* ===== THE LAYOUT =====
+	   [ text ............................................................ ]
+	   [+] [ access · browser · terminal      model · effort · ring ] [circles]
 	   The editor row's box steps aside (display: contents) so attach, the
-	   text and the circles are grid items of the box itself and can share
-	   the controls row once the text wraps. Moving them is layout only. */
+	   text and the circles are grid items of the box itself. */
 	:global(html[data-platform='desktop']) .chat-island {
 		display: grid;
 		grid-template-columns: auto minmax(0, 1fr) auto;
@@ -1952,54 +1935,35 @@
 	:global(html[data-platform='desktop']) .input-area {
 		display: contents;
 	}
-	:global(html[data-platform='desktop']) .composer-attach {
-		grid-row: 1;
-		grid-column: 1;
-		margin: 12px 0 4px 12px;
-	}
 	:global(html[data-platform='desktop']) .textarea-wrapper {
 		grid-row: 1;
-		grid-column: 2;
+		grid-column: 1 / -1;
 		z-index: 20;
-		padding: 12px 10px 4px;
+		padding: 14px 16px 2px;
 	}
-	:global(html[data-platform='desktop']) .send-cluster {
-		grid-row: 1;
-		grid-column: 3;
-		position: relative;
-		z-index: 20;
-		margin: 12px 12px 4px 0;
+	:global(html[data-platform='desktop']) .composer-attach {
+		grid-row: 2;
+		grid-column: 1;
+		margin: 0 0 8px 8px;
 	}
 	:global(html[data-platform='desktop']) .chat-island > :global(.controls-dock) {
 		grid-row: 2;
-		grid-column: 1 / -1;
-		align-self: stretch;
-	}
-	/* Wrapped: the text takes the whole first row; attach and the circles sit
-	   at the controls row's two ends, centred on it. */
-	:global(html[data-platform='desktop']) .chat-island.wrapped .textarea-wrapper {
-		grid-column: 1 / -1;
-		padding: 14px 16px 4px;
-	}
-	:global(html[data-platform='desktop']) .chat-island.wrapped .composer-attach {
-		grid-row: 2;
-		margin: 4px 0 8px 10px;
-	}
-	:global(html[data-platform='desktop']) .chat-island.wrapped .send-cluster {
-		grid-row: 2;
-		margin: 4px 10px 8px 0;
-	}
-	:global(html[data-platform='desktop']) .chat-island.wrapped > :global(.controls-dock) {
 		grid-column: 2;
-		padding: 4px 8px 8px;
+		align-self: stretch;
+		padding: 0 4px 8px;
+	}
+	:global(html[data-platform='desktop']) .send-cluster {
+		grid-row: 2;
+		grid-column: 3;
+		position: relative;
+		z-index: 20;
+		margin: 0 8px 8px 0;
 	}
 
 	/* ===== THE CIRCLES =====
-	   Attach (left), then dictate · Talk or Send · Stop (right): 32px buttons
-	   in either layout, cornered by --composer-btn-radius (a circle on most
-	   themes, a square on sharp ones). Attach and dictate are quiet
-	   (muted fill); Talk keeps the call button's accent tint; Send is the
-	   filled accent; Stop keeps its destructive tint. */
+	   Attach and dictate are quiet icons, Talk or Send the one filled action at
+	   the far right, cornered by --composer-btn-radius (a circle on most themes,
+	   a square on sharp ones). Stop keeps its destructive tint. */
 	.composer-attach {
 		display: grid;
 		place-items: center;
@@ -2009,13 +1973,13 @@
 		padding: 0;
 		border: 0;
 		border-radius: var(--composer-btn-radius);
-		background: var(--muted);
+		background: transparent;
 		color: var(--muted-foreground);
 		cursor: pointer;
 		transition: background-color 0.15s ease, color 0.15s ease, transform 0.1s ease;
 	}
 	.composer-attach:hover:not(:disabled) {
-		background: color-mix(in oklch, var(--muted) 80%, var(--foreground));
+		background: var(--hover-overlay);
 		color: var(--foreground);
 	}
 	.composer-attach:active:not(:disabled) { transform: scale(0.94); }
@@ -2024,8 +1988,7 @@
 	.composer-attach-spin { animation: composer-attach-spin 0.9s linear infinite; }
 	@keyframes composer-attach-spin { to { transform: rotate(360deg); } }
 
-	/* ===== SEND CLUSTER =====
-	   Right of the text (or at the controls row's right end once it wraps). */
+	/* ===== SEND CLUSTER ===== */
 	.send-cluster {
 		display: flex;
 		align-items: center;
@@ -2055,11 +2018,11 @@
 		width: 32px;
 	}
 	.send-cluster :global(.voice-btn:not(.recording):not(.preparing):not(.transcribing)) {
-		background: var(--muted);
+		background: transparent;
 		color: var(--muted-foreground);
 	}
 	.send-cluster :global(.voice-btn:not(.recording):not(.preparing):not(.transcribing):hover:not(:disabled)) {
-		background: color-mix(in oklch, var(--muted) 80%, var(--foreground));
+		background: var(--hover-overlay);
 		color: var(--foreground);
 	}
 	.send-cluster :global(.voice-btn:focus-visible) {
@@ -2074,20 +2037,19 @@
 		width: 32px;
 		height: 32px;
 		padding: 0;
-		background: var(--primary);
+		background: var(--action);
 		border: none;
 		border-radius: var(--composer-btn-radius);
-		color: var(--primary-foreground);
+		color: var(--action-foreground);
 		cursor: pointer;
-		transition: background-color 0.15s ease, color 0.15s ease, filter 0.12s ease, transform 0.1s ease;
+		transition: background-color 0.15s ease, color 0.15s ease, transform 0.1s ease;
 	}
 
 	.send-btn:hover:not(:disabled) {
-		filter: brightness(1.08);
+		background: var(--action-hover);
 	}
 
 	.send-btn:active:not(:disabled) {
-		filter: brightness(0.96);
 		transform: scale(0.94);
 	}
 
@@ -2127,11 +2089,11 @@
 		cursor: default;
 	}
 
-	/* Creating worktree: keep the accent fill behind the spinner. */
+	/* Creating worktree: keep the fill behind the spinner. */
 	.send-btn.creating-worktree,
 	.send-btn.creating-worktree:disabled {
-		background: var(--primary);
-		color: var(--primary-foreground);
+		background: var(--action);
+		color: var(--action-foreground);
 		cursor: wait;
 	}
 
@@ -2142,8 +2104,53 @@
 		border-radius: var(--composer-btn-radius);
 	}
 
-	/* The circles keep their 32px in the controls row too: the wrap
-	   measurement (composer-wrap.ts) compares their width across layouts. */
+	/* ===== A PHONE-WIDTH WINDOW =====
+	   44px targets and 16px text (iOS zooms the page into anything smaller). */
+	@media (max-width: 480px) {
+		:global(html[data-platform='desktop']) .chat-input-wrapper {
+			padding: 0 0.75rem 0.5rem;
+		}
+		:global(html[data-platform='desktop']) .chat-island {
+			--composer-btn-radius: min(calc(var(--radius, 10px) * 20 / 7), 20px);
+		}
+		:global(html[data-platform='desktop']) .textarea-wrapper :global(.tiptap-editor),
+		:global(html[data-platform='desktop']) .textarea-wrapper :global(.ProseMirror) {
+			font-size: 16px;
+		}
+		:global(html[data-platform='desktop']) .composer-attach {
+			width: 44px;
+			height: 44px;
+			margin: 0 0 4px 2px;
+		}
+		:global(html[data-platform='desktop']) .chat-island > :global(.controls-dock) {
+			padding: 0 0 4px;
+			gap: 4px;
+		}
+		:global(html[data-platform='desktop']) .send-cluster {
+			gap: 2px;
+			margin: 0 6px 6px 0;
+		}
+		.send-cluster :global(.voice-btn:not(.expanded):not(.preparing):not(.transcribing)) {
+			width: 44px;
+		}
+		.input-area .send-cluster :global(.voice-btn) {
+			height: 44px;
+		}
+		.send-btn,
+		.send-cluster :global(.call-circle),
+		.input-area .send-cluster :global(.stop-btn) {
+			position: relative;
+			width: 40px;
+			height: 40px;
+		}
+		.send-btn::after,
+		.send-cluster :global(.call-circle::after),
+		.input-area .send-cluster :global(.stop-btn::after) {
+			content: '';
+			position: absolute;
+			inset: -2px;
+		}
+	}
 
 	@keyframes fadeIn {
 		from { opacity: 0; }

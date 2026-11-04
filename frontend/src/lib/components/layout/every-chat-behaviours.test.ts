@@ -55,8 +55,9 @@ describe('no assistant mode anywhere', () => {
 	});
 
 	it('keeps the context chips and the browser toggle in every composer', () => {
-		// A new session shows the hero sentence in their place until its first message.
-		expect(chatInput).toMatch(/\{#if !mobileViewport && !newSession\}\s*<div class="context-pill-row"><ContextPillBar \/><\/div>\s*\{\/if\}/);
+		// A new session shows its own context row in their place until its first message.
+		expect(chatInput).toMatch(/\{#if !mobileViewport && !newSession\}\s*<ContextPillBar \/>\s*\{\/if\}/);
+		expect(chatInput).toMatch(/\{#if newSession\}\s*<NewSessionSentence \/>\s*\{\/if\}/);
 		expect(chatInput).toMatch(/<ControlsDock[\s\S]*?\{onBrowserToggle\}/);
 	});
 });

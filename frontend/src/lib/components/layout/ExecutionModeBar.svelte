@@ -69,22 +69,17 @@
 		 */
 		between?: Snippet;
 		/**
-		 * `sentence`: the new-session hero's "… on <branch> in <a worktree>"
-		 * words instead of chips. The branch word opens the same branch menu,
-		 * dropped down centred under it; the worktree word toggles the worktree.
-		 * The runner is never shown (the hero names it first).
+		 * `sentence`: the new-session row's branch and worktree controls instead
+		 * of chips. The branch one opens the same branch menu, dropped down
+		 * under it; the worktree one toggles the worktree. The runner is never
+		 * shown (the row names it first).
 		 */
 		variant?: 'chips' | 'sentence';
-		/**
-		 * Sentence variant: rendered right after its last word (the full stop),
-		 * so the dialogs mounted after the sentence leave no gap before it.
-		 */
-		after?: Snippet;
 		/** Show the open runner menu inside this element (the phone sheet's "Runs on" page). */
 		runnerMenuHost?: HTMLElement | null;
 	}
 
-	let { sheetMode = false, between, after, runnerMenuHost = null, variant = 'chips' }: Props = $props();
+	let { sheetMode = false, between, runnerMenuHost = null, variant = 'chips' }: Props = $props();
 	const sentence = $derived(variant === 'sentence' && !sheetMode);
 	let branchTriggerRef = $state<HTMLButtonElement | null>(null);
 	/** The open branch menu; the sentence variant floats it to <body>, outside dropdownRef. */
@@ -600,38 +595,38 @@
 {/snippet}
 
 {#if sentence}
-<!-- Hero sentence: "… on <branch> in <a worktree>". The parent supplies
-     "in <project>" (and, in local mode, "on <checkout branch>") as `between`. -->
-<span class="execution-mode-sentence">
-	{@render between?.()}
-	{#if $activeSession.worktreeIntent === 'worktree'}
-		on <span class="branch-selector sentence-part" bind:this={dropdownRef}><button
-			bind:this={branchTriggerRef}
-			type="button"
-			class="sentence-tok"
-			class:open={showBranchDropdown}
-			onclick={toggleDropdown}
-			aria-label="Worktree branch: {isAutoMode ? `a new branch from ${baseBranch}` : currentBranch}"
-			aria-haspopup="dialog"
-			aria-expanded={showBranchDropdown}
-			title={isAutoMode ? `A new branch from ${baseBranch}, named from your message.` : `Branch: ${currentBranch}`}
-		>{isAutoMode ? `a new branch from ${baseBranch}` : currentBranch}</button>{#if showBranchDropdown}<div
-				class="branch-dropdown sentence-menu"
-				role="dialog"
-				aria-label="Worktree branch"
-				bind:this={branchMenuRef}
-				use:floatingMenu={{ anchor: branchTriggerRef, align: 'center' }}
-			>{@render branchMenu()}</div>{/if}</span>
-	{/if}
-	{#if isGitRepo}
-		in <button
-			type="button"
-			class="sentence-tok"
-			aria-pressed={worktreeOn}
-			onclick={toggleWorktree}
-			aria-label={worktreeOn ? 'Runs in a worktree. Switch to the main checkout' : 'Runs in the main checkout. Switch to a worktree'}
-			title={worktreeOn ? 'Runs in an isolated git worktree. Click for the main checkout.' : 'Runs in the main checkout. Click for an isolated git worktree.'}
-		>{worktreeOn ? 'a worktree' : 'the main checkout'}</button>{/if}{@render after?.()}</span>
+<!-- The new-session row: the parent supplies the project (and, in local mode,
+     the checkout branch) as `between`. -->
+{@render between?.()}
+{#if $activeSession.worktreeIntent === 'worktree'}
+	<span class="branch-selector sentence-part" bind:this={dropdownRef}><button
+		bind:this={branchTriggerRef}
+		type="button"
+		class="sentence-tok"
+		class:open={showBranchDropdown}
+		onclick={toggleDropdown}
+		aria-label="Worktree branch: {isAutoMode ? `a new branch from ${baseBranch}` : currentBranch}"
+		aria-haspopup="dialog"
+		aria-expanded={showBranchDropdown}
+		title={isAutoMode ? `A new branch from ${baseBranch}, named from your message.` : `Branch: ${currentBranch}`}
+	><GitBranch size={14} strokeWidth={1.75} aria-hidden="true" /><span class="sentence-tok-label">{isAutoMode ? `New branch from ${baseBranch}` : currentBranch}</span></button>{#if showBranchDropdown}<div
+			class="branch-dropdown sentence-menu"
+			role="dialog"
+			aria-label="Worktree branch"
+			bind:this={branchMenuRef}
+			use:floatingMenu={{ anchor: branchTriggerRef, align: 'start' }}
+		>{@render branchMenu()}</div>{/if}</span>
+{/if}
+{#if isGitRepo}
+	<button
+		type="button"
+		class="sentence-tok"
+		aria-pressed={worktreeOn}
+		onclick={toggleWorktree}
+		aria-label={worktreeOn ? 'Runs in a worktree. Switch to the main checkout' : 'Runs in the main checkout. Switch to a worktree'}
+		title={worktreeOn ? 'Runs in an isolated git worktree. Click for the main checkout.' : 'Runs in the main checkout. Click for an isolated worktree.'}
+	><GitFork size={14} strokeWidth={1.75} aria-hidden="true" /><span class="sentence-tok-label">{worktreeOn ? 'Worktree' : 'Main checkout'}</span></button>
+{/if}
 {:else}
 <div class="execution-mode-bar" class:sheet-mode={sheetMode}>
 	<div class="mode-bar-row">
@@ -726,7 +721,7 @@
 				<span class="ctx-chip-cb" class:checked={worktreeOn} aria-hidden="true">
 					<Check size={9} strokeWidth={2.6} />
 				</span>
-				<span class="ctx-chip-label">worktree</span>
+				<span class="ctx-chip-label">Worktree</span>
 			</label>
 		{/if}
 		</div>
@@ -767,10 +762,6 @@
 		overflow: visible;
 	}
 
-	/* Hero sentence: the words flow inline with the parent's sentence. */
-	.execution-mode-sentence { display: inline; }
-	/* inline-flex: one unbreakable word, and the markup's own whitespace
-	   inside it never shows as a gap before the full stop. */
 	.sentence-part { display: inline-flex; position: static; }
 	/* floatingMenu owns its position; it drops down from the word. */
 	.branch-dropdown.sentence-menu {

@@ -24,7 +24,7 @@
 		selectedProjectV2Id?: string | null;
 		onSelectProject: (projectId: string, projectV2Id?: string | null) => void;
 		/**
-		 * `sentence`: the new-session hero's "with no project" word. The same
+		 * `sentence`: the new-session row's "No project" control. The same
 		 * picker drops down centred under it; picking one adds the project.
 		 */
 		variant?: 'hero' | 'sentence';
@@ -175,14 +175,14 @@
 		aria-label="No project. Add a project (optional: adds checkout, branch and git)"
 		title="Add a project (optional)"
 		onclick={toggleDropdown}
-	>no project</button>
+	><FolderClosed size={14} strokeWidth={1.75} aria-hidden="true" /><span class="sentence-tok-label">No project</span></button>
 	{#if showDropdown}
 		<div
 			id={pickerId}
 			class="picker-dropdown sentence-menu"
 			bind:this={listRef}
 			use:mobilePopup
-			use:floatingMenu={{ anchor: sentenceTrigger, align: 'center', enabled: !isMobileUi() }}
+			use:floatingMenu={{ anchor: sentenceTrigger, align: 'start', enabled: !isMobileUi() }}
 		>
 			<GroupedSelector
 				bind:this={groupedSelector}

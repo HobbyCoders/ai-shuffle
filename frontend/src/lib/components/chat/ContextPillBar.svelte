@@ -1,7 +1,7 @@
 <script lang="ts">
 	/**
-	 * ContextPillBar - the loose row of context chips that floats above the
-	 * chat composer box: agent · | · runner · repository · branch · worktree.
+	 * ContextPillBar - the quiet row of context controls under the chat
+	 * composer box: agent · | · runner · repository · branch · worktree.
 	 *
 	 * New draft (no durable session ID yet): every chip is a selector, because the
 	 * execution context (runner / repository / branch / worktree) has to be
@@ -19,8 +19,7 @@
 	 * session (queued work, no runner online) shows a read-only warning chip.
 	 *
 	 * `sheetMode` renders the same selectors as stacked rows inside the mobile
-	 * controls sheet. The chip dropdowns open upward since this row sits just
-	 * above the input.
+	 * controls sheet. The chip dropdowns open upward, over the box above them.
 	 */
 	import { onDestroy, untrack } from 'svelte';
 	import ProfileSelector from './ProfileSelector.svelte';
@@ -520,7 +519,6 @@
 	<!-- A no-project chat has no repository or execution controls, but a saved
 	     one still shows its runner so it can move to another worker (#639). -->
 	{#if $activeSession.mode !== 'chat' || !isEmptyState}
-	<span class="ctx-sep" aria-hidden="true"></span>
 
 	{#if isEmptyState}
 		{#if $activeSession.project || $activeSession.projectV2Id}
@@ -731,23 +729,25 @@
 {/if}
 
 <style>
-	/* The chip row floats above the composer box with a visible gap (mockup
-	   `.ctx`). Its dropdowns open upward; the stacking level keeps them below
-	   the input area's @/slash autocomplete panels.
+	/* The row sits under the composer box. Its dropdowns open upward over the
+	   box, so it stacks above the box's own rows (input area 20, controls 30).
 
-	   One line at every width: on a phone the repository and branch names
-	   shrink to an ellipsis instead of wrapping. The chips fill in after the
-	   first paint (the restored session, then the projects list), so a row
-	   that wrapped grew a second line then and moved the composer (#818). */
+	   One line at every width: the repository and branch names shrink to an
+	   ellipsis instead of wrapping. The chips fill in after the first paint
+	   (the restored session, then the projects list), and a row that wrapped
+	   grew a second line then and moved the composer (#818). */
 	.context-pill-bar {
 		position: relative;
-		z-index: 10;
+		z-index: 40;
 		display: flex;
 		flex-wrap: nowrap;
 		align-items: center;
-		gap: 6px;
-		margin: 0 0 10px 2px;
+		gap: 2px;
+		margin: 8px 0 0 6px;
 		min-width: 0;
+	}
+	@media (max-width: 480px) {
+		.context-pill-bar { margin: 2px 0 0; }
 	}
 
 	.context-pill-bar.sheet-mode {
@@ -760,14 +760,9 @@
 		margin: 0;
 	}
 
-	.sheet-mode .ctx-sep {
-		display: none;
-	}
-
 	/* Who shrinks on a narrow row: the repository and branch names first, the
 	   agent's name less, the runner ("Local" or the worker's name) and the
 	   worktree box not at all. */
-	.context-pill-bar:not(.sheet-mode) > .ctx-sep,
 	.context-pill-bar:not(.sheet-mode) > .runner-badge-wrap,
 	.context-pill-bar:not(.sheet-mode) .wt-indicator {
 		flex-shrink: 0;
@@ -778,11 +773,11 @@
 		min-width: 0;
 	}
 
-	/* A phone-width row keeps room for the names: the menu chevrons go and the
-	   worktree chip is its tick box alone (its title and label still name it). */
+	/* A phone-width row keeps room for the names: labels only, without chevrons;
+	   the worktree chip is its tick box alone (its title and label still name it). */
 	@media (max-width: 480px) {
-		.context-pill-bar:not(.sheet-mode) :global(.ctx-chip .ctx-chip-chev),
-		.context-pill-bar:not(.sheet-mode) :global(.ctx-chip svg.lucide-chevron-down) {
+		.context-pill-bar:not(.sheet-mode) :global(.ctx-chip > svg),
+		.context-pill-bar:not(.sheet-mode) :global(.ctx-chip > :where(span, div):not(.ctx-chip-cb) > svg) {
 			display: none;
 		}
 
@@ -993,17 +988,6 @@
 		}
 	}
 
-	/* Remote-placed session: a primary tint so the runner chip is
-	   distinguishable from the local one. */
-	.ctx-chip.runner {
-		color: var(--primary);
-		background: color-mix(in oklab, var(--primary) 12%, var(--muted));
-	}
-
-	.ctx-chip.runner :global(svg) {
-		color: var(--primary);
-	}
-
 	/* A move/continue in flight: the chip carries the progress label and
 	   cannot be clicked again until the request settles. */
 	.ctx-chip.runner.busy {
@@ -1011,12 +995,10 @@
 		color: var(--foreground);
 	}
 
-	/* Brief confirmation once the session runs on the new worker. Theme
-	   tokens only: no preset defines --success, so it stayed the app's green
-	   under every theme (#1809). The tick carries the meaning. */
+	/* Brief confirmation once the session runs on the new worker. The tick
+	   carries the meaning. */
 	.ctx-chip.runner.done {
 		color: var(--foreground);
-		background: color-mix(in oklab, var(--primary) 18%, var(--muted));
 	}
 
 	/* Long device names in the progress label must not push the row wider
@@ -1029,7 +1011,6 @@
 	   reads as an advisory (informational — there is no adopt/action here). */
 	.ctx-chip.degraded {
 		color: var(--warning);
-		background: color-mix(in oklab, var(--warning) 12%, var(--muted));
 	}
 
 	.ctx-chip.degraded :global(svg) {

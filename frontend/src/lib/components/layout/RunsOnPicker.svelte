@@ -1,6 +1,7 @@
 <script lang="ts">
+	import { Monitor } from 'lucide-svelte';
 	/**
-	 * RunsOnPicker — the worker word in the new-session sentence ("Runs on
+	 * RunsOnPicker — the worker control in the new-session row ("Runs on
 	 * <worker> in …", NewSessionSentence). The trigger is the worker's name as
 	 * a plain underlined word (no online dot: presence shows in the menu rows),
 	 * and the menu drops down centred under it.
@@ -213,7 +214,7 @@
 		aria-expanded={open}
 		aria-label="Runs on {label}{online === false ? ' (offline)' : ''}"
 		title={intent ? `This session will run on ${intent.name}` : 'This session will run on this worker'}
-	>{label}</button>
+	><Monitor size={14} strokeWidth={1.75} aria-hidden="true" /><span class="sentence-tok-label">{label}</span></button>
 	{#if open}
 		<!-- Floats to <body>: the hero is its own stacking context, so an
 		     in-place menu painted under the composer below it. -->
@@ -224,7 +225,7 @@
 			aria-label="Where this session runs"
 			bind:this={menuRef}
 			onkeydown={onMenuKeydown}
-			use:floatingMenu={{ anchor: triggerRef, align: 'center' }}
+			use:floatingMenu={{ anchor: triggerRef, align: 'start' }}
 		>
 			<WorkerMenuList
 				items={rows}
@@ -240,7 +241,7 @@
 </div>
 
 <style>
-	/* One inline word in the sentence; the look is `.sentence-tok` (app.css). */
+	/* The look is `.sentence-tok` (app.css). */
 	/* inline-flex: the markup's own whitespace never shows beside the word. */
 	.runs-on-wrap { display: inline-flex; }
 	.runs-on-menu:focus { outline: none; }

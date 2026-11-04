@@ -107,7 +107,7 @@
 	<button type="button" class="sentence-tok" class:open bind:this={trigger}
 		aria-label="Workspace folders: {projectName}{folderIds.length ? ` and ${folderIds.length} more` : ''}"
 		aria-haspopup="dialog" aria-expanded={open} title="Workspace folders" onclick={toggle}
-	>{projectName}{#if folderIds.length}<span class="sentence-count">+{folderIds.length}</span>{/if}</button>
+	><FolderClosed size={14} strokeWidth={1.75} aria-hidden="true" /><span class="sentence-tok-label">{projectName}</span>{#if folderIds.length}<span class="sentence-count">+{folderIds.length}</span>{/if}</button>
 	{:else}
 	<button type="button" class="ctx-chip repo-chip" class:open bind:this={trigger}
 		aria-label="Workspace folders: {projectName}" aria-haspopup="dialog" aria-expanded={open}
@@ -120,7 +120,7 @@
 	{/if}
 	{#if open}
 		<div class="workspace-dropdown" class:floating={sentence} role="dialog" aria-label="Workspace folders" aria-busy={saving}
-			bind:this={panel} use:floatingMenu={{ anchor: trigger, align: 'center', enabled: sentence }}>
+			bind:this={panel} use:floatingMenu={{ anchor: trigger, align: 'start', enabled: sentence }}>
 			<div class="menu-heading">Workspace folders</div>
 			<div class="folder-list">
 				<div class="folder-row" title={mainProject?.path ?? projectName}>

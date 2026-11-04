@@ -705,16 +705,12 @@ html:root[data-platform='mobile'] .banner-close {
 	min-height: 44px;
 }
 
-/* ── The new-session screen: centred agent + "Runs on …" sentence ─────────── */
+/* ── The new-session screen: a question over the composer ─────────── */
 
 /* frontend/src/lib/components/layout/NewSessionHero.svelte — the hero is
    centred in the room above the pinned composer; the sentence may take two
    balanced lines. */
 html:root[data-platform='mobile'] .ns-hero { padding: 0 12px 20px; }
-html:root[data-platform='mobile'] .ns-hero .card-name { font-size: 26px; }
-html:root[data-platform='mobile'] .ns-sentence { font-size: 14px; line-height: 2.1; padding: 0 4px; }
-/* Each word stays a comfortable tap target without breaking the line. */
-html:root[data-platform='mobile'] .ns-sentence .sentence-tok { padding: 3px 6px; }
 
 /* frontend/src/lib/components/layout/AttachProjectSheet.svelte — a bottom
    sheet with touch-sized rows and the sidebar sheet's grab handle; dragging

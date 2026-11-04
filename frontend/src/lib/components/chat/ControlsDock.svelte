@@ -444,6 +444,8 @@
 	// Effort shows its pinned level when one is set, else "Auto" (the model's
 	// own default); access always names the effective mode (it defaults to
 	// 'default' → Ask, never blank).
+	// Effort only shows when there is something real to say: never "Unknown".
+	const showEffort = $derived(effortCapability.known ? effortLevels.length > 0 : !!effortValue);
 	const effortLabel = $derived(
 		!effortCapability.known ? (effortValue ?? 'Unknown') : !effortLevels.length ? 'Not adjustable' : effortValue ? (effortLevels.find((m) => m.value === effortValue)?.label ?? 'Auto') : 'Auto'
 	);
@@ -472,12 +474,12 @@
 			aria-expanded={mobileSheetOpen}
 			aria-label={`${mobileSheetOpen ? 'Close' : 'Open'} chat controls. Current model: ${modelButtonLabel}`}
 		>
-			<SlidersHorizontal size={14} strokeWidth={1.8} aria-hidden="true" />
+			<SlidersHorizontal size={16} strokeWidth={1.75} aria-hidden="true" />
 		</button>
 			<div class="dock-pop-wrap desktop-controls" bind:this={permissionWrapRef} data-decision="access">
 				<button
 					type="button"
-					class="dock-txt"
+					class="dock-txt chevron-after"
 					class:open={openPopover === 'permission'}
 					class:binding-pending={permissionPending}
 					onclick={() => togglePopover('permission')}
@@ -558,7 +560,7 @@
 				title="Toggle live browser view"
 				aria-pressed={browserOpen}
 			>
-				<Globe size={14} strokeWidth={1.8} aria-hidden="true" />
+				<Globe size={16} strokeWidth={1.75} aria-hidden="true" />
 			</button>
 		{/if}
 
@@ -575,7 +577,7 @@
 				title={terminal.disabledReason ?? 'Toggle terminal'}
 				aria-pressed={terminal.open}
 			>
-				<SquareTerminal size={14} strokeWidth={1.8} aria-hidden="true" />
+				<SquareTerminal size={16} strokeWidth={1.75} aria-hidden="true" />
 			</button>
 		{/if}
 
@@ -585,10 +587,19 @@
 	<!-- One right group at every width. Only model/effort hide in the phone shell;
 	     the context producer stays mounted, preserving its fetch and open popover. -->
 	<div class="dock-group dock-right">
+		<!-- One producer across responsive web widths, first in the group so an idle
+		     ring leaves no gap between the model and the circles. The registered phone shell
+		     owns its quick-bar ring; its CSS-hidden dock must not start another. -->
+		{#if !ControlsSheet}
+		<div class="mobile-controls">
+			<ContextUsageBar onOpenChange={onUsageOpenChange} />
+		</div>
+		{/if}
 		<div class="dock-pop-wrap desktop-controls model-wrap" bind:this={modelWrapRef}>
 			<button
 				type="button"
 				class="dock-txt model-btn"
+				class:chevron-after={!showEffort}
 				class:open={openPopover === 'model'}
 				class:warn={rerouted && !voiceLane}
 				disabled={modelLocked}
@@ -625,10 +636,12 @@
 			{/if}
 		</div>
 
+		{#if showEffort}
+		<span class="dock-dot desktop-controls" aria-hidden="true">·</span>
 		<div class="dock-pop-wrap desktop-controls" bind:this={effortWrapRef}>
 			<button
 				type="button"
-				class="dock-tag effort-btn"
+				class="dock-txt effort-btn chevron-after"
 				class:open={openPopover === 'effort'}
 				disabled={modelLocked}
 				onclick={() => { if (!modelLocked) togglePopover('effort'); }}
@@ -660,13 +673,6 @@
 					/>
 				</div>
 			{/if}
-		</div>
-
-		<!-- One producer across responsive web widths. The registered phone shell
-		     owns its quick-bar ring; its CSS-hidden dock must not start another. -->
-		{#if !ControlsSheet}
-		<div class="mobile-controls">
-			<ContextUsageBar onOpenChange={onUsageOpenChange} />
 		</div>
 		{/if}
 	</div>
@@ -723,8 +729,8 @@
 {/if}
 
 <style>
-	/* ===== CONTROLS ROW (mockup `.controls`) =====
-	   No surface of its own — the box above provides the hairline frame. */
+	/* ===== CONTROLS ROW =====
+	   No surface of its own: the box provides the frame. */
 	.controls-dock {
 		/* Every popover in this row opens UPWARD over the input area directly
 		   above it. That area sets `z-index: 20`, so the row is lifted above it
@@ -735,6 +741,7 @@
 		align-items: center;
 		gap: 12px;
 		padding: 4px 10px 10px 14px;
+		min-width: 0;
 		overflow: visible;
 	}
 
@@ -750,7 +757,6 @@
 	.dock-right {
 		margin-left: auto;
 	}
-	.model-btn:disabled { display: inline-flex; align-items: center; gap: 4px; }
 	.model-btn span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 	.dock-pop-wrap {
@@ -760,32 +766,40 @@
 		align-items: center;
 	}
 
-	/* ===== PLAIN-TEXT CONTROLS (mockup `.txt`) ===== */
+	/* ===== PLAIN-TEXT CONTROLS ===== */
 	.dock-txt {
 		display: inline-flex;
 		align-items: center;
+		gap: 4px;
+		height: 28px;
 		max-width: 100%;
 		min-width: 0;
-		padding: 3px 5px;
+		padding: 0 7px;
 		background: transparent;
 		border: 0;
-		border-radius: 4px;
+		border-radius: var(--radius-control);
 		color: var(--muted-foreground);
 		font: inherit;
-		font-size: 12.5px;
-		font-weight: 500;
+		font-size: var(--fs-small);
+		font-weight: 450;
 		line-height: 1;
 		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
 		cursor: pointer;
 		transition: background-color 0.12s ease, color 0.12s ease;
 	}
 
 	.dock-txt:hover,
 	.dock-txt.open {
-		background: var(--muted);
+		background: var(--hover-overlay);
 		color: var(--foreground);
+	}
+
+	/* Model and effort read as one control: "Fake AI · High ⌄". */
+	.dock-dot {
+		margin: 0 -5px;
+		color: var(--subtle-foreground);
+		font-size: var(--fs-small);
+		pointer-events: none;
 	}
 
 	/* The chat's own value is on its way (#418): a quiet breathing label rather
@@ -806,7 +820,6 @@
 
 	.model-btn {
 		max-width: min(220px, 30vw);
-		display: block;
 	}
 
 	/* Reroute: amber text — the same treatment the old model pill carried, so
@@ -818,23 +831,23 @@
 		background: color-mix(in oklch, var(--warning) 10%, transparent);
 	}
 
-	/* ===== ICON BUTTONS (mockup `.ico`) ===== */
+	/* ===== ICON BUTTONS ===== */
 	.dock-ico {
 		display: grid;
 		place-items: center;
-		width: 24px;
-		height: 24px;
+		width: 28px;
+		height: 28px;
 		padding: 0;
 		background: transparent;
 		border: 0;
-		border-radius: 5px;
+		border-radius: var(--radius-control);
 		color: var(--muted-foreground);
 		cursor: pointer;
 		transition: background-color 0.12s ease, color 0.12s ease;
 	}
 
 	.dock-ico:hover:not(:disabled) {
-		background: var(--muted);
+		background: var(--hover-overlay);
 		color: var(--foreground);
 	}
 
@@ -844,8 +857,8 @@
 
 	.dock-ico.browser-toggle-btn.active,
 	.dock-ico.terminal-toggle-btn.active {
-		background: color-mix(in oklch, var(--primary) 12%, transparent);
-		color: var(--primary);
+		background: var(--muted);
+		color: var(--foreground);
 	}
 
 	.dock-ico:disabled {
@@ -853,38 +866,10 @@
 		cursor: not-allowed;
 	}
 
-	/* ===== EFFORT TAG (mockup `.tag`) ===== */
-	.dock-tag {
-		display: inline-flex;
-		align-items: center;
-		padding: 4px 7px;
-		background: var(--muted);
-		border: 0;
-		border-radius: 4px;
-		color: var(--foreground);
-		font: inherit;
-		font-size: 11.5px;
-		font-weight: 500;
-		line-height: 1;
-		white-space: nowrap;
-		cursor: pointer;
-		transition: background-color 0.12s ease, box-shadow 0.12s ease;
-	}
-
-	.dock-tag:hover {
-		background: color-mix(in oklch, var(--muted) 82%, var(--foreground));
-	}
-
-	.dock-tag.open {
-		background: color-mix(in oklch, var(--muted) 82%, var(--foreground));
-		box-shadow: inset 0 0 0 1px var(--border-strong);
-	}
-
 	.dock-txt:focus-visible,
-	.dock-ico:focus-visible,
-	.dock-tag:focus-visible {
-		outline: 1px solid var(--primary);
-		outline-offset: 2px;
+	.dock-ico:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 1px;
 	}
 
 	/* ===== POPOVERS =====
@@ -1031,6 +1016,14 @@
 	.access-check {
 		flex-shrink: 0;
 		color: var(--primary);
+	}
+
+	/* ===== A PHONE-WIDTH WINDOW: 44px targets ===== */
+	@media (max-width: 480px) {
+		.dock-txt { height: 44px; padding: 0 6px; }
+		.dock-ico { width: 40px; height: 44px; }
+		.dock-group { gap: 0; }
+		.chevron-after::after { display: none; }
 	}
 
 	/* ===== MOBILE ===== */

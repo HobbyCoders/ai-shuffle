@@ -279,7 +279,7 @@ describe('ControlsDock split controls', () => {
 		expect(screen.queryByRole('button', { name: /more input options/i })).toBeNull();
 	});
 
-	it('orders the row access · browser · terminal on the left, model · effort · ring on the right', () => {
+	it('orders the row access · browser · terminal on the left, ring · model · effort on the right', () => {
 		const { container } = renderDock({ onBrowserToggle: vi.fn(),
 			terminal: { open: false, disabledReason: null, toggle: vi.fn(), preload: vi.fn() } });
 
@@ -297,7 +297,7 @@ describe('ControlsDock split controls', () => {
 		expect(left && right && (left.compareDocumentPosition(right) & Node.DOCUMENT_POSITION_FOLLOWING))
 			.toBeTruthy();
 		expect(browser.querySelector('svg.lucide-globe')).toBeTruthy();
-		expect(browser.querySelector('svg')?.getAttribute('width')).toBe('14');
+		expect(browser.querySelector('svg')?.getAttribute('width')).toBe('16');
 	});
 
 	it('leaves attach, dictate and the call to the composer circles', () => {

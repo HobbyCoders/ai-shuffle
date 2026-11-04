@@ -167,7 +167,7 @@
 		aria-haspopup="menu"
 		aria-expanded={showDropdown}
 		title={isStreaming ? 'Branch locked during streaming' : currentBranch ? `Branch: ${currentBranch}` : 'Select branch'}
-	>{displayBranch ?? 'the current branch'}</button>
+	><GitBranch size={14} strokeWidth={1.75} aria-hidden="true" /><span class="sentence-tok-label">{displayBranch ?? 'Current branch'}</span></button>
 	{:else}
 	<button
 		type="button"
@@ -208,7 +208,7 @@
 
 	{#if showDropdown}
 		<div class="branch-dropdown" class:floating={sentence} role="menu" aria-label="Branch selection"
-			bind:this={menuRef} use:floatingMenu={{ anchor: sentenceTrigger, align: 'center', enabled: sentence }}>
+			bind:this={menuRef} use:floatingMenu={{ anchor: sentenceTrigger, align: 'start', enabled: sentence }}>
 			{#if showSearch}
 				<div class="dropdown-search">
 					<input
