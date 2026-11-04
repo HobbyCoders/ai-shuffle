@@ -43,6 +43,7 @@
 	import { subagentChats } from '$lib/stores/subagent-chats';
 	import { openHeaderDropdown, openDropdown, closeDropdown } from '$lib/stores/header-dropdowns';
 	import { getClusterGitState } from '$lib/api/installs';
+	import { selfWorkerName, workerDisplayName } from '$lib/components/ui/worker-name';
 	import { workerInstalls, refreshWorkerPresence, watchWorkerPresence, presenceOf } from '$lib/stores/worker-presence';
 	import {
 		adoptSession,
@@ -190,6 +191,7 @@
 	// Live presence (shared store, refreshed while the menu is open), so a
 	// worker that goes offline while the menu is open turns red and disabled.
 	const runnerInstalls = $derived($workerInstalls ?? []);
+	const selfName = $derived(selfWorkerName($workerInstalls));
 	let runnerEligibility = $state<EligibilityMap>(null);
 	let runnerMenuLoading = $state(false);
 	let runnerMenuError = $state('');
@@ -557,7 +559,7 @@
 						: badge?.title || 'Runs on this device — move this session to another worker'}
 					aria-label={runnerBusy
 						? runnerBusy.label
-						: `Runner: ${badge?.runner?.deviceName ?? 'Local'}${badge?.runner && !badge.runner.online ? ' (offline)' : ''}`}
+						: `Runner: ${badge?.runner?.deviceName ? workerDisplayName(badge.runner.deviceName) : selfName}${badge?.runner && !badge.runner.online ? ' (offline)' : ''}`}
 					aria-describedby={sheetMode && !runnerBusy && !runnerDone ? moveHintId : undefined}
 					aria-busy={runnerBusy ? 'true' : undefined}
 					disabled={runnerLocked}
@@ -578,7 +580,7 @@
 							<MonitorOff size={12} strokeWidth={1.6} aria-hidden="true" />
 						{/if}
 						<WorkerStatusDot online={!badge?.runner || badge.runner.online} />
-						<span class="ctx-chip-label">{badge?.runner?.deviceName ?? 'Local'}</span>
+						<span class="ctx-chip-label">{badge?.runner?.deviceName ? workerDisplayName(badge.runner.deviceName) : selfName}</span>
 						{#if sheetMode}
 							<!-- The phone's Chat controls draw this row as "Runs on"; the
 							     caption says the row is where a chat moves (#645). -->
@@ -680,7 +682,7 @@
 			<span class="ctx-chip readonly" title="Runs on this device">
 				<Monitor size={12} strokeWidth={1.6} aria-hidden="true" />
 				<WorkerStatusDot online />
-				<span class="ctx-chip-label">Local</span>
+				<span class="ctx-chip-label">{selfName}</span>
 			</span>
 		{/if}
 

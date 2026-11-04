@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { selfWorkerName, workerDisplayName } from '$lib/components/ui/worker-name';
 	import { Monitor } from 'lucide-svelte';
 	/**
 	 * RunsOnPicker — the worker control in the new-session row ("Runs on
@@ -42,11 +43,11 @@
 
 	const installs = $derived<Install[]>(failed ? [] : ($workerInstalls ?? []));
 	const peers = $derived(peerRunners(installs));
-	const selfName = $derived(installs.find((i) => i.is_self)?.device_name ?? 'This worker');
+	const selfName = $derived(selfWorkerName(installs));
 	const intent = $derived($activeSession.deviceIntent);
 	const worktreeOn = $derived($activeSession.worktreeIntent === 'worktree');
 	const hasProject = $derived(!!($activeSession.project || $activeSession.projectV2Id));
-	const label = $derived(intent ? intent.name : selfName);
+	const label = $derived(intent ? workerDisplayName(intent.name) : selfName);
 	const online = $derived.by((): boolean | null => (intent ? presenceOf(installs, [intent.id]) : true));
 	// The picked project's per-worker state, when this worker can set projects up elsewhere.
 	const syncRow = $derived(hasProject && $projectsOverviewSupported === true
@@ -101,7 +102,7 @@
 		},
 		...peers.map((install): WorkerMenuRow => ({
 			id: install.id,
-			label: install.device_name,
+			label: workerDisplayName(install.device_name),
 			online: install.online,
 			disabled: isBlockedForNewChat(install, worktreeOn, hasProject ? eligibility : null, syncRow),
 			title: newChatRowTitle(install, worktreeOn, hasProject ? eligibility : null, syncRow),

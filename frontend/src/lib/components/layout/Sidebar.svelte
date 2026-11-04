@@ -207,8 +207,8 @@
 
 	function projectLabel(s: Session): string {
 		if (s.project_name) return s.project_name;
-		if (s.project_id) return projectsById.get(s.project_id)?.name || 'Ungrouped';
-		return 'Ungrouped';
+		if (s.project_id) return projectsById.get(s.project_id)?.name || 'No project';
+		return 'No project';
 	}
 
 	// --- open-PR detection ---------------------------------------------------
@@ -317,7 +317,7 @@
 		const map = new Map<string, string>();
 		for (const s of sidebarSessions) {
 			const key = projectKey(s);
-			if (!map.has(key)) map.set(key, key === UNGROUPED_PROJECT ? 'Ungrouped' : projectLabel(s));
+			if (!map.has(key)) map.set(key, key === UNGROUPED_PROJECT ? 'No project' : projectLabel(s));
 		}
 		return [...map.entries()]
 			.map(([id, label]) => ({ id, label }))

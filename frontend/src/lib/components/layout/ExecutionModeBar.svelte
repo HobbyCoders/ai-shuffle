@@ -29,6 +29,7 @@
 	} from './execution-mode-eligibility';
 	import { loadProjectsOverview, projectsOverview, projectsOverviewSupported } from '$lib/stores/projects-overview';
 	import WorkerStatusDot from '$lib/components/ui/WorkerStatusDot.svelte';
+	import { selfWorkerName, workerDisplayName } from '$lib/components/ui/worker-name';
 	import WorkerMenuList, { type WorkerMenuRow } from '$lib/components/ui/WorkerMenuList.svelte';
 
 	// Local's row id; install ids are UUID-like, so this never collides.
@@ -265,6 +266,7 @@
 	// Live presence (shared store, refreshed while watched below), so a worker
 	// that goes offline while the menu is open turns red and blocked in place.
 	const installs = $derived<Install[]>(installsFailed ? [] : ($workerInstalls ?? []));
+	const selfName = $derived(selfWorkerName(installs));
 
 	// Per-install checkout eligibility for the selected project (ruling D6),
 	// keyed by install id. `null` = UNKNOWN — no project selected, the git-state
@@ -345,7 +347,7 @@
 	const runnerRows = $derived<WorkerMenuRow[]>([
 		{
 			id: LOCAL_ROW_ID,
-			label: 'Local',
+			label: selfName,
 			online: true,
 			disabled: false,
 			title: selfNote === 'not set up · set up' && syncRow
@@ -357,7 +359,7 @@
 		},
 		...peers.map((install): WorkerMenuRow => ({
 			id: install.id,
-			label: install.device_name,
+			label: workerDisplayName(install.device_name),
 			online: install.online,
 			disabled: isBlockedForNewChat(install, worktreeOn, eligibility, syncRow),
 			title: newChatRowTitle(install, worktreeOn, eligibility, syncRow),
@@ -641,7 +643,7 @@
 				class:open={showModeDropdown}
 				onclick={toggleModeDropdown}
 				title={deviceIntent ? `Run this session on ${deviceIntent.name}` : 'Run this session on this device'}
-				aria-label="Runner: {deviceIntent ? deviceIntent.name : 'Local'}{deviceIntentOnline === false ? ' (offline)' : ''}"
+				aria-label="Runner: {deviceIntent ? workerDisplayName(deviceIntent.name) : selfName}{deviceIntentOnline === false ? ' (offline)' : ''}"
 				aria-haspopup="menu"
 				aria-expanded={showModeDropdown}
 			>
@@ -653,7 +655,7 @@
 				{#if deviceIntentOnline !== null}
 					<WorkerStatusDot online={deviceIntentOnline} />
 				{/if}
-				<span class="ctx-chip-label mode-trigger-label">{deviceIntent ? deviceIntent.name : 'Local'}</span>
+				<span class="ctx-chip-label mode-trigger-label">{deviceIntent ? workerDisplayName(deviceIntent.name) : selfName}</span>
 				{#if sheetMode}
 					<ChevronDown size={12} strokeWidth={1.5} />
 				{/if}

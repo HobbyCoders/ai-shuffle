@@ -50,7 +50,7 @@ function input(overrides: Partial<RunnerBadgeMenuInput> = {}): RunnerBadgeMenuIn
 describe('runnerBadgeMenuItems', () => {
 	it('lists this worker first as the checked, non-moving row for a local session', () => {
 		const [current, ...rest] = runnerBadgeMenuItems(input({ ownerId: self.id, isRemote: false }));
-		expect(current).toMatchObject({ id: 'current-runner', label: 'Local', checked: true, action: null, disabled: false, online: true });
+		expect(current).toMatchObject({ id: 'current-runner', label: self.device_name, checked: true, action: null, disabled: false, online: true });
 		expect(rest.every((i) => !i.checked)).toBe(true);
 	});
 

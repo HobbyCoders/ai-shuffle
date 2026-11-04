@@ -217,7 +217,7 @@ describe.each([false, true])('worktree indicator (sheetMode=%s)', (sheetMode) =>
 		appSessions.store.set([{ id: base.sessionId, project_v2_id: 'pv2-project',
 			instance_id: 'local', is_remote: false, controllable: true }]);
 		listInstallsMock.mockResolvedValue({ installs: [
-			{ id: 'local', is_self: true, online: true, device_name: 'This worker' },
+			{ id: 'local', is_self: true, online: true, device_name: 'Local' },
 			{ id: 'peer', is_self: false, online: true, device_name: 'Other worker' },
 			{ id: 'offline', is_self: false, online: false, device_name: 'Offline worker' },
 			{ id: 'missing', is_self: false, online: true, device_name: 'Missing checkout' }
@@ -261,7 +261,7 @@ describe.each([false, true])('worktree indicator (sheetMode=%s)', (sheetMode) =>
 		appSessions.store.set([{ id: base.sessionId, project_v2_id: 'pv2-project',
 			instance_id: 'local', is_remote: false, controllable: true }]);
 		listInstallsMock.mockResolvedValue({ installs: [
-			{ id: 'local', is_self: true, online: true, device_name: 'This worker' },
+			{ id: 'local', is_self: true, online: true, device_name: 'Local' },
 			{ id: 'peer', is_self: false, online: true, device_name: 'Other worker' }
 		] });
 		getClusterGitStateMock.mockResolvedValue({ project_v2_id: 'pv2-project', installs: [
@@ -402,7 +402,7 @@ describe.each([false, true])('worktree indicator (sheetMode=%s)', (sheetMode) =>
 		appSessions.store.set([{ id: base.sessionId, project_v2_id: 'pv2-project',
 			instance_id: 'local', is_remote: false, controllable: true }]);
 		listInstallsMock.mockResolvedValue({ installs: [
-			{ id: 'local', is_self: true, online: true, device_name: 'This worker' },
+			{ id: 'local', is_self: true, online: true, device_name: 'Local' },
 			{ id: 'peer', is_self: false, online: true, device_name: 'Other worker' }
 		] });
 		getClusterGitStateMock.mockResolvedValue({ project_v2_id: 'pv2-project', installs: [
@@ -523,7 +523,7 @@ describe.each([false, true])('worktree indicator (sheetMode=%s)', (sheetMode) =>
 		session.store.set({ ...base, sessionId: 'chat', project: null, projectV2Id: null, mode: 'chat' });
 		appSessions.store.set([{ id: 'chat', instance_id: 'local', is_remote: false, controllable: true }]);
 		listInstallsMock.mockResolvedValue({ installs: [
-			{ id: 'local', is_self: true, online: true, device_name: 'This worker' },
+			{ id: 'local', is_self: true, online: true, device_name: 'Local' },
 			{ id: 'peer', is_self: false, online: true, device_name: 'Other worker' }
 		] });
 		vi.mocked(moveSession).mockResolvedValue({ moved: true } as any);
@@ -653,7 +653,7 @@ describe('worker presence dots', () => {
 		appSessions.store.set([{ id: base.sessionId, project_v2_id: 'pv2-project',
 			instance_id: 'local', is_remote: false, controllable: true }]);
 		listInstallsMock.mockResolvedValue({ installs: [
-			{ id: 'local', is_self: true, online: true, device_name: 'This worker' },
+			{ id: 'local', is_self: true, online: true, device_name: 'Local' },
 			{ id: 'unraid', is_self: false, online: true, device_name: 'ServerWorker' },
 			{ id: 'linux-worker', is_self: false, online: false, device_name: 'linux-worker' }
 		] });
@@ -685,7 +685,7 @@ describe('worker presence dots', () => {
 		appSessions.store.set([{ id: base.sessionId, project_v2_id: 'pv2-project',
 			instance_id: 'local', is_remote: false, controllable: true }]);
 		const registry = (online: boolean) => ({ installs: [
-			{ id: 'local', is_self: true, online: true, device_name: 'This worker' },
+			{ id: 'local', is_self: true, online: true, device_name: 'Local' },
 			{ id: 'unraid', is_self: false, online, device_name: 'ServerWorker' }
 		] });
 		listInstallsMock.mockResolvedValue(registry(true));
@@ -711,7 +711,7 @@ describe('the active runner menu lists the current worker like the new-chat pick
 		appSessions.store.set([{ id: base.sessionId, project_v2_id: 'pv2-project',
 			instance_id: 'local', is_remote: false, controllable: true }]);
 		listInstallsMock.mockResolvedValue({ installs: [
-			{ id: 'local', is_self: true, online: true, device_name: 'This worker' },
+			{ id: 'local', is_self: true, online: true, device_name: 'Local' },
 			{ id: 'unraid', is_self: false, online: true, device_name: 'ServerWorker' }
 		] });
 		const view = render(ContextPillBar);
@@ -731,7 +731,7 @@ describe('the active runner menu lists the current worker like the new-chat pick
 		appSessions.store.set([{ id: 'remote', project_v2_id: 'pv2-project', instance_id: 'owner',
 			device_name: 'DesktopWorker', device_online: true, is_remote: true, controllable: true }]);
 		listInstallsMock.mockResolvedValue({ installs: [
-			{ id: 'local', is_self: true, online: true, device_name: 'This worker' },
+			{ id: 'local', is_self: true, online: true, device_name: 'Local' },
 			{ id: 'owner', is_self: false, online: true, device_name: 'DesktopWorker' },
 			{ id: 'pop', is_self: false, online: false, device_name: 'linux-worker' }
 		] });
