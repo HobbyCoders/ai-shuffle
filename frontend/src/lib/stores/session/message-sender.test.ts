@@ -1118,6 +1118,56 @@ describe('Stop timeout recovery', () => {
 		});
 	});
 
+	describe('naming an unnamed Stop from the stopped send, not from what else is on the page', () => {
+		const event = (type: string, turn_id: string, seq: number, extra: Record<string, unknown> = {}) =>
+			feed.onEvent!({ type, id: `${type}-${seq}`, seq, session_id: 'sess-1', turn_id, created_at: '2026-11-04T00:00:00Z', ...extra });
+
+		function timedOutWith(...rows: Array<[string, string]>) {
+			const test = stopping(null);
+			const messages = rows.map(([content, commandId]) => ({ id: `optimistic-${commandId}`, role: 'user', content, commandId })) as ActiveSessionState['messages'];
+			test.deps.update(s => ({ ...s, messages }));
+			test.sender.stopGeneration();
+			vi.advanceTimersByTime(10000);
+			feedController.start('sess-1');
+			return test;
+		}
+
+		it('is not fooled by an older message with the same text claiming the optimistic row', () => {
+			const test = timedOutWith(['go', 'cmd-1']);
+			event('message.user', 'older', 1, { command_id: 'old', content: 'go' });
+			event('turn.completed', 'older', 2);
+			event('turn.started', 'turn-1', 3);
+			feed.onEvent!({ type: 'caught_up', seq: 3 });
+			vi.advanceTimersByTime(300);
+			let state = test.getState();
+			expect(state.liveTurnId).toBe('turn-1');
+			expect(stopRecoveryAppliesToTurn(state.stopTimedOutTurnId, state.liveTurnId)).toBe(true);
+
+			event('message.user', 'turn-1', 4, { command_id: 'cmd-1', content: 'go' });
+			vi.advanceTimersByTime(300);
+			state = test.getState();
+			expect(state.stopTimedOutTurnId).toBe('turn-1');
+			expect(stopRecoveryAppliesToTurn(state.stopTimedOutTurnId, state.liveTurnId)).toBe(true);
+		});
+
+		it('is not held open by an earlier failed send that never gets a receipt', () => {
+			const test = timedOutWith(['failed earlier', 'cmd-orphan'], ['go', 'cmd-1']);
+			event('turn.started', 'turn-1', 1);
+			event('message.user', 'turn-1', 2, { command_id: 'cmd-1', content: 'go' });
+			event('turn.completed', 'turn-1', 3);
+			feed.onEvent!({ type: 'caught_up', seq: 3 });
+			vi.advanceTimersByTime(300);
+			expect(test.getState().stopTimedOutTurnId).toBe('turn-1');
+
+			event('turn.started', 'turn-2', 4);
+			vi.advanceTimersByTime(300);
+			const state = test.getState();
+			expect(state.liveTurnId).toBe('turn-2');
+			expect(state.stopTimedOutTurnId).toBeNull();
+			expect(stopRecoveryAppliesToTurn(state.stopTimedOutTurnId, state.liveTurnId)).toBe(false);
+		});
+	});
+
 	it.each(['turn-1', null])('still recovers when a Stop on turn %s could not leave the page, without recording a Stop', liveTurnId => {
 		const test = stopping(liveTurnId);
 		test.wsConn.send.mockReturnValue(false);

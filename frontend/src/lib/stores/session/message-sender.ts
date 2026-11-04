@@ -811,7 +811,11 @@ export function createMessageSender(deps: MessageSenderDeps) {
 							return m.streaming ? { ...m, streaming: false } : m;
 						});
 						messages = messages.filter(m => !(m.type === 'text' && m.role === 'assistant' && !m.content));
-						return { ...s, messages, isStreaming: false, optimisticStreaming: false, stopTimedOutTurnId: s.liveTurnId ?? s.stopRequestedTurnId ?? STOP_TURN_NOT_NAMED };
+						// A newest user row with no turn yet is the send this Stop was pressed on.
+						const newestUser = s.messages.findLast(m => m.role === 'user');
+						return { ...s, messages, isStreaming: false, optimisticStreaming: false,
+							stopTimedOutTurnId: s.liveTurnId ?? s.stopRequestedTurnId ?? STOP_TURN_NOT_NAMED,
+							stopTimedOutCommandId: newestUser && !newestUser.turnId ? newestUser.commandId ?? null : null };
 					});
 				}
 				stopTimeout.set(null);

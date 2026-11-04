@@ -158,6 +158,8 @@ export interface ActiveSessionState {
 	/** This Stop attempt timed out: its turn id, or STOP_TURN_NOT_NAMED until the feed names it.
 	 * Reset by another Stop, a successor, a refused command, or navigation. */
 	stopTimedOutTurnId?: string | null;
+	/** The send a timed-out Stop was pressed on; its receipt names STOP_TURN_NOT_NAMED's turn. */
+	stopTimedOutCommandId?: string | null;
 	/** The latest turn is parked on background work (v2 feed `turn.parked`,
 	 *  cleared by the next `turn.*`). Keeps the transcript from folding a parked
 	 *  turn in the moment between its last task finishing and the wake turn
