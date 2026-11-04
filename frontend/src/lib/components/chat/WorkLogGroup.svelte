@@ -817,8 +817,10 @@
 	}
 
 	@keyframes worklog-settle {
-		from { opacity: 0; transform: translateY(2px); }
-		to { opacity: 1; transform: translateY(0); }
+		/* Settlement can fade its summary in, but must not move already-read
+		   prose inside the same work-log group (#1008/#1112). */
+		from { opacity: 0; }
+		to { opacity: 1; }
 	}
 
 	@media (prefers-reduced-motion: reduce) {

@@ -11,6 +11,7 @@ import ChatInput from './ChatInput.svelte';
 import { activeSession } from '$lib/stores/active-session';
 import { auth } from '$lib/stores/auth.svelte';
 import '$lib/test-stubs/composer-dom';
+import { readDraft, writeDraft } from '$lib/stores/session/draft-persistence';
 
 vi.hoisted(() => {
 	vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
@@ -31,6 +32,7 @@ const TEXT = 'typed right after boot';
 beforeEach(async () => {
 	localStorage.clear();
 	sessionStorage.clear();
+	history.replaceState({}, '', '/');
 	activeSession.newChat();
 	Object.assign(activeSession.current, { sessionId: null, mode: 'chat', profile: 'coding', error: null, worktreeError: null });
 	activeSession.setDraft('');
@@ -39,6 +41,7 @@ beforeEach(async () => {
 afterEach(() => {
 	cleanup();
 	activeSession.setDraft('');
+	history.replaceState({}, '', '/');
 	vi.restoreAllMocks();
 });
 
@@ -66,6 +69,27 @@ it('a composer mounted in place of one with debounced text opens with that text'
 	const editor = second.container.querySelector<HTMLElement>('.tiptap')!;
 	await waitFor(() => expect(editor.textContent).toBe(TEXT));
 	expect(activeSession.current.draft).toContain(TEXT);
+});
+
+it.each(['plain', 'html', 'document', 'document-text'])('paints a linked %s draft before boot adopts its session, without saving it as a new chat', async (format) => {
+	const lines = Array.from({ length: 180 }, (_, i) => `saved line ${i + 1}`).join('\n');
+	const draft = format.startsWith('document')
+		? JSON.stringify({ type: 'doc', content: (format === 'document' ? lines.split('\n') : [lines]).map(text => ({ type: 'paragraph', content: [{ type: 'text', text }] })) })
+		: format === 'html' ? lines.split('\n').map(line => `<p>${line}</p>`).join('') : lines;
+	writeDraft('opening-chat', draft);
+	writeDraft(null, 'unrelated new-chat draft');
+	history.replaceState({}, '', '/?session=opening-chat');
+	Object.assign(activeSession.current, { sessionId: null, isRestoringSession: true });
+
+	const view = render(ChatInput);
+	// The first committed layout, before the observer's later animation frame.
+	expect(view.container.querySelector('.chat-island.wrapped')).not.toBeNull();
+	const editor = view.container.querySelector<HTMLElement>('.tiptap')!;
+	await waitFor(() => expect(editor.textContent).toContain('saved line 180'));
+	expect(view.container.querySelector('.chat-island.wrapped')).not.toBeNull();
+	await new Promise(resolve => setTimeout(resolve, 150));
+	expect(readDraft(null)).toBe('unrelated new-chat draft');
+	expect(readDraft('opening-chat')).toBe(draft);
 });
 
 it('a composer unmounted inside the draft debounce keeps its text for the next one', async () => {

@@ -354,11 +354,12 @@
 	.turn-nav {
 		position: absolute;
 		left: 0;
-		top: 50%;
+		/* Stable origin: centring the changing tick list moved every existing
+		   tick on each send, and re-centred again as the composer cleared. */
+		top: min(120px, 20%);
 		z-index: 12;
 		display: flex;
 		flex-direction: column;
-		transform: translateY(-50%);
 		pointer-events: auto;
 	}
 
