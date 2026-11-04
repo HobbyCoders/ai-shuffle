@@ -1424,18 +1424,10 @@
 	 * the way to them. Without this any later height change would follow them down.
 	 */
 	async function stayWhereNotSentRowsLeftTheReader() {
-		const sessionId = $activeSession.sessionId;
-		const version = windowShiftVersion;
-		// Release before yielding: boundary/height callbacks for the same render
-		// must not reveal taller Not-sent rows while this transaction measures them.
-		const pausedFollowing = !$activeSession.error && shouldAutoScroll && !pendingScrollToBottom;
-		if (pausedFollowing) shouldAutoScroll = false;
 		cancelCurrentTurnAnchor(true);
 		await tick();
-		if ($activeSession.sessionId !== sessionId || version !== windowShiftVersion) return;
 		refreshLatestTurnTailReserve();
 		await tick();
-		if ($activeSession.sessionId !== sessionId || version !== windowShiftVersion) return;
 		// An already-visible error is the followed reading surface, after the
 		// queued rows. Keep that banner in place as Stop returns their words;
 		// ordinary Stop still preserves the transcript exactly as in #1066.
@@ -1446,9 +1438,11 @@
 			return;
 		}
 		const metrics = readScrollMetrics();
-		if (!metrics || pendingScrollToBottom) return;
-		if (pausedFollowing) shouldAutoScroll = metrics.scrollHeight - metrics.clientHeight - metrics.scrollTop <= 1;
-		if (!shouldAutoScroll) scheduleReadingAnchorCapture();
+		if (!metrics || !shouldAutoScroll || pendingScrollToBottom) return;
+		if (metrics.scrollHeight - metrics.clientHeight - metrics.scrollTop > 1) {
+			shouldAutoScroll = false;
+			scheduleReadingAnchorCapture();
+		}
 		updateJumpToLatestVisibility(metrics);
 		updateCurrentTurnIndex();
 	}
@@ -2422,6 +2416,7 @@
 	aria-label="Conversation messages"
 	aria-busy={$activeSession.isStreaming}
 	class="msg-scroll flex-1 overflow-y-auto overscroll-contain"
+	style:overflow-anchor={shouldAutoScroll ? 'none' : 'auto'}
 >
 	{#if transcriptRender === 'skeleton'}
 		<!-- Hydration skeleton. NOT the empty hero: this session has a transcript,
@@ -2835,11 +2830,10 @@
 		.chat-error-dismiss { transition: none; }
 	}
 
-	/* Keep the browser's scroll anchoring active so a resize of off-screen
-	   content ABOVE the viewport (e.g. a virtualized message being re-estimated
-	   while the tail streams) adjusts scrollTop to hold the visible content
-	   still, instead of letting earlier content shift under the reader. This is
-	   the default, but we assert it so nothing downstream defeats it. */
+	/* Native anchoring protects scrolled-up readers from off-screen resizes.
+	   Followers are positioned by the app instead (inline override): otherwise
+	   a temporary composer clamp can be remembered and restored by the browser
+	   when Stop adds rows, moving the already-followed reading surface. */
 	.transcript-shell {
 		position: relative;
 		flex: 1 1 0%;
