@@ -172,20 +172,20 @@
 <style>
 	.st-dwrap {
 		max-width: 700px;
-		padding: 20px 32px 96px;
+		padding: 10px 32px 96px;
 	}
 	.st-dtop {
 		display: flex;
 		align-items: center;
 		gap: 8px;
-		min-height: 22px;
+		min-height: var(--st-dtop-height);
 	}
 	.st-dh {
 		display: grid;
 		grid-template-columns: auto minmax(0, 1fr) auto;
 		gap: 14px;
-		align-items: center;
-		padding: 2px 0 18px;
+		align-items: start;
+		padding: calc(var(--st-page-top) - 10px - var(--st-dtop-height)) 0 18px;
 	}
 	.st-dh-main {
 		min-width: 0;
@@ -195,6 +195,7 @@
 		gap: 8px;
 		align-items: center;
 		flex-wrap: wrap;
+		min-height: 32px;
 	}
 	h2 {
 		font-size: 20px;

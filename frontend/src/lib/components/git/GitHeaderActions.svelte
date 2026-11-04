@@ -951,7 +951,7 @@
 	.trigger {
 		gap: 6px;
 		padding: 0 7px 0 9px;
-		font-size: 0.71875rem;
+		font-size: 12px;
 	}
 
 	/* A phone-width window: the icon carries the state, the words stay for

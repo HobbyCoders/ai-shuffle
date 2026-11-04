@@ -49,7 +49,7 @@
 	.st-page {
 		max-width: 856px;
 		margin: 0 auto;
-		padding: 32px 48px 120px;
+		padding: var(--st-page-top) 48px 120px;
 	}
 	.st-page-h {
 		display: flex;

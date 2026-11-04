@@ -48,7 +48,11 @@
 	--st-radius-md: var(--radius, 8px);
 	--st-radius-sm: calc(var(--radius, 8px) - 2px);
 	--st-line: 1.5px;
-	--st-index-width: 240px;
+	--st-index-width: 264px; /* The chat list pane's default width (320 less the 56 rail). */
+	/* Where every page title sits, and the row above it that holds the back link.
+	   See `.settings-shell:has(> .st-index)` for the Settings pages' values. */
+	--st-page-top: 32px;
+	--st-dtop-height: 22px;
 	--st-mono: var(--font-mono, ui-monospace, 'JetBrains Mono', monospace);
 
 	container: settings / inline-size;
@@ -138,6 +142,13 @@
 	width: min(100%, 856px);
 	border-right: 0;
 	padding: 0 32px;
+}
+/* One centred column: heading, filter and rows share its one left edge. */
+.settings-shell:not([data-stacked]) .st-coll:has(> .st-dpane > .st-empty-detail[data-idle]) > .st-lcol .st-lhead {
+	padding-inline: 16px;
+}
+.settings-shell:not([data-stacked]) .st-coll:has(> .st-dpane > .st-empty-detail[data-idle]) > .st-lcol .st-lh-top h1 {
+	padding-left: 0;
 }
 .settings-shell:not([data-stacked]) .st-coll:has(> .st-dpane > .st-empty-detail[data-idle]) > .st-lcol .st-lscroll {
 	padding-inline: 16px;
@@ -299,6 +310,13 @@
 }
 
 /* ---------- 601-900px of shell width: narrower index, fixed list ---------- */
+/* Settings pages share one title position: the page title centres on the index's
+   "Settings" title, and a back link sits in its own row above it. */
+.settings-shell:has(> .st-index) {
+	--st-page-top: 53px;
+	--st-dtop-height: 32px;
+}
+
 @container settings (max-width: 900px) {
 	.settings-shell .st-coll .st-divider {
 		display: none;
@@ -307,10 +325,10 @@
 		--st-list-width: 280px !important;
 	}
 	.settings-shell .st-page {
-		padding: 28px 28px 100px;
+		padding: var(--st-page-top) 28px 100px;
 	}
 	.settings-shell .st-dwrap {
-		padding: 18px 22px 80px;
+		padding: 10px 22px 80px;
 	}
 }
 
@@ -448,6 +466,7 @@
 }
 .settings-shell[data-stacked] .st-lh-top h1 {
 	font-size: 20px;
+	padding-left: 0;
 }
 .settings-shell[data-stacked] .st-lscroll {
 	padding: 0 16px 60px;
@@ -457,6 +476,13 @@
 }
 .settings-shell[data-stacked] .st-dwrap {
 	padding: 0 14px 90px;
+}
+.settings-shell[data-stacked] .st-dh {
+	padding-top: 2px;
+	align-items: center;
+}
+.settings-shell[data-stacked] .st-dhn {
+	min-height: 0;
 }
 .settings-shell[data-stacked] .st-dtop {
 	position: sticky;

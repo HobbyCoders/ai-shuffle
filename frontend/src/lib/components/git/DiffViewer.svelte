@@ -17,7 +17,7 @@
 	 * line numbers, tap lines on touch, arrow keys when focused) and send one
 	 * comment about it to the current chat. Nothing is written to disk or GitHub.
 	 */
-	import { ArrowLeft, FileText, Loader2, MessageSquareText, Send, X } from 'lucide-svelte';
+	import { ChevronLeft, FileText, Loader2, MessageSquareText, Send, X } from 'lucide-svelte';
 	import { onMount, tick } from 'svelte';
 	import { highlightToInnerHtml, onHighlighterReady, resolveShikiLang } from '$lib/utils/shiki';
 	import { sanitizeHtml } from '$lib/utils/sanitize';
@@ -422,7 +422,7 @@
 				class="flex items-center justify-center w-8 h-8 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors shrink-0 focus:outline-hidden focus:ring-2 focus:ring-ring"
 				aria-label="Back to file list"
 			>
-				<ArrowLeft size={18} />
+				<ChevronLeft size={18} />
 			</button>
 
 			<FileText size={16} class="text-muted-foreground shrink-0" />

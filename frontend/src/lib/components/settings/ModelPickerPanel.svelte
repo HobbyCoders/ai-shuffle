@@ -1202,7 +1202,7 @@
 		justify-content: space-between;
 		gap: 10px;
 		min-height: 24px;
-		padding: 0 2px;
+		padding: 0;
 	}
 	.mpp-cap-summary p {
 		min-width: 0;

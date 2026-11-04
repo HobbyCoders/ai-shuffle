@@ -61,7 +61,7 @@
 		Plus,
 		CheckCircle,
 		XCircle,
-		ArrowLeft,
+		ChevronLeft,
 		Shield,
 		Check
 	} from 'lucide-svelte';
@@ -760,7 +760,7 @@
 	<div class="auto-approvals" transition:fade={{ duration: 150 }}>
 		<div class="auto-form-header">
 			<button class="card-back-btn" onclick={() => currentView = 'list'} aria-label="Back to automations">
-				<ArrowLeft size={16} />
+				<ChevronLeft size={16} />
 			</button>
 			<h3 class="auto-form-title">Pending Approvals</h3>
 			<span class="card-badge card-badge--warning">{pendingApprovals.length}</span>

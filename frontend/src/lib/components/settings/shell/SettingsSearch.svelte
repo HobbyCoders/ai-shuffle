@@ -132,7 +132,7 @@
 	}
 	.st-search-icon {
 		position: absolute;
-		left: 10px;
+		left: 12px;
 		top: 8px;
 		display: flex;
 		color: var(--st-mfg);
@@ -149,7 +149,7 @@
 		border: 1px solid var(--st-input);
 		background: var(--st-field);
 		color: var(--st-fg);
-		padding: 0 52px 0 32px;
+		padding: 0 52px 0 34px;
 		font-size: 13px;
 	}
 	input::-webkit-search-cancel-button {

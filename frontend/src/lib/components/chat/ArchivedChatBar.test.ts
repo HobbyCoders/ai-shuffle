@@ -22,10 +22,11 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe('ArchivedChatBar', () => {
-	it('offers export and restore, and no message box', () => {
+	it('offers export and restore, and no message box', async () => {
 		render(ArchivedChatBar, { sessionId: 'old' });
 		expect(screen.getByText(/archived\. It is read-only until you restore it/)).toBeTruthy();
 		expect(screen.getByRole('button', { name: 'Restore' })).toBeTruthy();
+		await fireEvent.click(screen.getByRole('button', { name: 'Export chat' }));
 		expect(screen.getByRole('button', { name: 'Download private backup (.jsonl)' })).toBeTruthy();
 		expect(screen.getByRole('button', { name: 'Export for sharing (.md)' })).toBeTruthy();
 		expect(screen.queryByRole('textbox')).toBeNull();

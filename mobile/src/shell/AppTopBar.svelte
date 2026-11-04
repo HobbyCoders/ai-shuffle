@@ -45,7 +45,7 @@
 	import ConnectedWorkerBar from './ConnectedWorkerBar.svelte';
 	import { projects } from '$lib/stores/app-data.svelte';
 	import { backToChats } from '$lib/services/session-navigation';
-	import { chatHeaderTitle } from '$lib/components/layout/chat-empty-state';
+	import { chatHeaderTitle, NEW_CHAT_LABEL } from '$lib/components/layout/chat-empty-state';
 	import { canStartDrawerSwipe, completes, dragOffset, lockAxis, type DrawerSwipe } from './drawer-gesture';
 
 	interface Props {
@@ -323,7 +323,7 @@
 
 <svelte:window onkeydown={handleWindowKeydown} />
 
-<header class="topbar topbar-mobile">
+<header class="topbar topbar-mobile" class:no-rule={currentType === 'session' && chatTitle === NEW_CHAT_LABEL}>
 	{#if settingsSubPage}
 		<button class="tb-hamburger" onclick={() => settingsNav.back()} aria-label={settingsNav.view === 'detail' ? `Back to ${mobileTitle}` : 'Back to Settings'}>
 			<ChevronLeft size={20} strokeWidth={1.8} />

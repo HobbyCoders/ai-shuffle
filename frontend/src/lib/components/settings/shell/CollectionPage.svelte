@@ -191,7 +191,7 @@
 		min-width: 0;
 	}
 	.st-lhead {
-		padding: 32px 16px 12px 16px;
+		padding: var(--st-page-top) 8px 12px;
 		display: grid;
 		gap: 12px;
 	}
@@ -202,6 +202,8 @@
 		min-height: 32px;
 	}
 	h1 {
+		/* Text on the rows' text edge; the filter stays on their pill edge. */
+		padding-left: 12px;
 		font-size: 20px;
 		font-weight: 600;
 		letter-spacing: -0.012em;
@@ -260,7 +262,7 @@
 		border: 1px solid var(--st-input);
 		background: var(--st-field);
 		border-radius: var(--st-radius-md);
-		padding: 0 10px;
+		padding: 0 10px 0 11px;
 		color: var(--st-mfg);
 		min-width: 0;
 	}

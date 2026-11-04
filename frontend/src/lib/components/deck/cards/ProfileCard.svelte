@@ -1280,7 +1280,7 @@
 		flex: 1;
 	}
 	.starter-foot {
-		padding: 12px 8px 4px;
+		padding: 12px 0 4px;
 	}
 	.folder-filter {
 		display: inline-flex;

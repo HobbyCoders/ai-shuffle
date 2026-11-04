@@ -2,7 +2,7 @@
 	/** In-panel Git action editor. One parent owns scrolling and dismissal.
 	 * Saved preferences persist; message/force/PR overrides reset on mount.
 	 */
-	import { ArrowLeft } from 'lucide-svelte';
+	import { ChevronLeft } from 'lucide-svelte';
 	import GenerationModelSelect from '$lib/components/settings/GenerationModelSelect.svelte';
 	import { gitActionPreferences } from '$lib/stores/gitActionPreferences.svelte';
 	import {
@@ -222,7 +222,7 @@
 
 <section class="options-dropdown" {id} bind:this={panelRef} aria-label="{action} options">
 	<div class="opt-heading">
-		<button type="button" class="opt-back" onclick={onClose} aria-label="Back to Git actions"><ArrowLeft size={16} /> Back</button>
+		<button type="button" class="opt-back" onclick={onClose} aria-label="Back to Git actions"><ChevronLeft size={16} /> Back</button>
 		<div><h3>{titles[action]}</h3><p>{descriptions[action]}</p></div>
 	</div>
 	{#if busy}<p class="opt-blocked" role="status">This action is currently unavailable. Return to Git to check its status.</p>

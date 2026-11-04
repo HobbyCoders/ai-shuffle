@@ -32,6 +32,8 @@ type HeaderDropdownId =
 	| 'notifications-bar'
 	// Bound-chat session title in the header breadcrumb (rename / fork / delete).
 	| 'session-title'
+	// The chat header's one Export button.
+	| 'chat-export'
 	// The chat header's private-access panel (ChatAccess).
 	| 'private-access'
 	// The chat header's git panel (one button opens it) and the option popovers

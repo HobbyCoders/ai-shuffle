@@ -38,7 +38,7 @@
 		font-weight: 500;
 		letter-spacing: 0;
 		color: var(--st-mfg);
-		padding: 16px 8px 6px;
+		padding: 16px 12px 6px;
 	}
 	.st-lg.compact .act {
 		margin-left: 0;

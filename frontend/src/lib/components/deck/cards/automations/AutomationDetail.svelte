@@ -2,7 +2,7 @@
 	import { automationModelLabel, automationPermissionLabel, type Automation, type AutomationRun } from '$lib/api/automations';
 	import { fade, slide } from 'svelte/transition';
 	import {
-		ArrowLeft,
+		ChevronLeft,
 		Pencil,
 		Play,
 		Trash2
@@ -75,7 +75,7 @@
 	<!-- Detail header -->
 	<div class="auto-detail-header">
 		<button class="card-back-btn" onclick={onBack} aria-label="Back to automations">
-			<ArrowLeft size={16} />
+			<ChevronLeft size={16} />
 		</button>
 		<div class="auto-detail-header-info">
 			<div class="auto-detail-name-row">

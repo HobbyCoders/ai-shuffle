@@ -1018,7 +1018,7 @@
 	.p-top { flex: none; position: relative; padding: 0 8px; background: var(--sidebar); }
 	.phone .p-top { padding-top: env(safe-area-inset-top, 0px); }
 	.p-head { display: flex; align-items: center; gap: 2px; height: 52px; }
-	.p-title { margin-right: auto; padding-left: 6px; font-size: 16px; font-weight: 600; letter-spacing: -0.005em; color: var(--sidebar-foreground); }
+	.p-title { margin-right: auto; padding-left: 12px; font-size: 16px; font-weight: 600; letter-spacing: -0.005em; color: var(--sidebar-foreground); }
 
 	/* The bell is shared with the top bars, where it is right-anchored under a
 	   wide header. Inside the panel that anchor puts most of it off the left
@@ -1056,7 +1056,7 @@
 		align-items: center;
 		gap: 9px;
 		height: 32px;
-		padding: 0 10px;
+		padding: 0 10px 0 11px;
 		border: 1px solid var(--field-border);
 		border-radius: var(--radius-control);
 		background: var(--field-bg);
@@ -1194,7 +1194,7 @@
 	.sect.closed .chev { transform: rotate(-90deg); }
 	.sect.needs .lbl { color: var(--warning); }
 
-	.daylabel { padding: 10px 8px 3px; font-size: var(--fs-caption); font-weight: 500; color: var(--subtle-foreground); }
+	.daylabel { padding: 10px 12px 3px; font-size: var(--fs-caption); font-weight: 500; color: var(--subtle-foreground); }
 	.empty {
 		margin: 0;
 		padding: 14px 16px 18px;

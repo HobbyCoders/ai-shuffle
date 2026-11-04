@@ -342,7 +342,7 @@ describe('one API user', () => {
 			null
 		);
 		expect(openChat).toHaveBeenCalledWith('sess-new-5678');
-		await fireEvent.click(screen.getByRole('button', { name: 'Refresh sessions' }));
+		await fireEvent.click(screen.getByRole('button', { name: 'Refresh chats' }));
 		expect(loadApiUserSessions).toHaveBeenCalledOnce();
 	});
 });

@@ -47,7 +47,7 @@
 	} from '$lib/stores/derived/git-action-options';
 	import { computeOperationSideEffects, resolveCommitPlan, branchNameFromMessage } from '$lib/stores/derived/git-action-options';
 	import { isApiError } from '$lib/api/client';
-	import ChatExportActions from './ChatExportActions.svelte';
+	import ChatExportMenu from './ChatExportMenu.svelte';
 	import { notify } from '$lib/stores/notifications';
 	import { pullNotification } from './git-pull-notification';
 	import { browserPanel } from '$lib/stores/browser-panel.svelte';
@@ -69,7 +69,7 @@
 	import GitHeaderActions from '$lib/components/git/GitHeaderActions.svelte';
 	import { workerGitTargetFromKey, workerGitTargetKey } from './worker-git-target';
 	import { shouldShowHeaderGitActions } from './git-header-visibility';
-	import { chatHeaderTitle } from './chat-empty-state';
+	import { chatHeaderTitle, NEW_CHAT_LABEL } from './chat-empty-state';
 	import { warmHighlighter } from '$lib/utils/shiki';
 	import {
 		gitPollIntervalMs,
@@ -277,6 +277,11 @@
 	// The empty New Chat has no crumbs: the greeting is all the page says.
 	const onEmptyNewChat = $derived(
 		$activeView?.type === 'session' && !activeTab?.sessionId && !activeTab?.messages.length
+	);
+	// The bar draws its rule only once the chat has a title of its own: an empty
+	// or still-unnamed chat has nothing for the line to sit under.
+	const topBarRule = $derived(
+		$activeView?.type !== 'session' || (!onEmptyNewChat && headerTitle !== NEW_CHAT_LABEL)
 	);
 	const crumbProject = $derived(
 		$activeView?.type === 'session' && !onEmptyNewChat ? (headerProjectName || 'Chats') : null
@@ -951,7 +956,7 @@
 -->
 {#snippet downloadAction()}
 	{#if $activeView?.type === 'session' && activeTab?.sessionId && activeTab.messages.length > 0}
-		<span class="header-exports"><ChatExportActions sessionId={activeTab.sessionId} /></span>
+		<span class="header-exports"><ChatExportMenu sessionId={activeTab.sessionId} /></span>
 	{/if}
 {/snippet}
 
@@ -1029,6 +1034,7 @@
 			sessionId={activeTab?.sessionId ?? null}
 			{sidebarCollapsed}
 			{onToggleSidebar}
+			rule={topBarRule}
 		>
 			{#snippet actions()}
 				{@render downloadAction()}

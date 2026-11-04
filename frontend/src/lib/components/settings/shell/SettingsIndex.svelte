@@ -4,7 +4,7 @@
 	 * A category with something to look at shows a dot and count (the
 	 * module's `attention()`). Up/Down move between categories.
 	 */
-	import { ArrowLeft, ChevronRight } from 'lucide-svelte';
+	import { ChevronLeft, ChevronRight } from 'lucide-svelte';
 	import { CATEGORIES, CATEGORY_GROUPS } from '$lib/settings/categories';
 	import { MODULES } from '$lib/settings/registry';
 	import { settingsNav } from '$lib/settings/navigation.svelte';
@@ -58,7 +58,7 @@
 	<!-- The phone app's own header carries the way back. -->
 	{#if !platform.isMobile}
 		<button type="button" class="st-chats" onclick={backToChats}>
-			<ArrowLeft /><span>Back to chats</span>
+			<ChevronLeft /><span>Back to chats</span>
 		</button>
 	{/if}
 	<h1 class="st-ix-title">Settings</h1>
@@ -100,7 +100,7 @@
 		border-right: 1px solid var(--st-border);
 		display: flex;
 		flex-direction: column;
-		padding: 10px 10px 12px;
+		padding: 10px 8px 12px;
 		min-height: 0;
 		overflow-y: auto;
 		scrollbar-width: none;
@@ -112,7 +112,7 @@
 		gap: 8px;
 		flex: none;
 		height: 36px;
-		padding: 0 10px;
+		padding: 0 12px;
 		margin-bottom: 10px;
 		border: 0;
 		border-radius: var(--st-radius-md);
@@ -129,7 +129,7 @@
 		font-size: 16px;
 		font-weight: 600;
 		letter-spacing: -0.01em;
-		padding: 2px 10px 12px;
+		padding: 2px 12px 12px;
 		margin: 0;
 	}
 	.st-nav-g {
@@ -138,7 +138,7 @@
 		gap: 7px;
 		font-size: 12px;
 		color: var(--st-subtle);
-		padding: 16px 10px 6px;
+		padding: 16px 12px 6px;
 	}
 	.st-nav {
 		display: grid;
@@ -152,7 +152,7 @@
 		align-items: center;
 		gap: 10px;
 		height: 34px;
-		padding: 0 10px;
+		padding: 0 12px;
 		border-radius: var(--st-radius-md);
 		border: 0;
 		background: none;

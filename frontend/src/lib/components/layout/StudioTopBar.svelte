@@ -31,6 +31,8 @@
 		onToggleSidebar?: () => void;
 		/** Project crumb activation (returns to the sessions board). */
 		onOpenProject?: () => void;
+		/** Draw the rule under the bar. Off until a chat has a title of its own. */
+		rule?: boolean;
 		/** Right cluster contents supplied by MainPanel. */
 		actions?: Snippet;
 	}
@@ -42,6 +44,7 @@
 		sidebarCollapsed = false,
 		onToggleSidebar,
 		onOpenProject,
+		rule = true,
 		actions
 	}: Props = $props();
 
@@ -58,7 +61,7 @@
 	});
 </script>
 
-<header class="topbar">
+<header class="topbar" class:no-rule={!rule}>
 	{#if onToggleSidebar}
 		<button
 			class="tb-icon"
@@ -99,6 +102,8 @@
 		border-bottom: 1px solid var(--border);
 		background: var(--background);
 	}
+
+	.topbar.no-rule { border-bottom-color: transparent; }
 
 	.tb-icon {
 		width: 30px;

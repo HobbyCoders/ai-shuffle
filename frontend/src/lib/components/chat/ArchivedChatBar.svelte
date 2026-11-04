@@ -3,7 +3,7 @@
 	 *  read-only until restored, so the only actions are export and restore. */
 	import { ArchiveRestore, LoaderCircle } from 'lucide-svelte';
 	import { appData } from '$lib/stores/app-data.svelte';
-	import ChatExportActions from '$lib/components/layout/ChatExportActions.svelte';
+	import ChatExportMenu from '$lib/components/layout/ChatExportMenu.svelte';
 
 	let { sessionId }: { sessionId: string } = $props();
 	let restoring = $state(false);
@@ -27,7 +27,7 @@
 <div class="archived-bar" role="region" aria-label="Archived chat">
 	<p class="note">This chat is archived. It is read-only until you restore it.</p>
 	<div class="actions">
-		<ChatExportActions {sessionId} />
+		<ChatExportMenu {sessionId} up />
 		<button class="restore" onclick={restore} disabled={restoring} aria-busy={restoring}>
 			{#if restoring}<LoaderCircle class="spin" size={16} strokeWidth={1.5} />{:else}<ArchiveRestore size={16} strokeWidth={1.5} />{/if}
 			{restoring ? 'Restoring…' : 'Restore'}
