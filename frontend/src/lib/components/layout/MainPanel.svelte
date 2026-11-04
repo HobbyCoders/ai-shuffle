@@ -61,6 +61,7 @@
 	import { platform } from '$lib/stores/platform.svelte';
 	import type { MainPanelHeaderContext } from './main-panel-header';
 	import StudioTopBar from './StudioTopBar.svelte';
+	import { phoneLayout } from '$lib/components/chat/phone/phone-layout.svelte';
 	import NotificationDock from '$lib/components/NotificationDock.svelte';
 	import FeaturePanelHost from './FeaturePanelHost.svelte';
 	import { pageHeader } from '$lib/stores/page-header.svelte';
@@ -958,7 +959,7 @@
 	<!-- A running session without a project: the pill opens the one-way
 	     attach sheet (#371 step 4). It hides itself everywhere else. -->
 	{#if $activeView?.type === 'session' && activeTab?.sessionId}
-		<NoProjectPill compact={!!header} />
+		<NoProjectPill compact={!!header || phoneLayout.active} />
 	{/if}
 	<!-- Not in a subagent's chat: its requests and approvals show in its main
 	     chat's panel, labelled with the subagent. -->
@@ -1002,7 +1003,7 @@
 				onClickShipIt={handleShipIt}
 				onOpenDiffReview={openDiffPanel}
 				showChatExports={!header}
-				compact={!!header}
+				compact={!!header || phoneLayout.active}
 			/>
 		</div>
 	{/if}

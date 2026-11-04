@@ -9,18 +9,18 @@
 	 * shows beside the main panel.
 	 *
 	 * One row carries everything the phone used to stack in three:
-	 *   ☰ | page or chat title            | ⌄ | actions (shield, Git) | mic
-	 *     | ● worker · project › parent   |
+	 *   ☰ | page or chat title            | ⌄ | actions (shield, Git) | mic | bell
+	 *     | ● worker · parent             |
 	 * The second line is the "Connected to" worker chip (which also tells the
-	 * Android app to hide its own worker bar) and, in a bound chat, the trail
-	 * (SessionBreadcrumbs mobile). The chevron opens the chat-actions sheet
+	 * Android app to hide its own worker bar), plus the parent chat's link in a
+	 * subagent's chat. Project and branch live in the line under the composer.
+	 * The chevron opens the chat-actions sheet
 	 * (SessionTitleMenu variant="sheet") with the whole title. `actions` is
 	 * MainPanel's header cluster: private access + the compact Git button.
 	 *
-	 * The notification bell moved into that sidebar's header, so on this bar it
-	 * is represented by a dot on the ☰ while the drawer is closed. Unread state
-	 * therefore stays visible without a second bell, and opening the drawer puts
-	 * the real bell one row away.
+	 * The notification bell lives in that sidebar's header. This bar adds its own
+	 * only while something is unread, so nothing is said at zero and the count is
+	 * never hidden behind the ☰. The ☰ keeps the unread wording for screen readers.
 	 *
 	 * On desktop the sidebar itself replaces this bar's old tab row, and the main
 	 * panel's StudioTopBar carries the breadcrumbs and actions.
@@ -29,7 +29,7 @@
 	import { obscuresTranscript } from '$lib/components/chat/transcript-reading-area';
 	import { pushState } from '$app/navigation';
 	import { page } from '$app/state';
-	import { ArrowLeft, Menu, Mic, X } from 'lucide-svelte';
+	import { ChevronLeft, Menu, Mic, X } from 'lucide-svelte';
 	import { categoryById } from '$lib/settings/categories';
 	import { settingsNav } from '$lib/settings/navigation.svelte';
 	import { hotkeyPreferences } from '$lib/stores/hotkeyPreferences.svelte';
@@ -41,6 +41,7 @@
 	import Sidebar from '$lib/components/layout/Sidebar.svelte';
 	import SessionBreadcrumbs from '$lib/components/layout/SessionBreadcrumbs.svelte';
 	import SessionTitleMenu from '$lib/components/layout/SessionTitleMenu.svelte';
+	import NotificationCenter from '$lib/components/NotificationCenter.svelte';
 	import ConnectedWorkerBar from './ConnectedWorkerBar.svelte';
 	import { projects } from '$lib/stores/app-data.svelte';
 	import { backToChats } from '$lib/services/session-navigation';
@@ -325,7 +326,7 @@
 <header class="topbar topbar-mobile">
 	{#if settingsSubPage}
 		<button class="tb-hamburger" onclick={() => settingsNav.back()} aria-label={settingsNav.view === 'detail' ? `Back to ${mobileTitle}` : 'Back to Settings'}>
-			<ArrowLeft size={24} strokeWidth={1.8} />
+			<ChevronLeft size={20} strokeWidth={1.8} />
 		</button>
 	{:else}
 		<button
@@ -336,10 +337,7 @@
 			aria-label={$unreadCount > 0 ? `Open menu (${$unreadCount} unread notifications)` : 'Open menu'}
 			aria-expanded={drawerOpen}
 		>
-			<Menu size={24} strokeWidth={1.8} />
-			{#if !drawerOpen && $unreadCount > 0}
-				<span class="tb-unread" aria-hidden="true"></span>
-			{/if}
+			<Menu size={20} strokeWidth={1.8} />
 		</button>
 	{/if}
 
@@ -353,8 +351,7 @@
 		<div class="tb-sub">
 			<ConnectedWorkerBar />
 			{#if boundChatId}
-				<span class="tb-dot-sep" aria-hidden="true">·</span>
-				<SessionBreadcrumbs title={mobileTitle} sessionId={boundChatId} {projectLabel} mobile />
+				<SessionBreadcrumbs title={mobileTitle} sessionId={boundChatId} mobile />
 			{/if}
 		</div>
 	</div>
@@ -368,6 +365,7 @@
 				<Mic size={18} />
 			</button>
 		{/if}
+		<NotificationCenter bar />
 	</div>
 </header>
 
@@ -449,20 +447,6 @@
 	.tb-hamburger:hover { color: var(--foreground); background: var(--hover-overlay, var(--accent)); }
 	.tb-hamburger:active { background: var(--active-overlay, var(--hover-overlay)); }
 
-	/* A dot, not a count: the exact number is one tap away on the bell inside the
-	   drawer, and a badge on a navigation control reads as a nav badge. */
-	.tb-unread {
-		position: absolute;
-		top: 9px;
-		right: 6px;
-		width: 8px;
-		height: 8px;
-		border-radius: 50%;
-		background: var(--destructive);
-		box-shadow: 0 0 0 2px var(--background);
-		pointer-events: none;
-	}
-
 	/* Never put popovers in an overflow rail: unfolded phones are wider than
 	   the phone breakpoint and their anchored dialogs would be clipped. */
 	.tb-actions {
@@ -535,12 +519,6 @@
 		pointer-events: none;
 	}
 	.tb-sub > :global(*) { pointer-events: auto; }
-	.tb-dot-sep {
-		flex: none;
-		margin-bottom: 7px;
-		color: var(--subtle-foreground);
-		pointer-events: none;
-	}
 
 	/* Drawer */
 	.drawer-overlay {

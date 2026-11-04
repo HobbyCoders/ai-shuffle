@@ -186,6 +186,39 @@
 		color: var(--st-mfg);
 		font-variant-numeric: tabular-nums;
 	}
+	/* One phone row style: each group is a card of 48px rows with bare 18px glyphs,
+	   on the same 16px edge as the sheets. */
+	@media (max-width: 480px) {
+		.st-nav-g {
+			padding: 18px 4px 6px;
+		}
+		.st-nav {
+			gap: 0;
+			overflow: hidden;
+			border: 1px solid var(--st-border);
+			border-radius: var(--st-radius);
+			background: var(--st-card);
+		}
+		.st-nav > li + li {
+			border-top: 1px solid var(--st-border);
+		}
+		.st-nav-item {
+			height: 48px;
+			gap: 12px;
+			padding: 0 14px;
+			border-radius: 0;
+			color: var(--st-fg);
+			font-size: 15px;
+		}
+		.st-nav-item :global(svg:first-child) {
+			width: 18px;
+			height: 18px;
+			color: var(--st-mfg);
+		}
+		.st-index {
+			padding: 2px 16px 16px;
+		}
+	}
 	.st-go {
 		display: none;
 		color: var(--st-subtle);

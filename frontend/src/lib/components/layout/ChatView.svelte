@@ -873,10 +873,12 @@
 	.empty-bottom-spacer {
 		flex: 1.15 1 auto;
 	}
-	/* A phone-width window keeps the composer under the thumb. */
+	/* A phone-width window keeps the composer under the thumb, with the greeting
+	   sitting on it rather than floating mid-screen. */
 	@media (max-width: 480px) {
 		.empty-bottom-spacer { display: none; }
-		.empty-hero { justify-content: center; }
+		.empty-hero:not(.hero-only) { justify-content: flex-end; padding-bottom: 8px; }
+		.is-empty .input-slot.empty-input-layout { margin-top: 0; }
 	}
 
 	/* Overlay the error so it doesn't shift the vertically-centered content. */

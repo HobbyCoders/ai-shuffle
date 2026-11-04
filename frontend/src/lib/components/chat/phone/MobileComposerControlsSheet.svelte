@@ -49,7 +49,7 @@
 	import { page } from '$app/state';
 	import {
 		ChevronDown, ChevronLeft, ChevronRight, Download, FilePen, Globe, Hand, Lightbulb, LoaderCircle, Lock,
-		Moon, ShieldCheck, ShieldOff, Sparkles, SquareTerminal, Zap
+		Moon, ShieldCheck, ShieldOff, Sparkles, SquareTerminal, X, Zap
 	} from 'lucide-svelte';
 	import { activeSession } from '$lib/stores/active-session';
 	import { watches } from '$lib/stores/watches';
@@ -243,6 +243,7 @@
 	let panelRef = $state<HTMLElement | null>(null);
 	let bodyRef = $state<HTMLElement | null>(null);
 	let backRef = $state<HTMLButtonElement | null>(null);
+	let closeRef = $state<HTMLButtonElement | null>(null);
 	/** The Agent and "Runs on" pages host the shared selectors' own menus. */
 	let agentHost = $state<HTMLElement | null>(null);
 	let runnerHost = $state<HTMLElement | null>(null);
@@ -280,7 +281,8 @@
 	async function focusPanel() {
 		await tick();
 		if (pageName === 'main') panelRef?.focus({ preventScroll: true });
-		else backRef?.focus({ preventScroll: true });
+		// A page opened straight from the bar has no way back, only out.
+		else (direct ? closeRef : backRef)?.focus({ preventScroll: true });
 	}
 
 	/** Switch pages, telling the dock while the usage details are on screen (it polls limits then). */
@@ -871,7 +873,8 @@
 		class="mcp"
 		class:dragging={dragOffset !== null}
 		class:shown={panelVisible}
-		class:sub={onSubPage}
+		class:sub={onSubPage && !direct}
+		class:fit={direct && pageName === 'model'}
 		role="dialog"
 		aria-modal="true"
 		aria-label={pageName === 'model' ? 'Choose model' : PAGE_TITLE[pageName]}
@@ -885,10 +888,10 @@
 		<header class="mcp-head" onpointerdown={startHeadDrag}>
 			<span class="mcp-grab" aria-hidden="true"></span>
 			<div class="mcp-head-row">
-				<button bind:this={backRef} type="button" class="mcp-back" aria-label="Back to chat controls" tabindex={onSubPage ? 0 : -1}
-					aria-hidden={!onSubPage} onclick={() => backToMain()}><ChevronLeft size={24} strokeWidth={2.4} aria-hidden="true" /></button>
+				<button bind:this={backRef} type="button" class="mcp-back" aria-label="Back to chat controls" tabindex={onSubPage && !direct ? 0 : -1}
+					aria-hidden={!onSubPage || direct} onclick={() => backToMain()}><ChevronLeft size={20} strokeWidth={1.8} aria-hidden="true" /></button>
 				<h2 class="mcp-title" aria-live="polite">{PAGE_TITLE[pageName]}</h2>
-				<button type="button" class="mcp-close" onclick={closePanel}>Close chat controls</button>
+				<button bind:this={closeRef} type="button" class="mcp-close" aria-label="Close chat controls" onclick={closePanel}><X size={20} strokeWidth={1.8} aria-hidden="true" /></button>
 			</div>
 		</header>
 
@@ -907,18 +910,17 @@
 							</div>
 						{/if}
 
-						<h3 class="mcp-glabel">Model</h3>
 						<div class="mcp-group">
 							<button type="button" class="mcp-row" disabled={modelLocked} aria-label={`Model: ${modelLabel}${modelLocked ? ', locked' : ''}`}
 								onclick={(e) => goTo('model', e.currentTarget)}>
-								<span class="mcp-ic glyph" aria-hidden="true"><ProviderGlyph kind={modelGlyph} size={17} /></span>
+								<span class="mcp-ic glyph" aria-hidden="true"><ProviderGlyph kind={modelGlyph} size={18} /></span>
 								<span class="mcp-lbl"><span>Model</span></span>
 								<span class="mcp-val">{modelLabel}</span>
 								{#if modelLocked}<Lock size={16} class="mcp-chev" aria-hidden="true" />{:else}<ChevronRight size={18} class="mcp-chev" aria-hidden="true" />{/if}
 							</button>
 							<button type="button" class="mcp-row" onclick={(e) => goTo('usage', e.currentTarget)}
 								aria-label={`Context and usage: ${usageUnknownUsed != null ? `${usageUnknownUsed} tokens used` : usageOverLimit ? 'over the limit' : `${usagePercent}% used`}`}>
-								<svg class="mcp-ring {usageSeverity}" class:unknown={usageUnknownUsed != null} width="30" height="30" viewBox="0 0 30 30" aria-hidden="true">
+								<svg class="mcp-ring {usageSeverity}" class:unknown={usageUnknownUsed != null} width="18" height="18" viewBox="0 0 30 30" aria-hidden="true">
 									<circle class="ring-track" cx="15" cy="15" r="11" fill="none" stroke-width="3.5" />
 									{#if usageUnknownUsed == null}
 										<circle class="ring-progress" cx="15" cy="15" r="11" fill="none" stroke-width="3.5" stroke-linecap="round"
@@ -934,7 +936,7 @@
 							{#if effortRowShown}
 							<div class="mcp-stack" data-row="effort">
 								<div class="mcp-rowhead">
-									<span class="mcp-ic" aria-hidden="true"><Lightbulb size={17} /></span>
+									<span class="mcp-ic" aria-hidden="true"><Lightbulb size={18} /></span>
 									<span class="mcp-lbl"><span>Reasoning effort</span>{#if effortKnown && effortLocked && effortExplanation && effortExplanation !== panelEffortValue}<small>{effortExplanation}</small>{/if}</span>
 									<span class="mcp-val">{panelEffortValue}</span>
 								</div>
@@ -956,7 +958,7 @@
 								<button type="button" class="mcp-row" role="switch" aria-label={fastPending ? 'Fast mode: loading' : 'Fast mode'}
 									aria-checked={fastPending ? false : fastEnabled} aria-busy={fastPending || undefined} disabled={fastPending}
 									onclick={() => { if (!fastPending) onToggleFast?.(); }}>
-									<span class="mcp-ic" aria-hidden="true"><Zap size={17} /></span>
+									<span class="mcp-ic" aria-hidden="true"><Zap size={18} /></span>
 									<span class="mcp-lbl"><span>Fast mode</span><small>Higher price</small></span>
 									{#if fastPending}<LoaderCircle size={18} class="mcc-spin mcp-chev" aria-hidden="true" />{:else}<span class="mcp-sw" aria-hidden="true"></span>{/if}
 								</button>
@@ -970,7 +972,7 @@
 							<div class="mcp-group">
 								<div class="mcp-stack" data-row="access">
 									<div class="mcp-rowhead">
-										<span class="mcp-ic" aria-hidden="true">{#if accessValue === BYPASS}<ShieldOff size={17} />{:else}<ShieldCheck size={17} />{/if}</span>
+										<span class="mcp-ic" aria-hidden="true">{#if accessValue === BYPASS}<ShieldOff size={18} />{:else}<ShieldCheck size={18} />{/if}</span>
 										<span class="mcp-lbl"><span>Tool access</span></span>
 										{#if !accessValue}<span class="mcp-val">Loading…</span>{/if}
 									</div>
@@ -990,7 +992,7 @@
 								{#if awayShown}
 									<button type="button" class="mcp-row" role="switch" aria-label="Away mode" aria-checked={awayEnabled && awayAvailable}
 										aria-disabled={!awayAvailable || awayBusy || undefined} onclick={toggleAway}>
-										<span class="mcp-ic" aria-hidden="true"><Moon size={17} /></span>
+										<span class="mcp-ic" aria-hidden="true"><Moon size={18} /></span>
 										<span class="mcp-lbl"><span>Away mode</span><small>{awayAvailable ? 'Takes recommended defaults' : 'Available after the first message'}</small></span>
 										{#if awayBusy}<LoaderCircle size={18} class="mcc-spin mcp-chev" aria-hidden="true" />{:else}<span class="mcp-sw" aria-hidden="true"></span>{/if}
 									</button>
@@ -1337,7 +1339,7 @@
 	.mcp.dragging { transition: none; will-change: transform; }
 
 	/* Header: the grip, then one row with the title centred. */
-	.mcp-head { flex-shrink: 0; padding: 8px 12px 0; touch-action: none; cursor: grab; user-select: none; -webkit-user-select: none; }
+	.mcp-head { flex-shrink: 0; padding: 8px 18px 0; touch-action: none; cursor: grab; user-select: none; -webkit-user-select: none; }
 	.mcp-grab { display: block; width: 38px; height: 5px; margin: 0 auto 6px; border-radius: 3px; background: var(--border-strong); transition: width 0.15s, background-color 0.15s; }
 	.mcp.dragging .mcp-grab { width: 48px; background: var(--muted-foreground); }
 	.mcp.dragging .mcp-head { cursor: grabbing; }
@@ -1360,7 +1362,6 @@
 		place-items: center;
 		width: 44px;
 		height: 44px;
-		margin-left: -6px;
 		padding: 0;
 		border: 0;
 		border-radius: 50%;
@@ -1377,35 +1378,28 @@
 		.mcp-back:hover { background: var(--hover-overlay); }
 	}
 	.mcp-back:active { background: var(--active-overlay); }
-	/* Close: visually hidden until keyboard focus reaches it. */
+	/* Close: in the title's row, centred on the cards' chevron column. Drag and
+	   the backdrop still dismiss. */
 	.mcp-close {
-		position: absolute;
-		top: 50%;
-		right: 0;
-		width: 1px;
-		height: 1px;
+		grid-column: 3;
+		grid-row: 1;
+		display: grid;
+		place-items: center;
+		width: 44px;
+		height: 44px;
 		padding: 0;
-		overflow: hidden;
-		clip-path: inset(50%);
-		white-space: nowrap;
 		border: 0;
-		background: var(--muted);
-		color: var(--foreground);
-		font: inherit;
-		font-size: 13px;
-		font-weight: 550;
+		border-radius: 50%;
+		background: transparent;
+		color: var(--muted-foreground);
 		cursor: pointer;
+		transition: background-color 0.15s, color 0.15s;
 	}
-	.mcp-close:focus-visible {
-		width: auto;
-		height: 32px;
-		padding: 0 12px;
-		margin-top: -16px;
-		clip-path: none;
-		border-radius: 999px;
-		outline: 2px solid var(--ring);
-		outline-offset: 2px;
+	@media (hover: hover) {
+		.mcp-close:hover { background: var(--hover-overlay); color: var(--foreground); }
 	}
+	.mcp-close:active { background: var(--active-overlay); color: var(--foreground); }
+	.mcp-close:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
 
 	/* Pages: the active one in place, the main list shifted left and dimmed
 	   under a sub-page, the rest waiting off to the right. */
@@ -1425,7 +1419,7 @@
 	.mcp-scroll {
 		flex: 1;
 		min-height: 0;
-		padding: 0 14px 16px;
+		padding: 0 16px 16px;
 		overflow-x: hidden;
 		overflow-y: auto;
 		overscroll-behavior: contain;
@@ -1489,15 +1483,14 @@
 	.mcp-row:active:not(:disabled):not([aria-disabled='true']) { background: var(--muted); }
 	.mcp-row:disabled { cursor: default; }
 	.mcp-group > * + * { border-top: 1px solid var(--border); }
+	/* One phone row: a card row with a bare 18px glyph. */
 	.mcp-ic {
 		display: grid;
 		place-items: center;
-		width: 30px;
-		height: 30px;
+		width: 18px;
+		height: 18px;
 		flex: none;
-		border-radius: calc(var(--radius) * 0.65);
-		background: var(--muted);
-		color: var(--foreground);
+		color: var(--muted-foreground);
 	}
 	.mcp-lbl { flex: 1; min-width: 0; }
 	.mcp-lbl > span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1644,14 +1637,10 @@
 	/* Icon tile · name · value · chevron */
 	.mcp-setup :global(.sheet-mode .ctx-chip > svg:first-of-type) {
 		order: 0;
-		box-sizing: border-box;
-		width: 30px;
-		height: 30px;
+		width: 18px;
+		height: 18px;
 		flex: none;
-		padding: 7px;
-		border-radius: calc(var(--radius) * 0.65);
-		background: var(--muted);
-		color: var(--foreground);
+		color: var(--muted-foreground);
 	}
 	.mcp-setup :global(.sheet-mode .ctx-chip::before) {
 		order: 1;
@@ -1675,15 +1664,15 @@
 		text-align: right;
 	}
 	.mcp-setup :global(.sheet-mode .ctx-chip .ctx-chip-chev),
-	.mcp-setup :global(.sheet-mode .ctx-chip > svg.lucide-chevron-down) { order: 3; transform: rotate(-90deg); width: 16px; height: 16px; margin-right: -3px; color: var(--muted-foreground); }
+	.mcp-setup :global(.sheet-mode .ctx-chip > svg.lucide-chevron-down) { order: 3; transform: rotate(-90deg); width: 18px; height: 18px; margin: 0; color: var(--muted-foreground); opacity: 0.75; }
 	/* Agent and "Runs on" open a page: draw the list chevron. */
 	.mcp-setup :global(.sheet-mode :is(.context-selector-btn, .ctx-chip.runner, .mode-trigger)::after) {
 		content: '';
 		order: 4;
-		width: 7px;
-		height: 7px;
+		width: 6.4px;
+		height: 6.4px;
 		flex: none;
-		margin: 0 4px 0 -2px;
+		margin: 0 8px 0 -2px;
 		border-top: 1.5px solid var(--muted-foreground);
 		border-right: 1.5px solid var(--muted-foreground);
 		transform: rotate(45deg);
@@ -1819,8 +1808,14 @@
 	.mcp-page .mcp-host :global(.runner-item.primary) { color: var(--primary); }
 	.mcp-page .mcp-host :global(.runner-item.danger) { color: var(--destructive); }
 
-	/* Model page: the shared picker, sized to the page. */
-	.mcp-model { display: flex; flex: 1; min-height: 0; --mpp-width: 100%; --mpp-height: 100%; }
+	/* Model page: the shared picker with its footer right after the list. Pushed
+	   from Chat controls it is a page of the same sheet; opened straight from the
+	   quick bar the sheet itself is only as tall as the picker, up to 85%. */
+	.mcp-model { display: flex; align-items: flex-start; flex: 1; min-height: 0; --mpp-width: 100%; --mpp-height: 100%; }
+	.mcp.fit { top: auto; max-height: 85dvh; padding-bottom: env(safe-area-inset-bottom, 0px); }
+	.mcp.fit .mcp-pages { display: flex; flex: 0 1 auto; }
+	.mcp.fit .mcp-page[data-page='model'] { position: relative; inset: auto; flex: 1 1 auto; min-width: 0; min-height: 0; }
+	.mcp.fit .mcp-model { align-items: stretch; }
 	.mcp-model :global(.mpp-list) { touch-action: pan-y; -webkit-overflow-scrolling: touch; }
 
 	/* Context and usage page: the shared details on a card. */

@@ -36,8 +36,15 @@
 	import { openHeaderDropdown, toggleDropdown, closeDropdown } from '$lib/stores/header-dropdowns';
 
 	const history = $derived($notificationHistory);
+	interface Props {
+		/** The phone top bar's copy: shows only while something is unread (or its panel is open). */
+		bar?: boolean;
+	}
+	let { bar = false }: Props = $props();
+
 	const unread = $derived($unreadCount);
-	const showPanel = $derived($openHeaderDropdown === 'notifications');
+	const dropdownId = bar ? 'notifications-bar' : 'notifications';
+	const showPanel = $derived($openHeaderDropdown === dropdownId);
 
 	let rootRef = $state<HTMLDivElement | null>(null);
 	let bellRef = $state<HTMLButtonElement | null>(null);
@@ -58,14 +65,14 @@
 	};
 
 	function togglePanel() {
-		const nowOpen = toggleDropdown('notifications');
+		const nowOpen = toggleDropdown(dropdownId);
 		// Opening the bell marks everything seen — the badge is "new since last look".
 		if (nowOpen && unread > 0) notify.markAllRead();
 	}
 
 	function handleClickOutside(e: MouseEvent) {
 		if (!showPanel) return;
-		if (rootRef && !rootRef.contains(e.target as Node)) closeDropdown('notifications');
+		if (rootRef && !rootRef.contains(e.target as Node)) closeDropdown(dropdownId);
 	}
 
 	function handleKeydown(e: KeyboardEvent) {
@@ -73,11 +80,11 @@
 		e.preventDefault();
 		// Hand focus back to the bell rather than dropping it on <body>.
 		const focusWasInside = !!rootRef?.contains(document.activeElement);
-		closeDropdown('notifications');
+		closeDropdown(dropdownId);
 		if (focusWasInside) bellRef?.focus();
 	}
 
-	onDestroy(() => closeDropdown('notifications'));
+	onDestroy(() => closeDropdown(dropdownId));
 
 	function onItemClick(n: AppNotification) {
 		if (!n.read) notify.markRead(n.id);
@@ -85,7 +92,7 @@
 		// session through the shared 'open-session' navigation event.
 		if (n.session_id) {
 			window.dispatchEvent(new CustomEvent('open-session', { detail: { sessionId: n.session_id } }));
-			closeDropdown('notifications');
+			closeDropdown(dropdownId);
 		}
 	}
 
@@ -108,7 +115,8 @@
 
 <svelte:window onclick={handleClickOutside} onkeydown={handleKeydown} />
 
-<div class="notif-center" bind:this={rootRef}>
+{#if !bar || unread > 0 || showPanel}
+<div class="notif-center" class:bar bind:this={rootRef}>
 	<button
 		bind:this={bellRef}
 		class="notif-btn"
@@ -120,7 +128,7 @@
 		aria-label={unread > 0 ? `Notifications (${unread} unread)` : 'Notifications'}
 		title="Notifications"
 	>
-		<Bell size={18} strokeWidth={1.5} />
+		<Bell size={bar ? 16 : 18} strokeWidth={bar ? 1.8 : 1.5} />
 		{#if unread > 0}
 			<span class="notif-badge" aria-hidden="true">{unread > 99 ? '99+' : unread}</span>
 		{/if}
@@ -196,8 +204,30 @@
 		</div>
 	{/if}
 </div>
+{/if}
 
 <style>
+	/* Phone top bar: a 44x48 target, a 16px bell and a 14px count. */
+	.notif-center.bar .notif-btn { width: 44px; height: 48px; border-radius: 8px; opacity: 1; }
+	.notif-center.bar .notif-badge {
+		top: 8px;
+		right: auto;
+		left: 23px;
+		min-width: 14px;
+		height: 14px;
+		padding: 0 3px;
+		border: 0;
+		box-shadow: 0 0 0 1.5px var(--background);
+	}
+	.notif-center.bar .notif-panel {
+		position: fixed;
+		top: 58px;
+		left: 8px;
+		right: 8px;
+		width: auto;
+		max-height: calc(100dvh - 120px);
+	}
+
 	.notif-center {
 		position: relative;
 		display: flex;

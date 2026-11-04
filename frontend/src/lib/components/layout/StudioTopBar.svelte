@@ -7,9 +7,8 @@
 	 * It replaces the old AppTopBar tab row: page navigation
 	 * now lives in the sidebar's workspace nav.
 	 *
-	 * The notification bell used to sit here too. It now lives only in the
-	 * sidebar header, so there is exactly one bell on screen at any width
-	 * instead of one per header that happens to be mounted.
+	 * The notification bell lives in the sidebar header. At phone width, where
+	 * the sidebar is a drawer, the bar adds its own while something is unread.
 	 *
 	 * The bar renders inside MainPanel so the git action buttons it hosts are the
 	 * existing GitHeaderActions instance with its existing handlers — nothing
@@ -18,6 +17,7 @@
 	import type { Snippet } from 'svelte';
 	import { Menu, PanelLeft } from 'lucide-svelte';
 	import SessionBreadcrumbs from './SessionBreadcrumbs.svelte';
+	import NotificationCenter from '$lib/components/NotificationCenter.svelte';
 
 	interface Props {
 		/** Left crumb — the project (or section) the current view belongs to. */
@@ -68,7 +68,7 @@
 			aria-pressed={!sidebarCollapsed}
 		>
 			{#if phoneWidth}
-				<Menu size={24} strokeWidth={1.8} />
+				<Menu size={20} strokeWidth={1.8} />
 			{:else}
 				<PanelLeft size={17} strokeWidth={1.85} />
 			{/if}
@@ -81,6 +81,7 @@
 		{#if actions}
 			{@render actions()}
 		{/if}
+		{#if phoneWidth}<NotificationCenter bar />{/if}
 	</div>
 </header>
 
@@ -112,7 +113,7 @@
 		transition: background-color 0.13s ease, color 0.13s ease;
 	}
 	.tb-icon:hover { background: var(--accent); color: var(--foreground); }
-	.tb-icon.phone { width: 44px; height: 44px; margin-left: -6px; color: var(--foreground); }
+	.tb-icon.phone { width: 44px; height: 48px; color: var(--foreground); }
 
 	.tb-right {
 		margin-left: auto;
@@ -120,6 +121,12 @@
 		align-items: center;
 		gap: 8px;
 		flex: none;
+	}
+
+	/* The phone app's bar: same height, same edges, no gaps between its 44px targets. */
+	@media (max-width: 480px) {
+		.topbar { height: 56px; gap: 0; padding: 0 4px; }
+		.tb-right { gap: 0; }
 	}
 
 	:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }

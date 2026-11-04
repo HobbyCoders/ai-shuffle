@@ -914,8 +914,8 @@
 		align-items: center;
 		gap: 8px;
 		margin: 8px 8px 0;
-		padding: 0 2px 10px;
-		border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+		padding: 0 8px 10px;
+		border-bottom: 1px solid var(--border-subtle);
 		color: var(--muted-foreground);
 		flex-shrink: 0;
 		transition: border-color 0.12s ease;
@@ -960,11 +960,12 @@
 		min-height: 0;
 		overflow-y: auto;
 		overscroll-behavior: contain;
-		padding: 6px 6px 6px 8px;
+		/* 8px both sides: a reserved scrollbar gutter would push the pill off centre. */
+		padding: 6px 8px;
 		display: flex;
 		flex-direction: column;
 		gap: 2px;
-		scrollbar-gutter: stable;
+		scrollbar-width: none;
 	}
 
 	.mpp-group-name {
@@ -1068,7 +1069,9 @@
 	}
 	/* No hover on a touch screen: the star stays visible and quiet, and thumb-sized. */
 	@media (hover: none) {
-		.mpp-fav { width: 44px; height: 44px; margin: -8px -6px; opacity: 0.6; }
+		.mpp-row { min-height: 48px; padding: 2px 8px; gap: 0; }
+		.mpp-row-label { font-size: 15px; font-weight: 400; }
+		.mpp-fav { width: 44px; height: 44px; margin: 0 4px 0 0; opacity: 0.6; }
 	}
 	.mpp-fav.on :global(svg) {
 		fill: currentColor;
@@ -1079,7 +1082,8 @@
 		display: flex;
 		flex-direction: column;
 		gap: 6px;
-		padding: 8px 10px 6px;
+		margin: 0 8px;
+		padding: 8px 8px 6px;
 		border-top: 1px solid var(--border-subtle);
 		flex-shrink: 0;
 	}

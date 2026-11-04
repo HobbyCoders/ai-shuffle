@@ -353,16 +353,18 @@ html:root[data-platform='mobile'] .project-name {
 
 /* ── frontend/src/lib/components/layout/ChatView.svelte ────────────────────── */
 
-/* The invitation is centred in the room above the pinned composer and never
-   shrinks; when it does not fit, the whole empty surface scrolls. The
-   project popup uses the top layer. */
+/* The invitation sits just above the pinned composer and never shrinks; when
+   it does not fit, the whole empty surface scrolls. The project popup uses the
+   top layer. */
 html:root[data-platform='mobile'] .chat-view.is-empty { overflow-y: auto;
 }
 
 html:root[data-platform='mobile'] .is-empty .empty-hero {
 	flex: 1 0 auto;
-	justify-content: center;
+	justify-content: flex-end;
 	padding-top: 1rem;
+	/* With the hero's own 20px and the composer's 12px: 40px greeting to box. */
+	padding-bottom: 8px;
 }
 
 html:root[data-platform='mobile'] .is-empty .empty-hero-content { flex-shrink: 0;
