@@ -13,6 +13,16 @@ from app.core.project_utils import get_project_working_dir, get_worktree_working
 from app.db import database
 
 
+def _command_caller(request: Optional[Request]) -> Optional[str]:
+    """Use the query sender's current identity for both cwd and scope reads."""
+    if request is None:
+        return None
+    from app.api.chat_query import _request_query_principal
+    from app.core.session_modes import caller_of
+
+    return caller_of(_request_query_principal(request))
+
+
 def command_context(
     request: Optional[Request], project_id: Optional[str],
     worktree_id: Optional[str], session_id: Optional[str], profile_id: Optional[str] = None,
@@ -38,7 +48,7 @@ def command_context(
             elif not session.get("project_id"):
                 raise HTTPException(403, "Access denied to this session")
         from app.core.project_resolver import resolve_session_cwd
-        cwd = resolve_session_cwd(session)
+        cwd = resolve_session_cwd(session, caller=_command_caller(request))
         if not cwd:
             raise HTTPException(404, "Session checkout is not available on this device")
         return str(cwd), session
@@ -72,13 +82,22 @@ def command_context(
 
 def command_setting_sources(
     request: Optional[Request], session: Optional[dict], profile_id: Optional[str],
+    mode: Optional[str] = None,
 ):
-    """Resolve the same profile field passed by build_sdk_options to the adapter."""
+    """Match the adapter's effective scopes, including Chat's filesystem isolation."""
     from app.core.provider.harness_adapter import _fluid_setting_sources
     from app.core.provider.types import SessionOptions
+    from app.core.session_modes import runtime_session_mode
 
     config = _command_profile_config(request, session, profile_id)
-    return _fluid_setting_sources(SessionOptions(model="", setting_sources=config.get("setting_sources")))
+    # Authorize first, then use the same current caller and runtime lane as a
+    # query send. Stored mode alone is not the projectless session's lane.
+    # Before creation, preserve the explicit request-mode policy.
+    effective_mode = mode
+    if session is not None:
+        effective_mode = runtime_session_mode(session, caller=_command_caller(request))
+    sources = [] if effective_mode == "chat" else config.get("setting_sources")
+    return _fluid_setting_sources(SessionOptions(model="", setting_sources=sources))
 
 
 def _command_profile_config(request, session, profile_id):

@@ -65,6 +65,20 @@
 	],
 	"rules": [
 		{
+			"why": "Fluid file and installed plugin discovery must agree with composer selection, details and actual prompt expansion on native and Claude chats",
+			"journeys": ["fluid-commands"],
+			"globs": [
+				"frontend/tests/journeys/fluid-commands.journey.mjs",
+				"frontend/src/lib/components/CommandAutocomplete.svelte",
+				"app/core/slash_commands.py",
+				"app/api/commands.py",
+				"app/api/command_context.py",
+				"fluid/fluid/context/instructions.py",
+				"fluid/fluid/context/plugins.py",
+				"app/core/plugin_install.py"
+			]
+		},
+		{
 			"why": "what a sidebar row says is true: one row's failed change undoes only that change, a failed turn reads Failed on every producer, a project is listed once in the Filter",
 			"journeys": ["sidebar-truth"],
 			"globs": [

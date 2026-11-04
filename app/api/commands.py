@@ -137,7 +137,7 @@ async def list_commands(
     def _list():
         working_dir, session = command_context(http_request, project_id, worktree_id, session_id, profile_id)
         kind = command_provider_kind(http_request, session, model, profile_id, mode)
-        sources = command_setting_sources(http_request, session, profile_id)
+        sources = command_setting_sources(http_request, session, profile_id, mode)
         return get_all_commands(working_dir, provider_kind=kind, setting_sources=sources)
 
     commands = await run_sync(_list)
@@ -168,7 +168,7 @@ async def get_command(
         command_context, http_request, project_id, worktree_id, session_id, profile_id
     )
     kind = await run_sync(command_provider_kind, http_request, session, model, profile_id, mode)
-    sources = await run_sync(command_setting_sources, http_request, session, profile_id)
+    sources = await run_sync(command_setting_sources, http_request, session, profile_id, mode)
     # Check if it's an interactive command
     if kind == "delegated" and is_interactive_command(command_name):
         from app.core.slash_commands import INTERACTIVE_COMMANDS
