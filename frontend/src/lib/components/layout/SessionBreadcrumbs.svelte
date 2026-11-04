@@ -126,6 +126,13 @@
 		.current :global(.menu) { left: auto; right: 0; }
 		.crumbs :global(.crumb-sep) { width: 10px; }
 	}
+	/* A phone-width window has room for one name: the chat's. */
+	@media (max-width: 480px) {
+		.crumbs:not(.mobile):has(.current) > .project,
+		.crumbs:not(.mobile):has(.current):not(.has-parent) > :global(.crumb-sep) {
+			display: none;
+		}
+	}
 	/* Phone bar subline: 11.5px muted text sitting on the bar's baseline. The
 	   parent link stays a 44px-tall tap target whose text rides at the bottom. */
 	.crumbs.mobile { flex: 0 1 auto; gap: 4px; align-items: flex-end; height: 44px; min-width: 0; }

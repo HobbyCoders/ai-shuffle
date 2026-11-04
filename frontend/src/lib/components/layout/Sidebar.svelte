@@ -1015,6 +1015,10 @@
 	.search:hover:not(:disabled) { background: var(--row-hover); color: var(--sidebar-foreground); }
 	.search:disabled { cursor: default; }
 	.search :global(svg) { flex: none; }
+	/* No keyboard shortcut to advertise at phone width. */
+	@media (max-width: 480px) {
+		.search kbd { display: none; }
+	}
 	.search kbd {
 		margin-left: auto;
 		font-family: inherit;

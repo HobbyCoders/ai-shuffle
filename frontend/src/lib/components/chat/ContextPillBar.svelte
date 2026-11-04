@@ -710,7 +710,7 @@
 				<span class="ctx-chip-cb" class:checked={isWorktreeSelected} aria-hidden="true">
 					<Check size={9} strokeWidth={2.6} />
 				</span>
-				<span class="ctx-chip-label">worktree</span>
+				<span class="ctx-chip-label">Worktree</span>
 			</span>
 		{/if}
 		</div>

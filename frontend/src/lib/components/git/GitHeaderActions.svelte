@@ -954,6 +954,20 @@
 		font-size: 0.71875rem;
 	}
 
+	/* A phone-width window: the icon carries the state, the words stay for
+	   assistive tech. */
+	@media (max-width: 480px) {
+		:global(html[data-platform='desktop']) .trigger .btn-label,
+		:global(html[data-platform='desktop']) .trigger .btn-detail {
+			position: absolute;
+			width: 1px;
+			height: 1px;
+			overflow: hidden;
+			clip: rect(0 0 0 0);
+			white-space: nowrap;
+		}
+	}
+
 	.trigger.open {
 		background: var(--accent);
 		color: var(--foreground);
