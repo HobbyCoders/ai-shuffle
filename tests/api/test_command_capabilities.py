@@ -145,6 +145,58 @@ def caller(user=None):
     return request
 
 
+@pytest.mark.parametrize("kind", ["anthropic", "delegated"])
+@pytest.mark.parametrize("session_mode,request_mode,allowed", [
+    (None, "chat", False), (None, "code", True),
+    ("chat", "code", False), ("code", "chat", True),
+])
+async def test_chat_catalog_and_details_match_runtime_scope_exclusion(
+    source_tree, monkeypatch, kind, session_mode, request_mode, allowed,
+):
+    import json
+
+    home, _, child = source_tree
+    put(home / ".fluid/commands/direct.md", "Direct body")
+    put(child / ".fluid/skills/guide/SKILL.md", "Skill body")
+    put(home / ".fluid/plugins/cache/market/installed/1.0.0/commands/run.md", "Installed body")
+    put(home / ".fluid/settings.json", json.dumps({"enabledPlugins": {"installed@market": True}}))
+    put(home / ".claude/commands/claude-owned.md", "Claude body")
+    monkeypatch.setattr(context.database, "get_profile", lambda pid: {
+        "config": {"setting_sources": ["user", "project", "local"], "cwd": str(child)},
+    })
+    session = {"id": "s", "profile_id": "p", "mode": session_mode} if session_mode else None
+    monkeypatch.setattr(context.database, "get_session", lambda sid: session)
+    monkeypatch.setattr("app.core.project_resolver.resolve_session_cwd", lambda row: str(child))
+    monkeypatch.setattr(commands, "command_provider_kind", lambda *a: kind)
+    kwargs = {"http_request": caller(), "profile_id": "p", "mode": request_mode}
+    if session:
+        kwargs["session_id"] = "s"
+    listed = await commands.list_commands(**kwargs)
+    names = {cmd.name for cmd in listed.commands}
+    file_names = {"direct", "guide", "installed:run"}
+    if kind == "delegated":
+        file_names.add("claude-owned")
+    assert names & file_names == (file_names if allowed else set())
+    assert "compact" in names  # Runtime built-ins survive filesystem isolation.
+    for name in file_names:
+        if allowed:
+            assert (await commands.get_command(name, **kwargs)).content
+        else:
+            with pytest.raises(HTTPException) as error:
+                await commands.get_command(name, **kwargs)
+            assert error.value.status_code == 404
+    assert (await commands.get_command("compact", **kwargs)).type == "sdk_builtin"
+
+
+def test_chat_scope_exclusion_still_authorizes_profile(monkeypatch):
+    lookup = Mock(side_effect=AssertionError("unauthorized profile loaded"))
+    monkeypatch.setattr(context.database, "get_profile", lookup)
+    with pytest.raises(HTTPException) as error:
+        context.command_setting_sources(caller({"profile_ids": ["mine"]}), None, "other", "chat")
+    assert error.value.status_code == 403
+    lookup.assert_not_called()
+
+
 @pytest.mark.parametrize('kind', ['anthropic','openai_responses','openrouter','voice','unavailable'])
 def test_native_menu_uses_fluid_files_without_cli_builtins(monkeypatch, tmp_path, kind):
     monkeypatch.setattr('pathlib.Path.home', lambda: tmp_path / 'home')
