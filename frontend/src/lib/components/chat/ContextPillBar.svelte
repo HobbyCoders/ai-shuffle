@@ -580,7 +580,7 @@
 							<MonitorOff size={12} strokeWidth={1.6} aria-hidden="true" />
 						{/if}
 						<WorkerStatusDot online={!badge?.runner || badge.runner.online} />
-						<span class="ctx-chip-label">{badge?.runner?.deviceName ? workerDisplayName(badge.runner.deviceName) : selfName}</span>
+						<span class="ctx-chip-label" class:runner-here={!badge?.runner}>{badge?.runner?.deviceName ? workerDisplayName(badge.runner.deviceName) : selfName}</span>
 						{#if sheetMode}
 							<!-- The phone's Chat controls draw this row as "Runs on"; the
 							     caption says the row is where a chat moves (#645). -->
@@ -775,12 +775,25 @@
 		min-width: 0;
 	}
 
-	/* A phone-width row keeps room for the names: labels only, without chevrons;
-	   the worktree chip is its tick box alone (its title and label still name it). */
+	/* A phone-width row stays one line. Its leading icons go first. A chat with a
+	   branch is the crowded case: the chevrons go too, this worker keeps only its
+	   status dot, and the worktree chip is its tick box alone. Each still names
+	   itself through its title and label. */
 	@media (max-width: 480px) {
-		.context-pill-bar:not(.sheet-mode) :global(.ctx-chip > svg),
-		.context-pill-bar:not(.sheet-mode) :global(.ctx-chip > :where(span, div):not(.ctx-chip-cb) > svg) {
+		.context-pill-bar:not(.sheet-mode) :global(.ctx-chip > svg:not(.lucide-chevron-down):not(.ctx-chip-chev)),
+		.context-pill-bar:not(.sheet-mode) :global(.ctx-chip > :where(span, div):not(.ctx-chip-cb) > svg:not(.lucide-chevron-down):not(.ctx-chip-chev)),
+		.context-pill-bar:not(.sheet-mode):has(.wt-indicator) :global(.ctx-chip svg.lucide-chevron-down),
+		.context-pill-bar:not(.sheet-mode):has(.wt-indicator) :global(.ctx-chip svg.ctx-chip-chev) {
 			display: none;
+		}
+
+		.context-pill-bar:not(.sheet-mode):has(.wt-indicator) .runner-here {
+			position: absolute;
+			width: 1px;
+			height: 1px;
+			overflow: hidden;
+			clip: rect(0 0 0 0);
+			white-space: nowrap;
 		}
 
 		.context-pill-bar:not(.sheet-mode) .wt-indicator .ctx-chip-label {

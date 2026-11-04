@@ -38,12 +38,17 @@
 		GitMerge,
 		GitPullRequest,
 		GitPullRequestClosed,
+		Circle,
 		MessageSquare,
 		Monitor,
 		TriangleAlert,
 		Undo2
 	} from 'lucide-svelte';
 	import type { Session } from '$lib/api/client';
+
+	/** Every status mark on a row is drawn at this one weight. */
+	const MARK_STROKE = 1.5;
+
 	import { appData } from '$lib/stores/app-data.svelte';
 	import { git } from '$lib/stores/git.svelte';
 	import { sessionGitState } from '$lib/stores/session-git-state.svelte';
@@ -646,25 +651,25 @@
 			{#if status === 'working'}
 				<span class="pip" aria-hidden="true"></span>
 			{:else if failed}
-				<TriangleAlert size={14} strokeWidth={2} class="warn failed" aria-hidden="true" />
+				<TriangleAlert size={14} strokeWidth={MARK_STROKE} class="warn failed" aria-hidden="true" />
 			{:else if attention}
-				<TriangleAlert size={14} strokeWidth={2} class="warn" aria-hidden="true" />
+				<TriangleAlert size={14} strokeWidth={MARK_STROKE} class="warn" aria-hidden="true" />
 			{:else if stage === 'pr'}
-				<GitPullRequest size={14} strokeWidth={1.75} />
+				<GitPullRequest size={14} strokeWidth={MARK_STROKE} />
 			{:else if stage === 'merged'}
-				<GitMerge size={14} strokeWidth={1.75} />
+				<GitMerge size={14} strokeWidth={MARK_STROKE} />
 			{:else if stage === 'closed'}
-				<GitPullRequestClosed size={14} strokeWidth={1.75} />
+				<GitPullRequestClosed size={14} strokeWidth={MARK_STROKE} />
 			{:else if stage === 'dirty'}
-				<Diff size={14} strokeWidth={1.75} />
+				<Diff size={14} strokeWidth={MARK_STROKE} />
 			{:else if stage === 'committed'}
-				<GitCommitHorizontal size={14} strokeWidth={1.75} />
+				<GitCommitHorizontal size={14} strokeWidth={MARK_STROKE} />
 			{:else if stage === 'pushed'}
-				<ArrowUpFromLine size={14} strokeWidth={1.75} />
+				<ArrowUpFromLine size={14} strokeWidth={MARK_STROKE} />
 			{:else if stage === 'none'}
-				<MessageSquare size={14} strokeWidth={1.75} />
+				<MessageSquare size={14} strokeWidth={MARK_STROKE} />
 			{:else}
-				<span class="stage-dot"></span>
+				<Circle size={14} strokeWidth={MARK_STROKE} />
 			{/if}
 		</span>
 		{/if}
@@ -858,18 +863,9 @@
 	.lead.purple { color: var(--status-merged); }
 	.lead.amber { color: var(--warning); }
 	.lead.muted { color: var(--subtle-foreground); }
-	/* "Repo, nothing to report" is a dot rather than an icon — it should read
-	   as an absence, not as one more thing to decode. */
-	.stage-dot {
-		width: 5px;
-		height: 5px;
-		border-radius: 50%;
-		background: currentColor;
-		opacity: 0.75;
-	}
 	.pip {
-		width: 7px;
-		height: 7px;
+		width: 8px;
+		height: 8px;
 		border-radius: 50%;
 		background: var(--primary);
 		animation: card-ping 1.8s ease-in-out infinite;

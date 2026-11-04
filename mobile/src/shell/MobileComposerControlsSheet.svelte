@@ -44,6 +44,7 @@
 	 * this component only renders and reports intent.
 	 */
 	import { tick, untrack } from 'svelte';
+	import { selfWorkerName, workerDisplayName } from '$lib/components/ui/worker-name';
 	import { obscuresTranscript } from '$lib/components/chat/transcript-reading-area';
 	import { pushState } from '$app/navigation';
 	import { page } from '$app/state';
@@ -133,13 +134,13 @@
 	const effortShown = $derived(effortValue ?? effortDefaultValue ?? null);
 	const effortIndex = $derived(effortShown ? effortValues.indexOf(effortShown) : -1);
 	const effortLabel = $derived(
-		!effortKnown ? (effortValue ?? 'Unknown')
+		!effortKnown ? (effortValue ?? 'Effort')
 			: !effortOptions.length ? 'Fixed'
 			: effortValue ? (effortOptions.find((o) => o.value === effortValue)?.label ?? 'Auto')
 			: 'Auto'
 	);
 	/** The effort row's value: the level, or why there is no choice. */
-	const panelEffortValue = $derived(effortLocked && effortKnown ? 'Set by the model' : effortLabel);
+	const panelEffortValue = $derived(effortLocked && effortKnown ? 'Set by the model' : !effortKnown && !effortValue ? 'Unknown' : effortLabel);
 	const effortA11y = $derived(
 		!effortKnown ? `Reasoning effort: ${effortValue ?? 'unknown'}`
 			: !effortOptions.length ? 'Reasoning effort: set by the model'
@@ -184,11 +185,11 @@
 
 	// Status chips: where this chat runs and what it works on, when known.
 	const sessionRow = $derived($sessions.find((s) => s.id === $activeSession.sessionId) ?? null);
-	const selfName = $derived($workerInstalls?.find((i) => i.is_self)?.device_name ?? null);
+	const selfName = $derived($workerInstalls?.some((i) => i.is_self) ? selfWorkerName($workerInstalls) : null);
 	const workerName = $derived.by((): string | null => {
-		if (!$activeSession.sessionId) return $activeSession.deviceIntent?.name ?? selfName;
-		if (sessionRow?.is_remote ?? $activeSession.isRemote) return sessionRow?.device_name ?? $activeSession.ownerDeviceName ?? null;
-		return selfName ?? sessionRow?.device_name ?? null;
+		if (!$activeSession.sessionId) return $activeSession.deviceIntent ? workerDisplayName($activeSession.deviceIntent.name) : selfName;
+		if (sessionRow?.is_remote ?? $activeSession.isRemote) { const owner = sessionRow?.device_name ?? $activeSession.ownerDeviceName; return owner ? workerDisplayName(owner) : null; }
+		return selfName ?? (sessionRow?.device_name ? workerDisplayName(sessionRow.device_name) : null);
 	});
 	const projectName = $derived(
 		$activeSession.mode === 'chat' ? null
@@ -1213,9 +1214,10 @@
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
-		font-size: 11.5px;
-		font-weight: 550;
+		font-size: 11px;
+		font-weight: 500;
 		line-height: 1.2;
+		color: var(--muted-foreground);
 		font-variant-numeric: tabular-nums;
 	}
 	.qcell.lit .qi { color: var(--primary); }

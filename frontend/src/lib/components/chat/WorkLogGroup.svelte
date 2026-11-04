@@ -500,7 +500,7 @@
 			{#if open}
 				<button
 					type="button"
-					class="wlrow fold hairline"
+					class="wlrow fold"
 					data-fold-header
 					onclick={(event) => collapseFromHeader(event, () => setOpen(false))}
 					aria-expanded="true"
@@ -517,7 +517,7 @@
 			{:else}
 				<button
 					type="button"
-					class="wlrow fold hairline"
+					class="wlrow fold"
 					onclick={() => setOpen(true)}
 					aria-expanded="false"
 					aria-label={disclosureLabel}
@@ -627,7 +627,6 @@
 		<button
 			type="button"
 			class="wlrow fold"
-			class:hairline={mode === 'settled'}
 			data-fold-header
 			onclick={(event) => collapseFromHeader(event, () => setOpen(false))}
 			aria-expanded="true"
@@ -654,7 +653,6 @@
 		<button
 			type="button"
 			class="wlrow fold"
-			class:hairline={mode === 'settled'}
 			onclick={() => setOpen(true)}
 			aria-expanded="false"
 			aria-label={disclosureLabel}
@@ -816,11 +814,6 @@
 	.wlrow.fold:focus-visible {
 		outline: 2px solid var(--ring);
 		outline-offset: -2px;
-	}
-
-	.wlrow.fold.hairline {
-		border-bottom: 1px solid color-mix(in oklch, var(--border) 72%, transparent);
-		border-radius: 8px 8px 0 0;
 	}
 
 	@keyframes worklog-settle {

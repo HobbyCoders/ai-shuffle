@@ -1029,7 +1029,13 @@
 		.dock-txt { height: 44px; padding: 0 6px; }
 		.dock-ico { width: 40px; height: 44px; }
 		.dock-group { gap: 0; }
-		.chevron-after::after { display: none; }
+		.dock-dot { margin: 0 -2px; }
+	}
+
+	/* The narrowest phones: the model's name matters more than icon gutters. */
+	@media (max-width: 340px) {
+		.dock-ico { width: 32px; }
+		.model-btn { max-width: 36vw; }
 	}
 
 	/* ===== MOBILE ===== */

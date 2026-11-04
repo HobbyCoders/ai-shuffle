@@ -951,6 +951,8 @@
 		color: var(--sidebar-foreground);
 	}
 
+	.sidebar.phone { flex-direction: column-reverse; }
+
 	/* Hidden, not removed: coming back to chats stays instant. */
 	.col.rail-hidden { display: none; }
 
@@ -958,6 +960,7 @@
 		position: relative;
 		flex: 1;
 		min-width: 0;
+		min-height: 0;
 		display: flex;
 		flex-direction: column;
 		/* clip, not hidden: a hidden box can still be scrolled, and focus landing
@@ -1094,7 +1097,7 @@
 		scrollbar-width: thin;
 		scrollbar-color: var(--border-strong) transparent;
 	}
-	.phone .list { padding-bottom: calc(24px + env(safe-area-inset-bottom, 0px)); }
+	.phone .list { padding-bottom: 24px; }
 	/* The mobile drawer is the full screen wide, and Android reserves the
 	   outer ~24dp of each edge for its back gesture. A swipe rail flush with
 	   that edge got taken for a back swipe, and taps on its outer half went

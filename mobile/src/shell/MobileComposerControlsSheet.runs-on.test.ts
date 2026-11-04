@@ -163,7 +163,7 @@ describe('Move to another worker on the phone (#645)', () => {
 		arrange();
 		render(MobileComposerControlsSheet, { props: props() });
 		const setup = document.querySelector<HTMLElement>('.mcp .mcp-setup')!;
-		await waitFor(() => expect(setup.querySelector('.ctx-chip.readonly .ctx-chip-label')?.textContent).toBe('Local'));
+		await waitFor(() => expect(setup.querySelector('.ctx-chip.readonly .ctx-chip-label')?.textContent).toBe('DesktopWorker'));
 		expect(setup.querySelector('.ctx-chip.runner')).toBeNull();
 		expect(setup.querySelector('.ctx-chip-sub')).toBeNull();
 	});
@@ -205,7 +205,7 @@ describe('Hosted menu on its page (#705)', () => {
 		vi.mocked(getQueuedMove).mockResolvedValue({ busy: { running: false, tasks: [] }, pending: null });
 		const { panel, runsOn } = await openMoveMenu();
 		// The worker this chat already runs on just closes the menu.
-		await fireEvent.click(within(runsOn).getByRole('menuitemradio', { name: 'Local' }));
+		await fireEvent.click(within(runsOn).getByRole('menuitemradio', { name: 'DesktopWorker' }));
 		await waitFor(() => expect(panel.getAttribute('aria-label')).toBe('Chat controls'));
 		expect(runsOn.querySelector('[data-mcp-ghost]')?.textContent).toContain('ServerWorker');
 		await waitFor(() => expect(runsOn.querySelector('[data-mcp-ghost]')).toBeNull(), { timeout: 1500 });

@@ -171,11 +171,22 @@
 		padding: 10px 0 12px;
 		background: var(--sidebar);
 	}
+	/* On a phone this is not a desktop rail: it is the drawer's bottom row, where
+	   a thumb already is. It scrolls sideways rather than clipping a destination
+	   when someone keeps a lot of them on it. */
 	.rail.phone {
-		width: 60px;
-		padding-top: calc(10px + env(safe-area-inset-top, 0px));
-		padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+		width: 100%;
+		flex-direction: row;
+		justify-content: space-between;
+		gap: 0;
+		padding: 4px 8px calc(4px + env(safe-area-inset-bottom, 0px));
+		border-top: 1px solid var(--border-subtle);
+		overflow-x: auto;
+		scrollbar-width: none;
 	}
+	.rail.phone::-webkit-scrollbar { display: none; }
+	.rail.phone .r-sep,
+	.rail.phone .grow { display: none; }
 
 	.r-btn {
 		position: relative;

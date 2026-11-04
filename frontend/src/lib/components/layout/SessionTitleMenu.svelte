@@ -21,6 +21,7 @@
 	import { forkSession } from '$lib/api/client';
 	import { appData } from '$lib/stores/app-data.svelte';
 	import { activeSession } from '$lib/stores/active-session';
+	import ChatExportActions from './ChatExportActions.svelte';
 	import { notify } from '$lib/stores/notifications';
 	import { openHeaderDropdown, toggleDropdown, closeDropdown } from '$lib/stores/header-dropdowns';
 
@@ -301,6 +302,12 @@
 				<button type="button" class="dropdown-item" role="menuitem" onclick={handleFork}>
 					Fork session
 				</button>
+				{#if sessionId && activeSession.current.sessionId === sessionId && (activeSession.current.messages?.length ?? 0) > 0}
+					<div class="menu-exports">
+						<div class="dropdown-divider" role="separator"></div>
+						<ChatExportActions {sessionId} menu onStart={() => closeDropdown('session-title')} />
+					</div>
+				{/if}
 				<div class="dropdown-divider" role="separator"></div>
 				<button type="button" class="dropdown-item danger" role="menuitem" onclick={startDelete}>
 					Delete
@@ -463,6 +470,12 @@
 	}
 	.dropdown-item.danger:hover {
 		background: color-mix(in oklch, var(--destructive) 12%, transparent);
+	}
+
+	/* The header shows these as icons until a phone-width bar needs the room. */
+	.menu-exports { display: none; }
+	@media (max-width: 480px) {
+		.menu-exports { display: block; }
 	}
 
 	.dropdown-divider {

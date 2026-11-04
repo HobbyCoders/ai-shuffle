@@ -945,7 +945,7 @@
 -->
 {#snippet downloadAction()}
 	{#if $activeView?.type === 'session' && activeTab?.sessionId && activeTab.messages.length > 0}
-		<ChatExportActions sessionId={activeTab.sessionId} />
+		<span class="header-exports"><ChatExportActions sessionId={activeTab.sessionId} /></span>
 	{/if}
 {/snippet}
 
@@ -1140,6 +1140,13 @@
 
 <!-- Git modals (rendered outside main-panel for proper z-index stacking) -->
 <style>
+	.header-exports { display: contents; }
+	/* A phone-width bar gives its room to the title; the chat's title menu
+	   carries these actions there (SessionTitleMenu). */
+	@media (max-width: 480px) {
+		.header-exports { display: none; }
+	}
+
 	.main-content { position: relative; display: flex; flex: 1; min-width: 0; min-height: 0; overflow: hidden; }
 	/* Keep composer popovers below the sibling side-panel overlay. */
 	.main-surface { isolation: isolate; display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; overflow: hidden; }

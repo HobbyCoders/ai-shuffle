@@ -15,6 +15,7 @@
  *  - a plain browser (no app runtime): open that worker's own /mobile/.
  *  - an app without the capability: say where the switch lives in the app.
  */
+import { workerDisplayName } from '$lib/components/ui/worker-name';
 import type { Install } from '$lib/api/installs';
 import type { Session } from '$lib/api/sessions';
 
@@ -64,7 +65,7 @@ export function connectionWorkers(
 		}).length;
 		return {
 			id: install.id,
-			name: install.device_name || 'Worker',
+			name: workerDisplayName(install.device_name),
 			online: install.is_self ? (currentOnline ?? install.online) : install.online,
 			current: !!install.is_self,
 			running,
