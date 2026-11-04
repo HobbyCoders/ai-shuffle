@@ -273,12 +273,17 @@
 	// Breadcrumbs for the desktop top bar: `project › session title` in a chat,
 	// just the section name everywhere else. The project crumb returns to the
 	// sessions board.
+	// The empty New Chat has no crumbs: the greeting is all the page says.
+	const onEmptyNewChat = $derived(
+		$activeView?.type === 'session' && !activeTab?.sessionId && !activeTab?.messages.length
+	);
 	const crumbProject = $derived(
-		$activeView?.type === 'session' ? (headerProjectName || 'Sessions') : null
+		$activeView?.type === 'session' && !onEmptyNewChat ? (headerProjectName || 'Sessions') : null
 	);
 	const crumbTitle = $derived.by(() => {
 		const type = $activeView?.type;
 		if (!type) return 'Sessions';
+		if (onEmptyNewChat) return '';
 		if (type === 'session') return headerTitle;
 		if (type === 'board') return 'Sessions';
 		// These pages title themselves: a crumb would say it twice.

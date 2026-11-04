@@ -627,7 +627,7 @@
 		onclick={toggleWorktree}
 		aria-label={worktreeOn ? 'Runs in a worktree. Switch to the main checkout' : 'Runs in the main checkout. Switch to a worktree'}
 		title={worktreeOn ? 'Runs in an isolated git worktree. Click for the main checkout.' : 'Runs in the main checkout. Click for an isolated worktree.'}
-	><GitFork size={14} strokeWidth={1.75} aria-hidden="true" /><span class="sentence-tok-label">{worktreeOn ? 'Worktree' : 'Main checkout'}</span></button>
+	><GitFork size={14} strokeWidth={1.75} aria-hidden="true" /><span class="sentence-tok-label">{worktreeOn ? 'Worktree' : 'Main checkout'}</span>{#if worktreeOn}<Check size={14} strokeWidth={2.4} aria-hidden="true" />{/if}</button>
 {/if}
 {:else}
 <div class="execution-mode-bar" class:sheet-mode={sheetMode}>

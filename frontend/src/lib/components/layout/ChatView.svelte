@@ -869,9 +869,9 @@
 		padding-bottom: 1rem;
 	}
 
-	/* A little more room below than above: the pair sits at the optical centre. */
+	/* A little more room below than above: the stack sits just over true centre. */
 	.empty-bottom-spacer {
-		flex: 1.35 1 auto;
+		flex: 1.15 1 auto;
 	}
 	/* A phone-width window keeps the composer under the thumb. */
 	@media (max-width: 480px) {
