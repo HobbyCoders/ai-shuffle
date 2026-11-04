@@ -2040,6 +2040,24 @@ def get_latest_run_turn(session_id: str) -> Optional[Dict[str, Any]]:
     return _row(row)
 
 
+def get_latest_started_turn(session_id: str) -> Optional[Dict[str, Any]]:
+    """The latest turn that actually executed, ignoring never-started queue rows.
+
+    Unlike :func:`get_latest_run_turn`, this is execution order, not queue/history
+    order. ``started_at`` is refreshed when a parked turn resumes, so that turn
+    is current again even if other rows were enqueued more recently.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM turns WHERE session_id=%s AND started_at IS NOT NULL "
+            "ORDER BY started_at DESC, insert_order DESC, created_at DESC, position DESC, id DESC LIMIT 1",
+            (session_id,),
+        )
+        row = cursor.fetchone()
+    return _row(row)
+
+
 def get_queued_turns(session_id: str) -> List[Dict[str, Any]]:
     """Return all ``queued`` turns for a session, ordered front-to-back by
     ``position``."""

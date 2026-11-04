@@ -16,7 +16,7 @@ import { persistVoiceContext, voiceContextFor } from '$lib/services/voiceExecuti
 import { STREAM_DEBUG } from '$lib/utils/debug-log';
 import { generateBranchName, generateBranchNameLocal } from '$lib/api/git';
 import { ATTACHMENTS_NEED_LOCAL_CHECKOUT } from '$lib/components/chat/attach-disable';
-import { STOP_TURN_NOT_NAMED } from '$lib/utils/not-sent-hold';
+import { STOP_TURN_NOT_NAMED, stopPressedOn } from '$lib/utils/not-sent-hold';
 import { parkedSendTurnId } from '$lib/utils/work-log';
 // V2 Phase 1: SSE-fed reducer — the transcript authority for a session.
 import { feedController, OPTIMISTIC_STREAMING_ON } from './v2/feed-controller';
@@ -770,19 +770,28 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					...(_state.liveTurnId ? { turn_id: _state.liveTurnId } : {}),
 				});
 				// Only a Stop that left this page can have refused anything.
-				if (sent) update(s => ({ ...s, stopRequestedTurnId: s.liveTurnId ?? STOP_TURN_NOT_NAMED }));
+				if (sent) update(s => ({
+					...s,
+					stopRequestedTurnId: s.liveTurnId ?? STOP_TURN_NOT_NAMED,
+					stopTimedOutTurnId: null,
+				}));
 			} else if (internal.awaitingNewSession) {
 				// Brand-new session whose id the backend hasn't minted yet, so we
 				// have nothing to address the stop to. Defer it: the session_created
 				// / start handlers send the stop once the id arrives, so the backend
 				// can discard the orphan turn instead of silently dropping the click.
 				internal.stopRequestedBeforeSession = true;
+				update(s => ({ ...s, stopRequestedTurnId: STOP_TURN_NOT_NAMED, stopTimedOutTurnId: null }));
 			}
 
 			const current = stopTimeout.get();
 			if (current) clearTimeout(current);
 			stopTimeout.set(setTimeout(() => {
-				if (getState().isStreaming) {
+				const state = getState();
+				// A navigation or a started successor is not the Stop still waiting.
+				if (state.isStreaming
+					&& (!_state.sessionId || state.sessionId === _state.sessionId)
+					&& stopPressedOn(state.stopRequestedTurnId, state.liveTurnId)) {
 					console.warn('[ActiveSession] Stop confirmation timeout - forcing UI recovery');
 					// Deliberate override, not a competing writer: the stop was never
 					// confirmed, so this is the UI's last-resort recovery. Withdraw
@@ -795,7 +804,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 							return m.streaming ? { ...m, streaming: false } : m;
 						});
 						messages = messages.filter(m => !(m.type === 'text' && m.role === 'assistant' && !m.content));
-						return { ...s, messages, isStreaming: false, optimisticStreaming: false, stopTimedOutTurnId: s.liveTurnId };
+						return { ...s, messages, isStreaming: false, optimisticStreaming: false, stopTimedOutTurnId: s.liveTurnId ?? s.stopRequestedTurnId ?? STOP_TURN_NOT_NAMED };
 					});
 				}
 				stopTimeout.set(null);

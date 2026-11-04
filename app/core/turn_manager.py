@@ -840,7 +840,9 @@ def stop_reaches_background_work(
     """
     if flipped is not None or turn_id is None:
         return True
-    latest = turns.get_latest_run_turn(session_id)
+    # Queued/cancelled rows never owned the work. Only an actually started
+    # successor makes this Stop stale (#585); queue history must not hide P.
+    latest = turns.get_latest_started_turn(session_id)
     return bool(latest and latest["id"] == turn_id and latest["state"] == "parked")
 
 

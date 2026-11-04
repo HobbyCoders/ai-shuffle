@@ -6,6 +6,8 @@ import {
 	createStopBubbleHold,
 	holdNotSentRows,
 	nameStoppedTurn,
+	nameStopRecovery,
+	stopRecoveryAppliesToTurn,
 	restingOnNotSentRows,
 	STOP_TURN_NOT_NAMED,
 	stopPressedOn,
@@ -119,6 +121,42 @@ describe('a Stop pressed before the feed named its turn', () => {
 		expect(nameStoppedTurn('turn-1', 'turn-2', true)).toBe('turn-1');
 		expect(nameStoppedTurn('turn-1', null, false)).toBe('turn-1');
 		expect(nameStoppedTurn(null, 'turn-2', true)).toBeNull();
+	});
+});
+
+describe('Stop timeout recovery', () => {
+	it('keeps an unnamed timeout through quiet folds and binds it to the delayed start', () => {
+		let recovery = nameStopRecovery(STOP_TURN_NOT_NAMED, null);
+		expect(recovery).toBe(STOP_TURN_NOT_NAMED);
+		expect(stopRecoveryAppliesToTurn(recovery, null)).toBe(true);
+		recovery = nameStopRecovery(recovery, 'turn-1');
+		expect(recovery).toBe('turn-1');
+		expect(stopRecoveryAppliesToTurn(recovery, 'turn-1')).toBe(true);
+	});
+
+	it('releases held rows permanently even if a later queue message waits below them', () => {
+		const hold = createNotSentHold();
+		const messages = [reply, row('1', 'turn-1')];
+		const queued = [{ id: 'later', content: 'later', queuedAt: 0 }];
+		expect(hold(messages, 'turn-1', queued).bubbles).toHaveLength(1);
+		const render = (recovery: string, live: string | null) => {
+			const recovering = stopRecoveryAppliesToTurn(recovery, live);
+			return hold(messages, recovering ? null : live, recovering ? [] : queued);
+		};
+		expect(render(STOP_TURN_NOT_NAMED, null).messages).toBe(messages);
+		expect(render(nameStopRecovery(STOP_TURN_NOT_NAMED, 'turn-1')!, 'turn-1').messages).toBe(messages);
+		expect(render('turn-1', null).messages).toBe(messages);
+	});
+
+	it('never applies the previous timeout to a started successor or its hold', () => {
+		expect(stopRecoveryAppliesToTurn('turn-1', 'turn-2')).toBe(false);
+		expect(nameStopRecovery('turn-1', 'turn-2')).toBeNull();
+		const hold = createNotSentHold();
+		const messages = [reply, row('2', 'turn-2')];
+		const queued = [{ id: 'later', content: 'later', queuedAt: 0 }];
+		expect(hold(messages, 'turn-2', queued).bubbles).toHaveLength(1);
+		const recovery = nameStopRecovery('turn-1', 'turn-2');
+		expect(hold(messages, null, stopRecoveryAppliesToTurn(recovery, null) ? [] : queued).bubbles).toHaveLength(1);
 	});
 });
 

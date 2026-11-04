@@ -766,6 +766,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			// target — the target feed re-derives it from its own turn.* events.
 			liveTurnId: null,
 			stopRequestedTurnId: null,
+			stopTimedOutTurnId: null,
 			fastAppliesTurnId: null,
 			turnParked: false,
 			// Same for the live model: the leaving session's rerouted-model note
@@ -1181,6 +1182,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			// #585: reset the live turn id on newChat (mirrors defaultState).
 			liveTurnId: null,
 			stopRequestedTurnId: null,
+			stopTimedOutTurnId: null,
 			fastAppliesTurnId: null,
 			turnParked: false,
 			// Reset the live model too so no stale reroute flag survives into the

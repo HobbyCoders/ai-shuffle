@@ -1085,6 +1085,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 						streamStartTime: null,
 						// A refused Stop refused nothing: its queue is not waiting on rows.
 						stopRequestedTurnId: null,
+						stopTimedOutTurnId: null,
 					}));
 				}
 				break;

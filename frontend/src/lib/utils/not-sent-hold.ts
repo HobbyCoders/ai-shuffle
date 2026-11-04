@@ -86,6 +86,27 @@ export function nameStoppedTurn(
 	return liveTurnId ?? STOP_TURN_NOT_NAMED;
 }
 
+/** Bind an unconfirmed Stop's recovery even if it timed out before the feed named it.
+ * Non-streaming folds are not confirmation: delayed rows/start may still arrive.
+ * A genuinely different live turn ends recovery; it was never part of this Stop.
+ */
+export function nameStopRecovery(
+	timedOut: string | null | undefined,
+	liveTurnId: string | null
+): string | null {
+	if (!timedOut) return null;
+	if (timedOut === STOP_TURN_NOT_NAMED) return liveTurnId ?? timedOut;
+	return liveTurnId && liveTurnId !== timedOut ? null : timedOut;
+}
+
+/** Also releases a carried hold after settlement, when there is no live turn. */
+export function stopRecoveryAppliesToTurn(
+	timedOut: string | null | undefined,
+	liveTurnId: string | null | undefined
+): boolean {
+	return !!timedOut && (!liveTurnId || stopPressedOn(timedOut, liveTurnId));
+}
+
 /** The chat ends on words Stop refused: nothing below them is coming. */
 export function restingOnNotSentRows(messages: ChatMessage[]): boolean {
 	return messages.findLast(m => m.role === 'user')?.metadata?.not_sent === true;

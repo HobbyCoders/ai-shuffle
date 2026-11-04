@@ -155,7 +155,8 @@ export interface ActiveSessionState {
 	liveTurnId: string | null;
 	/** The turn this device pressed Stop on, or STOP_TURN_NOT_NAMED before the feed names it (see not-sent-hold). */
 	stopRequestedTurnId?: string | null;
-	/** The turn whose Stop was never confirmed (see not-sent-hold). */
+	/** This Stop attempt timed out: its turn id, or STOP_TURN_NOT_NAMED until the feed names it.
+	 * Reset by another Stop, a successor, a refused command, or navigation. */
 	stopTimedOutTurnId?: string | null;
 	/** The latest turn is parked on background work (v2 feed `turn.parked`,
 	 *  cleared by the next `turn.*`). Keeps the transcript from folding a parked
@@ -399,6 +400,8 @@ function defaultState(): ActiveSessionState {
 		isStreaming: false,
 		optimisticStreaming: false,
 		liveTurnId: null,
+		stopRequestedTurnId: null,
+		stopTimedOutTurnId: null,
 		turnParked: false,
 		liveModel: null,
 		liveRequestedModel: null,
