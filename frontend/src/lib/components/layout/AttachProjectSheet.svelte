@@ -233,7 +233,7 @@
 		try {
 			const result = await attachProject(sessionId, pickedItem.project);
 			activeSession.applyAttachedProject(sessionId, result.project_id, result.project_v2_id, result.permission_mode ?? 'default');
-			notify(`${pickedItem.name} attached. ${agentName?.trim() || 'Your agent'} now works in its checkout, on Ask.`, { severity: 'success' });
+			notify(`${pickedItem.name} attached. ${agentName?.trim() || 'Your agent'} now works in its checkout, on Ask first.`, { severity: 'success' });
 			onClose();
 		} catch (e) {
 			error = getErrorMessage(e, 'Could not attach the project.');

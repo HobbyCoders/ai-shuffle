@@ -37,7 +37,7 @@ afterEach(() => {
 });
 
 const ACCESS = [
-	{ value: 'default', label: 'Ask', description: 'Confirm before tools' },
+	{ value: 'default', label: 'Ask first', description: 'Confirm before tools' },
 	{ value: 'auto', label: 'Auto', description: 'Model decides per tool call' },
 	{ value: 'acceptEdits', label: 'Accept Edits', description: 'File edits run without asking' },
 	{ value: 'bypassPermissions', label: 'Bypass', description: 'Execute all tools' }
@@ -128,7 +128,7 @@ describe('quick bar', () => {
 		render(MobileComposerControlsSheet, { props: props({ onPermissionSelect }) });
 		await fireEvent.click(cell(/^Permission mode/));
 		const picker = screen.getByRole('dialog', { name: 'Tool access' });
-		expect(within(picker).getAllByRole('radio').map((r) => r.textContent?.trim())).toEqual(['Ask', 'Auto', 'Accept edits', 'Bypass']);
+		expect(within(picker).getAllByRole('radio').map((r) => r.textContent?.trim())).toEqual(['Ask first', 'Auto', 'Accept edits', 'Bypass']);
 		await fireEvent.click(within(picker).getByRole('radio', { name: 'Bypass' }));
 		expect(onPermissionSelect).toHaveBeenCalledExactlyOnceWith('bypassPermissions');
 	});
@@ -432,13 +432,13 @@ describe('Chat controls panel', () => {
 
 	it('shows Away on the quick bar, as the desktop composer does, without opening the panel', async () => {
 		const view = render(MobileComposerControlsSheet, { props: props({ awayEnabled: true }) });
-		const access = cell(/^Permission mode: Ask, Away mode on$/);
+		const access = cell(/^Permission mode: Ask first, Away mode on$/);
 		expect(access.querySelector('[data-away-badge]')).toBeTruthy();
 		await view.rerender(props({ awayEnabled: false }));
-		expect(cell(/^Permission mode: Ask$/).querySelector('[data-away-badge]')).toBeNull();
+		expect(cell(/^Permission mode: Ask first$/).querySelector('[data-away-badge]')).toBeNull();
 		// Before the first message Away cannot be on, whatever the store says.
 		await view.rerender(props({ awayEnabled: true, awayAvailable: false }));
-		expect(cell(/^Permission mode: Ask$/).querySelector('[data-away-badge]')).toBeNull();
+		expect(cell(/^Permission mode: Ask first$/).querySelector('[data-away-badge]')).toBeNull();
 	});
 
 	it('offers fast mode only where the model supports it', async () => {
@@ -676,12 +676,13 @@ describe('every chat (#371 step 5)', () => {
 		render(MobileComposerControlsSheet, { props: props({
 			open: true, showSetup: false, showEffort: false, fastSupported: true
 		}) });
-		expect(cell(/^Permission mode: Ask$/)).toBeTruthy();
+		expect(cell(/^Permission mode: Ask first$/)).toBeTruthy();
 		const dialog = panel();
 		expect(within(dialog).getByRole('switch', { name: 'Fast mode' })).toBeTruthy();
 		expect(within(dialog).getByRole('switch', { name: 'Away mode' })).toBeTruthy();
 		expect(within(dialog).getByRole('radiogroup', { name: 'Tool access' })).toBeTruthy();
-		expect(within(dialog).getByRole('heading', { name: 'Model' })).toBeTruthy();
+		expect(within(dialog).queryByRole('heading', { name: 'Model' })).toBeNull();
+		expect(within(dialog).getByRole('button', { name: /^Model/ })).toBeTruthy();
 		expect(within(dialog).getByRole('heading', { name: 'Permissions' })).toBeTruthy();
 		expect(within(dialog).queryByRole('heading', { name: 'Setup' })).toBeNull();
 	});

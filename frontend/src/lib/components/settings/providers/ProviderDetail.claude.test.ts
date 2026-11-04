@@ -215,7 +215,7 @@ it('offers no Open terminal when the worker refuses terminals', async () => {
 
 it('carries the Claude compaction switch, on by default, and saves a change', async () => {
 	await show();
-	const group = await screen.findByRole('region', { name: 'Sessions' });
+	const group = await screen.findByRole('region', { name: 'Chats' });
 	const sw = await within(group).findByRole('switch', { name: /Smarter compaction/ });
 	expect(sw.getAttribute('aria-checked')).toBe('true');
 	await fireEvent.click(sw);

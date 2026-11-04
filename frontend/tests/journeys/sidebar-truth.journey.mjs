@@ -50,7 +50,7 @@ const CARD = (id) => `[data-session-card="${id}"]`;
 /** The list of chats, open: the shared UI's sidebar, or the /mobile/ shell's menu holding the same one. */
 async function showSidebar(page) {
 	if (!new URL(page.url()).pathname.startsWith('/mobile/')) return showDesktopSidebar(page);
-	const sessions = page.getByRole('complementary', { name: 'Sessions' });
+	const sessions = page.getByRole('complementary', { name: 'Chats' });
 	if (await sessions.isVisible()) return sessions;
 	await page.getByRole('button', { name: /^Open menu/ }).click();
 	await sessions.waitFor({ timeout: 10_000 });
@@ -59,8 +59,8 @@ async function showSidebar(page) {
 const laneOf = (page, id) => page.evaluate((selector) => document.querySelector(selector)?.closest('[data-group]')?.getAttribute('data-group') ?? null, CARD(id));
 
 async function waitLane(page, id, lane, timeout = 30_000) {
-	await page.getByRole('complementary', { name: 'Sessions' })
-		.or(page.getByRole('button', { name: /^(Show sidebar|Sessions|Open menu)/ }))
+	await page.getByRole('complementary', { name: 'Chats' })
+		.or(page.getByRole('button', { name: /^(Show sidebar|Chats|Open menu)/ }))
 		.first().waitFor({ timeout: 60_000 });
 	await showSidebar(page);
 	try {
@@ -157,7 +157,7 @@ async function makeChat(ctx, label, { agent = null, first = 'hello', again = fal
 	if (again) await backToNew(page);
 	else await openNewChat(ctx);
 	if (agent) {
-		const hero = page.getByRole('region', { name: 'New session' });
+		const hero = page.getByRole('region', { name: 'New chat' });
 		const menu = page.getByRole('menu', { name: 'Agent selection' });
 		await pick(hero.getByRole('button', { name: /^Agent:/ }), menu, menu.getByRole('button', { name: agent, exact: true }), hero.getByRole('button', { name: `Agent: ${agent}` }));
 	}
@@ -171,7 +171,7 @@ async function makeChat(ctx, label, { agent = null, first = 'hello', again = fal
 
 async function backToNew(page) {
 	await showSidebar(page);
-	await page.getByRole('navigation', { name: 'Workspace' }).getByRole('button', { name: 'New session', exact: true }).click();
+	await page.getByRole('navigation', { name: 'Workspace' }).getByRole('button', { name: 'New chat', exact: true }).click();
 	await waitChat(page, { surface: 'new' });
 }
 
@@ -609,7 +609,7 @@ const PROJECT_CHOICE_SURVIVES = {
 		if (nudge) await api(page, 'DELETE', `/projects/${nudge}`).catch(() => {});
 	},
 	async act({ page, mark, project }) {
-		const hero = page.getByRole('region', { name: 'New session' });
+		const hero = page.getByRole('region', { name: 'New chat' });
 		const holds = async (when) => {
 			const deadline = Date.now() + 4_000;
 			while (Date.now() < deadline) {
@@ -637,7 +637,7 @@ const PROJECT_ONCE = {
 		if (project) await api(page, 'DELETE', `/projects/${project.id}`).catch(() => {});
 	},
 	async act({ page, mark, log, project, olderId }) {
-		const hero = page.getByRole('region', { name: 'New session' });
+		const hero = page.getByRole('region', { name: 'New chat' });
 		await mark('a worktree on a new branch, then the first message');
 		// This case is about the listing. Losing the choice has its own case above
 		// (#1078), so step around that one failure here and nothing else: the screen

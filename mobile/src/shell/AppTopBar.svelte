@@ -114,12 +114,12 @@
 	const mobileTitle = $derived.by(() => {
 		if (settingsSubPage) return categoryById(settingsNav.category).label;
 		if (currentType === 'session') return chatTitle;
-		if (currentType === 'board') return 'Sessions';
+		if (currentType === 'board') return 'Chats';
 		if (buildActive) return 'Build';
 		return (currentType && TITLES[currentType]) || 'AI Shuffle';
 	});
 	const projectLabel = $derived(
-		boundChatId ? ($projects.find((p) => p.id === $activeSession.project)?.name || 'Sessions') : null
+		boundChatId ? ($projects.find((p) => p.id === $activeSession.project)?.name || 'Chats') : null
 	);
 
 	// --- Navigation drawer ------------------------------------------------------

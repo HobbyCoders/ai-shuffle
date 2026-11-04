@@ -36,7 +36,7 @@ async function expectClearedState(page, title) {
 	await waitChat(page, { surface: 'cleared', composer: 'centre', loading: 'false', session: /^s:/ });
 	await page.getByText('Conversation cleared', { exact: false }).waitFor();
 	if (title) await page.getByRole('heading', { name: title, exact: true }).waitFor();
-	expect(!(await page.getByRole('region', { name: 'New session' }).isVisible()), 'the new-session hero is not shown');
+	expect(!(await page.getByRole('region', { name: 'New chat' }).isVisible()), 'the new-session hero is not shown');
 	expect((await page.locator('[data-ui-mount="NewSessionHero"]').count()) === 0, 'NewSessionHero is not mounted');
 }
 

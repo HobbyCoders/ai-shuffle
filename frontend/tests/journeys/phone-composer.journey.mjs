@@ -187,7 +187,7 @@ await runJourney({
 				expect((await composer(page).innerText()).includes(token), 'the typed text is kept');
 
 				await mark('pick an agent and send');
-				const hero = page.getByRole('region', { name: 'New session' });
+				const hero = page.getByRole('region', { name: 'New chat' });
 				await pickAgent(page, hero);
 				await sendButton(page).tap();
 				await waitTurnSettled(page, { text: `You said: “no agent yet ${token}`, messagesAtLeast: 2 });

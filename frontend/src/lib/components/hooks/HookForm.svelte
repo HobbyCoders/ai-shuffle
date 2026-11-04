@@ -132,7 +132,7 @@
 		<div class="lab"><h4>Scope</h4><p>{scopeProjectId ? 'Fires only for sessions in this project.' : 'Fires for all sessions regardless of project.'}</p></div>
 		<div class="ctl">
 			<select bind:value={scopeProjectId} class="sel">
-				<option value={null}>App (all sessions)</option>
+				<option value={null}>App (all chats)</option>
 				{#each $projects as project (project.id)}
 					<option value={project.id}>{project.name}</option>
 				{/each}

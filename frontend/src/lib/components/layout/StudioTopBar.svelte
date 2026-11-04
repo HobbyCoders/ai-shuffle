@@ -18,6 +18,7 @@
 	import { Menu, PanelLeft } from 'lucide-svelte';
 	import SessionBreadcrumbs from './SessionBreadcrumbs.svelte';
 	import NotificationCenter from '$lib/components/NotificationCenter.svelte';
+	import { unreadCount } from '$lib/stores/notifications';
 
 	interface Props {
 		/** Left crumb — the project (or section) the current view belongs to. */
@@ -63,7 +64,7 @@
 			class="tb-icon"
 			onclick={onToggleSidebar}
 			class:phone={phoneWidth}
-			aria-label={phoneWidth ? 'Sessions' : sidebarCollapsed ? 'Show sidebar' : 'Hide sidebar'}
+			aria-label={phoneWidth ? ($unreadCount > 0 ? `Chats (${$unreadCount} unread notifications)` : 'Chats') : sidebarCollapsed ? 'Show sidebar' : 'Hide sidebar'}
 			title={phoneWidth ? undefined : sidebarCollapsed ? 'Show sidebar' : 'Hide sidebar'}
 			aria-pressed={!sidebarCollapsed}
 		>

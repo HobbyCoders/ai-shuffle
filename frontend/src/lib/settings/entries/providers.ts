@@ -57,7 +57,7 @@ export const entries: SettingEntry[] = [
 	{
 		id: 'providers.claudeCompaction',
 		category: 'providers',
-		section: 'Sessions',
+		section: 'Chats',
 		label: 'Smarter compaction',
 		hint: 'Keeps more of the conversation',
 		help: COMPACTION_HELP,

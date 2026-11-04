@@ -35,7 +35,7 @@ const uniq = () => `${Date.now().toString(36)}${(counter++).toString(36)}`;
 async function openNewChat({ page, status }, agent = AGENT) {
 	await page.goto(status.urls.ui);
 	await page.locator('[data-ui-state="chat"][data-ui-surface="new"]').waitFor({ timeout: 90_000 });
-	const hero = page.getByRole('region', { name: 'New session' });
+	const hero = page.getByRole('region', { name: 'New chat' });
 	await hero.waitFor();
 	// Pick the engine explicitly; the default only exercises the native harness.
 	await page.getByRole('button', { name: /^Model: / }).waitFor({ timeout: 60_000 });

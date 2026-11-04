@@ -344,7 +344,7 @@ export async function pickProject(page, hero, project = PROJECT) {
 export async function openNewChat({ page, status }, { project = null } = {}) {
 	await gotoApp(page, status);
 	await waitChat(page, { surface: 'new' }, { timeout: 90_000 });
-	const hero = page.getByRole('region', { name: 'New session' });
+	const hero = page.getByRole('region', { name: 'New chat' });
 	await hero.waitFor();
 	await pickAgent(page, hero);
 	if (project) await pickProject(page, hero, project);
@@ -401,9 +401,9 @@ export const isPhone = (variant) => variant.viewport !== 'desktop' && variant.vi
 
 /** Show the sessions sidebar when it is hidden (always on a phone). */
 export async function showSidebar(page) {
-	const sessions = page.getByRole('complementary', { name: 'Sessions' });
+	const sessions = page.getByRole('complementary', { name: 'Chats' });
 	if (await sessions.isVisible()) return sessions;
-	await page.getByRole('button', { name: /^(Show sidebar|Sessions)$/ }).click();
+	await page.getByRole('button', { name: /^(Show sidebar|Chats)\b/ }).click();
 	await sessions.waitFor({ timeout: 10_000 });
 	return sessions;
 }

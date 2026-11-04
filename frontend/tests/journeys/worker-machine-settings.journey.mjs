@@ -22,8 +22,8 @@ await runJourney({
 			await page.waitForFunction(() => JSON.parse(localStorage.getItem('ai-shuffle-layout') || 'null')?.activeView?.type === 'session');
 			// Reconciliation can finish before Svelte has rendered the desktop
 			// sidebar. Wait for either visible shell state before checking it.
-			await page.getByRole('complementary', { name: 'Sessions' })
-				.or(page.getByRole('button', { name: /^(Show sidebar|Sessions)$/ }))
+			await page.getByRole('complementary', { name: 'Chats' })
+				.or(page.getByRole('button', { name: /^(Show sidebar|Chats)\b/ }))
 				.filter({ visible: true }).first().waitFor();
 			await showSidebar(page);
 			await page.getByRole('button', { name: 'Settings', exact: true }).click();

@@ -279,14 +279,14 @@
 		$activeView?.type === 'session' && !activeTab?.sessionId && !activeTab?.messages.length
 	);
 	const crumbProject = $derived(
-		$activeView?.type === 'session' && !onEmptyNewChat ? (headerProjectName || 'Sessions') : null
+		$activeView?.type === 'session' && !onEmptyNewChat ? (headerProjectName || 'Chats') : null
 	);
 	const crumbTitle = $derived.by(() => {
 		const type = $activeView?.type;
-		if (!type) return 'Sessions';
+		if (!type) return 'Chats';
 		if (onEmptyNewChat) return '';
 		if (type === 'session') return headerTitle;
-		if (type === 'board') return 'Sessions';
+		if (type === 'board') return 'Chats';
 		// These pages title themselves: a crumb would say it twice.
 		if (isBuildView || type === 'settings' || type === 'plugins' || type === 'mcp' || type === 'hooks') return '';
 		return viewTitles[type] || '';

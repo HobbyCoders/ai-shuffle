@@ -48,7 +48,7 @@
 	});
 </script>
 
-<section class="composer-context-line" aria-label={newChat && !sheetOpen ? 'New session' : undefined}>
+<section class="composer-context-line" aria-label={newChat && !sheetOpen ? 'New chat' : undefined}>
 	<button
 		type="button"
 		class="ccl-btn"

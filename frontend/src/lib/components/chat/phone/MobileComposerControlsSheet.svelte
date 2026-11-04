@@ -1002,7 +1002,7 @@
 
 						{#if showSetup && rendered}
 							<h3 class="mcp-glabel">Setup</h3>
-							<section class="mcp-group mcp-setup" aria-label={newChat ? 'New session' : undefined}><ContextPillBar sheetMode {menuHosts} /></section>
+							<section class="mcp-group mcp-setup" aria-label={newChat ? 'New chat' : undefined}><ContextPillBar sheetMode {menuHosts} /></section>
 						{/if}
 					{/if}
 				</div>

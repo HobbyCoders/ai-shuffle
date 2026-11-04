@@ -57,7 +57,7 @@ async function openClaudeOpusChat({ page, status }) {
 	}
 	await gotoApp(page, status);
 	await waitChat(page, { surface: 'new' }, { timeout: 90_000 });
-	const hero = page.getByRole('region', { name: 'New session' });
+	const hero = page.getByRole('region', { name: 'New chat' });
 	await hero.waitFor();
 	const agentMenu = page.getByRole('menu', { name: 'Agent selection' });
 	await pick(

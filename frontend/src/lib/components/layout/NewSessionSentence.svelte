@@ -54,7 +54,7 @@
 	}
 </script>
 
-<section class="ns-context" aria-label="New session">
+<section class="ns-context" aria-label="New chat">
 	<ProfileSelector variant="card" />
 	<div class="ns-sentence" role="group" aria-label="Where this session runs">
 		<RunsOnPicker />

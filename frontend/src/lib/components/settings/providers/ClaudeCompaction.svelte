@@ -58,7 +58,7 @@
 	onMount(() => void load());
 </script>
 
-<RowGroup title="Sessions">
+<RowGroup title="Chats">
 	<SettingRow id={ID} value={enabled ?? undefined} onReset={reset}>
 		{#if enabled !== null}
 			<Switch checked={enabled} disabled={busy} onchange={save} />

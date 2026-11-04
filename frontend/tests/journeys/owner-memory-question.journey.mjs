@@ -102,9 +102,9 @@ await runJourney({
                 await mark('fresh session after owner answer');
                 // Reloading / restores the active chat. Use the real New session
                 // action instead of calling the fresh-context setup helper twice.
-                await page.getByRole('button', { name: 'New session', exact: true }).click();
+                await page.getByRole('button', { name: 'New chat', exact: true }).click();
                 await waitChat(page, { surface: 'new' });
-                const hero = page.getByRole('region', { name: 'New session' });
+                const hero = page.getByRole('region', { name: 'New chat' });
                 await pickAgent(page, hero);
                 await pickProject(page, hero, PROJECT);
                 await pickAccess(page, 'Bypass');

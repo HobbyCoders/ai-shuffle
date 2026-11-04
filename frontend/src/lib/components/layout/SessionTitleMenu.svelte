@@ -175,7 +175,7 @@
 		try {
 			const result = await forkSession(sessionId);
 			await appData.loadSessions();
-			notify('Session forked', { severity: 'success' });
+			notify('Chat forked', { severity: 'success' });
 			window.dispatchEvent(new CustomEvent('open-session', { detail: { sessionId: result.session_id } }));
 		} catch {
 			notify('Failed to fork session', { severity: 'error' });

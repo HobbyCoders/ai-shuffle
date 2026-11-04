@@ -180,7 +180,7 @@
 		>
 			<!-- Header -->
 			<div class="px-4 py-3 border-b border-border flex items-center justify-between">
-				<h2 id="import-session-title" class="text-lg font-semibold text-foreground">Import Session</h2>
+				<h2 id="import-session-title" class="text-lg font-semibold text-foreground">Import chat</h2>
 				<button
 					class="import-modal-btn p-1.5 text-muted-foreground hover:text-foreground rounded-lg transition-colors"
 					onclick={close}

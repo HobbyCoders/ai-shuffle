@@ -67,13 +67,13 @@ await scenario('repro: New branch, send, New session mid-create', async ({ page,
 	check(create.branch_name === 'live/1528-explicit' && create.create_new_branch === false, 'create request', create);
 	check(await fx(() => window.oneTimeBranch.checkoutClaimed), 'choice claimed while in flight');
 	// The user starts the next task before the first create returns.
-	await button('New session').click();
+	await button('New chat').click();
 	await chipIs('Auto from main');
 	await fx(() => window.oneTimeBranch.finishCreate('ok'));
 	await page.waitForFunction(() => !window.oneTimeBranch.checkoutClaimed);
 	check((await fx(() => window.oneTimeBranch.storedCheckout())) === null, 'stored choice consumed after success');
 	await chipIs('Auto from main');
-	await button('New session').click();
+	await button('New chat').click();
 	await chipIs('Auto from main');
 	check((await fx(() => window.oneTimeBranch.state())).worktreeBranch === '', 'new compose has no staged branch');
 });
@@ -83,7 +83,7 @@ await scenario('repro without overlap: send completes, then New session', async 
 	await button('Send').click();
 	await page.getByRole('status').filter({ hasText: 'Created session-1' }).waitFor();
 	check((await fx(() => window.oneTimeBranch.storedCheckout())) === null, 'stored choice consumed after success');
-	await button('New session').click();
+	await button('New chat').click();
 	await chipIs('Auto from main');
 });
 
@@ -98,7 +98,7 @@ await scenario('failed create keeps the choice', async ({ page, fx, check, chipI
 	const stored = await fx(() => window.oneTimeBranch.storedCheckout());
 	check(stored?.branch === 'live/fails', 'stored choice kept', stored);
 	check(!(await fx(() => window.oneTimeBranch.checkoutClaimed)), 'claim released');
-	await button('New session').click();
+	await button('New chat').click();
 	await chipIs('live/fails');
 });
 
@@ -114,12 +114,12 @@ await scenario('existing branch picked from the list is one-time too', async ({ 
 	await page.waitForFunction(() => window.oneTimeBranch.creates.length === 1);
 	const create = (await fx(() => window.oneTimeBranch.creates))[0];
 	check(create.branch_name === 'develop' && create.create_new_branch === false, 'create request', create);
-	await button('New session').click();
+	await button('New chat').click();
 	await chipIs('Auto from main');
 	await fx(() => window.oneTimeBranch.finishCreate('ok'));
 	await page.waitForFunction(() => !window.oneTimeBranch.checkoutClaimed);
 	check((await fx(() => window.oneTimeBranch.storedCheckout())) === null, 'listed pick consumed after success');
-	await button('New session').click();
+	await button('New chat').click();
 	await chipIs('Auto from main');
 });
 

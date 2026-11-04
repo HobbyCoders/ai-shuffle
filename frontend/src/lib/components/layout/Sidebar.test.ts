@@ -297,16 +297,16 @@ afterEach(() => {
 
 async function openFilter(): Promise<HTMLElement> {
 	await fireEvent.click(screen.getByRole('button', { name: 'Filter' }));
-	return screen.getByRole('dialog', { name: 'Filter sessions' });
+	return screen.getByRole('dialog', { name: 'Filter chats' });
 }
 
 function filterOption(label: string): HTMLElement {
-	const sheet = screen.getByRole('dialog', { name: 'Filter sessions' });
+	const sheet = screen.getByRole('dialog', { name: 'Filter chats' });
 	return within(sheet).getByRole('button', { name: label });
 }
 
 function filterLabels(): string[] {
-	const sheet = screen.getByRole('dialog', { name: 'Filter sessions' });
+	const sheet = screen.getByRole('dialog', { name: 'Filter chats' });
 	return within(sheet).getAllByRole('button').map((node) => node.textContent?.trim() ?? '');
 }
 
@@ -584,11 +584,11 @@ describe('Sidebar session groups', () => {
 
 		await openFilter();
 		await fireEvent.keyDown(window, { key: 'Escape' });
-		expect(screen.queryByRole('dialog', { name: 'Filter sessions' })).toBeNull();
+		expect(screen.queryByRole('dialog', { name: 'Filter chats' })).toBeNull();
 
 		await openFilter();
 		await fireEvent.click(document.querySelector('.sheet-scrim.open') as HTMLElement);
-		expect(screen.queryByRole('dialog', { name: 'Filter sessions' })).toBeNull();
+		expect(screen.queryByRole('dialog', { name: 'Filter chats' })).toBeNull();
 	});
 });
 
@@ -1655,12 +1655,12 @@ describe('Sidebar header', () => {
 		const onNewSession = vi.fn();
 		render(Sidebar, { props: { ...sidebarProps, onNewSession } });
 
-		await fireEvent.click(railItem('New session'));
+		await fireEvent.click(railItem('New chat'));
 		expect(onNewSession).toHaveBeenCalledTimes(1);
 
 		appMode.set('chat');
 		await tick();
-		expect(railItem('New session')).toBeTruthy();
+		expect(railItem('New chat')).toBeTruthy();
 	});
 
 	it('opens the spotlight from the search field', async () => {
@@ -1701,7 +1701,7 @@ describe('Sidebar header', () => {
 		// One kind of session: the project is picked on the new-session screen.
 		expect(head?.querySelector('[role="radiogroup"]')).toBeNull();
 		expect(screen.queryAllByRole('radio')).toHaveLength(0);
-		expect(head?.textContent).toContain('Sessions');
+		expect(head?.textContent).toContain('Chats');
 	});
 });
 

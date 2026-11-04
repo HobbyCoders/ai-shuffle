@@ -210,7 +210,7 @@ await runJourney({
 			// phone drawer opened while its startup data was still loading.
 			name: 'drawer-survives-bootstrap',
 			viewports: ['phone'],
-			recorder: { selectors: ['sessions=[aria-label="Sessions"]', 'workspace=[aria-label="Workspace"]'] },
+			recorder: { selectors: ['sessions=[aria-label="Chats"]', 'workspace=[aria-label="Workspace"]'] },
 			async setup({ page, status }) {
 				await simulateWorkers(page);
 				await holdBootLoad(page, '/api/v1/tags', 30_000, { releaseOnSignal: true });
@@ -267,7 +267,7 @@ await runJourney({
 				await openNewChat(ctx, { project: PROJECT });
 			},
 			async act({ page, mark }) {
-				const hero = page.getByRole('region', { name: 'New session' });
+				const hero = page.getByRole('region', { name: 'New chat' });
 				await mark('open Runs on');
 				await withChatSetup(page, async () => {
 					// With a project, Chat controls uses the runner chip's name for the same control.

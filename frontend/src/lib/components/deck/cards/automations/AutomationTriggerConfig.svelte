@@ -416,9 +416,9 @@
 									value={trigger.config.event_type || ''}
 									onchange={(e) => updateTriggerConfig(trigIdx, { ...trigger.config, event_type: e.currentTarget.value })}>
 									<option value="">Select an event...</option>
-									<option value="session.complete">Session complete</option>
-									<option value="session.error">Session error</option>
-									<option value="session.started">Session started</option>
+									<option value="session.complete">Chat complete</option>
+									<option value="session.error">Chat error</option>
+									<option value="session.started">Chat started</option>
 									<option value="permission.requested">Permission requested</option>
 									<option value="input.needed">Input needed</option>
 								</select>

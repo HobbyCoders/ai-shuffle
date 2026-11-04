@@ -90,7 +90,7 @@ export function createSearchSources(projectId?: string): Source[] {
  }
  let mcp: Promise<SearchItem[]> | undefined;
  return [
-  { id: 'sessions', label: 'Sessions', load: async query =>
+  { id: 'sessions', label: 'Chats', load: async query =>
    (await searchSessionsPaginated(query, { limit: 20 })).items.map(session => ({
     id: session.id, label: session.title || 'Untitled session',
     description: session.match_type === 'content' ? session.match_snippet ?? undefined : undefined, session

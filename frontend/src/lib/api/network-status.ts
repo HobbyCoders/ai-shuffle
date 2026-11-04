@@ -107,7 +107,7 @@ export function firstCopyNotice(status: NetworkStatus | null | undefined): First
 			const done = Math.min(copy.apply_done ?? 0, total);
 			return {
 				title,
-				message: `Saving the data copied from ${peer}. Sessions and workers appear when this finishes.`,
+				message: `Saving the data copied from ${peer}. Chats and workers appear when this finishes.`,
 				severity: 'info',
 				fraction: total ? done / total : null
 			};

@@ -25,7 +25,7 @@ import type { MediaTools } from './media-tools.svelte';
 type LoadStatus = 'loading' | 'ok' | 'forbidden' | 'error';
 
 /** What text generation is used for (shown as chips). */
-export const TEXT_TASK_USES = ['Session titles', 'Commit messages', 'PR descriptions', 'Branch names', 'Agent generation'];
+export const TEXT_TASK_USES = ['Chat titles', 'Commit messages', 'PR descriptions', 'Branch names', 'Agent generation'];
 
 export class TextTasks {
 	/** Raw setting: '' means the registry default. */

@@ -486,7 +486,7 @@
 		!effortCapability.known ? (effortValue ?? 'Unknown') : !effortLevels.length ? 'Not adjustable' : effortValue ? (effortLevels.find((m) => m.value === effortValue)?.label ?? 'Auto') : 'Auto'
 	);
 	const permissionLabel = $derived(
-		permissionPending ? 'Access' : permissionModes.find((m) => m.value === permissionValue)?.label ?? 'Ask'
+		permissionPending ? 'Access' : permissionModes.find((m) => m.value === permissionValue)?.label ?? 'Ask first'
 	);
 	const permissionDescription = $derived(
 		permissionPending ? "loading this chat's own setting" : permissionModes.find((m) => m.value === permissionValue)?.description ?? ''

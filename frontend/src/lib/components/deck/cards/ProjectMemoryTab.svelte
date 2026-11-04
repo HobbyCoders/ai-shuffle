@@ -400,7 +400,7 @@
 			<div class="empty-state">
 				<FileText />
 				<p class="es-title">No memory files</p>
-				<p class="es-desc">AGENTS.md files provide persistent instructions and context for agent sessions. Existing CLAUDE.md files are still read.</p>
+				<p class="es-desc">AGENTS.md files provide persistent instructions and context for agent chats. Existing CLAUDE.md files are still read.</p>
 			</div>
 		{/if}
 	{/if}

@@ -145,7 +145,7 @@ describe('SessionTitleMenu', () => {
 		expect(mocks.forkSession).toHaveBeenCalledWith('session-a');
 		await vi.waitFor(() => expect(opened).toEqual(['forked-session']));
 		expect(mocks.loadSessions).toHaveBeenCalledOnce();
-		expect(mocks.toastPush).toHaveBeenCalledWith('Session forked', { severity: 'success' });
+		expect(mocks.toastPush).toHaveBeenCalledWith('Chat forked', { severity: 'success' });
 		window.removeEventListener('open-session', onOpen);
 	});
 

@@ -517,7 +517,7 @@
 		else (onBackToChats ?? backToChats)();
 	}
 	// One kind of session; the project is picked (or not) on the new screen.
-	const newLabel = 'New session';
+	const newLabel = 'New chat';
 
 	/** Which overlay is up: the More menu, the filter, or neither. */
 	let sheet = $state<'more' | 'filter' | null>(null);
@@ -767,7 +767,7 @@
 	</button>
 {/snippet}
 
-<aside class="sidebar" class:phone aria-label="Sessions">
+<aside class="sidebar" class:phone aria-label="Chats">
 	<SidebarRail
 		items={railItems}
 		settings={settingsItem}
@@ -808,7 +808,7 @@
 
 		<div class="p-top">
 			<header class="p-head">
-				<span class="p-title">Sessions</span>
+				<span class="p-title">Chats</span>
 				<DesktopUpdateButton bind:this={updater} bind:canCheck />
 				<!-- The bell's only home: it used to sit in both top bars, which meant
 				     two copies on mobile and none while the drawer was open. -->
@@ -922,7 +922,7 @@
 			{/if}
 		</div>
 
-		<SidebarSheet open={sheet === 'filter'} label="Filter sessions" {phone} placement="popover" onClose={() => (sheet = null)}>
+		<SidebarSheet open={sheet === 'filter'} label="Filter chats" {phone} placement="popover" onClose={() => (sheet = null)}>
 			{#if projectOptions.length > 0}
 				<h4>Project</h4>
 				<div class="opts">

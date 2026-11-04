@@ -41,7 +41,7 @@ afterEach(() => { cleanup(); vi.useRealTimers(); });
 describe('universal search', () => {
  it('starts without hardcoded sessions or agents and keeps quick actions', () => {
   render(SpotlightSearch, { props: props() });
-  expect(screen.queryByRole('region', { name: 'Sessions' })).toBeNull();
+  expect(screen.queryByRole('region', { name: 'Chats' })).toBeNull();
   expect(screen.queryByRole('region', { name: 'Agents' })).toBeNull();
   expect(screen.getByText('New conversation')).toBeTruthy();
   expect(mocks.get).not.toHaveBeenCalled();
@@ -49,7 +49,7 @@ describe('universal search', () => {
  it('groups only matching results and opens content-only sessions', async () => {
   const p = props(); render(SpotlightSearch, { props: p });
   await search('orchid');
-  for (const name of ['Sessions', 'Agents', 'MCP servers', 'Plugins', 'Notes', 'Documentation'])
+  for (const name of ['Chats', 'Agents', 'MCP servers', 'Plugins', 'Notes', 'Documentation'])
    expect(screen.getByRole('region', { name })).toBeTruthy();
   expect(screen.queryByRole('region', { name: 'Hooks' })).toBeNull();
   expect(screen.queryByText('never-render')).toBeNull();
@@ -121,7 +121,7 @@ describe('universal search', () => {
   mocks.sessions.mockRejectedValue(new Error('offline'));
   render(SpotlightSearch, { props: props() }); await search('orchid');
   expect(screen.getByText('Orchid note')).toBeTruthy();
-  expect(screen.getByText('Could not search: Sessions. Try again.')).toBeTruthy();
+  expect(screen.getByText('Could not search: Chats. Try again.')).toBeTruthy();
  });
  it('refreshes configuration on reopen', async () => {
   const p = props(); const view = render(SpotlightSearch, { props: p }); await search('orchid');

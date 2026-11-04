@@ -220,7 +220,7 @@
 					</div>
 
 					<div class="bcard">
-						<div class="blabel"><MessageSquare size={14} strokeWidth={2} /> Sessions</div>
+						<div class="blabel"><MessageSquare size={14} strokeWidth={2} /> Chats</div>
 						<div class="bignum">{summary?.session_count ?? 0}</div>
 						<div class="bsub">conversations in range</div>
 					</div>
@@ -307,11 +307,11 @@
 						{/if}
 					</div>
 
-					<!-- Top sessions by cost -->
+					<!-- Top chats by cost -->
 					<div class="bcard c2 bflex">
-						<div class="blabel">Top sessions by cost</div>
+						<div class="blabel">Top chats by cost</div>
 						{#if topSessions.length === 0}
-							<div class="bempty">No sessions</div>
+							<div class="bempty">No chats</div>
 						{:else}
 							<div class="tops">
 								{#each topSessions.slice(0, 5) as s, i}

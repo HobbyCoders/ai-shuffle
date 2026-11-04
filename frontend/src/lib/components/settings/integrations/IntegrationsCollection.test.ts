@@ -264,7 +264,7 @@ describe('one API user', () => {
 
 	it('says permissions always ask', async () => {
 		await open('u1', 'Run');
-		expect(screen.getByText('Ask, always')).toBeTruthy();
+		expect(screen.getByText('Ask first, always')).toBeTruthy();
 	});
 
 	it('rotates the key only after "Replace the key now?"', async () => {
@@ -323,8 +323,8 @@ describe('one API user', () => {
 			},
 			{ id: 'other', title: 'Not mine', api_user_id: 'u9', updated_at: '2026-03-01T00:00:00Z' }
 		);
-		await open('u1', 'Sessions');
-		expect(screen.getByRole('tab', { name: /Sessions/ }).textContent).toContain('2');
+		await open('u1', 'Chats');
+		expect(screen.getByRole('tab', { name: /Chats/ }).textContent).toContain('2');
 		const rows = screen.getAllByRole('button').filter((b) => b.classList.contains('ses'));
 		expect(rows.map((r) => r.querySelector('.ses-name')?.textContent)).toEqual(['sess-new', 'Older']);
 		expect(within(rows[1]).getByText('Helper, Website')).toBeTruthy();

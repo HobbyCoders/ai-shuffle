@@ -53,7 +53,7 @@
 	const enabled = $derived(hook?.enabled ?? form?.enabled ?? true);
 
 	const scopeOptions = $derived([
-		{ value: '', label: 'App (all sessions)' },
+		{ value: '', label: 'App (all chats)' },
 		...$projects.map((p) => ({ value: p.id, label: p.name }))
 	]);
 	const scopeName = $derived.by(() => {
@@ -193,7 +193,7 @@
 							onchange={(v) => (form.projectId = v || null)}
 						/>
 					{:else}
-						<ValueText value={form.projectId ? `Project: ${scopeName}` : 'App (all sessions)'} tone="fg" />
+						<ValueText value={form.projectId ? `Project: ${scopeName}` : 'App (all chats)'} tone="fg" />
 					{/if}
 				</SettingRow>
 				<SettingRow label="Event" hint={EVENT_HINTS[form.event]}>

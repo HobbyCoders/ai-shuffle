@@ -95,9 +95,9 @@ for (const width of [1040, 1280])
 	for (const actions of [330, 260])
 		for (const title of [undefined, 'Hi', LONG]) {
 			const m = await measure({ width, actions, title });
-			const expected = ['Sessions', 'Assistant', title ?? 'Agents page header review'];
+			const expected = ['Chats', 'Assistant', title ?? 'Agents page header review'];
 			check(m.order.join(' > ') === expected.join(' > '), `[${m.name}] three crumbs in order`, m.order);
-			check(!m.project.truncated, `[${m.name}] "Sessions" is not shortened`, m.project);
+			check(!m.project.truncated, `[${m.name}] "Chats" is not shortened`, m.project);
 			check(!m.parent.truncated, `[${m.name}] "Assistant" is not shortened`, m.parent);
 			for (const c of [m.project, m.parent, m.title])
 				if (!c.truncated) check(c.width - c.text_width < 2, `[${m.name}] no empty space beside "${c.text}"`, c);

@@ -17,14 +17,14 @@ import { runJourney } from './runner.mjs';
 import { PROJECT, SEEDED, openFromSidebar, openNewChat, pickProject, settleServiceWorker, showSidebar, waitChat, waitChatOpen, withChatSetup } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 
-const hero = (page) => page.getByRole('region', { name: 'New session' });
+const hero = (page) => page.getByRole('region', { name: 'New chat' });
 const projectWord = (page, project) => hero(page).getByRole('button', { name: `Workspace folders: ${project}` });
 const noProjectWord = (page) => hero(page).getByRole('button', { name: /^No project/ });
 
 /** Press the sidebar's New session (opening the drawer first on a phone). */
 async function pressNewSession(page) {
 	await showSidebar(page);
-	await page.getByRole('navigation', { name: 'Workspace' }).getByRole('button', { name: 'New session', exact: true }).click();
+	await page.getByRole('navigation', { name: 'Workspace' }).getByRole('button', { name: 'New chat', exact: true }).click();
 	await waitChat(page, { surface: 'new' });
 }
 

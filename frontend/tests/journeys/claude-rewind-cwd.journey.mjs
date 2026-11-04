@@ -19,7 +19,7 @@ await runJourney({
 			expect(status.seed?.claude_cli?.agent_id, 'fake Claude Code is seeded');
 			await gotoApp(page, status);
 			await waitChat(page, { surface: 'new' });
-			const hero = page.getByRole('region', { name: 'New session' });
+			const hero = page.getByRole('region', { name: 'New chat' });
 			const menu = page.getByRole('menu', { name: 'Agent selection' });
 			await pick(hero.getByRole('button', { name: /^Agent:/ }), menu,
 				menu.getByRole('button', { name: 'Dev (Claude Code)', exact: true }),

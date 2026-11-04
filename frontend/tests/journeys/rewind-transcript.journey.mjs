@@ -41,7 +41,7 @@ async function startClaudeChat({ page, status, variant }) {
 		await gotoApp(page, status);
 	}
 	await waitChat(page, { surface: 'new' });
-	const hero = page.getByRole('region', { name: 'New session' });
+	const hero = page.getByRole('region', { name: 'New chat' });
 	const menu = page.getByRole('menu', { name: 'Agent selection' });
 	await pick(
 		hero.getByRole('button', { name: /^Agent:/ }),
