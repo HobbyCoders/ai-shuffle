@@ -71,7 +71,6 @@
 	const title = $derived(row.name?.trim() || credential.name);
 	const line = $derived(
 		detailLine(
-			row.enabled ? 'On' : 'Off',
 			`${row.models.length} ${row.models.length === 1 ? 'model' : 'models'}`,
 			gateway ? (dialect === 'openai' ? 'OpenAI chat' : 'Anthropic Messages') : hostOf(row.base_url),
 			balance && `${balance} left`,
@@ -186,7 +185,7 @@
 >
 	{#snippet tile()}<ProviderTile {provider} size="lg" />{/snippet}
 	{#snippet primary()}
-		<CredentialControl {credential} />
+		<CredentialControl {credential} showState />
 	{/snippet}
 	{#snippet children(tab: string | null)}
 		{#if tab === 'Models'}

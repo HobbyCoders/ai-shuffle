@@ -27,7 +27,7 @@
 	onclick={() => settingsNav.selectItem(provider.item, 'providers')}
 	onkeydown={moveListFocus}
 >
-	<span class="tile"><ProviderTile {provider} /></span>
+	<span class="tile"><ProviderTile {provider} bare /></span>
 	<span class="tx">
 		<span class="nm">{provider.name}</span>
 		<span class="sm">{kinds}</span>
@@ -38,12 +38,12 @@
 <style>
 	.nc {
 		display: grid;
-		grid-template-columns: auto minmax(0, 1fr) auto;
+		grid-template-columns: var(--pv-glyph) minmax(0, 1fr) auto;
 		align-items: center;
-		gap: 12px;
+		column-gap: var(--pv-glyph-gap);
 		width: 100%;
 		min-height: 56px;
-		padding: 6px 16px;
+		padding: 6px var(--pv-row-inset);
 		border: 0;
 		background: none;
 		text-align: left;

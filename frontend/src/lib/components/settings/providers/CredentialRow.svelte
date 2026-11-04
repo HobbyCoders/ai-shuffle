@@ -74,7 +74,8 @@
 		align-items: center;
 		gap: 12px;
 		min-height: 56px;
-		padding: 6px 16px;
+		/* Keeps the glyph column empty, so the text sits under the provider's name. */
+		padding: 6px var(--pv-row-inset) 6px calc(var(--pv-row-inset) + var(--pv-glyph) + var(--pv-glyph-gap));
 		cursor: pointer;
 	}
 	.cred:hover {

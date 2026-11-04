@@ -184,7 +184,7 @@
 		display: grid;
 		grid-template-columns: auto minmax(0, 1fr) auto;
 		gap: 14px;
-		align-items: start;
+		align-items: center;
 		padding: calc(var(--st-page-top) - 10px - var(--st-dtop-height)) 0 18px;
 	}
 	.st-dh-main {
@@ -195,7 +195,6 @@
 		gap: 8px;
 		align-items: center;
 		flex-wrap: wrap;
-		min-height: 32px;
 	}
 	h2 {
 		font-size: 20px;

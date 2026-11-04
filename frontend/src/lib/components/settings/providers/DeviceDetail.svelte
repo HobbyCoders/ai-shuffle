@@ -114,7 +114,7 @@
 		{#if !signedIn && !reconnecting}
 			<button type="button" class="st-btn warn" onclick={reconnect}><RefreshCw />Reconnect</button>
 		{/if}
-		<CredentialControl {credential} />
+		<CredentialControl {credential} showState />
 	{/snippet}
 	{#snippet children(tab: string | null)}
 		{#if tab === 'Models'}

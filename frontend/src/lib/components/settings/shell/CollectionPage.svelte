@@ -204,7 +204,7 @@
 	h1 {
 		/* Text on the rows' text edge; the filter stays on their pill edge. */
 		padding-left: 12px;
-		font-size: 20px;
+		font-size: 24px;
 		font-weight: 600;
 		letter-spacing: -0.012em;
 		margin: 0;
@@ -214,7 +214,7 @@
 		outline: none;
 	}
 	.n {
-		color: var(--st-subtle);
+		color: var(--st-mfg);
 		font-size: 13px;
 		font-variant-numeric: tabular-nums;
 		white-space: nowrap;

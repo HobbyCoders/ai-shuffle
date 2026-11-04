@@ -1,7 +1,7 @@
 <script lang="ts">
 	/**
-	 * The Providers list: each connected provider is a quiet label above its own
-	 * card of credentials, then one card of the providers with nothing connected.
+	 * The Providers list: under "Connected", each provider is a quiet label above
+	 * its own card of credentials; under "Not connected", one card of the rest.
 	 */
 	import ListGroupLabel from '../rows/ListGroupLabel.svelte';
 	import CredentialRow from './CredentialRow.svelte';
@@ -19,7 +19,9 @@
 	const groups = $derived(splitProviders(filterProviders(views, filter)));
 </script>
 
+<div class="pl">
 {#if groups.connected.length}
+	<ListGroupLabel label="Connected" />
 	{#each groups.connected as provider (provider.id)}
 		<div class="pv" role="group" aria-label={provider.name}>
 			<ProviderGroupHeader {provider} />
@@ -44,8 +46,19 @@
 {#if !groups.connected.length && !groups.notConnected.length}
 	<p class="pv-empty">Nothing matches.</p>
 {/if}
+</div>
 
 <style>
+	/* One text edge: glyph column, then group names, card text and rows. */
+	.pl {
+		--pv-glyph: 16px;
+		--pv-glyph-gap: 10px;
+		--pv-row-inset: 16px;
+	}
+	/* With the list header's 12px, 24px under the filter. */
+	.pl > :global(.st-lg:first-child) {
+		margin-top: 4px;
+	}
 	.pg {
 		position: relative;
 	}

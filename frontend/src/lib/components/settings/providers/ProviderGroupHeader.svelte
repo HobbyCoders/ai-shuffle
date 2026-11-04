@@ -29,7 +29,7 @@
 		onclick={() => settingsNav.selectItem(provider.item, 'providers')}
 		onkeydown={moveListFocus}
 	>
-		<ProviderTile {provider} />
+		<ProviderTile {provider} bare />
 		<span class="pname">{provider.name}</span>
 	</button>
 	<span class="pgr">
@@ -58,10 +58,11 @@
 	.pgn {
 		display: inline-flex;
 		align-items: center;
-		gap: 8px;
+		/* The glyph column: card border + 16px in, name on the cards' text edge. */
+		gap: var(--pv-glyph-gap);
 		min-width: 0;
 		height: 32px;
-		padding: 0;
+		padding: 0 0 0 calc(var(--pv-row-inset) + 1px);
 		border: 0;
 		background: none;
 		text-align: left;

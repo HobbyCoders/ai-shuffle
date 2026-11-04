@@ -23,7 +23,7 @@
 		display: flex;
 		align-items: center;
 		gap: 8px;
-		font-size: 15px;
+		font-size: 14px;
 		font-weight: 600;
 		letter-spacing: -0.005em;
 		color: var(--st-fg);

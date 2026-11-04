@@ -81,13 +81,14 @@
 
 <DetailPane
 	name={credential.name}
-	subtitle={detailLine(s.falEnabled ? 'On' : 'Off', s.falEnabled ? 'Used by media tools' : 'Media tools are off', balanceValue, checked)}
+	subtitle={detailLine(s.falEnabled ? 'Used by media tools' : 'Media tools are off', balanceValue, checked)}
 	{danger}
 	item={FAL_KEY_ITEM}
 >
 	{#snippet tile()}<ProviderTile {provider} size="lg" />{/snippet}
 	{#snippet primary()}
 		<span class="onoff">
+			<span class="onoff-state">{s.falEnabled ? 'On' : 'Off'}</span>
 			<Switch checked={s.falEnabled} label="fal.ai on" onchange={(v) => setCredentialEnabled(credential, v)} />
 		</span>
 	{/snippet}
@@ -123,6 +124,7 @@
 </DetailPane>
 
 <style>
+	.onoff-state { font-size: 12px; color: var(--st-mfg); white-space: nowrap; }
 	.onoff {
 		display: inline-flex;
 		align-items: center;

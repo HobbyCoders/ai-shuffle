@@ -59,7 +59,7 @@
 		min-height: 32px;
 	}
 	h1 {
-		font-size: 20px;
+		font-size: 24px;
 		font-weight: 600;
 		letter-spacing: -0.012em;
 		margin: 0;

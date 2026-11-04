@@ -61,7 +61,7 @@
 	tabs={['Overview', 'Models']} {danger} item={credential.item}>
 	{#snippet tile()}<ProviderTile {provider} size="lg" />{/snippet}
 	{#snippet primary()}
-		{#if account}<CredentialControl {credential} />{/if}
+		{#if account}<CredentialControl {credential} showState />{/if}
 		{#if (account?.active || !account && providers.current.anthropicKeySet) && mode !== 'api_key'}
 			<button type="button" class="st-btn" onclick={() => changeClaudeMode('api_key')}>Use API key mode</button>
 		{/if}

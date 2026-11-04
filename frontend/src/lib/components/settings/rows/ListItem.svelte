@@ -150,7 +150,7 @@
 		grid-template-columns: minmax(auto, 40%) minmax(0, 1fr) 16px;
 		gap: 12px;
 		min-height: 56px;
-		padding: 6px 12px 6px 16px;
+		padding: 6px 16px;
 		border-radius: 0;
 	}
 	.st-it.value:first-child {

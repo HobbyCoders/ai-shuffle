@@ -222,7 +222,7 @@
 >
 	{#snippet tile()}<ProviderTile {provider} size="lg" />{/snippet}
 	{#snippet primary()}
-		{#if account}<CredentialControl {credential} />{/if}
+		{#if account}<CredentialControl {credential} showState />{/if}
 		{#if inactive}
 			{#if account?.needs_sign_in}
 				<button type="button" class="st-btn primary" disabled={access.readOnly} onclick={signInAgain}><SquareTerminal />Sign in again</button>

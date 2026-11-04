@@ -170,8 +170,13 @@
 }
 .settings-shell:not([data-stacked]) .st-coll[data-replace='detail'] .st-back {
 	display: inline-flex;
-	/* The chevron's stroke, not its 20px box, sits on the column's left edge. */
-	margin-left: -9px;
+	/* The chevron's stroke, not its 16px box, sits on the column's left edge. */
+	margin-left: -8px;
+}
+/* A detail that fills the page is the page: it takes the page title's size. */
+.settings-shell[data-stacked] .st-dhn h2,
+.settings-shell:not([data-stacked]) .st-coll[data-replace='detail'] .st-dhn h2 {
+	font-size: 24px;
 }
 
 /* ---------- row cards ---------- */
@@ -264,18 +269,23 @@
 .settings-shell .st-back {
 	display: none;
 	align-items: center;
-	gap: 2px;
+	gap: 8px;
 	height: 32px;
 	padding: 0 8px 0 2px;
 	border: 0;
 	background: none;
 	border-radius: var(--st-radius-md);
-	font-size: 14px;
+	color: var(--st-mfg);
+	font-size: 13px;
 	flex: none;
 }
+.settings-shell .st-back:hover {
+	color: var(--st-fg);
+	background: var(--st-hover);
+}
 .settings-shell .st-back svg.lucide {
-	width: 20px;
-	height: 20px;
+	width: 16px;
+	height: 16px;
 }
 
 /* Search jump highlight */
@@ -352,13 +362,18 @@
 .settings-shell[data-stacked] .st-back {
 	display: inline-flex;
 }
+/* Often the whole control on a phone, so the chevron keeps a thumb's size. */
+.settings-shell[data-stacked] .st-back svg.lucide {
+	width: 20px;
+	height: 20px;
+}
 .settings-shell[data-stacked] .st-index {
 	border-right: 0;
 	padding: 18px 16px 32px;
 	background: var(--st-bg);
 }
 .settings-shell[data-stacked] .st-ix-title {
-	font-size: 20px;
+	font-size: 24px;
 	padding: 6px 4px 16px;
 }
 .settings-shell[data-stacked] .st-search input {
@@ -406,7 +421,7 @@
 	gap: 4px;
 }
 .settings-shell[data-stacked] .st-page-h h1 {
-	font-size: 20px;
+	font-size: 24px;
 }
 /*
  * SettingRow on the phone: label and control share a line while they fit and
@@ -471,7 +486,7 @@
 	margin-left: 0;
 }
 .settings-shell[data-stacked] .st-lh-top h1 {
-	font-size: 20px;
+	font-size: 24px;
 	padding-left: 0;
 }
 .settings-shell[data-stacked] .st-lscroll {

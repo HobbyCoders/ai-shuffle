@@ -12,12 +12,25 @@
 		status?: StatusTone;
 		ring?: 'bg' | 'accent';
 		dashed?: boolean;
+		/** The list's mark: the glyph alone at 16px, no bordered tile. */
+		bare?: boolean;
 	}
 
-	let { provider, size = 'sm', status, ring = 'bg', dashed = false }: Props = $props();
+	let { provider, size = 'sm', status, ring = 'bg', dashed = false, bare = false }: Props = $props();
 	const mark = $derived(provider.glyph !== 'custom');
 </script>
 
+{#if bare}
+	<span class="bare" aria-hidden="true">
+		{#if mark}
+			<ProviderGlyph kind={provider.glyph} size={16} />
+		{:else if provider.media}
+			<Clapperboard size={16} />
+		{:else}
+			<Server size={16} />
+		{/if}
+	</span>
+{:else}
 <Tile {size} {status} {ring} {dashed}>
 	{#if mark}
 		<ProviderGlyph kind={provider.glyph} size={size === 'lg' ? 19 : 14} />
@@ -27,3 +40,15 @@
 		<Server />
 	{/if}
 </Tile>
+{/if}
+
+<style>
+	.bare {
+		display: grid;
+		place-items: center;
+		flex: none;
+		width: 16px;
+		height: 16px;
+		color: var(--st-fg);
+	}
+</style>
