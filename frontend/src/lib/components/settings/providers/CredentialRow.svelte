@@ -1,6 +1,6 @@
 <script lang="ts">
 	/**
-	 * One connected credential under its provider's label: name and summary, then
+	 * One connected credential in its provider's card: name and summary, then
 	 * one right column. The title area opens it; the switch (or "Use" on saved
 	 * Claude accounts) is its own on/off control, and a credential that cannot be
 	 * toggled says its state in words. A status dot only appears when something
@@ -74,8 +74,7 @@
 		align-items: center;
 		gap: 12px;
 		min-height: 56px;
-		/* Keeps the glyph column empty, so the text sits under the provider's name. */
-		padding: 6px var(--pv-row-inset) 6px calc(var(--pv-row-inset) + var(--pv-glyph) + var(--pv-glyph-gap));
+		padding: 6px var(--pv-row-inset);
 		cursor: pointer;
 	}
 	.cred:hover {

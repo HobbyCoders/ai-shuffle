@@ -31,7 +31,7 @@ async function show(readOnly = false) {
 	vi.stubGlobal('fetch', worker.fetch);
 	await providers.refreshAll();
 	render(ProvidersCollection, { context: new Map([[SETTINGS_ACCESS_CONTEXT, { readOnly }]]) });
-	await screen.findByRole('button', { name: 'Add account to OpenAI' });
+	await screen.findByRole('group', { name: 'OpenAI' });
 }
 beforeEach(() => {
 	vi.clearAllMocks();

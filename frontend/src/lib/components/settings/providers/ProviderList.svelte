@@ -1,7 +1,8 @@
 <script lang="ts">
 	/**
-	 * The Providers list: under "Connected", each provider is a quiet label above
-	 * its own card of credentials; under "Not connected", one card of the rest.
+	 * The Providers list: under "Connected", one card per provider, its name and
+	 * "Add account" first and its accounts below; under "Not connected", one card
+	 * of the rest. Glyphs and names sit on one x in both.
 	 */
 	import ListGroupLabel from '../rows/ListGroupLabel.svelte';
 	import CredentialRow from './CredentialRow.svelte';
@@ -23,13 +24,11 @@
 {#if groups.connected.length}
 	<ListGroupLabel label="Connected" />
 	{#each groups.connected as provider (provider.id)}
-		<div class="pv" role="group" aria-label={provider.name}>
+		<div class="pg st-card" role="group" aria-label={provider.name}>
 			<ProviderGroupHeader {provider} />
-			<div class="pg st-card">
-				{#each provider.credentials as credential (credential.item)}
-					<CredentialRow {credential} {provider} />
-				{/each}
-			</div>
+			{#each provider.credentials as credential (credential.item)}
+				<CredentialRow {credential} {provider} />
+			{/each}
 		</div>
 	{/each}
 {/if}
@@ -49,11 +48,15 @@
 </div>
 
 <style>
-	/* One text edge: glyph column, then group names, card text and rows. */
+	/* The card's text edge (17px from its outside, 16px on the phone), then the
+	   glyph column. Accounts have no glyph, so they start on that edge. */
 	.pl {
 		--pv-glyph: 16px;
 		--pv-glyph-gap: 10px;
 		--pv-row-inset: 16px;
+	}
+	:global(.settings-shell[data-stacked]) .pl {
+		--pv-row-inset: 15px;
 	}
 	/* With the list header's 12px, 24px under the filter. */
 	.pl > :global(.st-lg:first-child) {
@@ -62,8 +65,11 @@
 	.pg {
 		position: relative;
 	}
-	.pv + .pv {
-		margin-top: 20px;
+	.pg + .pg {
+		margin-top: 16px;
+	}
+	.pl > :global(.st-lg:not(:first-child)) {
+		padding-top: 32px;
 	}
 	/* Hairline between every row; the card's own edge ends the list. */
 	.pg > :global(* + *) {

@@ -1,7 +1,7 @@
 <script lang="ts">
 	/**
-	 * A connected provider's quiet label, outside its card: mark and name (opens
-	 * the provider), then "Add account" at the right.
+	 * A connected provider's first row in its card: mark and name (opens the
+	 * provider), then "Add account" at the right where there is one to add.
 	 */
 	import { settingsNav } from '$lib/settings/navigation.svelte';
 	import { moveListFocus } from '../rows/ListItem.svelte';
@@ -51,43 +51,47 @@
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
-		gap: 8px;
-		min-height: 32px;
-		margin-bottom: 6px;
+		min-height: 44px;
+	}
+	.pgh:has(.pgn:hover) {
+		background: var(--st-hover);
+	}
+	.pgh[aria-current='true'] {
+		background: var(--st-accent);
 	}
 	.pgn {
-		display: inline-flex;
+		display: flex;
+		flex: 1;
 		align-items: center;
-		/* The glyph column: card border + 16px in, name on the cards' text edge. */
+		align-self: stretch;
 		gap: var(--pv-glyph-gap);
 		min-width: 0;
-		height: 32px;
-		padding: 0 0 0 calc(var(--pv-row-inset) + 1px);
+		padding: 0 8px 0 var(--pv-row-inset);
 		border: 0;
 		background: none;
 		text-align: left;
 		color: var(--st-fg);
-		border-radius: var(--st-radius-sm);
+		border-radius: inherit;
 	}
-	.pgh[aria-current='true'] .pgn,
-	.pgn:hover {
-		text-decoration: underline;
-		text-underline-offset: 3px;
+	.pgn:focus-visible {
+		outline-offset: -2px;
 	}
 	.pname {
 		display: block;
 		font-weight: 500;
-		font-size: 13px;
+		font-size: 13.5px;
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
 	}
+	/* "Add account" ends on the chevrons' edge, past its own 8px of padding. */
 	.pgr {
 		display: flex;
 		align-items: center;
 		gap: 4px;
 		flex: none;
 		min-width: 0;
+		padding-right: calc(var(--pv-row-inset) - 8px);
 	}
 	.cnt {
 		padding-right: 8px;
@@ -106,11 +110,6 @@
 	@media (prefers-reduced-motion: reduce) {
 		.checking {
 			animation: none;
-		}
-	}
-	@media (pointer: coarse) {
-		.pgn {
-			min-height: 44px;
 		}
 	}
 </style>

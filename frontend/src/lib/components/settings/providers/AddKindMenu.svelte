@@ -1,8 +1,9 @@
 <script lang="ts">
 	/**
 	 * "Add account" on a provider: the credential kinds it supports that are not
-	 * added yet ("Another API key" where several are allowed). Disabled once
-	 * every kind is added. Picking one makes a draft credential.
+	 * added yet ("Another API key" where several are allowed). Not shown where
+	 * nothing can be added: every kind is added, the viewer may only read, or the
+	 * provider is itself a draft. Picking one makes a draft credential.
 	 */
 	import { tick } from 'svelte';
 	import { Plus } from 'lucide-svelte';
@@ -28,8 +29,11 @@
 	let left = $state(0);
 	let top = $state(0);
 
+	$effect(() => {
+		if (off) open = false;
+	});
+
 	async function show() {
-		if (off) return;
 		open = true;
 		await tick();
 		place();
@@ -94,16 +98,15 @@
 
 <svelte:window onpointerdown={onWindowPointer} onresize={() => open && hide(false)} />
 
+{#if !off}
 <button
 	bind:this={button}
 	type="button"
 	class="plus"
-	disabled={off}
 	aria-label="Add account to {providerName}"
 	aria-haspopup="menu"
 	aria-expanded={open}
 	aria-controls={open ? `${uid}-menu` : undefined}
-	title={kinds.length ? undefined : 'Every kind is added'}
 	onclick={(e) => {
 		e.stopPropagation();
 		if (open) hide();
@@ -112,6 +115,7 @@
 >
 	<Plus /><span>Add account</span>
 </button>
+{/if}
 
 {#if open}
 	<!-- svelte-ignore a11y_interactive_supports_focus -->
@@ -155,14 +159,10 @@
 			min-height: 44px;
 		}
 	}
-	.plus:hover:not(:disabled),
+	.plus:hover,
 	.plus[aria-expanded='true'] {
 		background: var(--st-hover);
 		color: var(--st-fg);
-	}
-	.plus:disabled {
-		color: var(--st-subtle);
-		opacity: 0.7;
 	}
 	.plus :global(svg.lucide) {
 		width: 14px;

@@ -318,7 +318,7 @@ describe('adding', () => {
 });
 
 describe('read-only', () => {
-	it('disables the switches, the modes, "+" and Add provider', async () => {
+	it('disables the switches, the modes and Add provider, and hides "+"', async () => {
 		await show({ readOnly: true });
 		for (const sw of screen.getAllByRole('switch')) expect((sw as HTMLButtonElement).disabled).toBe(true);
 		await fireEvent.click(within(group('Claude')).getByRole('button', { name: 'Claude' }));
@@ -326,13 +326,7 @@ describe('read-only', () => {
 		for (const mode of within(screen.getByRole('group', { name: 'Runs on' })).getAllByRole('button')) {
 			expect((mode as HTMLButtonElement).disabled).toBe(true);
 		}
-		expect(
-			(
-				screen.getByRole('button', {
-					name: 'Add account to OpenAI'
-				}) as HTMLButtonElement
-			).disabled
-		).toBe(true);
+		expect(screen.queryByRole('button', { name: 'Add account to OpenAI' })).toBeNull();
 		expect(
 			(
 				screen.getByRole('button', {
