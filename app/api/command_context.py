@@ -72,13 +72,17 @@ def command_context(
 
 def command_setting_sources(
     request: Optional[Request], session: Optional[dict], profile_id: Optional[str],
+    mode: Optional[str] = None,
 ):
-    """Resolve the same profile field passed by build_sdk_options to the adapter."""
+    """Match the adapter's effective scopes, including Chat's filesystem isolation."""
     from app.core.provider.harness_adapter import _fluid_setting_sources
     from app.core.provider.types import SessionOptions
 
     config = _command_profile_config(request, session, profile_id)
-    return _fluid_setting_sources(SessionOptions(model="", setting_sources=config.get("setting_sources")))
+    # Authorize the profile even when Chat excludes all on-disk settings. A
+    # request's mode must not override an existing session's isolation.
+    sources = [] if (session or {}).get("mode", mode) == "chat" else config.get("setting_sources")
+    return _fluid_setting_sources(SessionOptions(model="", setting_sources=sources))
 
 
 def _command_profile_config(request, session, profile_id):
