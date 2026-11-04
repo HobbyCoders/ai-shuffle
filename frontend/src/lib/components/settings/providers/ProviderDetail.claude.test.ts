@@ -78,8 +78,6 @@ it('shows the active mode, the CLI account and the key’s last four', async () 
 	expect(screen.getByRole('heading', { level: 2, name: 'Claude' })).toBeTruthy();
 	expect(screen.getByText('Runs on subscription')).toBeTruthy();
 	expect(within(modes()).getByRole('button', { name: 'Subscription' }).getAttribute('aria-pressed')).toBe('true');
-	const facts = screen.getByText('Runs on', { selector: 'dt' }).closest('div')!;
-	expect(within(facts).getByText('Subscription')).toBeTruthy();
 
 	const creds = credentials();
 	expect(within(creds).getByText('Claude Max subscription')).toBeTruthy();

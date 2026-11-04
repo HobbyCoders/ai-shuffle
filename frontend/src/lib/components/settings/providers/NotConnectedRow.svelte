@@ -40,10 +40,10 @@
 		display: grid;
 		grid-template-columns: auto minmax(0, 1fr) auto;
 		align-items: center;
-		gap: 10px;
+		gap: 12px;
 		width: 100%;
 		min-height: 56px;
-		padding: 6px 12px;
+		padding: 6px 16px;
 		border: 0;
 		background: none;
 		text-align: left;
@@ -71,7 +71,7 @@
 	}
 	.nm {
 		font-size: 13.5px;
-		font-weight: 500;
+		font-weight: 450;
 		white-space: nowrap;
 	}
 	.sm {

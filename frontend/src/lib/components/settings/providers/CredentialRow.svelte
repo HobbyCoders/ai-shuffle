@@ -1,24 +1,28 @@
 <script lang="ts">
 	/**
-	 * One connected credential in its provider's card. The switch (or "Use" on
-	 * saved Claude accounts) is the row's one on/off control, so the status dot
-	 * only appears when there is no control or something needs attention.
+	 * One connected credential: provider mark, name and summary, then one right
+	 * column. The switch (or "Use" on saved Claude accounts) is the on/off control;
+	 * a credential that cannot be toggled says its state in words. A status dot
+	 * only appears when something needs attention.
 	 */
 	import { settingsNav } from '$lib/settings/navigation.svelte';
 	import { moveListFocus } from '../rows/ListItem.svelte';
 	import StatusDot from '../rows/StatusDot.svelte';
 	import CredentialControl from './CredentialControl.svelte';
-	import type { CredentialView } from './providers-model';
+	import ProviderTile from './ProviderTile.svelte';
+	import type { CredentialView, ProviderView } from './providers-model';
 
 	interface Props {
 		credential: CredentialView;
+		provider: ProviderView;
 	}
 
-	let { credential }: Props = $props();
+	let { credential, provider }: Props = $props();
 
 	const selected = $derived(settingsNav.selectedItem('providers') === credential.item);
-	const showDot = $derived(
-		!credential.switchable || credential.status === 'warn' || credential.status === 'err' || credential.status === 'busy'
+	const showDot = $derived(credential.status === 'warn' || credential.status === 'err' || credential.status === 'busy');
+	const stateText = $derived(
+		credential.status === 'ok' && (credential.flavor === 'cli' || credential.flavor === 'device') ? 'Signed in' : credential.statusText
 	);
 
 	function select() {
@@ -33,6 +37,7 @@
 	data-settings-item={credential.item}
 	onclick={select}
 >
+	<span class="mark"><ProviderTile {provider} /></span>
 	<button
 		type="button"
 		class="main"
@@ -54,18 +59,18 @@
 			<CredentialControl {credential} />
 		</span>
 	{:else}
-		<span class="sw">{#if showDot}<StatusDot tone={credential.status} />{/if}</span>
+		<span class="sw state">{#if showDot}<StatusDot tone={credential.status} />{/if}{stateText}</span>
 	{/if}
 </div>
 
 <style>
 	.cred {
 		display: grid;
-		grid-template-columns: minmax(0, 1fr) auto;
+		grid-template-columns: auto minmax(0, 1fr) auto;
 		align-items: center;
 		gap: 12px;
 		min-height: 56px;
-		padding: 0 16px 0 48px;
+		padding: 6px 16px;
 		cursor: pointer;
 	}
 	.cred:hover {
@@ -73,6 +78,9 @@
 	}
 	.cred[aria-current='true'] {
 		background: var(--st-accent);
+	}
+	.mark {
+		display: flex;
 	}
 	.main {
 		display: grid;
@@ -102,6 +110,13 @@
 	.sw {
 		display: flex;
 		align-items: center;
+		justify-content: flex-end;
 		gap: 10px;
+	}
+	.state {
+		gap: 7px;
+		font-size: 13px;
+		color: var(--st-mfg);
+		white-space: nowrap;
 	}
 </style>

@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { detailLine, safeKeyHint } from './credential-display';
 	/**
 	 * The fal.ai media key: image, video, audio and 3D tools run on it, and it
 	 * also reads the account balance. Its switch turns fal.ai off without
@@ -80,28 +81,19 @@
 
 <DetailPane
 	name={credential.name}
-	badge="API key"
-	status={credential.status}
-	statusText={credential.statusText}
-	subtitle={s.falEnabled ? 'Used by media tools' : 'Media tools are off'}
-	facts={[
-		{ label: 'Key', value: s.falKeyMasked || 'Stored', mono: true },
-		{ label: 'Balance', value: balanceValue },
-		{ label: 'Checked', value: checked }
-	]}
+	subtitle={detailLine(s.falEnabled ? 'On' : 'Off', s.falEnabled ? 'Used by media tools' : 'Media tools are off', balanceValue, checked)}
 	{danger}
 	item={FAL_KEY_ITEM}
 >
 	{#snippet tile()}<ProviderTile {provider} size="lg" />{/snippet}
 	{#snippet primary()}
 		<span class="onoff">
-			{s.falEnabled ? 'On' : 'Off'}
 			<Switch checked={s.falEnabled} label="fal.ai on" onchange={(v) => setCredentialEnabled(credential, v)} />
 		</span>
 	{/snippet}
 	<RowGroup title="Key">
 		<SettingRow label="Media key">
-			<ValueText mono tone="fg" value={s.falKeyMasked || 'Stored'} />
+			<ValueText mono tone="fg" value={safeKeyHint(s.falKeyMasked) || 'Saved'} />
 		</SettingRow>
 		<SettingRow id="providers.falKey">
 			<TextField
@@ -109,7 +101,7 @@
 				type="password"
 				mono
 				placeholder="New fal.ai key"
-				width={180}
+				width={260}
 				disabled={saving}
 				label="New fal.ai key"
 			/>

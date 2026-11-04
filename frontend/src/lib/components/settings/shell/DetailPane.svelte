@@ -122,7 +122,7 @@
 
 <div class="st-dwrap">
 	<div class="st-dtop">
-		<button type="button" class="st-back" aria-label="Back to {catLabel}" onclick={() => (onBack ? onBack() : settingsNav.back())}>
+		<button type="button" class="st-back" aria-label="Back to {catLabel}" onclick={() => (onBack ? onBack() : settingsNav.stacked ? settingsNav.back() : settingsNav.clearSelection(cat))}>
 			<ChevronLeft /><span>{catLabel}</span>
 		</button>
 		{#if topStatus}{@render topStatus()}{:else}<SavedTick />{/if}
@@ -197,7 +197,7 @@
 		flex-wrap: wrap;
 	}
 	h2 {
-		font-size: 17px;
+		font-size: 20px;
 		font-weight: 600;
 		letter-spacing: -0.01em;
 		margin: 0;
@@ -223,7 +223,7 @@
 		display: flex;
 		gap: 4px 12px;
 		flex-wrap: wrap;
-		font-size: 12.5px;
+		font-size: 13px;
 		color: var(--st-mfg);
 		margin-top: 4px;
 		align-items: center;

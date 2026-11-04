@@ -75,7 +75,7 @@
 		align-items: center;
 		height: 30px;
 		border: 1px solid var(--st-input);
-		background: var(--st-muted);
+		background: var(--st-card);
 		border-radius: var(--st-radius-md);
 		overflow: hidden;
 	}

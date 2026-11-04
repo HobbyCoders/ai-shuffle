@@ -11,7 +11,7 @@
 	 * Selection lives in the navigation store per category (ListItem reads and
 	 * sets it). In stacked mode the list and the detail are separate steps.
 	 */
-	import { untrack, type Snippet } from 'svelte';
+	import { tick, untrack, type Snippet } from 'svelte';
 	import { ChevronLeft, ListFilter, Plus, Search } from 'lucide-svelte';
 	import { settingsNav } from '$lib/settings/navigation.svelte';
 	import { getSettingsAccess } from '$lib/settings/access.svelte';
@@ -43,6 +43,11 @@
 		onBack?: (() => void) | null;
 		/** Accessible name of the list region. */
 		listLabel?: string;
+		/**
+		 * Opening an item replaces the list at every width, with the detail's back
+		 * control returning to it (what stacked mode does on a phone).
+		 */
+		replaceOnSelect?: boolean;
 		list: Snippet;
 		detail: Snippet;
 	}
@@ -61,6 +66,7 @@
 		filters,
 		onBack,
 		listLabel,
+		replaceOnSelect = false,
 		list,
 		detail
 	}: Props = $props();
@@ -72,6 +78,28 @@
 	);
 
 	let el: HTMLDivElement | undefined = $state();
+	const openItem = $derived(category ? settingsNav.selectedItem(category) : null);
+
+	// The list and the detail swap in place, so focus has to move with them:
+	// into the detail's title, or back to the row it was opened from.
+	let lastOpen: string | null | undefined;
+	$effect(() => {
+		const current = openItem ?? null;
+		const previous = lastOpen;
+		lastOpen = current;
+		if (!replaceOnSelect || settingsNav.stacked || previous === undefined || previous === current) return;
+		void tick().then(() => {
+			const row = [...(el?.querySelectorAll<HTMLElement>('[data-settings-item]') ?? [])].find(
+				(item) => item.dataset.settingsItem === previous
+			);
+			const target = current
+				? el?.querySelector<HTMLElement>('[data-settings-heading="detail"]')
+				: row?.matches('[data-settings-nav-item]')
+					? row
+					: row?.querySelector<HTMLElement>('[data-settings-nav-item]');
+			target?.focus({ preventScroll: !current });
+		});
+	});
 	let width = $state(readListWidth());
 	let containerWidth = $state(0);
 
@@ -95,7 +123,12 @@
 	});
 </script>
 
-<div class="st-coll" bind:this={el} style:--st-list-width="{width}px">
+<div
+	class="st-coll"
+	bind:this={el}
+	style:--st-list-width="{width}px"
+	data-replace={replaceOnSelect ? (openItem ? 'detail' : 'list') : undefined}
+>
 	<ListDivider bind:width {containerWidth} />
 	<div class="st-lcol">
 		<div class="st-lhead">

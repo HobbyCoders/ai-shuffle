@@ -27,7 +27,7 @@
 		gap: 8px;
 		height: 32px;
 		border: 1px solid var(--st-input);
-		background: var(--st-muted);
+		background: var(--st-card);
 		border-radius: var(--st-radius-md);
 		padding: 0 4px 0 10px;
 		color: var(--st-mfg);

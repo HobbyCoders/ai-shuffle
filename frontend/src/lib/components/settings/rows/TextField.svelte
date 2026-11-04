@@ -91,7 +91,7 @@
 		height: 32px;
 		border-radius: var(--st-radius-md);
 		border: 1px solid var(--st-input);
-		background: var(--st-muted);
+		background: var(--st-card);
 		color: var(--st-fg);
 		padding: 0 10px;
 		font-size: 13px;
@@ -110,6 +110,7 @@
 		box-shadow: 0 0 0 3px var(--st-primary-soft);
 	}
 	.st-txt:disabled {
+		background: var(--st-muted);
 		opacity: 0.55;
 	}
 </style>

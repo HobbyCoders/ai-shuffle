@@ -107,6 +107,7 @@
 	count="{connectedCount} connected"
 	addLabel="Add provider"
 	onAdd={startGateway}
+	replaceOnSelect
 	bind:filter
 >
 	{#snippet list()}

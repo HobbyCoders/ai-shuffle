@@ -115,7 +115,7 @@ describe('the list', () => {
 		await flush();
 		const claude = group('Claude');
 		expect(within(claude).getByRole('status').textContent).toBe('Checking…');
-		expect(screen.queryByRole('radiogroup', { name: 'Claude runs on' })).toBeNull();
+		expect(screen.queryByRole('combobox', { name: 'Claude runs on' })).toBeNull();
 		expect(screen.getAllByText('Claude')).toHaveLength(1);
 		release();
 		await flush();
@@ -230,27 +230,21 @@ describe('fal.ai', () => {
 describe('Claude', () => {
 	it('turns Claude off from the header', async () => {
 		await show();
-		const modes = within(group('Claude')).getByRole('group', {
-			name: 'Claude runs on'
-		});
-		expect(within(modes).getByRole('button', { name: 'Subscription' }).getAttribute('aria-pressed')).toBe('true');
-		await fireEvent.click(within(modes).getByRole('button', { name: 'Off' }));
+		const modes = within(group('Claude')).getByRole('combobox', { name: 'Claude runs on' }) as HTMLSelectElement;
+		expect(modes.value).toBe('subscription');
+		await fireEvent.change(modes, { target: { value: 'off' } });
 		await waitFor(() => expect(worker.sent('PUT', '/settings/claude-auth')).toHaveLength(1));
 		expect(worker.sent('PUT', '/settings/claude-auth')[0].body).toEqual({
 			mode: 'off'
 		});
-		await waitFor(() =>
-			expect(within(modes).getByRole('button', { name: 'Off' }).getAttribute('aria-pressed')).toBe('true')
-		);
+		await waitFor(() => expect(modes.value).toBe('off'));
 		expect(credentialNames('Claude')).toEqual(['Claude Max subscription, Off', 'Anthropic API key, Off']);
 	});
 
 	it('does not save when the current mode is picked again', async () => {
 		await show();
-		const modes = within(group('Claude')).getByRole('group', {
-			name: 'Claude runs on'
-		});
-		await fireEvent.click(within(modes).getByRole('button', { name: 'Subscription' }));
+		const modes = within(group('Claude')).getByRole('combobox', { name: 'Claude runs on' });
+		await fireEvent.change(modes, { target: { value: 'subscription' } });
 		await flush();
 		expect(worker.sent('PUT', '/settings/claude-auth')).toHaveLength(0);
 	});
@@ -260,7 +254,7 @@ describe('adding', () => {
 	it('"+" offers the kinds not added yet and makes one draft row', async () => {
 		await show();
 		const plus = within(group('OpenAI')).getByRole('button', {
-			name: 'Add credential to OpenAI'
+			name: 'Add account to OpenAI'
 		});
 		await fireEvent.click(plus);
 		const menu = await screen.findByRole('menu', { name: 'Add to OpenAI' });
@@ -290,7 +284,7 @@ describe('adding', () => {
 	it('"+" offers another subscription when one is already added', async () => {
 		start({ rows: [chatgptRow()] });
 		await show();
-		await fireEvent.click(screen.getByRole('button', { name: 'Add credential to OpenAI' }));
+		await fireEvent.click(screen.getByRole('button', { name: 'Add account to OpenAI' }));
 		const menu = await screen.findByRole('menu');
 		expect(
 			within(menu)
@@ -315,14 +309,11 @@ describe('read-only', () => {
 	it('disables the switches, the modes, "+" and Add provider', async () => {
 		await show({ readOnly: true });
 		for (const sw of screen.getAllByRole('switch')) expect((sw as HTMLButtonElement).disabled).toBe(true);
-		const modes = within(group('Claude')).getByRole('group', {
-			name: 'Claude runs on'
-		});
-		for (const b of within(modes).getAllByRole('button')) expect((b as HTMLButtonElement).disabled).toBe(true);
+		expect((within(group('Claude')).getByRole('combobox', { name: 'Claude runs on' }) as HTMLSelectElement).disabled).toBe(true);
 		expect(
 			(
 				screen.getByRole('button', {
-					name: 'Add credential to OpenAI'
+					name: 'Add account to OpenAI'
 				}) as HTMLButtonElement
 			).disabled
 		).toBe(true);
@@ -333,7 +324,6 @@ describe('read-only', () => {
 				}) as HTMLButtonElement
 			).disabled
 		).toBe(true);
-		await fireEvent.click(within(modes).getByRole('button', { name: 'Off' }));
 		expect(worker.sent('PUT', '/settings/claude-auth')).toHaveLength(0);
 	});
 });

@@ -2,7 +2,8 @@
 	/**
 	 * RowGroup: a titled card of rows. On a preference page it is an h2
 	 * section; inside a DetailPane it becomes an h3 detail section. `tone`
-	 * danger is the danger-zone style (use DangerZone for that). The card is
+	 * danger marks the last, destructive section (use DangerZone for that); it looks
+	 * like any other group, and only its button is red. The card is
 	 * the global `.st-card` (settings.css), so custom layouts can reuse it.
 	 */
 	import type { Snippet } from 'svelte';
@@ -73,12 +74,5 @@
 		align-items: center;
 		gap: 4px;
 		font-weight: 400;
-	}
-	.st-grp.danger .st-gt {
-		color: var(--st-destructive);
-	}
-	.st-grp.danger .st-list {
-		border-color: var(--st-destructive-line);
-		background: var(--st-destructive-soft);
 	}
 </style>

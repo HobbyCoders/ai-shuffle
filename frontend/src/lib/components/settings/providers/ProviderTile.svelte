@@ -1,12 +1,13 @@
 <script lang="ts">
-	/** A provider's tile: its brand mark, or a letter for fal.ai and gateways. */
+	/** A provider's tile: its brand mark, or one line icon for media and gateways. */
+	import { Clapperboard, Server } from 'lucide-svelte';
 	import type { StatusTone } from '$lib/settings/types';
 	import ProviderGlyph from '../ProviderGlyph.svelte';
 	import Tile from '../rows/Tile.svelte';
 	import type { ProviderView } from './providers-model';
 
 	interface Props {
-		provider: Pick<ProviderView, 'glyph' | 'letter'>;
+		provider: Pick<ProviderView, 'glyph'> & { media?: boolean };
 		size?: 'sm' | 'lg';
 		status?: StatusTone;
 		ring?: 'bg' | 'accent';
@@ -20,7 +21,9 @@
 <Tile {size} {status} {ring} {dashed}>
 	{#if mark}
 		<ProviderGlyph kind={provider.glyph} size={size === 'lg' ? 19 : 14} />
+	{:else if provider.media}
+		<Clapperboard />
 	{:else}
-		{provider.letter}
+		<Server />
 	{/if}
 </Tile>

@@ -41,7 +41,7 @@
 	min-height: 160px;
 	border: 1px solid var(--st-input);
 	border-radius: var(--st-radius-md);
-	background: var(--st-muted);
+	background: var(--st-card);
 	color: var(--st-fg);
 	padding: 10px 12px;
 	font-family: var(--st-mono);

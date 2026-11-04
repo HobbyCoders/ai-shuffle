@@ -401,13 +401,31 @@ def _apply_token_flags(row: Dict[str, Any]) -> Dict[str, Any]:
     row.pop("openai_admin_key", None)
     token = row.pop("auth_token", None)
     row["_auth_token_set"] = bool(token)
-    row["_auth_token_masked"] = mask_api_key(token) if token else ""
+    row["_auth_token_masked"] = _mask_stored_token(token)
     codex_access = row.pop("codex_access_token", None)
     codex_refresh = row.pop("codex_refresh_token", None)
     row["_codex_access_token_set"] = bool(codex_access)
     row["_codex_refresh_token_set"] = bool(codex_refresh)
     row["_account_email"], row["_account_plan"] = _account_profile(codex_access)
     return row
+
+
+def _mask_stored_token(stored: Optional[str]) -> str:
+    """Mask a stored token for display, from the key itself.
+
+    ``auth_token`` is an ``enc:`` blob at rest, so masking the stored value
+    would publish a fragment of the ciphertext. A blob that cannot be read
+    masks to "" (the row still reports ``auth_token_set``); nothing about the
+    failure or the token is logged.
+    """
+    if not stored:
+        return ""
+    if not encryption.is_encrypted(stored):
+        return mask_api_key(stored)
+    try:
+        return mask_api_key(encryption.decrypt_value(stored))
+    except Exception:  # noqa: BLE001 — display-only; never expose credential failures
+        return ""
 
 
 def _account_profile(encrypted_access: Optional[str]) -> Tuple[Optional[str], Optional[str]]:

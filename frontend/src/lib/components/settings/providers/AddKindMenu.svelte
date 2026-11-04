@@ -1,6 +1,6 @@
 <script lang="ts">
 	/**
-	 * The "+" on a provider: the credential kinds it supports that are not
+	 * "Add account" on a provider: the credential kinds it supports that are not
 	 * added yet ("Another API key" where several are allowed). Disabled once
 	 * every kind is added. Picking one makes a draft credential.
 	 */
@@ -99,18 +99,18 @@
 	type="button"
 	class="plus"
 	disabled={off}
-	aria-label="Add credential to {providerName}"
+	aria-label="Add account to {providerName}"
 	aria-haspopup="menu"
 	aria-expanded={open}
 	aria-controls={open ? `${uid}-menu` : undefined}
-	title={kinds.length ? 'Add credential' : 'Every kind is added'}
+	title={kinds.length ? undefined : 'Every kind is added'}
 	onclick={(e) => {
 		e.stopPropagation();
 		if (open) hide();
 		else void show();
 	}}
 >
-	<Plus />
+	<Plus /><span>Add account</span>
 </button>
 
 {#if open}
@@ -137,15 +137,23 @@
 
 <style>
 	.plus {
-		width: 28px;
-		height: 28px;
-		display: grid;
-		place-items: center;
+		height: 30px;
+		display: inline-flex;
+		align-items: center;
+		gap: 4px;
 		border: 0;
 		background: none;
 		border-radius: var(--st-radius-sm);
 		color: var(--st-mfg);
-		padding: 0;
+		font-size: 12px;
+		font-weight: 500;
+		padding: 0 8px;
+		white-space: nowrap;
+	}
+	@media (pointer: coarse) {
+		.plus {
+			min-height: 44px;
+		}
 	}
 	.plus:hover:not(:disabled),
 	.plus[aria-expanded='true'] {
@@ -157,8 +165,8 @@
 		opacity: 0.7;
 	}
 	.plus :global(svg.lucide) {
-		width: 15px;
-		height: 15px;
+		width: 14px;
+		height: 14px;
 	}
 	.menu {
 		position: fixed;

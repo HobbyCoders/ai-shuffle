@@ -95,7 +95,7 @@
 						>
 							{#snippet lead()}
 								<ProviderTile
-									provider={{ glyph: m.glyph, letter: m.group.slice(0, 1).toUpperCase() }}
+									provider={{ glyph: m.glyph }}
 									status={m.routes.every((r) => !r.usable) ? 'warn' : undefined}
 									ring={selected === m.item ? 'accent' : 'bg'}
 								/>

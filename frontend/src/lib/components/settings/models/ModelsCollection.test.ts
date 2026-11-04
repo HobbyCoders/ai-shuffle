@@ -170,13 +170,10 @@ describe('ModelsCollection', () => {
 		}
 	});
 
-	it('filters by name, choice and group', async () => {
+	it('keeps the short list free of a filter', async () => {
 		render(ModelsCollection);
-		await fireEvent.input(screen.getByPlaceholderText('Filter default models'), { target: { value: 'generation' } });
-		const names = () => [...document.querySelectorAll('[data-settings-item]')].map((e) => e.getAttribute('data-settings-item'));
-		expect(names()).toEqual(['gen-image', 'gen-video', 'gen-audio', 'gen-3d', 'catalog']);
-		await fireEvent.input(screen.getByPlaceholderText('Filter default models'), { target: { value: 'aloud' } });
-		expect(names()).toEqual(['tts']);
+		expect(document.querySelectorAll('[data-settings-item]').length).toBeLessThanOrEqual(12);
+		expect(screen.queryByPlaceholderText('Filter default models')).toBeNull();
 	});
 
 	it('redirects the removed media tool items', () => {

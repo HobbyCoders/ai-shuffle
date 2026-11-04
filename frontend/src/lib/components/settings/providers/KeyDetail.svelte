@@ -2,7 +2,8 @@
 	/**
 	 * An API key (OpenAI, Grok, OpenRouter) or a custom gateway's key.
 	 * Overview is the connection (name, endpoint, token, dialect, context
-	 * window, max output); fields save on blur or Enter, the token with Replace.
+	 * window, max output); fields save on blur or Enter, the token through
+	 * Replace. The stored token is write-only: it reads "Saved", never a mask.
 	 * Every save passes the curated models back with their metadata, including
 	 * per-model local tuning. A custom gateway speaking OpenAI chat also gets a
 	 * Tuning tab (LocalTuning) for a declared llama.cpp or vLLM server.
@@ -35,6 +36,8 @@
 	import { supportsLocalTuning, tunedModels } from './local-tuning';
 	import { hostOf, supportsNativeImages, type CredentialView, type ProviderView } from './providers-model';
 	import CredentialControl from './CredentialControl.svelte';
+	import SavedSecretRow from './SavedSecretRow.svelte';
+	import { detailLine } from './credential-display';
 
 	interface Props {
 		credential: CredentialView;
@@ -54,7 +57,6 @@
 	const dialect = $derived<Dialect>(row.api_dialect === 'openai' ? 'openai' : 'anthropic');
 	const tuning = $derived(gateway && supportsLocalTuning(row));
 
-	let token = $state('');
 	let saving = $state(false);
 	let error = $state('');
 	let credits = $state<OpenRouterUsageStatus | null>(null);
@@ -66,23 +68,15 @@
 			: null
 	);
 
-	const facts = $derived(
-		gateway
-			? [
-					{ label: 'Endpoint', value: hostOf(row.base_url), mono: true },
-					{ label: 'Dialect', value: dialect === 'openai' ? 'OpenAI chat' : 'Anthropic Messages' },
-					{ label: 'Models', value: `${row.models.length} in picker` },
-					{
-						label: 'Context',
-						value: row.context_window ? `${Math.round(row.context_window / 1024)}k` : 'Model default'
-					}
-				]
-			: [
-					{ label: 'Key', value: row.auth_token_set ? row.auth_token_masked || 'Stored' : 'None', mono: true },
-					{ label: 'Endpoint', value: hostOf(row.base_url), mono: true },
-					{ label: 'Models', value: `${row.models.length} in picker` },
-					{ label: 'Balance', value: balance, muted: !!balance && !balance.startsWith('$') }
-				]
+	const title = $derived(row.name?.trim() || credential.name);
+	const line = $derived(
+		detailLine(
+			row.enabled ? 'On' : 'Off',
+			`${row.models.length} ${row.models.length === 1 ? 'model' : 'models'}`,
+			gateway ? (dialect === 'openai' ? 'OpenAI chat' : 'Anthropic Messages') : hostOf(row.base_url),
+			balance && `${balance} left`,
+			!row.auth_token_set && 'No token'
+		)
 	);
 
 	/** Positive integer or null; '' is null; anything else is invalid. */
@@ -151,12 +145,6 @@
 		return save({ api_dialect: next });
 	}
 
-	async function replaceToken() {
-		const value = token.trim();
-		if (!value) return;
-		if (await save({ auth_token: value })) token = '';
-	}
-
 	const danger = $derived<DangerAction[]>([
 		{
 			label: 'Remove this credential',
@@ -190,19 +178,15 @@
 </script>
 
 <DetailPane
-	name={credential.name}
-	badge={credential.kind}
-	status={credential.status}
-	statusText={credential.statusText}
-	subtitle={row.enabled ? `${row.models.length} models in picker` : 'Not in the model picker'}
-	{facts}
+	name={title}
+	subtitle={line}
 	tabs={gateway ? (tuning ? ['Overview', 'Models', 'Tuning'] : ['Overview', 'Models']) : row.provider_type === 'openai' ? ['Overview', 'Models'] : ['Overview', 'Models', 'Usage']}
 	{danger}
 	item={credential.item}
 >
 	{#snippet tile()}<ProviderTile {provider} size="lg" />{/snippet}
 	{#snippet primary()}
-		<CredentialControl {credential} showState />
+		<CredentialControl {credential} />
 	{/snippet}
 	{#snippet children(tab: string | null)}
 		{#if tab === 'Models'}
@@ -217,7 +201,7 @@
 		{:else}
 			<RowGroup title="Connection" id="providers-connection">
 				<SettingRow label="Name">
-					<TextField value={row.name} width={220} disabled={saving} onchange={(v) => save({ name: v })} />
+					<TextField value={row.name} width={260} disabled={saving} onchange={(v) => save({ name: v })} />
 				</SettingRow>
 				<SettingRow label="Endpoint">
 					<TextField
@@ -229,19 +213,13 @@
 						onchange={(v) => save({ base_url: v })}
 					/>
 				</SettingRow>
-				<SettingRow label="Auth token" hint="Blank keeps current">
-					<TextField
-						bind:value={token}
-						type="password"
-						mono
-						width={180}
-						placeholder={row.auth_token_set ? `${row.auth_token_masked || '••••'} kept` : 'Provider API key'}
-						disabled={saving}
-					/>
-					<button type="button" class="st-btn" disabled={saving || !token.trim()} onclick={replaceToken}>
-						{row.auth_token_set ? 'Replace' : 'Save'}
-					</button>
-				</SettingRow>
+				<SavedSecretRow
+					label="Auth token"
+					saved={row.auth_token_set}
+					placeholder="Provider API key"
+					busy={saving}
+					onsave={(value) => save({ auth_token: value }).then(Boolean)}
+				/>
 				{#if gateway}
 					<SettingRow label="API dialect">
 						<Segmented
@@ -257,7 +235,7 @@
 						value={rowValue(row, 'context_window')}
 						placeholder="Auto"
 						inputmode="numeric"
-						width={110}
+						width={260}
 						disabled={saving}
 						onchange={(v) => saveNumber('context_window', v)}
 					/>
@@ -267,7 +245,7 @@
 						value={rowValue(row, 'max_output_tokens')}
 						placeholder="Auto"
 						inputmode="numeric"
-						width={110}
+						width={260}
 						disabled={saving}
 						onchange={(v) => saveNumber('max_output_tokens', v)}
 					/>

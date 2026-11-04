@@ -25,6 +25,7 @@ import type {
 } from '$lib/api/claude-auth';
 import type { ProviderGlyphKind } from '$lib/components/settings/ProviderGlyph.svelte';
 import type { StatusTone } from '$lib/settings/types';
+import { safeKeyHint } from './credential-display';
 
 // ============================================================================
 // Ids
@@ -338,7 +339,7 @@ function claudeCredentials(claude: ClaudeAuthSummary | null, keyMasked?: string 
 			flavor: 'anthropic',
 			name: account.label || 'Anthropic API key',
 			kind: 'API key',
-			summary: `${account.masked_key}${account.active && !keyActive ? ', selected for API key mode' : ''}`,
+			summary: `${safeKeyHint(account.masked_key) || 'Saved'}${account.active && !keyActive ? ', selected for API key mode' : ''}`,
 			status: on ? 'ok' : 'standby',
 			statusText: account.active ? (keyActive ? 'Active for Claude' : 'Selected for API key mode') : 'Saved',
 			on,
@@ -352,7 +353,7 @@ function claudeCredentials(claude: ClaudeAuthSummary | null, keyMasked?: string 
 	// Compatibility with older workers, plus the missing-key row for the selected mode.
 	if ((!claude.accounts && claude.api_key.set) || (keyActive && !(claude.accounts?.api_key.length) && !claude.api_key.set)) {
 		const ready = claude.api_key.set;
-		const masked = keyMasked || (claude.api_key.last4 ? `sk-ant-…${claude.api_key.last4}` : 'Key stored');
+		const masked = safeKeyHint(keyMasked) || (claude.api_key.last4 ? `sk-ant-…${claude.api_key.last4}` : 'Saved');
 		const status: StatusTone = !ready ? 'warn' : mode === 'off' ? 'off' : keyActive ? 'ok' : 'standby';
 		const statusText = !ready ? 'No key stored' : mode === 'off' ? 'Off' : keyActive ? 'Active for Claude' : 'Standby';
 		out.push({
@@ -606,7 +607,7 @@ function falCredential(fal: ProvidersInput['fal']): CredentialView[] {
 			flavor: 'fal',
 			name: 'Media key',
 			kind: 'API key',
-			summary: fal.enabled ? fal.masked || 'Key stored' : 'Off',
+			summary: fal.enabled ? safeKeyHint(fal.masked) || 'Saved' : 'Off',
 			status: fal.enabled ? 'ok' : 'off',
 			statusText: fal.enabled ? 'On' : 'Off',
 			on: fal.enabled,

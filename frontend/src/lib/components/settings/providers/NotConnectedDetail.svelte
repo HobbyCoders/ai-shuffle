@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { detailLine } from './credential-display';
 	/**
 	 * A provider with nothing connected: the kinds it supports, each with Set up.
 	 * Claude also shows the installed CLI (version, keep installed, Remove), so
@@ -39,14 +40,7 @@
 
 <DetailPane
 	name={provider.name}
-	badge="Provider"
-	status="off"
-	statusText="Not connected"
-	subtitle="Nothing added yet"
-	facts={[
-		{ label: 'Kinds', value: kinds.map((k) => k.label).join(', ') },
-		{ label: 'Models', value: models }
-	]}
+	subtitle={detailLine('Not connected', kinds.map((k) => k.label).join(', '), models)}
 	item={provider.item}
 >
 	{#snippet tile()}<ProviderTile {provider} size="lg" dashed />{/snippet}

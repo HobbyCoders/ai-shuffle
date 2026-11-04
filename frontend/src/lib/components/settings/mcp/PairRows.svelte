@@ -110,7 +110,7 @@
 		min-width: 0;
 		border-radius: var(--st-radius-md);
 		border: 1px solid var(--st-input);
-		background: var(--st-muted);
+		background: var(--st-card);
 		color: var(--st-fg);
 		padding: 0 10px;
 		font-size: 12px;

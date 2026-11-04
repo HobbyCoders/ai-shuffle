@@ -138,6 +138,25 @@
 	padding-inline: 16px;
 }
 
+/* A collection whose open item replaces the list: one pane, centred like the list. */
+.settings-shell:not([data-stacked]) .st-coll[data-replace='detail'] {
+	grid-template-columns: minmax(0, 1fr);
+}
+.settings-shell:not([data-stacked]) .st-coll[data-replace='detail'] > .st-divider,
+.settings-shell:not([data-stacked]) .st-coll[data-replace='detail'] > .st-lcol {
+	display: none;
+}
+.settings-shell:not([data-stacked]) .st-coll[data-replace='detail'] .st-dwrap {
+	width: min(100%, 856px);
+	max-width: none;
+	margin-inline: auto;
+	padding-inline: 48px;
+}
+.settings-shell:not([data-stacked]) .st-coll[data-replace='detail'] .st-back {
+	display: inline-flex;
+	margin-left: -2px;
+}
+
 /* ---------- row cards ---------- */
 /* The card rows sit in (RowGroup). Global so bare groups and custom lists
    reuse it. No overflow clipping: popovers inside rows must escape it. */

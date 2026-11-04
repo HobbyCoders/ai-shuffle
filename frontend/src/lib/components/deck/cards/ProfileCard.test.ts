@@ -228,7 +228,9 @@ describe('detail', () => {
 		await heading('Researcher');
 		expect(screen.getByRole('button', { name: 'Duplicate' })).toBeTruthy();
 		expect(screen.getByRole('button', { name: 'Export .json' })).toBeTruthy();
-		expect(screen.getByRole('button', { name: 'Delete agent' })).toBeTruthy();
+		// Delete is one row at the bottom of the profile, never in the header.
+		expect(screen.getAllByRole('button', { name: 'Delete' })).toHaveLength(1);
+		expect(screen.queryByRole('button', { name: 'Delete agent' })).toBeNull();
 		expect(screen.queryByRole('button', { name: /More/ })).toBeNull();
 		await fireEvent.click(row(/^Frontend Designer/));
 		await heading('Frontend Designer');
@@ -402,8 +404,8 @@ describe('create, duplicate, delete', () => {
 	it('deletes only after the inline confirm in the danger zone', async () => {
 		render(ProfileCard);
 		await heading('Researcher');
-		await fireEvent.click(screen.getByRole('button', { name: 'Delete agent' }));
 		const zone = screen.getByRole('heading', { name: 'Danger zone' }).closest('section') as HTMLElement;
+		await fireEvent.click(within(zone).getByRole('button', { name: 'Delete' }));
 		expect(within(zone).getByText('Delete Researcher?')).toBeTruthy();
 		await fireEvent.click(within(zone).getByRole('button', { name: 'Cancel' }));
 		expect(within(zone).queryByText('Delete Researcher?')).toBeNull();

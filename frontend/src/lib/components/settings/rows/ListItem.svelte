@@ -29,6 +29,7 @@
 	import { settingsNav } from '$lib/settings/navigation.svelte';
 	import type { SettingsIcon } from '$lib/settings/categories';
 	import type { CategoryId, StatusTone } from '$lib/settings/types';
+	import { ChevronRight } from 'lucide-svelte';
 	import StatusDot from './StatusDot.svelte';
 	import Tile from './Tile.svelte';
 
@@ -47,8 +48,8 @@
 		onselect?: (id: string) => void;
 		/** Monospace name (log messages, ids). */
 		mono?: boolean;
-		/** `log`: a bare status dot instead of a tile, tighter row. `pinned`: tinted, outlined row (a pinned item such as the personal assistant). */
-		variant?: 'default' | 'log' | 'pinned';
+		/** `log`: a bare status dot instead of a tile, tighter row. `pinned`: tinted, outlined row (a pinned item such as the personal assistant). `value`: a 56px settings row, name left, summary right, then a chevron. */
+		variant?: 'default' | 'log' | 'pinned' | 'value';
 		/** Replaces the tile. */
 		lead?: Snippet;
 		/** Chips after the name (Draft, Modified). */
@@ -86,12 +87,18 @@
 	class="st-it"
 	class:log={variant === 'log'}
 	class:pinned={variant === 'pinned'}
+	class:value={variant === 'value'}
 	aria-current={isSelected ? 'true' : undefined}
 	data-settings-item={id}
 	data-settings-nav-item
 	onclick={select}
 	onkeydown={moveListFocus}
 >
+	{#if variant === 'value'}
+		<span class="nm">{name}</span>
+		<span class="vl">{#if status}<StatusDot tone={status} />{/if}<span class="vt">{summary}</span></span>
+		<ChevronRight class="chev" aria-hidden="true" />
+	{:else}
 	{#if lead}
 		{@render lead()}
 	{:else if variant === 'log'}
@@ -108,6 +115,7 @@
 		{#if summary}<span class="sm">{summary}</span>{/if}
 	</span>
 	{#if meta}<span class="meta">{meta}</span>{:else}<span></span>{/if}
+	{/if}
 </button>
 
 <style>
@@ -137,6 +145,45 @@
 	}
 	.st-it.log {
 		min-height: 42px;
+	}
+	.st-it.value {
+		grid-template-columns: minmax(auto, 40%) minmax(0, 1fr) 16px;
+		gap: 12px;
+		min-height: 56px;
+		padding: 6px 12px 6px 16px;
+		border-radius: 0;
+	}
+	.st-it.value:first-child {
+		border-radius: var(--st-radius-lg) var(--st-radius-lg) 0 0;
+	}
+	.st-it.value:last-child {
+		border-radius: 0 0 var(--st-radius-lg) var(--st-radius-lg);
+	}
+	.st-it.value:only-child {
+		border-radius: var(--st-radius-lg);
+	}
+	.st-it.value + :global(.st-it.value) {
+		border-top: 1px solid var(--st-border);
+	}
+	.vl {
+		display: flex;
+		align-items: center;
+		justify-content: flex-end;
+		gap: 7px;
+		min-width: 0;
+		font-size: 13px;
+		color: var(--st-mfg);
+	}
+	.vt {
+		min-width: 0;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	.st-it.value :global(.chev) {
+		width: 16px;
+		height: 16px;
+		color: var(--st-subtle);
 	}
 	.st-it.pinned {
 		border: 1px solid var(--st-primary-line);

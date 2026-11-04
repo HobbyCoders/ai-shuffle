@@ -2,7 +2,7 @@
 	/**
 	 * AgentDetail: one agent on the Agents page, in the Settings DetailPane
 	 * anatomy. Header (avatar, name, badges, the visible actions: Duplicate,
-	 * Export, Restore defaults or Delete), the facts strip (each fact opens its
+	 * Export or Restore defaults), the facts strip (each fact opens its
 	 * tab), a sideways-scrolling tab strip, then the tab's row groups. The
 	 * Profile tab ends with the danger zone and its inline confirm.
 	 *
@@ -10,7 +10,7 @@
 	 * reports.
 	 */
 	import { tick } from 'svelte';
-	import { Check, Copy, Download, LoaderCircle, Lock, RotateCcw, Trash2 } from 'lucide-svelte';
+	import { Check, Copy, Download, LoaderCircle, Lock, RotateCcw } from 'lucide-svelte';
 	import type { Profile } from '$lib/api/client';
 	import type { AvatarId } from '$lib/api/agent-identity';
 	import type { ToolSurface, ToolSurfaceGroup } from '$lib/api/toolSurface';
@@ -142,7 +142,6 @@
 	const title = $derived(form.name.trim() || 'New agent');
 
 	let root: HTMLDivElement | undefined = $state();
-	let deleteArmed = $state(false);
 	let restoreArmed = $state(false);
 
 	const kind = $derived(builtin ? 'Built-in' : 'Yours');
@@ -181,12 +180,11 @@
 		}
 	}
 
-	/** Header Delete / Restore: open the danger zone with its confirm armed. */
-	async function askDanger(which: 'delete' | 'restore') {
+	/** Header Restore: open the bottom section with its confirm armed. */
+	async function askRestore() {
 		onTab('profile');
 		await tick();
-		if (which === 'delete') deleteArmed = true;
-		else restoreArmed = true;
+		restoreArmed = true;
 		await tick();
 		const zone = root?.querySelector<HTMLElement>('.st-grp.danger');
 		zone?.scrollIntoView?.({ block: 'center', behavior: 'smooth' });
@@ -231,14 +229,10 @@
 	</button>
 	{#if builtin}
 		{#if modified}
-			<button type="button" class="st-btn" title="Restore defaults" aria-label="Restore defaults" onclick={() => askDanger('restore')}>
+			<button type="button" class="st-btn" title="Restore defaults" aria-label="Restore defaults" onclick={askRestore}>
 				<RotateCcw /><span class="lbl">Restore</span>
 			</button>
 		{/if}
-	{:else}
-		<button type="button" class="st-btn danger" title="Delete" aria-label="Delete agent" onclick={() => askDanger('delete')}>
-			<Trash2 /><span class="lbl">Delete</span>
-		</button>
 	{/if}
 {/snippet}
 
@@ -272,7 +266,6 @@
 	{:else}
 		<SettingRow label="Delete agent" hint={draft ? 'Discards this draft.' : 'Removes it everywhere.'}>
 			<InlineConfirm
-				bind:armed={deleteArmed}
 				label="Delete"
 				question={`Delete ${draft ? 'this draft' : title}?`}
 				size="sm"
