@@ -33,7 +33,7 @@ import type { SdkContextUsage } from '$lib/api/sessions';
 import type { QueuedMessage, Task } from '../../types';
 import { browserPanel } from '../../browser-panel.svelte';
 import { pendingQueue, reconcilePendingPeerMessages } from '../pending-queue';
-import { nameStoppedTurn, nameStopRecovery } from '$lib/utils/not-sent-hold';
+import { nameStoppedTurn, nameStopRecovery, STOP_TURN_NOT_NAMED } from '$lib/utils/not-sent-hold';
 import { swarms } from '../../swarms';
 
 /** MCP browser-tool prefix — a live `tool.use` for one auto-opens the panel. */
@@ -526,6 +526,16 @@ function seedOptimistic(): void {
 	}
 }
 
+/**
+ * While the page's own send is unconfirmed, any turn the feed shows came before
+ * it, so it can't be the turn an unnamed Stop was pressed on.
+ */
+function nameRecoveryFrom(timedOut: string | null | undefined, turnId: string | null): string | null {
+	const ownSendUnconfirmed = timedOut === STOP_TURN_NOT_NAMED
+		&& reducerState.messages.some(m => m.role === 'user' && !reducerState.messageOriginSeq.has(m.id));
+	return ownSendUnconfirmed ? timedOut : nameStopRecovery(timedOut, turnId);
+}
+
 // ─── Fold reducer state → activeSession (rAF-coalesced) ───────────────────────
 
 function deriveActiveTasks(summaries: Task[]): Task[] {
@@ -649,7 +659,7 @@ function fold(hydrationComplete = false): void {
 					...s,
 					...patch,
 					stopRequestedTurnId: nameStoppedTurn(s.stopRequestedTurnId, reducerState.liveTurnId, patch.isStreaming === true),
-					stopTimedOutTurnId: nameStopRecovery(s.stopTimedOutTurnId, reducerState.liveTurnId),
+					stopTimedOutTurnId: nameRecoveryFrom(s.stopTimedOutTurnId, reducerState.liveTurnId),
 					queuedMessages: reconcileQueuedMessages(s.queuedMessages),
 					pendingPeerMessages: reconcilePendingPeerMessages(s.pendingPeerMessages ?? [], patch.messages ?? s.messages),
 				}
@@ -1082,7 +1092,7 @@ export const feedController: FeedController = {
 				// Stop's recovery from that end, or it would bind to the next turn.
 				if ((ev.type === 'turn.completed' || ev.type === 'turn.aborted') && deps?.getState().stopTimedOutTurnId) {
 					const endedTurnId = typeof ev.turn_id === 'string' ? ev.turn_id : null;
-					deps.update(s => ({ ...s, stopTimedOutTurnId: nameStopRecovery(s.stopTimedOutTurnId, endedTurnId) }));
+					deps.update(s => ({ ...s, stopTimedOutTurnId: nameRecoveryFrom(s.stopTimedOutTurnId, endedTurnId) }));
 				}
 				// A lagged mirror can replay an entire turn before the next fold.
 				// Consume optimism when the reducer confirms the turn, not only

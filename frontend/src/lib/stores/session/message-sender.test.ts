@@ -1070,6 +1070,54 @@ describe('Stop timeout recovery', () => {
 		}
 	);
 
+	describe('when a stalled history replay ends an older turn first', () => {
+		function replaying() {
+			const test = stopping(null);
+			const optimistic = { id: 'optimistic-1', role: 'user', content: 'go', commandId: 'cmd-1' } as ActiveSessionState['messages'][number];
+			test.deps.update(s => ({ ...s, messages: [optimistic] }));
+			test.sender.stopGeneration();
+			vi.advanceTimersByTime(10000);
+			expect(test.getState().stopTimedOutTurnId).toBe(STOP_TURN_NOT_NAMED);
+			feedController.start('sess-1');
+			const event = (type: string, turn_id: string, seq: number, extra: Record<string, unknown> = {}) =>
+				feed.onEvent!({ type, id: `${type}-${seq}`, seq, session_id: 'sess-1', turn_id, created_at: '2026-11-04T00:00:00Z', ...extra });
+			return { test, event };
+		}
+
+		it('keeps the recovery for the stopped send, not the older turn', () => {
+			const { test, event } = replaying();
+			event('turn.completed', 'older', 1);
+			event('turn.started', 'turn-1', 2);
+			feed.onEvent!({ type: 'caught_up', seq: 2 });
+			vi.advanceTimersByTime(300);
+			let state = test.getState();
+			expect(state.liveTurnId).toBe('turn-1');
+			expect(stopRecoveryAppliesToTurn(state.stopTimedOutTurnId, state.liveTurnId)).toBe(true);
+
+			event('message.user', 'turn-1', 3, { command_id: 'cmd-1', content: 'go' });
+			vi.advanceTimersByTime(300);
+			state = test.getState();
+			expect(state.stopTimedOutTurnId).toBe('turn-1');
+			expect(stopRecoveryAppliesToTurn(state.stopTimedOutTurnId, state.liveTurnId)).toBe(true);
+		});
+
+		it('still ends the recovery with the stopped send once the feed has confirmed it', () => {
+			const { test, event } = replaying();
+			event('turn.completed', 'older', 1);
+			event('turn.started', 'turn-1', 2);
+			event('message.user', 'turn-1', 3, { command_id: 'cmd-1', content: 'go' });
+			event('turn.completed', 'turn-1', 4);
+			feed.onEvent!({ type: 'caught_up', seq: 4 });
+			vi.advanceTimersByTime(300);
+			expect(test.getState().stopTimedOutTurnId).toBe('turn-1');
+
+			event('turn.started', 'turn-2', 5);
+			vi.advanceTimersByTime(300);
+			expect(test.getState().liveTurnId).toBe('turn-2');
+			expect(test.getState().stopTimedOutTurnId).toBeNull();
+		});
+	});
+
 	it.each(['turn-1', null])('still recovers when a Stop on turn %s could not leave the page, without recording a Stop', liveTurnId => {
 		const test = stopping(liveTurnId);
 		test.wsConn.send.mockReturnValue(false);
