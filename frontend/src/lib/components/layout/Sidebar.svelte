@@ -433,7 +433,7 @@
 
 	// Each lane names its own nothing-here state; "No sessions yet" under a
 	// voice-only list reads as though the whole app were empty.
-	const emptyLabel = 'No sessions yet';
+	const emptyLabel = 'No chats yet';
 	// An empty Settled lane says nothing the Active lane does not. It stays only
 	// while older chats are one click away, because its shelf is how you get them.
 	const settledLaneShown = $derived(settledRows.length > 0 || loadingOlder || $sessionsHasMore);
@@ -626,7 +626,7 @@
 
 	function reportBulkFailure(failed: number, total: number) {
 		notify(
-			failed === total ? 'Failed to update the sessions' : `Failed to update ${failed} of ${total} sessions`,
+			failed === total ? 'Failed to update the chats' : `Failed to update ${failed} of ${total} chats`,
 			{ severity: 'error' }
 		);
 	}

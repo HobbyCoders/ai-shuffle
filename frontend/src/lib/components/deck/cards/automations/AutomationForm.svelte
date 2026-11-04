@@ -613,7 +613,7 @@
 			<div class="lab"><h4>Output</h4><p>Where the result is delivered.</p></div>
 			<div class="ctl">
 				<div class="seg">
-					<button type="button" class:on={formOutputType === 'session'} onclick={() => { onUpdateFormOutputType('session'); onUpdateFormOutputConfig({}); }}>Session</button>
+					<button type="button" class:on={formOutputType === 'session'} onclick={() => { onUpdateFormOutputType('session'); onUpdateFormOutputConfig({}); }}>Chat</button>
 					<button type="button" class:on={formOutputType === 'connector'} onclick={() => { onUpdateFormOutputType('connector'); onUpdateFormOutputConfig({}); }}>Connector</button>
 					<button type="button" class:on={formOutputType === 'webhook'} onclick={() => { onUpdateFormOutputType('webhook'); onUpdateFormOutputConfig({}); }}>Webhook</button>
 					<button type="button" class:on={formOutputType === 'none'} onclick={() => { onUpdateFormOutputType('none'); onUpdateFormOutputConfig({}); }}>None</button>

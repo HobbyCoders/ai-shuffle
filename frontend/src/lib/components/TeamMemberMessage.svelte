@@ -186,7 +186,7 @@
 		<!-- Session id row -->
 		{#if message.teammateSessionId}
 			<div class="px-4 py-2 border-b border-border/50 flex items-center gap-2 text-xs">
-				<span class="text-muted-foreground">Session:</span>
+				<span class="text-muted-foreground">Chat:</span>
 				<span class="font-mono text-muted-foreground truncate" title={message.teammateSessionId}>
 					{truncateSessionId(message.teammateSessionId)}
 				</span>

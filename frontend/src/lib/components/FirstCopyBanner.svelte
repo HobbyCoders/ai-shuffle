@@ -89,7 +89,7 @@
 			variant="page"
 			severity="success"
 			title="Your data is copied"
-			message="Reload to see your sessions and workers."
+			message="Reload to see your chats and workers."
 			action={{ label: 'Reload', onClick: () => window.location.reload() }}
 			dismissible
 			onDismiss={() => (dismissed = true)}

@@ -521,7 +521,7 @@
 							variant="page"
 							message={$activeSession.wsReconnectRequired
 								? 'Chat controls disconnected. Reconnect to send messages.'
-								: 'Chat controls disconnected. Trying to reconnect; running sessions continue.'}
+								: 'Chat controls disconnected. Trying to reconnect; running chats continue.'}
 							action={{ label: 'Reconnect', onClick: handleReconnect }}
 						/>
 					</NotificationSlot>

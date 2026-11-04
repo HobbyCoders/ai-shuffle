@@ -129,7 +129,7 @@
 		<div class="ctl"><input type="text" bind:value={name} placeholder="e.g., Slack Notification" class="inp" /></div>
 	</div>
 	<div class="set-row">
-		<div class="lab"><h4>Scope</h4><p>{scopeProjectId ? 'Fires only for sessions in this project.' : 'Fires for all sessions regardless of project.'}</p></div>
+		<div class="lab"><h4>Scope</h4><p>{scopeProjectId ? 'Fires only for chats in this project.' : 'Fires for all chats regardless of project.'}</p></div>
 		<div class="ctl">
 			<select bind:value={scopeProjectId} class="sel">
 				<option value={null}>App (all chats)</option>

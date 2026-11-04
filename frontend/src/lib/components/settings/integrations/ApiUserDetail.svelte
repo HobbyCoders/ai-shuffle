@@ -42,7 +42,7 @@
 	let { model, id }: Props = $props();
 
 	const PERMS_HELP =
-		'Connector sessions never inherit bypass. Tool approval requests go to the connected platform, such as Discord, for the user to approve or deny.';
+		'Connector chats never inherit bypass. Tool approval requests go to the connected platform, such as Discord, for the user to approve or deny.';
 	/** Subscription models are left out of this picker; the server refuses them for API users. */
 	const MODEL_HELP = SUBSCRIPTION_OWNER_ONLY_REASON;
 	/** A connector's key: only the owner's own account on it uses a subscription. */

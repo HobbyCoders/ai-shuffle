@@ -130,7 +130,6 @@ describe('AutomationForm model picker', () => {
 		expect(row.queryByText(/agent/i)).toBeNull();
 
 		await fireEvent.click(row.getByRole('button', { name: 'Worker default' }));
-		await fireEvent.click(row.getByRole('tab', { name: /^Claude/ }));
 		await fireEvent.click(row.getByRole('option', { name: /Haiku/ }));
 		expect(onUpdateFormModel).toHaveBeenCalledWith('haiku');
 	});
@@ -139,7 +138,6 @@ describe('AutomationForm model picker', () => {
 		const { getByTestId, onUpdateFormModel } = renderForm();
 		const row = within(getByTestId('automation-model-row'));
 		await fireEvent.click(row.getByRole('button', { name: 'Worker default' }));
-		await fireEvent.click(row.getByRole('tab', { name: /OpenAI/ }));
 		await fireEvent.click(row.getByRole('option', { name: /GPT-5\.6/ }));
 		expect(onUpdateFormModel).toHaveBeenCalledWith(encodeProviderModel('openai-row', 'gpt-5.6'));
 	});
@@ -225,7 +223,6 @@ describe('AutomationForm model picker', () => {
 		const trigger = getByRole('button', { name: 'Model (optional)' });
 		expect(trigger.textContent).toContain('Same as automation');
 		await fireEvent.click(trigger);
-		await fireEvent.click(getByRole('tab', { name: /^Claude/ }));
 		await fireEvent.click(getByRole('option', { name: /Haiku/ }));
 		expect(onUpdateFormActionSteps).toHaveBeenCalledWith([
 			{ type: 'send_prompt', prompt: 'next', model: 'haiku', provider_id: undefined }

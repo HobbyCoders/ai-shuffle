@@ -1726,7 +1726,7 @@ describe('Sidebar unified conversation history', () => {
 		appMode.set('voice');
 		render(Sidebar, { props: sidebarProps });
 		const empties = Array.from(document.querySelectorAll('.empty')).map((n) => n.textContent?.trim());
-		expect(empties).toEqual(['No sessions yet']);
+		expect(empties).toEqual(['No chats yet']);
 		expect(Array.from(document.querySelectorAll('.sect')).some((n) => n.textContent?.includes('Settled'))).toBe(false);
 	});
 	it('keeps an explicit project scope across lanes', async () => {

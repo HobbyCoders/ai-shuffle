@@ -117,7 +117,7 @@
 {#snippet denyRow()}
 	<SettingRow
 		label={device.confirmation === 'approved' ? 'Revoke approval' : 'Deny this request'}
-		hint={device.confirmation === 'approved' ? 'Stops its sessions here' : 'Final for this identity'}
+		hint={device.confirmation === 'approved' ? 'Stops its chats here' : 'Final for this identity'}
 	>
 		<InlineConfirm
 			label={device.confirmation === 'approved' ? 'Revoke' : 'Deny'}

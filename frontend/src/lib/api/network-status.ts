@@ -137,7 +137,7 @@ export function transcriptNotice(status: NetworkStatus | null | undefined): Firs
 	const copy = status.hub?.transcripts;
 	if (!copy || !copy.sessions_total) return null;
 	const peer = copy.peer_name || 'another worker';
-	const count = `${copy.sessions_done.toLocaleString('en-US')} of ${copy.sessions_total.toLocaleString('en-US')} sessions`;
+	const count = `${copy.sessions_done.toLocaleString('en-US')} of ${copy.sessions_total.toLocaleString('en-US')} chats`;
 	const fraction = Math.min(1, copy.sessions_done / copy.sessions_total);
 	if (copy.error) {
 		return {
