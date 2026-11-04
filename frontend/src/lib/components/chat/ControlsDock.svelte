@@ -124,12 +124,13 @@
 		const card = dockRef.closest('.chat-island')?.getBoundingClientRect();
 		const wrapBox = modelWrapRef?.getBoundingClientRect();
 		// A new chat has no transcript to protect but does have a headline above
-		// the composer. Whenever a usable list fits below, the picker hangs down
-		// over the empty page and at most the context row, leaving the headline whole.
-		const roomBelow = wrapBox ? window.innerHeight - wrapBox.bottom - 20 : 0;
+		// the composer. Whenever a usable list fits below, the picker opens 8px under
+		// the composer, right edges aligned, over the empty page and at most the
+		// context row, leaving the headline whole.
+		const roomBelow = card ? window.innerHeight - card.bottom - 20 : 0;
 		if (newChat && card && wrapBox && card.width > 0 && roomBelow >= MODEL_MENU_MIN_ROOM) {
 			popoverRoom = Math.max(220, Math.floor(roomBelow));
-			modelMenuAnchor = { top: wrapBox.height + 8, right: wrapBox.right - card.right, width: Math.min(card.width, 380) };
+			modelMenuAnchor = { top: card.bottom - wrapBox.top + 8, right: wrapBox.right - card.right, width: Math.min(card.width, 380) };
 			return;
 		}
 		// The model picker clears the whole composer so it never covers what you

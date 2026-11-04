@@ -84,7 +84,7 @@ function renderDock(props: Record<string, unknown> = {}) {
 
 describe('ControlsDock split controls', () => {
  it.each([
-  ['hangs down from the control', 900, { top: '40px', bottom: 'auto' }],
+  ['opens 8px under the composer', 900, { top: '48px', bottom: 'auto' }],
   ['falls back to above the composer in a short window', 700, { top: '', bottom: '110px' }]
  ])('on a new chat, the picker %s', async (_name, windowHeight, expected) => {
   const height = window.innerHeight;
