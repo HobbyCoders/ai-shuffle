@@ -75,13 +75,20 @@ def command_setting_sources(
     mode: Optional[str] = None,
 ):
     """Match the adapter's effective scopes, including Chat's filesystem isolation."""
+    from app.api.chat_query import _request_query_principal
     from app.core.provider.harness_adapter import _fluid_setting_sources
     from app.core.provider.types import SessionOptions
+    from app.core.session_modes import caller_of, runtime_session_mode
 
     config = _command_profile_config(request, session, profile_id)
-    # Authorize the profile even when Chat excludes all on-disk settings. A
-    # request's mode must not override an existing session's isolation.
-    sources = [] if (session or {}).get("mode", mode) == "chat" else config.get("setting_sources")
+    # Authorize first, then use the same current caller and runtime lane as a
+    # query send. Stored mode alone is not the projectless session's lane.
+    # Before creation, preserve the explicit request-mode policy.
+    effective_mode = mode
+    if session is not None:
+        caller = caller_of(_request_query_principal(request)) if request is not None else None
+        effective_mode = runtime_session_mode(session, caller=caller)
+    sources = [] if effective_mode == "chat" else config.get("setting_sources")
     return _fluid_setting_sources(SessionOptions(model="", setting_sources=sources))
 
 

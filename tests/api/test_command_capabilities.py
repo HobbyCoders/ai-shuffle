@@ -98,7 +98,9 @@ async def test_profile_cwd_is_used_before_session_creation(source_tree, monkeypa
     _, _, child = source_tree
     put(child / ".fluid/commands/here.md", "From profile cwd")
     monkeypatch.setattr(context.database, "get_profile", lambda pid: {"config": {"cwd": str(child), "setting_sources": ["project"], "model": "gpt-test"}})
-    result = await commands.list_commands(profile_id="p", http_request=caller())
+    req = caller()
+    req.state.auth_token = "local-owner"
+    result = await commands.list_commands(profile_id="p", http_request=req)
     assert [cmd.name for cmd in result.commands if cmd.name != "compact"] == ["here"]
 
 
@@ -140,8 +142,8 @@ def test_scoped_caller_defaults_to_its_only_agent_and_may_use_any_assigned(monke
 
 
 def caller(user=None):
-    request = Request({'type':'http','headers':[]})
-    request.state.api_user = user
+    request = Request({'type': 'http', 'headers': [(b'authorization', b'Bearer test-api-key')]})
+    request.state.api_user = {'id': 'test-user', **user} if user else None
     return request
 
 
@@ -164,7 +166,7 @@ async def test_chat_catalog_and_details_match_runtime_scope_exclusion(
     monkeypatch.setattr(context.database, "get_profile", lambda pid: {
         "config": {"setting_sources": ["user", "project", "local"], "cwd": str(child)},
     })
-    session = {"id": "s", "profile_id": "p", "mode": session_mode} if session_mode else None
+    session = {"id": "s", "profile_id": "p", "project_id": "mine", "mode": session_mode} if session_mode else None
     monkeypatch.setattr(context.database, "get_session", lambda sid: session)
     monkeypatch.setattr("app.core.project_resolver.resolve_session_cwd", lambda row: str(child))
     monkeypatch.setattr(commands, "command_provider_kind", lambda *a: kind)
@@ -195,6 +197,70 @@ def test_chat_scope_exclusion_still_authorizes_profile(monkeypatch):
         context.command_setting_sources(caller({"profile_ids": ["mine"]}), None, "other", "chat")
     assert error.value.status_code == 403
     lookup.assert_not_called()
+
+
+@pytest.mark.parametrize("kind", ["anthropic", "delegated"])
+@pytest.mark.parametrize("stored_mode,token,allowed", [
+    ("chat", "local-owner", True), (None, "preview:fixture", False),
+    ("chat", "preview:fixture", False), (None, "local-owner", True),
+])
+async def test_saved_catalog_uses_current_http_caller_runtime_lane(source_tree, monkeypatch, kind, stored_mode, token, allowed):
+    from app.core.session_modes import runtime_session_mode, caller_of
+    from app.api.chat_query import _request_query_principal
+
+    home, _, child = source_tree
+    put(home / ".fluid/commands/direct.md", "Direct body $1")
+    put(child / ".fluid/skills/guide/SKILL.md", "Skill body")
+    row = {"id": "owner-chat", "profile_id": "p", "mode": stored_mode}
+    req = caller()
+    req.state.auth_token = token
+    monkeypatch.setattr(context.database, "get_session", lambda sid: row)
+    monkeypatch.setattr(context.database, "get_profile", lambda pid: {
+        "config": {"setting_sources": ["user", "project", "local"]},
+    })
+    monkeypatch.setattr("app.core.project_resolver.resolve_session_cwd", lambda row: str(child))
+    monkeypatch.setattr("app.core.session_orchestration._principal", lambda sid: None)
+    # Opposite stored caller: the current HTTP send's caller must win.
+    monkeypatch.setattr("app.db.turns.latest_caller", lambda sid: "preview" if allowed else "authenticated")
+    monkeypatch.setattr(commands, "command_provider_kind", lambda *a: kind)
+    effective = runtime_session_mode(row, caller=caller_of(_request_query_principal(req)))
+    assert effective == ("code" if allowed else "chat")
+    kwargs = {"session_id": row["id"], "http_request": req, "mode": "chat" if allowed else "code"}
+    listed = await commands.list_commands(**kwargs)
+    assert {cmd.name for cmd in listed.commands} & {"direct", "guide"} == ({"direct", "guide"} if allowed else set())
+    if allowed:
+        assert (await commands.get_command("direct", **kwargs)).content == "Direct body $1"
+    else:
+        with pytest.raises(HTTPException) as error:
+            await commands.get_command("direct", **kwargs)
+        assert error.value.status_code == 404
+
+
+@pytest.mark.parametrize("kind", ["anthropic", "delegated"])
+@pytest.mark.parametrize("token,project_id,mode,allowed", [
+    ("local-owner", None, "chat", False), ("local-owner", None, "code", True),
+    ("preview:fixture", None, "code", True), ("preview:fixture", None, "chat", False),
+    ("local-owner", "mine", "chat", False), ("preview:fixture", "mine", "code", True),
+    ("api", None, "code", True), ("api", None, "chat", False),
+])
+async def test_unsaved_catalog_preserves_explicit_request_mode(source_tree, monkeypatch, kind, token, project_id, mode, allowed):
+    home, _, child = source_tree
+    put(home / ".fluid/commands/direct.md", "Fresh direct body")
+    req = caller({"project_id": "mine", "profile_ids": ["p"]} if token == "api" else None)
+    req.state.auth_token = token
+    monkeypatch.setattr(context.database, "get_profile", lambda pid: {"config": {"cwd": str(child), "setting_sources": ["user"]}})
+    monkeypatch.setattr(context.database, "get_project", lambda pid: {"id": "mine", "working_dir": str(child)})
+    monkeypatch.setattr(context, "get_project_working_dir", lambda row: str(child))
+    monkeypatch.setattr(commands, "command_provider_kind", lambda *a: kind)
+    kwargs = {"project_id": project_id, "profile_id": "p", "http_request": req, "mode": mode}
+    listed = await commands.list_commands(**kwargs)
+    assert ("direct" in {cmd.name for cmd in listed.commands}) == allowed
+    if allowed:
+        assert (await commands.get_command("direct", **kwargs)).content == "Fresh direct body"
+    else:
+        with pytest.raises(HTTPException) as error:
+            await commands.get_command("direct", **kwargs)
+        assert error.value.status_code == 404
 
 
 @pytest.mark.parametrize('kind', ['anthropic','openai_responses','openrouter','voice','unavailable'])
