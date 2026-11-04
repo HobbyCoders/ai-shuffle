@@ -57,7 +57,7 @@
 		border-radius: 999px;
 		border: 0;
 		padding: 0;
-		background: var(--switch-off);
+		background: var(--switch-off); box-shadow: inset 0 0 0 1px var(--switch-off-edge);
 		position: relative;
 		transition: background 0.15s;
 		flex: none;
@@ -79,7 +79,7 @@
 		transition: transform 0.15s;
 	}
 	.st-sw[aria-checked='true'] {
-		background: var(--switch-on);
+		background: var(--switch-on); box-shadow: none;
 	}
 	.st-sw:focus-visible {
 		outline: 2px solid var(--ring);

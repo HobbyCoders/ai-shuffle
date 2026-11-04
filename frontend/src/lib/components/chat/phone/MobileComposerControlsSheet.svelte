@@ -1516,7 +1516,7 @@
 
 	/* Switch rows */
 	/* The phone's measure of the shared Switch (mobile.css), which sits inside a row here. */
-	.mcp-sw { position: relative; width: 42px; height: 25px; flex: none; border-radius: 999px; background: var(--switch-off); transition: background-color 0.2s; }
+	.mcp-sw { position: relative; width: 42px; height: 25px; flex: none; border-radius: 999px; background: var(--switch-off); box-shadow: inset 0 0 0 1px var(--switch-off-edge); transition: background-color 0.2s; }
 	.mcp-sw::after {
 		content: '';
 		position: absolute;
@@ -1529,7 +1529,7 @@
 		box-shadow: 0 0 0 0.5px var(--switch-thumb-edge), 0 1px 2px var(--switch-thumb-edge);
 		transition: transform 0.22s var(--mcp-ease);
 	}
-	.mcp-row[aria-checked='true'] .mcp-sw { background: var(--switch-on); }
+	.mcp-row[aria-checked='true'] .mcp-sw { background: var(--switch-on); box-shadow: none; }
 	.mcp-row[aria-checked='true'] .mcp-sw::after { transform: translateX(17px); }
 	.mcp-row[aria-disabled='true'] { cursor: default; }
 	.mcp-row[aria-disabled='true'] .mcp-lbl > span, .mcp-row[aria-disabled='true'] .mcp-ic { opacity: 0.5; }
@@ -1572,7 +1572,7 @@
 	/* Settings' Segmented, thumb-sized: a grey tray and a card-coloured selected
 	   segment with a hairline. */
 	.mcp-seg button[aria-checked='true'] {
-		background: var(--card);
+		background: var(--segment-selected);
 		color: var(--foreground);
 		font-weight: 600;
 		box-shadow: 0 0 0 1px color-mix(in oklch, var(--foreground) 16%, transparent);
@@ -1731,7 +1731,7 @@
 		width: 42px;
 		height: 25px;
 		border-radius: 999px;
-		background: var(--switch-off);
+		background: var(--switch-off); box-shadow: inset 0 0 0 1px var(--switch-off-edge);
 		transition: background-color 0.2s;
 	}
 	.mcp-setup :global(.sheet-mode .ctx-chip .ctx-chip-cb::after) {
@@ -1745,7 +1745,7 @@
 		background: var(--switch-thumb);
 		transition: transform 0.2s;
 	}
-	.mcp-setup :global(.sheet-mode .ctx-chip .ctx-chip-cb.checked) { background: var(--switch-on); }
+	.mcp-setup :global(.sheet-mode .ctx-chip .ctx-chip-cb.checked) { background: var(--switch-on); box-shadow: none; }
 	.mcp-setup :global(.sheet-mode .ctx-chip .ctx-chip-cb.checked::after) { transform: translateX(17px); }
 	.mcp-setup :global(.sheet-mode .degraded::before) { content: 'Runs on'; }
 	/* The Project row names the project; the Branch row shows the branch alone. */

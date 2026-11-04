@@ -1170,7 +1170,7 @@
 				}}
 			/>
 			{#if offerStarterTeam && !loading}
-				<div class="starter-foot">{@render installTeamButton(true)}</div>
+				<div class="starter-foot">{@render installTeamButton(false)}</div>
 			{/if}
 		{/snippet}
 		{#snippet detail()}
@@ -1279,40 +1279,20 @@
 	.agents-shell :global(.st-coll) {
 		flex: 1;
 	}
-	/* The list's footer: a quiet line on the pane's text edge, not a second card. */
-	.agents-shell :global(.st-lscroll) {
-		display: flex;
-		flex-direction: column;
+	/* The list pane is the same sidebar surface as Chats and Settings. */
+	.settings-shell.agents-shell:not([data-stacked]) :global(.st-lcol) {
+		background: var(--sidebar);
 	}
+	/* Directly under the list, on the rows' edge. */
 	.starter-foot {
-		flex: none;
-		margin-top: auto;
-		/* Ends 12px above the pane's edge, inside the scroller's 56px end padding. */
-		margin-bottom: -44px;
 		padding: 12px 0 0;
-	}
-	.starter-foot :global(.st-btn) {
-		height: 28px;
-		padding: 0 12px;
-		border: 0;
-		background: none;
-		box-shadow: none;
-		color: var(--st-mfg);
-		font-size: 13px;
-		font-weight: 400;
-	}
-	.starter-foot :global(.st-btn:hover:not(:disabled)) {
-		background: var(--st-hover);
-		color: var(--st-fg);
-	}
-	.starter-foot :global(.st-btn svg) {
-		display: none;
-	}
-	.settings-shell.agents-shell[data-stacked] .starter-foot :global(.st-btn) {
-		padding-inline: 0;
 	}
 	@media (pointer: coarse) {
 		.starter-foot :global(.st-btn) { min-height: 44px; }
+	}
+	/* The same title as a provider's detail page. */
+	.settings-shell.agents-shell :global(.st-dhn h2) {
+		font-size: 24px;
 	}
 	.folder-filter {
 		display: inline-flex;

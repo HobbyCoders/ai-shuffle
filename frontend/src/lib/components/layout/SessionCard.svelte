@@ -680,7 +680,7 @@
 					{:else if stage === 'committed'}
 						<GitCommitHorizontal size={12} strokeWidth={MARK_STROKE} />
 					{:else if stage === 'pushed'}
-						<ArrowUpFromLine size={12} strokeWidth={MARK_STROKE} />
+						<ArrowUpFromLine size={14} strokeWidth={MARK_STROKE} />
 					{/if}
 					<!-- An idle row draws nothing, and takes no room (see .lead). -->
 				</span>

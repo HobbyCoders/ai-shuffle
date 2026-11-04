@@ -111,6 +111,7 @@
 		!!currentType && !!TITLES[currentType] && TITLES[currentType] === 'Settings'
 			&& settingsNav.stacked && settingsNav.view !== 'index'
 	);
+	const settingsPage = $derived(!!currentType && TITLES[currentType] === 'Settings');
 	const mobileTitle = $derived.by(() => {
 		if (settingsSubPage) return categoryById(settingsNav.category).label;
 		if (currentType === 'session') return chatTitle;
@@ -343,7 +344,7 @@
 
 	<div class="tb-context">
 		<div class="tb-titleline">
-			<span class="tb-title" class:new-chat={currentType === 'session' && mobileTitle === NEW_CHAT_LABEL} title={mobileTitle}>{mobileTitle}</span>
+			<span class="tb-title" class:new-chat={currentType === 'session' && mobileTitle === NEW_CHAT_LABEL} class:chat={currentType === 'session'} class:settings-page={settingsPage} title={mobileTitle}>{mobileTitle}</span>
 			{#if boundChatId}
 				<SessionTitleMenu variant="sheet" title={mobileTitle} sessionId={boundChatId} {projectLabel} />
 			{/if}
@@ -504,8 +505,11 @@
 		overflow: hidden;
 		text-overflow: ellipsis;
 	}
+	.tb-title.chat { font-size: 15px; }
 	/* An empty new chat has no name of its own: the title is a label. */
 	.tb-title.new-chat { font-size: 15px; font-weight: 500; }
+	/* A Settings page has no heading of its own: this is the page's top level. */
+	.tb-title.settings-page { font-size: 17px; letter-spacing: -0.02em; }
 	.tb-sub {
 		position: absolute;
 		left: 4px;

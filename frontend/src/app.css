@@ -273,9 +273,12 @@
 
 		/* Switch: the thumb stays white in both states and themes. */
 		--switch-off: color-mix(in oklch, var(--foreground) 16%, transparent);
+		--switch-off-edge: transparent;
 		--switch-on: var(--primary);
 		--switch-thumb: oklch(1 0 0);
 		--switch-thumb-edge: oklch(0 0 0 / 0.18);
+		/* A selected segment rises above its track, like a selected rail item. */
+		--segment-selected: var(--rail-selected);
 	}
 
 	/* ========================================
@@ -300,8 +303,10 @@
 		--action: var(--foreground);
 		--action-foreground: var(--background);
 		--action-hover: color-mix(in oklab, var(--foreground) 86%, var(--background));
-		/* The off track must read on a white card. */
-		--switch-off: color-mix(in oklch, var(--foreground) 32%, transparent);
+		/* The off track is a light fill; its edge carries the 3:1 on a white card. */
+		--switch-off: color-mix(in oklch, var(--foreground) 15%, transparent);
+		--switch-off-edge: color-mix(in oklch, var(--foreground) 54%, transparent);
+		--segment-selected: var(--card);
 
 		/* Secondary/Muted */
 		--secondary: oklch(0.95 0.004 90);

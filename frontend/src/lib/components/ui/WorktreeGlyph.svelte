@@ -24,7 +24,7 @@
 		/* The chip's gap is 6px; the label starts 8px after the track. */
 		margin-right: 2px;
 		border-radius: 999px;
-		background: var(--switch-off);
+		background: var(--switch-off); box-shadow: inset 0 0 0 1px var(--switch-off-edge);
 		transition: background-color 0.15s;
 	}
 	.worktree-switch::after {
@@ -40,7 +40,7 @@
 		transition: transform 0.15s;
 	}
 	.worktree-switch.on {
-		background: var(--switch-on);
+		background: var(--switch-on); box-shadow: none;
 	}
 	.worktree-switch.on::after {
 		transform: translateX(12px);

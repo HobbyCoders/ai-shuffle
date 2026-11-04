@@ -774,6 +774,8 @@
 	}
 
 	.fold-summary {
+		/* The row's 7px gap less 3px: the same space before the dot as its own after. */
+		margin-left: -3px;
 		min-width: 0;
 		overflow: hidden;
 		text-overflow: ellipsis;

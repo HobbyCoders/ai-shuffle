@@ -67,6 +67,10 @@
 	});
 </script>
 
+{#snippet workerLine()}
+	<span class="tb-newchat-worker"><i aria-hidden="true"></i><b>{selfWorkerName($workerInstalls)}</b></span>
+{/snippet}
+
 <header class="topbar" class:no-rule={!rule}>
 	{#if onToggleSidebar}
 		<button
@@ -90,7 +94,13 @@
 		     The worker is changed from Chat controls, under the composer. -->
 		<div class="tb-newchat">
 			<span class="tb-newchat-title">{NEW_CHAT_LABEL}</span>
-			<span class="tb-newchat-worker"><i aria-hidden="true"></i><b>{selfWorkerName($workerInstalls)}</b></span>
+			{@render workerLine()}
+		</div>
+	{:else if phoneWidth && sessionId}
+		<!-- An existing chat keeps the worker line, the same as the phone app's bar. -->
+		<div class="tb-newchat tb-chat">
+			<SessionBreadcrumbs {projectLabel} {title} {sessionId} {onOpenProject} />
+			{@render workerLine()}
 		</div>
 	{:else}
 		<SessionBreadcrumbs {projectLabel} {title} {sessionId} {onOpenProject} />
@@ -152,6 +162,11 @@
 		flex-direction: column;
 		min-width: 0;
 		padding: 8px 2px 0 4px;
+	}
+	.tb-chat > :global(.crumbs) {
+		flex: none;
+		height: 21px;
+		min-width: 0;
 	}
 	.tb-newchat-title {
 		font-size: 15px;

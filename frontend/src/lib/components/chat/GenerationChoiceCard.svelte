@@ -1007,7 +1007,7 @@
 		height: 18px;
 		margin: 0;
 		border-radius: 999px;
-		background: var(--switch-off);
+		background: var(--switch-off); box-shadow: inset 0 0 0 1px var(--switch-off-edge);
 		cursor: pointer;
 		transition: background-color 0.15s ease;
 	}
@@ -1024,7 +1024,7 @@
 		transition: transform 0.15s;
 	}
 	.gcc-switch:checked {
-		background: var(--switch-on);
+		background: var(--switch-on); box-shadow: none;
 	}
 	.gcc-switch:checked::after {
 		transform: translateX(14px);

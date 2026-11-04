@@ -199,7 +199,10 @@
 		font-size: 13px;
 		line-height: 1.5;
 		color: var(--st-fg);
-		resize: vertical;
+		/* Grows with its content; where field-sizing is missing it scrolls instead. */
+		resize: none;
+		field-sizing: content;
+		min-height: calc(3lh + 18px);
 		outline: none;
 	}
 	.desc-area::placeholder,

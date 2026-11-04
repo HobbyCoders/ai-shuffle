@@ -128,7 +128,7 @@
 		aria-label={unread > 0 ? `Notifications (${unread} unread)` : 'Notifications'}
 		title="Notifications"
 	>
-		<Bell size={bar ? 16 : 18} strokeWidth={bar ? 1.8 : 1.5} />
+		<Bell size={bar ? 16 : 18} strokeWidth={bar ? 1.8 : 1.75} />
 		{#if unread > 0}
 			<span class="notif-badge" aria-hidden="true">{unread > 99 ? '99+' : unread}</span>
 		{/if}
@@ -254,6 +254,16 @@
 	.notif-btn.open,
 	.notif-btn.has-unread {
 		opacity: 1;
+	}
+
+	/* In the sidebar header it matches the filter button beside it. */
+	.notif-center:not(.bar) .notif-btn {
+		color: var(--sidebar-muted);
+		opacity: 1;
+	}
+	.notif-center:not(.bar) .notif-btn:hover,
+	.notif-center:not(.bar) .notif-btn.open {
+		color: var(--foreground);
 	}
 
 	.notif-btn:hover,

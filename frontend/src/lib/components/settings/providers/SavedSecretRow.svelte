@@ -61,7 +61,7 @@
 			{#if replacing}<button type="button" class="st-btn ghost" disabled={busy} onclick={cancel}>Cancel</button>{/if}
 		</span>
 	{:else}
-		<ValueText tone="fg" value="Saved" />
+		<ValueText value="Saved" />
 		<button type="button" class="st-btn" disabled={busy} onclick={startReplace}>Replace</button>
 	{/if}
 </SettingRow>

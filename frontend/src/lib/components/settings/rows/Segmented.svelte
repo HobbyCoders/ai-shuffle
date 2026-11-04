@@ -81,7 +81,7 @@
 		color: var(--st-fg);
 	}
 	.st-seg button[aria-pressed='true'] {
-		background: var(--st-card);
+		background: var(--segment-selected);
 		color: var(--st-fg);
 		box-shadow: 0 0 0 1px var(--st-border-strong);
 	}

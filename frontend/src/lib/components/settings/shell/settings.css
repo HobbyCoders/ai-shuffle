@@ -598,3 +598,20 @@
 		border-top: 1px solid var(--st-border);
 	}
 }
+
+/* Phone section headings: one style everywhere, the index's muted 13px label,
+   inset 8px from the cards it names. */
+.settings-shell[data-stacked] .st-gt,
+.settings-shell[data-stacked] .st-lg:not(.compact) {
+	font-size: 13px;
+	font-weight: 500;
+	letter-spacing: 0;
+	color: var(--st-mfg);
+	padding-left: 8px;
+}
+.settings-shell[data-stacked] .st-gt {
+	margin-bottom: 7px;
+}
+.settings-shell[data-stacked] .st-lg:not(.compact) {
+	padding-bottom: 7px;
+}

@@ -537,7 +537,7 @@
 		width: 26px;
 		height: 16px;
 		border-radius: 999px;
-		background: var(--switch-off);
+		background: var(--switch-off); box-shadow: inset 0 0 0 1px var(--switch-off-edge);
 		transition: background 150ms ease;
 	}
 	.opt-switch::after {
@@ -553,7 +553,7 @@
 		transition: transform 150ms ease;
 	}
 	.opt-switch.on {
-		background: var(--switch-on);
+		background: var(--switch-on); box-shadow: none;
 	}
 	.opt-switch.on::after {
 		transform: translateX(10px);
