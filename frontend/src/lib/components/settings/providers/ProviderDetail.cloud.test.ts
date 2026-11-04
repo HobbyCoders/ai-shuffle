@@ -127,14 +127,14 @@ it('picking Cloud opens the setup with the warning instead of switching the mode
 	expect(screen.getByRole('button', { name: 'Save and use for Claude' })).toHaveProperty('disabled', true);
 });
 
-it('the Cloud pick in the provider list header opens the same setup and never sends the acknowledgement', async () => {
+it("the Cloud pick on Claude's account row opens the same setup and never sends the acknowledgement", async () => {
 	await show();
-	const header = screen.getByRole('combobox', { name: 'Claude runs on' }) as HTMLSelectElement;
-	await fireEvent.change(header, { target: { value: 'cloud' } });
+	await fireEvent.click(screen.getByRole('button', { name: 'Claude runs on: Subscription' }));
+	await fireEvent.click(screen.getByRole('menuitemradio', { name: 'Cloud' }));
 	await flush();
 	expect(worker.sent('PUT', '/settings/claude-auth')).toHaveLength(0);
 	expect(worker.sent('PUT', '/settings/claude-auth/cloud')).toHaveLength(0);
-	expect(header.value).toBe('subscription');
+	expect(screen.getByRole('button', { name: 'Claude runs on: Subscription' })).toBeTruthy();
 	expect(screen.getByText(WARNING)).toBeTruthy();
 	expect(screen.getByRole('button', { name: 'Save and use for Claude' })).toHaveProperty('disabled', true);
 });

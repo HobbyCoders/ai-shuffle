@@ -294,6 +294,8 @@
 		--action: var(--foreground);
 		--action-foreground: var(--background);
 		--action-hover: color-mix(in oklab, var(--foreground) 86%, var(--background));
+		/* The off track must read on a white card. */
+		--switch-off: color-mix(in oklch, var(--foreground) 32%, transparent);
 
 		/* Secondary/Muted */
 		--secondary: oklch(0.955 0.003 258);

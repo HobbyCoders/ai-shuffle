@@ -1,7 +1,7 @@
 <script lang="ts">
 	/**
-	 * The Providers list: one card of connected credentials, grouped under a
-	 * quiet provider label, then one card of the providers with nothing connected.
+	 * The Providers list: each connected provider is a quiet label above its own
+	 * card of credentials, then one card of the providers with nothing connected.
 	 */
 	import ListGroupLabel from '../rows/ListGroupLabel.svelte';
 	import CredentialRow from './CredentialRow.svelte';
@@ -20,16 +20,16 @@
 </script>
 
 {#if groups.connected.length}
-	<div class="pg st-card">
-		{#each groups.connected as provider (provider.id)}
-			<div class="pv" role="group" aria-label={provider.name}>
-				<ProviderGroupHeader {provider} />
+	{#each groups.connected as provider (provider.id)}
+		<div class="pv" role="group" aria-label={provider.name}>
+			<ProviderGroupHeader {provider} />
+			<div class="pg st-card">
 				{#each provider.credentials as credential (credential.item)}
 					<CredentialRow {credential} {provider} />
 				{/each}
 			</div>
-		{/each}
-	</div>
+		</div>
+	{/each}
 {/if}
 
 {#if groups.notConnected.length}
@@ -48,11 +48,12 @@
 <style>
 	.pg {
 		position: relative;
-		margin-bottom: 12px;
+	}
+	.pv + .pv {
+		margin-top: 20px;
 	}
 	/* Hairline between every row; the card's own edge ends the list. */
-	.pg > :global(* + *),
-	.pv > :global(* + *) {
+	.pg > :global(* + *) {
 		border-top: 1px solid var(--st-border);
 	}
 </style>

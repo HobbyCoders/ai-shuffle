@@ -285,6 +285,7 @@
 		{topStatus}
 		{banner}
 		facts={factList}
+		factsLine
 		{tabs}
 		{tab}
 		onTabChange={(t) => onTab(t as AgentTab)}
@@ -367,6 +368,11 @@
 	}
 	.agd :global(.st-dwrap) {
 		max-width: 740px;
+		margin-inline: auto;
+	}
+	/* The facts line replaces the ruled strip: tabs need no extra rule above. */
+	.agd :global(.st-facts.line) {
+		margin-top: 12px;
 	}
 	.savetick {
 		margin-left: auto;
@@ -457,16 +463,6 @@
 			padding: 0;
 			justify-content: center;
 			border-color: transparent;
-		}
-		.agd :global(.st-facts) {
-			grid-template-columns: repeat(2, minmax(0, 1fr));
-		}
-		.agd :global(.st-fact:nth-child(odd)) {
-			border-left: 0;
-			padding-left: 0;
-		}
-		.agd :global(.st-fact:nth-child(n + 3)) {
-			border-top: 1px solid var(--st-border);
 		}
 		.agd :global(.st-row:has(> .st-rt)) {
 			display: flex;

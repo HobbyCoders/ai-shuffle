@@ -440,7 +440,7 @@
 	}
 
 	function modelFact(models: Record<string, string>): string {
-		if (isPinned(models)) return subagentDefault ? `Pinned · ${providerNames(models)}` : providerNames(models);
+		if (isPinned(models)) return providerNames(models);
 		if (subagentDefault) {
 			return subagentDefault.model ? `Default · ${modelLabel(subagentDefault.model)}` : 'Default · not set';
 		}
@@ -1154,10 +1154,6 @@
 	{/if}
 {/snippet}
 
-{#snippet starterToolbar()}
-	{@render installTeamButton(true)}
-{/snippet}
-
 <div
 	class="settings-shell agents-shell"
 	bind:this={root}
@@ -1174,7 +1170,6 @@
 		bind:filter={query}
 		onBack={null}
 		listLabel="Agent list"
-		toolbar={offerStarterTeam && !loading ? starterToolbar : undefined}
 		filters={hasBuiltins || folders.length > 0 ? listFilters : undefined}
 	>
 		{#snippet list()}
@@ -1202,6 +1197,9 @@
 					folderFilter = '';
 				}}
 			/>
+			{#if offerStarterTeam && !loading}
+				<div class="starter-foot">{@render installTeamButton(true)}</div>
+			{/if}
 		{/snippet}
 		{#snippet detail()}
 			{#if viewMode === 'form'}
@@ -1308,6 +1306,9 @@
 	}
 	.agents-shell :global(.st-coll) {
 		flex: 1;
+	}
+	.starter-foot {
+		padding: 12px 8px 4px;
 	}
 	.folder-filter {
 		display: inline-flex;

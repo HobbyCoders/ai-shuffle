@@ -43,10 +43,13 @@
 
 <style>
 	.st-grp {
-		margin-bottom: 32px;
+		margin-bottom: 40px;
 	}
 	.st-grp.detail {
-		margin: 22px 0 0;
+		margin: 40px 0 0;
+	}
+	.st-grp.detail:first-child {
+		margin-top: 24px;
 	}
 	.st-gt {
 		display: flex;
@@ -56,12 +59,11 @@
 		font-weight: 600;
 		letter-spacing: -0.005em;
 		color: var(--st-fg);
-		margin: 0 0 10px;
+		margin: 0 0 20px;
 	}
 	.st-grp.detail .st-gt {
 		min-height: 26px;
 		align-items: center;
-		font-size: 14px;
 	}
 	.n {
 		font-weight: 400;

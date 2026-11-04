@@ -115,7 +115,7 @@ describe('the list', () => {
 		await flush();
 		const claude = group('Claude');
 		expect(within(claude).getByRole('status').textContent).toBe('Checking…');
-		expect(screen.queryByRole('combobox', { name: 'Claude runs on' })).toBeNull();
+		expect(screen.queryByRole('button', { name: /^Claude runs on/ })).toBeNull();
 		expect(screen.getAllByText('Claude')).toHaveLength(1);
 		release();
 		await flush();
@@ -228,23 +228,22 @@ describe('fal.ai', () => {
 });
 
 describe('Claude', () => {
-	it('turns Claude off from the header', async () => {
+	it("turns Claude off from Claude's account row", async () => {
 		await show();
-		const modes = within(group('Claude')).getByRole('combobox', { name: 'Claude runs on' }) as HTMLSelectElement;
-		expect(modes.value).toBe('subscription');
-		await fireEvent.change(modes, { target: { value: 'off' } });
+		await fireEvent.click(within(group('Claude')).getByRole('button', { name: 'Claude runs on: Subscription' }));
+		await fireEvent.click(screen.getByRole('menuitemradio', { name: 'Off' }));
 		await waitFor(() => expect(worker.sent('PUT', '/settings/claude-auth')).toHaveLength(1));
 		expect(worker.sent('PUT', '/settings/claude-auth')[0].body).toEqual({
 			mode: 'off'
 		});
-		await waitFor(() => expect(modes.value).toBe('off'));
+		await waitFor(() => within(group('Claude')).getByRole('button', { name: 'Claude runs on: Off' }));
 		expect(credentialNames('Claude')).toEqual(['Claude Max subscription, Off', 'Anthropic API key, Off']);
 	});
 
 	it('does not save when the current mode is picked again', async () => {
 		await show();
-		const modes = within(group('Claude')).getByRole('combobox', { name: 'Claude runs on' });
-		await fireEvent.change(modes, { target: { value: 'subscription' } });
+		await fireEvent.click(within(group('Claude')).getByRole('button', { name: 'Claude runs on: Subscription' }));
+		await fireEvent.click(screen.getByRole('menuitemradio', { name: 'Subscription' }));
 		await flush();
 		expect(worker.sent('PUT', '/settings/claude-auth')).toHaveLength(0);
 	});
@@ -309,7 +308,7 @@ describe('read-only', () => {
 	it('disables the switches, the modes, "+" and Add provider', async () => {
 		await show({ readOnly: true });
 		for (const sw of screen.getAllByRole('switch')) expect((sw as HTMLButtonElement).disabled).toBe(true);
-		expect((within(group('Claude')).getByRole('combobox', { name: 'Claude runs on' }) as HTMLSelectElement).disabled).toBe(true);
+		expect((within(group('Claude')).getByRole('button', { name: /^Claude runs on/ }) as HTMLButtonElement).disabled).toBe(true);
 		expect(
 			(
 				screen.getByRole('button', {

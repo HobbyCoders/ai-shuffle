@@ -242,7 +242,7 @@
 	button {
 		flex: none;
 		padding: 9px 0 10px;
-		font-size: 13.5px;
+		font-size: 13px;
 		color: var(--st-mfg);
 		border: 0;
 		background: none;
@@ -255,13 +255,11 @@
 	button[aria-selected='true'] {
 		color: var(--st-fg);
 		border-bottom-color: var(--st-fg);
-		font-weight: 500;
 	}
 	button:focus-visible {
 		outline-offset: -2px;
 	}
 	.n {
-		font-size: 11.5px;
 		color: var(--st-subtle);
 		margin-left: 5px;
 		font-variant-numeric: tabular-nums;

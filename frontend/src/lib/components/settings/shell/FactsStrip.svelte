@@ -19,9 +19,11 @@
 
 	interface Props {
 		facts: Fact[];
+		/** One quiet line under the name, instead of a ruled strip of cells. */
+		line?: boolean;
 	}
 
-	let { facts }: Props = $props();
+	let { facts, line = false }: Props = $props();
 	const shown = $derived(facts.filter((f) => f.value !== null && f.value !== undefined && f.value !== '').slice(0, 4));
 
 	$effect(() => {
@@ -30,7 +32,7 @@
 </script>
 
 {#if shown.length}
-	<dl class="st-facts" style:--n={shown.length}>
+	<dl class="st-facts" class:line style:--n={shown.length}>
 		{#each shown as fact (fact.label)}
 			{#if fact.onclick}
 				<div class="st-fact link">
@@ -57,6 +59,31 @@
 		border-top: 1px solid var(--st-border);
 		border-bottom: 1px solid var(--st-border);
 		margin: 0;
+	}
+	.st-facts.line {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 4px 20px;
+		border: 0;
+	}
+	.st-facts.line .st-fact {
+		display: flex;
+		align-items: baseline;
+		gap: 6px;
+		flex: none;
+		padding: 0;
+		border: 0;
+	}
+	.st-facts.line dt {
+		font-size: 13px;
+	}
+	.st-facts.line dd {
+		margin: 0;
+		font-size: 13px;
+		font-weight: 400;
+	}
+	.st-facts.line .go {
+		display: none;
 	}
 	.st-fact {
 		position: relative;

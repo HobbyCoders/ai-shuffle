@@ -133,7 +133,6 @@
 		box-shadow: 0 0 0 3px var(--st-primary-soft);
 	}
 	.st-sel:disabled {
-		background-color: var(--st-muted);
 		opacity: 0.55;
 	}
 </style>

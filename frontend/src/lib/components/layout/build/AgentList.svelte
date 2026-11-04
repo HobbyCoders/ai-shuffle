@@ -98,7 +98,7 @@
 {:else}
 	{#if showYours}
 		{#if yoursCount}
-			<ListGroupLabel label="Yours"><span class="c">{yoursCount}</span></ListGroupLabel>
+			<ListGroupLabel compact label="Yours"><span class="c">{yoursCount}</span></ListGroupLabel>
 			{#if draft}
 				<ListItem
 					id="__draft"
@@ -113,7 +113,7 @@
 			{/if}
 			{#each sections.yours as p (p.id)}{@render row(p)}{/each}
 		{:else if noneOfYours && !narrowed}
-			<ListGroupLabel label="Yours"><span class="c">0</span></ListGroupLabel>
+			<ListGroupLabel compact label="Yours"><span class="c">0</span></ListGroupLabel>
 			<div class="l-empty">
 				<span class="avs" aria-hidden="true">
 					<AgentAvatar avatar="fox" size={30} color="warning" />
@@ -128,7 +128,7 @@
 	{/if}
 
 	{#if sections.builtin.length}
-		<ListGroupLabel label="Built-in"><span class="c">{sections.builtin.length}</span></ListGroupLabel>
+		<ListGroupLabel compact label="Built-in"><span class="c">{sections.builtin.length}</span></ListGroupLabel>
 		{#each sections.builtin as p (p.id)}{@render row(p)}{/each}
 	{/if}
 

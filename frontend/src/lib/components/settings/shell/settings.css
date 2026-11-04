@@ -17,7 +17,7 @@
 	--st-accent: var(--accent);
 	--st-fg: var(--foreground);
 	--st-mfg: var(--muted-foreground);
-	--st-subtle: color-mix(in oklch, var(--muted-foreground) 72%, var(--background));
+	--st-subtle: var(--subtle-foreground);
 	--st-primary: var(--primary);
 	--st-pfg: var(--primary-foreground);
 	--st-action: var(--action);
@@ -98,6 +98,8 @@
 .settings-shell .st-mono {
 	font-family: var(--st-mono);
 	font-size: 12px;
+	/* Otherwise the mono font draws "http://" as "http: //". */
+	font-variant-ligatures: none;
 }
 
 /* Lucide icons inside Settings */
@@ -468,14 +470,14 @@
 	grid-column: 1 / -1;
 	justify-content: flex-start;
 }
-.settings-shell[data-stacked] .st-facts {
+.settings-shell[data-stacked] .st-facts:not(.line) {
 	grid-template-columns: repeat(2, minmax(0, 1fr));
 }
-.settings-shell[data-stacked] .st-fact:nth-child(odd) {
+.settings-shell[data-stacked] .st-facts:not(.line) .st-fact:nth-child(odd) {
 	border-left: 0;
 	padding-left: 0;
 }
-.settings-shell[data-stacked] .st-fact:nth-child(n + 3) {
+.settings-shell[data-stacked] .st-facts:not(.line) .st-fact:nth-child(n + 3) {
 	border-top: 1px solid var(--st-border);
 }
 .settings-shell[data-stacked] .st-meter {
@@ -528,14 +530,14 @@
 	.settings-shell:not([data-stacked]) .st-dpane .st-row .st-txt {
 		flex: 1 1 160px;
 	}
-	.settings-shell:not([data-stacked]) .st-dpane .st-facts {
+	.settings-shell:not([data-stacked]) .st-dpane .st-facts:not(.line) {
 		grid-template-columns: repeat(2, minmax(0, 1fr));
 	}
-	.settings-shell:not([data-stacked]) .st-dpane .st-fact:nth-child(odd) {
+	.settings-shell:not([data-stacked]) .st-dpane .st-facts:not(.line) .st-fact:nth-child(odd) {
 		border-left: 0;
 		padding-left: 0;
 	}
-	.settings-shell:not([data-stacked]) .st-dpane .st-fact:nth-child(n + 3) {
+	.settings-shell:not([data-stacked]) .st-dpane .st-facts:not(.line) .st-fact:nth-child(n + 3) {
 		border-top: 1px solid var(--st-border);
 	}
 }
