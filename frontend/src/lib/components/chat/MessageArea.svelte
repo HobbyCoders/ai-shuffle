@@ -1424,10 +1424,18 @@
 	 * the way to them. Without this any later height change would follow them down.
 	 */
 	async function stayWhereNotSentRowsLeftTheReader() {
+		const sessionId = $activeSession.sessionId;
+		const version = windowShiftVersion;
+		// Release before yielding: boundary/height callbacks for the same render
+		// must not reveal taller Not-sent rows while this transaction measures them.
+		const pausedFollowing = !$activeSession.error && shouldAutoScroll && !pendingScrollToBottom;
+		if (pausedFollowing) shouldAutoScroll = false;
 		cancelCurrentTurnAnchor(true);
 		await tick();
+		if ($activeSession.sessionId !== sessionId || version !== windowShiftVersion) return;
 		refreshLatestTurnTailReserve();
 		await tick();
+		if ($activeSession.sessionId !== sessionId || version !== windowShiftVersion) return;
 		// An already-visible error is the followed reading surface, after the
 		// queued rows. Keep that banner in place as Stop returns their words;
 		// ordinary Stop still preserves the transcript exactly as in #1066.
@@ -1438,11 +1446,9 @@
 			return;
 		}
 		const metrics = readScrollMetrics();
-		if (!metrics || !shouldAutoScroll || pendingScrollToBottom) return;
-		if (metrics.scrollHeight - metrics.clientHeight - metrics.scrollTop > 1) {
-			shouldAutoScroll = false;
-			scheduleReadingAnchorCapture();
-		}
+		if (!metrics || pendingScrollToBottom) return;
+		if (pausedFollowing) shouldAutoScroll = metrics.scrollHeight - metrics.clientHeight - metrics.scrollTop <= 1;
+		if (!shouldAutoScroll) scheduleReadingAnchorCapture();
 		updateJumpToLatestVisibility(metrics);
 		updateCurrentTurnIndex();
 	}
