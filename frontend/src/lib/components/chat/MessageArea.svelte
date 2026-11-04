@@ -51,7 +51,7 @@
 	import UserMessage from './UserMessage.svelte';
 	import { agentDelivery, agentSender, agentSenderNames } from '$lib/utils/agent-delivery';
 	import { createAgentMessageProjection } from '$lib/utils/agent-message-projection';
-	import { createNotSentHold, createNotSentRowsArrival, createStopBubbleHold, restingOnNotSentRows, stopPressedOn, withHeldBubbles } from '$lib/utils/not-sent-hold';
+	import { createNotSentHold, createNotSentRowsArrival, createStopBubbleHold, restingOnNotSentRows, stopPressedOn, stopRecoveryAppliesToTurn, withHeldBubbles } from '$lib/utils/not-sent-hold';
 	import AgentMessage from './AgentMessage.svelte';
 	import AssistantMessage from './AssistantMessage.svelte';
 	import TurnActivity from './TurnActivity.svelte';
@@ -401,15 +401,21 @@
 	// Stop's confirmation timeout ends the wait without a turn id change, for good:
 	// a later event raises isStreaming again, and the words must not go back to a
 	// bubble with no restore controls.
+	const stopRecovery = $derived(
+		stopRecoveryAppliesToTurn(
+			$activeSession.stopTimedOutTurnId,
+			$activeSession.liveTurnId
+		)
+	);
 	const holdingTurnId = $derived(
-		$activeSession.isStreaming && $activeSession.liveTurnId !== $activeSession.stopTimedOutTurnId
+		$activeSession.isStreaming && !stopRecovery
 			? $activeSession.liveTurnId
 			: null
 	);
 	const notSentHold = $derived(notSentRows(
 		$activeSession.messages,
 		holdingTurnId,
-		$activeSession.stopTimedOutTurnId ? [] : $activeSession.queuedMessages ?? []
+		stopRecovery ? [] : $activeSession.queuedMessages ?? []
 	));
 
 	const assistantQuestion = $derived(currentAssistantQuestion($activeSession.pendingPermissions ?? []));

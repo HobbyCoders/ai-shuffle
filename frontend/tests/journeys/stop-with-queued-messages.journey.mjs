@@ -16,6 +16,7 @@ import {
 	openNewChat,
 	pickAccess,
 	scriptTag,
+	sendButton,
 	stopButton,
 	typeAndSend,
 	uniq,
@@ -57,6 +58,8 @@ async function stopEverything(page) {
 async function canWithholdTurnEnd(page) {
 	await page.addInitScript(() => {
 		const withheld = () => sessionStorage.getItem('journey-withhold-turn-end') === '1';
+		const held = [];
+		window.__releaseHeldTurnEnds = () => held.splice(0).forEach((release) => release());
 		const feedTurnEnd = /"(?:type|event_type)"\s*:\s*"turn\.(?:completed|aborted)"/;
 		const socketTurnEnd = /"(?:type|event_type)"\s*:\s*"(?:stopped|interrupted|done|turn\.completed|turn\.aborted)"/;
 		const realFetch = window.fetch;
@@ -72,7 +75,9 @@ async function canWithholdTurnEnd(page) {
 					const frames = tail.split(/\r?\n\r?\n/);
 					tail = frames.pop();
 					for (const frame of frames) {
-						if (!(withheld() && feedTurnEnd.test(frame))) out.enqueue(encoder.encode(`${frame}\n\n`));
+						const release = () => out.enqueue(encoder.encode(`${frame}\n\n`));
+						if (withheld() && feedTurnEnd.test(frame)) held.push(release);
+						else release();
 					}
 				}
 			}));
@@ -84,7 +89,9 @@ async function canWithholdTurnEnd(page) {
 			get: onmessage.get,
 			set(handler) {
 				onmessage.set.call(this, (event) => {
-					if (!(withheld() && typeof event.data === 'string' && socketTurnEnd.test(event.data))) handler.call(this, event);
+					const release = () => handler.call(this, event);
+					if (withheld() && typeof event.data === 'string' && socketTurnEnd.test(event.data)) held.push(release);
+					else release();
 				});
 			}
 		});
@@ -103,10 +110,126 @@ async function reloadThePage(page, mark, name) {
 
 const STOPPED_BUBBLE = '.pending-messages [data-queue-status="stopped"]';
 
+/** A timeout must not change the next Stop, here or after navigating to another chat. */
+function stopAfterTimeout({ switchChat = false } = {}) {
+	return {
+		async setup(ctx) {
+			await canWithholdTurnEnd(ctx.page);
+			await openStopChat(ctx);
+			await ctx.page.waitForTimeout(800);
+		},
+		async act({ page, mark, variant, log }) {
+			const timedOut = await queueDuringASlowTurn(page, mark, variant, 2);
+			const notSent = (text) => page.locator('[data-not-sent="true"]').filter({ hasText: text });
+			await withholdTurnEnd(page, true);
+			await mark('first Stop times out');
+			await stopGenerating(page).click();
+			await waitChat(page, { streaming: 'false' }, { timeout: STOP_TIMEOUT_MS + 3000 });
+			for (const text of timedOut) await notSent(text).getByRole('button', { name: 'Restore to composer' }).waitFor({ timeout: 5000 });
+			await withholdTurnEnd(page, false);
+			// Keep the feed's terminal boundary before starting the next turn; permanently
+			// dropping it would test a different, incomplete transcript instead.
+			await page.evaluate(() => window.__releaseHeldTurnEnds());
+
+			if (switchChat) {
+				await mark('switch chats after the timeout');
+				await openChatFromTheList(page, SEEDED.no_project);
+				await waitChatOpen(page, { messagesAtLeast: 2, hold: 500 });
+			}
+
+			// The previous reply can leave the virtual window as the new one grows;
+			// count projected messages, not matching text nodes, to identify this reply.
+			const before = Number((await chatState(page)).messages);
+			await mark('send the later turn');
+			await typeAndSend(page, `stream tok-${uniq()} ${scriptTag(variant, 'slow', { tps: 2 })}`);
+			await waitChat(page, { messagesAtLeast: before + 2, streaming: 'true' });
+			const texts = [`tok-${uniq()}`, `tok-${uniq()}`];
+			await mark('queue for the later Stop');
+			for (const text of texts) {
+				await typeAndSend(page, `queued ${text}`);
+				await page.locator('.pending-messages [role="article"]').filter({ hasText: text }).waitFor({ timeout: 5000 });
+			}
+			await page.waitForFunction((n) => document.querySelectorAll('.pending-messages [data-queue-confirmed="true"]').length === n, texts.length, { timeout: 30_000 });
+			const fresh = `tok-${uniq()}`;
+			await composer(page).click();
+			await composer(page).fill(`fresh ${fresh} ${scriptTag(variant, 'default')}`);
+			const collect = await watchStopFrames(page, [...texts, fresh]);
+			await mark('a later Stop, immediately followed by Send');
+			await stopGenerating(page).click();
+			await sendButton(page).click();
+			await page.getByText(`You said: “fresh ${fresh}`, { exact: false }).first().waitFor({ timeout: 60_000 });
+			await waitChat(page, { streaming: 'false' }, { timeout: 60_000 });
+			await page.waitForTimeout(500);
+			const frames = await collect();
+			const waiting = frames.filter((f) => f.messages[2].bubbles > 0);
+			log(`after ${switchChat ? 'a chat switch and ' : ''}the earlier timeout: the new message waited in ${waiting.length} of ${frames.length} frames`);
+			expect(waiting.length > 0, 'the immediate new send was shown in the queue');
+			for (const frame of waiting) {
+				frame.messages.slice(0, 2).forEach((message) => {
+					expect(message.notSent === 0, `the later Stop kept its rows as bubbles while the new message waited: ${JSON.stringify(frame)}`);
+				});
+				expect(frame.messages[2].labelledNotSent === 0, 'the new message was not part of either Stop');
+			}
+			for (const text of texts) await notSent(text).getByRole('button', { name: 'Restore to composer' }).waitFor({ timeout: 5000 });
+		}
+	};
+}
+
 await runJourney({
 	name: 'stop-with-queued-messages',
 	recorder: { selectors: [STOP_SELECTOR, 'pending=.pending-messages [role="article"]'] },
 	cases: [
+		{
+			// Neither the turn's name nor its terminal event reaches this page before
+			// the timeout. Delayed rows must arrive with restore controls, never rehold.
+			name: 'unnamed-stop-times-out-before-the-feed-names-its-turn',
+			async setup(ctx) {
+				await canWithholdTurnEnd(ctx.page);
+				await ctx.page.addInitScript(() => {
+					const original = window.fetch;
+					window.__feedHeld = new Promise((resolve) => { window.__releaseFeed = resolve; });
+					window.fetch = async (input, init) => {
+						const url = typeof input === 'string' ? input : input.url;
+						if (/\/sessions\/[^/]+\/events/.test(url)) await window.__feedHeld;
+						return original(input, init);
+					};
+				});
+				await openStopChat(ctx);
+				await ctx.page.waitForTimeout(800);
+			},
+			async act({ page, mark, variant, log }) {
+				await mark('send before the feed connects');
+				await typeAndSend(page, `stream tok-${uniq()} ${scriptTag(variant, 'slow', { tps: 2 })}`);
+				await waitChat(page, { streaming: 'true' });
+				const texts = [`tok-${uniq()}`, `tok-${uniq()}`];
+				for (const text of texts) {
+					await typeAndSend(page, `queued ${text}`);
+					await page.locator('.pending-messages [role="article"]').filter({ hasText: text }).waitFor({ timeout: 5000 });
+				}
+				await page.waitForFunction((n) => document.querySelectorAll('.pending-messages [data-queue-confirmed="true"]').length === n, texts.length, { timeout: 30_000 });
+				await withholdTurnEnd(page, true);
+				const collect = await watchStopFrames(page, texts);
+				await mark('Stop while the turn is unnamed');
+				const pressedAt = Date.now();
+				await stopGenerating(page).click();
+				await waitChat(page, { streaming: 'false' }, { timeout: STOP_TIMEOUT_MS + 3000 });
+				expect(Date.now() - pressedAt >= 8000, 'the unnamed Stop reached timeout recovery');
+				await mark('the delayed feed supplies the start and rows, but no terminal event');
+				await page.evaluate(() => window.__releaseFeed());
+				for (const text of texts) {
+					await page.locator('[data-not-sent="true"]').filter({ hasText: text }).getByRole('button', { name: 'Restore to composer' }).waitFor({ timeout: 15_000 });
+				}
+				await page.waitForTimeout(1000);
+				const frames = await collect();
+				log(`unnamed timeout: ${frames.length} frames; final ${JSON.stringify(frames.at(-1).messages)}`);
+				expectEachOnceInEveryFrame(frames);
+				expect((await page.locator(STOPPED_BUBBLE).count()) === 0, 'late turn naming did not put the rows back in bubbles');
+				await page.locator('[data-not-sent="true"]').filter({ hasText: texts[0] }).getByRole('button', { name: 'Restore to composer' }).click();
+				await page.waitForFunction((text) => document.querySelector('[role="textbox"][aria-label="Message"]')?.textContent?.includes(text), texts[0], { timeout: 5000 });
+			}
+		},
+		{ name: 'timeout-does-not-change-a-later-stop-and-send', ...stopAfterTimeout() },
+		{ name: 'timeout-does-not-follow-a-chat-switch-into-stop-and-send', ...stopAfterTimeout({ switchChat: true }) },
 		{
 			// Stop reached the server and the rows came back, but this page never
 			// hears the turn end. Stop's own timeout must not leave words in a
