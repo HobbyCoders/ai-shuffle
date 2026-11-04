@@ -168,7 +168,7 @@ async def test_chat_catalog_and_details_match_runtime_scope_exclusion(
     })
     session = {"id": "s", "profile_id": "p", "project_id": "mine", "mode": session_mode} if session_mode else None
     monkeypatch.setattr(context.database, "get_session", lambda sid: session)
-    monkeypatch.setattr("app.core.project_resolver.resolve_session_cwd", lambda row: str(child))
+    monkeypatch.setattr("app.core.project_resolver.resolve_existing_cwd", lambda row: str(child))
     monkeypatch.setattr(commands, "command_provider_kind", lambda *a: kind)
     kwargs = {"http_request": caller(), "profile_id": "p", "mode": request_mode}
     if session:
@@ -205,12 +205,25 @@ def test_chat_scope_exclusion_still_authorizes_profile(monkeypatch):
     ("chat", "preview:fixture", False), (None, "local-owner", True),
 ])
 async def test_saved_catalog_uses_current_http_caller_runtime_lane(source_tree, monkeypatch, kind, stored_mode, token, allowed):
-    from app.core.session_modes import runtime_session_mode, caller_of
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from app.core import config, project_resolver
+    from app.core.session_modes import (
+        runtime_session_mode, caller_of, runs_in_owner_chat_folder,
+        chat_uploads_dir, owner_chat_dir,
+    )
+    from app.core.provider.harness_adapter import HarnessAdapter
+    from app.core.provider.types import SessionOptions
     from app.api.chat_query import _request_query_principal
 
-    home, _, child = source_tree
+    home, project, _ = source_tree
+    monkeypatch.setitem(config._runtime_overrides, "workspace_dir", project / "workspace")
+    owner, uploads = owner_chat_dir(), chat_uploads_dir()
+    for directory, body in [(owner, "OWNER RUNTIME BODY"), (uploads, "UPLOADS CATALOG BODY")]:
+        put(directory / ".fluid/commands/lane-check.md", body + " $1")
+        put(directory / ".fluid/skills/lane-skill/SKILL.md", body)
+    put(owner / ".fluid/commands/owner-only.md", "Owner-only command")
     put(home / ".fluid/commands/direct.md", "Direct body $1")
-    put(child / ".fluid/skills/guide/SKILL.md", "Skill body")
     row = {"id": "owner-chat", "profile_id": "p", "mode": stored_mode}
     req = caller()
     req.state.auth_token = token
@@ -218,22 +231,60 @@ async def test_saved_catalog_uses_current_http_caller_runtime_lane(source_tree, 
     monkeypatch.setattr(context.database, "get_profile", lambda pid: {
         "config": {"setting_sources": ["user", "project", "local"]},
     })
-    monkeypatch.setattr("app.core.project_resolver.resolve_session_cwd", lambda row: str(child))
     monkeypatch.setattr("app.core.session_orchestration._principal", lambda sid: None)
-    # Opposite stored caller: the current HTTP send's caller must win.
+    # Opposite recorded caller: use the real resolver to expose stale cwd as
+    # well as stale scopes. Its no-caller API must still retain that default.
     monkeypatch.setattr("app.db.turns.latest_caller", lambda sid: "preview" if allowed else "authenticated")
     monkeypatch.setattr(commands, "command_provider_kind", lambda *a: kind)
-    effective = runtime_session_mode(row, caller=caller_of(_request_query_principal(req)))
+    current_caller = caller_of(_request_query_principal(req))
+    effective = runtime_session_mode(row, caller=current_caller)
     assert effective == ("code" if allowed else "chat")
+    # These are query_options' real cwd branches, not a preselected resolver result.
+    runtime_cwd = owner if runs_in_owner_chat_folder(row, caller=current_caller) else uploads
+    assert project_resolver.resolve_session_cwd(row) == str(uploads if allowed else owner)
     kwargs = {"session_id": row["id"], "http_request": req, "mode": "chat" if allowed else "code"}
     listed = await commands.list_commands(**kwargs)
-    assert {cmd.name for cmd in listed.commands} & {"direct", "guide"} == ({"direct", "guide"} if allowed else set())
+    names = {cmd.name for cmd in listed.commands}
     if allowed:
-        assert (await commands.get_command("direct", **kwargs)).content == "Direct body $1"
+        detail = await commands.get_command("lane-check", **kwargs)
+        assert detail.content == "OWNER RUNTIME BODY $1"
+        assert (await commands.get_command("lane-skill", **kwargs)).content == "OWNER RUNTIME BODY"
+        assert {"direct", "lane-check", "lane-skill", "owner-only"} <= names
     else:
+        assert not names & {"direct", "lane-check", "lane-skill", "owner-only"}
         with pytest.raises(HTTPException) as error:
-            await commands.get_command("direct", **kwargs)
+            await commands.get_command("lane-check", **kwargs)
         assert error.value.status_code == 404
+    discovery_cwd, _ = context.command_context(req, None, None, row["id"])
+    assert discovery_cwd == str(runtime_cwd)
+    # Actual adapter expansion consumes the current runtime lane's cwd/scopes.
+    adapter = HarnessAdapter()
+    adapter._engine = SimpleNamespace(submit=AsyncMock())
+    adapter._is_delegated = kind == "delegated"
+    adapter._options = SessionOptions(model="sonnet", cwd=str(runtime_cwd),
+                                      setting_sources=context.command_setting_sources(req, row, "p"))
+    monkeypatch.setattr(adapter, "reconcile_user_questions", AsyncMock())
+    monkeypatch.setattr(adapter, "_refresh_task_roster", AsyncMock())
+    monkeypatch.setattr(adapter, "_turn_context_note", lambda query="": "")
+    await adapter.send_query("/lane-check argument")
+    assert adapter._engine.submit.await_args.args[0].content == (
+        "OWNER RUNTIME BODY argument" if allowed else "/lane-check argument")
+
+
+def test_session_cwd_current_caller_is_optional_and_read_only(source_tree, monkeypatch):
+    from app.core import config, project_resolver
+    from app.core.session_modes import chat_uploads_dir, owner_chat_dir
+
+    _, project, _ = source_tree
+    workspace = project / "not-created"
+    monkeypatch.setitem(config._runtime_overrides, "workspace_dir", workspace)
+    monkeypatch.setattr("app.core.session_orchestration._principal", lambda sid: None)
+    monkeypatch.setattr("app.db.turns.latest_caller", lambda sid: "preview")
+    row = {"id": "owner-chat", "mode": "chat"}
+    assert project_resolver.resolve_session_cwd(row) == str(chat_uploads_dir())
+    assert project_resolver.resolve_session_cwd(row, caller="authenticated") == str(owner_chat_dir())
+    assert project_resolver.resolve_session_cwd(row, caller="preview") == str(chat_uploads_dir())
+    assert not workspace.exists()  # A discovery read must not create either lane.
 
 
 @pytest.mark.parametrize("kind", ["anthropic", "delegated"])

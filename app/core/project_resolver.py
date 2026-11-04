@@ -308,12 +308,13 @@ def existing_checkout_path(session_row: Dict[str, Any]) -> Optional[str]:
     return path if path and os.path.isdir(path) else None
 
 
-def resolve_session_cwd(session_row: Dict[str, Any]) -> Optional[str]:
+def resolve_session_cwd(session_row: Dict[str, Any], *, caller: Optional[str] = None) -> Optional[str]:
     """Read a session's runtime cwd, including both no-project chat lanes.
 
     Match query_options' lane priority before looking at checkout bindings.
-    The latest stamped caller decides owner versus restricted chat just as it
-    does on resume. This grants no tools and creates no folders/checkouts.
+    A supplied current caller decides owner versus restricted chat; otherwise
+    use the latest stamped caller as on resume. This grants no tools and creates
+    no folders/checkouts.
     Project sessions still use the branch-validating pure-read resolver.
     """
     from app.core.session_modes import (
@@ -323,9 +324,9 @@ def resolve_session_cwd(session_row: Dict[str, Any]) -> Optional[str]:
         runtime_session_mode,
     )
 
-    if runtime_session_mode(session_row) == "chat":
+    if runtime_session_mode(session_row, caller=caller) == "chat":
         return str(chat_uploads_dir())
-    if runs_in_owner_chat_folder(session_row):
+    if runs_in_owner_chat_folder(session_row, caller=caller):
         return str(owner_chat_dir())
     return resolve_existing_cwd(session_row)
 
