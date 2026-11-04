@@ -227,3 +227,47 @@ def test_claude_owned_collision_keeps_cli_execution(installed_plugin, owner):
     assert len(entries) == 1
     assert get_command_by_name(str(cwd), name).content == "Claude body"
     assert expand_delegated_command(str(cwd), f"/{name} arg") == f"/{name} arg"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("file_kind", ["command", "skill"])
+@pytest.mark.parametrize("name,detail_type", [("compact", "sdk_builtin"), ("resume", "interactive"), ("doctor", None)])
+async def test_fluid_files_cannot_capture_cli_reserved_names(fluid_home, monkeypatch, file_kind, name, detail_type):
+    from app.api import commands
+    from app.core.provider.harness_adapter import HarnessAdapter
+    from app.core.provider.types import SessionOptions
+    from fastapi import HTTPException
+
+    svc, cwd = fluid_home
+    path = (svc.FLUID_DIR / "commands" / f"{name}.md" if file_kind == "command"
+            else svc.FLUID_DIR / "skills" / name / "SKILL.md")
+    write(path, "Fluid reserved-name body $ARGUMENTS")
+    entries = [cmd for cmd in get_all_commands(str(cwd)) if cmd["name"] == name]
+    assert [cmd["type"] for cmd in entries] == (["sdk_builtin"] if detail_type == "sdk_builtin" else [])
+    assert get_command_by_name(str(cwd), name) is None
+    monkeypatch.setattr(commands, "command_context", lambda *a: (str(cwd), None))
+    monkeypatch.setattr(commands, "command_provider_kind", lambda *a: "delegated")
+    monkeypatch.setattr(commands, "command_setting_sources", lambda *a: ["user"])
+    if detail_type:
+        detail = await commands.get_command(name)
+        assert detail.type == detail_type and detail.content is None
+    else:
+        with pytest.raises(HTTPException) as error:
+            await commands.get_command(name)
+        assert error.value.status_code == 404
+    prompt = f"/{name} keep this argument"
+    adapter = HarnessAdapter()
+    adapter._engine = SimpleNamespace(submit=AsyncMock())
+    adapter._is_delegated = True
+    adapter._options = SessionOptions(model="sonnet", cwd=str(cwd))
+    monkeypatch.setattr(adapter, "reconcile_user_questions", AsyncMock())
+    monkeypatch.setattr(adapter, "_refresh_task_roster", AsyncMock())
+    monkeypatch.setattr(adapter, "_turn_context_note", lambda query="": "must-not-append")
+    await adapter.send_query(prompt)
+    assert adapter._engine.submit.await_args.args[0].content == prompt
+    # Only the delegated Fluid additions are reserved, not native files or
+    # Claude's existing custom-file precedence over its own built-ins.
+    assert "Fluid reserved-name body" in expand_native_command(str(cwd), prompt)
+    write(Path.home() / ".claude" / "commands" / f"{name}.md", "Claude owned")
+    assert get_command_by_name(str(cwd), name).content == "Claude owned"
+    assert expand_delegated_command(str(cwd), prompt) == prompt

@@ -240,6 +240,8 @@ def _delegated_commands(working_dir: str, setting_sources=None) -> List[SlashCom
                     if kind != "skill" or cmd.user_invocable:
                         by_name.setdefault(cmd.name, cmd)
     for cmd in _fluid_commands(working_dir, setting_sources):
+        if cmd.name in SDK_BUILTIN_COMMANDS or cmd.name in INTERACTIVE_COMMANDS:
+            continue
         cmd.expand_in_app = True
         # Claude's own commands keep their precedence and CLI execution path.
         by_name.setdefault(cmd.name, cmd)
