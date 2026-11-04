@@ -191,8 +191,8 @@ describe('ChatInput mobile collapsed surface', () => {
 	});
 
 	it('keeps the agent context row available in every lane', () => {
-		expect(chatInput).toContain('<div class="context-pill-row"><ContextPillBar /></div>');
-		expect(chatInput).not.toMatch(/\{#if composerMode !== 'chat'\}\s*<div class="context-pill-row">/);
+		expect(chatInput).toContain('<ContextPillBar />');
+		expect(chatInput).not.toMatch(/\{#if composerMode !== 'chat'\}\s*<ContextPillBar/);
 	});
 
 	it('no longer carries a send-later button to hide', () => {

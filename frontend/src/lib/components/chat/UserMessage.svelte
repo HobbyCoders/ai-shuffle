@@ -118,8 +118,8 @@
 	}
 
 	.user-time {
-		font-family: var(--font-mono);
-		font-size: 10.5px;
+		font-size: var(--fs-label);
+		font-variant-numeric: tabular-nums;
 		color: var(--subtle-foreground);
 		white-space: nowrap;
 	}

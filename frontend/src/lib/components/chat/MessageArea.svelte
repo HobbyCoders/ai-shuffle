@@ -2625,11 +2625,12 @@
 		scroll-padding-block: 24px;
 	}
 
-	/* The reading column. A fixed 768px measure keeps prose at a comfortable
-	   line length no matter how wide the window gets, and every transcript
-	   element (bubbles, work-log rows, subagent cards) aligns to it. */
+	/* The reading column, shared with the composer. A fixed measure keeps prose
+	   at a comfortable line length no matter how wide the window gets, and every
+	   transcript element (bubbles, work-log rows, subagent cards) aligns to it.
+	   The cap includes the 24px gutters, so the content is the column's width. */
 	.chat-column {
-		max-width: 768px;
+		max-width: calc(var(--column-width) + 48px);
 		margin: 0 auto;
 		padding: 26px 24px 0;
 		display: flex;
@@ -2649,7 +2650,7 @@
 	@media (min-width: 640px) and (pointer: fine) {
 		.has-turn-nav .chat-column {
 			width: calc(100% - 40px);
-			margin-left: max(40px, calc((100% - 768px) / 2));
+			margin-left: max(40px, calc((100% - var(--column-width) - 48px) / 2));
 			padding-left: 24px;
 		}
 	}

@@ -171,11 +171,6 @@ html:root[data-platform='mobile'] .chat-island {
 	border-color 180ms ease;
 }
 
-/* Profile, branch and worktree setup live in the mobile controls sheet. */
-html:root[data-platform='mobile'] .context-pill-row {
-	display: none;
-}
-
 /* A 56px row: 8px of padding round a 40px band. The field is 40px tall too
    (a 24px line plus 8px above and below), so the + circle, the first text
    line and the right-hand circles share one centre, 8px from the card's top
@@ -330,10 +325,6 @@ html:root[data-platform='mobile'] .chat-input-wrapper:not(.mobile-collapsed) .te
 html:root[data-platform='mobile'] .mobile-collapsed .chat-island {
 	min-height: 50px;
 	border-radius: 14px;
-}
-
-html:root[data-platform='mobile'] .mobile-collapsed .context-pill-row {
-	display: none;
 }
 
 /* Collapsed: the controls row goes away entirely. The send / stop

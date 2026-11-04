@@ -482,6 +482,9 @@
 	}
 </script>
 
+<!-- A failure in a summary is the one part of it worth colouring. -->
+{#snippet summaryText(text: string)}{#each text.split(/(\b\d+ failed\b)/) as part, index}{#if index % 2}<span class="fold-failed">{part}</span>{:else}{part}{/if}{/each}{/snippet}
+
 <section
 	bind:this={sectionEl}
 	class="worklog"
@@ -508,7 +511,7 @@
 					</svg>
 					<span class="fold-label">{collapsedLabel}</span>
 					{#if summary}
-						<span class="fold-summary" title={summary}>· {#if compactSummary}<span class="fold-prose">{summary}</span><span class="fold-compact">{compactSummary}</span>{:else}{summary}{/if}</span>
+						<span class="fold-summary" title={summary}>· {#if compactSummary}<span class="fold-prose">{@render summaryText(summary)}</span><span class="fold-compact">{@render summaryText(compactSummary)}</span>{:else}{@render summaryText(summary)}{/if}</span>
 					{/if}
 				</button>
 			{:else}
@@ -524,7 +527,7 @@
 					</svg>
 					<span class="fold-label">{collapsedLabel}</span>
 					{#if summary}
-						<span class="fold-summary" title={summary}>· {#if compactSummary}<span class="fold-prose">{summary}</span><span class="fold-compact">{compactSummary}</span>{:else}{summary}{/if}</span>
+						<span class="fold-summary" title={summary}>· {#if compactSummary}<span class="fold-prose">{@render summaryText(summary)}</span><span class="fold-compact">{@render summaryText(compactSummary)}</span>{:else}{@render summaryText(summary)}{/if}</span>
 					{/if}
 				</button>
 			{/if}
@@ -635,7 +638,7 @@
 			</svg>
 			<span class="fold-label">{collapsedLabel}</span>
 			{#if mode === 'settled' && summary}
-				<span class="fold-summary" title={summary}>· {summary}</span>
+				<span class="fold-summary" title={summary}>· {@render summaryText(summary)}</span>
 			{/if}
 		</button>
 		<BoundedTranscriptRows items={[...folded, ...tail]} keyOf={rowKey} rowId={entry => entry.message.id} {pagingEnabled}>
@@ -670,7 +673,7 @@
 				{/if}
 			</span>
 			{#if mode === 'settled' && summary}
-				<span class="fold-summary" title={summary}>· {#if compactSummary}<span class="fold-prose">{summary}</span><span class="fold-compact">{compactSummary}</span>{:else}{summary}{/if}</span>
+				<span class="fold-summary" title={summary}>· {#if compactSummary}<span class="fold-prose">{@render summaryText(summary)}</span><span class="fold-compact">{@render summaryText(compactSummary)}</span>{:else}{@render summaryText(summary)}{/if}</span>
 			{/if}
 		</button>
 		<BoundedTranscriptRows items={tail} keyOf={rowKey} rowId={entry => entry.message.id} startAtTail={mode === 'live'} {pagingEnabled}>
@@ -749,12 +752,16 @@
 		font-variant-numeric: tabular-nums;
 	}
 
+	.fold-failed {
+		color: var(--destructive);
+	}
+
 	.fold-summary {
 		min-width: 0;
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
-		font-size: 11.5px;
+		font-size: var(--fs-label);
 		color: var(--subtle-foreground);
 	}
 

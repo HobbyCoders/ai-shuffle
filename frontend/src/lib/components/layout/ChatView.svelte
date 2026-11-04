@@ -889,13 +889,13 @@
 	}
 
 	/* Empty-state layout for the persistent input slot: centered and capped at the
-	   same 768px content width as the hero above it. Tailwind preflight makes
+	   same content width as the hero above it. Tailwind preflight makes
 	   box-sizing:border-box global, so the cap includes the gutters — ChatInput
 	   supplies its own dock padding inside, so none is added here. */
 	.input-slot.empty-input-layout {
 		align-self: center;
 		width: 100%;
-		max-width: calc(768px + 3rem);
+		max-width: calc(var(--column-width) + 3rem);
 		margin-top: 0.75rem;
 	}
 
@@ -1075,19 +1075,8 @@
 	.chat-view :global(.prose pre) {
 		background: var(--muted);
 		border: 1px solid var(--border);
-		box-shadow: var(--shadow-s);
-		border-radius: var(--radius, 0.75rem);
+		border-radius: var(--radius-card);
 		margin: 12px 0;
 		padding: 12px 16px;
-	}
-
-	.chat-view :global(.prose code:not(pre code)) {
-		background: var(--muted);
-		color: var(--foreground);
-		border: 1px solid var(--border);
-		padding: 2px 6px;
-		border-radius: calc(var(--radius, 0.75rem) * 0.33);
-		font-size: 0.875em;
-		font-weight: 500;
 	}
 </style>

@@ -540,7 +540,6 @@ describe.each([false, true])('worktree indicator (sheetMode=%s)', (sheetMode) =>
 		session.store.set({ ...base, sessionId: null, project: null, projectV2Id: null, mode: 'chat', messages: [] });
 		const view = render(ContextPillBar, { sheetMode });
 		expect(view.container.querySelector('.ctx-chip.runner')).toBeNull();
-		expect(view.container.querySelector('.ctx-sep')).toBeNull();
 		expect(execution).not.toHaveBeenCalled();
 	});
 

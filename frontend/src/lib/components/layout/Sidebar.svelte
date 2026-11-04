@@ -1199,8 +1199,8 @@
 		cursor: pointer;
 	}
 	.act:hover { background: var(--row-selected); }
-	.act.primary { background: var(--primary); color: var(--primary-foreground); }
-	.act.primary:hover { filter: brightness(1.08); }
+	.act.primary { background: var(--action); color: var(--action-foreground); }
+	.act.primary:hover { background: var(--action-hover); }
 
 	/* Sheet contents (SidebarSheet supplies the surface). */
 	h4 { margin: 0 4px 8px; font-size: 13px; font-weight: 600; color: var(--muted-foreground); }

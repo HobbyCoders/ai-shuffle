@@ -33,11 +33,11 @@ describe('parseFenceMeta', () => {
 });
 
 describe('renderCodeBlock', () => {
-	it('renders the chrome with a filename, lang chip and copy button', () => {
+	it('renders the chrome with a filename, language and copy button', () => {
 		const html = renderCodeBlock('const a = 1;', 'ts title="a.ts"', false);
 		expect(html).toContain('class="codeblock"');
 		expect(html).toContain('>a.ts<');
-		expect(html).toContain('>TS<');
+		expect(html).toContain('>ts<');
 		expect(html).toContain('code-copy-btn');
 	});
 
@@ -67,7 +67,7 @@ describe('renderCodeBlock', () => {
 
 	it('falls back to plain text for an unknown language', () => {
 		const html = renderCodeBlock('whatever', 'brainfuck', true);
-		expect(html).toContain('>BRAINFUCK<');
+		expect(html).toContain('>brainfuck<');
 		expect(html).not.toContain('--shiki-light');
 	});
 });

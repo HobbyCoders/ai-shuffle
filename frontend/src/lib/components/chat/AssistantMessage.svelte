@@ -857,7 +857,8 @@
 		position: absolute;
 		left: 14px;
 		bottom: 12px;
-		font: 11px/1 var(--font-mono);
+		font-size: var(--fs-caption);
+		line-height: 1;
 		color: var(--subtle-foreground);
 	}
 	@keyframes artifact-sweep { to { transform: translateX(100%); } }
@@ -921,8 +922,8 @@
 		display: flex;
 		align-items: center;
 		gap: 12px;
-		font-size: 11px;
-		font-family: var(--font-mono);
+		font-size: var(--fs-label);
+		font-variant-numeric: tabular-nums;
 		color: var(--subtle-foreground);
 	}
 
@@ -947,8 +948,8 @@
 	}
 
 	.assistant-time {
-		font-family: var(--font-mono);
-		font-size: 10.5px;
+		font-size: var(--fs-label);
+		font-variant-numeric: tabular-nums;
 		color: var(--subtle-foreground);
 		white-space: nowrap;
 	}
@@ -1043,7 +1044,7 @@
 	/* ── Code block chrome (markup produced by $lib/utils/chat-markdown) ── */
 	.abody :global(.codeblock) {
 		margin: 0 0 14px;
-		border-radius: 10px;
+		border-radius: var(--radius-card);
 		border: 1px solid var(--border);
 		background: var(--code-bg);
 		overflow: hidden;
@@ -1053,19 +1054,20 @@
 		display: flex;
 		align-items: center;
 		gap: 7px;
-		padding: 6px 8px 6px 11px;
-		border-bottom: 1px solid var(--border);
-		background: color-mix(in oklch, var(--muted) 45%, transparent);
+		padding: 6px 6px 0 14px;
 	}
 
-	.abody :global(.codehead .cb-icon) {
-		color: var(--subtle-foreground);
-		flex: none;
+	/* No filename: the language leads the row. */
+	.abody :global(.codehead .fname:empty) {
+		display: none;
+	}
+	.abody :global(.codehead .fname:empty + .lang) {
+		margin-right: auto;
 	}
 
 	.abody :global(.codehead .fname) {
 		font-family: var(--font-mono);
-		font-size: 11.5px;
+		font-size: var(--fs-label);
 		color: var(--muted-foreground);
 		margin-right: auto;
 		min-width: 0;
@@ -1075,13 +1077,8 @@
 	}
 
 	.abody :global(.codehead .lang) {
-		font-size: 10px;
-		letter-spacing: 0.06em;
-		text-transform: uppercase;
-		color: var(--subtle-foreground);
-		padding: 2px 6px;
-		border-radius: 5px;
-		border: 1px solid var(--border);
+		font-size: var(--fs-label);
+		color: var(--muted-foreground);
 		flex: none;
 	}
 
@@ -1269,13 +1266,14 @@
 
 	.abody :global(.codeblock .cb-pre) {
 		margin: 0;
-		padding: 11px 13px 13px;
+		padding: 4px 14px 14px;
 		overflow-x: auto;
 		background: transparent;
+		border: 0;
 		border-radius: 0;
 		font-family: var(--font-mono);
-		font-size: 12.25px;
-		line-height: 1.72;
+		font-size: var(--fs-small);
+		line-height: 1.6;
 		color: var(--muted-foreground);
 	}
 

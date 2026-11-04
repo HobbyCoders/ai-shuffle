@@ -258,6 +258,26 @@
 
 	$effect(() => () => endScrub(false));
 
+	// The rail rests invisible and shows while the transcript beside it scrolls.
+	let scrolling = $state(false);
+	$effect(() => {
+		const host = nav?.parentElement;
+		if (!host) return;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const onScroll = (event: Event) => {
+			if (!(event.target instanceof Node) || nav?.contains(event.target) || !host.contains(event.target)) return;
+			scrolling = true;
+			clearTimeout(timer);
+			timer = setTimeout(() => (scrolling = false), 1200);
+		};
+		// Scroll events don't bubble: only a capturing listener hears the scroller.
+		host.addEventListener('scroll', onScroll, { capture: true, passive: true });
+		return () => {
+			clearTimeout(timer);
+			host.removeEventListener('scroll', onScroll, { capture: true });
+		};
+	});
+
 	function onKeydown(event: KeyboardEvent, index: number) {
 		let destination: number;
 		if (event.key === 'Home' || event.key === 'End') {
@@ -281,6 +301,8 @@
 	class="turn-nav"
 	class:is-focused={focused}
 	class:is-scrubbing={scrubbing}
+	class:is-scrolling={scrolling}
+	class:needs-you={needsYouIds.length > 0}
 	style="--count: {items.length}"
 	aria-label="Navigate user turns"
 	onfocusin={() => (focused = true)}
@@ -353,13 +375,28 @@
 <style>
 	.turn-nav {
 		position: absolute;
-		left: 0;
+		left: 6px;
 		top: 50%;
 		z-index: 12;
 		display: flex;
 		flex-direction: column;
 		transform: translateY(-50%);
 		pointer-events: auto;
+	}
+
+	/* At rest the rail is invisible: it answers to the pointer, to the keyboard
+	   and to scrolling. A turn waiting on you keeps it up, since that dot is the
+	   only sign of it here. */
+	.turn-rail {
+		opacity: 0;
+		transition: opacity 180ms ease;
+	}
+	.turn-nav:hover .turn-rail,
+	.turn-nav.is-focused .turn-rail,
+	.turn-nav.is-scrubbing .turn-rail,
+	.turn-nav.is-scrolling .turn-rail,
+	.turn-nav.needs-you .turn-rail {
+		opacity: 1;
 	}
 
 	/* Ticks start at the top and never shrink: a centred, shrinking column is
@@ -425,10 +462,10 @@
 
 	.bar {
 		display: block;
-		height: 2px;
-		width: 14px;
+		height: 1px;
+		width: 10px;
 		border-radius: 999px;
-		background: color-mix(in oklch, var(--subtle-foreground) 72%, transparent);
+		background: color-mix(in oklch, var(--subtle-foreground) 55%, transparent);
 		transform: translateX(calc(var(--proximity, 0) * 4px)) scaleX(calc(1 + var(--proximity, 0) * 0.8));
 		transform-origin: left center;
 		transition:
@@ -557,8 +594,8 @@
 	/* Touch browsers can hold :hover on the tick the finger landed on; only
 	   the tick under the finger should read as lit. */
 	.turn-nav.is-scrubbing .tick:hover:not(.is-hovered):not(.is-current) .bar {
-		height: 2px;
-		background: color-mix(in oklch, var(--subtle-foreground) 72%, transparent);
+		height: 1px;
+		background: color-mix(in oklch, var(--subtle-foreground) 55%, transparent);
 		transform: translateX(calc(var(--proximity, 0) * 4px)) scaleX(calc(1 + var(--proximity, 0) * 0.8));
 	}
 
@@ -584,13 +621,14 @@
 		}
 
 		.turn-nav:not(.is-scrubbing) .tick:hover:not(.is-current) .bar {
-			height: 2px;
-			background: color-mix(in oklch, var(--subtle-foreground) 72%, transparent);
+			height: 1px;
+			background: color-mix(in oklch, var(--subtle-foreground) 55%, transparent);
 		}
 	}
 
 	@media (prefers-reduced-motion: reduce) {
 		.bar,
+		.turn-rail,
 		.preview { transition: none; }
 		.bar { transform: none; }
 	}

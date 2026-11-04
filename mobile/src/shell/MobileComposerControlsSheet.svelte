@@ -1673,7 +1673,6 @@
 	   "Runs on" open their menus on their own pages (menuHost). */
 	.mcp-setup { padding: 0; }
 	.mcp-setup :global(.context-pill-bar.sheet-mode) { display: flex; flex-direction: column; gap: 0; margin: -1px 0 0; }
-	.mcp-setup :global(.sheet-mode .ctx-sep) { display: none; }
 	.mcp-setup :global(.sheet-mode :is(.selector-wrapper, .runner-badge-wrap, .execution-mode-bar, .mode-bar-row, .branch-wt-row, .mode-selector, .branch-selector, .workspace-folder-selector)) {
 		display: flex;
 		flex-direction: column;
