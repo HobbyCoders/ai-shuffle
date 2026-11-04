@@ -434,6 +434,9 @@
 	// Each lane names its own nothing-here state; "No sessions yet" under a
 	// voice-only list reads as though the whole app were empty.
 	const emptyLabel = 'No sessions yet';
+	// An empty Settled lane says nothing the Active lane does not. It stays only
+	// while older chats are one click away, because its shelf is how you get them.
+	const settledLaneShown = $derived(settledRows.length > 0 || loadingOlder || $sessionsHasMore);
 	onMount(() => {
 		if (!isAdmin) return;
 		// Agent names and avatars for the new-session agent card.
@@ -870,7 +873,7 @@
 			{@render sect('active', 'Active', activeRows.length)}
 			{#if !collapsedGroups.active}
 				{#if activeRows.length === 0}
-					<p class="empty">Nothing active. Swipe a settled session left to bring it back.</p>
+					<p class="empty">{settledLaneShown ? 'Nothing active. Swipe a settled session left to bring it back.' : emptyLabel}</p>
 				{:else}
 					<div class="cards" data-group="active">
 						{@render laneRows(activeGroups)}
@@ -878,18 +881,16 @@
 				{/if}
 			{/if}
 
-			{@render sect('settled', 'Settled', settledRows.length)}
-			{#if !collapsedGroups.settled}
-				{#if visibleSettledRows.length === 0}
-					<p class="empty">{emptyLabel}</p>
-				{:else}
-					{#each settledDays as day (day.label)}
-						<div class="daylabel">{day.label}</div>
-						<div class="cards" data-group="settled">
-							{@render laneRows(byProject(day.rows), true)}
-						</div>
-					{/each}
-				{/if}
+			{#if settledLaneShown}
+				{@render sect('settled', 'Settled', settledRows.length)}
+			{/if}
+			{#if settledLaneShown && !collapsedGroups.settled}
+				{#each settledDays as day (day.label)}
+					<div class="daylabel">{day.label}</div>
+					<div class="cards" data-group="settled">
+						{@render laneRows(byProject(day.rows), true)}
+					</div>
+				{/each}
 
 				{#if loadingOlder}
 					<!-- Held for the whole multi-page run so the label cannot flip
@@ -1017,7 +1018,7 @@
 	.p-top { flex: none; position: relative; padding: 0 8px; background: var(--sidebar); }
 	.phone .p-top { padding-top: env(safe-area-inset-top, 0px); }
 	.p-head { display: flex; align-items: center; gap: 2px; height: 52px; }
-	.p-title { margin-right: auto; padding-left: 6px; font-size: 13px; font-weight: 600; letter-spacing: -0.005em; color: var(--sidebar-foreground); }
+	.p-title { margin-right: auto; padding-left: 6px; font-size: 16px; font-weight: 600; letter-spacing: -0.005em; color: var(--sidebar-foreground); }
 
 	/* The bell is shared with the top bars, where it is right-anchored under a
 	   wide header. Inside the panel that anchor puts most of it off the left
@@ -1150,16 +1151,17 @@
 	   the rows, and the start of a right (archive) swipe, clear of it. */
 	.list.edge-guard { padding-right: 24px; }
 	.cards { display: flex; flex-direction: column; gap: 2px; }
+	/* A project reads as a heading of its rows, brighter than the lane above it. */
 	.proj-head {
-		padding: 10px 8px 3px;
+		padding: 16px 8px 4px;
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
 		font-size: var(--fs-caption);
 		font-weight: 500;
-		color: var(--subtle-foreground);
+		color: var(--sidebar-foreground);
 	}
-	.proj-head:first-child { padding-top: 2px; }
+	.proj-head:first-child { padding-top: 4px; }
 
 	.sect {
 		position: sticky;

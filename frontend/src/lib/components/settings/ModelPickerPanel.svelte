@@ -147,7 +147,7 @@
 		if (pinned.length) out.push({ key: '__favorites__', name: 'Favorites', options: pinned });
 		for (const g of groups) {
 			const rows = matching.filter((o) => o.groupKey === g.key && !favorites.has(o.value));
-			if (rows.length) out.push({ key: g.key, name: g.name, subtext: g.subtext, options: rows });
+			if (rows.length) out.push({ key: g.key, name: g.name, subtext: g.subtext ?? undefined, options: rows });
 		}
 		return out;
 	});

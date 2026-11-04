@@ -38,10 +38,7 @@
 		GitMerge,
 		GitPullRequest,
 		GitPullRequestClosed,
-		Circle,
-		MessageSquare,
 		Monitor,
-		TriangleAlert,
 		Undo2
 	} from 'lucide-svelte';
 	import type { Session } from '$lib/api/client';
@@ -651,26 +648,23 @@
 			{#if status === 'working'}
 				<span class="pip" aria-hidden="true"></span>
 			{:else if failed}
-				<TriangleAlert size={14} strokeWidth={MARK_STROKE} class="warn failed" aria-hidden="true" />
+				<span class="pip warn failed" aria-hidden="true"></span>
 			{:else if attention}
-				<TriangleAlert size={14} strokeWidth={MARK_STROKE} class="warn" aria-hidden="true" />
+				<span class="pip warn" aria-hidden="true"></span>
 			{:else if stage === 'pr'}
-				<GitPullRequest size={14} strokeWidth={MARK_STROKE} />
+				<GitPullRequest size={12} strokeWidth={MARK_STROKE} />
 			{:else if stage === 'merged'}
-				<GitMerge size={14} strokeWidth={MARK_STROKE} />
+				<GitMerge size={12} strokeWidth={MARK_STROKE} />
 			{:else if stage === 'closed'}
-				<GitPullRequestClosed size={14} strokeWidth={MARK_STROKE} />
+				<GitPullRequestClosed size={12} strokeWidth={MARK_STROKE} />
 			{:else if stage === 'dirty'}
-				<Diff size={14} strokeWidth={MARK_STROKE} />
+				<Diff size={12} strokeWidth={MARK_STROKE} />
 			{:else if stage === 'committed'}
-				<GitCommitHorizontal size={14} strokeWidth={MARK_STROKE} />
+				<GitCommitHorizontal size={12} strokeWidth={MARK_STROKE} />
 			{:else if stage === 'pushed'}
-				<ArrowUpFromLine size={14} strokeWidth={MARK_STROKE} />
-			{:else if stage === 'none'}
-				<MessageSquare size={14} strokeWidth={MARK_STROKE} />
-			{:else}
-				<Circle size={14} strokeWidth={MARK_STROKE} />
+				<ArrowUpFromLine size={12} strokeWidth={MARK_STROKE} />
 			{/if}
+			<!-- An idle row draws nothing: its gutter stays, so titles keep one edge. -->
 		</span>
 		{/if}
 
@@ -863,20 +857,22 @@
 	.lead.purple { color: var(--status-merged); }
 	.lead.amber { color: var(--warning); }
 	.lead.muted { color: var(--subtle-foreground); }
+	/* One 6px dot for all three live states. Screen readers get the word from the
+	   lead's label, and the title reads it out in compact rows. */
 	.pip {
-		width: 8px;
-		height: 8px;
+		width: 6px;
+		height: 6px;
 		border-radius: 50%;
 		background: var(--primary);
 		animation: card-ping 1.8s ease-in-out infinite;
 	}
-	.lead :global(.warn) {
-		color: var(--warning);
+	.pip.warn {
+		background: var(--warning);
 		animation: card-pulse 2.4s ease-in-out infinite;
 	}
 	/* What happened, not something still calling: the danger colour, held still. */
-	.lead :global(.warn.failed) {
-		color: var(--destructive);
+	.pip.warn.failed {
+		background: var(--destructive);
 		animation: none;
 	}
 
@@ -1057,7 +1053,7 @@
 
 	@media (prefers-reduced-motion: reduce) {
 		.pip,
-		.lead :global(.warn) { animation: none; }
+		.pip.warn { animation: none; }
 		.scard-frame,
 		.scard,
 		.lane,

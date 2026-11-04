@@ -1721,12 +1721,13 @@ describe('Sidebar unified conversation history', () => {
 		expect(cardIds()).toEqual(['legacy', 'coded', 'chatty', 'spoken']);
 		expect(screen.getByRole('button', { name: 'Filter' })).toBeTruthy();
 	});
-	it('names the empty state of each lane', () => {
+	it('says one thing when there is nothing at all, with no empty Settled lane', () => {
 		mocks.sessions.set([]);
 		appMode.set('voice');
 		render(Sidebar, { props: sidebarProps });
 		const empties = Array.from(document.querySelectorAll('.empty')).map((n) => n.textContent?.trim());
-		expect(empties).toEqual(['Nothing active. Swipe a settled session left to bring it back.', 'No sessions yet']);
+		expect(empties).toEqual(['No sessions yet']);
+		expect(Array.from(document.querySelectorAll('.sect')).some((n) => n.textContent?.includes('Settled'))).toBe(false);
 	});
 	it('keeps an explicit project scope across lanes', async () => {
 		mocks.sessions.set(fixture());

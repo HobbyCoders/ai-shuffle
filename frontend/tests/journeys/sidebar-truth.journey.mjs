@@ -321,13 +321,15 @@ const ROLLBACK_DELETE = {
 
 /** The element is drawn in the theme's danger colour, whatever the theme makes that. */
 async function expectDangerColour(locator, what, log = () => {}) {
+	// A status mark is a dot, so its colour is its fill; a word's is its text.
 	const { colour, danger } = await locator.evaluate((el) => {
 		const probe = document.createElement('span');
 		probe.style.color = 'var(--destructive)';
 		document.body.append(probe);
 		const danger = getComputedStyle(probe).color;
 		probe.remove();
-		return { colour: getComputedStyle(el).color, danger };
+		const style = getComputedStyle(el);
+		return { colour: el.classList.contains('pip') ? style.backgroundColor : style.color, danger };
 	});
 	log(`${what}: ${colour}`);
 	expect(colour === danger, `${what} is in the danger colour (${colour}, the theme's is ${danger})`);
@@ -338,7 +340,7 @@ async function expectFailedRow({ page, mark, log, variant }, id) {
 	await waitStatus(page, id, 'Failed');
 	await waitLane(page, id, 'needs-you');
 	await expectDangerColour(page.locator(`${CARD(id)} .st`).first(), 'the status word', log);
-	await expectDangerColour(page.locator(`${CARD(id)} .lead .warn.failed`), 'the row\'s sign', log);
+	await expectDangerColour(page.locator(`${CARD(id)} .lead .pip.warn.failed`), 'the row\'s sign', log);
 	await mark('reload');
 	await page.reload({ waitUntil: 'domcontentloaded' });
 	// A new step once the recorder has seen the old page go: the reload itself
@@ -437,7 +439,7 @@ const FAILED_SETTLED = {
 		await waitLane(page, chat.id, 'settled');
 		// A settled row is the compact one: no status word to read, but the alert
 		// sign is in the danger colour and assistive tech hears the word.
-		const sign = page.locator(`${CARD(chat.id)} .lead .warn.failed`);
+		const sign = page.locator(`${CARD(chat.id)} .lead .pip.warn.failed`);
 		await sign.waitFor({ timeout: 5000 });
 		const said = await page.locator(`${CARD(chat.id)} .title .sr-only`).first().textContent();
 		expect(/^Failed: /.test(said ?? ''), `a settled failed row announces it: ${JSON.stringify(said)}`);

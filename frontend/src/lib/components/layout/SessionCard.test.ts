@@ -876,9 +876,16 @@ describe('SessionCard git state', () => {
 		cleanup();
 
 		const parked = renderCard({ is_active: true }, { status: 'needs_permission' });
-		expect(parked.container.querySelector('.lead .pip')).toBeNull();
-		expect(parked.container.querySelector('.lead .warn')).toBeTruthy();
+		expect(parked.container.querySelector('.lead .pip.warn')).toBeTruthy();
+		expect(parked.container.querySelector('.lead .pip.warn.failed')).toBeNull();
 		expect(parked.container.querySelector('.l2 .st')?.textContent).toBe('Needs permission');
+	});
+
+	it('draws nothing on an idle row but keeps its gutter', () => {
+		const idle = renderCard({ is_active: true }, { status: 'idle' });
+		const lead = idle.container.querySelector('.lead')!;
+		expect(lead).toBeTruthy();
+		expect(lead.children).toHaveLength(0);
 	});
 
 	it('leases one poll per active card', () => {
