@@ -218,7 +218,7 @@
 	.modal-backdrop {
 		position: fixed;
 		inset: 0;
-		z-index: 100;
+		z-index: 140; /* over the phone Chat controls sheet that can open it */
 		display: flex;
 		align-items: center;
 		justify-content: center;

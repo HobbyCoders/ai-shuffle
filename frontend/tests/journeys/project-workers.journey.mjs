@@ -23,7 +23,7 @@
 //                       callout shows, Send reads "Set up & send", the setup
 //                       fails and the reason shows with the draft kept.
 import { runJourney } from './runner.mjs';
-import { PROJECT, expect, gotoApp, holdBootLoad, isPhone, openNewChat, showSidebar, uniq, waitChat } from './lib/app.mjs';
+import { PROJECT, expect, gotoApp, holdBootLoad, isPhone, openNewChat, showSidebar, uniq, waitChat, withChatSetup } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 
 /**
@@ -269,16 +269,19 @@ await runJourney({
 			async act({ page, mark }) {
 				const hero = page.getByRole('region', { name: 'New session' });
 				await mark('open Runs on');
-				await hero.getByRole('button', { name: /^Runs on / }).click();
-				const menu = page.getByRole('menu', { name: 'Where this session runs' });
-				const pop = menu.getByRole('menuitemradio', { name: 'pop-os not set up · set up' });
-				await pop.waitFor({ timeout: 20_000 });
-				expect(!(await pop.isDisabled()), 'a worker without the project stays selectable');
-				expect(await menu.getByRole('menuitemradio', { name: 'Laptop offline' }).isDisabled(), 'an offline worker is blocked');
+				await withChatSetup(page, async () => {
+					// With a project, Chat controls uses the runner chip's name for the same control.
+					await hero.getByRole('button', { name: /^(Runs on |Runner: )/ }).click();
+					const menu = page.getByRole('menu', { name: /^(Where this session runs|Runner selection)$/ });
+					const pop = menu.getByRole('menuitemradio', { name: 'pop-os not set up · set up' });
+					await pop.waitFor({ timeout: 20_000 });
+					expect(!(await pop.isDisabled()), 'a worker without the project stays selectable');
+					expect(await menu.getByRole('menuitemradio', { name: 'Laptop offline' }).isDisabled(), 'an offline worker is blocked');
 
-				await mark('pick pop-os');
-				await pop.click();
-				await page.locator('[data-ui-setup="needed"]').waitFor({ timeout: 20_000 });
+					await mark('pick pop-os');
+					await pop.click();
+					await page.locator('[data-ui-setup="needed"]').waitFor({ state: 'attached', timeout: 20_000 });
+				});
 
 				const text = `Summarise the README ${uniq()}`;
 				const box = page.getByRole('textbox', { name: 'Message' });

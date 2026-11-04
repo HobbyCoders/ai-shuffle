@@ -185,18 +185,23 @@ export async function holdBootLoad(page, path, ms, { releaseOnSignal = false } =
  * opened too early; retry instead of failing on that setup noise.
  */
 export async function pick(trigger, popup, item, done) {
-	for (let attempt = 0; attempt < 5; attempt++) {
-		if (await done.isVisible()) return;
-		try {
-			if (!(await popup.isVisible())) await trigger.click();
-			await item.click({ timeout: 5000 });
-			await done.waitFor({ timeout: 5000 });
-			return;
-		} catch {
-			/* retry */
+	const steps = async () => {
+		for (let attempt = 0; attempt < 5; attempt++) {
+			if (await done.isVisible()) return;
+			try {
+				if (!(await popup.isVisible())) await trigger.click();
+				await item.click({ timeout: 5000 });
+				await done.waitFor({ timeout: 5000 });
+				return;
+			} catch {
+				/* retry */
+			}
 		}
-	}
-	await done.waitFor({ timeout: 1000 });
+		await done.waitFor({ timeout: 1000 });
+	};
+	// A phone keeps the new chat's setup controls inside Chat controls.
+	if (await trigger.isVisible()) await steps();
+	else await withChatSetup(trigger.page(), steps);
 }
 
 /** Click a trigger until its popup shows (an early click can land before hydration). */
@@ -220,6 +225,7 @@ export async function openPopup(trigger, popup) {
  * Returns whether it opened one, so the caller can close it again.
  */
 export async function openChatSetup(page) {
+	if (await page.getByRole('dialog', { name: 'Chat controls' }).isVisible()) return false;
 	const line = page.getByRole('button', { name: /^Chat context:/ });
 	if (!(await line.isVisible())) return false;
 	await line.click();
@@ -232,6 +238,17 @@ export async function closeChatSetup(page, opened) {
 	if (!opened) return;
 	await page.keyboard.press('Escape');
 	await page.getByRole('dialog', { name: 'Chat controls' }).waitFor({ state: 'hidden', timeout: 5000 });
+}
+
+/**
+ * Run `steps` against the new chat's setup controls: inside Chat controls on a
+ * phone, in place on a wider screen. Nests safely; the outermost call closes it.
+ */
+export async function withChatSetup(page, steps) {
+	const sheet = await openChatSetup(page);
+	const result = await steps();
+	await closeChatSetup(page, sheet);
+	return result;
 }
 
 /**
@@ -250,14 +267,12 @@ export async function composerControl(page, name) {
 /** Pick the seed's Dev agent on the new-session hero (the preview cookie cannot persist a default). */
 export async function pickAgent(page, hero) {
 	const agentMenu = page.getByRole('menu', { name: 'Agent selection' });
-	const sheet = await openChatSetup(page);
 	await pick(
 		hero.getByRole('button', { name: /^Agent:/ }),
 		agentMenu,
 		agentMenu.getByRole('button', { name: AGENT, exact: true }),
 		hero.getByRole('button', { name: `Agent: ${AGENT}` })
 	);
-	await closeChatSetup(page, sheet);
 }
 
 /**
@@ -319,9 +334,7 @@ export async function pickAccess(page, mode) {
 
 export async function pickProject(page, hero, project = PROJECT) {
 	const item = page.getByRole('button', { name: project, exact: true });
-	const sheet = await openChatSetup(page);
 	await pick(hero.getByRole('button', { name: /^No project/ }), item, item, hero.getByRole('button', { name: `Workspace folders: ${project}` }));
-	await closeChatSetup(page, sheet);
 }
 
 /**

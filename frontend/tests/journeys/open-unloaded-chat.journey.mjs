@@ -822,7 +822,7 @@ await runJourney({
 					incoming.click();
 					await frame();
 					// Reopen/paint the real drawer while B's native headers are in flight.
-					const menu = document.querySelector('button[aria-label^="Open menu"], button[aria-label="Show sidebar"]');
+					const menu = document.querySelector('button[aria-label^="Open menu"], button[aria-label="Sessions"], button[aria-label="Show sidebar"]');
 					if (menu) { menu.click(); await frame(); }
 					while (window.__switchHydrationHold.started === null) {
 						if (performance.now() - first >= 15_000) {

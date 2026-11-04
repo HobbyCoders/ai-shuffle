@@ -21,7 +21,8 @@ import {
 	typeAndSend,
 	uniq,
 	waitChat,
-	waitTurnSettled
+	waitTurnSettled,
+	withChatSetup
 } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 import { frames, markTime, spans } from './lib/timeline.mjs';
@@ -48,7 +49,9 @@ async function startClaudeChat({ page, status, variant }) {
 		menu.getByRole('button', { name: 'Dev (Claude Code)', exact: true }),
 		hero.getByRole('button', { name: 'Agent: Dev (Claude Code)' })
 	);
-	expect(await hero.getByRole('button', { name: /^No project/ }).isVisible(), 'fresh chat has no project');
+	await withChatSetup(page, async () => {
+		expect(await hero.getByRole('button', { name: /^No project/ }).isVisible(), 'fresh chat has no project');
+	});
 }
 
 /**

@@ -14,7 +14,7 @@
 //   keeps-cleared   pick a project, clear it, press New session and reload:
 //                   the screen stays without a project.
 import { runJourney } from './runner.mjs';
-import { PROJECT, SEEDED, openFromSidebar, openNewChat, pickProject, settleServiceWorker, showSidebar, waitChat, waitChatOpen } from './lib/app.mjs';
+import { PROJECT, SEEDED, openFromSidebar, openNewChat, pickProject, settleServiceWorker, showSidebar, waitChat, waitChatOpen, withChatSetup } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 
 const hero = (page) => page.getByRole('region', { name: 'New session' });
@@ -32,12 +32,14 @@ async function pressNewSession(page) {
 async function expectProject(page, project) {
 	const want = project ? projectWord(page, project) : noProjectWord(page);
 	const other = project ? noProjectWord(page) : hero(page).getByRole('button', { name: /^Workspace folders: / });
-	await want.waitFor({ timeout: 30_000 });
-	// Late boot loads and the catalog answering must not take it back.
-	await page.waitForTimeout(1500);
-	if (!(await want.isVisible()) || (await other.isVisible())) {
-		throw new Error(`expected the new-session screen to show ${project ? `project "${project}"` : 'no project'}`);
-	}
+	await withChatSetup(page, async () => {
+		await want.waitFor({ timeout: 30_000 });
+		// Late boot loads and the catalog answering must not take it back.
+		await page.waitForTimeout(1500);
+		if (!(await want.isVisible()) || (await other.isVisible())) {
+			throw new Error(`expected the new-session screen to show ${project ? `project "${project}"` : 'no project'}`);
+		}
+	});
 }
 
 /** Reload; a new step once the old page is gone, so the reload itself is not judged as going back. */
@@ -81,10 +83,12 @@ await runJourney({
 				const heroRegion = await openNewChat(ctx, { project: PROJECT });
 				const { page } = ctx;
 				const folders = page.getByRole('dialog', { name: 'Workspace folders' });
-				await projectWord(page, PROJECT).click();
-				await folders.waitFor();
-				await folders.getByRole('button', { name: `Remove ${PROJECT}: start without a project` }).click();
-				await heroRegion.getByRole('button', { name: /^No project/ }).waitFor();
+				await withChatSetup(page, async () => {
+					await projectWord(page, PROJECT).click();
+					await folders.waitFor();
+					await folders.getByRole('button', { name: `Remove ${PROJECT}: start without a project` }).click();
+					await heroRegion.getByRole('button', { name: /^No project/ }).waitFor();
+				});
 			},
 			async act({ page, mark }) {
 				await mark('New session after clearing the project');
