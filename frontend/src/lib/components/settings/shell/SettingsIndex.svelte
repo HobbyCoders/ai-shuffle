@@ -193,6 +193,7 @@
 			padding: 18px 4px 6px;
 		}
 		.st-nav {
+			flex: none;
 			gap: 0;
 			overflow: hidden;
 			border: 1px solid var(--st-border);

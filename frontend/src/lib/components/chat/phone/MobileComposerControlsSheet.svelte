@@ -1738,7 +1738,7 @@
 	   like the other two-line rows, with the worker and chevron on the right. */
 	.mcp-setup :global(.sheet-mode .ctx-chip.runner:has(.ctx-chip-sub)) {
 		display: grid;
-		grid-template-columns: 30px minmax(0, 1fr) auto auto auto;
+		grid-template-columns: 18px minmax(0, 1fr) auto auto auto;
 		grid-template-rows: auto auto;
 		column-gap: 12px;
 		row-gap: 1px;
@@ -1759,7 +1759,7 @@
 	}
 	.mcp-setup :global(.sheet-mode .ctx-chip.runner:has(.ctx-chip-sub) > .worker-status-dot) { grid-area: 1 / 3 / 3 / 4; margin-right: -6px; }
 	.mcp-setup :global(.sheet-mode .ctx-chip.runner:has(.ctx-chip-sub) > .ctx-chip-label) { grid-area: 1 / 4 / 3 / 5; max-width: 40vw; }
-	.mcp-setup :global(.sheet-mode .ctx-chip.runner:has(.ctx-chip-sub)::after) { grid-area: 1 / 5 / 3 / 6; margin: 0 3px 0 -4px; }
+	.mcp-setup :global(.sheet-mode .ctx-chip.runner:has(.ctx-chip-sub)::after) { grid-area: 1 / 5 / 3 / 6; margin: 0 8px 0 -2px; }
 	.mcp-setup :global(.sheet-mode .queued-cancel) { width: 44px; height: 44px; margin: 0 8px 0 0; border-radius: 50%; }
 	/* A selector that still opens in place (project, branch) drops below its row. */
 	.mcp-setup :global(.sheet-mode :is(.branch-dropdown, .selector-dropdown, .wf-menu)) { margin: 0 10px 10px; }

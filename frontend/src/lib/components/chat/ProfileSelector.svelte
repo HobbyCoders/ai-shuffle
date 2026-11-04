@@ -227,13 +227,6 @@
 		min-height: 44px;
 	}
 
-	/* The agent chip is the first item in the composer's context row. It shares
-	   the `.ctx-chip` look (app.css) and only differs from its neighbours by
-	   carrying the foreground colour: the agent reads as the composer's subject. */
-	.context-selector-btn {
-		color: var(--foreground);
-	}
-
 	/* No agent picked (or none exist): amber so the missing choice is visible. */
 	.context-selector-btn.unset {
 		color: var(--warning);

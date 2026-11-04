@@ -145,6 +145,12 @@
 		.crumbs:not(.mobile):has(.current):not(.has-parent) > :global(.crumb-sep) {
 			display: none;
 		}
+		/* The one name left is the bar's title, as on the real phone shell. */
+		.crumbs:not(.mobile) .current :global(button.title-trigger) {
+			color: var(--foreground);
+			font-size: 15px;
+			font-weight: 600;
+		}
 	}
 	/* Phone bar subline: 11.5px muted text sitting on the bar's baseline. The
 	   parent link stays a 44px-tall tap target whose text rides at the bottom. */
