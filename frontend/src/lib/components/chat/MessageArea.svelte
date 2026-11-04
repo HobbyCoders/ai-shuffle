@@ -851,6 +851,9 @@
 		const shiftSessionKey = windowSessionKey;
 		const version = ++windowShiftVersion;
 		windowShifting = true;
+		// A floor measured in the previous bounded slice is not a scroll target
+		// in this one. Retained-row anchoring owns coordinate compensation.
+		followedViewportEnd = 0;
 		mountedRange = next;
 		leadingGap = 0;
 		if (windowSessionKey) {
@@ -2059,24 +2062,31 @@
 			tailErrorOffsetPx = pendingHeight > 0 ? pendingHeight + gap : 0;
 			presentedTailError = s.error;
 		}
-		if (s.sessionId !== followedFloorSession || (!s.messages.length && !s.isStreaming) || untrack(() => windowShifting)) {
+		const resetFloor = s.sessionId !== followedFloorSession || (!s.messages.length && !s.isStreaming) || untrack(() => windowShifting);
+		if (resetFloor) {
 			followedViewportEnd = 0;
 			followedFloorSession = s.sessionId;
 		}
 		const boundary = `${s.sessionId}:${s.messages.length}:${s.isStreaming}:${s.liveTurnId}:${s.error}:${s.queuedMessages.map(m => `${m.id}:${m.status ?? ''}`).join(',')}`;
 		if (boundary === layoutBoundary) return;
 		layoutBoundary = boundary;
-		if (!untrack(() => isMounted && shouldAutoScroll) || !containerRef) return;
+		// lastKnownScrollTop still belongs to the outgoing/cleared slice here.
+		if (resetFloor || !untrack(() => isMounted && shouldAutoScroll) || !containerRef) return;
 		const beforeTop = untrack(() => lastKnownScrollTop);
 		followedViewportEnd = Math.max(followedViewportEnd, beforeTop + containerRef.clientHeight);
+		const sessionId = s.sessionId;
+		const version = untrack(() => windowShiftVersion);
+		let current = true;
 		programmaticScrollDepth++;
 		void tick().then(() => {
-			if (untrack(() => shouldAutoScroll)) {
+			if (current && version === windowShiftVersion && get(activeSession).sessionId === sessionId && !windowShifting && untrack(() => shouldAutoScroll)) {
 				if (currentTurnAnchorId) void maintainCurrentTurnAnchor(false, beforeTop);
 				followGrowthNow();
 			}
 			requestAnimationFrame(() => { programmaticScrollDepth = Math.max(0, programmaticScrollDepth - 1); });
 		});
+		// A newer boundary (including switch-away-and-back) owns its own layout.
+		return () => { current = false; };
 	});
 
 	// Rendered geometry has one lifecycle, including the terminal error, queue

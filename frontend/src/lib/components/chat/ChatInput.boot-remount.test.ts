@@ -7,6 +7,7 @@
  */
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { cleanup, render, waitFor } from '@testing-library/svelte';
+import { tick } from 'svelte';
 import ChatInput from './ChatInput.svelte';
 import { activeSession } from '$lib/stores/active-session';
 import { auth } from '$lib/stores/auth.svelte';
@@ -90,6 +91,34 @@ it.each(['plain', 'html', 'document', 'document-text'])('paints a linked %s draf
 	await new Promise(resolve => setTimeout(resolve, 150));
 	expect(readDraft(null)).toBe('unrelated new-chat draft');
 	expect(readDraft('opening-chat')).toBe(draft);
+});
+
+it('unmounting a linked composer before adoption does not overwrite the new-chat draft', async () => {
+	writeDraft('opening-chat', 'existing chat draft');
+	writeDraft(null, 'unrelated new-chat draft');
+	history.replaceState({}, '', '/?session=opening-chat');
+	Object.assign(activeSession.current, { sessionId: null, isRestoringSession: true });
+
+	const view = render(ChatInput);
+	await waitFor(() => expect(view.container.querySelector('.tiptap')?.textContent).toBe('existing chat draft'));
+	view.unmount();
+
+	expect(readDraft(null)).toBe('unrelated new-chat draft');
+	expect(readDraft('opening-chat')).toBe('existing chat draft');
+	expect(activeSession.current.draft).toBe('');
+});
+
+it('teardown saves the current editor owner after this composer has switched sessions', async () => {
+	const view = render(ChatInput);
+	Object.assign(activeSession.current, { sessionId: 'another-chat' });
+	activeSession.setDraft('');
+	await tick();
+	await typeInto(view.container);
+	view.unmount();
+
+	expect(activeSession.current.draft).toContain(TEXT);
+	expect(readDraft('another-chat')).toContain(TEXT);
+	expect(readDraft(null)).toBeNull();
 });
 
 it('a composer unmounted inside the draft debounce keeps its text for the next one', async () => {

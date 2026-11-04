@@ -263,8 +263,6 @@
 			compacting = false;
 		}
 	}
-	const initialSessionId = $activeSession.sessionId;
-
 	// Get the draft value as JSON string (preserves file chips)
 	function getDraftJSON(): string {
 		const json = editorRef?.getJSON();
@@ -274,7 +272,9 @@
 
 	// Helper to save draft immediately (used on unmount and on send)
 	function saveDraftImmediately(value?: string) {
-		if (!ownsComposer()) return;
+		// The editor may already hold a linked chat's draft while boot's store
+		// still points at New Chat. Use the same owner check as the debounce.
+		if (!ownsComposer() || get(activeSession).sessionId !== prevSessionId) return;
 		if (draftSaveTimeout) {
 			clearTimeout(draftSaveTimeout);
 			draftSaveTimeout = null;
@@ -335,8 +335,6 @@
 		detachComposerDictation(editorRef?.getEditor());
 		if (!ownsComposer()) return;
 		if (messageSent) return;
-		const currentSessionId = get(activeSession).sessionId;
-		if (currentSessionId !== initialSessionId) return; // session switched
 		saveDraftImmediately();
 	});
 	// A remounted composer (a chat archived and restored, a layout change)
@@ -345,7 +343,7 @@
 	$effect(() => {
 		if (mountSelectionRestored || !editorRef?.getEditor()) return;
 		mountSelectionRestored = true;
-		if (get(activeSession).sessionId === initialSessionId) restoreComposerSelection(initialSessionId, initialComposerDraft);
+		if (get(activeSession).sessionId === prevSessionId) restoreComposerSelection(prevSessionId, initialComposerDraft);
 	});
 	/** The editor is going away: keep its caret with the chat whose draft it holds. */
 	function beforeEditorDestroy(editor: Editor) {
