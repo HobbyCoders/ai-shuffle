@@ -36,8 +36,6 @@
 	import { EMPTY_TOOL_SURFACE, fetchToolSurface, type ToolSurface, type ToolSurfaceGroup } from '$lib/api/toolSurface';
 	import {
 		getDefaultModel,
-		getProviderDisplay,
-		getProviders,
 		normalizeModel,
 		NATIVE_PROVIDER_KEY
 	} from '$lib/constants/models';
@@ -59,16 +57,13 @@
 		type AgentTemplate,
 		type GroupState,
 		type RosterAgent,
-		invokeModeOf,
-		subagentsFact
+		invokeModeOf
 	} from './profiles/agentForm';
 	import {
 		FOLDER_NONE,
 		folderOf,
 		defaultModelBinding,
-		isPinned,
 		pinnedModel,
-		pinnedProviders,
 		profileModels,
 		sectionAgents,
 		uniqueAgentId,
@@ -430,30 +425,16 @@
 	}
 
 	// ── Model summaries ────────────────────────────────────────────────────
-	function providerNames(models: Record<string, string>): string {
-		const names = pinnedProviders(models).map((key) => {
-			if (key === NATIVE_PROVIDER_KEY) return 'Claude';
-			const provider = getProviders().find((p) => p.id === key);
-			return provider ? getProviderDisplay(provider).name : key;
-		});
-		return names.join(', ');
-	}
-
-	function modelFact(models: Record<string, string>): string {
-		if (isPinned(models)) return providerNames(models);
-		if (subagentDefault) {
-			return subagentDefault.model ? `Default · ${modelLabel(subagentDefault.model)}` : 'Default · not set';
-		}
-		return 'Chat only';
-	}
-
 	/** Right-hand meta on a list row: the agent's model. */
 	function metaOf(p: Profile): string {
 		const models =
 			viewMode === 'form' && editingProfile?.id === p.id ? profileForm.provider_models : profileModels(p);
 		const pinned = pinnedModel(models);
 		if (pinned) return modelLabel(pinned);
-		return subagentDefault ? 'Default' : 'Chat only';
+		// Following the subagent default: name the model it resolves to, the same
+		// one the Models tab shows, so the list and the detail cannot disagree.
+		if (subagentDefault) return subagentDefault.model ? modelLabel(subagentDefault.model) : 'Default';
+		return 'Chat only';
 	}
 
 	/**
@@ -470,20 +451,11 @@
 		return allSubagents.filter((a) => a.id !== id).length;
 	}
 
-	const facts = $derived.by(() => {
-		const n = others.length;
-		const reach = invokableCount(editingProfile?.id ?? '', profileForm.agent_invoke_mode, profileForm.enabled_agents);
-		return {
-			tools:
-				toolSelectionMode === 'all'
-					? `All ${totalTools}`
-					: toolSelectionMode === 'none'
-						? 'None'
-						: `${effectiveToolCount} of ${totalTools}`,
-			subagents: subagentsFact(profileForm.agent_invoke_mode, n, reach),
-			model: modelFact(profileForm.provider_models),
-			chats: editingProfile ? (editingProfile.session_count ?? null) : null
-		};
+	/** The tabs carry these counts; `undefined` while the tool list is still loading. */
+	const counts = $derived({
+		tools: !totalTools ? undefined : toolSelectionMode === 'all' ? totalTools : toolSelectionMode === 'none' ? 0 : effectiveToolCount,
+		subagents: invokableCount(editingProfile?.id ?? '', profileForm.agent_invoke_mode, profileForm.enabled_agents),
+		chats: editingProfile ? (editingProfile.session_count ?? null) : null
 	});
 
 	// ── Opening agents ─────────────────────────────────────────────────────
@@ -1216,7 +1188,7 @@
 						{saveState}
 						{remoteChange}
 						{tab}
-						{facts}
+						{counts}
 						{groups}
 						{templates}
 						{toolSurface}

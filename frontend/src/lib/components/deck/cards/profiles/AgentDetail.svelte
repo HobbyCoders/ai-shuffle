@@ -2,8 +2,8 @@
 	/**
 	 * AgentDetail: one agent on the Agents page, in the Settings DetailPane
 	 * anatomy. Header (avatar, name, badges, the visible actions: Duplicate,
-	 * Export or Restore defaults), the facts strip (each fact opens its
-	 * tab), a sideways-scrolling tab strip, then the tab's row groups. The
+	 * Export or Restore defaults), a sideways-scrolling tab strip whose tabs
+	 * carry the counts, then the tab's row groups. The
 	 * Profile tab ends with the danger zone and its inline confirm.
 	 *
 	 * ProfileCard owns the data and autosave; this component only renders and
@@ -16,7 +16,6 @@
 	import type { ToolSurface, ToolSurfaceGroup } from '$lib/api/toolSurface';
 	import type { SubagentDefault } from '$lib/api/subagentDefault';
 	import DetailPane from '$lib/components/settings/shell/DetailPane.svelte';
-	import type { Fact } from '$lib/components/settings/shell/FactsStrip.svelte';
 	import SettingRow from '$lib/components/settings/rows/SettingRow.svelte';
 	import InlineConfirm from '$lib/components/settings/rows/InlineConfirm.svelte';
 	import InlineBanner from '$lib/components/settings/rows/InlineBanner.svelte';
@@ -54,7 +53,7 @@
 		saveState: 'idle' | 'saving' | 'saved' | 'error';
 		remoteChange: string;
 		tab: AgentTab;
-		facts: { tools: string; subagents: string; model: string; chats: number | null };
+		counts: { tools: number | undefined; subagents: number; chats: number | null };
 		groups: GroupState;
 		templates: AgentTemplate[];
 		toolSurface: ToolSurface;
@@ -101,7 +100,7 @@
 		saveState,
 		remoteChange,
 		tab,
-		facts,
+		counts,
 		groups,
 		templates,
 		toolSurface,
@@ -159,20 +158,13 @@
 		return `Updated ${new Date(ms).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`;
 	});
 
-	const factList = $derived<Fact[]>([
-		{ label: 'Tools', value: facts.tools, onclick: () => onTab('tools'), action: `Tools: ${facts.tools}. Open Tools` },
-		{ label: 'Subagents', value: facts.subagents, onclick: () => onTab('subagents'), action: `Subagents: ${facts.subagents}. Open Subagents` },
-		{ label: 'Model', value: facts.model, onclick: () => onTab('models'), action: `Model: ${facts.model}. Open Models` },
-		{ label: 'Chats', value: facts.chats === null ? null : facts.chats.toLocaleString() }
-	]);
-
-	// None: no count on the Subagents tab (the header fact says "None").
-	// Approvals (saved permission rules) is owner only.
+	// Counts live on the tabs. Approvals (saved permission rules) is owner only.
 	const tabs = $derived(
 		AGENT_TABS.filter((t) => t.id !== 'approvals' || isAdmin).map((t) =>
-			t.id === 'subagents' ? { ...t, count: form.agent_invoke_mode === 'none' ? undefined : others.length } : { ...t }
+			t.id === 'tools' ? { ...t, count: counts.tools } : t.id === 'subagents' ? { ...t, count: counts.subagents } : { ...t }
 		)
 	);
+	const chats = $derived(counts.chats === null ? '' : `${counts.chats.toLocaleString()} ${counts.chats === 1 ? 'chat' : 'chats'}`);
 
 	function pickInvokeMode(mode: AgentInvokeMode) {
 		for (const [field, value] of Object.entries(invokeModePatch(mode))) {
@@ -217,7 +209,7 @@
 {/snippet}
 
 {#snippet subtitle()}
-	<span>{[kind, folder, updated].filter(Boolean).join(' · ')}</span>
+	<span>{[kind, folder, updated, chats].filter(Boolean).join(' · ')}</span>
 {/snippet}
 
 {#snippet primary()}
@@ -284,8 +276,6 @@
 		{primary}
 		{topStatus}
 		{banner}
-		facts={factList}
-		factsLine
 		{tabs}
 		{tab}
 		onTabChange={(t) => onTab(t as AgentTab)}
@@ -369,10 +359,6 @@
 	.agd :global(.st-dwrap) {
 		max-width: 740px;
 		margin-inline: auto;
-	}
-	/* The facts line replaces the ruled strip: tabs need no extra rule above. */
-	.agd :global(.st-facts.line) {
-		margin-top: 12px;
 	}
 	.savetick {
 		margin-left: auto;

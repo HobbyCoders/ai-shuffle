@@ -43,8 +43,6 @@
 		/** The one primary action. */
 		primary?: Snippet;
 		facts?: Fact[];
-		/** Facts as one quiet line rather than the ruled strip. */
-		factsLine?: boolean;
 		/** Notice between facts and tabs. */
 		banner?: Snippet;
 		tabs?: (string | DetailTab)[];
@@ -81,7 +79,6 @@
 		subtitle,
 		primary,
 		facts = [],
-		factsLine = false,
 		banner,
 		tabs = [],
 		category,
@@ -149,7 +146,7 @@
 			<fieldset class="st-dha" disabled={access.readOnly}>{@render primary()}</fieldset>
 		{/if}
 	</div>
-	<FactsStrip {facts} line={factsLine} />
+	<FactsStrip {facts} />
 	{@render banner?.()}
 	{#if showTabs}
 		<DetailTabs
