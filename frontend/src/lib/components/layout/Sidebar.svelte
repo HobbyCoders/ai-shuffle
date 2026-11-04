@@ -514,6 +514,27 @@
 		if (ts >= today - 6 * DAY) return 'Earlier this week';
 		return 'Older';
 	}
+	// Inside a lane, rows sit under their project when the lane spans more than
+	// one, so no row has to repeat it. A project's place follows its most recent
+	// row, and rows keep their recency order inside it.
+	function byProject(laneRows: CardRow[]): { key: string; label: string | null; rows: CardRow[] }[] {
+		const groups = new Map<string, CardRow[]>();
+		for (const row of laneRows) {
+			const key = projectKey(row.session);
+			const group = groups.get(key);
+			if (group) group.push(row);
+			else groups.set(key, [row]);
+		}
+		if (groups.size < 2) return [{ key: 'all', label: null, rows: laneRows }];
+		return [...groups].map(([key, rows]) => ({
+			key,
+			label: key === UNGROUPED_PROJECT ? 'No project' : projectLabel(rows[0].session),
+			rows
+		}));
+	}
+	const needsYouGroups = $derived(byProject(needsYouRows));
+	const activeGroups = $derived(byProject(activeRows));
+
 	const settledDays = $derived.by(() => {
 		const out: { label: string; rows: CardRow[] }[] = [];
 		for (const row of visibleSettledRows) {
@@ -679,6 +700,17 @@
 	/>
 {/snippet}
 
+{#snippet laneRows(groups: { key: string; label: string | null; rows: CardRow[] }[], compact = false)}
+	{#each groups as group (group.key)}
+		{#if group.label}
+			<div class="proj-head" title={group.label}>{group.label}</div>
+		{/if}
+		{#each group.rows as row (row.session.id)}
+			{@render card(row, compact)}
+		{/each}
+	{/each}
+{/snippet}
+
 {#snippet sect(key: 'needs' | 'active' | 'settled', label: string, count: number)}
 	<button
 		class="sect"
@@ -687,8 +719,7 @@
 		onclick={() => toggleGroup(key)}
 		aria-expanded={!collapsedGroups[key]}
 	>
-		{label} <span class="n">{count}</span>
-		<span class="rule" aria-hidden="true"></span>
+		<span class="lbl">{label}</span> <span class="n">{count}</span>
 		<span class="chev"><ChevronDown size={14} strokeWidth={2} /></span>
 	</button>
 {/snippet}
@@ -712,7 +743,7 @@
 		<!-- Selection bar: slides over the header while rows are selected. -->
 		<div class="selbar" inert={!selecting} aria-hidden={selecting ? undefined : 'true'}>
 			<button class="icon-btn" type="button" aria-label="Cancel selection" onclick={cancelSelection}>
-				<X size={18} strokeWidth={1.85} />
+				<X size={18} strokeWidth={1.75} />
 			</button>
 			<span class="cnt" aria-live="polite">{selected.size} selected</span>
 			{#if anySelectedSettled}
@@ -744,7 +775,7 @@
 
 			<div class="searchrow">
 				<button class="search" type="button" onclick={() => onOpenSpotlight?.()} disabled={!onOpenSpotlight}>
-					<Search size={16} strokeWidth={1.85} />
+					<Search size={15} strokeWidth={1.75} />
 					<span>Search</span>
 					{#if !phone}<kbd>Ctrl K</kbd>{/if}
 				</button>
@@ -758,7 +789,7 @@
 					aria-expanded={sheet === 'filter'}
 					onclick={() => toggleSheet('filter')}
 				>
-					<ListFilter size={17} strokeWidth={1.85} />
+					<ListFilter size={17} strokeWidth={1.75} />
 				</button>
 			</div>
 
@@ -784,9 +815,7 @@
 				{@render sect('needs', 'Needs you', needsYouRows.length)}
 				{#if !collapsedGroups.needs}
 					<div class="cards" data-group="needs-you">
-						{#each needsYouRows as row (row.session.id)}
-							{@render card(row)}
-						{/each}
+						{@render laneRows(needsYouGroups)}
 					</div>
 				{/if}
 			{/if}
@@ -797,9 +826,7 @@
 					<p class="empty">Nothing active. Swipe a settled session left to bring it back.</p>
 				{:else}
 					<div class="cards" data-group="active">
-						{#each activeRows as row (row.session.id)}
-							{@render card(row)}
-						{/each}
+						{@render laneRows(activeGroups)}
 					</div>
 				{/if}
 			{/if}
@@ -812,9 +839,7 @@
 					{#each settledDays as day (day.label)}
 						<div class="daylabel">{day.label}</div>
 						<div class="cards" data-group="settled">
-							{#each day.rows as row (row.session.id)}
-								{@render card(row, true)}
-							{/each}
+							{@render laneRows(byProject(day.rows), true)}
 						</div>
 					{/each}
 				{/if}
@@ -883,7 +908,7 @@
 							onpointerenter={() => preloadPanelForView(item.id)}
 							onfocus={() => preloadPanelForView(item.id)}
 						>
-							<item.icon size={phone ? 18 : 15} strokeWidth={1.85} />
+							<item.icon size={phone ? 18 : 15} strokeWidth={1.75} />
 							<span>{item.label}</span>
 						</button>
 					{/each}
@@ -892,13 +917,13 @@
 				<p class="wempty">Everything is on the rail.</p>
 			{/if}
 			<button class="custrow" type="button" role="menuitem" onclick={openCustomize}>
-				<SlidersHorizontal size={phone ? 17 : 15} strokeWidth={1.85} />
+				<SlidersHorizontal size={phone ? 17 : 15} strokeWidth={1.75} />
 				<span>Customize the rail</span>
 				<small>{split.shown.length} on the rail</small>
 			</button>
 			{#if isAdmin && canCheck}
 				<button class="custrow" type="button" role="menuitem" onclick={checkForUpdates}>
-					<RefreshCw size={phone ? 17 : 15} strokeWidth={1.85} />
+					<RefreshCw size={phone ? 17 : 15} strokeWidth={1.75} />
 					<span>Check for updates</span>
 				</button>
 			{/if}
@@ -975,48 +1000,46 @@
 		display: flex;
 		align-items: center;
 		gap: 9px;
-		height: 34px;
-		padding: 0 12px;
+		height: 32px;
+		padding: 0 10px;
 		border: 1px solid var(--sidebar-border);
-		border-radius: 10px;
-		background: oklch(1 0 0 / 0.055);
-		color: var(--subtle-foreground);
+		border-radius: var(--radius-control);
+		background: transparent;
+		color: var(--sidebar-muted);
 		font: inherit;
 		font-size: 13px;
 		text-align: left;
 		cursor: pointer;
 		transition: border-color 0.13s ease, color 0.13s ease;
 	}
-	.search:hover:not(:disabled) { border-color: var(--border-strong); color: var(--muted-foreground); }
+	.search:hover:not(:disabled) { background: var(--row-hover); color: var(--sidebar-foreground); }
 	.search:disabled { cursor: default; }
 	.search :global(svg) { flex: none; }
 	.search kbd {
 		margin-left: auto;
-		padding: 2px 5px;
-		border: 1px solid var(--sidebar-border);
-		border-radius: 5px;
-		font-family: var(--font-mono);
-		font-size: 10.5px;
+		font-family: inherit;
+		font-size: var(--fs-caption);
+		color: var(--subtle-foreground);
 	}
-	.phone .search { height: 40px; border-radius: 12px; font-size: 14px; }
+	.phone .search { height: 44px; font-size: 16px; }
 
 	.filter-btn {
 		position: relative;
-		width: 34px;
-		height: 34px;
+		width: 32px;
+		height: 32px;
 		flex: none;
 		display: grid;
 		place-items: center;
 		padding: 0;
 		border: 0;
-		border-radius: 10px;
-		background: oklch(1 0 0 / 0.05);
+		border-radius: var(--radius-control);
+		background: transparent;
 		color: var(--sidebar-muted);
 		cursor: pointer;
 	}
-	.phone .filter-btn { width: 40px; height: 40px; border-radius: 12px; }
-	.filter-btn:hover,
-	.filter-btn.open { background: var(--sidebar-accent-active); color: var(--foreground); }
+	.phone .filter-btn { width: 44px; height: 44px; }
+	.filter-btn:hover { background: var(--row-hover); color: var(--sidebar-foreground); }
+	.filter-btn.open { background: var(--row-selected); color: var(--sidebar-foreground); }
 	.filter-btn.set { color: var(--primary); }
 	.filter-btn.set::after {
 		content: '';
@@ -1068,7 +1091,17 @@
 	   touch area. The left edge needs no guard: the icon rail already keeps
 	   the rows, and the start of a right (archive) swipe, clear of it. */
 	.list.edge-guard { padding-right: 24px; }
-	.cards { display: flex; flex-direction: column; gap: 1px; }
+	.cards { display: flex; flex-direction: column; gap: 2px; }
+	.proj-head {
+		padding: 10px 8px 3px;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		font-size: var(--fs-caption);
+		font-weight: 500;
+		color: var(--subtle-foreground);
+	}
+	.proj-head:first-child { padding-top: 2px; }
 
 	.sect {
 		position: sticky;
@@ -1076,33 +1109,32 @@
 		z-index: 6;
 		display: flex;
 		align-items: center;
-		gap: 8px;
+		gap: 6px;
 		width: 100%;
-		padding: 12px 6px 7px;
+		padding: 12px 8px 6px;
 		border: 0;
 		background: linear-gradient(var(--sidebar) 78%, transparent);
 		color: var(--muted-foreground);
 		font: inherit;
-		font-size: 12px;
-		font-weight: 600;
+		font-size: var(--fs-label);
+		font-weight: 500;
 		text-align: left;
 		cursor: pointer;
 	}
+	.sect .lbl { flex: none; }
+	.sect:hover { color: var(--sidebar-foreground); }
+	.sect:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; border-radius: var(--radius-control); }
 	.sect .n {
-		font-family: var(--font-mono);
-		font-size: 11px;
-		font-weight: 500;
+		font-size: var(--fs-caption);
+		font-weight: 400;
 		font-variant-numeric: tabular-nums;
 		color: var(--subtle-foreground);
 	}
-	.sect .rule { flex: 1; height: 1px; background: var(--sidebar-border); }
-	.sect .chev { display: inline-flex; color: var(--subtle-foreground); transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1); }
+	.sect .chev { margin-left: auto; display: inline-flex; color: var(--subtle-foreground); transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1); }
 	.sect.closed .chev { transform: rotate(-90deg); }
-	.sect.needs,
-	.sect.needs .n { color: var(--warning); }
-	.sect.needs .rule { background: color-mix(in oklab, var(--warning) 35%, var(--sidebar-border)); }
+	.sect.needs .lbl { color: var(--warning); }
 
-	.daylabel { padding: 10px 8px 5px; font-size: 11.5px; font-weight: 500; color: var(--subtle-foreground); }
+	.daylabel { padding: 10px 8px 3px; font-size: var(--fs-caption); font-weight: 500; color: var(--subtle-foreground); }
 	.empty {
 		margin: 0;
 		padding: 14px 16px 18px;
@@ -1159,14 +1191,14 @@
 		padding: 0 12px;
 		border: 0;
 		border-radius: 10px;
-		background: oklch(1 0 0 / 0.08);
+		background: var(--row-hover);
 		color: var(--foreground);
 		font: inherit;
 		font-size: 13px;
 		font-weight: 600;
 		cursor: pointer;
 	}
-	.act:hover { background: oklch(1 0 0 / 0.13); }
+	.act:hover { background: var(--row-selected); }
 	.act.primary { background: var(--primary); color: var(--primary-foreground); }
 	.act.primary:hover { filter: brightness(1.08); }
 
@@ -1225,7 +1257,7 @@
 		gap: 6px;
 		padding: 0 4px;
 		border-radius: 11px;
-		background: oklch(1 0 0 / 0.04);
+		background: var(--row-hover);
 		color: var(--sidebar-muted);
 		font-size: 12px;
 		text-align: center;

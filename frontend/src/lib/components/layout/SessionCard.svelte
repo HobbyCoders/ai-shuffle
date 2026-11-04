@@ -2,19 +2,18 @@
 	/**
 	 * SessionCard — one ledger row in the sidebar.
 	 *
-	 * Every row leads with ONE glyph in a fixed left column: where the branch
-	 * sits between edit and merge (see `deriveGitStage`). The session's own
-	 * runtime state rides on the title — a pulsing dot while it works, an amber
-	 * warning when it is parked on a prompt.
+	 * Every row is one line: a mark in a fixed left column, the title, and the
+	 * total working time at the far right. The mark is the session's runtime
+	 * state when it has one (a pulsing dot while it works, a warning when it is
+	 * parked on a prompt or failed), and otherwise where the branch sits between
+	 * edit and merge (see `deriveGitStage`).
 	 *
-	 * Active card (three lines):
-	 *   L1  glyph · title · total working time
-	 *   L2  project · status word · PR state · diffstat
-	 *   L3  device icon · branch
+	 * An uncommitted diffstat or a several-PR summary sits before the time. A
+	 * second line appears only on an active row that is running or blocked: the
+	 * status word, PR state and diffstat.
 	 *
-	 * Settled row (compact, two lines):
-	 *   L1  glyph · title · total working time (age in the hover title)
-	 *   L2  device icon · git-state word · branch
+	 * Worker, project, branch and PR state live in the row's hover title and in a
+	 * visually hidden line for screen readers. The sidebar groups rows by project.
 	 *
 	 * Inbox gestures. A touch or pen swipe LEFT settles an active row (moves a
 	 * settled one back to Active, restores an archived one); a swipe RIGHT
@@ -152,9 +151,12 @@
 	const statusWord = $derived(runtimeStatusWord(status, compacting));
 	const statusTone = $derived(RUNTIME_STATUS_TONES[status]);
 	const attention = $derived(isAttentionStatus(status));
-	// In-flight (working) rows that aren't the open session recede so the list
-	// triages at a glance; prompt-parked / PR / done rows stay prominent.
-	const receded = $derived(status === 'working' && !active);
+	const failed = $derived(status === 'failed');
+	// Only these rows speak up: the open one, and any that is running or waiting
+	// on someone. A finished row stays in secondary text so the eye goes to them.
+	const running = $derived(status === 'working' || status === 'parked');
+	const emphasized = $derived(active || running || attention || failed);
+	const showStatusLine = $derived(!compact && (running || attention || failed));
 
 	// ── Git state ───────────────────────────────────────────────────────
 	// The session open in the main panel already has its checkout loaded by the
@@ -290,6 +292,14 @@
 	// would read as "still to review".
 	const diff = $derived(gitStatus?.has_changes ? diffCounts(gitDiffStats) : null);
 
+
+	// Everything a row no longer spells out stays one hover away.
+	const rowDetails = $derived(
+		[statusWord, prText || (compact ? stageWord : null), device, projectLabel, branch].filter(Boolean).join(' · ')
+	);
+	const rowTip = $derived(`${title}\n${rowDetails}`);
+	// A row with no recorded work has no time worth a column.
+	const showTimer = $derived(turnLive || counting || timer !== formatElapsed(0));
 
 	const actions = $derived(cardActions(session));
 	/** Hover order: Archive first, then the state toggle (or Restore). */
@@ -616,7 +626,7 @@
 	<div
 		class="scard"
 		class:active
-		class:receded
+		class:emphasized
 		class:compact
 		role="button"
 		tabindex="0"
@@ -624,7 +634,7 @@
 		aria-pressed={selecting ? selected : undefined}
 		onclick={openCard}
 		onkeydown={handleCardKeydown}
-		title={title}
+		title={rowTip}
 		style:transform={innerTransform}
 	>
 		{#if selecting}
@@ -633,20 +643,26 @@
 			</span>
 		{:else}
 		<span class="lead {stageTone}" role="img" title={stageTip} aria-label={stageTip}>
-			{#if stage === 'pr'}
-				<GitPullRequest size={14} strokeWidth={2} />
+			{#if status === 'working'}
+				<span class="pip" aria-hidden="true"></span>
+			{:else if failed}
+				<TriangleAlert size={14} strokeWidth={2} class="warn failed" aria-hidden="true" />
+			{:else if attention}
+				<TriangleAlert size={14} strokeWidth={2} class="warn" aria-hidden="true" />
+			{:else if stage === 'pr'}
+				<GitPullRequest size={14} strokeWidth={1.75} />
 			{:else if stage === 'merged'}
-				<GitMerge size={14} strokeWidth={2} />
+				<GitMerge size={14} strokeWidth={1.75} />
 			{:else if stage === 'closed'}
-				<GitPullRequestClosed size={14} strokeWidth={2} />
+				<GitPullRequestClosed size={14} strokeWidth={1.75} />
 			{:else if stage === 'dirty'}
-				<Diff size={14} strokeWidth={2} />
+				<Diff size={14} strokeWidth={1.75} />
 			{:else if stage === 'committed'}
-				<GitCommitHorizontal size={14} strokeWidth={2} />
+				<GitCommitHorizontal size={14} strokeWidth={1.75} />
 			{:else if stage === 'pushed'}
-				<ArrowUpFromLine size={14} strokeWidth={2} />
+				<ArrowUpFromLine size={14} strokeWidth={1.75} />
 			{:else if stage === 'none'}
-				<MessageSquare size={14} strokeWidth={2} />
+				<MessageSquare size={14} strokeWidth={1.75} />
 			{:else}
 				<span class="stage-dot"></span>
 			{/if}
@@ -654,21 +670,6 @@
 		{/if}
 
 		<span class="body">
-			<span class="l1">
-				<span class="title">
-					{#if status === 'working'}
-						<span class="pip" aria-hidden="true"></span>
-					{:else if status === 'failed'}
-						<TriangleAlert size={12} strokeWidth={2.2} class="warn failed" aria-hidden="true" />
-					{:else if attention}
-						<TriangleAlert size={12} strokeWidth={2.2} class="warn" aria-hidden="true" />
-					{/if}{#if compact && (status === 'working' || status === 'failed' || attention)}<span class="sr-only">{`${statusWord}: `}</span>{/if}{title}
-				</span>
-			</span>
-
-			<!-- The working time sits at the end of the row that carries the
-			     session's state: the status line on active rows, the meta line
-			     on settled ones. The title keeps the full width. -->
 			{#snippet multiPrChip()}
 				<!-- The one control for the PR list: pointer, keyboard and
 				     screen readers all use the chip itself. -->
@@ -685,16 +686,22 @@
 				>{#each prSummary?.parts ?? [] as part, i (part.state)}{#if i > 0}<span class="sep">{' · '}</span>{/if}<span class:green={part.state === 'open'} class:purple={part.state === 'merged'} class:muted={part.state === 'closed'}>{part.text}</span>{/each}</button>
 			{/snippet}
 			{#snippet timerChip()}
-				<span class="timer" class:live={turnLive} title={timerTitle}>{timer}</span>
+				{#if showTimer}<span class="timer" class:live={turnLive} title={timerTitle}>{timer}</span>{/if}
 			{/snippet}
 
-			{#if !compact}
+			<span class="l1">
+				<span class="title">{#if compact && (status === 'working' || failed || attention)}<span class="sr-only">{`${statusWord}: `}</span>{/if}{title}</span>
+				{#if !showStatusLine && multiPr}{@render multiPrChip()}{/if}
+				{#if !showStatusLine && diff}
+					<span class="diff"><span class="p">{diff.plus}</span> <span class="m">{diff.minus}</span></span>
+				{/if}
+				{@render timerChip()}
+			</span>
+
+			{#if showStatusLine}
 				<span class="l2">
-					<span class="st {statusTone}">{statusWord}{#if status === 'working'}<span class="working-dots" aria-hidden="true">
-							<span></span><span></span><span></span>
-						</span>{/if}</span>
+					<span class="st {statusTone}">{statusWord}</span>
 					{#if showPr}
-						<span class="dot" aria-hidden="true"></span>
 						{#if multiPr}
 							{@render multiPrChip()}
 						{:else}
@@ -702,39 +709,12 @@
 						{/if}
 					{/if}
 					{#if diff}
-						<span class="dot" aria-hidden="true"></span>
 						<span class="diff"><span class="p">{diff.plus}</span> <span class="m">{diff.minus}</span></span>
 					{/if}
-					{@render timerChip()}
 				</span>
 			{/if}
 
-			<span class="l3">
-				<span class="seg device-seg" title={device} aria-label={device}>
-					{#if session.is_remote}
-						<Cloud size={12} strokeWidth={1.9} />
-					{:else}
-						<Monitor size={12} strokeWidth={1.9} />
-					{/if}
-				</span>
-				{#if !compact}
-					<span class="dot" aria-hidden="true"></span>
-					<span class="seg proj-seg"><span class="proj">{projectLabel}</span></span>
-				{/if}
-				{#if compact && stageWord}
-					<span class="dot" aria-hidden="true"></span>
-					{#if multiPr && (stage === 'pr' || stage === 'merged' || stage === 'closed')}
-						{@render multiPrChip()}
-					{:else}
-						<span class="st {stageTone}">{stageWord}</span>
-					{/if}
-				{/if}
-				{#if branch}
-					<span class="dot" aria-hidden="true"></span>
-					<span class="seg branch-seg"><span class="branch">{branch}</span></span>
-				{/if}
-				{#if compact}{@render timerChip()}{/if}
-			</span>
+			<span class="details sr-only">{rowDetails}</span>
 		</span>
 	</div>
 
@@ -751,13 +731,13 @@
 					onclick={(e) => handleActionClick(e, action)}
 				>
 					{#if action === 'settle'}
-						<Check size={15} strokeWidth={1.9} />
+						<Check size={14} strokeWidth={1.75} />
 					{:else if action === 'activate'}
-						<Undo2 size={15} strokeWidth={1.9} />
+						<Undo2 size={14} strokeWidth={1.75} />
 					{:else if action === 'archive'}
-						<Archive size={15} strokeWidth={1.9} />
+						<Archive size={14} strokeWidth={1.75} />
 					{:else}
-						<ArchiveRestore size={15} strokeWidth={1.9} />
+						<ArchiveRestore size={14} strokeWidth={1.75} />
 					{/if}
 				</button>
 			{/each}
@@ -778,18 +758,15 @@
 	.scard-frame {
 		position: relative;
 		width: 100%;
-		margin-bottom: 2px;
-		border-radius: 12px;
+		border-radius: var(--radius-control);
 		overflow: hidden;
 		/* Vertical scroll stays native; a horizontal drag is the row's own. */
 		touch-action: pan-y;
 		transition:
 			height 260ms cubic-bezier(0.16, 1, 0.3, 1),
-			opacity 200ms ease,
-			margin 260ms cubic-bezier(0.16, 1, 0.3, 1);
+			opacity 200ms ease;
 	}
 	.scard-frame.folded {
-		margin-bottom: 0;
 		opacity: 0;
 	}
 
@@ -826,72 +803,56 @@
 	.scard-frame.armed .lane :global(svg) { transform: scale(1.18); }
 
 	/* ── The row itself ─────────────────────────────────────────────────
-	   Opaque, so the lanes never bleed through. A fixed 18px lead column keeps
-	   every glyph (and the selection checkmark) lined up down the list. */
+	   Opaque, so the lanes never bleed through. A fixed lead column keeps every
+	   mark (and the selection checkmark) lined up down the list. 32px plus the
+	   list's 2px gap is the 34px pitch. */
 	.scard {
 		position: relative;
 		z-index: 1;
 		display: grid;
-		grid-template-columns: 18px minmax(0, 1fr);
+		grid-template-columns: 16px minmax(0, 1fr);
 		column-gap: 8px;
 		align-items: start;
 		width: 100%;
-		padding: 8px 10px 9px 9px;
+		padding: 6px 8px;
 		border: none;
-		border-radius: 12px;
+		border-radius: var(--radius-control);
 		background: var(--sidebar);
 		color: inherit;
 		text-align: left;
 		cursor: pointer;
-		transition: transform 300ms cubic-bezier(0.16, 1, 0.3, 1), background-color 150ms ease;
+		transition: transform 300ms cubic-bezier(0.16, 1, 0.3, 1), background-color 120ms ease;
 	}
-	.scard-frame.phone .scard { column-gap: 10px; padding: 10px 10px 11px 9px; }
-	.scard-frame.dragging .scard { transition: background-color 150ms ease; }
-	.scard-frame:hover .scard { background: color-mix(in oklch, var(--sidebar-foreground) 5%, var(--sidebar)); }
+	.scard-frame.dragging .scard { transition: background-color 120ms ease; }
+	.scard-frame:hover .scard { background: var(--row-hover); }
 	.scard.active,
-	.scard-frame:hover .scard.active { background: color-mix(in oklch, var(--sidebar-foreground) 10%, var(--sidebar)); }
-	.scard.active::before {
-		content: '';
-		position: absolute;
-		left: 0;
-		top: 10px;
-		bottom: 10px;
-		width: 2.5px;
-		border-radius: 2px;
-		background: var(--primary);
-	}
-	.scard.compact.active::before { top: 8px; bottom: 8px; }
-	.scard-frame.pressing .scard {
-		background: color-mix(in oklch, var(--sidebar-foreground) 8%, var(--sidebar));
-		transform: scale(0.985);
-	}
+	.scard-frame:hover .scard.active,
+	.scard-frame.pressing .scard { background: var(--row-selected); }
+	.scard-frame.pressing .scard { transform: scale(0.985); }
 	.scard-frame.selected .scard,
 	.scard-frame.selected:hover .scard { background: color-mix(in oklab, var(--primary) 9%, var(--sidebar)); }
 	.scard:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
 
-	/* Selection checkmark, in the lead glyph's column. */
+	/* Selection checkmark, in the lead mark's column. */
 	.check {
 		display: grid;
 		place-items: center;
-		width: 18px;
-		height: 18px;
-		margin-top: 1px;
+		width: 16px;
+		height: 16px;
+		margin-top: 2px;
 		border: 1.5px solid var(--border-strong);
 		border-radius: 50%;
 		color: var(--primary-foreground);
 	}
 	.scard-frame.selected .check { background: var(--primary); border-color: var(--primary); }
 
-	.scard.compact .l3 { margin-top: 3px; }
-
-	/* ── Leading git glyph ───────────────────────────────────────────── */
+	/* ── Leading mark ─────────────────────────────────────────────────── */
 	.lead {
 		display: grid;
 		place-items: center;
-		height: 17px;
+		height: 20px;
 		color: var(--subtle-foreground);
 	}
-	.scard.compact .lead { height: 16px; }
 	.lead :global(svg) { flex: none; }
 	.lead.green { color: var(--success); }
 	.lead.purple { color: var(--status-merged); }
@@ -906,59 +867,21 @@
 		background: currentColor;
 		opacity: 0.75;
 	}
-
-	.body { min-width: 0; }
-
-	.l1 {
-		display: flex;
-		align-items: baseline;
-		gap: 8px;
-		min-width: 0;
-	}
-	.title {
-		flex: 1 1 auto;
-		min-width: 0;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-		font-size: 13px;
-		font-weight: 500;
-		letter-spacing: -0.008em;
-		color: var(--sidebar-foreground);
-	}
-	.scard:not(.compact) .title { font-size: 13.5px; font-weight: 600; }
-	/* Runtime state rides IN the title, so it truncates with it and never
-	   steals a column from the branch line. */
 	.pip {
-		display: inline-block;
-		width: 6px;
-		height: 6px;
+		width: 7px;
+		height: 7px;
 		border-radius: 50%;
 		background: var(--primary);
-		margin-right: 6px;
-		vertical-align: 1px;
 		animation: card-ping 1.8s ease-in-out infinite;
 	}
-	.title :global(.warn) {
-		display: inline-block;
+	.lead :global(.warn) {
 		color: var(--warning);
-		margin-right: 5px;
-		vertical-align: -2px;
 		animation: card-pulse 2.4s ease-in-out infinite;
 	}
 	/* What happened, not something still calling: the danger colour, held still. */
-	.title :global(.warn.failed) {
+	.lead :global(.warn.failed) {
 		color: var(--destructive);
 		animation: none;
-	}
-
-	.dot {
-		width: 3px;
-		height: 3px;
-		border-radius: 50%;
-		background: var(--subtle-foreground);
-		opacity: 0.6;
-		flex: none;
 	}
 
 	@keyframes card-ping {
@@ -970,169 +893,107 @@
 		50% { opacity: 1; }
 	}
 
-	/* Pinned to the right end of its line; the segments before it give way. */
+	.body { min-width: 0; }
+
+	.l1 {
+		display: flex;
+		align-items: baseline;
+		gap: 8px;
+		min-width: 0;
+		line-height: 20px;
+	}
+	.title {
+		flex: 1 1 auto;
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		font-size: 13.5px;
+		font-weight: 450;
+		color: var(--sidebar-muted);
+		transition: color 120ms ease;
+	}
+	.scard-frame:hover .title { color: var(--sidebar-foreground); }
+	.scard.emphasized .title {
+		font-weight: 500;
+		color: var(--sidebar-foreground);
+	}
+
+	/* Pinned to the right end of the line; the title gives way first. */
 	.timer {
 		flex: none;
 		margin-left: auto;
-		padding-left: 6px;
-		font-family: var(--font-mono);
 		font-variant-numeric: tabular-nums;
-		font-size: 11px;
-		color: var(--sidebar-muted);
+		font-size: var(--fs-label);
+		color: var(--subtle-foreground);
 		white-space: nowrap;
-		transition: opacity 120ms ease;
 	}
 	.timer.live { color: var(--primary); }
-	/* A long PR label ellipsizes before it can push the timer off the line. */
-	.l2 .st.pr,
-	.l3 .st.pr { flex: 0 1 auto; min-width: 0; white-space: nowrap; }
-	/* Several PRs: each count keeps its state's tone; the chip opens the list. */
-	/* A button that reads as inline text: no box, no font or line-height of
-	   its own, so the row keeps its height in the normal and compact lines. */
+
+	/* Several PRs: each count keeps its state's tone; the chip opens the list.
+	   A button that reads as inline text: no box, no font or line-height of its
+	   own, so the row keeps its height. */
 	.pr-chip.multi {
 		cursor: pointer;
 		position: relative;
+		flex: 0 1 auto;
+		min-width: 0;
 		margin: 0;
 		padding: 0;
 		border: 0;
 		border-radius: 3px;
 		background: none;
 		font: inherit;
-		font-weight: 500;
+		font-size: var(--fs-label);
 		line-height: inherit;
-		letter-spacing: inherit;
-		color: inherit;
+		color: var(--sidebar-muted);
 		text-align: inherit;
 		text-transform: none;
+		white-space: nowrap;
 		appearance: none;
 	}
-	.l3 .pr-chip.multi { font-weight: 400; }
 	.pr-chip.multi:focus-visible { outline: 2px solid var(--ring); outline-offset: -1px; }
 	.pr-chip.multi .sep { color: var(--subtle-foreground); }
 	.pr-chip.multi:hover > span:not(.sep),
 	.pr-chip.multi.open > span:not(.sep) { text-decoration: underline dotted; text-underline-offset: 2px; }
-	/* On the meta line the project and the branch share the squeeze, so
-	   neither collapses to a stub. */
-	.seg.proj-seg { flex: 0 1 auto; min-width: 4.5em; }
-	.l3 .timer { font-size: 10.5px; }
 
-	/* Receded rows dim the title + meta line but keep the status line, glyph
-	   and timer lit; hover (desktop) restores the whole row. */
-	.scard.receded .title,
-	.scard.receded .l3 { opacity: 0.62; transition: opacity 0.13s ease; }
-	.scard-frame:hover .scard.receded .title,
-	.scard-frame:hover .scard.receded .l3,
-	.scard-frame:has(:focus-visible) .scard.receded .title,
-	.scard-frame:has(:focus-visible) .scard.receded .l3 { opacity: 1; }
-
-	/* Line 2 (active cards): what the agent is doing · what the PR is doing ·
-	   how much has changed. */
+	/* Second line, only on a running or blocked row: what it is doing or waiting
+	   on, then what the PR and the diff are doing. */
 	.l2 {
 		display: flex;
 		align-items: center;
-		gap: 6px;
-		margin-top: 4px;
+		gap: 8px;
 		min-width: 0;
-		font-size: 11.5px;
+		padding-bottom: 1px;
+		font-size: var(--fs-label);
+		line-height: 17px;
 		white-space: nowrap;
 		overflow: hidden;
 	}
 	.st {
 		flex: none;
-		font-weight: 500;
 		overflow: hidden;
 		text-overflow: ellipsis;
 	}
+	.l2 .st.pr { flex: 0 1 auto; min-width: 0; }
 	.st.accent { color: var(--primary); }
 	.st.amber { color: var(--warning); }
 	.st.danger { color: var(--destructive); }
 	.st.green { color: var(--success); }
 	.st.purple { color: var(--status-merged); }
 	.st.muted { color: var(--muted-foreground); }
-	.working-dots {
-		display: inline-flex;
-		align-items: center;
-		gap: 2px;
-		margin-left: 4px;
-		vertical-align: middle;
-	}
-	.working-dots > span {
-		width: 3px;
-		height: 3px;
-		border-radius: 50%;
-		background: currentColor;
-		opacity: 0.65;
-		animation: working-dot-pulse 1.2s ease-in-out infinite;
-	}
-	.working-dots > span:nth-child(2) { animation-delay: 0.16s; }
-	.working-dots > span:nth-child(3) { animation-delay: 0.32s; }
-	@keyframes working-dot-pulse {
-		0%, 60%, 100% { opacity: 0.35; }
-		30% { opacity: 1; }
-	}
 	.diff {
 		flex: none;
-		font-family: var(--font-mono);
-		font-size: 10.5px;
+		font-size: var(--fs-label);
 		font-variant-numeric: tabular-nums;
 	}
 	.diff .p { color: var(--success); }
 	.diff .m { color: var(--destructive); }
 
-	.l3 {
-		margin-top: 4px;
-		display: flex;
-		align-items: center;
-		gap: 5px;
-		font-size: 11px;
-		color: var(--sidebar-muted);
-		min-width: 0;
-		flex-wrap: nowrap;
-		overflow: hidden;
-	}
-	.l3 :global(svg) { color: var(--subtle-foreground); flex: none; }
-	.l3 .st { font-size: 10.5px; font-weight: 400; }
-	.seg {
-		display: inline-flex;
-		align-items: center;
-		gap: 3.5px;
-		min-width: 0;
-		flex: none;
-		white-space: nowrap;
-	}
-	/* Branch gives back space first: it grows to fit long names when line 3
-	   has room and only ellipsizes once the row actually fills up. */
-	.seg.branch-seg {
-		flex: 0 1 auto;
-	}
-	.proj {
-		display: block;
-		min-width: 0;
-		max-width: 96px;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-		color: var(--sidebar-muted);
-		font-weight: 400;
-	}
-	.device-seg {
-		flex: none;
-	}
-	.branch {
-		min-width: 0;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-		font-family: var(--font-mono);
-		font-size: 10px;
-	}
-
-	/* Phone type is a step larger: thumbs, arm's length. */
-	.scard-frame.phone .scard:not(.compact) .title { font-size: 14.5px; }
-	.scard-frame.phone .scard.compact .title { font-size: 14px; }
-	.scard-frame.phone .l2 { font-size: 12px; }
-	.scard-frame.phone .l3 { font-size: 11.5px; }
-	.scard-frame.phone .branch { font-size: 11px; }
+	/* Phone: a 44px row and a larger title for thumbs at arm's length. */
+	.scard-frame.phone .scard { column-gap: 10px; padding: 12px 10px; }
+	.scard-frame.phone .title { font-size: 14.5px; }
+	.scard-frame.phone .l2 { font-size: 13px; line-height: 18px; }
 
 	/* ── Hover actions (pointer that hovers) ───────────────────────────── */
 	.hover-acts {
@@ -1144,31 +1005,23 @@
 		gap: 2px;
 		padding-left: 18px;
 		transform: translateY(-50%);
-		background: linear-gradient(
-			90deg,
-			transparent,
-			color-mix(in oklch, var(--sidebar-foreground) 5%, var(--sidebar)) 18px
-		);
+		background: linear-gradient(90deg, transparent, var(--row-hover) 18px);
 		opacity: 0;
 		transition: opacity 120ms ease;
 	}
 	.scard-frame:hover .hover-acts,
 	.hover-acts:focus-within { opacity: 1; }
 	.scard-frame.active .hover-acts {
-		background: linear-gradient(
-			90deg,
-			transparent,
-			color-mix(in oklch, var(--sidebar-foreground) 10%, var(--sidebar)) 18px
-		);
+		background: linear-gradient(90deg, transparent, var(--row-selected) 18px);
 	}
 	.row-action {
 		display: grid;
 		place-items: center;
-		width: 28px;
-		height: 28px;
+		width: 24px;
+		height: 24px;
 		padding: 0;
 		border: 0;
-		border-radius: 7px;
+		border-radius: 6px;
 		background: transparent;
 		color: var(--muted-foreground);
 		cursor: pointer;
@@ -1208,8 +1061,7 @@
 
 	@media (prefers-reduced-motion: reduce) {
 		.pip,
-		.working-dots > span,
-		.title :global(.warn) { animation: none; }
+		.lead :global(.warn) { animation: none; }
 		.scard-frame,
 		.scard,
 		.lane,

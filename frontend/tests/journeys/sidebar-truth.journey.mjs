@@ -337,7 +337,7 @@ async function expectFailedRow({ page, mark, log, variant }, id) {
 	await waitStatus(page, id, 'Failed');
 	await waitLane(page, id, 'needs-you');
 	await expectDangerColour(page.locator(`${CARD(id)} .st`).first(), 'the status word', log);
-	await expectDangerColour(page.locator(`${CARD(id)} .title .warn.failed`), 'the row\'s sign', log);
+	await expectDangerColour(page.locator(`${CARD(id)} .lead .warn.failed`), 'the row\'s sign', log);
 	await mark('reload');
 	await page.reload({ waitUntil: 'domcontentloaded' });
 	// A new step once the recorder has seen the old page go: the reload itself
@@ -436,7 +436,7 @@ const FAILED_SETTLED = {
 		await waitLane(page, chat.id, 'settled');
 		// A settled row is the compact one: no status word to read, but the alert
 		// sign is in the danger colour and assistive tech hears the word.
-		const sign = page.locator(`${CARD(chat.id)} .title .warn.failed`);
+		const sign = page.locator(`${CARD(chat.id)} .lead .warn.failed`);
 		await sign.waitFor({ timeout: 5000 });
 		const said = await page.locator(`${CARD(chat.id)} .title .sr-only`).first().textContent();
 		expect(/^Failed: /.test(said ?? ''), `a settled failed row announces it: ${JSON.stringify(said)}`);
@@ -458,7 +458,7 @@ const FAILED_CLEARED = {
 		await api(page, 'POST', `/sessions/${encodeURIComponent(chat.id)}/clear`);
 		await page.waitForFunction((selector) => {
 			const row = document.querySelector(selector);
-			return row && row.querySelector('.st')?.textContent?.trim() !== 'Failed' && !row.querySelector('.title .warn.failed');
+			return row && row.querySelector('.st')?.textContent?.trim() !== 'Failed' && !row.querySelector('.lead .warn.failed');
 		}, CARD(chat.id), { timeout: 30_000 });
 		expect(await laneOf(page, chat.id) !== 'needs-you', 'a cleared chat no longer needs you');
 		await mark('reload');
