@@ -144,7 +144,7 @@
 		border: 0;
 		background: none;
 		border-radius: var(--st-radius-sm);
-		color: var(--st-mfg);
+		color: var(--st-fg);
 		font-size: 13px;
 		font-weight: 500;
 		padding: 0 8px;

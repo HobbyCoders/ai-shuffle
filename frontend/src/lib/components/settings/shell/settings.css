@@ -207,6 +207,7 @@
 	border-radius: var(--st-radius-md);
 	border: 1px solid var(--st-border-strong);
 	background: transparent;
+	color: var(--st-fg);
 	font-size: 13px;
 	font-weight: 500;
 	white-space: nowrap;
@@ -236,10 +237,6 @@
 }
 .settings-shell .st-btn.ghost {
 	border-color: transparent;
-	color: var(--st-mfg);
-}
-.settings-shell .st-btn.ghost:hover:not(:disabled) {
-	color: var(--st-fg);
 }
 .settings-shell .st-btn.warn {
 	color: var(--st-warning);

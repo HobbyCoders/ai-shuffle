@@ -43,7 +43,7 @@
 	let { bar = false }: Props = $props();
 
 	const unread = $derived($unreadCount);
-	const dropdownId = bar ? 'notifications-bar' : 'notifications';
+	const dropdownId = $derived(bar ? 'notifications-bar' : 'notifications');
 	const showPanel = $derived($openHeaderDropdown === dropdownId);
 
 	let rootRef = $state<HTMLDivElement | null>(null);
