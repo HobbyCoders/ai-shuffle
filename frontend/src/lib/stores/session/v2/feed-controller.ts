@@ -1078,6 +1078,12 @@ export const feedController: FeedController = {
 				if (ev.type === 'swarm.updated') swarms.receive(ev.swarm, sessionId);
 				if (typeof ev.command_id === 'string') clearCompactRetry(sessionId, ev.command_id);
 				reducerState = reduce(reducerState, ev);
+				// A replay can end a turn before any fold saw it live: name the unnamed
+				// Stop's recovery from that end, or it would bind to the next turn.
+				if ((ev.type === 'turn.completed' || ev.type === 'turn.aborted') && deps?.getState().stopTimedOutTurnId) {
+					const endedTurnId = typeof ev.turn_id === 'string' ? ev.turn_id : null;
+					deps.update(s => ({ ...s, stopTimedOutTurnId: nameStopRecovery(s.stopTimedOutTurnId, endedTurnId) }));
+				}
 				// A lagged mirror can replay an entire turn before the next fold.
 				// Consume optimism when the reducer confirms the turn, not only
 				// when a streaming frame paints; otherwise its completed replay

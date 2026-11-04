@@ -99,6 +99,14 @@ export function nameStopRecovery(
 	return liveTurnId && liveTurnId !== timedOut ? null : timedOut;
 }
 
+/** Stop pressed again on a turn already given up on, or refused, keeps its rows restorable. */
+export function keepStopRecovery(
+	timedOut: string | null | undefined,
+	liveTurnId: string | null | undefined
+): string | null {
+	return liveTurnId && timedOut === liveTurnId ? timedOut : null;
+}
+
 /** Also releases a carried hold after settlement, when there is no live turn. */
 export function stopRecoveryAppliesToTurn(
 	timedOut: string | null | undefined,

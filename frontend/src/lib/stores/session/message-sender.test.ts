@@ -1024,35 +1024,64 @@ describe('Stop timeout recovery', () => {
 		expect(test.getState().stopTimedOutTurnId).toBeNull();
 	});
 
-	it.each([['turn-1', 'turn-1'], [null, STOP_TURN_NOT_NAMED]] as const)(
-		'keeps the recovery when Stop is pressed again on the same turn (%s)',
-		(liveTurnId, marker) => {
-			const test = stopping(liveTurnId);
+	it('keeps the recovery when Stop is pressed again on the same turn', () => {
+		const test = stopping();
+		test.sender.stopGeneration();
+		vi.advanceTimersByTime(10000);
+		expect(test.getState().stopTimedOutTurnId).toBe('turn-1');
+
+		// A late event raises the Stop button again on a turn already given up on.
+		test.deps.update(s => ({ ...s, isStreaming: true }));
+		test.sender.stopGeneration();
+		const state = test.getState();
+		expect(state.stopTimedOutTurnId).toBe('turn-1');
+		expect(stopRecoveryAppliesToTurn(state.stopTimedOutTurnId, state.liveTurnId)).toBe(true);
+	});
+
+	it('does not carry an unnamed recovery into a Stop on a new send', () => {
+		const test = stopping(null);
+		test.sender.stopGeneration();
+		vi.advanceTimersByTime(10000);
+		expect(test.getState().stopTimedOutTurnId).toBe(STOP_TURN_NOT_NAMED);
+
+		test.deps.update(s => ({ ...s, isStreaming: true }));
+		test.sender.stopGeneration();
+		expect(test.getState().stopTimedOutTurnId).toBeNull();
+	});
+
+	it.each(['turn.completed', 'turn.aborted', 'turn.parked'])(
+		'ends an unnamed recovery with the turn when a replay delivers %s before any fold',
+		terminal => {
+			const test = stopping(null);
 			test.sender.stopGeneration();
 			vi.advanceTimersByTime(10000);
-			expect(test.getState().stopTimedOutTurnId).toBe(marker);
 
-			// A late event raises the Stop button again on a turn already given up on.
-			test.deps.update(s => ({ ...s, isStreaming: true }));
-			test.sender.stopGeneration();
-			const state = test.getState();
-			expect(state.stopTimedOutTurnId).toBe(marker);
-			expect(stopRecoveryAppliesToTurn(state.stopTimedOutTurnId, state.liveTurnId)).toBe(true);
+			feedController.start('sess-1');
+			feed.onEvent!({ type: 'turn.started', id: 'start', seq: 1, session_id: 'sess-1', turn_id: 'turn-1', created_at: '2026-11-04T00:00:00Z' });
+			feed.onEvent!({ type: terminal, id: 'end', seq: 2, session_id: 'sess-1', turn_id: 'turn-1', created_at: '2026-11-04T00:00:01Z' });
+			feed.onEvent!({ type: 'caught_up', seq: 2 });
+			vi.advanceTimersByTime(300);
+			expect(test.getState().stopTimedOutTurnId).toBe('turn-1');
+
+			feed.onEvent!({ type: 'turn.started', id: 'next', seq: 3, session_id: 'sess-1', turn_id: 'turn-2', created_at: '2026-11-04T00:00:02Z' });
+			vi.advanceTimersByTime(300);
+			expect(test.getState().liveTurnId).toBe('turn-2');
+			expect(test.getState().stopTimedOutTurnId).toBeNull();
 		}
 	);
 
-	it('still recovers when Stop could not leave the page, without recording a Stop', () => {
-		const test = stopping();
+	it.each(['turn-1', null])('still recovers when a Stop on turn %s could not leave the page, without recording a Stop', liveTurnId => {
+		const test = stopping(liveTurnId);
 		test.wsConn.send.mockReturnValue(false);
 		test.sender.stopGeneration();
 		expect(test.getState().stopRequestedTurnId ?? null).toBeNull();
 		vi.advanceTimersByTime(10000);
 		expect(test.getState().isStreaming).toBe(false);
-		expect(test.getState().stopTimedOutTurnId).toBe('turn-1');
+		expect(test.getState().stopTimedOutTurnId).toBe(liveTurnId ?? STOP_TURN_NOT_NAMED);
 	});
 
-	it('does not let an unsent Stop recover a started successor', () => {
-		const test = stopping();
+	it.each(['turn-1', null])('does not let an unsent Stop on turn %s recover a turn the feed named later', liveTurnId => {
+		const test = stopping(liveTurnId);
 		test.wsConn.send.mockReturnValue(false);
 		test.sender.stopGeneration();
 		test.deps.update(s => ({ ...s, liveTurnId: 'turn-2', isStreaming: true }));

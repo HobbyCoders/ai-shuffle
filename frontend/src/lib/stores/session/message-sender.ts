@@ -16,7 +16,7 @@ import { persistVoiceContext, voiceContextFor } from '$lib/services/voiceExecuti
 import { STREAM_DEBUG } from '$lib/utils/debug-log';
 import { generateBranchName, generateBranchNameLocal } from '$lib/api/git';
 import { ATTACHMENTS_NEED_LOCAL_CHECKOUT } from '$lib/components/chat/attach-disable';
-import { STOP_TURN_NOT_NAMED, stopPressedOn, stopRecoveryAppliesToTurn } from '$lib/utils/not-sent-hold';
+import { keepStopRecovery, STOP_TURN_NOT_NAMED, stopPressedOn } from '$lib/utils/not-sent-hold';
 import { parkedSendTurnId } from '$lib/utils/work-log';
 // V2 Phase 1: SSE-fed reducer — the transcript authority for a session.
 import { feedController, OPTIMISTIC_STREAMING_ON } from './v2/feed-controller';
@@ -770,12 +770,11 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					session_id: _state.sessionId,
 					...(_state.liveTurnId ? { turn_id: _state.liveTurnId } : {}),
 				});
-				// Only a Stop that left this page can have refused anything. Pressing it
-				// again on a turn already given up on keeps that turn's rows restorable.
+				// Only a Stop that left this page can have refused anything.
 				if (recorded) update(s => ({
 					...s,
 					stopRequestedTurnId: s.liveTurnId ?? STOP_TURN_NOT_NAMED,
-					stopTimedOutTurnId: stopRecoveryAppliesToTurn(s.stopTimedOutTurnId, s.liveTurnId) ? s.stopTimedOutTurnId : null,
+					stopTimedOutTurnId: keepStopRecovery(s.stopTimedOutTurnId, s.liveTurnId),
 				}));
 			} else if (internal.awaitingNewSession) {
 				// Brand-new session whose id the backend hasn't minted yet, so we
@@ -793,12 +792,13 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				const state = getState();
 				// A navigation or a started successor is not the Stop still waiting. A
 				// Stop that never left the page records nothing, so go by the turn it
-				// was pressed on: this recovery is all that frees a page cut off offline.
+				// saw: this recovery is all that frees a page cut off offline, and a
+				// feed that has named a newer turn is not cut off.
 				if (state.isStreaming
 					&& (!_state.sessionId || state.sessionId === _state.sessionId)
 					&& (recorded
 						? stopPressedOn(state.stopRequestedTurnId, state.liveTurnId)
-						: !_state.liveTurnId || state.liveTurnId === _state.liveTurnId)) {
+						: state.liveTurnId === _state.liveTurnId)) {
 					console.warn('[ActiveSession] Stop confirmation timeout - forcing UI recovery');
 					// Deliberate override, not a competing writer: the stop was never
 					// confirmed, so this is the UI's last-resort recovery. Withdraw
