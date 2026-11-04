@@ -1,4 +1,5 @@
 <script lang="ts">
+	import Switch from '$lib/components/settings/rows/Switch.svelte';
 	/**
 	 * HookListItem - Individual hook row in the project Hooks tab.
 	 * Emits a Studio-v2 .set-row; primitives come from project-tabs.css (.ptab),
@@ -79,17 +80,7 @@
 				<Trash2 size={14} />
 			</button>
 		</RowActionMenu>
-		<button
-			type="button"
-			class="switch"
-			class:on={hook.enabled}
-			role="switch"
-			aria-checked={hook.enabled}
-			aria-label={hook.enabled ? 'Disable hook' : 'Enable hook'}
-			title={hook.enabled ? 'Disable hook' : 'Enable hook'}
-			onclick={onToggle}
-			disabled={saving}
-		><i></i></button>
+		<Switch controlled size="sm" checked={hook.enabled} label={hook.enabled ? 'Disable hook' : 'Enable hook'} title={hook.enabled ? 'Disable hook' : 'Enable hook'} onchange={() => onToggle()} disabled={saving} />
 	</div>
 </div>
 

@@ -493,43 +493,6 @@
 		height: 38px;
 	}
 
-	/* Toggle switch — button.switch > <i>. On = primary (white) track. */
-	.ed-content :global(.switch) {
-		width: 34px;
-		height: 20px;
-		flex-shrink: 0;
-		border-radius: 11px;
-		background: var(--muted);
-		border: 1px solid var(--border);
-		position: relative;
-		padding: 0;
-		cursor: pointer;
-		transition: background 0.18s, border-color 0.18s;
-	}
-	.ed-content :global(.switch i) {
-		position: absolute;
-		top: 1px;
-		left: 1px;
-		width: 15px;
-		height: 15px;
-		border-radius: 50%;
-		background: var(--foreground);
-		transition: left 0.18s, background 0.18s;
-	}
-	.ed-content :global(.switch.on) {
-		background: var(--primary);
-		border-color: var(--primary);
-	}
-	.ed-content :global(.switch.on i) {
-		left: 16px;
-		background: var(--primary-foreground);
-	}
-	.ed-content :global(.switch:disabled) {
-		opacity: 0.4;
-		cursor: not-allowed;
-	}
-
-	/* Segmented control. */
 	.ed-content :global(.seg) {
 		display: inline-flex;
 		border: 1px solid var(--border);

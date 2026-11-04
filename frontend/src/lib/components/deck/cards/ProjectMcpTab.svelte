@@ -1,4 +1,5 @@
 <script lang="ts">
+	import Switch from '$lib/components/settings/rows/Switch.svelte';
 	import { watchResources } from '$lib/services/watch-resources';
 	/**
 	 * ProjectMcpTab - MCP server visibility tab for project detail view
@@ -248,16 +249,7 @@
 			{@render serverMeta(server)}
 		</div>
 		<div class="ctl">
-			<button
-				type="button"
-				class="switch"
-				class:on={server.enabled}
-				role="switch"
-				aria-checked={server.enabled}
-				aria-label={`${server.enabled ? 'Disable' : 'Enable'} ${server.name}`}
-				title={server.enabled ? 'Disable server' : 'Enable server'}
-				onclick={() => handleToggle(server)}
-			><i></i></button>
+			<Switch controlled size="sm" checked={server.enabled} label={`${server.enabled ? 'Disable' : 'Enable'} ${server.name}`} title={server.enabled ? 'Disable server' : 'Enable server'} onchange={() => handleToggle(server)} />
 			{#if removable}
 				<RowActionMenu
 					open={actionsOpenKey === rowKey(server)}

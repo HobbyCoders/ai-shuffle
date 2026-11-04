@@ -1,4 +1,5 @@
 <script lang="ts">
+	import Switch from '$lib/components/settings/rows/Switch.svelte';
 	import {
 		automationFallbackModel,
 		fallbackModelHint,
@@ -653,7 +654,7 @@
 		<div class="set-row">
 			<div class="lab"><h4>Requires approval</h4><p>Pause before running so you can review.</p></div>
 			<div class="ctl">
-				<button type="button" class="switch" class:on={formRequiresApproval} role="switch" aria-checked={formRequiresApproval} aria-label="Requires approval" onclick={() => onUpdateFormRequiresApproval(!formRequiresApproval)}><i></i></button>
+				<Switch controlled size="sm" checked={formRequiresApproval} label="Requires approval" onchange={() => onUpdateFormRequiresApproval(!formRequiresApproval)} />
 			</div>
 		</div>
 	{/if}

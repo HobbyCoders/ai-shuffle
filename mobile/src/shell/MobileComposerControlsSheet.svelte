@@ -1588,21 +1588,22 @@
 	.mcp-ring.unknown .ring-track { stroke-dasharray: 3 2.7; }
 
 	/* Switch rows */
-	.mcp-sw { position: relative; width: 46px; height: 28px; flex: none; border-radius: 999px; background: var(--border-strong); transition: background-color 0.2s; }
+	/* The phone's measure of the shared Switch (mobile.css), which sits inside a row here. */
+	.mcp-sw { position: relative; width: 42px; height: 25px; flex: none; border-radius: 999px; background: var(--switch-off); transition: background-color 0.2s; }
 	.mcp-sw::after {
 		content: '';
 		position: absolute;
-		top: 3px;
-		left: 3px;
-		width: 22px;
-		height: 22px;
+		top: 2.5px;
+		left: 2.5px;
+		width: 20px;
+		height: 20px;
 		border-radius: 50%;
-		background: var(--background);
-		box-shadow: 0 1px 3px color-mix(in oklch, var(--foreground) 35%, transparent);
+		background: var(--switch-thumb);
+		box-shadow: 0 0 0 0.5px var(--switch-thumb-edge), 0 1px 2px var(--switch-thumb-edge);
 		transition: transform 0.22s var(--mcp-ease);
 	}
-	.mcp-row[aria-checked='true'] .mcp-sw { background: var(--primary); }
-	.mcp-row[aria-checked='true'] .mcp-sw::after { transform: translateX(18px); background: var(--primary-foreground); }
+	.mcp-row[aria-checked='true'] .mcp-sw { background: var(--switch-on); }
+	.mcp-row[aria-checked='true'] .mcp-sw::after { transform: translateX(17px); }
 	.mcp-row[aria-disabled='true'] { cursor: default; }
 	.mcp-row[aria-disabled='true'] .mcp-lbl > span, .mcp-row[aria-disabled='true'] .mcp-ic { opacity: 0.5; }
 	.mcp-row[aria-disabled='true'] .mcp-sw { opacity: 0.4; }

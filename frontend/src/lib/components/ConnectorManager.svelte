@@ -1,4 +1,5 @@
 <script lang="ts">
+	import Switch from '$lib/components/settings/rows/Switch.svelte';
 	import { watchResources } from '$lib/services/watch-resources';
 	/**
 	 * ConnectorManager - Manage external connectors (Telegram, Discord, WhatsApp, Webhook, Slack, LINE, Signal, iMessage)
@@ -962,19 +963,8 @@
 
 										<!-- Actions -->
 										<div class="flex items-center gap-1.5 shrink-0">
-											<!-- Toggle Switch (canonical .switch pattern) -->
-											<button
-												type="button"
-												class="switch"
-												class:on={connector.is_active}
-												role="switch"
-												aria-checked={connector.is_active}
-												aria-label={`${connector.is_active ? 'Deactivate' : 'Activate'} ${connector.name}`}
-												onclick={() => handleToggle(connector)}
-												title={connector.is_active ? 'Deactivate' : 'Activate'}
-											>
-												<i></i>
-											</button>
+											<!-- Toggle -->
+											<Switch controlled size="sm" checked={connector.is_active} label={`${connector.is_active ? 'Deactivate' : 'Activate'} ${connector.name}`} title={connector.is_active ? 'Deactivate' : 'Activate'} onchange={() => handleToggle(connector)} />
 
 											<!-- Test -->
 											<button
@@ -1713,12 +1703,6 @@
 </div>
 
 <style>
-	.switch { width: 32px; height: 18px; border-radius: 999px; background: var(--muted-foreground); border: 1px solid var(--border); padding: 2px; flex-shrink: 0; cursor: pointer; }
-	.switch i { display: block; width: 12px; height: 12px; border-radius: 50%; background: var(--background); transition: transform .15s; }
-	.switch[aria-checked='true'] { background: var(--primary); }
-	.switch[aria-checked='true'] i { transform: translateX(12px); }
-	.switch:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
-	.switch:disabled { opacity: .5; cursor: not-allowed; }
 	/* .connector-manager inherits from parent layout */
 
 	/* ========================================
@@ -1969,10 +1953,6 @@
 		outline: 2px solid var(--ring);
 		outline-offset: 1px;
 	}
-
-	/* The enable/disable toggle reuses the app's canonical `.switch`
-	   pattern (button.switch > <i>), themed globally by StudioEditorShell's
-	   `.ed-content :global(.switch)` rules — no bespoke toggle CSS here. */
 
 	/* ========================================
 	   Event Log Table

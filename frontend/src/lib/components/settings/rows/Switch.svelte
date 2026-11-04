@@ -1,9 +1,10 @@
 <script lang="ts">
 	/**
-	 * Switch: the only on/off control in Settings. `role="switch"` with
+	 * Switch: the app's one on/off control. `role="switch"` with
 	 * `aria-checked`. Inside a SettingRow it is labelled by the row; elsewhere
 	 * pass `label`. Disabled while Settings is read-only. An `onchange`
-	 * that reports a failed save (see `settle`) flips it back.
+	 * that reports a failed save (see `settle`) flips it back. With `controlled`
+	 * it never moves on its own: it asks, and shows what `checked` says.
 	 */
 	import { getSettingsAccess } from '$lib/settings/access.svelte';
 	import { controlAria, getRowContext, settle, type ChangeResult } from './row-context';
@@ -15,9 +16,11 @@
 		disabled?: boolean;
 		/** Accessible name when not inside a SettingRow (or to override it). */
 		label?: string;
+		title?: string;
+		controlled?: boolean;
 	}
 
-	let { checked = $bindable(false), onchange, size = 'md', disabled = false, label }: Props = $props();
+	let { checked = $bindable(false), onchange, size = 'md', disabled = false, label, title, controlled = false }: Props = $props();
 
 	const access = getSettingsAccess();
 	const row = getRowContext();
@@ -25,6 +28,10 @@
 
 	function toggle() {
 		if (off) return;
+		if (controlled) {
+			onchange?.(!checked);
+			return;
+		}
 		const before = checked;
 		checked = !before;
 		settle(onchange?.(checked), () => (checked = before));
@@ -38,6 +45,7 @@
 	class:sm={size === 'sm'}
 	aria-checked={checked}
 	disabled={off}
+	{title}
 	{...controlAria(row, label)}
 	onclick={toggle}
 ></button>
@@ -49,10 +57,14 @@
 		border-radius: 999px;
 		border: 0;
 		padding: 0;
-		background: var(--st-border-strong);
+		background: var(--switch-off);
 		position: relative;
 		transition: background 0.15s;
 		flex: none;
+		cursor: pointer;
+	}
+	.st-sw:disabled {
+		cursor: default;
 	}
 	.st-sw::after {
 		content: '';
@@ -67,7 +79,17 @@
 		transition: transform 0.15s;
 	}
 	.st-sw[aria-checked='true'] {
-		background: var(--st-primary);
+		background: var(--switch-on);
+	}
+	.st-sw:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
+	}
+	/* The track is small; a finger's target is not. */
+	.st-sw::before {
+		content: '';
+		position: absolute;
+		inset: -13px -6px;
 	}
 	/* The thumb stays white in both states. Its edge keeps it visible on a theme
 	   whose primary is itself white (Vercel). */

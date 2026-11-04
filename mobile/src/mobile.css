@@ -606,17 +606,17 @@ html:root[data-platform='mobile'] .settings-shell .st-back:not(:has(span)) {
 	margin-right: -6px;
 }
 
-html:root[data-platform='mobile'] .settings-shell .st-sw:not(.sm) {
+html:root[data-platform='mobile'] .st-sw:not(.sm) {
 	width: 42px;
 	height: 25px;
 }
 
-html:root[data-platform='mobile'] .settings-shell .st-sw:not(.sm)::after {
+html:root[data-platform='mobile'] .st-sw:not(.sm)::after {
 	width: 20px;
 	height: 20px;
 }
 
-html:root[data-platform='mobile'] .settings-shell .st-sw:not(.sm)[aria-checked='true']::after {
+html:root[data-platform='mobile'] .st-sw:not(.sm)[aria-checked='true']::after {
 	transform: translateX(17px);
 }
 

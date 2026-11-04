@@ -1,4 +1,5 @@
 <script lang="ts">
+	import Switch from '$lib/components/settings/rows/Switch.svelte';
 	/**
 	 * FilesStudio — the Studio-v2 Files surface.
 	 *
@@ -340,14 +341,7 @@
 		</nav>
 		<div class="fs-toolbar-spacer"></div>
 		<label class="fs-toggle">
-			<button
-				class="fs-switch"
-				class:on={showHidden}
-				role="switch"
-				aria-checked={showHidden}
-				aria-label="Toggle hidden files"
-				onclick={() => files.toggleShowHidden()}
-			><span class="fs-switch-thumb"></span></button>
+			<Switch controlled size="sm" checked={showHidden} label="Toggle hidden files" onchange={() => files.toggleShowHidden()} />
 			Hidden files
 		</label>
 	</div>
@@ -611,16 +605,6 @@
 		display: flex; align-items: center; gap: 8px;
 		font-size: 0.78rem; font-weight: 500; color: var(--muted-foreground); cursor: pointer;
 	}
-	.fs-switch {
-		position: relative; width: 34px; height: 19px; border-radius: 10px;
-		border: none; background: var(--muted); cursor: pointer; flex-shrink: 0; transition: background 180ms ease;
-	}
-	.fs-switch.on { background: var(--primary); }
-	.fs-switch-thumb {
-		position: absolute; top: 2px; left: 2px; width: 15px; height: 15px; border-radius: 50%;
-		background: var(--foreground); transition: transform 180ms ease;
-	}
-	.fs-switch.on .fs-switch-thumb { transform: translateX(15px); background: var(--primary-foreground); }
 
 	/* New folder inline */
 	.fs-newfolder {

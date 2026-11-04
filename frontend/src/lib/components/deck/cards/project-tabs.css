@@ -214,41 +214,6 @@
 }
 
 /* ── Toggle switch ── */
-.ptab .switch {
-	width: 34px;
-	height: 20px;
-	flex-shrink: 0;
-	border-radius: 11px;
-	background: var(--muted);
-	border: 1px solid var(--border);
-	position: relative;
-	padding: 0;
-	cursor: pointer;
-	transition: background 0.18s, border-color 0.18s;
-}
-.ptab .switch i {
-	position: absolute;
-	top: 1px;
-	left: 1px;
-	width: 15px;
-	height: 15px;
-	border-radius: 50%;
-	background: var(--foreground);
-	transition: left 0.18s, background 0.18s;
-}
-.ptab .switch.on {
-	background: var(--primary);
-	border-color: var(--primary);
-}
-.ptab .switch.on i {
-	left: 16px;
-	background: var(--primary-foreground);
-}
-.ptab .switch:disabled {
-	opacity: 0.4;
-	cursor: not-allowed;
-}
-
 /* ── Segmented control ── */
 .ptab .seg {
 	display: inline-flex;

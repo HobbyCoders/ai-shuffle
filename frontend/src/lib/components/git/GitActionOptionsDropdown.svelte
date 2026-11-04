@@ -534,10 +534,10 @@
 	.opt-switch {
 		position: relative;
 		flex-shrink: 0;
-		width: 30px;
-		height: 17px;
+		width: 26px;
+		height: 16px;
 		border-radius: 999px;
-		background: var(--border);
+		background: var(--switch-off);
 		transition: background 150ms ease;
 	}
 	.opt-switch::after {
@@ -545,18 +545,18 @@
 		position: absolute;
 		top: 2px;
 		left: 2px;
-		width: 13px;
-		height: 13px;
+		width: 12px;
+		height: 12px;
 		border-radius: 50%;
-		background: var(--card);
-		box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+		background: var(--switch-thumb);
+		box-shadow: 0 0 0 0.5px var(--switch-thumb-edge), 0 1px 2px var(--switch-thumb-edge);
 		transition: transform 150ms ease;
 	}
 	.opt-switch.on {
-		background: var(--primary);
+		background: var(--switch-on);
 	}
 	.opt-switch.on::after {
-		transform: translateX(13px);
+		transform: translateX(10px);
 	}
 	.opt-switch.danger.on {
 		background: var(--destructive);

@@ -266,6 +266,8 @@
 		--column-width: 740px;
 
 		/* Switch: the thumb stays white in both states and themes. */
+		--switch-off: color-mix(in oklch, var(--foreground) 16%, transparent);
+		--switch-on: var(--primary);
 		--switch-thumb: oklch(1 0 0);
 		--switch-thumb-edge: oklch(0 0 0 / 0.18);
 	}
