@@ -944,10 +944,10 @@
 	.model-menu {
 		right: 0;
 		width: min(380px, calc(100vw - 24px));
-		padding: 6px;
+		padding: 0;
 		--mpp-width: 100%;
 		/* The list scrolls above the pinned context footer in short viewports. */
-		--mpp-height: min(420px, calc(var(--dock-pop-max, 454px) - 14px));
+		--mpp-height: min(420px, calc(var(--dock-pop-max, 454px) - 2px));
 	}
 
 	/* Phone width: a real sheet, the same shape the phone app's picker has. */
