@@ -145,6 +145,7 @@
 		   theme preset's sidebar keeps working. */
 		--row-hover: color-mix(in oklab, var(--sidebar-foreground) 5%, var(--sidebar));
 		--row-selected: color-mix(in oklab, var(--sidebar-foreground) 9%, var(--sidebar));
+		--rail-selected: color-mix(in oklab, var(--sidebar-foreground) 17%, var(--sidebar));
 		--sidebar: oklch(0.185 0.004 265);
 		--sidebar-foreground: oklch(0.928 0.003 265);
 		--sidebar-border: oklch(1 0 0 / 0.085);
@@ -331,6 +332,7 @@
 		/* Sidebar plane. The rail shares it. */
 		--row-hover: color-mix(in oklab, var(--sidebar-foreground) 2.5%, var(--sidebar));
 		--row-selected: color-mix(in oklab, var(--sidebar-foreground) 4.5%, var(--sidebar));
+		--rail-selected: color-mix(in oklab, var(--sidebar-foreground) 11%, var(--sidebar));
 		--sidebar: oklch(0.955 0.003 90);
 		--sidebar-foreground: oklch(0.21 0.005 250);
 		--sidebar-border: oklch(0.21 0.01 250 / 0.09);

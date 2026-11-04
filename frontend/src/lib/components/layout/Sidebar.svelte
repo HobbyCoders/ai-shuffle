@@ -31,11 +31,11 @@
 		Archive,
 		Undo2,
 		Files,
-		NotebookPen,
+		StickyNote,
 		SquarePen,
 		Bot,
 		CalendarClock,
-		FolderKanban,
+		Folder,
 		BarChart3,
 		GitPullRequest,
 		Settings,
@@ -467,12 +467,12 @@
 	const destinations = $derived<WorkspaceNavItem[]>([
 		{ id: 'file-browser', label: 'Files', icon: Files, on: currentType === 'file-browser' },
 		// A notebook, not a second sheet of paper: this sits right under Files.
-		{ id: 'notes', label: 'Notes', icon: NotebookPen, on: currentType === 'notes' },
+		{ id: 'notes', label: 'Notes', icon: StickyNote, on: currentType === 'notes' },
 		{ id: 'build', label: 'Agents', icon: Bot, on: currentType ? BUILD_MEMBERS.includes(currentType) : false },
 		...(isAdmin
 			? [{ id: 'automations' as const, label: 'Automations', icon: CalendarClock, on: currentType === 'automations' }]
 			: []),
-		{ id: 'project', label: 'Projects', icon: FolderKanban, on: currentType === 'project' },
+		{ id: 'project', label: 'Projects', icon: Folder, on: currentType === 'project' },
 		{ id: 'prs', label: 'Pull requests', icon: GitPullRequest, on: currentType === 'prs' },
 		{ id: 'stats', label: 'Stats', icon: BarChart3, on: currentType === 'stats' },
 		{ id: 'docs', label: 'Docs', icon: BookOpen, on: currentType === 'docs' },
@@ -1151,15 +1151,15 @@
 	   the rows, and the start of a right (archive) swipe, clear of it. */
 	.list.edge-guard { padding-right: 24px; }
 	.cards { display: flex; flex-direction: column; gap: 2px; }
-	/* A project reads as a heading of its rows, brighter than the lane above it. */
+	/* Tiers: the lane label, then this quieter project label, then its rows. */
 	.proj-head {
-		padding: 16px 8px 4px;
+		padding: 16px 8px 4px 12px;
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
 		font-size: var(--fs-caption);
 		font-weight: 500;
-		color: var(--sidebar-foreground);
+		color: var(--subtle-foreground);
 	}
 	.proj-head:first-child { padding-top: 4px; }
 
@@ -1171,7 +1171,7 @@
 		align-items: center;
 		gap: 6px;
 		width: 100%;
-		padding: 12px 8px 6px;
+		padding: 12px 8px 6px 12px;
 		border: 0;
 		background: linear-gradient(var(--sidebar) 78%, transparent);
 		color: var(--muted-foreground);

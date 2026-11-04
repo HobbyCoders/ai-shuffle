@@ -2,8 +2,8 @@
 	/**
 	 * SessionCard — one ledger row in the sidebar.
 	 *
-	 * Every row is one line: a mark in a fixed left column, the title, and the
-	 * total working time at the far right. The mark is the session's runtime
+	 * Every row is one line: the title flush left, then a mark and the total
+	 * working time at the far right. The mark is the session's runtime
 	 * state when it has one (a pulsing dot while it works, a warning when it is
 	 * parked on a prompt or failed), and otherwise where the branch sits between
 	 * edit and merge (see `deriveGitStage`).
@@ -643,29 +643,6 @@
 			<span class="check" aria-hidden="true">
 				{#if selected}<Check size={12} strokeWidth={3} />{/if}
 			</span>
-		{:else}
-		<span class="lead {stageTone}" role="img" title={stageTip} aria-label={stageTip}>
-			{#if status === 'working'}
-				<span class="pip" aria-hidden="true"></span>
-			{:else if failed}
-				<span class="pip warn failed" aria-hidden="true"></span>
-			{:else if attention}
-				<span class="pip warn" aria-hidden="true"></span>
-			{:else if stage === 'pr'}
-				<GitPullRequest size={12} strokeWidth={MARK_STROKE} />
-			{:else if stage === 'merged'}
-				<GitMerge size={12} strokeWidth={MARK_STROKE} />
-			{:else if stage === 'closed'}
-				<GitPullRequestClosed size={12} strokeWidth={MARK_STROKE} />
-			{:else if stage === 'dirty'}
-				<Diff size={12} strokeWidth={MARK_STROKE} />
-			{:else if stage === 'committed'}
-				<GitCommitHorizontal size={12} strokeWidth={MARK_STROKE} />
-			{:else if stage === 'pushed'}
-				<ArrowUpFromLine size={12} strokeWidth={MARK_STROKE} />
-			{/if}
-			<!-- An idle row draws nothing: its gutter stays, so titles keep one edge. -->
-		</span>
 		{/if}
 
 		<span class="body">
@@ -684,6 +661,30 @@
 					onclick={togglePrList}
 				>{#each prSummary?.parts ?? [] as part, i (part.state)}{#if i > 0}<span class="sep">{' · '}</span>{/if}<span class:green={part.state === 'open'} class:purple={part.state === 'merged'} class:muted={part.state === 'closed'}>{part.text}</span>{/each}</button>
 			{/snippet}
+			{#snippet mark()}
+				<span class="lead {stageTone}" role="img" title={stageTip} aria-label={stageTip}>
+					{#if status === 'working'}
+						<span class="pip" aria-hidden="true"></span>
+					{:else if failed}
+						<span class="pip warn failed" aria-hidden="true"></span>
+					{:else if attention}
+						<span class="pip warn" aria-hidden="true"></span>
+					{:else if stage === 'pr'}
+						<GitPullRequest size={12} strokeWidth={MARK_STROKE} />
+					{:else if stage === 'merged'}
+						<GitMerge size={12} strokeWidth={MARK_STROKE} />
+					{:else if stage === 'closed'}
+						<GitPullRequestClosed size={12} strokeWidth={MARK_STROKE} />
+					{:else if stage === 'dirty'}
+						<Diff size={12} strokeWidth={MARK_STROKE} />
+					{:else if stage === 'committed'}
+						<GitCommitHorizontal size={12} strokeWidth={MARK_STROKE} />
+					{:else if stage === 'pushed'}
+						<ArrowUpFromLine size={12} strokeWidth={MARK_STROKE} />
+					{/if}
+					<!-- An idle row draws nothing, and takes no room (see .lead). -->
+				</span>
+			{/snippet}
 			{#snippet timerChip()}
 				{#if showTimer}<span class="timer" class:live={turnLive} title={timerTitle}>{timer}</span>{/if}
 			{/snippet}
@@ -694,6 +695,7 @@
 				{#if !showStatusLine && diff}
 					<span class="diff"><span class="p">{diff.plus}</span> <span class="m">{diff.minus}</span></span>
 				{/if}
+				{#if !selecting}{@render mark()}{/if}
 				{@render timerChip()}
 			</span>
 
@@ -809,11 +811,11 @@
 		position: relative;
 		z-index: 1;
 		display: grid;
-		grid-template-columns: 16px minmax(0, 1fr);
+		grid-template-columns: minmax(0, 1fr);
 		column-gap: 8px;
 		align-items: start;
 		width: 100%;
-		padding: 6px 8px;
+		padding: 6px 8px 6px 12px;
 		border: none;
 		border-radius: var(--radius-control);
 		background: var(--sidebar);
@@ -822,6 +824,8 @@
 		cursor: pointer;
 		transition: transform 300ms cubic-bezier(0.16, 1, 0.3, 1), background-color 120ms ease;
 	}
+	/* Selecting lends the row a checkbox column; titles move over only then. */
+	.scard:has(> .check) { grid-template-columns: 16px minmax(0, 1fr); }
 	.scard-frame.dragging .scard { transition: background-color 120ms ease; }
 	.scard-frame:hover .scard { background: var(--row-hover); }
 	.scard.active,
@@ -848,10 +852,13 @@
 	/* ── Leading mark ─────────────────────────────────────────────────── */
 	.lead {
 		display: grid;
+		flex: none;
 		place-items: center;
+		width: 16px;
 		height: 20px;
 		color: var(--subtle-foreground);
 	}
+	.lead:not(:has(> *)) { display: none; }
 	.lead :global(svg) { flex: none; }
 	.lead.green { color: var(--success); }
 	.lead.purple { color: var(--status-merged); }
@@ -983,7 +990,7 @@
 	.diff .m { color: var(--destructive); }
 
 	/* Phone: a 44px row and a larger title for thumbs at arm's length. */
-	.scard-frame.phone .scard { column-gap: 10px; padding: 12px 10px; }
+	.scard-frame.phone .scard { column-gap: 10px; padding: 12px; }
 	.scard-frame.phone .title { font-size: 14.5px; }
 	.scard-frame.phone .l2 { font-size: 13px; line-height: 18px; }
 

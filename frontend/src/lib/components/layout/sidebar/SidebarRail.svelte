@@ -101,7 +101,7 @@
 <nav class="rail" class:phone aria-label="Workspace">
 	{#if !phone}
 		<button class="r-btn r-new" type="button" aria-label={newLabel} title={`${newLabel} (Ctrl+N)`} onclick={onNew}>
-			<SquarePen size={18} strokeWidth={1.75} />
+			<SquarePen size={iconSize} strokeWidth={1.75} />
 			<span class="tip" aria-hidden="true">{newLabel}</span>
 		</button>
 	{/if}
@@ -232,7 +232,7 @@
 	.r-ic { display: grid; place-items: center; }
 	.r-btn:hover { background: var(--row-hover); color: var(--sidebar-foreground); }
 	.r-btn.on,
-	.r-btn.open { background: var(--row-selected); color: var(--sidebar-foreground); }
+	.r-btn.open { background: var(--rail-selected); color: var(--foreground); }
 	/* Five equal tabs: the selected one gets a pill behind its icon and a heavier
 	   label, so it never relies on colour alone. */
 	.phone .r-btn {
@@ -253,7 +253,7 @@
 		transition: background-color 0.13s ease;
 	}
 	.phone .r-btn.on .r-ic,
-	.phone .r-btn.open .r-ic { background: var(--row-selected); }
+	.phone .r-btn.open .r-ic { background: var(--rail-selected); }
 	.r-lbl {
 		max-width: 100%;
 		overflow: hidden;
