@@ -90,6 +90,46 @@ describe('Settings > Hooks list', () => {
 	});
 });
 
+describe('Settings > Hooks webhook secret', () => {
+	const SECRET = 'whsec_STORED_PLAINTEXT_9931';
+
+	async function openWebhook() {
+		api.getAppHooks.mockResolvedValue([
+			hook(),
+			hook({ id: 'h2', name: 'Notify', event: 'Stop', hook_type: 'webhook', command: null, url: 'https://ntfy.sh/x', tool_matcher: null, secret: SECRET })
+		]);
+		await show('h2');
+		await waitFor(() => expect(screen.getByRole('button', { name: 'Replace' })).toBeTruthy());
+	}
+
+	function expectNotOnPage() {
+		expect(document.body.innerHTML).not.toContain(SECRET);
+		for (const input of document.querySelectorAll('input')) expect(input.value).not.toContain(SECRET);
+	}
+
+	it('reads Saved, and the stored secret never enters a field', async () => {
+		await openWebhook();
+		expect(screen.getByText('Saved')).toBeTruthy();
+		expectNotOnPage();
+		await fireEvent.click(screen.getByRole('button', { name: 'Replace' }));
+		expect((screen.getByLabelText('Secret') as HTMLInputElement).value).toBe('');
+		expectNotOnPage();
+	});
+
+	it('keeps the stored secret when a save leaves the field blank', () => {
+		const form = formFromHook(hook({ hook_type: 'webhook', secret: SECRET }));
+		expect(form.secret).toBe('');
+		expect(updatePayload(form).secret).toBeUndefined();
+		expect(updatePayload({ ...form, secretState: 'replace' }).secret).toBeUndefined();
+	});
+
+	it('sends a new secret, and an empty one only for Remove', () => {
+		const form = formFromHook(hook({ hook_type: 'webhook', secret: SECRET }));
+		expect(updatePayload({ ...form, secret: ' new ', secretState: 'replace' }).secret).toBe('new');
+		expect(updatePayload({ ...form, secretState: 'remove' }).secret).toBe('');
+	});
+});
+
 describe('Settings > Hooks editing', () => {
 	it('adds an app hook with the typed command', async () => {
 		await show();

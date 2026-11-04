@@ -58,7 +58,10 @@ export interface HookForm {
 	/** Seconds in the form; the API stores milliseconds. */
 	timeoutSec: number;
 	url: string;
+	/** Only ever a NEW secret typed here. The stored one never enters the form. */
 	secret: string;
+	/** `saved` reads "Saved"; `replace` shows the blank field; `remove` clears it on save. */
+	secretState: 'none' | 'saved' | 'replace' | 'remove';
 	matcher: string;
 	/** Only used by the draft; existing hooks toggle at once. */
 	enabled: boolean;
@@ -80,6 +83,7 @@ export function emptyForm(projectId: string | null): HookForm {
 		timeoutSec: DEFAULT_TIMEOUT_MS / 1000,
 		url: '',
 		secret: '',
+		secretState: 'none',
 		matcher: '',
 		enabled: true
 	};
@@ -94,7 +98,8 @@ export function formFromHook(h: Hook): HookForm {
 		command: h.command ?? '',
 		timeoutSec: Math.round((h.timeout || DEFAULT_TIMEOUT_MS) / 1000),
 		url: h.url ?? '',
-		secret: h.secret ?? '',
+		secret: '',
+		secretState: h.secret ? 'saved' : 'none',
 		matcher: h.tool_matcher ?? '',
 		enabled: h.enabled
 	};
@@ -103,7 +108,9 @@ export function formFromHook(h: Hook): HookForm {
 /** What Save would change; `enabled` is left out (it saves on its own). */
 function editable(f: HookForm): string {
 	const { enabled: _enabled, ...rest } = f;
-	return JSON.stringify(rest);
+	// Opening the Replace field changes nothing until something is typed in it.
+	const secretState = f.secretState === 'replace' && !f.secret.trim() ? 'saved' : f.secretState;
+	return JSON.stringify({ ...rest, secretState });
 }
 
 export function validateForm(f: HookForm): string[] {
@@ -133,7 +140,8 @@ export function createPayload(f: HookForm): HookCreate {
 
 /**
  * The PATCH body. The worker skips null fields, so a cleared matcher or
- * secret is sent as an empty string (an empty matcher matches every tool).
+ * removed secret is sent as an empty string (an empty matcher matches every
+ * tool). A blank secret field keeps the stored secret.
  */
 export function updatePayload(f: HookForm): HookUpdate {
 	const bash = f.type === 'bash';
@@ -144,7 +152,7 @@ export function updatePayload(f: HookForm): HookUpdate {
 		command: bash ? f.command.trim() : undefined,
 		timeout: clampTimeout(f.timeoutSec),
 		url: bash ? undefined : f.url.trim(),
-		secret: bash ? undefined : f.secret.trim(),
+		secret: bash ? undefined : f.secret.trim() || (f.secretState === 'remove' ? '' : undefined),
 		tool_matcher: isToolEvent(f.event) ? f.matcher.trim() : ''
 	};
 }
