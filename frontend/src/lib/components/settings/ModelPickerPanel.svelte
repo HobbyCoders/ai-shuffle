@@ -1221,7 +1221,7 @@
 	}
 	.mpp-cap-adjust {
 		flex-shrink: 0;
-		height: 24px;
+		height: 26px;
 		padding: 0 9px;
 		border: 1px solid var(--border);
 		border-radius: var(--menu-row-radius);
@@ -1372,7 +1372,7 @@
 	}
 	.mpp-cap-chip {
 		min-width: 44px;
-		height: 28px;
+		height: 26px;
 		padding: 0 8px;
 		border: 1px solid var(--border);
 		border-radius: 7px;
@@ -1421,7 +1421,7 @@
 		display: inline-flex;
 		flex-shrink: 0;
 		align-items: center;
-		height: 28px;
+		height: 26px;
 		padding: 0 8px 0 2px;
 		border: 1px solid var(--border);
 		border-radius: 7px;
