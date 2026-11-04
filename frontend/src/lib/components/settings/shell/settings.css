@@ -482,8 +482,9 @@
 	border-bottom: 0;
 }
 /* A list page with nothing under its title (Default models) starts its first
-   section where a preference page does: the label's own 8px plus this makes 28. */
-.settings-shell .st-lhead:not(:has(.st-filter, .st-ltools, .st-lfilters)) {
+   section where a preference page does: the label's own 8px plus this makes 28.
+   Stacked pages already match each other at 15.5px, so this is desktop only. */
+.settings-shell:not([data-stacked]) .st-lhead:not(:has(.st-filter, .st-ltools, .st-lfilters)) {
 	padding-bottom: 20px;
 }
 .settings-shell[data-stacked] .st-lhead .st-filter,
