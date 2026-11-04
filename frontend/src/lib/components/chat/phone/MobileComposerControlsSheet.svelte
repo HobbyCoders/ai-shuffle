@@ -1628,6 +1628,8 @@
 		text-align: left;
 		box-shadow: none;
 	}
+	/* A locked row's value keeps the value column; only the chevron is missing. */
+	.mcp-setup :global(.sheet-mode .ctx-chip.readonly:not(.wt-indicator)) { padding-right: 38px; }
 	.mcp-setup :global(.sheet-mode button.ctx-chip:not(:disabled)) { cursor: pointer; }
 	@media (hover: hover) {
 		.mcp-setup :global(.sheet-mode button.ctx-chip:hover:not(:disabled)) { background: var(--hover-overlay); }

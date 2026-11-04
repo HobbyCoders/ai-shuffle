@@ -427,6 +427,10 @@
 		position: relative;
 		z-index: 40;
 	}
+	/* No rule until the chat has a title. */
+	.topbar.no-rule {
+		border-bottom-color: transparent;
+	}
 
 	.tb-hamburger {
 		position: relative;

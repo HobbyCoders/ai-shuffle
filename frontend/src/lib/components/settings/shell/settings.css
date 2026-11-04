@@ -354,7 +354,7 @@
 }
 .settings-shell[data-stacked] .st-index {
 	border-right: 0;
-	padding: 18px 14px 32px;
+	padding: 18px 16px 32px;
 	background: var(--st-bg);
 }
 .settings-shell[data-stacked] .st-ix-title {
@@ -382,6 +382,15 @@
 }
 .settings-shell[data-stacked] .st-nav-item .st-go {
 	display: inline-flex;
+}
+/* Phone: the same card row as Providers and the sheets, glyph on one x. */
+@media (max-width: 480px) {
+	.settings-shell[data-stacked] .st-nav-g {
+		padding: 18px 8px 6px;
+	}
+	.settings-shell[data-stacked] .st-nav-item {
+		padding: 0 14px;
+	}
 }
 .settings-shell[data-stacked] .st-page {
 	padding: 0 14px 100px;
