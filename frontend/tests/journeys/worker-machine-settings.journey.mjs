@@ -32,7 +32,8 @@ await runJourney({
 			expect(worker.ok(), 'owner can read machine settings');
 			const local = (await worker.json()).workers.find((w) => w.is_self);
 			expect(local?.outcome === 'ok', 'local worker has real status');
-			await page.getByRole('button').filter({ hasText: local.device_name }).first().click();
+			// The row may read "Local" rather than a raw machine id, so find it by its slot.
+			await page.locator('[data-settings-item="self"]').click();
 			const panel = page.getByRole('region', { name: 'Worker machine settings', exact: true });
 			await panel.getByText('Claude CLI', { exact: true }).waitFor();
 			await panel.getByRole('button', { name: 'Refresh worker status' }).scrollIntoViewIfNeeded();

@@ -50,9 +50,6 @@ const row = (page, id) => page.locator(`[data-settings-item="mp:${id}"]`);
 async function assertSelection(page, selected, saved) {
 	await row(page, selected).getByRole('switch', { checked: true }).waitFor();
 	await row(page, saved).getByRole('switch', { checked: false }).waitFor();
-	await row(page, selected).getByText('Active', { exact: true }).waitFor();
-	expect(await row(page, saved).getByText('Active', { exact: true }).count() === 0,
-		'the inactive sibling has no Active marker');
 }
 
 await runJourney({

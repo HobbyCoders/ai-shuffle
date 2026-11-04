@@ -363,8 +363,13 @@ export async function openFromSidebar(page, title) {
 	const sessions = await showSidebar(page);
 	// Settings and Agents take the session column's room; the rail brings it back.
 	const chats = sessions.getByRole('navigation', { name: 'Workspace' }).getByRole('button', { name: 'Chats', exact: true });
-	if (await chats.isVisible()) await chats.click();
 	const row = sidebarRow(sessions, title);
+	if (!(await row.isVisible()) && (await chats.isVisible())) {
+		await chats.click();
+		// On a phone Chats leaves Settings for the chat and closes the drawer: reopen it for the row.
+		await Promise.race([row.waitFor({ timeout: 5000 }), sessions.waitFor({ state: 'hidden', timeout: 5000 })]).catch(() => {});
+		if (!(await sessions.isVisible())) await showSidebar(page);
+	}
 	await row.scrollIntoViewIfNeeded();
 	await row.click();
 }
