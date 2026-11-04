@@ -950,6 +950,11 @@
 		--mpp-height: min(420px, calc(var(--dock-pop-max, 454px) - 2px));
 	}
 
+	/* The panel fills the menu edge to edge, so it follows the menu's corners. */
+	.model-menu :global(.mpp) {
+		border-radius: calc(var(--menu-radius) - 1px);
+	}
+
 	/* Phone width: a real sheet, the same shape the phone app's picker has. */
 	.model-layer {
 		display: contents;
