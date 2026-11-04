@@ -55,11 +55,21 @@ async function stopEverything(page) {
  * Set before the page loads; it starts dropping once `withholdTurnEnd` is on,
  * and stays on across a reload until it is turned off.
  */
-async function canWithholdTurnEnd(page) {
-	await page.addInitScript(() => {
+async function canWithholdTurnEnd(page, holdFeedTail = false) {
+	await page.addInitScript((holdFeedTail) => {
 		const withheld = () => sessionStorage.getItem('journey-withhold-turn-end') === '1';
 		const held = [];
-		window.__releaseHeldTurnEnds = () => held.splice(0).forEach((release) => release());
+		let feedPaused = false;
+		window.__releaseHeldTurnEnds = () => {
+			feedPaused = false;
+			held.splice(0).forEach(({ release }) => release());
+		};
+		window.__hasHeldFeedEnd = () => held.some((entry) => entry.feedEnd);
+		window.__releaseFirstHeldFeedEnd = () => {
+			const index = held.findIndex((entry) => entry.feedEnd);
+			if (index < 0) throw new Error('No terminal feed frame is waiting');
+			held.splice(index, 1)[0].release();
+		};
 		const feedTurnEnd = /"(?:type|event_type)"\s*:\s*"turn\.(?:completed|aborted)"/;
 		const socketTurnEnd = /"(?:type|event_type)"\s*:\s*"(?:stopped|interrupted|done|turn\.completed|turn\.aborted)"/;
 		const realFetch = window.fetch;
@@ -76,8 +86,11 @@ async function canWithholdTurnEnd(page) {
 					tail = frames.pop();
 					for (const frame of frames) {
 						const release = () => out.enqueue(encoder.encode(`${frame}\n\n`));
-						if (withheld() && feedTurnEnd.test(frame)) held.push(release);
-						else release();
+						const feedEnd = feedTurnEnd.test(frame);
+						if (withheld() && (feedEnd || (holdFeedTail && feedPaused))) {
+							feedPaused = true;
+							held.push({ release, feedEnd });
+						} else release();
 					}
 				}
 			}));
@@ -90,12 +103,12 @@ async function canWithholdTurnEnd(page) {
 			set(handler) {
 				onmessage.set.call(this, (event) => {
 					const release = () => handler.call(this, event);
-					if (withheld() && typeof event.data === 'string' && socketTurnEnd.test(event.data)) held.push(release);
+					if (withheld() && typeof event.data === 'string' && socketTurnEnd.test(event.data)) held.push({ release, feedEnd: false });
 					else release();
 				});
 			}
 		});
-	});
+	}, holdFeedTail);
 }
 
 const withholdTurnEnd = (page, on) => page.evaluate((value) => sessionStorage.setItem('journey-withhold-turn-end', value), on ? '1' : '0');
@@ -114,7 +127,7 @@ const STOPPED_BUBBLE = '.pending-messages [data-queue-status="stopped"]';
 function stopAfterTimeout({ switchChat = false } = {}) {
 	return {
 		async setup(ctx) {
-			await canWithholdTurnEnd(ctx.page);
+			await canWithholdTurnEnd(ctx.page, true);
 			await ctx.page.addInitScript(() => {
 				const nativeSend = WebSocket.prototype.send;
 				let stop;
@@ -177,6 +190,7 @@ function stopAfterTimeout({ switchChat = false } = {}) {
 			await composer(page).click();
 			await composer(page).fill(`fresh ${fresh} ${scriptTag(variant, 'default')}`);
 			const collect = await watchStopFrames(page, [...texts, fresh]);
+			await withholdTurnEnd(page, true);
 			await mark('a later Stop, immediately followed by Send');
 			// Separate Playwright clicks (or the async send preflight) can let Stop
 			// settle before Send even queues, missing the carry-over state entirely.
@@ -190,6 +204,16 @@ function stopAfterTimeout({ switchChat = false } = {}) {
 				send.click();
 			});
 			await page.waitForFunction(() => window.__stopAndQueryReleased === true);
+			// Stop's empty snapshot can erase an unconfirmed send (#1052). Exercise
+			// this hold only after its fresh queue receipt, with the ordered feed tail
+			// still paused so the successor cannot consume that receipt first.
+			await page.locator('.pending-messages [data-queue-confirmed="true"]').filter({ hasText: fresh }).waitFor();
+			await page.waitForFunction(() => window.__hasHeldFeedEnd());
+			await page.evaluate(() => window.__releaseFirstHeldFeedEnd());
+			await waitChat(page, { streaming: 'false' });
+			await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
+			await withholdTurnEnd(page, false);
+			await page.evaluate(() => window.__releaseHeldTurnEnds());
 			await page.getByText(`You said: “fresh ${fresh}`, { exact: false }).first().waitFor({ timeout: 60_000 });
 			await waitChat(page, { streaming: 'false' }, { timeout: 60_000 });
 			await page.waitForTimeout(500);
