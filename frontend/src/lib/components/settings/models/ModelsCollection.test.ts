@@ -158,8 +158,9 @@ describe('ModelsCollection', () => {
 		expect(labels).toEqual(['Generation', 'App tasks', 'Catalog']);
 		await waitFor(() => expect(item('Video').textContent).toContain('fal.ai · LTX 2'));
 		expect(item('Images').textContent).toContain('Asks each time');
-		expect(item('Images').querySelector('.st-dot.off')).toBeTruthy();
-		expect(item('Video').querySelector('.st-dot.off')).toBeNull();
+		// The words say it: no mark beside them.
+		expect(item('Images').querySelector('.st-dot')).toBeNull();
+		expect(item('Video').querySelector('.st-dot')).toBeNull();
 		await waitFor(() => expect(item('Text tasks').textContent).toContain('Sonnet, low effort'));
 		await waitFor(() => expect(item('Dictation').textContent).toContain('GPT-4o Transcribe'));
 		expect(item('Read aloud').textContent).toContain('Kokoro');

@@ -94,7 +94,7 @@ describe('WorkLogGroup', () => {
 		}));
 		const namingRow = createRawSnippet<[ChatMessage, number, ReadonlySet<string>?, ReadonlySet<string>?, boolean?]>(
 			(getMessage, _i, _g, _h, getNameAbove) => ({
-				render: () => `<div data-testid="row" data-name-above="${!!getNameAbove()}">${getMessage().id}</div>`
+				render: () => `<div data-testid="row" data-name-above="${!!getNameAbove?.()}">${getMessage().id}</div>`
 			})
 		);
 		const settled = { ...baseProps, mode: 'settled' as const, sequence: entries, durationLabel: 'Worked', row: namingRow };
