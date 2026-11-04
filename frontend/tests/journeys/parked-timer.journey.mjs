@@ -24,7 +24,8 @@ function readCard(page) {
 	return page.evaluate((selector) => {
 		const card = document.querySelector(selector);
 		return {
-			status: card?.querySelector('.st')?.textContent?.trim() || null,
+			// A quiet row shows no status word; its screen-reader details always start with it.
+			status: card?.querySelector('.details')?.textContent?.split(' · ')[0].trim() || null,
 			timer: card?.querySelector('.timer')?.textContent?.trim() || null
 		};
 	}, ACTIVE_CARD);
@@ -32,7 +33,7 @@ function readCard(page) {
 
 await runJourney({
 	name: 'parked-timer',
-	recorder: { selectors: [`timer=${ACTIVE_CARD} .timer`, `status=${ACTIVE_CARD} .st`] },
+	recorder: { selectors: [`timer=${ACTIVE_CARD} .timer`, `status=${ACTIVE_CARD} .l2 .st`] },
 	cases: [
 		{
 			name: 'park',
@@ -52,7 +53,7 @@ await runJourney({
 
 				await mark('parked');
 				await page.waitForFunction(
-					(selector) => document.querySelector(selector)?.querySelector('.st')?.textContent?.trim() === 'Parked',
+					(selector) => document.querySelector(selector)?.querySelector('.details')?.textContent?.split(' · ')[0].trim() === 'Parked',
 					ACTIVE_CARD,
 					{ timeout: 60_000 }
 				);
@@ -67,7 +68,7 @@ await runJourney({
 				await mark('woken');
 				await page.waitForFunction(
 					(selector) => {
-						const status = document.querySelector(selector)?.querySelector('.st')?.textContent?.trim();
+						const status = document.querySelector(selector)?.querySelector('.details')?.textContent?.split(' · ')[0].trim();
 						return status && status !== 'Parked' && status !== 'Working';
 					},
 					ACTIVE_CARD,

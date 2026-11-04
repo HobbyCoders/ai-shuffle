@@ -72,12 +72,13 @@ async function waitLane(page, id, lane, timeout = 30_000) {
 }
 
 /** The row's status word as the user reads it. */
-const statusWord = (page, id) => page.locator(`${CARD(id)} .st`).first().innerText();
+// A quiet row shows no status word; its screen-reader details always start with it.
+const statusWord = async (page, id) => (await page.locator(`${CARD(id)} .details`).first().textContent())?.split(' · ')[0].trim();
 
 async function waitStatus(page, id, word, timeout = 60_000) {
 	await showSidebar(page);
 	try {
-		await page.waitForFunction(({ selector, word }) => document.querySelector(`${selector} .st`)?.textContent?.trim() === word,
+		await page.waitForFunction(({ selector, word }) => document.querySelector(`${selector} .details`)?.textContent?.split(' · ')[0].trim() === word,
 			{ selector: CARD(id), word }, { timeout });
 	} catch {
 		throw new Error(`the row never said "${word}"; it says "${await statusWord(page, id).catch(() => '(no row)')}"`);
@@ -458,7 +459,7 @@ const FAILED_CLEARED = {
 		await api(page, 'POST', `/sessions/${encodeURIComponent(chat.id)}/clear`);
 		await page.waitForFunction((selector) => {
 			const row = document.querySelector(selector);
-			return row && row.querySelector('.st')?.textContent?.trim() !== 'Failed' && !row.querySelector('.lead .warn.failed');
+			return row && row.querySelector('.details')?.textContent?.split(' · ')[0].trim() !== 'Failed' && !row.querySelector('.lead .warn.failed');
 		}, CARD(chat.id), { timeout: 30_000 });
 		expect(await laneOf(page, chat.id) !== 'needs-you', 'a cleared chat no longer needs you');
 		await mark('reload');

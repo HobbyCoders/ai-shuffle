@@ -81,7 +81,8 @@ const openSeededChat = async (ctx) => {
 const SHEETS = [
 	{ trigger: /^Model: /, sheet: (page) => page.getByRole('dialog', { name: 'Choose model' }) },
 	{ trigger: /^Permission mode: /, sheet: (page) => page.getByRole('menu', { name: 'Tool access' }) },
-	{ trigger: /^Effort: /, sheet: (page) => page.getByRole('dialog', { name: 'Reasoning effort' }) },
+	// Only for a model with effort levels to pick from: the dev instance's scripted AI has none.
+	{ trigger: /^Effort: /, optional: true, sheet: (page) => page.getByRole('dialog', { name: 'Reasoning effort' }) },
 	{ trigger: /^Context and usage/, sheet: (page) => page.getByRole('dialog', { name: 'Context and usage' }) }
 ];
 
@@ -121,10 +122,18 @@ await runJourney({
 			name: 'sheets',
 			setup: openSeededChat,
 			async act({ page, mark, start }) {
-				for (const [index, { trigger, sheet }] of SHEETS.entries()) {
+				for (const [index, { trigger, optional, sheet }] of SHEETS.entries()) {
 					const label = String(trigger).replace(/[/^:]/g, '').trim();
+					const button = page.getByRole('region', { name: INPUT }).getByRole('button', { name: trigger }).first();
+					if (optional && !(await button.isVisible())) {
+						expect(
+							(await page.getByRole('region', { name: INPUT }).getByText('Unknown', { exact: true }).count()) === 0,
+							`${label}: a model with nothing to pick does not say "Unknown"`
+						);
+						continue;
+					}
 					await mark(`open ${label}`);
-					await page.getByRole('region', { name: INPUT }).getByRole('button', { name: trigger }).first().tap();
+					await button.tap();
 					const opened = sheet(page);
 					await opened.waitFor({ timeout: 5000 });
 					await page.waitForTimeout(400);

@@ -2111,7 +2111,7 @@
 			padding: 0 0.75rem 0.5rem;
 		}
 		:global(html[data-platform='desktop']) .chat-island {
-			--composer-btn-radius: min(calc(var(--radius, 10px) * 20 / 7), 20px);
+			--composer-btn-radius: min(calc(var(--radius, 10px) * 22 / 7), 22px);
 		}
 		:global(html[data-platform='desktop']) .textarea-wrapper :global(.tiptap-editor),
 		:global(html[data-platform='desktop']) .textarea-wrapper :global(.ProseMirror) {
