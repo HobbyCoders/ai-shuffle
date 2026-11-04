@@ -528,7 +528,7 @@
 		width: 170px;
 		padding: 0 9px;
 		border: 1px solid var(--st-input);
-		background: var(--st-muted);
+		background: var(--st-card);
 		border-radius: var(--st-radius-md);
 		color: var(--st-mfg);
 	}

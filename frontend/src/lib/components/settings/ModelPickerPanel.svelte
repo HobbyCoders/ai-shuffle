@@ -1025,25 +1025,6 @@
 		text-overflow: ellipsis;
 		white-space: nowrap;
 	}
-	.mpp-row-sub {
-		display: flex;
-		align-items: center;
-		gap: 6px;
-		margin-top: 3px;
-		font-size: 11.5px;
-		line-height: 1.35;
-		color: color-mix(in srgb, var(--muted-foreground) 75%, transparent);
-		overflow: hidden;
-		white-space: nowrap;
-	}
-	.mpp-row-sub > span {
-		overflow: hidden;
-		text-overflow: ellipsis;
-	}
-	.mpp-row-subtext {
-		opacity: 0.85;
-	}
-
 	.mpp-fav {
 		display: inline-flex;
 		align-items: center;

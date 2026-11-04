@@ -285,7 +285,7 @@
 	.area {
 		width: 100%;
 		border: 1px solid var(--st-input);
-		background: var(--st-muted);
+		background: var(--st-card);
 		border-radius: var(--st-radius-md);
 		font-size: 13px;
 		color: var(--st-fg);

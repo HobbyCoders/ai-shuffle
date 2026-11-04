@@ -1662,12 +1662,12 @@
 	.mcp-setup :global(.sheet-mode :is(.context-selector-btn, .ctx-chip.runner, .mode-trigger)::after) {
 		content: '';
 		order: 4;
-		width: 8px;
-		height: 8px;
+		width: 7px;
+		height: 7px;
 		flex: none;
-		margin: 0 3px 0 -2px;
-		border-top: 2px solid var(--muted-foreground);
-		border-right: 2px solid var(--muted-foreground);
+		margin: 0 4px 0 -2px;
+		border-top: 1.5px solid var(--muted-foreground);
+		border-right: 1.5px solid var(--muted-foreground);
 		transform: rotate(45deg);
 		opacity: 0.75;
 	}

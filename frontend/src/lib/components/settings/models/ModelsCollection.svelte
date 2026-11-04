@@ -82,8 +82,7 @@
 			id: `gen-${kind}`,
 			name: GENERATION_NAMES[kind],
 			summary: choice ? `${sourceLabel(choice.source)} · ${modelLabel(choice.model)}` : 'Asks each time',
-			icon: GENERATION_ICONS[kind],
-			status: choice ? undefined : 'off'
+			icon: GENERATION_ICONS[kind]
 		};
 	}
 

@@ -68,7 +68,7 @@
 		min-height: 320px;
 		padding: 10px 12px;
 		border: 1px solid var(--st-input);
-		background: var(--code-bg, var(--st-muted));
+		background: var(--st-card);
 		border-radius: var(--st-radius-md);
 		font-family: var(--st-mono);
 		font-size: 12.5px;

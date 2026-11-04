@@ -194,7 +194,7 @@
 		width: 100%;
 		padding: 8px 10px;
 		border: 1px solid var(--st-input);
-		background: var(--st-muted);
+		background: var(--st-card);
 		border-radius: var(--st-radius-md);
 		font-size: 13px;
 		line-height: 1.5;
@@ -217,7 +217,7 @@
 		max-width: 100%;
 		padding: 0 10px;
 		border: 1px solid var(--st-input);
-		background: var(--st-muted);
+		background: var(--st-card);
 		border-radius: var(--st-radius-md);
 		font-size: 13px;
 		color: var(--st-fg);
