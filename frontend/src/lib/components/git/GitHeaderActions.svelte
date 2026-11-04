@@ -553,7 +553,7 @@
 				{:else if summary.icon === 'pr'}<GitPullRequest size={20} strokeWidth={1.6} />
 				{:else}<GitBranch size={20} strokeWidth={1.6} />{/if}
 				{#if compactBadge === '✓'}
-					<span class="cg-badge tone-{summary.tone}" aria-hidden="true"><Check size={10} strokeWidth={3} /></span>
+					<span class="cg-badge tone-{summary.tone}" aria-hidden="true"></span>
 				{:else if compactBadge}
 					<span class="cg-badge tone-{summary.tone}" aria-hidden="true">{compactBadge}</span>
 				{/if}
@@ -1701,11 +1701,12 @@
 	.git-actions .git-btn.compact-btn.tone-blocked { color: var(--destructive); }
 	.git-actions .git-btn.compact-btn.init-btn { color: var(--primary); }
 	.cg-glyph { position: relative; display: grid; place-items: center; width: 20px; height: 20px; }
-	/* The ring in the bar's own colour keeps the badge legible over the glyph. */
+	/* The ring in the bar's own colour keeps the badge legible over the glyph. It
+	   rides the icon's outer corner, so the branch stays readable under it. */
 	.cg-badge {
 		position: absolute;
-		top: -7px;
-		left: 11px;
+		top: -8px;
+		left: 13px;
 		box-sizing: border-box;
 		display: inline-flex;
 		align-items: center;
@@ -1726,7 +1727,7 @@
 	.cg-badge.tone-changes { background: var(--warning); color: var(--warning-foreground); }
 	.cg-badge.tone-push, .cg-badge.tone-behind { background: var(--info, var(--primary)); color: var(--background); }
 	.cg-badge.tone-blocked { background: var(--destructive); color: var(--destructive-foreground); }
-	.cg-badge.tone-idle { min-width: 14px; width: 14px; height: 14px; padding: 0; top: -5px; left: 12px; border-radius: 50%; background: var(--success); color: var(--success-foreground); }
+	.cg-badge.tone-idle { min-width: 8px; width: 8px; height: 8px; padding: 0; top: -3px; left: auto; right: -4px; border-radius: 50%; background: var(--success); color: var(--success-foreground); }
 	.cg-last-known { position: absolute; bottom: -3px; right: -4px; }
 
 	@media (prefers-reduced-motion: reduce) {

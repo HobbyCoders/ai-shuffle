@@ -303,15 +303,8 @@ html:root[data-platform='mobile'] .chat-input-wrapper .ProseMirror p.is-editor-e
 	text-overflow: ellipsis;
 }
 
-/* At 360px and narrower the code lane's placeholder no longer fits and would
-   end in an ellipsis, so it says the same thing in fewer words. It matches the
-   value ChatInput sets, which leaves chat's "Ask anything" and suggestion
-   ghost text alone. */
+/* At 360px and narrower the send cluster gives way before the text field. */
 @media (max-width: 360px) {
-	html:root[data-platform='mobile'] .chat-input-wrapper .ProseMirror p.is-editor-empty:first-child[data-placeholder='Describe a task or ask a question']::before {
-		content: 'Ask or describe a task';
-	}
-
 	/* The mic stays beside send while there is a draft, so the cluster
 	   tightens its gap here and the text field keeps the room. */
 	html:root[data-platform='mobile'] .send-cluster { gap: 4px; }
@@ -596,6 +589,54 @@ html:root[data-platform='mobile'] .settings-shell textarea {
 html:root[data-platform='mobile'] .settings-shell .st-back {
 	min-height: 44px;
 	min-width: 44px;
+}
+
+/* The app bar carries the back arrow and the page's name below the index, so a
+   page neither repeats them nor stacks a second header under the bar. The heading
+   stays for screen readers and for the focus move that lands on it. */
+html:root[data-platform='mobile'] .settings-shell[data-view] .st-back {
+	display: none;
+}
+html:root[data-platform='mobile'] .settings-shell[data-view] :is(.st-page-h, .st-lh-top) > h1 {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	overflow: hidden;
+	clip-path: inset(50%);
+	white-space: nowrap;
+}
+html:root[data-platform='mobile'] .settings-shell[data-view] .st-page {
+	padding: 16px 16px 100px;
+}
+html:root[data-platform='mobile'] .settings-shell[data-view] .st-page-h {
+	position: absolute;
+	margin: 0;
+	padding: 0;
+	border: 0;
+	min-height: 0;
+}
+html:root[data-platform='mobile'] .settings-shell[data-view] .st-lhead {
+	padding: 0 16px;
+	border-bottom: 0;
+}
+html:root[data-platform='mobile'] .settings-shell[data-view] .st-lhead:not(:has(.st-filter, .st-ltools, .st-add)) {
+	padding: 0;
+}
+html:root[data-platform='mobile'] .settings-shell[data-view] .st-lhead .st-filter,
+html:root[data-platform='mobile'] .settings-shell[data-view] .st-lhead .st-ltools {
+	margin-left: 0;
+}
+html:root[data-platform='mobile'] .settings-shell[data-view] .st-lscroll {
+	padding: 0 16px 60px;
+}
+html:root[data-platform='mobile'] .settings-shell[data-view] .st-dwrap {
+	padding: 16px 16px 90px;
+}
+html:root[data-platform='mobile'] .settings-shell[data-view] .st-dtop {
+	position: absolute;
+	margin: 0;
+	padding: 0;
+	border: 0;
 }
 
 /* A chevron-only back button centres its icon in the 44px target and pulls

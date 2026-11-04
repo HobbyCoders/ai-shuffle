@@ -45,11 +45,6 @@
 		 * surface as a failed call much later.
 		 */
 		allowCustom?: boolean;
-		/**
-		 * Open the panel on an All-providers list (every catalog row, with
-		 * provider sublines). Used by subagent assignment pickers.
-		 */
-		startOnAll?: boolean;
 		/** List only API-key providers (see `BuildCatalogOptions.apiKeyOnly`). */
 		apiKeyOnly?: boolean;
 	}
@@ -63,7 +58,6 @@
 		allowEmpty = false,
 		emptyLabel = 'Unavailable as subagent',
 		allowCustom = true,
-		startOnAll = false,
 		apiKeyOnly = false
 	}: Props = $props();
 
@@ -205,7 +199,6 @@
 				onSelect={selectOption}
 				{leadingRows}
 				{trailingRows}
-				{startOnAll}
 				onRequestClose={() => (open = false)}
 			/>
 		</div>

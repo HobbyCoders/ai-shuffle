@@ -12,16 +12,16 @@
 	 * The phone's chat controls (issue #1816, design 4): a quick bar under the
 	 * composer's text field and the full "Chat controls" panel it pulls up.
 	 *
-	 * Quick bar: Model · Effort · Access · usage ring · Controls. Each cell shows
-	 * its state through its own icon and label. A tap opens a compact picker
-	 * (Effort, Access) or a page (Model, usage); a sideways swipe on Effort or
-	 * Access steps one level but never lands on Bypass. Dragging the bar up, or
+	 * Quick bar: one quiet line of words, Model · Access · Controls, plus the
+	 * usage ring only while usage needs attention. A tap opens a compact picker
+	 * (Access) or a page (Model, usage); a sideways swipe on Access steps one
+	 * level but never lands on Bypass. Reasoning effort lives in the panel.
+	 * Dragging the bar up, or
 	 * tapping Controls, opens the panel; dragging its grip or header down, the
 	 * scrim and Escape close it. Every gesture follows the finger and has a tap.
 	 *
 	 * The panel is portaled to <body> so no composer ancestor clips it. Its
-	 * main page is an inset grouped list: status chips (running work, worker,
-	 * project and branch), then Model (model, context and usage, reasoning
+	 * main page is an inset grouped list: a running-work chip, then Model (model, context and usage, reasoning
 	 * effort, Fast mode), Permissions (tool access, Away) and Setup (the
 	 * shared ContextPillBar selectors drawn as rows), over a pinned action bar
 	 * (Call / Browser / Terminal / Export). Rows with a chevron open a page
@@ -44,21 +44,16 @@
 	 * this component only renders and reports intent.
 	 */
 	import { tick, untrack } from 'svelte';
-	import { selfWorkerName, workerDisplayName } from '$lib/components/ui/worker-name';
 	import { obscuresTranscript } from '$lib/components/chat/transcript-reading-area';
 	import { pushState } from '$app/navigation';
 	import { page } from '$app/state';
 	import {
-		ChevronLeft, ChevronRight, Cpu, Download, FilePen, Globe, Hand, Lightbulb, LoaderCircle, Lock,
-		Moon, ShieldCheck, ShieldOff, SlidersHorizontal, Sparkles, SquareTerminal, Zap
+		ChevronDown, ChevronLeft, ChevronRight, Download, FilePen, Globe, Hand, Lightbulb, LoaderCircle, Lock,
+		Moon, ShieldCheck, ShieldOff, Sparkles, SquareTerminal, Zap
 	} from 'lucide-svelte';
 	import { activeSession } from '$lib/stores/active-session';
 	import { watches } from '$lib/stores/watches';
 	import { watchCount } from '$lib/components/chat/running-tasks';
-	import { notify } from '$lib/stores/notifications';
-	import { clusterProjects, projects, sessions } from '$lib/stores/app-data.svelte';
-	import { gitStatus } from '$lib/stores/git.svelte';
-	import { workerInstalls } from '$lib/stores/worker-presence';
 	import { closeDropdown } from '$lib/stores/header-dropdowns';
 	import ContextPillBar from '$lib/components/chat/ContextPillBar.svelte';
 	import ContextUsageBar from '$lib/components/chat/ContextUsageBar.svelte';
@@ -69,8 +64,7 @@
 	import type { PickerGroup } from '$lib/constants/model-picker';
 	import type { ComposerSheetProps as Props } from '$lib/components/chat/composer-shell';
 	import { fastAppliesNotice } from '$lib/utils/fast-outcome';
-	import EffortMeter from './EffortMeter.svelte';
-	import {
+		import {
 		ACCESS_HELP, ACCESS_LABEL, ACCESS_SHORT, BYPASS, VelocityTracker, dragAxis, settlesClosed,
 		settlesOpen, stepValue, taskSummary
 	} from './quick-controls';
@@ -88,7 +82,7 @@
 	const uid = $props.id();
 	const effortDefaultNoteId = `${uid}-effort-default`;
 
-	type Picker = 'effort' | 'access';
+	type Picker = 'access';
 	type Page = 'main' | 'model' | 'usage' | 'agent' | 'runner' | 'tasks' | 'export';
 	const PAGE_TITLES: Record<Page, string> = {
 		main: 'Chat controls',
@@ -129,23 +123,20 @@
 	});
 
 	const effortLocked = $derived(modelLocked || !effortKnown || effortOptions.length === 0);
-	const effortValues = $derived(effortOptions.map((o) => o.value));
-	/** What the meter draws: the pinned level, else the model's default. */
-	const effortShown = $derived(effortValue ?? effortDefaultValue ?? null);
-	const effortIndex = $derived(effortShown ? effortValues.indexOf(effortShown) : -1);
 	const effortLabel = $derived(
 		!effortKnown ? (effortValue ?? 'Effort')
 			: !effortOptions.length ? 'Fixed'
 			: effortValue ? (effortOptions.find((o) => o.value === effortValue)?.label ?? 'Auto')
 			: 'Auto'
 	);
+	/**
+	 * Levels the provider has not reported are not a state worth a row: the row
+	 * stays hidden until it has something true to say. A level already pinned to
+	 * this chat still shows, so a setting that is in force never goes invisible.
+	 */
+	const effortRowShown = $derived(effortKnown || !!effortValue);
 	/** The effort row's value: the level, or why there is no choice. */
-	const panelEffortValue = $derived(effortLocked && effortKnown ? 'Set by the model' : !effortKnown && !effortValue ? 'Unknown' : effortLabel);
-	const effortA11y = $derived(
-		!effortKnown ? `Reasoning effort: ${effortValue ?? 'unknown'}`
-			: !effortOptions.length ? 'Reasoning effort: set by the model'
-			: `Reasoning effort: ${effortLabel}`
-	);
+	const panelEffortValue = $derived(effortLocked && effortKnown ? 'Set by the model' : effortLabel);
 	// Tool access exists in code chats; chat and voice run a fixed tool surface.
 	const accessShown = $derived(showCodeControls);
 	const accessValues = $derived(permissionOptions.map((o) => o.value));
@@ -183,26 +174,6 @@
 	const showRunChip = $derived(runningTasks.length > 0 || liveWatches > 0 || preferenceOnly);
 	const canExport = $derived(!!$activeSession.sessionId && $activeSession.messages.length > 0);
 
-	// Status chips: where this chat runs and what it works on, when known.
-	const sessionRow = $derived($sessions.find((s) => s.id === $activeSession.sessionId) ?? null);
-	const selfName = $derived($workerInstalls?.some((i) => i.is_self) ? selfWorkerName($workerInstalls) : null);
-	const workerName = $derived.by((): string | null => {
-		if (!$activeSession.sessionId) return $activeSession.deviceIntent ? workerDisplayName($activeSession.deviceIntent.name) : selfName;
-		if (sessionRow?.is_remote ?? $activeSession.isRemote) { const owner = sessionRow?.device_name ?? $activeSession.ownerDeviceName; return owner ? workerDisplayName(owner) : null; }
-		return selfName ?? (sessionRow?.device_name ? workerDisplayName(sessionRow.device_name) : null);
-	});
-	const projectName = $derived(
-		$activeSession.mode === 'chat' ? null
-			: $projects.find((p) => p.id === $activeSession.project)?.name
-				?? $clusterProjects.find((p) => p.project_v2_id === $activeSession.projectV2Id)?.name
-				?? null
-	);
-	const branchName = $derived(
-		!projectName ? null
-			: $activeSession.worktreeBranch || $activeSession.selectedWorktreeBranch
-				|| ($activeSession.project ? ($gitStatus?.current_branch ?? null) : null)
-	);
-
 	// ── Quick bar: pickers and sideways steps ─────────────────────────────
 	let picker = $state<Picker | null>(null);
 	/** A swipe's preview, shown on the bar until the finger lifts. */
@@ -220,22 +191,17 @@
 	let usageWindowTokens = $state<string | null>(null);
 	const RING_C = 2 * Math.PI * 11;
 	const usageSeverity = $derived(usagePercent > 90 ? 'danger' : usagePercent >= 70 ? 'warning' : 'ok');
+	/** The footer shows usage only when there is something to do about it. */
+	const usageCalm = $derived(usageSeverity === 'ok' && !usageOverLimit);
 	const usageTokensLine = $derived(
 		usageUnknownUsed != null ? `${usageUnknownUsed} tokens used`
 			: usageUsedTokens && usageWindowTokens ? `${usageUsedTokens} of ${usageWindowTokens} tokens`
 			: null
 	);
 
-	const shownEffortIndex = $derived(preview?.cell === 'effort' ? effortValues.indexOf(preview.value) : effortIndex);
-	const shownEffortLabel = $derived(preview?.cell === 'effort' ? (effortOptions.find((o) => o.value === preview!.value)?.label ?? effortLabel) : effortLabel);
 	const shownAccess = $derived(preview?.cell === 'access' ? preview.value : accessValue);
-	const AccessIcon = $derived(accessIcons[shownAccess] ?? Hand);
 
 	function togglePicker(kind: Picker) {
-		if (kind === 'effort' && effortLocked) {
-			notify(effortExplanation || 'Set by the model', { severity: 'info' });
-			return;
-		}
 		picker = picker === kind ? null : kind;
 		if (picker) void tick().then(() => pickerRef?.querySelector<HTMLElement>('[aria-checked="true"], button')?.focus({ preventScroll: true }));
 	}
@@ -245,11 +211,6 @@
 		const kind = picker;
 		picker = null;
 		if (restoreFocus) barRef?.querySelector<HTMLElement>(`[data-cell="${kind}"]`)?.focus({ preventScroll: true });
-	}
-
-	function pickEffort(value: string) {
-		picker = null;
-		if (value !== effortValue) onEffortSelect(value);
 	}
 
 	function pickAccess(value: string) {
@@ -644,8 +605,6 @@
 				d.kind = axis === 'vertical' ? 'usage' : 'none';
 			} else if (axis === 'vertical') {
 				d.kind = dy < 0 ? 'open' : 'none';
-			} else if (d.cell === 'effort' && !effortLocked) {
-				d.kind = 'step';
 			} else if (d.cell === 'access' && accessShown && !permissionUpdating) {
 				d.kind = 'step';
 			} else {
@@ -684,11 +643,8 @@
 			usageDragOffset = d.offset;
 			d.tracker.add(event.clientY, event.timeStamp || performance.now());
 		} else if (d.kind === 'step') {
-			const next = d.cell === 'effort'
-				? stepValue(effortValues, effortShown, dx)
-				: permissionPending ? null : stepValue(accessValues, accessValue, dx, BYPASS);
-			const current = d.cell === 'effort' ? effortShown : accessValue;
-			preview = next && next !== current ? { cell: d.cell as Picker, value: next } : null;
+			const next = permissionPending ? null : stepValue(accessValues, accessValue, dx, BYPASS);
+			preview = next && next !== accessValue ? { cell: 'access', value: next } : null;
 		}
 	}
 
@@ -715,8 +671,7 @@
 			const chosen = preview;
 			preview = null;
 			if (!cancelled && chosen) {
-				if (chosen.cell === 'effort') onEffortSelect(chosen.value);
-				else onPermissionSelect(chosen.value);
+				onPermissionSelect(chosen.value);
 			}
 		}
 		if (suppressClick) setTimeout(() => { suppressClick = false; }, 0);
@@ -795,11 +750,9 @@
 		onpointerdown={startBarDrag}
 		onclickcapture={guardClick}
 	>
-		<span class="qbar-grip" aria-hidden="true"></span>
-
 		<button
 			type="button"
-			class="qcell"
+			class="qcell model"
 			class:locked={modelLocked}
 			data-cell="model"
 			aria-haspopup="dialog"
@@ -807,27 +760,9 @@
 			aria-disabled={modelLocked || undefined}
 			onclick={() => { if (!modelLocked) openPanel('model'); }}
 		>
-			<span class="qi">
-				{#if modelLocked}<Lock size={18} aria-hidden="true" />{:else}<Cpu size={20} aria-hidden="true" />{/if}
-				{#if fastShown && fastEnabled && !fastPending}<span class="qmini" aria-hidden="true"><Zap size={10} fill="currentColor" /></span>{/if}
-			</span>
 			<span class="ql">{modelLabel}</span>
-		</button>
-
-		<button
-			type="button"
-			class="qcell"
-			class:lit={!effortLocked}
-			class:locked={effortLocked}
-			class:stepping={preview?.cell === 'effort'}
-			data-cell="effort"
-			aria-haspopup="dialog"
-			aria-expanded={picker === 'effort'}
-			aria-label={effortA11y}
-			onclick={() => togglePicker('effort')}
-		>
-			<span class="qi"><EffortMeter index={effortLocked && !effortKnown ? -1 : shownEffortIndex} count={Math.max(effortOptions.length, effortLocked ? 5 : 1)} /></span>
-			<span class="ql">{shownEffortLabel}</span>
+			{#if fastShown && fastEnabled && !fastPending}<span class="qi" data-fast-badge aria-hidden="true"><Zap size={12} fill="currentColor" /></span>{/if}
+			{#if modelLocked}<Lock size={14} class="qchev" aria-hidden="true" />{:else}<ChevronDown size={14} class="qchev" aria-hidden="true" />{/if}
 		</button>
 
 		{#if accessShown}
@@ -842,16 +777,18 @@
 				aria-label={`Tool access: ${shownAccess ? (ACCESS_LABEL[shownAccess] ?? shownAccess) : 'loading'}${permissionUpdating ? ', saving' : ''}${awayOn ? ', Away mode on' : ''}`}
 				onclick={() => togglePicker('access')}
 			>
-				<span class="qi">
-					{#if permissionUpdating || (permissionPending && !shownAccess)}<LoaderCircle size={20} class="mcc-spin" aria-hidden="true" />{:else}<AccessIcon size={20} aria-hidden="true" />{/if}
-					{#if awayOn}<span class="qmini" data-away-badge aria-hidden="true"><Moon size={10} fill="currentColor" /></span>{/if}
-				</span>
 				<span class="ql">{shownAccess ? (ACCESS_SHORT[shownAccess] ?? shownAccess) : 'Access'}</span>
+				{#if awayOn}<span class="qi" data-away-badge aria-hidden="true"><Moon size={12} fill="currentColor" /></span>{/if}
+				{#if permissionUpdating || (permissionPending && !shownAccess)}<LoaderCircle size={14} class="mcc-spin qchev" aria-hidden="true" />{:else}<ChevronDown size={14} class="qchev" aria-hidden="true" />{/if}
 			</button>
 		{/if}
 
+		<!-- Always mounted: this cell measures usage and hosts its details sheet.
+		     Only the ring is hidden while there is nothing to act on; the same numbers
+		     stay one tap away under Context and usage in Chat controls. -->
 		<div
 			class="qcell usage"
+			class:calm={usageCalm}
 			class:held={usageHeld}
 			class:moved={usageDragOffset !== null}
 			data-cell="usage"
@@ -870,7 +807,7 @@
 		<button
 			bind:this={controlsCellRef}
 			type="button"
-			class="qcell"
+			class="qcell controls"
 			data-cell="controls"
 			aria-haspopup="dialog"
 			aria-controls={panelId}
@@ -878,11 +815,8 @@
 			aria-label={`All chat controls${runningTasks.length ? `, ${runningTasks.length} running` : ''}`}
 			onclick={() => (open ? closePanel() : openPanel('main'))}
 		>
-			<span class="qi">
-				<SlidersHorizontal size={20} aria-hidden="true" />
-				{#if runningTasks.length}<span class="qcount" aria-hidden="true">{runningTasks.length}</span>{/if}
-			</span>
 			<span class="ql">Controls</span>
+			{#if runningTasks.length}<span class="qcount" aria-hidden="true">{runningTasks.length}</span>{/if}
 		</button>
 	</div>
 
@@ -891,22 +825,10 @@
 			bind:this={pickerRef}
 			class="qpick"
 			role="dialog"
-			aria-label={picker === 'effort' ? 'Reasoning effort' : 'Tool access'}
+			aria-label="Tool access"
 			data-composer-owned-overlay="true"
 			data-no-drawer-swipe
 		>
-			{#if picker === 'effort'}
-				<div class="qp-h"><span>Reasoning effort</span></div>
-				<div class="segs" role="radiogroup" aria-label="Reasoning effort" style:--n={effortOptions.length}>
-					{#each effortOptions as option, i (option.value)}
-						<button type="button" class="seg" role="radio" aria-checked={option.value === effortValue}
-							title={option.description} onclick={() => pickEffort(option.value)}>
-							<EffortMeter index={i} count={effortOptions.length} size={18} />
-							<span>{option.label}</span>
-						</button>
-					{/each}
-				</div>
-			{:else}
 				<div class="qp-h">
 					<span>Tool access</span>
 					<span class="qp-help" aria-live="polite">
@@ -924,7 +846,6 @@
 						</button>
 					{/each}
 				</div>
-			{/if}
 		</div>
 	{/if}
 </div>
@@ -969,17 +890,13 @@
 			<section class="mcp-page" data-page="main" class:active={!onSubPage} class:under={onSubPage} inert={onSubPage} aria-label="Chat controls">
 				<div class="mcp-scroll" bind:this={bodyRef}>
 					{#if rendered || panelVisible}
-						{#if showRunChip || workerName || projectName}
+						{#if showRunChip}
 							<div class="mcp-status">
-								{#if showRunChip}
 									<button type="button" class="mcp-chip run" class:quiet={!runningTasks.length}
 										aria-label={`${runHead}: ${runSummary}. Open the list`}
 										onclick={(e) => goTo('tasks', e.currentTarget)}>
 										<i aria-hidden="true"></i>{runChipLabel}
 									</button>
-								{/if}
-								{#if workerName}<span class="mcp-chip" title="Runs on">{workerName}</span>{/if}
-								{#if projectName}<span class="mcp-chip" title="Project and branch">{projectName}{#if branchName}<span class="mcp-chip-sep" aria-hidden="true">·</span>{branchName}{/if}</span>{/if}
 							</div>
 						{/if}
 
@@ -1007,10 +924,11 @@
 								</span>
 								<ChevronRight size={18} class="mcp-chev" aria-hidden="true" />
 							</button>
+							{#if effortRowShown}
 							<div class="mcp-stack" data-row="effort">
 								<div class="mcp-rowhead">
 									<span class="mcp-ic" aria-hidden="true"><Lightbulb size={17} /></span>
-									<span class="mcp-lbl"><span>Reasoning effort</span>{#if effortLocked && effortExplanation && effortExplanation !== panelEffortValue}<small>{effortExplanation}</small>{/if}</span>
+									<span class="mcp-lbl"><span>Reasoning effort</span>{#if effortKnown && effortLocked && effortExplanation && effortExplanation !== panelEffortValue}<small>{effortExplanation}</small>{/if}</span>
 									<span class="mcp-val">{panelEffortValue}</span>
 								</div>
 								{#if !effortLocked}
@@ -1026,6 +944,7 @@
 									</div>
 								{/if}
 							</div>
+							{/if}
 							{#if fastShown}
 								<button type="button" class="mcp-row" role="switch" aria-label={fastPending ? 'Fast mode: loading' : 'Fast mode'}
 									aria-checked={fastPending ? false : fastEnabled} aria-busy={fastPending || undefined} disabled={fastPending}
@@ -1161,44 +1080,33 @@
 	/* ── Quick bar ───────────────────────────────────────────────────── */
 	.mobile-composer-controls { position: relative; display: none; min-width: 0; }
 	:global(html[data-platform='mobile']) .mobile-composer-controls { display: block; }
+	/* One quiet line along the composer's bottom edge. */
 	.qbar {
 		position: relative;
 		display: flex;
-		gap: 1px;
-		padding: 12px 2px 4px;
-		border-top: 1px solid var(--border-subtle);
+		align-items: center;
+		gap: 2px;
+		min-height: 44px;
+		padding: 0 4px;
 		touch-action: none;
 		cursor: grab;
 		user-select: none;
 		-webkit-user-select: none;
 	}
-	.qbar-grip {
-		position: absolute;
-		top: 4px;
-		left: 50%;
-		width: 32px;
-		height: 4px;
-		margin-left: -16px;
-		border-radius: 2px;
-		background: var(--border-strong);
-		transition: background 0.2s, width 0.2s, margin 0.2s;
-	}
-	.qbar:hover .qbar-grip, .qbar.dragging .qbar-grip { width: 44px; margin-left: -22px; background: var(--muted-foreground); }
 	.qcell {
 		position: relative;
-		flex: 1 1 0;
-		min-width: 0;
-		min-height: 52px;
+		flex: 0 0 auto;
+		min-width: 44px;
+		min-height: 44px;
 		display: flex;
-		flex-direction: column;
 		align-items: center;
 		justify-content: center;
-		gap: 3px;
-		padding: 5px 1px 4px;
+		gap: 4px;
+		padding: 0 8px;
 		border: 0;
 		border-radius: var(--radius);
 		background: transparent;
-		color: var(--foreground);
+		color: var(--muted-foreground);
 		font: inherit;
 		cursor: pointer;
 		touch-action: none;
@@ -1208,57 +1116,63 @@
 	.qcell:hover { background: var(--hover-overlay); }
 	.qcell:active { background: var(--active-overlay); }
 	.qcell[aria-expanded='true'] { background: var(--muted); }
-	.qi { position: relative; display: grid; place-items: center; height: 20px; color: var(--muted-foreground); }
+	/* The model name is the only cell that gives way on a narrow phone. */
+	.qcell.model { flex: 0 1 auto; min-width: 0; }
+	.qcell.controls { margin-left: auto; }
+	.qi { display: grid; place-items: center; flex: none; color: var(--primary); }
 	.ql {
-		max-width: 100%;
+		min-width: 0;
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
-		font-size: 11px;
+		font-size: 13px;
 		font-weight: 500;
 		line-height: 1.2;
-		color: var(--muted-foreground);
 		font-variant-numeric: tabular-nums;
 	}
-	.qcell.lit .qi { color: var(--primary); }
-	.qcell.locked .qi, .qcell.locked .ql { color: var(--subtle-foreground); }
+	.qcell :global(.qchev) { flex: none; opacity: 0.75; }
+	.qcell.locked { color: var(--subtle-foreground); }
 	.qcell.stepping { background: var(--muted); transform: scale(1.04); }
-	.qmini { position: absolute; right: -9px; bottom: -3px; display: grid; place-items: center; width: 14px; height: 14px; border-radius: 50%; background: var(--card); color: var(--primary); }
 	.qcount {
-		position: absolute;
-		top: -6px;
-		right: -12px;
 		display: grid;
 		place-items: center;
+		flex: none;
 		min-width: 18px;
 		height: 18px;
 		padding: 0 5px;
 		border-radius: 9px;
 		background: var(--primary);
 		color: var(--primary-foreground);
-		font-size: 11px;
-		font-weight: 700;
+		font-size: 12px;
+		font-weight: 600;
+		line-height: 1;
 	}
 	.qcell:focus-visible, .seg:focus-visible, .act:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
 
 	/* The usage cell hosts the shared ring button, stretched over the cell. */
-	.qcell.usage { cursor: default; padding: 0; }
+	.qcell.usage { cursor: default; padding: 0; margin-left: auto; }
+	.qcell.usage + .qcell.controls { margin-left: 0; }
+	/* Nothing to act on: no ring and no width. The cell itself stays, because its
+	   details sheet is position: fixed and still has to open from here. */
+	.qcell.usage.calm { min-width: 0; min-height: 0; margin-left: 0; }
+	.qcell.usage.calm + .qcell.controls { margin-left: auto; }
+	.qcell.usage.calm :global(.usage-indicator) { display: none; }
 	.qcell.usage :global(.usage-context-wrapper) { position: static; display: contents; }
 	.qcell.usage :global(.usage-indicator) {
 		width: 100%;
 		height: 100%;
-		min-height: 52px;
+		min-height: 44px;
 		margin: 0;
+		padding: 0 8px;
 		display: flex;
-		flex-direction: column;
 		align-items: center;
 		justify-content: center;
-		gap: 3px;
+		gap: 4px;
 		border-radius: var(--radius);
 		color: var(--foreground);
 	}
-	.qcell.usage :global(.usage-ring) { width: 20px; height: 20px; }
-	.qcell.usage :global(.usage-percent) { font-size: 11.5px; font-weight: 550; line-height: 1.2; font-variant-numeric: tabular-nums; }
+	.qcell.usage :global(.usage-ring) { width: 18px; height: 18px; }
+	.qcell.usage :global(.usage-percent) { font-size: 13px; font-weight: 500; line-height: 1.2; font-variant-numeric: tabular-nums; }
 	/* The shared usage details, as a bottom sheet over a scrim. */
 	.qcell.usage :global(.usage-popover) {
 		position: fixed;
@@ -1527,7 +1441,6 @@
 		white-space: nowrap;
 		text-overflow: ellipsis;
 	}
-	.mcp-chip-sep { opacity: 0.6; }
 	button.mcp-chip { cursor: pointer; }
 	.mcp-chip.run { color: var(--primary); background: color-mix(in oklab, var(--primary) 14%, transparent); font-weight: 600; }
 	.mcp-chip.run:active { background: color-mix(in oklab, var(--primary) 22%, transparent); }
@@ -1536,7 +1449,7 @@
 	@keyframes mcp-pulse { 50% { opacity: 0.3; } }
 
 	/* Grouped list */
-	.mcp-glabel { margin: 0; padding: 4px 8px 7px; font-size: 12px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted-foreground); }
+	.mcp-glabel { margin: 0; padding: 4px 8px 7px; font-size: 13px; font-weight: 500; color: var(--muted-foreground); }
 	.mcp-group { margin-bottom: 18px; overflow: hidden; border: 1px solid var(--border); border-radius: var(--mcp-row-radius); background: var(--card); }
 	.mcp-group + .mcp-note { margin-top: -10px; }
 	.mcp-row {
@@ -1857,7 +1770,7 @@
 
 	/* Model page: the shared picker, sized to the page. */
 	.mcp-model { display: flex; flex: 1; min-height: 0; --mpp-width: 100%; --mpp-height: 100%; }
-	.mcp-model :global(.mpp-list), .mcp-model :global(.mpp-rail) { touch-action: pan-y; -webkit-overflow-scrolling: touch; }
+	.mcp-model :global(.mpp-list) { touch-action: pan-y; -webkit-overflow-scrolling: touch; }
 
 	/* Context and usage page: the shared details on a card. */
 	.mcp-usage { padding: 14px; border: 1px solid var(--border); border-radius: var(--mcp-row-radius); background: var(--card); }
@@ -1921,7 +1834,7 @@
 
 	@media (prefers-reduced-motion: reduce) {
 		.qpick, .qcell.usage :global(.usage-popover) { animation: none; }
-		.mcp, .mcp.shown, .mcp-scrim, .qcell, .qbar-grip, .usage-grip span, .qcell.usage :global(.usage-popover),
+		.mcp, .mcp.shown, .mcp-scrim, .qcell, .usage-grip span, .qcell.usage :global(.usage-popover),
 		.mcp-grab, .mcp-back, .mcp-page, .mcp-page:not(.active):not(.under),
 		.mcp-row, .mcp-sw, .mcp-sw::after, .mcp-seg button, .act, .mcp-ring .ring-progress { transition: none; }
 		.mcp-chip.run i { animation: none; }

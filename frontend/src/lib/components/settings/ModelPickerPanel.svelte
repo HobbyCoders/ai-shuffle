@@ -23,9 +23,8 @@
 	 * trigger and no positioning — the parent owns the popover chrome and sizes
 	 * the panel via `--mpp-height` / `--mpp-width`.
 	 */
-	import { Check, LayoutGrid, Lock, Search, Star } from 'lucide-svelte';
+	import { Check, Lock, Search, Star } from 'lucide-svelte';
 	import { onDestroy, tick } from 'svelte';
-	import ProviderGlyph from './ProviderGlyph.svelte';
 	import type { PickerGroup, PickerOption } from '$lib/constants/model-picker';
 	import { matchesPickerQuery } from '$lib/constants/model-picker';
 	import {
@@ -78,12 +77,6 @@
 		onContextStandardChange?: (tokens: number) => void | Promise<void>;
 		/** Escape pressed inside the search box. */
 		onRequestClose?: () => void;
-		/**
-		 * Open on an All-providers list instead of the group that owns `value`.
-		 * Subagent pickers use this so a Claude (or Grok, …) row still shows
-		 * every connected provider's models without a rail click.
-		 */
-		startOnAll?: boolean;
 	}
 
 	let {
@@ -99,13 +92,10 @@
 		onContextChoiceSelect,
 		contextStandardTokens = null,
 		onContextStandardChange,
-		onRequestClose,
-		startOnAll = false
+		onRequestClose
 	}: Props = $props();
 
-	const FAVORITES = '__favorites__';
-	const ALL = '__all__';
-
+	const uid = crypto.randomUUID().slice(0, 8);
 	let query = $state('');
 	let searchEl = $state<HTMLInputElement | null>(null);
 	let listEl = $state<HTMLDivElement | null>(null);
@@ -138,57 +128,42 @@
 		return info && info.kind !== 'choice' ? info : null;
 	});
 
-	// ---- rail selection -------------------------------------------------------
-	// Initial rail pick: All (when requested), else favorites when any exist,
-	// else the group owning the current value, else the first group.
-	// Re-validated whenever the catalog changes so a vanished provider can't
-	// leave the rail pointing at nothing.
-	let railKey = $state<string | null>(null);
-	const currentGroupKey = $derived(options.find((o) => o.value === value)?.groupKey ?? null);
-	const effectiveRailKey = $derived.by(() => {
-		// Favorites stays addressable even while empty, so its rail button has a
-		// useful empty state instead of disappearing after the final unstar.
-		if (railKey === FAVORITES) return FAVORITES;
-		if (railKey === ALL) return ALL;
-		if (railKey && groups.some((g) => g.key === railKey)) return railKey;
-		if (startOnAll) return ALL;
-		if (currentGroupKey) return currentGroupKey;
-		if (hasFavorites) return FAVORITES;
-		return groups[0]?.key ?? null;
-	});
-
-	// The Favorites tab is a stable first-class rail destination, including in a
-	// one-provider scoped picker. Search still spans the full width.
-	const showRail = $derived(!isSearching && groups.length > 0);
-
 	// ---- visible rows ---------------------------------------------------------
-	const visibleOptions = $derived.by<PickerOption[]>(() => {
-		if (isSearching) return options.filter((o) => matchesPickerQuery(o, query));
-		if (effectiveRailKey === FAVORITES) return favoriteOptions;
-		if (effectiveRailKey === ALL) return options;
-		return options.filter((o) => o.groupKey === effectiveRailKey);
+	// One list: Favorites first, then each provider under a quiet text heading.
+	// A favorite appears once, so the list never shows two checks for one model
+	// and a name always finds exactly one row.
+	interface Section {
+		key: string;
+		name: string;
+		subtext?: string;
+		options: PickerOption[];
+	}
+
+	const matching = $derived(isSearching ? options.filter((o) => matchesPickerQuery(o, query)) : options);
+	const sections = $derived.by<Section[]>(() => {
+		const favorites = new Set(favoriteOptions.map((o) => o.value));
+		const out: Section[] = [];
+		const pinned = favoriteOptions.filter((o) => matching.includes(o));
+		if (pinned.length) out.push({ key: '__favorites__', name: 'Favorites', options: pinned });
+		for (const g of groups) {
+			const rows = matching.filter((o) => o.groupKey === g.key && !favorites.has(o.value));
+			if (rows.length) out.push({ key: g.key, name: g.name, subtext: g.subtext, options: rows });
+		}
+		return out;
 	});
+	const visibleOptions = $derived(sections.flatMap((section) => section.options));
 	const visibleLeading = $derived(isSearching ? [] : leadingRows);
 	const visibleTrailing = $derived(isSearching ? [] : trailingRows);
 
-	// Provider subline only earns its space when the list can mix providers
-	// (searching / favorites) or the rail is hidden and the user has no other
-	// cue; on a single-provider page it would repeat the rail's selection.
-	const showProviderLine = $derived(
-		isSearching || effectiveRailKey === FAVORITES || effectiveRailKey === ALL || !showRail
-	);
-
-	/** The provider whose models the list shows, named above them. */
-	const railGroup = $derived(groups.find((g) => g.key === effectiveRailKey) ?? null);
-
-	/** Rail tooltip: brand and auth subtext. */
-	function railLabel(g: PickerGroup): string {
-		return g.subtext ? `${g.name} · ${g.subtext}` : g.name;
-	}
-
-	function groupFor(o: PickerOption): PickerGroup | undefined {
-		return groups.find((g) => g.key === o.groupKey);
-	}
+	// The list opens on the current model, wherever it sits.
+	$effect(() => {
+		if (!listEl) return;
+		const row = listEl.querySelector<HTMLElement>('[aria-selected="true"]');
+		if (!row) return;
+		const list = listEl.getBoundingClientRect();
+		const box = row.getBoundingClientRect();
+		if (box.bottom > list.bottom) listEl.scrollTop += box.bottom - list.bottom + 32;
+	});
 
 	// ---- keyboard navigation --------------------------------------------------
 	// Flat index across leading → options → trailing so ↑/↓ + Enter work from the
@@ -213,9 +188,9 @@
 		const next = (idx + delta + rowValues.length) % rowValues.length;
 		highlighted = rowValues[next];
 		await tick();
-		listEl
-			?.querySelector<HTMLElement>(`[data-value="${CSS.escape(highlighted)}"]`)
-			?.scrollIntoView({ block: 'nearest' });
+		[...(listEl?.querySelectorAll<HTMLElement>('[data-value]') ?? [])]
+			.find((row) => row.dataset.value === highlighted)
+			?.scrollIntoView?.({ block: 'nearest' });
 	}
 
 	function onSearchKeydown(e: KeyboardEvent) {
@@ -241,11 +216,6 @@
 				onRequestClose();
 			}
 		}
-	}
-
-	function pickRail(key: string) {
-		railKey = key;
-		highlighted = null;
 	}
 
 	function toggleFavorite(e: MouseEvent, optionValue: string) {
@@ -572,56 +542,7 @@
 
 <div class="mpp" data-model-picker-panel>
 	<div class="mpp-body">
-	{#if showRail}
-		<div class="mpp-rail" role="tablist" aria-label="Providers">
-			<button
-				type="button"
-				role="tab"
-				class="mpp-rail-btn"
-				class:selected={effectiveRailKey === FAVORITES}
-				aria-selected={effectiveRailKey === FAVORITES}
-				aria-label={hasFavorites ? `Favorites, ${favoriteOptions.length} models` : 'Favorites, empty'}
-				title="Favorites"
-				onclick={() => pickRail(FAVORITES)}
-			>
-				<Star size={18} class="mpp-rail-star" />
-			</button>
-			<div class="mpp-rail-sep" aria-hidden="true"></div>
-			{#if startOnAll}
-				<button
-					type="button"
-					role="tab"
-					class="mpp-rail-btn"
-					class:selected={effectiveRailKey === ALL}
-					aria-selected={effectiveRailKey === ALL}
-					aria-label="All providers"
-					title="All providers"
-					onclick={() => pickRail(ALL)}
-				>
-					<LayoutGrid size={18} />
-				</button>
-			{/if}
-			{#each groups as g (g.key)}
-				<button
-					type="button"
-					role="tab"
-					class="mpp-rail-btn"
-					class:selected={effectiveRailKey === g.key}
-					aria-selected={effectiveRailKey === g.key}
-					aria-label={railLabel(g)}
-					title={railLabel(g)}
-					onclick={() => pickRail(g.key)}
-				>
-					<span class="mpp-rail-icon">
-						<ProviderGlyph kind={g.glyph} size={18} />
-						{#if g.isApi}<span class="mpp-api-badge" data-provider-api-badge aria-hidden="true">API</span>{/if}
-					</span>
-				</button>
-			{/each}
-		</div>
-	{/if}
-
-	<div class="mpp-main" class:with-rail={showRail}>
+	<div class="mpp-main">
 		<div class="mpp-search">
 			<Search size={15} class="mpp-search-icon" />
 			<input
@@ -642,65 +563,52 @@
 			<div class="mpp-notice">{notice}</div>
 		{/if}
 
-		{#if railGroup && !showProviderLine}
-			<div class="mpp-group-name" data-provider-heading>
-				<span>{railGroup.name}</span>{#if railGroup.subtext}<small>{railGroup.subtext}</small>{/if}
-			</div>
-		{/if}
-
 		<div class="mpp-list" role="listbox" aria-label={ariaLabel} bind:this={listEl}>
 			{#each visibleLeading as r (r.value)}
 				{@render plainRow(r)}
 			{/each}
 
-			{#each visibleOptions as o (o.value)}
-				{@const g = groupFor(o)}
-				{@const fav = isFavoriteModel(o.value)}
-				<!-- svelte-ignore a11y_click_events_have_key_events -->
-				<div
-					class="mpp-row"
-					class:selected={value === o.value}
-					class:highlighted={effectiveHighlighted === o.value}
-					role="option"
-					aria-selected={value === o.value}
-					tabindex="-1"
-					data-value={o.value}
-					title={o.description}
-					onclick={() => onSelect(o.value)}
-					onmouseenter={() => (highlighted = o.value)}
-				>
-					<div class="mpp-row-copy">
-						<div class="mpp-row-label">{o.label}</div>
-						{#if showProviderLine && g}
-							<div class="mpp-row-sub">
-								<ProviderGlyph kind={g.glyph} size={12} />
-								<span>{g.name}{#if g.subtext}<span class="mpp-row-subtext"> · {g.subtext}</span>{/if}</span>
-							</div>
-						{/if}
+			{#each sections as section (section.key)}
+				<div class="mpp-section" role="group" aria-labelledby={`${uid}-${section.key}`}>
+					<div class="mpp-group-name" id={`${uid}-${section.key}`} data-provider-heading>
+						<span>{section.name}</span>{#if section.subtext}<small>{section.subtext}</small>{/if}
 					</div>
-					<button
-						type="button"
-						class="mpp-fav"
-						class:on={fav}
-						aria-label={fav ? `Remove ${o.label} from favorites` : `Add ${o.label} to favorites`}
-						title={fav ? 'Remove from favorites' : 'Add to favorites'}
-						onclick={(e) => toggleFavorite(e, o.value)}
-					>
-						<Star size={14} />
-					</button>
+					{#each section.options as o (o.value)}
+						{@const fav = isFavoriteModel(o.value)}
+						<!-- svelte-ignore a11y_click_events_have_key_events -->
+						<div
+							class="mpp-row"
+							class:selected={value === o.value}
+							class:highlighted={effectiveHighlighted === o.value}
+							role="option"
+							aria-selected={value === o.value}
+							tabindex="-1"
+							data-value={o.value}
+							title={o.description}
+							onclick={() => onSelect(o.value)}
+							onmouseenter={() => (highlighted = o.value)}
+						>
+							<div class="mpp-row-copy">
+								<div class="mpp-row-label">{o.label}</div>
+							</div>
+							<button
+								type="button"
+								class="mpp-fav"
+								class:on={fav}
+								aria-label={fav ? `Remove ${o.label} from favorites` : `Add ${o.label} to favorites`}
+								title={fav ? 'Remove from favorites' : 'Add to favorites'}
+								onclick={(e) => toggleFavorite(e, o.value)}
+							>
+								<Star size={14} />
+							</button>
+							<span class="mpp-check" aria-hidden="true">{#if value === o.value}<Check size={16} />{/if}</span>
+						</div>
+					{/each}
 				</div>
 			{/each}
 
 			{#if visibleOptions.length === 0 && visibleLeading.length === 0}
-				<div class="mpp-empty">
-					{#if isSearching}
-						No models found
-					{:else if effectiveRailKey === FAVORITES}
-						No favorites yet — star a model to pin it here.
-					{:else}
-						No models available
-					{/if}
-				</div>
+				<div class="mpp-empty">{isSearching ? 'No models found' : 'No models available'}</div>
 			{/if}
 
 			{#each visibleTrailing as r (r.value)}
@@ -959,6 +867,7 @@
 		<div class="mpp-row-copy">
 			<div class="mpp-row-label">{r.label}</div>
 		</div>
+		<span class="mpp-check" aria-hidden="true">{#if value === r.value}<Check size={16} />{/if}</span>
 	</div>
 {/snippet}
 
@@ -990,108 +899,12 @@
 	}
 
 	/* ---- rail ------------------------------------------------------------- */
-	.mpp-rail {
-		position: relative;
-		display: flex;
-		flex-direction: column;
-		gap: 4px;
-		width: 44px;
-		flex-shrink: 0;
-		padding: 4px;
-		overflow-y: auto;
-		overscroll-behavior: contain;
-		scrollbar-width: none;
-		background: color-mix(in srgb, var(--muted) 30%, transparent);
-	}
-	.mpp-rail::-webkit-scrollbar {
-		display: none;
-	}
-	.mpp-rail-btn {
-		position: relative;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		width: 100%;
-		aspect-ratio: 1;
-		padding: 0;
-		border: 0;
-		border-radius: 7px;
-		background: transparent;
-		color: var(--muted-foreground);
-		cursor: pointer;
-		transition: background-color 0.12s ease, color 0.12s ease;
-	}
-	.mpp-rail-btn:hover,
-	.mpp-rail-btn:focus-visible {
-		background: var(--mpp-hover);
-		color: var(--foreground);
-		outline: none;
-	}
-	.mpp-rail-btn.selected {
-		color: var(--foreground);
-	}
-	/* T3's selected indicator: a short primary bar hugging the rail's right edge. */
-	.mpp-rail-btn.selected::after {
-		content: '';
-		position: absolute;
-		right: -4px;
-		top: 50%;
-		width: 3px;
-		height: 20px;
-		transform: translateY(-50%);
-		border-radius: 999px 0 0 999px;
-		background: var(--primary);
-	}
-	.mpp-rail-btn :global(.mpp-rail-star) {
-		fill: currentColor;
-	}
-	.mpp-rail-icon {
-		position: relative;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		width: 26px;
-		height: 26px;
-		border-radius: 999px;
-		background: color-mix(in oklab, var(--muted) 60%, transparent);
-	}
-	.mpp-rail-btn.selected .mpp-rail-icon {
-		background: var(--background);
-	}
-	.mpp-api-badge {
-		position: absolute;
-		left: 50%;
-		bottom: -3px;
-		transform: translateX(-50%);
-		min-width: 16px;
-		padding: 1px 2px;
-		border: 1px solid var(--popover);
-		border-radius: 999px;
-		background: var(--primary);
-		color: var(--primary-foreground);
-		font-size: 6px;
-		font-weight: 800;
-		line-height: 7px;
-		letter-spacing: 0.04em;
-		text-align: center;
-		box-shadow: 0 1px 2px color-mix(in srgb, var(--foreground) 18%, transparent);
-	}
-	.mpp-rail-sep {
-		border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
-		margin: 0 2px;
-	}
-
-	/* ---- main column ---------------------------------------------------- */
 	.mpp-main {
 		display: flex;
 		flex: 1;
 		flex-direction: column;
 		min-width: 0;
 		min-height: 0;
-		background: color-mix(in srgb, var(--muted) 40%, transparent);
-	}
-	.mpp-main.with-rail {
-		border-left: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
 	}
 
 	.mpp-search {
@@ -1156,11 +969,12 @@
 		display: flex;
 		align-items: baseline;
 		gap: 6px;
-		padding: 8px 16px 2px;
+		padding: 12px 8px 4px;
 		font-size: 12px;
 		font-weight: 500;
 		color: var(--muted-foreground);
 	}
+	.mpp-section:first-child .mpp-group-name { padding-top: 4px; }
 	.mpp-group-name small {
 		font-size: 12px;
 		font-weight: 400;
@@ -1171,7 +985,7 @@
 	.mpp-row {
 		display: flex;
 		align-items: center;
-		gap: 12px;
+		gap: 4px;
 		width: 100%;
 		min-height: var(--menu-row);
 		padding: 5px 8px;
@@ -1184,12 +998,14 @@
 	.mpp-row:hover {
 		background: var(--mpp-hover);
 	}
-	.mpp-row.selected {
-		background: color-mix(in srgb, var(--foreground) 8%, transparent);
-	}
-	.mpp-row.selected.highlighted,
-	.mpp-row.selected:hover {
-		background: var(--mpp-hover);
+	.mpp-row.selected .mpp-row-label { font-weight: 500; }
+	/* A fixed slot, so the star never shifts when the check appears. */
+	.mpp-check {
+		display: grid;
+		place-items: center;
+		flex: none;
+		width: 20px;
+		color: var(--foreground);
 	}
 	.mpp-row-plain {
 		color: var(--muted-foreground);
@@ -1242,7 +1058,7 @@
 		border-radius: 6px;
 		background: transparent;
 		color: var(--muted-foreground);
-		opacity: 0.55;
+		opacity: 0;
 		cursor: pointer;
 		transition: opacity 0.12s ease, color 0.12s ease;
 	}
@@ -1261,7 +1077,11 @@
 	}
 	.mpp-fav.on {
 		opacity: 1;
-		color: #eab308;
+		color: var(--warning);
+	}
+	/* No hover on a touch screen: the star stays visible and quiet, and thumb-sized. */
+	@media (hover: none) {
+		.mpp-fav { width: 44px; height: 44px; margin: -8px -6px; opacity: 0.6; }
 	}
 	.mpp-fav.on :global(svg) {
 		fill: currentColor;

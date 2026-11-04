@@ -141,7 +141,7 @@ async function run(viewport, touch, theme) {
 		page.on('pageerror', (e) => errors.push(e.message));
 		await page.goto(shell ? url : `${url}?theme=${theme}`);
 		// On a phone the update button rides in the sidebar drawer.
-		if (shell && touch) await page.getByRole('button', { name: 'Show sidebar' }).click();
+		if (shell && touch) await page.getByRole('button', { name: /^(Show sidebar|Sessions)$/ }).click();
 		const button = page.locator('.update-button');
 		await button.waitFor();
 		const shot = async (suffix = '') => {

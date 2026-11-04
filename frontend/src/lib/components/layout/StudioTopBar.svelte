@@ -16,7 +16,7 @@
 	 * about those actions is reimplemented here.
 	 */
 	import type { Snippet } from 'svelte';
-	import { PanelLeft } from 'lucide-svelte';
+	import { Menu, PanelLeft } from 'lucide-svelte';
 	import SessionBreadcrumbs from './SessionBreadcrumbs.svelte';
 
 	interface Props {
@@ -43,6 +43,18 @@
 		onOpenProject,
 		actions
 	}: Props = $props();
+
+	// At phone width this button stops being a panel toggle and becomes the way
+	// to the session list, drawn the way the phone app draws it.
+	let phoneWidth = $state(false);
+	$effect(() => {
+		const query = window.matchMedia?.('(max-width: 480px)');
+		if (!query) return;
+		phoneWidth = query.matches;
+		const change = (event: MediaQueryListEvent) => { phoneWidth = event.matches; };
+		query.addEventListener?.('change', change);
+		return () => query.removeEventListener?.('change', change);
+	});
 </script>
 
 <header class="topbar">
@@ -50,11 +62,16 @@
 		<button
 			class="tb-icon"
 			onclick={onToggleSidebar}
-			aria-label={sidebarCollapsed ? 'Show sidebar' : 'Hide sidebar'}
-			title={sidebarCollapsed ? 'Show sidebar' : 'Hide sidebar'}
+			class:phone={phoneWidth}
+			aria-label={phoneWidth ? 'Sessions' : sidebarCollapsed ? 'Show sidebar' : 'Hide sidebar'}
+			title={phoneWidth ? undefined : sidebarCollapsed ? 'Show sidebar' : 'Hide sidebar'}
 			aria-pressed={!sidebarCollapsed}
 		>
-			<PanelLeft size={17} strokeWidth={1.85} />
+			{#if phoneWidth}
+				<Menu size={24} strokeWidth={1.8} />
+			{:else}
+				<PanelLeft size={17} strokeWidth={1.85} />
+			{/if}
 		</button>
 	{/if}
 
@@ -95,6 +112,7 @@
 		transition: background-color 0.13s ease, color 0.13s ease;
 	}
 	.tb-icon:hover { background: var(--accent); color: var(--foreground); }
+	.tb-icon.phone { width: 44px; height: 44px; margin-left: -6px; color: var(--foreground); }
 
 	.tb-right {
 		margin-left: auto;

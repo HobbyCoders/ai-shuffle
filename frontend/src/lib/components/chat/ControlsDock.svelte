@@ -71,6 +71,8 @@
 	import { accessModes, effectiveAccessMode } from './session-scope';
 
 	interface Props {
+		/** No transcript yet: the headline above the composer is what must stay whole. */
+		newChat?: boolean;
 		onBrowserToggle?: () => void;
 		onBrowserPreload?: () => void;
 		browserOpen?: boolean;
@@ -84,7 +86,7 @@
 		callAction?: Snippet;
 	}
 
-	let { callAction, onSheetOpenChange, inertToolbar = false, onBrowserToggle, onBrowserPreload, browserOpen = false, terminal }: Props = $props();
+	let { callAction, onSheetOpenChange, inertToolbar = false, onBrowserToggle, onBrowserPreload, browserOpen = false, terminal, newChat = false }: Props = $props();
 
 	// ── Desktop popovers ──────────────────────────────────────────────
 	// Three anchored popovers, one open at a time: the permission menu, the
@@ -113,12 +115,25 @@
 	}
 
 	/** Where the model picker hangs from, relative to its button's wrapper. */
-	let modelMenuAnchor = $state<{ bottom: number; right: number; width: number } | null>(null);
+	let modelMenuAnchor = $state<{ bottom?: number; top?: number; right: number; width: number } | null>(null);
+	/** Phone width: the picker is a full-width sheet over a dimmed page. */
+	let modelSheet = $state(false);
 
 	function measurePopoverRoom() {
 		if (!dockRef) return;
 		const dockTop = dockRef.getBoundingClientRect().top;
 		const card = dockRef.closest('.chat-island')?.getBoundingClientRect();
+		modelSheet = window.innerWidth <= 480;
+		const wrapBox = modelWrapRef?.getBoundingClientRect();
+		// A new chat has no transcript to protect but does have a headline above
+		// the composer. With more room below, the picker hangs down over the empty
+		// page and at most the context row, leaving the headline whole.
+		const roomBelow = wrapBox ? window.innerHeight - wrapBox.bottom - 20 : 0;
+		if (newChat && !modelSheet && card && wrapBox && card.width > 0 && roomBelow > dockTop - 22) {
+			popoverRoom = Math.max(220, Math.floor(roomBelow));
+			modelMenuAnchor = { top: wrapBox.height + 8, right: wrapBox.right - card.right, width: Math.min(card.width, 380) };
+			return;
+		}
 		// The model picker clears the whole composer so it never covers what you
 		// are typing. With too little room above (a short window, an open phone
 		// keyboard) it falls back to hanging from the controls row.
@@ -629,15 +644,22 @@
 			>{#if modelLocked}<Lock size={11} aria-hidden="true" />{/if}<span>{modelButtonLabel}</span></button>
 
 			{#if openPopover === 'model'}
+				{#if modelSheet}
+					<!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+					<div class="model-scrim" onclick={(e) => { e.stopPropagation(); closePopover(); }}></div>
+				{/if}
 				<div
 					class="dock-menu model-menu"
-					style:bottom={modelMenuAnchor ? `${modelMenuAnchor.bottom}px` : undefined}
-					style:right={modelMenuAnchor ? `${modelMenuAnchor.right}px` : undefined}
-					style:width={modelMenuAnchor ? `${modelMenuAnchor.width}px` : undefined}
+					class:sheet={modelSheet}
+					style:bottom={!modelSheet && modelMenuAnchor?.bottom !== undefined ? `${modelMenuAnchor.bottom}px` : undefined}
+					style:top={!modelSheet && modelMenuAnchor?.top !== undefined ? `${modelMenuAnchor.top}px` : undefined}
+					style:right={!modelSheet && modelMenuAnchor ? `${modelMenuAnchor.right}px` : undefined}
+					style:width={!modelSheet && modelMenuAnchor ? `${modelMenuAnchor.width}px` : undefined}
 					role="dialog"
 					aria-label="Choose model"
 					data-composer-owned-overlay="true"
 				>
+					{#if modelSheet}<h2 class="model-sheet-title">Model</h2>{/if}
 					<ModelPickerPanel
 						groups={modelCatalog.groups}
 						options={modelCatalog.options}
@@ -921,6 +943,40 @@
 		--mpp-width: 100%;
 		/* The list scrolls above the pinned context footer in short viewports. */
 		--mpp-height: min(420px, calc(var(--dock-pop-max, 454px) - 14px));
+	}
+
+	/* Phone width: a real sheet, the same shape the phone app's picker has. */
+	.model-scrim {
+		position: fixed;
+		inset: 0;
+		z-index: 59;
+		background: color-mix(in oklab, var(--background) 45%, black 40%);
+		animation: model-scrim-in 0.16s ease-out;
+	}
+	@keyframes model-scrim-in { from { opacity: 0; } to { opacity: 1; } }
+	.model-menu.sheet {
+		position: fixed;
+		left: 0;
+		right: 0;
+		top: auto;
+		bottom: 0;
+		width: 100%;
+		max-height: min(82dvh, 640px);
+		padding: 16px 8px calc(8px + env(safe-area-inset-bottom, 0px));
+		border-width: 1px 0 0;
+		border-radius: 16px 16px 0 0;
+		display: flex;
+		flex-direction: column;
+		--mpp-height: min(calc(82dvh - 64px), 576px);
+		animation: model-sheet-in 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+	}
+	@keyframes model-sheet-in { from { transform: translateY(32px); opacity: 0.6; } to { transform: none; opacity: 1; } }
+	.model-sheet-title {
+		margin: 0 0 8px;
+		padding: 0 8px;
+		font-size: 16px;
+		font-weight: 600;
+		color: var(--foreground);
 	}
 
 	.effort-menu {

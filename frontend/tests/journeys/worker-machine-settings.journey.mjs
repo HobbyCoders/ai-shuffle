@@ -23,7 +23,7 @@ await runJourney({
 			// Reconciliation can finish before Svelte has rendered the desktop
 			// sidebar. Wait for either visible shell state before checking it.
 			await page.getByRole('complementary', { name: 'Sessions' })
-				.or(page.getByRole('button', { name: 'Show sidebar' }))
+				.or(page.getByRole('button', { name: /^(Show sidebar|Sessions)$/ }))
 				.filter({ visible: true }).first().waitFor();
 			await showSidebar(page);
 			await page.getByRole('button', { name: 'Settings', exact: true }).click();

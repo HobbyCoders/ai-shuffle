@@ -225,15 +225,11 @@ describe('ChatInput attachments per lane', () => {
 	});
 });
 
-describe('narrow-phone placeholder (#1612)', () => {
-	const narrow = mobileStyles.match(/@media \(max-width: 360px\) \{([\s\S]*?)\n\}/)?.[1] ?? '';
-
-	it('shortens only the code lane placeholder, by the exact value ChatInput sets', () => {
-		const long = narrow.match(/\[data-placeholder='([^']+)'\]::before/)?.[1];
-		expect(long).toBeTruthy();
-		// If ChatInput's wording changes, this rule would silently stop matching.
-		expect(chatInput).toContain(`'${long}'`);
-		expect(narrow).toMatch(/content: 'Ask or describe a task';/);
-		expect(narrow).toContain(MOBILE);
+describe('narrow-phone placeholder', () => {
+	it('says the short line in every lane below 480px, from ChatInput itself', () => {
+		expect(chatInput).toMatch(/matchMedia\?\.\('\(max-width: 479\.98px\)'\)/);
+		expect(chatInput).toMatch(/composerMode !== 'chat' && !narrowComposer \? 'Describe a task or ask a question' : 'Ask anything'/);
+		// No stylesheet rule overrides the placeholder any more.
+		expect(mobileStyles).not.toMatch(/data-placeholder='[^']+'\]::before/);
 	});
 });

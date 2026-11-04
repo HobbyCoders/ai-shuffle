@@ -7,6 +7,10 @@
 	 * Everything else waits under More, which the sidebar renders as a flyout
 	 * on desktop and a bottom sheet on the phone.
 	 *
+	 * On the phone this is the drawer's bottom row: labelled tabs (Chats, the
+	 * destinations the sidebar picked, Settings, More). New moves to the drawer's
+	 * header there, because a tab row is for going places.
+	 *
 	 * A touch long-press on any destination jumps straight to Customize, so
 	 * rearranging the rail never needs a trip through More.
 	 */
@@ -30,7 +34,9 @@
 		onPreload?: (type: ViewType) => void;
 		onMore: () => void;
 		onCustomize: () => void;
-		/** Set while the session column is hidden: the way back to it. */
+		/** The chat list and the chat it leads to are what is on screen. */
+		chatsOn?: boolean;
+		/** Always there, so the icons below it never jump between screens. */
 		onChats?: () => void;
 	}
 
@@ -46,8 +52,11 @@
 		onPreload,
 		onMore,
 		onCustomize,
+		chatsOn = false,
 		onChats
 	}: Props = $props();
+
+	const iconSize = $derived(phone ? 20 : 18);
 
 	const LONG_PRESS_MS = 520;
 	let pressing = $state<string | null>(null);
@@ -90,13 +99,23 @@
 </script>
 
 <nav class="rail" class:phone aria-label="Workspace">
-	<button class="r-btn r-new" type="button" aria-label={newLabel} title={phone ? undefined : `${newLabel} (Ctrl+N)`} onclick={onNew}>
-		<SquarePen size={18} strokeWidth={1.75} />
-		<span class="tip" aria-hidden="true">{newLabel}</span>
-	</button>
+	{#if !phone}
+		<button class="r-btn r-new" type="button" aria-label={newLabel} title={`${newLabel} (Ctrl+N)`} onclick={onNew}>
+			<SquarePen size={18} strokeWidth={1.75} />
+			<span class="tip" aria-hidden="true">{newLabel}</span>
+		</button>
+	{/if}
 	{#if onChats}
-		<button class="r-btn" type="button" aria-label="Chats" onclick={onChats}>
-			<MessagesSquare size={18} strokeWidth={1.75} />
+		<button
+			class="r-btn"
+			class:on={chatsOn}
+			type="button"
+			aria-label="Chats"
+			aria-current={chatsOn ? 'page' : undefined}
+			onclick={onChats}
+		>
+			<span class="r-ic"><MessagesSquare size={iconSize} strokeWidth={1.75} /></span>
+			{#if phone}<span class="r-lbl" aria-hidden="true">Chats</span>{/if}
 			<span class="tip" aria-hidden="true">Chats</span>
 		</button>
 	{/if}
@@ -121,26 +140,33 @@
 			onpointerleave={clearPress}
 			oncontextmenu={(e) => { if (phone) e.preventDefault(); }}
 		>
-			<item.icon size={18} strokeWidth={1.75} />
+			<span class="r-ic"><item.icon size={iconSize} strokeWidth={1.75} /></span>
+			{#if phone}<span class="r-lbl" aria-hidden="true">{item.label}</span>{/if}
 			<span class="tip" aria-hidden="true">{item.label}</span>
 		</button>
 	{/each}
 
 	<span class="grow" aria-hidden="true"></span>
 
-	<button
-		class="r-btn"
-		class:on={moreOn && !moreOpen}
-		class:open={moreOpen}
-		type="button"
-		aria-label="More"
-		aria-haspopup="menu"
-		aria-expanded={moreOpen}
-		onclick={onMore}
-	>
-		<MoreHorizontal size={18} strokeWidth={1.75} />
-		<span class="tip" aria-hidden="true">More</span>
-	</button>
+	{#snippet moreButton()}
+		<button
+			class="r-btn"
+			class:on={moreOn && !moreOpen}
+			class:open={moreOpen}
+			type="button"
+			aria-label="More"
+			aria-haspopup="menu"
+			aria-expanded={moreOpen}
+			onclick={onMore}
+		>
+			<span class="r-ic"><MoreHorizontal size={iconSize} strokeWidth={1.75} /></span>
+			{#if phone}<span class="r-lbl" aria-hidden="true">More</span>{/if}
+			<span class="tip" aria-hidden="true">More</span>
+		</button>
+	{/snippet}
+
+	<!-- Desktop keeps Settings at the very foot; on the phone More closes the row. -->
+	{#if !phone}{@render moreButton()}{/if}
 	{#if settings}
 		<button
 			class="r-btn"
@@ -152,10 +178,12 @@
 			onpointerenter={() => onPreload?.(settings.id)}
 			onfocus={() => onPreload?.(settings.id)}
 		>
-			<settings.icon size={18} strokeWidth={1.75} />
+			<span class="r-ic"><settings.icon size={iconSize} strokeWidth={1.75} /></span>
+			{#if phone}<span class="r-lbl" aria-hidden="true">{settings.label}</span>{/if}
 			<span class="tip" aria-hidden="true">{settings.label}</span>
 		</button>
 	{/if}
+	{#if phone}{@render moreButton()}{/if}
 </nav>
 
 <style>
@@ -171,20 +199,15 @@
 		padding: 10px 0 12px;
 		background: var(--sidebar);
 	}
-	/* On a phone this is not a desktop rail: it is the drawer's bottom row, where
-	   a thumb already is. It scrolls sideways rather than clipping a destination
-	   when someone keeps a lot of them on it. */
+	/* On a phone this is not a desktop rail: it is the drawer's bottom row of
+	   labelled tabs, where a thumb already is. */
 	.rail.phone {
 		width: 100%;
 		flex-direction: row;
-		justify-content: space-between;
 		gap: 0;
-		padding: 4px 8px calc(4px + env(safe-area-inset-bottom, 0px));
+		padding: 4px 4px calc(4px + env(safe-area-inset-bottom, 0px));
 		border-top: 1px solid var(--border-subtle);
-		overflow-x: auto;
-		scrollbar-width: none;
 	}
-	.rail.phone::-webkit-scrollbar { display: none; }
 	.rail.phone .r-sep,
 	.rail.phone .grow { display: none; }
 
@@ -206,10 +229,42 @@
 		-webkit-touch-callout: none;
 		user-select: none;
 	}
-	.phone .r-btn { width: 44px; height: 44px; }
+	.r-ic { display: grid; place-items: center; }
 	.r-btn:hover { background: var(--row-hover); color: var(--sidebar-foreground); }
 	.r-btn.on,
 	.r-btn.open { background: var(--row-selected); color: var(--sidebar-foreground); }
+	/* Five equal tabs: the selected one gets a pill behind its icon and a heavier
+	   label, so it never relies on colour alone. */
+	.phone .r-btn {
+		flex: 1 1 0;
+		min-width: 0;
+		width: auto;
+		height: 56px;
+		grid-template-rows: 28px 16px;
+		align-content: center;
+		justify-items: center;
+		gap: 2px;
+		background: transparent;
+	}
+	.phone .r-ic {
+		width: 48px;
+		height: 28px;
+		border-radius: 14px;
+		transition: background-color 0.13s ease;
+	}
+	.phone .r-btn.on .r-ic,
+	.phone .r-btn.open .r-ic { background: var(--row-selected); }
+	.r-lbl {
+		max-width: 100%;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		font-size: 11.5px;
+		font-weight: 500;
+		line-height: 16px;
+	}
+	.phone .r-btn.on .r-lbl,
+	.phone .r-btn.open .r-lbl { font-weight: 600; }
 	.r-btn.pressing { transform: scale(0.92); }
 	.r-btn:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
 

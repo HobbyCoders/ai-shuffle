@@ -31,7 +31,8 @@
 		Archive,
 		Undo2,
 		Files,
-		StickyNote,
+		NotebookPen,
+		SquarePen,
 		Bot,
 		CalendarClock,
 		FolderKanban,
@@ -63,7 +64,7 @@
 	import type { SessionMode } from '$lib/stores/sessionMode.svelte';
 	import { platform } from '$lib/stores/platform.svelte';
 	import { notify } from '$lib/stores/notifications';
-	import { splitWorkspaceItems, workspacePrefs } from '$lib/stores/sidebar-prefs.svelte';
+	import { splitWorkspaceItems, WORKSPACE_ITEM_IDS, workspacePrefs, type WorkspaceItemId } from '$lib/stores/sidebar-prefs.svelte';
 	import NotificationCenter from '$lib/components/NotificationCenter.svelte';
 	import DesktopUpdateButton from './sidebar/DesktopUpdateButton.svelte';
 	import SessionCard from './SessionCard.svelte';
@@ -102,6 +103,8 @@
 		onSelectMode?: (mode: SessionMode) => void;
 		/** Extra control for the header row (the drawer's close button). */
 		headerAction?: Snippet;
+		/** Leave a page for the chats. The phone's drawer also closes itself. */
+		onBackToChats?: () => void;
 		/** Only the rail: the open page brings its own navigation column. */
 		railOnly?: boolean;
 	}
@@ -115,8 +118,12 @@
 		onOpenSpotlight,
 		onSelectMode,
 		headerAction,
+		onBackToChats,
 		railOnly = false
 	}: Props = $props();
+
+	/** Who gets the phone's few tab seats on a list nobody has reordered. */
+	const PHONE_TAB_ORDER: readonly WorkspaceItemId[] = ['project', 'build', 'file-browser', 'notes', 'prs'];
 
 	// Statuses whose elapsed timer ticks live (1s) rather than showing a coarse age.
 	// A parked session's total keeps counting while its background work runs.
@@ -456,7 +463,8 @@
 	// order survives their role lapsing, because nothing rewrote it.
 	const destinations = $derived<WorkspaceNavItem[]>([
 		{ id: 'file-browser', label: 'Files', icon: Files, on: currentType === 'file-browser' },
-		{ id: 'notes', label: 'Notes', icon: StickyNote, on: currentType === 'notes' },
+		// A notebook, not a second sheet of paper: this sits right under Files.
+		{ id: 'notes', label: 'Notes', icon: NotebookPen, on: currentType === 'notes' },
 		{ id: 'build', label: 'Agents', icon: Bot, on: currentType ? BUILD_MEMBERS.includes(currentType) : false },
 		...(isAdmin
 			? [{ id: 'automations' as const, label: 'Automations', icon: CalendarClock, on: currentType === 'automations' }]
@@ -476,7 +484,35 @@
 			: null
 	);
 	const split = $derived(splitWorkspaceItems(destinations, $workspacePrefs));
-	const moreOn = $derived(split.hidden.some((item) => item.on));
+	// The phone's tab row holds four places plus More, so it has fewer seats than
+	// the rail. Until someone reorders their list, the seats go by real use: the
+	// chat list comes first in the rail itself, then Projects and Agents. A list
+	// the user has reordered keeps their order; nothing but seats change.
+	const phoneTabs = $derived.by<WorkspaceNavItem[]>(() => {
+		const seats = settingsItem ? 2 : 3;
+		const reordered = $workspacePrefs.order.join() !== WORKSPACE_ITEM_IDS.join();
+		const rank = (item: WorkspaceNavItem) => {
+			const at = PHONE_TAB_ORDER.indexOf(item.id);
+			return at < 0 ? PHONE_TAB_ORDER.length : at;
+		};
+		const pool = reordered ? split.shown : [...split.shown].sort((a, b) => rank(a) - rank(b));
+		return pool.slice(0, seats);
+	});
+	const railItems = $derived(phone ? phoneTabs : split.shown);
+	const moreItems = $derived(
+		phone ? destinations.filter((item) => !phoneTabs.some((tab) => tab.id === item.id)) : split.hidden
+	);
+	const moreOn = $derived(moreItems.some((item) => item.on));
+	/** The chat list, and the chat or board it leads to, are what is on screen. */
+	const chatsOn = $derived(currentType === null || currentType === 'session' || currentType === 'board');
+	let listRef = $state<HTMLElement | null>(null);
+
+	function openChats() {
+		sheet = null;
+		// Already here: on the phone the list is the page, so go to its top.
+		if (chatsOn) listRef?.scrollTo({ top: 0, behavior: 'smooth' });
+		else (onBackToChats ?? backToChats)();
+	}
 	// One kind of session; the project is picked (or not) on the new screen.
 	const newLabel = 'New session';
 
@@ -730,7 +766,7 @@
 
 <aside class="sidebar" class:phone aria-label="Sessions">
 	<SidebarRail
-		items={split.shown}
+		items={railItems}
 		settings={settingsItem}
 		{newLabel}
 		moreOpen={sheet === 'more'}
@@ -741,7 +777,8 @@
 		onPreload={preloadPanelForView}
 		onMore={() => toggleSheet('more')}
 		onCustomize={openCustomize}
-		onChats={railOnly ? backToChats : undefined}
+		{chatsOn}
+		onChats={openChats}
 	/>
 
 	<div class="col" class:selecting class:rail-hidden={railOnly}>
@@ -773,6 +810,11 @@
 				<!-- The bell's only home: it used to sit in both top bars, which meant
 				     two copies on mobile and none while the drawer was open. -->
 				<NotificationCenter />
+				{#if phone}
+					<button class="icon-btn p-new" type="button" aria-label={newLabel} onclick={() => { sheet = null; cancelSelection(); onNewSession(); }}>
+						<SquarePen size={20} strokeWidth={1.75} />
+					</button>
+				{/if}
 				{#if headerAction}
 					{@render headerAction()}
 				{/if}
@@ -815,7 +857,7 @@
 
 		</div>
 
-		<div class="list" class:edge-guard={phone}>
+		<div class="list" class:edge-guard={phone} bind:this={listRef}>
 			{#if needsYouRows.length > 0}
 				{@render sect('needs', 'Needs you', needsYouRows.length)}
 				{#if !collapsedGroups.needs}
@@ -900,9 +942,9 @@
 
 		<SidebarSheet open={sheet === 'more'} label="More destinations" role="menu" {phone} placement="flyout" onClose={() => (sheet = null)}>
 			{#if phone}<h4>More</h4>{/if}
-			{#if split.hidden.length > 0}
+			{#if moreItems.length > 0}
 				<div class="wgrid">
-					{#each split.hidden as item (item.id)}
+					{#each moreItems as item (item.id)}
 						<button
 							class="tile"
 							class:on={item.on}
@@ -913,7 +955,7 @@
 							onpointerenter={() => preloadPanelForView(item.id)}
 							onfocus={() => preloadPanelForView(item.id)}
 						>
-							<item.icon size={phone ? 18 : 15} strokeWidth={1.75} />
+							<item.icon size={phone ? 20 : 15} strokeWidth={1.75} />
 							<span>{item.label}</span>
 						</button>
 					{/each}
@@ -924,7 +966,7 @@
 			<button class="custrow" type="button" role="menuitem" onclick={openCustomize}>
 				<SlidersHorizontal size={phone ? 17 : 15} strokeWidth={1.75} />
 				<span>Customize the rail</span>
-				<small>{split.shown.length} on the rail</small>
+				{#if !phone}<small>{split.shown.length} on the rail</small>{/if}
 			</button>
 			{#if isAdmin && canCheck}
 				<button class="custrow" type="button" role="menuitem" onclick={checkForUpdates}>
@@ -1003,6 +1045,7 @@
 		cursor: pointer;
 	}
 	.icon-btn:hover { background: var(--sidebar-accent); color: var(--foreground); }
+	.icon-btn.p-new { width: 44px; height: 44px; color: var(--sidebar-foreground); }
 
 	.searchrow { display: flex; gap: 6px; padding-bottom: 8px; }
 	.search {
@@ -1245,7 +1288,6 @@
 
 	/* More: a tile grid on the phone, a plain menu on desktop. */
 	.wgrid { display: flex; flex-direction: column; gap: 1px; }
-	.phone .wgrid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
 	.tile {
 		display: flex;
 		align-items: center;
@@ -1265,20 +1307,15 @@
 	.tile span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 	.tile:hover,
 	.tile.on { background: var(--sidebar-accent-active); }
+	/* A plain labelled list, the same rows as the two beneath it. */
 	.phone .tile {
-		height: 72px;
-		flex-direction: column;
-		justify-content: center;
-		gap: 6px;
-		padding: 0 4px;
-		border-radius: 11px;
-		background: var(--row-hover);
-		color: var(--sidebar-muted);
-		font-size: 12px;
-		text-align: center;
+		height: 48px;
+		gap: 12px;
+		padding: 0 10px;
+		border-radius: 10px;
+		font-size: 14px;
 	}
-	.phone .tile :global(svg) { color: var(--sidebar-foreground); }
-	.phone .tile.on { background: var(--sidebar-accent-active); color: var(--foreground); }
+	.phone .tile.on { font-weight: 600; }
 	.wempty { margin: 0; padding: 6px 8px 4px; font-size: 12.5px; color: var(--muted-foreground); }
 
 	.custrow {

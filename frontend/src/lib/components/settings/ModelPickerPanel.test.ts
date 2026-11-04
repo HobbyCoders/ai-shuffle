@@ -1,3 +1,4 @@
+import { tick } from 'svelte';
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import ModelPickerPanel from './ModelPickerPanel.svelte';
@@ -120,22 +121,42 @@ describe('ModelPickerPanel', () => {
 		expect(document.querySelector('[data-context-summary]')?.textContent).toContain('Context limit 200K');
 	});
 
-	it('keeps Favorites first in the rail and persists functional row stars', async () => {
+	it('puts favorites first, once, and persists functional row stars', async () => {
 		render(ModelPickerPanel, {
 			props: { groups, options, value: 'sonnet', onSelect: vi.fn() }
 		});
-
-		const tabs = screen.getAllByRole('tab');
-		expect(tabs[0]?.getAttribute('title')).toBe('Favorites');
-		expect(screen.getByRole('tab', { name: /favorites, empty/i })).toBeTruthy();
+		const headings = () => [...document.querySelectorAll('[data-provider-heading]')].map((h) => h.textContent);
+		// No icon rail, and no Favorites heading while nothing is starred.
+		expect(screen.queryByRole('tablist')).toBeNull();
+		expect(headings().some((h) => h?.includes('Favorites'))).toBe(false);
 
 		await fireEvent.click(screen.getByRole('button', { name: /add opus to favorites/i }));
 		expect(JSON.parse(localStorage.getItem('aihub.pinnedModels') ?? '[]')).toEqual(['opus']);
 
-		await fireEvent.click(screen.getByRole('tab', { name: /favorites, 1 models/i }));
+		expect(headings()[0]).toBe('Favorites');
 		const list = screen.getByRole('listbox', { name: 'Model' });
-		expect(within(list).getByRole('option', { name: /opus/i })).toBeTruthy();
-		expect(within(list).queryByRole('option', { name: /sonnet/i })).toBeNull();
+		// getByRole throws on two matches, so this also proves it is listed once.
+		const opus = within(list).getByRole('option', { name: /opus/i });
+		expect(screen.getByRole('group', { name: 'Favorites' }).contains(opus)).toBe(true);
+		expect(within(list).getByRole('option', { name: /sonnet/i })).toBeTruthy();
+	});
+
+	it('marks only the selected row with a check', () => {
+		render(ModelPickerPanel, { props: { groups, options, value: 'sonnet', onSelect: vi.fn() } });
+		const list = screen.getByRole('listbox', { name: 'Model' });
+		const row = (name: RegExp) => within(list).getByRole('option', { name });
+		expect(row(/sonnet/i).querySelector('.mpp-check svg')).not.toBeNull();
+		expect(row(/opus/i).querySelector('.mpp-check svg')).toBeNull();
+	});
+
+	it('moves through every provider from the search box with the arrow keys', async () => {
+		const onSelect = vi.fn();
+		render(ModelPickerPanel, { props: { groups, options, value: options[0].value, onSelect } });
+		const search = screen.getByRole('textbox', { name: 'Search models' });
+		await fireEvent.keyDown(search, { key: 'ArrowDown' });
+		await tick();
+		await fireEvent.keyDown(search, { key: 'Enter' });
+		expect(onSelect).toHaveBeenCalledWith(options[1].value);
 	});
 
 	it('pins the context selector beneath the list for an eligible selected model', async () => {
@@ -160,7 +181,7 @@ describe('ModelPickerPanel', () => {
 		expect(onContextChoiceSelect).toHaveBeenCalledWith('standard');
 	});
 
-	it('startOnAll lists every provider even when value belongs to Claude', async () => {
+	it('lists every provider under its own heading, with no API badge', async () => {
 		const grok = {
 			key: 'grok-row',
 			name: 'Grok',
@@ -180,57 +201,19 @@ describe('ModelPickerPanel', () => {
 			}
 		];
 		render(ModelPickerPanel, {
-			props: {
-				groups: [...groups, grok],
-				options: mixedOptions,
-				value: 'sonnet',
-				onSelect: vi.fn(),
-				startOnAll: true
-			}
+			props: { groups: [...groups, grok], options: mixedOptions, value: 'sonnet', onSelect: vi.fn() }
 		});
 
-		expect(screen.getByRole('tab', { name: /all providers/i })).toBeTruthy();
 		const list = screen.getByRole('listbox', { name: 'Model' });
+		expect(within(screen.getByRole('group', { name: /^Grok/ })).getByRole('option', { name: /grok 4/i })).toBeTruthy();
 		expect(within(list).getByRole('option', { name: /sonnet/i })).toBeTruthy();
+		expect(document.querySelector('[data-provider-api-badge]')).toBeNull();
+
+		// A search narrows the same list and drops the headings it empties.
+		await fireEvent.input(screen.getByRole('textbox', { name: 'Search models' }), { target: { value: 'grok' } });
+		expect(within(list).queryByRole('option', { name: /sonnet/i })).toBeNull();
 		expect(within(list).getByRole('option', { name: /grok 4/i })).toBeTruthy();
-
-		await fireEvent.click(screen.getByRole('tab', { name: /^claude/i }));
-		expect(within(list).getByRole('option', { name: /sonnet/i })).toBeTruthy();
-		expect(within(list).queryByRole('option', { name: /grok 4/i })).toBeNull();
-	});
-
-	it('omits All providers when startOnAll is off, even if value is a Claude model', async () => {
-		const grok = {
-			key: 'grok-row',
-			name: 'Grok',
-			subtext: 'API',
-			glyph: 'grok' as const,
-			isApi: true
-		};
-		const mixedOptions = [
-			...options,
-			{
-				value: 'prov:grok-row:grok-4',
-				label: 'Grok 4',
-				description: 'grok-4',
-				groupKey: 'grok-row',
-				group: 'Grok',
-				groupSubtext: 'API'
-			}
-		];
-		render(ModelPickerPanel, {
-			props: {
-				groups: [...groups, grok],
-				options: mixedOptions,
-				value: 'sonnet',
-				onSelect: vi.fn()
-			}
-		});
-
-		expect(screen.queryByRole('tab', { name: /all providers/i })).toBeNull();
-		const list = screen.getByRole('listbox', { name: 'Model' });
-		expect(within(list).getByRole('option', { name: /sonnet/i })).toBeTruthy();
-		expect(within(list).queryByRole('option', { name: /grok 4/i })).toBeNull();
+		expect(document.querySelectorAll('[data-provider-heading]')).toHaveLength(1);
 	});
 
 	it('shows a ChatGPT or SuperGrok subscription without an Unofficial label', () => {
@@ -249,8 +232,7 @@ describe('ModelPickerPanel', () => {
 				groups: [chatgpt, xai],
 				options: [option('gpt-row', 'OpenAI', 'PRO', 'gpt-5'), option('xai-row', 'Grok', 'API', 'grok-4')],
 				value: '',
-				onSelect: vi.fn(),
-				startOnAll: true
+				onSelect: vi.fn()
 			}
 		});
 		const list = screen.getByRole('listbox', { name: 'Model' });
@@ -259,7 +241,7 @@ describe('ModelPickerPanel', () => {
 		expect(gpt.getAttribute('title')).toBe('gpt-5');
 		const grok = within(list).getByRole('option', { name: /grok-4/ });
 		expect(grok.textContent).not.toContain('Unofficial');
-		expect(screen.getByRole('tab', { name: 'OpenAI · PRO' })).toBeTruthy();
+		expect(screen.getByRole('group', { name: /^OpenAI/ }).textContent).toContain('PRO');
 	});
 });
 

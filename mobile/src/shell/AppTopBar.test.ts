@@ -104,7 +104,8 @@ describe('AppTopBar actions', () => {
 		const git = screen.getByRole('button', { name: 'Git actions: 3 files changed' });
 		expect(container.querySelector('.tb-actions')?.contains(git)).toBe(true);
 		const order = [...container.querySelectorAll('header button')].map((b) => b.getAttribute('aria-label') ?? b.textContent);
-		expect(order).toEqual(['Open menu', 'Connected to Stub. Switch worker', 'Chat actions', 'Git actions: 3 files changed']);
+		// The title's menu sits right after the title; the worker status runs under it.
+		expect(order).toEqual(['Open menu', 'Chat actions', 'Connected to Stub. Switch worker', 'Git actions: 3 files changed']);
 	});
 
 	it('retains global voice input in the single bar except when the chat owns it', async () => {

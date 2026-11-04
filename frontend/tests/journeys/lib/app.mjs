@@ -348,7 +348,7 @@ export const isPhone = (variant) => variant.viewport !== 'desktop' && variant.vi
 export async function showSidebar(page) {
 	const sessions = page.getByRole('complementary', { name: 'Sessions' });
 	if (await sessions.isVisible()) return sessions;
-	await page.getByRole('button', { name: 'Show sidebar' }).click();
+	await page.getByRole('button', { name: /^(Show sidebar|Sessions)$/ }).click();
 	await sessions.waitFor({ timeout: 10_000 });
 	return sessions;
 }

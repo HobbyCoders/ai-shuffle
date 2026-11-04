@@ -29,7 +29,9 @@
 	import { obscuresTranscript } from '$lib/components/chat/transcript-reading-area';
 	import { pushState } from '$app/navigation';
 	import { page } from '$app/state';
-	import { Menu, Mic, X } from 'lucide-svelte';
+	import { ArrowLeft, Menu, Mic, X } from 'lucide-svelte';
+	import { categoryById } from '$lib/settings/categories';
+	import { settingsNav } from '$lib/settings/navigation.svelte';
 	import { hotkeyPreferences } from '$lib/stores/hotkeyPreferences.svelte';
 	import { globalSttState, triggerToggle } from '$lib/services/globalStt';
 	import { activeView } from '$lib/stores/layout.svelte';
@@ -41,6 +43,7 @@
 	import SessionTitleMenu from '$lib/components/layout/SessionTitleMenu.svelte';
 	import ConnectedWorkerBar from './ConnectedWorkerBar.svelte';
 	import { projects } from '$lib/stores/app-data.svelte';
+	import { backToChats } from '$lib/services/session-navigation';
 	import { chatHeaderTitle } from '$lib/components/layout/chat-empty-state';
 	import { canStartDrawerSwipe, completes, dragOffset, lockAxis, type DrawerSwipe } from './drawer-gesture';
 
@@ -101,7 +104,14 @@
 			messageCount: s?.messages?.length ?? 0
 		});
 	});
+	// A Settings page below the index: the bar's ☰ becomes the way back up, and
+	// the bar carries the page's name so the page need not repeat it.
+	const settingsSubPage = $derived(
+		!!currentType && !!TITLES[currentType] && TITLES[currentType] === 'Settings'
+			&& settingsNav.stacked && settingsNav.view !== 'index'
+	);
 	const mobileTitle = $derived.by(() => {
+		if (settingsSubPage) return categoryById(settingsNav.category).label;
 		if (currentType === 'session') return chatTitle;
 		if (currentType === 'board') return 'Sessions';
 		if (buildActive) return 'Build';
@@ -313,22 +323,33 @@
 <svelte:window onkeydown={handleWindowKeydown} />
 
 <header class="topbar topbar-mobile">
-	<button
-		bind:this={hamburgerRef}
-		class="tb-hamburger"
-		onclick={openDrawer}
-		aria-controls="mobile-nav-drawer"
-		aria-label={$unreadCount > 0 ? `Open menu (${$unreadCount} unread notifications)` : 'Open menu'}
-		aria-expanded={drawerOpen}
-	>
-		<Menu size={20} strokeWidth={1.8} />
-		{#if !drawerOpen && $unreadCount > 0}
-			<span class="tb-unread" aria-hidden="true"></span>
-		{/if}
-	</button>
+	{#if settingsSubPage}
+		<button class="tb-hamburger" onclick={() => settingsNav.back()} aria-label={settingsNav.view === 'detail' ? `Back to ${mobileTitle}` : 'Back to Settings'}>
+			<ArrowLeft size={24} strokeWidth={1.8} />
+		</button>
+	{:else}
+		<button
+			bind:this={hamburgerRef}
+			class="tb-hamburger"
+			onclick={openDrawer}
+			aria-controls="mobile-nav-drawer"
+			aria-label={$unreadCount > 0 ? `Open menu (${$unreadCount} unread notifications)` : 'Open menu'}
+			aria-expanded={drawerOpen}
+		>
+			<Menu size={24} strokeWidth={1.8} />
+			{#if !drawerOpen && $unreadCount > 0}
+				<span class="tb-unread" aria-hidden="true"></span>
+			{/if}
+		</button>
+	{/if}
 
 	<div class="tb-context">
-		<span class="tb-title" title={mobileTitle}>{mobileTitle}</span>
+		<div class="tb-titleline">
+			<span class="tb-title" title={mobileTitle}>{mobileTitle}</span>
+			{#if boundChatId}
+				<SessionTitleMenu variant="sheet" title={mobileTitle} sessionId={boundChatId} {projectLabel} />
+			{/if}
+		</div>
 		<div class="tb-sub">
 			<ConnectedWorkerBar />
 			{#if boundChatId}
@@ -337,10 +358,6 @@
 			{/if}
 		</div>
 	</div>
-
-	{#if boundChatId}
-		<SessionTitleMenu variant="sheet" title={mobileTitle} sessionId={boundChatId} {projectLabel} />
-	{/if}
 
 	<div class="tb-actions">
 		{@render actions?.()}
@@ -386,6 +403,7 @@
 			onSettledOpenSession={drawerGo(onSettledOpenSession)}
 			onOpenSession={drawerGo(onOpenSession)}
 			onOpenFeature={drawerGo(onOpenFeature)}
+			onBackToChats={drawerGo(backToChats)}
 			onOpenSpotlight={onOpenSpotlight ? drawerGo(onOpenSpotlight) : undefined}
 		>
 			{#snippet headerAction()}
@@ -435,10 +453,10 @@
 	   drawer, and a badge on a navigation control reads as a nav badge. */
 	.tb-unread {
 		position: absolute;
-		top: 11px;
-		right: 8px;
-		width: 7px;
-		height: 7px;
+		top: 9px;
+		right: 6px;
+		width: 8px;
+		height: 8px;
 		border-radius: 50%;
 		background: var(--destructive);
 		box-shadow: 0 0 0 2px var(--background);
@@ -463,8 +481,8 @@
 	.tb-actions :global(.pa-trigger) { width: 44px; height: 48px; border-radius: 8px; }
 	.tb-actions :global(.pa-glyph) { width: 20px; height: 20px; }
 	.tb-actions :global(.pa-glyph > svg) { width: 20px; height: 20px; }
-	.tb-actions :global(.pa-count) { top: -6px; left: 11px; }
-	.tb-actions :global(.pa-dot) { top: -1px; right: -2px; }
+	.tb-actions :global(.pa-count) { top: -7px; left: 12px; }
+	.tb-actions :global(.pa-dot) { top: -3px; right: -4px; width: 8px; height: 8px; }
 
 	/* Title on line 1; line 2 (worker chip, trail) is laid over the bottom of
 	   the same 56px column so its 44px tap targets can reach the bar's edge. */
@@ -475,8 +493,20 @@
 		min-width: 0;
 		padding: 8px 2px 0 4px;
 	}
+	/* The chevron belongs to the title: it sits right after the text however long
+	   that is, and keeps a 44px target by reaching past the line's height. */
+	.tb-titleline { display: flex; align-items: center; min-width: 0; height: 21px; }
+	.tb-titleline :global(.chev-trigger) {
+		position: relative;
+		z-index: 1;
+		width: 40px;
+		height: 44px;
+		margin: 0 -10px 0 -6px;
+	}
 	.tb-title {
 		display: block;
+		flex: 0 1 auto;
+		min-width: 0;
 		font-size: 14px;
 		line-height: 21px;
 		font-weight: 600;

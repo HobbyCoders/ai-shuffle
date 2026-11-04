@@ -155,8 +155,19 @@
 		return handoffPlaceholder(pendingHandoff($activeSession.messages, row ? { deviceId: row.owner_device_id, deviceName: row.device_name } : null, $activeSession.sessionId, $activeSession.sessionId ? $handoffPending[$activeSession.sessionId] : null));
 	});
 	const agentName = $derived($profiles.find(profile => profile.id === $activeSession.profile)?.name?.trim() || null);
+	// The longer line does not fit a phone's field, and a cut-off hint reads as a
+	// bug. Below 480px every lane says the short one, on both phone shells.
+	let narrowComposer = $state(false);
+	$effect(() => {
+		const query = window.matchMedia?.('(max-width: 479.98px)');
+		if (!query) return;
+		narrowComposer = query.matches;
+		const change = (event: MediaQueryListEvent) => { narrowComposer = event.matches; };
+		query.addEventListener?.('change', change);
+		return () => query.removeEventListener?.('change', change);
+	});
 	const composerPlaceholder = $derived(
-		moveWait ?? (composerMode !== 'chat' ? 'Describe a task or ask a question' : 'Ask anything')
+		moveWait ?? (composerMode !== 'chat' && !narrowComposer ? 'Describe a task or ask a question' : 'Ask anything')
 	);
 
 	// Voice passes local file references to its worker rather than uploading
@@ -1741,6 +1752,7 @@
 				     shell's controls panel also offers a call. -->
 				<ControlsDock
 					bind:this={controlsDockRef}
+					newChat={newSession}
 					{onBrowserToggle}
 					{onBrowserPreload}
 					{browserOpen}

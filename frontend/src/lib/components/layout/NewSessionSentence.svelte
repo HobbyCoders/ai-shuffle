@@ -91,7 +91,9 @@
 {/if}
 
 <style>
-	/* The row wraps rather than clips on a narrow screen: nothing above it moves. */
+	/* The row wraps rather than clips on a narrow window: nothing above it moves.
+	   On a phone it stays one line that scrolls sideways; its menus float to
+	   <body>, so the scroller cannot clip them. */
 	.ns-context {
 		position: relative;
 		display: flex;
@@ -105,6 +107,13 @@
 	.ns-sentence { display: contents; }
 	.ns-pending { color: var(--subtle-foreground); cursor: default; }
 	@media (max-width: 480px) {
-		.ns-context { margin: 2px 0 0; }
+		.ns-context {
+			margin: 2px 0 0;
+			flex-wrap: nowrap;
+			overflow-x: auto;
+			scrollbar-width: none;
+		}
+		.ns-context::-webkit-scrollbar { display: none; }
+		.ns-context :global(button) { flex: none; }
 	}
 </style>

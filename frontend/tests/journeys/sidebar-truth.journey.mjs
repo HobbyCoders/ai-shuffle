@@ -60,7 +60,7 @@ const laneOf = (page, id) => page.evaluate((selector) => document.querySelector(
 
 async function waitLane(page, id, lane, timeout = 30_000) {
 	await page.getByRole('complementary', { name: 'Sessions' })
-		.or(page.getByRole('button', { name: /^(Show sidebar|Open menu)/ }))
+		.or(page.getByRole('button', { name: /^(Show sidebar|Sessions|Open menu)/ }))
 		.first().waitFor({ timeout: 60_000 });
 	await showSidebar(page);
 	try {

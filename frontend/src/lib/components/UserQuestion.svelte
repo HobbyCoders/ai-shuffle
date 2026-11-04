@@ -151,7 +151,7 @@
 			{#if catalog.options.length}
 				<div class="model-panel" role="group" aria-labelledby={`${id}-question`}>
 					<ModelPickerPanel groups={catalog.groups} options={catalog.options} value={pickedModel}
-						onSelect={pickModel} startOnAll ariaLabel="Subagent model" />
+						onSelect={pickModel} ariaLabel="Subagent model" />
 				</div>
 			{:else}
 				<p class="picker-empty">No models are available yet. Connect a provider in Settings, then delegate again.</p>

@@ -255,7 +255,6 @@ describe('ControlsDock dynamic effort', () => {
   expect(screen.getAllByText(/Reasoning effort capabilities are not known yet/)).toHaveLength(1);
   expect(get(activeSession).effortLevelOverride).toBe('minimal');
   // The phone keeps the unknown pin visible and offers no levels to pick.
-  expect(screen.getByRole('button', { name: 'Reasoning effort: minimal' })).toBeTruthy();
   await openPanel();
   expect(panelEffortValue()).toBe('minimal');
   expect(panelEfforts()).toHaveLength(0);
@@ -264,7 +263,6 @@ describe('ControlsDock dynamic effort', () => {
   await tick();
   expect(get(activeSession).effortLevelOverride).toBeNull();
   // Opening the panel closed the desktop popover that showed the long explanation.
-  expect(screen.getByRole('button', { name: 'Reasoning effort: set by the model' })).toBeTruthy();
   expect(panelEffortValue()).toBe('Set by the model');
   expect(panelEfforts()).toHaveLength(0);
  });

@@ -775,28 +775,19 @@
 		min-width: 0;
 	}
 
-	/* A phone-width row stays one line. Its leading icons go first. A chat with a
-	   branch is the crowded case: the chevrons go too, this worker keeps only its
-	   status dot, and the worktree chip is its tick box alone. Each still names
-	   itself through its title and label. */
+	/* A phone-width row stays one line of labelled items, each with its word and,
+	   when it opens something, its chevron. Leading icons go first, then the online
+	   dot (an offline worker keeps its dot beside its name). The worktree chip goes
+	   last: it is a read-only note that no longer fits, so it stays for screen
+	   readers and the repository and branch names give way before anything else. */
 	@media (max-width: 480px) {
 		.context-pill-bar:not(.sheet-mode) :global(.ctx-chip > svg:not(.lucide-chevron-down):not(.ctx-chip-chev)),
 		.context-pill-bar:not(.sheet-mode) :global(.ctx-chip > :where(span, div):not(.ctx-chip-cb) > svg:not(.lucide-chevron-down):not(.ctx-chip-chev)),
-		.context-pill-bar:not(.sheet-mode):has(.wt-indicator) :global(.ctx-chip svg.lucide-chevron-down),
-		.context-pill-bar:not(.sheet-mode):has(.wt-indicator) :global(.ctx-chip svg.ctx-chip-chev) {
+		.context-pill-bar:not(.sheet-mode) :global(.worker-status-dot.online) {
 			display: none;
 		}
 
-		.context-pill-bar:not(.sheet-mode):has(.wt-indicator) .runner-here {
-			position: absolute;
-			width: 1px;
-			height: 1px;
-			overflow: hidden;
-			clip: rect(0 0 0 0);
-			white-space: nowrap;
-		}
-
-		.context-pill-bar:not(.sheet-mode) .wt-indicator .ctx-chip-label {
+		.context-pill-bar:not(.sheet-mode) .wt-indicator {
 			position: absolute;
 			width: 1px;
 			height: 1px;

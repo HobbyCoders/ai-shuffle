@@ -98,12 +98,13 @@ describe('quick bar', () => {
 		activeSession.setDraft('');
 		render(MobileComposerControlsSheet, { props: props({ fastSupported: true, fastEnabled: true, permissionValue: 'acceptEdits' }) });
 		expect(cell(/^Model: Opus, fast mode$/).textContent).toContain('Opus');
-		expect(cell(/^Reasoning effort: High$/).textContent).toContain('High');
+		// Reasoning effort is not on the bar; it lives in the panel.
+		expect(bar().querySelector('[data-cell="effort"]')).toBeNull();
 		expect(cell(/^Tool access: Accept edits$/).textContent).toContain('Edits');
 		expect(within(bar()).getByRole('button', { name: /^Context and usage/ })).toBeTruthy();
 		expect(cell(/^All chat controls, 2 running$/).textContent).toContain('Controls');
-		// No information lines: every cell is a one-word label.
-		expect(bar().querySelectorAll('p, small')).toHaveLength(0);
+		// No information lines and no drag handle: every cell is a word or two.
+		expect(bar().querySelectorAll('p, small, .qbar-grip')).toHaveLength(0);
 	});
 
 	it('says at the switch when Fast waits for the next message', async () => {
@@ -122,18 +123,6 @@ describe('quick bar', () => {
 		expect(access.getAttribute('aria-busy')).toBe('true');
 	});
 
-	it('opens a compact effort picker and applies the pick', async () => {
-		const onEffortSelect = vi.fn();
-		render(MobileComposerControlsSheet, { props: props({ onEffortSelect }) });
-		await fireEvent.click(cell(/^Reasoning effort/));
-		const picker = screen.getByRole('dialog', { name: 'Reasoning effort' });
-		expect(within(picker).getAllByRole('radio')).toHaveLength(5);
-		expect(within(picker).getByRole('radio', { name: 'High' }).getAttribute('aria-checked')).toBe('true');
-		await fireEvent.click(within(picker).getByRole('radio', { name: 'Max' }));
-		expect(onEffortSelect).toHaveBeenCalledExactlyOnceWith('max');
-		expect(screen.queryByRole('dialog', { name: 'Reasoning effort' })).toBeNull();
-	});
-
 	it('opens a compact tool-access picker, with Bypass reachable by a deliberate tap', async () => {
 		const onPermissionSelect = vi.fn();
 		render(MobileComposerControlsSheet, { props: props({ onPermissionSelect }) });
@@ -146,21 +135,12 @@ describe('quick bar', () => {
 
 	it('closes a picker with Escape and on a tap elsewhere', async () => {
 		render(MobileComposerControlsSheet, { props: props() });
-		await fireEvent.click(cell(/^Reasoning effort/));
+		await fireEvent.click(cell(/^Tool access/));
 		await fireEvent.keyDown(window, { key: 'Escape' });
-		expect(screen.queryByRole('dialog', { name: 'Reasoning effort' })).toBeNull();
+		expect(screen.queryByRole('dialog', { name: 'Tool access' })).toBeNull();
 		await fireEvent.click(cell(/^Tool access/));
 		await fireEvent.pointerDown(document.body);
 		expect(screen.queryByRole('dialog', { name: 'Tool access' })).toBeNull();
-	});
-
-	it('steps effort one level with a sideways swipe', async () => {
-		const onEffortSelect = vi.fn();
-		render(MobileComposerControlsSheet, { props: props({ onEffortSelect }) });
-		await drag(cell(/^Reasoning effort/), 60, 0);
-		expect(onEffortSelect).toHaveBeenCalledExactlyOnceWith('xhigh');
-		await drag(cell(/^Reasoning effort/), -60, 0);
-		expect(onEffortSelect).toHaveBeenLastCalledWith('medium');
 	});
 
 	it('steps tool access with a swipe but never onto Bypass', async () => {
@@ -176,12 +156,39 @@ describe('quick bar', () => {
 		expect(screen.queryByRole('dialog', { name: 'Tool access' })).toBeNull();
 	});
 
-	it('locks effort where the model sets it, and says why on tap', async () => {
-		render(MobileComposerControlsSheet, { props: props({ effortOptions: [], effortValue: null, effortExplanation: 'Set by the model' }) });
-		const effort = cell(/^Reasoning effort: set by the model$/);
-		expect(effort.textContent).toContain('Fixed');
-		await fireEvent.click(effort);
-		expect(screen.queryByRole('dialog', { name: 'Reasoning effort' })).toBeNull();
+	it('says in the panel when the model sets its own effort', () => {
+		render(MobileComposerControlsSheet, { props: props({ open: true, effortOptions: [], effortValue: null, effortExplanation: 'Set by the model' }) });
+		const row = panel().querySelector('[data-row="effort"]')!;
+		expect(row.querySelector('.mcp-val')?.textContent).toBe('Set by the model');
+		expect(within(row as HTMLElement).queryByRole('radiogroup')).toBeNull();
+	});
+
+	it('hides the effort row, and never says Unknown, while levels are not reported', () => {
+		render(MobileComposerControlsSheet, { props: props({
+			open: true, effortKnown: false, effortOptions: [], effortValue: null,
+			effortExplanation: 'Reasoning effort capabilities are not known yet.'
+		}) });
+		expect(panel().querySelector('[data-row="effort"]')).toBeNull();
+		expect(panel().textContent).not.toContain('Unknown');
+		expect(panel().textContent).not.toContain('not known yet');
+	});
+
+	it('still shows a pinned level when levels are not reported, without the explanation', () => {
+		render(MobileComposerControlsSheet, { props: props({
+			open: true, effortKnown: false, effortOptions: [], effortValue: 'minimal',
+			effortExplanation: 'Reasoning effort capabilities are not known yet.'
+		}) });
+		expect(panel().querySelector('[data-row="effort"] .mcp-val')?.textContent).toBe('minimal');
+		expect(panel().textContent).not.toContain('not known yet');
+	});
+
+	it('marks the usage ring calm so the footer only shows it when it is actionable', () => {
+		render(MobileComposerControlsSheet, { props: props() });
+		const usage = bar().querySelector<HTMLElement>('.qcell.usage')!;
+		// Still mounted either way: it measures usage and hosts the details sheet.
+		expect(usage.classList.contains('calm')).toBe(true);
+		// Everything off the bar stays reachable in the panel.
+		expect(panel().querySelector('[data-row="usage"], [aria-label^="Context and usage"]')).not.toBeNull();
 	});
 
 	it('keeps an integrated voice model visible but locked', async () => {
