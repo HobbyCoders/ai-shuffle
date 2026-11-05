@@ -1,0 +1,76 @@
+{
+  "description": "After plan-update revision2: explicitly finish generation1, then safely roll over to generation2. Each CAS update is a separate real Plan call.",
+  "steps": [
+    {
+      "tool_calls": [
+        {
+          "name": "Plan",
+          "input": {
+            "action": "update",
+            "expected_revision": 2,
+            "request_id": "dev-plan-terminal",
+            "tasks": [
+              {
+                "id": "implement",
+                "title": "Implement bounded plan",
+                "status": "completed",
+                "depends_on": [
+                  "inspect"
+                ],
+                "evidence": [
+                  "Controlled fixture marks this task complete only to exercise safe rollover; not independent verification."
+                ],
+                "references": [
+                  "session-plan:revision:2"
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "Plan",
+          "input": {
+            "action": "update",
+            "expected_revision": 3,
+            "request_id": "dev-plan-rollover",
+            "rollover": true,
+            "goal": "Second controlled session goal",
+            "done_when": "The new generation displays its own work while prior revisions and cancellation remain preserved in history.",
+            "tasks": [
+              {
+                "id": "followup",
+                "title": "Draft follow-up research plan",
+                "status": "in_progress"
+              },
+              {
+                "id": "review",
+                "title": "Review the follow-up research plan",
+                "status": "pending",
+                "depends_on": [
+                  "followup"
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "Plan",
+          "input": {
+            "action": "get"
+          }
+        }
+      ]
+    },
+    {
+      "text": "The prior generation reached terminal states at revision 3, including a cancelled check that was not a success. Explicit rollover created generation 2 at revision 4 with new in-progress and pending work; prior history is retained. All statuses remain model-reported."
+    }
+  ]
+}

@@ -1,0 +1,28 @@
+{
+  "description": "Optional legacy scratch is still readable in a native code/project chat with an active Plan. Read-only: never add, remove, clear or convert notes, and never update Plan.",
+  "steps": [
+    {
+      "tool_calls": [
+        {
+          "name": "Note",
+          "input": {
+            "action": "list"
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "Plan",
+          "input": {
+            "action": "get"
+          }
+        }
+      ]
+    },
+    {
+      "text": "Optional Note scratch was read without changing it or copying the Plan checklist. Plan state was read, not updated; neither reported completion nor cancellation is independent verification."
+    }
+  ]
+}
