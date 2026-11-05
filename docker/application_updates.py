@@ -874,7 +874,9 @@ class ContainerUpdates:
         if refresh == "available":
             if (not self.state.get("active") or self.state.get("active") == self.updater_revision
                     or self.state.get("booting") or self.state.get("blocked") or self.state.get("pending")):
-                refresh = "current" if self.state.get("active") == self.updater_revision else "unknown"
+                refresh = ("current" if isinstance(self.updater_revision, str)
+                           and REVISION.fullmatch(self.updater_revision)
+                           and self.state.get("active") == self.updater_revision else "unknown")
         return {"revision": self.updater_revision,
                 "capabilities": ["stage-diagnostics-v1", "dependency-cache-v1", "prebuilt-ui-v1",
                                  "node-output-cache-v1", *(["refresh-updater-v1"] if self.refresh_mode == "available" else [])],

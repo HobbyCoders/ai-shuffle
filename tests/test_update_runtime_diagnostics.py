@@ -28,6 +28,18 @@ def test_resident_revision_is_not_app_revision(updater, monkeypatch):
     assert "stage-diagnostics-v1" in state["updater"]["capabilities"]
 
 
+def test_unknown_resident_without_active_revision_is_not_current(tmp_path, monkeypatch):
+    # An inherited handover marker cannot prove the revision of a module loaded
+    # from another path. The constructor deliberately records unknown identity.
+    monkeypatch.setenv("SHUFFLE_HANDED_OVER", A)
+    updater = ContainerUpdates(tmp_path / "updates", {"revision": A, "sequence": 1, "runtime": "test"},
+                               b"", lambda: True, lambda _: {}, refresh_mode="available")
+    assert updater.updater_revision is None and not updater.state.get("active")
+    status = json.loads((updater.root / "status.json").read_text())
+    assert status["updater"]["revision"] is None
+    assert status["updater"]["refresh"] == "unknown"
+
+
 def test_warm_tools_output_skips_second_build(updater, tmp_path, monkeypatch):
     calls = []
     def build(command, cwd, env):
