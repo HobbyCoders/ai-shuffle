@@ -451,6 +451,11 @@ def _task_status_handler():
     return handle_task_status
 
 
+def _scoped_task_stop_handler():
+    from app.core.scoped_remote_stop import handle
+    return handle
+
+
 def _task_stop_handler():
     from app.core.remote_task import handle_task_stop
     return handle_task_stop
@@ -598,6 +603,7 @@ _LAZY_HANDLERS = {
     "task-report": _task_report_handler,
     "task-status": _task_status_handler,
     "task-stop": _task_stop_handler,
+    "task-stop-scoped": _scoped_task_stop_handler,
     "task-message": _task_message_handler,
     "task-approval": _task_approval_handler,
     "task-approval-answer": _task_approval_answer_handler,
@@ -905,10 +911,16 @@ async def _sessions(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
 
 async def _interrupt(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
     from app.core import turn_manager
+    from app.core.scoped_remote_stop import incomplete_text
     session_id = str(body.get("session_id") or "")
     _require_owned(session_id)
     source = body.get("source")
     source = source[:64] if isinstance(source, str) and source else None
+    from app.core.query_session_lifecycle import capture_stop_scope, stop_all_background_tasks
+    from app.db import turns
+
+    # Before the flip's wait: once it commits, the next turn can start.
+    scope = capture_stop_scope(session_id)
     row = await turn_manager.interrupt_async(session_id, str(body.get("mode") or "stop"),
                                              stop_background=bool(body.get("stop_background")),
                                              turn_id=body.get("turn_id") or None,
@@ -917,11 +929,17 @@ async def _interrupt(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
     reaches_work = bool(body.get("stop_background")) and is_stop and await run_sync(
         turn_manager.stop_reaches_background_work, session_id, body.get("turn_id") or None, row,
     )
+    results = []
     if body.get("stop_background") and (row is not None or reaches_work):
-        from app.core.query_session_lifecycle import stop_all_background_tasks
-        await stop_all_background_tasks(session_id, user_stop=True)
+        results = await stop_all_background_tasks(
+            session_id, user_stop=True, scope=scope,
+            receipt=((row or {}).get("payload") or {}).get(turns.STOP_RECEIPT_KEY),
+        )
     return {"interrupted": row is not None or reaches_work,
-            "turn_id": (row or {}).get("id")}
+            "turn_id": (row or {}).get("id"),
+            **({"incomplete": True, "tasks": results,
+                "message": incomplete_text(results)}
+               if any(result.get("incomplete") for result in results) else {})}
 
 
 # Compatibility only for older peers that still poll or send terminal-task stops.

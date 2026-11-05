@@ -3185,11 +3185,17 @@ def publish_presence(*, capabilities: Optional[dict] = None, version: Optional[s
     ctx = context()
     if ctx is None:
         return False
+    if capabilities is None:
+        # Enrollment/hub/API publish before the periodic presence loop. Use the
+        # same locally detected protocol map now; do not erase enforcement for
+        # a heartbeat interval. An explicit empty/old map remains explicit.
+        from app.network.transport import _capabilities
+        capabilities = _capabilities()
     row = {
         "device_id": ctx.device_id,
         "endpoints": endpoints if endpoints is not None else _own_endpoints(),
         "capabilities": {nested_secret_sync.CAPABILITY: 1, native_providers.CAPABILITY: 1,
-                         **(capabilities or {})},
+                         **capabilities},
         "version": version,
         "source_revision": running_revision(),
         "platform": identity_mod.platform_name(),

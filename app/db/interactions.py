@@ -151,7 +151,12 @@ def answer_question_and_enqueue(
             row["session_id"], "user", prompt=prompt,
             profile_id=profile_id, project_id=context.get("project_id"),
             worktree_id=context.get("worktree_id"), overrides=overrides,
-            payload={**(context.get("payload") or {}), "deferred_user_record": True,
+            # Only an authenticated answer lifts a Stop on any install, and a
+            # stamp copied from the context turn must not stand in for one.
+            payload={**{key: value for key, value in (context.get("payload") or {}).items()
+                        if key != turns.PERSON_INPUT_KEY},
+                     **({turns.PERSON_INPUT_KEY: True} if human_input else {}),
+                     "deferred_user_record": True,
                      "question_answer_human_input": human_input,
                      "question_request_id": (row.get("payload") or {}).get("request_id")},
             command_id=f"question-answer-{row['id']}", _conn=conn,

@@ -7,7 +7,7 @@ a fresh agent can act again.
 """
 
 from contextlib import contextmanager
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -195,7 +195,7 @@ class TestNewTurnRearms:
         ), patch(
             "app.core.session_runtime._broadcast_queue_after_start", new=AsyncMock()
         ), patch.object(
-            SessionRuntime, "_maybe_pin_placement", new=AsyncMock()
+            SessionRuntime, "_maybe_pin_placement", new=MagicMock()
         ), patch.object(
             SessionRuntime, "_restore_working_set", new=AsyncMock()
         ), patch(
@@ -204,6 +204,7 @@ class TestNewTurnRearms:
             placement.resolve_placement.return_value = None
             runs_mod.claim_run.return_value = {"id": "r1", "fence_token": 1}
             turns_mod.start_turn.return_value = {"id": "t2"}
+            turns_mod.wake_cancelled_by_stop.return_value = False
             turns_mod.get_live_turn.return_value = None
             # The re-arm runs between start_turn and _reset_started_this_turn.
             with patch.object(

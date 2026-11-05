@@ -379,6 +379,10 @@ class TaskRegistry:
         # insertion order gives the cap below something to evict.
         self._user_stopped: Dict[str, float] = {}
         self._stop_generations: Dict[str, int] = {}
+        self._stop_cutoffs: Dict[str, int] = {}
+        self._stop_incomplete: set[str] = set()
+        # session_id -> ``insert_order`` of the newest turn to go live here.
+        self._turn_orders: Dict[str, int] = {}
         self._stop_supervisors: Dict[str, set] = {}
         # session_id -> {child_launch_tuid -> owner_launch_tuid} (B-1). A grand-
         # child background task's launch tool_use_id mapped to the launch
@@ -607,6 +611,50 @@ class TaskRegistry:
         record = self._tasks.get(session_id, {}).get(task_id)
         return record.get("started_at") if record else None
 
+    def note_turn_live(self, session_id: str, insert_order: Optional[int]) -> None:
+        """What every task started from now on belongs to (:meth:`task_turn_order`)."""
+        if insert_order:
+            self._turn_orders[session_id] = max(int(insert_order), self._turn_orders.get(session_id, 0))
+
+    def task_turn_order(self, session_id: str, task_id: str) -> Optional[int]:
+        """The ``insert_order`` of the turn this run started under, when it is known.
+
+        The database issued it, so it places a run against any turn on any install,
+        which no clock here can. A resume renews it with the run.
+        """
+        record = self._tasks.get(session_id, {}).get(task_id)
+        return record.get("turn_order") if record else None
+
+    def task_turn_upper_bound(self, session_id: str, task_id: str) -> Optional[int]:
+        """The exact order, or the conservative migration bound for a legacy run."""
+        record = self._tasks.get(session_id, {}).get(task_id) or {}
+        order = record.get("turn_order")
+        return order if order is not None else record.get("turn_order_upper_bound")
+
+    def remote_stop_scope(self, session_id: str, task_id: str) -> Optional[dict]:
+        from app.db.base import parse_jsonb
+        scope = parse_jsonb((self._tasks.get(session_id, {}).get(task_id) or {}).get("remote_stop_scope"))
+        return dict(scope) if isinstance(scope, dict) else None
+
+    def current_input_order(self, session_id: str) -> Optional[int]:
+        return self._turn_orders.get(session_id)
+
+    def advance_remote_stop_scope(self, session_id: str, task_id: str, scope: Any, *,
+                                  new_input: bool = False, admission_order: Optional[int] = None) -> None:
+        from app.core.scoped_remote_stop import valid_scope
+        record = self._tasks.get(session_id, {}).get(task_id)
+        if record is None or not valid_scope(scope):
+            return
+        previous = self.remote_stop_scope(session_id, task_id)
+        if previous and previous.get("epoch", 0) >= scope["epoch"]:
+            return  # a delayed RPC reply must never roll the incarnation back
+        record["remote_stop_scope"] = dict(scope)
+        if new_input:
+            record["turn_order"] = admission_order
+            record.pop("turn_order_upper_bound", None)
+            self._wake_suppressed.get(session_id, set()).discard(task_id)
+        self._persist_task_state(session_id, task_id)
+
     def matches_task_incarnation(
         self, session_id: str, task_id: str, incarnation: Optional[str],
     ) -> bool:
@@ -729,7 +777,7 @@ class TaskRegistry:
     # Session-wide user-stop latch
     # ------------------------------------------------------------------
 
-    def mark_user_stopped(self, session_id: str) -> bool:
+    def mark_user_stopped(self, session_id: str, *, input_cutoff: Optional[int] = None) -> bool:
         """Latch "the user pressed Stop on this session". First call wins.
 
         The Stop button's contract is that EVERYTHING this session is doing
@@ -749,7 +797,11 @@ class TaskRegistry:
         if not session_id:
             return False
         if session_id in self._user_stopped:
+            self.note_stop_cutoff(session_id, input_cutoff)
             return False
+        self._stop_cutoffs.pop(session_id, None)
+        self._stop_incomplete.discard(session_id)
+        self.note_stop_cutoff(session_id, input_cutoff)
         self._stop_generations[session_id] = self.stop_generation(session_id) + 1
         # Bounded: the latch is normally released by the user's very next
         # message, but a session stopped and never returned to would otherwise
@@ -766,6 +818,28 @@ class TaskRegistry:
                 except RuntimeError:
                     logger.debug("Stopped supervisor's loop is already closed", exc_info=True)
         return True
+
+    def note_stop_cutoff(self, session_id: str, input_cutoff: Optional[int]) -> None:
+        """The newest input the latest Stop applies to (``turns.STOP_RECEIPT_KEY``)."""
+        if input_cutoff is not None:
+            self._stop_cutoffs[session_id] = max(input_cutoff, self._stop_cutoffs.get(session_id, 0))
+            self._stop_incomplete.discard(session_id)
+
+    def stop_input_cutoff(self, session_id: str) -> Optional[int]:
+        return self._stop_cutoffs.get(session_id)
+
+    def note_stop_incomplete(self, session_id: str) -> None:
+        """This Stop could not read what it applies to. It holds what it named
+        locally, but with no cutoff it has no grounds to refuse a person's message."""
+        if session_id not in self._stop_cutoffs:
+            self._stop_incomplete.add(session_id)
+
+    def stop_admission_incomplete(self, session_id: str) -> bool:
+        return session_id in self._stop_incomplete
+
+    def user_stopped_sessions(self) -> List[str]:
+        """Oldest latch first."""
+        return list(self._user_stopped)
 
     def is_user_stopped(self, session_id: str) -> bool:
         """True while ``session_id`` is under a user Stop with no newer message."""
@@ -1092,6 +1166,8 @@ class TaskRegistry:
                 if previous_start and now <= previous_start:
                     now = (datetime.fromisoformat(previous_start) + timedelta(microseconds=1)).isoformat()
                 existing["started_at"] = now
+                existing["turn_order"] = self._turn_orders.get(session_id)
+                existing.pop("turn_order_upper_bound", None)
                 existing.pop("notification_delivered", None)
                 retained = self._recent_terminal.get(session_id)
                 if retained is not None:
@@ -1129,6 +1205,7 @@ class TaskRegistry:
             "model": model,
             "started_at": now,
             "updated_at": now,
+            "turn_order": self._turn_orders.get(session_id),
         }
         if remote_device_id:
             bucket[task_id]["remote_device_id"] = remote_device_id
@@ -1283,6 +1360,8 @@ class TaskRegistry:
                     in self._terminal_notified.get(session_id, set()),
                     "started_at": record.get("started_at"),
                     "updated_at": record.get("updated_at"),
+                    "turn_order": record.get("turn_order"),
+                    "turn_order_upper_bound": record.get("turn_order_upper_bound"),
                     "summary": record.get("summary"),
                     "reason": record.get("reason"),
                     "report_path": record.get("report_path"),
@@ -1291,6 +1370,7 @@ class TaskRegistry:
                     "name": record.get("name"),
                     "model": record.get("model"),
                     "remote_device_id": record.get("remote_device_id"),
+                    "remote_stop_scope": record.get("remote_stop_scope"),
                 },
             )
         except Exception:
@@ -1368,7 +1448,15 @@ class TaskRegistry:
                 "report_path": row.get("report_path"),
                 "report_chars": row.get("report_chars"),
                 "started_at": _iso(row.get("started_at")),
+                # Old installs omit these columns when reusing a task id. An
+                # unchanged order must not become authority over that NEW run.
+                # Timestamps are equality tokens here, never ordering evidence.
+                "turn_order": (row.get("turn_order") if row.get("started_at") is not None and
+                               _iso(row.get("turn_order_incarnation")) == _iso(row.get("started_at")) else None),
+                "turn_order_upper_bound": (row.get("turn_order_upper_bound") if row.get("started_at") is not None and
+                                           _iso(row.get("turn_order_incarnation")) == _iso(row.get("started_at")) else None),
                 "updated_at": _iso(row.get("updated_at")),
+                "remote_stop_scope": row.get("remote_stop_scope"),
                 "restored": True,
             }
             if row.get("terminal_notified"):
@@ -1786,6 +1874,7 @@ class TaskRegistry:
             "assignment_owner": bool(row.get("assignment_owner", True)),
             "tool_use_id": row.get("tool_use_id"),
             "started_at": _iso(row.get("started_at")),
+                "turn_order": row.get("turn_order"),
             "updated_at": _iso(row.get("updated_at")),
             "summary": row.get("summary"),
             "reason": row.get("reason"),
@@ -1868,6 +1957,7 @@ class TaskRegistry:
         already-expired entries don't linger).
         """
         self._tasks.pop(session_id, None)
+        self._turn_orders.pop(session_id, None)
         self._started_this_turn.pop(session_id, None)
         self._background_launches.pop(session_id, None)
         self._sdk_background_tasks.pop(session_id, None)
@@ -1900,6 +1990,8 @@ class TaskRegistry:
         self._wake_suppressed.clear()
         self._user_stopped.clear()
         self._stop_generations.clear()
+        self._stop_cutoffs.clear()
+        self._stop_incomplete.clear()
         self._stop_supervisors.clear()
         self._child_owner.clear()
         self._terminal_notified.clear()
@@ -1910,3 +2002,11 @@ class TaskRegistry:
 
 # Global instance
 task_registry = TaskRegistry()
+
+
+async def user_stop_holds(session_id: str) -> bool:
+    """The Stop latch, for anyone able to wait: it asks first whether a person has
+    answered the Stop on another install. Costs nothing unless the session is latched."""
+    from app.core.query_session_lifecycle import reconcile_user_stop
+
+    return not await reconcile_user_stop(session_id)

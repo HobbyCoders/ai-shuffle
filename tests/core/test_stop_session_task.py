@@ -525,7 +525,8 @@ class TestStopAllBackgroundTasks:
 
         seen = []
 
-        async def _stop(sid, task_id):
+        async def _stop(sid, task_id, *, _explicit_task_stop):
+            assert _explicit_task_stop is False  # bulk Stop grants no per-task retry authority
             # The whole snapshot must be suppressed before cancellation begins,
             # not one-at-a-time across awaits.
             seen.append((

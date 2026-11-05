@@ -89,7 +89,7 @@ async def test_a_later_stop_ends_an_execution_an_earlier_interrupt_left_running(
         # build that hit the bug); its guard used to swallow every later Stop.
         runtime._interrupt_driving = runtime._interrupt_finished = True
 
-        assert await runtime.interrupt("stop") == "interrupting"
+        assert await runtime.interrupt("stop") == "aborted"
         await asyncio.wait_for(execution, 2)
 
 

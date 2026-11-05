@@ -8,7 +8,7 @@ import logging
 
 import pytest
 
-from app.core import provider_agent_supervisor, remote_task, swarm, turn_scheduler
+from app.core import provider_agent_supervisor, remote_task, scoped_remote_stop, swarm, turn_scheduler
 from app.core.provider_agent_feed import reset_feed_groups
 from app.core.query_session_lifecycle import stop_all_background_tasks, stop_session_task
 from app.core.task_registry import task_registry
@@ -43,7 +43,8 @@ def _clean_tracking(monkeypatch):
 
 
 def stop_requests(router):
-    return [r for r in router.requests(UNRAID_URL) if r[1].endswith("/" + remote_task.TASK_STOP_ACTION)]
+    return [r for r in router.requests(UNRAID_URL)
+            if r[1].endswith(("/" + remote_task.TASK_STOP_ACTION, "/" + scoped_remote_stop.ACTION))]
 
 
 def child_turn(child):
@@ -246,7 +247,10 @@ def test_stop_on_the_parent_chat_stops_the_remote_child(workers, monkeypatch, ki
     with b.active():
         results = asyncio.run(stop_all_background_tasks("caller", user_stop=True))
         assert [r.get("task_id") for r in results] == [child]
-    assert len(stop_requests(router)) == 1
+        assert all(r["ok"] for r in results), results
+        assert remote_tasks.get_dispatch(child)["stop_origin"] is None
+    [request] = stop_requests(router)
+    assert request[1].endswith("/" + scoped_remote_stop.ACTION)
     assert_stopped_on_target(a, b, child)
 
 
@@ -334,17 +338,28 @@ def test_swarm_cancel_stops_a_remote_item(workers, monkeypatch, kicks):
 
 # --- a target that cannot be reached, or cannot stop it ---------------------------
 
-def test_a_stop_the_target_misses_is_sent_when_it_is_back(workers, monkeypatch, kicks):
+@pytest.mark.parametrize("old_ambiguous", [False, True])
+def test_a_stop_the_target_misses_is_sent_when_it_is_back(workers, monkeypatch, kicks, old_ambiguous):
     a, b, router = network(workers, monkeypatch)
     child = started_child(a, b)
     router.down.add(UNRAID_URL)
     with b.active():
+        first_request = None
+        if old_ambiguous:
+            # A NEW individual Stop is fresh authority, not a delivery/recovery
+            # that silently blesses a pre-upgrade request.
+            first_request = remote_tasks.request_stop(child, "user_stopped")["stop_requested_at"]
+            assert asyncio.run(remote_task.deliver_stops()) == 0
+            assert remote_tasks.get_dispatch(child)["stop_state"] == remote_tasks.STOP_INCOMPLETE
         result = asyncio.run(stop_session_task("caller", child))
         assert result["ok"] is True
         assert "ServerWorker could not be reached" in result["detail"]
         assert "sent again when it answers" in result["detail"]
         dispatch = remote_tasks.get_dispatch(child)
         assert dispatch["stop_state"] == remote_tasks.STOP_PENDING and dispatch["stop_error"]
+        assert dispatch.get("stop_origin") == "explicit_task_stop_v1"
+        if first_request is not None:
+            assert dispatch["stop_requested_at"] == first_request
         # Still away: a retry leaves it pending.
         assert asyncio.run(remote_task.deliver_stops()) == 0
         assert [r["worker_session_id"] for r in remote_tasks.pending_stops()] == [child]
@@ -481,6 +496,7 @@ def test_a_parent_restart_keeps_a_stopped_child_stopped(workers, monkeypatch, ki
     router.down.add(UNRAID_URL)
     with b.active():
         assert asyncio.run(stop_session_task("caller", child))["ok"] is True
+        assert remote_tasks.get_dispatch(child).get("stop_origin") == "explicit_task_stop_v1"
         restart_parent()  # before the killed row reached the database
         assert asyncio.run(remote_task.reattach_all()) == 0
         assert provider_agent_supervisor.get_worker("caller", child) is None

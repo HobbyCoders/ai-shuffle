@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 
 import pytest
 
-from app.core import provider_agent, provider_agent_supervisor, remote_task, swarm, turn_scheduler
+from app.core import provider_agent, provider_agent_supervisor, remote_task, scoped_remote_stop, swarm, turn_scheduler
 from app.core import remote_task_approvals as relay
 from app.core.provider_agent_feed import reset_feed_groups
 from app.core.query_session_lifecycle import stop_all_background_tasks
@@ -218,12 +218,18 @@ def press_stop(b):
 
 
 def stop_requests(router):
-    return [r for r in router.requests(UNRAID_URL) if r[1].endswith("/" + remote_task.TASK_STOP_ACTION)]
+    return [r for r in router.requests(UNRAID_URL)
+            if r[1].endswith(("/" + remote_task.TASK_STOP_ACTION, "/" + scoped_remote_stop.ACTION))]
 
 
-def test_stop_on_the_parent_after_the_notice_reaches_the_child_when_its_worker_returns(
+def incomplete_notes():
+    return [event for event in session_events.get_events("caller", 0, 1000)
+            if event["event_type"] == "system.note" and event["payload"].get("subtype") == "stop_incomplete"]
+
+
+def test_automatic_stop_after_the_offline_notice_leaves_remote_alone_with_one_warning(
         workers, monkeypatch):
-    """#1780: notice, Stop on the parent, worker back, child stopped, report wakes nobody."""
+    """An unreachable automatic Stop has no stable-id retry authority."""
     a, b, router = network(workers, monkeypatch)
     child = started_child(a, b)
     notice(b, go_quiet(b, router, child))
@@ -232,56 +238,57 @@ def test_stop_on_the_parent_after_the_notice_reaches_the_child_when_its_worker_r
     finish_wake(a, b, first)
 
     [result] = press_stop(b)
-    assert result["task_id"] == child and result["ok"] is True
-    assert "sent again when it answers" in result["detail"]
+    assert result["task_id"] == child and result["ok"] is False and result["incomplete"]
+    assert "ServerWorker" in result["detail"] and "STILL BE RUNNING" in result["detail"]
+    assert "Update" in result["detail"] and "open" in result["detail"]
     with b.active():
-        dispatch = remote_tasks.get_dispatch(child)
-        assert dispatch["stop_requested_at"] and dispatch["stop_reason"] == "user_stopped"
-        assert dispatch["stop_state"] == remote_tasks.STOP_PENDING
-    with a.active():
-        assert not remote_tasks.get_child(child)["stop_requested_at"]  # ServerWorker is still away
-    # Stop again: idempotent, nothing new is asked for.
-    assert press_stop(b) == []
-
+        row = remote_tasks.get_dispatch(child)
+        assert row["stop_requested_at"] is None and row["stop_state"] is None
+        [note] = incomplete_notes()
+        assert "ServerWorker" in str(note) and "STILL BE RUNNING" in str(note)
     router.down.clear()
     with b.active():
-        assert asyncio.run(remote_task.deliver_stops()) == 1
-        assert remote_tasks.get_dispatch(child)["stop_state"] == remote_tasks.STOP_SENT
-    with a.active():
-        assert remote_tasks.get_child(child)["stop_requested_at"]
-        assert task_registry.is_user_stopped(child)
-        [turn] = [t for t in all_turns(child) if t["source"] == "provider_agent"]
-        assert turn["state"] == "aborted"
-        assert asyncio.run(remote_task.sweep()) == 1
-        assert remote_tasks.get_child(child)["report"]["status"] == "stopped"
-    with b.active():
-        assert len(wakes()) == 1
-        dispatch = remote_tasks.get_dispatch(child)
-        assert dispatch["completion_id"] and dispatch["status"] == "stopped"
         assert asyncio.run(remote_task.deliver_stops()) == 0
+        assert remote_tasks.pending_stops() == []
+        assert len(incomplete_notes()) == 1
+        assert len(wakes()) == 1  # no fabricated success/report wake
+    assert stop_requests(router) == []  # neither scoped replay nor legacy fallback
+    with a.active():
+        assert remote_tasks.get_child(child)["stop_requested_at"] is None
+        assert remote_tasks.get_child(child)["state"] == remote_tasks.RUNNING
+        assert not task_registry.is_user_stopped(child)
+        [turn] = [t for t in all_turns(child) if t["source"] == "provider_agent"]
+        assert turn["state"] == "queued"
 
 
-def test_a_report_that_beats_the_stop_after_the_notice_wakes_nobody(workers, monkeypatch):
-    """The child finished while its worker was away; Stop pressed after the notice still holds.
-
-    The owner wrote to the chat since, so the session's in-memory Stop latch is
-    gone: only the durable stop keeps the report from waking it.
+def test_incomplete_automatic_stop_accepts_report_without_waking_cancelled_task(workers, monkeypatch):
+    """The warning does not claim remote cleanup, but local wake cancellation
+    still stands for this captured task, even after a person resumes the chat.
+    The eventual report is accepted without a fabricated remote stop.
     """
+    from app.core import turn_manager
+
     a, b, router = network(workers, monkeypatch)
     child = started_child(a, b)
     notice(b, go_quiet(b, router, child))
     with b.active():
         [first] = wakes()
     finish_wake(a, b, first)
-    press_stop(b)
+    [result] = press_stop(b)
+    assert result["incomplete"] and not result["ok"]
     with b.active():
-        assert task_registry.clear_user_stop("caller")
+        assert remote_tasks.get_dispatch(child)["stop_requested_at"] is None
+        turn_manager.submit("caller", "user", prompt="Continue with the result when it arrives.")
+        assert not task_registry.is_user_stopped("caller")
     router.down.clear()
     deliver(a, child, text="Disk is 40% full.")
     with b.active():
+        assert task_registry.is_wake_suppressed("caller", child)
         assert len(wakes()) == 1
         assert remote_tasks.get_dispatch(child)["completion_id"]
-        assert asyncio.run(remote_task.deliver_stops()) == 0  # at rest there: not owed
+        assert remote_tasks.get_dispatch(child)["status"] == "completed"
+        assert asyncio.run(remote_task.deliver_stops()) == 0
+        assert len(incomplete_notes()) == 1
     assert stop_requests(router) == []
 
 

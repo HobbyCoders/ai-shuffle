@@ -339,7 +339,7 @@ async def _kill_worker_session(worker_session_id: str, *, reason: str = "host_cl
 
 
 async def _stop_remote_worker(record: WorkerRecord, *, reason: str,
-                              summary: Optional[str] = None) -> Dict[str, Any]:
+                              summary: Optional[str] = None, explicit_task_stop: bool = False) -> Dict[str, Any]:
     """Stop a Task child that runs on another worker. Never raises.
 
     Its session, process tree and approval prompts belong to that worker, so
@@ -353,7 +353,8 @@ async def _stop_remote_worker(record: WorkerRecord, *, reason: str,
         from app.core import remote_task
 
         return await remote_task.stop_remote_child(
-            record.worker_session_id, str(record.remote_device_id), reason=reason, summary=summary)
+            record.worker_session_id, str(record.remote_device_id), reason=reason, summary=summary,
+            **({"explicit_task_stop": True} if explicit_task_stop else {}))
     except Exception:  # noqa: BLE001 — teardown must never raise
         logger.warning(
             "ProviderAgent supervisor: could not stop %s on worker %s",
@@ -609,6 +610,8 @@ async def teardown_worker(
     reason: str,
     summary: str,
     preview: str,
+    remote_confirmed: bool = False,
+    explicit_task_stop: bool = False,
 ) -> Dict[str, Any]:
     """Kill ONE live worker, end to end. Never raises.
 
@@ -688,10 +691,11 @@ async def teardown_worker(
     unregister_worker(parent_session_id, record.worker_session_id)
 
     detail = None
-    if record.remote_device_id:
+    if record.remote_device_id and not remote_confirmed:
         # AFTER the record settled here: a report the stop provokes then finds
         # it stopped and wakes nobody.
-        stopped = await _stop_remote_worker(record, reason=reason, summary=summary)
+        stopped = await _stop_remote_worker(record, reason=reason, summary=summary,
+            **({"explicit_task_stop": True} if explicit_task_stop else {}))
         outcome, detail = stopped.get("outcome") or "remote_stop_pending", stopped.get("detail")
 
     result = {
