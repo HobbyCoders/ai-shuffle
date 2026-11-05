@@ -671,6 +671,7 @@ def owner_memories(session_id: str, cwd: Optional[str] = None) -> List[Any]:
         from app.core.fluid_memory import owner_root, store_for_owner
         from app.db import database
         from fluid.codemode.facts import is_superseded, usefulness, visible_on
+        from fluid.codemode.preferences import COEXIST_KEY_PREFIX
         from fluid.context.screening import screen_findings
 
         row = database.get_session(session_id)
@@ -686,6 +687,8 @@ def owner_memories(session_id: str, cwd: Optional[str] = None) -> List[Any]:
         local = doc["store_id"]
         live = [entry for entry in doc["entries"]
                 if entry.get("protected") is True
+                # Lifecycle/control answers are Recall-only, never routing authority.
+                and not str(entry.get("key") or "").startswith(COEXIST_KEY_PREFIX)
                 and entry.get("provenance", "session") != "tool"
                 and not is_superseded(entry) and not entry.get("conflicted")
                 and not entry.get("retired_at")
