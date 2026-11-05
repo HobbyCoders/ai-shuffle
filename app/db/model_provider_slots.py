@@ -23,6 +23,8 @@ def model_provider_slot(row: Mapping[str, Any]) -> Optional[str]:
     """Match Settings' classifyRow, including auth_mode taking precedence."""
     auth = row.get("auth_mode")
     kind = row.get("provider_type")
+    if kind in ("kimi", "minimax", "opencode"):
+        return f"{kind}:subscription" if auth == "plan_key" else f"{kind}:key"
     if auth == "chatgpt":
         return "openai:subscription"
     if auth == "grok" or kind == "grok":

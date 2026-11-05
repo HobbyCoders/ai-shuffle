@@ -1472,11 +1472,13 @@ def test_supervisor_restart_failure_boundary(feed, monkeypatch, tmp_path, failur
     )
     monkeypatch.setattr(supervisor, "__file__", str(packaging / "container_runtime.py"))
     database = FakeDatabase()
-    def factory(root, image, public_key, allowed, lifecycle, channel, database=None):
+    def factory(root, image, public_key, allowed, lifecycle, channel, database=None, *, refresh_mode="unknown"):
         assert channel == "stable", "customers follow signed releases unless UPDATE_CHANNEL says otherwise"
         assert database is db, "the supervisor hands the updater its managed database"
+        assert refresh_mode == "image_update_required", "the fixture image has no source-supervisor capability"
         updater.allowed, updater.lifecycle = allowed, lifecycle
         updater.database = fake_database
+        updater.refresh_mode = refresh_mode
         return updater
     fake_database = database
     monkeypatch.setattr(update_module, "ContainerUpdates", factory)

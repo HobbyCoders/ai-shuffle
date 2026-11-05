@@ -42,6 +42,7 @@ from app.core import api_user_scope, artifact_access
 from app.db import session_recall
 from app.db.async_database import run_maintenance, run_sync, run_event_write
 from app.db.base import get_db, get_turn_db, get_event_db
+from app.db.sql_timeouts import transcript_decode_timeouts
 
 # Same Postgres-illegal code-point scrub the Claude session store applies at its
 # own jsonb boundary — see the comment block above ``_PG_ILLEGAL_RE`` there for
@@ -152,17 +153,24 @@ def _load_session_sync(session_id: str, *, include_nodes: bool = True) -> Option
         meta = SessionMeta(**dict(row))
         if not include_nodes:
             return {"meta": meta, "nodes": {}, "node_sizes": {}}
-        cur.execute(
-            "SELECT node_id, parent_id, ts, message FROM fluid_session_nodes "
-            "WHERE session_id = %s", (session_id,),
-        )
-        rows = cur.fetchall()
-    # Decode off the event loop, and release the connection first.
-    nodes = {r["node_id"]: SessionNode(
-        node_id=r["node_id"], parent_id=r["parent_id"], ts=r["ts"],
-        message=Message.from_dict(_as_dict(r["message"])),
-    ) for r in rows}
-    sizes = {key: len(json.dumps(node.message.to_dict())) for key, node in nodes.items()}
+        transcript_decode_timeouts(cur)
+        nodes, sizes = {}, {}
+        # A normal cursor buffers the entire raw transcript in libpq, even
+        # when Python iterates it. Keep only a small server-cursor batch beside
+        # the decoded tree. This whole read/decode already runs off-loop.
+        with conn.cursor(name="fluid_resume_nodes") as stream:
+            stream.itersize = 32
+            stream.execute(
+                "SELECT node_id, parent_id, ts, message FROM fluid_session_nodes "
+                "WHERE session_id = %s", (session_id,),
+            )
+            for r in stream:
+                node = SessionNode(
+                    node_id=r["node_id"], parent_id=r["parent_id"], ts=r["ts"],
+                    message=Message.from_dict(_as_dict(r["message"])),
+                )
+                nodes[node.node_id] = node
+                sizes[node.node_id] = len(json.dumps(node.message.to_dict()))
     return {"meta": meta, "nodes": nodes, "node_sizes": sizes}
 
 

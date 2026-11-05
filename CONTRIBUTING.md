@@ -32,8 +32,8 @@ Then commit and push. The hook scans every outgoing commit for credentials, with
 
 `fast` (affected tests), `check`, `full` and `full --step --attest` remain available for optional local validation; the push gate does not run or require them. Edge/nightly publication separately needs a hosted main-suite pass or the owner's attested local full run on the exact main revision. See [where tests run](docs/ci/pr-checks.md).
 
-## Open a draft pull request
+## Open a pull request
 
-Open pull requests as drafts against `main`. Describe the problem, the change, the issue it addresses, and the exact local commands and results. Say what you exercised in the running app and what you tested only with fixtures; the team's loop for that (a private dev instance, the UI journeys and the flight recorder) is in [dev-workflow.md](docs/internal/dev-workflow.md). For a visible change, describe in text what you checked in the rendered UI and at which widths; do not attach or link screenshots. Call out checks you could not run. Do not include credentials, private logs or personal data.
+Open pull requests as real (ready for review) PRs against `main`, not drafts, unless the pre-push check reports **NOTE — OUT OF REACH**. For that exception, open a draft and keep it in draft until the owner accepts each reported group with its `update-reach:<group>` label; the check refuses pushes to a real PR without the required labels. Describe the problem, the change, the issue it addresses, and the exact local commands and results. Say what you exercised in the running app and what you tested only with fixtures; the team's loop for that (a private dev instance, the UI journeys and the flight recorder) is in [dev-workflow.md](docs/internal/dev-workflow.md). For a visible change, describe in text what you checked in the rendered UI and at which widths; do not attach or link screenshots. Call out checks you could not run. Do not include credentials, private logs or personal data.
 
-Maintainers review the change and decide when it is ready. See [LICENSE](LICENSE) for AGPL-3.0 terms and [TRADEMARKS.md](TRADEMARKS.md) before distributing a modified build.
+Maintainers review the change and decide when it merges. See [LICENSE](LICENSE) for AGPL-3.0 terms and [TRADEMARKS.md](TRADEMARKS.md) before distributing a modified build.

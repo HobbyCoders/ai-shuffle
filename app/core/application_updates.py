@@ -11,9 +11,52 @@ import re
 import tempfile
 import time
 import threading
+from typing import Literal
+from pydantic import BaseModel, Field, ValidationError
 
 from app.core.private_storage import service_files
 from app.db import database
+
+
+class ResidentUpdater(BaseModel):
+    revision: str | None = Field(default=None, pattern=r"^[a-f0-9]{40}$")
+    capabilities: list[Literal["stage-diagnostics-v1", "dependency-cache-v1", "prebuilt-ui-v1",
+                               "node-output-cache-v1", "refresh-updater-v1"]] = Field(default_factory=list, max_length=16)
+    refresh: Literal["available", "current", "container_restart_required", "image_update_required",
+                     "disabled", "unknown"] = "unknown"
+
+
+class UpdateStage(BaseModel):
+    stage: Literal["command", "source_download", "source_extract", "source_verify", "runtimes", "assembly",
+                   "python_dependencies", "python_cache", "fluid", "prebuilt_ui", "prepare_files",
+                   "frontend_cache", "frontend_dependencies", "frontend_build", "tools_cache",
+                   "tools_dependencies", "tools_build", "browser_mcp_cache", "browser_mcp_dependencies",
+                   "browser_mcp_build", "desktop_cache", "desktop_dependencies", "desktop_build"]
+    elapsed_ms: float = Field(ge=0, le=2**53, allow_inf_nan=False)
+    outcome: Literal["completed", "failed", "hit", "miss", "fallback", "disabled"]
+
+
+class UpdateDiagnostics(BaseModel):
+    revision: str | None = Field(default=None, pattern=r"^[a-f0-9]{40}$")
+    stages: list[UpdateStage] = Field(default_factory=list, max_length=96)
+    total_elapsed_ms: float = Field(ge=0, le=2**53, allow_inf_nan=False)
+
+
+def safe_update_metadata(result):
+    # Both the filesystem producer and old/new desktop bridges use this contract.
+    # Absence is UNKNOWN, never evidence that a particular updater is outdated.
+    for key, model, fallback in (("updater", ResidentUpdater, ResidentUpdater().model_dump()),
+                                  ("diagnostics", UpdateDiagnostics, None)):
+        try:
+            result[key] = model.model_validate(result.get(key)).model_dump()
+        except (ValidationError, ValueError, TypeError):
+            result[key] = fallback
+    return result
+
+
+UPDATER_REFRESH_UNAVAILABLE = (
+    "In-app updater refresh is unavailable. Reloading the updater requires a separately approved container restart."
+)
 
 KEY = "allow_updates"
 ALL_KEY = "update_all_workers"
@@ -370,7 +413,8 @@ def status():
                 saved = json.loads(path.read_text())
             # notice: a coming update needs a newer Docker image (#1821).
             result.update({key: saved.get(key) for key in ("phase", "version", "error", "message",
-                                                           "release", "notes", "channel", "notice", "staged_version")})
+                                                           "release", "notes", "channel", "notice", "staged_version",
+                                                           "updater", "diagnostics")})
             # When the supervisor last asked the feed. Older supervisors do not
             # say, but they write an available status when a check ends and an
             # idle one mostly then too (also at startup and after an install),
@@ -406,15 +450,18 @@ def status():
                                                  and _desktop_request["expires_at"] >= time.time())
     if result.get("phase") in ("idle", "ready") and IN_PROGRESS.search(str(result.get("message") or "")):
         result["message"] = None
-    return result
+    return safe_update_metadata(result)
 
 
 def enqueue(action):
     global _desktop_request, _desktop_followup
-    if action not in ("check", "download", "install"):
+    if action not in ("check", "download", "install", "refresh-updater"):
         raise ValueError("Unknown update action")
     if not allowed():
         raise ValueError("Application updates are disabled in Account settings")
+    if action == "refresh-updater":
+        # Old residents may still advertise the deferred shortcut. Never queue it.
+        raise ValueError(UPDATER_REFRESH_UNAVAILABLE)
     root = control_root()
     if root:
         atomic_json(root / "request.json", {"action": action, "expires_at": time.time() + CONTAINER_REQUEST_SECONDS})

@@ -342,6 +342,11 @@ async def lifespan(app: FastAPI):
             "install's own previous run left behind are still stopped at boot."
         )
 
+    # Allocator retention is not specific to resumes or approved runners.
+    # Shutdown cancels/awaits this with the other owned background tasks.
+    from app.core.resume_memory import maintain_heap_memory
+    bg_tasks.append(asyncio.create_task(maintain_heap_memory(), name="heap-reclaim"))
+
     # One-time, unbounded backfill: heal any sessions orphaned by a past
     # mid-turn crash (NULL sdk_session_id but an intact transcript in the store →
     # blank history in postgres_only). Runs off the event loop and logs an ERROR

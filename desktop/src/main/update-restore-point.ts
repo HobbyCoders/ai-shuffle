@@ -79,8 +79,12 @@ export class SinglePassClusterCopy extends ColdClusterCopy {
  * ready-journal path are unchanged.
  * Launcher 9 adds signed UI bundles, content-keyed Node builds and update hints;
  * the ColdClusterCopy factory and ready-journal path are byte-for-byte unchanged.
+ * Launcher 10 adds preparation diagnostics; its installed factory still awaits the full
+ * ColdClusterCopy.validate in prepareRollback before select. source-updates-09.test
+ * drives the Windows entry with real single-pass and incremental ready points (including
+ * reused cache files), and rejects same-size content corruption before selection.
  * A new version is NOT trusted automatically: review its factory and ready-journal path. */
-export const RESTORE_POINT_VALIDATING_LAUNCHERS: ReadonlySet<number> = new Set([4, 5, 6, 7, 8, 9]);
+export const RESTORE_POINT_VALIDATING_LAUNCHERS: ReadonlySet<number> = new Set([4, 5, 6, 7, 8, 9, 10]);
 
 /** Unknown handoffs and fenced recovery must keep full validation. */
 export function launcherValidatedRestorePoint(platform: string, launcher: number, installedHandoff: boolean, migrationRisk: boolean): boolean {

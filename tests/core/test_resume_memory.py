@@ -1,5 +1,7 @@
-"""Cold-resume reclamation is bounded and never runs on ordinary live turns."""
+"""General heap reclamation is off-loop, observable and never evicts live data."""
 import asyncio
+import logging
+import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -12,24 +14,114 @@ from fluid.events import TurnComplete
 from fluid.messages import Message, Text
 from fluid.store.base import SessionNode
 
+MIB = 1024 * 1024
+
+
+@pytest.fixture(autouse=True)
+def reset_reclaimer(monkeypatch):
+    monkeypatch.setattr(memory, "_last_check", None)
+    monkeypatch.setattr(memory, "_last_trim_state", None)
+    functions = memory._glibc_functions
+    functions.cache_clear()
+    yield
+    functions.cache_clear()
+
+
+def allocator(monkeypatch, *, free=128 * MIB, before=400 * MIB, after=200 * MIB):
+    state = SimpleNamespace(free=free, rss=before, trims=0)
+    def trim(padding):
+        assert padding == 0
+        state.trims += 1
+        state.rss = after
+        return 1
+    monkeypatch.setattr(memory, "_glibc_functions", lambda: (
+        lambda: SimpleNamespace(fordblks=state.free), trim))
+    monkeypatch.setattr(memory.psutil, "Process", lambda: SimpleNamespace(
+        memory_info=lambda: SimpleNamespace(rss=state.rss)))
+    return state
+
 
 @pytest.mark.asyncio
-async def test_trim_is_off_loop_and_process_wide_rate_limited(monkeypatch):
+async def test_reclaim_is_off_loop_and_cold_hint_uses_same_worker(monkeypatch):
     monkeypatch.setattr(memory.sys, "platform", "linux")
-    monkeypatch.setattr(memory, "_last_trim", None)
-    clock = [0.0]
-    monkeypatch.setattr(memory.time, "monotonic", lambda: clock[0])
     worker = AsyncMock(return_value=True)
     monkeypatch.setattr(memory.asyncio, "to_thread", worker)
-    assert await memory.release_cold_resume_memory()
-    results = await asyncio.gather(*(memory.release_cold_resume_memory() for _ in range(20)))
-    assert results == [False] * 20
-    clock[0] = 59.0
-    assert not await memory.release_cold_resume_memory()
-    clock[0] = 60.0
+    assert await memory.release_unused_memory()
     assert await memory.release_cold_resume_memory()
     assert worker.await_count == 2
     worker.assert_awaited_with(memory._trim_glibc)
+
+
+def test_process_wide_budget_and_unchanged_trimmed_arenas_skip(monkeypatch, caplog):
+    state = allocator(monkeypatch)
+    clock = [0.0]
+    monkeypatch.setattr(memory.time, "monotonic", lambda: clock[0])
+    with caplog.at_level(logging.INFO):
+        assert memory._trim_glibc()
+    assert "reclaimed_bytes=209715200" in caplog.text
+    assert "free_heap_bytes=134217728" in caplog.text
+    assert "trim_ms=" in caplog.text
+    for _ in range(20):
+        assert not memory._trim_glibc()
+    clock[0] = 60.0
+    # glibc still owns the address space after madvise: do not trim it again.
+    assert not memory._trim_glibc()
+    assert state.trims == 1
+    clock[0] = 120.0
+    state.free += 64 * MIB  # freed a live allocation without increasing RSS
+    assert memory._trim_glibc()
+    clock[0] = 180.0
+    state.rss += 64 * MIB  # reused previously madvised pages
+    assert memory._trim_glibc()
+    clock[0] = 240.0
+    state.rss -= 64 * MIB  # a smaller live set must not pin an old RSS baseline
+    assert memory._trim_glibc()
+    assert state.trims == 4
+
+
+def test_small_free_heap_skips_and_checks_are_rate_limited(monkeypatch):
+    state = allocator(monkeypatch, free=MIB)
+    clock = [0.0]
+    monkeypatch.setattr(memory.time, "monotonic", lambda: clock[0])
+    assert not memory._trim_glibc()
+    state.free = 64 * MIB
+    clock[0] = 59.0
+    assert not memory._trim_glibc()
+    clock[0] = 60.0
+    assert memory._trim_glibc()
+    assert state.trims == 1
+
+
+@pytest.mark.asyncio
+async def test_cancelled_caller_cannot_allow_an_overlapping_trim(monkeypatch):
+    allocator(monkeypatch)
+    monkeypatch.setattr(memory.sys, "platform", "linux")
+    entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+    def trim(_):
+        entered.set()
+        assert release.wait(2)
+        return 1
+    monkeypatch.setattr(memory, "_glibc_functions", lambda: (
+        lambda: SimpleNamespace(fordblks=128 * MIB), trim))
+    original = memory._trim_glibc
+    def worker():
+        try:
+            return original()
+        finally:
+            finished.set()
+    monkeypatch.setattr(memory, "_trim_glibc", worker)
+    task = asyncio.create_task(memory.release_unused_memory())
+    try:
+        assert await asyncio.to_thread(entered.wait, 1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        # Even after the budget expired, the still-running worker holds the lock.
+        monkeypatch.setattr(memory, "_last_check", None)
+        assert not original()
+    finally:
+        release.set()
+        assert await asyncio.to_thread(finished.wait, 1)
 
 
 @pytest.mark.asyncio
@@ -38,27 +130,66 @@ async def test_other_platforms_do_not_load_libc(monkeypatch, platform):
     monkeypatch.setattr(memory.sys, "platform", platform)
     worker = AsyncMock()
     monkeypatch.setattr(memory.asyncio, "to_thread", worker)
-    assert not await memory.release_cold_resume_memory()
+    assert not await memory.release_unused_memory()
+    await memory.maintain_heap_memory()
     worker.assert_not_awaited()
 
 
-def test_trim_requires_glibc_and_tolerates_unavailable_symbols(monkeypatch):
-    monkeypatch.setattr(memory.ctypes, "CDLL", lambda _: SimpleNamespace())
+@pytest.mark.parametrize("missing", ["gnu_get_libc_version", "mallinfo2", "malloc_trim"])
+def test_missing_libc_symbols_are_safe_noops(monkeypatch, missing):
+    symbols = dict(gnu_get_libc_version=lambda: b"glibc",
+                   mallinfo2=lambda: None, malloc_trim=lambda _: 1)
+    symbols.pop(missing)
+    monkeypatch.setattr(memory.ctypes, "CDLL", lambda _: SimpleNamespace(**symbols))
     assert not memory._trim_glibc()
+
+
+def test_libc_abi_and_loading_failure(monkeypatch):
     def unavailable(_):
         raise OSError("libc unavailable")
     monkeypatch.setattr(memory.ctypes, "CDLL", unavailable)
-    assert not memory._trim_glibc()
-    calls = []
-    def trim(padding):
-        calls.append(padding)
-        return 1
+    assert memory._glibc_functions() is None
+    memory._glibc_functions.cache_clear()
+    info, trim = lambda: None, lambda _: 1
     monkeypatch.setattr(memory.ctypes, "CDLL", lambda _: SimpleNamespace(
-        gnu_get_libc_version=lambda: b"glibc", malloc_trim=trim))
-    assert memory._trim_glibc()
-    assert calls == [0]
+        gnu_get_libc_version=lambda: b"glibc", mallinfo2=info, malloc_trim=trim))
+    assert memory._glibc_functions() == (info, trim)
+    assert info.argtypes == [] and info.restype is memory._Mallinfo2
     assert trim.argtypes == [memory.ctypes.c_size_t]
-    assert trim.restype == memory.ctypes.c_int
+    assert trim.restype is memory.ctypes.c_int
+
+
+@pytest.mark.asyncio
+async def test_background_sweep_needs_no_resume_hint_and_cancels(monkeypatch):
+    monkeypatch.setattr(memory.sys, "platform", "linux")
+    sleep = AsyncMock(side_effect=[None, asyncio.CancelledError])
+    reclaim = AsyncMock(return_value=False)
+    monkeypatch.setattr(memory.asyncio, "sleep", sleep)
+    monkeypatch.setattr(memory, "release_unused_memory", reclaim)
+    with pytest.raises(asyncio.CancelledError):
+        await memory.maintain_heap_memory()
+    reclaim.assert_awaited_once_with()
+    assert all(call.args == (60.0,) for call in sleep.await_args_list)
+
+
+def test_zero_reclaim_is_observable_and_concurrent_growth_is_not_negative(monkeypatch, caplog):
+    allocator(monkeypatch, before=200 * MIB, after=201 * MIB)
+    info, grow = memory._glibc_functions()
+    def trim(padding):
+        grow(padding)
+        return 0
+    monkeypatch.setattr(memory, "_glibc_functions", lambda: (info, trim))
+    with caplog.at_level(logging.INFO):
+        assert not memory._trim_glibc()
+    assert "reclaimed_bytes=0" in caplog.text
+    assert "trim_ms=" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_unavailable_rss_is_best_effort(monkeypatch):
+    monkeypatch.setattr(memory.sys, "platform", "linux")
+    monkeypatch.setattr(memory.asyncio, "to_thread", AsyncMock(side_effect=OSError))
+    assert not await memory.release_unused_memory()
 
 
 @pytest.mark.asyncio

@@ -3,7 +3,7 @@ import asyncio
 
 import pytest
 
-from app.core import provider_agent_supervisor, remote_task, runner_capabilities, scoped_remote_stop, turn_scheduler, turn_manager
+from app.core import native_providers, provider_agent_supervisor, remote_task, runner_capabilities, scoped_remote_stop, turn_scheduler, turn_manager
 from app.core.task_persistence import flush
 from app.core.query_session_lifecycle import stop_all_background_tasks
 from app.core.task_registry import task_registry
@@ -53,6 +53,7 @@ def test_bare_presence_publishes_enforced_scope_before_any_heartbeat(workers):
         caps = engine.presence_of(a.device_id)["capabilities"]
         assert caps[scoped_remote_stop.CAPABILITY] == 1
         assert caps[SECRET_CAPABILITY] == 1
+        assert caps[native_providers.CAPABILITY] == 1
         assert control.known_action(scoped_remote_stop.ACTION)
         assert scoped_remote_stop.advertised(a.device_id)
 
@@ -68,7 +69,7 @@ def test_unenrolled_node_does_not_probe_or_advertise(workers, monkeypatch):
         assert engine.all_presence() == {}
 
 
-@pytest.mark.parametrize("explicit", [{}, {"scoped_task_stop": "1"}])
+@pytest.mark.parametrize("explicit", [{}, {"scoped_task_stop": "1"}, {native_providers.CAPABILITY: 0}])
 def test_explicit_old_or_malformed_capabilities_are_not_replaced(workers, monkeypatch, explicit):
     from app.network.nested_secret_sync import CAPABILITY as SECRET_CAPABILITY
     a = workers("explicit-publisher")
@@ -78,7 +79,8 @@ def test_explicit_old_or_malformed_capabilities_are_not_replaced(workers, monkey
     with a.active():
         engine.create_network("Home")
         engine.publish_presence(capabilities=explicit)
-        assert engine.presence_of(a.device_id)["capabilities"] == {SECRET_CAPABILITY: 1, **explicit}
+        assert engine.presence_of(a.device_id)["capabilities"] == {
+            SECRET_CAPABILITY: 1, native_providers.CAPABILITY: 1, **explicit}
         assert not scoped_remote_stop.advertised(a.device_id)
 
 
@@ -91,7 +93,8 @@ def test_bare_presence_with_unavailable_detection_is_unknown(workers, monkeypatc
     with a.active():
         engine.create_network("Home")
         engine.publish_presence()
-        assert engine.presence_of(a.device_id)["capabilities"] == {SECRET_CAPABILITY: 1}
+        assert engine.presence_of(a.device_id)["capabilities"] == {
+            SECRET_CAPABILITY: 1, native_providers.CAPABILITY: 1}
         assert not scoped_remote_stop.advertised(a.device_id)
 
 

@@ -23,17 +23,17 @@ async function cluster(t) {
 const read = file => fs.readFile(file, 'utf8');
 
 test('only a known installed Windows launcher handoff skips the second hash', () => {
-  assert.deepEqual([...RESTORE_POINT_VALIDATING_LAUNCHERS], [4, 5, 6, 7, 8, 9]);
-  for (const version of [4, 5, 6, 7, 8, 9]) assert.equal(launcherValidatedRestorePoint('win32', version, true, false), true);
-  for (const version of [0, 1, 2, 3, 10, 999, NaN, Infinity, 4.5]) assert.equal(launcherValidatedRestorePoint('win32', version, true, false), false);
-  for (const platform of ['linux', 'darwin']) assert.equal(launcherValidatedRestorePoint(platform, 4, true, false), false);
-  assert.equal(launcherValidatedRestorePoint('win32', 4, false, false), false);
-  assert.equal(launcherValidatedRestorePoint('win32', 4, true, true), false);
+  assert.deepEqual([...RESTORE_POINT_VALIDATING_LAUNCHERS], [4, 5, 6, 7, 8, 9, 10]);
+  for (const version of [4, 5, 6, 7, 8, 9, 10]) assert.equal(launcherValidatedRestorePoint('win32', version, true, false), true);
+  for (const version of [0, 1, 2, 3, 11, 999, NaN, Infinity, 4.5, '10', undefined]) assert.equal(launcherValidatedRestorePoint('win32', version, true, false), false);
+  for (const platform of ['linux', 'darwin']) assert.equal(launcherValidatedRestorePoint(platform, 10, true, false), false);
+  assert.equal(launcherValidatedRestorePoint('win32', 10, false, false), false);
+  assert.equal(launcherValidatedRestorePoint('win32', 10, true, true), false);
 });
 
 test('a launcher version bump requires explicitly reviewing the hash allowlist', async () => {
   const { version } = JSON.parse(await read(new URL('../launcher.json', import.meta.url)));
-  assert.equal(version, 9, 'Re-audit RESTORE_POINT_VALIDATING_LAUNCHERS and the installed factory; do not trust a new launcher without proof it hashes ready points');
+  assert.equal(version, 10, 'Re-audit RESTORE_POINT_VALIDATING_LAUNCHERS and the installed factory; do not trust a new launcher without proof it hashes ready points');
 });
 
 test('the installed launcher awaits prepareRollback before every select', async () => {
@@ -74,7 +74,7 @@ test('full validation still rejects changed contents on older or unknown launche
   const copy = new SinglePassClusterCopy(root, async () => {});
   await copy.snapshot();
   await fs.writeFile(path.join(root, 'update-snapshot', 'data', 'global', 'pg_control'), 'corrupt');
-  for (const launcher of [0, 3, 10]) {
+  for (const launcher of [0, 3, 11, 999]) {
     const validator = launcherValidatedRestorePoint('win32', launcher, true, false) ? { validate: () => checkRestorePointStructure(root) } : copy;
     await assert.rejects(validator.validate(), /validation/);
   }

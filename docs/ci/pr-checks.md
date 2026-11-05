@@ -747,6 +747,8 @@ protection, not GitHub push protection; the hook must be installed on each clone
 
 ## Out-of-reach changes: draft first, owner acceptance before readiness
 
+All other PRs open as real (ready for review) PRs against `main`, not drafts.
+
 The pre-push update-reach check reads `gh pr view --json isDraft,labels`.
 When the branch has no PR yet or its PR is a draft, an unreachable change is a
 prominent **NOTE — OUT OF REACH**, not a push failure. The note names each group
@@ -762,6 +764,10 @@ push only. Other check failures still fail the push.
    review, have the owner/release agent mark it ready. A ready PR without the
    required labels fails update-reach on subsequent checks/pushes. Cached test
    passes do not cache PR state or labels: pre-push reads them again.
+
+If a later push to a real PR is refused because the change became out of reach,
+convert it to a draft with `gh pr ready --undo <N>` and ask the owner for acceptance
+as above.
 
 **`gh pr ready` and `gh pr merge` themselves are not blocked; edge publication
 is.** There is no GitHub-required PR check (PR CI remains off). The strict
@@ -929,6 +935,20 @@ and feed the required `JavaScript package checks` aggregate. Neither uses a
 path filter (no frontend job does).
 
 ### UI journeys
+
+The `JavaScript contracts, docs and frontend audit` job runs
+`node frontend/tests/journeys/select.mjs --check` from the repository root on
+every PR. It fails if a journey lacks its own rule in `map.json`, a rule names
+an unknown journey, or a glob matches no tracked file. The default shallow
+checkout is sufficient: validation uses `git ls-files`, not commit history.
+Before checking the checkout's map, the same required job runs
+`node --test frontend/tests/journeys/select.test.mjs`: temporary maps exercise
+the exported validator and real CLI, requiring exit 0 for a valid map and exit 2
+for an unmatched glob, a rule-less or unknown journey, and a rule missing its
+`why`. The policy test rejects job- or step-level conditions, `continue-on-error`
+and shell overrides on this check, and keeps `contracts` in both the aggregate's
+`needs` and its expected-results list.
+This validates selection metadata; the journey shards still run every journey.
 
 `UI journeys (N/6)`: each shard installs the Python and JavaScript
 dependencies (pip/npm caches) and Chromium (browser-mcp's pinned

@@ -27,6 +27,7 @@ from app.core.config import settings
 # Import shared database utilities from base module.
 # Re-exported here so existing ``from app.db.database import get_db`` still works.
 from app.db.base import (  # noqa: F401
+    exempt_from_start_pressure,
     get_connection,
     get_db,
     _validate_identifier,
@@ -3963,6 +3964,7 @@ def run_database_maintenance(
     if stop is not None and stop.is_set():
         return results
     with get_db() as conn:
+        exempt_from_start_pressure(conn)
         cursor = conn.cursor()
 
         # 1. Statistics scans need longer than ordinary retention batches.
@@ -3987,6 +3989,7 @@ def run_database_maintenance(
         try:
             conn = get_connection()
             try:
+                exempt_from_start_pressure(conn)
                 # Postgres VACUUM cannot run inside a transaction block
                 conn.autocommit = True
                 cursor = conn.cursor()

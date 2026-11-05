@@ -1899,10 +1899,13 @@ def test_responses_url_composition():
     assert _responses_url("https://api.openai.com/v1") == "https://api.openai.com/v1/responses"
 
 
-def test_provider_kind_unknown_row_type_falls_back_to_the_sniff():
-    """A row shape the mapping doesn't recognise must not swallow the decision."""
-    assert _decide_provider_kind(_bound("gpt-4o", "weird-new-type")) == "openai_responses"
-    assert _decide_provider_kind(_bound("claude-sonnet-4-5", "weird-new-type")) == "delegated"
+@pytest.mark.parametrize("model", ["gpt-4o", "claude-sonnet-4-5", "vendor/model"])
+def test_provider_kind_unknown_row_type_fails_closed(model):
+    """A future row must never run on a provider inferred from its model id."""
+    from app.core.environment import ProviderConfigError
+
+    with pytest.raises(ProviderConfigError, match="weird-new-type.*update"):
+        _decide_provider_kind(_bound(model, "weird-new-type"))
 
 
 def test_provider_kind_looks_the_row_up_when_the_shape_is_missing(monkeypatch):

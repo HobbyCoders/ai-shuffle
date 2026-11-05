@@ -42,7 +42,7 @@ from itertools import groupby
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 from uuid import uuid4
 
-from app.core import encryption
+from app.core import encryption, native_providers
 from app.db import network as store
 from app.db.base import get_db
 from app.db.profiles import RETIRED_BUILTIN_IDS
@@ -3194,7 +3194,8 @@ def publish_presence(*, capabilities: Optional[dict] = None, version: Optional[s
     row = {
         "device_id": ctx.device_id,
         "endpoints": endpoints if endpoints is not None else _own_endpoints(),
-        "capabilities": {nested_secret_sync.CAPABILITY: 1, **capabilities},
+        "capabilities": {nested_secret_sync.CAPABILITY: 1, native_providers.CAPABILITY: 1,
+                         **capabilities},
         "version": version,
         "source_revision": running_revision(),
         "platform": identity_mod.platform_name(),

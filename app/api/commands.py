@@ -893,14 +893,24 @@ async def _execute_rewind(
                 exc_info=True,
             )
 
-        fluid_result = await run_maintenance(
-            rewind_fluid_session,
-            sdk_session_id,
-            request.target_uuid,
-            request.include_response,
-            request.target_role,
-            reset_session_id=session_id,
-        )
+        try:
+            fluid_result = await run_maintenance(
+                rewind_fluid_session,
+                sdk_session_id,
+                request.target_uuid,
+                request.include_response,
+                request.target_role,
+                reset_session_id=session_id,
+            )
+        except Exception as fluid_err:
+            logger.error(
+                f"Fluid rewind failed for session {session_id}: {fluid_err}",
+                exc_info=True,
+            )
+            errors.append(f"Chat rewind failed: {fluid_err}")
+            return RewindResponseV2(
+                success=False, message="Rewind failed", error="; ".join(errors),
+            )
         if fluid_result.success:
             chat_rewound = True
             messages_removed = fluid_result.messages_removed or 0
@@ -1021,6 +1031,14 @@ async def _execute_rewind(
             )
             errors.append(f"Store rewind failed: {store_err}")
 
+        if not store_truncated:
+            # The store and its failure reset rolled back (or no target existed).
+            # Do not cut the CLI copy or legacy rows out from under the chat that
+            # is still authoritative. A later user retry starts from intact copies.
+            return RewindResponseV2(
+                success=False, message="Rewind failed", error="; ".join(errors),
+            )
+
         # (b) Truncate the on-disk JSONL. Best-effort: the tmpfs transcript may
         # be gone on a fresh server and the store is authoritative.
         result = jsonl_rewind_service.truncate_to_checkpoint(
@@ -1034,8 +1052,8 @@ async def _execute_rewind(
         if jsonl_ok:
             messages_removed = result.messages_removed or 0
 
-        # Mirror the truncation into session_messages whenever ANY transcript
-        # layer was actually truncated. Without this, rewind leaves orphan rows
+        # Mirror the committed store truncation into session_messages even when
+        # the JSONL copy is absent. Without this, rewind leaves orphan rows
         # the UI renders on reload (the original "rewind doesn't stick"
         # symptom). Gating it on jsonl_ok alone left the legacy rows intact
         # whenever only the store could be truncated — e.g. with the (tmpfs,
@@ -1047,7 +1065,7 @@ async def _execute_rewind(
         # below may already pay for it; the pointer-clear check reuses the
         # answer instead of re-probing.
         transcript_probe: Optional[bool] = None
-        if jsonl_ok or store_truncated:
+        if store_truncated:
             db_removed = 0
             if anchor_id is not None:
                 try:
