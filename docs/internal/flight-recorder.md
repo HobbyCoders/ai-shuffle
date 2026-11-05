@@ -187,6 +187,40 @@ otherwise two deliberate opposite actions read as one reversal.
   navigation to another origin loses the earlier part of the recording. Iframes
   are not recorded.
 
+## MessageArea remount evidence
+
+While recording, MessageArea mount entries carry a `diagnostic` object. The
+same object is printed after `| diagnostic=` in the existing text timeline,
+so failed CI journeys retain it in `ui-journeys-N` → `attempt-1/journeys/` →
+`<journey>/<case>.txt` (and any retry's corresponding directory).
+
+- `source`, `at`, `removed`, `parent` and `stack` identify the removal API,
+  synchronous removal time and ancestor. `remove`, `removeChild` and
+  `replaceChild` are patched only during recording. Other APIs use the
+  MutationObserver fallback, explicitly labelled **no synchronous stack**.
+- `state` reads the live ChatView derived values at that call; `observed`
+  reads them again in the observer. The dev-only reader includes
+  `showEmptyHero`, `isEmptyState`, chat/presented/transcript surfaces, mirror
+  waiting, voice-call state, hashed target/transcript sessions and message
+  counts. Release builds eliminate its registration and cleanup entirely;
+  there only the existing signature attributes are available.
+- `node` is a recording-local DOM identity: the same number at remount means
+  the same element was reinserted, a different number means a new element.
+- `visibility` reports document visibility, connected and CSS-visible
+  MessageAreas, and hero presence. The first pre-paint probe during a gap
+  also emits a `MessageArea gap at pre-paint` note with this check and state.
+  This shows a rendering opportunity without the transcript, **not proof of
+  compositor paint**. Compare the existing contact-sheet keyframes too. No
+  gap note means no such sample was captured, not proof the gap was invisible.
+
+These details do not participate in signature reversals or remount detection.
+No assertion, noise guard or allow-list is changed. Hooks restore at stop (or
+remain inert if a page wrapper owns them). No DOM text, HTML, prompts, titles,
+raw session IDs or URL queries are added to this evidence; stack URLs retain
+only filenames and line/column locations. Nothing is sent to a console by the
+recorder. It is injected by the browser tool or journey harness, never shipped
+as part of the app.
+
 ## Adding a field
 
 1. Put `data-ui-<name>` on ChatView's root, or on any element with

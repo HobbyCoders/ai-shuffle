@@ -539,7 +539,7 @@
       case 'mark':
         return `> mark ${JSON.stringify(clip(entry.label, 120))}`;
       case 'mount':
-        return `${entry.op === 'unmount' ? '-' : '+'} ${entry.name} ${entry.op === 'unmount' ? 'unmounted' : 'mounted'}`;
+        return `${entry.op === 'unmount' ? '-' : '+'} ${entry.name} ${entry.op === 'unmount' ? 'unmounted' : 'mounted'}${entry.diagnostic ? ` | diagnostic=${JSON.stringify(entry.diagnostic)}` : ''}`;
       case 'error':
         return `! ${entry.source === 'console' ? 'console.error' : entry.source === 'rejection' ? 'unhandled rejection' : 'error'}: ${clip(entry.message, 160)}`;
       case 'request':
@@ -553,7 +553,7 @@
       case 'visibility':
         return `* page ${entry.state}`;
       case 'note':
-        return `* ${clip(entry.message, 160)}`;
+        return `* ${clip(entry.message, 160)}${entry.diagnostic ? ` | diagnostic=${JSON.stringify(entry.diagnostic)}` : ''}`;
       default:
         return `* ${entry.kind}`;
     }
@@ -757,7 +757,14 @@
     return changes;
   }
 
-  function sample() {
+  function sample(phase) {
+    if (phase && S.messageAreaGap && !S.gapSampled) {
+      S.gapSampled = true;
+      push({ t: elapsed(), kind: 'note', message: 'MessageArea gap at ' + phase,
+        diagnostic: tryDiagnostic(function () { return { frame: S.frame,
+          state: diagnosticState(root.document.querySelector('[data-ui-state="chat"]')),
+          visibility: diagnosticVisibility() }; }) });
+    }
     var started = root.performance && root.performance.now ? root.performance.now() : 0;
     var values = readSignature(S.opts);
     var changes = diff(S.last, values);
@@ -816,7 +823,7 @@
         probe.pending = false;
         probe.misses = 0;
         S.stats.paintedSamples += 1;
-        try { sample(); } catch (error) { note(error); }
+        try { sample('pre-paint'); } catch (error) { note(error); }
       });
       probe.observer.observe(box);
       doc.documentElement.appendChild(host);
@@ -919,6 +926,122 @@
     }
     return list;
   }
+  // Only MessageArea needs causal evidence. These optional, bounded details
+  // ride the existing mount/note timeline; they never feed anomaly detectors.
+  function diagnosticNode(node) {
+    if (!node || node.nodeType !== 1) return null;
+    var label = node.tagName.toLowerCase();
+    ['chat-view', 'chat-column', 'message-area-wrapper', 'empty-hero'].forEach(function (name) {
+      if (node.classList.contains(name)) label += '.' + name;
+    });
+    var mount = node.getAttribute('data-ui-mount');
+    return label + (mount ? '[' + cleanValue(mount) + ']' : '');
+  }
+  function diagnosticState(carrier) {
+    var state = {};
+    if (!carrier) return state;
+    // Explicit allowlist: never copy text, titles, raw session ids or paths.
+    ['surface', 'session', 'messages', 'loading', 'streaming', 'composer'].forEach(function (key) {
+      if (carrier.hasAttribute('data-ui-' + key)) state[key] = cleanValue(carrier.getAttribute('data-ui-' + key));
+    });
+    if (typeof carrier.__flightRecorderState === 'function') {
+      var live = carrier.__flightRecorderState();
+      if (live) {
+        ['showEmptyHero', 'isEmptyState', 'mirrorWaiting', 'voiceCallActive'].forEach(function (key) {
+          if (typeof live[key] === 'boolean') state[key] = live[key];
+        });
+        ['chatSurface', 'presentedSurface', 'transcriptSurface'].forEach(function (key) {
+          if (live[key] === null || /^(new|cleared|loading|active)$/.test(live[key])) state[key] = live[key];
+        });
+        ['session', 'transcriptSession'].forEach(function (key) {
+          if (/^(none|s:[a-z0-9]{6})$/.test(live[key])) state[key] = live[key];
+        });
+        ['messages', 'transcriptMessages'].forEach(function (key) {
+          if (live[key] === null || (Number.isInteger(live[key]) && live[key] >= 0)) state[key] = live[key] === null ? null : String(live[key]);
+        });
+      }
+    }
+    return state;
+  }
+  function diagnosticVisibility() {
+    var areas = root.document.querySelectorAll('[data-ui-mount="MessageArea"]');
+    var visible = 0;
+    for (var i = 0; i < areas.length; i += 1) {
+      if (areas[i].checkVisibility ? areas[i].checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) : areas[i].getClientRects().length > 0) visible += 1;
+    }
+    return { document: root.document.hidden ? 'hidden' : 'visible', messageAreas: areas.length,
+      visibleMessageAreas: visible, hero: Boolean(root.document.querySelector('.empty-hero')) };
+  }
+  function diagnosticId(node) {
+    if (!S.nodeIds.has(node)) S.nodeIds.set(node, ++S.nextNodeId);
+    return S.nodeIds.get(node);
+  }
+  function diagnosticStack() {
+    // Keep call sites, not arbitrary Error messages, URL queries or directories.
+    return (new Error().stack || '').split('\n').slice(1, 10).map(function (line) {
+      return clip(scrub(line.replace(/(?:https?|file):\/\/[^\s)]+/g, function (url) {
+        var location = url.split('?')[0].split('#')[0];
+        var position = url.match(/:(\d+):(\d+)$/);
+        return location.slice(location.lastIndexOf('/') + 1).replace(/:\d+:\d+$/, '') + (position ? ':' + position[1] + ':' + position[2] : '');
+      })), 240);
+    }).join('\n');
+  }
+  var removalHooks = null;
+  function installRemovalHooks() {
+    if (removalHooks) { removalHooks.active = true; return; }
+    var hooks = removalHooks = { active: true, methods: [] };
+    [[root.Element.prototype, 'remove', -1], [root.Node.prototype, 'removeChild', 0],
+      [root.Node.prototype, 'replaceChild', 1]].forEach(function (spec) {
+      var proto = spec[0], name = spec[1], index = spec[2];
+      var original = proto[name];
+      if (typeof original !== 'function') return;
+      var wrapper = function () {
+        if (hooks.active && S && S.active) {
+          try {
+            var removed = index < 0 ? this : arguments[index];
+            var nodes = marked(removed);
+            for (var i = 0; i < nodes.length; i += 1) {
+              var node = nodes[i];
+              if (node.getAttribute('data-ui-mount') !== 'MessageArea' || !node.isConnected) continue;
+              var carrier = node.closest('[data-ui-state="chat"]');
+              S.removalEvidence.set(node, { source: name, at: elapsed(), removed: diagnosticNode(removed),
+                parent: diagnosticNode(removed.parentNode), state: diagnosticState(carrier), stack: diagnosticStack() });
+            }
+          } catch (error) { note(error); }
+        }
+        return original.apply(this, arguments);
+      };
+      try { proto[name] = wrapper; hooks.methods.push({ proto: proto, name: name, original: original, wrapper: wrapper }); }
+      catch (error) { note(error); }
+    });
+  }
+  function releaseRemovalHooks() {
+    if (!removalHooks) return;
+    removalHooks.active = false;
+    // All-or-nothing, like the network hooks: a later page wrapper must not
+    // be dropped, and a subsequent start must re-arm every method together.
+    if (!removalHooks.methods.every(function (hook) { return hook.proto[hook.name] === hook.wrapper; })) return;
+    removalHooks.methods.forEach(function (hook) { hook.proto[hook.name] = hook.original; });
+    removalHooks = null;
+  }
+  function tryDiagnostic(read) {
+    try { return read(); }
+    catch (error) { note(error); return { unavailable: true }; }
+  }
+  function mountDiagnostic(node, removed, parent) {
+    var carrier = (node.closest && node.closest('[data-ui-state="chat"]'))
+      || (parent && parent.closest && parent.closest('[data-ui-state="chat"]'));
+    var observed = diagnosticState(carrier);
+    var evidence = removed && S.removalEvidence.get(node);
+    S.removalEvidence.delete(node);
+    var result = evidence || { source: 'MutationObserver (no synchronous stack)',
+      removed: removed ? diagnosticNode(removed) : null, parent: diagnosticNode(parent), state: observed };
+    result.node = diagnosticId(node);
+    result.observed = observed;
+    result.visibility = diagnosticVisibility();
+    return result;
+  }
+
   function countMount(name, delta) {
     var counts = S.stats.mounts[name] || (S.stats.mounts[name] = { mounted: 0, unmounted: 0 });
     if (delta > 0) counts.mounted += 1; else counts.unmounted += 1;
@@ -927,6 +1050,7 @@
     if (!S || !S.active) return;
     try {
       var removed = [];
+      var parents = new WeakMap();
       var added = [];
       var i;
       var j;
@@ -934,7 +1058,7 @@
         var record = records[i];
         if (record.type !== 'childList') continue;
         for (j = 0; j < record.removedNodes.length; j += 1) {
-          if (record.removedNodes[j].nodeType === 1) { removed.push(record.removedNodes[j]); S.rowsDirty = true; }
+          if (record.removedNodes[j].nodeType === 1) { removed.push(record.removedNodes[j]); parents.set(record.removedNodes[j], record.target); S.rowsDirty = true; }
         }
         for (j = 0; j < record.addedNodes.length; j += 1) {
           if (record.addedNodes[j].nodeType === 1) { added.push(record.addedNodes[j]); S.rowsDirty = true; }
@@ -949,7 +1073,13 @@
           S.mounted.delete(el);
           var name = cleanValue(el.getAttribute('data-ui-mount'));
           countMount(name, -1);
-          push({ t: t, kind: 'mount', name: name, op: 'unmount' });
+          var unmount = { t: t, kind: 'mount', name: name, op: 'unmount' };
+          if (name === 'MessageArea') {
+            unmount.diagnostic = tryDiagnostic(function () { return mountDiagnostic(el, removed[i], parents.get(removed[i])); });
+            S.messageAreaGap = true;
+            S.gapSampled = false;
+          }
+          push(unmount);
         }
       }
       for (i = 0; i < added.length; i += 1) {
@@ -961,7 +1091,12 @@
           S.mounted.add(node);
           var label = cleanValue(node.getAttribute('data-ui-mount'));
           countMount(label, 1);
-          push({ t: t, kind: 'mount', name: label, op: 'mount' });
+          var mount = { t: t, kind: 'mount', name: label, op: 'mount' };
+          if (label === 'MessageArea') {
+            mount.diagnostic = tryDiagnostic(function () { return mountDiagnostic(node, null, node.parentNode); });
+            S.messageAreaGap = false;
+          }
+          push(mount);
         }
       }
     } catch (error) {
@@ -1414,6 +1549,12 @@
     S.active = true;
     S.mounted = typeof WeakSet === 'function' ? new WeakSet() : { has: function () { return false; }, add: function () {}, delete: function () {} };
     S.rowsDirty = true;
+    S.nodeIds = new WeakMap();
+    S.nextNodeId = 0;
+    S.removalEvidence = new WeakMap();
+    S.messageAreaGap = false;
+    S.gapSampled = false;
+    installRemovalHooks();
     S.duplicates = S.duplicates || {};
     S.lastFrameEpoch = 0;
     S.probe = null;
@@ -1449,6 +1590,7 @@
     root.removeEventListener('pagehide', onPageHide, true);
     root.removeEventListener('pageshow', onPageShow, true);
     releaseHooks();
+    releaseRemovalHooks();
     // Nothing resumes a halted recording, so a handoff it left (one written on
     // the way into the back/forward cache, say) must not stay in the app's storage.
     removeHandoff(S.id);
