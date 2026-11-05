@@ -362,7 +362,7 @@
 
 	<div class="tb-actions">
 		{#if phoneBack.onclick}{@render phoneBack.status?.()}{:else if phonePanelActions.label === mobileTitle}{@render phonePanelActions.content?.()}{/if}
-		{#if phoneBack.onclick}<button class="tb-hamburger" aria-label="Open menu" title="Navigation" onclick={openDrawer}><Menu size={20} strokeWidth={1.8} /></button>{/if}
+		{#if phoneBack.onclick}{@render phoneBack.actions?.()}{/if}
 		{@render actions?.()}
 		{#if $hotkeyPreferences.globalSttEnabled && !hideGlobalStt}
 			<button class="tb-hamburger" class:recording={$globalSttState.isRecording}

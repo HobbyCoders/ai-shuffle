@@ -223,6 +223,8 @@
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
 	class="settings-shell"
+	class:awaiting-target={Boolean(initialItemId)}
+	aria-busy={Boolean(initialItemId)}
 	bind:this={root}
 	data-stacked={stacked ? '' : undefined}
 	data-mid={mid ? '' : undefined}

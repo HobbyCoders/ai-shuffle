@@ -74,6 +74,9 @@
 	line-height: 1.4;
 }
 
+/* A requested target must land before the retained shell paints its old page. */
+.settings-shell.awaiting-target { visibility: hidden; }
+
 .dark .settings-shell {
 	--st-shadow: 0 14px 40px color-mix(in oklch, var(--background) 70%, transparent), 0 0 0 1px var(--st-border-strong);
 }
@@ -153,7 +156,7 @@
 .settings-shell:not([data-stacked]) .st-coll:has(> .st-dpane > .st-empty-detail[data-idle]) > .st-lcol .st-lhead {
 	padding-inline: 16px;
 }
-.settings-shell:not([data-stacked]) .st-coll:has(> .st-dpane > .st-empty-detail[data-idle]) > .st-lcol .st-lh-top h1 {
+.settings-shell:not([data-stacked]) .st-coll:has(> .st-dpane > .st-empty-detail[data-idle]) > .st-lcol .st-page-title {
 	padding-left: 0;
 }
 .settings-shell:not([data-stacked]) .st-coll:has(> .st-dpane > .st-empty-detail[data-idle]) > .st-lcol .st-lscroll {
@@ -207,6 +210,8 @@
 
 /* ---------- shared buttons (used by several primitives and pages) ---------- */
 .settings-shell .st-btn {
+	position: relative;
+	justify-content: center;
 	display: inline-flex;
 	align-items: center;
 	gap: 6px;
@@ -221,6 +226,8 @@
 	font-weight: 500;
 	white-space: nowrap;
 }
+/* Secondary labels remain primary ink even inside a muted list summary. */
+.settings-shell .st-btn:not(.primary, .danger, .warn) { color: var(--st-fg); }
 .settings-shell .st-btn:hover:not(:disabled) {
 	background: var(--st-hover);
 }
@@ -286,13 +293,16 @@
  .settings-shell :is(.st-num input, textarea) { font-size: 16px; }
 }
 
-/* A compact visual control still owns a 44px phone target. */
-.settings-shell .st-btn.compact { position: relative; }
-.settings-shell[data-stacked] .st-btn.compact { height: 32px; min-height: 32px; margin-block: 6px; }
-.settings-shell[data-stacked] .st-btn.compact::after { content: ''; position: absolute; inset: -6px 0; }
+/* Draw the control at desktop density; reserve a full 44px phone touch pitch. */
+.settings-shell[data-stacked] .st-btn { height: 32px; min-height: 32px; margin-block: 6px; }
+.settings-shell[data-stacked] .st-btn::after { content: ''; position: absolute; inset: -6px min(0px, calc((100% - 44px) / 2)); }
+.settings-shell[data-stacked] .st-btn.icon { min-width: 32px; margin-inline: 6px; }
 @media (max-width: 600px), (pointer: coarse) {
- .settings-shell .st-btn.compact { height: 32px; min-height: 32px; margin-block: 6px; }
- .settings-shell .st-btn.compact::after { content: ''; position: absolute; inset: -6px 0; }
+ .settings-shell .st-btn { height: 32px; min-height: 32px; margin-block: 6px; }
+ .settings-shell .st-btn::after { content: ''; position: absolute; inset: -6px min(0px, calc((100% - 44px) / 2)); }
+ .settings-shell .st-btn.icon { min-width: 32px; margin-inline: 6px; }
+ .settings-shell .st-page-title .st-btn { margin-block: 0; }
+ .settings-shell .st-lhead { gap: 0; }
 }
 
 /* Back button: only in stacked mode */
@@ -515,20 +525,19 @@
 }
 .settings-shell[data-stacked] .st-lhead {
 	padding: 12px 16px;
-	gap: 12px;
+	gap: 0;
 	border-bottom: 0;
 }
-/* A list page with nothing under its title (Default models) starts its first
-   section where a preference page does: the label's own 8px plus this makes 28.
-   Stacked pages already match each other at 15.5px, so this is desktop only. */
-.settings-shell:not([data-stacked]) .st-lhead:not(:has(.st-filter, .st-ltools, .st-lfilters)) {
-	padding-bottom: 20px;
+/* PageTitle owns the title-to-content gap, including lists without a filter. */
+.settings-shell .st-lhead:not(:has(.st-filter, .st-ltools, .st-lfilters)) {
+	padding-bottom: 0;
 }
+.settings-shell .st-lscroll > .st-lg:first-child { padding-top: 0; }
 .settings-shell[data-stacked] .st-lhead .st-filter,
 .settings-shell[data-stacked] .st-lhead .st-ltools {
 	margin-left: 0;
 }
-.settings-shell[data-stacked] .st-lh-top h1 {
+.settings-shell[data-stacked] .st-page-title {
 	font-size: 24px;
 	padding-left: 0;
 }
@@ -631,7 +640,8 @@
 
 /* Phone section headings share the cards' 16px page edge and 15px labels. */
 .settings-shell[data-stacked] .st-grp .st-gt,
-.settings-shell[data-stacked] .st-lg:not(.compact) {
+.settings-shell[data-stacked] .st-nav-g,
+.settings-shell[data-stacked] .st-lg {
 	font-size: 15px;
 	font-weight: 500;
 	letter-spacing: 0;
@@ -649,12 +659,13 @@
 	.settings-shell[data-stacked] .st-row.st-phone-stack { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
 	.settings-shell[data-stacked] .st-row.st-phone-stack > .st-rc { width: 100%; margin-left: 0; }
 	.settings-shell .st-row.st-phone-stack > .st-rc > .st-seg { flex: 1; }
-	.settings-shell .st-row:has(.st-rh):has(> .st-rc :is(select, [aria-haspopup])) { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
-	.settings-shell .st-row:has(.st-rh) > .st-rc:has(:is(select, [aria-haspopup])) { display: flex; flex-wrap: nowrap; width: 100%; margin-left: 0; }
-	.settings-shell .st-row:has(.st-rh) > .st-rc :is(.st-sel-wrap, [aria-haspopup]) { flex: 1; max-width: none !important; }
+	.settings-shell .st-row:has(.st-rh):has(> .st-rc :is(select, [aria-haspopup], .st-seg)) { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
+	.settings-shell .st-row:has(.st-rh) > .st-rc:has(:is(select, [aria-haspopup], .st-seg)) { display: flex; flex-wrap: nowrap; width: 100%; margin-left: 0; }
+	.settings-shell .st-row:has(.st-rh) > .st-rc :is(.st-sel-wrap, [aria-haspopup], .st-seg) { flex: 1; max-width: none !important; }
 	.settings-shell .st-row:has(.st-rh) > .st-rc > .st-btn:has(svg):not([aria-haspopup]) { flex: none; min-width: 44px; }
 	.settings-shell :is(.st-rl, .st-it .nm, .st-lg, .st-lg.compact) { font-size: 15px; }
 	.settings-shell .st-lg.compact { padding-inline: 0; }
+	.settings-shell :is(.st-nav-g, .st-lg, .st-gt) { color: var(--st-mfg); font-size: 15px; font-weight: 500; letter-spacing: 0; padding-inline: 0; }
 	.settings-shell .st-it:not(.navigation) { padding-inline: 0; }
 	.settings-shell .st-gt { padding-inline: 0; }
 }

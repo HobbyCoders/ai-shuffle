@@ -24,7 +24,7 @@ Usage (all kit components export from $lib/components/layout/view):
 </ViewShell>
 Pass main's `back` to DetailPane's onBack (or your detail's back control).
 Keep detailOpen true when an item is selected; Shell owns phone push/pop history.
-No host (tests), an overlay sidebar (<=1080px), or the phone shell: inline.
+No host (tests), below the desktop rail (<768px), or the phone shell: inline.
 Panel contexts and tokens travel automatically. Off-screen feature pages never claim.
 -->
 <script lang="ts" module>
@@ -67,8 +67,8 @@ Panel contexts and tokens travel automatically. Off-screen feature pages never c
 	const active = $derived(feature?.active ?? true);
 	const token = Symbol('view-panel');
 	const historyKey = $props.id();
-	const docked = $derived(viewPanel.hostMounted && !layout.current.sidebarOverlay && !platform.isMobile);
 	let width = $state(0);
+	const docked = $derived(viewPanel.hostMounted && !platform.isMobile && (!layout.current.sidebarOverlay || width >= 768));
 	onMount(() => {
 		const measure = () => { width = window.innerWidth; };
 		measure();

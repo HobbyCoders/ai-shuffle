@@ -4,6 +4,7 @@ import { createRawSnippet } from 'svelte';
 import { settingsNav } from '$lib/settings/navigation.svelte';
 import { SETTINGS_ACCESS_CONTEXT } from '$lib/settings/access.svelte';
 import DetailPane from './DetailPane.svelte';
+import { platform } from '$lib/stores/platform.svelte';
 import EmptyIdentityFixture from '../../../../../tests/EmptyIdentityFixture.svelte';
 
 // Raw snippets render once; the tab state is asserted on the tabs and the store.
@@ -18,9 +19,22 @@ beforeEach(() => {
 	settingsNav.selectCategory('providers');
 	settingsNav.selectItem('c-sub');
 });
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+afterEach(() => { cleanup(); platform.set('desktop'); vi.unstubAllGlobals(); });
 
 describe('DetailPane', () => {
+ it('keeps desktop actions on the heading without a second More menu', () => {
+  const primary=createRawSnippet(() => ({render: () => '<button>Duplicate</button>'}));
+  render(DetailPane,{name:'Agent', primary});
+  expect(screen.getAllByRole('button',{name:'Duplicate'}).length).toBe(1);
+  expect(screen.queryByText('More')).toBeNull();
+ });
+ it('accepts a page-owned phone More snippet without wrapping a second menu', () => {
+  platform.set('mobile');
+  const phoneMenu=createRawSnippet(() => ({render: () => '<button aria-label="More note actions">More</button>'}));
+  const view=render(DetailPane,{name:'Note',phoneMenu});
+  expect(screen.getByRole('button',{name:'More note actions'})).toBeTruthy();
+  expect(view.container.querySelector('.detail-more')).toBeNull();
+ });
  it('removes the identity grid column when leaving a custom avatar for an anonymous header', async () => {
   const tile = createRawSnippet(() => ({ render: () => '<span data-testid="avatar">AV</span>' }));
   const view = render(DetailPane, { name: 'Agent', tile, contentFirst: true });

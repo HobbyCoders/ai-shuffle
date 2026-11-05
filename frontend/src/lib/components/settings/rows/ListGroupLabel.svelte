@@ -35,9 +35,9 @@
 	.st-lg.compact {
 		gap: 6px;
 		font-size: 12px;
-		font-weight: 500;
+		font-weight: 400;
 		letter-spacing: 0;
-		color: var(--st-mfg);
+		color: var(--st-subtle);
 		padding: 16px 12px 6px;
 	}
 	.st-lg.compact .act {

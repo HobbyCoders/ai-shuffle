@@ -393,9 +393,7 @@ html:root[data-platform='mobile'] .chat-view.is-empty .input-slot.empty-input-la
 /* SessionCard, Sidebar, SidebarRail, SidebarSheet and WorkspaceCustomize size
    their own touch targets (class:phone and @media (hover: none)). */
 
-/* Shared kit touch geometry for the native shell, including foldable widths. */
-html:root[data-platform='mobile'] .st-action { min-height: 44px; }
-html:root[data-platform='mobile'] .st-action.icon { width: 44px; }
+/* Shared buttons and switches own their drawn size and invisible touch target. */
 html:root[data-platform='mobile'] .ui-checkbox { min-height: 44px; }
 html:root[data-platform='mobile'] .ui-checkbox .control { width: 44px; height: 44px; }
 html:root[data-platform='mobile'] .ui-checkbox .mark { inset: 14px; }
@@ -433,20 +431,6 @@ html:root[data-platform='mobile'] .settings-shell .st-back:not(:has(span)) {
 	justify-content: center;
 	padding: 0;
 	margin-right: -6px;
-}
-
-html:root[data-platform='mobile'] .st-sw:not(.sm) {
-	width: 42px;
-	height: 25px;
-}
-
-html:root[data-platform='mobile'] .st-sw:not(.sm)::after {
-	width: 20px;
-	height: 20px;
-}
-
-html:root[data-platform='mobile'] .st-sw:not(.sm)[aria-checked='true']::after {
-	transform: translateX(17px);
 }
 
 /* ── frontend/src/lib/components/ui/RowActionMenu.svelte ───────────────────── */

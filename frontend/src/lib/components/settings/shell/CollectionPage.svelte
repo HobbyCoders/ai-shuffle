@@ -20,6 +20,7 @@
 	import { clampListWidth, readListWidth } from '$lib/settings/list-width';
 	import type { CategoryId } from '$lib/settings/types';
 	import ListDivider from './ListDivider.svelte';
+	import PageTitle from './PageTitle.svelte';
 
 	interface Props {
 		/** Settings category; pages outside Settings pass `title` instead. */
@@ -134,10 +135,8 @@
 	<div class="st-lcol">
 		<div class="st-lhead">
 			{#if onBack !== null}<BackRow label="Settings" onclick={() => (onBack ? onBack() : settingsNav.back())} />{/if}
-			<div class="st-lh-top">
-				<h1 tabindex="-1" data-settings-heading="page">{label}</h1>
-				{#if count !== undefined && count !== ''}<span class="n">{count}</span>{/if}
-				<span class="sp"></span>
+			<PageTitle title={label} {count}>
+				{#snippet actions()}
 				{#if addLabel}
 					<button
 						type="button"
@@ -149,7 +148,8 @@
 						<Plus /><span class="st-add-l">{addLabel}</span>
 					</button>
 				{/if}
-			</div>
+				{/snippet}
+			</PageTitle>
 			{#if toolbar}<div class="st-ltools">{@render toolbar()}</div>{/if}
 			{#if placeholder !== null}
 				<label class="st-filter">
@@ -190,36 +190,12 @@
 	.st-lhead {
 		position: relative;
 		padding: var(--st-page-top) 8px 12px;
-		display: grid;
-		gap: 12px;
-	}
-	.st-lh-top {
 		display: flex;
-		align-items: center;
-		gap: 10px;
-		min-height: 32px;
+		flex-direction: column;
 	}
-	h1 {
-		/* Text on the rows' text edge; the filter stays on their pill edge. */
-		padding-left: 12px;
-		font-size: 24px;
-		font-weight: 600;
-		letter-spacing: -0.012em;
-		margin: 0;
-		white-space: nowrap;
-	}
-	h1:focus {
-		outline: none;
-	}
-	.n {
-		color: var(--st-mfg);
-		font-size: 13px;
-		font-variant-numeric: tabular-nums;
-		white-space: nowrap;
-	}
-	.sp {
-		flex: 1;
-	}
+	.st-lhead > :global(.st-page-title) { padding-left: 12px; }
+	.st-filter + .st-lfilters, .st-ltools + .st-filter { margin-top: 12px; }
+
 	.st-add {
 		flex-shrink: 0;
 	}

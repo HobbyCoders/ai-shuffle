@@ -96,6 +96,8 @@
 	.st-sw[aria-checked='true']::after {
 		transform: translateX(14px);
 	}
+	.st-sw:active:not(:disabled) { filter: brightness(.92); }
+	@media (prefers-reduced-motion: reduce) { .st-sw, .st-sw::after { transition: none; } }
 	.st-sw:disabled {
 		opacity: 0.4;
 	}
@@ -109,5 +111,11 @@
 	}
 	.st-sw.sm[aria-checked='true']::after {
 		transform: translateX(10px);
+	}
+	@media (max-width: 600px), (pointer: coarse) {
+		.st-sw, .st-sw.sm { width: 36px; height: 22px; margin-inline: 4px; }
+		.st-sw::before { inset: -11px -4px; }
+		.st-sw::after, .st-sw.sm::after { width: 18px; height: 18px; }
+		.st-sw[aria-checked='true']::after, .st-sw.sm[aria-checked='true']::after { transform: translateX(14px); }
 	}
 </style>

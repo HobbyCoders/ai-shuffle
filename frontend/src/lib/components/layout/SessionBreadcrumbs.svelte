@@ -128,7 +128,7 @@
 	   fixed 220px basis on the parent used to reserve empty space after short
 	   names and squeeze "Chats" to "Ch…" beside it (#1799). */
 	.project, .parent { flex: none; max-width: min(220px, 25%); }
-	.project { max-width: min(220px, max(25%, 4.5rem)); }
+	.project { flex: 0 1 auto; max-width: none; }
 	@media (max-width: 700px) {
 		.crumbs { gap: 3px; flex: 1; }
 		.project { max-width: 22%; font-size: 11px; }
