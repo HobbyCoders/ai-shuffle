@@ -23,7 +23,7 @@ What is pinned here, end to end against the real turns/wakeups tables:
 from __future__ import annotations
 
 from contextlib import ExitStack
-from unittest.mock import AsyncMock, patch
+from unittest.mock import ANY, AsyncMock, patch
 
 import pytest
 
@@ -405,7 +405,7 @@ async def test_the_owning_runner_honours_the_durable_stop_background_bit():
         turns_mod.TERMINAL_STATES = ("completed", "aborted", "parked")
         await rt.interrupt("stop")
 
-    stop_bg.assert_awaited_once_with("cross-runner", user_stop=True)
+    stop_bg.assert_awaited_once_with("cross-runner", user_stop=True, scope=ANY)
 
 
 async def test_send_now_never_stops_background_work():

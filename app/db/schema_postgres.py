@@ -22,7 +22,7 @@ from app.db.base import column_exists
 logger = logging.getLogger("app.db.schema_postgres")
 
 # Must match database.py SCHEMA_VERSION
-SCHEMA_VERSION = 94
+SCHEMA_VERSION = 95
 
 
 def create_session_events_recall_index(cursor) -> None:
@@ -1000,7 +1000,15 @@ def create_postgres_schema(cursor: Any) -> None:
             source TEXT NOT NULL DEFAULT 'schedule_wakeup',
             instance_id TEXT,
             fire_at DOUBLE PRECISION NOT NULL,
-            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            stop_seq BIGINT
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS session_stops (
+            session_id TEXT PRIMARY KEY,
+            stop_seq BIGINT NOT NULL,
+            stopped_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
         )
     """)
     cursor.execute("""
@@ -1100,6 +1108,7 @@ def create_postgres_schema(cursor: Any) -> None:
             assignment_owner BOOLEAN NOT NULL DEFAULT TRUE,
             started_at TIMESTAMP WITH TIME ZONE,
             updated_at TIMESTAMP WITH TIME ZONE,
+            turn_order BIGINT,
             PRIMARY KEY (task_id, session_id)
         )
     """)

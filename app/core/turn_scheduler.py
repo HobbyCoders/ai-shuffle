@@ -451,13 +451,20 @@ def _is_compaction_continuation(row: Dict[str, Any]) -> bool:
                 and payload.get("compact_before_turn_id"))
 
 
+async def _user_stopped(session_id: str) -> bool:
+    """The Stop latch, once it has asked whether a person spoke on another install."""
+    from app.core.query_session_lifecycle import reconcile_user_stop
+
+    return not await reconcile_user_stop(session_id)
+
+
 async def _kick_impl(session_id: str) -> None:
     """Peek the front queued turn and execute it. Ownership is DB-raced inside
     ``execute`` (run lease + guarded ``start_turn``) — a lost race returns
     ``None`` and the row stays queued for whoever owns the session."""
     from app.core.task_registry import task_registry
     generation = task_registry.stop_generation(session_id)
-    if task_registry.is_user_stopped(session_id):
+    if await _user_stopped(session_id):
         return
     try:
         # Progress notes never start a turn of their own (#960).
@@ -617,9 +624,8 @@ async def _maybe_failover(
     every non-completed settlement and this returns early.
     """
     from app.core import account_failover
-    from app.core.task_registry import task_registry
 
-    if task_registry.is_user_stopped(session_id):
+    if await _user_stopped(session_id):
         # Belt and braces for the Stop latch: a user stop settles the turn
         # ``aborted`` so the terminal payload never qualifies here, but a
         # turn that completed in the instant Stop landed must not respawn
@@ -741,7 +747,7 @@ async def _maybe_recover_failed_wake(
     """
     from app.core.task_registry import task_registry
     generation = task_registry.stop_generation(session_id)
-    if task_registry.is_user_stopped(session_id):
+    if await _user_stopped(session_id):
         return False
     if (settled.get("source") or "") != "unpark":
         return False
@@ -887,7 +893,7 @@ async def _maybe_auto_continue(
     from app.core.task_registry import task_registry
 
     generation = task_registry.stop_generation(session_id)
-    if task_registry.is_user_stopped(session_id):
+    if await _user_stopped(session_id):
         # A user stop settles the turn ``aborted`` without the outcome, but a
         # turn that completed in the instant Stop landed must not respawn the
         # session either.
@@ -1652,12 +1658,11 @@ async def hold_queued_progress(session_id: str) -> List[str]:
     them queued: its next tool boundary takes every kind. A stopped receiver
     keeps them too; Stop's own queue cancellation retires them.
     """
-    from app.core.task_registry import task_registry
 
     try:
         rows = [row for row in await asyncio.to_thread(turns_db.get_queued_turns, session_id)
                 if _is_progress_row(row)]
-        if not rows or task_registry.is_user_stopped(session_id):
+        if not rows or await _user_stopped(session_id):
             return []
         async with _terminal_delivery_lock(session_id):
             if await asyncio.to_thread(turns_db.get_live_turn, session_id) is not None:
@@ -1869,7 +1874,7 @@ async def _on_agent_message_locked(
 
         reply_to = live_continuation_owner(session_id)
     owner_generation = task_registry.stop_generation(reply_to) if reply_to else None
-    if reply_to and task_registry.is_user_stopped(reply_to):
+    if reply_to and await _user_stopped(reply_to):
         return None
     from app.core.agent_messaging import message_provenance_async
     provenance = await message_provenance_async(session_id, sender)
@@ -1879,7 +1884,7 @@ async def _on_agent_message_locked(
         if reply_to else None
     )
     if not reply_to:
-        if task_registry.is_user_stopped(session_id):
+        if await _user_stopped(session_id):
             return None
         if urgent:
             # Compatibility with messages held before immediate peer wakes:
@@ -1972,7 +1977,7 @@ async def _enqueue_context_wake(
     from app.core.task_registry import task_registry
 
     generation = task_registry.stop_generation(session_id)
-    if task_registry.is_user_stopped(session_id):
+    if await _user_stopped(session_id):
         logger.info(
             "turn_scheduler: refusing a %s wake for %s — the user stopped "
             "this session (tasks=%s)",
@@ -2553,7 +2558,7 @@ async def _on_task_terminal_locked(
         # one it did. The frame is still recorded everywhere else; only the wake
         # decision is skipped. Cleared by the user's next message
         # (``turn_manager._submit_blocking``).
-        if task_registry.is_user_stopped(session_id):
+        if await _user_stopped(session_id):
             logger.info(
                 "turn_scheduler: wake suppressed for %s — the user stopped this "
                 "session (task %s, status %s)",
@@ -2764,7 +2769,7 @@ async def on_tasks_interrupted_by_restart(
     from app.core.task_registry import task_registry
 
     try:
-        if task_registry.is_user_stopped(session_id):
+        if await _user_stopped(session_id):
             return None
         from app.core import archive_guard
 

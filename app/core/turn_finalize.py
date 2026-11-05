@@ -295,7 +295,7 @@ async def settle_stopped_monitor_parks(session_id: str) -> bool:
     keep its park; this cleanup never schedules a wake.
     """
     try:
-        from app.core.task_registry import task_registry
+        from app.core.task_registry import task_registry, user_stop_holds
         from app.core import pending_reconcile
         from app.db import turns as turns_db
 
@@ -309,7 +309,7 @@ async def settle_stopped_monitor_parks(session_id: str) -> bool:
         # to the dispatch as the report and then run the wake anyway. A user
         # Stop suppresses that wake, so it never holds the park; neither does
         # a wake that missed the pending-wake limit (its write failed).
-        if not task_registry.is_user_stopped(session_id):
+        if not await user_stop_holds(session_id):
             from app.core.provider_agent import PENDING_WAKE_LIMIT_SECONDS
 
             latest = await asyncio.to_thread(turns_db.get_latest_run_turn, session_id)

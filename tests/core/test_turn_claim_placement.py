@@ -165,6 +165,7 @@ def _runtime_env(*, pump):
     recorder.start = AsyncMock()
     recorder.on_event = AsyncMock()
     recorder.close = AsyncMock()
+    recorder.writes_settled = AsyncMock()
     recorder.settle = AsyncMock()
 
     session_runtime.register_broadcaster(AsyncMock(name="broadcaster"))

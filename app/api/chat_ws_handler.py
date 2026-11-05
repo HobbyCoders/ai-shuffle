@@ -1938,6 +1938,10 @@ class ChatWebSocketHandler:
                     await self.send_json({"type": "error", "session_id": session_id, "message": str(exc)})
                 await self._v2_broadcast_queue(session_id)
                 return
+            from app.core.query_session_lifecycle import capture_stop_scope, stop_all_background_tasks
+
+            # Before the flip's wait: once it commits, the next turn can start.
+            scope = capture_stop_scope(session_id)
             flipped = await turn_manager.interrupt_async(
                 session_id,
                 "stop",
@@ -1953,9 +1957,10 @@ class ChatWebSocketHandler:
                 # Mark canceled-task wakes suppressed and stop all owned tasks.
                 # A delayed turn-specific Stop that matched no live turn must
                 # not cancel a successor's work.
-                from app.core.query_session_lifecycle import stop_all_background_tasks
-
-                await stop_all_background_tasks(session_id, user_stop=True)
+                await stop_all_background_tasks(
+                    session_id, user_stop=True, scope=scope,
+                    receipt=((flipped or {}).get("payload") or {}).get(turns_db.STOP_RECEIPT_KEY),
+                )
                 # The queue was just emptied durably; re-broadcast so the
                 # pending bubbles the client is showing go with it instead of
                 # sitting there implying work that will never run.

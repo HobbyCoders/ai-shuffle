@@ -10,6 +10,7 @@ from fluid.events.ops import AgentMessage
 from fluid.tools.registry import ToolOutcome
 
 from app.core import swarm
+from app.core.task_registry import user_stop_holds
 
 logger = logging.getLogger(__name__)
 
@@ -325,7 +326,7 @@ def make_message(supplier):
             error = await resume_unavailable(target, row)
             if error:
                 return ToolOutcome(text=f"Could not resume {row['name']}: {error}", is_error=True)
-        if task_registry.is_user_stopped(target):
+        if await user_stop_holds(target):
             return ToolOutcome(
                 text=f"Could not deliver to {row['name']}: receiver was stopped",
                 is_error=True,
@@ -427,11 +428,10 @@ def held_receipt(name: str) -> str:
 
 async def resume_unavailable(target, row):
     """A message is never authority to undo Stop or retry a policy rejection."""
-    from app.core.task_registry import task_registry
     from app.core import provider_agent, turn_scheduler
     from app.db import sessions
 
-    if task_registry.is_user_stopped(target):
+    if await user_stop_holds(target):
         return "receiver was stopped by the user; ask them to continue it in its chat"
     if row["status"] not in {"completed", "error", "failed", "interrupted"}:
         return f"state {row['status']} is not resumable; open the worker chat"
@@ -590,7 +590,7 @@ async def _settle_delivered_continuation(session_id, owner, settled):
     settled_now = False
     async with turn_scheduler.message_resume_lock(session_id):
         record = supervisor.get_worker(owner, session_id)
-        if (record and record.torn_down) or task_registry.is_user_stopped(session_id):
+        if (record and record.torn_down) or await user_stop_holds(session_id):
             return
         parked = await asyncio.to_thread(turn_scheduler._session_has_parked_turn, session_id)
         busy = await asyncio.to_thread(turns_db.session_has_unsettled_turns, session_id)
@@ -637,7 +637,7 @@ async def _finish_displaced_continuations(session_id, settled):
                 if task_registry.is_woken(owner, session_id, completion_id=completion_id):
                     continue
                 record = supervisor.get_worker(owner, session_id)
-                if task_registry.is_user_stopped(session_id) or (record and record.torn_down):
+                if await user_stop_holds(session_id) or (record and record.torn_down):
                     continue  # Stop is never authority to wake a displaced parent either.
                 if record and record.continuation_turn_id:
                     current = await asyncio.to_thread(turns_db.get_turn, record.continuation_turn_id)
@@ -650,7 +650,7 @@ async def _finish_displaced_continuations(session_id, settled):
                 await record_task_settle_frame(owner, session_id, "error", summary, tool_use_id=session_id)
                 if record and record.continuation_turn_id:
                     supervisor.unregister_worker(owner, session_id)
-            if task_registry.is_user_stopped(session_id) or (record and record.torn_down):
+            if await user_stop_holds(session_id) or (record and record.torn_down):
                 continue
             await turn_scheduler.on_task_terminal(owner, {
                 "task_id": session_id, "tool_use_id": session_id,
@@ -726,7 +726,7 @@ async def finish_message_resume(session_id, settled, outcome):
 
     async with turn_scheduler.message_resume_lock(session_id):
         record = supervisor.get_worker(owner, session_id)
-        if (not ((record and record.torn_down) or task_registry.is_user_stopped(session_id))
+        if (not ((record and record.torn_down) or await user_stop_holds(session_id))
                 and await asyncio.to_thread(_continuation_has_followup, session_id, settled)):
             return  # The result wake, not this interim note, owes the report.
         # Read only this turn's report: an interrupted continuation must never
@@ -735,7 +735,7 @@ async def finish_message_resume(session_id, settled, outcome):
         status, report, summary = _turn_report(session_id, settled, outcome, events)
         from app.core.provider_agent_feed import record_continuation_report
 
-        stopped = (record and record.torn_down) or task_registry.is_user_stopped(session_id)
+        stopped = (record and record.torn_down) or await user_stop_holds(session_id)
         await record_continuation_report(
             owner, session_id, completion_id, "killed" if stopped else status, report,
         )
@@ -756,7 +756,7 @@ async def finish_message_resume(session_id, settled, outcome):
             # task marked running forever. Never ignore a genuinely live turn.
             busy = bool(await asyncio.to_thread(turns_db.get_live_turn, session_id))
         latest = await asyncio.to_thread(turn_scheduler._latest_context_turn, session_id)
-        if (record and record.torn_down) or task_registry.is_user_stopped(session_id):
+        if (record and record.torn_down) or await user_stop_holds(session_id):
             return
         settled_now = False
         if (not busy and not parked and (not latest or latest["id"] == settled["id"])

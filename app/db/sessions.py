@@ -1768,6 +1768,7 @@ _SESSION_RUNTIME_TABLES = (
     "pending_interactions",
     "background_tasks",
     "session_task_chips",
+    "session_stops",
 )
 
 
@@ -2574,20 +2575,12 @@ def clear_session_conversation(session_id: str) -> Optional[str]:
         # log's cursor, so without this it skips the restarted seq 1, 2, 3 …
         # as already sent and a tab that reattaches to it never sees the next
         # reply. The recheck makes the reader compare log epochs and close;
-        # its clients reset or move to a fresh reader. Sent on commit; guarded
-        # because pg_notify is absent on the SQLite shim.
-        try:
-            from app.db.session_events import NOTIFY_CHANNEL
+        # its clients reset or move to a fresh reader. Sent after the commit:
+        # see send_wake for why a transaction that writes must not notify.
+        from app.db.base import after_commit
+        from app.db.session_events import send_wake
 
-            cursor.execute(
-                "SELECT pg_notify(%s, %s)",
-                (
-                    NOTIFY_CHANNEL,
-                    json.dumps({"session_id": session_id, "max_seq": 0, "recheck_log": True}),
-                ),
-            )
-        except Exception:  # noqa: BLE001 — the reader's resync is the backstop
-            logger.debug("clear recheck notify failed for %s", session_id, exc_info=True)
+        after_commit(conn, lambda: send_wake(session_id, 0, recheck_log=True))
         return prev_sdk_sid
 
 

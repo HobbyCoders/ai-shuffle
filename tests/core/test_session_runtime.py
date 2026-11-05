@@ -13,7 +13,7 @@ import threading
 from collections.abc import AsyncIterator, Callable
 from contextlib import ExitStack, contextmanager
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -65,6 +65,7 @@ def _recorder_mock():
     rec.start = AsyncMock()
     rec.on_event = AsyncMock()
     rec.close = AsyncMock()
+    rec.writes_settled = AsyncMock()
     rec.settle = AsyncMock()
     rec.record_task_terminal = AsyncMock(return_value=0)
     return rec
@@ -1828,7 +1829,8 @@ async def test_interrupt_honors_durable_stop_background_on_owning_runner(mock_db
     # Same semantics as the WebSocket Stop that set the bit (round 7): kill ALL
     # of the session's work and latch the session stopped, HERE — this is the
     # runner that owns the tasks the foreign WebSocket cannot see.
-    stop_all.assert_awaited_once_with("s9-bg", user_stop=True)
+    stop_all.assert_awaited_once_with("s9-bg", user_stop=True, scope=ANY,
+                                      receipt=turns_db.get_turn(turn["id"])["payload"]["stop_receipt"])
 
 
 @pytest.mark.parametrize("source,user_stop", [("session_closed", False), ("user_stopped", True), ("user_stop", True)])
@@ -1842,8 +1844,8 @@ async def test_internal_interrupt_preserves_source_on_owning_runner(mock_db, sou
         "app.core.query_session_lifecycle.stop_all_background_tasks", new=stop_all,
     ):
         await session_runtime.SessionRuntime(turn).interrupt(escalation_timeout=0.02)
-    stop_all.assert_awaited_once_with("s9-internal", user_stop=user_stop,
-                                      **({"source": source} if not user_stop else {}))
+    stop_all.assert_awaited_once_with("s9-internal", user_stop=user_stop, scope=ANY,
+                                      **({"source": source} if not user_stop else {"receipt": ANY}))
 
 
 async def test_interrupt_cancels_pending_prompts_before_signalling_the_sdk(mock_db):

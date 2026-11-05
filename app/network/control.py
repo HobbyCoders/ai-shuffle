@@ -909,6 +909,11 @@ async def _interrupt(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
     _require_owned(session_id)
     source = body.get("source")
     source = source[:64] if isinstance(source, str) and source else None
+    from app.core.query_session_lifecycle import capture_stop_scope, stop_all_background_tasks
+    from app.db import turns
+
+    # Before the flip's wait: once it commits, the next turn can start.
+    scope = capture_stop_scope(session_id)
     row = await turn_manager.interrupt_async(session_id, str(body.get("mode") or "stop"),
                                              stop_background=bool(body.get("stop_background")),
                                              turn_id=body.get("turn_id") or None,
@@ -918,8 +923,10 @@ async def _interrupt(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
         turn_manager.stop_reaches_background_work, session_id, body.get("turn_id") or None, row,
     )
     if body.get("stop_background") and (row is not None or reaches_work):
-        from app.core.query_session_lifecycle import stop_all_background_tasks
-        await stop_all_background_tasks(session_id, user_stop=True)
+        await stop_all_background_tasks(
+            session_id, user_stop=True, scope=scope,
+            receipt=((row or {}).get("payload") or {}).get(turns.STOP_RECEIPT_KEY),
+        )
     return {"interrupted": row is not None or reaches_work,
             "turn_id": (row or {}).get("id")}
 

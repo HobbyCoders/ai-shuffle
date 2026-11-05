@@ -275,6 +275,10 @@ async def _rearm_after_failed_submit(row: Dict[str, Any], reason: str) -> None:
             model=row.get("model"),
             source=row.get("source") or "schedule_wakeup",
             instance_id=row.get("instance_id") or settings.effective_instance_id,
+            # The same wake, so it stays older than what a person or a Stop did
+            # after it was armed, including while this submit was in flight.
+            created_at=row.get("created_at"),
+            stop_seq=row.get("stop_seq"),
         )
     except Exception:  # noqa: BLE001 — a re-arm failure is a real drop.
         logger.exception(
@@ -314,6 +318,26 @@ def _session_user_stopped(session_id: Optional[str]) -> bool:
         return False
 
 
+async def _stays_stopped(session_id: Optional[str]) -> bool:
+    """The latch above, once it has asked whether a person spoke on another install."""
+    if not _session_user_stopped(session_id):
+        return False
+    from app.core.query_session_lifecycle import reconcile_user_stop
+
+    return not await reconcile_user_stop(session_id)
+
+
+async def _superseded_by_person(wakeup_id: Optional[str]) -> bool:
+    """Same fail-open reading as the latch above: no answer leaves the wake to fire."""
+    if not wakeup_id:
+        return False
+    try:
+        return await asyncio.to_thread(wakeups_db.superseded_by_person, wakeup_id)
+    except Exception:  # noqa: BLE001 — never let the check break a wake.
+        logger.warning("wakeup %s: supersession check failed", wakeup_id, exc_info=True)
+        return False
+
+
 async def _fire(row: Dict[str, Any]) -> None:
     """Claim one wakeup (delete its row) and enrol its prompt in the turn queue.
 
@@ -349,7 +373,7 @@ async def _fire(row: Dict[str, Any]) -> None:
     # for a timer that had already fired (or was mid-flight) when Stop landed.
     # Dropped rather than re-armed: the wake's premise — that the session should
     # pick work back up on its own — is exactly what the user just refused.
-    if _session_user_stopped(session_id):
+    if await _stays_stopped(session_id):
         logger.info(
             "wakeup %s (session %s, source %s) dropped — the user stopped this "
             "session and has not messaged it since",
@@ -358,6 +382,15 @@ async def _fire(row: Dict[str, Any]) -> None:
         if wakeup_id:
             await asyncio.to_thread(wakeups_db.claim_wakeup, wakeup_id)
             _retry_attempts.pop(str(wakeup_id), None)
+        return
+
+    # A person's newer message outranks this wake even when its cancel failed
+    # (a held row, a lock timeout). Dropped for the same reason as above.
+    if await _superseded_by_person(wakeup_id):
+        logger.info("wakeup %s (session %s, source %s) dropped: a person's newer message "
+                    "superseded it", wakeup_id, session_id, row.get("source"))
+        await asyncio.to_thread(wakeups_db.claim_wakeup, wakeup_id)
+        _retry_attempts.pop(str(wakeup_id), None)
         return
 
     # An archived chat is read-only until the owner restores it (#1822).
@@ -543,14 +576,30 @@ def cancel_session_wakeups(
     return len(ids)
 
 
+async def cancel_named_wakeups_async(
+    session_id: str, wake_ids: "list[str]", handoff_tokens: "list[str]",
+) -> int:
+    """A Stop's cancel: only what its receipt named (never raises)."""
+    try:
+        ids = await asyncio.to_thread(
+            wakeups_db.pop_named_wakeups, session_id, wake_ids, handoff_tokens,
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("wakeup cancel failed for session %s (Stop)", session_id)
+        return 0
+    _disarm(ids)
+    if ids:
+        logger.info("wakeup cancel: Stop dropped %d pending wake(s) for session %s",
+                    len(ids), session_id)
+    return len(ids)
+
+
 async def cancel_session_wakeups_async(
-    session_id: str, source: Optional[str] = None
+    session_id: str, source: Optional[str] = None,
 ) -> int:
     """Async form of :func:`cancel_session_wakeups` (DB hit off the loop)."""
     try:
-        ids = await asyncio.to_thread(
-            wakeups_db.pop_session_wakeups, session_id, source
-        )
+        ids = await asyncio.to_thread(wakeups_db.pop_session_wakeups, session_id, source)
     except Exception:  # noqa: BLE001
         logger.exception(
             "wakeup cancel failed for session %s (source=%s)", session_id, source

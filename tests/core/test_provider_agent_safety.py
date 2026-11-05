@@ -88,6 +88,7 @@ def _recorder_mock():
     rec.start = AsyncMock()
     rec.on_event = AsyncMock()
     rec.close = AsyncMock()
+    rec.writes_settled = AsyncMock()
     rec.settle = AsyncMock()
     return rec
 
