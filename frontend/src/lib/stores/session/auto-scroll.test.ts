@@ -408,15 +408,22 @@ describe('queued prompt tracker', () => {
 		expect(tracker.classify({ content: 'Continue', turnId: 'row-1' }).fromQueue).toBe(true);
 	});
 
-	it('bounds its history but keeps every prompt still in the queue', () => {
-		const tracker = createQueuedPromptTracker();
+	it('bounds its history but keeps queued prompts and ones that just left the queue', () => {
 		const rows = (from: number, count: number) => Array.from({ length: count }, (_, i) => ({ id: `row-${from + i}`, content: `prompt ${from + i}` }));
-		tracker.observe(rows(0, 201), false);
-		expect(tracker.classify({ content: 'prompt 0', turnId: 'row-0' }).fromQueue).toBe(true);
+
+		const longQueue = createQueuedPromptTracker();
+		longQueue.observe(rows(0, 201), false);
+		expect(longQueue.classify({ content: 'prompt 0', turnId: 'row-0' }).fromQueue).toBe(true);
+
+		// The oldest prompt starts: the queue drops it before its row lands.
+		const draining = createQueuedPromptTracker();
+		draining.observe(rows(0, 201), false);
+		draining.observe(rows(1, 200), false);
+		expect(draining.classify({ content: 'prompt 0', turnId: 'row-0' }).fromQueue).toBe(true);
 
 		const bounded = createQueuedPromptTracker();
-		bounded.observe(rows(0, 1), false);
-		bounded.observe(rows(1, 200), false);
+		bounded.observe(rows(0, 201), false);
+		bounded.observe([], false);
 		expect(bounded.classify({ content: 'prompt 0', turnId: 'row-0' }).fromQueue).toBe(false);
 		expect(bounded.classify({ content: 'prompt 1', turnId: 'row-1' }).fromQueue).toBe(true);
 	});

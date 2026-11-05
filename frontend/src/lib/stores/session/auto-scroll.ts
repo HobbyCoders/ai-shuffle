@@ -348,8 +348,9 @@ export function createQueuedPromptTracker() {
 				}
 				listed.add(entry);
 			}
-			// History is bounded; a prompt still waiting in the queue is never dropped.
-			let excess = entries.length - MAX_TRACKED_QUEUE_ENTRIES;
+			// Only entries off the queue count toward the bound, so a prompt stays known
+			// while it waits and through the gap before its row lands.
+			let excess = entries.length - listed.size - MAX_TRACKED_QUEUE_ENTRIES;
 			if (excess > 0) entries = entries.filter((e) => listed.has(e) || excess-- <= 0);
 		},
 		/** The reader scrolled away: a pending send no longer overrides that. */
