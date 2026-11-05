@@ -240,6 +240,12 @@ def question_carry(target):
     return int(capabilities.get("move_questions") or 0) >= 1
 
 
+def plan_carry(target: str) -> bool:
+    from app.network import runners
+    caps = (runners.find(target) or {}).get("capabilities") or {}
+    return caps.get("session_plan") == 1
+
+
 def plain_folder_carry(target: str) -> bool | None:
     """Whether ``target`` moves a project folder without Git (#639); None until known."""
     from app.network import runners
@@ -847,6 +853,11 @@ def _begin(sid, target, remote, note, wake_barrier, timing, plain: bool = False)
         raise ValueError("The owning worker is busy. Wait for its turn to finish before resuming here.")
     held = {}
     try:
+        # The handoff lease now excludes plan writers. Check here, not before
+        # claiming it, so a last-moment plan cannot travel to an older receiver.
+        from app.db.session_plans import read as read_plan
+        if read_plan(sid)["plan"]["revision"] and not plan_carry(target):
+            raise ValueError("Update the target worker before moving a session with a Plan; ownership has not moved.")
         if project and not plain:
             timing.waiting("checkout_guard")
             # Publication commits and pushes the shared checkout. Exclude other

@@ -23,6 +23,20 @@ def read(session_id: str) -> dict:
         return {"plan": parse_jsonb(row["document"]) if row else empty_plan(), "status_source": "model_reported"}
 
 
+def projection(session_id: str) -> dict:
+    """Read-only UI projection; mirrored transcript events never authorize writes."""
+    current = read(session_id)
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT payload FROM session_events WHERE session_id=%s AND event_type=%s ORDER BY seq DESC LIMIT 1",
+                    (session_id, "plan.updated"))
+        row = cur.fetchone()
+    latest = (parse_jsonb(row["payload"]) or {}).get("plan") if row else None
+    if isinstance(latest, dict) and type(latest.get("revision")) is int and latest["revision"] > current["plan"]["revision"]:
+        current["plan"] = latest
+    return current
+
+
 def execute(session_id: str, args: dict, *, device_id: str, runner_id: str, proof: tuple | None) -> dict:
     validate_input(args)
     if not session_id:

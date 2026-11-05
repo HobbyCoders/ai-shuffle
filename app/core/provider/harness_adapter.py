@@ -840,7 +840,7 @@ class HarnessAdapter(ProviderAdapter):
                 # rates safe (WebSearch; WebFetch keeps prompting, see
                 # _web_grants). Never Bash, Read or a file-writing
                 # tool; nothing in plan mode.
-                permission_grants=_delegated_permission_grants(options),
+                permission_grants=_delegated_permission_grants(options, self._registry),
                 claude_cmd=claude_cmd,
                 # The CLI's hooks, forwarded into the same bus the native leg
                 # emits into; PreToolUse also enforces the deny policy, so a
@@ -6784,7 +6784,7 @@ def _web_grants() -> tuple:
     return tuple(spec.name for spec in (SEARCH_SPEC, FETCH_SPEC) if spec.risk == "safe")
 
 
-def _delegated_permission_grants(options: SessionOptions) -> Optional[list]:
+def _delegated_permission_grants(options: SessionOptions, registry: Any = None) -> Optional[list]:
     """``--allowed-tools`` for the delegated leg: tools that run unprompted.
 
     The CLI reads a bare name on ``--allowed-tools`` as a blanket
@@ -6842,6 +6842,10 @@ def _delegated_permission_grants(options: SessionOptions) -> Optional[list]:
         return permit is None or permit(name)
 
     cli_grants: list = []
+    if _delegated_offered(options, registry)("Plan"):
+        # Safe session intent only, matching the native permission engine;
+        # this cannot dispatch work or mutate a file chosen by the model.
+        cli_grants.append(_BUNDLED_CLI_PREFIX + "Plan")
     if _session_mode(options) == "chat":
         from app.core.attachment_read import DELEGATED_READ
 

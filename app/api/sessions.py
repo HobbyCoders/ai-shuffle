@@ -858,8 +858,8 @@ async def get_session_plan(
 ):
     """Current model-reported session intent, guarded like transcript content."""
     await require_transcript_session(request, session_id)
-    from app.db.session_plans import read
-    return await run_sync(read, session_id)
+    from app.db.session_plans import projection
+    return await run_sync(projection, session_id)
 
 
 @router.get("/{session_id}/composer-suggestion")
