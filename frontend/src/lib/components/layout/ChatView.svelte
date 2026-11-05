@@ -821,16 +821,15 @@
 		animation: messageAreaReveal 350ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
 	}
 
-	/* Only desktop actually moves its empty composer from centre to dock.
-	   The mobile shell is already docked under its hero; retain the message
-	   reveal without inventing a -30vh trip for the input (#1073). */
-	:global(html[data-platform='desktop']) .transitioning-from-empty .input-wrapper {
+	/* The shared layout moves its empty composer from centre to dock.
+	   Shells that already dock the composer override this input animation. */
+	.transitioning-from-empty .input-wrapper {
 		animation: inputSlideDown 400ms cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
 	}
 
 	@media (prefers-reduced-motion: reduce) {
 		.transitioning-from-empty .message-area-wrapper,
-		:global(html[data-platform='desktop']) .transitioning-from-empty .input-wrapper {
+		.transitioning-from-empty .input-wrapper {
 			animation: none;
 		}
 	}
