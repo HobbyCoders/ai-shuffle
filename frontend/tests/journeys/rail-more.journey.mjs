@@ -27,7 +27,7 @@ async function expectClosedPhoneSheets(page) {
 }
 async function openMore(page, native) {
 	if (native) {
-		await page.getByRole('button', { name: 'Open menu', exact: true }).click();
+		await page.getByRole('button', { name: /^Open menu(?: \(\d+ unread notifications\))?$/ }).click();
 		await workspace(page).waitFor();
 	}
 	await workspace(page).getByRole('button', { name: 'More', exact: true }).click();
@@ -79,7 +79,7 @@ await runJourney({
 			await page.keyboard.press('Escape');
 			await menu(page).waitFor({ state: 'hidden' });
 			// The native shell owns Escape for the entire drawer; desktop closes just More.
-			const launcher = native ? page.getByRole('button', { name: 'Open menu', exact: true }) : workspace(page).getByRole('button', { name: 'More', exact: true });
+			const launcher = native ? page.getByRole('button', { name: /^Open menu(?: \(\d+ unread notifications\))?$/ }) : workspace(page).getByRole('button', { name: 'More', exact: true });
 			expect(await launcher.evaluate(el => el === document.activeElement), 'focus returns to the navigation launcher');
 		}
 	})), ...['dark', 'light'].map(theme => ({
@@ -90,7 +90,7 @@ await runJourney({
 			await page.goto(new URL('/mobile/', status.urls.preview_listener).href);
 			await openMore(page, true);
 			await menu(page).getByRole('menuitem', { name: 'Pull requests', exact: true }).click();
-			await page.getByRole('button', { name: 'Open menu', exact: true }).click();
+			await page.getByRole('button', { name: /^Open menu(?: \(\d+ unread notifications\))?$/ }).click();
 			await workspace(page).waitFor();
 		},
 		async act({ page, mark }) {
@@ -105,7 +105,7 @@ await runJourney({
 			await mark('More still opens from a panel-owning destination');
 			await openMore(page, false);
 			await menu(page).getByRole('menuitem', { name: 'Docs', exact: true }).click();
-			await page.getByRole('button', { name: 'Open menu', exact: true }).click();
+			await page.getByRole('button', { name: /^Open menu(?: \(\d+ unread notifications\))?$/ }).click();
 			await workspace(page).waitFor();
 			await expectClosedPhoneSheets(page);
 			await openMore(page, false);

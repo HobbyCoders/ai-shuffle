@@ -42,7 +42,7 @@ await runJourney({
 		viewports: ['phone'],
 		async setup({ page, status }) {
 			await page.goto(new URL('/mobile/', status.urls.preview_listener).href);
-			await page.getByRole('button', { name: 'Open menu', exact: true }).click();
+			await page.getByRole('button', { name: /^Open menu(?: \(\d+ unread notifications\))?$/ }).click();
 			await page.getByRole('navigation', { name: 'Workspace', exact: true }).getByRole('button', { name: 'Agents', exact: true }).click();
 			await page.getByPlaceholder('Search agents').waitFor();
 		},

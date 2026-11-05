@@ -532,7 +532,7 @@ if (mobileShell) for (const { sheet, opening = false } of [
 			: sheet === 'actions' ? page.getByRole('button', { name: 'Chat actions', exact: true })
 			: sheet === 'attach' ? page.getByRole('button', { name: /^No project\. Attach a project/ })
 			: sheet === 'git' ? page.getByRole('button', { name: /^Git actions:/ })
-			: page.getByRole('button', { name: 'Open menu', exact: true });
+			: page.getByRole('button', { name: /^Open menu(?: \(\d+ unread notifications\))?$/ });
 		if (opening) await page.evaluate(() => {
 			// Hold the REAL CSS opening animation at origin through the initial
 			// ResizeObserver delivery, then advance it without a resize/end event.
