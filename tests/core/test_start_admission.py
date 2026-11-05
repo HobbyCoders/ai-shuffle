@@ -67,6 +67,55 @@ async def test_producing_turn_waits_before_lease_and_recovers(
                 await asyncio.gather(task, return_exceptions=True)
 
 
+@pytest.mark.asyncio
+async def test_producing_turn_runs_beside_a_checkout_that_never_returns(
+    mock_db: object, retaining_pool: tuple, monkeypatch: pytest.MonkeyPatch,  # noqa: F811
+) -> None:
+    """#1020: one retained connection held every new turn in Queued for good."""
+    pool, _ = retaining_pool
+    pool._reserved = 2
+    monkeypatch.setattr(base, "_close_connection", lambda conn: None)
+    retained = pool.getconn()
+    pool._held_since[id(retained)] -= base._HOLD_CHECK_SECONDS
+    # What PostgreSQL's answer records; tests/db/test_retained_checkout_postgres.py
+    # drives the same state from a real backend.
+    pool._holds[id(retained)].exited = True
+    gate = start_admission.StartAdmission()
+    monkeypatch.setattr(start_admission, "admission", gate)
+    with patch.multiple(
+        start_admission.settings, db_start_sustain_seconds=0.0,
+        db_start_recovery_seconds=0.0, db_start_interval_seconds=0.02,
+        db_start_poll_seconds=0.01, db_start_wait_seconds=2.0,
+    ), _runtime_env(pump=make_pump([{"type": "done"}])):
+        turn = turns_db.enqueue_turn("retained-worker", "worker", prompt="hello")
+        try:
+            result = await asyncio.wait_for(session_runtime.SessionRuntime(turn).execute(), 3)
+            assert result == "completed"
+            assert turns_db.get_turn(turn["id"])["state"] == "completed"
+            stats = start_admission.snapshot()
+            assert stats["oldest"] == 0 and stats["utilization"] > 0
+        finally:
+            pool.putconn(retained)
+
+
+def test_a_write_on_an_abandoned_connection_stops_counting_as_event_pressure(
+    retaining_pool: tuple, monkeypatch: pytest.MonkeyPatch,  # noqa: F811
+) -> None:
+    """Age alone is not enough: only PostgreSQL's answer about its connection."""
+    pool, _ = retaining_pool
+    now = time.monotonic()
+    active = {"stuck": now - base._HOLD_CHECK_SECONDS - 1}
+    monkeypatch.setattr(base, "_event_active", active)
+    monkeypatch.setattr(base, "_event_connections", {"stuck": 42})
+    assert start_admission.snapshot()["oldest"] >= base._HOLD_CHECK_SECONDS
+    pool._held_since[42] = now
+    pool._holds[42] = base._Hold((0, "stuck"), None, exited=True)
+    assert start_admission.snapshot()["oldest"] == 0
+    assert base.event_pressure_stats()["oldest_write_seconds"] >= base._HOLD_CHECK_SECONDS
+    active["young"] = now - 5
+    assert 5 <= start_admission.snapshot()["oldest"] < 6
+
+
 @pytest.fixture
 def quick_gate(monkeypatch: pytest.MonkeyPatch) -> tuple:
     stats = {"utilization": 1.0, "waiting": 1, "oldest": 10.0, "latency": 0.0}

@@ -15,7 +15,7 @@ from typing import Any, Callable, Iterator
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
-from app.db.base import get_db
+from app.db.base import exempt_from_start_pressure, get_db
 
 logger = logging.getLogger(__name__)
 COLUMN = "history_index_state"
@@ -101,6 +101,7 @@ def _online_cursor() -> Iterator[Any]:
         raw = getattr(db, "_conn", None)
         if not isinstance(raw, psycopg2.extensions.connection):
             raise RuntimeError("online history indexing requires PostgreSQL")
+        exempt_from_start_pressure(raw)
         raw.commit()
         raw.autocommit = True
         try:
