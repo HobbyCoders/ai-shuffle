@@ -153,6 +153,7 @@ Panel contexts and tokens travel automatically. Off-screen feature pages never c
 		</div>
 	{/if}
 	<section class="view-main-slot st-scroll" class:settings-viewport={nestedPanes} class:st-dpane={!nestedPanes} aria-label="Details" hidden={stacked && !contentFirst && !detailOpen} inert={stacked && !contentFirst && !detailOpen}>
+		<div class="view-titlebar" aria-hidden="true"></div>
 		{@render main(back)}
 	</section>
 </div>
@@ -161,7 +162,11 @@ Panel contexts and tokens travel automatically. Off-screen feature pages never c
 	.view-shell { display: grid; grid-template-columns: var(--view-panel-width, 264px) minmax(0, 1fr); height: 100%; min-height: 0; min-width: 0; }
 	.view-shell[data-docked], .view-shell[data-stacked] { grid-template-columns: minmax(0, 1fr); }
 	.inline-panel { min-height: 0; min-width: 0; border-right: 1px solid var(--sidebar-border); }
-	.view-main-slot { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: auto; scrollbar-gutter: stable; container: st-detail / inline-size; }
+	.view-main-slot { position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: auto; scrollbar-gutter: stable; container: st-detail / inline-size; }
+	/* One stable band, including when no object is selected. It precedes the
+	   controls in document order so their Electron no-drag regions win. */
+	.view-titlebar { position: absolute; top: 0; inset-inline: 0; height: var(--titlebar-height, 52px); border-bottom: 1px solid var(--st-border); pointer-events: none; }
+	.view-shell[data-stacked] .view-titlebar { display: none; }
 	.inline-panel[hidden], .view-main-slot[hidden] { display: none; }
 	.view-shell[data-stacked] .inline-panel { border-right: 0; }
 	.view-shell[data-stacked] .view-main-slot { scrollbar-gutter: auto; }

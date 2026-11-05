@@ -717,8 +717,8 @@
      onDelete={handleDelete} onToggleEnabled={handleToggleEnabled} onToggleRunExpanded={toggleRunExpanded}
      {formatTime} {formatCost} {formatDuration} {getStatusColor} {getRunStatusBadgeClass} {triggerTypeLabel} />
    {:else}
-    <ViewMain width="reading"><EmptyDetail title={loading ? 'Loading automations…' : 'Choose an automation'}
-     message="Run AI tasks on a schedule or in response to events.">
+    <ViewMain width="reading"><EmptyDetail title={loading ? 'Loading automations…' : automations.length ? 'Choose an automation' : 'No automations yet'}
+     message={automations.length ? 'Run AI tasks on a schedule or in response to events.' : 'Create a scheduled or event-driven task.'}>
      <button type="button" class="st-btn primary" onclick={openCreate}><Plus size={14} />New automation</button>
     </EmptyDetail></ViewMain>
    {/if}

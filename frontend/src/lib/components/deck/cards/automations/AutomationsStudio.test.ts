@@ -58,6 +58,12 @@ describe('automation list state marks', () => {
 });
 
 describe('disabled automation explanation', () => {
+    it('keeps the empty list quiet, with creation only in its header', () => {
+        const { container } = render(AutomationsStudio, { automations: [], pendingApprovals: [], profiles: [],
+            onApprove: vi.fn(), onDeny: vi.fn(), onClearError: vi.fn(), ...handlers });
+        expect(screen.getAllByRole('button', { name: 'New automation' })).toHaveLength(1);
+        expect(container.querySelector('.panel-body .st-empty-detail')?.textContent?.trim()).toBe('No automations yet');
+    });
     it('shows the stored error beside the disabled Studio row', () => {
         render(AutomationsStudio, { automations: [automation], pendingApprovals: [], profiles: [],
             onApprove: vi.fn(), onDeny: vi.fn(), onClearError: vi.fn(), ...handlers });

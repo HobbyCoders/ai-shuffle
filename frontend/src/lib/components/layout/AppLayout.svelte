@@ -226,7 +226,10 @@
 		box-shadow: 8px 0 32px color-mix(in oklch, black 45%, transparent);
 	}
 
-	.sidebar-slot.rail-only :global(.panel-plane) { display: none; }
+	/* The rail owns More even while the list is collapsed. Hide only columns,
+	   not the plane containing its overlays. */
+	.sidebar-slot.rail-only :global(.panel-plane) { position: absolute; left: 56px; top: 0; width: var(--panel-width); height: 100%; pointer-events: none; }
+	.sidebar-slot.rail-only :global(.panel-plane > .col) { display: none; }
 	.sidebar-slot.panel-overlay { z-index: 42; }
 	.sidebar-slot.panel-overlay:not(.rail-only) :global(.panel-plane) { position: absolute; left: 56px; top: 0; width: var(--panel-width); height: 100%; background: var(--sidebar); border-right: 1px solid var(--sidebar-border); }
 	.with-rail .sidebar-scrim { left: 56px; }

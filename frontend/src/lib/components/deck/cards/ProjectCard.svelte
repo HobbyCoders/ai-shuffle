@@ -278,11 +278,9 @@
 							ariaLabel={`Open ${row.name}${row.onHere ? '' : ` (not on ${selfName})`}`} onselect={() => handleRowClick(row)} />
 					</div>
 				{:else}
-					<EmptyDetail title={searchQuery ? `No projects match "${searchQuery}"` : workerFilter === 'here' && allRows.length ? `No projects on ${selfName} yet` : 'No projects configured yet'} message="Projects keep your work and settings together.">
-						{#if searchQuery}<button class="st-btn" onclick={() => (searchQuery = '')}>Clear search</button>
-						{:else if workerFilter === 'here' && allRows.length}<button class="st-btn" onclick={() => (workerFilter = 'all')}>Show all workers</button>
-						{:else}<button class="st-btn primary" onclick={() => (showAddModal = true)}>New project</button>{/if}
-					</EmptyDetail>
+					<EmptyDetail title={searchQuery ? `No projects match "${searchQuery}"` : workerFilter === 'here' && allRows.length ? `No projects on ${selfName} yet` : 'No projects configured yet'} message="Projects keep your work and settings together."
+						actionLabel={searchQuery ? 'Clear search' : workerFilter === 'here' && allRows.length ? 'Show all workers' : undefined}
+						onAction={() => { searchQuery = ''; workerFilter = 'all'; }} />
 				{/each}
 			</div>
 		</ViewPanel>
@@ -327,7 +325,7 @@
 				{/key}
 			</DetailPane>
 		{:else}
-			<ViewMain width="reading"><EmptyDetail title="Choose a project" message="Select a project to manage its settings and workers.">
+			<ViewMain width="reading"><EmptyDetail title={allRows.length ? 'Choose a project' : 'No projects configured yet'} message={allRows.length ? 'Select a project to manage its settings and workers.' : 'Projects keep your work and settings together.'}>
 				<button class="st-btn primary" onclick={() => (showAddModal = true)}><Plus />New project</button>
 			</EmptyDetail></ViewMain>
 		{/if}

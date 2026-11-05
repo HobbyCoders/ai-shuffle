@@ -115,16 +115,7 @@
 			{#each sections.yours as p (p.id)}{@render row(p)}{/each}
 		{:else if noneOfYours && !narrowed}
 			<ListGroupLabel compact label="Yours"><span class="c">0</span></ListGroupLabel>
-			<div class="l-empty">
-				<span class="avs" aria-hidden="true">
-					<AgentAvatar avatar="fox" size={30} color="warning" />
-					<AgentAvatar avatar="bolt" size={30} color="blue" />
-					<AgentAvatar avatar="sprout" size={30} color="emerald" />
-				</span>
-				<b>No agents of your own yet</b>
-				<span>{hasBuiltins ? 'Start blank, from a built-in, or describe one.' : 'Start blank or describe one.'}</span>
-				<button type="button" class="st-btn primary sm" onclick={onNew}><Plus />New agent</button>
-			</div>
+			<EmptyDetail message="No agents of your own yet" />
 		{/if}
 	{/if}
 
@@ -157,32 +148,6 @@
 	.chip.warn {
 		background: var(--st-warning-soft);
 		color: var(--st-warning);
-	}
-	.l-empty {
-		margin: 4px 2px;
-		padding: 18px 16px;
-		border: 1px dashed var(--st-border-strong);
-		border-radius: var(--st-radius);
-		display: grid;
-		gap: 4px;
-		justify-items: start;
-		color: var(--st-mfg);
-		font-size: 13px;
-	}
-	.l-empty b {
-		color: var(--st-fg);
-		font-weight: 600;
-		font-size: 13.5px;
-	}
-	.avs {
-		display: flex;
-		margin-bottom: 8px;
-	}
-	.avs > :global(* + *) {
-		margin-left: -8px;
-	}
-	.l-empty .st-btn {
-		margin-top: 8px;
 	}
 
 	/* Skeleton rows */

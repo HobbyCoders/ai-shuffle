@@ -6,10 +6,16 @@ import { layout, viewOwnsPanel } from '$lib/stores/layout.svelte';
 import { platform } from '$lib/stores/platform.svelte';
 import { viewPanel } from '$lib/stores/view-panel.svelte';
 import ViewHarness from './test-fixtures/ViewHarness.svelte';
+import { readFileSync } from 'node:fs';
+const desktopStyles = readFileSync('src/app.css', 'utf8');
 
 const mocks = vi.hoisted(() => ({ push: vi.fn() }));
 vi.mock('$app/navigation', () => ({ pushState: mocks.push, goto: vi.fn() }));
-beforeEach(() => { layout.setSidebarOverlay(false); platform.set('desktop'); page.state = {}; mocks.push.mockReset(); });
+beforeEach(() => {
+	vi.stubGlobal('matchMedia', () => ({ matches: false, addEventListener() {}, removeEventListener() {} }));
+	vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
+	layout.setSidebarOverlay(false); platform.set('desktop'); page.state = {}; mocks.push.mockReset();
+});
 afterEach(() => { cleanup(); platform.set('desktop'); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 async function resize(width: number) {
@@ -20,6 +26,15 @@ async function resize(width: number) {
 }
 
 describe('ViewShell', () => {
+	it('keeps an empty detail title band and covers shared desktop drag/no-drag regions', () => {
+		const { container } = render(ViewHarness);
+		expect(container.querySelector('.view-main-slot > .view-titlebar[aria-hidden="true"]')).toBeTruthy();
+		const dragRule = desktopStyles.match(/html\.desktop :is\(\.sb-head[^}]+}/)?.[0] ?? '';
+		for (const selector of ['.rail-titlebar', '.panel-header', '.p-head', '.view-titlebar', '.st-dtop', '.page-terminal > .bar']) expect(dragRule).toContain(selector);
+		expect(dragRule).toContain('-webkit-app-region: drag');
+		expect(desktopStyles).toMatch(/html\.desktop :is\(\.sidebar, \.view-shell, \.reopen-panel\) :is\(button, a, input, textarea, select, summary[^}]+-webkit-app-region: no-drag/s);
+		expect(desktopStyles).toMatch(/:has\(> \.sidebar-slot:is\(\.floating, \.panel-overlay:not\(\.rail-only\)\)\)[^}]+-webkit-app-region: no-drag/s);
+	});
 	it('bridges feature, row and live Settings access contexts into the docked snippet', async () => {
 		const view = render(ViewHarness);
 		await tick();
@@ -71,7 +86,7 @@ describe('ViewShell', () => {
 		expect(viewPanel.hostMounted).toBe(false);
 	});
 	it.each(['no-host', 'overlay', 'mobile'])('renders inline without a claim: %s', async mode => {
-		if (mode === 'overlay') layout.setSidebarOverlay(true);
+		if (mode === 'overlay') { vi.stubGlobal('innerWidth', 767); layout.setSidebarOverlay(true); }
 		if (mode === 'mobile') platform.set('mobile');
 		const view = render(ViewHarness, { host: mode !== 'no-host' });
 		await tick();

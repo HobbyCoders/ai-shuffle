@@ -47,7 +47,26 @@ await runJourney({
 			reason: 'the dev instance has no GitHub sign-in, so the Pull requests inbox cannot load'
 		}
 	],
-	cases: [...[false, true].map(phone => {
+	cases: [{
+		name: 'medium-768-collapsed-rail',
+		viewports: ['desktop'],
+		async setup({ page, status }) {
+			await gotoApp(page, status);
+			await page.setViewportSize({ width: 768, height: 900 });
+			await workspace(page).waitFor();
+		},
+		async act({ page, mark }) {
+			await mark('More stays reachable beside the collapsed medium-width panel');
+			await openMore(page, false);
+			await menu(page).getByRole('menuitem', { name: 'Automations', exact: true }).click();
+			await page.getByRole('heading', { name: 'Automations', exact: true }).waitFor();
+			await page.getByRole('button', { name: 'Hide sidebar', exact: true }).click();
+			await openMore(page, false);
+			await menu(page).getByRole('menuitem', { name: 'Docs', exact: true }).click();
+			await page.getByRole('heading', { name: 'Docs', exact: true }).waitFor();
+			expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'medium rail does not overflow');
+		}
+	}, ...[false, true].map(phone => {
 		const native = phone && mobileShell;
 		return {
 		name: phone ? `${native ? 'native' : 'responsive'}-drawer-after-feature` : 'docked-after-feature',

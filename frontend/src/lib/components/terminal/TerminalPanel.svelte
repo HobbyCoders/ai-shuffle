@@ -514,9 +514,6 @@
     {:else}
      <ListItem id="new-terminal" name={ready ? 'Open a terminal' : 'Terminal access'} summary={ready ? 'A shell on this worker' : 'View availability and connection status'} selected={false} onselect={() => detailOpen = true} />
     {/each}
-    {#if ready && !tabState.ids.length}
-     <EmptyDetail title="No terminals yet" message="Open a shell for setup or command-line work."><button class="st-btn primary" onclick={() => detailOpen = true}>New terminal</button></EmptyDetail>
-    {/if}
    </ViewPanel>
   {/snippet}
   {#snippet main(back)}{@render terminalBody(back)}{/snippet}

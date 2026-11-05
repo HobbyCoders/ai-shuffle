@@ -1145,11 +1145,31 @@ html.desktop:not(.desktop-fullscreen) {
 	--desktop-overlay-top: var(--titlebar-height);
 }
 
-html.desktop .sb-head,
-html.desktop .topbar {
+html.desktop :is(.sb-head, .topbar, .rail-titlebar, .panel-header, .p-head, .view-titlebar, .st-dtop, .page-terminal > .bar) {
 	-webkit-app-region: drag;
 	app-region: drag;
 	user-select: none;
+}
+/* All shared-shell controls, including nested More menus and the collapsed
+   panel launcher, must remain clickable inside the native title-bar band. */
+html.desktop :is(.sidebar, .view-shell, .reopen-panel) :is(button, a, input, textarea, select, summary, [role='button'], [role='menu'], [role='menuitem']),
+html.desktop .reopen-panel {
+	-webkit-app-region: no-drag;
+	app-region: no-drag;
+}
+html.desktop :is(.panel-header, .p-head, .page-terminal > .bar) {
+	height: var(--titlebar-height);
+	min-height: var(--titlebar-height);
+}
+html.desktop .st-dtop {
+	inset-inline-end: max(var(--st-gutter), calc(var(--titlebar-right) + 12px));
+}
+html.desktop .page-terminal > .bar {
+	padding-right: calc(var(--titlebar-right) + 12px);
+}
+/* macOS traffic lights occupy the leading edge of the rail. */
+html.desktop-darwin:not(.desktop-fullscreen) .rail:not(.phone) {
+	padding-top: calc(var(--titlebar-height) + 8px);
 }
 html.desktop .sb-head :is(button, a, input, [role='button'], [role='menu'], [role='menuitem'], .tb-right),
 html.desktop .topbar :is(button, a, input, [role='button'], [role='menu'], [role='menuitem'], .tb-right) {
@@ -1166,7 +1186,7 @@ html.desktop .topbar :is(button, a, input, [role='button'], [role='menu'], [role
      but comes before it in the document, so its header buttons (bell, update)
      lost their clicks to the strip. While it floats, the strip stops dragging;
      its scrim covers the page anyway. */
-html.desktop .app-body:has(> .sidebar-slot.floating) .topbar {
+html.desktop .app-body:has(> .sidebar-slot:is(.floating, .panel-overlay:not(.rail-only))) :is(.topbar, .view-titlebar, .st-dtop, .page-terminal > .bar) {
 	-webkit-app-region: no-drag;
 	app-region: no-drag;
 }

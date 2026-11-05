@@ -103,6 +103,7 @@
 </script>
 
 <nav class="rail" class:phone aria-label="Workspace">
+	{#if !phone}<span class="rail-titlebar" aria-hidden="true"></span>{/if}
 	{#if !phone}
 		<button class="r-btn r-new" type="button" aria-label={newLabel} title={`${newLabel} (Ctrl+N)`} onclick={onNew}>
 			<SquarePen size={iconSize} strokeWidth={1.75} />
@@ -206,6 +207,7 @@
 		padding: 10px 0 12px;
 		background: var(--sidebar);
 	}
+	.rail-titlebar { position: absolute; top: 0; inset-inline: 0; height: var(--titlebar-height, 52px); pointer-events: none; }
 	/* On a phone this is not a desktop rail: it is the drawer's bottom row of
 	   labelled tabs, where a thumb already is. */
 	.rail.phone {

@@ -12,6 +12,7 @@
 	import '../../settings/shell/settings.css';
 	import { layout } from '$lib/stores/layout.svelte';
 	import PanelToggle from './PanelToggle.svelte';
+	import ListEmptyScope from '../../settings/shell/ListEmptyScope.svelte';
 	interface Props {
 		title: string;
 		count?: string | number;
@@ -69,7 +70,7 @@
 	{#if filters}<div class="panel-filters">{@render filters()}</div>{/if}
 	<!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
 	<div onclick={(event) => { if (layout.current.sidebarOverlay && !platform.isMobile && window.innerWidth >= 768 && (event.target as Element).closest('button:not([aria-expanded]), a')) layout.setSidebarCollapsed(true); }} class="panel-body st-scroll" data-settings-list role="region" aria-label={listLabel ?? `${title} list`}>
-		{@render children?.()}
+		<ListEmptyScope>{@render children?.()}</ListEmptyScope>
 	</div>
 	{#if footer}<footer class="panel-footer">{@render footer()}</footer>{/if}
 </section>
@@ -84,7 +85,8 @@
 	.panel-filters { display: flex; flex: none; align-items: center; gap: 8px; flex-wrap: wrap; padding: 4px 8px 8px; }
 	.panel-body { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 0 8px 12px; }
 	.panel-body:has(:global(.st-empty-detail)) { display: flex; flex-direction: column; }
-	.panel-body :global(.st-empty-detail) { min-height: 0; flex: none; justify-content: flex-start; padding: 24px 0; }
+	.panel-body :global(.st-empty-detail) { min-height: 0; flex: none; justify-content: flex-start; padding: 12px; }
+	@media (max-width: 600px) { .panel-body :global(.st-empty-detail) { padding-inline: 0; } }
 	.panel-filters:not(:has(*)) { display: none; }
 	.view-panel:has(:global(.st-empty-detail)) .panel-search { padding-bottom: 0; }
 	.view-panel:has(:global(.st-empty-detail)) .panel-filters { display: none; }

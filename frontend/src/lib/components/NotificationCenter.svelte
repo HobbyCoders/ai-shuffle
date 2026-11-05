@@ -233,7 +233,7 @@
 		right: auto;
 		left: var(--notif-left);
 		bottom: var(--notif-bottom);
-		max-height: min(440px, calc(100dvh - 24px));
+		max-height: min(440px, calc(100dvh - var(--notif-bottom) - var(--titlebar-height, 0px) - 8px));
 	}
 
 	/* Phone top bar: a 44x48 target, a 16px bell and the one 16px count. */
@@ -419,7 +419,7 @@
 		display: flex;
 		align-items: flex-start;
 		gap: 9px;
-		padding: 10px 12px;
+		padding: 12px;
 		border-bottom: 1px solid var(--border);
 		transition: background-color 120ms ease;
 	}
@@ -492,21 +492,23 @@
 
 	.item-title {
 		font-size: 0.8125rem;
-		font-weight: 600;
+		font-weight: 500;
 		color: var(--foreground);
 		line-height: 1.3;
 	}
 
 	.item-message {
-		font-size: 0.78125rem;
-		color: var(--foreground);
-		line-height: 1.4;
+		font-size: 0.8125rem;
+		font-weight: 400;
+		color: var(--muted-foreground);
+		line-height: 1.5;
 		word-break: break-word;
 	}
 
 	.item-time {
 		font-size: 0.6875rem;
-		color: var(--muted-foreground);
+		font-weight: 400;
+		color: var(--subtle-foreground);
 		margin-top: 1px;
 	}
 

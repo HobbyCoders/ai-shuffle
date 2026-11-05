@@ -958,7 +958,7 @@
 		{:else}
 			<ViewMain width="reading">
 				{#if remoteChange}<InlineBanner>{remoteChange}</InlineBanner>{/if}
-				<EmptyDetail title="Select a note" message="Pick a note from the list, or start a new one." icon={Notebook}>
+				<EmptyDetail title={notes.length ? 'Select a note' : 'No notes yet'} message={notes.length ? 'Pick a note from the list, or start a new one.' : 'Keep ideas, plans and files together.'} icon={Notebook}>
 					<button class="st-btn primary" onclick={startNewNote}><Plus />New note</button>
 				</EmptyDetail>
 			</ViewMain>

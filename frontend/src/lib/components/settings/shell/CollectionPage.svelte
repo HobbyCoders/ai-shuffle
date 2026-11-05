@@ -21,6 +21,7 @@
 	import type { CategoryId } from '$lib/settings/types';
 	import ListDivider from './ListDivider.svelte';
 	import PageTitle from './PageTitle.svelte';
+	import ListEmptyScope from './ListEmptyScope.svelte';
 
 	interface Props {
 		/** Settings category; pages outside Settings pass `title` instead. */
@@ -161,7 +162,7 @@
 			{#if filters}<div class="st-lfilters">{@render filters()}</div>{/if}
 		</div>
 		<div class="st-lscroll st-scroll" data-settings-list role={listLabel ? 'region' : undefined} aria-label={listLabel}>
-			{@render list()}
+			<ListEmptyScope>{@render list()}</ListEmptyScope>
 		</div>
 	</div>
 	<section class="st-dpane st-scroll" aria-label="Details">

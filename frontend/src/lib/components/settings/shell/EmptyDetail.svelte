@@ -1,6 +1,6 @@
 <script lang="ts">
 	/** EmptyDetail: what the detail pane shows with nothing selected, or a quiet state such as "Available after approval". */
-	import type { Snippet } from 'svelte';
+	import { getContext, type Snippet } from 'svelte';
 	import type { SettingsIcon } from '$lib/settings/categories';
 
 	interface Props {
@@ -16,12 +16,17 @@
 	}
 
 	let { title, message = 'Select an item.', icon: _icon, children, actionLabel, onAction, idle = false }: Props = $props();
+	const inList = getContext<boolean>('view-panel-empty') ?? false;
 </script>
 
-<div class="st-empty-detail" data-idle={idle ? '' : undefined}>
-	{#if title}<h2>{title}</h2>{/if}
-	<p>{message}</p>
-	{#if actionLabel || children}<div class="acts">{#if actionLabel}<button type="button" class="st-btn" onclick={onAction}>{actionLabel}</button>{/if}{@render children?.()}</div>{/if}
+<div class="st-empty-detail" class:in-list={inList} data-idle={idle ? '' : undefined}>
+	{#if inList}
+		<p>{title ?? message}</p>
+	{:else}
+		{#if title}<h2>{title}</h2>{/if}
+		<p>{message}</p>
+	{/if}
+	{#if actionLabel || (!inList && children)}<div class="acts">{#if actionLabel}<button type="button" class="st-btn" onclick={onAction}>{actionLabel}</button>{/if}{#if !inList}{@render children?.()}{/if}</div>{/if}
 </div>
 
 <style>
@@ -36,10 +41,12 @@
 		font-size: 13px;
 		display: flex;
 		flex-direction: column;
-		align-items: flex-start;
+		align-items: center;
+		text-align: center;
 		justify-content: center;
 		gap: 6px;
 	}
+	.in-list { min-height: 0; flex: none; padding-block: 12px; align-items: flex-start; text-align: left; justify-content: flex-start; }
 	h2 {
 		margin: 0;
 		font-size: 15px;
