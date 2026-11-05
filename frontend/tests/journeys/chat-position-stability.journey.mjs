@@ -136,7 +136,7 @@ async function openClaude(ctx, { history = false } = {}) {
 	} else {
 		await gotoApp(page, status, prefix(variant));
 		await waitChat(page, { surface: 'new', loading: 'false' });
-		const hero = page.getByRole('region', { name: 'New session' });
+		const hero = page.getByRole('region', { name: 'New chat' });
 		const menu = page.getByRole('menu', { name: 'Agent selection' });
 		await pick(hero.getByRole('button', { name: /^Agent:/ }), menu,
 			menu.getByRole('button', { name: 'Dev (Claude Code)', exact: true }),
@@ -406,7 +406,7 @@ const cases = [{
 	async setup(ctx) {
 		await gotoApp(ctx.page, ctx.status, '/mobile/');
 		await waitChat(ctx.page, { surface: 'new', loading: 'false' });
-		await pickAgent(ctx.page, ctx.page.getByRole('region', { name: 'New session' }));
+		await pickAgent(ctx.page, ctx.page.getByRole('region', { name: 'New chat' }));
 		if (action === 'first-send') await composer(ctx.page).fill('hi');
 		await ctx.page.waitForTimeout(1000);
 	},
@@ -638,8 +638,10 @@ cases.push({
 			// Intended Needs-you/Active sidebar reclassification is tested separately;
 			// this extended flow sidebar-visible remains strict RED (0.120), not a
 			// global desktop pass. Existing desktop neighbors keep their sidebar.
-			await ctx.page.getByRole('button', { name: 'Hide sidebar', exact: true }).click();
-			const show = ctx.page.getByRole('button', { name: 'Show sidebar', exact: true });
+			// The redesign offers Hide sidebar in both the title bar and the Chats
+			// panel; either collapses the same sidebar.
+			await ctx.page.getByRole('button', { name: 'Hide sidebar', exact: true }).filter({ visible: true }).first().click();
+			const show = ctx.page.getByRole('button', { name: 'Show sidebar', exact: true }).filter({ visible: true }).first();
 			await show.waitFor({ state: 'visible' });
 			expect(await show.isVisible(), 'the desktop transcript check really collapsed the sidebar');
 		}

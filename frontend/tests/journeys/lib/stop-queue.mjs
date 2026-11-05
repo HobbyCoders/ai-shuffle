@@ -10,7 +10,7 @@ export async function openStopChat(ctx) {
 	const { page, status } = ctx;
 	await gotoApp(page, status, '/mobile/');
 	await waitChat(page, { surface: 'new' }, { timeout: 90_000 });
-	const hero = page.getByRole('region', { name: 'New session' });
+	const hero = page.getByRole('region', { name: 'New chat' });
 	await hero.waitFor();
 	await pickAgent(page, hero);
 }
