@@ -63,7 +63,8 @@
 		XCircle,
 		ChevronLeft,
 		Shield,
-		Check
+		Check,
+		CalendarClock
 	} from 'lucide-svelte';
 	
 
@@ -625,7 +626,7 @@
 </script>
 <ViewShell label="Automations" detailOpen={currentView !== 'list'} onBack={backToList}>
  {#snippet panel()}
-  <AutomationsStudio {automations} {pendingApprovals} {profiles} {loading} {error} {triggeringId}
+  <AutomationsStudio {automations} {pendingApprovals} {profiles} {loading} error={currentView === 'list' ? error : ''} {triggeringId}
    selectedId={currentView === 'detail' || currentView === 'edit' ? selectedAutomation?.id : null}
    onOpenCreate={openCreate} onOpenDetail={openDetail} onOpenEdit={openEdit}
    onToggleEnabled={handleToggleEnabled} onTrigger={handleTrigger} onDelete={handleDelete}
@@ -633,10 +634,9 @@
    {formatCost} {triggerTypeLabel} />
  {/snippet}
  {#snippet main(back)}
-  <div class="automation-main">
    {#if remoteChange}<InlineBanner tone="info">{remoteChange}</InlineBanner>{/if}
    {#if currentView === 'create' || currentView === 'edit'}
-    <DetailPane name={currentView === 'edit' ? formName || 'Edit automation' : 'New automation'}
+    <DetailPane icon={CalendarClock} name={currentView === 'edit' ? formName || 'Edit automation' : 'New automation'}
      subtitle={currentView === 'edit' ? 'Update its triggers, instructions and run limits.' : 'Run tasks on a schedule or in response to events.'}
      onBack={back} backLabel="Automations">
      {#snippet primary()}
@@ -719,12 +719,8 @@
      <button type="button" class="st-btn primary" onclick={openCreate}><Plus size={14} />New automation</button>
     </EmptyDetail></ViewMain>
    {/if}
-  </div>
  {/snippet}
 </ViewShell>
 <ConfirmDialog open={pendingDeleteId !== null} title="Delete automation?"
  message="This automation and its run history will be permanently deleted. This cannot be undone."
  confirmLabel="Delete" danger onConfirm={confirmDelete} onCancel={() => pendingDeleteId = null} />
-<style>
- .automation-main { width:100%; max-width:740px; min-height:100%; margin-inline:auto; }
-</style>

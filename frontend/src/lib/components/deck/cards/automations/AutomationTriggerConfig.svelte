@@ -268,7 +268,7 @@
      {:else}<p class="st-note p-4">Webhook URL and secret will be generated after creation.</p>{/if}
     {/if}
    </div>
-  {:else}<p class="st-note">{triggerTypeLabel(trigger.type)} · {getTriggerSummary(trigger)}</p>{/if}
+  {:else}<p class="st-note"><span>{triggerTypeLabel(trigger.type)}</span> · <span>{getTriggerSummary(trigger)}</span></p>{/if}
  </RowGroup>
 {/each}
 <button class="st-btn" onclick={addTrigger}><Plus size={14} />Add trigger</button>

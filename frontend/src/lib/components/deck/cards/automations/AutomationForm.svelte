@@ -351,7 +351,7 @@
       {:else if step.type === 'send_prompt'}
        <SettingRow label="Step prompt">{#snippet expanded()}<TextAreaField value={step.prompt || ''} label="Step prompt" placeholder="Enter prompt to send to AI agent…" oninput={(value) => updateActionStep(i,{...step,prompt:value})} />{/snippet}</SettingRow>
        <SettingRow label="Agent (optional)"><SelectField value={step.profile_id || ''} options={[{value:'',label:'Default (automation agent)'},...profiles.map(p => ({value:p.id,label:p.name}))]} onchange={(value) => updateActionStep(i,{...step,profile_id:value || undefined})} /></SettingRow>
-       <SettingRow label="Model (optional)"><ModelPicker id="auto-step-model-{i}" value={step.model || ''} allowEmpty emptyLabel="Same as automation" allowCustom={false} onSelect={(value) => updateActionStep(i,{...step,model:value || undefined,provider_id:undefined})} /></SettingRow>
+       <SettingRow label="Model (optional)"><label class="sr-only" for="auto-step-model-{i}">Model (optional)</label><ModelPicker id="auto-step-model-{i}" value={step.model || ''} allowEmpty emptyLabel="Same as automation" allowCustom={false} onSelect={(value) => updateActionStep(i,{...step,model:value || undefined,provider_id:undefined})} /></SettingRow>
        <SettingRow label="Max turns"><TextField value={String(step.max_turns ?? 1)} inputmode="numeric" oninput={(value) => updateActionStep(i,{...step,max_turns:parseInt(value) || 1})} /></SettingRow>
        <p class="st-note">Use {'{{response}}'} to reference previous AI output</p>
       {:else if step.type === 'webhook_call'}
@@ -372,8 +372,9 @@
    {#if !profiles.length}<button class="st-btn" onclick={() => layout.openFeaturePage('profile')}>No agents yet — create one first</button>
    {:else}<span data-agent-picker><SelectField label="Agent" value={formProfileId} options={[{value:'',label:'Select an agent…'},...profiles.map(p => ({value:p.id,label:p.name}))]} onchange={onUpdateFormProfileId} /></span>{/if}
   </SettingRow>
-  <div data-testid="automation-model-row"><SettingRow label="Reasoning model" hint={modelHint}>
-   <ModelPicker id="automation-model" value={formModel} allowEmpty emptyLabel={modelEmptyLabel} allowCustom={false} onSelect={onUpdateFormModel} />
+  <div data-testid="automation-model-row"><SettingRow label="Reasoning model" hint={modelHintIsError ? undefined : modelHint}>
+   {#if modelHintIsError}<p class="text-sm text-destructive model-error" role="alert">{modelHint}</p>{/if}
+   <label class="sr-only" for="automation-model">Reasoning model</label><ModelPicker id="automation-model" value={formModel} allowEmpty emptyLabel={modelEmptyLabel} allowCustom={false} onSelect={onUpdateFormModel} />
   </SettingRow></div>
   <div data-testid="automation-permission-row"><SettingRow label="Permissions" hint={permissionHint}>
    {#snippet expanded()}

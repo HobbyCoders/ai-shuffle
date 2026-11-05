@@ -125,8 +125,8 @@ function saved(fields: Partial<Automation>): Automation {
 
 function checked(row: ReturnType<typeof within>) {
 	return row
-		.getAllByRole('radio')
-		.filter((b: HTMLElement) => b.getAttribute('aria-checked') === 'true')
+		.getAllByRole('button')
+		.filter((b: HTMLElement) => b.getAttribute('aria-pressed') === 'true')
 		.map((b: HTMLElement) => b.textContent);
 }
 
@@ -140,14 +140,14 @@ describe('AutomationForm permission picker', () => {
 	it("offers the composer's modes and emits the pick", async () => {
 		const { row, onUpdateFormPermissionMode } = renderForm();
 		// The run model (worker default Haiku) has no Auto, as in the composer.
-		expect(row.getAllByRole('radio').map((b) => b.textContent)).toEqual(['Ask first', 'Accept Edits', 'Bypass']);
-		await fireEvent.click(row.getByRole('radio', { name: 'Accept Edits' }));
+		expect(row.getAllByRole('button').map((b) => b.textContent)).toEqual(['Ask first', 'Accept Edits', 'Bypass']);
+		await fireEvent.click(row.getByRole('button', { name: 'Accept Edits' }));
 		expect(onUpdateFormPermissionMode).toHaveBeenCalledWith('acceptEdits');
 	});
 
 	it('offers Auto when the run model supports it', () => {
 		const { row } = renderForm({ formModel: 'sonnet' });
-		expect(row.getAllByRole('radio').map((b) => b.textContent)).toEqual(['Ask first', 'Auto', 'Accept Edits', 'Bypass']);
+		expect(row.getAllByRole('button').map((b) => b.textContent)).toEqual(['Ask first', 'Auto', 'Accept Edits', 'Bypass']);
 	});
 
 	it('hides the Bypass warning on another mode', () => {

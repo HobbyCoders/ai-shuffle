@@ -81,6 +81,7 @@ beforeEach(() => {
 	listed = [];
 	automationsApi.getAutomations.mockImplementation(async () => listed);
 	automationsApi.getPendingApprovals.mockResolvedValue([]);
+	automationsApi.getAutomationRuns.mockResolvedValue([]);
 	automationsApi.createAutomation.mockImplementation(async () => {
 		listed = [created];
 		return created;
@@ -98,6 +99,7 @@ beforeEach(() => {
 afterEach(() => cleanup());
 
 async function stageImagePick() {
+ await fireEvent.click(screen.getByRole('tab', { name: 'Media generation' }));
 	const row = await waitFor(() => {
 		const el = document.querySelector<HTMLElement>('.ajc-row[data-kind="image"]');
 		expect(el).toBeTruthy();
@@ -186,14 +188,16 @@ describe('creating an automation with a pinned generation choice', () => {
 		const row = (kind: string) => document.querySelector<HTMLElement>(`.ajc-row[data-kind="${kind}"]`)!;
 
 		render(AutomationsCard, { props: { mobile: false } });
-		await fireEvent.click((await screen.findAllByTitle('Edit'))[0]);
+		await fireEvent.click(await screen.findByText('Poster run'));
+ await fireEvent.click(screen.getByTitle('Edit'));
+ await fireEvent.click(screen.getByRole('tab', {name:'Media generation'}));
 		await waitFor(() => expect(row('image')?.dataset.tier).toBe('job'));
 		expect(within(row('image')).getByText('fal.ai · Flux Dev')).toBeTruthy();
 		expect(row('audio').dataset.tier).toBe('job');
 
 		// Replace image (A -> B), clear audio, pin video (this write fails).
 		await fireEvent.click(within(row('image')).getByRole('button', { name: 'Change' }));
-		await fireEvent.click(await screen.findByRole('radio', { name: /SuperGrok/ }));
+		await fireEvent.change(await screen.findByRole('combobox', {name:'Source and model'}), {target:{value:'1'}});
 		await fireEvent.click(screen.getByRole('button', { name: /Pin to this job/ }));
 		await fireEvent.click(within(row('audio')).getByRole('button', { name: /Clear the job choice/ }));
 		await fireEvent.click(within(row('video')).getByRole('button', { name: /Pin a choice/ }));

@@ -43,12 +43,12 @@ describe('disabled automation explanation', () => {
         render(AutomationsStudio, { automations: [automation], pendingApprovals: [], profiles: [],
             onApprove: vi.fn(), onDeny: vi.fn(), onClearError: vi.fn(), ...handlers });
         expect(screen.getByText('Disabled')).toBeTruthy();
-        expect(screen.getByRole('status').textContent).toBe(explanation);
+        expect(screen.getByRole('status').textContent?.trim()).toBe(explanation);
     });
     it('also shows it in the alternate list', () => {
         render(AutomationsList, { automations: [automation], searchQuery: '', triggeringId: null,
             formatTime: () => 'Never', getStatusColor: () => 'var(--muted)', ...handlers });
-        expect(screen.getByRole('status').textContent).toBe(explanation);
+        expect(screen.getByRole('status').textContent?.trim()).toBe(explanation);
     });
     it('shows the explanation in the detail without requiring a failed run', () => {
         render(AutomationDetail, { automation, runs: [], runsLoading: false, expandedRunIds: new Set<string>(),
@@ -56,7 +56,7 @@ describe('disabled automation explanation', () => {
             onToggleRunExpanded: vi.fn(), formatTime: () => 'Never', formatCost: () => '$0',
             formatDuration: () => '0s', getStatusColor: () => 'var(--muted)',
             getRunStatusBadgeClass: () => '', triggerTypeLabel: () => 'Interval' });
-        expect(screen.getByRole('status').textContent).toBe(explanation);
+        expect(screen.getByRole('status').textContent?.trim()).toBe(explanation);
     });
 });
 
@@ -99,12 +99,11 @@ describe('automation detail state', () => {
         const missing = { ...automation, profile_id: 'removed-agent' };
         const { container } = render(AutomationDetail, detailProps({ automation: missing, profiles: agents('general-purpose') }));
         const warning = screen.getByTestId('automation-agent-missing');
-        const header = container.querySelector('.auto-detail-header')!;
-        // A direct child of the header grid (spans the card on a phone), after the
-        // action icons, and not inside the info column that shares their row.
-        expect(warning.parentElement).toBe(header);
-        expect(warning.previousElementSibling?.classList.contains('auto-detail-header-actions')).toBe(true);
-        expect(container.querySelector('.auto-detail-header-info')!.contains(warning)).toBe(false);
+        const header = container.querySelector('.st-dh')!;
+        // The shared detail banner sits below the whole header, never next to actions.
+        expect(header.contains(warning)).toBe(false);
+        expect(warning.closest('.st-dwrap')).toBe(header.parentElement);
+        expect(header.compareDocumentPosition(warning) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     });
     it('keeps only the mixed-version retired-ID tombstone exclusion', () => {
         render(AutomationDetail, detailProps({
@@ -134,8 +133,8 @@ describe('automation whose agent was deleted', () => {
             // jsdom does not lay out media queries. Guard the structure: the
             // warning must not live in metadata hidden by the phone breakpoint.
             // Real 390px rendering is checked in the browser as well.
-            expect(chip.closest('.as-body')).toBeTruthy();
-            expect(chip.closest('.as-meta')).toBeNull();
+            expect(chip.closest('.st-it')).toBeTruthy();
+            expect(chip.closest('.meta')).toBeNull();
             expect(screen.queryByText('General Purpose')).toBeNull();
         } finally {
             vi.unstubAllGlobals();

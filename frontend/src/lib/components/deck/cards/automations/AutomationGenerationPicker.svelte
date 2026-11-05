@@ -220,7 +220,7 @@
  {/if}
  {#if quoteError}<div role="alert"><InlineBanner>{quoteError}</InlineBanner></div>{/if}
  {#if saveError}<div role="alert"><InlineBanner>{saveError}</InlineBanner></div>{/if}
- {#if outcome}<div role={outcome.warning ? 'alert' : 'status'}><InlineBanner tone={outcome.warning ? 'warn' : 'info'}>Pinned to this job. {outcome.figure} {outcome.warning || outcome.note}</InlineBanner></div>{/if}
+ {#if outcome}<div role={outcome.warning ? 'alert' : 'status'}><InlineBanner tone={outcome.warning ? 'warn' : 'info'}>Pinned to this job: {outcome.figure} {outcome.warning || outcome.note}</InlineBanner></div>{/if}
  <div class="picker-actions"><button class="st-btn primary" disabled={!canUse} onclick={use}>{saving ? 'Saving…' : quoting ? 'Checking price…' : pickLabel}</button></div>
 </div>
 <style>
