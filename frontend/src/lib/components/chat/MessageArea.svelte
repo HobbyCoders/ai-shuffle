@@ -1443,7 +1443,7 @@
 	 * screen". Shrinks one-for-one as the response grows, bottoming out at the
 	 * normal breathing-room reserve.
 	 */
-	function latestTurnTailNow(): number | null {
+	function latestTurnTailNow(pendingRemoval?: HTMLElement): number | null {
 		if (!containerRef || !tailSpacerRef || currentTurnAnchorId) return null;
 		const latestTurnId = transcript.latestUserTurnId;
 		if (!latestTurnId) return MIN_TRANSCRIPT_TAIL_RESERVE;
@@ -1452,9 +1452,18 @@
 		const containerBox = containerRef.getBoundingClientRect();
 		const anchorTop = containerRef.scrollTop + anchor.getBoundingClientRect().top - containerBox.top;
 		const contentEnd = transcriptContentEnd();
+		// A disclosure after this anchor consumes its reserve. Restore that room in
+		// the SAME DOM commit as removal, before native layout can clamp scrollTop.
+		// Earlier-turn removal moves both anchor and content end, so has no delta.
+		let removedHeight = 0;
+		if (pendingRemoval && (anchor.compareDocumentPosition(pendingRemoval) & Node.DOCUMENT_POSITION_FOLLOWING)) {
+			const style = getComputedStyle(pendingRemoval);
+			removedHeight = pendingRemoval.getBoundingClientRect().height
+				+ (Number.parseFloat(style.marginTop) || 0) + (Number.parseFloat(style.marginBottom) || 0);
+		}
 		return Math.max(readingFloorReserve(), resolveAnchoredTailReserve({
 			clientHeight: containerRef.clientHeight,
-			contentAfterAnchor: Math.max(0, contentEnd - anchorTop)
+			contentAfterAnchor: Math.max(0, contentEnd - anchorTop - removedHeight)
 		}) + tailControlsExtent());
 	}
 
@@ -1776,6 +1785,11 @@
 			(transcriptActions && !transcriptActions.isCurrent(sessionId)) ||
 			!(event.currentTarget instanceof HTMLElement) || !containerRef?.contains(event.currentTarget)) return false;
 		disengageAutoScroll();
+		const details = document.getElementById(event.currentTarget.getAttribute('aria-controls') ?? '');
+		if (details && containerRef.contains(details)) {
+			const tail = latestTurnTailNow(details);
+			if (tail !== null) latestTurnTailPx = Math.max(latestTurnTailPx, tail);
+		}
 		return true;
 	}
 
