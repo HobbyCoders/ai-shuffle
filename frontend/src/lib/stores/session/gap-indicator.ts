@@ -87,6 +87,11 @@ export function findStreamingAnchorIndex(messages: ChatMessage[]): number {
 	return -1;
 }
 
+/** The anchor by identity: an index only holds for the array it was taken from. */
+export function streamingAnchorId(messages: ChatMessage[]): string | null {
+	return messages[findStreamingAnchorIndex(messages)]?.id ?? null;
+}
+
 /**
  * Whether to render the bottom-of-chat gap indicator.
  *

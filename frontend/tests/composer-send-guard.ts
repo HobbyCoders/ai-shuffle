@@ -65,6 +65,17 @@ window.fetch = async (input, init) => {
 		await hold('projects');
 		return json([{ id: PROJECT, name: PROJECT, path: `/p/${PROJECT}` }]);
 	}
+	if (path === `/api/v1/projects/${PROJECT}/git/status`) return json({
+		is_git_repo: true, current_branch: 'main', default_branch: 'main', is_clean: true,
+		staged: [], modified: [], untracked: [], conflicts: [],
+	});
+	if (path === `/api/v1/projects/${PROJECT}/git/branches`) return json({ branches: [], current_branch: 'main' });
+	if (path === `/api/v1/projects/${PROJECT}/git/worktrees`) return json({ worktrees: [], total: 0 });
+	if (path === `/api/v1/projects/${PROJECT}/git/graph`) return json({ commits: [], total: 0 });
+	if (path === `/api/v1/projects/${PROJECT}/git/diff-stats`) return json({ additions: 0, deletions: 0, files_changed: 0 });
+	if (path === `/api/v1/projects/${PROJECT}/git/changed-files`) return json({ files: [] });
+	if (path === `/api/v1/projects/${PROJECT}/git/pr-state`) return json({ current_branch: 'main', open_pr: null });
+	if (path === `/api/v1/projects/${PROJECT}/git/fetch`) return json({ success: true });
 	if (path.endsWith('/agents')) return json([{ id: 'claude-code', name: 'Claude Code', config: {} }]);
 	if (path.endsWith('/sessions/paginated')) return json({ sessions: [], total: 0, limit: 100, offset: 0 });
 	if (path.endsWith('/tags')) return json([]);
@@ -103,17 +114,27 @@ class FixtureSocket {
 window.WebSocket = FixtureSocket as unknown as typeof WebSocket;
 window.EventSource = FixtureSocket as unknown as typeof EventSource;
 
-const [{ activeSession }, { auth }, { notifications }, { default: Fixture }] = await Promise.all([
+const [{ activeSession }, { auth }, { notifications }, { git }, { default: Fixture }] = await Promise.all([
 	import('../src/lib/stores/active-session'),
 	import('../src/lib/stores/auth.svelte'),
 	import('../src/lib/stores/notifications'),
+	import('../src/lib/stores/git.svelte'),
 	import('./ComposerSendGuardFixture.svelte'),
 ]);
+// MainPanel normally loads this project's Git capability, but this reduced
+// shell omits it. Hydrate the real store through its API producer before the
+// composer can send; remembered worktree intent requires a known Git repo.
+await git.loadRepository(PROJECT);
 await auth.checkAuth();
 Object.assign(window, {
 	fixtureRequests: requests,
 	fixtureFrames: frames,
 	fixtureRelease: () => releaseLoads(),
+	fixtureGit: () => ({
+		projectId: git.current.projectId, worktreeId: git.current.worktreeId,
+		sessionId: git.current.sessionId, hydrated: git.current.hydrated,
+		isGitRepo: git.current.status?.is_git_repo,
+	}),
 	// Composer notices go to the notification center, which this fixture leaves out.
 	fixtureNotices: () => notifications.current.history.map(n => n.message),
 	fixtureSession: () => {

@@ -57,7 +57,9 @@ router.include_router(provider_balances.router)
 router.include_router(openrouter_billing.router)
 router.include_router(catalog_api.router)
 
-_VALID_PROVIDER_TYPES = ("openrouter", "custom", "openai", "chatgpt", "xai", "grok")
+from app.core import native_providers
+
+_VALID_PROVIDER_TYPES = ("openrouter", "custom", "openai", "chatgpt", "xai", "grok", *native_providers.PROVIDERS)
 
 # Wire formats a CUSTOM row's endpoint may speak. 'anthropic' (the default when
 # unset — the historic custom-row contract: Anthropic Messages at
@@ -75,7 +77,8 @@ class ModelProviderCreate(BaseModel):
     """Request body to create a model provider."""
     name: str
     provider_type: str
-    base_url: str
+    base_url: Optional[str] = None
+    auth_mode: Optional[str] = None
     api_dialect: Optional[str] = None
     auth_token: Optional[str] = None
     models: Optional[List[Dict[str, Any]]] = None
@@ -93,6 +96,7 @@ class ModelProviderUpdate(BaseModel):
     name: Optional[str] = None
     provider_type: Optional[str] = None
     base_url: Optional[str] = None
+    auth_mode: Optional[str] = None
     api_dialect: Optional[str] = None
     auth_token: Optional[str] = None
     models: Optional[List[Dict[str, Any]]] = None
@@ -121,7 +125,8 @@ class ModelProviderResponse(BaseModel):
     context_window: Optional[int] = None
     max_output_tokens: Optional[int] = None
     enabled: bool
-    slot: Optional[Literal["openai:key", "openai:subscription", "grok:key", "grok:subscription", "openrouter:key"]] = None
+    slot: Optional[str] = None
+    native_provider: Optional[Dict[str, Any]] = None
     # Codex/ChatGPT-subscription OAuth surface (blobs never exposed — only flags).
     auth_mode: Optional[str] = None
     codex_account_id: Optional[str] = None
@@ -229,6 +234,45 @@ class CodexConsumeResetCreditResponse(BaseModel):
 # ============================================================================
 # Validation helpers
 # ============================================================================
+
+def _validate_native_auth(provider_type, auth_mode, api_dialect) -> None:
+    if provider_type in native_providers.PROVIDERS:
+        if auth_mode not in (None, "api_key", "plan_key"):
+            raise HTTPException(status_code=400, detail="Use api_key or plan_key for this provider.")
+        if api_dialect not in (None, "anthropic"):
+            raise HTTPException(status_code=400, detail="This provider uses native Anthropic Messages.")
+    elif auth_mode is not None:
+        raise HTTPException(status_code=400, detail="auth_mode is managed by the provider's sign-in flow.")
+
+
+async def _require_native_workers() -> None:
+    try:
+        workers = await run_sync(native_providers.workers_requiring_update)
+    except Exception:
+        logger.exception("Could not check which workers support native providers")
+        raise HTTPException(status_code=503, detail=(
+            "Could not check whether every worker is up to date. Try again in a moment."))
+    if workers:
+        raise HTTPException(status_code=409, detail=(
+            "Update these workers before adding Kimi, MiniMax or OpenCode accounts: "
+            + ", ".join(workers)))
+
+
+async def _check_native_key(row, key) -> bool:
+    from app.core.http_client import get_http_client
+
+    try:
+        return await native_providers.check_key(row, key, client=get_http_client())
+    except native_providers.KeyCheckError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+
+
+@router.get("/native-options")
+async def native_options(token: str = Depends(require_admin)):
+    """Enrollment metadata; keys are submitted only to normal CRUD routes."""
+    return {"providers": [native_providers.metadata(p, m) for p in native_providers.PROVIDERS
+                          for m in ("plan_key", "api_key")]}
+
 
 def _validate_provider_type(provider_type: Optional[str]) -> None:
     if provider_type is not None and provider_type not in _VALID_PROVIDER_TYPES:
@@ -375,6 +419,8 @@ def _public_provider(row: Dict[str, Any]) -> ModelProviderResponse:
         max_output_tokens=row.get("max_output_tokens"),
         enabled=bool(row.get("enabled")),
         slot=model_provider_slot(row),
+        native_provider=(native_providers.metadata(row["provider_type"], row.get("auth_mode"))
+                         if row["provider_type"] in native_providers.PROVIDERS else None),
         auth_mode=row.get("auth_mode"),
         codex_account_id=row.get("codex_account_id"),
         needs_reauth=bool(row.get("needs_reauth")),
@@ -401,7 +447,9 @@ def _apply_token_flags(row: Dict[str, Any]) -> Dict[str, Any]:
     row.pop("openai_admin_key", None)
     token = row.pop("auth_token", None)
     row["_auth_token_set"] = bool(token)
-    row["_auth_token_masked"] = _mask_stored_token(token)
+    row["_auth_token_masked"] = (("********" if token else "")
+                                 if row.get("provider_type") in native_providers.PROVIDERS
+                                 else _mask_stored_token(token))
     codex_access = row.pop("codex_access_token", None)
     codex_refresh = row.pop("codex_refresh_token", None)
     row["_codex_access_token_set"] = bool(codex_access)
@@ -570,6 +618,13 @@ def _parse_models_response(
             if not isinstance(label, str) or not label:
                 label = model_id
             context_window = _upstream_context_length(entry)
+            if provider_type == "opencode":
+                if entry.get("type") not in (None, "chat"):
+                    continue
+                limits = entry.get("limit")
+                context = limits.get("context") if isinstance(limits, dict) else None
+                if isinstance(context, int) and not isinstance(context, bool) and context > 0:
+                    context_window = context
         else:
             continue
         if not model_id:
@@ -878,12 +933,27 @@ async def list_providers(token: str = Depends(require_admin)):
     return ModelProviderListResponse(providers=providers)
 
 
+@router.post("/{provider_id}/check-key")
+async def check_native_provider_key(provider_id: str, token: str = Depends(require_admin)):
+    row = await run_sync(db.get_model_provider, provider_id, include_token=True)
+    if not row:
+        raise HTTPException(status_code=404, detail="Model provider not found")
+    if row["provider_type"] not in native_providers.PROVIDERS:
+        raise HTTPException(status_code=400, detail="Use this provider's existing credential check.")
+    accepted = await _check_native_key(row, _generic_auth_token(row))
+    return {"status": "valid" if accepted else "unavailable"}
+
+
 @router.post("", response_model=ModelProviderResponse)
 @router.post("/", response_model=ModelProviderResponse)
 async def create_provider(body: ModelProviderCreate, token: str = Depends(require_admin)):
     """Create a new model provider."""
     _validate_provider_type(body.provider_type)
-    _validate_base_url(body.base_url, required=True)
+    native = body.provider_type in native_providers.PROVIDERS
+    if native:
+        await _require_native_workers()
+    _validate_native_auth(body.provider_type, body.auth_mode, body.api_dialect)
+    _validate_base_url(body.base_url, required=not native)
     _validate_api_dialect(body.api_dialect)
     _validate_models(body.models)
     _validate_local_models(body.models, body.provider_type, body.api_dialect)
@@ -897,6 +967,18 @@ async def create_provider(body: ModelProviderCreate, token: str = Depends(requir
     provider_id = str(uuid.uuid4())
 
     base_url = _normalize_base_url(body.provider_type, body.base_url)
+    auth_mode = body.auth_mode
+    models = body.models
+    if native:
+        auth_mode = "plan_key" if auth_mode == "plan_key" else None
+        base_url = native_providers.endpoint_root(body.provider_type, auth_mode, base_url)
+        models = models if models is not None else model_catalog_presets.preset_models_for(
+            {"provider_type": body.provider_type, "auth_mode": auth_mode})
+        if not raw_token:
+            raise HTTPException(status_code=400, detail="A provider key is required.")
+        await _check_native_key({"provider_type": body.provider_type, "auth_mode": auth_mode,
+                                 "base_url": base_url, "models": models,
+                                 "default_model": body.default_model}, raw_token)
 
     async with operation_lock(provider_id):
         row = await run_sync(
@@ -905,11 +987,12 @@ async def create_provider(body: ModelProviderCreate, token: str = Depends(requir
             name=body.name,
             provider_type=body.provider_type,
             base_url=base_url,
-            api_dialect=body.api_dialect,
+            api_dialect="anthropic" if native else body.api_dialect,
+            **({"auth_mode": auth_mode} if native else {}),
             auth_token=encrypted_token,
             models=_with_context_windows(
-                {"provider_type": body.provider_type},
-                model_modality.split_media_models(body.models)[0],
+                {"provider_type": body.provider_type, "auth_mode": auth_mode},
+                model_modality.split_media_models(models)[0],
             ),
             default_model=body.default_model,
             small_fast_model=body.small_fast_model,
@@ -937,6 +1020,16 @@ async def update_provider(
                             detail="Model provider not found")
 
     _validate_provider_type(body.provider_type)
+    effective_type = body.provider_type or existing.get("provider_type")
+    if effective_type in native_providers.PROVIDERS and existing.get("provider_type") not in native_providers.PROVIDERS:
+        await _require_native_workers()
+    effective_auth = body.auth_mode if "auth_mode" in body.model_fields_set else existing.get("auth_mode")
+    _validate_native_auth(effective_type, effective_auth if effective_type in native_providers.PROVIDERS else body.auth_mode,
+                          body.api_dialect)
+    if (existing.get("provider_type") in native_providers.PROVIDERS
+            or effective_type in native_providers.PROVIDERS):
+        if effective_type != existing.get("provider_type") or (effective_auth or "api_key") != (existing.get("auth_mode") or "api_key"):
+            raise HTTPException(status_code=400, detail="Create a separate row to change provider or credential kind.")
     _validate_base_url(body.base_url, required=False)
     _validate_api_dialect(body.api_dialect)
     _validate_models(body.models)
@@ -996,6 +1089,9 @@ async def update_provider(
     raw_token = (body.auth_token or "").strip()
     if raw_token:
         updates["auth_token"] = _encrypt_token_or_400(raw_token)
+    if effective_type in native_providers.PROVIDERS and (raw_token or body.base_url is not None):
+        key = raw_token or _generic_auth_token(await run_sync(db.get_model_provider, provider_id, include_token=True))
+        await _check_native_key({**existing, **updates}, key)
     # A discovery snapshot belongs to the key and endpoint that produced it.
     # Treat an explicit nonblank replacement as a new binding conservatively.
     catalog_binding_changed = bool(raw_token) or any(
@@ -1252,7 +1348,35 @@ async def _fetch_models(provider_id: str, *, backfill_context: bool = True) -> F
     from app.core.http_client import get_http_client
     client = get_http_client()
     try:
-        if kind == "chatgpt":
+        if row.get("provider_type") in native_providers.PROVIDERS:
+            auth_token = _generic_auth_token(row)
+            url = native_providers.catalog_url(row)
+            if url is None:
+                return FetchModelsResponse(source="preset", models=model_catalog_presets.preset_models_for(row) or [],
+                                           binding=checked_binding)
+            try:
+                if row["provider_type"] == "opencode":
+                    if not await _check_native_key(row, auth_token):
+                        raise UpstreamModelsError("key_check_unavailable")
+                response = await client.get(url, headers=native_providers.request_headers(auth_token),
+                                            timeout=_FETCH_TIMEOUT, follow_redirects=False)
+                if response.status_code >= 300:
+                    if response.status_code == 401:
+                        await _record_credential_check(provider_id, accepted=False, row=row)
+                    raise UpstreamModelsError(f"http_{response.status_code}")
+                models = _parse_models_response(response.json(), provider_type=row["provider_type"])
+                await _record_credential_check(provider_id, accepted=True, row=row)
+            except httpx.HTTPError:
+                raise UpstreamModelsError("transport_error") from None
+            except ValueError:
+                raise UpstreamModelsError("invalid_json") from None
+            if row["provider_type"] == "minimax":
+                # The model list still advertises older models, but current
+                # Messages docs explicitly only support M3.1 Flash and M3.
+                models = [m for m in models if m["id"] in {"MiniMax-M3.1-Flash", "MiniMax-M3"}]
+            if row["provider_type"] == "opencode" and row.get("auth_mode") != "plan_key":
+                models = [m for m in models if not m["id"].endswith("-free")]
+        elif kind == "chatgpt":
             models = await _fetch_codex_models(provider_id, client=client, on_success=record_subscription_binding)
         elif row.get("auth_mode") == "grok":
             access, account = _subscription_access_token(provider_id, kind="xai")

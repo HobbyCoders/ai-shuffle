@@ -3,6 +3,7 @@
 from pathlib import Path
 import subprocess
 import unittest
+from unittest.mock import patch
 
 import yaml
 
@@ -196,7 +197,7 @@ class PlayWorkflowTests(unittest.TestCase):
         self.assertEqual(summary["env"]["ADVISORY"], "${{ matrix.advisory }}")
         self.assertIn("GITHUB_STEP_SUMMARY", summary["run"])
         checks = next(step["run"] for step in steps if step.get("name") == "Check emulator readiness and instrumentation result parsers")
-        for script in ("test-emulator-readiness.py", "test-instrumentation-parser.py", "test-ui-runner.py"):
+        for script in ("test-emulator-readiness.py", "test-ci-webview.py", "test-instrumentation-parser.py", "test-ui-runner.py"):
             self.assertIn(script, checks)
         reports = next(step for step in steps if step.get("name") == "Upload test reports")
         self.assertEqual(reports["if"], "failure()")
@@ -206,6 +207,116 @@ class PlayWorkflowTests(unittest.TestCase):
         apk = release["jobs"]["android-apk"]
         self.assertEqual(apk["uses"], "./.github/workflows/android.yml")
         self.assertNotIn("continue-on-error", apk)
+
+    def test_notification_permission_input_requires_fresh_focused_window_bounds(self):
+        source = (ROOT / "android/app/src/notificationSmokeTest/java/com/hobbycoders/aishuffle/NotificationPermissionSmokeTest.kt").read_text()
+        # The API 36 controller exposed a button before a usable physical target:
+        # InputDispatcher routed the old coordinate to its NO_INPUT_CHANNEL sink.
+        self.assertIn("FLAG_RETRIEVE_INTERACTIVE_WINDOWS", source)
+        self.assertIn("flags = originalAutomationFlags", source)
+        for guard in ("node.refresh()", "node.window", "window.isFocused", "window.isActive",
+                      "bounds.intersect(windowBounds)", "stableGeometry", "stableSince"):
+            with self.subTest(guard=guard):
+                self.assertIn(guard, source)
+        self.assertIn("bounds=$bounds", source)
+        self.assertEqual(1, source.count("automation.injectInputEvent(event, true)"))
+        self.assertNotIn("performAction(AccessibilityNodeInfo.ACTION_CLICK)", source)
+
+    def test_offline_demo_navigation_uses_platform_input_barrier(self):
+        source = (ROOT / "android/app/src/androidTest/java/com/hobbycoders/aishuffle/OfflineDemoSmokeTest.kt").read_text()
+        # Espresso's direct InputManager injection can race WindowManager's core
+        # transition even after Settings is focused and its animation has ended.
+        # Keep one physical UiAutomation tap, not a performClick or retry.
+        self.assertNotIn("import androidx.test.espresso.action.ViewActions.click", source)
+        self.assertNotIn(".perform(click())", source)
+        self.assertNotIn("uiAutomation.waitForIdle(", source)
+        self.assertEqual(2, source.count('tapNative(screenView<SettingsActivity>(withText("Explore offline demo")).perform(scrollTo()))'))
+        self.assertEqual(2, source.count('tapNative(screenView<OfflineDemoActivity>(withText("Exit offline demo")))'))
+        self.assertIn("repeat(10) { launch ->", source)
+        self.assertIn("listOf(android.view.MotionEvent.ACTION_DOWN to 0, android.view.MotionEvent.ACTION_UP to 0)", source)
+        helper = (ROOT / "android/app/src/androidTest/java/com/hobbycoders/aishuffle/NativeStateIdlingResource.kt").read_text()
+        # Guard the implementation, not just the callers' helper name. A direct
+        # Espresso click inside tapNative would silently remove the WM barrier.
+        body = helper.split("internal fun tapNative(", 1)[1].split("\ninternal fun ", 1)[0]
+        self.assertEqual(2, body.count("automation.injectInputEvent("))
+        for event in ("down", "up"):
+            self.assertIn(f"automation.injectInputEvent({event}, true)", body)
+        self.assertNotRegex(body, r"\b(?:click|performClick)\s*\(")
+        self.assertNotIn("ACTION_CLICK", body)
+
+    def test_offline_demo_selects_only_the_resumed_focused_destination_root(self):
+        source = (ROOT / "android/app/src/androidTest/java/com/hobbycoders/aishuffle/OfflineDemoSmokeTest.kt").read_text()
+        # Input acknowledgement precedes a destination Activity's resume: API 34
+        # selected Workers at 07:03:40.443, before Settings resumed at .551.
+        signature = "private inline fun <reified A : android.app.Activity> screenView("
+        self.assertIn(signature, source, "Destination lookup must wait for its own Activity/root")
+        body = source.split(signature, 1)[1].split("    private fun openSettings()", 1)[0]
+        for guard in ("activity is A && stage == androidx.test.runner.lifecycle.Stage.RESUMED",
+                      "getActivitiesInStage(androidx.test.runner.lifecycle.Stage.RESUMED)",
+                      "resumed.await(8, TimeUnit.SECONDS)", "monitor.removeLifecycleCallback(callback)",
+                      "awaitNativeWindow(activity)",
+                      "onView(matcher).inRoot(withDecorView(sameInstance(activity.window.decorView)))"):
+            with self.subTest(guard=guard):
+                self.assertIn(guard, body)
+        self.assertLess(body.index("resumed.await("), body.index("awaitNativeWindow(activity)"))
+        self.assertLess(body.index("awaitNativeWindow(activity)"), body.index("onView(matcher)"))
+        self.assertEqual(1, source.count("onView("), "All navigation lookups must use screenView, not an outgoing default root")
+        for screen, target, count in (("ServerListActivity", 'withContentDescription("Settings")', 1),
+                                      ("SettingsActivity", 'withText("Explore offline demo")', 2),
+                                      ("OfflineDemoActivity", 'withText("Exit offline demo")', 2),
+                                      ("SettingsActivity", 'withText("Settings")', 3),
+                                      ("SettingsActivity", 'withContentDescription("Back")', 2)):
+            with self.subTest(screen=screen, target=target):
+                self.assertEqual(count, source.count(f"screenView<{screen}>({target})"))
+
+    def test_offline_demo_destination_guard_rejects_transition_mutations(self):
+        source = ROOT / "android/app/src/androidTest/java/com/hobbycoders/aishuffle/OfflineDemoSmokeTest.kt"
+        read_text = Path.read_text
+        original = source.read_text()
+        mutations = {
+            "missing focused frame": original.replace("awaitNativeWindow(activity)", "// missing focused frame"),
+            "wrong resumed stage": original.replace("Stage.RESUMED", "Stage.STARTED"),
+            "outgoing default root": original.replace(".inRoot(withDecorView(sameInstance(activity.window.decorView)))", ""),
+            "unscoped Back tap": original.replace('screenView<SettingsActivity>(withContentDescription("Back"))',
+                                                  'onView(withContentDescription("Back"))'),
+        }
+        for name, mutated in mutations.items():
+            with self.subTest(mutation=name):
+                self.assertNotEqual(original, mutated)
+                def read_source(path, *args, **kwargs):
+                    return mutated if path == source else read_text(path, *args, **kwargs)
+                with patch.object(Path, "read_text", new=read_source):
+                    with self.assertRaises(AssertionError):
+                        PlayWorkflowTests("test_offline_demo_selects_only_the_resumed_focused_destination_root").debug()
+
+    def test_offline_demo_barrier_guard_rejects_helper_mutations(self):
+        helper = ROOT / "android/app/src/androidTest/java/com/hobbycoders/aishuffle/NativeStateIdlingResource.kt"
+        read_text = Path.read_text
+        original = helper.read_text()
+        start = original.index("internal fun tapNative(")
+        end = original.index("\ninternal fun ", start)
+        espresso = original[:start] + (
+            "internal fun tapNative(target: androidx.test.espresso.ViewInteraction) {\n"
+            "    target.perform(androidx.test.espresso.action.ViewActions.click())\n}\n"
+        ) + original[end:]
+        mutations = {
+            "Espresso replaces platform barrier": espresso,
+            "DOWN becomes asynchronous": original.replace("injectInputEvent(down, true)", "injectInputEvent(down, false)"),
+            "UP becomes asynchronous": original.replace("injectInputEvent(up, true)", "injectInputEvent(up, false)"),
+            "extra Espresso click": original[:start] + original[start:].replace(
+                "    lateinit var point: FloatArray",
+                "    target.perform(androidx.test.espresso.action.ViewActions.click())\n    lateinit var point: FloatArray", 1),
+        }
+        for name, mutated in mutations.items():
+            with self.subTest(mutation=name):
+                self.assertNotEqual(original, mutated)
+                def read_source(path, *args, **kwargs):
+                    return mutated if path == helper else read_text(path, *args, **kwargs)
+                # Mutate only an in-memory source read: the Kotlin helper and
+                # every call site in the checkout remain untouched.
+                with patch.object(Path, "read_text", new=read_source):
+                    with self.assertRaises(self.failureException):
+                        self.test_offline_demo_navigation_uses_platform_input_barrier()
 
     def test_all_inline_shell_parses(self):
         for job in self.jobs.values():

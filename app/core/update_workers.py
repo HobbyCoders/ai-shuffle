@@ -501,20 +501,20 @@ async def _remote(row, body):
         if not isinstance(result, dict):
             raise ValueError("Invalid peer update response")
         fields = ("accepted", "reason", "supported", "allow_updates", "phase", "version", "running_version", "percent", "message", "error",
-                  "request_pending", "checked_at", "channel", "release", "notes", "kind",
+                  "request_pending", "checked_at", "channel", "release", "notes", "kind", "updater", "diagnostics",
                   "revision", "app_version", "busy", "deferred", "notice", "installer_newer", "retry_start",
                   "staged_version", "install_state", "blocked_by", "wait_reason", "restart_expires_at", "monitor_serving_idle_seconds", "stop_result")
-        return {key: result[key] for key in fields if key in result}
+        return updates.safe_update_metadata({key: result[key] for key in fields if key in result})
     except control.ControlRefused:
         # The peer answered and declined (an older build without the updater
         # endpoint answers 404): it is definitively outside this update.
-        return {"accepted": None, "reason": "Worker declined application updates; not included",
-                "supported": False, "phase": "unsupported"}
+        return updates.safe_update_metadata({"accepted": None, "reason": "Worker declined application updates; not included",
+                                             "supported": False, "phase": "unsupported"})
     except Exception:
         # "unknown", not "unsupported": an online worker whose status cannot be
         # read may still be preparing, so it must never count as excluded.
-        return {"accepted": None, "reason": "Worker unavailable or does not support application updates",
-                "supported": False, "phase": "unknown"}
+        return updates.safe_update_metadata({"accepted": None, "reason": "Worker unavailable or does not support application updates",
+                                             "supported": False, "phase": "unknown"})
 
 
 def _peer_entry(device_id):
@@ -738,6 +738,9 @@ async def snapshot(*, fresh=False):
     fresh = fresh or verifying
     if local["update_all_workers"] or tracked:
         async def read(row):
+            # Directory/discovery records identify peers; only their status
+            # producer may supply updater metadata. Offline rows stay unknown.
+            row = {key: value for key, value in row.items() if key not in ("updater", "diagnostics")}
             if not row["online"]:
                 return {**row, "supported": False, "phase": "unsupported", "reason": "Offline; not queued"}
             return {**row, **await _peer_status_for(row["device_id"], fresh=fresh)}
@@ -768,7 +771,7 @@ async def snapshot(*, fresh=False):
         _discover(rows, verifying)
     # Only return display fields, never peer endpoints/certificates.
     fields = ("device_id", "device_name", "is_self", "online", "supported", "allow_updates", "phase", "version", "running_version", "percent", "message", "error", "reason",
-              "request_pending", "checked_at", "channel", "release", "notes", "role", "label", "deferred", "notice",
+              "request_pending", "checked_at", "channel", "release", "notes", "role", "label", "deferred", "notice", "updater", "diagnostics",
               "remedy", "data_kept", "staged_version", "install_state", "blocked_by", "wait_reason", "restart_expires_at", "monitor_serving_idle_seconds", "stop_result")
     # server_time lets a browser judge how recent a completion is without
     # trusting its own clock (completed_at is stamped by this worker).
@@ -777,7 +780,7 @@ async def snapshot(*, fresh=False):
             "operation": observed,
             "plan": plan(rows, observed),
             "refusals": dict(_refusals),
-            "workers": [{key: row.get(key) for key in fields} for row in rows]}
+            "workers": [updates.safe_update_metadata({key: row.get(key) for key in fields}) for row in rows]}
 
 
 async def dispatch(action, mode=None, scope=None):

@@ -76,13 +76,64 @@ cost/publication policy tests. The asset paths matter: the APK's offline demo is
 built from `mobile/` and shared `frontend/` dependencies. Drafts and forks run too,
 on standard free `ubuntu-latest` runners. Superseded PR runs are cancelled.
 
+Both Android emulator workflows deliberately use `google_apis` on API 36 again,
+reversing the earlier AOSP-only choice after SystemUI/GMS ANRs. This image permits
+co-installing the signed, absent `com.android.webview` alternate without replacing
+a differently signed system APK. The initial six first-attempt boots across both
+workflows reached stable launchers without ANR recovery (debug runs 41544019324,
+41546528364, 41548997981; minified runs 41544019247, 41546528197, 41548997948); that is limited
+boot evidence, not proof that Google services can never cause an ANR.
+
+API 36 uses a **co-installed pinned AOSP alternate, not the phone provider**:
+WebView 136.0.7103.129 is a monolithic AOSP APK, whereas real phones typically use
+Google's auto-updating provider. This is not current-Google-WebView compatibility
+coverage; phones still on WebView 133 and provider-specific bugs remain outside
+this workaround. The proposed upstream request-lifetime fix's link to the observed
+native abort is inferred, not established by a symbolized stack.
+
+On a cache miss each API 36 leg fetches the 274,674,253-byte APK from a pinned
+Google Gitiles source commit using `android/ci/ci_webview.py`. Both workflows share
+an `actions/cache` key containing its exact SHA-256. A cache saved on a PR's merge
+ref is visible only to that PR, not to other PRs. `android-webview-cache.yml`
+therefore seeds the identical key and path on **main**: a push changing the helper
+or seed workflow triggers it, and two small weekly refreshes (Monday/Thursday,
+04:23 UTC) limit inactivity. Cross-PR hits are best effort: repository size pressure
+can evict even a recently used seeded entry within hours, before seven-day
+inactivity eviction. At review time, the repository held 9.66 GiB across 517
+entries, and its oldest entry had last been used 77 minutes earlier. The seeder
+uses one free standard Ubuntu runner, a 15-minute limit, no emulator or publishing
+credentials, and permits manual runs only on main. GitHub's default-branch cache fallback can
+then serve new PRs without their first API 36 runs independently fetching Gitiles.
+Cache hits still verify size and digest, including in the seeder; `actions/cache`
+only saves a miss after successful verification, and `prepare-android-ui.py`
+verifies again before install. Only bounded transient/truncated network transfers
+are retried, never app tests or a full-size checksum mismatch. A corrupt cache
+fails closed. API 34 retains its stock AOSP image/provider; no Chromium crash
+checks or APK signature checks are disabled.
+
+**Post-merge verification is required:** PR tests validate the seed workflow's
+triggers, guards, shared cache version inputs and unconditional verifier; a PR run
+cannot prove a push/scheduled cache publication on main or another PR's restore.
+After merge, check the first `Seed Android WebView cache` main-push job succeeds
+and its log verifies the exact pinned bytes before the cache save. Confirm
+`gh cache list --key aosp-webview-x86_64-8da41a8692c64870dc875a0fa656c59a678aa09902935c5095e7de6fd7c55a87 --json key,ref,lastAccessedAt`
+shows the entry on `refs/heads/main`, not just `refs/pull/.../merge`. On a new PR's
+first run, record each API 36 consumer's cache hit or miss. On a hit, check the
+helper's `Verified cached AOSP alternate WebView` result (no Gitiles fetch); on a
+miss, record the verified download fallback rather than assuming seed failure.
+Then confirm a scheduled main run refreshes the cache access time. The schedule
+and cross-PR hits are not claimed as observed before merge; missing/evicted
+entries still use the existing verified, bounded-transfer fallback.
+
 Only build/test and emulator jobs run on PRs. Existing owner/event/ref/input
 predicates still exclude PRs from every Firebase/signing/release-staging step
 and the write-permission publish job, even when evaluated with owner identity
 and publication inputs enabled. `tests/scripts/test_owner_publication_policy.py`
-checks those actual predicates; no release guard is relaxed. API 36 retains its
-existing release-advisory status (tracking #2375); its test-step failures remain
-visible and must be inspected, not treated as an app pass. API 34 gates publication.
+checks those actual predicates; no release guard is relaxed. In `android.yml`,
+API 36 retains its existing release-advisory status (tracking #2375); its failures
+remain visible, not app passes. API 34 gates publication. The separate minified
+API 34 and API 36 checks are both required on every PR, with no advisory bypass;
+the image/provider choice and limited boot evidence above apply to them too.
 
 Cloud service checks and deploy workflows live in the private
 [HobbyCoders/hobbycoders-cloud](https://github.com/HobbyCoders/hobbycoders-cloud)
@@ -113,7 +164,7 @@ three desktop shards, not the separate stable-release portability matrix.
 | docs | `android-and-docs` → exact local docs-copy helper; JavaScript contracts also compare copies |
 | desktop | `desktop` → existing typecheck and all unit tests |
 | android-bridge | `android-and-docs` → existing local Node download-bridge tests |
-| android-play | `android-and-docs` → all local Python/workflow-shell test scripts |
+| android-play | `android-and-docs` → all local Python/workflow-shell test scripts, including the default-branch WebView cache policy |
 | workflows/policy | `policy` → artifact/cost scripts and the complete local eight-file policy set, plus parity regressions |
 | update-reach | `update-reach` → regression set and strict signed-publication/merged-PR readiness (not advisory) |
 | full preflight security | `supply-chain` → offline secret scan and identical report-only dependency audit, including source-publisher |
@@ -696,6 +747,8 @@ protection, not GitHub push protection; the hook must be installed on each clone
 
 ## Out-of-reach changes: draft first, owner acceptance before readiness
 
+All other PRs open as real (ready for review) PRs against `main`, not drafts.
+
 The pre-push update-reach check reads `gh pr view --json isDraft,labels`.
 When the branch has no PR yet or its PR is a draft, an unreachable change is a
 prominent **NOTE — OUT OF REACH**, not a push failure. The note names each group
@@ -711,6 +764,10 @@ push only. Other check failures still fail the push.
    review, have the owner/release agent mark it ready. A ready PR without the
    required labels fails update-reach on subsequent checks/pushes. Cached test
    passes do not cache PR state or labels: pre-push reads them again.
+
+If a later push to a real PR is refused because the change became out of reach,
+convert it to a draft with `gh pr ready --undo <N>` and ask the owner for acceptance
+as above.
 
 **`gh pr ready` and `gh pr merge` themselves are not blocked; edge publication
 is.** There is no GitHub-required PR check (PR CI remains off). The strict
@@ -878,6 +935,20 @@ and feed the required `JavaScript package checks` aggregate. Neither uses a
 path filter (no frontend job does).
 
 ### UI journeys
+
+The `JavaScript contracts, docs and frontend audit` job runs
+`node frontend/tests/journeys/select.mjs --check` from the repository root on
+every PR. It fails if a journey lacks its own rule in `map.json`, a rule names
+an unknown journey, or a glob matches no tracked file. The default shallow
+checkout is sufficient: validation uses `git ls-files`, not commit history.
+Before checking the checkout's map, the same required job runs
+`node --test frontend/tests/journeys/select.test.mjs`: temporary maps exercise
+the exported validator and real CLI, requiring exit 0 for a valid map and exit 2
+for an unmatched glob, a rule-less or unknown journey, and a rule missing its
+`why`. The policy test rejects job- or step-level conditions, `continue-on-error`
+and shell overrides on this check, and keeps `contracts` in both the aggregate's
+`needs` and its expected-results list.
+This validates selection metadata; the journey shards still run every journey.
 
 `UI journeys (N/6)`: each shard installs the Python and JavaScript
 dependencies (pip/npm caches) and Chromium (browser-mcp's pinned

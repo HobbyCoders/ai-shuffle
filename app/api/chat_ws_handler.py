@@ -1947,7 +1947,7 @@ class ChatWebSocketHandler:
                 # unnamed source too); computer use reports it as theirs.
                 source="user_stop",
             )
-            if flipped is not None or target_turn_id is None:
+            if await run_sync(turn_manager.stop_reaches_background_work, session_id, target_turn_id, flipped):
                 # A session-scoped Stop also quiesces queued/blocked work with
                 # no live turn. A stale TURN-scoped Stop still spares successors.
                 # Mark canceled-task wakes suppressed and stop all owned tasks.

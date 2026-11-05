@@ -78,9 +78,11 @@ jobs:
       matrix:
         include:
           - api: 34
+            target: default
             cores: 2
             memory: 2048
           - api: 36
+            target: google_apis
             cores: 4
             memory: 4096
     defaults:
@@ -92,6 +94,16 @@ jobs:
         with:
           name: android-minified-smoke-apks
           path: android/minified-apks
+      - name: Cache pinned AOSP alternate WebView
+        if: matrix.api == 36
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/ci-webview.apk
+          key: aosp-webview-x86_64-8da41a8692c64870dc875a0fa656c59a678aa09902935c5095e7de6fd7c55a87
+      - name: Fetch or verify pinned AOSP alternate WebView for API 36
+        if: matrix.api == 36
+        # On cache hits the helper still verifies size/SHA; installation verifies again.
+        run: python3 ci/ci_webview.py "$RUNNER_TEMP/ci-webview.apk"
       - name: Free disk for the disposable AVD
         run: |
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift /opt/hostedtoolcache/CodeQL /usr/local/lib/android/sdk/ndk
@@ -103,18 +115,20 @@ jobs:
         shell: bash
         run: |
           sudo chmod 666 /dev/kvm
-          sdkmanager --install platform-tools 'platforms;android-${{ matrix.api }}' emulator 'system-images;android-${{ matrix.api }};default;x86_64'
+          sdkmanager --install platform-tools 'platforms;android-${{ matrix.api }}' emulator 'system-images;android-${{ matrix.api }};${{ matrix.target }};x86_64'
           export ANDROID_AVD_HOME="$HOME/.android/avd"
           mkdir -p "$ANDROID_AVD_HOME"
-          avdmanager create avd --force --name test --package 'system-images;android-${{ matrix.api }};default;x86_64' --device pixel_6 <<< no
+          avdmanager create avd --force --name test --package 'system-images;android-${{ matrix.api }};${{ matrix.target }};x86_64' --device pixel_6 <<< no
           printf '\ndisk.dataPartition.size=6144M\n' >> "$ANDROID_AVD_HOME/test.avd/config.ini"
           bash ci/emulator-diagnostics.sh before-boot
           bash ci/emulator-storage.sh check
       - name: Run black-box tests against non-debuggable minified code
         uses: reactivecircus/android-emulator-runner@v2
+        env:
+          CI_WEBVIEW_APK: ${{ runner.temp }}/ci-webview.apk
         with:
           api-level: ${{ matrix.api }}
-          target: default
+          target: ${{ matrix.target }}
           arch: x86_64
           profile: pixel_6
           working-directory: android

@@ -255,3 +255,37 @@ def test_a_restore_note_only_removes_the_row_it_names(mock_db):
     ])
     assert [m["content"] for m in project_event_messages("s-rest-two", session_events.get_events("s-rest-two"))] \
         == ["a real message"]
+
+
+async def test_stop_writes_the_whole_queue_in_one_commit(mock_db, monkeypatch):
+    """The chat shows one commit at a time; a row per commit would push the
+    bubbles still waiting below it down once per queued message."""
+    _chat("s-batch")
+    queued = [turns.enqueue_turn("s-batch", "user", prompt=words)
+              for words in ("first words", "second words", "third words")]
+    notified: list[tuple[str, list[str]]] = []
+    real_notify = session_events.notify_session_write
+
+    def notify(session_id, collection):
+        notified.append((session_id, [r["content"] for r in _rows(session_id)]))
+        real_notify(session_id, collection)
+
+    monkeypatch.setattr(session_events, "notify_session_write", notify)
+
+    await enter_user_stop("s-batch")
+
+    batch = [words for sid, words in notified if sid == "s-batch" and words]
+    assert batch and batch[0] == ["first words", "second words", "third words"]
+    assert {turns.get_turn(t["id"])["state"] for t in queued} == {"aborted"}
+
+
+async def test_stopping_a_queue_spares_a_row_that_already_left_it(mock_db):
+    _chat("s-raced")
+    started = turns.enqueue_turn("s-raced", "user", prompt="already gone")
+    waiting = turns.enqueue_turn("s-raced", "user", prompt="still waiting")
+    turns.remove_queued_turn(started["id"])
+
+    removed = turns.stop_queued_turns("s-raced", [started["id"], waiting["id"]])
+
+    assert [row["id"] for row in removed] == [waiting["id"]]
+    assert [r["content"] for r in _rows("s-raced")] == ["still waiting"]

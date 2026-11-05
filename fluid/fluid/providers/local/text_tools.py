@@ -418,6 +418,8 @@ class TextToolsAdapter:
             max_tokens=request.max_tokens,
             thinking=request.thinking,
             effort=request.effort,
+            session_id=request.session_id,
+            wire_state=request.wire_state,
             extra=request.extra,
         )
 

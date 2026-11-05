@@ -27,6 +27,11 @@
 	 * Screen-reader announcements of those verdicts live in
 	 * PendingStatusAnnouncer, outside the transcript's log region.
 	 *
+	 * `stopped` is a message Stop already refused, waiting for the stopped turn to
+	 * settle before it becomes a "Not sent" row (see not-sent-hold). It has no
+	 * controls, and only the last bubble keeps its action row, so stopping changes
+	 * no bubble's height.
+	 *
 	 * `stale` (#524): the worker running this chat could not confirm the queue
 	 * (its read came back unavailable, or never came back). The bubbles are the
 	 * ones this tab last knew about and stay put; they only change chrome — a
@@ -63,7 +68,7 @@
 		return messages.length - 1;
 	});
 
-	const STATUS_LABEL = { cancelling: 'Cancelling…', delivered: 'Already sent' } as const;
+	const STATUS_LABEL = { cancelling: 'Cancelling…', delivered: 'Already sent', stopped: 'Not sent' } as const;
 
 	// Svelte delegates clicks at the root, where a synthetic click on a disabled
 	// button still arrives — so the guard lives here too, not only in `disabled`.
@@ -80,11 +85,11 @@
 	<div class="pending-messages" class:is-stale={stale}>
 		{#each messages as msg, i (msg.id)}
 			{@const isAnchor = i === anchor}
-			<div class="userrow" role="article">
+			<div class="userrow" role="article" data-queue-confirmed={msg.id !== msg.clientMessageId} data-queue-status={msg.status}>
 				<div class="usercol">
 					<div class="bubble" class:is-cancelling={msg.status === 'cancelling'}>
 						<div class="bubble-text" class:is-clamped={shouldCollapseUserMessage(msg.content)}>{msg.content}</div>
-						{#if !isAnchor && msg.status !== 'delivered'}
+						{#if !isAnchor && msg.status !== 'delivered' && msg.status !== 'stopped'}
 							<button
 								type="button"
 								class="hover-remove"
@@ -95,7 +100,7 @@
 							>×</button>
 						{/if}
 					</div>
-					{#if isAnchor || msg.status}
+					{#if isAnchor || (msg.status && msg.status !== 'stopped')}
 						<div class="pending-actions">
 							{#if msg.status}
 								<span
@@ -107,7 +112,7 @@
 							{:else}
 								<span class="pending-hint">Not seen yet</span>
 							{/if}
-							{#if isAnchor && msg.status !== 'delivered'}
+							{#if isAnchor && msg.status !== 'delivered' && msg.status !== 'stopped'}
 								<span class="pending-sep" aria-hidden="true">·</span>
 								<button
 									type="button"

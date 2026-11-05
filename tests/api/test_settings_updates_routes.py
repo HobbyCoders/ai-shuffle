@@ -144,8 +144,11 @@ def test_workers_lists_this_worker_without_peer_endpoints(c):
     assert set(body["workers"][0]) == {
         "device_id", "device_name", "is_self", "online", "supported", "allow_updates", "phase", "version",
         "running_version", "percent", "message", "error", "reason", "request_pending", "checked_at",
-        "channel", "release", "notes", "role", "label", "deferred", "notice", "remedy", "data_kept",
+        "channel", "release", "notes", "role", "label", "deferred", "notice", "remedy", "data_kept", "updater", "diagnostics",
         "staged_version", "install_state", "blocked_by", "wait_reason", "restart_expires_at", "monitor_serving_idle_seconds", "stop_result"}
+    # No resident report exists yet: absence is unknown, not an outdated updater.
+    assert body["workers"][0]["updater"] == {"revision": None, "capabilities": [], "refresh": "unknown"}
+    assert body["workers"][0]["diagnostics"] is None
     assert body["plan"]["action"] in ("check", "download", "install")
 
 

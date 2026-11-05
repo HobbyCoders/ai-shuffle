@@ -844,14 +844,17 @@ def handover(settings, execve=os.execve):
     runs this image's supervisor instead, over the same update. Returns False
     when this image's supervisor should run; on success it does not return.
     """
-    if os.environ.get("SHUFFLE_HANDED_OVER") or os.environ.get("SHUFFLE_SOURCE_SUPERVISOR", "1").strip() == "0":
+    if (os.environ.get("SHUFFLE_HANDED_OVER")
+            or os.environ.get("SHUFFLE_SOURCE_SUPERVISOR", "1").strip() == "0"):
+        return False
+    if STOP.is_set():
         return False
     if isolation().ACTIVE is not None:
         # An update's supervisor would start with the service account's ids
         # and code the agent could have written before the mode was on.
         log("agent isolation: running this image's supervisor; updates still apply to the app")
         return False
-    here = Path(__file__).resolve().parent
+    here = image_dir()
     try:
         image = json.loads((here / "image.json").read_text())
     except (OSError, ValueError):
@@ -1652,7 +1655,16 @@ def watch(app, db, chrome, monitor=None, updates=None, restart=None, relaunch=No
                     confirm_handover(updates.root)
         if failure is None and updates is not None and time.monotonic() >= next_update:
             next_update = time.monotonic() + 1
-            if updates.install_requested.is_set():
+            if getattr(updates, "refresh_requested", None) is not None and updates.refresh_requested.is_set():
+                updates.refresh_requested.clear()
+                # An older producer may have queued the now-deferred shortcut.
+                # Refusal (including a failed status write) must leave the app serving.
+                try:
+                    updates.publish("ready" if updates.state.get("pending") else "idle",
+                                    error=UPDATER_REFRESH_UNAVAILABLE)
+                except Exception:
+                    log("could not publish the updater refresh refusal; current worker left running")
+            elif updates.install_requested.is_set():
                 updates.install_requested.clear()
                 try:
                     app = restart(app)
@@ -1704,6 +1716,24 @@ def watch(app, db, chrome, monitor=None, updates=None, restart=None, relaunch=No
 def _update_error(exc):
     # UpdateError comes from the updater module loaded beside this file.
     return type(exc).__name__ == "UpdateError"
+
+
+def updater_refresh_mode(image):
+    if isolation().ACTIVE is not None or "source-supervisor" not in (image.get("provides") or []):
+        return "image_update_required"
+    if os.environ.get("SHUFFLE_SOURCE_SUPERVISOR", "1").strip() == "0":
+        return "disabled"
+    return "container_restart_required"
+
+
+UPDATER_REFRESH_UNAVAILABLE = (
+    "In-app updater refresh is unavailable. Reloading the updater requires a separately approved container restart."
+)
+
+
+def prepare_updater_refresh(updates):
+    """Fail closed for stale callers; only process startup may hand over the supervisor."""
+    raise RestartRejected("Updater refresh is unavailable", UPDATER_REFRESH_UNAVAILABLE)
 
 
 def restart_into_update(current, updates, env, before_start=None):
@@ -1831,7 +1861,7 @@ def run(settings, action, filename=None):
                 try:
                     updates = ContainerUpdates(root, image, (image_dir() / "application-update-key.pem").read_bytes(),
                                                lambda: lifecycle("update-policy").get("allow_updates") is True, lifecycle,
-                                               channel=channel, database=db)
+                                               channel=channel, database=db, refresh_mode=updater_refresh_mode(image))
                 except UpdateError as exc:
                     raise RuntimeFailure(str(exc)) from exc
         chrome_selection = None

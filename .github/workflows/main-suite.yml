@@ -17,6 +17,16 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Build beside the suite, not after it. This optional cache is never proof of
+  # eligibility; publication still requires the exact successful main-suite run.
+  source-ui:
+    if: github.repository == 'HobbyCoders/ai-shuffle' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    uses: ./.github/workflows/source-ui-bundle.yml
+    with:
+      source-ref: ${{ github.sha }}
+      artifact-name: source-ui-${{ github.sha }}-${{ github.run_attempt }}
+      optional: true
+
   backend:
     if: github.event_name == 'push' || github.ref == 'refs/heads/main'
     uses: ./.github/workflows/ci-backend.yml

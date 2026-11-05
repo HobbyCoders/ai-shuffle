@@ -388,6 +388,7 @@ async def test_handoff_creates_seeded_session_and_event() -> None:
 
     # The summary request carried the transcript and the goal.
     handoff_req = provider.requests[-1]
+    assert handoff_req.session_id == sid
     assert "finish the migration" in handoff_req.messages[0].content[0].text
     assert "do the thing" in handoff_req.messages[0].content[0].text
 

@@ -200,7 +200,7 @@ def _scan_commands_directory(
 
 
 def _delegated_commands(working_dir: str, setting_sources=None) -> List[SlashCommand]:
-    """Claude's own commands, plus approved app-authored plugin commands."""
+    """Claude's own commands, plus the same approved Fluid catalog as native."""
     from fluid.context.plugins import discover_plugins
     from fluid.context.settings_stack import _load_json, merge_settings, project_dirs
     from app.core.plugin_models import _get_claude_dir
@@ -239,7 +239,9 @@ def _delegated_commands(working_dir: str, setting_sources=None) -> List[SlashCom
                     cmd.type = kind
                     if kind != "skill" or cmd.user_invocable:
                         by_name.setdefault(cmd.name, cmd)
-    for cmd in _fluid_commands(working_dir, setting_sources, authored_only=True):
+    for cmd in _fluid_commands(working_dir, setting_sources):
+        if cmd.name in SDK_BUILTIN_COMMANDS or cmd.name in INTERACTIVE_COMMANDS:
+            continue
         cmd.expand_in_app = True
         # Claude's own commands keep their precedence and CLI execution path.
         by_name.setdefault(cmd.name, cmd)
@@ -253,8 +255,8 @@ def _runtime_commands(working_dir, provider_kind, setting_sources):
     return discover(working_dir, setting_sources)
 
 
-def _fluid_commands(working_dir: str, setting_sources=None, *, authored_only=False) -> List[SlashCommand]:
-    """Use native discovery and approval checks, optionally only authored plugins."""
+def _fluid_commands(working_dir: str, setting_sources=None) -> List[SlashCommand]:
+    """Use native discovery, scope, enablement and approval checks on every runtime."""
     from fluid.context.instructions import discover_commands as native_commands
     from fluid.context.instructions import discover_skills as native_skills
     from fluid.context.plugins import discover_plugins
@@ -264,12 +266,8 @@ def _fluid_commands(working_dir: str, setting_sources=None, *, authored_only=Fal
     project_on = "project" in sources
     # Native prompt compilation and the Skill tool gate plugins on user scope.
     plugins = discover_plugins(working_dir, sources=sources) if user_on else []
-    if authored_only:
-        from fluid.context.plugin_authoring import AUTHORED_SOURCE
-
-        plugins = [plugin for plugin in plugins if plugin.marketplace == AUTHORED_SOURCE]
-    options = dict(include_global=user_on and not authored_only,
-                   include_project=project_on and not authored_only,
+    options = dict(include_global=user_on,
+                   include_project=project_on,
                    include_plugins=True, plugins=plugins)
     plugin_sources = {entry.path: plugin.ref for plugin in plugins
                       for entry in [*plugin.commands, *plugin.skills]}
@@ -342,7 +340,7 @@ def expand_native_command(working_dir: str, prompt: str, *, setting_sources=None
 
 
 def expand_delegated_command(working_dir: str, prompt: str, *, setting_sources=None) -> str:
-    """Expand app-authored plugins; leave Claude's own commands exactly as typed."""
+    """Expand Fluid commands/skills; leave Claude's own commands exactly as typed."""
     name, arguments = parse_command_input(prompt)
     if not name:
         return prompt

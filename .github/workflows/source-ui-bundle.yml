@@ -12,6 +12,9 @@ on:
       artifact-name:
         default: source-ui
         type: string
+      optional:
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -20,6 +23,9 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # Only the speculative main-suite cache may fail open. Publication callers
+    # retain the blocking default and rebuild when a cache is unavailable.
+    continue-on-error: ${{ inputs.optional }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -43,10 +49,17 @@ jobs:
         run: |
           revision=$(git rev-parse HEAD)
           echo "revision=$revision" >> "$GITHUB_OUTPUT"
+          version="$UI_VERSION"
+          if [ -z "$version" ]; then
+            version=$(python -I .ui-control/scripts/ci/publication_source.py version --source-root "$GITHUB_WORKSPACE" --revision "$revision" | python -I -c 'import json, sys; print(json.load(sys.stdin))')
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+        env:
+          UI_VERSION: ${{ inputs.version }}
       - name: Build desktop and phone together without publication credentials
         env:
           UI_REVISION: ${{ steps.source.outputs.revision }}
-          UI_VERSION: ${{ inputs.version }}
+          UI_VERSION: ${{ steps.source.outputs.version }}
         run: |
           mkdir -p "$RUNNER_TEMP/source-ui"
           python -I .ui-control/scripts/build_ui_bundle.py --source-root "$GITHUB_WORKSPACE" --revision "$UI_REVISION" --version "$UI_VERSION" --output "$RUNNER_TEMP/source-ui/ui.zip"
@@ -54,5 +67,5 @@ jobs:
         with:
           name: ${{ inputs.artifact-name }}
           path: ${{ runner.temp }}/source-ui/ui.zip
-          retention-days: 1
+          retention-days: 7
           if-no-files-found: error

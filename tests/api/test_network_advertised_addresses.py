@@ -6,7 +6,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.api import auth, network as api
-from app.core import managed_connection
+from app.core import managed_connection, native_providers
 from app.core.config import settings
 from app.db import database
 from app.db import network as store
@@ -56,7 +56,9 @@ def test_public_alias_with_tunnel_repairs_binding_and_is_signed_into_presence(se
     assert not applied.rejected
     with peer.active():
         assert alias in engine.presence_of(server.device_id)["endpoints"]
-        assert engine.presence_of(server.device_id)["capabilities"] == {**capabilities, "nested-secret-rekey": 1}
+        assert engine.presence_of(server.device_id)["capabilities"] == {
+            **capabilities, "nested-secret-rekey": 1, native_providers.CAPABILITY: 1,
+        }
         assert advertisements.owner_urls() == []  # another worker's local config is not imported
     with server.active():
         assert client.get("/api/v1/network/advertised-addresses").json()["addresses"] == [alias]

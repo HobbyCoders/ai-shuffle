@@ -28,6 +28,7 @@ import asyncio
 from contextlib import ExitStack
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 
 import app.api.chat_ws_handler as cwh
 from app.core.config import settings
@@ -606,6 +607,88 @@ async def test_handle_stop_stale_turn_id_spares_successor(mock_db):
     # Successor untouched (still running); the stale target stays completed.
     assert turns_db.get_turn(n1)["state"] == "running"
     assert turns_db.get_turn(n)["state"] == "completed"
+
+
+@pytest.mark.parametrize("newer", ["queued", "cancelled", "started", "completed"])
+async def test_handle_stop_on_a_parked_turn_ends_its_work(mock_db, newer):
+    """A turn parked on background work is the chat's current turn: Stop aimed
+    at it must reach that work, or the job finishes and wakes the chat anyway."""
+    _make_session("sess-1")
+    parked, successor = _park_with_newer_queue_history(newer)
+
+    with _Patches(), patch(
+        "app.core.query_session_lifecycle.stop_all_background_tasks",
+        new=AsyncMock(),
+    ) as stop_bg:
+        await _make_handler().handle_stop({"session_id": "sess-1", "turn_id": parked})
+
+    if newer in ("started", "completed"):
+        stop_bg.assert_not_awaited()
+        assert turns_db.get_turn(successor)["state"] == ("running" if newer == "started" else "completed")
+    else:
+        stop_bg.assert_awaited_once_with("sess-1", user_stop=True)
+
+
+async def test_handle_stop_for_a_parked_turn_spares_a_later_turn(mock_db):
+    """A delayed Stop for a parked turn that has since been followed by a wake
+    still spares the wake, like any other Stop for a turn that has passed."""
+    _make_session("sess-1")
+    parked = turns_db.enqueue_turn("sess-1", "user", prompt="first")["id"]
+    turns_db.start_turn(parked, run_id="run-1")
+    turns_db.park_turn(parked)
+    wake = turns_db.enqueue_turn("sess-1", "queue", prompt="wake")["id"]
+    turns_db.start_turn(wake, run_id="run-2")
+
+    with _Patches(), patch(
+        "app.core.query_session_lifecycle.stop_all_background_tasks",
+        new=AsyncMock(),
+    ) as stop_bg:
+        await _make_handler().handle_stop({"session_id": "sess-1", "turn_id": parked})
+
+    stop_bg.assert_not_awaited()
+    assert turns_db.get_turn(wake)["state"] == "running"
+
+
+def _park_with_newer_queue_history(newer):
+    parked = turns_db.enqueue_turn("sess-1", "user", prompt="first")["id"]
+    turns_db.start_turn(parked, run_id="run-1")
+    successor = turns_db.enqueue_turn("sess-1", "queue", prompt="second")["id"]
+    if newer == "cancelled":
+        turns_db.remove_queued_turn(successor)
+    turns_db.park_turn(parked)
+    if newer in ("started", "completed"):
+        turns_db.start_turn(successor, run_id="run-2")
+        if newer == "completed":
+            turns_db.settle_turn(successor, "completed")
+    # Queue/history consumers must still see Q; only Stop ignores unstarted Q.
+    assert turns_db.get_latest_run_turn("sess-1")["id"] == successor
+    return parked, successor
+
+
+@pytest.mark.parametrize("newer", ["queued", "cancelled", "started", "completed"])
+async def test_stop_relayed_to_the_owning_worker_ends_a_parked_turns_work(mock_db, newer):
+    """The same rule when another worker's page relays the Stop to the owner."""
+    from app.network import control
+
+    _make_session("sess-1")
+    parked, successor = _park_with_newer_queue_history(newer)
+
+    with patch.object(control, "_require_owned"), patch(
+        "app.core.query_session_lifecycle.stop_all_background_tasks",
+        new=AsyncMock(),
+    ) as stop_bg:
+        reply = await control._interrupt(
+            {"session_id": "sess-1", "mode": "stop", "stop_background": True, "turn_id": parked},
+            "other-device",
+        )
+
+    if newer in ("started", "completed"):
+        stop_bg.assert_not_awaited()
+        assert reply["interrupted"] is False
+        assert turns_db.get_turn(successor)["state"] == ("running" if newer == "started" else "completed")
+    else:
+        stop_bg.assert_awaited_once_with("sess-1", user_stop=True)
+        assert reply["interrupted"] is True
 
 
 # ═══ handle_interrupt_for_query — interrupt(send_now) + confirm ══════════════

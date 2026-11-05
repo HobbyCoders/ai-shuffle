@@ -913,11 +913,14 @@ async def _interrupt(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
                                              stop_background=bool(body.get("stop_background")),
                                              turn_id=body.get("turn_id") or None,
                                              **({"source": source} if source else {}))
-    session_stop = str(body.get("mode") or "stop") == "stop" and not body.get("turn_id")
-    if body.get("stop_background") and (row is not None or session_stop):
+    is_stop = str(body.get("mode") or "stop") == "stop"
+    reaches_work = bool(body.get("stop_background")) and is_stop and await run_sync(
+        turn_manager.stop_reaches_background_work, session_id, body.get("turn_id") or None, row,
+    )
+    if body.get("stop_background") and (row is not None or reaches_work):
         from app.core.query_session_lifecycle import stop_all_background_tasks
         await stop_all_background_tasks(session_id, user_stop=True)
-    return {"interrupted": row is not None or (session_stop and bool(body.get("stop_background"))),
+    return {"interrupted": row is not None or reaches_work,
             "turn_id": (row or {}).get("id")}
 
 

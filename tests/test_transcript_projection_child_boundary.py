@@ -10,6 +10,7 @@ import signal
 import sys
 import time
 from pathlib import Path
+from unittest.mock import AsyncMock, Mock
 
 import psutil
 import pytest
@@ -117,12 +118,34 @@ async def parent(tmp_path, mode="idle"):
         return process, await asyncio.wait_for(ready(), 15)
     except BaseException:
         for child in descendants:
-            if child.is_running():
-                child.kill()
+            try:
+                if child.is_running():
+                    child.kill()
+            except psutil.NoSuchProcess:
+                pass
         if process.returncode is None:
             process.kill()
         await process.wait()
         raise
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exit_during", ["check", "kill"])
+async def test_parent_startup_cleanup_preserves_original_failure(tmp_path, monkeypatch, exit_during):
+    child = Mock()
+    getattr(child, "is_running" if exit_during == "check" else "kill").side_effect = psutil.NoSuchProcess(101)
+    owner = Mock()
+    owner.children.return_value = [child]
+    monkeypatch.setattr(psutil, "Process", lambda pid: owner)
+    process = Mock(pid=100, returncode=None, wait=AsyncMock())
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", AsyncMock(return_value=process))
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock(side_effect=RuntimeError("startup failed")))
+
+    with pytest.raises(RuntimeError, match="startup failed"):
+        await parent(tmp_path)
+
+    process.kill.assert_called_once_with()
+    process.wait.assert_awaited_once_with()
 
 
 def alive(pid):
@@ -133,15 +156,55 @@ def alive(pid):
         return False
 
 
+def kill_if_alive(pid):
+    if alive(pid):
+        try:
+            psutil.Process(pid).kill()
+        except psutil.NoSuchProcess:
+            pass  # The child exited between the liveness check and the kill.
+
+
 async def cleanup(process, stats):
     # Only the parent/children created by this fixture, never a shared worker.
     for key in ("pid", "node", "tracker"):
         pid = stats.get(key)
-        if pid and alive(pid):
-            psutil.Process(pid).kill()
+        if pid:
+            kill_if_alive(pid)
     if process.returncode is None:
         process.kill()
     await process.wait()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exit_during", ["lookup", "kill"])
+async def test_cleanup_tolerates_children_exiting_after_alive_check(monkeypatch, exit_during):
+    checked = []
+    monkeypatch.setattr(sys.modules[__name__], "alive", lambda pid: checked.append(pid) or True)
+    child = Mock()
+    lookup = Mock(return_value=child)
+    if exit_during == "lookup":
+        lookup.side_effect = psutil.NoSuchProcess(101)
+    else:
+        child.kill.side_effect = psutil.NoSuchProcess(101)
+    monkeypatch.setattr(psutil, "Process", lookup)
+    process = Mock(returncode=None, wait=AsyncMock())
+
+    await cleanup(process, {"pid": 101, "node": 102, "tracker": 103})
+
+    assert checked == [101, 102, 103]
+    assert [call.args[0] for call in lookup.call_args_list] == checked
+    assert child.kill.call_count == (3 if exit_during == "kill" else 0)
+    process.kill.assert_called_once_with()
+    process.wait.assert_awaited_once_with()
+
+
+def test_cleanup_kill_does_not_hide_permission_errors(monkeypatch):
+    monkeypatch.setattr(sys.modules[__name__], "alive", lambda pid: True)
+    child = Mock()
+    child.kill.side_effect = psutil.AccessDenied(101)
+    monkeypatch.setattr(psutil, "Process", lambda pid: child)
+    with pytest.raises(psutil.AccessDenied):
+        kill_if_alive(101)
 
 
 @pytest.mark.asyncio
@@ -511,9 +574,13 @@ async def test_python_gate_defers_installed_site_hook_until_admission(tmp_path, 
             process.kill()
             await process.wait()
         if marker.exists() and alive(int(marker.read_text())):
-            descendant = psutil.Process(int(marker.read_text()))
-            # A private Windows venv Popen PID can itself be a redirector.
-            for member in reversed([descendant, *descendant.children(recursive=True)]):
+            try:
+                descendant = psutil.Process(int(marker.read_text()))
+                # A private Windows venv Popen PID can itself be a redirector.
+                members = [descendant, *descendant.children(recursive=True)]
+            except psutil.NoSuchProcess:
+                members = []
+            for member in reversed(members):
                 try:
                     member.kill()
                 except psutil.NoSuchProcess:
@@ -673,8 +740,7 @@ async def test_windows_owns_startup_descendants_and_launch_window(tmp_path, star
         await process.wait()
         # These are solely this fixture's known descendants; never shared workers.
         for pid in owned:
-            if alive(pid):
-                psutil.Process(pid).kill()
+            kill_if_alive(pid)
         if outer is not None:
             _job_object().close_job(outer)
 
@@ -757,5 +823,5 @@ async def test_windows_rejects_unrelated_identity_or_exited_launcher(tmp_path, m
         if candidate is not None and candidate.returncode is None:
             candidate.kill()
             await candidate.wait()
-        if mode != "unrelated" and runtime_pid is not None and alive(runtime_pid):
-            psutil.Process(runtime_pid).kill()
+        if mode != "unrelated" and runtime_pid is not None:
+            kill_if_alive(runtime_pid)

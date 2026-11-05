@@ -8,6 +8,7 @@
 //   node tests/journeys/select.mjs --json           { journeys, reasons, files }
 //   node tests/journeys/select.mjs --check          validate map.json: every glob matches a
 //                                                   tracked file, every journey is reachable
+//   node tests/journeys/select.mjs --check --map <path>  validate another map against this checkout
 //
 // Exit code 0; 2 on a bad map or a git error. Files no rule covers select
 // nothing (a docs or backend-only change needs no journey).
@@ -129,7 +130,9 @@ if (process.argv[1] && relative(process.argv[1], fileURLToPath(import.meta.url))
 	const flag = (name) => args.includes(name);
 	try {
 		if (flag('--check')) {
-			const problems = checkMap();
+			const mapAt = args.indexOf('--map');
+			const map = mapAt < 0 ? loadMap() : JSON.parse(readFileSync(args[mapAt + 1], 'utf8'));
+			const problems = checkMap(map);
 			for (const p of problems) console.error(`map.json: ${p}`);
 			if (problems.length) process.exit(2);
 			console.log(`map.json ok: ${allJourneys().length} journeys, every glob matches a tracked file`);

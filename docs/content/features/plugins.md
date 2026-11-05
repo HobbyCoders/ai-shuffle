@@ -37,6 +37,8 @@ AI Shuffle reads Claude Code plugins and Codex (Agent Plugins) plugins as they a
 
 Turned-on plugins load in every chat. You can also turn a plugin on for one agent only, in that agent's **Plugins** section. A plugin can also be installed into one project instead of the whole worker.
 
+Their slash commands and user-invocable skills appear in the composer's **/** menu in **Code** mode on both Claude-model and API-model chats. The same applies to your own Fluid command and skill files in `~/.fluid` and the project's `.fluid` or `.agents` directories, within the agent's enabled settings scopes. AI Shuffle expands their prompts and arguments before sending them; it does not run inline shell snippets in those prompts. If Claude Code has a command or skill with the same name, the Claude chat keeps Claude Code's version and execution path. **Chat** mode does not load these files or plugins, so its menu only offers the runtime's built-in commands.
+
 ## Updates
 
 **Settings → Plugins** shows plugins with a newer version. Update them one by one or all at once. You can also turn on automatic updates and pick how often they run. Automatic updates never install an older version.

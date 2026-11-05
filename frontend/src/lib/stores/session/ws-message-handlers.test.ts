@@ -1105,6 +1105,27 @@ describe('ws-message-handlers', () => {
 			expect(applied?.forkOfferSessionId).toBeNull();
 		});
 
+		it.each([
+			['the turn it timed out on', 'turn-1', 'turn-1'],
+			['a later turn', 'turn-2', null],
+		])('on a refused Stop during %s, keeps only that turn\'s recovery', (_name, liveTurnId, kept) => {
+			const state = mockState();
+			state.sessionId = 'session-1';
+			state.liveTurnId = liveTurnId;
+			state.stopRequestedTurnId = liveTurnId;
+			state.stopTimedOutTurnId = 'turn-1';
+			let applied: ActiveSessionState | undefined;
+			deps = createMockDeps({
+				getState: vi.fn(() => state),
+				update: vi.fn((fn) => { applied = fn(state); return applied; }),
+			});
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({ type: 'error', session_id: 'session-1', message: 'owner offline' });
+			expect(applied?.stopRequestedTurnId).toBeNull();
+			expect(applied?.stopTimedOutTurnId).toBe(kept);
+		});
+
 		it('treats an error with no session_id as the active session', () => {
 			// Backward-compat: a synchronous pre-stream command error (e.g. an empty
 			// prompt) carries no session_id and still applies to the session in view.

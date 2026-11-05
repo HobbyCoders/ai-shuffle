@@ -51,11 +51,12 @@
 	import UserMessage from './UserMessage.svelte';
 	import { agentDelivery, agentSender, agentSenderNames } from '$lib/utils/agent-delivery';
 	import { createAgentMessageProjection } from '$lib/utils/agent-message-projection';
+	import { createNotSentHold, createNotSentRowsArrival, createStopBubbleHold, restingOnNotSentRows, stopPressedOn, stopRecoveryAppliesToTurn, withHeldBubbles } from '$lib/utils/not-sent-hold';
 	import AgentMessage from './AgentMessage.svelte';
 	import AssistantMessage from './AssistantMessage.svelte';
 	import TurnActivity from './TurnActivity.svelte';
 	import TurnNavigator from './TurnNavigator.svelte';
-	import { findStreamingAnchorIndex, shouldShowGapIndicator, shouldRenderAssistantText } from '$lib/stores/session/gap-indicator';
+	import { streamingAnchorId, shouldShowGapIndicator, shouldRenderAssistantText } from '$lib/stores/session/gap-indicator';
 	import {
 		JUMP_TO_LATEST_DELAY_MS,
 		MIN_TRANSCRIPT_TAIL_RESERVE,
@@ -381,8 +382,7 @@
 	// synthetic phantom, re-appended by the WS-merge) is skipped so it can't
 	// steal the anchor from a real streaming message; with no real streaming
 	// message it returns -1, letting the phantom render invisibly and the bottom
-	// gap indicator take over. See gap-indicator.ts.
-	const lastStreamingMessageIndex = $derived(findStreamingAnchorIndex($activeSession.messages));
+	// gap indicator take over. See gap-indicator.ts, and streamingAnchor below.
 
 	// Show the streaming indicator at the bottom of the conversation whenever the
 	// turn is still active (isStreaming) but nothing else is currently signaling
@@ -397,6 +397,28 @@
 	// (assistant_confirm: the oldest still waiting). Its card sits in the
 	// transcript where it was raised, keyed by request id (#483); this only
 	// marks which card is the one being asked.
+	// Rows Stop just wrote stay bubbles until the stopped turn settles.
+	const notSentRows = createNotSentHold();
+	// Stop's confirmation timeout ends the wait without a turn id change, for good:
+	// a later event raises isStreaming again, and the words must not go back to a
+	// bubble with no restore controls.
+	const stopRecovery = $derived(
+		stopRecoveryAppliesToTurn(
+			$activeSession.stopTimedOutTurnId,
+			$activeSession.liveTurnId
+		)
+	);
+	const holdingTurnId = $derived(
+		$activeSession.isStreaming && !stopRecovery
+			? $activeSession.liveTurnId
+			: null
+	);
+	const notSentHold = $derived(notSentRows(
+		$activeSession.messages,
+		holdingTurnId,
+		stopRecovery ? [] : $activeSession.queuedMessages ?? []
+	));
+
 	const assistantQuestion = $derived(currentAssistantQuestion($activeSession.pendingPermissions ?? []));
 	const activeApprovalId = $derived(assistantQuestion?.request.request_id ?? null);
 
@@ -404,7 +426,7 @@
 	const showGapIndicator = $derived(
 		!assistantQuestion
 		&& shouldShowGapIndicator(
-			$activeSession.messages,
+			notSentHold.messages,
 			$activeSession.isStreaming,
 			chatPrefs?.showThinkingBlocks !== false
 		)
@@ -522,11 +544,14 @@
 	const agentMessageProjection = createAgentMessageProjection();
 	const projectedMessages = $derived(agentMessageProjection.update({
 		sessionId: $activeSession.sessionId,
-		messages: $activeSession.messages,
+		messages: notSentHold.messages,
 		pendingPeerMessages: $activeSession.pendingPeerMessages ?? [],
 		cancelledTurnIds: $activeSession.cancelledPeerTurnIds,
 		sessionActive: rawLatestTurnUnsettled && $activeSession.turnParked !== true
 	}));
+	// Found in the array the transcript renders: rows Stop holds back shift the store's indexes.
+	const streamingAnchor = $derived(streamingAnchorId(projectedMessages));
+
 	const transcript: TranscriptModel = $derived.by(() => {
 		const messages = projectedMessages;
 		const sessionId = $activeSession.sessionId;
@@ -1259,6 +1284,29 @@
 		updateCurrentTurnIndex();
 	}
 
+	/**
+	 * Follow growth in the task that caused it. Anything later lets the browser
+	 * paint or score everything below the growth, queued bubbles included, as
+	 * moved. Reveal overflow only: the blank reserve under the content is about to
+	 * be given back, and scrolling into it would come straight back. Scroll only:
+	 * changing the reserve here would mutate what is observed.
+	 */
+	function followGrowthNow() {
+		if (!containerRef || !tailSpacerRef || selectionBlocksNavigation) return;
+		if (!currentTurnAnchorId && !shouldAutoScroll) return;
+		const contentEnd = containerRef.scrollTop + tailSpacerRef.getBoundingClientRect().top - containerRef.getBoundingClientRect().top;
+		const delta = resolveAnchoredRevealDelta(containerRef.scrollTop, containerRef.clientHeight, contentEnd);
+		if (delta > 0) setProgrammaticScrollTop(containerRef.scrollTop + delta);
+	}
+
+	/** Refresh the reserve first: at the bottom of a stale one, the next refresh scrolls the reader straight back. */
+	async function pinBelowCurrentReserve() {
+		if (!shouldAutoScroll) return;
+		refreshLatestTurnTailReserve();
+		await tick();
+		if (shouldAutoScroll) scrollToBottom();
+	}
+
 	function scheduleCurrentTurnAnchorMaintenance(initial = false) {
 		if (!currentTurnAnchorId) return;
 		if (anchorMaintenanceRaf !== null) cancelAnimationFrame(anchorMaintenanceRaf);
@@ -1277,25 +1325,24 @@
 	 * screen". Shrinks one-for-one as the response grows, bottoming out at the
 	 * normal breathing-room reserve.
 	 */
-	function refreshLatestTurnTailReserve() {
-		if (!containerRef || !tailSpacerRef || currentTurnAnchorId) return;
+	function latestTurnTailNow(): number | null {
+		if (!containerRef || !tailSpacerRef || currentTurnAnchorId) return null;
 		const latestTurnId = transcript.latestUserTurnId;
-		if (!latestTurnId) {
-			if (latestTurnTailPx !== MIN_TRANSCRIPT_TAIL_RESERVE) latestTurnTailPx = MIN_TRANSCRIPT_TAIL_RESERVE;
-			return;
-		}
+		if (!latestTurnId) return MIN_TRANSCRIPT_TAIL_RESERVE;
 		const anchor = document.getElementById(turnAnchorId(latestTurnId));
-		if (!anchor || !containerRef.contains(anchor)) {
-			if (latestTurnTailPx !== MIN_TRANSCRIPT_TAIL_RESERVE) latestTurnTailPx = MIN_TRANSCRIPT_TAIL_RESERVE;
-			return;
-		}
+		if (!anchor || !containerRef.contains(anchor)) return MIN_TRANSCRIPT_TAIL_RESERVE;
 		const containerBox = containerRef.getBoundingClientRect();
 		const anchorTop = containerRef.scrollTop + anchor.getBoundingClientRect().top - containerBox.top;
 		const contentEnd = containerRef.scrollTop + tailSpacerRef.getBoundingClientRect().top - containerBox.top;
-		latestTurnTailPx = resolveAnchoredTailReserve({
+		return resolveAnchoredTailReserve({
 			clientHeight: containerRef.clientHeight,
 			contentAfterAnchor: Math.max(0, contentEnd - anchorTop)
 		});
+	}
+
+	function refreshLatestTurnTailReserve() {
+		const tail = latestTurnTailNow();
+		if (tail !== null && tail !== latestTurnTailPx) latestTurnTailPx = tail;
 	}
 
 	function scheduleLatestTurnTailRefresh() {
@@ -1309,6 +1356,33 @@
 		clearJumpRevealTimer();
 		showJumpToLatest = false;
 	}
+
+	/**
+	 * Where a stopped turn leaves the reader: where they are. The rows are the end
+	 * of the turn, so nothing more is coming to follow. Rows that fit keep a reader
+	 * at the bottom; rows past the fold release following, and Jump to latest shows
+	 * the way to them. Without this any later height change would follow them down.
+	 */
+	async function stayWhereNotSentRowsLeftTheReader() {
+		cancelCurrentTurnAnchor(true);
+		await tick();
+		refreshLatestTurnTailReserve();
+		await tick();
+		const metrics = readScrollMetrics();
+		if (!metrics || !shouldAutoScroll || pendingScrollToBottom) return;
+		if (metrics.scrollHeight - metrics.clientHeight - metrics.scrollTop > 1) {
+			shouldAutoScroll = false;
+			scheduleReadingAnchorCapture();
+		}
+		updateJumpToLatestVisibility(metrics);
+		updateCurrentTurnIndex();
+	}
+
+	const notSentRowsArrival = createNotSentRowsArrival();
+	$effect(() => {
+		if (!notSentRowsArrival($activeSession.sessionId, notSentHold.messages)) return;
+		if (untrack(() => shouldAutoScroll && !pendingScrollToBottom)) void stayWhereNotSentRowsLeftTheReader();
+	});
 
 	function jumpToLatest() {
 		applyMountedRange(transcriptWindow.toTail(), false);
@@ -1336,7 +1410,14 @@
 			const preSH = containerRef.scrollHeight;
 			const preST = containerRef.scrollTop;
 			const preCH = containerRef.clientHeight;
-			containerRef.scrollTop = containerRef.scrollHeight;
+			// Content that grew has not shrunk the reserve below it yet. The bottom of
+			// that stale reserve is too far: the next refresh would pull the reader
+			// straight back, a one-frame bounce of everything on screen.
+			const tailNow = latestTurnTailNow();
+			const staleTail = tailNow === null
+				? 0
+				: Math.max(0, Math.max(tailReservePx, latestTurnTailPx) - Math.max(tailReservePx, tailNow));
+			containerRef.scrollTop = containerRef.scrollHeight - containerRef.clientHeight - staleTail;
 			lastKnownScrollTop = containerRef.scrollTop;
 			// Refresh the scroll-direction baseline so a later genuine user scroll
 			// is measured against where WE left the viewport (the bottom), not a
@@ -1890,6 +1971,17 @@
 		};
 	});
 
+	// While a turn streams, follow in the task that changed the transcript. A turn
+	// that has ended goes through the settle pin and the not-sent rows rule instead,
+	// so its last changes never reach this: disconnecting drops what is queued.
+	const turnStreaming = $derived($activeSession.isStreaming);
+	$effect(() => {
+		if (!chatColumnRef || !turnStreaming) return;
+		const observer = new MutationObserver(followGrowthNow);
+		observer.observe(chatColumnRef, { subtree: true, childList: true, characterData: true, attributes: true });
+		return () => observer.disconnect();
+	});
+
 	// Re-pin to the bottom once a late-loading image/video actually decodes.
 	//
 	// Screenshots (tool results) and generated media render via {@html} with no
@@ -1949,9 +2041,8 @@
 			tick().then(() => scheduleCurrentTurnAnchorMaintenance());
 			return;
 		}
-		tick().then(() => {
-			if (!shouldAutoScroll || !containerRef) return;
-			scrollToBottom();
+		tick().then(async () => {
+			await pinBelowCurrentReserve();
 			requestAnimationFrame(() => {
 				if (shouldAutoScroll) scrollToBottom();
 			});
@@ -1960,7 +2051,13 @@
 
 	// Prompts sent but not yet handed to the model — rendered as bubbles below the
 	// transcript (see PendingMessages).
-	const pendingMessages = $derived($activeSession.queuedMessages ?? []);
+	const stopBubbles = createStopBubbleHold();
+	const pendingMessages = $derived(stopBubbles(
+		$activeSession.sessionId,
+		withHeldBubbles(notSentHold.bubbles, $activeSession.queuedMessages ?? []),
+		stopPressedOn($activeSession.stopRequestedTurnId, $activeSession.liveTurnId),
+		$activeSession.messages
+	));
 	const pendingPeerMessages = $derived($activeSession.pendingPeerMessages ?? []);
 
 	// Keep a freshly-sent pending bubble in view. The content effect below tracks
@@ -1974,9 +2071,8 @@
 			tick().then(() => scheduleCurrentTurnAnchorMaintenance());
 			return;
 		}
-		tick().then(() => {
-			if (!shouldAutoScroll || !containerRef) return;
-			scrollToBottom();
+		tick().then(async () => {
+			await pinBelowCurrentReserve();
 			requestAnimationFrame(() => {
 				if (shouldAutoScroll) scrollToBottom();
 			});
@@ -2127,9 +2223,7 @@
 				// in the deferred callback — the user may have scrolled up (wheel/touch
 				// disengage) in the frames between scheduling this and it running, and
 				// we must not yank them back down after they've released.
-				tick().then(() => requestAnimationFrame(() => {
-					if (shouldAutoScroll) scrollToBottom();
-				}));
+				tick().then(() => requestAnimationFrame(pinBelowCurrentReserve));
 			}
 		}
 		if (!currentTurnAnchorId && (hasNewMessage || hasContentChange)) {
@@ -2163,6 +2257,11 @@
 		if (!shouldPinLatestTurnOnSettle(wasUnsettled, unsettled, following)) {
 			scheduleLatestTurnTailRefresh();
 			void tick().then(() => updateCurrentTurnIndex());
+			return;
+		}
+		// Settling can still change the reply's height; the rows' rule holds through it.
+		if (untrack(() => restingOnNotSentRows(notSentHold.messages))) {
+			void stayWhereNotSentRowsLeftTheReader();
 			return;
 		}
 		cancelCurrentTurnAnchor(true);
@@ -2451,7 +2550,7 @@
 			subtype={message.thinkingSubtype}
 		/>
 	{:else if message.type === 'text' || !message.type}
-		{@const isStreamAnchor = !!(message.streaming && messageIndex === lastStreamingMessageIndex)}
+		{@const isStreamAnchor = !!(message.streaming && message.id === streamingAnchor)}
 		<!-- Suppress empty phantom assistant-text bubbles. The turn-start
 		     synthetic (empty streaming text) is re-appended to the tail during
 		     post-tool think-gaps and while parked on a subagent; when it is not

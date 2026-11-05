@@ -91,6 +91,9 @@ class ProviderConfig:
     model: str = ""  # empty → fall back to HarnessConfig.default_model
     base_url: str | None = None
     api_key_env: str | None = None
+    compatible_provider: str | None = None
+    auth_mode: str | None = None
+    user_agent: str | None = None
     tool_style: str = "native"  # one of TOOL_STYLES
     # Wall-clock budget for ONE whole model call, in seconds. The httpx
     # ``timeout`` is per read, so a provider that keeps emitting bytes (a
@@ -133,6 +136,9 @@ class ProviderConfig:
             model=d.get("model", ""),
             base_url=d.get("base_url"),
             api_key_env=d.get("api_key_env"),
+            compatible_provider=d.get("compatible_provider"),
+            auth_mode=d.get("auth_mode"),
+            user_agent=d.get("user_agent"),
             tool_style=tool_style,
             stream_deadline=_optional_seconds(d.get("stream_deadline")),
             first_byte_timeout=_optional_seconds(d.get("first_byte_timeout")),
@@ -656,6 +662,9 @@ class HarnessConfig:
                     "model": pc.model,
                     "base_url": pc.base_url,
                     "api_key_env": pc.api_key_env,
+                    "compatible_provider": pc.compatible_provider,
+                    "auth_mode": pc.auth_mode,
+                    "user_agent": pc.user_agent,
                     "tool_style": pc.tool_style,
                     "stream_deadline": pc.stream_deadline,
                     "first_byte_timeout": pc.first_byte_timeout,

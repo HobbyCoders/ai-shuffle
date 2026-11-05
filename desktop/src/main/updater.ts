@@ -5,12 +5,20 @@ import type { SourceUpdates } from './source-updates';
 import { installedRelease, returnToStable, type InstalledRelease } from './channel-return';
 import type { InstallerUpdates } from './installer-updates';
 import { timedPhase } from './timed-phase';
+import type { UpdateDiagnostics } from './source-build';
+
+/** Only the physical module path proves a source-managed shell's resident revision. */
+export function residentUpdaterRevision(filename: string): string | null {
+  return /(?:^|[\\/])versions[\\/]([a-f0-9]{40})[\\/]source[\\/]desktop[\\/]dist[\\/]main(?:[\\/]|$)/.exec(filename)?.[1] ?? null;
+}
 
 export type UpdatePhase = 'idle' | 'checking' | 'available' | 'downloading' | 'ready' | 'error' | 'unsupported';
 export interface UpdateState {
   phase: UpdatePhase; version: string | null; percent: number | null;
   error: string | null; checkedAt: string | null; message?: string | null;
   running_version?: string | null;
+  updater?: { revision: string | null; capabilities: string[]; refresh: 'unknown' | 'current' };
+  diagnostics?: UpdateDiagnostics | null;
   staged_version?: string | null;
   channel_config?: { channel: 'stable' | 'nightly'; source: 'file' | 'default'; editable: boolean };
   /** What this install runs: lets the worker check a return from nightly to stable. */
@@ -235,7 +243,10 @@ export class Updater {
   }
   get current(): UpdateState {
     const staged = this.applications?.pendingVersion;
-    return { ...this.state, running_version: this.applications?.version ?? null,
+    const revision = residentUpdaterRevision(typeof __dirname === 'string' ? __dirname : '');
+    return { ...this.state, updater: { revision, capabilities: this.applications ? ['stage-diagnostics-v1', 'dependency-cache-v1', 'prebuilt-ui-v1', 'node-output-cache-v1'] : [],
+      refresh: revision && revision === this.applications?.version ? 'current' : 'unknown' }, diagnostics: this.applications?.diagnostics ?? null,
+      running_version: this.applications?.version ?? null,
       staged_version: staged && staged !== this.applications?.version ? staged : null };
   }
   subscribe(fn: (state: UpdateState) => void): () => void { this.listeners.add(fn); return () => this.listeners.delete(fn); }

@@ -225,7 +225,7 @@ def provider_row_is_subscription(provider_type: Optional[str], auth_mode: Option
 
     ptype = (provider_type or "").strip().lower()
     mode = (auth_mode or "").strip().lower()
-    return ptype in ("chatgpt", "grok") or mode == "codex" or mode in _SUBSCRIPTION_AUTH_MODES
+    return ptype in ("chatgpt", "grok") or mode in ("codex", "plan_key") or mode in _SUBSCRIPTION_AUTH_MODES
 
 
 def claude_cli_uses_subscription() -> bool:
@@ -377,8 +377,8 @@ def provider_id_for_row(row: Mapping[str, Any]) -> str:
         return "openai"
     if auth_mode == "grok" or ptype in ("grok", "xai"):
         return "grok"
-    if ptype == "openrouter":
-        return "openrouter"
+    if ptype in ("openrouter", "kimi", "minimax", "opencode"):
+        return ptype
     return f"gw:{row.get('id')}"
 
 
@@ -480,8 +480,8 @@ def subscription_provider_model(
     """``(row, model id)`` on a usable flat-rate subscription row, or None.
 
     For background work no session names a provider for (the memory learner
-    behind a Claude Code session): only a subscription sign-in (ChatGPT,
-    SuperGrok) qualifies, never an API-key row, whose calls are billed per
+    behind a Claude Code session): only a subscription (ChatGPT, SuperGrok,
+    or a native plan key) qualifies, never a cash API-key row, billed per
     token. Newest row first, as :func:`usable_provider_rows` lists them; the
     first row that curates ``prefer_model`` wins, else the first row's own
     default model (its first curated model when no default is set), the same

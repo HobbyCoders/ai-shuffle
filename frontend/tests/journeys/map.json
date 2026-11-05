@@ -90,6 +90,31 @@
 			"globs": ["frontend/src/lib/components/layout/Sidebar.svelte", "frontend/src/lib/components/layout/sidebar/SidebarRail.svelte", "frontend/src/lib/components/layout/sidebar/SidebarSheet.svelte"]
 		},
 		{
+			"why": "resident updater identity and preparation timings stay separate from app version, and refresh is connected-worker only",
+			"journeys": ["update-runtime"],
+			"globs": [
+				"frontend/tests/journeys/update-runtime.journey.mjs",
+				"frontend/src/lib/components/settings/pages/SystemPage.svelte",
+				"frontend/src/lib/components/settings/pages/updates-state.svelte.ts",
+				"frontend/src/lib/components/settings/pages/editors/UpdateRuntimeDetails.svelte",
+				"frontend/src/lib/components/settings/pages/editors/UpdateCheckResults.svelte"
+			]
+		},
+		{
+			"why": "Fluid file and installed plugin discovery must agree with composer selection, details and actual prompt expansion on native and Claude chats",
+			"journeys": ["fluid-commands"],
+			"globs": [
+				"frontend/tests/journeys/fluid-commands.journey.mjs",
+				"frontend/src/lib/components/CommandAutocomplete.svelte",
+				"app/core/slash_commands.py",
+				"app/api/commands.py",
+				"app/api/command_context.py",
+				"fluid/fluid/context/instructions.py",
+				"fluid/fluid/context/plugins.py",
+				"app/core/plugin_install.py"
+			]
+		},
+		{
 			"why": "what a sidebar row says is true: one row's failed change undoes only that change, a failed turn reads Failed on every producer, a project is listed once in the Filter",
 			"journeys": ["sidebar-truth"],
 			"globs": [
@@ -218,7 +243,7 @@
 		},
 		{
 			"why": "sending, streaming and rendering a reply",
-			"journeys": ["chat-send-stream", "send-during-init", "stop-midstream", "queue-while-busy", "reload-midstream"],
+			"journeys": ["chat-send-stream", "send-during-init", "stop-midstream", "queue-while-busy", "stop-holds-the-reader", "reload-midstream"],
 			"globs": [
 				"frontend/src/lib/components/chat/AssistantMessage*",
 				"frontend/src/lib/components/chat/UserMessage*",
@@ -268,13 +293,13 @@
 		},
 		{
 			"why": "stopping a turn",
-			"journeys": ["stop-midstream", "chat-send-stream"],
+			"journeys": ["stop-midstream", "chat-send-stream", "stop-holds-the-reader", "stop-with-queued-messages"],
 			"globs": ["frontend/src/lib/components/chat/StopButton*", "frontend/src/lib/components/chat/BackgroundWorkStrip*"]
 		},
 		{
 			"why": "queued (pending) messages",
-			"journeys": ["queue-while-busy"],
-			"globs": ["frontend/src/lib/components/chat/Pending*", "frontend/src/lib/components/chat/pending-*"]
+			"journeys": ["queue-while-busy", "stop-holds-the-reader", "stop-with-queued-messages"],
+			"globs": ["frontend/src/lib/components/chat/Pending*", "frontend/src/lib/components/chat/pending-*", "frontend/src/lib/utils/not-sent-hold*"]
 		},
 		{
 			"why": "errors and banners shown to the user",
@@ -370,6 +395,24 @@
 			]
 		},
 		{
+			"why": "Claude Code Fast mode: mid-turn toggle notices, reported turn speed, refusals and reload persistence",
+			"journeys": ["fast-midturn"],
+			"globs": [
+				"frontend/tests/journeys/fast-midturn.journey.mjs",
+				"frontend/src/lib/constants/models.svelte.ts",
+				"frontend/src/lib/components/chat/ControlsDock.svelte",
+				"frontend/src/lib/components/chat/EffortPopoverCard.svelte",
+				"frontend/src/lib/components/SystemMessage.svelte",
+				"frontend/src/lib/utils/fast-outcome.ts",
+				"app/api/sessions_permissions.py",
+				"app/core/model_override.py",
+				"app/core/fast_outcome.py",
+				"app/core/provider/harness_adapter.py",
+				"fluid/fluid/engine/delegated.py",
+				"fluid/fluid/engine/delegated_proto.py"
+			]
+		},
+		{
 			"why": "Claude Code compaction: the card, the context meter, and the delegated leg and mod that turn the CLI's compaction frames into them",
 			"journeys": ["compaction"],
 			"globs": [
@@ -381,11 +424,6 @@
 				"fluid/fluid/engine/claude_mod_compaction.py",
 				"fluid/fluid/engine/claude_mod/**"
 			]
-		},
-		{
-			"why": "keep the existing Fast-mode journey reachable when its own test changes",
-			"journeys": ["fast-midturn"],
-			"globs": ["frontend/tests/journeys/fast-midturn.journey.mjs"]
 		},
 		{
 			"why": "owner memory questions and their replicated keep-both answers reach real session prompts",
