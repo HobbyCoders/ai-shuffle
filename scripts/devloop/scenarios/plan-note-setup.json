@@ -1,0 +1,19 @@
+{
+  "description": "Native PROJECT/code-mode only: produce optional legacy Note through its real add handler before plan.json. No Plan/UI/DB seeding or permission expansion; existing notes remain.",
+  "steps": [
+    {
+      "tool_calls": [
+        {
+          "name": "Note",
+          "input": {
+            "action": "add",
+            "text": "Legacy scratch remains a thought, not a completed step"
+          }
+        }
+      ]
+    },
+    {
+      "text": "Optional legacy scratch was appended through Note, without marking a task complete or creating a Plan. It remains a thought, not a completed step."
+    }
+  ]
+}

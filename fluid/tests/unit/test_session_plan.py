@@ -109,6 +109,8 @@ def test_reminder_is_bounded_and_honest():
         for i in range(50)]))
     text = plan.render_reminder(document)
     assert len(text) <= 2440 and "blocked=50" in text
+    assert text.startswith("<system-reminder>\n")
+    assert text.endswith("\n</system-reminder>")
     assert "model-reported" in text and "Cancelled is not success" in text
 
 
