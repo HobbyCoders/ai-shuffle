@@ -770,7 +770,7 @@
 	}
 
 	.review-backdrop {
-		background: oklch(0 0 0 / 0.55);
+		background: var(--modal-overlay);
 	}
 
 	/* ── Panel ───────────────────────────────────────────────────────── */
@@ -785,12 +785,9 @@
 		z-index: 95;
 		display: flex;
 		flex-direction: column;
-		background: color-mix(in oklch, var(--popover) 95%, transparent);
-		backdrop-filter: blur(8px);
-		border-left: 1px solid color-mix(in oklch, var(--border) 50%, transparent);
-		box-shadow:
-			-8px 0 24px rgb(0 0 0 / 0.3),
-			-2px 0 8px rgb(0 0 0 / 0.15);
+		background: var(--popover);
+		border-left: 1px solid var(--border);
+		box-shadow: var(--menu-shadow);
 		overflow: hidden;
 	}
 
@@ -803,7 +800,7 @@
 
 	/* Mobile: always fullscreen */
 	.panel-mobile {
-		width: 100% !important;
+		width: 100%;
 		border-left: none;
 	}
 
@@ -864,7 +861,6 @@
 		font-weight: 600;
 		color: var(--foreground);
 		margin: 0;
-		letter-spacing: -0.01em;
 	}
 
 	.total-badge {
@@ -960,8 +956,6 @@
 	.review-footer-category {
 		font-size: 0.5625rem;
 		font-weight: 700;
-		letter-spacing: 0.04em;
-		text-transform: uppercase;
 		flex-shrink: 0;
 	}
 
@@ -1100,8 +1094,6 @@
 		font-size: 0.75rem;
 		font-weight: 600;
 		color: var(--muted-foreground);
-		letter-spacing: 0.02em;
-		text-transform: uppercase;
 		flex: 1;
 	}
 

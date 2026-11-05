@@ -1,4 +1,5 @@
 <script lang="ts">
+	import '$lib/components/ui/surfaces.css';
 	/**
 	 * The Claude choice inside setup's "AI provider" step. Claude is one
 	 * provider among the others; this is its own connect flow.
@@ -125,12 +126,12 @@
 	onDestroy(() => { disposed = true; clearInterval(timer); });
 </script>
 
-<div class="space-y-4" data-testid="setup-claude">
+<div class="ui-surface space-y-4" data-testid="setup-claude">
 	<div role="radiogroup" aria-label="How to pay for Claude" class="ways">
 		<label class="way" class:selected={way === 'subscription'}>
 			<input type="radio" name="claude-way" value="subscription" checked={way === 'subscription'}
 				onchange={() => choose('subscription')} class="sr-only" disabled={switching} />
-			<SquareTerminal size={18} strokeWidth={1.75} class="shrink-0 text-primary mt-0.5" />
+			<SquareTerminal size={18} strokeWidth={1.75} class="shrink-0 text-muted-foreground mt-0.5" />
 			<span>
 				<span class="title">Subscription</span>
 				<span class="body">Your Claude Pro or Max plan. You sign in to the Claude Code CLI yourself, on Anthropic's page.</span>
@@ -139,7 +140,7 @@
 		<label class="way" class:selected={way === 'api_key'}>
 			<input type="radio" name="claude-way" value="api_key" checked={way === 'api_key'}
 				onchange={() => choose('api_key')} class="sr-only" disabled={switching} />
-			<KeyRound size={18} strokeWidth={1.75} class="shrink-0 text-primary mt-0.5" />
+			<KeyRound size={18} strokeWidth={1.75} class="shrink-0 text-muted-foreground mt-0.5" />
 			<span>
 				<span class="title">API key</span>
 				<span class="body">An Anthropic Console key, billed per use by Anthropic.</span>
@@ -161,9 +162,9 @@
 			<div class="bg-muted/30 border border-border rounded-lg px-4 py-3 flex items-center justify-between gap-3">
 				<div class="min-w-0">
 					<p class="text-sm text-foreground">Anthropic API key saved</p>
-					<p class="text-xs text-muted-foreground font-mono truncate">{keyLabel(creds.apiKey)}</p>
+					<p class="text-xs text-muted-foreground truncate">{keyLabel(creds.apiKey)}</p>
 				</div>
-				<button type="button" class="btn btn-secondary text-sm" onclick={() => (replacing = true)}>Replace</button>
+				<button type="button" class="ui-button text-sm" onclick={() => (replacing = true)}>Replace</button>
 			</div>
 		{:else}
 			<form class="space-y-3" onsubmit={saveKey}>
@@ -172,13 +173,13 @@
 				</p>
 				<div>
 					<label for="setup-api-key" class="block text-xs text-muted-foreground mb-1">Anthropic API key</label>
-					<input id="setup-api-key" type="password" class="input font-mono text-sm" autocomplete="off" spellcheck="false"
+					<input id="setup-api-key" type="password" class="ui-input text-sm" autocomplete="off" spellcheck="false"
 						placeholder="sk-ant-…" bind:value={keyInput} disabled={saving} />
 				</div>
 				{#if saveError}<div role="alert" class="bg-destructive/10 border border-destructive text-destructive px-3 py-2 rounded-lg text-sm">{saveError}</div>{/if}
 				<div class="flex gap-3">
-					{#if replacing}<button type="button" class="btn btn-secondary flex-1 py-2.5" onclick={() => { replacing = false; keyInput = ''; }} disabled={saving}>Keep the saved key</button>{/if}
-					<button type="submit" class="btn btn-primary flex-1 py-2.5" disabled={saving || !keyInput.trim()}>
+					{#if replacing}<button type="button" class="ui-button flex-1 py-2.5" onclick={() => { replacing = false; keyInput = ''; }} disabled={saving}>Keep the saved key</button>{/if}
+					<button type="submit" class="ui-button primary flex-1 py-2.5" disabled={saving || !keyInput.trim()}>
 						{#if saving}<Loader2 size={16} class="inline-block animate-spin mr-2" />{/if}Save key
 					</button>
 				</div>
@@ -212,7 +213,7 @@
 	}
 	.way:hover { border-color: color-mix(in srgb, var(--primary) 45%, var(--border)); }
 	.way:focus-within { outline: 2px solid var(--ring); outline-offset: 2px; }
-	.way.selected { border-color: var(--primary); background: color-mix(in srgb, var(--primary) 10%, transparent); }
+	.way.selected { border-color: var(--primary); background: var(--row-selected); }
 	.title { display: block; font-size: 0.875rem; font-weight: 600; color: var(--foreground); margin-bottom: 0.125rem; }
 	.body { display: block; font-size: 0.75rem; line-height: 1.45; color: var(--muted-foreground); }
 	@media (prefers-reduced-motion: reduce) { .way { transition: none; } }

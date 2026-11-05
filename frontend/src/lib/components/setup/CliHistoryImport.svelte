@@ -1,4 +1,6 @@
 <script lang="ts">
+	import Checkbox from '$lib/components/ui/Checkbox.svelte';
+	import '$lib/components/ui/surfaces.css';
 	/**
 	 * CliHistoryImport — bring recent Claude Code CLI conversations into AI
 	 * Shuffle. Shown in setup's optional last step and in the Import dialog.
@@ -114,29 +116,21 @@
 			<p class="cli-sub">
 				Found {conversations.length} recent {conversations.length === 1 ? 'conversation' : 'conversations'} from the Claude Code CLI on this worker. Import them to continue them here. Only the transcripts are read.
 			</p>
-			<label class="cli-all">
-				<input type="checkbox" checked={allSelected} onchange={toggleAll} />
-				<span>Select all</span>
-			</label>
+			<Checkbox checked={allSelected} onchange={toggleAll}>Select all</Checkbox>
 			<ul class="cli-list">
 				{#each conversations as conversation (conversation.sdk_session_id)}
 					<li>
-						<label>
-							<input
-								type="checkbox"
-								checked={selected.has(conversation.sdk_session_id)}
-								onchange={() => toggle(conversation.sdk_session_id)}
-							/>
+						<Checkbox checked={selected.has(conversation.sdk_session_id)} onchange={() => toggle(conversation.sdk_session_id)}>
 							<span class="cli-title">{conversation.title}</span>
 							<span class="cli-meta">
 								{#if conversation.cwd}<span title={conversation.cwd}>{folder(conversation.cwd)}</span> · {/if}{conversation.message_count} messages · {when(conversation.modified_at)}
 							</span>
-						</label>
+						</Checkbox>
 					</li>
 				{/each}
 			</ul>
 			{#if error}<p class="cli-error" role="alert">{error}</p>{/if}
-			<button type="button" class="btn btn-secondary w-full py-2.5 text-sm" onclick={importSelected} disabled={importing || selected.size === 0}>
+			<button type="button" class="ui-button w-full py-2.5 text-sm" onclick={importSelected} disabled={importing || selected.size === 0}>
 				{#if importing}<Loader2 size={14} class="inline-block animate-spin mr-1" />{/if}
 				Import {selected.size} {selected.size === 1 ? 'conversation' : 'conversations'}
 			</button>
@@ -151,17 +145,12 @@
 	.cli-sub { margin: 0; font-size: 0.8125rem; color: var(--muted-foreground); }
 	.cli-done { margin: 0; display: flex; align-items: center; gap: 6px; font-size: 0.8125rem; color: var(--success, var(--foreground)); }
 	.cli-error { margin: 0; font-size: 0.8125rem; color: var(--destructive); }
-	.cli-all { display: inline-flex; align-items: center; gap: 8px; font-size: 0.8125rem; color: var(--muted-foreground); cursor: pointer; }
 	.cli-list {
 		list-style: none; margin: 0; padding: 4px; max-height: 240px; overflow-y: auto;
 		border: 1px solid var(--border); border-radius: var(--radius, 0.75rem);
 	}
-	.cli-list li label {
-		display: grid; grid-template-columns: auto 1fr; column-gap: 8px; align-items: baseline;
-		padding: 6px 8px; border-radius: 6px; cursor: pointer;
-	}
-	.cli-list li label:hover { background: var(--hover-overlay, var(--accent)); }
-	.cli-list input { align-self: center; }
-	.cli-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.875rem; color: var(--foreground); }
-	.cli-meta { grid-column: 2; font-size: 0.75rem; color: var(--muted-foreground); }
+	.cli-list li { padding: 6px 8px; }
+	.cli-list li:hover { background: var(--hover-overlay); }
+	.cli-title { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.875rem; color: var(--foreground); }
+	.cli-meta { display: block; grid-column: 2; font-size: 0.75rem; color: var(--muted-foreground); }
 </style>

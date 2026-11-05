@@ -1,4 +1,5 @@
 <script lang="ts">
+	import '$lib/components/ui/surfaces.css';
 	/**
 	 * BrowserPicker — the panel's own popup for a page control whose real popup
 	 * Chrome draws outside the screencast (a `<select>` list, date and time
@@ -168,7 +169,7 @@
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 <div
 	bind:this={popupEl}
-	class="bp"
+	class="bp ui-surface"
 	class:sheet
 	class:above={!sheet && place.placement === 'above'}
 	style={popupStyle}
@@ -264,10 +265,7 @@
 		z-index: 11;
 		border-radius: 3px;
 		pointer-events: none;
-		box-shadow:
-			0 0 0 2px var(--background, #fff),
-			0 0 0 4px var(--ring, #6750a4),
-			0 0 14px 5px color-mix(in oklch, var(--ring, #6750a4) 32%, transparent);
+		box-shadow: 0 0 0 2px var(--background), 0 0 0 4px var(--ring);
 		animation: bp-fade 160ms ease-out both;
 	}
 
@@ -283,32 +281,17 @@
 		overflow: hidden;
 		color: var(--popover-foreground);
 		background: var(--popover);
-		border: 1px solid var(--menu-border);
-		border-radius: var(--menu-radius);
-		box-shadow: var(--menu-shadow);
+		border: 0;
+		border-radius: calc(var(--radius) + 8px);
+		box-shadow: var(--ui-dialog-shadow);
 		outline: none;
 		font-family: var(--font-sans);
 		transform-origin: top left;
 		animation: bp-in 150ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
 	}
-	/* The tether: an accent edge on the side that faces the field. */
-	.bp::before {
-		content: '';
-		position: absolute;
-		left: 0;
-		right: 0;
-		top: 0;
-		height: 2px;
-		background: linear-gradient(90deg, var(--primary), color-mix(in oklch, var(--primary) 0%, transparent) 85%);
-		pointer-events: none;
-	}
 	.bp.above {
 		--bp-shift: 6px;
 		transform-origin: bottom left;
-	}
-	.bp.above::before {
-		top: auto;
-		bottom: 0;
 	}
 
 	.bp.sheet {
@@ -320,9 +303,6 @@
 		border-radius: calc(var(--radius) + 6px) calc(var(--radius) + 6px) 0 0;
 		padding-bottom: max(10px, env(safe-area-inset-bottom));
 		animation: bp-sheet 220ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
-	}
-	.bp.sheet::before {
-		display: none;
 	}
 	.bp-grip {
 		width: 36px;
@@ -342,12 +322,10 @@
 	}
 	.bp-kind {
 		flex-shrink: 0;
-		font-family: var(--font-mono);
+		font-family: var(--font-sans);
 		font-size: 0.625rem;
 		font-weight: 600;
-		letter-spacing: 0.1em;
-		text-transform: uppercase;
-		color: var(--primary);
+		color: var(--foreground);
 	}
 	.bp-label {
 		flex: 1;
@@ -398,7 +376,7 @@
 	}
 	.bp-zone {
 		margin: 2px 14px 0;
-		font-family: var(--font-mono);
+		font-family: var(--font-sans);
 		font-size: 0.6875rem;
 		color: var(--muted-foreground);
 	}
@@ -413,12 +391,7 @@
 		display: block;
 		height: 12px;
 		border-radius: 6px;
-		background: linear-gradient(
-			90deg,
-			color-mix(in oklch, var(--muted) 90%, transparent) 0%,
-			color-mix(in oklch, var(--muted-foreground) 22%, transparent) 50%,
-			color-mix(in oklch, var(--muted) 90%, transparent) 100%
-		);
+		background: var(--muted);
 		background-size: 200% 100%;
 		animation: bp-shimmer 1.1s ease-in-out infinite;
 	}

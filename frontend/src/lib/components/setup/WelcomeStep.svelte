@@ -1,4 +1,5 @@
 <script lang="ts">
+	import '$lib/components/ui/surfaces.css';
 	/**
 	 * Wizard step 1: what AI Shuffle is, and the disclosures a buyer sees before
 	 * anything else: agents act with this worker's access, the AI account is the
@@ -16,14 +17,14 @@
 	let { desktop = false, onContinue }: Props = $props();
 </script>
 
-<div class="space-y-4" data-testid="setup-welcome">
+<div class="ui-surface space-y-4" data-testid="setup-welcome">
 	<p class="text-sm text-foreground leading-relaxed">
 		AI Shuffle runs AI coding agents on {desktop ? 'this computer' : 'your server'}, with a workspace for your projects
 		and sessions you can follow from any of your devices.
 	</p>
 
 	<section class="disclosure" aria-labelledby="welcome-access">
-		<ShieldCheck size={18} strokeWidth={1.75} class="shrink-0 text-primary mt-0.5" />
+		<ShieldCheck size={18} strokeWidth={1.75} class="shrink-0 text-muted-foreground mt-0.5" />
 		<div>
 			<h2 id="welcome-access">Agents act with your access</h2>
 			<p>
@@ -38,7 +39,7 @@
 	</section>
 
 	<section class="disclosure" aria-labelledby="welcome-account">
-		<Wallet size={18} strokeWidth={1.75} class="shrink-0 text-primary mt-0.5" />
+		<Wallet size={18} strokeWidth={1.75} class="shrink-0 text-muted-foreground mt-0.5" />
 		<div>
 			<h2 id="welcome-account">You bring your own AI account</h2>
 			<p>
@@ -49,7 +50,7 @@
 	</section>
 
 	<section class="disclosure" aria-labelledby="welcome-updates">
-		<RefreshCw size={18} strokeWidth={1.75} class="shrink-0 text-primary mt-0.5" />
+		<RefreshCw size={18} strokeWidth={1.75} class="shrink-0 text-muted-foreground mt-0.5" />
 		<div>
 			<h2 id="welcome-updates">Update checks</h2>
 			<p>
@@ -63,7 +64,7 @@
 		</div>
 	</section>
 
-	<button type="button" onclick={onContinue} class="btn btn-primary w-full py-3">Continue</button>
+	<button type="button" onclick={onContinue} class="ui-button primary w-full py-3">Continue</button>
 </div>
 
 <style>
@@ -71,9 +72,7 @@
 		display: flex;
 		gap: 0.75rem;
 		padding: 0.875rem 1rem;
-		border: 1px solid var(--border);
-		border-radius: 0.5rem;
-		background: color-mix(in srgb, var(--muted) 30%, transparent);
+		border-bottom: 1px solid var(--border);
 	}
 	.disclosure h2 {
 		margin: 0 0 0.25rem;

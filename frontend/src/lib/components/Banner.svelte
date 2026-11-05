@@ -89,10 +89,9 @@
 		border: 1px solid var(--border);
 		background: var(--card);
 		color: var(--card-foreground, var(--foreground));
-		box-shadow: 0 2px 8px rgb(0 0 0 / 0.06);
 		box-sizing: border-box;
 		flex-wrap: wrap;
-		border-radius: calc(var(--radius, 0.75rem) * 0.66);
+		border-radius: var(--radius);
 		font-size: 0.8125rem;
 		line-height: 1.4;
 	}
@@ -113,10 +112,10 @@
 		--banner-accent: var(--destructive);
 	}
 	.sev-warning {
-		--banner-accent: var(--warning, #d97706);
+		--banner-accent: var(--warning);
 	}
 	.sev-success {
-		--banner-accent: var(--success, #059669);
+		--banner-accent: var(--success);
 	}
 	.sev-info {
 		--banner-accent: var(--foreground);

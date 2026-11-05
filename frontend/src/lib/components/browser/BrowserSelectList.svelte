@@ -253,11 +253,9 @@
 		top: -2px;
 		z-index: 1;
 		padding: 10px 10px 4px;
-		font-family: var(--font-mono);
-		font-size: 0.625rem;
+		font-family: var(--font-sans);
+		font-size: 12px;
 		font-weight: 600;
-		letter-spacing: 0.09em;
-		text-transform: uppercase;
 		color: var(--muted-foreground);
 		background: var(--popover);
 	}
@@ -285,10 +283,10 @@
 		padding-left: 16px;
 	}
 	.bsl-option.active {
-		background: color-mix(in oklch, var(--primary) 14%, transparent);
+		background: var(--row-selected);
 	}
 	.bsl-option.selected {
-		color: var(--primary);
+		color: var(--foreground);
 		font-weight: 600;
 	}
 	.bsl-option[aria-disabled='true'] {
@@ -302,7 +300,7 @@
 		width: 16px;
 		flex-shrink: 0;
 		justify-content: center;
-		color: var(--primary);
+		color: var(--foreground);
 	}
 	.bsl-label {
 		min-width: 0;
@@ -324,13 +322,13 @@
 		flex-shrink: 0;
 	}
 
-	@media (pointer: coarse) {
+	@media (pointer: coarse), (max-width: 600px) {
 		.bsl-option {
 			min-height: 44px;
 			font-size: 0.9375rem;
 		}
 		.bsl-filter {
-			height: 40px;
+			height: 44px;
 		}
 		.bsl-filter input {
 			font-size: 16px; /* no iOS focus zoom */

@@ -1,4 +1,6 @@
 <script lang="ts">
+	import '$lib/components/ui/surfaces.css';
+	import Checkbox from './Checkbox.svelte';
 	/**
 	 * ConfirmDialog — a lightweight confirm/cancel dialog.
 	 *
@@ -91,46 +93,41 @@
 	<div
 		use:portal
 		use:focusTrap={{ initial: '[data-confirm-action]' }}
-		class="fixed inset-0 z-200 flex items-center justify-center p-4"
+		class="ui-overlay ui-surface"
 		role="dialog"
 		aria-modal="true"
 		aria-labelledby="confirm-title"
 		tabindex="-1"
 	>
 		<button
-			class="absolute inset-0 bg-black/60 backdrop-blur-xs"
+			class="ui-scrim"
 			onclick={onCancel}
 			tabindex="-1"
 			aria-label={cancelLabel}
 		></button>
 
 		<div
-			class="relative w-full max-w-sm bg-card border border-border rounded-2xl shadow-2xl p-6 animate-confirm-in"
+			class="ui-dialog"
 		>
-			<h2 id="confirm-title" class="text-lg font-semibold text-foreground">{title}</h2>
-			<p class="mt-2 text-sm text-muted-foreground whitespace-pre-line">{message}</p>
+			<header class="ui-dialog-header"><h2 id="confirm-title" class="ui-dialog-title">{title}</h2></header>
+			<div class="ui-dialog-body"><p class="mt-2 text-sm text-muted-foreground whitespace-pre-line">{message}</p>
 
 			{#if checkboxLabel}
-				<label class="confirm-checkbox mt-4 flex items-center gap-2.5 text-sm text-foreground cursor-pointer select-none">
-					<input type="checkbox" bind:checked={checkboxChecked} />
-					<span>{checkboxLabel}</span>
-				</label>
+<Checkbox bind:checked={checkboxChecked}>{checkboxLabel}</Checkbox>
 			{/if}
 
-			<div class="mt-6 flex flex-col-reverse sm:flex-row items-stretch sm:items-center justify-end gap-3">
+			</div>
+			<div class="ui-dialog-footer">
 				<button
 					onclick={onCancel}
-					class="confirm-secondary-btn px-5 py-2.5 rounded-xl text-sm font-medium bg-muted text-foreground border border-border transition-colors"
+					class="ui-button"
 				>
 					{cancelLabel}
 				</button>
 				<button
 					onclick={onConfirm}
 					data-confirm-action
-					class="px-5 py-2.5 rounded-xl text-sm font-medium transition-all min-w-[96px]
-						{danger
-							? 'bg-destructive text-destructive-foreground hover:opacity-90'
-							: 'bg-action text-action-foreground hover:opacity-90'}"
+					class="ui-button {danger ? 'danger' : 'primary'}"
 				>
 					{confirmLabel}
 				</button>
@@ -138,49 +135,3 @@
 		</div>
 	</div>
 {/if}
-
-<style>
-	@keyframes confirm-in {
-		from {
-			opacity: 0;
-			transform: scale(0.96) translateY(8px);
-		}
-		to {
-			opacity: 1;
-			transform: scale(1) translateY(0);
-		}
-	}
-
-	.animate-confirm-in {
-		animation: confirm-in 160ms cubic-bezier(0.16, 1, 0.3, 1);
-	}
-
-	@media (prefers-reduced-motion: reduce) {
-		.animate-confirm-in {
-			animation: none;
-		}
-	}
-
-	.confirm-checkbox input[type='checkbox'] {
-		width: 1rem;
-		height: 1rem;
-		flex-shrink: 0;
-		accent-color: var(--destructive);
-		cursor: pointer;
-	}
-
-	.confirm-checkbox input[type='checkbox']:focus-visible {
-		outline: 2px solid var(--ring);
-		outline-offset: 2px;
-	}
-
-	.confirm-secondary-btn:hover {
-		background: var(--hover-overlay);
-		border-color: color-mix(in oklch, var(--accent) 50%, var(--border));
-	}
-
-	.confirm-secondary-btn:focus-visible {
-		outline: 2px solid var(--ring);
-		outline-offset: 2px;
-	}
-</style>

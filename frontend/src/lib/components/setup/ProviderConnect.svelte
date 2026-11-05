@@ -1,4 +1,5 @@
 <script lang="ts">
+	import '$lib/components/ui/surfaces.css';
 	/**
 	 * The connect flow for OpenAI, xAI Grok, OpenRouter and custom gateways
 	 * inside setup's "AI provider" step. It reuses Settings > Providers' own
@@ -168,7 +169,7 @@
 					? 'Connected. You can add another below or continue.'
 					: 'Saved. The worker does not report it ready yet. Choose Check again below.'}
 			</span>
-			<button type="button" class="btn btn-secondary text-sm" onclick={again}>Add another</button>
+			<button type="button" class="ui-button text-sm" onclick={again}>Add another</button>
 		</div>
 	{:else if !draft}
 		<div class="kinds" role="group" aria-label="How to connect">
@@ -242,8 +243,8 @@
 		color: var(--primary);
 		transition: border-color 0.18s ease-out, background-color 0.18s ease-out;
 	}
-	.kind:hover { border-color: color-mix(in srgb, var(--primary) 45%, var(--border)); background: color-mix(in srgb, var(--primary) 6%, transparent); }
-	.kind:active { background: color-mix(in srgb, var(--primary) 12%, transparent); }
+	.kind:hover { border-color: color-mix(in srgb, var(--primary) 45%, var(--border)); background: var(--row-selected); }
+	.kind:active { background: var(--row-selected); }
 	.kind-title { display: block; font-size: 0.875rem; font-weight: 600; color: var(--foreground); }
 	.kind-hint { display: block; font-size: 0.75rem; color: var(--muted-foreground); }
 	.rejection { margin: 0 0 10px; }

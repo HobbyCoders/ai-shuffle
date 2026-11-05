@@ -1,4 +1,5 @@
 <script lang="ts">
+	import '$lib/components/ui/surfaces.css';
     import { onMount, onDestroy } from 'svelte';
     import { api } from '$lib/api/client';
     import { loadPlaid, type LinkHandler } from '$lib/utils/plaid-link';
@@ -46,9 +47,9 @@
     }
 </script>
 <svelte:head><title>Connect bank accounts — AI Shuffle</title><meta name="referrer" content="no-referrer" /></svelte:head>
-<main class="mx-auto max-w-lg space-y-4 p-6">
+<main class="ui-surface ui-onboarding"><section class="ui-onboarding-card space-y-4">
     <h1 class="text-xl font-semibold">{done ? 'Bank accounts connected' : 'Connect bank accounts'}</h1>
     <p>Read-only access to accounts, balances, and transactions through Plaid. No payments or transfers.</p>
     {#if error}<p role="alert" class="text-destructive">{error}</p>{:else if !done}<p>Opening secure Plaid Link…</p>{/if}
     <a href="/" class="text-primary">Return to AI Shuffle</a>
-</main>
+</section></main>

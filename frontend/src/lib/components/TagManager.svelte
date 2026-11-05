@@ -1,4 +1,5 @@
 <script lang="ts">
+	import '$lib/components/ui/surfaces.css';
 	import { watchResources } from '$lib/services/watch-resources';
 	import type { Tag } from '$lib/api/client';
 	import { getTags, createTag, updateTag, deleteTag } from '$lib/api/client';
@@ -129,21 +130,22 @@
 <!-- Escape is handled by the host page's global close-modal shortcut. -->
 
 <div
-	class="fixed inset-0 max-sm:bottom-[calc(4.5rem+env(safe-area-inset-bottom,0px))] z-50 flex items-center justify-center bg-black/50 backdrop-blur-xs"
+	class="ui-overlay ui-surface"
 	role="dialog"
 	aria-modal="true"
 	aria-labelledby="tag-manager-title"
 	tabindex="-1"
 	use:focusTrap
 >
-	<div class="bg-background border border-border rounded-2xl shadow-2xl w-full max-w-md max-h-[80vh] max-sm:max-h-full flex flex-col">
+	<button class="ui-scrim" onclick={() => onclose?.()} tabindex="-1" aria-label="Close dialog"></button>
+	<div class="ui-dialog">
 		<!-- Header -->
-		<div class="flex items-center justify-between px-5 py-4 border-b border-border">
-			<h2 id="tag-manager-title" class="text-lg font-semibold text-foreground">Manage Tags</h2>
+		<div class="ui-dialog-header">
+			<h2 id="tag-manager-title" class="ui-dialog-title">Manage tags</h2>
 			<button
 				onclick={() => onclose?.()}
 				aria-label="Close"
-				class="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-hover-overlay transition-colors"
+				class="ui-button ghost icon"
 			>
 				<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
@@ -153,7 +155,7 @@
 
 		<!-- Content -->
 		{#if remoteChange}<p role="status" style="flex: none; height: auto;" class="px-4 py-2 text-sm text-muted-foreground">{remoteChange}</p>{/if}
-		<div class="flex-1 overflow-y-auto p-5 space-y-5">
+		<div class="ui-dialog-body space-y-5">
 			{#if error}
 				<div class="p-3 rounded-lg bg-destructive/10 text-destructive text-sm" role="alert">
 					{error}
@@ -162,14 +164,14 @@
 
 			<!-- Create new tag -->
 			<div class="space-y-3">
-				<label for="new-tag-name" class="text-sm font-medium text-muted-foreground">Create New Tag</label>
-				<div class="flex items-center gap-2">
+				<label for="new-tag-name" class="text-sm font-medium text-muted-foreground">Create new tag</label>
+				<div class="tag-create">
 					<input
 						id="new-tag-name"
 						type="text"
 						bind:value={newTagName}
 						placeholder="Tag name..."
-						class="flex-1 px-3 py-2 rounded-lg bg-muted/50 border border-border text-foreground placeholder:text-muted-foreground focus:outline-hidden focus:ring-2 focus:ring-primary/50"
+						class="ui-input"
 						onkeypress={(e) => e.key === 'Enter' && handleCreateTag()}
 					/>
 					<div class="flex items-center gap-1">
@@ -186,7 +188,7 @@
 					<button
 						onclick={handleCreateTag}
 						disabled={!newTagName.trim()}
-						class="px-3 py-2 rounded-lg bg-primary text-primary-foreground font-medium text-sm disabled:opacity-50 disabled:cursor-not-allowed hover:bg-primary/90 transition-colors"
+						class="ui-button primary"
 					>
 						Add
 					</button>
@@ -195,26 +197,26 @@
 
 			<!-- Tag list -->
 			<div class="space-y-2">
-				<span class="text-sm font-medium text-muted-foreground">Your Tags</span>
+				<span class="text-sm font-medium text-muted-foreground">Your tags</span>
 				{#if loading}
 					<div class="flex items-center justify-center py-8">
 						<div class="animate-spin rounded-full h-6 w-6 border-2 border-primary border-t-transparent"></div>
 					</div>
 				{:else if tags.length === 0}
 					<div class="text-center py-8 text-muted-foreground text-sm">
-						No tags yet. Create one above!
+						No tags yet. Create one above.
 					</div>
 				{:else}
-					<div class="space-y-2">
+					<div class="tag-list">
 						{#each tags as tag (tag.id)}
-							<div class="flex items-center gap-3 p-3 rounded-lg bg-muted/50 border border-border">
+							<div class="tag-row">
 								{#if editingTag?.id === tag.id}
 									<!-- Edit mode -->
 									<input
 										type="text"
 										bind:value={editName}
 										aria-label="Tag name"
-										class="flex-1 px-2 py-1 rounded-sm bg-muted/50 border border-border text-foreground text-sm focus:outline-hidden focus:ring-2 focus:ring-primary/50"
+										class="ui-input flex-1"
 										onkeypress={(e) => e.key === 'Enter' && saveEdit()}
 									/>
 									<div class="flex items-center gap-1">
@@ -230,7 +232,7 @@
 									</div>
 									<button
 										onclick={saveEdit}
-										class="p-1.5 rounded-lg text-success hover:bg-success/10 transition-colors"
+										class="ui-button ghost icon"
 										title="Save"
 									>
 										<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -239,7 +241,7 @@
 									</button>
 									<button
 										onclick={cancelEdit}
-										class="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-hover-overlay transition-colors"
+										class="ui-button ghost icon"
 										title="Cancel"
 									>
 										<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -255,7 +257,7 @@
 									<span class="flex-1 text-sm text-foreground">{tag.name}</span>
 									<button
 										onclick={() => startEdit(tag)}
-										class="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-hover-overlay transition-colors"
+										class="ui-button ghost icon"
 										title="Edit"
 									>
 										<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -266,7 +268,7 @@
 										<span class="text-xs text-destructive">Delete?</span>
 										<button
 											onclick={() => handleDelete(tag.id)}
-											class="p-1.5 rounded-lg text-destructive hover:bg-destructive/10 transition-colors"
+											class="ui-button ghost icon"
 											title="Confirm delete"
 										>
 											<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -275,7 +277,7 @@
 										</button>
 										<button
 											onclick={() => confirmDelete = null}
-											class="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-hover-overlay transition-colors"
+											class="ui-button ghost icon"
 											title="Cancel"
 										>
 											<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -285,7 +287,7 @@
 									{:else}
 										<button
 											onclick={() => confirmDelete = tag.id}
-											class="p-1.5 rounded-lg text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
+											class="ui-button ghost icon"
 											title="Delete"
 										>
 											<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -302,13 +304,20 @@
 		</div>
 
 		<!-- Footer -->
-		<div class="flex justify-end px-5 py-4 border-t border-border">
+		<div class="ui-dialog-footer">
 			<button
 				onclick={() => onclose?.()}
-				class="px-4 py-2 rounded-lg bg-muted/50 text-foreground font-medium text-sm hover:bg-hover-overlay transition-colors"
+				class="ui-button"
 			>
 				Close
 			</button>
 		</div>
 	</div>
 </div>
+<style>
+ .tag-create { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+ .tag-create > input { flex: 1 0 100%; }
+ .tag-create > button { margin-left: auto; }
+ .tag-list { border-top: 1px solid var(--border); }
+ .tag-row { display: flex; align-items: center; gap: 12px; min-height: 52px; padding: 8px 0; border-bottom: 1px solid var(--border); }
+</style>

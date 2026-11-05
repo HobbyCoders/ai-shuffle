@@ -27,7 +27,7 @@ describe('TagManager accessibility', () => {
 		const view = render(TagManager);
 		await tick();
 		await Promise.resolve();
-		const dialog = screen.getByRole('dialog', { name: 'Manage Tags' });
+		const dialog = screen.getByRole('dialog', { name: 'Manage tags' });
 		expect(dialog.contains(document.activeElement)).toBe(true);
 		view.unmount();
 		expect(document.activeElement).toBe(opener);

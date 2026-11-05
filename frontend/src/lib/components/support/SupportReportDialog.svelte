@@ -1,4 +1,5 @@
 <script lang="ts">
+	import Checkbox from '$lib/components/ui/Checkbox.svelte';
 	/**
 	 * Send report to HobbyCoders support.
 	 *
@@ -208,10 +209,10 @@
 					</div>
 				</header>
 				<div class="sr-local-actions">
-					<a class="sr-btn sr-btn-primary" href={mailto} data-testid="mailto">
+					<a class="ui-button primary" href={mailto} data-testid="mailto">
 						<Mail size={14} aria-hidden="true" /> Email support
 					</a>
-					<button type="button" class="sr-btn" onclick={() => void copyReport()}>
+					<button type="button" class="ui-button" onclick={() => void copyReport()}>
 						{#if copied}<Check size={14} aria-hidden="true" /> Copied{:else}<Copy size={14} aria-hidden="true" /> Copy report{/if}
 					</button>
 					<span class="sr-muted sr-subject">Subject: {supportMailSubject(flow.reportKind)}</span>
@@ -283,7 +284,7 @@
 				{:else}
 					<span class="sr-label">Your note <span class="sr-muted">(optional)</span></span>
 				{/if}
-				<textarea
+				<textarea class="ui-input"
 					rows="2"
 					maxlength="2000"
 					placeholder={flow.isAiContent ? 'For example: it is hateful, sexual, violent or dangerous' : 'What were you doing?'}
@@ -312,7 +313,7 @@
 						{/if}
 					</div>
 					{#if flow.aiStep === 'off'}
-						<button type="button" class="sr-btn" onclick={() => flow.openAi()} disabled={flow.phase === 'sending'}>
+						<button type="button" class="ui-button" onclick={() => flow.openAi()} disabled={flow.phase === 'sending'}>
 							Add AI diagnosis
 						</button>
 					{/if}
@@ -336,24 +337,21 @@
 								/>
 							</div>
 						</div>
-						<label class="sr-ack">
-							<input type="checkbox" bind:checked={flow.aiAcknowledged} disabled={flow.aiStep === 'starting'} />
-							<span>I understand this uses my AI usage</span>
-						</label>
+						<Checkbox bind:checked={flow.aiAcknowledged} disabled={flow.aiStep === 'starting'}>I understand this uses my AI usage</Checkbox>
 						{#if flow.aiError}
 							<p class="sr-error" role="alert">{flow.aiError}</p>
 						{/if}
 						<div class="sr-ai-actions">
 							<button
 								type="button"
-								class="sr-btn sr-btn-primary"
+								class="ui-button primary"
 								disabled={!flow.aiAcknowledged || flow.aiStep === 'starting'}
 								onclick={() => void flow.startAi()}
 							>
 								{#if flow.aiStep === 'starting'}<LoaderCircle size={14} class="sr-spin" aria-hidden="true" />{/if}
 								Start diagnosis
 							</button>
-							<button type="button" class="sr-btn sr-btn-ghost" onclick={() => flow.cancelAi()} disabled={flow.aiStep === 'starting'}>
+							<button type="button" class="ui-button ghost" onclick={() => flow.cancelAi()} disabled={flow.aiStep === 'starting'}>
 								Not now
 							</button>
 						</div>
@@ -490,17 +488,17 @@
 	.sr-skeleton span {
 		height: 12px;
 		border-radius: 6px;
-		background: linear-gradient(90deg, var(--muted) 0%, var(--hover-overlay) 50%, var(--muted) 100%);
+		background: var(--muted);
 		background-size: 200% 100%;
-		animation: sr-shimmer 1.4s ease-in-out infinite;
+		animation: sr-pulse 1.4s ease-in-out infinite;
 	}
 	.sr-skeleton span:nth-child(2) { width: 82%; }
 	.sr-skeleton span:nth-child(3) { width: 64%; }
 	.sr-skeleton span:nth-child(4) { width: 90%; height: 96px; }
 
-	@keyframes sr-shimmer {
-		from { background-position: 100% 0; }
-		to { background-position: -100% 0; }
+	@keyframes sr-pulse {
+		from { opacity: .5; }
+		to { opacity: 1; }
 	}
 
 	.sr-notices {
@@ -522,40 +520,10 @@
 		font-size: 0.8125rem;
 		font-weight: 600;
 	}
-	textarea {
-		width: 100%;
-		min-height: 3.75rem;
-		resize: vertical;
-		padding: 0.625rem 0.75rem;
-		border: 1px solid var(--input-border, var(--border));
-		border-radius: 10px;
-		background: var(--input-bg, var(--background));
-		color: var(--foreground);
-		font: inherit;
-		font-size: 0.875rem;
-		line-height: 1.45;
-		transition: border-color 150ms ease, background-color 150ms ease;
-	}
-	textarea:hover {
-		border-color: var(--input-border-hover, var(--border-strong));
-	}
-	textarea:focus-visible {
-		outline: none;
-		border-color: var(--ring);
-		box-shadow: 0 0 0 3px color-mix(in oklch, var(--ring) 22%, transparent);
-	}
-	textarea[aria-invalid='true'] {
-		border-color: var(--destructive);
-	}
-	textarea:disabled {
-		opacity: 0.6;
-	}
-
 	/* ---- AI diagnosis ---- */
 	.sr-ai {
-		border: 1px solid var(--border);
-		border-radius: 12px;
-		background: color-mix(in oklch, var(--muted) 40%, transparent);
+		border-top: 1px solid var(--border);
+		border-bottom: 1px solid var(--border);
 		overflow: visible;
 	}
 	.sr-ai[data-step='running'] {
@@ -576,7 +544,7 @@
 		flex-shrink: 0;
 		border-radius: 8px;
 		color: var(--primary);
-		background: color-mix(in oklch, var(--primary) 14%, transparent);
+		background: var(--row-selected);
 	}
 	.sr-ai-titles {
 		flex: 1;
@@ -614,31 +582,6 @@
 	}
 	/* The picker panel is right-anchored and up to 360px wide; keep it inside
 	   the dialog on narrow screens. */
-	.sr-model :global(.mpk) {
-		min-width: 0;
-	}
-	.sr-model :global(.mpk-panel) {
-		--mpp-width: min(360px, calc(100vw - 72px));
-	}
-	.sr-ack {
-		display: flex;
-		align-items: center;
-		gap: 10px;
-		min-height: 32px;
-		cursor: pointer;
-		user-select: none;
-	}
-	.sr-ack input {
-		width: 1rem;
-		height: 1rem;
-		flex-shrink: 0;
-		accent-color: var(--primary);
-		cursor: pointer;
-	}
-	.sr-ack input:focus-visible {
-		outline: 2px solid var(--ring);
-		outline-offset: 2px;
-	}
 	.sr-ai-actions {
 		display: flex;
 		flex-wrap: wrap;
@@ -653,7 +596,7 @@
 	.sr-progress {
 		height: 3px;
 		border-radius: 3px;
-		background: color-mix(in oklch, var(--primary) 15%, transparent);
+		background: var(--row-selected);
 		overflow: hidden;
 	}
 	.sr-progress span {
@@ -720,7 +663,7 @@
 	.sr-choice button.active {
 		background: var(--card);
 		color: var(--foreground);
-		box-shadow: var(--shadow-s, 0 1px 2px rgba(0, 0, 0, 0.15));
+		box-shadow: var(--shadow-s);
 	}
 	.sr-choice button:focus-visible {
 		outline: 2px solid var(--ring);
@@ -728,53 +671,6 @@
 	}
 
 	/* ---- buttons ---- */
-	.sr-btn {
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		gap: 6px;
-		min-height: 36px;
-		padding: 0 14px;
-		flex-shrink: 0;
-		border: 1px solid var(--border);
-		border-radius: 10px;
-		background: var(--card);
-		color: var(--foreground);
-		font: inherit;
-		font-size: 0.8125rem;
-		font-weight: 600;
-		cursor: pointer;
-		transition: background-color 150ms ease, border-color 150ms ease, opacity 150ms ease;
-	}
-	.sr-btn:hover:not(:disabled) {
-		background: var(--hover-overlay);
-		border-color: color-mix(in oklch, var(--accent) 50%, var(--border));
-	}
-	.sr-btn:active:not(:disabled) {
-		background: var(--active-overlay, var(--hover-overlay));
-	}
-	.sr-btn:focus-visible {
-		outline: 2px solid var(--ring);
-		outline-offset: 2px;
-	}
-	.sr-btn:disabled {
-		opacity: 0.5;
-		cursor: not-allowed;
-	}
-	.sr-btn-primary {
-		border-color: transparent;
-		background: var(--primary);
-		color: var(--primary-foreground);
-	}
-	.sr-btn-primary:hover:not(:disabled) {
-		background: var(--primary);
-		border-color: transparent;
-		opacity: 0.9;
-	}
-	.sr-btn-ghost {
-		background: transparent;
-	}
-
 	/* ---- preview ---- */
 	.sr-preview {
 		display: flex;
@@ -837,9 +733,9 @@
 	.sr-policy {
 		margin: 0;
 		padding: 10px 12px;
-		border-left: 3px solid var(--primary);
-		border-radius: 4px 10px 10px 4px;
-		background: color-mix(in oklch, var(--primary) 8%, transparent);
+		border: 1px solid var(--border);
+		border-radius: var(--radius);
+		background: var(--row-selected);
 		line-height: 1.5;
 	}
 
@@ -888,16 +784,13 @@
 		flex-shrink: 0;
 		border-radius: 10px;
 		color: var(--primary);
-		background: color-mix(in oklch, var(--primary) 14%, transparent);
+		background: var(--row-selected);
 	}
 	.sr-local-actions {
 		display: flex;
 		flex-wrap: wrap;
 		align-items: center;
 		gap: 8px;
-	}
-	a.sr-btn {
-		text-decoration: none;
 	}
 	.sr-subject {
 		font-size: 0.75rem;
@@ -916,8 +809,8 @@
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
-		width: 48px;
-		height: 48px;
+		width: 28px;
+		height: 28px;
 		margin-bottom: 6px;
 		border-radius: 999px;
 		color: var(--success);
@@ -950,22 +843,21 @@
 	}
 
 	@media (max-width: 639px) {
-		.sr-btn,
 		.sr-choice button {
 			min-height: 44px;
 		}
 		.sr-ai-head {
 			flex-wrap: wrap;
 		}
-		.sr-ai-head .sr-btn {
+		.sr-ai-head .ui-button {
 			width: 100%;
 		}
 		.sr-model-row {
 			grid-template-columns: minmax(0, 1fr);
 			gap: 6px;
 		}
-		.sr-ai-actions .sr-btn,
-		.sr-local-actions .sr-btn {
+		.sr-ai-actions .ui-button,
+		.sr-local-actions .ui-button {
 			flex: 1 1 auto;
 		}
 		.sr-body {
