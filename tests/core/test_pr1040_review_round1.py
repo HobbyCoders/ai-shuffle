@@ -58,6 +58,12 @@ async def test_native_same_baseline_still_checks_qualification(chats, monkeypatc
     assert len(chats[2]) == int(wording_kind != "plain")
 
 
+async def test_confirm_wrapper_handles_unchanged_native_baseline(chats):
+    _native_request(chats, "start", "owner", "Start a review")
+    assert await mo.confirm("parent", "caller", model="opus", baseline="opus", action="start") is None
+    assert not chats[2]
+
+
 @pytest.mark.parametrize("entry", ["start", "task"])
 @pytest.mark.parametrize("source", ["owner", "memory"])
 @pytest.mark.parametrize("wording", ["Use Opus at version 4", "Use Opus with version four"])

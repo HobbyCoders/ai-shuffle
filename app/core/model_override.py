@@ -952,13 +952,13 @@ def _refusal(model: str, baseline: Optional[str], why: str) -> str:
 
 
 async def confirm(session_id: str, profile_id: Optional[str], *, model: str,
-                  baseline: Optional[str], action: str) -> str:
-    """How the user asked for ``model``: one of :data:`SOURCES`.
+                  baseline: Optional[str], action: str) -> Optional[str]:
+    """The consent source, or None for an unchanged, unqualified baseline.
 
     See :func:`accept`, which also names the memory that accepted it.
     """
-    return (await accept(session_id, profile_id, model=model, baseline=baseline,
-                         action=action)).source
+    accepted = await accept(session_id, profile_id, model=model, baseline=baseline, action=action)
+    return accepted.source if accepted is not None else None
 
 
 def _accepted_note(model: str, memory_id: str) -> str:
