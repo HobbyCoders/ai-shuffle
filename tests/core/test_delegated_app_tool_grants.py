@@ -79,6 +79,7 @@ async def test_app_mcp_tools_keep_their_grant_on_the_delegated_leg(monkeypatch, 
     # app's MCP tools.
     sdk_options = SimpleNamespace(
         model="fable",
+        aih_session_id="bound-session",
         system_prompt={"type": "preset", "preset": "claude_code", "append": "APPEND"},
         cwd=str(tmp_path),
         permission_mode="default",
@@ -106,6 +107,7 @@ async def test_app_mcp_tools_keep_their_grant_on_the_delegated_leg(monkeypatch, 
     assert _KwargsLoop.captured.get("permission_grants") == [
         "mcp__fluid_bundled__mcp__builtins__Recall",
         "mcp__fluid_bundled__mcp__builtins__ScheduleWakeup",
+        "mcp__fluid_bundled__Plan",
         *CODE_LANE_CLI_GRANTS,
     ]
     assert _KwargsLoop.captured.get("allowed_tools") is None

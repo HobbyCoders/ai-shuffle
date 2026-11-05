@@ -1806,6 +1806,33 @@ class HarnessAdapter(ProviderAdapter):
                 external_delivery=True,
             ))
 
+    async def _submit_turn(self, op: Any) -> None:
+        """Bind an immutable Plan generation at the engine's submit barrier.
+
+        Both engines reject overlaps before yielding on UserTurn/Resume. A
+        retained backend (or a call already offloaded to a thread) therefore
+        keeps its original proof, not the next pooled turn's lease.
+        """
+        from app.core.session_plan import Backend, CURRENT_PLAN_RUN
+
+        ctx = getattr(self._engine, "ctx", None)
+        previous = ctx.extra.get("session_plan") if ctx is not None else None
+        proof = CURRENT_PLAN_RUN.get()
+        if ctx is not None and previous is not None:
+            delegated = self._is_delegated
+            ctx.extra["session_plan"] = Backend(
+                self._resolve_app_session_id,
+                # Native child tasks inherit the producer's ContextVar. Even a
+                # delayed old task using the shared ctx cannot borrow this run.
+                lambda: proof if delegated or CURRENT_PLAN_RUN.get() == proof else None,
+            )
+        try:
+            await self._engine.submit(op)
+        except BaseException:
+            if ctx is not None and previous is not None:
+                ctx.extra["session_plan"] = previous
+            raise
+
     async def send_query(self, prompt: str) -> None:
         if self._engine is None:
             raise RuntimeError("Adapter not connected")
@@ -1817,8 +1844,6 @@ class HarnessAdapter(ProviderAdapter):
                     assert_proactive_allowed, proactive,
                     self._options.extra.get("app_session_id"),
                 )
-        from app.core.session_plan import CURRENT_PLAN_RUN
-        self._plan_fence = CURRENT_PLAN_RUN.get()
         await self.reconcile_user_questions()
         self._mark_turn_floor()
         await self._refresh_task_roster()
@@ -1891,7 +1916,7 @@ class HarnessAdapter(ProviderAdapter):
         # tests pass the prompt string straight through (the loops normalize it),
         # so the cast bridges the vendor annotation without touching the value.
         try:
-            await self._engine.submit(UserTurn(
+            await self._submit_turn(UserTurn(
                 content=cast(Any, content), source=source,
                 context_pin=self._memory_context_pin(content),
                 emergency_compaction=self._take_emergency_compaction(),
@@ -2119,9 +2144,10 @@ class HarnessAdapter(ProviderAdapter):
         from app.core.harness_state import bind_state_context
         from app.core.session_plan import Backend
 
-        ctx.extra["session_plan"] = Backend(
-            self._resolve_app_session_id, lambda: getattr(self, "_plan_fence", None),
-        )
+        if (getattr(self._options, "extra", None) or {}).get("app_session_id"):
+            ctx.extra["session_plan"] = Backend(
+                self._resolve_app_session_id, lambda: None,
+            )
         return bind_state_context(ctx, self._resolve_app_session_id)
 
     def _turn_context_note(self, query: str = "") -> Optional[str]:
@@ -2708,7 +2734,7 @@ class HarnessAdapter(ProviderAdapter):
             self._memory_held_for_turn = None
             self._native_scratch_held_for_turn = None
         self._mark_turn_floor()
-        await self._engine.submit(Resume(
+        await self._submit_turn(Resume(
             source=self._take_turn_source(),
             context_note="\n\n".join(n for n in (memory_note, scratch_note) if n) or None,
         ))
@@ -5633,10 +5659,14 @@ class HarnessAdapter(ProviderAdapter):
                     exc_info=True,
                 )
 
-        if not native:
-            # One app planner on both legs; unlike file tools it has no CLI copy.
+        if native or options.extra.get("app_session_id"):
+            # App Plan never falls back to Fluid's standalone local store. A
+            # stateless delegated caller keeps its CLI planner instead.
+            from dataclasses import replace
             from fluid.tools.builtins import plan
-            registry.register_builtin(plan.SPEC, plan.handler)
+            registry.register_builtin(
+                replace(plan.SPEC, requires_extra=("session_plan",)), plan.handler,
+            )
             builtins_registered = True
 
         if _registers_bundled_search(options, native=native):
@@ -9359,6 +9389,7 @@ def _wired_tool_names(
         spec.name
         for spec in specs
         if (permitted is None or spec.name in permitted)
+        and (spec.name != "Plan" or "session_plan" in wired)
         and all(key in wired for key in (getattr(spec, "requires_extra", ()) or ()))
     )
 

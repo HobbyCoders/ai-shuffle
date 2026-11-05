@@ -83,7 +83,8 @@ async def test_event_failure_rolls_back_document_and_receipt(active_plan, monkey
 @pytest.mark.parametrize("native", [True, False])
 async def test_both_registries_offer_one_deferred_planner(native):
     adapter = ha.HarnessAdapter()
-    options = SessionOptions(model="m", cwd="/fixture", mcp_servers={})
+    options = SessionOptions(model="m", cwd="/fixture", mcp_servers={},
+                             extra={"app_session_id": "bound-session"})
     with patch.object(ha, "_registers_bundled_search", return_value=False):
         registry = await adapter._build_registry(options, native=native)
     names = [s.name for s in registry.list_tools(loaded_only=False)]
@@ -110,6 +111,22 @@ def test_no_effective_plan_leaves_native_cli_planner_alone(allowed, denied, regi
     blocked = set(ha._delegated_disallowed(options, registry))
     assert not ({"TodoWrite", "TaskCreate", "TaskUpdate", "TaskGet", "TaskList"} & blocked)
     assert "mcp__fluid_bundled__Plan" not in (ha._delegated_permission_grants(options, registry) or [])
+
+
+@pytest.mark.parametrize("native", [True, False])
+async def test_stateless_adapter_does_not_advertise_broken_app_plan(native):
+    adapter = ha.HarnessAdapter()
+    adapter._options = SessionOptions(model="m", cwd="/fixture", mcp_servers={})
+    registry = await adapter._build_registry(adapter._options, native=native)
+    ctx = adapter._with_away_hook(ToolCtx())
+    assert "session_plan" not in ctx.extra
+    if native:
+        assert "Plan" not in ha._wired_tool_names(registry, None, ha._wired_capabilities(ctx))
+        assert registry.get("Plan").requires_extra == ("session_plan",)
+    else:
+        assert registry.get("Plan") is None
+        assert "TodoWrite" not in ha._delegated_disallowed(adapter._options, registry)
+        assert "mcp__fluid_bundled__Plan" not in (ha._delegated_permission_grants(adapter._options, registry) or [])
 
 
 async def test_plan_endpoint_uses_transcript_access_before_storage(monkeypatch):

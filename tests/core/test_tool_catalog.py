@@ -63,7 +63,7 @@ def test_harness_rows_say_which_tools_claude_sessions_never_get():
     missing = {name for name, row in rows.items() if row.get("delegated") is False}
     assert missing == {"Ledger", "Note"}
     assert rows["Note"]["delegated_note"] == tc.DELEGATED_MISSING_NOTE
-    for name in ("Swarm", "Task", "AskUser", "HistoryExpand", "Remember"):
+    for name in ("Plan", "Swarm", "Task", "AskUser", "HistoryExpand", "Remember"):
         assert "delegated" not in rows[name], name
 
 

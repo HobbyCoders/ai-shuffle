@@ -23,6 +23,7 @@ import re
 import time
 import uuid
 import asyncio
+from contextlib import AsyncExitStack
 from typing import Optional, Dict, Any, AsyncGenerator, List
 from datetime import datetime, timezone
 
@@ -91,6 +92,7 @@ from app.core.query_persistence import (  # noqa: F401 — re-exports
     log_captured_cli_stderr,
 )
 from app.core.session_context import set_current_session_id
+from app.core.session_plan import recorded_turn
 from app.core.memory_sync import (
     memory_leg_for_options, reconcile_memory, push_memory,
 )
@@ -527,6 +529,35 @@ def _task_notification_frame(message: Any) -> Dict[str, Any]:
     }
 
 
+async def _record_query_message(recorder, message):
+    """The HTTP/headless recorder tap (these consumers use full message blocks)."""
+    if not recorder:
+        return
+    if isinstance(message, (AssistantMessage, UserMessage)):
+        for block in message.content:
+            if isinstance(block, TextBlock) and isinstance(message, AssistantMessage):
+                await recorder.on_event({"type": "chunk", "content": block.text})
+            elif isinstance(block, ToolUseBlock):
+                await recorder.on_event({"type": "tool_use", "name": block.name,
+                                         "id": block.id, "input": block.input})
+            elif isinstance(block, ToolResultBlock):
+                await recorder.on_event({"type": "tool_result", "tool_use_id": block.tool_use_id,
+                                         "output": truncate_large_payload(block.content),
+                                         "is_error": block.is_error})
+        if isinstance(message, AssistantMessage) and message.usage:
+            await recorder.on_event({"type": "turn_usage", "usage": message.usage})
+    elif isinstance(message, ResultMessage):
+        usage = message.usage or {}
+        metadata = {
+            **vars(message),
+            "tokens_in": usage.get("input_tokens", 0),
+            "tokens_out": usage.get("output_tokens", 0),
+            "cache_creation_tokens": usage.get("cache_creation_input_tokens", 0),
+            "cache_read_tokens": usage.get("cache_read_input_tokens", 0),
+        }
+        await recorder.on_event({"type": "done", "metadata": metadata})
+
+
 async def execute_query(
     prompt: str,
     profile_id: str,
@@ -704,6 +735,7 @@ async def _execute_query_turn(
     # send_query(), like the background path does.
     from app.core.provider.factory import make_adapter
     adapter = make_adapter()
+    plan_scope = AsyncExitStack()
 
     try:
         # A rewind that gave up waiting may hold the chat; a claim now would undo it.
@@ -714,9 +746,11 @@ async def _execute_query_turn(
         # Headless metadata is created before connect, unlike the pooled paths.
         # Book the credential account actually bound by lazy client construction.
         metadata[USAGE_PROVIDER_KEY] = getattr(options, "aih_provider_id", None)
+        recorder = await plan_scope.enter_async_context(recorded_turn(session_id, prompt, profile_id))
         await adapter.send_query(prompt)
 
         async for message in adapter.receive_events():
+            await _record_query_message(recorder, message)
             # Mirror background-task lifecycle into the registry (TaskList / /live).
             # Task messages subclass SystemMessage, so this must run before the
             # isinstance chain claims them via the SystemMessage branch below.
@@ -840,6 +874,7 @@ async def _execute_query_turn(
         logger.error(f"Query execution error: {e}")
         raise
     finally:
+        await plan_scope.aclose()
         # One-shot path owns the adapter outright (never pooled), so tear the
         # subprocess/harness session down here — including on the crash path.
         try:
@@ -1426,7 +1461,9 @@ async def _stream_query_turn(
         state.streaming_started_at = None
         raise
 
+    plan_scope = AsyncExitStack()
     try:
+        recorder = await plan_scope.enter_async_context(recorded_turn(session_id, prompt, profile_id))
         prepare_completions = getattr(
             state.adapter, "prepare_background_completions", None
         )
@@ -1445,6 +1482,7 @@ async def _stream_query_turn(
         await state.adapter.send_query(prompt)
 
         async for message in state.adapter.receive_events():
+            await _record_query_message(recorder, message)
             # Check typed task messages before generic SystemMessage
             # (they are subclasses and would match isinstance SystemMessage)
             # Mirror background-task lifecycle into the registry (TaskList / /live).
@@ -1672,6 +1710,7 @@ async def _stream_query_turn(
         yield {"type": "error", "message": str(actual)}
 
     finally:
+        await plan_scope.aclose()
         clear_turn_context(session_id, expected=bound_generation_context)
         # Consume this turn's Stop before releasing the pooled state. A later
         # reset (after async setup) could erase a real Stop for this turn.

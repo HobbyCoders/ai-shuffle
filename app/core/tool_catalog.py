@@ -123,7 +123,7 @@ def harness_tools() -> List[Dict[str, Any]]:
 
 # fluid builtins the DelegatedLoop serves to the claude CLI itself, beside the
 # app's bridge (fluid.engine.delegated registers them on its bundled server).
-DELEGATED_FLUID_BUNDLED = frozenset({"HistoryExpand", "HistorySearch", "Glob", "Grep"})
+DELEGATED_FLUID_BUNDLED = frozenset({"HistoryExpand", "HistorySearch", "Glob", "Grep", "Plan"})
 
 #: Why a harness row is not on a Claude session, shown by the picker.
 DELEGATED_MISSING_NOTE = (
