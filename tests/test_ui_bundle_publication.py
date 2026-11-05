@@ -87,7 +87,7 @@ def test_nightly_and_both_stable_paths_use_the_unprivileged_bundle_job():
     # signer must not stamp the bundle and the manifest differently (v1.2.0).
     assert "version: ${{ needs.gate.outputs.version }}" in nightly
     assert "SOURCE_VERSION: ${{ needs.gate.outputs.version }}" in nightly
-    assert "publication_source.py version" in nightly
+    assert "source_ui_artifact.py" in nightly
     stable = (ROOT / ".github/workflows/release.yml").read_text()
     assert "needs: [create-release, docker, buyer-install, ui-stable]" in stable
     assert "needs: [preflight, stage-buyer, ui-stable]" in stable

@@ -39,7 +39,7 @@ def test_root_calls_existing_workflows_and_requires_all_parity_jobs():
     gate = jobs["main-suite"]
     assert gate["name"] == "Main suite"
     assert gate["if"] == "always()"
-    assert set(gate["needs"]) == set(suite.REQUIRED) == set(jobs) - {"main-suite", "journey-issues"}
+    assert set(gate["needs"]) == set(suite.REQUIRED) == set(jobs) - {"main-suite", "journey-issues", "source-ui"}
     expected = {
         "backend": "ci-backend", "javascript": "ci-frontend", "fluid": "ci-fluid",
         "windows": "windows-suite", "browser-workspace": "ci-browser-workspace",

@@ -147,7 +147,12 @@ class CostPolicyTests(unittest.TestCase):
         self.assertEqual(config["jobs"]["publish"]["needs"], ["gate", "ui"])
         self.assertEqual(config["jobs"]["ui"]["needs"], "gate")
         self.assertEqual(config["jobs"]["ui"]["permissions"], {"contents": "read"})
-        self.assertEqual(config["jobs"]["publish"]["if"], "needs.gate.outputs.ready == 'true'")
+        condition = config["jobs"]["publish"]["if"]
+        for clause in ("always()", "needs.gate.result == 'success'", "needs.gate.outputs.ready == 'true'",
+                       "needs.ui.result == 'skipped'", "needs.ui.result == 'success'"):
+            self.assertIn(clause, condition)
+        self.assertIn("needs.gate.outputs.ui-reused != 'true'", config["jobs"]["ui"]["if"])
+        self.assertNotIn("optional", config["jobs"]["ui"]["with"])
 
     def test_ios_macos_job_is_unsigned_and_bounded(self):
         config = workflow("ios.yml")

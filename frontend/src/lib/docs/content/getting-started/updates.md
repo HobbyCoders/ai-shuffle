@@ -47,6 +47,16 @@ Only a completed integrity mismatch quarantines an entry; a transient read or ac
 
 Web update actions wake the desktop launcher immediately over its authenticated local control connection; older workers and disconnected connections keep the existing 30-second heartbeat. The same command expiry and single-consumer rules still apply. Set `AI_SHUFFLE_PERF_DESKTOP_BUILD_REUSE=0` or `AI_SHUFFLE_PERF_DESKTOP_UPDATE_PUSH=0` on the launcher process to restore the respective previous path; dependency integrity checks remain enabled.
 
+### Updater identity and preparation timings
+
+In **Settings → System → Updates → Update details**, **Running app** and **Running updater** are separate revisions for the connected worker. The UI version is the build loaded in this browser. An app-only update does not replace a resident container supervisor. Missing metadata from an older worker is **Unknown**, not proof that its updater is current or outdated.
+
+**Update details is read-only.** There is no in-app updater-refresh shortcut in this version, including when an older worker reports that one is available. Loading a different resident container updater requires a separately operator-approved container restart outside this page; an app-only update or restart is not enough. Check active work before arranging that restart: the report does not establish that it is safe to restart. An image-managed updater requires an operator-managed image transition; that status alone does not mean the app or image is outdated. Unknown metadata does not establish that a restart is needed. Desktop uses its separate launcher lifecycle. The existing check, download and install controls are unchanged.
+
+**Latest preparation** reports elapsed wall time and individual stages from the updater's latest report, with verified-cache hits, misses, disabled reuse, source-build fallback or failure. Stages can be nested: do not sum them. A missing or disabled bundle is distinct from a fallback after a bundle could not be reused. These bounded diagnostics contain no build commands or private filesystem paths, and are not proof that an update installed successfully. Older workers may report no timings. There is no background-preparation opt-in in this version: downloading and activation retain their existing controls.
+
+Docker supervisors also reuse verified tools and browser build outputs when their source, build recipe and dependency/runtime inputs match. Reuse never skips signed-source verification, dependency integrity checks, rollback or active-work protections.
+
 ### Runtime overlays
 
 An overlay-aware Docker supervisor can install a release's required Python, Node, Chromium and relocatable tools/libraries on the persistent data volume. Nothing changes for an ordinary release: the image's runtimes remain the default. Overlays activate only when a signed release requires a capability the image lacks and includes an archive for this architecture with a pinned SHA-256 and size limits. Downloads and installed contents are verified before use; there are no privileged package-manager operations.
