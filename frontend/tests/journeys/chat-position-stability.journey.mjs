@@ -181,9 +181,13 @@ async function ensureFast(page, variant) {
 		return;
 	}
 	await page.keyboard.press('Escape');
-	const fast = page.getByRole('button', { name: 'Fast mode', exact: true });
-	await openPopup(page.getByRole('button', { name: /^Effort:/ }).first(), fast);
-	if (await fast.getAttribute('aria-pressed') !== 'true') await fast.click();
+	// Fast lives in the effort popover at desktop width and in Chat controls
+	// (as a switch) at phone width.
+	const fast = page.getByRole('button', { name: 'Fast mode', exact: true })
+		.or(page.getByRole('switch', { name: 'Fast mode', exact: true }));
+	await openPopup(page.getByRole('button', { name: /^(Effort:|All chat controls)/ }).first(), fast);
+	const on = (await fast.getAttribute('aria-pressed')) ?? (await fast.getAttribute('aria-checked'));
+	if (on !== 'true') await fast.click();
 	await page.keyboard.press('Escape');
 	await page.waitForTimeout(400);
 }
