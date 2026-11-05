@@ -709,12 +709,14 @@
 			composerWrapped = wrapped;
 		}
 	});
-	// Re-measure after text or control contents (setup/voice) change. The
-	// ordinary Send/Stop circles now keep their layout slots.
+	// Settle text and its layout in the same pre-paint flush: a later rAF
+	// would first paint restored/typed text in the old narrow editor. Keep
+	// the measurement's editor/box reads reactive so initial attachment also
+	// participates; check() writes only when the wrap decision changes.
 	$effect(() => {
 		void inputValue;
 		void circles;
-		wrapWatcher.schedule();
+		wrapWatcher.measureNow();
 	});
 	$effect(() => {
 		const island = islandRef;

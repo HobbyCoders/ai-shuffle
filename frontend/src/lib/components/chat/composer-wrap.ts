@@ -107,9 +107,9 @@ export interface WrapWatcherOptions {
 }
 
 /**
- * Watches the composer and flips the wrapped layout. `schedule()` after the
- * text or the circles change; `observe(island, circles)` follows width
- * changes. One measurement per frame at most.
+ * Watches the composer and flips the wrapped layout. `measureNow()` settles
+ * text/control updates before paint; `observe(island, circles)` coalesces
+ * later box-size changes through `schedule()` to one measurement per frame.
  */
 export function createWrapWatcher(options: WrapWatcherOptions) {
 	let frame = 0;
@@ -152,7 +152,9 @@ export function createWrapWatcher(options: WrapWatcherOptions) {
 		frame = 0;
 		const editor = options.getEditor();
 		const island = options.getIsland();
-		if (!editor || !island || !editor.isConnected) return;
+		// A hidden/unlaid-out box has no line width. Keep the seeded/current
+		// layout until attachment or the size observer supplies real geometry.
+		if (!editor || !island || !editor.isConnected || editor.clientWidth <= 0 || island.clientWidth <= 0) return;
 		const now = { island: island.clientWidth, circles: options.getCircles?.()?.offsetWidth ?? 0 };
 		const wrapped = options.isWrapped();
 		let width: number;
@@ -192,6 +194,11 @@ export function createWrapWatcher(options: WrapWatcherOptions) {
 	}
 
 	return {
+		/** Settle the current render without a narrow-text paint before the next rAF. */
+		measureNow() {
+			if (frame) cancelAnimationFrame(frame);
+			check();
+		},
 		schedule,
 		/** Re-measure when the box or the circles change size. Returns the teardown. */
 		observe(island: HTMLElement, circles?: HTMLElement | null): () => void {
