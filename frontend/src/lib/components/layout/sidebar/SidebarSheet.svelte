@@ -152,10 +152,19 @@
 		padding: 6px 12px calc(24px + env(safe-area-inset-bottom, 0px));
 		border-radius: 20px;
 		touch-action: none;
+		/* The plane ends above the phone tabs. Translation alone does not hide
+		   a closed sheet now that rail overlays live outside the clipped list. */
+		visibility: hidden;
+		pointer-events: none;
 		transform: translateY(calc(100% + 12px));
-		transition: transform 0.32s cubic-bezier(0.16, 1, 0.3, 1);
+		transition: transform 0.32s cubic-bezier(0.16, 1, 0.3, 1), visibility 0s linear 0.32s;
 	}
-	.sheet.phone.open { transform: translateY(var(--sheet-drag, 0px)); }
+	.sheet.phone.open {
+		visibility: visible;
+		pointer-events: auto;
+		transform: translateY(var(--sheet-drag, 0px));
+		transition-delay: 0s;
+	}
 	.sheet.phone.dragging { transition: none; }
 	.sheet-top {
 		position: relative;
@@ -226,6 +235,6 @@
 	.sheet.popover.open { opacity: 1; pointer-events: auto; transform: none; }
 
 	@media (prefers-reduced-motion: reduce) {
-		.sheet, .sheet-scrim { transition: none; }
+		.sheet.phone, .sheet.flyout, .sheet.popover, .sheet-scrim { transition: none; }
 	}
 </style>
