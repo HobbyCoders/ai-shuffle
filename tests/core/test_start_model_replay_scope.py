@@ -518,3 +518,130 @@ async def test_unbound_remote_inheritance_requires_an_explicit_choice(chats, rem
         cur = conn.cursor()
         cur.execute("SELECT id FROM turns WHERE session_id LIKE %s", (orch.REMOTE_RECEIPT_PREFIX + "%",))
         assert not cur.fetchall()
+
+
+@pytest.mark.parametrize("model", [None, "sonnet", "prov:lane:astra"])
+@pytest.mark.parametrize("delivered", [False, True])
+async def test_remote_retry_honors_current_permission_tightening(chats, remote_wire, model, delivered):
+    from app.core.agent_types import PermissionResultAllow
+    from app.db import sessions
+
+    _turn("caller", "user", "do the work", profile="agent")
+    # Controlled binding fixture, not a UI-picker claim. Use the normal session
+    # binding writer; the reservation and receiver policy are real producers.
+    sessions.set_session_run_binding("caller", permission_mode="bypassPermissions")
+    chats[3]["result"] = PermissionResultAllow(updated_input={})
+    args = {**ARGS, "worker": "Other", **({"model": model} if model else {})}
+    remote_wire.update(offline=not delivered, after_delivery=delivered)
+    first = await _start(args)
+    assert first.is_error and "could not be reached" in first.text
+    receipt = _remote_reservation()
+    original_body = receipt["payload"]["remote_start_body"]
+    assert original_body["permission_mode"] == "bypassPermissions"
+    child_id = original_body["session_id"]
+    assert (sessions.get_session(child_id) is not None) is delivered
+    original_prompt_count = len(chats[2])
+
+    sessions.set_session_run_binding("caller", permission_mode="default")
+    remote_wire.update(offline=False, after_delivery=False)
+    retry = await _start(args)
+    child = sessions.get_session(child_id)
+    if delivered:
+        assert not retry.is_error, retry.text
+        result = json.loads(retry.text)
+        assert result["created"] is False and result["session_id"] == child_id
+        # Readback is not fresh authority and must not rewrite an existing child.
+        assert child["permission_mode"] == "bypassPermissions"
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT id FROM turns WHERE session_id=%s", (child_id,))
+            assert len(cur.fetchall()) == 1
+    else:
+        assert retry.is_error and child is None, (
+            f"tightened retry created work with permission_mode={child and child['permission_mode']}: {retry.text}")
+        assert "new request_id" in retry.text
+    assert len(chats[2]) == original_prompt_count
+    assert _remote_reservation()["payload"]["remote_start_body"] == original_body
+    if not delivered:
+        assert remote_wire["calls"][-1][0] == orch.REMOTE_READBACK_ACTION
+
+
+@pytest.mark.parametrize("model", [None, "sonnet", "prov:lane:astra"])
+async def test_remote_retry_never_upgrades_saved_ask_to_current_bypass(chats, remote_wire, model):
+    from app.core.agent_types import PermissionResultAllow
+    from app.db import sessions
+
+    _turn("caller", "user", "do the work", profile="agent")
+    chats[3]["result"] = PermissionResultAllow(updated_input={})
+    args = {**ARGS, "worker": "Other", **({"model": model} if model else {})}
+    assert (await _start(args)).is_error
+    receipt = _remote_reservation()
+    original_body = receipt["payload"]["remote_start_body"]
+    assert original_body["permission_mode"] == "default"
+    original_prompt_count = len(chats[2])
+    sessions.set_session_run_binding("caller", permission_mode="bypassPermissions", model="opus")
+    remote_wire["offline"] = False
+    retry = await _start(args)
+    assert not retry.is_error, retry.text
+    result = json.loads(retry.text)
+    child = sessions.get_session(result["session_id"])
+    assert result["created"] is True
+    assert child["permission_mode"] == "default"
+    assert child["model"] == original_body["model"]
+    assert len(chats[2]) == original_prompt_count
+    assert remote_wire["calls"][-1] == (orch.REMOTE_ACTION, original_body)
+
+
+async def test_remote_retry_respects_current_connector_permission_ceiling(chats, remote_wire):
+    from app.db import sessions, turns
+
+    root = _turn("caller", "user", "do the work", profile="agent")
+    sessions.set_session_run_binding("caller", permission_mode="bypassPermissions")
+    args = {**ARGS, "worker": "Other"}
+    assert (await _start(args)).is_error
+    receipt = _remote_reservation()
+    # A real automatic continuation producer with a connector ceiling keeps the
+    # original root. No consent receipt or saved remote body is seeded here.
+    continuation = turns.enqueue_turn(
+        "caller", "agent_message", prompt="continue the same request", profile_id="agent",
+        overrides={"_permission_ceiling": "default"}, payload={"orchestration_root": root["id"]})
+    assert turns.start_turn(continuation["id"]) is not None
+    current = orch._context("caller")
+    assert current["id"] == continuation["id"]
+    assert current["overrides"]["_permission_ceiling"] == "default"
+    remote_wire["offline"] = False
+    retry = await _start(args)
+    child = sessions.get_session(receipt["payload"]["remote_session_id"])
+    assert retry.is_error and child is None, f"connector ceiling was bypassed: {retry.text}"
+    assert "new request_id" in retry.text
+    assert not chats[2]
+
+
+@pytest.mark.parametrize("saved,current", [(None, "bypassPermissions"), ("bypassPermissions", None),
+                                           ("bypassPermissions", "retired-mode")])
+async def test_remote_retry_with_unbound_or_unknown_permission_cannot_create(chats, remote_wire, saved, current):
+    from app.db import sessions
+
+    _turn("caller", "user", "do the work", profile="agent")
+    # Explicit legacy/unbound caller-state controls, not UI or old-binary claims.
+    # Only the caller input is controlled; every reservation is produced normally.
+    if saved is None:
+        with get_db() as conn:
+            conn.cursor().execute("UPDATE sessions SET permission_mode=NULL WHERE id='caller'")
+    else:
+        sessions.set_session_run_binding("caller", permission_mode=saved)
+    args = {**ARGS, "worker": "Other"}
+    assert (await _start(args)).is_error
+    receipt = _remote_reservation()
+    assert receipt["payload"]["remote_start_body"]["permission_mode"] == saved
+    if current is None:
+        with get_db() as conn:
+            conn.cursor().execute("UPDATE sessions SET permission_mode=NULL WHERE id='caller'")
+    else:
+        sessions.set_session_run_binding("caller", permission_mode=current)
+    remote_wire["offline"] = False
+    retry = await _start(args)
+    child = sessions.get_session(receipt["payload"]["remote_session_id"])
+    assert retry.is_error and child is None, f"unproven permission recovery created work: {retry.text}"
+    assert "new request_id" in retry.text
+    assert not chats[2]

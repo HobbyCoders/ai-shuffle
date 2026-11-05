@@ -916,14 +916,16 @@ def _remote_body(sender, data, overrides, payload, prompt, command_id, fingerpri
     return body
 
 
-def _remote_replay_body(previous, command_id, fingerprint):
+def _remote_replay_body(previous, command_id, fingerprint, permission_mode):
     """Only a complete canonical reservation can authorize remote recovery.
 
     Legacy/partial metadata permits querying an existing child, never creating
     one from a newly resolved model or the caller's current inherited settings.
+    Tightened or unbound permissions likewise permit readback only.
     """
     from app.core.model_registry import model_values
     from app.core.query_options import decode_provider_model
+    from app.core.session_modes import strictest_permission_mode
 
     identity = {"session_id": _remote_session_id(command_id),
                 "command_id": command_id, "fingerprint": fingerprint}
@@ -939,7 +941,12 @@ def _remote_replay_body(previous, command_id, fingerprint):
                     and all(key in body for key in (
                         "title", "prompt", "peer_message_content", "sender_session_id", "sender_label",
                         "depth", "profile_id", "permission_mode", "effort", "context_window", "fast"))):
-                return body, False
+                saved_mode = body["permission_mode"]
+                # A canonical model snapshot is not a lasting permission grant.
+                # Preserve the original, but only if current authority permits it.
+                if (saved_mode and permission_mode
+                        and strictest_permission_mode(saved_mode, permission_mode) == saved_mode):
+                    return body, False
     return identity, True
 
 
@@ -999,7 +1006,7 @@ def accept_remote_start(body, from_device, *, readback_only=False):
             raise ValueError("request_id was already used with different arguments.")
         return receipt(turn, False)
     if readback_only:
-        raise ValueError("No existing remote StartSession receipt; original model binding is missing. "
+        raise ValueError("No existing remote StartSession receipt; the execution binding does not authorize creation. "
                          "Use a new request_id to check current consent; nothing was started.")
     title = _remote_text(body, "title", 160).strip()
     _remote_text(body, "prompt", 20000)  # validate legacy wire field; never trust its frame
@@ -1733,7 +1740,7 @@ def _queue(sender_id, data, action, placement=None, model_plan=None, discovered_
             if remote is not None and made_remotely:
                 # Replay the original binding or ask only for existing state.
                 # Never rebuild an authorized execution from today's inheritance.
-                body, readback_only = _remote_replay_body(previous, command_id, fingerprint)
+                body, readback_only = _remote_replay_body(previous, command_id, fingerprint, started_mode)
                 return {"remote": remote, "receipt_id": previous["id"], "reserved": False,
                         "readback_only": readback_only, "body": body}
             return {"session_id": previous["session_id"], "turn_id": previous["id"],
