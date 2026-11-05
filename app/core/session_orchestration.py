@@ -1032,7 +1032,7 @@ def accept_remote_start(body, from_device, *, readback_only=False):
         raise ValueError("assistant_work must be true or false")
     choice = body.get("model_choice") if isinstance(body.get("model_choice"), dict) else None
     inherited = body.get("model_inherited", False)
-    if not isinstance(inherited, bool):
+    if inherited is not False and inherited is not True:
         raise ValueError("Invalid model_inherited")
 
     if database.get_profile(profile_id) is None:
