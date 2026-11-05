@@ -305,40 +305,45 @@ export function resolveReadingAnchorDelta(anchor: ReadingAnchor, rowTop: number,
  * is pending may also queue briefly behind the turn being cancelled; that one
  * asks to see its reply.
  *
- * Rows match entries by identity: the command id, or the queue row's id, which
- * a drained row carries as its turn id (`queuedTurnId` when absorbed into a
- * running turn). Resending a withdrawn prompt's words is therefore a new send.
- * Only a row with no identity at all falls back to text, and only against what
- * the queue still lists. Entries are kept once landed or withdrawn, so a
- * retained or stale queue row cannot count again.
+ * A composer send has a `client-` command id, which is exact: it matches its
+ * own entry or it is a new send, whatever its words or the turn it joins. Other
+ * rows are matched by the queue row id they run as (a drained row's turn id, or
+ * `queuedTurnId`), then by text, because an absorbed row may name only the turn
+ * it joined. Text can only hold back a row that no composer sent, so it never
+ * costs a sender their reply. An entry matches once, and stays known so a
+ * retained or stale queue row cannot count again or re-arm following.
  */
+const MAX_TRACKED_QUEUE_ENTRIES = 200;
+
 export function createQueuedPromptTracker() {
 	type Entry = {
 		ids: Set<string>;
 		clientMessageId?: string;
 		content: string;
 		followOnLanding: boolean;
-		listed: boolean;
 		landed: boolean;
 	};
 	let entries: Entry[] = [];
+	let lastQueue: readonly unknown[] | null = null;
 	return {
 		reset() {
 			entries = [];
+			lastQueue = null;
 		},
 		/** `stopPending` is false for the first read of a session's existing queue. */
 		observe(queue: readonly { id: string; clientMessageId?: string; content: string }[], stopPending: boolean) {
-			for (const entry of entries) entry.listed = false;
+			if (queue === lastQueue) return;
+			lastQueue = queue;
 			for (const { id, clientMessageId, content } of queue) {
 				const known = entries.find((e) => e.ids.has(id) || (!!clientMessageId && e.clientMessageId === clientMessageId));
 				if (known) {
 					known.ids.add(id);
 					known.clientMessageId ??= clientMessageId;
-					known.listed = true;
 				} else {
-					entries.push({ ids: new Set([id]), clientMessageId, content, followOnLanding: stopPending, listed: true, landed: false });
+					entries.push({ ids: new Set([id]), clientMessageId, content, followOnLanding: stopPending, landed: false });
 				}
 			}
+			if (entries.length > MAX_TRACKED_QUEUE_ENTRIES) entries = entries.slice(-MAX_TRACKED_QUEUE_ENTRIES);
 		},
 		/** The reader scrolled away: a pending send no longer overrides that. */
 		releaseStopFollow() {
@@ -346,11 +351,11 @@ export function createQueuedPromptTracker() {
 		},
 		/** Call once per new user row; a matched entry cannot match again. */
 		classify(row: { content?: string; commandId?: string; turnId?: string; queuedTurnId?: string }) {
+			const waiting = entries.filter((e) => !e.landed);
 			const queueId = row.queuedTurnId ?? row.turnId;
-			const content = row.content ?? '';
-			const landed = entries.find((e) => !e.landed && (row.commandId || queueId
-				? (!!row.commandId && e.clientMessageId === row.commandId) || (!!queueId && e.ids.has(queueId))
-				: e.listed && e.content === content));
+			const landed = row.commandId?.startsWith('client-')
+				? waiting.find((e) => e.clientMessageId === row.commandId)
+				: waiting.find((e) => !!queueId && e.ids.has(queueId)) ?? waiting.find((e) => e.content === (row.content ?? ''));
 			if (landed) landed.landed = true;
 			return { fromQueue: !!landed, followsStop: !!landed?.followOnLanding };
 		},

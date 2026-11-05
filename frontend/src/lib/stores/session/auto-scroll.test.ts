@@ -359,27 +359,51 @@ describe('queued prompt tracker', () => {
 		expect(tracker.classify({ content: 'Continue', commandId: 'client-a' })).toEqual({ fromQueue: true, followsStop: false });
 	});
 
-	it('does not let a withdrawn entry with no client id claim a fresh send', () => {
+	it('does not let a withdrawn entry with no client id claim a composer send', () => {
 		const tracker = createQueuedPromptTracker();
 		tracker.observe([{ id: 'row-1', content: 'Continue' }], false);
 		tracker.observe([], true);
 		expect(tracker.classify({ content: 'Continue', commandId: 'client-b', turnId: 'turn-b' })).toEqual({ fromQueue: false, followsStop: false });
-		expect(tracker.classify({ content: 'Continue' })).toEqual({ fromQueue: false, followsStop: false });
 	});
 
-	it('matches an entry with no client id by the turn its row runs as', () => {
+	it('treats a composer send as new even when it joins the turn an entry ran as', () => {
 		const tracker = createQueuedPromptTracker();
-		tracker.observe([{ id: 'row-1', content: 'Drained' }, { id: 'row-2', content: 'Absorbed' }], false);
-		tracker.observe([], false);
-		expect(tracker.classify({ content: 'Drained', turnId: 'row-1' }).fromQueue).toBe(true);
-		expect(tracker.classify({ content: 'Absorbed', turnId: 'live-turn', queuedTurnId: 'row-2' }).fromQueue).toBe(true);
+		// The opener landed in a batch with its reply, so it was never the newest row.
+		tracker.observe([{ id: 'turn-1', content: 'Opener' }], false);
+		expect(tracker.classify({ content: 'Follow-up', commandId: 'client-b', turnId: 'turn-1' })).toEqual({ fromQueue: false, followsStop: false });
 	});
 
-	it('uses text only for a row with no identity, and only against the listed queue', () => {
+	it('matches an entry with no client id by the queue row its row names', () => {
+		const tracker = createQueuedPromptTracker();
+		tracker.observe([{ id: 'row-1', content: 'Same' }, { id: 'row-2', content: 'Same' }], false);
+		tracker.observe([], false);
+		expect(tracker.classify({ content: 'Same', turnId: 'row-2' }).fromQueue).toBe(true);
+		expect(tracker.classify({ content: 'Same', turnId: 'live-turn', queuedTurnId: 'row-1' }).fromQueue).toBe(true);
+		expect(tracker.classify({ content: 'Same', turnId: 'row-1' }).fromQueue).toBe(false);
+	});
+
+	it('recognizes an absorbed row that names only the turn it joined', () => {
+		const tracker = createQueuedPromptTracker();
+		tracker.observe([{ id: 'row-1', content: 'Absorbed' }, { id: 'row-2', content: 'Resumed' }], false);
+		// Ordinary mid-turn delivery: the live turn id, no command id, no queue id.
+		expect(tracker.classify({ content: 'Absorbed', turnId: 'live-turn' })).toEqual({ fromQueue: true, followsStop: false });
+		// A parked turn resuming: its queue row has already left the snapshot.
+		tracker.observe([], false);
+		expect(tracker.classify({ content: 'Resumed', commandId: 'continuation-1', turnId: 'parked-turn' }).fromQueue).toBe(true);
+	});
+
+	it('leaves other rows new when no queue entry shares their identity or words', () => {
 		const tracker = createQueuedPromptTracker();
 		tracker.observe([{ id: 'row-1', content: 'Listed' }], false);
+		expect(tracker.classify({ content: 'Other', turnId: 'turn-9' }).fromQueue).toBe(false);
 		expect(tracker.classify({ content: 'Other' }).fromQueue).toBe(false);
-		expect(tracker.classify({ content: 'Listed' }).fromQueue).toBe(true);
+	});
+
+	it('stops tracking the oldest entries past its limit', () => {
+		const tracker = createQueuedPromptTracker();
+		tracker.observe(Array.from({ length: 201 }, (_, i) => ({ id: `row-${i}`, content: `prompt ${i}` })), false);
+		expect(tracker.classify({ content: 'prompt 0', turnId: 'row-0' }).fromQueue).toBe(false);
+		expect(tracker.classify({ content: 'prompt 200', turnId: 'row-200' }).fromQueue).toBe(true);
 	});
 
 	it('does not count a retained delivered row again, or re-arm its follow', () => {

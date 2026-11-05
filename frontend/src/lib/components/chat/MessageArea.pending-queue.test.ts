@@ -75,11 +75,11 @@ describe('MessageArea pending-queue wiring (#524)', () => {
 		// A withdrawn prompt's words, sent again with no queue step, are a new send.
 		const withdrawn = (clientMessageId: string, stop: string | null) => trackingState.update({ sessionId: 'chat-c', stopRequestedTurnId: stop, queuedMessages: clientMessageId ? [{ id: clientMessageId, clientMessageId, content: 'Continue' }] : [] });
 		withdrawn('', null);
-		withdrawn('send-1', null);
+		withdrawn('client-1', null);
 		withdrawn('', null);
-		expect(trackingState.follows('Continue', false, 'send-2', 'turn-2')).toBe(true);
+		expect(trackingState.follows('Continue', false, 'client-2', 'turn-2')).toBe(true);
 		// The withdrawn entry itself, delivered after all, still does not pull the reader.
-		expect(trackingState.follows('Continue', false, 'send-1', 'turn-1')).toBe(false);
+		expect(trackingState.follows('Continue', false, 'client-1', 'turn-1')).toBe(false);
 	});
 
 	it('uses one AgentMessage dispatch for queued and received peer rows', () => {
