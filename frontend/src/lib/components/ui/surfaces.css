@@ -1,0 +1,56 @@
+/* Shared Graphite surfaces, copied from NewAgentDialog and the model picker.
+   Opt-in only: never restyles a transcript or a caller's existing kit. */
+.ui-surface {
+ --st-popover: var(--popover); --st-card: var(--card); --st-muted: var(--muted);
+ --st-fg: var(--foreground); --st-mfg: var(--muted-foreground);
+ --st-input: var(--field-border); --st-field: var(--field-bg);
+ --st-primary: var(--primary); --st-primary-soft: color-mix(in oklch, var(--primary) 13%, transparent);
+ --st-radius-md: var(--radius); --st-radius-sm: calc(var(--radius) - 2px); --st-border: var(--border); --st-border-strong: var(--border-strong);
+ --ui-dialog-shadow: 0 14px 40px color-mix(in oklch, var(--foreground) 14%, transparent), 0 0 0 1px color-mix(in oklch, var(--foreground) 16%, transparent);
+ color: var(--foreground); font-family: var(--font-sans); font-size: 13px; line-height: 1.5;
+}
+.dark .ui-surface { --ui-dialog-shadow: 0 14px 40px color-mix(in oklch, var(--background) 70%, transparent), 0 0 0 1px color-mix(in oklch, var(--foreground) 16%, transparent); }
+.ui-overlay { position: fixed; inset: 0; z-index: 1000; display: grid; place-items: center; padding: 20px; }
+.ui-scrim { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; padding: 0; background: color-mix(in oklch, var(--background) 62%, transparent); backdrop-filter: blur(3px); }
+.ui-dialog { position: relative; width: min(var(--ui-dialog-width, 520px), 100%); min-width: 0; max-height: 100%; display: flex; flex-direction: column; overflow: auto; background: var(--popover); border-radius: calc(var(--radius) + 8px); box-shadow: var(--ui-dialog-shadow); animation: ui-dialog-in 180ms ease-out; }
+.ui-dialog:focus { outline: none; }
+.ui-dialog-header { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 18px 18px 6px 20px; flex: none; }
+.ui-dialog-title { margin: 0; font-size: 16px; font-weight: 600; line-height: 1.4; color: var(--foreground); }
+.ui-dialog-subtitle { margin: 3px 0 0; font-size: 13px; color: var(--muted-foreground); }
+.ui-dialog-body { min-height: 0; padding: 8px 20px 4px; overflow: auto; }
+.ui-dialog-footer { display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 14px 20px 18px; flex: none; }
+.ui-button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 32px; padding: 0 10px; border: 1px solid var(--border); border-radius: var(--radius); background: transparent; color: var(--foreground); font: inherit; font-size: 13px; line-height: 1.4; font-weight: 500; text-decoration: none; cursor: pointer; transition: background 180ms ease-out, color 180ms ease-out; }
+.ui-button:hover:not(:disabled) { background: var(--hover-overlay); }
+.ui-button.primary { background: var(--action); color: var(--action-foreground); border-color: transparent; }
+.ui-button.primary:hover:not(:disabled) { background: var(--action-hover); }
+.ui-button.danger { color: var(--destructive); border-color: color-mix(in oklch, var(--destructive) 40%, transparent); }
+.ui-button.ghost { border-color: transparent; color: var(--muted-foreground); }
+.ui-button.icon { width: 32px; padding: 0; flex: none; }
+.ui-button:active:not(:disabled) { transform: translateY(1px); }
+.ui-button:disabled { opacity: .5; cursor: not-allowed; }
+.ui-surface :focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+.ui-field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.ui-label { font-size: 12px; font-weight: 500; color: var(--muted-foreground); }
+.ui-input { width: 100%; min-width: 0; min-height: 32px; padding: 6px 10px; border: 1px solid var(--field-border); border-radius: var(--radius); background: var(--field-bg); color: var(--foreground); font: inherit; font-size: 13px; }
+.ui-input:focus { border-color: var(--field-border-focus); outline: 2px solid var(--ring); outline-offset: 2px; }
+.ui-input:disabled { opacity: .5; }
+.ui-choice { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 32px; padding: 6px 10px; border: 1px solid var(--border); border-radius: var(--radius); background: transparent; color: var(--muted-foreground); font: inherit; cursor: pointer; }
+.ui-choice:hover:not(:disabled) { background: var(--hover-overlay); color: var(--foreground); }
+.ui-choice[aria-pressed='true'], .ui-choice[aria-checked='true'] { background: var(--row-selected); color: var(--foreground); }
+.ui-choice:disabled { opacity: .5; cursor: not-allowed; }
+.ui-onboarding { min-height: 100dvh; display: grid; place-items: center; padding: 24px; background: var(--background); }
+.ui-onboarding-card { width: min(100%, 520px); padding: 32px; background: var(--popover); border-radius: calc(var(--radius) + 8px); box-shadow: var(--ui-dialog-shadow); }
+.ui-onboarding-card h1 { margin: 0 0 8px; font-size: 24px; font-weight: 600; line-height: 1.25; }
+@keyframes ui-dialog-in { from { opacity: 0; transform: translateY(-4px); } }
+@media (max-width: 600px) {
+ .ui-overlay { padding: 0; align-items: end; }
+ .ui-dialog { width: 100%; max-height: 92dvh; border-radius: 18px 18px 0 0; padding-bottom: env(safe-area-inset-bottom); }
+ .ui-dialog-footer { flex-wrap: wrap; }
+ .ui-dialog-footer .ui-button { min-height: 44px; flex: 1; }
+ .ui-surface .ui-button, .ui-surface .ui-choice { min-height: 44px; }
+ .ui-surface .ui-button.icon { width: 44px; }
+ .ui-input { min-height: 44px; font-size: 16px; }
+ .ui-onboarding { padding: 16px; }
+ .ui-onboarding-card { padding: 24px 20px; }
+}
+@media (prefers-reduced-motion: reduce) { .ui-dialog { animation: none; } .ui-button { transition: none; } }

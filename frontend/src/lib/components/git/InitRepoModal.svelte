@@ -1,4 +1,6 @@
 <script lang="ts">
+	import '$lib/components/ui/surfaces.css';
+	import Checkbox from '$lib/components/ui/Checkbox.svelte';
 	/**
 	 * InitRepoModal - Initialize or clone a git repository for a project
 	 *
@@ -139,38 +141,19 @@
 <svelte:window onkeydown={handleKeydown} />
 
 {#if open}
-	<div class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="init-repo-title" tabindex="-1" use:focusTrap={{ initial: 'input' }}>
-		<button class="modal-backdrop-close" onclick={onClose} tabindex="-1" aria-label="Close dialog"></button>
-		<div class="modal">
-			<!-- Close button -->
-			<button class="close-btn" onclick={onClose} aria-label="Close">
-				<X size={16} strokeWidth={1.5} />
-			</button>
-
-			<!-- Icon -->
-			<div class="modal-icon">
-				{#if isCloneMode}
-					<Download size={20} strokeWidth={1.5} />
-				{:else}
-					<FolderGit2 size={20} strokeWidth={1.5} />
-				{/if}
-			</div>
-
-			<!-- Title & description -->
-			<h2 id="init-repo-title" class="modal-title">Set up Git</h2>
-			<p class="modal-description">
-				{#if isCloneMode}
-					Clone an existing repository into this project.
-				{:else}
-					Initialize a git repository for this project to track changes,
-					create branches, and collaborate.
-				{/if}
-			</p>
-
+	<div class="ui-overlay ui-surface" role="dialog" aria-modal="true" aria-labelledby="init-repo-title" tabindex="-1" use:focusTrap={{ initial: 'input' }}>
+		<button class="ui-scrim" onclick={onClose} tabindex="-1" aria-label="Close dialog"></button>
+		<div class="ui-dialog">
+			<div class="ui-dialog-header">
+ <div><h2 id="init-repo-title" class="ui-dialog-title">Set up Git</h2>
+ <p class="ui-dialog-subtitle">{isCloneMode ? 'Clone an existing repository into this project.' : 'Track changes, create branches, and collaborate.'}</p></div>
+ <button class="ui-button ghost icon" onclick={onClose} aria-label="Close"><X size={16} strokeWidth={1.5} /></button>
+ </div>
+ <div class="ui-dialog-body init-body">
 			<!-- Mode toggle -->
 			<div class="mode-toggle">
 				<button
-					class="mode-btn"
+					class="ui-choice"
 					class:active={mode === 'init'}
 					aria-pressed={mode === 'init'}
 					onclick={() => mode = 'init'}
@@ -180,7 +163,7 @@
 					New repo
 				</button>
 				<button
-					class="mode-btn"
+					class="ui-choice"
 					class:active={mode === 'clone'}
 					aria-pressed={mode === 'clone'}
 					onclick={() => mode = 'clone'}
@@ -194,12 +177,12 @@
 			{#if isCloneMode}
 				<!-- Clone URL input -->
 				<div class="clone-section">
-					<div class="field">
-						<label class="field-label" for="clone-url-input">Repository URL</label>
+					<div class="ui-field">
+						<label class="ui-label" for="clone-url-input">Repository URL</label>
 						<input
 							id="clone-url-input"
 							type="text"
-							class="input"
+							class="ui-input"
 							placeholder="https://github.com/user/repo.git"
 							bind:value={cloneUrl}
 							bind:this={cloneUrlRef}
@@ -217,39 +200,31 @@
 				</div>
 			{:else}
 				<!-- Initial commit option -->
-				<label class="checkbox-row">
-					<input
-						type="checkbox"
-						bind:checked={createInitialCommit}
-						disabled={loading}
-					/>
+				<div class="checkbox-row">
+					<Checkbox block bind:checked={createInitialCommit} disabled={loading} label="Create initial commit">
 					<span class="checkbox-label">Create initial commit</span>
-					<span class="checkbox-hint">Stage and commit all existing files</span>
-				</label>
+					<span class="checkbox-hint">Stage and commit all existing files</span></Checkbox>
+				</div>
 
 				<!-- GitHub repo option -->
-				<label class="checkbox-row">
-					<input
-						type="checkbox"
-						bind:checked={createGithubRepo}
-						disabled={loading}
-					/>
+				<div class="checkbox-row">
+					<Checkbox block bind:checked={createGithubRepo} disabled={loading} label="Create GitHub repository">
 					<span class="checkbox-label">
 						<Github size={14} strokeWidth={1.5} />
 						Create GitHub repository
 					</span>
-					<span class="checkbox-hint">Create a new repo and set it as remote</span>
-				</label>
+					<span class="checkbox-hint">Create a new repo and set it as remote</span></Checkbox>
+				</div>
 
 				<!-- GitHub options (expanded) -->
 				{#if createGithubRepo}
 					<div class="github-options">
-						<div class="field">
-							<label class="field-label" for="repo-name-input">Repository name</label>
+						<div class="ui-field">
+							<label class="ui-label" for="repo-name-input">Repository name</label>
 							<input
 								id="repo-name-input"
 								type="text"
-								class="input"
+								class="ui-input"
 								placeholder="my-project"
 								bind:value={githubRepoName}
 								bind:this={repoNameRef}
@@ -259,7 +234,7 @@
 
 						<div class="visibility-toggle">
 							<button
-								class="vis-btn"
+								class="ui-choice"
 								class:active={githubPrivate}
 								aria-pressed={githubPrivate}
 								onclick={() => githubPrivate = true}
@@ -269,7 +244,7 @@
 								Private
 							</button>
 							<button
-								class="vis-btn"
+								class="ui-choice"
 								class:active={!githubPrivate}
 								aria-pressed={!githubPrivate}
 								onclick={() => githubPrivate = false}
@@ -287,9 +262,11 @@
 				<div class="error-msg" role="alert">{error}</div>
 			{/if}
 
+			</div>
+			<div class="ui-dialog-footer">
 			<!-- Action -->
 			<button
-				class="continue-btn"
+				class="ui-button primary"
 				disabled={loading || !canSubmit}
 				onclick={handleSubmit}
 			>
@@ -299,346 +276,20 @@
 					{isCloneMode ? 'Clone' : 'Initialize'}
 				{/if}
 			</button>
+			</div>
 		</div>
 	</div>
 {/if}
 
 <style>
-	.modal-backdrop {
-		position: fixed;
-		inset: 0;
-		z-index: 100;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		animation: fade-in 150ms ease;
-	}
-
-	.modal-backdrop-close {
-		position: absolute;
-		inset: 0;
-		width: 100%;
-		height: 100%;
-		background: color-mix(in oklch, var(--background) 80%, transparent);
-		backdrop-filter: blur(4px);
-		border: none;
-		cursor: default;
-		padding: 0;
-	}
-
-	@keyframes fade-in {
-		from { opacity: 0; }
-		to { opacity: 1; }
-	}
-
-	.modal {
-		position: relative;
-		width: 90%;
-		max-width: 420px;
-		background: var(--card);
-		border: 1px solid var(--border);
-		border-radius: 16px;
-		padding: 28px;
-		box-shadow: var(--shadow-l);
-		max-height: calc(100dvh - 32px);
-		overflow-y: auto;
-		display: flex;
-		flex-direction: column;
-		gap: 12px;
-		animation: modal-in 200ms ease;
-	}
-
-	@keyframes modal-in {
-		from { opacity: 0; transform: scale(0.97) translateY(4px); }
-		to { opacity: 1; transform: scale(1) translateY(0); }
-	}
-
-	.close-btn {
-		position: absolute;
-		top: 16px;
-		right: 16px;
-		width: 28px;
-		height: 28px;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		background: transparent;
-		border: none;
-		border-radius: 6px;
-		color: var(--muted-foreground);
-		cursor: pointer;
-		transition: all 150ms ease;
-	}
-
-	.close-btn:hover {
-		background: var(--hover-overlay);
-		color: var(--foreground);
-	}
-
-	.modal-icon {
-		width: 44px;
-		height: 44px;
-		border-radius: 12px;
-		background: color-mix(in oklch, var(--foreground) 8%, transparent);
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		color: var(--foreground);
-	}
-
-	.modal-title {
-		font-size: 1.125rem;
-		font-weight: 600;
-		color: var(--foreground);
-		margin: 0;
-		line-height: 1.2;
-	}
-
-	.modal-description {
-		font-size: 0.8125rem;
-		color: var(--muted-foreground);
-		margin: 0;
-		line-height: 1.5;
-	}
-
-	/* Mode toggle (segmented control) */
-	.mode-toggle {
-		display: flex;
-		gap: 2px;
-		padding: 3px;
-		background: var(--background);
-		border: 1px solid var(--border);
-		border-radius: 10px;
-	}
-
-	.mode-btn {
-		flex: 1;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		gap: 6px;
-		padding: 7px 12px;
-		font-size: 0.8125rem;
-		font-weight: 500;
-		border: 1px solid transparent;
-		border-radius: 8px;
-		background: transparent;
-		color: var(--muted-foreground);
-		cursor: pointer;
-		transition: all 150ms ease;
-	}
-
-	.mode-btn:hover:not(:disabled):not(.active) {
-		color: var(--foreground);
-	}
-
-	.mode-btn.active {
-		background: var(--card);
-		border-color: var(--border);
-		color: var(--foreground);
-		box-shadow: 0 1px 2px color-mix(in oklch, var(--foreground) 5%, transparent);
-	}
-
-	.mode-btn:disabled {
-		opacity: 0.5;
-		cursor: not-allowed;
-	}
-
-	/* Clone section */
-	.clone-section {
-		display: flex;
-		flex-direction: column;
-		gap: 10px;
-		animation: expand-in 150ms ease;
-	}
-
-	.divider {
-		display: flex;
-		align-items: center;
-		gap: 10px;
-		font-size: 0.75rem;
-		color: var(--muted-foreground);
-	}
-
-	.divider::before,
-	.divider::after {
-		content: '';
-		flex: 1;
-		height: 1px;
-		background: var(--border);
-	}
-
-	/* Checkbox rows */
-	.checkbox-row {
-		display: grid;
-		grid-template-columns: 18px 1fr;
-		grid-template-rows: auto auto;
-		gap: 0 10px;
-		align-items: center;
-		padding: 10px 12px;
-		background: var(--background);
-		border: 1px solid var(--border);
-		border-radius: 10px;
-		cursor: pointer;
-		transition: border-color 150ms ease;
-	}
-
-	.checkbox-row:hover {
-		border-color: var(--ring);
-	}
-
-	.checkbox-row input[type="checkbox"] {
-		grid-row: 1 / -1;
-		width: 16px;
-		height: 16px;
-		accent-color: var(--primary);
-		cursor: pointer;
-		margin: 0;
-	}
-
-	.checkbox-label {
-		display: flex;
-		align-items: center;
-		gap: 6px;
-		font-size: 0.8125rem;
-		font-weight: 500;
-		color: var(--foreground);
-		line-height: 1.3;
-	}
-
-	.checkbox-hint {
-		grid-column: 2;
-		font-size: 0.75rem;
-		color: var(--muted-foreground);
-		line-height: 1.3;
-	}
-
-	/* GitHub options section */
-	.github-options {
-		display: flex;
-		flex-direction: column;
-		gap: 10px;
-		padding: 12px;
-		background: var(--background);
-		border: 1px solid var(--border);
-		border-radius: 10px;
-		animation: expand-in 150ms ease;
-	}
-
-	@keyframes expand-in {
-		from { opacity: 0; transform: translateY(-4px); }
-		to { opacity: 1; transform: translateY(0); }
-	}
-
-	.field {
-		display: flex;
-		flex-direction: column;
-		gap: 6px;
-	}
-
-	.field-label {
-		font-size: 0.8125rem;
-		font-weight: 500;
-		color: var(--foreground);
-	}
-
-	.field-hint {
-		font-size: 0.75rem;
-		color: var(--muted-foreground);
-		line-height: 1.3;
-	}
-
-	.input {
-		width: 100%;
-		padding: 10px 14px;
-		background: var(--card);
-		border: 1px solid var(--border);
-		border-radius: 10px;
-		color: var(--foreground);
-		font-size: 0.875rem;
-		font-family: var(--font-mono);
-		outline: none;
-		transition: border-color 150ms ease, box-shadow 150ms ease;
-	}
-
-	.input:focus {
-		border-color: var(--ring);
-		box-shadow: 0 0 0 3px color-mix(in oklch, var(--ring) 15%, transparent);
-	}
-
-	.input:disabled {
-		opacity: 0.5;
-	}
-
-	/* Visibility toggle */
-	.visibility-toggle {
-		display: flex;
-		gap: 6px;
-	}
-
-	.vis-btn {
-		flex: 1;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		gap: 6px;
-		padding: 8px 12px;
-		font-size: 0.8125rem;
-		font-weight: 500;
-		border: 1px solid var(--border);
-		border-radius: 8px;
-		background: transparent;
-		color: var(--muted-foreground);
-		cursor: pointer;
-		transition: all 150ms ease;
-	}
-
-	.vis-btn:hover:not(:disabled) {
-		border-color: var(--foreground);
-		color: var(--foreground);
-	}
-
-	.vis-btn.active {
-		background: var(--foreground);
-		border-color: var(--foreground);
-		color: var(--background);
-	}
-
-	.vis-btn:disabled {
-		opacity: 0.5;
-		cursor: not-allowed;
-	}
-
-	.error-msg {
-		padding: 8px 12px;
-		background: color-mix(in oklch, var(--destructive) 10%, transparent);
-		border: 1px solid color-mix(in oklch, var(--destructive) 25%, transparent);
-		border-radius: 8px;
-		color: var(--destructive);
-		font-size: 0.8125rem;
-		line-height: 1.4;
-	}
-
-	.continue-btn {
-		width: 100%;
-		padding: 10px 20px;
-		margin-top: 4px;
-		font-size: 0.875rem;
-		font-weight: 500;
-		border-radius: 10px;
-		border: none;
-		cursor: pointer;
-		transition: all 150ms ease;
-		background: var(--foreground);
-		color: var(--background);
-	}
-
-	.continue-btn:hover:not(:disabled) {
-		opacity: 0.9;
-	}
-
-	.continue-btn:disabled {
-		opacity: 0.3;
-		cursor: not-allowed;
-	}
+ .init-body { display: grid; gap: 12px; }
+ .mode-toggle, .visibility-toggle { display: flex; gap: 6px; }
+ .mode-toggle > button, .visibility-toggle > button { flex: 1; }
+ .clone-section, .github-options { display: grid; gap: 10px; }
+ .divider { text-align: center; font-size: 12px; color: var(--muted-foreground); }
+ .checkbox-row { padding-block: 8px; border-bottom: 1px solid var(--border); }
+ .checkbox-label { display: flex; align-items: center; gap: 6px; font-size: 13px; }
+ .checkbox-hint { display: block; font-size: 12px; color: var(--muted-foreground); }
+ .field-hint { font-size: 12px; color: var(--muted-foreground); }
+ .error-msg { color: var(--destructive); font-size: 13px; }
 </style>

@@ -559,12 +559,11 @@
 	.bdp-readout {
 		margin: 0 12px 8px;
 		padding: 8px 10px;
-		font-family: var(--font-mono);
+		font-family: var(--font-sans);
 		font-size: 0.8125rem;
 		font-weight: 500;
-		letter-spacing: -0.01em;
 		color: var(--foreground);
-		background: color-mix(in oklch, var(--primary) 9%, transparent);
+		background: var(--row-selected);
 		border: 1px solid color-mix(in oklch, var(--primary) 22%, transparent);
 		border-radius: calc(var(--radius) - 4px);
 	}
@@ -597,7 +596,6 @@
 		padding: 4px 8px;
 		font-size: 0.875rem;
 		font-weight: 600;
-		letter-spacing: -0.01em;
 		color: var(--foreground);
 		background: transparent;
 		border: 0;
@@ -661,26 +659,26 @@
 	.bdp-wk {
 		height: auto; /* a row header spans its row, whatever the day height */
 		align-self: stretch;
-		font-family: var(--font-mono);
+		font-family: var(--font-sans);
 		font-size: 0.625rem;
 		color: var(--subtle-foreground, var(--muted-foreground));
 	}
 	.bdp-days.weeks .bdp-row.week-ok:hover:not(.head) {
-		background: color-mix(in oklch, var(--primary) 9%, transparent);
+		background: var(--row-selected);
 	}
 	.bdp-days.weeks .bdp-row.week-selected {
-		background: color-mix(in oklch, var(--primary) 18%, transparent);
+		background: var(--row-selected);
 	}
 	.bdp-days.weeks .bdp-row.week-selected .bdp-day,
 	.bdp-days.weeks .bdp-row.week-selected .bdp-wk {
-		color: var(--primary);
+		color: var(--foreground);
 		font-weight: 600;
 	}
 
 	.bdp-day,
 	.bdp-month,
 	.bdp-cell {
-		font-family: var(--font-mono);
+		font-family: var(--font-sans);
 		color: var(--popover-foreground);
 		background: transparent;
 		border: 0;
@@ -695,7 +693,7 @@
 	}
 	.bdp-day:hover:not([aria-disabled='true']),
 	.bdp-month:hover:not([aria-disabled='true']) {
-		background: color-mix(in oklch, var(--primary) 12%, transparent);
+		background: var(--row-selected);
 	}
 	.bdp-day.outside {
 		color: var(--muted-foreground);
@@ -710,15 +708,14 @@
 		height: 4px;
 		margin-left: -2px;
 		border-radius: 50%;
-		background: var(--primary);
+		background: var(--action);
 	}
 	.bdp-day.selected,
 	.bdp-month.selected,
 	.bdp-cell.selected {
-		color: var(--primary-foreground);
-		background: var(--primary);
+		color: var(--foreground);
+		background: var(--row-selected);
 		font-weight: 600;
-		box-shadow: 0 2px 8px -2px color-mix(in oklch, var(--primary) 55%, transparent);
 	}
 	.bdp-day.selected.today::after {
 		background: var(--primary-foreground);
@@ -809,7 +806,7 @@
 		-webkit-user-select: none;
 	}
 	.bdp-cell:hover:not([aria-disabled='true']):not(.selected) {
-		background: color-mix(in oklch, var(--primary) 12%, transparent);
+		background: var(--row-selected);
 	}
 
 	.bdp-foot {
@@ -829,14 +826,14 @@
 		font: inherit;
 		font-size: 0.75rem;
 		font-weight: 600;
-		color: var(--primary);
+		color: var(--foreground);
 		background: transparent;
 		border: 0;
 		border-radius: 6px;
 		cursor: pointer;
 	}
 	.bdp-link:hover:not(:disabled) {
-		background: color-mix(in oklch, var(--primary) 12%, transparent);
+		background: var(--row-selected);
 	}
 	.bdp-link:disabled {
 		color: var(--muted-foreground);
@@ -865,12 +862,12 @@
 		background: var(--hover-overlay, color-mix(in oklch, var(--muted) 70%, transparent));
 	}
 	.bdp-btn.primary {
-		color: var(--primary-foreground);
-		background: var(--primary);
+		color: var(--action-foreground);
+		background: var(--action);
 		border: 1px solid transparent;
 	}
 	.bdp-btn.primary:hover:not(:disabled) {
-		background: color-mix(in oklab, var(--primary) 88%, var(--foreground));
+		background: var(--row-selected);
 	}
 	.bdp-btn:disabled {
 		opacity: 0.45;
@@ -884,21 +881,21 @@
 		}
 	}
 
-	@media (pointer: coarse) {
+	@media (pointer: coarse), (max-width: 600px) {
 		.bdp-day {
-			height: 40px;
+			height: 44px;
 			font-size: 0.9375rem;
 		}
 		.bdp-cell {
-			height: 40px;
+			height: 44px;
 			font-size: 0.9375rem;
 		}
 		.bdp-icon {
-			width: 40px;
-			height: 40px;
+			width: 44px;
+			height: 44px;
 		}
 		.bdp-btn {
-			height: 40px;
+			height: 44px;
 			padding: 0 18px;
 		}
 		.bdp-link {

@@ -1,4 +1,5 @@
 <script lang="ts">
+	import '$lib/components/ui/surfaces.css';
 	/**
 	 * Wizard step: connect at least one AI provider. Every agent provider is an
 	 * equal choice (no default, no badge); picking one opens its connect flow
@@ -107,7 +108,7 @@
 	onDestroy(() => { disposed = true; clearInterval(timer); });
 </script>
 
-<div class="space-y-4" data-testid="setup-provider">
+<div class="ui-surface space-y-4" data-testid="setup-provider">
 	<p class="text-xs text-muted-foreground leading-relaxed">
 		Subscriptions (ChatGPT, SuperGrok, Claude) and API keys both work. Your provider bills you directly.
 	</p>
@@ -169,8 +170,8 @@
 	{/if}
 
 	<div class="flex gap-3">
-		{#if onBack}<button type="button" onclick={onBack} class="btn btn-secondary flex-1 py-3">Back</button>{/if}
-		<button type="button" onclick={onContinue} class="btn btn-primary flex-1 py-3" disabled={!readiness.anyReady}>Continue</button>
+		{#if onBack}<button type="button" onclick={onBack} class="ui-button flex-1 py-3">Back</button>{/if}
+		<button type="button" onclick={onContinue} class="ui-button primary flex-1 py-3" disabled={!readiness.anyReady}>Continue</button>
 	</div>
 </div>
 
@@ -178,25 +179,10 @@
 	.choices { list-style: none; padding: 0; display: flex; flex-direction: column; gap: 0.5rem; }
 	.choice {
 		position: relative;
-		border: 1px solid var(--border);
-		border-radius: 0.625rem;
-		background: color-mix(in srgb, var(--muted) 25%, transparent);
+		border-bottom: 1px solid var(--border);
 		transition: border-color 0.2s ease-out, background-color 0.2s ease-out, box-shadow 0.2s ease-out;
 	}
-	/* The open choice grows a primary rail down its left edge, into its panel. */
-	.choice::before {
-		content: '';
-		position: absolute;
-		left: -1px; top: 0.625rem; bottom: 0.625rem;
-		width: 3px;
-		border-radius: 0 3px 3px 0;
-		background: var(--primary);
-		transform: scaleY(0);
-		transform-origin: top;
-		transition: transform 0.25s cubic-bezier(0.2, 0.8, 0.2, 1);
-	}
-	.choice.open::before { transform: scaleY(1); }
-	.choice.open { border-color: color-mix(in srgb, var(--primary) 55%, var(--border)); background: var(--card); box-shadow: 0 6px 24px color-mix(in srgb, var(--foreground) 7%, transparent); }
+	.choice.open { background: var(--row-selected); }
 	.choice.connected:not(.open) { border-color: color-mix(in srgb, var(--success) 40%, var(--border)); }
 	.choice-head {
 		display: flex;
@@ -207,7 +193,7 @@
 		padding: 0.625rem 0.875rem;
 		background: transparent;
 		border: 0;
-		border-radius: 0.625rem;
+		border-radius: var(--radius);
 		text-align: left;
 		cursor: pointer;
 		color: var(--foreground);

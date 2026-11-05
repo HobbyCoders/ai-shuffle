@@ -1,4 +1,5 @@
 <script lang="ts">
+	import '$lib/components/ui/surfaces.css';
 	/**
 	 * GitHeaderActions - the chat header's git cluster, folded into one button.
 	 *
@@ -582,7 +583,7 @@
 	{#if panelOpen}
 		<!-- Scrim only takes effect in the bottom-sheet layout (see CSS). -->
 		<div class="git-scrim" aria-hidden="true"></div>
-		<div class="git-panel" use:obscuresTranscript={sheetLayout} class:dragging-sheet={draggingSheet} style:--sheet-offset={`${sheetOffset}px`} bind:this={panelRef} role="dialog" aria-label="Git actions">
+		<div class="git-panel ui-surface" use:obscuresTranscript={sheetLayout} class:dragging-sheet={draggingSheet} style:--sheet-offset={`${sheetOffset}px`} bind:this={panelRef} role="dialog" aria-label="Git actions">
 			<button
 				class="sheet-handle"
 				aria-label="Close Git panel (drag down or tap)"
@@ -882,7 +883,7 @@
 		width: 5px;
 		height: 5px;
 		border-radius: 50%;
-		background: var(--warning, #d29922);
+		background: var(--warning);
 		opacity: 0.8;
 	}
 
@@ -923,7 +924,7 @@
 	}
 
 	.init-btn:hover:not(:disabled) {
-		background: color-mix(in oklch, var(--primary) 10%, transparent);
+		background: var(--row-selected);
 	}
 
 	.btn-label {
@@ -990,7 +991,7 @@
 	.stat-line {
 		display: inline-flex;
 		gap: 5px;
-		font-family: var(--font-mono);
+		font-family: var(--font-sans);
 	}
 
 	.stat {
@@ -1030,10 +1031,10 @@
 		width: min(440px, calc(100vw - 24px));
 		max-height: calc(100vh - 80px);
 		overflow-y: auto;
-		background: var(--popover, var(--card));
-		border: 1px solid var(--border-strong, var(--border));
-		border-radius: calc(var(--radius, 0.75rem) * 1.2);
-		box-shadow: var(--shadow-l);
+		background: var(--popover);
+		border: 0;
+		border-radius: calc(var(--radius) + 8px);
+		box-shadow: var(--ui-dialog-shadow);
 		z-index: 150;
 		text-align: left;
 		animation: panel-in 160ms cubic-bezier(0.2, 0.7, 0.2, 1);
@@ -1216,7 +1217,7 @@
 	.step.done { color: var(--muted-foreground); }
 	.step.done i { background: var(--success); }
 	.step.next { color: var(--foreground); font-weight: 500; }
-	.step.next i { background: var(--primary); box-shadow: 0 0 0 3px color-mix(in oklch, var(--primary) 25%, transparent); }
+	.step.next i { background: var(--primary); }
 	.step.stop { color: var(--destructive); }
 	.step.stop i { background: var(--destructive); }
 
@@ -1243,9 +1244,9 @@
 		box-sizing: border-box;
 		height: 100%;
 		padding: 0 9px;
-		border: 1px solid color-mix(in oklch, var(--primary) 55%, transparent);
-		background: color-mix(in oklch, var(--primary) 10%, transparent);
-		color: var(--primary);
+		border: 1px solid var(--border);
+		background: var(--action);
+		color: var(--action-foreground);
 		font-size: 0.71875rem;
 		font-weight: 600;
 		cursor: pointer;
@@ -1266,7 +1267,7 @@
 	.ship-go .split-main:hover:not(:disabled),
 	.ship-go .split-chevron:hover:not(:disabled),
 	.ship-go .split-chevron.active {
-		background: color-mix(in oklch, var(--primary) 18%, transparent);
+		background: var(--row-selected);
 	}
 
 	.ship-go .split-main:disabled,
@@ -1368,11 +1369,11 @@
 
 	.on-default { color: var(--warning); }
 	.count {
-		font-family: var(--font-mono);
+		font-family: var(--font-sans);
 		font-size: 0.65625rem;
 		font-weight: 600;
-		color: var(--primary);
-		background: color-mix(in oklch, var(--primary) 14%, transparent);
+		color: var(--foreground);
+		background: var(--row-selected);
 		padding: 1px 5px;
 		border-radius: calc(var(--radius, 0.75rem) * 0.5);
 	}
@@ -1540,7 +1541,7 @@
 		display: block;
 		position: fixed;
 		inset: 0;
-		background: rgb(0 0 0 / 0.5);
+		background: var(--modal-overlay);
 		z-index: 140;
 		animation: scrim-in 180ms ease;
 	}
@@ -1719,7 +1720,6 @@
 		font-size: 10px;
 		font-weight: 700;
 		line-height: 1;
-		letter-spacing: -0.01em;
 		font-variant-numeric: tabular-nums;
 		white-space: nowrap;
 	}

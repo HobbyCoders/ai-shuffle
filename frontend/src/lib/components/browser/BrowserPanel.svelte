@@ -1142,7 +1142,7 @@
 		position: absolute;
 		inset: 0;
 		z-index: 95;
-		width: 100% !important;
+		width: 100%;
 		border-left: none;
 		/* Keep the toolbar/footer clear of notches and home indicators. */
 		padding-top: env(safe-area-inset-top, 0px);
@@ -1235,13 +1235,13 @@
 	/* Header toggles report their active state without covering the page. */
 	.inspect-toggle.active,
 	.keyboard-toggle.active {
-		background: color-mix(in oklch, var(--primary) 14%, transparent);
-		color: var(--primary);
+		background: var(--row-selected);
+		color: var(--foreground);
 	}
 	.inspect-toggle.active:hover:not(:disabled),
 	.keyboard-toggle.active:hover:not(:disabled) {
-		background: color-mix(in oklch, var(--primary) 20%, transparent);
-		color: var(--primary);
+		background: var(--row-selected);
+		color: var(--foreground);
 	}
 
 	.address-bar {
@@ -1260,7 +1260,7 @@
 		padding: 0 10px;
 		background: color-mix(in oklch, var(--muted) 55%, transparent);
 		border: 1px solid transparent;
-		border-radius: 999px;
+		border-radius: var(--radius);
 		color: var(--foreground);
 		font-size: 0.75rem;
 		font-family: var(--font-mono, monospace);
@@ -1296,7 +1296,7 @@
 		padding: 0 12px;
 		background: var(--background);
 		border: 1px solid var(--ring);
-		border-radius: 999px;
+		border-radius: var(--radius);
 		color: var(--foreground);
 		font-size: 0.75rem;
 		font-family: var(--font-mono, monospace);
@@ -1315,7 +1315,6 @@
 	}
 	.status-live {
 		background: var(--success);
-		box-shadow: 0 0 0 3px color-mix(in oklch, var(--success) 25%, transparent);
 	}
 	.status-connecting {
 		background: var(--warning);
@@ -1370,11 +1369,10 @@
 		padding: 3px 9px;
 		font-size: 0.6875rem;
 		font-weight: 500;
-		letter-spacing: 0.02em;
 		color: var(--foreground);
 		background: color-mix(in oklch, var(--popover) 88%, transparent);
 		border: 1px solid color-mix(in oklch, var(--border) 60%, transparent);
-		border-radius: 999px;
+		border-radius: var(--radius);
 		backdrop-filter: blur(6px);
 		pointer-events: none;
 	}
@@ -1444,10 +1442,10 @@
 		padding: 0 9px;
 		max-width: 60%;
 		min-width: 0;
-		background: color-mix(in oklch, var(--primary) 10%, transparent);
-		border: 1px solid color-mix(in oklch, var(--primary) 35%, transparent);
-		border-radius: 999px;
-		color: var(--primary);
+		background: var(--row-selected);
+		border: 1px solid var(--border);
+		border-radius: var(--radius);
+		color: var(--foreground);
 		font-size: 0.6875rem;
 		font-family: var(--font-mono, monospace);
 	}
@@ -1528,10 +1526,10 @@
 		align-items: center;
 		justify-content: center;
 		flex-shrink: 0;
-		background: var(--primary);
+		background: var(--action);
 		border: none;
 		border-radius: calc(var(--radius) - 2px);
-		color: var(--primary-foreground, #fff);
+		color: var(--action-foreground);
 		cursor: pointer;
 		transition: opacity 150ms ease;
 		-webkit-tap-highlight-color: transparent;
@@ -1564,7 +1562,7 @@
 		padding: 2px 8px;
 		background: transparent;
 		border: 1px solid var(--border);
-		border-radius: 999px;
+		border-radius: var(--radius);
 		color: var(--foreground);
 		font-size: 0.6875rem;
 		cursor: pointer;
@@ -1595,7 +1593,7 @@
 	}
 
 	.inspect-note {
-		color: var(--primary);
+		color: var(--foreground);
 		border-top-color: color-mix(in oklch, var(--primary) 30%, transparent);
 	}
 
@@ -1604,15 +1602,15 @@
 		padding: 2px 10px;
 		background: transparent;
 		border: 1px solid color-mix(in oklch, var(--primary) 40%, transparent);
-		border-radius: 999px;
-		color: var(--primary);
+		border-radius: var(--radius);
+		color: var(--foreground);
 		font-size: 0.6875rem;
 		font-weight: 500;
 		cursor: pointer;
 		-webkit-tap-highlight-color: transparent;
 	}
 	.note-exit:hover {
-		background: color-mix(in oklch, var(--primary) 10%, transparent);
+		background: var(--row-selected);
 	}
 
 	@media (prefers-reduced-motion: reduce) {

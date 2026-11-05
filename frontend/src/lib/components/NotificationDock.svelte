@@ -141,7 +141,7 @@
 		animation: dock-in 160ms ease-out;
 	}
 	.dock-entry > :global(.banner) {
-		box-shadow: var(--shadow-l, 0 8px 24px rgb(0 0 0 / 0.18));
+		box-shadow: var(--menu-shadow);
 	}
 
 	@keyframes dock-in {

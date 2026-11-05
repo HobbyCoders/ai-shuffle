@@ -1,4 +1,5 @@
 <script lang="ts">
+	import '$lib/components/ui/surfaces.css';
 	import { apiBase, withAuth } from '$lib/api/runtime';
 	import { focusTrap } from '$lib/components/ui/focus-trap';
 	import CliHistoryImport from '$lib/components/setup/CliHistoryImport.svelte';
@@ -162,7 +163,7 @@
 
 {#if show}
 	<div
-		class="fixed inset-0 max-sm:bottom-[calc(4.5rem+env(safe-area-inset-bottom,0px))] z-50 flex items-center justify-center p-4"
+		class="ui-overlay ui-surface"
 		role="dialog"
 		aria-modal="true"
 		aria-labelledby="import-session-title"
@@ -170,19 +171,19 @@
 		use:focusTrap
 	>
 		<button
-			class="absolute inset-0 w-full h-full bg-black/50 border-none p-0 cursor-default"
+			class="ui-scrim"
 			onclick={close}
 			tabindex="-1"
 			aria-label="Close dialog"
 		></button>
 		<div
-			class="relative bg-card rounded-xl w-full max-w-md overflow-hidden shadow-xl border border-border"
+			class="ui-dialog"
 		>
 			<!-- Header -->
-			<div class="px-4 py-3 border-b border-border flex items-center justify-between">
-				<h2 id="import-session-title" class="text-lg font-semibold text-foreground">Import chat</h2>
+			<div class="ui-dialog-header">
+				<h2 id="import-session-title" class="ui-dialog-title">Import chat</h2>
 				<button
-					class="import-modal-btn p-1.5 text-muted-foreground hover:text-foreground rounded-lg transition-colors"
+					class="ui-button ghost icon"
 					onclick={close}
 					aria-label="Close"
 				>
@@ -193,7 +194,7 @@
 			</div>
 
 			<!-- Content -->
-			<div class="p-4 space-y-4">
+			<div class="ui-dialog-body space-y-4">
 				<input
 					type="file"
 					accept=".json"
@@ -205,7 +206,7 @@
 				{#if !selectedFile || parseError}
 					<!-- Dropzone -->
 					<div
-						class="border-2 border-dashed rounded-xl p-8 text-center transition-colors cursor-pointer {isDragOver ? 'border-primary bg-primary/5' : 'border-border hover:border-primary/50'}"
+						class="border-2 border-dashed rounded-xl p-8 text-center transition-colors cursor-pointer {isDragOver ? 'border-border bg-muted' : 'border-border hover:border-muted-foreground'}"
 						onclick={triggerFileSelect}
 						ondrop={handleDrop}
 						ondragover={handleDragOver}
@@ -219,7 +220,7 @@
 						role="button"
 						tabindex="0"
 					>
-						<svg class="w-12 h-12 mx-auto mb-3 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						<svg class="w-7 h-7 mx-auto mb-3 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
 						</svg>
 						<p class="text-sm text-foreground mb-1">Drop your export file here</p>
@@ -233,7 +234,7 @@
 								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
 							</svg>
 							<div>
-								<p class="text-sm text-destructive font-medium">Invalid File</p>
+								<p class="text-sm text-destructive font-medium">Invalid file</p>
 								<p class="text-xs text-destructive/80 mt-0.5">{parseError}</p>
 							</div>
 						</div>
@@ -247,7 +248,7 @@
 					<!-- Preview -->
 					<div class="space-y-4">
 						<div class="flex items-center gap-3 p-3 bg-muted/50 rounded-lg">
-							<svg class="w-10 h-10 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<svg class="w-7 h-7 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
 							</svg>
 							<div class="flex-1 min-w-0">
@@ -267,7 +268,7 @@
 
 						<div class="border border-border rounded-lg overflow-hidden">
 							<div class="px-3 py-2 bg-muted/30 border-b border-border">
-								<p class="text-xs text-muted-foreground uppercase tracking-wider font-medium">Preview</p>
+								<p class="text-xs text-muted-foreground font-medium">Preview</p>
 							</div>
 							<div class="p-3 space-y-2">
 								<div class="flex justify-between">
@@ -305,7 +306,7 @@
 									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
 								</svg>
 								<div>
-									<p class="text-sm text-destructive font-medium">Import Failed</p>
+									<p class="text-sm text-destructive font-medium">Import failed</p>
 									<p class="text-xs text-destructive/80 mt-0.5">{importError}</p>
 								</div>
 							</div>
@@ -315,17 +316,17 @@
 			</div>
 
 			<!-- Footer -->
-			<div class="px-4 py-3 border-t border-border flex justify-end gap-2 bg-muted/30">
+			<div class="ui-dialog-footer">
 				<button
 					onclick={close}
-					class="import-modal-cancel px-4 py-2 text-sm bg-muted text-foreground rounded-lg transition-colors"
+					class="ui-button"
 				>
 					Cancel
 				</button>
 				<button
 					onclick={handleImport}
 					disabled={!previewData || isImporting}
-					class="px-4 py-2 text-sm bg-action text-action-foreground rounded-lg hover:opacity-90 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+					class="ui-button primary"
 				>
 					{#if isImporting}
 						<svg class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
@@ -337,30 +338,10 @@
 						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
 						</svg>
-						Import Session
+						Import chat
 					{/if}
 				</button>
 			</div>
 		</div>
 	</div>
 {/if}
-
-<style>
-	.import-modal-btn:hover {
-		background: var(--hover-overlay);
-	}
-
-	.import-modal-btn:focus-visible {
-		outline: 2px solid var(--ring);
-		outline-offset: 2px;
-	}
-
-	.import-modal-cancel:hover {
-		background: var(--hover-overlay);
-	}
-
-	.import-modal-cancel:focus-visible {
-		outline: 2px solid var(--ring);
-		outline-offset: 2px;
-	}
-</style>

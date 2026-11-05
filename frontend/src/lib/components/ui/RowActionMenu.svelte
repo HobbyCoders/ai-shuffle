@@ -154,10 +154,10 @@
 			top: 0;
 			bottom: 0;
 			padding: 0 6px;
-			border-radius: 10px;
+			border-radius: var(--menu-radius);
 			background: var(--popover);
-			border: 1px solid var(--border);
-			box-shadow: var(--shadow-l);
+			border: 1px solid var(--menu-border);
+			box-shadow: var(--menu-shadow);
 			z-index: 6;
 
 			/* Closed: collapsed toward the toggle, anchored at its right edge. */

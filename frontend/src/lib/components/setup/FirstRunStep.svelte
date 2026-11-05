@@ -1,4 +1,5 @@
 <script lang="ts">
+	import '$lib/components/ui/surfaces.css';
 	/**
 	 * Wizard step: the first agent run. One short prompt in a new chat session
 	 * (no project, no file tools), with the reply streamed in, so the owner
@@ -119,7 +120,7 @@
 	onDestroy(() => { handle?.cancel(); });
 </script>
 
-<div class="space-y-4" data-testid="setup-first-run">
+<div class="ui-surface space-y-4" data-testid="setup-first-run">
 	<p class="text-sm text-muted-foreground">
 		Run a one-line task to see an agent answer. It runs in a new chat session with no project and no access to your files.
 	</p>
@@ -175,7 +176,7 @@
 	{/if}
 
 	<div class="flex gap-3">
-		{#if onBack}<button type="button" onclick={onBack} class="btn btn-secondary flex-1 py-3" disabled={running}>Back</button>{/if}
+		{#if onBack}<button type="button" onclick={onBack} class="ui-button flex-1 py-3" disabled={running}>Back</button>{/if}
 		{#if !succeeded}
 			<button type="button" onclick={start} class="btn {attempted ? 'btn-secondary' : 'btn-primary'} flex-1 py-3" disabled={running || picking || (!pick && needsModel.length > 0)}>
 				{#if running}<Loader2 size={16} class="inline-block animate-spin mr-2" />Running…{:else}<Play size={16} class="inline-block mr-2" />{attempted ? 'Try again' : 'Run it'}{/if}
