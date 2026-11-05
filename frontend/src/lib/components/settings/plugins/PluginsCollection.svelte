@@ -14,7 +14,7 @@
 	import CollectionPage from '../shell/CollectionPage.svelte';
 	import EmptyDetail from '../shell/EmptyDetail.svelte';
 	import ListItem from '../rows/ListItem.svelte';
-	import ListGroupLabel from '../rows/ListGroupLabel.svelte';
+	import RowGroup from '../rows/RowGroup.svelte';
 	import InlineBanner from '../rows/InlineBanner.svelte';
 	import { PluginsModel, parseItem, plural, setPluginsModel, type PluginEntry } from './plugins-model.svelte';
 	import { EXPLORE_ICON, PACKAGE_ICON, PROJECTS_ICON, REVIEW_ICON, SOURCES_ICON, connectionIcon } from './icons';
@@ -149,7 +149,7 @@
 	const showProjects = $derived(matches('Project plugins', 'project folder scope local', projectsSummary));
 </script>
 
-<CollectionPage category={CATEGORY} count={model.loading ? undefined : `${installedCount} added`} bind:filter>
+<CollectionPage category={CATEGORY} count={model.loading ? undefined : `${installedCount} added`} filterPlaceholder={installedCount + (access.readOnly ? 2 : 3) > 6 || filter ? "Filter plugins" : null} bind:filter>
 	{#snippet list()}
 		{#if model.forbidden}
 			<p class="st-empty">{FORBIDDEN_TEXT}</p>
@@ -162,7 +162,7 @@
 			</InlineBanner>
 		{/if}
 		{#each groups as group (group.label)}
-			<ListGroupLabel label={group.label} />
+			<RowGroup title={group.label}>
 			{#each group.rows as row (row.entry.item)}
 				<ListItem
 					id={row.entry.item}
@@ -178,16 +178,17 @@
 					category={CATEGORY}
 				/>
 			{/each}
+   </RowGroup>
 		{/each}
 		{#if model.loading}
 			<p class="st-empty" role="status">Loading plugins…</p>
 		{:else if !model.forbidden && !model.error && installedCount === 0 && !q}
-			<p class="st-empty">Nothing added yet.</p>
+			<div class="st-card"><p class="st-empty">Nothing added yet.</p></div>
 		{:else if q && !groups.length && !showExplore && !showSources && !showProjects}
-			<p class="st-empty">No plugin matches “{filter.trim()}”.</p>
+			<EmptyDetail message={`No plugin matches “${filter.trim()}”.`} actionLabel="Clear" onAction={() => filter = ''} />
 		{/if}
 		{#if showExplore || showSources || showProjects}
-			<ListGroupLabel label="More" />
+			<RowGroup title="More">
 			{#if showExplore}
 				<ListItem
 					id="explore"
@@ -216,6 +217,7 @@
 					category={CATEGORY}
 				/>
 			{/if}
+   </RowGroup>
 		{/if}
 	{/snippet}
 	{#snippet detail()}

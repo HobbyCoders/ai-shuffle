@@ -32,6 +32,8 @@
 		name: string;
 		/** Settings retains its measure; collection details share one centered reading column. */
 		width?: 'settings' | 'reading' | 'data' | 'docs';
+		/** Content-first destinations have no detail-history or Saved row. */
+		contentFirst?: boolean;
 		/** Only genuine identity art (an agent avatar or provider logo), never a generic decorative tile. */
 		identity?: boolean;
 		icon?: SettingsIcon;
@@ -75,6 +77,7 @@
 	let {
 		name,
 		width = 'settings',
+		contentFirst = false,
 		identity = false,
 		icon,
 		glyph,
@@ -127,9 +130,11 @@
 </script>
 
 <div class="st-dwrap" class:data={width === 'data'} class:reading={width === 'reading'} class:docs={width === 'docs'}>
-	<BackRow label={catLabel} onclick={() => (onBack ? onBack() : settingsNav.stacked ? settingsNav.back() : settingsNav.clearSelection(cat))}>
-		{#if topStatus}{@render topStatus()}{:else}<SavedTick />{/if}
-	</BackRow>
+	{#if !contentFirst}
+		<BackRow label={catLabel} onclick={() => (onBack ? onBack() : settingsNav.stacked ? settingsNav.back() : settingsNav.clearSelection(cat))}>
+			{#if topStatus}{@render topStatus()}{:else}<SavedTick />{/if}
+		</BackRow>
+	{/if}
 	<div class="st-dh" class:has-identity={!!tile || identity || !!glyph}>
 		{#if tile}{@render tile()}{:else if identity || glyph}<Tile size="lg" {icon} text={glyph} status={statusText ? undefined : status} ring="bg" />{/if}
 		<div class="st-dh-main">

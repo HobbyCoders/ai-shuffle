@@ -142,7 +142,7 @@
 			</div>
 			{#if error}<p class="menu-error" role="alert">{error}</p>{/if}
 			{#if adding}
-				<div class="project-search"><Search size={14} aria-hidden="true" /><input bind:this={searchInput} bind:value={search} placeholder="Search projects…" aria-label="Search projects" /></div>
+				<div class="project-search"><Search size={14} aria-hidden="true" /><input bind:this={searchInput} bind:value={search} placeholder="Search projects" aria-label="Search projects" /></div>
 				<div class="project-options">
 					{#each available as project (project.id)}
 						<button type="button" class="project-option" disabled={saving} onclick={() => save([...folderIds, project.id])}>

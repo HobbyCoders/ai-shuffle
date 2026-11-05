@@ -18,6 +18,12 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe('DetailPane', () => {
+ it('omits the entire Back row for content-first pages, not just its button', () => {
+  const { container } = render(DetailPane, { name: 'Stats', contentFirst: true });
+  expect(container.querySelector('.st-back-row')).toBeNull();
+  expect(container.querySelector('h2')?.textContent).toBe('Stats');
+ });
+
 	it('opts collection pages into the centred reading column without changing Settings defaults', () => {
 		const normal = render(DetailPane, { name: 'Settings detail' });
 		expect(normal.container.querySelector('.st-dwrap.reading')).toBeNull();

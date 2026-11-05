@@ -90,7 +90,7 @@
 {#if $projectAgentsLoading}
 	<p class="project-muted" role="status">Loading agents…</p>
 {:else}
-	{#if $projectAgentCount > 3}<PanelSearch bind:value={searchQuery} label="Search agents" placeholder="Search agents…" />{/if}
+	{#if $projectAgentCount > 3}<PanelSearch bind:value={searchQuery} label="Search agents" placeholder="Search agents" />{/if}
 	{#if $projectAgentsError}<InlineBanner>{$projectAgentsError}{#snippet actions()}<button class="st-btn sm" onclick={() => projectAgents.clearError()}>Dismiss</button>{/snippet}</InlineBanner>{/if}
 	{#if filteredAgents().length === 0}
 		<EmptyDetail title={searchQuery ? `No agents match "${searchQuery}"` : 'No agents defined'} message="Create agents from the Subagents card to add specialized capabilities.">

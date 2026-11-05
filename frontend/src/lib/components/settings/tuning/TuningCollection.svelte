@@ -14,7 +14,7 @@
 	import CollectionPage from '../shell/CollectionPage.svelte';
 	import EmptyDetail from '../shell/EmptyDetail.svelte';
 	import ListItem from '../rows/ListItem.svelte';
-	import ListGroupLabel from '../rows/ListGroupLabel.svelte';
+	import RowGroup from '../rows/RowGroup.svelte';
 	import ProviderTile from '../providers/ProviderTile.svelte';
 	import TuningDetail from './TuningDetail.svelte';
 	import { tuningRevision } from './revision.svelte';
@@ -70,21 +70,21 @@
 <CollectionPage
 	category={CATEGORY}
 	count={models.length ? `${tunedCount} of ${models.length} changed` : undefined}
-	filterPlaceholder="Filter models"
+	filterPlaceholder={models.length > 6 ? 'Filter models' : null}
 	listLabel="Models"
 	bind:filter
 >
 	{#snippet list()}
 		<div data-setting-anchor="tuning.models">
 			{#if !ready && models.length === 0}
-				<p class="st-empty" role="status">Loading models…</p>
+				<div class="st-card"><p class="st-empty" role="status">Loading models…</p></div>
 			{:else if models.length === 0}
-				<p class="st-empty">No models in the picker yet. Connect a provider, then tune its models here.</p>
+				<div class="st-card"><p class="st-empty">No models in the picker yet. Connect a provider, then tune its models here.</p></div>
 			{:else if shown.length === 0}
-				<p class="st-empty">Nothing matches.</p>
+				<EmptyDetail message="Nothing matches." actionLabel="Clear" onAction={() => filter = ''} />
 			{:else}
 				{#each groups as [group, list] (group)}
-					<ListGroupLabel label={group} />
+					<RowGroup title={group}>
 					{#each list as m (m.item)}
 						<ListItem
 							id={m.item}
@@ -105,6 +105,7 @@
 							{/snippet}
 						</ListItem>
 					{/each}
+     </RowGroup>
 				{/each}
 			{/if}
 		</div>

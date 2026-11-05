@@ -112,7 +112,7 @@ describe('AddProjectModal "Set it up on"', () => {
 		m.overview.mockResolvedValue(null);
 		m.installs.mockResolvedValue({ installs: [inst('self', 'Unraid', { is_self: true }), inst('pc', 'Studio')], self_instance_id: 'self' });
 		render(AddProjectModal, { props: { open: true, onClose: vi.fn() } });
-		await screen.findByRole('button', { name: 'Add Project' });
+		await screen.findByRole('button', { name: 'Add project' });
 		expect(screen.queryByText('Set it up on')).toBeNull();
 	});
 });

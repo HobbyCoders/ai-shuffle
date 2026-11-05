@@ -177,7 +177,7 @@
 				{/each}
 			</div>
 		{:else}
-			<p class="st-empty">No task matches “{filter.trim()}”.</p>
+			<EmptyDetail message={`No task matches “${filter.trim()}”.`} actionLabel="Clear" onAction={() => filter = ''} />
 		{/each}
 	{/snippet}
 	{#snippet detail()}

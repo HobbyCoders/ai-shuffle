@@ -160,12 +160,12 @@ describe('FilesStudio operations', () => {
 	it('creates a folder in the current path from Enter, once', async () => {
 		await mount();
 		await fireEvent.click(screen.getByRole('button', { name: 'New folder' }));
-		const input = screen.getByPlaceholderText('Folder name…');
+		const input = screen.getByPlaceholderText('Folder name');
 		expect((screen.getByRole('button', { name: 'Create' }) as HTMLButtonElement).disabled).toBe(true);
 		await fireEvent.input(input, { target: { value: ' reports ' } });
 		await fireEvent.submit(input.closest('form')!);
 		await fireEvent.submit(input.closest('form')!);
-		await waitFor(() => expect(screen.queryByPlaceholderText('Folder name…')).toBeNull());
+		await waitFor(() => expect(screen.queryByPlaceholderText('Folder name')).toBeNull());
 		const posts = sent('POST', '/workspace/files/folder');
 		expect(posts).toHaveLength(1);
 		expect(posts[0].url.searchParams.get('path')).toBe('');
@@ -176,10 +176,10 @@ describe('FilesStudio operations', () => {
 		fail['POST /files/folder'] = 'A folder with that name exists';
 		await mount();
 		await fireEvent.click(screen.getByRole('button', { name: 'New folder' }));
-		await fireEvent.input(screen.getByPlaceholderText('Folder name…'), { target: { value: 'docs' } });
+		await fireEvent.input(screen.getByPlaceholderText('Folder name'), { target: { value: 'docs' } });
 		await fireEvent.click(screen.getByRole('button', { name: 'Create' }));
 		expect(await screen.findByText('A folder with that name exists')).toBeTruthy();
-		expect((screen.getByPlaceholderText('Folder name…') as HTMLInputElement).value).toBe('docs');
+		expect((screen.getByPlaceholderText('Folder name') as HTMLInputElement).value).toBe('docs');
 	});
 
 	it('renames with the new name and skips an unchanged name', async () => {

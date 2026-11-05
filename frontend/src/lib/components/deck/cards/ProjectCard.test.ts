@@ -100,6 +100,9 @@ describe('Projects master/detail', () => {
   render(ProjectCard);
   expect(await screen.findByRole('heading', { level: 2, name: 'Remote' })).toBeTruthy();
   expect(screen.getByRole('tab', { name: /^Workers/ }).getAttribute('aria-selected')).toBe('true');
+  expect(screen.queryByText('has it')).toBeNull();
+  expect(screen.queryByText('click to set up')).toBeNull();
+  expect(screen.queryByText('failed — open for why')).toBeNull();
   expect((screen.getByRole('tab', { name: 'General' }) as HTMLButtonElement).disabled).toBe(true);
   expect(screen.queryByRole('heading', { name: 'Danger zone' })).toBeNull();
   await fireEvent.click(screen.getByRole('button', { name: 'On Here' }));

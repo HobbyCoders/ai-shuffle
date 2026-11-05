@@ -350,7 +350,7 @@
 				{#each status.handoff_transfers.pending as transfer (transfer.token)}
 					<SettingRow label={transfer.title || 'Chat'} hint={`Waiting for ${transfer.source}`}>
 						{#if transfer.can_abandon}
-							<label><Checkbox  bind:checked={releaseWakes[transfer.token]} /> Resume remaining wake-ups</label>
+							<label><Checkbox checked={releaseWakes[transfer.token] ?? false} onchange={(checked) => releaseWakes[transfer.token] = checked} /> Resume remaining wake-ups</label>
 							<InlineConfirm label="Abandon transfer"
 								question={releaseWakes[transfer.token] ? 'Earlier messages may be missing. Resume remaining wake-ups anyway?' : 'Keep this chat here and discard its paused wake-ups?'}
 								onConfirm={() => abandon(transfer)} />

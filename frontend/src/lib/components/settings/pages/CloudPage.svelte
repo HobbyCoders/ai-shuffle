@@ -155,7 +155,7 @@
 			</SettingRow>
 		{/if}
 	</RowGroup>
-	<p class="st-msg" data-testid="cloud-follows">
+	<p class="cloud-follows" data-testid="cloud-follows">
 		Your plan follows the Cloud account you sign in with. Sign in with the same account on another worker and it gets the same plan.
 	</p>
 
@@ -192,6 +192,8 @@
 </PreferencePage>
 
 <style>
+ :global(.settings-shell .st-grp):has(+ .cloud-follows) { margin-bottom: 0; }
+ .cloud-follows { font-size: 13px; color: var(--st-mfg); line-height: 1.45; margin: 12px 0 20px; }
 	/* The tier ladder: three steps, the current one lifted out of the row. */
 	.cl-ladder {
 		container-type: inline-size;

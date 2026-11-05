@@ -132,7 +132,7 @@
 	<div class="project-toolbar">
 		<Segmented label="Hook source" size="sm" bind:value={activeTab} options={[{ value: 'custom', label: `Custom${$hookStats.totalCustom ? ` (${$hookStats.totalCustom})` : ''}` }, { value: 'plugins', label: `Plugins${$hookStats.totalPlugin ? ` (${$hookStats.totalPlugin})` : ''}` }]} />
 	</div>
-	{#if showSearch}<PanelSearch bind:value={searchQuery} label="Search hooks" placeholder="Search hooks…" />{/if}
+	{#if showSearch}<PanelSearch bind:value={searchQuery} label="Search hooks" placeholder="Search hooks" />{/if}
 	{#if testResult}<InlineBanner tone={testResult.result.success ? 'info' : 'warn'}>{testResult.result.success ? `Test passed (${testResult.result.duration_ms}ms)` : `Test failed: ${testResult.result.error}`}{#snippet actions()}<button class="st-btn sm" onclick={() => (testResult = null)}>Dismiss</button>{/snippet}</InlineBanner>{/if}
 	{#if activeTab === 'custom'}
 		{#if !filteredHooks().length}

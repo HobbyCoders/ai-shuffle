@@ -107,6 +107,12 @@ describe('polling', () => {
 });
 
 describe('toolbar', () => {
+ it('cards dense log rows without adding a filter to a short result', async () => {
+  vi.mocked(api.get).mockResolvedValue({ lines, total: 3, returned: 3, levels: ['INFO', 'ERROR', 'AUDIT'] });
+  const result = await mount();
+  expect(screen.queryByPlaceholderText('Search logs')).toBeNull();
+  expect(result.container.querySelector('.st-card .st-it.log')).toBeTruthy();
+ });
 	it('names the level filter and refetches with the level', async () => {
 		await mount();
 		const select = screen.getByRole('combobox', { name: 'Log level' }) as HTMLSelectElement;

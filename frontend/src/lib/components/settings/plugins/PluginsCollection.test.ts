@@ -183,19 +183,31 @@ describe('the list (from PluginsHub)', () => {
 		await waitFor(() => expect(within(detail()).getByRole('alert').textContent).toContain('Source offline'));
 	});
 
+  it('hides filtering for a small collection and cards its empty guidance', async () => {
+   m.getInstalledPlugins.mockResolvedValue([]); m.getConnectorTypes.mockResolvedValue([]);
+   const view = await show();
+   const list = screen.getByRole('heading', { level: 1, name: 'Plugins' }).closest('.st-lcol') as HTMLElement;
+   expect(within(list).queryByRole('searchbox')).toBeNull();
+   expect(within(list).getByText('Nothing added yet.').closest('.st-card')).toBeTruthy();
+   expect(view.container.querySelector('.st-lcol .st-card [data-settings-item]')).toBeTruthy();
+  });
+
 	it('groups apps with accounts and installed plugins, then the catalog', async () => {
 		hub();
+   // More than six visible rows: keep the filtering path exercised without
+   // restoring a permanent search box to a short list.
+   m.getInstalledPlugins.mockResolvedValue(Array.from({ length: 4 }, (_, i) => ({ id: i === 0 ? 'writer@local' : `writer${i}@local`, name: `Writer ${i}`, description: 'Writing skills', enabled: true })));
 		await show();
 		const list = screen.getByRole('heading', { level: 1, name: 'Plugins' }).closest('.st-lcol') as HTMLElement;
 		expect(within(list).getByText('Connected apps')).toBeTruthy();
 		expect(within(list).getByText('1 account')).toBeTruthy();
 		expect(within(list).getByText('Installed')).toBeTruthy();
-		expect(within(list).getByRole('button', { name: /Writer/ })).toBeTruthy();
+		expect(within(list).getByRole('button', { name: /Writer 0/ })).toBeTruthy();
 		// Review is only in the catalog.
 		expect(within(list).queryByRole('button', { name: /^Review/ })).toBeNull();
 		expect(within(list).getByRole('button', { name: /Explore plugins/ }).textContent).toContain('1 to add');
 		await fireEvent.input(within(list).getByRole('searchbox'), { target: { value: 'gmail' } });
-		expect(within(list).queryByRole('button', { name: /Writer/ })).toBeNull();
+		expect(within(list).queryByRole('button', { name: /Writer 0/ })).toBeNull();
 		expect(within(list).getByRole('button', { name: /Gmail/ })).toBeTruthy();
 	});
 
@@ -211,6 +223,9 @@ describe('the list (from PluginsHub)', () => {
 		expect(rows()).toHaveLength(1);
 		await fireEvent.input(search, { target: { value: 'no-such-plugin' } });
 		expect(within(pane).getByText('No plugins match your search.')).toBeTruthy();
+   await fireEvent.click(within(pane).getByRole('button', { name: 'Clear' }));
+   expect((search as HTMLInputElement).value).toBe('');
+   expect(rows()).toHaveLength(3);
 	});
 
 	it('renders the offered Apps catalog without Teams or its install action', async () => {

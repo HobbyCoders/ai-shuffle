@@ -120,6 +120,8 @@ describe('list', () => {
 		expect(screen.getByRole('button', { name: /Home Assistant/ }).textContent).toContain('Disabled');
 		expect(screen.getByText('3')).toBeTruthy();
 		expect(searchSource().map((s) => s.title)).toContain('Discord Bot');
+  expect(screen.queryByRole('searchbox')).toBeNull();
+  expect(screen.getByRole('button', { name: /Discord Bot/ }).closest('.st-card')).toBeTruthy();
 	});
 
 	it('shows the empty state and keeps Add available after a load failure', async () => {
