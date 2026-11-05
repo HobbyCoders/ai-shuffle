@@ -237,6 +237,22 @@ async def test_key_check_rejects_only_authentication_and_patch_keeps_old_key(cli
     assert "test-new-key" not in updated.text
 
 
+async def test_native_enrollment_refuses_safely_when_worker_check_fails(client, monkeypatch):
+    from app.core import native_providers
+
+    def lookup_failed():
+        raise RuntimeError("connection to server at 10.0.0.9 failed: password for appuser")
+    monkeypatch.setattr(native_providers, "workers_requiring_update", lookup_failed)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(200, json={}))) as http:
+        with patch("app.core.http_client.get_http_client", return_value=http):
+            result = client.post(ROOT, json={"name": "Native", "provider_type": "kimi", "auth_token": "fake"})
+    assert result.status_code == 503, result.text
+    detail = result.json()["detail"]
+    assert "up to date" in detail
+    assert "10.0.0.9" not in detail and "password" not in detail
+    assert not db.get_all_model_providers()
+
+
 @pytest.mark.parametrize("members,presence,allowed", [
     ([], {}, True),
     ([{"device_id": "self", "name": "This worker"}], {}, True),

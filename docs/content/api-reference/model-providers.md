@@ -168,7 +168,9 @@ returns `409` naming the workers to update when any current network member does
 not advertise native Messages support in its latest signed presence. Offline
 members are still checked; missing or unsupported signed capabilities require
 an update. Contact metadata alone is not proof of support. No network, or a
-network containing only this worker, is allowed. Existing native accounts may
+network containing only this worker, is allowed. If the worker check itself
+fails, the request returns `503` and nothing is created; retry it. Existing
+native accounts may
 still be edited, activated
 or deleted; provider and credential kind remain immutable.
 

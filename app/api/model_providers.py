@@ -246,7 +246,12 @@ def _validate_native_auth(provider_type, auth_mode, api_dialect) -> None:
 
 
 async def _require_native_workers() -> None:
-    workers = await run_sync(native_providers.workers_requiring_update)
+    try:
+        workers = await run_sync(native_providers.workers_requiring_update)
+    except Exception:
+        logger.exception("Could not check which workers support native providers")
+        raise HTTPException(status_code=503, detail=(
+            "Could not check whether every worker is up to date. Try again in a moment."))
     if workers:
         raise HTTPException(status_code=409, detail=(
             "Update these workers before adding Kimi, MiniMax or OpenCode accounts: "
