@@ -645,3 +645,96 @@ async def test_remote_retry_with_unbound_or_unknown_permission_cannot_create(cha
     assert retry.is_error and child is None, f"unproven permission recovery created work: {retry.text}"
     assert "new request_id" in retry.text
     assert not chats[2]
+
+
+@pytest.mark.parametrize("default", ["native", "provider", "stale-launch"])
+@pytest.mark.parametrize("worker", [None, "Other"])
+@pytest.mark.parametrize("explicit_default", [False, True])
+async def test_real_default_options_reach_startsession(
+        chats, remote_wire, monkeypatch, tmp_path, default, worker, explicit_default):
+    from fluid.tools.registry import ToolCtx
+
+    from app.core import query_options, turn_manager
+    from app.core.session_modes import CALLER_AUTHENTICATED
+    from app.db import sessions, turns
+
+    db = chats[0]
+    db.update_profile("agent", config={"cwd": str(tmp_path)})
+    sessions.create_session("default-caller", "agent", title="Default caller", is_active=True,
+                            project_id="task-project", permission_mode="default")
+    tid = turn_manager._submit_blocking("default-caller", "user", prompt="do the work", profile_id="agent",
+                                       caller=CALLER_AUTHENTICATED)
+    assert turns.start_turn(tid) is not None
+    # Controlled availability boundary, not a real provider/CLI capability claim.
+    monkeypatch.setattr(query_options, "_default_provider_model_without_claude",
+                        lambda **kwargs: ("lane", "astra") if default == "provider" else None)
+    options, _ = query_options.build_options_from_profile(
+        profile=db.get_profile("agent"), session_id="default-caller", overrides={"cwd": str(tmp_path)})
+    db.update_session("default-caller", launched_model=options.model)  # real engine init writer
+    if default == "stale-launch":
+        # A late old-generation stamp is not the current runtime model.
+        db.update_session("default-caller", launched_model="haiku")
+    else:
+        assert db.get_session("default-caller")["launched_model"] == options.model
+    if default != "provider":
+        assert db.get_session("default-caller")["model"] is None
+        assert turns.get_turn(tid)["overrides"].get("model") is None
+    ctx = ToolCtx(extra={"session_runtime_model": lambda: (options.model, options.aih_provider_id)})
+    remote_wire["offline"] = False
+    args = {**ARGS, **({"worker": worker} if worker else {})}
+    if explicit_default:
+        args["model"] = options.model
+    handler = orch.make_handler(lambda: "default-caller")
+    if worker and default != "provider" and not explicit_default:
+        unproven = await handler("start", args, ToolCtx())
+        assert unproven.is_error and "inherited remote model is unknown" in unproven.text
+    outcome = await handler("start", args, ctx)
+    assert not outcome.is_error, outcome.text
+    child = db.get_session(json.loads(outcome.text)["session_id"])
+    assert child["model"] == ("prov:lane:astra" if default == "provider" else options.model)
+    assert child["provider_id"] == options.aih_provider_id
+    # A delivered retry is readback, even if this runtime's default changes.
+    options.model = "haiku"
+    replay = await handler("start", args, ctx)
+    assert not replay.is_error, replay.text
+    assert json.loads(replay.text)["session_id"] == child["id"]
+    assert db.get_session(child["id"])["model"] == child["model"]
+    assert not chats[2]
+
+
+async def test_explicit_binding_beats_old_runtime_default(chats, remote_wire):
+    from fluid.tools.registry import ToolCtx
+
+    from app.db import sessions
+
+    _turn("caller", "user", "do the work", profile="agent")
+    sessions.set_session_run_binding("caller", model="opus")
+    ctx = ToolCtx(extra={"session_runtime_model": lambda: ("sonnet", None)})
+    remote_wire["offline"] = False
+    outcome = await orch.make_handler(lambda: "caller")("start", {**ARGS, "worker": "Other"}, ctx)
+    assert not outcome.is_error, outcome.text
+    child = sessions.get_session(json.loads(outcome.text)["session_id"])
+    assert child["model"] == "opus" and child["provider_id"] is None
+
+
+async def test_runtime_default_change_while_consent_waits_invalidates_plan(chats, remote_wire, monkeypatch):
+    from fluid.tools.registry import ToolCtx
+
+    from app.core import model_override
+    from app.core.agent_types import PermissionResultAllow
+
+    _turn("caller", "user", "do the work", profile="agent")
+    runtime = ["sonnet", None]
+    ctx = ToolCtx(extra={"session_runtime_model": lambda: tuple(runtime)})
+
+    async def answer(**kwargs):
+        runtime[0] = "haiku"
+        return PermissionResultAllow(updated_input={})
+
+    monkeypatch.setattr("app.core.permission_handler.permission_handler.request_permission", answer)
+    model_override._APPROVED.clear()
+    remote_wire["offline"] = False
+    outcome = await orch.make_handler(lambda: "caller")(
+        "start", {**ARGS, "worker": "Other", "model": "opus"}, ctx)
+    assert outcome.is_error and "context changed" in outcome.text
+    assert not remote_wire["calls"]

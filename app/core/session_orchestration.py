@@ -672,13 +672,25 @@ def start_session_spec():
     return build(_model_examples())
 
 
-def _inherited_model(sender, overrides):
+def _runtime_model(ctx):
+    """Current producing runtime's binding, never a previous launch stamp/default."""
+    from app.core import model_override
+    supplier = ctx.extra.get("session_runtime_model")
+    if supplier is None:
+        return None
+    model, provider_id = supplier()
+    return model_override.app_id(provider_id, model)
+
+
+def _inherited_model(sender, overrides, runtime_model=None):
     """The app-format model a new chat inherits from ``sender`` (None = unbound)."""
     from app.core import model_override
     from app.core.query_options import decode_provider_model, is_native_claude_model
     value = overrides.get("model") or sender.get("model")
+    if not value:
+        return runtime_model
     provider_id = sender.get("provider_id")
-    if not value or decode_provider_model(value) is not None:
+    if decode_provider_model(value) is not None:
         return model_override.app_id(None, value)
     if provider_id and is_native_claude_model(value):
         # A native Claude pick on a provider chat runs natively unless that
@@ -709,7 +721,7 @@ def _request_receipt(cursor, root_id, command_id, fingerprint):
     return previous
 
 
-def _start_model_scope(sender, context, data, principal):
+def _start_model_scope(sender, context, data, principal, runtime_model=None):
     """Bind an answer/readback to the caller and input checked before the wait.
 
     Exclude turn state/lease timestamps: settlement is not a new owner request.
@@ -725,10 +737,11 @@ def _start_model_scope(sender, context, data, principal):
             "provider_id", "model", "permission_mode", "project_id", "project_v2_id",
         )},
         "principal": principal,
+        "runtime_model": runtime_model,
     }
 
 
-def _start_model_plan(sender_id, data, remote):
+def _start_model_plan(sender_id, data, remote, runtime_model=None):
     """Resolve the model and exact queue receipt before consulting the owner.
 
     A receipt only permits readback in its original root with identical args;
@@ -738,9 +751,9 @@ def _start_model_plan(sender_id, data, remote):
     from app.db.base import get_db
     sender = _caller(sender_id)
     context = _context(sender_id)
-    scope = _start_model_scope(sender, context, data, _principal(sender_id))
+    scope = _start_model_scope(sender, context, data, _principal(sender_id), runtime_model)
     overrides = context.get("overrides") or {}
-    baseline = _inherited_model(sender, overrides)
+    baseline = _inherited_model(sender, overrides, runtime_model)
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT id FROM turns WHERE id=%s", (scope["root_id"],))
@@ -767,7 +780,7 @@ def _start_model_plan(sender_id, data, remote):
             **{key: record[key] for key in ("source", "memory_id", "accepted") if key in record}}
 
 
-async def _confirm_start_model(sender_id, data, placement):
+async def _confirm_start_model(sender_id, data, placement, runtime_model=None):
     """Check StartSession's ``model`` and, when it switches models, that the
     user asked for it (named it, or the owner approved). Returns a scoped plan
     for :func:`_queue` (marked unchanged for the inherited model), or None when
@@ -779,7 +792,7 @@ async def _confirm_start_model(sender_id, data, placement):
         remote = placement["remote"]
     else:
         remote = await asyncio.to_thread(_remote_worker, data.get("worker"))
-    plan = await asyncio.to_thread(_start_model_plan, sender_id, data, remote)
+    plan = await asyncio.to_thread(_start_model_plan, sender_id, data, remote, runtime_model)
     if plan["receipt_id"] or plan["unchanged"]:
         return plan
     title = str(data.get("title") or "").strip()[:80] or "new chat"
@@ -853,7 +866,8 @@ def _profile_config(row):
 
 
 def _remote_body(sender, data, overrides, payload, prompt, command_id, fingerprint, *,
-                 project_v2_id=None, assistant=False, model_plan=None, permission_mode=None):
+                 project_v2_id=None, assistant=False, model_plan=None, permission_mode=None,
+                 runtime_model=None):
     """What the destination needs to make the chat. No path, worktree, branch,
     credential or tool identity: those belong to this install.
 
@@ -892,7 +906,7 @@ def _remote_body(sender, data, overrides, payload, prompt, command_id, fingerpri
         # existing choice field also prevents older receivers rebinding a native
         # inheritance through their agent's provider. It grants no new consent.
         from app.core import model_override
-        inherited = _inherited_model(sender, overrides)
+        inherited = _inherited_model(sender, overrides, runtime_model)
         if not inherited:
             raise ValueError("The inherited remote model is unknown; pass an explicit model.")
         picked = model_override.resolve(inherited, runs_here=False)
@@ -1507,7 +1521,8 @@ def _checkout_note(checkout):
 
 
 def _create_started_chat(conn, sender, *, new_id, title, overrides, started_mode, checkout, principal,
-                         workspace, mode, plan=None, payload=None, explicit_effort=None, note=None):
+                         workspace, mode, plan=None, payload=None, explicit_effort=None, note=None,
+                         runtime_model=None):
     """The new chat's row, inheriting ``sender``'s agent and permission binding,
     and its provider, model and effort unless ``plan`` names a model.
 
@@ -1524,6 +1539,10 @@ def _create_started_chat(conn, sender, *, new_id, title, overrides, started_mode
            "model": overrides.get("model") or sender.get("model"),
            "effort": overrides.get("effort", sender.get("effort")),
            "context_window": sender.get("context_window"), "fast": _caller_fast(sender)}
+    if not run["model"] and runtime_model:
+        from app.core.query_options import decode_provider_model
+        decoded = decode_provider_model(runtime_model)
+        run.update(model=runtime_model, provider_id=decoded[0] if decoded else None)
     parent_effort = run["effort"]
     if plan:
         # A model the user asked for (#1830): its provider, and only
@@ -1584,7 +1603,8 @@ def _create_started_chat(conn, sender, *, new_id, title, overrides, started_mode
     return target, overrides
 
 
-def _queue(sender_id, data, action, placement=None, model_plan=None, discovered_peer=None):
+def _queue(sender_id, data, action, placement=None, model_plan=None, discovered_peer=None,
+           runtime_model=None):
     """``placement`` is :func:`_project_placement`'s answer for a StartSession
     that named a project (the owner's assistant only). ``model_plan`` is
     :func:`_confirm_start_model`'s scoped answer when the call passed ``model``;
@@ -1675,7 +1695,7 @@ def _queue(sender_id, data, action, placement=None, model_plan=None, discovered_
     target_context = context if action == "start" else _context(target["id"], allow_empty=True)
     principals = {sid: _principal(sid) for sid in {sender_id, target["id"]}}
     if model_plan and model_plan.get("scope") != _start_model_scope(
-            sender, context, data, principals[sender_id]):
+            sender, context, data, principals[sender_id], runtime_model):
         raise ValueError("Model consent context changed; retry from the current owner request.")
     # Never retry a rejected peer's work by waking it through a different tool.
     terminal = turn_scheduler._turn_terminal_payload(target["id"], target_context["id"])
@@ -1725,7 +1745,7 @@ def _queue(sender_id, data, action, placement=None, model_plan=None, discovered_
             # A new owner turn or an in-place human wake invalidates the answer.
             current_context = _context(sender_id, _conn=conn)
             if model_plan.get("scope") != _start_model_scope(
-                    sender, current_context, data, principals[sender_id]):
+                    sender, current_context, data, principals[sender_id], runtime_model):
                 raise ValueError("Model consent context changed; retry from the current owner request.")
             if model_plan.get("receipt_id") and (
                     not previous or previous["id"] != model_plan["receipt_id"]):
@@ -1767,7 +1787,7 @@ def _queue(sender_id, data, action, placement=None, model_plan=None, discovered_
         if remote is not None:
             body = _remote_body(sender, data, overrides, payload, prompt, command_id, fingerprint,
                                 project_v2_id=project_v2_id, assistant=assistant, model_plan=plan,
-                                permission_mode=started_mode)
+                                permission_mode=started_mode, runtime_model=runtime_model)
             receipt_payload = {"orchestration_fingerprint": fingerprint, "remote_device_id": remote["device_id"],
                                "remote_session_id": body["session_id"], "remote_start_body": body}
             if plan:
@@ -1797,7 +1817,7 @@ def _queue(sender_id, data, action, placement=None, model_plan=None, discovered_
                 started_mode=started_mode, checkout=checkout, principal=principals[sender_id],
                 workspace=workspace, mode=None if placement is not None else sender.get("mode"),
                 plan=plan, payload=payload, explicit_effort=data.get("effort"),
-                note=_checkout_note(checkout) if checkout is not None else None)
+                note=_checkout_note(checkout) if checkout is not None else None, runtime_model=runtime_model)
             if checkout is not None:
                 unused.kept = True
         turn = turns.enqueue_turn(
@@ -2196,13 +2216,14 @@ def make_handler(supplier):
                 placement = (await _project_placement(sender_id, data)
                              if action == "start" and data.get("project") is not None else None)
                 # A model choice may wait for the owner's answer: also before the lock.
-                model_plan = (await _confirm_start_model(sender_id, data, placement)
+                model_plan = (await _confirm_start_model(sender_id, data, placement, _runtime_model(ctx))
                               if action == "start" else None)
                 discovered_peer = (await _discover_remote_peer(sender_id, _text(data, "session_id", 200))
                                    if action == "message" else None)
                 async with turn_scheduler.message_resume_lock(target_id):
                     result = await asyncio.to_thread(_queue, sender_id, data, action, placement, model_plan,
-                                                     discovered_peer)
+                                                     discovered_peer,
+                                                     _runtime_model(ctx) if action == "start" else None)
                     if "remote" in result:
                         # The destination kicks and publishes its own chat;
                         # nothing here is local work to wake or broadcast.

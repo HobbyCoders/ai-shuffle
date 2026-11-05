@@ -1930,6 +1930,7 @@ def create_builtin_tools_server(
         async def invoke(args: dict) -> dict:
             ctx = ToolCtx(cwd=cwd or ".", session_id=session_id)
             ctx.extra["session_orchestration"] = orchestration_handler(lambda: session_id)
+            ctx.extra["session_runtime_model"] = lambda: (model, provider_id)
             return _fluid_outcome_result(await handler(args, ctx))
         return tool(spec.name, spec.description, spec.input_schema)(invoke)
 

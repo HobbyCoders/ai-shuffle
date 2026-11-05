@@ -81,3 +81,55 @@ async def test_resumed_session_keeps_the_id_it_was_built_with(monkeypatch, tmp_p
     )
 
     assert _CtxLoop.captured["ctx"].session_id == "ses_existing"
+
+
+@pytest.mark.parametrize("provider_id,model,expected", [
+    (None, "sonnet", "sonnet"),
+    ("account", "gpt-6.1-sol", "prov:account:gpt-6.1-sol"),
+])
+async def test_native_orchestration_gets_current_runtime_binding(monkeypatch, tmp_path, provider_id, model, expected):
+    from types import SimpleNamespace
+
+    import app.core.provider.harness_adapter as ha
+    from app.core import session_orchestration
+
+    monkeypatch.setattr(ha, "NativeLoop", _CtxLoop)
+    monkeypatch.setattr(ha, "_build_provider_client", _fake_provider_client)
+    adapter = ha.HarnessAdapter()
+    await adapter.connect(SessionOptions(model=model, cwd=str(tmp_path),
+                          extra={"fluid_provider": "openai_responses", "provider_pin_id": provider_id}))
+    ctx = _CtxLoop.captured["ctx"]
+    assert session_orchestration._runtime_model(ctx) == expected
+    # The real live-set-model callback updates _sdk_options. The producer must
+    # read it at call time, not keep the model captured when connect began.
+    adapter._sdk_options = SimpleNamespace(model="haiku", aih_provider_id=None)
+    assert session_orchestration._runtime_model(ctx) == "haiku"
+    await adapter.disconnect()
+
+
+@pytest.mark.parametrize("provider_id,model,expected", [
+    (None, "sonnet", "sonnet"),
+    ("account", "gpt-6.1-sol", "prov:account:gpt-6.1-sol"),
+])
+async def test_delegated_orchestration_bridge_carries_runtime_binding(
+        mock_db, monkeypatch, tmp_path, provider_id, model, expected):
+    from fluid.tools.registry import ToolOutcome
+
+    from app.core import session_orchestration
+    from app.mcp.builtin_tools import create_builtin_tools_server
+
+    captured = []
+
+    def make_handler(supplier):
+        async def handle(action, data, ctx):
+            captured.append(session_orchestration._runtime_model(ctx))
+            return ToolOutcome(text="handled")
+        return handle
+
+    monkeypatch.setattr(session_orchestration, "make_handler", make_handler)
+    server = create_builtin_tools_server(session_id="caller", model=model, provider_id=provider_id,
+                                         cwd=str(tmp_path), is_admin=True)
+    start = next(tool for tool in server["instance"].tools if tool.name == "StartSession")
+    result = await start.handler({"title": "Child", "prompt": "go", "request_id": "r1"})
+    assert not result.get("isError")
+    assert captured == [expected]

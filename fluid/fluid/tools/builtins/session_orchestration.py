@@ -79,12 +79,12 @@ _START_DESCRIPTION = (
 # Shared by StartSession, Task and Swarm: the host enforces it, so the text
 # says so rather than asking the model to police itself.
 MODEL_OVERRIDE_RULE = (
-    "Only for when the user named a model for this work in this chat, or saved owner "
-    "model-routing memory directs it; otherwise omit. The host checks that the user asked "
-    "in chat/memory or asks the owner; refusals start nothing. Never fabricate a model id or substitute after refusal. "
-    "For native Claude use a family name: haiku, sonnet or opus; "
-    "never pass a version pin, legacy id or [1m] form. Families select runtime aliases. "
-    "For provider models, pass the id or display name (case, spaces and dashes ignored). "
+    "Only when this chat's user named the model for this work or saved owner "
+    "model-routing memory directs it; otherwise omit. The host verifies chat/memory "
+    "or asks the owner; refusals start nothing. Never invent ids or substitute after refusal. "
+    "Native Claude: haiku, sonnet or opus only; no version pins, legacy ids or [1m] forms. "
+    "Families select runtime aliases. "
+    "Provider models: id or display name (case, spaces and dashes ignored). "
     "Unknown names start nothing and return real choices; ambiguous "
     "names need an exact model id. prov:<providerId>:<modelId> works; "
     "explicit providers stay scoped. A switch may cross providers for this start only. "
