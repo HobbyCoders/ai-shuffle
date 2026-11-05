@@ -1646,6 +1646,12 @@
 		scheduleReadingAnchorCapture();
 	}
 
+	// Retained space is outside the mounted history. Reader paging approaches
+	// that content edge, not document zero; use it for scroll and intent fallbacks.
+	function olderEdgeDistance(scrollTop: number) {
+		return scrollTop - leadingGap;
+	}
+
 	function handleScroll() {
 		if (!containerRef) return;
 		if (anchorRounding && containerRef.scrollTop !== anchorRounding.scrollTop) anchorRounding = null;
@@ -1681,7 +1687,7 @@
 			// anchor restoration or a rail jump.
 			if (!windowShifting && Date.now() >= manualNavigationReleaseUntil) {
 				const previousTop = lastScrollMetrics?.scrollTop ?? currentScrollTop;
-				if (currentScrollTop < previousTop && mountedStart > 0 && currentScrollTop < 900) {
+				if (currentScrollTop < previousTop && mountedStart > 0 && olderEdgeDistance(currentScrollTop) < 900) {
 					loadOlderItems();
 				} else if (currentScrollTop > previousTop && mountedEnd < displayItems.length &&
 					containerRef.scrollHeight - currentScrollTop - containerRef.clientHeight < 900) {
@@ -1765,7 +1771,7 @@
 		if (isUserScrollUpGesture(e.deltaY, 0)) disengageAutoScroll();
 		// At the boundary the browser cannot emit another scroll event. This
 		// also covers a gesture arriving during the last programmatic frame.
-		if (e.deltaY < 0 && containerRef && containerRef.scrollTop <= 1 && mountedStart > 0 && !windowShifting) loadOlderItems();
+		if (e.deltaY < 0 && containerRef && olderEdgeDistance(containerRef.scrollTop) <= 1 && mountedStart > 0 && !windowShifting) loadOlderItems();
 	}
 
 	// Touch: accumulate downward travel from the gesture's lowest clientY.
@@ -1781,7 +1787,7 @@
 		touchLastY = Math.min(touchLastY, y);
 		if (isUserScrollUpGesture(0, touchDeltaY)) {
 			disengageAutoScroll();
-			if (containerRef && containerRef.scrollTop <= 1 && mountedStart > 0 && !windowShifting) loadOlderItems();
+			if (containerRef && olderEdgeDistance(containerRef.scrollTop) <= 1 && mountedStart > 0 && !windowShifting) loadOlderItems();
 			touchLastY = y;
 		}
 	}

@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { createMessageSender, type MessageSenderDeps } from '$lib/stores/session/message-sender';
 import type { ActiveSessionState } from '$lib/stores/active-session';
 import { pendingQueue } from '$lib/stores/session/pending-queue';
+import { isUserScrollUpGesture } from '$lib/stores/session/auto-scroll';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
@@ -488,5 +489,61 @@ describe('automatic eviction retains the measured coordinate origin before rende
 		expect(appendProbe({ start: 1, end: 3, next: { start: 2, end: 3 }, firstKey: 'unused', removed: 3223,
 			leadingKey: 'old', retainedKey: 'third', gap: 400 }))
 			.toMatchObject({ gap: 3623, floor: 5600, version: 4, shifting: false });
+	});
+});
+
+// Execute each production older-edge entry point, with only layout/state edges
+// supplied by the probe. The optional helper also lets the pre-fix inline rule
+// execute for red-before proof instead of failing on a missing symbol.
+const olderEdgeRule = (source.match(/function olderEdgeDistance\(scrollTop: number\) \{[^}]*\}/)?.[0] ?? '')
+	.replace('scrollTop: number', 'scrollTop');
+const readerScrollEdge = between('// Shift only in the reader\'s direction', '// Save scroll position');
+const readerWheel = between('function handleWheel(', '// Touch: accumulate').replace('e: WheelEvent', 'e');
+const readerTouch = between('let touchLastY = 0;', '/**\n\t * Put a reader').replaceAll('e: TouchEvent', 'e');
+const readerLoadOlder = between('function loadOlderItems()', 'function loadNewerItems()');
+function readerEdgeProbe(kind: 'scroll' | 'wheel' | 'touch', top: number, gap: number, overrides = {}) {
+	const env = { top, gap, up: true, shifting: false, held: false, older: 0, follows: true, ...overrides };
+	new Function('env', 'kind', 'isUserScrollUpGesture', `
+		let leadingGap = env.gap, windowShifting = env.shifting, mountedStart = 10, mountedEnd = 100;
+		const containerRef = { scrollTop: env.top, scrollHeight: 10000, clientHeight: 634 };
+		const currentScrollTop = env.top, lastScrollMetrics = { scrollTop: env.top + (env.up ? 120 : -120) };
+		const manualNavigationReleaseUntil = env.held ? Date.now() + 10000 : 0, displayItems = Array(100);
+		const disengageAutoScroll = () => { env.follows = false; };
+		const transcriptWindow = { loadOlder: () => ({ start: 6, end: 30 }) };
+		const applyMountedRange = () => { env.older++; }, loadNewerItems = () => {};
+		${olderEdgeRule}
+		${readerLoadOlder}
+		${readerWheel}
+		${readerTouch}
+		if (kind === 'scroll') { ${readerScrollEdge} }
+		if (kind === 'wheel') handleWheel({ deltaY: env.up ? -120 : 120 });
+		if (kind === 'touch') {
+			handleTouchStart({ touches: [{ clientY: 100 }] });
+			handleTouchMove({ touches: [{ clientY: env.up ? 120 : 80 }] });
+		}
+	`)(env, kind, isUserScrollUpGesture);
+	return env;
+}
+
+describe('older paging uses the retained mounted origin', () => {
+	for (const kind of ['scroll', 'wheel', 'touch'] as const) {
+		it.each([2400, 1500])(`${kind} pages before a retained gap leaves blank history at %spx`, top => {
+			expect(readerEdgeProbe(kind, top, 3285.7)).toMatchObject({ older: 1, follows: false });
+		});
+		it(`${kind} does not page before approaching the mounted content`, () => {
+			expect(readerEdgeProbe(kind, 4285.7, 3285.7).older).toBe(0);
+		});
+		it(`${kind} retains the zero-gap boundary behavior`, () => {
+			expect(readerEdgeProbe(kind, kind === 'scroll' ? 899 : 0, 0)).toMatchObject({ older: 1, follows: false });
+		});
+		it(`${kind} does not load older history while moving newer`, () => {
+			expect(readerEdgeProbe(kind, 1500, 3285.7, { up: false }).older).toBe(0);
+		});
+		it(`${kind} respects an in-flight range shift`, () => {
+			expect(readerEdgeProbe(kind, 1500, 3285.7, { shifting: true }).older).toBe(0);
+		});
+	}
+	it('ordinary scroll still respects an explicit navigation hold', () => {
+		expect(readerEdgeProbe('scroll', 1500, 3285.7, { held: true }).older).toBe(0);
 	});
 });

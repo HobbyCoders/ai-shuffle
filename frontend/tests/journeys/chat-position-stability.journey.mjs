@@ -430,6 +430,77 @@ const cases = [{
 
 // Coherent geometry in one callback: a retained Range/row identity is evidence
 // of visible continuity; native source rectangles alone can be clipped or empty.
+async function watchUpwardPagingAcrossRetainedGap(ctx) {
+	const { page } = ctx, pane = page.locator(LOG);
+	const initial = await pane.evaluate(n => ({ top: n.scrollTop,
+		first: Number(n.querySelector('[data-transcript-index]').dataset.transcriptIndex),
+		gap: parseFloat(n.querySelector('.earlier-row').style.marginTop) || 0 }));
+	expect(initial.gap > 2000, 'reader regression follows a real multi-thousand-pixel eviction');
+	await ctx.mark('read upward near the retained mounted origin, without Show earlier');
+	await pane.hover();
+	await page.mouse.wheel(0, initial.gap + 1000 - initial.top);
+	await page.waitForFunction(target => Math.abs(document.querySelector('.msg-scroll').scrollTop - target) <= 1, initial.gap + 1000);
+	const before = await page.evaluate(() => {
+		const pane = document.querySelector('.msg-scroll'), view = pane.getBoundingClientRect();
+		let tracked;
+		for (const y of [72, 120, 168]) {
+			const caret = document.caretRangeFromPoint(view.left + 60, view.top + y), node = caret?.startContainer;
+			if (node?.nodeType !== Node.TEXT_NODE || !node.textContent.trim()) continue;
+			const row = node.parentElement.closest('[data-transcript-index]');
+			if (!row) continue;
+			const range = document.createRange(), start = Math.min(caret.startOffset, Math.max(0, node.length - 24));
+			range.setStart(node, start); range.setEnd(node, Math.min(node.length, start + 24));
+			const r = range.getBoundingClientRect();
+			if (!range.toString().trim() || r.top <= view.top || r.bottom + 240 >= view.bottom) continue;
+			tracked = { node, row, range }; break;
+		}
+		if (!tracked) throw new Error('No visible nonempty retained prose Range before upward paging');
+		const p = window.__upwardReader = { ...tracked, running: true, frames: [],
+			first: Number(pane.querySelector('[data-transcript-index]').dataset.transcriptIndex) };
+		const ids = new WeakMap([[p.row, 1], [p.node, 2]]);
+		const sample = () => p.frames.push({ first: Number(pane.querySelector('[data-transcript-index]').dataset.transcriptIndex),
+			top: pane.scrollTop, height: pane.scrollHeight, client: pane.clientHeight,
+			gap: parseFloat(pane.querySelector('.earlier-row').style.marginTop) || 0,
+			rowId: ids.get(p.row), textId: ids.get(p.node), connected: p.row.isConnected && p.node.isConnected,
+			text: p.range.toString(), rect: p.range.getBoundingClientRect().toJSON(),
+			viewportBottom: innerHeight, composer: document.querySelector('.input-slot').getBoundingClientRect().toJSON() });
+		const frame = () => {
+			if (!p.running) return;
+			const afterLayout = new IntersectionObserver(() => {
+				afterLayout.disconnect(); if (p.running) sample();
+			});
+			afterLayout.observe(pane); p.raf = requestAnimationFrame(frame);
+		};
+		p.raf = requestAnimationFrame(frame);
+		return { first: p.first, text: p.range.toString(), rect: p.range.getBoundingClientRect().toJSON() };
+	});
+	await ctx.mark('cross the older paging edge with a real upward wheel');
+	await page.mouse.wheel(0, -240);
+	const paged = await page.waitForFunction(() => {
+		const p = window.__upwardReader;
+		return p.frames.filter(f => f.first < p.first && f.gap === 0).length >= 30;
+	}, null, { timeout: 5000 }).then(() => true, () => false);
+	const observed = await page.evaluate(() => {
+		const p = window.__upwardReader; p.running = false; cancelAnimationFrame(p.raf);
+		return { frames: p.frames };
+	});
+	if (process.env.JOURNEY_OUT) writeFileSync(`${process.env.JOURNEY_OUT}/upward-reader-${prefix(ctx.variant) === '/mobile/' ? 'mobile' : 'root'}-${ctx.variant.viewport}.json`, JSON.stringify({ initial, before, ...observed }));
+	expect(paged, 'ordinary upward scrolling must page before the retained gap can leave a blank viewport');
+	const after = observed.frames.filter(f => f.first < before.first && f.gap === 0);
+	for (const f of after) {
+		expect(f.connected && f.rowId === 1 && f.textId === 2 && f.text === before.text, 'upward paging retains the same connected visible prose Range');
+		expect(Math.abs(f.rect.top - before.rect.top - 240) <= 1, 'anchored gap release adds no movement beyond the intended 240px reader scroll');
+		expect(Math.abs(f.composer.bottom - f.viewportBottom) <= 1, 'reader paging keeps the composer at the viewport bottom');
+	}
+	ctx.log(`automatic upward paging ${JSON.stringify({ initial, before, first: after[0], samples: after.length })}`);
+	await page.getByRole('button', { name: 'Jump to latest message', exact: true }).click();
+	await page.waitForFunction(() => {
+		const pane = document.querySelector('.msg-scroll'), view = pane.getBoundingClientRect();
+		const last = [...pane.querySelectorAll('[data-user-turn-id]')].at(-1)?.getBoundingClientRect();
+		return last && last.top > view.top && last.bottom < view.bottom;
+	});
+}
+
 async function watchLongCompletionThenError(ctx) {
 	const { page } = ctx;
 	await page.evaluate(() => {
@@ -548,6 +619,7 @@ async function watchLongCompletionThenError(ctx) {
 	expect(largeTerminalEviction, 'a real error completion must evict a large leading WORKLOG (phone >2000px; desktop >1000px)');
 	ctx.log(`long completion then error: ${JSON.stringify({ frames: observed.frames.length, phases, largeTerminalEviction,
 		shifts: observed.shifts.map(({ t, value, recent, sources }) => ({ t, value, recent, keys: sources.map(s => s.key) })) })}`);
+	await watchUpwardPagingAcrossRetainedGap(ctx);
 }
 
 // A fresh send can be queued without a new transcript row. Keep this phone-only
