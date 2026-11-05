@@ -795,6 +795,8 @@
 		onChats={openChats}
 	/>
 
+	<!-- The rail's overlays share the panel geometry, never Chats' hidden/inert scope. -->
+	<div class="panel-plane">
 	{#if ownsPanel}
 		<div class="col page-panel">
 			{#if viewPanel.panel}
@@ -960,6 +962,7 @@
 				{/each}
 			</div>
 		</SidebarSheet>
+	</div>
 
 		<SidebarSheet open={sheet === 'more'} label="More destinations" role="menu" {phone} placement="flyout" onClose={() => (sheet = null)}>
 			{#if phone}<h4>More</h4>{/if}
@@ -1015,6 +1018,9 @@
 	}
 
 	.sidebar.phone { flex-direction: column-reverse; }
+
+	/* Matches the old column's bounds, including the phone drawer's tab row. */
+	.panel-plane { position: relative; display: flex; flex: 1; min-width: 0; min-height: 0; }
 
 	/* Hidden, not removed: coming back to chats stays instant. */
 	.col.rail-hidden { display: none; }

@@ -65,6 +65,11 @@
 	],
 	"rules": [
 		{
+			"why": "rail-owned More and Customize stay reachable while a feature owns the Chats panel, including the real phone drawer",
+			"journeys": ["rail-more"],
+			"globs": ["frontend/src/lib/components/layout/Sidebar.svelte", "frontend/src/lib/components/layout/sidebar/SidebarRail.svelte", "frontend/src/lib/components/layout/sidebar/SidebarSheet.svelte"]
+		},
+		{
 			"why": "what a sidebar row says is true: one row's failed change undoes only that change, a failed turn reads Failed on every producer, a project is listed once in the Filter",
 			"journeys": ["sidebar-truth"],
 			"globs": [

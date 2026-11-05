@@ -1748,6 +1748,34 @@ describe('Sidebar unified conversation history', () => {
 });
 
 describe('Sidebar page-panel host', () => {
+	it.each(['prs', 'settings', 'build', 'stats', 'docs', 'terminal'])('keeps the rail menu and Customize outside hidden Chats on %s', async (type) => {
+		mocks.activeView.set({ type });
+		terminalTargets.mockResolvedValue({
+			worker: { id: 'w', name: 'ServerWorker', platform: 'linux' }, supported: true, unsupported_reason: null, targets: [],
+			shells: [{ name: 'bash', default: true }], default_shell: 'bash',
+			default_folder: { path: '/workspace', source: 'workspace' }, limit: 8, open: 0,
+		});
+		const onOpenFeature = vi.fn();
+		const view = render(Sidebar, { props: { ...sidebarProps, panelHost: true, isAdmin: true, onOpenFeature } });
+		await terminals.ensureCapability();
+		await tick();
+		const chats = view.container.querySelector('.col.rail-hidden');
+		expect(chats?.getAttribute('aria-hidden')).toBe('true');
+		// Chat-specific controls still belong to Chats, not the global rail.
+		expect(chats?.querySelector('.selbar')).toBeTruthy();
+		expect(chats?.querySelector('[aria-label="Filter chats"]')).toBeTruthy();
+		await openMore();
+		const menu = screen.getByRole('menu', { name: 'More destinations' });
+		expect(menu.closest('[inert], [aria-hidden="true"]')).toBeNull();
+		for (const [label, destination] of [['Docs', 'docs'], ['Stats', 'stats'], ['Terminal', 'terminal']]) {
+			await fireEvent.click(menuItem(label));
+			expect(onOpenFeature).toHaveBeenCalledWith(destination);
+			await openMore();
+		}
+		await fireEvent.click(menuItem('Customize the rail'));
+		const dialog = screen.getByRole('dialog', { name: 'Customize the rail' });
+		expect(dialog.closest('[inert], [aria-hidden="true"]')).toBeNull();
+	});
 	it('keeps Chats mounted and its scroll while a lazy page shows only its title', async () => {
 		const view = render(Sidebar, { props: { ...sidebarProps, panelHost: true } });
 		await tick();
