@@ -427,6 +427,69 @@ const cases = [{
 	}
 })) : [])];
 
+// A fresh send can be queued without a new transcript row. Keep this phone-only
+// producing regression separate from the original error/handoff/Stop actions.
+cases.push({
+	name: 'fresh-queued-send-releases-error-slot', viewports: ['phone'], throttles: ['slow'],
+	async setup(ctx) {
+		const { page, variant } = ctx;
+		await openClaude(ctx); // New short project chat; never clears the long CLI seed.
+		ctx.freshQueueToken = `fresh-${uniq()}`;
+		ctx.firstQueueToken = `waiting-0-${uniq()}`;
+		await typeAndSend(page, `held error ${uniq()} ${scriptTag(variant, 'error-500', { latency_ms: 10000 })}`);
+		await waitChat(page, { streaming: 'true' });
+		await typeAndSend(page, `${ctx.firstQueueToken} [script:slow tps=1]`);
+		await typeAndSend(page, `waiting-1-${uniq()} [script:slow tps=1]`);
+		await page.waitForFunction(() => document.querySelectorAll('.pending-messages [data-queue-confirmed="true"]').length === 2);
+		await page.locator('.chat-error-banner').waitFor({ timeout: 60_000 });
+		await page.waitForFunction(token => document.querySelector('[data-ui-state="chat"]')?.dataset.uiStreaming === 'true'
+			&& [...document.querySelectorAll('[data-user-turn-id]')].some(row => row.textContent.includes(token)), ctx.firstQueueToken);
+		const held = await page.locator('.tail-controls').evaluate(el => parseFloat(el.style.minHeight));
+		expect(held >= 150, `two confirmed queued bubbles produced a real held slot (${held}px)`);
+	},
+	async act({ page, mark, log, freshQueueToken }) {
+		const readState = () => page.evaluate(token => ({
+			streaming: document.querySelector('[data-ui-state="chat"]')?.dataset.uiStreaming,
+			session: document.querySelector('[data-ui-state="chat"]')?.dataset.uiSession,
+			users: document.querySelectorAll('[data-user-turn-id]').length,
+			freshInTranscript: [...document.querySelectorAll('[data-user-turn-id]')].some(row => row.textContent.includes(token)),
+			freshPending: document.querySelector('.pending-messages')?.textContent.includes(token) ?? false,
+			slot: parseFloat(document.querySelector('.tail-controls')?.style.minHeight),
+			error: !!document.querySelector('.chat-error-banner')
+		}), freshQueueToken);
+		await mark('fresh local send during the automatically delivered queued stream');
+		const before = await readState();
+		expect(before.streaming === 'true' && before.slot >= 150 && before.error,
+			'fresh send starts during real queued streaming with the presented error slot, not after completion');
+		await typeAndSend(page, `${freshQueueToken} [script:slow tps=1]`);
+		await page.locator('.pending-messages .bubble-text').filter({ hasText: freshQueueToken }).waitFor();
+		const after = await readState();
+		log(`fresh queued send ${JSON.stringify({ before, after })}`);
+		expect(after.streaming === 'true', 'the fresh send took the live-turn queue branch');
+		expect(after.session === before.session && after.users === before.users && !after.freshInTranscript && after.freshPending,
+			'the fresh local prompt is queued, not appended to the transcript');
+		expect(after.slot === 0 && !after.error, 'the admitted queued send releases the old error and measured slot');
+		await page.evaluate(() => {
+			const watch = window.__freshQueueSlot = { running: true, values: [] };
+			const sample = () => {
+				if (!watch.running) return;
+				watch.values.push(parseFloat(document.querySelector('.tail-controls')?.style.minHeight));
+				requestAnimationFrame(sample);
+			};
+			sample();
+		});
+		await mark('Stop the live turn and drain its queued recovery rows');
+		await page.getByRole('button', { name: 'Stop generating', exact: true }).click();
+		await waitTurnSettled(page, { hold: 4500 });
+		const samples = await page.evaluate(() => { window.__freshQueueSlot.running = false; return window.__freshQueueSlot.values; });
+		const settled = await readState();
+		log(`fresh slot after Stop ${JSON.stringify({ settled, samples: samples.length, heights: [...new Set(samples)] })}`);
+		expect(samples.length > 4 && samples.every(height => height === 0), 'the released slot never reappears through Stop and queue recovery');
+		expect(settled.slot === 0 && settled.streaming === 'false' && !settled.error && !settled.freshPending,
+			'the idle drained view has no stale held error geometry');
+	}
+});
+
 cases.push({
 	name: 'long-history-short-send',
 	async setup(ctx) { await openClaude(ctx, { history: true }); },
