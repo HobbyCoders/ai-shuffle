@@ -778,6 +778,11 @@
 	</button>
 {/snippet}
 
+{#snippet globalControls(rail: boolean)}
+	<DesktopUpdateButton {rail} bind:this={updater} bind:canCheck />
+	<NotificationCenter {rail} />
+{/snippet}
+
 <aside class="sidebar" class:phone aria-label="Chats">
 	<SidebarRail
 		items={railItems}
@@ -793,6 +798,7 @@
 		onCustomize={openCustomize}
 		{chatsOn}
 		onChats={openChats}
+		controls={globalControls}
 	/>
 
 	<!-- The rail's overlays share the panel geometry, never Chats' hidden/inert scope. -->
@@ -831,10 +837,8 @@
 		<div class="p-top">
 			<header class="p-head">
 				<span class="p-title">Chats</span>
-				<DesktopUpdateButton bind:this={updater} bind:canCheck />
-				<!-- The bell's only home: it used to sit in both top bars, which meant
-				     two copies on mobile and none while the drawer was open. -->
-				<NotificationCenter />
+				<!-- The phone drawer keeps its header controls; desktop has one copy in the rail. -->
+				{#if phone}{@render globalControls(false)}{/if}
 				{#if phone}
 					<button class="icon-btn p-new" type="button" aria-label={newLabel} onclick={() => { sheet = null; cancelSelection(); onNewSession(); }}>
 						<SquarePen size={20} strokeWidth={1.75} />

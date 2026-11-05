@@ -1,8 +1,8 @@
 <script lang="ts">
 	/**
 	 * NotificationCenter — the bell + history panel for the unified notification
-	 * system. Lives in the Sidebar header (one bell, independent of
-	 * the chat view) and reads the persisted `history` slice of the notification
+	 * system. Lives in the desktop rail or phone drawer header and
+	 * reads the persisted `history` slice of the notification
 	 * store.
 	 *
 	 * - Bell button with an unread-count badge.
@@ -10,8 +10,8 @@
 	 *   per-item mark-read + dismiss, plus mark-all-read and clear-all.
 	 * - Uses the shared `header-dropdowns` store so opening this closes the
 	 *   profile, branch, and git-action popovers (single-open-at-a-time).
-	 * - Desktop: the panel is right-anchored under the button (the bell sits in the
-	 *   top-bar right cluster) so it expands leftward and can't clip off-screen.
+	 * - Rail: the panel opens beyond the whole Sidebar, leaving its list readable.
+	 *   Header instances stay right-anchored under their button.
 	 * - Outside-click + Escape to close. On the mobile shell the panel is
 	 *   `position: fixed` so the right-edge anchor can't clip it.
 	 */
@@ -39,8 +39,10 @@
 	interface Props {
 		/** The phone top bar's copy: shows only while something is unread (or its panel is open). */
 		bar?: boolean;
+		/** Desktop rail: 18px icon and an outward, fixed-position history panel. */
+		rail?: boolean;
 	}
-	let { bar = false }: Props = $props();
+	let { bar = false, rail = false }: Props = $props();
 
 	const unread = $derived($unreadCount);
 	const dropdownId = $derived(bar ? 'notifications-bar' : 'notifications');
@@ -64,7 +66,19 @@
 		info: 'Info'
 	};
 
+	let railAnchor = $state({ left: 0, bottom: 8 });
+	function positionPanel() {
+		if (!rail || !bellRef) return;
+		const rect = bellRef.getBoundingClientRect();
+		const edge = bellRef.closest('aside')?.getBoundingClientRect().right ?? rect.right;
+		railAnchor = {
+			left: Math.max(8, Math.min(edge + 8, window.innerWidth - Math.min(360, window.innerWidth - 24))),
+			bottom: Math.max(8, window.innerHeight - rect.bottom)
+		};
+	}
+
 	function togglePanel() {
+		positionPanel();
 		const nowOpen = toggleDropdown(dropdownId);
 		// Opening the bell marks everything seen — the badge is "new since last look".
 		if (nowOpen && unread > 0) notify.markAllRead();
@@ -113,10 +127,10 @@
 	}
 </script>
 
-<svelte:window onclick={handleClickOutside} onkeydown={handleKeydown} />
+<svelte:window onclick={handleClickOutside} onkeydown={handleKeydown} onresize={positionPanel} />
 
 {#if !bar || unread > 0 || showPanel}
-<div class="notif-center" class:bar bind:this={rootRef}>
+<div class="notif-center" class:bar class:rail bind:this={rootRef} style:--notif-left={`${railAnchor.left}px`} style:--notif-bottom={`${railAnchor.bottom}px`}>
 	<button
 		bind:this={bellRef}
 		class="notif-btn"
@@ -207,6 +221,21 @@
 {/if}
 
 <style>
+	/* Rail controls share its 36px rhythm; history opens beyond the list column. */
+	.notif-center.rail .notif-btn { width: 36px; height: 36px; border-radius: var(--radius-control); }
+	.notif-center.rail .notif-btn:hover,
+	.notif-center.rail .notif-btn.open { background: var(--row-hover); }
+	.notif-center.rail .notif-btn:active { background: var(--row-hover); transform: scale(.95); }
+	.notif-center.rail .notif-badge { top: 0; right: -1px; box-shadow: 0 0 0 1.5px var(--sidebar); }
+	.notif-center.rail .notif-panel {
+		position: fixed;
+		top: auto;
+		right: auto;
+		left: var(--notif-left);
+		bottom: var(--notif-bottom);
+		max-height: min(440px, calc(100dvh - 24px));
+	}
+
 	/* Phone top bar: a 44x48 target, a 16px bell and the one 16px count. */
 	.notif-center.bar .notif-btn { width: 44px; height: 48px; border-radius: 8px; opacity: 1; }
 	.notif-center.bar .notif-badge {

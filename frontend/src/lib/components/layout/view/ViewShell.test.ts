@@ -113,7 +113,7 @@ describe('ViewShell', () => {
 		await fireEvent.click(screen.getByRole('button', { name: 'Open detail' }));
 		const ownEntry = page.state;
 		await view.rerender({ active: false });
-		page.state = { viewPanelDetail: 'another-page' };
+		page.state = { viewPanelDetail: 'another-page' } as App.PageState;
 		await tick();
 		page.state = ownEntry;
 		await tick();
