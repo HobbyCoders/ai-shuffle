@@ -1,4 +1,5 @@
 <script lang="ts">
+	import ActionButton from '$lib/components/settings/rows/ActionButton.svelte';
 	/**
 	 * JoinNetworkPanel — join another worker's network with its invite, as the
 	 * setup wizard shows it. The logic is JoinFlow, which Settings > Devices >
@@ -44,7 +45,7 @@
 		<div class="waiting" role="status">
 			<h5><Loader2 size={14} class="spin" /> {enrollment.status === 'syncing' ? 'Copying settings from' : 'Joining'} {enrollment.endpoint_url || 'the inviting worker'}…</h5>
 			<p>The invite admits this worker on its own. If the other worker went offline, this finishes when it is back.</p>
-			<button type="button" class="btn sm" onclick={() => flow.cancel()} disabled={busy}><X size={13} /> Cancel</button>
+			<ActionButton type="button"  onclick={() => flow.cancel()} disabled={busy}><X size={13} /> Cancel</ActionButton>
 		</div>
 	{:else}
 		<p>Invite codes are for a worker on your home network or a VPN such as Tailscale; workers signed in to the same Shuffle account find each other and always talk over the encrypted tunnel.</p>
@@ -52,7 +53,7 @@
 			<div class="fail" role="alert">
 				<ShieldAlert size={14} />
 				<span>The last join {enrollment.status}{enrollment.error ? `: ${enrollment.error}` : ''}.</span>
-				<button type="button" class="btn sm" onclick={() => flow.cancel()} disabled={busy}>Dismiss</button>
+				<ActionButton type="button"  onclick={() => flow.cancel()} disabled={busy}>Dismiss</ActionButton>
 			</div>
 		{/if}
 		<label class="field">
@@ -79,11 +80,11 @@
 			</div>
 		{/if}
 		<div class="actions">
-			<button type="button" class="btn primary" onclick={() => flow.join()} disabled={busy || !ready || pairingLinkPasted}>
+			<ActionButton type="button" variant="primary" onclick={() => flow.join()} disabled={busy || !ready || pairingLinkPasted}>
 				{#if busy}<Loader2 size={13} class="spin" />{:else}<LogIn size={13} />{/if}
 				{replace ? (confirmReplace ? 'Leave and join' : 'Join another network') : 'Join'}
-			</button>
-			{#if replace && confirmReplace}<button type="button" class="btn" onclick={() => flow.keepCurrent()} disabled={busy}>Keep current network</button>{/if}
+			</ActionButton>
+			{#if replace && confirmReplace}<ActionButton type="button"  onclick={() => flow.keepCurrent()} disabled={busy}>Keep current network</ActionButton>{/if}
 		</div>
 	{/if}
 	{#if flow.error}<p class="error" role="alert">{flow.error}</p>{/if}
@@ -93,29 +94,24 @@
 	.join { display: flex; flex-direction: column; gap: 10px; color: var(--foreground); }
 	h5 { display: flex; align-items: center; gap: 6px; margin: 0 0 6px; font-size: 13px; font-weight: 600; }
 	p { margin: 0; font-size: 12px; line-height: 1.5; color: var(--muted-foreground); overflow-wrap: anywhere; }
-	.waiting { padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: color-mix(in oklab, var(--primary) 5%, var(--card)); }
+	.waiting { padding: 12px; border: 1px solid var(--border); border-radius: var(--st-radius, calc(var(--radius) + 4px)); background: var(--card); }
 	.waiting p { margin-bottom: 8px; }
-	.fail { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 12px; border: 1px solid color-mix(in oklab, var(--destructive) 40%, var(--border)); border-radius: 10px; font-size: 12px; color: var(--destructive); }
-	.fail.warn { color: var(--foreground); border-color: color-mix(in oklab, var(--warning, orange) 50%, var(--border)); }
+	.fail { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 12px; border: 1px solid color-mix(in oklab, var(--destructive) 40%, var(--border)); border-radius: var(--st-radius, calc(var(--radius) + 4px)); font-size: 12px; color: var(--destructive); }
+	.fail.warn { color: var(--foreground); border-color: color-mix(in oklab, var(--warning) 50%, var(--border)); }
 	.field { display: block; }
 	.field span { display: block; margin-bottom: 4px; font-size: 12px; color: var(--muted-foreground); }
-	.inp { box-sizing: border-box; width: 100%; min-height: 36px; padding: 6px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--background); color: var(--foreground); font: inherit; font-size: 13px; }
+	.inp { box-sizing: border-box; width: 100%; min-height: 36px; padding: 6px 10px; border: 1px solid var(--border); border-radius: var(--st-radius-md, var(--radius)); background: var(--background); color: var(--foreground); font: inherit; font-size: 13px; }
 	.inp.mono { font-family: var(--font-mono); font-size: 12px; }
-	.inp:focus-visible, .btn:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+	.inp:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
 	.manual { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 8px; }
-	.parsed { display: grid; gap: 4px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; font-size: 12px; }
+	.parsed { display: grid; gap: 4px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--st-radius, calc(var(--radius) + 4px)); font-size: 12px; }
 	.parsed div { display: flex; gap: 8px; align-items: baseline; }
 	.parsed .k { flex: 0 0 60px; color: var(--muted-foreground); }
 	.parsed code { font-family: var(--font-mono); font-size: 12px; overflow-wrap: anywhere; }
 	.actions { display: flex; flex-wrap: wrap; gap: 8px; }
-	.btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 36px; padding: 6px 12px; border: 1px solid var(--border); border-radius: 8px; background: transparent; color: var(--foreground); font: inherit; font-size: 12px; cursor: pointer; }
-	.btn:hover:not(:disabled) { background: var(--hover-overlay); }
-	.btn:disabled { opacity: .55; cursor: default; }
-	.btn.primary { background: var(--primary); color: var(--primary-foreground); border-color: var(--primary); }
-	.btn.sm { min-height: 32px; padding: 4px 10px; }
 	.error { color: var(--destructive); }
 	.dim.error { color: var(--destructive); }
 	:global(.join .spin) { animation: join-spin 1s linear infinite; }
 	@keyframes join-spin { to { transform: rotate(360deg); } }
-	@media (max-width: 520px) { .manual { grid-template-columns: 1fr; } .btn, .inp { min-height: 44px; } }
+	@media (max-width: 520px) { .manual { grid-template-columns: 1fr; } .inp { min-height: 44px; font-size: 16px; } }
 </style>

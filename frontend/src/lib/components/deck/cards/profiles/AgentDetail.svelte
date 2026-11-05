@@ -468,7 +468,6 @@
 		}
 		.agd :global(.st-row .st-txt) {
 			flex: 1 1 160px;
-			width: auto !important;
 		}
 		.agd :global(.st-rowx) {
 			padding: 4px 14px 14px;

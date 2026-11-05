@@ -1,4 +1,5 @@
 <script lang="ts">
+	import Checkbox from '../rows/Checkbox.svelte';
 	/**
 	 * This worker: its name, platform and version, whether it stays on for
 	 * watches (#602), and the Network tab
@@ -349,7 +350,7 @@
 				{#each status.handoff_transfers.pending as transfer (transfer.token)}
 					<SettingRow label={transfer.title || 'Chat'} hint={`Waiting for ${transfer.source}`}>
 						{#if transfer.can_abandon}
-							<label><input type="checkbox" bind:checked={releaseWakes[transfer.token]} /> Resume remaining wake-ups</label>
+							<label><Checkbox  bind:checked={releaseWakes[transfer.token]} /> Resume remaining wake-ups</label>
 							<InlineConfirm label="Abandon transfer"
 								question={releaseWakes[transfer.token] ? 'Earlier messages may be missing. Resume remaining wake-ups anyway?' : 'Keep this chat here and discard its paused wake-ups?'}
 								onConfirm={() => abandon(transfer)} />

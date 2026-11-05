@@ -1,4 +1,5 @@
 <script lang="ts">
+	import ActionButton from '$lib/components/settings/rows/ActionButton.svelte';
 	/**
 	 * AccountPanel — the Shuffle account this worker belongs to, as the setup
 	 * wizard shows it (Settings > Devices > Shuffle account uses the same
@@ -55,7 +56,7 @@
 						{:else}{flow.checking ? 'Checking account…' : 'Account status unavailable'}{/if}
 					</span>
 					{#if signedIn && profile && !needsUsername && !flow.editingName}
-						<button type="button" class="btn icon-btn edit" onclick={() => flow.startEdit()} aria-label="Edit username" title="Edit username"><Pencil size={13} /></button>
+						<ActionButton type="button"  onclick={() => flow.startEdit()} aria-label="Edit username" title="Edit username"><Pencil size={13} /></ActionButton>
 					{/if}
 				</div>
 				{#if signedIn && remoteAccess}<span class="remote" class:connected={connection?.status === 'connected'}><span class="connection-dot" aria-hidden="true"></span>{remoteAccess}</span>{/if}
@@ -63,11 +64,11 @@
 		</div>
 		<div class="head-actions">
 			{#if signedIn}
-				<button type="button" class="btn" disabled={flow.busy} onclick={() => flow.signOut()}><LogOut size={14} /> {flow.busy ? 'Signing out…' : 'Sign out'}</button>
-				<button type="button" class="btn icon-btn refresh" disabled={flow.loadingProfile || flow.busy || flow.savingUsername || connection?.profile_ready === false} onclick={() => flow.loadProfile()} aria-label="Refresh account" title="Refresh account"><RefreshCw size={15} class={flow.loadingProfile ? 'refreshing' : ''} /></button>
+				<ActionButton type="button"  disabled={flow.busy} onclick={() => flow.signOut()}><LogOut size={14} /> {flow.busy ? 'Signing out…' : 'Sign out'}</ActionButton>
+				<ActionButton type="button"  disabled={flow.loadingProfile || flow.busy || flow.savingUsername || connection?.profile_ready === false} onclick={() => flow.loadProfile()} aria-label="Refresh account" title="Refresh account"><RefreshCw size={15} class={flow.loadingProfile ? 'refreshing' : ''} /></ActionButton>
 			{:else if connection && !(flow.intent && connection.code)}
-				<button type="button" class="btn primary" disabled={flow.busy || !flow.canStart} aria-describedby={!flow.canStart && connection.error ? 'account-panel-error' : undefined} onclick={() => flow.begin('signin')}>{flow.busy && flow.intent === 'signin' ? 'Preparing…' : 'Sign in'}</button>
-				{#if variant === 'setup'}<button type="button" class="btn" disabled={flow.busy || !flow.canStart} aria-describedby={!flow.canStart && connection.error ? 'account-panel-error' : undefined} onclick={() => flow.begin('signup')}>{flow.busy && flow.intent === 'signup' ? 'Preparing…' : 'Create account'}</button>{/if}
+				<ActionButton type="button" variant="primary" disabled={flow.busy || !flow.canStart} aria-describedby={!flow.canStart && connection.error ? 'account-panel-error' : undefined} onclick={() => flow.begin('signin')}>{flow.busy && flow.intent === 'signin' ? 'Preparing…' : 'Sign in'}</ActionButton>
+				{#if variant === 'setup'}<ActionButton type="button"  disabled={flow.busy || !flow.canStart} aria-describedby={!flow.canStart && connection.error ? 'account-panel-error' : undefined} onclick={() => flow.begin('signup')}>{flow.busy && flow.intent === 'signup' ? 'Preparing…' : 'Create account'}</ActionButton>{/if}
 			{/if}
 		</div>
 	</div>
@@ -83,15 +84,15 @@
 					<ExternalLink size={14} /> {flow.intent === 'signup' ? 'Create account in browser' : 'Sign in in browser'}
 				</a>
 				<p>Finish in the browser tab that opens, then return here. This worker joins your account as soon as you do.</p>
-				<button type="button" class="btn" aria-expanded={flow.showPhone} onclick={() => flow.togglePhone()}><Smartphone size={14} /> {flow.showPhone ? 'Hide phone code' : 'Use my phone instead'}</button>
+				<ActionButton type="button"  aria-expanded={flow.showPhone} onclick={() => flow.togglePhone()}><Smartphone size={14} /> {flow.showPhone ? 'Hide phone code' : 'Use my phone instead'}</ActionButton>
 			{/if}
 			{#if flow.showPhone || !connection.authorization_url}
 				<p>In the Shuffle app, sign in and choose <strong>Add worker</strong>, then scan this code or type it.</p>
 				{#if connection.qr_svg}<div class="qr" aria-label="Worker connection QR code">{@html connection.qr_svg}</div>{/if}
-				<div class="code"><code>{groupCode(connection.code)}</code><button type="button" class="btn" onclick={() => flow.copyCode()} aria-label="Copy connection code">{#if flow.copied}<Check size={14} /> Copied{:else}<Copy size={14} /> Copy{/if}</button></div>
+				<div class="code"><code>{groupCode(connection.code)}</code><ActionButton type="button"  onclick={() => flow.copyCode()} aria-label="Copy connection code">{#if flow.copied}<Check size={14} /> Copied{:else}<Copy size={14} /> Copy{/if}</ActionButton></div>
 				<p>The code expires after ten minutes and links exactly one worker.</p>
 			{/if}
-			<button type="button" class="btn subtle" disabled={flow.busy} onclick={() => flow.signOut()}>{flow.busy ? 'Cancelling…' : 'Cancel'}</button>
+			<ActionButton type="button"  disabled={flow.busy} onclick={() => flow.signOut()}>{flow.busy ? 'Cancelling…' : 'Cancel'}</ActionButton>
 		</div>
 	{/if}
 
@@ -102,8 +103,8 @@
 				<p class="muted">{needsUsername ? 'Your account has a temporary name. Pick the one other devices will see.' : USERNAME_HINT}</p>
 				<div class="row">
 					<input id="account-username" class="input" bind:value={flow.usernameInput} maxlength="64" autocomplete="off" spellcheck="false" disabled={flow.savingUsername} />
-					<button type="submit" class="btn primary" disabled={flow.savingUsername || !flow.usernameInput.trim()}>{flow.savingUsername ? 'Saving…' : 'Save'}</button>
-					{#if !needsUsername}<button type="button" class="btn" disabled={flow.savingUsername} onclick={() => flow.cancelEdit()}>Cancel</button>{/if}
+					<ActionButton type="submit" variant="primary" disabled={flow.savingUsername || !flow.usernameInput.trim()}>{flow.savingUsername ? 'Saving…' : 'Save'}</ActionButton>
+					{#if !needsUsername}<ActionButton type="button"  disabled={flow.savingUsername} onclick={() => flow.cancelEdit()}>Cancel</ActionButton>{/if}
 				</div>
 			</form>
 		{/if}
@@ -128,21 +129,21 @@
 			</div>
 			<p class="muted">These are account registrations, including offline devices. Local network members and direct pairings are separate from account registrations.</p>
 		{/if}
-		{#if flow.profileError}<div class="error-row"><p role="alert">{flow.profileError}</p><button type="button" class="btn" onclick={() => flow.loadProfile()}>Retry profile</button></div>{/if}
+		{#if flow.profileError}<div class="error-row"><p role="alert">{flow.profileError}</p><ActionButton type="button"  onclick={() => flow.loadProfile()}>Retry profile</ActionButton></div>{/if}
 		{#if browserSignedInThroughAccount}
-			<button type="button" class="btn subtle" onclick={() => flow.signOutBrowser()}><LogOut size={13} /> Sign this browser out</button>
+			<ActionButton type="button"  onclick={() => flow.signOutBrowser()}><LogOut size={13} /> Sign this browser out</ActionButton>
 		{/if}
 	{/if}
 
 	{#if flow.statusError}
-		<div class="error-row"><p role="alert">{flow.statusError}</p><button type="button" class="btn" disabled={flow.busy} onclick={() => flow.refresh()}>Retry account status</button></div>
+		<div class="error-row"><p role="alert">{flow.statusError}</p><ActionButton type="button"  disabled={flow.busy} onclick={() => flow.refresh()}>Retry account status</ActionButton></div>
 	{/if}
 	{#if refusal}
 		<div class="refusal" role="alert">
 			<p>{refusal.message}</p>
 			<p class="muted">{refusal.used} of {refusal.limit} remote {refusal.limit === 1 ? 'connection' : 'connections'} in use on this account. This worker keeps working here and on your local network. It asks again every hour, so an upgrade on this account takes effect within the hour.</p>
 			{#if variant === 'settings'}
-				<button type="button" class="btn" onclick={() => openSettingsTab('cloud')}>Open Settings &gt; Cloud</button>
+				<ActionButton type="button"  onclick={() => openSettingsTab('cloud')}>Open Settings &gt; Cloud</ActionButton>
 			{:else}
 				<p class="muted">A paid plan on this account raises the limit; see Settings &gt; Cloud once setup is done.</p>
 			{/if}
@@ -167,22 +168,14 @@
 	h4 { margin: 0; font-family: var(--font-sans); font-size: 13px; font-weight: 600; }
 	.status { font-size: 12px; color: var(--muted-foreground); overflow-wrap: anywhere; }
 	.head-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; flex-shrink: 0; }
-	.btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 36px; padding: 6px 12px; border: 1px solid var(--border); border-radius: 8px; background: transparent; color: var(--foreground); font: inherit; font-size: 12px; line-height: 1.4; text-decoration: none; cursor: pointer; }
-	.btn:hover:not(:disabled) { background: var(--hover-overlay); }
-	.btn:focus-visible, .input:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
-	.btn:disabled { opacity: .55; cursor: default; }
-	.btn.primary { background: var(--primary); color: var(--primary-foreground); border-color: var(--primary); }
-	.btn.subtle { border-color: transparent; color: var(--muted-foreground); padding-left: 6px; padding-right: 6px; }
-	.btn.icon-btn { width: 36px; padding: 0; flex-shrink: 0; color: var(--muted-foreground); }
-	.btn.edit { width: 28px; min-height: 28px; border-color: transparent; }
-	.refresh :global(.refreshing) { animation: account-refresh 1s linear infinite; }
+	:global(svg.refreshing) { animation: account-refresh 1s linear infinite; }
 	@keyframes account-refresh { to { transform: rotate(360deg); } }
-	@media (prefers-reduced-motion: reduce) { .refresh :global(.refreshing) { animation: none; } }
+	@media (prefers-reduced-motion: reduce) { :global(svg.refreshing) { animation: none; } }
 	.hint, p, .muted { font-size: 12px; line-height: 1.5; color: var(--muted-foreground); overflow-wrap: anywhere; }
 	.hint { margin: 8px 0 0; }
-	.flow { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; margin-top: 12px; padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: color-mix(in oklab, var(--primary) 4%, var(--card)); }
+	.flow { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; margin-top: 12px; padding: 12px; border: 1px solid var(--border); border-radius: var(--st-radius, calc(var(--radius) + 4px)); background: color-mix(in oklab, var(--primary) 4%, var(--card)); }
 	.flow p { margin: 0; }
-	.qr { width: 172px; max-width: 100%; box-sizing: border-box; padding: 10px; background: white; border-radius: 8px; }
+	.qr { width: 172px; max-width: 100%; box-sizing: border-box; padding: 10px; background: white; border-radius: var(--st-radius-md, var(--radius)); }
 	.qr :global(svg) { display: block; width: 100%; height: auto; }
 	.code { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; }
 	.code code { font-family: var(--font-mono); font-size: 17px; letter-spacing: .06em; user-select: all; overflow-wrap: anywhere; }
@@ -190,12 +183,12 @@
 	.username label { display: block; font-size: 13px; font-weight: 600; }
 	.username p { margin: 4px 0 8px; }
 	.row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
-	.input { box-sizing: border-box; flex: 1 1 200px; min-width: 0; min-height: 36px; padding: 6px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--background); color: var(--foreground); font: inherit; font-size: 13px; }
+	.input { box-sizing: border-box; flex: 1 1 200px; min-width: 0; min-height: 36px; padding: 6px 10px; border: 1px solid var(--border); border-radius: var(--st-radius-md, var(--radius)); background: var(--background); color: var(--foreground); font: inherit; font-size: 13px; }
 	.workers { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin-top: 10px; }
 	.workers { align-items: baseline; }
 	.workers .muted { display: inline-flex; align-items: center; gap: 6px; }
 	.workers ul { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; list-style: none; }
-	.workers li { padding: 2px 8px; border: 1px solid var(--border); border-radius: 999px; font-size: 12px; }
+	.workers li { padding: 2px 8px; border: 1px solid var(--border); border-radius: var(--st-radius-sm, calc(var(--radius) - 2px)); font-size: 12px; }
 	.error, .error-row p { color: var(--destructive); margin: 8px 0 0; }
 	.refusal { margin-top: 8px; display: flex; flex-direction: column; align-items: flex-start; gap: 6px; font-size: 12px; }
 	.refusal p { margin: 0; }

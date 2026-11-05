@@ -7,9 +7,8 @@
 
 /* A nested list of rows inside an expansion. */
 .settings-shell .st-xlist {
-	background: var(--st-card);
-	border: 1px solid var(--st-border);
-	border-radius: var(--st-radius);
+	background: transparent;
+	border-block: 1px solid var(--st-border);
 	overflow: hidden;
 }
 .settings-shell .st-xlist > .st-row + .st-row,
@@ -44,8 +43,8 @@
 	background: var(--st-field);
 	color: var(--st-fg);
 	padding: 10px 12px;
-	font-family: var(--st-mono);
-	font-size: 12px;
+	font-family: inherit;
+	font-size: 13px;
 	line-height: 1.6;
 	resize: vertical;
 	display: block;

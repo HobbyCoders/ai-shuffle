@@ -1,4 +1,5 @@
 <script lang="ts">
+	import Checkbox from '../rows/Checkbox.svelte';
 	/**
 	 * The "Cloud provider or gateway" form: one method (Amazon Bedrock, Google
 	 * Vertex AI, Microsoft Foundry or an LLM gateway), its values, and the
@@ -160,7 +161,7 @@
 
 	<div class="st-xlist">
 		<label class="st-check">
-			<input type="checkbox" bind:checked={acknowledged} disabled={busy || access.readOnly} />
+			<Checkbox  bind:checked={acknowledged} disabled={busy || access.readOnly} />
 			<span>I have read the warning above</span>
 			<span></span>
 		</label>
