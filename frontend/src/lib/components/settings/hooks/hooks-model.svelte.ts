@@ -59,7 +59,7 @@ export interface HookForm {
 	timeoutSec: number;
 	url: string;
 	secret: string;
-	/** Presence only: a deleted signed webhook needs a replacement before recreation. */
+	/** Signing observed during this form's lifetime, not the current server state. */
 	hasSecret: boolean;
 	matcher: string;
 	/** Only used by the draft; existing hooks toggle at once. */
@@ -88,7 +88,8 @@ export function emptyForm(projectId: string | null): HookForm {
 	};
 }
 
-export function formFromHook(h: Hook): HookForm {
+/** Rehydration must not erase signing safety evidence from a retained form. */
+export function formFromHook(h: Hook, observedSecret = false): HookForm {
 	return {
 		name: h.name,
 		projectId: h.project_id ?? null,
@@ -98,13 +99,13 @@ export function formFromHook(h: Hook): HookForm {
 		timeoutSec: Math.round((h.timeout || DEFAULT_TIMEOUT_MS) / 1000),
 		url: h.url ?? '',
 		secret: '',
-		hasSecret: h.has_secret,
+		hasSecret: observedSecret || h.has_secret,
 		matcher: h.tool_matcher ?? '',
 		enabled: h.enabled
 	};
 }
 
-/** Owner-editable fields only: Enabled saves separately; presence is server metadata. */
+/** Owner-editable fields only: Enabled saves separately; signing safety is not an edit. */
 function editable(f: HookForm): string {
 	const { enabled: _enabled, hasSecret: _hasSecret, ...rest } = f;
 	return JSON.stringify(rest);
@@ -280,7 +281,7 @@ export class HooksModel {
 			delete this.baselines[id];
 			return;
 		}
-		this.forms[id] = formFromHook(h);
+		this.forms[id] = formFromHook(h, this.forms[id]?.hasSecret);
 		this.baselines[id] = editable(this.forms[id]);
 	}
 
@@ -318,7 +319,7 @@ export class HooksModel {
 				return created.id;
 			}
 			const saved = await hooks.updateHook(id, updatePayload(f));
-			this.forms[id] = formFromHook(saved);
+			this.forms[id] = formFromHook(saved, this.forms[id]?.hasSecret || f.hasSecret);
 			this.baselines[id] = editable(this.forms[id]);
 			delete this.remote[id];
 			return id;
@@ -342,7 +343,7 @@ export class HooksModel {
 					f.enabled = saved.enabled;
 					f.hasSecret ||= saved.has_secret;
 				} else {
-					this.forms[id] = formFromHook(saved);
+					this.forms[id] = formFromHook(saved, f.hasSecret);
 					this.baselines[id] = editable(this.forms[id]);
 				}
 			}
@@ -395,7 +396,7 @@ export class HooksModel {
 			const h = this.hook(id);
 			if (!this.dirty(id)) {
 				if (h) {
-					this.forms[id] = formFromHook(h);
+					this.forms[id] = formFromHook(h, this.forms[id].hasSecret);
 					this.baselines[id] = editable(this.forms[id]);
 				} else {
 					delete this.forms[id];

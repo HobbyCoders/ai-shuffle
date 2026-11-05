@@ -245,6 +245,89 @@ describe('hooks-model', () => {
 		expect(api.createAppHook).not.toHaveBeenCalled();
 	});
 
+	it('retains newer signing evidence when an older clean toggle response arrives', async () => {
+		const unsigned = hook({ hook_type: 'webhook', url: 'https://example.test', has_secret: false });
+		api.getAppHooks.mockResolvedValue([unsigned]);
+		const model = new HooksModel();
+		await model.load();
+		model.ensure('h1');
+		let finish!: (saved: Hook) => void;
+		api.updateHook.mockReturnValue(new Promise<Hook>((resolve) => { finish = resolve; }));
+		const toggling = model.setEnabled('h1', false);
+		api.getAppHooks.mockResolvedValue([hook({ ...unsigned, has_secret: true })]);
+		await model.load();
+		expect(model.form('h1')!.hasSecret).toBe(true);
+		expect(model.dirty('h1')).toBe(false);
+		finish(hook({ ...unsigned, enabled: false }));
+		expect(await toggling).toBe(true);
+		expect(model.form('h1')!.hasSecret).toBe(true);
+		expect(model.dirty('h1')).toBe(false);
+		model.form('h1')!.name = 'Owner edit after the old response';
+		api.getAppHooks.mockResolvedValue([]);
+		await model.load();
+		expect(await model.save('h1')).toBeNull();
+		expect(api.createAppHook).not.toHaveBeenCalled();
+	});
+
+	it('retains signing evidence when a clean list refresh reports unsigned', async () => {
+		const signed = hook({ hook_type: 'webhook', url: 'https://example.test', has_secret: true });
+		api.getAppHooks.mockResolvedValue([signed]);
+		const model = new HooksModel();
+		await model.load();
+		model.ensure('h1');
+		api.getAppHooks.mockResolvedValue([hook({ ...signed, has_secret: false })]);
+		await model.load();
+		expect(model.form('h1')!.hasSecret).toBe(true);
+		expect(model.dirty('h1')).toBe(false);
+		model.form('h1')!.name = 'Owner edit after the unsigned list';
+		api.getAppHooks.mockResolvedValue([]);
+		await model.load();
+		expect(await model.save('h1')).toBeNull();
+		expect(api.createAppHook).not.toHaveBeenCalled();
+	});
+
+	it('retains signing evidence when discarding edits against an unsigned row', async () => {
+		const signed = hook({ hook_type: 'webhook', url: 'https://example.test', has_secret: true });
+		api.getAppHooks.mockResolvedValue([signed]);
+		const model = new HooksModel();
+		await model.load();
+		model.ensure('h1')!.name = 'Temporary owner edit';
+		api.getAppHooks.mockResolvedValue([hook({ ...signed, has_secret: false })]);
+		await model.load();
+		expect(model.form('h1')!.hasSecret).toBe(true);
+		model.discard('h1');
+		expect(model.form('h1')!.hasSecret).toBe(true);
+		expect(model.dirty('h1')).toBe(false);
+		model.form('h1')!.name = 'Next owner edit';
+		api.getAppHooks.mockResolvedValue([]);
+		await model.load();
+		expect(await model.save('h1')).toBeNull();
+		expect(api.createAppHook).not.toHaveBeenCalled();
+	});
+
+	it('retains newer signing evidence when an older full Save response arrives', async () => {
+		const unsigned = hook({ hook_type: 'webhook', url: 'https://example.test', has_secret: false });
+		api.getAppHooks.mockResolvedValue([unsigned]);
+		const model = new HooksModel();
+		await model.load();
+		model.ensure('h1')!.name = 'First owner edit';
+		let finish!: (saved: Hook) => void;
+		api.updateHook.mockReturnValue(new Promise<Hook>((resolve) => { finish = resolve; }));
+		const saving = model.save('h1');
+		api.getAppHooks.mockResolvedValue([hook({ ...unsigned, has_secret: true })]);
+		await model.load();
+		expect(model.form('h1')!.hasSecret).toBe(true);
+		finish(hook({ ...unsigned, name: 'First owner edit' }));
+		expect(await saving).toBe('h1');
+		expect(model.form('h1')!.hasSecret).toBe(true);
+		expect(model.dirty('h1')).toBe(false);
+		model.form('h1')!.name = 'Second owner edit';
+		api.getAppHooks.mockResolvedValue([]);
+		await model.load();
+		expect(await model.save('h1')).toBeNull();
+		expect(api.createAppHook).not.toHaveBeenCalled();
+	});
+
 	it('does not count learned signing presence as an edit after the owner reverts their text', async () => {
 		const original = hook({ hook_type: 'webhook', url: 'https://example.test', has_secret: false });
 		api.getAppHooks.mockResolvedValue([original]);
