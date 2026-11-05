@@ -33,10 +33,10 @@ def test_checked_in_eight_shard_plan_leaves_retry_headroom():
     buckets = ci.plan(8)
     assert len(buckets) == 8
     assert sorted(name for bucket in buckets for name in bucket) == sorted(weights)
-    # At most 18 minutes of journeys leaves about a minute for instance startup:
+    # Reserve 30 seconds for instance startup (7-12s in hosted run 42035121047):
     # first pass by ~19 minutes, then the full 180s retry before the 22m cutoff.
     loads = [sum(weights[name] for name in bucket) for bucket in buckets]
-    assert max(loads) <= 18 * 60, loads
+    assert max(loads) <= 19 * 60 - 30, loads
 
 
 def test_plan_uses_runtime_instead_of_case_counts(tmp_path, monkeypatch):
