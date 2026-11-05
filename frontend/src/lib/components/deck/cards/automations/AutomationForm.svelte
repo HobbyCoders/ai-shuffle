@@ -303,7 +303,11 @@
  const tabs = [{id:'setup',label:'Setup'},{id:'generation',label:'Media generation'},{id:'budget',label:'Budget & limits'}];
 </script>
 
-{#if formError}<div role="alert"><InlineBanner tone="warn">{formError}<button class="st-btn" onclick={() => onUpdateFormError('')}>Dismiss</button></InlineBanner></div>{/if}
+{#if formError}
+ <div role="alert"><InlineBanner tone="warn">{formError}
+  {#snippet actions()}<button class="st-btn" onclick={() => onUpdateFormError('')}>Dismiss</button>{/snippet}
+ </InlineBanner></div>
+{/if}
 {#if scheduledRunNotice}
  <div data-testid="automation-api-key-notice"><InlineBanner tone="warn">{scheduledRunNotice}
   {#snippet actions()}<button class="st-btn" onclick={() => openSettings({category:'providers',item:'provider:claude',anchor:'providers.claudeMode'})}>Open Claude settings</button>{/snippet}

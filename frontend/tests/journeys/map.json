@@ -65,6 +65,11 @@
 	],
 	"rules": [
 		{
+			"why": "automation authoring, search, detail tabs and responsive Back use the shared panel grammar",
+			"journeys": ["automations"],
+			"globs": ["frontend/src/lib/components/deck/cards/AutomationsCard.svelte", "frontend/src/lib/components/deck/cards/automations/**", "frontend/src/lib/components/layout/view/TextAreaField.svelte"]
+		},
+		{
 			"why": "responsive feature details keep one usable browser Back step across repeated desktop/stacked transitions",
 			"journeys": ["view-shell-back"],
 			"globs": ["frontend/src/lib/components/layout/view/ViewShell.svelte", "frontend/src/lib/components/deck/cards/ProfileCard.svelte"]
