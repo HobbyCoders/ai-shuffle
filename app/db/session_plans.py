@@ -43,13 +43,13 @@ def execute(session_id: str, args: dict, *, device_id: str, runner_id: str, proo
         raise ValueError("Plan requires an active app session")
     with get_db() as conn:
         cur = conn.cursor()
-        # The same row lock ownership publication takes: a handoff and mutation
-        # cannot cross. Mirrors may never write, even with a stale runtime.
-        cur.execute("SELECT owner_device_id FROM sessions WHERE id=%s FOR UPDATE", (session_id,))
-        session = cur.fetchone()
-        if not session or session["owner_device_id"] not in (None, device_id):
-            raise ValueError("Plan belongs to another worker or session is unavailable")
         if args["action"] == "update":
+            # Preserve the owner/unavailable error before run validation, without
+            # taking a lock ahead of the event counter. Recheck under lock below.
+            cur.execute("SELECT owner_device_id FROM sessions WHERE id=%s", (session_id,))
+            session = cur.fetchone()
+            if not session or session["owner_device_id"] not in (None, device_id):
+                raise ValueError("Plan belongs to another worker or session is unavailable")
             if not proof or proof[0] != session_id:
                 raise ValueError("Plan update requires the current session run")
             cur.execute("SELECT id FROM runs WHERE id=%s AND session_id=%s AND runner_id=%s "
@@ -57,6 +57,22 @@ def execute(session_id: str, args: dict, *, device_id: str, runner_id: str, proo
                         (proof[1], session_id, runner_id, proof[2]))
             if not cur.fetchone():
                 raise ValueError("Plan update refused: session run was superseded or expired")
+            # Match append_events: run fence -> counter -> session row. Its
+            # question projection locks the session after reserving a sequence;
+            # taking the session first here deadlocks with concurrent events.
+            # Lock without consuming a sequence; append_events still reserves
+            # the actual event atomically below. SELECT avoids an absent-session
+            # FK failure, leaving the normal ownership/unavailable check intact.
+            cur.execute("INSERT INTO session_event_counters (session_id,next_seq) "
+                        "SELECT id,0 FROM sessions WHERE id=%s "
+                        "ON CONFLICT(session_id) DO UPDATE SET next_seq=session_event_counters.next_seq",
+                        (session_id,))
+        # The same row lock ownership publication takes: a handoff and mutation
+        # cannot cross. Mirrors may never write, even with a stale runtime.
+        cur.execute("SELECT owner_device_id FROM sessions WHERE id=%s FOR UPDATE", (session_id,))
+        session = cur.fetchone()
+        if not session or session["owner_device_id"] not in (None, device_id):
+            raise ValueError("Plan belongs to another worker or session is unavailable")
         cur.execute("SELECT document,receipts FROM session_plans WHERE session_id=%s", (session_id,))
         row = cur.fetchone()
         document = parse_jsonb(row["document"]) if row else empty_plan()

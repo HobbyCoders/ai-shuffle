@@ -1,5 +1,6 @@
 """Real row-lock serialization, idempotent races and atomic event rollback."""
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from threading import Barrier, Event
 from uuid import uuid4
 
@@ -53,3 +54,65 @@ def test_concurrent_retry_rollback_and_handoff_fence(monkeypatch):
         with pytest.raises(ValueError, match="another worker"):
             pending.result(timeout=10)
     assert session_plans.read(sid)["plan"]["revision"] == 1
+
+
+def test_plan_and_normal_event_writer_use_compatible_lock_order(monkeypatch):
+    sid = "plan-event-race-" + uuid4().hex
+    with base.get_db() as conn:
+        conn.cursor().execute("INSERT INTO sessions(id,title,owner_device_id) VALUES (%s,'Event concurrency','source')", (sid,))
+    run = runs.claim_run(sid, "runner", 120)
+    proof = (sid, run["id"], run["fence_token"])
+    # Create the counter through the real event producer first. The race is
+    # an ordinary counter UPDATE versus a plan mutation, not FK insertion.
+    session_events.append_events(sid, [{"type": "system.note", "payload": {"subtype": "before-race"}}])
+    counter_held, plan_counter_attempt = Event(), Event()
+
+    class Cursor:
+        def __init__(self, cursor, planner):
+            self.cursor, self.planner = cursor, planner
+        def __getattr__(self, name):
+            return getattr(self.cursor, name)
+        def execute(self, sql, args=None):
+            counter = sql.startswith("INSERT INTO session_event_counters")
+            if counter and self.planner:
+                plan_counter_attempt.set()
+            result = self.cursor.execute(sql, args)
+            if counter and not self.planner:
+                counter_held.set()
+                assert plan_counter_attempt.wait(5), "Plan never attempted its event counter"
+            return result
+
+    class Connection:
+        def __init__(self, connection, planner):
+            self._connection, self.planner = connection, planner
+        def __getattr__(self, name):
+            return getattr(self._connection, name)
+        def cursor(self):
+            return Cursor(self._connection.cursor(), self.planner)
+
+    @contextmanager
+    def planner_db():
+        with base.get_db() as conn:
+            conn.cursor().execute("SET LOCAL lock_timeout='4s'")
+            conn.cursor().execute("SET LOCAL statement_timeout='6s'")
+            yield Connection(conn, True)
+    monkeypatch.setattr(session_plans, "get_db", planner_db)
+
+    def event_writer():
+        with base.get_db() as conn:
+            conn.cursor().execute("SET LOCAL lock_timeout='4s'")
+            conn.cursor().execute("SET LOCAL statement_timeout='6s'")
+            session_events.append_events(sid, [{"type": "system.note", "payload": {"subtype": "concurrent-event"}}],
+                                         run_id=proof[1], fence_token=proof[2], _conn=Connection(conn, False))
+    args = {"action": "update", "request_id": "concurrent-plan", "expected_revision": 0,
+            "goal": "No writer deadlock", "done_when": "Both producers commit", "tasks": [
+                {"id": "one", "title": "Write", "status": "in_progress"}]}
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        event = pool.submit(event_writer)
+        assert counter_held.wait(5)
+        plan = pool.submit(session_plans.execute, sid, args, device_id="source", runner_id="runner", proof=proof)
+        event.result(timeout=10)
+        assert plan.result(timeout=10)["revision"] == 1
+    assert session_plans.read(sid)["plan"]["revision"] == 1
+    types = [event["event_type"] for event in session_events.get_events(sid)]
+    assert types == ["system.note", "system.note", "plan.updated"]
