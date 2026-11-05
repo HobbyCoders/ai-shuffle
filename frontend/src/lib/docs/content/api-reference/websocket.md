@@ -96,6 +96,8 @@ Other devices watching the same session receive the same control frames. Content
 | `tabs_update` | Share this device's open tabs with your other devices, which receive `tabs_sync`; no reply | `tabs_data` (`tabs`, `activeTabId`) |
 | `pong` | Keep-alive response to a `ping` | — |
 
+A `stop` records a durable boundary for the work already admitted. Delayed cleanup belongs to that Stop, not to a newer message or a resumed attempt of the same turn; cancelled wake text cannot become a fresh instruction. During a rolling upgrade, an older background task may have no safe input attribution. Cleanup leaves such a task alone rather than risk stopping newer work, and records a `system` event with subtype `stop_incomplete`, `incomplete: true` and the affected task ids. Inspect the running tasks and stop those tasks individually. This is not a claim that all background work stopped.
+
 Every client frame is a JSON object with a string `type`. A frame with an unknown `type` is answered with an `error` frame (`Unknown message type: ...`), and so is one whose `type` is missing or not a string (`Missing message type`). A frame that is not a JSON object (invalid JSON, an array, a string, a binary frame) gets `Invalid message: expected a JSON object`. The connection stays open, but the 11th frame on a connection that is not a JSON object closes it with code `1007`. A frame may be at most 10 MiB; a larger one closes the connection (code `1009`).
 
 A connection may send 30 frames in any 10 seconds (`pong` does not count). A frame over the limit is not processed and is answered with `{"type": "error", "message": "Rate limited: too many messages. Please slow down."}`; the connection stays open.

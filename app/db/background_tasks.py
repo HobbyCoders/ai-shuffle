@@ -18,6 +18,7 @@ presence.
 from __future__ import annotations
 
 import logging
+import uuid
 from typing import Any, Dict, List, Optional
 
 from app.core.config import settings
@@ -43,6 +44,50 @@ def _task_text(text: Optional[str]) -> Optional[str]:
     unchanged. One-for-one replacement also preserves the existing text bounds.
     """
     return text.replace("\x00", "␀") if text is not None else None
+
+
+def create_order_guard(cursor: Any) -> None:
+    """Invalidate provenance written by pre-nonce installs, even at equal clocks.
+
+    New writers still cannot launder cached scope: their upsert must clear any
+    candidate at/below the legacy write's durable input boundary. Install this
+    and backfill in the same schema transaction; no old statement is rejected.
+    """
+    from app.db.base import column_exists
+    if not column_exists(cursor, "background_tasks", "turn_order_write_nonce"):
+        return  # existing schema: its additive column pass installs the guard
+    cursor.execute("""CREATE OR REPLACE FUNCTION background_task_order_guard()
+        RETURNS trigger LANGUAGE plpgsql AS $$
+        DECLARE boundary BIGINT;
+        BEGIN
+            IF (TG_OP = 'INSERT' AND NEW.turn_order_write_nonce IS NULL) THEN
+                SELECT COALESCE(MAX(insert_order), 0) INTO boundary FROM turns
+                    WHERE session_id = NEW.session_id;
+                NEW.turn_order_invalid_through := GREATEST(NEW.turn_order_invalid_through, boundary,
+                    COALESCE(NEW.turn_order, -1), COALESCE(NEW.turn_order_upper_bound, -1));
+                NEW.turn_order := NULL;
+                NEW.turn_order_upper_bound := NULL;
+                NEW.turn_order_incarnation := NULL;
+            ELSIF TG_OP = 'UPDATE' THEN
+                IF NEW.turn_order_write_nonce IS NOT DISTINCT FROM OLD.turn_order_write_nonce THEN
+                    SELECT COALESCE(MAX(insert_order), 0) INTO boundary FROM turns
+                        WHERE session_id = NEW.session_id;
+                    NEW.turn_order_invalid_through := GREATEST(OLD.turn_order_invalid_through, boundary,
+                        COALESCE(OLD.turn_order, -1), COALESCE(OLD.turn_order_upper_bound, -1));
+                    NEW.turn_order := NULL;
+                    NEW.turn_order_upper_bound := NULL;
+                    NEW.turn_order_incarnation := NULL;
+                END IF;
+            END IF;
+            RETURN NEW;
+        END $$""")
+    cursor.execute("""DO $$ BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_background_task_order_guard'
+                       AND tgrelid='background_tasks'::regclass) THEN
+            CREATE TRIGGER trg_background_task_order_guard BEFORE INSERT OR UPDATE ON background_tasks
+            FOR EACH ROW EXECUTE FUNCTION background_task_order_guard();
+        END IF;
+        END $$""")
 
 
 def upsert_background_task(snapshot: Dict[str, Any]) -> None:
@@ -77,8 +122,8 @@ def upsert_background_tasks(snapshots: List[Dict[str, Any]]) -> None:
                     tool_use_id, title, status, terminal_notified,
                     started_at, updated_at, summary, reason, report_path, report_chars,
                     agent, roster_name, model, remote_device_id, assignment_owner, turn_order, turn_order_upper_bound,
-                    turn_order_incarnation
-                ) VALUES ({", ".join([_ph] * 23)})
+                    turn_order_incarnation, turn_order_write_nonce
+                ) VALUES ({", ".join([_ph] * 24)})
                 ON CONFLICT (task_id, session_id) DO UPDATE SET
                     instance_id = EXCLUDED.instance_id,
                     kind = EXCLUDED.kind,
@@ -89,14 +134,20 @@ def upsert_background_tasks(snapshots: List[Dict[str, Any]]) -> None:
                     terminal_notified = EXCLUDED.terminal_notified,
                     started_at = EXCLUDED.started_at,
                     updated_at = EXCLUDED.updated_at,
-                    turn_order = EXCLUDED.turn_order,
+                    turn_order_write_nonce = EXCLUDED.turn_order_write_nonce,
+                    turn_order = CASE
+                        WHEN EXCLUDED.turn_order > background_tasks.turn_order_invalid_through
+                            THEN EXCLUDED.turn_order ELSE NULL END,
                     turn_order_upper_bound = CASE
-                        WHEN EXCLUDED.turn_order IS NOT NULL THEN NULL
+                        WHEN EXCLUDED.turn_order > background_tasks.turn_order_invalid_through THEN NULL
+                        WHEN EXCLUDED.turn_order_upper_bound > background_tasks.turn_order_invalid_through
+                            THEN EXCLUDED.turn_order_upper_bound
                         WHEN background_tasks.started_at IS NOT DISTINCT FROM EXCLUDED.started_at
-                            THEN COALESCE(EXCLUDED.turn_order_upper_bound, background_tasks.turn_order_upper_bound)
-                        ELSE EXCLUDED.turn_order_upper_bound END,
+                            THEN background_tasks.turn_order_upper_bound
+                        ELSE NULL END,
                     turn_order_incarnation = CASE
-                        WHEN EXCLUDED.turn_order IS NOT NULL OR EXCLUDED.turn_order_upper_bound IS NOT NULL
+                        WHEN EXCLUDED.turn_order > background_tasks.turn_order_invalid_through
+                          OR EXCLUDED.turn_order_upper_bound > background_tasks.turn_order_invalid_through
                             THEN EXCLUDED.started_at
                         WHEN background_tasks.started_at IS NOT DISTINCT FROM EXCLUDED.started_at
                             THEN background_tasks.turn_order_incarnation
@@ -135,8 +186,20 @@ def upsert_background_tasks(snapshots: List[Dict[str, Any]]) -> None:
                 snapshot.get("turn_order_upper_bound"),
                 snapshot.get("started_at") if (snapshot.get("turn_order") is not None or
                                                snapshot.get("turn_order_upper_bound") is not None) else None,
+                uuid.uuid4().hex,
             ) for snapshot in snapshots],
         )
+
+
+def get_stop_order_proofs(session_id: str, task_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+    if not task_ids:
+        return {}
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT task_id, started_at, turn_order, turn_order_upper_bound, turn_order_incarnation "
+                       "FROM background_tasks WHERE session_id=%s AND task_id IN (" +
+                       ",".join([ph()] * len(task_ids)) + ")", (session_id, *task_ids))
+        return {row["task_id"]: dict(row) for row in cursor.fetchall()}
 
 
 def get_running_task_presence(session_ids: List[str]) -> Dict[str, Dict[str, Any]]:
@@ -444,10 +507,10 @@ def settle_background_task_row(task_id: str, session_id: str, status: str) -> bo
         cursor = conn.cursor()
         cursor.execute(
             f"""UPDATE background_tasks
-                   SET status = {_ph}, updated_at = CURRENT_TIMESTAMP
+                   SET status = {_ph}, updated_at = CURRENT_TIMESTAMP, turn_order_write_nonce = {_ph}
                  WHERE task_id = {_ph} AND session_id = {_ph}
                    AND status NOT IN ({terminal_list})""",
-            (status, task_id, session_id),
+            (status, uuid.uuid4().hex, task_id, session_id),
         )
         return (cursor.rowcount or 0) > 0
 
@@ -464,7 +527,7 @@ def mark_background_task_killed(task_id: str, session_id: str) -> None:
         cursor = conn.cursor()
         cursor.execute(
             f"""UPDATE background_tasks
-                   SET status = 'killed', updated_at = CURRENT_TIMESTAMP
+                   SET status = 'killed', updated_at = CURRENT_TIMESTAMP, turn_order_write_nonce = {_ph}
                  WHERE task_id = {_ph} AND session_id = {_ph}""",
-            (task_id, session_id),
+            (uuid.uuid4().hex, task_id, session_id),
         )

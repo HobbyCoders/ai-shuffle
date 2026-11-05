@@ -2855,6 +2855,13 @@ def _run_column_migrations(cursor: Any) -> None:
     if not column_exists(cursor, "background_tasks", "turn_order_incarnation"):
         cursor.execute("ALTER TABLE background_tasks ADD COLUMN turn_order_incarnation TIMESTAMP WITH TIME ZONE")
         migrations_applied.append("background_tasks_turn_order_incarnation")
+    for column, definition in (("turn_order_write_nonce", "TEXT"),
+                               ("turn_order_invalid_through", "BIGINT NOT NULL DEFAULT -1")):
+        if not column_exists(cursor, "background_tasks", column):
+            cursor.execute(f"ALTER TABLE background_tasks ADD COLUMN {column} {definition}")
+            migrations_applied.append(f"background_tasks.{column}")
+    from app.db.background_tasks import create_order_guard
+    create_order_guard(cursor)
     _backfill_legacy_task_turn_bounds(cursor)
 
     if migrations_applied:
@@ -2862,19 +2869,21 @@ def _run_column_migrations(cursor: Any) -> None:
 
 
 def _backfill_legacy_task_turn_bounds(cursor: Any) -> None:
-    """Bound surviving remote runs in ONE statement's snapshot; never re-date one.
+    """Bound currently untrusted remote runs in ONE guarded statement's snapshot.
 
     Tasks created concurrently but invisible to this snapshot remain unknown.
     A successor already queued here is not strictly beyond this bound: cleanup
     must leave that run alone and report incomplete, not guess its identity.
     """
+    import uuid
     cursor.execute(
         "UPDATE background_tasks SET turn_order = NULL, turn_order_upper_bound = "
         "(SELECT COALESCE(MAX(insert_order), 0) FROM turns "
         "WHERE turns.session_id = background_tasks.session_id), "
-        "turn_order_incarnation = started_at "
+        "turn_order_incarnation = started_at, turn_order_write_nonce = %s "
         "WHERE turn_order_incarnation IS NULL AND started_at IS NOT NULL "
-        "AND status = 'running' AND remote_device_id IS NOT NULL"
+        "AND status = 'running' AND remote_device_id IS NOT NULL",
+        (uuid.uuid4().hex,),
     )
 
 

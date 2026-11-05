@@ -1282,6 +1282,10 @@ async def test_no_clock_decides_what_a_late_stop_ends(real_worker, skew_seconds)
     from app.core.task_registry import task_registry
 
     next_turns_worker = _second_worker()
+    # Establish the producing writer's old snapshots before replacing them
+    # with the other install's clock; a late queued mirror is a DIFFERENT run.
+    from app.core import task_persistence
+    await task_persistence.flush()
     skewed = (datetime.now(timezone.utc) + timedelta(seconds=skew_seconds)).isoformat()
     for task_id in ("worker-a", "worker-b"):
         row = task_registry._tasks[SID].pop(task_id)

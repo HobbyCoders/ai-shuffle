@@ -6,7 +6,7 @@ Extracted from query_engine.py to isolate session lifecycle management.
 
 import asyncio
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from typing import Any, Optional
 
 from app.core.provider import session_admission
@@ -539,6 +539,7 @@ class StopScope:
     # nothing here may be read off the session as it is now.
     older_only: bool = False
     unattributed: tuple[str, ...] = ()
+    orders: dict[str, Any] = field(default_factory=dict)
 
 
 def capture_stop_scope(session_id: str, *, before_turn: Optional[int] = None) -> StopScope:
@@ -583,8 +584,9 @@ def capture_stop_scope(session_id: str, *, before_turn: Optional[int] = None) ->
         task_id: task_registry.task_incarnation(session_id, task_id)
         for task_id in (*(t.get("id") for t in active if t.get("id")), *worker_sessions)
     }
+    orders = {task_id: task_registry.task_turn_upper_bound(session_id, task_id) for task_id in runs}
     if before_turn is None:
-        return StopScope(active, worker_sessions, worker_shells, runs)
+        return StopScope(active, worker_sessions, worker_shells, runs, orders=orders)
     older = {task_id for task_id in runs
              if (order := task_registry.task_turn_upper_bound(session_id, task_id)) is not None
              and int(order) < before_turn}
@@ -596,7 +598,46 @@ def capture_stop_scope(session_id: str, *, before_turn: Optional[int] = None) ->
         {worker: shells for worker, shells in worker_shells.items() if worker in older},
         {task_id: runs[task_id] for task_id in older},
         older_only=True, unattributed=unattributed,
+        orders={task_id: orders[task_id] for task_id in older},
     )
+
+
+async def _validate_remote_stop_scope(session_id: str, scope: StopScope) -> tuple[StopScope, list[dict]]:
+    """A cached remote order is provisional until checked against durable truth.
+
+    In particular, a pre-nonce writer may have invalidated it at the SAME
+    timestamp. Do this off-loop, in the bounded cleanup step, never ahead of
+    the provider's interrupt signal. Local run identity is checked at each act.
+    """
+    remote = {task["id"] for task in scope.active if task.get("worker")}
+    if not remote:
+        return scope, []
+    from app.db import background_tasks
+    try:
+        rows = await asyncio.to_thread(background_tasks.get_stop_order_proofs, session_id, list(remote))
+    except Exception:
+        logger.warning("Stop: remote provenance read failed for %s", session_id, exc_info=True)
+        rows = {}
+    unknown, replaced = set(), set()
+    def iso(value):
+        return value.isoformat() if hasattr(value, "isoformat") else value
+    for task_id in remote:
+        row = rows.get(task_id) or {}
+        order = row.get("turn_order") if row.get("turn_order") is not None else row.get("turn_order_upper_bound")
+        if (order is None or row.get("started_at") is None or
+                iso(row.get("turn_order_incarnation")) != iso(row.get("started_at"))):
+            unknown.add(task_id)
+        elif order != scope.orders.get(task_id) or iso(row.get("started_at")) != scope.runs.get(task_id):
+            replaced.add(task_id)
+    excluded = unknown | replaced
+    return replace(scope,
+        active=[task for task in scope.active if task.get("id") not in excluded],
+        worker_sessions=[tid for tid in scope.worker_sessions if tid not in excluded],
+        worker_shells={tid: shells for tid, shells in scope.worker_shells.items() if tid not in excluded},
+        runs={tid: run for tid, run in scope.runs.items() if tid not in excluded},
+        orders={tid: order for tid, order in scope.orders.items() if tid not in excluded},
+        unattributed=tuple(sorted(set(scope.unattributed) | unknown))), [
+            {"ok": True, "task_id": tid, "skipped": "resumed"} for tid in sorted(replaced)]
 
 
 async def enter_user_stop(session_id: str, *, stop: Optional[_UserStop] = None) -> dict:
@@ -848,6 +889,7 @@ async def stop_all_background_tasks(
             logger.warning("Stop: latching Swarm workflows failed for %s", session_id, exc_info=True)
 
     scope = scope or capture_stop_scope(session_id)
+    scope, revalidated = await _validate_remote_stop_scope(session_id, scope)
     active = scope.active
     # A worker shutting down (docker stop, quitting the desktop app) ends only
     # its own work: a Task child running on another worker keeps running, and
@@ -866,7 +908,10 @@ async def stop_all_background_tasks(
     # worker's teardown latches ``torn_down``, which refuses a new continuation.
     def same_run(task_id: str) -> bool:
         now = task_registry.task_incarnation(session_id, task_id)
-        return now is None or now == scope.runs.get(task_id)
+        order = task_registry.task_turn_upper_bound(session_id, task_id)
+        same_order = (task_id not in scope.orders or (now is None and order is None)
+                      or order == scope.orders[task_id])
+        return same_order and (now is None or now == scope.runs.get(task_id))
 
     async def overtaken() -> bool:
         # Asked either way: this may be what lifts the latch this Stop just set.
@@ -923,7 +968,7 @@ async def stop_all_background_tasks(
         if callable(cancel_checkpoint):
             await cancel_checkpoint()
 
-    results: list[dict] = list(spared)
+    results: list[dict] = [*spared, *revalidated]
     for task_id in task_ids:
         if not same_run(task_id):
             logger.info("Stop: %s of session %s was resumed; leaving the new run alone",

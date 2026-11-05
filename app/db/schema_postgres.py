@@ -1113,6 +1113,8 @@ def create_postgres_schema(cursor: Any) -> None:
             turn_order BIGINT,
             turn_order_upper_bound BIGINT,
             turn_order_incarnation TIMESTAMP WITH TIME ZONE,
+            turn_order_write_nonce TEXT,
+            turn_order_invalid_through BIGINT NOT NULL DEFAULT -1,
             PRIMARY KEY (task_id, session_id)
         )
     """)
@@ -2068,6 +2070,9 @@ def create_postgres_schema(cursor: Any) -> None:
     cursor.execute(
         "CREATE INDEX IF NOT EXISTS idx_turns_session_position ON turns(session_id, position DESC)"
     )
+
+    from app.db.background_tasks import create_order_guard
+    create_order_guard(cursor)
 
     # The existing session-prefixed indexes also cover insertion-order reads.
     # No history rewrite or new writer-blocking index build belongs in bootstrap.

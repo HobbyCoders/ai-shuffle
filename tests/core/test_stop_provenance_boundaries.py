@@ -1,4 +1,5 @@
 """Stop identity must survive claim, parked absorption, and runtime replacement."""
+import asyncio
 import json
 
 import pytest
@@ -56,7 +57,8 @@ async def test_claimed_wake_cannot_enter_a_turn_after_stop(monkeypatch, consumer
     assert turns.start_turn(queued[0]["id"], None, "peer-runner") is not None
 
 
-async def test_parked_absorption_retains_older_stop_cleanup_authority(real_worker):
+@pytest.mark.parametrize("delivery", ["runtime", "owner_observer"])
+async def test_parked_absorption_retains_older_stop_cleanup_authority(real_worker, delivery):
     from app.core import session_runtime as sr
     from app.core.task_registry import task_registry
     from app.db import turns
@@ -68,22 +70,47 @@ async def test_parked_absorption_retains_older_stop_cleanup_authority(real_worke
     turns.park_turn(accepted["id"], ["worker-a"])
     new_input = turns.enqueue_turn(SID, "user", prompt="new", profile_id="default",
                                    payload={turns.PERSON_INPUT_KEY: True})
-    absorbed = turns.start_turn(new_input["id"], None, "new-runner", can_resume=lambda *_args: True)
-    assert absorbed["id"] == started["id"]
-    assert absorbed["payload"]["accepted_input_id"] == new_input["id"]
-    successor = sr.SessionRuntime(absorbed)
-    sr._live_runtimes[SID] = successor
-    signal = AsyncMock()
-    try:
-        with patch("app.core.query_session_lifecycle.interrupt_session", signal):
-            await old.interrupt("stop", escalation_timeout=.01)
-            await _detached_work_done()
-        assert real_worker.torn_down is True
-        assert task_registry.get_task(SID, "worker-a")["status"] == "killed"
-        signal.assert_not_awaited()
-        assert successor.admission_order == new_input["insert_order"]
-    finally:
-        sr._live_runtimes.pop(SID, None)
+    # The independent R1 probe used this exact real-execute scaffold. Its
+    # assertion passed on the old bug; this regression asserts the opposite.
+    from tests.core.test_session_runtime import _runtime_env
+    from app.core import provider_agent_supervisor as supervisor
+    at_provider, release = asyncio.Event(), asyncio.Event()
+
+    async def pump(**_kwargs):
+        at_provider.set()
+        await release.wait()
+        yield {"type": "done", "metadata": {}}
+
+    with _runtime_env(pump=pump), patch("app.core.task_registry.task_registry", task_registry):
+        execution = asyncio.create_task(sr.execute(new_input))
+        try:
+            await asyncio.wait_for(at_provider.wait(), 5)
+            successor = sr.get_live_runtime(SID)
+            assert successor.turn_id == old.turn_id
+            assert successor.turn["insert_order"] == accepted["insert_order"]
+            assert successor.admission_order == new_input["insert_order"]
+            task_registry.start_task(SID, "worker-b", "agent", "worker-b")
+            newer_worker = supervisor.register_worker(supervisor.WorkerRecord(
+                parent_session_id=SID, worker_session_id="worker-b", task_id="worker-b",
+                tool_use_id="worker-b", background=True,
+            ))
+            assert task_registry.task_turn_order(SID, "worker-b") == new_input["insert_order"]
+            signal = AsyncMock()
+            with patch("app.core.query_session_lifecycle.interrupt_session", signal):
+                if delivery == "runtime":
+                    await old.interrupt("stop", escalation_timeout=.01)
+                    await _detached_work_done()
+                else:
+                    from app.core import stop_receipts
+                    await stop_receipts.observe("old-runner")
+                    await asyncio.wait_for(asyncio.gather(*list(stop_receipts._running.values())), 5)
+            assert real_worker.torn_down is True
+            assert task_registry.get_task(SID, "worker-a")["status"] == "killed"
+            assert newer_worker.torn_down is False
+            signal.assert_not_awaited()
+        finally:
+            release.set()
+            await execution
 
 
 @pytest.mark.parametrize("retry", ["failure", "limit_pushback"])
