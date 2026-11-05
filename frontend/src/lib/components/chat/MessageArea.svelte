@@ -2181,7 +2181,7 @@
 		// A prompt queued earlier lands here when its turn starts, long after the
 		// send (#863): it follows only a reader already at the bottom.
 		const { fromQueue, followsStop } = hasNewMessage && newestMessage?.role === 'user'
-			? queuedPrompts.classify(newestMessage.content ?? '', newestMessage.commandId)
+			? queuedPrompts.classify(newestMessage)
 			: { fromQueue: false, followsStop: false };
 		const newUserMessage = hasNewMessage && !!newestMessage && isNavigableUserTurn(newestMessage) && (!fromQueue || followsStop || shouldAutoScroll);
 		const newUserCommand = hasNewMessage && newestMessage?.role === 'user' && newestMessage.type === 'command';

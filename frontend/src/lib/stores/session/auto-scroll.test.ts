@@ -334,13 +334,13 @@ describe('queued prompt tracker', () => {
 		const tracker = createQueuedPromptTracker();
 		tracker.observe([entry('a', 'Continue')], false);
 		tracker.observe([entry('a', 'Continue')], true);
-		expect(tracker.classify('Continue')).toEqual({ fromQueue: true, followsStop: false });
+		expect(tracker.classify({ content: 'Continue', commandId: 'client-a' })).toEqual({ fromQueue: true, followsStop: false });
 	});
 
 	it('follows a send made while Stop is pending', () => {
 		const tracker = createQueuedPromptTracker();
 		tracker.observe([entry('b', 'Continue')], true);
-		expect(tracker.classify('Continue')).toEqual({ fromQueue: true, followsStop: true });
+		expect(tracker.classify({ content: 'Continue', commandId: 'client-b' })).toEqual({ fromQueue: true, followsStop: true });
 	});
 
 	it('follows a resend of the same words after the earlier prompt was withdrawn', () => {
@@ -348,36 +348,71 @@ describe('queued prompt tracker', () => {
 		tracker.observe([entry('a', 'Continue')], false);
 		tracker.observe([], false);
 		tracker.observe([entry('b', 'Continue')], true);
-		expect(tracker.classify('Continue', 'client-b')).toEqual({ fromQueue: true, followsStop: true });
+		expect(tracker.classify({ content: 'Continue', commandId: 'client-b' })).toEqual({ fromQueue: true, followsStop: true });
 	});
 
 	it('treats a direct resend of a withdrawn prompt as new, by command id', () => {
 		const tracker = createQueuedPromptTracker();
 		tracker.observe([entry('a', 'Continue')], false);
 		tracker.observe([], false);
-		expect(tracker.classify('Continue', 'client-b')).toEqual({ fromQueue: false, followsStop: false });
-		expect(tracker.classify('Continue', 'client-a')).toEqual({ fromQueue: true, followsStop: false });
+		expect(tracker.classify({ content: 'Continue', commandId: 'client-b', turnId: 'turn-b' })).toEqual({ fromQueue: false, followsStop: false });
+		expect(tracker.classify({ content: 'Continue', commandId: 'client-a' })).toEqual({ fromQueue: true, followsStop: false });
 	});
 
-	it('falls back to text only when one side has no id', () => {
+	it('does not let a withdrawn entry with no client id claim a fresh send', () => {
 		const tracker = createQueuedPromptTracker();
-		tracker.observe([{ id: 'server-1', content: 'No id on the entry' }, entry('a', 'No id on the row')], false);
-		expect(tracker.classify('No id on the entry', 'client-z').fromQueue).toBe(true);
-		expect(tracker.classify('No id on the row').fromQueue).toBe(true);
+		tracker.observe([{ id: 'row-1', content: 'Continue' }], false);
+		tracker.observe([], true);
+		expect(tracker.classify({ content: 'Continue', commandId: 'client-b', turnId: 'turn-b' })).toEqual({ fromQueue: false, followsStop: false });
+		expect(tracker.classify({ content: 'Continue' })).toEqual({ fromQueue: false, followsStop: false });
+	});
+
+	it('matches an entry with no client id by the turn its row runs as', () => {
+		const tracker = createQueuedPromptTracker();
+		tracker.observe([{ id: 'row-1', content: 'Drained' }, { id: 'row-2', content: 'Absorbed' }], false);
+		tracker.observe([], false);
+		expect(tracker.classify({ content: 'Drained', turnId: 'row-1' }).fromQueue).toBe(true);
+		expect(tracker.classify({ content: 'Absorbed', turnId: 'live-turn', queuedTurnId: 'row-2' }).fromQueue).toBe(true);
+	});
+
+	it('uses text only for a row with no identity, and only against the listed queue', () => {
+		const tracker = createQueuedPromptTracker();
+		tracker.observe([{ id: 'row-1', content: 'Listed' }], false);
+		expect(tracker.classify({ content: 'Other' }).fromQueue).toBe(false);
+		expect(tracker.classify({ content: 'Listed' }).fromQueue).toBe(true);
+	});
+
+	it('does not count a retained delivered row again, or re-arm its follow', () => {
+		const tracker = createQueuedPromptTracker();
+		tracker.observe([{ id: 'row-1', content: 'Continue' }], true);
+		tracker.releaseStopFollow();
+		expect(tracker.classify({ content: 'Continue', turnId: 'row-1' })).toEqual({ fromQueue: true, followsStop: false });
+		// The queue keeps showing the delivered row while a cancel is settled.
+		tracker.observe([{ id: 'row-1', content: 'Continue' }], true);
+		expect(tracker.classify({ content: 'Continue', turnId: 'row-1' })).toEqual({ fromQueue: false, followsStop: false });
+		expect(tracker.classify({ content: 'Continue' })).toEqual({ fromQueue: false, followsStop: false });
+		expect(tracker.classify({ content: 'Continue', commandId: 'client-b' })).toEqual({ fromQueue: false, followsStop: false });
 	});
 
 	it('keeps one entry the same when the server snapshot replaces its local id', () => {
 		const tracker = createQueuedPromptTracker();
 		tracker.observe([{ id: 'local', clientMessageId: 'client-a', content: 'Continue' }], false);
 		tracker.observe([{ id: 'server', clientMessageId: 'client-a', content: 'Continue' }], true);
-		expect(tracker.classify('Continue').followsStop).toBe(false);
+		expect(tracker.classify({ content: 'Continue', turnId: 'server' })).toEqual({ fromQueue: true, followsStop: false });
 	});
 
 	it('drops the follow once the reader scrolls away, and forgets a landed row', () => {
 		const tracker = createQueuedPromptTracker();
 		tracker.observe([entry('b', 'Continue')], true);
 		tracker.releaseStopFollow();
-		expect(tracker.classify('Continue')).toEqual({ fromQueue: true, followsStop: false });
-		expect(tracker.classify('Continue')).toEqual({ fromQueue: false, followsStop: false });
+		expect(tracker.classify({ content: 'Continue', commandId: 'client-b' })).toEqual({ fromQueue: true, followsStop: false });
+		expect(tracker.classify({ content: 'Continue', commandId: 'client-b' })).toEqual({ fromQueue: false, followsStop: false });
+	});
+
+	it('forgets everything on reset', () => {
+		const tracker = createQueuedPromptTracker();
+		tracker.observe([entry('a', 'Continue')], false);
+		tracker.reset();
+		expect(tracker.classify({ content: 'Continue', commandId: 'client-a' })).toEqual({ fromQueue: false, followsStop: false });
 	});
 });

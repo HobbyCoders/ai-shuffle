@@ -303,42 +303,55 @@ export function resolveReadingAnchorDelta(anchor: ReadingAnchor, rowTop: number,
  * Which transcript rows came through the prompt queue, so a prompt queued long
  * ago does not pull a reader who has scrolled up (#863). A send made while Stop
  * is pending may also queue briefly behind the turn being cancelled; that one
- * asks to see its reply. Rows match entries by command id, so resending the
- * words of a withdrawn prompt is still a new send. Text is the fallback only
- * when one side has no id.
+ * asks to see its reply.
+ *
+ * Rows match entries by identity: the command id, or the queue row's id, which
+ * a drained row carries as its turn id (`queuedTurnId` when absorbed into a
+ * running turn). Resending a withdrawn prompt's words is therefore a new send.
+ * Only a row with no identity at all falls back to text, and only against what
+ * the queue still lists. Entries are kept once landed or withdrawn, so a
+ * retained or stale queue row cannot count again.
  */
 export function createQueuedPromptTracker() {
-	type Entry = { clientMessageId?: string; content: string; followOnLanding: boolean };
-	const entries = new Map<string, Entry>();
-	const take = (matches: (entry: Entry) => boolean): Entry | null => {
-		for (const [key, entry] of entries) {
-			if (matches(entry)) {
-				entries.delete(key);
-				return entry;
-			}
-		}
-		return null;
+	type Entry = {
+		ids: Set<string>;
+		clientMessageId?: string;
+		content: string;
+		followOnLanding: boolean;
+		listed: boolean;
+		landed: boolean;
 	};
+	let entries: Entry[] = [];
 	return {
 		reset() {
-			entries.clear();
+			entries = [];
 		},
 		/** `stopPending` is false for the first read of a session's existing queue. */
 		observe(queue: readonly { id: string; clientMessageId?: string; content: string }[], stopPending: boolean) {
+			for (const entry of entries) entry.listed = false;
 			for (const { id, clientMessageId, content } of queue) {
-				const key = clientMessageId ?? id;
-				if (!entries.has(key)) entries.set(key, { clientMessageId, content, followOnLanding: stopPending });
+				const known = entries.find((e) => e.ids.has(id) || (!!clientMessageId && e.clientMessageId === clientMessageId));
+				if (known) {
+					known.ids.add(id);
+					known.clientMessageId ??= clientMessageId;
+					known.listed = true;
+				} else {
+					entries.push({ ids: new Set([id]), clientMessageId, content, followOnLanding: stopPending, listed: true, landed: false });
+				}
 			}
 		},
 		/** The reader scrolled away: a pending send no longer overrides that. */
 		releaseStopFollow() {
-			for (const entry of entries.values()) entry.followOnLanding = false;
+			for (const entry of entries) entry.followOnLanding = false;
 		},
-		/** Call once per new user row; a matched entry is consumed. */
-		classify(content: string, commandId?: string) {
-			const landed = commandId
-				? take((e) => e.clientMessageId === commandId) ?? take((e) => !e.clientMessageId && e.content === content)
-				: take((e) => e.content === content);
+		/** Call once per new user row; a matched entry cannot match again. */
+		classify(row: { content?: string; commandId?: string; turnId?: string; queuedTurnId?: string }) {
+			const queueId = row.queuedTurnId ?? row.turnId;
+			const content = row.content ?? '';
+			const landed = entries.find((e) => !e.landed && (row.commandId || queueId
+				? (!!row.commandId && e.clientMessageId === row.commandId) || (!!queueId && e.ids.has(queueId))
+				: e.listed && e.content === content));
+			if (landed) landed.landed = true;
 			return { fromQueue: !!landed, followsStop: !!landed?.followOnLanding };
 		},
 	};

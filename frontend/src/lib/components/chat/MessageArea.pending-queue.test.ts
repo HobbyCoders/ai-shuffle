@@ -48,9 +48,9 @@ describe('MessageArea pending-queue wiring (#524)', () => {
 			return {
 				release: disengageAutoScroll,
 				update: (state) => { $activeSession = state; pre(); },
-				follows: (content, shouldAutoScroll = false, commandId = undefined) => {
+				follows: (content, shouldAutoScroll = false, commandId = undefined, turnId = content) => {
 					const hasNewMessage = true;
-					const newestMessage = { role: 'user', content, commandId };
+					const newestMessage = { role: 'user', content, commandId, turnId };
 					const isNavigableUserTurn = () => true;
 					${decision}
 					return newUserMessage;
@@ -77,9 +77,9 @@ describe('MessageArea pending-queue wiring (#524)', () => {
 		withdrawn('', null);
 		withdrawn('send-1', null);
 		withdrawn('', null);
-		expect(trackingState.follows('Continue', false, 'send-2')).toBe(true);
+		expect(trackingState.follows('Continue', false, 'send-2', 'turn-2')).toBe(true);
 		// The withdrawn entry itself, delivered after all, still does not pull the reader.
-		expect(trackingState.follows('Continue', false, 'send-1')).toBe(false);
+		expect(trackingState.follows('Continue', false, 'send-1', 'turn-1')).toBe(false);
 	});
 
 	it('uses one AgentMessage dispatch for queued and received peer rows', () => {
