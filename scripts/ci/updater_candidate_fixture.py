@@ -1,7 +1,8 @@
 """CI-only synthetic signed release, built by the real candidate-image updater.
 
-Only called by verify_container_postgres in disposable volumes. It never runs
-on a worker installation. A passing fixture is not a production update result.
+Mounted read-only by verify_container_postgres, never shipped in the image or
+source update. It runs only in disposable volumes, not a worker installation.
+A passing fixture is not a production update result.
 """
 from __future__ import annotations
 
@@ -124,5 +125,8 @@ def main():
 
 
 if __name__ == "__main__":
+    # Direct execution starts sys.path at the bind-mounted script's directory,
+    # not WORKDIR. Use the packaged image's app/docker modules explicitly; do
+    # not depend on PYTHONPATH (the supervisor drops it during source handover).
     sys.path.insert(0, "/app")
     main()

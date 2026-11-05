@@ -181,6 +181,12 @@ class Check:
         # Direct script execution puts scripts/, not the repo, on sys.path.
         sys.path.insert(0, str(ROOT))
         from scripts.source_archive import build
+        # CI tools are deliberately absent from the packaged image/source archive.
+        # Bind only this fixture, outside /app, for both preparation and every
+        # later exec. A container mount survives the supervisor's source execve.
+        fixture = "/updater-candidate-fixture.py"
+        fixture_mount = (f"type=bind,src={(ROOT / 'scripts/ci/updater_candidate_fixture.py').resolve(strict=True)},"
+                         f"dst={fixture},readonly")
         archive = self.artifacts / "updater-source.zip"
         revision = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, check=True,
                                   capture_output=True, text=True).stdout.strip()
@@ -191,13 +197,17 @@ class Check:
         identity = self.system_id(initial)
         self.sql(initial, "CREATE TABLE updater_lifecycle_check (value text); INSERT INTO updater_lifecycle_check VALUES ('retained');")
         self.stop(initial)
-        fixture = "/app/scripts/ci/updater_candidate_fixture.py"
         # A separate offline preparation process: the supervisor is stopped, so
         # no two processes can race state.json or own the managed database.
+        # Track it even if docker run times out; cleanup must stop its builds
+        # before removing the disposable volume and must retain its logs.
+        preparation = self.prefix + "-c" + str(len(self.containers))
+        self.containers.append(preparation)
         try:
-            self.docker("run", "--rm", "--network", "bridge", "--user", "99:100", "--entrypoint", "python",
+            self.docker("run", "--name", preparation, "--network", "bridge", "--user", "99:100", "--entrypoint", "python",
                         "-e", "DATA_DIR=/data", "-e", "AI_SHUFFLE_UPDATER_FIXTURE=1",
                         "--mount", f"type=volume,src={volume},dst=/data",
+                        "--mount", fixture_mount,
                         "--mount", f"type=bind,src={archive.resolve()},dst=/fixture-source.zip,readonly",
                         self.image, fixture, "prepare", "/fixture-source.zip", timeout=900)
         finally:
@@ -206,7 +216,8 @@ class Check:
         public = self.artifacts / "updater-ci-public.pem"
         self.docker("cp", initial + ":/data/application-updates/ci-public.pem", public)
         app = self.launch(volume, env={"AI_SHUFFLE_UPDATER_FIXTURE": "1"},
-                          mounts=[f"type=bind,src={public.resolve()},dst=/app/docker/application-update-key.pem,readonly"])
+                          mounts=[fixture_mount,
+                                  f"type=bind,src={public.resolve()},dst=/app/docker/application-update-key.pem,readonly"])
         self.ready(app)
         self.docker("exec", "--user", "99:100", app, "python", fixture, "install")
         self.docker("exec", "--user", "99:100", app, "python", fixture, "installed", timeout=260)
