@@ -8,6 +8,9 @@
 // Cases:
 //   bash    [script:tool-bash]: one Bash call (echo), then the answer
 //   multi   [script:tool-multi]: two parallel calls, one more, then the answer
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { fakeAiTag, runJourney } from './runner.mjs';
 import { PROJECT, api, chatIdByToken, countUserRows, expect, openNewChat, pickAccess, typeAndSend, uniq, waitTurnSettled, watchRowFlicker } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
@@ -85,6 +88,38 @@ function toolCase(name) {
 	};
 }
 
+// Observe the producing checkout path, not the fake CLI's printed Bash result.
+function observeTaskCheckouts(status) {
+	const root = join(status.seed.projects['dev-sandbox'], '.fluid', 'worktrees');
+	const seen = new Map();
+	const sample = () => {
+		for (const [path, entry] of seen) if (!existsSync(join(path, '.git'))) entry.present = false;
+		for (const name of existsSync(root) ? readdirSync(root) : []) {
+			if (!name.startsWith('chore-task-')) continue;
+			const path = join(root, name);
+			if (!existsSync(join(path, '.git')) || seen.get(path)?.present) continue;
+			const branch = spawnSync('git', ['branch', '--show-current'], { cwd: path, encoding: 'utf8', timeout: 1000 });
+			const head = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: path, encoding: 'utf8', timeout: 1000 });
+			if (branch.status !== 0 || head.status !== 0) continue; // Git is still materializing it.
+			const entry = seen.get(path) || { generations: [] };
+			entry.generations.push({ branch: branch.stdout.trim(), head: head.stdout.trim() });
+			entry.present = true;
+			seen.set(path, entry);
+		}
+	};
+	const timer = setInterval(sample, 25);
+	return { root, seen, sample, stop: () => clearInterval(timer) };
+}
+
+async function waitForCheckout(predicate, message) {
+	const deadline = Date.now() + 30_000;
+	while (Date.now() < deadline) {
+		if (predicate()) return;
+		await new Promise((resolve) => setTimeout(resolve, 50));
+	}
+	throw new Error(`checkout observation timed out: ${message}`);
+}
+
 const workerFollowup = {
 	name: 'worker-followup',
 	allow: [{
@@ -97,35 +132,55 @@ const workerFollowup = {
 		const agents = await api(ctx.page, 'GET', '/agents');
 		expect(agents.some((agent) => agent.id === 'dev-claude-code'), 'the seeded fake CLI helper is available');
 	},
-	async act({ page, mark, variant, log }) {
+	async act({ page, mark, variant, log, status }) {
 		const fetchRefusals = [];
 		page.on('response', (response) => {
 			if (response.status() === 409 && response.url().includes('/git/fetch'))
 				fetchRefusals.push(response.json());
 		});
-		const token = `followup-${uniq()}`;
-		await mark('start an untouched worker then send its follow-up');
-		await typeAndSend(page, `${token} ${fakeAiTag(variant, 'tool-worker-followup')}`);
-		await waitTurnSettled(page, { text: 'Follow-up dispatched.', messagesAtLeast: 2 });
-		const id = await chatIdByToken(page, token);
-		const session = await api(page, 'GET', `/sessions/${id}`);
-		const messages = JSON.stringify(session.messages);
-		expect(messages.includes('Resume queued for script-tool-bash'), `the real SendMessage admits a continuation: ${messages.slice(-6000)}`);
-		expect(!messages.includes('Could not resume'), 'the follow-up was not refused');
-		const result = session.messages.find((m) => m.type === 'subagent' && m.content);
-		expect(!!result, 'the real Task has a persisted worker receipt');
-		const worker = JSON.parse(result.content);
-		await page.waitForFunction(async (id) => {
-			const response = await fetch(`/api/v1/sessions/${id}`);
-			const child = await response.json();
-			return child.messages.filter((m) => m.tool_name === 'Bash' && m.toolStatus === 'completed').length >= 2;
-		}, worker.worker_session_id, { timeout: 30_000, polling: 500 });
-		log('real Task checkout and continuation used the seeded fake CLI helper; both turns emitted scripted Bash results (not real shell execution)');
-		for (const refusal of await Promise.all(fetchRefusals))
-			expect(refusal.detail === 'A session using this worktree or branch is active. Stop it or wait before changing Git state.', 'only the active Git target safety refusal is expected');
+		const observation = observeTaskCheckouts(status);
+		try {
+			const token = `followup-${uniq()}`;
+			await mark('start an untouched fake CLI Task worker');
+			await typeAndSend(page, `${token}\nUse Sonnet for the helper.\n${fakeAiTag(variant, 'tool-worker-followup')}`);
+			await waitTurnSettled(page, { text: 'Worker task complete.', messagesAtLeast: 2 });
+			const id = await chatIdByToken(page, token);
+			const session = await api(page, 'GET', `/sessions/${id}`);
+			const result = session.messages.find((m) => m.type === 'subagent' && m.content);
+			expect(!!result, 'the real Task has a persisted worker receipt');
+			const worker = JSON.parse(result.content);
+			const branch = `chore/task-${worker.worker_session_id}`;
+			const path = join(observation.root, branch.replaceAll('/', '-'));
+			await mark('observe real Git reclamation before sending the continuation');
+			await waitForCheckout(() => !existsSync(path), 'first checkout was reclaimed');
+			observation.sample();
+			expect(observation.seen.get(path)?.generations.length === 1, 'real filesystem and Git witnessed initial Task checkout');
+			expect(spawnSync('git', ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`], { cwd: status.seed.projects['dev-sandbox'] }).status === 1, 'untouched worker branch was reclaimed');
+			await typeAndSend(page, fakeAiTag(variant, 'tool-worker-resume'));
+			await waitTurnSettled(page, { text: 'Follow-up dispatched.', messagesAtLeast: 4 });
+			const resumed = await api(page, 'GET', `/sessions/${id}`);
+			const messages = JSON.stringify(resumed.messages);
+			expect(messages.includes('Resume queued for script-tool-bash'), `the real SendMessage admits a continuation: ${messages.slice(-6000)}`);
+			expect(!messages.includes('Could not resume'), 'the follow-up was not refused');
+			await page.waitForFunction(async (id) => {
+				const response = await fetch(`/api/v1/sessions/${id}`);
+				const child = await response.json();
+				return child.messages.filter((m) => m.tool_name === 'Bash' && m.toolStatus === 'completed').length >= 2;
+			}, worker.worker_session_id, { timeout: 30_000, polling: 500 });
+			observation.sample();
+			const generations = observation.seen.get(path)?.generations || [];
+			expect(generations.length === 2 && generations.every((g) => g.branch === branch && g.head === generations[0].head), 'real Git restored the same Task branch and commit');
+			const starts = readFileSync(join(status.scratch_dir, 'fake-claude.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)
+				.filter((row) => row.kind === 'start' && row.cwd === path && row.argv.includes('-p'));
+			expect(starts.length >= 2, 'both actual CLI launches recorded the dedicated execution cwd');
+			log(`real Git creation/reclamation/restoration and two CLI process cwd receipts: ${branch}; Bash output is scripted, not shell execution`);
+			for (const refusal of await Promise.all(fetchRefusals))
+				expect(refusal.detail === 'A session using this worktree or branch is active. Stop it or wait before changing Git state.', 'only the active Git target safety refusal is expected');
+		} finally {
+			observation.stop();
+		}
 	}
 };
-
 const nativeModel = {
 	name: 'native-model',
 	async setup(ctx) {

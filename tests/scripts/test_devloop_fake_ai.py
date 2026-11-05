@@ -334,6 +334,10 @@ def test_worker_followup_uses_an_existing_seeded_cli_helper() -> None:
     assert task["name"] == "Task"
     assert task["input"]["agent"] == CLAUDE_AGENT_ID
     assert task["input"]["mode"] == "sync"
+    assert task["input"]["model"] == "sonnet"
+    assert scenario["steps"][-1]["text"] == "Worker task complete."
+    resume = json.loads((SCENARIOS_DIR / "tool-worker-resume.json").read_text())
+    assert resume["steps"][0]["tool_calls"][0]["name"] == "SendMessage"
     assert "scripted" in scenario["description"]
 
 
