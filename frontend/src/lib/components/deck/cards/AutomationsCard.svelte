@@ -251,6 +251,13 @@
 		testResult = null;
 	}
 
+	// The open form's identity for the detail's scroll reset. A new automation
+	// that stays on its form after the first save (e.g. a failed follow-up
+	// write) is still the same form, so it keeps the reader's place.
+	let formSession = $state(0);
+	const detailKey = $derived(currentView === 'create' || currentView === 'edit'
+		? `form:${formSession}` : `${currentView}:${selectedAutomation?.id ?? ''}`);
+
 	function backToList() {
 		currentView = 'list';
 		resetForm();
@@ -258,6 +265,7 @@
 	}
 
 	function openCreate() {
+		formSession++;
 		selectedAutomation = null;
 		error = '';
 		resetForm();
@@ -265,6 +273,7 @@
 	}
 
 	function openEdit(automation: Automation) {
+		formSession++;
 		error = '';
 		selectedAutomation = automation;
 		formName = automation.name;
@@ -627,7 +636,7 @@
 		else { currentView = 'list'; selectedAutomation = null; remoteChange = 'This item was deleted elsewhere.'; }
 	});
 </script>
-<ViewShell label="Automations" detailOpen={currentView !== 'list'} detailKey={`${currentView}:${selectedAutomation?.id ?? ''}`} onBack={backToList}>
+<ViewShell label="Automations" detailOpen={currentView !== 'list'} {detailKey} onBack={backToList}>
  {#snippet panel()}
   <AutomationsStudio {automations} {pendingApprovals} {profiles} {loading} error={currentView === 'list' ? error : ''} {triggeringId}
    selectedId={currentView === 'detail' || currentView === 'edit' ? selectedAutomation?.id : null}

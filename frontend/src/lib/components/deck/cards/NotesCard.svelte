@@ -150,6 +150,10 @@
 	let saveTimeout: ReturnType<typeof setTimeout> | null = null;
 	let hasUnsavedChanges = $state(false);
 	let editorGeneration = 0;
+	// What the detail shows, for its scroll reset: it changes only when a note
+	// is opened, started or closed. A new note's first save gives it an id but
+	// is still the same editor, so the writer keeps their place.
+	let editorSession = $state(0);
 	let editRevision = 0;
 	let navigationRequest = 0;
 	let savePromise: Promise<void> | null = null;
@@ -348,6 +352,7 @@
 		const apply = () => {
 			cancelAutosave();
 			editorGeneration++;
+			editorSession++;
 			hasUnsavedChanges = false;
 			uploading = false;
 			persistDraft();
@@ -850,7 +855,7 @@
 
 <svelte:window onclick={(event) => { if (!(event.target as Element)?.closest?.('.note-more')) closeMore(); }} onkeydown={(event) => { if (moreOpen && event.key === 'Escape') { event.preventDefault(); closeMore(true); } }} />
 
-<ViewShell label="Notes" detailOpen={!!(editingNote || isCreatingNew)} detailKey={isCreatingNew ? 'new' : editingNote?.id} onBack={closeEditor}>
+<ViewShell label="Notes" detailOpen={!!(editingNote || isCreatingNew)} detailKey={editorSession} onBack={closeEditor}>
 	{#snippet panel()}
 		<ViewPanel title="Notes" count={loading ? undefined : notes.length} {loading} listLabel="Notes list">
 			{#snippet actions()}<PanelIconButton label="New note" icon={Plus} onclick={startNewNote} />{/snippet}

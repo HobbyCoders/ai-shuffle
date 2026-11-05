@@ -111,6 +111,30 @@ describe('Notes draft persistence', () => {
 		expect(createNote).not.toHaveBeenCalled();
 	});
 
+	it("keeps the writer's place when a new note's first save gives it an id", async () => {
+		const scrollTo = vi.fn();
+		const original = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollTo');
+		Object.defineProperty(Element.prototype, 'scrollTo', { value: scrollTo, configurable: true, writable: true });
+		try {
+			render(NotesCard);
+			await fireEvent.click(newNote());
+			await tick();
+			const opened = scrollTo.mock.calls.length;
+			await fireEvent.input(title(), { target: { value: 'Draft' } });
+			await fireEvent.input(body(), { target: { value: 'a long body' } });
+			await waitFor(() => expect(createNote).toHaveBeenCalledTimes(1), { timeout: 2500 });
+			await flush();
+			expect(scrollTo.mock.calls.length).toBe(opened);
+			// Opening another note is a new detail, so it does start at the top.
+			await fireEvent.click(await screen.findByRole('button', { name: /Note A content A/ }));
+			await waitFor(() => expect(title().value).toBe('Note A'));
+			expect(scrollTo.mock.calls.length).toBeGreaterThan(opened);
+		} finally {
+			if (original) Object.defineProperty(Element.prototype, 'scrollTo', original);
+			else delete (Element.prototype as { scrollTo?: unknown }).scrollTo;
+		}
+	});
+
 	it('flushes A before switching to B instead of letting a timer save B', async () => {
 		render(NotesCard);
 		await fireEvent.click(await screen.findByRole('button', { name: /Note A content A/ }));
