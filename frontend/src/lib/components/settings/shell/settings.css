@@ -356,6 +356,17 @@
 .settings-shell .settings-viewport :is(.st-pscroll, .st-lscroll, .st-dpane) { overflow: visible; }
 .settings-shell .settings-viewport .st-coll { min-height: 100%; }
 .settings-shell .settings-viewport .st-lcol { min-height: 0; }
+/* A split collection shares that outer scroller with its list, so a row picked
+   far down a long list must not open a detail scrolled out of view above it:
+   the open detail stays pinned while the list scrolls beneath it. */
+.settings-shell .settings-viewport .st-coll:not([data-replace]) > .st-dpane {
+	position: sticky;
+	top: 0;
+	align-self: start;
+	max-height: 100dvh;
+	overflow-y: auto;
+	overscroll-behavior: contain;
+}
 
 /* Scrollbars in the scroll panes */
 .settings-shell .st-scroll {

@@ -17,14 +17,14 @@
 	let visible = $state(false);
 	onMount(() => {
 		const parent = row!.parentElement!;
-		const query = window.matchMedia('(max-width: 600px)');
-		const measure = () => { phone = query.matches; visible = parent.getBoundingClientRect().height > 0 && !parent.closest('[hidden], [inert]'); };
-		const ro = new ResizeObserver(measure); ro.observe(parent);
+		const query = typeof window.matchMedia === 'function' ? window.matchMedia('(max-width: 600px)') : null;
+		const measure = () => { phone = !!query?.matches; visible = parent.getBoundingClientRect().height > 0 && !parent.closest('[hidden], [inert]'); };
+		const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure); ro?.observe(parent);
 		const pane = parent.closest('[data-view-shell]');
 		const mo = new MutationObserver(measure);
 		if (pane) mo.observe(pane, { attributes: true, attributeFilter: ['data-pane', 'data-stacked'] });
-		query.addEventListener('change', measure); measure();
-		return () => { ro.disconnect(); mo.disconnect(); query.removeEventListener('change', measure); };
+		query?.addEventListener('change', measure); measure();
+		return () => { ro?.disconnect(); mo.disconnect(); query?.removeEventListener('change', measure); };
 	});
 	$effect(() => {
 		// Recheck CSS-swapped Settings panes as well as ViewShell's hidden panes.

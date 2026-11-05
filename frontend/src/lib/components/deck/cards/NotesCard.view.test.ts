@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { tick } from 'svelte';
 import NotesCard from './NotesCard.svelte';
@@ -71,6 +71,10 @@ it('shows a retryable loading failure and the shared empty state after recovery'
 	expect(screen.getByText('Loading notes…')).toBeTruthy();
 	await screen.findByText('Notes unavailable');
 	await fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
-	await screen.findByText('No notes yet');
-	expect(screen.getByRole('button', { name: 'Create your first note' })).toBeTruthy();
+	// The list and the empty detail pane both name the empty state.
+	expect((await screen.findAllByText('No notes yet')).length).toBeGreaterThan(0);
+	// The list keeps a one-line empty state; the start action lives in the main pane.
+	const details = within(screen.getByRole('region', { name: 'Details' }));
+	expect(details.getByText('No notes yet')).toBeTruthy();
+	expect(details.getByRole('button', { name: 'New note' })).toBeTruthy();
 });

@@ -106,10 +106,11 @@
 			node.style.height = 'auto';
 			node.style.height = `${node.scrollHeight}px`;
 		};
-		const observer = new ResizeObserver(fit);
-		observer.observe(node);
+		// jsdom test renders have no ResizeObserver; every supported browser does.
+		const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(fit);
+		observer?.observe(node);
 		fit();
-		return { update: fit, destroy: () => observer.disconnect() };
+		return { update: fit, destroy: () => observer?.disconnect() };
 	}
 
 	function inputTitle(event: Event & { currentTarget: HTMLTextAreaElement }) {

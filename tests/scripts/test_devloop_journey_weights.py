@@ -28,10 +28,10 @@ def test_runtime_partition_is_deterministic_and_exact(shards):
     assert len(buckets) == shards
 
 
-def test_checked_in_eight_shard_plan_leaves_retry_headroom():
+def test_checked_in_nine_shard_plan_leaves_retry_headroom():
     weights = ci.estimated_seconds()
-    buckets = ci.plan(8)
-    assert len(buckets) == 8
+    buckets = ci.plan(9)
+    assert len(buckets) == 9
     assert sorted(name for bucket in buckets for name in bucket) == sorted(weights)
     # Reserve 30 seconds for instance startup (7-12s in hosted run 42035121047):
     # first pass by ~19 minutes, then the full 180s retry before the 22m cutoff.

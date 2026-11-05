@@ -129,7 +129,10 @@ describe('Files worker picker', () => {
 		const remoteCalls = calls.filter((c) => c.url.pathname.includes('/workers/'));
 		expect(remoteCalls.length).toBeGreaterThan(0);
 		expect(remoteCalls.every((c) => c.url.pathname.startsWith('/api/v1/workspace/workers/dev_pc/files'))).toBe(true);
-		expect(screen.getByRole('navigation', { name: 'Breadcrumb' }).parentElement?.textContent).toContain('DesktopWorker');
+		// At the worker's root the header names the folder and the worker chip names
+		// the worker; the folder breadcrumb only appears inside a subfolder.
+		expect(chip().getAttribute('aria-label')).toContain('DesktopWorker');
+		expect(screen.queryByRole('navigation', { name: 'Breadcrumb' })).toBeNull();
 		expect(screen.queryByRole('button', { name: /Open terminal/ })).toBeNull();
 	});
 

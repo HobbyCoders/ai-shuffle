@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import { files, type FileItem } from '$lib/stores/files.svelte';
 import FilesStudio from './FilesStudio.svelte';
+import { platform } from '$lib/stores/platform.svelte';
 
 function item(name: string, type: 'file' | 'directory' = 'file', dir = ''): FileItem {
 	return {
@@ -259,5 +260,19 @@ describe('FilesStudio operations', () => {
 		expect((body.get('file') as File).name).toBe('hello.txt');
 		expect(body.get('path')).toBe('');
 		expect(screen.queryByText('Drop files to upload')).toBeNull();
+	});
+});
+
+describe('FilesStudio native phone app', () => {
+	afterEach(() => platform.set('desktop'));
+
+	it('keeps Upload and New folder in landscape, where the phone header hides desktop actions', async () => {
+		// matchMedia(max-width: 600px) stays false: a phone turned sideways.
+		platform.set('mobile');
+		render(FilesStudio);
+		// The phone stacks the folder list first; open the workspace folder.
+		await fireEvent.click(await screen.findByRole('button', { name: 'Workspace' }));
+		expect((await screen.findAllByRole('button', { name: /New folder/ })).length).toBeGreaterThan(0);
+		expect(screen.getAllByRole('button', { name: /Upload/ }).length).toBeGreaterThan(0);
 	});
 });

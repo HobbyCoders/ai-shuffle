@@ -156,7 +156,8 @@ await runJourney({
   name: 'pull-request-fixed-metadata-lines',
   async setup({page,status,variant}) {
    const row={repo:'example/workspace',number:142,title:'Bring every destination onto the shared panel',url:'https://github.com/example/workspace/pull/142',author:'preview',head_branch:'feat/unified-workspace',base_branch:'main',state:'open',review:'approved',checks:'passing',updated_at:new Date().toISOString(),projects:[{id:'dev-sandbox',name:'Dev sandbox'}]};
-   await page.route('**/api/v1/github/inbox?*',r=>r.fulfill({json:{items:[row,{...row,number:144,title:'Keep phone navigation one step back',head_branch:'fix/a-longer-branch-name-to-check-clean-desktop-wrapping'}],repos:[row.repo],skipped:[]}}));
+   // The service worker forwards /api/ itself, so only a context route sees it.
+   await page.context().route(url=>url.pathname==='/api/v1/github/inbox',r=>r.fulfill({json:{items:[row,{...row,number:144,title:'Keep phone navigation one step back',head_branch:'fix/a-longer-branch-name-to-check-clean-desktop-wrapping'}],repos:[row.repo],skipped:[]}}));
    await gotoApp(page,status,native&&variant.viewport==='phone'?'/mobile/':'/');
    const workspace=page.getByRole('navigation',{name:'Workspace',exact:true});
    if(!await workspace.isVisible())await page.getByRole('button',{name:/^(Open menu|Show sidebar|Chats)( \(|$)/}).first().click();

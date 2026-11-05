@@ -34,11 +34,13 @@
 	let element: HTMLElement | undefined = $state();
 	let visible = $state(false);
 	onMount(() => {
-		const query = window.matchMedia('(max-width: 600px)');
-		const update = () => { phone = query.matches; visible = !!element?.getBoundingClientRect().width && !!element?.getBoundingClientRect().height; };
-		const observer = new ResizeObserver(update); observer.observe(element!);
-		update(); query.addEventListener('change', update);
-		return () => { observer.disconnect(); query.removeEventListener('change', update); };
+		const query = typeof window.matchMedia === 'function' ? window.matchMedia('(max-width: 600px)') : null;
+		const update = () => { phone = !!query?.matches; visible = !!element?.getBoundingClientRect().width && !!element?.getBoundingClientRect().height; };
+		// Every supported browser has ResizeObserver; jsdom test renders do not.
+		const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(update);
+		observer?.observe(element!);
+		update(); query?.addEventListener('change', update);
+		return () => { observer?.disconnect(); query?.removeEventListener('change', update); };
 	});
 	$effect(() => {
 		if (feature?.active === false) return;
@@ -69,7 +71,7 @@
 	{#if search}<div class="panel-search">{@render search()}</div>{/if}
 	{#if filters}<div class="panel-filters">{@render filters()}</div>{/if}
 	<!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-	<div onclick={(event) => { if (layout.current.sidebarOverlay && !platform.isMobile && window.innerWidth >= 768 && (event.target as Element).closest('button:not([aria-expanded]), a')) layout.setSidebarCollapsed(true); }} class="panel-body st-scroll" data-settings-list role="region" aria-label={listLabel ?? `${title} list`}>
+	<div onclick={(event) => { if (layout.current?.sidebarOverlay && !platform.isMobile && window.innerWidth >= 768 && (event.target as Element).closest('button:not([aria-expanded]), a')) layout.setSidebarCollapsed(true); }} class="panel-body st-scroll" data-settings-list role="region" aria-label={listLabel ?? `${title} list`}>
 		<ListEmptyScope>{@render children?.()}</ListEmptyScope>
 	</div>
 	{#if footer}<footer class="panel-footer">{@render footer()}</footer>{/if}

@@ -23,9 +23,13 @@
 	import RowActionMenu from '$lib/components/ui/RowActionMenu.svelte';
 	import FilesTerminalDrawer from './FilesTerminalDrawer.svelte';
 	import { TerminalSquare } from 'lucide-svelte';
+	import { platform } from '$lib/stores/platform.svelte';
 	let terminalDrawer: ReturnType<typeof FilesTerminalDrawer>;
 	let terminalBusy = $state(false);
-	let phone = $state(false);
+	let narrow = $state(false);
+	// The native phone app keeps its phone header in landscape too, where the
+	// desktop header actions are hidden, so it must keep the inline actions.
+	const phone = $derived(narrow || platform.isMobile);
 	const feature = getContext<FeaturePanelContext | undefined>(FEATURE_PANEL_CONTEXT);
 	let detailOpen = $state(false);
 	let preview = $state<FileItem | null>(null);
@@ -128,13 +132,13 @@
 	}
 
 	onMount(() => {
-		const query = window.matchMedia('(max-width: 600px)');
-		const update = () => { phone = query.matches; };
+		const query = typeof window.matchMedia === 'function' ? window.matchMedia('(max-width: 600px)') : null;
+		const update = () => { narrow = !!query?.matches; };
 		update();
-		query.addEventListener('change', update);
+		query?.addEventListener('change', update);
 		files.loadFiles();
 		loadWorkers();
-		return () => query.removeEventListener('change', update);
+		return () => query?.removeEventListener('change', update);
 	});
 
 	// Keep the tree's root list in sync with the worker and the hidden-files

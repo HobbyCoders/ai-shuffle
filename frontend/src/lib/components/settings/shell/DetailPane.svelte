@@ -120,10 +120,10 @@
 	const contexts = getAllContexts();
 	let phone = $state(false);
 	onMount(() => {
-		const query = window.matchMedia('(max-width: 600px)');
-		const update = () => { phone = query.matches; }; update();
-		query.addEventListener('change', update);
-		return () => query.removeEventListener('change', update);
+		const query = typeof window.matchMedia === 'function' ? window.matchMedia('(max-width: 600px)') : null;
+		const update = () => { phone = !!query?.matches; }; update();
+		query?.addEventListener('change', update);
+		return () => query?.removeEventListener('change', update);
 	});
 	setInDetail();
 	const access = getSettingsAccess();

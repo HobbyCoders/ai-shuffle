@@ -38,6 +38,8 @@ beforeEach(() => {
 	mocks.put.mockImplementation(async (_: string, body: { keep_installed: boolean }) => current = { ...current, ...body });
 });
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); });
+// Manage mode holds the installed layout while it checks; wait for the real status.
+const loaded = () => waitFor(() => expect(document.querySelector('[aria-busy="true"]')).toBeNull());
 
 it('installs, polls, refreshes auth, and focuses the sign-in heading without a reload', async () => {
 	render(ClaudeCliPanel, { isAdmin: true, variant: 'setup' });
@@ -88,16 +90,26 @@ it('resumes a job on mount and stops polling on destroy', async () => {
 	again.unmount(); const calls = mocks.get.mock.calls.length;
 	await vi.advanceTimersByTimeAsync(6000); expect(mocks.get.mock.calls.length).toBe(calls);
 });
+it('holds the installed layout while it checks, so later sections do not jump', async () => {
+	let answer!: (value: ClaudeCliInstallation) => void;
+	mocks.get.mockImplementationOnce(() => new Promise((resolve) => { answer = resolve; }));
+	render(ClaudeCliInstall, { manage: true });
+	expect(screen.getByText('Claude Code CLI')).toBeTruthy();
+	expect(screen.getByRole('switch', { name: 'Keep Claude Code installed' }).hasAttribute('disabled')).toBe(true);
+	expect((screen.getByRole('button', { name: 'Check for update' }) as HTMLButtonElement).disabled).toBe(true);
+	answer({ ...base, installed: true, version: '2.1.285' }); await loaded();
+	expect(screen.getByText('2.1.285')).toBeTruthy();
+});
 it('sends the keep-installed PUT and reflects the response', async () => {
 	current = { ...base, installed: true, version: '2.1.285', path: '/home/appuser/.local/bin/claude' };
-	render(ClaudeCliInstall, { manage: true });
+	render(ClaudeCliInstall, { manage: true }); await loaded();
 	const control = await screen.findByRole('switch', { name: 'Keep Claude Code installed' });
 	await fireEvent.click(control);
 	expect(mocks.put).toHaveBeenCalledWith('/settings/claude-cli', { keep_installed: true });
 	await waitFor(() => expect(control.getAttribute('aria-checked')).toBe('true'));
 });
 it('hides Remove for an unowned installation', async () => {
-	current = { ...base, installed: true, can_remove: false }; render(ClaudeCliInstall, { manage: true });
+	current = { ...base, installed: true, can_remove: false }; render(ClaudeCliInstall, { manage: true }); await loaded();
 	await screen.findByRole('button', { name: 'Check for update' });
 	expect(screen.queryByRole('button', { name: 'Remove' })).toBeNull();
 });
@@ -111,7 +123,7 @@ it('requires confirmation before removing and preserves the sign-in warning', as
 	expect(mocks.post).toHaveBeenCalledWith('/settings/claude-cli/remove', {});
 });
 it('shows the update result from the worker', async () => {
-	current = { ...base, installed: true }; render(ClaudeCliInstall, { manage: true });
+	current = { ...base, installed: true }; render(ClaudeCliInstall, { manage: true }); await loaded();
 	const button = await screen.findByRole('button', { name: 'Check for update' });
 	current = { ...current, job: job('succeeded', 'update') }; await fireEvent.click(button);
 	expect(mocks.post).toHaveBeenCalledWith('/settings/claude-cli/update', {});

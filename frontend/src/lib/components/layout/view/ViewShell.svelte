@@ -68,7 +68,7 @@ Panel contexts and tokens travel automatically. Off-screen feature pages never c
 	const token = Symbol('view-panel');
 	const historyKey = $props.id();
 	let width = $state(0);
-	const docked = $derived(viewPanel.hostMounted && !platform.isMobile && (!layout.current.sidebarOverlay || width >= 768));
+	const docked = $derived(viewPanel.hostMounted && !platform.isMobile && (!layout.current?.sidebarOverlay || width >= 768));
 	onMount(() => {
 		const measure = () => { width = window.innerWidth; };
 		measure();
