@@ -427,6 +427,152 @@ const cases = [{
 	}
 })) : [])];
 
+// A fresh send can be queued without a new transcript row. Keep this phone-only
+// producing regression separate from the original error/handoff/Stop actions.
+// Exercise the leading-row boundary with real CLI history and retain the same
+// connected current-user text range across the error's mounted-window rebase.
+cases.push({
+	name: 'error-rebase-keeps-visible-prompt', viewports: ['phone'], throttles: ['slow'],
+	async setup(ctx) {
+		await openClaude(ctx, { history: true });
+		const count = Number(await ctx.page.locator('[data-ui-state="chat"]').getAttribute('data-ui-messages'));
+		await typeAndSend(ctx.page, `ninth history ${uniq()} [script:long tps=2000]`);
+		await waitTurnSettled(ctx.page, { messagesAtLeast: count + 2, hold: 200 });
+	},
+	async run(ctx) {
+		const { page, variant, trace } = ctx;
+		let evicted = false;
+		for (let turn = 0; turn < 3; turn++) {
+			const token = `rebase-${uniq()}`;
+			await page.evaluate(token => {
+				const pane = document.querySelector('.msg-scroll');
+				const view = document.querySelector('[data-ui-state="chat"]');
+				const p = window.__errorRebaseProbe = { started: performance.now(), frames: [], shifts: [], tracked: null, errorAt: null, running: true };
+				const sample = reason => {
+					if (!p.tracked) {
+						const row = [...pane.querySelectorAll('[data-user-turn-id]')].find(row => row.textContent.includes(token));
+						if (row) {
+							const walker = document.createTreeWalker(row, NodeFilter.SHOW_TEXT);
+							let node;
+							while ((node = walker.nextNode())) if (node.textContent.includes(token)) {
+								const range = document.createRange(); range.selectNodeContents(node);
+								p.tracked = { row, node, range }; break;
+							}
+						}
+					}
+					const t = performance.now() - p.started, tracked = p.tracked;
+					const f = { t, reason, top: pane.scrollTop, height: pane.scrollHeight, viewport: pane.getBoundingClientRect().toJSON(),
+						firstIndex: Number(pane.querySelector('[data-transcript-index]')?.dataset.transcriptIndex ?? -1),
+						user: tracked ? { connected: tracked.node.isConnected && tracked.row.isConnected,
+							key: tracked.row.dataset.transcriptKey ?? tracked.row.closest('[data-transcript-key]')?.dataset.transcriptKey,
+							text: tracked.range.toString(), rect: tracked.range.getBoundingClientRect().toJSON(), rowRect: tracked.row.getBoundingClientRect().toJSON() } : null };
+					p.frames.push(f);
+					if (tracked && document.querySelector('.chat-error-banner') && view.dataset.uiStreaming === 'false' && p.errorAt === null) p.errorAt = t;
+					return f;
+				};
+				p.observer = new PerformanceObserver(list => {
+					for (const entry of list.getEntries()) p.shifts.push({ t: entry.startTime - p.started, value: entry.value, recent: entry.hadRecentInput,
+						sources: (entry.sources ?? []).map(s => ({ key: s.node?.closest?.('[data-transcript-key]')?.dataset.transcriptKey,
+							previous: s.previousRect.toJSON(), current: s.currentRect.toJSON() })), frame: sample('native-layout-shift') });
+				});
+				p.observer.observe({ type: 'layout-shift' });
+				const frame = () => { if (!p.running) return; sample('raf'); p.raf = requestAnimationFrame(frame); };
+				p.raf = requestAnimationFrame(frame);
+			}, token);
+			await typeAndSend(page, `${token} [script:error-500 latency_ms=4500]`);
+			await waitChat(page, { streaming: 'true' });
+			await page.waitForFunction(() => {
+				const p = window.__errorRebaseProbe;
+				return p.errorAt !== null && performance.now() - p.started >= p.errorAt + 3300;
+			});
+			const observed = await page.evaluate(() => {
+				const p = window.__errorRebaseProbe; p.running = false; p.observer.disconnect(); cancelAnimationFrame(p.raf);
+				return { frames: p.frames, shifts: p.shifts, errorAt: p.errorAt };
+			});
+			if (process.env.JOURNEY_OUT) writeFileSync(`${process.env.JOURNEY_OUT}/error-rebase-${turn}.json`, JSON.stringify(observed));
+			const before = observed.frames.filter(f => f.user?.connected && f.t < observed.errorAt).at(-1);
+			expect(before?.user.rect.top > before?.viewport.top && before?.user.rect.bottom < before?.viewport.bottom, 'the current user text was actually visible before the error');
+			const after = observed.frames.filter(f => f.t >= observed.errorAt);
+			expect(after.length >= 2, 'observe the error through multiple painted frames');
+			for (const f of after) {
+				expect(f.user?.connected && f.user.key === before.user.key && f.user.text === before.user.text, 'retain the same connected current-user text range');
+				expect(Math.abs(f.user.rect.top - before.user.rect.top) <= 1, `visible current-user text must not bounce at rebase (${f.user.rect.top} vs ${before.user.rect.top})`);
+			}
+			evicted ||= after.some(f => f.firstIndex > before.firstIndex);
+			ctx.log(`error rebase ${turn}: ${JSON.stringify({ evicted, before, last: after.at(-1), shifts: observed.shifts })}`);
+		}
+		expect(evicted, 'this production path must actually evict a leading transcript row');
+		assertStrict(trace);
+	}
+});
+
+cases.push({
+	name: 'fresh-queued-send-releases-error-slot', viewports: ['phone'], throttles: ['slow'],
+	async setup(ctx) {
+		const { page, variant } = ctx;
+		await openClaude(ctx); // New short project chat; never clears the long CLI seed.
+		ctx.freshQueueToken = `fresh-${uniq()}`;
+		ctx.firstQueueToken = `waiting-0-${uniq()}`;
+		await typeAndSend(page, `held error ${uniq()} ${scriptTag(variant, 'error-500', { latency_ms: 10000 })}`);
+		await waitChat(page, { streaming: 'true' });
+		// Streaming optimism precedes adoption on a brand-new chat. Do not turn
+		// the two queued sends into two further session=none creation requests.
+		await page.waitForFunction(() => {
+			const state = document.querySelector('[data-ui-state="chat"]')?.dataset;
+			return state?.uiSession && state.uiSession !== 'none' && state.uiStreaming === 'true';
+		});
+		await typeAndSend(page, `${ctx.firstQueueToken} [script:slow tps=1]`);
+		await typeAndSend(page, `waiting-1-${uniq()} [script:slow tps=1]`);
+		await page.waitForFunction(() => document.querySelectorAll('.pending-messages [data-queue-confirmed="true"]').length === 2);
+		await page.locator('.chat-error-banner').waitFor({ timeout: 60_000 });
+		await page.waitForFunction(token => document.querySelector('[data-ui-state="chat"]')?.dataset.uiStreaming === 'true'
+			&& [...document.querySelectorAll('[data-user-turn-id]')].some(row => row.textContent.includes(token)), ctx.firstQueueToken);
+		const held = await page.locator('.tail-controls').evaluate(el => parseFloat(el.style.minHeight));
+		expect(held >= 150, `two confirmed queued bubbles produced a real held slot (${held}px)`);
+	},
+	async act({ page, mark, log, freshQueueToken }) {
+		const readState = () => page.evaluate(token => ({
+			streaming: document.querySelector('[data-ui-state="chat"]')?.dataset.uiStreaming,
+			session: document.querySelector('[data-ui-state="chat"]')?.dataset.uiSession,
+			users: document.querySelectorAll('[data-user-turn-id]').length,
+			freshInTranscript: [...document.querySelectorAll('[data-user-turn-id]')].some(row => row.textContent.includes(token)),
+			freshPending: document.querySelector('.pending-messages')?.textContent.includes(token) ?? false,
+			slot: parseFloat(document.querySelector('.tail-controls')?.style.minHeight),
+			error: !!document.querySelector('.chat-error-banner')
+		}), freshQueueToken);
+		await mark('fresh local send during the automatically delivered queued stream');
+		const before = await readState();
+		expect(before.streaming === 'true' && before.slot >= 150 && before.error,
+			'fresh send starts during real queued streaming with the presented error slot, not after completion');
+		await typeAndSend(page, `${freshQueueToken} [script:slow tps=1]`);
+		await page.locator('.pending-messages .bubble-text').filter({ hasText: freshQueueToken }).waitFor();
+		const after = await readState();
+		log(`fresh queued send ${JSON.stringify({ before, after })}`);
+		expect(after.streaming === 'true', 'the fresh send took the live-turn queue branch');
+		expect(after.session === before.session && after.users === before.users && !after.freshInTranscript && after.freshPending,
+			'the fresh local prompt is queued, not appended to the transcript');
+		expect(after.slot === 0 && !after.error, 'the admitted queued send releases the old error and measured slot');
+		await page.evaluate(() => {
+			const watch = window.__freshQueueSlot = { running: true, values: [] };
+			const sample = () => {
+				if (!watch.running) return;
+				watch.values.push(parseFloat(document.querySelector('.tail-controls')?.style.minHeight));
+				requestAnimationFrame(sample);
+			};
+			sample();
+		});
+		await mark('Stop the live turn and drain its queued recovery rows');
+		await page.getByRole('button', { name: 'Stop generating', exact: true }).click();
+		await waitTurnSettled(page, { hold: 4500 });
+		const samples = await page.evaluate(() => { window.__freshQueueSlot.running = false; return window.__freshQueueSlot.values; });
+		const settled = await readState();
+		log(`fresh slot after Stop ${JSON.stringify({ settled, samples: samples.length, heights: [...new Set(samples)] })}`);
+		expect(samples.length > 4 && samples.every(height => height === 0), 'the released slot never reappears through Stop and queue recovery');
+		expect(settled.slot === 0 && settled.streaming === 'false' && !settled.error && !settled.freshPending,
+			'the idle drained view has no stale held error geometry');
+	}
+});
+
 cases.push({
 	name: 'long-history-short-send',
 	async setup(ctx) { await openClaude(ctx, { history: true }); },

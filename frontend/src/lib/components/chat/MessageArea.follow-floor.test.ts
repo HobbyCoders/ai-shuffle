@@ -335,6 +335,89 @@ describe('MessageArea followed-floor coordinate ownership', () => {
 	});
 });
 
+const anchorMaintenance = between('async function maintainCurrentTurnAnchor(', 'function followGrowthNow()')
+	.replace('beforeShrink?: number', 'beforeShrink');
+function maintenanceAcrossShift() {
+	const root = document.createElement('div');
+	root.innerHTML = '<div id="maintained-user"></div>';
+	document.body.appendChild(root);
+	const env = { top: 5000, writes: [] as number[], ticks: [] as (() => void)[] };
+	const result = new Function('env', 'root', `
+		let containerRef = root, tailSpacerRef = {}, currentTurnAnchorId = 'user';
+		let windowShiftVersion = 0, windowShifting = false, tailReservePx = 0, shouldAutoScroll = true;
+		Object.defineProperty(root, 'scrollTop', { get: () => env.top });
+		Object.defineProperty(root, 'clientHeight', { value: 600 });
+		root.getBoundingClientRect = () => ({ top: 52 });
+		root.firstElementChild.getBoundingClientRect = () => ({ top: 5152 - env.top });
+		const turnAnchorId = () => 'maintained-user', transcriptContentEnd = () => 5300;
+		const readingFloorReserve = () => 0, resolveAnchoredTailReserve = () => 300, tailControlsExtent = () => 0;
+		const tick = () => new Promise(resolve => env.ticks.push(resolve));
+		const resolveCurrentTurnAnchorScrollTop = top => top, resolveAnchoredRevealDelta = () => 0;
+		const setProgrammaticScrollTop = top => { env.top = top; env.writes.push(top); };
+		const updateJumpToLatestVisibility = () => {}, updateCurrentTurnIndex = () => {}, cancelCurrentTurnAnchor = () => {};
+		${anchorMaintenance}
+		return { start: initial => maintainCurrentTurnAnchor(initial, 5000),
+			rebase() { windowShiftVersion++; windowShifting = true; env.top = 4560; windowShifting = false; } };
+	`)(env, root) as { start(initial: boolean): Promise<void>; rebase(): void };
+	return { env, ...result, dispose: () => root.remove() };
+}
+
+const rangeShift = between('function applyMountedRange(', 'function loadOlderItems()')
+	.replace('next: TranscriptRange', 'next').replaceAll('<HTMLElement>', '')
+	.replace('let delta: number | undefined;', 'let delta;');
+function shiftedOrigin(activeAnchor: boolean) {
+	const env = { top: 4900, order: [] as string[], ticks: [] as (() => void)[] };
+	const state = new Function('env', 'activeAnchor', `
+		let mountedRange = { start: 49, end: 71 }, mountedStart = 49, mountedEnd = 71;
+		let windowShiftVersion = 0, windowShifting = false, followedViewportEnd = 5600, leadingGap = 0;
+		let selectionBlocksNavigation = false, shouldAutoScroll = true, anchorRounding = null;
+		let lastKnownScrollTop = 5000, lastScrollMetrics = null;
+		const currentTurnAnchorId = activeAnchor ? 'user' : null;
+		const transcriptWindow = { selectionLimited: false }, pinnedTranscriptRange = () => null;
+		const containerRef = { get scrollTop() { return env.top; }, getBoundingClientRect: () => ({ top: 52 }) };
+		const chatColumnRef = {}, windowSessionKey = 'long', mountedRangeCache = new Map(), SCROLL_CACHE_MAX = 1;
+		const evictOldest = () => {}, markProgrammaticScrollSettling = () => {};
+		const readScrollMetrics = () => ({ scrollTop: env.top });
+		const tick = () => new Promise(resolve => env.ticks.push(resolve));
+		const refreshLatestTurnTailReserve = () => {};
+		const maintainCurrentTurnAnchor = async () => {
+			env.order.push(windowShifting ? 'reserve-before-unlock' : 'late-reserve');
+			env.top = 4560;
+			await tick();
+		};
+		${rangeShift}
+		applyMountedRange({ start: 50, end: 72 }, false);
+		return () => ({ known: lastKnownScrollTop, metrics: lastScrollMetrics, shifting: windowShifting });
+	`)(env, activeAnchor) as () => { known: number; metrics: { scrollTop: number } | null; shifting: boolean };
+	return { env, state, async flush() {
+		for (let i = 0; i < 6; i++) { env.ticks.splice(0).forEach(resolve => resolve()); await Promise.resolve(); }
+	} };
+}
+
+describe('bounded follower origin changes', () => {
+	it.each([false, true])('rejects anchor work whose own await crosses eviction (initial=%s)', async initial => {
+		const p = maintenanceAcrossShift();
+		try {
+			const pending = p.start(initial);
+			p.rebase(); p.env.ticks.splice(0).forEach(resolve => resolve());
+			await pending;
+			expect(p.env.writes).toEqual([]);
+			expect(p.env.top).toBe(4560);
+		} finally { p.dispose(); }
+	});
+
+	it('publishes the rebased scroll metrics even when follower anchoring has no delta', async () => {
+		const p = shiftedOrigin(false); await p.flush();
+		expect(p.state()).toEqual({ known: 4900, metrics: { scrollTop: 4900 }, shifting: false });
+	});
+
+	it('consumes the active follower reserve in the same bounded commit before unlocking', async () => {
+		const p = shiftedOrigin(true); await p.flush();
+		expect(p.env.order).toEqual(['reserve-before-unlock']);
+		expect(p.state()).toEqual({ known: 4560, metrics: { scrollTop: 4560 }, shifting: false });
+	});
+});
+
 const rangePrefix = between('function applyMountedRange(', 'const container = containerRef;')
 	.replace('next: TranscriptRange', 'next').replaceAll('<HTMLElement>', '');
 const rangeCommit = between('const version = ++windowShiftVersion;', 'void tick().then(async () => {');

@@ -918,9 +918,17 @@
 					// Never carry a real clamp/navigation boundary into a later shift.
 					anchorRounding = anchor?.isConnected && Math.abs(error) < 1
 						? { scrollTop: container.scrollTop, error } : null;
-					lastKnownScrollTop = container.scrollTop;
-					lastScrollMetrics = readScrollMetrics();
 				}
+				if (!preserveAnchor && shouldAutoScroll && currentTurnAnchorId) {
+					// A rebased origin must consume newly mounted error/activity height
+					// before paint, not in a later observer frame. Maintenance may size
+					// the reserve while locked, but its post-tick scroll is fenced.
+					await maintainCurrentTurnAnchor();
+					if (version !== windowShiftVersion || container !== containerRef) return;
+				}
+				// Followers have no preservation delta, but their origin still changed.
+				lastKnownScrollTop = container.scrollTop;
+				lastScrollMetrics = readScrollMetrics();
 			}
 			windowShifting = false;
 		});
@@ -1320,6 +1328,7 @@
 	async function maintainCurrentTurnAnchor(initial = false, beforeShrink?: number) {
 		if (!containerRef || !tailSpacerRef || !currentTurnAnchorId) return;
 		const maintainedTurnId = currentTurnAnchorId;
+		const maintainedWindowVersion = windowShiftVersion;
 		const anchor = document.getElementById(turnAnchorId(maintainedTurnId));
 		if (!anchor || !containerRef.contains(anchor)) {
 			cancelCurrentTurnAnchor();
@@ -1335,7 +1344,8 @@
 			contentAfterAnchor
 		}) + tailControlsExtent());
 		await tick();
-		if (!containerRef || currentTurnAnchorId !== maintainedTurnId) return;
+		if (!containerRef || currentTurnAnchorId !== maintainedTurnId
+			|| maintainedWindowVersion !== windowShiftVersion || windowShifting) return;
 
 		if (initial) {
 			setProgrammaticScrollTop(resolveCurrentTurnAnchorScrollTop(anchorTop));
