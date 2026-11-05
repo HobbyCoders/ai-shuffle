@@ -231,6 +231,23 @@ describe('hooks-model', () => {
 		expect(api.createAppHook).not.toHaveBeenCalled();
 	});
 
+	it('retains signing presence from an Enabled response before a deletion refresh', async () => {
+		api.getAppHooks.mockResolvedValue([hook({ hook_type: 'webhook', url: 'https://example.test', has_secret: false })]);
+		const model = new HooksModel();
+		await model.load();
+		model.ensure('h1')!.name = 'Renamed';
+		// Another client adds a secret; the Enabled PATCH is the only response
+		// that observes it before deletion and the next coalesced list refresh.
+		api.updateHook.mockResolvedValue(hook({ hook_type: 'webhook', url: 'https://example.test', has_secret: true, enabled: false }));
+		expect(await model.setEnabled('h1', false)).toBe(true);
+		api.getAppHooks.mockResolvedValue([]);
+		await model.load();
+		expect(await model.save('h1')).toBeNull();
+		expect(model.form('h1')!.name).toBe('Renamed');
+		expect(model.form('h1')!.enabled).toBe(false);
+		expect(api.createAppHook).not.toHaveBeenCalled();
+	});
+
 	it('flags dirty forms changed or deleted elsewhere and keeps clean ones in step', async () => {
 		const model = new HooksModel();
 		await model.load();

@@ -336,7 +336,10 @@ export class HooksModel {
 		try {
 			const saved = await hooks.updateHook(id, { enabled });
 			const f = this.forms[id];
-			if (f) f.enabled = saved.enabled;
+			if (f) {
+				f.enabled = saved.enabled;
+				f.hasSecret ||= saved.has_secret;
+			}
 			return true;
 		} catch (e) {
 			this.errors[id] = [message(e, 'Could not change the hook')];
