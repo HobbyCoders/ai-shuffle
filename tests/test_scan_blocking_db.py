@@ -444,3 +444,101 @@ def test_repeated_canonical_imports_without_rebinding_stay_pure():
             decode('null')
             db.parse_jsonb('null')
     """) == []
+
+
+@pytest.mark.parametrize(("imports", "namespace"), [
+    ("import app.db as pkg", "pkg.base"),
+    ("from app import db as pkg", "pkg.base"),
+    ("import app as pkg", "pkg.db.base"),
+    ("import app.db.base", "app.db.base"),
+])
+@pytest.mark.parametrize("read_through_package", [False, True])
+def test_package_namespace_mutation_revokes_equivalent_export(imports, namespace, read_through_package):
+    call = f"{namespace}.parse_jsonb" if read_through_package else "read.parse_jsonb"
+    source = (f"{imports}\nimport app.db.base as read\n"
+              "from app.db.turns import get_turn\n"
+              f"{namespace}.parse_jsonb = get_turn\n"
+              f"async def handler():\n    {call}('turn-id')\n")
+    assert _calls(source) == [call]
+
+
+@pytest.mark.parametrize("conflict", ["import other as pkg", "pkg = other"])
+def test_ambiguous_package_binding_cannot_preserve_export_purity(conflict):
+    source = ("from app import db as pkg\nimport app.db.base as read\n"
+              f"{conflict}\npkg.base.parse_jsonb = query\n"
+              "async def handler():\n    read.parse_jsonb('turn-id')\n")
+    assert _calls(source) == ["read.parse_jsonb"]
+
+
+@pytest.mark.parametrize("mutation", [
+    "setattr(changed, 'parse_jsonb', query)",
+    "setattr(changed, attribute_name, query)",
+    "delattr(changed, 'parse_jsonb')",
+    "object.__setattr__(changed, 'parse_jsonb', query)",
+    "changed.__dict__.update(parse_jsonb=query)",
+    "changed.__dict__.update({'parse_jsonb': query})",
+    "changed.__dict__.__setitem__('parse_jsonb', query)",
+    "changed.__dict__.setdefault('parse_jsonb', query)",
+    "vars(changed).update(parse_jsonb=query)",
+    "configure(module=changed)",
+    "configure(changed)",
+    "target = changed.__dict__\ntarget.update(parse_jsonb=query)",
+    "target = changed\ntarget.parse_jsonb = query",
+    "targets = [changed]\nconfigure(targets)",
+    "targets = {'module': changed}\nconfigure(targets)",
+    "def expose():\n    return changed",
+    "def configure_default(target=changed):\n    target.parse_jsonb = query",
+    "configure_default = lambda target=changed: setattr(target, 'parse_jsonb', query)",
+    "changed.__dict__['parse_jsonb'].__code__ = query.__code__",
+])
+def test_direct_mutators_or_escaped_module_objects_revoke_purity(mutation):
+    source = ("import app.db.base as changed\nfrom app.db import base as read\n"
+              + mutation + "\nasync def handler():\n    read.parse_jsonb('turn-id')\n")
+    assert _calls(source) == ["read.parse_jsonb"]
+
+
+@pytest.mark.parametrize("mutation", [
+    "setattr(pkg.base, 'parse_jsonb', query)",
+    "pkg.base.__dict__.update(parse_jsonb=query)",
+    "target = pkg.base.__dict__\ntarget['parse_jsonb'] = query",
+])
+def test_package_mutator_and_mapping_escape_use_the_same_normalization(mutation):
+    source = ("from app import db as pkg\nfrom app.db import base as read\n"
+              + mutation + "\nasync def handler():\n    read.parse_jsonb('turn-id')\n")
+    assert _calls(source) == ["read.parse_jsonb"]
+
+
+@pytest.mark.parametrize(("imports", "call"), [
+    ("import app.db as pkg", "pkg.base.parse_jsonb"),
+    ("from app import db as pkg", "pkg.base.parse_jsonb"),
+    ("import app as pkg", "pkg.db.base.parse_jsonb"),
+])
+def test_unchanged_package_bound_decoder_stays_pure(imports, call):
+    assert _calls(f"{imports}\nasync def handler():\n    {call}('null')\n") == []
+
+
+def test_non_db_escapes_do_not_invalidate_unchanged_decoder():
+    assert _calls("""
+        from app.db import base as db
+        value = object()
+        configure(value)
+        targets = [value]
+        async def handler():
+            return db.parse_jsonb('null')
+    """) == []
+
+
+def test_pure_decoder_objects_cannot_escape_and_retain_purity():
+    assert _calls("""
+        from app.db.base import parse_jsonb as decode
+        configure(decode)
+        async def handler():
+            decode('turn-id')
+    """) == ["decode()"]
+    assert _calls("""
+        import app.db.base as db
+        target = db.parse_jsonb(db)
+        target.parse_jsonb = query
+        async def handler():
+            db.parse_jsonb('turn-id')
+    """) == ["db.parse_jsonb"]

@@ -147,6 +147,12 @@ def collect_db_names(tree: ast.AST) -> tuple[dict[str, set[str]], set[str], set[
                     if _is_allowlisted(alias.name):
                         continue
                     module_aliases.setdefault(local, set()).add(f"{DB_PACKAGE}.{alias.name}")
+            elif mod and DB_PACKAGE.startswith(mod + "."):
+                # A package alias can reach the same exports: from app import db.
+                for alias in node.names:
+                    canonical = f"{mod}.{alias.name}"
+                    if canonical == DB_PACKAGE or DB_PACKAGE.startswith(canonical + "."):
+                        module_aliases.setdefault(alias.asname or alias.name, set()).add(canonical)
             elif mod.startswith(DB_PACKAGE + "."):
                 # from app.db.<module> import fn [as g]
                 if mod == ASYNC_DB_MODULE:
@@ -160,7 +166,8 @@ def collect_db_names(tree: ast.AST) -> tuple[dict[str, set[str]], set[str], set[
                 name = alias.name
                 local = alias.asname or name.split(".")[0]
                 bindings[local].add(name if alias.asname else local)
-                if not name.startswith(DB_PACKAGE + "."):
+                if not (name == DB_PACKAGE or name.startswith(DB_PACKAGE + ".")
+                        or DB_PACKAGE.startswith(name + ".")):
                     continue
                 if name == ASYNC_DB_MODULE:
                     continue
@@ -172,18 +179,19 @@ def collect_db_names(tree: ast.AST) -> tuple[dict[str, set[str]], set[str], set[
 
     pure: dict[str, str] = {}
     for canonical in PURE_DB_CALLS:
-        module, _, attr = canonical.rpartition(".")
         for local in bare_funcs:
             if bindings[local] == {canonical}:
                 pure[local] = canonical
         for local, modules in module_aliases.items():
-            if modules == {module} and bindings[local] == {module}:
-                pure[f"{local}.{attr}"] = canonical
+            if len(modules) == 1 and bindings[local] == modules:
+                origin = next(iter(modules))
+                if canonical.startswith(origin + "."):
+                    pure[local + canonical[len(origin):]] = canonical
         root = canonical.split(".")[0]
         if bindings[root] == {root}:
             pure[canonical] = canonical
 
-    writes, exports = _binding_writes(tree, module_aliases, bare_funcs, bindings)
+    writes, exports = _binding_writes(tree, bindings)
     unchanged = {call for call, canonical in pure.items()
                  if "*" not in bindings
                  and not any(call == name or call.startswith(name + ".") for name in writes)
@@ -191,7 +199,51 @@ def collect_db_names(tree: ast.AST) -> tuple[dict[str, set[str]], set[str], set[
     return module_aliases, bare_funcs, unchanged
 
 
-def _binding_writes(tree, module_aliases, bare_funcs, bindings) -> tuple[set[str], set[str]]:
+def _canonical_paths(node: ast.AST | None, bindings) -> set[str]:
+    """Normalize known import/package aliases, retaining every ambiguous candidate."""
+    parts = []
+    while isinstance(node, (ast.Attribute, ast.Subscript)):
+        if isinstance(node, ast.Attribute):
+            parts.append(node.attr)
+        node = node.value  # a mapping view may expose any of its namespace
+    if not isinstance(node, ast.Name):
+        return set()
+    suffix = "".join("." + part for part in reversed(parts))
+    dotted = node.id + suffix
+    paths = {origin + suffix for origin in bindings.get(node.id, ())}
+    if dotted == DB_PACKAGE or dotted.startswith(DB_PACKAGE + "."):
+        paths.add(dotted)
+    return paths
+
+
+def _escaped_exports(node: ast.AST | None, bindings) -> set[str]:
+    """Pure exports made uncertain by a namespace/callable or mapping escaping.
+
+    Do not follow result values or construct a call graph. Direct imported
+    objects, namespace views and containers exposing them revoke the exception;
+    unrelated arguments/results do not. This also handles direct mutator calls
+    without relying on a short list of mutator method names.
+    """
+    exports: set[str] = set()
+    for path in _canonical_paths(node, bindings):
+        for canonical in PURE_DB_CALLS:
+            module = canonical.rpartition(".")[0]
+            if canonical == path or canonical.startswith(path + "."):
+                exports.add(path)
+            elif path.startswith(module + ".__dict__") or path.startswith(canonical + "."):
+                exports.add(module)
+    if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
+        for value in node.elts:
+            exports.update(_escaped_exports(value, bindings))
+    elif isinstance(node, ast.Dict):
+        for value in [*node.keys, *node.values]:
+            exports.update(_escaped_exports(value, bindings))
+    elif isinstance(node, ast.Starred):
+        exports.update(_escaped_exports(node.value, bindings))
+    return exports
+
+
+def _binding_writes(tree, bindings) -> tuple[set[str], set[str]]:
     """Bindings and imported objects that cannot retain an exact pure exemption.
 
     This is conservative invalidation, not flow analysis: assignments/deletions,
@@ -208,6 +260,9 @@ def _binding_writes(tree, module_aliases, bare_funcs, bindings) -> tuple[set[str
             writes.add(node.arg)
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             writes.add(node.name)
+        elif isinstance(node, ast.arguments):
+            for value in [*node.defaults, *node.kw_defaults]:
+                exports.update(_escaped_exports(value, bindings))
         elif isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)):
             if node.name:
                 writes.add(node.name)
@@ -219,16 +274,17 @@ def _binding_writes(tree, module_aliases, bare_funcs, bindings) -> tuple[set[str
                 root = root.value
             if isinstance(root, ast.Name):
                 writes.add(root.id)
-                if root.id in module_aliases or root.id in bare_funcs:
-                    exports.update(bindings[root.id])
-            target = node.value if isinstance(node, ast.Subscript) else node
-            dotted = _dotted(target)
-            if dotted and dotted.startswith(DB_PACKAGE + "."):
-                exports.add(dotted)
-                for canonical in PURE_DB_CALLS:
-                    module = canonical.rpartition(".")[0]
-                    if dotted.startswith(module + "."):
-                        exports.add(module)
+            exports.update(_escaped_exports(node, bindings))
+        elif isinstance(node, ast.Call):
+            # Passing a namespace to setattr/unknown code (including through
+            # containers) or calling a namespace view's methods may mutate it.
+            for value in [*node.args, *(kw.value for kw in node.keywords)]:
+                exports.update(_escaped_exports(value, bindings))
+            callee = _canonical_paths(node.func, bindings)
+            if isinstance(node.func, ast.Attribute) and not (callee and callee <= PURE_DB_CALLS):
+                exports.update(_escaped_exports(node.func.value, bindings))
+        elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr, ast.Return, ast.Yield)):
+            exports.update(_escaped_exports(node.value, bindings))
     return writes, exports
 
 
@@ -250,19 +306,11 @@ def _call_label(
     if _is_allowlisted(attr):
         return None
 
-    base = func.value
-    if isinstance(base, ast.Name) and base.id in module_aliases:
-        return f"{base.id}.{attr}"
-
-    # Fully qualified: app.db.<module>.fn()
-    dotted = _dotted(base)
-    if (
-        dotted
-        and dotted.startswith(DB_PACKAGE + ".")
-        and dotted != ASYNC_DB_MODULE
-    ):
-        return f"{dotted}.{attr}"
-
+    # Module aliases and package aliases use the same canonical interpretation
+    # as export writes; a mutation cannot escape by changing the import spelling.
+    for canonical in _canonical_paths(func, module_aliases):
+        if canonical.startswith(DB_PACKAGE + ".") and not canonical.startswith(ASYNC_DB_MODULE + "."):
+            return _dotted(func)
     return None
 
 
