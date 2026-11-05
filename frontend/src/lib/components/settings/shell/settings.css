@@ -649,6 +649,9 @@
 }
 /* Phone rows share one content edge, with selectors below their label and helper. */
 @media (max-width: 600px) {
+	.settings-shell[data-stacked] .st-row.st-phone-stack { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
+	.settings-shell[data-stacked] .st-row.st-phone-stack > .st-rc { width: 100%; margin-left: 0; }
+	.settings-shell .st-row.st-phone-stack > .st-rc > .st-seg { flex: 1; }
 	.settings-shell .st-row:has(.st-rh):has(> .st-rc :is(select, [aria-haspopup])) { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
 	.settings-shell .st-row:has(.st-rh) > .st-rc:has(:is(select, [aria-haspopup])) { display: flex; flex-wrap: nowrap; width: 100%; margin-left: 0; }
 	.settings-shell .st-row:has(.st-rh) > .st-rc :is(.st-sel-wrap, [aria-haspopup]) { flex: 1; max-width: none !important; }

@@ -1,5 +1,5 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Automation } from '$lib/api/automations';
 import AutomationsStudio from './AutomationsStudio.svelte';
 import AutomationsList from './AutomationsList.svelte';
@@ -20,7 +20,11 @@ beforeAll(() => {
     };
 });
 afterAll(() => { if (!hadAnimate) delete proto.animate; });
-afterEach(cleanup);
+beforeEach(() => {
+    vi.stubGlobal('matchMedia', () => ({ matches: false, addEventListener() {}, removeEventListener() {} }));
+    vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
+});
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 const explanation = 'Built-in Explore was removed; review the General Purpose agent before re-enabling.';
 const automation: Automation = {
@@ -70,6 +74,15 @@ describe('automation detail state', () => {
     });
     const agents = (...ids: string[]) => ids.map((id) => ({ id, name: id })) as never;
 
+    it('keeps Delete text-only in the shared danger style and preserves its handler', async () => {
+        const onDelete = vi.fn();
+        render(AutomationDetail, detailProps({ onDelete }));
+        const button = screen.getByRole('button', { name: 'Delete', exact: true });
+        expect(button.classList.contains('danger')).toBe(true);
+        expect(button.querySelector('svg')).toBeNull();
+        await fireEvent.click(button);
+        expect(onDelete).toHaveBeenCalledWith(automation.id);
+    });
     it('marks a disabled automation as Disabled in the detail header', () => {
         render(AutomationDetail, detailProps());
         expect(screen.getByTestId('automation-disabled-badge').textContent).toBe('Disabled');

@@ -28,6 +28,9 @@ it('keeps the trigger heading and collapse control inside its card', () => {
  const view = renderWebhook('edit', 'auto-1a2b');
  const collapse = screen.getByRole('button', { name: 'Collapse trigger' });
  expect(collapse.closest('.st-card')).not.toBeNull();
+ expect(collapse.textContent).toBe('');
+ expect(collapse.querySelector('svg')).not.toBeNull();
+ expect(screen.getByRole('group', { name: 'Trigger type' }).closest('.st-row')).not.toBeNull();
  expect(view.container.querySelectorAll('.st-grp')).toHaveLength(0);
  expect(screen.queryByText(/Any trigger firing/)).toBeNull();
 });

@@ -284,6 +284,16 @@ describe('scheduled-run notice', () => {
 		expect(notice?.textContent).toContain('Claude runs on your subscription');
 	});
 
+	it('keeps compact notice detail reachable without changing regular error banners', async () => {
+		const notice = await noticeFor(signedIn, { formError: 'Could not save' });
+		expect(notice?.querySelector('.st-banner.compact')).not.toBeNull();
+		expect(within(notice as HTMLElement).getByRole('button', { name: 'Open Claude settings' }).textContent).toBe('Use an API key');
+		await fireEvent.click(within(notice as HTMLElement).getByRole('button', { name: 'About scheduled Claude runs' }));
+		expect(within(document.body).getByRole('tooltip').textContent).toContain('holds unattended turns past its budget until you confirm them');
+		const error = within(document.body).getByRole('alert');
+		expect(error.querySelector('.st-banner')?.classList.contains('compact')).toBe(false);
+		expect(error.querySelector('.acts')?.textContent).toBe('Dismiss');
+	});
 	it('shows for a Claude model on a signed-in Claude subscription', async () => {
 		const notice = await noticeFor(signedIn, { formModel: 'haiku' });
 		expect(notice?.textContent).toContain('Claude runs on your subscription');
