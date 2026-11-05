@@ -328,13 +328,18 @@ def test_app_start_never_publishes_restarting_during_wake(tmp_path):
     assert obj.data["app"]["starts"] == 2 and obj.wake.is_set()
 
 
-def test_child_reaches_app_main_as_main_without_changing_serve_settings(tmp_path, monkeypatch):
+def test_child_reaches_normal_startup_with_only_bounded_shutdown_setting(tmp_path, monkeypatch):
     from app import serve
+    import uvicorn
+
+    config = uvicorn.Config
 
     app, settings, calls = object(), object(), []
 
     def normal_run(wrapped, actual_settings):
         assert actual_settings is settings and wrapped.app is app
+        assert uvicorn.Config.func is config
+        assert uvicorn.Config.keywords == {"timeout_graceful_shutdown": 5}
         wrapped.stopped.set()
         wrapped.writer.join(2)
         calls.append("normal serve")
@@ -349,6 +354,7 @@ def test_child_reaches_app_main_as_main_without_changing_serve_settings(tmp_path
     monkeypatch.setattr(sys, "argv", ["child", str(tmp_path / "activity.json")])
     child.main()
     assert calls == ["normal serve"]
+    assert uvicorn.Config is config and serve.run is normal_run
 
 
 @pytest.mark.parametrize("failed_pause", [False, True])
@@ -381,18 +387,93 @@ def test_real_child_process_reaped_before_paused_ttl(tmp_path, monkeypatch, fail
     monkeypatch.setattr("docker.container_runtime.stop_group", stop_group)
     if failed_pause:
         postgres.wait.side_effect = subprocess.TimeoutExpired("postmaster", 30)
-        with pytest.raises(subprocess.TimeoutExpired):
-            idle.supervise(obj, {}, db, lease, threading.Event(), start_vite=Mock(), stop_vite=Mock())
-        assert "pausing" in obj.states and "paused" not in obj.states
+    idle.supervise(obj, {}, db, lease, threading.Event(), start_vite=Mock(), stop_vite=Mock())
+    assert "pausing" in obj.states
+    if failed_pause:
+        assert "pause-failed" in obj.states and "paused" not in obj.states
+        db.open.assert_called_once()  # Failed stop never opens a second cluster.
     else:
-        idle.supervise(obj, {}, db, lease, threading.Event(), start_vite=Mock(), stop_vite=Mock())
-        assert "pausing" in obj.states and "paused" in obj.states
+        assert "paused" in obj.states
     assert children[0].poll() == -idle.signal.SIGTERM
     stop_group.assert_not_called()  # Reaped app is cleared, including during TTL cleanup.
     assert stopped.is_set()
     db.close.assert_called_once()
     postgres.send_signal.assert_called_once_with(idle.signal.SIGINT)
-    postgres.wait.assert_called_once_with(timeout=30)
+    assert 0 < postgres.wait.call_args.kwargs["timeout"] <= idle.PAUSE_SECONDS
+
+
+def test_real_hung_child_hits_pause_deadline_without_deleting_data(tmp_path, monkeypatch):
+    obj = instance(tmp_path)
+    stopped = threading.Event()
+    lease = idle.IdleLease(obj, stopped, seconds=0)
+    real_popen, children = subprocess.Popen, []
+    marker = tmp_path / "retained-data"
+    marker.write_text("seed and owner work")
+    monkeypatch.setattr(idle, "PAUSE_SECONDS", 0.1)
+
+    def spawn(*args, **kwargs):
+        code = "import signal,time;signal.signal(signal.SIGTERM,signal.SIG_IGN);print('ready',flush=True);time.sleep(30)"
+        process = real_popen([sys.executable, "-c", code], stdout=subprocess.PIPE, start_new_session=True)
+        assert process.stdout.readline() == b"ready\n"
+        children.append(process)
+        return process
+
+    def on_start(process):
+        receipt(lease)
+        obj.data["app"].update(pid=process.pid, pid_identity=guardian.identity(process.pid))
+        record = json.loads(lease.receipt.read_text())
+        record.update(pid=process.pid, identity=guardian.identity(process.pid))
+        lease.receipt.write_text(json.dumps(record))
+        obj.write(state="ready")
+
+    original_write, failure_at = obj.write, []
+    began = time.monotonic()
+
+    def write(**changes):
+        original_write(**changes)
+        if changes.get("state") == "pause-failed":
+            failure_at.append(time.monotonic() - began)
+            assert children[0].poll() is None and marker.read_text() == "seed and owner work"
+
+    obj.write, obj.on_app_start = write, on_start
+    db = SimpleNamespace(open=Mock(), publish_descriptor=Mock(), close=Mock(), process=Mock(),
+                         query=Mock(return_value="f"))
+    monkeypatch.setattr(idle.subprocess, "Popen", spawn)
+    idle.supervise(obj, {}, db, lease, threading.Event(), start_vite=Mock(), stop_vite=Mock())
+    assert len(failure_at) == 1 and failure_at[0] < obj.args.ttl_seconds
+    assert "paused" not in obj.states and "wake disabled" in obj.data["pause_error"]
+    assert children[0].poll() == -idle.signal.SIGKILL  # Only final TTL teardown escalates.
+    children[0].stdout.close()
+    db.open.assert_called_once()
+    assert marker.read_text() == "seed and owner work"
+
+
+@pytest.mark.parametrize("new_work", ["request", "turn"])
+def test_work_appearing_during_final_recheck_aborts_pause(tmp_path, monkeypatch, new_work):
+    obj = instance(tmp_path)
+    lease = idle.IdleLease(obj, threading.Event(), seconds=0)
+    real_popen, children = subprocess.Popen, []
+
+    def spawn(*args, **kwargs):
+        process = real_popen([sys.executable, "-c", "import time;time.sleep(30)"], start_new_session=True)
+        process.send_signal = Mock(wraps=process.send_signal)
+        children.append(process)
+        return process
+
+    def on_start(process):
+        obj.write(state="ready")
+
+    calls = [True, new_work != "request"]
+    lease.idle = lambda: calls.pop(0) if calls else False
+    answers = ["f", "t"]
+    db = SimpleNamespace(open=Mock(), publish_descriptor=Mock(), close=Mock(), process=Mock(),
+                         query=lambda sql: answers.pop(0))
+    obj.on_app_start = on_start
+    monkeypatch.setattr(idle.subprocess, "Popen", spawn)
+    idle.supervise(obj, {}, db, lease, threading.Event(), start_vite=Mock(), stop_vite=Mock())
+    assert "pausing" in obj.states and "paused" not in obj.states
+    assert "pause-failed" not in obj.states
+    children[0].send_signal.assert_not_called()  # No clean-pause SIGTERM; TTL uses killpg.
 
 
 @pytest.mark.parametrize("ci,workers,flag,expected", [

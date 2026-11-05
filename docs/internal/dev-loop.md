@@ -19,15 +19,19 @@ runs such as `--seed long`. CI (`--ci`, including `scripts/devloop/ci.py`) and
 continuous presence and sync, and CI needs stable journey timing.
 
 Idle is not “no network traffic”: an explicit method/path allowlist covers
-observed auth, sidebar, git-status, preference and model-capability refreshes plus chat/sync/HMR
-reconnects. Unknown traffic counts as work. While paused, those background
+observed auth, sidebar, git-status, watch-list, preference and model-capability
+refreshes plus chat/sync/HMR reconnects and the selected chat's read-only event feed. Unknown traffic counts as work. While paused, those background
 requests receive 503 without waking; other requests trigger wake and receive
 a same-URL 307 when both backend and Vite are ready. Holders never forward
 traffic and are absent while awake: normal listeners, peer identity, preview
 authentication, HTTP bodies, SSE and WebSockets remain unchanged.
 
 With pausing enabled only, `scripts.devloop.child` runs the normal `app.main`
-`__main__` startup with a pure observational ASGI wrapper. It tracks unknown
+`__main__` startup with a pure observational ASGI wrapper and a **five-second
+Uvicorn graceful-shutdown timeout**. That timeout only applies after shutdown
+starts: lingering passive streams are cancelled, then normal lifespan teardown
+runs. These are the only intentional differences from `python -m app.main`.
+It tracks unknown
 HTTP requests, non-heartbeat client frames and voice/unknown sockets without
 buffering or changing requests. A private process-identified receipt is written
 at most twice per second; missing/stale/unreadable evidence keeps it awake.
@@ -36,7 +40,16 @@ whole lease using its process identity, even during long waits. Durable active
 runs, running/interrupting/draining turns, background tasks and queued/running
 git operations prevent pausing. A failed busy check keeps it awake. No live
 app or database is consulted. CI and `--no-pause` retain `python -m app.main`
-without the observer.
+without the observer or dev-only shutdown timeout.
+
+The launcher rechecks both idle and durable busy proofs immediately before
+sending SIGTERM. The complete clean pause has a **30-second deadline**. A
+failed or timed-out stop publishes `pause-failed`, retains the data and any
+surviving processes until `down` or TTL, and disables wake/restart rather than
+risking a second cluster. `status --wait` and `wake` fail immediately in that
+state; inspect the reported `pause_error` before stopping the instance. The
+normal pause never escalates to SIGKILL; final teardown retains its existing
+bounded cleanup policy.
 
 ```bash
 python -m scripts.devloop up                                          # local browser
@@ -55,7 +68,7 @@ inside a private directory:
 
 | Field | What it is |
 | --- | --- |
-| `state` | `starting`, `pairing` (two workers), `ready`, `restarting`, `pausing`, `paused`, `waking`, `app-exited` or `stopping` |
+| `state` | `starting`, `pairing` (two workers), `ready`, `restarting`, `pausing`, `paused`, `waking`, `pause-failed`, `app-exited` or `stopping` |
 | `pause` | Whether automatic pausing is enabled and its idle deadline in seconds |
 | `pid`, `pid_identity` | The launcher and its start time (a reused pid is not the launcher) |
 | `mode` | `dev`, or `ci` for `--ci` |
@@ -69,7 +82,7 @@ inside a private directory:
 
 `python -m scripts.devloop status` prints it (exit 0 while the launcher
 runs); `status --wait SECONDS` waits until the instance is `ready` and exits 1
-if it stops, its app exits or the time runs out. `python -m scripts.devloop
+if it stops, its app exits, a clean pause fails or the time runs out. `python -m scripts.devloop
 down` stops the instance. A status file whose launcher is gone (same pid and
 start time no longer running, an unreaped zombie included) is **stale**:
 `status` and `down` say so and remove it, and the journey runner refuses a

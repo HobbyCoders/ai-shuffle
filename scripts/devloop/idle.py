@@ -24,6 +24,7 @@ from urllib.parse import urlsplit
 log = logging.getLogger("devloop")
 IDLE_SECONDS = 300
 RECEIPT_MAX_AGE = 5
+PAUSE_SECONDS = 30
 # Observed with an untouched seeded tab, including the one-minute full refresh.
 # Unknown method/path pairs are work, regardless of browser or Fetch Metadata.
 POLL_GETS = frozenset({
@@ -197,10 +198,10 @@ class PausedPort:
                     return
                 owner.lease.activity()
                 with owner.lease.condition:
-                    while owner.lease.state != "ready" and not owner.lease.stopped.is_set():
+                    while owner.lease.state not in ("ready", "pause-failed") and not owner.lease.stopped.is_set():
                         owner.lease.condition.wait(0.5)
-                    self.respond(503 if owner.lease.stopped.is_set() else 307,
-                                 redirect=not owner.lease.stopped.is_set())
+                    ready = owner.lease.state == "ready" and not owner.lease.stopped.is_set()
+                    self.respond(307 if ready else 503, redirect=ready)
 
             do_GET = do_HEAD = do_POST = do_PUT = do_PATCH = do_DELETE = do_OPTIONS = handle_request
 
@@ -229,19 +230,27 @@ def supervise(instance, env, database, lease, restart, *, start_vite, stop_vite)
     def over():
         return stopped.is_set() or time.monotonic() >= deadline or process_identity(owner) != owner_start
 
-    def stop_app(*, clean=False):
+    def remaining(pause_deadline):
+        seconds = pause_deadline - time.monotonic()
+        if seconds <= 0:
+            raise TimeoutError("clean pause deadline exceeded")
+        return seconds
+
+    def stop_app(*, clean=False, pause_deadline=None):
         nonlocal process
         if process is None:
             return
         if process.poll() is None and process_identity(process.pid) == process_start:
             if clean:
+                remaining(pause_deadline)
                 process.send_signal(signal.SIGTERM)
                 while process.poll() is None and not over():
-                    stopped.wait(0.2)
+                    stopped.wait(min(0.2, remaining(pause_deadline)))
             else:
                 stop_group(process, 4)
         if process.poll() is not None:
             process = None  # Reaped; never signal this possibly reused PGID again.
+            instance.write(app={**instance.data["app"], "pid": None, "pid_identity": None})
 
     def start():
         nonlocal process, process_start, db_open
@@ -263,6 +272,11 @@ def supervise(instance, env, database, lease, restart, *, start_vite, stop_vite)
     try:
         start()
         while not over():
+            if lease.state == "pause-failed":
+                # Retain data and surviving processes until down/TTL. Never
+                # start another app/cluster on a partially stopped instance.
+                stopped.wait(0.2)
+                continue
             if lease.state in ("starting", "waking", "restarting") and instance.data["state"] == "ready":
                 lease.transition("ready")
                 lease.last_activity = time.monotonic()
@@ -292,24 +306,41 @@ def supervise(instance, env, database, lease, restart, *, start_vite, stop_vite)
                 else:
                     lease.requested = False
                     lease.transition("pausing")
-                    stop_app(clean=True)
-                    if over():
-                        break
-                    stop_vite(clean=True)
-                    database.process.send_signal(signal.SIGINT)  # PostgreSQL fast clean shutdown.
-                    database.process.wait(timeout=30)
-                    database.close()
-                    database.process = None
-                    db_open = False
-                    instance.write(app={**instance.data["app"], "pid": None, "pid_identity": None},
-                                   postgres=None, vite=None)
-                    for port in (instance.port, instance.vite_port):
-                        if port:
-                            holders.append(PausedPort(lease, str(instance.args.host), port))
-                    lease.transition("paused")
-                    log.info("idle: app, Vite and PostgreSQL paused; reload or `devloop wake` resumes them")
+                    pause_deadline = min(deadline, time.monotonic() + PAUSE_SECONDS)
+                    # Recheck both proofs immediately before the signal. Receipt
+                    # writes can lag by <=0.5s; durable turns cover live work.
+                    if not lease.idle() or database_busy(database) or not lease.idle():
+                        lease.last_activity = time.monotonic()
+                        lease.transition("ready")
+                        continue
+                    try:
+                        stop_app(clean=True, pause_deadline=pause_deadline)
+                        if over():
+                            break
+                        stop_vite(clean=True, timeout=remaining(pause_deadline))
+                        database.process.send_signal(signal.SIGINT)  # PostgreSQL FAST, not KILL.
+                        database.process.wait(timeout=remaining(pause_deadline))
+                        database.process = None  # Reaped: close must not signal a reused PGID.
+                        database.close()
+                        db_open = False
+                        remaining(pause_deadline)
+                        instance.write(app={**instance.data["app"], "pid": None, "pid_identity": None},
+                                       postgres=None, vite=None)
+                        for port in (instance.port, instance.vite_port):
+                            if port:
+                                remaining(pause_deadline)
+                                holders.append(PausedPort(lease, str(instance.args.host), port))
+                        remaining(pause_deadline)
+                        lease.transition("paused")
+                        log.info("idle: app, Vite and PostgreSQL paused; reload or `devloop wake` resumes them")
+                    except (TimeoutError, subprocess.TimeoutExpired, OSError):
+                        instance.write(pause_error="Clean pause exceeded its deadline or failed; "
+                                       "data retained until down/TTL; wake disabled")
+                        lease.transition("pause-failed")
+                        log.error("clean pause failed; retaining data and disabling wake until down/TTL")
+                        continue
             stopped.wait(0.2)
-        return 0
+        return 1 if lease.state == "pause-failed" else 0
     finally:
         instance.retire()
         stopped.set()

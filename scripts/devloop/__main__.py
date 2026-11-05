@@ -680,16 +680,17 @@ def up(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
                 log.info("vite dev (pid %s) on port %s, proxying /api to %s", vite.pid,
                          vite_port, api)
 
-            def stop_vite(*, clean=False):
+            def stop_vite(*, clean=False, timeout=20):
                 nonlocal vite
                 if vite is not None:
                     if clean:
                         # A pause is not a teardown: never SIGKILL a live child.
                         os.killpg(vite.pid, signal.SIGTERM)
-                        vite.wait(timeout=20)
+                        vite.wait(timeout=timeout)
                     else:
                         stop_group(vite, 10)
                     vite = None
+                    instance.write(vite=None)
 
             lease = None
             if not args.no_pause:
@@ -814,7 +815,7 @@ def show(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
         if status is not None and (ready or not args.wait):
             print(json.dumps(status, indent=2))
             return 0
-        if status is not None and status.get("state") in ("app-exited", "stopping"):
+        if status is not None and status.get("state") in ("app-exited", "stopping", "pause-failed"):
             print(json.dumps(status, indent=2))
             print(f"The dev instance is {status['state']}, not ready", file=sys.stderr)
             return 1
