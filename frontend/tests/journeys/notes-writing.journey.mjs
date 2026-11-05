@@ -28,21 +28,34 @@ function writingCase(name, native = false, mid = false) {
    await openNotes(page, status, native);
   },
   async act({ page, mark }) {
-   const title = `Writing journey ${uniq()}`;
+   const title = `Writing journey ${uniq()} — a quieter workspace for every release`;
    await mark('create a note through the editable heading and bounded writing field');
    await page.getByRole('button', { name: 'New note', exact: true }).first().click();
    expect(await page.getByRole('tab', { name: 'Edit', exact: true }).getAttribute('aria-selected') === 'true', 'new notes start in Edit');
    const heading = page.getByRole('textbox', { name: 'Note title', exact: true });
    expect(await heading.evaluate(el => !!el.closest('h1')), 'the only title input is the heading');
    expect(await heading.evaluate(el => parseFloat(getComputedStyle(el).fontSize)) >= 22, 'the editable title retains heading hierarchy, including the native shell');
+   expect(await heading.evaluate(el => el.tagName) === 'TEXTAREA', 'the note heading wraps in an auto-growing textarea');
    await heading.fill(title);
+   expect(await heading.evaluate(el => el.scrollHeight <= el.clientHeight + 1), 'every title line is visible');
+   await heading.press('Enter');
+   expect(await page.getByRole('textbox', { name: 'Note body', exact: true }).evaluate(el => el === document.activeElement), 'Enter moves from title to body');
+   expect(await heading.inputValue() === title, 'Enter never inserts a title newline');
    await page.getByRole('textbox', { name: 'Note body', exact: true }).fill('# Release plan\n- [x] **Ready** for [review](https://example.com)');
    await page.locator('.note-save').filter({ hasText: /^Saved$/ }).waitFor({ state: 'attached' });
    await mark('switch to Preview and keep the phone body above 320px');
    await page.getByRole('tab', { name: 'Preview', exact: true }).click();
+   const preview = page.locator('.note-preview');
+   const task = preview.locator('li').first();
+   expect(await task.locator('input[type=checkbox]:checked:disabled').count() === 1, 'Preview reuses read-only GFM task marks');
+   expect(await task.evaluate(el => getComputedStyle(el).listStyleType) === 'none', 'task items have no bullet');
+   expect(await preview.locator('ul').evaluate(el => parseFloat(getComputedStyle(el).paddingInlineStart)) >= 20, 'lists stay inside the preview column');
    const body = page.getByRole('region', { name: 'Note content', exact: true });
    if (page.viewportSize().width < 600) expect((await body.boundingBox()).y < 320, 'the note body starts within 320px');
-   expect(await page.getByRole('button', { name: 'Attach file', exact: true }).isVisible(), 'attach stays reachable');
+   const actions = page.locator('details.detail-more');
+   if (await actions.isVisible()) await actions.locator('summary').click();
+   expect(await page.getByRole('button', { name: 'Attach file', exact: true }).isVisible(), 'attach stays reachable through the phone title-row More menu');
+   if (await actions.isVisible()) await actions.locator('summary').click();
    const summary = page.locator('details.note-fields > summary');
    if (!await page.getByRole('textbox', { name: 'Add tag', exact: true }).isVisible()) await summary.click();
    await page.getByRole('textbox', { name: 'Add tag', exact: true }).fill('Planning');
@@ -50,6 +63,7 @@ function writingCase(name, native = false, mid = false) {
    await page.locator('.note-save').filter({ hasText: /^Saved$/ }).waitFor({ state: 'attached' });
    if (page.viewportSize().width < 600) await summary.click();
    await mark('More retains its keyboard path and the existing delete confirmation');
+   if (await actions.isVisible()) await actions.locator('summary').click();
    await page.getByRole('button', { name: 'More note actions', exact: true }).click();
    await page.getByRole('menuitem', { name: 'Delete note', exact: true }).press('Escape');
    expect(await page.getByRole('button', { name: 'More note actions', exact: true }).evaluate(el => el === document.activeElement), 'Escape returns focus');

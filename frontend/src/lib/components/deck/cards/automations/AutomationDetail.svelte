@@ -5,8 +5,7 @@
 	import {
 		ChevronLeft,
 		Pencil,
-		Play,
-		Trash2
+		Play
 	} from 'lucide-svelte';
 	import AutomationRunHistory from './AutomationRunHistory.svelte';
 	import AutomationModelLabel from './AutomationModelLabel.svelte';
@@ -125,7 +124,7 @@ import AutomationModelError from './AutomationModelError.svelte';
      {#each automation.action_steps as step, i}<SettingRow label="Step {i+1}" hint={step.type.replaceAll('_',' ')}><span title={[step.connector_id, step.action_id].filter(Boolean).join(' · ') || undefined}>{step.prompt || step.url || (step.type === 'delay' ? `${step.seconds}s` : step.type === 'connector_action' ? (connectorTypes.find(t => t.type === connectors.find(c => c.id === step.connector_id)?.type)?.actions.find(a => a.id === step.action_id)?.name || 'Saved connector action') : 'Saved action')}{#if step.connector_id} · {connectors.find(c => c.id === step.connector_id)?.name || 'Saved connector'}{/if}</span></SettingRow>{/each}
     </RowGroup>
    {/if}
-   <RowGroup title="Danger zone" tone="danger"><SettingRow label="Delete automation" hint="Permanently removes this automation and its history."><button class="st-btn danger" title="Delete" onclick={() => onDelete(automation.id)}><Trash2 size={14} />Delete</button></SettingRow></RowGroup>
+   <RowGroup title="Danger zone" tone="danger"><SettingRow label="Delete automation" hint="Permanently removes this automation and its history."><button class="st-btn danger" title="Delete" onclick={() => onDelete(automation.id)}>Delete</button></SettingRow></RowGroup>
   {:else if current === 'generation'}
    <section aria-label="Media generation" data-testid="automation-generation"><RowGroup title="Media generation" bare><AutomationJobChoices jobId={automation.id} mode="live" /></RowGroup></section>
   {:else}

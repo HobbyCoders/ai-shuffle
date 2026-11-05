@@ -32,6 +32,8 @@
 		onReset?: () => void;
 		/** Dims label and hint (the setting has no effect right now). */
 		dim?: boolean;
+		/** Keep selector controls full-width beneath their label on phone. */
+		stackOnPhone?: boolean;
 		children?: Snippet;
 		expanded?: Snippet;
 	}
@@ -46,6 +48,7 @@
 		defaultValue,
 		onReset,
 		dim = false,
+		stackOnPhone = false,
 		children,
 		expanded
 	}: Props = $props();
@@ -92,6 +95,7 @@
 	class="st-row"
 	class:mod={modified}
 	class:dim
+	class:st-phone-stack={stackOnPhone}
 	data-setting-anchor={id}
 	title={modified ? 'Changed from default' : undefined}
 >

@@ -12,6 +12,7 @@ vi.mock('$lib/api/client', () => ({
 const note = { id: 'writing', title: 'A quieter workspace', content: '# Release plan\n- [x] **Ready** for [review](https://example.com)', tags: ['Planning'], is_pinned: false, file_path: null, created_at: '2026-09-01', updated_at: '2026-09-01' };
 beforeEach(() => {
  vi.clearAllMocks(); sessionStorage.clear();
+ vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
  vi.mocked(getNotes).mockResolvedValue([note]); vi.mocked(getNote).mockResolvedValue(note);
  vi.mocked(updateNote).mockImplementation(async (_id, data) => ({ ...note, ...data }));
  vi.stubGlobal('matchMedia', () => ({ matches: false, addEventListener() {}, removeEventListener() {} }));
@@ -39,6 +40,34 @@ it('strips markdown from the list excerpt and opens an empty note in Edit', asyn
  await fireEvent.click(screen.getAllByRole('button', { name: 'New note' })[0]);
  expect(screen.getByRole('tab', { name: 'Edit' }).getAttribute('aria-selected')).toBe('true');
  expect(screen.getByRole('textbox', { name: 'Note body' })).toBeTruthy();
+});
+it('wraps the title while keeping pasted lines and Enter as one logical title', async () => {
+ render(NotesCard);
+ await fireEvent.click(await screen.findByText(note.title));
+ const title = screen.getByRole('textbox', { name: 'Note title' }) as HTMLTextAreaElement;
+ expect(title.tagName).toBe('TEXTAREA');
+ await fireEvent.input(title, { target: { value: 'Release plan\nfor every\r\nworkspace' } });
+ expect(title.value).toBe('Release plan for every workspace');
+ await fireEvent.keyDown(title, { key: 'Enter', isComposing: true });
+ expect(screen.getByRole('tab', { name: 'Preview' }).getAttribute('aria-selected')).toBe('true');
+ await fireEvent.keyDown(title, { key: 'Enter' });
+ await Promise.resolve();
+ expect(document.activeElement).toBe(screen.getByRole('textbox', { name: 'Note body' }));
+ expect(title.value).toBe('Release plan for every workspace');
+});
+it('uses read-only GFM tasks, semantic indented lists and nested markdown in Preview', async () => {
+ vi.mocked(getNote).mockResolvedValue({ ...note, content: '- [x] **Ready** for [review](https://example.com)\n- [ ] An unfinished item\n  - Nested bullet\n\n1. Ordered item' });
+ const view = render(NotesCard);
+ await fireEvent.click(await screen.findByText(note.title));
+ const preview = view.container.querySelector('.note-preview')!;
+ const boxes = preview.querySelectorAll<HTMLInputElement>('li > input[type=checkbox]');
+ expect(boxes).toHaveLength(2);
+ expect([...boxes].map(box => [box.checked, box.disabled])).toEqual([[true, true], [false, true]]);
+ expect(preview.textContent).not.toMatch(/\[[ x]\]/);
+ expect(preview.querySelector('ul ul li')?.textContent).toContain('Nested bullet');
+ expect(preview.querySelector('ol li')?.textContent).toBe('Ordered item');
+ expect(preview.querySelector('strong')?.textContent).toBe('Ready');
+ expect(preview.querySelector('a')?.getAttribute('href')).toBe('https://example.com');
 });
 it('keeps phone metadata and save status together inside the collapsed details', async () => {
  vi.stubGlobal('matchMedia', () => ({ matches: true, addEventListener() {}, removeEventListener() {} }));

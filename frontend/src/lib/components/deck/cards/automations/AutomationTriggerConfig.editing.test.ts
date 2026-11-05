@@ -43,7 +43,7 @@ describe('cron triggers', () => {
 		await fireEvent.change(preset, { target: { value: '0 9 * * 1-5' } });
 		expect(lastTriggers(onUpdateTriggers)).toEqual([{ type: 'cron', config: { expression: '0 9 * * 1-5' } }]);
 		expect(await screen.findByText('Every weekday at 9 AM', { selector: '.cron-summary-text' })).toBeTruthy();
-		expect(screen.getByText('0 9 * * 1-5', { selector: 'code' })).toBeTruthy();
+		expect((screen.getByLabelText('Cron expression') as HTMLInputElement).value).toBe('0 9 * * 1-5');
 	});
 
 	it('builds the custom expression from the field just changed, not the previous value', async () => {

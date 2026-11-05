@@ -12,10 +12,11 @@
 		ListGroupLabel, DetailPane, EmptyDetail, SelectField, InlineBanner
 	} from '$lib/components/layout/view';
 	import { tick } from 'svelte';
+	import { Marked } from 'marked';
 	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
 	import NoteFileAutocomplete from './NoteFileAutocomplete.svelte';
 	import { resizeToFitContent } from './notes-textarea-resize';
-	import { Notebook, Plus, Pin, Trash2, Paperclip, X, Ellipsis } from 'lucide-svelte';
+	import { Notebook, Plus, Pin, Paperclip, X, Ellipsis } from 'lucide-svelte';
 	import {
 		getNotes,
 		getNote,
@@ -95,6 +96,32 @@
 	}
 	let newTagInput = $state('');
 	let textareaEl = $state<HTMLTextAreaElement | null>(null);
+
+	// A title is one logical line, but may occupy any number of visual lines.
+	function sizeTitle(node: HTMLTextAreaElement, _value: string) {
+		const fit = () => {
+			node.style.height = 'auto';
+			node.style.height = `${node.scrollHeight}px`;
+		};
+		const observer = new ResizeObserver(fit);
+		observer.observe(node);
+		fit();
+		return { update: fit, destroy: () => observer.disconnect() };
+	}
+
+	function inputTitle(event: Event & { currentTarget: HTMLTextAreaElement }) {
+		editorTitle = event.currentTarget.value.replace(/[\r\n]+/g, ' ');
+		event.currentTarget.value = editorTitle;
+		markDirty();
+	}
+
+	async function titleKeydown(event: KeyboardEvent) {
+		if (event.key !== 'Enter' || event.isComposing) return;
+		event.preventDefault();
+		showPreview = false;
+		await tick();
+		textareaEl?.focus();
+	}
 
 	// Attachments state
 	let attachments = $state<NoteAttachment[]>([]);
@@ -758,31 +785,11 @@
 		);
 	}
 
-	// Simple markdown to HTML (basic conversion)
+	// Marked's GFM task handling is the same parser used by chat. Notes keeps
+	// its own instance: no chat code-block controls or interactive task toggles.
+	const noteMarkdown = new Marked({ gfm: true });
 	function renderMarkdown(content: string): string {
-		return renderAttachmentReferences(content)
-			// Headers
-			.replace(/^### (.+)$/gm, '<h3>$1</h3>')
-			.replace(/^## (.+)$/gm, '<h2>$1</h2>')
-			.replace(/^# (.+)$/gm, '<h1>$1</h1>')
-			// Bold and italic
-			.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-			.replace(/\*(.+?)\*/g, '<em>$1</em>')
-			// Code blocks
-			.replace(/```[\s\S]*?```/g, (match) => {
-				const content = match.slice(3, -3).trim();
-				return `<pre><code>${content.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</code></pre>`;
-			})
-			// Inline code
-			.replace(/`(.+?)`/g, '<code>$1</code>')
-			// Lists
-			.replace(/^- (.+)$/gm, '<li>$1</li>')
-			// Paragraphs
-			.replace(/\n\n/g, '</p><p>')
-			.replace(/^(.+)$/gm, (match) => {
-				if (match.startsWith('<')) return match;
-				return match;
-			});
+		return noteMarkdown.parse(renderAttachmentReferences(content), { async: false });
 	}
 	let remoteChange = $state('');
 	watchResources(['notes'], async () => {
@@ -877,7 +884,7 @@
 				tabs={[{ id: 'edit', label: 'Edit' }, { id: 'preview', label: 'Preview' }]}
 				tab={showPreview ? 'preview' : 'edit'} onTabChange={(tab) => { showPreview = tab === 'preview'; }}>
 				{#snippet heading()}
-					<h1 class="note-title"><span class="sr-only" aria-hidden="true">{editorTitle || 'New note'}</span><input aria-label="Note title" placeholder="New note" bind:value={editorTitle} oninput={markDirty} /></h1>
+					<h1 class="note-title"><span class="sr-only" aria-hidden="true">{editorTitle || 'New note'}</span><textarea aria-label="Note title" placeholder="New note" rows="1" value={editorTitle} use:sizeTitle={editorTitle} oninput={inputTitle} onkeydown={titleKeydown}></textarea></h1>
 				{/snippet}
 				{#snippet subtitle()}
 					{#if !narrow}{@render metadata()}{/if}
@@ -889,7 +896,7 @@
 						<button class="st-btn icon" bind:this={moreButton} title="More" aria-label="More note actions" aria-haspopup="menu" aria-expanded={moreOpen} onclick={toggleMore}><Ellipsis /></button>
 						{#if moreOpen}
 							<div class="note-menu" role="menu" aria-label="Note actions" bind:this={moreMenu}>
-								<button class="st-btn" role="menuitem" onclick={() => { closeMore(true); handleDelete(); }} disabled={isCreatingNew}><Trash2 />Delete note</button>
+								<button class="st-btn danger" role="menuitem" onclick={() => { closeMore(true); handleDelete(); }} disabled={isCreatingNew}>Delete note</button>
 							</div>
 						{/if}
 					</div>
@@ -973,10 +980,10 @@
 	.note-save { font-size: 13px; color: var(--st-mfg); }
 	.note-metadata { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; color: var(--st-mfg); font-size: 13px; }
 	.note-title { width: 100%; min-width: 0; margin: 0; font-size: 24px; font-weight: 600; letter-spacing: -0.01em; line-height: 1.25; }
-	.note-title input { display: block; width: 100%; min-width: 0; border: 0; border-radius: var(--st-radius-sm); padding: 0; background: transparent; color: var(--st-fg); font: inherit; font-size: inherit !important; letter-spacing: inherit; line-height: inherit; }
-	.note-title input:hover { background: var(--st-hover); }
-	.note-title input:focus-visible { outline: 2px solid var(--ring); outline-offset: 3px; }
-	.note-title input::placeholder { color: var(--st-mfg); }
+	.note-title textarea { display: block; width: 100%; min-width: 0; border: 0; border-radius: var(--st-radius-sm); padding: 0; background: transparent; color: var(--st-fg); font: inherit; font-size: inherit !important; letter-spacing: inherit; line-height: inherit; resize: none; overflow: hidden; overflow-wrap: anywhere; }
+	.note-title textarea:hover { background: var(--st-hover); }
+	.note-title textarea:focus-visible { outline: 2px solid var(--ring); outline-offset: 3px; }
+	.note-title textarea::placeholder { color: var(--st-mfg); }
 	.note-more { position: relative; }
 	.note-menu { position: absolute; right: 0; top: calc(100% + 4px); z-index: 20; min-width: 160px; padding: 4px; border: 1px solid var(--st-border); border-radius: var(--st-radius-md); background: var(--popover); box-shadow: var(--menu-shadow); }
 	.note-menu button { width: 100%; justify-content: flex-start; }
@@ -998,9 +1005,14 @@
 	.note-textarea:focus-visible { outline-offset: 4px; }
 	.note-drop { position: absolute; inset: 0; display: grid; place-items: center; background: var(--st-bg); color: var(--st-fg); font-size: 14px; pointer-events: none; }
 	.note-preview { max-width: none; min-height: 320px; padding: 12px 0; color: var(--st-fg); font-size: 14px; line-height: 1.7; overflow-wrap: anywhere; }
+	.note-preview :global(ul), .note-preview :global(ol) { padding-inline-start: 24px; }
+	.note-preview :global(li:has(> input[type='checkbox'])),
+	.note-preview :global(li:has(> p > input[type='checkbox'])) { position: relative; list-style: none; margin-inline-start: -24px; padding-inline-start: 24px; }
+	.note-preview :global(li input[type='checkbox']) { position: absolute; inset-inline-start: 0; top: 0.28em; width: 16px; height: 16px; margin: 0; accent-color: var(--st-fg); pointer-events: none; }
 	.note-preview :global(.note-ref) { color: var(--primary); text-decoration: underline; text-underline-offset: 3px; }
 	.note-preview :global(.note-ref--missing) { color: var(--st-mfg); text-decoration: none; }
 	@media (pointer: coarse), (max-width: 600px) {
+		.note-title { font-size: 22px; line-height: 1.3; }
 		.note-writing { padding-top: 0; }
 		.note-preview { padding-top: 0; }
 		.note-preview :global(> :first-child) { margin-top: 0; }

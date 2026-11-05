@@ -40,7 +40,7 @@ import AutomationModelError from './AutomationModelError.svelte';
 		type JobChoiceCommit,
 		type JobChoiceDraft
 	} from '$lib/api/generation-job-choices';
-	import Banner from '$lib/components/Banner.svelte';
+	import HelpTip from '$lib/components/settings/rows/HelpTip.svelte';
 	import { layout } from '$lib/stores/layout.svelte';
 	import { onMount } from 'svelte';
 	import { getClaudeAuth } from '$lib/api/claude-auth';
@@ -307,6 +307,12 @@ import AutomationModelError from './AutomationModelError.svelte';
  const tabs = [{id:'setup',label:'Setup'},{id:'generation',label:'Media generation'},{id:'budget',label:'Budget & limits'}];
 </script>
 <style>
+ .notice-actions { display: inline-flex; align-items: center; gap: 8px; vertical-align: middle; }
+ .notice-link { padding: 0; border: 0; border-radius: var(--st-radius-sm); background: none; color: var(--st-fg); font: inherit; text-decoration: underline; text-underline-offset: 3px; }
+ .notice-link:hover { color: var(--st-primary); }
+ .notice-link:active { opacity: 0.7; }
+ .notice-link:focus-visible { outline: 2px solid var(--ring); outline-offset: 3px; }
+ @media (max-width: 600px) { .notice-link { min-height: 44px; } }
  .automation-triggers { margin-top: 40px; }
  .automation-triggers header { margin-bottom: 16px; }
  .automation-triggers h3 { margin: 0; font-size: 14px; font-weight: 600; }
@@ -320,8 +326,8 @@ import AutomationModelError from './AutomationModelError.svelte';
  </InlineBanner></div>
 {/if}
 {#if scheduledRunNotice}
- <div data-testid="automation-api-key-notice"><InlineBanner tone="warn">{scheduledRunNotice}
-  {#snippet actions()}<button class="st-btn" onclick={() => openSettings({category:'providers',item:'provider:claude',anchor:'providers.claudeMode'})}>Open Claude settings</button>{/snippet}
+ <div data-testid="automation-api-key-notice"><InlineBanner tone="warn" compact>Claude runs on your subscription.
+  {#snippet actions()}<span class="notice-actions"><button class="notice-link" aria-label="Open Claude settings" onclick={() => openSettings({category:'providers',item:'provider:claude',anchor:'providers.claudeMode'})}>Use an API key</button><HelpTip about="scheduled Claude runs" text={scheduledRunNotice} /></span>{/snippet}
  </InlineBanner></div>
 {/if}
 <DetailTabs {tabs} current={tab} onselect={(id) => tab = id} label="Automation configuration" idPrefix="automation-form" />
