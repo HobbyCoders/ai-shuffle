@@ -4,12 +4,17 @@ The HTTPS pointer is only a reason to skip work, never permission to publish.
 No dependencies, credentials or signing keys are needed here.
 """
 import base64
+import importlib.util
 import json
 import os
 from pathlib import Path
 import re
 import urllib.error
 import urllib.request
+
+_retry_spec = importlib.util.spec_from_file_location("publication_read_retry", Path(__file__).with_name("publication_read_retry.py"))
+read_retry = importlib.util.module_from_spec(_retry_spec)
+_retry_spec.loader.exec_module(read_retry)
 
 URL = "https://hobbycoders.com/v1/desktop/manifest/edge"  # same pointer as /nightly
 # Cloudflare answers 403 to urllib's default "Python-urllib/x.y" agent, which
@@ -34,12 +39,14 @@ def changed(revision, fetch):
 
 
 def fetch():
-    request = urllib.request.Request(URL, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(request, timeout=20) as response:
-        raw = response.read(32769)
-    if len(raw) > 32768:
-        raise ValueError("Manifest exceeds limits")
-    return raw
+    def read():
+        request = urllib.request.Request(URL, headers={"User-Agent": USER_AGENT})
+        with urllib.request.urlopen(request, timeout=20) as response:
+            raw = response.read(32769)
+        if len(raw) > 32768:
+            raise ValueError("Manifest exceeds limits")
+        return raw
+    return read_retry.retry_read(read, read_retry.temporary_url_error)
 
 
 if __name__ == "__main__":
