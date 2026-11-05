@@ -171,6 +171,11 @@ def lifecycle_processes(proc=Path("/proc")):
             continue  # a short-lived process may exit during the census
         if not args:
             continue
+        # Debian Chromium rewrites /proc/cmdline as one space-joined title for
+        # both the browser and its children. Normalize only that browser view:
+        # basename(title) misses the root, and checking unsplit args misses
+        # child --type= switches. This is not shell-quoted argv (do not shlex).
+        browser_args = args[0].split() if len(args) == 1 else args
         # Entrypoint forwards empty argv (main defaults to run); signed source
         # handover supplies an explicit run. Only Python's script position is
         # an entry, not a mention in tini, maintenance, -c, -m or wrapper args.
@@ -191,11 +196,12 @@ def lifecycle_processes(proc=Path("/proc")):
             role = "postgres"
         elif any(Path(arg).name in ("chrome-supervisor.sh", "chrome-supervisor") for arg in args[:2]):
             role = "browser_supervisor"
-        elif (Path(args[0]).name in ("chromium", "chrome", "google-chrome-stable")
-              and not any(arg.startswith("--type=") for arg in args)):
+        elif (browser_args and Path(browser_args[0]).name in ("chromium", "chrome", "google-chrome-stable")
+              and not any(arg.startswith("--type=") for arg in browser_args)):
             role = "browser"
         if role:
-            processes[role].append({"pid": int(process.name), "executable": args[0], **({"entry": entry} if entry else {})})
+            executable = browser_args[0] if role == "browser" else args[0]
+            processes[role].append({"pid": int(process.name), "executable": executable, **({"entry": entry} if entry else {})})
     return processes
 
 

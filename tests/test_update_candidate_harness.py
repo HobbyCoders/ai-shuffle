@@ -326,7 +326,7 @@ def test_failed_install_captures_diagnostics_without_masking_failure(candidate, 
     )
 
 
-def process_fixture(root, revision, *, restarted=False):
+def process_fixture(root, revision, *, restarted=False, browser_title=True):
     directory = root / "versions" / revision
     resident = directory / "source/docker/container_runtime.py" if restarted else "/app/docker/container_runtime.py"
     argv = {
@@ -336,10 +336,19 @@ def process_fixture(root, revision, *, restarted=False):
         "11": [str(directory / "venv/bin/python"), "-m", "app.main"],
         "12": ["postgres", "-D", "/data/postgres/data"],
         "13": ["/bin/bash", "/tmp/private/chrome-supervisor.sh"],
-        "14": ["/usr/lib/chromium/chromium", "--ozone-platform=headless"],
+        "14": ["/usr/lib/chromium/chromium", "--ozone-platform=headless", "--remote-debugging-port=9221",
+               "--user-data-dir=/tmp/synthetic-profile"],
         "15": ["postgres: checkpointer"],
-        "16": ["/usr/lib/chromium/chromium", "--type=renderer"],
+        **{str(pid): ["/usr/lib/chromium/chromium", f"--type={kind}", "--user-data-dir=/tmp/synthetic-profile"]
+           for pid, kind in enumerate(("renderer", "zygote", "gpu-process", "utility"), 16)},
     }
+    if browser_title:
+        # Read-only /proc evidence: the resident Debian Chromium root AND its
+        # children expose one space-joined title, not the launcher's NUL argv.
+        # Earlier fixtures used only the launch vector and missed both facts:
+        # basename(title) is not chromium, and child --type= is inside title.
+        for pid in ("14", "16", "17", "18", "19"):
+            argv[pid] = [" ".join(argv[pid])]
     proc = root / "proc"
     for pid, args in argv.items():
         process = proc / pid
@@ -379,15 +388,38 @@ def test_census_does_not_mistake_maintenance_or_argument_mentions_for_supervisor
 
 
 @pytest.mark.parametrize("restarted", [False, True])
-def test_lifecycle_census_counts_owned_roots_not_children(tmp_path, restarted):
+@pytest.mark.parametrize("browser_title", [False, True])
+def test_lifecycle_census_counts_owned_roots_not_children(tmp_path, restarted, browser_title):
     from scripts.ci import updater_candidate_fixture as fixture
     revision = "b" * 40
-    proc = process_fixture(tmp_path, revision, restarted=restarted)
+    proc = process_fixture(tmp_path, revision, restarted=restarted, browser_title=browser_title)
     processes = fixture.lifecycle_processes(proc)
     assert all(len(owned) == 1 for owned in processes.values())
     assert processes["postgres"][0]["pid"] == 12
-    assert processes["browser"][0]["pid"] == 14
+    # Receipts must not leak the title's flags, profile path or page URL.
+    assert processes["browser"] == [{"pid": 14, "executable": "/usr/lib/chromium/chromium"}]
     assert (processes["supervisor"][0]["entry"].startswith(str(tmp_path))) is restarted
+
+
+@pytest.mark.parametrize("args", [
+    [f"/usr/lib/chromium/chromium --type={kind} --remote-debugging-port=9221"]
+    for kind in ("renderer", "zygote", "gpu-process", "utility")
+] + [
+    ["/usr/lib/chromium/chromium", "--type=renderer", "--remote-debugging-port=9221"],
+    ["node", "/opt/browser-mcp/dist/egress-launch.js", "--", "/usr/lib/chromium/chromium"],
+    ["node /opt/browser-mcp/dist/egress-launch.js -- /usr/lib/chromium/chromium"],
+    ["/bin/bash", "/usr/bin/chromium", "--remote-debugging-port=9221"],
+    ["/bin/echo", "/usr/lib/chromium/chromium --remote-debugging-port=9221"],
+    ["/bin/echo /usr/lib/chromium/chromium --remote-debugging-port=9221"],
+    ["/usr/lib/chromium/chrome_crashpad_handler", "--monitor-self"],
+    ["/usr/bin/chromium-helper --remote-debugging-port=9221"],
+    ["   "],
+])
+def test_browser_census_rejects_child_wrapper_and_argument_mentions(tmp_path, args):
+    from scripts.ci import updater_candidate_fixture as fixture
+    proc = process_fixture(tmp_path, "b" * 40)
+    (proc / "14/cmdline").write_bytes(b"\0".join(arg.encode() for arg in args) + b"\0")
+    assert fixture.lifecycle_processes(proc)["browser"] == []
 
 
 @pytest.mark.parametrize("scenario", [
@@ -504,6 +536,39 @@ def test_restart_proof_rejects_stale_unhealthy_or_duplicate_owners(tmp_path, mon
     ) else AssertionError
     with pytest.raises(expected_error):
         fixture.wait_for("restarted")
+
+
+@pytest.mark.parametrize("role", ["supervisor", "application", "postgres", "browser_supervisor", "browser"])
+@pytest.mark.parametrize("fault", ["missing", "duplicate"])
+def test_final_census_rejects_owner_changes_after_cdp_ready(tmp_path, monkeypatch, role, fault):
+    from scripts.ci import updater_candidate_fixture as fixture
+    revision, image = "b" * 40, "a" * 40
+    monkeypatch.setattr(fixture, "ROOT", tmp_path)
+    monkeypatch.setattr(fixture, "time", Clock())
+    proc = process_fixture(tmp_path, revision, restarted=True)
+    before = fixture.lifecycle_processes(proc)
+    cmdline = proc / str(before[role][0]["pid"]) / "cmdline"
+    if fault == "missing":
+        cmdline.unlink()  # only this test's synthetic proc file
+    else:
+        (proc / "20").mkdir()
+        (proc / "20/cmdline").write_bytes(cmdline.read_bytes())
+    after = fixture.lifecycle_processes(proc)
+    census = Mock(side_effect=[before, after])
+    monkeypatch.setattr(fixture, "lifecycle_processes", census)
+    ready = Mock(return_value=True)  # synthetic CDP; the producing Docker path is CI-only
+    monkeypatch.setattr(fixture, "browser_ready", ready)
+    write_json(tmp_path / "ci-fixture.json", {"revision": revision, "image_revision": image})
+    write_json(tmp_path / "ci-request.json", {"action": "install", "expires_at": 1000})
+    write_json(tmp_path / "state.json", {"active": revision})
+    write_json(tmp_path / "status.json", {
+        "updater": {"revision": revision},
+        "diagnostics": {"revision": revision, "stages": [{"stage": "tools_build", "outcome": "hit"}]},
+    })
+    with pytest.raises(AssertionError):
+        fixture.wait_for("restarted")
+    assert census.call_count == 2
+    ready.assert_called_once_with()
 
 
 def test_fixture_refuses_legacy_direct_refresh_without_writing_requests(tmp_path, monkeypatch):
