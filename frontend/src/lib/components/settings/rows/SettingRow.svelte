@@ -34,6 +34,8 @@
 		dim?: boolean;
 		/** Keep selector controls full-width beneath their label on phone. */
 		stackOnPhone?: boolean;
+		/** Never clamp action copy; move controls below it when the row is short of room. */
+		wrapHint?: boolean;
 		children?: Snippet;
 		expanded?: Snippet;
 	}
@@ -49,6 +51,7 @@
 		onReset,
 		dim = false,
 		stackOnPhone = false,
+		wrapHint = false,
 		children,
 		expanded
 	}: Props = $props();
@@ -96,10 +99,12 @@
 	class:mod={modified}
 	class:dim
 	class:st-phone-stack={stackOnPhone}
+	class:st-wrap-hint={wrapHint}
+	style:gap={wrapHint ? '12px 20px' : undefined}
 	data-setting-anchor={id}
 	title={modified ? 'Changed from default' : undefined}
 >
-	<div class="st-rt">
+	<div class="st-rt" style:flex-basis={wrapHint ? '280px' : undefined}>
 		<div class="st-rl">
 			<span id={labelId}>{text}</span>
 			{#if helpText}<HelpTip text={helpText} about={text} />{/if}
@@ -144,6 +149,10 @@
 	.st-rt {
 		min-width: 0;
 	}
+	.st-row.st-wrap-hint { display: flex; flex-wrap: wrap; }
+	.st-wrap-hint > .st-rt { flex-grow: 1; }
+	.st-wrap-hint .st-rh { white-space: normal; overflow: visible; overflow-wrap: anywhere; }
+	.st-wrap-hint > .st-rc { margin-left: auto; max-width: 100%; flex-wrap: wrap; }
 	.st-rl {
 		font-size: 13.5px;
 		font-weight: 500;

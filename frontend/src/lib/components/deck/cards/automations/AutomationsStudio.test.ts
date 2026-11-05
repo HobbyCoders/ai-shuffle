@@ -42,6 +42,21 @@ const handlers = {
     onTrigger: vi.fn(), onDelete: vi.fn(), formatCost: () => '$0', triggerTypeLabel: () => 'Interval'
 };
 
+describe('automation list state marks', () => {
+ it.each([
+  ['idle', true, 'Enabled', 'ok'], ['running', true, 'Running', 'ok'],
+  ['paused', true, 'Paused', 'warn'], ['paused', false, 'Paused', 'warn'],
+  ['idle', false, 'Disabled', 'off'], ['error', true, 'Error', 'err']
+ ] as const)('renders the real %s / enabled=%s state without a printed label', (status, is_enabled, label, tone) => {
+  const { container } = render(AutomationsList, { automations: [{ ...automation, status, is_enabled, last_error: null }],
+   searchQuery: '', triggeringId: null, formatTime: () => 'Never', getStatusColor: () => '', ...handlers });
+  const row = screen.getByRole('button', { name: `Saved search — ${label}` });
+  expect(row.textContent).not.toContain(label);
+  expect(container.querySelector('.automation-state')?.getAttribute('title')).toBe(label);
+  expect(screen.getByRole('img', { name: label }).classList.contains(tone)).toBe(true);
+ });
+});
+
 describe('disabled automation explanation', () => {
     it('shows the stored error beside the disabled Studio row', () => {
         render(AutomationsStudio, { automations: [automation], pendingApprovals: [], profiles: [],
@@ -74,6 +89,15 @@ describe('automation detail state', () => {
     });
     const agents = (...ids: string[]) => ids.map((id) => ({ id, name: id })) as never;
 
+    it('keeps all four run metrics in the compact Stats strip', () => {
+        const { container } = render(AutomationDetail, detailProps({
+            detailStats: { total_runs: 12, total_cost_usd: 1.5, successful_runs: 9, failed_runs: 3 },
+            formatCost: () => '$1.50'
+        }));
+        const strip = container.querySelector('.metrics')!;
+        expect([...strip.querySelectorAll('dt')].map(el => el.textContent)).toEqual(['Total runs', 'Total cost', 'Success rate', 'Failures']);
+        expect([...strip.querySelectorAll('dd')].map(el => el.textContent)).toEqual(['12', '$1.50', '75%', '3']);
+    });
     it('keeps Delete text-only in the shared danger style and preserves its handler', async () => {
         const onDelete = vi.fn();
         render(AutomationDetail, detailProps({ onDelete }));

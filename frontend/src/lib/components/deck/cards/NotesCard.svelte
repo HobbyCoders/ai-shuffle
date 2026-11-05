@@ -86,7 +86,10 @@
 		if (returnFocus) moreButton?.focus();
 	}
 	function noteExcerpt(content: string): string {
-		return content
+		// A document heading is already represented by the note title. Keep it
+		// only when it is the entire document, rather than running it into prose.
+		const body = content.trimStart().replace(/^(?:#{1,6}[ \t]+[^\n]*(?:\n|$)|[^\n]+\n[ \t]*(?:=+|-+)[ \t]*(?:\n|$))[ \t\n]*/, '');
+		return (body.trim() ? body : content)
 			.replace(/```[^\n]*\n?([\s\S]*?)```/g, '$1')
 			.replace(/!?\[([^\]]+)\]\([^)]*\)/g, '$1')
 			.replace(/^\s{0,3}(?:#{1,6}\s+|>\s*|[-*+]\s+(?:\[[ xX]\]\s*)?|\d+[.)]\s+)/gm, '')
@@ -835,11 +838,13 @@
 	<span class="note-save" role="status">{uploading ? 'Uploading…' : saveLabel}</span>
 {/snippet}
 
+{#snippet pinMark()}<Pin size={14} aria-hidden="true" />{/snippet}
+
 {#snippet noteItem(note: Note)}
 	<ListItem id={note.id} name={note.title || 'Untitled'}
 		summary={[noteExcerpt(note.content), ...note.tags.slice(0, 3)].filter(Boolean).join(' · ')}
 		meta={formatRelativeTime(note.updated_at)} icon={note.is_pinned ? Pin : Notebook}
-		selected={editingNote?.id === note.id} onselect={() => openNote(note)} />
+		selected={editingNote?.id === note.id} onselect={() => openNote(note)} lead={note.is_pinned ? pinMark : undefined} />
 {/snippet}
 
 <svelte:window onclick={(event) => { if (!(event.target as Element)?.closest?.('.note-more')) closeMore(); }} onkeydown={(event) => { if (moreOpen && event.key === 'Escape') { event.preventDefault(); closeMore(true); } }} />
@@ -880,14 +885,11 @@
 	{/snippet}
 	{#snippet main(back)}
 		{#if editingNote || isCreatingNew}
-			<DetailPane width="reading" name={editorTitle.trim() || 'New note'} backLabel="Notes" onBack={back}
+			<DetailPane width="reading" name={editorTitle.trim() || 'New note'} backLabel="Notes" onBack={back} compactHeader={narrow} subtitle={narrow ? undefined : metadata}
 				tabs={[{ id: 'edit', label: 'Edit' }, { id: 'preview', label: 'Preview' }]}
 				tab={showPreview ? 'preview' : 'edit'} onTabChange={(tab) => { showPreview = tab === 'preview'; }}>
 				{#snippet heading()}
 					<h1 class="note-title"><span class="sr-only" aria-hidden="true">{editorTitle || 'New note'}</span><textarea aria-label="Note title" placeholder="New note" rows="1" value={editorTitle} use:sizeTitle={editorTitle} oninput={inputTitle} onkeydown={titleKeydown}></textarea></h1>
-				{/snippet}
-				{#snippet subtitle()}
-					{#if !narrow}{@render metadata()}{/if}
 				{/snippet}
 				{#snippet primary()}
 					<button class="st-btn icon" title="Attach file" aria-label="Attach file" onclick={triggerFilePicker} disabled={uploading}><Paperclip /></button>
@@ -1008,13 +1010,15 @@
 	.note-preview :global(ul), .note-preview :global(ol) { padding-inline-start: 24px; }
 	.note-preview :global(li:has(> input[type='checkbox'])),
 	.note-preview :global(li:has(> p > input[type='checkbox'])) { position: relative; list-style: none; margin-inline-start: -24px; padding-inline-start: 24px; }
-	.note-preview :global(li input[type='checkbox']) { position: absolute; inset-inline-start: 0; top: 0.28em; width: 16px; height: 16px; margin: 0; accent-color: var(--st-fg); pointer-events: none; }
+	.note-preview :global(li input[type='checkbox']) { appearance: none; position: absolute; inset-inline-start: 0; top: 0.28em; width: 16px; height: 16px; margin: 0; border: 1.5px solid var(--st-mfg); border-radius: 3px; background: transparent; opacity: 1; pointer-events: none; }
+	.note-preview :global(li input[type='checkbox']:checked) { border-color: var(--st-primary); background: var(--st-primary); }
+	.note-preview :global(li input[type='checkbox']:checked::after) { content: ''; position: absolute; left: 4px; top: 1px; width: 5px; height: 9px; border: solid var(--st-pfg); border-width: 0 2px 2px 0; transform: rotate(45deg); }
 	.note-preview :global(.note-ref) { color: var(--primary); text-decoration: underline; text-underline-offset: 3px; }
 	.note-preview :global(.note-ref--missing) { color: var(--st-mfg); text-decoration: none; }
 	@media (pointer: coarse), (max-width: 600px) {
 		.note-title { font-size: 22px; line-height: 1.3; }
 		.note-writing { padding-top: 0; }
-		.note-preview { padding-top: 0; }
+		.note-preview { padding-top: 24px; }
 		.note-preview :global(> :first-child) { margin-top: 0; }
 		.note-fields { order: 2; }
 		.note-fields summary { min-height: 44px; display: flex; align-items: center; }

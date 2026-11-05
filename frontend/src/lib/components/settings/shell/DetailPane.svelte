@@ -39,6 +39,8 @@
 		width?: 'settings' | 'reading' | 'data' | 'docs';
 		/** Content-first destinations have no detail-history or Saved row. */
 		contentFirst?: boolean;
+		/** Tight editorial header, e.g. a phone note with its metadata folded away. */
+		compactHeader?: boolean;
 		/** Only genuine identity art (an agent avatar or provider logo), never a generic decorative tile. */
 		identity?: boolean;
 		icon?: SettingsIcon;
@@ -87,7 +89,7 @@
 		name,
 		heading,
 		width = 'settings',
-		contentFirst = false,
+		contentFirst = false, compactHeader = false,
 		identity = false,
 		icon,
 		glyph,
@@ -165,7 +167,7 @@
 			{#if topStatus}{@render topStatus()}{:else}<SavedTick />{/if}
 		</BackRow>
 	{/if}
-	<div class="st-dh">
+	<div class="st-dh" class:compact-header={compactHeader}>
 		<div class="st-identity">{#if tile}{@render tile()}{:else if hasIdentity}<Tile size="lg" {icon} text={glyph} status={statusText ? undefined : status} ring="bg" />{/if}</div>
 		<div class="st-dh-main">
 			<div class="st-dhn">
@@ -226,6 +228,7 @@
 		align-items: center;
 		padding: 0 0 18px;
 	}
+	.st-dwrap .st-dh.compact-header { padding-bottom: 6px; }
 	/* Empty tile snippets are truthy functions. Count actual identity elements,
 	   not the empty text/comment placeholders Svelte emits for those snippets. */
 	.st-identity { display: contents; }

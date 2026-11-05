@@ -3,6 +3,12 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import TextField from './TextField.svelte';
 afterEach(cleanup);
 describe('TextField form keyboard paths', () => {
+ it('fills the available row without changing numeric-width consumers', () => {
+  render(TextField, { value: '/workspace/project', label: 'Path', width: 'full' });
+  const field = screen.getByRole('textbox', { name: 'Path' });
+  expect(field.style.getPropertyValue('--st-text-width')).toBe('100%');
+  expect(field.parentElement?.style.getPropertyValue('--st-text-width')).toBe('100%');
+ });
  it('preserves the real path while its resting display keeps the last segment', async () => {
   const path = '/workspace/a-very-long-project/location/final-directory';
   render(TextField, { value: path, label: 'Path', pathDisplay: true, mono: true });

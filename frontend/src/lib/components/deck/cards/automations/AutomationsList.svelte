@@ -69,12 +69,14 @@
  </EmptyDetail>
 {:else}
  {#each filteredAutomations() as automation (automation.id)}
+  {@const state = automation.status === 'paused' ? 'Paused' : !automation.is_enabled ? 'Disabled' : automation.status === 'running' ? 'Running' : automation.status === 'error' ? 'Error' : 'Enabled'}
+  {@const tone = state === 'Paused' ? 'warn' : state === 'Disabled' ? 'off' : state === 'Error' ? 'err' : 'ok'}
   <ListItem id={automation.id} name={automation.name} icon={CalendarClock}
    selected={selectedId === automation.id} onselect={() => onOpenDetail(automation)}
-   status={!automation.is_enabled ? 'off' : automation.status === 'error' ? 'err' : 'ok'}
+   status={tone}
    summary={automation.description || (automation.triggers || [{type: automation.trigger_type}]).map(t => triggerTypeLabel(t.type)).join(' · ')}
-   ariaLabel={`${automation.name} — ${!automation.is_enabled ? 'Disabled' : automation.status === 'running' ? 'Running' : automation.status === 'error' ? 'Error' : 'Enabled'}${automation.description ? ` · ${automation.description}` : ''}`}>
-   {#snippet lead()}<span class="automation-state" title={!automation.is_enabled ? 'Disabled' : automation.status === 'running' ? 'Running' : automation.status === 'error' ? 'Error' : 'Enabled'}><StatusDot tone={!automation.is_enabled ? 'off' : automation.status === 'error' ? 'err' : 'ok'} /></span>{/snippet}
+   ariaLabel={`${automation.name} — ${state}${automation.description ? ` · ${automation.description}` : ''}`}>
+   {#snippet lead()}<span class="automation-state" title={state}><StatusDot {tone} label={state} /></span>{/snippet}
    {#snippet badges()}{#if !automation.profile_id}<span>No agent</span>{/if}{/snippet}
   </ListItem>
   {#if automation.last_error}<p class="px-3 pb-2 text-xs text-muted-foreground" role="status">{automation.last_error}</p>{/if}

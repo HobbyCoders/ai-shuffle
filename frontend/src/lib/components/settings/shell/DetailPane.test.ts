@@ -22,6 +22,12 @@ beforeEach(() => {
 afterEach(() => { cleanup(); platform.set('desktop'); vi.unstubAllGlobals(); });
 
 describe('DetailPane', () => {
+ it('offers compact editorial header spacing without changing default geometry', async () => {
+  const view = render(DetailPane, { name: 'Note' });
+  expect(view.container.querySelector('.compact-header')).toBeNull();
+  await view.rerender({ name: 'Note', compactHeader: true });
+  expect(view.container.querySelector('.st-dh.compact-header')).toBeTruthy();
+ });
  it('keeps desktop actions on the heading without a second More menu', () => {
   const primary=createRawSnippet(() => ({render: () => '<button>Duplicate</button>'}));
   render(DetailPane,{name:'Agent', primary});

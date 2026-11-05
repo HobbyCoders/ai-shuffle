@@ -50,6 +50,13 @@ function writingCase(name, native = false, mid = false) {
    expect(await task.locator('input[type=checkbox]:checked:disabled').count() === 1, 'Preview reuses read-only GFM task marks');
    expect(await task.evaluate(el => getComputedStyle(el).listStyleType) === 'none', 'task items have no bullet');
    expect(await preview.locator('ul').evaluate(el => parseFloat(getComputedStyle(el).paddingInlineStart)) >= 20, 'lists stay inside the preview column');
+   expect(await task.locator('input').evaluate(el => getComputedStyle(el).appearance) === 'none', 'task marks use the theme outline and accent, not disabled browser grey');
+   if (page.viewportSize().width < 600) {
+    expect(await preview.evaluate(el => getComputedStyle(el).paddingTop) === '24px', 'phone Preview has a 24px document inset');
+    const titleBox = await heading.boundingBox();
+    const tabsBox = await page.getByRole('tablist').boundingBox();
+    expect(tabsBox.y - (titleBox.y + titleBox.height) >= 16 && tabsBox.y - (titleBox.y + titleBox.height) <= 24, 'phone title-to-tabs spacing is 16–24px');
+   }
    const body = page.getByRole('region', { name: 'Note content', exact: true });
    if (page.viewportSize().width < 600) expect((await body.boundingBox()).y < 320, 'the note body starts within 320px');
    const actions = page.locator('details.detail-more');

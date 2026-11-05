@@ -2,7 +2,6 @@
 	/** Projects uses the shared master/detail view; project and worker actions stay local to this page. */
 	import { onDestroy, onMount, untrack } from 'svelte';
 	import { ViewShell, ViewPanel, ViewMain, PanelSearch, PanelIconButton, DetailPane, EmptyDetail, ListItem, Segmented, InlineBanner, RowGroup, SettingRow } from '$lib/components/layout/view';
-	import PathText from '$lib/components/settings/rows/PathText.svelte';
 	import { platform } from '$lib/stores/platform.svelte';
 	import { appData as tabs, projects } from '$lib/stores/app-data.svelte';
 	import { loadProjectsOverview, patchOverviewWorker, projectsOverview, projectsOverviewSupported } from '$lib/stores/projects-overview';
@@ -291,7 +290,7 @@
 		{#if selectedRow}
 				{#snippet projectDangerRows()}
 					{#if selectedProject}
-						<SettingRow label="Remove project" hint={confirmingRemove ? `Remove ${selectedRow.name}${overviewOn ? ` from ${selfName}` : ''} and its ${selectedRow.sessionCount} conversations? This cannot be undone.` : 'Removes the project and its conversations from this worker. Files stay on disk.'}>
+						<SettingRow wrapHint label="Remove project" hint={confirmingRemove ? `Remove ${selectedRow.name}${overviewOn ? ` from ${selfName}` : ''} and its ${selectedRow.sessionCount} conversations? This cannot be undone.` : 'Removes the project and its conversations from this worker. Files stay on disk.'}>
 							{#if confirmingRemove}<button class="st-btn" disabled={deleteLoading} onclick={() => (confirmingRemove = false)}>Cancel</button>
 								<button class="st-btn danger" disabled={deleteLoading} onclick={handleRemoveFromDetail}>{deleteLoading ? 'Removing…' : 'Remove'}</button>
 							{:else}<button class="st-btn danger" title={`Remove ${selectedRow.name} and its chats from this worker`} onclick={() => (confirmingRemove = true)}>Remove project and chats</button>{/if}
@@ -302,7 +301,7 @@
 				dangerRows={selectedProject ? projectDangerRows : undefined} tabs={detailTabs} tab={activeTab} onTabChange={(tab) => { activeTab = tab as DetailTab; focusInstallId = null; }}>
 				{#snippet topStatus()}{/snippet}
 				{#snippet subtitle()}
-					<PathText path={selectedProject?.path ?? selectedRow.remote ?? 'Not on this worker'} />
+					{#if remoteOnly && selectedRow.remote}<span class="st-mono">{selectedRow.remote}</span>{/if}
 					{#if selectedRow.workers.length}<ProjectWorkerChips workers={selectedRow.workers} kind={selectedRow.kind} projectName={selectedRow.name}
 						onSetup={(w) => setUpFromChip(selectedRow, w)} onOpen={(w) => { activeTab = 'workers'; focusInstallId = w.install_id; }} />{/if}
 				{/snippet}

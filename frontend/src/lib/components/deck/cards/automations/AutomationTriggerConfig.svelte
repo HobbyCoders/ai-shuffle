@@ -221,21 +221,21 @@
 {#each triggers as trigger, trigIdx}
  <section class="st-card trigger-card" aria-label={`Trigger ${trigIdx + 1}`}>
   <div class="trigger-header">
-   <h4>{triggerTypeLabel(trigger.type)}</h4>
+   <h4>{getTriggerSummary(trigger)}</h4>
    <div class="trigger-actions">
-    <button class="st-btn icon trigger-toggle" aria-label={`${expandedTriggers.has(trigIdx) ? 'Collapse' : 'Expand'} trigger`} aria-expanded={expandedTriggers.has(trigIdx)} onclick={() => onToggleTriggerExpand(trigIdx)}>{#if expandedTriggers.has(trigIdx)}<ChevronDown />{:else}<ChevronRight />{/if}</button>
+    <button class="st-btn icon trigger-toggle ghost" aria-label={`${expandedTriggers.has(trigIdx) ? 'Collapse' : 'Expand'} trigger`} aria-expanded={expandedTriggers.has(trigIdx)} onclick={() => onToggleTriggerExpand(trigIdx)}>{#if expandedTriggers.has(trigIdx)}<ChevronDown />{:else}<ChevronRight />{/if}</button>
     {#if triggers.length > 1}<button class="st-btn icon danger" aria-label="Remove trigger" onclick={() => removeTrigger(trigIdx)}><Trash2 size={14} /></button>{/if}
    </div>
   </div>
   {#if expandedTriggers.has(trigIdx)}
-   <div class="trigger-controls">
+   <!-- Direct card children reuse the shared SettingRow dividers. -->
     <SettingRow label="Trigger type" stackOnPhone>
      <Segmented label="Trigger type" value={trigger.type} options={[{value:'cron',label:'Cron'},{value:'interval',label:'Interval'},{value:'connector_event',label:'Event'},{value:'connector_trigger',label:'Connector'},{value:'webhook',label:'Webhook'}]} onchange={(value) => updateTriggerType(trigIdx,value)} />
     </SettingRow>
     {#if trigger.type === 'cron'}
      <SettingRow label="Schedule" stackOnPhone><Segmented label="Schedule" value={cronMode} options={[{value:'preset',label:'Preset'},{value:'custom',label:'Custom'}]} onchange={(value) => cronMode = value} /></SettingRow>
      {#if cronMode === 'preset'}
-      <SettingRow label="Preset" hint="Times use {timezone}."><SelectField value={trigger.config.expression || '0 9 * * *'} options={Object.entries(CRON_PRESETS).map(([value,label]) => ({value,label}))} onchange={(value) => {updateTriggerConfig(trigIdx,{...trigger.config,expression:value});syncCronFieldsFromExpression(value);}} /></SettingRow>
+      <SettingRow label="Preset" ><SelectField value={trigger.config.expression || '0 9 * * *'} options={Object.entries(CRON_PRESETS).map(([value,label]) => ({value,label}))} onchange={(value) => {updateTriggerConfig(trigIdx,{...trigger.config,expression:value});syncCronFieldsFromExpression(value);}} /></SettingRow>
      {:else}
 <SettingRow label="Minute"><SelectField value={cronMinute} options={[{value:'*',label:'Every minute'},...['5','10','15','30'].map(n => ({value:`*/${n}`,label:`Every ${n} min`})),...['0','15','30','45'].map(n => ({value:n,label:`:${n.padStart(2,'0')}`}))]} onchange={(value) => {cronMinute = value; updateTriggerConfig(trigIdx,{...trigger.config,expression:buildCronFromFields()});}} /></SettingRow>
 <SettingRow label="Hour"><SelectField value={cronHour} options={[{value:'*',label:'Every hour'},...Array.from({length:24},(_,h) => ({value:String(h),label:formatHour(h)}))]} onchange={(value) => {cronHour = value; updateTriggerConfig(trigIdx,{...trigger.config,expression:buildCronFromFields()});}} /></SettingRow>
@@ -247,7 +247,7 @@
      <SettingRow label="Expression" hint="Timezone: {timezone}">
       <div class="cron-expression">
        <TextField label="Cron expression" mono value={trigger.config.expression || ''} placeholder="0 9 * * *" oninput={(value) => {updateTriggerConfig(trigIdx,{...trigger.config,expression:value});syncCronFieldsFromExpression(value);}} />
-       <p class="cron-summary-text st-note">{describeCron(trigger.config.expression || '')}</p>
+       {#if cronMode === 'custom'}<p class="cron-summary-text st-note">{describeCron(trigger.config.expression || '')}</p>{/if}
       </div>
      </SettingRow>
     {:else if trigger.type === 'interval'}
@@ -266,20 +266,18 @@
       {#if trigger.config.secret}<SettingRow label="Secret">{#snippet expanded()}<input class="webhook-value" aria-label="Secret" value={trigger.config.secret} readonly />{/snippet}</SettingRow>{/if}
      {:else}<p class="st-note p-4">Webhook URL and secret will be generated after creation.</p>{/if}
     {/if}
-   </div>
-  {:else}<p class="st-note"><span>{triggerTypeLabel(trigger.type)}</span> · <span>{getTriggerSummary(trigger)}</span></p>{/if}
+  {/if}
  </section>
 {/each}
 <button class="st-btn" onclick={addTrigger}><Plus size={14} />Add trigger</button>
 <style>
  .trigger-card { margin-bottom: 12px; overflow: hidden; }
- .trigger-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--st-border); }
+ .trigger-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; }
+ .trigger-header:has(+ :global(.st-row)) { border-bottom: 1px solid var(--st-border); }
  .trigger-header h4 { margin: 0; font-size: 14px; font-weight: 600; }
  .trigger-actions { display: flex; align-items: center; gap: 8px; }
  .trigger-card > p { margin: 0; padding: 12px 16px; }
- .trigger-controls :global(.st-row:has(+ .st-rowx)) { min-height: 0; padding-bottom: 8px; }
- .trigger-controls :global(.st-rowx) { padding-top: 0; }
- .trigger-controls :global(.st-note) { margin: 0; }
+ .trigger-card :global(.st-note) { margin: 0; }
  .trigger-actions .st-btn.trigger-toggle { width: 28px; height: 28px; min-width: 28px; }
  .cron-expression { display: grid; gap: 6px; min-width: 0; }
  .cron-summary-text { font-size: 13px; color: var(--st-mfg); text-align: right; }
