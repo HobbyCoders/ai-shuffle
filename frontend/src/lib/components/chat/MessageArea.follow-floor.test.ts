@@ -1,10 +1,25 @@
 /** Execute MessageArea's actual pre-render transaction with controlled ticks.
  * jsdom has no scroll layout; geometry alone is supplied by the probe. */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { createMessageSender, type MessageSenderDeps } from '$lib/stores/session/message-sender';
+import type { ActiveSessionState } from '$lib/stores/active-session';
+import { pendingQueue } from '$lib/stores/session/pending-queue';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
+// Only transport/voice edges are stubbed: admission and all four echo branches
+// execute createMessageSender itself, then feed its emitted store snapshots into
+// the production pre-render transaction and rendered tail style binding below.
+vi.mock('$lib/stores/app-data.svelte', () => ({ appData: { current: { sessions: [] } } }));
+vi.mock('$lib/services/voiceCall', () => ({ isCallActiveFor: () => false, sendVoiceText: vi.fn() }));
+vi.mock('$lib/services/voiceExecutionContext', () => ({ persistVoiceContext: vi.fn(), voiceContextFor: () => ({}) }));
+vi.mock('$lib/api/git', () => ({ reopenWorktree: vi.fn(), generateBranchName: vi.fn(), generateBranchNameLocal: () => 'auto/test' }));
+vi.mock('$lib/api/client', () => ({ api: { post: vi.fn(), get: vi.fn(), put: vi.fn(), delete: vi.fn() } }));
+
 const source = readFileSync(resolve(process.cwd(), 'src/lib/components/chat/MessageArea.svelte'), 'utf8');
+const slotStyle = source.match(/style:min-height=\{(`[^`]+`)\}/)?.[1];
+if (!slotStyle) throw new Error('Missing rendered tail slot binding');
+const renderSlotStyle = new Function('tailQueueSlotPx', `return ${slotStyle}`);
 function between(start: string, end: string) {
 	const from = source.indexOf(start), to = source.indexOf(end, from);
 	if (from < 0 || to <= from) throw new Error(`Missing floor transaction: ${start}`);
@@ -15,10 +30,15 @@ const reserve = between('function readingFloorReserve()', 'async function mainta
 const beginShift = between('windowShifting = true;', 'mountedRange = next;');
 const beginTurn = between('function startCurrentTurnAnchor(', '/**\n\t * Where a stopped turn').replace('messageId: string', 'messageId');
 
-type Session = { sessionId: string; messages: unknown[]; isStreaming: boolean; liveTurnId: string | null; error: string | null; queuedMessages: never[] };
+type Session = Pick<ActiveSessionState, 'sessionId' | 'messages' | 'isStreaming' | 'liveTurnId' | 'error' | 'queuedMessages' | 'localSendIntent'>;
 const session = (id: string, count = 2): Session => ({ sessionId: id, messages: Array(count).fill({}), isStreaming: false, liveTurnId: null, error: null, queuedMessages: [] });
 
 function probe() {
+	// Render the real style binding into an actual slot element. jsdom supplies
+	// no layout, so its measured queue height remains explicitly controlled.
+	const slot = document.createElement('div');
+	slot.innerHTML = '<div class="tail-controls"></div>';
+	const tail = slot.firstElementChild as HTMLElement;
 	const env = {
 		session: session('long'), scrollTop: 5000, proseEnd: 200,
 		follows: true, pendingHeight: 0, gap: 18, calls: [] as string[], ticks: [] as (() => void)[]
@@ -63,11 +83,52 @@ function probe() {
 			reserve: () => readingFloorReserve(),
 			queueSlot: () => tailQueueSlotPx,
 			errorOffset: () => tailErrorOffsetPx,
+			presentedError: () => presentedTailError,
 			depth: () => programmaticScrollDepth
 		};
 	`);
-	const state = create(env) as { dismiss(): void; start(fromQueue: boolean): void; run(): void; shift(): void; endShift(): void; floor(): number; reserve(): number; queueSlot(): number; errorOffset(): number; depth(): number };
-	return { env, ...state, async flush() { env.ticks.splice(0).forEach(resolve => resolve()); await Promise.resolve(); } };
+	const state = create(env) as { dismiss(): void; start(fromQueue: boolean): void; run(): void; shift(): void; endShift(): void; floor(): number; reserve(): number; queueSlot(): number; errorOffset(): number; presentedError(): string | null; depth(): number };
+	return { env, ...state, render() { state.run(); tail.style.minHeight = renderSlotStyle(state.queueSlot()); return tail; }, async flush() { env.ticks.splice(0).forEach(resolve => resolve()); await Promise.resolve(); } };
+}
+
+/** The real sender owns intent publication; this adapter only records its updates. */
+function senderSnapshots(initial: Session, authoritative = false, switchOnConnection?: Session) {
+	const asActive = (value: Session) => ({ title: 'Existing chat', profile: 'claude-code', project: 'proj-1',
+		worktreeIntent: 'local', pendingPeerMessages: [], ...value } as ActiveSessionState);
+	let state = asActive(initial);
+	const snapshots: ActiveSessionState[] = [];
+	const deps = {
+		getState: () => state,
+		update: (fn: (s: ActiveSessionState) => ActiveSessionState) => { state = fn(state); snapshots.push(state); },
+		internal: { pendingTools: new Set(), awaitingNewSession: false, pendingRequestId: null,
+			stopRequestedBeforeSession: false, worktreeCreationGeneration: 0, worktreeCreateAbort: null },
+		wsConn: { isConnected: () => {
+			if (switchOnConnection) { state = asActive(switchOnConnection); switchOnConnection = undefined; }
+			return true;
+		}, connect: vi.fn(), send: () => true, resetReconnectAttempts: vi.fn() },
+		sessionEphemeralCache: { remove: vi.fn() }, appData: { loadSessions: vi.fn(), loadApiUserSessions: vi.fn() },
+		persistSession: vi.fn(), stopTimeout: { get: () => null, set: vi.fn() },
+		getActiveSession: () => ({ sendMessage: vi.fn(), createWorktree: vi.fn(), autoCreateWorktree: vi.fn() })
+	} as unknown as MessageSenderDeps;
+	const sender = createMessageSender(deps);
+	return {
+		getState: () => state,
+		async send(skipMessageAppend = false) {
+			const start = snapshots.length;
+			const authority = vi.spyOn(pendingQueue, 'authoritySpokeSince').mockReturnValue(authoritative);
+			try { expect(await sender.sendMessage('fresh local send', { skipMessageAppend })).toBe(true); }
+			finally { authority.mockRestore(); }
+			return snapshots.slice(start);
+		}
+	};
+}
+
+function presentedSlot() {
+	const p = probe(); p.render();
+	p.env.pendingHeight = 164.9375;
+	p.env.session = { ...session('long', 18), error: 'CLI error', isStreaming: true };
+	expect(p.render().style.minHeight).toBe('164.9375px');
+	return p;
 }
 
 function captureLongFloor(p: ReturnType<typeof probe>) {
@@ -78,6 +139,71 @@ function captureLongFloor(p: ReturnType<typeof probe>) {
 }
 
 describe('MessageArea followed-floor coordinate ownership', () => {
+	it.each([
+		{ name: 'optimistic queue', streaming: true, skip: false, authoritative: false },
+		{ name: 'authoritative queue without local echo', streaming: true, skip: false, authoritative: true },
+		{ name: 'pre-appended message', streaming: false, skip: true, authoritative: false },
+		{ name: 'transcript append', streaming: false, skip: false, authoritative: false }
+	])('renders the released slot from real sender snapshots: $name', async ({ streaming, skip, authoritative }) => {
+		const p = presentedSlot();
+		// Automatic queued handoff (including clearing error) is not fresh intent.
+		p.env.pendingHeight = 86.71875;
+		p.env.session = { ...p.env.session, error: null, isStreaming: streaming };
+		p.start(true);
+		expect(p.render().style.minHeight).toBe('164.9375px');
+		const producer = senderSnapshots(p.env.session, authoritative);
+		const snapshots = await producer.send(skip);
+		expect(snapshots.length).toBeGreaterThan(0);
+		for (const snapshot of snapshots.filter(s => s.error === null)) {
+			p.env.session = snapshot;
+			expect(p.render().style.minHeight).toBe('0px');
+			expect(p.errorOffset()).toBe(0);
+			expect(p.presentedError()).toBeNull();
+		}
+		if (streaming || skip) expect(producer.getState().messages).toBe(snapshots[0].messages);
+		// Later fromQueue delivery and Stop must not reintroduce the old slot.
+		p.env.pendingHeight = 0;
+		p.env.session = { ...producer.getState(), queuedMessages: [], isStreaming: false };
+		p.start(true);
+		expect(p.render().style.minHeight).toBe('0px');
+	});
+
+	it('ignores a stale real-send revision after a newer error was presented', async () => {
+		const p = presentedSlot();
+		const producer = senderSnapshots(p.env.session);
+		const first = (await producer.send()).at(-1)!;
+		const second = (await producer.send()).at(-1)!;
+		p.env.session = second; p.render();
+		p.env.pendingHeight = 86.71875;
+		p.env.session = { ...second, error: 'newer error' };
+		expect(p.render().style.minHeight).toBe('86.71875px');
+		p.env.session = first;
+		expect(p.render().style.minHeight).toBe('86.71875px');
+		expect(p.presentedError()).toBe('newer error');
+	});
+
+	it('ignores real intent captured for another session when the view changed during send', async () => {
+		const p = presentedSlot();
+		const producer = senderSnapshots({ ...p.env.session, sessionId: 'other' }, false, p.env.session);
+		const snapshots = await producer.send();
+		const emitted = snapshots.at(-1)!;
+		expect(emitted.sessionId).toBe('long');
+		expect(emitted.localSendIntent?.sessionId).toBe('other');
+		p.env.session = emitted;
+		expect(p.render().style.minHeight).toBe('164.9375px');
+		expect(p.presentedError()).toBe('CLI error');
+	});
+
+	it('retains the rendered slot through automatic error clearing, queue drain and Stop without fresh intent', () => {
+		const p = presentedSlot();
+		p.env.pendingHeight = 0;
+		p.env.session = { ...p.env.session, error: null, queuedMessages: [], isStreaming: false };
+		p.start(true);
+		expect(p.render().style.minHeight).toBe('164.9375px');
+		expect(p.presentedError()).toBe('CLI error');
+	});
+
+
 	it('holds the already-presented queue slot through error dequeue and transcript handoff', () => {
 		const p = probe();
 		p.run();

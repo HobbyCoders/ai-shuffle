@@ -2077,8 +2077,25 @@
 	// gets a chance to restore the reserve. Real wheel/touch intent still cancels
 	// immediately through disengageAutoScroll, even inside this transaction.
 	let layoutBoundary = '';
+	let tailSendContext = '';
+	let tailSendRevision = 0;
 	$effect.pre(() => {
 		const s = $activeSession;
+		const sendContext = s.sessionId ?? '';
+		if (sendContext !== tailSendContext) {
+			tailSendContext = sendContext;
+			tailSendRevision = 0;
+		}
+		// A fresh local send may only append a queued echo (or no echo). Consume
+		// its explicit intent before error capture; automatic dequeue and Stop do
+		// not publish one. Ignore late sends belonging to a different view.
+		const intent = s.localSendIntent;
+		if (sendContext && intent && intent.sessionId === s.sessionId && intent.revision > tailSendRevision) {
+			tailSendRevision = intent.revision;
+			presentedTailError = null;
+			tailErrorOffsetPx = 0;
+			tailQueueSlotPx = 0;
+		}
 		if (s.sessionId !== followedFloorContext?.sessionId || (!s.messages.length && !s.isStreaming)) {
 			presentedTailError = null;
 			tailErrorOffsetPx = 0;
@@ -2102,7 +2119,7 @@
 			followedViewportEnd = 0;
 			followedFloorContext = { sessionId: s.sessionId };
 		}
-		const boundary = `${s.sessionId}:${s.messages.length}:${s.isStreaming}:${s.liveTurnId}:${s.error}:${s.queuedMessages.map(m => `${m.id}:${m.status ?? ''}`).join(',')}`;
+		const boundary = `${s.sessionId}:${s.messages.length}:${s.isStreaming}:${s.liveTurnId}:${s.error}:${tailSendRevision}:${s.queuedMessages.map(m => `${m.id}:${m.status ?? ''}`).join(',')}`;
 		if (boundary === layoutBoundary) return;
 		layoutBoundary = boundary;
 		// lastKnownScrollTop still belongs to the outgoing/cleared slice here.
