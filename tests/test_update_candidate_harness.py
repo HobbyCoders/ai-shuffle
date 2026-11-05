@@ -22,9 +22,10 @@ def candidate(tmp_path, monkeypatch):
     check = Check("candidate-only", tmp_path)
     # Keep real launch/volume methods so assertions cover the Docker commands,
     # not just arguments to a mocked launch helper. Never contact a daemon.
-    check.docker = Mock(return_value=SimpleNamespace(stdout=b"", stderr=b"", returncode=0))
+    check.docker = Mock(return_value=SimpleNamespace(stdout=b"0", stderr=b"", returncode=0))
     check.ready = Mock()
-    check.stop = Mock()
+    check.state = Mock(return_value={"Running": False, "ExitCode": 0, "OOMKilled": False})
+    check.stop = Mock(wraps=check.stop)  # real stop/wait/zero-exit contract, mocked daemon only
     check.system_id = Mock(return_value="same-cluster")
     check.sql = Mock(side_effect=["", "retained", "retained"])
     check.passed = Mock()
@@ -35,7 +36,7 @@ def mounts(command):
     return [command[index + 1] for index, value in enumerate(command) if value == "--mount"]
 
 
-def test_candidate_lifecycle_is_built_offline_then_explicitly_installed_and_refreshed(candidate, tmp_path):
+def test_candidate_lifecycle_installs_then_gracefully_restarts_into_signed_supervisor(candidate, tmp_path):
     check, build = candidate
     check.updater_lifecycle()
     build.assert_called_once_with("a" * 40, tmp_path / "updater-source.zip")
@@ -63,10 +64,27 @@ def test_candidate_lifecycle_is_built_offline_then_explicitly_installed_and_refr
     assert fixture_mount in mounts(updated_run)
     assert f"type=bind,src={tmp_path / 'updater-ci-public.pem'},dst=/app/docker/application-update-key.pem,readonly" in mounts(updated_run)
     assert "AI_SHUFFLE_UPDATER_FIXTURE=1" in updated_run
+    assert "START_CHROME=1" in updated_run
     assert "--network" in updated_run and updated_run[updated_run.index("--network") + 1] == "none"
     actions = [call for call in calls if len(call) >= 2 and call[-2] == fixture]
-    assert [call[-1] for call in actions] == ["updater-ready", "install", "installed", "refresh-updater", "refreshed", "diagnose"]
+    assert [call[-1] for call in actions] == ["updater-ready", "install", "installed", "restarted", "diagnose"]
     assert all(call[:-2] == ("exec", "--user", "99:100", updated, "python") for call in actions)
+    assert all("refresh-updater" not in call for call in calls)
+    assert [call.args for call in check.stop.call_args_list] == [(initial,), (updated,), (updated,)]
+    stopped = calls.index(("stop", "--time", "120", updated))
+    waited = calls.index(("wait", updated))
+    available_lock = next(call for call in calls if call[0] == "run" and "assert lock.acquire()" in call[-1])
+    started = calls.index(("start", updated))
+    installed = next(call for call in actions if call[-1] == "installed")
+    restarted = next(call for call in actions if call[-1] == "restarted")
+    held_lock = next(call for call in calls if call[0] == "exec" and "assert not lock.acquire()" in call[-1])
+    assert calls.index(installed) < stopped < waited < calls.index(available_lock) < started < calls.index(restarted) < calls.index(held_lock)
+    assert available_lock[:9] == ("run", "--rm", "--network", "none", "--user", "99:100", "--entrypoint", "python", "--mount")
+    assert f"type=volume,src={check.volumes[0]},dst=/data" in available_lock
+    assert (tmp_path / "updater-installed.json").read_bytes() == b"0"
+    assert (tmp_path / "updater-restarted.json").read_bytes() == b"0"
+    assert json.loads((tmp_path / "updater-container-stop.json").read_text()) == check.state.return_value
+    assert (tmp_path / "updater-lifecycle.json").read_bytes() == b"0"
     assert check.system_id.call_count == 3
     assert check.sql.call_count == 3
     check.passed.assert_called_once()
@@ -288,6 +306,105 @@ def test_failed_install_captures_diagnostics_without_masking_failure(candidate, 
     with pytest.raises(RuntimeError, match="original install timeout"):
         check.updater_lifecycle()
     assert json.loads((tmp_path / "updater-lifecycle.json").read_text()) == {"unavailable": "diagnostic process timed out"}
+
+
+def process_fixture(root, revision, *, restarted=False):
+    directory = root / "versions" / revision
+    resident = directory / "source/docker/container_runtime.py" if restarted else "/app/docker/container_runtime.py"
+    argv = {
+        "10": ["/usr/local/bin/python3", "-I", "-B", "-u", str(resident), "run"],
+        "11": [str(directory / "venv/bin/python"), "-m", "app.main"],
+        "12": ["postgres", "-D", "/data/postgres/data"],
+        "13": ["/bin/bash", "/tmp/private/chrome-supervisor.sh"],
+        "14": ["/usr/lib/chromium/chromium", "--ozone-platform=headless"],
+        "15": ["postgres: checkpointer"],
+        "16": ["/usr/lib/chromium/chromium", "--type=renderer"],
+    }
+    proc = root / "proc"
+    for pid, args in argv.items():
+        process = proc / pid
+        process.mkdir(parents=True)
+        (process / "cmdline").write_bytes(b"\0".join(arg.encode() for arg in args) + b"\0")
+    return proc
+
+
+@pytest.mark.parametrize("restarted", [False, True])
+def test_lifecycle_census_counts_owned_roots_not_children(tmp_path, restarted):
+    from scripts.ci import updater_candidate_fixture as fixture
+    revision = "b" * 40
+    proc = process_fixture(tmp_path, revision, restarted=restarted)
+    processes = fixture.lifecycle_processes(proc)
+    assert all(len(owned) == 1 for owned in processes.values())
+    assert processes["postgres"][0]["pid"] == 12
+    assert processes["browser"][0]["pid"] == 14
+    assert (processes["supervisor"][0]["entry"].startswith(str(tmp_path))) is restarted
+
+
+@pytest.mark.parametrize("mode", ["installed", "restarted"])
+def test_resident_proof_uses_status_process_entry_and_preserves_receipt(tmp_path, monkeypatch, capsys, mode):
+    from scripts.ci import updater_candidate_fixture as fixture
+    revision, image = "b" * 40, "a" * 40
+    restarted = mode == "restarted"
+    monkeypatch.setattr(fixture, "ROOT", tmp_path)
+    proc = process_fixture(tmp_path, revision, restarted=restarted)
+    census = fixture.lifecycle_processes(proc)
+    monkeypatch.setattr(fixture, "lifecycle_processes", lambda: census)
+    write_json(tmp_path / "ci-fixture.json", {"revision": revision, "image_revision": image})
+    write_json(tmp_path / "ci-request.json", {"action": "install", "expires_at": 1000})
+    write_json(tmp_path / "state.json", {"active": revision})
+    write_json(tmp_path / "status.json", {
+        "updater": {"revision": revision if restarted else image},
+        "diagnostics": {"revision": revision, "stages": [{"stage": "tools_build", "outcome": "hit"}]},
+    })
+    fixture.wait_for(mode)
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["mode"] == mode
+    assert receipt["updater"]["revision"] == (revision if restarted else image)
+    assert receipt["app_revision"] == revision
+    assert receipt["processes"] == census
+    assert "observed_absent_at" in json.loads((tmp_path / "ci-request.json").read_text())
+
+
+@pytest.mark.parametrize("failure", ["old-resident", "booting", "trial", "duplicate-app", "image-app", "image-supervisor"])
+def test_restart_proof_rejects_stale_unhealthy_or_duplicate_owners(tmp_path, monkeypatch, failure):
+    from scripts.ci import updater_candidate_fixture as fixture
+    revision, image = "b" * 40, "a" * 40
+    monkeypatch.setattr(fixture, "ROOT", tmp_path)
+    monkeypatch.setattr(fixture, "time", Clock())
+    proc = process_fixture(tmp_path, revision, restarted=True)
+    census = fixture.lifecycle_processes(proc)
+    if failure == "duplicate-app":
+        census["application"].append(dict(census["application"][0], pid=20))
+    elif failure == "image-app":
+        census["application"][0]["executable"] = "/usr/local/bin/python3"
+    elif failure == "image-supervisor":
+        census["supervisor"][0]["entry"] = "/app/docker/container_runtime.py"
+    monkeypatch.setattr(fixture, "lifecycle_processes", lambda: census)
+    write_json(tmp_path / "ci-fixture.json", {"revision": revision, "image_revision": image})
+    write_json(tmp_path / "ci-request.json", {"action": "install", "expires_at": 1000})
+    write_json(tmp_path / "state.json", {"active": revision, **({"booting": revision} if failure == "booting" else {})})
+    write_json(tmp_path / "status.json", {
+        "updater": {"revision": image if failure == "old-resident" else revision},
+        "diagnostics": {"revision": revision, "stages": [{"stage": "tools_build", "outcome": "hit"}]},
+    })
+    if failure == "trial":
+        write_json(tmp_path / "handover.json", {"revision": revision})
+    expected_error = TimeoutError if failure in ("old-resident", "booting", "trial") else AssertionError
+    with pytest.raises(expected_error):
+        fixture.wait_for("restarted")
+
+
+def test_fixture_refuses_legacy_direct_refresh_without_writing_requests(tmp_path, monkeypatch):
+    from scripts.ci import updater_candidate_fixture as fixture
+    monkeypatch.setattr(fixture, "ROOT", tmp_path)
+    monkeypatch.setenv("AI_SHUFFLE_UPDATER_FIXTURE", "1")
+    monkeypatch.setenv("DATA_DIR", "/data")
+    monkeypatch.setattr(sys, "argv", ["fixture", "refresh-updater"])
+    with pytest.raises(SystemExit, match="Unknown fixture action"):
+        fixture.main()
+    with pytest.raises(SystemExit, match="Unknown fixture action"):
+        fixture.submit_request("refresh-updater")
+    assert not (tmp_path / "request.json").exists()
 
 
 def test_fixture_refuses_to_run_outside_disposable_candidate(monkeypatch):

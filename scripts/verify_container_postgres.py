@@ -215,19 +215,34 @@ class Check:
                         self.artifacts / "updater-build.log", check=False)
         public = self.artifacts / "updater-ci-public.pem"
         self.docker("cp", initial + ":/data/application-updates/ci-public.pem", public)
-        app = self.launch(volume, env={"AI_SHUFFLE_UPDATER_FIXTURE": "1"},
+        app = self.launch(volume, chrome=True, env={"AI_SHUFFLE_UPDATER_FIXTURE": "1"},
                           mounts=[fixture_mount,
                                   f"type=bind,src={public.resolve()},dst=/app/docker/application-update-key.pem,readonly"])
         try:
             self.ready(app)
             self.docker("exec", "--user", "99:100", app, "python", fixture, "updater-ready")
             self.docker("exec", "--user", "99:100", app, "python", fixture, "install")
-            self.docker("exec", "--user", "99:100", app, "python", fixture, "installed", timeout=260)
+            installed = self.docker("exec", "--user", "99:100", app, "python", fixture, "installed", timeout=260)
+            (self.artifacts / "updater-installed.json").write_bytes(installed.stdout)
             self.ready(app)
             assert self.system_id(app) == identity
             assert self.sql(app, "SELECT value FROM updater_lifecycle_check;") == "retained"
-            self.docker("exec", "--user", "99:100", app, "python", fixture, "refresh-updater")
-            self.docker("exec", "--user", "99:100", app, "python", fixture, "refreshed", timeout=260)
+            # This CI-owned container restart is deliberately not an app/API
+            # action. Normal process-start handover must verify the signed,
+            # healthy source and close every prior lifecycle owner first.
+            self.stop(app)
+            stopped = self.state(app)
+            assert not stopped["Running"] and stopped["ExitCode"] == 0
+            (self.artifacts / "updater-container-stop.json").write_text(json.dumps(stopped))
+            available_lock = ("from docker.container_runtime import ClusterLock; from pathlib import Path; "
+                              "lock=ClusterLock(Path('/data/postgres/lifecycle.lock')); "
+                              "assert lock.acquire(); lock.close()")
+            self.docker("run", "--rm", "--network", "none", "--user", "99:100", "--entrypoint", "python",
+                        "--mount", f"type=volume,src={volume},dst=/data", self.image, "-c", available_lock)
+            self.docker("start", app)
+            self.ready(app)
+            restarted = self.docker("exec", "--user", "99:100", app, "python", fixture, "restarted", timeout=260)
+            (self.artifacts / "updater-restarted.json").write_bytes(restarted.stdout)
             self.ready(app)
             assert self.system_id(app) == identity
             assert self.sql(app, "SELECT value FROM updater_lifecycle_check;") == "retained"
@@ -245,7 +260,8 @@ class Check:
             (self.artifacts / "updater-lifecycle.json").write_bytes(evidence)
         self.stop(app)
         self.passed("synthetic signed source: real pip/npm assembly, warm tools/browser hits, app-only install keeps "
-                    "resident revision; explicit supervisor refresh preserves PG identity/data and lifetime lock")
+                    "resident revision; controlled container restart loads the signed source supervisor and preserves "
+                    "PG identity/data, exclusive lifetime lock and single app/browser/PG owners")
 
     def fresh_persistence_and_restore(self):
         volume = self.volume()

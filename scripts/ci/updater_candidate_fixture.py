@@ -157,6 +157,38 @@ def diagnose():
     print(json.dumps(report))
 
 
+def lifecycle_processes(proc=Path("/proc")):
+    """Owned lifecycle roots, not PG backends/Chromium renderers or full argv."""
+    processes = {role: [] for role in ("supervisor", "application", "postgres", "browser_supervisor", "browser")}
+    for process in proc.iterdir():
+        if not process.name.isdigit():
+            continue
+        try:
+            with (process / "cmdline").open("rb") as stream:
+                args = [part.decode(errors="replace") for part in stream.read(8192).split(b"\0") if part]
+        except OSError:
+            continue  # a short-lived process may exit during the census
+        if not args:
+            continue
+        entry = next((arg for index, arg in enumerate(args[:-1])
+                      if Path(arg).name == "container_runtime.py" and args[index + 1] == "run"), None)
+        role = None
+        if entry:
+            role = "supervisor"
+        elif any(arg == "-m" and args[index + 1] == "app.main" for index, arg in enumerate(args[:-1])):
+            role = "application"
+        elif Path(args[0]).name == "postgres" and "-D" in args:
+            role = "postgres"
+        elif any(Path(arg).name in ("chrome-supervisor.sh", "chrome-supervisor") for arg in args[:2]):
+            role = "browser_supervisor"
+        elif (Path(args[0]).name in ("chromium", "chrome", "google-chrome-stable")
+              and not any(arg.startswith("--type=") for arg in args)):
+            role = "browser"
+        if role:
+            processes[role].append({"pid": int(process.name), "executable": args[0], **({"entry": entry} if entry else {})})
+    return processes
+
+
 def wait_for(mode):
     fixture = json.loads((ROOT / "ci-fixture.json").read_text())
     revision = fixture["revision"]
@@ -170,13 +202,19 @@ def wait_for(mode):
             atomic_json(ROOT / "ci-request.json", dict(request, observed_absent_at=time.time()))
         state = json.loads((ROOT / "state.json").read_text())
         status = json.loads((ROOT / "status.json").read_text())
-        expected = revision if mode == "refreshed" else fixture["image_revision"]
+        expected = revision if mode == "restarted" else fixture["image_revision"]
         if (state.get("active") == revision and not state.get("booting") and not state.get("blocked")
                 and status.get("updater", {}).get("revision") == expected
-                and (mode != "refreshed" or not (ROOT / "handover.json").exists())):
+                and (mode != "restarted" or not (ROOT / "handover.json").exists())):
             assert status["diagnostics"]["revision"] == revision
             assert any(item["stage"] == "tools_build" and item["outcome"] == "hit" for item in status["diagnostics"]["stages"])
-            print(json.dumps({"mode": mode, "app_revision": revision, "updater": status["updater"]}))
+            processes = lifecycle_processes()
+            assert all(len(owned) == 1 for owned in processes.values()), processes
+            directory = ROOT / "versions" / revision
+            assert processes["application"][0]["executable"] == str(directory / "venv/bin/python")
+            resident = directory / "source/docker/container_runtime.py" if mode == "restarted" else Path("/app/docker/container_runtime.py")
+            assert processes["supervisor"][0]["entry"] == str(resident)
+            print(json.dumps({"mode": mode, "app_revision": revision, "updater": status["updater"], "processes": processes}))
             return
         if state.get("blocked") or revision in state.get("failed", []):
             raise AssertionError("Candidate update failed or blocked")
@@ -185,6 +223,8 @@ def wait_for(mode):
 
 
 def submit_request(action):
+    if action not in ("check", "install"):
+        raise SystemExit("Unknown fixture action")
     from app.core.application_updates import atomic_json, CONTAINER_REQUEST_SECONDS
     queued = time.time()
     request = {"action": action, "expires_at": queued + CONTAINER_REQUEST_SECONDS}
@@ -202,9 +242,9 @@ def main():
         wait_for_service()
     elif action == "diagnose":
         diagnose()
-    elif action in ("installed", "refreshed"):
+    elif action in ("installed", "restarted"):
         wait_for(action)
-    elif action in ("install", "refresh-updater"):
+    elif action == "install":
         submit_request(action)
     else:
         raise SystemExit("Unknown fixture action")
