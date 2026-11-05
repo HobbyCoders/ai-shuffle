@@ -327,14 +327,26 @@ async def reclaim_finished_worker_checkout(worker_session_id: str, checkout: Opt
     """
     import asyncio
     from app.core import turn_scheduler
-    from app.db import turns
+    from app.db import database, turns
 
     async with turn_scheduler.message_resume_lock(worker_session_id):
         if (await asyncio.to_thread(turns.session_has_unsettled_turns, worker_session_id)
                 or await asyncio.to_thread(turn_scheduler._session_has_parked_turn, worker_session_id)):
             return False
+        if checkout is not None:
+            path = checkout.path
+        else:
+            try:
+                row = await asyncio.to_thread(database.get_session, worker_session_id)
+            except Exception:  # noqa: BLE001 — the cleanup helper also fails closed on binding errors
+                return False
+            path = (row or {}).get("worktree_path")
+        had_directory = bool(path and await asyncio.to_thread(os.path.isdir, path))
         reclaimed = await asyncio.to_thread(reclaim_untouched_worker_checkout, worker_session_id, checkout)
-        if reclaimed:
+        # Ref deletion can fail after Git removed the cwd (for example a ref lock).
+        # Overall cleanup success is not the lifetime of that directory inode.
+        cwd_removed = had_directory and not await asyncio.to_thread(os.path.isdir, path)
+        if reclaimed or cwd_removed:
             from app.core.session_pool import get_session_pool
 
             # A retained subprocess still points at the removed directory inode,

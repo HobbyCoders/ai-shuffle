@@ -377,7 +377,7 @@ def _family_consent(model: str, text: str) -> Optional[bool]:
     qualified = (rf"\b(?:old|older|previous|prior|legacy|last|earlier|original|\d+\.\d+|\d{{4}})\s+{name}\b|"
                  rf"\b(?:claude\s+\d+(?:\.\d+)?|\d+(?:\.\d+)?\s+version\s+of)\s+{name}\b|"
                  rf"(?<=[\w-])-{name}\b|\b{name}(?:-[\w-]+|{number}|"
-                 rf"\s+(?:(?:(?:at|with)\s+)?(?:model|version|build|release)\s+)?{number}|"
+                 rf"\s+(?:(?:(?:at|with)\s+)?(?:model|version|build|release)[\W_]+)?{number}|"
                  rf"{gap}(?:v?\d+\.\d+|1m)\b|[\s,:/()\[\]{{}}—–-]+{number}(?=[\s)\]}}]*(?:$|[.,;:!?])))")
     mentioned = False
     for sentence in re.split(r"(?<=[.!?])\s+|\n", str(text or "")):
@@ -996,7 +996,11 @@ async def accept(session_id: str, profile_id: Optional[str], *, model: str,
             action=action, cache_key=cache_key, key=key, incomplete=True))
     qualified = evidence is not None and not named_by_user(model, [evidence.get("text", "")])
     if model == baseline and not qualified:
-        return None
+        # A saved version request also needs agreement before a family retry.
+        # A newer plain owner message still takes precedence over saved routing.
+        if not native or evidence or not any(_family_consent(model, entry.text) is False
+                for entry in await asyncio.to_thread(owner_memories, session_id)):
+            return None
     if qualified:
         # A fresh pin supersedes every older source, including a previous Yes.
         # Approval for this request survives restart, not a later version request.

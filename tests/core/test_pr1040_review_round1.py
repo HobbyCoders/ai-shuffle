@@ -1,6 +1,9 @@
 """Producing-path regressions from the fresh independent PR 1040 review."""
 import asyncio
+import json
 from pathlib import Path
+import subprocess
+import sys
 import threading
 from unittest.mock import AsyncMock
 
@@ -73,6 +76,45 @@ async def test_labeled_version_after_gap_requires_agreement(chats, entry, source
     assert not ok and len(chats[2]) == 1 and not chats[1], error
 
 
+@pytest.mark.parametrize("entry", ["start", "task"])
+@pytest.mark.parametrize("source", ["owner", "memory"])
+@pytest.mark.parametrize("baseline", ["sonnet", "opus"])
+@pytest.mark.parametrize("wording", ["Use Opus at version: 4", "Use Opus with version: four"])
+async def test_punctuated_version_label_requires_fresh_agreement(chats, entry, source, baseline, wording):
+    _native_request(chats, entry, source, wording)
+    subagent_default.write(baseline)
+    database.update_profile("native-retry", config={"provider_models": {"__native__": baseline}})
+    database.set_session_run_binding("caller", model=baseline)
+    ok, error = await _native_call(entry, "claude-opus-4-7", "punctuated-pin")
+    assert not ok and not chats[1] and not chats[2], error
+    ok, error = await _native_call(entry, "opus", "punctuated-family")
+    assert not ok and len(chats[2]) == 1 and not chats[1], error
+
+
+@pytest.mark.parametrize("entry", ["start", "task"])
+@pytest.mark.parametrize("source", ["owner", "memory"])
+@pytest.mark.parametrize("baseline", ["sonnet", "opus"])
+async def test_unlabeled_agent_count_is_still_plain_consent(chats, entry, source, baseline):
+    _native_request(chats, entry, source, "Use Opus with 2 agents")
+    subagent_default.write(baseline)
+    database.update_profile("native-retry", config={"provider_models": {"__native__": baseline}})
+    database.set_session_run_binding("caller", model=baseline)
+    ok, result = await _native_call(entry, "opus", "unqualified-agent-count")
+    assert ok and not chats[2], result
+
+
+@pytest.mark.parametrize("entry", ["start", "task"])
+@pytest.mark.parametrize("baseline", ["sonnet", "opus"])
+async def test_new_plain_owner_request_overrides_qualified_saved_memory(chats, entry, baseline):
+    sid = _native_request(chats, entry, "memory", "Use Opus at version: 4")
+    subagent_default.write(baseline)
+    database.update_profile("native-retry", config={"provider_models": {"__native__": baseline}})
+    database.set_session_run_binding("caller", model=baseline)
+    _turn(sid, "user", "Use Opus for this review", profile="agent" if entry == "start" else "caller")
+    ok, result = await _native_call(entry, "opus", "newer-plain-owner")
+    assert ok and not chats[2], result
+
+
 @pytest.mark.parametrize("source", ["user", "api"])
 async def test_owner_enqueue_preflight_waits_for_old_finisher(repo, monkeypatch, source):
     checkout = bind_worker(repo)
@@ -117,6 +159,80 @@ async def test_reclaimed_checkout_retires_pooled_cwd_generation(repo, monkeypatc
     monkeypatch.setattr(session_pool, "remove", removed)
     assert await worker_checkout.reclaim_finished_worker_checkout("followup") is not dirty
     assert removed.await_count == int(not dirty)
+
+
+@pytest.mark.parametrize("supplied_checkout", [False, True])
+@pytest.mark.parametrize("dirty", [False, True])
+async def test_partial_ref_cleanup_retires_only_a_removed_real_process_cwd(repo, monkeypatch, supplied_checkout, dirty):
+    from app.core.session_pool import get_session_pool
+
+    checkout = bind_worker(repo)
+    if dirty:
+        Path(checkout.path, "keep-owner-work.txt").write_text("retain this checkout")
+    # A real Git ref lock fails only branch deletion, AFTER worktree removal.
+    lock = Path(repo[2], ".git", "refs", "heads", checkout.branch + ".lock")
+    lock.write_text("held by this test")
+    code = """import json, os, sys
+for line in sys.stdin:
+    try:
+        result = {"cwd": os.getcwd()}
+    except OSError as exc:
+        result = {"error": type(exc).__name__, "errno": exc.errno}
+    print(json.dumps(result), flush=True)
+"""
+    process = subprocess.Popen([sys.executable, "-u", "-c", code], cwd=checkout.path,
+                               stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    def cwd():
+        process.stdin.write("cwd\n")
+        process.stdin.flush()
+        return json.loads(process.stdout.readline())
+    try:
+        assert cwd() == {"cwd": checkout.path}
+        retired_cwd = []
+        async def retire(session_id, *, preserve_session):
+            assert session_id == "followup" and preserve_session is True
+            assert turn_scheduler.message_resume_lock(session_id).locked()
+            retired_cwd.append(cwd())
+            process.terminate()
+            process.wait(timeout=3)
+        removed = AsyncMock(side_effect=retire)
+        monkeypatch.setattr(get_session_pool(), "remove", removed)
+        reclaimed = await worker_checkout.reclaim_finished_worker_checkout(
+            "followup", checkout if supplied_checkout else None)
+        current = cwd() if process.poll() is None else retired_cwd[-1]
+        trace = {"dirty": dirty, "supplied_checkout": supplied_checkout,
+                 "reclaimed": reclaimed, "directory_exists": Path(checkout.path).is_dir(),
+                 "branch_sha": git(repo[2], "rev-parse", "refs/heads/" + checkout.branch),
+                 "pool_removals": removed.await_count, "old_process": current}
+        print("PARTIAL_RECLAIM_TRACE " + json.dumps(trace))
+        assert reclaimed is False, "branch cleanup failed or dirty checkout was retained"
+        assert trace["branch_sha"] == checkout.base_commit
+        assert trace["directory_exists"] is dirty
+        assert removed.await_count == int(not dirty), trace
+        if dirty:
+            assert current == {"cwd": checkout.path}
+        else:
+            assert retired_cwd == [{"error": "FileNotFoundError", "errno": 2}]
+            assert process.poll() is not None, "the deleted-cwd process must be retired"
+            # The still-held ref lock also blocks Git checkout; admission fails closed.
+            assert not await query_options.ensure_pending_checkout(database.get_session("followup"))
+            assert not Path(checkout.path).exists()
+            lock.unlink()
+            # Retry the actual execution preflight after the other Git writer releases its lock.
+            assert await query_options.ensure_pending_checkout(database.get_session("followup"))
+            assert git(checkout.path, "branch", "--show-current") == checkout.branch
+            assert git(checkout.path, "rev-parse", "HEAD") == checkout.base_commit
+            fresh = subprocess.check_output([sys.executable, "-c", "import os; print(os.getcwd())"],
+                                            cwd=checkout.path, text=True).strip()
+            assert fresh == checkout.path
+            print("RESTORED_PROCESS_CWD " + fresh)
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            process.wait(timeout=3)
+        process.stdin.close()
+        process.stdout.close()
+        lock.unlink(missing_ok=True)
 
 
 async def test_zero_output_retry_cannot_reclaim_a_queued_followup(repo, monkeypatch):
