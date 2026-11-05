@@ -813,10 +813,11 @@
 	let windowShifting = false;
 	let revealedTurnId = $state<string | null>(null);
 	let anchorRounding: { scrollTop: number; error: number } | null = null;
-	// Space kept above the window when evicting leading rows would need a
-	// negative scrollTop (#889): at scroll origin the compensation clamps and
-	// the reader moves up. Measured per shift; every later shift re-anchors.
+	// Exact leading space keeps automatic evictions in the same coordinate
+	// system, and prevents a reader's negative-scrollTop clamp (#889). Explicit
+	// paging re-anchors and releases it; range caches retain its measured value.
 	let leadingGap = $state(0);
+	let earlierRowRef = $state<HTMLDivElement | null>(null);
 
 	function applyMountedRange(next: TranscriptRange, preserveAnchor = true, keepLeadingSpace = false, allowFollowerAppend = false) {
 		// Once the budget was reached, keep the clear affordance stable until
@@ -838,6 +839,34 @@
 				evictOldest(mountedRangeCache, SCROLL_CACHE_MAX);
 			}
 			return;
+		}
+		// Removing leading DOM must not change an automatic follower's origin.
+		// Restoring scrollTop after tick is too late: measuring the shortened DOM
+		// has already laid out/scored a clamp, and can expose old prose at the tail.
+		// Retain the exact measured distance in the existing leading space instead.
+		// All reserve/observer writers then keep valid coordinates, even when a
+		// terminal row and a multi-thousand-pixel WORKLOG eviction commit together.
+		if (allowFollowerAppend && shouldAutoScroll && !preserveAnchor && !windowShifting &&
+			next.start > mountedStart && chatColumnRef && earlierRowRef) {
+			const rows = Array.from(chatColumnRef.querySelectorAll<HTMLElement>(':scope > [data-transcript-key]'));
+			const retained = rows.find(node => node.dataset.transcriptKey === displayItemKey(displayItems[next.start]));
+			const first = rows[0];
+			if (retained && first) {
+				// The control starts in flow only on the first eviction. Its measured
+				// height (including responsive text) is not an estimated row height.
+				const control = mountedStart === 0 ? earlierRowRef.getBoundingClientRect().height
+					+ (parseFloat(getComputedStyle(chatColumnRef).rowGap) || 0) : 0;
+				const gap = leadingGap + retained.getBoundingClientRect().top - first.getBoundingClientRect().top - control;
+				if (gap >= 0) {
+					leadingGap = gap;
+					mountedRange = next;
+					if (windowSessionKey) {
+						mountedRangeCache.set(windowSessionKey, { ...next, leadingGap: gap });
+						evictOldest(mountedRangeCache, SCROLL_CACHE_MAX);
+					}
+					return;
+				}
+			}
 		}
 		const container = containerRef;
 		const top = container?.getBoundingClientRect().top ?? 0;
@@ -2524,14 +2553,15 @@
 			style:--transcript-tail-reserve={`calc(${Math.max(tailReservePx, latestTurnTailPx)}px + env(safe-area-inset-bottom, 0px) + var(--call-dock-reserve, 0px))`}
 			style:padding-bottom="var(--transcript-tail-reserve)"
 		>
-			{#if mountedStart > 0}
-				<!-- Keyboard-accessible equivalent of scrolling into the older edge. -->
-				<div class="earlier-row" style:margin-top={leadingGap ? `${leadingGap}px` : undefined}>
-					<button type="button" class="earlier-button" onclick={loadOlderItems}>
-						Show earlier messages
-					</button>
-				</div>
-			{/if}
+			<!-- Measure out of flow before the first eviction; expose the same paging
+			     control once older rows exist, without changing the retained origin. -->
+			<div class="earlier-row" class:earlier-measure={mountedStart === 0} bind:this={earlierRowRef}
+				inert={mountedStart === 0} aria-hidden={mountedStart === 0}
+				style:margin-top={leadingGap ? `${leadingGap}px` : undefined}>
+				<button type="button" class="earlier-button" onclick={loadOlderItems}>
+					Show earlier messages
+				</button>
+			</div>
 			{#each visibleItems as item, i (displayItemKey(item))}
 				<!-- Bounded mounting, with real row geometry for scroll anchoring. -->
 				<div
@@ -2950,6 +2980,8 @@
 		display: flex;
 		justify-content: center;
 	}
+
+	.earlier-measure { position: absolute; visibility: hidden; pointer-events: none; }
 
 	.earlier-button {
 		min-height: 44px;

@@ -94,7 +94,7 @@ function probe() {
 /** The real sender owns intent publication; this adapter only records its updates. */
 function senderSnapshots(initial: Session, authoritative = false, switchOnConnection?: Session) {
 	const asActive = (value: Session) => ({ title: 'Existing chat', profile: 'claude-code', project: 'proj-1',
-		worktreeIntent: 'local', pendingPeerMessages: [], ...value } as ActiveSessionState);
+		worktreeIntent: 'local', pendingPeerMessages: [], ...value } as unknown as ActiveSessionState);
 	let state = asActive(initial);
 	const snapshots: ActiveSessionState[] = [];
 	const deps = {
@@ -423,14 +423,18 @@ const rangePrefix = between('function applyMountedRange(', 'const container = co
 const rangeCommit = between('const version = ++windowShiftVersion;', 'void tick().then(async () => {');
 function appendProbe(overrides: Record<string, unknown> = {}) {
 	const env = { start: 0, end: 2, next: { start: 0, end: 3 }, allowed: true, follows: true,
-		shifting: false, gap: 0, leadingKey: 'first', firstKey: 'first', ...overrides };
+		shifting: false, gap: 0, leadingKey: 'first', firstKey: 'first', removed: 120.21875, headerHeight: 44, retainedKey: 'second', ...overrides };
 	return new Function('env', `
 		let mountedRange = { start: env.start, end: env.end };
 		const mountedStart = mountedRange.start, mountedEnd = mountedRange.end;
 		let followedViewportEnd = 5600, windowShiftVersion = 4, windowShifting = env.shifting, leadingGap = env.gap;
 		let selectionBlocksNavigation = false, shouldAutoScroll = env.follows, anchorRounding = null;
 		const transcriptWindow = { selectionLimited: false }, pinnedTranscriptRange = () => null;
-		const chatColumnRef = { querySelector: () => ({ dataset: { transcriptKey: env.leadingKey } }) };
+		const first = { dataset: { transcriptKey: env.leadingKey }, getBoundingClientRect: () => ({ top: 100 }) };
+		const retained = { dataset: { transcriptKey: env.retainedKey }, getBoundingClientRect: () => ({ top: 100 + env.removed }) };
+		const chatColumnRef = { querySelector: () => first, querySelectorAll: () => [first, retained] };
+		const earlierRowRef = { getBoundingClientRect: () => ({ height: env.headerHeight }) };
+		const getComputedStyle = () => ({ rowGap: '18' });
 		const displayItems = [{ key: env.firstKey }, { key: 'second' }, { key: 'third' }];
 		const displayItemKey = item => item.key;
 		const windowSessionKey = 'long', mountedRangeCache = new Map(), SCROLL_CACHE_MAX = 1;
@@ -455,7 +459,10 @@ describe('automatic same-context follower appends', () => {
 	});
 
 	it.each([
-		['leading eviction', { next: { start: 1, end: 3 } }],
+		['unmounted next leading key', { next: { start: 2, end: 3 } }],
+		['explicit leading eviction', { next: { start: 1, end: 3 }, allowed: false }],
+		['reader leading eviction', { next: { start: 1, end: 3 }, follows: false }],
+		['overlapping leading eviction', { next: { start: 1, end: 3 }, shifting: true }],
 		['trailing removal', { next: { start: 0, end: 1 } }],
 		['replaced leading key', { firstKey: 'replacement' }],
 		['new session or explicit navigation', { allowed: false }],
@@ -464,5 +471,22 @@ describe('automatic same-context follower appends', () => {
 		['transcript clear', { next: { start: 0, end: 0 } }]
 	] as const)('retains the strict coordinate-shift path for %s', (_name, overrides) => {
 		expect(appendProbe(overrides)).toMatchObject({ floor: 0, version: 5, shifting: true });
+	});
+});
+
+describe('automatic eviction retains the measured coordinate origin before rendering', () => {
+	it.each([120.21875, 3223])('retains a %spx leading removal without invalidating follow work', removed => {
+		const state = appendProbe({ next: { start: 1, end: 3 }, removed });
+		expect(state).toMatchObject({ floor: 5600, version: 4, shifting: false,
+			gap: removed - 62, cached: { start: 1, end: 3, leadingGap: removed - 62 } });
+	});
+	it('measures the first earlier control instead of assuming a fixed height', () => {
+		expect(appendProbe({ next: { start: 1, end: 3 }, removed: 3223, headerHeight: 72 }))
+			.toMatchObject({ gap: 3133, version: 4, shifting: false });
+	});
+	it('adds dropped height to an already-retained origin without charging the control twice', () => {
+		expect(appendProbe({ start: 1, end: 3, next: { start: 2, end: 3 }, firstKey: 'unused', removed: 3223,
+			leadingKey: 'old', retainedKey: 'third', gap: 400 }))
+			.toMatchObject({ gap: 3623, floor: 5600, version: 4, shifting: false });
 	});
 });

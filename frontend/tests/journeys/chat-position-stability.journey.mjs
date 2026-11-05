@@ -427,17 +427,150 @@ const cases = [{
 	}
 })) : [])];
 
+
+// Coherent geometry in one callback: a retained Range/row identity is evidence
+// of visible continuity; native source rectangles alone can be clipped or empty.
+async function watchLongCompletionThenError(ctx) {
+	const { page } = ctx;
+	await page.evaluate(() => {
+		const pane = document.querySelector('.msg-scroll');
+		const p = window.__completionProbe = { started: performance.now(), phase: 'long', phaseAt: 0, frames: [], shifts: [], running: true };
+		const ids = new WeakMap(); let next = 1;
+		const id = n => { if (!n) return null; if (!ids.has(n)) ids.set(n, next++); return ids.get(n); };
+		const probes = new Map();
+		const sample = reason => {
+			const box = pane.getBoundingClientRect();
+			for (const y of [box.top + 32, box.top + box.height / 2, box.bottom - 48]) {
+				const caret = document.caretRangeFromPoint(box.left + 60, y);
+				const node = caret?.startContainer;
+				if (node?.nodeType !== Node.TEXT_NODE || !node.textContent.trim() || !pane.contains(node) || probes.has(node)) continue;
+				const range = caret.cloneRange();
+				range.setEnd(node, Math.min(node.length, range.startOffset + 24));
+				if (range.toString().trim()) probes.set(node, { range, row: node.parentElement.closest('[data-transcript-key]') });
+			}
+			const userRow = [...pane.querySelectorAll('[data-user-turn-id]')].at(-1);
+			const bubble = userRow?.querySelector('.bubble-text');
+			if (bubble) {
+				const walker = document.createTreeWalker(bubble, NodeFilter.SHOW_TEXT);
+				const node = walker.nextNode();
+				if (node?.textContent.trim() && !probes.has(node)) {
+					const range = document.createRange(); range.selectNodeContents(node);
+					probes.set(node, { range, row: userRow });
+				}
+			}
+			// Keep the current continuity window, not every old prose node from all
+			// turns. Large transfers at stop would stall Chromium/CI needlessly.
+			while (probes.size > 16) probes.delete(probes.keys().next().value);
+			const allRows = [...pane.querySelectorAll('[data-transcript-index]')];
+			const rows = [...new Set([...allRows.slice(0, 2), ...allRows.slice(-6)])];
+			const f = { t: performance.now() - p.started, phase: p.phase, reason,
+				userRow: id(userRow), top: pane.scrollTop, height: pane.scrollHeight, client: pane.clientHeight, viewport: box.toJSON(),
+				streaming: document.querySelector('[data-ui-state="chat"]').dataset.uiStreaming,
+				firstIndex: Number(rows[0]?.dataset.transcriptIndex ?? -1),
+				leadingGap: parseFloat(getComputedStyle(pane.querySelector('.chat-column > .earlier-row')).marginTop) || 0,
+				rows: rows.map(row => ({ id: id(row), key: row.dataset.transcriptKey, index: Number(row.dataset.transcriptIndex), rect: row.getBoundingClientRect().toJSON() })),
+				texts: [...probes].map(([node, { range, row }]) => ({ id: id(node), rowId: id(row), key: row?.dataset.transcriptKey, connected: node.isConnected && row?.isConnected,
+					text: range.toString(), rect: range.getBoundingClientRect().toJSON() })),
+				controls: Object.fromEntries(['.input-slot', '.tail-controls', '.tail-error', '.transcript-tail-spacer', '.turn-activity'].map(sel => [sel, document.querySelector(sel)?.getBoundingClientRect().toJSON()])) };
+			p.frames.push(f);
+			return f;
+		};
+		p.observer = new PerformanceObserver(list => {
+			for (const e of list.getEntries()) p.shifts.push({ t: e.startTime - p.started, value: e.value, recent: e.hadRecentInput,
+				sources: e.sources.map(s => ({ id: id(s.node), connected: s.node?.isConnected, html: s.node?.outerHTML?.slice(0, 600),
+					key: s.node?.closest?.('[data-transcript-key]')?.dataset.transcriptKey, previous: s.previousRect.toJSON(), current: s.currentRect.toJSON() })), frame: sample('native') });
+		});
+		p.observer.observe({ type: 'layout-shift' });
+		p.mutations = new MutationObserver(() => sample('mutation'));
+		p.mutations.observe(pane, { subtree: true, childList: true, characterData: true, attributes: true });
+		const frame = () => {
+			if (!p.running) return;
+			sample('raf');
+			// Observe after layout too: rAF can precede the app's follow callback.
+			const painted = new IntersectionObserver(() => {
+				painted.disconnect();
+				if (p.running) sample('post-layout');
+			});
+			painted.observe(pane);
+			p.raf = requestAnimationFrame(frame);
+		};
+		frame();
+	});
+	const sendLong = async () => {
+		await page.evaluate(() => { const p = window.__completionProbe; p.phase = 'long'; p.phaseAt = performance.now() - p.started; });
+		await ctx.mark('preceding long completion');
+		await typeAndSend(page, 'parent preceding long answer [script:long tps=2000]');
+		await waitChat(page, { streaming: 'true' });
+		await waitTurnSettled(page, { hold: 1800 });
+	};
+	await sendLong();
+	await page.evaluate(() => { const p = window.__completionProbe; p.phase = 'error-initial'; p.phaseAt = performance.now() - p.started; });
+	await ctx.mark('error after preceding long completion');
+	await typeAndSend(page, 'parent error after long [script:error-500 latency_ms=4500]');
+	await waitChat(page, { streaming: 'true' });
+	await waitTurnSettled(page, { hold: 900 });
+	// One more real long turn places the large WORKLOG at the next budget edge.
+	// Continue real errors until completion, not input admission, evicts it.
+	await sendLong();
+	let largeTerminalEviction = false;
+	for (let turn = 0; turn < 12; turn++) {
+		await page.evaluate(turn => { const p = window.__completionProbe; p.phase = `error-${turn}`; p.phaseAt = performance.now() - p.started; }, turn);
+		await ctx.mark(`error after long ${turn}`);
+		await typeAndSend(page, `parent error after long ${turn} [script:error-500 latency_ms=4500]`);
+		await waitChat(page, { streaming: 'true' });
+		await waitTurnSettled(page, { hold: 900 });
+		const removed = await page.evaluate(minHeight => {
+			const p = window.__completionProbe, fs = p.frames.filter(f => f.phase === p.phase && f.t > p.phaseAt + 2000);
+			return fs.some((f,i) => i && f.firstIndex > fs[i-1].firstIndex && fs[i-1].rows.some(row =>
+				row.index < f.firstIndex && row.key.startsWith('wl-') && row.rect.height > minHeight));
+		}, ctx.variant.viewport === 'phone' ? 2000 : 1000);
+		ctx.log(`terminal worklog eviction ${turn}: ${removed}`);
+		if (removed) { largeTerminalEviction = true; break; }
+	}
+	const observed = await page.evaluate(() => {
+		const p = window.__completionProbe;
+		p.running = false; p.observer.disconnect(); p.mutations.disconnect(); cancelAnimationFrame(p.raf);
+		return { frames: p.frames, shifts: p.shifts };
+	});
+	if (process.env.JOURNEY_OUT) writeFileSync(`${process.env.JOURNEY_OUT}/long-completion-error-${prefix(ctx.variant) === '/mobile/' ? 'mobile' : 'root'}-${ctx.variant.viewport}.json`, JSON.stringify(observed));
+	const phases = [...new Set(observed.frames.map(f => f.phase))].filter(phase => phase.startsWith('error'));
+	for (const phase of phases) {
+		const fs = observed.frames.filter(f => f.phase === phase);
+		const before = fs.filter(f => f.streaming === 'true').at(-1);
+		const text = before?.texts.find(t => t.rowId === before.userRow && t.connected);
+		expect(text && text.rect.top > before.viewport.top && text.rect.bottom < before.viewport.bottom, 'the error prompt is visibly tracked before completion');
+		for (const f of fs.filter(f => f.t >= before.t && (f.reason === 'raf' || f.reason === 'post-layout'))) {
+			const current = f.texts.find(t => t.id === text.id);
+			expect(current?.connected && current.rowId === text.rowId && current.text === text.text, 'completion retains the same connected prompt Range and row');
+			expect(Math.abs(current.rect.top - text.rect.top) <= 1, `completion/rebase must not move the prompt (${current.rect.top} vs ${text.rect.top})`);
+		}
+	}
+	expect(largeTerminalEviction, 'a real error completion must evict a large leading WORKLOG (phone >2000px; desktop >1000px)');
+	ctx.log(`long completion then error: ${JSON.stringify({ frames: observed.frames.length, phases, largeTerminalEviction,
+		shifts: observed.shifts.map(({ t, value, recent, sources }) => ({ t, value, recent, keys: sources.map(s => s.key) })) })}`);
+}
+
 // A fresh send can be queued without a new transcript row. Keep this phone-only
 // producing regression separate from the original error/handoff/Stop actions.
 // Exercise the leading-row boundary with real CLI history and retain the same
 // connected current-user text range across the error's mounted-window rebase.
 cases.push({
-	name: 'error-rebase-keeps-visible-prompt', viewports: ['phone'], throttles: ['slow'],
+	name: 'error-rebase-keeps-visible-prompt', viewports: ['desktop', 'phone'], throttles: ['slow'],
 	async setup(ctx) {
 		await openClaude(ctx, { history: true });
 		const count = Number(await ctx.page.locator('[data-ui-state="chat"]').getAttribute('data-ui-messages'));
 		await typeAndSend(ctx.page, `ninth history ${uniq()} [script:long tps=2000]`);
 		await waitTurnSettled(ctx.page, { messagesAtLeast: count + 2, hold: 200 });
+		if (ctx.variant.viewport === 'desktop') {
+			// Scope this NEW desktop transcript-origin check with the real UI.
+			// Intended Needs-you/Active sidebar reclassification is tested separately;
+			// this extended flow sidebar-visible remains strict RED (0.120), not a
+			// global desktop pass. Existing desktop neighbors keep their sidebar.
+			await ctx.page.getByRole('button', { name: 'Hide sidebar', exact: true }).click();
+			const show = ctx.page.getByRole('button', { name: 'Show sidebar', exact: true });
+			await show.waitFor({ state: 'visible' });
+			expect(await show.isVisible(), 'the desktop transcript check really collapsed the sidebar');
+		}
 	},
 	async act(ctx) {
 		const { page } = ctx;
@@ -491,7 +624,7 @@ cases.push({
 				const p = window.__errorRebaseProbe; p.running = false; p.observer.disconnect(); cancelAnimationFrame(p.raf);
 				return { frames: p.frames, shifts: p.shifts, errorAt: p.errorAt };
 			});
-			if (process.env.JOURNEY_OUT) writeFileSync(`${process.env.JOURNEY_OUT}/error-rebase-${turn}.json`, JSON.stringify(observed));
+			if (process.env.JOURNEY_OUT) writeFileSync(`${process.env.JOURNEY_OUT}/error-rebase-${prefix(ctx.variant) === '/mobile/' ? 'mobile' : 'root'}-${ctx.variant.viewport}-${turn}.json`, JSON.stringify(observed));
 			const before = observed.frames.filter(f => f.user?.connected && f.t < observed.errorAt).at(-1);
 			expect(before?.user.rect.top > before?.viewport.top && before?.user.rect.bottom < before?.viewport.bottom, 'the current user text was actually visible before the error');
 			const after = observed.frames.filter(f => f.t >= observed.errorAt);
@@ -505,6 +638,9 @@ cases.push({
 			ctx.log(`error rebase ${turn}: ${JSON.stringify({ evicted, before, last: after.at(-1), shifts: observed.shifts })}`);
 		}
 		expect(evicted, 'this production path must actually evict a leading transcript row');
+		// Record the whole historical producer, including the preceding long reply's
+		// completion. Installing diagnostics only before the error misses that commit.
+		await watchLongCompletionThenError(ctx);
 		// The runner owns the unchanged strict recorder/anomaly verdict.
 	}
 });
