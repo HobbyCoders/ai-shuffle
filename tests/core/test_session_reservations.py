@@ -22,7 +22,7 @@ def history(mock_db):
 def test_idle_history_does_not_hold_resources(history):
     assert not holds_resources("history")
     database.set_session_active("history", True)
-    assert holds_resources("history")
+    assert not holds_resources("history")  # Moving a row is not starting work.
 
 
 @pytest.mark.parametrize("sid", ["history", "child"])

@@ -1,7 +1,7 @@
 """History does not reserve resources; only unfinished work does.
 
-Shared by checkout mutation, branch rebinding and primary-PR adoption. Active
-working-set chats reserve their checkout; settled chats reserve only unfinished work.
+Shared by checkout mutation, branch rebinding and primary-PR adoption. Sidebar
+membership is not a reservation: an idle chat in either lane holds no resources.
 """
 def holds_resources(session_id: str) -> bool:
     from app.db.base import get_db
@@ -11,10 +11,6 @@ def holds_resources(session_id: str) -> bool:
         return True
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT is_active FROM sessions WHERE id=%s", (session_id,))
-        row = cursor.fetchone()
-        if row and row["is_active"]:
-            return True
         cursor.execute("""WITH RECURSIVE family AS (
             SELECT id FROM sessions WHERE id=%s
             UNION ALL SELECT s.id FROM sessions s JOIN family f ON s.parent_session_id=f.id

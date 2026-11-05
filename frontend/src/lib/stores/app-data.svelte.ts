@@ -10,13 +10,12 @@
 
 import type { Session, Profile, PaginatedSessions, CursorPaginatedSessions, SessionSearchResult, PaginatedSessionSearchResults } from '$lib/api/client';
 import { feedController } from './session/v2/feed-controller';
-import { api, searchSessionsPaginated, renameSession as apiRenameSession, setSessionActive as apiSetSessionActive, setSessionArchived as apiSetSessionArchived } from '$lib/api/client';
+import { api, searchSessionsPaginated, renameSession as apiRenameSession, setSessionActive as apiSetSessionActive } from '$lib/api/client';
 import { listClusterProjects, type ClusterProject } from '$lib/api/installs';
 import { refreshProjectsOverviewIfUsed } from './projects-overview';
 import type { Project } from './types';
 import { createSubscribers } from './store-utils';
 import { activeSession } from './active-session';
-import { archivedChats } from './archived-chats';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -87,10 +86,9 @@ const INITIAL_SESSION_PAGES = 1;
 const MAX_RELOAD_SESSION_PAGES = 10;
 
 /**
- * Every sidebar list request. Archived chats live in Settings, never in the
- * sidebar, so they are excluded on the server: otherwise `has_more` counts
- * rows the sidebar will drop and "Load older sessions" fetches pages that
- * add nothing visible.
+ * Bounded settled history is separate from the complete Active working set.
+ * Keep the retired archive query flag for older servers; upgraded servers
+ * canonicalise legacy archive metadata before applying these visibility rules.
  */
 const SESSION_LIST_BASE = `/sessions/cursor?limit=${SESSIONS_PAGE_SIZE}&admin_only=true&exclude_archived=true&membership=settled`;
 const SEARCH_PAGE_SIZE = 20;

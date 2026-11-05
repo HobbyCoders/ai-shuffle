@@ -279,16 +279,16 @@ async def lifespan(app: FastAPI):
         runner_approved = False
     cluster_heartbeat_task = asyncio.create_task(_cluster_heartbeat_loop())
 
-    # Install the v2 turn-scheduler seams (turn_scheduler.install +
-    # turn_manager interrupt executor) BEFORE reconcile runs: reconcile's boot
-    # sweep fires turn_scheduler.kick() for recovered sessions, which is a no-op
-    # unless these seams are already installed.
-    from app.core.startup import install_v2_turns_wiring
-    install_v2_turns_wiring()
-
-    # Fail closed before admission if the durable archive retirement cannot finish.
+    # Archive retirement must finish before wiring starts the claim loop. No
+    # runtime from the previous process survives here; durable interrupts remain
+    # visible to its runner without admitting a stale queued input on this one.
     from app.db.session_archive_migration import reconcile as reconcile_archive_retirement
     await reconcile_archive_retirement()
+
+    # Install scheduler seams before the ordinary boot recovery sweep, whose
+    # recovered turns need turn_scheduler.kick(). This also starts turn claims.
+    from app.core.startup import install_v2_turns_wiring
+    install_v2_turns_wiring()
 
     # Reconcile from durable truth BEFORE any session machinery starts: a
     # previous run's crash can leave sessions durably marked parked (stuck

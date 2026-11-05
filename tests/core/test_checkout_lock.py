@@ -63,6 +63,7 @@ def project(mock_db, tmp_path, monkeypatch):
     database.create_profile("agent", "Agent", None, {"model": "sonnet"})
     monkeypatch.setattr(orch, "_principal", lambda sid: None)
     chat("parent", pv2["id"], branch="parent-branch")
+    queue_turn("parent")  # Resource protection follows unfinished work, not membership.
     # The parent is the checkout's original owner: older than any chat below.
     with get_db() as conn:
         conn.cursor().execute("UPDATE sessions SET created_at=%s WHERE id=%s",
@@ -117,7 +118,7 @@ def test_start_session_child_gets_its_own_worktree_and_cannot_switch_the_parents
     assert str(own) in note and "(branch 'parent-branch')" in note
 
     # Lock: the child's `checkout -b` in the parent's folder is refused, even
-    # while the parent is idle... Paths in commands are written with forward
+    # while the parent has work queued. Paths in commands are written with forward
     # slashes, as the Bash tool asks: bash eats an unquoted Windows path's
     # backslashes, so D:\t\parent would name a different folder.
     for command, cwd in (("git checkout -b fix/stable-channel-switch-back", parent),
@@ -158,24 +159,30 @@ def test_a_parent_with_a_legacy_co_bound_child_keeps_its_own_checkout(project):
 def test_a_co_bound_chat_is_blocked_only_while_the_owner_works(project):
     pv2, _base, parent = project
     chat("legacy-child", pv2, branch="parent-branch")
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE turns SET state='completed' WHERE session_id='parent'")
     assert checkout_lock.tool_denial("legacy-child", "Bash", bash("git switch main"), str(parent)) is None
     queue_turn("parent")
     denial = checkout_lock.tool_denial("legacy-child", "Bash", bash("git switch main"), str(parent))
     assert denial and "bound to that checkout too" in denial
 
 
-def test_an_unbound_chat_is_refused_while_the_owner_is_idle(project):
+def test_an_unbound_chat_is_refused_only_while_the_owner_has_work(project):
     pv2, _base, parent = project
     chat("stranger", pv2)
     denial = checkout_lock.tool_denial("stranger", "Bash", bash("git switch main"), str(parent))
     assert denial and "Refused" in denial
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE turns SET state='completed' WHERE session_id='parent'")
+    assert checkout_lock.tool_denial("stranger", "Bash", bash("git switch main"), str(parent)) is None
 
 
-def test_archived_sessions_and_the_base_checkout_are_not_locked(project):
+def test_idle_migrated_history_and_the_base_checkout_are_not_locked(project):
     pv2, base, parent = project
     chat("other", pv2)
     with get_db() as conn:
-        conn.cursor().execute("UPDATE sessions SET status='archived' WHERE id=%s", ("parent",))
+        conn.cursor().execute("UPDATE sessions SET status='active',is_active=FALSE WHERE id=%s", ("parent",))
+        conn.cursor().execute("UPDATE turns SET state='completed' WHERE session_id='parent'")
     assert checkout_lock.tool_denial("other", "Bash", bash("git switch main"), str(parent)) is None
     # The project's base checkout records no branch and is shared by design.
     assert checkout_lock.tool_denial("other", "Bash", bash("git checkout -b x"), str(base)) is None
@@ -199,7 +206,7 @@ def test_branch_ops_aimed_by_name_or_path_are_refused(project):
     pv2, base, parent = project
     chat("other", pv2)
     denial = checkout_lock.tool_denial("other", "Bash", bash(f"git worktree remove {parent.as_posix()}"), str(base))
-    assert denial and "archives session parent" in denial
+    assert denial and "still in use by session parent" in denial
     assert checkout_lock.tool_denial("other", "Bash", bash(f"git worktree move {parent.as_posix()} {parent.as_posix()}-moved"),
                                      str(base))
     assert checkout_lock.tool_denial("other", "Bash", bash("git branch -D parent-branch"), str(base))

@@ -313,7 +313,7 @@ describe('a refused change gives back only what it touched (#1034)', () => {
 
 	const CHANGES = [
 		['settle', () => appData.setSessionActive('s0', false), mocks.setSessionActive],
-		['archive', () => appData.setSessionArchived('s0', true), mocks.setSessionArchived],
+		['legacy archive alias', () => appData.setSessionArchived('s0', true), mocks.setSessionActive],
 		['rename', () => appData.renameSession('s0', 'Refused'), mocks.renameSession],
 		['delete', () => appData.deleteSession('s0'), mocks.delete],
 	] as const;

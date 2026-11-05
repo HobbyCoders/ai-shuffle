@@ -55,6 +55,12 @@ def test_direct_status_and_bulk_writers_cannot_persist_archive(mock_db):
     database.update_session("legacy", status="archived")
     row = database.get_session("legacy")
     assert row["status"] == "active" and not row["is_active"]
+    from app.db.base import get_db
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT is_active,local_revision FROM network_session_active WHERE session_id='legacy'")
+        membership = cur.fetchone()
+        assert not membership["is_active"] and membership["local_revision"] == 1
     from app.db.sessions import set_sessions_active
     set_sessions_active(["legacy"], True, archived=True)
     row = database.get_session("legacy")

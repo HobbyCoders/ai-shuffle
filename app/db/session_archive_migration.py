@@ -20,7 +20,8 @@ def migrate(cursor):
         return []
     # A durable handoff to runtime settlement, in the same transaction as conversion.
     cursor.execute("""CREATE TABLE IF NOT EXISTS session_archive_retirement (
-        session_id TEXT PRIMARY KEY, membership_revision BIGINT NOT NULL,
+        session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+        membership_revision BIGINT NOT NULL,
         membership_epoch TEXT NOT NULL, done BOOLEAN NOT NULL DEFAULT FALSE,
         cancelled_peers TEXT NOT NULL DEFAULT '[]',
         cancelled_wakes TEXT NOT NULL DEFAULT '[]')""")

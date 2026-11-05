@@ -9,7 +9,7 @@
 	 * Active and Settled.
 	 *
 	 * Rows follow the inbox model. Swipe left settles an active session (or
-	 * brings a settled one back); swipe right archives. A long press starts a
+	 * brings a settled one back); swipe right is inert. A long press starts a
 	 * multi-select whose bar offers the same moves in bulk. On desktop the
 	 * same moves sit in each row's hover actions.
 	 *
@@ -28,7 +28,6 @@
 		RefreshCw,
 		X,
 		Check,
-		Archive,
 		Undo2,
 		Files,
 		Notebook,
@@ -84,7 +83,6 @@
 		sessionPrState,
 		projectKey,
 		isVisibleSidebarSession,
-		isArchived,
 		sidebarGroup,
 		lastWorkFailed,
 		openSessionNeeds,

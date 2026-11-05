@@ -914,6 +914,15 @@ def update_session(
     # path every turn hits several times.
     with (nullcontext(_conn) if _conn is not None else get_db()) as conn:
         cursor = get_cursor(conn)
+        if status == "archived":
+            # Trusted legacy DB callers must update the shared projection too;
+            # otherwise an older membership row can undo this settle on peers.
+            from app.network import session_active
+            from app.db import network as store
+            store.lock_state(cursor)
+            cursor.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (session_id,))
+            if cursor.fetchone():
+                session_active._record_active(cursor, session_id, False)
         cursor.execute(
             f"UPDATE sessions SET {', '.join(updates)} WHERE id = {_ph} RETURNING *",
             values
