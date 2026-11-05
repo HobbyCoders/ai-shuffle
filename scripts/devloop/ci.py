@@ -130,8 +130,9 @@ def plan(shards: int, directory: Path = JOURNEYS, weights_path: Path = WEIGHTS) 
 def parse_journey_log(log: str) -> list[tuple[str, float, int]]:
     """One job's timestamped log -> (file, seconds, cases), excluding teardown.
 
-    A journey's own passing footer closes its interval, including the last
-    journey in a shard. Missing/failed results must not become short weights.
+    A journey's own completed footer closes its interval, including the last
+    journey in a shard. Known bugs count as completed cases, as in the runner;
+    missing/failed results must not become short weights.
     """
     samples = []
     pending = None
@@ -145,11 +146,12 @@ def parse_journey_log(log: str) -> list[tuple[str, float, int]]:
         elif pending is not None:
             name, started = pending
             footer = re.fullmatch(re.escape(name.removesuffix(".journey.mjs"))
-                                  + r": (\d+)/(\d+) passed; timelines in .+", message)
+                                  + r": (\d+)/(\d+) passed(?:, (\d+) known bug)?; timelines in .+", message)
             if footer:
                 seconds = (datetime.fromisoformat(stamp) - started).total_seconds()
                 passed, cases = int(footer[1]), int(footer[2])
-                if passed != cases or cases == 0 or seconds <= 0:
+                known_bugs = int(footer[3] or 0)
+                if passed + known_bugs != cases or cases == 0 or seconds <= 0:
                     raise ValueError(f"Not a completed passing journey: {name}")
                 samples.append((name, seconds, cases))
                 pending = None

@@ -973,10 +973,13 @@ Refresh after journey runtime changes, using a few recent completed green
 `main-suite.yml` and `ci-frontend.yml` run IDs with authenticated `gh`:
 `python -m scripts.devloop.ci refresh-weights RUN_ID [RUN_ID ...]`. This reads
 timestamped whole-job logs from the runs' logs archives, measures each
-`[ci] running <file>` through its own passing case-count footer (including
+`[ci] running <file>` through its own completed case-count footer (including
 the last journey, excluding instance teardown), and stores median seconds per
-journey. The fallback is the median of each sample's seconds divided by its
-case count. Use completed green runs on **attempt 1**, with no journey retries.
+journey. A footer may include the runner's `, N known bug` clause only when
+passed plus known-bug cases equals the positive total; a real failure or
+mismatched count is still refused. The fallback is the median of each sample's
+seconds divided by its total case count, including known-bug cases. Use completed
+green runs on **attempt 1**, with no journey retries.
 All re-runs (`attempt != 1`) are refused: GitHub's logs archive contains only
 the latest attempt's jobs, so it cannot prove earlier attempts had no retries.
 A retry marker anywhere in a journey log, including after unterminated output,

@@ -131,11 +131,12 @@ def test_929_short_cases_cannot_pack_the_four_long_journeys_together():
     assert new_load < 0.8 * old_load
 
 
-def _log(stem, seconds, cases, passed=None):
+def _log(stem, seconds, cases, passed=None, known_bugs=0):
     start = datetime(2026, 10, 30, tzinfo=timezone.utc)
     end = start + timedelta(seconds=seconds)
+    known = f", {known_bugs} known bug" if known_bugs else ""
     return (f"{start.isoformat()} [ci] running {stem}.journey.mjs\n"
-            f"{end.isoformat()} {stem}: {cases if passed is None else passed}/{cases} passed; "
+            f"{end.isoformat()} {stem}: {cases if passed is None else passed}/{cases} passed{known}; "
             f"timelines in /tmp/journeys/{stem}\n")
 
 
@@ -172,11 +173,19 @@ def test_log_parser_times_each_journey_including_last_without_teardown():
                                          ("transcript-reader.journey.mjs", 90, 6)]
 
 
+@pytest.mark.parametrize("passed,cases,known_bugs", [(44, 46, 2), (1, 2, 1), (0, 2, 2)])
+def test_log_parser_times_completed_journeys_with_known_bugs(passed, cases, known_bugs):
+    log = _log("sidebar-truth", 650, cases, passed=passed, known_bugs=known_bugs)
+    assert ci.parse_journey_log(log) == [("sidebar-truth.journey.mjs", 650, cases)]
+
+
 @pytest.mark.parametrize("log", [
     "2026-10-30T00:00:00.1234567Z [ci] running cut.journey.mjs\n",
     ("2026-10-30T00:00:00Z [ci] running cut.journey.mjs\n"
      "2026-10-30T00:01:00Z [ci] running next.journey.mjs\n"),
     _log("failed", 30, 3, passed=2),
+    _log("overcounted-known-bugs", 650, 46, passed=45, known_bugs=2),
+    _log("failed-with-known-bugs", 650, 46, passed=43, known_bugs=2),
     _log("empty", 30, 0),
     _log("backwards", -1, 3),
 ])
@@ -186,8 +195,8 @@ def test_incomplete_or_failed_journeys_cannot_become_weights(log):
 
 
 def test_refresh_produces_medians_from_green_archived_job_logs(tmp_path, monkeypatch, refresh_inventory):
-    archives = {10: _archive(_log("a", 30, 3) + _log("b", 10, 2)),
-                20: _archive(_log("a", 50, 5) + _log("b", 30, 3))}
+    archives = {10: _archive(_log("a", 30, 3) + _log("b", 10, 2, passed=1, known_bugs=1)),
+                20: _archive(_log("a", 50, 5) + _log("b", 30, 3, passed=2, known_bugs=1))}
     calls = []
 
     def gh(command, **kwargs):
