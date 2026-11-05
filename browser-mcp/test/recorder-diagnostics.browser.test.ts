@@ -307,6 +307,128 @@ it.each(["throw", "stop-then-throw"])("returns the recording despite a %s hook o
   } finally { await page.close(); }
 });
 
+it.each([false, true])("keeps a new recording's listeners when cleanup attempts start (throws=%s)", async (throws) => {
+  const page = await browser.newPage();
+  try {
+    await page.setContent('<main data-ui-state="chat"></main>');
+    await page.evaluate(recorderSource());
+    const outcome = await page.evaluate((throws) => {
+      const api = (window as any).__flightRecorder;
+      api.start({ id: "old", persist: false });
+      const descriptor = Object.getOwnPropertyDescriptor(Node.prototype, "removeChild")!;
+      let attempted: any;
+      Object.defineProperty(Node.prototype, "removeChild", { configurable: true, get() {
+        // Retry outside cleanup if the lifecycle correctly refuses re-entry.
+        if (!attempted) attempted = api.start({ id: "new", persist: false });
+        if (throws) throw new Error("cleanup ownership getter");
+        return descriptor.value;
+      } });
+      const stopped = api.stop();
+      Object.defineProperty(Node.prototype, "removeChild", descriptor);
+      if (!attempted.ok) api.start({ id: "new", persist: false });
+      window.dispatchEvent(new ErrorEvent("error", { message: "fixture error after cleanup" }));
+      const result = api.stop();
+      return { stopped: stopped.ok, attempted: attempted.ok, id: result.id, errors: result.stats.errors };
+    }, throws);
+    expect(outcome).toEqual({ stopped: true, attempted: false, id: "new", errors: 1 });
+  } finally { await page.close(); }
+});
+
+it("drops an old pre-paint diagnostic when its reader restarts recording", async () => {
+  const page = await browser.newPage();
+  try {
+    await page.setContent('<main data-ui-state="chat"><section><div data-ui-mount="MessageArea"></div></section></main>');
+    await page.evaluate(recorderSource());
+    await page.evaluate(() => (window as any).__flightRecorder.start({ id: "old", persist: false }));
+    await page.waitForFunction(() => (window as any).__flightRecorder.snapshot().stats.paintedSamples > 0);
+    await page.evaluate(() => {
+      const view = document.querySelector("main")!;
+      const column = view.firstElementChild!;
+      let gapReads = 0;
+      (view as any).__flightRecorderState = () => {
+        // First disconnected read: mutation delivery. Second: pre-paint sample.
+        if (!column.isConnected && ++gapReads === 2) {
+          delete (view as any).__flightRecorderState;
+          (window as any).restarted = (window as any).__flightRecorder.start({ id: "new", restart: true, persist: false });
+        }
+        return { showEmptyHero: true };
+      };
+      column.remove();
+    });
+    await page.waitForFunction(() => (window as any).restarted?.ok, undefined, { timeout: 5000 });
+    const rec = await page.evaluate(() => (window as any).__flightRecorder.stop());
+    expect(rec.id).toBe("new");
+    expect(rec.timeline.filter((e: any) => e.message === "MessageArea gap at pre-paint")).toEqual([]);
+    expect(rec.stats.internalErrors).toBe(0);
+  } finally { await page.close(); }
+});
+
+it("disconnects and removes a probe that falls back after missed samples", async () => {
+  const page = await browser.newPage();
+  try {
+    await page.setContent('<main data-ui-state="chat"></main>');
+    await page.evaluate(() => {
+      const NativeObserver = ResizeObserver;
+      (window as any).probeDisconnects = 0;
+      window.ResizeObserver = class extends NativeObserver {
+        disconnect() { (window as any).probeDisconnects++; super.disconnect(); }
+      };
+    });
+    await page.evaluate(recorderSource());
+    await page.evaluate(() => (window as any).__flightRecorder.start({ persist: false }));
+    await page.waitForFunction(() => (window as any).__flightRecorder.snapshot().stats.paintedSamples > 0);
+    await page.evaluate(() => (document.querySelector("flight-recorder-probe") as HTMLElement).style.setProperty("display", "none", "important"));
+    await page.waitForFunction(() => (window as any).__flightRecorder.snapshot().stats.probeMisses >= 3, undefined, { timeout: 5000 });
+    const beforeStop = await page.evaluate(() => ({ hosts: document.querySelectorAll("flight-recorder-probe").length, disconnects: (window as any).probeDisconnects }));
+    await page.evaluate(() => (window as any).__flightRecorder.stop());
+    expect(beforeStop).toEqual({ hosts: 0, disconnects: 1 });
+    expect(await page.locator("flight-recorder-probe").count()).toBe(0);
+  } finally { await page.close(); }
+});
+
+it("drops an old error event when its message getter restarts recording", async () => {
+  const page = await browser.newPage();
+  try {
+    await page.setContent('<main data-ui-state="chat"></main>');
+    await page.evaluate(recorderSource());
+    const rec = await page.evaluate(() => {
+      const api = (window as any).__flightRecorder;
+      api.start({ id: "old", persist: false });
+      const event = new ErrorEvent("error");
+      Object.defineProperty(event, "message", { get() {
+        api.start({ id: "new", restart: true, persist: false });
+        return "old event";
+      } });
+      window.dispatchEvent(event);
+      return api.stop();
+    });
+    expect(rec.id).toBe("new");
+    expect(rec.stats.errors).toBe(0);
+    expect(rec.timeline.filter((e: any) => e.kind === "error")).toEqual([]);
+  } finally { await page.close(); }
+});
+
+it("does not attribute an old fetch completion to a restarted recording", async () => {
+  const page = await browser.newPage();
+  try {
+    await page.setContent('<main data-ui-state="chat"></main>');
+    await page.evaluate(() => { window.fetch = () => new Promise((resolve) => { (window as any).finishFetch = resolve; }); });
+    await page.evaluate(recorderSource());
+    const rec = await page.evaluate(async () => {
+      const api = (window as any).__flightRecorder;
+      api.start({ id: "old", persist: false });
+      const pending = fetch("/fixture");
+      api.start({ id: "new", restart: true, persist: false });
+      (window as any).finishFetch(new Response("fixture", { status: 503 }));
+      await pending;
+      return api.stop();
+    });
+    expect(rec.id).toBe("new");
+    expect(rec.stats.failedRequests).toBe(0);
+    expect(rec.timeline.filter((e: any) => e.kind === "request")).toEqual([]);
+  } finally { await page.close(); }
+});
+
 it("does not charge a restarted recording for the old reader's failure", async () => {
   const page = await browser.newPage();
   try {

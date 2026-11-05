@@ -228,6 +228,12 @@ The result is committed before stop cleans up hooks or the rendering probe.
 Hooks restore (or remain inert if a page wrapper owns them or a frozen prototype
 prevents restoration); ownership reads and restoration faults cannot lose the
 recording. Cleanup faults still increment the existing internal-error counter.
+Recorder callbacks, listeners and pending requests carry their recording owner;
+entries and sampling state are discarded if a page callback stops or restarts
+that owner. Lifecycle transitions are serialized: `start`, `resume` and `stop`
+refuse re-entry during another transition or cleanup, so callers may retry when
+it returns. Probe fallback disconnects and removes the captured owner's probe
+before marking it disabled, retaining ownership if removal fails.
 No DOM text, HTML, prompts, titles, raw session IDs or URL queries are added to
 this evidence; all stack locations retain only filenames and line/column
 locations, and unrecognized formats are redacted. Nothing is sent to a console
