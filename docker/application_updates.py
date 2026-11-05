@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import base64
 import bz2
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 import gzip
 import hashlib
 import lzma
@@ -753,7 +753,7 @@ CHECK_INTERVAL_SECONDS = 24 * 3600
 
 
 class ContainerUpdates:
-    def __init__(self, root, image, public_key, allowed, lifecycle, channel="stable", database=None):
+    def __init__(self, root, image, public_key, allowed, lifecycle, channel="stable", database=None, *, refresh_mode="unknown"):
         if channel not in CHANNELS:
             raise UpdateError("Unknown update channel")
         global _alias_logged
@@ -774,6 +774,15 @@ class ContainerUpdates:
         self.allowed = allowed
         self.lifecycle = lifecycle
         self.state = {}
+        # Capture the code actually loaded, not GIT_SHA (which names the app).
+        handed = os.environ.get("SHUFFLE_HANDED_OVER")
+        self.updater_revision = (handed if handed and REVISION.fullmatch(handed)
+                                 and Path(__file__).resolve().parents[2].name == handed
+                                 else None if handed else image.get("revision"))
+        self.refresh_mode = refresh_mode  # supplied by the owning supervisor, not the app
+        self.diagnostics = None
+        self.diagnostic_started = None
+        self.refresh_requested = threading.Event()
         self.stop = threading.Event()
         self.overlays = RuntimeOverlays(self.root, self.stop)
         self.thread = None
@@ -787,6 +796,12 @@ class ContainerUpdates:
         self.checked_at = None
         self.next_check = time.monotonic() + FIRST_CHECK_SECONDS
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        try:
+            from app.core.application_updates import safe_update_metadata
+            self.diagnostics = safe_update_metadata({"diagnostics": json.loads(
+                (self.root / "diagnostics.json").read_text())})["diagnostics"]
+        except (OSError, ValueError, TypeError):
+            pass
         self.state_path = self.root / "state.json"
         self.request_path = self.root / "request.json"
         try:
@@ -854,6 +869,45 @@ class ContainerUpdates:
         """The release name and notes shown beside the update button."""
         self.offer = {"revision": manifest["revision"], "release": manifest.get("version"), "notes": manifest.get("notes")}
 
+    def updater_status(self):
+        refresh = self.refresh_mode
+        if refresh == "available":
+            if (not self.state.get("active") or self.state.get("active") == self.updater_revision
+                    or self.state.get("booting") or self.state.get("blocked") or self.state.get("pending")):
+                refresh = "current" if self.state.get("active") == self.updater_revision else "unknown"
+        return {"revision": self.updater_revision,
+                "capabilities": ["stage-diagnostics-v1", "dependency-cache-v1", "prebuilt-ui-v1",
+                                 "node-output-cache-v1", *(["refresh-updater-v1"] if self.refresh_mode == "available" else [])],
+                "refresh": refresh}
+
+    def begin_diagnostics(self, revision):
+        self.diagnostic_started = time.monotonic()
+        self.diagnostics = {"revision": revision, "stages": [], "total_elapsed_ms": 0}
+
+    def record_stage(self, stage, started, outcome):
+        if self.diagnostics is None:
+            return
+        item = {"stage": stage, "elapsed_ms": round(max(0, time.monotonic() - started) * 1000, 3),
+                "outcome": outcome}
+        self.diagnostics["stages"] = [*self.diagnostics["stages"], item][-96:]
+        self.diagnostics["total_elapsed_ms"] = round(max(0, time.monotonic() - self.diagnostic_started) * 1000, 3)
+        # No commands, paths, environment, URLs or exception messages.
+        try:
+            _log(json.dumps({"event": "update_stage", **item}, sort_keys=True))
+        except (OSError, ValueError):
+            pass
+
+    @contextmanager
+    def stage(self, name):
+        started, result = time.monotonic(), {"outcome": "completed"}
+        try:
+            yield result
+        except BaseException:
+            result["outcome"] = "failed"
+            raise
+        finally:
+            self.record_stage(name, started, result["outcome"])
+
     def publish(self, phase, message=None, error=None, version=None):
         pending = self.state.get("pending")
         if phase == "ready" and pending and self.offer.get("revision") != pending:
@@ -864,11 +918,17 @@ class ContainerUpdates:
             except Exception:
                 self.offer = {"revision": pending}
         offered = self.offer if phase in ("available", "ready", "downloading") else {}
+        if self.diagnostics is not None:
+            try:
+                atomic_json(self.root / "diagnostics.json", self.diagnostics)
+            except OSError:
+                pass  # diagnostics cannot prevent an update or rollback
         atomic_json(self.root / "status.json", {"phase": phase, "message": message,
                     "error": error, "version": (version or self.state.get("pending") or self.running or "")[:12] or None,
                     "staged_version": pending if pending != self.running else None,
                     "release": offered.get("release"), "notes": offered.get("notes"), "channel": self.channel,
-                    "checked_at": self.checked_at, "notice": self.notice})
+                    "checked_at": self.checked_at, "notice": self.notice,
+                    "updater": self.updater_status(), "diagnostics": self.diagnostics})
 
     def release_name(self, revision):
         try:
@@ -1113,7 +1173,7 @@ class ContainerUpdates:
         return b"".join(chunks)
 
     def run_build(self, command, cwd, env):
-        with (self.root / "build.log").open("ab") as log:
+        with self.stage("command"), (self.root / "build.log").open("ab") as log:
             child = subprocess.Popen(command, cwd=cwd, env=env, stdout=log,
                                      stderr=subprocess.STDOUT, start_new_session=True)
             deadline = time.monotonic() + 900
@@ -1357,7 +1417,9 @@ class ContainerUpdates:
         key = self.dependency_key(source, names, identity)
         if key is None:
             return None
+        started = time.monotonic()
         cached, complete = self.cached_dependencies("python", key, env)
+        self.record_stage("python_cache", started, "hit" if complete else "miss")
         if not complete:
             self.install_python_dependencies(cached, source, env, runtime_python, cache=True)
         verify_venv_python(cached, runtime_python)
@@ -1401,7 +1463,9 @@ class ContainerUpdates:
         if key is None:
             self.run_build(["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"], folder, env)
             return None
+        started = time.monotonic()
         cached, complete = self.cached_dependencies("node/" + package, key)
+        self.record_stage(package.replace("-", "_") + "_cache", started, "hit" if complete else "miss")
         if not complete:
             for name in ("package.json", "package-lock.json"):
                 shutil.copyfile(folder / name, cached / name)
@@ -1411,6 +1475,90 @@ class ContainerUpdates:
             self.complete_dependencies(cached, "node/" + package, key)
         (folder / "node_modules").symlink_to(cached / "node_modules", target_is_directory=True)
         return cached
+
+    @staticmethod
+    def node_tree(directory, inputs=False):
+        """Byte-hash package inputs/outputs; never follow links into another tree."""
+        digest, count = hashlib.sha256(), 0
+        if directory.is_symlink() or not directory.is_dir():
+            raise ValueError("Missing Node build input/output")
+        def unreadable(error):
+            raise error
+        for base, directories, files in os.walk(directory, onerror=unreadable):
+            directories[:] = sorted(name for name in directories
+                                    if not inputs or name not in ("node_modules", "dist", ".git"))
+            for name in directories + sorted(files):
+                path = Path(base) / name
+                relative = path.relative_to(directory)
+                if path.is_symlink() or not (path.is_file() or path.is_dir()):
+                    raise ValueError("Non-regular Node build input/output")
+                if path.is_file():
+                    digest.update(relative.as_posix().encode() + b"\0" + hashlib.sha256(path.read_bytes()).digest())
+                    count += 1
+        if not count:
+            raise ValueError("Empty Node build input/output")
+        return digest.hexdigest()
+
+    def node_output_key(self, package, source, identity):
+        # Same bounded contract as desktop source-build: only revision-independent
+        # tools/browser output. UI and Fluid must always belong to this revision.
+        if package not in ("tools", "browser-mcp") or identity is None:
+            return None
+        digest = hashlib.sha256(json.dumps([1, package, identity], sort_keys=True).encode())
+        digest.update(self.node_tree(source / package, inputs=True).encode())
+        for path in sorted(source.iterdir()):
+            if path.is_file() and (path.suffix == ".json" or path.name == ".npmrc"):
+                if path.is_symlink():
+                    raise ValueError("Linked build configuration")
+                digest.update(path.name.encode() + b"\0" + path.read_bytes())
+        return digest.hexdigest()
+
+    def node_output(self, package, source, env, identity):
+        output = source / package / "dist"
+        reuse = os.environ.get("AI_SHUFFLE_PERF_DOCKER_BUILD_REUSE", "").strip().lower() not in ("0", "false", "off")
+        try:
+            key = self.node_output_key(package, source, identity) if reuse else None
+        except (OSError, ValueError):
+            key = None
+        root = self.root / "dependencies/builds" / package
+        cached = root / key if key else None
+        with self.stage(package.replace("-", "_") + "_build") as result:
+            if cached:
+                try:
+                    marker = json.loads((cached / ".complete").read_text())
+                    if cached.is_symlink() or marker != {"key": key, "tree": self.node_tree(cached / "dist")}:
+                        raise ValueError("Invalid Node output cache")
+                    shutil.copytree(cached / "dist", output)
+                    if self.node_tree(output) != marker["tree"]:
+                        raise ValueError("Node output changed during reuse")
+                    result["outcome"] = "hit"
+                    return
+                except (OSError, ValueError):
+                    if output.exists():
+                        shutil.rmtree(output)
+            result["outcome"] = "miss" if cached else "disabled"
+            self.run_build(["npm", "run", "build"], source / package, env)
+            if cached:
+                temporary = None
+                try:
+                    if key != self.node_output_key(package, source, identity):
+                        return
+                    root.mkdir(parents=True, exist_ok=True)
+                    temporary = Path(tempfile.mkdtemp(prefix="partial-", dir=root))
+                    shutil.copytree(output, temporary / "dist")
+                    atomic_json(temporary / ".complete", {"key": key, "tree": self.node_tree(temporary / "dist")})
+                    if cached.exists():
+                        shutil.rmtree(cached)
+                    temporary.rename(cached)
+                    # Copies, not references: two warm generations per package suffice.
+                    for old in sorted(root.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)[2:]:
+                        if old.is_dir() and not old.is_symlink():
+                            shutil.rmtree(old)
+                except (OSError, ValueError):
+                    _log("Node build output cache unavailable; keeping this revision's build")
+                finally:
+                    if temporary is not None and temporary.exists():
+                        shutil.rmtree(temporary)
 
     def prune_dependencies(self):
         """Keep referenced environments plus two warm entries per package.
@@ -1512,21 +1660,28 @@ class ContainerUpdates:
         self.probe_runtimes(selected, source, env)
         reuse = os.environ.get("AI_SHUFFLE_PERF_DOCKER_DEPENDENCY_REUSE", "").strip().lower() not in ("0", "false", "off")
         references = []
-        cached = self.python_dependencies(directory, source, env, runtime_python) if reuse else None
-        if cached is None:
-            self.install_python_dependencies(directory, source, env, runtime_python)
-        else:
-            references.append(str(cached.relative_to(self.root / "dependencies")))
+        with self.stage("python_dependencies") as result:
+            cached = self.python_dependencies(directory, source, env, runtime_python) if reuse else None
+            if cached is None:
+                result["outcome"] = "fallback" if reuse else "disabled"
+                self.install_python_dependencies(directory, source, env, runtime_python)
+            else:
+                references.append(str(cached.relative_to(self.root / "dependencies")))
         pip = [str(python), "-m", "pip", "install", "--prefer-binary", "--timeout", "120", "--retries", "10"]
-        self.run_build(pip + ["--no-deps", "--no-build-isolation", "./fluid"], source, env)
-        ui = self.prebuilt_ui(directory, manifest)
+        with self.stage("fluid"):
+            self.run_build(pip + ["--no-deps", "--no-build-isolation", "./fluid"], source, env)
+        with self.stage("prebuilt_ui") as result:
+            ui = self.prebuilt_ui(directory, manifest)
+            disabled = os.environ.get("AI_SHUFFLE_PERF_PREBUILT_UI", "").strip().lower() in ("0", "false", "off")
+            result["outcome"] = "hit" if ui else "disabled" if disabled or not manifest.get("ui") else "fallback"
         identity = self.dependency_identity("node", None, source, env) if reuse else None
         for package in (("tools", "browser-mcp") if ui else ("frontend", "tools", "browser-mcp")):
             self.publish("downloading", f"Building {package}…", version=revision)
-            cached = self.node_dependencies(package, source, env, identity)
-            if cached is not None:
-                references.append(str(cached.relative_to(self.root / "dependencies")))
-            self.run_build(["npm", "run", "build"], source / package, env)
+            with self.stage(package.replace("-", "_") + "_dependencies"):
+                cached = self.node_dependencies(package, source, env, identity)
+                if cached is not None:
+                    references.append(str(cached.relative_to(self.root / "dependencies")))
+            self.node_output(package, source, env, identity)
         atomic_json(directory / "dependency-cache.json", references)
         shutil.copytree(ui or source / "frontend/build", source / "app/static")
         atomic_json(directory / "complete", revision)
@@ -1634,19 +1789,25 @@ class ContainerUpdates:
             shutil.rmtree(directory)
         directory.mkdir(parents=True, mode=0o700)
         archive = directory / "source.zip"
+        self.begin_diagnostics(revision)
         try:
             self.publish("downloading", "Downloading verified source…", version=revision)
-            self.fetch("sources/" + revision, archive, manifest)
-            listing = tree_lines(extract_source(archive, directory / "source", revision))
+            with self.stage("source_download"):
+                self.fetch("sources/" + revision, archive, manifest)
+            with self.stage("source_extract"):
+                listing = tree_lines(extract_source(archive, directory / "source", revision))
             archive.unlink()
             if hashlib.sha256(listing).hexdigest() != manifest["tree"]:
                 raise UpdateError("Source files do not match the signed release")
             (directory / "tree.txt").write_bytes(listing)
             (directory / "release.json").write_bytes(signed)
             self.prune_overlays()
-            self.overlays.prepare(selected_overlays(manifest["container"], self.image))
-            self.build(directory, revision, manifest.get("version"))
-            verify_tree(directory, manifest)
+            with self.stage("runtimes"):
+                self.overlays.prepare(selected_overlays(manifest["container"], self.image))
+            with self.stage("assembly"):
+                self.build(directory, revision, manifest.get("version"))
+            with self.stage("source_verify"):
+                verify_tree(directory, manifest)
             (directory / "release.json").write_bytes(signed)
             if not self.allowed():
                 raise UpdateError("Updates were disabled while preparing; no update was activated")
@@ -1675,6 +1836,11 @@ class ContainerUpdates:
                 action = request.get("action") if request.get("expires_at", 0) >= time.time() else None
             except FileNotFoundError:
                 pass
+            if action == "refresh-updater":
+                if not self.allowed() or self.updater_status()["refresh"] != "available":
+                    raise UpdateError("Updater refresh is not available")
+                self.refresh_requested.set()
+                return
             if action == "install":
                 if not self.allowed():
                     raise UpdateError("Application updates are disabled")
