@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import ProjectGeneralTab from './ProjectGeneralTab.svelte';
-import { projects } from '$lib/stores/app-data.svelte';
+import { appData, projects } from '$lib/stores/app-data.svelte';
 import type { Writable } from 'svelte/store';
 vi.mock('$lib/stores/app-data.svelte', async () => {
 	const { writable } = await import('svelte/store');
@@ -17,6 +17,18 @@ vi.mock('$lib/stores/git.svelte', () => ({ git: { refreshStatus: vi.fn() } }));
 afterEach(cleanup);
 const list = projects as unknown as Writable<any[]>;
 describe('project general remote fields', () => {
+	it('preserves Enter-to-save through the Settings field wrapper', async () => {
+		list.set([{id:'project',name:'Original',path:'/old'}]);
+		render(ProjectGeneralTab, {projectId:'project'});
+		const name = screen.getByPlaceholderText('Project name');
+		await fireEvent.input(name, {target:{value:'Renamed'}});
+		await fireEvent.keyDown(name, {key:'Enter'});
+		expect(appData.updateProject).toHaveBeenCalledWith('project', {name:'Renamed'});
+		const path = screen.getByPlaceholderText('Project path');
+		await fireEvent.input(path, {target:{value:'/new'}});
+		await fireEvent.keyDown(path, {key:'Enter'});
+		expect(appData.updateProject).toHaveBeenCalledWith('project', {path:'/new'});
+	});
 	it('updates clean fields but preserves dirty fields and makes deleted-project text recoverable', async () => {
 		list.set([{id:'project',name:'Original',path:'/old'}]);
 		render(ProjectGeneralTab, {projectId:'project'});

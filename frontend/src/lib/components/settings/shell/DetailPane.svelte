@@ -30,6 +30,8 @@
 
 	interface Props {
 		name: string;
+		/** Collection pages outside Settings use the Agents reading column. */
+		centered?: boolean;
 		icon?: SettingsIcon;
 		/** Tile text instead of an icon (provider glyph). */
 		glyph?: string;
@@ -70,6 +72,7 @@
 
 	let {
 		name,
+		centered = false,
 		icon,
 		glyph,
 		tile,
@@ -120,7 +123,7 @@
 	}
 </script>
 
-<div class="st-dwrap">
+<div class="st-dwrap" class:centered>
 	<div class="st-dtop">
 		<button type="button" class="st-back" aria-label="Back to {catLabel}" onclick={() => (onBack ? onBack() : settingsNav.stacked ? settingsNav.back() : settingsNav.clearSelection(cat))}>
 			<ChevronLeft /><span>{catLabel}</span>
@@ -174,6 +177,7 @@
 		max-width: 700px;
 		padding: 10px 32px 96px;
 	}
+	.st-dwrap.centered { width: 100%; max-width: 740px; margin-inline: auto; }
 	.st-dtop {
 		display: flex;
 		align-items: center;

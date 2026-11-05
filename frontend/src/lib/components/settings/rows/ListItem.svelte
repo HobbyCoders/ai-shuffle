@@ -36,6 +36,8 @@
 	interface Props {
 		id: string;
 		name: string;
+		/** Preserve a collection row's existing accessible action name. */
+		ariaLabel?: string;
 		summary?: string;
 		meta?: string;
 		icon?: SettingsIcon;
@@ -59,6 +61,7 @@
 	let {
 		id,
 		name,
+		ariaLabel,
 		summary,
 		meta,
 		icon,
@@ -89,6 +92,7 @@
 	class:pinned={variant === 'pinned'}
 	class:value={variant === 'value'}
 	aria-current={isSelected ? 'true' : undefined}
+	aria-label={ariaLabel}
 	data-settings-item={id}
 	data-settings-nav-item
 	onclick={select}

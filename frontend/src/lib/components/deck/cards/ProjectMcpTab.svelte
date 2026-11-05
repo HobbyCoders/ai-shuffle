@@ -1,25 +1,14 @@
 <script lang="ts">
 	import Switch from '$lib/components/settings/rows/Switch.svelte';
 	import { watchResources } from '$lib/services/watch-resources';
-	/**
-	 * ProjectMcpTab - MCP server visibility tab for project detail view
-	 *
-	 * Studio-v2 grouped-field design (.set-group / .set-row), mirroring the
-	 * Profile editor. Field primitives come from project-tabs.css (.ptab).
-	 *
-	 * Shows ALL MCP servers available to this project across all scopes:
-	 * - USER scope (global servers) — enable/disable toggle + remove
-	 * - INSTALLED scope (~/.claude.json project mcpServers) — toggle + remove
-	 * - LOCAL scope (.claude/.mcp.json) — edit
-	 * - PROJECT scope (.mcp.json) — edit
-	 */
+	/** MCP servers across user, installed, local and project scopes. */
 	import { untrack } from 'svelte';
 	import { mcp, projectMcpServers, mcpLoading, mcpError } from '$lib/stores/mcp.svelte';
 	import type { McpServerInfo } from '$lib/api/mcp';
 	import McpServerForm from '$lib/components/mcp/McpServerForm.svelte';
 	import RowActionMenu from '$lib/components/ui/RowActionMenu.svelte';
 	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
-	import Banner from '$lib/components/Banner.svelte';
+	import { RowGroup, SettingRow, PanelSearch, EmptyDetail, InlineBanner } from '$lib/components/layout/view';
 	import { Search, Server, Globe, FolderGit2, FolderLock, Download, Trash2, Pencil } from 'lucide-svelte';
 	import './project-tabs.css';
 
@@ -227,155 +216,35 @@
 		}
 	});
 </script>
-
 <svelte:window onclick={onWindowClick} onkeydown={onWindowKeydown} />
-
-{#snippet serverMeta(server: McpServerInfo)}
-	{#if server.type === 'stdio' && server.command}
-		<p class="mono">{server.command}{server.args ? ' ' + server.args.join(' ') : ''}</p>
-	{:else if (server.type === 'sse' || server.type === 'http') && server.url}
-		<p class="mono">{server.url}</p>
-	{/if}
-{/snippet}
-
-{#snippet toggleRow(server: McpServerInfo, removable: boolean)}
-	<div class="set-row" class:disabled={!server.enabled}>
-		<div class="lab">
-			<h4>
-				{server.name}
-				<span class="hint">· {getTypeLabel(server.type)}</span>
-				{#if server.builtin}<span class="badge muted">Built-in</span>{/if}
-			</h4>
-			{@render serverMeta(server)}
-		</div>
-		<div class="ctl">
+{#snippet serverRow(server: McpServerInfo, editable: boolean)}
+	<SettingRow label={server.name} hint={`${getTypeLabel(server.type)}${server.builtin ? ' · Built-in' : ''}`}>
+		{#snippet expanded()}
+			{#if server.command || server.url}<p class="project-code">{server.command ? `${server.command}${server.args ? ' ' + server.args.join(' ') : ''}` : server.url}</p>{/if}
+		{/snippet}
+		{#if editable}
+			<button class="st-btn icon" title="Edit server" aria-label={`Edit ${server.name}`} onclick={() => handleEditServer(server)}><Pencil /></button>
+		{:else}
 			<Switch controlled size="sm" checked={server.enabled} label={`${server.enabled ? 'Disable' : 'Enable'} ${server.name}`} title={server.enabled ? 'Disable server' : 'Enable server'} onchange={() => handleToggle(server)} />
-			{#if removable}
-				<RowActionMenu
-					open={actionsOpenKey === rowKey(server)}
-					onToggle={(e) => toggleRowActions(e, rowKey(server))}
-					label="Server actions"
-				>
-					<button type="button" class="icon-btn danger" title="Remove server" aria-label={`Remove ${server.name}`} onclick={(e) => { e.stopPropagation(); actionsOpenKey = null; pendingRemove = server; }}>
-						<Trash2 size={15} />
-					</button>
+			{#if !server.builtin}
+				<RowActionMenu open={actionsOpenKey === rowKey(server)} onToggle={(e) => toggleRowActions(e, rowKey(server))} label="Server actions">
+					<button type="button" class="st-btn icon danger" title="Remove server" aria-label={`Remove ${server.name}`} onclick={(e) => { e.stopPropagation(); actionsOpenKey = null; pendingRemove = server; }}><Trash2 /></button>
 				</RowActionMenu>
 			{/if}
-		</div>
-	</div>
+		{/if}
+	</SettingRow>
 {/snippet}
-
-{#snippet editRow(server: McpServerInfo)}
-	<div class="set-row">
-		<div class="lab">
-			<h4>{server.name} <span class="hint">· {getTypeLabel(server.type)}</span></h4>
-			{@render serverMeta(server)}
-		</div>
-		<div class="ctl">
-			<button type="button" class="icon-btn" title="Edit server" aria-label={`Edit ${server.name}`} onclick={() => handleEditServer(server)}>
-				<Pencil size={15} />
-			</button>
-		</div>
-	</div>
-{/snippet}
-
-<div class="ptab">
-	<!-- Search -->
-	{#if totalServers > 3}
-		<div class="tsearch">
-			<Search />
-			<input type="text" bind:value={searchQuery} placeholder="Search MCP servers…" class="inp" />
-		</div>
-	{/if}
-
-	{#if $mcpError}
-		<Banner severity="error" message={$mcpError} dismissible onDismiss={() => mcp.clearError()} />
-	{/if}
-
-	<!-- Global (User) MCP Servers -->
-	{#if filteredUserServers().length > 0}
-		<div class="set-group">
-			<div class="set-grouphead grouphead-row">
-				<div><h3><Globe />Global MCP Servers</h3></div>
-				<span class="badge mono">~/.claude.json</span>
-			</div>
-			{#each filteredUserServers() as server (server.name)}
-				{@render toggleRow(server, !server.builtin)}
-			{/each}
-		</div>
-	{/if}
-
-	<!-- Installed MCP Servers (per-project in ~/.claude.json) -->
-	{#if filteredInstalledServers().length > 0}
-		<div class="set-group">
-			<div class="set-grouphead grouphead-row">
-				<div><h3><Download />Installed MCP Servers</h3></div>
-				<span class="badge mono">~/.claude.json</span>
-			</div>
-			{#each filteredInstalledServers() as server (server.name)}
-				{@render toggleRow(server, true)}
-			{/each}
-		</div>
-	{/if}
-
-	<!-- Local MCP Servers -->
-	{#if filteredLocalServers().length > 0}
-		<div class="set-group">
-			<div class="set-grouphead grouphead-row">
-				<div><h3><FolderLock />Local MCP Servers</h3></div>
-				<span class="badge mono">.claude/.mcp.json</span>
-			</div>
-			{#each filteredLocalServers() as server (server.name)}
-				{@render editRow(server)}
-			{/each}
-		</div>
-	{/if}
-
-	<!-- Project MCP Servers -->
-	{#if filteredProjectServers().length > 0}
-		<div class="set-group">
-			<div class="set-grouphead grouphead-row">
-				<div><h3><FolderGit2 />Project MCP Servers</h3></div>
-				<span class="badge mono">.mcp.json</span>
-			</div>
-			{#each filteredProjectServers() as server (server.name)}
-				{@render editRow(server)}
-			{/each}
-		</div>
-	{/if}
-
-	<!-- Empty state -->
-	{#if listed && totalServers === 0 && !$mcpError}
-		<div class="empty-state">
-			<Server />
-			<p class="es-title">No MCP servers available</p>
-			<p class="es-desc">Add MCP servers from the MCP Servers card to see them here.</p>
-		</div>
-	{/if}
-
-	<ConfirmDialog
-		open={!!pendingRemove}
-		title="Remove MCP server"
-		message={pendingRemove?.scope === 'user'
-			? `Remove "${pendingRemove?.name}"? It is a global server, so every project loses it.`
-			: `Remove "${pendingRemove?.name}" from this project?`}
-		confirmLabel="Remove"
-		danger
-		onConfirm={confirmRemove}
-		onCancel={() => (pendingRemove = null)}
-	/>
-
-	<!-- MCP Server Form Modal -->
-	<McpServerForm bind:this={remoteForm}
-		show={showMcpServerForm}
-		server={editingMcpServer}
-		scope={mcpSelectedScope}
-		loading={$mcpLoading}
-		showScopeSelector={!editingMcpServer}
-		onSave={handleSaveMcpServer}
-		onClose={() => {
-			showMcpServerForm = false;
-			editingMcpServer = null;
-		}}
-	/>
-</div>
+{#if totalServers > 3}<PanelSearch bind:value={searchQuery} label="Search MCP servers" placeholder="Search MCP servers…" />{/if}
+{#if $mcpError}<InlineBanner>{$mcpError}{#snippet actions()}<button class="st-btn sm" onclick={() => mcp.clearError()}>Dismiss</button>{/snippet}</InlineBanner>{/if}
+{#if !listed && !$mcpError}<p class="project-muted" role="status">Loading MCP servers…</p>{/if}
+{#if filteredUserServers().length}<RowGroup title="Global MCP servers">{#snippet actions()}<code class="project-muted">~/.claude.json</code>{/snippet}{#each filteredUserServers() as server (server.name)}{@render serverRow(server, false)}{/each}</RowGroup>{/if}
+{#if filteredInstalledServers().length}<RowGroup title="Installed MCP servers">{#snippet actions()}<code class="project-muted">.claude/settings.json</code>{/snippet}{#each filteredInstalledServers() as server (server.name)}{@render serverRow(server, false)}{/each}</RowGroup>{/if}
+{#if filteredLocalServers().length}<RowGroup title="Local MCP servers">{#snippet actions()}<code class="project-muted">.claude/settings.local.json</code>{/snippet}{#each filteredLocalServers() as server (server.name)}{@render serverRow(server, true)}{/each}</RowGroup>{/if}
+{#if filteredProjectServers().length}<RowGroup title="Project MCP servers">{#snippet actions()}<code class="project-muted">.mcp.json</code>{/snippet}{#each filteredProjectServers() as server (server.name)}{@render serverRow(server, true)}{/each}</RowGroup>{/if}
+{#if listed && !filteredUserServers().length && !filteredInstalledServers().length && !filteredLocalServers().length && !filteredProjectServers().length && !$mcpError}
+	<EmptyDetail title={searchQuery ? 'No matching MCP servers' : 'No MCP servers available'} message="Add a server to make its tools available to this project.">
+		{#if searchQuery}<button class="st-btn" onclick={() => (searchQuery = '')}>Clear search</button>{:else}<button class="st-btn primary" onclick={openAddForm}>Add server</button>{/if}
+	</EmptyDetail>
+{/if}
+<ConfirmDialog open={!!pendingRemove} title="Remove MCP server" message={pendingRemove?.scope === 'user' ? `Remove "${pendingRemove?.name}"? It is a global server, so every project loses it.` : `Remove "${pendingRemove?.name}" from this project?`} confirmLabel="Remove" danger onConfirm={confirmRemove} onCancel={() => (pendingRemove = null)} />
+<McpServerForm bind:this={remoteForm} show={showMcpServerForm} server={editingMcpServer} scope={mcpSelectedScope} loading={$mcpLoading} showScopeSelector={!editingMcpServer} onSave={handleSaveMcpServer} onClose={() => { showMcpServerForm = false; editingMcpServer = null; }} />

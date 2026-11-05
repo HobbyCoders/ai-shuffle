@@ -165,6 +165,45 @@ await runJourney({
 	throttles: ['fast'],
 	cases: [
 		{
+			name: 'master-detail',
+			async setup(ctx) { await gotoApp(ctx.page, ctx.status); },
+			async act({ page, mark, variant }) {
+				await mark('open Projects master/detail');
+				await openProjects(page, variant);
+				if (isPhone(variant)) {
+					expect(await projectRow(page, PROJECT).isVisible(), 'phone starts on the project list');
+				} else {
+					await page.getByRole('heading', { level: 2 }).filter({ hasText: /^Dev / }).waitFor();
+					expect(await projectRow(page, PROJECT).isVisible(), 'desktop detail keeps the project list visible');
+				}
+				await projectRow(page, PROJECT).click();
+				await page.getByRole('heading', { level: 2, name: PROJECT, exact: true }).waitFor();
+				await mark('open Memory and create or edit project instructions');
+				await page.getByRole('tab', { name: 'Memory', exact: true }).click();
+				const memory = page.getByRole('region', { name: 'Project memory', exact: true });
+				await memory.waitFor();
+				const create = memory.getByRole('button', { name: 'Create', exact: true });
+				if (await create.count()) await create.click();
+				else await memory.getByRole('button', { name: 'Edit', exact: true }).click();
+				const text = 'Keep changes focused and run the affected tests.';
+				await memory.getByRole('textbox', { name: 'Edit Project memory' }).fill(text);
+				await memory.getByRole('button', { name: 'Save', exact: true }).click();
+				await memory.getByRole('button', { name: text, exact: true }).waitFor();
+				await mark('verify saved project memory through its read API');
+				const files = await page.evaluate(async () => (await fetch('/api/v1/projects/dev-sandbox/memory')).json());
+				expect(files.find(f => f.location === 'project')?.content === text, 'the UI saved the project memory on the worker');
+				if (isPhone(variant)) {
+					await mark('Back returns to Projects without opening the drawer');
+					await page.getByRole('button', { name: 'Back to Projects', exact: true }).click();
+					await projectRow(page, PROJECT).waitFor();
+				}
+				await mark('New project launches the shared modal');
+				await page.getByRole('button', { name: 'New project', exact: true }).click();
+				await page.getByRole('dialog').waitFor();
+				await page.keyboard.press('Escape');
+			}
+		},
+		{
 			name: 'fail-open',
 			async setup(ctx) {
 				await simulateWorkers(ctx.page, { overview404: true });
@@ -177,7 +216,7 @@ await runJourney({
 				await page.waitForTimeout(1500);
 				expect((await listMode(page)) === 'local', 'an older worker shows the plain project list');
 				expect((await page.getByRole('group', { name: /^Workers with / }).count()) === 0, 'no worker chips without the overview');
-				expect((await page.getByRole('radiogroup', { name: 'Show projects' }).count()) === 0, 'no worker filter without the overview');
+				expect((await page.getByRole('group', { name: 'Show projects' }).count()) === 0, 'no worker filter without the overview');
 			},
 			allow: [{ kind: 'failed_requests', status: 404, url: /\/projects\/overview(\?|$)/, reason: 'the older worker this case simulates has no overview route (the fail-open path under test)' }]
 		},
@@ -191,9 +230,10 @@ await runJourney({
 				await mark('open Projects');
 				await openProjects(page, variant);
 				await page.locator('[data-ui-projects="overview"]').waitFor({ timeout: 30_000 });
+				await projectRow(page, PROJECT).click();
 				const chips = page.getByRole('group', { name: `Workers with ${PROJECT}` });
 				await chips.getByRole('button', { name: /^Studio: / }).waitFor();
-				expect(await page.getByRole('radiogroup', { name: 'Show projects' }).isVisible(), 'the All workers / On this worker filter shows');
+				if (!isPhone(variant)) expect(await page.getByRole('group', { name: 'Show projects' }).isVisible(), 'the All workers / On this worker filter shows');
 
 				await mark('click the dashed pop-os chip');
 				await chips.getByRole('button', { name: `pop-os: not set up — set ${PROJECT} up on pop-os` }).click();
@@ -256,7 +296,7 @@ await runJourney({
 
 				await mark('Set up on all missing');
 				await page.getByRole('button', { name: 'Set up on all missing' }).click();
-				await page.locator('article[data-worker-state="ready"]', { has: page.getByText('this worker', { exact: true }) }).waitFor({ timeout: 20_000 });
+				await page.locator('article[data-worker-state="ready"]', { has: page.getByText('This worker · Online', { exact: true }) }).waitFor({ timeout: 20_000 });
 				await page.waitForTimeout(1500);
 			}
 		},
