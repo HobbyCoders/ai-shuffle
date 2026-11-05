@@ -15,7 +15,7 @@
 	 * Read-only mode disables the primary action and the whole body.
 	 */
 	import type { Snippet } from 'svelte';
-	import { ChevronLeft } from 'lucide-svelte';
+	import BackRow from './BackRow.svelte';
 	import { settingsNav } from '$lib/settings/navigation.svelte';
 	import { getSettingsAccess } from '$lib/settings/access.svelte';
 	import { categoryById, type SettingsIcon } from '$lib/settings/categories';
@@ -30,8 +30,12 @@
 
 	interface Props {
 		name: string;
+		/** Optional editable heading; keeps the shared header geometry. */
+		heading?: Snippet;
 		/** Settings retains its measure; collection details share one centered reading column. */
-		width?: 'settings' | 'reading' | 'data';
+		width?: 'settings' | 'reading' | 'data' | 'docs';
+		/** Only genuine identity art (an agent avatar or provider logo), never a generic decorative tile. */
+		identity?: boolean;
 		icon?: SettingsIcon;
 		/** Tile text instead of an icon (provider glyph). */
 		glyph?: string;
@@ -72,7 +76,9 @@
 
 	let {
 		name,
+		heading,
 		width = 'settings',
+		identity = false,
 		icon,
 		glyph,
 		tile,
@@ -123,18 +129,16 @@
 	}
 </script>
 
-<div class="st-dwrap" class:data={width === 'data'} class:reading={width === 'reading'}>
-	<div class="st-dtop">
-		<button type="button" class="st-back" aria-label="Back to {catLabel}" onclick={() => (onBack ? onBack() : settingsNav.stacked ? settingsNav.back() : settingsNav.clearSelection(cat))}>
-			<ChevronLeft /><span>{catLabel}</span>
-		</button>
+<div class="st-dwrap" class:data={width === 'data'} class:reading={width === 'reading'} class:docs={width === 'docs'}>
+	<BackRow label={catLabel} onclick={() => (onBack ? onBack() : settingsNav.stacked ? settingsNav.back() : settingsNav.clearSelection(cat))}>
 		{#if topStatus}{@render topStatus()}{:else}<SavedTick />{/if}
-	</div>
-	<div class="st-dh">
-		{#if tile}{@render tile()}{:else}<Tile size="lg" {icon} text={glyph} status={statusText ? undefined : status} ring="bg" />{/if}
+	</BackRow>
+	<div class="st-dh" class:has-identity={!!tile || identity || !!glyph}>
+		{#if tile}{@render tile()}{:else if identity || glyph}<Tile size="lg" {icon} text={glyph} status={statusText ? undefined : status} ring="bg" />{/if}
 		<div class="st-dh-main">
 			<div class="st-dhn">
-				<h2 tabindex="-1" data-settings-heading="detail">{name}</h2>
+				{#if heading}{@render heading()}{:else}<h2 tabindex="-1" data-settings-heading="detail">{name}</h2>{/if}
+				{#if status && !statusText && !tile && !identity && !glyph}<StatusDot tone={status} />{/if}
 				{#if badge}<span class="badge">{badge}</span>{/if}
 				{@render badges?.()}
 			</div>
@@ -174,30 +178,26 @@
 
 <style>
 	.st-dwrap {
-		max-width: 700px;
-		padding: 10px 32px 96px;
+		position: relative;
+		width: 100%;
+		max-width: calc(var(--st-reading-width) + 2 * var(--st-gutter));
+		margin-inline: auto;
+		padding: var(--st-page-top) var(--st-gutter) 96px;
 	}
-	.st-dwrap.data { max-width: none; }
-	.st-dwrap.reading { width: 100%; max-width: 740px; margin-inline: auto; }
-	.reading h2 { font-size: 24px; }
-	.st-dtop {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		min-height: var(--st-dtop-height);
-	}
+	.st-dwrap.docs { max-width: calc(var(--st-prose-width) + var(--st-toc-width) + var(--st-toc-gap) + 2 * var(--st-gutter)); }
+	.st-dwrap.data { max-width: calc(var(--st-data-width) + 2 * var(--st-gutter)); }
 	.st-dh {
 		display: grid;
-		grid-template-columns: auto minmax(0, 1fr) auto;
+		grid-template-columns: minmax(0, 1fr) auto;
 		gap: 14px;
 		align-items: center;
-		padding: calc(var(--st-page-top) - 10px - var(--st-dtop-height)) 0 18px;
+		padding: 0 0 18px;
 	}
+	.st-dh.has-identity { grid-template-columns: auto minmax(0, 1fr) auto; }
 	.st-dh-main {
 		min-width: 0;
 	}
-	/* A deliberately empty tile snippet must not put the title in the icon column. */
-	.st-dh-main:first-child { grid-column: 1 / 3; }
+
 	.st-dhn {
 		display: flex;
 		gap: 8px;
@@ -205,7 +205,7 @@
 		flex-wrap: wrap;
 	}
 	h2 {
-		font-size: 20px;
+		font-size: 24px;
 		font-weight: 600;
 		letter-spacing: -0.01em;
 		margin: 0;

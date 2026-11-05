@@ -18,7 +18,12 @@ vi.mock('$lib/stores/layout.svelte', async () => {
  return { activeView: writable({ type: 'project' }), layout: { current: { sidebarOverlay: true, sidebarWidth: 320 } } };
 });
 vi.mock('$lib/stores/auth.svelte', async () => ({ isAdmin: (await import('svelte/store')).writable(true) }));
-vi.mock('./ProjectGeneralTab.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
+vi.mock('$lib/api/git', () => ({ getGitStatus: vi.fn().mockResolvedValue({ is_git_repo: true }) }));
+vi.mock('$lib/components/git/InitRepoModal.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
+vi.mock('$lib/stores/groups.svelte', async () => {
+ const { writable } = await import('svelte/store');
+ return { groups: Object.assign(writable({ projects: { groups: [], assignments: {} } }), { createGroup: vi.fn(), assignToGroup: vi.fn() }) };
+});
 vi.mock('./ProjectWorkersTab.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
 vi.mock('./ProjectMcpTab.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
 vi.mock('./ProjectAgentsTab.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
@@ -26,7 +31,7 @@ vi.mock('./ProjectHooksTab.svelte', () => import('$lib/test-stubs/EmptyRouteDepe
 vi.mock('./ProjectMemoryTab.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
 vi.mock('$lib/components/AddProjectModal.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
 import ProjectCard from './ProjectCard.svelte';
-import { projects } from '$lib/stores/app-data.svelte';
+import { appData, projects } from '$lib/stores/app-data.svelte';
 import { activeView } from '$lib/stores/layout.svelte';
 import { platform } from '$lib/stores/platform.svelte';
 import { projectsOverview, projectsOverviewSupported } from '$lib/stores/projects-overview';
@@ -42,6 +47,22 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); platform.set('desktop'); vi.restoreAllMocks(); });
 describe('Projects master/detail', () => {
+ it('discards A’s dirty name and path when switching to B, but preserves same-project refreshes', async () => {
+  render(ProjectCard);
+  const name = await screen.findByPlaceholderText('Project name');
+  await fireEvent.input(name, { target: { value: 'Unsaved A' } });
+  await fireEvent.input(screen.getByPlaceholderText('Project path'), { target: { value: '/unsaved-a' } });
+  list.set([{ id: 'one', name: 'Refreshed A', path: '/refreshed-a' }, { id: 'two', name: 'Two', path: '/two' }]);
+  await tick();
+  expect(screen.getByDisplayValue('Unsaved A')).toBeTruthy();
+  await fireEvent.click(screen.getByRole('button', { name: 'Open Two' }));
+  expect((screen.getByPlaceholderText('Project name') as HTMLInputElement).value).toBe('Two');
+  expect((screen.getByPlaceholderText('Project path') as HTMLInputElement).value).toBe('/two');
+  await fireEvent.input(screen.getByPlaceholderText('Project name'), { target: { value: 'Saved B' } });
+  await fireEvent.keyDown(screen.getByPlaceholderText('Project name'), { key: 'Enter' });
+  expect(appData.updateProject).toHaveBeenCalledWith('two', { name: 'Saved B' });
+  expect(appData.updateProject).not.toHaveBeenCalledWith('two', { name: 'Unsaved A' });
+ });
  it('opens the first project on desktop and keeps the searchable side list mounted', async () => {
   render(ProjectCard);
   await screen.findByRole('heading', { level: 2, name: 'One' });

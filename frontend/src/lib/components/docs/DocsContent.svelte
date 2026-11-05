@@ -17,10 +17,12 @@
 
 	interface Props {
 		content: string;
+		/** DetailPane provides the article title; retain its anchor without a duplicate heading. */
+		framed?: boolean;
 		onHeadingsExtracted?: (headings: DocSection[]) => void;
 	}
 
-	let { content, onHeadingsExtracted }: Props = $props();
+	let { content, framed = false, onHeadingsExtracted }: Props = $props();
 
 	let contentEl = $state<HTMLDivElement | null>(null);
 
@@ -130,11 +132,12 @@
 
 <!-- Native copy buttons emit clicks for Enter/Space too; a key handler here would copy twice. -->
 <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
-<div class="docs-content" bind:this={contentEl} onclick={handleContentClick}>
+<div class="docs-content" class:framed bind:this={contentEl} onclick={handleContentClick}>
 	{@html sanitizeHtml(renderedHtml)}
 </div>
 
 <style>
+ .docs-content.framed :global(> h1:first-child) { display: none; }
  .docs-content { width:100%; font:14px/1.7 var(--font-sans); color:var(--foreground); overflow-wrap:anywhere; }
  .docs-content :global(h1) { font-size:28px; font-weight:600; line-height:1.25; margin:0 0 24px; }
  .docs-content :global(h2) { font-size:20px; font-weight:600; line-height:1.4; margin:40px 0 16px; }

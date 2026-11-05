@@ -27,8 +27,13 @@ Keep detailOpen true when an item is selected; Shell owns phone push/pop history
 No host (tests), an overlay sidebar (<=1080px), or the phone shell: inline.
 Panel contexts and tokens travel automatically. Off-screen feature pages never claim.
 -->
+<script lang="ts" module>
+	// Retained destinations share the browser stack: retire the old step before
+	// another destination may push its own. A pop is asynchronous.
+	const detailHistory = $state({ retiring: null as string | null });
+</script>
 <script lang="ts">
-	import { getAllContexts, getContext, onMount, untrack, type Snippet } from 'svelte';
+	import { getAllContexts, getContext, onMount, tick, untrack, type Snippet } from 'svelte';
 	import { page } from '$app/state';
 	import { pushState } from '$app/navigation';
 	import { layout } from '$lib/stores/layout.svelte';
@@ -50,10 +55,12 @@ Panel contexts and tokens travel automatically. Off-screen feature pages never c
 		inheritScope?: boolean;
 		/** Legacy Settings owns inner page/detail panes; its outer slot is not a detail pane. */
 		nestedPanes?: boolean;
+		/** Content-first data destinations keep their main visible on phones, without a detail Back step. */
+		contentFirst?: boolean;
 		/** Optional observation, e.g. a page that auto-selects its first item only on desktop. */
 		stacked?: boolean;
 	}
-	let { panel, main, label, detailOpen = false, onBack, manageHistory = true, inheritScope = false, nestedPanes = false,
+	let { panel, main, label, detailOpen = false, onBack, manageHistory = true, inheritScope = false, nestedPanes = false, contentFirst = false,
 		stacked = $bindable(false) }: Props = $props();
 	const contexts = getAllContexts();
 	const feature = getContext<FeaturePanelContext | undefined>(FEATURE_PANEL_CONTEXT);
@@ -79,29 +86,41 @@ Panel contexts and tokens travel automatically. Off-screen feature pages never c
 	let pushed = false;
 	let previousOpen = false;
 	$effect(() => {
-		const open = active && stacked && detailOpen;
-		// Resizing out of and back into the stack reuses the existing detail step.
-		// Two identical markers would make Back land on the same key and leave detail open.
-		if (manageHistory && open && !previousOpen && !pushed) {
-			untrack(() => {
+		const open = active && stacked && detailOpen && !contentFirst;
+		const retiring = detailHistory.retiring;
+		if (!manageHistory) return;
+		// Leaving a retained destination must remove its invisible Back stop.
+		if (!active && pushed) {
+			pushed = false;
+			if (untrack(() => (page.state as { viewPanelDetail?: string }).viewPanelDetail) === historyKey) {
+				detailHistory.retiring = historyKey;
+				history.back();
+			}
+		}
+		if (active && stacked && !detailOpen && previousOpen && pushed) {
+			pushed = false;
+			history.back();
+		}
+		previousOpen = open;
+		if (open && !pushed && !retiring) {
+			let cancelled = false;
+			// Let every retained destination retire first, irrespective of effect order.
+			void tick().then(() => {
+				if (cancelled || detailHistory.retiring) return;
 				try {
-					// A retained page may return to its own still-current history entry.
 					if ((page.state as { viewPanelDetail?: string }).viewPanelDetail !== historyKey) {
 						pushState('', { ...page.state, viewPanelDetail: historyKey } as App.PageState);
 					}
 					pushed = true;
 				} catch { /* Routerless tests still have an in-page back. */ }
 			});
+			return () => { cancelled = true; };
 		}
-		if (manageHistory && active && stacked && !detailOpen && previousOpen && pushed) {
-			pushed = false;
-			history.back();
-		}
-		previousOpen = open;
 	});
 	let firstHistory = true;
 	$effect(() => {
 		const entry = (page.state as { viewPanelDetail?: string } | undefined)?.viewPanelDetail;
+		if (detailHistory.retiring && entry !== detailHistory.retiring) detailHistory.retiring = null;
 		if (firstHistory) { firstHistory = false; return; }
 		untrack(() => {
 			if (manageHistory && pushed && entry !== historyKey) {
@@ -126,13 +145,14 @@ Panel contexts and tokens travel automatically. Off-screen feature pages never c
 <div class="view-shell" class:settings-shell={!inheritScope} data-view-shell={label}
 	style:--view-panel-width={`${(layout.current?.sidebarWidth ?? 320) - 56}px`}
 	data-docked={docked || undefined} data-stacked={stacked ? '' : undefined}
-	data-pane={stacked ? (detailOpen ? 'detail' : 'panel') : undefined}>
+	data-content-first={contentFirst || undefined}
+	data-pane={stacked ? (contentFirst || detailOpen ? 'detail' : 'panel') : undefined}>
 	{#if !docked}
-		<div class="inline-panel" hidden={stacked && detailOpen} inert={stacked && detailOpen}>
+		<div class="inline-panel" hidden={stacked && (contentFirst || detailOpen)} inert={stacked && (contentFirst || detailOpen)}>
 			{@render bridgedPanel()}
 		</div>
 	{/if}
-	<section class="view-main-slot st-scroll" class:st-dpane={!nestedPanes} aria-label="Details" hidden={stacked && !detailOpen} inert={stacked && !detailOpen}>
+	<section class="view-main-slot st-scroll" class:st-dpane={!nestedPanes} aria-label="Details" hidden={stacked && !contentFirst && !detailOpen} inert={stacked && !contentFirst && !detailOpen}>
 		{@render main(back)}
 	</section>
 </div>
@@ -144,4 +164,5 @@ Panel contexts and tokens travel automatically. Off-screen feature pages never c
 	.view-main-slot { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: auto; container: st-detail / inline-size; }
 	.inline-panel[hidden], .view-main-slot[hidden] { display: none; }
 	.view-shell[data-stacked] .inline-panel { border-right: 0; }
+	.view-shell[data-stacked][data-content-first] :global(.st-dtop .st-back) { display: none; }
 </style>

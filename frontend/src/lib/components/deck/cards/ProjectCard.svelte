@@ -322,6 +322,7 @@
 					{#if selectedRow.localId && !liveRow}<InlineBanner>This project was deleted elsewhere. Any unsaved fields remain available below until you leave.</InlineBanner>{/if}
 					{#if remoteOnly}<InlineBanner tone="info">{selectedRow.name} isn't on {selfName}. Set it up here from Workers to change its settings, MCP servers, agents, hooks and memory.</InlineBanner>{/if}
 				{/snippet}
+				{#key selectedRow.key}
 				{#if activeTab === 'workers' && showWorkersTab && selectedRow.projectV2Id}
 					<ProjectWorkersTab projectRef={{ project_v2_id: selectedRow.projectV2Id }} projectName={selectedRow.name} localProjectId={selectedRow.localId} {focusInstallId} onChanged={() => void loadProjectsOverview()} />
 				{:else if selectedProject || (selectedRow.localId && activeTab === 'general')}
@@ -331,6 +332,7 @@
 					{:else if activeTab === 'hooks'}<ProjectHooksTab projectId={selectedRow.localId!} />
 					{:else if activeTab === 'memory'}<ProjectMemoryTab projectId={selectedRow.localId!} />{/if}
 				{/if}
+				{/key}
 			</DetailPane>
 		{:else}
 			<ViewMain width="reading"><EmptyDetail title="Choose a project" message="Select a project to manage its settings and workers.">

@@ -3,6 +3,7 @@ export { default as SettingsShell } from './SettingsShell.svelte';
 export { default as PreferencePage } from './PreferencePage.svelte';
 export { default as CollectionPage } from './CollectionPage.svelte';
 export { default as DetailPane } from './DetailPane.svelte';
+export { default as BackRow } from './BackRow.svelte';
 export { default as FactsStrip } from './FactsStrip.svelte';
 export type { Fact } from './FactsStrip.svelte';
 export { default as DetailTabs } from './DetailTabs.svelte';

@@ -142,10 +142,11 @@
 		'plugins': 'Plugins',
 		'mcp': 'MCP Servers',
 		'notes': 'Notes',
+		'automations': 'Automations',
 		'hooks': 'Hooks',
 		'prs': 'Pull requests',
 		'stats': 'Stats',
-		'docs': 'Documentation',
+		'docs': 'Docs',
 		'terminal': 'Terminal',
 	};
 
@@ -291,8 +292,8 @@
 		if (onEmptyNewChat) return '';
 		if (type === 'session') return headerTitle;
 		if (type === 'board') return 'Chats';
-		// These pages title themselves: a crumb would say it twice.
-		if (isBuildView || type === 'settings' || type === 'plugins' || type === 'mcp' || type === 'hooks') return '';
+		if (isBuildView) return 'Agents';
+		if (type === 'settings' || type === 'plugins' || type === 'mcp' || type === 'hooks') return 'Settings';
 		return viewTitles[type] || '';
 	});
 

@@ -39,6 +39,8 @@
 		/** Offer an empty assignment for provider-scoped subagent configuration. */
 		allowEmpty?: boolean;
 		emptyLabel?: string;
+		/** Optional friendly trigger label when a saved value is not in the catalog. */
+		fallbackLabel?: string;
 		/**
 		 * Offer the free-text `Custom…` entry. Off for callers that must end up
 		 * with a real, routable model id — a typo'd custom string would only
@@ -57,6 +59,7 @@
 		providerScope,
 		allowEmpty = false,
 		emptyLabel = 'Unavailable as subagent',
+		fallbackLabel,
 		allowCustom = true,
 		apiKeyOnly = false
 	}: Props = $props();
@@ -128,6 +131,7 @@
 		if (allowEmpty && !value) return emptyLabel;
 		if (value === CUSTOM_VALUE) return 'Custom…';
 		if (currentOption) return currentOption.label;
+		if (fallbackLabel) return fallbackLabel;
 		// No matching option (registry not hydrated yet, or the provider/model was
 		// removed) — show the bare model id rather than the raw `prov:…` composite.
 		return decodeProviderModel(value)?.modelId ?? (value || 'Select a model');

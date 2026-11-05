@@ -14,7 +14,7 @@ vi.mock('$lib/api/client', () => ({
 
 const note = (id: string) => ({ id, title: `Note ${id}`, content: `content ${id}`, tags: [], is_pinned: false, file_path: null, created_at: '2026-09-01', updated_at: '2026-09-01' });
 const body = () => screen.getByPlaceholderText(/Write your note/) as HTMLTextAreaElement;
-const title = () => screen.getByPlaceholderText('Note title…') as HTMLInputElement;
+const title = () => screen.getByRole('textbox', { name: 'Note title' }) as HTMLInputElement;
 const newNote = () => screen.getAllByRole('button', { name: 'New note' })[0];
 const flush = async () => { await Promise.resolve(); await tick(); };
 
@@ -34,6 +34,7 @@ describe('Notes draft persistence', () => {
 		it('refreshes both the list and a clean selected editor without replacing its textarea', async () => {
 			render(NotesCard);
 			await fireEvent.click(await screen.findByRole('button', { name: /Note A content A/ }));
+		await fireEvent.click(screen.getByRole('tab', { name: 'Edit' }));
 			await waitFor(() => expect(body().value).toBe('content A'));
 			const textarea = body();
 			const fresh = { ...note('A'), title: 'Renamed remotely', content: 'Remote body', tags: ['remote'], is_pinned: true };
@@ -50,6 +51,7 @@ describe('Notes draft persistence', () => {
 		it('keeps a debounced edit and reports a remote change', async () => {
 			render(NotesCard);
 			await fireEvent.click(await screen.findByRole('button', { name: /Note A content A/ }));
+		await fireEvent.click(screen.getByRole('tab', { name: 'Edit' }));
 			await fireEvent.input(body(), { target: { value: 'Unsaved here' } });
 			vi.mocked(getNote).mockResolvedValue({ ...note('A'), content: 'Changed elsewhere' });
 			resourceSync.invalidate(['notes']);
@@ -60,6 +62,7 @@ describe('Notes draft persistence', () => {
 		it('keeps a remotely deleted dirty note recoverable as a new draft', async () => {
 			render(NotesCard);
 			await fireEvent.click(await screen.findByRole('button', { name: /Note A content A/ }));
+		await fireEvent.click(screen.getByRole('tab', { name: 'Edit' }));
 			await fireEvent.input(body(), { target: { value: 'Recover me' } });
 			vi.mocked(getNotes).mockResolvedValue([]);
 			vi.mocked(getNote).mockRejectedValue({ status: 404 });
@@ -73,6 +76,7 @@ describe('Notes draft persistence', () => {
 		it('closes a clean deleted note, but not one merely absent from a filtered list', async () => {
 			render(NotesCard);
 			await fireEvent.click(await screen.findByRole('button', { name: /Note A content A/ }));
+		await fireEvent.click(screen.getByRole('tab', { name: 'Edit' }));
 			vi.mocked(getNotes).mockResolvedValue([]);
 			resourceSync.invalidate(['notes']);
 			await waitFor(() => expect(getNotes).toHaveBeenCalledTimes(2));
@@ -110,6 +114,7 @@ describe('Notes draft persistence', () => {
 	it('flushes A before switching to B instead of letting a timer save B', async () => {
 		render(NotesCard);
 		await fireEvent.click(await screen.findByRole('button', { name: /Note A content A/ }));
+		await fireEvent.click(screen.getByRole('tab', { name: 'Edit' }));
 		await fireEvent.input(body(), { target: { value: 'edited A' } });
 		await fireEvent.click(screen.getByRole('button', { name: /Note B content B/ }));
 		await waitFor(() => expect(title().value).toBe('Note B'));
@@ -137,6 +142,7 @@ describe('Notes draft persistence', () => {
 		vi.mocked(getNote).mockReturnValueOnce(new Promise(resolve => { finish = resolve; }));
 		render(NotesCard);
 		await fireEvent.click(await screen.findByRole('button', { name: /Note A content A/ }));
+		await fireEvent.click(screen.getByRole('tab', { name: 'Edit' }));
 		await fireEvent.input(body(), { target: { value: 'local edit' } });
 		finish({ ...note('A'), content: 'stale response' });
 		await flush();

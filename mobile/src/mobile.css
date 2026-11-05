@@ -425,39 +425,7 @@ html:root[data-platform='mobile'] .settings-shell .st-back {
 	min-width: 44px;
 }
 
-/* The app bar carries the back arrow and the page's name below the index, so a
-   page neither repeats them nor stacks a second header under the bar. The heading
-   stays for screen readers and for the focus move that lands on it. */
-html:root[data-platform='mobile'] .settings-shell[data-view] :is(.st-page-h, .st-lh-top) > h1 {
-	position: absolute;
-	width: 1px;
-	height: 1px;
-	overflow: hidden;
-	clip-path: inset(50%);
-	white-space: nowrap;
-}
-html:root[data-platform='mobile'] .settings-shell[data-view] .st-page {
-	padding: 16px 16px 100px;
-}
-html:root[data-platform='mobile'] .settings-shell[data-view] .st-page-h {
-	margin: 0 0 12px;
-	padding: 0;
-	border: 0;
-}
-html:root[data-platform='mobile'] .settings-shell[data-view] .st-lhead {
-	padding: 12px 16px;
-}
-html:root[data-platform='mobile'] .settings-shell[data-view] .st-lhead:not(:has(.st-filter, .st-ltools, .st-add)) {
-	padding: 0;
-}
-html:root[data-platform='mobile'] .settings-shell[data-view] .st-dwrap:not(.reading) {
-	padding: 16px 16px 90px;
-}
-html:root[data-platform='mobile'] .settings-shell[data-view] .st-dtop {
-	margin: 0;
-	padding: 0;
-	border: 0;
-}
+/* Shared Settings frames and parent-labelled back rows own phone spacing. */
 
 /* A chevron-only back button centres its icon in the 44px target and pulls
    the title in, so the gap after it matches the labelled back button. */

@@ -9,7 +9,7 @@
 	 */
 	import { ChevronDown } from 'lucide-svelte';
 	import { activeSession } from '$lib/stores/active-session';
-	import { clusterProjects, profiles, projects } from '$lib/stores/app-data.svelte';
+	import { clusterProjects, profiles, projects, sessions } from '$lib/stores/app-data.svelte';
 	import { gitStatus } from '$lib/stores/git.svelte';
 	import { refreshWorkerPresence, workerInstalls } from '$lib/stores/worker-presence';
 	import { selfWorkerName, workerDisplayName } from '$lib/components/ui/worker-name';
@@ -26,6 +26,9 @@
 	let { newChat, sheetOpen, onOpen }: Props = $props();
 
 	const selfName = $derived(selfWorkerName($workerInstalls));
+	// Durable ownership wins over both the connected device and stale compose intent.
+	const sessionRow = $derived($sessions.find((s) => s.id === $activeSession.sessionId));
+	const ownerName = $derived(sessionRow?.device_name ?? $activeSession.ownerDeviceName ?? null);
 	const intentName = $derived(
 		$activeSession.deviceIntent?.name ? workerDisplayName($activeSession.deviceIntent.name) : null
 	);
@@ -41,8 +44,8 @@
 				$activeSession.worktreeBranch ||
 				($activeSession.project ? ($gitStatus?.current_branch ?? null) : null),
 			agentName: $profiles.find((p) => p.id === $activeSession.profile)?.name ?? null,
-			workerName: intentName ?? selfName,
-			pickedWorkerName: intentName !== selfName ? intentName : null
+			workerName: $activeSession.sessionId ? (ownerName ? workerDisplayName(ownerName) : selfName) : intentName ?? selfName,
+			pickedWorkerName: !$activeSession.sessionId && intentName !== selfName ? intentName : null
 		})
 	);
 	const label = $derived(parts.join(' · '));

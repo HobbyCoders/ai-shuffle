@@ -11,11 +11,11 @@
 		ViewShell, ViewPanel, ViewMain, PanelSearch, PanelIconButton, ListItem,
 		ListGroupLabel, DetailPane, EmptyDetail, SelectField, InlineBanner
 	} from '$lib/components/layout/view';
-	import TextField from '$lib/components/settings/rows/TextField.svelte';
+	import { tick } from 'svelte';
 	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
 	import NoteFileAutocomplete from './NoteFileAutocomplete.svelte';
 	import { resizeToFitContent } from './notes-textarea-resize';
-	import { Notebook, Plus, Pin, Trash2, Paperclip, X } from 'lucide-svelte';
+	import { Notebook, Plus, Pin, Trash2, Paperclip, X, Ellipsis } from 'lucide-svelte';
 	import {
 		getNotes,
 		getNote,
@@ -63,6 +63,36 @@
 	let editorPinned = $state(false);
 	let saving = $state(false);
 	let showPreview = $state(false);
+	let moreOpen = $state(false);
+	let moreButton = $state<HTMLButtonElement>();
+	let moreMenu = $state<HTMLDivElement>();
+	let fieldsOpen = $state(true);
+	let narrow = $state(false);
+	onMount(() => {
+		const media = window.matchMedia('(max-width: 600px)');
+		const sync = () => { narrow = media.matches; };
+		sync();
+		fieldsOpen = !media.matches;
+		media.addEventListener('change', sync);
+		return () => media.removeEventListener('change', sync);
+	});
+	async function toggleMore() {
+		moreOpen = !moreOpen;
+		if (moreOpen) { await tick(); moreMenu?.querySelector<HTMLButtonElement>('button')?.focus(); }
+	}
+	function closeMore(returnFocus = false) {
+		moreOpen = false;
+		if (returnFocus) moreButton?.focus();
+	}
+	function noteExcerpt(content: string): string {
+		return content
+			.replace(/```[^\n]*\n?([\s\S]*?)```/g, '$1')
+			.replace(/!?\[([^\]]+)\]\([^)]*\)/g, '$1')
+			.replace(/^\s{0,3}(?:#{1,6}\s+|>\s*|[-*+]\s+(?:\[[ xX]\]\s*)?|\d+[.)]\s+)/gm, '')
+			.replace(/<[^>]*>/g, '').replace(/[*_`~]/g, '')
+			.replace(/&(?:amp|lt|gt|quot|#39);/g, (entity) => ({'&amp;':'&','&lt;':'<','&gt;':'>','&quot;':'"','&#39;':"'"})[entity] ?? entity)
+			.replace(/\s+/g, ' ').trim();
+	}
 	let newTagInput = $state('');
 	let textareaEl = $state<HTMLTextAreaElement | null>(null);
 
@@ -317,6 +347,7 @@
 		hasUnsavedChanges = false;
 		attachments = [];
 		showPreview = false;
+		moreOpen = false;
 		closeAutocomplete();
 	}
 
@@ -348,7 +379,8 @@
 		editorPinned = note.is_pinned;
 		hasUnsavedChanges = false;
 		attachments = [];
-		showPreview = false;
+		showPreview = !!note.content.trim();
+		moreOpen = false;
 		closeAutocomplete();
 		loadAttachments(note.id);
 		// The list comes from the non-reconciling endpoint, so it may hold stale
@@ -791,18 +823,25 @@
 	});
 </script>
 
+{#snippet metadata()}
+	<span>{editingNote ? `Global · Updated ${formatRelativeTime(editingNote.updated_at)}` : 'Global · New note'}</span>
+	<span class="note-save" role="status">{uploading ? 'Uploading…' : saveLabel}</span>
+{/snippet}
+
 {#snippet noteItem(note: Note)}
 	<ListItem id={note.id} name={note.title || 'Untitled'}
-		summary={[note.content, ...note.tags.slice(0, 3).map(tag => `#${tag}`)].filter(Boolean).join(' · ')}
+		summary={[noteExcerpt(note.content), ...note.tags.slice(0, 3)].filter(Boolean).join(' · ')}
 		meta={formatRelativeTime(note.updated_at)} icon={note.is_pinned ? Pin : Notebook}
 		selected={editingNote?.id === note.id} onselect={() => openNote(note)} />
 {/snippet}
+
+<svelte:window onclick={(event) => { if (!(event.target as Element)?.closest?.('.note-more')) closeMore(); }} onkeydown={(event) => { if (moreOpen && event.key === 'Escape') { event.preventDefault(); closeMore(true); } }} />
 
 <ViewShell label="Notes" detailOpen={!!(editingNote || isCreatingNew)} onBack={closeEditor}>
 	{#snippet panel()}
 		<ViewPanel title="Notes" count={loading ? undefined : notes.length} {loading} listLabel="Notes list">
 			{#snippet actions()}<PanelIconButton label="New note" icon={Plus} onclick={startNewNote} />{/snippet}
-			{#snippet search()}<PanelSearch placeholder="Search notes…" bind:value={searchQuery} />{/snippet}
+			{#snippet search()}<PanelSearch placeholder="Search notes" bind:value={searchQuery} />{/snippet}
 			{#snippet filters()}
 				<SelectField label="Filter by tag" value={selectedTag ?? ''}
 					onchange={(value) => { selectedTag = value || null; }}
@@ -814,10 +853,9 @@
 				<InlineBanner tone="warn">{error}<button class="st-btn" onclick={() => loadData()}>Retry</button></InlineBanner>
 			{:else if notes.length === 0}
 				<EmptyDetail title={searchQuery || selectedTag ? 'No notes match' : 'No notes yet'}
-					message={searchQuery || selectedTag ? 'Try another search or tag.' : 'Keep ideas, plans and files together.'}>
-					{#if searchQuery || selectedTag}
-						<button class="st-btn" onclick={() => { searchQuery = ''; selectedTag = null; }}>Clear filters</button>
-					{:else}
+					message={searchQuery || selectedTag ? 'Try another search or tag.' : 'Keep ideas, plans and files together.'}
+					actionLabel={searchQuery || selectedTag ? 'Clear filters' : undefined} onAction={() => { searchQuery = ''; selectedTag = null; }}>
+					{#if !searchQuery && !selectedTag}
 						<button class="st-btn primary" onclick={startNewNote}>Create your first note</button>
 					{/if}
 				</EmptyDetail>
@@ -835,23 +873,35 @@
 	{/snippet}
 	{#snippet main(back)}
 		{#if editingNote || isCreatingNew}
-			<DetailPane width="reading" name={editorTitle.trim() || 'New note'} icon={Notebook} backLabel="Notes" onBack={back}
-				subtitle={editingNote ? `Global · Updated ${formatRelativeTime(editingNote.updated_at)}` : 'Global · New note'}
+			<DetailPane width="reading" name={editorTitle.trim() || 'New note'} backLabel="Notes" onBack={back}
 				tabs={[{ id: 'edit', label: 'Edit' }, { id: 'preview', label: 'Preview' }]}
 				tab={showPreview ? 'preview' : 'edit'} onTabChange={(tab) => { showPreview = tab === 'preview'; }}>
-				{#snippet topStatus()}<span class="note-save" role="status">{uploading ? 'Uploading…' : saveLabel}</span>{/snippet}
+				{#snippet heading()}
+					<h1 class="note-title"><span class="sr-only" aria-hidden="true">{editorTitle || 'New note'}</span><input aria-label="Note title" placeholder="New note" bind:value={editorTitle} oninput={markDirty} /></h1>
+				{/snippet}
+				{#snippet subtitle()}
+					{#if !narrow}{@render metadata()}{/if}
+				{/snippet}
 				{#snippet primary()}
 					<button class="st-btn icon" title="Attach file" aria-label="Attach file" onclick={triggerFilePicker} disabled={uploading}><Paperclip /></button>
 					<button class="st-btn icon" title={editorPinned ? 'Unpin' : 'Pin'} aria-label={editorPinned ? 'Unpin' : 'Pin'} aria-pressed={editorPinned} onclick={() => { editorPinned = !editorPinned; markDirty(); }}><Pin /></button>
-					<button class="st-btn icon danger" title="Delete note" aria-label="Delete note" onclick={handleDelete} disabled={isCreatingNew}><Trash2 /></button>
-					<button class="st-btn icon" title="Close" aria-label="Close" onclick={closeEditor}><X /></button>
+					<div class="note-more" onfocusout={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node)) closeMore(); }}>
+						<button class="st-btn icon" bind:this={moreButton} title="More" aria-label="More note actions" aria-haspopup="menu" aria-expanded={moreOpen} onclick={toggleMore}><Ellipsis /></button>
+						{#if moreOpen}
+							<div class="note-menu" role="menu" aria-label="Note actions" bind:this={moreMenu}>
+								<button class="st-btn" role="menuitem" onclick={() => { closeMore(true); handleDelete(); }} disabled={isCreatingNew}><Trash2 />Delete note</button>
+							</div>
+						{/if}
+					</div>
 				{/snippet}
 				{#if remoteChange}<InlineBanner>{remoteChange}</InlineBanner>{/if}
 				{#if error}<InlineBanner tone="warn">{error}<button class="st-btn" onclick={() => { error = null; hasUnsavedChanges ? saveNote() : loadData(); }}>Retry</button></InlineBanner>{/if}
 				<input type="file" multiple bind:this={fileInputEl} onchange={handleFileInputChange} hidden />
-				<div class="note-fields">
-					<span class="note-field-label">Title</span>
-					<TextField label="Note title" placeholder="Note title…" bind:value={editorTitle} oninput={markDirty} width={760} />
+				<div class="note-writing">
+				<details class="note-fields" bind:open={fieldsOpen}>
+					<summary>Tags &amp; files{editorTags.length + attachments.length ? ` · ${editorTags.length + attachments.length}` : ''}</summary>
+					<div class="note-fields-content">
+					{#if narrow}<div class="note-metadata">{@render metadata()}</div>{/if}
 					<div class="note-tags">
 						{#each editorTags as tag (tag)}
 							<button class="st-btn sm" onclick={() => removeTag(tag)} aria-label="Remove tag" title={tag}>{tag}<X /></button>
@@ -873,7 +923,8 @@
 							{/each}
 						</div>
 					{/if}
-				</div>
+					</div>
+				</details>
 				<div class="note-content" class:drag-over={isDragOver} role="region" aria-label="Note content"
 					ondragover={handleDragOver} ondragleave={handleDragLeave} ondrop={handleDrop}>
 					{#if showPreview}
@@ -892,6 +943,7 @@
 						</div>
 					{/if}
 					{#if isDragOver}<div class="note-drop">Drop files to attach</div>{/if}
+				</div>
 				</div>
 			</DetailPane>
 		{:else}
@@ -918,9 +970,22 @@
 
 <style>
 	/* The shared kit owns all panel, row, header, tab and button geometry. */
-	.note-save, .note-field-label { font-size: 13px; color: var(--st-mfg); }
-	.note-save { margin-left: auto; }
-	.note-fields { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; padding: 20px 0; min-width: 0; }
+	.note-save { font-size: 13px; color: var(--st-mfg); }
+	.note-metadata { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; color: var(--st-mfg); font-size: 13px; }
+	.note-title { width: 100%; min-width: 0; margin: 0; font-size: 24px; font-weight: 600; letter-spacing: -0.01em; line-height: 1.25; }
+	.note-title input { display: block; width: 100%; min-width: 0; border: 0; border-radius: var(--st-radius-sm); padding: 0; background: transparent; color: var(--st-fg); font: inherit; font-size: inherit !important; letter-spacing: inherit; line-height: inherit; }
+	.note-title input:hover { background: var(--st-hover); }
+	.note-title input:focus-visible { outline: 2px solid var(--ring); outline-offset: 3px; }
+	.note-title input::placeholder { color: var(--st-mfg); }
+	.note-more { position: relative; }
+	.note-menu { position: absolute; right: 0; top: calc(100% + 4px); z-index: 20; min-width: 160px; padding: 4px; border: 1px solid var(--st-border); border-radius: var(--st-radius-md); background: var(--popover); box-shadow: var(--menu-shadow); }
+	.note-menu button { width: 100%; justify-content: flex-start; }
+	.note-writing { display: flex; flex-direction: column; gap: 16px; padding-top: 12px; }
+	.note-fields { min-width: 0; }
+	.note-fields summary { width: fit-content; cursor: pointer; color: var(--st-mfg); font-size: 13px; padding-block: 6px; }
+	.note-fields summary:hover { color: var(--st-fg); }
+	.note-fields summary:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+	.note-fields-content { display: grid; gap: 12px; padding-top: 12px; }
 	.note-tags, .note-attachments, .note-attachment { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; min-width: 0; }
 	.note-attachment { max-width: 100%; flex-wrap: nowrap; gap: 2px; }
 	.note-attachment-link { min-width: 0; text-decoration: none; }
@@ -929,13 +994,18 @@
 	.note-tag-input::placeholder, .note-textarea::placeholder { color: var(--st-mfg); opacity: 1; }
 	.note-content, .note-textarea-wrap { position: relative; min-width: 0; }
 	.note-content.drag-over { outline: 2px dashed var(--primary); outline-offset: 2px; }
-	.note-textarea { display: block; width: 100%; min-height: 320px; padding: 12px 0; border: 0; background: transparent; color: var(--st-fg); font: inherit; font-size: 14px; line-height: 1.7; resize: none; overflow: hidden; }
+	.note-textarea { display: block; width: 100%; min-height: 320px; padding: 14px 16px; border: 1px solid var(--st-input); border-radius: var(--st-radius-md); background: var(--st-field); color: var(--st-fg); font: inherit; font-size: 14px; line-height: 1.7; resize: none; overflow: hidden; }
 	.note-textarea:focus-visible { outline-offset: 4px; }
 	.note-drop { position: absolute; inset: 0; display: grid; place-items: center; background: var(--st-bg); color: var(--st-fg); font-size: 14px; pointer-events: none; }
 	.note-preview { max-width: none; min-height: 320px; padding: 12px 0; color: var(--st-fg); font-size: 14px; line-height: 1.7; overflow-wrap: anywhere; }
 	.note-preview :global(.note-ref) { color: var(--primary); text-decoration: underline; text-underline-offset: 3px; }
 	.note-preview :global(.note-ref--missing) { color: var(--st-mfg); text-decoration: none; }
 	@media (pointer: coarse), (max-width: 600px) {
+		.note-writing { padding-top: 0; }
+		.note-preview { padding-top: 0; }
+		.note-preview :global(> :first-child) { margin-top: 0; }
+		.note-fields { order: 2; }
+		.note-fields summary { min-height: 44px; display: flex; align-items: center; }
 		.note-tag-input { height: 44px; font-size: 16px; }
 		.note-textarea { font-size: 16px; overflow-y: auto; }
 	}

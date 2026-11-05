@@ -132,7 +132,7 @@
  <div class="ui-overlay ui-surface spotlight-overlay" role="dialog" aria-modal="true" aria-label="Search everything" tabindex="-1" use:focusTrap={{ initial: 'input' }}>
   <button class="ui-scrim" onclick={onClose} tabindex="-1" aria-label="Close search"></button>
   <div class="ui-dialog">
-   <div class="flex items-center gap-3 px-4 py-3 border-b border-border">
+   <div class="spotlight-search flex items-center gap-3 px-4 py-3 border-b border-border">
     <Search size={20} class="text-muted-foreground shrink-0" />
     <input bind:this={input} bind:value={query} aria-label="Search everything" placeholder="Search everything…" class="min-w-0 flex-1 bg-transparent text-foreground placeholder-muted-foreground focus:outline-hidden text-base" />
     <kbd class="text-xs text-muted-foreground">esc</kbd>
@@ -165,6 +165,8 @@
 {/if}
 
 <style>
+ .spotlight-search:focus-within { outline: 2px solid var(--ring); outline-offset: -2px; }
+ .spotlight-search input, .spotlight-search input:focus, .spotlight-search input:focus-visible { border: 0; outline: none; box-shadow: none; }
  .spotlight-overlay { align-items: start; padding-top: 10dvh; }
  @media (max-width: 600px) { .spotlight-overlay { padding: 0; align-items: end; } .spotlight-item { min-height: 44px; } }
   .spotlight-item:hover {

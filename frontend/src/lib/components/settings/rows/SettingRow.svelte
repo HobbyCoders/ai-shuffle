@@ -162,6 +162,7 @@
 		overflow: hidden;
 		text-overflow: ellipsis;
 	}
+	@media (max-width: 600px) { .st-rh { white-space: normal; } }
 	.st-rh.st-mono {
 		font-size: 11.5px;
 	}

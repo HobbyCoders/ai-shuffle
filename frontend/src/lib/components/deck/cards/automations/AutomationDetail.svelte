@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { automationModelLabel, automationPermissionLabel, type Automation, type AutomationRun } from '$lib/api/automations';
+	import { automationPermissionLabel, type Automation, type AutomationRun } from '$lib/api/automations';
 	import { DetailPane, RowGroup, SettingRow, Switch, InlineBanner } from '$lib/components/layout/view';
  import { CalendarClock } from 'lucide-svelte';
 	import {
@@ -9,8 +9,11 @@
 		Trash2
 	} from 'lucide-svelte';
 	import AutomationRunHistory from './AutomationRunHistory.svelte';
+	import AutomationModelLabel from './AutomationModelLabel.svelte';
+import AutomationModelError from './AutomationModelError.svelte';
 	import AutomationJobChoices from './AutomationJobChoices.svelte';
 	import type { Profile } from '$lib/api/client';
+	import type { Connector, ConnectorTypeInfo } from '$lib/api/connectors';
 
 	/** Mixed-version tombstone only: older peers may send this retired ID.
 	 * Never treat it as a live/selectable agent; the API rejects it with 410. */
@@ -22,6 +25,8 @@
 		automation: Automation;
 		/** Every agent, or null while the list has not loaded (never guess "removed"). */
 		profiles?: Pick<Profile, 'id'>[] | null;
+		connectors?: Connector[];
+		connectorTypes?: ConnectorTypeInfo[];
 		runs: AutomationRun[];
 		runsLoading: boolean;
 		expandedRunIds: Set<string>;
@@ -43,7 +48,7 @@
 
 	let {
  onToggleEnabled, triggeringId = null,		automation,
-		profiles = null,
+		profiles = null, connectors = [], connectorTypes = [],
 		runs,
 		runsLoading,
 		expandedRunIds,
@@ -88,7 +93,7 @@
  {/snippet}
  {#snippet banner()}
   {#if automation.last_error}<p role="status"><InlineBanner tone="info">{automation.last_error}</InlineBanner></p>{/if}
-  {#if automation.model_error}<div role="alert"><InlineBanner tone="warn">{automation.model_error}</InlineBanner></div>{/if}
+  {#if automation.model_error}<div role="alert"><InlineBanner tone="warn"><AutomationModelError error={automation.model_error} providerId={automation.effective_provider_id} modelId={automation.effective_model} /></InlineBanner></div>{/if}
   {#if agentMissing}
    <div data-testid="automation-agent-missing"><InlineBanner tone="warn">
     {automation.is_enabled ? 'Its agent was removed. Pick another agent so it can run.' : 'Its agent was removed. Pick another agent to enable it.'}
@@ -102,10 +107,10 @@
     <SettingRow label="Enabled" hint="Allow scheduled and event-driven runs.">
      <Switch controlled label={automation.is_enabled ? 'Disable automation' : 'Enable automation'} checked={automation.is_enabled} disabled={!onToggleEnabled} onchange={() => onToggleEnabled?.(automation)} />
     </SettingRow>
-    <SettingRow label="Reasoning model"><span data-testid="automation-model-badge" title={automation.model_error || 'Model its runs use'}>{automationModelLabel(automation)}</span></SettingRow>
+    <SettingRow label="Reasoning model"><AutomationModelLabel {automation} /></SettingRow>
     <SettingRow label="Permissions"><span data-testid="automation-permission-badge" title="Permission mode its runs start in">{automationPermissionLabel(automation)}</span></SettingRow>
     <SettingRow label="Last run"><span>{formatTime(automation.last_run_at)}</span></SettingRow>
-    <SettingRow label="Prompt">{#snippet expanded()}<p class="whitespace-pre-wrap text-sm">{automation.prompt || 'No prompt. This automation uses action steps.'}</p>{/snippet}</SettingRow>
+    <div class="automation-prompt"><h4>Prompt</h4><p>{automation.prompt || 'No prompt. This automation uses action steps.'}</p></div>
    </RowGroup>
    {#if detailStats}
     <RowGroup title="Run summary">
@@ -117,7 +122,7 @@
    {/if}
    {#if automation.action_steps?.length}
     <RowGroup title="Action steps">
-     {#each automation.action_steps as step, i}<SettingRow label="Step {i+1}" hint={step.type.replaceAll('_',' ')}><span>{step.action_id || step.prompt || step.url || (step.type === 'delay' ? `${step.seconds}s` : '')}{step.connector_id ? ` on ${step.connector_id}` : ''}</span></SettingRow>{/each}
+     {#each automation.action_steps as step, i}<SettingRow label="Step {i+1}" hint={step.type.replaceAll('_',' ')}><span title={[step.connector_id, step.action_id].filter(Boolean).join(' · ') || undefined}>{step.prompt || step.url || (step.type === 'delay' ? `${step.seconds}s` : step.type === 'connector_action' ? (connectorTypes.find(t => t.type === connectors.find(c => c.id === step.connector_id)?.type)?.actions.find(a => a.id === step.action_id)?.name || 'Saved connector action') : 'Saved action')}{#if step.connector_id} · {connectors.find(c => c.id === step.connector_id)?.name || 'Saved connector'}{/if}</span></SettingRow>{/each}
     </RowGroup>
    {/if}
    <RowGroup title="Danger zone" tone="danger"><SettingRow label="Delete automation" hint="Permanently removes this automation and its history."><button class="st-btn danger" title="Delete" onclick={() => onDelete(automation.id)}><Trash2 size={14} />Delete</button></SettingRow></RowGroup>
@@ -128,3 +133,8 @@
   {/if}
  {/snippet}
 </DetailPane>
+<style>
+ .automation-prompt { padding: 14px 16px; border-top: 1px solid var(--st-border); }
+ .automation-prompt h4 { margin: 0; font-size: 13.5px; font-weight: 500; }
+ .automation-prompt p { margin: 8px 0 0; font-size: 14px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+</style>

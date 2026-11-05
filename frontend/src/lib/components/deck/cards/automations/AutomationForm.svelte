@@ -15,6 +15,7 @@
 	} from '$lib/api/automations';
 	import { accessModes, effectiveAccessMode } from '$lib/components/chat/session-scope';
 	import ModelPicker from '$lib/components/settings/ModelPicker.svelte';
+import AutomationModelError from './AutomationModelError.svelte';
 	import type { Profile } from '$lib/api/client';
 	import type { Project } from '$lib/stores/types';
 	import type { Connector, ConnectorTypeInfo } from '$lib/api/connectors';
@@ -44,6 +45,7 @@
 	import { onMount } from 'svelte';
 	import { getClaudeAuth } from '$lib/api/claude-auth';
 	import { decodeProviderModel, supportsAutoPermission } from '$lib/constants/models';
+	import { buildModelPickerCatalog } from '$lib/constants/model-picker';
 	import { openSettings } from '$lib/settings/navigation.svelte';
 
 	interface Props {
@@ -235,7 +237,9 @@
 		const unchanged = savedAutomation && (savedAutomation.model || '') === formModel;
 		if (unchanged && savedAutomation?.model_error) return savedAutomation.model_error;
 		if (formModel) return 'Every run uses this model.';
-		return fallbackModelHint(fallbackModel);
+		const label = fallbackModel.label;
+		const option = buildModelPickerCatalog().options.find(option => option.label === label || option.value === label || option.description === label);
+		return fallbackModelHint({ ...fallbackModel, label: option?.label ?? (fallbackModel.legacy ? 'the saved model' : null) });
 	});
 	const modelHintIsError = $derived(
 		!!savedAutomation?.model_error && (savedAutomation.model || '') === formModel
@@ -278,7 +282,7 @@
 
 	function getActionSummary(step: ActionStep): string {
 		switch (step.type) {
-			case 'connector_action': return step.action_id ? `${step.action_id}` : 'Not configured';
+			case 'connector_action': return getActionsForConnector(step.connector_id || '').find(a => a.id === step.action_id)?.name || (step.action_id ? 'Saved connector action' : 'Not configured');
 			case 'send_prompt': return step.prompt ? step.prompt.slice(0, 50) + (step.prompt.length > 50 ? '...' : '') : 'Empty prompt';
 			case 'webhook_call': return step.url || 'No URL';
 			case 'delay': return `Wait ${step.seconds ?? 5}s`;
@@ -302,6 +306,13 @@
  let tab = $state('setup');
  const tabs = [{id:'setup',label:'Setup'},{id:'generation',label:'Media generation'},{id:'budget',label:'Budget & limits'}];
 </script>
+<style>
+ .automation-triggers { margin-top: 40px; }
+ .automation-triggers header { margin-bottom: 16px; }
+ .automation-triggers h3 { margin: 0; font-size: 14px; font-weight: 600; }
+ .automation-triggers h3 span { margin-left: 8px; color: var(--st-subtle); font-weight: 400; }
+ .automation-triggers header p { margin: 8px 0 0; color: var(--st-mfg); font-size: 13px; line-height: 1.5; }
+</style>
 
 {#if formError}
  <div role="alert"><InlineBanner tone="warn">{formError}
@@ -320,9 +331,10 @@
   <SettingRow label="Name" hint="A label to recognize this automation."><TextField value={formName} oninput={onUpdateFormName} placeholder="e.g. Daily report generator" invalid={!!formError && !formName.trim()} /></SettingRow>
   <SettingRow label="Description" hint="What this automation does. Optional."><TextField value={formDescription} oninput={onUpdateFormDescription} placeholder="Optional description…" /></SettingRow>
  </RowGroup>
- <RowGroup title="Triggers" count={formTriggers.length} bare>
+ <section class="automation-triggers" aria-label="Triggers">
+  <header><h3>Triggers <span>{formTriggers.length}</span></h3><p>Any trigger firing will run this automation. At least one is required.</p></header>
   <AutomationTriggerConfig triggers={formTriggers} {expandedTriggers} {connectors} {connectorTypes} {connectorsWithTriggers} {currentView} {selectedAutomationId} {timezone} onUpdateTriggers={onUpdateFormTriggers} {onToggleTriggerExpand} />
- </RowGroup>
+ </section>
  <RowGroup title="Prompt & actions" bare>
   <div class="st-card">
    <SettingRow label="Prompt" hint={formActionSteps.length ? 'Optional when action steps are configured. Runs before action steps.' : 'The main instruction sent to the AI agent when this automation runs.'}>
@@ -355,7 +367,7 @@
       {:else if step.type === 'send_prompt'}
        <SettingRow label="Step prompt">{#snippet expanded()}<TextAreaField value={step.prompt || ''} label="Step prompt" placeholder="Enter prompt to send to AI agent…" oninput={(value) => updateActionStep(i,{...step,prompt:value})} />{/snippet}</SettingRow>
        <SettingRow label="Agent (optional)"><SelectField value={step.profile_id || ''} options={[{value:'',label:'Default (automation agent)'},...profiles.map(p => ({value:p.id,label:p.name}))]} onchange={(value) => updateActionStep(i,{...step,profile_id:value || undefined})} /></SettingRow>
-       <SettingRow label="Model (optional)"><label class="sr-only" for="auto-step-model-{i}">Model (optional)</label><ModelPicker id="auto-step-model-{i}" value={step.model || ''} allowEmpty emptyLabel="Same as automation" allowCustom={false} onSelect={(value) => updateActionStep(i,{...step,model:value || undefined,provider_id:undefined})} /></SettingRow>
+       <SettingRow label="Model (optional)"><label class="sr-only" for="auto-step-model-{i}">Model (optional)</label><ModelPicker id="auto-step-model-{i}" value={step.model || ''} allowEmpty emptyLabel="Same as automation" fallbackLabel="Saved model (unavailable)" allowCustom={false} onSelect={(value) => updateActionStep(i,{...step,model:value || undefined,provider_id:undefined})} /></SettingRow>
        <SettingRow label="Max turns"><TextField value={String(step.max_turns ?? 1)} inputmode="numeric" oninput={(value) => updateActionStep(i,{...step,max_turns:parseInt(value) || 1})} /></SettingRow>
        <p class="st-note">Use {'{{response}}'} to reference previous AI output</p>
       {:else if step.type === 'webhook_call'}
@@ -377,8 +389,8 @@
    {:else}<span data-agent-picker><SelectField label="Agent" value={formProfileId} options={[{value:'',label:'Select an agent…'},...profiles.map(p => ({value:p.id,label:p.name}))]} onchange={onUpdateFormProfileId} /></span>{/if}
   </SettingRow>
   <div data-testid="automation-model-row"><SettingRow label="Reasoning model" hint={modelHintIsError ? undefined : modelHint}>
-   {#if modelHintIsError}<p class="text-sm text-destructive model-error" role="alert">{modelHint}</p>{/if}
-   <label class="sr-only" for="automation-model">Reasoning model</label><ModelPicker id="automation-model" value={formModel} allowEmpty emptyLabel={modelEmptyLabel} allowCustom={false} onSelect={onUpdateFormModel} />
+   {#if modelHintIsError}<p class="text-sm text-destructive model-error" role="alert"><AutomationModelError error={modelHint} providerId={savedAutomation?.effective_provider_id} modelId={savedAutomation?.effective_model} /></p>{/if}
+   <label class="sr-only" for="automation-model">Reasoning model</label><ModelPicker id="automation-model" value={formModel} allowEmpty emptyLabel={modelEmptyLabel} fallbackLabel="Saved model (unavailable)" allowCustom={false} onSelect={onUpdateFormModel} />
   </SettingRow></div>
   <div data-testid="automation-permission-row"><SettingRow label="Permissions" hint={permissionHint}>
    {#snippet expanded()}
@@ -386,7 +398,7 @@
     {#if permissionValue === 'bypassPermissions'}<p class="st-note" data-testid="automation-bypass-hint">Runs every tool, including shell commands, without asking — nobody is watching an automation.</p>{/if}
    {/snippet}
   </SettingRow></div>
-  <SettingRow label="Project" hint="Scope the run to a project, or leave global."><SelectField value={formProjectId} options={[{value:'',label:'None (global)'},...(formProjectId && !projects.some(p => p.id === formProjectId) ? [{value:formProjectId,label:`Unknown project (${formProjectId.slice(0,8)}…)`}] : []), ...projects.map(p => ({value:p.id,label:p.name}))]} onchange={onUpdateFormProjectId} /></SettingRow>
+  <SettingRow label="Project" hint="Scope the run to a project, or leave global."><SelectField value={formProjectId} options={[{value:'',label:'None (global)'},...(formProjectId && !projects.some(p => p.id === formProjectId) ? [{value:formProjectId,label:'Saved project (unavailable)'}] : []), ...projects.map(p => ({value:p.id,label:p.name}))]} onchange={onUpdateFormProjectId} /></SettingRow>
   <SettingRow label="Output" hint="Where the result is delivered.">
    {#snippet expanded()}<Segmented label="Output" value={formOutputType} options={[{value:'session',label:'Chat'},{value:'connector',label:'Connector'},{value:'webhook',label:'Webhook'},{value:'none',label:'None'}]} onchange={(value) => {onUpdateFormOutputType(value);onUpdateFormOutputConfig({});}} />{/snippet}
   </SettingRow>

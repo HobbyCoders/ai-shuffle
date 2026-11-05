@@ -51,7 +51,13 @@
 	--st-index-width: 264px; /* The chat list pane's default width (320 less the 56 rail). */
 	/* Where every page title sits, and the row above it that holds the back link.
 	   See `.settings-shell:has(> .st-index)` for the Settings pages' values. */
-	--st-page-top: 32px;
+	--st-page-top: 53px;
+	--st-reading-width: 760px;
+	--st-data-width: 1120px;
+	--st-prose-width: 720px;
+	--st-toc-width: 184px;
+	--st-toc-gap: 40px;
+	--st-gutter: 48px;
 	--st-dtop-height: 22px;
 	--st-mono: var(--font-mono, ui-monospace, 'JetBrains Mono', monospace);
 
@@ -163,10 +169,8 @@
 	display: none;
 }
 .settings-shell:not([data-stacked]) .st-coll[data-replace='detail'] .st-dwrap {
-	width: min(100%, 856px);
-	max-width: none;
+	width: 100%;
 	margin-inline: auto;
-	padding-inline: 48px;
 }
 .settings-shell:not([data-stacked]) .st-coll[data-replace='detail'] .st-back {
 	display: inline-flex;
@@ -282,6 +286,15 @@
  .settings-shell :is(.st-num input, textarea) { font-size: 16px; }
 }
 
+/* A compact visual control still owns a 44px phone target. */
+.settings-shell .st-btn.compact { position: relative; }
+.settings-shell[data-stacked] .st-btn.compact { height: 32px; min-height: 32px; margin-block: 6px; }
+.settings-shell[data-stacked] .st-btn.compact::after { content: ''; position: absolute; inset: -6px 0; }
+@media (max-width: 600px), (pointer: coarse) {
+ .settings-shell .st-btn.compact { height: 32px; min-height: 32px; margin-block: 6px; }
+ .settings-shell .st-btn.compact::after { content: ''; position: absolute; inset: -6px 0; }
+}
+
 /* Back button: only in stacked mode */
 .settings-shell .st-back {
 	display: none;
@@ -348,12 +361,7 @@
 	.settings-shell .st-coll {
 		--st-list-width: 280px !important;
 	}
-	.settings-shell .st-page {
-		padding: var(--st-page-top) 28px 100px;
-	}
-	.settings-shell .st-dwrap {
-		padding: 10px 22px 80px;
-	}
+	.settings-shell { --st-gutter: 28px; }
 }
 
 .settings-shell[data-mid] {
@@ -368,6 +376,7 @@
 
 /* ---------- stacked (phone app, or the shell is 600px or less) ---------- */
 .settings-shell[data-stacked] {
+	--st-gutter: 14px;
 	grid-template-columns: minmax(0, 1fr);
 }
 .settings-shell[data-stacked][data-view='index'] .st-content {
@@ -428,14 +437,8 @@
 	padding: 0 14px 100px;
 }
 .settings-shell[data-stacked] .st-page-h {
-	position: sticky;
-	top: 0;
-	z-index: 5;
-	background: var(--st-bg);
-	margin: 0 -14px 14px;
-	padding: 10px 10px 10px 6px;
-	border-bottom: 1px solid var(--st-border);
-	gap: 4px;
+	min-height: 30px;
+	gap: 12px;
 }
 .settings-shell[data-stacked] .st-page-h h1 {
 	font-size: 24px;
@@ -465,12 +468,22 @@
 	margin-left: auto;
 	flex-wrap: wrap;
 }
-.settings-shell[data-stacked] .st-row:has(> .st-rc :is(.st-txt, .st-meter)) > .st-rc {
+.settings-shell[data-stacked] .st-row:has(> .st-rc :is(.st-txt, .st-meter, .st-text-field, .st-path, textarea, input:not([type='checkbox']):not([type='range']):not([type='radio']))) > .st-rc {
 	flex: 1 1 100%;
+	width: 100%;
+	margin-left: 0;
 	flex-wrap: nowrap;
 }
+.settings-shell[data-stacked] .st-row > .st-rc :is(.st-text-field, .st-path, form) { flex: 1; width: 100%; }
+.settings-shell[data-stacked] .st-row > .st-rc :is(input:not([type='checkbox']):not([type='range']):not([type='radio']), textarea) { width: 100%; min-width: 0; }
+@media (max-width: 600px) {
+	.settings-shell { --st-gutter: 14px; }
+	.settings-shell .st-row:has(> .st-rc :is(.st-txt, .st-text-field, .st-path, textarea, input:not([type='checkbox']):not([type='range']):not([type='radio']))) { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+	.settings-shell .st-row > .st-rc:has(:is(.st-text-field, .st-path, textarea, input:not([type='checkbox']):not([type='range']):not([type='radio']))) { width: 100%; justify-content: flex-start; }
+	.settings-shell .st-row > .st-rc :is(.st-text-field, .st-path, form) { flex: 1; width: 100%; }
+}
 .settings-shell[data-stacked] .st-row .st-txt {
-	flex: 1 1 160px;
+	flex: 1 1 100%;
 }
 .settings-shell[data-stacked] .st-row.mod .st-reset {
 	visibility: visible;
@@ -516,30 +529,21 @@
 	padding: 0 16px 60px;
 }
 .settings-shell[data-stacked] .st-it {
-	min-height: 54px;
+	min-height: 48px;
 }
+.settings-shell[data-stacked] .st-it.navigation { min-height: 44px; }
 .settings-shell[data-stacked] .st-dwrap {
 	padding: 0 14px 90px;
 }
 .settings-shell[data-stacked] .st-dh {
-	padding-top: 2px;
 	align-items: center;
 }
 .settings-shell[data-stacked] .st-dhn {
 	min-height: 0;
 }
-.settings-shell[data-stacked] .st-dtop {
-	position: sticky;
-	top: 0;
-	z-index: 5;
-	background: var(--st-bg);
-	margin: 0 -14px 14px;
-	padding: 10px 10px 10px 6px;
-	border-bottom: 1px solid var(--st-border);
-}
-.settings-shell[data-stacked] .st-dh {
-	grid-template-columns: auto minmax(0, 1fr);
-}
+
+.settings-shell[data-stacked] .st-dh { grid-template-columns: minmax(0, 1fr); }
+.settings-shell[data-stacked] .st-dh.has-identity { grid-template-columns: auto minmax(0, 1fr); }
 .settings-shell[data-stacked] .st-dha {
 	grid-column: 1 / -1;
 	justify-content: flex-start;

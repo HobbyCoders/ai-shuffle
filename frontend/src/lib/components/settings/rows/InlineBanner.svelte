@@ -34,10 +34,11 @@
 		border-radius: var(--st-radius-md);
 		padding: 8px 10px;
 		margin: 6px 0 10px;
-		flex-wrap: wrap;
+		border: 1px solid transparent;
 	}
 	.st-banner.warn {
 		background: var(--st-warning-soft);
+		border-color: var(--st-warning);
 	}
 	.st-banner.warn > :global(svg.lucide) {
 		color: var(--st-warning);
@@ -54,8 +55,12 @@
 	.st-banner.info > :global(svg.lucide) {
 		color: var(--st-mfg);
 	}
-	.msg {
-		min-width: 0;
+	.st-banner > :global(svg) { width: 16px; height: 16px; flex: 0 0 16px; align-self: flex-start; margin-top: 2px; }
+	.msg { min-width: 0; flex: 1; line-height: 1.5; overflow-wrap: anywhere; }
+	@media (max-width: 600px) {
+		.st-banner { flex-wrap: wrap; align-items: flex-start; }
+		.msg { flex-basis: calc(100% - 28px); }
+		.acts { padding-left: 26px; }
 	}
 	.acts {
 		margin-left: auto;

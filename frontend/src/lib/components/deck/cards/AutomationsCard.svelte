@@ -711,7 +711,7 @@
     </DetailPane>
    {:else if currentView === 'detail' && selectedAutomation}
     {#if error}<InlineBanner tone="warn">{error}</InlineBanner>{/if}
-    <AutomationDetail automation={selectedAutomation} profiles={profilesLoaded ? profiles : null}
+    <AutomationDetail automation={selectedAutomation} profiles={profilesLoaded ? profiles : null} {connectors} {connectorTypes}
      {runs} {runsLoading} {expandedRunIds} {detailStats} {triggeringId}
      onBack={back} onEdit={openEdit} onPickAgent={pickAgent} onTrigger={handleTrigger}
      onDelete={handleDelete} onToggleEnabled={handleToggleEnabled} onToggleRunExpanded={toggleRunExpanded}

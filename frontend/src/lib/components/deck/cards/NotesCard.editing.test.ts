@@ -17,7 +17,7 @@ const note = (id: string, over: Record<string, unknown> = {}) => ({
 	created_at: '2026-09-01', updated_at: '2026-09-01', ...over
 });
 const body = () => screen.getByPlaceholderText(/Write your note/) as HTMLTextAreaElement;
-const title = () => screen.getByPlaceholderText('Note title…') as HTMLInputElement;
+const title = () => screen.getByRole('textbox', { name: 'Note title' }) as HTMLInputElement;
 const newNote = () => screen.getAllByRole('button', { name: 'New note' })[0];
 const dialog = () => screen.queryByRole('dialog');
 const confirmIn = (label: string) => within(dialog()!).getAllByRole('button', { name: label }).at(-1)!;
@@ -44,7 +44,9 @@ describe('Notes create, rename and delete', () => {
 		// Only fake the debounce timers; leave Svelte's microtasks running normally.
 		vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
 		await fireEvent.click(newNote());
-		expect((screen.getByTitle('Delete note') as HTMLButtonElement).disabled).toBe(true);
+		await fireEvent.click(screen.getByRole('button', { name: 'More note actions' }));
+		expect((screen.getByRole('menuitem', { name: 'Delete note' }) as HTMLButtonElement).disabled).toBe(true);
+		await fireEvent.click(screen.getByRole('button', { name: 'More note actions' }));
 		const tag = screen.getByPlaceholderText('add tag…');
 		await fireEvent.input(tag, { target: { value: ' Bug  Fix ' } });
 		await fireEvent.keyDown(tag, { key: 'Enter' });
@@ -73,14 +75,16 @@ describe('Notes create, rename and delete', () => {
 		render(NotesCard);
 		await fireEvent.click(await screen.findByRole('button', { name: /Note B content B/ }));
 		await waitFor(() => expect(title().value).toBe('Note B'));
-		await fireEvent.click(screen.getByTitle('Delete note'));
+		await fireEvent.click(screen.getByRole('button', { name: 'More note actions' }));
+		await fireEvent.click(screen.getByRole('menuitem', { name: 'Delete note' }));
 		expect(dialog()!.textContent).toContain('Delete this note? This cannot be undone.');
 		await fireEvent.click(confirmIn('Cancel'));
 		expect(deleteNote).not.toHaveBeenCalled();
 		expect(title().value).toBe('Note B');
 
 		vi.mocked(getNotes).mockResolvedValue([note('A', { is_pinned: true })]);
-		await fireEvent.click(screen.getByTitle('Delete note'));
+		await fireEvent.click(screen.getByRole('button', { name: 'More note actions' }));
+		await fireEvent.click(screen.getByRole('menuitem', { name: 'Delete note' }));
 		await fireEvent.click(confirmIn('Delete'));
 		await waitFor(() => expect(screen.getByText('Select a note')).toBeTruthy());
 		expect(deleteNote).toHaveBeenCalledExactlyOnceWith('B');
@@ -92,7 +96,7 @@ describe('Notes create, rename and delete', () => {
 		render(NotesCard);
 		await fireEvent.click(newNote());
 		await fireEvent.input(body(), { target: { value: 'scratch thought' } });
-		await fireEvent.click(screen.getByTitle('Close'));
+		await fireEvent.click(screen.getByRole('button', { name: 'Back to Notes' }));
 		expect(dialog()!.textContent).toContain('You have unsaved changes. Discard them?');
 		await fireEvent.click(confirmIn('Discard'));
 		await waitFor(() => expect(screen.getByText('Select a note')).toBeTruthy());
@@ -120,6 +124,7 @@ describe('Notes preview and filtering', () => {
 		}));
 		render(NotesCard);
 		await fireEvent.click(await screen.findByRole('button', { name: /Note B content B/ }));
+		await fireEvent.click(screen.getByRole('tab', { name: 'Edit' }));
 		await waitFor(() => expect(body().value).toContain('# Heading'));
 		await screen.findByTitle('Download spec.pdf');
 		await fireEvent.click(screen.getByRole('tab', { name: 'Preview' }));
@@ -141,7 +146,7 @@ describe('Notes preview and filtering', () => {
 		expect(screen.getByText('Pinned')).toBeTruthy();
 		expect(screen.getByText('Recent')).toBeTruthy();
 		vi.mocked(getNotes).mockResolvedValue([]);
-		await fireEvent.input(screen.getByPlaceholderText('Search notes…'), { target: { value: 'roadmap' } });
+		await fireEvent.input(screen.getByPlaceholderText('Search notes'), { target: { value: 'roadmap' } });
 		expect(getNotes).toHaveBeenCalledTimes(1);
 		await waitFor(() => expect(getNotes).toHaveBeenLastCalledWith({ search: 'roadmap', tag: undefined }));
 		expect(await screen.findByText('No notes match')).toBeTruthy();

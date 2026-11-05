@@ -29,7 +29,7 @@
 	import { settingsNav } from '$lib/settings/navigation.svelte';
 	import type { SettingsIcon } from '$lib/settings/categories';
 	import type { CategoryId, StatusTone } from '$lib/settings/types';
-	import { ChevronRight } from 'lucide-svelte';
+	import { ChevronRight, Pin } from 'lucide-svelte';
 	import StatusDot from './StatusDot.svelte';
 	import Tile from './Tile.svelte';
 
@@ -41,6 +41,11 @@
 		summary?: string;
 		meta?: string;
 		icon?: SettingsIcon;
+		/** Opt in only when the icon carries information; avatars use lead. Pinned notes keep their mark automatically. */
+		showIcon?: boolean;
+		/** Item rows stay 48px even without an excerpt; navigation rows are 34px (44px on phone). */
+		rowKind?: 'item' | 'navigation';
+		disabled?: boolean;
 		/** Tile text instead of an icon (provider glyph). */
 		glyph?: string;
 		status?: StatusTone;
@@ -65,6 +70,8 @@
 		summary,
 		meta,
 		icon,
+		showIcon = false,
+		disabled = false,
 		glyph,
 		status,
 		category,
@@ -72,10 +79,13 @@
 		onselect,
 		mono = false,
 		variant = 'default',
+		rowKind,
 		lead,
 		badges
 	}: Props = $props();
 
+	const meaningfulIcon = $derived(showIcon || icon === Pin);
+	const hasLead = $derived(!!lead || variant === 'log' || (variant !== 'plain' && (!!glyph || meaningfulIcon || !!status)));
 	const cat = $derived(category ?? settingsNav.category);
 	const isSelected = $derived(selected ?? settingsNav.selectedItem(cat) === id);
 
@@ -92,6 +102,9 @@
 	class:pinned={variant === 'pinned'}
 	class:value={variant === 'value'}
 	class:plain={variant === 'plain'}
+	class:navigation={(rowKind ?? (variant === 'plain' ? 'navigation' : 'item')) === 'navigation'}
+	class:has-lead={hasLead}
+	{disabled}
 	aria-current={isSelected ? 'true' : undefined}
 	aria-label={ariaLabel}
 	data-settings-item={id}
@@ -108,8 +121,10 @@
 		{@render lead()}
 	{:else if variant === 'log'}
 		<StatusDot tone={status ?? 'off'} />
-	{:else if variant !== 'plain'}
+	{:else if variant !== 'plain' && (glyph || meaningfulIcon)}
 		<Tile {icon} text={glyph} {status} ring={isSelected ? 'accent' : 'bg'} />
+	{:else if variant !== 'plain' && status}
+		<StatusDot tone={status} />
 	{/if}
 	<span class="tx">
 		{#if badges}
@@ -127,7 +142,7 @@
 	.st-it {
 		position: relative;
 		display: grid;
-		grid-template-columns: auto minmax(0, 1fr) auto;
+		grid-template-columns: minmax(0, 1fr) auto;
 		align-items: center;
 		gap: 10px;
 		min-height: 48px;
@@ -148,10 +163,13 @@
 	.st-it:focus-visible {
 		outline-offset: -2px;
 	}
-	.st-it.plain { grid-template-columns: minmax(0,1fr) auto; min-height:44px; }
-	.st-it.log {
-		min-height: 42px;
-	}
+	.st-it.has-lead { grid-template-columns: auto minmax(0, 1fr) auto; }
+	.st-it.navigation { min-height: 34px; padding-block: 4px; }
+	.st-it.navigation .nm { font-size: 13px; }
+	.st-it:active:not(:disabled) { background: var(--st-accent); }
+	.st-it:disabled { opacity: .45; cursor: not-allowed; }
+	@media (max-width: 600px), (pointer: coarse) { .st-it.navigation { min-height: 44px; } }
+	.st-it.log:not(.navigation) { min-height: 48px; }
 	.st-it.value {
 		grid-template-columns: minmax(auto, 40%) minmax(0, 1fr) 16px;
 		gap: 12px;
