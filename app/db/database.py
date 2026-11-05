@@ -2812,6 +2812,8 @@ def _run_column_migrations(cursor: Any) -> None:
     from app.db.session_mode_migration import migrate as migrate_session_modes
 
     migrations_applied.extend(migrate_session_modes(cursor))
+    from app.db.session_archive_migration import migrate as retire_session_archive
+    migrations_applied.extend(retire_session_archive(cursor))
     from app.db.watch_migration import migrate as migrate_email_watches
 
     migrations_applied.extend(migrate_email_watches(cursor))
@@ -3597,7 +3599,7 @@ def migrations_fingerprint() -> str:
 
     from app.db import (
         schema_postgres, mobile_hub, network, owner_state, working_record, watches, watch_delivery,
-        session_mode_migration, model_provider_slots, project_setup,
+        session_mode_migration, session_archive_migration, model_provider_slots, project_setup,
     )
     from app.core import owner_auth
 
@@ -3607,7 +3609,7 @@ def migrations_fingerprint() -> str:
     # Include their sources and the network schema so upgrades cannot skip new DDL.
     for module in (
         sys.modules[__name__], schema_postgres, mobile_hub, owner_auth, network, owner_state,
-        working_record, watches, watch_delivery, session_mode_migration, model_provider_slots,
+        working_record, watches, watch_delivery, session_mode_migration, session_archive_migration, model_provider_slots,
         project_setup,
     ):
         path = getattr(module, "__file__", None)

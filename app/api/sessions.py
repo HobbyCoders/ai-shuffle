@@ -127,15 +127,8 @@ router.add_api_route(
 # ============================================================================
 
 def _refuse_archived(session: dict, action: str) -> None:
-    """409 for an archived chat: it is read-only until the owner restores it."""
-    from app.core import archive_guard
-
-    if archive_guard.is_archived_row(session):
-        archive_guard.log_dropped(session["id"], action, f"{action} refused")
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"This chat is archived. Restore it before you {action} it.",
-        )
+    """Retired import seam. Ordinary access/Stop/admission checks still apply."""
+    return None
 
 
 def _adopt_device_name(instance_id: Optional[str]) -> Optional[str]:
@@ -1319,7 +1312,7 @@ async def get_live_session(
         "profile_id": session.get("profile_id"),
         "permission_mode": session.get("permission_mode"),
         "fast": bool(session.get("fast")),
-        # An archived chat opens read-only (no composer) until restored (#1822).
+        # Runtime status is not Active/Settled membership or composer availability.
         "status": session.get("status"),
         # A subagent's chat shows no Git or private-access controls.
         "is_worker": bool(session.get("is_worker")),
@@ -1602,6 +1595,10 @@ async def update_session(
         except Exception as e:
             logger.warning(f"Failed to rename SDK session {sdk_sid}: {e}")
 
+    if session_status == "archived":
+        from app.network.session_active import update_membership
+        await update_membership(existing, False)
+        session_status = "active"
     session = await run_sync(
         database.update_session,
         session_id=session_id,
@@ -2261,13 +2258,9 @@ async def batch_delete_sessions(
 
 @router.post("/{session_id}/archive")
 async def archive_session(request: Request, session_id: str, token: str = Depends(require_auth)):
-    """Archive a session. API users can only archive their accessible sessions.
-
-    Kept for older clients; the sidebar uses ``PATCH /{id}/active`` with
-    ``archived`` so a session owned by another worker archives on its owner.
-    """
-    await set_session_active(request, session_id, SessionActiveUpdate(is_active=False, archived=True), token)
-    return {"status": "ok", "message": "Session archived"}
+    """Decode-only legacy alias for ordinary settlement, with normal access checks."""
+    row = await set_session_active(request, session_id, SessionActiveUpdate(is_active=False, archived=True), token)
+    return {"status": "ok", "message": "Session settled", "session": Session.model_validate(row)}
 
 
 @router.patch("/{session_id}/active", response_model=Session)

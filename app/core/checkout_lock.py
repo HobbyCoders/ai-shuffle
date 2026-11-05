@@ -337,10 +337,8 @@ def _checkout_row(toplevel: str) -> Optional[Dict[str, Any]]:
 
 
 def _has_work(session_id: str) -> bool:
-    from app.db import turns as turns_db
-
-    # One read: two would miss a turn flipping from queued to running between them.
-    return turns_db.session_has_unsettled_turns(session_id)
+    from app.core.session_reservations import holds_resources
+    return holds_resources(session_id)
 
 
 def _created(row: Dict[str, Any]) -> tuple:
@@ -361,7 +359,8 @@ def checkout_owners(toplevel: str, session_id: str) -> tuple[Optional[Dict[str, 
         return None, []
     me = settings.effective_instance_id
     bound = [other for other in database.list_sessions_for_v2_branch(row["project_id"], row["branch"])
-             if (other.get("status") or "") != "archived" and other.get("instance_id") in (None, "", me)]
+             if other.get("instance_id") in (None, "", me)
+             and (other.get("id") == session_id or _has_work(other["id"]))]
     others = [other for other in bound
               if other.get("id") != session_id and other.get("parent_session_id") != session_id]
     caller = next((other for other in bound if other.get("id") == session_id), None)
@@ -395,8 +394,8 @@ def _refusal(change: BranchChange, toplevel: str, row: Dict[str, Any],
     text = change.text if len(change.text) <= 200 else change.text[:197] + "..."
     own, bound = _own_checkout(session_id)
     if change.worktree:
-        where = (f"To move or remove that worktree, the owner archives {who} first; an archived "
-                 "chat's checkout is not locked.")
+        where = (f"The checkout is still in use by {who}. Wait for its work to finish "
+                 "before moving or removing it; settling does not stop that work.")
     elif own and _inside(own, toplevel):
         where = ("This chat is bound to that checkout too, and that session is working in it, "
                  "so its branch cannot change now. Leave the branch as it is, or ask the owner "

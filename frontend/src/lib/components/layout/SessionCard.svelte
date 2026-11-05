@@ -339,18 +339,16 @@
 
 	const actions = $derived(cardActions(session));
 	/** Hover order: Archive first, then the state toggle (or Restore). */
-	const hoverActions = $derived([...actions].sort((a, b) => (a === 'archive' ? -1 : b === 'archive' ? 1 : 0)));
+	const hoverActions = $derived(actions);
 	/** What a left swipe does (the state toggle); a right swipe always archives. */
 	const leftAction = $derived<CardAction>(
-		actions.includes('restore') ? 'restore' : session.is_active ? 'settle' : 'activate'
+		actions[0]
 	);
-	const canArchive = $derived(actions.includes('archive'));
+	const canArchive = false; // Right swipe is deliberately inert.
 
 	const ACTION_META: Record<CardAction, { title: string; aria: string; label: string }> = {
 		settle: { title: 'Settle session', aria: 'Settle session', label: 'Settle' },
-		activate: { title: 'Move to Active', aria: 'Move session to Active', label: 'Move to Active' },
-		archive: { title: 'Archive session', aria: 'Archive session', label: 'Archive' },
-		restore: { title: 'Restore archived session', aria: 'Restore archived session', label: 'Restore' }
+		activate: { title: 'Move to Active', aria: 'Move session to Active', label: 'Move to Active' }
 	};
 
 	/** A short banner whose Undo reverts the change it reports. */
@@ -392,13 +390,6 @@
 					break;
 				case 'activate':
 					await appData.setSessionActive(id, true);
-					break;
-				case 'archive':
-					await appData.setSessionArchived(id, true);
-					offerUndo(`Archived “${title}”`, () => appData.setSessionArchived(id, false, wasActive));
-					break;
-				case 'restore':
-					await appData.setSessionArchived(id, false);
 					break;
 			}
 		} catch (err) {
@@ -498,6 +489,7 @@
 			const horizontal = Math.abs(dx) > Math.abs(dy);
 			const allowed = dx < 0 || canArchive;
 			if (!horizontal || pointerType === 'mouse' || selecting || !allowed) {
+				if (horizontal && pointerType !== 'mouse' && !selecting && !allowed) suppressNextClick = true;
 				pointerId = null;
 				return;
 			}
@@ -544,7 +536,8 @@
 		const flick = Math.abs(velocity) > FLICK_VELOCITY && Math.abs(dx) > FLICK_MIN_DX;
 		if (dx !== 0 && (armed || flick)) {
 			const dir = dx < 0 ? -1 : 1;
-			slideOut(dir, dir < 0 ? leftAction : 'archive');
+			if (dir < 0) slideOut(dir, leftAction);
+			else springBack();
 		} else {
 			springBack();
 		}
@@ -646,16 +639,11 @@
 >
 	{#if lane}
 		<!-- Lane `l` is uncovered by a right swipe, lane `r` by a left one. -->
-		<div class="lane l archive" aria-hidden="true" class:on={lane === 'l'}>
-			<Archive size={20} strokeWidth={2} /><span>Archive</span>
-		</div>
 		<div class="lane r toggle" aria-hidden="true" class:on={lane === 'r'}>
 			{#if leftAction === 'settle'}
 				<span>Settle</span><Check size={20} strokeWidth={2} />
 			{:else if leftAction === 'activate'}
 				<span>Move to Active</span><Undo2 size={20} strokeWidth={2} />
-			{:else}
-				<span>Restore</span><ArchiveRestore size={20} strokeWidth={2} />
 			{/if}
 		</div>
 	{/if}
@@ -776,10 +764,6 @@
 						<Check size={14} strokeWidth={1.75} />
 					{:else if action === 'activate'}
 						<Undo2 size={14} strokeWidth={1.75} />
-					{:else if action === 'archive'}
-						<Archive size={14} strokeWidth={1.75} />
-					{:else}
-						<ArchiveRestore size={14} strokeWidth={1.75} />
 					{/if}
 				</button>
 			{/each}

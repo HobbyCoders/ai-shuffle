@@ -26,8 +26,14 @@ results** to continue beyond the first 20 matches.
 `is_active`, not `status`), plus `device_id` (the owning instance ID).
 `GET /api/v1/sessions/count` returns `{ "total": n }` without row enrichment,
 using the same project/profile, device, tag, API-user/admin, instance, hidden
-and worker predicates. Both support `exclude_archived=true`; existing archive
-semantics are unchanged. API keys cannot request another user's total.
+and worker predicates. `exclude_archived` is accepted only for old clients and
+has no effect. API keys cannot request another user's total.
+
+Archive is retired. Existing archived conversations become ordinary Settled
+chats on upgrade, without changing transcript, ownership, project or real
+activity timestamps. Opening history never starts work; sending explicitly
+creates a fresh turn. Settling dismisses owner-facing prompts, not unrelated
+Monitor jobs or subagents, and never clears an explicit Stop.
 
 Owner-only disposable test creation may set `disposable_test: true` on
 `POST /api/v1/sessions` or a new-session chat WebSocket query. The chat is hidden
@@ -38,7 +44,7 @@ unfinished **test-owned** work before settling; ordinary Settle never means Stop
 
 ## Lifecycle synchronization
 
-Active/Settled membership is shared across paired workers; archive and delete run on the session's execution owner. An ordered replication backlog can delay these updates and newly created catalog rows. A child operation whose cascading parent has a known deletion record is recorded as a conflict rather than retried forever, allowing subsequent lifecycle updates to drain. This applies only to parents with generated, non-reusable IDs (sessions, tags, notes and API users). Its signed operation remains available for forwarding. A missing parent without a deletion record still waits for replication; permission rules always wait for their agent, whose ID can be reused.
+Active/Settled membership is shared across paired workers; delete runs on the session's execution owner. An ordered replication backlog can delay these updates and newly created catalog rows. A child operation whose cascading parent has a known deletion record is recorded as a conflict rather than retried forever, allowing subsequent lifecycle updates to drain. This applies only to parents with generated, non-reusable IDs (sessions, tags, notes and API users). Its signed operation remains available for forwarding. A missing parent without a deletion record still waits for replication; permission rules always wait for their agent, whose ID can be reused.
 
 `GET /api/v1/network/status` includes each peer's `sync_warning` and `stalled_streams` (origin, incarnation, next required `head_seq`, reason, pass count and Unix `first_seen_at`). A successful HTTP exchange does not erase a blocked-stream warning. Diagnostic counters are in-memory and restart with the worker. A stalled prefix does not automatically restart transcript backfill or bootstrap; missing retained operations continue using the existing verified state-copy protocol.
 
@@ -211,7 +217,7 @@ List sessions with optional filters.
 |-----------|------|-------------|
 | `project_id` | string | Filter by project |
 | `profile_id` | string | Filter by agent |
-| `status` | string | Filter by status (active, archived) |
+| `status` | string | Filter by runtime status (for example active or failed); membership uses `membership` |
 | `tag_id` | string | Filter by tag |
 | `admin_only` | boolean | Only owner sessions |
 | `api_users_only` | boolean | Only API user sessions |
@@ -255,7 +261,7 @@ List sessions a page at a time using a cursor instead of an offset. Use this for
 | `limit` | integer | Page size (default: 50, max: 100) |
 | `cursor` | string | `next_cursor` from the previous page (omit for the first page) |
 | `cursor_id` | string | `next_cursor_id` from the previous page |
-| `exclude_archived` | boolean | Leave out archived sessions (default: `false`). `has_more` then counts only the sessions you will get back |
+| `exclude_archived` | boolean | Retired compatibility argument; no effect |
 
 ```bash
 curl "http://localhost:8000/api/v1/sessions/cursor?limit=50" \
@@ -450,7 +456,7 @@ Update session metadata.
 `title` and `status` are query parameters, not a JSON body.
 
 ```bash
-curl -X PATCH "http://localhost:8000/api/v1/sessions/sess_abc123?title=New%20Title&status=archived" \
+curl -X PATCH "http://localhost:8000/api/v1/sessions/sess_abc123?title=New%20Title" \
   -H "Authorization: Bearer aih_your_key"
 ```
 
@@ -526,7 +532,7 @@ Successful manual and automatic compactions leave durable transcript entries wit
 { "turn_id": "...", "session_id": "sess_abc123" }
 ```
 
-**Errors:** `409` while a turn runs or waits in the queue, `409` for an archived chat, `400` for a chat that cannot be compacted (voice).
+**Errors:** `409` while a turn runs or waits in the queue, `400` for a chat that cannot be compacted (voice).
 
 ### GET /api/v1/sessions/{session_id}/cache-state
 
@@ -595,7 +601,7 @@ When armed, `pending` holds the existing wake metadata (`fire_at`, `reset_at`, `
 
 Send `{"turn_id": "turn_abc123"}` using the id from `limit_stopped`. Arms one continuation after that turn's reset without changing either global setting. Returns the same state as GET. Repeating the request returns the existing schedule without creating another wake. Reset lookup uses the stopped turn's end time, so clicking later does not age its provider reading out of the recency window. The actual wake includes the usual grace period, jitter and stagger; compaction and renewed-limit checks still apply.
 
-Returns `409` with a readable `detail` for an unknown reset, a stale turn, a previously handled limit, or a stopped, settled, archived, moved or busy chat. Manual retry remains available. A newer run, Stop, Settle, Archive or handoff invalidates the opt-in. Cancelling or consuming it does not allow another automatic continuation for the same limit.
+Returns `409` with a readable `detail` for an unknown reset, a stale turn, a previously handled limit, or a stopped, settled, moved or busy chat. Manual retry remains available. A newer run, Stop, Settle or handoff invalidates the opt-in. Cancelling or consuming it does not allow another automatic continuation for the same limit.
 
 The event log emits `system` frames with subtype `limit_resume` (`system.note` in storage). With the global setting off, a known reset emits `data.status: "available"`; an unknown reset emits `"no_reset"`. Both include `turn_id`, `provider`, `reset_at`, `reset_known`, `armed: false` and `resume_at: null`. Scheduling emits `"scheduled"` with `armed: true` and `resume_at`; the existing deferred, resumed, cancelled and dropped statuses still apply. Refetch GET after those events to obtain the current action state.
 
@@ -624,7 +630,7 @@ persistent assistant conversation exempt from deletion.
 
 ### POST /api/v1/sessions/{session_id}/archive
 
-Archive a session.
+Retired alias for ordinary settlement, using the same authorization and shared membership path. The response includes the canonical `session` (`status: active`, `is_active: false`). It never stops running work.
 
 ### PATCH /api/v1/sessions/{session_id}/active
 
@@ -632,9 +638,9 @@ Set whether a session is in the Active group. Send a JSON body with the new valu
 
 In a worker network, this is shared sidebar state, not an execution command. Any worker holding the session can save the change for an authorized caller even when the execution owner is offline. The change is durable locally and syncs on reconnect; concurrent edits use the network's last-writer-wins order. Owner catalog updates do not overwrite this membership. Settling dismisses a pending prompt: permissions are denied, questions and private-access requests are cancelled, and prose-question attention is cleared on the owning worker (on reconnect if it is offline); only a turn waiting on a prompt is interrupted, not other background work, placement, or ownership. Update all workers for consistent membership on every device.
 
-Add `"archived": true` to archive the session (it always leaves Active) or `"archived": false` to restore an archived one. Archiving changes the session's status on the worker that runs it, so unlike settling it needs that worker online: an offline owner returns `503` and a refused change `409`.
+Older clients may still send `"archived": true`; this means ordinary Settle, even when the execution owner is offline. `"archived": false` uses the explicit `is_active` value and does not restore old work or clear Stop. The legacy metadata query `status=archived` also means ordinary Settle. Signed legacy catalog updates and full snapshots are normalized on upgraded peers; an older server may still display its own archive UI until it upgrades.
 
-In the app, archived conversations live under **Settings → Archived chats**, not in the sidebar. This page loads archived history independently of sidebar filters and provides pagination for older chats. Opening a conversation leaves it archived; **Restore** moves it to Settled. Desktop session rows expose Archive on hover or keyboard focus, and mobile rows expose it with a right swipe; a left swipe settles a row, or brings a settled one back to Active.
+There is no Archived settings page, Restore bar, Archive hover action or bulk Archive action. Desktop and the real mobile shell show former archived conversations in bounded Settled history and search. A left swipe settles a row or brings it back to Active; right swipe has no lifecycle action.
 
 ```bash
 curl -X PATCH http://localhost:8000/api/v1/sessions/sess_abc123/active \
@@ -899,7 +905,7 @@ A session that is running a turn, has messages queued behind it, has a scheduled
 
 A queued move waits until the turn, the queued messages and the background work end, then commits, pushes and moves the session like `/move`. `after` is `queued` when queued messages run first; the waiter nudges their scheduler if the original enqueue kick was missed, only when no turn or run is live and at most once a minute. A draining turn gives streaming cleanup up to two minutes before treating a stuck stream as wedged; live background work still prevents eviction. An overdue wake-up with no live timer on the owning worker does not hold the move: its durable row moves normally so the destination can re-arm it. A near-future wake or an overdue wake with a live timer still holds the move. While a wake holds it, `busy` also includes `wake_due_at` (Unix seconds), `wake_overdue` and `wake_armed`, and the once-per-minute waiting log includes those details. Slow transfers log the current export/import step and elapsed times at INFO once a minute, before the operation finishes. It waits at most 10 minutes to become idle; after that it is cancelled and the chat says what was still running. `stop: true` stops the work first, as the Stop button does.
 
-Messages you send while a move waits are held, not run. They run on the new worker after the move, in order. If the move is cancelled, fails or runs out of time, they run on the current worker instead; if a failed move did in fact reach the new worker, they follow the session there. Held messages stay stored on the old worker until the new one has taken each of them, so a restart loses none; delivery is retried for 5 minutes, and a new worker drops a message it already took, so none runs twice. A message the new worker refuses, never takes, or (on an older release) does not confirm is named in the chat, or in a notification when the chat cannot be reached; an older worker gets each message once and is never sent it again. Messages held for a chat archived meanwhile are named the same way rather than run. Before the transfer starts, a held message also cancels the session's pending wake-ups, as a sent message does. Once the transfer is in flight it leaves the exported wake set alone; the newer message supersedes those wakes on the receiving worker before they are released.
+Messages you send while a move waits are held, not run. They run on the new worker after the move, in order. If the move is cancelled, fails or runs out of time, they run on the current worker instead; if a failed move did in fact reach the new worker, they follow the session there. Held messages stay stored on the old worker until the new one has taken each of them, so a restart loses none; delivery is retried for 5 minutes, and a new worker drops a message it already took, so none runs twice. A message the new worker refuses, never takes, or (on an older release) does not confirm is named in the chat, or in a notification when the chat cannot be reached; an older worker gets each message once and is never sent it again. Before the transfer starts, a held message also cancels the session's pending wake-ups, as a sent message does. Once the transfer is in flight it leaves the exported wake set alone; the newer message supersedes those wakes on the receiving worker before they are released.
 
 A move the agent queued with `HandOffSession` resumes the chat on the new worker: after any held messages, one turn starts there with a short system-authored prompt naming both workers and the agent's hand-off note, so the agent continues the work. It is sent once (a resend after a lost reply or a restart is dropped by the new worker). A move you queue yourself, or one that is cancelled, fails or runs out of time, starts no turn, and neither does a move after you pressed Stop (on either worker). A new worker on an older release cannot take the resume turn; the outcome row then says so and the chat waits for your next message there.
 

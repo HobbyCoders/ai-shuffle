@@ -322,7 +322,8 @@ def _pull_claimed_elsewhere(pr: Any, session: dict, project_id: Optional[str]) -
     if not v2_id and not legacy_id:
         return False  # unscoped, read-only discovery probe
     for row in database.list_sessions_by_pr_number(pr.number):
-        if row.get("id") == session.get("id") or row.get("status") == "archived":
+        from app.core.session_reservations import holds_resources
+        if row.get("id") == session.get("id") or not holds_resources(row["id"]):
             continue
         same_project = (
             row.get("project_v2_id") == v2_id if v2_id

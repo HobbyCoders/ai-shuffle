@@ -286,6 +286,10 @@ async def lifespan(app: FastAPI):
     from app.core.startup import install_v2_turns_wiring
     install_v2_turns_wiring()
 
+    # Fail closed before admission if the durable archive retirement cannot finish.
+    from app.db.session_archive_migration import reconcile as reconcile_archive_retirement
+    await reconcile_archive_retirement()
+
     # Reconcile from durable truth BEFORE any session machinery starts: a
     # previous run's crash can leave sessions durably marked parked (stuck
     # spinners/badges in the UI) and leak its CLI subprocesses — nothing in

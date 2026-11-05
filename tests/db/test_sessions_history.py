@@ -22,10 +22,10 @@ def test_settled_count_and_keysets_share_scopes(mock_db):
     mock_db.execute("UPDATE sessions SET instance_id = ? WHERE id = ?", ("other-worker", "g"))
     mock_db.commit()
     scope = dict(membership="settled", api_user_id="", device_id="this-worker", exclude_archived=True)
-    assert database.count_sessions(**scope) == 2
+    assert database.count_sessions(**scope) == 3
     first, cursor, cursor_id, more = database.get_sessions_cursor(limit=1, **scope)
-    second, _, _, more2 = database.get_sessions_cursor(limit=1, cursor=cursor, cursor_id=cursor_id, **scope)
-    assert [s["id"] for s in first + second] == ["b", "a"]
+    second, _, _, more2 = database.get_sessions_cursor(limit=2, cursor=cursor, cursor_id=cursor_id, **scope)
+    assert [s["id"] for s in first + second] == ["f", "b", "a"]
     assert more and not more2
     assert database.count_sessions(membership="active", exclude_archived=True) == 1
     assert database.get_session("d")["hidden"]  # retained, not deleted

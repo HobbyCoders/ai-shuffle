@@ -73,7 +73,7 @@ for that token itself: running the smoke on Docker is the owner's call. A
 worker started by the desktop app only admits its own window on loopback;
 record that worker's rows by hand instead (see below). For in-chat live tests,
 the live-test skill drives sessions through the agent tools (StartSession,
-MessageSession, ArchiveSession) and needs no token.
+MessageSession, SettleSession; explicitly Stop unfinished test-owned work first) and needs no token.
 
 Useful flags: `--token-cap N`, `--model M` (default: the cheapest-looking
 usable model), `--peer NAME` (default: the only other paired worker),

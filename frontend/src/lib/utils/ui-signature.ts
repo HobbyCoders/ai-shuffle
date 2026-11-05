@@ -64,7 +64,6 @@ export function uiSessionTag(sessionId: string | null | undefined): string {
  * (mobile.css), so there an empty chat reads as bottom.
  */
 export function uiComposer(input: { archived: boolean; emptyHero: boolean; mobile: boolean }): UiComposer {
-	if (input.archived) return 'hidden';
 	return input.emptyHero && !input.mobile ? 'centre' : 'bottom';
 }
 

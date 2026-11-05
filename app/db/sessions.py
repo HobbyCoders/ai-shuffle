@@ -428,9 +428,7 @@ def _session_list_scope(
         params.append(status)
     if active_only:
         base_query += f" AND {col_prefix}is_active = TRUE"
-    if exclude_archived:
-        # NULL status is a live row, so it must survive the inequality.
-        base_query += f" AND ({col_prefix}status IS NULL OR {col_prefix}status <> 'archived')"
+    # exclude_archived is a decode-only compatibility argument.
     if api_users_only:
         base_query += f" AND {col_prefix}api_user_id IS NOT NULL"
     elif api_user_id is not None:
@@ -487,9 +485,8 @@ def get_sessions_cursor(
 
     Hidden sessions are excluded unless ``include_hidden`` is True —
     the filter is part of the shared WHERE clause, so the limit+1 has_more
-    probe never counts hidden rows. ``exclude_archived`` works the same way
-    for archived sessions: a list that never shows them (the sidebar) must
-    not be told more rows exist when only archived ones remain.
+    probe never counts hidden rows. ``exclude_archived`` is accepted as a
+    legacy no-op; converted history belongs in ordinary Settled paging.
 
     Returns:
         Tuple of (sessions, next_cursor, next_cursor_id, has_more)
@@ -847,7 +844,9 @@ def update_session(
         values.append(title)
     if status is not None:
         updates.append(f"status = {_ph}")
-        values.append(status)
+        values.append("active" if status == "archived" else status)
+        if status == "archived":
+            updates.append("is_active = FALSE")
     # Truthiness (not `!= 0`) on purpose: a None increment passes `!= 0` and
     # emits `col = col + NULL`, which NULLs the column for good — that is what
     # broke GET /api/v1/sessions/cursor (pydantic float validation on
@@ -1911,7 +1910,8 @@ def set_session_active(
     On a networked worker a plain membership change is shared sidebar state,
     committed independently of execution ownership."""
     from app.network import engine, session_active
-    if archived is None and engine.context() is not None:
+    is_active = False if archived else is_active
+    if engine.context() is not None:
         return session_active.write_shared(session_id, is_active)
     _ph = ph()
     with get_db() as conn:
@@ -1927,10 +1927,6 @@ def set_session_active(
 
 def archive_status_sql(archived: Optional[bool], placeholder: str) -> tuple[str, tuple]:
     """The ``status`` assignment for an archive change, as SQL plus params."""
-    if archived is None:
-        return "", ()
-    if archived:
-        return f", status = {placeholder}", ("archived",)
     return (f", status = CASE WHEN status = {placeholder} THEN {placeholder} ELSE status END",
             ("archived", "active"))
 
@@ -1972,7 +1968,7 @@ def get_sessions_by_ids(session_ids: List[str]) -> Dict[str, SessionRow]:
 
 
 def get_settled_sessions(api_user_id: str, limit: int, offset: int = 0) -> List[SessionRow]:
-    """Settled (inactive, not archived) list-visible top-level rows, newest first.
+    """Settled (inactive) list-visible top-level rows, newest first.
 
     A coarse prefilter for bulk sidebar management. ``api_user_id`` follows
     ``get_sessions``: an empty string selects admin rows (NULL). Callers still
@@ -1981,10 +1977,10 @@ def get_settled_sessions(api_user_id: str, limit: int, offset: int = 0) -> List[
     _ph = ph()
     inst_sql, params = _instance_filter(_ph, "")
     query = (f"SELECT * FROM sessions WHERE 1=1{inst_sql}"
-             f" AND (is_active IS NULL OR is_active = FALSE) AND (status IS NULL OR status <> {_ph})"
+             " AND (is_active IS NULL OR is_active = FALSE)"
              " AND COALESCE(hidden, FALSE) = FALSE AND COALESCE(is_worker, FALSE) = FALSE"
              " AND parent_session_id IS NULL")
-    params = [*params, "archived"]
+    params = list(params)
     if api_user_id:
         query += f" AND api_user_id = {_ph}"
         params.append(api_user_id)
@@ -2755,7 +2751,7 @@ def _native_search_cte(
             WHERE n.message::text ILIKE {placeholder}
             AND texts.content ILIKE {placeholder}
             AND n.message->>'role' IN ('user', 'assistant')
-            AND s.status NOT IN ('archived','failed'){instance_sql}
+            AND COALESCE(s.status, 'active') <> 'failed'{instance_sql}
             ORDER BY s.id, n.ts DESC
         ),
     """
@@ -2775,7 +2771,7 @@ def search_sessions(
     for title search (titles are short, always fast).
     Returns sessions with matching snippets showing where the match was found.
 
-    Every CTE excludes ``status IN ('archived','failed')``. ``'failed'`` is the
+    Every CTE excludes ``status = 'failed'``. ``'failed'`` is the
     ProviderAgent verdict on a worker session whose dispatch errored (see
     ``app.core.provider_agent.WORKER_FAILED_STATUS``): the transcript stays
     readable from the session lists, but a dead worker must not compete with
@@ -2826,7 +2822,7 @@ def search_sessions(
                 s.updated_at as match_time
             FROM sessions s
             WHERE {sql_ilike('s.title')}
-            AND s.status NOT IN ('archived','failed'){inst_sql}
+            AND COALESCE(s.status, 'active') <> 'failed'{inst_sql}
         ),
         content_matches AS (
             SELECT DISTINCT ON (s.id)
@@ -2841,7 +2837,7 @@ def search_sessions(
             INNER JOIN sessions s ON s.id = sm.session_id
             WHERE (sm.content_tsv @@ plainto_tsquery('english', {_ph}) OR sm.content ILIKE {_ph})
             AND sm.role IN ('user', 'assistant')
-            AND s.status NOT IN ('archived','failed'){inst_sql}
+            AND COALESCE(s.status, 'active') <> 'failed'{inst_sql}
             ORDER BY s.id, sm.created_at DESC
         ),
         store_matches AS (
@@ -2858,7 +2854,7 @@ def search_sessions(
             WHERE sse.subpath IS NULL
             AND (to_tsvector('english', sse_entry_text(sse.entry)) @@ plainto_tsquery('english', {_ph})
                  OR sse_entry_text(sse.entry) ILIKE {_ph})
-            AND s.status NOT IN ('archived','failed'){inst_sql}
+            AND COALESCE(s.status, 'active') <> 'failed'{inst_sql}
             ORDER BY s.id, sse.created_at DESC
         ),
         {native_cte}
@@ -2929,7 +2925,7 @@ def search_sessions_paginated(
     Matches titles and user/assistant messages across legacy, SDK and native
     transcripts. Literal substring matching supplements legacy full-text search.
 
-    Excludes ``status IN ('archived','failed')`` in every CTE, for the reasons
+    Excludes ``status = 'failed'`` in every CTE, for the reasons
     spelled out on :func:`search_sessions`.
 
     Returns:
@@ -2973,7 +2969,7 @@ def search_sessions_paginated(
                 s.updated_at as match_time
             FROM sessions s
             WHERE {sql_ilike('s.title')}
-            AND s.status NOT IN ('archived','failed'){inst_sql}
+            AND COALESCE(s.status, 'active') <> 'failed'{inst_sql}
         ),
         content_matches AS (
             SELECT DISTINCT ON (s.id)
@@ -2986,7 +2982,7 @@ def search_sessions_paginated(
             INNER JOIN sessions s ON s.id = sm.session_id
             WHERE (sm.content_tsv @@ plainto_tsquery('english', {_ph}) OR sm.content ILIKE {_ph})
             AND sm.role IN ('user', 'assistant')
-            AND s.status NOT IN ('archived','failed'){inst_sql}
+            AND COALESCE(s.status, 'active') <> 'failed'{inst_sql}
             ORDER BY s.id, sm.created_at DESC
         ),
         store_matches AS (
@@ -3001,7 +2997,7 @@ def search_sessions_paginated(
             WHERE sse.subpath IS NULL
             AND (to_tsvector('english', sse_entry_text(sse.entry)) @@ plainto_tsquery('english', {_ph})
                  OR sse_entry_text(sse.entry) ILIKE {_ph})
-            AND s.status NOT IN ('archived','failed'){inst_sql}
+            AND COALESCE(s.status, 'active') <> 'failed'{inst_sql}
             ORDER BY s.id, sse.created_at DESC
         ),
         {native_cte}

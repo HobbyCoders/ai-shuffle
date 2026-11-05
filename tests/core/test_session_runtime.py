@@ -1567,18 +1567,18 @@ _ARCHIVED_WAKE_SOURCES = (
 
 @pytest.mark.parametrize("source", _ARCHIVED_WAKE_SOURCES)
 async def test_no_turn_starts_in_an_archived_session(mock_db, source):
-    """THE guard: execute() refuses an archived session for every source, aborts
-    the queued row (and any other queued row of the chat) so nothing drains it
-    later, never reaches the provider and leaves the chat archived."""
+    """Migration cancels old queued work before startup recovery can execute it."""
+    from app.db.session_archive_migration import migrate
+    from app.db.base import get_db
     sid = f"s4archived-{source}"
     _seed_session(sid, "archived")
     turn = turns_db.enqueue_turn(sid, source, prompt="wake up")
     other = turns_db.enqueue_turn(sid, "queue", prompt="and this")
+    with get_db() as conn:
+        migrate(conn.cursor())
     pump = MagicMock(name="pump")
-
     with _runtime_env(pump=pump) as env:
-        outcome = await session_runtime.SessionRuntime(turn).execute()
-
+        outcome = await session_runtime.SessionRuntime(turns_db.get_turn(turn["id"])).execute()
     assert outcome is None
     pump.assert_not_called()
     env["recorder"].start.assert_not_called()
@@ -1586,20 +1586,22 @@ async def test_no_turn_starts_in_an_archived_session(mock_db, source):
     for row in (turn, other):
         settled = turns_db.get_turn(row["id"])
         assert settled["state"] == "aborted"
-        assert settled["stop_reason"] == "archived"
-    assert _status_of(sid) == "archived"
+        assert settled["stop_reason"] == "removed_from_queue"
+    assert _status_of(sid) == "active"
 
 
-async def test_archived_turn_drop_is_logged_with_session_and_source(mock_db, caplog):
+async def test_migration_keeps_a_durable_startup_marker(mock_db):
+    from app.db.session_archive_migration import migrate
+    from app.db.base import get_db
     sid = "s4archivedlog"
     _seed_session(sid, "archived")
-    turn = turns_db.enqueue_turn(sid, "unpark", prompt="<task-notification/>")
-
-    with caplog.at_level("WARNING", logger="app.core.archive_guard"),             _runtime_env(pump=make_pump([{"type": "done", "metadata": {}}])):
-        await session_runtime.SessionRuntime(turn).execute()
-
-    assert any(sid in r.getMessage() and "unpark" in r.getMessage()
-               for r in caplog.records)
+    with get_db() as conn:
+        cur = conn.cursor()
+        migrate(cur)
+        cur.execute("SELECT * FROM session_archive_retirement WHERE session_id=%s", (sid,))
+        marker = cur.fetchone()
+    assert marker and not marker["done"]
+    assert marker["membership_revision"] > 0 and marker["membership_epoch"]
 
 
 async def test_restored_session_runs_turns_again(mock_db):

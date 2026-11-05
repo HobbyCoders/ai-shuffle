@@ -389,7 +389,6 @@
 
 	const rows = $derived.by((): CardRow[] =>
 		visibleSessions
-			.filter((s) => !isArchived(s))
 			.map((s) => {
 				const branch = branchLabel(s);
 				const prSet = branch && s.project_id ? openPrBranches.get(s.project_id) : undefined;
@@ -678,18 +677,14 @@
 
 	const plural = (n: number) => `${n} session${n === 1 ? '' : 's'}`;
 
-	async function runBulk(kind: 'settle' | 'activate' | 'archive') {
+	async function runBulk(kind: 'settle' | 'activate') {
 		const targets = selectedRows.filter((r) =>
 			kind === 'settle' ? r.session.is_active : kind === 'activate' ? !r.session.is_active : true
 		);
 		cancelSelection();
 		if (targets.length === 0) return;
 		const ids = targets.map((r) => r.session.id);
-		const wasActive = new Map(targets.map((r) => [r.session.id, !!r.session.is_active]));
-		const apply = (id: string) =>
-			kind === 'archive'
-				? appData.setSessionArchived(id, true, wasActive.get(id))
-				: appData.setSessionActive(id, kind === 'activate');
+		const apply = (id: string) => appData.setSessionActive(id, kind === 'activate');
 		const results = await Promise.allSettled(ids.map(apply));
 		const done = ids.filter((_, i) => results[i].status === 'fulfilled');
 		const failed = ids.length - done.length;
@@ -697,10 +692,6 @@
 		if (done.length === 0) return;
 		if (kind === 'settle') {
 			if (activeId && done.includes(activeId) && !phone) onSettledOpenSession();
-		} else if (kind === 'archive') {
-			offerUndo(`Archived ${plural(done.length)}`, () =>
-				Promise.all(done.map((id) => appData.setSessionArchived(id, false, wasActive.get(id))))
-			);
 		}
 	}
 
@@ -845,9 +836,6 @@
 					<Undo2 size={15} strokeWidth={2} />Active
 				</button>
 			{/if}
-			<button class="act" type="button" aria-label="Archive" title="Archive" onclick={() => runBulk('archive')}>
-				<Archive size={15} strokeWidth={2} />
-			</button>
 			{#if anySelectedActive}
 				<button class="act primary" type="button" onclick={() => runBulk('settle')}>
 					<Check size={15} strokeWidth={2.25} />Settle

@@ -51,9 +51,18 @@ async def test_stop_reports_only_successfully_cancelled_queued_peers(recipient):
     assert len(cancellations(recipient)) == 2
 
 
-def test_archive_reports_cancelled_peers(recipient):
+async def migrate_legacy_archive(sid):
+    from app.db.session_archive_migration import migrate, reconcile
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE sessions SET status='archived' WHERE id=%s", (sid,))
+        migrate(conn.cursor())
+    await reconcile()
+
+
+async def test_legacy_archive_migration_reports_cancelled_peers(recipient):
     peer = queued(recipient)
-    assert archive_guard.drop_queued_turns(recipient) == 1
+    await migrate_legacy_archive(recipient)
+    assert turns.get_queued_turns(recipient) == []
     assert cancellations(recipient) == [peer["id"]]
 
 
@@ -157,7 +166,7 @@ async def test_legacy_history_survives_cancellation_then_backfill(legacy_recipie
         if removal == "stop":
             assert (await query_session_lifecycle.enter_user_stop(sid))["queued_aborted"] == 1
         elif removal == "archive":
-            assert archive_guard.drop_queued_turns(sid) == 1
+            await migrate_legacy_archive(sid)
         elif removal == "settle":
             assert turns.settle_turn(peer["id"], "aborted", "admission_failed") is not None
         else:
@@ -165,16 +174,21 @@ async def test_legacy_history_survives_cancellation_then_backfill(legacy_recipie
 
     assert turns.get_queued_turns(sid) == []
     prefix = session_events.get_events(sid)
-    assert [event["event_type"] for event in prefix] == ["queue.cancelled"]
+    expected = (["queue.cancelled", "message.user", "message.assistant", "system.note"]
+                if removal == "archive" else ["queue.cancelled"])
+    assert [event["event_type"] for event in prefix] == expected
     assert prefix[0]["seq"] == 1
     assert prefix[0]["payload"]["cancelled_turn_ids"] == [peer["id"]]
     await history_backfill.ensure_backfilled(sid)
     events = session_events.get_events(sid)
-    assert events[:1] == prefix
-    assert [event["seq"] for event in events] == [1, 2, 3]
-    assert [event["event_type"] for event in events[1:]] == ["message.user", "message.assistant"]
-    assert [event["payload"]["content"] for event in events[1:]] == ["Legacy question", "Legacy reply"]
-    assert all(event["turn_id"] == "backfill" for event in events[1:])
+    assert events[:len(prefix)] == prefix
+    assert [event["seq"] for event in events] == list(range(1, len(events) + 1))
+    history = [event for event in events if event["event_type"].startswith("message.")]
+    assert [event["event_type"] for event in history] == ["message.user", "message.assistant"]
+    assert [event["payload"]["content"] for event in history] == ["Legacy question", "Legacy reply"]
+    assert all(event["turn_id"] == "backfill" for event in history)
+    if removal == "archive":
+        assert events[-1]["payload"]["subtype"] == "session_settled"
     await history_backfill.ensure_backfilled(sid)
     assert session_events.get_events(sid) == events
 

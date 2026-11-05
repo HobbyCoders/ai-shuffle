@@ -5,19 +5,17 @@
 import type { Component } from 'svelte';
 import type { CategoryId } from '$lib/settings/types';
 import GeneralPage from './GeneralPage.svelte';
-import ArchivedChatsPage from './ArchivedChatsPage.svelte';
 import VoicePage from './VoicePage.svelte';
 import SecurityPage from './SecurityPage.svelte';
 import SystemPage from './SystemPage.svelte';
 import CloudPage from './CloudPage.svelte';
 import UsagePage from './UsagePage.svelte';
 
-export type PreferenceCategory = 'general' | 'archived' | 'voice' | 'usage' | 'cloud' | 'security' | 'system';
+export type PreferenceCategory = 'general' | 'voice' | 'usage' | 'cloud' | 'security' | 'system';
 export type CollectionCategory = Exclude<CategoryId, PreferenceCategory>;
 
 export const PREFERENCE_PAGES: Record<PreferenceCategory, Component> = {
 	general: GeneralPage,
-	archived: ArchivedChatsPage,
 	voice: VoicePage,
 	usage: UsagePage,
 	cloud: CloudPage,

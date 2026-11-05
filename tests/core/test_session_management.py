@@ -27,8 +27,7 @@ async def invoke(ctx, name, **data):
 
 
 async def test_native_round_trip_keeps_work_and_transcript(chats, monkeypatch):
-    """Settling never touches work; archiving stops it (#1822: an archived chat
-    is read-only, so nothing may be left running to wake it)."""
+    """Both ordinary Settle and its retired alias preserve unrelated running work."""
     from app.core import turn_scheduler
     from app.core.sync_engine import sync_engine
     kick = Mock()
@@ -40,7 +39,7 @@ async def test_native_round_trip_keeps_work_and_transcript(chats, monkeypatch):
     before = turns.get_turn(turn["id"])
     for name, active, archived in (("SettleSession", False, False), ("SettleSession", False, False),
                                     ("UnsettleSession", True, False), ("UnsettleSession", True, False),
-                                    ("ArchiveSession", False, True), ("ArchiveSession", False, True)):
+                                    ("ArchiveSession", False, False), ("ArchiveSession", False, False)):
         outcome = await invoke(chats, name, session_id="target")
         assert not outcome.is_error, outcome.text
         receipt = json.loads(outcome.text)
@@ -52,14 +51,13 @@ async def test_native_round_trip_keeps_work_and_transcript(chats, monkeypatch):
         if not archived:
             assert turns.get_turn(turn["id"]) == before
         assert broadcast.await_args.kwargs["updates"] == {"is_active": active, "status": row["status"]}
-    # The archive stopped the running turn the way the Stop button does.
-    assert turns.get_turn(turn["id"])["state"] in turns.TERMINAL_STATES
-    assert "stopped" in receipt["note"]
+    assert turns.get_turn(turn["id"]) == before
+    assert "not stop" in receipt["note"]
     kick.assert_not_called()
     for name in ("SettleSession", "UnsettleSession"):
         outcome = await invoke(chats, name, session_id="target")
-        assert outcome.is_error and "Restore" in outcome.text
-        assert sessions.get_session("target")["status"] == "archived"
+        assert not outcome.is_error, outcome.text
+        assert sessions.get_session("target")["status"] == "active"
 
 
 async def test_settle_self_then_unsettle_self(chats):
@@ -78,7 +76,7 @@ async def test_list_producer_finds_settled_and_archived(chats):
     assert not (await invoke(chats, "UnsettleSession", session_id=listing["sessions"][0]["id"])).is_error
     assert [r["id"] for r in orch.list_sessions("caller", {})["sessions"]] == ["target"]
     await invoke(chats, "ArchiveSession", session_id="target")
-    assert orch.list_sessions("caller", {"state": "settled"})["sessions"] == []
+    assert [r["id"] for r in orch.list_sessions("caller", {"state": "settled"})["sessions"]] == ["target"]
     for state in ("archived", "all"):
         assert [r["id"] for r in orch.list_sessions("caller", {"state": state})["sessions"]] == ["target"]
     assert (await invoke(chats, "ListSessions", state="invalid")).is_error
@@ -147,14 +145,26 @@ async def test_mcp_registration_executes_same_tools(chats, monkeypatch):
         captured.update({item.name: item for item in kwargs["tools"]})
         return real_create(**kwargs)
     monkeypatch.setattr(inproc, "create_tool_server", capture)
-    create_builtin_tools_server(session_id="caller", profile_id="agent")
-    for name in ("SettleSession", "UnsettleSession", "ArchiveSession"):
+    config = create_builtin_tools_server(session_id="caller", profile_id="agent")
+    assert not captured["ArchiveSession"].discoverable
+    from fluid.tools.registry import ToolRegistry
+    from app.core.provider.fluid_tool_bridge import register_recorded_sdk_servers
+    registry = ToolRegistry()
+    register_recorded_sdk_servers(registry, {"builtins": config})
+    alias = "mcp__builtins__ArchiveSession"
+    assert registry.get(alias).risk == "write"
+    assert alias not in {spec.name for spec in registry.list_tools(loaded_only=False)}
+    assert not registry.search_tools("ArchiveSession")
+    result = await registry.dispatch(alias, {"session_id": "target"})
+    assert not result.is_error, result.text
+    assert not sessions.get_session("target")["is_active"]
+    for name in ("SettleSession", "UnsettleSession"):
         assert BUILTINS_RISK_MAP[name] == "write"
         assert name in NATIVE_SHADOWED_BUILTINS
         assert f"mcp__builtins__{name}" in get_builtin_tool_names()
         result = await captured[name].handler({"session_id": "target"})
         assert not result.get("isError"), result
-    assert sessions.get_session("target")["status"] == "archived"
+    assert sessions.get_session("target")["status"] == "active"
 
 
 async def test_host_capability_required():
@@ -180,7 +190,7 @@ async def test_code_mode_write_permission_gate(chats, name):
     assert not (await allowed.on_host_call(name, {"session_id": "target"})).denied
     row = sessions.get_session("target")
     assert bool(row["is_active"]) is (name == "UnsettleSession")
-    assert (row["status"] == "archived") is (name == "ArchiveSession")
+    assert row["status"] == "active"
 
 
 @pytest.mark.parametrize("field,value", [("is_worker", True), ("hidden", True),
@@ -189,8 +199,8 @@ async def test_ineligible_callers_cannot_manage_chats(chats, field, value):
     with get_db() as conn:
         conn.cursor().execute(f"UPDATE sessions SET {field}=%s WHERE id=%s", (value, "caller"))
     result = await invoke(chats, "ArchiveSession", session_id="target")
-    assert result.is_error
-    assert sessions.get_session("target")["is_active"]
+    assert result.is_error is (field != "status")
+    assert bool(sessions.get_session("target")["is_active"]) is (field != "status")
 
 
 async def test_missing_writer_result_is_not_success(chats, monkeypatch):
@@ -226,7 +236,7 @@ async def bulk(ctx, name, **data):
 async def test_single_id_keeps_original_receipt(chats):
     receipt = await bulk(chats, "ArchiveSession", session_id="target")
     assert set(receipt) == {"session_id", "is_active", "status", "action", "note"}
-    assert receipt["status"] == "archived" and _state("target") == (False, "archived")
+    assert receipt["status"] == "active" and _state("target") == (False, "active")
 
 
 @pytest.mark.parametrize("action", ["settle", "unsettle", "archive"])
@@ -255,7 +265,7 @@ async def test_ids_mix_processes_each_item_independently(chats, monkeypatch, act
     assert all(issue["outcome"] == "refused" for issue in result["issues"])
     for sid in ("sub", "voice", "worker", "foreign", "mobile", "missing"):
         assert refused[sid] == management.INACCESSIBLE  # unknown and foreign look the same
-    want = {"settle": (False, "active"), "unsettle": (True, "active"), "archive": (False, "archived")}[action]
+    want = {"settle": (False, "active"), "unsettle": (True, "active"), "archive": (False, "active")}[action]
     assert _state("ok1") == _state("ok2") == want
     assert {sid: _state(sid) for sid in before} == before
     # Idempotent re-run: nothing changes, the same chats are refused.
@@ -270,8 +280,8 @@ async def test_ids_settle_refuses_archived_and_counts_already(chats):
     await bulk(chats, "ArchiveSession", session_ids=["gone"])
     await bulk(chats, "SettleSession", session_id="target")
     result = await bulk(chats, "SettleSession", session_ids=["gone", "target", "caller"])
-    assert (result["settled"], result["already_in_state"], result["refused"]) == (1, 1, 1)
-    assert result["issues"] == [{"session_id": "gone", "outcome": "refused", "reason": management.ARCHIVED}]
+    assert (result["settled"], result["already_in_state"], result["refused"]) == (1, 2, 0)
+    assert result["issues"] == []
     assert _state("caller") == (False, "active")  # explicit self is allowed, as with session_id
 
 
@@ -283,7 +293,7 @@ async def test_ids_use_one_set_based_update(chats, monkeypatch):
     monkeypatch.setattr(sessions, "set_sessions_active", lambda *a: calls.append(a) or real(*a))
     monkeypatch.setattr(database, "set_session_active", Mock(side_effect=AssertionError("per-row write")))
     result = await bulk(chats, "ArchiveSession", session_ids=["a", "b", "c"])
-    assert result["archived"] == 3 and len(calls) == 1 and calls[0][0] == ["a", "b", "c"]
+    assert result["settled"] == 3 and len(calls) == 1 and calls[0][0] == ["a", "b", "c"]
 
 
 async def test_batch_failure_falls_back_and_one_failure_does_not_abort(chats, monkeypatch):
@@ -299,9 +309,9 @@ async def test_batch_failure_falls_back_and_one_failure_does_not_abort(chats, mo
         return await real(row, active, archived)
     monkeypatch.setattr(session_active, "update_membership", flaky)
     result = await bulk(chats, "ArchiveSession", session_ids=["a", "b", "c"])
-    assert (result["archived"], result["failed"], result["refused"]) == (2, 1, 0)
+    assert (result["settled"], result["failed"], result["refused"]) == (2, 1, 0)
     assert result["issues"] == [{"session_id": "b", "outcome": "failed", "reason": "Failed to update active status"}]
-    assert _state("a")[1] == _state("c")[1] == "archived" and _state("b") == (True, "active")
+    assert _state("a")[1] == _state("c")[1] == "active" and _state("b") == (True, "active")
 
 
 async def test_all_settled_project_then_all_scope_never_touches_caller(chats):
@@ -315,14 +325,14 @@ async def test_all_settled_project_then_all_scope_never_touches_caller(chats):
     for sid in ("here", "there", "caller"):
         await bulk(chats, "SettleSession", session_id=sid)
     result = await bulk(chats, "ArchiveSession", all_settled=True)
-    assert (result["matched"], result["archived"], result["scope"], result["remaining"]) == (1, 1, "project", False)
-    assert _state("here") == (False, "archived")
+    assert (result["matched"], result["settled"], result["scope"], result["remaining"]) == (1, 0, "project", False)
+    assert _state("here") == (False, "active")
     assert _state("there") == (False, "active") and _state("open") == (True, "active")
     assert _state("caller") == (False, "active")  # settled, but the current chat is never selected
     result = await bulk(chats, "ArchiveSession", all_settled=True, scope="all")
-    assert (result["matched"], result["archived"]) == (1, 1) and _state("there") == (False, "archived")
+    assert (result["matched"], result["settled"]) == (2, 0) and _state("there") == (False, "active")
     again = await bulk(chats, "ArchiveSession", all_settled=True, scope="all")
-    assert (again["matched"], again["archived"], again["issues"]) == (0, 0, [])
+    assert (again["matched"], again["settled"], again["issues"]) == (2, 0, [])
     assert _state("caller") == (False, "active") and _state("target") == (True, "active")
 
 
@@ -333,7 +343,7 @@ async def test_all_settled_skips_inaccessible_rows_silently(chats):
     _set("theirs", api_user_id="other")
     _set("sub", parent_session_id="caller")
     result = await bulk(chats, "ArchiveSession", all_settled=True)
-    assert (result["matched"], result["archived"], result["issues"]) == (1, 1, [])
+    assert (result["matched"], result["settled"], result["issues"]) == (1, 0, [])
     assert _state("theirs") == _state("sub") == (False, "active")
 
 
@@ -342,10 +352,11 @@ async def test_all_settled_is_capped_and_resumable(chats, monkeypatch):
     for sid in ("s1", "s2", "s3"):
         sessions.create_session(sid, "agent", title=sid, is_active=False)
     first = await bulk(chats, "ArchiveSession", all_settled=True)
-    assert (first["archived"], first["remaining"]) == (2, True) and "repeat" in first["note"]
+    assert (first["settled"], first["remaining"], first["already_in_state"]) == (0, False, 2)
+    assert "no archive cleanup" in first["note"]
     second = await bulk(chats, "ArchiveSession", all_settled=True)
-    assert (second["archived"], second["remaining"]) == (1, False)
-    assert all(_state(sid)[1] == "archived" for sid in ("s1", "s2", "s3"))
+    assert (second["settled"], second["remaining"], second["already_in_state"]) == (0, False, 2)
+    assert all(_state(sid)[1] == "active" for sid in ("s1", "s2", "s3"))
 
 
 async def test_bound_and_bounded_output(chats):

@@ -35,7 +35,7 @@ def _management_tool(name, action, description, *, filter_text=""):
     if filter_text:
         properties["all_settled"] = {"type": "boolean"}
         properties["scope"] = {"type": "string", "enum": ["project", "all"]}
-    return (ToolSpec(name=name, description=description + (
+    return (ToolSpec(name=name, discoverable=action != "archive", description=description + (
         f" Pass exactly one of {selectors}. session_id changes one chat; session_ids changes up to "
         f"{MAX_SESSIONS_PER_CALL} chats in one call (duplicates ignored). For a group, prefer one "
         "session_ids call over one call per chat. " + filter_text +
@@ -129,14 +129,13 @@ SPECS = (
         "(the first page) also lists active chats on the owner's other online workers, with "
         "worker and owner_device_id; MessageSession relays to them. "
         "Default scope is this project; use scope='all' for relevant cross-project work. "
-        "Use state='settled', 'archived' or 'all' for sidebar management; these also include "
+        "Use state='settled' or 'all' for sidebar management; these also include "
         "stopped chats, which are not messaging targets; find chats to message with state='active'. "
         "Follow next_offset when present; an empty filtered page may have more pages. "
-        "To settle, unsettle or archive several chats, pass their IDs together in one session_ids "
-        "call; to archive every settled chat, use ArchiveSession all_settled=true without listing. "
+        "To settle or unsettle several chats, pass their IDs together in one session_ids call. "
         "Follow MessageSession's peer-coordination rules."), input_schema={"type": "object", "properties": {
             "scope": {"type": "string", "enum": ["project", "all"]},
-            "state": {"type": "string", "enum": ["active", "settled", "archived", "all"]},
+            "state": {"type": "string", "enum": ["active", "settled", "all"]},
             "offset": {"type": "integer", "minimum": 0}}, "additionalProperties": False},
         risk="safe", requires_extra=("session_orchestration",)), _handler("list")),
     (ToolSpec(name="MessageSession", description=(
@@ -147,7 +146,7 @@ SPECS = (
         "interrupted and no parallel recipient turn is started. Without eligible steering "
         "the normal queued-turn drain is used; an idle peer wakes, but kind=progress "
         "rides its next wake. "
-        "Stopped, archived, hidden, subagent and foreign-owner sessions are refused. "
+        "Stopped, settled, hidden, subagent and foreign-owner sessions are refused. "
         "A chat on another of the owner's workers is relayed there, and that worker checks it "
         "again; only the owner's chats can message across workers, and a chat whose worker is "
         "offline is refused. "
@@ -165,16 +164,9 @@ SPECS = (
         "Move a chat from Active to Settled, dismissing pending owner prompts without stopping other work. "
         "This also works offline; the execution worker dismisses its waits on reconnect."),
     _management_tool("UnsettleSession", "unsettle",
-        "Move a settled chat back to Active without starting a turn or clearing a user stop. "
-        "Archived chats must first be restored in the app."),
+        "Move a settled chat back to Active without starting a turn or clearing a user stop."),
     _management_tool("ArchiveSession", "archive",
-        "Archive a chat and remove it from Active without deleting its conversation. An archived chat "
-        "is read-only until the owner restores it in the app: archiving stops its running and parked "
-        "work, and nothing can message, resume or wake it. A chat cannot archive itself. "
-        "Its execution worker must be reachable.",
+        "Retired compatibility alias for SettleSession. Never stops work or locks a transcript.",
         filter_text=(
-            "all_settled=true archives every settled chat without listing first; scope is "
-            "'project' (default) or 'all', as in ListSessions. It never selects the current chat, "
-            f"handles up to {MAX_SESSIONS_PER_CALL} chats per call and returns remaining=true when "
-            "more match: repeat the same call to continue. ")),
+            "all_settled=true is a bounded no-op on already settled history. No cleanup is needed. ")),
 )

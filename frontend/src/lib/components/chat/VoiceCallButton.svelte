@@ -44,7 +44,7 @@
 	const freshComposer = $derived(!$activeSession.sessionId);
 	// A conversation another worker runs takes a call too: the call runs here
 	// and forwards to that worker (#700).
-	const permittedSurface = $derived(freshComposer || (!sessionRow?.hidden && !sessionRow?.parent_session_id && sessionRow?.status !== 'archived'));
+	const permittedSurface = $derived(freshComposer || (!sessionRow?.hidden && !sessionRow?.parent_session_id));
 	const show = $derived(voiceEnabled && permittedSurface && !isCallSurfaceActive($voiceCallState, $activeSession.sessionId));
 	// Every conversation takes a call at any time, even while it works (see
 	// callBusyReason); only one whose worker is offline is refused.

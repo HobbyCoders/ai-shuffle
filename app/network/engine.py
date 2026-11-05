@@ -542,6 +542,9 @@ def serialize_row(coll: policy.Collection, row: Mapping[str, Any], *, cursor=Non
     """Plaintext record for a row, or None when the row is not shared."""
     if coll.shared_row is not None and not coll.shared_row(row):
         return None
+    if coll.name == "sessions":
+        from app.db.session_archive_migration import canonical_session
+        row = canonical_session(row)
     record: Dict[str, Any] = {}
     encrypted_columns: List[str] = []
     excluded = set(coll.local_fields)
@@ -584,6 +587,9 @@ def serialize_row(coll: policy.Collection, row: Mapping[str, Any], *, cursor=Non
 
 
 def content_hash(coll: policy.Collection, record: Mapping[str, Any]) -> str:
+    if coll.name == "sessions":
+        from app.db.session_archive_migration import canonical_session
+        record = canonical_session(record)
     subset = {name: record.get(name) for name in coll.hash_fields if name not in coll.local_fields}
     if coll.name == "model_providers":
         # An explicit local disconnect is an update even when the previously

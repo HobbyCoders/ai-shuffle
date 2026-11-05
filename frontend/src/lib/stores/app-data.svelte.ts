@@ -1206,26 +1206,9 @@ export const appData = {
 		await loadSessionsInternal(_state.sessionsTagFilter);
 	},
 
-	/**
-	 * Archive a session (out of the history, and out of Active) or restore it.
-	 * Optimistic like setSessionActive; `isActive` is where a restore lands, so
-	 * undoing an archive puts an Active session back in Active.
-	 */
+	/** Legacy caller compatibility: normal settlement, never readonly or Stop. */
 	async setSessionArchived(sessionId: string, archived: boolean, isActive = false) {
-		const change = beginRowChange(sessionId, archived
-			? { status: 'archived', is_active: false }
-			: { status: 'active', is_active: isActive });
-		// An open archived chat loses its composer; a restored one gets it back.
-		archivedChats.mark(sessionId, archived);
-		try {
-			await apiSetSessionArchived(sessionId, archived, isActive);
-		} catch (err) {
-			refuseRowChange(change);
-			archivedChats.mark(sessionId, !archived);
-			throw err;
-		}
-		acceptRowChange(change);
-		await loadSessionsInternal(_state.sessionsTagFilter);
+		await this.setSessionActive(sessionId, archived ? false : isActive);
 	},
 
 	// ── Search ──────────────────────────────────────────────────────────

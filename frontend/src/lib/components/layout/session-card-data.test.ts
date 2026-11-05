@@ -693,9 +693,9 @@ describe('sessionWorkMs (#1619)', () => {
 
 describe('cardActions', () => {
 	it('offers Archive + Settle, then Active + Archive, then Restore', () => {
-		expect(cardActions({ is_active: true, status: 'active' })).toEqual(['archive', 'settle']);
-		expect(cardActions({ is_active: false, status: 'active' })).toEqual(['activate', 'archive']);
-		expect(cardActions({ is_active: false, status: 'archived' })).toEqual(['restore']);
+		expect(cardActions({ is_active: true, status: 'active' })).toEqual(['settle']);
+		expect(cardActions({ is_active: false, status: 'active' })).toEqual(['activate']);
+		expect(cardActions({ is_active: false, status: 'archived' })).toEqual(['activate']);
 	});
 });
 

@@ -195,34 +195,17 @@ describe('SessionCard archive and undo', () => {
 		expect(mocks.banner).not.toHaveBeenCalled();
 	});
 
-	it('archives an active desktop session directly and Undo restores Active', async () => {
-		renderCard({ is_active: true });
-		await fireEvent.click(screen.getByTitle('Archive session'));
-		expect(mocks.setSessionArchived).toHaveBeenCalledWith('session-a', true);
-		const [message, opts] = lastBanner();
-		expect(message).toBe('Archived “Sidebar work”');
-		expect(opts).toMatchObject({ persist: false, duration_ms: 6000, action: { label: 'Undo' } });
-		opts.action.onClick();
-		expect(mocks.dismissLive).toHaveBeenCalledWith('banner-1');
-		expect(mocks.setSessionArchived).toHaveBeenLastCalledWith('session-a', false, true);
-	});
-
-	it('archives a settled session and Undo restores it where it was', async () => {
-		renderCard({ is_active: false });
-		await fireEvent.click(screen.getByTitle('Archive session'));
-		expect(mocks.setSessionArchived).toHaveBeenCalledWith('session-a', true);
-		const [message, opts] = lastBanner();
-		expect(message).toBe('Archived “Sidebar work”');
-		opts.action.onClick();
-		expect(mocks.setSessionArchived).toHaveBeenLastCalledWith('session-a', false, false);
-	});
-
-	it('offers only Restore on an archived row, with no Undo banner', async () => {
-		renderCard({ is_active: false, status: 'archived' });
+	it.each([true, false])('has no archive or restore control (active=%s)', (is_active) => {
+		renderCard({ is_active });
 		expect(screen.queryByTitle('Archive session')).toBeNull();
-		expect(screen.queryByTitle('Move to Active')).toBeNull();
-		await fireEvent.click(screen.getByTitle('Restore archived session'));
-		expect(mocks.setSessionArchived).toHaveBeenCalledWith('session-a', false);
+		expect(screen.queryByTitle('Restore archived session')).toBeNull();
+	});
+
+	it('reactivates legacy metadata without Restore or Undo', async () => {
+		renderCard({ is_active: false, status: 'archived' });
+		await fireEvent.click(screen.getByTitle('Move to Active'));
+		expect(mocks.setSessionActive).toHaveBeenCalledWith('session-a', true);
+		expect(mocks.setSessionArchived).not.toHaveBeenCalled();
 		expect(mocks.banner).not.toHaveBeenCalled();
 	});
 
@@ -577,22 +560,19 @@ describe('SessionCard swipe gestures', () => {
 		expect(onOpen).not.toHaveBeenCalled();
 	});
 
-	it.each([true, false])('archives on a long right swipe, then offers Undo (active=%s)', async (is_active) => {
+	it.each([true, false])('right swipe has no lifecycle side effects (active=%s)', async (is_active) => {
 		const clock = slowClock();
 		const { container } = renderCard({ is_active });
 		const { frame, card } = parts(container);
 		await down(card, { x: 20 });
 		await move(frame, { x: 220 });
-		const lane = container.querySelector('.lane.l.on');
-		expect(lane?.textContent).toContain('Archive');
-		expect(lane?.classList.contains('archive')).toBe(true);
 		await up(frame, { x: 220 });
 		clock.mockRestore();
-		expect(card.style.transform).toBe('translateX(320px)');
 		await vi.advanceTimersByTimeAsync(450);
-		expect(mocks.setSessionArchived).toHaveBeenCalledWith('session-a', true);
+		expect(container.querySelector('.lane.l')).toBeNull();
+		expect(mocks.setSessionArchived).not.toHaveBeenCalled();
 		expect(mocks.setSessionActive).not.toHaveBeenCalled();
-		expect(mocks.banner.mock.calls.at(-1)?.[0]).toBe('Archived “Sidebar work”');
+		expect(mocks.banner).not.toHaveBeenCalled();
 	});
 
 	it('moves a settled row back to Active on a left swipe', async () => {
@@ -615,11 +595,11 @@ describe('SessionCard swipe gestures', () => {
 		const { frame, card } = parts(container);
 		await down(card, { x: 300 });
 		await move(frame, { x: 100 });
-		expect(container.querySelector('.lane.r.on')?.textContent).toContain('Restore');
+		expect(container.querySelector('.lane.r.on')?.textContent).toContain('Move to Active');
 		await up(frame, { x: 100 });
 		clock.mockRestore();
 		await vi.advanceTimersByTimeAsync(450);
-		expect(mocks.setSessionArchived).toHaveBeenCalledWith('session-a', false);
+		expect(mocks.setSessionActive).toHaveBeenCalledWith('session-a', true);
 	});
 
 	it('springs a short slow drag back and keeps the next tap working', async () => {

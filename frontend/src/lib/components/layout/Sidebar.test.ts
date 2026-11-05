@@ -214,11 +214,11 @@ function session(
 }
 
 describe('Archived sessions', () => {
-	it('keeps archived history out of the sidebar; Settings owns the archive', () => {
+	it('has no separate archive lane for legacy metadata', () => {
 		mocks.sessions.set([session('history', 'Archived work', null, false, false, { status: 'archived' })]);
 		render(Sidebar, sidebarProps);
-		expect(screen.queryByText('Archived work')).toBeNull();
-		expect(screen.queryByRole('button', { name: /^Archived/ })).toBeNull();
+		expect(screen.queryByText('Archived work')).toBeTruthy();
+		expect(screen.queryByRole('button', { name: /^Archived$/ })).toBeNull();
 	});
 });
 
@@ -1199,21 +1199,12 @@ describe('Sidebar multi-select (R15)', () => {
 			expect(within(selbar()).getByRole('button', { name: /Active/ })).toBeTruthy();
 			expect(within(selbar()).getByRole('button', { name: /Settle/ })).toBeTruthy();
 
-			await fireEvent.click(within(selbar()).getByRole('button', { name: 'Archive' }));
+			expect(within(selbar()).queryByRole('button', { name: 'Archive' })).toBeNull();
+			await fireEvent.click(within(selbar()).getByRole('button', { name: /Settle/ }));
 			await vi.advanceTimersByTimeAsync(0);
-			expect(mocks.setSessionArchived).toHaveBeenCalledWith('active', true, true);
-			expect(mocks.setSessionArchived).toHaveBeenCalledWith('settled', true, false);
-			// Archive still offers Undo, which puts each row back where it was.
-			expect(mocks.banner).toHaveBeenCalledTimes(1);
-			const [message, options] = mocks.banner.mock.calls[0] as [
-				string,
-				{ action: { label: string; onClick: () => void } },
-			];
-			expect(message).toBe('Archived 2 sessions');
-			expect(options.action.label).toBe('Undo');
-			options.action.onClick();
-			expect(mocks.setSessionArchived).toHaveBeenCalledWith('active', false, true);
-			expect(mocks.setSessionArchived).toHaveBeenCalledWith('settled', false, false);
+			expect(mocks.setSessionActive).toHaveBeenCalledWith('active', false);
+			expect(mocks.setSessionArchived).not.toHaveBeenCalled();
+			expect(mocks.banner).not.toHaveBeenCalled();
 		} finally {
 			vi.useRealTimers();
 		}
