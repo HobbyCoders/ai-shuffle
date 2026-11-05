@@ -3,7 +3,30 @@
 One command gives you a running copy of the checkout you are in: its own
 throwaway PostgreSQL and data, realistic seed data, a free deterministic fake
 AI, Vite hot reload for the UI, and an app restart on every Python change.
-Use it to exercise a change in the real app before you push.
+Use it to exercise a change in the real app before you push. Private one-worker
+instances **pause after about five idle minutes and wake automatically on use**:
+app, Vite/esbuild and PostgreSQL stop cleanly, while their data, ports, access
+link and TTL stay. Only the small launcher (including the fake services and
+resident ingress) and guardian remain. The first request after an idle pause
+waits for readiness rather than failing; `python -m scripts.devloop wake`
+explicitly wakes it too. `status` never wakes an instance.
+
+Prefer `--no-vite` when you do not need hot reload: it serves the stamped build
+and saves about **0.5 GB per instance**. Use `--no-pause` for stable measurement
+runs such as `--seed long`. CI (`--ci`, including `scripts/devloop/ci.py`) and
+`--workers 2` **never pause**, regardless of this flag: paired workers need
+continuous presence and sync, and CI needs stable journey timing.
+
+Idle is not “no network traffic”: browser GET polls, chat/sync WebSocket
+keepalives and Vite HMR reconnects do not extend the idle deadline. The resident
+ingress holds polling requests while paused; real navigation, input, mutations,
+a chat query, frontend edits or a Python reload wake it. The browser-side
+chat/HMR sockets stay connected while their upstream children are stopped;
+known subscriptions are replayed on wake, while keepalives stay local. A running
+journey pins the whole lease using its process identity, even during long waits.
+Finite HTTP requests, voice/unknown sockets, durable active agent runs,
+background tasks and queued/running git operations prevent pausing. A failed
+busy check keeps the instance awake. No live app or database is consulted.
 
 ```bash
 python -m scripts.devloop up                                          # local browser
@@ -22,7 +45,8 @@ inside a private directory:
 
 | Field | What it is |
 | --- | --- |
-| `state` | `starting`, `pairing` (two workers), `ready`, `restarting`, `app-exited` or `stopping` |
+| `state` | `starting`, `pairing` (two workers), `ready`, `restarting`, `pausing`, `paused`, `waking`, `app-exited` or `stopping` |
+| `pause` | Whether automatic pausing is enabled and its idle deadline in seconds |
 | `pid`, `pid_identity` | The launcher and its start time (a reused pid is not the launcher) |
 | `mode` | `dev`, or `ci` for `--ci` |
 | `access_link`, `urls.ui` | The link to open; the UI (Vite, or the stamped build) origin |

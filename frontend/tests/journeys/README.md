@@ -8,7 +8,21 @@ They run against a **dev instance** (`python -m scripts.devloop up`, see
 [dev-loop.md](../../../docs/internal/dev-loop.md)): its own database, seed data
 and the free scripted fake AI. They never touch a live install.
 
-## Run them all, or what a change needs
+## Run locally only what you are fixing
+
+Before pushing, locally run only the journey that reproduces your bug or the
+one you are actively fixing. Every PR already repeats the journeys on GitHub;
+do not run the full set or all selected journeys on the worker.
+
+Private one-worker dev instances pause and wake automatically after about five
+idle minutes. A journey wakes a paused instance and pins its lease for the whole
+run, including slow actions and voice waits. CI (`--ci`) and `--workers 2` never
+pause. For measurement runs use `--no-pause` (for example with `--seed long`).
+Prefer `--no-vite` when you do not need hot reload: serving the stamped build
+saves about 0.5 GB per instance.
+
+The aggregate commands below are available for CI; use the single-file commands
+under **Run one** locally.
 
 ```bash
 # terminal 1 (or a Monitor task): the dev instance
