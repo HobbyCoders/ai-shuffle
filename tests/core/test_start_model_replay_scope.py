@@ -201,8 +201,10 @@ async def test_remote_recovery_cannot_substitute_a_new_catalog_choice(chats, mon
     # receipt must not authorize a newly-resolved model after a catalog edit.
     monkeypatch.setattr(mo, "resolve", lambda *args, **kwargs: mo.Choice(
         model="prov:lane:sol", provider_id="lane", model_id="sol"))
-    with pytest.raises(ValueError, match="replay choice changed"):
-        await orch._confirm_start_model("caller", args, None)
+    replay_plan = await orch._confirm_start_model("caller", args, None)
+    replay = orch._queue("caller", args, "start", model_plan=replay_plan)
+    assert replay["body"] == first["body"]
+    assert replay["body"]["model_choice"]["model"] == "prov:lane:astra"
     assert not chats[2]
 
 
@@ -283,3 +285,236 @@ async def test_concurrent_same_root_starts_share_one_prompt_and_child(chats, mon
         orch._queue, "caller", args, "start", model_plan=plan) for plan in plans))
     assert sorted(result["created"] for result in results) == [False, True]
     assert len({(result["session_id"], result["turn_id"]) for result in results}) == 1
+
+
+@pytest.fixture
+def remote_wire(chats, monkeypatch):
+    """Real caller/receiver producers and SQL, with an offline transport fixture.
+
+    The member fixture supplies authenticated worker identity; no permission
+    or consent check is patched. This is not a live network/capability probe.
+    """
+    from types import SimpleNamespace
+
+    from app.network import catalog, control, engine, membership
+
+    state = {"offline": True, "calls": [], "after_delivery": False, "old_peer": False}
+    monkeypatch.setattr(orch, "_remote_worker", lambda worker: {
+        "device_id": "other-worker", "device_name": "Other",
+        "capabilities": {"start_session_permissions": 1}})
+    member = SimpleNamespace(kind=membership.KIND_WORKER, status=membership.STATUS_ACTIVE,
+                             name="Caller worker")
+    context = SimpleNamespace(device_id="other-worker",
+                              member=lambda device: member if device == "caller-worker" else None)
+
+    async def wire(device, action, body, **kwargs):
+        state["calls"].append((action, body))
+        if state["offline"]:
+            raise control.RunnerUnreachable("undelivered fixture request")
+        if state["old_peer"] and action != orch.REMOTE_ACTION:
+            raise control.ControlRefused("Unknown control action")
+        with monkeypatch.context() as receiver:
+            receiver.setattr(engine, "context", lambda: context)
+            receiver.setattr(catalog, "publish_owned", lambda: None)
+            try:
+                answer = await control.handle(action, body, from_device="caller-worker")
+            except (ValueError, PermissionError, control.UnknownControlAction) as exc:
+                raise control.ControlRefused(str(exc)) from exc
+        if state["after_delivery"]:
+            raise control.MaybeApplied("delivered fixture request lost its response")
+        return answer
+
+    monkeypatch.setattr(control, "call", wire)
+    return state
+
+
+def _remote_reservation():
+    from app.db import turns
+
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM turns WHERE session_id LIKE %s",
+                    (orch.REMOTE_RECEIPT_PREFIX + "%",))
+        [receipt] = cur.fetchall()
+        return turns._row(receipt)
+
+
+@pytest.mark.parametrize("metadata", ["missing", "old_override", "old_noop", "partial_body"])
+async def test_legacy_undelivered_receipt_cannot_create_new_catalog_choice(chats, remote_wire, metadata):
+    from app.core.agent_types import PermissionResultAllow
+    from app.db import sessions
+
+    db = chats[0]
+    db.update_model_provider("lane", models_json=[{"id": "astra", "label": "Review Lane"}, {"id": "sol"}])
+    _turn("caller", "user", "do the work", profile="agent")
+    chats[3]["result"] = PermissionResultAllow(updated_input={})
+    args = {**ARGS, "model": "Review Lane", "worker": "Other"}
+    first = await _start(args)
+    assert first.is_error and "could not be reached" in first.text
+    receipt = _remote_reservation()
+    # Explicit upgrade fixture: old reservations had no canonical metadata.
+    # This is not a claim to have executed an old binary.
+    legacy = {key: value for key, value in receipt["payload"].items()
+              if key not in ("model_override", "model_unchanged", "remote_start_body")}
+    if metadata == "old_override":
+        legacy["model_override"] = receipt["payload"]["model_override"]
+    elif metadata == "old_noop":
+        legacy["model_unchanged"] = True
+    elif metadata == "partial_body":
+        partial = dict(remote_wire["calls"][0][1])
+        partial.pop("model_choice")
+        legacy["remote_start_body"] = partial
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE turns SET payload=%s WHERE id=%s",
+                              (json.dumps(legacy), receipt["id"]))
+    db.update_model_provider("lane", models_json=[{"id": "astra"}, {"id": "sol", "label": "Review Lane"}])
+    remote_wire["offline"] = False
+    retry = await _start(args)
+    child = sessions.get_session(receipt["payload"]["remote_session_id"])
+    assert retry.is_error and child is None, f"legacy retry created an unapproved child: {retry.text}"
+    assert len(chats[2]) == 1  # first explicit approval only, no fabricated consent
+    assert remote_wire["calls"][-1][0] == orch.REMOTE_READBACK_ACTION
+
+
+@pytest.mark.parametrize("provider", [False, True])
+@pytest.mark.parametrize("explicit", [False, True])
+async def test_pending_noop_or_inherited_retry_keeps_original_binding(chats, remote_wire, provider, explicit):
+    from app.db import sessions
+
+    if provider:
+        sessions.set_session_run_binding("caller", model="prov:lane:astra")
+    _turn("caller", "user", "start a review", profile="agent")
+    original = "prov:lane:astra" if provider else "sonnet"
+    args = {**ARGS, "worker": "Other", **({"model": original} if explicit else {})}
+    first = await _start(args)
+    assert first.is_error and "could not be reached" in first.text
+    if provider:
+        sessions.set_session_run_binding("caller", model="prov:grok:grok-4.5")
+    else:
+        sessions.set_session_run_binding("caller", model="opus")
+    remote_wire["offline"] = False
+    retry = await _start(args)
+    assert not retry.is_error, retry.text
+    result = json.loads(retry.text)
+    child = sessions.get_session(result["session_id"])
+    assert child["model"] == original, f"pending retry drifted: {retry.text}"
+    assert child["provider_id"] == ("lane" if provider else None)
+    assert not chats[2]
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("model", [None, "sonnet", "Review Lane"])
+async def test_delivered_retry_reads_original_child_despite_drift(chats, remote_wire, monkeypatch, legacy, model):
+    from app.core import model_override as mo
+    from app.core.agent_types import PermissionResultAllow
+    from app.db import sessions
+
+    db = chats[0]
+    db.update_model_provider("lane", models_json=[{"id": "astra", "label": "Review Lane"}, {"id": "sol"}])
+    _turn("caller", "user", "do the work", profile="agent")
+    chats[3]["result"] = PermissionResultAllow(updated_input={})
+    remote_wire.update(offline=False, after_delivery=True)
+    args = {**ARGS, "worker": "Other", **({"model": model} if model else {})}
+    first = await _start(args)
+    assert first.is_error and "could not be reached" in first.text
+    receipt = _remote_reservation()
+    original = sessions.get_session(receipt["payload"]["remote_session_id"])
+    assert original is not None  # real receiver creation committed before response loss
+    if legacy:
+        payload = {key: value for key, value in receipt["payload"].items()
+                   if key not in ("remote_start_body", "model_override", "model_unchanged")}
+        with get_db() as conn:
+            conn.cursor().execute("UPDATE turns SET payload=%s WHERE id=%s",
+                                  (json.dumps(payload), receipt["id"]))
+    sessions.set_session_run_binding("caller", model="opus")
+    db.update_model_provider("lane", models_json=[{"id": "astra"}, {"id": "sol", "label": "Review Lane"}])
+    mo._APPROVED.clear()
+
+    async def unexpected_accept(*args, **kwargs):
+        pytest.fail("Proven delivered readback must not prompt or authorize fresh work")
+
+    monkeypatch.setattr(mo, "accept", unexpected_accept)
+    remote_wire["after_delivery"] = False
+    replay = await _start(args)
+    assert not replay.is_error, replay.text
+    result = json.loads(replay.text)
+    assert result["created"] is False and result["session_id"] == original["id"]
+    assert result["model"] == original["model"]
+    assert result["provider"]["id"] == original["provider_id"]
+    assert remote_wire["calls"][-1][0] == (orch.REMOTE_READBACK_ACTION if legacy else orch.REMOTE_ACTION)
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM turns WHERE session_id=%s", (original["id"],))
+        assert len(cur.fetchall()) == 1
+
+
+async def test_legacy_readback_on_old_peer_never_falls_back_to_create(chats, remote_wire):
+    from app.db import sessions
+
+    _turn("caller", "user", "do the work", profile="agent")
+    args = {**ARGS, "worker": "Other"}
+    assert (await _start(args)).is_error
+    receipt = _remote_reservation()
+    payload = {key: value for key, value in receipt["payload"].items() if key != "remote_start_body"}
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE turns SET payload=%s WHERE id=%s", (json.dumps(payload), receipt["id"]))
+    remote_wire.update(offline=False, old_peer=True)
+    replay = await _start(args)
+    assert replay.is_error and "older release" in replay.text
+    assert [action for action, _ in remote_wire["calls"]] == [orch.REMOTE_ACTION, orch.REMOTE_READBACK_ACTION]
+    assert sessions.get_session(payload["remote_session_id"]) is None
+    assert not chats[2]
+
+
+async def test_remote_inherited_native_choice_does_not_rebind_to_receiver_profile(chats, remote_wire):
+    from app.db import sessions
+
+    _turn("caller", "user", "do the work", profile="agent")
+    args = {**ARGS, "worker": "Other"}
+    assert (await _start(args)).is_error
+    # Receiver agent configuration changes after reservation; the saved native
+    # binding must win rather than inheriting that agent's new provider.
+    chats[0].update_profile("agent", config={"provider_id": "lane", "model": "astra"})
+    remote_wire["offline"] = False
+    retry = await _start(args)
+    assert not retry.is_error, retry.text
+    result = json.loads(retry.text)
+    child = sessions.get_session(result["session_id"])
+    assert child["provider_id"] is None and child["model"] == "sonnet"
+    assert "model_override" not in result  # inheritance is not fabricated consent
+
+
+@pytest.mark.parametrize("invalid", ["fingerprint", "worker"])
+async def test_legacy_readback_receiver_rechecks_identity(chats, remote_wire, monkeypatch, invalid):
+    from types import SimpleNamespace
+
+    from app.network import control, engine, membership
+
+    _turn("caller", "user", "do the work", profile="agent")
+    remote_wire.update(offline=False, after_delivery=True)
+    args = {**ARGS, "worker": "Other"}
+    assert (await _start(args)).is_error
+    receipt = _remote_reservation()
+    body = {"session_id": receipt["payload"]["remote_session_id"], "command_id": receipt["command_id"],
+            "fingerprint": receipt["payload"]["orchestration_fingerprint"]}
+    member = SimpleNamespace(kind=membership.KIND_WORKER, status=membership.STATUS_ACTIVE)
+    context = SimpleNamespace(device_id="other-worker", member=lambda device: member if device == "caller-worker" else None)
+    monkeypatch.setattr(engine, "context", lambda: context)
+    if invalid == "fingerprint":
+        body["fingerprint"] = "0" * 64
+    with pytest.raises((ValueError, PermissionError), match="different arguments|active workers"):
+        await control.handle(orch.REMOTE_READBACK_ACTION, body,
+                             from_device="caller-worker" if invalid == "fingerprint" else "unpaired-worker")
+
+
+async def test_unbound_remote_inheritance_requires_an_explicit_choice(chats, remote_wire):
+    _turn("caller", "user", "do the work", profile="agent")
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE sessions SET model=NULL WHERE id='caller'")
+    result = await _start({**ARGS, "worker": "Other"})
+    assert result.is_error and "inherited remote model is unknown" in result.text
+    assert not remote_wire["calls"] and not chats[2]
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM turns WHERE session_id LIKE %s", (orch.REMOTE_RECEIPT_PREFIX + "%",))
+        assert not cur.fetchall()

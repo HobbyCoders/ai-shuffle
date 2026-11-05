@@ -27,6 +27,9 @@ MAX_STARTS = 32
 # local mirror, which has the bare id).
 REMOTE_RECEIPT_PREFIX = "orchestration-remote:"
 REMOTE_ACTION = "orchestration-start"
+# A distinct action fails closed on older peers; a flag on the create action
+# could be ignored and turn a legacy readback into an unapproved creation.
+REMOTE_READBACK_ACTION = "orchestration-start-readback"
 # A chat the owner's assistant started on another worker sends its report back
 # to the assistant's worker with this action when it comes to rest.
 REPORT_ACTION = "orchestration-report"
@@ -738,17 +741,21 @@ def _start_model_plan(sender_id, data, remote):
     scope = _start_model_scope(sender, context, data, _principal(sender_id))
     overrides = context.get("overrides") or {}
     baseline = _inherited_model(sender, overrides)
-    try:
-        choice = model_override.resolve(data.get("model"), sender.get("provider_id"),
-                                        runs_here=remote is None)
-    except ValueError as exc:
-        raise ValueError(f"{exc} Nothing was started.") from None
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT id FROM turns WHERE id=%s", (scope["root_id"],))
         if not cursor.fetchone():
             raise ValueError("Orchestration origin no longer exists.")
         previous = _request_receipt(cursor, scope["root_id"], scope["command_id"], scope["fingerprint"])
+    if previous and previous["session_id"].startswith(REMOTE_RECEIPT_PREFIX):
+        # Recovery uses only the reserved body, never today's catalog/baseline.
+        # Missing legacy proof is read-only at the destination, not new authority.
+        return {"scope": scope, "receipt_id": previous["id"], "unchanged": True}
+    try:
+        choice = model_override.resolve(data.get("model"), sender.get("provider_id"),
+                                        runs_here=remote is None)
+    except ValueError as exc:
+        raise ValueError(f"{exc} Nothing was started.") from None
     record = (previous["payload"].get("model_override") or {}) if previous else {}
     if record and (record.get("model"), record.get("provider_id")) != (choice.model, choice.provider_id):
         raise ValueError("Model replay choice changed; use a new request_id to check consent again.")
@@ -880,6 +887,18 @@ def _remote_body(sender, data, overrides, payload, prompt, command_id, fingerpri
             context_window=body["context_window"], fast=body["fast"])
         body.update(model=model_plan["model"], provider_id=model_plan["provider_id"], **mapped)
         body["model_choice"] = _override_record(model_plan)
+    else:
+        # Bind even an omitted/no-op model to the original canonical leg. The
+        # existing choice field also prevents older receivers rebinding a native
+        # inheritance through their agent's provider. It grants no new consent.
+        from app.core import model_override
+        inherited = _inherited_model(sender, overrides)
+        if not inherited:
+            raise ValueError("The inherited remote model is unknown; pass an explicit model.")
+        picked = model_override.resolve(inherited, runs_here=False)
+        body.update(model=picked.model, provider_id=picked.provider_id,
+                    model_choice={"model": picked.model, "provider_id": picked.provider_id},
+                    model_inherited=True)
     if assistant:
         body["report_back"] = True
         # Explicit, so a receiver never falls back to the old report_back
@@ -897,6 +916,33 @@ def _remote_body(sender, data, overrides, payload, prompt, command_id, fingerpri
     return body
 
 
+def _remote_replay_body(previous, command_id, fingerprint):
+    """Only a complete canonical reservation can authorize remote recovery.
+
+    Legacy/partial metadata permits querying an existing child, never creating
+    one from a newly resolved model or the caller's current inherited settings.
+    """
+    from app.core.model_registry import model_values
+    from app.core.query_options import decode_provider_model
+
+    identity = {"session_id": _remote_session_id(command_id),
+                "command_id": command_id, "fingerprint": fingerprint}
+    body = previous["payload"].get("remote_start_body")
+    if isinstance(body, dict) and all(body.get(key) == value for key, value in identity.items()):
+        choice = body.get("model_choice")
+        if isinstance(choice, dict):
+            model, provider = choice.get("model"), choice.get("provider_id")
+            decoded = decode_provider_model(model) if isinstance(model, str) else None
+            canonical = ((provider is None and isinstance(model, str) and model in model_values())
+                         or (decoded is not None and decoded[0] == provider))
+            if (canonical and body.get("model") == model and body.get("provider_id") == provider
+                    and all(key in body for key in (
+                        "title", "prompt", "peer_message_content", "sender_session_id", "sender_label",
+                        "depth", "profile_id", "permission_mode", "effort", "context_window", "fast"))):
+                return body, False
+    return identity, True
+
+
 def _remote_text(body, key, limit, *, required=True):
     value = body.get(key)
     if value is None and not required:
@@ -906,7 +952,7 @@ def _remote_text(body, key, limit, *, required=True):
     return value
 
 
-def accept_remote_start(body, from_device):
+def accept_remote_start(body, from_device, *, readback_only=False):
     """Destination side of a StartSession aimed at this worker (synchronous).
 
     The caller already applied its permission gates, dedupe and chain budget.
@@ -932,6 +978,29 @@ def accept_remote_start(body, from_device):
     if not _COMMAND_RE.fullmatch(command_id) or _remote_session_id(command_id) != session_id:
         raise ValueError("Invalid StartSession request identity")
     fingerprint = _remote_text(body, "fingerprint", 64)
+
+    def receipt(turn, created):
+        row = sessions.get_session(session_id) or {}
+        return {"session_id": session_id, "turn_id": turn["id"], "created": created,
+                "status": "queued" if created else "already_queued",
+                "delivery_status": _delivery_status(turn),
+                "report_back": bool((turn.get("payload") or {}).get("orchestration_report_device")),
+                "assistant_work": bool(row.get("away_mode")),
+                "model": row.get("model"), "provider_id": row.get("provider_id")}
+
+    if sessions.get_session(session_id) is not None:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM turns WHERE session_id=%s AND command_id=%s", (session_id, command_id))
+            turn = turns._row(cursor.fetchone())
+        if turn is None:
+            raise ValueError("A different chat already uses this id; nothing was started.")
+        if (turn.get("payload") or {}).get("orchestration_fingerprint") != fingerprint:
+            raise ValueError("request_id was already used with different arguments.")
+        return receipt(turn, False)
+    if readback_only:
+        raise ValueError("No existing remote StartSession receipt; original model binding is missing. "
+                         "Use a new request_id to check current consent; nothing was started.")
     title = _remote_text(body, "title", 160).strip()
     _remote_text(body, "prompt", 20000)  # validate legacy wire field; never trust its frame
     from fluid.tools.hardening import defang_harness_markers
@@ -962,26 +1031,10 @@ def accept_remote_start(body, from_device):
     if type(assistant_work) is not bool:
         raise ValueError("assistant_work must be true or false")
     choice = body.get("model_choice") if isinstance(body.get("model_choice"), dict) else None
+    inherited = body.get("model_inherited", False)
+    if not isinstance(inherited, bool):
+        raise ValueError("Invalid model_inherited")
 
-    def receipt(turn, created):
-        row = sessions.get_session(session_id) or {}
-        return {"session_id": session_id, "turn_id": turn["id"], "created": created,
-                "status": "queued" if created else "already_queued",
-                "delivery_status": _delivery_status(turn),
-                "report_back": bool((turn.get("payload") or {}).get("orchestration_report_device")),
-                "assistant_work": bool(row.get("away_mode")),
-                "model": row.get("model"), "provider_id": row.get("provider_id")}
-
-    if sessions.get_session(session_id) is not None:
-        with get_db() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT * FROM turns WHERE session_id=%s AND command_id=%s", (session_id, command_id))
-            turn = turns._row(cursor.fetchone())
-        if turn is None:
-            raise ValueError("A different chat already uses this id; nothing was started.")
-        if (turn.get("payload") or {}).get("orchestration_fingerprint") != fingerprint:
-            raise ValueError("request_id was already used with different arguments.")
-        return receipt(turn, False)
     if database.get_profile(profile_id) is None:
         raise ValueError(f"The agent {profile_id!r} does not exist on this worker; nothing was started.")
     if project_v2_id and not checkouts.has_active_base_checkout(project_v2_id, settings.effective_instance_id):
@@ -1002,9 +1055,10 @@ def accept_remote_start(body, from_device):
             raise ValueError(f"The exact model id {choice.get('model')!r} cannot run on this worker. "
                              f"Choose one of: {picked.model}. Nothing was started.")
         provider_id, model = picked.provider_id, picked.model
-        mapped = model_override.settings_for_model(model, provider_id, effort=effort,
-                                                   context_window=context_window, fast=fast)
-        effort, context_window, fast = mapped["effort"], mapped["context_window"], mapped["fast"]
+        if not inherited:
+            mapped = model_override.settings_for_model(model, provider_id, effort=effort,
+                                                       context_window=context_window, fast=fast)
+            effort, context_window, fast = mapped["effort"], mapped["context_window"], mapped["fast"]
     elif provider_id and model_providers.resolve_model_provider(provider_id) is None:
         provider_id = None
     from app.core.model_effort import resolve_child_effort
@@ -1022,7 +1076,7 @@ def accept_remote_start(body, from_device):
         "peer_sender_label": f"{sender_label} (on {worker_name})",
         "forwarded_by_device": from_device,
     }
-    if choice is not None:
+    if choice is not None and not inherited:
         payload["model_override"] = {
             "model": model, "provider_id": provider_id,
             "source": choice.get("source") if choice.get("source") in (
@@ -1059,6 +1113,12 @@ def accept_remote_start(body, from_device):
                                   overrides=overrides, payload=payload, command_id=command_id, _conn=conn)
     log.info("StartSession from worker %s created chat %s", from_device, session_id)
     return receipt(turn, True)
+
+
+async def handle_remote_start_readback(body, from_device):
+    """Read-only recovery; an older peer refuses this action instead of creating."""
+    from app.db.async_database import run_sync
+    return await run_sync(accept_remote_start, body, from_device, readback_only=True)
 
 
 async def handle_remote_start(body, from_device):
@@ -1671,11 +1731,11 @@ def _queue(sender_id, data, action, placement=None, model_plan=None, discovered_
                 device = previous["payload"].get("remote_device_id")
                 remote = {"device_id": device, "device_name": _device_name(device)}
             if remote is not None and made_remotely:
-                # Re-ask the destination: it answers with the chat it already made.
+                # Replay the original binding or ask only for existing state.
+                # Never rebuild an authorized execution from today's inheritance.
+                body, readback_only = _remote_replay_body(previous, command_id, fingerprint)
                 return {"remote": remote, "receipt_id": previous["id"], "reserved": False,
-                        "body": _remote_body(sender, data, overrides, payload, prompt, command_id, fingerprint,
-                                             project_v2_id=project_v2_id, assistant=assistant,
-                                             model_plan=plan, permission_mode=started_mode)}
+                        "readback_only": readback_only, "body": body}
             return {"session_id": previous["session_id"], "turn_id": previous["id"],
                     "status": "already_queued", "delivery_status": _delivery_status(previous),
                     "created": False,
@@ -1702,11 +1762,9 @@ def _queue(sender_id, data, action, placement=None, model_plan=None, discovered_
                                 project_v2_id=project_v2_id, assistant=assistant, model_plan=plan,
                                 permission_mode=started_mode)
             receipt_payload = {"orchestration_fingerprint": fingerprint, "remote_device_id": remote["device_id"],
-                               "remote_session_id": body["session_id"]}
+                               "remote_session_id": body["session_id"], "remote_start_body": body}
             if plan:
                 receipt_payload["model_override"] = _override_record(plan)
-            elif model_plan:
-                receipt_payload["model_unchanged"] = True
             if assistant:
                 # Where that chat's report is delivered, and the chain it belongs to.
                 receipt_payload.update(report_to=sender_id, orchestration_depth=depth + 1)
@@ -1811,7 +1869,8 @@ async def _start_remote(plan, sender_id, sender_generation):
         await release()
         raise ValueError("The user stopped this session; nothing was started.")
     try:
-        answer = await control.call(remote["device_id"], REMOTE_ACTION, plan["body"], timeout=REMOTE_TIMEOUT)
+        action = REMOTE_READBACK_ACTION if plan.get("readback_only") else REMOTE_ACTION
+        answer = await control.call(remote["device_id"], action, plan["body"], timeout=REMOTE_TIMEOUT)
     except control.ControlRefused as exc:
         await release()
         reason = str(exc)
@@ -1823,7 +1882,8 @@ async def _start_remote(plan, sender_id, sender_generation):
         # request_id reads it back instead of making a second chat.
         raise ValueError(f"{name} could not be reached: {exc} Retry with the same request_id; "
                          "it never makes a second chat.") from exc
-    if not isinstance(answer, dict) or answer.get("session_id") != plan["body"]["session_id"]:
+    if (not isinstance(answer, dict) or answer.get("session_id") != plan["body"]["session_id"]
+            or (plan.get("readback_only") and answer.get("created") is not False)):
         raise ValueError(f"{name} gave an invalid answer; retry with the same request_id.")
     owner = answer.get("owner_device_id") or remote["device_id"]
     await asyncio.to_thread(_link_remote_chat, sender_id, answer["session_id"], owner, plan["body"].get("title"))
@@ -1839,12 +1899,12 @@ async def _start_remote(plan, sender_id, sender_generation):
                        "in the sidebar once the worker publishes it.")}
     # What the destination actually made it on; an older release does not
     # say, so the request's own model stands in.
-    choice = plan["body"].get("model_choice")
+    choice = None if plan["body"].get("model_inherited") else plan["body"].get("model_choice")
     result.update(_model_receipt(
         None, {"source": choice.get("source"), "baseline": choice.get("instead_of")} if choice else None,
         model=answer.get("model") or plan["body"].get("model"),
         provider_id=answer.get("provider_id") if "model" in answer else plan["body"].get("provider_id")))
-    if plan["body"].get("report_back"):
+    if plan["body"].get("report_back", answer.get("report_back")):
         if answer.get("report_back"):
             result["note"] = (f"Runs on {name}, in the project's checkout there, with no private-access "
                               "grants. It reports back to you automatically when it finishes or fails.")

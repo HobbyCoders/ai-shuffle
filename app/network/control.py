@@ -421,6 +421,11 @@ def _orchestration_start_handler():
     return handle_remote_start
 
 
+def _orchestration_start_readback_handler():
+    from app.core.session_orchestration import handle_remote_start_readback
+    return handle_remote_start_readback
+
+
 def _orchestration_report_handler():
     from app.core.session_orchestration import handle_remote_report
     return handle_remote_report
@@ -591,6 +596,7 @@ _LAZY_HANDLERS = {
     "session-move": _session_move_handler,
     "application-update": _application_update_handler,
     "orchestration-start": _orchestration_start_handler,
+    "orchestration-start-readback": _orchestration_start_readback_handler,
     "orchestration-report": _orchestration_report_handler,
     "orchestration-message": _orchestration_message_handler,
     "orchestration-peers": _orchestration_peers_handler,
