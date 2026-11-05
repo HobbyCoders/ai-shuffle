@@ -42,7 +42,7 @@ def load_budgets(monkeypatch):
     from app.db import base
 
     # Healthy loads use production budgets unless a test explicitly opts in.
-    control = SimpleNamespace(idle=None, statement=None, completed=[])
+    control = SimpleNamespace(idle=None, completed=[])
     real_db = base.get_db
     budgets = ("idle_in_transaction_session_timeout", "statement_timeout", "lock_timeout")
 
@@ -65,8 +65,6 @@ def load_budgets(monkeypatch):
                 cur = conn.cursor()
                 if control.idle is not None:
                     cur.execute("SET LOCAL idle_in_transaction_session_timeout = %s", (control.idle,))
-                if control.statement is not None:
-                    cur.execute("SET LOCAL statement_timeout = %s", (control.statement,))
                 yield conn
         finally:
             # The real get_db has committed/rolled back and returned its slot.
@@ -106,8 +104,8 @@ async def test_slow_decode_survives_idle_budget_and_keeps_pool_available(monkeyp
         elif text == "node-32":
             # Includes the next FETCH: an upper bound on the first batch's work.
             batch_clock["elapsed"] = now - batch_clock["start"]
-        entered.set()
         if text == "node-00":
+            entered.set()
             time.sleep(3.5)  # Exceeds the control's 3s idle limit, not ordinary jitter.
         return original(raw)
 
@@ -119,7 +117,7 @@ async def test_slow_decode_survives_idle_budget_and_keeps_pool_available(monkeyp
     monkeypatch.setattr(module, "transcript_decode_timeouts", lambda cur: None)
     with pytest.raises((psycopg2.OperationalError, psycopg2.InterfaceError)):
         await cold.get_session(session_id)
-    assert entered.is_set()  # Control reached decode, not an unrelated SQL error.
+    assert entered.is_set()  # Control reached the deliberate stall before failing.
     _empty_cache(cold, session_id)
     assert not base._pg_pool._used
     monkeypatch.setattr(module, "transcript_decode_timeouts", guard)
@@ -182,25 +180,46 @@ async def test_fetch_still_has_statement_deadline_and_can_retry(monkeypatch, loa
 
     cold, session_id = await _transcript()
     real_cursor = base._PgDictConnection.cursor
+    guard = module.transcript_decode_timeouts
+    helper_ran, fetch_started = Event(), Event()
+
+    def limited_guard(cur):
+        # Metadata runs with production budgets. Prove the real guard preserves
+        # a generous SQL budget before narrowing only this negative attempt.
+        cur.execute("SET LOCAL statement_timeout = '5s'")
+        guard(cur)
+        cur.execute("SHOW statement_timeout")
+        assert cur.fetchone()["statement_timeout"] == "5s", "guard changed statement budget"
+        cur.execute("SET LOCAL statement_timeout = '100ms'")
+        helper_ran.set()
 
     class SlowFetch(RealDictCursor):
         def execute(self, query, params=None):
             # Sleep in the actual FETCH, not during DECLARE or Python decode.
             return super().execute(query.replace("SELECT node_id", "SELECT pg_sleep(0.02), node_id"), params)
 
+        def __next__(self):
+            assert helper_ran.is_set()
+            with self.connection.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("SHOW statement_timeout")
+                assert cur.fetchone()["statement_timeout"] == "100ms"
+            fetch_started.set()
+            return super().__next__()
+
     def cursor(conn, *args, **kwargs):
         if kwargs.get("name"):
             kwargs["cursor_factory"] = SlowFetch
         return real_cursor(conn, *args, **kwargs)
 
-    load_budgets.statement = "100ms"  # Only the negative SQL-timeout attempt.
+    monkeypatch.setattr(module, "transcript_decode_timeouts", limited_guard)
     monkeypatch.setattr(base._PgDictConnection, "cursor", cursor)
     with pytest.raises(psycopg2.errors.QueryCanceled, match="statement timeout"):
         await cold.get_session(session_id)
+    assert helper_ran.is_set() and fetch_started.is_set()
     _empty_cache(cold, session_id)
     assert not base._pg_pool._used
     monkeypatch.setattr(base._PgDictConnection, "cursor", real_cursor)
-    load_budgets.statement = None
+    monkeypatch.setattr(module, "transcript_decode_timeouts", guard)
     assert await cold.get_session(session_id)
     assert len(cold._nodes[session_id]) == 33
     assert load_budgets.completed
@@ -215,6 +234,7 @@ async def test_stalled_decode_expires_without_publishing_and_retries(monkeypatch
     cold, session_id = await _transcript()
     guard = module.transcript_decode_timeouts
     original = module.Message.from_dict
+    stall_reached = Event()
 
     def short_guard(cur):
         guard(cur)
@@ -225,6 +245,7 @@ async def test_stalled_decode_expires_without_publishing_and_retries(monkeypatch
 
     def stalled(raw):
         if raw["content"][0]["text"] == "node-16":
+            stall_reached.set()
             time.sleep(0.3)
         return original(raw)
 
@@ -232,6 +253,7 @@ async def test_stalled_decode_expires_without_publishing_and_retries(monkeypatch
     monkeypatch.setattr(module.Message, "from_dict", stalled)
     with pytest.raises((psycopg2.OperationalError, psycopg2.InterfaceError)):
         await cold.get_session(session_id)
+    assert stall_reached.is_set()
     _empty_cache(cold, session_id)
     assert not base._pg_pool._used
     monkeypatch.setattr(module.Message, "from_dict", original)
