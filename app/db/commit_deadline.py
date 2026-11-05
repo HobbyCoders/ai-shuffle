@@ -205,6 +205,11 @@ class _CommitWatchdog:
         # Read from the duplicate we own: libpq's number can change hands right after
         # dup, and recording that stranger would make it the one the deadline shuts down.
         identity = _identity(duplicate_fd)
+        if identity is None and os.name != "nt":
+            # Unlike Winsock, POSIX must identify our duplicate. A failed snapshot
+            # means its number may already be someone else's: neither close nor arm it.
+            duplicate.detach()
+            raise OSError(errno.EBADF, "connection socket identity is gone")
         armed = _Armed(time.monotonic() + seconds, fd, identity, identity,
                        thread.ident or 0, thread.name)
         with self._condition:
