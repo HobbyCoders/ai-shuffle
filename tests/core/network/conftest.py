@@ -22,7 +22,11 @@ def workers(tmp_path, monkeypatch):
             try:
                 return await coro
             finally:
-                if _ACTIVE.get() is not None:
+                consumer = task_persistence._consumer
+                # Nested run_as() loops must not flush/reset another loop's
+                # consumer or its loop-bound wakeup and drain lock.
+                owns_writer = consumer is None or consumer.get_loop() is asyncio.get_running_loop()
+                if _ACTIVE.get() is not None and owns_writer:
                     # The app keeps its loop alive. These scenarios don't: wait
                     # for the REAL writer (including a popped in-flight snapshot)
                     # before ending its loop, then release loop-bound primitives.

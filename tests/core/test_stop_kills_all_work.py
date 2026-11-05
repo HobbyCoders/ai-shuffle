@@ -41,7 +41,8 @@ class _StopPatches:
     def __enter__(self):
         self.stopped: list[str] = []
 
-        async def _stop(sid, task_id):
+        async def _stop(sid, task_id, *, _explicit_task_stop):
+            assert _explicit_task_stop is False  # bulk Stop grants no per-task retry authority
             self.stopped.append(task_id)
             return {"ok": True, "task_id": task_id}
 
