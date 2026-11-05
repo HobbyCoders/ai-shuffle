@@ -74,7 +74,7 @@
 		<button
 			type="button" class="plan-row" aria-expanded={expanded} aria-controls={detailsId}
 			aria-label={`${expanded ? 'Collapse' : 'Expand'} plan: ${view.goal}`}
-			onclick={toggle}
+			onclick={() => expanded = !expanded}
 		>
 			<span class="plan-bars" aria-hidden="true">
 				{#each view.tasks as task (task.id)}<i class={task.status}></i>{/each}
