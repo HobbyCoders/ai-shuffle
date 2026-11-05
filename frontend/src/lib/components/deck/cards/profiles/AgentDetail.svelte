@@ -407,35 +407,8 @@
 		background: var(--st-warning-soft);
 		color: var(--st-warning);
 	}
-	/* 601-900px of page: compact header buttons. */
-	@container settings (max-width: 900px) {
-		.lbl {
-			display: none;
-		}
-		.agd :global(.st-dha .st-btn) {
-			width: 32px;
-			padding: 0;
-			justify-content: center;
-		}
-	}
-
-	/* Narrow detail (phone, or a cramped split): icon buttons, rows wrap. */
+	/* Narrow form rows wrap; the shared DetailPane owns the header. */
 	@container agd (max-width: 560px) {
-		.lbl {
-			display: none;
-		}
-		.agd :global(.st-dha) {
-			grid-column: auto;
-			gap: 2px;
-			flex-wrap: nowrap;
-		}
-		.agd :global(.st-dha .st-btn) {
-			width: 38px;
-			height: 38px;
-			padding: 0;
-			justify-content: center;
-			border-color: transparent;
-		}
 		.agd :global(.st-row:has(> .st-rt)) {
 			display: flex;
 			flex-wrap: wrap;
