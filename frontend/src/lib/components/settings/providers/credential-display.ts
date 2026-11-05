@@ -8,7 +8,7 @@ const CIPHERTEXT = /^\s*(enc:|gAAAA|Z0FBQUFB)/;
 /** A masked key that is safe to show, or '' when there is none. */
 export function safeKeyHint(masked: string | null | undefined): string {
 	const value = masked?.trim() ?? '';
-	return !value || CIPHERTEXT.test(value) ? '' : value;
+	return !value || /^\*+$/.test(value) || CIPHERTEXT.test(value) ? '' : value;
 }
 
 /** One line under a detail title: "On · 2 models · OpenAI chat". */

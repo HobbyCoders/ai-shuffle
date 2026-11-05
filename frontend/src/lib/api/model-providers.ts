@@ -15,6 +15,36 @@
 
 import { api } from './client';
 
+export type NativeProviderId = 'kimi' | 'minimax' | 'opencode';
+export interface NativeProviderOption {
+	provider_type: NativeProviderId;
+	display_name: string;
+	auth_mode: 'plan_key' | null;
+	credential_kind: 'subscription' | 'api_key';
+	credential_label: string;
+	slot: `${NativeProviderId}:${'subscription' | 'key'}`;
+	base_url: string;
+	api_dialect: 'anthropic';
+	key_page_url: string;
+	key_prefixes: string[];
+	usage_meter_available: boolean;
+}
+
+export function getNativeProviderOptions(): Promise<{ providers: NativeProviderOption[] }> {
+	return api.get('/model-providers/native-options');
+}
+
+export function checkProviderKey(id: string): Promise<{ status: 'valid' | 'unavailable' }> {
+	return api.post(`/model-providers/${id}/check-key`);
+}
+
+export const isNativeProvider = (id: string): id is NativeProviderId =>
+	id === 'kimi' || id === 'minimax' || id === 'opencode';
+
+/** Kimi Code has no models endpoint; its preset is the catalog. */
+export const hasModelRefresh = (row: Pick<ModelProvider, 'provider_type' | 'auth_mode'>): boolean =>
+	!(row.provider_type === 'kimi' && row.auth_mode === 'plan_key');
+
 /** Normalized provider evidence; null levels mean unknown, [] means unsupported. */
 export interface ReasoningCapabilities {
 	version: 1;
@@ -120,7 +150,8 @@ export interface ModelProvider {
 	max_output_tokens: number | null;
 	enabled: boolean;
 	/** One active account per built-in provider and kind; gateways are independent. */
-	slot?: 'openai:key' | 'openai:subscription' | 'grok:key' | 'grok:subscription' | 'openrouter:key' | null;
+	slot?: 'openai:key' | 'openai:subscription' | 'grok:key' | 'grok:subscription' | 'openrouter:key' | NativeProviderOption['slot'] | null;
+	native_provider?: NativeProviderOption | null;
 	// ----- Codex / ChatGPT-subscription OAuth surface -----
 	// The secret access/refresh blobs are NEVER returned — only the boolean
 	// `codex_*_token_set` flags. The non-secret Codex fields (`auth_mode`,
@@ -153,7 +184,8 @@ export interface ModelProvidersResponse {
 export interface ModelProviderCreate {
 	name: string;
 	provider_type: string;
-	base_url: string;
+	base_url?: string;
+	auth_mode?: 'plan_key' | null;
 	/** Custom rows only: endpoint wire format ('anthropic' default | 'openai'). */
 	api_dialect?: 'anthropic' | 'openai' | null;
 	/** Omit or leave blank to store no token. */

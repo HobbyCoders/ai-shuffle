@@ -10,7 +10,8 @@
 	 */
 	import { onMount } from 'svelte';
 	import { getErrorMessage } from '$lib/api/client';
-	import type { ModelProvider, ModelProviderCreate } from '$lib/api/model-providers';
+	import { checkProviderKey, isNativeProvider, type ModelProvider, type ModelProviderCreate } from '$lib/api/model-providers';
+	import { nativeOption } from './native-options.svelte';
 	import {
 		getOpenRouterUsage,
 		supportsOpenRouterBilling,
@@ -54,6 +55,21 @@
 
 	const row = $derived(credential.row!);
 	const gateway = $derived(credential.flavor === 'gateway');
+	const native = $derived(isNativeProvider(row.provider_type));
+	const option = $derived(nativeOption(row.provider_type, row.auth_mode === 'plan_key') ?? row.native_provider);
+	let keyStatus = $state('');
+	let checking = $state(false);
+	async function checkKey() {
+		if (checking) return;
+		checking = true;
+		keyStatus = '';
+		error = '';
+		try {
+			const result = await checkProviderKey(row.id);
+			keyStatus = result.status === 'valid' ? 'Key is valid' : 'Saved, but unverified. Try checking again later.';
+		} catch (e) { error = getErrorMessage(e, 'Could not check key'); }
+		finally { checking = false; }
+	}
 	const dialect = $derived<Dialect>(row.api_dialect === 'openai' ? 'openai' : 'anthropic');
 	const tuning = $derived(gateway && supportsLocalTuning(row));
 
@@ -100,7 +116,7 @@
 		saving = true;
 		error = '';
 		try {
-			const body: ModelProviderCreate = {
+			const body: ModelProviderCreate = native ? { name: next.name, provider_type: row.provider_type, ...patch } : {
 				name: next.name,
 				provider_type: row.provider_type,
 				base_url: next.base_url,
@@ -114,6 +130,7 @@
 				...(patch.auth_token ? { auth_token: patch.auth_token } : {})
 			};
 			await providers.saveProvider(body, row.id);
+			keyStatus = '';
 			flashSaved();
 			return true;
 		} catch (e) {
@@ -179,7 +196,7 @@
 <DetailPane
 	name={title}
 	subtitle={line}
-	tabs={gateway ? (tuning ? ['Overview', 'Models', 'Tuning'] : ['Overview', 'Models']) : row.provider_type === 'openai' ? ['Overview', 'Models'] : ['Overview', 'Models', 'Usage']}
+	tabs={gateway ? (tuning ? ['Overview', 'Models', 'Tuning'] : ['Overview', 'Models']) : row.provider_type === 'openai' || native ? ['Overview', 'Models'] : ['Overview', 'Models', 'Usage']}
 	{danger}
 	item={credential.item}
 >
@@ -219,6 +236,12 @@
 					busy={saving}
 					onsave={(value) => save({ auth_token: value }).then(Boolean)}
 				/>
+				{#if native}
+					<SettingRow label={option?.credential_label ?? credential.kind} hint="Saving a replacement checks the key; a blank key leaves it unchanged">
+						<button type="button" class="st-btn" disabled={checking || saving || !row.auth_token_set} onclick={checkKey}>{checking ? 'Checking…' : 'Check key'}</button>
+					</SettingRow>
+					{#if keyStatus}<p class="pv-msg" role="status">{keyStatus}</p>{/if}
+				{/if}
 				{#if gateway}
 					<SettingRow label="API dialect">
 						<Segmented

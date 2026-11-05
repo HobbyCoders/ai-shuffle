@@ -30,7 +30,7 @@
 	import { onMount, untrack } from 'svelte';
 	import { RefreshCw } from 'lucide-svelte';
 	import { getErrorMessage } from '$lib/api/client';
-	import { getModelCatalog, updateModelProvider, type ModelCatalogSnapshot, type ModelProvider } from '$lib/api/model-providers';
+	import { hasModelRefresh, getModelCatalog, updateModelProvider, type ModelCatalogSnapshot, type ModelProvider } from '$lib/api/model-providers';
 	import { providers } from '$lib/stores/providers.svelte';
 	import { notify } from '$lib/stores/notifications';
 	import { watchResources } from '$lib/services/watch-resources';
@@ -85,6 +85,7 @@
 
 	const id = $derived(row?.id ?? providerId ?? '');
 	const current = $derived(row ?? providers.current.providers?.find((p) => p.id === id));
+	const canRefresh = $derived(!current || hasModelRefresh(current));
 	/** A catalog may beat its provider row over sync; keep it hidden until matched. */
 	let candidate = $state<ModelCatalogSnapshot | null>(null);
 	const catalog = $derived(candidate?.binding &&
@@ -133,6 +134,13 @@
 
 	async function load(refresh = true, fetchMissing = false) {
 		if (!id) return;
+		if (!canRefresh && current) {
+			rows = rowsFromStored(current.models);
+			selectionRevision = current.revision;
+			source = 'preset';
+			typeable = false;
+			return;
+		}
 		if (loading) { reloadPending = true; return; }
 		loading = true;
 		error = '';
@@ -295,6 +303,7 @@
 
 <RowGroup {title} {count} bare>
 	{#snippet actions()}
+		{#if canRefresh}
 		<button
 			type="button"
 			class="st-btn icon ghost sm"
@@ -305,6 +314,7 @@
 		>
 			<RefreshCw />
 		</button>
+		{/if}
 	{/snippet}
 	{#if mode === 'setup' && !failure}<p class="pv-msg" aria-live="polite">{setupHint}</p>{/if}
 	{#if catalog?.fetched_at}

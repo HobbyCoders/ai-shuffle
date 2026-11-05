@@ -6,6 +6,8 @@
 	 * Remove), so an owner without a Claude sign-in can still change or remove them.
 	 */
 	import { providers } from '$lib/stores/providers.svelte';
+	import { isNativeProvider } from '$lib/api/model-providers';
+	import { loadNativeOptions, nativeOptions } from './native-options.svelte';
 	import { getSettingsAccess } from '$lib/settings/access.svelte';
 	import DetailPane from '../shell/DetailPane.svelte';
 	import RowGroup from '../rows/RowGroup.svelte';
@@ -46,6 +48,12 @@
 >
 	{#snippet tile()}<ProviderTile {provider} size="lg" dashed />{/snippet}
 	{#if provider.claude}<ClaudeModeRow {provider} />{/if}
+	{#if isNativeProvider(provider.id) && !kinds.length}
+		{#if nativeOptions.error}
+			<p class="pv-msg err" role="alert">{nativeOptions.error}</p>
+			<button type="button" class="st-btn" onclick={() => loadNativeOptions()}>Retry provider options</button>
+		{:else}<p class="pv-msg" role="status">Loading provider options…</p>{/if}
+	{/if}
 	<RowGroup title="Connect" id="providers-connect">
 		{#each kinds as k (k.flavor)}
 			<SettingRow label={k.label} hint={k.hint}>

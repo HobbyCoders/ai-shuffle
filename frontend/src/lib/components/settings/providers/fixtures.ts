@@ -2,7 +2,32 @@
  * Test data for the Providers collection: model_providers rows and a Claude
  * Code mode summary shaped like the worker's answers.
  */
-import type { ModelProvider } from '$lib/api/model-providers';
+import type { ModelProvider, NativeProviderId, NativeProviderOption } from '$lib/api/model-providers';
+
+/** Deliberately different endpoints: enrollment UI must use server metadata. */
+export const nativeEnrollment: NativeProviderOption[] = (['kimi', 'minimax', 'opencode'] as NativeProviderId[]).flatMap((provider_type) => {
+	const display_name = { kimi: 'Kimi', minimax: 'MiniMax', opencode: 'OpenCode' }[provider_type];
+	return [true, false].map((plan) => ({
+		provider_type, display_name,
+		auth_mode: plan ? 'plan_key' as const : null,
+		credential_kind: plan ? 'subscription' as const : 'api_key' as const,
+		credential_label: plan ? { kimi: 'Kimi Code membership', minimax: 'MiniMax M Plan', opencode: 'OpenCode Go' }[provider_type]
+			: provider_type === 'opencode' ? 'OpenCode Console (pay as you go)' : `${display_name} API (pay as you go)`,
+		slot: `${provider_type}:${plan ? 'subscription' : 'key'}` as NativeProviderOption['slot'],
+		base_url: `https://fixture.example/${provider_type}/${plan ? 'plan' : 'api'}`,
+		api_dialect: 'anthropic' as const,
+		key_page_url: `https://fixture.example/keys/${provider_type}/${plan ? 'plan' : 'api'}`,
+		key_prefixes: provider_type === 'minimax' && plan ? ['sk-cp-'] : [],
+		usage_meter_available: false
+	}));
+});
+
+export function nativeRow(option: NativeProviderOption, partial: Partial<ModelProvider> = {}): ModelProvider {
+	return row({ id: `${option.provider_type}-${option.auth_mode ? 'plan' : 'api'}`, name: option.credential_label, provider_type: option.provider_type,
+		auth_mode: option.auth_mode, slot: option.slot, base_url: option.base_url, native_provider: option,
+		auth_token_masked: '********', models: [{ id: `${option.provider_type}-model`, label: `${option.display_name} Model` }],
+		...partial });
+}
 import type {
 	ClaudeAccounts,
 	ClaudeAuthSummary,

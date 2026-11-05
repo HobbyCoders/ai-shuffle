@@ -192,10 +192,10 @@ export function searchSource(): SearchItem[] {
 				at('Banked resets', 'Usage', 'codex rate limit reset use');
 				at('Weekly allowance', 'Usage', 'subscription usage limit');
 			}
-			if (c.flavor === 'device' || c.flavor === 'key' || c.flavor === 'gateway') {
+			if (c.flavor === 'device' || c.flavor === 'plan-key' || c.flavor === 'key' || c.flavor === 'gateway') {
 				at('Model curation', 'Models', 'offered models picker checklist');
 			}
-			if (c.flavor === 'gateway' || c.flavor === 'key') {
+			if (c.flavor === 'gateway' || c.flavor === 'plan-key' || c.flavor === 'key') {
 				at('Connection', 'Overview', 'endpoint token dialect context window max output');
 			}
 			if (c.flavor === 'key' && c.row?.provider_type === 'openrouter') at('OpenRouter credits', 'Usage', 'balance billing');

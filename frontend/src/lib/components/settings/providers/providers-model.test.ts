@@ -52,7 +52,7 @@ describe('grouping', () => {
 		);
 		const { connected, notConnected } = splitProviders(views);
 		expect(connected.map((p) => p.name)).toEqual(['OpenAI', 'xAI Grok', 'Claude', 'fal.ai', 'ServerWorker vLLM']);
-		expect(notConnected.map((p) => p.name)).toEqual(['OpenRouter']);
+		expect(notConnected.map((p) => p.name)).toEqual(['OpenRouter', 'Kimi', 'MiniMax', 'OpenCode']);
 		// Subscriptions come before keys inside a provider.
 		expect(byId(views, 'openai').credentials.map((c) => c.flavor)).toEqual(['device', 'key']);
 		expect(byId(views, 'gw:gw-1').credentials.map((c) => c.name)).toEqual(['Gateway key']);

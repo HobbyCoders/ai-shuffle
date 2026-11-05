@@ -17,9 +17,10 @@
 	 * `onConnected` fires with the provider id once models are saved; whether
 	 * the step then says "Connected" is the worker's call (`connected`).
 	 */
-	import { onDestroy, untrack } from 'svelte';
+	import { onDestroy, onMount, untrack } from 'svelte';
+	import { loadNativeOptions, nativeOption, nativeOptions } from '$lib/components/settings/providers/native-options.svelte';
 	import { KeyRound, LogIn, Plug } from 'lucide-svelte';
-	import { deleteModelProvider, type ModelProvider } from '$lib/api/model-providers';
+	import { deleteModelProvider, type NativeProviderId, type ModelProvider } from '$lib/api/model-providers';
 	import { providers } from '$lib/stores/providers.svelte';
 	import '$lib/components/settings/shell/settings.css';
 	import '$lib/components/settings/providers/providers.css';
@@ -34,7 +35,7 @@
 
 	interface Props {
 		/** `openai`, `grok`, `openrouter`, or `gateway` for a new custom gateway. */
-		provider: 'openai' | 'grok' | 'openrouter' | 'gateway';
+		provider: 'openai' | 'grok' | 'openrouter' | 'gateway' | NativeProviderId;
 		/** Credentials this provider already has (names the new draft "API key 2"). */
 		existing?: Pick<CredentialView, 'name'>[];
 		/** A key or gateway row saved earlier that has no model yet: resumed at its models step. */
@@ -57,7 +58,7 @@
 	const DEVICE_LABEL: Record<string, string> = { openai: 'Sign in with ChatGPT', grok: 'Sign in with SuperGrok' };
 	const BRAND: Record<string, string> = { openai: 'OpenAI', grok: 'xAI', openrouter: 'OpenRouter' };
 	const brandName = $derived.by(() => {
-		if (provider !== 'gateway') return BRAND[provider];
+		if (provider !== 'gateway') return nativeOption(provider, false)?.display_name ?? BRAND[provider];
 		const rowId = draft?.rowId;
 		const row = rowId ? providers.current.providers?.find((p) => p.id === rowId) : undefined;
 		return row?.name?.trim() || 'The gateway';
@@ -76,7 +77,7 @@
 		drop();
 		done = false;
 		rejection = '';
-		const d = provider === 'gateway' ? providerDrafts.addGateway() : providerDrafts.add(provider, 'key', existing);
+		const d = provider === 'gateway' ? providerDrafts.addGateway() : providerDrafts.add(provider, row.auth_mode === 'plan_key' ? 'plan-key' : 'key', existing);
 		providerDrafts.update(d.item, { rowId: row.id, ownsRow: false, step: 'models', name: row.name });
 		if (provider === 'gateway') providerDrafts.renameGateway(d.providerId, row.name);
 		draftItem = d.item;
@@ -158,6 +159,7 @@
 		drop();
 	}
 
+	onMount(() => { void loadNativeOptions(); });
 	onDestroy(drop);
 </script>
 
@@ -172,6 +174,8 @@
 			<button type="button" class="ui-button text-sm" onclick={again}>Add another</button>
 		</div>
 	{:else if !draft}
+		{#if nativeOptions.loading}<p class="pv-msg" role="status">Loading provider options…</p>{/if}
+		{#if nativeOptions.error}<p class="pv-msg err" role="alert">{nativeOptions.error}</p><button type="button" class="st-btn" onclick={() => loadNativeOptions()}>Retry provider options</button>{/if}
 		<div class="kinds" role="group" aria-label="How to connect">
 			{#each kinds as k (k.flavor)}
 				<button type="button" class="kind" onclick={() => start(k.flavor)}>

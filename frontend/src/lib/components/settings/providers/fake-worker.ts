@@ -7,7 +7,7 @@ import type { ModelProvider } from '$lib/api/model-providers';
 import type { ClaudeAuthMode, ClaudeAuthSummary } from '$lib/api/claude-auth';
 import type { ClaudeCliStatus } from '$lib/api/claude-cli';
 import type { LoopGuardStatus } from '$lib/api/loop-guard';
-import { claudeSummary } from './fixtures';
+import { claudeSummary, nativeEnrollment } from './fixtures';
 import { classifyRow } from './providers-model';
 
 export interface WorkerCall {
@@ -111,7 +111,7 @@ export function fakeWorker(init: Partial<FakeWorkerState> = {}, routes: Record<s
 	};
 	const calls: WorkerCall[] = [];
 
-	const slot = (r: ModelProvider) => classifyRow(r) === 'custom' ? r.id : classifyRow(r);
+	const slot = (r: ModelProvider) => r.slot ?? (classifyRow(r) === 'custom' ? r.id : `${classifyRow(r)}:${r.auth_mode === 'plan_key' ? 'subscription' : 'key'}`);
 	function select(id: string) {
 		const target = state.rows.find((r) => r.id === id)!;
 		state.rows = state.rows.map((r) => slot(r) === slot(target) ? { ...r, enabled: r.id === id } : r);
@@ -129,6 +129,7 @@ export function fakeWorker(init: Partial<FakeWorkerState> = {}, routes: Record<s
 
 	const defaults: Record<string, RouteHandler> = {
 		'GET /model-providers': () => ({ providers: state.rows }),
+		'GET /model-providers/native-options': () => ({ providers: nativeEnrollment }),
 		'POST /model-providers/:id/activate': (_body, path) => select(decodeURIComponent(path.split('/')[2])),
 		'POST /settings/claude-auth/accounts/api-keys': (body) => {
 			const { api_key, label } = body as { api_key: string; label?: string };
