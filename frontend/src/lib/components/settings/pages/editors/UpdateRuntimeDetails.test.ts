@@ -23,10 +23,10 @@ async function show(extra: Partial<UpdateRuntimeStatus> = {}) {
   await fireEvent.click(screen.getByRole('button', { name: 'Update details' }));
 }
 
-it.each(['connected', 'peer'] as const)('defensively renders the controlled malformed %s input as unknown without stages or refresh', async (entry) => {
+it.each([['connected', 'not-a-revision'], ['peer', 'not-a-revision'], ['connected', null], ['peer', null]] as const)('defensively renders controlled %s identity %s as unknown without stages or actions', async (entry, revision) => {
   const malformed = {
     allow_updates: true, update_all_workers: true, supported: true, phase: 'idle', running_version: app,
-    updater: { revision: 'not-a-revision', capabilities: ['refresh-updater-v1'], refresh: 'available' },
+    updater: { revision, capabilities: ['refresh-updater-v1'], refresh: 'available' },
     diagnostics: { revision: 'bogus', total_elapsed_ms: -50, stages: 'malformed' }
   } as unknown as UpdateRuntimeStatus;
   if (entry === 'connected') {
@@ -41,6 +41,20 @@ it.each(['connected', 'peer'] as const)('defensively renders the controlled malf
   expect(screen.getByText('No update timings reported yet.')).toBeTruthy();
 });
 
+it.each(['connected', 'peer'] as const)('keeps a valid legacy available %s report read-only with no shortcut or confirmation', async (entry) => {
+  if (entry === 'connected') await show();
+  else {
+    render(UpdateRuntimeDetails, { status: status(), workerName: 'Other worker' });
+    await fireEvent.click(screen.getByRole('button', { name: 'Update details for Other worker' }));
+  }
+  expect(screen.getByText('aaaaaaaaaaaa')).toBeTruthy();
+  expect(screen.getByText('bbbbbbbbbbbb')).toBeTruthy();
+  expect(screen.getByText(/separately operator-approved container restart/)).toBeTruthy();
+  expect(screen.getByRole('region', { name: entry === 'connected' ? 'Connected worker update details' : 'Other worker update details' }).querySelector('button')).toBeNull();
+  expect(screen.queryByText('Restart the connected worker to refresh its updater?')).toBeNull();
+  expect(transport.post).not.toHaveBeenCalled();
+});
+
 it('separates app and updater identity and never infers current from the app', async () => {
   await show({ updater: null });
   expect(screen.getByText('aaaaaaaaaaaa')).toBeTruthy();
@@ -52,9 +66,9 @@ it('separates app and updater identity and never infers current from the app', a
 
 it.each([
   ['current', /matches the active app revision/],
-  ['container_restart_required', /supported container restart is required/],
+  ['container_restart_required', /separately operator-approved container restart/],
   ['image_update_required', /does not mean the app or image is out of date/],
-  ['disabled', /refresh is disabled/],
+  ['disabled', /Updater changes are disabled/],
   ['unknown', /does not report its running updater revision/]
 ] as const)('explains %s without offering a refresh action', async (refresh, text) => {
   await show({ updater: { revision: resident, capabilities: [], refresh } });
@@ -77,31 +91,13 @@ it('shows nested wall time, outcomes and fallback without raw producer text', as
   expect(document.body.textContent).not.toContain('/private');
 });
 
-it('requires confirmation, focuses Cancel, restores focus and sends no request on Escape', async () => {
-  await show();
-  const trigger = screen.getByRole('button', { name: 'Refresh updater…' });
-  await fireEvent.click(trigger);
-  const cancel = screen.getByRole('button', { name: 'Cancel' });
-  expect(document.activeElement).toBe(cancel);
-  await fireEvent.keyDown(cancel, { key: 'Escape' });
-  expect(screen.queryByRole('button', { name: 'Cancel' })).toBeNull();
-  expect(document.activeElement).toBe(trigger);
-  expect(transport.post).not.toHaveBeenCalled();
-});
-
-it('reports a confirmed request as queued, never completed', async () => {
-  await show();
-  transport.post.mockResolvedValueOnce({ queued: true });
-  await fireEvent.click(screen.getByRole('button', { name: 'Refresh updater…' }));
-  await fireEvent.click(screen.getByRole('button', { name: 'Refresh and restart worker' }));
-  await waitFor(() => expect(screen.getByText(/completion has not been confirmed/)).toBeTruthy());
-  expect(transport.post).toHaveBeenCalledWith('/settings/application-updates', { action: 'refresh-updater', scope: 'current' });
-  expect((screen.getByRole('button', { name: 'Refresh requested' }) as HTMLButtonElement).disabled).toBe(true);
-});
-
-it.each([{ allow_updates: false }, { request_pending: true }, { install_pending: true }, { phase: 'downloading' }, { phase: 'error' }])('disables refresh for %j', async (extra) => {
+it.each([{ allow_updates: false }, { request_pending: true }, { install_pending: true }, { phase: 'downloading' }, { phase: 'error' }])('keeps paused, pending and failed reports read-only for %j', async (extra) => {
   await show(extra);
-  expect((screen.getByRole('button', { name: 'Refresh updater…' }) as HTMLButtonElement).disabled).toBe(true);
+  expect(screen.queryByRole('button', { name: /Refresh updater|Refresh and restart/ })).toBeNull();
+  expect(screen.getByRole('region', { name: 'Connected worker update details' }).querySelector('[role="group"]')).toBeNull();
+  if (extra.allow_updates === false) expect(screen.getByText('In-app updates are paused.')).toBeTruthy();
+  if (extra.request_pending || extra.install_pending) expect(screen.getByText('An update action is pending.')).toBeTruthy();
+  expect(transport.post).not.toHaveBeenCalled();
 });
 
 it('shows read-only peer metadata without a local refresh action', async () => {
@@ -112,11 +108,22 @@ it('shows read-only peer metadata without a local refresh action', async () => {
   expect(screen.queryByRole('button', { name: 'Refresh updater…' })).toBeNull();
 });
 
-it('respects Settings approval when the action would otherwise be available', async () => {
+it('keeps legacy available metadata read-only under Settings approval', async () => {
   updates.runtime = status(); updates.policy = { allow_updates: true, update_all_workers: false }; updates.status = 'ok';
   render(UpdateRuntimeDetails, { props: { updates }, context: new Map([[SETTINGS_ACCESS_CONTEXT, { readOnly: true }]]) });
   await fireEvent.click(screen.getByRole('button', { name: 'Update details' }));
-  expect(screen.getByRole('button', { name: 'Refresh updater…' }).closest('fieldset')?.disabled).toBe(true);
+  expect(screen.getByText('bbbbbbbbbbbb')).toBeTruthy();
+  expect(screen.queryByRole('button', { name: /Refresh updater|Refresh and restart/ })).toBeNull();
+  expect(transport.post).not.toHaveBeenCalled();
+});
+
+it('keeps the last report visible and read-only while status is stale', async () => {
+  await show();
+  updates.runtimeStale = true;
+  await waitFor(() => expect(screen.getByText('Worker status is temporarily unavailable. Showing the last report.')).toBeTruthy());
+  expect(screen.getByText('bbbbbbbbbbbb')).toBeTruthy();
+  expect(screen.getByRole('region', { name: 'Connected worker update details' }).querySelector('button')).toBeNull();
+  expect(transport.post).not.toHaveBeenCalled();
 });
 
 it('renders loading, failure and recovery states', async () => {

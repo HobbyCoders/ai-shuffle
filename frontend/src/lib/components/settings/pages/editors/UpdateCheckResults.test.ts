@@ -17,5 +17,6 @@ it('shows each worker’s metadata without borrowing local identity or allowing 
   expect(other.textContent).toContain('Unknown');
   await fireEvent.click(screen.getByRole('button', { name: 'Update details for Local worker' }));
   expect(screen.getByText('bbbbbbbbbbbb')).toBeTruthy();
-  expect(screen.queryByRole('button', { name: 'Refresh updater…' })).toBeNull();
+  expect(screen.queryByRole('button', { name: /Refresh updater|Refresh and restart/ })).toBeNull();
+  expect(screen.queryByText('Restart the connected worker to refresh its updater?')).toBeNull();
 });

@@ -229,7 +229,7 @@ export function normalizeUpdateRuntimeStatus(value: unknown): UpdateRuntimeStatu
 		phase: typeof source.phase === 'string' && UPDATE_PHASES.has(source.phase) ? source.phase : 'unsupported',
 		running_version: updateRevision(source.running_version) ? source.running_version : null,
 		error: typeof source.error === 'string' ? source.error.slice(0, 1024) : null,
-		// Invalid present guards block refresh rather than masquerading as false.
+		// Malformed pending values stay pending rather than masquerading as false.
 		request_pending: source.request_pending !== undefined && source.request_pending !== false,
 		install_pending: source.install_pending !== undefined && source.install_pending !== false,
 		updater,
@@ -252,13 +252,6 @@ export class UpdatesState {
 	error = $state('');
 	runtime = $state<UpdateRuntimeStatus | null>(null);
 	runtimeStale = $state(false);
-	refreshingUpdater = $state(false);
-	updaterQueued = $state(false);
-	updaterNotice = $state('');
-	updaterError = $state('');
-	#refreshTarget: string | null = null;
-	#refreshRequestedAt = 0;
-	#refreshPreviousError: string | null = null;
 
 	/** Check results, null until a check runs. */
 	rows = $state<UpdateResultRow[] | null>(null);
@@ -282,18 +275,6 @@ export class UpdatesState {
 			this.policy = { allow_updates: next.allow_updates === true, update_all_workers: next.update_all_workers === true };
 			this.runtime = next;
 			this.runtimeStale = false;
-			if (this.updaterQueued && this.#refreshTarget && next.updater?.revision === this.#refreshTarget && next.updater.refresh === 'current') {
-				this.updaterQueued = false;
-				this.updaterNotice = 'Updater status confirms the refreshed revision.';
-			} else if (this.updaterQueued && !next.request_pending && (next.phase === 'error' || (next.error && next.error !== this.#refreshPreviousError))) {
-				this.updaterQueued = false;
-				this.updaterNotice = '';
-				this.updaterError = 'The worker reported an update error. The updater refresh was not confirmed.';
-			} else if (this.updaterQueued && Date.now() - this.#refreshRequestedAt >= 120_000) {
-				this.updaterQueued = false;
-				this.updaterNotice = '';
-				this.updaterError = 'Updater refresh has not been confirmed. Check the connected worker before trying again.';
-			}
 			this.status = 'ok';
 		} catch (cause) {
 			if (!this.#alive) return;
@@ -303,36 +284,6 @@ export class UpdatesState {
 				this.status = 'error';
 				this.error = getErrorMessage(cause, 'Could not load update settings');
 			}
-		}
-	}
-
-	get canRefreshUpdater(): boolean {
-		const s = normalizeUpdateRuntimeStatus(this.runtime);
-		return this.status === 'ok' && !this.runtimeStale && !!this.policy?.allow_updates && !this.saving && !this.checking
-			&& !this.refreshingUpdater && !this.updaterQueued && !!s?.supported && !s.request_pending && !s.install_pending
-			&& (s.phase === 'idle' || s.phase === 'ready') && !!s.updater?.revision && !!s.running_version && s.updater.refresh === 'available'
-			&& s.updater.capabilities.includes('refresh-updater-v1');
-	}
-
-	async refreshUpdater(): Promise<void> {
-		if (!this.canRefreshUpdater) return;
-		this.refreshingUpdater = true;
-		this.updaterError = '';
-		this.updaterNotice = '';
-		this.#refreshTarget = this.runtime?.running_version ?? null;
-		this.#refreshPreviousError = this.runtime?.error ?? null;
-		try {
-			const receipt = await api.post<{ queued: boolean }>('/settings/application-updates', { action: 'refresh-updater', scope: 'current' });
-			if (!this.#alive) return;
-			if (!receipt?.queued) throw new Error('Not queued');
-			this.#refreshRequestedAt = Date.now();
-			this.updaterQueued = true;
-			this.updaterNotice = 'Refresh requested for the connected worker only. It may restart; completion has not been confirmed.';
-			window.dispatchEvent(new Event(POLICY_EVENT));
-		} catch {
-			if (this.#alive) this.updaterError = 'Could not request an updater refresh. Check the worker status and try again.';
-		} finally {
-			this.refreshingUpdater = false;
 		}
 	}
 
@@ -357,7 +308,7 @@ export class UpdatesState {
 	}
 
 	async check(): Promise<void> {
-		if (this.checking || this.refreshingUpdater || this.updaterQueued || !this.policy?.allow_updates) return;
+		if (this.checking || !this.policy?.allow_updates) return;
 		const run = ++this.#run;
 		this.checking = true;
 		this.checkError = '';

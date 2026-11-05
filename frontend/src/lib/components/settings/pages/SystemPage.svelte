@@ -384,7 +384,7 @@
 			dim={!allow}
 			expanded={resultsOpen && (updates.rows || updates.checkError) ? results : undefined}
 		>
-			<button type="button" class="st-btn" aria-busy={updates.checking} disabled={!updates.policy || !allow || updates.checking || updates.refreshingUpdater || updates.updaterQueued} onclick={runCheck}>
+			<button type="button" class="st-btn" aria-busy={updates.checking} disabled={!updates.policy || !allow || updates.checking} onclick={runCheck}>
 				{updates.checking ? 'Checking…' : 'Check now'}
 			</button>
 		</SettingRow>

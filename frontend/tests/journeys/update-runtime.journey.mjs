@@ -70,17 +70,15 @@ await runJourney({
       async act({ page, mark }) {
         await mark('inspect controlled resident identity and nested timings');
         await page.getByRole('button', { name: 'Update details', exact: true }).click();
-        const panel = page.getByRole('region', { name: 'Connected worker update details' });
-        await panel.getByRole('button', { name: 'Refresh updater…', exact: true }).click();
-        await panel.getByText('Restart the connected worker to refresh its updater?', { exact: true }).waitFor();
-        await mark('cancel the current-worker-only confirmation without any update request');
-        await panel.getByRole('button', { name: 'Cancel', exact: true }).click();
       },
       async verify({ page, variant }) {
         const panel = page.getByRole('region', { name: 'Connected worker update details' });
         await panel.getByText('aaaaaaaaaaaa', { exact: true }).first().waitFor();
         await panel.getByText('bbbbbbbbbbbb', { exact: true }).waitFor();
         await panel.getByText('1.5 s total', { exact: true }).waitFor();
+        await panel.getByText(/separately operator-approved container restart/).waitFor();
+        expect(await panel.getByRole('button').count() === 0, 'valid legacy available metadata stays read-only');
+        expect(await panel.getByRole('group').count() === 0, 'no updater restart confirmation');
         await panel.getByText('Reused verified cache', { exact: true }).waitFor();
         await panel.getByText('Prebuilt UI not reused; using a source build instead.', { exact: true }).waitFor();
         const size = await panel.evaluate((el) => ({ width: el.clientWidth, scroll: el.scrollWidth, viewport: innerWidth, page: document.documentElement.scrollWidth }));
@@ -97,7 +95,7 @@ await runJourney({
       ['pending', { request_pending: true, install_pending: true }],
       ['failed', { phase: 'error' }]
     ].map(([name, extra]) => ({
-      name: `controlled-${name}-blocks-refresh`,
+      name: `controlled-${name}-report-is-read-only`,
       async setup({ page, status }) {
         await page.route('**/api/v1/settings/application-updates', async (route) => {
           expect(route.request().method() === 'GET', 'blocked states must not dispatch an update');
@@ -116,7 +114,8 @@ await runJourney({
       },
       async verify({ page }) {
         const panel = page.getByRole('region', { name: 'Connected worker update details' });
-        expect(await panel.getByRole('button', { name: 'Refresh updater…', exact: true }).isDisabled(), `${name} prevents refresh`);
+        expect(await panel.getByRole('button').count() === 0, `${name} has no updater action`);
+        expect(await panel.getByRole('group').count() === 0, `${name} has no updater confirmation`);
       }
     })),
     ...['not-a-revision', null].map((revision) => ({
@@ -145,12 +144,18 @@ await runJourney({
         await panel.getByText('No update timings reported yet.', { exact: true }).waitFor();
       }
     })),
-    {
-      name: 'controlled-legacy-peer-never-borrows-local-identity',
+    ...[
+      ['legacy', { revision: null, capabilities: [], refresh: 'unknown' }, null],
+      ['unknown', { revision: null, capabilities: ['refresh-updater-v1'], refresh: 'available' }, null],
+      ['malformed', { revision: 'not-a-revision', capabilities: ['refresh-updater-v1'], refresh: 'available' },
+        { revision: 'bogus', total_elapsed_ms: -50, stages: 'malformed' }],
+      ['available', { revision: 'c'.repeat(40), capabilities: ['refresh-updater-v1'], refresh: 'available' }, null]
+    ].map(([name, updater, diagnostics]) => ({
+      name: `controlled-${name}-peer-is-read-only-and-never-borrows-local-identity`,
       async setup({ page, status }) {
         await page.route('**/api/v1/settings/application-updates', async (route) => {
           const post = route.request().method() === 'POST';
-          if (post) expect(route.request().postDataJSON().action === 'check', 'controlled check only, never a refresh fanout');
+          if (post) expect(route.request().postDataJSON().action === 'check', 'controlled check only, never an updater refresh');
           await route.fulfill({ json: post
             ? { results: [{ device_id: 'peer', device_name: 'Other worker', accepted: false, reason: 'Offline; not queued' }] }
             : { allow_updates: true, update_all_workers: true, supported: true, phase: 'idle', running_version: 'a'.repeat(40),
@@ -159,22 +164,27 @@ await runJourney({
         });
         await page.route('**/api/v1/settings/application-updates/workers', async (route) => route.fulfill({ json: {
           allow_updates: true, update_all_workers: true, workers: [{ device_id: 'peer', device_name: 'Other worker',
-            online: false, supported: false, phase: 'unsupported', updater: { revision: null, capabilities: [], refresh: 'unknown' }, diagnostics: null }]
+            online: false, supported: false, phase: 'unsupported', running_version: 'd'.repeat(40), updater, diagnostics }]
         } }));
         await openSystem(page, status);
       },
       async act({ page, mark }) {
-        await mark('read controlled per-worker check results');
+        await mark(`read controlled ${name} per-worker check results without updater action`);
         await page.getByRole('button', { name: 'Check now', exact: true }).click();
         await page.getByRole('button', { name: 'Update details for Other worker', exact: true }).click();
       },
       async verify({ page }) {
         const panel = page.getByRole('region', { name: 'Other worker update details' });
-        expect((await panel.innerText()).includes('Unknown'), 'legacy peer identity remains unknown');
-        expect(!(await panel.innerText()).includes('aaaaaaaaaaaa'), 'never borrow the app revision of the connected worker');
-        expect(!(await panel.innerText()).includes('bbbbbbbbbbbb'), 'never borrow the resident revision of the connected worker');
-        expect(await panel.getByRole('button', { name: /Refresh updater/ }).count() === 0, 'peer details have no refresh action');
+        await panel.getByText('dddddddddddd', { exact: true }).waitFor();
+        await panel.getByText(name === 'available' ? 'cccccccccccc' : 'Unknown', { exact: true }).waitFor();
+        expect(!(await panel.innerText()).includes('aaaaaaaaaaaa'), 'never borrow the connected app revision');
+        expect(!(await panel.innerText()).includes('bbbbbbbbbbbb'), 'never borrow the connected resident revision');
+        expect(await panel.getByRole('button').count() === 0, 'peer details have no updater action');
+        expect(await panel.getByRole('group').count() === 0, 'peer details have no updater confirmation');
+        expect(await panel.getByRole('list', { name: 'Preparation stages' }).count() === 0, 'legacy or malformed timings do not become rows');
+        const size = await panel.evaluate((el) => ({ width: el.clientWidth, scroll: el.scrollWidth, viewport: innerWidth, page: document.documentElement.scrollWidth }));
+        expect(size.scroll <= size.width && size.page <= size.viewport, 'peer details fit without horizontal overflow');
       }
-    }
+    }))
   ]
 });

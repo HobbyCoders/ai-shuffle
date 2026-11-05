@@ -53,6 +53,17 @@ async function ready() {
 }
 
 describe('connected-worker runtime status', () => {
+	it('has no updater refresh action or eligibility plumbing, even for legacy available metadata', async () => {
+		transport.get.mockResolvedValueOnce({
+			allow_updates: true, update_all_workers: true, supported: true, phase: 'idle', running_version: 'a'.repeat(40),
+			updater: { revision: 'b'.repeat(40), capabilities: ['refresh-updater-v1'], refresh: 'available' }
+		});
+		await state.refresh();
+		expect('refreshUpdater' in state).toBe(false);
+		expect('canRefreshUpdater' in state).toBe(false);
+		expect(transport.post).not.toHaveBeenCalled();
+	});
+
 	it('fails closed on the exact controlled malformed legacy response from QA', async () => {
 		transport.get.mockResolvedValueOnce({
 			allow_updates: true, update_all_workers: true, supported: true, phase: 'idle', running_version: 'a'.repeat(40),
@@ -60,10 +71,8 @@ describe('connected-worker runtime status', () => {
 			diagnostics: { revision: 'bogus', total_elapsed_ms: -50, stages: 'malformed' }
 		});
 		await state.refresh();
-		expect(state.canRefreshUpdater).toBe(false);
 		expect(state.runtime?.updater).toEqual({ revision: null, capabilities: [], refresh: 'unknown' });
 		expect(state.runtime?.diagnostics).toBeNull();
-		await state.refreshUpdater();
 		expect(transport.post).not.toHaveBeenCalled();
 	});
 
@@ -92,86 +101,18 @@ describe('connected-worker runtime status', () => {
 		expect(state.runtime).toMatchObject(status);
 	});
 
-	const available = (extra: Record<string, unknown> = {}) => ({
-		allow_updates: true, update_all_workers: true, supported: true, phase: 'idle',
-		running_version: 'a'.repeat(40),
-		updater: { revision: 'b'.repeat(40), capabilities: ['refresh-updater-v1'], refresh: 'available' },
-		...extra
-	});
-	async function load(extra: Record<string, unknown> = {}) {
-		transport.get.mockResolvedValueOnce(available(extra));
+	it('keeps the last read-only report stale after a failed read and recovers on a fresh read', async () => {
+		const status = { allow_updates: true, update_all_workers: false, supported: true, phase: 'idle', running_version: 'a'.repeat(40) };
+		transport.get.mockResolvedValueOnce(status);
 		await state.refresh();
-	}
-
-	it('requests only the connected worker, without a mode, and never treats queued as complete', async () => {
-		await load();
-		transport.post.mockResolvedValueOnce({ queued: true });
-		await state.refreshUpdater();
-		expect(transport.post).toHaveBeenCalledWith('/settings/application-updates', { action: 'refresh-updater', scope: 'current' });
-		expect(state.updaterQueued).toBe(true);
-		expect(state.updaterNotice).toContain('completion has not been confirmed');
-		await state.check();
-		await state.refreshUpdater();
-		expect(transport.post).toHaveBeenCalledTimes(1);
-		await load();
-		expect(state.updaterQueued).toBe(true);
-		await load({ updater: { revision: 'a'.repeat(40), capabilities: [], refresh: 'current' } });
-		expect(state.updaterQueued).toBe(false);
-		expect(state.updaterNotice).toContain('confirms the refreshed revision');
-	});
-
-	it.each([
-		{ allow_updates: false }, { phase: 'checking' }, { phase: 'downloading' }, { phase: 'error' },
-		{ request_pending: true }, { install_pending: true }, { supported: false },
-		{ updater: null }, { updater: { revision: null, capabilities: ['refresh-updater-v1'], refresh: 'available' } },
-		{ updater: { revision: 'b'.repeat(40), capabilities: [], refresh: 'available' } },
-		{ updater: { revision: 'b'.repeat(40), capabilities: ['refresh-updater-v1'], refresh: 'image_update_required' } }
-	])('does not request a refresh while blocked: %j', async (blocked) => {
-		await load(blocked);
-		expect(state.canRefreshUpdater).toBe(false);
-		await state.refreshUpdater();
-		expect(transport.post).not.toHaveBeenCalled();
-	});
-
-	it('handles a supervisor refusal in idle/ready without calling it a successful refresh', async () => {
-		await load();
-		transport.post.mockResolvedValueOnce({ queued: true });
-		await state.refreshUpdater();
-		await load({ phase: 'ready', error: 'Updater refresh requires no active sessions.' });
-		expect(state.updaterQueued).toBe(false);
-		expect(state.updaterNotice).toBe('');
-		expect(state.updaterError).toContain('not confirmed');
-	});
-
-	it('bounds an unacknowledged request without automatically retrying it', async () => {
-		await load();
-		transport.post.mockResolvedValueOnce({ queued: true });
-		await state.refreshUpdater();
-		await vi.advanceTimersByTimeAsync(120_000);
-		await load();
-		expect(state.updaterQueued).toBe(false);
-		expect(state.updaterError).toContain('before trying again');
-		expect(transport.post).toHaveBeenCalledTimes(1);
-	});
-
-	it('pauses refresh when a status read fails, then recovers on a fresh read', async () => {
-		await load();
 		transport.get.mockRejectedValueOnce(new Error('offline'));
 		await state.refresh();
 		expect(state.runtimeStale).toBe(true);
-		expect(state.canRefreshUpdater).toBe(false);
-		await load();
-		expect(state.canRefreshUpdater).toBe(true);
-	});
-
-	it('reports failure safely and allows retry instead of exposing server details', async () => {
-		await load();
-		transport.post.mockRejectedValueOnce({ detail: '/private/worker command --secret' });
-		await state.refreshUpdater();
-		expect(state.updaterError).toContain('try again');
-		expect(state.updaterError).not.toContain('/private');
-		expect(state.updaterQueued).toBe(false);
-		expect(state.canRefreshUpdater).toBe(true);
+		expect(state.runtime?.running_version).toBe(status.running_version);
+		transport.get.mockResolvedValueOnce(status);
+		await state.refresh();
+		expect(state.runtimeStale).toBe(false);
+		expect(transport.post).not.toHaveBeenCalled();
 	});
 });
 
@@ -230,12 +171,13 @@ describe('bounded runtime metadata normalization', () => {
 		expect(normalizeUpdateRuntimeStatus({ diagnostics: { ...diagnostics, stages: Array(96).fill(stage) } }).diagnostics?.stages).toHaveLength(96);
 	});
 
-	it.each([{ running_version: 'invalid' }, { supported: 'true' }, { request_pending: 'false' }, { install_pending: {} }])('fails closed on malformed refresh guard fields %j', async (extra) => {
-		state.policy = { allow_updates: true, update_all_workers: true };
-		state.status = 'ok';
-		state.runtime = { supported: true, phase: 'idle', running_version: 'a'.repeat(40), updater: resident, ...extra } as never;
-		expect(state.canRefreshUpdater).toBe(false);
-		await state.refreshUpdater();
+	it.each([
+		[{ running_version: 'invalid' }, { running_version: null }],
+		[{ supported: 'true' }, { supported: false }],
+		[{ request_pending: 'false' }, { request_pending: true }],
+		[{ install_pending: {} }, { install_pending: true }]
+	])('fails closed on malformed read-only status fields %j', (extra, expected) => {
+		expect(normalizeUpdateRuntimeStatus({ supported: true, phase: 'idle', running_version: 'a'.repeat(40), updater: resident, ...extra })).toMatchObject(expected);
 		expect(transport.post).not.toHaveBeenCalled();
 	});
 });
