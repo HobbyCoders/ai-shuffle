@@ -256,7 +256,8 @@ jobs:
       matrix:
         shard: [1, 2, 3, 4, 5, 6, 7]
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    # Keep ten minutes outside the journey step for setup/build and artifacts.
+    timeout-minutes: ${{ matrix.shard == 7 && 45 || 35 }}
     steps:
       - uses: actions/checkout@v4
       - name: Plan this shard
@@ -326,7 +327,9 @@ jobs:
       - name: Run the journeys on a fresh dev instance
         id: journeys
         if: steps.plan.outputs.files != ''
-        timeout-minutes: 25
+        # Run 41966098681: shard 7's 156 cases project to ~29m, plus 3m teardown.
+        # Other shards and the runner's per-file/retry limits stay unchanged.
+        timeout-minutes: ${{ matrix.shard == 7 && 35 || 25 }}
         run: |
           # The runner's preinstalled, stopped PostgreSQL 16 binaries; the dev
           # instance initializes its own throwaway cluster on a free port.
