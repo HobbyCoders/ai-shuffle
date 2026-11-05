@@ -1,5 +1,5 @@
 <script lang="ts">
-	import Checkbox from '../rows/Checkbox.svelte';
+	import Checkbox from '$lib/components/ui/Checkbox.svelte';
 	/**
 	 * One API user (or the draft from "Add API user"): Overview, Run,
 	 * Access and Sessions. Existing users save each change as it is made;

@@ -2,7 +2,7 @@
 	import Switch from '$lib/components/settings/rows/Switch.svelte';
 	/** Files: shared navigation panel and a full-width workspace table. */
 	import { getContext, onMount } from 'svelte';
-	import { ViewShell, ViewPanel, ViewMain, ViewCheckbox, DetailPane, EmptyDetail, InlineBanner } from '$lib/components/layout/view';
+	import { ViewShell, ViewPanel, Checkbox, DetailPane, EmptyDetail, InlineBanner } from '$lib/components/layout/view';
 	import { FEATURE_PANEL_CONTEXT, type FeaturePanelContext } from '$lib/components/layout/feature-panel-context';
 	import FilesPreview from './FilesPreview.svelte';
 	import { withAuth } from '$lib/api/runtime';
@@ -311,8 +311,7 @@
 		</ViewPanel>
 	{/snippet}
 	{#snippet main(back)}
-		<ViewMain width="data">
-			<DetailPane name={folderName} dataLayout onBack={back} backLabel="Files">
+		<DetailPane width="data" name={folderName} onBack={back} backLabel="Files">
 				{#snippet tile()}{/snippet}
 				{#snippet topStatus()}{/snippet}
 				{#snippet subtitle()}
@@ -356,7 +355,7 @@
 				<div class="fs-main" class:drag={isDragging} role="region" aria-label="File list" aria-busy={loading}
 					ondragover={onDragOver} ondragleave={onDragLeave} ondrop={onDrop}>
 					<div class="fs-row fs-row--head" aria-hidden={!!loadError || ($sortedFiles.length === 0)}>
-						<ViewCheckbox label="Select all" checked={allSelected} mixed={selectedCount > 0 && !allSelected} onchange={onHeaderSelectAll} disabled={loading || !!loadError || !$sortedFiles.length} />
+						<Checkbox isolate label="Select all" checked={allSelected} indeterminate={selectedCount > 0 && !allSelected} onchange={onHeaderSelectAll} disabled={loading || !!loadError || !$sortedFiles.length} />
 						<span>Name</span><span class="fs-sz">Size</span><span class="fs-md">Modified</span><span></span>
 					</div>
 					{#if loadError && workerOffline}
@@ -389,7 +388,7 @@
 								{@const Ic = fileIcon(item)}
 								<div class="fs-row" class:selected={$files.selectedFiles.has(item.path)} role="button" tabindex="0"
 									onclick={() => rowClick(item)} onkeydown={(e) => { if ((e.key === 'Enter' || e.key === ' ') && e.target === e.currentTarget) { e.preventDefault(); rowClick(item); } }}>
-									<ViewCheckbox label="Select {item.name}" checked={$files.selectedFiles.has(item.path)} onchange={() => files.toggleSelection(item.path)} />
+									<Checkbox isolate label="Select {item.name}" checked={$files.selectedFiles.has(item.path)} onchange={() => files.toggleSelection(item.path)} />
 									<span class="fs-nm" title={item.name}><Ic size={16} /><span class="fs-nm-text">{item.name}</span></span>
 									<span class="fs-sz">{item.type === 'directory' ? '—' : item.sizeFormatted ?? '—'}</span>
 									<span class="fs-md" title={new Date(item.modifiedAt).toLocaleString()}>{relTime(item.modifiedAt)}</span>
@@ -406,7 +405,6 @@
 					{#if isDragging}<div class="fs-droplay"><Upload size={26} /><span>Drop files to upload</span></div>{/if}
 				</div>
 			</DetailPane>
-		</ViewMain>
 	{/snippet}
 </ViewShell>
 <FilesTerminalDrawer bind:this={terminalDrawer} bind:busy={terminalBusy} active={feature?.active ?? true} />

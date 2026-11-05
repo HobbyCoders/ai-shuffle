@@ -51,7 +51,10 @@ await runJourney({
 				await mark(`open a native detail then return with browser Back (cycle ${cycle})`);
 				await page.locator('[data-view-shell="Agents"] [data-settings-item]').first().click();
 				await page.locator('[data-view-shell="Agents"][data-pane="detail"]').waitFor();
-				await page.goBack();
+				const back = page.getByRole('button', { name: 'Back to Agents', exact: true });
+				expect(await back.isVisible(), 'native detail has an on-screen Back control');
+				if (cycle === 1) await back.click();
+				else await page.goBack();
 				await page.locator('[data-view-shell="Agents"][data-pane="panel"]').waitFor({ timeout: 5000 });
 				expect(await page.getByPlaceholder('Search agents').isVisible(), 'native Back returns to the list');
 			}

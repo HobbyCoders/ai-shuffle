@@ -1225,28 +1225,14 @@
 	@media (pointer: coarse) {
 		.starter-foot :global(.st-btn) { min-height: 44px; }
 	}
-	/* The same title as a provider's detail page. */
-	.settings-shell.agents-shell :global(.st-dhn h2) {
-		font-size: 24px;
-	}
+
 	.folder-filter {
 		display: inline-flex;
 		flex: 1;
 		min-width: 0;
 		max-width: 170px;
 	}
-	.folder-filter :global(select) {
-		height: 26px;
-		font-size: 12.5px;
-	}
-	/* Phone: header actions stay on the name line (they fit as icons). */
-	.settings-shell.agents-shell[data-stacked] :global(.st-dh) {
-		grid-template-columns: auto minmax(0, 1fr) auto;
-	}
-	.settings-shell.agents-shell[data-stacked] :global(.st-dha) {
-		grid-column: auto;
-		justify-content: flex-end;
-	}
+
 
 	.sk-detail {
 		max-width: 740px;

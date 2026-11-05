@@ -9,7 +9,7 @@
 
 	import {
 		ViewShell, ViewPanel, ViewMain, PanelSearch, PanelIconButton, ListItem,
-		ListGroupLabel, ViewDetail, EmptyDetail, SelectField, InlineBanner
+		ListGroupLabel, DetailPane, EmptyDetail, SelectField, InlineBanner
 	} from '$lib/components/layout/view';
 	import TextField from '$lib/components/settings/rows/TextField.svelte';
 	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
@@ -835,7 +835,7 @@
 	{/snippet}
 	{#snippet main(back)}
 		{#if editingNote || isCreatingNew}
-			<ViewDetail name={editorTitle.trim() || 'New note'} icon={Notebook} backLabel="Notes" onBack={back}
+			<DetailPane width="reading" name={editorTitle.trim() || 'New note'} icon={Notebook} backLabel="Notes" onBack={back}
 				subtitle={editingNote ? `Global · Updated ${formatRelativeTime(editingNote.updated_at)}` : 'Global · New note'}
 				tabs={[{ id: 'edit', label: 'Edit' }, { id: 'preview', label: 'Preview' }]}
 				tab={showPreview ? 'preview' : 'edit'} onTabChange={(tab) => { showPreview = tab === 'preview'; }}>
@@ -893,7 +893,7 @@
 					{/if}
 					{#if isDragOver}<div class="note-drop">Drop files to attach</div>{/if}
 				</div>
-			</ViewDetail>
+			</DetailPane>
 		{:else}
 			<ViewMain width="reading">
 				{#if remoteChange}<InlineBanner>{remoteChange}</InlineBanner>{/if}

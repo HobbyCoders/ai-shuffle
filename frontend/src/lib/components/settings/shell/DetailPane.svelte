@@ -196,6 +196,8 @@
 	.st-dh-main {
 		min-width: 0;
 	}
+	/* A deliberately empty tile snippet must not put the title in the icon column. */
+	.st-dh-main:first-child { grid-column: 1 / 3; }
 	.st-dhn {
 		display: flex;
 		gap: 8px;

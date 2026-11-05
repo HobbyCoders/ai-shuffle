@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { automationModelLabel, automationPermissionLabel, type Automation, type AutomationRun } from '$lib/api/automations';
-	import { ViewDetail, RowGroup, SettingRow, Switch, InlineBanner } from '$lib/components/layout/view';
+	import { DetailPane, RowGroup, SettingRow, Switch, InlineBanner } from '$lib/components/layout/view';
  import { CalendarClock } from 'lucide-svelte';
 	import {
 		ChevronLeft,
@@ -76,7 +76,7 @@
  let tab = $state('overview');
 </script>
 
-<ViewDetail name={automation.name} icon={CalendarClock} onBack={onBack} backLabel="Automations"
+<DetailPane width="reading" name={automation.name} icon={CalendarClock} onBack={onBack} backLabel="Automations"
  subtitle={automation.description || (automation.triggers || [{type:automation.trigger_type}]).map(t => triggerTypeLabel(t.type)).join(' · ')}
  tab={tab} onTabChange={(value) => tab = value} tabs={[{id:'overview',label:'Overview'},{id:'runs',label:'Run history',count:detailStats?.total_runs ?? runs.length},{id:'generation',label:'Media generation'}]}>
  {#snippet badges()}
@@ -127,4 +127,4 @@
    <AutomationRunHistory {runs} {runsLoading} {expandedRunIds} {onToggleRunExpanded} {formatTime} {formatCost} {formatDuration} {getRunStatusBadgeClass} />
   {/if}
  {/snippet}
-</ViewDetail>
+</DetailPane>

@@ -1,5 +1,5 @@
 <script lang="ts">
-	import Checkbox from './settings/rows/Checkbox.svelte';
+	import Checkbox from '$lib/components/ui/Checkbox.svelte';
 	import ActionButton from './settings/rows/ActionButton.svelte';
 	import SelectField from './settings/rows/SelectField.svelte';
 	import Segmented from './settings/rows/Segmented.svelte';

@@ -1,5 +1,5 @@
 <script lang="ts">
-	import Checkbox from '../rows/Checkbox.svelte';
+	import Checkbox from '$lib/components/ui/Checkbox.svelte';
 	/**
 	 * ModelCuration: which of a credential's models the pickers offer.
 	 *

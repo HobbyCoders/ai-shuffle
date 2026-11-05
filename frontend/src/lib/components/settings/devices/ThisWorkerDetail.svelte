@@ -1,5 +1,5 @@
 <script lang="ts">
-	import Checkbox from '../rows/Checkbox.svelte';
+	import Checkbox from '$lib/components/ui/Checkbox.svelte';
 	/**
 	 * This worker: its name, platform and version, whether it stays on for
 	 * watches (#602), and the Network tab

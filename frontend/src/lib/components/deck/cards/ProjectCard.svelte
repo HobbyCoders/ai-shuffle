@@ -306,7 +306,7 @@
 						</SettingRow>
 					{/if}
 				{/snippet}
-			<DetailPane centered name={selectedRow.name} icon={selectedRow.kind === 'git' ? FolderGit2 : FolderOpen} onBack={back} backLabel="Projects"
+			<DetailPane width="reading" name={selectedRow.name} icon={selectedRow.kind === 'git' ? FolderGit2 : FolderOpen} onBack={back} backLabel="Projects"
 				dangerRows={selectedProject ? projectDangerRows : undefined} tabs={detailTabs} tab={activeTab} onTabChange={(tab) => { activeTab = tab as DetailTab; focusInstallId = null; }}>
 				{#snippet topStatus()}{/snippet}
 				{#snippet subtitle()}

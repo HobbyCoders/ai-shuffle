@@ -64,7 +64,6 @@
 	import { phoneLayout } from '$lib/components/chat/phone/phone-layout.svelte';
 	import NotificationDock from '$lib/components/NotificationDock.svelte';
 	import FeaturePanelHost from './FeaturePanelHost.svelte';
-	import { pageHeader } from '$lib/stores/page-header.svelte';
 	import NoProjectPill from './NoProjectPill.svelte';
 	import GitHeaderActions from '$lib/components/git/GitHeaderActions.svelte';
 	import { workerGitTargetFromKey, workerGitTargetKey } from './worker-git-target';
@@ -1040,11 +1039,6 @@
 			{#snippet actions()}
 				{@render downloadAction()}
 				{@render headerActions()}
-				{#if pageHeader.actions}
-					<!-- Desktop app: the page on screen lends its header actions to
-					     the strip (see StudioPageHeader). -->
-					<div class="page-actions">{@render pageHeader.actions()}</div>
-				{/if}
 			{/snippet}
 		</StudioTopBar>
 	{/if}
@@ -1174,13 +1168,6 @@
 		min-width: 0;
 		overflow: hidden;
 		background: var(--background);
-	}
-
-	/* Anchor for the git progress popover so it drops under the header actions. */
-	.page-actions {
-		display: flex;
-		align-items: center;
-		gap: 8px;
 	}
 
 	.git-actions-host {

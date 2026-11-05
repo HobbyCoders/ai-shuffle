@@ -269,6 +269,7 @@
 
 <div class="agd" bind:this={root}>
 	<DetailPane
+		width="reading"
 		name={title}
 		{tile}
 		{badges}
@@ -356,10 +357,7 @@
 		container: agd / inline-size;
 		min-height: 100%;
 	}
-	.agd :global(.st-dwrap) {
-		max-width: 740px;
-		margin-inline: auto;
-	}
+
 	.savetick {
 		margin-left: auto;
 		display: inline-flex;

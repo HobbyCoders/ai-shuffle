@@ -393,6 +393,13 @@ html:root[data-platform='mobile'] .chat-view.is-empty .input-slot.empty-input-la
 /* SessionCard, Sidebar, SidebarRail, SidebarSheet and WorkspaceCustomize size
    their own touch targets (class:phone and @media (hover: none)). */
 
+/* Shared kit touch geometry for the native shell, including foldable widths. */
+html:root[data-platform='mobile'] .st-action { min-height: 44px; }
+html:root[data-platform='mobile'] .st-action.icon { width: 44px; }
+html:root[data-platform='mobile'] .ui-checkbox { min-height: 44px; }
+html:root[data-platform='mobile'] .ui-checkbox .control { width: 44px; height: 44px; }
+html:root[data-platform='mobile'] .ui-checkbox .mark { inset: 14px; }
+
 /* ── frontend/src/lib/components/settings/shell (Settings) ───────────────── */
 
 /* Settings always stacks in the app (index, then page, then detail; see
@@ -421,9 +428,6 @@ html:root[data-platform='mobile'] .settings-shell .st-back {
 /* The app bar carries the back arrow and the page's name below the index, so a
    page neither repeats them nor stacks a second header under the bar. The heading
    stays for screen readers and for the focus move that lands on it. */
-html:root[data-platform='mobile'] .settings-shell[data-view] .st-back {
-	display: none;
-}
 html:root[data-platform='mobile'] .settings-shell[data-view] :is(.st-page-h, .st-lh-top) > h1 {
 	position: absolute;
 	width: 1px;
@@ -436,11 +440,9 @@ html:root[data-platform='mobile'] .settings-shell[data-view] .st-page {
 	padding: 16px 16px 100px;
 }
 html:root[data-platform='mobile'] .settings-shell[data-view] .st-page-h {
-	position: absolute;
-	margin: 0;
+	margin: 0 0 12px;
 	padding: 0;
 	border: 0;
-	min-height: 0;
 }
 html:root[data-platform='mobile'] .settings-shell[data-view] .st-lhead {
 	padding: 12px 16px;
@@ -452,7 +454,6 @@ html:root[data-platform='mobile'] .settings-shell[data-view] .st-dwrap {
 	padding: 16px 16px 90px;
 }
 html:root[data-platform='mobile'] .settings-shell[data-view] .st-dtop {
-	position: absolute;
 	margin: 0;
 	padding: 0;
 	border: 0;

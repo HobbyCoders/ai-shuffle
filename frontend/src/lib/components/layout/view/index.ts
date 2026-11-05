@@ -2,13 +2,11 @@
 export { default as ViewShell } from './ViewShell.svelte';
 export { default as ViewPanel } from './ViewPanel.svelte';
 export { default as ViewMain } from './ViewMain.svelte';
-export { default as ViewDetail } from './ViewDetail.svelte';
-export { default as ViewCheckbox } from './ViewCheckbox.svelte';
+export { default as Checkbox } from '../../ui/Checkbox.svelte';
 export { default as PanelSearch } from './PanelSearch.svelte';
 export { default as PanelIconButton } from './PanelIconButton.svelte';
 export { default as PanelField } from './PanelField.svelte';
 export { default as PanelRowActions } from './PanelRowActions.svelte';
-export { default as CheckField } from './CheckField.svelte';
 export { default as DetailPane } from '../../settings/shell/DetailPane.svelte';
 export { default as DetailTabs } from '../../settings/shell/DetailTabs.svelte';
 export { default as EmptyDetail } from '../../settings/shell/EmptyDetail.svelte';

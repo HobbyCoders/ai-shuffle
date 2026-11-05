@@ -102,7 +102,7 @@ describe('FilesStudio listing', () => {
 		expect(within(panel).getByRole('button', { name: /^Worker:/ })).toBeTruthy();
 		expect(within(panel).getByRole('switch', { name: 'Toggle hidden files' })).toBeTruthy();
 		expect(within(panel).queryByRole('button', { name: 'Upload' })).toBeNull();
-		expect(screen.getByRole('heading', { name: 'Workspace' }).closest('.data-layout')).toBeTruthy();
+		expect(screen.getByRole('heading', { name: 'Workspace' }).closest('.st-dwrap.data')).toBeTruthy();
 	});
 
 	it('isolates selection clicks from folder navigation and shows the mixed state', async () => {

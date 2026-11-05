@@ -35,6 +35,6 @@
 	.st-action:focus-visible { outline: 2px solid var(--st-primary, var(--ring)); outline-offset: 2px; }
 	.st-action:active:not(:disabled) { transform: translateY(1px); }
 	.st-action:disabled { opacity: .45; cursor: not-allowed; }
-	@media (max-width: 600px) { .st-action { min-height: 44px; } .st-action.icon { width: 44px; } }
+	@media (max-width: 600px), (pointer: coarse) { .st-action { min-height: 44px; } .st-action.icon { width: 44px; } }
 	@media (prefers-reduced-motion: reduce) { .st-action { transition: none; } }
 </style>

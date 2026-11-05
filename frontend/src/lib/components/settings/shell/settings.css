@@ -265,10 +265,21 @@
 	height: 15px;
 }
 
-/* Opt-in touch-sized actions for data views; desktop keeps the shared 32px control. */
+/* Phone geometry belongs to the kit, not individual destination overrides.
+   data-stacked also covers the native shell on a wide/foldable viewport. */
+.settings-shell[data-stacked] :is(.st-btn, .st-back, .st-vbtn, .st-hotkey, .st-reset, .st-vlink, .st-help),
+.settings-shell[data-stacked] .st-seg button {
+ min-height: 44px;
+}
+.settings-shell[data-stacked] :is(.st-btn.icon, .st-vbtn, .st-reset, .st-help) { min-width: 44px; }
+.settings-shell[data-stacked] :is(input.st-txt, select.st-sel, .st-num) { min-height: 44px; font-size: 16px; }
+.settings-shell[data-stacked] :is(.st-num input, textarea) { font-size: 16px; }
 @media (max-width: 600px), (pointer: coarse) {
-	.settings-shell .st-btn.touch { min-height: 44px; }
-	.settings-shell .st-btn.touch.icon { min-width: 44px; }
+ .settings-shell :is(.st-btn, .st-back, .st-vbtn, .st-hotkey, .st-reset, .st-vlink, .st-help),
+ .settings-shell .st-seg button { min-height: 44px; }
+ .settings-shell :is(.st-btn.icon, .st-vbtn, .st-reset, .st-help) { min-width: 44px; }
+ .settings-shell :is(input.st-txt, select.st-sel, .st-num) { min-height: 44px; font-size: 16px; }
+ .settings-shell :is(.st-num input, textarea) { font-size: 16px; }
 }
 
 /* Back button: only in stacked mode */

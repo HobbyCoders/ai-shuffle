@@ -130,7 +130,12 @@ describe('AppTopBar title', () => {
 		expect(screen.getByText('Chats')).toBeTruthy();
 		activeView.set({ type: 'profile' });
 		await tick();
-		expect(screen.getByText('Build')).toBeTruthy();
+		expect(screen.getByText('Agents')).toBeTruthy();
+		for (const [type, title] of Object.entries({ 'file-browser': 'Files', notes: 'Notes', automations: 'Automations', project: 'Projects', prs: 'Pull requests', stats: 'Stats', docs: 'Docs', terminal: 'Terminal' })) {
+			activeView.set({ type });
+			await tick();
+			expect(screen.getByText(title)).toBeTruthy();
+		}
 		// MCP servers moved into Settings (#1684).
 		activeView.set({ type: 'mcp' });
 		await tick();

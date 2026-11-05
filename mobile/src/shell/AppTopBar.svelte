@@ -86,6 +86,8 @@
 		project: 'Projects',
 		docs: 'Docs',
 		stats: 'Stats',
+		prs: 'Pull requests',
+		terminal: 'Terminal',
 		settings: 'Settings',
 		// Plugins, MCP servers and Hooks all live in Settings.
 		plugins: 'Settings',
@@ -105,8 +107,8 @@
 			messageCount: s?.messages?.length ?? 0
 		});
 	});
-	// A Settings page below the index: the bar's ☰ becomes the way back up, and
-	// the bar carries the page's name so the page need not repeat it.
+	// Settings below the index uses its category title; every destination keeps
+	// its visible in-page Back control and the same global menu in this bar.
 	const settingsSubPage = $derived(
 		!!currentType && !!TITLES[currentType] && TITLES[currentType] === 'Settings'
 			&& settingsNav.stacked && settingsNav.view !== 'index'
@@ -116,7 +118,7 @@
 		if (settingsSubPage) return categoryById(settingsNav.category).label;
 		if (currentType === 'session') return chatTitle;
 		if (currentType === 'board') return 'Chats';
-		if (buildActive) return 'Build';
+		if (buildActive) return 'Agents';
 		return (currentType && TITLES[currentType]) || 'AI Shuffle';
 	});
 	const projectLabel = $derived(
@@ -325,11 +327,6 @@
 <svelte:window onkeydown={handleWindowKeydown} />
 
 <header class="topbar topbar-mobile" class:no-rule={currentType === 'session' && chatTitle === NEW_CHAT_LABEL}>
-	{#if settingsSubPage}
-		<button class="tb-hamburger" onclick={() => settingsNav.back()} aria-label={settingsNav.view === 'detail' ? `Back to ${mobileTitle}` : 'Back to Settings'}>
-			<ChevronLeft size={20} strokeWidth={1.8} />
-		</button>
-	{:else}
 		<button
 			bind:this={hamburgerRef}
 			class="tb-hamburger"
@@ -340,7 +337,6 @@
 		>
 			<Menu size={20} strokeWidth={1.8} />
 		</button>
-	{/if}
 
 	<div class="tb-context">
 		<div class="tb-titleline">

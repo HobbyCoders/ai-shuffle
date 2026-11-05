@@ -13,7 +13,7 @@
 	import { peerTerminals } from '$lib/stores/peer-terminals.svelte';
 	import { age, countdown, PENDING_SECONDS } from '$lib/terminal/peer';
 	import PeerCode from './PeerCode.svelte';
-	import CheckField from '$lib/components/layout/view/CheckField.svelte';
+	import Checkbox from '$lib/components/ui/Checkbox.svelte';
 
 	let { workerName }: { workerName: string } = $props();
 
@@ -58,7 +58,7 @@
 					<div class="req-body">
 						<PeerCode code={request.confirmation_code} left={timing.left} total={PENDING_SECONDS} label={`Code from ${request.source_name}`} />
 						<p class="why">Approve only if <strong>{request.source_name}</strong> shows this same code. Approving opens <strong>one</strong> interactive shell on {workerName} for up to 10 minutes; you can revoke it here at any time.</p>
-	<CheckField checked={!!matched[request.request_id]} label={`The code matches on ${request.source_name}`} disabled={!!decision} onchange={(checked) => (matched = { ...matched, [request.request_id]: checked })} />
+	<Checkbox checked={!!matched[request.request_id]} disabled={!!decision} onchange={(checked) => (matched = { ...matched, [request.request_id]: checked })}>The code matches on {request.source_name}</Checkbox>
 					</div>
 				{/if}
 

@@ -20,10 +20,10 @@ afterEach(cleanup);
 describe('DetailPane', () => {
 	it('opts collection pages into the centred reading column without changing Settings defaults', () => {
 		const normal = render(DetailPane, { name: 'Settings detail' });
-		expect(normal.container.querySelector('.st-dwrap.centered')).toBeNull();
+		expect(normal.container.querySelector('.st-dwrap.reading')).toBeNull();
 		normal.unmount();
-		const centered = render(DetailPane, { name: 'Project detail', centered: true });
-		expect(centered.container.querySelector('.st-dwrap.centered')).toBeTruthy();
+		const centered = render(DetailPane, { name: 'Project detail', width: 'reading' });
+		expect(centered.container.querySelector('.st-dwrap.reading')).toBeTruthy();
 	});
 	it('renders header, at most four facts with data, tabs and the danger zone', async () => {
 		const onConfirm = vi.fn();

@@ -3,7 +3,7 @@
 </script>
 
 <script lang="ts">
-	import Checkbox from '../../rows/Checkbox.svelte';
+	import Checkbox from '$lib/components/ui/Checkbox.svelte';
 	/**
 	 * ImportWizard: copy instructions, skills, agents, MCP inventory and
 	 * projects from Claude Code and Codex, inline under System > Workspace.
