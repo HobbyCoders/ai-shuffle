@@ -161,6 +161,82 @@ export interface UpdateRuntimeStatus extends Partial<UpdatePolicy> {
 	} | null;
 }
 
+/** Fixed producer vocabulary, shared with the defensive renderer. */
+export const UPDATE_STAGE_LABELS = {
+	command: 'Build command', source_download: 'Source download', source_extract: 'Source extraction', source_verify: 'Source verification',
+	runtimes: 'Runtime preparation', assembly: 'Update assembly', python_dependencies: 'Python dependencies', python_cache: 'Python cache',
+	fluid: 'Fluid installation', prebuilt_ui: 'Prebuilt UI', prepare_files: 'File preparation', frontend_cache: 'UI cache',
+	frontend_dependencies: 'UI dependencies', frontend_build: 'UI build', tools_cache: 'Tools cache', tools_dependencies: 'Tools dependencies',
+	tools_build: 'Tools build', browser_mcp_cache: 'Browser cache', browser_mcp_dependencies: 'Browser dependencies', browser_mcp_build: 'Browser build',
+	desktop_cache: 'Desktop cache', desktop_dependencies: 'Desktop dependencies', desktop_build: 'Desktop build'
+};
+export const UPDATE_OUTCOME_LABELS = {
+	completed: 'Completed', failed: 'Failed', hit: 'Reused verified cache', miss: 'No reusable verified entry', fallback: 'Fallback to source build', disabled: 'Not offered or reuse disabled'
+};
+const UPDATE_CAPABILITIES = new Set(['stage-diagnostics-v1', 'dependency-cache-v1', 'prebuilt-ui-v1', 'node-output-cache-v1', 'refresh-updater-v1']);
+const UPDATE_REFRESH_MODES = new Set(['available', 'current', 'container_restart_required', 'image_update_required', 'disabled', 'unknown']);
+const UPDATE_PHASES = new Set(['idle', 'checking', 'downloading', 'available', 'ready', 'error', 'image-required', 'unsupported']);
+const updateRecord = (value: unknown): Record<string, unknown> | null =>
+	value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
+const updateRevision = (value: unknown): value is string => typeof value === 'string' && value.length === 40 && /^[a-f0-9]{40}$/.test(value);
+const updateElapsed = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 2 ** 53;
+const updateKey = <T extends object>(labels: T, value: unknown): value is Extract<keyof T, string> =>
+	typeof value === 'string' && Object.hasOwn(labels, value);
+
+/**
+ * Fail closed at every UI entry, including legacy peers and direct component props.
+ * Mirrors the bounded server metadata schema; malformed updater/diagnostics objects
+ * fall back independently. Copy only known fields, never arbitrary producer extras.
+ */
+export function normalizeUpdateRuntimeStatus(value: unknown): UpdateRuntimeStatus {
+	const source = updateRecord(value) ?? {};
+	let updater: NonNullable<UpdateRuntimeStatus['updater']> = { revision: null, capabilities: [], refresh: 'unknown' };
+	const resident = updateRecord(source.updater);
+	if (resident) {
+		const revision = resident.revision === undefined ? null : resident.revision;
+		const capabilities = resident.capabilities === undefined ? [] : resident.capabilities;
+		const refresh = resident.refresh === undefined ? 'unknown' : resident.refresh;
+		if ((revision === null || updateRevision(revision)) && Array.isArray(capabilities) && capabilities.length <= 16
+			&& Array.from(capabilities).every((cap) => typeof cap === 'string' && UPDATE_CAPABILITIES.has(cap))
+			&& typeof refresh === 'string' && UPDATE_REFRESH_MODES.has(refresh)) {
+			// A nullable identity may describe image ownership/disabled policy, but
+			// cannot prove that a newer/current updater exists or confer capability.
+			if (revision !== null || !['available', 'current', 'container_restart_required'].includes(refresh)) {
+				updater = { revision, capabilities: revision === null ? [] : [...capabilities], refresh: refresh as typeof updater.refresh };
+			}
+		}
+	}
+	let diagnostics: UpdateRuntimeStatus['diagnostics'] = null;
+	const report = updateRecord(source.diagnostics);
+	if (report && (report.revision === undefined || report.revision === null || updateRevision(report.revision))
+		&& updateElapsed(report.total_elapsed_ms)) {
+		const stages = report.stages === undefined ? [] : report.stages;
+		if (Array.isArray(stages) && stages.length <= 96 && Array.from(stages).every((value) => {
+			const stage = updateRecord(value);
+			return stage && updateKey(UPDATE_STAGE_LABELS, stage.stage) && updateKey(UPDATE_OUTCOME_LABELS, stage.outcome) && updateElapsed(stage.elapsed_ms);
+		})) {
+			diagnostics = {
+				revision: report.revision === undefined ? null : report.revision as string | null,
+				total_elapsed_ms: report.total_elapsed_ms,
+				stages: stages.map((value) => ({ stage: value.stage, elapsed_ms: value.elapsed_ms, outcome: value.outcome }))
+			};
+		}
+	}
+	return {
+		allow_updates: typeof source.allow_updates === 'boolean' ? source.allow_updates : undefined,
+		update_all_workers: typeof source.update_all_workers === 'boolean' ? source.update_all_workers : undefined,
+		supported: source.supported === true,
+		phase: typeof source.phase === 'string' && UPDATE_PHASES.has(source.phase) ? source.phase : 'unsupported',
+		running_version: updateRevision(source.running_version) ? source.running_version : null,
+		error: typeof source.error === 'string' ? source.error.slice(0, 1024) : null,
+		// Invalid present guards block refresh rather than masquerading as false.
+		request_pending: source.request_pending !== undefined && source.request_pending !== false,
+		install_pending: source.install_pending !== undefined && source.install_pending !== false,
+		updater,
+		diagnostics
+	};
+}
+
 interface Snapshot extends UpdatePolicy {
 	workers: UpdateWorker[];
 }
@@ -201,9 +277,9 @@ export class UpdatesState {
 
 	async refresh(): Promise<void> {
 		try {
-			const next = await api.get<UpdatePolicy & UpdateRuntimeStatus>('/settings/application-updates');
+			const next = normalizeUpdateRuntimeStatus(await api.get<unknown>('/settings/application-updates'));
 			if (!this.#alive || this.saving) return;
-			this.policy = { allow_updates: next.allow_updates, update_all_workers: next.update_all_workers };
+			this.policy = { allow_updates: next.allow_updates === true, update_all_workers: next.update_all_workers === true };
 			this.runtime = next;
 			this.runtimeStale = false;
 			if (this.updaterQueued && this.#refreshTarget && next.updater?.revision === this.#refreshTarget && next.updater.refresh === 'current') {
@@ -231,7 +307,7 @@ export class UpdatesState {
 	}
 
 	get canRefreshUpdater(): boolean {
-		const s = this.runtime;
+		const s = normalizeUpdateRuntimeStatus(this.runtime);
 		return this.status === 'ok' && !this.runtimeStale && !!this.policy?.allow_updates && !this.saving && !this.checking
 			&& !this.refreshingUpdater && !this.updaterQueued && !!s?.supported && !s.request_pending && !s.install_pending
 			&& (s.phase === 'idle' || s.phase === 'ready') && !!s.updater?.revision && !!s.running_version && s.updater.refresh === 'available'
@@ -358,7 +434,7 @@ export class UpdatesState {
 					const view = done ? describeWorker(worker, own) : { tone: 'busy' as const, text: 'Checking' };
 					const hint = done ? (installerHint(worker) ?? imageHint(worker)) : undefined;
 					const link = done && installerHint(worker) ? INSTALLER_LINK : undefined;
-					rows.push({ id, name, ...view, ...('updater' in worker ? { runtime: worker } : {}), ...(hint ? { hint } : {}), ...(link ? { link } : {}) });
+					rows.push({ id, name, ...view, ...('updater' in worker || 'diagnostics' in worker ? { runtime: normalizeUpdateRuntimeStatus(worker) } : {}), ...(hint ? { hint } : {}), ...(link ? { link } : {}) });
 				}
 				this.rows = rows;
 			} else settled = false;
