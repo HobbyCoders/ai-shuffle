@@ -94,7 +94,7 @@ export function formFromHook(h: Hook): HookForm {
 		command: h.command ?? '',
 		timeoutSec: Math.round((h.timeout || DEFAULT_TIMEOUT_MS) / 1000),
 		url: h.url ?? '',
-		secret: h.secret ?? '',
+		secret: '',
 		matcher: h.tool_matcher ?? '',
 		enabled: h.enabled
 	};
@@ -132,8 +132,8 @@ export function createPayload(f: HookForm): HookCreate {
 }
 
 /**
- * The PATCH body. The worker skips null fields, so a cleared matcher or
- * secret is sent as an empty string (an empty matcher matches every tool).
+ * The PATCH body. Blank secrets are omitted to preserve the stored value.
+ * A cleared matcher is sent as an empty string (it matches every tool).
  */
 export function updatePayload(f: HookForm): HookUpdate {
 	const bash = f.type === 'bash';
@@ -144,7 +144,7 @@ export function updatePayload(f: HookForm): HookUpdate {
 		command: bash ? f.command.trim() : undefined,
 		timeout: clampTimeout(f.timeoutSec),
 		url: bash ? undefined : f.url.trim(),
-		secret: bash ? undefined : f.secret.trim(),
+		secret: !bash && f.secret.trim() ? f.secret.trim() : undefined,
 		tool_matcher: isToolEvent(f.event) ? f.matcher.trim() : ''
 	};
 }

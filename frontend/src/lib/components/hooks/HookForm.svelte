@@ -29,7 +29,7 @@
 		command: hook?.command || '',
 		timeout: hook?.timeout || 30000,
 		url: hook?.url || '',
-		secret: hook?.secret || '',
+		secret: '',
 		toolMatcher: hook?.tool_matcher || '',
 		enabled: hook?.enabled ?? true,
 	}));
@@ -109,7 +109,7 @@
 		command = fresh.command || '';
 		timeout = fresh.timeout || 30000;
 		url = fresh.url || '';
-		secret = fresh.secret || '';
+		secret = '';
 		toolMatcher = fresh.tool_matcher || '';
 		enabled = fresh.enabled;
 		baseline = snapshot();

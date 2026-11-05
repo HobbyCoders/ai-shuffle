@@ -91,6 +91,16 @@ describe('Settings > Hooks list', () => {
 });
 
 describe('Settings > Hooks editing', () => {
+	it('shows saved-secret presence without hydrating it on an unrelated save', async () => {
+		api.getAppHooks.mockResolvedValue([hook({ hook_type: 'webhook', url: 'https://example.test', has_secret: true })]);
+		await show('h1');
+		expect(field('Leave blank to keep').value).toBe('');
+		expect(screen.getByText('Secret saved')).toBeTruthy();
+		await type(field('Block rm -rf'), 'Renamed');
+		await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+		await waitFor(() => expect(api.updateHook).toHaveBeenCalledWith('h1', expect.objectContaining({ name: 'Renamed', secret: undefined })));
+	});
+
 	it('adds an app hook with the typed command', async () => {
 		await show();
 		await fireEvent.click(screen.getByRole('button', { name: 'Add hook' }));
@@ -139,6 +149,16 @@ describe('Settings > Hooks editing', () => {
 });
 
 describe('hooks-model', () => {
+	it('keeps secret input empty and sends only an intentional replacement', () => {
+		const form = formFromHook(hook({ hook_type: 'webhook', has_secret: true }));
+		expect(form.secret).toBe('');
+		expect(updatePayload(form).secret).toBeUndefined();
+		form.secret = '  ';
+		expect(updatePayload(form).secret).toBeUndefined();
+		form.secret = ' dummy-replacement ';
+		expect(updatePayload(form).secret).toBe('dummy-replacement');
+	});
+
 	it('builds create and update payloads for the chosen action type', () => {
 		const web = { ...emptyForm(null), name: ' Ping ', type: 'webhook' as const, url: ' https://x.test ', command: 'ignored', timeoutSec: 999 };
 		expect(createPayload(web)).toMatchObject({ name: 'Ping', command: undefined, url: 'https://x.test', timeout: 300000, tool_matcher: undefined });

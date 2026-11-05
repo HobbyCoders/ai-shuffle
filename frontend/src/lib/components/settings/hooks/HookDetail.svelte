@@ -233,8 +233,8 @@
 					<SettingRow label="URL" hint="Receives a POST">
 						<TextField bind:value={form.url} type="url" placeholder="https://ntfy.sh/my-topic" mono width={300} />
 					</SettingRow>
-					<SettingRow label="Secret" hint="Signs each request" help="The signature is sent in the X-Hook-Signature header.">
-						<TextField bind:value={form.secret} type="password" placeholder="Optional" mono width={220} />
+					<SettingRow label="Secret" hint={hook?.has_secret ? 'Secret saved' : 'Signs each request'} help="The signature is sent in the X-Hook-Signature header. Leave blank to keep the saved secret.">
+						<TextField bind:value={form.secret} type="password" placeholder={hook?.has_secret ? 'Leave blank to keep' : 'Optional'} mono width={220} />
 					</SettingRow>
 					<SettingRow label="Timeout">
 						<NumberField bind:value={form.timeoutSec} min={1} max={300} unit="s" />
