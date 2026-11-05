@@ -126,6 +126,7 @@
 	import SubagentMessage from '$lib/components/SubagentMessage.svelte';
 	import TeamMemberMessage from '$lib/components/TeamMemberMessage.svelte';
 	import TodoList from '$lib/components/TodoList.svelte';
+	import PlanDisplay from '$lib/components/PlanDisplay.svelte';
 	import NotesList from '$lib/components/NotesList.svelte';
 	import { notesFromToolMessage } from '$lib/utils/note-tool';
 	import { UI_MOUNT } from '$lib/utils/ui-signature';
@@ -2660,6 +2661,8 @@
 	{:else if isApprovalOutcome(message)}
 		<!-- What the owner's answer did, right after that answer (#484). -->
 		<ApprovalOutcome data={message.systemData} content={message.content} />
+	{:else if message.type === 'system' && message.systemSubtype === 'session_plan'}
+		<PlanDisplay plan={message.systemData?.plan} />
 	{:else if message.type === 'system'}
 		<div class="w-full">
 			<div class="min-w-0">
