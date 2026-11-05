@@ -9117,6 +9117,8 @@ async def _build_provider_client(
     # ANTHROPIC_BASE_URL: append ``/v1/messages``.
     if creds is not None:
         if creds.compatible_provider:
+            from app.core.config import settings
+
             session_http = _session_provider_http(timeouts["timeout"])
             return (
                 AnthropicClient(

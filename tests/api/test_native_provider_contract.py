@@ -164,3 +164,25 @@ async def test_catalog_urls_kinds_and_supported_rosters(client, provider, mode):
     if provider == "opencode" and mode is None:
         assert "some-free" not in ids
 
+
+
+@pytest.mark.parametrize("provider", native_providers.PROVIDERS)
+@pytest.mark.parametrize("mode", ["plan_key", "api_key"])
+async def test_session_client_builds_from_saved_row(client, provider, mode):
+    """Chats build their client on a different path from the key check on save."""
+    from app.core.config import settings
+    from app.core.provider.harness_adapter import _build_provider_client
+    from app.core.provider.types import SessionOptions
+    from fluid.providers.anthropic.client import AnthropicClient
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(200, json={"content": []}))) as http:
+        with patch("app.core.http_client.get_http_client", return_value=http):
+            row = create(client, provider, mode)
+    options = SessionOptions(model="any-model", extra={"provider_id": row["id"]})
+    built, session_http = await _build_provider_client("anthropic", options)
+    try:
+        assert isinstance(built, AnthropicClient)
+        assert built.name == provider
+        assert built._user_agent == f"ai-shuffle/{settings.version}"
+    finally:
+        await session_http.aclose()
