@@ -134,6 +134,9 @@ describe('MessageArea followed-floor coordinate ownership', () => {
 		expect(source).toContain('style:min-height={`${tailQueueSlotPx}px`}');
 		const css = source.slice(source.indexOf('\n\t.tail-controls {'));
 		expect(css.slice(0, css.indexOf('}'))).toContain('justify-content: flex-end;');
+		const nested = source.slice(source.indexOf('.tail-controls :global(.pending-messages) {'));
+		expect(nested.slice(0, nested.indexOf('}'))).toContain('min-height: inherit;');
+		expect(nested.slice(0, nested.indexOf('}'))).toContain('justify-content: flex-end;');
 	});
 
 	it('does not carry the outgoing long scroll offset into a short completed chat', () => {

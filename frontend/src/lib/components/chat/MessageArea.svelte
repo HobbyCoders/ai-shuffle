@@ -2981,6 +2981,13 @@
 		justify-content: flex-end;
 	}
 
+	/* PendingMessages owns a second flex box. It must share the held slot,
+	   rather than shrinking inside a stable parent during the same handoff. */
+	.tail-controls :global(.pending-messages) {
+		min-height: inherit;
+		justify-content: flex-end;
+	}
+
 	.tail-error {
 		bottom: calc(24px + env(safe-area-inset-bottom, 0px) + var(--call-dock-reserve, 0px) - var(--transcript-tail-reserve) + var(--error-tail-offset, 0px));
 	}
