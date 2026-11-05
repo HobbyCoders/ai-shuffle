@@ -9,9 +9,8 @@
 import type { ProviderBilling, ProviderUsage } from '$lib/api/analytics';
 
 export function formatCost(cost: number): string {
-	if (cost >= 100) return '$' + cost.toFixed(0);
-	if (cost >= 1) return '$' + cost.toFixed(2);
-	return '$' + cost.toFixed(4);
+	if (cost > 0 && cost < 0.01) return '<$0.01';
+	return '$' + cost.toFixed(2);
 }
 
 export function formatTokens(n: number): string {
