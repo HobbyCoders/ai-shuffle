@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { Session } from '$lib/api/client';
 import type { ChatMessage } from '$lib/stores/types';
 import {
+	gitProgressWord,
 	cardActions,
 	withinTapTarget,
 	sessionNeedsYou,
@@ -984,5 +985,23 @@ describe('the three Needs-you consumers agree (spec §5)', () => {
 		expect(deriveStatus({ ...base, attention: null })).toBe('working');
 		expect(deriveStatus({ ...base, attention: { count: 1, kind: 'permission' } })).toBe('needs_permission');
 		expect(deriveStatus({ ...base, remoteRuntimeState: 'working', attention: null })).toBe('working');
+	});
+});
+
+describe('gitProgressWord', () => {
+	it('names the work that has no PR word to carry it', () => {
+		expect(gitProgressWord('dirty')).toBe('Uncommitted');
+		expect(gitProgressWord('committed')).toBe('Committed');
+		expect(gitProgressWord('pushed')).toBe('Pushed');
+	});
+
+	it('stays quiet when there is nothing to add', () => {
+		for (const stage of ['pr', 'merged', 'closed', 'clean', 'none'] as const) {
+			expect(gitProgressWord(stage)).toBeNull();
+		}
+	});
+
+	it('speaks up for stray edits on top of a PR', () => {
+		expect(gitProgressWord('merged', true)).toBe('Uncommitted');
 	});
 });
