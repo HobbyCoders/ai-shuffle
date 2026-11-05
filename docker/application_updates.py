@@ -782,7 +782,7 @@ class ContainerUpdates:
         self.refresh_mode = refresh_mode  # supplied by the owning supervisor, not the app
         self.diagnostics = None
         self.diagnostic_started = None
-        self.refresh_requested = threading.Event()
+        self.refresh_requested = threading.Event()  # legacy intents are refused by the supervisor
         self.stop = threading.Event()
         self.overlays = RuntimeOverlays(self.root, self.stop)
         self.thread = None
@@ -871,15 +871,18 @@ class ContainerUpdates:
 
     def updater_status(self):
         refresh = self.refresh_mode
-        if refresh == "available":
-            if (not self.state.get("active") or self.state.get("active") == self.updater_revision
+        if refresh in ("available", "container_restart_required"):
+            # A legacy supervisor may still pass "available". Live refresh is
+            # deferred until admission can be fenced without stopping new work.
+            refresh = "container_restart_required"
+            identified = isinstance(self.updater_revision, str) and REVISION.fullmatch(self.updater_revision)
+            if (not identified or not self.state.get("active") or self.state.get("active") == self.updater_revision
                     or self.state.get("booting") or self.state.get("blocked") or self.state.get("pending")):
-                refresh = ("current" if isinstance(self.updater_revision, str)
-                           and REVISION.fullmatch(self.updater_revision)
+                refresh = ("current" if identified
                            and self.state.get("active") == self.updater_revision else "unknown")
         return {"revision": self.updater_revision,
                 "capabilities": ["stage-diagnostics-v1", "dependency-cache-v1", "prebuilt-ui-v1",
-                                 "node-output-cache-v1", *(["refresh-updater-v1"] if self.refresh_mode == "available" else [])],
+                                 "node-output-cache-v1"],
                 "refresh": refresh}
 
     def begin_diagnostics(self, revision):
@@ -1839,10 +1842,8 @@ class ContainerUpdates:
             except FileNotFoundError:
                 pass
             if action == "refresh-updater":
-                if not self.allowed() or self.updater_status()["refresh"] != "available":
-                    raise UpdateError("Updater refresh is not available")
-                self.refresh_requested.set()
-                return
+                # Refuse stale request.json writers too, without setting a restart intent.
+                raise UpdateError("In-app updater refresh is unavailable. Reloading the updater requires a separately approved container restart.")
             if action == "install":
                 if not self.allowed():
                     raise UpdateError("Application updates are disabled")

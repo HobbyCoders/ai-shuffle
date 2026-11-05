@@ -54,6 +54,10 @@ def safe_update_metadata(result):
     return result
 
 
+UPDATER_REFRESH_UNAVAILABLE = (
+    "In-app updater refresh is unavailable. Reloading the updater requires a separately approved container restart."
+)
+
 KEY = "allow_updates"
 ALL_KEY = "update_all_workers"
 _bridge_lock = threading.Lock()
@@ -455,12 +459,10 @@ def enqueue(action):
         raise ValueError("Unknown update action")
     if not allowed():
         raise ValueError("Application updates are disabled in Account settings")
-    root = control_root()
     if action == "refresh-updater":
-        resident = status()["updater"]
-        if (root is None or "refresh-updater-v1" not in resident["capabilities"]
-                or resident["refresh"] != "available"):
-            raise ValueError("This resident updater cannot refresh itself here. Older supervisors may need an operator restart; isolated supervisors are image-managed.")
+        # Old residents may still advertise the deferred shortcut. Never queue it.
+        raise ValueError(UPDATER_REFRESH_UNAVAILABLE)
+    root = control_root()
     if root:
         atomic_json(root / "request.json", {"action": action, "expires_at": time.time() + CONTAINER_REQUEST_SECONDS})
         return

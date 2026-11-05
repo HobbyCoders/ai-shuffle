@@ -41,7 +41,7 @@ def test_legacy_status_does_not_prove_outdated_updater(client, monkeypatch):
     assert not (root / "request.json").exists()
 
 
-def test_actual_producer_status_queues_only_explicit_local_refresh(client, monkeypatch):
+def test_actual_producer_status_refuses_deferred_refresh(client, monkeypatch):
     client, root = client
     supervisor = ContainerUpdates(root, {"revision": A, "sequence": 1, "runtime": "fixture"}, b"", lambda: True, lambda _: {})
     supervisor.refresh_mode = "available"
@@ -52,20 +52,123 @@ def test_actual_producer_status_queues_only_explicit_local_refresh(client, monke
     supervisor.publish("idle")
     result = client.get("/settings/application-updates").json()
     assert result["updater"]["revision"] == A
-    assert result["updater"]["refresh"] == "available"
+    assert result["updater"]["refresh"] == "container_restart_required"
+    assert "refresh-updater-v1" not in result["updater"]["capabilities"]
     assert result["diagnostics"]["stages"][0]["outcome"] == "hit"
     for body in ({"action": "refresh-updater"}, {"action": "refresh-updater", "scope": "current", "mode": "stop"}):
         assert client.post("/settings/application-updates", json=body).status_code == 409
     body = {"action": "refresh-updater", "scope": "current"}
-    assert client.post("/settings/application-updates", json=body).json() == {"queued": True}
-    assert json.loads((root / "request.json").read_text())["action"] == "refresh-updater"
-    supervisor.service()
-    assert supervisor.refresh_requested.is_set()
+    response = client.post("/settings/application-updates", json=body)
+    assert response.status_code == 409
+    assert "separately approved container restart" in response.json()["detail"]
+    assert not supervisor.refresh_requested.is_set()
     assert not (root / "request.json").exists()
     monkeypatch.setattr(policy, "allowed", lambda: False)
     assert client.post("/settings/application-updates", json=body).status_code == 409
     monkeypatch.setattr(api.preview_access, "grant", lambda _: object())
     assert client.post("/settings/application-updates", json=body).status_code == 403
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_core_and_owner_api_refuse_even_legacy_refresh_capability(client, monkeypatch, legacy):
+    client, root = client
+    updater = {"revision": A, "capabilities": ["refresh-updater-v1"], "refresh": "available"} if legacy else None
+    (root / "status.json").write_text(json.dumps({"phase": "idle", "version": B[:12], "updater": updater}))
+    monkeypatch.setattr(policy, "allowed", lambda: True)
+    # Neither caller may replace an unrelated, already queued normal action.
+    pending = {"action": "check", "expires_at": 9999999999}
+    (root / "request.json").write_text(json.dumps(pending))
+    with pytest.raises(ValueError, match="separately approved container restart"):
+        policy.enqueue("refresh-updater")
+    for body in ({"action": "refresh-updater"}, {"action": "refresh-updater", "scope": "current"},
+                 {"action": "refresh-updater", "scope": "current", "mode": "stop"},
+                 {"action": "refresh-updater", "scope": "current", "mode": "when_idle"}):
+        response = client.post("/settings/application-updates", json=body)
+        assert response.status_code == 409
+        assert "separately approved container restart" in response.json()["detail"]
+    assert json.loads((root / "request.json").read_text()) == pending
+
+
+def test_deferred_refresh_keeps_policy_preview_and_owner_checks(client, monkeypatch):
+    client, root = client
+    body = {"action": "refresh-updater", "scope": "current"}
+    monkeypatch.setattr(policy, "allowed", lambda: False)
+    response = client.post("/settings/application-updates", json=body)
+    assert response.status_code == 409
+    assert "disabled in Account settings" in response.json()["detail"]
+    with pytest.raises(ValueError, match="disabled in Account settings"):
+        policy.enqueue("refresh-updater")
+    monkeypatch.setattr(api.preview_access, "grant", lambda _: object())
+    assert client.post("/settings/application-updates", json=body).status_code == 403
+    monkeypatch.setattr(api.preview_access, "grant", lambda _: None)
+    client.app.dependency_overrides.pop(require_admin)
+    assert client.post("/settings/application-updates", json=body).status_code == 403
+    assert not (root / "request.json").exists()
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("pending", [False, True])
+def test_real_service_refuses_stale_direct_refresh_request(client, monkeypatch, enabled, pending):
+    import time
+    client, root = client
+    lifecycle = Mock()
+    supervisor = ContainerUpdates(root, {"revision": A, "sequence": 1, "runtime": "fixture"},
+                                  b"", lambda: enabled, lifecycle, refresh_mode="available")
+    supervisor.state = {"active": B, **({"pending": B} if pending else {})}
+    expected = dict(supervisor.state)
+    (root / "request.json").write_text(json.dumps({"action": "refresh-updater", "expires_at": time.time() + 10}))
+    supervisor.service()
+    assert supervisor.state == expected
+    assert not supervisor.refresh_requested.is_set()
+    assert not supervisor.install_requested.is_set()
+    lifecycle.assert_not_called()
+    assert not (root / "request.json").exists()
+    status = json.loads((root / "status.json").read_text())
+    assert status["phase"] == ("ready" if pending else "error")
+    assert "separately approved container restart" in status["error"]
+    assert "refresh-updater-v1" not in status["updater"]["capabilities"]
+    assert status["updater"]["refresh"] != "available"
+
+
+@pytest.mark.parametrize("mode,active,transient,expected", [
+    ("available", B, None, "container_restart_required"),
+    ("container_restart_required", B, None, "container_restart_required"),
+    ("available", A, None, "current"),
+    ("container_restart_required", A, None, "current"),
+    ("available", None, None, "unknown"),
+    ("container_restart_required", B, "booting", "unknown"),
+    ("available", B, "blocked", "unknown"),
+    ("available", B, "pending", "unknown"),
+    ("disabled", B, None, "disabled"),
+    ("image_update_required", B, None, "image_update_required"),
+    ("unknown", B, None, "unknown"),
+])
+def test_producer_metadata_never_offers_deferred_action(client, mode, active, transient, expected):
+    client, root = client
+    supervisor = ContainerUpdates(root, {"revision": A, "sequence": 1, "runtime": "fixture"},
+                                  b"", lambda: True, lambda _: {}, refresh_mode=mode)
+    supervisor.state = {**({"active": active} if active else {}),
+                        **({transient: True if transient == "blocked" else B} if transient else {})}
+    supervisor.publish("idle")
+    result = client.get("/settings/application-updates").json()
+    assert result["updater"]["revision"] == A
+    assert result["updater"]["refresh"] == expected
+    assert result["updater"]["capabilities"] == ["stage-diagnostics-v1", "dependency-cache-v1", "prebuilt-ui-v1", "node-output-cache-v1"]
+
+
+@pytest.mark.parametrize("mode", ["available", "container_restart_required"])
+def test_unknown_resident_does_not_infer_restart_requirement(client, monkeypatch, mode):
+    client, root = client
+    monkeypatch.setenv("SHUFFLE_HANDED_OVER", A)
+    supervisor = ContainerUpdates(root, {"revision": A, "sequence": 1, "runtime": "fixture"},
+                                  b"", lambda: True, lambda _: {}, refresh_mode=mode)
+    assert supervisor.updater_revision is None
+    supervisor.state = {"active": B}
+    supervisor.publish("idle")
+    result = client.get("/settings/application-updates").json()
+    assert result["updater"]["revision"] is None
+    assert result["updater"]["refresh"] == "unknown"
+    assert "refresh-updater-v1" not in result["updater"]["capabilities"]
 
 
 def test_desktop_bridge_optional_metadata_is_bounded_and_redacted(monkeypatch):

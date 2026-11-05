@@ -114,13 +114,6 @@ class RuntimeFailure(Exception):
     """Deliberately secret-free operator diagnostic."""
 
 
-class SupervisorRefresh(Exception):
-    """An owner-authorized handoff, raised through run's complete shutdown."""
-
-    def __init__(self, revision):
-        self.revision = revision
-
-
 class RestartRejected(RuntimeFailure):
     """Preflight failed before any request could quiesce the running worker.
 
@@ -840,7 +833,7 @@ def load_updater():
     return module
 
 
-def handover(settings, execve=os.execve, *, refresh_revision=None):
+def handover(settings, execve=os.execve):
     """Start the active update's own supervisor in place of this image's copy.
 
     Runs once at container start, as appuser, before PostgreSQL or anything
@@ -851,7 +844,7 @@ def handover(settings, execve=os.execve, *, refresh_revision=None):
     runs this image's supervisor instead, over the same update. Returns False
     when this image's supervisor should run; on success it does not return.
     """
-    if ((os.environ.get("SHUFFLE_HANDED_OVER") and refresh_revision is None)
+    if (os.environ.get("SHUFFLE_HANDED_OVER")
             or os.environ.get("SHUFFLE_SOURCE_SUPERVISOR", "1").strip() == "0"):
         return False
     if STOP.is_set():
@@ -879,8 +872,6 @@ def handover(settings, execve=os.execve, *, refresh_revision=None):
     if target is None:
         return False
     revision, python, script = target
-    if refresh_revision is not None and revision != refresh_revision:
-        return False
     write_private(root / HANDOVER_TRIAL, json.dumps({"revision": revision}), replace=True)
     env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV")}
     env.update(SHUFFLE_HANDED_OVER=revision, SHUFFLE_IMAGE_DIR=str(here),
@@ -1666,18 +1657,13 @@ def watch(app, db, chrome, monitor=None, updates=None, restart=None, relaunch=No
             next_update = time.monotonic() + 1
             if getattr(updates, "refresh_requested", None) is not None and updates.refresh_requested.is_set():
                 updates.refresh_requested.clear()
+                # An older producer may have queued the now-deferred shortcut.
+                # Refusal (including a failed status write) must leave the app serving.
                 try:
-                    if monitor is None or not monitor.ever_ready or monitor.failures:
-                        raise RestartRejected("Application is not ready", "Wait for this worker to be ready, then retry updater refresh.")
-                    revision = prepare_updater_refresh(updates)
-                except RestartRejected as exc:
-                    updates.publish("ready" if updates.state.get("pending") else "idle", error=exc.reason)
+                    updates.publish("ready" if updates.state.get("pending") else "idle",
+                                    error=UPDATER_REFRESH_UNAVAILABLE)
                 except Exception:
-                    failure = "updater refresh failed after preflight"
-                else:
-                    # run's finally closes updater threads, app, Chrome and PG;
-                    # main re-verifies and execs only AFTER the lifetime lock closes.
-                    raise SupervisorRefresh(revision)
+                    log("could not publish the updater refresh refusal; current worker left running")
             elif updates.install_requested.is_set():
                 updates.install_requested.clear()
                 try:
@@ -1737,29 +1723,17 @@ def updater_refresh_mode(image):
         return "image_update_required"
     if os.environ.get("SHUFFLE_SOURCE_SUPERVISOR", "1").strip() == "0":
         return "disabled"
-    return "available"
+    return "container_restart_required"
+
+
+UPDATER_REFRESH_UNAVAILABLE = (
+    "In-app updater refresh is unavailable. Reloading the updater requires a separately approved container restart."
+)
 
 
 def prepare_updater_refresh(updates):
-    """Validate before quiescing; never switch code or ownership in a service thread."""
-    try:
-        if (updater_refresh_mode(updates.image) != "available" or not updates.allowed()
-                or updates.updater_status()["refresh"] != "available"):
-            raise ValueError("unavailable")
-        if updates.lifecycle("active-sessions").get("active_sessions") != 0:
-            raise ValueError("busy")
-        target = load_updater().handover_target(updates.root, updates.image, updates.public_key)
-        if target is None or target[0] == updates.updater_revision:
-            raise ValueError("unproven")
-        # Policy can change during the signature/tree checks.
-        if not updates.allowed():
-            raise ValueError("disabled")
-    except Exception as exc:
-        raise RestartRejected("Updater refresh preflight failed",
-                              "Updater refresh requires a healthy signed update, Allow updates, and no active sessions.") from exc
-    if updates.lifecycle("stop-sessions").get("stopped") is not True:
-        raise RuntimeFailure("Could not quiesce the worker for updater refresh")
-    return target[0]
+    """Fail closed for stale callers; only process startup may hand over the supervisor."""
+    raise RestartRejected("Updater refresh is unavailable", UPDATER_REFRESH_UNAVAILABLE)
 
 
 def restart_into_update(current, updates, env, before_start=None):
@@ -1996,12 +1970,7 @@ def main(argv=None):
         harden_process_introspection(settings)
         if (args.action or "run") == "run":
             handover(settings)
-        try:
-            return run(settings, args.action or "run", getattr(args, "file", None))
-        except SupervisorRefresh as refresh:
-            if handover(settings, refresh_revision=refresh.revision):
-                return 0  # execve does not return in production
-            raise RuntimeFailure("Updater refresh refused after shutdown; restart the container to recover")
+        return run(settings, args.action or "run", getattr(args, "file", None))
     except RuntimeFailure as error:
         log(str(error))
     except Exception as error:

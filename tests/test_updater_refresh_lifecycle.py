@@ -1,11 +1,12 @@
-"""Refresh keeps the supervisor boundary; subprocess checks are controlled, not a container update."""
-import importlib.util
+"""Deferred live refresh never stops work; startup handover retains its ownership boundary."""
+import asyncio
 import itertools
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
+import threading
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -22,6 +23,7 @@ def healthy(feed, monkeypatch):
     updater, publish, *_ = feed
     import copy
     current = installed(updater, publish, image=copy.deepcopy(NEW_IMAGE))
+    # An older resident may still pass this mode and retain a queued intent.
     current.refresh_mode = "available"
     current.lifecycle = Mock(side_effect=lambda action: {"active_sessions": 0} if action == "active-sessions" else {"stopped": True})
     monkeypatch.setattr(runtime, "isolation", lambda: SimpleNamespace(ACTIVE=None))
@@ -30,10 +32,13 @@ def healthy(feed, monkeypatch):
     return current
 
 
-def test_refresh_rechecks_signed_healthy_source_before_quiescing(healthy):
-    assert runtime.prepare_updater_refresh(healthy) == B
-    assert [call.args[0] for call in healthy.lifecycle.call_args_list] == ["active-sessions", "stop-sessions"]
-    assert healthy.state == {"active": B}, "refresh does not activate staging or migrate the database"
+def test_refresh_is_refused_even_with_signed_healthy_source(healthy):
+    assert module.handover_target(healthy.root, healthy.image, healthy.public_key)[0] == B
+    with pytest.raises(runtime.RestartRejected) as caught:
+        runtime.prepare_updater_refresh(healthy)
+    assert "separately approved container restart" in caught.value.reason
+    healthy.lifecycle.assert_not_called()
+    assert healthy.state == {"active": B}, "refusal does not activate staging or migrate the database"
 
 
 @pytest.mark.parametrize("gate", ["isolation", "disabled", "policy", "busy", "booting", "blocked", "pending", "trial", "signature", "capability"])
@@ -57,17 +62,114 @@ def test_refresh_preflight_fails_closed_without_quiescing(healthy, monkeypatch, 
         healthy.image["provides"] = []
     with pytest.raises(runtime.RestartRejected):
         runtime.prepare_updater_refresh(healthy)
-    assert all(call.args[0] != "stop-sessions" for call in healthy.lifecycle.call_args_list)
+    healthy.lifecycle.assert_not_called()
 
 
-def test_policy_change_during_verification_is_refused(healthy):
-    healthy.allowed = Mock(side_effect=[True, False])
-    with pytest.raises(runtime.RestartRejected):
-        runtime.prepare_updater_refresh(healthy)
-    assert healthy.lifecycle.call_args_list == [(('active-sessions',),)]
+@pytest.mark.parametrize("isolated,disabled,capability,expected", [
+    (False, False, True, "container_restart_required"),
+    (False, True, True, "disabled"),
+    (True, False, True, "image_update_required"),
+    (False, False, False, "image_update_required"),
+])
+def test_refresh_mode_never_offers_live_action(healthy, monkeypatch, isolated, disabled, capability, expected):
+    monkeypatch.setattr(runtime, "isolation", lambda: SimpleNamespace(ACTIVE=object() if isolated else None))
+    monkeypatch.setenv("SHUFFLE_SOURCE_SUPERVISOR", "0" if disabled else "1")
+    if not capability:
+        healthy.image["provides"] = []
+    assert runtime.updater_refresh_mode(healthy.image) == expected
 
 
-def test_explicit_handover_chains_only_to_reverified_target(healthy, monkeypatch, tmp_path):
+async def test_refresh_never_stops_turn_admitted_during_signed_verification(healthy, mock_db, monkeypatch):
+    """The original race now refuses at every entry while real turns keep running.
+
+    Signed validation is driven independently: the deferred prepare operation
+    must no longer reach it, or any lifecycle operation, at all.
+    """
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+    from app.api import internal, settings_updates
+    from app.api.auth import require_admin
+    from app.core import application_updates, session_runtime, startup
+    from app.db import runs, turns
+    from app.serve import IngressApplication
+    from tests.core.test_session_runtime import _runtime_env
+
+    monkeypatch.setenv("SHUFFLE_DESKTOP_LIFECYCLE_TOKEN", "test-child-secret")
+    monkeypatch.setattr(internal, "_shutdown_task", None)
+    monkeypatch.setattr(startup, "is_shutting_down", False)
+    monkeypatch.setattr(application_updates, "allowed", lambda: True)
+    monkeypatch.setattr(application_updates, "control_root", lambda: healthy.root)
+    monkeypatch.setattr(settings_updates.preview_access, "grant", lambda _: None)
+    app = FastAPI()
+    app.include_router(internal.router)
+    app.include_router(settings_updates.updates_router, prefix="/settings")
+    app.dependency_overrides[require_admin] = lambda: "owner"
+    loop = asyncio.get_running_loop()
+    verifying, finish = asyncio.Event(), asyncio.Event()
+    began = asyncio.Queue()
+    verified = threading.Event()
+    signed_target = module.handover_target
+
+    def verify(*args):
+        loop.call_soon_threadsafe(verifying.set)
+        assert verified.wait(5), "test did not admit work during verification"
+        return signed_target(*args)
+
+    async def pump(**kwargs):
+        began.put_nowait(True)
+        await finish.wait()
+        yield {"type": "done"}
+
+    monkeypatch.setattr(module, "handover_target", verify)
+    existing = turns.enqueue_turn("existing-work", "user", prompt="keep working")
+    arriving = turns.enqueue_turn("verification-race", "user", prompt="new work")
+    async with AsyncClient(transport=ASGITransport(app=IngressApplication(app, 8000)),
+                           base_url="http://localhost:8000") as client:
+        async def request(action):
+            response = await client.request("GET" if action == "active-sessions" else "POST",
+                                            f"/api/v1/internal/desktop/{action}",
+                                            headers={"Authorization": "Bearer test-child-secret"})
+            response.raise_for_status()
+            return response.json()
+
+        healthy.lifecycle.side_effect = lambda action: asyncio.run_coroutine_threadsafe(request(action), loop).result(5)
+        with _runtime_env(pump=pump) as env:
+            env["registry"].active_session_ids.return_value = []
+            work = [asyncio.create_task(session_runtime.execute(existing))]
+            verification = None
+            try:
+                await asyncio.wait_for(began.get(), 5)
+                verification = asyncio.create_task(asyncio.to_thread(
+                    module.handover_target, healthy.root, healthy.image, healthy.public_key))
+                await asyncio.wait_for(verifying.wait(), 5)
+                work.append(asyncio.create_task(session_runtime.execute(arriving)))
+                await asyncio.wait_for(began.get(), 5)
+                verified.set()
+                assert (await asyncio.wait_for(verification, 5))[0] == B
+                with pytest.raises(runtime.RestartRejected):
+                    await asyncio.to_thread(runtime.prepare_updater_refresh, healthy)
+                response = await client.post("/settings/application-updates",
+                                             json={"action": "refresh-updater", "scope": "current"})
+                assert response.status_code == 409
+                assert not (healthy.root / "request.json").exists()
+                for task, turn in zip(work, (existing, arriving)):
+                    assert not task.done()
+                    assert turns.get_turn(turn["id"])["state"] == "running"
+                    assert runs.get_active_run(turn["session_id"]) is not None
+                assert not startup.is_shutting_down
+                healthy.lifecycle.assert_not_called()
+            finally:
+                verified.set()
+                finish.set()
+                await asyncio.gather(*work, *([verification] if verification else []), return_exceptions=True)
+                startup.is_shutting_down = False
+            # Refusal leaves admission open too, not merely existing work alive.
+            successor = turns.enqueue_turn("after-refusal", "user", prompt="still serving")
+            await session_runtime.execute(successor)
+            assert turns.get_turn(successor["id"])["state"] == "completed"
+
+
+def test_startup_handover_chains_only_to_reverified_target(healthy, monkeypatch, tmp_path):
     image = tmp_path / "image"
     image.mkdir()
     (image / "image.json").write_text(json.dumps(healthy.image))
@@ -79,32 +181,55 @@ def test_explicit_handover_chains_only_to_reverified_target(healthy, monkeypatch
     settings = SimpleNamespace(effective_data_dir=healthy.root.parent)
     execute = Mock()
     assert runtime.handover(settings, execute) is False
-    assert runtime.handover(settings, execute, refresh_revision=A) is False
     execute.assert_not_called()
-    assert runtime.handover(settings, execute, refresh_revision=B) is True
+    # Only a new container process, not an in-app refresh, can hand over again.
+    monkeypatch.delenv("SHUFFLE_HANDED_OVER")
+    assert runtime.handover(settings, execute) is True
     executable, args, env = execute.call_args.args
     assert args == [executable, str(healthy.directory(B) / "source/docker/container_runtime.py"), "run"]
     assert env["SHUFFLE_HANDED_OVER"] == B and env["SHUFFLE_IMAGE_DIR"] == str(image)
     assert json.loads((healthy.root / "handover.json").read_text()) == {"revision": B}
     # An exec which never reaches health cannot get a second trial.
-    assert runtime.handover(settings, Mock(), refresh_revision=B) is False
+    assert runtime.handover(settings, Mock()) is False
 
 
-def test_watch_handoff_is_an_explicit_supervisor_event(healthy, monkeypatch):
-    monkeypatch.setattr(runtime, "prepare_updater_refresh", lambda _: B)
+@pytest.mark.parametrize("pending", [False, True])
+@pytest.mark.parametrize("publish_fails", [False, True])
+def test_watch_refuses_stale_refresh_intent_without_restarting(healthy, monkeypatch, pending, publish_fails):
     counter = itertools.count(step=5)
     monkeypatch.setattr(runtime.time, "monotonic", lambda: next(counter))
+    prepare, restart, relaunch, stop, shutdown = (Mock() for _ in range(5))
+    monkeypatch.setattr(runtime, "prepare_updater_refresh", prepare)
+    monkeypatch.setattr(runtime, "stop_group", stop)
+    monkeypatch.setattr(runtime, "shutdown", shutdown)
     runtime.STOP.clear()
     healthy.refresh_requested.set()
+    if pending:
+        healthy.state["pending"] = B
+    original_publish = healthy.publish
+
+    def refuse(phase, **kwargs):
+        runtime.STOP.set()  # bound the test watch, not an application stop
+        if publish_fails:
+            raise OSError("synthetic status write failure")
+        return original_publish(phase, **kwargs)
+
+    monkeypatch.setattr(healthy, "publish", Mock(side_effect=refuse))
     app = SimpleNamespace(poll=lambda: None)
     monitor = SimpleNamespace(ever_ready=True, failures=0, live_failures=0, check=lambda: False)
-    with pytest.raises(runtime.SupervisorRefresh) as caught:
-        runtime.watch(app, SimpleNamespace(process=None), None, monitor=monitor, updates=healthy)
-    assert caught.value.revision == B
-    assert not healthy.refresh_requested.is_set()
+    try:
+        assert runtime.watch(app, SimpleNamespace(process=None), None, monitor=monitor, updates=healthy,
+                             restart=restart, relaunch=relaunch) == 0
+        assert not healthy.refresh_requested.is_set()
+        healthy.publish.assert_called_once_with("ready" if pending else "idle", error=runtime.UPDATER_REFRESH_UNAVAILABLE)
+        for operation in (prepare, restart, relaunch, stop, shutdown, healthy.lifecycle):
+            operation.assert_not_called()
+        assert healthy.state == {"active": B, **({"pending": B} if pending else {})}
+    finally:
+        runtime.STOP.clear()
 
 
-def test_real_subprocess_app_restart_keeps_resident_supervisor_and_refresh_releases_lock(tmp_path):
+def test_real_subprocess_app_restart_keeps_supervisor_and_startup_handover_releases_lock(tmp_path):
     project = Path(__file__).resolve().parents[1]
     target = tmp_path / "target.py"
     target.write_text("""import fcntl,json,os,pathlib,sys
@@ -136,10 +261,9 @@ rt.Database=DB
 class Updates:
  def __init__(self,*args,**kw):
   self.root=root; self.state={'active':'b'*40}; self.image=image; self.public_key=b'fixture'
-  self.updater_revision='a'*40; self.refresh_mode='available'; self.stop=types.SimpleNamespace(is_set=lambda:False)
+  self.updater_revision='a'*40; self.stop=types.SimpleNamespace(is_set=lambda:False)
  def publish(self,*a,**kw): pass
  def allowed(self): return True
- def updater_status(self): return {'refresh':'available'}
  def lifecycle(self,action): return {'active_sessions':0,'stopped':True}
  def launch(self,env,**kw): return [sys.executable,'-c','import signal; signal.pause()'],None,dict(env,GIT_SHA='b'*40)
  def snapshot_room(self): pass
@@ -156,13 +280,18 @@ def watch(app,db,chrome,monitor,updates,restart,relaunch,**kw):
  assert new.pid!=old and app.poll() is not None and os.getpid()==initial
  assert updates.updater_revision=='a'*40 and updates.state['active']=='b'*40
  events['app_restart_kept_supervisor']=True
- raise rt.SupervisorRefresh(rt.prepare_updater_refresh(updates))
+ try: rt.prepare_updater_refresh(updates)
+ except rt.RestartRejected: pass
+ else: raise AssertionError('live refresh was accepted')
+ assert new.poll() is None and not events['closed'] and not events.get('updates_closed')
+ rt.STOP.set()  # a separate process stop, not a refresh request
+ return 0
 rt.watch=watch
-try: rt.run(settings,'run')
-except rt.SupervisorRefresh as refresh:
- assert events['closed'] and events['updates_closed'] and events['app_restart_kept_supervisor']
- rt.handover(settings,refresh_revision=refresh.revision)
-raise AssertionError('exec did not occur')
+assert rt.run(settings,'run')==0
+assert events['closed'] and events['updates_closed'] and events['app_restart_kept_supervisor']
+rt.STOP.clear()
+rt.handover(settings)
+raise AssertionError('startup exec did not occur')
 """
     env = {"PATH": os.defpath, "HOME": str(tmp_path), "PYTHONPATH": str(project) + os.pathsep + str(project / "fluid"),
            "DATA_DIR": str(tmp_path), "AI_SHUFFLE_ENV_FILE": os.devnull, "TESTING": "1"}

@@ -80,11 +80,10 @@ async def application_update_action(body: UpdateAction, _=Depends(require_update
     from app.core.update_workers import dispatch
     try:
         if body.action == "refresh-updater":
-            # Never fan this disruptive, capability-specific action out to peers.
-            if body.scope != "current" or body.mode is not None:
-                raise ValueError("Updater refresh requires scope=current and no restart mode")
-            await run_sync(application_updates.enqueue, body.action)
-            return {"queued": True}
+            # Recognize stale clients, but do not trust an older resident's capability.
+            if not await run_sync(application_updates.allowed):
+                raise ValueError("Application updates are disabled in Account settings")
+            raise ValueError(application_updates.UPDATER_REFRESH_UNAVAILABLE)
         return await dispatch(body.action, body.mode, body.scope)
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
