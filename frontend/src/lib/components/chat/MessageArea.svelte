@@ -817,7 +817,7 @@
 	// the reader moves up. Measured per shift; every later shift re-anchors.
 	let leadingGap = $state(0);
 
-	function applyMountedRange(next: TranscriptRange, preserveAnchor = true, keepLeadingSpace = false) {
+	function applyMountedRange(next: TranscriptRange, preserveAnchor = true, keepLeadingSpace = false, allowFollowerAppend = false) {
 		// Once the budget was reached, keep the clear affordance stable until
 		// the native selection ends, even if this reprice itself fits the window.
 		selectionBlocksNavigation = transcriptWindow.selectionLimited ||
@@ -825,6 +825,19 @@
 		if (selectionBlocksNavigation) shouldAutoScroll = false;
 		if (!preserveAnchor) anchorRounding = null;
 		if (next.start === mountedStart && next.end === mountedEnd) return;
+		// An automatic append retains this session's coordinate origin. Let the
+		// same-task tail follow consume its reserve instead of treating it as an
+		// eviction and blocking follow until a later ResizeObserver frame.
+		if (allowFollowerAppend && shouldAutoScroll && !preserveAnchor && !windowShifting &&
+			next.start === mountedStart && next.end > mountedEnd && mountedEnd > mountedStart &&
+			chatColumnRef?.querySelector<HTMLElement>(':scope > [data-transcript-key]')?.dataset.transcriptKey === displayItemKey(displayItems[next.start])) {
+			mountedRange = next;
+			if (windowSessionKey) {
+				mountedRangeCache.set(windowSessionKey, leadingGap ? { ...next, leadingGap } : next);
+				evictOldest(mountedRangeCache, SCROLL_CACHE_MAX);
+			}
+			return;
+		}
 		const container = containerRef;
 		const top = container?.getBoundingClientRect().top ?? 0;
 		const candidates = preserveAnchor && container
@@ -946,7 +959,7 @@
 				next = transcriptWindow.restoreRange(saved);
 			}
 			const reading = !isNewSession && !shouldAutoScroll;
-			applyMountedRange(next, reading, reading);
+			applyMountedRange(next, reading, reading, !isNewSession);
 			if (isNewSession && saved?.leadingGap && next.start === saved.start && next.end === saved.end) leadingGap = saved.leadingGap;
 		});
 	});

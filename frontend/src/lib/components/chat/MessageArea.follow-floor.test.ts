@@ -138,3 +138,52 @@ describe('MessageArea followed-floor coordinate ownership', () => {
 		expect(p.env.calls).toEqual(['anchor', 'follow']);
 	});
 });
+
+const rangePrefix = between('function applyMountedRange(', 'const container = containerRef;')
+	.replace('next: TranscriptRange', 'next').replaceAll('<HTMLElement>', '');
+const rangeCommit = between('const version = ++windowShiftVersion;', 'void tick().then(async () => {');
+function appendProbe(overrides: Record<string, unknown> = {}) {
+	const env = { start: 0, end: 2, next: { start: 0, end: 3 }, allowed: true, follows: true,
+		shifting: false, gap: 0, leadingKey: 'first', firstKey: 'first', ...overrides };
+	return new Function('env', `
+		let mountedRange = { start: env.start, end: env.end };
+		const mountedStart = mountedRange.start, mountedEnd = mountedRange.end;
+		let followedViewportEnd = 5600, windowShiftVersion = 4, windowShifting = env.shifting, leadingGap = env.gap;
+		let selectionBlocksNavigation = false, shouldAutoScroll = env.follows, anchorRounding = null;
+		const transcriptWindow = { selectionLimited: false }, pinnedTranscriptRange = () => null;
+		const chatColumnRef = { querySelector: () => ({ dataset: { transcriptKey: env.leadingKey } }) };
+		const displayItems = [{ key: env.firstKey }, { key: 'second' }, { key: 'third' }];
+		const displayItemKey = item => item.key;
+		const windowSessionKey = 'long', mountedRangeCache = new Map(), SCROLL_CACHE_MAX = 1;
+		const evictOldest = () => {};
+		${rangePrefix}
+		${rangeCommit}
+		}
+		applyMountedRange(env.next, false, false, env.allowed);
+		return { floor: followedViewportEnd, version: windowShiftVersion, shifting: windowShifting,
+			gap: leadingGap, range: mountedRange, cached: mountedRangeCache.get(windowSessionKey) };
+	`)(env);
+}
+
+describe('automatic same-context follower appends', () => {
+	it('does not invalidate coordinates or pending follow work when only the tail grows', () => {
+		const state = appendProbe();
+		expect(state).toMatchObject({ floor: 5600, version: 4, shifting: false, range: { start: 0, end: 3 }, cached: { start: 0, end: 3 } });
+	});
+
+	it('preserves existing leading space in both the DOM state and cached range', () => {
+		expect(appendProbe({ gap: 12 })).toMatchObject({ floor: 5600, version: 4, shifting: false, gap: 12, cached: { leadingGap: 12 } });
+	});
+
+	it.each([
+		['leading eviction', { next: { start: 1, end: 3 } }],
+		['trailing removal', { next: { start: 0, end: 1 } }],
+		['replaced leading key', { firstKey: 'replacement' }],
+		['new session or explicit navigation', { allowed: false }],
+		['scrolled-up reader', { follows: false }],
+		['a genuine shift already in progress', { shifting: true }],
+		['transcript clear', { next: { start: 0, end: 0 } }]
+	] as const)('retains the strict coordinate-shift path for %s', (_name, overrides) => {
+		expect(appendProbe(overrides)).toMatchObject({ floor: 0, version: 5, shifting: true });
+	});
+});

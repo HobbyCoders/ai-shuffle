@@ -5,7 +5,7 @@
 // error/Stop case specifically requires the seeded Claude Code CLI project.
 import { writeFileSync } from 'node:fs';
 import { runJourney } from './runner.mjs';
-import { api, composer, expect, gotoApp, openPopup, pick, pickAgent, pickProject, scriptTag, seededChatId, sendButton, sidebarRow, typeAndSend, uniq, waitChat, waitChatOpen, waitTurnSettled } from './lib/app.mjs';
+import { SEEDED, api, composer, expect, gotoApp, openFromSidebar, openPopup, pick, pickAgent, pickProject, scriptTag, seededChatId, sendButton, sidebarRow, typeAndSend, uniq, waitChat, waitChatOpen, waitTurnSettled } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 
 const mobile = process.argv.includes('--mobile-shell');
@@ -403,5 +403,53 @@ cases.push({
 	async setup(ctx) { await openClaude(ctx, { history: true }); },
 	act: cases.find(test => test.name === 'short-send').act
 });
+
+cases.push({
+	name: 'long-to-short-navigation',
+	async setup(ctx) {
+		const { page, status, variant } = ctx;
+		await gotoApp(page, status, `${prefix(variant)}?session=${seededChatId(status, 'other_project')}`);
+		await waitChatOpen(page, { messagesAtLeast: 2 });
+		await openSwitchTarget(ctx, SEEDED.no_project);
+		for (let turn = 0; turn < 4; turn++) {
+			const count = Number(await page.locator('[data-ui-state="chat"]').getAttribute('data-ui-messages'));
+			await typeAndSend(page, `navigation history ${uniq()} ${scriptTag(variant, 'long', { tps: 2000 })}`);
+			await waitTurnSettled(page, { messagesAtLeast: count + 2, hold: 200 });
+		}
+		await page.waitForTimeout(1600);
+		const top = await page.locator(LOG).evaluate(el => el.scrollTop);
+		expect(top > 5000, `the outgoing followed chat really has long coordinates (${top}px)`);
+	},
+	async act(ctx) {
+		const { page, mark, log } = ctx;
+		await mark('switch from the followed long chat to the cached short chat');
+		await openSwitchTarget(ctx, SEEDED.other_project);
+		await page.waitForTimeout(2000);
+		const geometry = await page.locator(LOG).evaluate(el => {
+			const box = el.getBoundingClientRect();
+			const column = el.querySelector('.chat-column');
+			const last = [...column.querySelectorAll(':scope > .msg-virtualized')].at(-1);
+			const row = last.getBoundingClientRect();
+			return { top: el.scrollTop, height: el.scrollHeight, viewport: el.clientHeight,
+				padding: parseFloat(getComputedStyle(column).paddingBottom), rowTop: row.top, rowBottom: row.bottom,
+				viewportTop: box.top, viewportBottom: box.bottom };
+		});
+		log(`long-to-short navigation ${JSON.stringify(geometry)}`);
+		expect(geometry.padding <= geometry.viewport + 1, 'short chat reserve belongs to its viewport, not the outgoing scroll offset');
+		expect(geometry.top <= geometry.viewport, 'the incoming short chat does not inherit the outgoing long scroll offset');
+		expect(geometry.rowBottom > geometry.viewportTop && geometry.rowTop < geometry.viewportBottom, 'the short completed answer remains on screen, not above blank padding');
+	}
+});
+
+async function openSwitchTarget(ctx, title) {
+	const { page, variant } = ctx;
+	if (mobile && variant.viewport === 'phone') {
+		await page.getByRole('button', { name: /^Open menu/ }).click();
+		await sidebarRow(page, title).click();
+	} else {
+		await openFromSidebar(page, title);
+	}
+	await waitChatOpen(page, { messagesAtLeast: 2, hold: 300 });
+}
 
 await runJourney({ name: 'chat-position-stability', cases, allow: [...DEV_INSTANCE_NOISE] });
