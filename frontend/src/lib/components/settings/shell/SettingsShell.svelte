@@ -226,7 +226,7 @@
 	data-view={stacked ? settingsNav.view : undefined}
 	{onkeydown}
 >
-	<ViewShell label="Settings" inheritScope bind:stacked detailOpen={settingsNav.view !== 'index'}
+	<ViewShell label="Settings" inheritScope nestedPanes bind:stacked detailOpen={settingsNav.view !== 'index'}
 		manageHistory={false} onBack={() => settingsNav.back()}>
 		{#snippet panel()}<SettingsIndex {onkeydown} />{/snippet}
 		{#snippet main()}

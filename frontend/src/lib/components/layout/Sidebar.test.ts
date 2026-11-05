@@ -1770,9 +1770,10 @@ describe('Sidebar page-panel host', () => {
 		view.unmount();
 		expect(viewPanel.hostMounted).toBe(false);
 	});
-	it('does not register or consume claims in the phone drawer', async () => {
+	it.each([false, true])('does not register or consume claims in the phone drawer (host=%s)', async (panelHost) => {
+		platform.set('mobile');
 		mocks.activeView.set({ type: 'settings' });
-		const view = render(Sidebar, { props: sidebarProps });
+		const view = render(Sidebar, { props: { ...sidebarProps, panelHost } });
 		await tick();
 		expect(viewPanel.hostMounted).toBe(false);
 		expect(view.container.querySelector('.page-panel')).toBeNull();

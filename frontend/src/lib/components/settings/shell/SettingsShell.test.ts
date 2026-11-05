@@ -378,6 +378,9 @@ describe('SettingsShell stacked mode', () => {
 
 		await fireEvent.click(within(nav()).getByRole('button', { name: 'Voice' }));
 		expect(shell.getAttribute('data-view')).toBe('page');
+		// Page mode hides inner .st-dpane item details, never the shared outer slot.
+		expect(shell.querySelector('.view-main-slot')?.classList.contains('st-dpane')).toBe(false);
+		expect(shell.querySelector('.view-main-slot')?.hasAttribute('hidden')).toBe(false);
 		expect(mocks.pushState).toHaveBeenCalledWith('', expect.objectContaining({ settingsView: 'page', settingsDepth: 1 }));
 
 		await fireEvent.click(screen.getByRole('button', { name: 'Back to Settings' }));

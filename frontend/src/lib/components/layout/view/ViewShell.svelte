@@ -48,10 +48,12 @@ Panel contexts and tokens travel automatically. Off-screen feature pages never c
 		manageHistory?: boolean;
 		/** Existing Settings/Agents provide their own stacked token scope. */
 		inheritScope?: boolean;
+		/** Legacy Settings owns inner page/detail panes; its outer slot is not a detail pane. */
+		nestedPanes?: boolean;
 		/** Optional observation, e.g. a page that auto-selects its first item only on desktop. */
 		stacked?: boolean;
 	}
-	let { panel, main, label, detailOpen = false, onBack, manageHistory = true, inheritScope = false,
+	let { panel, main, label, detailOpen = false, onBack, manageHistory = true, inheritScope = false, nestedPanes = false,
 		stacked = $bindable(false) }: Props = $props();
 	const contexts = getAllContexts();
 	const feature = getContext<FeaturePanelContext | undefined>(FEATURE_PANEL_CONTEXT);
@@ -123,7 +125,7 @@ Panel contexts and tokens travel automatically. Off-screen feature pages never c
 			{@render bridgedPanel()}
 		</div>
 	{/if}
-	<section class="view-main-slot st-dpane st-scroll" aria-label="Details" hidden={stacked && !detailOpen} inert={stacked && !detailOpen}>
+	<section class="view-main-slot st-scroll" class:st-dpane={!nestedPanes} aria-label="Details" hidden={stacked && !detailOpen} inert={stacked && !detailOpen}>
 		{@render main(back)}
 	</section>
 </div>
