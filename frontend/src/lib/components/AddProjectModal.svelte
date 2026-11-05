@@ -29,6 +29,7 @@
 	import type { GitHubRepo } from '$lib/api/github';
 	import type { Install } from '$lib/api/installs';
 	import { onMount, untrack } from 'svelte';
+	import Segmented from '$lib/components/settings/rows/Segmented.svelte';
 	import DirectoryBrowser from '$lib/components/DirectoryBrowser.svelte';
 	import GitHubRepoPicker from '$lib/components/git/GitHubRepoPicker.svelte';
 	import { focusTrap } from '$lib/components/ui/focus-trap';
@@ -287,14 +288,8 @@
 				<Banner message={addError} />
 			{/if}
 
-			<div class="src" role="radiogroup" aria-label="Source">
-				<button class="ui-choice" type="button" role="radio" aria-checked={source === 'folder'} class:on={source === 'folder'} onclick={() => (source = 'folder')} disabled={adding}>
-					<Folder size={14} strokeWidth={1.8} aria-hidden="true" /><span>Folder on {selfName}</span>
-				</button>
-				<button class="ui-choice" type="button" role="radio" aria-checked={source === 'github'} class:on={source === 'github'} onclick={() => (source = 'github')} disabled={adding}>
-					<Github size={14} strokeWidth={1.8} aria-hidden="true" /><span>Clone from GitHub</span>
-				</button>
-			</div>
+			<Segmented label="Source" selection="radio" stretch bind:value={source} disabled={adding}
+				options={[{ value: 'folder', label: `Folder on ${selfName}`, icon: Folder }, { value: 'github', label: 'Clone from GitHub', icon: Github }]} />
 
 			{#if source === 'folder'}
 				<div class="ui-field">
@@ -410,9 +405,7 @@
 
 <style>
  .project-body { display: grid; gap: 12px; }
- .src { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
- .src button { min-width: 0; text-align: left; }
- .src button span { overflow: hidden; text-overflow: ellipsis; }
+
  .create-modal-row { display: flex; gap: 12px; }
  .create-modal-row > div { flex: 1; }
  .path-hint, .hint { font-size: 12px; color: var(--muted-foreground); }
@@ -426,5 +419,5 @@
  .worker-copy > .hint:last-child { margin-left: auto; }
  .box { display: grid; place-items: center; width: 16px; height: 16px; border: 1px solid var(--border); border-radius: 4px; background: var(--muted); color: var(--foreground); }
  .foot { margin: 8px 0 0; }
- @media (max-width: 600px) { .create-modal-row { flex-direction: column; } .src { grid-template-columns: 1fr; } }
+ @media (max-width: 600px) { .create-modal-row { flex-direction: column; } }
 </style>

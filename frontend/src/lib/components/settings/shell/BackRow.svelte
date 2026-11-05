@@ -1,7 +1,7 @@
 <script lang="ts" module>
 	/** The visible parent step lends its original callback to either phone bar. */
 	export const phoneBack = $state({ owner: null as symbol | null, host: null as symbol | null,
-		label: '', onclick: null as (() => void) | null, status: null as import('svelte').Snippet | null });
+		label: '', onclick: null as (() => void) | null, status: null as import('svelte').Snippet | null, actions: null as import('svelte').Snippet | null });
 </script>
 <script lang="ts">
 	import { getContext, onMount, type Snippet } from 'svelte';
@@ -9,7 +9,7 @@
 	import { platform } from '$lib/stores/platform.svelte';
 	import { settingsNav } from '$lib/settings/navigation.svelte';
 	import { FEATURE_PANEL_CONTEXT, type FeaturePanelContext } from '../../layout/feature-panel-context';
-	let { label, onclick, children }: { label: string; onclick: () => void; children?: Snippet } = $props();
+	let { label, onclick, children, actions }: { label: string; onclick: () => void; children?: Snippet; actions?: Snippet } = $props();
 	const feature = getContext<FeaturePanelContext | undefined>(FEATURE_PANEL_CONTEXT);
 	const owner = Symbol('phone-back');
 	let row: HTMLDivElement | undefined = $state();
@@ -33,13 +33,13 @@
 	});
 	$effect(() => {
 		if ((!phone && !platform.isMobile) || !visible || feature?.active === false) return;
-		phoneBack.owner = owner; phoneBack.label = label; phoneBack.onclick = onclick; phoneBack.status = children ?? null;
-		return () => { if (phoneBack.owner === owner) { phoneBack.owner = null; phoneBack.label = ''; phoneBack.onclick = null; phoneBack.status = null; } };
+		phoneBack.owner = owner; phoneBack.label = label; phoneBack.onclick = onclick; phoneBack.status = children ?? null; phoneBack.actions = actions ?? null;
+		return () => { if (phoneBack.owner === owner) { phoneBack.owner = null; phoneBack.label = ''; phoneBack.onclick = null; phoneBack.status = null; phoneBack.actions = null; } };
 	});
 </script>
 <div class="st-back-row st-dtop" bind:this={row} data-in-topbar={phoneBack.host && (phone || platform.isMobile) ? '' : undefined}>
 	<button type="button" class="st-back" aria-label={`Back to ${label}`} {onclick}><ChevronLeft /><span>{label}</span></button>
-	<div class="back-status">{@render children?.()}</div>
+	<div class="back-status">{@render children?.()}{#if !phoneBack.host && (phone || platform.isMobile)}{@render actions?.()}{/if}</div>
 </div>
 <style>
 	.st-back-row { position: absolute; top: 10px; inset-inline: var(--st-gutter); display: flex; align-items: center; min-height: 32px; gap: 8px; }

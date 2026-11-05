@@ -112,11 +112,14 @@ import AutomationModelError from './AutomationModelError.svelte';
     <div class="automation-prompt"><h4>Prompt</h4><p>{automation.prompt || 'No prompt. This automation uses action steps.'}</p></div>
    </RowGroup>
    {#if detailStats}
-    <RowGroup title="Run summary">
-     <SettingRow label="Total runs"><span>{detailStats.total_runs}</span></SettingRow>
-     <SettingRow label="Total cost"><span>{formatCost(detailStats.total_cost_usd)}</span></SettingRow>
-     <SettingRow label="Success rate"><span>{successRate(detailStats.total_runs,detailStats.successful_runs)}</span></SettingRow>
-     <SettingRow label="Failures"><span>{detailStats.failed_runs}</span></SettingRow>
+    <RowGroup title="Run summary" bare>
+     <!-- Same metric-strip grammar as Stats: four columns, two by two on phone. -->
+     <dl class="metrics st-card">
+      <div class="metric"><dt>Total runs</dt><dd>{detailStats.total_runs}</dd></div>
+      <div class="metric"><dt>Total cost</dt><dd>{formatCost(detailStats.total_cost_usd)}</dd></div>
+      <div class="metric"><dt>Success rate</dt><dd>{successRate(detailStats.total_runs,detailStats.successful_runs)}</dd></div>
+      <div class="metric"><dt>Failures</dt><dd>{detailStats.failed_runs}</dd></div>
+     </dl>
     </RowGroup>
    {/if}
    {#if automation.action_steps?.length}
@@ -124,7 +127,7 @@ import AutomationModelError from './AutomationModelError.svelte';
      {#each automation.action_steps as step, i}<SettingRow label="Step {i+1}" hint={step.type.replaceAll('_',' ')}><span title={[step.connector_id, step.action_id].filter(Boolean).join(' · ') || undefined}>{step.prompt || step.url || (step.type === 'delay' ? `${step.seconds}s` : step.type === 'connector_action' ? (connectorTypes.find(t => t.type === connectors.find(c => c.id === step.connector_id)?.type)?.actions.find(a => a.id === step.action_id)?.name || 'Saved connector action') : 'Saved action')}{#if step.connector_id} · {connectors.find(c => c.id === step.connector_id)?.name || 'Saved connector'}{/if}</span></SettingRow>{/each}
     </RowGroup>
    {/if}
-   <RowGroup title="Danger zone" tone="danger"><SettingRow label="Delete automation" hint="Permanently removes this automation and its history."><button class="st-btn danger" title="Delete" onclick={() => onDelete(automation.id)}>Delete</button></SettingRow></RowGroup>
+   <RowGroup title="Danger zone" tone="danger"><SettingRow wrapHint label="Delete automation" hint="Permanently removes this automation and its history."><button class="st-btn danger" title="Delete" onclick={() => onDelete(automation.id)}>Delete</button></SettingRow></RowGroup>
   {:else if current === 'generation'}
    <section aria-label="Media generation" data-testid="automation-generation"><RowGroup title="Media generation" bare><AutomationJobChoices jobId={automation.id} mode="live" /></RowGroup></section>
   {:else}
@@ -133,6 +136,16 @@ import AutomationModelError from './AutomationModelError.svelte';
  {/snippet}
 </DetailPane>
 <style>
+ .metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 0; }
+ .metrics > .metric { min-width: 0; padding: 20px; border-radius: 0; }
+ .metric + .metric { border-left: 1px solid var(--st-border); }
+ .metric dt { margin: 0 0 8px; color: var(--st-mfg); font-size: 12px; }
+ .metric dd { margin: 0; font-size: 28px; font-weight: 600; line-height: 1.2; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+ @media (max-width: 600px) {
+  .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .metric:nth-child(3) { border-left: 0; }
+  .metric:nth-child(n+3) { border-top: 1px solid var(--st-border); }
+ }
  .automation-prompt { padding: 14px 16px; border-top: 1px solid var(--st-border); }
  .automation-prompt h4 { margin: 0; font-size: 13.5px; font-weight: 500; }
  .automation-prompt p { margin: 8px 0 0; font-size: 14px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }

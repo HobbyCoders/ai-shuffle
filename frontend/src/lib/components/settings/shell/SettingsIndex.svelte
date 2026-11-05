@@ -180,7 +180,7 @@
 	   on the same 16px edge as the sheets. */
 	@media (max-width: 480px) {
 		.st-nav-g {
-			padding: 18px 4px 6px;
+			padding: 18px 0 6px;
 		}
 		.st-nav {
 			flex: none;

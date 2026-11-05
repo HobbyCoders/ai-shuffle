@@ -36,10 +36,24 @@ it('strips markdown from the list excerpt and opens an empty note in Edit', asyn
  render(NotesCard);
  const row = (await screen.findByText(note.title)).closest('button')!;
  expect(row.textContent).not.toMatch(/# Release|\[x\]|\*\*|https:/);
- expect(within(row).getByText(/Release plan Ready for review/)).toBeTruthy();
+ expect(within(row).getByText('Ready for review · Planning')).toBeTruthy();
  await fireEvent.click(screen.getAllByRole('button', { name: 'New note' })[0]);
  expect(screen.getByRole('tab', { name: 'Edit' }).getAttribute('aria-selected')).toBe('true');
  expect(screen.getByRole('textbox', { name: 'Note body' })).toBeTruthy();
+});
+it.each(['# Release plan\n\nThe release body.', 'Release plan\n===\n\nThe release body.'])('separates a leading heading from the list preview: %s', async (content) => {
+ vi.mocked(getNotes).mockResolvedValue([{ ...note, content, is_pinned: true }]);
+ render(NotesCard);
+ const row = (await screen.findByText(note.title)).closest('button')!;
+ expect(within(row).getByText('The release body. · Planning')).toBeTruthy();
+ expect(row.querySelector('svg.lucide-pin')).toBeTruthy();
+ expect(row.querySelector('.st-tile')).toBeNull();
+});
+it('keeps a heading-only document useful in the list', async () => {
+ vi.mocked(getNotes).mockResolvedValue([{ ...note, content: '# Heading only' }]);
+ render(NotesCard);
+ const row = (await screen.findByText(note.title)).closest('button')!;
+ expect(within(row).getByText('Heading only · Planning')).toBeTruthy();
 });
 it('wraps the title while keeping pasted lines and Enter as one logical title', async () => {
  render(NotesCard);
@@ -75,6 +89,8 @@ it('keeps phone metadata and save status together inside the collapsed details',
  await fireEvent.click(await screen.findByText(note.title));
  const details = screen.getByText(/^Tags & files/).closest('details')!;
  expect(details.open).toBe(false);
+ expect(document.querySelector('.st-dh.compact-header')).toBeTruthy();
+ expect(document.querySelector('.st-dhs')).toBeNull();
  expect(details.textContent).toContain('Global · Updated');
  expect(details.textContent).toContain('Saved');
  expect(screen.getByRole('region', { name: 'Note content' })).toBeTruthy();

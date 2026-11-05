@@ -1,5 +1,6 @@
 /** Settings shell and page layouts. See docs/settings-redesign/implementation-plan.md 1.2-1.5. */
 export { default as SettingsShell } from './SettingsShell.svelte';
+export { default as PageTitle } from './PageTitle.svelte';
 export { default as PreferencePage } from './PreferencePage.svelte';
 export { default as CollectionPage } from './CollectionPage.svelte';
 export { default as DetailPane } from './DetailPane.svelte';

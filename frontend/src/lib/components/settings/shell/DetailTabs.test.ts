@@ -122,10 +122,12 @@ describe('wheel and drag', () => {
 		await fireEvent.scroll(strip);
 		const wrap = container.querySelector('.st-tabs-wrap')!;
 		expect(wrap.classList.contains('more-r')).toBe(true);
+		expect(container.querySelector('.tabs-more svg')?.getAttribute('width')).toBe('12');
 		expect(wrap.classList.contains('more-l')).toBe(false);
 		strip.scrollLeft = 300;
 		await fireEvent.scroll(strip);
 		expect(wrap.classList.contains('more-l')).toBe(true);
 		expect(wrap.classList.contains('more-r')).toBe(false);
+		expect(container.querySelector('.tabs-more')).toBeNull();
 	});
 });

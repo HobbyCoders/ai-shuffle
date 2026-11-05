@@ -15,7 +15,7 @@ vi.mock('$lib/stores/projects-overview', async () => {
 });
 vi.mock('$lib/stores/layout.svelte', async () => {
  const { writable } = await import('svelte/store');
- return { activeView: writable({ type: 'project' }), layout: { current: { sidebarOverlay: true, sidebarWidth: 320 } } };
+ return { activeView: writable({ type: 'project' }), layout: { current: { sidebarOverlay: true, sidebarWidth: 320 }, setSidebarCollapsed: vi.fn() } };
 });
 vi.mock('$lib/stores/auth.svelte', async () => ({ isAdmin: (await import('svelte/store')).writable(true) }));
 vi.mock('$lib/api/git', () => ({ getGitStatus: vi.fn().mockResolvedValue({ is_git_repo: true }) }));
@@ -41,12 +41,22 @@ const overview = projectsOverview as Writable<any[]>;
 const supported = projectsOverviewSupported as Writable<boolean>;
 beforeEach(() => {
  platform.set('desktop'); page.state = {};
+ vi.stubGlobal('matchMedia', () => ({ matches: false, addEventListener() {}, removeEventListener() {} }));
+ vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
  Object.defineProperty(window, 'innerWidth', { value: 1440, configurable: true });
  list.set([{ id: 'one', name: 'One', path: '/one', session_count: 2 }, { id: 'two', name: 'Two', path: '/two' }]);
  view.set({ type: 'project' }); overview.set([]); supported.set(false);
 });
-afterEach(() => { cleanup(); platform.set('desktop'); vi.restoreAllMocks(); });
+afterEach(() => { cleanup(); platform.set('desktop'); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 describe('Projects master/detail', () => {
+ it('keeps the path only in its full-width field and makes removal copy wrap', async () => {
+  const { container } = render(ProjectCard);
+  const path = await screen.findByPlaceholderText('Project path');
+  expect(container.querySelector('.st-dhs')?.textContent).not.toContain('/one');
+  expect(path.style.getPropertyValue('--st-text-width')).toBe('100%');
+  const removal = screen.getByText('Files stay on disk.', { exact: false }).closest('.st-row');
+  expect(removal?.classList.contains('st-wrap-hint')).toBe(true);
+ });
  it('discards A’s dirty name and path when switching to B, but preserves same-project refreshes', async () => {
   render(ProjectCard);
   const name = await screen.findByPlaceholderText('Project name');

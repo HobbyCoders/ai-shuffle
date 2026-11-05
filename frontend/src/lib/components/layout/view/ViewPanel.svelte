@@ -10,6 +10,8 @@
 	import PanelContext from './PanelContext.svelte';
 	import { platform } from '$lib/stores/platform.svelte';
 	import '../../settings/shell/settings.css';
+	import { layout } from '$lib/stores/layout.svelte';
+	import PanelToggle from './PanelToggle.svelte';
 	interface Props {
 		title: string;
 		count?: string | number;
@@ -60,11 +62,13 @@
 	<header class="panel-header">
 		<h1>{title}</h1>
 		{#if count !== undefined}<span class="panel-count">{count}</span>{/if}
+		<PanelToggle />
 		<div class="panel-actions">{#if !platform.isMobile && !phone}{@render actions?.()}{/if}</div>
 	</header>
 	{#if search}<div class="panel-search">{@render search()}</div>{/if}
 	{#if filters}<div class="panel-filters">{@render filters()}</div>{/if}
-	<div class="panel-body st-scroll" data-settings-list role="region" aria-label={listLabel ?? `${title} list`}>
+	<!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+	<div onclick={(event) => { if (layout.current.sidebarOverlay && !platform.isMobile && window.innerWidth >= 768 && (event.target as Element).closest('button:not([aria-expanded]), a')) layout.setSidebarCollapsed(true); }} class="panel-body st-scroll" data-settings-list role="region" aria-label={listLabel ?? `${title} list`}>
 		{@render children?.()}
 	</div>
 	{#if footer}<footer class="panel-footer">{@render footer()}</footer>{/if}

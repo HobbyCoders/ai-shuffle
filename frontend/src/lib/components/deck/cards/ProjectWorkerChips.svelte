@@ -40,7 +40,7 @@
 		{#each chips as { worker, chip } (worker.install_id)}
 			<button
 				type="button"
-				class="st-btn sm wchip wchip--{chip.tone}"
+				class="wchip wchip--{chip.tone}"
 				title={chip.title}
 				aria-label="{chip.text}: {chip.actionable ? `not set up — set ${projectName} up on ${worker.device_name}` : chip.title}"
 				data-worker-state={worker.state}
@@ -54,7 +54,10 @@
 
 <style>
 	.wchips { display: flex; gap: 6px; flex-wrap: wrap; min-width: 0; }
-	.wchip { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; }
+	.wchip { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; min-height: 16px; padding: 0; border: 0; border-radius: var(--st-radius-sm); background: transparent; color: var(--st-mfg); font: inherit; cursor: pointer; }
+	.wchip:hover, .wchip:active { color: var(--st-fg); }
+	.wchip:focus-visible { outline: 2px solid var(--st-primary); outline-offset: 4px; }
+	@media (pointer: coarse), (max-width: 600px) { .wchip { position: relative; } .wchip::before { content: ''; position: absolute; inset: -12px 0; } }
 	.wchip .t { overflow: hidden; text-overflow: ellipsis; }
 	.d { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--st-success); }
 	.wchip--missing .d { background: transparent; border: 1px solid var(--st-mfg); }

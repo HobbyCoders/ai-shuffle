@@ -57,9 +57,11 @@
     {#each categories as cat}
      {#if docsByCategory[cat.id]?.length}
       <ListGroupLabel label={cat.label} compact />
+      <div class="docs-group">
       {#each docsByCategory[cat.id] as doc}
        <ListItem variant="plain" id={`${cat.id}/${doc.slug}`} name={doc.title} selected={activeCategory === cat.id && activeSlug === doc.slug} onselect={() => selectDoc(cat.id, doc.slug)} />
       {/each}
+      </div>
      {/if}
     {/each}
    </nav>
@@ -85,6 +87,7 @@
  {/snippet}
 </ViewShell>
 <style>
+ .docs-group { margin-left: 8px; }
  .docs-layout { display: grid; grid-template-columns: minmax(0,var(--st-prose-width)) var(--st-toc-width); justify-content: start; gap: var(--st-toc-gap); align-items: start; }
  .doc-content { min-width: 0; }
  .doc-toc { position: sticky; top: 0; }

@@ -99,7 +99,7 @@
 	{:else}
 		<RowGroup title="Agents" count={filteredAgents().length}>
 			{#each filteredAgents() as agent (agent.name)}
-				<SettingRow label={deletingAgent === agent.name ? `Delete “${agent.name}”?` : agent.name} hint={deletingAgent === agent.name ? 'This removes the agent file. This cannot be undone.' : `${getModelDisplay(agent.model)} · ${agent.tools?.length ? `${agent.tools.length} tools` : 'All tools'}`}>
+				<SettingRow wrapHint={deletingAgent === agent.name} label={deletingAgent === agent.name ? `Delete “${agent.name}”?` : agent.name} hint={deletingAgent === agent.name ? 'This removes the agent file. This cannot be undone.' : `${getModelDisplay(agent.model)} · ${agent.tools?.length ? `${agent.tools.length} tools` : 'All tools'}`}>
 					{#if deletingAgent === agent.name}
 						<button class="st-btn" onclick={(e) => { e.stopPropagation(); deletingAgent = null; }} disabled={deleteLoading}>Cancel</button>
 						<button class="st-btn danger" onclick={(e) => { e.stopPropagation(); handleDelete(agent.name); }} disabled={deleteLoading}>{deleteLoading ? 'Deleting…' : 'Delete'}</button>

@@ -42,7 +42,8 @@ describe('cron triggers', () => {
 		const preset = screen.getByDisplayValue('Every day at 9 AM') as HTMLSelectElement;
 		await fireEvent.change(preset, { target: { value: '0 9 * * 1-5' } });
 		expect(lastTriggers(onUpdateTriggers)).toEqual([{ type: 'cron', config: { expression: '0 9 * * 1-5' } }]);
-		expect(await screen.findByText('Every weekday at 9 AM', { selector: '.cron-summary-text' })).toBeTruthy();
+		expect(await screen.findByRole('heading', { name: 'Every weekday at 9 AM' })).toBeTruthy();
+		expect(document.querySelector('.cron-summary-text')).toBeNull();
 		expect((screen.getByLabelText('Cron expression') as HTMLInputElement).value).toBe('0 9 * * 1-5');
 	});
 
@@ -65,7 +66,7 @@ describe('cron triggers', () => {
 		const raw = screen.getByPlaceholderText('0 9 * * *') as HTMLInputElement;
 		await fireEvent.input(raw, { target: { value: '0 9 * *' } });
 		expect(lastTriggers(onUpdateTriggers)[0].config.expression).toBe('0 9 * *');
-		expect(await screen.findByText('Invalid expression')).toBeTruthy();
+		expect(await screen.findByText('Invalid expression', { selector: '.cron-summary-text' })).toBeTruthy();
 		expect(screen.getByLabelText('Minute')).toBeTruthy(); // custom builder shown
 		await fireEvent.input(raw, { target: { value: '*/15 * * * *' } });
 		expect(await screen.findByDisplayValue('Every 15 minutes')).toBeTruthy();

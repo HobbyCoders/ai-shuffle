@@ -388,6 +388,7 @@ describe('SettingsShell stacked mode', () => {
 		await view.rerender({ initialItemId: target });
 		await tick();
 		expect(mocks.pushState).not.toHaveBeenCalled();
+		expect(view.container.querySelector('.settings-shell.awaiting-target')).toBeTruthy();
 
 		// The outgoing ViewShell's asynchronous history.back() has now completed.
 		mocks.pushState.mockImplementation((_url, state) => { page.state = state; });

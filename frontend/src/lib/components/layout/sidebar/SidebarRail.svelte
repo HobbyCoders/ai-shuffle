@@ -229,7 +229,7 @@
 		border: 0;
 		border-radius: var(--radius-control);
 		background: transparent;
-		color: var(--sidebar-muted);
+		color: color-mix(in srgb, var(--sidebar-foreground) 72%, var(--sidebar));
 		cursor: pointer;
 		transition: background-color 0.13s ease, color 0.13s ease, transform 0.3s cubic-bezier(0.16, 1, 0.3, 1);
 		-webkit-tap-highlight-color: transparent;

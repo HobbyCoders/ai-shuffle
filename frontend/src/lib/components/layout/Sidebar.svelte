@@ -72,6 +72,7 @@
 	import SessionCard from './SessionCard.svelte';
 	import { backToChats } from '$lib/services/session-navigation';
 	import SidebarRail from './sidebar/SidebarRail.svelte';
+	import PanelToggle from './view/PanelToggle.svelte';
 	import SidebarSheet from './sidebar/SidebarSheet.svelte';
 	import WorkspaceCustomize from './sidebar/WorkspaceCustomize.svelte';
 	import type { WorkspaceNavItem } from './sidebar/workspace-items';
@@ -129,7 +130,7 @@
 		viewPanel.mountHost(hostToken);
 		return () => viewPanel.unmountHost(hostToken);
 	});
-	const ownsPanel = $derived(panelHost && !platform.isMobile && !layout.current.sidebarOverlay && viewOwnsPanel($activeView?.type));
+	const ownsPanel = $derived(panelHost && !platform.isMobile && viewOwnsPanel($activeView?.type));
 	const panelTitle = $derived(ownsPanel ? viewPanelTitles[$activeView!.type as keyof typeof viewPanelTitles] : 'Chats');
 
 	/** Who gets the phone's few tab seats on a list nobody has reordered. */
@@ -844,6 +845,7 @@
 		<div class="p-top">
 			<header class="p-head">
 				<span class="p-title">Chats</span>
+				<PanelToggle />
 				<!-- The phone drawer keeps its header controls; desktop has one copy in the rail. -->
 				{#if phone}{@render globalControls(false)}{/if}
 				{#if phone}

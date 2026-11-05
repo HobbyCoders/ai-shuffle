@@ -115,7 +115,7 @@
 			{@render workerLine()}
 		</div>
 	{:else}
-		<div class="tb-page-label" class:panel-open={!sessionId && phonePanelActions.visible} aria-label={title ?? projectLabel ?? undefined}><SessionBreadcrumbs {projectLabel} {title} {sessionId} {onOpenProject} /></div>
+		<div class="tb-page-label" aria-label={title ?? projectLabel ?? undefined}><SessionBreadcrumbs {projectLabel} {title} {sessionId} {onOpenProject} /></div>
 	{/if}
 
 	<div class="tb-right">
@@ -123,7 +123,7 @@
 		{#if actions}
 			{@render actions()}
 		{/if}
-		{#if phoneWidth && phoneBack.onclick && onToggleSidebar}<button class="tb-icon phone" aria-label="Chats" title="Navigation" onclick={onToggleSidebar}><Menu size={20} strokeWidth={1.8} /></button>{/if}
+		{#if phoneWidth && phoneBack.onclick}{@render phoneBack.actions?.()}{/if}
 			{#if phoneWidth}<NotificationCenter bar />{/if}
 	</div>
 </header>
@@ -160,8 +160,8 @@
 	.tb-back { display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 12px; border: 0; border-radius: 8px; background: none; color: var(--foreground); font-size: 15px; }
 	.tb-back:hover { background: var(--accent); }
 	.tb-back:active { background: var(--row-selected); }
-	.tb-page-label { display: flex; min-width: 0; }
-	@media (min-width: 601px) and (max-width: 1080px) { .tb-page-label.panel-open { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); } }
+	.tb-page-label { display: flex; flex: 1; min-width: 0; }
+	/* The page owns its title beside the persistent desktop rail. */
 	.tb-icon:hover { background: var(--accent); color: var(--foreground); }
 	.tb-icon.phone { width: 44px; height: 48px; color: var(--foreground); }
 

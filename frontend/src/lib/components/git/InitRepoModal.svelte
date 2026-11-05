@@ -14,6 +14,7 @@
 	import { focusTrap } from '$lib/components/ui/focus-trap';
 	import { layout } from '$lib/stores/layout.svelte';
 	import GitHubRepoPicker from './GitHubRepoPicker.svelte';
+	import Segmented from '$lib/components/settings/rows/Segmented.svelte';
 	import type { GitHubRepo } from '$lib/api/github';
 
 	interface Props {
@@ -151,28 +152,8 @@
  </div>
  <div class="ui-dialog-body init-body">
 			<!-- Mode toggle -->
-			<div class="mode-toggle">
-				<button
-					class="ui-choice"
-					class:active={mode === 'init'}
-					aria-pressed={mode === 'init'}
-					onclick={() => mode = 'init'}
-					disabled={loading}
-				>
-					<FolderGit2 size={13} strokeWidth={1.5} />
-					New repo
-				</button>
-				<button
-					class="ui-choice"
-					class:active={mode === 'clone'}
-					aria-pressed={mode === 'clone'}
-					onclick={() => mode = 'clone'}
-					disabled={loading}
-				>
-					<Download size={13} strokeWidth={1.5} />
-					Clone
-				</button>
-			</div>
+			<Segmented label="Repository source" bind:value={mode} disabled={loading} stretch
+				options={[{ value: 'init', label: 'New repo', icon: FolderGit2 }, { value: 'clone', label: 'Clone', icon: Download }]} />
 
 			{#if isCloneMode}
 				<!-- Clone URL input -->
@@ -232,28 +213,9 @@
 							/>
 						</div>
 
-						<div class="visibility-toggle">
-							<button
-								class="ui-choice"
-								class:active={githubPrivate}
-								aria-pressed={githubPrivate}
-								onclick={() => githubPrivate = true}
-								disabled={loading}
-							>
-								<Lock size={13} strokeWidth={1.5} />
-								Private
-							</button>
-							<button
-								class="ui-choice"
-								class:active={!githubPrivate}
-								aria-pressed={!githubPrivate}
-								onclick={() => githubPrivate = false}
-								disabled={loading}
-							>
-								<Globe size={13} strokeWidth={1.5} />
-								Public
-							</button>
-						</div>
+						<Segmented label="Repository visibility" value={githubPrivate ? 'private' : 'public'} disabled={loading}
+							onchange={(value) => { githubPrivate = value === 'private'; }}
+							options={[{ value: 'private', label: 'Private', icon: Lock }, { value: 'public', label: 'Public', icon: Globe }]} />
 					</div>
 				{/if}
 			{/if}
@@ -283,8 +245,7 @@
 
 <style>
  .init-body { display: grid; gap: 12px; }
- .mode-toggle, .visibility-toggle { display: flex; gap: 6px; }
- .mode-toggle > button, .visibility-toggle > button { flex: 1; }
+
  .clone-section, .github-options { display: grid; gap: 10px; }
  .divider { text-align: center; font-size: 12px; color: var(--muted-foreground); }
  .checkbox-row { padding-block: 8px; border-bottom: 1px solid var(--border); }

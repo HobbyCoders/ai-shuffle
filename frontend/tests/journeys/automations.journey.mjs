@@ -30,6 +30,10 @@ function formCase(native = false) {
    await collapse.click();
    await page.getByRole('button', { name: 'Expand trigger', exact: true }).click();
    const trigger = page.getByRole('region', { name: 'Trigger 1', exact: true });
+   expect(await trigger.getByRole('heading', { name: 'Every day at 9 AM', exact: true }).count() === 1, 'the trigger heading is its useful schedule, not Cron');
+   expect(await trigger.locator('.cron-summary-text').count() === 0, 'preset descriptions are not repeated as helpers');
+   expect((await trigger.innerText()).match(/UTC/g)?.length === 1, 'the trigger says UTC once');
+   expect(await trigger.locator(':scope > .st-row + .st-row').count() > 0, 'trigger controls use shared card row dividers');
    const row = trigger.locator('.st-row').filter({ hasText: 'Trigger type' });
    expect(await row.getByRole('group', { name: 'Trigger type' }).count() === 1, 'trigger type is inside the shared row, not an expansion');
    const toggleSize = await collapse.boundingBox();
@@ -40,7 +44,7 @@ function formCase(native = false) {
     expect(Math.abs((await schedule.boundingBox()).width - (await scheduleRow.locator('.st-rc').boundingBox()).width) < 1, 'Schedule spans the stacked phone control row');
    }
    await page.getByRole('textbox', { name: 'Cron expression', exact: true }).fill('*/15 * * * *');
-   await page.getByText('Every 15 minutes', { exact: true }).last().waitFor();
+   await trigger.getByRole('heading', { name: 'Every 15 minutes', exact: true }).waitFor();
    const actions = page.locator('details.detail-more');
    if (await actions.isVisible()) await actions.locator('summary').click();
    await page.getByRole('button', { name: 'Create', exact: true }).click();

@@ -19,8 +19,8 @@
 		mono?: boolean;
 		/** Middle-ellipsized path at rest; full unmodified value on focus. */
 		pathDisplay?: boolean;
-		/** Width in px (default 220). */
-		width?: number;
+		/** Width in px (default 220), or the full available row width. */
+		width?: number | 'full';
 		disabled?: boolean;
 		label?: string;
 		autocomplete?: HTMLInputElement['autocomplete'];
@@ -70,11 +70,11 @@
 	}
 </script>
 
-<span class="st-text-field" class:path-display={pathDisplay} style:--st-text-width="{width}px">
+<span class="st-text-field" class:path-display={pathDisplay} style:--st-text-width={width === 'full' ? '100%' : `${width}px`}>
 <input
 	class="st-txt"
 	class:st-mono={mono}
-	style:--st-text-width="{width}px"
+	style:--st-text-width={width === 'full' ? '100%' : `${width}px`}
 	{type}
 	{placeholder}
 	{autocomplete}

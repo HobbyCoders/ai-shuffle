@@ -37,7 +37,10 @@
 	.st-action:focus-visible { outline: 2px solid var(--st-primary, var(--ring)); outline-offset: 2px; }
 	.st-action:active:not(:disabled) { transform: translateY(1px); }
 	.st-action:disabled { opacity: .45; cursor: not-allowed; }
-	@media (max-width: 600px), (pointer: coarse) { .st-action { min-height: 44px; } .st-action.icon { width: 44px; } }
-	@media (max-width: 600px), (pointer: coarse) { .st-action.compact { height: 32px; min-height: 32px; margin-block: 6px; } .st-action.compact::after { content: ""; position: absolute; inset: -6px 0; } }
+	@media (max-width: 600px), (pointer: coarse) {
+		.st-action { height: 32px; min-height: 32px; margin-block: 6px; }
+		.st-action::after { content: ""; position: absolute; inset: -6px min(0px, calc((100% - 44px) / 2)); }
+		.st-action.icon { width: 32px; margin-inline: 6px; }
+	}
 	@media (prefers-reduced-motion: reduce) { .st-action { transition: none; } }
 </style>

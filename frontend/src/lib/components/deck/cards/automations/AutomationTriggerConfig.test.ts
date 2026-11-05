@@ -24,6 +24,19 @@ function renderWebhook(currentView: 'create' | 'edit', selectedAutomationId: str
 	});
 }
 
+it('summarises the schedule in its header without duplicating preset copy or timezone', () => {
+ const view = render(AutomationTriggerConfig, {
+  triggers: [{ type: 'cron', config: { expression: '0 9 * * *' } }], expandedTriggers: new Set([0]),
+  connectors: [], connectorTypes: [], connectorsWithTriggers: [], currentView: 'create',
+  selectedAutomationId: null, timezone: 'UTC', onUpdateTriggers: () => {}, onToggleTriggerExpand: () => {}
+ });
+ expect(screen.getByRole('heading', { name: 'Every day at 9 AM' })).toBeTruthy();
+ expect(view.container.textContent?.match(/UTC/g)).toHaveLength(1);
+ expect(view.container.querySelector('.cron-summary-text')).toBeNull();
+ expect(view.container.querySelector('.trigger-card > .st-row + .st-row')).toBeTruthy();
+ expect(screen.getByRole('button', { name: 'Collapse trigger' }).classList.contains('ghost')).toBe(true);
+});
+
 it('keeps the trigger heading and collapse control inside its card', () => {
  const view = renderWebhook('edit', 'auto-1a2b');
  const collapse = screen.getByRole('button', { name: 'Collapse trigger' });
