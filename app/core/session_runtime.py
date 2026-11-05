@@ -3169,8 +3169,14 @@ class SessionRuntime:
         if self._interrupt_driving:
             if self._interrupt_finished:
                 row = await asyncio.to_thread(turns_db.get_turn, self.turn_id)
-                if row is not None and row["state"] in turns_db.TERMINAL_STATES:
+                accepted = int(((row or {}).get("payload") or {}).get("accepted_input_order") or
+                               (row or {}).get("insert_order") or 0)
+                # A logical turn id can be reused for newer input. Confirm this
+                # runtime's admission, not just any terminal row with that id.
+                if (row is not None and row["state"] in turns_db.TERMINAL_STATES
+                        and 0 < accepted == self.admission_order):
                     await self._end_orphaned_pump("a repeated stop")
+                    return row["state"]
             return "interrupting"
         self._interrupt_driving = True
         # Also tells the heartbeat that any later rejection is expected. This
