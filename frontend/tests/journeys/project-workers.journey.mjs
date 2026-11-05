@@ -153,7 +153,9 @@ async function simulateWorkers(page, { overview404 = false, failOn = {} } = {}) 
 async function openProjects(page, variant) {
 	if (isPhone(variant)) await showSidebar(page);
 	await page.getByRole('navigation', { name: 'Workspace' }).getByRole('button', { name: 'Projects', exact: true }).click();
-	await page.getByRole('heading', { name: /projects/i, level: 1 }).waitFor({ timeout: 30_000 });
+	// K1 moves the phone title/create action into the top bar, without a list heading.
+	await page.locator('[data-view-shell="Projects"]').filter({ visible: true }).waitFor({ timeout: 30_000 });
+	await page.getByRole('button', { name: 'New project', exact: true }).filter({ visible: true }).waitFor();
 }
 
 const projectRow = (page, name) => page.getByRole('button', { name: new RegExp(`^Open ${name}( \\(|$)`) });

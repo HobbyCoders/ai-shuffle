@@ -62,7 +62,9 @@ await runJourney({
 				await gotoApp(page, status);
 				await showSidebar(page);
 				await workspace(page).getByRole('button', { name: 'Pull requests', exact: true }).click();
-				await page.getByRole('heading', { name: 'Pull requests', exact: true }).waitFor();
+				// K1 removes the phone panel heading; P1 gives the detail its state title.
+				await page.locator('[data-view-shell="Pull requests"]').filter({ visible: true }).waitFor();
+				await page.getByRole('heading', { name: 'Open pull requests', exact: true }).waitFor();
 			}
 		},
 		async act({ page, mark }) {
