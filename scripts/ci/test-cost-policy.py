@@ -5,6 +5,7 @@ Unfiltered PR suites have no secrets or publishing permissions. Android addition
 runs path-filtered unsigned native checks; its release-only steps stay owner-gated.
 """
 from pathlib import Path
+import json
 import unittest
 
 import yaml
@@ -161,6 +162,27 @@ class CostPolicyTests(unittest.TestCase):
         for forbidden in ["secrets.", "environment:", "upload-artifact", "altool", "-exportArchive", "archive "]:
             self.assertNotIn(forbidden, text)
         self.assertIn("CODE_SIGNING_ALLOWED=NO", text)
+
+    def test_journey_map_is_validated_by_javascript_contracts(self):
+        jobs = workflow("ci-frontend.yml")["jobs"]
+        job = jobs["contracts"]
+        gate = jobs["javascript"]
+        self.assertIn("contracts", gate["needs"])
+        expected = json.loads(gate["steps"][0]["run"].split("const expected = ", 1)[1].split(";", 1)[0])
+        self.assertIn("contracts", expected)
+        self.assertNotIn("if", job)
+        self.assertNotIn("continue-on-error", job)
+        self.assertNotIn("shell", job.get("defaults", {}).get("run", {}))
+        step = next(step for step in job["steps"]
+                    if step.get("name") == "Validate UI journey map")
+        self.assertEqual(step["run"].splitlines(), [
+            "node --test frontend/tests/journeys/select.test.mjs",
+            "node frontend/tests/journeys/select.mjs --check",
+        ])
+        self.assertEqual(step.get("working-directory", job["defaults"]["run"]["working-directory"]), ".")
+        self.assertNotIn("if", step)
+        self.assertNotIn("continue-on-error", step)
+        self.assertNotIn("shell", step)
 
     def test_manual_checks_use_standard_runners_and_keep_backend_parallelism(self):
         backend = workflow("ci-backend.yml")
