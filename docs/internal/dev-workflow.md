@@ -22,6 +22,8 @@ per instance), and `--no-pause` for uninterrupted measurement runs or long manua
 sessions. Journeys, live turns, voice, in-flight requests and client frames are
 protected; local-only typing or scrolling does not extend the idle timer. CI and
 `--workers 2` stay running; a running journey also holds its instance awake.
+The first Send after a pause wakes the copy and reloads the page; the draft
+survives, so press Send again.
 A failed clean stop reports `pause-failed` and retains its data until `down` or
 TTL; it never silently starts a second cluster. See the dev-loop guide for the
 dev-only five-second stream shutdown grace and the whole-pause deadline.

@@ -19,7 +19,8 @@ idle minutes. A journey wakes a paused instance and pins its lease for the whole
 run, including slow actions and voice waits. CI (`--ci`) and `--workers 2` never
 pause. For measurement runs use `--no-pause` (for example with `--seed long`).
 Prefer `--no-vite` when you do not need hot reload: serving the stamped build
-saves about 0.5 GB per instance.
+saves about 0.5 GB per instance. In a manual tab, the first Send after a pause
+wakes the copy and reloads the page; the draft is preserved, so press Send again.
 
 The aggregate commands below are available for CI; use the single-file commands
 under **Run one** locally.

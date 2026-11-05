@@ -11,6 +11,8 @@ paused-port holders) and guardian remain. Reloading a paused page waits for
 readiness and redirects back to the same URL; `python -m scripts.devloop wake`
 explicitly wakes it too. `status` never wakes an instance. An existing tab may
 need a reload after a pause, and connections made during startup may retry.
+The first Send after a pause wakes the copy and reloads the page; the draft is
+preserved, so **press Send again**. It is not automatically sent twice.
 
 Prefer `--no-vite` when you do not need hot reload: it serves the stamped build
 and saves about **0.5 GB per instance**. Use `--no-pause` for stable measurement
@@ -49,7 +51,11 @@ Before SIGTERM, the child atomically closes admission only if no finite request
 or new foreground activity appeared since the idle decision. The launcher then
 rechecks durable busy work. Late HTTP requests receive 503 with `Retry-After`;
 late client frames get an explicit “message NOT sent” error and a retryable
-WebSocket close, rather than reaching a shutting-down app. A failed proof aborts
+WebSocket close, rather than reaching a shutting-down app. In that narrow
+admission-window race, the current chat client can clear the error and optimistic
+text on reconnect without restoring the draft: the message is not delivered and
+must be retyped. This is distinct from an already-paused tab's preserved draft.
+Use `--no-pause` to avoid that test-copy-only limit. A failed proof aborts
 the pause; a stalled launcher cannot hold the gate closed longer than five
 seconds. An internally scheduled turn starting after the last SQL proof remains
 a narrow race; use `--no-pause` for workloads requiring uninterrupted scheduling.
