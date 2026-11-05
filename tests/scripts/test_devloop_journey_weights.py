@@ -17,7 +17,7 @@ def _weights(tmp_path, seconds, per_case=10.0):
     return path
 
 
-@pytest.mark.parametrize("shards", [1, 4, 30])
+@pytest.mark.parametrize("shards", [1, 4, 8, 30])
 def test_runtime_partition_is_deterministic_and_exact(shards):
     weights = {f"{i}.journey.mjs": (i % 5 + 1) * 0.25 for i in range(25)}
     buckets = ci.partition(weights, shards)
@@ -26,6 +26,17 @@ def test_runtime_partition_is_deterministic_and_exact(shards):
     assert sorted(flat) == sorted(weights)
     assert len(flat) == len(set(flat))
     assert len(buckets) == shards
+
+
+def test_checked_in_eight_shard_plan_leaves_retry_headroom():
+    weights = ci.estimated_seconds()
+    buckets = ci.plan(8)
+    assert len(buckets) == 8
+    assert sorted(name for bucket in buckets for name in bucket) == sorted(weights)
+    # Reserve 30 seconds for instance startup (7-12s in hosted run 42035121047):
+    # first pass by ~19 minutes, then the full 180s retry before the 22m cutoff.
+    loads = [sum(weights[name] for name in bucket) for bucket in buckets]
+    assert max(loads) <= 19 * 60 - 30, loads
 
 
 def test_plan_uses_runtime_instead_of_case_counts(tmp_path, monkeypatch):
