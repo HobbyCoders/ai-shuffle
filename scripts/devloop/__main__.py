@@ -281,8 +281,6 @@ class Instance:
 
         self.args, self.directory, self.env, self.fake = args, directory, env, fake
         self.vite_port = vite_port
-        self.public_port: int | None = None
-        self.vite_backend_port = vite_port
         self.status_writer = status_writer
         self.gate = gate or RestartGate(threading.Event())
         #: Set by a stop signal: the status says "stopping" and is never rewritten.
@@ -401,7 +399,8 @@ class Instance:
             self.wake.clear()
             process, started = self.app, self.app_started
             while not self.done.is_set() and process is self.app and process.poll() is None:
-                if answers_http(self.connect, self.port, "/api/preview"):
+                if (answers_http(self.connect, self.port, "/api/preview")
+                        and (not self.vite_port or answers_http(self.connect, self.vite_port))):
                     self._ready(process, round(time.monotonic() - started, 1))
                     break
                 if time.monotonic() - started > FIRST_START_GRACE_SECONDS:
@@ -425,17 +424,9 @@ class Instance:
         access = read_status(self.directory / "access.json") or {}
         seed = read_status(self.directory / "seed.json")
         link = access.get("url")
-        if link and (self.vite_port or self.public_port):
+        if link and self.vite_port:
             link = preview_access.preview_url(access["session_id"], self.browser.strip("[]"),
-                                              self.vite_port or self.public_port, token=access["token"])
-        if self.vite_port:
-            deadline = time.monotonic() + 60
-            while not self.done.is_set() and time.monotonic() < deadline:
-                if answers_http(_connect_host(str(self.args.host)), self.vite_backend_port):
-                    break
-                time.sleep(0.25)
-            else:
-                log.warning("Vite did not answer on port %s yet", self.vite_port)
+                                              self.vite_port, token=access["token"])
         self.write(state="ready", access_link=link, seed=seed)
         lines = [
             f"app ready in {seconds:.1f}s",
@@ -611,7 +602,6 @@ def up(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
 
     old = {sig: signal.signal(sig, stop) for sig in STOP_SIGNALS}
     fake = fake_voice = vite = watcher = instance = reporter = None
-    ingress = []
     try:
         with scratch_directory("ai-shuffle-preview-") as raw:
             directory = Path(raw)
@@ -638,12 +628,6 @@ def up(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
                 extra["SHUFFLE_DEV_SEED"] = args.seed
             if vite_port:
                 extra["SHUFFLE_DEV_UI"] = "vite"
-            public_port = port
-            public_vite_port = vite_port
-            if not args.no_pause:
-                port = free_port(exclude=(public_port, protected, vite_port or 0))
-                if vite_port:
-                    vite_port = free_port(exclude=(public_port, public_vite_port, port, protected))
             env = application_environment(args, directory, port, protected, extra=extra)
             claude_cli = None
             if args.claude_cli == "fake":
@@ -661,11 +645,7 @@ def up(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
                 SimpleNamespace(effective_data_dir=Path(env["DATA_DIR"])),
                 port=free_port(exclude=(port, protected, int(env["PORT"]), vite_port or 0)),
             )
-            instance = Instance(args, directory, env, fake, public_vite_port, gate)
-            instance.public_port, instance.vite_backend_port = public_port, vite_port
-            instance.data["urls"]["preview_listener"] = f"http://{instance.browser}:{public_port}/"
-            if not public_vite_port:
-                instance.data["urls"]["ui"] = instance.data["urls"]["preview_listener"]
+            instance = Instance(args, directory, env, fake, vite_port, gate)
             instance.data["pause"] = {"enabled": not args.no_pause, "idle_seconds": 300}
             instance.database, instance.stopped = database, stopped
             instance.data["guardian"] = guardian
@@ -694,7 +674,7 @@ def up(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
                                         env=vite_environment(env, api), start_new_session=True)
                 instance.write(vite={"pid": vite.pid,
                                      "pid_identity": process_identity(vite.pid),
-                                     "port": public_vite_port, "backend_port": vite_port,
+                                     "port": vite_port,
                                      "proxies_to": api})
                 log.info("vite dev (pid %s) on port %s, proxying /api to %s", vite.pid,
                          vite_port, api)
@@ -712,13 +692,10 @@ def up(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
 
             lease = None
             if not args.no_pause:
-                from scripts.devloop.idle import IdleLease, Ingress, SourceActivity
+                from scripts.devloop.idle import IdleLease, SourceActivity
 
                 lease = IdleLease(instance, stopped)
                 SourceActivity(lease, poll=args.poll).start()
-                ingress.append(Ingress(lease, str(args.host), public_port, port))
-                if vite_port:
-                    ingress.append(Ingress(lease, str(args.host), public_vite_port, vite_port))
             else:
                 start_vite()
             if not args.ci:  # a CI run tests one fixed revision: no restarts
@@ -752,8 +729,6 @@ def up(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
             instance.retire()
         if watcher is not None:
             watcher.stop()
-        for listener in ingress:
-            listener.close()
         if vite is not None:
             stop_group(vite, 10)
         if fake is not None:
@@ -811,22 +786,11 @@ def remove_own_status(path: Path, pid: int, identity: str | None = None) -> bool
 
 def wake_instance(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     """Explicitly resume the same lease; status --wait alone never wakes it."""
-    from urllib.parse import urlsplit
-
     status = load_status(args.status)
     if status is None or not status_alive(status):
         parser.error("No live dev instance to wake; run `python -m scripts.devloop up`")
     if (status.get("pause") or {}).get("enabled"):
-        url = urlsplit(status["urls"]["preview_listener"])
-        connection = http.client.HTTPConnection(url.hostname, url.port, timeout=5)
-        try:
-            connection.request("POST", "/__devloop/wake")
-            response = connection.getresponse()
-            response.read()
-            if response.status != 204:
-                parser.error(f"The instance could not wake (HTTP {response.status})")
-        finally:
-            connection.close()
+        write_private_json(Path(status["scratch_dir"]) / "wake.request", {"pid": status["pid"]})
     args.wait = 180
     return show(parser, args)
 

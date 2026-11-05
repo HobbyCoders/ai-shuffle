@@ -7,9 +7,10 @@ Use it to exercise a change in the real app before you push. Private one-worker
 instances **pause after about five idle minutes and wake automatically on use**:
 app, Vite/esbuild and PostgreSQL stop cleanly, while their data, ports, access
 link and TTL stay. Only the small launcher (including the fake services and
-resident ingress) and guardian remain. The first request after an idle pause
-waits for readiness rather than failing; `python -m scripts.devloop wake`
-explicitly wakes it too. `status` never wakes an instance.
+paused-port holders) and guardian remain. Reloading a paused page waits for
+readiness and redirects back to the same URL; `python -m scripts.devloop wake`
+explicitly wakes it too. `status` never wakes an instance. An existing tab may
+need a reload after a pause, and connections made during startup may retry.
 
 Prefer `--no-vite` when you do not need hot reload: it serves the stamped build
 and saves about **0.5 GB per instance**. Use `--no-pause` for stable measurement
@@ -17,16 +18,25 @@ runs such as `--seed long`. CI (`--ci`, including `scripts/devloop/ci.py`) and
 `--workers 2` **never pause**, regardless of this flag: paired workers need
 continuous presence and sync, and CI needs stable journey timing.
 
-Idle is not “no network traffic”: browser GET polls, chat/sync WebSocket
-keepalives and Vite HMR reconnects do not extend the idle deadline. The resident
-ingress holds polling requests while paused; real navigation, input, mutations,
-a chat query, frontend edits or a Python reload wake it. The browser-side
-chat/HMR sockets stay connected while their upstream children are stopped;
-known subscriptions are replayed on wake, while keepalives stay local. A running
-journey pins the whole lease using its process identity, even during long waits.
-Finite HTTP requests, voice/unknown sockets, durable active agent runs,
-background tasks and queued/running git operations prevent pausing. A failed
-busy check keeps the instance awake. No live app or database is consulted.
+Idle is not “no network traffic”: an explicit method/path allowlist covers
+observed auth, sidebar, git-status and preference refreshes plus chat/sync/HMR
+reconnects. Unknown traffic counts as work. While paused, those background
+requests receive 503 without waking; other requests trigger wake and receive
+a same-URL 307 when both backend and Vite are ready. Holders never forward
+traffic and are absent while awake: normal listeners, peer identity, preview
+authentication, HTTP bodies, SSE and WebSockets remain unchanged.
+
+With pausing enabled only, `scripts.devloop.child` runs the normal `app.main`
+`__main__` startup with a pure observational ASGI wrapper. It tracks unknown
+HTTP requests, non-heartbeat client frames and voice/unknown sockets without
+buffering or changing requests. A private process-identified receipt is written
+at most twice per second; missing/stale/unreadable evidence keeps it awake.
+The fake-provider log and source edits count as activity. A journey pins the
+whole lease using its process identity, even during long waits. Durable active
+runs, running/interrupting/draining turns, background tasks and queued/running
+git operations prevent pausing. A failed busy check keeps it awake. No live
+app or database is consulted. CI and `--no-pause` retain `python -m app.main`
+without the observer.
 
 ```bash
 python -m scripts.devloop up                                          # local browser

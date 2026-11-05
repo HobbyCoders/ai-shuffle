@@ -1,10 +1,13 @@
-"""Idle decisions and the real resident HTTP ingress; no app/database fixtures."""
+"""Focused idle decisions, observational ASGI parity and paused-only holders."""
 from __future__ import annotations
 
 import asyncio
 import http.client
 import json
 import os
+import sqlite3
+import subprocess
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -13,14 +16,15 @@ from unittest.mock import Mock
 
 import pytest
 
-from scripts.devloop import idle, guardian
+from scripts.devloop import idle, guardian, observer, child
 from scripts.devloop import __main__ as devloop
 
 
 def instance(tmp_path):
     states = []
     obj = SimpleNamespace(directory=tmp_path, data={"state": "starting", "app": {}},
-                          args=SimpleNamespace(ttl_seconds=0.6))
+                          args=SimpleNamespace(ttl_seconds=0.8, host="127.0.0.1"),
+                          fake=SimpleNamespace(log_path=tmp_path / "fake.jsonl"), port=0, vite_port=None)
 
     def write(**changes):
         obj.data.update(changes)
@@ -30,233 +34,289 @@ def instance(tmp_path):
     obj.retire = lambda: write(state="stopping")
     obj.states = states
     obj.record_postgres = Mock()
-    obj.on_app_start = lambda process: write(state="ready")
     obj.on_app_exit = Mock()
     return obj
 
 
-def test_polling_reconnects_and_vite_pings_do_not_count_as_work():
-    browser = {"Sec-Fetch-Dest": "empty"}
-    assert not idle.foreground("GET", "/api/v1/network/status", browser)
-    assert not idle.foreground("GET", "/api/v1/sessions/x/events", browser)
-    assert not idle.foreground("GET", "/", {"Accept": "text/x-vite-ping"})
-    for route in ("/api/v1/ws/chat", "/api/v1/ws/global", "/api/v1/ws/sessions/x"):
-        assert not idle.foreground("GET", route, {"Upgrade": "websocket"})
-    assert not idle.foreground("GET", "/?token=hmr", {
-        "Upgrade": "websocket", "Sec-WebSocket-Protocol": "vite-hmr"})
-    assert idle.foreground("GET", "/", {"Sec-Fetch-Dest": "document"})
-    assert idle.foreground("GET", "/api/v1/projects", {})  # Unknown clients stay safe.
-    assert idle.foreground("POST", "/api/v1/sessions", browser)
+def receipt(lease, **changes):
+    app = lease.instance.data["app"]
+    app.update(pid=os.getpid(), pid_identity=guardian.identity(os.getpid()))
+    record = {"pid": app["pid"], "identity": app["pid_identity"],
+              "updated": time.monotonic(), "activity": time.monotonic() - 100,
+              "active": 0, "uncertain": False}
+    record.update(changes)
+    lease.receipt.write_text(json.dumps(record))
+
+
+def test_observed_allowlist_needs_no_browser_guessing():
+    for path in idle.POLL_GETS:
+        assert idle.passive("GET", path + "?query=not-stored")
+    assert idle.passive("GET", "/api/v1/projects/seeded/git/status")
+    assert idle.passive("PUT", "/api/v1/preferences/browser_panel")
+    for route in ("/api/v1/ws/chat", "/api/v1/ws/global", "/api/v1/ws/sessions/seeded"):
+        assert idle.passive("GET", route, {"Upgrade": "websocket"})
+    for protocol in ("vite-hmr", "vite-ping"):
+        assert idle.passive("GET", "/", {"Upgrade": "websocket", "Sec-WebSocket-Protocol": protocol})
+    assert idle.passive("GET", "/", {"Accept": "text/x-vite-ping"})
+    for method, path in (("GET", "/"), ("POST", "/api/v1/sessions"),
+                         ("PUT", "/api/v1/sessions/x"), ("GET", "/api/unknown")):
+        assert not idle.passive(method, path, {"Sec-Fetch-Dest": "empty", "User-Agent": "Mozilla/5.0"})
     for path in ("/api/v1/voice/sessions/x/audio", "/api/v1/ws/terminals/x"):
-        assert idle.foreground("GET", path, {"Upgrade": "websocket"})
-    assert b"setInterval" not in idle.ACTIVITY_SCRIPT
-    assert b"pointerdown" in idle.ACTIVITY_SCRIPT
+        assert not idle.passive("GET", path, {"Upgrade": "websocket"})
 
 
-def test_http_browser_polling_without_fetch_metadata_is_passive():
-    # Observed on Chromium against the private plain-HTTP, non-loopback preview:
-    # Fetch Metadata is absent, unlike localhost or an HTTPS page.
-    browser = {
-        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                      "(KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
-        "Accept": "application/json",
-    }
-    for path in ("/api/v1/auth/owner-status", "/api/v1/git/status", "/api/v1/computer-use/status"):
-        assert not idle.foreground("GET", path, browser)
-    browser["Accept"] = "*/*"
-    assert not idle.foreground("GET", "/api/v1/sessions", browser)
-    assert idle.foreground("POST", "/api/v1/sessions", browser)
-    assert not idle.foreground("PUT", "/api/v1/preferences/browser_panel", browser)
-    assert not idle.foreground("PUT", "/api/v1/preferences/chat_task_checks?only_if_missing=true", browser)
-    assert idle.foreground("PUT", "/api/v1/sessions/x", browser)
-    assert idle.foreground("PUT", "/api/v1/preferences/browser_panel", {})
-    assert idle.foreground("POST", "/__devloop/activity", browser)
-    browser["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-    assert idle.foreground("GET", "/api/v1/sessions", browser)
-    assert idle.foreground("GET", "/api/v1/sessions", {"Accept": "application/json"})
-    assert idle.foreground("GET", "/api/v1/sessions", {"User-Agent": "Mozilla/5.0"})
+def test_draining_turn_without_active_run_prevents_pause():
+    # Execute the real busy-proof SQL, not a fixture which returns the desired answer.
+    connection = sqlite3.connect(":memory:")
+    connection.create_function("NOW", 0, lambda: 0)
+    for ddl in ("runs (state TEXT, lease_expires_at INT)", "turns (state TEXT)",
+                "background_tasks (status TEXT)", "git_ops (status TEXT)"):
+        connection.execute("CREATE TABLE " + ddl)
+    db = SimpleNamespace(query=lambda sql: "t" if connection.execute(sql).fetchone()[0] else "f")
+    try:
+        assert not idle.database_busy(db)
+        for state in ("running", "interrupting", "draining"):
+            connection.execute("DELETE FROM turns")
+            connection.execute("INSERT INTO turns VALUES (?)", (state,))
+            assert idle.database_busy(db)
+        connection.execute("UPDATE turns SET state='completed'")
+        assert not idle.database_busy(db)
+    finally:
+        connection.close()
+    assert idle.database_busy(SimpleNamespace(query=Mock(side_effect=RuntimeError("offline"))))
 
 
-def test_busy_and_uncertain_database_reads_prevent_pause():
-    db = SimpleNamespace(query=Mock(return_value="f"))
-    assert not idle.database_busy(db)
-    sql = db.query.call_args.args[0]
-    assert "lease_expires_at >= NOW()" in sql
-    assert "background_tasks" in sql and "git_ops" in sql
-    for answer in ("t", "", "unknown"):
-        db.query.return_value = answer
-        assert idle.database_busy(db)
-    db.query.side_effect = RuntimeError("offline")
-    assert idle.database_busy(db)
+@pytest.mark.parametrize("changes", [{"active": 1}, {"uncertain": True}, {"pid": -1},
+                                     {"identity": "reused"}, {"updated": 0},
+                                     {"activity": "unreadable"}, {"activity": float("nan")}])
+def test_missing_stale_or_busy_receipts_never_pause(tmp_path, changes):
+    lease = idle.IdleLease(instance(tmp_path), threading.Event(), seconds=0)
+    assert not lease.idle()
+    receipt(lease, **changes)
+    assert not lease.idle()
 
 
-def test_idle_requires_no_inflight_work_and_a_deadline(tmp_path):
-    lease = idle.IdleLease(instance(tmp_path), threading.Event(), seconds=0.01)
-    lease.last_activity -= 1
+def test_activity_fake_provider_and_journey_keep_awake(tmp_path):
+    lease = idle.IdleLease(instance(tmp_path), threading.Event(), seconds=1)
+    lease.last_activity -= 100
+    receipt(lease)
     assert lease.idle()
-    lease.active = 1
+    lease.instance.fake.log_path.write_text("request metadata only")
     assert not lease.idle()
-    lease.active = 0
-    lease.activity()
+    lease.last_activity -= 100
+    receipt(lease)
+    pin = tmp_path / "journey-test.lease"
+    pin.write_text(f"{os.getpid()} {guardian.identity(os.getpid())}")
+    assert not lease.idle()
+    pin.write_text(f"{os.getpid()} different-start")
+    assert lease.idle()
+    pin.write_text("partial")
     assert not lease.idle()
 
 
-def test_journeys_hold_the_whole_run_with_reuse_safe_identity(tmp_path):
-    receipt = tmp_path / "journey-test.lease"
-    receipt.write_text(f"{os.getpid()} {guardian.identity(os.getpid())}")
-    assert idle.journey_active(tmp_path)
-    receipt.write_text(f"{os.getpid()} different-start")
-    assert not idle.journey_active(tmp_path)
-    receipt.write_text("partial")
-    assert idle.journey_active(tmp_path)  # Unsure: do not stop work.
-
-
-@pytest.mark.parametrize("meaningful", [True, False])
-def test_paused_request_is_held_then_served_once(tmp_path, meaningful):
-    received = []
-
-    class Upstream(BaseHTTPRequestHandler):
-        def do_GET(self):
-            received.append(self.path)
-            self.send_response(200)
-            self.send_header("Content-Length", "5")
-            self.end_headers()
-            self.wfile.write(b"saved")
-
-        def log_message(self, *_):
-            pass
-
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Upstream)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
+def test_passive_requests_get_503_without_waking(tmp_path):
     lease = idle.IdleLease(instance(tmp_path), threading.Event())
     lease.transition("paused")
-    ingress = idle.Ingress(lease, "127.0.0.1", 0, server.server_port)
-    result = []
+    holder = idle.PausedPort(lease, "127.0.0.1", 0)
+    try:
+        connection = http.client.HTTPConnection("127.0.0.1", holder.server.server_port, timeout=2)
+        connection.request("GET", "/api/v1/owner/status")
+        response = connection.getresponse()
+        assert response.status == 503 and response.read() == b""
+        assert not lease.requested
+        connection.close()
+    finally:
+        holder.close()
+
+
+def test_held_post_redirects_then_resends_unchanged_to_direct_server(tmp_path):
+    lease = idle.IdleLease(instance(tmp_path), threading.Event())
+    lease.transition("paused")
+    holder = idle.PausedPort(lease, "127.0.0.1", 0)
+    port = holder.server.server_port
+    result, received = [], []
+    body = b"original POST body"
 
     def request():
-        connection = http.client.HTTPConnection("127.0.0.1", ingress.server.server_port, timeout=3)
-        connection.request("GET", "/api/v1/saved?original=1", headers={} if meaningful else {"Sec-Fetch-Dest": "empty"})
-        result.append(connection.getresponse().read())
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+        connection.request("POST", "/work?original=1", body=body)
+        response = connection.getresponse()
+        result.append((response.status, response.getheader("Location"), response.read()))
         connection.close()
 
     client = threading.Thread(target=request)
     client.start()
+    server = None
     try:
-        time.sleep(0.1)
-        assert not received and client.is_alive()
-        assert lease.requested is meaningful
+        for _ in range(100):
+            if lease.requested:
+                break
+            time.sleep(0.005)
+        assert lease.requested and not result
         lease.transition("waking")
-        time.sleep(0.05)
-        assert not received
+        holder.close()  # Accepted connection survives; public port is released.
+
+        class Direct(BaseHTTPRequestHandler):
+            def do_POST(self):
+                received.append((self.path, self.rfile.read(int(self.headers["Content-Length"]))))
+                self.send_response(200)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, *_):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", port), Direct)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
         lease.transition("ready")
         client.join(3)
-        assert result == [b"saved"]
-        assert received == ["/api/v1/saved?original=1"]
-        assert lease.active == 0
+        assert result == [(307, "/work?original=1", b"")] and not received
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+        connection.request("POST", result[0][1], body=body)
+        assert connection.getresponse().status == 200
+        connection.close()
+        assert received == [("/work?original=1", body)]
     finally:
         lease.stopped.set()
         with lease.condition:
             lease.condition.notify_all()
-        ingress.close()
-        server.shutdown()
-        server.server_close()
+        if server:
+            server.shutdown()
+            server.server_close()
         client.join(3)
 
 
+def test_holder_denies_nonprivate_peer_without_wake(tmp_path, monkeypatch):
+    monkeypatch.setattr("app.core.owner_auth.is_private_address", lambda peer: False)
+    lease = idle.IdleLease(instance(tmp_path), threading.Event())
+    holder = idle.PausedPort(lease, "127.0.0.1", 0)
+    try:
+        connection = http.client.HTTPConnection("127.0.0.1", holder.server.server_port, timeout=2)
+        connection.request("GET", "/")
+        assert connection.getresponse().status == 403
+        assert not lease.requested
+        connection.close()
+    finally:
+        holder.close()
 
 
-def test_idle_websocket_keeps_browser_and_buffers_a_real_query_through_wake(tmp_path):
-    from websockets.asyncio.client import connect
-    from websockets.asyncio.server import serve
+def bare_observer(app):
+    obj = observer.ActivityObserver.__new__(observer.ActivityObserver)
+    obj.app, obj.lock = app, threading.Lock()
+    obj.active, obj.activity, obj.uncertain = 0, 0, False
+    return obj
 
+
+def test_observer_http_streaming_identity_and_inflight_pin():
     async def exercise():
-        received = []
+        original_scope = {"type": "http", "path": "/unknown", "method": "POST", "headers": []}
+        messages = [{"type": "http.request", "body": b"secret-not-retained", "more_body": False}]
+        sent = []
 
-        async def echo(socket):
-            try:
-                async for message in socket:
-                    received.append(message)
-                    await socket.send(message)
-            except Exception:
-                pass  # The upstream is deliberately stopped by the pause.
+        async def receive():
+            return messages[0]
 
-        lease = idle.IdleLease(instance(tmp_path), threading.Event())
-        lease.transition("ready")
-        async with serve(echo, "127.0.0.1", 0) as server:
-            port = server.sockets[0].getsockname()[1]
-            ingress = idle.Ingress(lease, "127.0.0.1", 0, port)
-            try:
-                async with connect(f"ws://127.0.0.1:{ingress.server.server_port}/api/v1/ws/chat",
-                                   ping_interval=None) as client:
-                    watch = '{"type":"watch_session","session_id":"seeded"}'
-                    await client.send(watch)
-                    assert await asyncio.wait_for(client.recv(), 3) == watch
-                    lease.transition("pausing")
-                    lease.disconnect_streams()
-                    await asyncio.sleep(0.1)
-                    lease.transition("paused")
-                    lease.requested = False
-                    await client.send('{"type":"pong"}')
-                    await asyncio.sleep(0.1)
-                    assert not lease.requested
-                    query = '{"type":"query","prompt":"original","session_id":"seeded"}'
-                    await client.send(query)
-                    for _ in range(100):
-                        if lease.requested:
-                            break
-                        await asyncio.sleep(0.01)
-                    assert lease.requested
-                    assert query not in received
-                    lease.transition("waking")
-                    await asyncio.sleep(0.05)
-                    assert query not in received
-                    lease.transition("ready")
-                    assert await asyncio.wait_for(client.recv(), 3) == watch  # replayed subscription
-                    assert await asyncio.wait_for(client.recv(), 3) == query
-                    assert received.count(query) == 1
-                    assert received.count(watch) == 2
-            finally:
-                lease.stopped.set()
-                lease.disconnect_streams()
-                ingress.close()
+        async def send(message):
+            sent.append(message)
 
+        async def app(scope, receive_arg, send_arg):
+            assert scope is original_scope and receive_arg is receive and send_arg is send
+            assert wrapped.active == 1
+            assert await receive_arg() is messages[0]
+            for chunk in (b"data: first\n\n", b"data: last\n\n"):
+                message = {"type": "http.response.body", "body": chunk, "more_body": True}
+                await send_arg(message)
+                assert sent[-1] is message  # No buffering or copies, including SSE.
+
+        wrapped = bare_observer(app)
+        await wrapped(original_scope, receive, send)
+        assert wrapped.active == 0 and wrapped.activity > 0 and not wrapped.uncertain
+        assert not hasattr(wrapped, "body")
     asyncio.run(exercise())
 
 
-def test_websocket_parser_handles_partial_and_extended_masked_frames():
-    payload = b'{"type":"query","prompt":"' + b'x' * 200 + b'"}'
-    mask = b'abcd'
-    frame = bytes([129, 128 | 126]) + len(payload).to_bytes(2, "big") + mask
-    frame += bytes(byte ^ mask[i % 4] for i, byte in enumerate(payload))
-    assert idle.websocket_frames(frame[:5]) == ([], frame[:5])
-    frames, rest = idle.websocket_frames(frame)
-    assert not rest and frames == [(frame, 1, payload)]
-    assert idle.websocket_work(1, payload)
-    assert not idle.websocket_work(1, b'{"type":"pong"}')
-    assert idle.websocket_work(2, b'unknown')
+def test_observer_socket_heartbeats_only_are_passive_and_voice_pins():
+    async def exercise(path, heartbeat, pin):
+        message = {"type": "websocket.receive", "text": heartbeat}
+
+        async def receive():
+            return message
+
+        async def send(_):
+            pass
+
+        async def app(scope, wrapped_receive, wrapped_send):
+            assert wrapped.active == pin
+            before = wrapped.activity
+            assert await wrapped_receive() is message
+            assert (wrapped.activity == before) == (heartbeat == '{"type":"ping"}')
+
+        wrapped = bare_observer(app)
+        await wrapped({"type": "websocket", "path": path, "headers": []}, receive, send)
+        assert wrapped.active == 0
+    for text in ('{"type":"ping"}', '{"type":"query","prompt":"not stored"}', 'unknown'):
+        asyncio.run(exercise("/api/v1/ws/chat", text, 0))
+    asyncio.run(exercise("/api/v1/voice/sessions/x/audio", '{"type":"ping"}', 1))
 
 
-def test_ttl_ends_while_paused_and_shutdown_is_clean(tmp_path, monkeypatch):
+def test_child_reaches_app_main_as_main_without_changing_serve_settings(tmp_path, monkeypatch):
+    from app import serve
+
+    app, settings, calls = object(), object(), []
+
+    def normal_run(wrapped, actual_settings):
+        assert actual_settings is settings and wrapped.app is app
+        wrapped.stopped.set()
+        wrapped.writer.join(2)
+        calls.append("normal serve")
+
+    def module(name, **kwargs):
+        assert name == "app.main" and kwargs == {"run_name": "__main__", "alter_sys": True}
+        assert len(sys.argv) == 1
+        serve.run(app, settings)
+
+    monkeypatch.setattr(serve, "run", normal_run)
+    monkeypatch.setattr(child.runpy, "run_module", module)
+    monkeypatch.setattr(sys, "argv", ["child", str(tmp_path / "activity.json")])
+    child.main()
+    assert calls == ["normal serve"]
+
+
+def test_real_child_process_reaped_before_paused_ttl(tmp_path, monkeypatch):
     obj = instance(tmp_path)
     stopped = threading.Event()
     lease = idle.IdleLease(obj, stopped, seconds=0)
-    process = SimpleNamespace(returncode=None)
-    process.poll = lambda: process.returncode
-    process.send_signal = Mock(side_effect=lambda _: setattr(process, "returncode", 0))
+    real_popen = subprocess.Popen
+    children = []
+
+    def spawn(*args, **kwargs):
+        process = real_popen([sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True)
+        children.append(process)
+        return process
+
+    def on_start(process):
+        receipt(lease)
+        obj.data["app"].update(pid=process.pid, pid_identity=guardian.identity(process.pid))
+        record = json.loads(lease.receipt.read_text())
+        record.update(pid=process.pid, identity=guardian.identity(process.pid))
+        lease.receipt.write_text(json.dumps(record))
+        obj.write(state="ready")
+
+    obj.on_app_start = on_start
     postgres = Mock()
-    db = SimpleNamespace(open=Mock(), publish_descriptor=Mock(), close=Mock(),
-                         process=postgres, query=Mock(return_value="f"))
-    monkeypatch.setattr(idle.subprocess, "Popen", lambda *a, **kw: process)
-    monkeypatch.setattr("docker.container_runtime.stop_group", Mock())
+    db = SimpleNamespace(open=Mock(), publish_descriptor=Mock(), close=Mock(), process=postgres,
+                         query=Mock(return_value="f"))
+    monkeypatch.setattr(idle.subprocess, "Popen", spawn)
+    stop_group = Mock()
+    monkeypatch.setattr("docker.container_runtime.stop_group", stop_group)
     idle.supervise(obj, {}, db, lease, threading.Event(), start_vite=Mock(), stop_vite=Mock())
     assert "pausing" in obj.states and "paused" in obj.states
+    assert children[0].poll() == -idle.signal.SIGTERM
+    stop_group.assert_not_called()  # Reaped app is cleared, including during TTL cleanup.
     assert stopped.is_set()
-    process.send_signal.assert_called_once_with(idle.signal.SIGTERM)
     db.close.assert_called_once()
     postgres.send_signal.assert_called_once_with(idle.signal.SIGINT)
     postgres.wait.assert_called_once_with(timeout=30)
-
-
 
 
 @pytest.mark.parametrize("ci,workers,flag,expected", [
@@ -274,27 +334,6 @@ def test_ci_and_paired_workers_never_pause(monkeypatch, ci, workers, flag, expec
     monkeypatch.setattr(devloop, "stamped_build_problem", lambda: None)
     devloop._validate(argparse.ArgumentParser(), args)
     assert args.no_pause is expected
-
-
-def test_postgres_identity_is_replaced_on_every_start(tmp_path, monkeypatch):
-    import ipaddress
-
-    args = SimpleNamespace(host=ipaddress.ip_address("127.0.0.1"), browser_host=None,
-                           ttl_seconds=60, status=tmp_path / "private" / "status.json")
-    fake = SimpleNamespace(url="http://127.0.0.1:9", log_path=tmp_path / "log",
-                           scenarios=SimpleNamespace(directory=tmp_path, load=dict))
-    env = {"SHUFFLE_PREVIEW_PORT": "19990", "PORT": "19991", "SHUFFLE_PROTECTED_PORT": "19992",
-           "DATA_DIR": str(tmp_path / "data"), "WORKSPACE_DIR": str(tmp_path / "workspace")}
-    obj = devloop.Instance(args, tmp_path, env, fake, None)
-    monkeypatch.setattr("app.core.temp_scratch.process_identity", lambda pid: f"identity-{pid}")
-    obj.database = SimpleNamespace(process=SimpleNamespace(pid=100), socket=tmp_path / "first")
-    obj.record_postgres()
-    obj.database.process.pid = 200
-    obj.database.socket = tmp_path / "second"
-    obj.record_postgres()
-    status = json.loads(args.status.read_text())
-    assert status["postgres"] == {"pid": 200, "pid_identity": "identity-200",
-                                  "socket_dir": str(tmp_path / "second")}
 
 
 @pytest.mark.parametrize("state", ["paused", "waking"])
