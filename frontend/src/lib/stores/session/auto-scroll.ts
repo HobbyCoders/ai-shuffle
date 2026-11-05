@@ -298,3 +298,42 @@ export function resolveReadingAnchorDelta(anchor: ReadingAnchor, rowTop: number,
 	const target = anchor.offset >= 0 ? viewTop + anchor.offset : viewTop - anchor.past * rowHeight;
 	return rowTop - target;
 }
+
+/**
+ * Which transcript rows came through the prompt queue, so a prompt queued long
+ * ago does not pull a reader who has scrolled up (#863). A send made while Stop
+ * is pending may also queue briefly behind the turn being cancelled; that one
+ * asks to see its reply. Freshness goes by queue entry, not text, so resending
+ * the words of an earlier withdrawn prompt still counts as a new send.
+ */
+export function createQueuedPromptTracker() {
+	const seenText = new Set<string>();
+	const seenEntries = new Set<string>();
+	const sentAfterStop = new Set<string>();
+	return {
+		reset() {
+			seenText.clear();
+			seenEntries.clear();
+			sentAfterStop.clear();
+		},
+		/** `stopPending` is false for the first read of a session's existing queue. */
+		observe(queue: readonly { id: string; clientMessageId?: string; content: string }[], stopPending: boolean) {
+			for (const entry of queue) {
+				const key = entry.clientMessageId ?? entry.id;
+				if (!seenEntries.has(key) && stopPending) sentAfterStop.add(entry.content);
+				seenEntries.add(key);
+				seenText.add(entry.content);
+			}
+		},
+		/** The reader scrolled away: a pending send no longer overrides that. */
+		releaseStopFollow() {
+			sentAfterStop.clear();
+		},
+		/** Call once per new user row; it consumes the row's text. */
+		classify(content: string) {
+			const fromQueue = seenText.delete(content);
+			const followsStop = sentAfterStop.delete(content);
+			return { fromQueue, followsStop };
+		},
+	};
+}

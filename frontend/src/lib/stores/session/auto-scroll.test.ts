@@ -13,6 +13,7 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+	createQueuedPromptTracker,
 	CURRENT_TURN_ANCHOR_OFFSET,
 	MIN_TRANSCRIPT_TAIL_RESERVE,
 	NEAR_BOTTOM_THRESHOLD,
@@ -323,5 +324,45 @@ describe('reading anchor across a width change (#865)', () => {
 		expect(anchor.past).toBe(0.25);
 		// Landscape: the reply is half as tall; a quarter in is 200px past its top.
 		expect(resolveReadingAnchorDelta(anchor, -1500, 800, 0)).toBe(-1300);
+	});
+});
+
+describe('queued prompt tracker', () => {
+	const entry = (id: string, content: string) => ({ id, clientMessageId: `client-${id}`, content });
+
+	it('marks a prompt queued before Stop as queued, so it does not pull a reader', () => {
+		const tracker = createQueuedPromptTracker();
+		tracker.observe([entry('a', 'Continue')], false);
+		tracker.observe([entry('a', 'Continue')], true);
+		expect(tracker.classify('Continue')).toEqual({ fromQueue: true, followsStop: false });
+	});
+
+	it('follows a send made while Stop is pending', () => {
+		const tracker = createQueuedPromptTracker();
+		tracker.observe([entry('b', 'Continue')], true);
+		expect(tracker.classify('Continue')).toEqual({ fromQueue: true, followsStop: true });
+	});
+
+	it('follows a resend of the same words after the earlier prompt was withdrawn', () => {
+		const tracker = createQueuedPromptTracker();
+		tracker.observe([entry('a', 'Continue')], false);
+		tracker.observe([], false);
+		tracker.observe([entry('b', 'Continue')], true);
+		expect(tracker.classify('Continue')).toEqual({ fromQueue: true, followsStop: true });
+	});
+
+	it('keeps one entry the same when the server snapshot replaces its local id', () => {
+		const tracker = createQueuedPromptTracker();
+		tracker.observe([{ id: 'local', clientMessageId: 'client-a', content: 'Continue' }], false);
+		tracker.observe([{ id: 'server', clientMessageId: 'client-a', content: 'Continue' }], true);
+		expect(tracker.classify('Continue').followsStop).toBe(false);
+	});
+
+	it('drops the follow once the reader scrolls away, and forgets a landed row', () => {
+		const tracker = createQueuedPromptTracker();
+		tracker.observe([entry('b', 'Continue')], true);
+		tracker.releaseStopFollow();
+		expect(tracker.classify('Continue')).toEqual({ fromQueue: true, followsStop: false });
+		expect(tracker.classify('Continue')).toEqual({ fromQueue: false, followsStop: false });
 	});
 });
