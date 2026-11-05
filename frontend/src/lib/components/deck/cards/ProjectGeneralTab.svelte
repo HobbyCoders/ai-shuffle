@@ -1,6 +1,6 @@
 <script lang="ts">
 	/** Project identity, location and grouping, using Settings rows. */
-	import { untrack } from 'svelte';
+	import { tick, untrack } from 'svelte';
 	import { getGitStatus } from '$lib/api/git';
 	import { git } from '$lib/stores/git.svelte';
 	import InitRepoModal from '$lib/components/git/InitRepoModal.svelte';
@@ -112,9 +112,11 @@
 		}
 	}
 
-	function startGroupCreate() {
+	async function startGroupCreate() {
 		creatingGroup = true;
 		newGroupName = '';
+		await tick();
+		document.querySelector<HTMLInputElement>('input[aria-label="Group name"]')?.focus();
 	}
 
 	function confirmGroupCreate() {
