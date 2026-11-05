@@ -439,8 +439,8 @@ cases.push({
 		await typeAndSend(ctx.page, `ninth history ${uniq()} [script:long tps=2000]`);
 		await waitTurnSettled(ctx.page, { messagesAtLeast: count + 2, hold: 200 });
 	},
-	async run(ctx) {
-		const { page, variant, trace } = ctx;
+	async act(ctx) {
+		const { page } = ctx;
 		let evicted = false;
 		for (let turn = 0; turn < 3; turn++) {
 			const token = `rebase-${uniq()}`;
@@ -502,7 +502,7 @@ cases.push({
 			ctx.log(`error rebase ${turn}: ${JSON.stringify({ evicted, before, last: after.at(-1), shifts: observed.shifts })}`);
 		}
 		expect(evicted, 'this production path must actually evict a leading transcript row');
-		assertStrict(trace);
+		// The runner owns the unchanged strict recorder/anomaly verdict.
 	}
 });
 
