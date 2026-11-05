@@ -253,7 +253,7 @@
 		{#each groups as group (group.label)}
    <RowGroup title={group.label}>
 			{#each group.rows as row (row.id)}
-				<ListItem id={row.id} name={row.name} summary={row.summary} status={row.status} icon={row.icon} category={CATEGORY} />
+				<ListItem variant="card" id={row.id} name={row.name} summary={row.summary} status={row.status} icon={row.icon} category={CATEGORY} />
 			{/each}
    </RowGroup>
 		{/each}

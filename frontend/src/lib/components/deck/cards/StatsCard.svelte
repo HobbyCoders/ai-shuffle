@@ -189,14 +189,12 @@
   </ViewPanel>
  {/snippet}
  {#snippet main()}
-  <DetailPane width="data" contentFirst name="Stats" subtitle={`${formatDisplayDate(startDate)} — ${formatDisplayDate(endDate)} · Usage, estimated spend and activity`}>
+  <DetailPane width="data" contentFirst name={`Last ${parseInt(selectedPreset)} days`} subtitle={`${formatDisplayDate(startDate)} — ${formatDisplayDate(endDate)} · Usage, estimated spend and activity`}>
+   {#snippet heading()}<h2 class="stats-title">Last {parseInt(selectedPreset)} days</h2>{/snippet}
    {#if stacked}
     <div class="stats-controls">
      <Segmented label="Date range" options={PRESETS.map(p => ({value: p.id, label: p.label}))} value={selectedPreset} onchange={selectPreset} />
-     {#if !platform.isMobile}
-      <PanelIconButton label="Refresh" icon={RefreshCw} onclick={handleRefresh} disabled={refreshing || loading} />
-      <PanelIconButton label="Export usage by provider as CSV" icon={exportLoading ? Loader2 : Download} onclick={handleExport} disabled={exportLoading} />
-     {/if}
+
     </div>
    {/if}
    {#if error}<div role="alert"><InlineBanner>{error}</InlineBanner></div>{/if}
@@ -233,8 +231,9 @@
 
 				</div>
 					<!-- Usage by provider (full width) -->
-					<section class="stats-section st-card" data-section="providers">
-						<ListGroupLabel label="Usage by provider" />
+					<section class="stats-section" data-section="providers" aria-labelledby="stats-providers">
+						<h3 id="stats-providers">Usage by provider</h3>
+						<div class="stats-content st-card">
 						{#if providersFailed}
 							<div class="bempty">Provider breakdown unavailable</div>
 						{:else if providers.length === 0}
@@ -270,11 +269,13 @@
 								<p class="prov-foot">{provTotals.inferred.toLocaleString()} older {provTotals.inferred === 1 ? 'turn was' : 'turns were'} recorded before per-provider tracking and {provTotals.inferred === 1 ? 'is' : 'are'} shown under {provTotals.inferred === 1 ? 'its' : 'their'} session's current provider.</p>
 							{/if}
 						{/if}
+						</div>
 					</section>
 
 					<!-- Spend over time (tall, wide) -->
-					<section class="stats-section st-card" data-section="spend">
-						<ListGroupLabel label="Estimated spend over time" />
+					<section class="stats-section" data-section="spend" aria-labelledby="stats-spend">
+						<h3 id="stats-spend">Estimated spend over time</h3>
+						<div class="stats-content st-card">
 						{#if usageTrends.length === 0}
 							<div class="bempty">No usage in this range</div>
 						{:else}
@@ -288,11 +289,13 @@
 								{/each}
 							</div>
 						{/if}
+						</div>
 					</section>
 
 					<!-- Cost by profile -->
-					<section class="stats-section st-card" data-section="profiles">
-						<ListGroupLabel label="Cost by profile" />
+					<section class="stats-section" data-section="profiles" aria-labelledby="stats-profiles">
+						<h3 id="stats-profiles">Cost by profile</h3>
+						<div class="stats-content st-card">
 						{#if costBreakdown.length === 0}
 							<div class="bempty">No data</div>
 						{:else}
@@ -306,11 +309,13 @@
 								{/each}
 							</div>
 						{/if}
+						</div>
 					</section>
 
 					<!-- Top chats by cost -->
-					<section class="stats-section st-card" data-section="chats">
-						<ListGroupLabel label="Top chats by cost" />
+					<section class="stats-section" data-section="chats" aria-labelledby="stats-chats">
+						<h3 id="stats-chats">Top chats by cost</h3>
+						<div class="stats-content st-card">
 						{#if topSessions.length === 0}
 							<div class="bempty">No chats</div>
 						{:else}
@@ -326,6 +331,7 @@
 								{/each}
 							</div>
 						{/if}
+						</div>
 					</section>
    </div>{/if}
   </DetailPane>
@@ -343,8 +349,10 @@
  .bsub { font-size: 12px; color: var(--st-mfg); margin-top: 8px; }
  .bsub--warn { color: var(--st-warning); }
  .bempty { min-height: 80px; display: grid; place-items: center; color: var(--st-mfg); font-size: 13px; text-align: center; }
- .stats-section { scroll-margin-top: 24px; margin-top: 32px; padding: 20px; }
- .stats-section :global(.st-gl) { margin-top: 0; }
+ .stats-title { margin: 0; font-size: 24px; font-weight: 600; letter-spacing: -.01em; line-height: 1.25; }
+ .stats-section { scroll-margin-top: 24px; margin-top: 40px; }
+ .stats-section h3 { font-size: 14px; font-weight: 600; margin: 0 0 20px; }
+ .stats-content { padding: 20px; }
  .bars { height: 180px; }
  @container settings (max-width: 800px) { .metrics { grid-template-columns: 1fr 1fr; } .metric:nth-child(3) { border-left: 0; } .metric:nth-child(n+3) { border-top: 1px solid var(--st-border); } }
  @media (prefers-reduced-motion: reduce) { .bars i, .brk-fill, .prov-fill { transition: none; } }
@@ -362,10 +370,10 @@
 	/* Cost-by-profile rows */
 	.brk { display: flex; flex-direction: column; gap: 11px; margin-top: 2px; }
 	.brk-row { display: grid; grid-template-columns: minmax(64px, 96px) 1fr auto; align-items: center; gap: 10px; }
-	.brk-name { font-size: 0.8125rem; color: var(--foreground); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+	.brk-name { font-size: 13px; color: var(--foreground); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 	.brk-track { height: 6px; background: var(--muted); border-radius: 999px; overflow: hidden; }
 	.brk-fill { display: block; height: 100%; background: var(--st-meter); border-radius: 999px; transition: width 450ms ease; }
-	.brk-val { font-size: 0.75rem; font-weight: 600; color: var(--muted-foreground); text-align: right; }
+	.brk-val { font-size: 13px; font-weight: 600; color: var(--muted-foreground); text-align: right; }
 
 	/* Usage-by-provider rows */
 	.prov { display: flex; flex-direction: column; }
@@ -378,7 +386,7 @@
 		border-top: none; padding: 0 0 4px;
 		font-size: 12px; color: var(--muted-foreground);
 	}
-	.prov-name { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 0.8125rem; color: var(--foreground); }
+	.prov-name { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 13px; color: var(--foreground); }
 	.prov-label { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 	.prov-chip {
 		flex-shrink: 0; padding: 1px 7px; border-radius: 999px; font-size: 0.65rem; font-weight: 600;
@@ -386,7 +394,7 @@
 	}
 	.prov-chip[data-billing='subscription'] { color: var(--st-mfg); }
 	.prov-chip[data-billing='unknown'] { border-style: dashed; }
-	.prov-num { font-size: 0.75rem; color: var(--muted-foreground); text-align: right; font-variant-numeric: tabular-nums; }
+	.prov-num { font-size: 13px; color: var(--muted-foreground); text-align: right; font-variant-numeric: tabular-nums; }
 	.prov-head .prov-num { font-size: 12px; }
 	.prov-mlabel { display: none; }
 	.prov-track { height: 6px; background: var(--muted); border-radius: 999px; overflow: hidden; }
@@ -394,7 +402,7 @@
 	/* Subscription equivalent remains labelled, with a quieter token-coloured track. */
 	.prov-fill.sub { background: var(--st-meter); opacity: 0.65; }
 	.prov-cost { display: flex; flex-direction: column; align-items: flex-end; text-align: right; cursor: help; }
-	.prov-cost-val { font-size: 0.75rem; font-weight: 600; color: var(--foreground); }
+	.prov-cost-val { font-size: 13px; font-weight: 600; color: var(--foreground); }
 	.prov-cost.missing .prov-cost-val { color: var(--muted-foreground); font-weight: 500; font-style: italic; }
 	.prov-cost-note { font-size: 0.65rem; color: var(--muted-foreground); white-space: nowrap; }
 	.prov-foot { margin: 10px 0 0; font-size: 0.72rem; color: var(--muted-foreground); }
@@ -414,10 +422,10 @@
 		border-radius: 6px; background: color-mix(in oklch, var(--st-meter) 15%, transparent);
 		color: var(--st-mfg); font-size: 0.65rem; font-weight: 600;
 	}
-	.top-name { font-size: 0.8125rem; color: var(--foreground); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+	.top-name { font-size: 13px; color: var(--foreground); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 	.top-track { height: 5px; background: var(--muted); border-radius: 999px; overflow: hidden; }
 	.top-fill { display: block; height: 100%; background: color-mix(in oklch, var(--st-meter) 75%, transparent); border-radius: 999px; }
-	.top-val { font-size: 0.75rem; font-weight: 600; color: var(--muted-foreground); text-align: right; }
+	.top-val { font-size: 13px; font-weight: 600; color: var(--muted-foreground); text-align: right; }
 	.top-row :global(.top-arrow) { color: var(--muted-foreground); opacity: 0; transition: opacity 120ms ease; }
 	.top-row:hover :global(.top-arrow) { opacity: 1; }
 	/* Touch / mobile shell: the drill-in arrow can't be hover-revealed — show it so

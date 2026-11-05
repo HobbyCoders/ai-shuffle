@@ -161,8 +161,9 @@ Panel contexts and tokens travel automatically. Off-screen feature pages never c
 	.view-shell { display: grid; grid-template-columns: var(--view-panel-width, 264px) minmax(0, 1fr); height: 100%; min-height: 0; min-width: 0; }
 	.view-shell[data-docked], .view-shell[data-stacked] { grid-template-columns: minmax(0, 1fr); }
 	.inline-panel { min-height: 0; min-width: 0; border-right: 1px solid var(--sidebar-border); }
-	.view-main-slot { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: auto; container: st-detail / inline-size; }
+	.view-main-slot { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: auto; scrollbar-gutter: stable; container: st-detail / inline-size; }
 	.inline-panel[hidden], .view-main-slot[hidden] { display: none; }
 	.view-shell[data-stacked] .inline-panel { border-right: 0; }
+	.view-shell[data-stacked] .view-main-slot { scrollbar-gutter: auto; }
 	.view-shell[data-stacked][data-content-first] :global(.st-dtop .st-back) { display: none; }
 </style>

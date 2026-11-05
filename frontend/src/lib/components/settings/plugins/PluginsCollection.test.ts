@@ -108,6 +108,8 @@ function detail(): HTMLElement {
 
 beforeEach(() => {
 	vi.clearAllMocks();
+	vi.stubGlobal('matchMedia', () => ({ matches: false, addEventListener() {}, removeEventListener() {} }));
+	vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
 	resetPluginsLive();
 	details = {
 		[installedDetails.id]: installedDetails,
@@ -123,7 +125,7 @@ beforeEach(() => {
 	m.getAutoUpdateSettings.mockResolvedValue(null);
 	m.get.mockResolvedValue([]);
 });
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 describe('background resource refreshes', () => {
 	it('defers hidden invalidations and reloads once on visibility, not after unmount', async () => {
@@ -189,6 +191,7 @@ describe('the list (from PluginsHub)', () => {
    const list = screen.getByRole('heading', { level: 1, name: 'Plugins' }).closest('.st-lcol') as HTMLElement;
    expect(within(list).queryByRole('searchbox')).toBeNull();
    expect(within(list).getByText('Nothing added yet.').closest('.st-card')).toBeTruthy();
+   expect(within(list).getByRole('button', { name: 'Explore plugins' })).toBeTruthy();
    expect(view.container.querySelector('.st-lcol .st-card [data-settings-item]')).toBeTruthy();
   });
 
@@ -223,7 +226,7 @@ describe('the list (from PluginsHub)', () => {
 		expect(rows()).toHaveLength(1);
 		await fireEvent.input(search, { target: { value: 'no-such-plugin' } });
 		expect(within(pane).getByText('No plugins match your search.')).toBeTruthy();
-   await fireEvent.click(within(pane).getByRole('button', { name: 'Clear' }));
+   await fireEvent.click(within(pane).getByRole('button', { name: 'Clear search' }));
    expect((search as HTMLInputElement).value).toBe('');
    expect(rows()).toHaveLength(3);
 	});

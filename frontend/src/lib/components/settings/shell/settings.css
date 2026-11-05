@@ -340,11 +340,6 @@
 	font-size: 13px;
 }
 
-/* Keep the centered detail frame fixed when a classic scrollbar appears.
-   Index/list scrollers deliberately keep their existing available width. */
-.settings-shell .settings-viewport {
-	scrollbar-gutter: stable;
-}
 /* Preference and collection pages scroll in the same outer frame. Inner
    max-widths no longer choose whether the column loses a scrollbar's width. */
 .settings-shell .settings-viewport > .st-content { overflow: visible; flex: 1 0 auto; }
@@ -554,8 +549,10 @@
 	min-height: 0;
 }
 
-.settings-shell[data-stacked] .st-dh { grid-template-columns: minmax(0, 1fr) auto; gap: 12px; }
-.settings-shell[data-stacked] .st-dh.has-identity { grid-template-columns: auto minmax(0, 1fr) auto; }
+.settings-shell[data-stacked] .st-dh { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+.settings-shell[data-stacked] .st-dh:has(> .st-dha) { grid-template-columns: minmax(0, 1fr) auto; }
+.settings-shell[data-stacked] .st-dh:has(> .st-identity > *) { grid-template-columns: auto minmax(0, 1fr); }
+.settings-shell[data-stacked] .st-dh:has(> .st-identity > *):has(> .st-dha) { grid-template-columns: auto minmax(0, 1fr) auto; }
 .settings-shell[data-stacked] .st-dha {
 	grid-column: auto;
 	justify-content: flex-end;
@@ -669,3 +666,10 @@
 .settings-shell details:not(.detail-more) > summary::-webkit-details-marker { display: none; }
 .settings-shell details:not(.detail-more) > summary::before { content: ''; flex: none; width: 7px; height: 7px; margin: 0 4px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(-45deg); }
 .settings-shell details[open]:not(.detail-more) > summary::before { transform: rotate(45deg); }
+/* Additive content helpers: opt in to the shared card → footnote → section rhythm. */
+.settings-shell .st-footnote { margin: 12px 0 40px; color: var(--st-mfg); font-size: 13px; line-height: 1.45; }
+.settings-shell .st-grp:has(+ .st-footnote),
+.settings-shell article:has(+ .st-footnote) > .st-grp { margin-bottom: 0; }
+.settings-shell .st-card + .st-grp { margin-top: 40px; }
+.settings-shell .st-it.card { padding-inline: 16px; }
+.settings-shell .st-note:has(+ .st-grp) { margin-bottom: 40px; }

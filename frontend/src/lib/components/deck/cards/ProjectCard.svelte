@@ -6,7 +6,7 @@
 	import { platform } from '$lib/stores/platform.svelte';
 	import { appData as tabs, projects } from '$lib/stores/app-data.svelte';
 	import { loadProjectsOverview, patchOverviewWorker, projectsOverview, projectsOverviewSupported } from '$lib/stores/projects-overview';
-	import { Plus, Trash2, FolderOpen, FolderGit2, Settings, Server, Bot, Zap, Brain, Loader2, MonitorSmartphone } from 'lucide-svelte';
+	import { Plus, FolderOpen, FolderGit2, Settings, Server, Bot, Zap, Brain, Loader2, MonitorSmartphone } from 'lucide-svelte';
 	import type ProjectMcpTabType from './ProjectMcpTab.svelte';
 	import ProjectGeneralTab from './ProjectGeneralTab.svelte';
 	import ProjectMcpTab from './ProjectMcpTab.svelte';
@@ -291,10 +291,10 @@
 		{#if selectedRow}
 				{#snippet projectDangerRows()}
 					{#if selectedProject}
-						<SettingRow label="Remove project" hint={confirmingRemove ? `Remove ${selectedRow.name}${overviewOn ? ` from ${selfName}` : ''} and its ${selectedRow.sessionCount} conversations? This cannot be undone.` : 'Removes the project and its conversations. Files stay on disk.'}>
+						<SettingRow label="Remove project" hint={confirmingRemove ? `Remove ${selectedRow.name}${overviewOn ? ` from ${selfName}` : ''} and its ${selectedRow.sessionCount} conversations? This cannot be undone.` : 'Removes the project and its conversations from this worker. Files stay on disk.'}>
 							{#if confirmingRemove}<button class="st-btn" disabled={deleteLoading} onclick={() => (confirmingRemove = false)}>Cancel</button>
 								<button class="st-btn danger" disabled={deleteLoading} onclick={handleRemoveFromDetail}>{deleteLoading ? 'Removing…' : 'Remove'}</button>
-							{:else}<button class="st-btn danger" title="Delete" aria-label={`Delete ${selectedRow.name}`} onclick={() => (confirmingRemove = true)}><Trash2 />Remove</button>{/if}
+							{:else}<button class="st-btn danger" title={`Remove ${selectedRow.name} and its chats from this worker`} onclick={() => (confirmingRemove = true)}>Remove project and chats</button>{/if}
 						</SettingRow>
 					{/if}
 				{/snippet}

@@ -46,6 +46,8 @@ describe('pr-inbox helpers', () => {
 describe('PrInboxCard', () => {
 	beforeEach(() => {
   platform.set('desktop'); page.state = {};
+  vi.stubGlobal('matchMedia', () => ({ matches: window.innerWidth <= 600, addEventListener() {}, removeEventListener() {} }));
+  vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
   Object.defineProperty(window, 'innerWidth', { value: 1440, configurable: true });
 		getPullRequestInbox.mockReset();
 		getPullRequestInbox.mockResolvedValue({
@@ -54,7 +56,7 @@ describe('PrInboxCard', () => {
 			repos: ['o/alpha', 'o/beta']
 		});
 	});
-	afterEach(() => { cleanup(); platform.set('desktop'); vi.restoreAllMocks(); });
+	afterEach(() => { cleanup(); platform.set('desktop'); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 	it('lists pull requests from every project and filters them', async () => {
 		render(PrInboxCard);
@@ -62,6 +64,13 @@ describe('PrInboxCard', () => {
 		expect(within(list).getAllByRole('listitem')).toHaveLength(3);
 		expect(screen.getByRole('link', { name: /Add inbox/ }).getAttribute('href')).toBe('https://github.com/o/alpha/pull/1');
 		expect(screen.getByText('o/beta#3')).toBeTruthy();
+		expect(screen.getByRole('heading', { name: 'Open pull requests', level: 2 })).toBeTruthy();
+		expect(screen.getByText('3 pull requests')).toBeTruthy();
+		expect(within(list).getByText('Checks passed')).toBeTruthy();
+		expect(within(list).getByText('Checks failed')).toBeTruthy();
+		expect(within(list).getByText('Approved')).toBeTruthy();
+		expect(within(list).getByText('Changes requested')).toBeTruthy();
+		expect(within(list).getAllByText('by me')).toHaveLength(3);
 		expect(screen.getByText(/1 project or repository not included/)).toBeTruthy();
 
 		await fireEvent.click(screen.getByRole('button', { name: 'Filter pull requests' }));
@@ -71,7 +80,7 @@ describe('PrInboxCard', () => {
 
 		await fireEvent.change(screen.getByRole('combobox', { name: 'Review' }), { target: { value: 'approved' } });
 		await screen.findByText('No pull requests match these filters.');
-		await fireEvent.click(screen.getByRole('button', { name: 'Clear filters' }));
+		await fireEvent.click(screen.getAllByRole('button', { name: 'Clear filters' })[0]);
 		await waitFor(() => expect(screen.getAllByRole('listitem').length).toBeGreaterThanOrEqual(3));
 
 		await fireEvent.change(screen.getByRole('combobox', { name: 'Project' }), { target: { value: 'p-b' } });

@@ -15,7 +15,7 @@
 	 * refreshes it. Owner/admin only actions; API users never see folders.
 	 */
 	import { onDestroy, tick, untrack } from 'svelte';
-	import { Check, X, Loader2, FolderOpen, MessageSquarePlus, Trash2, RotateCw, Github } from 'lucide-svelte';
+	import { Check, X, Loader2, FolderOpen, MessageSquarePlus, RotateCw, Github } from 'lucide-svelte';
 	import { RowGroup, SettingRow, EmptyDetail, InlineBanner } from '$lib/components/layout/view';
 	import TextField from '$lib/components/settings/rows/TextField.svelte';
 	import './project-tabs.css';
@@ -296,18 +296,18 @@
 				{@const failed = w.state === 'failed'}
 				{@const action = failed ? errorAction(w.setup?.error_code, w.device_name) : null}
 				<article id="pw-card-{w.install_id}" tabindex="-1" aria-label={w.device_name} data-worker-state={w.state}>
+					{#snippet statusDetail()}
+						{#if w.state === 'queued_offline'}<p class="project-muted">It sets up when {w.device_name} comes back online.</p>
+						{:else if w.state === 'unknown'}<p class="project-muted">{w.device_name} is online but didn't answer. It may still have this project.</p>
+						{:else if failed}<p class="project-error">{failureReason(w)}</p>{/if}
+					{/snippet}
 					<RowGroup title={w.device_name}>
-						<SettingRow label="Status" hint={[w.is_self ? 'This worker' : '', w.online ? 'Online' : ['Offline', seenAgo(w.last_seen)].filter(Boolean).join(' · ')].filter(Boolean).join(' · ')}>
+						<SettingRow label="Status" hint={[w.is_self ? 'This worker' : '', w.online ? 'Online' : ['Offline', seenAgo(w.last_seen)].filter(Boolean).join(' · ')].filter(Boolean).join(' · ')} expanded={w.state === 'queued_offline' || w.state === 'unknown' || failed ? statusDetail : undefined}>
 							<span class:project-error={failed} class="project-muted">{running ? (kind === 'folder' ? 'Setting up…' : 'Cloning…') : has ? 'Ready' : w.state === 'queued_offline' ? `Waiting for ${w.device_name}` : failed ? (kind === 'folder' ? "Couldn't set it up" : "Couldn't clone") : w.state === 'unknown' ? `Couldn't check ${w.device_name}` : `Not set up ${w.is_self ? 'on this worker' : 'here'}`}</span>
 							{#if running}
 								{@const p = w.setup?.progress}
 								<progress class="project-progress" max="100" value={typeof p === 'number' ? p : undefined} aria-label="Setting up on {w.device_name}"></progress>
 							{/if}
-							{#snippet expanded()}
-								{#if w.state === 'queued_offline'}<p class="project-muted">It sets up when {w.device_name} comes back online.</p>
-								{:else if w.state === 'unknown'}<p class="project-muted">{w.device_name} is online but didn't answer. It may still have this project.</p>
-								{:else if failed}<p class="project-error">{failureReason(w)}</p>{/if}
-							{/snippet}
 						</SettingRow>
 						{#if has || running}
 							<SettingRow label="Folder" hint={w.folder || folders[w.install_id] || w.suggested_folder || 'Not reported'} hintMono />
@@ -328,9 +328,9 @@
 							{#if running && $isAdmin && w.setup?.op_id}<button class="st-btn" onclick={() => cancel(w)} disabled={busy[w.install_id]}>Cancel</button>
 							{:else if has}
 								{#if w.online}<button class="st-btn" onclick={() => newChatHere(w)}><MessageSquarePlus />New chat here</button>{/if}
-								{#if $isAdmin && (w.online || w.is_self)}
+								{#if $isAdmin && !w.is_self && w.online}
 									{#if confirmingRemove === w.install_id}<button class="st-btn" onclick={() => (confirmingRemove = null)} disabled={busy[w.install_id]}>Cancel</button><button class="st-btn danger" onclick={() => remove(w)} disabled={busy[w.install_id]}>{busy[w.install_id] ? 'Removing…' : 'Remove'}</button>
-									{:else}<button class="st-btn danger" onclick={() => (confirmingRemove = w.install_id)}><Trash2 />Remove from {w.device_name}</button>{/if}
+									{:else}<button class="st-btn danger" onclick={() => (confirmingRemove = w.install_id)}>Remove project and chats from {w.device_name}</button>{/if}
 								{/if}
 							{:else if w.state === 'queued_offline' && $isAdmin && w.setup?.op_id}<button class="st-btn" onclick={() => cancel(w)} disabled={busy[w.install_id]}>Withdraw</button>
 							{:else if w.state === 'unknown'}<button class="st-btn" onclick={() => load()}><RotateCw />Check again</button>
@@ -345,7 +345,7 @@
 					</RowGroup>
 				</article>
 			{/each}
-			<p class="project-muted">Each worker keeps its own copy and clones with its own GitHub sign-in. Removing a project from a worker leaves its files on disk. You can leave this page; setup keeps going on the worker.</p>
+			<p class="st-footnote">Each worker keeps its own copy and clones with its own GitHub sign-in. Removing a project from a worker leaves its files on disk. You can leave this page; setup keeps going on the worker.</p>
 		{/if}
 	{/if}
 </div>

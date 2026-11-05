@@ -15,7 +15,7 @@
 	 */
 	import { onDestroy } from 'svelte';
 	import { obscuresTranscript } from '$lib/components/chat/transcript-reading-area';
-	import { ChevronDown, GitFork, Pencil, Trash2, X } from 'lucide-svelte';
+	import { ChevronDown, GitFork, Pencil, X } from 'lucide-svelte';
 	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
 	import { focusTrap } from '$lib/components/ui/focus-trap';
 	import { forkSession } from '$lib/api/client';
@@ -253,7 +253,7 @@
 					<div class="stm-list" role="group" aria-label="Session actions">
 						<button type="button" class="sheet-row" disabled={renaming} onclick={startRename}><Pencil size={17} aria-hidden="true" />Rename session</button>
 						<button type="button" class="sheet-row" disabled={renaming} onclick={handleFork}><GitFork size={17} aria-hidden="true" />Fork session</button>
-						<button type="button" class="sheet-row danger" disabled={renaming} onclick={startDelete}><Trash2 size={17} aria-hidden="true" />Delete</button>
+						<button type="button" class="sheet-row danger" disabled={renaming} onclick={startDelete}>Delete</button>
 					</div>
 				</div>
 			</div>
