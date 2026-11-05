@@ -296,7 +296,7 @@ def test_routing_overlap_without_explicit_replacement_keeps_every_owner_rule(tmp
         assert all(not m.superseded_by for m in live.values())
         section = store.render_memory_section(None)
         assert "unresolved conflict" in section
-        assert "Recall both and ask the owner" in section
+        assert "and ask the owner once" in section
         assert "and model-routing authority" in section
         assert all(saved[name].id in section for name in saved)
     # An explicit correction is still applied, without deleting the old text.
@@ -319,11 +319,10 @@ def test_a_newer_fact_about_one_job_asks_without_hiding_a_wider_rule(tmp_path):
 
 def test_open_conflicts_are_capped(tmp_path):
     store = SkillStore(tmp_path)
-    for i in range(MAX_OPEN_CONFLICTS + 2):
-        store.save_memory(f"Owner rule for team {i}: code work goes to Sol; reviews go to Opus.",
-                          protected=True)
-        store.save_memory(f"Owner rule for team {i}: code work goes to Opus; reviews go to Sonnet.",
-                          protected=True)
+    # The cap counts distinct jobs, not many pairings of the same two rules.
+    for i, job in enumerate(("Code", "Review", "UI", "Backend", "Docs")):
+        store.save_memory(f"Owner rule for team {i}: {job} work goes to Sol.", protected=True)
+        store.save_memory(f"Owner rule for team {i}: {job} work goes to Opus.", protected=True)
     curate_protected_conflicts(store)
     curate_protected_conflicts(store)
     waiting = open_conflicts(store._facts.snapshot()["entries"])
