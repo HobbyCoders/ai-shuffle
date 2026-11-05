@@ -732,7 +732,7 @@ class HarnessAdapter(ProviderAdapter):
             # Resolving the CLI stats PATH entries on disk. A missing CLI
             # raises ClaudeCliMissingError here, before any engine is built.
             claude_cmd = await asyncio.to_thread(_resolve_claude_cmd)
-            delegated_blocked = _delegated_disallowed(options)
+            delegated_blocked = _delegated_disallowed(options, self._registry)
             _install_bridge_tool_filter(options)
             from app.core.usage_limits import claude_mod_usage_sink
             from app.core import claude_compaction
@@ -1817,6 +1817,8 @@ class HarnessAdapter(ProviderAdapter):
                     assert_proactive_allowed, proactive,
                     self._options.extra.get("app_session_id"),
                 )
+        from app.core.session_plan import CURRENT_PLAN_RUN
+        self._plan_fence = CURRENT_PLAN_RUN.get()
         await self.reconcile_user_questions()
         self._mark_turn_floor()
         await self._refresh_task_roster()
@@ -2115,7 +2117,11 @@ class HarnessAdapter(ProviderAdapter):
             self._resolve_app_session_id
         )
         from app.core.harness_state import bind_state_context
+        from app.core.session_plan import Backend
 
+        ctx.extra["session_plan"] = Backend(
+            self._resolve_app_session_id, lambda: getattr(self, "_plan_fence", None),
+        )
         return bind_state_context(ctx, self._resolve_app_session_id)
 
     def _turn_context_note(self, query: str = "") -> Optional[str]:
@@ -2131,13 +2137,25 @@ class HarnessAdapter(ProviderAdapter):
             return None
         if self._is_delegated:
             blocks = [self._env_note(), self._memory_turn_note(query), self._working_record_note(),
-                      self._away_note(), self._scratch_turn_note()]
+                      self._away_note(), self._scratch_turn_note(), self._plan_note()]
         else:
             # Scratch sits right after memory: one message has one pinned range.
             blocks = [self._env_note(), self._memory_turn_note(query), self._native_scratch_note(),
                       self._working_record_note(), self._away_note()]
         present = [block for block in blocks if block]
         return "\n\n".join(present) if present else None
+
+    def _plan_note(self) -> Optional[str]:
+        if self._options is None or not _delegated_offered(self._options, self._registry)("Plan"):
+            return None
+        from app.core.session_plan import Backend
+        from fluid.tools.builtins.plan import render_reminder
+        try:
+            backend = Backend(self._resolve_app_session_id, lambda: None)
+            return render_reminder(backend({"action": "get"})["plan"])
+        except Exception:
+            logger.warning("Session plan reminder unavailable", exc_info=True)
+            return None
 
     def _working_record_block(self) -> Optional[str]:
         """The owner working record as a reminder block, or None. Never raises."""
@@ -2529,6 +2547,7 @@ class HarnessAdapter(ProviderAdapter):
             ("working_record", self._working_record_block(), 4, None, True),
             ("away", self._away_note(), 1, _RESTORE_SMALL_SECTION_CHARS, False),
             ("scratch", self._scratch_note(), 2, _RESTORE_SMALL_SECTION_CHARS, False),
+            ("plan", self._plan_note(), 2, 2600, False),
         ]
         return [
             RestorationSection(name=name, text=text, priority=priority,
@@ -5383,6 +5402,9 @@ class HarnessAdapter(ProviderAdapter):
                 mcp_block = _mcp_instructions_block(registry, permitted)
                 if mcp_block:
                     sections.append(PromptSection(kind="extra", text=mcp_block))
+            if native and (permitted is None or "Plan" in permitted) and (registry is None or registry.get("Plan") is not None):
+                from fluid.tools.builtins.plan import guidance
+                sections.append(PromptSection(kind="extra", text="# Session planning\n" + guidance(permitted)))
             if native and _recall_backend_available() and (
                 permitted is None
                 or {"SessionSearch", "SessionView"} <= permitted
@@ -5610,6 +5632,12 @@ class HarnessAdapter(ProviderAdapter):
                     "Monitor spec; leaving the vendor spec as-is.",
                     exc_info=True,
                 )
+
+        if not native:
+            # One app planner on both legs; unlike file tools it has no CLI copy.
+            from fluid.tools.builtins import plan
+            registry.register_builtin(plan.SPEC, plan.handler)
+            builtins_registered = True
 
         if _registers_bundled_search(options, native=native):
             from fluid.tools.builtins import glob as glob_tool, grep as grep_tool
@@ -6411,7 +6439,7 @@ _NO_APPROVER_DENIAL = (
 _BUNDLED_CLI_PREFIX = "mcp__fluid_bundled__"
 
 
-def _delegated_disallowed(options: SessionOptions) -> list:
+def _delegated_disallowed(options: SessionOptions, registry: Any = None) -> list:
     """``--disallowed-tools`` for the delegated (claude CLI) leg.
 
     Five sources, unioned:
@@ -6454,6 +6482,9 @@ def _delegated_disallowed(options: SessionOptions) -> list:
     from app.core.tool_access import tool_permitted
 
     banned = set(DELEGATED_BANNED_TOOLS) | set(_delegated_blocklist(options))
+    if _delegated_offered(options, registry)("Plan"):
+        # Exact CLI-native names only: never the MCP background TaskList/Get.
+        banned.update({"TodoWrite", "TaskCreate", "TaskUpdate", "TaskGet", "TaskList"})
     if options.extra.get("assistant_proactive") is not None:
         from app.core.session_modes import PROACTIVE_DENIED_TOOLS
         banned.update(PROACTIVE_DENIED_TOOLS)
@@ -7592,8 +7623,8 @@ DELEGATED_PREFERENCE_RULE = (
 # The native leg's copy also covers fluid's Note and Ledger tools, which the
 # delegated leg does not have; that leg uses _MEMORY_BLOCK_CORE alone.
 MEMORY_BLOCK = _MEMORY_BLOCK_CORE + """ Note and Ledger are \
-per-session working state and never persist; keep anything lasting with \
-Remember."""
+session-scoped working files that can survive compaction and restarts, not \
+cross-session memory. Keep lasting facts with Remember."""
 
 GITHUB_BLOCK = """# GitHub
 Open a PR only when repository files changed for the user's request, inside \
@@ -7966,7 +7997,7 @@ def _delegated_offered(options: SessionOptions, registry: Any):
     permit = _delegated_tool_predicate(options)
 
     def offered(tool: str) -> bool:
-        name = tool if tool in ("Glob", "Grep") else f"mcp__builtins__{tool}"
+        name = tool if tool in ("Glob", "Grep", "Plan") else f"mcp__builtins__{tool}"
         return name in names and (permit is None or permit(name))
 
     return offered
@@ -8218,6 +8249,9 @@ def _delegated_append_text(
         swarm_available=offered("Swarm"), task_available=task_offered,
         monitor_available=offered("Monitor"),
     ))
+    if offered("Plan"):
+        from fluid.tools.builtins.plan import guidance
+        parts.append("# Session planning\n" + guidance(_delegated_permitted_names(options, registry)).replace("use Plan", "use mcp__fluid_bundled__Plan"))
     parts.extend(_delegated_fluid_context(options))
     parts.extend(_learned_guidance_blocks(options.model))
     parts.extend(_delegated_guidance_blocks(options, registry))

@@ -19,7 +19,7 @@ from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
 SPEC = ToolSpec(
     name="Note",
     description=(
-        "Working notes — a scratchpad for the current plan and thoughts "
+        "Optional working notes — a scratchpad for thoughts "
         "through a session. Actions: 'add' appends one or more notes "
         "(text: one note, or several lines for a batch; texts: an array), "
         "'remove' deletes the notes whose text matches exactly and takes the "
@@ -28,11 +28,10 @@ SPEC = ToolSpec(
         "'clear' empties them. Notes live outside the context window; calling "
         "Note is what brings them back into view, and non-empty notes are "
         "recited on every later turn, so they cost context while they exist. "
-        "For tasks under ~5 steps skip Note; a long or multi-turn plan is what "
-        "it is for. Add the steps in one call, and batch removals with "
-        "`texts` (retire several finished steps at once) rather than one call "
-        "per step. Keep only notes that still matter; do not leave completed "
-        "work in the list, and do not mark items done in place."
+        "While a session Plan exists, use list to read these optional notes; "
+        "they are not automatically recited alongside the plan. Batch related "
+        "adds/removals with texts. Keep only notes that still matter; do not "
+        "mark items done in place."
     ),
     input_schema={
         "type": "object",
@@ -61,6 +60,16 @@ SPEC = ToolSpec(
     },
     risk="safe",
 )
+
+
+def describe(permitted=None) -> str:
+    text = SPEC.description
+    if permitted is not None and "Plan" not in permitted:
+        text = text.replace(
+            "While a session Plan exists, use list to read these optional notes; "
+            "they are not automatically recited alongside the plan. ", "",
+        )
+    return text
 
 
 def _notes_path(ctx: ToolCtx, session_id: str | None = None) -> Path:

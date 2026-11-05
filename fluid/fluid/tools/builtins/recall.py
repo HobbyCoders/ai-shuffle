@@ -39,7 +39,8 @@ def describe(tools: frozenset[str] | None = None) -> str:
     )
     return (
         "Search your long-term memory: every saved fact (archived ones too) "
-        "plus the saved-skill index. Use ids=[...] for the full text of a "
+        "plus the saved-skill index. Use ids=[...] (at most 10 normalized unique "
+        "IDs; blanks/duplicates ignored) for the full text of a "
         "# Memory line before relying on it, and keywords when the task "
         "touches something you may have learned before — a preference, a "
         "convention, a port, a past correction. Returns the top matches per "
@@ -63,7 +64,7 @@ SPEC = ToolSpec(
             },
             "ids": {
                 "type": "array", "items": {"type": "string"},
-                "description": "Ids for full text.",
+                "description": "At most 10 normalized unique memory IDs for full text (trimmed; blanks/duplicates ignored).",
             },
         },
     },
