@@ -47,7 +47,7 @@ def env(mock_db, monkeypatch, tmp_path):
     monkeypatch.setattr(ts, "_kick_after_batch_window", lambda sid: None)
     monkeypatch.setattr("app.core.task_dispatch.task_report_dir", lambda row: tmp_path / "reports")
     monkeypatch.setattr("app.core.worker_checkout.restore_worker_checkout", lambda sid: (True, None))
-    monkeypatch.setattr("app.core.worker_checkout.reclaim_untouched_worker_checkout", lambda sid: None)
+    monkeypatch.setattr("app.core.worker_checkout.reclaim_untouched_worker_checkout", lambda sid, checkout=None: None)
     terminals = []
 
     async def on_task_terminal(session_id, frame, *args, **kwargs):

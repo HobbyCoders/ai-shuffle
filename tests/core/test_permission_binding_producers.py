@@ -29,6 +29,19 @@ from tests.core.query_engine_flow_harness import RecordingPool, engine_patches, 
 BYPASS = "bypassPermissions"
 
 
+def _producing_runtime_model(session_id, tmp_path):
+    """Match the real bridge: resolve this run before calling orchestration."""
+    from app.core import model_override, query_options
+    from app.db import database
+
+    row = database.get_session(session_id)
+    options, _ = query_options.build_options_from_profile(
+        profile=database.get_profile(row["profile_id"]), session_id=session_id,
+        overrides={"cwd": str(tmp_path)})
+    database.update_session(session_id, launched_model=options.model)
+    return model_override.app_id(options.aih_provider_id, options.model)
+
+
 def _profile(profile_id, permission_mode=None, **config):
     from app.db import database
 
@@ -378,7 +391,7 @@ async def test_start_session_child_takes_the_senders_current_binding(tightened_s
     assert await _engine_mode(child["id"], turns.get_turn(result["turn_id"]), tmp_path) == "default"
 
 
-async def test_remote_start_session_body_carries_the_senders_current_binding(tightened_sender):
+async def test_remote_start_session_body_carries_the_senders_current_binding(tightened_sender, tmp_path):
     from app.core import session_orchestration as orch
 
     wake = await tightened_sender._enqueue_context_wake("caller", "unpark", [], ["job"], "done")
@@ -388,7 +401,8 @@ async def test_remote_start_session_body_carries_the_senders_current_binding(tig
               "capabilities": {"start_session_permissions": 1}}
     with patch.object(orch, "_remote_worker", return_value=remote):
         planned = orch._queue("caller", {"title": "Child", "prompt": "go", "request_id": "r2",
-                                         "worker": "DesktopWorker"}, "start")
+                                         "worker": "DesktopWorker"}, "start",
+                              runtime_model=_producing_runtime_model("caller", tmp_path))
     assert planned["body"]["permission_mode"] == "default"
 
 
@@ -533,7 +547,7 @@ async def test_start_session_child_of_a_chat_starts_in_the_chats_mode(chat_paren
 
 
 @pytest.mark.parametrize("mode", CHAT_MODES)
-async def test_remote_start_session_from_a_chat_carries_the_chats_mode(chat_parent, mode):
+async def test_remote_start_session_from_a_chat_carries_the_chats_mode(chat_parent, tmp_path, mode):
     from app.core import session_orchestration as orch
     from app.db import projects_v2
 
@@ -545,7 +559,8 @@ async def test_remote_start_session_from_a_chat_carries_the_chats_mode(chat_pare
               "capabilities": {"start_session_permissions": 1}}
     planned = orch._queue(sender, {"title": "Child", "prompt": "go", "request_id": "c2",
                                    "worker": "DesktopWorker", "project": "Remote project"}, "start",
-                          placement={"remote": remote, "project": project})
+                          placement={"remote": remote, "project": project},
+                          runtime_model=_producing_runtime_model(sender, tmp_path))
     assert planned["body"]["permission_mode"] == mode
 
 

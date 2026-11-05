@@ -544,7 +544,8 @@ async def ensure_pending_checkout(
 
     One timeout budget for the whole preflight. Never calls ``ensure_checkout``
     unless this task won ``claim_op`` — the wait path must not double-add.
-    Returns False on timeout/error/nothing-to-do; the caller still runs
+    Returns True if an owned missing Task checkout was restored or a matching
+    op completed; False on timeout/error/nothing-to-do. The caller still runs
     ``build_session_options`` because cwd may already exist.
     """
     if not session_row:
@@ -552,6 +553,24 @@ async def ensure_pending_checkout(
     branch = session_row.get("branch") or session_row.get("worktree_branch")
     if not branch:
         return False
+    # MessageSession and user-typed turns do not use Task message admission.
+    # Restore a reclaimed Task cwd at execution too, before either native or
+    # delegated options resolve it. Refusals remain actionable checkout errors
+    # from build_session_options, never permission to use another checkout.
+    from app.core.worker_checkout import is_worker_branch, restore_worker_checkout_async
+
+    path = session_row.get("worktree_path")
+    restored = False
+    if is_worker_branch(branch, session_row.get("id") or "") and path:
+        from app.core.turn_scheduler import message_resume_lock
+
+        # An old finisher may already be deleting the initially existing cwd.
+        # Wait before checking it; a later finisher sees this queued/live turn.
+        async with message_resume_lock(session_row["id"]):
+            if not Path(path).is_dir():
+                restored, _note = await restore_worker_checkout_async(session_row["id"], follow_live_switch=False)
+    # Even after restoration, claim/wait for a queued operation below. Another
+    # chat bound to this branch must not pretend it restored the owner's cwd.
     try:
         from app.core import git_ops_runner
         from app.core.config import settings as _settings
@@ -582,7 +601,7 @@ async def ensure_pending_checkout(
             )
             await run_sync(git_ops_db.fail_op, zombie["id"], "stale running")
         if pending is None:
-            return False
+            return restored
         if pending["status"] == "queued":
             claimed = await run_sync(git_ops_db.claim_op, pending["id"], me)
             if claimed is not None:
@@ -1772,6 +1791,10 @@ def build_options_from_profile(
             is_admin=not api_user_id,
             model=model_to_use,
             provider_id=provider_id,
+            # This server may outlive newer, equivalent MCP instances on reuse.
+            # Read its connect options: the adapter updates these only after an
+            # acknowledged hot-swap; a provider change still requires reconnect.
+            runtime_model_supplier=lambda: (options.model, options.aih_provider_id),
             # The resolved cwd, so the bridged Task tool can discover the same
             # file/plugin agent definitions a native leg gets from fluid — the
             # delegated (CLI) leg has no engine to publish them (ruling CE6).

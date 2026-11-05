@@ -7,6 +7,7 @@ or the owner approved it at a prompt. It may move the work to another
 provider, for that one start.
 """
 import json
+import re
 from typing import Any, Dict, Optional
 
 import pytest
@@ -65,6 +66,23 @@ def test_ambiguous_generic_or_partial_words_do_not(model, text):
 ])
 def test_full_names_count_even_when_a_word_is_shared(model, text):
     assert mo.named_by_user(model, [text], CATALOG)
+
+
+@pytest.mark.parametrize("family", ["opus", "sonnet", "haiku", "fable"])
+@pytest.mark.parametrize("spelling, before, after", [
+    ("{family} 4.7", [], ["4", "7"]),
+    ("{family}-4-7", [], ["4", "7"]),
+    ("claude-{family}-4-7", ["claude"], ["4", "7"]),
+    ("{family}[1m]", [], ["1m"]),
+    ("{family} v4.7", [], ["v4", "7"]),
+])
+def test_version_qualified_family_words_do_not_name_the_current_alias(family, spelling, before, after):
+    text = spelling.format(family=family)
+    assert mo._tokens(text) == [*before, family, *after]
+    assert not mo.named_by_user(family, [f"Use {text} for the review"], CATALOG)
+    assert not mo.memory_names(family, f"Route reviews to {text}", CATALOG)
+    assert mo.named_by_user(family, [f"Use {text}; use {family} for this instead"], CATALOG)
+    assert mo.named_by_user(family, [text, f"use {family} instead"], CATALOG)
 
 
 # ---------------------------------------------------------------------------
@@ -141,11 +159,71 @@ def test_spoken_model_id_resolves_to_registry_spelling(world):
 
 
 @pytest.mark.parametrize("wording, expected", [("opus", "opus"), ("OPUS", "opus"),
-                                              ("Claude Opus", "opus"), ("claude-opus-4-6", "opus"),
                                               ("prov:lane:astra", "prov:lane:astra")])
 @pytest.mark.parametrize("remote", [False, True])
-def test_spoken_resolution_preserves_claude_and_exact_composites(world, wording, expected, remote):
+def test_spoken_resolution_accepts_family_names_and_exact_provider_composites(world, wording, expected, remote):
     assert mo.resolve(wording, "lane", runs_here=not remote).model == expected
+
+
+@pytest.mark.parametrize("wording", ["claude-opus-4-7", "claude-sonnet-4-6", "opus[1m]",
+                                     "claude-opus-5[1m]", "Claude Opus"])
+@pytest.mark.parametrize("remote", [False, True])
+def test_explicit_native_legacy_ids_are_refused_not_migrated(world, wording, remote):
+    with pytest.raises(ValueError, match="family name") as refused:
+        mo.resolve(wording, runs_here=not remote)
+    assert "Choose one of:" in str(refused.value)
+
+
+@pytest.mark.parametrize("legacy, expected", [("claude-opus-4-7", "opus"),
+    ("claude-sonnet-4-6", "sonnet"), ("opus[1m]", "opus"), ("claude-opus-5[1m]", "opus")])
+async def test_stored_legacy_settings_and_profile_pins_still_start_without_an_override(world, legacy, expected):
+    db, seen, prompts, _ = world
+    # Seed the historical stored value, not write(), which already normalizes.
+    db.set_system_setting(subagent_default.SETTING_KEY, json.dumps({"model": legacy}))
+    assert subagent_default.effective().model == expected
+    from app.core.agent_provider_models import leg_model_id
+    assert leg_model_id(None, legacy) == expected
+    for key, config in (("top", {"model": legacy}),
+                        ("map", {"provider_models": {"__native__": legacy}})):
+        pid = "legacy-" + key
+        db.create_profile(pid, pid, None, config)
+        result = await _task({"agent": pid})
+        assert result["ok"], result
+        # Saved profile values retain the existing storage path; explicit
+        # resolve() is never called. The execution leg migrates them separately.
+        stored = seen[-1]["model_id"]
+        assert stored == legacy
+        assert leg_model_id(None, stored) == expected
+        from app.core.model_registry import resolve_api_model_id
+        assert resolve_api_model_id(stored) == {"opus": "claude-opus-5", "sonnet": "claude-sonnet-5"}[expected]
+    assert prompts == []
+
+
+@pytest.mark.parametrize("wording", ["claude-opus-4-7", "Claude Opus 4.7"])
+def test_native_shaped_provider_names_keep_the_credential_refusal(world, monkeypatch, wording):
+    world[0].create_model_provider("relay", "Relay", "openai", "https://example.invalid/v1",
+        models=[{"id": "claude-opus-4-7", "label": "Claude Opus 4.7"}])
+    monkeypatch.setattr(td, "_credential_gap", lambda provider:
+                        "Relay has no working credential." if provider == "relay" else None)
+    with pytest.raises(ValueError, match="Relay has no working credential") as refused:
+        mo.resolve(wording)
+    assert "For native Claude" not in str(refused.value)
+
+
+def test_public_model_rules_offer_native_families_not_version_pins(world):
+    from fluid.tools.builtins.session_orchestration import start_session_spec
+    from fluid.tools.builtins import swarm
+    from app.core.agent_provider_models import build_task_contract
+    for description in (start_session_spec().input_schema["properties"]["model"]["description"],
+                        build_task_contract("caller", None).input_schema["properties"]["model"]["description"]):
+        assert "Native Claude: haiku, sonnet or opus only" in description
+        assert "no version pins, legacy ids or [1m] forms" in description
+        assert "Families select runtime aliases." in description
+        assert "Provider models: id or display name" in description
+        assert "explicit providers stay scoped" in description
+        assert "The host verifies chat/memory or asks the owner; refusals start nothing." in description
+        assert "model IDs and display names match" not in description
+    assert "See Task.model" in swarm.input_schema()["properties"]["tasks"]["items"]["properties"]["model"]["description"]
 
 
 def test_spoken_resolution_never_uses_a_partial_or_fuzzy_name(world):
@@ -601,17 +679,17 @@ async def test_the_owners_sentence_names_opus_for_an_unpinned_agent(unpinned, so
     assert prompts == []
 
 
-@pytest.mark.parametrize("text", [
-    OWNER_SENTENCE,
-    "use opus",
-    "run them on Opus 4",
-    "OPUS sub-agents please",
-    "spin up opus-powered agents",
-    "Claude Opus for the reviewers",
-    "claude-opus-5",
+@pytest.mark.parametrize("text, named", [
+    (OWNER_SENTENCE, True),
+    ("use opus", True),
+    ("run them on Opus 4", False),
+    ("OPUS sub-agents please", True),
+    ("spin up opus-powered agents", False),
+    ("Claude Opus for the reviewers", True),
+    ("claude-opus-5", False),
 ])
-def test_ordinary_phrasings_of_opus_count_as_named(unpinned, text):
-    assert mo.named_by_user("opus", [text])
+def test_opus_phrasings_distinguish_the_current_family_from_a_pin(unpinned, text, named):
+    assert mo.named_by_user("opus", [text]) is named
 
 
 @pytest.mark.parametrize("text", [
@@ -966,6 +1044,267 @@ async def _start(args, sender="caller"):
 ARGS = {"title": "Review", "prompt": "Review the change", "request_id": "r1"}
 
 
+VERSION_WORDINGS = [
+    "claude-3-opus", "claude-3-opus-latest", "claude-opus-latest", "use 4.7 opus",
+    "Route reviews to claude-3-opus", "use opus 2 reviewers", "Use Opus 4 as the reviewer",
+    "Use Opus four", "use old opus", "use the previous opus", "Opus version 4", "Opus, four",
+    "Use the 4.7 version of Opus", "Opus model 4.7",
+    "opus at version 4.7", "opus with 1m context", "Reviews: Opus, 4.7",
+    "Reviews go on the 4.7 version of Opus", "opus build 4.7", "opus release 4.7",
+]
+PLAIN_WORDINGS = [
+    "Use opus.\n1. Fix the bug\n2. Review it",
+    "Use opus. 3 files changed", "use opus. Version 4.7 of the lib is broken",
+    "Use opus\n\n2 things to check", "Opus please - 4 agents",
+    "use opus for PR 1040", "use opus for step 2",
+    "Use opus instead of Sol 6.1", "use 4 opus agents", "use opus, 2 reviewers",
+    "use opus with 2 agents", "Run this on Opus, one agent per PR", "use opus at 5pm",
+    "use opus #1040", "PR 1040: opus", "Use GPT 6.1 → Opus",
+]
+
+
+@pytest.mark.parametrize("family", ["haiku", "sonnet", "opus", "fable"])
+@pytest.mark.parametrize("wording, consent", [(s, False) for s in VERSION_WORDINGS]
+                         + [(s, True) for s in PLAIN_WORDINGS])
+def test_native_sentence_consent_is_shared_by_owner_memory_and_receipts(monkeypatch, family, wording, consent):
+    text = re.sub("opus", family, wording, flags=re.I)
+    assert mo.named_by_user(family, [text]) is consent
+    assert mo.memory_names(family, text) is consent
+    monkeypatch.setattr(mo, "_receipt", lambda *a: {
+        "source": "own_message", "turn_id": "t", "session_id": "caller", "text": text})
+    assert mo._has_named("caller", family) is consent
+
+
+def test_historical_sonnet_name_is_not_current_family_consent():
+    assert not mo.named_by_user("sonnet", ["claude-3-5-sonnet"])
+    assert not mo.memory_names("sonnet", "claude-3-5-sonnet")
+
+
+@pytest.mark.parametrize("entry", ["start", "task"])
+@pytest.mark.parametrize("source", ["owner", "memory"])
+@pytest.mark.parametrize("wording, consent", [(s, False) for s in VERSION_WORDINGS]
+                         + [(s, True) for s in PLAIN_WORDINGS])
+async def test_sentence_rule_through_real_native_start(chats, entry, source, wording, consent):
+    _native_request(chats, entry, source, wording)
+    # The memory writer collapses blank paragraphs: the saved number is now
+    # adjacent to Opus, unlike the owner's original newline-delimited message.
+    if source == "memory" and wording == "Use opus\n\n2 things to check":
+        consent = False
+    ok, error = await _native_call(entry, "opus", "sentence-consent")
+    assert ok is consent, error
+    assert len(chats[2]) == int(not consent)
+    if ok and entry == "start":
+        receipt = json.loads(error)
+        assert receipt["model"] == sessions.get_session(receipt["session_id"])["model"] == "opus"
+
+
+@pytest.mark.parametrize("entry", ["start", "task"])
+@pytest.mark.parametrize("source", ["memory", "history", "receipt", "approval", "saved-approval"])
+async def test_latest_owner_version_request_overrides_every_older_consent(chats, entry, source):
+    from tests.core.test_model_override_memory import _save
+
+    _, seen, prompts, answer = chats
+    sid = _native_request(chats, entry, "owner", "a review")
+    profile = "agent" if entry == "start" else "caller"
+    if source == "memory":
+        _save("Risky/cross-cutting code and all UI work: Opus.")
+    elif source in {"history", "receipt"}:
+        _turn(sid, "user", "use opus for the refactor", profile=profile)
+        if source == "receipt":
+            assert (await _native_call(entry, "opus", "earlier-naming"))[0]
+    else:
+        answer["result"] = PermissionResultAllow(updated_input={})
+        assert (await _native_call(entry, "opus", "earlier-yes"))[0]
+        answer["result"] = PermissionResultDeny(message="Denied")
+        if source == "saved-approval":
+            mo._APPROVED.clear()
+    seen.clear()
+    prompts.clear()
+    _turn(sid, "user", "for this review use Opus 4.7 specifically", profile=profile)
+    assert not (await _native_call(entry, "claude-opus-4-7", "new-pin"))[0]
+    ok, error = await _native_call(entry, "opus", "old-consent-denied")
+    assert not ok, error
+    assert len(prompts) == 1 and not seen
+    answer["result"] = PermissionResultAllow(updated_input={})
+    assert (await _native_call(entry, "opus", "new-agreement"))[0]
+    assert len(prompts) == 2
+    mo._APPROVED.clear()
+    assert (await _native_call(entry, "opus", "durable-new-agreement"))[0]
+    assert len(prompts) == 2
+    answer["result"] = PermissionResultDeny(message="Denied")
+    _turn(sid, "user", "now use Opus 5.5 specifically", profile=profile)
+    assert not (await _native_call(entry, "opus", "different-pin"))[0]
+    assert len(prompts) == 3
+    _turn(sid, "user", "use opus for this review", profile=profile)
+    assert (await _native_call(entry, "opus", "newer-plain-consent"))[0]
+    assert len(prompts) == 3
+
+
+async def _native_call(entry, model, request_id):
+    if entry == "start":
+        outcome = await _start({**ARGS, "model": model, "request_id": request_id})
+        return not outcome.is_error, outcome.text
+    result = await _task({"agent": "native-retry", "model": model})
+    return result["ok"], result.get("error", "")
+
+
+def _native_request(chats, entry, source, wording):
+    chats[0].create_profile("native-retry", "Native retry", None, {"model": "sonnet"})
+    sid = "caller" if entry == "start" else "parent"
+    text = wording  # Preserve clause endings and the owner's actual wording.
+    if source == "memory":
+        from tests.core.test_model_override_memory import _save
+        _save(f"Route reviews to {wording}")
+        text = "Start the review"
+    _turn(sid, "user", text, profile="agent" if entry == "start" else "caller")
+    return sid
+
+
+@pytest.mark.parametrize("entry", ["start", "task"])
+@pytest.mark.parametrize("source", ["owner", "memory"])
+@pytest.mark.parametrize("wording", ["Opus 4.7", "opus-4-7", "claude-opus-4-7", "opus[1m]"])
+async def test_refused_pin_then_family_retry_requires_owner_agreement(chats, entry, source, wording):
+    _, seen, prompts, answer = chats
+    _native_request(chats, entry, source, wording)
+    before = len(sessions.get_sessions(limit=100))
+    ok, error = await _native_call(entry, "claude-opus-4-7", "pin")
+    assert not ok and "current version" in error and "agreement" in error
+    assert not prompts and not seen
+    ok, error = await _native_call(entry, "opus", "family-denied")
+    assert not ok, error
+    assert len(prompts) == 1 and not seen
+    assert len(sessions.get_sessions(limit=100)) == before
+    answer["result"] = PermissionResultAllow(updated_input={})
+    ok, error = await _native_call(entry, "opus", "family-approved")
+    assert ok, error
+    assert len(prompts) == 2
+    if entry == "task":
+        assert seen[0]["model_id"] == "opus"
+    else:
+        assert sessions.get_session(json.loads(error)["session_id"])["model"] == "opus"
+
+
+@pytest.mark.parametrize("entry", ["start", "task"])
+@pytest.mark.parametrize("source", ["owner", "memory"])
+@pytest.mark.parametrize("wording", ["Opus", "opus"])
+async def test_unqualified_family_still_authorizes_the_real_start(chats, entry, source, wording):
+    _native_request(chats, entry, source, wording)
+    ok, error = await _native_call(entry, "opus", "plain-family")
+    assert ok, error
+    assert not chats[2]
+
+
+@pytest.mark.parametrize("source", ["owner", "memory"])
+@pytest.mark.parametrize("wording, needs_prompt", [("claude-opus-4-7", True), ("Opus 4.7", True), ("opus", False)])
+async def test_swarm_pin_refusal_does_not_authorize_a_family_retry(chats, monkeypatch, source, wording, needs_prompt):
+    from unittest.mock import AsyncMock
+    from app.core import swarm, provider_agent, turn_scheduler
+    from app.core.task_registry import task_registry
+
+    _, seen, prompts, _ = chats
+    _native_request(chats, "task", source, wording)
+    for name in ("coordinators", "workers", "worker_jobs", "_locks"):
+        monkeypatch.setattr(swarm, name, {})
+    monkeypatch.setattr(swarm, "persist", AsyncMock())
+    monkeypatch.setattr(turn_scheduler, "on_task_terminal", AsyncMock())
+    monkeypatch.setattr(td, "_await_worker_registration", AsyncMock(return_value=True))
+
+    async def worker(**kwargs):
+        seen.append(kwargs)
+        wid = kwargs["worker_session_id"]
+        await provider_agent._notify_caller_terminal("parent", wid, wid, "completed", "done")
+        return WorkerOutcome(ok=True, session_id=wid, report="done")
+
+    monkeypatch.setattr(provider_agent, "dispatch_worker", worker)
+    ctx = ToolCtx(extra={"task_dispatch": td.make_fluid_dispatcher("parent", "caller", None)})
+
+    async def run(model):
+        outcome = await swarm.make_handler(lambda: "parent")({"action": "start", "tasks": [
+            {"id": "review", "agent": "native-retry", "prompt": "go", "model": model}]}, ctx)
+        assert not outcome.is_error, outcome.text
+        coordinator = swarm.coordinators["parent"]
+        key = outcome.background_task.task_id
+        await coordinator.jobs[key]
+        return coordinator.snapshot(key)
+
+    try:
+        first = await run("claude-opus-4-7")
+        assert first["status"] == "failed" and not prompts and not seen
+        retry = await run("opus")
+        assert retry["status"] == ("failed" if needs_prompt else "completed"), retry
+        assert len(prompts) == int(needs_prompt)
+        assert len(seen) == int(not needs_prompt)
+    finally:
+        task_registry.clear_session("parent")
+
+
+@pytest.mark.parametrize("entry", ["start", "task"])
+@pytest.mark.parametrize("retained", [True, False])
+async def test_pre_repair_native_receipts_need_verifiable_owner_text(chats, entry, retained):
+    from app.db import interactions
+
+    sid = _native_request(chats, entry, "owner", "opus")
+    evidence = next(e for e in mo._user_evidence(sid) if "opus" in e["text"])
+    assert mo._remember_named(sid, "opus", evidence)
+    receipt = interactions.get_interaction(mo._named_id(sid, "opus"))
+    payload = receipt["payload"]
+    payload.pop("text")
+    payload["native_family_policy"] = "unversioned-v1"
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE pending_interactions SET payload=%s WHERE id=%s",
+                              (json.dumps(payload), receipt["id"]))
+        if not retained:
+            conn.cursor().execute("DELETE FROM turns WHERE id=%s", (evidence["turn_id"],))
+    assert not mo._has_named(sid, "opus")
+    _turn(sid, "user", "start the review", profile="agent" if entry == "start" else "caller")
+    ok, error = await _native_call(entry, "opus", "pre-repair-receipt")
+    assert ok is retained, error
+    assert len(chats[2]) == int(not retained)
+    assert mo._has_named(sid, "opus") is retained
+
+
+@pytest.mark.parametrize("entry", ["start", "task"])
+async def test_new_unversioned_family_receipts_still_survive_history_retention(chats, entry):
+    sid = _native_request(chats, entry, "owner", "opus")
+    assert (await _native_call(entry, "opus", "first-family"))[0]
+    assert mo._has_named(sid, "opus")
+    with get_db() as conn:
+        conn.cursor().execute("DELETE FROM turns WHERE session_id=%s", (sid,))
+    _turn(sid, "user", "start the review", profile="agent" if entry == "start" else "caller")
+    ok, error = await _native_call(entry, "opus", "saved-family")
+    assert ok, error
+    assert not chats[2]
+
+
+@pytest.mark.parametrize("entry", ["start", "task"])
+async def test_old_native_naming_receipt_cannot_bypass_pin_agreement(chats, entry):
+    from app.db import interactions
+
+    sid = _native_request(chats, entry, "owner", "claude-opus-4-7")
+    assert mo._remember_named(sid, "opus", mo._user_evidence(sid)[0])
+    receipt = interactions.get_interaction(mo._named_id(sid, "opus"))
+    payload = receipt["payload"]
+    payload.pop("text", None)  # old receipt has no original sentence to validate
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE pending_interactions SET payload=%s WHERE id=%s",
+                              (json.dumps(payload), receipt["id"]))
+    ok, error = await _native_call(entry, "opus", "old-naming-receipt")
+    assert not ok, error
+    assert len(chats[2]) == 1 and not chats[1]
+
+
+@pytest.mark.parametrize("text, consent", [(s, False) for s in VERSION_WORDINGS]
+                         + [(s, True) for s in PLAIN_WORDINGS])
+def test_native_receipts_reuse_the_sentence_matcher(chats, text, consent):
+    from app.db import interactions
+
+    sid = _native_request(chats, "start", "owner", text)
+    assert mo._remember_named(sid, "opus", mo._user_evidence(sid)[0])
+    assert mo._has_named(sid, "opus") is consent
+    receipt = interactions.get_interaction(mo._named_id(sid, "opus"))
+    assert receipt["payload"]["text"] == text
+
+
 @pytest.mark.parametrize("wording", ["gpt 6 astra", "prov:lane:GPT-6-ASTRA"])
 async def test_spoken_model_startsession_queues_canonical_binding(chats, wording):
     _turn("caller", "user", f"start it on {wording}", profile="agent")
@@ -1144,10 +1483,25 @@ async def test_omitted_model_inherits_and_the_receipt_names_it(chats):
     assert "model_override" not in result
 
 
+@pytest.mark.parametrize("legacy, expected", [("claude-opus-4-7", "opus"),
+    ("claude-sonnet-4-6", "sonnet"), ("opus[1m]", "opus"), ("claude-opus-5[1m]", "opus")])
+async def test_startsession_inherits_stored_legacy_model_without_explicit_resolution(chats, legacy, expected):
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE sessions SET model=%s WHERE id='caller'", (legacy,))
+    _turn("caller", "user", "start the review", profile="agent")
+    outcome = await _start(ARGS)
+    assert not outcome.is_error, outcome.text
+    child = sessions.get_session(json.loads(outcome.text)["session_id"])
+    assert child["model"] == legacy and child["provider_id"] is None
+    from app.core.agent_provider_models import leg_model_id
+    assert leg_model_id(None, child["model"]) == expected
+    assert not chats[2]
+
+
 async def test_the_inherited_model_named_again_needs_no_prompt(chats):
     _, _, prompts, _ = chats
     _turn("caller", "user", "work", profile="agent")
-    outcome = await _start({**ARGS, "model": "claude-sonnet-5"})
+    outcome = await _start({**ARGS, "model": "SONNET"})
     assert not outcome.is_error, outcome.text
     assert prompts == [] and "model_override" not in json.loads(outcome.text)
 
@@ -1252,7 +1606,8 @@ def test_startsession_spec_takes_a_string_and_states_the_rule(chats):
     spec = orch.start_session_spec()
     prop = spec.input_schema["properties"]["model"]
     assert prop["type"] == "string" and "enum" not in prop
-    assert "Only for when the user named a model" in prop["description"]
+    assert ("Only when this chat's user named the model for this work or saved owner "
+            "model-routing memory directs it; otherwise omit.") in prop["description"]
     from app.core.agent_provider_models import build_task_contract
     from fluid.tools.builtins.swarm import input_schema
     descriptions = [prop["description"],
@@ -1261,13 +1616,16 @@ def test_startsession_spec_takes_a_string_and_states_the_rule(chats):
     assert "See Task.model for host validation and provider rules" in swarm_description
     assert "under the same rule as Task's model" in swarm_description
     for description in descriptions:
-        assert "Pass the model exactly as the user or memory named it" in description
+        assert "Native Claude: haiku, sonnet or opus only; no version pins, legacy ids or [1m] forms." in description
         assert "saved owner model-routing memory" in description
-        assert "Never fabricate a model id" in description
-        assert "model IDs and display names" in description
-        assert "case, spaces and dashes" in description
-        assert "start nothing" in description and "ambiguous" in description
-        assert "receiving worker's own eligibility" in description
+        assert "The host verifies chat/memory or asks the owner; refusals start nothing." in description
+        assert "Never invent ids or substitute after refusal." in description
+        assert "Provider models: id or display name (case, spaces and dashes ignored)." in description
+        assert "Unknown names start nothing and return real choices;" in description
+        assert "ambiguous names need an exact model id." in description
+        assert "prov:<providerId>:<modelId> works; explicit providers stay scoped." in description
+        assert "A switch may cross providers for this start only." in description
+        assert "Remote starts also validate the receiving worker's own eligibility." in description
     assert "Examples: sonnet." in prop["description"]
     assert "pass model only when the user named a model" in spec.description
 

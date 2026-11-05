@@ -1,0 +1,9 @@
+{
+  "description": "Resume the existing fake CLI Task worker through real SendMessage admission after the journey has observed checkout reclamation. Bash output remains scripted.",
+  "steps": [
+    {"tool_calls": [{"name": "SendMessage", "input": {
+      "to": "script-tool-bash", "message": "[script:tool-bash]", "kind": "result"
+    }}]},
+    {"text": "Follow-up dispatched."}
+  ]
+}

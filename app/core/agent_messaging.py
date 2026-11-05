@@ -331,13 +331,18 @@ def make_message(supplier):
                 text=f"Could not deliver to {row['name']}: receiver was stopped",
                 is_error=True,
             )
-        if not resuming:
-            status, turn_id = await deliver_message(target, session_id, text, urgent=urgent,
-                                                    kind=kind)
-            return ToolOutcome(**delivery_receipt(row["name"], status, turn_id))
-        turn_id = await turn_scheduler.on_agent_message(
-            target, session_id, text, reply_to=session_id, kind=kind,
-        )
+        from app.core.worker_checkout import WorkerCheckoutError
+
+        try:
+            if not resuming:
+                status, turn_id = await deliver_message(target, session_id, text, urgent=urgent,
+                                                        kind=kind)
+                return ToolOutcome(**delivery_receipt(row["name"], status, turn_id))
+            turn_id = await turn_scheduler.on_agent_message(
+                target, session_id, text, reply_to=session_id, kind=kind,
+            )
+        except WorkerCheckoutError as exc:
+            return ToolOutcome(text=f"Could not resume {row['name']}: {exc}", is_error=True)
         if not turn_id:
             return ToolOutcome(**delivery_receipt(row["name"], STOPPED))
         if turn_id == turn_scheduler.HELD:
@@ -444,12 +449,8 @@ async def resume_unavailable(target, row):
     error = (str(outcome.get("error") or "") + " " + str(terminal.get("errors") or "")).casefold()
     if any(marker in error for marker in ("cyber_policy", "content_policy", "policy rejection", "policy violation", "safety policy")):
         return "the provider rejected this work on policy grounds; ask the user, do not replay it"
-    # An untouched dedicated checkout is reclaimed when its worker finishes;
-    # the resumed turn reuses that saved cwd, so bring it back first.
-    from app.core.worker_checkout import restore_worker_checkout
-    restored, note = await asyncio.to_thread(restore_worker_checkout, target)
-    if not restored:
-        return note or "its dedicated checkout could not be restored; dispatch a new Task instead"
+    # Checkout restoration belongs to actual admission, not this eligibility
+    # check: a progress note may be held without ever starting another turn.
     return None
 
 
@@ -613,8 +614,8 @@ async def _settle_delivered_continuation(session_id, owner, settled):
             supervisor.unregister_worker(owner, session_id)
         settled_now = True
     if settled_now:
-        from app.core.worker_checkout import reclaim_untouched_worker_checkout
-        await asyncio.to_thread(reclaim_untouched_worker_checkout, session_id)
+        from app.core.worker_checkout import reclaim_finished_worker_checkout
+        await reclaim_finished_worker_checkout(session_id)
 
 
 async def _finish_displaced_continuations(session_id, settled):
@@ -790,5 +791,5 @@ async def finish_message_resume(session_id, settled, outcome):
     })
     if settled_now:
         # Same rule as a first run: an untouched dedicated checkout is reclaimed.
-        from app.core.worker_checkout import reclaim_untouched_worker_checkout
-        await asyncio.to_thread(reclaim_untouched_worker_checkout, session_id)
+        from app.core.worker_checkout import reclaim_finished_worker_checkout
+        await reclaim_finished_worker_checkout(session_id)

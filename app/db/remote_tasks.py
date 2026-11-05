@@ -555,34 +555,104 @@ def message_answer(message_id: str) -> Optional[Dict[str, Any]]:
 
 
 def reserve_message_scope(message_id: str, worker_id: str, from_device: str) -> dict:
+    return _reserve_message_scope(message_id, worker_id, from_device, undoable=False)[0]
+
+
+def reserve_message_scope_for_delivery(message_id: str, worker_id: str, from_device: str) -> tuple[dict, Optional[dict]]:
+    """Also return this call's fresh reservation proof, never a pending retry's."""
+    return _reserve_message_scope(message_id, worker_id, from_device, undoable=True)
+
+
+def _reserve_message_scope(message_id: str, worker_id: str, from_device: str, *, undoable: bool) -> tuple[dict, Optional[dict]]:
     """Fence a new remote instruction BEFORE delivery, without replaying old intent.
 
     A pending intent survives restart. Its retry may continue only while it is
     still the child's current generation; a newer instruction cannot be replaced
     by retrying that old id. Final delivery replaces this pending answer.
     """
+    from uuid import uuid4
+
+    pending: dict = {"_scope_pending": True}
+    if undoable:
+        pending["_scope_reservation"] = uuid4().hex
     with get_db() as conn:
         _init_messaging(conn)
         cursor = conn.cursor()
+        # Same admission lock as enqueue_turn: capture the previous tuple and
+        # the reserved input cutoff without racing an admitted local input.
+        cursor.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (worker_id,))
         cursor.execute("INSERT INTO remote_task_messages "
                        "(message_id,worker_session_id,from_device_id,direction,answer,created_at) "
                        "VALUES (%s,%s,%s,'child',%s,%s) ON CONFLICT(message_id) DO NOTHING RETURNING message_id",
-                       (message_id, worker_id, from_device, json.dumps({"_scope_pending": True}), utc_now_iso()))
+                       (message_id, worker_id, from_device, json.dumps(pending), utc_now_iso()))
         fresh = cursor.fetchone() is not None
+        previous = None
         if fresh:
+            cursor.execute("SELECT scope_generation,scope_epoch,scope_input_order, "
+                           "COALESCE((SELECT stop_seq FROM session_stops WHERE session_id=%s),0) AS stop_seq "
+                           "FROM remote_task_children WHERE worker_session_id=%s AND parent_device_id=%s "
+                           "AND stop_requested_at IS NULL FOR UPDATE", (worker_id, worker_id, from_device))
+            previous = cursor.fetchone()
             cursor.execute("UPDATE remote_task_children SET scope_generation=%s, "
                            "scope_epoch=CAST(COALESCE(CAST(scope_epoch AS BIGINT),0)+1 AS TEXT), "
                            "scope_input_order=CAST((SELECT COALESCE(MAX(insert_order),0) FROM turns WHERE session_id=%s) AS TEXT) "
                            "WHERE worker_session_id=%s AND parent_device_id=%s AND stop_requested_at IS NULL "
-                           "RETURNING scope_generation,scope_epoch", (message_id, worker_id, worker_id, from_device))
+                           "RETURNING scope_generation,scope_epoch,scope_input_order", (message_id, worker_id, worker_id, from_device))
         else:
-            cursor.execute("SELECT scope_generation,scope_epoch FROM remote_task_children "
+            # A retry may already have delivered to a live engine without a new
+            # turn row. Revoke the first caller's undo proof BEFORE it can do so.
+            cursor.execute("UPDATE remote_task_messages SET answer=%s WHERE message_id=%s "
+                           "AND worker_session_id=%s AND from_device_id=%s AND direction='child' "
+                           "AND CAST(answer AS JSONB) ->> '_scope_pending' IS NOT NULL RETURNING message_id",
+                           (json.dumps({"_scope_pending": True}), message_id, worker_id, from_device))
+            if cursor.fetchone() is None:
+                raise ValueError("This message id was already used for another message.")
+            cursor.execute("SELECT scope_generation,scope_epoch,scope_input_order FROM remote_task_children "
                            "WHERE worker_session_id=%s AND parent_device_id=%s AND scope_generation=%s "
                            "AND stop_requested_at IS NULL", (worker_id, from_device, message_id))
         row = cursor.fetchone()
         if not row:
             raise ValueError("The child was stopped or this pending instruction was superseded; it was not delivered.")
-        return {"generation": row["scope_generation"], "epoch": int(row["scope_epoch"])}
+        scope = {"generation": row["scope_generation"], "epoch": int(row["scope_epoch"])}
+        undo = ({"message_id": message_id, "worker_id": worker_id, "from_device": from_device,
+                 "pending": pending, "previous": dict(previous), "reserved": dict(row)}
+                if fresh and undoable else None)
+        return scope, undo
+
+
+def undo_refused_message_scope(reservation: dict) -> bool:
+    """Undo ONLY a fresh, unused reservation after definite pre-enqueue refusal.
+
+    A retry, finalized answer, Stop, newer generation or admitted input makes
+    the proof unusable. Never undo uncertain delivery or a recovered pending id.
+    """
+    worker_id, message_id = reservation["worker_id"], reservation["message_id"]
+    previous, reserved = reservation["previous"], reservation["reserved"]
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (worker_id,))
+        cursor.execute("SELECT message_id FROM remote_task_messages WHERE message_id=%s "
+                       "AND worker_session_id=%s AND from_device_id=%s AND direction='child' "
+                       "AND CAST(answer AS JSONB)=%s::jsonb FOR UPDATE",
+                       (message_id, worker_id, reservation["from_device"], json.dumps(reservation["pending"])))
+        if cursor.fetchone() is None:
+            return False
+        cursor.execute("UPDATE remote_task_children SET scope_generation=%s,scope_epoch=%s,scope_input_order=%s "
+                       "WHERE worker_session_id=%s AND parent_device_id=%s AND stop_requested_at IS NULL "
+                       "AND scope_generation=%s AND scope_epoch=%s AND scope_input_order=%s "
+                       "AND COALESCE((SELECT stop_seq FROM session_stops WHERE session_id=%s),0)=%s "
+                       "AND NOT EXISTS (SELECT 1 FROM turns WHERE session_id=%s AND insert_order>%s) "
+                       "RETURNING worker_session_id",
+                       (previous["scope_generation"], previous["scope_epoch"], previous["scope_input_order"],
+                        worker_id, reservation["from_device"], reserved["scope_generation"], reserved["scope_epoch"],
+                        reserved["scope_input_order"], worker_id, previous["stop_seq"], worker_id,
+                        int(reserved["scope_input_order"])))
+        if cursor.fetchone() is None:
+            return False
+        # Delete just our refused intent, in the same transaction as the CAS.
+        # The same id can retry honestly; it is not a fabricated delivery answer.
+        cursor.execute("DELETE FROM remote_task_messages WHERE message_id=%s", (message_id,))
+        return True
 
 
 def record_message(message_id: str, *, worker_session_id: str, from_device_id: str,
