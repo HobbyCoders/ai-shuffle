@@ -13,7 +13,7 @@ export async function releaseRead(url, options = {}, read = response => response
    // fetch can time out or lose an established socket before our signal fires.
    const timeout = error?.name === 'TimeoutError' ||
     ['UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT'].includes(error?.cause?.code ?? error?.code);
-   const closed = error instanceof TypeError && error.message === 'fetch failed' &&
+   const closed = error instanceof TypeError && ['fetch failed', 'terminated'].includes(error.message) &&
     ['UND_ERR_SOCKET', 'ECONNRESET', 'EPIPE', 'UND_ERR_CLOSED'].includes(error.cause?.code);
    // Refusal, DNS, TLS and unclassified failures can mean misconfiguration.
    if (attempt === 2 || !(timeout || closed)) throw error;

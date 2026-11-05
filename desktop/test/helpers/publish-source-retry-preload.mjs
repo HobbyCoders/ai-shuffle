@@ -53,8 +53,8 @@ globalThis.fetch = async (url, options = {}) => {
    if (kind.endsWith('upload')) {
     for await (const chunk of options.body) { /* consume before returning or failing */ }
    }
-   if (failure === 'body-timeout') return { ok: true, status: 200, json: async () => {
-    throw new TypeError('terminated', { cause: { code: 'UND_ERR_BODY_TIMEOUT' } });
+   if (failure === 'body-timeout' || failure === 'body-socket') return { ok: true, status: 200, json: async () => {
+    throw new TypeError('terminated', { cause: { code: failure === 'body-socket' ? 'UND_ERR_SOCKET' : 'UND_ERR_BODY_TIMEOUT' } });
    } };
    if (failure === 'timeout') throw new DOMException('request timed out', 'TimeoutError');
    if (failure === 'socket') throw new TypeError('fetch failed', { cause: { code: 'UND_ERR_SOCKET' } });

@@ -26,7 +26,7 @@ const messages = { release: 'Source release lookup failed', 'source-assets': 'So
  create: 'Source release lookup failed', 'source-upload': 'Source upload failed', 'ui-upload': 'UI asset upload failed' };
 
 for (const target of ['release', 'source-assets', 'ui-assets']) {
- for (const failure of [502, 'timeout', 'socket', 'body-timeout']) {
+ for (const failure of [502, 'timeout', 'socket', 'body-timeout', 'body-socket']) {
   test(`${target} recovers from one ${failure} with a fresh GET`, async t => {
    const result = await publish(t, { target, failure, ui: target === 'ui-assets' });
    assert.equal(result.status, 0, result.stderr);
@@ -44,7 +44,7 @@ for (const target of ['release', 'source-assets', 'ui-assets']) {
    assert.deepEqual(result.waits, [1000, 2000]);
    assert.equal(result.signalCount, 3);
    if (failure === 502) assert(result.stderr.includes(`${messages[target]} (502)`));
-   else assert.match(result.stderr, failure === 'timeout' ? /request timed out/ : failure === 'body-timeout' ? /terminated/ : /fetch failed/);
+   else assert.match(result.stderr, failure === 'timeout' ? /request timed out/ : failure.startsWith('body-') ? /terminated/ : /fetch failed/);
    assert(!result.events.includes('publish'));
    assert(!result.calls.some(call => call.kind.endsWith('upload')));
    await assert.rejects(fs.stat(path.join(result.root, 'record.json')), { code: 'ENOENT' });
