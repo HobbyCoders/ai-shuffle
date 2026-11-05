@@ -159,6 +159,11 @@
     "kind": "internal",
     "reason": "Desktop updater rollback to the existing 30-second bridge heartbeat; command expiry, atomic consumption and authenticated control access are unchanged."
   },
+  "AI_SHUFFLE_PERF_DOCKER_BUILD_REUSE": {
+    "kind": "internal",
+    "reason": "Default-on supervisor rollback switch for verified tools/browser Node-output reuse; 0/false/off rebuild from source while input/output hashes and per-revision UI/Fluid builds remain mandatory.",
+    "base_settings": false
+  },
   "AI_SHUFFLE_PERF_DOCKER_DEPENDENCY_REUSE": {
     "kind": "internal",
     "reason": "Supervisor-only dependency-cache rollback switch; source signatures, runtime checks and per-revision app code remain mandatory."
@@ -249,6 +254,11 @@
   "AI_SHUFFLE_TRANSCRIPT_PRODUCER": {
     "kind": "internal",
     "reason": "Default-off opt-in for installation-local shadow transcript production; enables background work only, never enables derived reads",
+    "base_settings": false
+  },
+  "AI_SHUFFLE_UPDATER_FIXTURE": {
+    "kind": "internal",
+    "reason": "CI-only opt-in guard for synthetic signed updater fixtures on disposable candidate-container volumes; not worker configuration, a signing key or an access grant.",
     "base_settings": false
   },
   "AI_SHUFFLE_VERSION": {
