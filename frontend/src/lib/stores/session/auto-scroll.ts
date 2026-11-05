@@ -303,37 +303,43 @@ export function resolveReadingAnchorDelta(anchor: ReadingAnchor, rowTop: number,
  * Which transcript rows came through the prompt queue, so a prompt queued long
  * ago does not pull a reader who has scrolled up (#863). A send made while Stop
  * is pending may also queue briefly behind the turn being cancelled; that one
- * asks to see its reply. Freshness goes by queue entry, not text, so resending
- * the words of an earlier withdrawn prompt still counts as a new send.
+ * asks to see its reply. Rows match entries by command id, so resending the
+ * words of a withdrawn prompt is still a new send. Text is the fallback only
+ * when one side has no id.
  */
 export function createQueuedPromptTracker() {
-	const seenText = new Set<string>();
-	const seenEntries = new Set<string>();
-	const sentAfterStop = new Set<string>();
+	type Entry = { clientMessageId?: string; content: string; followOnLanding: boolean };
+	const entries = new Map<string, Entry>();
+	const take = (matches: (entry: Entry) => boolean): Entry | null => {
+		for (const [key, entry] of entries) {
+			if (matches(entry)) {
+				entries.delete(key);
+				return entry;
+			}
+		}
+		return null;
+	};
 	return {
 		reset() {
-			seenText.clear();
-			seenEntries.clear();
-			sentAfterStop.clear();
+			entries.clear();
 		},
 		/** `stopPending` is false for the first read of a session's existing queue. */
 		observe(queue: readonly { id: string; clientMessageId?: string; content: string }[], stopPending: boolean) {
-			for (const entry of queue) {
-				const key = entry.clientMessageId ?? entry.id;
-				if (!seenEntries.has(key) && stopPending) sentAfterStop.add(entry.content);
-				seenEntries.add(key);
-				seenText.add(entry.content);
+			for (const { id, clientMessageId, content } of queue) {
+				const key = clientMessageId ?? id;
+				if (!entries.has(key)) entries.set(key, { clientMessageId, content, followOnLanding: stopPending });
 			}
 		},
 		/** The reader scrolled away: a pending send no longer overrides that. */
 		releaseStopFollow() {
-			sentAfterStop.clear();
+			for (const entry of entries.values()) entry.followOnLanding = false;
 		},
-		/** Call once per new user row; it consumes the row's text. */
-		classify(content: string) {
-			const fromQueue = seenText.delete(content);
-			const followsStop = sentAfterStop.delete(content);
-			return { fromQueue, followsStop };
+		/** Call once per new user row; a matched entry is consumed. */
+		classify(content: string, commandId?: string) {
+			const landed = commandId
+				? take((e) => e.clientMessageId === commandId) ?? take((e) => !e.clientMessageId && e.content === content)
+				: take((e) => e.content === content);
+			return { fromQueue: !!landed, followsStop: !!landed?.followOnLanding };
 		},
 	};
 }

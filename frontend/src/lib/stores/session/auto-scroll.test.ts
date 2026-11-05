@@ -348,7 +348,22 @@ describe('queued prompt tracker', () => {
 		tracker.observe([entry('a', 'Continue')], false);
 		tracker.observe([], false);
 		tracker.observe([entry('b', 'Continue')], true);
-		expect(tracker.classify('Continue')).toEqual({ fromQueue: true, followsStop: true });
+		expect(tracker.classify('Continue', 'client-b')).toEqual({ fromQueue: true, followsStop: true });
+	});
+
+	it('treats a direct resend of a withdrawn prompt as new, by command id', () => {
+		const tracker = createQueuedPromptTracker();
+		tracker.observe([entry('a', 'Continue')], false);
+		tracker.observe([], false);
+		expect(tracker.classify('Continue', 'client-b')).toEqual({ fromQueue: false, followsStop: false });
+		expect(tracker.classify('Continue', 'client-a')).toEqual({ fromQueue: true, followsStop: false });
+	});
+
+	it('falls back to text only when one side has no id', () => {
+		const tracker = createQueuedPromptTracker();
+		tracker.observe([{ id: 'server-1', content: 'No id on the entry' }, entry('a', 'No id on the row')], false);
+		expect(tracker.classify('No id on the entry', 'client-z').fromQueue).toBe(true);
+		expect(tracker.classify('No id on the row').fromQueue).toBe(true);
 	});
 
 	it('keeps one entry the same when the server snapshot replaces its local id', () => {
