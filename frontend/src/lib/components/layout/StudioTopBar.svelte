@@ -24,7 +24,6 @@
 	import { NEW_CHAT_LABEL } from './chat-empty-state';
 	import { workerInstalls } from '$lib/stores/worker-presence';
 	import { selfWorkerName } from '$lib/components/ui/worker-name';
-	import { layout } from '$lib/stores/layout.svelte';
 
 	interface Props {
 		/** Left crumb — the project (or section) the current view belongs to. */
@@ -116,7 +115,7 @@
 			{@render workerLine()}
 		</div>
 	{:else}
-		<div class="tb-page-label" class:panel-open={(!sidebarCollapsed || layout.current.sidebarOverlay) && !sessionId && !!phonePanelActions.label} aria-label={title ?? projectLabel ?? undefined}><SessionBreadcrumbs {projectLabel} {title} {sessionId} {onOpenProject} /></div>
+		<div class="tb-page-label" class:panel-open={!sessionId && phonePanelActions.visible} aria-label={title ?? projectLabel ?? undefined}><SessionBreadcrumbs {projectLabel} {title} {sessionId} {onOpenProject} /></div>
 	{/if}
 
 	<div class="tb-right">

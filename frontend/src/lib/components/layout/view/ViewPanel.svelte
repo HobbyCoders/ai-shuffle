@@ -1,7 +1,7 @@
 <script lang="ts" module>
 	import type { Snippet as ActionSnippet } from 'svelte';
 	/** The active native destination lends its original actions to the shell bar. */
-	export const phonePanelActions = $state({ owner: null as symbol | null, label: '', content: null as ActionSnippet | null });
+	export const phonePanelActions = $state({ owner: null as symbol | null, label: '', visible: false, content: null as ActionSnippet | null });
 </script>
 <script lang="ts">
 	/** Chats' column anatomy, including its own Settings token scope when docked. */
@@ -28,21 +28,26 @@
 	const feature = getContext<FeaturePanelContext | undefined>(FEATURE_PANEL_CONTEXT);
 	const owner = Symbol('phone-panel-actions');
 	let phone = $state(false);
+	let element: HTMLElement | undefined = $state();
+	let visible = $state(false);
 	onMount(() => {
 		const query = window.matchMedia('(max-width: 600px)');
-		const update = () => { phone = query.matches; };
+		const update = () => { phone = query.matches; visible = !!element?.getBoundingClientRect().width && !!element?.getBoundingClientRect().height; };
+		const observer = new ResizeObserver(update); observer.observe(element!);
 		update(); query.addEventListener('change', update);
-		return () => query.removeEventListener('change', update);
+		return () => { observer.disconnect(); query.removeEventListener('change', update); };
 	});
 	$effect(() => {
 		if (feature?.active === false) return;
 		phonePanelActions.owner = owner;
 		phonePanelActions.label = title;
+		phonePanelActions.visible = visible;
 		phonePanelActions.content = nativeActions;
 		return () => {
 			if (phonePanelActions.owner === owner) {
 				phonePanelActions.owner = null;
 				phonePanelActions.label = '';
+				phonePanelActions.visible = false;
 				phonePanelActions.content = null;
 			}
 		};
@@ -51,7 +56,7 @@
 
 {#snippet nativeActions()}<PanelContext {contexts}><div class="settings-shell native-panel-actions">{@render actions?.()}</div></PanelContext>{/snippet}
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-<section class="settings-shell view-panel" class:native={platform.isMobile} aria-label={title} aria-busy={loading || undefined} {onkeydown}>
+<section bind:this={element} class="settings-shell view-panel" class:native={platform.isMobile} aria-label={title} aria-busy={loading || undefined} {onkeydown}>
 	<header class="panel-header">
 		<h1>{title}</h1>
 		{#if count !== undefined}<span class="panel-count">{count}</span>{/if}
