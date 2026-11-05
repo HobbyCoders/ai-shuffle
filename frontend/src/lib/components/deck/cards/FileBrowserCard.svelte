@@ -1,9 +1,9 @@
 <script lang="ts">
 	/**
-	 * FileBrowserCard — Files surface (Studio-v2).
+	 * FileBrowserCard — workspace files in the shared view layout.
 	 *
-	 * Renders the full two-column FilesStudio page (tree + columnar list) which
-	 * owns the header, toolbar, and all browse/upload/download/rename/delete
+	 * Renders FilesStudio, whose tree claims the shared navigation panel and
+	 * whose data pane owns all browse/preview/upload/download/rename/delete
 	 * functionality via the `files` store.
 	 */
 	import FilesStudio from '../files/FilesStudio.svelte';

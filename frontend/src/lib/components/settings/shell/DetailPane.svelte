@@ -30,6 +30,8 @@
 
 	interface Props {
 		name: string;
+		/** A ViewMain data wrapper owns width and gutters instead of the reading pane. */
+		dataLayout?: boolean;
 		icon?: SettingsIcon;
 		/** Tile text instead of an icon (provider glyph). */
 		glyph?: string;
@@ -70,6 +72,7 @@
 
 	let {
 		name,
+		dataLayout = false,
 		icon,
 		glyph,
 		tile,
@@ -120,7 +123,7 @@
 	}
 </script>
 
-<div class="st-dwrap">
+<div class="st-dwrap" class:data-layout={dataLayout}>
 	<div class="st-dtop">
 		<button type="button" class="st-back" aria-label="Back to {catLabel}" onclick={() => (onBack ? onBack() : settingsNav.stacked ? settingsNav.back() : settingsNav.clearSelection(cat))}>
 			<ChevronLeft /><span>{catLabel}</span>
@@ -173,6 +176,13 @@
 	.st-dwrap {
 		max-width: 700px;
 		padding: 10px 32px 96px;
+	}
+	.st-dwrap.data-layout { max-width: none; padding: 0; }
+	.data-layout .st-dh { grid-template-columns: minmax(0, 1fr) auto; }
+	.data-layout .st-dtop { min-height: 0; }
+	@media (max-width: 600px), (pointer: coarse) { .data-layout .st-back { min-height: 44px; } }
+	@container settings (max-width: 850px) {
+		.data-layout .st-dha { grid-column: 1 / -1; justify-content: flex-start; }
 	}
 	.st-dtop {
 		display: flex;
