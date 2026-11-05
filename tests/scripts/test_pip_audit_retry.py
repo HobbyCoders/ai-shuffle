@@ -174,6 +174,44 @@ def test_process_deadline_fails_closed_and_keeps_partial_output(scenario, monkey
     print(f"process deadline: attempts={data['attempts']}, elapsed={elapsed:.3f}s, budget=3s")
 
 
+def assert_resolver_descendant_stopped(status):
+    # A killed grandchild can briefly remain a zombie until init reaps it.
+    for _ in range(50):
+        try:
+            if status.read_text().rsplit(")", 1)[1].split()[0] == "Z":
+                break
+        except (FileNotFoundError, ProcessLookupError):
+            break
+        time.sleep(0.01)
+    else:
+        pytest.fail("resolver descendant survived the audit deadline")
+
+
+@pytest.mark.parametrize("error", [FileNotFoundError, ProcessLookupError])
+def test_resolver_exit_during_proc_read_is_already_stopped(monkeypatch, error):
+    def exited(*args, **kwargs):
+        raise error("process exited during the stat read")
+
+    monkeypatch.setattr(Path, "read_text", exited)
+    assert_resolver_descendant_stopped(Path("/proc/fixture/stat"))
+
+
+def test_resolver_descendant_survival_still_fails(tmp_path, monkeypatch):
+    status = tmp_path / "stat"
+    status.write_text("123 (resolver) S 1 2 3")
+    sleeps = []
+    monkeypatch.setattr(time, "sleep", sleeps.append)
+    with pytest.raises(pytest.fail.Exception, match="resolver descendant survived the audit deadline"):
+        assert_resolver_descendant_stopped(status)
+    assert sleeps == [0.01] * 50
+
+
+def test_resolver_descendant_zombie_is_stopped(tmp_path):
+    status = tmp_path / "stat"
+    status.write_text("123 (resolver) Z 1 2 3")
+    assert_resolver_descendant_stopped(status)
+
+
 def test_process_deadline_cleans_up_resolver_descendants(scenario, monkeypatch):
     # Leave ample room for interpreter startup on a busy hosted runner.
     monkeypatch.setattr(audit, "TOTAL_TIMEOUT", 3)
@@ -184,17 +222,7 @@ def test_process_deadline_cleans_up_resolver_descendants(scenario, monkeypatch):
     assert result.stdout == "resolver starting\n" and "resolver diagnostic\n" in result.stderr
     assert elapsed < 8
     if sys.platform == "linux":
-        # A killed grandchild can briefly remain a zombie until init reaps it.
-        status = Path(f"/proc/{data['child_pid']}/stat")
-        for _ in range(50):
-            try:
-                if status.read_text().rsplit(")", 1)[1].split()[0] == "Z":
-                    break
-            except FileNotFoundError:
-                break
-            time.sleep(0.01)
-        else:
-            pytest.fail("resolver descendant survived the audit deadline")
+        assert_resolver_descendant_stopped(Path(f"/proc/{data['child_pid']}/stat"))
     print(f"resolver-tree deadline: attempts={data['attempts']}, elapsed={elapsed:.3f}s, budget=3s")
 
 
