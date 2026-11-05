@@ -270,16 +270,21 @@ _CLAUSE_RE = re.compile(r"[;\n—–]|[.!?](?=\s|$)")
 # never remove a candidate. Keep nominal/imperative/current assignment shapes
 # ahead of narrative mentions; this is deliberately not a truth classifier.
 _ROUTING_PRIORITY = re.compile(
-    r"\b(?:use|switch|handles?)\b|\b(?:go(?:es)?|runs?|move[ds]?)\s+(?:to|on)\b"
+    r"\b(?:use|switch|assign|does|handles?)\b|\b(?:go(?:es)?|runs?|move[ds]?)\s+(?:to|on)\b"
     r"|\b(?:should|must)\s+be\s+used\b|\bmodel\s+used\s+for\b"
+    r"|\b(?:work|jobs?|tasks?|reviews?)\s+by\b"
     r"|(?:\b(?:" + "|".join(sorted(_MODEL_NAMES)) + r")\s+for\b)"
     r"|(?::\s*(?:" + "|".join(sorted(_MODEL_NAMES)) + r")\b)", re.I)
 
 
 def routing_priority(text: str) -> int:
     """Present-assignment hints first; never an eligibility/authority decision."""
-    positive_models = _words(" ".join(affirmed_clauses(text))) & _MODEL_NAMES
-    return int(bool(positive_models) and bool(_ROUTING_PRIORITY.search(text)))
+    # Past evaluations can contain "Sol for UI" without assigning today's work.
+    # Rank per clause so a historical aside cannot downgrade a separate assignment.
+    return int(any(_words(" ".join(affirmed_clauses(clause))) & _MODEL_NAMES
+                   and _ROUTING_PRIORITY.search(clause)
+                   and not re.search(r"\b(?:was|were)\b", clause, re.I)
+                   for clause in _CLAUSE_RE.split(text or "")))
 
 
 def model_routing(text: str) -> dict[str, frozenset[str]]:
@@ -389,9 +394,9 @@ _CONFLICT_FIELDS = ("id", "origin", "revision", "text", "when", "always", "key",
 
 def protected_conflicts(entries: list[dict], *, skip: set[str] | frozenset[str] = frozenset(),
                         limit: int = MAX_OPEN_CONFLICTS,
-                        disjoint: bool = False) -> list[tuple[dict, dict, str]]:
-    """Bounded questions for this exact snapshot; return the caller's rows."""
-    refs = _cached_conflict_refs(_conflict_revision(entries), frozenset(skip), limit, disjoint)
+                        disjoint: bool = False, grouped: bool = False) -> list[tuple[dict, dict, str]]:
+    """Return caller rows. Normally cap pairs; grouped=True caps jobs, retaining their pairs."""
+    refs = _cached_conflict_refs(_conflict_revision(entries), frozenset(skip), limit, disjoint, grouped)
     return [(entries[a], entries[b], reason) for a, b, reason in refs]
 
 
@@ -452,15 +457,15 @@ def _cached_answer_matches(revision: tuple) -> tuple:
 
 
 @lru_cache(maxsize=4)
-def _cached_conflict_refs(revision: tuple, skip: frozenset, limit: int, disjoint: bool) -> tuple:
+def _cached_conflict_refs(revision: tuple, skip: frozenset, limit: int, disjoint: bool, grouped: bool) -> tuple:
     rows = [dict(zip(_CONFLICT_FIELDS, values)) for values in revision]
     indices = {id(e): i for i, e in enumerate(rows)}
-    pairs = _find_protected_conflicts(rows, skip=skip, limit=limit, disjoint=disjoint)
+    pairs = _find_protected_conflicts(rows, skip=skip, limit=limit, disjoint=disjoint, grouped=grouped)
     return tuple((indices[id(a)], indices[id(b)], why) for a, b, why in pairs)
 
 
 def _find_protected_conflicts(entries: list[dict], *, skip: frozenset[str],
-                             limit: int, disjoint: bool) -> list[tuple[dict, dict, str]]:
+                             limit: int, disjoint: bool, grouped: bool = False) -> list[tuple[dict, dict, str]]:
     """Same-topic pairs of live user-kept facts where the newer one changes
     the rule: ``[(old, new, reason)]``, strongest first, at most ``limit``.
 
@@ -558,6 +563,14 @@ def _find_protected_conflicts(entries: list[dict], *, skip: frozenset[str],
             priority = min(priorities[old["id"]], priorities[new["id"]]) if moved else 1
             candidates.append((priority, strength, overlap, float(new.get("updated_at") or 0), old, new, reason))
     candidates.sort(key=lambda c: (-c[0], -c[1], -c[3], -c[2]))
+    if grouped:
+        # The cap is on questions/jobs, not on pairs. Retain every unresolved
+        # pair in each selected job so one owner answer can close them together.
+        groups = _question_groups([(a, b, why) for _, _, _, _, a, b, why in candidates
+                                   if _pair_key(a, b) not in skip])
+        return list({_pair_key(a, b): (a, b, why)
+                     for pairs in list(groups.values())[:limit]
+                     for a, b, why in pairs}.values())
     used: set[str] = set()
     out: list[tuple[dict, dict, str]] = []
     for _priority, _strength, _overlap, _at, old, new, reason in candidates:
@@ -571,25 +584,113 @@ def _find_protected_conflicts(entries: list[dict], *, skip: frozenset[str],
     return out
 
 
-def owner_conflict_lines(entries: list[dict], *, questions: list | None = None) -> list[str]:
-    """Existing footer; answers use Remember, not replacement or local state."""
+GROUP_ANSWER_PREFIX = COEXIST_KEY_PREFIX + "job."
+
+
+def _question_groups(pairs: list) -> dict[tuple, list]:
+    """Ranked pairs -> one question per job in each scope/worker partition."""
+    rows = {e["id"]: e for a, b, _ in pairs for e in (a, b)}
+    routes = {i: model_routing(e["text"]) for i, e in rows.items()}
+    groups: dict[tuple, dict] = {}
+    for old, new, reason in pairs:
+        a, b = routes[old["id"]], routes[new["id"]]
+        shared = sorted(a.keys() & b.keys())
+        moved = [job for job in shared if a[job] != b[job]]
+        jobs = [f"model routing: {job}" for job in moved or shared]
+        for subject in jobs or [reason]:
+            partition = (old.get("scope") or "global", old.get("worker"), subject)
+            groups.setdefault(partition, {})[_pair_key(old, new)] = (old, new, reason)
+    # Aliases such as "backend code" can name multiple job categories with the
+    # identical contest. They need one answer, not another slot for the same set.
+    distinct: dict[tuple, tuple[list[str], dict]] = {}
+    for (scope, worker, subject), group in groups.items():
+        identity = (scope, worker, tuple(sorted(group)))
+        if identity not in distinct:
+            distinct[identity] = ([], group)
+        distinct[identity][0].append(subject)
+    return {(scope, worker, "; ".join(sorted(subjects))): list(group.values())
+            for (scope, worker, _), (subjects, group) in distinct.items()}
+
+
+def owner_questions(entries: list[dict], *, questions: list | None = None) -> list[dict]:
+    """One executable answer key per job, binding the entire current pair set.
+
+    This virtual key is never stored as an authority row. FactStore expands it
+    to existing exact-pair keys in one locked commit, so legacy closures and
+    endpoint-change semantics remain unchanged.
+    """
+    if questions is None:
+        return list(_cached_owner_questions(_conflict_revision(entries)))
+    if not questions or isinstance(questions[0], dict):
+        return questions
+    return _build_owner_questions(questions)  # compatibility with precomputed pair callers
+
+
+@lru_cache(maxsize=4)
+def _cached_owner_questions(revision: tuple) -> tuple:
+    """Cache the whole job plan, not just pairs: warmed renders must stay O(n).
+
+    Revision keys include raw text/applicability, not usage counters. Retain only
+    four snapshots, just like the existing pair cache; never persist a decision.
+    """
+    rows = [dict(zip(_CONFLICT_FIELDS, values)) for values in revision]
+    return tuple(_build_owner_questions(protected_conflicts(rows, grouped=True)))
+
+
+def _build_owner_questions(pairs: list) -> list[dict]:
     from fluid.codemode.facts import global_id
-    return [
-        f"- [owner question; unresolved conflict] Saved facts [{global_id(old)}] and "
-        f"[{global_id(new)}] disagree ({reason}). Both facts remain usable as context "
-        "and model-routing authority. Recall both and ask the owner which rule applies; "
-        "do not silently choose a model for the contested job. If the owner says both stand, "
-        f"Remember their answer with key={coexistence_key(old, new)!r}, user_requested=true, "
-        f"scope={'global' if old.get('scope') in (None, 'global') else 'project'!r}, "
-        'when="When applying these two owner rules"; no replaces. '
-        "This closes this pair on synced workers until either fact changes."
-        for old, new, reason in (protected_conflicts(entries) if questions is None else questions)
-    ]
+    out = []
+    for (scope, worker, subject), pairs in list(_question_groups(pairs).items())[:MAX_OPEN_CONFLICTS]:
+        members = {global_id(e): e for a, b, _ in pairs for e in (a, b)}
+        # Hash each endpoint once, not twice per pair (quadratic at capacity).
+        tokens = {i: _coexistence_token(e) for i, e in members.items()}
+        keys = [COEXIST_KEY_PREFIX + "v2." + ".".join(sorted((tokens[global_id(a)], tokens[global_id(b)])))
+                for a, b, _ in pairs]
+        basis = (scope, worker, subject, sorted(keys))
+        digest = hashlib.sha256(json.dumps(basis, ensure_ascii=False).encode()).hexdigest()[:32]
+        out.append(dict(subject=subject, scope=scope, pairs=pairs, members=list(members.values()),
+                        key=GROUP_ANSWER_PREFIX + digest))
+    return out
+
+
+def _question_refs(members: list[dict]) -> str:
+    from fluid.codemode.facts import global_id
+    ids = [global_id(e) for e in members]
+    if len(ids) <= 8:
+        return ", ".join(f"[{i}]" for i in ids)
+    # Lossless source-prefix factoring: never drop members or substitute local
+    # IDs, which could refer to a different fact after moving to another worker.
+    sources: dict[str, list[str]] = {}
+    for full in ids:
+        source, short = full.rsplit(":", 1)
+        sources.setdefault(source, []).append(short)
+    return ("; ".join(f"source {source} IDs [{', '.join(shorts)}]" for source, shorts in sources.items())
+            + " (Recall each as '<source>:<ID>')")
+
+
+def owner_conflict_lines(entries: list[dict], *, questions: list | None = None) -> list[str]:
+    """Ask once per job; answers use Remember, not replacement or local state."""
+    lines = []
+    for question in owner_questions(entries, questions=questions):
+        refs = _question_refs(question["members"])
+        both = len(question["members"]) == 2
+        lines.append(
+            f"- [owner question; unresolved conflict] Saved facts {refs} disagree ({question['subject']}). "
+            f"{'Both' if both else 'All'} facts remain usable as context and model-routing authority. "
+            f"Recall {'both' if both else 'all'} and ask the owner once which rules apply; "
+            "do not silently choose a model for the contested job. If the owner says these rules stand, "
+            f"Remember their answer with key={question['key']!r}, user_requested=true, "
+            f"scope={'global' if question['scope'] == 'global' else 'project'!r}, "
+            'when="When applying these owner rules"; no replaces. '
+            f"One answer commits all {len(question['pairs'])} pair closures together on synced workers "
+            "until a fact changes.")
+    return lines
 
 
 def open_conflicts(entries: list[dict]) -> int:
-    """Bounded non-link questions; correction, replacement or keep-both closes one."""
-    return len(protected_conflicts(entries))
+    """Number of bounded owner questions, not the number of pair combinations."""
+    return len(owner_questions(entries))
+
 
 
 def _load_curation(root: Path) -> dict:

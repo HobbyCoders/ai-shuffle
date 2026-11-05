@@ -1868,10 +1868,10 @@ class SkillStore:
         archived = [self._facts._entry(e) for e in doc["archived"] if visible_on(e, local)]
         if not entries and not archived:
             return EMPTY_MEMORY_SECTION
-        from fluid.codemode.preferences import protected_conflicts
+        from fluid.codemode.preferences import owner_questions
         visible = [vars(e) for e in entries
                    if project is None or e.scope in ("global", project)]
-        questions = protected_conflicts(visible)
+        questions = owner_questions(visible)
         plan = self.memory_snapshot_plan(project, checkout=checkout, entries=entries, archived=archived,
                                          task_query=task_query, questions=questions)
         shown = plan["lines"]
@@ -2000,12 +2000,15 @@ class SkillStore:
         identity: list[tuple[MemoryEntry, str]] = []
         index: list[tuple[MemoryEntry, str]] = []
         from fluid.codemode.facts import is_superseded
-        from fluid.codemode.preferences import protected_conflicts
+        from fluid.codemode.preferences import owner_questions
         visible = [vars(e) for e in entries
                    if project is None or e.scope in ("global", project)]
-        if questions is None:
-            questions = protected_conflicts(visible)
-        question_ids = {e["id"] for old, new, _ in questions for e in (old, new)}
+        questions = owner_questions(visible, questions=questions)
+        question_ids = {e["id"] for q in questions for e in q["members"]}
+        # Preserve the old bound of two full facts per question. Other members
+        # use the ordinary budgeted index; the footer names every ID for Recall.
+        # Grouping must not pin hundreds of 2k-character texts outside the budget.
+        full_question_ids = {e["id"] for q in questions for e in q["pairs"][0][:2]}
         for entry in entries:
             if project is not None and entry.scope not in ("global", project):
                 out_of_scope += 1
@@ -2020,7 +2023,11 @@ class SkillStore:
             if entry.id in question_ids:
                 findings = screen_findings(entry.text) + screen_findings(entry.when or "")
                 text = "[withheld — suspected injection]" if findings else entry.text
-                pinned.append((entry, f"- [{entry.id} r{entry.revision}; owner question] {text}"))
+                line = f"- [{entry.id} r{entry.revision}; owner question] "
+                if entry.id in full_question_ids or findings:
+                    pinned.append((entry, line + text))
+                else:
+                    index.append((entry, line + when_line(entry)))
                 continue
             if entry.protected and entry.superseded_by:
                 # A dangling unconfirmed edge does not make a saved rule stale
