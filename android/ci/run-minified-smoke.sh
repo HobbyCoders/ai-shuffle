@@ -6,7 +6,7 @@ on_exit() {
   local status=$?
   trap - EXIT
   if (( status != 0 )); then
-    bash ci/emulator-diagnostics.sh minified-failure || true
+    bash ci/emulator-diagnostics.sh test-failure || true
     timeout 15 adb -s emulator-5554 logcat -d > "$out/logcat.txt" || true
   fi
   exit "$status"

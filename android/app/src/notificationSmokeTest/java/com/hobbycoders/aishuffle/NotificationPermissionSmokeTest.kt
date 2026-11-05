@@ -1,0 +1,280 @@
+package com.hobbycoders.aishuffle
+
+import android.Manifest
+import android.app.UiAutomation
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.graphics.Rect
+import android.os.SystemClock
+import android.view.InputDevice
+import android.view.MotionEvent
+import android.view.accessibility.AccessibilityNodeInfo
+import android.webkit.WebResourceResponse
+import android.webkit.WebView
+import android.widget.LinearLayout
+import androidx.core.app.NotificationManagerCompat
+import androidx.test.core.app.ActivityScenario
+import androidx.test.core.app.ApplicationProvider
+import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
+import androidx.test.runner.lifecycle.ActivityLifecycleMonitorRegistry
+import androidx.test.runner.lifecycle.Stage
+import androidx.work.WorkManager
+import com.hobbycoders.aishuffle.data.ServerStore
+import com.hobbycoders.aishuffle.model.Server
+import com.hobbycoders.aishuffle.net.ApiClient
+import com.hobbycoders.aishuffle.ui.ChatActivity
+import com.hobbycoders.aishuffle.ui.ServerListActivity
+import com.hobbycoders.aishuffle.presence.WorkerPresenceProbe
+import okhttp3.OkHttpClient
+import okhttp3.Protocol
+import okhttp3.Response
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.ResponseBody.Companion.toResponseBody
+import org.json.JSONObject
+import org.junit.Assert.*
+import org.junit.Test
+import org.junit.runner.RunWith
+import java.io.ByteArrayInputStream
+import java.time.Instant
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
+
+/** Separate push-enabled debug APK, real startup path and Android permission controller.
+ * Worker HTTP is synthetic; this never registers with Firebase or needs publisher secrets. */
+@RunWith(AndroidJUnit4::class)
+class NotificationPermissionSmokeTest {
+    private val instrumentation get() = InstrumentationRegistry.getInstrumentation()
+    private val context get() = ApplicationProvider.getApplicationContext<android.content.Context>()
+    private val automation get() = instrumentation.getUiAutomation(UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES)
+
+    private fun await(message: String, condition: () -> Boolean) {
+        val deadline = SystemClock.elapsedRealtime() + 12_000
+        while (!condition()) {
+            if (SystemClock.elapsedRealtime() >= deadline) throw AssertionError(message)
+            SystemClock.sleep(50)
+        }
+    }
+
+    private fun permissionButtons(root: AccessibilityNodeInfo, id: String): List<AccessibilityNodeInfo> {
+        val matches = mutableListOf<AccessibilityNodeInfo>()
+        fun visit(node: AccessibilityNodeInfo) {
+            // Google PermissionController may retain AOSP's resource namespace:
+            // the APK/window package is not necessarily the resource package.
+            if (node.packageName == root.packageName && node.viewIdResourceName?.substringAfterLast('/') == id)
+                matches += AccessibilityNodeInfo.obtain(node)
+            for (index in 0 until node.childCount) {
+                val child = node.getChild(index) ?: continue
+                try { visit(child) } finally { child.recycle() }
+            }
+        }
+        visit(root)
+        return matches
+    }
+
+    private fun permissionBounds(node: AccessibilityNodeInfo): Rect? {
+        if (!node.refresh() || !node.isEnabled || !node.isVisibleToUser || !node.isClickable) return null
+        val window = node.window ?: return null
+        try {
+            if (!window.isFocused || !window.isActive) return null
+            val bounds = Rect().also { node.getBoundsInScreen(it) }
+            val windowBounds = Rect().also { window.getBoundsInScreen(it) }
+            // A visible cached node can describe a point outside the actual
+            // controller window. Android sends that tap to a no-input backdrop.
+            return bounds.takeIf { bounds.intersect(windowBounds) && !bounds.isEmpty }
+        } finally { window.recycle() }
+    }
+
+    private fun tap(text: String, permission: Boolean = false, beforeTap: () -> Unit = {}) {
+        var target: AccessibilityNodeInfo? = null
+        var targetBounds: Rect? = null
+        var stableGeometry: List<Int>? = null
+        var stableSince = 0L
+        await("Missing ${if (permission) "system notification permission" else "chat"} control: $text") {
+            val root = automation.rootInActiveWindow
+            if (root == null) { stableGeometry = null; return@await false }
+            try {
+                // A native app rationale must not satisfy the system-dialog assertion.
+                val system = root.packageName?.toString() in setOf(
+                    "com.android.permissioncontroller", "com.google.android.permissioncontroller")
+                if (permission && !system) { stableGeometry = null; return@await false }
+                if (!permission && root.packageName?.toString() != context.packageName) return@await false
+                // Android transforms permission-button labels (including all caps).
+                // Match the controller's semantic resource ID, not rendered English.
+                val nodes = if (permission) permissionButtons(root,
+                    "permission_${if (text == "Allow") "allow" else "deny"}_button")
+                    else root.findAccessibilityNodeInfosByText(text)
+                val label = nodes.firstOrNull { it.isEnabled && it.isVisibleToUser &&
+                    (!permission || it.isClickable) &&
+                    (permission || it.text?.toString() == text || it.contentDescription?.toString() == text) }
+                // PopupMenu exposes its label as a non-clickable TextView. Tap
+                // the enabled, visible clickable row, not a fake menu callback.
+                var found = label?.let { AccessibilityNodeInfo.obtain(it) }
+                while (found != null && !found.isClickable) {
+                    val parent = found.parent
+                    found.recycle()
+                    found = parent
+                }
+                if (found?.isEnabled != true || found?.isVisibleToUser != true) {
+                    found?.recycle()
+                    found = null
+                }
+                if (permission) {
+                    val candidate = found
+                    val fresh = candidate?.let { permissionBounds(it) }
+                    val geometry = fresh?.let { listOf(requireNotNull(candidate).windowId, it.left, it.top, it.right, it.bottom) }
+                    val now = SystemClock.uptimeMillis()
+                    if (geometry != stableGeometry) { stableGeometry = geometry; stableSince = now }
+                    // Readiness polling before ONE tap, never retry after input.
+                    if (geometry == null || now - stableSince < 100L) {
+                        candidate?.recycle()
+                        found = null
+                    } else targetBounds = fresh
+                }
+                target = found
+                nodes.forEach { it.recycle() }
+                found != null
+            } finally { root.recycle() }
+        }
+        val node = requireNotNull(target)
+        val bounds = targetBounds ?: Rect().also { node.getBoundsInScreen(it) }
+        try {
+            if (permission) println("NOTIFICATION_PERMISSION_CONTROLLER: package=${node.packageName}; button=${node.viewIdResourceName}; window=${node.windowId}; bounds=$bounds")
+        } finally { node.recycle() }
+        beforeTap()
+        val now = SystemClock.uptimeMillis()
+        for ((action, time) in listOf(MotionEvent.ACTION_DOWN to now, MotionEvent.ACTION_UP to now + 50)) {
+            val event = MotionEvent.obtain(now, time, action, bounds.exactCenterX(), bounds.exactCenterY(), 0)
+            try {
+                event.source = InputDevice.SOURCE_TOUCHSCREEN
+                assertTrue("Android rejected local input", automation.injectInputEvent(event, true))
+            } finally { event.recycle() }
+        }
+    }
+
+    private fun web(activity: ChatActivity): WebView {
+        val column = activity.findViewById<android.view.View>(R.id.screenToolbar).parent as LinearLayout
+        return (0 until column.childCount).map { column.getChildAt(it) }.filterIsInstance<WebView>().single()
+    }
+
+    private fun pageReady(token: String): Boolean {
+        val done = CountDownLatch(1)
+        var ready = false
+        var queried = false
+        instrumentation.runOnMainSync {
+            val activity = ActivityLifecycleMonitorRegistry.getInstance()
+                .getActivitiesInStage(Stage.RESUMED).filterIsInstance<ChatActivity>().singleOrNull()
+            if (activity != null && activity.hasWindowFocus()) {
+                queried = true
+                web(activity).evaluateJavascript("document.readyState === 'complete' && window.__SHUFFLE_MOBILE__?.token === '$token'") {
+                    ready = it == "true"; done.countDown()
+                }
+            }
+        }
+        if (!queried) return false
+        assertTrue("WebView did not answer after the permission decision", done.await(2, TimeUnit.SECONDS))
+        return ready
+    }
+
+    @Test fun allowingStartupNotificationsLeavesChatUsable() = exercise(allow = true)
+    @Test fun denyingStartupNotificationsLeavesChatUsable() = exercise(allow = false)
+    @Test fun allowingLauncherNotificationsLeavesChatUsable() = exercise(allow = true, launcher = true)
+    @Test fun denyingLauncherNotificationsLeavesChatUsable() = exercise(allow = false, launcher = true)
+
+    private fun exercise(allow: Boolean, launcher: Boolean = false) {
+        assertTrue("This check must use the push-enabled debug APK", BuildConfig.DEBUG && BuildConfig.PUSH_ENABLED)
+        assertTrue(android.os.Build.VERSION.SDK_INT >= 33)
+        assertEquals("The runner must not pre-grant notifications", PackageManager.PERMISSION_DENIED,
+            context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS))
+        assertFalse(NotificationManagerCompat.from(context).areNotificationsEnabled())
+        val originalAutomationFlags = automation.serviceInfo.flags
+        context.getSharedPreferences("needs_you_permission", 0).edit().clear().commit()
+        val server = Server.create("Notification fixture", "https://notification-fixture.example", "fixture-key")
+        val sessions = AtomicInteger()
+        val field = ApiClient::class.java.getDeclaredField("client\$delegate").apply { isAccessible = true }
+        val previous = field.get(null)
+        // Replace only the HTTP transport, not presence parsing/auto-connect policy.
+        // The fixture host must never be resolved or contacted on the Internet.
+        val presenceField = WorkerPresenceProbe::class.java.getDeclaredField("client").apply { isAccessible = true }
+        val previousPresence = presenceField.get(null)
+        val probes = AtomicInteger()
+        val client = OkHttpClient.Builder().addInterceptor { chain ->
+            val request = chain.request()
+            check(request.url.host == "notification-fixture.example")
+            val body = when (request.url.encodedPath) {
+                "/api/v1/health" -> {
+                    probes.incrementAndGet()
+                    """{"status":"healthy","service":"AI Shuffle","version":"fixture","authenticated":false}"""
+                }
+                "/api/v1/mobile/key/renew" -> JSONObject().put("device_id", server.deviceId).put("api_key", server.apiKey)
+                    .put("rotated", false).put("expires_at", Instant.now().plusSeconds(3600).toString()).toString()
+                "/api/v1/mobile/web-session/reservations" -> "{\"reservation\":\"wsm_${"a".repeat(43)}\",\"expires_in\":120,\"expires_at\":\"2099-01-01T00:00:00Z\"}"
+                "/api/v1/mobile/web-session" -> "{\"session_token\":\"permission-${sessions.incrementAndGet()}\"}"
+                else -> "{}" // Push-state sync is local-only too; no Firebase config is installed.
+            }
+            Response.Builder().request(request).protocol(Protocol.HTTP_1_1).code(200).message("Fixture")
+                .header("Content-Type", "application/json").body(body.toResponseBody("application/json".toMediaType())).build()
+        }.build()
+        instrumentation.runOnMainSync { ServerStore.get(context).add(server) }
+        field.set(null, lazyOf(client))
+        presenceField.set(null, client)
+        // A worker page fixture, not a fake permission callback. The real shell
+        // still reserves/mints a session, installs its bootstrap and handles taps.
+        ChatActivity.uiFixture = {
+            val html = "<html><head><meta name='viewport' content='width=device-width'></head>" +
+                "<body><h1>Permission chat fixture</h1></body></html>"
+            WebResourceResponse("text/html", "utf-8", ByteArrayInputStream(html.toByteArray()))
+        }
+        try {
+            automation.serviceInfo = automation.serviceInfo.apply {
+                flags = flags or android.accessibilityservice.AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS or
+                    android.accessibilityservice.AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
+            }
+            val intent = if (launcher) {
+                requireNotNull(context.packageManager.getLaunchIntentForPackage(context.packageName)).also {
+                    assertEquals("Must exercise the manifest launcher", ServerListActivity::class.java.name, it.component?.className)
+                    assertEquals(Intent.ACTION_MAIN, it.action)
+                    assertTrue(it.hasCategory(Intent.CATEGORY_LAUNCHER))
+                }
+            } else Intent(context, ChatActivity::class.java).putExtra(ChatActivity.EXTRA_SERVER_ID, server.id)
+            ActivityScenario.launch<android.app.Activity>(intent).use {
+                tap(if (allow) "Allow" else "Don’t allow", permission = true) {
+                    if (launcher) assertEquals("Launcher connected before the real OS permission decision", 0, sessions.get())
+                }
+                await("Permission result did not reach Android") {
+                    context.getSharedPreferences("needs_you_permission", 0).getBoolean("asked", false) &&
+                        context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) ==
+                        (if (allow) PackageManager.PERMISSION_GRANTED else PackageManager.PERMISSION_DENIED) &&
+                        automation.rootInActiveWindow?.packageName?.toString() == context.packageName
+                }
+                await("Chat did not initialize after the permission decision") {
+                    sessions.get() > 0 && pageReady("permission-${sessions.get()}")
+                }
+                if (launcher) assertTrue("Launcher must probe then auto-connect without a worker-row tap", probes.get() > 0)
+                val before = sessions.get()
+                tap("More chat options")
+                tap("Refresh chat")
+                await("A real Refresh chat tap did not mint another session") { sessions.get() > before }
+                await("Refreshed chat is not usable") { pageReady("permission-${sessions.get()}") }
+                assertEquals(allow, NotificationManagerCompat.from(context).areNotificationsEnabled())
+                println("NOTIFICATION_PERMISSION_PROOF: entry=${if (launcher) "launcher" else "chat"}; decision=${if (allow) "allow" else "deny"}; real_system_prompt=true; chat_refresh=ok")
+            }
+        } finally {
+            automation.serviceInfo = automation.serviceInfo.apply { flags = originalAutomationFlags }
+            // Closing the launcher scenario does not own the chat it auto-opened.
+            instrumentation.runOnMainSync {
+                val monitor = ActivityLifecycleMonitorRegistry.getInstance()
+                listOf(Stage.RESUMED, Stage.PAUSED, Stage.STOPPED).flatMap { monitor.getActivitiesInStage(it) }
+                    .filterIsInstance<ChatActivity>().distinct().forEach { it.finish() }
+            }
+            instrumentation.waitForIdleSync()
+            // Each branch runs in its own instrumentation process with cleared app data.
+            WorkManager.getInstance(context).cancelAllWork().result.get(5, TimeUnit.SECONDS)
+            presenceField.set(null, previousPresence)
+            field.set(null, previous); ChatActivity.uiFixture = null
+            instrumentation.runOnMainSync { ServerStore.get(context).remove(server.id) }
+            client.dispatcher.executorService.shutdown()
+        }
+    }
+}

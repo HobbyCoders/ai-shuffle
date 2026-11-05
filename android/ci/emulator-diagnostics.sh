@@ -38,7 +38,10 @@ capture system-image-version bash -c 'for f in "$1"/system-images/android-*/*/x8
 # state inside its test script, before teardown, without dismissing ANR dialogs.
 if [[ "$phase" == test-failure || "$phase" == launcher-recovery ]]; then
   serial=${ANDROID_SERIAL:-emulator-5554}
-  capture logcat adb -s "$serial" logcat -b all -d -v threadtime
+  capture logcat adb -s "$serial" logcat -b main -b system -b events -d -v threadtime
+  # The kernel buffer can exhaust the capture budget before the app's abort.
+  # Preserve the crash stack independently, including native WebView failures.
+  capture crash adb -s "$serial" logcat -b crash -d -v threadtime
   capture properties adb -s "$serial" shell getprop
   capture guest-disk adb -s "$serial" shell df -h
   capture activity adb -s "$serial" shell dumpsys activity
@@ -47,7 +50,7 @@ if [[ "$phase" == test-failure || "$phase" == launcher-recovery ]]; then
   capture meminfo adb -s "$serial" shell dumpsys meminfo
   # The WebView provider and version the app ran on (emulator images never update it).
   capture webview adb -s "$serial" shell dumpsys webviewupdate
-  for tag in data_app_anr system_app_anr system_server_anr; do
+  for tag in data_app_anr system_app_anr system_server_anr data_app_crash data_app_native_crash; do
     capture "$tag" adb -s "$serial" shell dumpsys dropbox --print "$tag"
   done
 fi
