@@ -58,6 +58,44 @@ async function typeInto(container: HTMLElement): Promise<void> {
 	expect(activeSession.current.draft).not.toContain(TEXT);
 }
 
+it.each(['typed', 'restored', 'seeded'])('lays out %s text before any later animation frame', async (origin) => {
+	// Hold rAF: a restored/typed line must not paint in the old narrow text box
+	// while waiting for the wrap observer to decide the controls-row layout.
+	vi.spyOn(globalThis, 'requestAnimationFrame').mockReturnValue(1);
+	vi.spyOn(globalThis, 'cancelAnimationFrame').mockImplementation(() => {});
+	vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockImplementation(function (this: HTMLElement) {
+		if (this.classList.contains('chat-island')) return 342;
+		if (this.classList.contains('tiptap')) return this.closest('.wrapped') ? 308 : 156;
+		return 0;
+	});
+	vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockImplementation(function (this: HTMLElement) {
+		if (this.style.left !== '-10000px') return 0;
+		return Math.max(1, Math.ceil((this.textContent!.length * 8) / parseFloat(this.style.width))) * 22;
+	});
+	const text = 'restored words that need the full width of the composer';
+	if (origin === 'seeded') activeSession.setDraft(text);
+	try {
+		const view = render(ChatInput);
+		const dom = view.container.querySelector<EditorHost>('.tiptap')!;
+		await waitFor(() => expect(dom.editor).toBeTruthy());
+		dom.style.fontSize = '14px';
+		dom.style.lineHeight = '22px';
+		if (origin === 'restored') activeSession.setPendingRestorePrompt(text);
+		else if (origin === 'typed') dom.editor!.commands.insertContent(text);
+		await tick();
+		expect(dom.textContent).toBe(text);
+		expect(view.container.querySelector('.chat-island.wrapped')).not.toBeNull();
+
+		dom.editor!.commands.setTextSelection({ from: 1, to: text.length + 1 });
+		dom.editor!.commands.deleteSelection();
+		await tick();
+		expect(view.container.querySelector('.chat-island.wrapped')).toBeNull();
+		view.unmount();
+	} finally {
+		vi.restoreAllMocks();
+	}
+});
+
 it('a composer mounted in place of one with debounced text opens with that text', async () => {
 	const first = render(ChatInput);
 	await typeInto(first.container);
