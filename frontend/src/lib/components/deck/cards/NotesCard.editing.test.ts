@@ -122,7 +122,7 @@ describe('Notes preview and filtering', () => {
 		await fireEvent.click(await screen.findByRole('button', { name: /Note B content B/ }));
 		await waitFor(() => expect(body().value).toContain('# Heading'));
 		await screen.findByTitle('Download spec.pdf');
-		await fireEvent.click(screen.getByRole('button', { name: 'Preview' }));
+		await fireEvent.click(screen.getByRole('tab', { name: 'Preview' }));
 		const region = screen.getByRole('region', { name: 'Note content' });
 		expect(region.querySelector('h1')?.textContent).toBe('Heading');
 		expect(region.querySelector('strong')?.textContent).toBe('bold');
@@ -131,7 +131,7 @@ describe('Notes preview and filtering', () => {
 		expect(ref.getAttribute('href')).toBe('/dl/B/att1');
 		expect(region.querySelector('.note-ref--missing')?.textContent).toBe('@gone.png');
 		expect(screen.queryByPlaceholderText(/Write your note/)).toBeNull();
-		await fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+		await fireEvent.click(screen.getByRole('tab', { name: 'Edit' }));
 		expect(body().value).toContain('**bold**');
 	});
 
@@ -146,7 +146,7 @@ describe('Notes preview and filtering', () => {
 		await waitFor(() => expect(getNotes).toHaveBeenLastCalledWith({ search: 'roadmap', tag: undefined }));
 		expect(await screen.findByText('No notes match')).toBeTruthy();
 		vi.mocked(getNotes).mockResolvedValue([note('A', { is_pinned: true, tags: ['ideas'] })]);
-		await fireEvent.click(screen.getByRole('button', { name: /^ideas/ }));
+		await fireEvent.change(screen.getByRole('combobox', { name: 'Filter by tag' }), { target: { value: 'ideas' } });
 		await waitFor(() => expect(getNotes).toHaveBeenLastCalledWith({ search: 'roadmap', tag: 'ideas' }));
 		expect(await screen.findByRole('button', { name: /Note A content A/ })).toBeTruthy();
 	});

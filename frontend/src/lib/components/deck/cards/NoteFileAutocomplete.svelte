@@ -4,8 +4,8 @@
 	 *
 	 * Lists a note's attached files when the user types `@` in the note body and,
 	 * on selection, inserts a markdown reference token that renders as a clickable
-	 * link in the note preview. Kept self-contained (uses card-design-system
-	 * tokens) so it doesn't depend on the shared chat FileAutocomplete component.
+	 * link in the note preview. Uses the shared view tokens so it matches
+	 * the editor without depending on the chat FileAutocomplete component.
 	 */
 	import { Paperclip } from 'lucide-svelte';
 	import type { NoteAttachment } from '$lib/api/client';
@@ -140,17 +140,16 @@
 		display: flex;
 		flex-direction: column;
 		overflow: hidden;
-		background: var(--popover, var(--card));
-		border: 1px solid var(--border-default);
-		border-radius: var(--radius-md);
-		box-shadow: var(--shadow-lg, 0 8px 24px rgba(0, 0, 0, 0.25));
+		background: var(--st-card);
+		border: 1px solid var(--st-border);
+		border-radius: var(--st-radius);
 	}
 
 	.note-autocomplete-header {
 		padding: var(--space-1) var(--space-2);
 		font-size: var(--text-xs);
-		color: var(--text-secondary);
-		border-bottom: 1px solid var(--border-subtle, var(--border-default));
+		color: var(--st-mfg);
+		border-bottom: 1px solid var(--st-border);
 	}
 
 	.note-autocomplete-list {
@@ -166,19 +165,24 @@
 		align-items: center;
 		gap: var(--space-2);
 		width: 100%;
+		min-height: 36px;
 		padding: var(--space-1) var(--space-2);
 		background: none;
 		border: none;
-		border-radius: var(--radius-sm);
-		color: var(--text-primary);
+		border-radius: var(--st-radius-md);
+		color: var(--st-fg);
 		font-size: var(--text-sm);
 		text-align: left;
 		cursor: pointer;
 	}
 
+	.note-autocomplete-item:hover,
 	.note-autocomplete-item.selected {
-		background: var(--surface-selected, var(--surface-hover));
+		background: var(--st-accent);
 	}
+
+	.note-autocomplete-item:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
+	@media (pointer: coarse), (max-width: 600px) { .note-autocomplete-item { min-height: 44px; } }
 
 	.note-autocomplete-name {
 		flex: 1;
@@ -190,13 +194,13 @@
 	.note-autocomplete-size {
 		flex-shrink: 0;
 		font-size: var(--text-xs);
-		color: var(--text-tertiary);
+		color: var(--st-mfg);
 	}
 
 	.note-autocomplete-empty {
 		padding: var(--space-3);
 		font-size: var(--text-sm);
-		color: var(--text-secondary);
+		color: var(--st-mfg);
 		text-align: center;
 	}
 
@@ -204,15 +208,15 @@
 		display: flex;
 		gap: var(--space-3);
 		padding: var(--space-1) var(--space-2);
-		border-top: 1px solid var(--border-subtle, var(--border-default));
+		border-top: 1px solid var(--st-border);
 		font-size: var(--text-xs);
-		color: var(--text-tertiary);
+		color: var(--st-mfg);
 	}
 
 	.note-autocomplete-footer kbd {
 		padding: 1px 4px;
-		background: var(--surface-1);
-		border-radius: var(--radius-sm);
+		background: var(--st-muted);
+		border-radius: var(--st-radius-md);
 		font-family: var(--font-mono);
 	}
 </style>

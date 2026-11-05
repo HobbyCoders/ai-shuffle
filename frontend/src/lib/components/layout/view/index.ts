@@ -2,6 +2,7 @@
 export { default as ViewShell } from './ViewShell.svelte';
 export { default as ViewPanel } from './ViewPanel.svelte';
 export { default as ViewMain } from './ViewMain.svelte';
+export { default as ViewDetail } from './ViewDetail.svelte';
 export { default as PanelSearch } from './PanelSearch.svelte';
 export { default as PanelIconButton } from './PanelIconButton.svelte';
 export { default as DetailPane } from '../../settings/shell/DetailPane.svelte';
