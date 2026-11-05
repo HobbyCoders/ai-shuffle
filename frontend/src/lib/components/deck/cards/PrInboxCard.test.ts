@@ -64,6 +64,8 @@ describe('PrInboxCard', () => {
 		expect(within(list).getAllByRole('listitem')).toHaveLength(3);
 		expect(screen.getByRole('link', { name: /Add inbox/ }).getAttribute('href')).toBe('https://github.com/o/alpha/pull/1');
 		expect(screen.getByText('o/beta#3')).toBeTruthy();
+			expect(list.querySelectorAll('.pri-attribution')).toHaveLength(3);
+			expect(list.querySelectorAll('.pri-external')).toHaveLength(3);
 		expect(screen.getByRole('heading', { name: 'Open pull requests', level: 2 })).toBeTruthy();
 		expect(screen.getByText('3 pull requests')).toBeTruthy();
 		expect(within(list).getByText('Checks passed')).toBeTruthy();

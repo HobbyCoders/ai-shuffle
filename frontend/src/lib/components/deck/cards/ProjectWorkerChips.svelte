@@ -16,6 +16,7 @@
 	 */
 	import type { ProjectKind, ProjectWorker } from '$lib/api/project-workers';
 	import { workerChip } from './project-workers-view';
+	import { workerDisplayName } from '$lib/components/ui/worker-name';
 
 	interface Props {
 		workers: ProjectWorker[];
@@ -27,7 +28,7 @@
 
 	let { workers, kind, projectName, onSetup, onOpen }: Props = $props();
 
-	const chips = $derived(workers.map((w) => ({ worker: w, chip: workerChip(w, kind) })));
+	const chips = $derived(workers.map((w) => ({ worker: w, chip: workerChip({ ...w, device_name: workerDisplayName(w.device_name, w.is_self ? 'Local' : 'Worker') }, kind) })));
 
 	function activate(e: MouseEvent, worker: ProjectWorker, actionable: boolean) {
 		e.stopPropagation();
@@ -42,7 +43,7 @@
 				type="button"
 				class="wchip wchip--{chip.tone}"
 				title={chip.title}
-				aria-label="{chip.text}: {chip.actionable ? `not set up — set ${projectName} up on ${worker.device_name}` : chip.title}"
+				aria-label="{chip.text}: {chip.actionable ? `not set up — set ${projectName} up on ${workerDisplayName(worker.device_name, worker.is_self ? 'Local' : 'Worker')}` : chip.title}"
 				data-worker-state={worker.state}
 				onclick={(e) => activate(e, worker, chip.actionable)}
 				onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') e.stopPropagation(); }}

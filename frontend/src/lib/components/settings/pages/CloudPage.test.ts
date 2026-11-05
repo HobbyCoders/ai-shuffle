@@ -76,8 +76,7 @@ function expectNoKeyWording() {
 }
 
 function expectPlanFollowsAccount() {
-	expect(screen.getByTestId('cloud-follows').textContent).toMatch(/plan follows the Cloud account you sign in with/);
-	expect(screen.getByTestId('cloud-follows').textContent).toMatch(/another worker .* same plan/);
+	expect(screen.getByTestId('cloud-follows').textContent).toBe('Your plan follows your Cloud account across workers. Local use stays free.');
 }
 
 describe('not linked', () => {
@@ -85,14 +84,14 @@ describe('not linked', () => {
 		render(CloudPage);
 		await waitFor(() => expect(state()).toContain('Not linked'));
 		expect(screen.getByRole('heading', { level: 1, name: 'Cloud' })).toBeTruthy();
-		expect(screen.getByTestId('cloud-message').textContent).toContain('Local use is free');
+		expect(screen.getAllByRole('heading', { name: 'Plans' })).toHaveLength(1);
+		expect(screen.queryByTestId('cloud-message')).toBeNull();
 		expect(tierNamed('This worker').querySelector('[aria-current]')?.getAttribute('aria-current')).toBe('true');
 		expect(tierNamed('This worker').textContent).toContain('Local use, no account');
 		expect(tierNamed('Free account').textContent).toMatch(/2\s*·\s*remote workers, no card/);
 		expect(tierNamed('Paid plan').textContent).toMatch(/4\s*·\s*remote workers and sync/);
-		expect(screen.getByText('Local use stays free')).toBeTruthy();
-		expect(screen.getByText('A free account adds two')).toBeTruthy();
-		expect(seats()).toBe('None');
+		expect(screen.queryByText('A free account adds two')).toBeNull();
+		expect(screen.queryByTestId('cloud-seats')).toBeNull();
 		expect(screen.queryByText('Renews')).toBeNull();
 		const plans = screen.getByRole('link', { name: /See plans/ });
 		expect(plans.getAttribute('href')).toBe('https://hobbycoders.com/ai-shuffle/pricing');
@@ -122,6 +121,14 @@ describe('not linked', () => {
 });
 
 describe('free', () => {
+	it('keeps an account-specific remote-worker limit in the plan row', async () => {
+		status = { ...free, remote_worker_limit: 5, seats_used: 3 };
+		render(CloudPage);
+		await waitFor(() => expect(state()).toContain('Free'));
+		expect(tierNamed('Free account').textContent).toMatch(/5\s*·\s*remote workers/);
+		expect(seats()).toBe('3 of 5 in use');
+	});
+
 	it('shows the 2 included remote workers and an upgrade link', async () => {
 		status = { ...free };
 		render(CloudPage);
@@ -130,7 +137,7 @@ describe('free', () => {
 		expect(seats()).toBe('2 remote workers included');
 		expect(tierNamed('Free account').querySelector('[aria-current]')?.getAttribute('aria-current')).toBe('true');
 		expect(tierNamed('This worker').querySelector('[aria-current]')).toBeNull();
-		const upgrade = screen.getByRole('link', { name: /Upgrade/ });
+		const upgrade = screen.getByRole('link', { name: /See plans/ });
 		expect(upgrade.getAttribute('href')).toBe('https://hobbycoders.com/ai-shuffle/pricing');
 		expect(screen.queryByRole('button', { name: 'Link account' })).toBeNull();
 		expect(screen.queryByText('Renews')).toBeNull();
@@ -155,7 +162,7 @@ describe('paid', () => {
 		expect(screen.getByText('Renews')).toBeTruthy();
 		expect(screen.getByTestId('cloud-renewal').textContent).toContain('Oct 25, 2026');
 		expect(tierNamed('Paid plan').querySelector('[aria-current]')?.getAttribute('aria-current')).toBe('true');
-		expect(screen.queryByRole('link', { name: /Upgrade|See plans/ })).toBeNull();
+		expect(screen.getByRole('link', { name: /See plans/ }).closest('.st-row')?.textContent).toContain('Paid plan');
 		expect(screen.queryByRole('button', { name: 'Link account' })).toBeNull();
 		expectPlanFollowsAccount();
 		expectNoKeyWording();
@@ -182,7 +189,7 @@ describe('paid', () => {
 		status = { ...paid, seats: 100, seats_used: 2, remote_worker_limit: 100 };
 		render(CloudPage);
 		await waitFor(() => expect(state()).toContain('Paid'));
-		expect(seats()).toBe('Unlimited remote workers');
+		expect(seats()).toBe('2 in use');
 		expect(screen.getByText('2 in use')).toBeTruthy();
 		expect(tierNamed('Paid plan').textContent).toContain('Unlimited');
 		expect(screen.queryByRole('meter')).toBeNull();
@@ -242,8 +249,7 @@ describe('coverage', () => {
 	it('renders a row for every Cloud entry on a paid plan', async () => {
 		status = { ...paid, linked: false };
 		await assertCategoryCoverage('cloud', () => render(CloudPage).container, {
-			settle: () => waitFor(() => expect(state()).toContain('Paid')),
-			skip: { 'cloud.upgrade': 'only when not on a paid plan; the free and not-linked tests render it' }
+			settle: () => waitFor(() => expect(state()).toContain('Paid'))
 		});
 	});
 });

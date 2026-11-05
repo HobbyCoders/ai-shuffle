@@ -128,13 +128,12 @@
 								</span>
 								<div class="pri-main">
 									<a class="pri-title" href={pr.url} target="_blank" rel="noopener noreferrer">
-										{pr.title}<ExternalLink size={11} aria-hidden="true" />
+										<span>{pr.title}</span><span class="pri-external"><ExternalLink size={12} aria-hidden="true" /></span>
 									</a>
 									<div class="pri-meta">
 										<span class="pri-repo">{pr.repo}#{pr.number}</span>
 										<span class="pri-branch" title="{pr.head_branch} → {pr.base_branch}">{pr.head_branch} → {pr.base_branch}</span>
-										<span>by {pr.author}</span>
-										<span class="pri-projects" title={pr.projects.map((p) => p.name).join(', ')}>{pr.projects.map((p) => p.name).join(', ')}</span>
+										<span class="pri-attribution"><span>by {pr.author}</span><span class="pri-projects" title={pr.projects.map((p) => p.name).join(', ')}>{pr.projects.map((p) => p.name).join(', ')}</span></span>
 									</div>
 								</div>
 								<div class="pri-badges">
@@ -201,10 +200,12 @@
  .pri-row[data-state='merged'] .pri-state { color: var(--chart-3, var(--st-mfg)); }
  .pri-row[data-state='closed'] .pri-state { color: var(--st-destructive); }
  .pri-main { flex: 1; min-width: 0; }
- .pri-title { display: inline-flex; align-items: center; gap: 6px; font-size: 14px; font-weight: 500; color: var(--st-fg); }
+ .pri-title { display: grid; grid-template-columns: minmax(0, 1fr) 20px; align-items: start; gap: 6px; width: fit-content; max-width: 100%; font-size: 14px; font-weight: 500; color: var(--st-fg); overflow-wrap: anywhere; }
+ .pri-external { display: flex; justify-content: center; padding-top: 3px; }
  .pri-title:hover { color: var(--st-primary); }
  .pri-meta { display: flex; flex-wrap: wrap; gap: 4px 8px; margin-top: 4px; color: var(--sidebar-muted); font-size: 12px; overflow-wrap: anywhere; }
- .pri-meta > span + span::before { content: '·'; display: inline-block; margin-right: 8px; color: var(--st-mfg); font-family: inherit; }
+ .pri-attribution { display: flex; flex-wrap: wrap; gap: 4px 12px; }
+ @media (max-width: 600px) { .pri-meta { display: grid; gap: 4px; } .pri-title { width: 100%; } }
  .pri-repo { color: var(--secondary-foreground); }
  .pri-branch { font-family: var(--st-mono); }
  .pri-badges { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; color: var(--st-mfg); font-size: 12px; }

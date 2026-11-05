@@ -180,6 +180,10 @@
 		font-size: 11.5px;
 	}
 	.st-rc {
+		/* Plain read-only content inherits the same value style as ValueText.
+		   Buttons, fields and semantic state colours keep their own styles. */
+		font-size: 13px;
+		color: var(--st-mfg);
 		display: flex;
 		align-items: center;
 		gap: 8px;

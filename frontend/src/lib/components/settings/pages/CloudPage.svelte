@@ -63,16 +63,7 @@
 		return { text: 'Not linked', tone: 'off' };
 	});
 
-	const accountHint = $derived.by(() => {
-		if (!status) return undefined;
-		return status.linked ? 'Linked to AI Shuffle Cloud' : 'Local use stays free';
-	});
-
-	const workersHint = $derived.by(() => {
-		if (tier === 'not_linked') return 'A free account adds two';
-		if (unlimited && used !== null) return `${used} in use`;
-		return undefined;
-	});
+	const accountHint = $derived(status?.linked ? 'Linked to AI Shuffle Cloud' : undefined);
 
 	function shortDate(iso: string | null): string {
 		if (!iso) return '';
@@ -87,7 +78,7 @@
 
 	const tiers = $derived([
 		{ id: 'local', name: 'This worker', figure: 'Free', unit: 'Local use, no account' },
-		{ id: 'free', name: 'Free account', figure: String(FREE_WORKERS), unit: 'remote workers, no card' },
+		{ id: 'free', name: 'Free account', figure: String(tier === 'free' ? cap : FREE_WORKERS), unit: 'remote workers, no card' },
 		{
 			id: 'paid',
 			name: 'Paid plan',
@@ -96,7 +87,6 @@
 		}
 	]);
 	const currentTier = $derived(tier === 'paid' ? 'paid' : tier === 'free' ? 'free' : tier ? 'local' : null);
-	const tierIndex = $derived(tiers.findIndex((t) => t.id === currentTier));
 
 	/* ---------- loading and actions ---------- */
 
@@ -122,70 +112,53 @@
 </script>
 
 <PreferencePage category="cloud">
-	<section class="cl-ladder" aria-label="What AI Shuffle Cloud adds" aria-busy={load === 'loading'} data-testid="cloud-tiers">
-		<div class="st-card">
+	<RowGroup title="Account">
+		<SettingRow id="cloud.account" hint={accountHint} stackOnPhone={!!status && !status.linked}>
+			<span data-testid="cloud-state"><ValueText value={accountView.text} status={accountView.tone} /></span>
+			{#if status && !status.linked}
+				<button type="button" class="st-btn primary" data-setting-anchor="cloud.link" onclick={linkAccount}>Link account</button>
+			{/if}
+		</SettingRow>
+	</RowGroup>
+
+	<section aria-label="Plans" aria-busy={load === 'loading'} data-testid="cloud-tiers">
+		<RowGroup title="Plans">
 			{#each tiers as t (t.id)}
-				<SettingRow label={t.name} hint={`${t.figure} · ${t.unit}`}>
-					{#if t.id === currentTier}<span class="cl-here" aria-current="true">You are here</span>{/if}
+				<SettingRow label={t.name} hint={`${t.figure} · ${t.unit}`} stackOnPhone={t.id === currentTier && used !== null}>
+					{#if t.id === currentTier}
+						<span class="cl-here" aria-current="true">You are here</span>
+						{#if t.id !== 'local'}
+							<span data-testid="cloud-seats" data-setting-anchor="cloud.remoteWorkers">
+								{#if unlimited}
+									<ValueText value={used !== null ? `${used} in use` : 'Unlimited remote workers'} />
+								{:else if used !== null}
+									<Meter {used} {cap} unit=" in use" label="Remote workers in use" warnAt={1} />
+								{:else}
+									<span class="sr-only">{cap} remote {cap === 1 ? 'worker' : 'workers'} included</span>
+								{/if}
+							</span>
+						{/if}
+					{/if}
+					{#if t.id === 'paid'}
+						<a class="st-btn" data-setting-anchor="cloud.upgrade" href={CLOUD_PRICING_URL} target="_blank" rel="noopener noreferrer"><ExternalLink />See plans</a>
+					{/if}
 				</SettingRow>
 			{/each}
-		</div>
-		<div class="cl-foot st-footnote">
-			<p class="cl-msg" data-testid="cloud-message">
-				{status?.message ?? 'Everything on your own machines and network is free.'}
-			</p>
-			<button type="button" class="st-btn ghost sm" onclick={openDocs}><BookOpen />How Cloud works</button>
-		</div>
-	</section>
-
-	<RowGroup title="Account">
-		<SettingRow id="cloud.account" hint={accountHint}>
-			<span data-testid="cloud-state"><ValueText value={accountView.text} status={accountView.tone} /></span>
-		</SettingRow>
-		{#if status && !status.linked}
-			<SettingRow id="cloud.link">
-				<button type="button" class="st-btn primary" onclick={linkAccount}>Link account</button>
-			</SettingRow>
-		{/if}
-	</RowGroup>
-	<p class="st-footnote" data-testid="cloud-follows">
-		Your plan follows the Cloud account you sign in with. Sign in with the same account on another worker and it gets the same plan.
-	</p>
-
-	{#if status}
-		<RowGroup title="Plan">
-			<SettingRow id="cloud.remoteWorkers" hint={workersHint}>
-				<span data-testid="cloud-seats">
-					{#if tier === 'not_linked'}
-						<ValueText value="None" />
-					{:else if unlimited}
-						<ValueText value="Unlimited remote workers" tone="fg" />
-					{:else if used !== null}
-						<Meter {used} {cap} unit=" in use" label="Remote workers in use" warnAt={1} />
-					{:else}
-						<ValueText value={`${cap} remote ${cap === 1 ? 'worker' : 'workers'} included`} tone="fg" />
-					{/if}
-				</span>
-			</SettingRow>
-			{#if paid && status.expires_at}
+			{#if paid && status?.expires_at}
 				<SettingRow id="cloud.renewal">
-					<span data-testid="cloud-renewal"><ValueText value={shortDate(status.expires_at)} tone="fg" /></span>
-				</SettingRow>
-			{/if}
-			{#if !paid}
-				<SettingRow id="cloud.upgrade">
-					<a class="st-btn" href={CLOUD_PRICING_URL} target="_blank" rel="noopener noreferrer">
-						<ExternalLink />{tier === 'free' ? 'Upgrade' : 'See plans'}
-					</a>
+					<span data-testid="cloud-renewal"><ValueText value={shortDate(status.expires_at)} /></span>
 				</SettingRow>
 			{/if}
 		</RowGroup>
-	{/if}
-	{#if error}<p class="st-msg err" role="alert">{error}</p>{/if}
+	</section>
+	<div class="cl-foot st-footnote">
+		<p class="cl-msg" data-testid="cloud-follows">Your plan follows your Cloud account across workers. Local use stays free.</p>
+		<button type="button" class="st-btn ghost sm" onclick={openDocs}><BookOpen />How Cloud works</button>
+	</div>
+	{#if error}<p class="st-msg err" role="alert">{error} <button type="button" class="st-btn" onclick={() => { error = ''; load = 'loading'; void loadStatus(); }}>Try again</button></p>{/if}
 </PreferencePage>
 
 <style>
-	.cl-ladder { margin: 0; }
 	.cl-here { font-size: 12px; padding: 2px 8px; border: 1px solid var(--st-border-strong); border-radius: 999px; color: var(--st-mfg); white-space: nowrap; }
 	.cl-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 	.cl-msg { margin: 0; min-width: 0; }

@@ -184,7 +184,7 @@
 		{#if model.loading}
 			<p class="st-empty" role="status">Loading plugins…</p>
 		{:else if !model.forbidden && !model.error && installedCount === 0 && !q}
-			<div class="st-card"><SettingRow label="Nothing added yet."><button type="button" class="st-btn" onclick={() => settingsNav.selectItem('explore', CATEGORY)}>Explore plugins</button></SettingRow></div>
+			<div class="st-card"><SettingRow label="Nothing added yet." /></div>
 		{:else if q && !groups.length && !showExplore && !showSources && !showProjects}
 			<EmptyDetail message={`No plugin matches “${filter.trim()}”.`} actionLabel="Clear search" onAction={() => filter = ''} />
 		{/if}

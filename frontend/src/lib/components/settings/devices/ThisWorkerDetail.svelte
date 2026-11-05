@@ -210,13 +210,14 @@
 				{#key rev}
 					<SettingRow label="Name" hint={model.enrolled && model.self ? undefined : 'Join a network to rename'}>
 						<TextField
-							value={model.workerName}
+							value={model.workerLabel}
 							maxlength={100}
 							disabled={!model.enrolled || !model.self || model.saving !== null}
 							onchange={rename}
 						/>
 					</SettingRow>
 				{/key}
+				{#if model.workerName !== model.workerLabel}<SettingRow label="Worker ID"><span style="font-size: 12px; color: var(--st-mfg)">{model.workerName}</span></SettingRow>{/if}
 				<SettingRow label="Platform"><ValueText value={status.platform ?? 'Unknown'} tone="fg" /></SettingRow>
 				<SettingRow label="Version"><ValueText value={status.version ?? 'Unknown'} mono tone="fg" /></SettingRow>
 				<SettingRow label="Revision"><ValueText value={status.revision ?? 'Unknown'} mono tone="fg" /></SettingRow>
