@@ -29,6 +29,7 @@
 	import InlineBanner from '../rows/InlineBanner.svelte';
 	import ImportWizard, { type ImportStep } from './editors/ImportWizard.svelte';
 	import UpdateCheckResults from './editors/UpdateCheckResults.svelte';
+	import UpdateRuntimeDetails from './editors/UpdateRuntimeDetails.svelte';
 	import MemoryHealthList from './editors/MemoryHealthList.svelte';
 	import Segmented from '../rows/Segmented.svelte';
 	import NightlyConfirm from './editors/NightlyConfirm.svelte';
@@ -383,16 +384,17 @@
 			dim={!allow}
 			expanded={resultsOpen && (updates.rows || updates.checkError) ? results : undefined}
 		>
-			<button type="button" class="st-btn" aria-busy={updates.checking} disabled={!updates.policy || !allow || updates.checking} onclick={runCheck}>
+			<button type="button" class="st-btn" aria-busy={updates.checking} disabled={!updates.policy || !allow || updates.checking || updates.refreshingUpdater || updates.updaterQueued} onclick={runCheck}>
 				{updates.checking ? 'Checking…' : 'Check now'}
 			</button>
 		</SettingRow>
 		<SettingRow id="system.deployStatus" expanded={deployOpen ? deployList : undefined}>
 			<ExpandToggle value={deployError ? 'Unavailable' : deploySummary(deploy)} bind:open={deployOpen} />
 		</SettingRow>
-		<SettingRow id="system.version">
+		<SettingRow id="system.version" label="This UI version" hint="Loaded in this browser">
 			<ValueText value={__APP_VERSION__} mono />
 		</SettingRow>
+		<UpdateRuntimeDetails {updates} />
 	</RowGroup>
 	{#if updates.error}<p class="st-msg err" role="alert">{updates.error}</p>{/if}
 	{#if updates.status === 'forbidden'}<p class="st-msg">Update settings: {FORBIDDEN_TEXT.toLowerCase()}</p>{/if}
