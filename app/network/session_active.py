@@ -35,8 +35,19 @@ def project(cursor, record: dict) -> None:
     cursor.execute("UPDATE network_session_active SET local_revision=local_revision+1, "
                    "local_revision_epoch=CASE WHEN local_revision_epoch='' THEN %s ELSE local_revision_epoch END "
                    "WHERE session_id=%s", (str(uuid4()), record["session_id"]))
-    cursor.execute("UPDATE sessions SET is_active=%s, status=CASE WHEN status='archived' THEN 'active' ELSE status END WHERE id=%s",
+    cursor.execute("UPDATE sessions SET is_active=%s, status=CASE WHEN status='archived' THEN 'active' ELSE status END WHERE id=%s RETURNING *",
                    (record["is_active"], record["session_id"]))
+    row = cursor.fetchone()
+    if row is not None and control.owner_of(dict(row)):
+        # This is a local projection of an owner-ordered catalog, not a new
+        # owner write. Snapshot/apply hash the projected row too; keep that
+        # cache current when membership arrives AFTER the catalog. Otherwise
+        # identical rows retain different hashes after a mixed-version reboot.
+        coll = engine.policy.collection("sessions")
+        serialized = engine.serialize_row(coll, dict(row), cursor=cursor)
+        if serialized is not None:
+            cursor.execute("UPDATE sync_records SET content_hash=%s WHERE collection='sessions' AND record_id=%s",
+                           (engine.content_hash(coll, serialized), record["session_id"]))
 
 
 def _record_active(cursor, session_id: str, active: bool) -> Optional[dict]:

@@ -62,7 +62,7 @@ class Worker:
             c.execute(sql,params)
             return [dict(x) for x in c.fetchall()] if c.description else []
 
-    def start(self, checkout):
+    def start(self, checkout, *, wrapper=None, wait_ready=True):
         self.stop()
         self.checkout=Path(checkout)
         assert (self.checkout/'.git').exists() or (self.checkout/'.source-commit').is_file(), 'host-provisioned source required'
@@ -70,7 +70,9 @@ class Worker:
         self.starts+=1
         self.log=self.directory/f'app-{self.starts}.log'
         with self.log.open('w') as log:
-            self.process=subprocess.Popen([sys.executable,'-m','app.main'],cwd=self.checkout,env=env,stdout=log,stderr=log,start_new_session=True)
+            self.process=subprocess.Popen([sys.executable,str(wrapper)] if wrapper else [sys.executable,'-m','app.main'],cwd=self.checkout,env=env,stdout=log,stderr=log,start_new_session=True)
+        if not wait_ready:
+            return
         def ready():
             if self.process.poll() is not None: raise AssertionError(f'{self.name} boot exited {self.process.returncode}; inspect {self.log}')
             try:return self.request('GET','/api/v1/network/status')
@@ -219,8 +221,96 @@ def one_order(order,args,receipts):
         print('PASS upgrade '+order+' all apps and PostgreSQL cleaned on exit',flush=True)
 
 
+
+def legacy_inputs(args):
+    directory=Path(args.scratch)/('legacy-'+uuid.uuid4().hex[:6]);directory.mkdir(mode=0o700)
+    receipt={'inputs':[]}
+    with contextlib.ExitStack() as stack:
+        a=Worker('A',directory/'A',Path(args.candidate),stack);b=Worker('B',directory/'B',Path(args.candidate),stack)
+        for w in (a,b):w.start(args.old)
+        paired(a,b)
+        sa,sb=seed(a,'legacy owner A'),seed(b,'legacy owner B')
+        wait('legacy catalogs mirrored',lambda:a.row(sb) and b.row(sa))
+        original={sid:(a if sid==sa else b).sql('SELECT id,event_type,payload FROM session_events WHERE session_id=%s ORDER BY id',(sid,)) for sid in (sa,sb)}
+        a.start(args.candidate)
+        caller=str(uuid.uuid4())
+        b.run(f"from app.db import database\npid=database.get_all_profiles()[0]['id']\ndatabase.create_session({caller!r},pid,title='Old tool caller',is_active=True)")
+        for name in ('archive-http','active-flag','generic-status-patch','ArchiveSession','session-active'):
+            a.request('PATCH',f'/api/v1/sessions/{sa}/active',{'is_active':True})
+            wait(name+' active before legacy input',lambda:b.row(sa)['is_active'])
+            if name=='archive-http':b.request('POST',f'/api/v1/sessions/{sa}/archive')
+            elif name=='active-flag':b.request('PATCH',f'/api/v1/sessions/{sa}/active',{'is_active':True,'archived':True})
+            elif name=='generic-status-patch':
+                # An actual legacy HTTP shape against the upgraded server.
+                # The old server's generic bypass edits only its local catalog,
+                # not a signed intent to a different execution owner.
+                a.request('PATCH',f'/api/v1/sessions/{sa}?status=archived')
+                b.request('PATCH',f'/api/v1/sessions/{sb}?status=archived')
+            elif name=='ArchiveSession':
+                b.run(f"""import asyncio
+from fluid.tools.registry import ToolCtx
+from fluid.tools.builtins.session_orchestration import SPECS
+from app.core import session_orchestration as orch
+ctx=ToolCtx(extra={{'session_orchestration':orch.make_handler(lambda:{caller!r})}})
+async def invoke():
+    _,handler=next((spec,fn) for spec,fn in SPECS if spec.name=='ArchiveSession')
+    result=await handler({{'session_id':{sa!r}}},ctx)
+    assert not result.is_error,result.text
+asyncio.run(invoke())
+""")
+            else:
+                b.run(f"""import asyncio
+from app.network import control
+asyncio.run(control.call({a.device!r},'session-active',{{'session_id':{sa!r},'is_active':True,'archived':True}}))
+""")
+            wait(name+' canonical settlement from old producer',lambda:canonical(a.row(sa)))
+            b.publish();a.snapshot(b)
+            assert canonical(a.row(sa)),name+' resurrected archive after old snapshot'
+            receipt['inputs'].append({'name':name,'result':'passed','producer':'old app/tool/control; generic cached HTTP shape against new app'})
+        # Catalog-only legacy producer: no session_active record exists for it.
+        catalog_id=str(uuid.uuid4())
+        b.run(f"""from app.db import database
+from app.db.base import get_db
+pid=database.get_all_profiles()[0]['id']
+database.create_session({catalog_id!r},pid,title='Catalog-only legacy archive',is_active=False)
+with get_db() as conn:
+    c=conn.cursor();c.execute("DELETE FROM network_session_active WHERE session_id=%s",({catalog_id!r},))
+    c.execute("UPDATE sessions SET status='archived' WHERE id=%s",({catalog_id!r},))
+""")
+        b.publish();a.snapshot(b)
+        assert canonical(a.row(catalog_id)),'catalog-only archived insertion was not normalized'
+        a.request('PATCH',f'/api/v1/sessions/{catalog_id}/active',{'is_active':True})
+        wait('newer active membership visible on old catalog owner',lambda:b.row(catalog_id)['is_active'])
+        assert b.row(catalog_id)['status']=='archived','must actually replay archived old catalog'
+        # A new archived catalog revision, arriving behind the newer membership.
+        b.sql('UPDATE sessions SET title=title||%s WHERE id=%s',(' delayed',catalog_id))
+        b.publish();a.snapshot(b)
+        assert a.row(catalog_id)['status']=='active' and a.row(catalog_id)['is_active']
+        receipt['catalog_only']={'result':'canonical insertion and stale archived catalog behind newer active membership passed',
+            'old_owner_status':b.row(catalog_id)['status'],
+            'policy':'3764 owner still renders its own archived status; complete owner UX requires its upgrade. This proves catalog-only input, not an untested pre-membership binary.'}
+        b.start(args.candidate)
+        # Migration is intentional settlement; let that new intent converge.
+        wait('old owner upgraded catalog canonical',lambda:b.row(catalog_id)['status']=='active')
+        for w in (a,b):w.stop()
+        for w in (a,b):w.start(args.candidate)
+        for w,p in ((a,b),(b,a)):w.snapshot(p)
+        for w in (a,b):
+            for sid,events in original.items():
+                actual={e['id']:e for e in w.sql('SELECT id,event_type,payload FROM session_events WHERE session_id=%s',(sid,))}
+                assert all(actual.get(e['id'])==e for e in events),'original transcript/task event lost or changed'
+                assert w.row(sid)['status']=='active'
+                assert w.row(sid)['owner_device_id']==(a.device if sid==sa else b.device)
+        for w in (a,b):w.publish()
+        ids=[sa,sb,catalog_id]
+        wait('legacy restart hashes converge',lambda:a.sql("SELECT record_id,content_hash FROM sync_records WHERE collection='sessions' AND record_id=ANY(%s) ORDER BY record_id",(ids,))==b.sql("SELECT record_id,content_hash FROM sync_records WHERE collection='sessions' AND record_id=ANY(%s) ORDER BY record_id",(ids,)))
+        receipt['restart']='both candidates restarted; full snapshots; exact original transcript/tool-event retention and ownership passed'
+        Path(args.scratch,'legacy-results.json').write_text(json.dumps(receipt,indent=2,default=str))
+    print('PASS legacy input stage; both apps and PostgreSQL stopped',flush=True)
+
+
 def main():
-    p=argparse.ArgumentParser();p.add_argument('--old',required=True);p.add_argument('--candidate',required=True);p.add_argument('--scratch',required=True);p.add_argument('--smoke',action='store_true')
+    p=argparse.ArgumentParser();p.add_argument('--old',required=True);p.add_argument('--candidate',required=True);p.add_argument('--scratch',required=True);p.add_argument('--smoke',action='store_true');p.add_argument('--stage',choices=('upgrade','legacy','matrix'),default='upgrade')
     args=p.parse_args();receipts=[]
     scratch=Path(args.scratch).resolve()
     assert scratch.is_dir() and scratch.stat().st_uid==os.getuid(), 'scratch must be an existing caller-owned directory'
@@ -236,6 +326,11 @@ def main():
             for w in (a,b):w.start(args.candidate)
             paired(a,b)
         print('PASS startup smoke stopped both apps and PostgreSQL',flush=True)
+    elif args.stage=='legacy':
+        legacy_inputs(args)
+    elif args.stage=='matrix':
+        from archive_retirement_matrix import run
+        run(args)
     else:
         for order in ('AB','BA'):one_order(order,args,receipts)
 
