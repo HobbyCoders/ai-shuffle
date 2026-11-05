@@ -521,9 +521,13 @@ const offCatalogIdentity = async ({ page, variant }) => {
 // answer last — project chats popped in above the loose chats about a second
 // later and pushed every card down (layout shift 0.13 from div.scard-frame).
 // Holding the catalog until the cards have painted makes that ordering
-// deterministic on the seeded list.
-const cardTitles = (page) =>
-	page.evaluate(() => [...document.querySelectorAll('.scard-frame')].map((el) => (el.textContent || '').replace(/\s+/g, ' ').trim()));
+// deterministic on the seeded list. Which card sits where is the contract: a
+// card's second line may still gain its Git word, or tick its age, in place.
+const cardPlacement = (page) =>
+	page.evaluate(() => [...document.querySelectorAll('.scard-frame')].map((el) => {
+		const { top, height } = el.getBoundingClientRect();
+		return `${(el.querySelector('.title')?.textContent || '').trim()} @${Math.round(top)}+${Math.round(height)}`;
+	}));
 
 const deepLinkLateCatalog = async ({ page, status, mark }) => {
 	// Wrap fetch rather than page.route: the app's service worker serves its
@@ -546,14 +550,14 @@ const deepLinkLateCatalog = async ({ page, status, mark }) => {
 	await page.goto(new URL(`/?session=${encodeURIComponent(seededChatId(status, 'no_project'))}`, status.urls.ui).toString());
 	await page.locator('.scard-frame').first().waitFor();
 	await page.waitForTimeout(300);
-	const firstPaint = await cardTitles(page);
+	const firstPaint = await cardPlacement(page);
 	await page.evaluate(() => window.__releaseCatalog());
 	await page.waitForTimeout(2500);
 	expect(await page.evaluate(() => window.__catalogAnswered), 'the held project catalog answered');
-	const settled = await cardTitles(page);
+	const settled = await cardPlacement(page);
 	expect(
 		JSON.stringify(settled) === JSON.stringify(firstPaint),
-		`sidebar cards changed after the catalog answered:\n  first paint: ${firstPaint.slice(0, 6).join(' | ')}\n  settled:     ${settled.slice(0, 6).join(' | ')}`
+		`sidebar cards moved after the catalog answered:\n  first paint: ${firstPaint.slice(0, 6).join(' | ')}\n  settled:     ${settled.slice(0, 6).join(' | ')}`
 	);
 };
 
