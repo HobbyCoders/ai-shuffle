@@ -95,6 +95,15 @@ def get(receipt_id: str) -> dict | None:
         return rows[0] if rows else None
 
 
+def record_result(receipt_id: str, result: dict) -> None:
+    # Checkpoint the bounded cleanup separately from its warning delivery. A
+    # restart must retry only the notice, not acquire authority over newer work.
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE turn_stop_receipts SET result=%s "
+                              "WHERE id=%s AND consumed_at IS NULL AND result IS NULL",
+                              (json.dumps(result), receipt_id))
+
+
 def finish(receipt_id: str, result: dict) -> None:
     # Cleanup can be replayed after a crash, but only its first committed result
     # consumes the authority. Unknown attribution remains durable, never 'done'.

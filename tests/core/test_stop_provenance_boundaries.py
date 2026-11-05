@@ -139,3 +139,47 @@ async def test_retry_does_not_rearm_cancelled_text_into_a_new_generation(monkeyp
     assert retried["stop_seq"] == old["stop_seq"] < fresh["stop_seq"]
     assert wakeups.claim_wakeup(retried["id"]) is False
     assert wakeups.claim_wakeup(fresh["id"]) is True
+
+
+async def test_recovery_produces_runtime_and_task_boundaries_from_absorbed_input():
+    from app.core import session_runtime as sr
+    from app.core.task_registry import task_registry
+    from app.core.query_session_lifecycle import capture_stop_scope
+    from app.db import turns
+    from tests.core.test_session_runtime import _runtime_env
+
+    old = turns.enqueue_turn(SID, "user", prompt="old", profile_id="default")
+    turns.start_turn(old["id"], None, "old-owner")
+    cutoff = turns.read_stop_receipt(SID)
+    turns.park_turn(old["id"])
+    new = turns.enqueue_turn(SID, "user", prompt="new", profile_id="default",
+                             payload={turns.PERSON_INPUT_KEY: True})
+    turns.start_turn(new["id"], None, "new-owner", can_resume=lambda *_: True)
+    turns.reap_expired()
+    queued = turns.get_turn(old["id"])
+    assert queued["state"] == "queued"
+    at_provider, release = asyncio.Event(), asyncio.Event()
+
+    async def pump(**_kwargs):
+        task_registry.start_task(SID, "recovered-task", "agent", "new input's work")
+        at_provider.set()
+        await release.wait()
+        yield {"type": "done", "metadata": {}}
+
+    with _runtime_env(pump=pump), patch("app.core.task_registry.task_registry", task_registry):
+        execution = asyncio.create_task(sr.execute(queued))
+        try:
+            await asyncio.wait_for(at_provider.wait(), 5)
+            runtime = sr.get_live_runtime(SID)
+            assert runtime.turn_id == old["id"]
+            assert runtime.admission_order == new["insert_order"]
+            assert task_registry.task_turn_order(SID, "recovered-task") == new["insert_order"]
+            assert task_registry.task_incarnation(SID, "recovered-task")
+            assert turns.outlives_stop(runtime.turn, cutoff["input_cutoff"])
+            old_scope = capture_stop_scope(SID, before_turn=cutoff["input_cutoff"] + 1)
+            assert "recovered-task" not in {task["id"] for task in old_scope.active}
+            assert turns.interrupt_turn(SID, "stop", turn_id=old["id"], stop_receipt=cutoff) is None
+        finally:
+            release.set()
+            await execution
+            await _detached_work_done()

@@ -1013,6 +1013,8 @@ def create_postgres_schema(cursor: Any) -> None:
     """)
     from app.db.stop_receipts import create_schema as create_stop_receipts_schema
     create_stop_receipts_schema(cursor)
+    from app.db.stop_notices import create_schema as create_stop_notices_schema
+    create_stop_notices_schema(cursor)
     cursor.execute("""
         CREATE INDEX IF NOT EXISTS idx_pending_wakeups_instance
         ON pending_wakeups(instance_id, fire_at)

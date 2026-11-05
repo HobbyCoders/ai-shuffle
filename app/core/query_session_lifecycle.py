@@ -1118,7 +1118,9 @@ async def stop_all_background_tasks(
         # Idle sessions have no owner receipt, so this is their producing path.
         if not _receipt_consumer and (not receipt or not receipt.get("cleanup_receipts")):
             from app.core.scoped_remote_stop import record_incomplete_note
-            await record_incomplete_note(session_id, results)
+            bound = stop.receipt or {}
+            await record_incomplete_note(session_id, results,
+                notice_key=f"idle:{bound['stop_seq']}" if "stop_seq" in bound else None)
     return results
 
 

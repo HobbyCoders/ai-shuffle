@@ -2353,7 +2353,8 @@ async def deliver_stops() -> int:
             result = incomplete(row["worker_session_id"], row["target_device_id"],
                 worker_display_name(row["target_device_id"]), "old queued Stop has no enforceable boundary")
             await asyncio.to_thread(remote_tasks.defer_unscoped_user_stop, row["worker_session_id"], result["detail"])
-            noted = await record_incomplete_note(row["root_session_id"], [result])
+            noted = await record_incomplete_note(row["root_session_id"], [result],
+                notice_key=f"remote:{row['worker_session_id']}:{row.get('stop_requested_at')}")
             if noted:
                 await asyncio.to_thread(remote_tasks.defer_unscoped_user_stop,
                     row["worker_session_id"], result["detail"], noted=True)

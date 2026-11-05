@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -48,15 +49,61 @@ def incomplete_text(results: list[dict]) -> str:
         "Some background work may STILL BE RUNNING. Open the worker running that work and stop it there.")
 
 
-async def record_incomplete_note(sid: str, results: list[dict]) -> bool:
+NOTICE_WAIT = 1.0
+_notice_writes: dict[str, asyncio.Task] = {}
+
+
+async def _write_notice(notice_id: str, sid: str | None = None, data: dict | None = None) -> bool:
+    from app.db import stop_notices
+    from app.db.async_database import run_event_write
+
+    if sid is not None:
+        await asyncio.to_thread(stop_notices.save, notice_id, sid, data)
+    return await run_event_write(stop_notices.deliver, notice_id)
+
+
+async def _notice_ack(notice_id: str, sid: str | None = None, data: dict | None = None) -> bool:
+    from app.core.turn_recorder import start_detached
+
+    task = _notice_writes.get(notice_id)
+    if task is None:
+        task = start_detached(_write_notice(notice_id, sid, data))
+        _notice_writes[notice_id] = task
+        task.add_done_callback(lambda done: _notice_writes.pop(notice_id, None)
+                               if _notice_writes.get(notice_id) is done else None)
     try:
-        from app.core.turn_recorder import record_drained_event
-        await record_drained_event(sid, {"type": "system", "subtype": "stop_incomplete",
-            "data": {"incomplete": True, "content": incomplete_text(results)}})
-        return True
+        # Timeout/cancellation is NOT an acknowledgement. The in-flight write
+        # may still commit; the durable outbox and stable event id make replay safe.
+        return await asyncio.wait_for(asyncio.shield(task), timeout=NOTICE_WAIT)
     except Exception:
-        logger.warning("Stop incomplete note failed for %s", sid, exc_info=True)
+        logger.warning("Stop incomplete note not confirmed for %s", notice_id, exc_info=True)
         return False
+
+
+async def record_incomplete_note(sid: str, results: list[dict], *,
+                                 notice_key: str | None = None, data: dict | None = None) -> bool:
+    # Do not use record_drained_event: its never-raising/queued-write contract is
+    # intentionally not a durable acknowledgement. Keep warning-only authority
+    # even for idle sessions or dispatches deleted before their next retry.
+    notice_id = str(uuid.uuid5(uuid.NAMESPACE_URL,
+                              f"stop-incomplete:{sid}:{notice_key or uuid.uuid4().hex}"))
+    return await _notice_ack(notice_id, sid, {
+        **(data or {}), "incomplete": True, "content": incomplete_text(results)})
+
+
+async def retry_incomplete_notes(*, wait: bool = True) -> None:
+    from app.db import stop_notices
+    from app.core.turn_recorder import start_detached
+
+    acknowledgements = [_notice_ack(notice_id)
+                        for notice_id in await asyncio.to_thread(stop_notices.pending)]
+    if wait:
+        await asyncio.gather(*acknowledgements)
+    else:
+        # The claim observer must not wait behind warning commits before it can
+        # signal interrupts or admit a new turn. Per-id writers are coalesced.
+        for acknowledgement in acknowledgements:
+            start_detached(acknowledgement)
 
 
 async def request(task_id: str, worker: dict, scope: Any, *, guard, suppress) -> dict:

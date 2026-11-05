@@ -839,6 +839,9 @@ def enqueue_turn(
         # the same admission; their follow-up is the app's, not a message the
         # owner typed, so it is never written as one.
         payload = dict(payload or {})
+        # A copied retry payload is a new admission, not recovery of the old
+        # logical row. Only start/reap of that SAME row retain this identity.
+        payload.pop("accepted_input_order", None)
         if payload.pop("compact_first", False):
             compact = enqueue_turn(
                 session_id, source, prompt="/compact", profile_id=profile_id,
@@ -1107,7 +1110,9 @@ def start_turn(
             if _wake_cancelled_by_stop(cursor, queued):
                 _abort_cancelled_wake(cursor, queued)
                 return None
-            queued["payload"]["accepted_input_order"] = queued["insert_order"]
+            # A reaped logical turn can already contain a later absorbed input.
+            # Its immutable row order is NOT that input's Stop boundary.
+            queued["payload"].setdefault("accepted_input_order", queued["insert_order"])
             queued["payload"]["execution_defaults"] = _execution_defaults(cursor, queued)
             if can_resume is not None:
                 cursor.execute(
@@ -1183,8 +1188,8 @@ def start_turn(
                     # This id is shared with the parked prompt, so an event under
                     # it does not prove this input was recorded. The recording
                     # carries this receipt (see _already_in_transcript).
-                    payload["accepted_input_id"] = queued["id"]
-                    payload["accepted_input_order"] = queued["insert_order"]
+                    payload["accepted_input_id"] = payload.get("accepted_input_id", queued["id"])
+                    payload["accepted_input_order"] = queued["payload"]["accepted_input_order"]
                     payload["parked_usage"] = (previous.get("payload") or {}).get("parked_usage", {})
                     cursor.execute(
                         "UPDATE turns SET state='running', run_id=%s, instance_id=%s, "

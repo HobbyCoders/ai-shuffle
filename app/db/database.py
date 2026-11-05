@@ -1590,6 +1590,8 @@ def _run_column_migrations(cursor: Any) -> None:
         migrations_applied.append("session_stops")
     from app.db.stop_receipts import create_schema as create_stop_receipts_schema
     create_stop_receipts_schema(cursor)
+    from app.db.stop_notices import create_schema as create_stop_notices_schema
+    create_stop_notices_schema(cursor)
     if not column_exists(cursor, "pending_wakeups", "stop_seq"):
         # Rows here now read 0, so the next Stop cancels them. An older install
         # still writing to this database leaves it empty: see _cancelled_by_stop.
@@ -3664,7 +3666,7 @@ def migrations_fingerprint() -> str:
 
     from app.db import (
         schema_postgres, mobile_hub, network, owner_state, working_record, watches, watch_delivery,
-        session_mode_migration, model_provider_slots, project_setup,
+        session_mode_migration, model_provider_slots, project_setup, stop_notices,
     )
     from app.core import owner_auth
 
@@ -3675,7 +3677,7 @@ def migrations_fingerprint() -> str:
     for module in (
         sys.modules[__name__], schema_postgres, mobile_hub, owner_auth, network, owner_state,
         working_record, watches, watch_delivery, session_mode_migration, model_provider_slots,
-        project_setup,
+        project_setup, stop_notices,
     ):
         path = getattr(module, "__file__", None)
         if not path:

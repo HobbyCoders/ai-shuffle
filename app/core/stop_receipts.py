@@ -34,46 +34,45 @@ async def _consume(row: dict, *, scope=None) -> list[dict]:
         return (current["result"] or {}).get("results") or []
     row = current
     sid, receipt = row["session_id"], row["receipt"]
-    await task_registry.ensure_hydrated(sid)
-    # A deletion may already have removed the mutable mirrors. Keep the
-    # captured identities available, but never overwrite a newer local run.
-    task_registry.hydrate_rows(sid, receipt.get("tasks") or [])
-    scope = scope or capture_stop_scope(sid, before_turn=int(row["input_cutoff"]) + 1)
-    try:
-        results = await asyncio.wait_for(stop_all_background_tasks(
-            sid, user_stop=True, scope=scope, receipt=receipt, _receipt_consumer=True,
-        ), timeout=30)
-    except Exception as exc:
-        logger.warning("Stop receipt %s cleanup failed", row["id"], exc_info=True)
-        results = [{"ok": False, "incomplete": True, "reason": type(exc).__name__}]
-    missing = [task["task_id"] for task in receipt.get("tasks") or []
-               if task_registry.get_task(sid, task["task_id"]) is None]
-    results.extend({"ok": False, "task_id": tid, "incomplete": True,
-                    "reason": "captured task identity unavailable"} for tid in missing)
-    incomplete = any(r.get("incomplete") or r.get("ok") is False for r in results)
-    if incomplete:
+    result = row.get("result")
+    if result is None:
+        await task_registry.ensure_hydrated(sid)
+        # A deletion may already have removed the mutable mirrors. Keep the
+        # captured identities available, but never overwrite a newer local run.
+        task_registry.hydrate_rows(sid, receipt.get("tasks") or [])
+        scope = scope or capture_stop_scope(sid, before_turn=int(row["input_cutoff"]) + 1)
         try:
-            from app.core.turn_recorder import record_drained_event
-            from app.core.scoped_remote_stop import incomplete_text
-            await record_drained_event(sid, {
-                "type": "system", "subtype": "stop_incomplete",
-                "data": {"interrupted_turn_id": row["turn_id"], "stop_receipt_id": row["id"],
-                         "incomplete": True,
-                         "content": incomplete_text(results),
-                         "tasks": [r["task_id"] for r in results if r.get("task_id") and r.get("incomplete")]},
-            })
-        except Exception:
-            logger.warning("Stop receipt %s incomplete note failed", row["id"], exc_info=True)
-    # The result and consumed marker commit together, only AFTER the bounded
-    # captured-scope attempt. A crash before this commit safely replays it.
-    await asyncio.to_thread(stop_receipts.finish, row["id"],
-                            {"incomplete": incomplete, "results": results})
+            results = await asyncio.wait_for(stop_all_background_tasks(
+                sid, user_stop=True, scope=scope, receipt=receipt, _receipt_consumer=True,
+            ), timeout=30)
+        except Exception as exc:
+            logger.warning("Stop receipt %s cleanup failed", row["id"], exc_info=True)
+            results = [{"ok": False, "incomplete": True, "reason": type(exc).__name__}]
+        missing = [task["task_id"] for task in receipt.get("tasks") or []
+                   if task_registry.get_task(sid, task["task_id"]) is None]
+        results.extend({"ok": False, "task_id": tid, "incomplete": True,
+                        "reason": "captured task identity unavailable"} for tid in missing)
+        result = {"incomplete": any(r.get("incomplete") or r.get("ok") is False for r in results),
+                  "results": results}
+        await asyncio.to_thread(stop_receipts.record_result, row["id"], result)
+    results = result["results"]
+    if result["incomplete"]:
+        from app.core.scoped_remote_stop import record_incomplete_note
+        noted = await record_incomplete_note(sid, results, notice_key=f"receipt:{row['id']}",
+            data={"interrupted_turn_id": row["turn_id"], "stop_receipt_id": row["id"],
+                  "tasks": [r["task_id"] for r in results if r.get("task_id") and r.get("incomplete")]})
+        if not noted:
+            return results
+    # Consume only after a committed warning (if needed), never a queued write.
+    await asyncio.to_thread(stop_receipts.finish, row["id"], result)
     return results
 
 
 async def observe(instance_id: str) -> None:
     from app.db import stop_receipts
+    from app.core.scoped_remote_stop import retry_incomplete_notes
 
+    await retry_incomplete_notes(wait=False)
     rows = await asyncio.to_thread(stop_receipts.pending, instance_id)
     for row in rows:
         if row["id"] in _running:
