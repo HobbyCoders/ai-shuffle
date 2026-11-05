@@ -11,8 +11,8 @@ describe('composerContextLine', () => {
 	});
 
 	it('still names a worker on a new chat when it is not the one in the header', () => {
-		expect(composerContextLine({ ...facts, newChat: true, pickedWorkerName: 'GamingPC' }))
-			.toEqual(['Dev agent', 'No project', 'GamingPC']);
+		expect(composerContextLine({ ...facts, newChat: true, pickedWorkerName: 'Worker B' }))
+			.toEqual(['Dev agent', 'No project', 'Worker B']);
 	});
 
 	it('keeps the worker in a chat with no project, where nothing else names it', () => {

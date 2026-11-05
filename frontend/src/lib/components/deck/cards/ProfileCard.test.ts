@@ -367,7 +367,7 @@ describe('create, duplicate, delete', () => {
 		await fireEvent.click(screen.getByRole('button', { name: 'New agent' }));
 		const dialog = screen.getByRole('dialog', { name: 'New agent' });
 		await fireEvent.click(within(dialog).getByRole('radio', { name: /From a built-in/ }));
-		expect((within(dialog).getByLabelText('Built-in') as HTMLSelectElement).value).toBe('frontend-designer');
+		expect((within(dialog).getByRole('combobox', { name: 'Built-in agent' }) as HTMLSelectElement).value).toBe('frontend-designer');
 		await fireEvent.click(within(dialog).getByRole('button', { name: 'Create' }));
 		await heading('New agent');
 		await fireEvent.click(tab('Instructions'));

@@ -126,7 +126,7 @@
 	/* The leading crumbs keep their own text width and give way only past a
 	   share of the strip; the current title absorbs any shortfall first. A
 	   fixed 220px basis on the parent used to reserve empty space after short
-	   names and squeeze "Sessions" to "Se…" beside it (#1799). */
+	   names and squeeze "Chats" to "Ch…" beside it (#1799). */
 	.project, .parent { flex: none; max-width: min(220px, 25%); }
 	.project { max-width: min(220px, max(25%, 4.5rem)); }
 	@media (max-width: 700px) {

@@ -119,10 +119,12 @@
 
 	function reconcile() {
 		const stored = current?.models ?? [];
-		rows = catalog ? rowsFromFetch(stored, catalog) : rowsFromStored(stored);
+		const listed = catalog ? rowsFromFetch(stored, catalog) : rowsFromStored(stored);
+		// An empty fixed-preset selection is deliberate, not an uncurated default.
+		rows = canRefresh ? listed : listed.map((r) => ({ ...r, checked: stored.some((m) => m.id === r.id) }));
 		selectionRevision = current?.revision;
 		hiddenMedia = catalog?.hidden ?? [];
-		if (candidate) typeable = !!catalog && catalog.models.length === 0;
+		if (candidate) typeable = canRefresh && !!catalog && catalog.models.length === 0;
 		source = catalog?.source ?? '';
 	}
 
@@ -134,19 +136,13 @@
 
 	async function load(refresh = true, fetchMissing = false) {
 		if (!id) return;
-		if (!canRefresh && current) {
-			rows = rowsFromStored(current.models);
-			selectionRevision = current.revision;
-			source = 'preset';
-			typeable = false;
-			return;
-		}
 		if (loading) { reloadPending = true; return; }
 		loading = true;
 		error = '';
 		failure = null;
 		try {
 			// Setup validates the current key: an old snapshot is not auth evidence.
+			// For Kimi Code the server returns its fixed preset locally, without upstream I/O.
 			const live = refresh || mode === 'setup' || wizard;
 			let res = live ? null : await getModelCatalog(id);
 			if (!live) {
@@ -191,7 +187,7 @@
 				if (!catalog) return;
 			}
 			hiddenMedia = res.hidden ?? [];
-			typeable = (res.models?.length ?? 0) === 0;
+			typeable = canRefresh && (res.models?.length ?? 0) === 0;
 		} catch (e) {
 			const detail = getErrorMessage(e, 'Could not fetch models');
 			if (mode === 'setup' && describeFetchFailure(detail, providerName).kind === 'rejected') {
@@ -199,7 +195,7 @@
 				candidate = null;
 			}
 			// A rejected key needs a new key, not typed model names.
-			typeable = describeFetchFailure(detail, providerName).kind !== 'rejected';
+			typeable = canRefresh && describeFetchFailure(detail, providerName).kind !== 'rejected';
 			if (wizard) {
 				failure = describeFetchFailure(detail, providerName);
 				if (failure.kind === 'rejected') onRejected?.(failure.message);

@@ -210,7 +210,7 @@ describe('AutomationForm model picker', () => {
 			savedAutomation: saved({ model: 'prov:gone:gpt-x', model_source: 'automation', model_error: error })
 		});
 		const hint = within(getByTestId('automation-model-row')).getByText(error);
-		expect(hint.classList.contains('model-error')).toBe(true);
+		expect(hint.closest('[role="alert"]')).toBeTruthy();
 	});
 
 	it('offers a per-step model that defaults to the automation', async () => {

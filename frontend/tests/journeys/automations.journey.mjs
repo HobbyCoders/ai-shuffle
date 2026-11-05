@@ -1,16 +1,19 @@
 // Private preview validation: owner-only saves stay refused by preview auth.
 // No provider work is triggered; populated history is covered by rendered tests.
 import { runJourney } from './runner.mjs';
-import { gotoApp } from './lib/app.mjs';
+import { expect, gotoApp } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 
-await runJourney({
- name: 'automations',
- allow: DEV_INSTANCE_NOISE,
- cases: [{
-  name: 'form-validation-and-back',
+const mobileShell = process.argv.includes('--mobile-shell');
+function formCase(native = false) {
+ return {
+  name: native ? 'native-form-validation-and-back' : 'form-validation-and-back',
+  ...(native ? { viewports: ['phone'] } : {}),
   async setup({ page, status }) {
-   await gotoApp(page, status);
+   if (native) {
+    await page.goto(new URL('/mobile/', status.urls.preview_listener).href);
+    expect(new URL(page.url()).pathname === '/mobile/', 'native evidence uses the real phone bundle');
+   } else await gotoApp(page, status);
    const nav = page.getByRole('navigation', { name: 'Workspace', exact: true });
    if (!await nav.isVisible()) {
     await page.getByRole('button', { name: /^(Open menu|Show sidebar|Chats)( \(|$)/ }).first().click();
@@ -48,5 +51,6 @@ await runJourney({
    await page.getByPlaceholder('Search automations').fill('no such automation');
    await page.getByText('No matching automations', { exact: true }).waitFor();
   }
- }]
-});
+ };
+}
+await runJourney({ name: 'automations', allow: DEV_INSTANCE_NOISE, cases: [formCase(), ...(mobileShell ? [formCase(true)] : [])] });

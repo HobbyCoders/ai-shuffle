@@ -2,6 +2,7 @@
 import { runJourney } from './runner.mjs';
 import { expect, gotoApp } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
+const mobileShell = process.argv.includes('--mobile-shell');
 
 await runJourney({
 	name: 'view-shell-back',
@@ -77,26 +78,33 @@ await runJourney({
 			expect(await page.getByPlaceholder('Search agents').isVisible(), 'the list is visible after Back');
 		}
 	}, {
-		name: 'native-detail-browser-back',
+		name: `${mobileShell ? 'native' : 'responsive'}-detail-browser-back`,
 		viewports: ['phone'],
 		async setup({ page, status }) {
-			await page.goto(new URL('/mobile/', status.urls.preview_listener).href);
-			await page.getByRole('button', { name: /^Open menu(?: \(\d+ unread notifications\))?$/ }).click();
+			if (mobileShell) {
+				await page.goto(new URL('/mobile/', status.urls.preview_listener).href);
+				expect(new URL(page.url()).pathname === '/mobile/', 'native evidence uses the real phone bundle');
+				await page.getByRole('button', { name: /^Open menu(?: \(\d+ unread notifications\))?$/ }).click();
+			} else {
+				await gotoApp(page, status);
+				await page.getByRole('button', { name: /^Chats(?: \(|$)/ }).first().click();
+			}
 			await page.getByRole('navigation', { name: 'Workspace', exact: true }).getByRole('button', { name: 'Agents', exact: true }).click();
 			await page.getByPlaceholder('Search agents').waitFor();
 		},
 		async act({ page, mark }) {
-			await mark('native create action is a reachable 44px top-bar control');
+			await mark(mobileShell ? 'native create action is a reachable 44px top-bar control' : 'responsive create action stays inside the phone viewport');
 			const create = page.getByRole('button', { name: 'New agent', exact: true });
 			const rect = await create.boundingBox();
-			expect(rect && rect.width >= 44 && rect.height >= 44 && rect.y < 56 && rect.x >= 0 && rect.x + rect.width <= 390, 'create fits in the native bar, not outside size containment');
+			expect(rect && rect.x >= 0 && rect.x + rect.width <= 390, 'create stays inside the phone viewport');
+			if (mobileShell) expect(rect.width >= 44 && rect.height >= 44 && rect.y < 56, 'native create is a 44px top-bar target, not outside size containment');
 			await create.click();
 			const dialog = page.getByRole('dialog', { name: 'New agent', exact: true });
 			await dialog.waitFor();
 			await dialog.getByRole('button', { name: 'Close', exact: true }).click();
 			await page.getByPlaceholder('Search agents').waitFor();
 			for (let cycle = 1; cycle <= 2; cycle++) {
-				await mark(`open a native detail then return with browser Back (cycle ${cycle})`);
+				await mark(`open a ${mobileShell ? 'native' : 'responsive'} detail then return with browser Back (cycle ${cycle})`);
 				await page.locator('[data-view-shell="Agents"] [data-settings-item]').first().click();
 				await page.locator('[data-view-shell="Agents"][data-pane="detail"]').waitFor();
 				const back = page.getByRole('button', { name: 'Back to Agents', exact: true });

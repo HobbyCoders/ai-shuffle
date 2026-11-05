@@ -42,7 +42,7 @@ describe('disabled automation explanation', () => {
     it('shows the stored error beside the disabled Studio row', () => {
         render(AutomationsStudio, { automations: [automation], pendingApprovals: [], profiles: [],
             onApprove: vi.fn(), onDeny: vi.fn(), onClearError: vi.fn(), ...handlers });
-        expect(screen.getByText('Disabled')).toBeTruthy();
+        expect(screen.getByRole('button', { name: 'Saved search — Disabled' })).toBeTruthy();
         expect(screen.getByRole('status').textContent?.trim()).toBe(explanation);
     });
     it('also shows it in the alternate list', () => {

@@ -74,7 +74,7 @@ it.each(nativeEnrollment)('$credential_label is a pasted key with a metadata lin
 
 it.each([
 	[400, 'The vendor rejected this key. Nothing was saved.'],
-	[409, 'Update GamingPC and HomeLab before adding this provider.'],
+	[409, 'Update Worker A and Worker B before adding this provider.'],
 	[503, 'Could not check the workers. Nothing was created. Try again.']
 ])('shows the exact error detail for HTTP %s and allows a retry', async (status, detail) => {
 	worker = fakeWorker({}, { 'POST /model-providers': () => { throw { status, detail }; } });
@@ -87,6 +87,11 @@ it.each([
 	expect((screen.getByRole('button', { name: 'Continue' }) as HTMLButtonElement).disabled).toBe(false);
 	expect(worker.state.rows).toEqual([]);
 	expect(providerDrafts.get(draft.item)?.rowId).toBeNull();
+	// The worker may have upgraded (409), or recovered (503). Retry must make
+	// a new request with the still-entered key, not retain the earlier refusal.
+	await fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+	await waitFor(() => expect(worker.sent('POST', '/model-providers')).toHaveLength(2));
+	expect((await screen.findByRole('alert')).textContent).toBe(detail);
 });
 
 it.each(nativeEnrollment)('$credential_label stays built-in and connected, with a friendly model fallback', (option) => {
@@ -172,29 +177,40 @@ it('metadata edits do not revalidate a native endpoint, and a rejected replaceme
 	expect(worker.state.rows[0].auth_token_masked).toBe('********');
 });
 
-it('uses Kimi Code’s preset without offering or attempting a model refresh', async () => {
+it('loads Kimi Code’s fixed preset without offering or attempting an upstream refresh', async () => {
 	const option = nativeEnrollment[0];
-	worker = fakeWorker({ rows: [nativeRow(option)] });
+	const row = nativeRow(option, { catalog_binding: 'fixed-preset-binding' });
+	worker = fakeWorker({ rows: [row] }, {
+		'GET /model-providers/:id/model-catalog': () => null,
+		'POST /model-providers/:id/fetch-models': () => ({ models: row.models, source: 'preset', binding: row.catalog_binding })
+	});
 	vi.stubGlobal('fetch', worker.fetch);
 	await providers.refreshAll();
 	settingsNav.go({ category: 'providers', item: `mp:${nativeRow(option).id}`, tab: 'Models' });
 	render(ProvidersCollection);
 	await screen.findByText('Kimi Model');
 	expect(screen.queryByRole('button', { name: 'Refresh model list' })).toBeNull();
-	expect(worker.calls.filter((c) => /fetch-models|model-catalog/.test(c.path))).toEqual([]);
+	// The same endpoint serves fixed presets locally; it is not an upstream refresh.
+	await waitFor(() => expect(worker.sent('POST', `/model-providers/${row.id}/fetch-models`)).toHaveLength(1));
 });
 
 it('ProviderConnect offers both pasted-key kinds and completes Kimi Code from the preset', async () => {
 	const onConnected = vi.fn();
-	worker = fakeWorker({}, { 'POST /model-providers': () => {
-		const saved = nativeRow(nativeEnrollment[0]); worker.state.rows.push(saved); return saved;
-	} });
+	const saved = nativeRow(nativeEnrollment[0], { catalog_binding: 'fixed-preset-binding' });
+	worker = fakeWorker({}, {
+		'POST /model-providers': () => { worker.state.rows.push(saved); return saved; },
+		'POST /model-providers/:id/fetch-models': () => ({ models: saved.models, source: 'preset', binding: saved.catalog_binding })
+	});
 	vi.stubGlobal('fetch', worker.fetch);
 	render(ProviderConnect, { provider: 'kimi', connected: true, onConnected });
 	await fireEvent.click(screen.getByRole('button', { name: /Kimi Code membership/ }));
 	await fireEvent.input(screen.getByLabelText('Kimi Code membership'), { target: { value: 'fake-plan' } });
 	await fireEvent.click(screen.getByRole('button', { name: 'Save key' }));
-	await fireEvent.click(await screen.findByRole('button', { name: /Use selected/ }));
+	await fireEvent.click(await screen.findByRole('checkbox', { name: /Kimi Model/ }));
+	const useSelected = await screen.findByRole('button', { name: 'Use selected (1)' });
+	await waitFor(() => expect((useSelected as HTMLButtonElement).disabled).toBe(false));
+	await fireEvent.click(useSelected);
 	await waitFor(() => expect(onConnected).toHaveBeenCalledWith('kimi'));
-	expect(worker.calls.filter((c) => /device|fetch-models/.test(c.path))).toEqual([]);
+	expect(worker.calls.filter((c) => /device/.test(c.path))).toEqual([]);
+	expect(worker.sent('POST', `/model-providers/${saved.id}/fetch-models`)).toHaveLength(1);
 });

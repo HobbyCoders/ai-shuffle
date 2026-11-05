@@ -1609,6 +1609,7 @@
 	 * re-sticks via nextStickToBottom().
 	 */
 	function disengageAutoScroll() {
+		sentAfterStop.clear();
 		cancelCurrentTurnAnchor();
 		if (!shouldAutoScroll && !pendingScrollToBottom) return;
 		// Stop any in-flight scroll settle so it can't keep fighting the user
@@ -2140,15 +2141,23 @@
 	// Prompts seen waiting in this session's queue, by text, until their row
 	// lands in the transcript (#863). Cleared on a session switch.
 	const queuedPromptsSeen = new Set<string>();
+	// A send after Stop may briefly queue behind the turn being cancelled. Unlike
+	// an older queued prompt, it asks to see a new reply even if Stop released follow.
+	const sentAfterStop = new Set<string>();
 	let queuedPromptsSession: string | null | undefined;
 	$effect.pre(() => {
 		const sessionId = $activeSession.sessionId;
 		const queued = $activeSession.queuedMessages;
-		if (sessionId !== queuedPromptsSession) {
+		const sameSession = sessionId === queuedPromptsSession;
+		if (!sameSession) {
 			queuedPromptsSeen.clear();
+			sentAfterStop.clear();
 			queuedPromptsSession = sessionId;
 		}
-		for (const entry of queued) queuedPromptsSeen.add(entry.content);
+		for (const entry of queued) {
+			if (sameSession && $activeSession.stopRequestedTurnId && !queuedPromptsSeen.has(entry.content)) sentAfterStop.add(entry.content);
+			queuedPromptsSeen.add(entry.content);
+		}
 	});
 
 	// Watch for message changes and streaming content updates
@@ -2178,7 +2187,8 @@
 		// A prompt queued earlier lands here when its turn starts, long after the
 		// send (#863): it follows only a reader already at the bottom.
 		const fromQueue = hasNewMessage && newestMessage?.role === 'user' && queuedPromptsSeen.delete(newestMessage.content ?? '');
-		const newUserMessage = hasNewMessage && !!newestMessage && isNavigableUserTurn(newestMessage) && (!fromQueue || shouldAutoScroll);
+		const followsStop = hasNewMessage && newestMessage?.role === 'user' && sentAfterStop.delete(newestMessage.content ?? '');
+		const newUserMessage = hasNewMessage && !!newestMessage && isNavigableUserTurn(newestMessage) && (!fromQueue || followsStop || shouldAutoScroll);
 		const newUserCommand = hasNewMessage && newestMessage?.role === 'user' && newestMessage.type === 'command';
 		if (newUserMessage) {
 			shouldAutoScroll = true;

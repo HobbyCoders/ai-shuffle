@@ -80,7 +80,6 @@ describe('SettingsShell index', () => {
 			.map((b) => b.textContent?.trim());
 		expect(names).toEqual([
 			'General',
-			'Archived chats',
 			'Voice',
 			'Providers',
 			'Default models',
@@ -106,10 +105,13 @@ describe('SettingsShell index', () => {
 		const general = within(nav()).getByRole('button', { name: 'General' });
 		general.focus();
 		await fireEvent.keyDown(general, { key: 'ArrowDown' });
-		expect(document.activeElement).toBe(within(nav()).getByRole('button', { name: 'Archived chats' }));
+		expect(document.activeElement).toBe(within(nav()).getByRole('button', { name: 'Voice' }));
 	});
 
 	it('loads a collection page on first visit and focuses its heading', async () => {
+		// Collection readers poll only when their real Settings host is active.
+		layout.openFeaturePage('settings');
+		onTestFinished(() => layout.openChat(null));
 		render(SettingsShell);
 		await fireEvent.click(within(nav()).getByRole('button', { name: 'Logs' }));
 		// Wait for the real lazy module, not Testing Library's 1s query budget:
@@ -117,7 +119,8 @@ describe('SettingsShell index', () => {
 		// Keep this after the click so we still exercise first-visit loading.
 		await vi.dynamicImportSettled();
 		const heading = await screen.findByRole('heading', { level: 1, name: 'Logs' });
-		expect(screen.getByPlaceholderText('Search logs')).toBeTruthy();
+		expect(await screen.findByText('No logs found.')).toBeTruthy();
+		expect(screen.queryByPlaceholderText('Search logs')).toBeNull();
 		expect(screen.getByRole('separator', { name: 'Resize list' })).toBeTruthy();
 		await waitFor(() => expect(document.activeElement).toBe(heading));
 		expect(within(nav()).getByRole('button', { name: 'Logs' }).getAttribute('aria-current')).toBe('page');

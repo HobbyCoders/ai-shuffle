@@ -2,10 +2,14 @@
 import { runJourney } from './runner.mjs';
 import { expect, gotoApp, uniq } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
+const mobileShell = process.argv.includes('--mobile-shell');
 
 async function openNotes(page, status, native = false) {
  await gotoApp(page, status);
- if (native) await page.goto(new URL('/mobile/', status.urls.preview_listener).href);
+ if (native) {
+  await page.goto(new URL('/mobile/', status.urls.preview_listener).href);
+  expect(new URL(page.url()).pathname === '/mobile/', 'native evidence uses the real phone bundle');
+ }
  const nav = page.getByRole('navigation', { name: 'Workspace', exact: true });
  if (!await nav.isVisible()) await page.getByRole('button', { name: /^(Open menu|Show sidebar|Chats)( \(|$)/ }).first().click();
  const notes = nav.getByRole('button', { name: 'Notes', exact: true });
@@ -64,4 +68,4 @@ function writingCase(name, native = false, mid = false) {
   }
  };
 }
-await runJourney({ name: 'notes-writing', allow: DEV_INSTANCE_NOISE, cases: [writingCase('responsive-note-writing'), writingCase('mid-note-writing', false, true), writingCase('native-note-writing', true)] });
+await runJourney({ name: 'notes-writing', allow: DEV_INSTANCE_NOISE, cases: [writingCase('responsive-note-writing'), writingCase('mid-note-writing', false, true), ...(mobileShell ? [writingCase('native-note-writing', true)] : [])] });

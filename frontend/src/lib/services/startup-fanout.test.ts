@@ -40,7 +40,8 @@ vi.mock('$lib/stores/active-session', async () => {
 			applyComposerDefaults: vi.fn(),
 			resetForAccountChange: vi.fn(),
 			newChat: vi.fn(),
-			validateSelectedProfile: vi.fn()
+			validateSelectedProfile: vi.fn(),
+			linkDiscoveredProjects: vi.fn()
 		}
 	};
 });
@@ -175,8 +176,10 @@ describe('startup fan-out (journey 1)', () => {
 	it('requests each startup resource once', async () => {
 		const { requests: sent, duplicates } = await measure();
 		expect(duplicates).toEqual([]);
-		// Ratchet: the replay's reads, each once. Raise only with a new reader.
-		expect(sent.length).toBeLessThanOrEqual(15);
+		// Settled history now has its own scoped count, even while collapsed.
+		expect(sent.filter((r) => r.startsWith('GET /sessions/count?') && r.includes('membership=settled'))).toHaveLength(1);
+		// Ratchet: the replay's reads, each once, including that new reader.
+		expect(sent.length).toBeLessThanOrEqual(16);
 	});
 
 	it('sends the sidebar list as soon as auth answers, ahead of the page fan-out', async () => {

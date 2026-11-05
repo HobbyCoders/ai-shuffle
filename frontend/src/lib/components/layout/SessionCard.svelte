@@ -796,14 +796,9 @@
 		background: color-mix(in oklab, var(--primary) 28%, var(--sidebar));
 		color: var(--primary);
 	}
-	.lane.archive {
-		background: color-mix(in oklab, var(--info) 22%, var(--sidebar));
-		color: var(--info);
-	}
 	.lane span { opacity: 0.55; transition: opacity 150ms ease; }
 	.lane :global(svg) { flex: none; transition: transform 180ms cubic-bezier(0.16, 1, 0.3, 1); }
 	.scard-frame.armed .lane.toggle { background: var(--primary); color: var(--primary-foreground); }
-	.scard-frame.armed .lane.archive { background: var(--info); color: oklch(0.18 0.04 250); }
 	.scard-frame.armed .lane span { opacity: 1; }
 	.scard-frame.armed .lane :global(svg) { transform: scale(1.18); }
 

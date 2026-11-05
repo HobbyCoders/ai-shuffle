@@ -85,6 +85,27 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 
+it('can re-enable the fixed Kimi Code model after disabling it and reopening Manage models', async () => {
+	const model = entry('kimi-for-coding');
+	const preset = { source: 'preset', binding: 'kimi-binding', models: [model] };
+	mocks.post.mockResolvedValue(preset);
+	const kimi = row({ id: 'kimi', provider_type: 'kimi', auth_mode: 'plan_key', catalog_binding: 'kimi-binding', models: [model] });
+	const opened = render(ModelCuration, { row: kimi });
+	await screen.findByRole('checkbox', { name: model.label });
+	await toggle(model.label);
+	expect(saved()).toEqual([]);
+	await opened.unmount();
+
+	render(ModelCuration, { row: { ...kimi, models: saved() } });
+	const choice = await screen.findByRole('checkbox', { name: model.label });
+	expect((choice as HTMLInputElement).checked).toBe(false);
+	expect(screen.queryByRole('button', { name: 'Refresh model list' })).toBeNull();
+	expect(screen.queryByTestId('curation-typed')).toBeNull();
+	mocks.patch.mockClear();
+	await toggle(model.label);
+	expect(saved()).toEqual([model]);
+});
+
 describe('shared catalog and concurrent curation', () => {
 	const catalog = { source: 'upstream', binding: 'fixture-binding-a', models: [entry('old'), entry('remote'), entry('new')] };
 

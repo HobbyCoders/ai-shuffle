@@ -436,7 +436,6 @@ const FAILED_SETTLED = {
 		await waitStatus(page, chat.id, 'Failed');
 		await mark('settle it: not now, but still what happened');
 		await rowAction(page, chat.id, 'Settle session');
-		await waitLane(page, chat.id, 'settled');
 		// In the shared UI settling the open chat leaves it (on a phone that closes
 		// the drawer too), so read the row once that has happened, not while it is
 		// going. The /mobile/ shell stays on the chat.

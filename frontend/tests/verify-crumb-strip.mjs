@@ -1,7 +1,7 @@
 // Real-browser layout check of the desktop strip's breadcrumb (#1799): a
 // subagent transcript opened from the assistant shows three crumbs,
-// "Sessions > Assistant > <title>". Crumbs must use the free space before they
-// truncate, "Sessions" is never shortened while space is free, no crumb keeps
+// "Chats > Assistant > <title>". Crumbs must use the free space before they
+// truncate, "Chats" is never shortened while space is free, no crumb keeps
 // empty space beside its text, and the current title takes what is left.
 //
 // Run from frontend/ while the fixture is serving:

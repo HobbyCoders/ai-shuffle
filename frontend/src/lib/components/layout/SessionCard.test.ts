@@ -1026,10 +1026,10 @@ describe('SessionCard git state', () => {
 			cleanup();
 		}
 		const remote = renderCard(
-			{ ...bare, is_active: true, is_remote: true, device_name: 'GamingPC' },
+			{ ...bare, is_active: true, is_remote: true, device_name: 'Worker B' },
 			{ status: 'working' },
 		);
-		expect(remote.container.querySelector('.l2 .where')?.textContent).toMatch(/^GamingPC · (.* ago|Just now)$/);
+		expect(remote.container.querySelector('.l2 .where')?.textContent).toMatch(/^Worker B · (.* ago|Just now)$/);
 	});
 
 	it('names the project only when the row is not under a project header', () => {
@@ -1042,11 +1042,11 @@ describe('SessionCard git state', () => {
 
 	it('marks another worker with an icon, its name on hover and in the details', () => {
 		const { container } = renderCard(
-			{ is_active: true, is_remote: true, device_name: 'GamingPC', worktree_branch: 'feat/a' },
+			{ is_active: true, is_remote: true, device_name: 'Worker B', worktree_branch: 'feat/a' },
 			{ status: 'idle' },
 		);
-		expect(container.querySelector('.l2 .worker')?.getAttribute('title')).toBe('On GamingPC');
-		expect(container.querySelector('.details')?.textContent).toContain('GamingPC');
+		expect(container.querySelector('.l2 .worker')?.getAttribute('title')).toBe('On Worker B');
+		expect(container.querySelector('.details')?.textContent).toContain('Worker B');
 		expect(container.querySelector('.l2 .where')?.textContent).toBe('feat/a');
 	});
 
