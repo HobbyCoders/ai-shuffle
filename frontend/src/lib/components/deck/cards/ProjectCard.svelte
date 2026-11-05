@@ -2,6 +2,7 @@
 	/** Projects uses the shared master/detail view; project and worker actions stay local to this page. */
 	import { onDestroy, onMount, untrack } from 'svelte';
 	import { ViewShell, ViewPanel, ViewMain, PanelSearch, PanelIconButton, DetailPane, EmptyDetail, ListItem, Segmented, InlineBanner, RowGroup, SettingRow } from '$lib/components/layout/view';
+	import PathText from '$lib/components/settings/rows/PathText.svelte';
 	import { platform } from '$lib/stores/platform.svelte';
 	import { appData as tabs, projects } from '$lib/stores/app-data.svelte';
 	import { loadProjectsOverview, patchOverviewWorker, projectsOverview, projectsOverviewSupported } from '$lib/stores/projects-overview';
@@ -301,7 +302,7 @@
 				dangerRows={selectedProject ? projectDangerRows : undefined} tabs={detailTabs} tab={activeTab} onTabChange={(tab) => { activeTab = tab as DetailTab; focusInstallId = null; }}>
 				{#snippet topStatus()}{/snippet}
 				{#snippet subtitle()}
-					<span class="project-path">{selectedProject?.path ?? selectedRow.remote ?? 'Not on this worker'}</span>
+					<PathText path={selectedProject?.path ?? selectedRow.remote ?? 'Not on this worker'} />
 					{#if selectedRow.workers.length}<ProjectWorkerChips workers={selectedRow.workers} kind={selectedRow.kind} projectName={selectedRow.name}
 						onSetup={(w) => setUpFromChip(selectedRow, w)} onOpen={(w) => { activeTab = 'workers'; focusInstallId = w.install_id; }} />{/if}
 				{/snippet}

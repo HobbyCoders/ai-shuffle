@@ -854,7 +854,7 @@
 			{:else if notes.length === 0}
 				<EmptyDetail title={searchQuery || selectedTag ? 'No notes match' : 'No notes yet'}
 					message={searchQuery || selectedTag ? 'Try another search or tag.' : 'Keep ideas, plans and files together.'}
-					actionLabel={searchQuery || selectedTag ? 'Clear filters' : undefined} onAction={() => { searchQuery = ''; selectedTag = null; }}>
+					actionLabel={selectedTag ? 'Clear filters' : searchQuery ? 'Clear search' : undefined} onAction={() => { searchQuery = ''; selectedTag = null; }}>
 					{#if !searchQuery && !selectedTag}
 						<button class="st-btn primary" onclick={startNewNote}>Create your first note</button>
 					{/if}

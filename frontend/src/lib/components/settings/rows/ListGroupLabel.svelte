@@ -45,6 +45,7 @@
 		font-weight: 400;
 		color: var(--st-subtle);
 	}
+	@media (max-width: 600px) { .st-lg:not(.compact), .st-lg.compact { font-size: 15px; padding-inline: 0; } }
 	.act {
 		margin-left: auto;
 		display: inline-flex;

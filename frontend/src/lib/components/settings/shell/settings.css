@@ -342,10 +342,15 @@
 
 /* Keep the centered detail frame fixed when a classic scrollbar appears.
    Index/list scrollers deliberately keep their existing available width. */
-.settings-shell .st-dpane,
-.settings-shell .st-pscroll {
+.settings-shell .settings-viewport {
 	scrollbar-gutter: stable;
 }
+/* Preference and collection pages scroll in the same outer frame. Inner
+   max-widths no longer choose whether the column loses a scrollbar's width. */
+.settings-shell .settings-viewport > .st-content { overflow: visible; flex: 1 0 auto; }
+.settings-shell .settings-viewport :is(.st-pscroll, .st-lscroll, .st-dpane) { overflow: visible; }
+.settings-shell .settings-viewport .st-coll { min-height: 100%; }
+.settings-shell .settings-viewport .st-lcol { min-height: 0; }
 
 /* Scrollbars in the scroll panes */
 .settings-shell .st-scroll {
@@ -383,7 +388,7 @@
 
 /* ---------- stacked (phone app, or the shell is 600px or less) ---------- */
 .settings-shell[data-stacked] {
-	--st-gutter: 14px;
+	--st-gutter: 16px;
 	grid-template-columns: minmax(0, 1fr);
 }
 .settings-shell[data-stacked][data-view='index'] .st-content {
@@ -441,7 +446,7 @@
 	}
 }
 .settings-shell[data-stacked] .st-page {
-	padding: 0 14px 100px;
+	padding: 12px 16px 100px;
 }
 .settings-shell[data-stacked] .st-page-h {
 	min-height: 30px;
@@ -484,7 +489,7 @@
 .settings-shell[data-stacked] .st-row > .st-rc :is(.st-text-field, .st-path, form) { flex: 1; width: 100%; }
 .settings-shell[data-stacked] .st-row > .st-rc :is(input:not([type='checkbox']):not([type='range']):not([type='radio']), textarea) { width: 100%; min-width: 0; }
 @media (max-width: 600px) {
-	.settings-shell { --st-gutter: 14px; }
+	.settings-shell { --st-gutter: 16px; }
 	.settings-shell .st-row:has(> .st-rc :is(.st-txt, .st-text-field, .st-path, textarea, input:not([type='checkbox']):not([type='range']):not([type='radio']))) { grid-template-columns: minmax(0, 1fr); gap: 8px; }
 	.settings-shell .st-row > .st-rc:has(:is(.st-text-field, .st-path, textarea, input:not([type='checkbox']):not([type='range']):not([type='radio']))) { width: 100%; justify-content: flex-start; }
 	.settings-shell .st-row > .st-rc :is(.st-text-field, .st-path, form) { flex: 1; width: 100%; }
@@ -540,7 +545,7 @@
 }
 .settings-shell[data-stacked] .st-it.navigation { min-height: 44px; }
 .settings-shell[data-stacked] .st-dwrap {
-	padding: 0 14px 90px;
+	padding: 12px 16px 90px;
 }
 .settings-shell[data-stacked] .st-dh {
 	align-items: center;
@@ -549,11 +554,11 @@
 	min-height: 0;
 }
 
-.settings-shell[data-stacked] .st-dh { grid-template-columns: minmax(0, 1fr); }
-.settings-shell[data-stacked] .st-dh.has-identity { grid-template-columns: auto minmax(0, 1fr); }
+.settings-shell[data-stacked] .st-dh { grid-template-columns: minmax(0, 1fr) auto; gap: 12px; }
+.settings-shell[data-stacked] .st-dh.has-identity { grid-template-columns: auto minmax(0, 1fr) auto; }
 .settings-shell[data-stacked] .st-dha {
-	grid-column: 1 / -1;
-	justify-content: flex-start;
+	grid-column: auto;
+	justify-content: flex-end;
 }
 .settings-shell[data-stacked] .st-facts:not(.line) {
 	grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -643,3 +648,22 @@
 .settings-shell[data-stacked] .st-lg:not(.compact) {
 	padding-bottom: 7px;
 }
+/* Phone rows share one content edge, with selectors below their label and helper. */
+@media (max-width: 600px) {
+	.settings-shell .st-row:has(.st-rh):has(> .st-rc :is(select, [aria-haspopup])) { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
+	.settings-shell .st-row:has(.st-rh) > .st-rc:has(:is(select, [aria-haspopup])) { display: flex; flex-wrap: nowrap; width: 100%; margin-left: 0; }
+	.settings-shell .st-row:has(.st-rh) > .st-rc :is(.st-sel-wrap, [aria-haspopup]) { flex: 1; max-width: none !important; }
+	.settings-shell .st-row:has(.st-rh) > .st-rc > .st-btn:has(svg):not([aria-haspopup]) { flex: none; min-width: 44px; }
+	.settings-shell :is(.st-rl, .st-it .nm, .st-lg, .st-lg.compact) { font-size: 15px; }
+	.settings-shell .st-lg.compact { padding-inline: 0; }
+	.settings-shell .st-it:not(.navigation) { padding-inline: 0; }
+	.settings-shell .st-gt { padding-inline: 0; }
+}
+/* Native phone shells stay stacked even in an unfolded viewport. */
+.settings-shell[data-stacked] :is(.st-rl, .st-it .nm, .st-lg) { font-size: 15px; }
+.settings-shell[data-stacked] :is(.st-gt, .st-lg) { padding-inline: 0; }
+/* Only non-transcript disclosures: native triangles are replaced by the same line chevron. */
+.settings-shell details:not(.detail-more) > summary { list-style: none; display: flex; align-items: center; gap: 8px; }
+.settings-shell details:not(.detail-more) > summary::-webkit-details-marker { display: none; }
+.settings-shell details:not(.detail-more) > summary::before { content: ''; flex: none; width: 7px; height: 7px; margin: 0 4px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(-45deg); }
+.settings-shell details[open]:not(.detail-more) > summary::before { transform: rotate(45deg); }

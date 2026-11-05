@@ -18,7 +18,7 @@
 <style>
 	.panel-search-field { display: flex; align-items: center; gap: 9px; height: 32px; padding: 0 10px 0 11px; border: 1px solid var(--field-border); border-radius: var(--radius-control); background: var(--field-bg); color: var(--sidebar-muted); transition: border-color 0.2s ease-out; }
 	.panel-search-field:hover { color: var(--sidebar-foreground); }
-	.panel-search-field:focus-within { border-color: var(--field-border-focus); outline: 2px solid var(--ring); outline-offset: 2px; }
+	.panel-search-field:focus-within { border-color: var(--field-border-focus); outline: 1.5px solid var(--panel-search-ring); outline-offset: 1px; }
 	.panel-search-field:has(input:disabled) { opacity: 0.5; }
 	input { width: 100%; min-width: 0; height: 100%; border: 0; padding: 0; outline: none; background: transparent; color: var(--foreground); font: inherit; font-size: 13px; }
 	.panel-search-field input, .panel-search-field input:focus, .panel-search-field input:focus-visible { border: 0; outline: none; box-shadow: none; }

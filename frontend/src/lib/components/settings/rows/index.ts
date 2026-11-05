@@ -9,6 +9,7 @@ export { default as NumberField } from './NumberField.svelte';
 export { default as RangeField } from './RangeField.svelte';
 export { default as TextField } from './TextField.svelte';
 export { default as PathField } from './PathField.svelte';
+export { default as PathText } from './PathText.svelte';
 export type { PathCheck } from './PathField.svelte';
 export { default as ValueText } from './ValueText.svelte';
 export { default as LinkValue } from './LinkValue.svelte';

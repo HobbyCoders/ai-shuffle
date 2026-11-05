@@ -14,7 +14,9 @@
 	 *
 	 * Read-only mode disables the primary action and the whole body.
 	 */
-	import type { Snippet } from 'svelte';
+	import { onMount, type Snippet } from 'svelte';
+	import { ChevronDown } from 'lucide-svelte';
+	import { platform } from '$lib/stores/platform.svelte';
 	import BackRow from './BackRow.svelte';
 	import { settingsNav } from '$lib/settings/navigation.svelte';
 	import { getSettingsAccess } from '$lib/settings/access.svelte';
@@ -106,6 +108,13 @@
 		badges
 	}: Props = $props();
 
+	let phone = $state(false);
+	onMount(() => {
+		const query = window.matchMedia('(max-width: 600px)');
+		const update = () => { phone = query.matches; }; update();
+		query.addEventListener('change', update);
+		return () => query.removeEventListener('change', update);
+	});
 	setInDetail();
 	const access = getSettingsAccess();
 	const uid = $props.id();
@@ -155,7 +164,11 @@
 			{/if}
 		</div>
 		{#if primary}
-			<fieldset class="st-dha" disabled={access.readOnly}>{@render primary()}</fieldset>
+			<fieldset class="st-dha" disabled={access.readOnly}>
+					{#if phone || platform.isMobile}
+						<details class="detail-more"><summary class="st-btn">More<ChevronDown size={14} /></summary><div class="detail-actions">{@render primary()}</div></details>
+					{:else}{@render primary()}{/if}
+				</fieldset>
 		{/if}
 	</div>
 	<FactsStrip {facts} />
@@ -273,6 +286,11 @@
 		padding: 0;
 		min-width: 0;
 	}
+	.st-dha:has(.detail-more):not(:has(.detail-actions :is(button, a, input))) { display: none; }
+	.detail-more { position: relative; }
+	.detail-more summary { list-style: none; cursor: pointer; }
+	.detail-more summary::-webkit-details-marker { display: none; }
+	.detail-actions { position: absolute; right: 0; top: calc(100% + 4px); z-index: 20; display: flex; flex-direction: column; gap: 8px; padding: 8px; min-width: max-content; border: 1px solid var(--st-border); border-radius: var(--st-radius-md); background: var(--st-popover); box-shadow: var(--st-shadow); }
 	.st-dbody {
 		border: 0;
 		margin: 0;

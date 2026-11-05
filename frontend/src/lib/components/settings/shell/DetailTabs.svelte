@@ -267,7 +267,10 @@
 		outline-offset: -2px;
 	}
 	@media (max-width: 600px) {
-		.st-tabs-wrap::before, .st-tabs-wrap::after { width: 16px; }
+		.st-tabs-wrap::before, .st-tabs-wrap::after { width: 32px; }
+		.st-tabs-wrap::after { background: linear-gradient(to left, var(--st-bg) 12px, transparent 32px); }
+		.st-tabs-wrap::before { background: linear-gradient(to right, var(--st-bg) 12px, transparent 32px); }
+		.st-tabs { padding-inline-end: 24px; }
 		button { min-height: 44px; }
 	}
 	@media (prefers-reduced-motion: reduce) { .st-tabs-wrap::before, .st-tabs-wrap::after { transition: none; } }

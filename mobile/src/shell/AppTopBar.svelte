@@ -31,6 +31,7 @@
 	import { page } from '$app/state';
 	import { ChevronLeft, Menu, Mic, X } from 'lucide-svelte';
 	import { phonePanelActions } from '$lib/components/layout/view/ViewPanel.svelte';
+	import { phoneBack } from '$lib/components/settings/shell/BackRow.svelte';
 	import { settingsNav } from '$lib/settings/navigation.svelte';
 	import { hotkeyPreferences } from '$lib/stores/hotkeyPreferences.svelte';
 	import { globalSttState, triggerToggle } from '$lib/services/globalStt';
@@ -74,6 +75,8 @@
 		actions
 	}: Props = $props();
 
+	const phoneHost = Symbol('native-bar');
+	$effect(() => { phoneBack.host = phoneHost; return () => { if (phoneBack.host === phoneHost) phoneBack.host = null; }; });
 	const BUILD_MEMBERS: ViewType[] = ['build', 'profile'];
 	const currentType = $derived($activeView?.type ?? null);
 	const buildActive = $derived(currentType ? BUILD_MEMBERS.includes(currentType) : false);
@@ -327,6 +330,9 @@
 <svelte:window onkeydown={handleWindowKeydown} />
 
 <header class="topbar topbar-mobile" class:no-rule={currentType === 'session' && chatTitle === NEW_CHAT_LABEL}>
+		{#if phoneBack.onclick}
+			<button class="tb-back" onclick={phoneBack.onclick} aria-label={`Back to ${phoneBack.label}`}><ChevronLeft size={20} /><span>{phoneBack.label}</span></button>
+		{:else}
 		<button
 			bind:this={hamburgerRef}
 			class="tb-hamburger"
@@ -338,7 +344,8 @@
 			<Menu size={20} strokeWidth={1.8} />
 		</button>
 
-	<div class="tb-context">
+	{/if}
+	<div class="tb-context" class:back-context={!!phoneBack.onclick}>
 		<div class="tb-titleline">
 			<span class="tb-title" class:new-chat={currentType === 'session' && mobileTitle === NEW_CHAT_LABEL} class:chat={currentType === 'session'} class:settings-page={settingsPage} title={mobileTitle}>{mobileTitle}</span>
 			{#if boundChatId}
@@ -354,7 +361,8 @@
 	</div>
 
 	<div class="tb-actions">
-		{#if phonePanelActions.label === mobileTitle}{@render phonePanelActions.content?.()}{/if}
+		{#if phoneBack.onclick}{@render phoneBack.status?.()}{:else if phonePanelActions.label === mobileTitle}{@render phonePanelActions.content?.()}{/if}
+		{#if phoneBack.onclick}<button class="tb-hamburger" aria-label="Open menu" title="Navigation" onclick={openDrawer}><Menu size={20} strokeWidth={1.8} /></button>{/if}
 		{@render actions?.()}
 		{#if $hotkeyPreferences.globalSttEnabled && !hideGlobalStt}
 			<button class="tb-hamburger" class:recording={$globalSttState.isRecording}
@@ -412,6 +420,10 @@
 {/if}
 
 <style>
+	.tb-back { display: flex; align-items: center; gap: 8px; min-height: 44px; border: 0; border-radius: 8px; padding: 0 12px; background: none; color: var(--foreground); font-size: 15px; }
+	.tb-back:hover { background: var(--accent); }
+	.tb-back:active { background: var(--row-selected); }
+	.tb-context.back-context { visibility: hidden; }
 	.topbar {
 		display: flex;
 		align-items: center;

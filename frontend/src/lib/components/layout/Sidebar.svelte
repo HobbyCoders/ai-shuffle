@@ -1106,6 +1106,7 @@
 		transition: border-color 0.13s ease, color 0.13s ease;
 	}
 	.search:hover:not(:disabled) { color: var(--sidebar-foreground); }
+	.search:focus-visible { outline: 1.5px solid var(--panel-search-ring); outline-offset: 1px; }
 	.search:disabled { cursor: default; }
 	.search :global(svg) { flex: none; }
 	/* No keyboard shortcut to advertise at phone width. */

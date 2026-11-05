@@ -439,14 +439,6 @@
 			padding: 4px 14px 14px;
 		}
 	}
-	/* Phone: the tab strip runs edge to edge. */
-	:global(.settings-shell[data-stacked]) .agd :global(.st-tabs-wrap) {
-		margin-left: -14px;
-		margin-right: -14px;
-	}
-	:global(.settings-shell[data-stacked]) .agd :global(.st-tabs) {
-		padding: 0 14px;
-	}
 	@media (prefers-reduced-motion: reduce) {
 		.savetick :global(.spin) {
 			animation: none;

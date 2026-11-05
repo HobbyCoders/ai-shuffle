@@ -162,7 +162,7 @@
 		<SettingRow label={project ? 'Path' : 'Unsaved path'} hint="Filesystem location of this project.">
 			{#snippet expanded()}
 				<form class="project-controls" onsubmit={(e) => { e.preventDefault(); handleSavePath(); }}>
-					<TextField onkeydown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleSavePath(); } }} bind:value={editPath} oninput={(value) => (editPath = value)} placeholder="Project path" mono width={600} label="Project path" />
+					<TextField onkeydown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleSavePath(); } }} bind:value={editPath} oninput={(value) => (editPath = value)} placeholder="Project path" mono pathDisplay width={600} label="Project path" />
 					{#if pathDirty && project}<button class="st-btn icon" disabled={pathLoading || !editPath.trim()} title="Save path" aria-label="Save path"><Check /></button>{/if}
 				</form>
 				{#if pathError}<span class="project-error" role="alert">{pathError}</span>{/if}

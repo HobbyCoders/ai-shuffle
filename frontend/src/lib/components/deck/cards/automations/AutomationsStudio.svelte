@@ -57,14 +57,18 @@
 	}: Props = $props();
 
 	let searchQuery = $state('');
+	const matches = $derived.by(() => {
+		const q = searchQuery.trim().toLowerCase();
+		return q ? automations.filter(a => a.name.toLowerCase().includes(q) || a.trigger_type.toLowerCase().includes(q) || (a.triggers || []).some(t => t.type.toLowerCase().includes(q)) || a.description?.toLowerCase().includes(q)) : automations;
+	});
 </script>
-<ViewPanel title="Automations" count={automations.length} {loading}>
+<ViewPanel title="Automations" count={matches.length} {loading}>
  {#snippet actions()}<PanelIconButton label="New automation" icon={Plus} onclick={onOpenCreate} />{/snippet}
  {#snippet search()}<PanelSearch bind:value={searchQuery} placeholder="Search automations" />{/snippet}
  {#if error}<InlineBanner tone="warn">{error}<button class="st-btn" onclick={onClearError}>Dismiss</button></InlineBanner>{/if}
  {#if loading}<p class="p-4 text-sm text-muted-foreground" role="status">Loading automations…</p>
  {:else}
-  <AutomationsList {automations} bind:searchQuery {triggeringId} {selectedId} {profiles}
+  <AutomationsList automations={matches} bind:searchQuery {triggeringId} {selectedId} {profiles}
    {onOpenDetail} {onOpenCreate} {onOpenEdit} {onToggleEnabled} {onTrigger} {onDelete}
    {formatCost} {triggerTypeLabel} formatTime={(value) => value ? new Date(value).toLocaleString() : 'Never'} getStatusColor={() => ''} />
  {/if}

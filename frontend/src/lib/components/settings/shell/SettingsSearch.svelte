@@ -162,7 +162,7 @@
 	input::placeholder {
 		color: var(--st-subtle);
 	}
-	.st-search:focus-within { outline: 2px solid var(--ring); outline-offset: 2px; }
+	.st-search:focus-within { outline: 1.5px solid var(--panel-search-ring); outline-offset: 1px; }
 	.st-search input, .st-search input:focus, .st-search input:focus-visible { border: 0; outline: none; box-shadow: none; }
 	kbd {
 		position: absolute;
