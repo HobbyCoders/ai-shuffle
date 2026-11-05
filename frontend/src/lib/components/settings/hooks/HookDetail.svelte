@@ -235,7 +235,7 @@
 						<TextField bind:value={form.url} type="url" placeholder="https://ntfy.sh/my-topic" mono width={300} />
 					</SettingRow>
 					<SettingRow label="Secret" hint={needsSecret ? 'Required to recreate' : 'Signs each request'} help="The signature is sent in the X-Hook-Signature header.">
-						{#if form.secretState === 'saved' || form.secretState === 'remove'}
+						{#if !needsSecret && (form.secretState === 'saved' || form.secretState === 'remove')}
 							<ValueText tone={form.secretState === 'remove' ? 'muted' : 'fg'} value={form.secretState === 'remove' ? 'Removed when you save' : 'Saved'} />
 							{#if form.secretState === 'saved'}
 								<button type="button" class="st-btn" onclick={() => (form.secretState = 'replace')}>Replace</button>
@@ -244,7 +244,7 @@
 								<button type="button" class="st-btn ghost" onclick={() => (form.secretState = 'saved')}>Keep</button>
 							{/if}
 						{:else}
-							<TextField bind:value={form.secret} type="password" label="Secret" autocomplete="new-password" placeholder={form.secretState === 'replace' ? 'New secret' : 'Optional'} mono width={260} />
+							<TextField bind:value={form.secret} type="password" label="Secret" autocomplete="new-password" placeholder={needsSecret ? 'Required to recreate' : form.secretState === 'replace' ? 'New secret' : 'Optional'} mono width={260} />
 							{#if form.secretState === 'replace'}
 								<button type="button" class="st-btn ghost" onclick={() => { form.secret = ''; form.secretState = 'saved'; }}>Cancel</button>
 							{/if}

@@ -108,7 +108,7 @@ describe('Settings > Hooks webhook secret', () => {
 	async function openWebhook() {
 		api.getAppHooks.mockResolvedValue([
 			hook(),
-			hook({ id: 'h2', name: 'Notify', event: 'Stop', hook_type: 'webhook', command: null, url: 'https://ntfy.sh/x', tool_matcher: null, secret: SECRET })
+			hook({ id: 'h2', name: 'Notify', event: 'Stop', hook_type: 'webhook', command: null, url: 'https://ntfy.sh/x', tool_matcher: null, has_secret: true })
 		]);
 		await show('h2');
 		await waitFor(() => expect(screen.getByRole('button', { name: 'Replace' })).toBeTruthy());
@@ -129,14 +129,14 @@ describe('Settings > Hooks webhook secret', () => {
 	});
 
 	it('keeps the stored secret when a save leaves the field blank', () => {
-		const form = formFromHook(hook({ hook_type: 'webhook', secret: SECRET }));
+		const form = formFromHook(hook({ hook_type: 'webhook', has_secret: true }));
 		expect(form.secret).toBe('');
 		expect(updatePayload(form).secret).toBeUndefined();
 		expect(updatePayload({ ...form, secretState: 'replace' }).secret).toBeUndefined();
 	});
 
 	it('sends a new secret, and an empty one only for Remove', () => {
-		const form = formFromHook(hook({ hook_type: 'webhook', secret: SECRET }));
+		const form = formFromHook(hook({ hook_type: 'webhook', has_secret: true }));
 		expect(updatePayload({ ...form, secret: ' new ', secretState: 'replace' }).secret).toBe('new');
 		expect(updatePayload({ ...form, secretState: 'remove' }).secret).toBe('');
 	});
@@ -160,8 +160,9 @@ describe('Settings > Hooks editing', () => {
 	it('shows saved-secret presence without hydrating it on an unrelated save', async () => {
 		api.getAppHooks.mockResolvedValue([hook({ hook_type: 'webhook', url: 'https://example.test', has_secret: true })]);
 		await show('h1');
-		expect(field('Leave blank to keep').value).toBe('');
-		expect(screen.getByText('Secret saved')).toBeTruthy();
+		expect(screen.getByText('Saved')).toBeTruthy();
+		await fireEvent.click(screen.getByRole('button', { name: 'Replace' }));
+		expect(field('New secret').value).toBe('');
 		await type(field('Block rm -rf'), 'Renamed');
 		await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 		await waitFor(() => expect(api.updateHook).toHaveBeenCalledWith('h1', expect.objectContaining({ name: 'Renamed', secret: undefined })));
