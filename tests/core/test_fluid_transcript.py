@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+from unittest.mock import ANY, Mock
 
 import pytest
 
@@ -30,6 +31,7 @@ from app.core.provider.fluid_transcript import (
     rewind_fluid_session,
 )
 from tests.helpers import fluid_message
+from tests.shared_fixtures import reset_backfill_memo  # noqa: F401 (autouse fixture)
 
 
 def _user(text):
@@ -260,12 +262,13 @@ def test_a_rewind_and_its_reset_survive_a_restart_together(mock_db, monkeypatch)
     turn_id = _failed_chat(session_id)
     assert turns.sessions_with_failed_latest_turn(["chat"]) == {"chat"}
 
-    def refused(*args, **kwargs):
-        raise RuntimeError("database away")
+    refused = Mock(side_effect=RuntimeError("database away"))
 
     with monkeypatch.context() as outage:
         outage.setattr(turns, "set_outcome_baseline", refused)
         response, sync_engine = _rewind_in_a_process_that_then_ends(session_id)
+        # An earlier v2 history-resolution refusal must not stand in for the outage.
+        refused.assert_called_once_with(ANY, "chat", False)
         assert response.success is False
         assert response.chat_rewound is False
         assert response.message == "Rewind failed"
