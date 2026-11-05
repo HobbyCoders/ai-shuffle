@@ -44,6 +44,8 @@ def compile_fixture(*, native=True):
             "app.core.agent_provider_models.task_model_choices": ("Claude", []),
             "app.core.agent_provider_models.task_worker_property": None,
             "app.core.subagent_default.effective": SimpleNamespace(model="sonnet"),
+            "app.core.model_override.owner_memories": [],
+            "app.core.task_dispatch._is_worker_session": False,
             "app.mcp.builtin_tools._discover_agent_registry": {},
             "fluid.context.agents.discover_agents": [],
             "fluid.context.compiler.build_instruction_blocks": [],
@@ -79,8 +81,10 @@ def compile_fixture(*, native=True):
         }
         assert all(servers.values()), "A bundled tool factory returned no catalog"
         options = SessionOptions(model="gpt-5", cwd="/fixture", mcp_servers=servers,
-            setting_sources=[], extra={"automatic_workflows": True, "github_connected": True})
+            setting_sources=[], extra={"automatic_workflows": True, "github_connected": True,
+                                       "app_session_id": "app-sess"})
         adapter = ha.HarnessAdapter()
+        adapter._options = options
         registry = asyncio.run(adapter._build_registry(options, native=native))
         specs = registry.list_tools(loaded_only=False)
         projection = Projection(specs, deferred=[s.name for s in registry.deferred_tools()])

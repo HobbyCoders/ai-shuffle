@@ -353,6 +353,11 @@ def test_identity_and_guidance_do_not_break_static_bound(tmp_path, monkeypatch) 
     second = default_base_prompt(config)
     assert first == second
     assert len(first) < 16_000
+    from fluid.tools.builtins.plan import GUIDANCE
+
+    assert first.count(GUIDANCE) == 1
+    assert "expected_revision" not in first  # full Plan help remains deferred
+    assert "Track multi-step work with Note" not in first
 
 
 

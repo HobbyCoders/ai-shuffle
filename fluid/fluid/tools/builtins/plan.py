@@ -16,21 +16,13 @@ MAX_PAYLOAD = 32768
 MAX_RECEIPTS = 64
 STATUSES = ("pending", "in_progress", "blocked", "completed", "cancelled")
 ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
-GUIDANCE = (
-    "For complex (~5+ real steps or multi-turn) work, use Plan for the goal, "
-    "done_when acceptance and stable tasks; skip it for simple requests. Batch "
-    "updates at meaningful transitions, keep blockers visible, and never treat "
-    "model-reported completion as independent verification or cancellation as success. "
-    "Plan records intent only: it never starts workers, polls or schedules wakes. "
-    "Do not copy the checklist across stores."
-)
+# Only the decision to plan is eager. Mechanics and store boundaries live in
+# the deferred tool help, loaded before use on either harness leg.
+GUIDANCE = "For ~5+ real steps or multi-turn use Plan; else skip."
+
+
 def guidance(tools=None):
-    text = GUIDANCE
-    names = set(tools or ("Ledger", "Remember", "WorkingRecord")) if tools is None else set(tools)
-    for name, purpose in (("WorkingRecord", "owner-wide commitments/results"), ("Ledger", "constraints/decisions"), ("Remember", "lasting facts")):
-        if any(n == name or n.endswith("__" + name) for n in names):
-            text += f" Keep {purpose} in {name}."
-    return text
+    return GUIDANCE
 
 
 TASK_SCHEMA = {
@@ -47,28 +39,35 @@ TASK_SCHEMA = {
 }
 SPEC = ToolSpec(
     name="Plan", description=(
-        "Session-owned plan. get returns current state; update atomically upserts "
-        "tasks by stable id (omitted tasks survive), optionally revising goal/done_when. "
-        "Start from revision 0; update requires expected_revision and a unique request_id. "
-        "Retry the same request verbatim (last 64 receipts retained); on conflict get "
-        "the latest state before editing. Initial update requires goal, done_when and tasks. "
-        "50 active-generation tasks, 32KiB payload; blocked needs blocked_reason. "
-        "rollover=true starts a new generation only when every old task is terminal; "
-        "supply goal, done_when and tasks. IDs are stable within a generation; history "
-        "is retained by the host. Dependencies must exist "
-        "and be acyclic; completed tasks require completed dependencies. Evidence and "
-        "existing execution references are optional, not proof. Reported statuses "
-        "are intent, not independent verification; cancelled is not successful "
-        "completion. This tool never executes work."
+        "Session-owned intent, not execution or independent verification; "
+        "cancelled is not success. get reads state; update atomically upserts "
+        "stable task IDs (omitted tasks survive), optionally goal/done_when acceptance. "
+        "Start at revision 0; updates need expected_revision and unique request_id. "
+        "Retry verbatim (last 64 receipts); on conflict get before editing. "
+        "Initial/rollover updates require goal, done_when, tasks. rollover=true only "
+        "after all old tasks completed/cancelled; host retains history; IDs stable "
+        "per generation. Tasks require id/title/status; max 50/generation, 32KiB payload. "
+        "Dependencies must exist, be acyclic and completed before dependents complete. "
+        "blocked needs blocked_reason. Evidence/existing execution references optional, "
+        "not proof. Batch meaningful transitions; keep blockers visible. Never starts "
+        "workers, polls or schedules wakes. Do not copy checklists across stores. "
+        "If offered: WorkingRecord for owner-wide commitments/results; Ledger for "
+        "constraints/decisions; Remember for lasting facts."
     ),
     input_schema={"type": "object", "additionalProperties": False, "properties": {
         "action": {"type": "string", "enum": ["get", "update"]},
-        "rollover": {"type": "boolean", "description": "Explicit new generation after all old tasks completed/cancelled; retains history."},
-        "expected_revision": {"type": "integer", "minimum": 0},
-        "request_id": {"type": "string", "minLength": 1, "maxLength": 80},
-        "goal": {"type": "string", "maxLength": 600},
-        "done_when": {"type": "string", "maxLength": 1000},
-        "tasks": {"type": "array", "maxItems": MAX_TASKS, "items": TASK_SCHEMA},
+        "rollover": {"type": "boolean", "description": "New generation; see rollover rules above."},
+        "expected_revision": {"type": "integer", "minimum": 0, "description": "Current revision (>=0)."},
+        "request_id": {"type": "string", "minLength": 1, "maxLength": 80, "description": "Retry key, 1-80 chars."},
+        "goal": {"type": "string", "maxLength": 600, "description": "Goal, <=600 chars."},
+        "done_when": {"type": "string", "maxLength": 1000, "description": "Acceptance, <=1000 chars."},
+        "tasks": {"type": "array", "maxItems": MAX_TASKS, "items": TASK_SCHEMA, "description": (
+            "Up to 50 task objects. Required: id (matches " + ID_PATTERN + "), "
+            "title (string <=200 chars), status (pending/in_progress/blocked/completed/cancelled). "
+            "Optional: depends_on (<=10 ID strings), blocked_reason (string <=500 chars), "
+            "evidence (<=3 strings, <=500 chars each), references (<=5 strings, <=100 chars each). "
+            "Unknown fields rejected in tasks and top-level input."
+        )},
     }, "required": ["action"]}, risk="safe",
 )
 

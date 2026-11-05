@@ -119,10 +119,71 @@ def test_plan_prompt_only_when_offered_no_competing_note_checklist():
         text = compose_base_prompt(PromptProfile(tools=frozenset(names)))
         assert mentioned_tool_names(text) <= names
         if "Plan" in names:
-            assert "skip it for simple requests" in text
-            assert "Track multi-step work with Note" not in text
+            assert text.count(plan.GUIDANCE) == 1
+            assert "~5+ real steps or multi-turn" in text and "else skip" in text
+        if "Note" in names:
+            assert "optional session scratchpad" in text
+        assert "Track multi-step work with Note" not in text
+        assert "every current step" not in text
     assert "maxItems" not in recall.SPEC.input_schema["properties"]["ids"]
-    assert "normalized unique" in recall.SPEC.input_schema["properties"]["ids"]["description"]
+    ids_help = recall.SPEC.input_schema["properties"]["ids"]["description"]
+    assert "10 normalized unique" in ids_help and "trimmed; blanks/duplicates ignored" in ids_help
+    assert "before relying on it" in recall.describe()
+    assert "archived too" in recall.describe() and "saved-skill index" in recall.describe()
+    assert "per category with sources" in recall.describe()
+    assert "not transcripts" in recall.describe() and "SessionSearch" not in recall.describe(set())
+
+
+def test_plan_and_note_documentation_budget_and_field_contract():
+    from pathlib import Path
+
+    fixture = json.loads((Path(__file__).parents[1] / "fixtures" / "session_plan_contract.json").read_text())
+
+    def without_descriptions(value):
+        if isinstance(value, dict):
+            return {k: without_descriptions(v) for k, v in value.items() if k != "description"}
+        if isinstance(value, list):
+            return [without_descriptions(v) for v in value]
+        return value
+
+    for spec in (plan.SPEC, note.SPEC):
+        assert without_descriptions(spec.input_schema) == fixture["schemas"][spec.name]
+        assert spec.risk == "safe"
+        ceiling = fixture["description_chars"][spec.name] * (100 + fixture["allowance_percent"]) // 100
+        assert len(spec.description) <= ceiling
+        paragraphs = [p.strip() for p in spec.description.split("\n\n") if p.strip()]
+        assert len(paragraphs) == len(set(paragraphs))
+
+
+def test_deferred_plan_help_preserves_all_semantic_and_safety_rules():
+    # These moved from eager guidance or were deduplicated, not removed.
+    help_text = plan.SPEC.description
+    for rule in (
+        "Session-owned intent, not execution or independent verification",
+        "cancelled is not success", "atomically upserts", "omitted tasks survive",
+        "goal/done_when acceptance", "revision 0", "expected_revision", "unique request_id",
+        "Retry verbatim (last 64 receipts)", "on conflict get before editing",
+        "Initial/rollover updates require goal, done_when, tasks",
+        "rollover=true only after all old tasks completed/cancelled",
+        "host retains history", "IDs stable per generation", "Tasks require id/title/status",
+        "max 50/generation, 32KiB payload", "Dependencies must exist, be acyclic",
+        "completed before dependents complete", "blocked needs blocked_reason",
+        "Evidence/existing execution references optional, not proof",
+        "Batch meaningful transitions", "keep blockers visible",
+        "Never starts workers, polls or schedules wakes", "Do not copy checklists across stores",
+        "If offered: WorkingRecord for owner-wide commitments/results",
+        "Ledger for constraints/decisions", "Remember for lasting facts",
+    ):
+        assert rule in help_text, rule
+
+    for names in ({"Plan"}, {"Plan", "Note"}, {"Plan", "Note", "Ledger", "Remember"}):
+        text = compose_base_prompt(PromptProfile(tools=frozenset(names)))
+        assert text.count(plan.GUIDANCE) == 1
+        assert help_text not in text
+        assert "expected_revision" not in text
+        assert "every current step" not in text
+    assert "use list" in note.describe()  # legacy notes remain accessible
+    assert "session Plan" not in note.describe({"Note"})
 
 async def test_recall_cap_counts_normalized_unique_ids_not_raw_array_length():
     seen = []

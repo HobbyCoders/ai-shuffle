@@ -1,0 +1,131 @@
+{
+  "allowance_percent": 1,
+  "description_chars": {
+    "Plan": 1016,
+    "Note": 453
+  },
+  "schemas": {
+    "Plan": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": [
+            "get",
+            "update"
+          ]
+        },
+        "rollover": {
+          "type": "boolean"
+        },
+        "expected_revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "goal": {
+          "type": "string",
+          "maxLength": 600
+        },
+        "done_when": {
+          "type": "string",
+          "maxLength": 1000
+        },
+        "tasks": {
+          "type": "array",
+          "maxItems": 50,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
+              },
+              "title": {
+                "type": "string",
+                "maxLength": 200
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "pending",
+                  "in_progress",
+                  "blocked",
+                  "completed",
+                  "cancelled"
+                ]
+              },
+              "depends_on": {
+                "type": "array",
+                "maxItems": 10,
+                "items": {
+                  "type": "string"
+                }
+              },
+              "blocked_reason": {
+                "type": "string",
+                "maxLength": 500
+              },
+              "evidence": {
+                "type": "array",
+                "maxItems": 3,
+                "items": {
+                  "type": "string",
+                  "maxLength": 500
+                }
+              },
+              "references": {
+                "type": "array",
+                "maxItems": 5,
+                "items": {
+                  "type": "string",
+                  "maxLength": 100
+                }
+              }
+            },
+            "required": [
+              "id",
+              "title",
+              "status"
+            ]
+          }
+        }
+      },
+      "required": [
+        "action"
+      ]
+    },
+    "Note": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": [
+            "add",
+            "remove",
+            "list",
+            "clear"
+          ]
+        },
+        "text": {
+          "type": "string"
+        },
+        "texts": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "action"
+      ]
+    }
+  }
+}

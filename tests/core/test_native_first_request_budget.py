@@ -279,7 +279,7 @@ def _pin_host(monkeypatch, host: str) -> None:
 @pytest.mark.parametrize("host", sorted(_HOSTS))
 @pytest.mark.parametrize("code_mode", [True, False], ids=["code_mode", "json_tools"])
 async def test_default_profile_first_request_stays_under_budget(
-    monkeypatch, tmp_path, code_mode, host
+    monkeypatch, tmp_path, code_mode, host, record_property
 ):
     import fluid.context.runtime_facts as runtime
     import fluid.state as state
@@ -302,12 +302,21 @@ async def test_default_profile_first_request_stays_under_budget(
     # The pinned host is the one rendered, whatever machine runs the test.
     windows = host == "windows"
     assert ("Platform: win32\n" in request.system) is windows
+    from fluid.tools.builtins.plan import GUIDANCE
+
+    # Price a genuinely Plan-enabled session, never a cheaper capability-
+    # gated fixture that silently omits the new feature. Its help stays lazy.
+    assert _engine.registry.get("Plan") is not None
+    assert "Plan" in {s.name for s in _engine.registry.deferred_tools()}
+    assert (request.system or "").count(GUIDANCE) == 1
+    assert all(t.get("name") != "Plan" for t in request.tools)
     prefix = (request.system or "") + json.dumps(request.tools)
     assert ("Git Bash, not PowerShell" in prefix) is windows
     rows = _rows(reported)
     tool_rows = rows.get("System tools", 0) + rows.get("MCP tools", 0)
     assert tool_rows <= TOOL_ROWS_BUDGET, rows
     priced = _priced_before_the_turn(request, "hello")
+    record_property("priced_prefix_chars_div_4_estimate", priced)
     assert priced <= FIRST_REQUEST_BUDGET[host], (priced, rows)
     reminders = _request_tokens(request) - priced
     assert reminders <= TURN_REMINDERS_BUDGET, reminders
