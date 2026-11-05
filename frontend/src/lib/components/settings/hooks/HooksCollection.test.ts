@@ -26,6 +26,7 @@ vi.mock('$lib/api/client', async (importOriginal) => ({
 vi.mock('$lib/services/watch-resources', () => ({ watchResources: vi.fn() }));
 
 import { hooks } from '$lib/stores/hooks.svelte';
+import { watchResources } from '$lib/services/watch-resources';
 import { settingsNav } from '$lib/settings/navigation.svelte';
 import HooksCollection from './HooksCollection.svelte';
 import { DRAFT_ID, HooksModel, createPayload, emptyForm, formFromHook, updatePayload } from './hooks-model.svelte';
@@ -91,6 +92,20 @@ describe('Settings > Hooks list', () => {
 });
 
 describe('Settings > Hooks editing', () => {
+	it('explains and blocks recreating a deleted signed webhook without a replacement', async () => {
+		api.getAppHooks.mockResolvedValue([hook({ hook_type: 'webhook', url: 'https://example.test', has_secret: true })]);
+		await show('h1');
+		await type(field('Block rm -rf'), 'Renamed');
+		api.getAppHooks.mockResolvedValue([]);
+		await vi.mocked(watchResources).mock.calls.at(-1)![1]();
+		expect(await screen.findByText('Deleted elsewhere. Enter a signing secret before saving it again.')).toBeTruthy();
+		expect(field('Required to recreate').value).toBe('');
+		await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+		expect((await screen.findByRole('alert')).textContent).toContain('Enter a signing secret to recreate this deleted webhook');
+		expect(api.createAppHook).not.toHaveBeenCalled();
+		expect(api.updateHook).not.toHaveBeenCalled();
+	});
+
 	it('shows saved-secret presence without hydrating it on an unrelated save', async () => {
 		api.getAppHooks.mockResolvedValue([hook({ hook_type: 'webhook', url: 'https://example.test', has_secret: true })]);
 		await show('h1');
@@ -166,6 +181,54 @@ describe('hooks-model', () => {
 		const tool = { ...formFromHook(hook()), matcher: '' };
 		expect(updatePayload(tool)).toMatchObject({ tool_matcher: '', command: 'guard.sh', url: undefined, secret: undefined });
 		expect(updatePayload({ ...tool, event: 'Stop' }).tool_matcher).toBe('');
+	});
+
+	it.each([null, 'P1'])('requires a replacement before recreating a deleted signed webhook in scope %s', async (projectId) => {
+		const signed = hook({ hook_type: 'webhook', url: 'https://example.test', has_secret: true, project_id: projectId });
+		api.getAppHooks.mockResolvedValue([signed]);
+		api.getProjectHooks.mockResolvedValue([signed]);
+		api.createHook.mockImplementation(async (_pid, body) => hook({ ...body, id: 'h9', project_id: projectId }));
+		const model = new HooksModel();
+		model.projectId = projectId;
+		await model.load();
+		model.ensure('h1')!.name = 'Renamed';
+		api.getAppHooks.mockResolvedValue([]);
+		api.getProjectHooks.mockResolvedValue([]);
+		await model.load();
+		expect(model.remote.h1).toBe('deleted');
+		model.form('h1')!.secret = '  ';
+		expect(await model.save('h1')).toBeNull();
+		expect(api.createAppHook).not.toHaveBeenCalled();
+		expect(api.createHook).not.toHaveBeenCalled();
+		expect(model.errors.h1).toEqual(['Enter a signing secret to recreate this deleted webhook']);
+		model.form('h1')!.secret = ' dummy-replacement ';
+		expect(await model.save('h1')).toBe('h9');
+		const created = projectId ? api.createHook.mock.calls[0][1] : api.createAppHook.mock.calls[0][0];
+		expect(created).toMatchObject({ name: 'Renamed', secret: 'dummy-replacement', enabled: true });
+	});
+
+	it.each(['bash', 'webhook'] as const)('still recreates an unsigned %s hook without a replacement', async (hook_type) => {
+		api.getAppHooks.mockResolvedValue([hook({ hook_type, has_secret: false, url: 'https://example.test' })]);
+		const model = new HooksModel();
+		await model.load();
+		model.ensure('h1')!.name = 'Renamed';
+		api.getAppHooks.mockResolvedValue([]);
+		await model.load();
+		expect(await model.save('h1')).toBe('h9');
+		expect(api.createAppHook).toHaveBeenCalledWith(expect.objectContaining({ name: 'Renamed', secret: undefined }));
+	});
+
+	it('retains a signing requirement observed while edits are dirty', async () => {
+		api.getAppHooks.mockResolvedValue([hook({ hook_type: 'webhook', url: 'https://example.test', has_secret: false })]);
+		const model = new HooksModel();
+		await model.load();
+		model.ensure('h1')!.name = 'Renamed';
+		api.getAppHooks.mockResolvedValue([hook({ hook_type: 'webhook', url: 'https://example.test', has_secret: true })]);
+		await model.load();
+		api.getAppHooks.mockResolvedValue([]);
+		await model.load();
+		expect(await model.save('h1')).toBeNull();
+		expect(api.createAppHook).not.toHaveBeenCalled();
 	});
 
 	it('flags dirty forms changed or deleted elsewhere and keeps clean ones in step', async () => {

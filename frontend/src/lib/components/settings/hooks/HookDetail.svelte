@@ -51,6 +51,7 @@
 	const errors = $derived(model.errors[id] ?? []);
 	const remote = $derived(model.remote[id]);
 	const enabled = $derived(hook?.enabled ?? form?.enabled ?? true);
+	const needsSecret = $derived(!isDraft && !hook && form?.type === 'webhook' && form.hasSecret);
 
 	const scopeOptions = $derived([
 		{ value: '', label: 'App (all sessions)' },
@@ -156,7 +157,7 @@
 					{/snippet}
 				</InlineBanner>
 			{:else if remote === 'deleted'}
-				<InlineBanner tone="warn">Deleted elsewhere. Save adds it back.</InlineBanner>
+				<InlineBanner tone="warn">{needsSecret ? 'Deleted elsewhere. Enter a signing secret before saving it again.' : 'Deleted elsewhere. Save adds it back.'}</InlineBanner>
 			{/if}
 			{#if errors.length}
 				<InlineBanner tone="warn"><span role="alert">{errors.join('. ')}</span></InlineBanner>
@@ -233,8 +234,8 @@
 					<SettingRow label="URL" hint="Receives a POST">
 						<TextField bind:value={form.url} type="url" placeholder="https://ntfy.sh/my-topic" mono width={300} />
 					</SettingRow>
-					<SettingRow label="Secret" hint={hook?.has_secret ? 'Secret saved' : 'Signs each request'} help="The signature is sent in the X-Hook-Signature header. Leave blank to keep the saved secret.">
-						<TextField bind:value={form.secret} type="password" placeholder={hook?.has_secret ? 'Leave blank to keep' : 'Optional'} mono width={220} />
+					<SettingRow label="Secret" hint={needsSecret ? 'Required to recreate' : hook?.has_secret ? 'Secret saved' : 'Signs each request'} help={needsSecret ? 'The previous secret cannot be recovered. Enter it again or choose a new signing secret before saving.' : 'The signature is sent in the X-Hook-Signature header. Leave blank to keep the saved secret.'}>
+						<TextField bind:value={form.secret} type="password" placeholder={needsSecret ? 'Required to recreate' : hook?.has_secret ? 'Leave blank to keep' : 'Optional'} mono width={220} />
 					</SettingRow>
 					<SettingRow label="Timeout">
 						<NumberField bind:value={form.timeoutSec} min={1} max={300} unit="s" />

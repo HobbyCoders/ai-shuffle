@@ -59,6 +59,8 @@ export interface HookForm {
 	timeoutSec: number;
 	url: string;
 	secret: string;
+	/** Presence only: a deleted signed webhook needs a replacement before recreation. */
+	hasSecret: boolean;
 	matcher: string;
 	/** Only used by the draft; existing hooks toggle at once. */
 	enabled: boolean;
@@ -80,6 +82,7 @@ export function emptyForm(projectId: string | null): HookForm {
 		timeoutSec: DEFAULT_TIMEOUT_MS / 1000,
 		url: '',
 		secret: '',
+		hasSecret: false,
 		matcher: '',
 		enabled: true
 	};
@@ -95,6 +98,7 @@ export function formFromHook(h: Hook): HookForm {
 		timeoutSec: Math.round((h.timeout || DEFAULT_TIMEOUT_MS) / 1000),
 		url: h.url ?? '',
 		secret: '',
+		hasSecret: h.has_secret,
 		matcher: h.tool_matcher ?? '',
 		enabled: h.enabled
 	};
@@ -289,6 +293,9 @@ export class HooksModel {
 		const f = this.form(id);
 		if (!f || this.saving) return null;
 		const problems = validateForm(f);
+		if (id !== DRAFT_ID && !this.hook(id) && f.type === 'webhook' && f.hasSecret && !f.secret.trim()) {
+			problems.push('Enter a signing secret to recreate this deleted webhook');
+		}
 		if (problems.length) {
 			this.errors[id] = problems;
 			return null;
@@ -390,6 +397,8 @@ export class HooksModel {
 			}
 			if (h) {
 				this.forms[id].enabled = h.enabled;
+				// Never lose an observed signing requirement while keeping dirty edits.
+				this.forms[id].hasSecret ||= h.has_secret;
 				if (editable(formFromHook(h)) !== this.baselines[id]) this.remote[id] = 'changed';
 			} else if (this.belongsToLoadedScope(id)) {
 				this.remote[id] = 'deleted';
