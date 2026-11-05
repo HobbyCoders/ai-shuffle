@@ -12,6 +12,30 @@ AI Shuffle no longer ships a default built-in agent. For ordinary session creati
 
 An API key sees and acts only on the sessions it started (see [Own Sessions](/docs/api-reference/api-users#own-sessions)). A route that takes a `session_id` returns `403` for the owner's session, another key's, or one outside the key's project or agents, and `404` for an id that does not exist. The owner can use every session.
 
+## Bounded chat history
+
+The Chats panel keeps Active/Needs you separate from recent Settled history.
+Settled starts collapsed unless you saved an expansion choice; its count covers
+all server-visible settled chats, not only the loaded page. Opening reveals a
+bounded recent window; Show more and Load older retrieve stable pages without
+deleting history. Project/device filters explicitly apply to **loaded chats
+only**, not the entire history. Search reaches all history, with **More chat
+results** to continue beyond the first 20 matches.
+
+`GET /api/v1/sessions/cursor` accepts `membership=active|settled` (membership is
+`is_active`, not `status`), plus `device_id` (the owning instance ID).
+`GET /api/v1/sessions/count` returns `{ "total": n }` without row enrichment,
+using the same project/profile, device, tag, API-user/admin, instance, hidden
+and worker predicates. Both support `exclude_archived=true`; existing archive
+semantics are unchanged. API keys cannot request another user's total.
+
+Owner-only disposable test creation may set `disposable_test: true` on
+`POST /api/v1/sessions` or a new-session chat WebSocket query. The chat is hidden
+at birth (also when created on another worker), excluded from ordinary lists,
+counts and search, and retained for direct-ID access and export. This is
+explicit provenance, never inferred from a title. Cleanup must explicitly Stop
+unfinished **test-owned** work before settling; ordinary Settle never means Stop.
+
 ## Lifecycle synchronization
 
 Active/Settled membership is shared across paired workers; archive and delete run on the session's execution owner. An ordered replication backlog can delay these updates and newly created catalog rows. A child operation whose cascading parent has a known deletion record is recorded as a conflict rather than retried forever, allowing subsequent lifecycle updates to drain. This applies only to parents with generated, non-reusable IDs (sessions, tags, notes and API users). Its signed operation remains available for forwarding. A missing parent without a deletion record still waits for replication; permission rules always wait for their agent, whose ID can be reused.

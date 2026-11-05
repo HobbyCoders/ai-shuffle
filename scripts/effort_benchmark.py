@@ -229,7 +229,7 @@ class Benchmark:
                           + task["prompt"] + " Finish with a concise result.")
                 request_id = uuid.uuid4().hex
                 frame = {"type": "query", "prompt": prompt, "request_id": request_id,
-                         "profile": self.args.agent, "overrides": overrides}
+                         "profile": self.args.agent, "overrides": overrides, "disposable_test": True}
                 created = c._exchange(frame, lambda r: r.get("type") == "session_created"
                                       and r.get("request_id") == request_id, wait_s=30, linger_s=0)
                 if not created:
@@ -267,18 +267,18 @@ class Benchmark:
             if sid:
                 try:
                     c.stop(sid)
-                    c.archive(sid)
+                    c.settle(sid)
                     # Verify the write before claiming cleanup.
-                    archived = c.session(sid)
-                    if archived.get("status") != "archived":
-                        raise RuntimeError("archive not confirmed")
+                    settled = c.session(sid)
+                    if settled.get("is_active") or not settled.get("hidden"):
+                        raise RuntimeError("hidden settlement not confirmed")
                     with self.lock:
                         self.sessions.discard(sid)
                         self.write_journal()
                     # Failed/timed-out runs still consumed tokens and tools.
-                    # Metrics failure must not misreport a verified archive failure.
+                    # Metrics failure must not misreport a verified settlement failure.
                     if "model_calls" not in row:
-                        row["observed_effort"] = archived.get("effort")
+                        row["observed_effort"] = settled.get("effort")
                         try:
                             row.update(read_metrics(c, sid))
                         except Exception as exc:
@@ -298,9 +298,10 @@ class Benchmark:
         try:
             for sid in list(self.sessions):
                 c.stop(sid)
-                c.archive(sid)
-                if c.session(sid).get("status") != "archived":
-                    raise RuntimeError("archive not confirmed")
+                c.settle(sid)
+                settled = c.session(sid)
+                if settled.get("is_active") or not settled.get("hidden"):
+                    raise RuntimeError("hidden settlement not confirmed")
                 self.sessions.discard(sid)
                 self.write_journal()
         finally:

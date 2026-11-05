@@ -94,8 +94,10 @@ Run it under Monitor or in a terminal: a full run takes several minutes.
   reads are recorded but not counted. Past the cap the run stops the
   current session, marks the current row failed and every remaining row
   "not run: token cap reached", and the run is a fail.
-- Every session the run created is archived at the end, also after a
-  failure, the cap, Ctrl-C or SIGTERM.
+- New test chats carry explicit `disposable_test: true` provenance at creation.
+  They are hidden from ordinary Chats, counts and search, but retained by ID and
+  export. Cleanup explicitly Stops unfinished test-owned work, then settles it,
+  also after a failure, the cap, Ctrl-C or SIGTERM. Settling itself is not Stop.
 
 ### Offline workers
 
@@ -194,7 +196,7 @@ on Windows). Format (`format: 1`):
      "status": "pass | fail | not_run", "reason": null,
      "evidence": {"sessions": {"a": "<session id>"}, "step": 1, "message_index": 1, "message_id": "…"}}
   ],
-  "sessions": [{"session_id": "…", "row": "two-worker-smoke.2", "archived": true}]
+  "sessions": [{"session_id": "…", "row": "two-worker-smoke.2", "settled": true}]
 }
 ```
 

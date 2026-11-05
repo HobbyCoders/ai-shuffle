@@ -12,9 +12,9 @@ export interface SearchItem {
  session?: SessionSearchResult;
  action?: () => void;
 }
-export interface SearchGroup { id: string; label: string; items: SearchItem[] }
+export interface SearchGroup { id: string; label: string; items: SearchItem[]; total?: number; hasMore?: boolean; nextOffset?: number }
 interface Named { id: string; name: string; description?: string }
-interface Source { id: string; label: string; load: (query: string) => Promise<SearchItem[]> }
+interface Source { id: string; label: string; load: (query: string, offset?: number) => Promise<SearchItem[]>; total?: number; hasMore?: boolean; nextOffset?: number }
 
 export const searchPages: SearchItem[] = [
  ['profile', 'Agents', 'Configure profiles, models, instructions and tools'],
@@ -89,12 +89,18 @@ export function createSearchSources(projectId?: string): Source[] {
   } };
  }
  let mcp: Promise<SearchItem[]> | undefined;
+ const chats: Source = { id: 'sessions', label: 'Chats', load: async (query, offset = 0) => {
+  const page = await searchSessionsPaginated(query, { limit: 20, offset, adminOnly: true });
+  chats.total = page.total;
+  chats.hasMore = page.has_more;
+  chats.nextOffset = page.offset + page.limit;
+  return page.items.map(session => ({
+   id: session.id, label: session.title || 'Untitled session',
+   description: session.match_type === 'content' ? session.match_snippet ?? undefined : undefined, session
+  }));
+ } };
  return [
-  { id: 'sessions', label: 'Chats', load: async query =>
-   (await searchSessionsPaginated(query, { limit: 20 })).items.map(session => ({
-    id: session.id, label: session.title || 'Untitled session',
-    description: session.match_type === 'content' ? session.match_snippet ?? undefined : undefined, session
-   })) },
+  chats,
   configured('agents', 'Agents', '/agents', 'profile'),
   { id: 'mcp', label: 'MCP servers', load: async query => {
    mcp ??= (async () => {

@@ -658,19 +658,19 @@ class Runner:
                     pass
 
     def cleanup(self) -> list:
-        """Stop anything still running, then archive every session this run created."""
+        """Explicitly Stop unfinished test-owned work, then settle its hidden evidence."""
         report = []
         for c in self.created:
             sid = c["session_id"]
-            entry = {"session_id": sid, "row": c["row"], "archived": False}
+            entry = {"session_id": sid, "row": c["row"], "settled": False}
             try:
                 try:
                     if self._busy(sid, self.client.session(sid)):
                         self.client.stop(sid)
                 except ClientError:
                     pass
-                self.client.archive(sid)
-                entry["archived"] = True
+                self.client.settle(sid)
+                entry["settled"] = True
             except ClientError as exc:
                 entry["error"] = str(exc)
             report.append(entry)

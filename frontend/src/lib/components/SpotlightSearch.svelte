@@ -34,6 +34,7 @@
  let results = $state<SearchGroup[]>([]);
  let failures = $state<string[]>([]);
  let searching = $state(false);
+ let loadingMore = $state(false);
  let sources = $state.raw(createSearchSources());
  // The Settings page's own index, built once per opening (some rows come from
  // live lists). Loaded on first use so the registry stays out of the startup bundle.
@@ -56,7 +57,7 @@
   ...results,
   ...(trimmed && onOpenFeature ? [{ id: 'pages', label: 'App pages', items: pages.filter(item => matches(item, trimmed)) }] : []),
   { id: 'actions', label: 'Quick actions', items: actions.filter(item => !trimmed || matches(item, trimmed)) }
- ].filter(group => group.items.length));
+ ].filter(group => group.items.length || group.hasMore));
  const items = $derived(groups.flatMap(group => group.items));
 
  $effect(() => {
@@ -91,12 +92,33 @@
    const settled = await Promise.allSettled(currentSources.map(source => source.load(text)));
    if (cancelled) return;
    results = settled.flatMap((result, index) => result.status === 'fulfilled'
-    ? [{ id: currentSources[index].id, label: currentSources[index].label, items: result.value }] : []);
+    ? [{ id: currentSources[index].id, label: currentSources[index].label, items: result.value, total: currentSources[index].total, hasMore: currentSources[index].hasMore, nextOffset: currentSources[index].nextOffset }] : []);
    failures = settled.flatMap((result, index) => result.status === 'rejected' ? [currentSources[index].label] : []);
    searching = false;
   }, 250);
   return () => { cancelled = true; clearTimeout(timer); };
  });
+
+ async function moreChats(group: SearchGroup) {
+  if (loadingMore || !group.hasMore || group.nextOffset === undefined) return;
+  const text = trimmed;
+  const currentSources = sources;
+  const source = currentSources.find(source => source.id === group.id);
+  if (!source) return;
+  loadingMore = true;
+  try {
+   const more = await source.load(text, group.nextOffset);
+   if (!visible || trimmed !== text || sources !== currentSources) return;
+   const seen = new Set(group.items.map(item => item.id));
+   const added = more.filter(item => !seen.has(item.id) && !!seen.add(item.id));
+   results = results.map(row => row.id !== group.id ? row : {
+    ...row, items: [...row.items, ...added],
+    total: source.total, hasMore: added.length > 0 && source.hasMore && (source.nextOffset ?? 0) > group.nextOffset!, nextOffset: source.nextOffset
+   });
+  } catch {
+   if (visible && trimmed === text && sources === currentSources) failures = [...new Set([...failures, 'More chats'])];
+  } finally { loadingMore = false; }
+ }
 
  function select(item: SearchItem) {
   if (item.session) onSelectSession(item.session);
@@ -142,7 +164,7 @@
     {#if searching}<p role="status" class="px-4 py-3 text-sm text-muted-foreground">Searching…</p>{/if}
     {#each groups as group, groupIndex (group.id)}
      <section aria-label={group.label}>
-      <h3 class="px-4 py-2 text-xs font-medium text-muted-foreground border-t border-border">{group.label} <span class="opacity-60">{group.items.length}</span></h3>
+      <h3 class="px-4 py-2 text-xs font-medium text-muted-foreground border-t border-border">{group.label} <span class="opacity-60">{group.total ?? group.items.length}</span></h3>
       {#each group.items as item, index (item.id)}
        {@const globalIndex = indexOf(groupIndex, index)}
        <button type="button" data-index={globalIndex} class="spotlight-item w-full px-4 py-2.5 flex items-start gap-3 text-left transition-colors {selectedIndex === globalIndex ? 'selected' : ''}" onmouseenter={() => selectedIndex = globalIndex} onclick={() => select(item)}>
@@ -154,6 +176,9 @@
         <ArrowUpRight size={14} class="mt-1 text-muted-foreground shrink-0" />
        </button>
       {/each}
+      {#if group.hasMore}
+       <button type="button" class="spotlight-item w-full px-4 py-2.5 text-left text-sm text-muted-foreground" disabled={loadingMore} onclick={() => moreChats(group)}>{loadingMore ? 'Loading chats…' : 'More chat results'}</button>
+      {/if}
      </section>
     {/each}
     {#if trimmed && !searching && !items.length}<p class="px-4 py-8 text-center text-muted-foreground">No results found.</p>{/if}

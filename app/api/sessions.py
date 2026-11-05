@@ -10,7 +10,7 @@ This module was split for maintainability. Sub-modules:
 
 import asyncio
 import uuid
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Body, HTTPException, Depends, Query, Response, status, Request
 from pydantic import TypeAdapter
@@ -674,6 +674,31 @@ async def list_sessions_paginated(
     )
 
 
+@router.get("/count")
+async def count_sessions(
+    request: Request,
+    project_id: Optional[str] = Query(None),
+    profile_id: Optional[str] = Query(None),
+    api_user_id: Optional[str] = Query(None),
+    admin_only: bool = Query(False),
+    api_users_only: bool = Query(False),
+    membership: Optional[Literal["active", "settled"]] = Query(None),
+    device_id: Optional[str] = Query(None),
+    tag_id: Optional[str] = Query(None),
+    exclude_archived: bool = Query(False),
+    token: str = Depends(require_auth),
+):
+    project_id, profile_id, owner, users_only = await _apply_session_filters(
+        request, project_id, profile_id, api_user_id, admin_only, api_users_only, False,
+    )
+    total = await run_sync(
+        database.count_sessions, project_id=project_id, profile_id=profile_id,
+        api_user_id=owner, api_users_only=users_only, membership=membership,
+        device_id=device_id, tag_id=tag_id, exclude_archived=exclude_archived,
+    )
+    return {"total": total}
+
+
 @router.get("/cursor", response_model=CursorPaginatedSessions)
 async def list_sessions_cursor(
     request: Request,
@@ -690,6 +715,8 @@ async def list_sessions_cursor(
     limit: int = Query(50, ge=1, le=100),
     cursor: Optional[str] = Query(None, description="Cursor from previous response (updated_at timestamp)"),
     cursor_id: Optional[str] = Query(None, description="Cursor ID from previous response (session ID tiebreaker)"),
+    membership: Optional[Literal["active", "settled"]] = Query(None),
+    device_id: Optional[str] = Query(None),
     token: str = Depends(require_auth)
 ):
     """
@@ -716,6 +743,8 @@ async def list_sessions_cursor(
         limit=limit,
         cursor=cursor,
         cursor_id=cursor_id,
+        membership=membership,
+        device_id=device_id,
     )
 
     enriched = sessions
