@@ -65,6 +65,11 @@
 	],
 	"rules": [
 		{
+			"why": "responsive feature details keep one usable browser Back step across repeated desktop/stacked transitions",
+			"journeys": ["view-shell-back"],
+			"globs": ["frontend/src/lib/components/layout/view/ViewShell.svelte", "frontend/src/lib/components/deck/cards/ProfileCard.svelte"]
+		},
+		{
 			"why": "rail-owned More and Customize stay reachable while a feature owns the Chats panel, including the real phone drawer",
 			"journeys": ["rail-more"],
 			"globs": ["frontend/src/lib/components/layout/Sidebar.svelte", "frontend/src/lib/components/layout/sidebar/SidebarRail.svelte", "frontend/src/lib/components/layout/sidebar/SidebarSheet.svelte"]

@@ -10,7 +10,14 @@ import ViewHarness from './test-fixtures/ViewHarness.svelte';
 const mocks = vi.hoisted(() => ({ push: vi.fn() }));
 vi.mock('$app/navigation', () => ({ pushState: mocks.push, goto: vi.fn() }));
 beforeEach(() => { layout.setSidebarOverlay(false); platform.set('desktop'); page.state = {}; mocks.push.mockReset(); });
-afterEach(() => { cleanup(); platform.set('desktop'); vi.restoreAllMocks(); });
+afterEach(() => { cleanup(); platform.set('desktop'); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
+
+async function resize(width: number) {
+	vi.stubGlobal('innerWidth', width);
+	layout.setSidebarOverlay(width <= 1080);
+	window.dispatchEvent(new Event('resize'));
+	await tick();
+}
 
 describe('ViewShell', () => {
 	it('bridges feature, row and live Settings access contexts into the docked snippet', async () => {
@@ -63,6 +70,60 @@ describe('ViewShell', () => {
 		await tick();
 		expect(screen.getByRole('button', { name: 'Open detail' })).toBeTruthy();
 		expect(back).toHaveBeenCalledOnce();
+	});
+	it('reuses the detail history step across desktop/stacked resize cycles', async () => {
+		vi.stubGlobal('innerWidth', 1440);
+		mocks.push.mockImplementation((_url, state) => { page.state = state; });
+		const back = vi.spyOn(history, 'back').mockImplementation(() => {});
+		const view = render(ViewHarness);
+		await tick();
+		await fireEvent.click(screen.getByRole('button', { name: 'Open detail' }));
+		await resize(1000); await resize(390);
+		expect(mocks.push).toHaveBeenCalledOnce();
+		await resize(1440); await resize(1000); await resize(390);
+		expect(mocks.push).toHaveBeenCalledOnce();
+		await fireEvent.click(screen.getByRole('button', { name: 'Back to panel' }));
+		expect(back).toHaveBeenCalledOnce();
+		page.state = {};
+		await tick();
+		expect(view.container.querySelector('[data-pane="panel"]')).toBeTruthy();
+	});
+	it('drops history ownership popped while wide before re-entering stacked', async () => {
+		vi.stubGlobal('innerWidth', 1440);
+		mocks.push.mockImplementation((_url, state) => { page.state = state; });
+		const view = render(ViewHarness);
+		await tick();
+		await fireEvent.click(screen.getByRole('button', { name: 'Open detail' }));
+		await resize(390);
+		await resize(1440);
+		page.state = {};
+		await tick();
+		// Browser Back while wide must not discard the selected desktop detail.
+		expect(view.container.querySelector('.view-main-slot[hidden]')).toBeNull();
+		await resize(390);
+		expect(mocks.push).toHaveBeenCalledTimes(2);
+		expect(view.container.querySelector('[data-pane="detail"]')).toBeTruthy();
+	});
+	it('reuses its current entry after another retained page temporarily owned history', async () => {
+		platform.set('mobile');
+		mocks.push.mockImplementation((_url, state) => { page.state = state; });
+		const back = vi.spyOn(history, 'back').mockImplementation(() => {});
+		const view = render(ViewHarness);
+		await tick();
+		await fireEvent.click(screen.getByRole('button', { name: 'Open detail' }));
+		const ownEntry = page.state;
+		await view.rerender({ active: false });
+		page.state = { viewPanelDetail: 'another-page' };
+		await tick();
+		page.state = ownEntry;
+		await tick();
+		await view.rerender({ active: true });
+		expect(mocks.push).toHaveBeenCalledOnce();
+		await fireEvent.click(screen.getByRole('button', { name: 'Back to panel' }));
+		expect(back).toHaveBeenCalledOnce();
+		page.state = {};
+		await tick();
+		expect(view.container.querySelector('[data-pane="panel"]')).toBeTruthy();
 	});
 	it('keeps a newer token claim when an older page releases', () => {
 		const older = Symbol(), newer = Symbol();

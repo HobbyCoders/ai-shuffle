@@ -80,10 +80,15 @@ Panel contexts and tokens travel automatically. Off-screen feature pages never c
 	let previousOpen = false;
 	$effect(() => {
 		const open = active && stacked && detailOpen;
-		if (manageHistory && open && !previousOpen) {
+		// Resizing out of and back into the stack reuses the existing detail step.
+		// Two identical markers would make Back land on the same key and leave detail open.
+		if (manageHistory && open && !previousOpen && !pushed) {
 			untrack(() => {
 				try {
-					pushState('', { ...page.state, viewPanelDetail: historyKey } as App.PageState);
+					// A retained page may return to its own still-current history entry.
+					if ((page.state as { viewPanelDetail?: string }).viewPanelDetail !== historyKey) {
+						pushState('', { ...page.state, viewPanelDetail: historyKey } as App.PageState);
+					}
 					pushed = true;
 				} catch { /* Routerless tests still have an in-page back. */ }
 			});
@@ -99,9 +104,11 @@ Panel contexts and tokens travel automatically. Off-screen feature pages never c
 		const entry = (page.state as { viewPanelDetail?: string } | undefined)?.viewPanelDetail;
 		if (firstHistory) { firstHistory = false; return; }
 		untrack(() => {
-			if (manageHistory && active && stacked && pushed && entry !== historyKey) {
+			if (manageHistory && pushed && entry !== historyKey) {
+				// A pop while wide/off screen still releases our step; it must not block
+				// a fresh claim the next time this selected detail becomes stacked.
 				pushed = false;
-				onBack?.();
+				if (active && stacked) onBack?.();
 			}
 		});
 	});
