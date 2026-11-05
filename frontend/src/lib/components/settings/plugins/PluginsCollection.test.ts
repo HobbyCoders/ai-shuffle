@@ -191,7 +191,7 @@ describe('the list (from PluginsHub)', () => {
    const list = screen.getByRole('heading', { level: 1, name: 'Plugins' }).closest('.st-lcol') as HTMLElement;
    expect(within(list).queryByRole('searchbox')).toBeNull();
    expect(within(list).getByText('Nothing added yet.').closest('.st-card')).toBeTruthy();
-   expect(within(list).getByRole('button', { name: 'Explore plugins', exact: true })).toBeTruthy();
+   expect(within(list).getByRole('button', { name: 'Explore plugins' })).toBeTruthy();
    expect(view.container.querySelector('.st-lcol .st-card [data-settings-item]')).toBeTruthy();
   });
 
