@@ -47,7 +47,7 @@ afterEach(() => {
 	vi.restoreAllMocks();
 });
 
-type EditorHost = HTMLElement & { editor?: { commands: { insertContent(content: string | object[]): boolean }; getJSON(): object } };
+type EditorHost = HTMLElement & { editor?: { commands: { insertContent(content: string | object[]): boolean; setTextSelection(selection: number | { from: number; to: number }): boolean; deleteSelection(): boolean }; getJSON(): object } };
 
 async function typeInto(container: HTMLElement): Promise<void> {
 	const dom = container.querySelector<EditorHost>('.tiptap')!;
@@ -86,12 +86,13 @@ it.each(['plain', 'html', 'document', 'document-text'])('paints a linked %s draf
 	const view = render(ChatInput);
 	// The first committed layout, before the observer's later animation frame.
 	expect(view.container.querySelector('.chat-island.wrapped')).not.toBeNull();
-	const editor = view.container.querySelector<HTMLElement>('.tiptap')!;
+	const editor = view.container.querySelector<EditorHost>('.tiptap')!;
 	await waitFor(() => expect(editor.textContent).toContain('saved line 180'));
 	expect(view.container.querySelector('.chat-island.wrapped')).not.toBeNull();
 	await new Promise(resolve => setTimeout(resolve, 150));
 	expect(readDraft(null)).toBe('unrelated new-chat draft');
-	expect(readDraft('opening-chat')).toBe(draft);
+	// Saving the owned document may normalize legacy plain/HTML drafts to JSON.
+	expect(readDraft('opening-chat')).toBe(JSON.stringify(editor.editor!.getJSON()));
 });
 
 it('unmounting a linked composer before adoption does not overwrite the new-chat draft', async () => {
@@ -102,10 +103,11 @@ it('unmounting a linked composer before adoption does not overwrite the new-chat
 
 	const view = render(ChatInput);
 	await waitFor(() => expect(view.container.querySelector('.tiptap')?.textContent).toBe('existing chat draft'));
+	const document = JSON.stringify(view.container.querySelector<EditorHost>('.tiptap')!.editor!.getJSON());
 	view.unmount();
 
 	expect(readDraft(null)).toBe('unrelated new-chat draft');
-	expect(readDraft('opening-chat')).toBe('existing chat draft');
+	expect(readDraft('opening-chat')).toBe(document);
 	expect(activeSession.current.draft).toBe('');
 });
 
@@ -145,8 +147,8 @@ async function editLinkedDraft(container: HTMLElement): Promise<string> {
 	return JSON.stringify(dom.editor!.getJSON());
 }
 
-function linkedBoot() {
-	writeDraft('opening-chat', 'existing chat draft');
+function linkedBoot(draft = 'existing chat draft') {
+	writeDraft('opening-chat', draft);
 	writeDraft('other-chat', 'other chat draft');
 	writeDraft(null, 'unrelated new-chat draft');
 	history.replaceState({}, '', '/?session=opening-chat');
@@ -268,4 +270,43 @@ it('retires boot-owner debounce and teardown writes across an account ownership 
 	expect(readDraft('opening-chat')).toBe('next account chat draft');
 	expect(readDraft(null)).toBe('next account new-chat draft');
 	expect(activeSession.current.draft).toBe('');
+});
+
+it.each([
+	{ initial: 'original saved draft', flush: 'debounce' },
+	{ initial: 'original saved draft', flush: 'teardown' },
+	{ initial: '', flush: 'debounce' },
+	{ initial: '', flush: 'teardown' }
+])('persists linked undo/clear back to "$initial" through $flush after an intermediate save', async ({ initial, flush }) => {
+	linkedBoot(initial);
+	const first = render(ChatInput);
+	const dom = first.container.querySelector<EditorHost>('.tiptap')!;
+	await waitFor(() => expect(dom.editor).toBeTruthy());
+	const editor = dom.editor!;
+	const insertionPoint = initial.length + 1;
+	editor.commands.setTextSelection(insertionPoint);
+	editor.commands.insertContent(TEXT);
+	await new Promise(resolve => setTimeout(resolve, 150));
+	expect(readDraft('opening-chat')).toContain(TEXT);
+	expectOtherDraftsUntouched();
+
+	// Delete only the added text, returning exactly to the initial text (or
+	// clearing an initially empty draft) after its intermediate value was saved.
+	editor.commands.setTextSelection({ from: insertionPoint, to: insertionPoint + TEXT.length });
+	editor.commands.deleteSelection();
+	expect(dom.textContent).toBe(initial);
+	const finalDocument = JSON.stringify(editor.getJSON());
+	if (flush === 'debounce') {
+		await new Promise(resolve => setTimeout(resolve, 150));
+		expect(readDraft('opening-chat')).toBe(finalDocument);
+	}
+	first.unmount();
+	expect(readDraft('opening-chat')).toBe(finalDocument);
+	expectOtherDraftsUntouched();
+
+	const second = render(ChatInput);
+	const restored = second.container.querySelector<EditorHost>('.tiptap')!;
+	await waitFor(() => expect(restored.editor?.getJSON()).toEqual(JSON.parse(finalDocument)));
+	expect(restored.textContent).toBe(initial);
+	expectOtherDraftsUntouched();
 });

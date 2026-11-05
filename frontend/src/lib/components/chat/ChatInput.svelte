@@ -282,7 +282,6 @@
 		const bootRestoring = state.sessionId === null && state.isRestoringSession
 			&& prevSessionId !== null && prevSessionId === composerBootSessionId;
 		if (state.sessionId !== prevSessionId && !bootRestoring) return;
-		if (bootRestoring && value === undefined && inputValue === initialComposerDraft) return;
 		if (draftSaveTimeout) {
 			clearTimeout(draftSaveTimeout);
 			draftSaveTimeout = null;
