@@ -2472,6 +2472,32 @@ function reduceInternal(
 			};
 		}
 
+		// A Plan update is a historical event snapshot, not an execution task or
+		// a live view of the session's latest API state. Replaying this same fold
+		// on the server hydrates cold transcripts without a parallel feed/store.
+		case 'plan.updated': {
+			const plan = obj(event.plan);
+			if (!plan || plan.version !== 1 || event.status_source !== 'model_reported' ||
+				typeof plan.generation !== 'number' || !Number.isSafeInteger(plan.generation) || plan.generation < 1 ||
+				typeof plan.revision !== 'number' || !Number.isSafeInteger(plan.revision) || plan.revision < 1 ||
+				typeof plan.goal !== 'string' || typeof plan.done_when !== 'string' ||
+				!Array.isArray(plan.tasks) || plan.tasks.length > 50) return state;
+			if (state.messageOriginSeq.has(event.id)) return state;
+			return appendMessage(closeOpen(state), {
+				id: event.id,
+				role: 'system',
+				type: 'system',
+				content: '',
+				systemSubtype: 'session_plan',
+				// Transport payloads are JSON. Disown nested task/evidence arrays so
+				// a later revision or caller cannot rewrite an older event's card.
+				systemData: { plan: JSON.parse(JSON.stringify(plan)), status_source: 'model_reported' },
+				seq,
+				...(turnId ? { turnId } : {}),
+				timestamp: stampTs(event, createdAt) || undefined,
+			}, seq);
+		}
+
 		// ── System messages ─────────────────────────────────────────────
 		case 'system.note': {
 			if (str(event.subtype) === 'unsent_restored') {
