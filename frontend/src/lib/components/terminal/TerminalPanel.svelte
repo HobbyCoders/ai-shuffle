@@ -11,6 +11,10 @@
 	 */
 	import { onMount, onDestroy, tick, untrack, type Snippet } from 'svelte';
 	import { Plus, X, Search, Copy, Check, Eraser, Square, ChevronUp, ChevronDown, LoaderCircle, MessageSquarePlus } from 'lucide-svelte';
+	import { ViewShell, ViewPanel, PanelIconButton, ListItem, EmptyDetail } from '$lib/components/layout/view';
+	import PanelRowActions from '$lib/components/layout/view/PanelRowActions.svelte';
+	import ChevronLeft from 'lucide-svelte/icons/chevron-left';
+	import '$lib/components/settings/shell/settings.css';
 	import TerminalView from './TerminalView.svelte';
 	import MonitorWatch from './MonitorWatch.svelte';
 	import NewTerminalPicker from './NewTerminalPicker.svelte';
@@ -37,6 +41,8 @@
 	type View = ReturnType<typeof TerminalView>;
 	let views = $state<Record<string, View | undefined>>({});
 	let pickerOpen = $state(false);
+	let detailOpen = $state(false);
+	let newTerminal = $state(false);
 	let watching = $state(false);
 	let creating = $state(false);
 	let searchOpen = $state(false);
@@ -74,7 +80,8 @@
 	let requestOrigin: Element | null = null;
 	let destroyed = false;
 
-	const probe = $derived(terminals.probeFor(sessionId));
+	// A worker-wide denial is final; ensureProbe deliberately skips per-chat probes.
+	const probe = $derived(terminals.capability.status === 'denied' ? terminals.capability : terminals.probeFor(sessionId));
 	const access = $derived(terminalAccess(probe));
 	const ready = $derived(probe.status === 'ready' && access.kind === 'ready' ? probe : null);
 	const tabState = $derived(terminals.tabsFor(sessionId));
@@ -238,6 +245,8 @@
 		creating = false;
 		if (peer) void terminals.ensureProbe(sessionId, true);
 		if (info) {
+			newTerminal = false;
+			detailOpen = true;
 			pickerOpen = false;
 			await tick();
 			views[info.id]?.markFresh();
@@ -328,9 +337,14 @@
 
 <svelte:window onpointerdown={onWindowPointer} />
 
-<section class="tpanel" class:mobile aria-label="Terminal" bind:this={panelEl}>
+{#snippet terminalBody(back: () => void)}
+<section class="tpanel settings-shell" class:mobile class:page-terminal={chatless} aria-label="Terminal" bind:this={panelEl}>
 	<header class="bar">
-		{#if ready && tabState.ids.length && !watching}
+  {#if chatless}
+   <button type="button" class="st-back page-back" aria-label="Back to Terminal" onclick={back}><ChevronLeft size={16} />Terminal</button>
+   <div class="page-terminal-title">{!ready ? 'Terminal' : activeInfo && !newTerminal ? `${activeInfo.shell} · ${folderName(activeInfo.cwd)}` : 'New terminal'}</div>
+  {/if}
+		{#if !chatless && ready && tabState.ids.length && !watching}
 			<div class="tabs" role="tablist" aria-label={chatless ? 'Terminals on this worker' : 'Terminals in this chat'} bind:this={tabsEl}>
 				{#each tabState.ids as id, index (id)}
 					{@const info = terminals.terminal(id)}
@@ -348,10 +362,10 @@
 					</div>
 				{/each}
 			</div>
-		{:else}
+		{:else if !chatless}
 			<div class="title"><span class="title-mark" aria-hidden="true">&gt;_</span>Terminal</div>
 		{/if}
-		{#if ready && !watching}
+		{#if !chatless && ready && !watching}
 			<div class="plus-wrap" bind:this={plusWrap}>
 				<button class="tool" aria-label="New terminal" aria-haspopup="dialog" aria-expanded={pickerOpen}
 					title={`New terminal (${openCount} of ${limit} open on ${ready.worker})`}
@@ -417,13 +431,13 @@
 		{#if probe.status === 'idle' || probe.status === 'loading' || (ready && !tabState.loaded)}
 			<div class="state" aria-busy="true"><LoaderCircle size={18} class="spin" /><span>Loading terminals…</span></div>
 		{:else if probe.status === 'denied'}
-			<div class="state"><p class="state-title">Only the owner can use terminals</p><p>Sign in with the owner password on this worker to open one.</p></div>
+			<div class="state"><EmptyDetail title="Only the owner can use terminals" message="Sign in with the owner password on this worker to open one." /></div>
 		{:else if access.kind === 'disabled'}
-			<div class="state"><p class="state-title">Terminals aren't available here</p><p>{access.reason}</p></div>
+			<div class="state"><EmptyDetail title="Terminals aren't available here" message={access.reason} /></div>
 		{:else if probe.status === 'error'}
-			<div class="state"><p class="state-title">Terminals aren't available right now</p><p>{probe.message}</p>
-				<button class="retry" onclick={() => terminals.ensureProbe(sessionId, true)}>Try again</button></div>
-		{:else if ready && !tabState.ids.length}
+			<div class="state"><EmptyDetail title="Terminals aren't available right now" message={probe.message} />
+				<button class="st-btn" onclick={() => terminals.ensureProbe(sessionId, true)}>Try again</button></div>
+		{:else if ready && (!tabState.ids.length || (chatless && newTerminal))}
 			<!-- Backstop for a missed change: using the picker re-probes once the answer is stale. -->
 			<div class="state empty" onfocusin={() => void terminals.ensureProbe(sessionId)}>
 				{#if tabState.error}<p class="err" role="alert">{tabState.error}</p>{/if}
@@ -432,7 +446,7 @@
 		{/if}
 		{#if ready}
 			{#each tabState.ids as id (id)}
-				<TerminalView bind:this={views[id]} {id} {sessionId} active={id === activeId && !watching}
+				<TerminalView bind:this={views[id]} {id} {sessionId} active={id === activeId && !watching && !(chatless && newTerminal)}
 					ctrlArmed={ctrl} onCtrlUsed={() => (ctrl = false)}
 					onPasteRequest={(text) => void queuePaste(id, text)} mayFocus={focusAllowed}
 					onSelectionChange={(has) => (selected[id] = has)} />
@@ -454,8 +468,8 @@
 				<div class="confirm-text"><strong>A command is running. Close this terminal?</strong><span>The shell and everything running in it stop.</span></div>
 			{/if}
 			<div class="confirm-actions">
-				<button class="ghost" onclick={cancelConfirm}>Cancel</button>
-				<button class="go" class:danger={confirm.kind === 'close'} bind:this={confirmButton} onclick={acceptConfirm}>{confirm.kind === 'paste' ? 'Paste' : 'Close'}</button>
+				<button class="st-btn" onclick={cancelConfirm}>Cancel</button>
+				<button class="st-btn primary" class:danger={confirm.kind === 'close'} bind:this={confirmButton} onclick={acceptConfirm}>{confirm.kind === 'paste' ? 'Paste' : 'Close'}</button>
 			</div>
 		</div>
 	{/if}
@@ -480,7 +494,45 @@
 	{/if}
 </section>
 
+{/snippet}
+{#if chatless}
+ <ViewShell label="Terminal" {detailOpen} onBack={() => detailOpen = false}>
+  {#snippet panel()}
+   <ViewPanel title="Terminal" loading={probe.status === 'loading'}>
+    {#snippet actions()}
+     <PanelIconButton label="New terminal" icon={Plus} disabled={!ready || creating} onclick={() => { newTerminal = true; detailOpen = true; pickerOpen = false; void terminals.ensureProbe(sessionId, true); }} />
+    {/snippet}
+    {#each tabState.ids as id,index (id)}
+     {@const info = terminals.terminal(id)}
+     {@const link = terminals.connection(id)}
+     <PanelRowActions>
+      <ListItem {id} name={`${info?.shell ?? 'shell'} · ${folderName(info?.cwd)}`} summary={hostName(info)} selected={id === activeId}
+       status={info?.state === 'exited' ? 'err' : link.status === 'live' ? (info?.busy ? 'busy' : 'ok') : link.status === 'reconnecting' ? 'warn' : 'off'}
+       onselect={() => { newTerminal = false; terminals.select(sessionId,id); detailOpen = true; }} />
+      {#snippet actions()}<PanelIconButton label={`Close terminal ${index + 1}`} icon={X} onclick={() => { detailOpen = true; closeTab(id); }} />{/snippet}
+     </PanelRowActions>
+    {:else}
+     <ListItem id="new-terminal" name={ready ? 'Open a terminal' : 'Terminal access'} summary={ready ? 'A shell on this worker' : 'View availability and connection status'} selected={false} onselect={() => detailOpen = true} />
+    {/each}
+    {#if ready && !tabState.ids.length}
+     <EmptyDetail title="No terminals yet" message="Open a shell for setup or command-line work."><button class="st-btn primary" onclick={() => detailOpen = true}>New terminal</button></EmptyDetail>
+    {/if}
+   </ViewPanel>
+  {/snippet}
+  {#snippet main(back)}{@render terminalBody(back)}{/snippet}
+ </ViewShell>
+{:else}
+ {@render terminalBody(() => {})}
+{/if}
+
 <style>
+ .page-terminal { min-width:0; }
+ .page-terminal .bar { flex:none; min-height:60px; padding:8px 24px; background:var(--background); }
+ .page-terminal-title { font-size:16px; font-weight:600; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+ .page-back { display:none; }
+ :global(.view-shell[data-stacked]) .page-back { display:inline-flex; }
+ :global(.view-shell[data-stacked]) .page-terminal-title { display:none; }
+
 	.stage.watch-hidden { display: none; }
 	.watch-toggle { flex-shrink: 0; min-height: 44px; padding: 0 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--card); color: var(--foreground); font-size: .75rem; cursor: pointer; }
 	.watch-toggle:hover, .watch-toggle[aria-pressed="true"] { background: var(--hover-overlay); }
@@ -491,22 +543,21 @@
 	/* ── Header: tabs, +, tools, panel actions ── */
 	.bar { display: flex; align-items: center; gap: 2px; min-height: 40px; padding: 4px 6px 0; border-bottom: 1px solid var(--border); background: var(--muted); }
 	.title { display: flex; align-items: center; gap: 8px; padding: 0 8px 4px; font-size: 13px; font-weight: 600; color: var(--foreground); }
-	.title-mark { font: 700 11px var(--font-mono); color: var(--primary); letter-spacing: -0.04em; }
+	.title-mark { font: 600 12px var(--font-sans); color: var(--muted-foreground); }
 	.tabs { display: flex; gap: 2px; min-width: 0; overflow-x: auto; scrollbar-width: none; align-self: stretch; align-items: flex-end; }
 	.tabs::-webkit-scrollbar { display: none; }
 	.tab { position: relative; display: flex; align-items: center; flex: 0 1 168px; min-width: 96px; max-width: 168px; height: 34px;
 		border: 1px solid transparent; border-bottom: 0; border-radius: 7px 7px 0 0; transition: background-color 0.15s ease-out; }
 	.tab:hover:not(.current) { background: var(--hover-overlay); }
 	.tab.current { background: var(--code-bg); border-color: var(--border); margin-bottom: -1px; height: 35px; }
-	.tab.current::before { content: ''; position: absolute; inset: -1px -1px auto; height: 2px; border-radius: 7px 7px 0 0; background: var(--primary); }
-	.tab-select { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; height: 100%; padding: 0 22px 0 10px; border: 0; background: transparent; color: var(--muted-foreground); font: 500 12px var(--font-mono); cursor: pointer; text-align: left; }
+	.tab-select { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; height: 100%; padding: 0 22px 0 10px; border: 0; background: transparent; color: var(--muted-foreground); font: 500 12px var(--font-sans); cursor: pointer; text-align: left; }
 	.tab.current .tab-select { color: var(--foreground); }
 	.tab-select:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; border-radius: 6px; }
 	.tab-shell { flex-shrink: 0; }
 	/* One line, cut with an ellipsis (the full name is its title). It may
 	   shrink, so it never runs under the close button; the folder gives way first. */
 	.tab-host { flex: 0 1 auto; min-width: 0; max-width: 16ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 1px 5px; border-radius: 4px; font: 600 10.5px var(--font-sans);
-		color: var(--primary); background: color-mix(in oklch, var(--primary) 13%, transparent); }
+		color: var(--muted-foreground); background: var(--muted); }
 	/* A shell on another worker: room for the worker's name next to the shell. */
 	.tab:has(.tab-host) { flex-basis: 232px; max-width: 232px; }
 	.tab-folder { flex-shrink: 100; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--subtle-foreground); }
@@ -534,45 +585,36 @@
 	.tool:active:not(:disabled) { transform: translateY(1px); }
 	.tool:focus-visible { outline: 2px solid var(--ring); outline-offset: -1px; }
 	.tool:disabled { opacity: 0.35; cursor: not-allowed; }
-	.tool[aria-pressed='true'], .tool[aria-expanded='true'] { background: color-mix(in oklch, var(--primary) 14%, transparent); color: var(--primary); }
+	.tool[aria-pressed='true'], .tool[aria-expanded='true'] { background: var(--row-selected); color: var(--foreground); }
 	.stop:not(:disabled) { color: var(--destructive); }
 	.to-chat.sent { color: var(--success); }
 	.sr-status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 
 	/* ── Search ── */
 	.search { display: flex; align-items: center; gap: 4px; padding: 4px 6px 4px 12px; border-bottom: 1px solid var(--border); background: var(--background); color: var(--muted-foreground); animation: slide 0.18s ease-out; }
-	.search input { flex: 1; min-width: 0; height: 28px; border: 0; outline: 0; background: transparent; color: var(--foreground); font: 12.5px var(--font-mono); }
+	.search input { flex: 1; min-width: 0; height: 28px; border: 0; outline: 0; background: transparent; color: var(--foreground); font: 13px var(--font-sans); }
 	.miss { font-size: 11.5px; color: var(--warning); white-space: nowrap; }
 
 	/* ── Stage ── */
 	.stage { position: relative; flex: 1; min-height: 0; background: var(--code-bg); overflow: hidden; }
-	.state { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; padding: 24px; text-align: center; color: var(--muted-foreground); font-size: 12.5px; background:
-		radial-gradient(circle at 50% 38%, color-mix(in oklch, var(--primary) 7%, transparent), transparent 60%),
-		repeating-linear-gradient(0deg, transparent 0 23px, color-mix(in oklch, var(--foreground) 3%, transparent) 23px 24px); }
+	.state { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; padding: 24px; text-align: center; color: var(--muted-foreground); font-size: 12.5px; background: var(--background); }
 	.state p { margin: 0; max-width: 34ch; line-height: 1.5; }
-	.state-title { font-size: 13.5px; font-weight: 600; color: var(--foreground); }
 	.state.empty { align-items: stretch; justify-content: safe center; overflow-y: auto; padding: 24px clamp(16px, 8cqi, 48px); text-align: left; }
 	.state.empty > :global(*) { align-self: center; }
 	.err { color: var(--destructive); }
-	.retry { margin-top: 8px; min-height: 32px; padding: 0 14px; border: 1px solid var(--border-strong); border-radius: calc(var(--radius) - 4px); background: transparent; color: var(--foreground); cursor: pointer; }
-	.retry:hover { background: var(--hover-overlay); }
 	:global(.tpanel .spin) { animation: spin 0.9s linear infinite; }
 
 	/* ── Confirm, notice, status ── */
-	.confirm { display: grid; gap: 8px; padding: 10px 12px; border-top: 1px solid color-mix(in oklch, var(--primary) 35%, transparent); background: color-mix(in oklab, var(--primary) 7%, var(--background)); animation: slide 0.2s cubic-bezier(0.2, 0.8, 0.2, 1); outline: none; }
+	.confirm { display: grid; gap: 8px; padding: 10px 12px; border-top: 1px solid var(--border); background: var(--card); animation: slide 0.2s cubic-bezier(0.2, 0.8, 0.2, 1); outline: none; }
 	.confirm-text { display: grid; gap: 2px; font-size: 12.5px; color: var(--muted-foreground); }
 	.confirm-text strong { font-size: 13px; color: var(--foreground); }
 	.preview { margin: 0; max-height: 72px; overflow: hidden; padding: 6px 8px; border-radius: 6px; background: var(--code-bg); color: var(--foreground); font: 11.5px/1.45 var(--font-mono); white-space: pre-wrap; word-break: break-all; }
 	.confirm-actions { display: flex; justify-content: flex-end; gap: 8px; }
 	.confirm-actions button { min-height: 30px; padding: 0 14px; border-radius: calc(var(--radius) - 4px); font: 500 12.5px var(--font-sans); cursor: pointer; }
 	.confirm-actions button:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
-	.ghost { border: 1px solid var(--border-strong); background: transparent; color: var(--foreground); }
-	.ghost:hover { background: var(--hover-overlay); }
-	.go { border: 1px solid var(--primary); background: var(--primary); color: var(--primary-foreground); }
-	.go.danger { border-color: var(--destructive); background: var(--destructive); color: var(--destructive-foreground); }
 	.notice { display: flex; align-items: center; gap: 8px; padding: 4px 6px 4px 12px; border-top: 1px solid color-mix(in oklch, var(--warning) 35%, transparent); background: color-mix(in oklab, var(--warning) 10%, var(--background)); color: var(--warning); font-size: 12px; }
 	.notice span { flex: 1; min-width: 0; }
-	.status { display: flex; align-items: center; gap: 10px; height: 26px; flex-shrink: 0; padding: 0 12px; border-top: 1px solid var(--border); background: var(--background); font: 11px var(--font-mono); color: var(--muted-foreground); white-space: nowrap; }
+	.status { display: flex; align-items: center; gap: 10px; height: 26px; flex-shrink: 0; padding: 0 12px; border-top: 1px solid var(--border); background: var(--background); font: 12px var(--font-sans); color: var(--muted-foreground); white-space: nowrap; }
 	.state-pill { display: inline-flex; align-items: center; gap: 6px; color: var(--foreground); }
 	.state-pill[data-tone='warn'] { color: var(--warning); }
 	.state-pill[data-tone='bad'] { color: var(--destructive); }

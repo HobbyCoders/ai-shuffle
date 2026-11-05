@@ -499,15 +499,17 @@ describe('Terminal page (no chat)', () => {
 		await fireEvent.click(view.getByRole('button', { name: 'Open terminal' }));
 		await waitFor(() => expect(api.create).toHaveBeenCalledTimes(1));
 		expect(api.create.mock.calls[0][0]).toMatchObject({ session_id: null, cwd: null, shell: 'bash' });
-		await waitFor(() => expect(view.getByRole('tablist', { name: 'Terminals on this worker' })).toBeTruthy());
+		await waitFor(() => expect(view.container.querySelector('.view-panel [data-settings-item]')).toBeTruthy());
+		expect(view.queryByRole('tablist')).toBeNull();
 		expect(fx.terms).toHaveLength(1);
 	});
 
 	it("reattaches the worker's chatless shells and leaves a chat's alone", async () => {
 		const view = await mountPage([info('own', { session_id: null, cwd: '/workspace' }), info('chat', { session_id: 's1' })]);
-		const tabs = view.getAllByRole('tab');
-		expect(tabs).toHaveLength(1);
-		expect(tabs[0].id).toBe('terminal-tab-own');
+		const rows = view.container.querySelectorAll('.view-panel [data-settings-item]');
+		expect(rows).toHaveLength(1);
+		expect(rows[0].getAttribute('data-settings-item')).toBe('own');
+		expect(view.queryByRole('tablist')).toBeNull();
 	});
 
 	it('shows the refusal, not a shell, to a viewer the worker denies', async () => {
@@ -515,6 +517,15 @@ describe('Terminal page (no chat)', () => {
 		const view = render(TerminalPage);
 		await waitFor(() => expect(view.getByText('Only the owner can use terminals')).toBeTruthy());
 		expect(view.queryByRole('button', { name: 'Open terminal' })).toBeNull();
+		expect(api.create).not.toHaveBeenCalled();
+	});
+
+	it('shows a prior worker-wide refusal rather than waiting forever for a skipped probe', async () => {
+		api.targets.mockRejectedValue(new TerminalApiError("Agent previews can't use terminals.", 403, 'http_403'));
+		await terminals.ensureCapability();
+		const view = render(TerminalPage);
+		await waitFor(() => expect(view.getByText('Only the owner can use terminals')).toBeTruthy());
+		expect(view.queryByText('Loading terminals…')).toBeNull();
 		expect(api.create).not.toHaveBeenCalled();
 	});
 

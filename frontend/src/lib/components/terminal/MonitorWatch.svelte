@@ -1,6 +1,7 @@
 <script lang="ts">
 	/** Monitor output is plain text, never a PTY: no input, resize or stop channel. */
 	import { tick } from 'svelte';
+	import { SelectField, Switch } from '$lib/components/layout/view';
 	import { Eye, RefreshCw, Copy, Check } from 'lucide-svelte';
 	import { apiBase, withAuth, wsUrl } from '$lib/api/runtime';
 	import { copyText } from '$lib/utils/clipboard';
@@ -84,17 +85,14 @@
 <section class="monitor" aria-label="Background command output">
 	<div class="readonly"><Eye size={16} aria-hidden="true" /><strong>Read-only</strong><span>No input or process control</span></div>
 	<div class="picker">
-		<label for="monitor-task">Background command</label>
+		<span class="picker-label">Background command</span>
 		<div class="choices">
-			<select id="monitor-task" bind:value={selected} disabled={loading || !tasks.length}>
-				{#if !tasks.length}<option value="">{loading ? 'Loading commands…' : 'No commands'}</option>{/if}
-				{#each tasks as entry (entry.id)}<option value={entry.id}>{entry.subject} · {entry.status}</option>{/each}
-			</select>
-			<button aria-label="Refresh commands" title="Refresh commands" disabled={loading} onclick={() => refresh++}><RefreshCw size={16} /></button>
+<SelectField bind:value={selected} label="Background command" disabled={loading || !tasks.length} options={tasks.length ? tasks.map(entry => ({value:entry.id,label:`${entry.subject} · ${entry.status}`})) : [{value:'',label:loading ? 'Loading commands…' : 'No commands'}]} />
+			<button class="st-btn" aria-label="Refresh commands" title="Refresh commands" disabled={loading} onclick={() => refresh++}><RefreshCw size={16} /></button>
 		</div>
 	</div>
 	{#if error}
-		<div class="message" role="alert"><p>{error}</p><button onclick={() => refresh++}>Try again</button></div>
+		<div class="message" role="alert"><p>{error}</p><button class="st-btn" onclick={() => refresh++}>Try again</button></div>
 	{:else if loading}
 		<p class="message" role="status">Loading background commands…</p>
 	{:else if !tasks.length}
@@ -102,10 +100,10 @@
 	{:else}
 		<div class="controls">
 			<span role="status">{task?.status ?? connection}{task?.exit_code != null ? ` · exit ${task.exit_code}` : ''}</span>
-			<label><input type="checkbox" bind:checked={follow} /> Follow output</label>
-			<button aria-label="Copy command output" title="Copy command output" disabled={!lines.length} onclick={copy}>{#if copied}<Check size={16} />{:else}<Copy size={16} />{/if}</button>
+			<label><Switch bind:checked={follow} label="Follow output" /> Follow output</label>
+			<button class="st-btn" aria-label="Copy command output" title="Copy command output" disabled={!lines.length} onclick={copy}>{#if copied}<Check size={16} />{:else}<Copy size={16} />{/if}</button>
 		</div>
-		{#if streamError}<div class="stream-error" role="alert"><span>{streamError}</span><button onclick={() => retry++}>Reconnect</button></div>{/if}
+		{#if streamError}<div class="stream-error" role="alert"><span>{streamError}</span><button class="st-btn" onclick={() => retry++}>Reconnect</button></div>{/if}
 		<!-- Keyboard focus is required to scroll and copy this read-only output. -->
 		<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
 		<pre bind:this={output} role="region" tabindex="0" aria-label="Read-only command output">{lines.length ? lines.join('\n') : connection === 'Connecting…' ? 'Connecting to output…' : 'No output yet.'}</pre>
@@ -116,22 +114,14 @@
 <style>
 	.monitor { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; color: var(--foreground); }
 	.readonly { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 12px 16px; background: var(--muted); border-bottom: 1px solid var(--border); font-size: .75rem; }
-	.readonly strong { letter-spacing: .04em; text-transform: uppercase; }
+	.readonly strong { font-weight:600; }
 	.readonly span { color: var(--muted-foreground); }
 	.picker { padding: 12px 16px; }
-	.picker > label { display: block; margin-bottom: 6px; color: var(--muted-foreground); font-size: .75rem; }
+	.picker-label { display: block; margin-bottom: 6px; color: var(--muted-foreground); font-size: .75rem; }
 	.choices { display: flex; gap: 8px; }
-	select { flex: 1; min-width: 0; padding: 8px; }
-	select, button { background: var(--card); color: var(--foreground); border: 1px solid var(--border); border-radius: 6px; font: inherit; font-size: .8125rem; }
-	button { min-width: 44px; min-height: 44px; padding: 8px; display: inline-flex; justify-content: center; align-items: center; cursor: pointer; transition: background .2s ease; }
-	button:hover { background: var(--hover-overlay); }
-	button:active { transform: translateY(1px); }
-	button:disabled, select:disabled { opacity: .5; cursor: default; }
-	button:focus-visible, select:focus-visible, pre:focus-visible, input:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
 	.controls { padding: 0 16px 8px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; font-size: .75rem; }
 	.controls > span { flex: 1; }
 	.controls label { display: flex; align-items: center; gap: 6px; min-height: 44px; }
-	input { accent-color: var(--primary); width: 16px; height: 16px; }
 	pre { flex: 1; min-height: 120px; margin: 0; padding: 16px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--font-mono); font-size: .8125rem; line-height: 1.6; background: var(--background); border-block: 1px solid var(--border); user-select: text; }
 	.message { padding: 24px; display: flex; flex-direction: column; align-items: flex-start; gap: 12px; font-size: .8125rem; color: var(--muted-foreground); }
 	.message p { margin: 0; line-height: 1.6; }

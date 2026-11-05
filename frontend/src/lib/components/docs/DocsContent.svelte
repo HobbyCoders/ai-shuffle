@@ -110,7 +110,8 @@
 	// Extract headings after render for ToC
 	$effect(() => {
 		if (!contentEl || !onHeadingsExtracted) return;
-		// Give the DOM a tick to update
+		// Track new article content for the table of contents.
+		void renderedHtml;
 		requestAnimationFrame(() => {
 			if (!contentEl) return;
 			const headingEls = contentEl.querySelectorAll('h2, h3');
@@ -129,153 +130,37 @@
 
 <!-- Native copy buttons emit clicks for Enter/Space too; a key handler here would copy twice. -->
 <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
-<div class="docs-content prose" bind:this={contentEl} onclick={handleContentClick}>
+<div class="docs-content" bind:this={contentEl} onclick={handleContentClick}>
 	{@html sanitizeHtml(renderedHtml)}
 </div>
 
 <style>
-	.docs-content {
-		width: 100%;
-	}
-
-	/* ── Studio-v2 prose headings (serif display) ── */
-	.docs-content :global(h1) {
-		font-family: var(--font-display, Georgia, serif);
-		font-weight: 800;
-		font-size: 1.85rem;
-		letter-spacing: -0.02em;
-		line-height: 1.15;
-		margin: 0 0 12px;
-	}
-
-	.docs-content :global(h2) {
-		font-family: var(--font-display, Georgia, serif);
-		font-weight: 700;
-		font-size: 1.3rem;
-		line-height: 1.2;
-		margin: 32px 0 12px;
-	}
-
-	.docs-content :global(h3) {
-		font-weight: 700;
-		font-size: 1.05rem;
-		margin: 24px 0 8px;
-	}
-
-	.docs-content :global(p),
-	.docs-content :global(li) {
-		font-size: 0.95rem;
-		line-height: 1.7;
-	}
-
-	/* Code block wrapper styling */
-	.docs-content :global(.code-block-wrapper) {
-		position: relative;
-		margin: 1rem 0;
-		border: 1px solid var(--border);
-		border-radius: 10px;
-		overflow: hidden;
-		background: var(--muted);
-	}
-
-	.docs-content :global(.code-block-header) {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		padding: 6px 12px;
-		background: var(--card);
-		border-bottom: 1px solid var(--border);
-		font-size: 12px;
-	}
-
-	.docs-content :global(.code-lang) {
-		color: var(--muted-foreground);
-		font-family: var(--font-mono, 'JetBrains Mono', monospace);
-		text-transform: uppercase;
-		font-size: 11px;
-		letter-spacing: 0.5px;
-	}
-
-	.docs-content :global(.code-copy-btn) {
-		padding: 2px 10px;
-		font-size: 12px;
-		color: var(--muted-foreground);
-		background: var(--card);
-		border: 1px solid var(--border);
-		border-radius: 4px;
-		cursor: pointer;
-		transition: all 0.15s;
-	}
-
-	.docs-content :global(.code-copy-btn:hover) {
-		color: var(--foreground);
-		background: var(--muted);
-	}
-
-	.docs-content :global(.code-block-wrapper pre) {
-		margin: 0;
-		padding: 16px;
-		overflow-x: auto;
-		border: none;
-		border-radius: 0;
-	}
-
-	.docs-content :global(.code-block-wrapper code) {
-		background: none;
-		border: none;
-		padding: 0;
-		font-size: 13px;
-		font-family: var(--font-mono, 'JetBrains Mono', monospace);
-	}
-
-	/* Table styling enhancements */
-	.docs-content :global(table) {
-		width: 100%;
-		border-collapse: collapse;
-		margin: 1rem 0;
-		font-size: 14px;
-	}
-
-	.docs-content :global(th) {
-		text-align: left;
-		font-weight: 600;
-		padding: 10px 12px;
-		background: var(--muted);
-		border-bottom: 2px solid var(--border);
-		color: var(--foreground);
-	}
-
-	.docs-content :global(td) {
-		padding: 8px 12px;
-		border-bottom: 1px solid var(--border);
-		color: var(--muted-foreground);
-	}
-
-	.docs-content :global(tr:hover td) {
-		background: var(--muted);
-	}
-
-	/* Heading anchor hover indicator */
-	.docs-content :global(h2),
-	.docs-content :global(h3) {
-		scroll-margin-top: 80px;
-		cursor: pointer;
-		position: relative;
-	}
-
-	.docs-content :global(h2:hover::before),
-	.docs-content :global(h3:hover::before) {
-		content: '#';
-		position: absolute;
-		left: -1.5em;
-		color: var(--muted-foreground);
-		font-weight: 400;
-	}
-
-	@media (max-width: 639px) {
-		.docs-content :global(h2:hover::before),
-		.docs-content :global(h3:hover::before) {
-			display: none;
-		}
-	}
+ .docs-content { width:100%; font:14px/1.7 var(--font-sans); color:var(--foreground); overflow-wrap:anywhere; }
+ .docs-content :global(h1) { font-size:28px; font-weight:600; line-height:1.25; margin:0 0 24px; }
+ .docs-content :global(h2) { font-size:20px; font-weight:600; line-height:1.4; margin:40px 0 16px; }
+ .docs-content :global(h3) { font-size:16px; font-weight:600; margin:32px 0 12px; }
+ .docs-content :global(h1), .docs-content :global(h2), .docs-content :global(h3) { scroll-margin-top:24px; }
+ .docs-content :global(p), .docs-content :global(ul), .docs-content :global(ol) { margin:0 0 16px; }
+ .docs-content :global(ul) { list-style:disc; padding-left:24px; }
+ .docs-content :global(ol) { list-style:decimal; padding-left:24px; }
+ .docs-content :global(li) { margin-bottom:6px; }
+ .docs-content :global(a) { color:var(--primary); text-decoration:underline; text-underline-offset:3px; }
+ .docs-content :global(a:hover) { color:var(--foreground); }
+ .docs-content :global(blockquote) { border-left:2px solid var(--border); color:var(--muted-foreground); padding-left:16px; margin:24px 0; }
+ .docs-content :global(hr) { border:0; border-top:1px solid var(--border); margin:32px 0; }
+ .docs-content :global(.code-block-wrapper) { margin:24px 0; border:1px solid var(--border); border-radius:var(--radius-control); overflow:hidden; background:var(--code-bg); }
+ .docs-content :global(.code-block-header) { display:flex; align-items:center; justify-content:space-between; padding:8px 12px; border-bottom:1px solid var(--border); font-size:12px; color:var(--muted-foreground); }
+ /* Sanitizer permits only this renderer-owned class on a prose control. */
+ .docs-content :global(.code-copy-btn) { display:inline-flex; align-items:center; justify-content:center; height:32px; padding:0 12px; font:500 13px var(--font-sans); border:1px solid var(--border); border-radius:var(--radius-control); background:transparent; color:var(--foreground); cursor:pointer; }
+ .docs-content :global(.code-copy-btn:hover) { background:var(--hover-overlay); }
+ .docs-content :global(.code-copy-btn:focus-visible) { outline:2px solid var(--ring); outline-offset:2px; }
+ @media (max-width:600px) { .docs-content :global(.code-copy-btn) { height:44px; } }
+ .docs-content :global(pre) { margin:0; padding:16px; overflow:auto; }
+ .docs-content :global(code) { font-family:var(--st-mono); font-size:13px; background:var(--code-bg); padding:2px 4px; border-radius:var(--radius-control); }
+ .docs-content :global(pre code) { padding:0; background:none; }
+ .docs-content :global(table) { display:block; width:100%; overflow:auto; border-collapse:collapse; margin:24px 0; font-size:13px; }
+ .docs-content :global(th:first-child), .docs-content :global(td:first-child) { min-width:124px; overflow-wrap:normal; }
+ .docs-content :global(th) { text-align:left; font-weight:500; padding:10px 12px; color:var(--muted-foreground); border-bottom:1px solid var(--border); }
+ .docs-content :global(td) { padding:10px 12px; border-bottom:1px solid var(--border); }
+ .docs-content :global(img) { max-width:100%; height:auto; }
 </style>

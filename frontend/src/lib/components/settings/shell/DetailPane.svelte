@@ -30,6 +30,8 @@
 
 	interface Props {
 		name: string;
+		/** Full-width data pages use the same header without the reading measure. */
+		width?: 'reading' | 'data';
 		icon?: SettingsIcon;
 		/** Tile text instead of an icon (provider glyph). */
 		glyph?: string;
@@ -70,6 +72,7 @@
 
 	let {
 		name,
+		width = 'reading',
 		icon,
 		glyph,
 		tile,
@@ -120,7 +123,7 @@
 	}
 </script>
 
-<div class="st-dwrap">
+<div class="st-dwrap" class:data={width === 'data'}>
 	<div class="st-dtop">
 		<button type="button" class="st-back" aria-label="Back to {catLabel}" onclick={() => (onBack ? onBack() : settingsNav.stacked ? settingsNav.back() : settingsNav.clearSelection(cat))}>
 			<ChevronLeft /><span>{catLabel}</span>
@@ -174,6 +177,7 @@
 		max-width: 700px;
 		padding: 10px 32px 96px;
 	}
+	.st-dwrap.data { max-width: none; }
 	.st-dtop {
 		display: flex;
 		align-items: center;
