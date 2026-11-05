@@ -1,4 +1,6 @@
 <script lang="ts">
+	import ActionButton from '$lib/components/settings/rows/ActionButton.svelte';
+	import SelectField from '$lib/components/settings/rows/SelectField.svelte';
     import { onMount, onDestroy } from 'svelte';
     import { api } from '$lib/api/client';
     let { connected = false, onConnected }: { connected?: boolean; onConnected: () => void } = $props();
@@ -49,7 +51,7 @@
     }
 </script>
 
-<section aria-label="Personal finance connection" class="space-y-3 rounded-lg border border-border p-4">
+<section aria-label="Personal finance connection" class="space-y-3">
     <h3 class="font-semibold">Bank &amp; credit-card accounts</h3>
     <p class="text-sm">Connect your own accounts through Plaid Link. Agents can read accounts, balances, and purchases. No payments, transfers, full card numbers, or bank login credentials are exposed to agents.</p>
     {#if error}<p role="alert" class="text-sm text-destructive">{error}</p>{/if}
@@ -58,21 +60,21 @@
         {#if connected}
             <p class="text-sm">This connection is saved. To replace an expired authorization, add a new connection and remove the old one. Removing a connection here does not revoke consent at your bank; you can revoke access in your institution’s settings or Plaid Portal.</p>
         {:else}
-            <button type="button" class="rounded bg-action px-4 py-2 text-action-foreground" disabled={busy} onclick={connect}>{busy ? 'Waiting for Plaid…' : 'Connect bank with Plaid'}</button>
+            <ActionButton type="button" variant="primary" disabled={busy} onclick={connect}>{busy ? 'Waiting for Plaid…' : 'Connect bank with Plaid'}</ActionButton>
         {/if}
     {:else if status}
         <p class="text-sm">One-time administrator setup is required: create a Plaid app with Transactions enabled. Production access and institution OAuth approval may be required. This is not Stripe merchant access.</p>
     {/if}
-    <button type="button" class="text-sm text-primary" disabled={busy} aria-expanded={setup} onclick={() => setup = !setup}>{setup ? 'Hide app setup' : 'Plaid app setup'}</button>
+    <ActionButton type="button"  disabled={busy} aria-expanded={setup} onclick={() => setup = !setup}>{setup ? 'Hide app setup' : 'Plaid app setup'}</ActionButton>
     {#if setup}
         <div class="space-y-2">
             <label class="block text-sm">Client ID<input class="block w-full rounded border border-border bg-input p-2" bind:value={clientId} autocomplete="off" /></label>
             <label class="block text-sm">Secret<input class="block w-full rounded border border-border bg-input p-2" type="password" bind:value={secret} autocomplete="new-password" /></label>
-            <label class="block text-sm">Environment<select class="block w-full rounded border border-border bg-input p-2" bind:value={environment}><option value="sandbox">Sandbox (sample data)</option><option value="production">Production (real accounts)</option></select></label>
+            <div class="text-sm"><span>Environment</span><SelectField label="Environment" bind:value={environment} options={[{ value: 'sandbox', label: 'Sandbox (sample data)' }, { value: 'production', label: 'Production (real accounts)' }]} /></div>
             <label class="block text-sm">Country codes<input class="block w-full rounded border border-border bg-input p-2" bind:value={countries} placeholder="US,CA" /></label>
             <label class="block text-sm">OAuth return URI<input class="block w-full rounded border border-border bg-input p-2" bind:value={redirect} /></label>
             <p class="text-xs">Use this app’s HTTPS address ending in /plaid-link. Add the exact URI to the allowed redirect URIs in your Plaid dashboard. Secrets are encrypted on this installation.</p>
-            <button type="button" class="rounded bg-action px-4 py-2 text-action-foreground" disabled={busy || !clientId || !secret || !redirect} onclick={save}>Save Plaid app</button>
+            <ActionButton type="button" variant="primary" disabled={busy || !clientId || !secret || !redirect} onclick={save}>Save Plaid app</ActionButton>
         </div>
     {/if}
 </section>

@@ -1,4 +1,5 @@
 <script lang="ts">
+	import ActionButton from '$lib/components/settings/rows/ActionButton.svelte';
 	import { untrack } from 'svelte';
 	import {
 		generateProfile,
@@ -229,14 +230,15 @@
 							{#if question.options && question.options.length > 0}
 								<div class="options-grid">
 									{#each question.options as option}
-										<button
-											class="option-btn"
-											class:selected={clarificationAnswers[question.id] === option}
+										<ActionButton
+
+											variant={clarificationAnswers[question.id] === option ? 'primary' : 'default'}
+											aria-pressed={clarificationAnswers[question.id] === option}
 											onclick={() => selectOption(question.id, option)}
 											disabled={isLoading}
 										>
 											{option}
-										</button>
+										</ActionButton>
 									{/each}
 								</div>
 								<div class="custom-answer">
@@ -274,10 +276,10 @@
 					{/if}
 
 					<div class="dialog-actions">
-						<button class="btn btn-secondary" onclick={handleBackToDescription} disabled={isLoading}>
+						<ActionButton  onclick={handleBackToDescription} disabled={isLoading}>
 							Back
-						</button>
-						<button class="btn btn-primary" onclick={handleClarificationSubmit} disabled={isLoading}>
+						</ActionButton>
+						<ActionButton variant="primary" onclick={handleClarificationSubmit} disabled={isLoading}>
 							{#if isLoading}
 								<span class="spinner"></span>
 								<span>Generating...</span>
@@ -287,7 +289,7 @@
 								</svg>
 								<span>Generate</span>
 							{/if}
-						</button>
+						</ActionButton>
 					</div>
 				{:else}
 					<!-- Initial Form UI -->
@@ -357,9 +359,9 @@
 					{/if}
 
 					<div class="dialog-actions">
-						<button class="btn btn-secondary" onclick={handleClose} disabled={isLoading}> Cancel </button>
-						<button
-							class="btn btn-primary"
+						<ActionButton  onclick={handleClose} disabled={isLoading}> Cancel </ActionButton>
+						<ActionButton
+							variant="primary"
 							onclick={handleGenerate}
 							disabled={isLoading || description.length < 10}
 						>
@@ -372,7 +374,7 @@
 								</svg>
 								<span>Generate</span>
 							{/if}
-						</button>
+						</ActionButton>
 					</div>
 				{/if}
 			</div>
@@ -412,8 +414,8 @@
 		max-height: calc(100% - 32px);
 		background: var(--card);
 		border: 1px solid var(--border);
-		border-radius: 12px;
-		box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
+		border-radius: calc(var(--radius) + 4px);
+
 		overflow: hidden;
 		display: flex;
 		flex-direction: column;
@@ -456,7 +458,7 @@
 		padding: 0;
 		background: transparent;
 		border: none;
-		border-radius: 6px;
+		border-radius: calc(var(--radius) - 2px);
 		cursor: pointer;
 		color: var(--muted-foreground);
 		transition: all 150ms ease;
@@ -503,7 +505,7 @@
 		color: var(--foreground);
 		background: var(--background);
 		border: 1px solid var(--border);
-		border-radius: 8px;
+		border-radius: var(--radius);
 		resize: vertical;
 		min-height: 100px;
 		transition: border-color 150ms ease;
@@ -546,7 +548,7 @@
 		color: var(--foreground);
 		background: var(--muted);
 		border: 1px solid var(--border);
-		border-radius: 8px;
+		border-radius: var(--radius);
 		cursor: pointer;
 		transition: all 150ms ease;
 		text-align: left;
@@ -599,11 +601,11 @@
 		width: 100%;
 		padding: 12px;
 		font-size: 0.8rem;
-		font-family: var(--font-mono);
+		font-family: inherit;
 		color: var(--foreground);
 		background: var(--background);
 		border: 1px solid var(--border);
-		border-radius: 8px;
+		border-radius: var(--radius);
 		resize: vertical;
 		min-height: 120px;
 		transition: border-color 150ms ease;
@@ -628,8 +630,8 @@
 	.clarification-intro {
 		margin-bottom: 20px;
 		padding: 12px 16px;
-		background: color-mix(in oklch, var(--primary) 10%, transparent);
-		border-radius: 8px;
+		background: var(--muted);
+		border-radius: var(--radius);
 	}
 
 	.clarification-intro p {
@@ -663,33 +665,9 @@
 		margin-bottom: 8px;
 	}
 
-	.option-btn {
-		padding: 8px 14px;
-		font-size: 0.8rem;
-		font-family: inherit;
-		color: var(--foreground);
-		background: var(--background);
-		border: 1px solid var(--border);
-		border-radius: 6px;
-		cursor: pointer;
-		transition: all 150ms ease;
-	}
 
-	.option-btn:hover:not(:disabled) {
-		background: var(--hover-overlay);
-		border-color: var(--primary);
-	}
 
-	.option-btn.selected {
-		background: var(--primary);
-		color: var(--primary-foreground);
-		border-color: var(--primary);
-	}
 
-	.option-btn:disabled {
-		opacity: 0.6;
-		cursor: not-allowed;
-	}
 
 	.custom-answer {
 		margin-top: 8px;
@@ -704,7 +682,7 @@
 		color: var(--foreground);
 		background: var(--background);
 		border: 1px solid var(--border);
-		border-radius: 8px;
+		border-radius: var(--radius);
 		transition: border-color 150ms ease;
 	}
 
@@ -732,7 +710,7 @@
 		padding: 12px;
 		background: color-mix(in oklch, var(--destructive) 10%, transparent);
 		border: 1px solid var(--destructive);
-		border-radius: 8px;
+		border-radius: var(--radius);
 		color: var(--destructive);
 		font-size: 0.875rem;
 		margin-bottom: 20px;
@@ -752,48 +730,11 @@
 		padding-top: 8px;
 	}
 
-	.btn {
-		display: inline-flex;
-		align-items: center;
-		gap: 8px;
-		padding: 10px 16px;
-		font-size: 0.875rem;
-		font-weight: 500;
-		font-family: inherit;
-		border-radius: 8px;
-		cursor: pointer;
-		transition: all 150ms ease;
-	}
 
-	.btn svg {
-		width: 16px;
-		height: 16px;
-	}
 
-	.btn:disabled {
-		opacity: 0.6;
-		cursor: not-allowed;
-	}
 
-	.btn-primary {
-		background: var(--primary);
-		color: var(--primary-foreground);
-		border: none;
-	}
 
-	.btn-primary:hover:not(:disabled) {
-		background: color-mix(in oklch, var(--primary) 90%, white);
-	}
 
-	.btn-secondary {
-		background: var(--muted);
-		color: var(--foreground);
-		border: 1px solid var(--border);
-	}
-
-	.btn-secondary:hover:not(:disabled) {
-		background: var(--hover-overlay);
-	}
 
 	.spinner {
 		width: 16px;

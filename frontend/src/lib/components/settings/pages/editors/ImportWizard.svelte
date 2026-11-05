@@ -3,6 +3,7 @@
 </script>
 
 <script lang="ts">
+	import Checkbox from '../../rows/Checkbox.svelte';
 	/**
 	 * ImportWizard: copy instructions, skills, agents, MCP inventory and
 	 * projects from Claude Code and Codex, inline under System > Workspace.
@@ -245,8 +246,8 @@
 				<div class="st-xitem">
 					<div class="cat">
 						<label class="st-check">
-							<input
-								type="checkbox"
+							<Checkbox
+
 								checked={allIn(category)}
 								indeterminate={countIn(category) > 0 && !allIn(category)}
 								disabled={list.length === 0}
@@ -270,8 +271,8 @@
 							{#each category.items as item (item.id)}
 								<li>
 									<label class="st-check">
-										<input
-											type="checkbox"
+										<Checkbox
+
 											checked={selected.has(item.id)}
 											disabled={unavailable(item)}
 											aria-label="Import {item.label}"
@@ -301,7 +302,7 @@
 		<div class="st-xh">Confirm</div>
 		<div class="st-xlist">
 			<label class="st-check">
-				<input type="checkbox" bind:checked={acknowledged} disabled={applying || chosen.length === 0} />
+				<Checkbox  bind:checked={acknowledged} disabled={applying || chosen.length === 0} />
 				<span>Sources untouched, existing settings win</span>
 				<span></span>
 			</label>

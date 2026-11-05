@@ -169,7 +169,7 @@
 		border: 1px solid var(--st-border-strong);
 		border-radius: 999px;
 		background: var(--st-muted);
-		font-family: var(--st-mono);
+		font-family: inherit;
 		font-size: 11.5px;
 		color: var(--st-fg);
 	}

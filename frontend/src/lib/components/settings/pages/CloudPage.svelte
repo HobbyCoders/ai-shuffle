@@ -238,20 +238,19 @@
 		border-top-right-radius: var(--st-radius);
 	}
 	.cl-tier.reached::before {
-		background: var(--st-primary-line);
+		background: var(--st-border-strong);
 	}
 	.cl-tier.current {
-		background: var(--st-primary-soft);
+		background: var(--st-accent);
 		color: var(--st-fg);
 	}
 	.cl-tier.current::before {
-		background: var(--st-primary);
+		background: var(--st-border-strong);
 	}
 	.cl-name {
 		font-size: 12px;
 		font-weight: 500;
-		letter-spacing: 0.04em;
-		text-transform: uppercase;
+
 	}
 	.cl-fig {
 		display: flex;
@@ -281,8 +280,8 @@
 		font-weight: 500;
 		padding: 2px 7px;
 		border-radius: 999px;
-		color: var(--st-primary);
-		border: 1px solid var(--st-primary-line);
+		color: var(--st-mfg);
+		border: 1px solid var(--st-border-strong);
 		animation: cl-in 0.3s ease-out;
 	}
 	.cl-foot {

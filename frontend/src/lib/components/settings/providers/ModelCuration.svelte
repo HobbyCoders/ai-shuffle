@@ -1,4 +1,5 @@
 <script lang="ts">
+	import Checkbox from '../rows/Checkbox.svelte';
 	/**
 	 * ModelCuration: which of a credential's models the pickers offer.
 	 *
@@ -355,7 +356,7 @@
 			<div class="pv-mlist">
 				{#each shown as r (r.id)}
 					<label class="pv-mrow">
-						<input type="checkbox" class="pv-chk" checked={r.checked} disabled={saving} onchange={() => toggle(r.id)} />
+						<Checkbox checked={r.checked} disabled={saving} onchange={() => toggle(r.id)} />
 						<span class="id">{r.id}</span>
 						{#if r.label && r.label !== r.id}<span class="lbl">{r.label}</span>{:else}<span></span>{/if}
 					</label>
@@ -397,18 +398,11 @@
 	.filter {
 		margin: 0 0 8px;
 	}
-	.filter :global(.st-txt) {
-		width: 100% !important;
-	}
 	.typed {
 		display: flex;
 		flex-wrap: wrap;
 		gap: 8px;
 		margin: 0 0 8px;
-	}
-	.typed :global(.st-txt) {
-		flex: 1 1 200px;
-		width: auto !important;
 	}
 	.pv-fail {
 		display: flex;

@@ -31,7 +31,7 @@
 	import InlineBanner from '../rows/InlineBanner.svelte';
 	import StatusDot from '../rows/StatusDot.svelte';
 	import SearchBox from './SearchBox.svelte';
-	import { GENERATION_ICONS } from './icons';
+	import Segmented from '../rows/Segmented.svelte';
 	import { groupByWorker, type AccountCatalog } from './account-catalog.svelte';
 
 	let { catalog }: { catalog: AccountCatalog } = $props();
@@ -122,14 +122,9 @@
 </script>
 
 <div class="acat" data-kind={kind}>
-	<div class="kinds" role="group" aria-label="Generation kind">
-		{#each GENERATION_KINDS as k (k)}
-			{@const Icon = GENERATION_ICONS[k]}
-			<button type="button" class="kind" aria-pressed={kind === k} onclick={() => catalog.setKind(k)}>
-				<Icon aria-hidden="true" />{KIND_SHORT[k]}
-			</button>
-		{/each}
-	</div>
+	<Segmented label="Generation kind" value={kind}
+		options={GENERATION_KINDS.map((k) => ({ value: k, label: KIND_SHORT[k] }))}
+		onchange={(k) => catalog.setKind(k)} />
 
 	<SearchBox bind:value={search} placeholder="Search accounts and models" label="Search accounts and models" />
 
@@ -270,42 +265,6 @@
 		container-type: inline-size;
 	}
 
-	/* ── Kind switch ─────────────────────────────────────────────── */
-	.kinds {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 6px;
-	}
-	.kind {
-		display: inline-flex;
-		align-items: center;
-		gap: 6px;
-		min-height: 32px;
-		padding: 0 12px;
-		border-radius: 999px;
-		border: 1px solid var(--st-border-strong);
-		background: none;
-		color: var(--st-mfg);
-		font-size: 12.5px;
-		font-weight: 500;
-		transition:
-			color 0.15s ease,
-			background-color 0.15s ease;
-	}
-	.kind :global(svg) {
-		width: 14px;
-		height: 14px;
-	}
-	.kind:hover:not([aria-pressed='true']) {
-		color: var(--st-fg);
-		background: var(--st-hover);
-	}
-	.kind[aria-pressed='true'] {
-		background: var(--st-fg);
-		color: var(--st-bg);
-		border-color: transparent;
-	}
-
 	/* ── Favourite: a bookmark ribbon, apart from the remembered choice ── */
 	.fav {
 		position: relative;
@@ -314,16 +273,14 @@
 		gap: 12px;
 		align-items: start;
 		padding: 14px 16px 14px 14px;
-		border: 1px dashed var(--st-border-strong);
+		border: 1px solid var(--st-border);
 		border-radius: var(--st-radius);
 		background: var(--st-card);
 	}
 	.fav.set {
 		border-style: solid;
-		border-color: var(--st-warning-line);
-		background:
-			linear-gradient(100deg, var(--st-warning-soft), transparent 55%),
-			var(--st-card);
+		border-color: var(--st-border-strong);
+		background: var(--st-card);
 	}
 	.fav-mark {
 		display: grid;
@@ -352,8 +309,7 @@
 		margin: 0;
 		font-size: 11px;
 		font-weight: 600;
-		letter-spacing: 0.06em;
-		text-transform: uppercase;
+
 		color: var(--st-mfg);
 	}
 	.fav-pick {
@@ -437,7 +393,7 @@
 		opacity: 0.62;
 	}
 	.arow.fav-row {
-		background: linear-gradient(90deg, var(--st-warning-soft), transparent 40%);
+		background: var(--st-accent);
 	}
 	.main {
 		min-width: 0;
@@ -452,8 +408,7 @@
 	.src {
 		font-size: 11px;
 		font-weight: 600;
-		letter-spacing: 0.05em;
-		text-transform: uppercase;
+
 		color: var(--st-mfg);
 		overflow-wrap: anywhere;
 	}
@@ -482,8 +437,8 @@
 		background: var(--st-warning-soft);
 	}
 	.pill.accent {
-		color: var(--st-primary);
-		background: var(--st-primary-soft);
+		color: var(--st-fg);
+		background: var(--st-muted);
 	}
 	.model {
 		display: flex;
@@ -516,7 +471,7 @@
 		min-width: 64px;
 	}
 	.fig {
-		font-family: var(--st-mono);
+		font-family: inherit;
 		font-size: 14px;
 		font-weight: 600;
 		letter-spacing: -0.02em;

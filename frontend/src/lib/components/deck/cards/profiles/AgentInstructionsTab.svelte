@@ -42,7 +42,7 @@
 	</RowGroup>
 {/if}
 
-<RowGroup title="Prompt">
+<RowGroup title="Prompt" bare>
 	{#snippet actions()}
 		<span class="count" class:over>{prompt.length.toLocaleString('en-US')} / 10,000</span>
 	{/snippet}
@@ -60,7 +60,7 @@
 
 <style>
 	.body {
-		padding: 14px 16px 16px;
+		padding: 0;
 	}
 	.prompt {
 		display: block;
@@ -70,7 +70,7 @@
 		border: 1px solid var(--st-input);
 		background: var(--st-card);
 		border-radius: var(--st-radius-md);
-		font-family: var(--st-mono);
+		font-family: inherit;
 		font-size: 12.5px;
 		line-height: 1.55;
 		color: var(--st-fg);
@@ -85,7 +85,7 @@
 		box-shadow: 0 0 0 3px var(--st-primary-soft);
 	}
 	.count {
-		font-family: var(--st-mono);
+		font-family: inherit;
 		font-size: 11.5px;
 		color: var(--st-subtle);
 		font-variant-numeric: tabular-nums;
@@ -100,7 +100,7 @@
 	}
 	@container (max-width: 560px) {
 		.body {
-			padding: 12px;
+			padding: 0;
 		}
 		.prompt {
 			min-height: 260px;
