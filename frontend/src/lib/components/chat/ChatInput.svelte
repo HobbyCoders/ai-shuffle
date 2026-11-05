@@ -178,8 +178,8 @@
 		// debounce; Svelte can mount the replacement before the old one's
 		// onDestroy saves it, so save it now or this editor opens empty (#811).
 		flushPendingDraft();
-		const storeDraft = get(activeSession).draft;
-		if (storeDraft) return storeDraft;
+		const state = get(activeSession);
+		if (state.sessionId === composerBootSessionId && state.draft) return state.draft;
 		return readDraft(composerBootSessionId) || '';
 	}
 
@@ -263,27 +263,36 @@
 			compacting = false;
 		}
 	}
+	// The child editor can be destroyed before this composer's onDestroy.
+	// Keep its final document, not the lossy message-text serialization.
+	let teardownDraft: string | null = null;
 	// Get the draft value as JSON string (preserves file chips)
 	function getDraftJSON(): string {
 		const json = editorRef?.getJSON();
-		if (!json) return inputValue;
+		if (!json) return teardownDraft ?? inputValue;
 		return JSON.stringify(json);
 	}
 
 	// Helper to save draft immediately (used on unmount and on send)
 	function saveDraftImmediately(value?: string) {
-		// The editor may already hold a linked chat's draft while boot's store
-		// still points at New Chat. Use the same owner check as the debounce.
-		if (!ownsComposer() || get(activeSession).sessionId !== prevSessionId) return;
+		if (!ownsComposer()) return;
+		const state = get(activeSession);
+		// A linked editor owns its chat before the store adopts it. Persist that
+		// owner's edits, but leave the unrelated New Chat store/slot alone.
+		const bootRestoring = state.sessionId === null && state.isRestoringSession
+			&& prevSessionId !== null && prevSessionId === composerBootSessionId;
+		if (state.sessionId !== prevSessionId && !bootRestoring) return;
+		if (bootRestoring && value === undefined && inputValue === initialComposerDraft) return;
 		if (draftSaveTimeout) {
 			clearTimeout(draftSaveTimeout);
 			draftSaveTimeout = null;
 		}
 		const val = value ?? getDraftJSON();
-		activeSession.setDraft(val);
-		// Keep the sessionStorage mirror in lockstep. On send this is called with
-		// '' which clears the persisted entry; on unmount it flushes the live text.
-		writeDraft(get(activeSession).sessionId, val);
+		if (bootRestoring) activeSession.saveDraftForSession(prevSessionId, val);
+		else if (val !== state.draft) activeSession.setDraft(val);
+		// Only a composer that began as New Chat may migrate that slot. A
+		// linked chat must not delete an unrelated draft, including after adoption.
+		writeDraft(prevSessionId, val, { preserveNewChat: composerBootSessionId !== null });
 	}
 
 	// Save draft to store when input changes (debounced)
@@ -292,6 +301,7 @@
 		// Track inputValue for reactivity (triggers on any text change)
 		const _trigger = inputValue;
 		const capturedSessionId = $activeSession.sessionId;
+		const capturedEditorOwner = prevSessionId;
 
 		// Debounce draft saves to avoid excessive updates
 		if (draftSaveTimeout) {
@@ -301,16 +311,10 @@
 			if (draftSaveTimeout) clearTimeout(draftSaveTimeout);
 			draftSaveTimeout = null;
 			releasePendingDraft(save);
-			if (!ownsComposer()) return;
-			// Guard: only save if we're still on the same session
-			if (get(activeSession).sessionId !== capturedSessionId || capturedSessionId !== prevSessionId) return;
-			const draftValue = getDraftJSON();
-			if (draftValue !== get(activeSession).draft) {
-				activeSession.setDraft(draftValue);
-			}
-			// Mirror to sessionStorage so the draft survives a full page reload
-			// (e.g. a silent PWA update). Empty text clears the entry.
-			writeDraft(capturedSessionId, draftValue);
+			// Both identities must still match: boot may have a null store owner,
+			// but navigation must never let an old callback save the new editor.
+			if (get(activeSession).sessionId !== capturedSessionId || prevSessionId !== capturedEditorOwner) return;
+			saveDraftImmediately();
 		};
 		draftSaveTimeout = setTimeout(save, 100);
 		// A composer mounting in this one's place saves it first (#811).
@@ -350,6 +354,7 @@
 		detachComposerDictation(editor);
 		if (!ownsComposer()) return;
 		rememberComposerSelection(prevSessionId, editor);
+		teardownDraft = JSON.stringify(editor.getJSON());
 	}
 	/** Keep a chat's caret with its draft; an empty composer (sent or cleared)
 	 *  forgets it so a later draft never gets a stale offset. Not gated on
@@ -444,7 +449,7 @@
 				activeSession.saveDraftForSession(prevSessionId, leavingDraft);
 				// Keep the persisted mirror aligned with the ephemeral cache so the
 				// leaving session's draft also survives a reload.
-				writeDraft(prevSessionId, leavingDraft);
+				writeDraft(prevSessionId, leavingDraft, { preserveNewChat: composerBootSessionId !== null });
 			}
 			// The caret and selection go with the draft (#864).
 			rememberComposerSelection(prevSessionId, editorRef?.getEditor());

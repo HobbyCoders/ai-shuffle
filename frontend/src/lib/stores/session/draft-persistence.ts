@@ -41,9 +41,10 @@ export function readDraft(sessionId: string | null): string | null {
  * Empty / whitespace-only text clears the entry instead of storing it. When a
  * draft is saved for a real session (non-null id) the stale `__aihub_draft_new`
  * slot is removed too, so a draft that started life in the "new chat" composer
- * migrates cleanly to its session once one exists.
+ * migrates cleanly to its session once one exists. An editor that already owns
+ * a real session can opt out: the New Chat slot is then an unrelated draft.
  */
-export function writeDraft(sessionId: string | null, text: string): void {
+export function writeDraft(sessionId: string | null, text: string, options: { preserveNewChat?: boolean } = {}): void {
 	try {
 		if (typeof sessionStorage === 'undefined') return;
 		const key = draftKey(sessionId);
@@ -53,7 +54,7 @@ export function writeDraft(sessionId: string | null, text: string): void {
 			sessionStorage.setItem(key, text);
 		}
 		// Migrate away from the new-chat slot once a real session id exists.
-		if (sessionId) sessionStorage.removeItem(NEW_KEY);
+		if (sessionId && !options.preserveNewChat) sessionStorage.removeItem(NEW_KEY);
 	} catch {
 		// Storage unavailable / quota exceeded — silent no-op.
 	}

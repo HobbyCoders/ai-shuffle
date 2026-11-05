@@ -13,6 +13,7 @@ import { activeSession } from '$lib/stores/active-session';
 import { auth } from '$lib/stores/auth.svelte';
 import '$lib/test-stubs/composer-dom';
 import { readDraft, writeDraft } from '$lib/stores/session/draft-persistence';
+import { bindSessionOwner } from '$lib/stores/session-owner';
 
 vi.hoisted(() => {
 	vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
@@ -46,7 +47,7 @@ afterEach(() => {
 	vi.restoreAllMocks();
 });
 
-type EditorHost = HTMLElement & { editor?: { commands: { insertContent(text: string): boolean } } };
+type EditorHost = HTMLElement & { editor?: { commands: { insertContent(content: string | object[]): boolean }; getJSON(): object } };
 
 async function typeInto(container: HTMLElement): Promise<void> {
 	const dom = container.querySelector<EditorHost>('.tiptap')!;
@@ -130,4 +131,141 @@ it('a composer unmounted inside the draft debounce keeps its text for the next o
 	const second = render(ChatInput);
 	const editor = second.container.querySelector<HTMLElement>('.tiptap')!;
 	await waitFor(() => expect(editor.textContent).toBe(TEXT));
+});
+
+
+async function editLinkedDraft(container: HTMLElement): Promise<string> {
+	const dom = container.querySelector<EditorHost>('.tiptap')!;
+	await waitFor(() => expect(dom.editor).toBeTruthy());
+	dom.editor!.commands.insertContent([
+		{ type: 'text', text: TEXT },
+		{ type: 'fileChip', attrs: { path: 'notes.txt', fullPath: '/uploads/notes.txt', filename: 'notes.txt', type: 'file' } }
+	]);
+	expect(dom.querySelector('[data-file-chip]')).not.toBeNull();
+	return JSON.stringify(dom.editor!.getJSON());
+}
+
+function linkedBoot() {
+	writeDraft('opening-chat', 'existing chat draft');
+	writeDraft('other-chat', 'other chat draft');
+	writeDraft(null, 'unrelated new-chat draft');
+	history.replaceState({}, '', '/?session=opening-chat');
+	Object.assign(activeSession.current, { sessionId: null, isRestoringSession: true });
+}
+
+function expectOtherDraftsUntouched(storeDraft = '') {
+	expect(readDraft(null)).toBe('unrelated new-chat draft');
+	expect(readDraft('other-chat')).toBe('other chat draft');
+	expect(activeSession.current.draft).toBe(storeDraft);
+}
+
+it('debounces typed rich text and file chips to the linked editor owner before adoption', async () => {
+	linkedBoot();
+	const view = render(ChatInput);
+	const edited = await editLinkedDraft(view.container);
+	await new Promise(resolve => setTimeout(resolve, 150));
+
+	expect(readDraft('opening-chat')).toBe(edited);
+	expectOtherDraftsUntouched();
+});
+
+it('flushes typed linked text and file chips on teardown and restores them on remount before adoption', async () => {
+	linkedBoot();
+	const first = render(ChatInput);
+	const edited = await editLinkedDraft(first.container);
+	// No debounce/timer flush: this exercises the real teardown save.
+	first.unmount();
+	expect(readDraft('opening-chat')).toBe(edited);
+	expectOtherDraftsUntouched();
+	const second = render(ChatInput);
+	const dom = second.container.querySelector<EditorHost>('.tiptap')!;
+	await waitFor(() => expect(dom.editor?.getJSON()).toEqual(JSON.parse(edited)));
+	expectOtherDraftsUntouched();
+});
+
+it('flushes linked edits when the replacement mounts before the old composer is destroyed', async () => {
+	linkedBoot();
+	const first = render(ChatInput);
+	const edited = await editLinkedDraft(first.container);
+	await tick(); // registers the changed editor's pending-draft callback
+	const second = render(ChatInput);
+	first.unmount();
+	const dom = second.container.querySelector<EditorHost>('.tiptap')!;
+	await waitFor(() => expect(dom.editor?.getJSON()).toEqual(JSON.parse(edited)));
+	expectOtherDraftsUntouched();
+});
+
+it('does not seed a linked editor from the unrelated null store draft', async () => {
+	linkedBoot();
+	activeSession.setDraft('unrelated in-memory new-chat draft');
+	const view = render(ChatInput);
+	await waitFor(() => expect(view.container.querySelector('.tiptap')?.textContent).toBe('existing chat draft'));
+	const edited = await editLinkedDraft(view.container);
+	view.unmount();
+	expect(readDraft('opening-chat')).toBe(edited);
+	expectOtherDraftsUntouched('unrelated in-memory new-chat draft');
+});
+
+it('keeps linked edits through adoption without migrating an unrelated new-chat draft', async () => {
+	linkedBoot();
+	const view = render(ChatInput);
+	const edited = await editLinkedDraft(view.container);
+	Object.assign(activeSession.current, { sessionId: 'opening-chat', isRestoringSession: false });
+	activeSession.setDraft('existing chat draft'); // restore commits the previously persisted snapshot
+	await tick();
+	await new Promise(resolve => setTimeout(resolve, 150));
+	expect(readDraft('opening-chat')).toBe(edited);
+	expectOtherDraftsUntouched(edited);
+	view.unmount();
+	expectOtherDraftsUntouched(edited);
+});
+
+it('saves the linked owner on switch but never lets its stale timer overwrite the new owner', async () => {
+	linkedBoot();
+	const view = render(ChatInput);
+	const edited = await editLinkedDraft(view.container);
+	Object.assign(activeSession.current, { sessionId: 'other-chat', isRestoringSession: false });
+	activeSession.setDraft('other chat draft');
+	await tick();
+	await new Promise(resolve => setTimeout(resolve, 150));
+	expect(readDraft('opening-chat')).toBe(edited);
+	expect(readDraft('other-chat')).not.toContain(TEXT);
+	expect(activeSession.current.draft).not.toContain(TEXT);
+	expect(view.container.querySelector('.tiptap')?.textContent).toBe('other chat draft');
+	expect(readDraft(null)).toBe('unrelated new-chat draft');
+});
+
+it('still debounces ordinary null new-chat edits to the null store and persistence slot', async () => {
+	const view = render(ChatInput);
+	await typeInto(view.container);
+	await new Promise(resolve => setTimeout(resolve, 150));
+	expect(readDraft(null)).toContain(TEXT);
+	expect(activeSession.current.draft).toContain(TEXT);
+});
+
+it('still migrates an ordinary new-chat draft when that composer adopts its created session', async () => {
+	const view = render(ChatInput);
+	await typeInto(view.container);
+	const draft = JSON.stringify(view.container.querySelector<EditorHost>('.tiptap')!.editor!.getJSON());
+	Object.assign(activeSession.current, { sessionId: 'created-chat', isRestoringSession: false });
+	activeSession.setDraft(draft);
+	await tick();
+	await new Promise(resolve => setTimeout(resolve, 150));
+	expect(readDraft('created-chat')).toBe(draft);
+	expect(activeSession.current.draft).toBe(draft);
+	expect(readDraft(null)).toBeNull();
+});
+
+it('retires boot-owner debounce and teardown writes across an account ownership boundary', async () => {
+	linkedBoot();
+	const view = render(ChatInput);
+	await editLinkedDraft(view.container);
+	bindSessionOwner('previous-account', 'next-account');
+	writeDraft('opening-chat', 'next account chat draft');
+	writeDraft(null, 'next account new-chat draft');
+	await new Promise(resolve => setTimeout(resolve, 150));
+	view.unmount();
+	expect(readDraft('opening-chat')).toBe('next account chat draft');
+	expect(readDraft(null)).toBe('next account new-chat draft');
+	expect(activeSession.current.draft).toBe('');
 });
