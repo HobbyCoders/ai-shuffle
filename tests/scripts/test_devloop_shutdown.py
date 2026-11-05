@@ -52,8 +52,14 @@ wrapped = ActivityObserver(app, root/'activity.json')
 sock = socket.socket()
 sock.bind(('127.0.0.1',0)); sock.listen(128); sock.setblocking(False)
 (root/'port').write_text(str(sock.getsockname()[1]))
+class ReadyServer(uvicorn.Server):
+    async def startup(self, sockets=None):
+        await super().startup(sockets=sockets)
+        if self.started:
+            # Startup runs inside Uvicorn's installed signal-handler context.
+            (root/'server-ready').write_text('startup and signal handlers ready')
 with bounded_shutdown():
-    server = uvicorn.Server(uvicorn.Config(wrapped, log_level='critical', access_log=False))
+    server = ReadyServer(uvicorn.Config(wrapped, log_level='critical', access_log=False))
     if len(sys.argv) > 3:
         server.handle_exit = lambda *args: None  # Real hung-child/deadline case.
     server.run(sockets=[sock])
@@ -77,7 +83,7 @@ def test_gate_refuses_late_work_or_aborts_and_allows_completion_before_sse_teard
                                cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     connections = []
     try:
-        wait_for(lambda: (tmp_path / "port").exists())
+        wait_for(lambda: (tmp_path / "server-ready").exists())
         port = int((tmp_path / "port").read_text())
 
         def connect(path):
@@ -146,7 +152,7 @@ def test_real_guardian_ends_committed_child_after_launcher_sigkill(tmp_path):
         cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
     connection = None
     try:
-        wait_for(lambda: (server / "port").exists())
+        wait_for(lambda: (server / "server-ready").exists())
         lease = idle.IdleLease(SimpleNamespace(directory=server,
             data={"app": {"pid": process.pid, "pid_identity": guardian.identity(process.pid)}},
             fake=SimpleNamespace(log_path=server / "fake.jsonl")), threading.Event(), seconds=0)
@@ -204,7 +210,7 @@ def test_real_committed_hung_child_keeps_refusing_in_pause_failed(tmp_path, monk
 
         process.send_signal = Mock(side_effect=signal_and_expire)
         children.append(process)
-        wait_for(lambda: (tmp_path / "port").exists())
+        wait_for(lambda: (tmp_path / "server-ready").exists())
         return process
 
     def write(**changes):
