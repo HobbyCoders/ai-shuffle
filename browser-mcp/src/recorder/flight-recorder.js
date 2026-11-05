@@ -663,8 +663,11 @@
     return value.length > max ? value.slice(0, max - 1) + '…' : value;
   }
   function note(error) {
-    if (S) S.stats.internalErrors += 1;
-    if (S && !S.firstInternalError) S.firstInternalError = clip(error && error.message ? error.message : error, 160);
+    if (!S) return;
+    S.stats.internalErrors += 1;
+    if (S.firstInternalError) return;
+    try { S.firstInternalError = clip(error && error.message ? error.message : error, 160); }
+    catch (_) { S.firstInternalError = 'unreadable diagnostic error'; }
   }
 
   function push(entry, force) {
@@ -977,18 +980,26 @@
     return S.nodeIds.get(node);
   }
   function diagnosticStack() {
-    // Keep call sites, not arbitrary Error messages, URL queries or directories.
+    // Emit only filename:line:column, including for bare/Windows sourceURLs.
+    // Unknown frame formats are redacted, never copied as potentially private paths.
     return (new Error().stack || '').split('\n').slice(1, 10).map(function (line) {
-      return clip(scrub(line.replace(/(?:https?|file):\/\/[^\s)]+/g, function (url) {
-        var location = url.split('?')[0].split('#')[0];
-        var position = url.match(/:(\d+):(\d+)$/);
-        return location.slice(location.lastIndexOf('/') + 1).replace(/:\d+:\d+$/, '') + (position ? ':' + position[1] + ':' + position[2] : '');
-      })), 240);
+      var location = line.match(/([^\s()]+):(\d+):(\d+)\)?$/);
+      if (!location) return '[unrecognized stack frame]';
+      var file = location[1].split(/[?#]/)[0].split(/[\\/]/).pop();
+      if (file !== '<anonymous>' && !/^[\w.$-]+$/.test(file)) return '[unrecognized stack frame]';
+      return clip(scrub(file + ':' + location[2] + ':' + location[3]), 240);
     }).join('\n');
   }
   var removalHooks = null;
   function installRemovalHooks() {
-    if (removalHooks) { removalHooks.active = true; return; }
+    if (removalHooks) {
+      removalHooks.active = true;
+      removalHooks.methods.forEach(function (hook) {
+        try { if (hook.proto[hook.name] === hook.original) hook.proto[hook.name] = hook.wrapper; }
+        catch (error) { note(error); }
+      });
+      return;
+    }
     var hooks = removalHooks = { active: true, methods: [] };
     [[root.Element.prototype, 'remove', -1], [root.Node.prototype, 'removeChild', 0],
       [root.Node.prototype, 'replaceChild', 1]].forEach(function (spec) {
@@ -996,20 +1007,30 @@
       var original = proto[name];
       if (typeof original !== 'function') return;
       var wrapper = function () {
-        if (hooks.active && S && S.active) {
+        var recording = S, captured = [];
+        if (hooks.active && recording && recording.active) {
           try {
             var removed = index < 0 ? this : arguments[index];
+            var parent = removed && removed.parentNode;
             var nodes = marked(removed);
             for (var i = 0; i < nodes.length; i += 1) {
               var node = nodes[i];
               if (node.getAttribute('data-ui-mount') !== 'MessageArea' || !node.isConnected) continue;
               var carrier = node.closest('[data-ui-state="chat"]');
-              S.removalEvidence.set(node, { source: name, at: elapsed(), removed: diagnosticNode(removed),
-                parent: diagnosticNode(removed.parentNode), state: diagnosticState(carrier), stack: diagnosticStack() });
+              captured.push({ node: node, root: removed, parent: parent, detail: {
+                source: name, at: elapsed(), removed: diagnosticNode(removed),
+                parent: diagnosticNode(parent), state: diagnosticState(carrier), stack: diagnosticStack() } });
             }
           } catch (error) { note(error); }
         }
-        return original.apply(this, arguments);
+        // A failed/no-op native call must leave no evidence for a later mutation.
+        var result = original.apply(this, arguments);
+        try {
+          if (S === recording && S && S.active) captured.forEach(function (evidence) {
+            if (evidence.root.parentNode !== evidence.parent) S.removalEvidence.set(evidence.node, evidence);
+          });
+        } catch (error) { note(error); }
+        return result;
       };
       try { proto[name] = wrapper; hooks.methods.push({ proto: proto, name: name, original: original, wrapper: wrapper }); }
       catch (error) { note(error); }
@@ -1021,20 +1042,29 @@
     // All-or-nothing, like the network hooks: a later page wrapper must not
     // be dropped, and a subsequent start must re-arm every method together.
     if (!removalHooks.methods.every(function (hook) { return hook.proto[hook.name] === hook.wrapper; })) return;
-    removalHooks.methods.forEach(function (hook) { hook.proto[hook.name] = hook.original; });
-    removalHooks = null;
+    var restored = true;
+    removalHooks.methods.forEach(function (hook) {
+      try { hook.proto[hook.name] = hook.original; }
+      catch (error) { restored = false; note(error); }
+    });
+    // A frozen prototype may retain our now-inert wrapper. Still return the
+    // recording, and remember all methods so a later start can re-arm them.
+    if (restored) removalHooks = null;
   }
   function tryDiagnostic(read) {
     try { return read(); }
     catch (error) { note(error); return { unavailable: true }; }
   }
-  function mountDiagnostic(node, removed, parent) {
+  function mountDiagnostic(node, removed, parent, uniqueRemoval) {
     var carrier = (node.closest && node.closest('[data-ui-state="chat"]'))
       || (parent && parent.closest && parent.closest('[data-ui-state="chat"]'));
     var observed = diagnosticState(carrier);
     var evidence = removed && S.removalEvidence.get(node);
     S.removalEvidence.delete(node);
-    var result = evidence || { source: 'MutationObserver (no synchronous stack)',
+    // Multiple removals of the same root in one delivery are ambiguous: never
+    // attach a transient call's state/stack to the eventual real unmount.
+    var matched = evidence && uniqueRemoval && evidence.root === removed && evidence.parent === parent;
+    var result = (matched && evidence.detail) || { source: 'MutationObserver (no synchronous stack)',
       removed: removed ? diagnosticNode(removed) : null, parent: diagnosticNode(parent), state: observed };
     result.node = diagnosticId(node);
     result.observed = observed;
@@ -1051,6 +1081,7 @@
     try {
       var removed = [];
       var parents = new WeakMap();
+      var removalCounts = new WeakMap();
       var added = [];
       var i;
       var j;
@@ -1058,7 +1089,11 @@
         var record = records[i];
         if (record.type !== 'childList') continue;
         for (j = 0; j < record.removedNodes.length; j += 1) {
-          if (record.removedNodes[j].nodeType === 1) { removed.push(record.removedNodes[j]); parents.set(record.removedNodes[j], record.target); S.rowsDirty = true; }
+          if (record.removedNodes[j].nodeType === 1) {
+            var removedNode = record.removedNodes[j];
+            removed.push(removedNode); parents.set(removedNode, record.target); S.rowsDirty = true;
+            removalCounts.set(removedNode, (removalCounts.get(removedNode) || 0) + 1);
+          }
         }
         for (j = 0; j < record.addedNodes.length; j += 1) {
           if (record.addedNodes[j].nodeType === 1) { added.push(record.addedNodes[j]); S.rowsDirty = true; }
@@ -1075,7 +1110,7 @@
           countMount(name, -1);
           var unmount = { t: t, kind: 'mount', name: name, op: 'unmount' };
           if (name === 'MessageArea') {
-            unmount.diagnostic = tryDiagnostic(function () { return mountDiagnostic(el, removed[i], parents.get(removed[i])); });
+            unmount.diagnostic = tryDiagnostic(function () { return mountDiagnostic(el, removed[i], parents.get(removed[i]), removalCounts.get(removed[i]) === 1); });
             S.messageAreaGap = true;
             S.gapSampled = false;
           }
@@ -1101,6 +1136,9 @@
       }
     } catch (error) {
       note(error);
+    } finally {
+      // Expire evidence even for ignored transient mutations or failed reads.
+      S.removalEvidence = new WeakMap();
     }
   }
   function baselineMounts() {

@@ -32,22 +32,32 @@ it.each(["remove", "removeChild", "replaceChild", "innerHTML"])("captures a forc
     // Injection alone is inert; start is the only switch.
     expect(await page.evaluate(() => Element.prototype.remove === (window as any).originalRemove)).toBe(true);
     await page.evaluate(() => (window as any).__flightRecorder.start({ persist: false }));
-    await page.evaluate(async (method) => {
+    await page.waitForFunction(() => (window as any).__flightRecorder.snapshot().stats.paintedSamples > 0, undefined, { timeout: 5000 });
+    await page.evaluate((method) => {
       const view = document.querySelector("main")!;
       const column = view.querySelector("section")!;
       (window as any).liveState.showEmptyHero = true;
       (window as any).liveState.isEmptyState = true;
-      if (method === "remove") column.remove();
+      if (method === "remove") {
+        // A bare sourceURL must not leak its private directories into the stack.
+        new Function("column", "column.remove();\n//# sourceURL=/home/bob/client/probe.js")(column);
+      }
       else if (method === "removeChild") view.removeChild(column);
       else if (method === "replaceChild") view.replaceChild(document.createComment("gap"), column);
       else view.innerHTML = ""; // unpatched API: observer fallback must identify the removed ancestor
       // No rAF signature can see this reversal: the synchronous getter must.
       (window as any).liveState.showEmptyHero = false;
       (window as any).liveState.isEmptyState = false;
-      await new Promise((resolve) => setTimeout(resolve, 100));
-      view.append(column); // same node, not a new component; identity is diagnostic only
-      await new Promise((resolve) => setTimeout(resolve, 40));
+      (window as any).removedColumn = column;
     }, method);
+    // Keep the gap open until the observation under test, not an assumed frame deadline.
+    await page.waitForFunction(() => (window as any).__flightRecorder.snapshot().timeline.some(
+      (e: any) => e.message === "MessageArea gap at pre-paint"
+    ), undefined, { timeout: 5000 });
+    await page.evaluate(() => document.querySelector("main")!.append((window as any).removedColumn));
+    await page.waitForFunction(() => (window as any).__flightRecorder.snapshot().timeline.some(
+      (e: any) => e.kind === "mount" && e.op === "mount"
+    ), undefined, { timeout: 5000 });
     const rec = await page.evaluate(() => (window as any).__flightRecorder.stop());
     expect(rec.anomalies.filter((a: any) => a.kind === "remount")).toMatchObject([{ name: "MessageArea" }]);
     const mounts = rec.timeline.filter((e: any) => e.kind === "mount" && e.name === "MessageArea");
@@ -57,7 +67,11 @@ it.each(["remove", "removeChild", "replaceChild", "innerHTML"])("captures a forc
     expect(gone.parent).toBe("main[ChatView]");
     expect(gone.source).toBe(method === "innerHTML" ? "MutationObserver (no synchronous stack)" : method);
     expect(gone.state).toMatchObject({ showEmptyHero: method !== "innerHTML", messages: "1", session: "s:abc123" });
-    if (method !== "innerHTML") expect(gone.stack).toMatch(/recorder-diagnostics|eval|evaluate/);
+    if (method !== "innerHTML") expect(gone.stack).toMatch(/<anonymous>:\d+:\d+/);
+    if (method === "remove") {
+      expect(gone.stack).toMatch(/probe\.js:\d+:\d+/);
+      expect(gone.stack).not.toContain("/home/bob/client");
+    }
     expect(gone.observed.showEmptyHero).toBe(false);
     expect(gone.visibility).toMatchObject({ document: "visible", messageAreas: 0, visibleMessageAreas: 0 });
     expect(back.state.showEmptyHero).toBe(false);
@@ -75,19 +89,23 @@ it.each(["remove", "removeChild", "replaceChild", "innerHTML"])("captures a forc
   } finally { await page.close(); }
 });
 
-it("keeps remount detection and native removal semantics when a diagnostic reader throws", async () => {
+it.each(["Error", "throwing message getter"])("keeps native removal and remount detection when a reader throws %s", async (failure) => {
   const page = await browser.newPage();
   try {
     await page.setContent('<main data-ui-state="chat"><div data-ui-mount="MessageArea"></div></main>');
     await page.evaluate(recorderSource());
-    await page.evaluate(() => {
+    await page.evaluate((failure) => {
       const view = document.querySelector("main")!;
-      (view as any).__flightRecorderState = () => { throw new Error("broken reader"); };
+      (view as any).__flightRecorderState = () => {
+        if (failure === "Error") throw new Error("broken reader");
+        throw { get message() { throw new Error("broken message getter"); } };
+      };
       (window as any).__flightRecorder.start({ persist: false });
       const area = view.firstElementChild!;
       (window as any).oldArea = area;
       view.removeChild(area);
-    });
+      if (area.isConnected) throw new Error("diagnostic prevented native removal");
+    }, failure);
     await page.waitForTimeout(20);
     await page.evaluate(() => {
       const area = document.createElement("div");
@@ -100,6 +118,85 @@ it("keeps remount detection and native removal semantics when a diagnostic reade
     expect(rec.timeline.filter((e: any) => e.kind === "mount").map((e: any) => e.diagnostic)).toEqual([
       { unavailable: true }, { unavailable: true }
     ]);
+  } finally { await page.close(); }
+});
+
+it.each(["transient-previous-batch", "transient-same-batch", "failed-native-call"])("discards stale removal evidence after %s", async (mode) => {
+  const page = await browser.newPage();
+  try {
+    await page.setContent('<main data-ui-state="chat"><section class="chat-column"><div data-ui-mount="MessageArea"></div></section></main>');
+    await page.evaluate(recorderSource());
+    const failedCall = await page.evaluate((mode) => {
+      const view = document.querySelector("main")!;
+      const column = view.querySelector("section")!;
+      (window as any).oldColumn = column;
+      (window as any).hero = true;
+      (view as any).__flightRecorderState = () => ({ showEmptyHero: (window as any).hero });
+      (window as any).__flightRecorder.start({ persist: false });
+      let failure = null;
+      if (mode === "failed-native-call") {
+        try { document.createElement("aside").removeChild(column); }
+        catch (error) { failure = (error as DOMException).name; }
+      } else {
+        column.remove(); view.append(column);
+      }
+      (window as any).hero = false;
+      if (mode !== "transient-previous-batch") view.innerHTML = "";
+      return failure;
+    }, mode);
+    if (mode === "failed-native-call") expect(failedCall).toBe("NotFoundError");
+    if (mode === "transient-previous-batch") {
+      expect(await page.evaluate(() => (window as any).__flightRecorder.snapshot().timeline.filter((e: any) => e.kind === "mount"))).toEqual([]);
+      await page.evaluate(() => { document.querySelector("main")!.innerHTML = ""; });
+    }
+    await page.waitForFunction(() => (window as any).__flightRecorder.snapshot().timeline.some((e: any) => e.op === "unmount"));
+    await page.evaluate(() => document.querySelector("main")!.append((window as any).oldColumn));
+    await page.waitForFunction(() => (window as any).__flightRecorder.snapshot().timeline.some((e: any) => e.op === "mount"));
+    const rec = await page.evaluate(() => (window as any).__flightRecorder.stop());
+    const gone = rec.timeline.find((e: any) => e.op === "unmount").diagnostic;
+    expect(gone).toMatchObject({ source: "MutationObserver (no synchronous stack)", removed: "section.chat-column", state: { showEmptyHero: false } });
+    expect(gone.stack).toBeUndefined();
+    expect(rec.anomalies).toContainEqual(expect.objectContaining({ kind: "remount", name: "MessageArea" }));
+  } finally { await page.close(); }
+});
+
+it("returns the recording and leaves inert wrappers when a prototype cannot be restored", async () => {
+  const page = await browser.newPage();
+  try {
+    await page.setContent('<main data-ui-state="chat"><div data-ui-mount="MessageArea"></div></main>');
+    await page.evaluate(recorderSource());
+    await page.evaluate(() => {
+      (window as any).__flightRecorder.start({ persist: false });
+      Object.freeze(Node.prototype);
+      const area = document.querySelector('[data-ui-mount="MessageArea"]')!;
+      (window as any).area = area;
+      area.remove();
+    });
+    await page.waitForFunction(() => (window as any).__flightRecorder.snapshot().timeline.some((e: any) => e.op === "unmount"));
+    await page.evaluate(() => document.querySelector("main")!.append((window as any).area));
+    await page.waitForFunction(() => (window as any).__flightRecorder.snapshot().timeline.some((e: any) => e.op === "mount"));
+    const rec = await page.evaluate(() => (window as any).__flightRecorder.stop());
+    expect(rec.ok).toBe(true);
+    expect(rec.anomalies).toContainEqual(expect.objectContaining({ kind: "remount", name: "MessageArea" }));
+    expect(await page.evaluate(() => {
+      const view = document.querySelector("main")!;
+      (view as any).__flightRecorderState = () => { throw new Error("stopped hooks must not read"); };
+      const child = view.firstChild!;
+      return view.removeChild(child) === child && !(window as any).__flightRecorder.peek().recording;
+    })).toBe(true);
+    // A retained Node hook must not prevent a later recording from re-arming
+    // the Element hook that was successfully restored.
+    await page.evaluate(() => {
+      const view = document.querySelector("main")!;
+      (view as any).__flightRecorderState = () => null;
+      view.append((window as any).area);
+      (window as any).__flightRecorder.start({ persist: false });
+      (window as any).area.remove();
+    });
+    await page.waitForFunction(() => (window as any).__flightRecorder.snapshot().timeline.some((e: any) => e.op === "unmount"));
+    const restarted = await page.evaluate(() => (window as any).__flightRecorder.stop());
+    expect(restarted.ok).toBe(true);
+    expect(restarted.timeline.find((e: any) => e.op === "unmount").diagnostic.source).toBe("remove");
   } finally { await page.close(); }
 });
 

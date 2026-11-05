@@ -214,11 +214,17 @@ so failed CI journeys retain it in `ui-journeys-N` → `attempt-1/journeys/` →
   gap note means no such sample was captured, not proof the gap was invisible.
 
 These details do not participate in signature reversals or remount detection.
-No assertion, noise guard or allow-list is changed. Hooks restore at stop (or
-remain inert if a page wrapper owns them). No DOM text, HTML, prompts, titles,
-raw session IDs or URL queries are added to this evidence; stack URLs retain
-only filenames and line/column locations. Nothing is sent to a console by the
-recorder. It is injected by the browser tool or journey harness, never shipped
+No assertion, noise guard or allow-list is changed. Synchronous evidence is
+used only for a successful removal matching a unique removed root and parent
+in that observer delivery. Ignored transient mutations expire their evidence;
+ambiguous repeated removals use the explicit observer fallback instead of a
+potentially stale stack or state. Diagnostic faults never block native removal.
+Hooks restore at stop (or remain inert if a page wrapper owns them or a frozen
+prototype prevents restoration); restoration faults do not lose the recording.
+No DOM text, HTML, prompts, titles, raw session IDs or URL queries are added to
+this evidence; all stack locations retain only filenames and line/column
+locations, and unrecognized formats are redacted. Nothing is sent to a console
+by the recorder. It is injected by the browser tool or journey harness, never shipped
 as part of the app.
 
 ## Adding a field
