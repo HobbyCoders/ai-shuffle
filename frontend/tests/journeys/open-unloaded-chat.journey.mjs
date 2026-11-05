@@ -775,11 +775,11 @@ await runJourney({
 		{ name: 'reading-anchor-survives-hydration',
 			async setup(ctx) {
 				await prepareHeldSwitch(ctx, 800, 'long');
-				await ctx.page.evaluate(() => {
-					const log = document.querySelector('[role="log"][aria-label="Conversation messages"]');
-					log.scrollTop = (log.scrollHeight - log.clientHeight) / 2;
-				});
+				await scrollTranscriptTo(ctx.page, 0.5);
 				await ctx.page.waitForTimeout(500);
+				const reading = await transcriptScroll(ctx.page);
+				expect(reading && reading.max - reading.top >= 600,
+					`a genuine reader is away from the bottom before switching: ${JSON.stringify(reading)}`);
 				await ctx.page.evaluate(() => {
 					const log = document.querySelector('[role="log"][aria-label="Conversation messages"]');
 					window.__switchReadingAnchor = [...log.querySelectorAll('.msg-virtualized')]

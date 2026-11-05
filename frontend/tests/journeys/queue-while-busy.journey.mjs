@@ -365,6 +365,7 @@ await runJourney({
 				await reloadWithBootHeld('page reloaded after the lost answer');
 				await page.unroute(REWIND);
 				await editor().click();
+				await page.keyboard.press('Control+End');
 				await page.keyboard.type(duringBoot);
 				await finishBoot();
 				await composerHas(`queued ${lost}`);
