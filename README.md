@@ -95,7 +95,7 @@ The app is free: run it on your own hardware, on your home network or your own V
 
 ## Contributing, security and license
 
-- **Contributing:** outside contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for DCO sign-off, local checks and draft pull requests; team setup is in [docs/internal/CONTRIBUTING.md](docs/internal/CONTRIBUTING.md).
+- **Contributing:** outside contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for DCO sign-off, local checks and pull requests; team setup is in [docs/internal/CONTRIBUTING.md](docs/internal/CONTRIBUTING.md).
 - **Security:** report vulnerabilities privately to support@hobbycoders.com, and never post secrets in issues. See [SECURITY.md](SECURITY.md) and [SUPPORT.md](SUPPORT.md).
 - **License:** [GNU AGPL-3.0 only](LICENSE). Copyright (c) 2026 HobbyCoders. "AI Shuffle", "HobbyCoders" and the shuffle mark are trademarks of HobbyCoders; modified builds may not ship under those names. See [TRADEMARKS.md](TRADEMARKS.md) and [third-party notices](THIRD_PARTY_NOTICES.md).
 - **Not affiliated:** AI Shuffle is not affiliated with Anthropic, OpenAI, xAI or any other AI provider. None of them build, endorse or support it; their names and marks belong to their respective owners.
