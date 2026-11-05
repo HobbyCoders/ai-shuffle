@@ -333,7 +333,15 @@ async def reclaim_finished_worker_checkout(worker_session_id: str, checkout: Opt
         if (await asyncio.to_thread(turns.session_has_unsettled_turns, worker_session_id)
                 or await asyncio.to_thread(turn_scheduler._session_has_parked_turn, worker_session_id)):
             return False
-        return await asyncio.to_thread(reclaim_untouched_worker_checkout, worker_session_id, checkout)
+        reclaimed = await asyncio.to_thread(reclaim_untouched_worker_checkout, worker_session_id, checkout)
+        if reclaimed:
+            from app.core.session_pool import get_session_pool
+
+            # A retained subprocess still points at the removed directory inode,
+            # even after the same path is restored. Retire it before admission
+            # unlocks; the next request resumes a fresh client in the new cwd.
+            await get_session_pool().remove(worker_session_id, preserve_session=True)
+        return reclaimed
 
 
 def reclaim_untouched_worker_checkout(

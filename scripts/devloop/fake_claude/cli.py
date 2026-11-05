@@ -759,6 +759,14 @@ class DevClaude(script.Fake):
 
     # ── a turn ──
     def play(self, msg: dict) -> None:
+        # Observe this test process itself; never repair/chdir or inspect peers.
+        self.query_generation = getattr(self, "query_generation", 0) + 1
+        try:
+            cwd_state = {"cwd": os.getcwd(), "cwd_error": None}
+        except OSError as exc:
+            cwd_state = {"cwd": None, "cwd_error": type(exc).__name__, "cwd_errno": exc.errno}
+        log("turn_cwd", session_id=self.sid, launch_generation=os.getpid(),
+            query_generation=self.query_generation, **cwd_state)
         self.model_calls = 0
         content = (msg.get("message") or {}).get("content")
         if isinstance(content, str):

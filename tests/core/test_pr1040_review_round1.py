@@ -101,6 +101,24 @@ async def test_owner_enqueue_preflight_waits_for_old_finisher(repo, monkeypatch,
     assert git(checkout.path, "branch", "--show-current") == checkout.branch
 
 
+@pytest.mark.parametrize("dirty", [False, True])
+async def test_reclaimed_checkout_retires_pooled_cwd_generation(repo, monkeypatch, dirty):
+    from app.core.session_pool import get_session_pool
+
+    session_pool = get_session_pool()
+    checkout = bind_worker(repo)
+    if dirty:
+        Path(checkout.path, "keep-owner-work.txt").write_text("retain this checkout")
+    async def retire(session_id, *, preserve_session):
+        assert session_id == "followup" and preserve_session is True
+        assert not Path(checkout.path).exists()
+        assert turn_scheduler.message_resume_lock(session_id).locked()
+    removed = AsyncMock(side_effect=retire)
+    monkeypatch.setattr(session_pool, "remove", removed)
+    assert await worker_checkout.reclaim_finished_worker_checkout("followup") is not dirty
+    assert removed.await_count == int(not dirty)
+
+
 async def test_zero_output_retry_cannot_reclaim_a_queued_followup(repo, monkeypatch):
     checkout = bind_worker(repo)
     await turn_manager.submit_async("followup", "user", prompt="continue", profile_id="coder", no_kick=True)
