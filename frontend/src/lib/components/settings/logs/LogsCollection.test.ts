@@ -222,3 +222,19 @@ it('renders every Logs registry entry', async () => {
 		return render(LogsCollection, { props: { model: new LogsModel() } }).container;
 	});
 });
+
+describe('detail scroll', () => {
+	it('opens a newly picked entry at its top, not where the previous one was scrolled', async () => {
+		await mount();
+		const rows = [...document.querySelectorAll<HTMLElement>('[data-settings-item]')];
+		expect(rows.length).toBeGreaterThan(1);
+		await fireEvent.click(rows[0]);
+		await tick();
+		const pane = screen.getByRole('region', { name: 'Details' });
+		const scrollTo = vi.fn();
+		pane.scrollTo = scrollTo as unknown as typeof pane.scrollTo;
+		await fireEvent.click(rows[1]);
+		await tick();
+		expect(scrollTo).toHaveBeenCalledWith({ top: 0 });
+	});
+});

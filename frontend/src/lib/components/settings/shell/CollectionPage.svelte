@@ -83,6 +83,16 @@
 	let el: HTMLDivElement | undefined = $state();
 	const openItem = $derived(category ? settingsNav.selectedItem(category) : null);
 
+	// The open detail scrolls on its own beside the list, so a newly picked item
+	// starts at its top rather than where the previous item was scrolled to.
+	let pane: HTMLElement | undefined = $state();
+	let lastScrolled: string | null | undefined;
+	$effect(() => {
+		const current = openItem ?? null;
+		if (lastScrolled !== undefined && lastScrolled !== current) pane?.scrollTo?.({ top: 0 });
+		lastScrolled = current;
+	});
+
 	// The list and the detail swap in place, so focus has to move with them:
 	// into the detail's title, or back to the row it was opened from.
 	let lastOpen: string | null | undefined;
@@ -165,7 +175,7 @@
 			<ListEmptyScope>{@render list()}</ListEmptyScope>
 		</div>
 	</div>
-	<section class="st-dpane st-scroll" aria-label="Details">
+	<section class="st-dpane st-scroll" aria-label="Details" bind:this={pane}>
 		{@render detail()}
 	</section>
 </div>
