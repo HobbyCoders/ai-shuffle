@@ -308,3 +308,139 @@ def test_actual_jsonb_decoder_is_pure_and_preserves_passthrough(raw, expected, m
     assert decoded == expected
     if not isinstance(raw, str):
         assert decoded is raw
+
+
+def test_rebound_decoder_reports_the_actual_sync_query_call():
+    findings = scan_source(
+        "from app.db.base import parse_jsonb\n"
+        "from app.db.turns import get_turn\n"
+        "parse_jsonb = get_turn\n"
+        "async def handler():\n"
+        "    parse_jsonb('turn-id')\n",
+        "rebinding.py",
+    )
+    assert findings == [{"file": "rebinding.py", "line": 5,
+                         "call": "parse_jsonb()", "handler": "handler"}]
+
+
+@pytest.mark.parametrize("binding", [
+    "decode = get_turn",
+    "decode: object = get_turn",
+    "decode += get_turn",
+    "decode, other = get_turn, None",
+    "del decode",
+    "for decode in [get_turn]: pass",
+    "with manager() as decode: pass",
+    "if (decode := get_turn): pass",
+    "try: pass\nexcept Exception as decode: pass",
+    "match value:\n    case {'query': decode}: pass",
+    "match value:\n    case [*decode]: pass",
+    "match value:\n    case {**decode}: pass",
+    "def decode(): pass",
+    "async def decode(): pass",
+    "class decode: pass",
+    "from app.core.other import decode",
+    "import other as decode",
+    "from other import *",
+])
+def test_pure_bare_binding_must_not_have_another_binding_or_deletion(binding):
+    source = ("from app.db.base import parse_jsonb as decode\n"
+              "from app.db.turns import get_turn\n" + binding +
+              "\nasync def handler():\n    decode('turn-id')\n")
+    assert _calls(source) == ["decode()"]
+
+
+@pytest.mark.parametrize("arguments", [
+    "decode", "decode=get_turn", "*decode", "**decode", "*, decode", "decode, /",
+])
+def test_parameter_shadowing_invalidates_pure_bare_binding(arguments):
+    source = ("from app.db.base import parse_jsonb as decode\n"
+              "from app.db.turns import get_turn\n"
+              f"async def handler({arguments}):\n    decode('turn-id')\n")
+    assert _calls(source) == ["decode()"]
+
+
+def test_enclosing_parameter_and_comprehension_shadowing_are_not_pure():
+    assert _calls("""
+        from app.db.base import parse_jsonb as decode
+        from app.db.turns import get_turn
+        def factory(decode):
+            async def handler():
+                decode('turn-id')
+    """) == ["decode()"]
+    assert _calls("""
+        from app.db.base import parse_jsonb as decode
+        from app.db.turns import get_turn
+        async def handler():
+            return [decode('turn-id') for decode in [get_turn]]
+    """) == ["decode()"]
+
+
+@pytest.mark.parametrize("binding", [
+    "db = other",
+    "del db",
+    "db.parse_jsonb = get_turn",
+    "del db.parse_jsonb",
+    "for db in modules: pass",
+    "with manager() as db: pass",
+    "if (db := other): pass",
+    "from app.core import other as db",
+    "import other as db",
+    "from app.db import async_database as db",
+])
+def test_module_alias_uncertainty_invalidates_pure_export(binding):
+    source = ("from app.db import base as db\n"
+              "from app.db.turns import get_turn\n" + binding +
+              "\nasync def handler():\n    db.parse_jsonb('turn-id')\n")
+    assert _calls(source) == ["db.parse_jsonb"]
+
+
+def test_module_alias_parameter_shadowing_is_not_pure():
+    assert _calls("""
+        import app.db.base as db
+        async def handler(db):
+            db.parse_jsonb('turn-id')
+    """) == ["db.parse_jsonb"]
+
+
+@pytest.mark.parametrize("binding", [
+    "app = other",
+    "app.db = other",
+    "app.db.base = other",
+    "app.db.base.parse_jsonb = get_turn",
+    "del app.db.base.parse_jsonb",
+    "import other as app",
+])
+def test_fully_qualified_decoder_requires_unchanged_package_binding(binding):
+    source = ("import app.db.base\n" + binding +
+              "\nasync def handler():\n    app.db.base.parse_jsonb('turn-id')\n")
+    assert _calls(source) == ["app.db.base.parse_jsonb"]
+
+
+def test_export_mutation_through_an_equivalent_alias_is_not_pure():
+    assert _calls("""
+        from app.db import base as changed
+        import app.db.base as read
+        changed.parse_jsonb = query
+        async def handler():
+            read.parse_jsonb('turn-id')
+    """) == ["read.parse_jsonb"]
+    assert _calls("""
+        from app.db import base as changed
+        import app.db.base
+        changed.parse_jsonb = query
+        async def handler():
+            app.db.base.parse_jsonb('turn-id')
+    """) == ["app.db.base.parse_jsonb"]
+
+
+def test_repeated_canonical_imports_without_rebinding_stay_pure():
+    assert _calls("""
+        from app.db.base import parse_jsonb as decode
+        import app.db.base as db
+        async def handler():
+            from app.db.base import parse_jsonb as decode
+            import app.db.base as db
+            decode('null')
+            db.parse_jsonb('null')
+    """) == []

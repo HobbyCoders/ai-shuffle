@@ -118,20 +118,22 @@ def _dotted(node: ast.AST) -> str | None:
     return ".".join(reversed(parts))
 
 
-def collect_db_names(tree: ast.AST) -> tuple[dict[str, set[str]], set[str]]:
-    """Return (module_aliases, bare_funcs) bound to synchronous app.db code.
+def collect_db_names(tree: ast.AST) -> tuple[dict[str, set[str]], set[str], set[str]]:
+    """Return DB candidates and the calls with unchanged canonical pure bindings.
 
-    ``module_aliases`` maps local names to their candidate ``app.db`` modules,
-    retaining provenance for exact pure-export exceptions. Multiple candidates
-    remain conservative. ``bare_funcs`` are local names bound directly to a
-    non-exempt function pulled out of an ``app.db`` module.
+    Import collection is deliberately scope-agnostic: competing imports or any
+    binding/shadowing write invalidate purity, even in another lexical scope.
+    Keep pure imports as DB candidates so uncertainty cannot erase a finding.
     """
     module_aliases: dict[str, set[str]] = {}
     bare_funcs: set[str] = set()
+    bindings: dict[str, set[str]] = collections.defaultdict(set)
 
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
             mod = node.module or ""
+            for alias in node.names:
+                bindings[alias.asname or alias.name].add("." * node.level + f"{mod}.{alias.name}")
             # Relative imports (level > 0) can't be resolved without knowing
             # the importing package; app/ uses absolute imports throughout.
             if node.level:
@@ -150,13 +152,14 @@ def collect_db_names(tree: ast.AST) -> tuple[dict[str, set[str]], set[str]]:
                 if mod == ASYNC_DB_MODULE:
                     continue
                 for alias in node.names:
-                    if (_is_allowlisted(alias.name)
-                            or f"{mod}.{alias.name}" in PURE_DB_CALLS):
+                    if _is_allowlisted(alias.name):
                         continue
                     bare_funcs.add(alias.asname or alias.name)
         elif isinstance(node, ast.Import):
             for alias in node.names:
                 name = alias.name
+                local = alias.asname or name.split(".")[0]
+                bindings[local].add(name if alias.asname else local)
                 if not name.startswith(DB_PACKAGE + "."):
                     continue
                 if name == ASYNC_DB_MODULE:
@@ -167,14 +170,75 @@ def collect_db_names(tree: ast.AST) -> tuple[dict[str, set[str]], set[str]]:
                 # Plain `import app.db.turns` binds `app`; those call sites are
                 # matched by their full dotted path instead (see _call_label).
 
-    return module_aliases, bare_funcs
+    pure: dict[str, str] = {}
+    for canonical in PURE_DB_CALLS:
+        module, _, attr = canonical.rpartition(".")
+        for local in bare_funcs:
+            if bindings[local] == {canonical}:
+                pure[local] = canonical
+        for local, modules in module_aliases.items():
+            if modules == {module} and bindings[local] == {module}:
+                pure[f"{local}.{attr}"] = canonical
+        root = canonical.split(".")[0]
+        if bindings[root] == {root}:
+            pure[canonical] = canonical
+
+    writes, exports = _binding_writes(tree, module_aliases, bare_funcs, bindings)
+    unchanged = {call for call, canonical in pure.items()
+                 if "*" not in bindings
+                 and not any(call == name or call.startswith(name + ".") for name in writes)
+                 and not any(canonical == name or canonical.startswith(name + ".") for name in exports)}
+    return module_aliases, bare_funcs, unchanged
+
+
+def _binding_writes(tree, module_aliases, bare_funcs, bindings) -> tuple[set[str], set[str]]:
+    """Bindings and imported objects that cannot retain an exact pure exemption.
+
+    This is conservative invalidation, not flow analysis: assignments/deletions,
+    parameters, defs, import conflicts, loop/with/walrus/comprehension targets and
+    exception/pattern captures may all shadow a canonical binding. Mutating an
+    imported DB object also invalidates equivalent aliases of its pure exports.
+    """
+    writes: set[str] = set()
+    exports: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            writes.add(node.id)
+        elif isinstance(node, ast.arg):
+            writes.add(node.arg)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            writes.add(node.name)
+        elif isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)):
+            if node.name:
+                writes.add(node.name)
+        elif isinstance(node, ast.MatchMapping) and node.rest:
+            writes.add(node.rest)
+        elif isinstance(node, (ast.Attribute, ast.Subscript)) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            root = node
+            while isinstance(root, (ast.Attribute, ast.Subscript)):
+                root = root.value
+            if isinstance(root, ast.Name):
+                writes.add(root.id)
+                if root.id in module_aliases or root.id in bare_funcs:
+                    exports.update(bindings[root.id])
+            target = node.value if isinstance(node, ast.Subscript) else node
+            dotted = _dotted(target)
+            if dotted and dotted.startswith(DB_PACKAGE + "."):
+                exports.add(dotted)
+                for canonical in PURE_DB_CALLS:
+                    module = canonical.rpartition(".")[0]
+                    if dotted.startswith(module + "."):
+                        exports.add(module)
+    return writes, exports
 
 
 def _call_label(
-    node: ast.Call, module_aliases: dict[str, set[str]], bare_funcs: set[str]
+    node: ast.Call, module_aliases: dict[str, set[str]], bare_funcs: set[str], pure_calls: set[str]
 ) -> str | None:
     """Label for a call into synchronous app.db code, or None if it isn't one."""
     func = node.func
+    if _dotted(func) in pure_calls:
+        return None
 
     if isinstance(func, ast.Name):
         return f"{func.id}()" if func.id in bare_funcs else None
@@ -188,8 +252,6 @@ def _call_label(
 
     base = func.value
     if isinstance(base, ast.Name) and base.id in module_aliases:
-        if all(f"{module}.{attr}" in PURE_DB_CALLS for module in module_aliases[base.id]):
-            return None
         return f"{base.id}.{attr}"
 
     # Fully qualified: app.db.<module>.fn()
@@ -198,7 +260,6 @@ def _call_label(
         dotted
         and dotted.startswith(DB_PACKAGE + ".")
         and dotted != ASYNC_DB_MODULE
-        and f"{dotted}.{attr}" not in PURE_DB_CALLS
     ):
         return f"{dotted}.{attr}"
 
@@ -221,9 +282,7 @@ def scan_source(src: str, path: str = "<string>") -> list[dict]:
     except SyntaxError:
         return []
 
-    module_aliases, bare_funcs = collect_db_names(tree)
-    if not module_aliases and not bare_funcs:
-        return []
+    module_aliases, bare_funcs, pure_calls = collect_db_names(tree)
 
     lines = src.splitlines()
     # A lambda is a sync scope like any other `def`: `run_sync(lambda: db.f())`
@@ -243,7 +302,7 @@ def scan_source(src: str, path: str = "<string>") -> list[dict]:
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
-        label = _call_label(node, module_aliases, bare_funcs)
+        label = _call_label(node, module_aliases, bare_funcs, pure_calls)
         if label is None:
             continue
         enc = _enclosing(funcs, node.lineno)
