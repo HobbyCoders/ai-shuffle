@@ -11,6 +11,8 @@
 		value: string;
 		onchange?: (value: string) => void;
 		oninput?: (value: string) => void;
+		/** Optional form keyboard path; preventDefault opts out of the default commit. */
+		onkeydown?: (event: KeyboardEvent) => void;
 		placeholder?: string;
 		type?: 'text' | 'password' | 'url' | 'email' | 'search';
 		mono?: boolean;
@@ -32,6 +34,7 @@
 		value = $bindable(''),
 		onchange,
 		oninput,
+		onkeydown,
 		placeholder,
 		type = 'text',
 		mono = false,
@@ -79,6 +82,8 @@
 	oninput={() => oninput?.(value)}
 	onblur={commit}
 	onkeydown={(e) => {
+		onkeydown?.(e);
+		if (e.defaultPrevented) return;
 		if (e.key === 'Enter') {
 			e.preventDefault();
 			commit();

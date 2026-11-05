@@ -32,6 +32,8 @@
 		name: string;
 		/** A ViewMain data wrapper owns width and gutters instead of the reading pane. */
 		dataLayout?: boolean;
+		/** Collection pages outside Settings use the Agents reading column. */
+		centered?: boolean;
 		icon?: SettingsIcon;
 		/** Tile text instead of an icon (provider glyph). */
 		glyph?: string;
@@ -73,6 +75,7 @@
 	let {
 		name,
 		dataLayout = false,
+		centered = false,
 		icon,
 		glyph,
 		tile,
@@ -123,7 +126,7 @@
 	}
 </script>
 
-<div class="st-dwrap" class:data-layout={dataLayout}>
+<div class="st-dwrap" class:data-layout={dataLayout} class:centered>
 	<div class="st-dtop">
 		<button type="button" class="st-back" aria-label="Back to {catLabel}" onclick={() => (onBack ? onBack() : settingsNav.stacked ? settingsNav.back() : settingsNav.clearSelection(cat))}>
 			<ChevronLeft /><span>{catLabel}</span>
@@ -184,6 +187,7 @@
 	@container settings (max-width: 850px) {
 		.data-layout .st-dha { grid-column: 1 / -1; justify-content: flex-start; }
 	}
+	.st-dwrap.centered { width: 100%; max-width: 740px; margin-inline: auto; }
 	.st-dtop {
 		display: flex;
 		align-items: center;

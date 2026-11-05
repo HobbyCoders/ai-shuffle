@@ -44,7 +44,7 @@ afterEach(() => cleanup());
 
 async function mount(projectId = 'p1') {
 	const view = render(ProjectMcpTab, { props: { projectId } });
-	await screen.findByText('Global MCP Servers');
+	await screen.findByText('Global MCP servers');
 	return view;
 }
 
@@ -52,15 +52,15 @@ describe('ProjectMcpTab', () => {
 	it('groups servers by scope and filters by search', async () => {
 		await mount();
 		expect(api.getProjectMcpServers).toHaveBeenCalledWith('p1');
-		for (const h of ['Installed MCP Servers', 'Local MCP Servers', 'Project MCP Servers']) expect(screen.getByText(h)).toBeTruthy();
+		for (const h of ['Installed MCP servers', 'Local MCP servers', 'Project MCP servers']) expect(screen.getByText(h)).toBeTruthy();
 		expect(screen.getByText('https://db.example.com/mcp')).toBeTruthy();
 		// Built-in global servers can be toggled but not removed.
 		expect(screen.getByRole('switch', { name: 'Disable sdk' })).toBeTruthy();
 		expect(screen.queryByRole('button', { name: 'Remove sdk' })).toBeNull();
 
 		await fireEvent.input(screen.getByPlaceholderText('Search MCP servers…'), { target: { value: 'db.example' } });
-		expect(screen.queryByText('Global MCP Servers')).toBeNull();
-		expect(screen.getByText('Project MCP Servers')).toBeTruthy();
+		expect(screen.queryByText('Global MCP servers')).toBeNull();
+		expect(screen.getByText('Project MCP servers')).toBeTruthy();
 	});
 
 	it('shows the empty state when the project has no servers', async () => {
@@ -104,7 +104,7 @@ describe('ProjectMcpTab', () => {
 		expect(within(screen.getByRole('dialog')).getByText('Remove "sentry" from this project?')).toBeTruthy();
 		await fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Remove' }));
 		await waitFor(() => expect(api.removeProjectMcpServer).toHaveBeenCalledWith('p1', 'sentry', 'installed'));
-		await waitFor(() => expect(screen.queryByText('Installed MCP Servers')).toBeNull());
+		await waitFor(() => expect(screen.queryByText('Installed MCP servers')).toBeNull());
 	});
 
 	it('adds a project-scoped server through the form', async () => {
@@ -166,7 +166,7 @@ describe('ProjectMcpTab', () => {
 		expect(screen.queryByText('No MCP servers available')).toBeNull();
 		p2.resolve(p2Servers());
 		expect(await screen.findByRole('button', { name: 'Edit p2-only' })).toBeTruthy();
-		expect(screen.queryByText('Installed MCP Servers')).toBeNull();
+		expect(screen.queryByText('Installed MCP servers')).toBeNull();
 	});
 
 	it('does not keep showing the previous project when the new load fails', async () => {
@@ -174,7 +174,7 @@ describe('ProjectMcpTab', () => {
 		api.getProjectMcpServers.mockRejectedValueOnce({ detail: 'project path missing' });
 		await view.rerender({ projectId: 'p2' });
 		expect(await screen.findByText('project path missing')).toBeTruthy();
-		expect(screen.queryByText('Global MCP Servers')).toBeNull();
+		expect(screen.queryByText('Global MCP servers')).toBeNull();
 		expect(screen.queryByRole('switch', { name: 'Enable sentry' })).toBeNull();
 	});
 
@@ -203,6 +203,6 @@ describe('ProjectMcpTab', () => {
 		await waitFor(() => expect(api.getProjectMcpServers.mock.calls.slice(before)).toEqual([['p1'], ['p2']]));
 		expect(api.toggleProjectMcpServer).toHaveBeenCalledWith('p1', 'sentry', true);
 		expect(await screen.findByRole('button', { name: 'Edit p2-only' })).toBeTruthy();
-		expect(screen.queryByText('Installed MCP Servers')).toBeNull();
+		expect(screen.queryByText('Installed MCP servers')).toBeNull();
 	});
 });

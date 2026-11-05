@@ -53,6 +53,16 @@ describe('keyboard', () => {
 	});
 });
 
+describe('disabled tabs', () => {
+	it('keeps locked project tabs visible but skips them with the keyboard', async () => {
+		const onselect = vi.fn();
+		render(DetailTabs, { tabs: [{ id: 'general', label: 'General', disabled: true }, { id: 'workers', label: 'Workers' }], current: 'workers', onselect, label: 'Project settings', idPrefix: 'p' });
+		expect((screen.getByRole('tab', { name: 'General' }) as HTMLButtonElement).disabled).toBe(true);
+		await fireEvent.keyDown(screen.getByRole('tab', { name: 'Workers' }), { key: 'Home' });
+		expect(onselect).toHaveBeenLastCalledWith('workers');
+	});
+});
+
 describe('keeping the active tab in view', () => {
 	it('scrolls left or right only as far as needed, with some room', () => {
 		const view = { scrollLeft: 100, width: 300 };

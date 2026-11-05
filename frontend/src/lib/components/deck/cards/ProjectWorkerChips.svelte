@@ -49,7 +49,7 @@
 		{#each chips as { worker, chip } (worker.install_id)}
 			<button
 				type="button"
-				class="wchip wchip--{chip.tone}"
+				class="st-btn sm wchip wchip--{chip.tone}"
 				title={chip.title}
 				aria-label="{chip.text}: {chip.actionable ? `not set up — set ${projectName} up on ${worker.device_name}` : chip.title}"
 				data-worker-state={worker.state}
@@ -63,58 +63,15 @@
 {/if}
 
 <style>
-	.wchips { display: flex; gap: 5px; flex-wrap: wrap; justify-content: flex-end; min-width: 0; }
-	.wchips--legend { justify-content: flex-start; gap: 12px; }
-	.wchip {
-		display: inline-flex;
-		align-items: center;
-		gap: 5px;
-		min-height: 24px;
-		max-width: 100%;
-		padding: 2px 8px;
-		border: 1px solid var(--border);
-		border-radius: 999px;
-		background: transparent;
-		color: var(--foreground);
-		font: inherit;
-		font-size: 0.72rem;
-		line-height: 1.2;
-		white-space: nowrap;
-		cursor: pointer;
-		transition: color 120ms ease, border-color 120ms ease, background-color 120ms ease;
-	}
-	.wchips--legend .wchip { cursor: default; }
+	.wchips { display: flex; gap: 6px; flex-wrap: wrap; min-width: 0; }
+	.wchips--legend { gap: 8px 12px; color: var(--st-mfg); font-size: 12px; }
+	.wchip { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; }
 	.wchip .t { overflow: hidden; text-overflow: ellipsis; }
-	button.wchip:hover { background: var(--hover-overlay); }
-	button.wchip:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
-	.d { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--success); }
-
-	.wchip--missing { border-style: dashed; color: var(--muted-foreground); }
-	.wchip--missing .d { width: 8px; height: 8px; background: transparent; border: 1.5px solid var(--muted-foreground); }
-	button.wchip--missing:hover { color: var(--primary); border-color: var(--primary); background: color-mix(in oklch, var(--primary) 8%, transparent); }
-	button.wchip--missing:hover .d { border-color: var(--primary); }
-
-	.wchip--offline { color: var(--muted-foreground); }
-	.wchip--offline .d { background: var(--muted-foreground); }
-
-	.wchip--busy { color: var(--primary); border-color: color-mix(in oklch, var(--primary) 50%, transparent); }
-	.wchip--busy .d {
-		width: 9px;
-		height: 9px;
-		background: transparent;
-		border: 2px solid var(--primary);
-		border-right-color: transparent;
-		animation: wchip-spin 0.8s linear infinite;
-	}
-
-	.wchip--failed { color: var(--destructive); border-color: color-mix(in oklch, var(--destructive) 50%, transparent); }
-	.wchip--failed .d { background: var(--destructive); }
-
-	.wchip--unknown { color: var(--muted-foreground); border-style: dotted; }
-	.wchip--unknown .d { background: transparent; border: 1.5px dotted var(--muted-foreground); }
-
-	@keyframes wchip-spin { to { transform: rotate(360deg); } }
-	@media (prefers-reduced-motion: reduce) {
-		.wchip--busy .d { animation: none; border-right-color: var(--primary); opacity: 0.6; }
-	}
+	.d { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--st-success); }
+	.wchip--missing .d { background: transparent; border: 1px solid var(--st-mfg); }
+	.wchip--offline .d, .wchip--unknown .d { background: var(--st-mfg); }
+	.wchip--failed .d { background: var(--st-destructive); }
+	.wchip--busy .d { background: transparent; width: 9px; height: 9px; border: 2px solid var(--st-mfg); border-right-color: transparent; animation: worker-spin 0.8s linear infinite; }
+	@keyframes worker-spin { to { transform: rotate(360deg); } }
+	@media (prefers-reduced-motion: reduce) { .wchip--busy .d { animation: none; } }
 </style>

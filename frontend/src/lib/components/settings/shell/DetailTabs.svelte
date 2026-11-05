@@ -3,6 +3,8 @@
 		id: string;
 		label?: string;
 		count?: number | string;
+		disabled?: boolean;
+		title?: string;
 	}
 
 	/** Extra room kept beside the active tab when it is scrolled into view. */
@@ -89,17 +91,19 @@
 	});
 
 	function onkeydown(event: KeyboardEvent) {
-		const i = tabs.findIndex((t) => t.id === current);
+		const enabled = tabs.filter((t) => !t.disabled);
+		if (!enabled.length) return;
+		const i = enabled.findIndex((t) => t.id === current);
 		let next = -1;
-		if (event.key === 'ArrowRight') next = (i + 1) % tabs.length;
-		else if (event.key === 'ArrowLeft') next = (i - 1 + tabs.length) % tabs.length;
+		if (event.key === 'ArrowRight') next = (i + 1) % enabled.length;
+		else if (event.key === 'ArrowLeft') next = (i - 1 + enabled.length) % enabled.length;
 		else if (event.key === 'Home') next = 0;
-		else if (event.key === 'End') next = tabs.length - 1;
+		else if (event.key === 'End') next = enabled.length - 1;
 		if (next < 0) return;
 		event.preventDefault();
-		onselect(tabs[next].id);
-		list?.querySelectorAll<HTMLElement>('[role="tab"]')[next]?.focus({ preventScroll: true });
-		reveal(tabs[next].id);
+		onselect(enabled[next].id);
+		list?.querySelector<HTMLElement>(`[data-tab-id="${enabled[next].id}"]`)?.focus({ preventScroll: true });
+		reveal(enabled[next].id);
 	}
 
 	/** A vertical wheel scrolls the strip sideways, until it reaches an end. */
@@ -176,6 +180,9 @@
 				role="tab"
 				id="{idPrefix}-tab-{tab.id}"
 				data-tab-id={tab.id}
+				disabled={tab.disabled}
+				aria-disabled={tab.disabled || undefined}
+				title={tab.title}
 				aria-selected={tab.id === current}
 				aria-controls="{idPrefix}-panel"
 				tabindex={tab.id === current ? 0 : -1}

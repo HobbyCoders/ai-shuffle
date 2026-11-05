@@ -1,22 +1,14 @@
 <script lang="ts">
-	/**
-	 * ProjectGeneralTab - General settings tab for project detail view
-	 *
-	 * Studio-v2 grouped-field design (.set-group / .set-row), mirroring the
-	 * old Profile editor. Field primitives come from
-	 * project-tabs.css, gated under the `.ptab` wrapper.
-	 *
-	 * - Editable project name + path (inline save)
-	 * - Read-only project ID
-	 * - Group assignment with select + plus/delete buttons + new group input
-	 */
-	import { untrack } from 'svelte';
+	/** Project identity, location and grouping, using Settings rows. */
+	import { tick, untrack } from 'svelte';
 	import { getGitStatus } from '$lib/api/git';
 	import { git } from '$lib/stores/git.svelte';
 	import InitRepoModal from '$lib/components/git/InitRepoModal.svelte';
 	import { appData, projects } from '$lib/stores/app-data.svelte';
 	import { groups as groupsStore } from '$lib/stores/groups.svelte';
 	import { FolderGit2, Check, Plus, Trash2, Loader2 } from 'lucide-svelte';
+	import { RowGroup, SettingRow, SelectField, InlineBanner } from '$lib/components/layout/view';
+	import TextField from '$lib/components/settings/rows/TextField.svelte';
 	import './project-tabs.css';
 
 	interface Props {
@@ -112,8 +104,7 @@
 	}
 
 	// Group handlers
-	function handleGroupChange(e: Event) {
-		const v = (e.target as HTMLSelectElement).value;
+	function handleGroupChange(v: string) {
 		if (v) {
 			groupsStore.assignToGroup('projects', projectId, v);
 		} else {
@@ -121,9 +112,11 @@
 		}
 	}
 
-	function startGroupCreate() {
+	async function startGroupCreate() {
 		creatingGroup = true;
 		newGroupName = '';
+		await tick();
+		document.querySelector<HTMLInputElement>('input[aria-label="Group name"]')?.focus();
 	}
 
 	function confirmGroupCreate() {
@@ -149,138 +142,46 @@
 		}
 	}
 </script>
-
 {#if showInitRepoModal}
-	<InitRepoModal open={showInitRepoModal} {projectId} projectName={project?.name ?? ''}
-		onClose={() => (showInitRepoModal = false)} onInitialized={repositoryInitialized} />
+	<InitRepoModal open={showInitRepoModal} {projectId} projectName={project?.name ?? ''} onClose={() => (showInitRepoModal = false)} onInitialized={repositoryInitialized} />
 {/if}
-
-{#if remoteChange}<p role="status" style="flex: none; height: auto;" class="px-4 py-2 text-sm text-muted-foreground">{remoteChange}</p>{/if}
-{#if !project && remoteChange}
-	<label class="block p-4">Unsaved name<input class="inp" bind:value={editName} /></label>
-	<label class="block p-4">Unsaved path<input class="inp" bind:value={editPath} /></label>
+{#if remoteChange}<InlineBanner>{remoteChange}</InlineBanner>{/if}
+{#if project || remoteChange}
+	<RowGroup title="Identity">
+		{#if canInitialize}
+			<SettingRow label="Version control" hint="This folder is not a Git repository."><button class="st-btn" onclick={() => (showInitRepoModal = true)}>Initialize Git repository</button></SettingRow>
+		{/if}
+		<SettingRow label={project ? 'Name' : 'Unsaved name'} hint="Display name shown across the app.">
+			<form class="project-controls" onsubmit={(e) => { e.preventDefault(); handleSaveName(); }}>
+				<TextField onkeydown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleSaveName(); } }} bind:value={editName} oninput={(value) => (editName = value)} placeholder="Project name" />
+				{#if nameDirty && project}<button class="st-btn icon" disabled={nameLoading || !editName.trim()} title="Save name" aria-label="Save name"><Check /></button>{/if}
+			</form>
+			{#if nameError}<span class="project-error" role="alert">{nameError}</span>{/if}
+		</SettingRow>
+		{#if project}<SettingRow label="Project ID" hint="Unique identifier (read-only)."><span class="project-muted">{project.id}</span></SettingRow>{/if}
+		<SettingRow label={project ? 'Path' : 'Unsaved path'} hint="Filesystem location of this project.">
+			{#snippet expanded()}
+				<form class="project-controls" onsubmit={(e) => { e.preventDefault(); handleSavePath(); }}>
+					<TextField onkeydown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleSavePath(); } }} bind:value={editPath} oninput={(value) => (editPath = value)} placeholder="Project path" mono width={600} label="Project path" />
+					{#if pathDirty && project}<button class="st-btn icon" disabled={pathLoading || !editPath.trim()} title="Save path" aria-label="Save path"><Check /></button>{/if}
+				</form>
+				{#if pathError}<span class="project-error" role="alert">{pathError}</span>{/if}
+			{/snippet}
+		</SettingRow>
+		{#if project}
+			<SettingRow label="Group" hint="Organize related projects together.">
+				<SelectField value={groups?.projects?.assignments?.[projectId] ?? ''} options={[{ value: '', label: 'No group' }, ...(groups?.projects?.groups ?? []).map(g => ({ value: g.name, label: g.name }))]} onchange={handleGroupChange} />
+				{#if creatingGroup}
+					<form class="project-controls" onsubmit={(e) => { e.preventDefault(); confirmGroupCreate(); }}>
+						<TextField onkeydown={(e) => { if (e.key === 'Enter') { e.preventDefault(); confirmGroupCreate(); } else if (e.key === 'Escape') { e.preventDefault(); cancelGroupCreate(); } }} bind:value={newGroupName} oninput={(v) => (newGroupName = v)} placeholder="Group name…" label="Group name" />
+						<button class="st-btn icon" title="Create" aria-label="Create"><Check /></button>
+						<button type="button" class="st-btn" onclick={cancelGroupCreate}>Cancel</button>
+					</form>
+				{:else}
+					<button class="st-btn icon" onclick={startGroupCreate} title="New group" aria-label="New group"><Plus /></button>
+					{#if groups?.projects?.assignments?.[projectId]}<button class="st-btn icon danger" onclick={deleteCurrentGroup} title="Delete group" aria-label="Delete group"><Trash2 /></button>{/if}
+				{/if}
+			</SettingRow>
+		{/if}
+	</RowGroup>
 {/if}
-{#if project}
-	<div class="ptab">
-		<div class="set-group">
-			<div class="set-grouphead"><h3><FolderGit2 />Identity</h3></div>
-
-			{#if canInitialize}
-				<div class="set-row">
-					<div class="lab"><h4>Version control</h4><p>This folder is not a Git repository.</p></div>
-					<div class="ctl"><button class="btn" onclick={() => (showInitRepoModal = true)}>Initialize Git repository</button></div>
-				</div>
-			{/if}
-
-			<!-- Project Name -->
-			<div class="set-row">
-				<div class="lab"><h4>Name</h4><p>Display name shown across the app.</p></div>
-				<div class="ctl ctl-col">
-					<div class="grp-row">
-						<input
-							type="text"
-							bind:value={editName}
-							class="inp"
-							placeholder="Project name"
-							onkeydown={(e) => { if (e.key === 'Enter') handleSaveName(); }}
-						/>
-						{#if nameDirty}
-							<button class="icon-btn" onclick={handleSaveName} disabled={nameLoading || !editName.trim()} title="Save name">
-								{#if nameLoading}<Loader2 size={14} class="animate-spin" />{:else}<Check size={14} />{/if}
-							</button>
-						{/if}
-					</div>
-					{#if nameError}<p class="fld-err">{nameError}</p>{/if}
-				</div>
-			</div>
-
-			<!-- Project ID -->
-			<div class="set-row">
-				<div class="lab"><h4>Project ID</h4><p>Unique identifier (read-only).</p></div>
-				<div class="ctl">
-					<input type="text" class="inp mono" value={project.id} readonly />
-				</div>
-			</div>
-
-			<!-- Project Path -->
-			<div class="set-row stack">
-				<div class="lab"><h4>Path</h4><p>Filesystem location of this project.</p></div>
-				<div class="ctl ctl-col">
-					<div class="grp-row">
-						<input
-							type="text"
-							bind:value={editPath}
-							class="inp mono"
-							placeholder="Project path"
-							onkeydown={(e) => { if (e.key === 'Enter') handleSavePath(); }}
-						/>
-						{#if pathDirty}
-							<button class="icon-btn" onclick={handleSavePath} disabled={pathLoading || !editPath.trim()} title="Save path">
-								{#if pathLoading}<Loader2 size={14} class="animate-spin" />{:else}<Check size={14} />{/if}
-							</button>
-						{/if}
-					</div>
-					{#if pathError}<p class="fld-err">{pathError}</p>{/if}
-				</div>
-			</div>
-
-			<!-- Group Assignment -->
-			<div class="set-row">
-				<div class="lab"><h4>Group</h4><p>Organize related projects together.</p></div>
-				<div class="ctl ctl-col">
-					<div class="grp-row">
-						<select
-							class="sel"
-							value={groups?.projects?.assignments?.[projectId] ?? ''}
-							onchange={handleGroupChange}
-						>
-							<option value="">No group</option>
-							{#each groups?.projects?.groups ?? [] as group}
-								<option value={group.name}>{group.name}</option>
-							{/each}
-						</select>
-						{#if creatingGroup}
-							<button type="button" class="icon-btn" onclick={confirmGroupCreate} title="Create">
-								<Check size={14} />
-							</button>
-						{:else}
-							<button type="button" class="icon-btn" onclick={startGroupCreate} title="New group">
-								<Plus size={14} />
-							</button>
-							{#if (groups?.projects?.assignments?.[projectId] ?? "")}
-								<button type="button" class="icon-btn danger" onclick={deleteCurrentGroup} title="Delete group">
-									<Trash2 size={14} />
-								</button>
-							{/if}
-						{/if}
-					</div>
-					{#if creatingGroup}
-						<!-- svelte-ignore a11y_autofocus -->
-						<input
-							type="text"
-							class="inp"
-							placeholder="Group name…"
-							bind:value={newGroupName}
-							onkeydown={(e) => {
-								if (e.key === 'Enter') { e.preventDefault(); confirmGroupCreate(); }
-								if (e.key === 'Escape') { e.preventDefault(); cancelGroupCreate(); }
-							}}
-							autofocus
-						/>
-					{/if}
-				</div>
-			</div>
-		</div>
-	</div>
-{/if}
-
-<style>
-	:global(.animate-spin) {
-		animation: spin 1s linear infinite;
-	}
-
-	@keyframes spin {
-		from { transform: rotate(0deg); }
-		to { transform: rotate(360deg); }
-	}
-</style>
