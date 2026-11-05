@@ -25,7 +25,7 @@
 //   JOURNEY_CONSOLE    regex: page console lines that match are added to the
 //                      report (diagnosis, e.g. JOURNEY_CONSOLE='feedController')
 import { createHash } from 'node:crypto';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -78,7 +78,7 @@ export function readDevloopStatus() {
 	} catch (error) {
 		throw new Error(`no dev instance status at ${path} (${error.code || error.message}). Start one: python -m scripts.devloop up`);
 	}
-	if (status.state !== 'ready') throw new Error(`dev instance is ${status.state}, not ready (${path})`);
+	if (!['ready', 'paused', 'pausing', 'waking'].includes(status.state)) throw new Error(`dev instance is ${status.state}, not ready (${path})`);
 	if (!status.access_link) throw new Error(`dev instance status has no access_link (${path})`);
 	// A launcher killed before its teardown leaves a "ready" file behind.
 	if (status.pid && !processAlive(status.pid)) {
@@ -245,6 +245,20 @@ export async function runJourney(spec) {
 	if (!plan.length) throw new Error(`no case matches --only=${args.only}`);
 
 	const status = readDevloopStatus();
+	// Hold the private lease for this whole process, including setup, slow
+	// browser actions and long voice waits. PID/start time makes crashes safe.
+	if (status.pause?.enabled) {
+		const fields = readFileSync(`/proc/${process.pid}/stat`, 'utf8').split(') ').at(-1).split(' ');
+		const lease = join(status.scratch_dir, `journey-${process.pid}.lease`);
+		writeFileSync(lease, `${process.pid} ${fields[19]}`, { mode: 0o600 });
+		process.once('exit', () => { try { unlinkSync(lease); } catch {} });
+		writeFileSync(join(status.scratch_dir, 'wake.request'), JSON.stringify({ pid: status.pid }), { mode: 0o600 });
+		const deadline = Date.now() + 180_000;
+		while (readDevloopStatus().state !== 'ready') {
+			if (Date.now() >= deadline) throw new Error('dev instance did not wake within 180s');
+			await new Promise(resolve => setTimeout(resolve, 250));
+		}
+	}
 	const out = join(process.env.JOURNEY_OUT || join(tmpdir(), 'journeys'), spec.name);
 	mkdirSync(out, { recursive: true });
 	const { chromium } = require(process.env.PLAYWRIGHT_MODULE || resolve(CHECKOUT, 'browser-mcp/node_modules/playwright-core'));

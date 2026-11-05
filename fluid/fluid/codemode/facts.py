@@ -7,6 +7,7 @@ and project identities; standalone Fluid uses an installation-local owner.
 """
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import fields
 import hashlib
 import json
@@ -677,7 +678,7 @@ class FactStore:
     def save(self, text, memory_id=None, scope=None, provenance=None, *, protected=False,
              durable=None, key=None, expected_revision=None, source_session=None, restore=False,
              per_worker=False, correction_project=None, replaces=None, receipt=None,
-             when=None, always=None, require_when=False):
+             when=None, always=None, require_when=False, _document=None):
         """Save one fact in a tier.
 
         ``protected`` is the explicit tier (the user asked). ``durable=True``
@@ -702,6 +703,13 @@ class FactStore:
         a protected save may set it, and the in-scope ALWAYS_CHARS budget
         refuses one that would overflow it (:meth:`_check_always_budget`).
         """
+        if isinstance(key, str) and key.startswith("memory.coexist.job."):
+            return self._save_job_answer(
+                text, key=key, scope=scope, memory_id=memory_id, provenance=provenance,
+                protected=protected, durable=durable, expected_revision=expected_revision,
+                source_session=source_session, restore=restore, per_worker=per_worker,
+                correction_project=correction_project, replaces=replaces, receipt=receipt,
+                when=when, always=always, require_when=require_when)
         text = validate_text(text)
         if when is not None:
             when = validate_when(when)
@@ -723,8 +731,8 @@ class FactStore:
         receipt = receipt if isinstance(receipt, dict) else {}
         receipt.update(replaced=[], skipped=[], similar=[])
         fp = fingerprint(text)
-        with file_transaction(self.lock):
-            doc = self._prepare()
+        with file_transaction(self.lock) if _document is None else nullcontext():
+            doc = self._prepare() if _document is None else _document
             all_entries = doc["entries"] + doc["archived"]
             local = doc["store_id"]
             old = next((e for e in all_entries if e["id"] == memory_id), None) if memory_id else None
@@ -765,6 +773,12 @@ class FactStore:
             # Pair answers are separate decisions even when their prose is
             # identical. Legacy Bloom/tombstone text fences must not poison a
             # different pair; id/key fences still prevent restoring this one.
+            old_answer = bool(old and str(old.get("key") or "").startswith("memory.coexist."))
+            if old is not None and str(key or "").startswith("memory.coexist.") and not old_answer:
+                raise ValueError("An ordinary fact cannot be moved into the answer namespace; "
+                                 "save a separate owner answer; nothing was saved")
+            # Only an answer that stays in its control namespace may ignore a
+            # text fence. Rekeying it to an ordinary rule restores that fence.
             pair_answer = str(key or (old or {}).get("key") or "").startswith("memory.coexist.")
             suppressed = not pair_answer and barrier_contains(doc.get("forgotten", ""), "text:" + fp)
             if key:
@@ -806,7 +820,8 @@ class FactStore:
                         self._supersede(doc, old, targets)
                         self._maintain(doc, keep=old["id"])
                         receipt["replaced"] = self._replaced(old, targets)
-                        self._write(doc)
+                        if _document is None:
+                            self._write(doc)
                     return self._entry(old)  # already saved at the user's request
                 if durable:
                     raise ValueError("This fact was saved at the user's request; an agent cannot "
@@ -837,7 +852,8 @@ class FactStore:
                 self._edit_metadata(doc, old, when, always, protected=protected,
                                     expected_revision=expected_revision, exclude=())
                 self._maintain(doc, keep=old["id"])
-                self._write(doc)
+                if _document is None:
+                    self._write(doc)
                 return self._entry(old)
             if (old and not resolves and not old.get("conflicted") and old["text"] == text
                     and old.get("protected", False) == protected and bool(old.get("durable")) == is_durable):
@@ -849,7 +865,8 @@ class FactStore:
                         doc["archived"] = [e for e in doc["archived"] if e is not old]
                         doc["entries"].append(old)
                         self._maintain(doc, keep=old["id"])
-                        self._write(doc)
+                        if _document is None:
+                            self._write(doc)
                     return self._entry(old)
                 if old.get("superseded_by"):
                     if targets:
@@ -881,7 +898,8 @@ class FactStore:
                     self._supersede(doc, old, targets)
                 self._maintain(doc, keep=old["id"])
                 receipt["replaced"] = self._replaced(old, targets)
-                self._write(doc)
+                if _document is None:
+                    self._write(doc)
                 return self._entry(old)
             if old and old.get("protected") and expected_revision is None:
                 ref = f"[{old['id']} r{old.get('revision', 1)}]"
@@ -998,8 +1016,39 @@ class FactStore:
             if old is None and (protected or is_durable):
                 receipt["similar"] = self._similar(doc, entry, {e["id"] for e in targets},
                                                    correction_project)
-            self._write(doc)
+            if _document is None:
+                self._write(doc)
             return self._entry(entry)
+
+    def _save_job_answer(self, text, *, key, scope, **kwargs):
+        """Expand a current footer key to exact-pair rows, in one atomic commit.
+
+        A stale key, deletion fence, quota or validation failure commits nothing.
+        No ordinary rule is edited, and old per-pair keys remain valid closures.
+        """
+        from fluid.codemode.preferences import owner_questions, coexistence_key
+
+        if (not kwargs.get("protected") or kwargs.get("memory_id") is not None
+                or kwargs.get("replaces") or kwargs.get("expected_revision") is not None):
+            raise ValueError("A job answer must be a separate user-requested answer; "
+                             "no memory_id, replaces or revision; nothing was saved")
+        with file_transaction(self.lock):
+            doc = self._prepare()
+            scope = scope or "global"
+            rows = [e for e in doc["entries"] if visible_on(e, doc["store_id"])
+                    and (e.get("scope") or "global") == scope]
+            question = next((q for q in owner_questions(rows) if q["key"] == key), None)
+            if question is None:
+                raise ValueError("The owner question changed; Recall the current rules and "
+                                 "use the fresh footer answer key; nothing was saved")
+            answers = []
+            for a, b, _ in question["pairs"]:
+                answers.append(self.save(text, key=coexistence_key(a, b), scope=scope,
+                                         _document=doc, **kwargs))
+            self._write(doc)
+            if isinstance(kwargs.get("receipt"), dict):
+                kwargs["receipt"]["pair_answers"] = [e.id for e in answers]
+            return answers[-1]
 
     @staticmethod
     def _entry(entry):

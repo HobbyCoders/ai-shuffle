@@ -360,7 +360,7 @@ jobs:
             tests/db/test_turn_context_postgres.py tests/db/test_git_repository_record_postgres.py \
             tests/db/test_transcript_projection_postgres.py tests/db/test_session_message_window_postgres.py \
             tests/db/test_handoff_bulk_postgres.py \
-            tests/db/test_fluid_session_ownership_postgres.py \
+            tests/db/test_fluid_session_ownership_postgres.py tests/db/test_fluid_streamed_load_postgres.py \
             -o addopts="" -p no:cacheprovider --timeout=120 -v
 
       # Full controls once per database; repeat only both primary ratchets on main.

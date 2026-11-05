@@ -18,6 +18,7 @@ through the same ``CommitGate`` path via ``fluid evolve pending|run``.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 import sys
@@ -373,6 +374,7 @@ async def draft_anchors(
         model=model,
         messages=[Message(role="user", content=[Text(text="\n".join(lines))])],
         system=_HARVEST_SYSTEM.replace("{max}", str(MAX_HARVEST_DRAFTS)),
+        session_id="harvest:" + hashlib.sha256(project.encode()).hexdigest(),
         tools=[],
         max_tokens=4096,
     )

@@ -149,12 +149,13 @@ def _fetch(ids: list[str], store: Any, project: str | None = None) -> ToolOutcom
 
 def _owner_questions(store, project, hits):
     from fluid.codemode.facts import global_id
-    from fluid.codemode.preferences import owner_conflict_lines
+    from fluid.codemode.preferences import owner_conflict_lines, owner_questions
     ids = {global_id(vars(e)) for e, _ in hits}
     entries = [vars(e) for e in store.memories()
                if project is None or e.scope in ("global", project)]
-    return [line for line in owner_conflict_lines(entries)
-            if any(f"[{gid}]" in line for gid in ids)]
+    questions = [q for q in owner_questions(entries)
+                 if any(global_id(e) in ids for e in q["members"])]
+    return owner_conflict_lines(entries, questions=questions)
 
 
 def _is_answer(entry: Any) -> bool:

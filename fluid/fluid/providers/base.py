@@ -146,6 +146,8 @@ class ProviderRequest:
     # Per-loop, per-role routing state (see WireState). None for one-off
     # callers; a client that uses it reads and updates it in place.
     wire_state: WireState | None = field(default=None, compare=False, repr=False)
+    # Stable host conversation identity, never a per-request timestamp.
+    session_id: str | None = None
 
 
 def flatten_system(system: str | list[Any] | None) -> str | None:

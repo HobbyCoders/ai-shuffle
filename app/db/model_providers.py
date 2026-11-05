@@ -165,6 +165,7 @@ def create_model_provider(
     max_output_tokens: Optional[int] = None,
     enabled: bool = True,
     api_dialect: Optional[str] = None,
+    auth_mode: Optional[str] = None,
 ) -> Optional[ModelProviderRow]:
     """Insert a new model-provider row and return it (without the token).
 
@@ -182,8 +183,8 @@ def create_model_provider(
                 (id, name, provider_type, base_url, api_dialect, auth_token,
                  models_json, default_model, small_fast_model, extra_env_json,
                  context_window, max_output_tokens, enabled,
-                 created_at, updated_at, revision)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 created_at, updated_at, revision, auth_mode)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 provider_id,
@@ -202,9 +203,10 @@ def create_model_provider(
                 now,
                 now,
                 str(uuid4()),
+                auth_mode,
             ),
         )
-        slot = model_provider_slot({"provider_type": provider_type})
+        slot = model_provider_slot({"provider_type": provider_type, "auth_mode": auth_mode})
         if slot and enabled:
             select_model_provider_slot(cursor, slot, provider_id)
         reconcile_model_provider_slots(cursor)

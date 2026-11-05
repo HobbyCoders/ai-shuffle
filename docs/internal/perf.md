@@ -189,6 +189,31 @@ checks compare complete messages and pagination headers against the full path,
 including these fallbacks, streamed deltas, late tool results, answers, compaction,
 repeated prompts, profiles and cost attribution.
 
+## Backend heap reclamation
+
+The main app sweeps already-free glibc heap pages off the event loop, at most
+once per minute. Cold resumes share that same budget. This is on by default,
+not a cache eviction or a garbage-collection pass; live transcripts stay live.
+Windows, macOS, musl and libc builds without `mallinfo2` are safe no-ops.
+A sweep skips when glibc reports less than 32 MiB free, or when neither RSS nor
+free-heap bytes changed by 32 MiB since the previous trim. Free arena address
+space can stay high after pages have been returned, so it alone is not a leak.
+
+Each attempted trim logs an INFO `[MemoryReclaim]` line with
+`reclaimed_bytes`, before/after RSS, free-heap bytes and `trim_ms`, without
+session content. Reclaimed bytes are the observed nonnegative RSS decrease;
+concurrent allocations can offset it. The work is off-loop but glibc can still
+stall allocating threads: compare its duration and allocating-thread latency
+under the same burst before changing the cadence. In a private dev instance,
+sample RSS alongside `tracemalloc` and `mallinfo2`: low live traced bytes plus
+high free-heap bytes, followed by an RSS fall on trim without a Python-heap
+fall, distinguishes allocator retention from live data. Do not enable diagnostic
+routes or profile the owner's database to collect a baseline.
+
+Native cold hydration uses a 32-row server cursor so libpq does not hold a
+second complete raw transcript beside the decoded tree. It still loads all
+nodes; this does not window away branches or change resume semantics.
+
 ## Phase-1 baseline (2026-10-29)
 
 These are historical p75 observations, **not thresholds**. Seed shape and phone

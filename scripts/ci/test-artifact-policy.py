@@ -262,8 +262,8 @@ class ArtifactPolicyTests(unittest.TestCase):
         run = next(s for s in job["steps"] if s.get("id") == "journeys")
         self.assertIn("--retry-failures", run["run"])
         self.assertNotIn("continue-on-error", run)
-        self.assertEqual(run["timeout-minutes"], "${{ matrix.shard == 7 && 35 || 25 }}")
-        self.assertEqual(job["timeout-minutes"], "${{ matrix.shard == 7 && 45 || 35 }}")
+        self.assertEqual(run["timeout-minutes"], "25")
+        self.assertEqual(job["timeout-minutes"], "35")
         step = uploads(job)[0]
         self.assertEqual(step["if"], "failure() || steps.journeys.outputs.retried == 'true'")
         self.assertEqual(step["with"]["name"], "ui-journeys-${{ matrix.shard }}")

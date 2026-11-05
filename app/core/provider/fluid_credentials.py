@@ -86,6 +86,9 @@ class ProviderCredentials:
     # The exact account supplying these credentials (a durable pin may follow
     # a sibling). Consumers must attribute usage to this row, not the old pin.
     provider_id: Optional[str] = None
+    compatible_provider: Optional[str] = None
+    plan_key: bool = False
+    model_efforts: Optional[Dict[str, list[str]]] = None
 
 
 # ``auth_mode`` values that mean "this row carries a subscription OAuth login,
@@ -370,4 +373,20 @@ async def resolve_provider_credentials(
     base_url = (row.get("base_url") or "").strip() or None
     if kind == "openai_responses" and _is_xai_api(row) and not base_url:
         base_url = "https://api.x.ai/v1"
-    return ProviderCredentials(api_key=api_key, base_url=base_url, provider_id=provider_id)
+    from fluid.providers.compatible import PROVIDERS, endpoint_root
+
+    ptype = row.get("provider_type")
+    compatible = ptype if ptype in PROVIDERS else None
+    if compatible:
+        if kind != "anthropic":
+            raise ProviderCredentialError("This provider requires native Messages routing.")
+        base_url = endpoint_root(compatible, row.get("auth_mode"), base_url)
+    model_efforts = None
+    if compatible == "opencode":
+        from app.core.model_effort import effort_capabilities
+
+        model_efforts = {m["id"]: effort_capabilities(m["id"], row)["effort_levels"] or []
+                         for m in row.get("models_json") or [] if isinstance(m, dict) and m.get("id")}
+    return ProviderCredentials(api_key=api_key, base_url=base_url, provider_id=provider_id,
+                               compatible_provider=compatible, plan_key=bool(compatible and row.get("auth_mode") == "plan_key"),
+                               model_efforts=model_efforts)

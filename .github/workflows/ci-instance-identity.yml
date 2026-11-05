@@ -48,7 +48,7 @@ jobs:
           import subprocess
           import sys
 
-          wanted = {"pydantic", "pydantic-settings", "pytest", "pytest-timeout", "pytest-asyncio", "psutil"}
+          wanted = {"pydantic", "pydantic-settings", "pytest", "pytest-timeout", "pytest-asyncio", "psutil", "psycopg2-binary"}
           selected = {}
           for filename in ("requirements.txt", "requirements-dev.txt"):
               for line in Path(filename).read_text(encoding="utf-8").splitlines():
@@ -69,6 +69,18 @@ jobs:
         run: >-
           python -m pytest tests/core/test_instance_identity.py
           --confcutdir=tests/core -o addopts="" -p no:cacheprovider --timeout=60 -q
+      - name: Start the runner's PostgreSQL for the database probe
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Get-Service -Name 'postgresql*' | Set-Service -StartupType Manual -PassThru | Start-Service
+      - name: Exercise the database probe's native child process
+        # A real child, kill and venv start. The runner sets PGPASSWORD; libpq reads it.
+        if: runner.os == 'Windows'
+        env:
+          BACKEND_PROBE_TEST_DSN: host=127.0.0.1 user=postgres dbname=postgres
+        run: >-
+          python -m pytest tests/db/test_backend_probe.py
+          --confcutdir=tests/db -o addopts="" -p no:cacheprovider --timeout=60 -q
       - uses: actions/setup-node@v4
         with:
           node-version: '22'

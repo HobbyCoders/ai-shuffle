@@ -207,9 +207,12 @@ def test_ui_journeys_and_visual_regression_gate_every_pr():
     journeys = jobs["journeys"]
     assert journeys["strategy"]["fail-fast"] == "false"
     shards = journeys["strategy"]["matrix"]["shard"]
+    assert shards == [str(index) for index in range(1, 10)]
+    assert journeys["name"] == "UI journeys (${{ matrix.shard }}/9)"
     steps = {step.get("name"): step for step in journeys["steps"]}
     plan = steps["Plan this shard"]["run"]
     assert f"plan --shards {len(shards)}" in plan
+    assert f"UI journeys shard ${{{{ matrix.shard }}}}/{len(shards)}:" in plan
     run = steps["Run the journeys on a fresh dev instance"]["run"]
     assert f'--shard "${{{{ matrix.shard }}}}/{len(shards)}"' in run
     assert "/usr/lib/postgresql/16/bin" in run and "||" not in run

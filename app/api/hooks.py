@@ -25,6 +25,11 @@ router = APIRouter(prefix="/api/v1/hooks", tags=["Hooks"])
 
 def _validate_hook_data(hook_data: HookCreate | HookUpdate, is_create: bool = False) -> None:
     """Validate hook data"""
+    if isinstance(hook_data, HookUpdate) and hook_data.clear_secret and hook_data.secret and hook_data.secret.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot replace and clear a hook secret in the same update",
+        )
     event = getattr(hook_data, 'event', None)
     if event is not None and event not in VALID_HOOK_EVENTS:
         raise HTTPException(
@@ -226,6 +231,7 @@ async def update_hook(
             timeout=hook_data.timeout,
             url=hook_data.url,
             secret=hook_data.secret,
+            clear_secret=hook_data.clear_secret,
             enabled=hook_data.enabled,
             tool_matcher=hook_data.tool_matcher,
         )
