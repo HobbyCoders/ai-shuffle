@@ -43,7 +43,8 @@
 		type GenerationOption,
 		type SaveQuote
 	} from '$lib/utils/generation-choice';
-	import GenerationChoiceCard from '$lib/components/chat/GenerationChoiceCard.svelte';
+	import AutomationGenerationPicker from './AutomationGenerationPicker.svelte';
+ import { RowGroup, SettingRow, InlineBanner } from '$lib/components/layout/view';
 	import { GENERATION_ICONS, GENERATION_NAMES } from '$lib/components/settings/models/icons';
 
 	interface Props {
@@ -334,7 +335,7 @@
 					<p>This job's media generation choices could not be loaded, so they are not shown. Runs fail closed on choices they cannot read.</p>
 				{/if}
 			</div>
-			<button type="button" class="ajc-btn sm" onclick={() => jobId && load(jobId)}>Retry</button>
+			<button type="button" class="st-btn" onclick={() => jobId && load(jobId)}>Retry</button>
 		</div>
 	{/if}
 
@@ -346,11 +347,11 @@
 			{@const fallback = remembered[kind]}
 			{@const pending = staged(kind)}
 			{@const plural = KIND_LABEL[kind].plural}
-			<li class="ajc-row" data-kind={kind} data-tier={tier} style="--i: {index}">
+			<li class="ajc-row" data-kind={kind} data-tier={tier}><RowGroup title={GENERATION_NAMES[kind]} bare>
 				<div class="ajc-head">
 					<span class="ajc-glyph" aria-hidden="true"><Icon /></span>
 					<div class="ajc-heading">
-						<h5>{GENERATION_NAMES[kind]}</h5>
+						
 						<ol class="ajc-ladder" aria-label="Which choice {plural} runs use">
 							{#each LADDER as rung (rung.tier)}
 								<li
@@ -367,7 +368,7 @@
 						{#if job}
 							<button
 								type="button"
-								class="ajc-btn"
+								class="st-btn"
 								disabled={busyKind === kind}
 								aria-expanded={openKind === kind}
 								onclick={() => (openKind === kind ? (openKind = null) : openPicker(kind))}
@@ -376,7 +377,7 @@
 							</button>
 							<button
 								type="button"
-								class="ajc-btn ghost"
+								class="st-btn"
 								disabled={busyKind === kind}
 								onclick={() => clear(kind)}
 								aria-label="Clear the job choice for {plural}"
@@ -386,7 +387,7 @@
 						{:else}
 							<button
 								type="button"
-								class="ajc-btn"
+								class="st-btn"
 								disabled={busyKind === kind}
 								aria-expanded={openKind === kind}
 								onclick={() => (openKind === kind ? (openKind = null) : openPicker(kind))}
@@ -407,9 +408,9 @@
 							<strong title={job.model}>{label(job)}</strong>
 						</p>
 						<dl class="ajc-facts">
-							<div><dt>Account</dt><dd class="mono">{job.account}</dd></div>
+							<div><dt>Account</dt><dd >{job.account}</dd></div>
 							<div><dt>Worker</dt><dd>{workerLabel(job.worker, $workerInstalls, here)}</dd></div>
-							<div><dt>Model</dt><dd class="mono">{job.model}</dd></div>
+							<div><dt>Model</dt><dd >{job.model}</dd></div>
 							<div><dt>Options</dt><dd title={describe(job)}>{describe(job)}</dd></div>
 						</dl>
 						<p class="ajc-quote" aria-live="polite">
@@ -434,7 +435,7 @@
 							<p class="ajc-replaces">You have no remembered choice for {plural}; without this pin, runs would skip and report.</p>
 						{/if}
 						{#if pending}
-							<button type="button" class="ajc-link" onclick={() => undo(kind)}>
+							<button type="button" class="st-btn ghost sm" onclick={() => undo(kind)}>
 								<RotateCcw aria-hidden="true" />Undo
 							</button>
 						{/if}
@@ -444,7 +445,7 @@
 						Could not be read. Runs skip {plural} and report it.
 						{#if unreadableRecord}<button
 							type="button"
-							class="ajc-link"
+							class="st-btn ghost sm"
 							disabled={busyKind === kind}
 							onclick={() => clear(kind)}
 						>
@@ -463,7 +464,7 @@
 							{/if}
 							<button
 								type="button"
-								class="ajc-link"
+								class="st-btn ghost sm"
 								onclick={() => openSettings({ category: 'models', item: `gen-${kind}` })}
 							>
 								{fallback ? 'Change in Default models' : 'Set one in Default models'}
@@ -472,7 +473,7 @@
 						{#if pending}
 							<p class="ajc-fallback">
 								<span class="ajc-tag draft">Unsaved</span>The pinned choice is cleared when you save.
-								<button type="button" class="ajc-link" onclick={() => undo(kind)}>
+								<button type="button" class="st-btn ghost sm" onclick={() => undo(kind)}>
 									<RotateCcw aria-hidden="true" />Undo
 								</button>
 							</p>
@@ -489,7 +490,7 @@
 						{#if optionsError[kind]}
 							<p class="ajc-msg" role="alert">
 								{optionsError[kind]}
-								<button type="button" class="ajc-link" onclick={() => loadOptions(kind)}>Retry</button>
+								<button type="button" class="st-btn ghost sm" onclick={() => loadOptions(kind)}>Retry</button>
 							</p>
 						{:else if !options[kind]}
 							<div class="ajc-skeleton" aria-busy="true" aria-label="Loading sources">
@@ -501,535 +502,50 @@
 							</p>
 						{:else}
 							{#key options[kind]}
-								<GenerationChoiceCard
+								<AutomationGenerationPicker
 									{kind}
 									options={options[kind] ?? []}
-									variant="settings"
+									
 									pickLabel="Pin to this job"
 									onpick={(choice) => pick(kind, choice)}
 								/>
 							{/key}
 						{/if}
-						<button type="button" class="ajc-link" onclick={() => (openKind = null)}>Cancel</button>
+						<button type="button" class="st-btn ghost sm" onclick={() => (openKind = null)}>Cancel</button>
 					</div>
 				{/if}
-			</li>
+			</RowGroup></li>
 		{/each}
 	</ul>
 </div>
 
 <style>
-	.ajc {
-		container-type: inline-size;
-		display: grid;
-		gap: 12px;
-		min-width: 0;
-	}
-	.ajc-intro {
-		margin: 0;
-		font-size: 12.5px;
-		line-height: 1.55;
-		color: var(--muted-foreground);
-	}
-	.ajc-intro-strong {
-		color: var(--foreground);
-		font-weight: 600;
-	}
-	.ajc-status {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		margin: 0;
-		font-size: 12px;
-		color: var(--muted-foreground);
-	}
-	.ajc-spinner {
-		width: 12px;
-		height: 12px;
-		border-radius: 50%;
-		border: 2px solid color-mix(in oklch, var(--primary) 25%, transparent);
-		border-top-color: var(--primary);
-		animation: ajc-spin 0.8s linear infinite;
-	}
-	.ajc-alert {
-		display: flex;
-		align-items: flex-start;
-		gap: 10px;
-		padding: 10px 12px;
-		border: 1px solid color-mix(in oklab, var(--warning) 45%, var(--border));
-		border-left-width: 3px;
-		border-radius: 8px;
-		background: color-mix(in oklab, var(--warning) 9%, var(--card));
-		font-size: 12px;
-		line-height: 1.45;
-		color: var(--muted-foreground);
-	}
-	.ajc-alert > :global(svg) {
-		flex: none;
-		width: 15px;
-		height: 15px;
-		margin-top: 1px;
-		color: var(--warning);
-	}
-	.ajc-alert > div {
-		flex: 1;
-		min-width: 0;
-	}
-	.ajc-alert p {
-		margin: 0;
-	}
-	.ajc-alert-title {
-		color: var(--foreground);
-		font-weight: 600;
-	}
-
-	/* ── Rows ─────────────────────────────────────────────── */
-	.ajc-list {
-		list-style: none;
-		margin: 0;
-		padding: 0;
-		border: 1px solid var(--border);
-		border-radius: 10px;
-		overflow: hidden;
-		background: var(--background);
-	}
-	.ajc-row {
-		position: relative;
-		display: grid;
-		gap: 8px;
-		padding: 12px 14px 12px 17px;
-		border-bottom: 1px solid var(--border);
-		animation: ajc-in 240ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
-		animation-delay: calc(var(--i, 0) * 40ms);
-	}
-	.ajc-row:last-child {
-		border-bottom: none;
-	}
-	/* The tier spine: a left rule whose weight tells which choice wins. */
-	.ajc-row::before {
-		content: '';
-		position: absolute;
-		left: 0;
-		top: 10px;
-		bottom: 10px;
-		width: 3px;
-		border-radius: 0 3px 3px 0;
-		background: var(--border);
-		transition: background-color 0.2s ease;
-	}
-	.ajc-row[data-tier='job']::before {
-		background: var(--primary);
-	}
-	.ajc-row[data-tier='remembered']::before {
-		background: color-mix(in oklab, var(--primary) 35%, var(--border));
-	}
-	.ajc-row[data-tier='unreadable']::before {
-		background: var(--warning);
-	}
-
-	.ajc-head {
-		display: flex;
-		align-items: center;
-		gap: 10px;
-		min-width: 0;
-	}
-	.ajc-glyph {
-		flex: none;
-		display: grid;
-		place-items: center;
-		width: 30px;
-		height: 30px;
-		border-radius: 8px;
-		color: var(--muted-foreground);
-		background: color-mix(in oklch, var(--muted) 60%, transparent);
-		transition: color 0.2s ease, background-color 0.2s ease;
-	}
-	.ajc-row[data-tier='job'] .ajc-glyph {
-		color: var(--primary);
-		background: color-mix(in oklch, var(--primary) 12%, transparent);
-		box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--primary) 22%, transparent);
-	}
-	.ajc-glyph :global(svg) {
-		width: 15px;
-		height: 15px;
-	}
-	.ajc-heading {
-		flex: 1;
-		min-width: 0;
-	}
-	h5 {
-		margin: 0 0 4px;
-		font-size: 13px;
-		font-weight: 600;
-		color: var(--foreground);
-	}
-
-	/* Precedence ladder: Job choice › Remembered › Skip and report. */
-	.ajc-ladder {
-		display: flex;
-		flex-wrap: wrap;
-		align-items: center;
-		gap: 4px;
-		margin: 0;
-		padding: 0;
-		list-style: none;
-		font-family: var(--font-mono, monospace);
-		font-size: 10.5px;
-		letter-spacing: 0.01em;
-	}
-	.ajc-ladder li {
-		display: inline-flex;
-		align-items: center;
-		gap: 4px;
-		padding: 1px 7px;
-		border-radius: 999px;
-		color: color-mix(in oklch, var(--muted-foreground) 75%, transparent);
-		border: 1px solid transparent;
-		white-space: nowrap;
-	}
-	.ajc-ladder li + li::before {
-		content: '›';
-		display: inline-block;
-		margin: 0 4px 0 -8px;
-		color: color-mix(in oklch, var(--muted-foreground) 50%, transparent);
-	}
-	.ajc-ladder li.on {
-		color: var(--foreground);
-		border-color: color-mix(in oklab, var(--primary) 40%, var(--border));
-		background: color-mix(in oklch, var(--primary) 10%, transparent);
-		font-weight: 600;
-	}
-	.ajc-row[data-tier='unreadable'] .ajc-ladder li {
-		opacity: 0.6;
-	}
-	.ajc-ladder li.overridden {
-		text-decoration: line-through;
-		text-decoration-color: color-mix(in oklch, var(--muted-foreground) 60%, transparent);
-	}
-
-	.ajc-acts {
-		flex: none;
-		display: flex;
-		gap: 6px;
-	}
-	.ajc-btn {
-		display: inline-flex;
-		align-items: center;
-		gap: 5px;
-		height: 30px;
-		padding: 0 11px;
-		border: 1px solid var(--border);
-		border-radius: 8px;
-		background: var(--card);
-		color: var(--foreground);
-		font: inherit;
-		font-size: 12px;
-		font-weight: 600;
-		cursor: pointer;
-		white-space: nowrap;
-		transition: background-color 0.15s ease, border-color 0.15s ease, transform 0.1s ease;
-	}
-	.ajc-btn :global(svg) {
-		width: 13px;
-		height: 13px;
-	}
-	.ajc-btn:hover:not(:disabled) {
-		background: var(--hover-overlay, var(--muted));
-		border-color: color-mix(in oklab, var(--primary) 35%, var(--border));
-	}
-	.ajc-btn:active:not(:disabled) {
-		transform: translateY(1px);
-	}
-	.ajc-btn:focus-visible,
-	.ajc-link:focus-visible {
-		outline: 2px solid var(--ring, var(--primary));
-		outline-offset: 2px;
-	}
-	.ajc-btn:disabled {
-		opacity: 0.5;
-		cursor: not-allowed;
-	}
-	.ajc-btn[aria-expanded='true'] {
-		border-color: var(--primary);
-		background: color-mix(in oklab, var(--primary) 8%, var(--card));
-	}
-	.ajc-btn.ghost {
-		background: transparent;
-		color: var(--muted-foreground);
-	}
-	.ajc-btn.ghost:hover:not(:disabled) {
-		color: var(--destructive);
-		border-color: color-mix(in oklab, var(--destructive) 35%, var(--border));
-		background: color-mix(in oklch, var(--destructive) 8%, transparent);
-	}
-	.ajc-btn.sm {
-		height: 28px;
-		flex: none;
-	}
-
-	/* ── Pinned choice ────────────────────────────────────── */
-	.ajc-pin,
-	.ajc-none {
-		display: grid;
-		gap: 6px;
-		padding-left: 40px;
-		min-width: 0;
-	}
-	.ajc-choice {
-		display: flex;
-		align-items: center;
-		flex-wrap: wrap;
-		gap: 6px;
-		margin: 0;
-		font-size: 13px;
-		color: var(--foreground);
-	}
-	.ajc-choice strong {
-		font-weight: 600;
-		overflow-wrap: anywhere;
-	}
-	.ajc-tag {
-		display: inline-flex;
-		align-items: center;
-		padding: 1px 7px;
-		border-radius: 5px;
-		font-size: 10.5px;
-		font-weight: 700;
-		letter-spacing: 0.03em;
-		text-transform: uppercase;
-		white-space: nowrap;
-	}
-	.ajc-tag.job {
-		color: var(--primary-foreground);
-		background: var(--primary);
-	}
-	.ajc-tag.draft {
-		color: var(--warning);
-		background: color-mix(in oklch, var(--warning) 14%, transparent);
-		margin-right: 6px;
-	}
-	.ajc-choice .ajc-tag.draft {
-		margin-right: 0;
-	}
-	.ajc-facts {
-		display: grid;
-		grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-		gap: 4px 14px;
-		margin: 0;
-		font-size: 11.5px;
-	}
-	.ajc-facts div {
-		display: flex;
-		gap: 6px;
-		min-width: 0;
-	}
-	.ajc-facts dt {
-		flex: none;
-		color: var(--muted-foreground);
-	}
-	.ajc-facts dd {
-		margin: 0;
-		min-width: 0;
-		color: var(--foreground);
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-	}
-	.mono {
-		font-family: var(--font-mono, monospace);
-		font-size: 11px;
-	}
-	.ajc-quote {
-		display: flex;
-		align-items: baseline;
-		flex-wrap: wrap;
-		gap: 6px;
-		margin: 0;
-		font-size: 12px;
-	}
-	.ajc-figure {
-		font-family: var(--font-mono, monospace);
-		font-variant-numeric: tabular-nums;
-		font-weight: 600;
-		color: var(--foreground);
-	}
-	.ajc-muted {
-		color: var(--muted-foreground);
-	}
-	.ajc-warn,
-	.ajc-row-error {
-		display: inline-flex;
-		align-items: flex-start;
-		gap: 6px;
-		color: var(--warning);
-		line-height: 1.45;
-	}
-	.ajc-warn :global(svg),
-	.ajc-row-error :global(svg) {
-		flex: none;
-		width: 13px;
-		height: 13px;
-		margin-top: 2px;
-	}
-	.ajc-row-error {
-		margin: 0;
-		padding-left: 40px;
-		font-size: 12px;
-		color: var(--destructive);
-	}
-	.ajc-replaces {
-		margin: 0;
-		font-size: 11.5px;
-		line-height: 1.45;
-		color: var(--muted-foreground);
-	}
-	.ajc-replaces s {
-		color: var(--foreground);
-		text-decoration-color: color-mix(in oklch, var(--muted-foreground) 70%, transparent);
-	}
-
-	/* ── Empty state ──────────────────────────────────────── */
-	.ajc-empty {
-		margin: 0;
-		font-size: 12.5px;
-		font-style: italic;
-		color: var(--foreground);
-	}
-	.ajc-empty.warn {
-		padding-left: 40px;
-		font-style: normal;
-		color: var(--warning);
-	}
-	.ajc-fallback {
-		display: flex;
-		align-items: baseline;
-		flex-wrap: wrap;
-		gap: 4px 8px;
-		margin: 0;
-		font-size: 11.5px;
-		line-height: 1.45;
-		color: var(--muted-foreground);
-	}
-	.ajc-fallback strong {
-		color: var(--foreground);
-		font-weight: 600;
-	}
-	.ajc-link {
-		display: inline-flex;
-		align-items: center;
-		gap: 4px;
-		justify-self: start;
-		min-height: 24px;
-		padding: 0;
-		border: 0;
-		background: none;
-		color: var(--muted-foreground);
-		font: inherit;
-		font-size: 11.5px;
-		cursor: pointer;
-		text-decoration: underline;
-		text-decoration-color: color-mix(in oklch, currentColor 35%, transparent);
-		text-underline-offset: 3px;
-	}
-	.ajc-link :global(svg) {
-		width: 12px;
-		height: 12px;
-	}
-	.ajc-link:hover {
-		color: var(--foreground);
-	}
-
-	/* ── Picker ───────────────────────────────────────────── */
-	.ajc-picker {
-		display: grid;
-		gap: 8px;
-		margin-left: 40px;
-		padding: 10px;
-		border: 1px dashed color-mix(in oklab, var(--primary) 35%, var(--border));
-		border-radius: 10px;
-		background: color-mix(in oklch, var(--primary) 3%, transparent);
-		animation: ajc-in 200ms ease-out both;
-	}
-	.ajc-msg {
-		margin: 0;
-		font-size: 12.5px;
-		line-height: 1.5;
-		color: var(--muted-foreground);
-	}
-	.ajc-skeleton {
-		display: grid;
-		grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-		gap: 8px;
-	}
-	.ajc-skeleton span {
-		height: 88px;
-		border-radius: 8px;
-		background: linear-gradient(90deg, var(--muted), color-mix(in oklch, var(--muted) 40%, transparent), var(--muted));
-		background-size: 200% 100%;
-		animation: ajc-shimmer 1.2s ease-in-out infinite;
-	}
-
-	@keyframes ajc-in {
-		from {
-			opacity: 0;
-			transform: translateY(3px);
-		}
-	}
-	@keyframes ajc-shimmer {
-		to {
-			background-position: -200% 0;
-		}
-	}
-	@keyframes ajc-spin {
-		to {
-			transform: rotate(360deg);
-		}
-	}
-
-	/* Narrow (phone, or a narrow deck card): actions drop under the heading. */
-	@container (max-width: 520px) {
-		.ajc-head {
-			flex-wrap: wrap;
-		}
-		.ajc-acts {
-			width: 100%;
-			padding-left: 40px;
-		}
-		.ajc-pin,
-		.ajc-none,
-		.ajc-row-error,
-		.ajc-empty.warn {
-			padding-left: 0;
-		}
-		.ajc-acts {
-			padding-left: 0;
-		}
-		.ajc-acts .ajc-btn {
-			flex: 1;
-			justify-content: center;
-			min-height: 44px;
-		}
-		.ajc-link {
-			min-height: 44px;
-		}
-		.ajc-picker {
-			margin-left: 0;
-		}
-	}
-	@media (pointer: coarse) {
-		.ajc-btn {
-			min-height: 44px;
-		}
-		.ajc-link {
-			min-height: 44px;
-		}
-	}
-	@media (prefers-reduced-motion: reduce) {
-		.ajc-row,
-		.ajc-picker,
-		.ajc-skeleton span,
-		.ajc-spinner {
-			animation: none;
-		}
-	}
+ .ajc-intro,.ajc-status { font-size:13px; line-height:1.55; color:var(--st-mfg); margin:0 0 20px; }
+ .ajc-intro-strong { display:block; margin-top:4px; }
+ .ajc-list { list-style:none; padding:0; margin:0; }
+ .ajc-head { display:flex; flex-wrap:wrap; align-items:center; gap:12px; }
+ .ajc-glyph { display:none; }
+ .ajc-heading { flex:1; min-width:0; }
+ .ajc-ladder { display:flex; flex-wrap:wrap; list-style:none; padding:0; gap:8px 12px; color:var(--st-mfg); font-size:12px; }
+ .ajc-ladder .on { color:var(--st-fg); font-weight:500; }
+ .ajc-ladder .overridden { text-decoration:line-through; }
+ .ajc-acts { display:flex; align-items:center; gap:8px; }
+ .ajc-pin,.ajc-none,.ajc-picker { margin-top:16px; font-size:13px; line-height:1.55; }
+ .ajc-choice { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:12px; }
+ .ajc-choice strong { font-weight:500; }
+ .ajc-tag { color:var(--st-mfg); font-size:12px; }
+ .ajc-facts { display:grid; grid-template-columns:1fr 1fr; gap:12px 24px; margin:12px 0; }
+ .ajc-facts dt { color:var(--st-mfg); font-size:12px; }
+ .ajc-facts dd { margin:2px 0 0; overflow-wrap:anywhere; }
+ .ajc-quote,.ajc-replaces,.ajc-empty,.ajc-fallback { margin:8px 0; }
+ .ajc-muted,.ajc-replaces,.ajc-fallback,.ajc-empty { color:var(--st-mfg); }
+ .ajc-row-error,.ajc-warn,.ajc-alert,.warn { color:var(--st-warning); }
+ .ajc-alert { display:flex; flex-wrap:wrap; gap:12px; margin:16px 0; font-size:13px; }
+ .ajc-alert>div { flex:1; }
+ .ajc-row-error { display:flex; align-items:center; gap:8px; margin-top:12px; font-size:13px; }
+ .ajc-status { min-height:32px; }
+ .ajc-picker { border-top:1px solid var(--st-border); padding-top:16px; }
+ .ajc-skeleton { min-height:48px; color:var(--st-mfg); }
+ .ajc-skeleton::before { content:'Loading sources…'; }
+ @media (max-width:600px) { .ajc-facts { grid-template-columns:1fr; } .ajc-head { align-items:flex-start; } .ajc-acts { width:100%; } }
 </style>

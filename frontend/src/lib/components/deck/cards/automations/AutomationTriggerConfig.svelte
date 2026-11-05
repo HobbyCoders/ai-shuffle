@@ -1,7 +1,8 @@
 <script lang="ts">
 	import { automationWebhookUrl, type TriggerType, type TriggerItem } from '$lib/api/automations';
 	import type { Connector, ConnectorTypeInfo } from '$lib/api/connectors';
-	import { slide } from 'svelte/transition';
+	import { RowGroup, SettingRow, SelectField, Segmented } from '$lib/components/layout/view';
+ import TextField from '$lib/components/settings/rows/TextField.svelte';
 	import {
 		Clock,
 		Timer,
@@ -217,522 +218,64 @@
 		return `${h - 12} PM`;
 	}
 </script>
+<p class="st-note">Any trigger firing will run this automation. At least one required.</p>
+{#each triggers as trigger, trigIdx}
+ <RowGroup title="Trigger {trigIdx + 1}" bare>
+  {#snippet actions()}
+   <button class="st-btn" aria-expanded={expandedTriggers.has(trigIdx)} onclick={() => onToggleTriggerExpand(trigIdx)}>{expandedTriggers.has(trigIdx) ? 'Collapse' : 'Expand'} trigger</button>
+   {#if triggers.length > 1}<button class="st-btn icon danger" aria-label="Remove trigger" onclick={() => removeTrigger(trigIdx)}><Trash2 size={14} /></button>{/if}
+  {/snippet}
+  {#if expandedTriggers.has(trigIdx)}
+   <div class="st-card">
+    <SettingRow label="Trigger type">
+     {#snippet expanded()}<Segmented label="Trigger type" value={trigger.type} options={[{value:'cron',label:'Cron'},{value:'interval',label:'Interval'},{value:'connector_event',label:'Event'},{value:'connector_trigger',label:'Connector'},{value:'webhook',label:'Webhook'}]} onchange={(value) => updateTriggerType(trigIdx,value)} />{/snippet}
+    </SettingRow>
+    {#if trigger.type === 'cron'}
+     <SettingRow label="Schedule"><Segmented label="Schedule" value={cronMode} options={[{value:'preset',label:'Preset'},{value:'custom',label:'Custom'}]} onchange={(value) => cronMode = value} /></SettingRow>
+     {#if cronMode === 'preset'}
+      <SettingRow label="Preset"><SelectField value={trigger.config.expression || '0 9 * * *'} options={Object.entries(CRON_PRESETS).map(([value,label]) => ({value,label}))} onchange={(value) => {updateTriggerConfig(trigIdx,{...trigger.config,expression:value});syncCronFieldsFromExpression(value);}} /></SettingRow>
+     {:else}
+<SettingRow label="Minute"><SelectField value={cronMinute} options={[{value:'*',label:'Every minute'},...['5','10','15','30'].map(n => ({value:`*/${n}`,label:`Every ${n} min`})),...['0','15','30','45'].map(n => ({value:n,label:`:${n.padStart(2,'0')}`}))]} onchange={(value) => {cronMinute = value; updateTriggerConfig(trigIdx,{...trigger.config,expression:buildCronFromFields()});}} /></SettingRow>
+<SettingRow label="Hour"><SelectField value={cronHour} options={[{value:'*',label:'Every hour'},...Array.from({length:24},(_,h) => ({value:String(h),label:formatHour(h)}))]} onchange={(value) => {cronHour = value; updateTriggerConfig(trigIdx,{...trigger.config,expression:buildCronFromFields()});}} /></SettingRow>
+<SettingRow label="Day of month"><SelectField value={cronDayOfMonth} options={[{value:'*',label:'Every day'},...Array.from({length:31},(_,i) => ({value:String(i+1),label:String(i+1)}))]} onchange={(value) => {cronDayOfMonth = value; updateTriggerConfig(trigIdx,{...trigger.config,expression:buildCronFromFields()});}} /></SettingRow>
+<SettingRow label="Month"><SelectField value={cronMonth} options={[{value:'*',label:'Every month'},...['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'].map((m,i) => ({value:String(i+1),label:m}))]} onchange={(value) => {cronMonth = value; updateTriggerConfig(trigIdx,{...trigger.config,expression:buildCronFromFields()});}} /></SettingRow>
+<SettingRow label="Day of Week"><SelectField value={cronDayOfWeek} options={[{value:'*',label:'Every day'},{value:'1-5',label:'Weekdays (Mon-Fri)'},{value:'0,6',label:'Weekends'},...['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'].map((label,i) => ({value:String(i),label}))]} onchange={(value) => {cronDayOfWeek = value; updateTriggerConfig(trigIdx,{...trigger.config,expression:buildCronFromFields()});}} /></SettingRow>
 
-<div class="af-triggers">
-	<p class="af-hint">Any trigger firing will run this automation. At least one required.</p>
-
-	{#each triggers as trigger, trigIdx}
-		<div class="af-item-card" transition:slide={{ duration: 150 }}>
-			<div class="af-item-header" role="button" tabindex="0" onclick={() => onToggleTriggerExpand(trigIdx)} onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') onToggleTriggerExpand(trigIdx); }}>
-				<div class="af-item-header-left">
-					{#if expandedTriggers.has(trigIdx)}
-						<ChevronDown size={14} />
-					{:else}
-						<ChevronRight size={14} />
-					{/if}
-					<span class="af-item-type-badge">
-						{#if getTriggerIcon(trigger.type)}
-							{@const TriggerIcon = getTriggerIcon(trigger.type)}
-							<TriggerIcon size={12} />
-						{/if}
-						{triggerTypeLabel(trigger.type)}
-					</span>
-					{#if !expandedTriggers.has(trigIdx)}
-						<span class="af-item-summary">{getTriggerSummary(trigger)}</span>
-					{/if}
-				</div>
-				<div class="af-item-header-actions">
-					{#if triggers.length > 1}
-						<button
-							type="button"
-							class="icon-x"
-							aria-label="Remove trigger"
-							onclick={(e) => { e.stopPropagation(); removeTrigger(trigIdx); }}
-						>
-							<Trash2 size={13} />
-						</button>
-					{/if}
-				</div>
-			</div>
-
-			{#if expandedTriggers.has(trigIdx)}
-				<div class="af-item-body" transition:slide={{ duration: 150 }}>
-					<!-- Type selector -->
-					<div class="auto-trigger-selector">
-						<button type="button" class="auto-trigger-btn" class:active={trigger.type === 'cron'}
-							onclick={() => updateTriggerType(trigIdx, 'cron')}>
-							<Clock size={13} /> Cron
-						</button>
-						<button type="button" class="auto-trigger-btn" class:active={trigger.type === 'interval'}
-							onclick={() => updateTriggerType(trigIdx, 'interval')}>
-							<Timer size={13} /> Interval
-						</button>
-						<button type="button" class="auto-trigger-btn" class:active={trigger.type === 'connector_event'}
-							onclick={() => updateTriggerType(trigIdx, 'connector_event')}>
-							<Radio size={13} /> Event
-						</button>
-						<button type="button" class="auto-trigger-btn" class:active={trigger.type === 'connector_trigger'}
-							onclick={() => updateTriggerType(trigIdx, 'connector_trigger')}>
-							<Zap size={13} /> Connector
-						</button>
-						<button type="button" class="auto-trigger-btn" class:active={trigger.type === 'webhook'}
-							onclick={() => updateTriggerType(trigIdx, 'webhook')}>
-							<Webhook size={13} /> Webhook
-						</button>
-					</div>
-
-					<!-- Type-specific config -->
-					{#if trigger.type === 'cron'}
-						<div class="af-trigger-config">
-							<div class="cron-mode-selector">
-								<button type="button" class="auto-trigger-btn" class:active={cronMode === 'preset'}
-									onclick={() => cronMode = 'preset'}>Preset</button>
-								<button type="button" class="auto-trigger-btn" class:active={cronMode === 'custom'}
-									onclick={() => cronMode = 'custom'}>Custom</button>
-							</div>
-							{#if cronMode === 'preset'}
-								<select class="af-input"
-									value={trigger.config.expression || '0 9 * * *'}
-									onchange={(e) => {
-										const val = e.currentTarget.value;
-										updateTriggerConfig(trigIdx, { ...trigger.config, expression: val });
-										syncCronFieldsFromExpression(val);
-									}}>
-									<option value="*/15 * * * *">Every 15 minutes</option>
-									<option value="*/30 * * * *">Every 30 minutes</option>
-									<option value="0 * * * *">Every hour</option>
-									<option value="0 9 * * *">Every day at 9 AM</option>
-									<option value="0 9 * * 1-5">Every weekday at 9 AM</option>
-									<option value="0 9 * * 1">Every Monday at 9 AM</option>
-									<option value="0 0 1 * *">Every month on the 1st</option>
-								</select>
-							{:else}
-								<div class="cron-builder-grid">
-									<div class="cron-field">
-										<label class="af-mini-label" for="auto-cron-minute-{trigIdx}">Minute</label>
-										<select class="af-input" id="auto-cron-minute-{trigIdx}" bind:value={cronMinute}
-											onchange={() => { const expr = buildCronFromFields(); updateTriggerConfig(trigIdx, { ...trigger.config, expression: expr }); }}>
-											<option value="*">Every minute</option>
-											<option value="*/5">Every 5 min</option>
-											<option value="*/10">Every 10 min</option>
-											<option value="*/15">Every 15 min</option>
-											<option value="*/30">Every 30 min</option>
-											<option value="0">:00</option>
-											<option value="15">:15</option>
-											<option value="30">:30</option>
-											<option value="45">:45</option>
-										</select>
-									</div>
-									<div class="cron-field">
-										<label class="af-mini-label" for="auto-cron-hour-{trigIdx}">Hour</label>
-										<select class="af-input" id="auto-cron-hour-{trigIdx}" bind:value={cronHour}
-											onchange={() => { const expr = buildCronFromFields(); updateTriggerConfig(trigIdx, { ...trigger.config, expression: expr }); }}>
-											<option value="*">Every hour</option>
-											{#each Array.from({length: 24}, (_, i) => i) as h}
-												<option value={String(h)}>{formatHour(h)}</option>
-											{/each}
-										</select>
-									</div>
-									<div class="cron-field">
-										<label class="af-mini-label" for="auto-cron-day-{trigIdx}">Day</label>
-										<select class="af-input" id="auto-cron-day-{trigIdx}" bind:value={cronDayOfMonth}
-											onchange={() => { const expr = buildCronFromFields(); updateTriggerConfig(trigIdx, { ...trigger.config, expression: expr }); }}>
-											<option value="*">Every day</option>
-											{#each Array.from({length: 31}, (_, i) => i + 1) as d}
-												<option value={String(d)}>{d}</option>
-											{/each}
-										</select>
-									</div>
-									<div class="cron-field">
-										<label class="af-mini-label" for="auto-cron-month-{trigIdx}">Month</label>
-										<select class="af-input" id="auto-cron-month-{trigIdx}" bind:value={cronMonth}
-											onchange={() => { const expr = buildCronFromFields(); updateTriggerConfig(trigIdx, { ...trigger.config, expression: expr }); }}>
-											<option value="*">Every month</option>
-											{#each ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'] as m, mi}
-												<option value={String(mi+1)}>{m}</option>
-											{/each}
-										</select>
-									</div>
-									<div class="cron-field" style="grid-column: 1 / -1">
-										<label class="af-mini-label" for="auto-cron-dow-{trigIdx}">Day of Week</label>
-										<select class="af-input" id="auto-cron-dow-{trigIdx}" bind:value={cronDayOfWeek}
-											onchange={() => { const expr = buildCronFromFields(); updateTriggerConfig(trigIdx, { ...trigger.config, expression: expr }); }}>
-											<option value="*">Every day</option>
-											<option value="1-5">Weekdays (Mon-Fri)</option>
-											<option value="0,6">Weekends</option>
-											<option value="1">Monday</option>
-											<option value="2">Tuesday</option>
-											<option value="3">Wednesday</option>
-											<option value="4">Thursday</option>
-											<option value="5">Friday</option>
-											<option value="6">Saturday</option>
-											<option value="0">Sunday</option>
-										</select>
-									</div>
-								</div>
-							{/if}
-							{#if trigger.config.expression}
-								<div class="cron-summary">
-									<span class="cron-summary-text">{describeCron(trigger.config.expression)}</span>
-									<code class="cron-summary-expr">{trigger.config.expression}</code>
-								</div>
-							{/if}
-							<details class="cron-raw-details">
-								<summary class="af-hint" style="cursor: pointer; user-select: none;">Edit raw expression</summary>
-								<input type="text" class="mono-input" style="margin-top: 6px"
-									value={trigger.config.expression || ''}
-									oninput={(e) => { updateTriggerConfig(trigIdx, { ...trigger.config, expression: e.currentTarget.value }); syncCronFieldsFromExpression(e.currentTarget.value); }}
-									placeholder="0 9 * * *" />
-							</details>
-							<p class="af-hint">Timezone: {timezone}</p>
-						</div>
-					{:else if trigger.type === 'interval'}
-						<div class="af-trigger-config">
-							<div class="af-mini-field">
-								<label class="af-mini-label" for="auto-interval-{trigIdx}">Interval (seconds)</label>
-								<input type="number" class="af-input" id="auto-interval-{trigIdx}" min="60"
-									value={trigger.config.seconds || ''}
-									oninput={(e) => updateTriggerConfig(trigIdx, { ...trigger.config, seconds: parseInt(e.currentTarget.value) || 0 })}
-									placeholder="3600" />
-								<p class="af-hint">Minimum 60 seconds</p>
-							</div>
-						</div>
-					{:else if trigger.type === 'connector_event'}
-						<div class="af-trigger-config">
-							<div class="af-mini-field">
-								<label class="af-mini-label" for="auto-evt-connector-{trigIdx}">Connector</label>
-								<select class="af-input" id="auto-evt-connector-{trigIdx}"
-									value={trigger.config.connector_id || ''}
-									onchange={(e) => updateTriggerConfig(trigIdx, { ...trigger.config, connector_id: e.currentTarget.value })}>
-									<option value="">Select a connector...</option>
-									{#each connectors.filter(c => c.is_active || c.status === 'connected') as c}
-										<option value={c.id}>{c.name} ({c.type})</option>
-									{/each}
-								</select>
-							</div>
-							<div class="af-mini-field">
-								<label class="af-mini-label" for="auto-evt-type-{trigIdx}">Event Type</label>
-								<select class="af-input" id="auto-evt-type-{trigIdx}"
-									value={trigger.config.event_type || ''}
-									onchange={(e) => updateTriggerConfig(trigIdx, { ...trigger.config, event_type: e.currentTarget.value })}>
-									<option value="">Select an event...</option>
-									<option value="session.complete">Chat complete</option>
-									<option value="session.error">Chat error</option>
-									<option value="session.started">Chat started</option>
-									<option value="permission.requested">Permission requested</option>
-									<option value="input.needed">Input needed</option>
-								</select>
-							</div>
-						</div>
-					{:else if trigger.type === 'connector_trigger'}
-						<div class="af-trigger-config">
-							<div class="af-mini-field">
-								<label class="af-mini-label" for="auto-trig-connector-{trigIdx}">Connector</label>
-								<select class="af-input" id="auto-trig-connector-{trigIdx}"
-									value={trigger.config.connector_id || ''}
-									onchange={(e) => updateTriggerConfig(trigIdx, { ...trigger.config, connector_id: e.currentTarget.value, trigger_id: '' })}>
-									<option value="">Select a connector...</option>
-									{#each connectorsWithTriggers as c}
-										<option value={c.id}>{c.name} ({c.type})</option>
-									{/each}
-								</select>
-							</div>
-							{#if trigger.config.connector_id}
-								<div class="af-mini-field">
-									<label class="af-mini-label" for="auto-trig-id-{trigIdx}">Trigger</label>
-									<select class="af-input" id="auto-trig-id-{trigIdx}"
-										value={trigger.config.trigger_id || ''}
-										onchange={(e) => updateTriggerConfig(trigIdx, { ...trigger.config, trigger_id: e.currentTarget.value })}>
-										<option value="">Select a trigger...</option>
-										{#each getTriggersForConnector(trigger.config.connector_id) as trig}
-											<option value={trig.id}>{trig.name}</option>
-										{/each}
-									</select>
-								</div>
-							{/if}
-						</div>
-					{:else if trigger.type === 'webhook'}
-						<div class="af-trigger-config">
-							{#if currentView === 'edit' && selectedAutomationId}
-								<div class="af-mini-field">
-									<label class="af-mini-label" for="auto-webhook-url-{trigIdx}">Webhook URL</label>
-									<input type="text" class="mono-input" id="auto-webhook-url-{trigIdx}"
-										value={automationWebhookUrl(selectedAutomationId)} readonly />
-								</div>
-								{#if trigger.config.secret}
-									<div class="af-mini-field">
-										<label class="af-mini-label" for="auto-webhook-secret-{trigIdx}">Secret</label>
-										<input type="text" class="mono-input" id="auto-webhook-secret-{trigIdx}"
-											value={trigger.config.secret} readonly />
-									</div>
-								{/if}
-							{:else}
-								<p class="af-hint">Webhook URL and secret will be generated after creation.</p>
-							{/if}
-						</div>
-					{/if}
-				</div>
-			{/if}
-		</div>
-	{/each}
-
-	<button type="button" class="af-add-btn" onclick={addTrigger}>
-		<Plus size={14} />
-		Add trigger
-	</button>
-</div>
-
+     {/if}
+     <SettingRow label="Expression" hint="Timezone: {timezone}">
+      {#snippet expanded()}
+       <p class="cron-summary-text st-note">{describeCron(trigger.config.expression || '')}</p>
+       {#if trigger.config.expression}<code>{trigger.config.expression}</code>{/if}
+       <details><summary>Edit raw expression</summary>
+        <TextField label="Cron expression" value={trigger.config.expression || ''} placeholder="0 9 * * *" oninput={(value) => {updateTriggerConfig(trigIdx,{...trigger.config,expression:value});syncCronFieldsFromExpression(value);}} />
+       </details>
+      {/snippet}
+     </SettingRow>
+    {:else if trigger.type === 'interval'}
+     <SettingRow label="Interval (seconds)" hint="Minimum 60 seconds"><TextField value={String(trigger.config.seconds || '')} placeholder="3600" inputmode="numeric" oninput={(value) => updateTriggerConfig(trigIdx,{...trigger.config,seconds:parseInt(value) || 0})} /></SettingRow>
+    {:else if trigger.type === 'connector_event'}
+     <SettingRow label="Connector"><SelectField value={trigger.config.connector_id || ''} options={[{value:'',label:'Select a connector...'},...connectors.filter(c => c.is_active || c.status === 'connected').map(c => ({value:c.id,label:`${c.name} (${c.type})`}))]} onchange={(value) => updateTriggerConfig(trigIdx,{...trigger.config,connector_id:value})} /></SettingRow>
+     <SettingRow label="Event Type"><SelectField value={trigger.config.event_type || ''} options={[{value:'',label:'Select an event...'},...['session.complete','session.error','session.started','permission.requested','input.needed'].map((value,i) => ({value,label:['Chat complete','Chat error','Chat started','Permission requested','Input needed'][i]}))]} onchange={(value) => updateTriggerConfig(trigIdx,{...trigger.config,event_type:value})} /></SettingRow>
+    {:else if trigger.type === 'connector_trigger'}
+     <SettingRow label="Connector"><SelectField value={trigger.config.connector_id || ''} options={[{value:'',label:'Select a connector...'},...connectorsWithTriggers.map(c => ({value:c.id,label:`${c.name} (${c.type})`}))]} onchange={(value) => updateTriggerConfig(trigIdx,{...trigger.config,connector_id:value,trigger_id:''})} /></SettingRow>
+     {#if trigger.config.connector_id}
+      <SettingRow label="Trigger"><SelectField value={trigger.config.trigger_id || ''} options={[{value:'',label:'Select a trigger...'},...getTriggersForConnector(trigger.config.connector_id).map(t => ({value:t.id,label:t.name}))]} onchange={(value) => updateTriggerConfig(trigIdx,{...trigger.config,trigger_id:value})} /></SettingRow>
+     {/if}
+    {:else if trigger.type === 'webhook'}
+     {#if currentView === 'edit' && selectedAutomationId}
+      <SettingRow label="Webhook URL">{#snippet expanded()}<input class="webhook-value" aria-label="Webhook URL" value={automationWebhookUrl(selectedAutomationId)} readonly />{/snippet}</SettingRow>
+      {#if trigger.config.secret}<SettingRow label="Secret">{#snippet expanded()}<input class="webhook-value" aria-label="Secret" value={trigger.config.secret} readonly />{/snippet}</SettingRow>{/if}
+     {:else}<p class="st-note p-4">Webhook URL and secret will be generated after creation.</p>{/if}
+    {/if}
+   </div>
+  {:else}<p class="st-note">{triggerTypeLabel(trigger.type)} · {getTriggerSummary(trigger)}</p>{/if}
+ </RowGroup>
+{/each}
+<button class="st-btn" onclick={addTrigger}><Plus size={14} />Add trigger</button>
 <style>
-	/* Stack: intro hint → trigger cards → add button. Mirrors the action-step
-	   builder in AutomationForm so triggers and actions read identically. */
-	.af-triggers {
-		display: flex;
-		flex-direction: column;
-		gap: 8px;
-	}
-
-	/* ── Collapsible item card (matches AutomationForm action steps) ── */
-	.af-item-card {
-		background: var(--background);
-		border: 1px solid var(--border);
-		border-radius: 10px;
-		overflow: hidden;
-	}
-	.af-item-header {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		width: 100%;
-		padding: 9px 12px;
-		cursor: pointer;
-		text-align: left;
-		transition: background 0.12s;
-	}
-	.af-item-header:hover {
-		background: var(--muted);
-	}
-	.af-item-header-left {
-		display: flex;
-		align-items: center;
-		gap: 9px;
-		min-width: 0;
-		flex: 1;
-	}
-	/* Direct-child chevron only — the badge's nested icon keeps its own color. */
-	.af-item-header-left > :global(svg) {
-		flex-shrink: 0;
-		color: var(--muted-foreground);
-	}
-	.af-item-header-actions {
-		flex-shrink: 0;
-	}
-	.icon-x {
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		width: 26px;
-		height: 26px;
-		background: none;
-		border: none;
-		border-radius: 7px;
-		color: var(--destructive);
-		cursor: pointer;
-		transition: background 0.12s;
-	}
-	.icon-x:hover {
-		background: color-mix(in oklch, var(--destructive) 14%, transparent);
-	}
-	.af-item-type-badge {
-		display: inline-flex;
-		align-items: center;
-		gap: 5px;
-		padding: 2px 9px;
-		font-size: 11px;
-		font-weight: 600;
-		background: var(--primary);
-		color: var(--primary-foreground);
-		border-radius: 6px;
-		white-space: nowrap;
-	}
-	.af-item-type-badge :global(svg) {
-		color: var(--primary-foreground);
-	}
-	.af-item-summary {
-		font-size: 12px;
-		color: var(--muted-foreground);
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-		min-width: 0;
-	}
-	.af-item-body {
-		padding: 11px 12px 13px;
-		border-top: 1px solid var(--border);
-		display: flex;
-		flex-direction: column;
-		gap: 10px;
-	}
-
-	.af-trigger-config {
-		display: flex;
-		flex-direction: column;
-		gap: 10px;
-	}
-
-	/* ── Field labels / hints (match AutomationForm) ── */
-	.af-hint {
-		font-size: 11.5px;
-		color: var(--muted-foreground);
-		margin: 0;
-		line-height: 1.45;
-	}
-	.af-mini-label {
-		font-size: 11px;
-		font-weight: 600;
-		color: var(--muted-foreground);
-	}
-	.af-mini-field {
-		display: flex;
-		flex-direction: column;
-		gap: 5px;
-	}
-
-	/* Mono inputs (raw cron expression, webhook URL/secret). Self-contained so
-	   it wins over the inherited .af-input font-family regardless of cascade. */
-	.mono-input {
-		width: 100%;
-		padding: 9px 12px;
-		background: var(--background);
-		border: 1px solid var(--border);
-		border-radius: 9px;
-		color: var(--foreground);
-		font-family: var(--font-mono, monospace);
-		font-size: 12px;
-		outline: none;
-		transition: border-color 0.15s;
-	}
-	.mono-input:focus {
-		border-color: var(--ring, var(--primary));
-	}
-	.mono-input::placeholder {
-		color: var(--muted-foreground);
-		opacity: 0.65;
-	}
-	.mono-input[readonly] {
-		color: var(--muted-foreground);
-		cursor: default;
-	}
-
-	/* ── Trigger-type / cron-mode selectors (chip row) ── */
-	.auto-trigger-selector {
-		display: flex;
-		gap: 6px;
-		flex-wrap: wrap;
-	}
-	.cron-mode-selector {
-		display: flex;
-		gap: 6px;
-	}
-	.auto-trigger-btn {
-		display: inline-flex;
-		align-items: center;
-		gap: 6px;
-		padding: 7px 12px;
-		font-size: 12.5px;
-		font-weight: 600;
-		border-radius: 8px;
-		background: var(--background);
-		border: 1px solid var(--border);
-		color: var(--muted-foreground);
-		cursor: pointer;
-		transition: background 0.12s, border-color 0.12s, color 0.12s;
-	}
-	.auto-trigger-btn:hover {
-		border-color: var(--muted-foreground);
-		color: var(--foreground);
-	}
-	.auto-trigger-btn:focus-visible {
-		outline: 2px solid var(--ring);
-		outline-offset: 2px;
-	}
-	.auto-trigger-btn.active {
-		background: var(--primary);
-		border-color: var(--primary);
-		color: var(--primary-foreground);
-	}
-
-	/* ── Cron builder grid ── */
-	.cron-builder-grid {
-		display: grid;
-		grid-template-columns: 1fr 1fr;
-		gap: 10px;
-	}
-	.cron-field {
-		display: flex;
-		flex-direction: column;
-		gap: 5px;
-	}
-
-	.cron-summary {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: 8px;
-		padding: 8px 12px;
-		background: color-mix(in oklch, var(--primary) 7%, transparent);
-		border: 1px solid color-mix(in oklch, var(--primary) 22%, transparent);
-		border-radius: 8px;
-		font-size: 12.5px;
-	}
-	.cron-summary-text {
-		color: var(--foreground);
-		font-weight: 600;
-	}
-	.cron-summary-expr {
-		font-family: var(--font-mono, monospace);
-		color: var(--muted-foreground);
-		font-size: 11px;
-		padding: 2px 6px;
-		background: var(--muted);
-		border-radius: 4px;
-		flex-shrink: 0;
-	}
-
-	.cron-raw-details summary {
-		cursor: pointer;
-	}
-
-	/* ── Add button (dashed, matches AutomationForm) ── */
-	.af-add-btn {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		gap: 6px;
-		width: 100%;
-		padding: 10px;
-		background: none;
-		border: 1px dashed var(--border);
-		border-radius: 10px;
-		color: var(--muted-foreground);
-		font-size: 12.5px;
-		font-weight: 600;
-		cursor: pointer;
-		transition: border-color 0.12s, color 0.12s, background 0.12s;
-	}
-	.af-add-btn:hover {
-		border-color: var(--muted-foreground);
-		color: var(--foreground);
-		background: var(--muted);
-	}
-
-	@media (max-width: 639px) {
-		.cron-builder-grid {
-			grid-template-columns: 1fr;
-		}
-		.cron-summary {
-			flex-direction: column;
-			align-items: flex-start;
-			gap: 4px;
-		}
-	}
+ details { margin-top: 12px; }
+ summary { cursor: pointer; min-height: 32px; font-size: 13px; color: var(--st-mfg); }
+ summary:hover { color: var(--st-fg); }
+ .webhook-value { width: 100%; min-width: 0; background: var(--st-field); color: var(--st-fg); border: 1px solid var(--st-input); border-radius: var(--st-radius-md); padding: 8px 12px; font: inherit; font-size: 13px; }
+ @media (max-width:600px) { summary { min-height:44px; } .webhook-value { font-size:16px; } }
 </style>
