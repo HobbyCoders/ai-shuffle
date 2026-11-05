@@ -260,9 +260,9 @@ describe('SessionCard actions', () => {
 		expect(container.querySelector('.scard.compact')).toBeTruthy();
 		expect(container.querySelector('.title')?.textContent).toContain('Sidebar work');
 		expect(container.querySelector('.l2 .where')?.textContent).toBe('fix/thing');
-		expect(container.querySelector('.l1 .timer')?.textContent).toBe('1m 30s');
+		expect(container.querySelector('.l1 .timer')?.textContent).toBe('1m');
 		// The rest of the row's facts stay on hover and for screen readers.
-		const tip = container.querySelector('.scard')?.getAttribute('title');
+		const tip = container.querySelector('.body')?.getAttribute('title');
 		expect(tip).toContain('Sidebar work');
 		for (const part of ['This device', 'Project A', 'fix/thing']) {
 			expect(tip).toContain(part);
@@ -389,7 +389,7 @@ describe('SessionCard actions', () => {
 		);
 
 		expect(container.querySelector('.timer')?.getAttribute('title')).toBe(
-			'Total working time · last activity 3m ago'
+			'Total working time 1m 30s · last activity 3m ago'
 		);
 	});
 
@@ -402,20 +402,43 @@ describe('SessionCard actions', () => {
 		);
 
 		const timer = container.querySelector('.timer');
-		expect(timer?.textContent).toBe('12m 34s');
-		expect(timer?.getAttribute('title')).toBe('Total working time · last activity 3h ago');
-		expect(timer?.classList.contains('live')).toBe(false);
+		expect(timer?.textContent).toBe('12m');
+		expect(timer?.getAttribute('title')).toBe('Total working time 12m 34s · last activity 3h ago');
 	});
 
-	it('gives a parked card the plain timer style, not the live accent', () => {
-		const parked = renderCard({ work_ms: 90_000, work_started_at: null }, { status: 'parked' });
-		expect(parked.container.querySelector('.timer')?.classList.contains('live')).toBe(false);
+	// Owner decision 2026-11-05: state belongs to the state column, not the clock.
+	it('draws the time in one neutral tone, whatever the row is doing', () => {
+		for (const status of ['working', 'parked', 'needs_permission', 'failed', 'offline', 'done', 'idle']) {
+			for (const compact of [false, true]) {
+				const { container } = renderCard({ work_ms: 90_000, is_active: !compact }, { status, compact });
+				expect(container.querySelector('.timer')?.className.replace(/\s*svelte-\S+/g, '')).toBe('timer');
+				cleanup();
+			}
+		}
+		const source = readFileSync(resolve(import.meta.dirname, 'SessionCard.svelte'), 'utf8');
+		expect(source.match(/\.timer[^{]*\{[^}]*\}/g)?.join()).not.toMatch(/--primary|--warning|--destructive|--success/);
+		expect(source).not.toMatch(/\.timer\.[a-z]/);
+	});
 
-		const working = renderCard(
-			{ work_ms: 0, work_started_at: '2026-08-20T12:05:00Z' },
-			{ status: 'working' }
-		);
-		expect(working.container.querySelector('.timer')?.classList.contains('live')).toBe(true);
+	it('ticks seconds only while the row is working, with the exact total on hover everywhere', () => {
+		const shown = (status: string) => {
+			const { container } = renderCard({ work_ms: 754_000, work_started_at: null }, { status });
+			const timer = container.querySelector('.timer');
+			const out = [timer?.textContent, timer?.getAttribute('title')];
+			cleanup();
+			return out;
+		};
+		expect(shown('working')).toEqual(['12m 34s', 'Total working time 12m 34s']);
+		for (const status of ['parked', 'needs_permission', 'has_question', 'await', 'failed', 'offline', 'done', 'idle']) {
+			expect(shown(status)).toEqual(['12m', 'Total working time 12m 34s']);
+		}
+	});
+
+	it('keeps an hour-long total short, and its seconds on hover', () => {
+		const { container } = renderCard({ work_ms: 3_969_000, work_started_at: null }, { status: 'done' });
+		const timer = container.querySelector('.timer');
+		expect(timer?.textContent).toBe('1h 06m');
+		expect(timer?.getAttribute('title')).toBe('Total working time 1h 06m 09s');
 	});
 
 	// ── #1619: total working time, not time since the last activity ─────
@@ -423,8 +446,8 @@ describe('SessionCard actions', () => {
 		const { container } = renderCard({ work_ms: 754_000 }, { status: 'done' });
 
 		const timer = container.querySelector('.timer');
-		expect(timer?.textContent).toBe('12m 34s');
-		expect(timer?.getAttribute('title')).toBe('Total working time');
+		expect(timer?.textContent).toBe('12m');
+		expect(timer?.getAttribute('title')).toBe('Total working time 12m 34s');
 	});
 
 	it('adds the running turn to the banked total while it works', () => {
@@ -442,11 +465,11 @@ describe('SessionCard actions', () => {
 			{ work_ms: 90_000, work_started_at: null },
 			{ status: 'parked' }
 		);
-		expect(container.querySelector('.timer')?.textContent).toBe('1m 30s');
+		expect(container.querySelector('.timer')?.textContent).toBe('1m');
 
 		// An hour of idle wall-clock later the parked total has not moved.
 		await rerender({ now: Date.parse('2026-08-20T13:06:00Z') } as never);
-		expect(container.querySelector('.timer')?.textContent).toBe('1m 30s');
+		expect(container.querySelector('.timer')?.textContent).toBe('1m');
 
 		// A wake turn starts: the total resumes from the banked value.
 		await rerender({
@@ -462,11 +485,12 @@ describe('SessionCard actions', () => {
 			{ work_ms: 90_000, work_started_at: '2026-08-20T12:05:00Z' },
 			{ status: 'parked' }
 		);
-		expect(container.querySelector('.timer')?.textContent).toBe('2m 30s');
+		expect(container.querySelector('.timer')?.textContent).toBe('2m');
 
 		// Ten minutes later the background work is still running.
 		await rerender({ now: Date.parse('2026-08-20T12:16:00Z') } as never);
-		expect(container.querySelector('.timer')?.textContent).toBe('12m 30s');
+		expect(container.querySelector('.timer')?.textContent).toBe('12m');
+		expect(container.querySelector('.timer')?.getAttribute('title')).toBe('Total working time 12m 30s');
 	});
 
 	it('closes a stale live interval at the last activity once the turn is done', () => {
@@ -477,7 +501,7 @@ describe('SessionCard actions', () => {
 			{ status: 'done', timestamp: Date.parse('2026-08-20T12:05:00Z'), now: Date.parse('2026-08-20T14:00:00Z') }
 		);
 
-		expect(container.querySelector('.timer')?.textContent).toBe('2m 00s');
+		expect(container.querySelector('.timer')?.textContent).toBe('2m');
 	});
 
 	it('shows the working total on a settled row while its turn runs', () => {
@@ -722,7 +746,7 @@ describe('SessionCard git state', () => {
 		mocks.gitCurrent.diffStats = { additions: 70, deletions: 4 };
 		const { container } = renderCard({ worktree_branch: 'feat/new' }, { active: true });
 		expect(container.querySelector('.diff')).toBeNull();
-		expect(container.querySelector('.lead')?.getAttribute('title')).toBe('No changes');
+		expect(container.querySelector('.lead')?.hasAttribute('title')).toBe(false);
 		expect(mocks.watch).toHaveBeenCalled();
 		expect(mocks.remember).not.toHaveBeenCalled();
 	});
@@ -740,7 +764,13 @@ describe('SessionCard git state', () => {
 		mocks.gitCurrent.projectId = 'project-a';
 		mocks.gitCurrent.status = gitStatus({ has_changes: true });
 		const { container } = renderCard({}, { active: true });
-		expect(container.querySelector('.lead')?.getAttribute('title')).toBe('No changes');
+		expect(container.querySelector('.lead')?.hasAttribute('title')).toBe(false);
+	});
+
+	it('claims nothing about a settled row whose checkout was never read', () => {
+		const { container } = renderCard({ is_active: false, worktree_branch: 'feat/left-dirty' });
+		expect(container.querySelector('.lead')?.hasAttribute('title')).toBe(false);
+		expect(container.querySelector('.details')?.textContent).toContain('feat/left-dirty');
 	});
 
 	it('leads a merged session with the purple merge glyph', () => {
@@ -842,32 +872,116 @@ describe('SessionCard git state', () => {
 
 		expect(container.querySelector('.title')?.textContent).toContain('Sidebar work');
 		const statusLine = container.querySelector('.l2');
-		expect(statusLine?.querySelector('.st')?.textContent).toBe('Working');
-		expect(statusLine?.querySelector('.st')?.classList.contains('accent')).toBe(true);
+		expect(statusLine?.textContent?.trim()).toBe('feat/x');
 		expect(statusLine?.querySelector('.timer')).toBeNull();
 		expect(container.querySelector('.l1 .timer')).toBeTruthy();
 	});
 
-	it.each(['pr', 'pr_merged', 'done', 'idle'])('prints no status word on a %s row', (status) => {
-		const { container } = renderCard({ is_active: true }, { status });
-		expect(container.querySelector('.l2')).toBeTruthy();
-		expect(container.querySelector('.l2 .st:not(.pr)')).toBeNull();
+	// Owner decision 2026-11-05: the state column says the state, without words.
+	it.each([
+		['working', 'Working'],
+		['parked', 'Parked'],
+		['needs_permission', 'Needs permission'],
+		['has_question', 'Has question'],
+		['await', 'Awaiting input'],
+		['failed', 'Failed'],
+		['offline', 'Offline'],
+		['pr', 'Done'],
+		['pr_merged', 'Done'],
+		['done', 'Done'],
+		['idle', 'Idle'],
+	])('prints no status word on a %s row, in either lane', (status, word) => {
+		for (const compact of [false, true]) {
+			const { container } = renderCard(
+				{ is_active: !compact, worktree_branch: 'feat/x' },
+				{ status, compact },
+			);
+			expect(container.querySelector('.l2 .where')?.textContent).toBe('feat/x');
+			expect(container.querySelector('.l2 .st:not(.pr)')).toBeNull();
+			expect(container.querySelector('.l2')?.textContent).not.toContain(word);
+			cleanup();
+		}
 	});
 
-	it('says the status once for screen readers: the printed word is hidden, the details line speaks', () => {
+	it('says the state once for screen readers: the mark is hidden, the details line speaks', () => {
 		for (const [status, word, compact] of [
 			['working', 'Working', true],
 			['needs_permission', 'Needs permission', true],
 			['working', 'Working', false],
+			['failed', 'Failed', false],
 		] as const) {
-			const { container } = renderCard({ is_active: !compact }, { status, compact });
-			expect(container.querySelector('.details')?.textContent).toContain(word);
-			expect(container.querySelector('.lead')?.getAttribute('aria-hidden')).toBe('true');
+			const { container } = renderCard({ is_active: !compact, title: 'Plain title' }, { status, compact });
+			const details = container.querySelector('.details')?.textContent ?? '';
+			expect(details.split(' · ')[0]).toBe(word);
+			expect(details.split(word)).toHaveLength(2);
+			const lead = container.querySelector('.lead');
+			expect(lead?.getAttribute('aria-hidden')).toBe('true');
+			expect(lead?.getAttribute('title')).toBe(word);
 			for (const printed of container.querySelectorAll('.l2 .st, .l2 .where, .l2 .diff')) {
 				expect(printed.getAttribute('aria-hidden')).toBe('true');
 			}
+			// A title on the button would be read out again as its description.
+			expect(container.querySelector('.scard')?.hasAttribute('title')).toBe(false);
+			expect(container.querySelector('.body')?.getAttribute('title')).toContain(word);
 			cleanup();
 		}
+	});
+
+	it('gives each runtime state its own mark and its word as the hover title', () => {
+		const mark = (status: string, compacting = false) => {
+			const { container } = renderCard({ is_active: true }, { status, compacting });
+			const lead = container.querySelector('.lead')!;
+			const out = {
+				word: lead.getAttribute('title'),
+				glyph: lead.querySelector('svg') !== null,
+				classes: [...(lead.querySelector('.pip')?.classList ?? [])].filter((c) => !c.startsWith('svelte-')).join(' '),
+			};
+			cleanup();
+			return out;
+		};
+		expect(mark('working')).toEqual({ word: 'Working', glyph: false, classes: 'pip' });
+		expect(mark('working', true)).toEqual({ word: 'Compacting', glyph: false, classes: 'pip compacting' });
+		expect(mark('parked')).toEqual({ word: 'Parked', glyph: false, classes: 'pip held' });
+		expect(mark('needs_permission')).toEqual({ word: 'Needs permission', glyph: false, classes: 'pip warn' });
+		expect(mark('has_question')).toEqual({ word: 'Has question', glyph: false, classes: 'pip warn' });
+		expect(mark('failed')).toEqual({ word: 'Failed', glyph: false, classes: 'pip warn failed' });
+		expect(mark('offline')).toEqual({ word: 'Offline', glyph: true, classes: '' });
+	});
+
+	it('only says Compacting while the row is actually working', () => {
+		const { container } = renderCard({ is_active: true }, { status: 'idle', compacting: true });
+		expect(container.querySelector('.pip')).toBeNull();
+		expect(container.querySelector('.details')?.textContent).not.toContain('Compacting');
+	});
+
+	it('keeps the marks apart by shape, not hue alone, with motion off too', () => {
+		const source = readFileSync(resolve(import.meta.dirname, 'SessionCard.svelte'), 'utf8');
+		const rule = (selector: string) => source.match(new RegExp(`${selector.replace(/\./g, '\\.')} \\{[^}]*\\}`))?.[0] ?? '';
+		expect(rule('.pip')).toMatch(/border-radius: 50%/);
+		expect(rule('.pip.compacting')).toMatch(/width: 12px[^}]*height: 5px/);
+		expect(rule('.pip.held')).toMatch(/background: transparent/);
+		expect(rule('.pip.warn')).toMatch(/rotate\(45deg\)/);
+		expect(rule('.pip.warn.failed')).toMatch(/clip-path: polygon/);
+		// Compacting moves at half working's pace.
+		expect(rule('.pip')).toMatch(/card-ping 1\.8s/);
+		expect(rule('.pip.compacting')).toMatch(/card-squeeze 3\.6s/);
+		// Motion off stops every mark. `.pip` alone would not beat `.pip.compacting`.
+		expect(source).toMatch(/prefers-reduced-motion: reduce\) \{\s*\.pip,\s*\.pip\.compacting,\s*\.pip\.warn \{ animation: none; \}/);
+	});
+
+	it('never lets a pulse fade a mark below what it needs to stay readable', () => {
+		const source = readFileSync(resolve(import.meta.dirname, 'SessionCard.svelte'), 'utf8');
+		const frames = (name: string) => source.match(new RegExp(`@keyframes ${name} \\{[\\s\\S]*?\\n\\t\\}`))?.[0] ?? '';
+		// 0.8 is the floor where the working colour still holds 3:1 on the light panel.
+		for (const name of ['card-ping', 'card-squeeze']) {
+			const opacities = [...frames(name).matchAll(/opacity: ([\d.]+)/g)].map((m) => Number(m[1]));
+			expect(opacities.length).toBeGreaterThan(0);
+			expect(Math.min(...opacities)).toBeGreaterThanOrEqual(0.8);
+		}
+		// Amber has no headroom on the light panel, so the diamond never fades at all,
+		// and it stays a diamond while it pulses.
+		expect(frames('card-pulse')).not.toMatch(/opacity/);
+		expect(frames('card-pulse')).toMatch(/rotate\(45deg\) scale\(0\.82\)/);
 	});
 
 	it('keeps the row on two lines in every status, so starting or stopping work cannot move it', () => {
@@ -897,7 +1011,6 @@ describe('SessionCard git state', () => {
 			{ status: 'working' },
 		);
 		expect(container.querySelector('.lead .pip')).toBeTruthy();
-		expect(container.querySelector('.l2 .st.accent')?.textContent).toBe('Working');
 		const pr = container.querySelector('.l2 .st.pr');
 		expect(pr?.textContent).toBe('PR #142 open');
 		expect(pr?.classList.contains('green')).toBe(true);
@@ -911,7 +1024,7 @@ describe('SessionCard git state', () => {
 				{ is_active: false, pr_state: 'merged', pr_number: 7 },
 				{ status, compact: true },
 			);
-			expect(container.querySelector('.l2 .st.accent, .l2 .st.amber, .l2 .st.danger, .l2 .st.muted:not(.pr)')).toBeNull();
+			expect(container.querySelector('.l2')?.textContent?.trim()).toBe('PR #7 merged');
 			expect(container.querySelector('.l2 .st.pr.purple')?.textContent).toBe('PR #7 merged');
 			cleanup();
 		}
@@ -923,6 +1036,20 @@ describe('SessionCard git state', () => {
 			{ compact: true, status: 'idle' },
 		);
 		expect(container.querySelector('.l2 .where')?.textContent).toMatch(/ago$|^Just now$/);
+	});
+
+	it('falls back to the same age on a working row with no facts, never a status word', () => {
+		const bare = { worktree_branch: null, branch: null, pr_state: null, pr_number: null, pull_requests: [] };
+		for (const status of ['working', 'parked', 'needs_permission', 'failed']) {
+			const { container } = renderCard({ ...bare, is_active: true }, { status });
+			expect(container.querySelector('.l2 .where')?.textContent).toMatch(/ago$|^Just now$/);
+			cleanup();
+		}
+		const remote = renderCard(
+			{ ...bare, is_active: true, is_remote: true, device_name: 'GamingPC' },
+			{ status: 'working' },
+		);
+		expect(remote.container.querySelector('.l2 .where')?.textContent).toMatch(/^GamingPC · (.* ago|Just now)$/);
 	});
 
 	it('names the project only when the row is not under a project header', () => {
@@ -951,7 +1078,7 @@ describe('SessionCard git state', () => {
 		const parked = renderCard({ is_active: true }, { status: 'needs_permission' });
 		expect(parked.container.querySelector('.lead .pip.warn')).toBeTruthy();
 		expect(parked.container.querySelector('.lead .pip.warn.failed')).toBeNull();
-		expect(parked.container.querySelector('.l2 .st')?.textContent).toBe('Needs permission');
+		expect(parked.container.querySelector('.lead')?.getAttribute('title')).toBe('Needs permission');
 	});
 
 	it('draws nothing on an idle row but keeps its gutter', () => {

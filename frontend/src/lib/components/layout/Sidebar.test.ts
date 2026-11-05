@@ -408,6 +408,42 @@ describe('Sidebar session groups', () => {
 		expect(titles()).toEqual(before);
 	});
 
+	// A project swapping places moves a screenful of rows, so its newest chat
+	// leaving a lane, for good or until the server refuses it, must not do that.
+	it('keeps a project in its place when its newest chat leaves the lane', async () => {
+		const at = (minutes: number) => ({ updated_at: new Date(Date.now() - minutes * 60_000).toISOString() });
+		const visible = (id: string, title: string, isActive: boolean, minutes: number, extra = {}) =>
+			session(id, title, 'visible-project', isActive, false, { ...at(minutes), ...extra });
+		const other = (id: string, title: string, minutes: number) =>
+			session(id, title, 'other-project', true, false, { ...at(minutes), project_name: 'Other Project' });
+		mocks.projects.set([
+			{ id: 'visible-project', name: 'Visible Project' },
+			{ id: 'other-project', name: 'Other Project' },
+		]);
+		const before = [visible('newest', 'Newest', true, 1), other('middle', 'Middle', 2), visible('oldest', 'Oldest', true, 3)];
+		mocks.sessions.set(before);
+		render(Sidebar, { props: sidebarProps });
+		const activeTitles = () =>
+			[...document.querySelectorAll('[data-group="active"] .scard-frame .title')].map((el) => el.textContent);
+		expect(activeTitles()).toEqual(['Newest', 'Oldest', 'Middle']);
+
+		// Settled: the project keeps its place, though Middle is now newer than
+		// anything of that project left in this lane.
+		mocks.sessions.set([visible('newest', 'Newest', false, 1), before[1], before[2]]);
+		await tick();
+		expect(activeTitles()).toEqual(['Oldest', 'Middle']);
+
+		// Archived, until the server has answered: the row is still in the list.
+		mocks.sessions.set([visible('newest', 'Newest', false, 1, { status: 'archived' }), before[1], before[2]]);
+		await tick();
+		expect(activeTitles()).toEqual(['Oldest', 'Middle']);
+
+		// Refused: it comes back to where it was, and nothing else moved.
+		mocks.sessions.set(before);
+		await tick();
+		expect(activeTitles()).toEqual(['Newest', 'Oldest', 'Middle']);
+	});
+
 	it('keeps a remote-only catalog project in the list and filter', async () => {
 		mocks.clusterProjects.set([
 			{
@@ -575,7 +611,8 @@ describe('Sidebar session groups', () => {
 		await fireEvent.click(screen.getByRole('button', { name: 'Clear device filter Laptop' }));
 		expect(cardIds()).toEqual(['active', 'peer']);
 		await fireEvent.click(screen.getByRole('button', { name: 'Clear project filter Visible Project' }));
-		expect(cardIds()).toEqual(['active', 'other', 'peer']);
+		// Visible Project holds the newest chat, so it comes first in every lane.
+		expect(cardIds()).toEqual(['active', 'peer', 'other']);
 		expect(document.querySelector('.filter-btn.set')).toBeNull();
 	});
 

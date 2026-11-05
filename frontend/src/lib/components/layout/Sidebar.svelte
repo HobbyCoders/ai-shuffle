@@ -557,9 +557,21 @@
 		if (ts >= today - 6 * DAY) return 'Earlier this week';
 		return 'Older';
 	}
+	// A project's place follows its most recent chat in ANY lane, archived-but-
+	// not-yet-gone included. Ranking on the lane's own rows made a project swap
+	// places, moving a screenful of rows, whenever its newest chat left the lane,
+	// and swap back if the server then refused the change.
+	const projectRecency = $derived.by(() => {
+		const latest = new Map<string, number>();
+		for (const s of visibleSessions) {
+			const key = projectKey(s);
+			const ts = sessionTimestamp(s);
+			if (ts > (latest.get(key) ?? -Infinity)) latest.set(key, ts);
+		}
+		return latest;
+	});
 	// Inside a lane, rows sit under their project when the lane spans more than
-	// one, so no row has to repeat it. A project's place follows its most recent
-	// row, and rows keep their recency order inside it.
+	// one, so no row has to repeat it. Rows keep their recency order inside it.
 	function byProject(laneRows: CardRow[]): { key: string; label: string | null; rows: CardRow[] }[] {
 		const groups = new Map<string, CardRow[]>();
 		for (const row of laneRows) {
@@ -569,11 +581,14 @@
 			else groups.set(key, [row]);
 		}
 		if (groups.size < 2) return [{ key: 'all', label: null, rows: laneRows }];
-		return [...groups].map(([key, rows]) => ({
-			key,
-			label: key === UNGROUPED_PROJECT ? 'No project' : projectLabel(rows[0].session),
-			rows
-		}));
+		const recency = (key: string) => projectRecency.get(key) ?? 0;
+		return [...groups]
+			.sort(([a], [b]) => recency(b) - recency(a))
+			.map(([key, rows]) => ({
+				key,
+				label: key === UNGROUPED_PROJECT ? 'No project' : projectLabel(rows[0].session),
+				rows
+			}));
 	}
 	// A lane with no project headers still needs its rows to say where they
 	// belong, unless the whole list is one project and it goes without saying.
@@ -1255,7 +1270,7 @@
 	}
 	.phone .selbar { height: calc(56px + env(safe-area-inset-top, 0px)); padding-top: env(safe-area-inset-top, 0px); }
 	.col.selecting .selbar { transform: none; }
-	.cnt { margin-right: auto; padding-left: 4px; font-size: 14px; font-weight: 650; color: var(--foreground); }
+	.cnt { margin-right: auto; padding-left: 2px; font-size: 13px; font-weight: 650; white-space: nowrap; color: var(--foreground); }
 	.act {
 		display: flex;
 		align-items: center;
