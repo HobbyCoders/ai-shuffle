@@ -33,19 +33,31 @@ async function produce(page, variant, script) {
 async function assertDisclosurePosition(page, plan, activate, log, label) {
  const button = plan.getByRole('button', { name: /(?:Expand|Collapse) plan/ });
  await button.focus();
- const measure = () => button.evaluate(button => {
-  const scroller = button.closest('.msg-scroll');
-  const box = button.getBoundingClientRect();
-  return { top: box.top, bottom: box.bottom, focused: document.activeElement === button,
-   scrollTop: scroller.scrollTop, scrollHeight: scroller.scrollHeight, clientHeight: scroller.clientHeight,
-   viewportTop: scroller.getBoundingClientRect().top, viewportBottom: scroller.getBoundingClientRect().bottom, windowY: scrollY };
+ const preLocator = await button.evaluate(button => {
+  const measure = () => {
+   const scroller = button.closest('.msg-scroll');
+   const box = button.getBoundingClientRect();
+   return { top: box.top, bottom: box.bottom, focused: document.activeElement === button,
+    scrollTop: scroller.scrollTop, scrollHeight: scroller.scrollHeight, clientHeight: scroller.clientHeight,
+    viewportTop: scroller.getBoundingClientRect().top, viewportBottom: scroller.getBoundingClientRect().bottom, windowY: scrollY };
+  };
+  // Locator click may reveal a header near the scroll-padding edge BEFORE
+  // dispatch. Observe its actual click before Svelte's target handler changes
+  // layout; retain the pre-locator coordinates to distinguish that reveal.
+  button.__planDisclosureProbe = { measure, before: null };
+  button.addEventListener('click', () => { button.__planDisclosureProbe.before = measure(); }, { capture: true, once: true });
+  return measure();
  });
- const before = await measure();
  await activate(button);
  // Let the real column ResizeObserver and reserve handoff finish, including at 4x CPU.
  await page.evaluate(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(() => requestAnimationFrame(done)))));
- const after = await measure();
- log(`${label}: ${JSON.stringify({ before, after })}`);
+ const { before, after } = await button.evaluate(button => {
+  const { before, measure } = button.__planDisclosureProbe;
+  delete button.__planDisclosureProbe;
+  return { before, after: measure() };
+ });
+ expect(!!before, `${label}: activation dispatched a real disclosure click`);
+ log(`${label}: ${JSON.stringify({ preLocator, before, after })}`);
  const clamp = Math.max(0, before.scrollTop - (after.scrollHeight - after.clientHeight));
  expect(Math.abs(after.top - before.top - clamp) <= 2, `${label}: focused header stays put (except physical bottom clamp)`);
  expect(after.focused && after.bottom > after.viewportTop && after.top < after.viewportBottom, `${label}: focus stays visible`);
