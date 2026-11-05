@@ -1588,6 +1588,8 @@ def _run_column_migrations(cursor: Any) -> None:
             )
         """)
         migrations_applied.append("session_stops")
+    from app.db.stop_receipts import create_schema as create_stop_receipts_schema
+    create_stop_receipts_schema(cursor)
     if not column_exists(cursor, "pending_wakeups", "stop_seq"):
         # Rows here now read 0, so the next Stop cancels them. An older install
         # still writing to this database leaves it empty: see _cancelled_by_stop.
@@ -2850,6 +2852,9 @@ def _run_column_migrations(cursor: Any) -> None:
     if not column_exists(cursor, "background_tasks", "turn_order_upper_bound"):
         cursor.execute("ALTER TABLE background_tasks ADD COLUMN turn_order_upper_bound BIGINT")
         migrations_applied.append("background_tasks_turn_order_upper_bound")
+    if not column_exists(cursor, "background_tasks", "turn_order_incarnation"):
+        cursor.execute("ALTER TABLE background_tasks ADD COLUMN turn_order_incarnation TIMESTAMP WITH TIME ZONE")
+        migrations_applied.append("background_tasks_turn_order_incarnation")
     _backfill_legacy_task_turn_bounds(cursor)
 
     if migrations_applied:
@@ -2864,10 +2869,11 @@ def _backfill_legacy_task_turn_bounds(cursor: Any) -> None:
     must leave that run alone and report incomplete, not guess its identity.
     """
     cursor.execute(
-        "UPDATE background_tasks SET turn_order_upper_bound = "
+        "UPDATE background_tasks SET turn_order = NULL, turn_order_upper_bound = "
         "(SELECT COALESCE(MAX(insert_order), 0) FROM turns "
-        "WHERE turns.session_id = background_tasks.session_id) "
-        "WHERE turn_order IS NULL AND turn_order_upper_bound IS NULL "
+        "WHERE turns.session_id = background_tasks.session_id), "
+        "turn_order_incarnation = started_at "
+        "WHERE turn_order_incarnation IS NULL AND started_at IS NOT NULL "
         "AND status = 'running' AND remote_device_id IS NOT NULL"
     )
 
@@ -3378,6 +3384,10 @@ def _retire_assistant_home(cursor) -> List[str]:
                        f"AND id NOT IN ({marks})", params + params)
         if table_exists(cursor, "usage_log"):
             cursor.execute(f"UPDATE usage_log SET session_id = NULL WHERE session_id IN ({marks})", params)
+        from app.db.stop_receipts import prune_consumed
+        for session_id in ids:
+            prune_consumed(cursor, session_id=session_id)
+        # Pending authority survives retirement of its mutable turn/session.
         for table in _ASSISTANT_HOME_RUNTIME_TABLES:
             if table_exists(cursor, table):
                 cursor.execute(f"DELETE FROM {table} WHERE session_id IN ({marks})", params)

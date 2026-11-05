@@ -1423,8 +1423,13 @@ class TaskRegistry:
                 "report_path": row.get("report_path"),
                 "report_chars": row.get("report_chars"),
                 "started_at": _iso(row.get("started_at")),
-                "turn_order": row.get("turn_order"),
-                "turn_order_upper_bound": row.get("turn_order_upper_bound"),
+                # Old installs omit these columns when reusing a task id. An
+                # unchanged order must not become authority over that NEW run.
+                # Timestamps are equality tokens here, never ordering evidence.
+                "turn_order": (row.get("turn_order") if row.get("started_at") is not None and
+                               _iso(row.get("turn_order_incarnation")) == _iso(row.get("started_at")) else None),
+                "turn_order_upper_bound": (row.get("turn_order_upper_bound") if row.get("started_at") is not None and
+                                           _iso(row.get("turn_order_incarnation")) == _iso(row.get("started_at")) else None),
                 "updated_at": _iso(row.get("updated_at")),
                 "restored": True,
             }

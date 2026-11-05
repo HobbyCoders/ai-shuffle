@@ -14,7 +14,7 @@ def _restore_legacy(bound):
 
     row = task_registry._tasks[SID].pop("worker-a")
     row.update(remote_device_id="other-install", turn_order=None,
-               turn_order_upper_bound=bound)
+               turn_order_upper_bound=bound, turn_order_incarnation=row.get("started_at"))
     task_registry.hydrate_rows(SID, [row])
 
 

@@ -459,7 +459,7 @@ async def _fire(row: Dict[str, Any]) -> None:
             from app.core import turn_scheduler
 
             turn_id = await turn_scheduler.promote_held_peer_messages(
-                session_id, row.get("prompt") or "",
+                session_id, row.get("prompt") or "", wake_stop_seq=row.get("stop_seq"),
             )
         else:
             # A wake runs as the key that owns the session, never as the owner:
@@ -473,7 +473,8 @@ async def _fire(row: Dict[str, Any]) -> None:
                 project_id=row.get("project_id"),
                 overrides=overrides,
                 **({"command_id": str(wakeup_id)} if row.get("source") == "handoff_resume" else {}),
-                payload={"api_user_id": api_user_id} if api_user_id else None,
+                payload={"wake_stop_seq": row.get("stop_seq"),
+                         **({"api_user_id": api_user_id} if api_user_id else {})},
             )
     except asyncio.CancelledError:
         raise
@@ -784,6 +785,8 @@ async def schedule(
     reason: Optional[str] = None,
     model: Optional[str] = None,
     source: str = "schedule_wakeup",
+    created_at: Any = None,
+    stop_seq: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Persist a wakeup and arm its in-process timer. Returns the persisted row.
 
@@ -816,7 +819,9 @@ async def schedule(
             session_id, source, dropped,
         )
         return {}
-    replaced = await cancel_session_wakeups_async(session_id, source)
+    # A postponed claimed wake retains its original boundary, and must not
+    # delete a genuinely new wake armed after that boundary.
+    replaced = await cancel_session_wakeups_async(session_id, source) if stop_seq is None else []
     if replaced:
         logger.info(
             "wakeup schedule: replaced %d outstanding %s wake(s) for session %s",
@@ -835,6 +840,8 @@ async def schedule(
         model=model,
         source=source,
         instance_id=settings.effective_instance_id,
+        created_at=created_at,
+        stop_seq=stop_seq,
     )
     _arm(row, max(0.0, float(delay_seconds)))
     logger.info(

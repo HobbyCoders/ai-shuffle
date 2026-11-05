@@ -127,3 +127,32 @@ def test_upgrade_snapshot_does_not_include_concurrently_admitted_successor(conne
         cursor.execute("SELECT turn_order,turn_order_upper_bound FROM background_tasks "
                        "WHERE task_id='newer' AND session_id=%s", (session_id,))
         assert dict(cursor.fetchone()) == {"turn_order": newer["insert_order"], "turn_order_upper_bound": None}
+
+
+@pytest.mark.parametrize("exact_order", [False, True])
+def test_previous_version_writer_cannot_transfer_bound_to_new_incarnation(session_id, exact_order):
+    from app.core.query_session_lifecycle import capture_stop_scope
+    from app.core.task_registry import task_registry
+    from app.db import base, database, turns
+
+    _legacy(session_id)
+    with base.get_db() as conn:
+        database._backfill_legacy_task_turn_bounds(conn.cursor())
+    if exact_order:
+        from app.db import background_tasks
+        snapshot = _row(session_id)
+        snapshot.update(turn_order=snapshot["turn_order_upper_bound"], turn_order_upper_bound=None)
+        background_tasks.upsert_background_task(snapshot)
+    newer = turns.enqueue_turn(session_id, "user", prompt="newer input", profile_id="default")
+    with base.get_db() as conn:
+        # Pre-column writers update started_at but omit every new order column.
+        # This is their ON CONFLICT SET behavior on the existing legacy row.
+        conn.cursor().execute("UPDATE background_tasks SET started_at='2021-01-01T00:00:00Z' "
+                              "WHERE task_id='legacy' AND session_id=%s", (session_id,))
+    try:
+        task_registry.hydrate_rows(session_id, [_row(session_id)])
+        scope = capture_stop_scope(session_id, before_turn=newer["insert_order"])
+        assert scope.active == []
+        assert scope.unattributed == ("legacy",)
+    finally:
+        task_registry.clear_session(session_id)

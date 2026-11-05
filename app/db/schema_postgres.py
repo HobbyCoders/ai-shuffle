@@ -1011,6 +1011,8 @@ def create_postgres_schema(cursor: Any) -> None:
             stopped_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
         )
     """)
+    from app.db.stop_receipts import create_schema as create_stop_receipts_schema
+    create_stop_receipts_schema(cursor)
     cursor.execute("""
         CREATE INDEX IF NOT EXISTS idx_pending_wakeups_instance
         ON pending_wakeups(instance_id, fire_at)
@@ -1110,6 +1112,7 @@ def create_postgres_schema(cursor: Any) -> None:
             updated_at TIMESTAMP WITH TIME ZONE,
             turn_order BIGINT,
             turn_order_upper_bound BIGINT,
+            turn_order_incarnation TIMESTAMP WITH TIME ZONE,
             PRIMARY KEY (task_id, session_id)
         )
     """)

@@ -178,6 +178,13 @@ async def claim_once() -> int:
     """
     me = settings.effective_instance_id
     await _reconcile_stop_latches()
+    # Independent of mutable turn.state/instance_id/payload. This also replays
+    # a Stop whose old runtime died or whose logical turn was removed.
+    try:
+        from app.core import stop_receipts
+        await stop_receipts.observe(me)
+    except Exception:
+        logger.warning("turn_claim: Stop receipt observe failed", exc_info=True)
 
     # --- Interrupt-observe pass (first: reacting to a stop beats starting
     # new work, and the list is almost always empty). ---

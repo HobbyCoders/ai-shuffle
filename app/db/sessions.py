@@ -1818,6 +1818,10 @@ def delete_session(session_id: str) -> bool:
             f"UPDATE usage_log SET session_id = NULL WHERE session_id = {_ph}",
             (session_id,),
         )
+        from app.db.stop_receipts import prune_consumed
+        prune_consumed(cursor, session_id=session_id)
+        # Unconsumed Stop authority is not mutable runtime state: its owning
+        # install must still attempt cleanup even after this chat disappears.
         for table in _SESSION_RUNTIME_TABLES:
             # Table names are a module-level literal tuple, never user input.
             cursor.execute(

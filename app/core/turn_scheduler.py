@@ -1576,6 +1576,7 @@ def _restore_held_peer_messages(session_id: str, held: str) -> None:
 
 async def promote_held_peer_messages(
     session_id: str, held: str, *, released: bool = False,
+    wake_stop_seq: Optional[int] = None,
 ) -> Optional[str]:
     """Deliver held peer messages now, as a wake of their own.
 
@@ -1589,13 +1590,17 @@ async def promote_held_peer_messages(
     if not held.strip():
         return None
     async with _terminal_delivery_lock(session_id):
-        merged = await _hold_in_queued_unpark(session_id, held)
-        if merged is not None:
-            return merged["id"]
+        # A timer's older text must not taint a newer queued wake. Keep that
+        # claimed wake's own arm boundary through a separate durable admission.
+        if wake_stop_seq is None:
+            merged = await _hold_in_queued_unpark(session_id, held)
+            if merged is not None:
+                return merged["id"]
         turn = await _enqueue_context_wake(
             session_id, "promotion", [], [],
             _held_peer_block(held, promoted=not released, released=released),
-            extra_payload={"held_peer_messages": held},
+            extra_payload={"held_peer_messages": held,
+                           **({"wake_stop_seq": wake_stop_seq} if wake_stop_seq is not None else {})},
         )
     if turn.get("id"):
         logger.info(

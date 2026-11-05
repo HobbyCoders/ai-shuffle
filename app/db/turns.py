@@ -602,6 +602,32 @@ def block_missing_cwd(session_id: str, turn_id: str, path: str, reason: str) -> 
 # ``stop_seq`` is its place in the session's Stops (``session_stops``), which is
 # what any install holds a wake against, however that wake's delete went.
 STOP_RECEIPT_KEY = "stop_receipt"
+# The arm boundary travels with a claimed wake, including compact-first pairs.
+# Claiming deletes the wake row; Stop can still arrive before durable admission.
+WAKE_STOP_SEQ_KEY = "wake_stop_seq"
+
+
+def _wake_cancelled_by_stop(cursor: Any, turn: Dict[str, Any]) -> bool:
+    seq = (turn.get("payload") or {}).get(WAKE_STOP_SEQ_KEY)
+    if seq is None:
+        return False
+    cursor.execute("SELECT stop_seq FROM session_stops WHERE session_id=%s", (turn["session_id"],))
+    latest = cursor.fetchone()
+    return latest is not None and int(seq) < int(latest["stop_seq"])
+
+
+def wake_cancelled_by_stop(turn: Dict[str, Any]) -> bool:
+    if (turn.get("payload") or {}).get(WAKE_STOP_SEQ_KEY) is None:
+        return False
+    with get_db() as conn:
+        return _wake_cancelled_by_stop(conn.cursor(), turn)
+
+
+def _abort_cancelled_wake(cursor: Any, turn: Dict[str, Any]) -> Dict[str, Any]:
+    cursor.execute("UPDATE turns SET state='aborted', stop_reason='interrupted', ended_at=NOW() "
+                   "WHERE id=%s AND state='queued' RETURNING *", (turn["id"],))
+    return _row(cursor.fetchone()) or turn
+
 # Stamped by ``turn_manager`` on what a person just sent, and never copied to a
 # row re-queued from it: only that lifts a Stop on the install that holds it.
 PERSON_INPUT_KEY = "person_input"
@@ -644,8 +670,11 @@ def _stop_receipt(cursor: Any, session_id: str) -> Dict[str, Any]:
     cursor.execute("SELECT token FROM handoff_wakes WHERE session_id=%s AND finalized=FALSE",
                    (session_id,))
     handoffs = [row["token"] for row in cursor.fetchall()]
-    return {"input_cutoff": cutoff, "stop_seq": stop_seq, "queued": queued, "parks": parks,
-            "wakes": wakes, "handoffs": handoffs}
+    receipt = {"input_cutoff": cutoff, "stop_seq": stop_seq, "queued": queued, "parks": parks,
+               "wakes": wakes, "handoffs": handoffs}
+    from app.db import stop_receipts
+    receipt["cleanup_receipts"] = stop_receipts.publish(cursor, session_id, receipt)
+    return receipt
 
 
 def read_stop_receipt(session_id: str) -> Dict[str, Any]:
@@ -704,7 +733,8 @@ def outlives_stop(turn: Optional[Dict[str, Any]], input_cutoff: Optional[int]) -
     return bool(
         turn and input_cutoff is not None
         and (turn.get("payload") or {}).get(PERSON_INPUT_KEY)
-        and int(turn.get("insert_order") or 0) > input_cutoff
+        and int((turn.get("payload") or {}).get("accepted_input_order") or
+                turn.get("insert_order") or 0) > input_cutoff
     )
 
 
@@ -816,7 +846,7 @@ def enqueue_turn(
                 explicit_permission=explicit_permission,
                 payload={k: v for k, v in payload.items()
                          if k in ("api_user_id", "user_id", "forwarded_by_device", PERSON_INPUT_KEY,
-                                  COMPACTION_CONTINUATION_KEY, LIMIT_RESUME_KEY)},
+                                  COMPACTION_CONTINUATION_KEY, LIMIT_RESUME_KEY, WAKE_STOP_SEQ_KEY)},
                 instance_id=instance_id, _conn=conn,
             )
             payload["compact_before_turn_id"] = compact["id"]
@@ -875,6 +905,8 @@ def enqueue_turn(
         row = _row(cursor.fetchone())
         if row is None:  # INSERT ... RETURNING always yields the new row
             raise RuntimeError(f"enqueue_turn: INSERT returned no row for {turn_id}")
+        if _wake_cancelled_by_stop(cursor, row):
+            return _abort_cancelled_wake(cursor, row)
         return row
 
 
@@ -1072,6 +1104,10 @@ def start_turn(
             queued = _row(cursor.fetchone())
             if queued is None:
                 return None
+            if _wake_cancelled_by_stop(cursor, queued):
+                _abort_cancelled_wake(cursor, queued)
+                return None
+            queued["payload"]["accepted_input_order"] = queued["insert_order"]
             queued["payload"]["execution_defaults"] = _execution_defaults(cursor, queued)
             if can_resume is not None:
                 cursor.execute(
@@ -1148,6 +1184,7 @@ def start_turn(
                     # it does not prove this input was recorded. The recording
                     # carries this receipt (see _already_in_transcript).
                     payload["accepted_input_id"] = queued["id"]
+                    payload["accepted_input_order"] = queued["insert_order"]
                     payload["parked_usage"] = (previous.get("payload") or {}).get("parked_usage", {})
                     cursor.execute(
                         "UPDATE turns SET state='running', run_id=%s, instance_id=%s, "

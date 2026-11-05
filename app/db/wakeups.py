@@ -305,14 +305,16 @@ def merge_session_wakeup(
         stop_seq = int(cursor.fetchone()["stop_seq"])
         cursor.execute(
             f"SELECT * FROM pending_wakeups "
-            f"WHERE session_id = {_ph} AND source = {_ph} ORDER BY fire_at ASC",
-            (session_id, source),
+            f"WHERE session_id = {_ph} AND source = {_ph} "
+            f"AND (stop_seq IS NULL OR stop_seq <= {_ph}) ORDER BY fire_at ASC",
+            (session_id, source, stop_seq),
         )
         existing = rows_to_list(list(cursor.fetchall() or []))
         replaced, kept = [], []
         for row in existing:
             cursor.execute(
-                f"DELETE FROM pending_wakeups WHERE id = {_ph}", (row["id"],)
+                f"DELETE FROM pending_wakeups WHERE id = {_ph} "
+                f"AND (stop_seq IS NULL OR stop_seq <= {_ph})", (row["id"], stop_seq)
             )
             if cursor.rowcount and cursor.rowcount > 0:
                 replaced.append(row)

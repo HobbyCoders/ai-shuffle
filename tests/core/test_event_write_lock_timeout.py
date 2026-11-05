@@ -1285,7 +1285,10 @@ async def test_no_clock_decides_what_a_late_stop_ends(real_worker, skew_seconds)
     skewed = (datetime.now(timezone.utc) + timedelta(seconds=skew_seconds)).isoformat()
     for task_id in ("worker-a", "worker-b"):
         row = task_registry._tasks[SID].pop(task_id)
-        task_registry.hydrate_rows(SID, [{**row, "remote_device_id": "other-install", "started_at": skewed}])
+        from app.db import background_tasks
+        background_tasks.upsert_background_task({**row, "task_id": task_id, "session_id": SID,
+                                                 "remote_device_id": "other-install", "started_at": skewed})
+        task_registry.hydrate_rows(SID, [background_tasks.get_background_task(task_id, SID)])
 
     await _late_stop_reaches_the_old_runtime()
 
@@ -1301,7 +1304,10 @@ def test_a_task_keeps_its_turn_when_it_comes_back_from_the_database():
     try:
         record = task_registry._tasks[SID].pop("worker-c")
         assert record["turn_order"] == 7
-        task_registry.hydrate_rows(SID, [{**record, "task_id": "worker-c", "remote_device_id": "other-install"}])
+        from app.db import background_tasks
+        background_tasks.upsert_background_task({**record, "task_id": "worker-c", "session_id": SID,
+                                                 "remote_device_id": "other-install"})
+        task_registry.hydrate_rows(SID, [background_tasks.get_background_task("worker-c", SID)])
         assert task_registry.task_turn_order(SID, "worker-c") == 7
     finally:
         task_registry.clear_session(SID)

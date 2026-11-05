@@ -745,6 +745,8 @@ class SessionRuntime:
         user_id: Optional[str] = None,
     ) -> None:
         self.turn = turn_row
+        self.admission_order = int((turn_row.get("payload") or {}).get("accepted_input_order") or
+                                   turn_row.get("insert_order") or 0)
         self.session_id: str = turn_row["session_id"]
         self.turn_id: str = turn_row["id"]
         self.source: str = turn_row.get("source") or "user"
@@ -926,7 +928,7 @@ class SessionRuntime:
                 from app.core import turn_scheduler
                 turn_scheduler._kick_at_reset(sid, time.time())
             return None
-        if self._stop_applies():
+        if self._stop_applies() or await asyncio.to_thread(turns_db.wake_cancelled_by_stop, self.turn):
             await asyncio.to_thread(turns_db.remove_queued_turn, tid, keep_unsent_words=True)
             return None
 
@@ -1003,7 +1005,7 @@ class SessionRuntime:
             )
             return None
 
-        if self._stop_applies():
+        if self._stop_applies() or await asyncio.to_thread(turns_db.wake_cancelled_by_stop, self.turn):
             await asyncio.to_thread(turns_db.remove_queued_turn, tid, keep_unsent_words=True)
             return None
 
@@ -1082,7 +1084,7 @@ class SessionRuntime:
         outcome: Optional[str] = None
         settled_here = False
         try:
-            if self._stop_applies():
+            if self._stop_applies() or await asyncio.to_thread(turns_db.wake_cancelled_by_stop, self.turn):
                 await asyncio.to_thread(turns_db.remove_queued_turn, tid, keep_unsent_words=True)
                 return None
             # 2. Take the session's single live slot.
@@ -1100,10 +1102,12 @@ class SessionRuntime:
             # start_turn can atomically absorb this queued input into a parked
             # turn. Every subsequent lease, event and settlement uses that id.
             self.turn = started
+            self.admission_order = int((started.get("payload") or {}).get("accepted_input_order") or
+                                       started.get("insert_order") or 0)
             self.turn_id = tid = started["id"]
             self.source = started.get("source") or "user"
 
-            if self._stop_applies():
+            if self._stop_applies() or await asyncio.to_thread(turns_db.wake_cancelled_by_stop, self.turn):
                 # Stop may have cleared the queue while start_turn was in flight.
                 # Do not re-arm input or connect a provider for this obsolete turn.
                 # The sweep no longer sees it and nothing has recorded it yet.
@@ -1117,7 +1121,7 @@ class SessionRuntime:
             # boot-wired executor → get_live_runtime(sid).interrupt(mode)) can
             # reach us. Self-guarded pop in the outer finally.
             _live_runtimes[sid] = self
-            task_registry.note_turn_live(sid, self.turn.get("insert_order"))
+            task_registry.note_turn_live(sid, self.admission_order)
             from app.core.lifecycle_events import enqueue
             if not (self.turn.get("payload") or {}).get("continued_turn"):
                 enqueue("started", sid, tid)
@@ -1582,7 +1586,7 @@ class SessionRuntime:
                     )
             if self._abort_reason == "recording_failed":
                 return
-            if self._stop_applies():
+            if self._stop_applies() or await asyncio.to_thread(turns_db.wake_cancelled_by_stop, self.turn):
                 self._terminal = "interrupted"
                 self._abort_reason = "user_stopped"
                 return
@@ -3236,7 +3240,8 @@ class SessionRuntime:
         # does not. One whose start this cannot place spares everything.
         successor = _live_runtimes.get(sid) if self._replaced_by_newer_runtime() else None
         scope = capture_stop_scope(sid) if successor is None else capture_stop_scope(
-            sid, before_turn=int((getattr(successor, "turn", None) or {}).get("insert_order") or 0),
+            sid, before_turn=int(getattr(successor, "admission_order", 0) or
+                                 (getattr(successor, "turn", None) or {}).get("insert_order") or 0),
         )
 
         async def read_row() -> Optional[Dict[str, Any]]:
@@ -3249,6 +3254,18 @@ class SessionRuntime:
         reading = start_detached(read_row())
 
         async def background_stop() -> None:
+            # Cleanup authority survives logical-row absorption and foreign
+            # resumption. The owning installation also replays it after restart.
+            from app.core import stop_receipts as cleanup
+            from app.db import stop_receipts as receipts_db
+            pending = await asyncio.to_thread(
+                receipts_db.pending, self.turn.get("instance_id"),
+                turn_id=tid,
+            )
+            if pending:
+                for receipt in pending:
+                    await cleanup.consume(receipt, scope=scope)
+                return
             # Same semantics as the WebSocket Stop that set the bit (round 7):
             # end ALL of the session's background work — sub-agents and their
             # descendants, provider-lane workers, Monitor shells including serving
@@ -3263,6 +3280,10 @@ class SessionRuntime:
             if not (row and row.get("stop_background")):
                 return
             payload = row.get("payload") or {}
+            if (payload.get(turns_db.STOP_RECEIPT_KEY) or {}).get("cleanup_receipts"):
+                # Already attempted by the independent owner observer. Do not
+                # reinterpret this old Stop as authority over today's tasks.
+                return
             stop_source = payload.get("interrupt_source", "user_stop")
             # Without a receipt, a Stop this late could not tell the newer
             # turn's input from what it applies to: it ends only named work.
