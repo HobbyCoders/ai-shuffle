@@ -12,11 +12,17 @@ metadata; it does not receive signing or Cloudflare keys.
 """
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 from pathlib import Path
 import re
 import subprocess
+import sys
+
+_retry_spec = importlib.util.spec_from_file_location("publication_read_retry", Path(__file__).with_name("publication_read_retry.py"))
+read_retry = importlib.util.module_from_spec(_retry_spec)
+_retry_spec.loader.exec_module(read_retry)
 
 REPOSITORY = "HobbyCoders/ai-shuffle"
 OWNER_ID = "76577322"
@@ -35,10 +41,15 @@ class GitHub:
         self.repository = repository
 
     def __call__(self, endpoint):
-        raw = subprocess.check_output(
-            ["gh", "api", f"repos/{self.repository}" + (f"/{endpoint}" if endpoint else "")],
-            text=True, encoding="utf-8", timeout=20
-        )
+        try:
+            raw = read_retry.retry_read(lambda: subprocess.check_output(
+                ["gh", "api", f"repos/{self.repository}" + (f"/{endpoint}" if endpoint else "")],
+                text=True, encoding="utf-8", timeout=20, stderr=subprocess.PIPE
+            ), read_retry.temporary_command_error)
+        except subprocess.CalledProcessError as error:
+            # Preserve gh's original diagnostic on final/permanent failure.
+            sys.stderr.write(error.stderr or "")
+            raise
         return json.loads(raw)
 
 
@@ -47,14 +58,23 @@ def published_edge_revision() -> str:
     import httpx
     # Match docker/application_updates.py::ContainerUpdates.fetch: no environment proxy,
     # no redirects, bounded streaming. Edge is public and needs no license lease.
-    raw = bytearray()
-    with httpx.Client(trust_env=False, follow_redirects=False, timeout=20) as client:
-        with client.stream("GET", "https://hobbycoders.com/v1/desktop/manifest/edge") as response:
-            response.raise_for_status()
-            for chunk in response.iter_bytes():
-                raw.extend(chunk)
-                if len(raw) > 32768:
-                    raise ValueError("Edge manifest exceeds limits")
+    def fetch():
+        # Discard any partial body before retrying a timed-out stream.
+        raw = bytearray()
+        with httpx.Client(trust_env=False, follow_redirects=False, timeout=20) as client:
+            with client.stream("GET", "https://hobbycoders.com/v1/desktop/manifest/edge") as response:
+                response.raise_for_status()
+                for chunk in response.iter_bytes():
+                    raw.extend(chunk)
+                    if len(raw) > 32768:
+                        raise ValueError("Edge manifest exceeds limits")
+        return raw
+
+    def temporary(error):
+        return (isinstance(error, httpx.TimeoutException)
+                or isinstance(error, httpx.HTTPStatusError) and 500 <= error.response.status_code < 600)
+
+    raw = read_retry.retry_read(fetch, temporary)
     revision = verify_edge_manifest(raw)
     # Keep the envelope, not just its SHA: offline use must reverify the signature
     # and the updater's complete manifest contract with the current public key.
