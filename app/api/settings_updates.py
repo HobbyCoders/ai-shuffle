@@ -23,7 +23,7 @@ class UpdatePolicy(BaseModel):
 
 
 class UpdateAction(BaseModel):
-    action: Literal["check", "download", "install", "cancel"]
+    action: Literal["check", "download", "install", "cancel", "refresh-updater"]
     # Install only, when sessions are running: restart once they finish, or
     # stop them first. "cancel" drops a waiting "when_idle" restart.
     mode: Literal["when_idle", "stop"] | None = None
@@ -79,6 +79,12 @@ async def set_application_updates(body: UpdatePolicy, _=Depends(require_update_o
 async def application_update_action(body: UpdateAction, _=Depends(require_update_owner)):
     from app.core.update_workers import dispatch
     try:
+        if body.action == "refresh-updater":
+            # Never fan this disruptive, capability-specific action out to peers.
+            if body.scope != "current" or body.mode is not None:
+                raise ValueError("Updater refresh requires scope=current and no restart mode")
+            await run_sync(application_updates.enqueue, body.action)
+            return {"queued": True}
         return await dispatch(body.action, body.mode, body.scope)
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc

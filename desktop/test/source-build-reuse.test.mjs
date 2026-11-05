@@ -98,14 +98,15 @@ async function fixture(t, { electron = false } = {}) {
     }
     await mutate(source);
     const sharedCache = path.join(root, clock.cacheRoot ?? 'cache');
+    const diagnostics = [];
     const opts = { source, server: path.join(stage, 'server'), cache: path.join(sharedCache, clock.namespace ?? ''), sharedCache,
       log: path.join(root, 'build.log'), prebuiltUI: clock.localUI ? undefined : path.join(source, 'ui'),
       runtime: { python: 'fake-python', node: 'fake-node', npm: path.join(root, 'npm/bin/npm-cli.js'), pythonDependencies: await module.exports.pythonDependencyKey(source) },
-      revision: number.toString(16).padStart(40, '0'), progress() {} };
+      revision: number.toString(16).padStart(40, '0'), progress() {}, diagnostic: item => diagnostics.push(item) };
     const start = calls.length, statStart = stats.length;
     const built = await module.exports.buildSource(opts);
     await fs.writeFile(path.join(stage, 'build.json'), JSON.stringify(built));
-    return { opts, calls: calls.slice(start), stats: stats.slice(statStart), built };
+    return { opts, calls: calls.slice(start), stats: stats.slice(statStart), built, diagnostics };
   };
   const loadUpdates = async () => {
     const loaded = { exports: {} };
@@ -127,6 +128,11 @@ test('unchanged content across signed revisions runs zero package builds or npm 
   const second = await f.build();
   assert.deepEqual(built(second), [], 'unchanged tools/browser-mcp/desktop must reuse their outputs');
   assert.deepEqual(installed(second), []);
+  for (const stage of ['tools_cache', 'browser_mcp_cache', 'desktop_cache', 'tools_build', 'browser_mcp_build', 'desktop_build']) {
+    assert.ok(second.diagnostics.some(item => item.stage === stage && item.outcome === 'hit'), stage);
+  }
+  assert.ok(second.diagnostics.every(item => Number.isFinite(item.elapsed_ms) && item.elapsed_ms >= 0));
+  assert.ok(second.diagnostics.every(item => Object.keys(item).sort().join(',') === 'elapsed_ms,outcome,stage'));
   assert.equal(await fs.readFile(path.join(second.opts.server, 'fluid/__init__.py'), 'utf8'), '# Fluid revision 2');
   assert.equal(await fs.readFile(path.join(second.opts.server, 'app/main.py'), 'utf8'), '# app revision 2');
 });

@@ -1,0 +1,128 @@
+"""CI-only synthetic signed release, built by the real candidate-image updater.
+
+Only called by verify_container_postgres in disposable volumes. It never runs
+on a worker installation. A passing fixture is not a production update result.
+"""
+from __future__ import annotations
+
+import base64
+import hashlib
+import io
+import json
+import os
+from pathlib import Path
+import sys
+import tempfile
+import time
+import zipfile
+
+ROOT = Path("/data/application-updates")
+
+
+def prepare(archive):
+    import httpx
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+    from docker import application_updates as updates
+    from docker.update_contract import manifest_fields
+
+    image = json.loads(Path("/app/docker/image.json").read_text())
+    data = Path(archive).read_bytes()
+    revision = hashlib.sha256(b"candidate-updater-lifecycle-v1\0" + data).hexdigest()[:40]
+    # New test release identity, unchanged real candidate source bytes. UI/Fluid
+    # are rebuilt for this identity by the ordinary per-revision build recipe.
+    output = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(data)) as source, zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as target:
+        for item in source.infolist():
+            relative = item.filename.split("/", 1)[1]
+            if relative and not item.is_dir():
+                target.writestr(f"ai-shuffle-{revision}/{relative}", source.read(item))
+    data = output.getvalue()
+    with zipfile.ZipFile(io.BytesIO(data)) as source:
+        listing = updates.tree_lines([(item.filename.split("/", 1)[1], hashlib.sha256(source.read(item)).hexdigest())
+                                      for item in source.infolist()])
+    sequence = image["sequence"] + 1
+    manifest = {"format": 2, "revision": revision, "sequence": sequence, "version": "9.9.0-dev.ci",
+                "channel": "stable", "sha256": hashlib.sha256(data).hexdigest(), "size": len(data),
+                "tree": hashlib.sha256(listing).hexdigest(), "container": {**manifest_fields(), "sequence": sequence}}
+    key = Ed25519PrivateKey.generate()
+    public = key.public_key().public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo)
+    payload = json.dumps(manifest).encode()
+    signed = json.dumps({"payload": base64.b64encode(payload).decode(), "signature": base64.b64encode(key.sign(payload)).decode()}).encode()
+    client = httpx.Client
+    def serve(request):
+        if request.url.path == "/v1/desktop/manifest":
+            return httpx.Response(200, content=signed)
+        if request.url.path == "/v1/desktop/sources/" + revision:
+            return httpx.Response(200, content=data)
+        return httpx.Response(404)
+    # Only feed transport is synthetic; signature/hash/tree checks, extraction,
+    # runtime selection, pip/npm builds and staging are the production producer.
+    updates.httpx.Client = lambda **kwargs: client(transport=httpx.MockTransport(serve), **kwargs)
+    updater = updates.ContainerUpdates(ROOT, image, public, lambda: True, lambda _: {})
+    updater.check(download=True)
+    assert updater.state == {"pending": revision}
+    assert updater.diagnostics["revision"] == revision
+    # Exercise actual compiled tools/browser warm reuse, not seeded output markers.
+    source = updater.directory(revision) / "source"
+    with tempfile.TemporaryDirectory(prefix="updater-warm-probe-") as scratch:
+        import shutil
+        scratch = Path(scratch)
+        home = scratch / "home"
+        home.mkdir()
+        env = updates.build_environment(home)
+        identity = updater.dependency_identity("node", None, source, env)
+        assert identity is not None
+        for path in source.iterdir():
+            if path.is_file() and (path.suffix == ".json" or path.name == ".npmrc"):
+                shutil.copyfile(path, scratch / path.name)
+        for package in ("tools", "browser-mcp"):
+            shutil.copytree(source / package, scratch / package, ignore=shutil.ignore_patterns("node_modules", "dist"))
+            updater.node_dependencies(package, scratch, env, identity)
+            updater.node_output(package, scratch, env, identity)
+            assert updater.diagnostics["stages"][-1]["outcome"] == "hit"
+    updater.publish("ready")
+    (ROOT / "ci-public.pem").write_bytes(public)
+    (ROOT / "ci-fixture.json").write_text(json.dumps({"revision": revision, "image_revision": image["revision"]}))
+    print(json.dumps({"fixture": "synthetic-signed-source", "revision": revision, "stages": updater.diagnostics["stages"]}))
+
+
+def wait_for(mode):
+    fixture = json.loads((ROOT / "ci-fixture.json").read_text())
+    revision = fixture["revision"]
+    deadline = time.monotonic() + 240
+    while time.monotonic() < deadline:
+        state = json.loads((ROOT / "state.json").read_text())
+        status = json.loads((ROOT / "status.json").read_text())
+        expected = revision if mode == "refreshed" else fixture["image_revision"]
+        if (state.get("active") == revision and not state.get("booting") and not state.get("blocked")
+                and status.get("updater", {}).get("revision") == expected
+                and (mode != "refreshed" or not (ROOT / "handover.json").exists())):
+            assert status["diagnostics"]["revision"] == revision
+            assert any(item["stage"] == "tools_build" and item["outcome"] == "hit" for item in status["diagnostics"]["stages"])
+            print(json.dumps({"mode": mode, "app_revision": revision, "updater": status["updater"]}))
+            return
+        if state.get("blocked") or revision in state.get("failed", []):
+            raise AssertionError("Candidate update failed or blocked")
+        time.sleep(1)
+    raise TimeoutError("Candidate updater lifecycle did not complete")
+
+
+def main():
+    if os.environ.get("AI_SHUFFLE_UPDATER_FIXTURE") != "1" or os.environ.get("DATA_DIR") != "/data":
+        raise SystemExit("Only the disposable candidate-container harness may run this fixture")
+    action = sys.argv[1]
+    if action == "prepare":
+        prepare(sys.argv[2])
+    elif action in ("installed", "refreshed"):
+        wait_for(action)
+    elif action in ("install", "refresh-updater"):
+        from app.core.application_updates import atomic_json
+        atomic_json(ROOT / "request.json", {"action": action, "expires_at": time.time() + 10})
+    else:
+        raise SystemExit("Unknown fixture action")
+
+
+if __name__ == "__main__":
+    sys.path.insert(0, "/app")
+    main()

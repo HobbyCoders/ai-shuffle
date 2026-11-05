@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 import time
 import uuid
 
@@ -170,6 +171,60 @@ class Check:
     def passed(self, name):
         self.results.append(name)
         print("PASS:", name, flush=True)
+
+    def updater_lifecycle(self):
+        """A synthetic signed release, real builds/install/PG and supervisor exec.
+
+        Runs only on GitHub's disposable candidate; no production key/feed,
+        host worker config or existing data is used or modified.
+        """
+        # Direct script execution puts scripts/, not the repo, on sys.path.
+        sys.path.insert(0, str(ROOT))
+        from scripts.source_archive import build
+        archive = self.artifacts / "updater-source.zip"
+        revision = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, check=True,
+                                  capture_output=True, text=True).stdout.strip()
+        build(revision, archive)
+        volume = self.volume()
+        initial = self.launch(volume)
+        self.ready(initial)
+        identity = self.system_id(initial)
+        self.sql(initial, "CREATE TABLE updater_lifecycle_check (value text); INSERT INTO updater_lifecycle_check VALUES ('retained');")
+        self.stop(initial)
+        fixture = "/app/scripts/ci/updater_candidate_fixture.py"
+        # A separate offline preparation process: the supervisor is stopped, so
+        # no two processes can race state.json or own the managed database.
+        try:
+            self.docker("run", "--rm", "--network", "bridge", "--user", "99:100", "--entrypoint", "python",
+                        "-e", "DATA_DIR=/data", "-e", "AI_SHUFFLE_UPDATER_FIXTURE=1",
+                        "--mount", f"type=volume,src={volume},dst=/data",
+                        "--mount", f"type=bind,src={archive.resolve()},dst=/fixture-source.zip,readonly",
+                        self.image, fixture, "prepare", "/fixture-source.zip", timeout=900)
+        finally:
+            self.docker("cp", initial + ":/data/application-updates/build.log",
+                        self.artifacts / "updater-build.log", check=False)
+        public = self.artifacts / "updater-ci-public.pem"
+        self.docker("cp", initial + ":/data/application-updates/ci-public.pem", public)
+        app = self.launch(volume, env={"AI_SHUFFLE_UPDATER_FIXTURE": "1"},
+                          mounts=[f"type=bind,src={public.resolve()},dst=/app/docker/application-update-key.pem,readonly"])
+        self.ready(app)
+        self.docker("exec", "--user", "99:100", app, "python", fixture, "install")
+        self.docker("exec", "--user", "99:100", app, "python", fixture, "installed", timeout=260)
+        self.ready(app)
+        assert self.system_id(app) == identity
+        assert self.sql(app, "SELECT value FROM updater_lifecycle_check;") == "retained"
+        self.docker("exec", "--user", "99:100", app, "python", fixture, "refresh-updater")
+        self.docker("exec", "--user", "99:100", app, "python", fixture, "refreshed", timeout=260)
+        self.ready(app)
+        assert self.system_id(app) == identity
+        assert self.sql(app, "SELECT value FROM updater_lifecycle_check;") == "retained"
+        # The new resident owns the same cluster, not a daemonized second PG.
+        lock_probe = ("from docker.container_runtime import ClusterLock; from pathlib import Path; "
+                      "lock=ClusterLock(Path('/data/postgres/lifecycle.lock')); assert not lock.acquire()")
+        self.docker("exec", "--user", "99:100", app, "python", "-c", lock_probe)
+        self.stop(app)
+        self.passed("synthetic signed source: real pip/npm assembly, warm tools/browser hits, app-only install keeps "
+                    "resident revision; explicit supervisor refresh preserves PG identity/data and lifetime lock")
 
     def fresh_persistence_and_restore(self):
         volume = self.volume()
@@ -410,6 +465,7 @@ def main():
     try:
         check.docker("image", "inspect", args.image)
         check.fresh_persistence_and_restore()
+        check.updater_lifecycle()
         check.identity_and_failure_safety()
         check.removed_environment_regression()
     finally:
