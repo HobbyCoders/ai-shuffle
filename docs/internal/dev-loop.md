@@ -14,7 +14,10 @@ need a reload after a pause, and connections made during startup may retry.
 
 Prefer `--no-vite` when you do not need hot reload: it serves the stamped build
 and saves about **0.5 GB per instance**. Use `--no-pause` for stable measurement
-runs such as `--seed long`. CI (`--ci`, including `scripts/devloop/ci.py`) and
+runs such as `--seed long` and for long manual sessions. Journeys, live turns,
+voice, in-flight requests and meaningful client frames are protected; purely
+local typing or scrolling is not observable and does not extend the idle timer.
+CI (`--ci`, including `scripts/devloop/ci.py`) and
 `--workers 2` **never pause**, regardless of this flag: paired workers need
 continuous presence and sync, and CI needs stable journey timing.
 
@@ -27,8 +30,8 @@ traffic and are absent while awake: normal listeners, peer identity, preview
 authentication, HTTP bodies, SSE and WebSockets remain unchanged.
 
 With pausing enabled only, `scripts.devloop.child` runs the normal `app.main`
-`__main__` startup with a pure observational ASGI wrapper and a **five-second
-Uvicorn graceful-shutdown timeout**. That timeout only applies after shutdown
+`__main__` startup with an ASGI activity observer, a short pause admission gate,
+and a **five-second Uvicorn graceful-shutdown timeout**. That timeout only applies after shutdown
 starts: lingering passive streams are cancelled, then normal lifespan teardown
 runs. These are the only intentional differences from `python -m app.main`.
 It tracks unknown
@@ -42,8 +45,15 @@ git operations prevent pausing. A failed busy check keeps it awake. No live
 app or database is consulted. CI and `--no-pause` retain `python -m app.main`
 without the observer or dev-only shutdown timeout.
 
-The launcher rechecks both idle and durable busy proofs immediately before
-sending SIGTERM. The complete clean pause has a **30-second deadline**. A
+Before SIGTERM, the child atomically closes admission only if no finite request
+or new foreground activity appeared since the idle decision. The launcher then
+rechecks durable busy work. Late HTTP requests receive 503 with `Retry-After`;
+late client frames get an explicit “message NOT sent” error and a retryable
+WebSocket close, rather than reaching a shutting-down app. A failed proof aborts
+the pause; a stalled launcher cannot hold the gate closed longer than five
+seconds. An internally scheduled turn starting after the last SQL proof remains
+a narrow race; use `--no-pause` for workloads requiring uninterrupted scheduling.
+The complete clean pause has a **30-second deadline**. A
 failed or timed-out stop publishes `pause-failed`, retains the data and any
 surviving processes until `down` or TTL, and disables wake/restart rather than
 risking a second cluster. `status --wait` and `wake` fail immediately in that

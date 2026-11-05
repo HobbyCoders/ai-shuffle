@@ -17,6 +17,7 @@ import socket
 import subprocess
 import threading
 import time
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -92,6 +93,8 @@ class IdleLease:
         self.last_activity = time.monotonic()
         self.requested = False
         self.receipt = instance.directory / "activity.json"
+        self.gate_request = self.receipt.with_suffix(".gate")
+        self.gate_id = None
         self.wake_file = instance.directory / "wake.request"
         self.fake_mtime = None
 
@@ -106,6 +109,40 @@ class IdleLease:
             self.state = state
             self.instance.write(state=state)
             self.condition.notify_all()
+
+    def close_admission(self):
+        from scripts.devloop.__main__ import write_private_json
+
+        app = self.instance.data["app"]
+        self.gate_id = uuid.uuid4().hex
+        try:
+            write_private_json(self.gate_request, {"id": self.gate_id,
+                "pid": app["pid"], "identity": app["pid_identity"],
+                "before": time.monotonic() - self.seconds,
+                "expires": time.monotonic() + 5})
+            until = time.monotonic() + 2
+            while time.monotonic() < until and not self.stopped.is_set():
+                record = json.loads(self.receipt.read_text())
+                if record.get("gate_id") == self.gate_id:
+                    return self.admission_closed()
+                self.stopped.wait(0.05)
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+        return False
+
+    def admission_closed(self):
+        try:
+            record = json.loads(self.receipt.read_text())
+            app = self.instance.data["app"]
+            return (record["pid"] == app["pid"] and record["identity"] == app["pid_identity"]
+                    and record.get("gate_id") == self.gate_id
+                    and record["gate_until"] > time.monotonic() + 1
+                    and not record["uncertain"] and record["active"] == 0)
+        except (OSError, ValueError, KeyError, TypeError):
+            return False
+
+    def open_admission(self):
+        self.gate_request.unlink(missing_ok=True)  # Child also reopens autonomously in <=5s.
 
     def idle(self):
         if journey_active(self.instance.directory):
@@ -307,14 +344,19 @@ def supervise(instance, env, database, lease, restart, *, start_vite, stop_vite)
                     lease.requested = False
                     lease.transition("pausing")
                     pause_deadline = min(deadline, time.monotonic() + PAUSE_SECONDS)
-                    # Recheck both proofs immediately before the signal. Receipt
-                    # writes can lag by <=0.5s; durable turns cover live work.
-                    if not lease.idle() or database_busy(database) or not lease.idle():
+                    # The child's lock closes admission atomically with its final
+                    # finite-request/activity proof. SQL follows the ack: turns
+                    # admitted before close must finish, never be cut by SIGTERM.
+                    if (not lease.idle() or not lease.close_admission()
+                            or database_busy(database) or not lease.idle()
+                            or not lease.admission_closed()):
+                        lease.open_admission()
                         lease.last_activity = time.monotonic()
                         lease.transition("ready")
                         continue
                     try:
                         stop_app(clean=True, pause_deadline=pause_deadline)
+                        lease.open_admission()
                         if over():
                             break
                         stop_vite(clean=True, timeout=remaining(pause_deadline))
@@ -334,6 +376,7 @@ def supervise(instance, env, database, lease, restart, *, start_vite, stop_vite)
                         lease.transition("paused")
                         log.info("idle: app, Vite and PostgreSQL paused; reload or `devloop wake` resumes them")
                     except (TimeoutError, subprocess.TimeoutExpired, OSError):
+                        lease.open_admission()
                         instance.write(pause_error="Clean pause exceeded its deadline or failed; "
                                        "data retained until down/TTL; wake disabled")
                         lease.transition("pause-failed")

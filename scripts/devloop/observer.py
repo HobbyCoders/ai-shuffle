@@ -1,4 +1,4 @@
-"""Dev-child-only, pure observational ASGI wrapper (never used by production)."""
+"""Dev-child-only activity observer and bounded pause admission gate."""
 from __future__ import annotations
 
 import json
@@ -11,7 +11,7 @@ from scripts.devloop.idle import passive, passive_subscription
 
 
 class ActivityObserver:
-    """No buffering, scope mutation or network forwarding; bounded receipts only."""
+    """Awake: no buffering, scope mutation or forwarding. Gate only during pause."""
     def __init__(self, app, receipt: Path):
         from app.core.temp_scratch import process_identity
 
@@ -21,6 +21,8 @@ class ActivityObserver:
         self.active = 0
         self.activity = time.monotonic()
         self.uncertain = False
+        self.gate_request = receipt.with_suffix(".gate")
+        self.gate_id, self.gate_until = None, 0
         self.stopped = threading.Event()
         self.writer = threading.Thread(target=self.publish, daemon=True, name="devloop-activity")
         self.writer.start()
@@ -30,20 +32,54 @@ class ActivityObserver:
 
         while not self.stopped.is_set():
             try:
+                self.control_gate()
                 with self.lock:
                     record = {"pid": self.pid, "identity": self.identity,
                               "updated": time.monotonic(), "activity": self.activity,
-                              "active": self.active, "uncertain": self.uncertain}
+                              "active": self.active, "uncertain": self.uncertain,
+                              "gate_id": self.gate_id, "gate_until": self.gate_until}
                 write_private_json(self.receipt, record)
             except Exception:
                 self.uncertain = True  # Stay awake until TTL, never silently ignore lost evidence.
             self.stopped.wait(0.5)  # At most two tiny writes/s, not one per request/frame.
 
-    def note(self, delta=0, *, activity=True):
+    def control_gate(self):
+        """A private-file command, never an app route; a lost launcher fails open."""
+        try:
+            command = json.loads(self.gate_request.read_text())
+        except FileNotFoundError:
+            with self.lock:
+                self.gate_until = 0
+            return
+        except (OSError, ValueError):
+            self.failed()
+            with self.lock:
+                self.gate_until = 0
+            return
         with self.lock:
+            if command.get("id") == self.gate_id:
+                return  # Never renew a timed-out close command.
+            self.gate_id, self.gate_until = command.get("id"), 0
+            now = time.monotonic()
+            try:
+                if (command["pid"] == self.pid and command["identity"] == self.identity
+                        and 0 < command["expires"] - now <= 5
+                        and self.active == 0 and not self.uncertain
+                        and self.activity <= command["before"]):
+                    self.gate_until = command["expires"]
+            except (KeyError, TypeError):
+                self.uncertain = True
+
+    def note(self, delta=0, *, activity=True, admit=False):
+        with self.lock:
+            # The check, activity update and finite-request admission are atomic
+            # with close. No request/frame can slip between the proof and SIGTERM.
+            if admit and time.monotonic() < self.gate_until:
+                return False
             if activity:
                 self.activity = time.monotonic()
             self.active += delta
+            return True
 
     def failed(self):
         self.uncertain = True
@@ -66,11 +102,21 @@ class ActivityObserver:
             # not work; durable turns/runs protect live work instead. Finite
             # polls and every unknown stream still pin until completion.
             subscription = kind == "http" and passive_subscription(scope.get("method", "GET"), scope["path"])
-            if not quiet or (kind == "http" and not subscription):
-                self.note(1, activity=not quiet)
-                counted = True
+            counted = not quiet or (kind == "http" and not subscription)
+            admitted = self.note(int(counted), activity=not quiet, admit=True)
         except Exception:
             self.failed()
+            admitted = self.note(activity=False, admit=True)
+        if not admitted:
+            if kind == "http":
+                await send({"type": "http.response.start", "status": 503,
+                            "headers": [(b"retry-after", b"1"), (b"content-length", b"0"),
+                                        (b"cache-control", b"no-store")]})
+                await send({"type": "http.response.body", "body": b""})
+            else:
+                await send({"type": "websocket.close", "code": 1013,
+                            "reason": "Private dev instance pausing; retry after wake"})
+            return
 
         async def observe_receive():
             message = await receive()
@@ -85,8 +131,18 @@ class ActivityObserver:
                             heartbeat = json.loads(text).get("type") in ("ping", "pong")
                         except (ValueError, AttributeError):
                             pass
-                    if not heartbeat:
-                        self.note()
+                    if not heartbeat and not self.note(admit=True):
+                        # The chat client renders this synchronous command error,
+                        # rather than leaving an optimistic send silently pending.
+                        try:
+                            await send({"type": "websocket.send", "text": json.dumps({
+                                "type": "error", "message": "Private dev instance is pausing. "
+                                "Message was NOT sent; reload and retry your message."})})
+                            await send({"type": "websocket.close", "code": 1013,
+                                        "reason": "Message refused during private dev pause"})
+                        except Exception:
+                            self.failed()
+                        return {"type": "websocket.disconnect", "code": 1013}
                 except Exception:
                     self.failed()
             return message  # The very same message, unchanged and without a queue.

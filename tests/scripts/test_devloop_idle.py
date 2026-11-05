@@ -209,6 +209,7 @@ def bare_observer(app):
     obj = observer.ActivityObserver.__new__(observer.ActivityObserver)
     obj.app, obj.lock = app, threading.Lock()
     obj.active, obj.activity, obj.uncertain = 0, 0, False
+    obj.gate_id, obj.gate_until = None, 0
     return obj
 
 
@@ -362,6 +363,10 @@ def test_real_child_process_reaped_before_paused_ttl(tmp_path, monkeypatch, fail
     obj = instance(tmp_path)
     stopped = threading.Event()
     lease = idle.IdleLease(obj, stopped, seconds=0)
+    # These dummy children exercise teardown; the real ASGI gate is covered in
+    # test_devloop_shutdown.py, where late requests must complete or get 503.
+    monkeypatch.setattr(lease, "close_admission", lambda: True)
+    monkeypatch.setattr(lease, "admission_closed", lambda: True)
     real_popen = subprocess.Popen
     children = []
 
@@ -406,6 +411,10 @@ def test_real_hung_child_hits_pause_deadline_without_deleting_data(tmp_path, mon
     obj = instance(tmp_path)
     stopped = threading.Event()
     lease = idle.IdleLease(obj, stopped, seconds=0)
+    # These dummy children exercise teardown; the real ASGI gate is covered in
+    # test_devloop_shutdown.py, where late requests must complete or get 503.
+    monkeypatch.setattr(lease, "close_admission", lambda: True)
+    monkeypatch.setattr(lease, "admission_closed", lambda: True)
     real_popen, children = subprocess.Popen, []
     marker = tmp_path / "retained-data"
     marker.write_text("seed and owner work")
@@ -463,6 +472,8 @@ def test_work_appearing_during_final_recheck_aborts_pause(tmp_path, monkeypatch,
     def on_start(process):
         obj.write(state="ready")
 
+    monkeypatch.setattr(lease, "close_admission", lambda: True)
+    monkeypatch.setattr(lease, "admission_closed", lambda: True)
     calls = [True, new_work != "request"]
     lease.idle = lambda: calls.pop(0) if calls else False
     answers = ["f", "t"]

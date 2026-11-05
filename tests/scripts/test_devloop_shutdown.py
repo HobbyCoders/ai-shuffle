@@ -4,7 +4,6 @@ from __future__ import annotations
 import http.client
 import json
 import signal
-import sqlite3
 import subprocess
 import sys
 import threading
@@ -19,7 +18,7 @@ from scripts.devloop.__main__ import ROOT
 
 
 SERVER = """
-import asyncio, pathlib, socket, sqlite3, sys
+import asyncio, pathlib, socket, sys
 sys.path.insert(0, sys.argv[2])
 import uvicorn
 from scripts.devloop.child import bounded_shutdown
@@ -38,9 +37,12 @@ async def app(scope, receive, send):
                 return
     else:
         if scope['path'] == '/late-finite-request':
-            with sqlite3.connect(root/'durable.sqlite') as db:
-                db.execute('CREATE TABLE turns (state TEXT)')
-                db.execute("INSERT INTO turns VALUES ('running')")
+            (root/'finite-started').write_text('admitted')
+            await asyncio.sleep(6)  # Longer than the shutdown grace: must NOT be cut.
+            (root/'finite-completed').write_text('work finished')
+            await send({'type':'http.response.start','status':200,'headers':[]})
+            await send({'type':'http.response.body','body':b'completed'})
+            return
         await send({'type':'http.response.start','status':200,
                     'headers':[(b'content-type',b'text/event-stream')]})
         await send({'type':'http.response.body','body':b': keepalive\\n\\n','more_body':True})
@@ -64,7 +66,7 @@ def wait_for(condition, seconds=10):
 
 
 @pytest.mark.parametrize("late_finite", [False, True])
-def test_cutting_passive_sse_runs_lifespan_and_retains_late_durable_write(tmp_path, late_finite):
+def test_gate_refuses_late_work_or_aborts_and_allows_completion_before_sse_teardown(tmp_path, late_finite):
     script = tmp_path / "server.py"
     script.write_text(SERVER)
     process = subprocess.Popen([sys.executable, str(script), str(tmp_path), str(ROOT)],
@@ -75,7 +77,7 @@ def test_cutting_passive_sse_runs_lifespan_and_retains_late_durable_write(tmp_pa
         port = int((tmp_path / "port").read_text())
 
         def connect(path):
-            connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+            connection = http.client.HTTPConnection("127.0.0.1", port, timeout=9)
             connections.append(connection)
             connection.request("GET", path)
             assert connection.getresponse().status == 200
@@ -87,17 +89,37 @@ def test_cutting_passive_sse_runs_lifespan_and_retains_late_durable_write(tmp_pa
             fake=SimpleNamespace(log_path=tmp_path / "fake.jsonl")), threading.Event(), seconds=0)
         wait_for(lease.idle)  # Real passive stream is open, no finite request pins it.
         if late_finite:
-            # Worst-case arrival after final proof: committed work must survive cancellation.
-            connect("/late-finite-request")
-            wait_for(lambda: json.loads(lease.receipt.read_text())["active"] == 1)
-            assert not lease.idle()  # Normal recheck would abort; intentionally simulate the gap.
+            response = []
+
+            def late_request():
+                connection = connect("/late-finite-request")
+                # connect already read headers; the completion marker proves the
+                # actual >5s operation, not merely a committed starting row.
+                response.append((tmp_path / "finite-completed").read_text())
+
+            worker = threading.Thread(target=late_request)
+            worker.start()
+            wait_for(lambda: (tmp_path / "finite-started").exists())
+            assert not lease.close_admission()  # Arrival after decision aborts pause.
+            assert not lease.admission_closed()
+            worker.join(9)
+            assert not worker.is_alive() and response == ["work finished"]
+            wait_for(lease.idle)
+        assert lease.close_admission()
+        assert lease.admission_closed()
+        refused = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+        connections.append(refused)
+        refused.request("POST", "/late-finite-request", body=b"not admitted")
+        reply = refused.getresponse()
+        assert reply.status == 503 and reply.getheader("Retry-After") == "1"
+        assert not late_finite or (tmp_path / "finite-completed").exists()
+        if not late_finite:
+            assert not (tmp_path / "finite-started").exists()
         process.terminate()
         # Uvicorn re-raises its captured SIGTERM after normal lifespan teardown.
         assert process.wait(timeout=10) == -signal.SIGTERM
         assert (tmp_path / "lifespan-stopped").read_text() == "normal teardown completed"
-        if late_finite:
-            with sqlite3.connect(tmp_path / "durable.sqlite") as db:
-                assert db.execute("SELECT state FROM turns").fetchall() == [("running",)]
+        assert not late_finite or (tmp_path / "finite-completed").read_text() == "work finished"
     finally:
         for connection in connections:
             connection.close()

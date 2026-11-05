@@ -18,7 +18,9 @@ The tools:
 Private one-worker dev instances pause and wake automatically after about five
 idle minutes, keeping data and the same access link; the first use waits for
 startup. Use `--no-vite` when hot reload is unnecessary (about 0.5 GB less memory
-per instance), and `--no-pause` for uninterrupted measurement runs. CI and
+per instance), and `--no-pause` for uninterrupted measurement runs or long manual
+sessions. Journeys, live turns, voice, in-flight requests and client frames are
+protected; local-only typing or scrolling does not extend the idle timer. CI and
 `--workers 2` stay running; a running journey also holds its instance awake.
 A failed clean stop reports `pause-failed` and retains its data until `down` or
 TTL; it never silently starts a second cluster. See the dev-loop guide for the
