@@ -58,6 +58,7 @@
 		min-height: 32px;
 	}
 	h1 {
+		align-self: flex-start;
 		font-size: 24px;
 		line-height: 1.25;
 		font-weight: 600;
