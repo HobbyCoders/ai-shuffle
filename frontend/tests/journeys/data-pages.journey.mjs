@@ -45,6 +45,13 @@ await runJourney({
     const general=page.locator('.st-page-h h1').filter({visible:true});
     await general.waitFor();
     expect((await general.boundingBox()).y===statsTitle.y,'Settings and data-page title text share the exact top line');
+    const settingsFrame=await page.locator('.st-page-h').filter({visible:true}).boundingBox();
+    await open('Notes');
+    await page.getByRole('button',{name:'New note',exact:true}).filter({visible:true}).first().click();
+    await page.getByRole('textbox',{name:'Note title',exact:true}).waitFor();
+    const noteFrame=await page.locator('.st-dh').filter({visible:true}).boundingBox();
+    expect(noteFrame.x===settingsFrame.x&&noteFrame.width===settingsFrame.width,
+     'short Notes and long Settings reserve the same centered reading frame');
     await open('Stats');
     await page.locator('[data-view-shell="Stats"] .metrics').waitFor();
    }

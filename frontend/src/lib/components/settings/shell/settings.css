@@ -340,6 +340,13 @@
 	font-size: 13px;
 }
 
+/* Keep the centered detail frame fixed when a classic scrollbar appears.
+   Index/list scrollers deliberately keep their existing available width. */
+.settings-shell .st-dpane,
+.settings-shell .st-pscroll {
+	scrollbar-gutter: stable;
+}
+
 /* Scrollbars in the scroll panes */
 .settings-shell .st-scroll {
 	scrollbar-width: thin;
