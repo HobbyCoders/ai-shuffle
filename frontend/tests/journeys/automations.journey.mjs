@@ -11,9 +11,10 @@ await runJourney({
   name: 'form-validation-and-back',
   async setup({ page, status }) {
    await gotoApp(page, status);
-   const drawer = page.getByRole('button', { name: 'Open menu', exact: true });
-   if (await drawer.isVisible()) await drawer.click();
    const nav = page.getByRole('navigation', { name: 'Workspace', exact: true });
+   if (!await nav.isVisible()) {
+    await page.getByRole('button', { name: /^(Open menu|Show sidebar|Chats)( \(|$)/ }).first().click();
+   }
    await nav.getByRole('button', { name: 'More', exact: true }).click();
    await page.getByRole('menuitem', { name: 'Automations', exact: true }).click();
    await page.getByPlaceholder('Search automations').waitFor();
