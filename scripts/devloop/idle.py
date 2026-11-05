@@ -35,6 +35,12 @@ POLL_GETS = frozenset({
 })
 
 
+def passive_subscription(method: str, path: str) -> bool:
+    """A settled chat keeps this exact read-only SSE subscription open."""
+    return method == "GET" and bool(re.fullmatch(
+        r"/api/v1/sessions/[^/]+/events", urlsplit(path).path))
+
+
 def passive(method: str, path: str, headers=None) -> bool:
     route = urlsplit(path).path
     headers = headers or {}
@@ -43,7 +49,8 @@ def passive(method: str, path: str, headers=None) -> bool:
                 or bool(re.fullmatch(r"/api/v1/ws/sessions/[^/]+", route))
                 or headers.get("Sec-WebSocket-Protocol") in ("vite-hmr", "vite-ping"))
     if method == "GET":
-        return (route in POLL_GETS or bool(re.fullmatch(r"/api/v1/projects/[^/]+/git/status", route))
+        return (route in POLL_GETS or passive_subscription(method, route)
+                or bool(re.fullmatch(r"/api/v1/projects/[^/]+/git/status", route))
                 or (route == "/" and headers.get("Accept") == "text/x-vite-ping"))
     return ((method == "PUT" and route.startswith("/api/v1/preferences/"))
             or (method == "POST" and route == "/api/v1/model-providers/refresh-capabilities"))
@@ -252,8 +259,6 @@ def supervise(instance, env, database, lease, restart, *, start_vite, stop_vite)
                                    env=env, start_new_session=True)
         process_start = process_identity(process.pid)
         instance.on_app_start(process)
-        if lease.state == "waking":
-            instance.write(state="waking")
 
     try:
         start()

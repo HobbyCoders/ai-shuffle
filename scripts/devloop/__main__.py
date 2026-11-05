@@ -368,7 +368,8 @@ class Instance:
             self.data["app"].update(pid=process.pid, pid_identity=process_identity(process.pid),
                                     starts=self.starts)
         self.record_postgres()
-        self.write(state="starting" if self.starts == 1 else "restarting")
+        self.write(state="waking" if self.data["state"] == "waking"
+                   else "starting" if self.starts == 1 else "restarting")
         self.wake.set()
 
     def record_postgres(self) -> None:

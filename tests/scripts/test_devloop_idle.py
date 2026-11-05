@@ -272,6 +272,58 @@ def test_observer_socket_heartbeats_only_are_passive_and_voice_pins():
     asyncio.run(exercise("/api/v1/voice/sessions/x/audio", '{"type":"ping"}', 1))
 
 
+def test_settled_chat_subscription_is_unpinned_but_live_turn_is_busy(tmp_path):
+    async def exercise(live):
+        entered, finish = asyncio.Event(), asyncio.Event()
+
+        async def app(scope, receive, send):
+            assert wrapped.active == 0 and wrapped.activity == 0
+            entered.set()
+            await finish.wait()  # The real feed stays open and emits keepalives.
+
+        wrapped = bare_observer(app)
+        task = asyncio.create_task(wrapped({"type": "http", "method": "GET",
+            "path": "/api/v1/sessions/seeded/events", "headers": []}, None, None))
+        await entered.wait()
+        assert not task.done()
+        lease = idle.IdleLease(instance(tmp_path), threading.Event(), seconds=0)
+        receipt(lease, active=wrapped.active)
+        database = sqlite3.connect(":memory:")
+        database.create_function("NOW", 0, lambda: 0)
+        for ddl in ("runs (state TEXT, lease_expires_at INT)", "turns (state TEXT)",
+                    "background_tasks (status TEXT)", "git_ops (status TEXT)"):
+            database.execute("CREATE TABLE " + ddl)
+        if live:
+            database.execute("INSERT INTO turns VALUES ('draining')")
+        db = SimpleNamespace(query=lambda sql: "t" if database.execute(sql).fetchone()[0] else "f")
+        try:
+            assert lease.idle()  # An open feed alone does not forbid pausing.
+            assert idle.database_busy(db) is live
+            assert (lease.idle() and not idle.database_busy(db)) is not live
+        finally:
+            finish.set()
+            await task
+            database.close()
+        assert wrapped.active == 0 and wrapped.activity == 0
+
+    assert idle.passive("GET", "/api/v1/sessions/seeded/events?from_seq=45")
+    assert not idle.passive("POST", "/api/v1/sessions/seeded/events")
+    assert not idle.passive("GET", "/api/v1/sessions/seeded/unknown-stream")
+    asyncio.run(exercise(False))
+    asyncio.run(exercise(True))
+
+
+def test_app_start_never_publishes_restarting_during_wake(tmp_path):
+    obj = instance(tmp_path)
+    obj.starts, obj.gate, obj.wake = 1, Mock(), threading.Event()
+    obj.lock = threading.RLock()
+    obj.data["state"] = "waking"
+    obj.record_postgres = lambda: obj.write(postgres={"pid": os.getpid()})
+    devloop.Instance.on_app_start(obj, SimpleNamespace(pid=os.getpid()))
+    assert obj.states == ["waking", "waking"]
+    assert obj.data["app"]["starts"] == 2 and obj.wake.is_set()
+
+
 def test_child_reaches_app_main_as_main_without_changing_serve_settings(tmp_path, monkeypatch):
     from app import serve
 
@@ -295,7 +347,8 @@ def test_child_reaches_app_main_as_main_without_changing_serve_settings(tmp_path
     assert calls == ["normal serve"]
 
 
-def test_real_child_process_reaped_before_paused_ttl(tmp_path, monkeypatch):
+@pytest.mark.parametrize("failed_pause", [False, True])
+def test_real_child_process_reaped_before_paused_ttl(tmp_path, monkeypatch, failed_pause):
     obj = instance(tmp_path)
     stopped = threading.Event()
     lease = idle.IdleLease(obj, stopped, seconds=0)
@@ -322,8 +375,14 @@ def test_real_child_process_reaped_before_paused_ttl(tmp_path, monkeypatch):
     monkeypatch.setattr(idle.subprocess, "Popen", spawn)
     stop_group = Mock()
     monkeypatch.setattr("docker.container_runtime.stop_group", stop_group)
-    idle.supervise(obj, {}, db, lease, threading.Event(), start_vite=Mock(), stop_vite=Mock())
-    assert "pausing" in obj.states and "paused" in obj.states
+    if failed_pause:
+        postgres.wait.side_effect = subprocess.TimeoutExpired("postmaster", 30)
+        with pytest.raises(subprocess.TimeoutExpired):
+            idle.supervise(obj, {}, db, lease, threading.Event(), start_vite=Mock(), stop_vite=Mock())
+        assert "pausing" in obj.states and "paused" not in obj.states
+    else:
+        idle.supervise(obj, {}, db, lease, threading.Event(), start_vite=Mock(), stop_vite=Mock())
+        assert "pausing" in obj.states and "paused" in obj.states
     assert children[0].poll() == -idle.signal.SIGTERM
     stop_group.assert_not_called()  # Reaped app is cleared, including during TTL cleanup.
     assert stopped.is_set()

@@ -7,7 +7,7 @@ import threading
 import time
 from pathlib import Path
 
-from scripts.devloop.idle import passive
+from scripts.devloop.idle import passive, passive_subscription
 
 
 class ActivityObserver:
@@ -62,7 +62,11 @@ class ActivityObserver:
             if kind == "websocket":
                 headers["Upgrade"] = "websocket"
             quiet = passive(scope.get("method", "GET"), scope["path"], headers)
-            if kind == "http" or not quiet:
+            # This known SSE feed outlives a settled turn. Its keepalives are
+            # not work; durable turns/runs protect live work instead. Finite
+            # polls and every unknown stream still pin until completion.
+            subscription = kind == "http" and passive_subscription(scope.get("method", "GET"), scope["path"])
+            if not quiet or (kind == "http" and not subscription):
                 self.note(1, activity=not quiet)
                 counted = True
         except Exception:
