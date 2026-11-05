@@ -409,8 +409,9 @@ def test_task_model_takes_any_model_and_states_the_user_rule(lane):
     assert prop["type"] == "string" and "enum" not in prop
     assert "Omitted, the agent runs on its own pinned model" in prop["description"]
     assert "never runs on this session's model" in prop["description"]
-    assert "Only for when the user named a model" in prop["description"]
-    assert "The host checks that the user asked" in prop["description"]
+    assert ("Only when this chat's user named the model for this work or saved owner "
+            "model-routing memory directs it; otherwise omit.") in prop["description"]
+    assert "The host verifies chat/memory or asks the owner; refusals start nothing." in prop["description"]
     assert "The owner's subagent default: sonnet." in contract.description
     assert "- plain (model: sonnet, the subagent default; runs on Claude)" in contract.description
     assert "- pinned (model: haiku; runs on Claude)" in contract.description

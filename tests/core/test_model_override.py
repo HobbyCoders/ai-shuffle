@@ -216,11 +216,12 @@ def test_public_model_rules_offer_native_families_not_version_pins(world):
     from app.core.agent_provider_models import build_task_contract
     for description in (start_session_spec().input_schema["properties"]["model"]["description"],
                         build_task_contract("caller", None).input_schema["properties"]["model"]["description"]):
-        assert "For native Claude use a family name: haiku, sonnet or opus" in description
-        assert "never pass a version pin, legacy id or [1m] form" in description
-        assert "For provider models, pass the id or display name" in description
+        assert "Native Claude: haiku, sonnet or opus only" in description
+        assert "no version pins, legacy ids or [1m] forms" in description
+        assert "Families select runtime aliases." in description
+        assert "Provider models: id or display name" in description
         assert "explicit providers stay scoped" in description
-        assert "The host checks that the user asked" in description
+        assert "The host verifies chat/memory or asks the owner; refusals start nothing." in description
         assert "model IDs and display names match" not in description
     assert "See Task.model" in swarm.input_schema()["properties"]["tasks"]["items"]["properties"]["model"]["description"]
 
@@ -1605,7 +1606,8 @@ def test_startsession_spec_takes_a_string_and_states_the_rule(chats):
     spec = orch.start_session_spec()
     prop = spec.input_schema["properties"]["model"]
     assert prop["type"] == "string" and "enum" not in prop
-    assert "Only for when the user named a model" in prop["description"]
+    assert ("Only when this chat's user named the model for this work or saved owner "
+            "model-routing memory directs it; otherwise omit.") in prop["description"]
     from app.core.agent_provider_models import build_task_contract
     from fluid.tools.builtins.swarm import input_schema
     descriptions = [prop["description"],
@@ -1614,13 +1616,16 @@ def test_startsession_spec_takes_a_string_and_states_the_rule(chats):
     assert "See Task.model for host validation and provider rules" in swarm_description
     assert "under the same rule as Task's model" in swarm_description
     for description in descriptions:
-        assert "For native Claude use a family name" in description
+        assert "Native Claude: haiku, sonnet or opus only; no version pins, legacy ids or [1m] forms." in description
         assert "saved owner model-routing memory" in description
-        assert "Never fabricate a model id" in description
-        assert "For provider models, pass the id or display name" in description
-        assert "case, spaces and dashes" in description
-        assert "start nothing" in description and "ambiguous" in description
-        assert "receiving worker's own eligibility" in description
+        assert "The host verifies chat/memory or asks the owner; refusals start nothing." in description
+        assert "Never invent ids or substitute after refusal." in description
+        assert "Provider models: id or display name (case, spaces and dashes ignored)." in description
+        assert "Unknown names start nothing and return real choices;" in description
+        assert "ambiguous names need an exact model id." in description
+        assert "prov:<providerId>:<modelId> works; explicit providers stay scoped." in description
+        assert "A switch may cross providers for this start only." in description
+        assert "Remote starts also validate the receiving worker's own eligibility." in description
     assert "Examples: sonnet." in prop["description"]
     assert "pass model only when the user named a model" in spec.description
 
