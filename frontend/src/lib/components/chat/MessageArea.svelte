@@ -1291,21 +1291,21 @@
 
 	function renderedFollowEnd(): number {
 		if (!containerRef) return 0;
-		// Only the active floating dock occludes the viewport. The retained
-		// call reserve after hangup must not lift controls or the followed edge.
-		const callLift = chatColumnRef ? parseFloat(getComputedStyle(chatColumnRef).getPropertyValue('--call-dock-lift')) || 0 : 0;
+		// Call room stays held after hangup so the transcript does not move.
+		// Use that same room for both control placement and the followed edge.
+		const callRoom = chatColumnRef ? parseFloat(getComputedStyle(chatColumnRef).getPropertyValue('--call-dock-reserve')) || 0 : 0;
 		const controls = [tailControlsRef, tailErrorRef].filter((el): el is HTMLDivElement => !!el && el.getBoundingClientRect().height > 0);
 		if (controls.length) {
 			// The error was read above the queue. Keep that trailing slot in the
 			// followed edge after Stop removes its bubbles; following only the
 			// remaining banner bottom lets it move within the viewport (#1113).
 			const end = Math.max(...controls.map(el => el.getBoundingClientRect().bottom
-				+ (el === tailErrorRef ? tailErrorOffsetPx : 0))) + MIN_TRANSCRIPT_TAIL_RESERVE + callLift;
+				+ (el === tailErrorRef ? tailErrorOffsetPx : 0))) + MIN_TRANSCRIPT_TAIL_RESERVE + callRoom;
 			return containerRef.scrollTop + end - containerRef.getBoundingClientRect().top;
 		}
 		// Keep prose (and the working line in its existing 24px tail) above
-		// the active dock, without changing the no-call follow coordinates.
-		return transcriptContentEnd() + (callLift > 0 ? callLift + MIN_TRANSCRIPT_TAIL_RESERVE : 0);
+		// the held call room, without changing the zero-room follow coordinates.
+		return transcriptContentEnd() + (callRoom > 0 ? callRoom + MIN_TRANSCRIPT_TAIL_RESERVE : 0);
 	}
 
 	function readingFloorReserve(): number {
@@ -2948,12 +2948,12 @@
 		pointer-events: none;
 	}
 
-	/* The full reserve includes call room. Restore only the active dock's lift
-	   so controls clear it, while held room after hangup stays passive. */
+	/* Restore call room after subtracting the full reserve. It stays held on
+	   hangup, so removing the floating dock cannot move the reading surface. */
 	.tail-controls, .tail-error {
 		position: absolute;
 		inset-inline: 0;
-		bottom: calc(24px + env(safe-area-inset-bottom, 0px) + var(--call-dock-lift, 0px) - var(--transcript-tail-reserve));
+		bottom: calc(24px + env(safe-area-inset-bottom, 0px) + var(--call-dock-reserve, 0px) - var(--transcript-tail-reserve));
 		display: flex;
 		flex-direction: column;
 		flex: 0 0 auto;
@@ -2962,7 +2962,7 @@
 	}
 
 	.tail-error {
-		bottom: calc(24px + env(safe-area-inset-bottom, 0px) + var(--call-dock-lift, 0px) - var(--transcript-tail-reserve) + var(--error-tail-offset, 0px));
+		bottom: calc(24px + env(safe-area-inset-bottom, 0px) + var(--call-dock-reserve, 0px) - var(--transcript-tail-reserve) + var(--error-tail-offset, 0px));
 	}
 
 	/* The 30px working line fits the 24px tail plus 6px of its preceding gap.

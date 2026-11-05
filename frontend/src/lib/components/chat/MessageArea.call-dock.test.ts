@@ -50,19 +50,19 @@ function controlBottom(kind: 'queue' | 'error', state: ReturnType<typeof call>, 
 
 const followSource = source.slice(source.indexOf('function renderedFollowEnd()'), source.indexOf('function readingFloorReserve()'));
 const followJs = ts.transpile(followSource, { target: ts.ScriptTarget.ES2022 });
-function followEnd(lift: number, bottoms: (number | undefined)[], proseEnd = 500, errorOffset = 0) {
+function followEnd(room: number, bottoms: (number | undefined)[], proseEnd = 500, errorOffset = 0, lift = room) {
 	return new Function('env', `
 		const containerRef = { scrollTop: 1000, getBoundingClientRect: () => ({ top: 0 }) };
 		const box = bottom => ({ getBoundingClientRect: () => ({ height: 60, bottom }) });
 		const tailControlsRef = env.bottoms[0] === undefined ? null : box(env.bottoms[0]);
 		const tailErrorRef = env.bottoms[1] === undefined ? null : box(env.bottoms[1]);
 		const chatColumnRef = {};
-		const getComputedStyle = () => ({ getPropertyValue: key => key === '--call-dock-lift' ? env.lift + 'px' : '' });
+		const getComputedStyle = () => ({ getPropertyValue: key => key === '--call-dock-reserve' ? env.room + 'px' : key === '--call-dock-lift' ? env.lift + 'px' : '' });
 		const tailErrorOffsetPx = env.errorOffset, MIN_TRANSCRIPT_TAIL_RESERVE = 24;
 		const transcriptContentEnd = () => 1000 + env.proseEnd;
 		${followJs}
 		return renderedFollowEnd();
-	`)({ lift, bottoms, proseEnd, errorOffset }) as number;
+	`)({ room, lift, bottoms, proseEnd, errorOffset }) as number;
 }
 
 describe('floating call dock clearance for MessageArea tail surfaces', () => {
@@ -75,8 +75,8 @@ describe('floating call dock clearance for MessageArea tail surfaces', () => {
 		}
 	});
 
-	it.each(['queue', 'error'] as const)('leaves %s placement identical without a floating dock, including retained room after hangup', kind => {
-		for (const state of [call(false, true, 0), call(false, true, 20), call(true, false, 0), call(true, false, 20), { safe: 20, room: 0, lift: 0 }]) {
+	it.each(['queue', 'error'] as const)('leaves %s placement identical with zero call room on desktop or phone', kind => {
+		for (const state of [call(false, true, 0), call(false, true, 20), { safe: 0, room: 0, lift: 0 }, { safe: 20, room: 0, lift: 0 }]) {
 			const offset = kind === 'error' ? 90 : 0;
 			expect(controlBottom(kind, state, 400, offset)).toBe(viewport - 24 - state.safe - offset);
 		}
@@ -114,6 +114,29 @@ describe('floating call dock clearance for MessageArea tail surfaces', () => {
 			expect(pixels(jumpBottom, { '--call-dock-lift': lift })).toBe(12 + lift);
 			expect(pixels(phoneJumpBottom, { '--call-dock-lift': lift })).toBe(8 + lift);
 		}
+	});
+
+
+	it.each(['queue', 'error'] as const)('keeps %s position and follow edge stable when the provider hangs up with call room held', kind => {
+		const input = { phone: true, callActive: true, dockHeight: 120, session: 'chat', streaming: false };
+		const active = nextCallRoom(NO_CALL_ROOM, input);
+		const held = nextCallRoom(active, { ...input, callActive: false, dockHeight: 0 });
+		expect(held.room).toBe(active.room);
+		for (const safe of [0, 20]) {
+			const offset = kind === 'error' ? 90 : 0;
+			const before = controlBottom(kind, { safe, room: active.room, lift: 120 }, 400, offset);
+			const after = controlBottom(kind, { safe, room: held.room, lift: 0 }, 400, offset);
+			expect(after).toBe(before);
+			const bottoms = (bottom: number) => kind === 'queue' ? [bottom] : [undefined, bottom];
+			expect(followEnd(held.room, bottoms(after), 500, offset, 0))
+				.toBe(followEnd(active.room, bottoms(before), 500, offset, 120));
+		}
+	});
+
+	it('keeps the prose/working follow edge stable across the same held-room hangup', () => {
+		const active = nextCallRoom(NO_CALL_ROOM, { phone: true, callActive: true, dockHeight: 120, session: 'chat', streaming: false });
+		const held = nextCallRoom(active, { phone: true, callActive: false, dockHeight: 0, session: 'chat', streaming: false });
+		expect(followEnd(held.room, [], 500, 0, 0)).toBe(followEnd(active.room, [], 500, 0, 120));
 	});
 
 	it('retains then releases call room through the actual producer lifecycle', () => {
