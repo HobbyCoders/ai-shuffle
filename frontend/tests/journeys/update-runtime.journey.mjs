@@ -119,6 +119,32 @@ await runJourney({
         expect(await panel.getByRole('button', { name: 'Refresh updater…', exact: true }).isDisabled(), `${name} prevents refresh`);
       }
     })),
+    ...['not-a-revision', null].map((revision) => ({
+      name: `controlled-${revision === null ? 'unknown' : 'malformed'}-identity-is-not-refreshable`,
+      async setup({ page, status }) {
+        await page.route('**/api/v1/settings/application-updates', async (route) => {
+          expect(route.request().method() === 'GET', 'malformed metadata must never dispatch an update');
+          await route.fulfill({ json: {
+            allow_updates: true, update_all_workers: true, supported: true, phase: 'idle', running_version: 'a'.repeat(40),
+            updater: { revision, capabilities: ['refresh-updater-v1'], refresh: 'available' },
+            diagnostics: { revision: 'bogus', total_elapsed_ms: -50, stages: 'malformed' }
+          } });
+        });
+        await openSystem(page, status);
+      },
+      async act({ page, mark }) {
+        await mark('inspect controlled malformed legacy metadata without dispatch');
+        await page.getByRole('button', { name: 'Update details', exact: true }).click();
+      },
+      async verify({ page }) {
+        const panel = page.getByRole('region', { name: 'Connected worker update details' });
+        await panel.getByText('Unknown', { exact: true }).waitFor();
+        expect(await panel.getByRole('button', { name: /Refresh updater/ }).count() === 0, 'unknown identity cannot enable refresh');
+        expect(await panel.getByText(/A newer updater can be loaded/).count() === 0, 'unknown identity cannot prove a newer updater');
+        expect(await panel.getByRole('list', { name: 'Preparation stages' }).count() === 0, 'malformed diagnostics cannot become stage rows');
+        await panel.getByText('No update timings reported yet.', { exact: true }).waitFor();
+      }
+    })),
     {
       name: 'controlled-legacy-peer-never-borrows-local-identity',
       async setup({ page, status }) {

@@ -2,7 +2,7 @@
 	/** Redacted resident identity and nested preparation timings for the connected worker. */
 	import { ChevronDown } from 'lucide-svelte';
 	import SettingRow from '../../rows/SettingRow.svelte';
-	import type { UpdatesState, UpdateRuntimeStatus } from '../updates-state.svelte';
+	import { normalizeUpdateRuntimeStatus, UPDATE_STAGE_LABELS, UPDATE_OUTCOME_LABELS, type UpdatesState, type UpdateRuntimeStatus } from '../updates-state.svelte';
 
 	let { updates, status, workerName }: { updates?: UpdatesState; status?: UpdateRuntimeStatus; workerName?: string } = $props();
 	let open = $state(false);
@@ -10,7 +10,7 @@
 	let cancel = $state<HTMLButtonElement | null>(null);
 	let refreshButton = $state<HTMLButtonElement | null>(null);
 	const uid = $props.id();
-	const runtime = $derived(updates?.runtime ?? status);
+	const runtime = $derived(normalizeUpdateRuntimeStatus(updates?.runtime ?? status));
 	const updater = $derived(runtime?.updater);
 	const diagnostics = $derived(runtime?.diagnostics);
 	const refreshMode = $derived(!updater?.revision && (updater?.refresh === 'current' || updater?.refresh === 'available') ? 'unknown' : updater?.refresh ?? 'unknown');
@@ -26,17 +26,8 @@
 		}
 	});
 
-	const stages: Record<string, string> = {
-		command: 'Build command', source_download: 'Source download', source_extract: 'Source extraction', source_verify: 'Source verification',
-		runtimes: 'Runtime preparation', assembly: 'Update assembly', python_dependencies: 'Python dependencies', python_cache: 'Python cache',
-		fluid: 'Fluid installation', prebuilt_ui: 'Prebuilt UI', prepare_files: 'File preparation', frontend_cache: 'UI cache',
-		frontend_dependencies: 'UI dependencies', frontend_build: 'UI build', tools_cache: 'Tools cache', tools_dependencies: 'Tools dependencies',
-		tools_build: 'Tools build', browser_mcp_cache: 'Browser cache', browser_mcp_dependencies: 'Browser dependencies', browser_mcp_build: 'Browser build',
-		desktop_cache: 'Desktop cache', desktop_dependencies: 'Desktop dependencies', desktop_build: 'Desktop build'
-	};
-	const outcomes: Record<string, string> = {
-		completed: 'Completed', failed: 'Failed', hit: 'Reused verified cache', miss: 'No reusable verified entry', fallback: 'Fallback to source build', disabled: 'Not offered or reuse disabled'
-	};
+	const stages: Record<string, string> = UPDATE_STAGE_LABELS;
+	const outcomes: Record<string, string> = UPDATE_OUTCOME_LABELS;
 
 	// Never render arbitrary producer strings, commands, paths or endpoints here.
 	function revision(value: string | null | undefined): string {

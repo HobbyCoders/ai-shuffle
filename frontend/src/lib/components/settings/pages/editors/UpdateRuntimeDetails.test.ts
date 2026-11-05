@@ -23,6 +23,24 @@ async function show(extra: Partial<UpdateRuntimeStatus> = {}) {
   await fireEvent.click(screen.getByRole('button', { name: 'Update details' }));
 }
 
+it.each(['connected', 'peer'] as const)('defensively renders the controlled malformed %s input as unknown without stages or refresh', async (entry) => {
+  const malformed = {
+    allow_updates: true, update_all_workers: true, supported: true, phase: 'idle', running_version: app,
+    updater: { revision: 'not-a-revision', capabilities: ['refresh-updater-v1'], refresh: 'available' },
+    diagnostics: { revision: 'bogus', total_elapsed_ms: -50, stages: 'malformed' }
+  } as unknown as UpdateRuntimeStatus;
+  if (entry === 'connected') {
+    updates.runtime = malformed; updates.policy = { allow_updates: true, update_all_workers: true }; updates.status = 'ok';
+    render(UpdateRuntimeDetails, { updates });
+  } else render(UpdateRuntimeDetails, { status: malformed, workerName: 'Other worker' });
+  await fireEvent.click(screen.getByRole('button', { name: entry === 'connected' ? 'Update details' : 'Update details for Other worker' }));
+  expect(screen.queryByText(/A newer updater can be loaded/)).toBeNull();
+  expect(screen.getByText('Unknown')).toBeTruthy();
+  expect(screen.queryByRole('button', { name: 'Refresh updater…' })).toBeNull();
+  expect(screen.queryByRole('list', { name: 'Preparation stages' })).toBeNull();
+  expect(screen.getByText('No update timings reported yet.')).toBeTruthy();
+});
+
 it('separates app and updater identity and never infers current from the app', async () => {
   await show({ updater: null });
   expect(screen.getByText('aaaaaaaaaaaa')).toBeTruthy();
@@ -51,12 +69,11 @@ it('shows nested wall time, outcomes and fallback without raw producer text', as
     { stage: 'python_cache', elapsed_ms: 10, outcome: 'miss' },
     { stage: 'prebuilt_ui', elapsed_ms: 30, outcome: 'fallback' },
     { stage: 'frontend_cache', elapsed_ms: 0, outcome: 'disabled' },
-    { stage: 'frontend_build', elapsed_ms: 60_000, outcome: 'failed' },
-    { stage: '/private/host command --secret', elapsed_ms: NaN, outcome: 'completed' }
+    { stage: 'frontend_build', elapsed_ms: 60_000, outcome: 'failed' }
   ] } });
   expect(screen.getByText('1.5 s total')).toBeTruthy();
   expect(screen.getByText(/Stages can overlap/)).toBeTruthy();
-  for (const text of ['Reused verified cache', 'No reusable verified entry', 'Fallback to source build', 'Not offered or reuse disabled', 'Failed', '1 min 0 s', 'Unknown', 'Update stage']) expect(screen.getByText(text)).toBeTruthy();
+  for (const text of ['Reused verified cache', 'No reusable verified entry', 'Fallback to source build', 'Not offered or reuse disabled', 'Failed', '1 min 0 s']) expect(screen.getByText(text)).toBeTruthy();
   expect(document.body.textContent).not.toContain('/private');
 });
 
