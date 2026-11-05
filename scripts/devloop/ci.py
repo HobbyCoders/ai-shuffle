@@ -53,6 +53,7 @@ FRONTEND = ROOT / "frontend"
 JOURNEYS = FRONTEND / "tests" / "journeys"
 RUN_ALL = "run-all.mjs"
 WEIGHTS = Path(__file__).with_name("journey_weights.json")
+HOSTED_SHARDS = 9
 READY_SECONDS = 420
 JOURNEY_SECONDS = 1500
 SUMMARY_CASE_CHARS = 12_000
@@ -220,6 +221,7 @@ def refresh_weights(run_ids: list[int], weights_path: Path = WEIGHTS) -> None:
                     "green main-suite/ci-frontend runs: python -m scripts.devloop.ci refresh-weights "
                     "RUN_ID [RUN_ID ...]. seconds_per_case is the median of seconds/cases per sample.",
         "source_runs": run_ids,
+        "case_counts": expected_cases,
         "seconds_per_case": round(median(per_case), 2),
         "seconds": {name: round(median(values), 2) for name, values in sorted(durations.items())},
     }
