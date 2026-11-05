@@ -223,19 +223,19 @@
   <div class="trigger-header">
    <h4>{triggerTypeLabel(trigger.type)}</h4>
    <div class="trigger-actions">
-    <button class="st-btn compact" aria-expanded={expandedTriggers.has(trigIdx)} onclick={() => onToggleTriggerExpand(trigIdx)}>{expandedTriggers.has(trigIdx) ? 'Collapse' : 'Expand'} trigger</button>
+    <button class="st-btn icon trigger-toggle" aria-label={`${expandedTriggers.has(trigIdx) ? 'Collapse' : 'Expand'} trigger`} aria-expanded={expandedTriggers.has(trigIdx)} onclick={() => onToggleTriggerExpand(trigIdx)}>{#if expandedTriggers.has(trigIdx)}<ChevronDown />{:else}<ChevronRight />{/if}</button>
     {#if triggers.length > 1}<button class="st-btn icon danger" aria-label="Remove trigger" onclick={() => removeTrigger(trigIdx)}><Trash2 size={14} /></button>{/if}
    </div>
   </div>
   {#if expandedTriggers.has(trigIdx)}
    <div class="trigger-controls">
-    <SettingRow label="Trigger type">
-     {#snippet expanded()}<Segmented label="Trigger type" value={trigger.type} options={[{value:'cron',label:'Cron'},{value:'interval',label:'Interval'},{value:'connector_event',label:'Event'},{value:'connector_trigger',label:'Connector'},{value:'webhook',label:'Webhook'}]} onchange={(value) => updateTriggerType(trigIdx,value)} />{/snippet}
+    <SettingRow label="Trigger type" stackOnPhone>
+     <Segmented label="Trigger type" value={trigger.type} options={[{value:'cron',label:'Cron'},{value:'interval',label:'Interval'},{value:'connector_event',label:'Event'},{value:'connector_trigger',label:'Connector'},{value:'webhook',label:'Webhook'}]} onchange={(value) => updateTriggerType(trigIdx,value)} />
     </SettingRow>
     {#if trigger.type === 'cron'}
-     <SettingRow label="Schedule"><Segmented label="Schedule" value={cronMode} options={[{value:'preset',label:'Preset'},{value:'custom',label:'Custom'}]} onchange={(value) => cronMode = value} /></SettingRow>
+     <SettingRow label="Schedule" stackOnPhone><Segmented label="Schedule" value={cronMode} options={[{value:'preset',label:'Preset'},{value:'custom',label:'Custom'}]} onchange={(value) => cronMode = value} /></SettingRow>
      {#if cronMode === 'preset'}
-      <SettingRow label="Preset"><SelectField value={trigger.config.expression || '0 9 * * *'} options={Object.entries(CRON_PRESETS).map(([value,label]) => ({value,label}))} onchange={(value) => {updateTriggerConfig(trigIdx,{...trigger.config,expression:value});syncCronFieldsFromExpression(value);}} /></SettingRow>
+      <SettingRow label="Preset" hint="Times use {timezone}."><SelectField value={trigger.config.expression || '0 9 * * *'} options={Object.entries(CRON_PRESETS).map(([value,label]) => ({value,label}))} onchange={(value) => {updateTriggerConfig(trigIdx,{...trigger.config,expression:value});syncCronFieldsFromExpression(value);}} /></SettingRow>
      {:else}
 <SettingRow label="Minute"><SelectField value={cronMinute} options={[{value:'*',label:'Every minute'},...['5','10','15','30'].map(n => ({value:`*/${n}`,label:`Every ${n} min`})),...['0','15','30','45'].map(n => ({value:n,label:`:${n.padStart(2,'0')}`}))]} onchange={(value) => {cronMinute = value; updateTriggerConfig(trigIdx,{...trigger.config,expression:buildCronFromFields()});}} /></SettingRow>
 <SettingRow label="Hour"><SelectField value={cronHour} options={[{value:'*',label:'Every hour'},...Array.from({length:24},(_,h) => ({value:String(h),label:formatHour(h)}))]} onchange={(value) => {cronHour = value; updateTriggerConfig(trigIdx,{...trigger.config,expression:buildCronFromFields()});}} /></SettingRow>
@@ -245,13 +245,10 @@
 
      {/if}
      <SettingRow label="Expression" hint="Timezone: {timezone}">
-      {#snippet expanded()}
+      <div class="cron-expression">
+       <TextField label="Cron expression" mono value={trigger.config.expression || ''} placeholder="0 9 * * *" oninput={(value) => {updateTriggerConfig(trigIdx,{...trigger.config,expression:value});syncCronFieldsFromExpression(value);}} />
        <p class="cron-summary-text st-note">{describeCron(trigger.config.expression || '')}</p>
-       {#if trigger.config.expression}<code>{trigger.config.expression}</code>{/if}
-       <details><summary>Edit raw expression</summary>
-        <TextField label="Cron expression" value={trigger.config.expression || ''} placeholder="0 9 * * *" oninput={(value) => {updateTriggerConfig(trigIdx,{...trigger.config,expression:value});syncCronFieldsFromExpression(value);}} />
-       </details>
-      {/snippet}
+      </div>
      </SettingRow>
     {:else if trigger.type === 'interval'}
      <SettingRow label="Interval (seconds)" hint="Minimum 60 seconds"><TextField value={String(trigger.config.seconds || '')} placeholder="3600" inputmode="numeric" oninput={(value) => updateTriggerConfig(trigIdx,{...trigger.config,seconds:parseInt(value) || 0})} /></SettingRow>
@@ -282,10 +279,10 @@
  .trigger-card > p { margin: 0; padding: 12px 16px; }
  .trigger-controls :global(.st-row:has(+ .st-rowx)) { min-height: 0; padding-bottom: 8px; }
  .trigger-controls :global(.st-rowx) { padding-top: 0; }
- .trigger-controls :global(.st-note) { margin: 0 0 8px; }
- details { margin-top: 12px; }
- summary { cursor: pointer; min-height: 32px; font-size: 13px; color: var(--st-mfg); }
- summary:hover { color: var(--st-fg); }
+ .trigger-controls :global(.st-note) { margin: 0; }
+ .trigger-actions .st-btn.trigger-toggle { width: 28px; height: 28px; min-width: 28px; }
+ .cron-expression { display: grid; gap: 6px; min-width: 0; }
+ .cron-summary-text { font-size: 13px; color: var(--st-mfg); text-align: right; }
  .webhook-value { width: 100%; min-width: 0; background: var(--st-field); color: var(--st-fg); border: 1px solid var(--st-input); border-radius: var(--st-radius-md); padding: 8px 12px; font: inherit; font-size: 13px; }
- @media (max-width:600px) { summary { min-height:44px; } .webhook-value { font-size:16px; } }
+ @media (max-width:600px) { .trigger-actions .st-btn.trigger-toggle { width:44px; height:44px; min-width:44px; } .cron-expression { width:100%; } .cron-summary-text { text-align:left; } .webhook-value { font-size:16px; } }
 </style>

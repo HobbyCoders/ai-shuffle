@@ -236,6 +236,7 @@
 		overflow: hidden;
 		text-overflow: ellipsis;
 	}
+	@media (max-width: 600px) { .st-it:not(.value) { padding-inline: 0; } .nm, .st-it.navigation .nm { font-size: 15px; } }
 	.nm.st-mono {
 		font-weight: 400;
 		font-size: 12px;

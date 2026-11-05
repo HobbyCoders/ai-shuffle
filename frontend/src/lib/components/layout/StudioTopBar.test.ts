@@ -15,11 +15,13 @@ vi.mock('$lib/api/client', () => ({
 }));
 
 import StudioTopBar from './StudioTopBar.svelte';
+import { phoneBack } from '../settings/shell/BackRow.svelte';
+import { phonePanelActions } from './view/ViewPanel.svelte';
 import { api } from '$lib/api/client';
 import { ACCOUNT_CHANGED_EVENT } from '$lib/api/account';
 
 beforeEach(() => vi.clearAllMocks());
-afterEach(() => { cleanup(); vi.useRealTimers(); });
+afterEach(() => { cleanup(); phoneBack.owner = null; phoneBack.host = null; phoneBack.onclick = null; phoneBack.label = ''; phoneBack.status = null; phonePanelActions.visible = false; vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 it('does not render an account bubble or its separator, or refresh account metadata', async () => {
 	vi.useFakeTimers();
@@ -50,6 +52,28 @@ it('keeps the sidebar toggle and project navigation', async () => {
 	expect(onOpenProject).toHaveBeenCalledOnce();
 	await view.rerender({ sidebarCollapsed: true });
 	expect(screen.getByRole('button', { name: 'Show sidebar' }).getAttribute('aria-pressed')).toBe('false');
+});
+
+it('lends the existing Back callback to the phone bar without losing global navigation', async () => {
+ vi.stubGlobal('matchMedia', () => ({ matches: true, addEventListener() {}, removeEventListener() {} }));
+ const back = vi.fn(); const menu = vi.fn();
+ phoneBack.owner = Symbol('detail'); phoneBack.label = 'Agents'; phoneBack.onclick = back;
+ const view = render(StudioTopBar, { title: 'Agents', onToggleSidebar: menu });
+ const control = await screen.findByRole('button', { name: 'Back to Agents' });
+ expect(view.container.querySelector('.topbar')?.contains(control)).toBe(true);
+ await fireEvent.click(control); expect(back).toHaveBeenCalledOnce();
+ await fireEvent.click(screen.getByRole('button', { name: 'Chats' })); expect(menu).toHaveBeenCalledOnce();
+ expect(screen.queryByRole('button', { name: 'Hide sidebar' })).toBeNull();
+});
+
+it('restores the destination word when its actual panel is no longer visible', async () => {
+ phonePanelActions.visible = true;
+ const view = render(StudioTopBar, { title: 'Agents', sidebarCollapsed: false });
+ expect(view.container.querySelector('.tb-page-label')?.classList.contains('panel-open')).toBe(true);
+ expect(view.container.querySelector('.tb-page-label')?.getAttribute('aria-label')).toBe('Agents');
+ phonePanelActions.visible = false;
+ await vi.waitFor(() => expect(view.container.querySelector('.tb-page-label')?.classList.contains('panel-open')).toBe(false));
+ expect(screen.getByText('Agents')).toBeTruthy();
 });
 
 it('keeps caller-provided header actions', () => {

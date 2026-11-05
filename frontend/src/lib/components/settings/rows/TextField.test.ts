@@ -3,6 +3,16 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import TextField from './TextField.svelte';
 afterEach(cleanup);
 describe('TextField form keyboard paths', () => {
+ it('preserves the real path while its resting display keeps the last segment', async () => {
+  const path = '/workspace/a-very-long-project/location/final-directory';
+  render(TextField, { value: path, label: 'Path', pathDisplay: true, mono: true });
+  const field = screen.getByRole('textbox', { name: 'Path' }) as HTMLInputElement;
+  expect(field.value).toBe(path);
+  expect(document.querySelector('.path-rest .tail')?.textContent).toBe('/final-directory');
+  expect(document.querySelector('.path-text')?.getAttribute('title')).toBe(path);
+  await fireEvent.focus(field);
+  expect(field.value).toBe(path);
+ });
  it('uses an overridable desktop width so narrow rows can fill their control line', () => {
   render(TextField, { value: 'Before', label: 'Name', width: 260 });
   const field = screen.getByRole('textbox', { name: 'Name' }) as HTMLInputElement;

@@ -152,7 +152,7 @@ Panel contexts and tokens travel automatically. Off-screen feature pages never c
 			{@render bridgedPanel()}
 		</div>
 	{/if}
-	<section class="view-main-slot st-scroll" class:st-dpane={!nestedPanes} aria-label="Details" hidden={stacked && !contentFirst && !detailOpen} inert={stacked && !contentFirst && !detailOpen}>
+	<section class="view-main-slot st-scroll" class:settings-viewport={nestedPanes} class:st-dpane={!nestedPanes} aria-label="Details" hidden={stacked && !contentFirst && !detailOpen} inert={stacked && !contentFirst && !detailOpen}>
 		{@render main(back)}
 	</section>
 </div>

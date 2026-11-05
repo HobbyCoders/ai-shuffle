@@ -16,6 +16,7 @@ export { default as ListGroupLabel } from '../../settings/rows/ListGroupLabel.sv
 export { default as RowGroup } from '../../settings/rows/RowGroup.svelte';
 export { default as SettingRow } from '../../settings/rows/SettingRow.svelte';
 export { default as SelectField } from '../../settings/rows/SelectField.svelte';
+export { default as PathText } from '../../settings/rows/PathText.svelte';
 export { default as Switch } from '../../settings/rows/Switch.svelte';
 export { default as Segmented } from '../../settings/rows/Segmented.svelte';
 export { default as Tile } from '../../settings/rows/Tile.svelte';

@@ -15,11 +15,10 @@
 		idle?: boolean;
 	}
 
-	let { title, message = 'Select an item.', icon: Icon, children, actionLabel, onAction, idle = false }: Props = $props();
+	let { title, message = 'Select an item.', icon: _icon, children, actionLabel, onAction, idle = false }: Props = $props();
 </script>
 
 <div class="st-empty-detail" data-idle={idle ? '' : undefined}>
-	{#if Icon}<span class="ic"><Icon /></span>{/if}
 	{#if title}<h2>{title}</h2>{/if}
 	<p>{message}</p>
 	{#if actionLabel || children}<div class="acts">{#if actionLabel}<button type="button" class="st-btn" onclick={onAction}>{actionLabel}</button>{/if}{@render children?.()}</div>{/if}
@@ -40,20 +39,6 @@
 		align-items: flex-start;
 		justify-content: center;
 		gap: 6px;
-	}
-	.ic {
-		display: grid;
-		place-items: center;
-		width: 42px;
-		height: 42px;
-		border-radius: 10px;
-		border: 1px dashed var(--st-border-strong);
-		color: var(--st-subtle);
-		margin-bottom: 8px;
-	}
-	.ic :global(svg.lucide) {
-		width: 19px;
-		height: 19px;
 	}
 	h2 {
 		margin: 0;

@@ -25,6 +25,24 @@ function formCase(native = false) {
   async act({ page, mark }) {
    await mark('open a new automation and validate the required fields');
    await page.getByRole('button', { name: 'New automation', exact: true }).first().click();
+   const collapse = page.getByRole('button', { name: 'Collapse trigger', exact: true });
+   expect((await collapse.innerText()).trim() === '', 'trigger collapse is an icon-only control');
+   await collapse.click();
+   await page.getByRole('button', { name: 'Expand trigger', exact: true }).click();
+   const trigger = page.getByRole('region', { name: 'Trigger 1', exact: true });
+   const row = trigger.locator('.st-row').filter({ hasText: 'Trigger type' });
+   expect(await row.getByRole('group', { name: 'Trigger type' }).count() === 1, 'trigger type is inside the shared row, not an expansion');
+   const toggleSize = await collapse.boundingBox();
+   expect(toggleSize.width === (page.viewportSize().width < 600 ? 44 : 28), 'chevron keeps desktop density and a phone touch target');
+   if (page.viewportSize().width < 600) {
+    const schedule = trigger.getByRole('group', { name: 'Schedule', exact: true });
+    const scheduleRow = schedule.locator('xpath=ancestor::div[contains(@class,"st-row")]');
+    expect(Math.abs((await schedule.boundingBox()).width - (await scheduleRow.locator('.st-rc').boundingBox()).width) < 1, 'Schedule spans the stacked phone control row');
+   }
+   await page.getByRole('textbox', { name: 'Cron expression', exact: true }).fill('*/15 * * * *');
+   await page.getByText('Every 15 minutes', { exact: true }).last().waitFor();
+   const actions = page.locator('details.detail-more');
+   if (await actions.isVisible()) await actions.locator('summary').click();
    await page.getByRole('button', { name: 'Create', exact: true }).click();
    await page.getByRole('alert').filter({ hasText: 'Name is required' }).waitFor();
    await page.getByRole('textbox', { name: 'Name', exact: true }).fill('Preview form validation');
@@ -32,6 +50,7 @@ function formCase(native = false) {
    await page.getByRole('alert').filter({ hasText: 'Either a prompt or at least one action step is required' }).waitFor();
    await page.getByRole('textbox', { name: 'Prompt', exact: true }).fill('No provider work is triggered.');
    await page.getByRole('combobox', { name: 'Agent', exact: true }).selectOption('dev-agent');
+   if (await actions.isVisible()) await actions.locator('summary').click();
    await mark('switch trigger configurations using the shared controls');
    const types = page.getByRole('group', { name: 'Trigger type', exact: true });
    for (const label of ['Interval', 'Event', 'Connector', 'Webhook', 'Cron']) {

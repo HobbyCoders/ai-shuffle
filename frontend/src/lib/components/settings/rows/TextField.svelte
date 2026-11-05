@@ -4,6 +4,7 @@
 	 * (`onchange`); `oninput` fires on every keystroke for forms with an
 	 * explicit Save (passwords, keys).
 	 */
+	import PathText from './PathText.svelte';
 	import { getSettingsAccess } from '$lib/settings/access.svelte';
 	import { controlAria, getRowContext } from './row-context';
 
@@ -16,6 +17,8 @@
 		placeholder?: string;
 		type?: 'text' | 'password' | 'url' | 'email' | 'search';
 		mono?: boolean;
+		/** Middle-ellipsized path at rest; full unmodified value on focus. */
+		pathDisplay?: boolean;
 		/** Width in px (default 220). */
 		width?: number;
 		disabled?: boolean;
@@ -38,6 +41,7 @@
 		placeholder,
 		type = 'text',
 		mono = false,
+		pathDisplay = false,
 		width = 220,
 		disabled = false,
 		label,
@@ -66,6 +70,7 @@
 	}
 </script>
 
+<span class="st-text-field" class:path-display={pathDisplay} style:--st-text-width="{width}px">
 <input
 	class="st-txt"
 	class:st-mono={mono}
@@ -90,8 +95,16 @@
 		}
 	}}
 />
+{#if pathDisplay}<span class="path-rest" aria-hidden="true"><PathText path={value} /></span>{/if}
+</span>
 
 <style>
+	.st-text-field { position: relative; display: inline-flex; width: var(--st-text-width); max-width: 100%; min-width: 0; }
+	.path-rest { position: absolute; inset: 1px 10px; display: flex; align-items: center; pointer-events: none; color: var(--st-fg); }
+	.path-display:not(:focus-within) .st-txt { color: transparent; }
+	.path-display:focus-within .path-rest { display: none; }
+	.path-display:focus-within .st-txt { color: var(--st-fg); }
+	.path-display .st-txt { transition-property: border-color, box-shadow, background-color; }
 	.st-txt {
 		width: var(--st-text-width);
 		height: 32px;

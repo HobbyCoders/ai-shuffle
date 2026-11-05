@@ -1,10 +1,17 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import SettingRowHarness from '$lib/test-stubs/SettingRowHarness.svelte';
+import SettingRow from './SettingRow.svelte';
 
 afterEach(cleanup);
 
 describe('SettingRow', () => {
+	it('only opts into the full-width phone selector layout when requested', async () => {
+		const view = render(SettingRow, { label: 'Schedule' });
+		expect(view.container.querySelector('.st-phone-stack')).toBeNull();
+		await view.rerender({ label: 'Schedule', stackOnPhone: true });
+		expect(view.container.querySelector('.st-row.st-phone-stack')).not.toBeNull();
+	});
 	it('takes label and default from the registry and renders its anchor', () => {
 		const { container } = render(SettingRowHarness, { id: 'general.timezone', value: 'local' });
 		const row = container.querySelector('[data-setting-anchor="general.timezone"]');

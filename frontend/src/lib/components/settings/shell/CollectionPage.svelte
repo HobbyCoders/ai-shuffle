@@ -284,7 +284,7 @@
 	.st-filter input::placeholder {
 		color: var(--st-subtle);
 	}
-	.st-filter:focus-within { outline: 2px solid var(--ring); outline-offset: 2px; }
+	.st-filter:focus-within { outline: 1.5px solid color-mix(in srgb, var(--ring) 60%, transparent); outline-offset: 1px; }
 	.st-filter input, .st-filter input:focus, .st-filter input:focus-visible { border: 0; outline: none; box-shadow: none; }
 	.st-lscroll {
 		flex: 1;

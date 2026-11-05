@@ -15,7 +15,9 @@
 	 * about those actions is reimplemented here.
 	 */
 	import type { Snippet } from 'svelte';
-	import { Menu, PanelLeft } from 'lucide-svelte';
+	import { ChevronLeft, Menu, PanelLeft } from 'lucide-svelte';
+	import { phonePanelActions } from './view/ViewPanel.svelte';
+	import { phoneBack } from '../settings/shell/BackRow.svelte';
 	import SessionBreadcrumbs from './SessionBreadcrumbs.svelte';
 	import NotificationCenter from '$lib/components/NotificationCenter.svelte';
 	import { unreadCount } from '$lib/stores/notifications';
@@ -58,12 +60,18 @@
 	// to the session list, drawn the way the phone app draws it.
 	let phoneWidth = $state(false);
 	$effect(() => {
-		const query = window.matchMedia?.('(max-width: 480px)');
+		const query = window.matchMedia?.('(max-width: 600px)');
 		if (!query) return;
 		phoneWidth = query.matches;
 		const change = (event: MediaQueryListEvent) => { phoneWidth = event.matches; };
 		query.addEventListener?.('change', change);
 		return () => query.removeEventListener?.('change', change);
+	});
+	const phoneHost = Symbol('responsive-bar');
+	$effect(() => {
+		if (!phoneWidth) return;
+		phoneBack.host = phoneHost;
+		return () => { if (phoneBack.host === phoneHost) phoneBack.host = null; };
 	});
 </script>
 
@@ -72,7 +80,9 @@
 {/snippet}
 
 <header class="topbar" class:no-rule={!rule}>
-	{#if onToggleSidebar}
+	{#if phoneWidth && phoneBack.onclick}
+		<button class="tb-back" onclick={phoneBack.onclick} aria-label={`Back to ${phoneBack.label}`}><ChevronLeft size={20} /><span>{phoneBack.label}</span></button>
+	{:else if onToggleSidebar}
 		<button
 			class="tb-icon"
 			onclick={onToggleSidebar}
@@ -89,7 +99,9 @@
 		</button>
 	{/if}
 
-	{#if phoneWidth && newChat}
+	{#if phoneWidth && phoneBack.onclick}
+		<!-- The parent name is already in the back control. -->
+	{:else if phoneWidth && newChat}
 		<!-- The phone app's bar (AppTopBar): the title over the worker this page talks to.
 		     The worker is changed from Chat controls, under the composer. -->
 		<div class="tb-newchat">
@@ -103,14 +115,16 @@
 			{@render workerLine()}
 		</div>
 	{:else}
-		<SessionBreadcrumbs {projectLabel} {title} {sessionId} {onOpenProject} />
+		<div class="tb-page-label" class:panel-open={!sessionId && phonePanelActions.visible} aria-label={title ?? projectLabel ?? undefined}><SessionBreadcrumbs {projectLabel} {title} {sessionId} {onOpenProject} /></div>
 	{/if}
 
 	<div class="tb-right">
+		{#if phoneWidth && phoneBack.onclick}{@render phoneBack.status?.()}{:else if phoneWidth && phonePanelActions.label === title}{@render phonePanelActions.content?.()}{/if}
 		{#if actions}
 			{@render actions()}
 		{/if}
-		{#if phoneWidth}<NotificationCenter bar />{/if}
+		{#if phoneWidth && phoneBack.onclick && onToggleSidebar}<button class="tb-icon phone" aria-label="Chats" title="Navigation" onclick={onToggleSidebar}><Menu size={20} strokeWidth={1.8} /></button>{/if}
+			{#if phoneWidth}<NotificationCenter bar />{/if}
 	</div>
 </header>
 
@@ -143,6 +157,11 @@
 		cursor: pointer;
 		transition: background-color 0.13s ease, color 0.13s ease;
 	}
+	.tb-back { display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 12px; border: 0; border-radius: 8px; background: none; color: var(--foreground); font-size: 15px; }
+	.tb-back:hover { background: var(--accent); }
+	.tb-back:active { background: var(--row-selected); }
+	.tb-page-label { display: flex; min-width: 0; }
+	@media (min-width: 601px) and (max-width: 1080px) { .tb-page-label.panel-open { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); } }
 	.tb-icon:hover { background: var(--accent); color: var(--foreground); }
 	.tb-icon.phone { width: 44px; height: 48px; color: var(--foreground); }
 
@@ -201,7 +220,7 @@
 	}
 
 	/* The phone app's bar: same height, same edges, no gaps between its 44px targets. */
-	@media (max-width: 480px) {
+	@media (max-width: 600px) {
 		.topbar { height: 56px; gap: 0; padding: 0 4px; }
 		.tb-right { gap: 0; }
 	}

@@ -140,6 +140,7 @@
 		--border-strong: oklch(1 0 0 / 0.14);
 		--input: oklch(1 0 0 / 0.1);
 		--ring: oklch(0.72 0.11 175);
+		--panel-search-ring: color-mix(in srgb, var(--ring) 60%, transparent);
 
 		/* One field: every text field, search box and select. Only focus brightens it. */
 		--field-bg: var(--card);
@@ -338,6 +339,8 @@
 		--border-strong: oklch(0.21 0.01 250 / 0.18);
 		--input: oklch(0.21 0.01 250 / 0.14);
 		--ring: oklch(0.53 0.09 178);
+		/* 60% measured 2.38:1; 75% clears 3:1 on the light panel. */
+		--panel-search-ring: color-mix(in srgb, var(--ring) 75%, transparent);
 
 		/* One field: every text field, search box and select. Only focus brightens it. */
 		--field-bg: var(--card);
