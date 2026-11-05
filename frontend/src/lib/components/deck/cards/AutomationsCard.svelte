@@ -10,7 +10,7 @@
 	 * - Approve/deny pending automation runs
 	 */
 	import { onMount, tick } from 'svelte';
-	import { ViewShell, ViewMain, DetailPane, EmptyDetail, InlineBanner } from '$lib/components/layout/view';
+	import { ViewShell, ViewMain, ViewDetail, EmptyDetail, InlineBanner } from '$lib/components/layout/view';
 	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
 	import type {
 		Automation,
@@ -636,7 +636,7 @@
  {#snippet main(back)}
    {#if remoteChange}<InlineBanner tone="info">{remoteChange}</InlineBanner>{/if}
    {#if currentView === 'create' || currentView === 'edit'}
-    <DetailPane icon={CalendarClock} name={currentView === 'edit' ? formName || 'Edit automation' : 'New automation'}
+    <ViewDetail icon={CalendarClock} name={currentView === 'edit' ? formName || 'Edit automation' : 'New automation'}
      subtitle={currentView === 'edit' ? 'Update its triggers, instructions and run limits.' : 'Run tasks on a schedule or in response to events.'}
      onBack={back} backLabel="Automations">
      {#snippet primary()}
@@ -705,7 +705,7 @@
 				onToggleActionExpand={toggleActionExpand}
 			/>
      {/snippet}
-    </DetailPane>
+    </ViewDetail>
    {:else if currentView === 'detail' && selectedAutomation}
     {#if error}<InlineBanner tone="warn">{error}</InlineBanner>{/if}
     <AutomationDetail automation={selectedAutomation} profiles={profilesLoaded ? profiles : null}
