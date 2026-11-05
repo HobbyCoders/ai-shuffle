@@ -78,11 +78,12 @@ beforeEach(() => {
 	serverTitles = {};
 	listDelayMs = 0;
 	mocks.get.mockImplementation(async (url: string) => {
+		if (url.startsWith('/sessions/count')) return { total: 138 };
 		if (url.startsWith('/sessions/cursor')) {
 			if (listDelayMs) await new Promise((r) => setTimeout(r, listDelayMs));
 			// The Active group is pulled in separately so the page cap can never
 			// hide a long-idle active session.
-			if (url.includes('active_only=true')) {
+			if (url.includes('membership=active')) {
 				return {
 					items: rowsFor([...page1, ...page2].filter((r) => r.is_active)),
 					next_cursor: null,
@@ -106,6 +107,22 @@ beforeEach(() => {
 });
 
 describe('capped initial load (W1)', () => {
+ it('pages the Active working set separately from bounded Settled history and its total', async () => {
+  mocks.get.mockImplementation(async (url: string) => {
+   if (url.startsWith('/sessions/count')) return { total: 1000 };
+   if (url.includes('membership=active')) return url.includes('cursor=active-next')
+    ? { items: [{ id: 'active-101', is_active: true }], has_more: false }
+    : { items: Array.from({ length: 100 }, (_, i) => ({ id: `active-${i}`, is_active: true })), has_more: true, next_cursor: 'active-next', next_cursor_id: 'a' };
+   expect(url).toContain('membership=settled');
+   return { items: [{ id: 'settled-recent', is_active: false }], has_more: true, next_cursor: 'history-next', next_cursor_id: 's' };
+  });
+  await appData.loadSessions(null);
+  expect(appData.current.sessions.filter(row => row.is_active)).toHaveLength(101);
+  expect(appData.current.settledTotal).toBe(1000);
+  expect(appData.current.sessionsHasMore).toBe(true);
+  expect(appData.current.sessionsCursor).toBe('history-next');
+ });
+
 	it('coalesces independent resource subscribers and keeps an in-flight dirty follow-up', async () => {
 		vi.useFakeTimers();
 		const sync = new ResourceSync();
@@ -117,20 +134,21 @@ describe('capped initial load (W1)', () => {
 			listDelayMs = 500;
 			sync.invalidate(['sessions', 'projects']);
 			await vi.advanceTimersByTimeAsync(100);
-			expect(mocks.get).toHaveBeenCalledTimes(2);
+			expect(mocks.get).toHaveBeenCalledTimes(3);
 			// A focus refresh while the requests are running must not be lost.
 			const refreshed = appData.loadSessions();
 			void appData.loadSessions();
 			await vi.advanceTimersByTimeAsync(1000);
 			await refreshed;
-			expect(mocks.get).toHaveBeenCalledTimes(4);
+			expect(mocks.get).toHaveBeenCalledTimes(6);
 		} finally { off.forEach(stop => stop()); sync.clear(); vi.useRealTimers(); }
 	});
 
 	it('discards an in-flight response for a superseded tag', async () => {
 		let resolve!: (value: unknown) => void;
 		mocks.get.mockImplementation((url: string) => {
-			if (url.includes('active_only=true')) return Promise.resolve({ items: [] });
+			if (url.startsWith('/sessions/count')) return Promise.resolve({ total: 0 });
+			if (url.includes('membership=active')) return Promise.resolve({ items: [] });
 			if (url.includes('tag_id=old')) return new Promise(done => { resolve = done; });
 			return Promise.resolve({ items: [{id: 'new-tag'}], has_more: false });
 		});
@@ -152,7 +170,7 @@ describe('capped initial load (W1)', () => {
 
 		// One page + one active-only request, in parallel — not ⌈N/100⌉
 		// sequential round-trips.
-		expect(mocks.get).toHaveBeenCalledTimes(2);
+		expect(mocks.get).toHaveBeenCalledTimes(3);
 		expect(appData.current.sessions).toHaveLength(101);
 		expect(appData.current.sessionsHasMore).toBe(true);
 		expect(appData.current.sessionsCursor).toBe('c1');
@@ -606,7 +624,7 @@ describe('"Load older sessions" paging', () => {
 
 	it('stops reporting more when the server repeats the same cursor', async () => {
 		mocks.get.mockImplementation(async (url: string) => {
-			if (url.includes('active_only=true')) return { items: [], next_cursor: null, next_cursor_id: null, has_more: false };
+			if (url.includes('membership=active')) return { items: [], next_cursor: null, next_cursor_id: null, has_more: false };
 			if (url.includes('cursor=stuck')) {
 				return { items: [], next_cursor: 'stuck', next_cursor_id: 'stuck-id', has_more: true };
 			}

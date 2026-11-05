@@ -39,6 +39,21 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.useRealTimers(); });
 
 describe('universal search', () => {
+ it('reaches chat matches past the first twenty without duplicates', async () => {
+  mocks.sessions.mockImplementation(async (_q, { offset }) => ({
+   items: Array.from({ length: offset ? 5 : 20 }, (_, i) => ({ id: `chat-${offset + i}`, title: `History ${offset + i}` })),
+   total: 25, offset, limit: 20, has_more: offset === 0
+  }));
+  const p = props(); render(SpotlightSearch, { props: p }); await search('history');
+  expect(screen.queryByText('History 24')).toBeNull();
+  await fireEvent.click(screen.getByRole('button', { name: 'More chat results' }));
+  await tick();
+  expect(screen.getAllByText('History 0')).toHaveLength(1);
+  expect(screen.queryByRole('button', { name: 'More chat results' })).toBeNull();
+  await fireEvent.click(screen.getByText('History 24'));
+  expect(p.onSelectSession).toHaveBeenCalledWith(expect.objectContaining({ id: 'chat-24' }));
+ });
+
  it('starts without hardcoded sessions or agents and keeps quick actions', () => {
   render(SpotlightSearch, { props: props() });
   expect(screen.queryByRole('region', { name: 'Chats' })).toBeNull();
@@ -71,7 +86,7 @@ describe('universal search', () => {
   render(SpotlightSearch, { props: { ...props(), currentProjectId: 'project' } });
   for (const value of ['o', 'or', 'orchid']) await fireEvent.input(screen.getByRole('textbox'), { target: { value } });
   await vi.advanceTimersByTimeAsync(260);
-  expect(mocks.sessions).toHaveBeenCalledExactlyOnceWith('orchid', { limit: 20 });
+  expect(mocks.sessions).toHaveBeenCalledExactlyOnceWith('orchid', { limit: 20, offset: 0, adminOnly: true });
  });
  it('keeps keyboard indices aligned across dynamic groups', async () => {
   const p = props(); render(SpotlightSearch, { props: p }); await search('orchid');

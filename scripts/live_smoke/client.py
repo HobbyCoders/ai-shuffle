@@ -177,8 +177,9 @@ class HttpWorkerClient:
             raise Unreachable(f"{self.base_url} unreachable: {type(exc).__name__}") from None
         return notes
 
-    def archive(self, session_id: str) -> None:
-        self._req("PATCH", f"/sessions/{session_id}/active", json={"is_active": False, "archived": True})
+    def settle(self, session_id: str) -> None:
+        """Settle test-owned evidence. Call Stop separately for unfinished test work."""
+        self._req("PATCH", f"/sessions/{session_id}/active", json={"is_active": False})
 
     # -- chat WebSocket (the same frames the web UI sends) --------------------
 
@@ -243,6 +244,8 @@ class HttpWorkerClient:
         """Start a session (no ``session_id``) or send a message; returns the session id."""
         request_id = uuid.uuid4().hex
         frame = {"type": "query", "prompt": prompt, "request_id": request_id}
+        if not session_id:
+            frame["disposable_test"] = True
         if session_id:
             frame["session_id"] = session_id
         if profile:

@@ -397,33 +397,12 @@ def get_sessions_paginated(
         return sessions, total
 
 
-def get_sessions_cursor(
-    project_id: Optional[str] = None,
-    profile_id: Optional[str] = None,
-    status: Optional[str] = None,
-    api_user_id: Optional[str] = None,
-    api_users_only: bool = False,
-    active_only: bool = False,
-    tag_id: Optional[str] = None,
-    limit: int = 50,
-    cursor: Optional[str] = None,
-    cursor_id: Optional[str] = None,
-    include_hidden: bool = False,
-    exclude_archived: bool = False,
-) -> tuple[List[Dict[str, Any]], Optional[str], Optional[str], bool]:
-    """Get sessions using cursor-based pagination (keyset pagination).
-
-    Uses (updated_at, id) as the cursor key for deterministic ordering.
-
-    Hidden sessions are excluded unless ``include_hidden`` is True —
-    the filter is part of the shared WHERE clause, so the limit+1 has_more
-    probe never counts hidden rows. ``exclude_archived`` works the same way
-    for archived sessions: a list that never shows them (the sidebar) must
-    not be told more rows exist when only archived ones remain.
-
-    Returns:
-        Tuple of (sessions, next_cursor, next_cursor_id, has_more)
-    """
+def _session_list_scope(
+    project_id=None, profile_id=None, status=None, api_user_id=None,
+    api_users_only=False, active_only=False, tag_id=None, include_hidden=False,
+    exclude_archived=False, membership=None, device_id=None,
+):
+    """One visibility/membership predicate for keyset pages and cheap counts."""
     _ph = ph()
     if tag_id:
         inst_sql, inst_params = _instance_filter(_ph, "s.")
@@ -466,6 +445,62 @@ def get_sessions_cursor(
         # probe is needed.
         base_query += f" AND COALESCE({col_prefix}hidden, FALSE) = FALSE"
         base_query += f" AND COALESCE({col_prefix}is_worker, FALSE) = FALSE"
+
+    if membership == "active":
+        base_query += f" AND {col_prefix}is_active = TRUE"
+    elif membership == "settled":
+        base_query += f" AND COALESCE({col_prefix}is_active, FALSE) = FALSE"
+    if device_id:
+        base_query += f" AND {col_prefix}instance_id = {_ph}"
+        params.append(device_id)
+    return base_query, params, col_prefix
+
+
+def count_sessions(**filters) -> int:
+    """Count the same visible cohort as get_sessions_cursor, without enrichment."""
+    base_query, params, col_prefix = _session_list_scope(**filters)
+    with get_db() as conn:
+        cursor = get_cursor(conn)
+        cursor.execute(f"SELECT COUNT(DISTINCT {col_prefix}id) AS cnt {base_query}", params)
+        return cursor.fetchone()["cnt"]
+
+
+def get_sessions_cursor(
+    project_id: Optional[str] = None,
+    profile_id: Optional[str] = None,
+    status: Optional[str] = None,
+    api_user_id: Optional[str] = None,
+    api_users_only: bool = False,
+    active_only: bool = False,
+    tag_id: Optional[str] = None,
+    limit: int = 50,
+    cursor: Optional[str] = None,
+    cursor_id: Optional[str] = None,
+    include_hidden: bool = False,
+    exclude_archived: bool = False,
+    membership: Optional[str] = None,
+    device_id: Optional[str] = None,
+) -> tuple[List[Dict[str, Any]], Optional[str], Optional[str], bool]:
+    """Get sessions using cursor-based pagination (keyset pagination).
+
+    Uses (updated_at, id) as the cursor key for deterministic ordering.
+
+    Hidden sessions are excluded unless ``include_hidden`` is True —
+    the filter is part of the shared WHERE clause, so the limit+1 has_more
+    probe never counts hidden rows. ``exclude_archived`` works the same way
+    for archived sessions: a list that never shows them (the sidebar) must
+    not be told more rows exist when only archived ones remain.
+
+    Returns:
+        Tuple of (sessions, next_cursor, next_cursor_id, has_more)
+    """
+    _ph = ph()
+    base_query, params, col_prefix = _session_list_scope(
+        project_id=project_id, profile_id=profile_id, status=status,
+        api_user_id=api_user_id, api_users_only=api_users_only, active_only=active_only,
+        tag_id=tag_id, include_hidden=include_hidden, exclude_archived=exclude_archived,
+        membership=membership, device_id=device_id,
+    )
 
     # Cursor condition: seek past the last seen (updated_at, id)
     if cursor and cursor_id:
@@ -2758,6 +2793,7 @@ def search_sessions(
     # Cross-install sharing (default): no per-install clause. Isolation mode:
     # restrict both CTEs to this install (legacy NULL rows visible everywhere).
     inst_sql, inst_params = _instance_filter(_ph, "s.")
+    inst_sql += " AND COALESCE(s.hidden, FALSE) = FALSE AND COALESCE(s.is_worker, FALSE) = FALSE"
 
     with get_db() as conn:
         cursor = get_cursor(conn)
@@ -2910,6 +2946,7 @@ def search_sessions_paginated(
     # Cross-install sharing (default): no per-install clause. Isolation mode:
     # restrict both CTEs to this install (legacy NULL rows visible everywhere).
     inst_sql, inst_params = _instance_filter(_ph, "s.")
+    inst_sql += " AND COALESCE(s.hidden, FALSE) = FALSE AND COALESCE(s.is_worker, FALSE) = FALSE"
 
     with get_db() as conn:
         cursor = get_cursor(conn)
@@ -3029,7 +3066,7 @@ def search_sessions_paginated(
         SELECT * FROM deduped_matches
         ORDER BY
             CASE WHEN match_type = 'title' THEN 0 ELSE 1 END,
-            updated_at DESC
+            updated_at DESC, id DESC
         LIMIT {_ph} OFFSET {_ph}
         """
         cursor.execute(data_sql, base_params + filter_params + [limit, offset])

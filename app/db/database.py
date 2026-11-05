@@ -4005,6 +4005,7 @@ from app.db.sessions import (  # noqa: F401
     get_sessions,
     get_sessions_paginated,
     get_sessions_cursor,
+    count_sessions,
     create_session,
     create_session_with_stats,
     update_session,

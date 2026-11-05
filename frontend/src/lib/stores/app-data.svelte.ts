@@ -40,6 +40,7 @@ interface AppDataState {
 	sessionsTagFilter: string | null;
 	// Pagination state for sessions
 	sessionsTotal: number;
+	settledTotal: number | null;
 	sessionsOffset: number;
 	sessionsHasMore: boolean;
 	sessionsLoadingMore: boolean;
@@ -91,7 +92,7 @@ const MAX_RELOAD_SESSION_PAGES = 10;
  * rows the sidebar will drop and "Load older sessions" fetches pages that
  * add nothing visible.
  */
-const SESSION_LIST_BASE = `/sessions/cursor?limit=${SESSIONS_PAGE_SIZE}&admin_only=true&exclude_archived=true`;
+const SESSION_LIST_BASE = `/sessions/cursor?limit=${SESSIONS_PAGE_SIZE}&admin_only=true&exclude_archived=true&membership=settled`;
 const SEARCH_PAGE_SIZE = 20;
 
 // ─── Reactive State ──────────────────────────────────────────────────────────
@@ -106,6 +107,7 @@ let _state = $state<AppDataState>({
 	sessionsLoading: false,
 	sessionsTagFilter: null,
 	sessionsTotal: 0,
+	settledTotal: null,
 	sessionsOffset: 0,
 	sessionsHasMore: false,
 	sessionsLoadingMore: false,
@@ -523,15 +525,22 @@ function commitSessions(rows: Session[], meta: SessionsPageMeta): void {
  * PARALLEL with the first page, and filtered server-side) keeps it complete.
  */
 async function fetchActiveSessions(tagId?: string | null): Promise<Session[]> {
-	let url = `${SESSION_LIST_BASE}&active_only=true`;
-	if (tagId) url += `&tag_id=${encodeURIComponent(tagId)}`;
-	try {
+	const rows = new Map<string, Session>();
+	let cursor: string | null = null;
+	let cursorId: string | null = null;
+	for (;;) {
+		let url = SESSION_LIST_BASE.replace('membership=settled', 'membership=active&active_only=true');
+		if (tagId) url += `&tag_id=${encodeURIComponent(tagId)}`;
+		if (cursor && cursorId) url += `&cursor=${encodeURIComponent(cursor)}&cursor_id=${encodeURIComponent(cursorId)}`;
 		const result = await api.get<CursorPaginatedSessions>(url);
-		return result.items;
-	} catch (e) {
-		// Never fail the whole load over the supplementary request.
-		console.error('Failed to load active sessions:', e);
-		return [];
+		for (const row of result.items) rows.set(row.id, row);
+		if (!result.has_more) return [...rows.values()];
+		if (!result.next_cursor || !result.next_cursor_id ||
+			(result.next_cursor === cursor && result.next_cursor_id === cursorId)) {
+			throw new Error('Active session cursor did not advance');
+		}
+		cursor = result.next_cursor;
+		cursorId = result.next_cursor_id;
 	}
 }
 
@@ -610,6 +619,12 @@ async function fetchSessionList(tagId?: string | null, requestedPages?: number) 
 	_update(s => ({ ...s, sessionsLoading: true }));
 	try {
 		const activeRowsPromise = fetchActiveSessions(tagId);
+		const countUrl = '/sessions/count?admin_only=true&exclude_archived=true&membership=settled' +
+			(tagId ? `&tag_id=${encodeURIComponent(tagId)}` : '');
+		const countPromise = api.get<{ total: number }>(countUrl).catch(() => null);
+		// Attach rejection handlers before the sequential history page requests.
+		const workingSet = Promise.all([activeRowsPromise, countPromise]);
+		void workingSet.catch(() => {});
 		const all: Session[] = [];
 		let cursor: string | null = null;
 		let cursorId: string | null = null;
@@ -633,9 +648,11 @@ async function fetchSessionList(tagId?: string | null, requestedPages?: number) 
 			// A newer load superseded this one while we were fetching — discard.
 			if (requestId !== _loadSessionsRequestId) return;
 
-			all.push(...result.items);
+			const seen = new Set(all.map(row => row.id));
+			all.push(...result.items.filter(row => !seen.has(row.id) && !!seen.add(row.id)));
 			pagesFetched++;
-			hasMore = result.has_more;
+			const advanced = result.next_cursor !== cursor || result.next_cursor_id !== cursorId;
+			hasMore = result.has_more && advanced;
 			cursor = result.next_cursor;
 			cursorId = result.next_cursor_id;
 
@@ -649,7 +666,7 @@ async function fetchSessionList(tagId?: string | null, requestedPages?: number) 
 		// Fold in any Active row the capped page missed. They go on the END so the
 		// leading rows stay strictly most-recent-first (consumers that take the
 		// first few as "latest" keep working); the sidebar sorts for itself.
-		const activeRows = await activeRowsPromise;
+		const [activeRows, count] = await workingSet;
 		if (requestId !== _loadSessionsRequestId) return;
 		const seen = new Set(all.map(row => row.id));
 		for (const row of activeRows) {
@@ -675,7 +692,7 @@ async function fetchSessionList(tagId?: string | null, requestedPages?: number) 
 			cursor,
 			cursorId,
 		});
-		_update(s => ({ ...s, sessionsLoading: false }));
+		_update(s => ({ ...s, sessionsLoading: false, settledTotal: count?.total ?? null }));
 	} catch (e) {
 		// Don't surface a stale error over a newer in-flight load.
 		if (requestId !== _loadSessionsRequestId) return;
@@ -1230,5 +1247,6 @@ export const sessionsTagFilter = createDerived(() => _state.sessionsTagFilter);
 /** True when the server has more session pages behind the loaded ones — drives
  *  the sidebar's explicit "load more" shelf now that the initial load is capped. */
 export const sessionsHasMore = createDerived(() => _state.sessionsHasMore);
+export const settledTotal = createDerived(() => _state.settledTotal);
 export const sessionsLoadingMore = createDerived(() => _state.sessionsLoadingMore);
 export const apiUserSessions = createDerived(() => _state.apiUserSessions);

@@ -50,7 +50,8 @@
 		projects,
 		clusterProjects,
 		projectCatalogReady,
-		sessionsHasMore
+		sessionsHasMore,
+		settledTotal
 	} from '$lib/stores/app-data.svelte';
 	import { activeSession, streamingSessions, backgroundPermissions } from '$lib/stores/active-session';
 	import { privateAccessPending } from '$lib/stores/chat-access';
@@ -157,7 +158,7 @@
 	// A click that fast belongs to the load, not to a request to collapse.
 	const SHELF_SETTLE_MS = 500;
 
-	const collapsedGroups = $derived($sidebarGroups);
+	const collapsedGroups: Record<string, boolean> = $derived({ settled: true, ...$sidebarGroups });
 	function toggleGroup(name: string) {
 		sidebarGroups.set({ ...collapsedGroups, [name]: !collapsedGroups[name] });
 	}
@@ -447,7 +448,7 @@
 	const emptyLabel = 'No chats yet';
 	// An empty Settled lane says nothing the Active lane does not. It stays only
 	// while older chats are one click away, because its shelf is how you get them.
-	const settledLaneShown = $derived(settledRows.length > 0 || loadingOlder || $sessionsHasMore);
+	const settledLaneShown = $derived(settledRows.length > 0 || ($settledTotal ?? 0) > 0 || loadingOlder || $sessionsHasMore);
 	onMount(() => {
 		if (!isAdmin) return;
 		// Agent names and avatars for the new-session agent card.
@@ -928,7 +929,7 @@
 			{/if}
 
 			{#if settledLaneShown}
-				{@render sect('settled', 'Settled', settledRows.length)}
+				{@render sect('settled', filtersSet || $settledTotal === null ? 'Settled · loaded' : 'Settled', filtersSet ? settledRows.length : ($settledTotal ?? settledRows.length))}
 			{/if}
 			{#if settledLaneShown && !collapsedGroups.settled}
 				{#each settledDays as day (day.label)}
@@ -969,6 +970,7 @@
 		</div>
 
 		<SidebarSheet open={sheet === 'filter'} label="Filter chats" {phone} placement="popover" onClose={() => (sheet = null)}>
+				<p class="text-xs text-muted-foreground px-2 py-1">Filters apply to loaded chats only. Search reaches all history.</p>
 			{#if projectOptions.length > 0}
 				<h4>Project</h4>
 				<div class="opts">

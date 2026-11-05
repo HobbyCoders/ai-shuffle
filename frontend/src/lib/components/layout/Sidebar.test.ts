@@ -56,6 +56,7 @@ vi.mock('$lib/stores/app-data.svelte', () => ({
 	clusterProjects: mocks.clusterProjects,
 	projectCatalogReady: mocks.projectCatalogReady,
 	sessionsHasMore: mocks.sessionsHasMore,
+	settledTotal: { subscribe: (run: (count: number) => void) => mocks.sessions.subscribe(rows => run(rows.filter((row: any) => !row.hidden && !row.is_active && row.status !== 'archived').length)) },
 	sessionsLoadingMore: mocks.sessionsLoadingMore,
 	appData: {
 		setSessionActive: mocks.setSessionActive,
@@ -253,7 +254,7 @@ beforeEach(() => {
 	layout.setSidebarOverlay(false);
 	mocks.activeView.set(null);
 	localStorage.clear();
-	mocks.adapters.get('sidebar_collapsed_groups')!.apply(undefined);
+	mocks.adapters.get('sidebar_collapsed_groups')!.apply({ settled: false });
 	mocks.save.mockClear();
 	appMode.set('code');
 	sidebarWorkspace.reset();
@@ -323,6 +324,19 @@ function sectLabels(): string[] {
 }
 
 describe('Sidebar session groups', () => {
+ it('defaults Settled to collapsed without writing over an explicit saved choice', async () => {
+  mocks.adapters.get('sidebar_collapsed_groups')!.apply(undefined);
+  const { container } = render(Sidebar);
+  const header = () => Array.from(container.querySelectorAll<HTMLButtonElement>('.sect')).find(button => button.textContent?.includes('Settled'))!;
+  expect(header().getAttribute('aria-expanded')).toBe('false');
+  expect(screen.queryByText('Settled chat')).toBeNull();
+  expect(mocks.save.mock.calls.some(([key]) => key === 'sidebar_collapsed_groups')).toBe(false);
+  mocks.adapters.get('sidebar_collapsed_groups')!.apply({ settled: false });
+  await tick();
+  expect(header().getAttribute('aria-expanded')).toBe('true');
+  expect(screen.getByText('Settled chat')).toBeTruthy();
+ });
+
 	it('shares collapsed groups with a mounted sidebar and resets them on account change', async () => {
 		const { container } = render(Sidebar);
 		const header = () => Array.from(container.querySelectorAll<HTMLButtonElement>('.sect'))
