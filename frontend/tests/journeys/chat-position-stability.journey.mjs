@@ -722,6 +722,16 @@ cases.push({
 	async setup(ctx) {
 		const { page, variant } = ctx;
 		await openClaude(ctx); // New short project chat; never clears the long CLI seed.
+		// Establish this CLI through a real completed reply before testing queued
+		// geometry. Adoption/streaming optimism is not CLI readiness: a send in
+		// the spawn -> hook-registration window can take the stdin steer fallback,
+		// so neither bubble remains queued (hosted run 42107295628). No timer,
+		// provider substitution or injected queue state stands in for this turn.
+		const warmup = `queue-ready-${uniq()}`, frontier = await replyFrontier(page);
+		await typeAndSend(page, `${warmup} [script:default tps=300]`);
+		await waitForCurrentReplyProse(page, frontier, warmup);
+		await waitTurnSettled(page, { hold: 200 });
+		ctx.log('queue setup: real CLI warm-up reply completed before the held error send');
 		ctx.freshQueueToken = `fresh-${uniq()}`;
 		ctx.firstQueueToken = `waiting-0-${uniq()}`;
 		await typeAndSend(page, `held error ${uniq()} ${scriptTag(variant, 'error-500', { latency_ms: 10000 })}`);
@@ -732,9 +742,17 @@ cases.push({
 			const state = document.querySelector('[data-ui-state="chat"]')?.dataset;
 			return state?.uiSession && state.uiSession !== 'none' && state.uiStreaming === 'true';
 		});
-		await typeAndSend(page, `${ctx.firstQueueToken} [script:slow tps=1]`);
-		await typeAndSend(page, `waiting-1-${uniq()} [script:slow tps=1]`);
+		// Two real two-line bubbles establish the >=150px prerequisite without
+		// depending on whether a random token wraps onto a second line. A single
+		// line less made the original setup 142.828px instead of 164.938px.
+		await typeAndSend(page, `${ctx.firstQueueToken}\n[script:slow tps=1]`);
+		await typeAndSend(page, `waiting-1-${uniq()}\n[script:slow tps=1]`);
 		await page.waitForFunction(() => document.querySelectorAll('.pending-messages [data-queue-confirmed="true"]').length === 2);
+		ctx.log(`confirmed queued producer geometry ${JSON.stringify(await page.locator('.pending-messages').evaluate(el => ({
+			rows: [...el.querySelectorAll('[data-queue-confirmed="true"]')].map(row => ({ text: row.textContent, height: row.getBoundingClientRect().height,
+				lineHeight: getComputedStyle(row.querySelector('.bubble-text')).lineHeight, bubbleHeight: row.querySelector('.bubble').getBoundingClientRect().height })),
+			height: el.getBoundingClientRect().height
+		})))}`);
 		await page.locator('.chat-error-banner').waitFor({ timeout: 60_000 });
 		await page.waitForFunction(token => document.querySelector('[data-ui-state="chat"]')?.dataset.uiStreaming === 'true'
 			&& [...document.querySelectorAll('[data-user-turn-id]')].some(row => row.textContent.includes(token)), ctx.firstQueueToken);
