@@ -615,6 +615,14 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					? clientMessageId
 					: null;
 
+				// A fresh local send can clear an error without adding a transcript row
+				// (queued/authoritative/pre-appended paths). Publish that intent in the
+				// same transaction, rather than making presentation infer it from a row.
+				const localSendIntent = (s: ActiveSessionState) => ({
+					sessionId: _state.sessionId,
+					revision: (s.localSendIntent?.revision ?? 0) + 1,
+				});
+
 				// Single atomic update — avoids intermediate render where streaming
 				// is cleared but the new user message hasn't been appended yet.
 				if (queuedEcho && !optimisticQueuedId) {
@@ -622,7 +630,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					// through to the transcript append below put a send into a live turn
 					// on the transcript, where the steer's own `message.user` was a
 					// second copy of it (#2016).
-					update(s => ({ ...s, error: null }));
+					update(s => ({ ...s, error: null, localSendIntent: localSendIntent(s) }));
 				} else if (options?.skipMessageAppend) {
 					update(s => ({
 						...s,
@@ -631,6 +639,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 						// `turn.started` instead of fighting with it.
 						...OPTIMISTIC_STREAMING_ON,
 						error: null,
+						localSendIntent: localSendIntent(s),
 						title: newTitle,
 						currentQueryProfileId: queryProfileId ?? null,
 					}));
@@ -645,6 +654,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 							queuedAt: Date.now(),
 						}],
 						error: null,
+						localSendIntent: localSendIntent(s),
 					}));
 				} else {
 					update(s => {
@@ -670,6 +680,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 							// branch above) — not a competing write of isStreaming.
 							...OPTIMISTIC_STREAMING_ON,
 							error: null,
+							localSendIntent: localSendIntent(s),
 							title: newTitle,
 							currentQueryProfileId: queryProfileId ?? null,
 						};

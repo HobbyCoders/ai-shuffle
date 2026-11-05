@@ -408,6 +408,11 @@
 			]
 		},
 		{
+			"why": "per-frame transcript/composer stability regression cases",
+			"journeys": ["chat-position-stability"],
+			"globs": ["frontend/tests/journeys/chat-position-stability.journey.mjs"]
+		},
+		{
 			"why": "owner memory questions and their replicated keep-both answers reach real session prompts",
 			"journeys": ["owner-memory-question"],
 			"globs": [

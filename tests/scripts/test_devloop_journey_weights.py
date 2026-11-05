@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from scripts.devloop import ci
+from scripts.devloop import ci, journey_retry
 
 
 def _weights(tmp_path, seconds, per_case=10.0):
@@ -17,7 +17,7 @@ def _weights(tmp_path, seconds, per_case=10.0):
     return path
 
 
-@pytest.mark.parametrize("shards", [1, 4, 8, 30])
+@pytest.mark.parametrize("shards", [1, 4, 8, 9, 30])
 def test_runtime_partition_is_deterministic_and_exact(shards):
     weights = {f"{i}.journey.mjs": (i % 5 + 1) * 0.25 for i in range(25)}
     buckets = ci.partition(weights, shards)
@@ -28,15 +28,36 @@ def test_runtime_partition_is_deterministic_and_exact(shards):
     assert len(buckets) == shards
 
 
-def test_checked_in_eight_shard_plan_leaves_retry_headroom():
+def test_new_heavy_producer_has_an_explicit_unmeasured_budget():
+    data = json.loads(ci.WEIGHTS.read_text())
+    name = "chat-position-stability.journey.mjs"
+    assert 42107295628 not in data["source_runs"]  # red evidence is NOT a green measurement
+    assert ci.estimated_seconds()[name] == data["seconds"].get(name, 18 * 60)
+
+
+def test_unmeasured_budget_never_overrides_a_green_median(tmp_path, monkeypatch):
+    name = "chat-position-stability.journey.mjs"
+    (tmp_path / name).touch()
+    monkeypatch.setattr(ci, "case_count", lambda path: 47)
+    assert ci.estimated_seconds(tmp_path, _weights(tmp_path, {}))[name] == 18 * 60
+    assert ci.estimated_seconds(tmp_path, _weights(tmp_path, {name: 900}))[name] == 900
+    # It is a floor, not a cap on the ordinary per-case estimate.
+    assert ci.estimated_seconds(tmp_path, _weights(tmp_path, {}, per_case=30))[name] == 1410
+
+
+def test_checked_in_nine_shard_plan_leaves_retry_headroom():
     weights = ci.estimated_seconds()
-    buckets = ci.plan(8)
-    assert len(buckets) == 8
+    buckets = ci.plan(9)
+    assert len(buckets) == 9
     assert sorted(name for bucket in buckets for name in bucket) == sorted(weights)
-    # Reserve 30 seconds for instance startup (7-12s in hosted run 42035121047):
-    # first pass by ~19 minutes, then the full 180s retry before the 22m cutoff.
+    # Include the ENTIRE first pass, 30s startup, all 180s of exact-case retry,
+    # and the existing 180s teardown reserve inside the unchanged 25m step.
     loads = [sum(weights[name] for name in bucket) for bucket in buckets]
     assert max(loads) <= 19 * 60 - 30, loads
+    full_budget = max(loads) + 30 + journey_retry.RETRY_SECONDS + journey_retry.TEARDOWN_SECONDS
+    assert full_budget <= journey_retry.STEP_SECONDS
+    assert all(ci.commands_for(bucket, 9) == [["node", str(ci.JOURNEYS / name)] for name in bucket]
+               for bucket in buckets)
 
 
 def test_plan_uses_runtime_instead_of_case_counts(tmp_path, monkeypatch):

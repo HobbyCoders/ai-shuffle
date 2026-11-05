@@ -22,6 +22,9 @@ describe('ChatView — stable mobile empty layout', () => {
 	it('is a section of the mobile sheet', () => {
 		expect(start).toBeGreaterThan(-1);
 	});
+	it('keeps the already-docked composer still when the first message reveals', () => {
+		expect(body('.transitioning-from-empty .input-wrapper')).toMatch(/animation: none;/);
+	});
 	it('retains the action-applied panel-flow fallback', () => {
 		expect(body('.chat-view.is-empty .input-slot.empty-input-layout[data-panel-flow]')).toMatch(/position: static;/);
 	});

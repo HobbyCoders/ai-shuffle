@@ -12,7 +12,8 @@ exits), waits until it is ready (its ``DEVLOOP_READY`` line, then
 ``frontend/tests/journeys/run-all.mjs`` it runs that; otherwise it runs each
 ``*.journey.mjs`` of the shard, every one even after a failure. Shards split
 the journey files by measured hosted runtime, each file exactly once. Unknown
-journeys use their case count (``--list``) times the measured per-case median.
+journeys use their case count (``--list``) times the measured per-case median,
+with explicit conservative floors for new heavy producers (not measurements).
 
 Outputs under ``--out``: ``devloop.log`` (the instance's whole log),
 ``logs/<journey>.log``, and the runner's per-case text timelines (and contact
@@ -53,6 +54,11 @@ FRONTEND = ROOT / "frontend"
 JOURNEYS = FRONTEND / "tests" / "journeys"
 RUN_ALL = "run-all.mjs"
 WEIGHTS = Path(__file__).with_name("journey_weights.json")
+# Conservative planning budgets, NOT hosted measurements. The new 47-case
+# producer took ~17 minutes in red run 42107295628 (job 127526542398), versus
+# 8.6 minutes from the generic per-case fallback. Reserve 18 minutes until a
+# complete green run supplies its median; never add red evidence to WEIGHTS.
+UNMEASURED_BUDGET_FLOORS = {"chat-position-stability.journey.mjs": 18 * 60}
 READY_SECONDS = 420
 JOURNEY_SECONDS = 1500
 SUMMARY_CASE_CHARS = 12_000
@@ -100,7 +106,7 @@ def partition(weights: dict[str, float], shards: int) -> list[list[str]]:
 
 
 def estimated_seconds(directory: Path = JOURNEYS, weights_path: Path = WEIGHTS) -> dict[str, float]:
-    """Use hosted medians; only unmeasured files need Node/``--list``."""
+    """Use hosted medians; unmeasured files use per-case estimates plus budget floors."""
     files = journey_files(directory)
     if not files:
         raise SystemExit(f"No *.journey.mjs under {directory}: refusing to pass with no journeys")
@@ -110,7 +116,8 @@ def estimated_seconds(directory: Path = JOURNEYS, weights_path: Path = WEIGHTS) 
         if (isinstance(value, bool) or not isinstance(value, (int, float))
                 or not math.isfinite(value) or value <= 0):
             raise ValueError(f"{weights_path}: runtime weights must be positive finite seconds")
-    return {path.name: measured[path.name] if path.name in measured else case_count(path) * per_case
+    return {path.name: measured[path.name] if path.name in measured else max(
+                case_count(path) * per_case, UNMEASURED_BUDGET_FLOORS.get(path.name, 0))
             for path in files}
 
 

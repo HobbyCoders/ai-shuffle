@@ -842,6 +842,8 @@
 		animation: messageAreaReveal 350ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
 	}
 
+	/* The shared layout moves its empty composer from centre to dock.
+	   Shells that already dock the composer override this input animation. */
 	.transitioning-from-empty .input-wrapper {
 		animation: inputSlideDown 400ms cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
 	}

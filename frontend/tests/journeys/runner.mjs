@@ -111,8 +111,10 @@ export function fakeAiTag(variant, scenario = 'default') {
  * so chats left behind push the seeded ones out of it and break later journeys.
  * Returns how many were deleted; never throws (a report line says why).
  */
-async function deleteCaseChats(context, status, startedAt) {
-	const seeded = Object.values(status.seed?.chats || {});
+export async function deleteCaseChats(context, status, startedAt) {
+	// The fake CLI project chat is seeded outside `chats`. A cold instance can
+	// put it inside the 2s cleanup lookback; it belongs to later cases too.
+	const seeded = [...Object.values(status.seed?.chats || {}), status.seed?.claude_cli?.chat].filter(Boolean);
 	const page = await context.newPage();
 	try {
 		await page.goto(new URL('/api/v1/auth/status', status.urls.ui).toString());
