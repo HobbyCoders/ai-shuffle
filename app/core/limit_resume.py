@@ -1092,6 +1092,7 @@ async def _fire(row: Dict[str, Any]) -> Optional[str]:
             project_id=row.get("project_id"), prompt=row.get("prompt") or RESUME_PROMPT,
             delay_seconds=max(0.0, fire_at - now), reason=json.dumps(meta, sort_keys=True),
             model=row.get("model"), source=LIMIT_RESUME_SOURCE,
+            created_at=row.get("created_at"), stop_seq=row.get("stop_seq"),
         )
         if again:
             for sid in note_sessions:
@@ -1105,11 +1106,12 @@ async def _fire(row: Dict[str, Any]) -> Optional[str]:
         return None
 
     if owner:
-        return await _resume_worker(session_id, owner, meta)
+        return await _resume_worker(session_id, owner, meta, wake_stop_seq=row.get("stop_seq"))
     return await _resume_chat(row, meta)
 
 
-async def _resume_worker(worker_id: str, owner: str, meta: Dict[str, Any]) -> Optional[str]:
+async def _resume_worker(worker_id: str, owner: str, meta: Dict[str, Any], *,
+                         wake_stop_seq: Optional[int] = None) -> Optional[str]:
     from app.core import turn_scheduler
 
     from app.core.worker_checkout import WorkerCheckoutError
@@ -1119,10 +1121,16 @@ async def _resume_worker(worker_id: str, owner: str, meta: Dict[str, Any]) -> Op
         turn_id = await turn_scheduler.on_agent_message(
             worker_id, RESUME_SENDER, WORKER_RESUME_TEXT, reply_to=owner,
             extra_payload={PAYLOAD_KEY: {"limit_key": meta.get("limit_key"),
-                                         "reset_at": meta.get("reset_at")}},
+                                         "reset_at": meta.get("reset_at")},
+                           "wake_stop_seq": wake_stop_seq},
         )
     except WorkerCheckoutError as exc:
         refusal, turn_id = str(exc) or "refused", None
+    if wake_stop_seq is not None:
+        from app.db import turns
+        if await asyncio.to_thread(turns.wake_cancelled_by_stop,
+                                   {"session_id": worker_id, "payload": {"wake_stop_seq": wake_stop_seq}}):
+            turn_id = None
     if not turn_id or turn_id == turn_scheduler.HELD:
         for sid, extra in ((worker_id, {}), (owner, {"task_id": worker_id})):
             await _record(sid, _STATUS_DROPPED, {"reason": refusal, **extra,
@@ -1162,6 +1170,7 @@ async def _resume_chat(row: Dict[str, Any], meta: Dict[str, Any]) -> Optional[st
     # they hit again is not resumed a second time.
     payload: Dict[str, Any] = {PAYLOAD_KEY: {"limit_key": meta.get("limit_key"),
                                              "reset_at": meta.get("reset_at")}}
+    payload["wake_stop_seq"] = row.get("stop_seq")
     if api_user_id:
         payload["api_user_id"] = api_user_id
 
@@ -1184,6 +1193,11 @@ async def _resume_chat(row: Dict[str, Any], meta: Dict[str, Any]) -> Optional[st
         return None
     except Exception as exc:  # noqa: BLE001 — the wake-up service retries it
         await wakeup_service._rearm_after_failed_submit(row, f"{type(exc).__name__}: {exc}")
+        return None
+    from app.db import turns
+    if await asyncio.to_thread(turns.wake_cancelled_by_stop,
+                               {"session_id": session_id, "payload": payload}):
+        await _record(session_id, _STATUS_DROPPED, {"reason": "user_stopped", "limit_key": meta.get("limit_key")})
         return None
     if not turn_id:
         await wakeup_service._rearm_after_failed_submit(row, "the turn manager refused the resume")

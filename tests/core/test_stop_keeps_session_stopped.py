@@ -23,7 +23,7 @@ What is pinned here, end to end against the real turns/wakeups tables:
 from __future__ import annotations
 
 from contextlib import ExitStack
-from unittest.mock import AsyncMock, patch
+from unittest.mock import ANY, AsyncMock, patch
 
 import pytest
 
@@ -86,7 +86,8 @@ class _KillSeams:
         self.settled: list[tuple] = []
         self.retired: list[list] = []
 
-        async def _stop(sid, task_id):
+        async def _stop(sid, task_id, *, _explicit_task_stop):
+            assert _explicit_task_stop is False  # bulk Stop grants no per-task retry authority
             self.stopped.append(task_id)
             return {"ok": True, "task_id": task_id}
 
@@ -174,7 +175,8 @@ async def test_terminal_surface_fires_exactly_once_per_task(mock_db):
     _make_session()
     _seed_tasks(SESSION)
 
-    async def _stop_and_settle(sid, task_id):
+    async def _stop_and_settle(sid, task_id, *, _explicit_task_stop):
+        assert _explicit_task_stop is False
         # Stand in for the real kill paths, which complete the row themselves.
         task_registry.complete_task(
             sid, task_id, "killed", summary="Stopped by user",
@@ -405,7 +407,7 @@ async def test_the_owning_runner_honours_the_durable_stop_background_bit():
         turns_mod.TERMINAL_STATES = ("completed", "aborted", "parked")
         await rt.interrupt("stop")
 
-    stop_bg.assert_awaited_once_with("cross-runner", user_stop=True)
+    stop_bg.assert_awaited_once_with("cross-runner", user_stop=True, scope=ANY)
 
 
 async def test_send_now_never_stops_background_work():

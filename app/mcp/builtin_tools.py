@@ -1055,8 +1055,14 @@ async def _settle_reaped_shell(session_id: str, task_id: str) -> None:
         )
 
 
+def session_background_shell_ids(session_id: str) -> set[str]:
+    """The Monitor shells a session has right now, to stop later by identity."""
+    return {tid for tid, task in list(_background_tasks.items()) if task.session_id == session_id}
+
+
 async def stop_session_background_shells(
     session_id: str, *, require_stopped: bool = False,
+    only: Optional[set[str]] = None,
 ) -> int:
     """Terminate + reap every Monitor shell spawned by a session (U2).
 
@@ -1076,11 +1082,14 @@ async def stop_session_background_shells(
     leave the task tracked. Checkout deletion must await this strict mode rather
     than schedule the fire-and-forget wrapper.
 
+    With only, stop just those shells: a Stop that has outlived its turn must not
+    reach a shell started since.
+
     Returns the number of shell tasks reaped.
     """
     victims = [
         (tid, t) for tid, t in list(_background_tasks.items())
-        if t.session_id == session_id
+        if t.session_id == session_id and (only is None or tid in only)
     ]
     reaped = 0
     for tid, task in victims:

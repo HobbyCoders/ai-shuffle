@@ -25,8 +25,8 @@ test_chat_ws_handler_queue.py and test_chat_ws_queue_race_gaps.py.
 """
 
 import asyncio
-from contextlib import ExitStack
-from unittest.mock import AsyncMock, MagicMock, patch
+from contextlib import ExitStack, contextmanager
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -542,7 +542,8 @@ async def test_handle_stop_interrupts_live_turn_and_stops_background(mock_db):
     # STOP SEMANTICS (round 7): Stop kills ALL of the session's work — shells,
     # serving tasks and watchers included — and quiesces the session so nothing
     # wakes it until the user's next message. See handle_stop's note.
-    stop_bg.assert_awaited_once_with("sess-1", user_stop=True)
+    stop_bg.assert_awaited_once_with("sess-1", user_stop=True, scope=ANY,
+                                     receipt=row["payload"]["stop_receipt"])
 
 
 async def test_handle_stop_without_live_turn_quiesces_queued_work(mock_db):
@@ -609,6 +610,25 @@ async def test_handle_stop_stale_turn_id_spares_successor(mock_db):
     assert turns_db.get_turn(n)["state"] == "completed"
 
 
+@contextmanager
+def _captured_parked_stop(session_id, turn_id):
+    from app.core.query_session_lifecycle import capture_stop_scope
+    from app.core.task_registry import task_registry
+
+    task_registry.start_task(session_id, "captured-task", "shell", "Job", tool_use_id="launch")
+    captured = []
+    def capture(sid, **kwargs):
+        assert sid == session_id
+        assert turns_db.get_turn(turn_id)["state"] == "parked"  # BEFORE the interrupt
+        scope = capture_stop_scope(sid, **kwargs)
+        assert [task["id"] for task in scope.active] == ["captured-task"]
+        assert scope.runs["captured-task"] is not None
+        captured.append(scope)
+        return scope
+    with patch("app.core.query_session_lifecycle.capture_stop_scope", side_effect=capture):
+        yield captured
+
+
 @pytest.mark.parametrize("newer", ["queued", "cancelled", "started", "completed"])
 async def test_handle_stop_on_a_parked_turn_ends_its_work(mock_db, newer):
     """A turn parked on background work is the chat's current turn: Stop aimed
@@ -616,9 +636,9 @@ async def test_handle_stop_on_a_parked_turn_ends_its_work(mock_db, newer):
     _make_session("sess-1")
     parked, successor = _park_with_newer_queue_history(newer)
 
-    with _Patches(), patch(
+    with _Patches(), _captured_parked_stop("sess-1", parked) as captured, patch(
         "app.core.query_session_lifecycle.stop_all_background_tasks",
-        new=AsyncMock(),
+        new=AsyncMock(return_value=[]),
     ) as stop_bg:
         await _make_handler().handle_stop({"session_id": "sess-1", "turn_id": parked})
 
@@ -626,7 +646,12 @@ async def test_handle_stop_on_a_parked_turn_ends_its_work(mock_db, newer):
         stop_bg.assert_not_awaited()
         assert turns_db.get_turn(successor)["state"] == ("running" if newer == "started" else "completed")
     else:
-        stop_bg.assert_awaited_once_with("sess-1", user_stop=True)
+        [scope] = captured
+        # A parked turn has no live-row flip/owner receipt. Cleanup must bind
+        # its own cutoff later, but still uses THIS pre-interrupt local scope.
+        assert turns_db.STOP_RECEIPT_KEY not in turns_db.get_turn(parked)["payload"]
+        stop_bg.assert_awaited_once_with("sess-1", user_stop=True, scope=scope, receipt=None)
+        assert stop_bg.await_args.kwargs["scope"] is scope
 
 
 async def test_handle_stop_for_a_parked_turn_spares_a_later_turn(mock_db):
@@ -673,9 +698,9 @@ async def test_stop_relayed_to_the_owning_worker_ends_a_parked_turns_work(mock_d
     _make_session("sess-1")
     parked, successor = _park_with_newer_queue_history(newer)
 
-    with patch.object(control, "_require_owned"), patch(
+    with patch.object(control, "_require_owned"), _captured_parked_stop("sess-1", parked) as captured, patch(
         "app.core.query_session_lifecycle.stop_all_background_tasks",
-        new=AsyncMock(),
+        new=AsyncMock(return_value=[]),
     ) as stop_bg:
         reply = await control._interrupt(
             {"session_id": "sess-1", "mode": "stop", "stop_background": True, "turn_id": parked},
@@ -687,7 +712,12 @@ async def test_stop_relayed_to_the_owning_worker_ends_a_parked_turns_work(mock_d
         assert reply["interrupted"] is False
         assert turns_db.get_turn(successor)["state"] == ("running" if newer == "started" else "completed")
     else:
-        stop_bg.assert_awaited_once_with("sess-1", user_stop=True)
+        [scope] = captured
+        # A parked turn has no live-row flip/owner receipt. Cleanup must bind
+        # its own cutoff later, but still uses THIS pre-interrupt local scope.
+        assert turns_db.STOP_RECEIPT_KEY not in turns_db.get_turn(parked)["payload"]
+        stop_bg.assert_awaited_once_with("sess-1", user_stop=True, scope=scope, receipt=None)
+        assert stop_bg.await_args.kwargs["scope"] is scope
         assert reply["interrupted"] is True
 
 

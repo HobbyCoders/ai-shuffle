@@ -1939,14 +1939,19 @@ def _no_terminal_event_error(worker_session_id: str, turn_id: Optional[str]) -> 
     report back to the parent as if it had done the job. The durable ``turns``
     row is the second opinion; when even that is unreadable the outcome is
     still a failure, just a less specific one.
+
+    A turn aborted because its events could not be written says so: the parent
+    should resume that worker, not treat the task itself as having failed.
     """
     detail = ""
+    stop_reason = None
     if turn_id:
         try:
             from app.db import turns as turns_db
 
             row = turns_db.get_turn(turn_id)
             if row is not None:
+                stop_reason = row.get("stop_reason")
                 parts = [f"turn state={row.get('state')}"]
                 if row.get("stop_reason"):
                     parts.append(f"stop_reason={row.get('stop_reason')}")
@@ -1958,6 +1963,15 @@ def _no_terminal_event_error(worker_session_id: str, turn_id: Optional[str]) -> 
                 "ProviderAgent: turns row read failed for worker %s",
                 worker_session_id, exc_info=True,
             )
+    if stop_reason == "recording_failed":
+        return (
+            "A database write failure aborted the worker's turn: its events could "
+            f"not be saved, so it produced no terminal turn event{detail} and its "
+            "result cannot be trusted. The failure is in the app's database, not "
+            "the worker's task. Its transcript and uncommitted edits are kept, "
+            "though its last step may be missing from the transcript, so it can be "
+            f"resumed with SendMessage. Its session is {worker_session_id}."
+        )
     return (
         f"The worker produced no terminal turn event{detail}, so its result "
         f"cannot be trusted. Its session is {worker_session_id}."

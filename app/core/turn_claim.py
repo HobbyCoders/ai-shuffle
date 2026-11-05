@@ -116,6 +116,8 @@ _peer_checked_at: float = 0.0
 # Strong refs to fire-and-forget interrupt-drive tasks (asyncio only holds
 # weak refs; a GC'd task silently vanishes mid-escalation).
 _interrupt_tasks: Set[asyncio.Task] = set()
+_STOP_RECONCILE_SECONDS = 2.0
+_next_stop_reconcile: float = 0.0
 
 
 def notify_turns_changed(session_id: str) -> None:
@@ -152,6 +154,22 @@ def _on_gateway_tick(session_id: str) -> None:
         pass  # loop already closed (shutdown) — poll cadence is gone anyway.
 
 
+async def _reconcile_stop_latches() -> None:
+    """A person's message on another install reaches this one's latch here.
+
+    Every NOTIFY runs a claim pass, so this is paced apart from it.
+    """
+    global _next_stop_reconcile
+    from app.core.query_session_lifecycle import reconcile_user_stops
+    from app.core.task_registry import task_registry
+
+    now = time.monotonic()
+    if now < _next_stop_reconcile or not task_registry.user_stopped_sessions():
+        return
+    _next_stop_reconcile = now + _STOP_RECONCILE_SECONDS
+    await reconcile_user_stops()
+
+
 async def claim_once() -> int:
     """Run one observe+claim pass. Returns the number of sessions kicked.
 
@@ -159,6 +177,14 @@ async def claim_once() -> int:
     (racing deletion, resolver error) must not starve the rest.
     """
     me = settings.effective_instance_id
+    await _reconcile_stop_latches()
+    # Independent of mutable turn.state/instance_id/payload. This also replays
+    # a Stop whose old runtime died or whose logical turn was removed.
+    try:
+        from app.core import stop_receipts
+        await stop_receipts.observe(me)
+    except Exception:
+        logger.warning("turn_claim: Stop receipt observe failed", exc_info=True)
 
     # --- Interrupt-observe pass (first: reacting to a stop beats starting
     # new work, and the list is almost always empty). ---

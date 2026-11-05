@@ -1871,7 +1871,10 @@ async def _dispatch_task_tool(
 
     max_depth = int(getattr(settings, "task_tool_max_depth", 5) or 5)
     _, root_session_id, caller_depth = caller_chain(caller_session_id)
-    from app.core.task_registry import task_registry
+    from app.core.task_registry import task_registry, user_stop_holds
+    # Asks whether a person answered the Stop on another install, ahead of the two
+    # reads below, which nothing may come between.
+    await user_stop_holds(root_session_id)
     stop_generation = task_registry.stop_generation(root_session_id)
     if task_registry.is_user_stopped(root_session_id):
         return {"ok": False, "error": "The user stopped this Task dispatch.", "killed": True}

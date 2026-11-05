@@ -527,6 +527,7 @@ def _real_pump_env():
     recorder.start = AsyncMock()
     recorder.on_event = AsyncMock()
     recorder.close = AsyncMock()
+    recorder.writes_settled = AsyncMock()
     recorder.settle = AsyncMock()
 
     def _no_spawn(*_a, **_k):

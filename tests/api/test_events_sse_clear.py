@@ -9,11 +9,12 @@ the gateway receives.
 """
 import asyncio
 import json
+from contextlib import contextmanager
+from types import SimpleNamespace
 
 import pytest
 
 import app.api.events as events_mod
-import app.db.sessions as sessions_db
 from app.api.events import event_stream
 from app.db import database, session_events as se
 from tests.api.sse_helpers import collect_frames, parse_frame
@@ -44,11 +45,18 @@ class _NotifyCursor:
 
 
 def _clear(monkeypatch, session_id):
+    """Records the wake, which clear sends in its own transaction after committing."""
     notifications = []
-    real = sessions_db.get_cursor
-    monkeypatch.setattr(sessions_db, "get_cursor", lambda conn: _NotifyCursor(real(conn), notifications))
+    real = se.get_db
+
+    @contextmanager
+    def recording_db():
+        with real() as conn:
+            yield SimpleNamespace(cursor=lambda: _NotifyCursor(conn.cursor(), notifications))
+
+    monkeypatch.setattr(se, "get_db", recording_db)
     database.clear_session_conversation(session_id)
-    monkeypatch.setattr(sessions_db, "get_cursor", real)
+    monkeypatch.setattr(se, "get_db", real)
     return notifications
 
 

@@ -534,6 +534,9 @@ def test_compaction_uses_real_append_output_and_commits_per_session(pg, monkeypa
             session_events.append_events(sid, [
                 {"type": "assistant.text_delta", "payload": {"text": str(i)}, "turn_id": "turn"}
                 for i in range(6)], _conn=conn)
+    # The setup appends each woke readers in their own transaction; only the
+    # compaction's commits are under test.
+    commits.clear()
     state["stop_after_commit"] = stopping
     result = COMPACT_IDLE(keep_tail_events=0, stop=stop)
     assert result == {"sessions": 1 if stopping else 2, "runs": 1 if stopping else 2, "rows": 5 if stopping else 10}

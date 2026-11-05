@@ -2084,9 +2084,9 @@ async def defer_started_report(starter_id, frame):
     The stable event also deduplicates repeated settlement/transport deliveries.
     """
     from app.db import sessions, session_events
-    from app.core.task_registry import task_registry
+    from app.core.task_registry import user_stop_holds
     row = await asyncio.to_thread(sessions.get_session, starter_id)
-    if row and row.get("is_active") and row.get("status") != "archived" and not task_registry.is_user_stopped(starter_id):
+    if row and row.get("is_active") and row.get("status") != "archived" and not await user_stop_holds(starter_id):
         return False
     event_id = "deferred-report:" + hashlib.sha256(
         f"{starter_id}:{frame.get('task_id')}:{frame.get('agent_message_turn_id')}".encode()).hexdigest()

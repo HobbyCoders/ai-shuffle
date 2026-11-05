@@ -6,7 +6,8 @@ Extracted from query_engine.py to isolate session lifecycle management.
 
 import asyncio
 import logging
-from typing import Optional
+from dataclasses import dataclass, field, replace
+from typing import Any, Optional
 
 from app.core.provider import session_admission
 from app.core.session_pool import get_session_pool
@@ -212,7 +213,10 @@ async def _durable_force_settle(session_id: str, task_id: str) -> Optional[dict]
     return None
 
 
-async def stop_session_task(session_id: str, task_id: str, *, source: str = "user_stop") -> dict:
+async def stop_session_task(
+    session_id: str, task_id: str, *, source: str = "user_stop",
+    _remote_confirmed: bool = False, _explicit_task_stop: bool = True,
+) -> dict:
     """Stop ONE background task (sub-agent OR Monitor shell) in a session.
 
     Two kinds of task surface in the UI's ``activeTasks`` strip:
@@ -232,6 +236,8 @@ async def stop_session_task(session_id: str, task_id: str, *, source: str = "use
     ``ok: false``, and the UI strip is left showing a task that can never be
     cleared (its button stuck disabled).
 
+    ``_explicit_task_stop`` is false for automatic stop-all reuse: only a fresh
+    dedicated TaskStop/card Stop may grant legacy per-task retry authority.
     Returns ``{"ok": bool, "kind": ..., "detail"?: ...}``. Never raises.
     """
     from app.core.task_registry import task_registry
@@ -310,6 +316,9 @@ async def stop_session_task(session_id: str, task_id: str, *, source: str = "use
             summary = preview = f"Stopped by host: {source}"
         torn = await provider_agent_supervisor.teardown_worker(
             record, reason=source, summary=summary, preview=preview,
+            **({"explicit_task_stop": True} if (record.remote_device_id and _explicit_task_stop
+                and not _remote_confirmed and source in (USER_STOP_REASON, AGENT_STOP_REASON)) else {}),
+            **({"remote_confirmed": True} if _remote_confirmed else {}),
         )
         own = task_registry.get_task(session_id, task_id)
         if record.parent_session_id != session_id and own is not None and own.get("status") == "running":
@@ -364,7 +373,305 @@ async def stop_session_task(session_id: str, task_id: str, *, source: str = "use
     return {"ok": False, "kind": "agent", "detail": "task not found"}
 
 
-async def enter_user_stop(session_id: str) -> dict:
+_STOP_RECEIPT_RETRY_DELAYS = (0.2, 0.5)
+# Lifted by the sweep below at most this many a pass, in turn, so every latch is
+# reached; anything acting on a session asks for it (:func:`reconcile_user_stop`).
+_STOP_SWEEP_BATCH = 200
+_stop_sweep_start = 0
+
+
+async def reconcile_user_stop(session_id: str) -> bool:
+    """Whether nothing holds this session under a Stop, once the database is asked.
+
+    A person's message lifts the latch only on the install it was sent to. Any
+    other install holding the latch learns of it here, before refusing work. Only
+    a message above the Stop's cutoff counts; until the Stop has read its cutoff
+    the latch holds, and a Stop that could not read one has no grounds to refuse
+    a person's waiting message. Costs nothing unless the session is latched.
+    """
+    from app.core.task_registry import task_registry
+    from app.db import turns as turns_db
+
+    if not task_registry.is_user_stopped(session_id):
+        return True
+    generation = task_registry.stop_generation(session_id)
+    cutoff = task_registry.stop_input_cutoff(session_id)
+    try:
+        if cutoff is not None:
+            newer = await asyncio.to_thread(turns_db.person_input_after, session_id, cutoff)
+        elif task_registry.stop_admission_incomplete(session_id):
+            newer = await asyncio.to_thread(turns_db.person_input_queued, session_id)
+        else:
+            return False
+    except Exception:  # noqa: BLE001 — unanswered, the latch keeps holding.
+        logger.warning("Stop: reading newer input failed for %s", session_id, exc_info=True)
+        return False
+    if (newer and task_registry.stop_generation(session_id) == generation
+            and task_registry.clear_user_stop(session_id)):
+        logger.info("Stop: a newer message reached %s; released the latch", session_id)
+    return not task_registry.is_user_stopped(session_id)
+
+
+async def reconcile_user_stops() -> None:
+    """Lift this install's latches a person has answered on another install.
+
+    The latch's many synchronous readers cannot ask the database themselves, so
+    each answers correctly from the next pass on. Never raises.
+    """
+    from app.core.task_registry import task_registry
+    from app.db import turns as turns_db
+
+    global _stop_sweep_start
+    stopped = list(task_registry.user_stopped_sessions())
+    start = _stop_sweep_start % len(stopped) if stopped else 0
+    sessions = (stopped[start:] + stopped[:start])[:_STOP_SWEEP_BATCH]
+    _stop_sweep_start = start + len(sessions)
+    held = {sid: (task_registry.stop_input_cutoff(sid), task_registry.stop_generation(sid))
+            for sid in sessions}
+    try:
+        newer = await asyncio.to_thread(
+            turns_db.sessions_with_person_input_after,
+            {sid: cutoff for sid, (cutoff, _generation) in held.items() if cutoff is not None},
+        ) if any(cutoff is not None for cutoff, _generation in held.values()) else []
+    except Exception:  # noqa: BLE001 — the next pass asks again.
+        logger.warning("Stop: reading newer input failed", exc_info=True)
+        newer = []
+    for sid in newer:
+        if (task_registry.stop_generation(sid) == held[sid][1]
+                and task_registry.clear_user_stop(sid)):
+            logger.info("Stop: a newer message reached %s; released the latch", sid)
+    for sid in sessions:
+        if task_registry.stop_admission_incomplete(sid):
+            await reconcile_user_stop(sid)
+
+
+@dataclass
+class _UserStop:
+    """One Stop and its receipt: what it applies to, fixed when it was admitted.
+
+    ``app.db.turns.interrupt_turn`` records the receipt in the transaction that
+    admits the Stop, so it holds across installs and through every wait below.
+    Cleanup ends only what the receipt names, and a person's message above its
+    ``input_cutoff`` outlives the Stop (:func:`app.db.turns.outlives_stop`).
+    A Stop with no live turn to record it on reads its own, once (:meth:`bind`).
+    """
+
+    session_id: str
+    generation: int
+    first: bool
+    receipt: Optional[dict] = None
+
+    def _latch_held(self) -> bool:
+        from app.core.task_registry import task_registry
+
+        return (task_registry.is_user_stopped(self.session_id)
+                and task_registry.stop_generation(self.session_id) == self.generation)
+
+    async def bind(self) -> dict:
+        from app.core.task_registry import task_registry
+        from app.db import turns as turns_db
+
+        if self.receipt is None and not self._latch_held():
+            # A message overtook this Stop before it was recorded. Recording it now
+            # would place it after that message, and cancel what that message armed.
+            self.receipt = {}
+        if self.receipt is None:
+            receipt: Optional[dict] = None
+            for delay in (*_STOP_RECEIPT_RETRY_DELAYS, None):
+                try:
+                    receipt = await asyncio.to_thread(turns_db.read_stop_receipt, self.session_id)
+                    break
+                except Exception:  # noqa: BLE001 — reported below if it never answers.
+                    logger.warning("Stop: reading what session %s holds failed", self.session_id,
+                                   exc_info=True)
+                if delay is not None:
+                    await asyncio.sleep(delay)
+            if receipt is None:
+                # Named work still ends, and only that. See ``overtaken``.
+                logger.error("Stop: session %s was stopped without knowing what it applies to: "
+                             "older queued turns, wakes and parks may survive it", self.session_id)
+                if self._latch_held():
+                    task_registry.note_stop_incomplete(self.session_id)
+                receipt = {}
+            if not self._latch_held():
+                # A message lifted the latch during that read, and the read may
+                # have seen it. What is older can no longer be told apart.
+                receipt = {}
+            task_registry.note_stop_cutoff(self.session_id, receipt.get("input_cutoff"))
+            self.receipt = receipt
+        return self.receipt
+
+    async def overtaken(self) -> bool:
+        """Whether a person has sent a message since this Stop, on any install.
+
+        Lifts the latch when they have. Asked after latching, so a message this
+        read cannot see yet meets the latch and its cutoff at the runtime's gate.
+        """
+        from app.core.task_registry import task_registry
+        from app.db import turns as turns_db
+
+        if not self._latch_held() or task_registry.stop_admission_incomplete(self.session_id):
+            return True
+        try:
+            newer = await asyncio.to_thread(
+                turns_db.person_input_after, self.session_id, (self.receipt or {}).get("input_cutoff"),
+            )
+        except Exception:  # noqa: BLE001 — spare what this cannot place.
+            logger.warning("Stop: reading newer input failed for %s", self.session_id, exc_info=True)
+            return True
+        if newer and self._latch_held() and task_registry.clear_user_stop(self.session_id):
+            logger.info("Stop: a newer message reached %s; released the latch", self.session_id)
+        return newer
+
+
+def _begin_user_stop(session_id: str, receipt: Optional[dict] = None) -> _UserStop:
+    from app.core.task_registry import task_registry
+
+    first = task_registry.mark_user_stopped(session_id, input_cutoff=(receipt or {}).get("input_cutoff"))
+    return _UserStop(session_id, task_registry.stop_generation(session_id), first, receipt)
+
+
+@dataclass(frozen=True)
+class StopScope:
+    """The local work a Stop may end, each run named by its incarnation.
+
+    Only the install running a task can act on it, and a restart ends it, so
+    this is taken on that install, before any wait, not stored with the receipt.
+    """
+
+    active: list[dict]
+    worker_sessions: list[str]
+    worker_shells: dict[str, set[str]]
+    runs: dict[str, Any]
+    # Something newer already runs, so this names only what predates it, and
+    # nothing here may be read off the session as it is now.
+    older_only: bool = False
+    unattributed: tuple[str, ...] = ()
+    orders: dict[str, Any] = field(default_factory=dict)
+    remote_scopes: dict[str, Optional[dict]] = field(default_factory=dict)
+
+
+def capture_stop_scope(session_id: str, *, before_turn: Optional[int] = None) -> StopScope:
+    """Synchronous, so nothing can start between the caller's check and this.
+
+    ``before_turn`` is the ``insert_order`` of a newer turn that took over this
+    session. Each run knows the turn it started under
+    (:meth:`TaskRegistry.task_turn_order`) and a resume renews that, so a run under
+    an earlier turn is older, whatever any clock says. A legacy run's migration
+    bound must be strictly before the successor, not equal. What this cannot
+    place is left running and reported incomplete.
+    """
+    from app.core.task_registry import task_registry
+
+    active = task_registry.get_active(session_id)
+    # An offline-noticed child may still run remotely. Keep its captured task
+    # identity, rather than later discovering it and issuing a broad id Stop.
+    known = {t.get("id") for t in active}
+    active.extend(t for t in task_registry.get_visible(session_id)
+                  if t.get("id") not in known and t.get("worker")
+                  and t.get("reason") == "worker_unreachable")
+    # Worker sessions to sweep AFTER the kills. A ProviderAgent worker's own
+    # Monitor shells are registered under the WORKER's session id, and killing
+    # the worker does not reach them: the shell is a child of the APP process,
+    # not of the worker's CLI, so evicting the worker's pooled client leaves its
+    # dev server or CI watcher running (and its registry row stranded). Snapshot
+    # the ids now — ``teardown_worker`` unregisters each record as it goes.
+    # ``live_workers`` is keyed on the ROOT session, which is where nested
+    # workers register too (``task_dispatch`` passes ``root_session_id``), so
+    # this covers the whole descendant tree, not just the top level.
+    worker_sessions: list[str] = []
+    worker_shells: dict[str, set[str]] = {}
+    try:
+        from app.core import provider_agent_supervisor
+        from app.mcp.builtin_tools import session_background_shell_ids
+
+        worker_sessions = [
+            r.worker_session_id
+            for r in provider_agent_supervisor.live_workers(session_id)
+            if r.worker_session_id
+        ]
+        worker_shells = {
+            worker: session_background_shell_ids(worker) for worker in worker_sessions
+        }
+    except Exception:  # noqa: BLE001 — never let bookkeeping fail a stop.
+        logger.debug("Stop: could not enumerate workers for %s", session_id, exc_info=True)
+    runs = {
+        task_id: task_registry.task_incarnation(session_id, task_id)
+        for task_id in (*(t.get("id") for t in active if t.get("id")), *worker_sessions)
+    }
+    orders = {task_id: task_registry.task_turn_upper_bound(session_id, task_id) for task_id in runs}
+    remote_scopes = {task_id: task_registry.remote_stop_scope(session_id, task_id) for task_id in runs}
+    if before_turn is None:
+        return StopScope(active, worker_sessions, worker_shells, runs, orders=orders, remote_scopes=remote_scopes)
+    older = {task_id for task_id in runs
+             if (order := task_registry.task_turn_upper_bound(session_id, task_id)) is not None
+             and int(order) < before_turn}
+    unattributed = tuple(task_id for task_id in runs if task_id not in older
+                         and task_registry.task_turn_order(session_id, task_id) is None)
+    return StopScope(
+        [task for task in active if task.get("id") in older],
+        [worker for worker in worker_sessions if worker in older],
+        {worker: shells for worker, shells in worker_shells.items() if worker in older},
+        {task_id: runs[task_id] for task_id in older},
+        older_only=True, unattributed=unattributed,
+        orders={task_id: orders[task_id] for task_id in older},
+        remote_scopes={task_id: remote_scopes[task_id] for task_id in older},
+    )
+
+
+async def _validate_remote_stop_scope(session_id: str, scope: StopScope) -> tuple[StopScope, list[dict]]:
+    """A cached remote order is provisional until checked against durable truth.
+
+    In particular, a pre-nonce writer may have invalidated it at the SAME
+    timestamp. Do this off-loop, in the bounded cleanup step, never ahead of
+    the provider's interrupt signal. Local run identity is checked at each act.
+    """
+    remote = {task["id"] for task in scope.active if task.get("worker")}
+    if not remote:
+        return scope, []
+    from app.db import background_tasks
+    try:
+        rows = await asyncio.to_thread(background_tasks.get_stop_order_proofs, session_id, list(remote))
+    except Exception:
+        logger.warning("Stop: remote provenance read failed for %s", session_id, exc_info=True)
+        rows = {}
+    unknown, replaced = set(), set()
+    def iso(value):
+        return value.isoformat() if hasattr(value, "isoformat") else value
+    from app.db.base import parse_jsonb
+    for task_id in remote:
+        row = rows.get(task_id) or {}
+        order = row.get("turn_order") if row.get("turn_order") is not None else row.get("turn_order_upper_bound")
+        if (order is None or row.get("started_at") is None or
+                iso(row.get("turn_order_incarnation")) != iso(row.get("started_at"))):
+            unknown.add(task_id)
+        else:
+            current_scope = parse_jsonb(row.get("remote_stop_scope"))
+            captured_scope = scope.remote_scopes.get(task_id)
+            from app.core.scoped_remote_stop import valid_scope
+            if current_scope != captured_scope:
+                if (valid_scope(current_scope) and valid_scope(captured_scope)
+                        and current_scope["epoch"] > captured_scope["epoch"]):
+                    replaced.add(task_id)
+                else:
+                    unknown.add(task_id)  # persistence lag is not proof of a newer run
+            elif order != scope.orders.get(task_id) or iso(row.get("started_at")) != scope.runs.get(task_id):
+                if scope.orders.get(task_id) is not None and order > scope.orders[task_id]:
+                    replaced.add(task_id)
+                else:
+                    unknown.add(task_id)
+    excluded = unknown | replaced
+    return replace(scope,
+        active=[task for task in scope.active if task.get("id") not in excluded],
+        worker_sessions=[tid for tid in scope.worker_sessions if tid not in excluded],
+        worker_shells={tid: shells for tid, shells in scope.worker_shells.items() if tid not in excluded},
+        runs={tid: run for tid, run in scope.runs.items() if tid not in excluded},
+        orders={tid: order for tid, order in scope.orders.items() if tid not in excluded},
+        unattributed=tuple(sorted(set(scope.unattributed) | unknown))), [
+            {"ok": True, "task_id": tid, "skipped": "resumed"} for tid in sorted(replaced)]
+
+
+async def enter_user_stop(session_id: str, *, stop: Optional[_UserStop] = None) -> dict:
     """Quiesce a session the user just stopped — everything BESIDES killing tasks.
 
     STOP SEMANTICS. Stop means: everything this session is doing ends
@@ -402,33 +709,37 @@ async def enter_user_stop(session_id: str) -> dict:
     ``stop_background`` path route through here, so the latch lands on whichever
     install actually holds the session's work. Idempotent and best-effort: every
     leg is independently guarded, and a failure in one never skips the others.
+
+    This work can outlast the turn it stops, so each leg ends only what the
+    receipt names (see :class:`_UserStop`), and running it again is harmless.
+    Without one, this call is the Stop.
     Returns a small counts dict for the log/tests.
     """
-    from app.core.task_registry import task_registry
+    from app.db import turns as turns_db
 
     # (1) FIRST, and synchronously — before any await — so a terminal frame
     #     racing this call is already looking at a stopped session.
-    first = task_registry.mark_user_stopped(session_id)
+    stop = stop or _begin_user_stop(session_id)
+    receipt = await stop.bind()
+    await stop.overtaken()
 
     wakeups_cancelled = 0
-    try:
-        from app.core import wakeup_service
+    if receipt.get("wakes") or receipt.get("handoffs"):
+        try:
+            from app.core import wakeup_service
 
-        wakeups_cancelled = await wakeup_service.cancel_session_wakeups_async(
-            session_id
-        )
-    except Exception:  # noqa: BLE001 — one leg failing must not skip the rest.
-        logger.warning(
-            "Stop: cancelling wakeups failed for session %s", session_id,
-            exc_info=True,
-        )
+            wakeups_cancelled = await wakeup_service.cancel_named_wakeups_async(
+                session_id, receipt.get("wakes") or [], receipt.get("handoffs") or [],
+            )
+        except Exception:  # noqa: BLE001 — one leg failing must not skip the rest.
+            logger.warning(
+                "Stop: cancelling wakeups failed for session %s", session_id,
+                exc_info=True,
+            )
 
     queued_aborted = 0
     try:
-        from app.db import turns as turns_db
-
-        queued = await asyncio.to_thread(turns_db.get_queued_turns, session_id)
-        turn_ids = [turn["id"] for turn in queued if turn.get("id")]
+        turn_ids = receipt.get("queued") or []
         if turn_ids:
             removed = await asyncio.to_thread(turns_db.stop_queued_turns, session_id, turn_ids)
             queued_aborted = len(removed)
@@ -440,11 +751,12 @@ async def enter_user_stop(session_id: str) -> dict:
 
     parked_settled = 0
     try:
-        from app.db import turns as turns_db
-
-        parked_settled = await asyncio.to_thread(
-            turns_db.settle_parked_turns, session_id
-        )
+        # By these ids and intervals, rechecked under the admission lock the next
+        # message's enqueue also takes: a park named here can have resumed.
+        for park in receipt.get("parks") or []:
+            parked_settled += await asyncio.to_thread(
+                turns_db.settle_parked_turns, session_id, observed_park=park,
+            )
         if parked_settled:
             # Settling banked the park's working time; show the final total.
             from app.core.turn_finalize import broadcast_work_time
@@ -456,17 +768,20 @@ async def enter_user_stop(session_id: str) -> dict:
             exc_info=True,
         )
 
-    if first or wakeups_cancelled or queued_aborted or parked_settled:
+    if stop.first or wakeups_cancelled or queued_aborted or parked_settled:
         logger.info(
             "Stop: quiesced session %s (latched=%s, wakeups=%d, queued=%d, "
             "parked=%d)",
-            session_id, first, wakeups_cancelled, queued_aborted, parked_settled,
+            session_id, stop.first, wakeups_cancelled, queued_aborted, parked_settled,
         )
+    from app.core.task_registry import task_registry
+
     return {
-        "latched": first,
+        "latched": stop.first,
         "wakeups_cancelled": wakeups_cancelled,
         "queued_aborted": queued_aborted,
         "parked_settled": parked_settled,
+        **({"incomplete": True} if task_registry.stop_admission_incomplete(session_id) else {}),
     }
 
 
@@ -534,6 +849,7 @@ async def _settle_stopped_task(session_id: str, task_id: str, *, source: str = "
 async def stop_all_background_tasks(
     session_id: str, *, include_shells: bool = True, user_stop: bool = False,
     respect_shell_preference: bool = True, source: str = "user_stop",
+    scope: Optional[StopScope] = None, receipt: Optional[dict] = None, _receipt_consumer: bool = False,
 ) -> list[dict]:
     """Stop EVERY in-flight background task in a session, one at a time.
 
@@ -571,17 +887,26 @@ async def stop_all_background_tasks(
     can survive termination of the worker process tree. Force paths (session delete, eviction reap) don't come through here
     at all — they use ``reap_session_background_shells``, which is unchanged.
 
-    Snapshots the active list first so mutations during iteration (a task
-    dropping to a terminal state as it is stopped) don't disturb the loop.
+    Everything this stop will end is decided before any wait. ``receipt`` names
+    the session's durable work (see :class:`_UserStop`) and ``scope`` this
+    install's running work; a caller that had to wait for the receipt captured
+    the scope first (:func:`capture_stop_scope`). A caller may let this run on
+    after signalling the provider, so the turn can be over and the next one
+    running by the time a later step gets its turn. The runs named here still
+    end, and nothing started after them does: a task resumed under the same id is
+    a new run, left alone (:meth:`TaskRegistry.task_incarnation`).
     Returns one result dict per task attempted, plus a ``skipped`` entry for
     each spared shell. Never raises.
     """
     from app.core.task_registry import task_registry
 
+    stop: Optional[_UserStop] = None
     if user_stop:
-        # Latch + durable quiesce BEFORE the snapshot: a task completing while
-        # we work through the list finds a stopped session and enqueues nothing.
-        await enter_user_stop(session_id)
+        # The latch before the snapshot: a task completing while we work through
+        # the list finds a stopped session and enqueues nothing.
+        stop = _begin_user_stop(session_id, receipt)
+        if stop.first:
+            logger.info("Stop: latched session %s", session_id)
         if include_shells and respect_shell_preference and _keep_monitor_shells_on_stop():
             include_shells = False
         # A Swarm this session runs would start its next workers as the current
@@ -594,15 +919,9 @@ async def stop_all_background_tasks(
         except Exception:  # noqa: BLE001 — the per-task stops below still run.
             logger.warning("Stop: latching Swarm workflows failed for %s", session_id, exc_info=True)
 
-    # Checkpoints belong to the pooled engine, not the task registry. Idle
-    # sessions have no turn runtime to interrupt, but Stop/archive must still
-    # cancel their provider call and clear any pending checkpoint.
-    state = get_session_pool().peek(session_id)
-    cancel_checkpoint = getattr(getattr(state, "adapter", None), "cancel_checkpoint", None)
-    if callable(cancel_checkpoint):
-        await cancel_checkpoint()
-
-    active = task_registry.get_active(session_id)
+    scope = scope or capture_stop_scope(session_id)
+    scope, revalidated = await _validate_remote_stop_scope(session_id, scope)
+    active = scope.active
     # A worker shutting down (docker stop, quitting the desktop app) ends only
     # its own work: a Task child running on another worker keeps running, and
     # its report reaches this chat when this worker is back (#1808).
@@ -612,33 +931,36 @@ async def stop_all_background_tasks(
     if keep_remote:
         active = [task for task in active if not task.get("worker")]
     task_ids = [task.get("id") for task in active if task.get("id")]
+    remote_workers = {task["id"]: task["worker"] for task in active if task.get("worker")}
 
-    # Worker sessions to sweep AFTER the kills. A ProviderAgent worker's own
-    # Monitor shells are registered under the WORKER's session id, and killing
-    # the worker does not reach them: the shell is a child of the APP process,
-    # not of the worker's CLI, so evicting the worker's pooled client leaves its
-    # dev server or CI watcher running (and its registry row stranded). Snapshot
-    # the ids now — ``teardown_worker`` unregisters each record as it goes.
-    # ``live_workers`` is keyed on the ROOT session, which is where nested
-    # workers register too (``task_dispatch`` passes ``root_session_id``), so
-    # this covers the whole descendant tree, not just the top level.
-    worker_sessions: list[str] = []
-    if user_stop:
-        try:
-            from app.core import provider_agent_supervisor
+    worker_sessions = scope.worker_sessions if user_stop else []
+    worker_shells = scope.worker_shells
 
-            worker_sessions = [
-                r.worker_session_id
-                for r in provider_agent_supervisor.live_workers(session_id)
-                if r.worker_session_id
-            ]
-        except Exception:  # noqa: BLE001 — never let bookkeeping fail a stop.
-            logger.debug(
-                "Stop: could not enumerate workers for %s", session_id,
-                exc_info=True,
-            )
+    # Asked right before each act below: nothing suspends from there until a
+    # worker's teardown latches ``torn_down``, which refuses a new continuation.
+    def same_run(task_id: str) -> bool:
+        now = task_registry.task_incarnation(session_id, task_id)
+        order = task_registry.task_turn_upper_bound(session_id, task_id)
+        same_order = (task_id not in scope.orders or (now is None and order is None)
+                      or order == scope.orders[task_id])
+        same_remote = task_registry.remote_stop_scope(session_id, task_id) == scope.remote_scopes.get(task_id)
+        return same_order and same_remote and (now is None or now == scope.runs.get(task_id))
+
+    async def overtaken() -> bool:
+        # Asked either way: this may be what lifts the latch this Stop just set.
+        newer = stop is not None and await stop.overtaken()
+        return newer or scope.older_only
 
     spared: list[dict] = []
+    for task_id in scope.unattributed:
+        record = task_registry.get_task(session_id, task_id) or {}
+        if record.get("worker"):
+            from app.core.scoped_remote_stop import incomplete
+            worker = record["worker"]
+            spared.append(incomplete(task_id, worker["deviceId"],
+                worker.get("name") or worker["deviceId"], "task attribution is unknown"))
+        else:
+            spared.append({"ok": False, "task_id": task_id, "incomplete": True, "skipped": "unattributed"})
     if not include_shells:
         from app.mcp.builtin_tools import is_background_shell_running
 
@@ -651,10 +973,10 @@ async def stop_all_background_tasks(
         }
         if keep:
             task_ids = [tid for tid in task_ids if tid not in keep]
-            spared = [
+            spared.extend(
                 {"ok": True, "kind": "shell", "task_id": tid, "skipped": "left running"}
                 for tid in sorted(keep)
-            ]
+            )
             logger.info(
                 f"Stop for session {session_id} left {len(keep)} running "
                 f"Monitor shell(s) alive: {sorted(keep)}"
@@ -670,15 +992,62 @@ async def stop_all_background_tasks(
 
         turn_scheduler.discard_queued_task_wakes(session_id, task_ids)
 
-    results: list[dict] = list(spared)
-    for task_id in task_ids:
-        results.append(await stop_session_task(session_id, task_id,
-                                              **({"source": source} if source != "user_stop" else {})))
+    if stop is not None:
+        quiesced = await enter_user_stop(session_id, stop=stop)
+        if quiesced.get("incomplete"):
+            spared.append({"ok": False, "incomplete": True, "skipped": "stop receipt unavailable"})
 
-    if user_stop and not keep_remote:
+    # Checkpoints belong to the pooled engine, not the task registry. Idle
+    # sessions have no turn runtime to interrupt, but Stop/archive must still
+    # cancel their provider call and clear any pending checkpoint. A checkpoint
+    # running after the next message belongs to that message.
+    if not await overtaken():
+        state = get_session_pool().peek(session_id)
+        cancel_checkpoint = getattr(getattr(state, "adapter", None), "cancel_checkpoint", None)
+        if callable(cancel_checkpoint):
+            await cancel_checkpoint()
+
+    results: list[dict] = [*spared, *revalidated]
+    not_stopped: set[str] = set()
+    for task_id in task_ids:
+        if not same_run(task_id):
+            logger.info("Stop: %s of session %s was resumed; leaving the new run alone",
+                        task_id, session_id)
+            results.append({"ok": True, "kind": "agent", "task_id": task_id, "skipped": "resumed"})
+            continue
+        remote_confirmed = False
+        if user_stop and task_id in remote_workers:
+            from app.core import scoped_remote_stop
+            checked = await scoped_remote_stop.request(task_id, remote_workers[task_id],
+                scope.remote_scopes.get(task_id), guard=lambda: same_run(task_id),
+                suppress=lambda: task_registry.suppress_wake(session_id, task_id))
+            if not checked.get("ok") or checked.get("skipped"):
+                not_stopped.add(task_id)
+                results.append(checked)
+                continue
+            if not same_run(task_id):
+                results.append({"ok": True, "task_id": task_id, "skipped": "resumed"})
+                continue
+            remote_confirmed = True
+            from app.db import remote_tasks
+            try:
+                await asyncio.to_thread(remote_tasks.record_scoped_stop, task_id, source)
+            except Exception:
+                logger.warning("Could not project confirmed remote Stop for %s", task_id, exc_info=True)
+            if not same_run(task_id):
+                results.append({"ok": True, "task_id": task_id, "skipped": "resumed"})
+                not_stopped.add(task_id)
+                continue
+        results.append(await stop_session_task(session_id, task_id, _explicit_task_stop=False,
+            **({"source": source} if source != "user_stop" else {}),
+            **({"_remote_confirmed": True} if remote_confirmed else {})))
+
+    if not user_stop and not keep_remote and not await overtaken():
         # A Task child on another worker whose worker went quiet past the
         # offline notice is no longer in the registry or the supervisor, but may
         # still run there: its stop is recorded and delivered when it answers.
+        # This reads the session's children when it runs, so it asks first: once
+        # a newer message is in, a child here could be that message's.
         try:
             from app.core import remote_task
             from app.core.task_registry import USER_STOP_REASON
@@ -690,10 +1059,20 @@ async def stop_all_background_tasks(
                            exc_info=True)
 
     for worker_session_id in worker_sessions:
+        if worker_session_id in not_stopped:
+            continue
         try:
             from app.mcp.builtin_tools import stop_session_background_shells
 
-            reaped = await stop_session_background_shells(worker_session_id)
+            # A worker can start a shell until it is killed just above, so sweep
+            # all of its shells. Once it is running for something newer, only the
+            # shells it had when this stop began.
+            newer = await overtaken()
+            reaped = await stop_session_background_shells(
+                worker_session_id,
+                **({} if not newer and same_run(worker_session_id)
+                   else {"only": worker_shells.get(worker_session_id, set())}),
+            )
             if reaped:
                 logger.info(
                     "Stop for session %s reaped %d shell(s) belonging to worker %s",
@@ -709,6 +1088,8 @@ async def stop_all_background_tasks(
     # Both are best-effort and neither may change what the stop reports.
     frames: list[dict] = []
     for task_id in task_ids:
+        if task_id in not_stopped or not same_run(task_id):
+            continue
         try:
             record = await _settle_stopped_task(session_id, task_id,
                                                 **({"source": source} if source != "user_stop" else {}))
@@ -739,6 +1120,17 @@ async def stop_all_background_tasks(
             logger.debug(
                 "Stop: engine retirement failed for %s", session_id, exc_info=True,
             )
+    if user_stop and any(r.get("incomplete") or r.get("ok") is False for r in results):
+        # A live/parked owner receipt writes its durable note when consumed.
+        # Idle sessions have no owner receipt, so this is their producing path.
+        # enter_user_stop may have published an owner receipt even when the
+        # caller supplied none. That bound authority, not the original argument,
+        # decides whether the receipt consumer already owns this warning.
+        bound = stop.receipt or {}
+        if not _receipt_consumer and not bound.get("cleanup_receipts"):
+            from app.core.scoped_remote_stop import record_incomplete_note
+            await record_incomplete_note(session_id, results,
+                notice_key=f"idle:{bound['stop_seq']}" if "stop_seq" in bound else None)
     return results
 
 
