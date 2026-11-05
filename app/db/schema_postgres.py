@@ -1109,6 +1109,7 @@ def create_postgres_schema(cursor: Any) -> None:
             started_at TIMESTAMP WITH TIME ZONE,
             updated_at TIMESTAMP WITH TIME ZONE,
             turn_order BIGINT,
+            turn_order_upper_bound BIGINT,
             PRIMARY KEY (task_id, session_id)
         )
     """)

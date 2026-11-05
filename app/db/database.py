@@ -2843,8 +2843,33 @@ def _run_column_migrations(cursor: Any) -> None:
     from app.db.project_setup import create_schema as create_project_setup_schema
     create_project_setup_schema(cursor)
 
+    # Both tables exist now, including on the bootstrap-only schema path.
+    # A legacy remote run predates this snapshot, but its actual launch/resume
+    # turn is unknown. Keep that distinction: only a later-admitted successor
+    # can safely place it. No clock (including a peer's started_at) can do so.
+    if not column_exists(cursor, "background_tasks", "turn_order_upper_bound"):
+        cursor.execute("ALTER TABLE background_tasks ADD COLUMN turn_order_upper_bound BIGINT")
+        migrations_applied.append("background_tasks_turn_order_upper_bound")
+    _backfill_legacy_task_turn_bounds(cursor)
+
     if migrations_applied:
         logger.info(f"Applied column migrations: {', '.join(migrations_applied)}")
+
+
+def _backfill_legacy_task_turn_bounds(cursor: Any) -> None:
+    """Bound surviving remote runs in ONE statement's snapshot; never re-date one.
+
+    Tasks created concurrently but invisible to this snapshot remain unknown.
+    A successor already queued here is not strictly beyond this bound: cleanup
+    must leave that run alone and report incomplete, not guess its identity.
+    """
+    cursor.execute(
+        "UPDATE background_tasks SET turn_order_upper_bound = "
+        "(SELECT COALESCE(MAX(insert_order), 0) FROM turns "
+        "WHERE turns.session_id = background_tasks.session_id) "
+        "WHERE turn_order IS NULL AND turn_order_upper_bound IS NULL "
+        "AND status = 'running' AND remote_device_id IS NOT NULL"
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -3268,7 +3268,7 @@ class SessionRuntime:
             # turn's input from what it applies to: it ends only named work.
             user_stop = (stop_source in {"user_stop", "user_stopped"}
                          and (successor is None or turns_db.STOP_RECEIPT_KEY in payload))
-            await stop_all_background_tasks(
+            results = await stop_all_background_tasks(
                 sid, user_stop=user_stop,
                 **({"source": stop_source} if not user_stop else {}),
                 # Still the live turn: nothing newer exists, so the Stop takes
@@ -3278,6 +3278,17 @@ class SessionRuntime:
                 **({"receipt": payload[turns_db.STOP_RECEIPT_KEY]}
                    if turns_db.STOP_RECEIPT_KEY in payload else {}),
             )
+            if any(result.get("incomplete") for result in results):
+                from app.core.turn_recorder import record_drained_event
+
+                await record_drained_event(sid, {
+                    "type": "system", "subtype": "stop_incomplete",
+                    "data": {"interrupted_turn_id": tid, "incomplete": True,
+                                "content": "Stop could not safely identify all older background work. "
+                                           "Some tasks may still be running; stop those tasks individually.",
+                                "tasks": [r["task_id"] for r in results
+                                          if r.get("incomplete") and r.get("task_id")]},
+                })
             logger.info("SessionRuntime: background teardown for %s source=%s", sid, stop_source)
 
         await self._run_interrupt_step(background_stop(), "background-task stop")

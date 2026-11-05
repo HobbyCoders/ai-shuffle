@@ -625,6 +625,12 @@ class TaskRegistry:
         record = self._tasks.get(session_id, {}).get(task_id)
         return record.get("turn_order") if record else None
 
+    def task_turn_upper_bound(self, session_id: str, task_id: str) -> Optional[int]:
+        """The exact order, or the conservative migration bound for a legacy run."""
+        record = self._tasks.get(session_id, {}).get(task_id) or {}
+        order = record.get("turn_order")
+        return order if order is not None else record.get("turn_order_upper_bound")
+
     def matches_task_incarnation(
         self, session_id: str, task_id: str, incarnation: Optional[str],
     ) -> bool:
@@ -1137,6 +1143,7 @@ class TaskRegistry:
                     now = (datetime.fromisoformat(previous_start) + timedelta(microseconds=1)).isoformat()
                 existing["started_at"] = now
                 existing["turn_order"] = self._turn_orders.get(session_id)
+                existing.pop("turn_order_upper_bound", None)
                 existing.pop("notification_delivered", None)
                 retained = self._recent_terminal.get(session_id)
                 if retained is not None:
@@ -1330,6 +1337,7 @@ class TaskRegistry:
                     "started_at": record.get("started_at"),
                     "updated_at": record.get("updated_at"),
                     "turn_order": record.get("turn_order"),
+                    "turn_order_upper_bound": record.get("turn_order_upper_bound"),
                     "summary": record.get("summary"),
                     "reason": record.get("reason"),
                     "report_path": record.get("report_path"),
@@ -1416,6 +1424,7 @@ class TaskRegistry:
                 "report_chars": row.get("report_chars"),
                 "started_at": _iso(row.get("started_at")),
                 "turn_order": row.get("turn_order"),
+                "turn_order_upper_bound": row.get("turn_order_upper_bound"),
                 "updated_at": _iso(row.get("updated_at")),
                 "restored": True,
             }

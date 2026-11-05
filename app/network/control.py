@@ -922,13 +922,16 @@ async def _interrupt(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
     reaches_work = bool(body.get("stop_background")) and is_stop and await run_sync(
         turn_manager.stop_reaches_background_work, session_id, body.get("turn_id") or None, row,
     )
+    results = []
     if body.get("stop_background") and (row is not None or reaches_work):
-        await stop_all_background_tasks(
+        results = await stop_all_background_tasks(
             session_id, user_stop=True, scope=scope,
             receipt=((row or {}).get("payload") or {}).get(turns.STOP_RECEIPT_KEY),
         )
     return {"interrupted": row is not None or reaches_work,
-            "turn_id": (row or {}).get("id")}
+            "turn_id": (row or {}).get("id"),
+            **({"incomplete": True, "tasks": results}
+               if any(result.get("incomplete") for result in results) else {})}
 
 
 # Compatibility only for older peers that still poll or send terminal-task stops.

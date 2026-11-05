@@ -299,6 +299,10 @@ def merge_session_wakeup(
     _ph = ph()
     with (nullcontext(_conn) if _conn is not None else get_db()) as conn:
         cursor = get_cursor(conn)
+        # One arm boundary for both filtering and stamping. A Stop after this
+        # read cancels the entire merge, even if its insert happens after Stop.
+        cursor.execute(f"SELECT {CURRENT_STOP_SEQ} AS stop_seq", (session_id,))
+        stop_seq = int(cursor.fetchone()["stop_seq"])
         cursor.execute(
             f"SELECT * FROM pending_wakeups "
             f"WHERE session_id = {_ph} AND source = {_ph} ORDER BY fire_at ASC",
@@ -312,7 +316,8 @@ def merge_session_wakeup(
             )
             if cursor.rowcount and cursor.rowcount > 0:
                 replaced.append(row)
-                if not _cancelled_by_stop(cursor, row):
+                if (row.get("source") == "profile_cancelled" or row.get("stop_seq") is None
+                        or int(row["stop_seq"]) >= stop_seq):
                     kept.append(row)
         texts = [str(r.get("prompt") or "") for r in kept]
         parts = [prompt, *texts] if prepend else [*texts, prompt]
@@ -324,9 +329,9 @@ def merge_session_wakeup(
                 (id, session_id, profile_id, project_id, prompt, reason, model,
                  source, instance_id, fire_at, stop_seq)
                 VALUES ({_ph}, {_ph}, {_ph}, {_ph}, {_ph}, {_ph}, {_ph}, {_ph}, {_ph}, {_ph},
-                        {CURRENT_STOP_SEQ})""",
+                        {_ph})""",
             (id, session_id, profile_id, project_id, text, reason, model,
-             source, instance_id, float(fire_at), session_id),
+             source, instance_id, float(fire_at), stop_seq),
         )
         cursor.execute(f"SELECT created_at, stop_seq FROM pending_wakeups WHERE id = {_ph}", (id,))
         armed = cursor.fetchone()

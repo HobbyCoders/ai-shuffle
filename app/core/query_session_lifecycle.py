@@ -538,6 +538,7 @@ class StopScope:
     # Something newer already runs, so this names only what predates it, and
     # nothing here may be read off the session as it is now.
     older_only: bool = False
+    unattributed: tuple[str, ...] = ()
 
 
 def capture_stop_scope(session_id: str, *, before_turn: Optional[int] = None) -> StopScope:
@@ -546,8 +547,9 @@ def capture_stop_scope(session_id: str, *, before_turn: Optional[int] = None) ->
     ``before_turn`` is the ``insert_order`` of a newer turn that took over this
     session. Each run knows the turn it started under
     (:meth:`TaskRegistry.task_turn_order`) and a resume renews that, so a run under
-    an earlier turn is older, whatever any clock says. Unknown is not older: what
-    this cannot place, a Stop leaves running.
+    an earlier turn is older, whatever any clock says. A legacy run's migration
+    bound must be strictly before the successor, not equal. What this cannot
+    place is left running and reported incomplete.
     """
     from app.core.task_registry import task_registry
 
@@ -584,14 +586,16 @@ def capture_stop_scope(session_id: str, *, before_turn: Optional[int] = None) ->
     if before_turn is None:
         return StopScope(active, worker_sessions, worker_shells, runs)
     older = {task_id for task_id in runs
-             if (order := task_registry.task_turn_order(session_id, task_id)) is not None
+             if (order := task_registry.task_turn_upper_bound(session_id, task_id)) is not None
              and int(order) < before_turn}
+    unattributed = tuple(task_id for task_id in runs if task_id not in older
+                         and task_registry.task_turn_order(session_id, task_id) is None)
     return StopScope(
         [task for task in active if task.get("id") in older],
         [worker for worker in worker_sessions if worker in older],
         {worker: shells for worker, shells in worker_shells.items() if worker in older},
         {task_id: runs[task_id] for task_id in older},
-        older_only=True,
+        older_only=True, unattributed=unattributed,
     )
 
 
@@ -869,7 +873,10 @@ async def stop_all_background_tasks(
         newer = stop is not None and await stop.overtaken()
         return newer or scope.older_only
 
-    spared: list[dict] = []
+    spared: list[dict] = [
+        {"ok": False, "task_id": task_id, "incomplete": True, "skipped": "unattributed"}
+        for task_id in scope.unattributed
+    ]
     if not include_shells:
         from app.mcp.builtin_tools import is_background_shell_running
 
@@ -882,10 +889,10 @@ async def stop_all_background_tasks(
         }
         if keep:
             task_ids = [tid for tid in task_ids if tid not in keep]
-            spared = [
+            spared.extend(
                 {"ok": True, "kind": "shell", "task_id": tid, "skipped": "left running"}
                 for tid in sorted(keep)
-            ]
+            )
             logger.info(
                 f"Stop for session {session_id} left {len(keep)} running "
                 f"Monitor shell(s) alive: {sorted(keep)}"
@@ -902,7 +909,9 @@ async def stop_all_background_tasks(
         turn_scheduler.discard_queued_task_wakes(session_id, task_ids)
 
     if stop is not None:
-        await enter_user_stop(session_id, stop=stop)
+        quiesced = await enter_user_stop(session_id, stop=stop)
+        if quiesced.get("incomplete"):
+            spared.append({"ok": False, "incomplete": True, "skipped": "stop receipt unavailable"})
 
     # Checkpoints belong to the pooled engine, not the task registry. Idle
     # sessions have no turn runtime to interrupt, but Stop/archive must still
