@@ -246,9 +246,9 @@
 	let tailControlsRef = $state<HTMLDivElement | null>(null);
 	let tailErrorRef = $state<HTMLDivElement | null>(null);
 	let tailErrorOffsetPx = $state(0);
-	let presentedTailError = $state<string | null>(null);
+	let presentedTailError: string | null = null;
 	let followedViewportEnd = 0;
-	let followedFloorSession: string | null = null;
+	let followedFloorContext: { sessionId: string | null } | null = null;
 	let currentTurnAnchorId: string | null = null;
 	let tailReservePx = $state(MIN_TRANSCRIPT_TAIL_RESERVE);
 	let anchorMaintenanceRaf: number | null = null;
@@ -2049,7 +2049,7 @@
 	let layoutBoundary = '';
 	$effect.pre(() => {
 		const s = $activeSession;
-		if (s.sessionId !== followedFloorSession) {
+		if (s.sessionId !== followedFloorContext?.sessionId) {
 			presentedTailError = null;
 			tailErrorOffsetPx = 0;
 		}
@@ -2062,10 +2062,10 @@
 			tailErrorOffsetPx = pendingHeight > 0 ? pendingHeight + gap : 0;
 			presentedTailError = s.error;
 		}
-		const resetFloor = s.sessionId !== followedFloorSession || (!s.messages.length && !s.isStreaming) || untrack(() => windowShifting);
+		const resetFloor = s.sessionId !== followedFloorContext?.sessionId || (!s.messages.length && !s.isStreaming) || untrack(() => windowShifting);
 		if (resetFloor) {
 			followedViewportEnd = 0;
-			followedFloorSession = s.sessionId;
+			followedFloorContext = { sessionId: s.sessionId };
 		}
 		const boundary = `${s.sessionId}:${s.messages.length}:${s.isStreaming}:${s.liveTurnId}:${s.error}:${s.queuedMessages.map(m => `${m.id}:${m.status ?? ''}`).join(',')}`;
 		if (boundary === layoutBoundary) return;
@@ -2076,17 +2076,17 @@
 		followedViewportEnd = Math.max(followedViewportEnd, beforeTop + containerRef.clientHeight);
 		const sessionId = s.sessionId;
 		const version = untrack(() => windowShiftVersion);
-		let current = true;
+		const context = followedFloorContext;
 		programmaticScrollDepth++;
 		void tick().then(() => {
-			if (current && version === windowShiftVersion && get(activeSession).sessionId === sessionId && !windowShifting && untrack(() => shouldAutoScroll)) {
+			if (context === followedFloorContext && version === windowShiftVersion && get(activeSession).sessionId === sessionId && !windowShifting && untrack(() => shouldAutoScroll)) {
 				if (currentTurnAnchorId) void maintainCurrentTurnAnchor(false, beforeTop);
 				followGrowthNow();
 			}
 			requestAnimationFrame(() => { programmaticScrollDepth = Math.max(0, programmaticScrollDepth - 1); });
 		});
-		// A newer boundary (including switch-away-and-back) owns its own layout.
-		return () => { current = false; };
+		// Same-context boundaries still need their follow work. The owner identity
+		// changes on switch/clear; the existing window version handles eviction.
 	});
 
 	// Rendered geometry has one lifecycle, including the terminal error, queue
@@ -2416,7 +2416,7 @@
 	aria-label="Conversation messages"
 	aria-busy={$activeSession.isStreaming}
 	class="msg-scroll flex-1 overflow-y-auto overscroll-contain"
-	style:overflow-anchor={shouldAutoScroll && !presentedTailError ? 'none' : 'auto'}
+	style:overflow-anchor={shouldAutoScroll ? 'none' : 'auto'}
 >
 	{#if transcriptRender === 'skeleton'}
 		<!-- Hydration skeleton. NOT the empty hero: this session has a transcript,
@@ -2830,8 +2830,8 @@
 		.chat-error-dismiss { transition: none; }
 	}
 
-	/* Native anchoring protects scrolled-up readers and the retained error slot.
-	   Ordinary followers are positioned by the app (inline override): otherwise
+	/* Native anchoring protects scrolled-up readers from off-screen resizes.
+	   Followers are positioned by the app instead (inline override): otherwise
 	   a temporary composer clamp can be remembered and restored by the browser
 	   when Stop adds rows, moving the already-followed reading surface. */
 	.transcript-shell {

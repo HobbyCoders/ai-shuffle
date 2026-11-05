@@ -24,7 +24,7 @@ function probe() {
 	};
 	const create = new Function('env', `
 		let $activeSession = env.session, lastKnownScrollTop = env.scrollTop;
-		let followedViewportEnd = 0, followedFloorSession = null;
+		let followedViewportEnd = 0, followedFloorContext = null;
 		let presentedTailError = null, tailErrorOffsetPx = 0;
 		let windowShifting = false, windowShiftVersion = 0;
 		let isMounted = true, shouldAutoScroll = true, programmaticScrollDepth = 0;
@@ -107,6 +107,24 @@ describe('MessageArea followed-floor coordinate ownership', () => {
 		expect(p.env.calls).toEqual([]);
 		expect(p.floor()).toBe(0);
 		expect(p.depth()).toBe(0);
+	});
+
+	it('keeps pending same-context follow work through consecutive queue or terminal boundaries', async () => {
+		const p = probe();
+		captureLongFloor(p);
+		p.env.session = session('long', 4); p.run();
+		await p.flush();
+		expect(p.env.calls).toEqual(['anchor', 'follow', 'anchor', 'follow']);
+	});
+
+	it('rejects every pending callback across a switch, not just the latest one', async () => {
+		const p = probe();
+		captureLongFloor(p);
+		p.env.session = session('long', 4); p.run();
+		p.env.session = session('short', 1); p.run();
+		p.env.session = session('long', 4); p.run();
+		await p.flush();
+		expect(p.env.calls).toEqual([]);
 	});
 
 	it('still protects same-context terminal growth and never captures a scrolled-up reader', async () => {
