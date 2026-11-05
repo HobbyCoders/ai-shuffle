@@ -163,9 +163,11 @@ Panel contexts and tokens travel automatically. Off-screen feature pages never c
 	.view-shell[data-docked], .view-shell[data-stacked] { grid-template-columns: minmax(0, 1fr); }
 	.inline-panel { min-height: 0; min-width: 0; border-right: 1px solid var(--sidebar-border); }
 	.view-main-slot { position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: auto; scrollbar-gutter: stable; container: st-detail / inline-size; }
-	/* One stable band, including when no object is selected. It precedes the
-	   controls in document order so their Electron no-drag regions win. */
-	.view-titlebar { position: absolute; top: 0; inset-inline: 0; height: var(--titlebar-height, 52px); border-bottom: 1px solid var(--st-border); pointer-events: none; }
+	/* One stable, invisible window-drag band, including when no object is
+	   selected. Sticky so it stays at the top while the detail scrolls; the
+	   negative margin keeps it out of layout. It precedes the controls in
+	   document order so their Electron no-drag regions win. */
+	.view-titlebar { position: sticky; top: 0; flex: none; height: var(--titlebar-height, 52px); margin-bottom: calc(-1 * var(--titlebar-height, 52px)); pointer-events: none; }
 	.view-shell[data-stacked] .view-titlebar { display: none; }
 	.inline-panel[hidden], .view-main-slot[hidden] { display: none; }
 	.view-shell[data-stacked] .inline-panel { border-right: 0; }
