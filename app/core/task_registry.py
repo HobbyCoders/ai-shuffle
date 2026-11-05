@@ -631,6 +631,30 @@ class TaskRegistry:
         order = record.get("turn_order")
         return order if order is not None else record.get("turn_order_upper_bound")
 
+    def remote_stop_scope(self, session_id: str, task_id: str) -> Optional[dict]:
+        from app.db.base import parse_jsonb
+        scope = parse_jsonb((self._tasks.get(session_id, {}).get(task_id) or {}).get("remote_stop_scope"))
+        return dict(scope) if isinstance(scope, dict) else None
+
+    def current_input_order(self, session_id: str) -> Optional[int]:
+        return self._turn_orders.get(session_id)
+
+    def advance_remote_stop_scope(self, session_id: str, task_id: str, scope: Any, *,
+                                  new_input: bool = False, admission_order: Optional[int] = None) -> None:
+        from app.core.scoped_remote_stop import valid_scope
+        record = self._tasks.get(session_id, {}).get(task_id)
+        if record is None or not valid_scope(scope):
+            return
+        previous = self.remote_stop_scope(session_id, task_id)
+        if previous and previous.get("epoch", 0) >= scope["epoch"]:
+            return  # a delayed RPC reply must never roll the incarnation back
+        record["remote_stop_scope"] = dict(scope)
+        if new_input:
+            record["turn_order"] = admission_order
+            record.pop("turn_order_upper_bound", None)
+            self._wake_suppressed.get(session_id, set()).discard(task_id)
+        self._persist_task_state(session_id, task_id)
+
     def matches_task_incarnation(
         self, session_id: str, task_id: str, incarnation: Optional[str],
     ) -> bool:
@@ -1346,6 +1370,7 @@ class TaskRegistry:
                     "name": record.get("name"),
                     "model": record.get("model"),
                     "remote_device_id": record.get("remote_device_id"),
+                    "remote_stop_scope": record.get("remote_stop_scope"),
                 },
             )
         except Exception:
@@ -1431,6 +1456,7 @@ class TaskRegistry:
                 "turn_order_upper_bound": (row.get("turn_order_upper_bound") if row.get("started_at") is not None and
                                            _iso(row.get("turn_order_incarnation")) == _iso(row.get("started_at")) else None),
                 "updated_at": _iso(row.get("updated_at")),
+                "remote_stop_scope": row.get("remote_stop_scope"),
                 "restored": True,
             }
             if row.get("terminal_notified"):

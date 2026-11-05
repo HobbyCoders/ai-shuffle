@@ -213,7 +213,7 @@ async def _durable_force_settle(session_id: str, task_id: str) -> Optional[dict]
     return None
 
 
-async def stop_session_task(session_id: str, task_id: str, *, source: str = "user_stop") -> dict:
+async def stop_session_task(session_id: str, task_id: str, *, source: str = "user_stop", _remote_confirmed: bool = False) -> dict:
     """Stop ONE background task (sub-agent OR Monitor shell) in a session.
 
     Two kinds of task surface in the UI's ``activeTasks`` strip:
@@ -311,6 +311,7 @@ async def stop_session_task(session_id: str, task_id: str, *, source: str = "use
             summary = preview = f"Stopped by host: {source}"
         torn = await provider_agent_supervisor.teardown_worker(
             record, reason=source, summary=summary, preview=preview,
+            **({"remote_confirmed": True} if _remote_confirmed else {}),
         )
         own = task_registry.get_task(session_id, task_id)
         if record.parent_session_id != session_id and own is not None and own.get("status") == "running":
@@ -540,6 +541,7 @@ class StopScope:
     older_only: bool = False
     unattributed: tuple[str, ...] = ()
     orders: dict[str, Any] = field(default_factory=dict)
+    remote_scopes: dict[str, Optional[dict]] = field(default_factory=dict)
 
 
 def capture_stop_scope(session_id: str, *, before_turn: Optional[int] = None) -> StopScope:
@@ -555,6 +557,12 @@ def capture_stop_scope(session_id: str, *, before_turn: Optional[int] = None) ->
     from app.core.task_registry import task_registry
 
     active = task_registry.get_active(session_id)
+    # An offline-noticed child may still run remotely. Keep its captured task
+    # identity, rather than later discovering it and issuing a broad id Stop.
+    known = {t.get("id") for t in active}
+    active.extend(t for t in task_registry.get_visible(session_id)
+                  if t.get("id") not in known and t.get("worker")
+                  and t.get("reason") == "worker_unreachable")
     # Worker sessions to sweep AFTER the kills. A ProviderAgent worker's own
     # Monitor shells are registered under the WORKER's session id, and killing
     # the worker does not reach them: the shell is a child of the APP process,
@@ -585,8 +593,9 @@ def capture_stop_scope(session_id: str, *, before_turn: Optional[int] = None) ->
         for task_id in (*(t.get("id") for t in active if t.get("id")), *worker_sessions)
     }
     orders = {task_id: task_registry.task_turn_upper_bound(session_id, task_id) for task_id in runs}
+    remote_scopes = {task_id: task_registry.remote_stop_scope(session_id, task_id) for task_id in runs}
     if before_turn is None:
-        return StopScope(active, worker_sessions, worker_shells, runs, orders=orders)
+        return StopScope(active, worker_sessions, worker_shells, runs, orders=orders, remote_scopes=remote_scopes)
     older = {task_id for task_id in runs
              if (order := task_registry.task_turn_upper_bound(session_id, task_id)) is not None
              and int(order) < before_turn}
@@ -599,6 +608,7 @@ def capture_stop_scope(session_id: str, *, before_turn: Optional[int] = None) ->
         {task_id: runs[task_id] for task_id in older},
         older_only=True, unattributed=unattributed,
         orders={task_id: orders[task_id] for task_id in older},
+        remote_scopes={task_id: remote_scopes[task_id] for task_id in older},
     )
 
 
@@ -621,14 +631,28 @@ async def _validate_remote_stop_scope(session_id: str, scope: StopScope) -> tupl
     unknown, replaced = set(), set()
     def iso(value):
         return value.isoformat() if hasattr(value, "isoformat") else value
+    from app.db.base import parse_jsonb
     for task_id in remote:
         row = rows.get(task_id) or {}
         order = row.get("turn_order") if row.get("turn_order") is not None else row.get("turn_order_upper_bound")
         if (order is None or row.get("started_at") is None or
                 iso(row.get("turn_order_incarnation")) != iso(row.get("started_at"))):
             unknown.add(task_id)
-        elif order != scope.orders.get(task_id) or iso(row.get("started_at")) != scope.runs.get(task_id):
-            replaced.add(task_id)
+        else:
+            current_scope = parse_jsonb(row.get("remote_stop_scope"))
+            captured_scope = scope.remote_scopes.get(task_id)
+            from app.core.scoped_remote_stop import valid_scope
+            if current_scope != captured_scope:
+                if (valid_scope(current_scope) and valid_scope(captured_scope)
+                        and current_scope["epoch"] > captured_scope["epoch"]):
+                    replaced.add(task_id)
+                else:
+                    unknown.add(task_id)  # persistence lag is not proof of a newer run
+            elif order != scope.orders.get(task_id) or iso(row.get("started_at")) != scope.runs.get(task_id):
+                if scope.orders.get(task_id) is not None and order > scope.orders[task_id]:
+                    replaced.add(task_id)
+                else:
+                    unknown.add(task_id)
     excluded = unknown | replaced
     return replace(scope,
         active=[task for task in scope.active if task.get("id") not in excluded],
@@ -818,7 +842,7 @@ async def _settle_stopped_task(session_id: str, task_id: str, *, source: str = "
 async def stop_all_background_tasks(
     session_id: str, *, include_shells: bool = True, user_stop: bool = False,
     respect_shell_preference: bool = True, source: str = "user_stop",
-    scope: Optional[StopScope] = None, receipt: Optional[dict] = None,
+    scope: Optional[StopScope] = None, receipt: Optional[dict] = None, _receipt_consumer: bool = False,
 ) -> list[dict]:
     """Stop EVERY in-flight background task in a session, one at a time.
 
@@ -900,6 +924,7 @@ async def stop_all_background_tasks(
     if keep_remote:
         active = [task for task in active if not task.get("worker")]
     task_ids = [task.get("id") for task in active if task.get("id")]
+    remote_workers = {task["id"]: task["worker"] for task in active if task.get("worker")}
 
     worker_sessions = scope.worker_sessions if user_stop else []
     worker_shells = scope.worker_shells
@@ -911,17 +936,24 @@ async def stop_all_background_tasks(
         order = task_registry.task_turn_upper_bound(session_id, task_id)
         same_order = (task_id not in scope.orders or (now is None and order is None)
                       or order == scope.orders[task_id])
-        return same_order and (now is None or now == scope.runs.get(task_id))
+        same_remote = task_registry.remote_stop_scope(session_id, task_id) == scope.remote_scopes.get(task_id)
+        return same_order and same_remote and (now is None or now == scope.runs.get(task_id))
 
     async def overtaken() -> bool:
         # Asked either way: this may be what lifts the latch this Stop just set.
         newer = stop is not None and await stop.overtaken()
         return newer or scope.older_only
 
-    spared: list[dict] = [
-        {"ok": False, "task_id": task_id, "incomplete": True, "skipped": "unattributed"}
-        for task_id in scope.unattributed
-    ]
+    spared: list[dict] = []
+    for task_id in scope.unattributed:
+        record = task_registry.get_task(session_id, task_id) or {}
+        if record.get("worker"):
+            from app.core.scoped_remote_stop import incomplete
+            worker = record["worker"]
+            spared.append(incomplete(task_id, worker["deviceId"],
+                worker.get("name") or worker["deviceId"], "task attribution is unknown"))
+        else:
+            spared.append({"ok": False, "task_id": task_id, "incomplete": True, "skipped": "unattributed"})
     if not include_shells:
         from app.mcp.builtin_tools import is_background_shell_running
 
@@ -969,16 +1001,41 @@ async def stop_all_background_tasks(
             await cancel_checkpoint()
 
     results: list[dict] = [*spared, *revalidated]
+    not_stopped: set[str] = set()
     for task_id in task_ids:
         if not same_run(task_id):
             logger.info("Stop: %s of session %s was resumed; leaving the new run alone",
                         task_id, session_id)
             results.append({"ok": True, "kind": "agent", "task_id": task_id, "skipped": "resumed"})
             continue
+        remote_confirmed = False
+        if user_stop and task_id in remote_workers:
+            from app.core import scoped_remote_stop
+            checked = await scoped_remote_stop.request(task_id, remote_workers[task_id],
+                scope.remote_scopes.get(task_id), guard=lambda: same_run(task_id),
+                suppress=lambda: task_registry.suppress_wake(session_id, task_id))
+            if not checked.get("ok") or checked.get("skipped"):
+                not_stopped.add(task_id)
+                results.append(checked)
+                continue
+            if not same_run(task_id):
+                results.append({"ok": True, "task_id": task_id, "skipped": "resumed"})
+                continue
+            remote_confirmed = True
+            from app.db import remote_tasks
+            try:
+                await asyncio.to_thread(remote_tasks.record_scoped_stop, task_id, source)
+            except Exception:
+                logger.warning("Could not project confirmed remote Stop for %s", task_id, exc_info=True)
+            if not same_run(task_id):
+                results.append({"ok": True, "task_id": task_id, "skipped": "resumed"})
+                not_stopped.add(task_id)
+                continue
         results.append(await stop_session_task(session_id, task_id,
-                                              **({"source": source} if source != "user_stop" else {})))
+            **({"source": source} if source != "user_stop" else {}),
+            **({"_remote_confirmed": True} if remote_confirmed else {})))
 
-    if user_stop and not keep_remote and not await overtaken():
+    if not user_stop and not keep_remote and not await overtaken():
         # A Task child on another worker whose worker went quiet past the
         # offline notice is no longer in the registry or the supervisor, but may
         # still run there: its stop is recorded and delivered when it answers.
@@ -995,6 +1052,8 @@ async def stop_all_background_tasks(
                            exc_info=True)
 
     for worker_session_id in worker_sessions:
+        if worker_session_id in not_stopped:
+            continue
         try:
             from app.mcp.builtin_tools import stop_session_background_shells
 
@@ -1022,7 +1081,7 @@ async def stop_all_background_tasks(
     # Both are best-effort and neither may change what the stop reports.
     frames: list[dict] = []
     for task_id in task_ids:
-        if not same_run(task_id):
+        if task_id in not_stopped or not same_run(task_id):
             continue
         try:
             record = await _settle_stopped_task(session_id, task_id,
@@ -1054,6 +1113,12 @@ async def stop_all_background_tasks(
             logger.debug(
                 "Stop: engine retirement failed for %s", session_id, exc_info=True,
             )
+    if user_stop and any(r.get("incomplete") or r.get("ok") is False for r in results):
+        # A live/parked owner receipt writes its durable note when consumed.
+        # Idle sessions have no owner receipt, so this is their producing path.
+        if not _receipt_consumer and (not receipt or not receipt.get("cleanup_receipts")):
+            from app.core.scoped_remote_stop import record_incomplete_note
+            await record_incomplete_note(session_id, results)
     return results
 
 

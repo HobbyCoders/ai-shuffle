@@ -451,6 +451,11 @@ def _task_status_handler():
     return handle_task_status
 
 
+def _scoped_task_stop_handler():
+    from app.core.scoped_remote_stop import handle
+    return handle
+
+
 def _task_stop_handler():
     from app.core.remote_task import handle_task_stop
     return handle_task_stop
@@ -598,6 +603,7 @@ _LAZY_HANDLERS = {
     "task-report": _task_report_handler,
     "task-status": _task_status_handler,
     "task-stop": _task_stop_handler,
+    "task-stop-scoped": _scoped_task_stop_handler,
     "task-message": _task_message_handler,
     "task-approval": _task_approval_handler,
     "task-approval-answer": _task_approval_answer_handler,
@@ -905,6 +911,7 @@ async def _sessions(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
 
 async def _interrupt(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
     from app.core import turn_manager
+    from app.core.scoped_remote_stop import incomplete_text
     session_id = str(body.get("session_id") or "")
     _require_owned(session_id)
     source = body.get("source")
@@ -930,7 +937,8 @@ async def _interrupt(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
         )
     return {"interrupted": row is not None or reaches_work,
             "turn_id": (row or {}).get("id"),
-            **({"incomplete": True, "tasks": results}
+            **({"incomplete": True, "tasks": results,
+                "message": incomplete_text(results)}
                if any(result.get("incomplete") for result in results) else {})}
 
 

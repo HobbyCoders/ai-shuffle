@@ -249,8 +249,9 @@ async def test_actual_stop_revalidates_cached_order_after_same_clock_old_write(s
     try:
         result = await qsl.stop_all_background_tasks(session_id, scope=scope)
         stop.assert_not_awaited()
-        assert result == [{"ok": False, "incomplete": True,
-                           "task_id": "cached", "skipped": "unattributed"}]
+        assert len(result) == 1 and result[0]["ok"] is False and result[0]["incomplete"] is True
+        assert result[0]["task_id"] == "cached" and result[0]["worker_name"] == "remote"
+        assert "STILL BE RUNNING" in result[0]["detail"] and "Update remote" in result[0]["detail"]
         assert _saved_task(session_id, "cached")["status"] == "running"
     finally:
         task_registry.clear_session(session_id)

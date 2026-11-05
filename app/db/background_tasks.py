@@ -17,6 +17,7 @@ presence.
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from typing import Any, Dict, List, Optional
@@ -68,6 +69,7 @@ def create_order_guard(cursor: Any) -> None:
                 NEW.turn_order := NULL;
                 NEW.turn_order_upper_bound := NULL;
                 NEW.turn_order_incarnation := NULL;
+                NEW.remote_stop_scope := NULL;
             ELSIF TG_OP = 'UPDATE' THEN
                 IF NEW.turn_order_write_nonce IS NOT DISTINCT FROM OLD.turn_order_write_nonce THEN
                     SELECT COALESCE(MAX(insert_order), 0) INTO boundary FROM turns
@@ -77,6 +79,7 @@ def create_order_guard(cursor: Any) -> None:
                     NEW.turn_order := NULL;
                     NEW.turn_order_upper_bound := NULL;
                     NEW.turn_order_incarnation := NULL;
+                NEW.remote_stop_scope := NULL;
                 END IF;
             END IF;
             RETURN NEW;
@@ -122,8 +125,8 @@ def upsert_background_tasks(snapshots: List[Dict[str, Any]]) -> None:
                     tool_use_id, title, status, terminal_notified,
                     started_at, updated_at, summary, reason, report_path, report_chars,
                     agent, roster_name, model, remote_device_id, assignment_owner, turn_order, turn_order_upper_bound,
-                    turn_order_incarnation, turn_order_write_nonce
-                ) VALUES ({", ".join([_ph] * 24)})
+                    turn_order_incarnation, turn_order_write_nonce, remote_stop_scope
+                ) VALUES ({", ".join([_ph] * 25)})
                 ON CONFLICT (task_id, session_id) DO UPDATE SET
                     instance_id = EXCLUDED.instance_id,
                     kind = EXCLUDED.kind,
@@ -135,6 +138,7 @@ def upsert_background_tasks(snapshots: List[Dict[str, Any]]) -> None:
                     started_at = EXCLUDED.started_at,
                     updated_at = EXCLUDED.updated_at,
                     turn_order_write_nonce = EXCLUDED.turn_order_write_nonce,
+                    remote_stop_scope = EXCLUDED.remote_stop_scope,
                     turn_order = CASE
                         WHEN EXCLUDED.turn_order > background_tasks.turn_order_invalid_through
                             THEN EXCLUDED.turn_order ELSE NULL END,
@@ -160,7 +164,11 @@ def upsert_background_tasks(snapshots: List[Dict[str, Any]]) -> None:
                     roster_name = EXCLUDED.roster_name,
                     model = EXCLUDED.model,
                     remote_device_id = EXCLUDED.remote_device_id,
-                    assignment_owner = background_tasks.assignment_owner AND EXCLUDED.assignment_owner""",
+                    assignment_owner = background_tasks.assignment_owner AND EXCLUDED.assignment_owner
+                WHERE background_tasks.remote_stop_scope IS NULL OR
+                    (EXCLUDED.remote_stop_scope IS NOT NULL AND
+                     CAST(EXCLUDED.remote_stop_scope ->> 'epoch' AS BIGINT) >=
+                     CAST(background_tasks.remote_stop_scope ->> 'epoch' AS BIGINT))""",
             [(
                 snapshot.get("task_id"),
                 snapshot.get("session_id"),
@@ -187,6 +195,7 @@ def upsert_background_tasks(snapshots: List[Dict[str, Any]]) -> None:
                 snapshot.get("started_at") if (snapshot.get("turn_order") is not None or
                                                snapshot.get("turn_order_upper_bound") is not None) else None,
                 uuid.uuid4().hex,
+                json.dumps(snapshot["remote_stop_scope"]) if snapshot.get("remote_stop_scope") else None,
             ) for snapshot in snapshots],
         )
 
@@ -196,7 +205,7 @@ def get_stop_order_proofs(session_id: str, task_ids: List[str]) -> Dict[str, Dic
         return {}
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT task_id, started_at, turn_order, turn_order_upper_bound, turn_order_incarnation "
+        cursor.execute("SELECT task_id, started_at, turn_order, turn_order_upper_bound, turn_order_incarnation, remote_stop_scope "
                        "FROM background_tasks WHERE session_id=%s AND task_id IN (" +
                        ",".join([ph()] * len(task_ids)) + ")", (session_id, *task_ids))
         return {row["task_id"]: dict(row) for row in cursor.fetchall()}
@@ -292,7 +301,7 @@ def list_session_terminal_background_tasks(
             f"""SELECT task_id, session_id, kind, tool_use_id, title, status,
                        started_at, updated_at, summary, reason, report_path,
                        report_chars, agent, roster_name, model, remote_device_id,
-                       assignment_owner, terminal_notified, turn_order, turn_order_upper_bound, turn_order_incarnation
+                       assignment_owner, terminal_notified, turn_order, turn_order_upper_bound, turn_order_incarnation, remote_stop_scope
                   FROM background_tasks
                  WHERE session_id = {_ph}
                    AND (status IN ({terminal_list}) OR remote_device_id IS NOT NULL)
@@ -483,7 +492,7 @@ def get_background_task(task_id: str, session_id: str) -> Optional[Dict[str, Any
             f"""SELECT task_id, session_id, kind, tool_use_id, title, status,
                        started_at, updated_at, summary, reason, report_path, report_chars,
                        agent, roster_name, model, remote_device_id,
-                       assignment_owner, terminal_notified, turn_order, turn_order_upper_bound, turn_order_incarnation
+                       assignment_owner, terminal_notified, turn_order, turn_order_upper_bound, turn_order_incarnation, remote_stop_scope
                   FROM background_tasks
                  WHERE task_id = {_ph} AND session_id = {_ph}""",
             (task_id, session_id),

@@ -41,7 +41,7 @@ async def _consume(row: dict, *, scope=None) -> list[dict]:
     scope = scope or capture_stop_scope(sid, before_turn=int(row["input_cutoff"]) + 1)
     try:
         results = await asyncio.wait_for(stop_all_background_tasks(
-            sid, user_stop=True, scope=scope, receipt=receipt,
+            sid, user_stop=True, scope=scope, receipt=receipt, _receipt_consumer=True,
         ), timeout=30)
     except Exception as exc:
         logger.warning("Stop receipt %s cleanup failed", row["id"], exc_info=True)
@@ -54,12 +54,12 @@ async def _consume(row: dict, *, scope=None) -> list[dict]:
     if incomplete:
         try:
             from app.core.turn_recorder import record_drained_event
+            from app.core.scoped_remote_stop import incomplete_text
             await record_drained_event(sid, {
                 "type": "system", "subtype": "stop_incomplete",
                 "data": {"interrupted_turn_id": row["turn_id"], "stop_receipt_id": row["id"],
                          "incomplete": True,
-                         "content": "Stop could not safely identify all older background work. "
-                                    "Some tasks may still be running; stop those tasks individually.",
+                         "content": incomplete_text(results),
                          "tasks": [r["task_id"] for r in results if r.get("task_id") and r.get("incomplete")]},
             })
         except Exception:

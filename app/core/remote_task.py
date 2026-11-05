@@ -548,6 +548,8 @@ async def dispatch_remote(
         root_session_id=root_session_id, owner_session_id=caller_session_id, label=label,
         agent_name=agent_name, roster_name=roster_name, provider_id=provider_id,
         model_id=model_id, prompt=prompt, launch_tool_use_id=launch_tool_use_id)
+    for sid in dict.fromkeys((root_session_id, caller_session_id)):
+        task_registry.advance_remote_stop_scope(sid, worker_id, answer.get("stop_scope"))
     receipt = remote_receipt(answer, worker=worker, worker_id=worker_id, result_agent=result_agent,
                              model_id=model_id, label=label, mode=mode)
     if warning:
@@ -760,6 +762,7 @@ def _answer(worker_session_id: str, turn: Mapping[str, Any], row: Mapping[str, A
         "created": created,
         "status": "started" if created else "already_started",
         "owner_device_id": ctx.device_id if ctx else None,
+        "stop_scope": {"generation": worker_session_id, "epoch": 1},
         "permission_mode": (turn.get("overrides") or {}).get("permission_mode") or row.get("permission_mode"),
         "checkout": {"mode": mode, "branch": row.get("branch") if mode == "branch" else None},
     }
@@ -974,7 +977,7 @@ def prepare_task_start(body: Mapping[str, Any], from_device: str) -> Dict[str, A
                 command_id=COMMAND_PREFIX + start.worker_session_id, _conn=conn)
             # The report it owes, durable from birth: a restart at any point
             # after this commit still ends in a report (``sweep``).
-            remote_tasks.record_child(start.worker_session_id, from_device, conn=conn)
+            remote_tasks.record_child(start.worker_session_id, from_device, conn=conn, input_order=turn["insert_order"])
     except BaseException:
         if checkout is not None:
             discard_unused_worker_checkout(checkout)
@@ -2344,6 +2347,17 @@ async def deliver_stops() -> int:
         return 0
     groups: Dict[tuple, List[str]] = {}
     for row in rows:
+        from app.core.task_registry import USER_STOP_REASON
+        if row.get("stop_reason") == USER_STOP_REASON or row.get("stop_state") == remote_tasks.STOP_INCOMPLETE_NOTICE:
+            from app.core.scoped_remote_stop import incomplete, record_incomplete_note
+            result = incomplete(row["worker_session_id"], row["target_device_id"],
+                worker_display_name(row["target_device_id"]), "old queued Stop has no enforceable boundary")
+            await asyncio.to_thread(remote_tasks.defer_unscoped_user_stop, row["worker_session_id"], result["detail"])
+            noted = await record_incomplete_note(row["root_session_id"], [result])
+            if noted:
+                await asyncio.to_thread(remote_tasks.defer_unscoped_user_stop,
+                    row["worker_session_id"], result["detail"], noted=True)
+            continue
         key = (row["target_device_id"], row.get("stop_reason") or "stopped")
         groups.setdefault(key, []).append(row["worker_session_id"])
     answered = 0
@@ -2590,7 +2604,7 @@ async def send_to_child(sender_session_id: str, row: Mapping[str, Any], text: st
     "queued" is never reported as delivered.
     """
     from app.core import agent_messaging
-    from app.core.task_registry import user_stop_holds
+    from app.core.task_registry import user_stop_holds, task_registry
     from app.db import remote_tasks
 
     worker_id = row["worker_session_id"]
@@ -2615,6 +2629,8 @@ async def send_to_child(sender_session_id: str, row: Mapping[str, Any], text: st
     refusal = await asyncio.to_thread(spending_limits.message_refusal, worker_id)
     if refusal:
         return {"text": f"Could not deliver to {who}: {refusal}", "is_error": True}
+    admitted = {sid: task_registry.current_input_order(sid)
+                for sid in dict.fromkeys((dispatch["root_session_id"], dispatch["owner_session_id"]))}
     known = dispatch.get("completion_id")
     body = _with_kind({
         "version": WIRE_VERSION, "to": TO_CHILD, "worker_session_id": worker_id,
@@ -2634,10 +2650,14 @@ async def send_to_child(sender_session_id: str, row: Mapping[str, Any], text: st
     if status == RESUMED:
         if known:
             await reopen(dispatch, known)
+        for sid, order in admitted.items():
+            task_registry.advance_remote_stop_scope(sid, worker_id, answer.get("stop_scope"), new_input=True, admission_order=order)
         return {"text": (f"Resume queued for {who} (turn {answer.get('turn_id')}). You will be woken "
                          "with its new report when it finishes."), "is_error": False}
     if status not in (agent_messaging.DELIVERED, agent_messaging.QUEUED, agent_messaging.HELD):
         return _invalid_answer(who, where)
+    for sid, order in admitted.items():
+        task_registry.advance_remote_stop_scope(sid, worker_id, answer.get("stop_scope"), new_input=True, admission_order=order)
     return {"text": agent_messaging.delivery_receipt(who, status)["text"], "is_error": False}
 
 
@@ -2762,6 +2782,11 @@ _STOPPED_CHILD = "it was stopped on this worker, and a message cannot restart it
 
 
 async def _message_child(msg: Mapping[str, Any], from_device: str) -> Dict[str, Any]:
+    async with _start_lock("scoped:" + msg["worker_session_id"]):
+        return await _message_child_locked(msg, from_device)
+
+
+async def _message_child_locked(msg: Mapping[str, Any], from_device: str) -> Dict[str, Any]:
     """Target side: a message from the worker that started this child."""
     from app.core import agent_messaging, provider_agent, turn_scheduler
     from app.core.task_registry import user_stop_holds
@@ -2781,12 +2806,14 @@ async def _message_child(msg: Mapping[str, Any], from_device: str) -> Dict[str, 
             or child.get("stop_requested_at")):
         raise ValueError(_STOPPED_CHILD)
     if child["state"] == remote_tasks.RUNNING:
+        stop_scope = (await asyncio.to_thread(remote_tasks.reserve_message_scope,
+            msg["message_id"], worker_id, from_device) if msg["kind"] != turn_scheduler.PROGRESS_KIND else None)
         status, turn_id = await agent_messaging.deliver_message(
             worker_id, msg["sender_session_id"], msg["text"], urgent=msg["urgent"],
             kind=msg["kind"])
         if status == agent_messaging.STOPPED:
             raise ValueError(_STOPPED_CHILD)
-        return {"status": status, "turn_id": turn_id}
+        return {"status": status, "turn_id": turn_id, **({"stop_scope": stop_scope} if stop_scope else {})}
     if child["state"] == remote_tasks.OWED and child.get("completion_id") != msg["known_completion_id"]:
         raise ValueError("it just finished and its report is still on its way to you; send the "
                          "message again after that report arrives")
@@ -2804,6 +2831,8 @@ async def _message_child(msg: Mapping[str, Any], from_device: str) -> Dict[str, 
         if turn_id == turn_scheduler.HELD:
             return {"status": agent_messaging.HELD, "turn_id": None}
         return {"status": agent_messaging.QUEUED, "turn_id": turn_id}
+    # Reserve before the first delivery await, not after enqueuing a newer turn.
+    stop_scope = await asyncio.to_thread(remote_tasks.reserve_message_scope, msg["message_id"], worker_id, from_device)
     # Known as a worker again, so its settle hook owes the new report at once.
     provider_agent.register_worker_session(worker_id)
     turn_id = await turn_scheduler.on_agent_message(
@@ -2814,7 +2843,7 @@ async def _message_child(msg: Mapping[str, Any], from_device: str) -> Dict[str, 
     if not await asyncio.to_thread(remote_tasks.resume_child, worker_id, from_device,
                                    msg["known_completion_id"]):
         logger.warning("remote_task: resumed %s, but its report row did not reopen", worker_id)
-    return {"status": RESUMED, "turn_id": turn_id}
+    return {"status": RESUMED, "turn_id": turn_id, "stop_scope": stop_scope}
 
 
 async def _message_main(msg: Mapping[str, Any], from_device: str) -> Dict[str, Any]:
@@ -2856,7 +2885,8 @@ async def handle_task_message(body: Dict[str, Any], from_device: str) -> Dict[st
             if (seen["from_device_id"] != from_device
                     or seen["worker_session_id"] != msg["worker_session_id"]):
                 raise ValueError("This message id was already used for another message.")
-            return {**seen["answer"], "duplicate": True}
+            if not seen["answer"].get("_scope_pending"):
+                return {**seen["answer"], "duplicate": True}
         if msg["to"] == TO_CHILD:
             answer = await _message_child(msg, from_device)
         else:
