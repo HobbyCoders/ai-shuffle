@@ -115,6 +115,7 @@ def test_between_turns_a_switch_is_not_followed(scene):
 
 def test_a_checkout_another_session_shares_is_never_taken(scene):
     peer = _new_session(scene["project"]["id"], OLD)
+    _start_turn(peer)  # An idle historical binding no longer reserves a checkout.
     _start_turn(scene["sid"])
     _git(scene["worktree"], "switch", "-c", NEW)
 
@@ -176,7 +177,8 @@ def test_the_browser_still_refuses_a_shared_checkout_by_name(scene, monkeypatch)
     from app.core import browser_runtime, profiles
 
     monkeypatch.setattr(profiles, "get_profile", lambda pid: {"config": {"env": {}, "ai_tools": {}}})
-    _new_session(scene["project"]["id"], OLD)
+    peer = _new_session(scene["project"]["id"], OLD)
+    _start_turn(peer)
     _start_turn(scene["sid"])
     _git(scene["worktree"], "switch", "-c", NEW)
 

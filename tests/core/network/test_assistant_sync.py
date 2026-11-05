@@ -89,7 +89,9 @@ def test_any_session_can_be_settled_and_archived(workers):
         assert not database.get_session(shared["id"])["is_active"]
         archived = database.create_session("archived", "default", is_active=True)
         session_active._write(archived["id"], True, archived=True, local=True)
-        assert database.get_session(archived["id"])["status"] == "archived"
+        row = database.get_session(archived["id"])
+        assert row["status"] == "active"
+        assert not row["is_active"]
 
 
 def test_account_collection_keeps_wire_compatibility():

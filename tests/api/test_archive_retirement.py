@@ -32,4 +32,9 @@ def test_aliases_return_canonical_state_and_preserve_running_work(mock_db, metho
     assert "_settled_membership" not in canonical
     assert turns.get_turn(tid) == before
     assert task_registry.is_user_stopped("old")
-    assert database.get_session("old")["status"] == "active"
+    row = database.get_session("old")
+    assert row["status"] == "active"
+    # These retired API seams must not refuse resume/move/compact even when
+    # a caller is still holding an old row rather than the canonical response.
+    for action in ("resume", "move", "compact"):
+        routes._refuse_archived({**row, "status": "archived"}, action)
