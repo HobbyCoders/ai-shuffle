@@ -136,6 +136,19 @@ jobs:
             android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
           if-no-files-found: error
 
+      # A second debug-only build exercises the real notification prompt without
+      # Firebase credentials. Upload the ordinary APKs above before this overwrites them.
+      - name: Build push-enabled notification permission smoke APKs
+        run: ./gradlew -PnotificationSmoke=true assembleDebug assembleDebugAndroidTest --max-workers=2 --stacktrace
+      - uses: actions/upload-artifact@v4
+        with:
+          retention-days: 1
+          name: android-notification-smoke-apks
+          path: |
+            android/app/build/outputs/apk/debug/app-debug.apk
+            android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+          if-no-files-found: error
+
       - name: Decode release keystore
         if: github.repository == 'HobbyCoders/ai-shuffle' && github.actor_id == '76577322' && github.triggering_actor == github.actor && ((github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))) || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))) && inputs.publish_download && (inputs.release_tag != '' || github.ref == 'refs/heads/main')
         env:
@@ -195,12 +208,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # GitHub-hosted runners have 4 vCPUs and 16 GB. The app uses no
-          # Google Play services, so both levels run the plain AOSP image:
-          # API 36 google_apis spent the guest CPU on Play services startup,
-          # hit SystemUI/GMS ANRs before install (run 38343028922) and, with
-          # the whole host, still lost window focus and delivered obscured
-          # taps mid-suite (run 38344827383). API 36 keeps the larger guest.
+          # GitHub-hosted runners have 4 vCPUs and 16 GB. API 34 stays AOSP.
+          # API 36 deliberately reverses the old AOSP-only image decision:
+          # google_apis permits a signed, absent AOSP alternate WebView >=136;
+          # default cannot replace its differently signed, crashing WebView 133.
+          # Earlier google_apis ANRs were recorded in runs 38343028922 and
+          # 38344827383 (now unavailable/404). Six independent first-attempt
+          # boots across both workflows reached a stable launcher without ANR
+          # recovery: debug 41544019324, 41546528364, 41548997981;
+          # minified 41544019247, 41546528197, 41548997948.
+          # This is bounded boot evidence, not proof the GMS risk is eliminated.
+          # API 36 keeps the larger guest; GMS/app failures still fail closed.
           - api: 34
             target: default
             cores: 2
@@ -212,7 +230,9 @@ jobs:
           # Making API 36 gate promotion is a separate owner decision.
           # Internal tracking: #2375.
           - api: 36
-            target: default
+            # Google APIs permits co-installing official com.android.webview as
+            # an absent alternate provider, without replacing a system package.
+            target: google_apis
             cores: 4
             memory: 4096
             advisory: true
@@ -231,6 +251,20 @@ jobs:
           # run-android-ui-tests.sh installs from instrumentation-apks/ relative
           # to android/, its working directory.
           path: android/instrumentation-apks
+      - uses: actions/download-artifact@v4
+        with:
+          name: android-notification-smoke-apks
+          path: android/notification-instrumentation-apks
+      - name: Cache pinned AOSP alternate WebView
+        if: matrix.api == 36
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/ci-webview.apk
+          key: aosp-webview-x86_64-8da41a8692c64870dc875a0fa656c59a678aa09902935c5095e7de6fd7c55a87
+      - name: Fetch or verify pinned AOSP alternate WebView for API 36
+        if: matrix.api == 36
+        # On cache hits the helper still verifies size/SHA; installation verifies again.
+        run: python3 ci/ci_webview.py "$RUNNER_TEMP/ci-webview.apk"
       - name: Free hosted-runner disk before preparing the AVD
         run: |
           df -h
@@ -245,6 +279,7 @@ jobs:
       - name: Check emulator readiness and instrumentation result parsers
         run: |
           python3 ci/test-emulator-readiness.py
+          python3 ci/test-ci-webview.py
           python3 ci/test-instrumentation-parser.py
           python3 ci/test-ui-runner.py
       - name: Enable emulator acceleration
@@ -263,6 +298,8 @@ jobs:
       - name: Exercise native onboarding and tool permissions
         id: emulator_tests
         uses: reactivecircus/android-emulator-runner@v2
+        env:
+          CI_WEBVIEW_APK: ${{ runner.temp }}/ci-webview.apk
         with:
           api-level: ${{ matrix.api }}
           target: ${{ matrix.target }}

@@ -85,40 +85,91 @@ test('source builds stage without replacing running files and activate on restar
 });
 
 test('installed-entry factory fully hashes a real ready journal before selection', async t => {
- const { f, u } = await rollbackFixture(t);
- const { version } = JSON.parse(await fs.readFile(new URL('../launcher.json', import.meta.url), 'utf8'));
- const { launcherValidatedRestorePoint } = require('../dist/main/update-restore-point.js');
- assert.equal(version, 9, 'the audited installed factory must cover the shipped launcher');
- assert.equal(launcherValidatedRestorePoint('win32', version, true, false), true);
- const { SinglePassClusterCopy } = require('../dist/main/update-restore-point.js');
+ const launcher = await fs.readFile(new URL('../launcher.json', import.meta.url), 'utf8');
+ const { version } = JSON.parse(launcher);
+ const { SinglePassClusterCopy, launcherValidatedRestorePoint, checkRestorePointStructure } = require('../dist/main/update-restore-point.js');
+ const { IncrementalClusterCopy } = require('../dist/main/incremental-restore-point.js');
  const { ColdClusterCopy } = require('../dist/main/database-restore.js');
- const cluster = path.join(f.root, 'postgres');
- await fs.mkdir(path.join(cluster, 'data', 'global'), { recursive: true });
- await fs.writeFile(path.join(cluster, 'data', 'PG_VERSION'), '17');
- await fs.writeFile(path.join(cluster, 'data', 'global', 'pg_control'), 'control');
- await u.prepareRollback(async () => new SinglePassClusterCopy(cluster, async () => {}));
- // Execute the actual installed-entry factory initializer. Its deferred binary/stop
- // dependencies are deliberately absent: validating a ready point must not use them.
- const ts = require('typescript');
- const text = await fs.readFile(new URL('../src/main/installed-entry.ts', import.meta.url), 'utf8');
- const source = ts.createSourceFile('installed-entry.ts', text, ts.ScriptTarget.ES2022, true);
- let initializer;
- const visit = node => {
-  if (ts.isVariableDeclaration(node) && node.name.getText(source) === 'database') initializer = node.initializer.getText(source);
-  ts.forEachChild(node, visit);
- };
- visit(source);
- assert.ok(initializer, 'installed launcher must supply its database factory');
- const factory = vm.runInNewContext(ts.transpileModule(`const database = ${initializer}; database;`, {
-  compilerOptions: { target: ts.ScriptTarget.ES2022 }
- }).outputText, { ColdClusterCopy, path, userData: f.root });
- const copy = await factory(A);
- assert.equal(copy.validate, ColdClusterCopy.prototype.validate, 'ready points use the full ColdClusterCopy validator');
- await u.prepareRollback(factory);
- // Same names AND same size: only reading the copied bytes detects this corruption.
- await fs.writeFile(path.join(cluster, 'update-snapshot', 'data', 'global', 'pg_control'), 'CORRUPT');
- await assert.rejects(u.prepareRollback(factory), /validation/);
- assert.equal(u.pendingVersion, B, 'the corrupt point never reaches select');
+ assert.equal(version, 10, 'the audited installed factory must cover the shipped launcher');
+ assert.equal(launcherValidatedRestorePoint('win32', version, true, false), true);
+ const entry = await fs.readFile(new URL('../dist/main/installed-entry.js', import.meta.url), 'utf8');
+ for (const [producer, Copy, cached] of [
+  ['single-pass', SinglePassClusterCopy, false],
+  ['incremental', IncrementalClusterCopy, false],
+  ['incremental cache', IncrementalClusterCopy, true],
+ ]) for (const corrupt of [null, path.join('global', 'pg_control'), path.join('base', '1', '1259')]) {
+  await t.test(`${producer}: ${corrupt ?? 'valid'} contents`, async t => {
+   const { f, u, journal } = await rollbackFixture(t);
+   const cluster = path.join(f.root, 'postgres');
+   for (const [name, body] of [['PG_VERSION', '17'], [path.join('global', 'pg_control'), 'control'], [path.join('base', '1', '1259'), 'rows']]) {
+    await fs.mkdir(path.dirname(path.join(cluster, 'data', name)), { recursive: true });
+    await fs.writeFile(path.join(cluster, 'data', name), body);
+   }
+   const copy = new Copy(cluster, async () => {});
+   assert.equal(copy.validate, ColdClusterCopy.prototype.validate);
+   let retained;
+   if (cached) {
+    await copy.snapshot(); await copy.discard();
+    retained = await fs.stat(path.join(cluster, 'update-copy-cache', 'data', 'global', 'pg_control'));
+   }
+   await u.prepareRollback(async () => copy);
+   assert.equal((await journal()).phase, 'ready');
+   assert.equal((await journal()).revision, B);
+   if (cached) assert.equal((await fs.stat(path.join(cluster, 'update-snapshot', 'data', 'global', 'pg_control'))).ino, retained.ino, 'the real producer reuses the retained file');
+   // Same names AND same size: structural validation cannot detect either change.
+   if (corrupt) {
+    const file = path.join(cluster, 'update-snapshot', 'data', corrupt);
+    const bytes = await fs.readFile(file);
+    await fs.writeFile(file, Buffer.alloc(bytes.length, 'X'));
+    await checkRestorePointStructure(cluster);
+   }
+   const events = [], module = { exports: {} };
+   let manager;
+   class InstalledUpdates extends SourceUpdates {
+    constructor(options) { super({ ...f.options, baseline: options.baseline, launcher: options.launcher }); manager = this; assert.equal(options.launcher, 10); }
+    async select(...args) {
+     assert.deepEqual(events, ['hash:start', 'hash:done'], 'full validation must finish before selection');
+     events.push('select'); return super.select(...args);
+    }
+   }
+   class ObservedCopy extends ColdClusterCopy {
+    async validate() { events.push('hash:start'); await super.validate(); events.push('hash:done'); }
+   }
+   // Run the actual Windows entry and factory, not a reimplementation of their order.
+   // Only external Electron/process operations and fixture resource paths are replaced.
+   const app = { requestSingleInstanceLock: () => true, releaseSingleInstanceLock: () => {}, getPath: () => f.root, getName: () => 'test', getAppPath: () => f.root,
+    quit: () => events.push('quit'), commandLine: { getSwitchValue: () => '' } };
+   vm.runInNewContext(entry, { module, exports: module.exports, process: { platform: 'win32', resourcesPath: f.root, argv: [] }, require: id => {
+    if (id === 'electron') return { app };
+    if (id === 'node:path') return path;
+    if (id === 'node:fs') return { promises: { ...fs, readFile: async (file, ...args) => {
+     if (String(file).endsWith('desktop-build.json')) return JSON.stringify({ revision: A, sequence: 50, launcher: 4 });
+     if (file === path.join(f.root, 'launcher.json')) return launcher;
+     if (String(file).endsWith('application-update-key.pem')) return f.options.publicKey;
+     return fs.readFile(file, ...args);
+    } } };
+    if (id === './source-updates') return { SourceUpdates: InstalledUpdates };
+    if (id === './database-restore') return { ColdClusterCopy: ObservedCopy };
+    if (id === './postgres') return { resolvePostgresBinaries: () => assert.fail('ready validation must not resolve database binaries') };
+    if (id === './worker-process') return { quiesceRecordedWorker: () => assert.fail('ready validation must not stop a worker') };
+    if (id === './launcher-swap') return require('../dist/main/launcher-swap.js');
+    if (id === './installed-host') return { installedExecutable: () => '/test/AI Shuffle.exe', saveInstalledHost: async () => {}, installedLaunchArgs: () => [],
+     launchInstalledSource: async (selected, _root, _args, launcher) => { assert.equal(selected.revision, B); assert.equal(launcher, 10); events.push('launch'); } };
+    assert.fail('Unexpected installed-entry dependency: ' + id);
+   } });
+   if (corrupt) {
+    await assert.rejects(module.exports.startInstalled(), /validation/);
+    assert.deepEqual(events, ['hash:start'], 'corrupt contents never reach selection or launch');
+    assert.equal(manager.pendingVersion, B);
+    assert.equal((await journal()).phase, 'ready', 'the rejected point is retained');
+    assert.equal(JSON.parse(await fs.readFile(path.join(f.root, 'state.json'), 'utf8')).booting, undefined);
+   } else {
+    await module.exports.startInstalled();
+    assert.deepEqual(events, ['hash:start', 'hash:done', 'select', 'launch', 'quit']);
+   }
+   assert.equal(await fs.readFile(path.join(cluster, 'data', 'global', 'pg_control'), 'utf8'), 'control');
+  });
+ }
 });
 
 

@@ -149,9 +149,18 @@ class ArtifactPolicyTests(unittest.TestCase):
         jobs = workflow("android.yml")["jobs"]
         build = jobs["build"]
         exported = {s["with"]["name"]: s for s in uploads(build)}
-        self.assertEqual(set(exported), {"android-instrumentation-apks", "android-download"})
-        self.assertEqual(exported["android-instrumentation-apks"]["with"]["retention-days"], "1")
-        self.assertNotIn("if", exported["android-instrumentation-apks"])
+        self.assertEqual(set(exported), {"android-instrumentation-apks", "android-notification-smoke-apks", "android-download"})
+        for name in ("android-instrumentation-apks", "android-notification-smoke-apks"):
+            self.assertEqual(exported[name]["with"]["retention-days"], "1")
+            self.assertNotIn("if", exported[name])
+            self.assertEqual(exported[name]["with"]["path"].splitlines(), [
+                "android/app/build/outputs/apk/debug/app-debug.apk",
+                "android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk",
+            ])
+        smoke_build = next(s for s in build["steps"] if s.get("name") == "Build push-enabled notification permission smoke APKs")
+        self.assertIn("-PnotificationSmoke=true assembleDebug assembleDebugAndroidTest", smoke_build["run"])
+        self.assertLess(build["steps"].index(exported["android-instrumentation-apks"]), build["steps"].index(smoke_build))
+        self.assertLess(build["steps"].index(smoke_build), build["steps"].index(exported["android-notification-smoke-apks"]))
         for name in ["Decode release keystore", "Build release APK", "Verify APK is signed with the release key", "Prepare public APK download", "Upload public download files"]:
             step = next(s for s in build["steps"] if s.get("name") == name)
             self.assertEqual(step["if"], jobs["publish"]["if"])
@@ -166,6 +175,33 @@ class ArtifactPolicyTests(unittest.TestCase):
         for step in jobs["android-ui"]["steps"]:
             self.assertNotIn("continue-on-error", step)
         self.assertEqual(jobs["publish"]["needs"], ["build", "android-ui"])
+
+    def test_both_api36_readiness_callers_cache_and_verify_the_alternate_provider(self):
+        for filename, jobname in (("android.yml", "android-ui"), ("ci-android-minified.yml", "smoke")):
+            with self.subTest(workflow=filename):
+                job = workflow(filename)["jobs"][jobname]
+                images = {int(entry["api"]): entry["target"] for entry in job["strategy"]["matrix"]["include"]}
+                self.assertEqual({34: "default", 36: "google_apis"}, images)
+                steps = job["steps"]
+                emulator = next(s for s in steps if s.get("uses", "").startswith("reactivecircus/android-emulator-runner@"))
+                self.assertEqual("${{ matrix.target }}", emulator["with"]["target"])
+                self.assertEqual("${{ runner.temp }}/ci-webview.apk", emulator["env"]["CI_WEBVIEW_APK"])
+                # Select the executable contract, not the prose step label.
+                downloads = [s for s in steps if s.get("run") == 'python3 ci/ci_webview.py "$RUNNER_TEMP/ci-webview.apk"']
+                self.assertEqual(1, len(downloads))
+                download = downloads[0]
+                self.assertEqual("matrix.api == 36", download["if"])
+                self.assertEqual('python3 ci/ci_webview.py "$RUNNER_TEMP/ci-webview.apk"', download["run"])
+                caches = [s for s in steps if s.get("uses", "").startswith("actions/cache@")]
+                self.assertEqual(1, len(caches))
+                cache = caches[0]
+                self.assertEqual("matrix.api == 36", cache["if"])
+                self.assertEqual("${{ runner.temp }}/ci-webview.apk", cache["with"]["path"])
+                self.assertEqual("aosp-webview-x86_64-8da41a8692c64870dc875a0fa656c59a678aa09902935c5095e7de6fd7c55a87", cache["with"]["key"])
+                self.assertLess(steps.index(cache), steps.index(download))
+                self.assertLess(steps.index(download), steps.index(emulator))
+                avd = next(s for s in steps if "avdmanager create avd" in s.get("run", ""))
+                self.assertIn(";${{ matrix.target }};x86_64", avd["run"])
 
     def test_manual_only_binary_upload_gates_execute(self):
         android = workflow("android.yml")["jobs"]["publish"]["if"]

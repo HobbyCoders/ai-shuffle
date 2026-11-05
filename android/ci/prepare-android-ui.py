@@ -7,8 +7,8 @@ KeyguardService bind times out while the cold image is still optimizing; runs
 each once, before any Shuffle code is installed. Never dismiss an application
 ANR, never recover during instrumentation, and never turn off Android's dialogs.
 
-Then set the emulator WebView's debug flags (configure_webview) before the app
-is installed.
+Then select and verify the official emulator WebView (configure_webview) before
+the app is installed, keeping all Chromium crash checks enabled.
 """
 
 import os
@@ -121,40 +121,51 @@ def prepare(adb, out: Path, *, deadline_seconds=120, required_samples=3, sleep=t
     raise RuntimeError("Emulator never reached a stable unlocked launcher before app verification")
 
 
-# The emulator's built-in AOSP WebView is never updated and gets no variations
-# seed, so it runs Chromium's code defaults. In Chromium 133 (API 36 image
-# BE2A.250530.026.D1) PartitionAllocUnretainedDanglingPtr defaults to mode=crash:
-# a dangling base::Unretained inside WebView's own IO thread aborted the app
-# process with SIGTRAP mid-suite (release run 38824056427, attempts 1 and 2;
-# Chromium's own field-trial testing config runs this study as
-# dump_without_crashing). Turn off only that internal check. Every other
-# WebView, renderer or app crash still fails the run.
-WEBVIEW_FLAGS_FILE = "/data/local/tmp/webview-command-line"
-WEBVIEW_FLAGS = "_ --disable-features=PartitionAllocUnretainedDanglingPtr"
+# Both API 36 SDK images ship WebView 133. Suppressing its dangling-pointer
+# check only moved the native abort to basic_string SIGABRT (41509192630,
+# 41509957738). Chromium's intercepted-request WeakPtr fix is in 136 (74beb528),
+# but its causal link to those unsymbolized aborts is inferred, not established.
+# On google_apis, com.android.webview is an allowed but ABSENT alternate provider
+# (41544019324). Co-install the official signed AOSP package: do not replace a
+# differently signed system package, bypass signatures or disable crash checks.
+def install_webview(adb):
+    from ci_webview import verify
+    apk = os.environ.get("CI_WEBVIEW_APK")
+    if not apk:
+        raise RuntimeError("API 36 requires a verified CI_WEBVIEW_APK")
+    verify(apk)
+    adb("install", apk)
+    adb("shell", "cmd", "webviewupdate", "set-webview-implementation", "com.android.webview")
 
 
-def configure_webview(adb, out: Path):
+def configure_webview(adb, out: Path, installer=install_webview):
+    from ci_webview import VERSION
     out.mkdir(parents=True, exist_ok=True)
-    # Never disable a check on an unrecognized image or provider. In particular,
-    # API 34 and newer WebViews must exercise their normal crash checks.
     sdk = adb("shell", "getprop", "ro.build.version.sdk").strip()
-    build_id = adb("shell", "getprop", "ro.build.id").strip()
     provider = adb("shell", "dumpsys", "webviewupdate")
     (out / "webview.txt").write_text(provider, encoding="utf-8")
-    current = re.findall(r"^\s*Current WebView package \(name, version\): \(com\.android\.webview, 133\.0\.6943\.137\)\s*$",
-                         provider, re.MULTILINE)
-    if sdk != "36" or build_id != "BE2A.250530.026.D1" or len(current) != 1:
-        print(f"No WebView workaround for SDK {sdk!r}, build {build_id!r}; keeping crash checks enabled", flush=True)
-        return
-    # WebView reads the flags file only on debuggable (userdebug/eng) builds.
-    build_type = adb("shell", "getprop", "ro.build.type").strip()
-    if build_type not in ("userdebug", "eng"):
-        raise RuntimeError(f"WebView ignores {WEBVIEW_FLAGS_FILE} on a {build_type or 'unknown'} build")
-    adb("shell", f"echo '{WEBVIEW_FLAGS}' > {WEBVIEW_FLAGS_FILE} && chmod 644 {WEBVIEW_FLAGS_FILE}")
-    written = adb("shell", "cat", WEBVIEW_FLAGS_FILE).strip()
-    if written != WEBVIEW_FLAGS:
-        raise RuntimeError(f"WebView flags file reads back as {written!r}")
-    report_workaround(adb, f"Known emulator WebView 133 debug-check workaround: {WEBVIEW_FLAGS}")
+    if sdk == "36":
+        current = re.findall(r"^\s*Current WebView package \(name, version\): \((com\.(?:android|google\.android)\.webview), (\d+)\.\d+\.\d+\.\d+\)\s*$",
+                             provider, re.MULTILINE)
+        if len(current) != 1:
+            raise RuntimeError("API 36 requires a WebView >= 136; missing or ambiguous provider: " + provider.strip())
+        if int(current[0][1]) < 136:
+            if current[0][0] != "com.google.android.webview" or "com.android.webview is NOT installed." not in provider:
+                raise RuntimeError("API 36 requires a WebView >= 136 and the google_apis image with an absent AOSP provider")
+            (out / "webview-before.txt").write_text(provider, encoding="utf-8")
+            installer(adb)
+            provider = adb("shell", "dumpsys", "webviewupdate")
+            (out / "webview.txt").write_text(provider, encoding="utf-8")
+            expected = f"Current WebView package (name, version): (com.android.webview, {VERSION})"
+            if provider.count(expected) != 1:
+                raise RuntimeError("Verified AOSP WebView did not become the active provider: " + provider.strip())
+        if int(current[0][1]) < 136:
+            description = "API 36 co-installed pinned AOSP alternate, not the phone provider"
+        else:
+            description = "API 36 retained its existing provider; see exact package/version"
+        report_workaround(adb, description + "; abort/request-lifetime link inferred; all crash checks enabled")
+    else:
+        print(f"SDK {sdk!r}: keeping stock WebView and all crash checks enabled", flush=True)
 
 
 def main():
@@ -164,7 +175,8 @@ def main():
 
     def adb(*args):
         return subprocess.run(["adb", "-s", serial, *args], check=True, text=True,
-                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=15).stdout
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                              timeout=120 if args[0] == "install" else 15).stdout
 
     def diagnostics():
         subprocess.run(["bash", "ci/emulator-diagnostics.sh", "launcher-recovery"],
@@ -172,7 +184,7 @@ def main():
 
     out = Path(os.environ["RUNNER_TEMP"]) / "android-emulator" / "readiness"
     prepare(adb, out, diagnostics=diagnostics)
-    # Before the app is installed: WebView reads its flags when it first loads in a process.
+    # Before the app is installed, select and verify the provider without suppressing crash checks.
     configure_webview(adb, out)
 
 

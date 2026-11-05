@@ -65,6 +65,17 @@
 	],
 	"rules": [
 		{
+			"why": "resident updater identity and preparation timings stay separate from app version, and refresh is connected-worker only",
+			"journeys": ["update-runtime"],
+			"globs": [
+				"frontend/tests/journeys/update-runtime.journey.mjs",
+				"frontend/src/lib/components/settings/pages/SystemPage.svelte",
+				"frontend/src/lib/components/settings/pages/updates-state.svelte.ts",
+				"frontend/src/lib/components/settings/pages/editors/UpdateRuntimeDetails.svelte",
+				"frontend/src/lib/components/settings/pages/editors/UpdateCheckResults.svelte"
+			]
+		},
+		{
 			"why": "Fluid file and installed plugin discovery must agree with composer selection, details and actual prompt expansion on native and Claude chats",
 			"journeys": ["fluid-commands"],
 			"globs": [
@@ -359,6 +370,24 @@
 			]
 		},
 		{
+			"why": "Claude Code Fast mode: mid-turn toggle notices, reported turn speed, refusals and reload persistence",
+			"journeys": ["fast-midturn"],
+			"globs": [
+				"frontend/tests/journeys/fast-midturn.journey.mjs",
+				"frontend/src/lib/constants/models.svelte.ts",
+				"frontend/src/lib/components/chat/ControlsDock.svelte",
+				"frontend/src/lib/components/chat/EffortPopoverCard.svelte",
+				"frontend/src/lib/components/SystemMessage.svelte",
+				"frontend/src/lib/utils/fast-outcome.ts",
+				"app/api/sessions_permissions.py",
+				"app/core/model_override.py",
+				"app/core/fast_outcome.py",
+				"app/core/provider/harness_adapter.py",
+				"fluid/fluid/engine/delegated.py",
+				"fluid/fluid/engine/delegated_proto.py"
+			]
+		},
+		{
 			"why": "Claude Code compaction: the card, the context meter, and the delegated leg and mod that turn the CLI's compaction frames into them",
 			"journeys": ["compaction"],
 			"globs": [
@@ -375,11 +404,6 @@
 			"why": "per-frame transcript/composer stability regression cases",
 			"journeys": ["chat-position-stability"],
 			"globs": ["frontend/tests/journeys/chat-position-stability.journey.mjs"]
-		},
-		{
-			"why": "keep the existing Fast-mode journey reachable when its own test changes",
-			"journeys": ["fast-midturn"],
-			"globs": ["frontend/tests/journeys/fast-midturn.journey.mjs"]
 		},
 		{
 			"why": "owner memory questions and their replicated keep-both answers reach real session prompts",

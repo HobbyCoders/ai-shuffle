@@ -153,65 +153,83 @@ class EmulatorReadinessTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "never reached"):
             self.run_preparation([HOME, HOME, "mCurrentFocus=null", HOME, HOME, "mCurrentFocus=null"])
 
-    def run_webview(self, build_type="userdebug", readback=None, sdk=SDK, build_id=BUILD_ID,
-                    provider=SYNTHETIC_PROVIDER):
-        commands, flags = [], {}
+    def run_webview(self, sdk=SDK, provider=SYNTHETIC_PROVIDER, activate=True):
+        from ci_webview import VERSION as FIXED_VERSION
+        commands, installed = [], []
+        updated = f"Current WebView package (name, version): (com.android.webview, {FIXED_VERSION})\n"
+        self.installed = installed
 
         def adb(*args):
             commands.append(args)
-            properties = {"ro.build.type": build_type, "ro.build.version.sdk": sdk, "ro.build.id": build_id}
             if args[:2] == ("shell", "getprop"):
-                return properties[args[2]] + "\n"
-            if args[:2] == ("shell", "cat"):
-                return (readback if readback is not None else flags.get(args[2], "")) + "\n"
+                return {"ro.build.version.sdk": sdk, "ro.build.id": BUILD_ID}[args[2]] + "\n"
             if args == ("shell", "dumpsys", "webviewupdate"):
-                return provider
-            written = re.fullmatch(r"echo '([^']*)' > (\S+) && chmod 644 \2", args[1]) if len(args) == 2 else None
-            if written:
-                flags[written.group(2)] = written.group(1)
+                return updated if installed and activate else provider
             return ""
+
+        def installer(connection):
+            self.assertIs(connection, adb)
+            installed.append(True)
 
         self.webview_log = io.StringIO()
         with tempfile.TemporaryDirectory() as folder, redirect_stdout(self.webview_log):
             summary = Path(folder) / "summary"
             with patch.dict("os.environ", {"GITHUB_STEP_SUMMARY": str(summary)}):
-                configure_webview(adb, Path(folder))
+                configure_webview(adb, Path(folder), installer=installer)
             evidence = (Path(folder) / "webview.txt").read_text()
             self.summary = summary.read_text() if summary.exists() else ""
-        return commands, flags, evidence
+        return commands, evidence
 
-    def test_webview_turns_off_only_the_unretained_dangling_ptr_crash(self):
-        commands, flags, evidence = self.run_webview()
-        self.assertEqual({"/data/local/tmp/webview-command-line": "_ --disable-features=PartitionAllocUnretainedDanglingPtr"}, flags)
-        self.assertIn("133.0.6943.137", evidence)
-        self.assertIn("Known emulator WebView 133 debug-check workaround", self.webview_log.getvalue())
-        self.assertIn(module["WEBVIEW_FLAGS"], self.webview_log.getvalue())
-        self.assertIn(module["WEBVIEW_FLAGS"], self.summary)
-        self.assertIn("SDK 36, build BE2A.250530.026.D1", self.summary)
-        self.assertIn("com.android.webview, 133.0.6943.137", self.summary)
-        # Only that one feature: no blanket crash, field-trial or sandbox switches.
-        written = flags["/data/local/tmp/webview-command-line"].split()
-        self.assertEqual(["_", "--disable-features=PartitionAllocUnretainedDanglingPtr"], written)
-        self.assertFalse(any("force-stop" in command or "kill" in " ".join(command) for command in commands))
+    def test_stock_fixed_providers_keep_every_crash_check(self):
+        for package in ("com.android.webview", "com.google.android.webview"):
+            for version in ("136.0.7103.129", "151.0.0.0"):
+                with self.subTest(package=package, version=version):
+                    provider = f"Current WebView package (name, version): ({package}, {version})\n"
+                    commands, evidence = self.run_webview(provider=provider)
+                    self.assertEqual(provider, evidence)
+                    self.assertIn("all crash checks enabled", self.webview_log.getvalue())
+                    self.assertIn("all crash checks enabled", self.summary)
+                    self.assertIn(f"{package}, {version}", self.summary)
+                    self.assertFalse(any("disable-features" in " ".join(command) or "webview-command-line" in " ".join(command)
+                                         or "force-stop" in command or "kill" in " ".join(command) or "install" in command
+                                         for command in commands))
 
-    def test_other_images_and_providers_keep_all_crash_checks(self):
-        known = "Current WebView package (name, version): (com.android.webview, 133.0.6943.137)\n"
-        for overrides in ({"sdk": "34"}, {"sdk": ""}, {"build_id": "new-image"},
-                          {"provider": known.replace("133.0.6943.137", "134.0.0.0")},
-                          {"provider": known.replace("com.android.webview", "com.google.android.webview")},
-                          {"provider": ""}, {"provider": known * 2},
-                          {"provider": known.replace("Current WebView", "Preferred WebView")}):
-            with self.subTest(overrides=overrides):
-                commands, flags, _ = self.run_webview(**overrides)
-                self.assertEqual({}, flags)
-                self.assertFalse(any("chmod" in " ".join(command) for command in commands))
-                self.assertIn("keeping crash checks enabled", self.webview_log.getvalue())
+    def test_api34_keeps_the_original_stock_image(self):
+        commands, evidence = self.run_webview(sdk="34")
+        self.assertEqual(SYNTHETIC_PROVIDER, evidence)
+        self.assertIn("keeping stock WebView and all crash checks enabled", self.webview_log.getvalue())
+        self.assertEqual([("shell", "getprop", "ro.build.version.sdk"), ("shell", "dumpsys", "webviewupdate")], commands)
 
-    def test_webview_flags_fail_closed_when_android_would_ignore_them(self):
-        with self.assertRaisesRegex(RuntimeError, "ignores"):
-            self.run_webview(build_type="user")
-        with self.assertRaisesRegex(RuntimeError, "reads back"):
-            self.run_webview(readback="")
+    def test_google_image_coinstalls_an_absent_official_provider(self):
+        # Package-presence layout from run 41544019324; no system APK update.
+        provider = SYNTHETIC_PROVIDER.replace("com.android.webview", "com.google.android.webview") + "com.android.webview is NOT installed.\n"
+        _, evidence = self.run_webview(provider=provider)
+        self.assertEqual([True], self.installed)
+        self.assertIn("com.android.webview, 136.0.7103.129", evidence)
+        self.assertIn("co-installed pinned AOSP alternate, not the phone provider", self.summary)
+        self.assertIn("link inferred", self.summary)
+        self.assertIn("all crash checks enabled", self.summary)
+        with self.assertRaisesRegex(RuntimeError, "did not become the active provider"):
+            self.run_webview(provider=provider, activate=False)
+
+    def test_coinstall_verifies_bytes_and_never_replaces_a_system_package(self):
+        commands = []
+        with patch.dict("os.environ", {"CI_WEBVIEW_APK": "/fixture/verified.apk"}), patch("ci_webview.verify") as verify:
+            module["install_webview"](lambda *args: commands.append(args))
+        verify.assert_called_once_with("/fixture/verified.apk")
+        self.assertEqual([("install", "/fixture/verified.apk"),
+                          ("shell", "cmd", "webviewupdate", "set-webview-implementation", "com.android.webview")], commands)
+        with patch.dict("os.environ", {"CI_WEBVIEW_APK": "/fixture/invalid.apk"}), patch("ci_webview.verify", side_effect=RuntimeError("bad digest")):
+            with self.assertRaisesRegex(RuntimeError, "bad digest"):
+                module["install_webview"](lambda *args: self.fail("Invalid APK reached adb"))
+
+    def test_old_or_ambiguous_api36_providers_fail_closed(self):
+        known = SYNTHETIC_PROVIDER
+        for provider in (known, known.replace("133.0.6943.137", "134.0.0.0"), "", known * 2,
+                         known.replace("Current WebView", "Preferred WebView"),
+                         known.replace("com.android.webview", "com.unknown.provider")):
+            with self.subTest(provider=provider), self.assertRaisesRegex(RuntimeError, "requires a WebView >= 136"):
+                self.run_webview(provider=provider)
 
 
 if __name__ == "__main__":

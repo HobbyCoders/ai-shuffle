@@ -429,13 +429,14 @@ def test_workflow_wiring_matches_the_gate():
     assert config["env"]["SOURCE_CHANNEL"] == "nightly"
     steps = config["jobs"]["gate"]["steps"]
     assert steps[1]["run"] == "python3 scripts/ci/nightly_changed.py"
-    select, pin = steps[-2], steps[-1]
+    select = next(step for step in steps if step.get("id") == "ci")
+    pin = next(step for step in steps if step.get("id") == "version")
     assert select["if"] == "steps.changed.outputs.changed == 'true'"
     assert select["run"].endswith("edge_publication_gate.py --select")
     # The version is pinned once, by trusted control code, for the selected revision.
     assert pin["if"] == "steps.ci.outputs.ready == 'true'"
     assert pin["env"]["REVISION"] == "${{ steps.ci.outputs.revision }}"
-    assert "python -I scripts/ci/publication_source.py version" in pin["run"]
+    assert "python -I scripts/ci/source_ui_artifact.py" in pin["run"]
     assert config["jobs"]["gate"]["outputs"]["version"] == "${{ steps.version.outputs.version }}"
     assert config["jobs"]["ui"]["with"]["version"] == "${{ needs.gate.outputs.version }}"
     assert steps[0]["with"]["fetch-depth"] == "0"

@@ -14,7 +14,8 @@ import {
 	UpdatesState,
 	describeWorker,
 	imageHint,
-	installerHint
+	installerHint,
+	normalizeUpdateRuntimeStatus
 } from './updates-state.svelte';
 
 const self = (phase: string, extra: Record<string, unknown> = {}) => ({
@@ -50,6 +51,144 @@ async function ready() {
 	await state.refresh();
 	expect(state.policy?.allow_updates).toBe(true);
 }
+
+describe('connected-worker runtime status', () => {
+	it('has no updater refresh action or eligibility plumbing, even for legacy available metadata', async () => {
+		transport.get.mockResolvedValueOnce({
+			allow_updates: true, update_all_workers: true, supported: true, phase: 'idle', running_version: 'a'.repeat(40),
+			updater: { revision: 'b'.repeat(40), capabilities: ['refresh-updater-v1'], refresh: 'available' }
+		});
+		await state.refresh();
+		expect('refreshUpdater' in state).toBe(false);
+		expect('canRefreshUpdater' in state).toBe(false);
+		expect(transport.post).not.toHaveBeenCalled();
+	});
+
+	it('fails closed on the exact controlled malformed legacy response from QA', async () => {
+		transport.get.mockResolvedValueOnce({
+			allow_updates: true, update_all_workers: true, supported: true, phase: 'idle', running_version: 'a'.repeat(40),
+			updater: { revision: 'not-a-revision', capabilities: ['refresh-updater-v1'], refresh: 'available' },
+			diagnostics: { revision: 'bogus', total_elapsed_ms: -50, stages: 'malformed' }
+		});
+		await state.refresh();
+		expect(state.runtime?.updater).toEqual({ revision: null, capabilities: [], refresh: 'unknown' });
+		expect(state.runtime?.diagnostics).toBeNull();
+		expect(transport.post).not.toHaveBeenCalled();
+	});
+
+	it('normalizes malformed peer metadata without borrowing the connected worker identity', async () => {
+		await ready();
+		snapshots = [[self('idle', {
+			updater: { revision: 'not-a-revision', capabilities: ['refresh-updater-v1'], refresh: 'available' },
+			diagnostics: { revision: 'bogus', total_elapsed_ms: -50, stages: 'malformed' }, private_path: '/private/worker'
+		})]];
+		await state.check();
+		expect(state.rows?.[0].runtime?.updater).toEqual({ revision: null, capabilities: [], refresh: 'unknown' });
+		expect(state.rows?.[0].runtime?.diagnostics).toBeNull();
+		expect(state.rows?.[0].runtime).not.toHaveProperty('private_path');
+	});
+
+
+	it('retains resident identity and timings separately from app identity', async () => {
+		const status = {
+			allow_updates: true, update_all_workers: false, supported: true, phase: 'idle',
+			running_version: 'a'.repeat(40),
+			updater: { revision: 'b'.repeat(40), capabilities: ['refresh-updater-v1'], refresh: 'available' },
+			diagnostics: { revision: 'a'.repeat(40), stages: [], total_elapsed_ms: 1500 }
+		};
+		transport.get.mockResolvedValueOnce(status);
+		await state.refresh();
+		expect(state.runtime).toMatchObject(status);
+	});
+
+	it('keeps the last read-only report stale after a failed read and recovers on a fresh read', async () => {
+		const status = { allow_updates: true, update_all_workers: false, supported: true, phase: 'idle', running_version: 'a'.repeat(40) };
+		transport.get.mockResolvedValueOnce(status);
+		await state.refresh();
+		transport.get.mockRejectedValueOnce(new Error('offline'));
+		await state.refresh();
+		expect(state.runtimeStale).toBe(true);
+		expect(state.runtime?.running_version).toBe(status.running_version);
+		transport.get.mockResolvedValueOnce(status);
+		await state.refresh();
+		expect(state.runtimeStale).toBe(false);
+		expect(transport.post).not.toHaveBeenCalled();
+	});
+});
+
+describe('bounded runtime metadata normalization', () => {
+	const unknown = { revision: null, capabilities: [], refresh: 'unknown' };
+	const resident = { revision: 'b'.repeat(40), capabilities: ['refresh-updater-v1'], refresh: 'available' };
+	const stage = { stage: 'tools_cache', elapsed_ms: 0, outcome: 'hit' };
+	const diagnostics = { revision: null, total_elapsed_ms: 1500, stages: [stage] };
+
+	it.each([null, undefined, [], 'legacy', 17, {}])('defaults missing/legacy root %j to unknown metadata', (value) => {
+		const safe = normalizeUpdateRuntimeStatus(value);
+		expect(safe.updater).toEqual(unknown);
+		expect(safe.diagnostics).toBeNull();
+		expect(safe.supported).toBe(false);
+	});
+
+	it.each([
+		{ revision: 'invalid' }, { revision: 'a'.repeat(40) + '\n' }, { revision: 12 }, { revision: {} },
+		{ capabilities: 'refresh-updater-v1' }, { capabilities: [null] }, { capabilities: ['unknown-capability'] },
+		{ capabilities: Array(17).fill('refresh-updater-v1') }, { refresh: 'restart-anywhere' }, { refresh: {} }
+	])('rejects malformed resident metadata %j independently of valid diagnostics', (extra) => {
+		const safe = normalizeUpdateRuntimeStatus({ updater: { ...resident, ...extra }, diagnostics });
+		expect(safe.updater).toEqual(unknown);
+		expect(safe.diagnostics).toEqual(diagnostics);
+	});
+
+	it.each(['available', 'current', 'container_restart_required'])('does not prove %s with a null resident identity', (refresh) => {
+		expect(normalizeUpdateRuntimeStatus({ updater: { ...resident, revision: null, refresh } }).updater).toEqual(unknown);
+	});
+
+	it.each([
+		{ stages: 'malformed' }, { stages: {} }, { stages: [null] }, { stages: Array(97).fill(stage) },
+		{ stages: [{ ...stage, stage: 'constructor' }] }, { stages: [{ ...stage, outcome: 'raw-error' }] },
+		{ stages: [{ ...stage, elapsed_ms: -1 }] }, { stages: [{ ...stage, elapsed_ms: Infinity }] },
+		{ stages: [{ ...stage, elapsed_ms: NaN }] }, { stages: [{ ...stage, elapsed_ms: 2 ** 53 + 2 }] },
+		{ stages: [{ ...stage, elapsed_ms: '30' }] }, { total_elapsed_ms: -50 }, { total_elapsed_ms: NaN },
+		{ total_elapsed_ms: Infinity }, { total_elapsed_ms: 2 ** 53 + 2 }, { total_elapsed_ms: '50' },
+		{ revision: 'bogus' }, { revision: {} }
+	])('drops an entire malformed diagnostics report %j independently of valid resident data', (extra) => {
+		const safe = normalizeUpdateRuntimeStatus({ updater: resident, diagnostics: { ...diagnostics, ...extra } });
+		expect(safe.updater).toEqual(resident);
+		expect(safe.diagnostics).toBeNull();
+	});
+
+	it('keeps bounded valid nested timings without summing them, strips extras and does not mutate input', () => {
+		const raw = {
+			updater: { ...resident, command: '/private/command' }, private_path: '/private/worker',
+			diagnostics: { ...diagnostics, host: 'private-host', stages: [{ ...stage, elapsed_ms: 2 ** 53, command: '/private/command' }] }
+		};
+		const safe = normalizeUpdateRuntimeStatus(raw);
+		expect(safe.updater).toEqual(resident);
+		expect(safe.diagnostics).toEqual({ ...diagnostics, stages: [{ ...stage, elapsed_ms: 2 ** 53 }] });
+		expect(safe).not.toHaveProperty('private_path');
+		expect(raw.updater.command).toBe('/private/command');
+		expect(normalizeUpdateRuntimeStatus(safe)).toEqual(safe);
+		expect(normalizeUpdateRuntimeStatus({ diagnostics: { ...diagnostics, stages: Array(96).fill(stage) } }).diagnostics?.stages).toHaveLength(96);
+	});
+
+	it.each([
+		[{ running_version: 'invalid' }, { running_version: null }],
+		[{ supported: 'true' }, { supported: false }],
+		[{ request_pending: 'false' }, { request_pending: true }],
+		[{ install_pending: {} }, { install_pending: true }]
+	])('fails closed on malformed read-only status fields %j', (extra, expected) => {
+		expect(normalizeUpdateRuntimeStatus({ supported: true, phase: 'idle', running_version: 'a'.repeat(40), updater: resident, ...extra })).toMatchObject(expected);
+		expect(transport.post).not.toHaveBeenCalled();
+	});
+});
+
+it('retains only each checked worker’s own runtime metadata', async () => {
+	await ready();
+	snapshots = [[self('idle', { updater: { revision: 'b'.repeat(40), capabilities: [], refresh: 'current' }, diagnostics: null })]];
+	await state.check();
+	expect(state.rows?.[0].runtime?.updater?.revision).toBe('b'.repeat(40));
+	expect(state.runtime?.updater).toEqual({ revision: null, capabilities: [], refresh: 'unknown' });
+});
 
 describe('check for updates', () => {
 	it('settles once a worker leaves "checking"', async () => {

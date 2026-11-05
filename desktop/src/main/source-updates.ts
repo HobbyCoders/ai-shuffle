@@ -5,7 +5,8 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { extractSource, treeDigest } from './source-archive';
 import { publicSourceFetch, SOURCE_ORIGIN } from './source-auth';
-import { buildSource, removeSourceDirectory, type BuiltSource } from './source-build';
+import { buildSource, removeSourceDirectory, safeDiagnostics, type BuiltSource, type DiagnosticStage, type UpdateDiagnostics } from './source-build';
+import { performance } from 'node:perf_hooks';
 import { prepareNativeRuntime } from './source-runtime';
 import { prepareUIBundle, type UIBundle } from './source-ui-bundle';
 import { durableJson, syncDirectory, type RollbackDatabase } from './database-restore';
@@ -171,6 +172,10 @@ export interface LateRestorePoint {
 
 export class SourceUpdates {
   private state: SourceState = {};
+  private latestDiagnostics: UpdateDiagnostics | null = null;
+  get diagnostics(): UpdateDiagnostics | null {
+    return this.latestDiagnostics ? { ...this.latestDiagnostics, stages: this.latestDiagnostics.stages.map(item => ({ ...item })) } : null;
+  }
   private running: string | null = null;
   // Legacy producers preserve unknown JSON fields, but always rewrite compact
   // JSON. Only our exact serialization proves the most recent state writer.
@@ -430,6 +435,8 @@ export class SourceUpdates {
   }
   async load(): Promise<void> {
     await fs.mkdir(path.join(this.options.root, 'versions'), { recursive: true });
+    try { this.latestDiagnostics = safeDiagnostics(JSON.parse(await fs.readFile(path.join(this.options.root, 'diagnostics.json'), 'utf8'))); }
+    catch { /* optional diagnostics never determine recovery or code selection */ }
     await this.readMigrationFloor();
     const file = path.join(this.options.root, 'state.json');
     let text: string | undefined;
@@ -747,6 +754,13 @@ export class SourceUpdates {
     const stage = path.join(this.options.root, 'staging');
     await removeSourceDirectory(stage);
     await fs.mkdir(stage, { recursive: true });
+    const started = performance.now();
+    this.latestDiagnostics = { revision: manifest.revision, stages: [], total_elapsed_ms: 0 };
+    const diagnostic = (item: DiagnosticStage) => {
+      this.latestDiagnostics!.stages = [...this.latestDiagnostics!.stages, item].slice(-96);
+      this.latestDiagnostics!.total_elapsed_ms = Math.max(0, performance.now() - started);
+    };
+    let assembling = false, assemblyStarted = started;
     try {
       progress(0, 'Downloading verified source…');
       const response = await this.response(`${SOURCE_ORIGIN}/v1/desktop/sources/${manifest.revision}`);
@@ -759,6 +773,7 @@ export class SourceUpdates {
         }
       } finally { await file.close(); }
       if (size !== manifest.size || hash.digest('hex') !== manifest.sha256) throw new Error('Source archive checksum or size mismatch');
+      diagnostic({ stage: 'source_download', elapsed_ms: Math.max(0, performance.now() - started), outcome: 'completed' });
       const unpacked = path.join(stage, 'unpacked'); const extracted = await extractSource(archive, unpacked);
       const entries = await fs.readdir(unpacked);
       if (entries.length !== 1 || !new RegExp(`^(ai-shuffle-${manifest.revision}|HobbyCoders-ai-shuffle-${manifest.revision.slice(0, 7)}[a-f0-9]*)$`, "i").test(entries[0])) throw new Error('Unexpected source archive root');
@@ -772,11 +787,18 @@ export class SourceUpdates {
       const source = path.join(stage, 'source');
       const message = (text: string) => progress(null, text);
       let built: InstalledBuild;
+      assembling = true; assemblyStarted = performance.now();
       if (this.options.build) built = await this.options.build(source, stage, manifest.revision, message);
       else {
+        const runtimeStarted = performance.now();
         const native = await prepareNativeRuntime(source, this.options.root, this.options.bootstrapNode, message);
+        diagnostic({ stage: 'runtimes', elapsed_ms: Math.max(0, performance.now() - runtimeStarted), outcome: 'completed' });
+        const uiStarted = performance.now();
         const prebuiltUI = await prepareUIBundle(stage, manifest, this.options.fetch);
-        built = { ...await buildSource({ source, server: path.join(stage, 'server'), cache: path.join(this.options.root, 'dependencies', native.key.slice(0, 24)), sharedCache: path.join(this.options.root, 'dependencies'), runtime: native.runtime, revision: manifest.revision, version: manifest.version, prebuiltUI, log: path.join(this.options.root, 'build.log'), progress: message }), runtimeKey: native.key, layout: 2 };
+        const uiDisabled = ['0', 'false', 'off'].includes((process.env.AI_SHUFFLE_PERF_PREBUILT_UI ?? '').trim().toLowerCase());
+        diagnostic({ stage: 'prebuilt_ui', elapsed_ms: Math.max(0, performance.now() - uiStarted),
+          outcome: prebuiltUI ? 'hit' : uiDisabled || !manifest.ui ? 'disabled' : 'fallback' });
+        built = { ...await buildSource({ source, server: path.join(stage, 'server'), cache: path.join(this.options.root, 'dependencies', native.key.slice(0, 24)), sharedCache: path.join(this.options.root, 'dependencies'), runtime: native.runtime, revision: manifest.revision, version: manifest.version, prebuiltUI, log: path.join(this.options.root, 'build.log'), progress: message, diagnostic }), runtimeKey: native.key, layout: 2 };
       }
       await fs.writeFile(path.join(stage, 'build.json.tmp'), JSON.stringify(built));
       await fs.rename(path.join(stage, 'build.json.tmp'), path.join(stage, 'build.json'));
@@ -794,7 +816,15 @@ export class SourceUpdates {
         for (const key of ['staged', 'pending'] as const) { if (before[key] === undefined) delete this.state[key]; else this.state[key] = before[key]; }
         throw error;
       }
-    } finally { await removeSourceDirectory(stage); }
+      diagnostic({ stage: 'assembly', elapsed_ms: Math.max(0, performance.now() - assemblyStarted), outcome: 'completed' });
+    } catch (error) {
+      diagnostic({ stage: assembling ? 'assembly' : 'source_verify', elapsed_ms: Math.max(0, performance.now() - (assembling ? assemblyStarted : started)), outcome: 'failed' });
+      throw error;
+    } finally {
+      try { await durableJson(path.join(this.options.root, 'diagnostics.json'), this.latestDiagnostics); }
+      catch { /* diagnostics cannot block activation or cleanup */ }
+      await removeSourceDirectory(stage);
+    }
   }
   /** The signed manifest an installed revision was built from, verified again. */
   async release(revision: string): Promise<SourceManifest> {

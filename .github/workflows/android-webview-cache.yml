@@ -1,0 +1,41 @@
+name: Seed Android WebView cache
+
+# PR caches cannot be restored by other PRs. Publish the exact verified APK on
+# main so GitHub's default-branch cache fallback can serve both emulator callers.
+on:
+  push:
+    branches: [main]
+    paths:
+      - android/ci/ci_webview.py
+      - .github/workflows/android-webview-cache.yml
+  schedule:
+    # Two small refreshes per week leave headroom before seven-day eviction.
+    - cron: '23 4 * * 1,4'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+concurrency:
+  group: android-webview-cache-main
+  cancel-in-progress: false
+
+jobs:
+  seed:
+    if: github.repository == 'HobbyCoders/ai-shuffle' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Restore the shared pinned AOSP alternate
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/ci-webview.apk
+          key: aosp-webview-x86_64-8da41a8692c64870dc875a0fa656c59a678aa09902935c5095e7de6fd7c55a87
+      - name: Fetch or verify exact pinned bytes on both misses and hits
+        run: python3 android/ci/ci_webview.py "$RUNNER_TEMP/ci-webview.apk"
+      - name: Report verified default-branch seed
+        run: |
+          printf '%s\n' 'Verified the pinned AOSP alternate on main; actions/cache saves a miss only after this job succeeds.' >> "$GITHUB_STEP_SUMMARY"

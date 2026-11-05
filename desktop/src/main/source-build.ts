@@ -4,6 +4,7 @@ import { spawn } from 'node:child_process';
 import type * as FS from 'node:fs';
 import path from 'node:path';
 import { clearTimeout, setTimeout } from 'node:timers';
+import { performance } from 'node:perf_hooks';
 
 /**
  * Electron's unpatched fs, as rawFs() in asar.ts. Inside Electron, node:fs reads
@@ -26,6 +27,28 @@ export interface BuiltSource {
   /** Selected cache-root-relative IDs; legacy builds may omit them. Metadata only, not deletion authority. */
   nodeGenerations?: string[];
 }
+export interface DiagnosticStage {
+  stage: string; elapsed_ms: number;
+  outcome: 'completed' | 'failed' | 'hit' | 'miss' | 'fallback' | 'disabled';
+}
+export interface UpdateDiagnostics { revision: string | null; stages: DiagnosticStage[]; total_elapsed_ms: number }
+export function safeDiagnostics(value: unknown): UpdateDiagnostics | null {
+  const data = value as UpdateDiagnostics;
+  const stages = new Set(['command', 'source_download', 'source_extract', 'source_verify', 'runtimes', 'assembly',
+    'python_dependencies', 'python_cache', 'fluid', 'prebuilt_ui', 'prepare_files',
+    ...['frontend', 'tools', 'browser_mcp', 'desktop'].flatMap(name => ['cache', 'dependencies', 'build'].map(kind => name + '_' + kind))]);
+  const outcomes = new Set(['completed', 'failed', 'hit', 'miss', 'fallback', 'disabled']);
+  const duration = (n: unknown): n is number => typeof n === 'number' && Number.isFinite(n) && n >= 0 && n <= Number.MAX_SAFE_INTEGER;
+  if (!data || (data.revision !== null && (typeof data.revision !== 'string' || !/^[a-f0-9]{40}$/.test(data.revision))) ||
+      !duration(data.total_elapsed_ms) || !Array.isArray(data.stages) || data.stages.length > 96 ||
+      data.stages.some(item => !item || !stages.has(item.stage) || !outcomes.has(item.outcome) || !duration(item.elapsed_ms))) return null;
+  return { revision: data.revision, total_elapsed_ms: data.total_elapsed_ms,
+    stages: data.stages.map(({ stage, elapsed_ms, outcome }) => ({ stage, elapsed_ms, outcome })) };
+}
+export function diagnostic(opts: Pick<BuildOptions, 'diagnostic'>, stage: string, started: number, outcome: DiagnosticStage['outcome']): void {
+  // Diagnostics must never turn a successful build into a failed update.
+  try { opts.diagnostic?.({ stage, elapsed_ms: Math.max(0, performance.now() - started), outcome }); } catch { /* observer only */ }
+}
 export interface BuildOptions {
   source: string;
   server: string;
@@ -43,6 +66,7 @@ export interface BuildOptions {
   prebuiltUI?: string;
   log: string;
   progress: (message: string) => void;
+  diagnostic?: (stage: DiagnosticStage) => void;
 }
 
 async function exists(file: string): Promise<boolean> { try { await fs.access(file); return true; } catch { return false; } }
@@ -65,11 +89,14 @@ export function buildEnvironment(node: string, python: string): NodeJS.ProcessEn
 async function run(executable: string, args: string[], cwd: string, opts: BuildOptions, python = opts.runtime.python, electronDownload = false): Promise<void> {
   await fs.mkdir(path.dirname(opts.log), { recursive: true });
   const log = await fs.open(opts.log, 'a');
-  const started = Date.now();
-  // Timestamps and durations make each step's cost visible in build.log (#430).
-  const finish = (result: string) => log.write(`[${new Date().toISOString()}] ${result} after ${((Date.now() - started) / 1000).toFixed(1)}s\n`);
+  const started = performance.now();
+  const finish = (result: 'completed' | 'failed') => {
+    diagnostic(opts, 'command', started, result);
+    return log.write(JSON.stringify({ event: 'update_stage', stage: 'command', outcome: result,
+      elapsed_ms: Math.max(0, performance.now() - started) }) + '\n');
+  };
   try {
-    await log.write(`\n[${new Date(started).toISOString()}] $ ${path.basename(executable)} ${args.join(' ')}\n`);
+    await log.write(JSON.stringify({ event: 'update_stage_start', stage: 'command' }) + '\n');
     await new Promise<void>((resolve, reject) => {
       const env: NodeJS.ProcessEnv = { ...buildEnvironment(opts.runtime.node, python), GITHUB_SHA: opts.revision };
       if (opts.version) env.APP_VERSION = opts.version;
@@ -77,7 +104,7 @@ async function run(executable: string, args: string[], cwd: string, opts: BuildO
       const child = spawn(executable, args, { cwd, env, windowsHide: true, stdio: ['ignore', log.fd, log.fd], timeout: 15 * 60_000 });
       child.once('error', reject);
       child.once('exit', (code, signal) => code === 0 ? resolve() : reject(new Error(`${path.basename(executable)} failed (${signal ?? code}). Build log: ${opts.log}`)));
-    }).then(() => finish('done'), async (error) => { await finish('failed'); throw error; });
+    }).then(() => finish('completed'), async (error) => { await finish('failed'); throw error; });
   } finally { await log.close(); }
 }
 
@@ -147,14 +174,17 @@ async function pythonRuntime(opts: BuildOptions): Promise<string | null> {
   }
   const key = await pythonDependencyKey(opts.source);
   // Either key is a hash of these very inputs, so a match means the runtime was installed from them.
-  if (key === opts.runtime.pythonDependencies || await legacyPythonDependencyKey(opts.source) === opts.runtime.pythonDependencies) return null;
+  if (key === opts.runtime.pythonDependencies || await legacyPythonDependencyKey(opts.source) === opts.runtime.pythonDependencies) {
+    diagnostic(opts, 'python_cache', performance.now(), 'hit'); return null;
+  }
   const target = path.join(opts.cache, 'python', key.slice(0, 24));
-  if (await exists(path.join(target, '.complete'))) return key;
+  if (await exists(path.join(target, '.complete'))) { diagnostic(opts, 'python_cache', performance.now(), 'hit'); return key; }
   if (await exists(path.join(target, '.base-complete'))) {
     const python = path.join(target, process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
     if (await installOptionalVoice(python, opts)) await fs.writeFile(path.join(target, '.complete'), key);
     return key; // Main dependencies remain usable even when the optional install fails.
   }
+  diagnostic(opts, 'python_cache', performance.now(), 'miss');
   opts.progress('Installing updated Python dependencies. The running application is unchanged.');
   const temporary = `${target}.tmp-${randomUUID().slice(0, 8)}`;
   await fs.mkdir(path.dirname(target), { recursive: true });
@@ -348,7 +378,9 @@ async function nodePackage(name: string, opts: BuildOptions, python: string, ide
   const shared = opts.sharedCache && identity;
   const key = shared ? createHash('sha256').update(`node-dependencies-1\0${identity}\0${files}`).digest('hex') : files;
   const root = path.join(shared ? opts.sharedCache! : opts.cache, 'node', name);
+  const dependencyStarted = performance.now();
   let cache = await cachedNodeDependencies(root, key);
+  diagnostic(opts, name.replace(/-/g, '_') + '_cache', dependencyStarted, cache ? 'hit' : 'miss');
   if (!cache) {
     opts.progress(`Installing ${name} dependencies. They will be reused for later updates.`);
     cache = path.join(root, `${key.slice(0, 24)}-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`);
@@ -383,11 +415,15 @@ async function nodePackage(name: string, opts: BuildOptions, python: string, ide
   const outputRoot = path.join(opts.sharedCache ?? opts.cache, 'builds', name);
   const outputKey = reuseNodeBuilds() && identity && ['tools', 'browser-mcp', 'desktop'].includes(name)
     ? await nodeOutputKey(name, opts, identity, files) : null;
+  const outputStarted = performance.now();
   if (outputKey && await reuseNodeOutput(path.join(outputRoot, outputKey), outputKey, output)) {
+    diagnostic(opts, name.replace(/-/g, '_') + '_build', outputStarted, 'hit');
     opts.progress(`Reusing verified ${name} build output.`);
   } else {
     opts.progress(`Building ${name} from source…`);
-    await run(opts.runtime.node, [opts.runtime.npm, 'run', 'build'], source, opts, python);
+    try { await run(opts.runtime.node, [opts.runtime.npm, 'run', 'build'], source, opts, python); }
+    catch (error) { diagnostic(opts, name.replace(/-/g, '_') + '_build', outputStarted, 'failed'); throw error; }
+    diagnostic(opts, name.replace(/-/g, '_') + '_build', outputStarted, outputKey ? 'miss' : 'disabled');
     if (outputKey && outputKey === await nodeOutputKey(name, opts, identity!, files)) {
       try { await publishNodeOutput(outputRoot, outputKey, output); }
       catch { opts.progress(`Built ${name}; its output could not be cached.`); }
@@ -397,7 +433,11 @@ async function nodePackage(name: string, opts: BuildOptions, python: string, ide
 }
 
 export async function buildSource(opts: BuildOptions): Promise<BuiltSource> {
-  const pythonKey = await pythonRuntime(opts);
+  const pythonStarted = performance.now();
+  let pythonKey: string | null;
+  try { pythonKey = await pythonRuntime(opts); }
+  catch (error) { diagnostic(opts, 'python_dependencies', pythonStarted, 'failed'); throw error; }
+  diagnostic(opts, 'python_dependencies', pythonStarted, 'completed');
   const python = pythonKey ? path.join(opts.cache, 'python', pythonKey.slice(0, 24), process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python') : opts.runtime.python;
   const dependencies = new Map<string, string>();
   const identity = opts.sharedCache ? await nodeIdentity(opts) : null;

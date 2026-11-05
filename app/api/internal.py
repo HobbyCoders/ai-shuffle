@@ -8,6 +8,7 @@ These are not intended for external consumption.
 import logging
 
 from fastapi import APIRouter, Request
+from app.core.application_updates import ResidentUpdater, UpdateDiagnostics
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +59,9 @@ class DesktopInstalledRelease(BaseModel):
 
 
 class DesktopUpdateState(BaseModel):
+    # Optional so older shells/workers continue exchanging their original state.
+    updater: ResidentUpdater | None = None
+    diagnostics: UpdateDiagnostics | None = None
     channel_config: DesktopChannelConfig | None = None
     # Shells that report it can verify a return from nightly to stable.
     installed_release: DesktopInstalledRelease | None = None

@@ -12,7 +12,7 @@ const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 const URL_READY = 'http://127.0.0.1:8000';
 
 /** Runs dist/main/index.js against fakes of Electron and of every module with side effects. */
-async function launch({ stop = async () => {}, acknowledge = async () => true, realUpdater = false, postgresStart = null, installed = null, registered = false, messageBox = async () => ({ response: 0 }), installers = null, heldLock = false, managed = null, platform = 'darwin', env = {}, delegatedApplication = null } = {}) {
+async function launch({ stop = async () => {}, acknowledge = async () => true, realUpdater = false, postgresStart = null, installed = null, registered = false, messageBox = async () => ({ response: 0 }), installers = null, heldLock = false, managed = null, platform = 'darwin', env = {}, delegatedApplication = null, userData = path.join(desktopDir, 'no-user-data') } = {}) {
 	const file = path.join(desktopDir, 'dist/main/index.js');
 	const localRequire = createRequire(file);
 	const appEvents = new EventEmitter();
@@ -22,7 +22,7 @@ async function launch({ stop = async () => {}, acknowledge = async () => true, r
 		// Linux delegation only ever runs inside the packaged app.
 		isPackaged: !!installed || !!installers || !!delegatedApplication,
 		getAppPath: () => desktopDir,
-		getPath: () => path.join(desktopDir, 'no-user-data'),
+		getPath: () => userData,
 		getVersion: () => '0.0.0-test',
 		setAppUserModelId() {}, setName() {}, setPath() {},
 		commandLine: { getSwitchValue: () => '' },
@@ -190,7 +190,7 @@ test('a source update starts its worker with its verified release version; the b
   assert.equal('appVersion' in builtIn.worker.options, false);
 });
 
-for (const launcher of [undefined, '3', 'unknown', '4', '5', '6', '7', '8']) test(`main process keeps full validation with launcher ${launcher} when no installed handoff is known`, async () => {
+for (const launcher of [undefined, '3', 'unknown', '4', '5', '6', '7', '8', '9', '10']) test(`main process keeps full validation with launcher ${launcher} when no installed handoff is known`, async () => {
   const updates = { options: { root: '/isolated/no-root' }, hasMigrationRisk: false, async requireRestorePoint(database) { await database.validate(); }, async databaseStarting() {}, async healthy() {}, async finishRollback() {}, async failed() {} };
   const f = await launch({ platform: 'win32', managed: { root: '/isolated/no-root', updates, application: { resources: '/isolated/resources', node: process.execPath, serverDir: '/isolated/server', desktopDir: '/isolated/desktop', python: '/isolated/python' } }, env: { SHUFFLE_LAUNCHER_VERSION: launcher } });
   assert.deepEqual(f.errors, []);
@@ -211,7 +211,35 @@ test('direct source relaunch clears the previous launcher handoff proof', async 
   assert.equal(f.app.quits, 1);
 });
 
-for (const launcher of ['10', '999']) test(`installed launcher ${launcher} keeps the full hash and does not pre-create a point`, async () => {
+for (const migrationRisk of [false, true, undefined]) test(`installed launcher 10 skips the second hash only with no migration risk (${migrationRisk})`, async t => {
+  const { promises: fs } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const userData = await fs.mkdtemp(path.join(tmpdir(), 'shuffle-launcher-handoff-'));
+  t.after(() => fs.rm(userData, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
+  const cluster = path.join(userData, 'postgres');
+  for (const [name, body] of [['PG_VERSION', '17'], [path.join('global', 'pg_control'), 'control']]) {
+    await fs.mkdir(path.dirname(path.join(cluster, 'data', name)), { recursive: true });
+    await fs.writeFile(path.join(cluster, 'data', name), body);
+  }
+  const require = createRequire(import.meta.url);
+  const { SinglePassClusterCopy } = require('../dist/main/update-restore-point.js');
+  const { ColdClusterCopy } = require('../dist/main/database-restore.js');
+  await new SinglePassClusterCopy(cluster, async () => {}).snapshot();
+  await new ColdClusterCopy(cluster, async () => {}).validate(); // The installed launcher already hashed this real point.
+  let checks = 0;
+  const updates = { options: { root: '/isolated/no-root' }, hasMigrationRisk: migrationRisk,
+    async requireRestorePoint(database) { checks++; await database.validate(); }, async databaseStarting() {}, async healthy() {}, async finishRollback() {}, async failed() {} };
+  const managed = { root: '/isolated/no-root', updates, host: { executable: 'C:/AI Shuffle.exe' },
+    application: { resources: '/isolated/resources', node: process.execPath, serverDir: '/isolated/server', desktopDir: '/isolated/desktop', python: '/isolated/python' } };
+  const f = await launch({ platform: 'win32', managed, userData, env: { SHUFFLE_LAUNCHER_VERSION: '10' } });
+  assert.deepEqual(f.errors, []);
+  assert.equal(checks, 1, 'the restore point is still checked before starting');
+  assert.equal(f.postgres.validations, migrationRisk === false ? undefined : 1);
+  assert.equal(f.worker.state.phase, 'ready');
+  assert.equal(typeof f.updater.prepared?.prepare, 'function');
+});
+
+for (const launcher of ['11', '999']) test(`installed launcher ${launcher} keeps the full hash and does not pre-create a point`, async () => {
   const updates = { options: { root: '/isolated/no-root' }, hasMigrationRisk: false,
     async requireRestorePoint(database) { await database.validate(); }, async databaseStarting() {}, async healthy() {}, async finishRollback() {}, async failed() {} };
   const managed = { root: '/isolated/no-root', updates, host: { executable: 'C:/AI Shuffle.exe' },
@@ -623,7 +651,7 @@ test('an update\'s first start gives its worker 10 minutes to become ready; othe
 	}
 });
 
-for (const launcher of ['4', '5', '6', '7', '8']) test(`restarting with launcher ${launcher} copies the database for its restore point with the window saying so`, async () => {
+for (const launcher of ['4', '5', '6', '7', '8', '9', '10']) test(`restarting with launcher ${launcher} copies the database for its restore point with the window saying so`, async () => {
 	const R = 'b'.repeat(40);
 	const application = { revision: R, resources: '/isolated/resources', python: '/isolated/python', serverDir: '/isolated/server', node: '/isolated/node', desktopDir: '/isolated/desktop' };
 	const host = { executable: 'C:/Programs/AI Shuffle/AI Shuffle.exe', userData: 'C:/Users/owner/AppData/Roaming/AI Shuffle', name: 'AI Shuffle' };

@@ -5,6 +5,7 @@ Unfiltered PR suites have no secrets or publishing permissions. Android addition
 runs path-filtered unsigned native checks; its release-only steps stay owner-gated.
 """
 from pathlib import Path
+import json
 import unittest
 
 import yaml
@@ -21,6 +22,7 @@ PR_CHECKS = {
 AUTOMATIC = {
     "desktop-source.yml": {"schedule", "workflow_dispatch", "workflow_run"},
     "main-suite.yml": {"push", "workflow_dispatch"},
+    "android-webview-cache.yml": {"push", "schedule", "workflow_dispatch"},
     "android.yml": {"pull_request", "workflow_dispatch", "workflow_call"},
     **{name: {"pull_request", "workflow_dispatch", "workflow_call"} for name in PR_CHECKS},
 }
@@ -146,7 +148,12 @@ class CostPolicyTests(unittest.TestCase):
         self.assertEqual(config["jobs"]["publish"]["needs"], ["gate", "ui"])
         self.assertEqual(config["jobs"]["ui"]["needs"], "gate")
         self.assertEqual(config["jobs"]["ui"]["permissions"], {"contents": "read"})
-        self.assertEqual(config["jobs"]["publish"]["if"], "needs.gate.outputs.ready == 'true'")
+        condition = config["jobs"]["publish"]["if"]
+        for clause in ("always()", "needs.gate.result == 'success'", "needs.gate.outputs.ready == 'true'",
+                       "needs.ui.result == 'skipped'", "needs.ui.result == 'success'"):
+            self.assertIn(clause, condition)
+        self.assertIn("needs.gate.outputs.ui-reused != 'true'", config["jobs"]["ui"]["if"])
+        self.assertNotIn("optional", config["jobs"]["ui"]["with"])
 
     def test_ios_macos_job_is_unsigned_and_bounded(self):
         config = workflow("ios.yml")
@@ -160,6 +167,27 @@ class CostPolicyTests(unittest.TestCase):
         for forbidden in ["secrets.", "environment:", "upload-artifact", "altool", "-exportArchive", "archive "]:
             self.assertNotIn(forbidden, text)
         self.assertIn("CODE_SIGNING_ALLOWED=NO", text)
+
+    def test_journey_map_is_validated_by_javascript_contracts(self):
+        jobs = workflow("ci-frontend.yml")["jobs"]
+        job = jobs["contracts"]
+        gate = jobs["javascript"]
+        self.assertIn("contracts", gate["needs"])
+        expected = json.loads(gate["steps"][0]["run"].split("const expected = ", 1)[1].split(";", 1)[0])
+        self.assertIn("contracts", expected)
+        self.assertNotIn("if", job)
+        self.assertNotIn("continue-on-error", job)
+        self.assertNotIn("shell", job.get("defaults", {}).get("run", {}))
+        step = next(step for step in job["steps"]
+                    if step.get("name") == "Validate UI journey map")
+        self.assertEqual(step["run"].splitlines(), [
+            "node --test frontend/tests/journeys/select.test.mjs",
+            "node frontend/tests/journeys/select.mjs --check",
+        ])
+        self.assertEqual(step.get("working-directory", job["defaults"]["run"]["working-directory"]), ".")
+        self.assertNotIn("if", step)
+        self.assertNotIn("continue-on-error", step)
+        self.assertNotIn("shell", step)
 
     def test_manual_checks_use_standard_runners_and_keep_backend_parallelism(self):
         backend = workflow("ci-backend.yml")
