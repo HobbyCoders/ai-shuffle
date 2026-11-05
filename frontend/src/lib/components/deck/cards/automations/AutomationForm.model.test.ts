@@ -129,7 +129,7 @@ describe('AutomationForm model picker', () => {
 		expect(row.queryByText(/Sonnet/)).toBeNull();
 		expect(row.queryByText(/agent/i)).toBeNull();
 
-		await fireEvent.click(row.getByRole('button', { name: 'Worker default' }));
+		await fireEvent.click(row.getByRole('button', { name: 'Reasoning model' }));
 		await fireEvent.click(row.getByRole('option', { name: /Haiku/ }));
 		expect(onUpdateFormModel).toHaveBeenCalledWith('haiku');
 	});
@@ -137,7 +137,7 @@ describe('AutomationForm model picker', () => {
 	it('emits a provider model as its picker value', async () => {
 		const { getByTestId, onUpdateFormModel } = renderForm();
 		const row = within(getByTestId('automation-model-row'));
-		await fireEvent.click(row.getByRole('button', { name: 'Worker default' }));
+		await fireEvent.click(row.getByRole('button', { name: 'Reasoning model' }));
 		await fireEvent.click(row.getByRole('option', { name: /GPT-5\.6/ }));
 		expect(onUpdateFormModel).toHaveBeenCalledWith(encodeProviderModel('openai-row', 'gpt-5.6'));
 	});
@@ -153,7 +153,7 @@ describe('AutomationForm model picker', () => {
 		});
 		const row = within(getByTestId('automation-model-row'));
 		expect(row.getByText('Every run uses this model.')).toBeTruthy();
-		await fireEvent.click(row.getByRole('button', { name: /GPT-5\.6/ }));
+		await fireEvent.click(row.getByRole('button', { name: 'Reasoning model' }));
 		expect(queryByText('Custom…')).toBeNull();
 	});
 
@@ -164,7 +164,7 @@ describe('AutomationForm model picker', () => {
 		});
 		const row = within(getByTestId('automation-model-row'));
 		expect(row.getByText("Uses GPT-5.6, the worker's default for unattended runs.")).toBeTruthy();
-		expect(row.getByRole('button', { name: 'Worker default' })).toBeTruthy();
+		expect(row.getByRole('button', { name: 'Reasoning model' })).toBeTruthy();
 	});
 
 	it('says so when the agent still carries a legacy saved model', () => {
@@ -173,7 +173,7 @@ describe('AutomationForm model picker', () => {
 		});
 		const row = within(getByTestId('automation-model-row'));
 		expect(row.getByText('Uses GPT-5.6, saved on this agent (legacy).')).toBeTruthy();
-		expect(row.getByRole('button', { name: 'Saved on agent (legacy)' })).toBeTruthy();
+		expect(row.getByRole('button', { name: 'Reasoning model' })).toBeTruthy();
 	});
 
 	it("takes the server's report for a saved automation on its own agent", () => {

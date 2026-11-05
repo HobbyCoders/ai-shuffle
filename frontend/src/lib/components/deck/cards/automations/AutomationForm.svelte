@@ -1,5 +1,7 @@
 <script lang="ts">
-	import Switch from '$lib/components/settings/rows/Switch.svelte';
+	import { RowGroup, SettingRow, SelectField, Switch, Segmented, DetailTabs, InlineBanner } from '$lib/components/layout/view';
+ import TextField from '$lib/components/settings/rows/TextField.svelte';
+ import TextAreaField from '$lib/components/layout/view/TextAreaField.svelte';
 	import {
 		automationFallbackModel,
 		fallbackModelHint,
@@ -296,737 +298,118 @@
 		updated[index] = step;
 		onUpdateFormActionSteps(updated);
 	}
+
+ let tab = $state('setup');
+ const tabs = [{id:'setup',label:'Setup'},{id:'generation',label:'Media generation'},{id:'budget',label:'Budget & limits'}];
 </script>
 
 {#if formError}
-	<div transition:slide={{ duration: 150 }}>
-		<Banner severity="error" message={formError} dismissible onDismiss={() => onUpdateFormError('')} />
-	</div>
+ <div role="alert"><InlineBanner tone="warn">{formError}
+  {#snippet actions()}<button class="st-btn" onclick={() => onUpdateFormError('')}>Dismiss</button>{/snippet}
+ </InlineBanner></div>
 {/if}
-
 {#if scheduledRunNotice}
-	<div data-testid="automation-api-key-notice">
-		<Banner
-			severity="warning"
-			message={scheduledRunNotice}
-			action={{ label: 'Open Claude settings', onClick: () => openSettings({ category: 'providers', item: 'provider:claude', anchor: 'providers.claudeMode' }) }}
-		/>
-	</div>
+ <div data-testid="automation-api-key-notice"><InlineBanner tone="warn">{scheduledRunNotice}
+  {#snippet actions()}<button class="st-btn" onclick={() => openSettings({category:'providers',item:'provider:claude',anchor:'providers.claudeMode'})}>Open Claude settings</button>{/snippet}
+ </InlineBanner></div>
 {/if}
-
-<!-- Basics -->
-<div class="set-group">
-	<button type="button" class="set-grouphead head-toggle" class:collapsed={collapsedSections.has('basics')} onclick={() => onToggleSection('basics')}>
-		<h3><CalendarClock />Basics</h3>
-		<ChevronDown size={15} class={collapsedSections.has('basics') ? 'gh-chev' : 'gh-chev open'} />
-	</button>
-	{#if !collapsedSections.has('basics')}
-		<div class="set-row">
-			<div class="lab"><h4>Name <span class="req">*</span></h4><p>A label to recognize this automation.</p></div>
-			<div class="ctl"><input type="text" class="inp" value={formName} oninput={(e) => onUpdateFormName(e.currentTarget.value)} placeholder="e.g. Daily report generator" /></div>
-		</div>
-		<div class="set-row">
-			<div class="lab"><h4>Description</h4><p>What this automation does. Optional.</p></div>
-			<div class="ctl"><input type="text" class="inp" value={formDescription} oninput={(e) => onUpdateFormDescription(e.currentTarget.value)} placeholder="Optional description…" /></div>
-		</div>
-	{/if}
+<DetailTabs {tabs} current={tab} onselect={(id) => tab = id} label="Automation configuration" idPrefix="automation-form" />
+<div role="tabpanel" id="automation-form-panel" aria-labelledby="automation-form-tab-{tab}">
+{#if tab === 'setup'}
+ <RowGroup title="Basics">
+  <SettingRow label="Name" hint="A label to recognize this automation."><TextField value={formName} oninput={onUpdateFormName} placeholder="e.g. Daily report generator" invalid={!!formError && !formName.trim()} /></SettingRow>
+  <SettingRow label="Description" hint="What this automation does. Optional."><TextField value={formDescription} oninput={onUpdateFormDescription} placeholder="Optional description…" /></SettingRow>
+ </RowGroup>
+ <RowGroup title="Triggers" count={formTriggers.length} bare>
+  <AutomationTriggerConfig triggers={formTriggers} {expandedTriggers} {connectors} {connectorTypes} {connectorsWithTriggers} {currentView} {selectedAutomationId} {timezone} onUpdateTriggers={onUpdateFormTriggers} {onToggleTriggerExpand} />
+ </RowGroup>
+ <RowGroup title="Prompt & actions" bare>
+  <div class="st-card">
+   <SettingRow label="Prompt" hint={formActionSteps.length ? 'Optional when action steps are configured. Runs before action steps.' : 'The main instruction sent to the AI agent when this automation runs.'}>
+    {#snippet expanded()}<TextAreaField value={formPrompt} oninput={onUpdateFormPrompt} label="Prompt" placeholder="Enter the prompt template for this automation…" />{/snippet}
+   </SettingRow>
+  </div>
+  {#each formActionSteps as step, i}
+   <RowGroup title="Step {i + 1}" bare>
+    {#snippet actions()}
+     <button class="st-btn" aria-expanded={expandedActions.has(i)} onclick={() => onToggleActionExpand(i)}>{expandedActions.has(i) ? 'Collapse' : 'Expand'} step</button>
+     <button class="st-btn icon danger" aria-label="Remove step" onclick={() => removeActionStep(i)}><Trash2 size={14} /></button>
+    {/snippet}
+    <p class="st-note">{actionStepTypeLabel(step.type)} · {getActionSummary(step)}</p>
+    {#if expandedActions.has(i)}
+     <div class="st-card">
+      <SettingRow label="Action type"><SelectField value={step.type} options={[{value:'connector_action',label:'Connector action'},{value:'send_prompt',label:'AI prompt'},{value:'webhook_call',label:'Webhook call'},{value:'delay',label:'Delay'}]} onchange={(value) => changeActionStepType(i, value as ActionStepType)} /></SettingRow>
+      {#if step.type === 'connector_action'}
+       <SettingRow label="Connector"><SelectField value={step.connector_id || ''} options={[{value:'',label:'Select a connector…'}, ...connectorsWithActions.map(c => ({value:c.id,label:`${c.name} (${c.type})`}))]} onchange={(value) => updateActionStep(i, {...step,connector_id:value,action_id:'',params:{}})} /></SettingRow>
+       {#if step.connector_id}
+        <SettingRow label="Action"><SelectField value={step.action_id || ''} options={[{value:'',label:'Select an action…'}, ...getActionsForConnector(step.connector_id).map(a => ({value:a.id,label:a.name}))]} onchange={(value) => updateActionStep(i, {...step,action_id:value,params:{}})} /></SettingRow>
+        {@const actionDef = getActionsForConnector(step.connector_id).find(a => a.id === step.action_id)}
+        {#if actionDef}
+         <p class="st-note">{actionDef.description}</p>
+         {#each Object.entries(actionDef.input_schema?.properties || {}) as [key, schemaDef]}
+          <SettingRow label={key} hint={(schemaDef as Record<string, any>).description || key}><TextField value={String((step.params || {})[key] || '')} oninput={(value) => updateActionStep(i, {...step,params:{...step.params,[key]:value}})} /></SettingRow>
+         {/each}
+         <p class="st-note">Use {'{{trigger.data.field}}'} or {'{{response}}'} for template variables</p>
+        {/if}
+       {/if}
+      {:else if step.type === 'send_prompt'}
+       <SettingRow label="Step prompt">{#snippet expanded()}<TextAreaField value={step.prompt || ''} label="Step prompt" placeholder="Enter prompt to send to AI agent…" oninput={(value) => updateActionStep(i,{...step,prompt:value})} />{/snippet}</SettingRow>
+       <SettingRow label="Agent (optional)"><SelectField value={step.profile_id || ''} options={[{value:'',label:'Default (automation agent)'},...profiles.map(p => ({value:p.id,label:p.name}))]} onchange={(value) => updateActionStep(i,{...step,profile_id:value || undefined})} /></SettingRow>
+       <SettingRow label="Model (optional)"><label class="sr-only" for="auto-step-model-{i}">Model (optional)</label><ModelPicker id="auto-step-model-{i}" value={step.model || ''} allowEmpty emptyLabel="Same as automation" allowCustom={false} onSelect={(value) => updateActionStep(i,{...step,model:value || undefined,provider_id:undefined})} /></SettingRow>
+       <SettingRow label="Max turns"><TextField value={String(step.max_turns ?? 1)} inputmode="numeric" oninput={(value) => updateActionStep(i,{...step,max_turns:parseInt(value) || 1})} /></SettingRow>
+       <p class="st-note">Use {'{{response}}'} to reference previous AI output</p>
+      {:else if step.type === 'webhook_call'}
+       <SettingRow label="Webhook URL"><TextField type="url" value={step.url || ''} placeholder="https://example.com/webhook" oninput={(value) => updateActionStep(i,{...step,url:value})} /></SettingRow>
+       <SettingRow label="Method"><SelectField value={step.method || 'POST'} options={['POST','GET','PUT','PATCH','DELETE']} onchange={(value) => updateActionStep(i,{...step,method:value})} /></SettingRow>
+       <SettingRow label="Request body" hint={'Supports {{response}} and {{trigger.data.field}} template variables.'}>{#snippet expanded()}<TextAreaField label="Request body" value={step.body || ''} oninput={(value) => updateActionStep(i,{...step,body:value})} placeholder="Request body (supports template variables)…" />{/snippet}</SettingRow>
+      {:else if step.type === 'delay'}
+       <SettingRow label="Seconds to wait" hint="Maximum 300 seconds (5 minutes)."><TextField value={String(step.seconds ?? 5)} inputmode="numeric" oninput={(value) => updateActionStep(i,{...step,seconds:parseInt(value) || 0})} /></SettingRow>
+      {/if}
+     </div>
+    {/if}
+   </RowGroup>
+  {/each}
+  <button class="st-btn" onclick={() => addActionStep()}><Plus size={14} />Add action step</button>
+ </RowGroup>
+ <RowGroup title="Configuration">
+  <SettingRow label="Agent" hint="The agent this automation runs under.">
+   {#if !profiles.length}<button class="st-btn" onclick={() => layout.openFeaturePage('profile')}>No agents yet — create one first</button>
+   {:else}<span data-agent-picker><SelectField label="Agent" value={formProfileId} options={[{value:'',label:'Select an agent…'},...profiles.map(p => ({value:p.id,label:p.name}))]} onchange={onUpdateFormProfileId} /></span>{/if}
+  </SettingRow>
+  <div data-testid="automation-model-row"><SettingRow label="Reasoning model" hint={modelHintIsError ? undefined : modelHint}>
+   {#if modelHintIsError}<p class="text-sm text-destructive model-error" role="alert">{modelHint}</p>{/if}
+   <label class="sr-only" for="automation-model">Reasoning model</label><ModelPicker id="automation-model" value={formModel} allowEmpty emptyLabel={modelEmptyLabel} allowCustom={false} onSelect={onUpdateFormModel} />
+  </SettingRow></div>
+  <div data-testid="automation-permission-row"><SettingRow label="Permissions" hint={permissionHint}>
+   {#snippet expanded()}
+    <Segmented label="Permissions" options={permissionModes} value={permissionValue} onchange={onUpdateFormPermissionMode} />
+    {#if permissionValue === 'bypassPermissions'}<p class="st-note" data-testid="automation-bypass-hint">Runs every tool, including shell commands, without asking — nobody is watching an automation.</p>{/if}
+   {/snippet}
+  </SettingRow></div>
+  <SettingRow label="Project" hint="Scope the run to a project, or leave global."><SelectField value={formProjectId} options={[{value:'',label:'None (global)'},...(formProjectId && !projects.some(p => p.id === formProjectId) ? [{value:formProjectId,label:`Unknown project (${formProjectId.slice(0,8)}…)`}] : []), ...projects.map(p => ({value:p.id,label:p.name}))]} onchange={onUpdateFormProjectId} /></SettingRow>
+  <SettingRow label="Output" hint="Where the result is delivered.">
+   {#snippet expanded()}<Segmented label="Output" value={formOutputType} options={[{value:'session',label:'Chat'},{value:'connector',label:'Connector'},{value:'webhook',label:'Webhook'},{value:'none',label:'None'}]} onchange={(value) => {onUpdateFormOutputType(value);onUpdateFormOutputConfig({});}} />{/snippet}
+  </SettingRow>
+  {#if formOutputType === 'connector'}
+   <SettingRow label="Connector" hint="The destination connector."><SelectField value={formOutputConfig.connector_id || ''} options={[{value:'',label:'Select a connector…'},...connectors.map(c => ({value:c.id,label:`${c.name} (${c.type})${c.is_active || c.status === 'connected' ? '' : ' - inactive'}`}))]} onchange={(value) => onUpdateFormOutputConfig({...formOutputConfig,connector_id:value})} /></SettingRow>
+   <SettingRow label="Platform chat ID" hint="Chat, channel ID, or email to deliver to."><TextField value={formOutputConfig.platform_chat_id || ''} oninput={(value) => onUpdateFormOutputConfig({...formOutputConfig,platform_chat_id:value})} placeholder="chat / channel ID / email" /></SettingRow>
+  {:else if formOutputType === 'webhook'}
+   <SettingRow label="Webhook URL" hint="The endpoint to POST the result to."><TextField type="url" value={formOutputConfig.url || ''} oninput={(value) => onUpdateFormOutputConfig({...formOutputConfig,url:value})} placeholder="https://example.com/webhook" /></SettingRow>
+  {/if}
+  <SettingRow label="Requires approval" hint="Pause before running so you can review."><Switch controlled size="sm" checked={formRequiresApproval} label="Requires approval" onchange={() => onUpdateFormRequiresApproval(!formRequiresApproval)} /></SettingRow>
+ </RowGroup>
+{:else if tab === 'generation'}
+ <div data-testid="automation-generation-group"><RowGroup title="Media generation" bare>
+  <AutomationJobChoices jobId={selectedAutomationId} mode="draft" draft={generationDraft} committed={generationCommit} onDraftChange={(draft) => onUpdateGenerationDraft?.(draft)} />
+ </RowGroup></div>
+{:else}
+ <RowGroup title="Budget & limits">
+<SettingRow label="Max cost / run" hint="Dollar cap per run. Blank = no limit."><TextField value={formMaxCostPerRun} oninput={onUpdateFormMaxCostPerRun} inputmode="decimal" placeholder="No limit" /></SettingRow>
+<SettingRow label="Max cost / day" hint="Dollar cap per day. Blank = no limit."><TextField value={formMaxCostPerDay} oninput={onUpdateFormMaxCostPerDay} inputmode="decimal" placeholder="No limit" /></SettingRow>
+<SettingRow label="Max total" hint="Lifetime dollar cap. Blank = no limit."><TextField value={formMaxCostTotal} oninput={onUpdateFormMaxCostTotal} inputmode="decimal" placeholder="No limit" /></SettingRow>
+<SettingRow label="Max runs / day" hint="Cap the number of runs per day."><TextField value={formMaxRunsPerDay} oninput={onUpdateFormMaxRunsPerDay} inputmode="numeric" placeholder="No limit" /></SettingRow>
+<SettingRow label="Max turns" hint="Agent turns allowed per run. Blank = no limit."><TextField value={formMaxTurns} oninput={onUpdateFormMaxTurns} inputmode="numeric" placeholder="No limit" /></SettingRow>
+<SettingRow label="Timeout" hint="Maximum run duration in seconds. Blank = no limit."><TextField value={formTimeoutSeconds} oninput={onUpdateFormTimeoutSeconds} inputmode="numeric" placeholder="No limit" /></SettingRow>
+</RowGroup>
+{/if}
 </div>
-
-<!-- Triggers -->
-<div class="set-group">
-	<button type="button" class="set-grouphead head-toggle" class:collapsed={collapsedSections.has('triggers')} onclick={() => onToggleSection('triggers')}>
-		<span class="gh-left"><h3><Zap />Triggers</h3><span class="pill-s acc">{formTriggers.length}</span></span>
-		<ChevronDown size={15} class={collapsedSections.has('triggers') ? 'gh-chev' : 'gh-chev open'} />
-	</button>
-	{#if !collapsedSections.has('triggers')}
-		<div class="set-row stack">
-			<div class="ctl">
-				<AutomationTriggerConfig
-					triggers={formTriggers}
-					{expandedTriggers}
-					{connectors}
-					{connectorTypes}
-					{connectorsWithTriggers}
-					{currentView}
-					{selectedAutomationId}
-					{timezone}
-					onUpdateTriggers={onUpdateFormTriggers}
-					onToggleTriggerExpand={onToggleTriggerExpand}
-				/>
-			</div>
-		</div>
-	{/if}
-</div>
-
-<!-- Prompt & Actions -->
-<div class="set-group">
-	<button type="button" class="set-grouphead head-toggle" class:collapsed={collapsedSections.has('prompt')} onclick={() => onToggleSection('prompt')}>
-		<span class="gh-left"><h3><FileText />Prompt &amp; actions</h3>{#if formActionSteps.length > 0}<span class="pill-s acc">{formActionSteps.length} action{formActionSteps.length !== 1 ? 's' : ''}</span>{/if}</span>
-		<ChevronDown size={15} class={collapsedSections.has('prompt') ? 'gh-chev' : 'gh-chev open'} />
-	</button>
-	{#if !collapsedSections.has('prompt')}
-		<div class="set-row stack">
-			<div class="lab"><h4>Prompt {#if formActionSteps.length === 0}<span class="req">*</span>{/if}</h4>
-				<p>{#if formActionSteps.length > 0}Optional when action steps are configured. Runs before action steps.{:else}The main instruction sent to the AI agent when this automation runs.{/if}</p>
-			</div>
-			<div class="ctl">
-				<textarea class="fld code" value={formPrompt} oninput={(e) => onUpdateFormPrompt(e.currentTarget.value)} placeholder="Enter the prompt template for this automation…"></textarea>
-			</div>
-		</div>
-
-		<div class="set-row stack">
-			<div class="lab"><h4>Action steps</h4><p>Run connectors, prompts, webhooks, or delays in sequence after the prompt.</p></div>
-			<div class="ctl">
-				{#each formActionSteps as step, i}
-					<div class="af-item-card" transition:slide={{ duration: 150 }}>
-						<div class="af-item-header" role="button" tabindex="0" onclick={() => onToggleActionExpand(i)} onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') onToggleActionExpand(i); }}>
-							<div class="af-item-header-left">
-								{#if expandedActions.has(i)}
-									<ChevronDown size={14} />
-								{:else}
-									<ChevronRight size={14} />
-								{/if}
-								<span class="af-item-step-num">{i + 1}</span>
-								<span class="af-item-type-badge">{actionStepTypeLabel(step.type)}</span>
-								{#if !expandedActions.has(i)}
-									<span class="af-item-summary">{getActionSummary(step)}</span>
-								{/if}
-							</div>
-							<div class="af-item-header-actions">
-								<button type="button" class="icon-x" aria-label="Remove step" onclick={(e) => { e.stopPropagation(); removeActionStep(i); }}>
-									<Trash2 size={13} />
-								</button>
-							</div>
-						</div>
-
-						{#if expandedActions.has(i)}
-							<div class="af-item-body" transition:slide={{ duration: 150 }}>
-								<select class="af-input"
-									value={step.type}
-									onchange={(e) => changeActionStepType(i, e.currentTarget.value as ActionStepType)}>
-									<option value="connector_action">Connector Action</option>
-									<option value="send_prompt">AI Prompt</option>
-									<option value="webhook_call">Webhook Call</option>
-									<option value="delay">Delay</option>
-								</select>
-
-								{#if step.type === 'connector_action'}
-									<select class="af-input"
-										value={step.connector_id || ''}
-										onchange={(e) => { const updated = { ...step, connector_id: e.currentTarget.value, action_id: '', params: {} }; updateActionStep(i, updated); }}>
-										<option value="">Select connector…</option>
-										{#each connectorsWithActions as c}
-											<option value={c.id}>{c.name} ({c.type})</option>
-										{/each}
-									</select>
-									{#if step.connector_id}
-										<select class="af-input"
-											value={step.action_id || ''}
-											onchange={(e) => { const updated = { ...step, action_id: e.currentTarget.value, params: {} }; updateActionStep(i, updated); }}>
-											<option value="">Select action…</option>
-											{#each getActionsForConnector(step.connector_id) as action}
-												<option value={action.id}>{action.name}</option>
-											{/each}
-										</select>
-									{/if}
-									{#if step.action_id}
-										{@const actionDef = getActionsForConnector(step.connector_id || '').find(a => a.id === step.action_id)}
-										{#if actionDef}
-											<p class="af-hint">{actionDef.description}</p>
-											{#if actionDef.input_schema?.properties}
-												<div class="af-param-list">
-													{#each Object.entries(actionDef.input_schema.properties) as [key, schemaDef]}
-														{@const schemaObj = schemaDef as Record<string, any>}
-														<label class="af-mini-label" for="auto-param-{i}-{key}">{key}</label>
-														<input type="text" class="af-input" id="auto-param-{i}-{key}"
-															value={(step.params || {})[key] || ''}
-															oninput={(e) => { const params = { ...(step.params || {}), [key]: e.currentTarget.value }; updateActionStep(i, { ...step, params }); }}
-															placeholder={schemaObj.description || key} />
-													{/each}
-												</div>
-												<p class="af-hint">Use {'{{trigger.data.field}}'} or {'{{response}}'} for template variables</p>
-											{/if}
-										{/if}
-									{/if}
-								{:else if step.type === 'send_prompt'}
-									<textarea class="af-input af-textarea"
-										placeholder="Enter prompt to send to AI agent…"
-										value={step.prompt || ''}
-										oninput={(e) => { updateActionStep(i, { ...step, prompt: e.currentTarget.value }); }}></textarea>
-									<div class="af-grid-2">
-										<div class="af-mini-field">
-											<label class="af-mini-label" for="auto-step-profile-{i}">Agent (optional)</label>
-											<select class="af-input" id="auto-step-profile-{i}"
-												value={step.profile_id || ''}
-												onchange={(e) => { updateActionStep(i, { ...step, profile_id: e.currentTarget.value || undefined }); }}>
-												<option value="">Default (automation agent)</option>
-												{#each profiles as profile}
-													<option value={profile.id}>{profile.name}</option>
-												{/each}
-											</select>
-										</div>
-										<div class="af-mini-field">
-											<label class="af-mini-label" for="auto-step-model-{i}">Model (optional)</label>
-											<ModelPicker
-												id="auto-step-model-{i}"
-												value={step.model || ''}
-												allowEmpty
-												emptyLabel="Same as automation"
-												allowCustom={false}
-												onSelect={(v) => { updateActionStep(i, { ...step, model: v || undefined, provider_id: undefined }); }}
-											/>
-										</div>
-										<div class="af-mini-field">
-											<label class="af-mini-label" for="auto-step-maxturns-{i}">Max turns</label>
-											<input type="number" class="af-input" id="auto-step-maxturns-{i}"
-												min="1" max="25"
-												value={step.max_turns ?? 1}
-												oninput={(e) => { updateActionStep(i, { ...step, max_turns: parseInt(e.currentTarget.value) || 1 }); }} />
-										</div>
-									</div>
-									<p class="af-hint">Use {'{{response}}'} to reference previous AI output</p>
-								{:else if step.type === 'webhook_call'}
-									<input type="url" class="af-input"
-										placeholder="https://example.com/webhook"
-										value={step.url || ''}
-										oninput={(e) => { updateActionStep(i, { ...step, url: e.currentTarget.value }); }} />
-									<select class="af-input"
-										value={step.method || 'POST'}
-										onchange={(e) => { updateActionStep(i, { ...step, method: e.currentTarget.value }); }}>
-										<option value="POST">POST</option>
-										<option value="GET">GET</option>
-										<option value="PUT">PUT</option>
-										<option value="PATCH">PATCH</option>
-										<option value="DELETE">DELETE</option>
-									</select>
-									<textarea class="af-input af-textarea"
-										placeholder="Request body (supports template variables)…"
-										value={step.body || ''}
-										oninput={(e) => { updateActionStep(i, { ...step, body: e.currentTarget.value }); }}></textarea>
-									<p class="af-hint">Use {'{{response}}'} or {'{{trigger.data.field}}'} for template variables</p>
-								{:else if step.type === 'delay'}
-									<div class="af-mini-field">
-										<label class="af-mini-label" for="auto-step-delay-{i}">Seconds to wait</label>
-										<input type="number" class="af-input" id="auto-step-delay-{i}" min="1" max="300"
-											placeholder="5"
-											value={step.seconds ?? 5}
-											oninput={(e) => { updateActionStep(i, { ...step, seconds: parseInt(e.currentTarget.value) || 0 }); }} />
-										<p class="af-hint">Maximum 300 seconds (5 minutes)</p>
-									</div>
-								{/if}
-							</div>
-						{/if}
-					</div>
-				{/each}
-
-				<button type="button" class="af-add-btn" onclick={() => addActionStep()}>
-					<Plus size={14} />
-					Add action step
-				</button>
-			</div>
-		</div>
-	{/if}
-</div>
-
-<!-- Configuration -->
-<div class="set-group">
-	<button type="button" class="set-grouphead head-toggle" class:collapsed={collapsedSections.has('config')} onclick={() => onToggleSection('config')}>
-		<h3><Settings />Configuration</h3>
-		<ChevronDown size={15} class={collapsedSections.has('config') ? 'gh-chev' : 'gh-chev open'} />
-	</button>
-	{#if !collapsedSections.has('config')}
-		<div class="set-row">
-			<div class="lab"><h4>Agent <span class="req">*</span></h4><p>The agent this automation runs under.</p></div>
-			<div class="ctl">
-				{#if profiles.length === 0}
-					<!-- Nothing is seeded, so a fresh install reaches this required field with an
-					     empty picker and a save that can only fail. Name the missing piece here,
-					     where the user is already looking, instead of at submit time. -->
-					<button type="button" class="no-agents" onclick={() => layout.openFeaturePage('profile')}>
-						No agents yet — create one first
-					</button>
-				{:else}
-					<select class="sel" data-agent-picker value={formProfileId} onchange={(e) => onUpdateFormProfileId(e.currentTarget.value)}>
-						<option value="">Select an agent…</option>
-						{#each profiles as profile}
-							<option value={profile.id}>{profile.name}</option>
-						{/each}
-					</select>
-				{/if}
-			</div>
-		</div>
-		<div class="set-row" data-testid="automation-model-row">
-			<div class="lab"><h4>Reasoning model</h4><p class:model-error={modelHintIsError}>{modelHint}</p></div>
-			<div class="ctl">
-				<ModelPicker
-					id="automation-model"
-					value={formModel}
-					allowEmpty
-					emptyLabel={modelEmptyLabel}
-					allowCustom={false}
-					onSelect={onUpdateFormModel}
-				/>
-			</div>
-		</div>
-		<div class="set-row perm-row" data-testid="automation-permission-row">
-			<div class="lab"><h4 id="automation-permission-label">Permissions</h4><p>{permissionHint}</p></div>
-			<div class="ctl perm-ctl">
-				<div class="seg perm-seg" role="radiogroup" aria-labelledby="automation-permission-label">
-					{#each permissionModes as mode (mode.value)}
-						<button
-							type="button"
-							role="radio"
-							aria-checked={permissionValue === mode.value}
-							class:on={permissionValue === mode.value}
-							class:bypass={mode.value === 'bypassPermissions'}
-							title={mode.description}
-							data-mode={mode.value}
-							onclick={() => onUpdateFormPermissionMode(mode.value)}
-						>{mode.label}</button>
-					{/each}
-				</div>
-				{#if permissionValue === 'bypassPermissions'}
-					<p class="perm-warn" data-testid="automation-bypass-hint" transition:slide={{ duration: 160 }}>
-						<TriangleAlert size={13} aria-hidden="true" />
-						<span>Runs every tool, including shell commands, without asking — nobody is watching an automation.</span>
-					</p>
-				{/if}
-			</div>
-		</div>
-		<div class="set-row">
-			<div class="lab"><h4>Project</h4><p>Scope the run to a project, or leave global.</p></div>
-			<div class="ctl">
-				<select class="sel" value={formProjectId} onchange={(e) => onUpdateFormProjectId(e.currentTarget.value)}>
-					<option value="">None (global)</option>
-					{#if formProjectId && !projects.some((p) => p.id === formProjectId)}
-						<!-- Saved project isn't in this install's list; without this option the
-						     browser would silently display "None (global)" while the stale id stays saved. -->
-						<option value={formProjectId}>Unknown project ({formProjectId.slice(0, 8)}…)</option>
-					{/if}
-					{#each projects as project}
-						<option value={project.id}>{project.name}</option>
-					{/each}
-				</select>
-			</div>
-		</div>
-		<div class="set-row">
-			<div class="lab"><h4>Output</h4><p>Where the result is delivered.</p></div>
-			<div class="ctl">
-				<div class="seg">
-					<button type="button" class:on={formOutputType === 'session'} onclick={() => { onUpdateFormOutputType('session'); onUpdateFormOutputConfig({}); }}>Chat</button>
-					<button type="button" class:on={formOutputType === 'connector'} onclick={() => { onUpdateFormOutputType('connector'); onUpdateFormOutputConfig({}); }}>Connector</button>
-					<button type="button" class:on={formOutputType === 'webhook'} onclick={() => { onUpdateFormOutputType('webhook'); onUpdateFormOutputConfig({}); }}>Webhook</button>
-					<button type="button" class:on={formOutputType === 'none'} onclick={() => { onUpdateFormOutputType('none'); onUpdateFormOutputConfig({}); }}>None</button>
-				</div>
-			</div>
-		</div>
-
-		{#if formOutputType === 'connector'}
-			<div class="set-row">
-				<div class="lab"><h4>Connector</h4><p>The destination connector.</p></div>
-				<div class="ctl">
-					<select class="sel" value={formOutputConfig.connector_id || ''} onchange={(e) => onUpdateFormOutputConfig({ ...formOutputConfig, connector_id: e.currentTarget.value })}>
-						<option value="">Select a connector…</option>
-						{#each connectors.filter(c => c.is_active || c.status === 'connected') as c}
-							<option value={c.id}>{c.name} ({c.type})</option>
-						{/each}
-						{#if connectors.filter(c => !c.is_active && c.status !== 'connected').length > 0}
-							<optgroup label="Inactive">
-								{#each connectors.filter(c => !c.is_active && c.status !== 'connected') as c}
-									<option value={c.id}>{c.name} ({c.type}) - inactive</option>
-								{/each}
-							</optgroup>
-						{/if}
-					</select>
-				</div>
-			</div>
-			<div class="set-row stack">
-				<div class="lab"><h4>Platform chat ID</h4><p>Chat, channel ID, or email to deliver to.</p></div>
-				<div class="ctl"><input type="text" class="inp mono" value={formOutputConfig.platform_chat_id || ''} oninput={(e) => onUpdateFormOutputConfig({ ...formOutputConfig, platform_chat_id: e.currentTarget.value })} placeholder="chat / channel ID / email" /></div>
-			</div>
-		{:else if formOutputType === 'webhook'}
-			<div class="set-row stack">
-				<div class="lab"><h4>Webhook URL</h4><p>The endpoint to POST the result to.</p></div>
-				<div class="ctl"><input type="text" class="inp mono" value={formOutputConfig.url || ''} oninput={(e) => onUpdateFormOutputConfig({ ...formOutputConfig, url: e.currentTarget.value })} placeholder="https://example.com/webhook" /></div>
-			</div>
-		{/if}
-
-		<div class="set-row">
-			<div class="lab"><h4>Requires approval</h4><p>Pause before running so you can review.</p></div>
-			<div class="ctl">
-				<Switch controlled size="sm" checked={formRequiresApproval} label="Requires approval" onchange={() => onUpdateFormRequiresApproval(!formRequiresApproval)} />
-			</div>
-		</div>
-	{/if}
-</div>
-
-<!-- Media generation: pinned job choices (separate from the reasoning model above) -->
-<div class="set-group" data-testid="automation-generation-group">
-	<button type="button" class="set-grouphead head-toggle" class:collapsed={collapsedSections.has('generation')} onclick={() => onToggleSection('generation')}>
-		<span class="gh-left">
-			<h3><Sparkles />Media generation</h3>
-			{#if hasDraftChanges(generationDraft)}<span class="pill-s acc">unsaved</span>{/if}
-		</span>
-		<ChevronDown size={15} class={collapsedSections.has('generation') ? 'gh-chev' : 'gh-chev open'} />
-	</button>
-	{#if !collapsedSections.has('generation')}
-		<div class="set-row stack">
-			<div class="ctl">
-				<AutomationJobChoices
-					jobId={currentView === 'edit' ? selectedAutomationId : null}
-					mode="draft"
-					draft={generationDraft}
-					committed={generationCommit}
-					onDraftChange={(draft) => onUpdateGenerationDraft?.(draft)}
-				/>
-			</div>
-		</div>
-	{/if}
-</div>
-
-<!-- Budget & Limits -->
-<div class="set-group">
-	<button type="button" class="set-grouphead head-toggle" class:collapsed={collapsedSections.has('budget')} onclick={() => onToggleSection('budget')}>
-		<h3><DollarSign />Budget &amp; limits</h3>
-		<ChevronDown size={15} class={collapsedSections.has('budget') ? 'gh-chev' : 'gh-chev open'} />
-	</button>
-	{#if !collapsedSections.has('budget')}
-		<div class="set-row">
-			<div class="lab"><h4>Max cost / run</h4><p>Dollar cap per run. Blank = no limit.</p></div>
-			<div class="ctl"><input type="number" class="inp num" step="0.01" min="0" value={formMaxCostPerRun} oninput={(e) => onUpdateFormMaxCostPerRun(e.currentTarget.value)} placeholder="No limit" /></div>
-		</div>
-		<div class="set-row">
-			<div class="lab"><h4>Max cost / day</h4><p>Dollar cap per day. Blank = no limit.</p></div>
-			<div class="ctl"><input type="number" class="inp num" step="0.01" min="0" value={formMaxCostPerDay} oninput={(e) => onUpdateFormMaxCostPerDay(e.currentTarget.value)} placeholder="No limit" /></div>
-		</div>
-		<div class="set-row">
-			<div class="lab"><h4>Max total</h4><p>Lifetime dollar cap. Blank = no limit.</p></div>
-			<div class="ctl"><input type="number" class="inp num" step="0.01" min="0" value={formMaxCostTotal} oninput={(e) => onUpdateFormMaxCostTotal(e.currentTarget.value)} placeholder="No limit" /></div>
-		</div>
-		<div class="set-row">
-			<div class="lab"><h4>Max runs / day</h4><p>Cap the number of runs per day.</p></div>
-			<div class="ctl"><input type="number" class="inp num" min="1" value={formMaxRunsPerDay} oninput={(e) => onUpdateFormMaxRunsPerDay(e.currentTarget.value)} placeholder="No limit" /></div>
-		</div>
-		<div class="set-row">
-			<div class="lab"><h4>Max turns</h4><p>Agent turns allowed per run. Blank = no limit.</p></div>
-			<div class="ctl"><input type="number" class="inp num" min="1" value={formMaxTurns} oninput={(e) => onUpdateFormMaxTurns(e.currentTarget.value)} placeholder="No limit" /></div>
-		</div>
-		<div class="set-row">
-			<div class="lab"><h4>Timeout</h4><p>Maximum run duration in seconds. Blank = no limit.</p></div>
-			<div class="ctl"><input type="number" class="inp num" min="10" value={formTimeoutSeconds} oninput={(e) => onUpdateFormTimeoutSeconds(e.currentTarget.value)} placeholder="No limit" /></div>
-		</div>
-	{/if}
-</div>
-
-<style>
-	.req {
-		color: var(--destructive);
-		font-weight: 700;
-	}
-
-	/* Collapsible group head (button styled as a grouphead) */
-	.head-toggle {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		width: 100%;
-		background: none;
-		border: none;
-		border-bottom: 1px solid var(--border);
-		cursor: pointer;
-		text-align: left;
-		font: inherit;
-		transition: background 0.12s;
-	}
-	.head-toggle:hover {
-		background: color-mix(in oklch, var(--muted) 45%, transparent);
-	}
-	.head-toggle.collapsed {
-		border-bottom: none;
-	}
-	.gh-left {
-		display: inline-flex;
-		align-items: center;
-		gap: 9px;
-		min-width: 0;
-	}
-	.head-toggle :global(.gh-chev) {
-		color: var(--muted-foreground);
-		flex-shrink: 0;
-		transition: transform 0.18s;
-		transform: rotate(-90deg);
-	}
-	.head-toggle :global(.gh-chev.open) {
-		transform: rotate(0deg);
-	}
-
-	/* Stands in for the agent select when there is nothing to pick yet.
-	   No margin-top: `.ctl` centres its contents, so the link sits on the
-	   same baseline the select would have. */
-	.no-agents {
-		background: none;
-		border: none;
-		padding: 0;
-		color: var(--primary);
-		cursor: pointer;
-		font-size: 0.8125rem;
-	}
-
-	.no-agents:hover {
-		text-decoration: underline;
-	}
-
-	.lab .model-error {
-		color: var(--destructive);
-	}
-
-	/* ── Permission mode (the composer's modes as a segmented control) ──
-	   Qualified to outrank the shared `.ptab .set-row .ctl` (align-items: center). */
-	.set-row .ctl.perm-ctl {
-		display: flex;
-		flex-direction: column;
-		align-items: flex-end;
-		gap: 8px;
-		min-width: 0;
-	}
-	.perm-seg {
-		max-width: 100%;
-	}
-	.perm-seg button {
-		white-space: nowrap;
-		min-height: 34px;
-	}
-	.perm-seg button:focus-visible {
-		outline: 2px solid var(--ring);
-		outline-offset: -2px;
-	}
-	.perm-seg button:active {
-		filter: brightness(0.94);
-	}
-	/* Bypass selected reads as a caution, not the plain primary fill. */
-	.perm-seg button.bypass.on {
-		background: var(--warning);
-		color: var(--warning-foreground);
-	}
-	.perm-warn {
-		display: flex;
-		align-items: flex-start;
-		gap: 7px;
-		margin: 0;
-		max-width: 340px;
-		padding: 7px 10px;
-		border: 1px solid color-mix(in oklab, var(--warning) 45%, var(--border));
-		border-radius: 8px;
-		background: color-mix(in oklab, var(--warning) 10%, var(--card));
-		color: var(--foreground);
-		font-size: 12px;
-		line-height: 1.4;
-		text-align: left;
-	}
-	.perm-warn :global(svg) {
-		flex: none;
-		margin-top: 2px;
-		color: color-mix(in oklab, var(--warning) 70%, var(--foreground));
-	}
-	@media (max-width: 560px) {
-		.set-row .ctl.perm-ctl {
-			align-items: stretch;
-			width: 100%;
-		}
-		.perm-seg {
-			display: flex;
-			width: 100%;
-		}
-		.perm-seg button {
-			flex: 1 1 0;
-			justify-content: center;
-			padding: 8px 6px;
-			min-height: 44px;
-		}
-		.perm-warn {
-			max-width: none;
-		}
-	}
-
-	/* Narrow numeric inputs in budget rows */
-	.ctl :global(.inp.num) {
-		min-width: 0;
-		width: 150px;
-		text-align: right;
-	}
-
-	/* ── Action-step builder (nested cards inside the stacked control) ── */
-	.ctl :global(.af-input) {
-		width: 100%;
-		padding: 9px 12px;
-		background: var(--background);
-		border: 1px solid var(--border);
-		border-radius: 9px;
-		color: var(--foreground);
-		font-size: 13px;
-		font-family: inherit;
-		transition: border-color 0.15s;
-		outline: none;
-	}
-	.ctl :global(.af-input:focus) {
-		border-color: var(--ring, var(--primary));
-	}
-	.ctl :global(.af-input::placeholder) {
-		color: var(--muted-foreground);
-		opacity: 0.65;
-	}
-	.ctl :global(.af-textarea) {
-		min-height: 90px;
-		resize: vertical;
-		line-height: 1.5;
-	}
-	.af-hint {
-		font-size: 11.5px;
-		color: var(--muted-foreground);
-		margin: 0;
-		line-height: 1.45;
-	}
-	.af-mini-label {
-		font-size: 11px;
-		font-weight: 600;
-		color: var(--muted-foreground);
-	}
-	.af-mini-field {
-		display: flex;
-		flex-direction: column;
-		gap: 5px;
-	}
-	.af-param-list {
-		display: flex;
-		flex-direction: column;
-		gap: 5px;
-	}
-	.af-grid-2 {
-		display: grid;
-		grid-template-columns: 1fr 1fr;
-		gap: 10px;
-	}
-	@media (max-width: 520px) {
-		.af-grid-2 {
-			grid-template-columns: 1fr;
-		}
-	}
-
-	.af-item-card {
-		background: var(--background);
-		border: 1px solid var(--border);
-		border-radius: 10px;
-		overflow: hidden;
-		margin-bottom: 8px;
-	}
-	/* A step's open model picker must not be clipped by its card (the editor
-	   shell does the same for `.set-group`). */
-	.af-item-card:has(:global(.mpk-panel)) {
-		overflow: visible;
-	}
-	.af-item-header {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		width: 100%;
-		padding: 9px 12px;
-		cursor: pointer;
-		text-align: left;
-		transition: background 0.12s;
-	}
-	.af-item-header:hover {
-		background: var(--muted);
-	}
-	.af-item-header-left {
-		display: flex;
-		align-items: center;
-		gap: 9px;
-		min-width: 0;
-		flex: 1;
-	}
-	.af-item-header-left :global(svg) {
-		flex-shrink: 0;
-		color: var(--muted-foreground);
-	}
-	.af-item-header-actions {
-		flex-shrink: 0;
-	}
-	.icon-x {
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		width: 26px;
-		height: 26px;
-		background: none;
-		border: none;
-		border-radius: 7px;
-		color: var(--destructive);
-		cursor: pointer;
-		transition: background 0.12s;
-	}
-	.icon-x:hover {
-		background: color-mix(in oklch, var(--destructive) 14%, transparent);
-	}
-	.af-item-type-badge {
-		display: inline-flex;
-		align-items: center;
-		padding: 2px 9px;
-		font-size: 11px;
-		font-weight: 600;
-		background: var(--primary);
-		color: var(--primary-foreground);
-		border-radius: 6px;
-		white-space: nowrap;
-	}
-	.af-item-step-num {
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		width: 21px;
-		height: 21px;
-		font-family: var(--font-mono, monospace);
-		font-size: 11px;
-		font-weight: 700;
-		background: var(--muted);
-		color: var(--foreground);
-		border-radius: 50%;
-		flex-shrink: 0;
-	}
-	.af-item-summary {
-		font-size: 12px;
-		color: var(--muted-foreground);
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-		min-width: 0;
-	}
-	.af-item-body {
-		padding: 11px 12px 13px;
-		border-top: 1px solid var(--border);
-		display: flex;
-		flex-direction: column;
-		gap: 8px;
-	}
-
-	.af-add-btn {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		gap: 6px;
-		width: 100%;
-		padding: 10px;
-		background: none;
-		border: 1px dashed var(--border);
-		border-radius: 10px;
-		color: var(--muted-foreground);
-		font-size: 12.5px;
-		font-weight: 600;
-		cursor: pointer;
-		transition: border-color 0.12s, color 0.12s, background 0.12s;
-	}
-	.af-add-btn:hover {
-		border-color: var(--muted-foreground);
-		color: var(--foreground);
-		background: var(--muted);
-	}
-</style>

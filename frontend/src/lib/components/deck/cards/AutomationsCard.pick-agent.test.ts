@@ -6,6 +6,8 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import type { Automation } from '$lib/api/automations';
+// Component tests have no SvelteKit router; exercise the kit's in-page Back fallback.
+vi.mock('$app/navigation', () => ({ pushState: () => { throw new Error('No router'); } }));
 
 const automationsApi = vi.hoisted(() => ({
 	getAutomations: vi.fn(),
@@ -70,20 +72,36 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 describe.each([1280, 390])('list errors at %ipx', (width) => {
+	it('refreshes the detail switch from the server after enabling', async () => {
+		vi.stubGlobal('innerWidth', width);
+		automationsApi.getAutomations.mockResolvedValueOnce([orphan])
+			.mockResolvedValue([{ ...orphan, is_enabled: true }]);
+		automationsApi.enableAutomation.mockResolvedValue({ ...orphan, is_enabled: true });
+		render(AutomationsCard, { props: { mobile: false } });
+		await fireEvent.click(await screen.findByText('Nightly digest'));
+		await fireEvent.click(await screen.findByRole('switch', { name: 'Enable automation' }));
+		expect((await screen.findByRole('switch', { name: 'Disable automation' })).getAttribute('aria-checked')).toBe('true');
+		expect(automationsApi.enableAutomation).toHaveBeenCalledWith('a1');
+	});
+
 	it.each(['edit', 'create'])('clears the refused-enable error when opening %s', async (destination) => {
 		vi.stubGlobal('innerWidth', width);
 		automationsApi.getAutomations.mockResolvedValue([{ ...orphan, profile_id: null }]);
 		const message = 'Choose an agent before re-enabling this automation';
 		automationsApi.enableAutomation.mockRejectedValue({ detail: message });
 		render(AutomationsCard, { props: { mobile: false } });
-		await fireEvent.click(await screen.findByRole('button', { name: 'Enable automation' }));
+		await fireEvent.click(await screen.findByText('Nightly digest'));
+			await fireEvent.click(await screen.findByRole('switch', { name: 'Enable automation' }));
 		expect(await screen.findByText(message)).toBeTruthy();
+		if (width <= 600 && destination === 'create') {
+			await fireEvent.click(screen.getByRole('button', { name: 'Back to Automations' }));
+		}
 		await fireEvent.click(destination === 'edit'
 			? screen.getByTitle('Edit')
-			: screen.getAllByRole('button', { name: /New automation/ })[0]);
-		await waitFor(() => expect(document.querySelector('select.sel[data-agent-picker]')).toBeTruthy());
+			: await waitFor(() => screen.getAllByRole('button', { name: /New automation/ })[0]));
+		await waitFor(() => expect(document.querySelector('[data-agent-picker] select')).toBeTruthy());
 		await waitFor(() => expect(screen.queryByText(message)).toBeNull());
-		await fireEvent.click(screen.getByRole('button', { name: /^Automations/ }));
+		await fireEvent.click(screen.getByRole('button', { name: 'Back to Automations' }));
 		expect(screen.queryByText(message)).toBeNull();
 	});
 });
@@ -98,7 +116,7 @@ describe('Pick an agent', () => {
 		render(AutomationsCard, { props: { mobile: true } });
 		await fireEvent.click(await openOrphanDetail());
 		const picker = await waitFor(() => {
-			const el = document.querySelector<HTMLSelectElement>('select.sel[data-agent-picker]');
+			const el = document.querySelector<HTMLSelectElement>('[data-agent-picker] select');
 			expect(el).toBeTruthy();
 			return el!;
 		});
@@ -110,26 +128,26 @@ describe('Pick an agent', () => {
 	it('focuses the agent picker on the desktop layout too', async () => {
 		render(AutomationsCard, { props: { mobile: false } });
 		await fireEvent.click(await openOrphanDetail());
-		await waitFor(() => expect(document.activeElement?.matches('select.sel[data-agent-picker]')).toBe(true));
+		await waitFor(() => expect(document.activeElement?.matches('[data-agent-picker] select')).toBe(true));
 	});
 
 	it('does not move focus when the editor is opened with the pencil', async () => {
 		render(AutomationsCard, { props: { mobile: true } });
 		await openOrphanDetail();
 		await fireEvent.click(screen.getByTitle('Edit'));
-		await waitFor(() => expect(document.querySelector('select.sel[data-agent-picker]')).toBeTruthy());
-		expect(document.activeElement?.matches('select.sel[data-agent-picker]')).toBe(false);
+		await waitFor(() => expect(document.querySelector('[data-agent-picker] select')).toBeTruthy());
+		expect(document.activeElement?.matches('[data-agent-picker] select')).toBe(false);
 	});
 
-	it('expands a collapsed Configuration section before focusing', async () => {
+	it('returns from a different form tab before focusing', async () => {
 		render(AutomationsCard, { props: { mobile: true } });
 		// Collapse Configuration (holds the Agent field) in the editor, then go back.
 		await openOrphanDetail();
 		await fireEvent.click(screen.getByTitle('Edit'));
-		await fireEvent.click(await screen.findByRole('button', { name: /Configuration/ }));
-		await waitFor(() => expect(document.querySelector('select.sel[data-agent-picker]')).toBeNull());
-		await fireEvent.click(screen.getByRole('button', { name: /^Automations/ }));
+		await fireEvent.click(await screen.findByRole('tab', { name: 'Budget & limits' }));
+		await waitFor(() => expect(document.querySelector('[data-agent-picker] select')).toBeNull());
+		await fireEvent.click(screen.getByRole('button', { name: 'Back to Automations' }));
 		await fireEvent.click(await openOrphanDetail());
-		await waitFor(() => expect(document.activeElement?.matches('select.sel[data-agent-picker]')).toBe(true));
+		await waitFor(() => expect(document.activeElement?.matches('[data-agent-picker] select')).toBe(true));
 	});
 });
