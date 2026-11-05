@@ -65,7 +65,7 @@ class Worker:
     def start(self, checkout):
         self.stop()
         self.checkout=Path(checkout)
-        assert (self.checkout/'.git').exists(), 'host-provisioned checkout required'
+        assert (self.checkout/'.git').exists() or (self.checkout/'.source-commit').is_file(), 'host-provisioned source required'
         env={**self.env,'PYTHONPATH':str(self.checkout)+os.pathsep+str(self.checkout/'fluid')}
         self.starts+=1
         self.log=self.directory/f'app-{self.starts}.log'
@@ -100,13 +100,23 @@ class Worker:
         return json.loads(lines[-1][7:]) if lines else None
 
     def snapshot(self, peer):
-        return self.run(f"""import asyncio,json,httpx
-from app.network import engine,transport
+        wait(peer.name+' transcript backfill before serving full snapshot',lambda:not peer.sql(
+            "SELECT 1 FROM network_transcript_backfill WHERE NOT done LIMIT 1"))
+        return self.run(f"""import asyncio,json,httpx,time
+from app.network import engine,transport,peer_snapshot
 ctx=engine.require_context()
 link=transport.PeerLink({peer.device!r},[{peer.env['CLUSTER_ADVERTISE_URL']!r}])
 async def copy():
     async with httpx.AsyncClient(timeout=90) as client:
-        return await link.receive_state(client,ctx)
+        deadline=time.monotonic()+75
+        while time.monotonic()<deadline:
+            manifest=await link.call(client,ctx,'POST','/api/v1/network/peer/state',
+                json_body={{}},params={{'prepare':'true','format':'1'}},timeout=60)
+            if manifest.get('status')!='preparing':
+                peer_snapshot.verify_manifest(manifest,link.device_id)
+                return await link._download_state(client,ctx,manifest)
+            await asyncio.sleep(.3)
+        raise AssertionError('full snapshot preparation timed out')
 print('RESULT '+json.dumps(asyncio.run(copy())))
 """)
 
@@ -216,7 +226,8 @@ def main():
     assert scratch.is_dir() and scratch.stat().st_uid==os.getuid(), 'scratch must be an existing caller-owned directory'
     for checkout in (args.old,args.candidate):
         assert not scratch.is_relative_to(Path(checkout).resolve()), 'scratch must be outside both source checkouts'
-    old_sha=subprocess.check_output(['git','rev-parse','HEAD'],cwd=args.old,text=True).strip()
+    stamp=Path(args.old)/'.source-commit'
+    old_sha=stamp.read_text().strip() if stamp.is_file() else subprocess.check_output(['git','rev-parse','HEAD'],cwd=args.old,text=True).strip()
     assert args.smoke or old_sha.startswith('3764f2f81'), 'old checkout must be pinned at the requested compatibility baseline'
     if args.smoke:
         directory=Path(args.scratch)/('startup-smoke-'+uuid.uuid4().hex[:6]);directory.mkdir(mode=0o700)
