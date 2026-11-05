@@ -397,6 +397,10 @@ def create_postgres_schema(cursor: Any) -> None:
     """)
 
     # ------------------------------------------------------------------
+    # Session intent shares session lifetime and travels with handoff history.
+    from app.db.session_plans import create_schema as create_plan_schema
+    create_plan_schema(cursor)
+
     # Hand-off staging references sessions, unlike the dependency-free network
     # tables bootstrapped above. Keep the FK on fresh databases and upgrades.
     from app.db.network import create_handoff_history_schema

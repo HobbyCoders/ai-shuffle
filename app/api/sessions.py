@@ -852,6 +852,16 @@ def _set_message_pagination_headers(response: Response, pagination: dict) -> Non
         response.headers["X-Message-Next-Before-Seq"] = str(pagination["next_before_seq"])
 
 
+@router.get("/{session_id}/plan")
+async def get_session_plan(
+    request: Request, session_id: str, token: str = Depends(require_auth),
+):
+    """Current model-reported session intent, guarded like transcript content."""
+    await require_transcript_session(request, session_id)
+    from app.db.session_plans import read
+    return await run_sync(read, session_id)
+
+
 @router.get("/{session_id}/composer-suggestion")
 async def get_composer_suggestion(
     request: Request, session_id: str, token: str = Depends(require_auth),

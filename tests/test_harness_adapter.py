@@ -7872,8 +7872,9 @@ def test_memory_block_says_what_remember_is_for():
     # Absence must not read as "the store is empty": a fold or a new turn
     # without the reminder is not an empty store.
     assert "empty" not in text.split("Saved facts arrive", 1)[1]
-    # Note/Ledger never persist.
-    assert "Note and Ledger are" in text and "never persist" in text
+    # Session working files persist without becoming cross-session memory.
+    assert "Note and Ledger are" in text and "session-scoped working files" in text
+    assert "survive compaction and restarts" in text and "never persist" not in text
 
 
 @pytest.mark.asyncio

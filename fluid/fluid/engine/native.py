@@ -2721,9 +2721,14 @@ class NativeLoop(BackgroundLifecycleMixin):
         ledger = self._ledger_reminder()
         if ledger is not None:
             content.append(Text(ledger))
-        notes = self._notes_reminder()
-        if notes is not None:
-            content.append(Text(notes))
+        from fluid.tools.builtins.plan import reminder as plan_reminder
+        plan_note = await asyncio.to_thread(plan_reminder, self.ctx) if self._tool_wired("Plan") else None
+        if plan_note:
+            content.append(Text(plan_note))
+        else:
+            notes = self._notes_reminder()
+            if notes is not None:
+                content.append(Text(notes))
         env_note = await self._environment_reminder()
         if env_note is not None:
             content.append(Text(env_note))

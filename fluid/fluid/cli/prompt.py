@@ -58,7 +58,7 @@ if TYPE_CHECKING:  # pragma: no cover
 # of the tool modules) so composing a prompt stays dependency-light; the
 # regression test asserts it matches the registry, so drift cannot go unseen.
 BUILTIN_TOOL_NAMES: tuple[str, ...] = (
-    "Read", "Grep", "Glob", "Write", "Edit", "Bash", "Skill", "Note", "Task",
+    "Read", "Grep", "Glob", "Write", "Edit", "Bash", "Skill", "Note", "Plan", "Task",
     "Monitor", "ToolSearch", "HistoryExpand", "HistorySearch", "Ledger",
     "AskUser", "SessionSearch", "SessionView", "WebFetch", "WebSearch",
     "Remember", "Recall", "Forget", "ListAgents", "SendMessage", "Swarm", "GetUsage",
@@ -856,7 +856,10 @@ def _instructions_section(p: PromptProfile) -> str | None:
             "lists what the Task tool can delegate to; without one, nothing "
             "is defined to delegate to."
         )
-    if "Note" in t and "Ledger" in t:
+    if "Plan" in t:
+        from fluid.tools.builtins.plan import guidance
+        bullets.append("- " + guidance(t))
+    elif "Note" in t and "Ledger" in t:
         bullets.append(
             "- Track multi-step work with Note: add every current step in "
             "one call before starting (one note per line, or pass texts). "
