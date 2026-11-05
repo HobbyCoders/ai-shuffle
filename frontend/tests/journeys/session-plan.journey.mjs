@@ -38,7 +38,7 @@ async function assertDisclosurePosition(page, plan, activate, log, label) {
   const box = button.getBoundingClientRect();
   return { top: box.top, bottom: box.bottom, focused: document.activeElement === button,
    scrollTop: scroller.scrollTop, scrollHeight: scroller.scrollHeight, clientHeight: scroller.clientHeight,
-   viewportTop: scroller.getBoundingClientRect().top, viewportBottom: scroller.getBoundingClientRect().bottom };
+   viewportTop: scroller.getBoundingClientRect().top, viewportBottom: scroller.getBoundingClientRect().bottom, windowY: scrollY };
  });
  const before = await measure();
  await activate(button);
@@ -167,9 +167,15 @@ const lifecycle = {
   await historical.getByRole('button', { name: /Collapse plan/ }).click();
   const jump = page.getByRole('button', { name: 'Jump to latest', exact: true });
   if (await jump.isVisible()) await jump.click();
-  // End is real keyboard input to the transcript, not a synthetic scroll event.
-  await page.getByRole('log', { name: 'Conversation messages' }).focus();
-  await page.keyboard.press('Control+End');
+  // Native End scrolls animate (and the log is not focusable). Measuring in
+  // that animation mistakes its remaining travel for disclosure-induced drift.
+  // Use real input inside the scroller and prove it reached the bottom first.
+  await page.getByRole('log', { name: 'Conversation messages' }).hover();
+  await page.mouse.wheel(0, 10000);
+  await page.waitForFunction(() => {
+   const s = document.querySelector('.msg-scroll');
+   return s && Math.abs(s.scrollHeight - s.clientHeight - s.scrollTop) <= 1;
+  });
   await assertDisclosurePosition(page, historical, button => button.click(), log, 'historical pointer expand');
   await assertDisclosurePosition(page, historical, () => page.keyboard.press('Enter'), log, 'historical keyboard collapse');
   await assertDisclosurePosition(page, revision(page, 4), () => page.keyboard.press('Enter'), log, 'current keyboard collapse');
