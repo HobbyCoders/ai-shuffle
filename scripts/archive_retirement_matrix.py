@@ -115,6 +115,29 @@ interactions.cancel_interaction(fresh['id'])
             'result':'real init_database + real lifespan; crash before async dismissal, two candidate boots, outbox held, frozen membership clock, recreated epoch and later prompt passed',
             'cohorts':w.sql("SELECT hidden,is_worker,mode,api_user_id,status,is_active,COUNT(*) AS n FROM sessions GROUP BY hidden,is_worker,mode,api_user_id,status,is_active ORDER BY COUNT(*) DESC"),
             'caveat':'A process restart cannot retain a live OS task or in-memory private wait. The fixture creates a real private request and Monitor at the pre-reconcile hook; their survival tests the settlement boundary, not cross-process resurrection.'}
+        # Count, traversal and search run through the actual API after boot.
+        from urllib.parse import urlencode
+        expected=w.sql("SELECT COUNT(*) AS n FROM sessions WHERE NOT COALESCE(hidden,FALSE) AND NOT COALESCE(is_worker,FALSE) AND api_user_id IS NULL AND NOT COALESCE(is_active,FALSE)")[0]['n']
+        count=w.request('GET','/api/v1/sessions/count?membership=settled&admin_only=true')['total']
+        assert count==expected
+        seen=[];params={'membership':'settled','admin_only':'true','sync_claude_sessions':'false','limit':100}
+        while True:
+            page=w.request('GET','/api/v1/sessions/cursor?'+urlencode(params))
+            seen.extend(r['id'] for r in page['items'])
+            if not page['has_more']:break
+            assert page['next_cursor'] and page['next_cursor_id']
+            params.update(cursor=page['next_cursor'],cursor_id=page['next_cursor_id'])
+        assert len(seen)==len(set(seen))==expected
+        first=w.request('GET','/api/v1/sessions/search/paginated?q=Matrix%20history&limit=20&offset=0')
+        later=w.request('GET','/api/v1/sessions/search/paginated?q=Matrix%20history&limit=20&offset=20')
+        assert first['total']==later['total']==1000 and len(later['items'])==20
+        assert not ({r['id'] for r in first['items']}&{r['id'] for r in later['items']})
+        old_link=later['items'][10]['id']
+        assert not w.request('GET',f'/api/v1/sessions/{old_link}')['is_active']
+        exported=w.request('GET',f"/api/v1/sessions/{ids['waits']}/export?format=json")
+        assert exported['session']['id']==ids['waits'] and 'messages' in exported
+        result.update(scoped_visible_settled_count=count,unique_paged_rows=len(seen),search_total=1000,
+            search_beyond_20_opened=old_link,export_readable=True)
         Path(args.scratch,'boot-matrix-results.json').write_text(json.dumps(result,indent=2,default=str))
     print('PASS full boot matrix; app and PostgreSQL stopped',flush=True)
 
@@ -155,9 +178,29 @@ async def reconcile():
     from app.db import database
     from app.core.session_reservations import holds_resources
     assert holds_resources(IDS['background'])
+    assert not holds_resources(IDS['stopped'])
+    # Use real resource-claim consumers against the migrated rows, without a
+    # GitHub write or touching any checkout outside this disposable directory.
+    from app.db import projects_v2,checkouts
+    from app.db.base import get_db
+    from app.core import checkout_lock,session_pr_state
+    from app.core.config import settings
+    project=projects_v2.upsert_project('fixture://archive-retirement/matrix','Disposable claims')
+    path=D/'private-checkout';path.mkdir(exist_ok=True)
+    checkouts.upsert_checkout(project['id'],settings.effective_instance_id,str(path),branch='retained')
+    candidate={'id':IDS['active'],'project_v2_id':project['id']}
+    pr=SimpleNamespace(number=789)
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE sessions SET project_v2_id=%s,branch='retained',pr_number=789,pr_state='open' WHERE id=%s",(project['id'],IDS['stopped']))
+    assert not checkout_lock.checkout_owners(str(path),IDS['active'])[1]
+    assert not session_pr_state._pull_claimed_elsewhere(pr,candidate,None)
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE sessions SET project_v2_id=%s,branch='retained',pr_number=789,pr_state='open' WHERE id=%s",(project['id'],IDS['background']))
+    assert [row['id'] for row in checkout_lock.checkout_owners(str(path),IDS['active'])[1]]==[IDS['background']]
+    assert session_pr_state._pull_claimed_elsewhere(pr,candidate,None)
     result={'private_before':private_before,'private_after':chat_access.broker.pending_count(IDS['waits']),
         'stop_latched':task_registry.is_user_stopped(IDS['stopped']),'outbox_held':engine.outbox_held(),
-        'monitor_running_after_settlement':True}
+        'monitor_running_after_settlement':True,'idle_history_releases_checkout_and_pr':True,'live_monitor_protects_checkout_and_pr':True}
     (D/'reconciled.json').write_text(json.dumps(result));release.touch();(D/'release-outbox').touch();held(False)
 migration.reconcile=reconcile
 runpy.run_module('app.main',run_name='__main__')

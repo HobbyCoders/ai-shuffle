@@ -12,10 +12,10 @@ out, or rename or delete that branch, or move or remove the checkout:
 ``gh pr checkout``. History edits on the same branch (``rebase``, ``reset``)
 keep the branch name and are not locked.
 
-Who is bound: a checkout row on this runner records a branch, and every
-non-archived session on this runner bound to that branch is bound to that
-checkout (the rule turn end uses, ``turn_finalize``). The calling session and
-its own workers never count. Then:
+Who is bound: a checkout row on this runner records a branch. A session
+bound to that branch holds its checkout only while it has unfinished work,
+including live Monitor jobs or subagents; idle history in either lane does
+not reserve it. The calling session and its own workers never count. Then:
 
 * A caller not bound to the checkout is refused while any other session is.
   That is the reported case: a chat started from another one ran ``git
@@ -348,8 +348,8 @@ def _created(row: Dict[str, Any]) -> tuple:
 def checkout_owners(toplevel: str, session_id: str) -> tuple[Optional[Dict[str, Any]], List[Dict[str, Any]]]:
     """``(checkout row, sessions that keep session_id from changing its branch)``.
 
-    See the module docstring for the rule. Sessions on another runner, archived
-    sessions and the caller's own workers never block.
+    See the module docstring for the rule. Sessions on another runner, idle
+    history and the caller's own workers never block.
     """
     from app.core.config import settings
     from app.db import database
