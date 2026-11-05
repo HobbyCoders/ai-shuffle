@@ -59,6 +59,13 @@
 	.wchip:hover, .wchip:active { color: var(--st-fg); }
 	.wchip:focus-visible { outline: 2px solid var(--st-primary); outline-offset: 4px; }
 	@media (pointer: coarse), (max-width: 600px) { .wchip { position: relative; } .wchip::before { content: ''; position: absolute; inset: -12px 0; } }
+	@media (max-width: 600px) {
+		/* A live setup label must not add/remove a metadata line above the tabs.
+		   Scroll the complete labels, with room for each 44px touch target. */
+		.wchips { flex-wrap: nowrap; overflow-x: auto; padding-block: 12px; margin-block: -12px; scrollbar-width: none; }
+		.wchip { flex: none; min-height: 20px; max-width: none; }
+		.wchip .t { white-space: nowrap; }
+	}
 	.wchip .t { overflow: hidden; text-overflow: ellipsis; }
 	.d { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--st-success); }
 	.wchip--missing .d { background: transparent; border: 1px solid var(--st-mfg); }
