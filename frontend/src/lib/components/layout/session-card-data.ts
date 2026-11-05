@@ -328,6 +328,15 @@ export const GIT_STAGE_LABELS: Record<GitStage, string> = {
 	none: ''
 };
 
+/** The line-two word for work that has no PR word to carry it. Uncommitted work
+ *  speaks even on top of a PR: stray edits are still at risk. */
+export function gitProgressWord(stage: GitStage, hasChanges = false): string | null {
+	if (hasChanges || stage === 'dirty') return 'Uncommitted';
+	if (stage === 'committed') return 'Committed';
+	if (stage === 'pushed') return 'Pushed';
+	return null;
+}
+
 export const GIT_STAGE_TONES: Record<GitStage, 'green' | 'purple' | 'amber' | 'muted'> = {
 	pr: 'green',
 	merged: 'purple',

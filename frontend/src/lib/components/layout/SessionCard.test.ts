@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import { platform } from '$lib/stores/platform.svelte';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 
 const mocks = vi.hoisted(() => {
 	function store<T>(initial: T) {
@@ -249,7 +251,7 @@ describe('SessionCard actions', () => {
 		expect(open.container.querySelector('.scard.emphasized')).toBeTruthy();
 	});
 
-	it('renders a settled row on one line, keeping its details and action', () => {
+	it('renders a settled row on two quiet lines, keeping its details and action', () => {
 		const { container } = renderCard(
 			{ is_active: false, worktree_branch: 'fix/thing', work_ms: 90_000 },
 			{ compact: true }
@@ -257,9 +259,9 @@ describe('SessionCard actions', () => {
 
 		expect(container.querySelector('.scard.compact')).toBeTruthy();
 		expect(container.querySelector('.title')?.textContent).toContain('Sidebar work');
-		expect(container.querySelector('.l2')).toBeNull();
+		expect(container.querySelector('.l2 .where')?.textContent).toBe('fix/thing');
 		expect(container.querySelector('.l1 .timer')?.textContent).toBe('1m 30s');
-		// Worker, project and branch leave the row but stay on hover and for screen readers.
+		// The rest of the row's facts stay on hover and for screen readers.
 		const tip = container.querySelector('.scard')?.getAttribute('title');
 		expect(tip).toContain('Sidebar work');
 		for (const part of ['This device', 'Project A', 'fix/thing']) {
@@ -720,7 +722,7 @@ describe('SessionCard git state', () => {
 		mocks.gitCurrent.diffStats = { additions: 70, deletions: 4 };
 		const { container } = renderCard({ worktree_branch: 'feat/new' }, { active: true });
 		expect(container.querySelector('.diff')).toBeNull();
-		expect(container.querySelector('.lead')?.getAttribute('aria-label')).toBe('No changes');
+		expect(container.querySelector('.lead')?.getAttribute('title')).toBe('No changes');
 		expect(mocks.watch).toHaveBeenCalled();
 		expect(mocks.remember).not.toHaveBeenCalled();
 	});
@@ -738,14 +740,14 @@ describe('SessionCard git state', () => {
 		mocks.gitCurrent.projectId = 'project-a';
 		mocks.gitCurrent.status = gitStatus({ has_changes: true });
 		const { container } = renderCard({}, { active: true });
-		expect(container.querySelector('.lead')?.getAttribute('aria-label')).toBe('No changes');
+		expect(container.querySelector('.lead')?.getAttribute('title')).toBe('No changes');
 	});
 
 	it('leads a merged session with the purple merge glyph', () => {
 		const { container } = renderCard({ pr_state: 'merged', pr_number: 1071 });
 
 		const lead = container.querySelector('.lead');
-		expect(lead?.getAttribute('aria-label')).toBe('Pull request merged');
+		expect(lead?.getAttribute('title')).toBe('Pull request merged');
 		expect(lead?.classList.contains('purple')).toBe(true);
 		expect(container.querySelector('.details')?.textContent).toContain('PR #1071 merged');
 	});
@@ -754,7 +756,7 @@ describe('SessionCard git state', () => {
 		const { container } = renderCard({ pr_state: 'open', pr_number: 42 }, { status: 'pr' });
 
 		const lead = container.querySelector('.lead');
-		expect(lead?.getAttribute('aria-label')).toBe('Pull request open');
+		expect(lead?.getAttribute('title')).toBe('Pull request open');
 		expect(lead?.classList.contains('green')).toBe(true);
 		expect(container.querySelector('.details')?.textContent).toContain('PR #42 open');
 	});
@@ -762,7 +764,7 @@ describe('SessionCard git state', () => {
 	it('leads a chat session with the chat glyph and no branch talk', () => {
 		const { container } = renderCard({ project_id: null });
 
-		expect(container.querySelector('.lead')?.getAttribute('aria-label')).toBe('Chat session');
+		expect(container.querySelector('.lead')?.getAttribute('title')).toBe('Chat session');
 		expect(container.querySelector('.details')?.textContent).not.toContain('PR');
 	});
 
@@ -776,7 +778,7 @@ describe('SessionCard git state', () => {
 		const { container } = renderCard({ worktree_branch: 'feat/x' });
 
 		const lead = container.querySelector('.lead');
-		expect(lead?.getAttribute('aria-label')).toBe('Uncommitted changes');
+		expect(lead?.getAttribute('title')).toBe('Uncommitted changes');
 		expect(lead?.classList.contains('amber')).toBe(true);
 		expect(container.querySelector('.diff')?.textContent).toBe('+124 −38');
 	});
@@ -795,7 +797,7 @@ describe('SessionCard git state', () => {
 		});
 
 		const lead = container.querySelector('.lead');
-		expect(lead?.getAttribute('aria-label')).toBe('Uncommitted changes');
+		expect(lead?.getAttribute('title')).toBe('Uncommitted changes');
 		expect(lead?.classList.contains('amber')).toBe(true);
 		expect(container.querySelector('.details')?.textContent).toContain('PR #1071 merged');
 		expect(container.querySelector('.diff')?.textContent).toBe('+12 −3');
@@ -811,7 +813,7 @@ describe('SessionCard git state', () => {
 
 		const { container } = renderCard({ worktree_branch: 'feat/x' });
 
-		expect(container.querySelector('.lead')?.getAttribute('aria-label')).toBe('Pushed, no PR yet');
+		expect(container.querySelector('.lead')?.getAttribute('title')).toBe('Pushed, no PR yet');
 		// No uncommitted work, so no diffstat to answer for.
 		expect(container.querySelector('.diff')).toBeNull();
 	});
@@ -826,8 +828,8 @@ describe('SessionCard git state', () => {
 
 		const { container } = renderCard({ worktree_branch: 'feat/x' });
 
-		expect(container.querySelector('.lead')?.getAttribute('aria-label')).toBe('No changes');
-		expect(container.querySelector('.lead')?.getAttribute('aria-label')).not.toBe(
+		expect(container.querySelector('.lead')?.getAttribute('title')).toBe('No changes');
+		expect(container.querySelector('.lead')?.getAttribute('title')).not.toBe(
 			'Pushed, no PR yet'
 		);
 	});
@@ -846,28 +848,99 @@ describe('SessionCard git state', () => {
 		expect(container.querySelector('.l1 .timer')).toBeTruthy();
 	});
 
-	it.each(['pr', 'pr_merged', 'done', 'idle'])('keeps a %s row to one line', (status) => {
+	it.each(['pr', 'pr_merged', 'done', 'idle'])('prints no status word on a %s row', (status) => {
 		const { container } = renderCard({ is_active: true }, { status });
-		expect(container.querySelector('.l2')).toBeNull();
+		expect(container.querySelector('.l2')).toBeTruthy();
+		expect(container.querySelector('.l2 .st:not(.pr)')).toBeNull();
 	});
 
-	it('names the pip/warning state for screen readers on compact rows, where no status word shows', () => {
-		const working = renderCard({ is_active: true }, { status: 'working', compact: true });
-		expect(working.container.querySelector('.title .sr-only')?.textContent).toBe('Working: ');
-		cleanup();
-
-		const parked = renderCard({ is_active: true }, { status: 'needs_permission', compact: true });
-		expect(parked.container.querySelector('.title .sr-only')?.textContent).toBe('Needs permission: ');
-		cleanup();
-
-		// A blocked or running active row prints the status word on line two.
-		const full = renderCard({ is_active: true }, { status: 'working' });
-		expect(full.container.querySelector('.title .sr-only')).toBeNull();
+	it('says the status once for screen readers: the printed word is hidden, the details line speaks', () => {
+		for (const [status, word, compact] of [
+			['working', 'Working', true],
+			['needs_permission', 'Needs permission', true],
+			['working', 'Working', false],
+		] as const) {
+			const { container } = renderCard({ is_active: !compact }, { status, compact });
+			expect(container.querySelector('.details')?.textContent).toContain(word);
+			expect(container.querySelector('.lead')?.getAttribute('aria-hidden')).toBe('true');
+			for (const printed of container.querySelectorAll('.l2 .st, .l2 .where, .l2 .diff')) {
+				expect(printed.getAttribute('aria-hidden')).toBe('true');
+			}
+			cleanup();
+		}
 	});
 
-	it('keeps compact cards free of the status line', () => {
-		const { container } = renderCard({}, { status: 'working', compact: true });
-		expect(container.querySelector('.l2')).toBeNull();
+	it('keeps the row on two lines in every status, so starting or stopping work cannot move it', () => {
+		const statuses = ['working', 'parked', 'needs_permission', 'needs_input', 'failed', 'offline', 'idle', 'done', 'pr', 'pr_merged'];
+		for (const compact of [false, true]) {
+			for (const status of statuses) {
+				const { container } = renderCard({ is_active: !compact }, { status, compact });
+				expect(container.querySelectorAll('.body > .l1')).toHaveLength(1);
+				expect(container.querySelectorAll('.body > .l2')).toHaveLength(1);
+				cleanup();
+			}
+		}
+		// Both lines take their height from the row, not from what they hold.
+		const source = readFileSync(resolve(import.meta.dirname, 'SessionCard.svelte'), 'utf8');
+		expect(source).toMatch(/\.l1 \{[^}]*height: var\(--line-1\)/);
+		expect(source).toMatch(/\.l2 \{[^}]*height: var\(--line-2\)/);
+	});
+
+	it('keeps the PR state and diffstat in view while the row works', () => {
+		mocks.getSessionGit.mockReturnValue({
+			status: gitStatus({ has_changes: true }),
+			diffStats: { additions: 12, deletions: 3, files_changed: 4 },
+			loaded: true,
+		});
+		const { container } = renderCard(
+			{ is_active: true, pr_state: 'open', pr_number: 142, worktree_branch: 'feat/rows' },
+			{ status: 'working' },
+		);
+		expect(container.querySelector('.lead .pip')).toBeTruthy();
+		expect(container.querySelector('.l2 .st.accent')?.textContent).toBe('Working');
+		const pr = container.querySelector('.l2 .st.pr');
+		expect(pr?.textContent).toBe('PR #142 open');
+		expect(pr?.classList.contains('green')).toBe(true);
+		expect(container.querySelector('.l2 .diff')?.textContent).toBe('+12 −3');
+		expect(container.querySelector('.l2 .where')?.textContent).toBe('feat/rows');
+	});
+
+	it('prints no status word on a settled row, working or not, but keeps its PR', () => {
+		for (const status of ['working', 'needs_permission', 'failed', 'done', 'idle']) {
+			const { container } = renderCard(
+				{ is_active: false, pr_state: 'merged', pr_number: 7 },
+				{ status, compact: true },
+			);
+			expect(container.querySelector('.l2 .st.accent, .l2 .st.amber, .l2 .st.danger, .l2 .st.muted:not(.pr)')).toBeNull();
+			expect(container.querySelector('.l2 .st.pr.purple')?.textContent).toBe('PR #7 merged');
+			cleanup();
+		}
+	});
+
+	it('never leaves line two blank: a row with no facts shows its age', () => {
+		const { container } = renderCard(
+			{ is_active: false, worktree_branch: null, branch: null, pr_state: null, pr_number: null, pull_requests: [] },
+			{ compact: true, status: 'idle' },
+		);
+		expect(container.querySelector('.l2 .where')?.textContent).toMatch(/ago$|^Just now$/);
+	});
+
+	it('names the project only when the row is not under a project header', () => {
+		const under = renderCard({ is_active: true, worktree_branch: 'feat/a' }, { status: 'idle' });
+		expect(under.container.querySelector('.l2 .where')?.textContent).toBe('feat/a');
+		cleanup();
+		const flat = renderCard({ is_active: true, worktree_branch: 'feat/a' }, { status: 'idle', showProject: true });
+		expect(flat.container.querySelector('.l2 .where')?.textContent).toBe('Project A · feat/a');
+	});
+
+	it('marks another worker with an icon, its name on hover and in the details', () => {
+		const { container } = renderCard(
+			{ is_active: true, is_remote: true, device_name: 'GamingPC', worktree_branch: 'feat/a' },
+			{ status: 'idle' },
+		);
+		expect(container.querySelector('.l2 .worker')?.getAttribute('title')).toBe('On GamingPC');
+		expect(container.querySelector('.details')?.textContent).toContain('GamingPC');
+		expect(container.querySelector('.l2 .where')?.textContent).toBe('feat/a');
 	});
 
 	it('marks a working row with the live pip and a parked row with the warning', () => {
@@ -910,7 +983,7 @@ describe('SessionCard git state', () => {
 
 		expect(mocks.watch).not.toHaveBeenCalled();
 		expect(container.querySelector('.diff')?.textContent).toBe('+7 −1');
-		expect(container.querySelector('.lead')?.getAttribute('aria-label')).toBe('Uncommitted changes');
+		expect(container.querySelector('.lead')?.getAttribute('title')).toBe('Uncommitted changes');
 	});
 });
 
@@ -939,7 +1012,7 @@ describe('SessionCard several pull requests', () => {
 			},
 			{ status: 'pr' },
 		);
-		const chip = container.querySelector('.l1 .pr-chip.multi');
+		const chip = container.querySelector('.l2 .pr-chip.multi');
 		expect(chip?.textContent).toBe('2 PRs open · 1 merged');
 		expect(chip?.querySelector('.green')?.textContent).toBe('2 PRs open');
 		expect(chip?.querySelector('.purple')?.textContent).toBe('1 merged');
@@ -1057,7 +1130,7 @@ describe('SessionCard several pull requests', () => {
 			{ is_active: false, pull_requests: [pr(1, 'merged'), pr(2, 'open')], pr_state: 'open', pr_number: 2 },
 			{ compact: true },
 		);
-		expect(container.querySelector('.l1 .pr-chip.multi')?.textContent).toBe('1 PR open · 1 merged');
+		expect(container.querySelector('.l2 .pr-chip.multi')?.textContent).toBe('1 PR open · 1 merged');
 	});
 });
 
