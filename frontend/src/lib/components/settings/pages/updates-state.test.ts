@@ -51,6 +51,110 @@ async function ready() {
 	expect(state.policy?.allow_updates).toBe(true);
 }
 
+describe('connected-worker runtime status', () => {
+	it('retains resident identity and timings separately from app identity', async () => {
+		const status = {
+			allow_updates: true, update_all_workers: false, supported: true, phase: 'idle',
+			running_version: 'a'.repeat(40),
+			updater: { revision: 'b'.repeat(40), capabilities: ['refresh-updater-v1'], refresh: 'available' },
+			diagnostics: { revision: 'a'.repeat(40), stages: [], total_elapsed_ms: 1500 }
+		};
+		transport.get.mockResolvedValueOnce(status);
+		await state.refresh();
+		expect(state.runtime).toEqual(status);
+	});
+
+	const available = (extra: Record<string, unknown> = {}) => ({
+		allow_updates: true, update_all_workers: true, supported: true, phase: 'idle',
+		running_version: 'a'.repeat(40),
+		updater: { revision: 'b'.repeat(40), capabilities: ['refresh-updater-v1'], refresh: 'available' },
+		...extra
+	});
+	async function load(extra: Record<string, unknown> = {}) {
+		transport.get.mockResolvedValueOnce(available(extra));
+		await state.refresh();
+	}
+
+	it('requests only the connected worker, without a mode, and never treats queued as complete', async () => {
+		await load();
+		transport.post.mockResolvedValueOnce({ queued: true });
+		await state.refreshUpdater();
+		expect(transport.post).toHaveBeenCalledWith('/settings/application-updates', { action: 'refresh-updater', scope: 'current' });
+		expect(state.updaterQueued).toBe(true);
+		expect(state.updaterNotice).toContain('completion has not been confirmed');
+		await state.check();
+		await state.refreshUpdater();
+		expect(transport.post).toHaveBeenCalledTimes(1);
+		await load();
+		expect(state.updaterQueued).toBe(true);
+		await load({ updater: { revision: 'a'.repeat(40), capabilities: [], refresh: 'current' } });
+		expect(state.updaterQueued).toBe(false);
+		expect(state.updaterNotice).toContain('confirms the refreshed revision');
+	});
+
+	it.each([
+		{ allow_updates: false }, { phase: 'checking' }, { phase: 'downloading' }, { phase: 'error' },
+		{ request_pending: true }, { install_pending: true }, { supported: false },
+		{ updater: null }, { updater: { revision: null, capabilities: ['refresh-updater-v1'], refresh: 'available' } },
+		{ updater: { revision: 'b'.repeat(40), capabilities: [], refresh: 'available' } },
+		{ updater: { revision: 'b'.repeat(40), capabilities: ['refresh-updater-v1'], refresh: 'image_update_required' } }
+	])('does not request a refresh while blocked: %j', async (blocked) => {
+		await load(blocked);
+		expect(state.canRefreshUpdater).toBe(false);
+		await state.refreshUpdater();
+		expect(transport.post).not.toHaveBeenCalled();
+	});
+
+	it('handles a supervisor refusal in idle/ready without calling it a successful refresh', async () => {
+		await load();
+		transport.post.mockResolvedValueOnce({ queued: true });
+		await state.refreshUpdater();
+		await load({ phase: 'ready', error: 'Updater refresh requires no active sessions.' });
+		expect(state.updaterQueued).toBe(false);
+		expect(state.updaterNotice).toBe('');
+		expect(state.updaterError).toContain('not confirmed');
+	});
+
+	it('bounds an unacknowledged request without automatically retrying it', async () => {
+		await load();
+		transport.post.mockResolvedValueOnce({ queued: true });
+		await state.refreshUpdater();
+		await vi.advanceTimersByTimeAsync(120_000);
+		await load();
+		expect(state.updaterQueued).toBe(false);
+		expect(state.updaterError).toContain('before trying again');
+		expect(transport.post).toHaveBeenCalledTimes(1);
+	});
+
+	it('pauses refresh when a status read fails, then recovers on a fresh read', async () => {
+		await load();
+		transport.get.mockRejectedValueOnce(new Error('offline'));
+		await state.refresh();
+		expect(state.runtimeStale).toBe(true);
+		expect(state.canRefreshUpdater).toBe(false);
+		await load();
+		expect(state.canRefreshUpdater).toBe(true);
+	});
+
+	it('reports failure safely and allows retry instead of exposing server details', async () => {
+		await load();
+		transport.post.mockRejectedValueOnce({ detail: '/private/worker command --secret' });
+		await state.refreshUpdater();
+		expect(state.updaterError).toContain('try again');
+		expect(state.updaterError).not.toContain('/private');
+		expect(state.updaterQueued).toBe(false);
+		expect(state.canRefreshUpdater).toBe(true);
+	});
+});
+
+it('retains only each checked worker’s own runtime metadata', async () => {
+	await ready();
+	snapshots = [[self('idle', { updater: { revision: 'b'.repeat(40), capabilities: [], refresh: 'current' }, diagnostics: null })]];
+	await state.check();
+	expect(state.rows?.[0].runtime?.updater?.revision).toBe('b'.repeat(40));
+	expect(state.runtime?.updater).toBeUndefined();
+});
+
 describe('check for updates', () => {
 	it('settles once a worker leaves "checking"', async () => {
 		await ready();

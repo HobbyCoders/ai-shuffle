@@ -34,7 +34,7 @@ import { waitingSummary, waitingView, type WaitingFields } from './update-waitin
 export { DATA_KEPT, INSTALLER_ACTION, INSTALLER_LINK, INSTALLER_URL, installerHint } from './update-remedy';
 
 /** One worker in GET /settings/application-updates/workers; restart waiting fields from update-waiting.ts. */
-export interface UpdateWorker extends WaitingFields {
+export interface UpdateWorker extends WaitingFields, UpdateRuntimeStatus {
 	device_id: string;
 	device_name: string;
 	is_self?: boolean;
@@ -71,6 +71,8 @@ export interface UpdateResultRow {
 	name: string;
 	tone: StatusTone;
 	text: string;
+	/** Validated status for this worker only; no local metadata fallback. */
+	runtime?: UpdateRuntimeStatus;
 	/** What to do about it, shown once under the list. */
 	hint?: string;
 	/** The one action that goes with the hint. */
@@ -139,6 +141,26 @@ export interface UpdatePolicy {
 	update_all_workers: boolean;
 }
 
+/** Optional on older workers; never substitute the app revision for the resident updater. */
+export interface UpdateRuntimeStatus extends Partial<UpdatePolicy> {
+	supported?: boolean;
+	phase?: string;
+	error?: string | null;
+	running_version?: string | null;
+	request_pending?: boolean;
+	install_pending?: boolean;
+	updater?: {
+		revision: string | null;
+		capabilities: string[];
+		refresh: 'available' | 'current' | 'container_restart_required' | 'image_update_required' | 'disabled' | 'unknown';
+	} | null;
+	diagnostics?: {
+		revision: string | null;
+		stages: { stage: string; elapsed_ms: number; outcome: 'completed' | 'failed' | 'hit' | 'miss' | 'fallback' | 'disabled' }[];
+		total_elapsed_ms: number;
+	} | null;
+}
+
 interface Snapshot extends UpdatePolicy {
 	workers: UpdateWorker[];
 }
@@ -152,6 +174,15 @@ export class UpdatesState {
 	status = $state<'loading' | 'ok' | 'forbidden' | 'error'>('loading');
 	saving = $state(false);
 	error = $state('');
+	runtime = $state<UpdateRuntimeStatus | null>(null);
+	runtimeStale = $state(false);
+	refreshingUpdater = $state(false);
+	updaterQueued = $state(false);
+	updaterNotice = $state('');
+	updaterError = $state('');
+	#refreshTarget: string | null = null;
+	#refreshRequestedAt = 0;
+	#refreshPreviousError: string | null = null;
 
 	/** Check results, null until a check runs. */
 	rows = $state<UpdateResultRow[] | null>(null);
@@ -170,17 +201,62 @@ export class UpdatesState {
 
 	async refresh(): Promise<void> {
 		try {
-			const next = await api.get<UpdatePolicy>('/settings/application-updates');
+			const next = await api.get<UpdatePolicy & UpdateRuntimeStatus>('/settings/application-updates');
 			if (!this.#alive || this.saving) return;
 			this.policy = { allow_updates: next.allow_updates, update_all_workers: next.update_all_workers };
+			this.runtime = next;
+			this.runtimeStale = false;
+			if (this.updaterQueued && this.#refreshTarget && next.updater?.revision === this.#refreshTarget && next.updater.refresh === 'current') {
+				this.updaterQueued = false;
+				this.updaterNotice = 'Updater status confirms the refreshed revision.';
+			} else if (this.updaterQueued && !next.request_pending && (next.phase === 'error' || (next.error && next.error !== this.#refreshPreviousError))) {
+				this.updaterQueued = false;
+				this.updaterNotice = '';
+				this.updaterError = 'The worker reported an update error. The updater refresh was not confirmed.';
+			} else if (this.updaterQueued && Date.now() - this.#refreshRequestedAt >= 120_000) {
+				this.updaterQueued = false;
+				this.updaterNotice = '';
+				this.updaterError = 'Updater refresh has not been confirmed. Check the connected worker before trying again.';
+			}
 			this.status = 'ok';
 		} catch (cause) {
 			if (!this.#alive) return;
+			this.runtimeStale = true;
 			if (isForbidden(cause)) this.status = 'forbidden';
 			else if (!this.policy) {
 				this.status = 'error';
 				this.error = getErrorMessage(cause, 'Could not load update settings');
 			}
+		}
+	}
+
+	get canRefreshUpdater(): boolean {
+		const s = this.runtime;
+		return this.status === 'ok' && !this.runtimeStale && !!this.policy?.allow_updates && !this.saving && !this.checking
+			&& !this.refreshingUpdater && !this.updaterQueued && !!s?.supported && !s.request_pending && !s.install_pending
+			&& (s.phase === 'idle' || s.phase === 'ready') && !!s.updater?.revision && !!s.running_version && s.updater.refresh === 'available'
+			&& s.updater.capabilities.includes('refresh-updater-v1');
+	}
+
+	async refreshUpdater(): Promise<void> {
+		if (!this.canRefreshUpdater) return;
+		this.refreshingUpdater = true;
+		this.updaterError = '';
+		this.updaterNotice = '';
+		this.#refreshTarget = this.runtime?.running_version ?? null;
+		this.#refreshPreviousError = this.runtime?.error ?? null;
+		try {
+			const receipt = await api.post<{ queued: boolean }>('/settings/application-updates', { action: 'refresh-updater', scope: 'current' });
+			if (!this.#alive) return;
+			if (!receipt?.queued) throw new Error('Not queued');
+			this.#refreshRequestedAt = Date.now();
+			this.updaterQueued = true;
+			this.updaterNotice = 'Refresh requested for the connected worker only. It may restart; completion has not been confirmed.';
+			window.dispatchEvent(new Event(POLICY_EVENT));
+		} catch {
+			if (this.#alive) this.updaterError = 'Could not request an updater refresh. Check the worker status and try again.';
+		} finally {
+			this.refreshingUpdater = false;
 		}
 	}
 
@@ -205,7 +281,7 @@ export class UpdatesState {
 	}
 
 	async check(): Promise<void> {
-		if (this.checking || !this.policy?.allow_updates) return;
+		if (this.checking || this.refreshingUpdater || this.updaterQueued || !this.policy?.allow_updates) return;
 		const run = ++this.#run;
 		this.checking = true;
 		this.checkError = '';
@@ -282,7 +358,7 @@ export class UpdatesState {
 					const view = done ? describeWorker(worker, own) : { tone: 'busy' as const, text: 'Checking' };
 					const hint = done ? (installerHint(worker) ?? imageHint(worker)) : undefined;
 					const link = done && installerHint(worker) ? INSTALLER_LINK : undefined;
-					rows.push({ id, name, ...view, ...(hint ? { hint } : {}), ...(link ? { link } : {}) });
+					rows.push({ id, name, ...view, ...('updater' in worker ? { runtime: worker } : {}), ...(hint ? { hint } : {}), ...(link ? { link } : {}) });
 				}
 				this.rows = rows;
 			} else settled = false;

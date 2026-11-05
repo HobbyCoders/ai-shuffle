@@ -5,6 +5,7 @@
 	 * button.
 	 */
 	import type { UpdateResultRow } from '../updates-state.svelte';
+	import UpdateRuntimeDetails from './UpdateRuntimeDetails.svelte';
 	import StatusDot from '../../rows/StatusDot.svelte';
 	import SettingRow from '../../rows/SettingRow.svelte';
 	import { ExternalLink } from 'lucide-svelte';
@@ -33,6 +34,9 @@
 					{#if row.tone === 'busy'}<span class="st-spin"></span>{:else}<StatusDot tone={row.tone} />{/if}{row.text}
 				</span>
 			</SettingRow>
+			{#if row.runtime}
+				<UpdateRuntimeDetails status={row.runtime} workerName={row.name} />
+			{/if}
 		{/each}
 	</div>
 	{#each hints as row (`${row.hint}\n${row.link?.href ?? ''}`)}

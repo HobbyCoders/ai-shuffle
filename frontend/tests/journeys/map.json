@@ -65,6 +65,17 @@
 	],
 	"rules": [
 		{
+			"why": "resident updater identity and preparation timings stay separate from app version, and refresh is connected-worker only",
+			"journeys": ["update-runtime"],
+			"globs": [
+				"frontend/tests/journeys/update-runtime.journey.mjs",
+				"frontend/src/lib/components/settings/pages/SystemPage.svelte",
+				"frontend/src/lib/components/settings/pages/updates-state.svelte.ts",
+				"frontend/src/lib/components/settings/pages/editors/UpdateRuntimeDetails.svelte",
+				"frontend/src/lib/components/settings/pages/editors/UpdateCheckResults.svelte"
+			]
+		},
+		{
 			"why": "Fluid file and installed plugin discovery must agree with composer selection, details and actual prompt expansion on native and Claude chats",
 			"journeys": ["fluid-commands"],
 			"globs": [
