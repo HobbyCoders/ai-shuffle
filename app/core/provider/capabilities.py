@@ -16,4 +16,9 @@ def supports_auto_permission(model: str, provider: Mapping[str, Any] | None = No
             provider_auth_mode=provider.get('auth_mode'),
             provider_dialect=provider.get('api_dialect'),
         )
-    return _decide_provider_kind(options) == 'delegated'
+    from app.core.environment import ProviderConfigError
+
+    try:
+        return _decide_provider_kind(options) == 'delegated'
+    except ProviderConfigError:
+        return False  # Capability enumeration is not an attempt to execute it.

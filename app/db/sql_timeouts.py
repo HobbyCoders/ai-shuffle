@@ -1,4 +1,4 @@
-"""Explicit SQL budgets for offline DDL and bounded maintenance, not user queries."""
+"""Transaction-local SQL budgets for work outside ordinary short queries."""
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
@@ -19,6 +19,17 @@ def migration_timeouts(cursor: Any) -> None:
         cursor.execute("SET LOCAL statement_timeout = 0")
         cursor.execute("SET LOCAL lock_timeout = 0")
         cursor.execute("SET LOCAL idle_in_transaction_session_timeout = 0")
+
+
+def transcript_decode_timeouts(cursor: Any) -> None:
+    """A server cursor idles during Python decode; keep SQL/lock deadlines.
+
+    Decoding one batch can exceed the pool's idle timeout under CPU contention.
+    Five minutes allows ample headroom over the measured 2.6-second slow batch,
+    but still expires a stalled transaction. SET LOCAL ends on commit/rollback.
+    """
+    if isinstance(cursor, psycopg2.extensions.cursor):
+        cursor.execute("SET LOCAL idle_in_transaction_session_timeout = '5min'")
 
 
 def analyze_timeouts(cursor: Any) -> None:

@@ -51,6 +51,11 @@ curl http://localhost:8000/api/v1/hooks/events \
 
 ## Hook CRUD
 
+Signing secrets are write-only: every list, get, create and update response
+contains `has_secret` (boolean), never `secret`. The app-config hook tools also
+return only secret presence. The stored secret remains available on the server
+for webhook HMAC signing.
+
 ### GET /api/v1/hooks/app
 
 List all app-level hooks (not scoped to any project). These fire for all sessions.
@@ -141,7 +146,16 @@ Get hook details.
 
 ### PATCH /api/v1/hooks/{hook_id}
 
-Update a hook. All fields are optional. Returns `400` for an unknown `event`, `404` if the hook does not exist, and `422` for an unknown `hook_type`.
+Update a hook. All fields are optional. Returns `400` for an unknown `event` or
+conflicting secret operations, `404` if the hook does not exist, and `422` for an
+unknown `hook_type`.
+
+- A nonblank `secret` replaces the stored signing secret.
+- Omitted, `null`, empty or whitespace-only `secret` values keep the stored secret.
+- `clear_secret: true` explicitly removes it (default: `false`). Combining this
+  with a nonblank `secret` returns `400` without changing the hook.
+
+The response contains `has_secret`, not the secret value.
 
 **Auth:** Owner only
 

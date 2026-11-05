@@ -47,6 +47,26 @@ def test_preference_publication_kill_switch_is_internal_only():
     assert entry["base_settings"] is False
 
 
+def test_docker_build_reuse_kill_switch_is_internal_only():
+    name = "AI_SHUFFLE_PERF_DOCKER_BUILD_REUSE"
+    allowed = json.loads((ROOT / "scripts/ci/env_allowlist.json").read_text())
+    entry = allowed[name]
+    assert entry["kind"] == "internal"
+    assert entry["base_settings"] is False
+    assert entry["reason"].strip()
+    assert name not in basesettings_names((ROOT / "app/core/config.py").read_text())
+
+
+def test_updater_candidate_fixture_is_internal_only():
+    name = "AI_SHUFFLE_UPDATER_FIXTURE"
+    allowed = json.loads((ROOT / "scripts/ci/env_allowlist.json").read_text())
+    entry = allowed[name]
+    assert entry["kind"] == "internal"
+    assert entry["base_settings"] is False
+    assert entry["reason"].strip()
+    assert name not in basesettings_names((ROOT / "app/core/config.py").read_text())
+
+
 def test_scanner_wake_kill_switch_is_internal_only():
     allowed = json.loads((ROOT / "scripts/ci/env_allowlist.json").read_text())
     entry = allowed["AI_SHUFFLE_PERF_SCAN_WAKE"]

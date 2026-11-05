@@ -276,7 +276,7 @@ async def test_unresolved_owner_questions_preserve_every_side_as_authority(world
     assert result["ok"] and not prompts
     assert result["model_override"]["source"] == mo.REMEMBERED
     section = store_for_owner("local").render_memory_section()
-    assert "Recall both and ask the owner" in section
+    assert "Recall all and ask the owner once" in section
     assert "and model-routing authority" in section
 
 
@@ -298,7 +298,7 @@ async def test_later_note_never_revokes_uncontested_jobs_from_broad_rule(world, 
     assert ("owner question" in section) == later.startswith("Speed sprint:")
 
 
-async def test_facts_outside_question_cap_still_authorize_and_labels_match_health(world):
+async def test_many_rules_on_one_job_still_authorize_and_labels_match_health(world):
     from fluid.codemode.preferences import MAX_OPEN_CONFLICTS, protected_conflicts
     from fluid.codemode import memory_health
     _, prompts = world
@@ -310,12 +310,22 @@ async def test_facts_outside_question_cap_still_authorize_and_labels_match_healt
     assert len(pairs) == MAX_OPEN_CONFLICTS
     assert len(mo.owner_memories("parent")) == 2 * (MAX_OPEN_CONFLICTS + 3)
     section = store.render_memory_section()
-    assert section.count("[owner question; unresolved conflict]") == MAX_OPEN_CONFLICTS
-    selected_ids = {e["id"] for a, b, _ in pairs for e in (a, b)}
-    assert section.count("; owner question]") == len(selected_ids)
+    assert section.count("[owner question; unresolved conflict]") == 1
+    # The job cap must not hide participating facts just because there are many pairs.
+    assert section.count("; owner question]") == 2 * (MAX_OPEN_CONFLICTS + 3)
     signal = next(s for s in memory_health.check(store)["signals"] if s["id"] == "proposals")
-    assert signal["detail"]["conflicts"] == MAX_OPEN_CONFLICTS
+    assert signal["detail"]["conflicts"] == 1
     assert (await _task("gpt 6.1 sol"))["ok"] and not prompts
+
+
+async def test_answer_control_row_is_not_model_routing_authority(world):
+    store = store_for_owner("local")
+    answer = store.save_memory("Use GPT 6.1 Sol for code.", protected=True,
+                               key="memory.coexist.legacy.example")
+    assert answer.id not in {e.id for e in mo.owner_memories("parent")}
+    _, prompts = world
+    result = await _task("gpt 6.1 sol")
+    assert not result["ok"] and len(prompts) == 1
 
 
 async def test_missing_unconfirmed_successor_keeps_original_routing_authority(world):

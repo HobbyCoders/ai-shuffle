@@ -9,9 +9,13 @@
 // phone widths. `--mobile-shell` opens the phone variants in the separately
 // built production /mobile/ shell (npm run build, app.preview stamp,
 // devloop up --no-vite).
+import { execFileSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { runJourney } from './runner.mjs';
 import {
 	chatState,
+	chatIdByToken,
 	composer,
 	countText,
 	expect,
@@ -25,6 +29,57 @@ import {
 } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 import { frames, markTime, spans } from './lib/timeline.mjs';
+
+// A deterministic refused write on the private database, not a mocked API reply.
+const REWIND_DATABASE = String.raw`
+import hashlib, json, os, sys
+from pathlib import Path
+home = Path(sys.argv[1]).resolve()
+assert home.name == 'data' and home.parent.name.startswith('ai-shuffle-preview-')
+assert (home / '.branch-preview').exists() or (home.parent / '.branch-preview').exists()
+os.environ['DATA_DIR'] = str(home)
+from app.core.config import settings
+assert settings.effective_data_dir.resolve() == home
+import psycopg2
+from psycopg2.extras import RealDictCursor
+chat, stage = sys.argv[2:4]
+with psycopg2.connect(**settings.get_database_connection()) as conn:
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute('SELECT sdk_session_id, outcome_baseline_failed, outcome_baseline_order FROM sessions WHERE id=%s', (chat,))
+        session = dict(cur.fetchone())
+        sdk = session.pop('sdk_session_id')
+        cur.execute('SELECT head_node_id, cli_session_id FROM fluid_sessions WHERE session_id=%s', (sdk,))
+        fluid = dict(cur.fetchone())
+        cli = fluid.get('cli_session_id')
+        cur.execute('SELECT id, role, content FROM session_messages WHERE session_id=%s ORDER BY id', (chat,))
+        rows = [dict(row) for row in cur.fetchall()]
+        cur.execute('SELECT COUNT(*) AS n FROM session_events WHERE session_id=%s', (chat,))
+        events = cur.fetchone()['n']
+        files = sorted(home.parent.rglob(cli + '.jsonl')) if cli else []
+        assert files, 'real CLI must have produced a transcript'
+        snapshot = {'session': session, 'fluid': fluid, 'rows': rows, 'events': events,
+                    'files': {str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in files}}
+        if stage == 'refuse':
+            cur.execute("""CREATE FUNCTION journey_refuse_rewind() RETURNS trigger LANGUAGE plpgsql AS $$
+                BEGIN IF NEW.id = TG_ARGV[0] THEN RAISE EXCEPTION 'journey rewind write refused'; END IF;
+                RETURN NEW; END $$""")
+            cur.execute("""CREATE TRIGGER journey_refuse_rewind BEFORE UPDATE OF outcome_baseline_order, outcome_baseline_failed
+                ON sessions FOR EACH ROW EXECUTE FUNCTION journey_refuse_rewind(%s)""", (chat,))
+        if stage == 'release':
+            cur.execute('DROP TRIGGER journey_refuse_rewind ON sessions')
+            cur.execute('DROP FUNCTION journey_refuse_rewind()')
+print(json.dumps(snapshot, default=str))
+`;
+
+function rewindDatabase(status, sessionId, stage) {
+	const local = join(status.checkout, '.venv', 'bin', 'python');
+	const python = existsSync(local) ? local : (process.env.PYTHON || 'python3');
+	return JSON.parse(execFileSync(python, ['-c', REWIND_DATABASE, status.data_dir, sessionId, stage], {
+		cwd: status.checkout,
+		env: { ...process.env, PYTHONPATH: join(status.checkout, 'fluid'), PYTHONDONTWRITEBYTECODE: '1' },
+		encoding: 'utf8'
+	}));
+}
 
 const mobileShell = process.argv.includes('--mobile-shell');
 const REWIND = 'rewind';
@@ -189,6 +244,48 @@ function installStallableFeed() {
 await runJourney({
 	name: 'rewind-transcript',
 	cases: [
+		{
+			name: 'refused-write',
+			async setup(ctx) {
+				await stageTwoTurns(ctx);
+				ctx.state.sessionId = await chatIdByToken(ctx.page, ctx.state.retained);
+			},
+			async act({ page, status, mark, log, state }) {
+				const before = rewindDatabase(status, state.sessionId, 'refuse');
+				try {
+					await mark('refused rewind');
+					await page.getByTitle('Rewind to before this message', { exact: true }).last().focus();
+					await page.keyboard.press('Enter');
+					const answered = page.waitForResponse(r => r.url().includes('/rewind/execute/') && r.request().method() === 'POST');
+					await page.getByRole('dialog').getByRole('button', { name: 'Rewind', exact: true }).click();
+					const response = await answered;
+					expect(response.status() === 200, `refused transaction must return a structured response, not HTTP ${response.status()}`);
+					const result = await response.json();
+					expect(!result.success && !result.chat_rewound && result.messages_removed === 0, 'refused transaction reports no removal');
+					expect(result.error?.includes('journey rewind write refused'), 'the database refusal reaches the user');
+					await page.getByRole('dialog').getByText(/journey rewind write refused/).waitFor();
+					await waitChat(page, { surface: 'active', messages: '4', loading: 'false' });
+					const after = rewindDatabase(status, state.sessionId, 'snapshot');
+					expect(JSON.stringify(after) === JSON.stringify(before), 'head, legacy rows, CLI bytes, events and outcome baseline remain intact');
+					log('Real CLI-produced transcript: refused reset rolled back with intact head, rows, events and CLI bytes; structured error rendered in dialog.');
+				} finally {
+					rewindDatabase(status, state.sessionId, 'release');
+				}
+			},
+			async verify({ page, status, state, log }) {
+				// After the recording, retry the same dialog against the recovered DB.
+				const answered = page.waitForResponse(r => r.url().includes('/rewind/execute/') && r.request().method() === 'POST');
+				await page.getByRole('dialog').getByRole('button', { name: 'Rewind', exact: true }).click();
+				const result = await (await answered).json();
+				expect(result.success && result.chat_rewound, 'retry succeeds after removing the refusal');
+				await page.getByRole('dialog').waitFor({ state: 'hidden' });
+				await waitChat(page, { messages: '2', loading: 'false' });
+				expect((await composer(page).innerText()).includes(state.removed), 'retry restores the removed prompt');
+				const after = rewindDatabase(status, state.sessionId, 'snapshot');
+				expect(after.rows.length === 1, 'only retained legacy user row remains after retry');
+				log('Recovered database: same UI request rewinds successfully and restores the prompt.');
+			}
+		},
 		{
 			name: 'latest-turn',
 			expectShift: rowsLeave(4, 2),

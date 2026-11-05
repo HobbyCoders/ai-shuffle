@@ -147,14 +147,14 @@ def test_sprint_routing_asks_without_linking_or_hiding_wider_rule(tmp_path):
 @pytest.mark.parametrize("scope", ["global", "project:fixture"])
 async def test_owner_keep_both_answer_uses_existing_remember_and_syncs(tmp_path, scope):
     from fluid.codemode import memory_health
-    from fluid.codemode.preferences import coexistence_key, protected_conflicts, curate_protected_conflicts
+    from fluid.codemode.preferences import owner_questions, protected_conflicts, curate_protected_conflicts
     from fluid.tools.builtins.remember import handler as remember
     from fluid.tools.builtins.recall import handler as recall
     from fluid.tools.registry import ToolCtx
     store = SkillStore(tmp_path / "source")
     a = store.save_memory("Code work goes to Opus.", protected=True, scope=scope)
     b = store.save_memory("Code work goes to Sol.", protected=True, scope=scope)
-    key = coexistence_key(vars(a), vars(b))
+    key = owner_questions(store._facts.snapshot()["entries"])[0]["key"]
     assert key in store.render_memory_section(scope)
     curate_protected_conflicts(store)  # curation log is NOT the answer
     replica = SkillStore(tmp_path / "replica")
@@ -227,7 +227,7 @@ def test_question_detection_once_per_render_and_cached_by_document_revision(tmp_
     store.render_memory_section()
     assert len(scans) == len(calls) == 1
     store.render_memory_section()
-    assert len(scans) == 1 and len(calls) == 2
+    assert len(scans) == len(calls) == 1  # reuse the entire job plan, not only its pairs
     # A restarted store shares the revision cache. Raw text is in the key too:
     # an imported metadata edit cannot return stale labels even without a bump.
     restarted = SkillStore(tmp_path)
@@ -253,6 +253,20 @@ def test_owner_question_size_and_duplicate_paragraph_guard(tmp_path):
     assert len(section) <= fixture['section_chars'] + fixture['allowance_chars']
     paragraphs = [p.strip() for p in section.split('\n\n') if p.strip()]
     assert len(paragraphs) == len(set(paragraphs)), 'do not repeat the memory footer/owner question'
+    # A pair-only budget misses the combinatorial regression: four code rules
+    # must share a question without crowding out the independent review job.
+    group = fixture['grouped']
+    store = SkillStore(tmp_path / 'grouped')
+    for text in group['texts']:
+        store.save_memory(text, protected=True, when=group['when'])
+    lines = owner_conflict_lines(store._facts.snapshot()['entries'])
+    assert len(lines) == group['questions']
+    assert len(store.learner_proposal_footer()) <= group['footer_chars'] + group['allowance_chars']
+    section = store.render_memory_section()
+    assert len(section) <= group['section_chars'] + group['allowance_chars']
+    paragraphs = [p.strip() for p in section.split('\n\n') if p.strip()]
+    assert len(paragraphs) == len(set(paragraphs)), 'do not repeat a job question/footer'
+
 
 @pytest.mark.parametrize("later", [
     "Sol for UI work from now on.", "UI work moved to Sol.",

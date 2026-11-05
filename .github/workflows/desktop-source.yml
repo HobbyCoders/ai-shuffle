@@ -38,6 +38,7 @@ jobs:
       ready: ${{ steps.ci.outputs.ready }}
       revision: ${{ steps.ci.outputs.revision }}
       version: ${{ steps.version.outputs.version }}
+      ui-reused: ${{ steps.version.outputs.reused }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -59,22 +60,30 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python scripts/ci/edge_publication_gate.py --select
-      # One version per run: a release tag pushed while this run is in flight
-      # must not give the UI bundle and the signed manifest different names
-      # (desktop/scripts/nightly-version.mjs).
-      - name: Pin the display version for the UI build and the signer
+      # Reuse only the selected revision's successful main run + latest attempt.
+      # Pin its validated build version (including a pre-tag nightly stamp), or
+      # resolve one version for the fallback builder and signer. No candidate code
+      # runs here, and artifacts from PRs/off-main dispatches are never eligible.
+      - name: Stage the proven UI artifact or pin the fallback display version
         if: steps.ci.outputs.ready == 'true'
         id: version
         env:
+          GH_TOKEN: ${{ github.token }}
           REVISION: ${{ steps.ci.outputs.revision }}
         run: |
           git worktree add --detach "$RUNNER_TEMP/candidate" "$REVISION"
-          version=$(python -I scripts/ci/publication_source.py version --source-root "$RUNNER_TEMP/candidate" --revision "$REVISION" | python -I -c 'import json, sys; print(json.load(sys.stdin))')
-          echo "version=$version" >> "$GITHUB_OUTPUT"
+          python -I scripts/ci/source_ui_artifact.py --source-root "$RUNNER_TEMP/candidate" --revision "$REVISION" --output "$RUNNER_TEMP/source-ui/ui.zip"
+      - uses: actions/upload-artifact@v4
+        if: steps.ci.outputs.ready == 'true' && steps.version.outputs.reused == 'true'
+        with:
+          name: source-ui
+          path: ${{ runner.temp }}/source-ui/ui.zip
+          retention-days: 1
+          if-no-files-found: error
 
   ui:
     needs: gate
-    if: needs.gate.outputs.ready == 'true'
+    if: needs.gate.outputs.ready == 'true' && needs.gate.outputs.ui-reused != 'true'
     permissions:
       contents: read
     uses: ./.github/workflows/source-ui-bundle.yml
@@ -84,7 +93,11 @@ jobs:
 
   publish:
     needs: [gate, ui]
-    if: needs.gate.outputs.ready == 'true'
+    # A reused ZIP skips ui intentionally; a failed/cancelled fallback never signs.
+    if: >-
+      always() && needs.gate.result == 'success' && needs.gate.outputs.ready == 'true' &&
+      ((needs.gate.outputs.ui-reused == 'true' && needs.ui.result == 'skipped') ||
+       (needs.gate.outputs.ui-reused != 'true' && needs.ui.result == 'success'))
     # A manual retry must not interrupt a scheduled signing/database write.
     concurrency:
       group: desktop-source-publish

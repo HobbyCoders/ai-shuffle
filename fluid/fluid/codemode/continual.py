@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import hashlib
 import json
 import logging
 import re
@@ -677,6 +678,7 @@ class Synthesizer:
         pass_timeout: float = 180.0,
         close_timeout: float = 90.0,
         session_model: str | None = None,
+        session_id: str | None = None,
         guidance_snapshot: dict[str, str] | None = None,
         context_window: int | None = None,
         workflow_cwd: str | None = None,
@@ -699,6 +701,12 @@ class Synthesizer:
         # The current project's memory-scope key: ``scope="project"`` tags in
         # the model's output resolve to it. ``None`` keeps everything global.
         self._project = project
+        self._session_id = session_id
+        if session_id is None and getattr(provider, "name", None) == "opencode":
+            # Standalone synthesis may span many conversations. Its memory
+            # scope is stable across passes/restarts, without exposing paths.
+            scope = [str(store.root.resolve()), store._facts.owner, project]
+            self._session_id = "learner:" + hashlib.sha256(json.dumps(scope).encode()).hexdigest()
         # The SESSION's model id (may differ from the synthesis
         # model above) — a guidance proposal's stem must be a substring of it
         # to ever load — and the current guidance file(s) matching it, shown
@@ -788,16 +796,17 @@ class Synthesizer:
         return True
 
     def _request_routing(self) -> tuple[dict[str, Any], WireState | None]:
-        # The routing speaks the Responses client's dialect; a learner pinned
-        # to another client sends none of it.
-        if self._routing is None or getattr(self._provider, "name", None) != "openai_responses":
+        # OpenCode also needs the owning conversation's wire identity, but
+        # must not receive Responses-only cache-affinity body fields.
+        kind = getattr(self._provider, "name", None)
+        if self._routing is None or kind not in ("openai_responses", "opencode"):
             return {}, None
         try:
             extra, wire = self._routing()
         except Exception:  # noqa: BLE001 — routing never fails a pass
             _log.debug("learner routing lookup failed", exc_info=True)
             return {}, None
-        return dict(extra or {}), wire
+        return (dict(extra or {}) if kind == "openai_responses" else {}), wire
 
     # ─── triggering ──────────────────────────────────────────────────────
     def mark_urgent(self) -> None:
@@ -1998,6 +2007,7 @@ Never claim a workflow is installed because it was proposed."""
             effort=self._effort,
             extra=extra,
             wire_state=wire_state,
+            session_id=wire_state.session_id if wire_state else self._session_id,
         )
         parts: list[str] = []
         raw: dict[str, Any] = {}
