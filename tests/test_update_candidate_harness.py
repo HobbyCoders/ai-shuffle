@@ -1,9 +1,11 @@
 """CI-only fixture mounting; no candidate builds or container operations run here."""
+import json
 import runpy
 import subprocess
 import sys
+import threading
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import MagicMock, Mock
 
 import pytest
 
@@ -63,7 +65,7 @@ def test_candidate_lifecycle_is_built_offline_then_explicitly_installed_and_refr
     assert "AI_SHUFFLE_UPDATER_FIXTURE=1" in updated_run
     assert "--network" in updated_run and updated_run[updated_run.index("--network") + 1] == "none"
     actions = [call for call in calls if len(call) >= 2 and call[-2] == fixture]
-    assert [call[-1] for call in actions] == ["install", "installed", "refresh-updater", "refreshed"]
+    assert [call[-1] for call in actions] == ["updater-ready", "install", "installed", "refresh-updater", "refreshed", "diagnose"]
     assert all(call[:-2] == ("exec", "--user", "99:100", updated, "python") for call in actions)
     assert check.system_id.call_count == 3
     assert check.sql.call_count == 3
@@ -119,6 +121,173 @@ def test_direct_mounted_script_bootstraps_image_imports_without_cwd_or_pythonpat
     with pytest.raises(SystemExit, match="Unknown fixture action"):
         runpy.run_path(str(mounted), run_name="__main__")
     assert sys.path[0] == "/app"  # parent of both the packaged app and local docker namespace
+
+
+class Clock:
+    def __init__(self):
+        self.now = 0.0
+
+    def time(self):
+        return 1000 + self.now
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now = round(self.now + seconds, 3)
+
+
+def write_json(path, value):
+    # Like the producer, publish via replacement so each generation is distinct.
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(value))
+    temporary.replace(path)
+
+
+def test_barrier_waits_for_real_watch_service_before_short_lived_install(tmp_path, monkeypatch):
+    from docker import application_updates as updates
+    from docker import container_runtime as runtime
+    from scripts.ci import updater_candidate_fixture as fixture
+
+    clock = Clock()
+    monkeypatch.setattr(fixture, "ROOT", tmp_path)
+    monkeypatch.setattr(fixture, "time", clock)
+    monkeypatch.setattr(runtime, "time", clock)
+    monkeypatch.setattr(updates, "time", clock)
+    image_revision, revision = "a" * 40, "b" * 40
+    write_json(tmp_path / "ci-fixture.json", {"image_revision": image_revision, "revision": revision})
+    updater = updates.ContainerUpdates(tmp_path, {"revision": image_revision}, b"unused", lambda: True, lambda _: {})
+    updater.state = {"pending": revision}  # unit-only input, not a candidate build
+    updater.fetch = Mock(side_effect=updates.UpdateError("Offline fixture network"))
+    service_times = []
+
+    def tick():
+        service_times.append(clock.now)
+        updater.service()  # real consumer, including expiry/policy/check publication
+
+    updater.tick = tick
+    stop = SimpleNamespace(is_set=lambda: clock.now >= 31, wait=clock.sleep)
+    monkeypatch.setattr(runtime, "STOP", stop)
+    monitor = runtime.ReadinessMonitor("http://unused/health/ready", probe=lambda _: True)
+
+    def first_sleep(seconds):
+        # Drive the real supervisor loop from cold start on the same fake clock.
+        monkeypatch.setattr(clock, "sleep", Clock.sleep.__get__(clock))
+        runtime.watch(SimpleNamespace(poll=lambda: None), SimpleNamespace(process=None), None,
+                      monitor=monitor, updates=updater)
+
+    monkeypatch.setattr(clock, "sleep", first_sleep)
+    fixture.wait_for_service()
+    assert monitor.ever_ready
+    assert service_times[0] >= runtime.READY_PROBE_INTERVAL == 30
+    initial_request = json.loads((tmp_path / "ci-request.json").read_text())
+    assert initial_request["action"] == "check"
+    assert initial_request["expires_at"] < clock.time()  # boot-gated check expired
+    assert not updater.install_requested.is_set()
+    assert not (tmp_path / "request.json").exists()
+    assert json.loads((tmp_path / "status.json").read_text())["error"] == "Offline fixture network"
+
+    fixture.submit_request("install")
+    queued = json.loads((tmp_path / "request.json").read_text())
+    assert queued["expires_at"] - clock.time() == 10  # no TTL extension/requeue
+    clock.sleep(1)
+    updater.service()
+    assert updater.install_requested.is_set()
+    assert not (tmp_path / "request.json").exists()
+
+
+@pytest.mark.parametrize("initial,fresh", [
+    ({"phase": "ready", "checked_at": 900}, None),  # persisted preparation
+    ({"phase": "ready"}, None),  # constructor publication
+    ({"phase": "ready"}, {"phase": "ready"}),  # a new constructor-only publication
+    ({"phase": "idle", "checked_at": 900}, None),  # old completed check
+    ({"phase": "ready", "error": "old error"}, None),
+    ({"phase": "ready"}, {"phase": "checking", "checked_at": 1001}),
+    ({"phase": "ready"}, {"phase": "downloading", "error": "old error"}),
+    ({"phase": "ready"}, {"phase": "idle", "checked_at": 1001, "updater": {"revision": "c" * 40}}),
+])
+def test_barrier_rejects_stale_unready_or_wrong_resident_publications(tmp_path, monkeypatch, initial, fresh):
+    from scripts.ci import updater_candidate_fixture as fixture
+    clock = Clock()
+    monkeypatch.setattr(fixture, "ROOT", tmp_path)
+    monkeypatch.setattr(fixture, "time", clock)
+    submit = Mock()
+    monkeypatch.setattr(fixture, "submit_request", submit)
+    resident = {"revision": "a" * 40}
+    write_json(tmp_path / "ci-fixture.json", {"image_revision": resident["revision"]})
+    write_json(tmp_path / "status.json", {"updater": resident, **initial})
+
+    def sleep(seconds):
+        clock.now += 30
+        if fresh:
+            write_json(tmp_path / "status.json", {"updater": resident, **fresh})
+
+    monkeypatch.setattr(clock, "sleep", sleep)
+    with pytest.raises(TimeoutError, match="first service pass"):
+        fixture.wait_for_service()
+    submit.assert_called_once_with("check")
+
+
+@pytest.mark.parametrize("row,allowed", [(None, True), (("true",), True), (("false",), False)])
+def test_diagnostics_capture_actual_files_and_read_only_policy(tmp_path, monkeypatch, capsys, row, allowed):
+    import psycopg2
+    from app.core.config import settings
+    from scripts.ci import updater_candidate_fixture as fixture
+    monkeypatch.setattr(fixture, "ROOT", tmp_path)
+    write_json(tmp_path / "state.json", {"pending": "a" * 40, "active": None, "private": "must-not-copy"})
+    write_json(tmp_path / "request.json", {"action": "install", "expires_at": 1000})
+    write_json(tmp_path / "status.json", {"phase": "ready", "updater": {"revision": "b" * 40}})
+    (tmp_path / "handover.json").write_text("x" * 16385)
+    monkeypatch.setattr(type(settings), "get_database_connection", lambda _: {"host": "synthetic", "password": "must-not-copy"})
+    connection = MagicMock()
+    cursor = connection.cursor.return_value.__enter__.return_value
+    cursor.fetchone.return_value = row
+    connect = Mock(return_value=connection)
+    monkeypatch.setattr(psycopg2, "connect", connect)
+    fixture.diagnose()
+    output = capsys.readouterr().out
+    report = json.loads(output)
+    assert report["files"]["state.json"] == {"pending": "a" * 40, "active": None}
+    assert report["files"]["request.json"]["action"] == "install"
+    assert report["files"]["status.json"]["updater"]["revision"] == "b" * 40
+    assert report["files"]["handover.json"] == {"unavailable": "ValueError"}
+    assert report["files"]["ci-fixture.json"] == {"unavailable": "FileNotFoundError"}
+    assert report["policy"] == {"allow_updates": allowed}
+    assert "must-not-copy" not in output
+    assert connect.call_args.kwargs["connect_timeout"] == 5
+    assert "default_transaction_read_only=on" in connect.call_args.kwargs["options"]
+    cursor.execute.assert_called_once_with("SELECT value FROM system_settings WHERE key = %s", ("allow_updates",))
+    connection.close.assert_called_once()
+
+
+def test_policy_diagnostic_failure_reports_only_exception_type(tmp_path, monkeypatch, capsys):
+    import psycopg2
+    from app.core.config import settings
+    from scripts.ci import updater_candidate_fixture as fixture
+    monkeypatch.setattr(fixture, "ROOT", tmp_path)
+    monkeypatch.setattr(type(settings), "get_database_connection", lambda _: {})
+    monkeypatch.setattr(psycopg2, "connect", Mock(side_effect=RuntimeError("must-not-copy connection details")))
+    fixture.diagnose()
+    output = capsys.readouterr().out
+    assert json.loads(output)["policy"] == {"unavailable": "RuntimeError"}
+    assert "must-not-copy" not in output
+
+
+def test_failed_install_captures_diagnostics_without_masking_failure(candidate, tmp_path):
+    check, _ = candidate
+    result = check.docker.return_value
+
+    def docker(*args, **kwargs):
+        if args[-1] == "installed":
+            raise RuntimeError("original install timeout")
+        if args[-1] == "diagnose":
+            raise subprocess.TimeoutExpired("docker", 20)
+        return result
+
+    check.docker.side_effect = docker
+    with pytest.raises(RuntimeError, match="original install timeout"):
+        check.updater_lifecycle()
+    assert json.loads((tmp_path / "updater-lifecycle.json").read_text()) == {"unavailable": "diagnostic process timed out"}
 
 
 def test_fixture_refuses_to_run_outside_disposable_candidate(monkeypatch):

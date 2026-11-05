@@ -88,11 +88,86 @@ def prepare(archive):
     print(json.dumps({"fixture": "synthetic-signed-source", "revision": revision, "stages": updater.diagnostics["stages"]}))
 
 
+def wait_for_service():
+    """Do not submit a 10s request before the supervisor's first ready probe.
+
+    /health/ready precedes the supervisor's 30s readiness poll. Its initial
+    status is constructor output, not proof that it can consume requests.
+    Wait for the normal first feed check to finish (including a feed error on
+    this network-isolated container), without extending or replaying requests.
+    """
+    fixture = json.loads((ROOT / "ci-fixture.json").read_text())
+    path = ROOT / "status.json"
+    before = path.stat()
+    generation = (before.st_ino, before.st_mtime_ns)
+    # A single read-only check also covers a container whose automatic first
+    # check finished before this barrier. It is never renewed or replayed.
+    submit_request("check")
+    deadline = time.monotonic() + 90
+    while time.monotonic() < deadline:
+        stamp = path.stat()
+        status = json.loads(path.read_text())
+        if ((stamp.st_ino, stamp.st_mtime_ns) != generation
+                and status.get("updater", {}).get("revision") == fixture["image_revision"]
+                and status.get("phase") not in ("checking", "downloading")
+                and (status.get("checked_at") is not None or status.get("error") is not None)):
+            return
+        time.sleep(1)
+    raise TimeoutError("Resident updater did not complete its first service pass")
+
+
+def diagnose():
+    """Bounded CI-only evidence; never copy credentials, descriptors or env."""
+    fields = {
+        "ci-fixture.json": ("revision", "image_revision"),
+        "ci-request.json": ("action", "queued_at", "expires_at", "observed_absent_at"),
+        "request.json": ("action", "expires_at"),
+        "state.json": ("pending", "active", "previous", "booting", "blocked", "failed"),
+        "status.json": ("phase", "checked_at", "error", "updater", "diagnostics"),
+        "handover.json": ("revision",),
+    }
+    report = {"observed_at": time.time(), "files": {}}
+    for name, keys in fields.items():
+        try:
+            with (ROOT / name).open() as stream:
+                text = stream.read(16385)
+            if len(text) > 16384:
+                raise ValueError("oversized diagnostic")
+            value = json.loads(text)
+            report["files"][name] = {key: value[key] for key in keys if key in value}
+        except (OSError, ValueError, TypeError) as exc:
+            report["files"][name] = {"unavailable": type(exc).__name__}
+    try:
+        import psycopg2
+        from app.core.config import settings
+        # Same saved policy read by the real API's allowed(); no pool/schema
+        # initialization, policy changes, or database credentials in the report.
+        options = dict(settings.get_database_connection(), connect_timeout=5,
+                       options="-c statement_timeout=5000 -c default_transaction_read_only=on")
+        connection = psycopg2.connect(**options)
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT value FROM system_settings WHERE key = %s", ("allow_updates",))
+                row = cursor.fetchone()
+                report["policy"] = {"allow_updates": row is None or row[0] == "true"}
+        finally:
+            connection.close()
+    except Exception as exc:
+        report["policy"] = {"unavailable": type(exc).__name__}
+    print(json.dumps(report))
+
+
 def wait_for(mode):
     fixture = json.loads((ROOT / "ci-fixture.json").read_text())
     revision = fixture["revision"]
     deadline = time.monotonic() + 240
     while time.monotonic() < deadline:
+        # Record disappearance separately from success: the consumer can also
+        # remove an expired or refused request. Only the state proofs below pass.
+        request = json.loads((ROOT / "ci-request.json").read_text())
+        if not (ROOT / "request.json").exists() and "observed_absent_at" not in request:
+            from app.core.application_updates import atomic_json
+            atomic_json(ROOT / "ci-request.json", dict(request, observed_absent_at=time.time()))
         state = json.loads((ROOT / "state.json").read_text())
         status = json.loads((ROOT / "status.json").read_text())
         expected = revision if mode == "refreshed" else fixture["image_revision"]
@@ -109,17 +184,28 @@ def wait_for(mode):
     raise TimeoutError("Candidate updater lifecycle did not complete")
 
 
+def submit_request(action):
+    from app.core.application_updates import atomic_json, CONTAINER_REQUEST_SECONDS
+    queued = time.time()
+    request = {"action": action, "expires_at": queued + CONTAINER_REQUEST_SECONDS}
+    atomic_json(ROOT / "ci-request.json", dict(request, queued_at=queued))
+    atomic_json(ROOT / "request.json", request)
+
+
 def main():
     if os.environ.get("AI_SHUFFLE_UPDATER_FIXTURE") != "1" or os.environ.get("DATA_DIR") != "/data":
         raise SystemExit("Only the disposable candidate-container harness may run this fixture")
     action = sys.argv[1]
     if action == "prepare":
         prepare(sys.argv[2])
+    elif action == "updater-ready":
+        wait_for_service()
+    elif action == "diagnose":
+        diagnose()
     elif action in ("installed", "refreshed"):
         wait_for(action)
     elif action in ("install", "refresh-updater"):
-        from app.core.application_updates import atomic_json
-        atomic_json(ROOT / "request.json", {"action": action, "expires_at": time.time() + 10})
+        submit_request(action)
     else:
         raise SystemExit("Unknown fixture action")
 

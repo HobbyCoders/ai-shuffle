@@ -218,21 +218,31 @@ class Check:
         app = self.launch(volume, env={"AI_SHUFFLE_UPDATER_FIXTURE": "1"},
                           mounts=[fixture_mount,
                                   f"type=bind,src={public.resolve()},dst=/app/docker/application-update-key.pem,readonly"])
-        self.ready(app)
-        self.docker("exec", "--user", "99:100", app, "python", fixture, "install")
-        self.docker("exec", "--user", "99:100", app, "python", fixture, "installed", timeout=260)
-        self.ready(app)
-        assert self.system_id(app) == identity
-        assert self.sql(app, "SELECT value FROM updater_lifecycle_check;") == "retained"
-        self.docker("exec", "--user", "99:100", app, "python", fixture, "refresh-updater")
-        self.docker("exec", "--user", "99:100", app, "python", fixture, "refreshed", timeout=260)
-        self.ready(app)
-        assert self.system_id(app) == identity
-        assert self.sql(app, "SELECT value FROM updater_lifecycle_check;") == "retained"
-        # The new resident owns the same cluster, not a daemonized second PG.
-        lock_probe = ("from docker.container_runtime import ClusterLock; from pathlib import Path; "
-                      "lock=ClusterLock(Path('/data/postgres/lifecycle.lock')); assert not lock.acquire()")
-        self.docker("exec", "--user", "99:100", app, "python", "-c", lock_probe)
+        try:
+            self.ready(app)
+            self.docker("exec", "--user", "99:100", app, "python", fixture, "updater-ready")
+            self.docker("exec", "--user", "99:100", app, "python", fixture, "install")
+            self.docker("exec", "--user", "99:100", app, "python", fixture, "installed", timeout=260)
+            self.ready(app)
+            assert self.system_id(app) == identity
+            assert self.sql(app, "SELECT value FROM updater_lifecycle_check;") == "retained"
+            self.docker("exec", "--user", "99:100", app, "python", fixture, "refresh-updater")
+            self.docker("exec", "--user", "99:100", app, "python", fixture, "refreshed", timeout=260)
+            self.ready(app)
+            assert self.system_id(app) == identity
+            assert self.sql(app, "SELECT value FROM updater_lifecycle_check;") == "retained"
+            # The new resident owns the same cluster, not a daemonized second PG.
+            lock_probe = ("from docker.container_runtime import ClusterLock; from pathlib import Path; "
+                          "lock=ClusterLock(Path('/data/postgres/lifecycle.lock')); assert not lock.acquire()")
+            self.docker("exec", "--user", "99:100", app, "python", "-c", lock_probe)
+        finally:
+            try:
+                captured = self.docker("exec", "--user", "99:100", app, "python", fixture, "diagnose",
+                                       check=False, timeout=20)
+                evidence = captured.stdout or json.dumps({"unavailable": "diagnostic process failed"}).encode()
+            except subprocess.TimeoutExpired:
+                evidence = b'{"unavailable":"diagnostic process timed out"}'
+            (self.artifacts / "updater-lifecycle.json").write_bytes(evidence)
         self.stop(app)
         self.passed("synthetic signed source: real pip/npm assembly, warm tools/browser hits, app-only install keeps "
                     "resident revision; explicit supervisor refresh preserves PG identity/data and lifetime lock")
