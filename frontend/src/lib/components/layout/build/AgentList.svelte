@@ -12,6 +12,7 @@
 	import { Plus } from 'lucide-svelte';
 	import ListItem from '$lib/components/settings/rows/ListItem.svelte';
 	import ListGroupLabel from '$lib/components/settings/rows/ListGroupLabel.svelte';
+ import EmptyDetail from '$lib/components/settings/shell/EmptyDetail.svelte';
 	import AgentAvatar from '$lib/components/agents/AgentAvatar.svelte';
 	import type { AgentSections } from '$lib/components/deck/cards/profiles/agentList';
 
@@ -133,10 +134,7 @@
 	{/if}
 
 	{#if narrowed && sections.matches === 0 && !draft}
-		<p class="l-none">
-			No agents match{query.trim() ? ` “${query.trim()}”` : ' this filter'}.
-			<button type="button" class="lnk" onclick={onClear}>Clear</button>
-		</p>
+		<EmptyDetail message={`No agents match${query.trim() ? ` “${query.trim()}”` : ' this filter'}.`} actionLabel="Clear" onAction={onClear} />
 	{/if}
 {/if}
 
@@ -186,23 +184,7 @@
 	.l-empty .st-btn {
 		margin-top: 8px;
 	}
-	.l-none {
-		padding: 18px 10px;
-		margin: 0;
-		font-size: 13px;
-		color: var(--st-mfg);
-	}
-	.lnk {
-		padding: 0;
-		border: 0;
-		background: none;
-		color: var(--st-primary);
-		font-weight: 600;
-		font-size: inherit;
-	}
-	.lnk:hover {
-		text-decoration: underline;
-	}
+
 	/* Skeleton rows */
 	.sk {
 		display: block;

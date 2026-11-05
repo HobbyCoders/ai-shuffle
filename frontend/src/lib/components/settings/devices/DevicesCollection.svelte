@@ -25,7 +25,7 @@
 	import CollectionPage from '../shell/CollectionPage.svelte';
 	import EmptyDetail from '../shell/EmptyDetail.svelte';
 	import ListItem from '../rows/ListItem.svelte';
-	import ListGroupLabel from '../rows/ListGroupLabel.svelte';
+	import RowGroup from '../rows/RowGroup.svelte';
 	import InlineBanner from '../rows/InlineBanner.svelte';
 	import AccountDetail from './AccountDetail.svelte';
 	import RequestDetail from './RequestDetail.svelte';
@@ -72,7 +72,7 @@
 		return Number.isFinite(t) && model.now - t < RECENT_MS;
 	}
 
-	const groups = $derived.by((): { label: string; rows: Row[] }[] => {
+	const allGroups = $derived.by((): { label: string; rows: Row[] }[] => {
 		const acct = accountStatus(model.account);
 		const list: { label: string; rows: Row[] }[] = [
 			{
@@ -185,14 +185,13 @@
 				}))
 			}
 		];
-		const q = filter.trim().toLowerCase();
-		return list
-			.map((g) => ({
-				label: g.label,
-				rows: q ? g.rows.filter((r) => `${r.name} ${r.summary} ${g.label}`.toLowerCase().includes(q)) : g.rows
-			}))
-			.filter((g) => g.rows.length);
+		return list.filter((g) => g.rows.length);
 	});
+ const rowCount = $derived(allGroups.reduce((n, group) => n + group.rows.length, 0));
+ const groups = $derived.by(() => {
+  const q = filter.trim().toLowerCase();
+  return allGroups.map(g => ({ ...g, rows: q ? g.rows.filter(r => `${r.name} ${r.summary} ${g.label}`.toLowerCase().includes(q)) : g.rows })).filter(g => g.rows.length);
+ });
 
 	const count = $derived(
 		model.complete
@@ -209,7 +208,7 @@
 	}
 </script>
 
-<CollectionPage category={CATEGORY} {count} addLabel="Add device" onAdd={add} bind:filter>
+<CollectionPage category={CATEGORY} {count} addLabel="Add device" onAdd={add} filterPlaceholder={rowCount > 6 || filter ? "Filter devices" : null} bind:filter>
 	{#snippet list()}
 		{#if model.statusError}
 			<InlineBanner tone="warn">
@@ -252,17 +251,11 @@
 		{#if model.notice}<p class="notice" role="status">{model.notice}</p>{/if}
 
 		{#each groups as group (group.label)}
-			<ListGroupLabel label={group.label} />
+   <RowGroup title={group.label}>
 			{#each group.rows as row (row.id)}
-				<ListItem
-					id={row.id}
-					name={row.name}
-					summary={row.summary}
-					status={row.status}
-					icon={row.icon}
-					category={CATEGORY}
-				/>
+				<ListItem id={row.id} name={row.name} summary={row.summary} status={row.status} icon={row.icon} category={CATEGORY} />
 			{/each}
+   </RowGroup>
 		{/each}
 		{#if !model.clientsLoaded && !model.clientsError && !model.forbidden}
 			<p class="st-empty" role="status">Loading devices…</p>
@@ -270,7 +263,7 @@
 		{#if model.account.profile && model.account.profile.devices === undefined}
 			<p class="st-empty">Update the account service to list its phones and browsers.</p>
 		{/if}
-		{#if filter.trim() && groups.length === 0}<p class="st-empty">Nothing matches.</p>{/if}
+		{#if filter.trim() && groups.length === 0}<EmptyDetail message="Nothing matches." actionLabel="Clear" onAction={() => filter = ''} />{/if}
 	{/snippet}
 	{#snippet detail()}
 		{@const request = model.requests.byId(selected)}

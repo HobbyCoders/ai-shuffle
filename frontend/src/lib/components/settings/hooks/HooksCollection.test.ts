@@ -76,7 +76,16 @@ beforeEach(() => {
 afterEach(() => cleanup());
 
 describe('Settings > Hooks list', () => {
+ it('cards the app group and hides filtering for the short list', async () => {
+  await show();
+  expect(screen.queryByRole('searchbox')).toBeNull();
+  expect(screen.getByRole('button', { name: /^Guard rm/ }).closest('.st-card')).toBeTruthy();
+ });
 	it('groups app and plugin hooks and filters by search', async () => {
+  api.getAppHooks.mockResolvedValue([
+   hook(), hook({ id: 'h2', name: 'Notify', event: 'Stop', hook_type: 'webhook', command: null, url: 'https://ntfy.sh/x', tool_matcher: null, enabled: false }),
+   ...Array.from({ length: 4 }, (_, i) => hook({ id: `extra-${i}`, name: `Extra ${i}`, event: 'Stop', command: 'extra' }))
+  ]);
 		await show();
 		expect(screen.getByText('PreToolUse, Bash')).toBeTruthy();
 		expect(screen.getByText('Off, Stop')).toBeTruthy();
@@ -87,6 +96,8 @@ describe('Settings > Hooks list', () => {
 		expect(screen.getByText('Off, Stop')).toBeTruthy();
 		await fireEvent.input(screen.getByRole('searchbox'), { target: { value: 'zzz' } });
 		expect(screen.getByText('Nothing matches.')).toBeTruthy();
+  await fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+  expect((screen.getByRole('searchbox') as HTMLInputElement).value).toBe('');
 	});
 });
 

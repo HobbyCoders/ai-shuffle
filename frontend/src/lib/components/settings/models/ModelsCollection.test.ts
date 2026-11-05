@@ -316,7 +316,8 @@ describe('CatalogDetail, fal.ai models', () => {
 		}
 		await fireEvent.input(search, { target: { value: 'nothing-like-this' } });
 		expect(screen.getByText(/No models match/)).toBeTruthy();
-		await fireEvent.click(screen.getByRole('button', { name: 'Clear search' }));
+		await fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+  expect((search as HTMLInputElement).value).toBe('');
 		expect(rows()).toHaveLength(5);
 	});
 

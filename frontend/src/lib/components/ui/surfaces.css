@@ -14,7 +14,8 @@
 .ui-scrim { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; padding: 0; background: color-mix(in oklch, var(--background) 62%, transparent); backdrop-filter: blur(3px); }
 .ui-dialog { position: relative; width: min(var(--ui-dialog-width, 520px), 100%); min-width: 0; max-height: 100%; display: flex; flex-direction: column; overflow: auto; background: var(--popover); border-radius: calc(var(--radius) + 8px); box-shadow: var(--ui-dialog-shadow); animation: ui-dialog-in 180ms ease-out; }
 .ui-dialog:focus { outline: none; }
-.ui-dialog-header { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 18px 18px 6px 20px; flex: none; }
+.ui-dialog-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; padding: 18px 18px 6px 20px; flex: none; }
+.ui-dialog-header > .ui-button.icon { margin-top: -5px; }
 .ui-dialog-title { margin: 0; font-size: 16px; font-weight: 600; line-height: 1.4; color: var(--foreground); }
 .ui-dialog-subtitle { margin: 3px 0 0; font-size: 13px; color: var(--muted-foreground); }
 .ui-dialog-body { min-height: 0; padding: 8px 20px 4px; overflow: auto; }
@@ -49,6 +50,7 @@
  .ui-dialog-footer .ui-button { min-height: 44px; flex: 1; }
  .ui-surface .ui-button, .ui-surface .ui-choice { min-height: 44px; }
  .ui-surface .ui-button.icon { width: 44px; }
+ .ui-dialog-header > .ui-button.icon { margin-top: -11px; }
  .ui-input { min-height: 44px; font-size: 16px; }
  .ui-onboarding { padding: 16px; }
  .ui-onboarding-card { padding: 24px 20px; }

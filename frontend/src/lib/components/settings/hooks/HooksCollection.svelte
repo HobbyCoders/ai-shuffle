@@ -17,7 +17,7 @@
 	import CollectionPage from '../shell/CollectionPage.svelte';
 	import EmptyDetail from '../shell/EmptyDetail.svelte';
 	import ListItem from '../rows/ListItem.svelte';
-	import ListGroupLabel from '../rows/ListGroupLabel.svelte';
+	import RowGroup from '../rows/RowGroup.svelte';
 	import InlineBanner from '../rows/InlineBanner.svelte';
 	import SelectField from '../rows/SelectField.svelte';
 	import HookDetail from './HookDetail.svelte';
@@ -96,6 +96,7 @@
 	category={CATEGORY}
 	count={total}
 	addLabel="Add hook"
+ filterPlaceholder={total + Number(!!model.draft) > 6 ? 'Filter hooks' : null}
 	onAdd={add}
 	addDisabled={model.forbidden}
 	bind:filter
@@ -122,12 +123,12 @@
 				</InlineBanner>
 			{/if}
 			{#if model.forbidden}
-				<p class="st-empty">{FORBIDDEN_TEXT}</p>
+				<div class="st-card"><p class="st-empty">{FORBIDDEN_TEXT}</p></div>
 			{:else if model.loading && !model.loaded}
-				<p class="st-empty" role="status">Loading hooks…</p>
+				<div class="st-card"><p class="st-empty" role="status">Loading hooks…</p></div>
 			{:else}
 				{#if showDraft && model.draft}
-					<ListGroupLabel label="New" />
+					<RowGroup title="New">
 					<ListItem
 						id={DRAFT_ID}
 						name={model.draft.name.trim() || 'New hook'}
@@ -136,19 +137,22 @@
 						status="busy"
 						summary="Not added yet"
 					/>
+     </RowGroup>
 				{/if}
 				{#if app.length || !q}
-					<ListGroupLabel label="App" />
+					<RowGroup title="App">
 					{#each app as h (h.id)}{@render hookRow(h)}{/each}
 					{#if !q && model.app.length === 0}<p class="st-empty">No app hooks. They fire in every session.</p>{/if}
+     </RowGroup>
 				{/if}
 				{#if model.projectId && (project.length || !q)}
-					<ListGroupLabel label={projectName ?? 'Project'} />
+					<RowGroup title={projectName ?? 'Project'}>
 					{#each project as h (h.id)}{@render hookRow(h)}{/each}
 					{#if !q && model.project.length === 0}<p class="st-empty">No hooks for this project.</p>{/if}
+     </RowGroup>
 				{/if}
 				{#if plugin.length}
-					<ListGroupLabel label="Plugins" />
+					<RowGroup title="Plugins">
 					{#each plugin as p (p.id)}
 						<ListItem
 							id={p.id}
@@ -160,11 +164,12 @@
 							meta="plugin"
 						/>
 					{/each}
+     </RowGroup>
 				{/if}
 				{#if q && nothingShown}
-					<p class="st-empty">Nothing matches.</p>
+					<EmptyDetail message="Nothing matches." actionLabel="Clear" onAction={() => filter = ''} />
 				{:else if !model.projectId && !q}
-					<p class="st-empty">Pick a project above to see its hooks.</p>
+					<div class="st-card"><p class="st-empty">Pick a project above to see its hooks.</p></div>
 				{/if}
 			{/if}
 		</div>

@@ -256,20 +256,14 @@
 		.map(t => ({ id: t.id, label: t.label, disabled: t.local && remoteOnly,
 			title: t.local && remoteOnly ? `${selectedRow?.name} isn't on ${selfName}. Set it up here to change this.` : undefined,
 			count: t.id === 'workers' && detailMissing > 0 ? `${detailMissing} missing` : undefined })));
-	const LEGEND = [
-		{ tone: 'ready' as const, text: 'has it' },
-		{ tone: 'missing' as const, text: 'click to set up' },
-		{ tone: 'busy' as const, text: 'setting up' },
-		{ tone: 'offline' as const, text: 'offline' },
-		{ tone: 'failed' as const, text: 'failed — open for why' }
-	];
+
 </script>
 
 <ViewShell label="Projects" detailOpen={!!selectedRow} onBack={handleBack} bind:stacked>
 	{#snippet panel()}
 		<ViewPanel title="Projects" count={allRows.length}>
 			{#snippet actions()}<PanelIconButton label="New project" icon={Plus} onclick={() => (showAddModal = true)} />{/snippet}
-			{#snippet search()}<PanelSearch bind:value={searchQuery} label="Search projects" placeholder="Search projects…" />{/snippet}
+			{#snippet search()}<PanelSearch bind:value={searchQuery} label="Search projects" placeholder="Search projects" />{/snippet}
 			{#snippet filters()}
 				{#if overviewOn && workerCount > 1}
 					<Segmented label="Show projects" size="sm" bind:value={workerFilter} options={[{ value: 'all', label: 'All workers' }, { value: 'here', label: `On ${selfName}` }]} />
@@ -290,9 +284,6 @@
 					</EmptyDetail>
 				{/each}
 			</div>
-			{#snippet footer()}
-				{#if overviewOn && workerCount > 1}<ProjectWorkerChips workers={[]} kind={null} projectName="" legend={LEGEND} />{/if}
-			{/snippet}
 		</ViewPanel>
 	{/snippet}
 	{#snippet main(back)}

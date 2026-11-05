@@ -182,6 +182,18 @@ function show(item?: string, tab?: string) {
 }
 
 describe('Devices list', () => {
+ it('uses card groups and only exposes filtering after six rows, with Clear recovery', async () => {
+  const view = show();
+  expect(screen.queryByRole('searchbox', { name: 'Filter devices' })).toBeNull();
+  expect(view.container.querySelector('.st-lcol .st-card [data-settings-item]')).toBeTruthy();
+  model.clients = Array.from({ length: 5 }, (_, i) => client(`phone-${i}`));
+  const input = await screen.findByRole('searchbox', { name: 'Filter devices' });
+  await fireEvent.input(input, { target: { value: 'no device matches' } });
+  expect(screen.getByText('Nothing matches.')).toBeTruthy();
+  await fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+  expect((input as HTMLInputElement).value).toBe('');
+ });
+
 	function peerFailure(last_error: string, last_error_code: string | null) {
 		status.sync = { records: {}, ops: 0, holes: [], conflicts: 0, peers: [{ device_id: 'laptop', base_url: null,
 			endpoints: ['https://alias.example'], last_error, last_error_code, seconds_since_contact: null, online: false }] };

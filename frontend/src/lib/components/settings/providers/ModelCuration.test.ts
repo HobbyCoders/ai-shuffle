@@ -327,6 +327,17 @@ describe('Models tab', () => {
 		expect(screen.queryByLabelText('Model name')).toBeNull();
 	});
 
+ it('recovers an empty model filter through the shared Clear action', async () => {
+  mocks.post.mockResolvedValue({ source: 'upstream', binding: 'fixture-binding-a', models: [entry('chat')] });
+  render(ModelCuration, { row: router([]) });
+  await screen.findByRole('checkbox', { name: 'chat' });
+  const input = screen.getByLabelText('Filter models');
+  await fireEvent.input(input, { target: { value: 'no-model-like-this' } });
+  expect(screen.getByText('No models match “no-model-like-this”.')).toBeTruthy();
+  await fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+  expect((input as HTMLInputElement).value).toBe('');
+  expect(screen.getByRole('checkbox', { name: 'chat' })).toBeTruthy();
+ });
 	it('explains a media model the filter finds in the hidden list', async () => {
 		mocks.post.mockResolvedValue({
 			source: 'upstream',

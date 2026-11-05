@@ -1,4 +1,5 @@
 <script lang="ts">
+ import EmptyDetail from '../shell/EmptyDetail.svelte';
 	import Checkbox from '$lib/components/ui/Checkbox.svelte';
 	/**
 	 * ModelCuration: which of a credential's models the pickers offer.
@@ -362,7 +363,7 @@
 					</label>
 				{/each}
 				{#if shown.length === 0 && !hiddenMatch}
-					<p class="pv-empty">No models match “{filter}”.</p>
+					<EmptyDetail message={`No models match “${filter}”.`} actionLabel="Clear" onAction={() => filter = ''} />
 				{/if}
 			</div>
 			{#if hiddenMatch}

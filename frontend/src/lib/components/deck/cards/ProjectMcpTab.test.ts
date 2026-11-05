@@ -58,7 +58,7 @@ describe('ProjectMcpTab', () => {
 		expect(screen.getByRole('switch', { name: 'Disable sdk' })).toBeTruthy();
 		expect(screen.queryByRole('button', { name: 'Remove sdk' })).toBeNull();
 
-		await fireEvent.input(screen.getByPlaceholderText('Search MCP servers…'), { target: { value: 'db.example' } });
+		await fireEvent.input(screen.getByPlaceholderText('Search MCP servers'), { target: { value: 'db.example' } });
 		expect(screen.queryByText('Global MCP servers')).toBeNull();
 		expect(screen.getByText('Project MCP servers')).toBeTruthy();
 	});
@@ -132,14 +132,14 @@ describe('ProjectMcpTab', () => {
 
 	it('closes an open editor and clears the search when the project changes', async () => {
 		const view = await mount();
-		await fireEvent.input(screen.getByPlaceholderText('Search MCP servers…'), { target: { value: 'scr' } });
+		await fireEvent.input(screen.getByPlaceholderText('Search MCP servers'), { target: { value: 'scr' } });
 		await fireEvent.click(screen.getByRole('button', { name: 'Edit scratch' }));
 		expect(await screen.findByRole('dialog')).toBeTruthy();
 
 		await view.rerender({ projectId: 'p2' });
 		await waitFor(() => expect(api.getProjectMcpServers).toHaveBeenLastCalledWith('p2'));
 		expect(screen.queryByRole('dialog')).toBeNull();
-		expect((screen.getByPlaceholderText('Search MCP servers…') as HTMLInputElement).value).toBe('');
+		expect((screen.getByPlaceholderText('Search MCP servers') as HTMLInputElement).value).toBe('');
 		expect(api.updateProjectMcpServer).not.toHaveBeenCalled();
 	});
 

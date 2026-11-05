@@ -561,6 +561,14 @@
 		color: var(--muted-foreground);
 	}
 
+	/* Mouse readers get a quiet gutter; keep the existing focus and touch
+   scrub path visible, including pending-turn marks. */
+  @media (hover: hover) and (pointer: fine) {
+   .bar { background: color-mix(in oklch, var(--subtle-foreground) 35%, transparent); }
+   .tick.is-current .bar { background: color-mix(in oklch, var(--foreground) 55%, transparent); }
+   .tick:hover .bar, .tick:focus-visible .bar { background: var(--foreground); }
+  }
+
 	/* Compact and touch layouts: a narrower rail with taller tap targets. */
 	/* Inside a phone's 16px transcript margin, so it never sits on the text. */
 	@media (max-width: 640px) {

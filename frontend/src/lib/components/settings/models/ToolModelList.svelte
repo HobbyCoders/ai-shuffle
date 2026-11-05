@@ -1,4 +1,5 @@
 <script lang="ts">
+ import EmptyDetail from '../shell/EmptyDetail.svelte';
 	/**
 	 * ToolModelList: a tool's Model tab. "Recommended" lists the curated
 	 * models with price and capabilities; "More from fal.ai" lists the
@@ -119,7 +120,7 @@
 {/if}
 
 {#if q && !curatedShown.length && !moreFiltered.length}
-	<p class="none">No models match “{query.trim()}”.</p>
+	<EmptyDetail message={`No models match “${query.trim()}”.`} actionLabel="Clear" onAction={() => query = ''} />
 {/if}
 
 <style>
@@ -132,15 +133,10 @@
 		border-radius: var(--st-radius);
 		overflow: hidden;
 	}
-	.st-mopts.empty,
-	.none {
+	.st-mopts.empty {
 		padding: 16px;
 		font-size: 13px;
 		color: var(--st-mfg);
-	}
-	.none {
-		margin: 22px 0 0;
-		padding: 0 2px;
 	}
 	.more {
 		margin-top: 6px;

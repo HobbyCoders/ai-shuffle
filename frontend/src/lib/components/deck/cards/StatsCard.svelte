@@ -1,6 +1,7 @@
 <script lang="ts">
 	/** Analytics with shared panel navigation and token-coloured charts. */
 	import { onMount } from 'svelte';
+ import { platform } from '$lib/stores/platform.svelte';
 	import {
 		getAnalyticsSummary,
 		getCostBreakdown,
@@ -16,9 +17,9 @@
 	} from '$lib/api/client';
 	import { billingLabel, formatCost, formatTokens, providerCostCell, providerTotals } from './statsProviders';
 	import { tick } from 'svelte';
-	import { ViewShell, ViewPanel, PanelIconButton, ListItem, ListGroupLabel, DetailPane, Tile, InlineBanner, EmptyDetail } from '$lib/components/layout/view';
+	import { ViewShell, ViewPanel, PanelIconButton, ListItem, ListGroupLabel, DetailPane, Segmented, InlineBanner, EmptyDetail } from '$lib/components/layout/view';
 	import UsageEstimatedBadge from '$lib/components/UsageEstimatedBadge.svelte';
-	import { Download, RefreshCw, Loader2, Zap, DollarSign, MessageSquare, Gauge, ChevronRight } from 'lucide-svelte';
+	import { Download, RefreshCw, Loader2, ChevronRight } from 'lucide-svelte';
 
 	interface Props {
 		mobile?: boolean;
@@ -162,6 +163,7 @@
 	});
 
  let detailOpen = $state(false);
+ let stacked = $state(false);
  let contentEl = $state<HTMLDivElement>();
  const sections = [{id:'providers', label:'Usage by provider'}, {id:'spend',label:'Estimated spend over time'}, {id:'profiles',label:'Cost by profile'}, {id:'chats',label:'Top chats by cost'}];
  async function jump(id: string) {
@@ -171,7 +173,7 @@
  }
 </script>
 
-<ViewShell label="Stats" {detailOpen} onBack={() => detailOpen = false}>
+<ViewShell label="Stats" contentFirst bind:stacked {detailOpen} onBack={() => detailOpen = false}>
  {#snippet panel()}
   <ViewPanel title="Stats" loading={loading || refreshing}>
    {#snippet actions()}
@@ -186,14 +188,23 @@
    {#each sections as section}<ListItem variant="plain" id={section.id} name={section.label} selected={false} onselect={() => jump(section.id)} />{/each}
   </ViewPanel>
  {/snippet}
- {#snippet main(back)}
-  <DetailPane width="data" name={`${formatDisplayDate(startDate)} — ${formatDisplayDate(endDate)}`} subtitle="Usage, estimated spend and activity" icon={Gauge} onBack={back} backLabel="Stats">
+ {#snippet main()}
+  <DetailPane width="data" contentFirst name="Stats" subtitle={`${formatDisplayDate(startDate)} — ${formatDisplayDate(endDate)} · Usage, estimated spend and activity`}>
+   {#if stacked}
+    <div class="stats-controls">
+     <Segmented label="Date range" options={PRESETS.map(p => ({value: p.id, label: p.label}))} value={selectedPreset} onchange={selectPreset} />
+     {#if !platform.isMobile}
+      <PanelIconButton label="Refresh" icon={RefreshCw} onclick={handleRefresh} disabled={refreshing || loading} />
+      <PanelIconButton label="Export usage by provider as CSV" icon={exportLoading ? Loader2 : Download} onclick={handleExport} disabled={exportLoading} />
+     {/if}
+    </div>
+   {/if}
    {#if error}<div role="alert"><InlineBanner>{error}</InlineBanner></div>{/if}
    {#if loading}<EmptyDetail title="Loading analytics" message="Gathering usage for this range…" />
    {:else}<div bind:this={contentEl}>
-				<div class="metrics">
+				<div class="metrics st-card">
 					<!-- Metric cards -->
-					<div class="metric"><Tile icon={DollarSign} />
+					<div class="metric">
 						<div class="blabel" title="Estimated by this app from token counts and model prices. Provider-reported spend is in the usage popover.">Estimated spend {#if hasEstimates}<UsageEstimatedBadge label="est." />{/if}</div>
 						<div class="bignum">{summary?.total_cost ? formatCost(summary.total_cost) : '$0.00'}</div>
 						<div class="bsub">app estimate across {summary?.session_count ?? 0} sessions</div>
@@ -202,19 +213,19 @@
 						{/if}
 					</div>
 
-					<div class="metric"><Tile icon={Zap} />
+					<div class="metric">
 						<div class="blabel">Tokens {#if hasEstimates}<UsageEstimatedBadge label="est." />{/if}</div>
 						<div class="bignum">{formatTokens(totalTokens)}</div>
 						<div class="bsub">{formatTokens(summary?.total_input_tokens ?? 0)} in · {formatTokens(summary?.total_output_tokens ?? 0)} out</div>
 					</div>
 
-					<div class="metric"><Tile icon={MessageSquare} />
+					<div class="metric">
 						<div class="blabel">Chats</div>
 						<div class="bignum">{summary?.session_count ?? 0}</div>
 						<div class="bsub">conversations in range</div>
 					</div>
 
-					<div class="metric"><Tile icon={Gauge} />
+					<div class="metric">
 						<div class="blabel">Avg / session {#if hasEstimates}<UsageEstimatedBadge label="est." />{/if}</div>
 						<div class="bignum">{summary?.average_cost_per_session ? formatCost(summary.average_cost_per_session) : '$0.00'}</div>
 						<div class="bsub">mean estimated spend per session</div>
@@ -222,7 +233,7 @@
 
 				</div>
 					<!-- Usage by provider (full width) -->
-					<section class="stats-section" data-section="providers">
+					<section class="stats-section st-card" data-section="providers">
 						<ListGroupLabel label="Usage by provider" />
 						{#if providersFailed}
 							<div class="bempty">Provider breakdown unavailable</div>
@@ -262,7 +273,7 @@
 					</section>
 
 					<!-- Spend over time (tall, wide) -->
-					<section class="stats-section" data-section="spend">
+					<section class="stats-section st-card" data-section="spend">
 						<ListGroupLabel label="Estimated spend over time" />
 						{#if usageTrends.length === 0}
 							<div class="bempty">No usage in this range</div>
@@ -280,7 +291,7 @@
 					</section>
 
 					<!-- Cost by profile -->
-					<section class="stats-section" data-section="profiles">
+					<section class="stats-section st-card" data-section="profiles">
 						<ListGroupLabel label="Cost by profile" />
 						{#if costBreakdown.length === 0}
 							<div class="bempty">No data</div>
@@ -298,7 +309,7 @@
 					</section>
 
 					<!-- Top chats by cost -->
-					<section class="stats-section" data-section="chats">
+					<section class="stats-section st-card" data-section="chats">
 						<ListGroupLabel label="Top chats by cost" />
 						{#if topSessions.length === 0}
 							<div class="bempty">No chats</div>
@@ -321,16 +332,21 @@
  {/snippet}
 </ViewShell>
 <style>
- .metrics { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 24px; padding: 12px 0 24px; border-bottom: 1px solid var(--st-border); }
- .metric { min-width: 0; }
- .blabel { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin: 12px 0 8px; color: var(--st-mfg); font-size: 12px; }
+ .stats-controls { display: flex; align-items: center; gap: 4px; margin-bottom: 24px; flex-wrap: wrap; }
+ .stats-controls :global(.st-seg) { margin-right: auto; }
+ .stats-controls :global(.st-seg button) { min-height: 44px; padding-inline: 10px; }
+ .metrics { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); }
+ .metrics > .metric { min-width: 0; padding: 20px; border-radius: 0; }
+ .metric + .metric { border-left: 1px solid var(--st-border); }
+ .blabel { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin: 0 0 8px; color: var(--st-mfg); font-size: 12px; }
  .bignum { font-size: 28px; font-weight: 600; line-height: 1.2; font-variant-numeric: tabular-nums; }
  .bsub { font-size: 12px; color: var(--st-mfg); margin-top: 8px; }
  .bsub--warn { color: var(--st-warning); }
- .bempty { padding: 32px 0; color: var(--st-mfg); font-size: 13px; }
- .stats-section { scroll-margin-top: 24px; }
+ .bempty { min-height: 80px; display: grid; place-items: center; color: var(--st-mfg); font-size: 13px; text-align: center; }
+ .stats-section { scroll-margin-top: 24px; margin-top: 32px; padding: 20px; }
+ .stats-section :global(.st-gl) { margin-top: 0; }
  .bars { height: 180px; }
- @container settings (max-width: 800px) { .metrics { grid-template-columns: 1fr 1fr; } }
+ @container settings (max-width: 800px) { .metrics { grid-template-columns: 1fr 1fr; } .metric:nth-child(3) { border-left: 0; } .metric:nth-child(n+3) { border-top: 1px solid var(--st-border); } }
  @media (prefers-reduced-motion: reduce) { .bars i, .brk-fill, .prov-fill { transition: none; } }
 	/* Spend-over-time bars */
 	.bars { display: flex; align-items: flex-end; gap: 4px; flex: 1; min-height: 120px; margin-top: auto; padding-top: 14px; }

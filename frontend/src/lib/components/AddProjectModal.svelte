@@ -178,7 +178,7 @@
 			? (progressText ?? 'Creating…')
 			: canSetUpElsewhere
 				? `Create on ${workerCount} ${workerCount === 1 ? 'worker' : 'workers'}`
-				: source === 'github' ? 'Clone project' : 'Add Project'
+				: source === 'github' ? 'Clone project' : 'Add project'
 	);
 
 	function toggleTarget(id: string) {
@@ -337,12 +337,12 @@
 
 			<div class="create-modal-row">
 				<div class="ui-field ui-field--half">
-					<label class="ui-label" for="add-project-name">Display Name</label>
+					<label class="ui-label" for="add-project-name">Display name</label>
 					<input
 						id="add-project-name"
 						type="text"
 						class="ui-input"
-						placeholder="My Project"
+						placeholder="My project"
 						bind:value={projectName}
 						oninput={() => { nameManuallyEdited = true; }}
 						onkeydown={onFieldEnter}

@@ -336,7 +336,7 @@
 					<form class="fs-newfolder" onsubmit={(e) => { e.preventDefault(); confirmNewFolder(); }}>
 						<FolderPlus size={16} />
 						<!-- svelte-ignore a11y_autofocus -->
-						<input aria-label="Folder name" placeholder="Folder name…" bind:value={newFolderName} autofocus onkeydown={(e) => { if (e.key === 'Escape') showNewFolder = false; }} />
+						<input aria-label="Folder name" placeholder="Folder name" bind:value={newFolderName} autofocus onkeydown={(e) => { if (e.key === 'Escape') showNewFolder = false; }} />
 						<button class="st-btn touch primary" disabled={creatingFolder || !newFolderName.trim()}>Create</button>
 						<button type="button" class="st-btn touch" onclick={() => showNewFolder = false}>Cancel</button>
 					</form>
@@ -423,10 +423,10 @@
 	.fs-row { display: grid; grid-template-columns: 32px minmax(0, 1fr) 80px 90px 132px; gap: 12px; align-items: center; min-height: 44px; border-bottom: 1px solid var(--st-border); font-size: 13px; cursor: pointer; --ram-reveal: 0; --ram-touch-size: 44px; }
 	.fs-row:hover, .fs-row:focus-within { background: var(--st-hover); --ram-reveal: 1; }
 	.fs-row.selected { background: var(--st-accent); }
-	.fs-row--head { color: var(--st-mfg); cursor: default; font-size: 12px; }
+	.fs-row--head { color: var(--st-fg); cursor: default; font-size: 12px; }
 	.fs-row--head:hover { background: transparent; }
 	.fs-nm { display: flex; align-items: center; gap: 10px; min-width: 0; }
-	.fs-nm :global(svg) { color: var(--st-mfg); flex: none; }
+	.fs-nm :global(svg) { color: currentColor; flex: none; }
 	.fs-nm-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 	.fs-sz, .fs-md { color: var(--st-mfg); font-variant-numeric: tabular-nums; white-space: nowrap; }
 	.fs-sz { text-align: right; }

@@ -9,9 +9,11 @@
 	 * not read are listed under the results, with why.
 	 */
 	import { onMount } from 'svelte';
-	import { GitPullRequest, GitPullRequestDraft, GitMerge, GitPullRequestClosed, RefreshCw, Loader2, Check, X, Clock, ExternalLink } from 'lucide-svelte';
-	import { ViewShell, ViewPanel, PanelIconButton, ListItem, ListGroupLabel, SettingRow, SelectField, Switch, DetailPane, EmptyDetail, InlineBanner } from '$lib/components/layout/view';
+ import { platform } from '$lib/stores/platform.svelte';
+	import { GitPullRequest, GitPullRequestDraft, GitMerge, GitPullRequestClosed, RefreshCw, ListFilter, Check, X, Clock, ExternalLink } from 'lucide-svelte';
+	import { ViewShell, ViewPanel, PanelIconButton, ListItem, Segmented, SettingRow, SelectField, Switch, DetailPane, EmptyDetail, InlineBanner } from '$lib/components/layout/view';
 	import PanelField from '$lib/components/layout/view/PanelField.svelte';
+	import SidebarSheet from '$lib/components/layout/sidebar/SidebarSheet.svelte';
 	import { getPullRequestInbox, type InboxPullRequest, type PullRequestInbox } from '$lib/api/github';
 	import {
 		activityAge,
@@ -35,9 +37,10 @@
 
 	const projects = $derived(inbox ? inboxProjects(inbox.items) : []);
 	const shown = $derived(inbox ? filterInbox(inbox.items, filters) : []);
-	const filtered = $derived(
-		filters.review !== 'any' || filters.checks !== 'any' || filters.project !== 'any' || filters.hideDrafts
-	);
+	const filterCount = $derived(Number(filters.review !== 'any') + Number(filters.checks !== 'any') + Number(filters.project !== 'any') + Number(filters.hideDrafts));
+ const filtered = $derived(filterCount > 0);
+ let filtersOpen = $state(false);
+ let stacked = $state(false);
 
 	async function load() {
 		const mine = ++request;
@@ -83,7 +86,8 @@
 	let detailOpen = $state(false);
 </script>
 
-<ViewShell label="Pull requests" {detailOpen} onBack={() => detailOpen = false}>
+<div class="pri-surface settings-shell" data-stacked={stacked ? '' : undefined}>
+<ViewShell inheritScope label="Pull requests" contentFirst bind:stacked {detailOpen} onBack={() => detailOpen = false}>
  {#snippet panel()}
   <ViewPanel title="Pull requests" {loading}>
    {#snippet actions()}<PanelIconButton label="Refresh pull requests" icon={RefreshCw} onclick={load} disabled={loading} />{/snippet}
@@ -92,18 +96,16 @@
      <ListItem variant="plain" id={option.value} name={option.label} selected={serverState === option.value} onselect={() => { setServerState(option.value); detailOpen = true; }} />
     {/each}
    </div>
-   <ListGroupLabel label="Filters" compact />
-   <div role="group" aria-label="Filter pull requests">
-    <PanelField label="Review"><SelectField bind:value={filters.review} label="Review" options={[{value:'any', label:'Any'}, ...Object.entries(REVIEW_LABELS).map(([value, label]) => ({value, label}))]} /></PanelField>
-    <PanelField label="Checks"><SelectField bind:value={filters.checks} label="Checks" options={[{value:'any', label:'Any'}, ...Object.entries(CHECKS_LABELS).map(([value, label]) => ({value, label}))]} /></PanelField>
-    <PanelField label="Project"><SelectField bind:value={filters.project} label="Project" options={[{value:'any', label:'All projects'}, ...projects.map(p => ({value:p.id, label:p.name}))]} /></PanelField>
-    {#if serverState === 'open' || serverState === 'all'}<SettingRow label="Hide drafts"><Switch bind:checked={filters.hideDrafts} label="Hide drafts" /></SettingRow>{/if}
-    {#if filtered}<button type="button" class="st-btn" onclick={clearFilters}>Clear filters</button>{/if}
-   </div>
+
   </ViewPanel>
  {/snippet}
- {#snippet main(back)}
-  <DetailPane width="data" name={`${STATE_OPTIONS.find(o => o.value === serverState)?.label} pull requests`} icon={GitPullRequest} subtitle={`${shown.length} ${shown.length === 1 ? 'pull request' : 'pull requests'}`} onBack={back} backLabel="Pull requests">
+ {#snippet main()}
+  <DetailPane width="data" contentFirst name="Pull requests" subtitle={`${STATE_OPTIONS.find(o => o.value === serverState)?.label} · ${shown.length} ${shown.length === 1 ? 'pull request' : 'pull requests'}`}>
+   <div class="pri-toolbar">
+    {#if stacked}<Segmented label="Pull request state" options={STATE_OPTIONS} value={serverState} onchange={setServerState} />{/if}
+    <button type="button" class="st-btn pri-filter" aria-label={`Filter pull requests${filterCount ? `, ${filterCount} active` : ''}`} aria-expanded={filtersOpen} onclick={() => filtersOpen = !filtersOpen}><ListFilter size={16} /><span class="pri-filter-label">Filters</span>{#if filterCount}<span class="pri-count">{filterCount}</span>{/if}</button>
+    {#if stacked && !platform.isMobile}<PanelIconButton label="Refresh pull requests" icon={RefreshCw} onclick={load} disabled={loading} />{/if}
+   </div>
    {#if error}<div role="alert"><InlineBanner tone="warn">{error}</InlineBanner></div>
    {:else if loading && !inbox}<EmptyDetail title="Loading pull requests" message="Fetching repository status…" />
    {:else if inbox}
@@ -112,12 +114,9 @@
 						{inbox.repos.length === 0 ? 'No project has a GitHub remote yet.' : `No ${serverState === 'all' ? '' : `${serverState} `}pull requests.`}
 					</div>
 				{:else if shown.length === 0}
-					<div class="pri-empty">
-						No pull requests match these filters.
-						<button type="button" class="st-btn" onclick={clearFilters}>Clear filters</button>
-					</div>
+					<EmptyDetail title="No matching pull requests" message="No pull requests match these filters." actionLabel="Clear" onAction={clearFilters} />
 				{:else}
-					<ul class="pri-list" aria-label="Pull requests">
+					<ul class="pri-list st-card" aria-label="Pull requests">
 						{#each shown as pr (`${pr.repo}#${pr.number}`)}
 							<li class="pri-row" data-state={pr.state}>
 								<span class="pri-state" title={stateLabel(pr)} aria-label={stateLabel(pr)}>
@@ -139,7 +138,9 @@
 								</div>
 								<div class="pri-badges">
 									{#if pr.review !== 'none'}
-										<span class="pri-chip" data-review={pr.review}>{REVIEW_LABELS[pr.review]}</span>
+										<span class="pri-chip" data-review={pr.review} title={REVIEW_LABELS[pr.review]} aria-label={REVIEW_LABELS[pr.review]}>
+            {#if pr.review === 'approved'}<Check size={14} />{:else if pr.review === 'changes_requested'}<X size={14} />{:else}<Clock size={14} />{/if}
+           </span>
 									{/if}
 									{#if pr.checks !== 'none'}
 										<span class="pri-checks" data-checks={pr.checks} title={CHECKS_LABELS[pr.checks]} aria-label={CHECKS_LABELS[pr.checks]}>
@@ -169,9 +170,29 @@
   </DetailPane>
  {/snippet}
 </ViewShell>
+<SidebarSheet open={filtersOpen} label="Filter pull requests" phone={stacked} onClose={() => filtersOpen = false}>
+ <div class="pri-filters">
+  <h3>Filter pull requests</h3>
+  <PanelField label="Review"><SelectField bind:value={filters.review} label="Review" options={[{value:'any', label:'Any'}, ...Object.entries(REVIEW_LABELS).map(([value, label]) => ({value, label}))]} /></PanelField>
+  <PanelField label="Checks"><SelectField bind:value={filters.checks} label="Checks" options={[{value:'any', label:'Any'}, ...Object.entries(CHECKS_LABELS).map(([value, label]) => ({value, label}))]} /></PanelField>
+  <PanelField label="Project"><SelectField bind:value={filters.project} label="Project" options={[{value:'any', label:'All projects'}, ...projects.map(p => ({value:p.id, label:p.name}))]} /></PanelField>
+  {#if serverState === 'open' || serverState === 'all'}<SettingRow label="Hide drafts"><Switch bind:checked={filters.hideDrafts} label="Hide drafts" /></SettingRow>{/if}
+  <div class="pri-filter-actions">{#if filtered}<button type="button" class="st-btn" onclick={clearFilters}>Clear filters</button>{/if}<button type="button" class="st-btn" onclick={() => filtersOpen = false}>Done</button></div>
+ </div>
+</SidebarSheet>
+</div>
 <style>
- .pri-list { list-style: none; padding: 0; margin: 0; }
- .pri-row { display: flex; align-items: center; gap: 12px; padding: 16px 0; border-bottom: 1px solid var(--st-border); }
+ .pri-surface { position: relative; display: block; height: 100%; min-height: 0; min-width: 0; }
+ .pri-toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+ .pri-filter { margin-left: auto; position: relative; }
+ .pri-count { font-variant-numeric: tabular-nums; }
+ .pri-filters { color: var(--foreground); padding: 8px; }
+ .pri-filters h3 { font-size: 14px; font-weight: 600; margin: 0 0 12px; }
+ .pri-filter-actions { display: flex; justify-content: flex-end; gap: 8px; margin: 16px 0 8px; }
+ .pri-filters :global(.panel-field) { margin-bottom: 12px; }
+ .pri-list { list-style: none; padding: 0; margin: 0; overflow: hidden; }
+ .pri-row { display: flex; align-items: center; gap: 12px; padding: 14px 16px; border-bottom: 1px solid var(--st-border); }
+ .pri-row:last-child { border-bottom: 0; }
  .pri-state { flex: none; color: var(--st-success); }
  .pri-row[data-state='draft'] .pri-state { color: var(--st-mfg); }
  .pri-row[data-state='merged'] .pri-state { color: var(--chart-3, var(--st-mfg)); }
@@ -179,7 +200,7 @@
  .pri-main { flex: 1; min-width: 0; }
  .pri-title { display: inline-flex; align-items: center; gap: 6px; font-size: 14px; font-weight: 500; color: var(--st-fg); }
  .pri-title:hover { color: var(--st-primary); }
- .pri-meta { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 6px; color: var(--st-mfg); font-size: 12px; overflow-wrap: anywhere; }
+ .pri-meta { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 4px; color: var(--sidebar-muted); font-size: 12px; overflow-wrap: anywhere; }
  .pri-branch { font-family: var(--st-mono); }
  .pri-badges { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; color: var(--st-mfg); font-size: 12px; }
  .pri-chip[data-review='approved'], .pri-checks[data-checks='passing'] { color: var(--st-success); }
@@ -189,5 +210,5 @@
  .pri-empty { padding: 48px 0; color: var(--st-mfg); display: grid; justify-items: center; gap: 16px; text-align: center; }
  .pri-skipped { margin-top: 24px; color: var(--st-mfg); font-size: 13px; }
  .pri-skipped summary { cursor: pointer; }
- @media (max-width:600px) { .pri-row { flex-wrap: wrap; } .pri-badges { width: 100%; justify-content: flex-start; padding-left: 28px; } }
+ @media (max-width:600px) { .pri-toolbar :global(.st-seg button) { min-height: 44px; padding-inline: 10px; } .pri-filter { min-height: 44px; width: 44px; padding: 0; } .pri-filter-label { display: none; } .pri-count { position: absolute; top: 1px; right: 3px; font-size: 11px; } .pri-filter-actions button { min-height: 44px; } .pri-row { flex-wrap: wrap; } .pri-badges { width: 100%; justify-content: flex-start; padding-left: 28px; } }
 </style>

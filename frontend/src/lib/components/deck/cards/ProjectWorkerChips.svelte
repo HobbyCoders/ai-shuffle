@@ -15,7 +15,7 @@
 	 * alone (each has its own shape and words).
 	 */
 	import type { ProjectKind, ProjectWorker } from '$lib/api/project-workers';
-	import { workerChip, type ChipTone } from './project-workers-view';
+	import { workerChip } from './project-workers-view';
 
 	interface Props {
 		workers: ProjectWorker[];
@@ -23,11 +23,9 @@
 		projectName: string;
 		onSetup?: (worker: ProjectWorker) => void;
 		onOpen?: (worker: ProjectWorker) => void;
-		/** Legend mode: static examples, not buttons. */
-		legend?: { tone: ChipTone; text: string }[];
 	}
 
-	let { workers, kind, projectName, onSetup, onOpen, legend }: Props = $props();
+	let { workers, kind, projectName, onSetup, onOpen }: Props = $props();
 
 	const chips = $derived(workers.map((w) => ({ worker: w, chip: workerChip(w, kind) })));
 
@@ -38,13 +36,6 @@
 	}
 </script>
 
-{#if legend}
-	<div class="wchips wchips--legend" aria-hidden="true">
-		{#each legend as item (item.tone)}
-			<span class="wchip wchip--{item.tone}"><i class="d"></i>{item.text}</span>
-		{/each}
-	</div>
-{:else}
 	<div class="wchips" role="group" aria-label="Workers with {projectName}">
 		{#each chips as { worker, chip } (worker.install_id)}
 			<button
@@ -60,11 +51,9 @@
 			</button>
 		{/each}
 	</div>
-{/if}
 
 <style>
 	.wchips { display: flex; gap: 6px; flex-wrap: wrap; min-width: 0; }
-	.wchips--legend { gap: 8px 12px; color: var(--st-mfg); font-size: 12px; }
 	.wchip { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; }
 	.wchip .t { overflow: hidden; text-overflow: ellipsis; }
 	.d { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--st-success); }

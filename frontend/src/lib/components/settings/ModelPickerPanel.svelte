@@ -552,7 +552,7 @@
 				bind:value={query}
 				type="text"
 				class="mpp-search-inp"
-				placeholder="Search models..."
+				placeholder="Search models"
 				aria-label="Search models"
 				spellcheck="false"
 				autocapitalize="off"

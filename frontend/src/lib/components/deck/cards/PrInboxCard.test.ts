@@ -6,6 +6,8 @@ const getPullRequestInbox = vi.fn<(state?: string, limit?: number) => Promise<Pu
 vi.mock('$lib/api/github', () => ({ getPullRequestInbox: (...args: [string?, number?]) => getPullRequestInbox(...args) }));
 
 import PrInboxCard from './PrInboxCard.svelte';
+import { platform } from '$lib/stores/platform.svelte';
+import { page } from '$app/state';
 import { activityAge, filterInbox, inboxProjects, DEFAULT_FILTERS } from './pr-inbox';
 
 const pr = (over: Partial<InboxPullRequest>): InboxPullRequest => ({
@@ -43,6 +45,8 @@ describe('pr-inbox helpers', () => {
 
 describe('PrInboxCard', () => {
 	beforeEach(() => {
+  platform.set('desktop'); page.state = {};
+  Object.defineProperty(window, 'innerWidth', { value: 1440, configurable: true });
 		getPullRequestInbox.mockReset();
 		getPullRequestInbox.mockResolvedValue({
 			items,
@@ -50,7 +54,7 @@ describe('PrInboxCard', () => {
 			repos: ['o/alpha', 'o/beta']
 		});
 	});
-	afterEach(cleanup);
+	afterEach(() => { cleanup(); platform.set('desktop'); vi.restoreAllMocks(); });
 
 	it('lists pull requests from every project and filters them', async () => {
 		render(PrInboxCard);
@@ -60,19 +64,37 @@ describe('PrInboxCard', () => {
 		expect(screen.getByText('o/beta#3')).toBeTruthy();
 		expect(screen.getByText(/1 project or repository not included/)).toBeTruthy();
 
+		await fireEvent.click(screen.getByRole('button', { name: 'Filter pull requests' }));
 		await fireEvent.change(screen.getByRole('combobox', { name: 'Checks' }), { target: { value: 'failing' } });
 		await waitFor(() => expect(within(list).getAllByRole('listitem')).toHaveLength(1));
 		expect(screen.getByRole('link', { name: /Fix flake/ })).toBeTruthy();
 
 		await fireEvent.change(screen.getByRole('combobox', { name: 'Review' }), { target: { value: 'approved' } });
 		await screen.findByText('No pull requests match these filters.');
-		await fireEvent.click(screen.getAllByRole('button', { name: 'Clear filters' })[0]);
+		await fireEvent.click(screen.getByRole('button', { name: 'Clear filters' }));
 		await waitFor(() => expect(screen.getAllByRole('listitem').length).toBeGreaterThanOrEqual(3));
 
 		await fireEvent.change(screen.getByRole('combobox', { name: 'Project' }), { target: { value: 'p-b' } });
 		await waitFor(() => expect(screen.queryByRole('link', { name: /Add inbox/ })).toBeNull());
 		expect(screen.getByRole('link', { name: /Draft idea/ })).toBeTruthy();
 	});
+
+ it.each(['narrow browser', 'phone app'])('opens on real pull requests with no Back step on %s', async mode => {
+  if (mode === 'phone app') platform.set('mobile');
+  else Object.defineProperty(window, 'innerWidth', { value: 390, configurable: true });
+  const view = render(PrInboxCard);
+  await screen.findByRole('list', { name: 'Pull requests' });
+  expect(view.container.querySelector('[data-pane="detail"]')).toBeTruthy();
+  expect(screen.queryByRole('button', { name: 'Back to Pull requests' })).toBeNull();
+  expect(screen.queryByRole('heading', { level: 1, name: 'Pull requests' })).toBeNull();
+  await fireEvent.click(screen.getByRole('button', { name: 'Merged' }));
+  await waitFor(() => expect(getPullRequestInbox).toHaveBeenLastCalledWith('merged'));
+  await fireEvent.click(screen.getByRole('button', { name: 'Filter pull requests' }));
+  expect(screen.getByRole('combobox', { name: 'Review' })).toBeTruthy();
+  await fireEvent.change(screen.getByRole('combobox', { name: 'Checks' }), { target: { value: 'failing' } });
+  await fireEvent.click(screen.getByRole('button', { name: 'Done' }));
+  expect(screen.getByRole('button', { name: 'Filter pull requests, 1 active' })).toBeTruthy();
+ });
 
 	it('asks the server again when the state changes', async () => {
 		render(PrInboxCard);
