@@ -999,15 +999,17 @@ async def test_recent_sessions_lists_newest_first_with_previews(mock_db):
     _session_row(mock_db, "app-2", "ses_r2", "Readme polish",
                  updated_at="2026-08-21 10:00:00")
 
-    # Hidden and archived sessions never surface in the listing.
+    # Hidden sessions stay hidden; legacy archive history remains discoverable.
     _session_row(mock_db, "app-3", "ses_hidden", "Hidden one",
                  updated_at="2026-08-22 10:00:00", hidden=1)
     _session_row(mock_db, "app-4", "ses_archived", "Archived one",
                  updated_at="2026-08-23 10:00:00", status="archived")
 
     rows = await store.recent_sessions(limit=10)
-    assert [r.session_id for r in rows] == ["ses_r2", "ses_r1"]
+    assert [r.session_id for r in rows] == ["ses_archived", "ses_r2", "ses_r1"]
     assert all(isinstance(r, SessionSummary) for r in rows)
+    assert rows[0].title == "Archived one"
+    rows = rows[1:]  # The two transcript-backed previews retain their order.
     assert rows[0].title == "Readme polish"
     assert rows[0].preview == "Readme polished and pushed."
     assert rows[0].message_count == 2
@@ -1018,7 +1020,7 @@ async def test_recent_sessions_lists_newest_first_with_previews(mock_db):
 
     # The caller's own session is excluded, like search.
     excluded = await store.recent_sessions(limit=10, exclude_session_id="ses_r2")
-    assert [r.session_id for r in excluded] == ["ses_r1"]
+    assert [r.session_id for r in excluded] == ["ses_archived", "ses_r1"]
 
 
 @pytest.mark.asyncio

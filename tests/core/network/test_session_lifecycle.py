@@ -41,8 +41,8 @@ async def test_lifecycle_converges(workers, monkeypatch, owner_index, from_mirro
         for worker in pair:
             with worker.active():
                 row = database.get_session("lifecycle")
-                assert bool(row["is_active"]) is active
-                assert (row["status"] == "archived") is bool(archived)
+                assert bool(row["is_active"]) is (False if archived else active)
+                assert row["status"] == "active"  # legacy archive inputs settle
                 assert row["owner_device_id"] == owner.device_id
     with actor.active():
         if batch:

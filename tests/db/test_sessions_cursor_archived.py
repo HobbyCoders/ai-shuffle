@@ -29,8 +29,10 @@ def test_legacy_exclude_archived_cannot_hide_settled_history(mock_db):
     assert has_more is True
     assert next_cursor is not None and next_cursor_id == newest
 
-    # Default stays unchanged: Settings' archived list and API callers that
-    # want every row still page through archived sessions.
+    # The legacy flag cannot hide history from either pagination or counts.
+    assert database.count_sessions(exclude_archived=True) == 3
+    assert database.count_sessions(exclude_archived=False) == 3
+    assert database.count_sessions(membership="settled", exclude_archived=True) == 3
     rows, _, _, has_more = database.get_sessions_cursor(limit=1)
     assert [s["id"] for s in rows] == [newest]
     assert has_more is True

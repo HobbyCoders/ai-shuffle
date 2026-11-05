@@ -266,7 +266,7 @@ def test_boot_repair_is_idempotent(mock_db, test_db):
     assert pending_reconcile.repair_fluid_pending_log("app-c", "ses_c") == []
 
 
-def test_boot_sweep_only_visits_this_installs_open_sessions(mock_db, test_db):
+def test_boot_sweep_visits_this_installs_history_including_legacy_archived(mock_db, test_db):
     test_db.executemany(
         "INSERT INTO sessions (id, sdk_session_id, instance_id, status) "
         "VALUES (?, ?, ?, ?)",
@@ -280,7 +280,7 @@ def test_boot_sweep_only_visits_this_installs_open_sessions(mock_db, test_db):
     test_db.commit()
 
     assert pending_reconcile.list_sessions_for_pending_repair() == [
-        ("open", "ses_open")
+        ("open", "ses_open"), ("gone", "ses_gone")
     ]
 
 async def test_terminal_evidence_survives_registry_restart(mock_db):

@@ -117,4 +117,6 @@ async def test_started_chat_recall_and_lifecycle_after_stale_frontier(workers, m
             result = await handler({"session_id": target}, ToolCtx(extra={
                 "session_orchestration": orch.make_handler(lambda: "caller")}))
             assert not result.is_error, result.text
-        assert database.get_session(target)["status"] == "archived"
+        row = database.get_session(target)
+        assert row["status"] == "active"
+        assert not row["is_active"]  # ArchiveSession is a legacy settle alias.

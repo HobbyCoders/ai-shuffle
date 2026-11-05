@@ -121,9 +121,10 @@ async def test_invalidation_hides_arm_and_blocks_claimed_wake(stopped_chat, monk
     if change == "stop":
         task_registry.mark_user_stopped("once-chat")
     elif change in ("settle", "archive"):
-        with get_db() as conn:
-            sql = "is_active=FALSE" if change == "settle" else "status='archived'"
-            conn.cursor().execute("UPDATE sessions SET " + sql + " WHERE id=%s", ("once-chat",))
+        from app.network.session_active import update_membership
+        await update_membership(database.get_session("once-chat"), False,
+                                archived=True if change == "archive" else None)
+        assert database.get_session("once-chat")["status"] == "active"
     elif change == "handoff":
         monkeypatch.setattr("app.core.session_handoff.pending_for", lambda sid: object())
     elif change == "membership":

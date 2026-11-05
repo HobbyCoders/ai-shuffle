@@ -205,8 +205,10 @@ def test_measurement_is_repeatable_and_deferred_catalog_is_not_sent() -> None:
     first = measure()
     assert measure() == first
     compiled, catalog, specs = compile_fixture()
-    # Project tools remain deferred; the two Android emulator schemas are gone.
-    assert len(specs) == 111
+    # Project tools remain deferred; emulator schemas and ArchiveSession are gone.
+    assert len(specs) == 110
+    assert not any(s.name == "ArchiveSession" for s in specs)
+    assert any(s.name == "SettleSession" for s in specs)
     for leaf in (
         "CreateWatch", "ListWatches", "PauseWatch", "StopWatch", "WorkingRecord",
         "generationPreferences", "listProjects", "createProject",

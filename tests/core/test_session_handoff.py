@@ -1310,8 +1310,8 @@ async def test_large_non_ascii_undelivered_note_is_recorded_on_the_new_worker():
     notify.assert_not_awaited()
 
 
-async def test_held_messages_of_a_chat_archived_meanwhile_are_named_not_dropped():
-    """F10: the chat was archived while the move waited."""
+async def test_held_messages_of_a_legacy_archived_chat_are_sent_not_dropped():
+    """Legacy archive state must not discard messages held during a move."""
     from app.db.base import get_db
     _chat()
     sh.request("s1", "DesktopWorker")
@@ -1322,11 +1322,11 @@ async def test_held_messages_of_a_chat_archived_meanwhile_are_named_not_dropped(
             patch("app.services.notification_service.emit_notification", AsyncMock()) as notify:
         handoff_id = sh.pending_for("s1").handoff_id
         assert await sh.cancel_move("s1") == {"cancelled": True, "handoff_id": handoff_id}
-    assert record.await_args.args[1] == ("Could not send 1 of your messages here because this chat is archived: "
-                                         "“one”. Send them again.")
-    assert record.await_args.args[2]["reason"] == "archived"
-    assert notify.await_args.kwargs["message"] == record.await_args.args[1]
-    assert _queued_prompts() == []
+    record.assert_awaited_once()
+    assert record.await_args.args[1] == "Queued move to DesktopWorker cancelled. Your message was sent here."
+    assert record.await_args.args[2]["status"] == "cancelled"
+    notify.assert_not_awaited()
+    assert _queued_prompts() == ["one"]
 
 
 def test_the_agent_cannot_replace_a_queued_move():
