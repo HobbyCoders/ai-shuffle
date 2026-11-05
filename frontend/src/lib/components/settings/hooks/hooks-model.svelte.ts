@@ -104,9 +104,9 @@ export function formFromHook(h: Hook): HookForm {
 	};
 }
 
-/** What Save would change; `enabled` is left out (it saves on its own). */
+/** Owner-editable fields only: Enabled saves separately; presence is server metadata. */
 function editable(f: HookForm): string {
-	const { enabled: _enabled, ...rest } = f;
+	const { enabled: _enabled, hasSecret: _hasSecret, ...rest } = f;
 	return JSON.stringify(rest);
 }
 
@@ -337,8 +337,14 @@ export class HooksModel {
 			const saved = await hooks.updateHook(id, { enabled });
 			const f = this.forms[id];
 			if (f) {
-				f.enabled = saved.enabled;
-				f.hasSecret ||= saved.has_secret;
+				// Decide after the request: the owner may have edited while it ran.
+				if (this.dirty(id)) {
+					f.enabled = saved.enabled;
+					f.hasSecret ||= saved.has_secret;
+				} else {
+					this.forms[id] = formFromHook(saved);
+					this.baselines[id] = editable(this.forms[id]);
+				}
 			}
 			return true;
 		} catch (e) {

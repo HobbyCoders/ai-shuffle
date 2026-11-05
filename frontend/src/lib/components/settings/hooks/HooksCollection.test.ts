@@ -141,6 +141,20 @@ describe('Settings > Hooks editing', () => {
 		await waitFor(() => expect(api.updateHook).toHaveBeenCalledWith('h1', expect.objectContaining({ tool_matcher: 'Write|Edit' })));
 	});
 
+	it('refreshes a clean form from the Enabled response without enabling a stale Save', async () => {
+		api.getAppHooks.mockResolvedValue([hook({ name: 'Before', hook_type: 'webhook', url: 'https://example.test', has_secret: false })]);
+		settingsNav.reset();
+		settingsNav.selectCategory('hooks');
+		settingsNav.go({ category: 'hooks', item: 'h1' });
+		render(HooksCollection);
+		await screen.findByText('Before', { selector: 'h2' });
+		api.updateHook.mockResolvedValue(hook({ name: 'After', hook_type: 'webhook', url: 'https://example.test', has_secret: true, enabled: false }));
+		await fireEvent.click(screen.getByRole('switch'));
+		await waitFor(() => expect(field('Block rm -rf').value).toBe('After'));
+		expect((screen.getByRole('button', { name: 'Save' }) as HTMLButtonElement).disabled).toBe(true);
+		expect(api.updateHook).toHaveBeenCalledExactlyOnceWith('h1', { enabled: false });
+	});
+
 	it('saves the Enabled switch at once', async () => {
 		await show('h1');
 		await fireEvent.click(screen.getByRole('switch'));
@@ -225,6 +239,38 @@ describe('hooks-model', () => {
 		model.ensure('h1')!.name = 'Renamed';
 		api.getAppHooks.mockResolvedValue([hook({ hook_type: 'webhook', url: 'https://example.test', has_secret: true })]);
 		await model.load();
+		api.getAppHooks.mockResolvedValue([]);
+		await model.load();
+		expect(await model.save('h1')).toBeNull();
+		expect(api.createAppHook).not.toHaveBeenCalled();
+	});
+
+	it('does not count learned signing presence as an edit after the owner reverts their text', async () => {
+		const original = hook({ hook_type: 'webhook', url: 'https://example.test', has_secret: false });
+		api.getAppHooks.mockResolvedValue([original]);
+		const model = new HooksModel();
+		await model.load();
+		model.ensure('h1')!.name = 'Temporary edit';
+		api.updateHook.mockResolvedValue(hook({ ...original, has_secret: true, enabled: false }));
+		expect(await model.setEnabled('h1', false)).toBe(true);
+		model.form('h1')!.name = original.name;
+		expect(model.form('h1')!.hasSecret).toBe(true);
+		expect(model.dirty('h1')).toBe(false);
+	});
+
+	it('keeps owner edits made while an Enabled request is pending', async () => {
+		api.getAppHooks.mockResolvedValue([hook({ hook_type: 'webhook', url: 'https://example.test', has_secret: false })]);
+		const model = new HooksModel();
+		await model.load();
+		model.ensure('h1');
+		let finish!: (saved: Hook) => void;
+		api.updateHook.mockReturnValue(new Promise<Hook>((resolve) => { finish = resolve; }));
+		const toggling = model.setEnabled('h1', false);
+		model.form('h1')!.name = 'Owner edit during toggle';
+		finish(hook({ name: 'Remote name', hook_type: 'webhook', url: 'https://example.test', has_secret: true, enabled: false }));
+		expect(await toggling).toBe(true);
+		expect(model.form('h1')!.name).toBe('Owner edit during toggle');
+		expect(model.dirty('h1')).toBe(true);
 		api.getAppHooks.mockResolvedValue([]);
 		await model.load();
 		expect(await model.save('h1')).toBeNull();

@@ -221,7 +221,7 @@ def _create_hook_tools(is_admin: bool, project_id: Optional[str]) -> list:
 
     @tool(
         "updateHook",
-        "Update properties of an existing hook.",
+        "Update hook.",
         {
             "type": "object",
             "properties": {
@@ -231,8 +231,8 @@ def _create_hook_tools(is_admin: bool, project_id: Optional[str]) -> list:
                 "hook_type": {"type": "string", "enum": VALID_HOOK_TYPES},
                 "command": {"type": "string"},
                 "url": {"type": "string"},
-                "secret": {"type": "string", "description": "Nonblank replaces the signing secret; blank keeps it."},
-                "clear_secret": {"type": "boolean", "description": "Explicitly remove the signing secret."},
+                "secret": {"type": "string", "description": "Blank keeps; nonblank replaces."},
+                "clear_secret": {"type": "boolean", "description": "Clear."},
                 "tool_matcher": {"type": "string"},
                 "timeout": {"type": "integer", "description": "Timeout in seconds."},
                 "enabled": {"type": "boolean"},
