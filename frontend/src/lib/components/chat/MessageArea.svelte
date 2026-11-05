@@ -1361,6 +1361,9 @@
 	 */
 	function followGrowthNow() {
 		if (!containerRef || !tailSpacerRef || selectionBlocksNavigation) return;
+		// Not-sent rows preserve the stopped reader (#1066), unless an error
+		// below them is already the visible tail being followed.
+		if (restingOnNotSentRows(notSentHold.messages) && !$activeSession.error) return;
 		if (!currentTurnAnchorId && !shouldAutoScroll) return;
 		const contentEnd = renderedFollowEnd();
 		const delta = resolveAnchoredRevealDelta(containerRef.scrollTop, containerRef.clientHeight, contentEnd);
@@ -2113,9 +2116,7 @@
 			if (!currentTurnAnchorId) refreshLatestTurnTailReserve();
 			if (!shouldAutoScroll) return;
 			if (currentTurnAnchorId) void maintainCurrentTurnAnchor(false, lastKnownScrollTop);
-			// Not-sent rows preserve the stopped reader (#1066), unless an error
-			// below them is already the visible tail being followed.
-			if (!restingOnNotSentRows(notSentHold.messages) || $activeSession.error) followGrowthNow();
+			followGrowthNow();
 		});
 		observer.observe(chatColumnRef, { subtree: true, childList: true, characterData: true, attributes: true });
 		return () => observer.disconnect();
