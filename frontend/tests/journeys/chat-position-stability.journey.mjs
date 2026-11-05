@@ -370,7 +370,16 @@ const cases = [{
 		const banners = frames.filter(f => f.banner);
 		expect(banners.length > 4, 'the real CLI error banner appeared and was sampled');
 		if (scrolledUp) expect(travel(frames, 'anchor') <= 2, 'error and Stop leave the older row being read alone');
-		else expect(travel(banners, 'banner') <= 2, `the error stays still through Stop (${travel(banners, 'banner').toFixed(1)}px)`);
+		else {
+				expect(travel(banners, 'banner') <= 2, `the error stays still through Stop (${travel(banners, 'banner').toFixed(1)}px)`);
+				// Keep the already-presented queue slot, not only the last child.
+				// Shrinking its bottom-positioned wrapper during follow-scroll was
+				// the pre-Stop 0.082 CLS; separate paints could hide it below 0.05.
+				expect(travel(banners, 'tailControls') <= 2, `the error's queue slot stays still through handoff (${travel(banners, 'tailControls').toFixed(1)}px)`);
+				const retained = banners.map(frame => ({ pending: frame.rows.find(row => row.pending && row.text.startsWith('waiting-1 '))?.bubble })).filter(frame => frame.pending);
+				expect(retained.length > 4, 'the retained queued bubble was sampled');
+				expect(travel(retained, 'pending') <= 2 && travel(retained, 'pending', 'bottom') <= 2, 'retaining the slot must not move its remaining queued bubble');
+			}
 	}
 })), {
 	name: 'placeholder', setup: openHistory,

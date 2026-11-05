@@ -13,26 +13,30 @@ function between(start: string, end: string) {
 const transaction = between("let layoutBoundary = '';", '// Rendered geometry has one lifecycle');
 const reserve = between('function readingFloorReserve()', 'async function maintainCurrentTurnAnchor').replace('(): number', '()');
 const beginShift = between('windowShifting = true;', 'mountedRange = next;');
+const beginTurn = between('function startCurrentTurnAnchor(', '/**\n\t * Where a stopped turn').replace('messageId: string', 'messageId');
 
-type Session = { sessionId: string; messages: unknown[]; isStreaming: boolean; liveTurnId: string | null; error: null; queuedMessages: never[] };
+type Session = { sessionId: string; messages: unknown[]; isStreaming: boolean; liveTurnId: string | null; error: string | null; queuedMessages: never[] };
 const session = (id: string, count = 2): Session => ({ sessionId: id, messages: Array(count).fill({}), isStreaming: false, liveTurnId: null, error: null, queuedMessages: [] });
 
 function probe() {
 	const env = {
 		session: session('long'), scrollTop: 5000, proseEnd: 200,
-		follows: true, calls: [] as string[], ticks: [] as (() => void)[]
+		follows: true, pendingHeight: 0, gap: 18, calls: [] as string[], ticks: [] as (() => void)[]
 	};
 	const create = new Function('env', `
 		let $activeSession = env.session, lastKnownScrollTop = env.scrollTop;
 		let followedViewportEnd = 0, followedFloorContext = null;
-		let presentedTailError = null, tailErrorOffsetPx = 0;
+		let presentedTailError = null, tailErrorOffsetPx = 0, tailQueueSlotPx = 0;
 		let windowShifting = false, windowShiftVersion = 0;
 		let isMounted = true, shouldAutoScroll = true, programmaticScrollDepth = 0;
-		let currentTurnAnchorId = 'anchor', cleanup;
+		let currentTurnAnchorId = 'anchor', cleanup, showJumpToLatest = false;
+		const clearJumpRevealTimer = () => {};
 		const containerRef = { clientHeight: 600, scrollTop: 0, getBoundingClientRect: () => ({ top: 0 }) };
 		const tailSpacerRef = { getBoundingClientRect: () => ({ top: env.proseEnd }) };
-		const tailControlsRef = null, chatColumnRef = null;
+		const tailControlsRef = { getBoundingClientRect: () => ({ height: env.pendingHeight }) }, chatColumnRef = {};
+		const getComputedStyle = () => ({ rowGap: String(env.gap) });
 		const activeSession = {}, get = () => env.session;
+		const liveActiveSession = { clearError: () => { env.session = { ...env.session, error: null }; } };
 		const untrack = fn => fn();
 		const tick = () => new Promise(resolve => env.ticks.push(resolve));
 		const requestAnimationFrame = fn => { fn(); return 0; };
@@ -42,7 +46,10 @@ function probe() {
 		const $effect = { pre: fn => { effect = fn; } };
 		${reserve}
 		${transaction}
+		${beginTurn}
 		return {
+			start: fromQueue => startCurrentTurnAnchor('next', fromQueue),
+			dismiss: () => dismissTailError(),
 			run() {
 				cleanup?.();
 				$activeSession = env.session;
@@ -54,10 +61,12 @@ function probe() {
 			endShift() { windowShifting = false; },
 			floor: () => followedViewportEnd,
 			reserve: () => readingFloorReserve(),
+			queueSlot: () => tailQueueSlotPx,
+			errorOffset: () => tailErrorOffsetPx,
 			depth: () => programmaticScrollDepth
 		};
 	`);
-	const state = create(env) as { run(): void; shift(): void; endShift(): void; floor(): number; reserve(): number; depth(): number };
+	const state = create(env) as { dismiss(): void; start(fromQueue: boolean): void; run(): void; shift(): void; endShift(): void; floor(): number; reserve(): number; queueSlot(): number; errorOffset(): number; depth(): number };
 	return { env, ...state, async flush() { env.ticks.splice(0).forEach(resolve => resolve()); await Promise.resolve(); } };
 }
 
@@ -69,6 +78,64 @@ function captureLongFloor(p: ReturnType<typeof probe>) {
 }
 
 describe('MessageArea followed-floor coordinate ownership', () => {
+	it('holds the already-presented queue slot through error dequeue and transcript handoff', () => {
+		const p = probe();
+		p.run();
+		p.env.pendingHeight = 164.9375;
+		p.env.session = { ...session('long', 18), error: 'CLI error' };
+		p.run();
+		expect(p.queueSlot()).toBe(164.9375);
+		expect(p.errorOffset()).toBe(182.9375);
+		// The real producer removes one pending row, then delivers a user row.
+		// Neither commit may resize the slot beneath an already-read error.
+		p.env.pendingHeight = 86.71875;
+		p.env.session = { ...session('long', 19), error: 'enriched CLI error' };
+		p.run();
+		expect(p.queueSlot()).toBe(164.9375);
+		expect(p.errorOffset()).toBe(182.9375);
+		const minHeight = source.match(/style:min-height=\{(`[^`]+`)\}/)?.[1] ?? '`0px`';
+		const slotHeight = parseFloat(new Function('tailQueueSlotPx', `return ${minHeight}`)(p.queueSlot()));
+		expect(662 - Math.max(p.env.pendingHeight, slotHeight)).toBe(497.0625);
+		p.env.pendingHeight = 0;
+		p.env.session = { ...session('long', 21), error: 'enriched CLI error' };
+		p.run();
+		expect(p.queueSlot()).toBe(164.9375);
+	});
+
+	it.each([false, true])('a fresh send releases the slot, but queued handoff retains it (fromQueue=%s)', fromQueue => {
+		const p = probe(); p.run();
+		p.env.pendingHeight = 164.9375;
+		p.env.session = { ...session('long', 18), error: 'CLI error' }; p.run();
+		p.start(fromQueue);
+		expect(p.queueSlot()).toBe(fromQueue ? 164.9375 : 0);
+	});
+
+	it('releases both slots when the reader dismisses the error', () => {
+		const p = probe(); p.run();
+		p.env.pendingHeight = 164.9375;
+		p.env.session = { ...session('long', 18), error: 'CLI error' }; p.run();
+		p.dismiss();
+		expect(p.queueSlot()).toBe(0);
+		expect(p.errorOffset()).toBe(0);
+		expect(p.env.session.error).toBeNull();
+		expect(source).toContain('onclick={dismissTailError}');
+	});
+
+	it.each(['switch', 'clear'] as const)('releases the error queue slot on %s', action => {
+		const p = probe(); p.run();
+		p.env.pendingHeight = 164.9375;
+		p.env.session = { ...session('long', 18), error: 'CLI error' }; p.run();
+		p.env.session = action === 'switch' ? session('other') : session('long', 0);
+		p.run();
+		expect(p.queueSlot()).toBe(0);
+	});
+
+	it('bottom-aligns the queue inside its retained slot, without hiding or transforming it', () => {
+		expect(source).toContain('style:min-height={`${tailQueueSlotPx}px`}');
+		const css = source.slice(source.indexOf('\n\t.tail-controls {'));
+		expect(css.slice(0, css.indexOf('}'))).toContain('justify-content: flex-end;');
+	});
+
 	it('does not carry the outgoing long scroll offset into a short completed chat', () => {
 		const p = probe();
 		captureLongFloor(p);

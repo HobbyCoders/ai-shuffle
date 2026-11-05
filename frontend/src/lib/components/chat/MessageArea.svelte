@@ -246,6 +246,7 @@
 	let tailControlsRef = $state<HTMLDivElement | null>(null);
 	let tailErrorRef = $state<HTMLDivElement | null>(null);
 	let tailErrorOffsetPx = $state(0);
+	let tailQueueSlotPx = $state(0);
 	let presentedTailError: string | null = null;
 	let followedViewportEnd = 0;
 	let followedFloorContext: { sessionId: string | null } | null = null;
@@ -1431,11 +1432,19 @@
 			followedViewportEnd = 0;
 			presentedTailError = null;
 			tailErrorOffsetPx = 0;
+			tailQueueSlotPx = 0;
 		}
 		currentTurnAnchorId = messageId;
 		shouldAutoScroll = true;
 		clearJumpRevealTimer();
 		showJumpToLatest = false;
+	}
+
+	function dismissTailError() {
+		presentedTailError = null;
+		tailErrorOffsetPx = 0;
+		tailQueueSlotPx = 0;
+		liveActiveSession.clearError();
 	}
 
 	/**
@@ -2070,9 +2079,10 @@
 	let layoutBoundary = '';
 	$effect.pre(() => {
 		const s = $activeSession;
-		if (s.sessionId !== followedFloorContext?.sessionId) {
+		if (s.sessionId !== followedFloorContext?.sessionId || (!s.messages.length && !s.isStreaming)) {
 			presentedTailError = null;
 			tailErrorOffsetPx = 0;
+			tailQueueSlotPx = 0;
 		}
 		if (s.error && !presentedTailError) {
 			const pendingHeight = tailControlsRef?.getBoundingClientRect().height ?? 0;
@@ -2081,6 +2091,10 @@
 			// Its already-painted slot belongs to this reading context, not to the
 			// next error string or the queue's now-empty height.
 			tailErrorOffsetPx = pendingHeight > 0 ? pendingHeight + gap : 0;
+			// The queue and error are one already-presented slot. Keep its outer
+			// geometry too: dequeue can coincide with transcript growth/follow,
+			// otherwise the bottom-docked wrapper shrinks in that same paint.
+			tailQueueSlotPx = pendingHeight;
 			presentedTailError = s.error;
 		}
 		const resetFloor = s.sessionId !== followedFloorContext?.sessionId || (!s.messages.length && !s.isStreaming) || untrack(() => windowShifting);
@@ -2565,7 +2579,7 @@
 					     new 30px row + 18px gap that disappears at completion. -->
 					<div class="tail-activity"><TurnActivity startedAt={liveTurnStartedAt} /></div>
 				{/if}
-				<div class="tail-controls" bind:this={tailControlsRef}>
+				<div class="tail-controls" bind:this={tailControlsRef} style:min-height={`${tailQueueSlotPx}px`}>
 					{#if pendingMessages.length > 0}
 						<PendingMessages
 							messages={pendingMessages}
@@ -2633,7 +2647,7 @@
 			{#if forkOfferSessionId}
 				<button type="button" onclick={() => forkOfferedSessionHere(forkOfferSessionId)} class="text-sm font-medium underline underline-offset-2 hover:opacity-80 px-1.5">Fork here</button>
 			{/if}
-			<button type="button" onclick={() => liveActiveSession.clearError()} class="chat-error-dismiss" aria-label="Dismiss error" title="Dismiss">
+			<button type="button" onclick={dismissTailError} class="chat-error-dismiss" aria-label="Dismiss error" title="Dismiss">
 				<X size={16} strokeWidth={2} aria-hidden="true" />
 			</button>
 		</span>
@@ -2959,6 +2973,12 @@
 		flex: 0 0 auto;
 		gap: var(--chat-item-gap);
 		pointer-events: auto;
+	}
+
+	/* Dequeued children leave from the top of the held error/queue slot; the
+	   remaining bubble and the slot keep their bottom-docked geometry. */
+	.tail-controls {
+		justify-content: flex-end;
 	}
 
 	.tail-error {
