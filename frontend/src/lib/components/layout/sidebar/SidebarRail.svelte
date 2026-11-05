@@ -15,6 +15,7 @@
 	 * rearranging the rail never needs a trip through More.
 	 */
 	import { MessagesSquare, MoreHorizontal, SquarePen } from 'lucide-svelte';
+	import type { Snippet } from 'svelte';
 	import type { ViewType } from '$lib/stores/layout.svelte';
 	import type { WorkspaceNavItem } from './workspace-items';
 
@@ -38,6 +39,8 @@
 		chatsOn?: boolean;
 		/** Always there, so the icons below it never jump between screens. */
 		onChats?: () => void;
+		/** Global desktop controls, above More and outside the page/Chats column. */
+		controls?: Snippet<[rail: boolean]>;
 	}
 
 	let {
@@ -53,7 +56,8 @@
 		onMore,
 		onCustomize,
 		chatsOn = false,
-		onChats
+		onChats,
+		controls
 	}: Props = $props();
 
 	const iconSize = $derived(phone ? 20 : 18);
@@ -166,7 +170,10 @@
 	{/snippet}
 
 	<!-- Desktop keeps Settings at the very foot; on the phone More closes the row. -->
-	{#if !phone}{@render moreButton()}{/if}
+	{#if !phone}
+		{@render controls?.(true)}
+		{@render moreButton()}
+	{/if}
 	{#if settings}
 		<button
 			class="r-btn"

@@ -1748,6 +1748,36 @@ describe('Sidebar unified conversation history', () => {
 });
 
 describe('Sidebar page-panel host', () => {
+	it('keeps the single notification bell and offered update reachable on Notes', async () => {
+		mocks.activeView.set({ type: 'notes' });
+		mocks.apiGet.mockResolvedValue({ allow_updates: true, update_all_workers: false, workers: [{
+			device_id: 'local', device_name: 'Local', is_self: true, phase: 'available',
+			supported: true, online: true, allow_updates: true, version: '2.0.0', running_version: '1.0.0'
+		}] });
+		render(Sidebar, { props: { ...sidebarProps, panelHost: true } });
+		await tick();
+		const rail = screen.getByRole('navigation', { name: 'Workspace' });
+		for (const name of [/Notifications/, /Download update/]) {
+			const button = await screen.findByRole('button', { name });
+			expect(rail.contains(button)).toBe(true);
+			expect(button.closest('[inert], [aria-hidden="true"]')).toBeNull();
+		}
+		expect(document.querySelectorAll('.notif-center')).toHaveLength(1);
+		expect(document.querySelectorAll('.update-slot')).toHaveLength(1);
+		await fireEvent.click(screen.getByRole('button', { name: /Notifications/ }));
+		expect(screen.getByRole('dialog', { name: 'Notifications' }).closest('[inert], [aria-hidden="true"]')).toBeNull();
+	});
+	it('keeps phone drawer controls in the Chats header, not the bottom tabs', async () => {
+		platform.set('mobile');
+		mocks.activeView.set({ type: 'notes' });
+		render(Sidebar, { props: { ...sidebarProps, panelHost: true } });
+		await tick();
+		const bell = screen.getByRole('button', { name: /Notifications/ });
+		expect(bell.closest('.p-head')).not.toBeNull();
+		expect(bell.closest('[inert], [aria-hidden="true"]')).toBeNull();
+		expect(screen.getByRole('navigation', { name: 'Workspace' }).contains(bell)).toBe(false);
+		expect(document.querySelectorAll('.notif-center')).toHaveLength(1);
+	});
 	it.each(['prs', 'settings', 'build', 'stats', 'docs', 'terminal'])('keeps the rail menu and Customize outside hidden Chats on %s', async (type) => {
 		mocks.activeView.set({ type });
 		terminalTargets.mockResolvedValue({
