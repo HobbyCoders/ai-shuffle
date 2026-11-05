@@ -37,6 +37,7 @@
 	 * kept in view (after selection, keyboard moves and resizes).
 	 */
 	import { tick } from 'svelte';
+	import { ChevronRight } from 'lucide-svelte';
 
 	interface Props {
 		tabs: DetailTab[];
@@ -192,9 +193,11 @@
 			</button>
 		{/each}
 	</div>
+	{#if moreRight}<span class="tabs-more" aria-hidden="true"><ChevronRight size={12} strokeWidth={1.8} /></span>{/if}
 </div>
 
 <style>
+	.tabs-more { position: absolute; right: 0; top: 0; bottom: 1px; z-index: 2; display: grid; place-items: center; width: 16px; color: var(--st-mfg); pointer-events: none; }
 	.st-tabs-wrap {
 		position: relative;
 		margin-top: 14px;

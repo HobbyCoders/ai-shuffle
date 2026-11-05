@@ -161,9 +161,9 @@
  .docs-content :global(pre) { margin:0; padding:16px; overflow:auto; }
  .docs-content :global(code) { font-family:var(--st-mono); font-size:13px; background:var(--code-bg); padding:2px 4px; border-radius:var(--radius-control); }
  .docs-content :global(pre code) { padding:0; background:none; }
- .docs-content :global(table) { display:block; width:100%; overflow:auto; border-collapse:collapse; margin:24px 0; font-size:13px; }
- .docs-content :global(th:first-child), .docs-content :global(td:first-child) { min-width:124px; overflow-wrap:normal; }
+ .docs-content :global(table) { width:100%; table-layout:fixed; border-collapse:collapse; margin:24px 0; font-size:13px; }
+ .docs-content :global(th:first-child), .docs-content :global(td:first-child) { width:160px; overflow-wrap:anywhere; }
  .docs-content :global(th) { text-align:left; font-weight:500; padding:10px 12px; color:var(--muted-foreground); border-bottom:1px solid var(--border); }
- .docs-content :global(td) { padding:10px 12px; border-bottom:1px solid var(--border); }
+ .docs-content :global(td) { overflow-wrap:anywhere; padding:10px 12px; border-bottom:1px solid var(--border); }
  .docs-content :global(img) { max-width:100%; height:auto; }
 </style>

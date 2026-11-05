@@ -42,10 +42,10 @@ await runJourney({
     const statsTitle=await page.getByRole('heading',{level:2,name:'Last 30 days',exact:true}).boundingBox();
     await open('Settings');
     await page.locator('nav[aria-label=Settings]').getByRole('button',{name:/^General/}).filter({visible:true}).first().click();
-    const general=page.locator('.st-page-h h1').filter({visible:true});
+    const general=page.locator('.st-page-title h1').filter({visible:true});
     await general.waitFor();
     expect((await general.boundingBox()).y===statsTitle.y,'Settings and data-page title text share the exact top line');
-    const settingsFrame=await page.locator('.st-page-h').filter({visible:true}).boundingBox();
+    const settingsFrame=await page.locator('.st-page-title').filter({visible:true}).boundingBox();
     await open('Notes');
     await page.getByRole('button',{name:'New note',exact:true}).filter({visible:true}).first().click();
     await page.getByRole('textbox',{name:'Note title',exact:true}).waitFor();
@@ -127,7 +127,14 @@ await runJourney({
     const upload=await actions.getByRole('button',{name:'Upload',exact:true}).boundingBox();
     const folder=await actions.getByRole('button',{name:'New folder',exact:true}).boundingBox();
     expect(upload&&folder&&upload.y===folder.y&&Math.abs(upload.width-folder.width)<0.1,'F2: primary file actions share one equal-width row '+JSON.stringify({upload,folder}));
-    expect(upload.height>=44&&folder.height>=44,'F2: file actions have 44px targets');
+    // R3 deliberately separates the drawn 32px box from its 44px tap area.
+    for(const label of ['Upload','New folder']) {
+     const target=await actions.getByRole('button',{name:label,exact:true}).evaluate(el=>{
+      const box=el.getBoundingClientRect(), hit=getComputedStyle(el,'::after');
+      return {drawn:box.height,height:box.height-parseFloat(hit.top)-parseFloat(hit.bottom),width:box.width-parseFloat(hit.left)-parseFloat(hit.right)};
+     });
+     expect(target.drawn>=32&&target.drawn<=36&&target.height>=44&&target.width>=44,'R3: compact file action retains its 44px tap area '+JSON.stringify(target));
+    }
     await actions.getByText('More',{exact:true}).click();
     expect(await actions.getByRole('button',{name:'Open terminal here',exact:true}).isEnabled(),'F2: guarded terminal action remains reachable');
     await actions.getByText('More',{exact:true}).click();

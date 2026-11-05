@@ -36,7 +36,9 @@ await runJourney({
 			await page.locator('[data-view-shell="Notes"][data-pane="detail"]').waitFor();
 		},
 		async act({ page, mark }) {
-			await mark('leave an open note for Files');
+			await mark('Back reaches the Notes list and its global menu, then Files');
+			await page.locator('.topbar').getByRole('button', { name: 'Back to Notes', exact: true }).click();
+			await page.locator('[data-view-shell="Notes"][data-pane="panel"]').waitFor();
 			await page.getByRole('button', { name: /^Chats(?: \(|$)/ }).first().click();
 			await page.getByRole('navigation', { name: 'Workspace', exact: true }).getByRole('button', { name: 'Files', exact: true }).click();
 			await page.getByRole('button', { name: 'Workspace', exact: true }).click();
@@ -57,9 +59,9 @@ await runJourney({
 			await page.locator('[data-view-shell="Agents"] .st-dwrap').waitFor();
 		},
 		async act({ page, mark, log }) {
-			await mark('resize the selected desktop detail through inline into stacked');
+			await mark('resize the selected desktop detail through the medium desktop frame into stacked');
 			await page.setViewportSize({ width: 1000, height: 1000 });
-			await page.locator('[data-view-shell="Agents"]:not([data-docked]):not([data-stacked])').waitFor();
+			await page.locator('[data-view-shell="Agents"][data-docked]:not([data-stacked])').waitFor();
 			await page.setViewportSize({ width: 390, height: 1000 });
 			await page.locator('[data-view-shell="Agents"][data-stacked][data-pane="detail"]').waitFor();
 			await page.waitForTimeout(300);
@@ -67,7 +69,7 @@ await runJourney({
 			await page.setViewportSize({ width: 1440, height: 1000 });
 			await page.locator('[data-view-shell="Agents"][data-docked]').waitFor();
 			await page.setViewportSize({ width: 1000, height: 1000 });
-			await page.locator('[data-view-shell="Agents"]:not([data-docked]):not([data-stacked])').waitFor();
+			await page.locator('[data-view-shell="Agents"][data-docked]:not([data-stacked])').waitFor();
 			await page.setViewportSize({ width: 390, height: 1000 });
 			await page.locator('[data-view-shell="Agents"][data-stacked][data-pane="detail"]').waitFor();
 			await page.waitForTimeout(300);

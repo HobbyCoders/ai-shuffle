@@ -3,17 +3,24 @@
 	import { Search, X } from 'lucide-svelte';
 	import PanelIconButton from './PanelIconButton.svelte';
 	let { value = $bindable(''), placeholder = 'Search', label = placeholder, disabled = false,
-		input = $bindable(), oninput, onkeydown, clearable = false }: {
+		input = $bindable(), oninput, onkeydown, clearable = true }: {
 		value?: string; placeholder?: string; label?: string; disabled?: boolean; clearable?: boolean;
 		input?: HTMLInputElement;
 		oninput?: (event: Event & { currentTarget: HTMLInputElement }) => void;
 		onkeydown?: (event: KeyboardEvent) => void;
 	} = $props();
+	function clear() {
+		value = '';
+		if (!input) return;
+		input.value = '';
+		input.dispatchEvent(new Event('input', { bubbles: true }));
+		input.focus();
+	}
 </script>
 <div class="panel-search-field" class:clearable>
 	<Search size={15} strokeWidth={1.75} aria-hidden="true" />
 	<input bind:this={input} type="search" bind:value {placeholder} aria-label={label} {disabled} {oninput} {onkeydown} />
-	{#if clearable && value}<PanelIconButton label="Clear search" icon={X} {disabled} onclick={() => { value = ''; input?.focus(); }} />{/if}
+	{#if clearable && value}<PanelIconButton label="Clear search" icon={X} {disabled} onclick={clear} />{/if}
 </div>
 <style>
 	.panel-search-field { display: flex; align-items: center; gap: 9px; height: 32px; padding: 0 10px 0 11px; border: 1px solid var(--field-border); border-radius: var(--radius-control); background: var(--field-bg); color: var(--sidebar-muted); transition: border-color 0.2s ease-out; }
@@ -24,6 +31,7 @@
 	.panel-search-field input, .panel-search-field input:focus, .panel-search-field input:focus-visible { border: 0; outline: none; box-shadow: none; }
 	input::placeholder { color: var(--sidebar-muted); opacity: 1; }
 	.clearable input::-webkit-search-cancel-button { display: none; }
+	.panel-search-field :global(button) { color: var(--muted-foreground); }
 	@media (max-width: 600px), (pointer: coarse) { .panel-search-field { height: 44px; } input { font-size: 16px; } }
 	@media (prefers-reduced-motion: reduce) { .panel-search-field { transition: none; } }
 </style>

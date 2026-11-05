@@ -15,6 +15,7 @@
 	import { categoryById } from '$lib/settings/categories';
 	import type { CategoryId } from '$lib/settings/types';
 	import SavedTick from './SavedTick.svelte';
+	import PageTitle from './PageTitle.svelte';
 
 	interface Props {
 		category: CategoryId;
@@ -30,10 +31,7 @@
 <div class="st-pscroll st-scroll">
 	<div class="st-page">
 		<BackRow label="Settings" onclick={() => settingsNav.back()} />
-		<div class="st-page-h">
-			<h1 tabindex="-1" data-settings-heading="page">{label}</h1>
-			<SavedTick />
-		</div>
+		<PageTitle title={label}>{#snippet actions()}<SavedTick />{/snippet}</PageTitle>
 		{@render children()}
 	</div>
 </div>
@@ -50,22 +48,5 @@
 		margin: 0 auto;
 		padding: var(--st-page-top) var(--st-gutter) 120px;
 	}
-	.st-page-h {
-		display: flex;
-		align-items: center;
-		gap: 12px;
-		margin-bottom: 28px;
-		min-height: 32px;
-	}
-	h1 {
-		align-self: flex-start;
-		font-size: 24px;
-		line-height: 1.25;
-		font-weight: 600;
-		letter-spacing: -0.012em;
-		margin: 0;
-	}
-	h1:focus {
-		outline: none;
-	}
+
 </style>

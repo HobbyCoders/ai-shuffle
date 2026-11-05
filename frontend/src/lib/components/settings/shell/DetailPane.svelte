@@ -14,8 +14,9 @@
 	 *
 	 * Read-only mode disables the primary action and the whole body.
 	 */
-	import { onMount, type Snippet } from 'svelte';
-	import { ChevronDown } from 'lucide-svelte';
+	import { getAllContexts, onMount, type Snippet } from 'svelte';
+	import { MoreHorizontal } from 'lucide-svelte';
+	import PanelContext from '../../layout/view/PanelContext.svelte';
 	import { platform } from '$lib/stores/platform.svelte';
 	import BackRow from './BackRow.svelte';
 	import { settingsNav } from '$lib/settings/navigation.svelte';
@@ -52,6 +53,10 @@
 		subtitle?: string | Snippet;
 		/** The one primary action. */
 		primary?: Snippet;
+		/** Keep a single primary action beside the phone title; multi-action snippets use the bar's More menu. */
+		phonePrimary?: 'menu' | 'inline';
+		/** Optional page-owned More snippet, rendered in the phone bar with its original callbacks. */
+		phoneMenu?: Snippet;
 		facts?: Fact[];
 		/** Notice between facts and tabs. */
 		banner?: Snippet;
@@ -92,6 +97,8 @@
 		badge,
 		subtitle,
 		primary,
+		phonePrimary = 'menu',
+		phoneMenu,
 		facts = [],
 		banner,
 		tabs = [],
@@ -108,6 +115,7 @@
 		badges
 	}: Props = $props();
 
+	const contexts = getAllContexts();
 	let phone = $state(false);
 	onMount(() => {
 		const query = window.matchMedia('(max-width: 600px)');
@@ -142,9 +150,18 @@
 	}
 </script>
 
+{#snippet phoneActions()}
+	<PanelContext {contexts}>
+		<div class="settings-shell phone-detail-actions">
+			<fieldset disabled={access.readOnly}>
+				{#if phoneMenu}{@render phoneMenu()}{:else}<details class="detail-more"><summary class="st-btn icon" aria-label="More" title="More"><MoreHorizontal size={18} /></summary><div class="detail-actions">{@render primary?.()}</div></details>{/if}
+			</fieldset>
+		</div>
+	</PanelContext>
+{/snippet}
 <div class="st-dwrap" class:data={width === 'data'} class:reading={width === 'reading'} class:docs={width === 'docs'}>
 	{#if !contentFirst}
-		<BackRow label={catLabel} onclick={() => (onBack ? onBack() : settingsNav.stacked ? settingsNav.back() : settingsNav.clearSelection(cat))}>
+		<BackRow label={catLabel} actions={phoneMenu || (primary && phonePrimary === 'menu') ? phoneActions : undefined} onclick={() => (onBack ? onBack() : settingsNav.stacked ? settingsNav.back() : settingsNav.clearSelection(cat))}>
 			{#if topStatus}{@render topStatus()}{:else}<SavedTick />{/if}
 		</BackRow>
 	{/if}
@@ -164,12 +181,8 @@
 				</div>
 			{/if}
 		</div>
-		{#if primary}
-			<fieldset class="st-dha" disabled={access.readOnly}>
-					{#if phone || platform.isMobile}
-						<details class="detail-more"><summary class="st-btn">More<ChevronDown size={14} /></summary><div class="detail-actions">{@render primary()}</div></details>
-					{:else}{@render primary()}{/if}
-				</fieldset>
+		{#if primary && ((!phone && !platform.isMobile) || phonePrimary === 'inline' || contentFirst)}
+			<fieldset class="st-dha" disabled={access.readOnly}>{@render primary()}</fieldset>
 		{/if}
 	</div>
 	<FactsStrip {facts} />
@@ -197,6 +210,7 @@
 
 <style>
 	.st-dwrap {
+		container: detail-header / inline-size;
 		position: relative;
 		width: 100%;
 		max-width: calc(var(--st-reading-width) + 2 * var(--st-gutter));
@@ -293,7 +307,16 @@
 		padding: 0;
 		min-width: 0;
 	}
-	.st-dha:has(.detail-more):not(:has(.detail-actions :is(button, a, input))) { display: none; }
+	/* All multi-action headers reflow together when the content, not the window, is narrow. */
+	@container detail-header (max-width: 720px) {
+		.st-dh:has(> .st-dha) { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+		.st-dh:global(:has(> .st-identity > *)):has(> .st-dha) { grid-template-columns: auto minmax(0, 1fr); }
+		.st-dha { grid-column: 1 / -1; justify-content: flex-start; }
+	}
+	.phone-detail-actions { display: flex; flex: none; width: 56px; height: auto; min-width: 0; container-type: normal; background: transparent; }
+	.phone-detail-actions:not(:has(:is(button, a, input))) { display: none; }
+	.phone-detail-actions fieldset { border: 0; margin: 0; padding: 0 6px; }
+	.phone-detail-actions summary { color: var(--st-fg); }
 	.detail-more { position: relative; }
 	.detail-more summary { list-style: none; cursor: pointer; }
 	.detail-more summary::-webkit-details-marker { display: none; }
