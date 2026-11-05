@@ -36,6 +36,81 @@ def _notices(sid):
         return list(cursor.fetchall())
 
 
+@pytest.mark.parametrize("queue_order", ["fifo", "front", "position_tie", "legacy_time", "legacy_id"])
+async def test_stop_receipt_preserves_queue_order_through_not_sent_events(session_id, queue_order):
+    from app.core import stop_receipts as consumer
+    from app.core.task_registry import task_registry
+    from app.core.task_persistence import flush
+    from app.db import base, stop_receipts, turns
+
+    owner = _started(session_id)
+    first = turns.enqueue_turn(session_id, "queue", prompt="first", profile_id="default")
+    second = turns.enqueue_turn(session_id, "user", prompt="second", profile_id="default")
+    third = turns.enqueue_turn(session_id, "queue", prompt="third", profile_id="default",
+                               at_front=queue_order in ("front", "position_tie"))
+    expected = [first["id"], second["id"], third["id"]]
+    if queue_order == "front":
+        # A genuine front insertion differs from admission/heap order.
+        expected = [third["id"], first["id"], second["id"]]
+    elif queue_order == "position_tie":
+        # Recovery keeps the old position: it ties the newer front insertion.
+        # Admission order must break that tie, before the ordinary queued row.
+        recovered_id = owner["id"]
+        turns.requeue_turn(recovered_id)
+        owner = turns.start_turn(second["id"], None, "old-owner")
+        queued = turns.get_queued_turns(session_id)
+        assert queued[0]["position"] == queued[1]["position"]
+        assert queued[0]["insert_order"] < queued[1]["insert_order"]
+        expected = [recovered_id, third["id"], first["id"]]
+    elif queue_order.startswith("legacy_"):
+        # Frozen legacy imports can have equal positions and zero ordinals.
+        # Keep the genuine enqueued prompts; model only their old ordering keys.
+        with base.get_db() as conn:
+            cursor = conn.cursor()
+            for index, row in enumerate((first, second, third)):
+                day = 3 - index if queue_order == "legacy_time" else 1
+                cursor.execute("UPDATE turns SET position=0, insert_order=0, created_at=%s WHERE id=%s",
+                               (f"2000-01-0{day}T00:00:00+00:00", row["id"]))
+        expected = list(reversed(expected)) if queue_order == "legacy_time" else sorted(expected)
+
+    canonical = [row["id"] for row in turns.get_queued_turns(session_id)]
+    assert canonical == expected
+    receipt = turns.read_stop_receipt(session_id)
+    [published] = stop_receipts.pending("old-owner", turn_id=owner["id"])
+    newer = turns.enqueue_turn(session_id, "user", prompt="after Stop", profile_id="default",
+                               payload={turns.PERSON_INPUT_KEY: True})
+    assert newer["insert_order"] > receipt["input_cutoff"]
+    assert newer["id"] not in receipt["queued"]
+    try:
+        # Real durable consumption quiesces the queue and writes message.user
+        # in the receipt's sequence. Replaying the same authority is harmless.
+        assert await consumer.consume(published) == []
+        assert await consumer.consume(published) == []
+        saved = stop_receipts.get(published["id"])
+        assert saved["consumed_at"] is not None
+        with base.get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT turn_id, seq, payload FROM session_events WHERE session_id=%s "
+                           "AND event_type='message.user' ORDER BY seq", (session_id,))
+            messages = list(cursor.fetchall())
+            cursor.execute("SELECT stop_seq FROM session_stops WHERE session_id=%s", (session_id,))
+            assert cursor.fetchone()["stop_seq"] == receipt["stop_seq"] == 1
+        message_order = [row["turn_id"] for row in messages]
+        assert message_order == saved["receipt"]["queued"] == receipt["queued"]
+        assert message_order == canonical
+        assert len({row["seq"] for row in messages}) == len(canonical)
+        for message in messages:
+            turn = turns.get_turn(message["turn_id"])
+            assert turn["state"] == "aborted"
+            assert message["payload"]["not_sent"] is True
+            assert message["payload"]["queued_turn_id"] == turn["id"]
+            assert message["payload"]["content"] == turn["prompt"]
+        assert [row["id"] for row in turns.get_queued_turns(session_id)] == [newer["id"]]
+    finally:
+        task_registry.clear_session(session_id)
+        await flush()
+
+
 @pytest.mark.parametrize("source", ["user", "queue", "agent_message", "promotion"])
 @pytest.mark.parametrize("recovery", ["reap", "requeue"])
 def test_absorbed_input_survives_reap_and_delayed_old_stop(session_id, source, recovery):

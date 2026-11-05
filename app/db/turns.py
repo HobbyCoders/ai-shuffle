@@ -659,7 +659,8 @@ def _stop_receipt(cursor: Any, session_id: str) -> Dict[str, Any]:
     cursor.execute("SELECT COALESCE(MAX(insert_order), 0) AS cutoff FROM turns WHERE session_id=%s",
                    (session_id,))
     cutoff = cursor.fetchone()["cutoff"]
-    cursor.execute("SELECT id FROM turns WHERE session_id=%s AND state='queued' AND insert_order<=%s",
+    cursor.execute("SELECT id FROM turns WHERE session_id=%s AND state='queued' AND insert_order<=%s "
+                   "ORDER BY position ASC, insert_order ASC, created_at ASC, id ASC",
                    (session_id, cutoff))
     queued = [row["id"] for row in cursor.fetchall()]
     cursor.execute("SELECT id, run_id, ended_at FROM turns WHERE session_id=%s AND state='parked' "
