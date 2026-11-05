@@ -33,7 +33,7 @@ from datetime import datetime, timezone
 # the dispatch below never sees a claude_agent_sdk message class. Version skew
 # is absorbed inside the translation layer.
 from app.core.provider.events import (
-    AssistantMessage, UserMessage, TextBlock, ToolUseBlock,
+    AssistantMessage, UserMessage, TextBlock, ThinkingBlock, ToolUseBlock,
     ToolResultBlock, ResultMessage, SystemMessage, StreamEvent,
     ServerToolUseBlock, ServerToolResultBlock,
     TaskStartedMessage, TaskProgressMessage, TaskNotificationMessage,
@@ -43,6 +43,7 @@ from app.core.provider.events import (
 _SERVER_TOOL_TYPES: tuple = (ServerToolUseBlock,)
 _SERVER_TOOL_RESULT_TYPES: tuple = (ServerToolResultBlock,)
 from app.core.agent_types import PermissionResultAllow, PermissionResultDeny
+from fluid.context.assistant import quote_assistant_text
 from fluid.engine.delegated import ClaudeCliMissingError
 from fluid.engine.guardrail import GUARDRAIL_TOOL
 
@@ -529,14 +530,27 @@ def _task_notification_frame(message: Any) -> Dict[str, Any]:
     }
 
 
+_QUERY_REPLAY_NOTES = frozenset({
+    "attempt_discarded", "provider_retry", "assistant_text_sanitized", "guardrail_blocked",
+})
+
+
 async def _record_query_message(recorder, message):
-    """The HTTP/headless recorder tap (these consumers use full message blocks)."""
+    """Record full HTTP/headless blocks plus the controls that govern replay.
+
+    Partial StreamEvents mirror these blocks and must not be recorded again.
+    Native blocks arrive before the end-of-call sanitization notice, so quote
+    their model-authored control markers before they reach the durable log.
+    """
     if not recorder:
         return
     if isinstance(message, (AssistantMessage, UserMessage)):
         for block in message.content:
             if isinstance(block, TextBlock) and isinstance(message, AssistantMessage):
-                await recorder.on_event({"type": "chunk", "content": block.text})
+                await recorder.on_event({"type": "chunk", "content": quote_assistant_text(block.text)})
+            elif isinstance(block, ThinkingBlock) and isinstance(message, AssistantMessage):
+                await recorder.on_event({"type": "stream_delta", "delta_type": "thinking",
+                                         "content": quote_assistant_text(block.thinking)})
             elif isinstance(block, ToolUseBlock):
                 await recorder.on_event({"type": "tool_use", "name": block.name,
                                          "id": block.id, "input": block.input})
@@ -546,6 +560,8 @@ async def _record_query_message(recorder, message):
                                          "is_error": block.is_error})
         if isinstance(message, AssistantMessage) and message.usage:
             await recorder.on_event({"type": "turn_usage", "usage": message.usage})
+    elif isinstance(message, SystemMessage) and message.subtype in _QUERY_REPLAY_NOTES:
+        await recorder.on_event({"type": "system", "subtype": message.subtype, "data": message.data})
     elif isinstance(message, ResultMessage):
         usage = message.usage or {}
         metadata = {
@@ -708,8 +724,10 @@ async def _execute_query_turn(
     # Resolve virtual @Notes/note-id references to actual content
     prompt = _resolve_note_references_for(prompt, api_user_id)
 
-    # Execute query and collect response
+    # Match canonical replay: a discard removes only the current model attempt,
+    # not earlier accepted output preceding a tool result or provider retry.
     response_text = []
+    response_attempt_start = 0
     metadata = {
         "usage_settlement_key": await capture_usage_identity(session_id),
         USAGE_PROVIDER_KEY: getattr(options, "aih_provider_id", None),
@@ -756,6 +774,10 @@ async def _execute_query_turn(
             # isinstance chain claims them via the SystemMessage branch below.
             _record_task_message(session_id, message)
             if isinstance(message, SystemMessage):
+                if message.subtype == "attempt_discarded":
+                    del response_text[response_attempt_start:]
+                if message.subtype in ("attempt_discarded", "provider_retry"):
+                    response_attempt_start = len(response_text)
                 # session_id comes in warmup message data after first query
                 if message.subtype == "init" and "session_id" in message.data:
                     sdk_session_id = message.data["session_id"]
@@ -795,7 +817,9 @@ async def _execute_query_turn(
             elif isinstance(message, AssistantMessage):
                 for block in message.content:
                     if isinstance(block, TextBlock):
-                        response_text.append(block.text)
+                        response_text.append(quote_assistant_text(block.text))
+                    elif isinstance(block, (ToolResultBlock, ServerToolResultBlock)):
+                        response_attempt_start = len(response_text)
                 metadata["model"] = message.model
 
                 # Track per-API-call usage so we can persist the LAST call's
@@ -815,6 +839,10 @@ async def _execute_query_turn(
                         metadata["last_call_tokens_in"] = message.usage.get("input_tokens", 0)
                         metadata["last_call_cache_creation_tokens"] = message.usage.get("cache_creation_input_tokens", 0)
                         metadata["last_call_cache_read_tokens"] = message.usage.get("cache_read_input_tokens", 0)
+
+            elif isinstance(message, UserMessage):
+                if any(isinstance(block, (ToolResultBlock, ServerToolResultBlock)) for block in message.content):
+                    response_attempt_start = len(response_text)
 
             elif isinstance(message, RateLimitEvent):
                 logger.debug(f"Rate limit event: status={message.rate_limit_info.status}, type={message.rate_limit_info.rate_limit_type}")
@@ -1504,6 +1532,8 @@ async def _stream_query_turn(
                     "description": message.description,
                 }
             elif isinstance(message, SystemMessage):
+                if message.subtype in _QUERY_REPLAY_NOTES:
+                    yield {"type": "system", "subtype": message.subtype, "data": message.data}
                 # session_id comes in init message data after first query
                 if message.subtype == "init" and "session_id" in message.data:
                     sdk_session_id = message.data["session_id"]
@@ -1538,7 +1568,7 @@ async def _stream_query_turn(
             elif isinstance(message, AssistantMessage):
                 for block in message.content:
                     if isinstance(block, TextBlock):
-                        yield {"type": "text", "content": block.text}
+                        yield {"type": "text", "content": quote_assistant_text(block.text)}
 
                     elif isinstance(block, ToolUseBlock):
                         tool_id = getattr(block, 'id', None)
