@@ -120,7 +120,7 @@ export interface ModelProvider {
 	max_output_tokens: number | null;
 	enabled: boolean;
 	/** One active account per built-in provider and kind; gateways are independent. */
-	slot?: 'openai:key' | 'openai:subscription' | 'grok:key' | 'grok:subscription' | 'openrouter:key' | null;
+	slot?: 'openai:key' | 'openai:subscription' | 'grok:key' | 'grok:subscription' | 'openrouter:key' | `${'kimi' | 'minimax' | 'opencode'}:${'key' | 'subscription'}` | null;
 	// ----- Codex / ChatGPT-subscription OAuth surface -----
 	// The secret access/refresh blobs are NEVER returned — only the boolean
 	// `codex_*_token_set` flags. The non-secret Codex fields (`auth_mode`,
@@ -153,7 +153,9 @@ export interface ModelProvidersResponse {
 export interface ModelProviderCreate {
 	name: string;
 	provider_type: string;
-	base_url: string;
+	/** Native plan keys only; omit for pay-as-you-go keys. */
+	auth_mode?: 'plan_key' | null;
+	base_url?: string;
 	/** Custom rows only: endpoint wire format ('anthropic' default | 'openai'). */
 	api_dialect?: 'anthropic' | 'openai' | null;
 	/** Omit or leave blank to store no token. */

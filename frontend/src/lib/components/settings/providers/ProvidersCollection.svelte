@@ -32,6 +32,7 @@
 		parseProviderItem
 	} from './providers-model';
 	import { startGateway } from './provider-actions';
+	import { nativeOptions } from './native-options.svelte';
 
 	let filter = $state('');
 
@@ -94,6 +95,7 @@
 	});
 
 	onMount(() => {
+		void nativeOptions.load();
 		void providers.refreshAll();
 		// Subscription rows name their plan; the stored snapshot has the freshest one.
 		void providers.loadUsage();

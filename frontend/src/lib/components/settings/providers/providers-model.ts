@@ -26,12 +26,13 @@ import type {
 import type { ProviderGlyphKind } from '$lib/components/settings/ProviderGlyph.svelte';
 import type { StatusTone } from '$lib/settings/types';
 import { safeKeyHint } from './credential-display';
+import { isNativeProvider, nativeOptions, type NativeProviderId } from './native-options.svelte';
 
 // ============================================================================
 // Ids
 // ============================================================================
 
-export type BuiltInProviderId = 'claude' | 'openai' | 'grok' | 'openrouter' | 'fal';
+export type BuiltInProviderId = 'claude' | 'openai' | 'grok' | 'openrouter' | 'fal' | NativeProviderId;
 /** Built-in providers, then one `gw:<rowId>` per custom gateway (`gw:draft-<n>` while new). */
 export type ProviderId = BuiltInProviderId | `gw:${string}`;
 
@@ -71,7 +72,7 @@ export function parseRowItem(item: string | null | undefined): string | null {
  * (ChatGPT/SuperGrok sign-in), key (OpenAI/xAI/OpenRouter API key),
  * gateway (custom endpoint), fal (fal.ai media key).
  */
-export type CredentialFlavor = 'cli' | 'anthropic' | 'cloud' | 'device' | 'key' | 'gateway' | 'fal';
+export type CredentialFlavor = 'cli' | 'anthropic' | 'cloud' | 'device' | 'key' | 'plan-key' | 'gateway' | 'fal';
 
 export interface CredentialKindDef {
 	/** Menu and row label: "Subscription", "API key". */
@@ -98,11 +99,16 @@ const KINDS: Record<BuiltInProviderId | 'gateway', CredentialKindDef[]> = {
 		{ label: 'API key', flavor: 'key', multiple: true, hint: 'Paste a key' }
 	],
 	openrouter: [{ label: 'API key', flavor: 'key', multiple: true, hint: 'One key, many models' }],
+	kimi: [], minimax: [], opencode: [],
 	fal: [{ label: 'Media key', flavor: 'fal', multiple: false, hint: 'Also reads the balance' }],
 	gateway: [{ label: 'Gateway key', flavor: 'gateway', multiple: false, hint: 'Endpoint, dialect, token' }]
 };
 
 export function kindsOf(providerId: ProviderId): CredentialKindDef[] {
+	if (isNativeProvider(providerId)) return nativeOptions.list.filter((o) => o.provider_type === providerId).map((o) => ({
+		label: o.credential_label, flavor: o.auth_mode === 'plan_key' ? 'plan-key' : 'key',
+		multiple: true, hint: 'Paste a key'
+	}));
 	return isGatewayId(providerId) ? KINDS.gateway : KINDS[providerId];
 }
 
@@ -112,7 +118,7 @@ export const isGatewayId = (id: ProviderId): id is `gw:${string}` => id.startsWi
 // Row classification
 // ============================================================================
 
-export type RowClass = 'chatgpt' | 'grok' | 'openai' | 'xai' | 'openrouter' | 'custom';
+export type RowClass = 'chatgpt' | 'grok' | 'openai' | 'xai' | 'openrouter' | NativeProviderId | 'custom';
 
 /**
  * Which slot a model_providers row belongs to. auth_mode wins (the Codex row
@@ -122,6 +128,7 @@ export function classifyRow(p: Pick<ModelProvider, 'auth_mode' | 'provider_type'
 	if (p.auth_mode === 'chatgpt') return 'chatgpt';
 	if (p.auth_mode === 'grok' || p.provider_type === 'grok') return 'grok';
 	if (p.provider_type === 'chatgpt') return 'chatgpt';
+	if (isNativeProvider(p.provider_type)) return p.provider_type;
 	if (p.provider_type === 'openrouter') return 'openrouter';
 	if (p.provider_type === 'openai') return 'openai';
 	if (p.provider_type === 'xai') return 'xai';
@@ -136,8 +143,9 @@ export function providerOfRow(p: ModelProvider): ProviderId {
 		case 'grok':
 		case 'xai':
 			return 'grok';
+		case 'kimi': case 'minimax': case 'opencode':
 		case 'openrouter':
-			return 'openrouter';
+			return classifyRow(p) as BuiltInProviderId;
 		default:
 			return `gw:${p.id}`;
 	}
@@ -146,6 +154,7 @@ export function providerOfRow(p: ModelProvider): ProviderId {
 export function flavorOfRow(p: ModelProvider): CredentialFlavor {
 	const cls = classifyRow(p);
 	if (cls === 'chatgpt' || cls === 'grok') return 'device';
+	if (isNativeProvider(p.provider_type) && p.auth_mode === 'plan_key') return 'plan-key';
 	if (cls === 'custom') return 'gateway';
 	return 'key';
 }
@@ -250,6 +259,9 @@ const BUILT_IN: { id: BuiltInProviderId; name: string; glyph: ProviderGlyphKind;
 	{ id: 'grok', name: 'xAI Grok', glyph: 'grok', letter: 'X' },
 	{ id: 'claude', name: 'Claude', glyph: 'claude', letter: 'C' },
 	{ id: 'openrouter', name: 'OpenRouter', glyph: 'openrouter', letter: 'R' },
+	{ id: 'kimi', name: 'Kimi', glyph: 'kimi', letter: 'K' },
+	{ id: 'minimax', name: 'MiniMax', glyph: 'minimax', letter: 'M' },
+	{ id: 'opencode', name: 'OpenCode', glyph: 'opencode', letter: 'O' },
 	{ id: 'fal', name: 'fal.ai', glyph: 'custom', letter: 'f' }
 ];
 
@@ -578,7 +590,9 @@ export function rowCredential(row: ModelProvider, usagePlan?: string | null): Cr
 		providerId,
 		flavor,
 		name: flavor === 'gateway' ? 'Gateway key' : keyName(row.name),
-		kind: flavor === 'gateway' ? 'Gateway' : 'API key',
+		kind: isNativeProvider(row.provider_type)
+			? nativeOptions.option(row.provider_type, row.auth_mode === 'plan_key')?.credential_label ?? (row.auth_mode === 'plan_key' ? 'Plan key' : 'API key')
+			: flavor === 'gateway' ? 'Gateway' : 'API key',
 		summary: row.enabled ? `${host}, ${plural(models, 'model')}${row.auth_token_set ? '' : ', no token'}` : 'Off',
 		status: row.enabled ? 'ok' : 'off',
 		statusText: flavor === 'gateway' ? (row.enabled ? 'On' : 'Off') : row.enabled ? 'Active' : 'Saved',
@@ -652,7 +666,7 @@ export function buildProviders(input: ProvidersInput): ProviderView[] {
 	for (const c of falCredential(input.fal)) push('fal', c);
 	for (const d of drafts) push(d.providerId, draftCredential(d));
 
-	const views: ProviderView[] = BUILT_IN.map((b) => view(b.id, b.name, b.glyph, b.letter, byProvider.get(b.id) ?? []));
+	const views: ProviderView[] = BUILT_IN.map((b) => view(b.id, nativeOptions.list.find((o) => o.provider_type === b.id)?.display_name ?? b.name, b.glyph, b.letter, byProvider.get(b.id) ?? []));
 	const claudeView = views.find((v) => v.claude);
 	if (claudeView) claudeView.claudeSubscriptions = !!input.claude?.accounts?.subscription_support?.supported;
 	if (input.claudePending && !input.claude) {
@@ -773,7 +787,8 @@ const DRAFT_BASE: Record<CredentialFlavor, (p: ProviderId) => string> = {
 	anthropic: () => 'Anthropic API key',
 	cloud: () => 'Cloud provider or gateway',
 	device: (p) => (p === 'openai' ? 'ChatGPT subscription' : 'SuperGrok subscription'),
-	key: (p) => `${p === 'openai' ? 'OpenAI' : p === 'grok' ? 'Grok' : 'OpenRouter'} API key`,
+	key: (p) => nativeOptions.option(p, false)?.credential_label ?? `${p === 'openai' ? 'OpenAI' : p === 'grok' ? 'Grok' : 'OpenRouter'} API key`,
+	'plan-key': (p) => nativeOptions.option(p, true)?.credential_label ?? 'Plan key',
 	gateway: () => 'Gateway key',
 	fal: () => 'Media key'
 };

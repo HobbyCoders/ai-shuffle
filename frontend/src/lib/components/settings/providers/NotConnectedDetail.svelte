@@ -15,6 +15,7 @@
 	import ClaudeModeRow from './ClaudeModeRow.svelte';
 	import { kindsOf, type ProviderView } from './providers-model';
 	import { startSetup } from './provider-actions';
+	import { isNativeProvider, nativeOptions } from './native-options.svelte';
 
 	interface Props {
 		provider: ProviderView;
@@ -46,6 +47,11 @@
 >
 	{#snippet tile()}<ProviderTile {provider} size="lg" dashed />{/snippet}
 	{#if provider.claude}<ClaudeModeRow {provider} />{/if}
+	{#if isNativeProvider(provider.id) && nativeOptions.loading}<p class="pv-msg" role="status">Loading connection options</p>{/if}
+	{#if isNativeProvider(provider.id) && nativeOptions.error}
+		<p class="pv-msg err" role="alert">{nativeOptions.error}</p>
+		<button type="button" class="st-btn" onclick={() => nativeOptions.load(true)}>Retry</button>
+	{/if}
 	<RowGroup title="Connect" id="providers-connect">
 		{#each kinds as k (k.flavor)}
 			<SettingRow label={k.label} hint={k.hint}>
