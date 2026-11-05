@@ -151,3 +151,28 @@ describe('Pick an agent', () => {
 		await waitFor(() => expect(document.activeElement?.matches('[data-agent-picker] select')).toBe(true));
 	});
 });
+
+describe('detail scroll position', () => {
+	it('keeps the reader’s place when a clean editor refreshes from a remote change', async () => {
+		const { watchResources } = await import('$lib/services/watch-resources');
+		const scrollTo = vi.fn();
+		const original = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollTo');
+		Object.defineProperty(Element.prototype, 'scrollTo', { value: scrollTo, configurable: true, writable: true });
+		try {
+			render(AutomationsCard, { props: { mobile: false } });
+			await openOrphanDetail();
+			await fireEvent.click(screen.getByTitle('Edit'));
+			await screen.findByDisplayValue('Nightly digest');
+			const opened = scrollTo.mock.calls.length;
+			expect(opened).toBeGreaterThan(0);
+			const refresh = vi.mocked(watchResources).mock.calls.find(([kinds]) => (kinds as string[]).includes('automations'))![1] as () => Promise<void>;
+			automationsApi.getAutomations.mockResolvedValue([{ ...orphan, name: 'Renamed elsewhere' }]);
+			await refresh();
+			await screen.findByDisplayValue('Renamed elsewhere');
+			expect(scrollTo.mock.calls.length).toBe(opened);
+		} finally {
+			if (original) Object.defineProperty(Element.prototype, 'scrollTo', original);
+			else delete (Element.prototype as { scrollTo?: unknown }).scrollTo;
+		}
+	});
+});

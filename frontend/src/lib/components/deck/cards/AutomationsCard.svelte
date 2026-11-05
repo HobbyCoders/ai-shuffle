@@ -272,8 +272,10 @@
 		currentView = 'create';
 	}
 
-	function openEdit(automation: Automation) {
-		formSession++;
+	/** `refresh` re-hydrates the same open form after a remote change, so the
+	 *  reader keeps their place; only opening an editor starts at the top. */
+	function openEdit(automation: Automation, refresh = false) {
+		if (!refresh) formSession++;
 		error = '';
 		selectedAutomation = automation;
 		formName = automation.name;
@@ -632,7 +634,7 @@
 				: 'This item was deleted elsewhere. Copy your unsaved changes before leaving.';
 			return;
 		}
-		if (fresh) openEdit(fresh);
+		if (fresh) openEdit(fresh, true);
 		else { currentView = 'list'; selectedAutomation = null; remoteChange = 'This item was deleted elsewhere.'; }
 	});
 </script>
@@ -640,7 +642,7 @@
  {#snippet panel()}
   <AutomationsStudio {automations} {pendingApprovals} {profiles} {loading} error={currentView === 'list' ? error : ''} {triggeringId}
    selectedId={currentView === 'detail' || currentView === 'edit' ? selectedAutomation?.id : null}
-   onOpenCreate={openCreate} onOpenDetail={openDetail} onOpenEdit={openEdit}
+   onOpenCreate={openCreate} onOpenDetail={openDetail} onOpenEdit={(a) => openEdit(a)}
    onToggleEnabled={handleToggleEnabled} onTrigger={handleTrigger} onDelete={handleDelete}
    onApprove={handleApprove} onDeny={handleDeny} onClearError={() => error = ''}
    {formatCost} {triggerTypeLabel} />
@@ -722,7 +724,7 @@
     {#if error}<InlineBanner tone="warn">{error}</InlineBanner>{/if}
     <AutomationDetail automation={selectedAutomation} profiles={profilesLoaded ? profiles : null} {connectors} {connectorTypes}
      {runs} {runsLoading} {expandedRunIds} {detailStats} {triggeringId}
-     onBack={back} onEdit={openEdit} onPickAgent={pickAgent} onTrigger={handleTrigger}
+     onBack={back} onEdit={(a) => openEdit(a)} onPickAgent={pickAgent} onTrigger={handleTrigger}
      onDelete={handleDelete} onToggleEnabled={handleToggleEnabled} onToggleRunExpanded={toggleRunExpanded}
      {formatTime} {formatCost} {formatDuration} {getStatusColor} {getRunStatusBadgeClass} {triggerTypeLabel} />
    {:else}
