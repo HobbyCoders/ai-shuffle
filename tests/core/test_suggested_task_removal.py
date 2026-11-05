@@ -8,6 +8,7 @@ to reach, and try each way an old client or peer could still start one.
 from __future__ import annotations
 
 import importlib.util
+import json
 import re
 from pathlib import Path
 
@@ -62,19 +63,59 @@ def _worker_options(tmp_path, **kwargs) -> SessionOptions:
     return options
 
 
-def test_no_production_source_names_the_feature():
+def _production_feature_references(root: Path) -> list[str]:
     found = []
     for folder in PRODUCTION_SOURCES:
-        for path in sorted((ROOT / folder).rglob("*")):
+        for path in sorted((root / folder).rglob("*")):
             if path.suffix not in (".py", ".json") or not path.is_file() or "node_modules" in path.parts:
                 continue
-            relative = path.relative_to(ROOT).as_posix()
+            relative = path.relative_to(root).as_posix()
             text = path.read_text(encoding="utf-8", errors="replace")
+            if relative == "scripts/devloop/journey_weights.json":
+                weights = json.loads(text)
+                journeys = {p.name for p in (root / "frontend/tests/journeys").glob("*.journey.mjs")
+                            if p.is_file()}
+                # Only measured filenames are test inventory, not production references.
+                # Keep every value (even for exempt keys) and all metadata in the scan.
+                weights["seconds"] = [[None if name in journeys else name, value]
+                                      for name, value in weights["seconds"].items()]
+                text = json.dumps(weights)
             if relative in INERT_TABLE_FILES:
                 text = text.replace("session_task_chips", "").replace("idx_session_task_chips", "")
             if RETIRED_NAMES.search(text) or TOOL.lower() in relative.replace("-", "").lower():
                 found.append(relative)
-    assert found == []
+    return found
+
+
+def test_no_production_source_names_the_feature():
+    assert _production_feature_references(ROOT) == []
+
+
+@pytest.mark.parametrize("reference", [None, "metadata", "unknown-key", "value", "other-map", "production"])
+def test_journey_weight_exemption_only_covers_existing_journey_keys(tmp_path, reference):
+    journey = "retired-task-chips.journey.mjs"
+    journey_path = tmp_path / "frontend/tests/journeys" / journey
+    journey_path.parent.mkdir(parents=True)
+    journey_path.write_text("", encoding="utf-8")
+    weights_path = tmp_path / "scripts/devloop/journey_weights.json"
+    weights_path.parent.mkdir(parents=True)
+    weights = {"_comment": "Hosted runtime measurements", "seconds": {journey: 10}}
+    expected = "scripts/devloop/journey_weights.json"
+    if reference == "metadata":
+        weights["_comment"] = TOOL
+    elif reference == "unknown-key":
+        weights["seconds"]["missing-task-chips.journey.mjs"] = 20
+    elif reference == "value":
+        weights["seconds"][journey] = TOOL
+    elif reference == "other-map":
+        weights["other"] = {journey: 10}
+    elif reference == "production":
+        source = tmp_path / "app/feature.py"
+        source.parent.mkdir()
+        source.write_text(f"name = {TOOL!r}\n", encoding="utf-8")
+        expected = "app/feature.py"
+    weights_path.write_text(json.dumps(weights), encoding="utf-8")
+    assert _production_feature_references(tmp_path) == ([expected] if reference else [])
 
 
 @pytest.mark.parametrize("module", ["app.core.task_chips", "app.db.task_chips"])
