@@ -10,7 +10,7 @@
 	 * - Approve/deny pending automation runs
 	 */
 	import { onMount, tick } from 'svelte';
-	import StudioEditorShell from '$lib/components/layout/StudioEditorShell.svelte';
+	import { ViewShell, ViewMain, DetailPane, EmptyDetail, InlineBanner } from '$lib/components/layout/view';
 	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
 	import type {
 		Automation,
@@ -65,11 +65,11 @@
 		Shield,
 		Check
 	} from 'lucide-svelte';
-	import './card-design-system.css';
+	
 
 	// Sub-components
 	import Banner from '$lib/components/Banner.svelte';
-	import AutomationsList from './automations/AutomationsList.svelte';
+	
 	import AutomationsStudio from './automations/AutomationsStudio.svelte';
 	import AutomationForm from './automations/AutomationForm.svelte';
 	import AutomationDetail from './automations/AutomationDetail.svelte';
@@ -301,7 +301,7 @@
 		if (collapsedSections.has('config')) toggleSection('config');
 		openEdit(automation);
 		await tick();
-		document.querySelector<HTMLSelectElement>('select.sel[data-agent-picker]')?.focus();
+		document.querySelector<HTMLSelectElement>('[data-agent-picker] select')?.focus();
 	}
 	async function openDetail(automation: Automation, quiet = false) {
 		selectedAutomation = automation;
@@ -622,53 +622,28 @@
 		else { currentView = 'list'; selectedAutomation = null; remoteChange = 'This item was deleted elsewhere.'; }
 	});
 </script>
-
-{#if remoteChange}<p role="status" style="flex: none; height: auto;" class="px-4 py-2 text-sm text-muted-foreground">{remoteChange}</p>{/if}
-
-{#snippet automationsMainContent()}
-	<!-- Test result -->
-	{#if testResult}
-		<div class="auto-banner" transition:slide={{ duration: 200 }}>
-			<Banner
-				severity={testResult.budget_ok ? 'success' : 'warning'}
-				message={testResult.message}
-				dismissible
-				onDismiss={() => (testResult = null)}
-			/>
-		</div>
-	{/if}
-
-	<!-- Error display -->
-	{#if error}
-		<div class="auto-error-banner" transition:slide={{ duration: 200 }}>
-			<Banner severity="error" message={error} dismissible onDismiss={() => (error = '')} />
-		</div>
-	{/if}
-
-	<!-- View router -->
-	<div class="auto-content">
-		{#if loading}
-			<div class="auto-loading">
-				<Loader2 size={32} class="animate-spin" />
-				<p>Loading automations...</p>
-			</div>
-		{:else if currentView === 'list'}
-			<AutomationsList
-				{automations}
-				{searchQuery}
-				{triggeringId}
-				onOpenDetail={openDetail}
-				onOpenCreate={openCreate}
-				onOpenEdit={openEdit}
-				onToggleEnabled={handleToggleEnabled}
-				onTrigger={handleTrigger}
-				onDelete={handleDelete}
-				{formatTime}
-				{formatCost}
-				{triggerTypeLabel}
-				{getStatusColor}
-			/>
-		{:else if currentView === 'create' || currentView === 'edit'}
+<ViewShell label="Automations" detailOpen={currentView !== 'list'} onBack={backToList}>
+ {#snippet panel()}
+  <AutomationsStudio {automations} {pendingApprovals} {profiles} {loading} {error} {triggeringId}
+   selectedId={currentView === 'detail' || currentView === 'edit' ? selectedAutomation?.id : null}
+   onOpenCreate={openCreate} onOpenDetail={openDetail} onOpenEdit={openEdit}
+   onToggleEnabled={handleToggleEnabled} onTrigger={handleTrigger} onDelete={handleDelete}
+   onApprove={handleApprove} onDeny={handleDeny} onClearError={() => error = ''}
+   {formatCost} {triggerTypeLabel} />
+ {/snippet}
+ {#snippet main(back)}
+  <ViewMain width="reading">
+   {#if remoteChange}<InlineBanner tone="info">{remoteChange}</InlineBanner>{/if}
+   {#if currentView === 'create' || currentView === 'edit'}
+    <DetailPane name={currentView === 'edit' ? formName || 'Edit automation' : 'New automation'}
+     subtitle={currentView === 'edit' ? 'Update its triggers, instructions and run limits.' : 'Run tasks on a schedule or in response to events.'}
+     onBack={back} backLabel="Automations">
+     {#snippet primary()}
+      <button type="button" class="st-btn primary" onclick={handleSave} disabled={formSaving}>
+       {#if formSaving}<Loader2 size={14} class="animate-spin" />Saving…{:else}<Check size={14} />{currentView === 'edit' ? 'Save' : 'Create'}{/if}
+      </button>
+     {/snippet}
+     {#snippet children()}
 			<AutomationForm
 				currentView={currentView as 'create' | 'edit'}
 				selectedAutomationId={selectedAutomation?.id ?? null}
@@ -728,553 +703,24 @@
 				onToggleTriggerExpand={toggleTriggerExpand}
 				onToggleActionExpand={toggleActionExpand}
 			/>
-		{:else if currentView === 'detail' && selectedAutomation}
-			<AutomationDetail
-				automation={selectedAutomation}
-				profiles={profilesLoaded ? profiles : null}
-				{runs}
-				{runsLoading}
-				{expandedRunIds}
-				{detailStats}
-				onBack={() => currentView = 'list'}
-				onEdit={openEdit}
-				onPickAgent={pickAgent}
-				onTrigger={handleTrigger}
-				onDelete={handleDelete}
-				onToggleRunExpanded={toggleRunExpanded}
-				{formatTime}
-				{formatCost}
-				{formatDuration}
-				{getStatusColor}
-				{getRunStatusBadgeClass}
-				{triggerTypeLabel}
-			/>
-		{:else if currentView === 'approvals'}
-			{@render approvalsView()}
-		{/if}
-	</div>
-{/snippet}
-
-<!-- ═══════════════════ APPROVALS VIEW ═══════════════════ -->
-{#snippet approvalsView()}
-	<div class="auto-approvals" transition:fade={{ duration: 150 }}>
-		<div class="auto-form-header">
-			<button class="card-back-btn" onclick={() => currentView = 'list'} aria-label="Back to automations">
-				<ChevronLeft size={16} />
-			</button>
-			<h3 class="auto-form-title">Pending Approvals</h3>
-			<span class="card-badge card-badge--warning">{pendingApprovals.length}</span>
-		</div>
-
-		{#if pendingApprovals.length === 0}
-			<div class="card-empty-state">
-				<div class="card-empty-icon">
-					<Shield size={32} />
-				</div>
-				<p class="card-empty-title">No pending approvals</p>
-				<p class="card-empty-description">Automations requiring approval will show up here</p>
-			</div>
-		{:else}
-			<div class="auto-approval-list">
-				{#each pendingApprovals as approval (approval.id)}
-					<div class="auto-approval-item" transition:slide={{ duration: 150 }}>
-						<div class="auto-approval-info">
-							<span class="auto-approval-name">{approval.automation_name || 'Automation'}</span>
-							{#if approval.prompt_preview}
-								<p class="auto-approval-prompt">{approval.prompt_preview}</p>
-							{/if}
-							<span class="fp-meta-chip">{formatTime(approval.created_at)}</span>
-						</div>
-						<div class="auto-approval-actions">
-							<button class="card-btn-primary auto-approval-btn" onclick={() => handleApprove(approval.id)}>
-								<CheckCircle size={14} />
-								Approve
-							</button>
-							<button class="card-btn-secondary auto-approval-btn" onclick={() => handleDeny(approval.id)}>
-								<XCircle size={14} />
-								Deny
-							</button>
-						</div>
-					</div>
-				{/each}
-			</div>
-		{/if}
-	</div>
-{/snippet}
-
-<!-- ═══════════════════ RENDER ═══════════════════ -->
-{#if !mobile}
-	{#if currentView === 'create' || currentView === 'edit'}
-		<StudioEditorShell
-			title={currentView === 'edit' && selectedAutomation ? selectedAutomation.name : 'New Automation'}
-			subtitle={currentView === 'edit' ? 'Automation' : 'Create a new automation'}
-			backLabel="Automations"
-			onBack={backToList}
-		>
-			{#snippet actions()}
-				<button type="button" class="ed-btn primary" onclick={handleSave} disabled={formSaving}>
-					{#if formSaving}
-						<Loader2 size={14} class="animate-spin" />
-						<span>Saving...</span>
-					{:else}
-						<Check size={14} />
-						<span>{currentView === 'edit' ? 'Save' : 'Create'}</span>
-					{/if}
-				</button>
-			{/snippet}
-			<div class="card-system" style="position: relative;">
-				{@render automationsMainContent()}
-			</div>
-		</StudioEditorShell>
-	{:else if currentView === 'detail' && selectedAutomation}
-		<!-- Detail (run history) — full canvas; AutomationDetail renders its own header/back. -->
-		<div class="automations-card card-system" style="position: relative;">
-			{#if error}
-				<div class="auto-error-banner" transition:slide={{ duration: 200 }}>
-					<Banner severity="error" message={error} dismissible onDismiss={() => (error = '')} />
-				</div>
-			{/if}
-			<div class="auto-content">
-				<div class="auto-detail-center">
-				<AutomationDetail
-					automation={selectedAutomation}
-					profiles={profilesLoaded ? profiles : null}
-					{runs}
-					{runsLoading}
-					{expandedRunIds}
-					{detailStats}
-					onBack={() => currentView = 'list'}
-					onEdit={openEdit}
-					onPickAgent={pickAgent}
-					onTrigger={handleTrigger}
-					onDelete={handleDelete}
-					onToggleRunExpanded={toggleRunExpanded}
-					{formatTime}
-					{formatCost}
-					{formatDuration}
-					{getStatusColor}
-					{getRunStatusBadgeClass}
-					{triggerTypeLabel}
-				/>
-				</div>
-			</div>
-		</div>
-	{:else}
-		<!-- List — Studio-v2 surface (header + approval banners + run list) -->
-		{#if loading}
-			<div class="auto-loading">
-				<Loader2 size={32} class="animate-spin" />
-				<p>Loading automations...</p>
-			</div>
-		{:else}
-			<AutomationsStudio
-				{automations}
-				{pendingApprovals}
-				{profiles}
-				{loading}
-				{error}
-				{triggeringId}
-				onOpenCreate={openCreate}
-				onOpenDetail={openDetail}
-				onOpenEdit={openEdit}
-				onToggleEnabled={handleToggleEnabled}
-				onTrigger={handleTrigger}
-				onDelete={handleDelete}
-				onApprove={handleApprove}
-				onDeny={handleDeny}
-				onClearError={() => error = ''}
-				{formatCost}
-				{triggerTypeLabel}
-			/>
-		{/if}
-	{/if}
-{:else if mobile}
-	<div class="automations-card card-system mobile">
-		<!-- Tabs -->
-		<div class="auto-tabs">
-			<button
-				onclick={() => currentView = 'list'}
-				class="auto-tab"
-				class:active={currentView !== 'approvals'}
-			>
-				Automations
-				<span class="auto-tab-count" class:active={currentView !== 'approvals'}>
-					{automations.length}
-				</span>
-			</button>
-			<button
-				onclick={() => currentView = 'approvals'}
-				class="auto-tab"
-				class:active={currentView === 'approvals'}
-			>
-				Approvals
-				{#if approvalCount > 0}
-					<span class="auto-tab-count auto-approval-badge" class:active={currentView === 'approvals'}>
-						{approvalCount}
-					</span>
-				{/if}
-			</button>
-		</div>
-
-		<!-- Search and actions -->
-		<div class="auto-search-bar">
-			<div class="search-input-wrapper">
-				<Search size={16} class="search-icon" />
-				<input
-					type="text"
-					bind:value={searchQuery}
-					placeholder="Search automations..."
-					class="search-input"
-				/>
-			</div>
-			<button onclick={openCreate} class="add-auto-btn">
-				<Plus size={16} />
-				New
-			</button>
-		</div>
-
-		{@render automationsMainContent()}
-
-		<!-- Footer -->
-		<div class="auto-footer">
-			<div class="footer-stats">
-				{enabledCount} enabled / {runningCount} running
-			</div>
-		</div>
-	</div>
-{/if}
-
-<!-- Delete automation confirmation -->
-<ConfirmDialog
-	open={!!pendingDeleteId}
-	title="Delete automation"
-	message="Are you sure you want to delete this automation?"
-	confirmLabel="Delete"
-	danger
-	onConfirm={confirmDelete}
-	onCancel={() => (pendingDeleteId = null)}
-/>
-
-<style>
-	/* ═══════════════════ Layout ═══════════════════ */
-	.automations-card {
-		display: flex;
-		flex-direction: column;
-		height: 100%;
-		overflow: hidden;
-	}
-
-	/* ═══════════════════ Tabs ═══════════════════ */
-	.auto-tabs {
-		display: flex;
-		align-items: center;
-		gap: 4px;
-		padding: 8px 16px;
-		border-bottom: 1px solid var(--border);
-		background: var(--surface-1);
-		overflow-x: auto;
-		flex-shrink: 0;
-	}
-
-	.auto-tab {
-		padding: 6px 12px;
-		font-size: 0.8125rem;
-		font-weight: 500;
-		border-radius: calc(var(--radius, 0.75rem) * 0.5);
-		white-space: nowrap;
-		display: flex;
-		align-items: center;
-		gap: 6px;
-		color: var(--muted-foreground);
-		background: transparent;
-		border: 1px solid transparent;
-		cursor: pointer;
-		transition: all 150ms ease;
-	}
-
-	.auto-tab:hover {
-		color: var(--foreground);
-		border-color: var(--accent);
-		box-shadow: 0 0 8px color-mix(in oklch, var(--accent) 20%, transparent);
-	}
-
-	.auto-tab:focus-visible {
-		outline: 2px solid var(--ring);
-		outline-offset: 2px;
-	}
-
-	.auto-tab.active {
-		background: var(--selection-bg-emphasis);
-		color: var(--selection-text);
-		border-color: var(--selection-ring);
-		box-shadow: var(--selection-shadow);
-	}
-
-	.auto-tab-count {
-		padding: 1px 6px;
-		font-size: 0.6875rem;
-		border-radius: 9999px;
-		background: var(--muted);
-		color: var(--muted-foreground);
-	}
-
-	.auto-tab-count.active {
-		background: color-mix(in oklch, var(--selection) 20%, transparent);
-		color: var(--selection-text);
-	}
-
-	.auto-approval-badge {
-		background: color-mix(in oklch, var(--warning) 25%, transparent) !important;
-		color: var(--warning) !important;
-	}
-
-	/* ═══════════════════ Search Bar ═══════════════════ */
-	.auto-search-bar {
-		display: flex;
-		align-items: center;
-		gap: 12px;
-		padding: 12px 16px;
-		border-bottom: 1px solid var(--border);
-		flex-shrink: 0;
-	}
-
-	.search-input-wrapper {
-		position: relative;
-		flex: 1;
-	}
-
-	.search-input-wrapper :global(.search-icon) {
-		position: absolute;
-		left: 12px;
-		top: 50%;
-		transform: translateY(-50%);
-		color: var(--muted-foreground);
-	}
-
-	.search-input {
-		width: 100%;
-		padding: 8px 12px 8px 36px;
-		border-radius: calc(var(--radius, 0.75rem) * 0.5);
-		background: var(--input);
-		border: 1px solid var(--border);
-		color: var(--foreground);
-		font-size: 0.875rem;
-		transition: all 150ms ease;
-	}
-
-	.search-input::placeholder {
-		color: var(--muted-foreground);
-	}
-
-	.search-input:focus {
-		outline: none;
-		border-color: var(--ring);
-		box-shadow: 0 0 0 2px color-mix(in oklch, var(--ring) 25%, transparent);
-	}
-
-	.add-auto-btn {
-		display: flex;
-		align-items: center;
-		gap: 6px;
-		padding: 8px 12px;
-		font-size: 0.875rem;
-		font-weight: 500;
-		border-radius: calc(var(--radius, 0.75rem) * 0.5);
-		background: var(--primary);
-		color: var(--primary-foreground);
-		border: none;
-		cursor: pointer;
-		transition: all 150ms ease;
-		white-space: nowrap;
-	}
-
-	.add-auto-btn:hover {
-		filter: brightness(1.1);
-	}
-
-	.add-auto-btn:focus-visible {
-		outline: 2px solid var(--ring);
-		outline-offset: 2px;
-	}
-
-	/* ═══════════════════ Toast / Error ═══════════════════ */
-	.auto-banner {
-		margin: 0 16px;
-	}
-
-	.auto-error-banner {
-		margin: 12px 16px 0;
-	}
-
-	/* ═══════════════════ Content ═══════════════════ */
-	.auto-content {
-		flex: 1;
-		overflow-y: auto;
-	}
-
-	/* Centered detail (run history) — matches the list's max-width wrap, not full-bleed. */
-	.auto-detail-center {
-		width: 100%;
-		max-width: 1240px;
-		min-height: 100%;
-		margin: 0 auto;
-	}
-
-	.auto-loading {
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		justify-content: center;
-		padding: 48px;
-		color: var(--muted-foreground);
-		gap: 12px;
-	}
-
-	.auto-loading :global(svg) {
-		color: var(--primary);
-	}
-
-	/* ═══════════════════ Approvals View ═══════════════════ */
-	.auto-approvals {
-		display: flex;
-		flex-direction: column;
-		height: 100%;
-	}
-
-	.auto-approval-list {
-		flex: 1;
-		overflow-y: auto;
-		padding: 16px;
-		display: flex;
-		flex-direction: column;
-		gap: 10px;
-	}
-
-	.auto-approval-item {
-		display: flex;
-		align-items: flex-start;
-		gap: 12px;
-		padding: 14px 16px;
-		background: var(--surface-1);
-		border: 1px solid var(--border-subtle, var(--border));
-		border-radius: var(--radius-md, calc(var(--radius, 0.75rem) * 0.833));
-	}
-
-	.auto-approval-info {
-		flex: 1;
-		min-width: 0;
-		display: flex;
-		flex-direction: column;
-		gap: 4px;
-	}
-
-	.auto-approval-name {
-		font-size: var(--text-md, 0.875rem);
-		font-weight: 600;
-		color: var(--text-primary, var(--foreground));
-	}
-
-	.auto-approval-prompt {
-		font-size: var(--text-sm, 0.75rem);
-		color: var(--text-secondary, var(--muted-foreground));
-		display: -webkit-box;
-		-webkit-line-clamp: 3;
-		line-clamp: 3;
-		-webkit-box-orient: vertical;
-		overflow: hidden;
-		margin: 0;
-		line-height: 1.4;
-	}
-
-	.auto-approval-actions {
-		display: flex;
-		flex-direction: column;
-		gap: 6px;
-		flex-shrink: 0;
-	}
-
-	.auto-approval-btn {
-		padding: 6px 12px !important;
-		font-size: var(--text-sm, 0.75rem) !important;
-	}
-
-	/* ═══════════════════ Footer ═══════════════════ */
-	.auto-footer {
-		display: flex;
-		justify-content: flex-end;
-		align-items: center;
-		padding: 12px 16px;
-		border-top: 1px solid var(--border);
-		background: var(--surface-1);
-		flex-shrink: 0;
-	}
-
-	.footer-stats {
-		font-size: 0.75rem;
-		color: var(--muted-foreground);
-	}
-
-	/* ═══════════════════ Spinner ═══════════════════ */
-	:global(.animate-spin) {
-		animation: spin 1s linear infinite;
-	}
-
-	@keyframes spin {
-		from { transform: rotate(0deg); }
-		to { transform: rotate(360deg); }
-	}
-
-	/* ═══════════════════ Mobile ═══════════════════ */
-	.automations-card.mobile .auto-tabs {
-		padding: 6px 8px;
-		gap: 2px;
-		scrollbar-width: none;
-	}
-
-	.automations-card.mobile .auto-tabs::-webkit-scrollbar {
-		display: none;
-	}
-
-	.automations-card.mobile .auto-tab {
-		padding: 5px 8px;
-		font-size: 0.75rem;
-		gap: 4px;
-		flex-shrink: 0;
-	}
-
-	.automations-card.mobile .auto-tab-count {
-		font-size: 0.625rem;
-		padding: 0 4px;
-	}
-
-	.automations-card.mobile .auto-search-bar {
-		flex-wrap: wrap;
-		padding: 8px;
-		gap: 8px;
-	}
-
-	.automations-card.mobile .search-input-wrapper {
-		width: 100%;
-	}
-
-	.automations-card.mobile .add-auto-btn {
-		width: 100%;
-		justify-content: center;
-	}
-
-	@media (max-width: 639px) {
-		.auto-approval-item {
-			flex-direction: column;
-		}
-
-		.auto-approval-actions {
-			flex-direction: row;
-			width: 100%;
-		}
-
-		.auto-approval-btn {
-			flex: 1;
-		}
-	}
-
-</style>
+     {/snippet}
+    </DetailPane>
+   {:else if currentView === 'detail' && selectedAutomation}
+    {#if error}<InlineBanner tone="warn">{error}</InlineBanner>{/if}
+    <AutomationDetail automation={selectedAutomation} profiles={profilesLoaded ? profiles : null}
+     {runs} {runsLoading} {expandedRunIds} {detailStats} {triggeringId}
+     onBack={back} onEdit={openEdit} onPickAgent={pickAgent} onTrigger={handleTrigger}
+     onDelete={handleDelete} onToggleEnabled={handleToggleEnabled} onToggleRunExpanded={toggleRunExpanded}
+     {formatTime} {formatCost} {formatDuration} {getStatusColor} {getRunStatusBadgeClass} {triggerTypeLabel} />
+   {:else}
+    <EmptyDetail title={loading ? 'Loading automations…' : 'Choose an automation'}
+     message="Run AI tasks on a schedule or in response to events.">
+     <button type="button" class="st-btn primary" onclick={openCreate}><Plus size={14} />New automation</button>
+    </EmptyDetail>
+   {/if}
+  </ViewMain>
+ {/snippet}
+</ViewShell>
+<ConfirmDialog open={pendingDeleteId !== null} title="Delete automation?"
+ message="This automation and its run history will be permanently deleted. This cannot be undone."
+ confirmLabel="Delete" danger onConfirm={confirmDelete} onCancel={() => pendingDeleteId = null} />

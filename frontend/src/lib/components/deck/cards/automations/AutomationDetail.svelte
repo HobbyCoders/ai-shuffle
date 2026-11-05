@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { automationModelLabel, automationPermissionLabel, type Automation, type AutomationRun } from '$lib/api/automations';
-	import { fade, slide } from 'svelte/transition';
+	import { DetailPane, RowGroup, SettingRow, Switch, InlineBanner } from '$lib/components/layout/view';
+ import { CalendarClock } from 'lucide-svelte';
 	import {
 		ChevronLeft,
 		Pencil,
@@ -16,6 +17,8 @@
 	const RETIRED_AGENT_ID = 'builtin_assistant';
 
 	interface Props {
+ onToggleEnabled?: (automation: Automation) => void;
+ triggeringId?: string | null;
 		automation: Automation;
 		/** Every agent, or null while the list has not loaded (never guess "removed"). */
 		profiles?: Pick<Profile, 'id'>[] | null;
@@ -39,7 +42,7 @@
 	}
 
 	let {
-		automation,
+ onToggleEnabled, triggeringId = null,		automation,
 		profiles = null,
 		runs,
 		runsLoading,
@@ -69,326 +72,59 @@
 		if (total === 0) return 'N/A';
 		return `${Math.round((successful / total) * 100)}%`;
 	}
+
+ let tab = $state('overview');
 </script>
 
-<div class="auto-detail" transition:fade={{ duration: 150 }}>
-	<!-- Detail header -->
-	<div class="auto-detail-header">
-		<button class="card-back-btn" onclick={onBack} aria-label="Back to automations">
-			<ChevronLeft size={16} />
-		</button>
-		<div class="auto-detail-header-info">
-			<div class="auto-detail-name-row">
-				<span
-					class="auto-status-dot"
-					style="background: {getStatusColor(automation.status)}"
-				></span>
-				<h3 class="auto-detail-name">{automation.name}</h3>
-				{#each (automation.triggers || [{ type: automation.trigger_type }]) as trig}
-					<span class="card-badge card-badge--muted">{triggerTypeLabel(trig.type)}</span>
-				{/each}
-				<span
-					class="card-badge {automation.model_error ? 'card-badge--warning' : 'card-badge--muted'}"
-					data-testid="automation-model-badge"
-					title={automation.model_error || 'Model its runs use'}
-				>{automationModelLabel(automation)}</span>
-				<span
-					class="card-badge card-badge--muted"
-					data-testid="automation-permission-badge"
-					title="Permission mode its runs start in"
-				>{automationPermissionLabel(automation)}</span>
-				{#if !automation.is_enabled}
-					<span
-						class="card-badge card-badge--warning"
-						data-testid="automation-disabled-badge"
-						title="This automation does not run until it is enabled"
-					>Disabled</span>
-				{/if}
-			</div>
-			{#if automation.last_error}
-				<p class="auto-detail-desc auto-model-error" role="status">{automation.last_error}</p>
-			{/if}
-			{#if automation.model_error}
-				<p class="auto-detail-desc auto-model-error" role="alert">{automation.model_error}</p>
-			{/if}
-			{#if automation.description}
-				<p class="auto-detail-desc">{automation.description}</p>
-			{/if}
-		</div>
-		<div class="auto-detail-header-actions">
-			<button class="card-action-btn" title="Edit" onclick={() => onEdit(automation)}>
-				<Pencil size={16} />
-			</button>
-			<button class="card-action-btn" title="Trigger" onclick={() => onTrigger(automation.id)}>
-				<Play size={16} />
-			</button>
-			<button class="card-action-btn card-action-btn--destructive" title="Delete" onclick={() => onDelete(automation.id)}>
-				<Trash2 size={16} />
-			</button>
-		</div>
-		{#if agentMissing}
-			<!-- Its own header row (not inside the info column), so on a phone it spans
-			     the card instead of squeezing beside the edit/run/delete icons. -->
-			<div class="auto-agent-missing" data-testid="automation-agent-missing">
-				<p>
-					{automation.is_enabled
-						? 'Its agent was removed. Pick another agent so it can run.'
-						: 'Its agent was removed. Pick another agent to enable it.'}
-				</p>
-				<button type="button" class="auto-agent-pick" onclick={() => (onPickAgent ?? onEdit)(automation)}>Pick an agent</button>
-			</div>
-		{/if}
-	</div>
-
-	<!-- Stats summary -->
-	{#if detailStats}
-		<div class="auto-stats-row" transition:slide={{ duration: 150 }}>
-			<div class="auto-stat">
-				<span class="auto-stat-value">{detailStats.total_runs}</span>
-				<span class="auto-stat-label">Total Runs</span>
-			</div>
-			<div class="auto-stat">
-				<span class="auto-stat-value">{formatCost(detailStats.total_cost_usd)}</span>
-				<span class="auto-stat-label">Total Cost</span>
-			</div>
-			<div class="auto-stat">
-				<span class="auto-stat-value">{successRate(detailStats.total_runs, detailStats.successful_runs)}</span>
-				<span class="auto-stat-label">Success Rate</span>
-			</div>
-			<div class="auto-stat">
-				<span class="auto-stat-value">{detailStats.failed_runs}</span>
-				<span class="auto-stat-label">Failures</span>
-			</div>
-		</div>
-	{/if}
-
-	<!-- Pinned media generation choices: written as soon as they are picked or cleared. -->
-	<section class="auto-generation" aria-labelledby="auto-generation-{automation.id}" data-testid="automation-generation">
-		<h4 class="auto-generation-title" id="auto-generation-{automation.id}">Media generation</h4>
-		<AutomationJobChoices jobId={automation.id} mode="live" />
-	</section>
-
-	<!-- Action Steps -->
-	{#if automation.action_steps?.length}
-		<div class="card-form-section" style="padding: 12px 16px; border-bottom: 1px solid var(--border-subtle, var(--border));">
-			<span class="card-form-label">Action Steps</span>
-			{#each automation.action_steps as step, i}
-				<div class="auto-detail-row">
-					<span class="auto-detail-label">Step {i + 1}</span>
-					<span class="auto-detail-value">{step.action_id} on {step.connector_id}</span>
-				</div>
-			{/each}
-		</div>
-	{/if}
-
-	<!-- Runs table -->
-	<AutomationRunHistory
-		{runs}
-		{runsLoading}
-		{expandedRunIds}
-		{onToggleRunExpanded}
-		{formatTime}
-		{formatCost}
-		{formatDuration}
-		{getRunStatusBadgeClass}
-	/>
-</div>
-
-<style>
-	.auto-detail {
-		display: flex;
-		flex-direction: column;
-		height: 100%;
-	}
-
-	/* Grid: back | info | actions, then the removed-agent warning on a second row
-	   (under info + actions on wide screens, the full card width on a phone). */
-	.auto-detail-header {
-		display: grid;
-		grid-template-columns: auto minmax(0, 1fr) auto;
-		align-items: start;
-		gap: 8px;
-		padding: 12px 16px;
-		border-bottom: 1px solid var(--border-subtle, var(--border));
-		flex-shrink: 0;
-	}
-
-	.auto-detail-header-info {
-		min-width: 0;
-	}
-
-	/* Wraps: name + trigger + model + Disabled badges overflow a 390 px phone on one line. */
-	.auto-detail-name-row {
-		display: flex;
-		align-items: center;
-		flex-wrap: wrap;
-		gap: 6px 8px;
-	}
-
-	.auto-detail-name {
-		font-size: var(--text-lg, 1rem);
-		font-weight: 600;
-		color: var(--text-primary, var(--foreground));
-		margin: 0;
-		min-width: 0;
-		overflow-wrap: anywhere;
-	}
-
-	.auto-agent-missing {
-		grid-column: 2 / -1;
-		display: flex;
-		align-items: center;
-		flex-wrap: wrap;
-		gap: 6px 12px;
-		padding: 8px 10px;
-		border: 1px solid color-mix(in oklch, var(--warning) 40%, transparent);
-		border-left-width: 3px;
-		border-radius: var(--radius-sm, 6px);
-		background: color-mix(in oklch, var(--warning) 10%, transparent);
-	}
-
-	.auto-agent-missing p {
-		flex: 1 1 14rem;
-		margin: 0;
-		font-size: var(--text-sm, 0.75rem);
-		font-weight: 500;
-		color: var(--text-primary, var(--foreground));
-	}
-
-	.auto-agent-pick {
-		flex-shrink: 0;
-		padding: 5px 10px;
-		font: inherit;
-		font-size: var(--text-sm, 0.75rem);
-		font-weight: 600;
-		color: var(--text-primary, var(--foreground));
-		background: var(--card);
-		border: 1px solid var(--border);
-		border-radius: var(--radius-sm, 6px);
-		cursor: pointer;
-		transition: background-color 120ms ease, border-color 120ms ease;
-	}
-
-	.auto-agent-pick:hover {
-		background: var(--hover-overlay);
-		border-color: color-mix(in oklab, var(--warning) 55%, var(--border));
-	}
-
-	.auto-agent-pick:focus-visible {
-		outline: 2px solid var(--ring, var(--primary));
-		outline-offset: 2px;
-	}
-
-	.auto-agent-pick:active {
-		transform: translateY(1px);
-	}
-
-	.auto-detail-desc {
-		font-size: var(--text-sm, 0.75rem);
-		color: var(--text-secondary, var(--muted-foreground));
-		margin: 4px 0 0 0;
-	}
-
-	.auto-detail-desc.auto-model-error {
-		color: var(--destructive);
-		overflow-wrap: anywhere;
-	}
-
-	.auto-detail-header-actions {
-		display: flex;
-		gap: 2px;
-		flex-shrink: 0;
-	}
-
-	/* Stats row */
-	.auto-stats-row {
-		display: flex;
-		gap: 16px;
-		padding: 12px 16px;
-		border-bottom: 1px solid var(--border-subtle, var(--border));
-		background: var(--surface-1);
-		flex-shrink: 0;
-		flex-wrap: wrap;
-	}
-
-	.auto-stat {
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		gap: 2px;
-		flex: 1;
-		min-width: 60px;
-	}
-
-	.auto-stat-value {
-		font-size: var(--text-md, 0.875rem);
-		font-weight: 700;
-		color: var(--text-primary, var(--foreground));
-	}
-
-	.auto-stat-label {
-		font-size: var(--text-xs, 0.6875rem);
-		color: var(--text-tertiary, var(--muted-foreground));
-	}
-
-	.auto-generation {
-		display: grid;
-		gap: 8px;
-		padding: 14px 16px;
-		border-bottom: 1px solid var(--border-subtle, var(--border));
-		flex-shrink: 0;
-	}
-
-	.auto-generation-title {
-		margin: 0;
-		font-size: var(--text-md, 0.875rem);
-		font-weight: 600;
-		color: var(--text-primary, var(--foreground));
-	}
-
-	/* Detail rows */
-	.auto-detail-row {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		padding: 4px 0;
-		font-size: var(--text-sm, 0.75rem);
-	}
-
-	.auto-detail-label {
-		color: var(--text-secondary, var(--muted-foreground));
-		font-weight: 500;
-		min-width: 60px;
-	}
-
-	.auto-detail-value {
-		color: var(--text-primary, var(--foreground));
-		font-family: var(--card-font-mono, monospace);
-		font-size: var(--text-xs, 0.6875rem);
-	}
-
-	@media (max-width: 639px) {
-		.auto-stats-row {
-			gap: 8px;
-		}
-
-		.auto-agent-missing {
-			grid-column: 1 / -1;
-		}
-
-		.auto-agent-pick {
-			min-height: 44px;
-			padding: 0 14px;
-		}
-	}
-
-	@media (prefers-reduced-motion: reduce) {
-		.auto-agent-pick {
-			transition: none;
-		}
-
-		.auto-agent-pick:active {
-			transform: none;
-		}
-	}
-</style>
+<DetailPane name={automation.name} icon={CalendarClock} onBack={onBack} backLabel="Automations"
+ subtitle={automation.description || (automation.triggers || [{type:automation.trigger_type}]).map(t => triggerTypeLabel(t.type)).join(' · ')}
+ tab={tab} onTabChange={(value) => tab = value} tabs={[{id:'overview',label:'Overview'},{id:'runs',label:'Run history',count:detailStats?.total_runs ?? runs.length},{id:'generation',label:'Media generation'}]}>
+ {#snippet badges()}
+  {#if !automation.is_enabled}<span class="text-xs text-muted-foreground" data-testid="automation-disabled-badge" title="This automation does not run until it is enabled">Disabled</span>{/if}
+ {/snippet}
+ {#snippet primary()}
+  <button class="st-btn" title="Edit" onclick={() => onEdit(automation)}><Pencil size={14} />Edit</button>
+  <button class="st-btn" title="Trigger" aria-label="Trigger" disabled={triggeringId === automation.id} onclick={() => onTrigger(automation.id)}><Play size={14} />{triggeringId === automation.id ? 'Running…' : 'Run now'}</button>
+ {/snippet}
+ {#snippet banner()}
+  {#if automation.last_error}<p role="status"><InlineBanner tone="info">{automation.last_error}</InlineBanner></p>{/if}
+  {#if automation.model_error}<div role="alert"><InlineBanner tone="warn">{automation.model_error}</InlineBanner></div>{/if}
+  {#if agentMissing}
+   <div data-testid="automation-agent-missing"><InlineBanner tone="warn">
+    {automation.is_enabled ? 'Its agent was removed. Pick another agent so it can run.' : 'Its agent was removed. Pick another agent to enable it.'}
+    {#snippet actions()}<button class="st-btn" onclick={() => (onPickAgent ?? onEdit)(automation)}>Pick an agent</button>{/snippet}
+   </InlineBanner></div>
+  {/if}
+ {/snippet}
+ {#snippet children(current)}
+  {#if current === 'overview'}
+   <RowGroup title="Configuration">
+    <SettingRow label="Enabled" hint="Allow scheduled and event-driven runs.">
+     <Switch controlled label={automation.is_enabled ? 'Disable automation' : 'Enable automation'} checked={automation.is_enabled} disabled={!onToggleEnabled} onchange={() => onToggleEnabled?.(automation)} />
+    </SettingRow>
+    <SettingRow label="Reasoning model"><span data-testid="automation-model-badge" title={automation.model_error || 'Model its runs use'}>{automationModelLabel(automation)}</span></SettingRow>
+    <SettingRow label="Permissions"><span data-testid="automation-permission-badge" title="Permission mode its runs start in">{automationPermissionLabel(automation)}</span></SettingRow>
+    <SettingRow label="Last run"><span>{formatTime(automation.last_run_at)}</span></SettingRow>
+    <SettingRow label="Prompt">{#snippet expanded()}<p class="whitespace-pre-wrap text-sm">{automation.prompt || 'No prompt. This automation uses action steps.'}</p>{/snippet}</SettingRow>
+   </RowGroup>
+   {#if detailStats}
+    <RowGroup title="Run summary">
+     <SettingRow label="Total runs"><span>{detailStats.total_runs}</span></SettingRow>
+     <SettingRow label="Total cost"><span>{formatCost(detailStats.total_cost_usd)}</span></SettingRow>
+     <SettingRow label="Success rate"><span>{successRate(detailStats.total_runs,detailStats.successful_runs)}</span></SettingRow>
+     <SettingRow label="Failures"><span>{detailStats.failed_runs}</span></SettingRow>
+    </RowGroup>
+   {/if}
+   {#if automation.action_steps?.length}
+    <RowGroup title="Action steps">
+     {#each automation.action_steps as step, i}<SettingRow label="Step {i+1}" hint={step.type.replaceAll('_',' ')}><span>{step.action_id || step.prompt || step.url || (step.type === 'delay' ? `${step.seconds}s` : '')}{step.connector_id ? ` on ${step.connector_id}` : ''}</span></SettingRow>{/each}
+    </RowGroup>
+   {/if}
+   <RowGroup title="Danger zone" tone="danger"><SettingRow label="Delete automation" hint="Permanently removes this automation and its history."><button class="st-btn danger" title="Delete" onclick={() => onDelete(automation.id)}><Trash2 size={14} />Delete</button></SettingRow></RowGroup>
+  {:else if current === 'generation'}
+   <section aria-label="Media generation" data-testid="automation-generation"><RowGroup title="Media generation" bare><AutomationJobChoices jobId={automation.id} mode="live" /></RowGroup></section>
+  {:else}
+   <AutomationRunHistory {runs} {runsLoading} {expandedRunIds} {onToggleRunExpanded} {formatTime} {formatCost} {formatDuration} {getRunStatusBadgeClass} />
+  {/if}
+ {/snippet}
+</DetailPane>
