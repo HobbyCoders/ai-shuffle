@@ -873,8 +873,11 @@ async def test_a_rewind_that_is_rejected_does_not_touch_the_running_reply(monkey
 
 async def test_a_failing_rewind_still_lets_the_chat_go(monkeypatch):
     rewinding = _Rewinding(monkeypatch, pooled=False, rewind=MagicMock(side_effect=OSError("disk")))
-    with pytest.raises(OSError):
-        await rewinding.run()
+    response = await rewinding.run()
+    assert response.success is False
+    assert response.chat_rewound is False
+    assert response.messages_removed == 0
+    assert response.error == "Chat rewind failed: disk"
     admission.close(await admission.acquire("app-id"))
 
 
