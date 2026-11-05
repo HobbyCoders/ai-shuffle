@@ -1,7 +1,7 @@
 """Run the script rows of the smoke scenarios against one worker.
 
 The client is injected (``client.HttpWorkerClient`` for real runs, a fake in
-tests). Every session the run creates is archived in ``finally``, so a
+tests). Every session the run creates is settled in ``finally``, so a
 failure, the token cap or Ctrl+C still cleans up, and the result file is
 written in every case.
 
@@ -24,7 +24,7 @@ Desktop launch-token restrictions may require manually recorded evidence; never
 copy credentials. Record browser/owner rows separately and import the peer's
 result file before checking both. --rows creates diagnostic partial files that
 cannot satisfy the gate. Image-edit rows can incur provider charges. The runner
-stops/archives its sessions. HB3 proves catalog availability, not Swarm execution;
+stops/settles its sessions. HB3 proves catalog availability, not Swarm execution;
 row 9 proves a consumed peer-message receipt, not obedience or mid-turn timing.
 """
 from __future__ import annotations
