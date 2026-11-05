@@ -11,7 +11,7 @@
 		Folder, File as FileIcon, FileCode, FileText, FileImage, FileVideo, FileAudio,
 		FileArchive, FileSpreadsheet, Database, Settings, Package,
 		FolderPlus, Upload, Download, Trash2, Edit3, Home, Check, X, Loader2,
-		ServerOff, FolderX, RotateCw
+		ServerOff, FolderX, RotateCw, ChevronDown
 	} from 'lucide-svelte';
 	import { files, sortedFiles, breadcrumbs, type FileItem } from '$lib/stores/files.svelte';
 
@@ -24,6 +24,7 @@
 	import { TerminalSquare } from 'lucide-svelte';
 	let terminalDrawer: ReturnType<typeof FilesTerminalDrawer>;
 	let terminalBusy = $state(false);
+	let phone = $state(false);
 	const feature = getContext<FeaturePanelContext | undefined>(FEATURE_PANEL_CONTEXT);
 	let detailOpen = $state(false);
 	let preview = $state<FileItem | null>(null);
@@ -126,8 +127,13 @@
 	}
 
 	onMount(() => {
+		const query = window.matchMedia('(max-width: 600px)');
+		const update = () => { phone = query.matches; };
+		update();
+		query.addEventListener('change', update);
 		files.loadFiles();
 		loadWorkers();
+		return () => query.removeEventListener('change', update);
 	});
 
 	// Keep the tree's root list in sync with the worker and the hidden-files
@@ -311,27 +317,30 @@
 		</ViewPanel>
 	{/snippet}
 	{#snippet main(back)}
-		<DetailPane width="data" name={folderName} onBack={back} backLabel="Files">
+		{#snippet desktopActions()}
+			{#if workerId === null}<button class="st-btn touch" disabled={loading || !!loadError || terminalBusy} onclick={() => terminalDrawer.open(currentPath)} title="Open terminal in this folder on this worker"><TerminalSquare size={15} /><span>Open terminal here</span></button>{/if}
+			<button class="st-btn touch" onclick={openNewFolder} disabled={!!loadError}><FolderPlus size={15} /><span>New folder</span></button>
+			<button class="st-btn touch primary" onclick={triggerUpload} disabled={uploading || !!loadError}>{#if uploading}<Loader2 size={15} class="fs-spin" />{:else}<Upload size={15} />{/if}<span>{uploading ? `Uploading ${uploadProgress}%` : 'Upload'}</span></button>
+		{/snippet}
+		<DetailPane width="data" name={folderName} onBack={back} backLabel="Files" primary={phone ? undefined : desktopActions}>
 				{#snippet tile()}{/snippet}
 				{#snippet topStatus()}{/snippet}
 				{#snippet subtitle()}
-					<span>{selectedWorker.name}</span><span aria-hidden="true">·</span>
-					<nav class="fs-crumbs" aria-label="Breadcrumb">
+					<span>{selectedWorker.name}</span>
+					{#if currentPath}<span aria-hidden="true">·</span><nav class="fs-crumbs" aria-label="Breadcrumb">
 						{#each $breadcrumbs as crumb, i (crumb.path)}
 							{#if i > 0}<span aria-hidden="true">/</span>{/if}
 							<button class="st-btn touch ghost dense" aria-current={i === $breadcrumbs.length - 1 ? 'page' : undefined} title={crumb.path || 'Workspace'} onclick={() => navigate(crumb.path)}>{crumb.name}</button>
 						{/each}
-					</nav>
+					</nav>{/if}
 				{/snippet}
-				{#snippet primary()}
-					{#if workerId === null}
-						<button class="st-btn touch" disabled={loading || !!loadError || terminalBusy} onclick={() => terminalDrawer.open(currentPath)} title="Open terminal in this folder on this worker"><TerminalSquare size={15} /><span>Open terminal here</span></button>
-					{/if}
-					<button class="st-btn touch" onclick={openNewFolder} disabled={!!loadError}><FolderPlus size={15} /><span>New folder</span></button>
-					<button class="st-btn touch primary" onclick={triggerUpload} disabled={uploading || !!loadError}>
-						{#if uploading}<Loader2 size={15} class="fs-spin" />{:else}<Upload size={15} />{/if}<span>{uploading ? `Uploading ${uploadProgress}%` : 'Upload'}</span>
-					</button>
-				{/snippet}
+				{#if phone}
+					<div class="fs-phone-actions">
+						<button class="st-btn touch primary" onclick={triggerUpload} disabled={uploading || !!loadError}>{#if uploading}<Loader2 size={15} class="fs-spin" />{:else}<Upload size={15} />{/if}<span>{uploading ? `Uploading ${uploadProgress}%` : 'Upload'}</span></button>
+						<button class="st-btn touch" onclick={openNewFolder} disabled={!!loadError}><FolderPlus size={15} /><span>New folder</span></button>
+						{#if workerId === null}<details class="fs-more"><summary class="st-btn touch" aria-label="More file actions">More<ChevronDown size={14} /></summary><div class="fs-more-menu"><button class="st-btn touch" disabled={loading || !!loadError || terminalBusy} onclick={(e) => { e.currentTarget.closest('details')?.removeAttribute('open'); terminalDrawer.open(currentPath); }}>Open terminal here</button></div></details>{/if}
+					</div>
+				{/if}
 				{#if showNewFolder}
 					<form class="fs-newfolder" onsubmit={(e) => { e.preventDefault(); confirmNewFolder(); }}>
 						<FolderPlus size={16} />
@@ -345,18 +354,18 @@
 					<div class="fs-bulkbar" role="region" aria-label="Selected files">
 						<span>{selectedCount} selected</span>
 						<button class="st-btn touch" onclick={() => files.clearSelection()}>Clear</button>
-						<button class="st-btn touch danger" onclick={() => pendingBulkDelete = true}><Trash2 size={14} /><span>Delete selected</span></button>
+						<button class="st-btn touch danger" onclick={() => pendingBulkDelete = true}>Delete selected</button>
 					</div>
 				{/if}
 				{#if error}<div role="alert"><InlineBanner tone="info">{error}{#snippet actions()}<button class="st-btn touch dense" aria-label="Dismiss error" onclick={() => files.clearError()}><X size={14} /></button>{/snippet}</InlineBanner></div>{/if}
 				{#if preview}
 					{#key `${workerId}:${preview.path}`}<FilesPreview item={preview} base={files.base()} onClose={() => preview = null} />{/key}
 				{/if}
-				<div class="fs-main" class:drag={isDragging} role="region" aria-label="File list" aria-busy={loading}
+				<div class="fs-main st-card" class:drag={isDragging} role="region" aria-label="File list" aria-busy={loading}
 					ondragover={onDragOver} ondragleave={onDragLeave} ondrop={onDrop}>
 					<div class="fs-row fs-row--head" aria-hidden={!!loadError || ($sortedFiles.length === 0)}>
 						<Checkbox isolate label="Select all" checked={allSelected} indeterminate={selectedCount > 0 && !allSelected} onchange={onHeaderSelectAll} disabled={loading || !!loadError || !$sortedFiles.length} />
-						<span>Name</span><span class="fs-sz">Size</span><span class="fs-md">Modified</span><span></span>
+						<span class="fs-nm">Name</span><span class="fs-sz">Size</span><span class="fs-md">Modified</span><span class="fs-actions-head"></span>
 					</div>
 					{#if loadError && workerOffline}
 						<div role="alert"><EmptyDetail title="{selectedWorker.name} is offline" message="{loadError} Its files will show here once it reconnects." icon={ServerOff}>
@@ -404,6 +413,11 @@
 						{/if}
 					{#if isDragging}<div class="fs-droplay"><Upload size={26} /><span>Drop files to upload</span></div>{/if}
 				</div>
+				{#if !loading && !loadError && $sortedFiles.length}
+					{@const folders = $sortedFiles.filter(item => item.type === 'directory').length}
+					{@const countFiles = $sortedFiles.length - folders}
+					<div class="fs-footer">{[folders ? `${folders} ${folders === 1 ? 'folder' : 'folders'}` : '', countFiles ? `${countFiles} ${countFiles === 1 ? 'file' : 'files'}` : ''].filter(Boolean).join(', ')}</div>
+				{/if}
 			</DetailPane>
 	{/snippet}
 </ViewShell>
@@ -419,17 +433,28 @@
 	.fs-crumbs { display: flex; gap: 2px; align-items: center; flex-wrap: wrap; min-width: 0; }
 	.fs-crumbs button { max-width: 240px; overflow: hidden; text-overflow: ellipsis; display: block; }
 	.fs-crumbs button[aria-current] { color: var(--st-fg); }
-	.fs-main { position: relative; min-width: 0; border-top: 1px solid var(--st-border); }
-	.fs-row { display: grid; grid-template-columns: 32px minmax(0, 1fr) 80px 90px 132px; gap: 12px; align-items: center; min-height: 44px; border-bottom: 1px solid var(--st-border); font-size: 13px; cursor: pointer; --ram-reveal: 0; --ram-touch-size: 44px; }
+	.fs-main { position: relative; min-width: 0; padding: 0 16px 16px; }
+	.fs-footer { padding-top: 12px; color: var(--st-mfg); font-size: 12px; }
+	.fs-phone-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)) auto; gap: 8px; align-items: center; margin-bottom: 20px; }
+	.fs-phone-actions > button { flex: 1 1 0; min-width: 0; padding-inline: 8px; min-height: 44px; }
+	.fs-more { position: relative; flex: none; }
+	.fs-more summary { list-style: none; cursor: pointer; min-width: 44px; min-height: 44px; padding-inline: 0; gap: 2px; font-size: 12px; }
+	.fs-more summary::-webkit-details-marker { display: none; }
+	.fs-more summary::before { display: none !important; }
+	.fs-more-menu { position: absolute; top: calc(100% + 4px); right: 0; z-index: 20; padding: 8px; min-width: max-content; border: 1px solid var(--st-border); border-radius: var(--st-radius-md); background: var(--st-popover); box-shadow: var(--st-shadow); }
+	.fs-row { display: grid; grid-template-columns: 32px minmax(0, 1fr) 132px 80px 100px; grid-template-areas: "select name actions size modified"; gap: 12px; align-items: center; min-height: 44px; border-bottom: 1px solid var(--st-border); font-size: 13px; cursor: pointer; --ram-reveal: 0; --ram-touch-size: 44px; }
 	.fs-row:hover, .fs-row:focus-within { background: var(--st-hover); --ram-reveal: 1; }
 	.fs-row.selected { background: var(--st-accent); }
-	.fs-row--head { color: var(--st-fg); cursor: default; font-size: 12px; }
+	.fs-row--head { color: var(--st-mfg); cursor: default; font-size: 12px; }
 	.fs-row--head:hover { background: transparent; }
-	.fs-nm { display: flex; align-items: center; gap: 10px; min-width: 0; }
+	.fs-row > :global(:first-child) { grid-area: select; }
+	.fs-row > :global(.ram), .fs-actions-head { grid-area: actions; }
+	.fs-nm { grid-area: name; display: flex; align-items: center; gap: 10px; min-width: 0; }
 	.fs-nm :global(svg) { color: currentColor; flex: none; }
 	.fs-nm-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 	.fs-sz, .fs-md { color: var(--st-mfg); font-variant-numeric: tabular-nums; white-space: nowrap; }
-	.fs-sz { text-align: right; }
+	.fs-sz { grid-area: size; text-align: right; }
+	.fs-md { grid-area: modified; padding-left: 12px; text-align: right; }
 	.fs-newfolder, .fs-rename, .fs-bulkbar { display: flex; gap: 8px; align-items: center; padding: 12px 0; flex-wrap: wrap; }
 	.fs-newfolder input, .fs-rename input { flex: 1; min-width: 100px; height: 32px; border: 1px solid var(--st-input); border-radius: var(--st-radius-md); background: var(--st-field); color: var(--st-fg); padding: 0 10px; font-size: 13px; }
 	.fs-bulkbar { font-size: 13px; font-variant-numeric: tabular-nums; }
@@ -437,7 +462,7 @@
 	.fs-droplay { position: absolute; inset: 0; display: flex; justify-content: center; align-items: center; gap: 12px; min-height: 160px; background: var(--st-card); border: 1px dashed var(--st-border-strong); pointer-events: none; }
 	:global(.fs-spin) { animation: fs-spin 1s linear infinite; }
 	@keyframes fs-spin { to { transform: rotate(360deg); } }
-	@container settings (max-width: 850px) { .fs-row { grid-template-columns: 32px minmax(0, 1fr) 64px 80px 132px; gap: 8px; } }
-	@media (max-width: 600px), (pointer: coarse) { .fs-root { min-height: 44px; } .fs-row { grid-template-columns: 44px minmax(0, 1fr) 56px 44px; gap: 6px; min-height: 52px; } .fs-md { display: none; } .fs-crumbs button { max-width: 180px; } .fs-newfolder input, .fs-rename input { height: 44px; font-size: 16px; } }
+	@container settings (max-width: 850px) { .fs-row { grid-template-columns: 32px minmax(0, 1fr) 112px 64px 100px; gap: 8px; } }
+	@media (max-width: 600px), (pointer: coarse) { .fs-root { min-height: 44px; } .fs-row { grid-template-columns: 32px minmax(0, 1fr) 44px 44px; grid-template-areas: "select name size actions"; gap: 6px; min-height: 52px; } .fs-md { display: none; } .fs-crumbs button { max-width: 180px; } .fs-newfolder input, .fs-rename input { height: 44px; font-size: 16px; } }
 	@media (prefers-reduced-motion: reduce) { :global(.fs-spin) { animation: none; } }
 </style>

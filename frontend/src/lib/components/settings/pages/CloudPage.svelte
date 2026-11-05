@@ -123,21 +123,14 @@
 
 <PreferencePage category="cloud">
 	<section class="cl-ladder" aria-label="What AI Shuffle Cloud adds" aria-busy={load === 'loading'} data-testid="cloud-tiers">
-		<ol>
-			{#each tiers as t, i (t.id)}
-				<li
-					class="cl-tier"
-					class:current={t.id === currentTier}
-					class:reached={tierIndex >= 0 && i < tierIndex}
-					aria-current={t.id === currentTier ? 'true' : undefined}
-				>
-					<span class="cl-name">{t.name}</span>
-					<span class="cl-fig"><b>{t.figure}</b><span>{t.unit}</span></span>
-					{#if t.id === currentTier}<span class="cl-here">You are here</span>{/if}
-				</li>
+		<div class="st-card">
+			{#each tiers as t (t.id)}
+				<SettingRow label={t.name} hint={`${t.figure} · ${t.unit}`}>
+					{#if t.id === currentTier}<span class="cl-here" aria-current="true">You are here</span>{/if}
+				</SettingRow>
 			{/each}
-		</ol>
-		<div class="cl-foot">
+		</div>
+		<div class="cl-foot st-footnote">
 			<p class="cl-msg" data-testid="cloud-message">
 				{status?.message ?? 'Everything on your own machines and network is free.'}
 			</p>
@@ -155,7 +148,7 @@
 			</SettingRow>
 		{/if}
 	</RowGroup>
-	<p class="cloud-follows" data-testid="cloud-follows">
+	<p class="st-footnote" data-testid="cloud-follows">
 		Your plan follows the Cloud account you sign in with. Sign in with the same account on another worker and it gets the same plan.
 	</p>
 
@@ -192,168 +185,9 @@
 </PreferencePage>
 
 <style>
- :global(.settings-shell .st-grp):has(+ .cloud-follows) { margin-bottom: 0; }
- .cloud-follows { font-size: 13px; color: var(--st-mfg); line-height: 1.45; margin: 12px 0 20px; }
-	/* The tier ladder: three steps, the current one lifted out of the row. */
-	.cl-ladder {
-		container-type: inline-size;
-		margin-bottom: 28px;
-	}
-	ol {
-		list-style: none;
-		margin: 0;
-		padding: 0;
-		display: grid;
-		grid-template-columns: repeat(3, minmax(0, 1fr));
-		border: 1px solid var(--st-border);
-		border-radius: var(--st-radius);
-		background: var(--st-card);
-	}
-	.cl-tier {
-		position: relative;
-		display: grid;
-		align-content: start;
-		gap: 6px;
-		padding: 14px 16px 16px;
-		min-width: 0;
-		color: var(--st-mfg);
-		transition:
-			background-color 0.25s ease-out,
-			color 0.25s ease-out;
-	}
-	.cl-tier + .cl-tier {
-		border-left: 1px solid var(--st-border);
-	}
-	.cl-tier::before {
-		/* the progress rail along the top edge */
-		content: '';
-		position: absolute;
-		inset: -1px 0 auto;
-		height: 3px;
-		background: transparent;
-		transition: background-color 0.25s ease-out;
-	}
-	.cl-tier:first-child::before {
-		border-top-left-radius: var(--st-radius);
-	}
-	.cl-tier:last-child::before {
-		border-top-right-radius: var(--st-radius);
-	}
-	.cl-tier.reached::before {
-		background: var(--st-border-strong);
-	}
-	.cl-tier.current {
-		background: var(--st-accent);
-		color: var(--st-fg);
-	}
-	.cl-tier.current::before {
-		background: var(--st-border-strong);
-	}
-	.cl-name {
-		font-size: 12px;
-		font-weight: 500;
-
-	}
-	.cl-fig {
-		display: flex;
-		flex-wrap: wrap;
-		align-items: baseline;
-		gap: 2px 7px;
-		min-width: 0;
-	}
-	.cl-fig b {
-		font-size: 26px;
-		line-height: 1;
-		font-weight: 600;
-		letter-spacing: -0.02em;
-		color: var(--st-fg);
-		font-variant-numeric: tabular-nums;
-	}
-	.cl-tier:not(.current) .cl-fig b {
-		color: var(--st-mfg);
-	}
-	.cl-fig span {
-		font-size: 12.5px;
-		line-height: 1.3;
-	}
-	.cl-here {
-		justify-self: start;
-		font-size: 11px;
-		font-weight: 500;
-		padding: 2px 7px;
-		border-radius: 999px;
-		color: var(--st-mfg);
-		border: 1px solid var(--st-border-strong);
-		animation: cl-in 0.3s ease-out;
-	}
-	.cl-foot {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: 12px;
-		margin-top: 10px;
-	}
-	.cl-msg {
-		margin: 0;
-		font-size: 13px;
-		color: var(--st-mfg);
-		min-width: 0;
-	}
-	@keyframes cl-in {
-		from {
-			opacity: 0;
-			transform: translateY(2px);
-		}
-	}
-	@media (prefers-reduced-motion: reduce) {
-		.cl-tier,
-		.cl-tier::before {
-			transition: none;
-		}
-		.cl-here {
-			animation: none;
-		}
-	}
-	/* Narrow (phone): the steps stack, rail on the left. */
-	@container (max-width: 480px) {
-		ol {
-			grid-template-columns: minmax(0, 1fr);
-		}
-		.cl-tier {
-			grid-template-columns: minmax(0, 1fr) auto;
-			align-items: center;
-			padding: 12px 14px;
-		}
-		.cl-tier .cl-name {
-			grid-column: 1;
-		}
-		.cl-tier .cl-fig {
-			grid-column: 1;
-		}
-		.cl-tier .cl-here {
-			grid-column: 2;
-			grid-row: 1 / span 2;
-			align-self: center;
-		}
-		.cl-tier + .cl-tier {
-			border-left: 0;
-			border-top: 1px solid var(--st-border);
-		}
-		.cl-tier::before {
-			inset: 0 auto 0 -1px;
-			width: 3px;
-			height: auto;
-		}
-		.cl-tier:first-child::before {
-			border-radius: var(--st-radius) 0 0 0;
-		}
-		.cl-tier:last-child::before {
-			border-radius: 0 0 0 var(--st-radius);
-		}
-		.cl-foot {
-			flex-direction: column;
-			align-items: flex-start;
-			gap: 6px;
-		}
-	}
+	.cl-ladder { margin: 0; }
+	.cl-here { font-size: 12px; padding: 2px 8px; border: 1px solid var(--st-border-strong); border-radius: 999px; color: var(--st-mfg); white-space: nowrap; }
+	.cl-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+	.cl-msg { margin: 0; min-width: 0; }
+	@media (max-width: 600px) { .cl-foot { flex-direction: column; align-items: flex-start; gap: 6px; } }
 </style>

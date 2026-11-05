@@ -201,6 +201,7 @@ describe('SessionTitleMenu', () => {
 			expect(sheet.parentElement?.parentElement).toBe(document.body);
 			expect(sheet.textContent).toContain('AI Shuffle');
 			expect(sheet.textContent).toContain(longTitle);
+			expect(screen.getByRole('button', { name: 'Delete' }).querySelector('svg')).toBeNull();
 			for (const name of ['Rename session', 'Fork session', 'Delete']) {
 				expect(screen.getByRole('button', { name })).toBeTruthy();
 			}

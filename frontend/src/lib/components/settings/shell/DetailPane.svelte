@@ -133,6 +133,7 @@
 				)
 	);
 	const showTabs = $derived(tabList.length > 1);
+	const hasIdentity = $derived(Boolean(tile || glyph || (identity && icon)));
 	const catLabel = $derived(backLabel ?? categoryById(cat).label);
 
 	function selectTab(t: string) {
@@ -147,8 +148,8 @@
 			{#if topStatus}{@render topStatus()}{:else}<SavedTick />{/if}
 		</BackRow>
 	{/if}
-	<div class="st-dh" class:has-identity={!!tile || identity || !!glyph}>
-		{#if tile}{@render tile()}{:else if identity || glyph}<Tile size="lg" {icon} text={glyph} status={statusText ? undefined : status} ring="bg" />{/if}
+	<div class="st-dh">
+		<div class="st-identity">{#if tile}{@render tile()}{:else if hasIdentity}<Tile size="lg" {icon} text={glyph} status={statusText ? undefined : status} ring="bg" />{/if}</div>
 		<div class="st-dh-main">
 			<div class="st-dhn">
 				{#if heading}{@render heading()}{:else}<h2 tabindex="-1" data-settings-heading="detail">{name}</h2>{/if}
@@ -206,12 +207,18 @@
 	.st-dwrap.data { max-width: calc(var(--st-data-width) + 2 * var(--st-gutter)); }
 	.st-dh {
 		display: grid;
-		grid-template-columns: minmax(0, 1fr) auto;
+		grid-template-columns: minmax(0, 1fr);
 		gap: 14px;
 		align-items: center;
 		padding: 0 0 18px;
 	}
-	.st-dh.has-identity { grid-template-columns: auto minmax(0, 1fr) auto; }
+	/* Empty tile snippets are truthy functions. Count actual identity elements,
+	   not the empty text/comment placeholders Svelte emits for those snippets. */
+	.st-identity { display: contents; }
+	.st-identity:not(:has(> :global(*))) { display: none; }
+	.st-dh:has(> .st-dha) { grid-template-columns: minmax(0, 1fr) auto; }
+	.st-dh:global(:has(> .st-identity > *)) { grid-template-columns: auto minmax(0, 1fr); }
+	.st-dh:global(:has(> .st-identity > *)):has(> .st-dha) { grid-template-columns: auto minmax(0, 1fr) auto; }
 	/* The host bar names content-first pages on phone. Keep their semantic
 	   heading, but do not repeat that title in the shared detail header. */
 	:global(.view-shell[data-stacked][data-content-first]) .st-dh { padding-top: 12px; }

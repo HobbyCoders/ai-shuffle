@@ -4,6 +4,7 @@ import { createRawSnippet } from 'svelte';
 import { settingsNav } from '$lib/settings/navigation.svelte';
 import { SETTINGS_ACCESS_CONTEXT } from '$lib/settings/access.svelte';
 import DetailPane from './DetailPane.svelte';
+import EmptyIdentityFixture from '../../../../../tests/EmptyIdentityFixture.svelte';
 
 // Raw snippets render once; the tab state is asserted on the tabs and the store.
 const body = createRawSnippet((tab: () => string | null) => ({
@@ -11,13 +12,37 @@ const body = createRawSnippet((tab: () => string | null) => ({
 }));
 
 beforeEach(() => {
+	vi.stubGlobal('matchMedia', () => ({ matches: false, addEventListener() {}, removeEventListener() {} }));
+	vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
 	settingsNav.reset();
 	settingsNav.selectCategory('providers');
 	settingsNav.selectItem('c-sub');
 });
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 describe('DetailPane', () => {
+ it('removes the identity grid column when leaving a custom avatar for an anonymous header', async () => {
+  const tile = createRawSnippet(() => ({ render: () => '<span data-testid="avatar">AV</span>' }));
+  const view = render(DetailPane, { name: 'Agent', tile, contentFirst: true });
+  expect(view.container.querySelector('.st-dh:has(> .st-identity > *)')).toBeTruthy();
+  expect(screen.getByTestId('avatar')).toBeTruthy();
+  await view.rerender({ name: 'Workspace', tile: undefined });
+  expect(view.container.querySelector('.st-dh:has(> .st-identity > *)')).toBeNull();
+  expect(screen.queryByTestId('avatar')).toBeNull();
+ });
+ it('does not treat an intentionally empty tile snippet as identity art', () => {
+  const view = render(EmptyIdentityFixture);
+  expect(view.container.querySelector('.st-identity')?.children.length).toBe(0);
+  expect(view.container.querySelector('.st-dh:has(> .st-identity > *)')).toBeNull();
+ });
+ it('does not reserve an identity column without identity art, and preserves a provider glyph', async () => {
+  const view = render(DetailPane, { name: 'Workspace', identity: true, contentFirst: true });
+  expect(view.container.querySelector('.st-dh:has(> .st-identity > *)')).toBeNull();
+  expect(view.container.querySelector('.st-tile')).toBeNull();
+  await view.rerender({ name: 'Provider', identity: false, glyph: 'C' });
+  expect(view.container.querySelector('.st-dh:has(> .st-identity > *)')).toBeTruthy();
+  expect(view.container.querySelector('.st-tile')?.textContent?.trim()).toBe('C');
+ });
  it('omits the entire Back row for content-first pages, not just its button', () => {
   const { container } = render(DetailPane, { name: 'Stats', contentFirst: true });
   expect(container.querySelector('.st-back-row')).toBeNull();

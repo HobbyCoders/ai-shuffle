@@ -56,7 +56,7 @@
 		/** Monospace name (log messages, ids). */
 		mono?: boolean;
 		/** `log`: a bare status dot instead of a tile, tighter row. `pinned`: tinted, outlined row (a pinned item such as the personal assistant). `value`: a 56px settings row, name left, summary right, then a chevron. */
-		variant?: 'default' | 'log' | 'pinned' | 'value' | 'plain';
+		variant?: 'default' | 'log' | 'pinned' | 'value' | 'plain' | 'card';
 		/** Replaces the tile. */
 		lead?: Snippet;
 		/** Chips after the name (Draft, Modified). */
@@ -101,6 +101,7 @@
 	class:log={variant === 'log'}
 	class:pinned={variant === 'pinned'}
 	class:value={variant === 'value'}
+	class:card={variant === 'card'}
 	class:plain={variant === 'plain'}
 	class:navigation={(rowKind ?? (variant === 'plain' ? 'navigation' : 'item')) === 'navigation'}
 	class:has-lead={hasLead}
@@ -134,7 +135,7 @@
 		{/if}
 		{#if summary}<span class="sm">{summary}</span>{/if}
 	</span>
-	{#if meta}<span class="meta">{meta}</span>{:else}<span></span>{/if}
+	<span class="trailing">{#if meta}<span class="meta">{meta}</span>{/if}{#if variant === 'card'}<ChevronRight class="chev" aria-hidden="true" />{/if}</span>
 	{/if}
 </button>
 
@@ -170,6 +171,13 @@
 	.st-it:disabled { opacity: .45; cursor: not-allowed; }
 	@media (max-width: 600px), (pointer: coarse) { .st-it.navigation { min-height: 44px; } }
 	.st-it.log:not(.navigation) { min-height: 48px; }
+	/* Opt-in settings collection row: same inset, divider and rhythm as value rows. */
+	.st-it.card { min-height: 56px; padding: 10px 16px; border-radius: 0; }
+	.st-it.card + :global(.st-it.card) { border-top: 1px solid var(--st-border); }
+	.st-it.card .nm { font-size: 14px; }
+	.st-it.card .sm { font-size: 13px; }
+	.st-it.card .trailing { display: flex; align-items: center; gap: 12px; }
+	.st-it.card :global(.chev) { width: 16px; height: 16px; color: var(--st-subtle); }
 	.st-it.value {
 		grid-template-columns: minmax(auto, 40%) minmax(0, 1fr) 16px;
 		gap: 12px;
@@ -236,7 +244,7 @@
 		overflow: hidden;
 		text-overflow: ellipsis;
 	}
-	@media (max-width: 600px) { .st-it:not(.value) { padding-inline: 0; } .nm, .st-it.navigation .nm { font-size: 15px; } }
+	@media (max-width: 600px) { .st-it:not(.value):not(.card) { padding-inline: 0; } .st-it.card .nm { font-size: 15px; } .nm, .st-it.navigation .nm { font-size: 15px; } }
 	.nm.st-mono {
 		font-weight: 400;
 		font-size: 12px;
