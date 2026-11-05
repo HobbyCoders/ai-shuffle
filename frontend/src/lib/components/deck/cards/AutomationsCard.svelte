@@ -479,6 +479,9 @@
 				await enableAutomation(automation.id);
 			}
 			await loadData();
+			if (selectedAutomation?.id === automation.id) {
+				selectedAutomation = automations.find((item) => item.id === automation.id) ?? selectedAutomation;
+			}
 		} catch (e: any) {
 			error = e.detail || 'Failed to toggle automation';
 		}

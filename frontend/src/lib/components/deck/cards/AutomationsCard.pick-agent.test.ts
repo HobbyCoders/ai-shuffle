@@ -72,6 +72,18 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 describe.each([1280, 390])('list errors at %ipx', (width) => {
+	it('refreshes the detail switch from the server after enabling', async () => {
+		vi.stubGlobal('innerWidth', width);
+		automationsApi.getAutomations.mockResolvedValueOnce([orphan])
+			.mockResolvedValue([{ ...orphan, is_enabled: true }]);
+		automationsApi.enableAutomation.mockResolvedValue({ ...orphan, is_enabled: true });
+		render(AutomationsCard, { props: { mobile: false } });
+		await fireEvent.click(await screen.findByText('Nightly digest'));
+		await fireEvent.click(await screen.findByRole('switch', { name: 'Enable automation' }));
+		expect(await screen.findByRole('switch', { name: 'Disable automation' })).toHaveAttribute('aria-checked', 'true');
+		expect(automationsApi.enableAutomation).toHaveBeenCalledWith('a1');
+	});
+
 	it.each(['edit', 'create'])('clears the refused-enable error when opening %s', async (destination) => {
 		vi.stubGlobal('innerWidth', width);
 		automationsApi.getAutomations.mockResolvedValue([{ ...orphan, profile_id: null }]);
