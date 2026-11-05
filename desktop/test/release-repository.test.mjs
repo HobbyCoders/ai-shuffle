@@ -25,6 +25,8 @@ for (const [name, failure] of [
  ['fetch transport timeout', connectTimeout],
  ['headers timeout', () => new TypeError('fetch failed', { cause: { code: 'UND_ERR_HEADERS_TIMEOUT' } })],
  ['body timeout', () => new TypeError('terminated', { cause: { code: 'UND_ERR_BODY_TIMEOUT' } })],
+ ...['UND_ERR_SOCKET', 'ECONNRESET', 'EPIPE', 'UND_ERR_CLOSED'].map(code =>
+  [code, () => new TypeError('fetch failed', { cause: { code } })]),
 ]) {
  test(`repository identity recovers after ${name}`, async t => {
   const { calls, waits } = retryFixture(t, [failure(), identity()]);
@@ -64,6 +66,12 @@ for (const [name, failure, message] of [
  ['malformed JSON', () => new Response('not json'), /JSON/],
  ['authentication error', () => new Error('authentication failed'), /authentication failed/],
  ['connection refused', () => new TypeError('fetch failed', { cause: { code: 'ECONNREFUSED' } }), /fetch failed/],
+ ['DNS failure', () => new TypeError('fetch failed', { cause: { code: 'ENOTFOUND' } }), /fetch failed/],
+ ['certificate error', () => new TypeError('fetch failed', { cause: { code: 'CERT_HAS_EXPIRED' } }), /fetch failed/],
+ ['unclassified fetch failure', () => new TypeError('fetch failed'), /fetch failed/],
+ ['unclassified body termination', () => new TypeError('terminated'), /terminated/],
+ ['body termination with refused connection', () => new TypeError('terminated', { cause: { code: 'ECONNREFUSED' } }), /terminated/],
+ ['non-fetch socket error', () => new Error('socket bug', { cause: { code: 'UND_ERR_SOCKET' } }), /socket bug/],
 ]) {
  test(`repository identity does not retry ${name}`, async t => {
   const { calls, waits } = retryFixture(t, [failure()]);
@@ -81,6 +89,21 @@ test('repository identity retries a timeout while reading the response body', as
  assert.equal(calls.length, 2);
  assert.deepEqual(waits, [1000]);
 });
+
+for (const failures of [1, 3]) {
+ test(`repository identity body socket close: ${failures === 1 ? 'recovers' : 'fails closed'}`, async t => {
+  const error = new TypeError('terminated', { cause: { code: 'UND_ERR_SOCKET' } });
+  const partial = { status: 200, json: async () => { throw error; } };
+  const { calls, waits } = retryFixture(t, [...Array(failures).fill(partial), identity()]);
+  if (failures === 1) {
+   assert.deepEqual(await releaseRepository('fixture', pinned), { repository: 'HobbyCoders/ai-shuffle', id: 42 });
+  } else {
+   await assert.rejects(releaseRepository('fixture', pinned), failure => failure === error);
+  }
+  assert.equal(calls.length, failures === 1 ? 2 : 3);
+  assert.deepEqual(waits, failures === 1 ? [1000] : [1000, 2000]);
+ });
+}
 
 test('repository identity still validates the successful retry response', async t => {
  const { calls, waits } = retryFixture(t, [new Response(null, { status: 503 }),

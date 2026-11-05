@@ -22,7 +22,7 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { readLauncher } from './launcher-contract.mjs';
 import { nightlyVersion } from './nightly-version.mjs';
-import { releaseRepository } from './release-repository.mjs';
+import { releaseRead, releaseRepository } from './release-repository.mjs';
 import { publishSourcePointer } from './source-pointer.mjs';
 const { repository: repo, id: repositoryId } = await releaseRepository(process.env.GH_TOKEN);
 const channel = process.env.SOURCE_CHANNEL || 'edge';
@@ -89,7 +89,12 @@ if (!key || !token) throw new Error('Source publishing credentials are missing')
 if (!/^[a-f0-9-]{36}$/.test(databaseId ?? '')) throw new Error('ACCOUNT_HUB_DATABASE_ID is missing or invalid');
 const headers = { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'User-Agent': 'AI-Shuffle-Source-Publisher' };
 async function api(route, options = {}) {
- return fetch(`https://api.github.com/repos/${repo}/${route}`, { ...options, headers: { ...headers, ...options.headers } });
+ const url = `https://api.github.com/repos/${repo}/${route}`;
+ const request = { ...options, headers: { ...headers, ...options.headers } };
+ // Keep JSON body transport timeouts inside the GET retry, never the POST.
+ const read = async response => ({ ok: response.ok, status: response.status,
+  data: response.ok ? await response.json() : undefined });
+ return !options.method || options.method === 'GET' ? releaseRead(url, request, read) : read(await fetch(url, request));
 }
 // Activation is shared with the no-signing whole-release promoter.
 
@@ -123,14 +128,14 @@ if (releaseResponse.status === 404) {
  }) });
 }
 if (!releaseResponse.ok) throw new Error(`Source release lookup failed (${releaseResponse.status})`);
-const release = await releaseResponse.json();
+const release = releaseResponse.data;
 // A new name: assets published before this change are full-repository zipballs.
 const assetName = `${revision}-runtime.zip`;
 let asset;
 for (let page = 1; ; page++) {
  const r = await api(`releases/${release.id}/assets?per_page=100&page=${page}`);
  if (!r.ok) throw new Error(`Source asset lookup failed (${r.status})`);
- const assets = await r.json();
+ const assets = r.data;
  asset = assets.find(item => item.name === assetName);
  if (asset || assets.length < 100) break;
 }
@@ -146,7 +151,7 @@ async function publishUIBundle() {
  for (let page = 1; ; page++) {
   const response = await api(`releases/${release.id}/assets?per_page=100&page=${page}`);
   if (!response.ok) throw Error(`UI asset lookup failed (${response.status})`);
-  const assets = await response.json();
+  const assets = response.data;
   found = assets.find(item => item.name === name);
   if (found || assets.length < 100) break;
  }
