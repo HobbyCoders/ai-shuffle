@@ -35,8 +35,19 @@ def project(cursor, record: dict) -> None:
     cursor.execute("UPDATE network_session_active SET local_revision=local_revision+1, "
                    "local_revision_epoch=CASE WHEN local_revision_epoch='' THEN %s ELSE local_revision_epoch END "
                    "WHERE session_id=%s", (str(uuid4()), record["session_id"]))
-    cursor.execute("UPDATE sessions SET is_active=%s WHERE id=%s",
+    cursor.execute("UPDATE sessions SET is_active=%s, status=CASE WHEN status='archived' THEN 'active' ELSE status END WHERE id=%s RETURNING *",
                    (record["is_active"], record["session_id"]))
+    row = cursor.fetchone()
+    if row is not None and control.owner_of(dict(row)):
+        # This is a local projection of an owner-ordered catalog, not a new
+        # owner write. Snapshot/apply hash the projected row too; keep that
+        # cache current when membership arrives AFTER the catalog. Otherwise
+        # identical rows retain different hashes after a mixed-version reboot.
+        coll = engine.policy.collection("sessions")
+        serialized = engine.serialize_row(coll, dict(row), cursor=cursor)
+        if serialized is not None:
+            cursor.execute("UPDATE sync_records SET content_hash=%s WHERE collection='sessions' AND record_id=%s",
+                           (engine.content_hash(coll, serialized), record["session_id"]))
 
 
 def _record_active(cursor, session_id: str, active: bool) -> Optional[dict]:
@@ -115,7 +126,7 @@ async def _apply_settle_change(row: dict, active: bool, archived: Optional[bool]
     """Dismiss waits on the owner; shared membership remains offline-first."""
     envelope = row.pop("_settled_membership", None)
     revision = row.pop("_settled_revision", {"session_updated_at": row.get("updated_at")})
-    if active or archived is not None or row.get("status") == "archived":
+    if active:
         return
     owner = control.owner_of(row)
     try:
@@ -234,11 +245,10 @@ async def handle(body: dict, from_device: str) -> dict:
         # with us. The asking peer's view of our stream is that comparison
         # (#1621); without it the request is refused below as before.
         await run_sync(transport.release_hold_for_peer_view, from_device, view)
-    restoring = archived is False and await _is_archived(session_id)
-    row, envelope = await run_sync(lambda: _write(session_id, active, archived=archived))
-    await _apply_settle_change(row, active, archived)
+    active = False if archived else active
+    row, envelope = await run_sync(lambda: _write(session_id, active))
+    await _apply_settle_change(row, active)
     await _broadcast(row, session_id)
-    await _apply_archive_change(session_id, archived, restoring)
     # Only the signed catalog representation crosses the worker boundary.
     return {"envelope": envelope}
 
@@ -248,60 +258,30 @@ class MembershipUpdateFailed(RuntimeError):
 
 
 async def update_membership(existing: dict, active: bool, archived: Optional[bool] = None) -> dict:
-    """Apply an authorized UI or tool edit through the same owner/sync paths."""
+    """Legacy archive intents are ordinary shared settlement, never Stop."""
     session_id = existing["id"]
+    active = False if archived else active
     if engine.context() is not None:
-        if archived is None:
-            return await set_shared(session_id, active)
-        owner = control.owner_of(existing)
-        if owner is not None:
-            await set_remote(owner, session_id, active, archived)
-            # Prevent a stale local membership record overriding the owner reply.
-            return await set_shared(session_id, False if archived else active)
-        return await set_local(session_id, active, archived)
-    row = await run_sync(database.set_session_active, session_id, active, archived)
+        return await set_shared(session_id, active)
+    row = await run_sync(database.set_session_active, session_id, active, None)
     if row is None:
         raise MembershipUpdateFailed("Failed to update active status")
-    await _apply_settle_change(row, active, archived)
+    await _apply_settle_change(row, active)
     await _broadcast(row, session_id)
-    await _apply_archive_change(session_id, archived, existing.get("status") == "archived")
     return row
 
 
 async def set_local(session_id: str, active: bool, archived: Optional[bool] = None) -> dict:
-    """Settle, reopen, archive or restore a session this worker owns, for its own UI."""
-    restoring = archived is False and await _is_archived(session_id)
-    row, _envelope = await run_sync(lambda: _write(session_id, active, archived=archived, local=True))
-    await _apply_settle_change(row, active, archived)
+    active = False if archived else active
+    row, _envelope = await run_sync(lambda: _write(session_id, active, local=True))
+    await _apply_settle_change(row, active)
     await _broadcast(row, session_id)
-    await _apply_archive_change(session_id, archived, restoring)
     return row
 
 
-async def _is_archived(session_id: str) -> bool:
-    from app.core import archive_guard
-
-    return await archive_guard.is_archived_async(session_id)
-
-
-async def _apply_archive_change(session_id: str, archived: Optional[bool],
-                                restored: bool = False) -> None:
-    """On the execution owner, after an archive or restore committed (#1822).
-
-    Archive stops the chat's running and parked work so nothing is left to wake
-    it; it runs after the write, so every wake producer already reads the chat
-    as archived while the stop is in progress. Restore makes the chat fully
-    usable again by releasing the Stop latch archiving set; ``restored`` says the
-    chat really was archived, so an ``archived=False`` write to a chat that was
-    not leaves a Stop the owner pressed alone. ``None`` (a plain settle or
-    reopen) changes nothing.
-    """
-    from app.core import archive_guard
-
-    if archived:
-        await archive_guard.stop_work(session_id)
-    elif archived is False and restored:
-        archive_guard.release_after_restore(session_id)
+async def _apply_archive_change(session_id: str, archived: Optional[bool], restored: bool = False) -> None:
+    """Compatibility for cached callers. Archive has no execution side effects."""
+    return None
 
 
 async def _broadcast(row: dict, session_id: str) -> None:

@@ -69,10 +69,11 @@ async def test_tool_archives_on_remote_owner(workers, monkeypatch):
         for _ in range(2):
             result = await invoke("ArchiveSession")
             assert not result.is_error, result.text
-        assert database.get_session("target")["status"] == "archived"
+        assert database.get_session("target")["status"] == "active"
         assert not database.get_session("target")["is_active"]
+    converge([a, b])
     with a.active():
-        assert database.get_session("target")["status"] == "archived"
+        assert database.get_session("target")["status"] == "active"
         assert not database.get_session("target")["is_active"]
 
 
@@ -88,9 +89,9 @@ async def test_tool_remote_archive_failures_are_errors_not_success(workers, monk
     monkeypatch.setattr(control, "call", AsyncMock(side_effect=error))
     with b.active():
         result = await invoke("ArchiveSession")
-        assert result.is_error, result.text
-        assert database.get_session("target")["status"] != "archived"
-        assert database.get_session("target")["is_active"]
+        assert not result.is_error, result.text
+        assert database.get_session("target")["status"] == "active"
+        assert not database.get_session("target")["is_active"]
 
 
 async def invoke_with(name, **data):
@@ -144,10 +145,8 @@ async def test_bulk_archive_offline_owner_fails_per_item(workers, monkeypatch):
         result = await invoke_with("ArchiveSession", session_ids=["target", "local"])
         assert not result.is_error, result.text
         summary = json.loads(result.text)
-        assert (summary["archived"], summary["failed"]) == (1, 1)
-        [issue] = summary["issues"]
-        assert (issue["session_id"], issue["outcome"]) == ("target", "failed")
-        assert "can't be reached" in issue["reason"]
-        assert database.get_session("local")["status"] == "archived"
-        assert database.get_session("target")["status"] != "archived"
-        assert database.get_session("target")["is_active"]
+        assert (summary["settled"], summary["failed"]) == (2, 0)
+        assert summary["issues"] == []
+        assert database.get_session("local")["status"] == "active"
+        assert database.get_session("target")["status"] == "active"
+        assert not database.get_session("target")["is_active"]

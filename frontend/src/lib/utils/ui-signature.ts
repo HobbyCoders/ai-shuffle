@@ -14,7 +14,7 @@
  * every data-ui-* attribute on a carrier each animation frame:
  *   data-ui-surface    new | cleared | loading | active  (classifyChatSurface)
  *   data-ui-session    none | s:<6-char hash of the bound session id>
- *   data-ui-composer   centre (new-chat hero) | bottom (docked) | hidden (archived)
+ *   data-ui-composer   centre (new-chat hero) | bottom (docked); legacy hidden stays readable
  *   data-ui-messages   transcript message count, pending peer messages included
  *   data-ui-loading    true while history loads (open, boot restore, deep link)
  *   data-ui-streaming  true while the session streams a reply
@@ -59,12 +59,11 @@ export function uiSessionTag(sessionId: string | null | undefined): string {
 }
 
 /**
- * Where the composer sits: under the new-chat hero, docked at the bottom, or
- * replaced (archived chat). The phone shell docks it under its hero too
- * (mobile.css), so there an empty chat reads as bottom.
+ * Where the composer sits: under the new-chat hero or docked at the bottom.
+ * Legacy archived input never hides it. The phone shell docks it under its
+ * hero too (mobile.css), so there an empty chat reads as bottom.
  */
 export function uiComposer(input: { archived: boolean; emptyHero: boolean; mobile: boolean }): UiComposer {
-	if (input.archived) return 'hidden';
 	return input.emptyHero && !input.mobile ? 'centre' : 'bottom';
 }
 

@@ -494,6 +494,8 @@ def prepare_session_mirror(cursor, record: Dict[str, Any], *, origin_device_id: 
         # build omits the label, with the same effect.
         for field in OWNER_ONLY_SESSION_FIELDS:
             record.pop(field, None)
+    from app.db.session_archive_migration import canonical_session
+    record = canonical_session(record)
     # A later owner catalog update must not undo an offline sidebar edit.
     # Keep this independent of the owner's stream, including when membership
     # arrives before the session catalog during bootstrap.

@@ -1512,7 +1512,7 @@ def _recent_sync(
         f"SELECT {columns} FROM sessions "
         f"WHERE {listed} "
         "AND COALESCE(hidden, FALSE) = FALSE "
-        "AND status NOT IN ('archived', 'failed')"
+        "AND COALESCE(status, 'active') <> 'failed'"
     )
     if project_id is not None:
         sql += " AND project_id = %s"

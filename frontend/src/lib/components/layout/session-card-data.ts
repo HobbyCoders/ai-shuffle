@@ -835,11 +835,11 @@ export function sessionModeOf(s: Session): SessionMode {
 
 /** Sessions the archive shelf owns (backend sets status='archived'). */
 export function isArchived(s: Session): boolean {
-	return s.status === 'archived';
+	return s.status === 'archived'; // Decode old metadata only; never a sidebar lane or readonly state.
 }
 
 /** A sidebar row action. */
-export type CardAction = 'settle' | 'activate' | 'archive' | 'restore';
+export type CardAction = 'settle' | 'activate';
 
 /**
  * The actions a row offers. On touch, a left swipe commits the state toggle
@@ -848,9 +848,7 @@ export type CardAction = 'settle' | 'activate' | 'archive' | 'restore';
  * first for its hover actions, so this order is not the on-screen order.
  */
 export function cardActions(s: Pick<Session, 'is_active' | 'status'>): CardAction[] {
-	if (isArchived(s as Session)) return ['restore'];
-	if (s.is_active) return ['archive', 'settle'];
-	return ['activate', 'archive'];
+	return [s.is_active && s.status !== 'archived' ? 'settle' : 'activate'];
 }
 
 /**

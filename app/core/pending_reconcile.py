@@ -518,7 +518,6 @@ def list_sessions_for_pending_repair(
                 f"""SELECT id, sdk_session_id FROM sessions
                      WHERE instance_id = {_ph}
                        AND sdk_session_id IS NOT NULL
-                       AND status <> 'archived'
                      ORDER BY updated_at DESC
                      LIMIT {_ph}""",
                 (settings.effective_instance_id, int(limit)),

@@ -53,7 +53,9 @@ def test_searches_messages_written_by_native_store():
         rows, count = sessions.search_sessions_paginated('userneedle' + token, profile_id='another-profile')
         assert rows == [] and count == 0
         sessions.update_session(sid, status='archived')
-        assert sessions.search_sessions('userneedle' + token) == []
+        row = sessions.get_session(sid)
+        assert row['status'] == 'active' and not row['is_active']
+        assert sid in [row['id'] for row in sessions.search_sessions('userneedle' + token)]
     finally:
         sessions.delete_session(sid)
         with base.get_db() as conn:

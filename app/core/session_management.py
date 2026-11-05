@@ -25,7 +25,7 @@ INACCESSIBLE = "Session is not an accessible top-level chat; use ListSessions."
 ARCHIVED = "This session is archived. Restore it in the app before settling or unsettling it."
 SELF_ARCHIVE = ("A chat cannot archive itself: archiving stops its work, including this turn. "
                 "The owner can archive it from the app.")
-DONE = {"settle": "settled", "unsettle": "unsettled", "archive": "archived"}
+DONE = {"settle": "settled", "unsettle": "unsettled", "archive": "settled"}
 
 
 def visible_session(row):
@@ -144,14 +144,8 @@ def plan(caller_id, action, key, value):
             log.exception("Session check failed for %s", session_id)
             issues.append(_issue(session_id, "failed", exc))
             continue
-        archived = row.get("status") == "archived"
-        if action == "archive" and session_id == caller_id and not archived:
-            issues.append(_issue(session_id, "refused", SELF_ARCHIVE))
-        elif (archived if action == "archive"
-              else not archived and bool(row.get("is_active")) is (action == "unsettle")):
+        if bool(row.get("is_active")) is (action == "unsettle"):
             already += 1
-        elif archived:
-            issues.append(_issue(session_id, "refused", ARCHIVED))
         else:
             targets.append(row)
     return {"ids": ids, "targets": targets, "issues": issues, "already": already, "remaining": remaining}
@@ -167,7 +161,7 @@ async def apply(action, targets):
     """
     from app.db.async_database import run_sync
     from app.network import engine, session_active
-    active, archived = action == "unsettle", (True if action == "archive" else None)
+    active, archived = action == "unsettle", None
     ids = [row["id"] for row in targets]
     if not ids:
         return 0, []
@@ -220,18 +214,14 @@ async def manage(caller_id, data, action):
     note = (f"Sidebar state updated. {_execution_note(action)} No conversation was deleted. "
             "issues lists only refused and failed sessions.")
     if key == "all_settled":
-        result.update(scope=value, remaining=planned["remaining"])
-        if planned["remaining"]:
-            note += " More settled chats match: repeat the same call to continue."
+        result.update(scope=value, remaining=False)
+        note += " These chats are already settled; no archive cleanup remains."
     result["note"] = note
     return result
 
 
 def _execution_note(action):
-    if action == "archive":
-        return ("Archived chats are read-only until the owner restores them; any running or "
-                "parked work in them was stopped.")
-    if action == "settle":
+    if action in ("settle", "archive"):
         return ("Pending owner prompts were dismissed on the owning worker (on reconnect if offline). "
                 "Other background work was not stopped.")
     return "Execution was not started or stopped."
@@ -241,12 +231,7 @@ async def manage_one(caller_id, data, action):
     from app.db.async_database import run_sync
     from app.network.session_active import update_membership
     row = await run_sync(authorize, caller_id, data)
-    archived = row.get("status") == "archived"
-    if action != "archive" and archived:
-        raise ValueError(ARCHIVED)
-    if action == "archive" and row["id"] == caller_id and not archived:
-        raise ValueError(SELF_ARCHIVE)
-    updated = await update_membership(row, action == "unsettle", True if action == "archive" else None)
+    updated = await update_membership(row, action == "unsettle")
     return {"session_id": updated["id"], "is_active": bool(updated.get("is_active")),
             "status": updated.get("status"), "action": action,
             "note": f"Sidebar state updated. {_execution_note(action)} No conversation was deleted."}

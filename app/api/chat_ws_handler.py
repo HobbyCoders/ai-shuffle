@@ -1360,6 +1360,10 @@ class ChatWebSocketHandler:
         # drain) unparking on the shared device socket during its awaiting window.
         # Only meaningful for a new session (session_id is None); ignored otherwise.
         request_id = data.get("request_id")
+        disposable_test = not session_id and data.get("disposable_test") is True
+        if disposable_test and self.api_user_id:
+            await self.send_json({"type": "error", "message": "Only the owner can create disposable test chats."})
+            return
         # Composer device pick: run this NEW session on another install. Only
         # honored at creation — an existing session's placement is settled, so
         # the key is dropped rather than allowed to silently re-route history.
@@ -1540,6 +1544,7 @@ class ChatWebSocketHandler:
                         api_user_id=self.api_user_id,
                         title=title,
                         is_active=True,
+                        hidden=disposable_test,
                         target_instance_id=target_instance_id,
                         project_v2_id=resolved_pv2_id,
                         # The composer's pick IS the session's binding —
@@ -1593,6 +1598,7 @@ class ChatWebSocketHandler:
                             "permission_mode": (overrides or {}).get("permission_mode"),
                             "context_window": create_window,
                             "fast": (overrides or {}).get("fast"), "mode": session_mode,
+                            "hidden": disposable_test,
                             # Who started it, recorded above; the worker that
                             # runs it labels it at creation (#1877).
                             "provenance_owner": (self.trusted_principal or {}).get("owner"),

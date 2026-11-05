@@ -27,6 +27,7 @@ from app.core.config import settings
 # Import shared database utilities from base module.
 # Re-exported here so existing ``from app.db.database import get_db`` still works.
 from app.db.base import (  # noqa: F401
+    exempt_from_start_pressure,
     get_connection,
     get_db,
     _validate_identifier,
@@ -2811,6 +2812,8 @@ def _run_column_migrations(cursor: Any) -> None:
     from app.db.session_mode_migration import migrate as migrate_session_modes
 
     migrations_applied.extend(migrate_session_modes(cursor))
+    from app.db.session_archive_migration import migrate as retire_session_archive
+    migrations_applied.extend(retire_session_archive(cursor))
     from app.db.watch_migration import migrate as migrate_email_watches
 
     migrations_applied.extend(migrate_email_watches(cursor))
@@ -3596,7 +3599,7 @@ def migrations_fingerprint() -> str:
 
     from app.db import (
         schema_postgres, mobile_hub, network, owner_state, working_record, watches, watch_delivery,
-        session_mode_migration, model_provider_slots, project_setup,
+        session_mode_migration, session_archive_migration, model_provider_slots, project_setup,
     )
     from app.core import owner_auth
 
@@ -3606,7 +3609,7 @@ def migrations_fingerprint() -> str:
     # Include their sources and the network schema so upgrades cannot skip new DDL.
     for module in (
         sys.modules[__name__], schema_postgres, mobile_hub, owner_auth, network, owner_state,
-        working_record, watches, watch_delivery, session_mode_migration, model_provider_slots,
+        working_record, watches, watch_delivery, session_mode_migration, session_archive_migration, model_provider_slots,
         project_setup,
     ):
         path = getattr(module, "__file__", None)
@@ -3893,6 +3896,7 @@ def run_database_maintenance(
     if stop is not None and stop.is_set():
         return results
     with get_db() as conn:
+        exempt_from_start_pressure(conn)
         cursor = conn.cursor()
 
         # 1. Statistics scans need longer than ordinary retention batches.
@@ -3917,6 +3921,7 @@ def run_database_maintenance(
         try:
             conn = get_connection()
             try:
+                exempt_from_start_pressure(conn)
                 # Postgres VACUUM cannot run inside a transaction block
                 conn.autocommit = True
                 cursor = conn.cursor()
@@ -4005,6 +4010,7 @@ from app.db.sessions import (  # noqa: F401
     get_sessions,
     get_sessions_paginated,
     get_sessions_cursor,
+    count_sessions,
     create_session,
     create_session_with_stats,
     update_session,

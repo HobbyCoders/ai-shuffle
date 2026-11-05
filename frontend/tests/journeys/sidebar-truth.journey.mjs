@@ -10,7 +10,7 @@
 // Cases:
 //   rollback-settle   Settle fails: only that row goes back; another device's
 //                     settle of a second chat and rename of the first both stay
-//   rollback-archive  the same for Archive
+//   rollback-reactivate  the same for moving Settled history back to Active
 //   rollback-rename   the same for Rename
 //   rollback-delete   the same for Delete: the row returns where it was
 //   failed-open       a provider error on the open chat: the row says Failed,
@@ -63,6 +63,10 @@ async function waitLane(page, id, lane, timeout = 30_000) {
 		.or(page.getByRole('button', { name: /^(Show sidebar|Chats|Open menu)/ }))
 		.first().waitFor({ timeout: 60_000 });
 	await showSidebar(page);
+	if (lane === 'settled') {
+		const section = page.getByRole('button', { name: /^Settled/ }).first();
+		if (await section.getAttribute('aria-expanded') === 'false') await section.click();
+	}
 	try {
 		await page.waitForFunction(({ selector, lane }) => document.querySelector(selector)?.closest('[data-group]')?.getAttribute('data-group') === lane,
 			{ selector: CARD(id), lane }, { timeout });
@@ -252,19 +256,21 @@ const ROLLBACK_SETTLE = {
 	}
 };
 
-const ROLLBACK_ARCHIVE = {
-	name: 'rollback-archive',
+const ROLLBACK_REACTIVATE = {
+	name: 'rollback-reactivate',
 	setup: twoChats,
 	allow: [...REFUSAL_NOISE],
 	async act(ctx) {
-		const { page, mark, a } = ctx;
-		await mark('archive the first chat; the server holds on to it');
+		const { page, status, mark, a } = ctx;
+		await otherDevice(page, status, 'PATCH', `/sessions/${a.id}/active`, { is_active: false });
+		await waitLane(page, a.id, 'settled');
+		await mark('reactivate the first chat; the server holds on to it');
 		await armHold(page, 'PATCH', `/sessions/${a.id}/active`);
-		await rowAction(page, a.id, 'Archive session');
-		await page.locator(CARD(a.id)).waitFor({ state: 'detached', timeout: 15_000 });
+		await rowAction(page, a.id, 'Move session to Active');
+		await waitLane(page, a.id, 'active');
 
 		const check = await refuseAfterOtherDevice(ctx);
-		await waitLane(page, a.id, 'active');
+		await waitLane(page, a.id, 'settled');
 		await check();
 	}
 };
@@ -689,5 +695,5 @@ const PROJECT_ONCE = {
 await runJourney({
 	name: 'sidebar-truth',
 	allow: [...DEV_INSTANCE_NOISE],
-	cases: [ROLLBACK_SETTLE, ROLLBACK_ARCHIVE, ROLLBACK_RENAME, ROLLBACK_DELETE, FAILED_OPEN, FAILED_UNOPENED, FAILED_CLAUDE, FAILED_SETTLED, FAILED_CLEARED, STOPPED, PROJECT_CHOICE_SURVIVES, PROJECT_ONCE]
+	cases: [ROLLBACK_SETTLE, ROLLBACK_REACTIVATE, ROLLBACK_RENAME, ROLLBACK_DELETE, FAILED_OPEN, FAILED_UNOPENED, FAILED_CLAUDE, FAILED_SETTLED, FAILED_CLEARED, STOPPED, PROJECT_CHOICE_SURVIVES, PROJECT_ONCE]
 });

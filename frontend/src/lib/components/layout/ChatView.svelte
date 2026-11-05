@@ -32,8 +32,6 @@
 	import MirrorSyncGate from '$lib/components/chat/MirrorSyncGate.svelte';
 	import { createMirrorSync, mirrorSyncHeadline } from '$lib/components/chat/mirror-sync.svelte';
 	import ChatInput from '$lib/components/chat/ChatInput.svelte';
-	import ArchivedChatBar from '$lib/components/chat/ArchivedChatBar.svelte';
-	import { archivedChats } from '$lib/stores/archived-chats';
 	import PermissionQueue from '$lib/components/PermissionQueue.svelte';
 	import QuestionTray from '$lib/components/chat/QuestionTray.svelte';
 	import PrivateAccessPrompt from '$lib/components/chat/PrivateAccessPrompt.svelte';
@@ -236,11 +234,6 @@
 
 	// Keep the editor mounted through call transitions so drafts and file chips survive.
 	const showComposer = true;
-	// An archived chat is a read-only transcript until restored (#1822): the
-	// composer slot shows export and restore instead of the editor.
-	const archivedSessionId = $derived(
-		$activeSession.sessionId && $archivedChats.has($activeSession.sessionId) ? $activeSession.sessionId : null
-	);
 	// What the flight recorder reads off this view each frame (ui-signature.ts).
 	// Derived from the same inputs as chatSurface; nothing reads them back.
 	// The surface and message count are what is on screen: a mirrored chat's
@@ -248,7 +241,7 @@
 	// and 0 until then.
 	const uiSignature = $derived({
 		session: uiSessionTag($activeSession.sessionId),
-		composer: uiComposer({ archived: Boolean(archivedSessionId), emptyHero: showEmptyHero, mobile: platform.isMobile }),
+		composer: uiComposer({ archived: false, emptyHero: showEmptyHero, mobile: platform.isMobile }),
 		messages: mirrorSync.waiting ? '0' : String($activeSession.messages.length + ($activeSession.pendingPeerMessages?.length ?? 0)),
 		loading: uiFlag(
 			$activeSession.isLoadingSession || $activeSession.isRestoringSession || historyUnconfirmed
@@ -579,9 +572,6 @@
 				<div class="call-dock-slot" bind:clientHeight={callDockHeight}><VoiceCallPanel sessionId={$activeSession.sessionId} compact /></div>
 			{/if}
 			<BackgroundWorkStrip jobs={backgroundJobs} onOpen={openJob} onStop={stopJob} />
-			{#if archivedSessionId}
-				<ArchivedChatBar sessionId={archivedSessionId} />
-			{:else}
 				{#key $sessionOwnerBoundary}
 					{#if PromptDock}
 						<PromptDock
@@ -599,7 +589,6 @@
 					{/if}
 					<ChatInput compact={!showEmptyHero} newSession={showNewSessionHero} {onBrowserToggle} {onBrowserPreload} {browserOpen} {terminal} />
 				{/key}
-			{/if}
 		</div>
 	{/if}
 

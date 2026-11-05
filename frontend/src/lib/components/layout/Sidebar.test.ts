@@ -56,6 +56,7 @@ vi.mock('$lib/stores/app-data.svelte', () => ({
 	clusterProjects: mocks.clusterProjects,
 	projectCatalogReady: mocks.projectCatalogReady,
 	sessionsHasMore: mocks.sessionsHasMore,
+	settledTotal: { subscribe: (run: (count: number) => void) => mocks.sessions.subscribe(rows => run(rows.filter((row: any) => !row.hidden && !row.is_active && row.status !== 'archived').length)) },
 	sessionsLoadingMore: mocks.sessionsLoadingMore,
 	appData: {
 		setSessionActive: mocks.setSessionActive,
@@ -213,11 +214,11 @@ function session(
 }
 
 describe('Archived sessions', () => {
-	it('keeps archived history out of the sidebar; Settings owns the archive', () => {
+	it('has no separate archive lane for legacy metadata', () => {
 		mocks.sessions.set([session('history', 'Archived work', null, false, false, { status: 'archived' })]);
 		render(Sidebar, sidebarProps);
-		expect(screen.queryByText('Archived work')).toBeNull();
-		expect(screen.queryByRole('button', { name: /^Archived/ })).toBeNull();
+		expect(screen.queryByText('Archived work')).toBeTruthy();
+		expect(screen.queryByRole('button', { name: /^Archived$/ })).toBeNull();
 	});
 });
 
@@ -253,7 +254,7 @@ beforeEach(() => {
 	layout.setSidebarOverlay(false);
 	mocks.activeView.set(null);
 	localStorage.clear();
-	mocks.adapters.get('sidebar_collapsed_groups')!.apply(undefined);
+	mocks.adapters.get('sidebar_collapsed_groups')!.apply({ settled: false });
 	mocks.save.mockClear();
 	appMode.set('code');
 	sidebarWorkspace.reset();
@@ -323,6 +324,19 @@ function sectLabels(): string[] {
 }
 
 describe('Sidebar session groups', () => {
+ it('defaults Settled to collapsed without writing over an explicit saved choice', async () => {
+  mocks.adapters.get('sidebar_collapsed_groups')!.apply(undefined);
+  const { container } = render(Sidebar);
+  const header = () => Array.from(container.querySelectorAll<HTMLButtonElement>('.sect')).find(button => button.textContent?.includes('Settled'))!;
+  expect(header().getAttribute('aria-expanded')).toBe('false');
+  expect(screen.queryByText('Settled chat')).toBeNull();
+  expect(mocks.save.mock.calls.some(([key]) => key === 'sidebar_collapsed_groups')).toBe(false);
+  mocks.adapters.get('sidebar_collapsed_groups')!.apply({ settled: false });
+  await tick();
+  expect(header().getAttribute('aria-expanded')).toBe('true');
+  expect(screen.getByText('Settled chat')).toBeTruthy();
+ });
+
 	it('shares collapsed groups with a mounted sidebar and resets them on account change', async () => {
 		const { container } = render(Sidebar);
 		const header = () => Array.from(container.querySelectorAll<HTMLButtonElement>('.sect'))
@@ -1185,21 +1199,12 @@ describe('Sidebar multi-select (R15)', () => {
 			expect(within(selbar()).getByRole('button', { name: /Active/ })).toBeTruthy();
 			expect(within(selbar()).getByRole('button', { name: /Settle/ })).toBeTruthy();
 
-			await fireEvent.click(within(selbar()).getByRole('button', { name: 'Archive' }));
+			expect(within(selbar()).queryByRole('button', { name: 'Archive' })).toBeNull();
+			await fireEvent.click(within(selbar()).getByRole('button', { name: /Settle/ }));
 			await vi.advanceTimersByTimeAsync(0);
-			expect(mocks.setSessionArchived).toHaveBeenCalledWith('active', true, true);
-			expect(mocks.setSessionArchived).toHaveBeenCalledWith('settled', true, false);
-			// Archive still offers Undo, which puts each row back where it was.
-			expect(mocks.banner).toHaveBeenCalledTimes(1);
-			const [message, options] = mocks.banner.mock.calls[0] as [
-				string,
-				{ action: { label: string; onClick: () => void } },
-			];
-			expect(message).toBe('Archived 2 sessions');
-			expect(options.action.label).toBe('Undo');
-			options.action.onClick();
-			expect(mocks.setSessionArchived).toHaveBeenCalledWith('active', false, true);
-			expect(mocks.setSessionArchived).toHaveBeenCalledWith('settled', false, false);
+			expect(mocks.setSessionActive).toHaveBeenCalledWith('active', false);
+			expect(mocks.setSessionArchived).not.toHaveBeenCalled();
+			expect(mocks.banner).not.toHaveBeenCalled();
 		} finally {
 			vi.useRealTimers();
 		}

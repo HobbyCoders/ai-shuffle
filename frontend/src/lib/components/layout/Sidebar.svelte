@@ -9,7 +9,7 @@
 	 * Active and Settled.
 	 *
 	 * Rows follow the inbox model. Swipe left settles an active session (or
-	 * brings a settled one back); swipe right archives. A long press starts a
+	 * brings a settled one back); swipe right is inert. A long press starts a
 	 * multi-select whose bar offers the same moves in bulk. On desktop the
 	 * same moves sit in each row's hover actions.
 	 *
@@ -28,7 +28,6 @@
 		RefreshCw,
 		X,
 		Check,
-		Archive,
 		Undo2,
 		Files,
 		Notebook,
@@ -50,7 +49,8 @@
 		projects,
 		clusterProjects,
 		projectCatalogReady,
-		sessionsHasMore
+		sessionsHasMore,
+		settledTotal
 	} from '$lib/stores/app-data.svelte';
 	import { activeSession, streamingSessions, backgroundPermissions } from '$lib/stores/active-session';
 	import { privateAccessPending } from '$lib/stores/chat-access';
@@ -83,7 +83,6 @@
 		sessionPrState,
 		projectKey,
 		isVisibleSidebarSession,
-		isArchived,
 		sidebarGroup,
 		lastWorkFailed,
 		openSessionNeeds,
@@ -157,7 +156,7 @@
 	// A click that fast belongs to the load, not to a request to collapse.
 	const SHELF_SETTLE_MS = 500;
 
-	const collapsedGroups = $derived($sidebarGroups);
+	const collapsedGroups: Record<string, boolean> = $derived({ settled: true, ...$sidebarGroups });
 	function toggleGroup(name: string) {
 		sidebarGroups.set({ ...collapsedGroups, [name]: !collapsedGroups[name] });
 	}
@@ -388,7 +387,6 @@
 
 	const rows = $derived.by((): CardRow[] =>
 		visibleSessions
-			.filter((s) => !isArchived(s))
 			.map((s) => {
 				const branch = branchLabel(s);
 				const prSet = branch && s.project_id ? openPrBranches.get(s.project_id) : undefined;
@@ -447,7 +445,7 @@
 	const emptyLabel = 'No chats yet';
 	// An empty Settled lane says nothing the Active lane does not. It stays only
 	// while older chats are one click away, because its shelf is how you get them.
-	const settledLaneShown = $derived(settledRows.length > 0 || loadingOlder || $sessionsHasMore);
+	const settledLaneShown = $derived(settledRows.length > 0 || ($settledTotal ?? 0) > 0 || loadingOlder || $sessionsHasMore);
 	onMount(() => {
 		if (!isAdmin) return;
 		// Agent names and avatars for the new-session agent card.
@@ -677,18 +675,14 @@
 
 	const plural = (n: number) => `${n} session${n === 1 ? '' : 's'}`;
 
-	async function runBulk(kind: 'settle' | 'activate' | 'archive') {
+	async function runBulk(kind: 'settle' | 'activate') {
 		const targets = selectedRows.filter((r) =>
 			kind === 'settle' ? r.session.is_active : kind === 'activate' ? !r.session.is_active : true
 		);
 		cancelSelection();
 		if (targets.length === 0) return;
 		const ids = targets.map((r) => r.session.id);
-		const wasActive = new Map(targets.map((r) => [r.session.id, !!r.session.is_active]));
-		const apply = (id: string) =>
-			kind === 'archive'
-				? appData.setSessionArchived(id, true, wasActive.get(id))
-				: appData.setSessionActive(id, kind === 'activate');
+		const apply = (id: string) => appData.setSessionActive(id, kind === 'activate');
 		const results = await Promise.allSettled(ids.map(apply));
 		const done = ids.filter((_, i) => results[i].status === 'fulfilled');
 		const failed = ids.length - done.length;
@@ -696,10 +690,6 @@
 		if (done.length === 0) return;
 		if (kind === 'settle') {
 			if (activeId && done.includes(activeId) && !phone) onSettledOpenSession();
-		} else if (kind === 'archive') {
-			offerUndo(`Archived ${plural(done.length)}`, () =>
-				Promise.all(done.map((id) => appData.setSessionArchived(id, false, wasActive.get(id))))
-			);
 		}
 	}
 
@@ -844,9 +834,6 @@
 					<Undo2 size={15} strokeWidth={2} />Active
 				</button>
 			{/if}
-			<button class="act" type="button" aria-label="Archive" title="Archive" onclick={() => runBulk('archive')}>
-				<Archive size={15} strokeWidth={2} />
-			</button>
 			{#if anySelectedActive}
 				<button class="act primary" type="button" onclick={() => runBulk('settle')}>
 					<Check size={15} strokeWidth={2.25} />Settle
@@ -928,7 +915,7 @@
 			{/if}
 
 			{#if settledLaneShown}
-				{@render sect('settled', 'Settled', settledRows.length)}
+				{@render sect('settled', filtersSet || $settledTotal === null ? 'Settled · loaded' : 'Settled', filtersSet ? settledRows.length : ($settledTotal ?? settledRows.length))}
 			{/if}
 			{#if settledLaneShown && !collapsedGroups.settled}
 				{#each settledDays as day (day.label)}
@@ -969,6 +956,7 @@
 		</div>
 
 		<SidebarSheet open={sheet === 'filter'} label="Filter chats" {phone} placement="popover" onClose={() => (sheet = null)}>
+			<p class="text-xs text-muted-foreground px-2 py-1">Filters apply to loaded chats only. Search reaches all history.</p>
 			{#if projectOptions.length > 0}
 				<h4>Project</h4>
 				<div class="opts">

@@ -59,7 +59,7 @@ marks it as a state carrier):
 | --- | --- |
 | `data-ui-surface` | `new`, `cleared`, `loading` or `active`, the output of `classifyChatSurface` in `layout/chat-empty-state.ts`; a mirrored chat waiting for its first sync reads `loading` (`chatLayoutSurface`) |
 | `data-ui-session` | `none`, or `s:` plus a 6-character hash of the bound session id |
-| `data-ui-composer` | `centre` (under the new-chat hero), `bottom` (docked) or `hidden` (archived chat) |
+| `data-ui-composer` | `centre` (under the new-chat hero) or `bottom` (docked); `hidden` is readable in legacy recordings only |
 | `data-ui-messages` | the transcript message count, including pending peer messages; `0` while a mirrored chat waits for its first sync (its transcript is not shown) |
 | `data-ui-loading` | `true` while history loads (opening a chat, boot restore or a deep link) |
 | `data-ui-streaming` | `true` while a reply streams |

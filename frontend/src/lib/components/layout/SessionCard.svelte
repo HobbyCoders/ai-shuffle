@@ -28,20 +28,17 @@
 	 * the button's description.
 	 *
 	 * Inbox gestures. A touch or pen swipe LEFT settles an active row (moves a
-	 * settled one back to Active, restores an archived one); a swipe RIGHT
-	 * archives. Past 40% of
+	 * settled one back to Active); a swipe RIGHT is inert. Past 40% of
 	 * the row the lane goes solid and letting go commits; a fast flick commits
 	 * too. The row then slides out and folds away. A press-and-hold starts
 	 * selection, where a tap toggles the row's checkmark. A mouse never
 	 * swipes: on a pointer that hovers, the same actions sit at the row's right
-	 * edge on hover. Archive offers Undo; Settle does not, since a settled
+	 * edge on hover. Settle has no Undo, since a settled
 	 * session is one tap from Active. Rename, Fork, and Delete
 	 * live on the header session-title menu.
 	 */
 	import { untrack } from 'svelte';
 	import {
-		Archive,
-		ArchiveRestore,
 		ArrowUpFromLine,
 		Check,
 		Diff,
@@ -338,36 +335,17 @@
 	const showTimer = $derived(counting || workMs >= 1000);
 
 	const actions = $derived(cardActions(session));
-	/** Hover order: Archive first, then the state toggle (or Restore). */
-	const hoverActions = $derived([...actions].sort((a, b) => (a === 'archive' ? -1 : b === 'archive' ? 1 : 0)));
-	/** What a left swipe does (the state toggle); a right swipe always archives. */
+	/** The single membership toggle is also available to assistive technology. */
+	const hoverActions = $derived(actions);
+	/** Left swipe toggles membership; right swipe never changes the session. */
 	const leftAction = $derived<CardAction>(
-		actions.includes('restore') ? 'restore' : session.is_active ? 'settle' : 'activate'
+		actions[0]
 	);
-	const canArchive = $derived(actions.includes('archive'));
 
 	const ACTION_META: Record<CardAction, { title: string; aria: string; label: string }> = {
 		settle: { title: 'Settle session', aria: 'Settle session', label: 'Settle' },
-		activate: { title: 'Move to Active', aria: 'Move session to Active', label: 'Move to Active' },
-		archive: { title: 'Archive session', aria: 'Archive session', label: 'Archive' },
-		restore: { title: 'Restore archived session', aria: 'Restore archived session', label: 'Restore' }
+		activate: { title: 'Move to Active', aria: 'Move session to Active', label: 'Move to Active' }
 	};
-
-	/** A short banner whose Undo reverts the change it reports. */
-	function offerUndo(message: string, undo: () => Promise<unknown>) {
-		const id = notify.banner(message, {
-			severity: 'info',
-			persist: false,
-			duration_ms: 6000,
-			action: {
-				label: 'Undo',
-				onClick: () => {
-					notify.dismissLive(id);
-					undo().catch((err) => reportFailure(err));
-				}
-			}
-		});
-	}
 
 	function reportFailure(err: unknown) {
 		// The server says why (owner offline, owner still syncing); pass that
@@ -381,7 +359,6 @@
 
 	async function commitAction(action: CardAction) {
 		const id = session.id;
-		const wasActive = !!session.is_active;
 		try {
 			switch (action) {
 				case 'settle':
@@ -392,13 +369,6 @@
 					break;
 				case 'activate':
 					await appData.setSessionActive(id, true);
-					break;
-				case 'archive':
-					await appData.setSessionArchived(id, true);
-					offerUndo(`Archived “${title}”`, () => appData.setSessionArchived(id, false, wasActive));
-					break;
-				case 'restore':
-					await appData.setSessionArchived(id, false);
 					break;
 			}
 		} catch (err) {
@@ -496,8 +466,9 @@
 			clearLongPress();
 			pressing = false;
 			const horizontal = Math.abs(dx) > Math.abs(dy);
-			const allowed = dx < 0 || canArchive;
+			const allowed = dx < 0;
 			if (!horizontal || pointerType === 'mouse' || selecting || !allowed) {
+				if (horizontal && pointerType !== 'mouse' && !selecting && !allowed) suppressNextClick = true;
 				pointerId = null;
 				return;
 			}
@@ -511,8 +482,8 @@
 		if (elapsed > 0) velocity = (event.clientX - lastX) / elapsed;
 		lastX = event.clientX;
 		lastT = t;
-		// A row that cannot archive only travels left.
-		if (!canArchive) dx = Math.min(0, dx);
+		// There is no action on a right swipe.
+		dx = Math.min(0, dx);
 		const lim = rowWidth * EASE_RATIO;
 		dragX = Math.abs(dx) <= lim ? dx : Math.sign(dx) * (lim + (Math.abs(dx) - lim) * 0.35);
 		lane = dx > 0 ? 'l' : dx < 0 ? 'r' : null;
@@ -544,7 +515,8 @@
 		const flick = Math.abs(velocity) > FLICK_VELOCITY && Math.abs(dx) > FLICK_MIN_DX;
 		if (dx !== 0 && (armed || flick)) {
 			const dir = dx < 0 ? -1 : 1;
-			slideOut(dir, dir < 0 ? leftAction : 'archive');
+			if (dir < 0) slideOut(dir, leftAction);
+			else springBack();
 		} else {
 			springBack();
 		}
@@ -646,16 +618,11 @@
 >
 	{#if lane}
 		<!-- Lane `l` is uncovered by a right swipe, lane `r` by a left one. -->
-		<div class="lane l archive" aria-hidden="true" class:on={lane === 'l'}>
-			<Archive size={20} strokeWidth={2} /><span>Archive</span>
-		</div>
 		<div class="lane r toggle" aria-hidden="true" class:on={lane === 'r'}>
 			{#if leftAction === 'settle'}
 				<span>Settle</span><Check size={20} strokeWidth={2} />
 			{:else if leftAction === 'activate'}
 				<span>Move to Active</span><Undo2 size={20} strokeWidth={2} />
-			{:else}
-				<span>Restore</span><ArchiveRestore size={20} strokeWidth={2} />
 			{/if}
 		</div>
 	{/if}
@@ -776,10 +743,6 @@
 						<Check size={14} strokeWidth={1.75} />
 					{:else if action === 'activate'}
 						<Undo2 size={14} strokeWidth={1.75} />
-					{:else if action === 'archive'}
-						<Archive size={14} strokeWidth={1.75} />
-					{:else}
-						<ArchiveRestore size={14} strokeWidth={1.75} />
 					{/if}
 				</button>
 			{/each}

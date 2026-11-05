@@ -165,8 +165,7 @@ async def test_manual_summary_books_via_terminal_only(mock_db, monkeypatch):
         await loop.aclose()
 
 
-@pytest.mark.parametrize("archive", [False, True])
-async def test_idle_host_stop_cancels_and_books_reported_usage(mock_db, monkeypatch, archive):
+async def test_idle_host_stop_cancels_and_books_reported_usage(mock_db, monkeypatch):
     sid, adapter, loop, provider = await setup_loop(monkeypatch)
     monkeypatch.setattr(query_session_lifecycle, "get_session_pool", lambda: SimpleNamespace(
         peek=lambda _: SimpleNamespace(adapter=adapter),
@@ -178,10 +177,7 @@ async def test_idle_host_stop_cancels_and_books_reported_usage(mock_db, monkeypa
         task = loop._summary_task
         await asyncio.wait_for(provider.started.wait(), 3)
         loop._pending_summary = ("first", "last", "pending")
-        if archive:
-            await archive_guard.stop_work(sid)
-        else:
-            await query_session_lifecycle.stop_all_background_tasks(sid, user_stop=True)
+        await query_session_lifecycle.stop_all_background_tasks(sid, user_stop=True)
         assert task.cancelled()
         assert loop._pending_summary is None
         # Only the side call is cancelled: a continuation turn running on the

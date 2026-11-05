@@ -572,9 +572,8 @@ class TestConversation:
         mock_conv_dependencies["submit"].assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_conversation_refuses_an_archived_session(self, mock_conv_dependencies):
-        """An archived chat is read-only until restored (#1822): 409, no turn."""
-        from fastapi import HTTPException
+    async def test_conversation_continues_a_legacy_settled_session(self, mock_conv_dependencies):
+        """A legacy archive intent settles; explicit API send remains usable."""
         from app.api.query import conversation
         from app.core.models import ConversationRequest
         from app.db import database
@@ -585,12 +584,14 @@ class TestConversation:
         database.update_session("archived-session", status="archived")
         request = ConversationRequest(prompt="Wake up", session_id="archived-session")
 
-        with pytest.raises(HTTPException) as exc_info:
-            await conversation(request, {"id": "user1", "profile_ids": ["default"]})
+        row = database.get_session("archived-session")
+        assert row["status"] == "active" and not row["is_active"]
+        result = await conversation(request, {"id": "user1", "profile_ids": ["default"]})
 
-        assert exc_info.value.status_code == 409
-        assert "archived" in exc_info.value.detail
-        mock_conv_dependencies["submit"].assert_not_called()
+        assert result["response"] == "Continued response"
+        submit = mock_conv_dependencies["submit"]
+        submit.assert_called_once()
+        assert submit.call_args.args[:2] == ("archived-session", "api")
 
     @pytest.mark.asyncio
     async def test_conversation_omitted_profile_returns_400(self, mock_conv_dependencies):

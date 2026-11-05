@@ -170,7 +170,7 @@ def session_stopped(session_id):
     if not session_id or task_registry.is_user_stopped(session_id):
         return True
     session = database.get_session(session_id)
-    if not session or session.get("status") in ("stopped", "archived"):
+    if not session or session.get("status") == "stopped":
         return True
     with get_db() as conn:
         cursor = conn.cursor()

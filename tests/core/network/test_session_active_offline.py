@@ -138,6 +138,27 @@ async def test_membership_precedes_catalog_on_third_worker(workers):
         assert bool(database.get_session("later-catalog")["is_active"]) is False
 
 
+async def test_membership_after_catalog_refreshes_only_mirror_hash(workers):
+    a, b = workers("owner"), workers("mirror")
+    with a.active():
+        engine.create_network("Home")
+    join(a, b)
+    _new_session(a, "hash-after-catalog", "Retained legacy history")
+    converge([a, b])
+    with b.active():
+        before = store.ops_since({})
+        owner_ops = [op for op in before if op["collection"] == "sessions"]
+        await settle("hash-after-catalog", False)
+        row = database.get_session("hash-after-catalog")
+        coll = engine.policy.collection("sessions")
+        with get_db() as conn:
+            cached = store.get_record(conn.cursor(), "sessions", row["id"])
+        assert cached["content_hash"] == engine.content_hash(coll, engine.serialize_row(coll, row))
+        engine.scan_all()
+        after = [op for op in store.ops_since({}) if op["collection"] == "sessions"]
+        assert after == owner_ops  # No re-signing or rewriting the owner's history.
+
+
 async def test_concurrent_sidebar_edits_converge_and_do_not_republish_catalog(workers):
     a, b, c = workers("gaming"), workers("unraid"), workers("third")
     with a.active():

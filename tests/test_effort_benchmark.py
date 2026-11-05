@@ -84,22 +84,22 @@ def test_summary_reports_spread_not_only_averages():
     assert got["reasoning_tokens"] is None
 
 
-def test_one_run_sets_effort_and_archives_even_when_metrics_fail(monkeypatch, tmp_path):
+def test_one_run_sets_effort_and_settles_even_when_metrics_fail(monkeypatch, tmp_path):
     from scripts import effort_benchmark as bench
-    frames, archived = [], []
+    frames, settled = [], []
     class Client:
         def _exchange(self, frame, done, **kw):
             frames.append(frame)
             return {"session_id": "owned-fixture"}
         def session(self, sid):
-            return {"status": "archived" if archived else "active", "effort": "high",
+            return {"is_active": not settled, "hidden": True, "effort": "high",
                     "messages": [{"role": "assistant", "content": "done"}]}
         def state(self, sid):
             return {"is_streaming": False}
         def stop(self, sid):
             assert sid == "owned-fixture"
-        def archive(self, sid):
-            archived.append(sid)
+        def settle(self, sid):
+            settled.append(sid)
         def close(self):
             pass
     args = SimpleNamespace(output=str(tmp_path / "result.json"), url="unused", seed=95,
@@ -113,7 +113,8 @@ def test_one_run_sets_effort_and_archives_even_when_metrics_fail(monkeypatch, tm
     monkeypatch.setattr(bench, "read_metrics", broken_metrics)
     runner.one((load_tasks()[0], "high", 0))
     assert frames[0]["overrides"]["effort"] == "high"
-    assert archived == ["owned-fixture"]
+    assert settled == ["owned-fixture"]
+    assert frames[0]["disposable_test"] is True
     assert not runner.sessions
     assert json.loads(runner.journal.read_text()) == []
     assert runner.rows[0]["error"] == "ValueError"
