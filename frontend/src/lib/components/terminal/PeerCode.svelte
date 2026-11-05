@@ -46,18 +46,18 @@
 	.gap { width: 8px; }
 	.cap {
 		display: grid; place-items: center; width: 30px; height: 38px; box-sizing: border-box;
-		border: 1px solid color-mix(in oklab, var(--primary) 34%, var(--border-strong)); border-bottom-width: 3px;
+		border:1px solid var(--border);
 		border-radius: 7px; background: var(--code-bg); color: var(--foreground);
-		font: 700 19px/1 var(--font-mono); letter-spacing: 0;
+		font: 600 19px/1 var(--st-mono); letter-spacing: 0;
 		box-shadow: inset 0 1px 0 color-mix(in oklch, var(--foreground) 6%, transparent);
 		animation: cap-in 0.32s cubic-bezier(0.2, 0.8, 0.2, 1) both; animation-delay: calc(var(--i) * 35ms);
 	}
 	.clock { display: grid; gap: 4px; width: 100%; max-width: 212px; font: 500 11.5px var(--font-sans); color: var(--muted-foreground); }
 	.line { display: block; height: 2px; border-radius: 2px; background: var(--muted); overflow: hidden; }
-	.fill { display: block; height: 100%; background: var(--primary); transform-origin: left center; transition: transform 1s linear; }
+	.fill { display: block; height: 100%; background:var(--muted-foreground); transform-origin: left center; transition: transform 1s linear; }
 	.clock.low { color: var(--warning); }
 	.clock.low .fill { background: var(--warning); }
-	time { font-family: var(--font-mono); font-variant-numeric: tabular-nums; color: var(--foreground); }
+	time { font-variant-numeric: tabular-nums; color: var(--foreground); }
 	.clock.low time { color: var(--warning); }
 	@keyframes cap-in { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: none; } }
 	@media (max-width: 700px) { .cap { width: 34px; height: 42px; font-size: 21px; } }

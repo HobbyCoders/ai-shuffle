@@ -241,8 +241,8 @@
 			<p><strong>The shell exited</strong>{exitDetail(info?.exit_code)}</p>
 			<p class="sub">{remote ? 'Its output stays here until you close it. To continue, open a new terminal with + (another worker asks for approval again).' : 'Its output stays here until you close or restart it.'}</p>
 			<div class="ended-actions">
-				{#if !remote}<button class="primary" onclick={() => terminals.restart(sessionId, id)}><RotateCcw size={14} />Restart</button>{/if}
-				<button onclick={() => terminals.close(sessionId, id)}><X size={14} />Close</button>
+				{#if !remote}<button class="st-btn primary" onclick={() => terminals.restart(sessionId, id)}><RotateCcw size={14} />Restart</button>{/if}
+				<button class="st-btn" onclick={() => terminals.close(sessionId, id)}><X size={14} />Close</button>
 			</div>
 		</div>
 	{:else if link.status === 'gone' || link.status === 'auth' || link.status === 'error'}
@@ -250,8 +250,8 @@
 			<p><strong>{link.status === 'gone' ? 'This terminal ended' : link.status === 'auth' ? 'Signed out' : 'Connection lost'}</strong></p>
 			{#if link.message}<p class="sub">{link.message}</p>{/if}
 			<div class="ended-actions">
-				{#if link.status === 'error'}<button class="primary" onclick={retry}><RefreshCw size={14} />Retry</button>{/if}
-				<button onclick={() => (link.status === 'gone' ? terminals.drop(id) : terminals.close(sessionId, id))}><X size={14} />Close tab</button>
+				{#if link.status === 'error'}<button class="st-btn primary" onclick={retry}><RefreshCw size={14} />Retry</button>{/if}
+				<button class="st-btn" onclick={() => (link.status === 'gone' ? terminals.drop(id) : terminals.close(sessionId, id))}><X size={14} />Close tab</button>
 			</div>
 		</div>
 	{/if}
@@ -263,13 +263,13 @@
 	.term-view.dim .term-host { opacity: 0.55; }
 	.term-host { flex: 1; min-height: 0; padding: 8px 4px 4px 10px; transition: opacity 0.2s ease-out; }
 	.term-host :global(.xterm) { height: 100%; }
-	.term-host :global(.xterm-viewport) { background-color: transparent !important; scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
+	.term-host :global(.xterm-viewport) { scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
 	.term-host :global(.xterm:focus-within) { outline: none; }
 
 	.hint {
 		flex-shrink: 0; display: flex; align-items: center; gap: 8px; min-height: 28px;
-		padding: 4px 12px; border-top: 1px solid color-mix(in oklch, var(--primary) 30%, transparent);
-		background: color-mix(in oklab, var(--primary) 9%, var(--code-bg));
+		padding: 4px 12px; border-top:1px solid var(--border);
+		background:var(--muted);
 		color: var(--foreground); font: 500 11.5px/1.3 var(--font-sans);
 		animation: rise 0.22s cubic-bezier(0.2, 0.8, 0.2, 1);
 	}
@@ -281,22 +281,11 @@
 		width: min(340px, calc(100% - 24px)); box-sizing: border-box; padding: 14px 16px;
 		border: 1px solid var(--border-strong); border-radius: var(--radius);
 		background: color-mix(in oklch, var(--popover) 94%, transparent); backdrop-filter: blur(8px);
-		box-shadow: 0 12px 32px oklch(0 0 0 / 0.35); animation: rise 0.25s cubic-bezier(0.2, 0.8, 0.2, 1);
+		box-shadow:var(--menu-shadow); animation: rise 0.25s cubic-bezier(0.2, 0.8, 0.2, 1);
 	}
 	.ended p { margin: 0; font-size: 13px; color: var(--foreground); }
 	.ended .sub { margin-top: 3px; font-size: 12px; color: var(--muted-foreground); }
 	.ended-actions { display: flex; gap: 8px; margin-top: 12px; }
-	.ended-actions button {
-		display: inline-flex; align-items: center; gap: 6px; min-height: 32px; padding: 0 12px;
-		border: 1px solid var(--border-strong); border-radius: calc(var(--radius) - 4px);
-		background: transparent; color: var(--foreground); font: 500 12.5px var(--font-sans); cursor: pointer;
-		transition: background-color 0.15s ease-out, border-color 0.15s ease-out;
-	}
-	.ended-actions button:hover { background: var(--hover-overlay); }
-	.ended-actions button:active { transform: translateY(1px); }
-	.ended-actions button:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
-	.ended-actions .primary { background: var(--primary); border-color: var(--primary); color: var(--primary-foreground); }
-	.ended-actions .primary:hover { background: color-mix(in oklch, var(--primary) 88%, white); }
 
 	@keyframes rise { from { opacity: 0; transform: translate(var(--tx, 0), 6px); } to { opacity: 1; transform: translate(var(--tx, 0), 0); } }
 	.ended { --tx: -50%; }

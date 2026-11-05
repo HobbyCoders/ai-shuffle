@@ -30,10 +30,8 @@
 
 	interface Props {
 		name: string;
-		/** A ViewMain data wrapper owns width and gutters instead of the reading pane. */
-		dataLayout?: boolean;
-		/** Collection pages outside Settings use the Agents reading column. */
-		centered?: boolean;
+		/** Settings retains its measure; collection details share one centered reading column. */
+		width?: 'settings' | 'reading' | 'data';
 		icon?: SettingsIcon;
 		/** Tile text instead of an icon (provider glyph). */
 		glyph?: string;
@@ -74,8 +72,7 @@
 
 	let {
 		name,
-		dataLayout = false,
-		centered = false,
+		width = 'settings',
 		icon,
 		glyph,
 		tile,
@@ -126,7 +123,7 @@
 	}
 </script>
 
-<div class="st-dwrap" class:data-layout={dataLayout} class:centered>
+<div class="st-dwrap" class:data={width === 'data'} class:reading={width === 'reading'}>
 	<div class="st-dtop">
 		<button type="button" class="st-back" aria-label="Back to {catLabel}" onclick={() => (onBack ? onBack() : settingsNav.stacked ? settingsNav.back() : settingsNav.clearSelection(cat))}>
 			<ChevronLeft /><span>{catLabel}</span>
@@ -180,14 +177,9 @@
 		max-width: 700px;
 		padding: 10px 32px 96px;
 	}
-	.st-dwrap.data-layout { max-width: none; padding: 0; }
-	.data-layout .st-dh { grid-template-columns: minmax(0, 1fr) auto; }
-	.data-layout .st-dtop { min-height: 0; }
-	@media (max-width: 600px), (pointer: coarse) { .data-layout .st-back { min-height: 44px; } }
-	@container settings (max-width: 850px) {
-		.data-layout .st-dha { grid-column: 1 / -1; justify-content: flex-start; }
-	}
-	.st-dwrap.centered { width: 100%; max-width: 740px; margin-inline: auto; }
+	.st-dwrap.data { max-width: none; }
+	.st-dwrap.reading { width: 100%; max-width: 740px; margin-inline: auto; }
+	.reading h2 { font-size: 24px; }
 	.st-dtop {
 		display: flex;
 		align-items: center;

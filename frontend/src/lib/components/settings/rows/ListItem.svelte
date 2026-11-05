@@ -51,7 +51,7 @@
 		/** Monospace name (log messages, ids). */
 		mono?: boolean;
 		/** `log`: a bare status dot instead of a tile, tighter row. `pinned`: tinted, outlined row (a pinned item such as the personal assistant). `value`: a 56px settings row, name left, summary right, then a chevron. */
-		variant?: 'default' | 'log' | 'pinned' | 'value';
+		variant?: 'default' | 'log' | 'pinned' | 'value' | 'plain';
 		/** Replaces the tile. */
 		lead?: Snippet;
 		/** Chips after the name (Draft, Modified). */
@@ -91,6 +91,7 @@
 	class:log={variant === 'log'}
 	class:pinned={variant === 'pinned'}
 	class:value={variant === 'value'}
+	class:plain={variant === 'plain'}
 	aria-current={isSelected ? 'true' : undefined}
 	aria-label={ariaLabel}
 	data-settings-item={id}
@@ -107,7 +108,7 @@
 		{@render lead()}
 	{:else if variant === 'log'}
 		<StatusDot tone={status ?? 'off'} />
-	{:else}
+	{:else if variant !== 'plain'}
 		<Tile {icon} text={glyph} {status} ring={isSelected ? 'accent' : 'bg'} />
 	{/if}
 	<span class="tx">
@@ -147,6 +148,7 @@
 	.st-it:focus-visible {
 		outline-offset: -2px;
 	}
+	.st-it.plain { grid-template-columns: minmax(0,1fr) auto; min-height:44px; }
 	.st-it.log {
 		min-height: 42px;
 	}

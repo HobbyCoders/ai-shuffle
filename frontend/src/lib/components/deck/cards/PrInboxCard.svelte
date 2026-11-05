@@ -10,7 +10,8 @@
 	 */
 	import { onMount } from 'svelte';
 	import { GitPullRequest, GitPullRequestDraft, GitMerge, GitPullRequestClosed, RefreshCw, Loader2, Check, X, Clock, ExternalLink } from 'lucide-svelte';
-	import StudioPageHeader from '$lib/components/layout/StudioPageHeader.svelte';
+	import { ViewShell, ViewPanel, PanelIconButton, ListItem, ListGroupLabel, SettingRow, SelectField, Switch, DetailPane, EmptyDetail, InlineBanner } from '$lib/components/layout/view';
+	import PanelField from '$lib/components/layout/view/PanelField.svelte';
 	import { getPullRequestInbox, type InboxPullRequest, type PullRequestInbox } from '$lib/api/github';
 	import {
 		activityAge,
@@ -78,76 +79,34 @@
 	onMount(() => {
 		void load();
 	});
+
+	let detailOpen = $state(false);
 </script>
 
-<div class="pri">
-	<div class="pri-wrap">
-		<div class="pri-head">
-			<StudioPageHeader eyebrow="Across every project" title="Pull" accent="requests">
-				{#snippet actions()}
-					<div class="pri-seg" role="group" aria-label="Pull request state">
-						{#each STATE_OPTIONS as option (option.value)}
-							<button
-								type="button"
-								class="pri-seg-btn"
-								class:on={serverState === option.value}
-								aria-pressed={serverState === option.value}
-								onclick={() => setServerState(option.value)}
-							>{option.label}</button>
-						{/each}
-					</div>
-					<button type="button" class="pri-btn" onclick={() => load()} disabled={loading} title="Refresh" aria-label="Refresh pull requests">
-						<RefreshCw size={15} strokeWidth={1.9} class={loading ? 'pri-spin' : ''} />
-					</button>
-				{/snippet}
-			</StudioPageHeader>
-
-			<div class="pri-filters" role="group" aria-label="Filter pull requests">
-				<label>
-					<span>Review</span>
-					<select bind:value={filters.review} aria-label="Review">
-						<option value="any">Any</option>
-						{#each Object.entries(REVIEW_LABELS) as [value, label] (value)}
-							<option {value}>{label}</option>
-						{/each}
-					</select>
-				</label>
-				<label>
-					<span>Checks</span>
-					<select bind:value={filters.checks} aria-label="Checks">
-						<option value="any">Any</option>
-						{#each Object.entries(CHECKS_LABELS) as [value, label] (value)}
-							<option {value}>{label}</option>
-						{/each}
-					</select>
-				</label>
-				<label>
-					<span>Project</span>
-					<select bind:value={filters.project} aria-label="Project">
-						<option value="any">All projects</option>
-						{#each projects as project (project.id)}
-							<option value={project.id}>{project.name}</option>
-						{/each}
-					</select>
-				</label>
-				{#if serverState === 'open' || serverState === 'all'}
-					<label class="pri-check">
-						<input type="checkbox" bind:checked={filters.hideDrafts} />
-						<span>Hide drafts</span>
-					</label>
-				{/if}
-				{#if filtered}
-					<button type="button" class="pri-clear" onclick={clearFilters}>Clear filters</button>
-				{/if}
-			</div>
-		</div>
-
-		<div class="pri-scroll">
-			{#if error}
-				<div class="pri-error" role="alert">{error}</div>
-			{:else if loading && !inbox}
-				<div class="pri-empty"><Loader2 size={22} class="pri-spin" /> Loading pull requests…</div>
-			{:else if inbox}
+<ViewShell label="Pull requests" {detailOpen} onBack={() => detailOpen = false}>
+ {#snippet panel()}
+  <ViewPanel title="Pull requests" {loading}>
+   {#snippet actions()}<PanelIconButton label="Refresh pull requests" icon={RefreshCw} onclick={load} disabled={loading} />{/snippet}
+   <div role="group" aria-label="Pull request state">
+    {#each STATE_OPTIONS as option (option.value)}
+     <ListItem variant="plain" id={option.value} name={option.label} selected={serverState === option.value} onselect={() => { setServerState(option.value); detailOpen = true; }} />
+    {/each}
+   </div>
+   <ListGroupLabel label="Filters" compact />
+   <div role="group" aria-label="Filter pull requests">
+    <PanelField label="Review"><SelectField bind:value={filters.review} label="Review" options={[{value:'any', label:'Any'}, ...Object.entries(REVIEW_LABELS).map(([value, label]) => ({value, label}))]} /></PanelField>
+    <PanelField label="Checks"><SelectField bind:value={filters.checks} label="Checks" options={[{value:'any', label:'Any'}, ...Object.entries(CHECKS_LABELS).map(([value, label]) => ({value, label}))]} /></PanelField>
+    <PanelField label="Project"><SelectField bind:value={filters.project} label="Project" options={[{value:'any', label:'All projects'}, ...projects.map(p => ({value:p.id, label:p.name}))]} /></PanelField>
+    {#if serverState === 'open' || serverState === 'all'}<SettingRow label="Hide drafts"><Switch bind:checked={filters.hideDrafts} label="Hide drafts" /></SettingRow>{/if}
+    {#if filtered}<button type="button" class="st-btn" onclick={clearFilters}>Clear filters</button>{/if}
+   </div>
+  </ViewPanel>
+ {/snippet}
+ {#snippet main(back)}
+  <DetailPane width="data" name={`${STATE_OPTIONS.find(o => o.value === serverState)?.label} pull requests`} icon={GitPullRequest} subtitle={`${shown.length} ${shown.length === 1 ? 'pull request' : 'pull requests'}`} onBack={back} backLabel="Pull requests">
+   {#if error}<div role="alert"><InlineBanner tone="warn">{error}</InlineBanner></div>
+   {:else if loading && !inbox}<EmptyDetail title="Loading pull requests" message="Fetching repository status…" />
+   {:else if inbox}
 				{#if inbox.items.length === 0}
 					<div class="pri-empty">
 						{inbox.repos.length === 0 ? 'No project has a GitHub remote yet.' : `No ${serverState === 'all' ? '' : `${serverState} `}pull requests.`}
@@ -155,7 +114,7 @@
 				{:else if shown.length === 0}
 					<div class="pri-empty">
 						No pull requests match these filters.
-						<button type="button" class="pri-clear" onclick={clearFilters}>Clear filters</button>
+						<button type="button" class="st-btn" onclick={clearFilters}>Clear filters</button>
 					</div>
 				{:else}
 					<ul class="pri-list" aria-label="Pull requests">
@@ -206,114 +165,29 @@
 						</ul>
 					</details>
 				{/if}
-			{/if}
-		</div>
-	</div>
-</div>
-
+   {/if}
+  </DetailPane>
+ {/snippet}
+</ViewShell>
 <style>
-	.pri {
-		display: flex;
-		flex-direction: column;
-		height: 100%;
-		min-height: 0;
-		overflow: hidden;
-		background: var(--background);
-	}
-	.pri-wrap {
-		width: 100%;
-		max-width: 1080px;
-		margin: 0 auto;
-		flex: 1;
-		min-height: 0;
-		display: flex;
-		flex-direction: column;
-	}
-	.pri-head { flex-shrink: 0; padding: 22px 28px 0; }
-	.pri-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 14px 28px 28px; }
-
-	.pri-seg { display: inline-flex; padding: 3px; gap: 2px; background: var(--muted); border-radius: calc(var(--radius, 0.75rem) - 2px); }
-	.pri-seg-btn {
-		height: 28px; padding: 0 11px; border: 0; border-radius: calc(var(--radius, 0.75rem) - 4px);
-		background: transparent; color: var(--muted-foreground); font-size: 0.8125rem; cursor: pointer;
-	}
-	.pri-seg-btn:hover { color: var(--foreground); }
-	.pri-seg-btn.on { background: var(--card); color: var(--foreground); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18); }
-	.pri-btn {
-		display: inline-grid; place-items: center; width: 34px; height: 34px; border: 1px solid var(--border);
-		border-radius: calc(var(--radius, 0.75rem) - 2px); background: var(--card); color: var(--muted-foreground); cursor: pointer;
-	}
-	.pri-btn:hover:not(:disabled) { color: var(--foreground); background: var(--hover-overlay); }
-	.pri-btn:disabled { opacity: 0.55; cursor: not-allowed; }
-
-	.pri-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin-top: 14px; font-size: 0.8125rem; }
-	.pri-filters label { display: inline-flex; align-items: center; gap: 6px; color: var(--muted-foreground); }
-	.pri-filters select {
-		height: 30px; padding: 0 8px; border: 1px solid var(--border); border-radius: calc(var(--radius, 0.75rem) - 4px);
-		background: var(--card); color: var(--foreground); font: inherit; max-width: 200px;
-	}
-	.pri-check { cursor: pointer; }
-	.pri-clear {
-		border: 0; background: transparent; color: var(--primary); font: inherit; font-size: 0.8125rem; cursor: pointer; padding: 0 2px;
-	}
-	.pri-clear:hover { text-decoration: underline; }
-
-	.pri-error {
-		padding: 12px 14px; border: 1px solid color-mix(in oklab, var(--destructive) 40%, var(--border));
-		border-radius: var(--radius, 0.75rem); color: var(--destructive); font-size: 0.875rem;
-	}
-	.pri-empty {
-		display: flex; align-items: center; justify-content: center; gap: 10px; padding: 48px 12px;
-		color: var(--muted-foreground); font-size: 0.875rem;
-	}
-
-	.pri-list { list-style: none; margin: 0; padding: 0; border: 1px solid var(--border); border-radius: var(--radius, 0.75rem); background: var(--card); overflow: hidden; }
-	.pri-row { display: flex; align-items: flex-start; gap: 12px; padding: 11px 14px; border-top: 1px solid var(--border); }
-	.pri-row:first-child { border-top: 0; }
-	.pri-row:hover { background: var(--hover-overlay); }
-	.pri-state { flex-shrink: 0; margin-top: 2px; color: var(--success, #22a06b); display: inline-flex; }
-	.pri-row[data-state='draft'] .pri-state { color: var(--muted-foreground); }
-	.pri-row[data-state='merged'] .pri-state { color: var(--primary); }
-	.pri-row[data-state='closed'] .pri-state { color: var(--destructive); }
-	.pri-main { flex: 1; min-width: 0; }
-	.pri-title {
-		display: inline-flex; align-items: center; gap: 5px; max-width: 100%; color: var(--foreground);
-		font-size: 0.9rem; font-weight: 500; text-decoration: none; overflow-wrap: anywhere;
-	}
-	.pri-title :global(svg) { flex-shrink: 0; opacity: 0; color: var(--muted-foreground); }
-	.pri-title:hover { text-decoration: underline; }
-	.pri-title:hover :global(svg), .pri-title:focus-visible :global(svg) { opacity: 1; }
-	.pri-meta {
-		display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 3px; color: var(--muted-foreground);
-		font-size: 0.75rem; min-width: 0;
-	}
-	.pri-meta > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 280px; }
-	.pri-repo, .pri-branch { font-family: var(--font-mono, monospace); }
-	.pri-badges { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
-	.pri-chip {
-		font-size: 0.6875rem; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted-foreground); white-space: nowrap;
-	}
-	.pri-chip[data-review='approved'] { color: var(--success, #22a06b); border-color: color-mix(in oklab, var(--success, #22a06b) 45%, var(--border)); }
-	.pri-chip[data-review='changes_requested'] { color: var(--destructive); border-color: color-mix(in oklab, var(--destructive) 45%, var(--border)); }
-	.pri-checks { display: inline-flex; }
-	.pri-checks[data-checks='passing'] { color: var(--success, #22a06b); }
-	.pri-checks[data-checks='failing'] { color: var(--destructive); }
-	.pri-checks[data-checks='pending'] { color: var(--warning, #c58a00); }
-	.pri-age { min-width: 30px; text-align: right; color: var(--muted-foreground); font-size: 0.75rem; font-variant-numeric: tabular-nums; }
-
-	.pri-skipped { margin-top: 14px; font-size: 0.8125rem; color: var(--muted-foreground); }
-	.pri-skipped summary { cursor: pointer; }
-	.pri-skipped ul { margin: 8px 0 0; padding-left: 18px; }
-	.pri-skipped li { margin: 3px 0; }
-
-	:global(.pri-spin) { animation: pri-spin 0.9s linear infinite; }
-	@keyframes pri-spin { to { transform: rotate(360deg); } }
-
-	@media (max-width: 640px) {
-		.pri-head { padding: 16px 14px 0; }
-		.pri-scroll { padding: 12px 14px 20px; }
-		.pri-row { flex-wrap: wrap; }
-		.pri-badges { width: 100%; padding-left: 28px; }
-		.pri-age { margin-left: auto; }
-	}
+ .pri-list { list-style: none; padding: 0; margin: 0; }
+ .pri-row { display: flex; align-items: center; gap: 12px; padding: 16px 0; border-bottom: 1px solid var(--st-border); }
+ .pri-state { flex: none; color: var(--st-success); }
+ .pri-row[data-state='draft'] .pri-state { color: var(--st-mfg); }
+ .pri-row[data-state='merged'] .pri-state { color: var(--chart-3, var(--st-mfg)); }
+ .pri-row[data-state='closed'] .pri-state { color: var(--st-destructive); }
+ .pri-main { flex: 1; min-width: 0; }
+ .pri-title { display: inline-flex; align-items: center; gap: 6px; font-size: 14px; font-weight: 500; color: var(--st-fg); }
+ .pri-title:hover { color: var(--st-primary); }
+ .pri-meta { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 6px; color: var(--st-mfg); font-size: 12px; overflow-wrap: anywhere; }
+ .pri-branch { font-family: var(--st-mono); }
+ .pri-badges { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; color: var(--st-mfg); font-size: 12px; }
+ .pri-chip[data-review='approved'], .pri-checks[data-checks='passing'] { color: var(--st-success); }
+ .pri-chip[data-review='changes_requested'], .pri-checks[data-checks='failing'] { color: var(--st-destructive); }
+ .pri-checks[data-checks='pending'] { color: var(--st-warning); }
+ .pri-age { font-variant-numeric: tabular-nums; }
+ .pri-empty { padding: 48px 0; color: var(--st-mfg); display: grid; justify-items: center; gap: 16px; text-align: center; }
+ .pri-skipped { margin-top: 24px; color: var(--st-mfg); font-size: 13px; }
+ .pri-skipped summary { cursor: pointer; }
+ @media (max-width:600px) { .pri-row { flex-wrap: wrap; } .pri-badges { width: 100%; justify-content: flex-start; padding-left: 28px; } }
 </style>
