@@ -52,7 +52,7 @@ async function diagnosticEvents(page, id) {
      if (!line.startsWith('data:')) continue;
      const data = JSON.parse(line.slice(5));
      if (data.type === 'caught_up') return out;
-     if (['tool.result', 'plan.updated', 'turn.aborted'].includes(data.type)) out.push(data);
+     if (['tool.use', 'tool.result', 'plan.updated', 'turn.aborted'].includes(data.type)) out.push(data);
     }
    }
   } catch (error) { out.push({ diagnostic: String(error) }); }
