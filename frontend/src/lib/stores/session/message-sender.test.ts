@@ -785,6 +785,59 @@ describe('message-sender send during a live turn', () => {
 	});
 });
 
+describe('message-sender local-send presentation intent', () => {
+	it.each([
+		{ name: 'transcript append', streaming: false, skip: false, authoritative: false },
+		{ name: 'optimistic queue', streaming: true, skip: false, authoritative: false },
+		{ name: 'authoritative queue without local echo', streaming: true, skip: false, authoritative: true },
+		{ name: 'pre-appended message', streaming: false, skip: true, authoritative: false },
+	])('publishes one atomic intent for $name', async ({ streaming, skip, authoritative }) => {
+		const initial = baseState({
+			sessionId: 'intent-session', title: 'Existing chat', isStreaming: streaming,
+			messages: [{ id: 'earlier', role: 'user', content: 'earlier' } as any],
+			error: 'previous held error',
+			localSendIntent: { sessionId: 'intent-session', revision: 7 },
+		});
+		const { deps, getState } = makeDeps(initial);
+		const snapshots: ActiveSessionState[] = [];
+		const update = deps.update;
+		deps.update = fn => update(s => {
+			const next = fn(s);
+			snapshots.push(next);
+			return next;
+		});
+		const authority = vi.spyOn(pendingQueue, 'authoritySpokeSince').mockReturnValue(authoritative);
+		try {
+			const sender = createMessageSender(deps);
+			for (const revision of [8, 9]) {
+				const start = snapshots.length;
+				expect(await sender.sendMessage('fresh local send', { skipMessageAppend: skip })).toBe(true);
+				expect(getState().localSendIntent).toEqual({ sessionId: 'intent-session', revision });
+				const cleared = snapshots.slice(start).filter(s => s.error === null);
+				expect(cleared.length).toBeGreaterThan(0);
+				for (const snapshot of cleared) {
+					expect(snapshot.localSendIntent).toEqual({ sessionId: 'intent-session', revision });
+				}
+			}
+			if (streaming || skip) expect(getState().messages).toBe(initial.messages);
+		} finally {
+			authority.mockRestore();
+		}
+	});
+
+	it('does not publish an intent for a refused preflight', async () => {
+		const intent = { sessionId: 'previous-session', revision: 7 };
+		const { deps, getState, wsConn } = makeDeps(baseState({
+			sessionId: null, title: 'Existing chat',
+			messages: [{ id: 'earlier', role: 'user', content: 'earlier' } as any],
+			localSendIntent: intent,
+		}));
+		expect(await createMessageSender(deps).sendMessage('must not create another session')).toBe(false);
+		expect(getState().localSendIntent).toBe(intent);
+		expect(wsConn.send).not.toHaveBeenCalled();
+	});
+});
+
 /**
  * Worktree sessions resume like local sessions: they only need their initial
  * working directory to still exist on disk (enforced backend-side on the query

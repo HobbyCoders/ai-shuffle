@@ -1,0 +1,21 @@
+{
+  "description": "A real Task using the seeded fake Claude CLI helper finishes without changes, then receives a follow-up after its disposable checkout has been reclaimed. CLI Bash results are scripted; checkout provisioning and continuation are real.",
+  "steps": [
+    {
+      "tool_calls": [
+        {
+          "name": "Task",
+          "input": {
+            "agent": "dev-claude-code",
+            "model": "sonnet",
+            "prompt": "[script:tool-bash]",
+            "mode": "sync"
+          }
+        }
+      ]
+    },
+    {
+      "text": "Worker task complete."
+    }
+  ]
+}

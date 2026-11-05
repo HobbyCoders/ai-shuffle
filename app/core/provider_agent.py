@@ -3567,7 +3567,5 @@ async def dispatch_worker(
         # research-only worker. Anything committed or changed is retained.
         # A resumed worker re-materializes it from the recorded tip.
         if worker_checkout is not None and not outstanding and status != "paused":
-            from app.core.worker_checkout import reclaim_untouched_worker_checkout
-            await emit_shielded(asyncio.to_thread(
-                reclaim_untouched_worker_checkout, worker_session_id, worker_checkout,
-            ))
+            from app.core.worker_checkout import reclaim_finished_worker_checkout
+            await emit_shielded(reclaim_finished_worker_checkout(worker_session_id, worker_checkout))

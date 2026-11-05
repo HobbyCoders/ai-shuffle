@@ -83,9 +83,13 @@ describe('createWrapWatcher', () => {
 
 	/** A composer whose widths the test sets; lines are counted at 10px a character. */
 	function composer(text: string) {
-		const frames: FrameRequestCallback[] = [];
-		vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => { frames.push(cb); return frames.length; });
-		vi.stubGlobal('cancelAnimationFrame', () => {});
+		const frames = new Map<number, FrameRequestCallback>();
+		let nextFrame = 0;
+		vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+			frames.set(++nextFrame, cb);
+			return nextFrame;
+		});
+		vi.stubGlobal('cancelAnimationFrame', vi.fn((id: number) => { frames.delete(id); }));
 		const el = (width: number) => {
 			const node = document.createElement('div');
 			document.body.append(node);
@@ -108,9 +112,45 @@ describe('createWrapWatcher', () => {
 			setWrapped: (w) => { state.wrapped = w; },
 			countLines: (t, _e, width) => { state.widths.push(width); state.measured.push(t.length); return Math.ceil((t.length * 10) / width); }
 		});
-		const run = () => { watcher.schedule(); frames.splice(0).forEach((cb) => cb(0)); };
+		const run = () => {
+			watcher.schedule();
+			const pending = [...frames.values()];
+			frames.clear();
+			pending.forEach((cb) => cb(0));
+		};
 		return { state, run, watcher };
 	}
+
+	it('settles a text update immediately and cancels its already queued observer frame', () => {
+		const { state, watcher, run } = composer('x'.repeat(52));
+		watcher.schedule();
+		expect(state.wrapped).toBe(false);
+		watcher.measureNow();
+		expect(state.wrapped).toBe(true);
+		expect(cancelAnimationFrame).toHaveBeenCalledWith(1);
+		state.editorWidth = 640;
+		state.circles = 108;
+		watcher.schedule();
+		watcher.schedule();
+		run();
+		expect(state.widths).toEqual([500, 462]);
+		state.text = '';
+		watcher.measureNow();
+		expect(state.wrapped).toBe(false);
+	});
+
+	it.each(['island', 'editorWidth'] as const)('keeps the current layout while %s is unmeasurable, then resumes', (box) => {
+		const { state, run } = composer('short');
+		state.wrapped = true;
+		const width = state[box];
+		state[box] = 0;
+		run();
+		expect(state.wrapped).toBe(true);
+		expect(state.widths).toEqual([]);
+		state[box] = width;
+		run();
+		expect(state.wrapped).toBe(false);
+	});
 
 	// #912: the hidden copy re-lays out all it holds, so a 200 KB paste copied
 	// whole on every change cost a long task per keystroke.

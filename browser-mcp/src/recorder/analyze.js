@@ -506,7 +506,7 @@ function describeEntry(entry, state) {
     case 'mark':
       return `> mark ${JSON.stringify(clip(entry.label, 120))}`;
     case 'mount':
-      return `${entry.op === 'unmount' ? '-' : '+'} ${entry.name} ${entry.op === 'unmount' ? 'unmounted' : 'mounted'}`;
+      return `${entry.op === 'unmount' ? '-' : '+'} ${entry.name} ${entry.op === 'unmount' ? 'unmounted' : 'mounted'}${entry.diagnostic ? ` | diagnostic=${JSON.stringify(entry.diagnostic)}` : ''}`;
     case 'error':
       return `! ${entry.source === 'console' ? 'console.error' : entry.source === 'rejection' ? 'unhandled rejection' : 'error'}: ${clip(entry.message, 160)}`;
     case 'request':
@@ -520,7 +520,7 @@ function describeEntry(entry, state) {
     case 'visibility':
       return `* page ${entry.state}`;
     case 'note':
-      return `* ${clip(entry.message, 160)}`;
+      return `* ${clip(entry.message, 160)}${entry.diagnostic ? ` | diagnostic=${JSON.stringify(entry.diagnostic)}` : ''}`;
     default:
       return `* ${entry.kind}`;
   }

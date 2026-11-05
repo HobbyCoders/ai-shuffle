@@ -229,6 +229,27 @@
 	// mid-call. The transcript column takes over and fills in as the exchange
 	// lands.
 	const showEmptyHero = $derived(isEmptyState && !voiceCallActive);
+	// The injected flight recorder can read the live derived values *inside*
+	// a DOM removal, before Svelte updates the signature attributes. No effect
+	// tracks these reads. Vite eliminates this entire block in release builds.
+	if (import.meta.env.DEV) {
+		$effect(() => {
+			const view = document.querySelector<HTMLElement & { __flightRecorderState?: () => unknown }>(
+				'[data-ui-mount="ChatView"]'
+			);
+			if (!view) return;
+			const read = () => untrack(() => ({
+				showEmptyHero, isEmptyState, chatSurface, presentedSurface, transcriptSurface,
+				mirrorWaiting: mirrorSync.waiting, voiceCallActive,
+				session: uiSessionTag($activeSession.sessionId),
+				transcriptSession: uiSessionTag(transcriptSessionId),
+				messages: $activeSession.messages.length,
+				transcriptMessages: transcriptMessageCount
+			}));
+			view.__flightRecorderState = read;
+			return () => { if (view.__flightRecorderState === read) delete view.__flightRecorderState; };
+		});
+	}
 	// A brand-new session (not a cleared one or the "could not open" notice)
 	// leads with the agent and the "Runs on …" sentence, which stands in for
 	// the composer's chip row until the first message.
@@ -821,6 +842,8 @@
 		animation: messageAreaReveal 350ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
 	}
 
+	/* The shared layout moves its empty composer from centre to dock.
+	   Shells that already dock the composer override this input animation. */
 	.transitioning-from-empty .input-wrapper {
 		animation: inputSlideDown 400ms cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
 	}

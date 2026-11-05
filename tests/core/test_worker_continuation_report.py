@@ -126,7 +126,7 @@ async def test_a_continued_worker_saves_its_new_report_for_task_get(report_dir, 
     terminal = AsyncMock()
     monkeypatch.setattr(turn_scheduler, "on_task_terminal", terminal)
     monkeypatch.setattr("app.core.worker_checkout.reclaim_untouched_worker_checkout",
-                        lambda sid: None)
+                        lambda sid, checkout=None: None)
 
     await agent_messaging.finish_message_resume("w1", settled, "completed")
 
@@ -206,7 +206,7 @@ async def test_a_continuation_with_no_text_after_the_message_reports_its_turn(
     monkeypatch.setattr("app.core.provider_agent_feed.record_continuation_report", AsyncMock())
     monkeypatch.setattr(turn_scheduler, "on_task_terminal", AsyncMock())
     monkeypatch.setattr("app.core.worker_checkout.reclaim_untouched_worker_checkout",
-                        lambda sid: None)
+                        lambda sid, checkout=None: None)
 
     await agent_messaging.finish_message_resume("w1", settled, "completed")
     row = task_registry.get_task("parent-1", "w1")

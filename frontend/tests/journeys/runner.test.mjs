@@ -1,11 +1,11 @@
-// Exercise the real runner's planning path, before it needs a browser or app.
+// Exercise the real runner's selection and cleanup without a browser or app.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { test } from 'node:test';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { readDevloopStatus } from './runner.mjs';
+import { deleteCaseChats, readDevloopStatus } from './runner.mjs';
 
 test('paused transitions are usable without hiding a dead or broken instance', () => {
 	const directory = mkdtempSync(join(tmpdir(), 'journey-idle-'));
@@ -80,3 +80,41 @@ test('local default and substring selection retain their behavior', () => {
 	assert.equal(substring.status, 0, substring.stderr);
 	assert.deepEqual(substring.stdout.trim().split('\n'), ['copy@desktop-fast', 'prefix-copy@desktop-fast']);
 });
+
+// Run the real cleanup callback against a fake session API, not a second copy
+// of its filter. A cold devloop can seed the CLI inside the case's 2s lookback.
+for (const withCli of [false, true]) {
+	test(`cleanup preserves every seed and deletes only case chats (CLI seed: ${withCli})`, async (t) => {
+		const startedAt = Date.parse('2026-11-04T22:00:00Z');
+		const recent = new Date(startedAt - 500).toISOString();
+		const older = new Date(startedAt - 3000).toISOString();
+		const status = { urls: { ui: 'http://devloop.invalid/' }, seed: {
+			chats: { long: 'native-seed' },
+			...(withCli ? { claude_cli: { chat: 'cli-seed', agent_id: 'dev-claude-code' } } : {})
+		} };
+		const rows = new Map([
+			['native-seed', recent], ...(withCli ? [['cli-seed', recent]] : []),
+			['previous-case', older], ['case-chat', recent], ['lookback-chat', new Date(startedAt - 2000).toISOString()]
+		].map(([id, created_at]) => [id, { id, created_at }]));
+		const deleted = [];
+		t.mock.method(globalThis, 'fetch', async (url, options) => {
+			if (url === '/api/v1/sessions?limit=100') return { ok: true, json: async () => [...rows.values()] };
+			assert.equal(options.method, 'DELETE');
+			const id = decodeURIComponent(url.slice('/api/v1/sessions/'.length));
+			deleted.push(id);
+			assert.equal(rows.delete(id), true, `unexpected deletion: ${id}`);
+			return { ok: true };
+		});
+		let closed = false;
+		const context = { newPage: async () => ({
+			goto: async (url) => assert.equal(url, 'http://devloop.invalid/api/v1/auth/status'),
+			evaluate: async (callback, args) => callback(args),
+			close: async () => { closed = true; }
+		}) };
+		const count = await deleteCaseChats(context, status, startedAt);
+		assert.deepEqual(deleted, ['case-chat', 'lookback-chat']);
+		assert.equal(count, 2);
+		assert.deepEqual([...rows.keys()], ['native-seed', ...(withCli ? ['cli-seed'] : []), 'previous-case']);
+		assert.equal(closed, true);
+	});
+}

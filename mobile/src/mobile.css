@@ -157,6 +157,7 @@ html:root[data-platform='mobile'] .chat-input-wrapper {
 /* The composer card (issue #1816): + | text | mic · talk/send · stop, with
    the quick bar (MobileComposerControlsSheet) as its bottom edge. */
 html:root[data-platform='mobile'] .chat-island {
+	--composer-action-size: 40px;
 	/* The composer buttons follow the theme's corners as on desktop, scaled
 	   to the 40px buttons: 0.5rem (8px here) and up makes a full circle,
 	   0.25-0.375rem a rounded square, 0 a square (2.5x, capped at half the
@@ -543,6 +544,12 @@ html:root[data-platform='mobile'] .project-name {
 }
 
 /* ── frontend/src/lib/components/layout/ChatView.svelte ────────────────────── */
+
+/* This shell already docks the empty composer beneath the hero. Keep the
+   message reveal, without the shared input's invented -30vh trip (#1073). */
+html:root[data-platform='mobile'] .transitioning-from-empty .input-wrapper {
+	animation: none;
+}
 
 /* The invitation is centred in the room above the pinned composer and never
    shrinks; when it does not fit, the whole empty surface scrolls. The

@@ -102,4 +102,3 @@ async def test_older_receiver_cannot_silently_drop_plan(pair, monkeypatch, tmp_p
     with a.active():
         assert session_plans.read(SID)["plan"]["revision"] == 1
         assert database.get_session(SID)["owner_device_id"] == a.identity.device_id
-

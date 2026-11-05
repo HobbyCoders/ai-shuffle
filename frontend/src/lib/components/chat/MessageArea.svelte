@@ -70,7 +70,7 @@
 		resolveReadingAnchorDelta,
 		type ReadingAnchor,
 		shouldAutoScrollOnChange,
-		shouldPinLatestTurnOnSettle,
+		shouldFollowLatestTurnOnSettle,
 		shouldShowJumpToLatest,
 		type ScrollMetrics
 	} from '$lib/stores/session/auto-scroll';
@@ -245,6 +245,13 @@
 	// Non-virtualized current-turn anchoring. The spacer grows only for the latest
 	// sent turn, then shrinks one-for-one beneath the response as it fills the view.
 	let tailSpacerRef = $state<HTMLDivElement | null>(null);
+	let tailControlsRef = $state<HTMLDivElement | null>(null);
+	let tailErrorRef = $state<HTMLDivElement | null>(null);
+	let tailErrorOffsetPx = $state(0);
+	let tailQueueSlotPx = $state(0);
+	let presentedTailError: string | null = null;
+	let followedViewportEnd = 0;
+	let followedFloorContext: { sessionId: string | null } | null = null;
 	let currentTurnAnchorId: string | null = null;
 	let tailReservePx = $state(MIN_TRANSCRIPT_TAIL_RESERVE);
 	let anchorMaintenanceRaf: number | null = null;
@@ -808,12 +815,13 @@
 	let windowShifting = false;
 	let revealedTurnId = $state<string | null>(null);
 	let anchorRounding: { scrollTop: number; error: number } | null = null;
-	// Space kept above the window when evicting leading rows would need a
-	// negative scrollTop (#889): at scroll origin the compensation clamps and
-	// the reader moves up. Measured per shift; every later shift re-anchors.
+	// Exact leading space keeps automatic evictions in the same coordinate
+	// system, and prevents a reader's negative-scrollTop clamp (#889). Explicit
+	// paging re-anchors and releases it; range caches retain its measured value.
 	let leadingGap = $state(0);
+	let earlierRowRef = $state<HTMLDivElement | null>(null);
 
-	function applyMountedRange(next: TranscriptRange, preserveAnchor = true, keepLeadingSpace = false) {
+	function applyMountedRange(next: TranscriptRange, preserveAnchor = true, keepLeadingSpace = false, allowFollowerAppend = false) {
 		// Once the budget was reached, keep the clear affordance stable until
 		// the native selection ends, even if this reprice itself fits the window.
 		selectionBlocksNavigation = transcriptWindow.selectionLimited ||
@@ -821,6 +829,47 @@
 		if (selectionBlocksNavigation) shouldAutoScroll = false;
 		if (!preserveAnchor) anchorRounding = null;
 		if (next.start === mountedStart && next.end === mountedEnd) return;
+		// An automatic append retains this session's coordinate origin. Let the
+		// same-task tail follow consume its reserve instead of treating it as an
+		// eviction and blocking follow until a later ResizeObserver frame.
+		if (allowFollowerAppend && shouldAutoScroll && !preserveAnchor && !windowShifting &&
+			next.start === mountedStart && next.end > mountedEnd && mountedEnd > mountedStart &&
+			chatColumnRef?.querySelector<HTMLElement>(':scope > [data-transcript-key]')?.dataset.transcriptKey === displayItemKey(displayItems[next.start])) {
+			mountedRange = next;
+			if (windowSessionKey) {
+				mountedRangeCache.set(windowSessionKey, leadingGap ? { ...next, leadingGap } : next);
+				evictOldest(mountedRangeCache, SCROLL_CACHE_MAX);
+			}
+			return;
+		}
+		// Removing leading DOM must not change an automatic follower's origin.
+		// Restoring scrollTop after tick is too late: measuring the shortened DOM
+		// has already laid out/scored a clamp, and can expose old prose at the tail.
+		// Retain the exact measured distance in the existing leading space instead.
+		// All reserve/observer writers then keep valid coordinates, even when a
+		// terminal row and a multi-thousand-pixel WORKLOG eviction commit together.
+		if (allowFollowerAppend && shouldAutoScroll && !preserveAnchor && !windowShifting &&
+			next.start > mountedStart && chatColumnRef && earlierRowRef) {
+			const rows = Array.from(chatColumnRef.querySelectorAll<HTMLElement>(':scope > [data-transcript-key]'));
+			const retained = rows.find(node => node.dataset.transcriptKey === displayItemKey(displayItems[next.start]));
+			const first = rows[0];
+			if (retained && first) {
+				// The control starts in flow only on the first eviction. Its measured
+				// height (including responsive text) is not an estimated row height.
+				const control = mountedStart === 0 ? earlierRowRef.getBoundingClientRect().height
+					+ (parseFloat(getComputedStyle(chatColumnRef).rowGap) || 0) : 0;
+				const gap = leadingGap + retained.getBoundingClientRect().top - first.getBoundingClientRect().top - control;
+				if (gap >= 0) {
+					leadingGap = gap;
+					mountedRange = next;
+					if (windowSessionKey) {
+						mountedRangeCache.set(windowSessionKey, { ...next, leadingGap: gap });
+						evictOldest(mountedRangeCache, SCROLL_CACHE_MAX);
+					}
+					return;
+				}
+			}
+		}
 		const container = containerRef;
 		const top = container?.getBoundingClientRect().top ?? 0;
 		const candidates = preserveAnchor && container
@@ -847,6 +896,9 @@
 		const shiftSessionKey = windowSessionKey;
 		const version = ++windowShiftVersion;
 		windowShifting = true;
+		// A floor measured in the previous bounded slice is not a scroll target
+		// in this one. Retained-row anchoring owns coordinate compensation.
+		followedViewportEnd = 0;
 		mountedRange = next;
 		leadingGap = 0;
 		if (windowSessionKey) {
@@ -897,9 +949,17 @@
 					// Never carry a real clamp/navigation boundary into a later shift.
 					anchorRounding = anchor?.isConnected && Math.abs(error) < 1
 						? { scrollTop: container.scrollTop, error } : null;
-					lastKnownScrollTop = container.scrollTop;
-					lastScrollMetrics = readScrollMetrics();
 				}
+				if (!preserveAnchor && shouldAutoScroll && currentTurnAnchorId) {
+					// A rebased origin must consume newly mounted error/activity height
+					// before paint, not in a later observer frame. Maintenance may size
+					// the reserve while locked, but its post-tick scroll is fenced.
+					await maintainCurrentTurnAnchor();
+					if (version !== windowShiftVersion || container !== containerRef) return;
+				}
+				// Followers have no preservation delta, but their origin still changed.
+				lastKnownScrollTop = container.scrollTop;
+				lastScrollMetrics = readScrollMetrics();
 			}
 			windowShifting = false;
 		});
@@ -939,7 +999,7 @@
 				next = transcriptWindow.restoreRange(saved);
 			}
 			const reading = !isNewSession && !shouldAutoScroll;
-			applyMountedRange(next, reading, reading);
+			applyMountedRange(next, reading, reading, !isNewSession);
 			if (isNewSession && saved?.leadingGap && next.start === saved.start && next.end === saved.end) leadingGap = saved.leadingGap;
 		});
 	});
@@ -1096,11 +1156,11 @@
 		let needsNewestTickRoom = false;
 		if (!currentTurnAnchorId && turnNavigationItems[index + 1] === undefined && tailSpacerRef) {
 			const anchorTop = containerRef.scrollTop + anchorBox.top - containerBox.top;
-			const contentEnd = containerRef.scrollTop + tailSpacerRef.getBoundingClientRect().top - containerBox.top;
+			const contentEnd = transcriptContentEnd();
 			const desired = resolveAnchoredTailReserve({
 				clientHeight: containerRef.clientHeight,
 				contentAfterAnchor: Math.max(0, contentEnd - anchorTop)
-			});
+			}) + tailControlsExtent();
 			if (desired > Math.max(tailReservePx, latestTurnTailPx)) {
 				latestTurnTailPx = desired;
 				needsNewestTickRoom = true;
@@ -1252,9 +1312,55 @@
 		}
 	}
 
-	async function maintainCurrentTurnAnchor(initial = false) {
+	// Queue/error controls share the existing trailing reserve. Their bottom
+	// stays docked while prose consumes that reserve, instead of trading flow
+	// height with blank space on queue removal, handoff, error, and Stop.
+	function tailControlsExtent(): number {
+		const pendingHeight = tailControlsRef?.getBoundingClientRect().height ?? 0;
+		const errorHeight = tailErrorRef?.getBoundingClientRect().height ?? 0;
+		const height = Math.max(pendingHeight, errorHeight > 0 ? tailErrorOffsetPx + errorHeight : 0);
+		const gap = chatColumnRef ? parseFloat(getComputedStyle(chatColumnRef).rowGap) || 0 : 0;
+		return height > 0 ? height + MIN_TRANSCRIPT_TAIL_RESERVE + gap : 0;
+	}
+
+	function transcriptContentEnd(): number {
+		if (!containerRef || !tailSpacerRef) return 0;
+		return containerRef.scrollTop + tailSpacerRef.getBoundingClientRect().top
+			- containerRef.getBoundingClientRect().top + tailControlsExtent();
+	}
+
+	function renderedFollowEnd(): number {
+		if (!containerRef) return 0;
+		// Call room stays held after hangup so the transcript does not move.
+		// Use that same room for both control placement and the followed edge.
+		const callRoom = chatColumnRef ? parseFloat(getComputedStyle(chatColumnRef).getPropertyValue('--call-dock-reserve')) || 0 : 0;
+		const controls = [tailControlsRef, tailErrorRef].filter((el): el is HTMLDivElement => !!el && el.getBoundingClientRect().height > 0);
+		if (controls.length) {
+			// The error was read above the queue. Keep that trailing slot in the
+			// followed edge after Stop removes its bubbles; following only the
+			// remaining banner bottom lets it move within the viewport (#1113).
+			const end = Math.max(...controls.map(el => el.getBoundingClientRect().bottom
+				+ (el === tailErrorRef ? tailErrorOffsetPx : 0))) + MIN_TRANSCRIPT_TAIL_RESERVE + callRoom;
+			return containerRef.scrollTop + end - containerRef.getBoundingClientRect().top;
+		}
+		// Keep prose (and the working line in its existing 24px tail) above
+		// the held call room, without changing the zero-room follow coordinates.
+		return transcriptContentEnd() + (callRoom > 0 ? callRoom + MIN_TRANSCRIPT_TAIL_RESERVE : 0);
+	}
+
+	function readingFloorReserve(): number {
+		if (!containerRef || !tailSpacerRef || !shouldAutoScroll || windowShifting) return 0;
+		const proseEnd = containerRef.scrollTop + tailSpacerRef.getBoundingClientRect().top - containerRef.getBoundingClientRect().top;
+		// Dequeue and delivered user row are separate commits. Keep the read
+		// viewport available between them; subsequent content consumes it.
+		return Math.max(0, followedViewportEnd - proseEnd);
+	}
+
+	async function maintainCurrentTurnAnchor(initial = false, beforeShrink?: number) {
 		if (!containerRef || !tailSpacerRef || !currentTurnAnchorId) return;
-		const anchor = document.getElementById(turnAnchorId(currentTurnAnchorId));
+		const maintainedTurnId = currentTurnAnchorId;
+		const maintainedWindowVersion = windowShiftVersion;
+		const anchor = document.getElementById(turnAnchorId(maintainedTurnId));
 		if (!anchor || !containerRef.contains(anchor)) {
 			cancelCurrentTurnAnchor();
 			return;
@@ -1262,22 +1368,30 @@
 
 		const containerBox = containerRef.getBoundingClientRect();
 		const anchorTop = containerRef.scrollTop + anchor.getBoundingClientRect().top - containerBox.top;
-		const contentEnd = containerRef.scrollTop + tailSpacerRef.getBoundingClientRect().top - containerBox.top;
+		const contentEnd = transcriptContentEnd();
 		const contentAfterAnchor = Math.max(0, contentEnd - anchorTop);
-		tailReservePx = resolveAnchoredTailReserve({
+		tailReservePx = Math.max(readingFloorReserve(), resolveAnchoredTailReserve({
 			clientHeight: containerRef.clientHeight,
 			contentAfterAnchor
-		});
+		}) + tailControlsExtent());
 		await tick();
-		if (!containerRef || !currentTurnAnchorId) return;
+		if (!containerRef || currentTurnAnchorId !== maintainedTurnId
+			|| maintainedWindowVersion !== windowShiftVersion || windowShifting) return;
 
 		if (initial) {
 			setProgrammaticScrollTop(resolveCurrentTurnAnchorScrollTop(anchorTop));
 		} else {
+			// A tail control can leave before its replacement arrives (queue,
+			// error, Stop). Give back its room and undo any browser clamp in this
+			// same microtask, before it can paint a bounce. Window eviction owns
+			// its own coordinates and must not restore an old absolute scrollTop.
+			if (beforeShrink !== undefined && !windowShifting && shouldAutoScroll && beforeShrink > containerRef.scrollTop) {
+				setProgrammaticScrollTop(beforeShrink);
+			}
 			const delta = resolveAnchoredRevealDelta(
 				containerRef.scrollTop,
 				containerRef.clientHeight,
-				contentEnd
+				renderedFollowEnd()
 			);
 			if (delta > 0) setProgrammaticScrollTop(containerRef.scrollTop + delta);
 		}
@@ -1294,8 +1408,11 @@
 	 */
 	function followGrowthNow() {
 		if (!containerRef || !tailSpacerRef || selectionBlocksNavigation) return;
+		// Not-sent rows preserve the stopped reader (#1066), unless an error
+		// below them is already the visible tail being followed.
+		if (restingOnNotSentRows(notSentHold.messages) && !$activeSession.error) return;
 		if (!currentTurnAnchorId && !shouldAutoScroll) return;
-		const contentEnd = containerRef.scrollTop + tailSpacerRef.getBoundingClientRect().top - containerRef.getBoundingClientRect().top;
+		const contentEnd = renderedFollowEnd();
 		const delta = resolveAnchoredRevealDelta(containerRef.scrollTop, containerRef.clientHeight, contentEnd);
 		if (delta > 0) setProgrammaticScrollTop(containerRef.scrollTop + delta);
 	}
@@ -1334,11 +1451,11 @@
 		if (!anchor || !containerRef.contains(anchor)) return MIN_TRANSCRIPT_TAIL_RESERVE;
 		const containerBox = containerRef.getBoundingClientRect();
 		const anchorTop = containerRef.scrollTop + anchor.getBoundingClientRect().top - containerBox.top;
-		const contentEnd = containerRef.scrollTop + tailSpacerRef.getBoundingClientRect().top - containerBox.top;
-		return resolveAnchoredTailReserve({
+		const contentEnd = transcriptContentEnd();
+		return Math.max(readingFloorReserve(), resolveAnchoredTailReserve({
 			clientHeight: containerRef.clientHeight,
 			contentAfterAnchor: Math.max(0, contentEnd - anchorTop)
-		});
+		}) + tailControlsExtent());
 	}
 
 	function refreshLatestTurnTailReserve() {
@@ -1351,11 +1468,24 @@
 		requestAnimationFrame(() => { void tick().then(refreshLatestTurnTailReserve); });
 	}
 
-	function startCurrentTurnAnchor(messageId: string) {
+	function startCurrentTurnAnchor(messageId: string, fromQueue = false) {
+		if (!fromQueue) {
+			followedViewportEnd = 0;
+			presentedTailError = null;
+			tailErrorOffsetPx = 0;
+			tailQueueSlotPx = 0;
+		}
 		currentTurnAnchorId = messageId;
 		shouldAutoScroll = true;
 		clearJumpRevealTimer();
 		showJumpToLatest = false;
+	}
+
+	function dismissTailError() {
+		presentedTailError = null;
+		tailErrorOffsetPx = 0;
+		tailQueueSlotPx = 0;
+		liveActiveSession.clearError();
 	}
 
 	/**
@@ -1369,6 +1499,15 @@
 		await tick();
 		refreshLatestTurnTailReserve();
 		await tick();
+		// An already-visible error is the followed reading surface, after the
+		// queued rows. Keep that banner in place as Stop returns their words;
+		// ordinary Stop still preserves the transcript exactly as in #1066.
+		if ($activeSession.error && shouldAutoScroll && !pendingScrollToBottom) {
+			followGrowthNow();
+			updateJumpToLatestVisibility();
+			updateCurrentTurnIndex();
+			return;
+		}
 		const metrics = readScrollMetrics();
 		if (!metrics || !shouldAutoScroll || pendingScrollToBottom) return;
 		if (metrics.scrollHeight - metrics.clientHeight - metrics.scrollTop > 1) {
@@ -1509,6 +1648,12 @@
 		scheduleReadingAnchorCapture();
 	}
 
+	// Retained space is outside the mounted history. Reader paging approaches
+	// that content edge, not document zero; use it for scroll and intent fallbacks.
+	function olderEdgeDistance(scrollTop: number) {
+		return scrollTop - leadingGap;
+	}
+
 	function handleScroll() {
 		if (!containerRef) return;
 		if (anchorRounding && containerRef.scrollTop !== anchorRounding.scrollTop) anchorRounding = null;
@@ -1544,7 +1689,7 @@
 			// anchor restoration or a rail jump.
 			if (!windowShifting && Date.now() >= manualNavigationReleaseUntil) {
 				const previousTop = lastScrollMetrics?.scrollTop ?? currentScrollTop;
-				if (currentScrollTop < previousTop && mountedStart > 0 && currentScrollTop < 900) {
+				if (currentScrollTop < previousTop && mountedStart > 0 && olderEdgeDistance(currentScrollTop) < 900) {
 					loadOlderItems();
 				} else if (currentScrollTop > previousTop && mountedEnd < displayItems.length &&
 					containerRef.scrollHeight - currentScrollTop - containerRef.clientHeight < 900) {
@@ -1610,6 +1755,7 @@
 	 * re-sticks via nextStickToBottom().
 	 */
 	function disengageAutoScroll() {
+		followedViewportEnd = 0;
 		cancelCurrentTurnAnchor();
 		if (!shouldAutoScroll && !pendingScrollToBottom) return;
 		// Stop any in-flight scroll settle so it can't keep fighting the user
@@ -1639,7 +1785,7 @@
 		if (isUserScrollUpGesture(e.deltaY, 0)) disengageAutoScroll();
 		// At the boundary the browser cannot emit another scroll event. This
 		// also covers a gesture arriving during the last programmatic frame.
-		if (e.deltaY < 0 && containerRef && containerRef.scrollTop <= 1 && mountedStart > 0 && !windowShifting) loadOlderItems();
+		if (e.deltaY < 0 && containerRef && olderEdgeDistance(containerRef.scrollTop) <= 1 && mountedStart > 0 && !windowShifting) loadOlderItems();
 	}
 
 	// Touch: accumulate downward travel from the gesture's lowest clientY.
@@ -1655,7 +1801,7 @@
 		touchLastY = Math.min(touchLastY, y);
 		if (isUserScrollUpGesture(0, touchDeltaY)) {
 			disengageAutoScroll();
-			if (containerRef && containerRef.scrollTop <= 1 && mountedStart > 0 && !windowShifting) loadOlderItems();
+			if (containerRef && olderEdgeDistance(containerRef.scrollTop) <= 1 && mountedStart > 0 && !windowShifting) loadOlderItems();
 			touchLastY = y;
 		}
 	}
@@ -1973,7 +2119,7 @@
 				refreshLatestTurnTailReserve();
 				await tick();
 				// Upward input can release following while the layout work is queued.
-				if (shouldAutoScroll) scrollToBottom();
+				if (shouldAutoScroll) followGrowthNow();
 				updateJumpToLatestVisibility();
 			});
 		});
@@ -1984,13 +2130,89 @@
 		};
 	});
 
-	// While a turn streams, follow in the task that changed the transcript. A turn
-	// that has ended goes through the settle pin and the not-sent rows rule instead,
-	// so its last changes never reach this: disconnecting drops what is queued.
-	const turnStreaming = $derived($activeSession.isStreaming);
+	// A browser clamp belongs to the render that caused it, not to the reader.
+	// Protect terminal/queue/row-boundary commits before the DOM can shrink.
+	// Otherwise handleScroll can release following before a post-render observer
+	// gets a chance to restore the reserve. Real wheel/touch intent still cancels
+	// immediately through disengageAutoScroll, even inside this transaction.
+	let layoutBoundary = '';
+	let tailSendContext = '';
+	let tailSendRevision = 0;
+	$effect.pre(() => {
+		const s = $activeSession;
+		const sendContext = s.sessionId ?? '';
+		if (sendContext !== tailSendContext) {
+			tailSendContext = sendContext;
+			tailSendRevision = 0;
+		}
+		// A fresh local send may only append a queued echo (or no echo). Consume
+		// its explicit intent before error capture; automatic dequeue and Stop do
+		// not publish one. Ignore late sends belonging to a different view.
+		const intent = s.localSendIntent;
+		if (sendContext && intent && intent.sessionId === s.sessionId && intent.revision > tailSendRevision) {
+			tailSendRevision = intent.revision;
+			presentedTailError = null;
+			tailErrorOffsetPx = 0;
+			tailQueueSlotPx = 0;
+		}
+		if (s.sessionId !== followedFloorContext?.sessionId || (!s.messages.length && !s.isStreaming)) {
+			presentedTailError = null;
+			tailErrorOffsetPx = 0;
+			tailQueueSlotPx = 0;
+		}
+		if (s.error && !presentedTailError) {
+			const pendingHeight = tailControlsRef?.getBoundingClientRect().height ?? 0;
+			const gap = chatColumnRef ? parseFloat(getComputedStyle(chatColumnRef).rowGap) || 0 : 0;
+			// Queue auto-handoff may clear/enrich the same failure before Stop.
+			// Its already-painted slot belongs to this reading context, not to the
+			// next error string or the queue's now-empty height.
+			tailErrorOffsetPx = pendingHeight > 0 ? pendingHeight + gap : 0;
+			// The queue and error are one already-presented slot. Keep its outer
+			// geometry too: dequeue can coincide with transcript growth/follow,
+			// otherwise the bottom-docked wrapper shrinks in that same paint.
+			tailQueueSlotPx = pendingHeight;
+			presentedTailError = s.error;
+		}
+		const resetFloor = s.sessionId !== followedFloorContext?.sessionId || (!s.messages.length && !s.isStreaming) || untrack(() => windowShifting);
+		if (resetFloor) {
+			followedViewportEnd = 0;
+			followedFloorContext = { sessionId: s.sessionId };
+		}
+		const boundary = `${s.sessionId}:${s.messages.length}:${s.isStreaming}:${s.liveTurnId}:${s.error}:${tailSendRevision}:${s.queuedMessages.map(m => `${m.id}:${m.status ?? ''}`).join(',')}`;
+		if (boundary === layoutBoundary) return;
+		layoutBoundary = boundary;
+		// lastKnownScrollTop still belongs to the outgoing/cleared slice here.
+		if (resetFloor || !untrack(() => isMounted && shouldAutoScroll) || !containerRef) return;
+		const beforeTop = untrack(() => lastKnownScrollTop);
+		followedViewportEnd = Math.max(followedViewportEnd, beforeTop + containerRef.clientHeight);
+		const sessionId = s.sessionId;
+		const version = untrack(() => windowShiftVersion);
+		const context = followedFloorContext;
+		programmaticScrollDepth++;
+		void tick().then(() => {
+			if (context === followedFloorContext && version === windowShiftVersion && get(activeSession).sessionId === sessionId && !windowShifting && untrack(() => shouldAutoScroll)) {
+				if (currentTurnAnchorId) void maintainCurrentTurnAnchor(false, beforeTop);
+				followGrowthNow();
+			}
+			requestAnimationFrame(() => { programmaticScrollDepth = Math.max(0, programmaticScrollDepth - 1); });
+		});
+		// Same-context boundaries still need their follow work. The owner identity
+		// changes on switch/clear; the existing window version handles eviction.
+	});
+
+	// Rendered geometry has one lifecycle, including the terminal error, queue
+	// handoff and Stop frames. Disconnecting on streaming=false discarded those
+	// mutations and left the slower ResizeObserver/rAF to correct visible rows.
 	$effect(() => {
-		if (!chatColumnRef || !turnStreaming) return;
-		const observer = new MutationObserver(followGrowthNow);
+		if (!chatColumnRef) return;
+		const observer = new MutationObserver(() => {
+			if (windowShifting) return;
+			// Size controls for scrolled-up readers too, without moving them.
+			if (!currentTurnAnchorId) refreshLatestTurnTailReserve();
+			if (!shouldAutoScroll) return;
+			if (currentTurnAnchorId) void maintainCurrentTurnAnchor(false, lastKnownScrollTop);
+			followGrowthNow();
+		});
 		observer.observe(chatColumnRef, { subtree: true, childList: true, characterData: true, attributes: true });
 		return () => observer.disconnect();
 	});
@@ -2195,7 +2417,7 @@
 		const newUserCommand = hasNewMessage && newestMessage?.role === 'user' && newestMessage.type === 'command';
 		if (newUserMessage) {
 			shouldAutoScroll = true;
-			if (newestMessage.id) startCurrentTurnAnchor(newestMessage.id);
+			if (newestMessage.id) startCurrentTurnAnchor(newestMessage.id, fromQueue);
 		} else if (newUserCommand) {
 			// Command rows are user-authored but intentionally have no turn-navigation
 			// anchor. Preserve the previous bottom-pinning behavior for them.
@@ -2226,7 +2448,7 @@
 			} else if (newUserMessage) {
 				// The newly-sent prompt owns a stable top anchor. Its responsive tail
 				// reserve leaves the response room to grow beneath it.
-				tick().then(() => scheduleCurrentTurnAnchorMaintenance(true));
+				tick().then(() => scheduleCurrentTurnAnchorMaintenance(!fromQueue));
 			} else if (currentTurnAnchorId) {
 				// While the reserve remains, growth consumes blank room without moving
 				// the prompt. Once it is exhausted, reveal only the new overflow.
@@ -2249,11 +2471,9 @@
 		prevLastMetadata = currentMetadata;
 	});
 
-	// When a followed turn settles, the work log collapses and the live
-	// anchor will not scroll back up. Recompute the tail and pin the latest
-	// user prompt the same way a remount does. A reader who left the live
-	// edge is left alone; we still refresh the timeline so it does not stay
-	// stuck on the first tick.
+	// Settlement changes presentation, not the reader's destination. Followers
+	// keep the live edge; readers who left it keep their place. Prompt-first
+	// navigation belongs to an explicit send/rail/jump, never turn completion.
 	$effect(() => {
 		const sessionId = $activeSession.sessionId;
 		const unsettled = latestTurnUnsettled;
@@ -2267,7 +2487,7 @@
 		wasLatestTurnUnsettled = unsettled;
 		if (!isMounted || !wasUnsettled || unsettled) return;
 		const following = untrack(() => shouldAutoScroll);
-		if (!shouldPinLatestTurnOnSettle(wasUnsettled, unsettled, following)) {
+		if (!shouldFollowLatestTurnOnSettle(wasUnsettled, unsettled, following)) {
 			scheduleLatestTurnTailRefresh();
 			void tick().then(() => updateCurrentTurnIndex());
 			return;
@@ -2283,16 +2503,7 @@
 			refreshLatestTurnTailReserve();
 			await tick();
 			if (!containerRef || !untrack(() => shouldAutoScroll)) return;
-			const latestTurnId = transcript.latestUserTurnId;
-			const anchor = latestTurnId ? document.getElementById(turnAnchorId(latestTurnId)) : null;
-			if (!anchor || !containerRef.contains(anchor)) {
-				scrollToBottom();
-				updateCurrentTurnIndex();
-				return;
-			}
-			const containerBox = containerRef.getBoundingClientRect();
-			const anchorTop = containerRef.scrollTop + anchor.getBoundingClientRect().top - containerBox.top;
-			setProgrammaticScrollTop(resolveCurrentTurnAnchorScrollTop(anchorTop));
+			followGrowthNow();
 			updateCurrentTurnIndex();
 		});
 	});
@@ -2314,6 +2525,7 @@
 	aria-label="Conversation messages"
 	aria-busy={$activeSession.isStreaming}
 	class="msg-scroll flex-1 overflow-y-auto overscroll-contain"
+	style:overflow-anchor={shouldAutoScroll ? 'none' : 'auto'}
 >
 	{#if transcriptRender === 'skeleton'}
 		<!-- Hydration skeleton. NOT the empty hero: this session has a transcript,
@@ -2355,15 +2567,21 @@
 		</div>
 	{:else}
 		<!-- Messages -->
-		<div class="chat-column" bind:this={chatColumnRef}>
-			{#if mountedStart > 0}
-				<!-- Keyboard-accessible equivalent of scrolling into the older edge. -->
-				<div class="earlier-row" style:margin-top={leadingGap ? `${leadingGap}px` : undefined}>
-					<button type="button" class="earlier-button" onclick={loadOlderItems}>
-						Show earlier messages
-					</button>
-				</div>
-			{/if}
+		<div
+			class="chat-column"
+			bind:this={chatColumnRef}
+			style:--transcript-tail-reserve={`calc(${Math.max(tailReservePx, latestTurnTailPx)}px + env(safe-area-inset-bottom, 0px) + var(--call-dock-reserve, 0px))`}
+			style:padding-bottom="var(--transcript-tail-reserve)"
+		>
+			<!-- Measure out of flow before the first eviction; expose the same paging
+			     control once older rows exist, without changing the retained origin. -->
+			<div class="earlier-row" class:earlier-measure={mountedStart === 0} bind:this={earlierRowRef}
+				inert={mountedStart === 0} aria-hidden={mountedStart === 0}
+				style:margin-top={leadingGap ? `${leadingGap}px` : undefined}>
+				<button type="button" class="earlier-button" onclick={loadOlderItems}>
+					Show earlier messages
+				</button>
+			</div>
 			{#each visibleItems as item, i (displayItemKey(item))}
 				<!-- Bounded mounting, with real row geometry for scroll anchoring. -->
 				<div
@@ -2411,32 +2629,14 @@
 				</div>
 			{/if}
 
-			<!-- Prompts already sent but not yet delivered to the model. They sit
-			     below the transcript, above the activity indicator, until the
-			     backend hands them over (mid-turn steer or next-turn start). -->
-			{#if pendingMessages.length > 0}
-				<PendingMessages
-					messages={pendingMessages}
-					stale={!!$activeSession.queueStale}
-					ownerName={$activeSession.isRemote ? $activeSession.ownerDeviceName : null}
-					onRemove={(id) => liveActiveSession.unsendQueuedMessage(id)}
-					onInterrupt={() => liveActiveSession.interruptForQueuedMessages()}
-				/>
-			{/if}
-
 			<!-- The gap predicate guarantees this does not duplicate a prose cursor,
 			     running-tool spinner, visible thinking state, or active subagent row. -->
-			{#if showGapIndicator || $activeSession.liveCompaction}
+			{#if $activeSession.liveCompaction}
 				<TurnActivity
 					startedAt={liveTurnStartedAt}
 					compaction={$activeSession.liveCompaction ?? null}
 					working={showGapIndicator}
 				/>
-			{/if}
-
-			<!-- Error -->
-			{#if $activeSession.error}
-				{@render errorBanner($activeSession.error, $activeSession.forkOfferSessionId)}
 			{/if}
 
 			<!-- In-flight background work pinned to the history tail: agents (swarms
@@ -2450,9 +2650,29 @@
 			<div
 				bind:this={tailSpacerRef}
 				class="transcript-tail-spacer"
-				style:height={`calc(${Math.max(tailReservePx, latestTurnTailPx)}px + env(safe-area-inset-bottom, 0px) + var(--call-dock-reserve, 0px))`}
-				aria-hidden="true"
-			></div>
+			>
+				{#if showGapIndicator && !$activeSession.liveCompaction}
+					<!-- Working occupies existing trailing breathing room, not a
+					     new 30px row + 18px gap that disappears at completion. -->
+					<div class="tail-activity"><TurnActivity startedAt={liveTurnStartedAt} /></div>
+				{/if}
+				<div class="tail-controls" bind:this={tailControlsRef} style:min-height={`${tailQueueSlotPx}px`}>
+					{#if pendingMessages.length > 0}
+						<PendingMessages
+							messages={pendingMessages}
+							stale={!!$activeSession.queueStale}
+							ownerName={$activeSession.isRemote ? $activeSession.ownerDeviceName : null}
+							onRemove={(id) => liveActiveSession.unsendQueuedMessage(id)}
+							onInterrupt={() => liveActiveSession.interruptForQueuedMessages()}
+						/>
+					{/if}
+				</div>
+				{#if $activeSession.error}
+					<div class="tail-error" bind:this={tailErrorRef} style:--error-tail-offset={`${tailErrorOffsetPx}px`}>
+						{@render errorBanner($activeSession.error, $activeSession.forkOfferSessionId)}
+					</div>
+				{/if}
+			</div>
 		</div>
 	{/if}
 </div>
@@ -2504,7 +2724,7 @@
 			{#if forkOfferSessionId}
 				<button type="button" onclick={() => forkOfferedSessionHere(forkOfferSessionId)} class="text-sm font-medium underline underline-offset-2 hover:opacity-80 px-1.5">Fork here</button>
 			{/if}
-			<button type="button" onclick={() => liveActiveSession.clearError()} class="chat-error-dismiss" aria-label="Dismiss error" title="Dismiss">
+			<button type="button" onclick={dismissTailError} class="chat-error-dismiss" aria-label="Dismiss error" title="Dismiss">
 				<X size={16} strokeWidth={2} aria-hidden="true" />
 			</button>
 		</span>
@@ -2722,11 +2942,10 @@
 		.chat-error-dismiss { transition: none; }
 	}
 
-	/* Keep the browser's scroll anchoring active so a resize of off-screen
-	   content ABOVE the viewport (e.g. a virtualized message being re-estimated
-	   while the tail streams) adjusts scrollTop to hold the visible content
-	   still, instead of letting earlier content shift under the reader. This is
-	   the default, but we assert it so nothing downstream defeats it. */
+	/* Native anchoring protects scrolled-up readers from off-screen resizes.
+	   Followers are positioned by the app instead (inline override): otherwise
+	   a temporary composer clamp can be remembered and restored by the browser
+	   when Stop adds rows, moving the already-followed reading surface. */
 	.transcript-shell {
 		position: relative;
 		flex: 1 1 0%;
@@ -2759,10 +2978,11 @@
 		}
 	}
 
-	/* Match TurnNavigator's visibility. Reserve its hit area even when a wide
-	   window contains a narrow chat pane; keep the usual centering once it fits. */
+	/* Reserve the rail lane from the first turn, not when the second queued
+	   prompt creates its ticks. Changing this width reflows already-read prose
+	   at handoff (a 14px horizontal shift in the real mobile shell). */
 	@media (min-width: 640px) and (pointer: fine) {
-		.has-turn-nav .chat-column {
+		.chat-column {
 			width: calc(100% - 40px);
 			margin-left: max(40px, calc((100% - 768px) / 2));
 			padding-left: 24px;
@@ -2772,7 +2992,7 @@
 	/* Compact and touch layouts use TurnNavigator's narrower rail; keep the
 	   text clear of it. */
 	@media (max-width: 639px), (pointer: coarse) {
-		.has-turn-nav .chat-column { padding-left: 28px; }
+		.chat-column { padding-left: 28px; }
 	}
 
 
@@ -2782,6 +3002,8 @@
 		display: flex;
 		justify-content: center;
 	}
+
+	.earlier-measure { position: absolute; visibility: hidden; pointer-events: none; }
 
 	.earlier-button {
 		min-height: 44px;
@@ -2812,10 +3034,52 @@
 		content-visibility: visible;
 	}
 
+	/* The reserve is column padding, not a giant moving blank row. Its zero-
+	   height origin marks the prose end; controls occupy its trailing room. */
 	.transcript-tail-spacer {
-		flex: 0 0 auto;
-		min-height: calc(24px + env(safe-area-inset-bottom, 0px));
+		position: relative;
+		flex: 0 0 0;
+		height: 0;
 		pointer-events: none;
+	}
+
+	/* Restore call room after subtracting the full reserve. It stays held on
+	   hangup, so removing the floating dock cannot move the reading surface. */
+	.tail-controls, .tail-error {
+		position: absolute;
+		inset-inline: 0;
+		bottom: calc(24px + env(safe-area-inset-bottom, 0px) + var(--call-dock-reserve, 0px) - var(--transcript-tail-reserve));
+		display: flex;
+		flex-direction: column;
+		flex: 0 0 auto;
+		gap: var(--chat-item-gap);
+		pointer-events: auto;
+	}
+
+	/* Dequeued children leave from the top of the held error/queue slot; the
+	   remaining bubble and the slot keep their bottom-docked geometry. */
+	.tail-controls {
+		justify-content: flex-end;
+	}
+
+	/* PendingMessages owns a second flex box. It must share the held slot,
+	   rather than shrinking inside a stable parent during the same handoff. */
+	.tail-controls :global(.pending-messages) {
+		min-height: inherit;
+		justify-content: flex-end;
+	}
+
+	.tail-error {
+		bottom: calc(24px + env(safe-area-inset-bottom, 0px) + var(--call-dock-reserve, 0px) - var(--transcript-tail-reserve) + var(--error-tail-offset, 0px));
+	}
+
+	/* The 30px working line fits the 24px tail plus 6px of its preceding gap.
+	   It stays next to the content even when the prompt's reserve is tall.
+	   Compaction (which may have a multiline reason) keeps its normal flow row. */
+	.tail-activity {
+		position: absolute;
+		top: -6px;
+		inset-inline: 0;
 	}
 
 	.jump-latest-layer, .selection-limit-layer {
@@ -2885,7 +3149,7 @@
 	}
 
 	@media (max-width: 639px), (pointer: coarse) {
-		.jump-latest-layer { bottom: 8px; }
+		.jump-latest-layer { bottom: calc(8px + var(--call-dock-lift, 0px)); }
 		.jump-latest { width: 44px; height: 44px; }
 	}
 

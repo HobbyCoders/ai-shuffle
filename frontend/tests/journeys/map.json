@@ -271,7 +271,14 @@
 				"frontend/src/lib/components/chat/WorkLogGroup*",
 				"frontend/src/lib/components/chat/SystemMessageGroup*",
 				"frontend/src/lib/utils/work-log*",
-				"frontend/src/lib/utils/tool-*"
+				"frontend/src/lib/utils/tool-*",
+				"app/core/agent_messaging.py",
+				"app/core/worker_checkout.py",
+				"app/core/turn_scheduler.py",
+				"app/core/provider_agent.py",
+				"app/core/session_pr_state.py",
+				"app/core/model_override.py",
+				"app/core/model_registry.py"
 			]
 		},
 		{
@@ -407,6 +414,11 @@
 				"fluid/fluid/engine/claude_mod_compaction.py",
 				"fluid/fluid/engine/claude_mod/**"
 			]
+		},
+		{
+			"why": "per-frame transcript/composer stability regression cases",
+			"journeys": ["chat-position-stability"],
+			"globs": ["frontend/tests/journeys/chat-position-stability.journey.mjs"]
 		},
 		{
 			"why": "owner memory questions and their replicated keep-both answers reach real session prompts",

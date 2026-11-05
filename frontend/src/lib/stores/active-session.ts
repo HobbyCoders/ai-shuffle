@@ -126,6 +126,10 @@ export interface ActiveSessionState {
 	mode: SessionMode;
 	title: string;
 	messages: ChatMessage[];
+	/** Locally admitted text-send intent, including sends with no transcript echo.
+	 * Published atomically with error dismissal; automatic queue handoff and Stop
+	 * never advance it. Session-scoped so a delayed send cannot reset another view. */
+	localSendIntent?: { sessionId: string | null; revision: number };
 	/** Whether a turn is live for this session.
 	 *
 	 *  SINGLE WRITER (finding S6): the SSE feed's reducer, folded through

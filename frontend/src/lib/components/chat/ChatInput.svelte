@@ -46,7 +46,7 @@
 	import { composerInsert, completeComposerInsert } from '$lib/stores/composer-insert';
 	import PromptStashMenu from './PromptStashMenu.svelte';
 	import { sessionOwnerEpoch } from '$lib/stores/session-owner';
-	import { getInitGeneration } from '$lib/stores/session/session-init';
+	import { getInitGeneration, tabRestoreTarget } from '$lib/stores/session/session-init';
 	import { appData, profiles, sessions } from '$lib/stores/app-data.svelte';
 	import { newChatSetup, newChatSetupNeed, type NewChatSetupNeed } from '$lib/stores/project-setup';
 	import { hasStoppableWork } from './stoppable-work';
@@ -170,14 +170,17 @@
 	// Resolve the draft to seed the composer with. The in-memory store draft is
 	// authoritative, but it's wiped by a full page reload (e.g. a PWA update), so
 	// fall back to the per-tab sessionStorage mirror when the store is empty.
+	// Boot already knows the tab/link target before its async store adoption.
+	// Seed the mounted editor with that chat's draft, never the new-chat slot.
+	const composerBootSessionId = $activeSession.sessionId ?? tabRestoreTarget()?.sessionId ?? null;
 	function resolveInitialDraft(): string {
 		// A composer this one replaces may still hold text inside its draft
 		// debounce; Svelte can mount the replacement before the old one's
 		// onDestroy saves it, so save it now or this editor opens empty (#811).
 		flushPendingDraft();
-		const storeDraft = get(activeSession).draft;
-		if (storeDraft) return storeDraft;
-		return readDraft($activeSession.sessionId) || '';
+		const state = get(activeSession);
+		if (state.sessionId === composerBootSessionId && state.draft) return state.draft;
+		return readDraft(composerBootSessionId) || '';
 	}
 
 	// Input state - use draft for persistence across session switches
@@ -260,27 +263,35 @@
 			compacting = false;
 		}
 	}
-	const initialSessionId = $activeSession.sessionId;
-
+	// The child editor can be destroyed before this composer's onDestroy.
+	// Keep its final document, not the lossy message-text serialization.
+	let teardownDraft: string | null = null;
 	// Get the draft value as JSON string (preserves file chips)
 	function getDraftJSON(): string {
 		const json = editorRef?.getJSON();
-		if (!json) return inputValue;
+		if (!json) return teardownDraft ?? inputValue;
 		return JSON.stringify(json);
 	}
 
 	// Helper to save draft immediately (used on unmount and on send)
 	function saveDraftImmediately(value?: string) {
 		if (!ownsComposer()) return;
+		const state = get(activeSession);
+		// A linked editor owns its chat before the store adopts it. Persist that
+		// owner's edits, but leave the unrelated New Chat store/slot alone.
+		const bootRestoring = state.sessionId === null && state.isRestoringSession
+			&& prevSessionId !== null && prevSessionId === composerBootSessionId;
+		if (state.sessionId !== prevSessionId && !bootRestoring) return;
 		if (draftSaveTimeout) {
 			clearTimeout(draftSaveTimeout);
 			draftSaveTimeout = null;
 		}
 		const val = value ?? getDraftJSON();
-		activeSession.setDraft(val);
-		// Keep the sessionStorage mirror in lockstep. On send this is called with
-		// '' which clears the persisted entry; on unmount it flushes the live text.
-		writeDraft(get(activeSession).sessionId, val);
+		if (bootRestoring) activeSession.saveDraftForSession(prevSessionId, val);
+		else if (val !== state.draft) activeSession.setDraft(val);
+		// Only a composer that began as New Chat may migrate that slot. A
+		// linked chat must not delete an unrelated draft, including after adoption.
+		writeDraft(prevSessionId, val, { preserveNewChat: composerBootSessionId !== null });
 	}
 
 	// Save draft to store when input changes (debounced)
@@ -289,6 +300,7 @@
 		// Track inputValue for reactivity (triggers on any text change)
 		const _trigger = inputValue;
 		const capturedSessionId = $activeSession.sessionId;
+		const capturedEditorOwner = prevSessionId;
 
 		// Debounce draft saves to avoid excessive updates
 		if (draftSaveTimeout) {
@@ -298,16 +310,10 @@
 			if (draftSaveTimeout) clearTimeout(draftSaveTimeout);
 			draftSaveTimeout = null;
 			releasePendingDraft(save);
-			if (!ownsComposer()) return;
-			// Guard: only save if we're still on the same session
-			if (get(activeSession).sessionId !== capturedSessionId) return;
-			const draftValue = getDraftJSON();
-			if (draftValue !== get(activeSession).draft) {
-				activeSession.setDraft(draftValue);
-			}
-			// Mirror to sessionStorage so the draft survives a full page reload
-			// (e.g. a silent PWA update). Empty text clears the entry.
-			writeDraft(capturedSessionId, draftValue);
+			// Both identities must still match: boot may have a null store owner,
+			// but navigation must never let an old callback save the new editor.
+			if (get(activeSession).sessionId !== capturedSessionId || prevSessionId !== capturedEditorOwner) return;
+			saveDraftImmediately();
 		};
 		draftSaveTimeout = setTimeout(save, 100);
 		// A composer mounting in this one's place saves it first (#811).
@@ -332,8 +338,6 @@
 		detachComposerDictation(editorRef?.getEditor());
 		if (!ownsComposer()) return;
 		if (messageSent) return;
-		const currentSessionId = get(activeSession).sessionId;
-		if (currentSessionId !== initialSessionId) return; // session switched
 		saveDraftImmediately();
 	});
 	// A remounted composer (a chat archived and restored, a layout change)
@@ -342,13 +346,14 @@
 	$effect(() => {
 		if (mountSelectionRestored || !editorRef?.getEditor()) return;
 		mountSelectionRestored = true;
-		if (get(activeSession).sessionId === initialSessionId) restoreComposerSelection(initialSessionId, initialComposerDraft);
+		if (get(activeSession).sessionId === prevSessionId) restoreComposerSelection(prevSessionId, initialComposerDraft);
 	});
 	/** The editor is going away: keep its caret with the chat whose draft it holds. */
 	function beforeEditorDestroy(editor: Editor) {
 		detachComposerDictation(editor);
 		if (!ownsComposer()) return;
 		rememberComposerSelection(prevSessionId, editor);
+		teardownDraft = JSON.stringify(editor.getJSON());
 	}
 	/** Keep a chat's caret with its draft; an empty composer (sent or cleared)
 	 *  forgets it so a later draft never gets a stale offset. Not gated on
@@ -385,7 +390,7 @@
 		? { ...availableSendState, disabled: true, title: 'Starting compaction…' }
 		: availableSendState);
 	let editorRef = $state<TiptapEditor | null>(null);
-	let prevSessionId = $state($activeSession.sessionId);
+	let prevSessionId = $state(composerBootSessionId);
 
 	// Subscribe synchronously: effects may coalesce a short live→idle transition.
 	onMount(() => {
@@ -429,6 +434,8 @@
 	$effect(() => {
 		const newSessionId = $activeSession.sessionId;
 		if (!ownsComposer()) return;
+		// Adoption is not a navigation away from the draft we already painted.
+		if (!newSessionId && $activeSession.isRestoringSession && prevSessionId === composerBootSessionId) return;
 		if (newSessionId !== prevSessionId) {
 			// Move capture off the shared editor before replacing its document.
 			detachComposerDictation(editorRef?.getEditor());
@@ -441,7 +448,7 @@
 				activeSession.saveDraftForSession(prevSessionId, leavingDraft);
 				// Keep the persisted mirror aligned with the ephemeral cache so the
 				// leaving session's draft also survives a reload.
-				writeDraft(prevSessionId, leavingDraft);
+				writeDraft(prevSessionId, leavingDraft, { preserveNewChat: composerBootSessionId !== null });
 			}
 			// The caret and selection go with the draft (#864).
 			rememberComposerSelection(prevSessionId, editorRef?.getEditor());
@@ -675,7 +682,19 @@
 	// Wrap: while the text fits on one line, attach and the circles sit inline
 	// with it; once it needs a second line they move to the controls row's two
 	// ends and the text takes the full width (composer-wrap.ts).
-	let composerWrapped = $state(false);
+	// Multiline persisted text needs its full-width layout on the first paint,
+	// not after the wrap watcher's first animation frame (#1049).
+	function initialDraftIsWrapped(draft: string): boolean {
+		try {
+			type DraftNode = { type?: string; text?: string; content?: DraftNode[] };
+			const doc = JSON.parse(draft) as DraftNode;
+			const hasLineBreak = (node: DraftNode): boolean => node.type === 'hardBreak'
+				|| !!node.text?.includes('\n') || !!node.content?.some(hasLineBreak);
+			if (doc?.type === 'doc') return (doc.content?.length ?? 0) > 1 || hasLineBreak(doc);
+		} catch { /* plain text or legacy HTML */ }
+		return draft.includes('\n') || /<(?:br\b|\/p>\s*<p\b)/i.test(draft);
+	}
+	let composerWrapped = $state(initialDraftIsWrapped(initialComposerDraft));
 	let sendClusterRef = $state<HTMLDivElement | null>(null);
 	const wrapWatcher = createWrapWatcher({
 		getText: () => editorRef?.getText() ?? '',
@@ -683,14 +702,21 @@
 		getIsland: () => islandRef,
 		getCircles: () => sendClusterRef,
 		isWrapped: () => composerWrapped,
-		setWrapped: (wrapped) => { composerWrapped = wrapped; }
+		setWrapped: (wrapped) => {
+			// The observer can run while the lazy editor is still mounting. Its
+			// temporary empty getText() must not undo a restored multiline layout.
+			if (initialComposerDraft && !editorRef?.getEditor()) return;
+			composerWrapped = wrapped;
+		}
 	});
-	// Re-measure after the text changes, and after the circles do (Stop
-	// arriving or leaving changes the room the text has on its line).
+	// Settle text and its layout in the same pre-paint flush: a later rAF
+	// would first paint restored/typed text in the old narrow editor. Keep
+	// the measurement's editor/box reads reactive so initial attachment also
+	// participates; check() writes only when the wrap decision changes.
 	$effect(() => {
 		void inputValue;
 		void circles;
-		wrapWatcher.schedule();
+		wrapWatcher.measureNow();
 	});
 	$effect(() => {
 		const island = islandRef;
@@ -1137,6 +1163,8 @@
 		const priorUploadedFiles = uploadedFiles;
 
 		inputValue = '';
+		// Clearing text and its wrapped layout are one render, not a later rAF.
+		composerWrapped = false;
 		uploadedFiles = [];
 		recall.reset();
 
@@ -1716,6 +1744,7 @@
 							onRestore={restoreStashed}
 							onDelete={deleteStashed}
 						/>
+						<span class="send-slot">
 						{#if circles.includes('busy')}
 							<!-- Creating worktree, or a send held for the project catalog or a project setup - show spinner -->
 							{#if heldForCatalog}<span class="sr-only" role="status">Loading projects…</span>{/if}
@@ -1744,12 +1773,15 @@
 						     voice availability is read once and a starting call is
 						     never torn down by a keystroke. -->
 						<span class="talk-slot" hidden={!showTalk}>{@render talk()}</span>
+						</span>
+						<span class="stop-slot">
 						{#if circles.includes('stop')}
 							<StopButton
 								activeTasks={$activeSession.activeTasks}
 								onStop={() => { composerSuggestion.invalidate(); activeSession.stopGeneration(); }}
 							/>
 						{/if}
+						</span>
 					</div>
 				</div>
 
@@ -1976,18 +2008,20 @@
 		align-self: stretch;
 	}
 	/* Wrapped: the text takes the whole first row; attach and the circles sit
-	   at the controls row's two ends, centred on it. */
+	   at the controls row's two ends, centred on it. Keep the text insets and
+	   40px controls-row height: changing arrangement alone must not grow the
+	   box (and move a centred composer or clamp a bottom-following reader). */
 	:global(html[data-platform='desktop']) .chat-island.wrapped .textarea-wrapper {
 		grid-column: 1 / -1;
-		padding: 14px 16px 4px;
+		padding: 12px 16px 4px;
 	}
 	:global(html[data-platform='desktop']) .chat-island.wrapped .composer-attach {
 		grid-row: 2;
-		margin: 4px 0 8px 10px;
+		margin: 4px 0 4px 10px;
 	}
 	:global(html[data-platform='desktop']) .chat-island.wrapped .send-cluster {
 		grid-row: 2;
-		margin: 4px 10px 8px 0;
+		margin: 4px 10px 4px 0;
 	}
 	:global(html[data-platform='desktop']) .chat-island.wrapped > :global(.controls-dock) {
 		grid-column: 2;
@@ -2032,6 +2066,17 @@
 		align-self: center;
 		gap: 6px;
 		flex-shrink: 0;
+	}
+
+	/* Stop arriving/leaving must not change the editor's width (and trigger a
+	   second wrapped layout), nor move Send under the reader's finger. Empty
+	   slots are layout only: no disabled or invisible focusable buttons. */
+	.send-slot, .stop-slot {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		min-width: var(--composer-action-size, 32px);
+		min-height: var(--composer-action-size, 32px);
 	}
 
 	/* Only one of Talk and Send shows; the hidden one stays mounted. */
