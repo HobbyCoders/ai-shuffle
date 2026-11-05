@@ -44,10 +44,9 @@ def _error(message: str) -> dict:
 
 
 def _sanitize_hook(hook: dict) -> dict:
-    """Strip secrets from hook data before returning to the agent."""
+    """Expose signing-secret presence, never its value, to the agent."""
     safe = dict(hook)
-    if safe.get("secret"):
-        safe["secret"] = "••••••••"
+    safe["has_secret"] = bool(safe.pop("secret", None))
     return safe
 
 
@@ -109,6 +108,7 @@ def _hook_summary(hook: dict) -> dict:
         "name": hook.get("name"),
         "event": hook.get("event"),
         "hook_type": hook.get("hook_type"),
+        "has_secret": bool(hook.get("secret")),
         "enabled": hook.get("enabled"),
         "tool_matcher": hook.get("tool_matcher"),
         "scope": "project" if hook.get("project_id") else "app",

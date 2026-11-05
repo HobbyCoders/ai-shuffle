@@ -59,6 +59,8 @@ export interface HookForm {
 	timeoutSec: number;
 	url: string;
 	secret: string;
+	/** Signing observed during this form's lifetime, not the current server state. */
+	hasSecret: boolean;
 	matcher: string;
 	/** Only used by the draft; existing hooks toggle at once. */
 	enabled: boolean;
@@ -80,12 +82,14 @@ export function emptyForm(projectId: string | null): HookForm {
 		timeoutSec: DEFAULT_TIMEOUT_MS / 1000,
 		url: '',
 		secret: '',
+		hasSecret: false,
 		matcher: '',
 		enabled: true
 	};
 }
 
-export function formFromHook(h: Hook): HookForm {
+/** Rehydration must not erase signing safety evidence from a retained form. */
+export function formFromHook(h: Hook, observedSecret = false): HookForm {
 	return {
 		name: h.name,
 		projectId: h.project_id ?? null,
@@ -94,15 +98,16 @@ export function formFromHook(h: Hook): HookForm {
 		command: h.command ?? '',
 		timeoutSec: Math.round((h.timeout || DEFAULT_TIMEOUT_MS) / 1000),
 		url: h.url ?? '',
-		secret: h.secret ?? '',
+		secret: '',
+		hasSecret: observedSecret || h.has_secret,
 		matcher: h.tool_matcher ?? '',
 		enabled: h.enabled
 	};
 }
 
-/** What Save would change; `enabled` is left out (it saves on its own). */
+/** Owner-editable fields only: Enabled saves separately; signing safety is not an edit. */
 function editable(f: HookForm): string {
-	const { enabled: _enabled, ...rest } = f;
+	const { enabled: _enabled, hasSecret: _hasSecret, ...rest } = f;
 	return JSON.stringify(rest);
 }
 
@@ -132,8 +137,8 @@ export function createPayload(f: HookForm): HookCreate {
 }
 
 /**
- * The PATCH body. The worker skips null fields, so a cleared matcher or
- * secret is sent as an empty string (an empty matcher matches every tool).
+ * The PATCH body. Blank secrets are omitted to preserve the stored value.
+ * A cleared matcher is sent as an empty string (it matches every tool).
  */
 export function updatePayload(f: HookForm): HookUpdate {
 	const bash = f.type === 'bash';
@@ -144,7 +149,7 @@ export function updatePayload(f: HookForm): HookUpdate {
 		command: bash ? f.command.trim() : undefined,
 		timeout: clampTimeout(f.timeoutSec),
 		url: bash ? undefined : f.url.trim(),
-		secret: bash ? undefined : f.secret.trim(),
+		secret: !bash && f.secret.trim() ? f.secret.trim() : undefined,
 		tool_matcher: isToolEvent(f.event) ? f.matcher.trim() : ''
 	};
 }
@@ -276,7 +281,7 @@ export class HooksModel {
 			delete this.baselines[id];
 			return;
 		}
-		this.forms[id] = formFromHook(h);
+		this.forms[id] = formFromHook(h, this.forms[id]?.hasSecret);
 		this.baselines[id] = editable(this.forms[id]);
 	}
 
@@ -289,6 +294,9 @@ export class HooksModel {
 		const f = this.form(id);
 		if (!f || this.saving) return null;
 		const problems = validateForm(f);
+		if (id !== DRAFT_ID && !this.hook(id) && f.type === 'webhook' && f.hasSecret && !f.secret.trim()) {
+			problems.push('Enter a signing secret to recreate this deleted webhook');
+		}
 		if (problems.length) {
 			this.errors[id] = problems;
 			return null;
@@ -311,7 +319,9 @@ export class HooksModel {
 				return created.id;
 			}
 			const saved = await hooks.updateHook(id, updatePayload(f));
-			this.forms[id] = formFromHook(saved);
+			// A newer refresh may have removed the form while this Save was pending.
+			if (!this.forms[id]) return null;
+			this.forms[id] = formFromHook(saved, this.forms[id]?.hasSecret || f.hasSecret);
 			this.baselines[id] = editable(this.forms[id]);
 			delete this.remote[id];
 			return id;
@@ -329,7 +339,16 @@ export class HooksModel {
 		try {
 			const saved = await hooks.updateHook(id, { enabled });
 			const f = this.forms[id];
-			if (f) f.enabled = saved.enabled;
+			if (f) {
+				// Decide after the request: the owner may have edited while it ran.
+				if (this.dirty(id)) {
+					f.enabled = saved.enabled;
+					f.hasSecret ||= saved.has_secret;
+				} else {
+					this.forms[id] = formFromHook(saved, f.hasSecret);
+					this.baselines[id] = editable(this.forms[id]);
+				}
+			}
 			return true;
 		} catch (e) {
 			this.errors[id] = [message(e, 'Could not change the hook')];
@@ -379,7 +398,7 @@ export class HooksModel {
 			const h = this.hook(id);
 			if (!this.dirty(id)) {
 				if (h) {
-					this.forms[id] = formFromHook(h);
+					this.forms[id] = formFromHook(h, this.forms[id].hasSecret);
 					this.baselines[id] = editable(this.forms[id]);
 				} else {
 					delete this.forms[id];
@@ -390,6 +409,8 @@ export class HooksModel {
 			}
 			if (h) {
 				this.forms[id].enabled = h.enabled;
+				// Never lose an observed signing requirement while keeping dirty edits.
+				this.forms[id].hasSecret ||= h.has_secret;
 				if (editable(formFromHook(h)) !== this.baselines[id]) this.remote[id] = 'changed';
 			} else if (this.belongsToLoadedScope(id)) {
 				this.remote[id] = 'deleted';

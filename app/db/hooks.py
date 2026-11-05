@@ -130,8 +130,11 @@ def update_hook(
     secret: Optional[str] = None,
     enabled: Optional[bool] = None,
     tool_matcher: Optional[str] = None,
+    clear_secret: bool = False,
 ) -> Optional[HookRow]:
-    """Update a hook"""
+    """Update a hook. Blank signing secrets preserve the stored value."""
+    if clear_secret and secret and secret.strip():
+        raise ValueError("Cannot replace and clear a hook secret in the same update")
     existing = get_hook(hook_id)
     if not existing:
         return None
@@ -157,9 +160,9 @@ def update_hook(
     if url is not None:
         updates.append("url = %s")
         values.append(url if url else None)
-    if secret is not None:
+    if clear_secret or (secret and secret.strip()):
         updates.append("secret = %s")
-        values.append(secret if secret else None)
+        values.append(None if clear_secret else secret)
     if enabled is not None:
         updates.append("enabled = %s")
         values.append(enabled)
