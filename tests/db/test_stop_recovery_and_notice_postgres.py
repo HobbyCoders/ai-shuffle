@@ -21,10 +21,10 @@ from tests.db.test_event_write_lock_timeout_postgres import (
 pytestmark = requires_real_pg
 
 
-def _started(sid):
+def _started(sid, owner="old-owner"):
     from app.db import turns
     queued = turns.enqueue_turn(sid, "user", prompt="old", profile_id="default")
-    return turns.start_turn(queued["id"], None, "old-owner")
+    return turns.start_turn(queued["id"], None, owner)
 
 
 def _notices(sid):
@@ -343,3 +343,285 @@ def test_notice_outbox_is_created_by_upgrade_migration(session_id):
     assert len(stop_notices.pending()) == 1
     for notice_id in stop_notices.pending():
         assert stop_notices.deliver(notice_id)
+
+
+@pytest.mark.parametrize("commit_uncertain", [False, True])
+async def test_idle_stop_retries_initial_notice_save_until_committed(session_id, monkeypatch, commit_uncertain):
+    from psycopg2 import OperationalError
+    from app.core import query_session_lifecycle
+    from app.core.task_registry import task_registry
+    from app.core.task_persistence import flush
+    from app.db import stop_notices, stop_receipts
+
+    task_registry.start_task(session_id, "initial-save-child", "agent", "remote work",
+                             remote_device_id="old-worker", worker_name="Other worker")
+    await flush()
+    real_save = stop_notices.save
+    attempts = []
+    def fail_first_save(*args, **kwargs):
+        attempts.append(args[0])
+        if len(attempts) == 1:
+            if commit_uncertain:
+                real_save(*args, **kwargs)
+            raise OperationalError("injected initial outbox connection failure")
+        return real_save(*args, **kwargs)
+    monkeypatch.setattr(stop_notices, "save", fail_first_save)
+    try:
+        started = time.monotonic()
+        results = await query_session_lifecycle.stop_all_background_tasks(session_id, user_stop=True)
+        assert time.monotonic() - started < 2
+        assert any(r.get("incomplete") and "Other worker" in r.get("detail", "") for r in results)
+        assert task_registry.get_task(session_id, "initial-save-child")["status"] == "running"
+        assert stop_receipts.pending("old-owner", turn_id="absent") == []
+        assert len(attempts) == 2, "an initial save failure must not discard warning-only retry authority"
+        assert attempts[0] == attempts[1]
+        notes = _notices(session_id)
+        assert len(notes) == 1
+        assert "Other worker" in notes[0]["payload"]["data"]["content"]
+        assert "STILL BE RUNNING" in notes[0]["payload"]["data"]["content"]
+        assert stop_notices.pending() == []
+    finally:
+        task_registry.clear_session(session_id)
+        await flush()
+
+
+@pytest.mark.parametrize("first_owner", ["runtime", "observer"])
+@pytest.mark.parametrize("cancel_caller", [False, True])
+async def test_receipt_single_flight_owns_cleanup_result_not_its_caller(
+        session_id, monkeypatch, first_owner, cancel_caller):
+    from app.core import query_session_lifecycle, scoped_remote_stop as scoped, stop_receipts as consumer
+    from app.db import stop_receipts, turns
+
+    owner = "flight-" + uuid4().hex
+    old = _started(session_id, owner)
+    receipt = turns.read_stop_receipt(session_id)
+    row = stop_receipts.pending(owner, turn_id=old["id"])[0]
+    entered, release_cleanup = asyncio.Event(), asyncio.Event()
+    caller_received, release_tail, endpoint_waiting = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    calls, caller_results = [], []
+    async def cleanup(*args, **kwargs):
+        calls.append(kwargs["receipt"])
+        entered.set()
+        await release_cleanup.wait()
+        turns.settle_turn(old["id"], "aborted", "interrupted")
+        return [{"ok": True, "task_id": "captured"}]
+    monkeypatch.setattr(query_session_lifecycle, "stop_all_background_tasks", cleanup)
+    # The endpoint joins the same already-published Stop, not another click.
+    monkeypatch.setattr(scoped, "claim", lambda *args: {
+        "accepted": True, "receipt": receipt, "turn_id": old["id"]})
+    real_consume = consumer.consume
+    endpoint = None
+    async def observed_consume(*args, **kwargs):
+        if asyncio.current_task() is endpoint:
+            endpoint_waiting.set()
+        return await real_consume(*args, **kwargs)
+    monkeypatch.setattr(consumer, "consume", observed_consume)
+    async def runtime_caller():
+        caller_results.append(await consumer.consume(row))
+        caller_received.set()
+        await release_tail.wait()  # unrelated caller work must never own cleanup
+        return None
+
+    if first_owner == "observer":
+        await consumer.observe(owner)
+        await asyncio.wait_for(entered.wait(), 2)
+    caller = asyncio.create_task(runtime_caller())
+    await asyncio.wait_for(entered.wait(), 2)
+    endpoint = asyncio.create_task(scoped.handle({"version": 1, "worker_session_id": session_id,
+        "scope": {"generation": "captured", "epoch": 1}}, "parent"))
+    try:
+        await asyncio.wait_for(endpoint_waiting.wait(), 2)
+        await consumer.observe(owner)
+        if cancel_caller:
+            caller.cancel()
+            await asyncio.gather(caller, return_exceptions=True)
+        release_cleanup.set()
+        if not cancel_caller:
+            await asyncio.wait_for(caller_received.wait(), 2)
+        completed, _ = await asyncio.wait({endpoint}, timeout=1)
+        release_tail.set()
+        answers = await asyncio.wait_for(asyncio.gather(caller, endpoint, return_exceptions=True), 2)
+        assert isinstance(answers[1], dict), f"endpoint received its caller's result instead of cleanup: {answers[1]!r}"
+        assert answers[1] == {"scope_enforced": True, "ok": True}
+        assert endpoint in completed, "receipt consumption waited for unrelated caller work"
+        assert len(calls) == 1
+        if not cancel_caller:
+            assert caller_results == [[{"ok": True, "task_id": "captured"}]]
+        assert stop_receipts.get(row["id"])["consumed_at"] is not None
+    finally:
+        release_cleanup.set()
+        release_tail.set()
+        await asyncio.gather(caller, endpoint, return_exceptions=True)
+
+
+@pytest.mark.parametrize("owner_state", ["running", "parked"])
+async def test_actual_stop_with_owner_receipt_emits_one_warning_per_stop(session_id, monkeypatch, owner_state):
+    from app.core import query_session_lifecycle, stop_receipts as consumer
+    from app.core.task_registry import task_registry
+    from app.core.task_persistence import flush
+    from app.db import stop_receipts, turns
+
+    old = _started(session_id)
+    task_registry.note_turn_live(session_id, old["insert_order"])
+    task_registry.start_task(session_id, "unknown-worker", "agent", "remote work",
+                             remote_device_id="old-worker", worker_name="Other worker")
+    await flush()
+    if owner_state == "parked":
+        turns.park_turn(old["id"])
+    try:
+        # Real Stop admission/cleanup publishes the owner's receipt itself.
+        # In old/no-RPC mode work remains running; no transport retry is involved.
+        first = await query_session_lifecycle.stop_all_background_tasks(session_id, user_stop=True)
+        assert any(r.get("incomplete") for r in first)
+        pending = stop_receipts.pending("old-owner", turn_id=old["id"])
+        assert len(pending) == 1
+        first_receipt = pending[0]
+        await consumer.consume(first_receipt)
+        notes = _notices(session_id)
+        assert len(notes) == 1, "one Stop produced both a generic/idle and receipt warning"
+        assert notes[0]["payload"]["data"]["stop_receipt_id"] == first_receipt["id"]
+        assert "Other worker" in notes[0]["payload"]["data"]["content"]
+        assert task_registry.get_task(session_id, "unknown-worker")["status"] == "running"
+        # A genuinely second Stop is not deduplicated with its predecessor.
+        await query_session_lifecycle.stop_all_background_tasks(session_id, user_stop=True)
+        second = stop_receipts.pending("old-owner", turn_id=old["id"])
+        if owner_state == "running":
+            [second_receipt] = second
+            assert second_receipt["stop_seq"] > first_receipt["stop_seq"]
+            await consumer.consume(second_receipt)
+            second_id = second_receipt["id"]
+        else:
+            # The first Stop quiesced the parked owner. The genuine second
+            # Stop is now idle and therefore owns its warning directly.
+            assert second == []
+            second_id = None
+        notes = _notices(session_id)
+        assert len(notes) == 2
+        assert {note["payload"]["data"].get("stop_receipt_id") for note in notes} == {
+            first_receipt["id"], second_id}
+    finally:
+        task_registry.clear_session(session_id)
+        await flush()
+
+
+@pytest.mark.parametrize("interruption", ["caller_cancel", "writer_cancel", "outbox_read_failure"])
+async def test_unsaved_idle_warning_survives_cancellation_without_repeating_stop(
+        session_id, monkeypatch, interruption):
+    from psycopg2 import OperationalError
+    from app.core import query_session_lifecycle, scoped_remote_stop as scoped, turn_manager
+    from app.core.task_registry import task_registry
+    from app.core.task_persistence import flush
+    from app.db import stop_notices, turns
+
+    task_registry.start_task(session_id, "retry-child", "agent", "remote work",
+                             remote_device_id="old-worker", worker_name="Other worker")
+    await flush()
+    real_save, real_pending = stop_notices.save, stop_notices.pending
+    allow_save, first_attempt = threading.Event(), asyncio.Event()
+    loop = asyncio.get_running_loop()
+    attempts = []
+    def unavailable(*args, **kwargs):
+        attempts.append((args[0], time.monotonic()))
+        loop.call_soon_threadsafe(first_attempt.set)
+        if not allow_save.is_set():
+            raise OperationalError("initial outbox temporarily unavailable")
+        return real_save(*args, **kwargs)
+    monkeypatch.setattr(stop_notices, "save", unavailable)
+    cleanup = AsyncMock(wraps=query_session_lifecycle.stop_all_background_tasks)
+    monkeypatch.setattr(query_session_lifecycle, "stop_all_background_tasks", cleanup)
+    producer = asyncio.create_task(query_session_lifecycle.stop_all_background_tasks(session_id, user_stop=True))
+    notice_id = None
+    try:
+        await asyncio.wait_for(first_attempt.wait(), 2)
+        started = time.monotonic()
+        if interruption == "caller_cancel":
+            producer.cancel()
+            await asyncio.gather(producer, return_exceptions=True)
+        else:
+            await asyncio.wait_for(asyncio.shield(producer), 2)
+            assert len(attempts) >= 2
+            assert attempts[1][1] - attempts[0][1] >= scoped.NOTICE_SAVE_RETRY * .8
+        assert time.monotonic() - started < 2
+        notice_id = attempts[0][0]
+        assert notice_id in scoped._notice_saves
+        assert real_pending() == [] and _notices(session_id) == []
+        if interruption != "caller_cancel":
+            writer = scoped._notice_writes[notice_id]
+            writer.cancel()
+            await asyncio.gather(writer, return_exceptions=True)
+            assert notice_id in scoped._notice_saves
+        # Actual new input producer releases Stop, then the task resumes under a
+        # newer admission/incarnation while only a warning save remains owed.
+        new_id = await asyncio.to_thread(turn_manager.submit, session_id, "user", prompt="new instructions",
+                                         profile_id="default", no_kick=True)
+        running = turns.start_turn(new_id, None, "new-owner")
+        task_registry.note_turn_live(session_id, running["insert_order"])
+        task_registry.complete_task(session_id, "retry-child", "completed")
+        task_registry.start_task(session_id, "retry-child", "agent", "new work",
+                                 remote_device_id="old-worker", worker_name="Other worker")
+        incarnation = task_registry.task_incarnation(session_id, "retry-child")
+        generation = task_registry.stop_generation(session_id)
+        assert not task_registry.is_user_stopped(session_id)
+        if interruption == "outbox_read_failure":
+            def failed_read():
+                raise OperationalError("outbox read also temporarily unavailable")
+            monkeypatch.setattr(stop_notices, "pending", failed_read)
+        allow_save.set()
+        await scoped.retry_incomplete_notes()
+        monkeypatch.setattr(stop_notices, "pending", real_pending)
+        assert await scoped._notice_ack(notice_id) is True
+        await scoped.retry_incomplete_notes()
+        assert notice_id not in scoped._notice_saves
+        assert len(_notices(session_id)) == 1
+        assert real_pending() == []
+        assert task_registry.get_task(session_id, "retry-child")["status"] == "running"
+        assert task_registry.task_incarnation(session_id, "retry-child") == incarnation
+        assert task_registry.stop_generation(session_id) == generation
+        assert not task_registry.is_user_stopped(session_id)
+        assert turns.get_turn(new_id)["state"] == "running"
+        cleanup.assert_awaited_once()
+    finally:
+        allow_save.set()
+        if not producer.done():
+            producer.cancel()
+        await asyncio.gather(producer, return_exceptions=True)
+        monkeypatch.setattr(stop_notices, "pending", real_pending)
+        if notice_id is not None:
+            await scoped._notice_ack(notice_id)
+        task_registry.clear_session(session_id)
+        await flush()
+
+
+async def test_legacy_runtime_user_stop_fallback_does_not_add_a_second_warning(session_id, monkeypatch):
+    from app.core import session_runtime
+    from app.core.task_registry import task_registry
+    from app.core.task_persistence import flush
+    from app.db import turns
+
+    queued = turns.enqueue_turn(session_id, "user", prompt="legacy owner", profile_id="default")
+    running = turns.start_turn(queued["id"], None, None)
+    task_registry.note_turn_live(session_id, running["insert_order"])
+    task_registry.start_task(session_id, "legacy-child", "agent", "remote work",
+                             remote_device_id="old-worker", worker_name="Other worker")
+    await flush()
+    stopped = turns.interrupt_turn(session_id, "stop", True, running["id"], source="user_stop")
+    assert not stopped["payload"][turns.STOP_RECEIPT_KEY]["cleanup_receipts"]
+    runtime = session_runtime.SessionRuntime(stopped)
+    class BackgroundChecked(Exception):
+        pass
+    async def stop_after_background(work, label):
+        assert label == "background-task stop"
+        await work
+        raise BackgroundChecked
+    monkeypatch.setattr(runtime, "_run_interrupt_step", stop_after_background)
+    try:
+        # Run the actual legacy fallback closure, stopping before provider
+        # signalling: no provider/pump is involved in this warning producer.
+        with pytest.raises(BackgroundChecked):
+            await runtime._drive_interrupt("stop", escalation_timeout=None, source="user_stop")
+        notes = _notices(session_id)
+        assert len(notes) == 1, "runtime fallback duplicated the lifecycle-owned Stop warning"
+        assert "Other worker" in notes[0]["payload"]["data"]["content"]
+    finally:
+        task_registry.clear_session(session_id)
+        await flush()

@@ -3299,7 +3299,9 @@ class SessionRuntime:
                 **({"receipt": payload[turns_db.STOP_RECEIPT_KEY]}
                    if turns_db.STOP_RECEIPT_KEY in payload else {}),
             )
-            if any(result.get("incomplete") for result in results):
+            # A user Stop warning belongs to the lifecycle/outbox (or owner
+            # receipt). Only non-user teardown retains this runtime diagnostic.
+            if not user_stop and any(result.get("incomplete") for result in results):
                 from app.core.turn_recorder import record_drained_event
 
                 await record_drained_event(sid, {

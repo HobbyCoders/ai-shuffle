@@ -8,18 +8,24 @@ logger = logging.getLogger(__name__)
 _running: dict[str, asyncio.Task] = {}
 
 
-async def consume(row: dict, *, scope=None) -> list[dict]:
+def _start_consume(row: dict, *, scope=None) -> asyncio.Task:
+    from app.core.turn_recorder import start_detached
+
     receipt_id = row["id"]
-    current = _running.get(receipt_id)
-    if current is not None and current is not asyncio.current_task():
-        return await asyncio.shield(current)
-    task = asyncio.current_task()
-    _running[receipt_id] = task
-    try:
-        return await _consume(row, scope=scope)
-    finally:
-        if _running.get(receipt_id) is task:
-            _running.pop(receipt_id, None)
+    task = _running.get(receipt_id)
+    if task is None or task.done():
+        # Own just the cleanup result, never an endpoint/runtime/observer's
+        # entire caller task or its unrelated tail. Cancellation of a waiter
+        # must not cancel or duplicate the captured cleanup.
+        task = start_detached(_consume(row, scope=scope))
+        _running[receipt_id] = task
+        task.add_done_callback(lambda done: _running.pop(receipt_id, None)
+                               if _running.get(receipt_id) is done else None)
+    return task
+
+
+async def consume(row: dict, *, scope=None) -> list[dict]:
+    return await asyncio.shield(_start_consume(row, scope=scope))
 
 
 async def _consume(row: dict, *, scope=None) -> list[dict]:
@@ -75,8 +81,4 @@ async def observe(instance_id: str) -> None:
     await retry_incomplete_notes(wait=False)
     rows = await asyncio.to_thread(stop_receipts.pending, instance_id)
     for row in rows:
-        if row["id"] in _running:
-            continue
-        task = asyncio.create_task(consume(row))
-        _running[row["id"]] = task
-        task.add_done_callback(lambda t: t.cancelled() or t.exception())
+        _start_consume(row)

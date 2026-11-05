@@ -50,15 +50,35 @@ def incomplete_text(results: list[dict]) -> str:
 
 
 NOTICE_WAIT = 1.0
+NOTICE_SAVE_RETRY = 0.25
+NOTICE_SAVE_RETRY_MAX = 30.0
 _notice_writes: dict[str, asyncio.Task] = {}
+# Before the first commit there is no durable row for the observer to find.
+# This warning-only authority outlives a failed/cancelled writer, not just its
+# caller. Once saved, the outbox alone owns recovery. It carries no Stop scope.
+_notice_saves: dict[str, tuple[str, dict]] = {}
 
 
-async def _write_notice(notice_id: str, sid: str | None = None, data: dict | None = None) -> bool:
+async def _write_notice(notice_id: str) -> bool:
     from app.db import stop_notices
     from app.db.async_database import run_event_write
 
-    if sid is not None:
-        await asyncio.to_thread(stop_notices.save, notice_id, sid, data)
+    unsaved = _notice_saves.get(notice_id)
+    delay = NOTICE_SAVE_RETRY
+    while unsaved is not None:
+        sid, data = unsaved
+        try:
+            await asyncio.to_thread(stop_notices.save, notice_id, sid, data)
+        except Exception:
+            # An uncertain commit is safe to retry with the same immutable id.
+            # Never discard the only retry owner of an idle Stop's warning.
+            logger.warning("Stop incomplete notice %s not saved; retrying in %.2fs",
+                           notice_id, delay, exc_info=True)
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, NOTICE_SAVE_RETRY_MAX)
+        else:
+            _notice_saves.pop(notice_id, None)
+            break
     return await run_event_write(stop_notices.deliver, notice_id)
 
 
@@ -66,8 +86,10 @@ async def _notice_ack(notice_id: str, sid: str | None = None, data: dict | None 
     from app.core.turn_recorder import start_detached
 
     task = _notice_writes.get(notice_id)
-    if task is None:
-        task = start_detached(_write_notice(notice_id, sid, data))
+    if task is None or task.done():
+        if sid is not None:
+            _notice_saves.setdefault(notice_id, (sid, dict(data or {})))
+        task = start_detached(_write_notice(notice_id))
         _notice_writes[notice_id] = task
         task.add_done_callback(lambda done: _notice_writes.pop(notice_id, None)
                                if _notice_writes.get(notice_id) is done else None)
@@ -95,8 +117,15 @@ async def retry_incomplete_notes(*, wait: bool = True) -> None:
     from app.db import stop_notices
     from app.core.turn_recorder import start_detached
 
-    acknowledgements = [_notice_ack(notice_id)
-                        for notice_id in await asyncio.to_thread(stop_notices.pending)]
+    try:
+        pending = await asyncio.to_thread(stop_notices.pending)
+    except Exception:
+        logger.warning("Stop incomplete outbox could not be read", exc_info=True)
+        pending = []
+    # A cancelled initial writer may have left no row yet. Resume only its
+    # saved warning payload, never the cleanup that discovered the problem.
+    notice_ids = dict.fromkeys([*_notice_saves, *pending])
+    acknowledgements = [_notice_ack(notice_id) for notice_id in notice_ids]
     if wait:
         await asyncio.gather(*acknowledgements)
     else:

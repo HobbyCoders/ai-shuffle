@@ -1116,9 +1116,12 @@ async def stop_all_background_tasks(
     if user_stop and any(r.get("incomplete") or r.get("ok") is False for r in results):
         # A live/parked owner receipt writes its durable note when consumed.
         # Idle sessions have no owner receipt, so this is their producing path.
-        if not _receipt_consumer and (not receipt or not receipt.get("cleanup_receipts")):
+        # enter_user_stop may have published an owner receipt even when the
+        # caller supplied none. That bound authority, not the original argument,
+        # decides whether the receipt consumer already owns this warning.
+        bound = stop.receipt or {}
+        if not _receipt_consumer and not bound.get("cleanup_receipts"):
             from app.core.scoped_remote_stop import record_incomplete_note
-            bound = stop.receipt or {}
             await record_incomplete_note(session_id, results,
                 notice_key=f"idle:{bound['stop_seq']}" if "stop_seq" in bound else None)
     return results
