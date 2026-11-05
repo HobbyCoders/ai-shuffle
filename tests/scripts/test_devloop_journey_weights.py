@@ -61,6 +61,42 @@ def test_unknown_journey_uses_case_count_times_per_case_median(tmp_path, monkeyp
     assert counted == ["new.journey.mjs"]
 
 
+def test_case_count_lists_all_cases_without_an_inherited_filter(tmp_path, monkeypatch):
+    path = tmp_path / "a.journey.mjs"
+    monkeypatch.setenv("JOURNEY_ONLY", "copy@desktop-fast")
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append(command)
+        return ci.subprocess.CompletedProcess(command, 0, stdout="a@desktop-fast\nb@phone-slow\n")
+
+    monkeypatch.setattr(ci.subprocess, "run", run)
+    assert ci.case_count(path, strict=True) == 2
+    assert calls == [["node", str(path), "--list", "--only="]]
+
+
+@pytest.mark.parametrize("returncode,stdout", [(1, "a\n"), (0, ""), (0, "a\na\n")])
+def test_strict_case_count_refuses_unreadable_lists(tmp_path, monkeypatch, returncode, stdout):
+    monkeypatch.setattr(ci.subprocess, "run", lambda command, **kwargs:
+                        ci.subprocess.CompletedProcess(command, returncode, stdout=stdout))
+    path = tmp_path / "a.journey.mjs"
+    with pytest.raises(ValueError, match=r"Cannot read case count for a\.journey\.mjs"):
+        ci.case_count(path, strict=True)
+    assert ci.case_count(path) == 1
+
+
+@pytest.mark.parametrize("error", [OSError("node missing"), ci.subprocess.TimeoutExpired("node", 60)])
+def test_strict_case_count_refuses_listing_errors(tmp_path, monkeypatch, error):
+    def fail(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(ci.subprocess, "run", fail)
+    path = tmp_path / "a.journey.mjs"
+    with pytest.raises(ValueError, match=r"Cannot read case count for a\.journey\.mjs"):
+        ci.case_count(path, strict=True)
+    assert ci.case_count(path) == 1
+
+
 @pytest.mark.parametrize("bad", [0, -1, float("nan"), float("inf"), True, "slow"])
 def test_invalid_runtime_measurements_are_refused(tmp_path, bad):
     (tmp_path / "a.journey.mjs").touch()
@@ -157,6 +193,9 @@ def refresh_inventory(tmp_path, monkeypatch):
     for stem in ("a", "b"):
         (directory / f"{stem}.journey.mjs").touch()
     monkeypatch.setattr(ci, "JOURNEYS", directory)
+    monkeypatch.setattr(ci, "case_count", lambda path, *, strict=False: {
+        "a.journey.mjs": 3, "b.journey.mjs": 2,
+    }[path.name])
 
 
 def _run_state(command, *, attempt=1, conclusion="success"):
@@ -196,7 +235,7 @@ def test_incomplete_or_failed_journeys_cannot_become_weights(log):
 
 def test_refresh_produces_medians_from_green_archived_job_logs(tmp_path, monkeypatch, refresh_inventory):
     archives = {10: _archive(_log("a", 30, 3) + _log("b", 10, 2, passed=1, known_bugs=1)),
-                20: _archive(_log("a", 50, 5) + _log("b", 30, 3, passed=2, known_bugs=1))}
+                20: _archive(_log("a", 50, 3) + _log("b", 30, 2, passed=1, known_bugs=1))}
     calls = []
 
     def gh(command, **kwargs):
@@ -214,7 +253,7 @@ def test_refresh_produces_medians_from_green_archived_job_logs(tmp_path, monkeyp
     ci.refresh_weights([20, 10, 20], path)
     data = json.loads(path.read_text())
     assert data["seconds"] == {"a.journey.mjs": 40, "b.journey.mjs": 20}
-    assert data["seconds_per_case"] == 10
+    assert data["seconds_per_case"] == 12.5
     assert data["source_runs"] == [10, 20]
     assert "refresh-weights" in data["_comment"]
     assert len(calls) == 5
@@ -224,7 +263,8 @@ def test_refresh_produces_medians_from_green_archived_job_logs(tmp_path, monkeyp
 
 
 @pytest.mark.parametrize("failure", ["red", "no-samples", "incomplete", "duplicate"])
-def test_bad_refresh_leaves_existing_measurements_untouched(tmp_path, monkeypatch, failure):
+def test_bad_refresh_leaves_existing_measurements_untouched(
+        tmp_path, monkeypatch, refresh_inventory, failure):
     path = tmp_path / "weights.json"
     path.write_text("unchanged")
 
@@ -243,6 +283,42 @@ def test_bad_refresh_leaves_existing_measurements_untouched(tmp_path, monkeypatc
     with pytest.raises(ValueError):
         ci.refresh_weights([10], path)
     assert path.read_text() == "unchanged"
+
+
+def test_refresh_refuses_unreadable_case_counts_before_network_or_writing(tmp_path, monkeypatch):
+    directory = tmp_path / "journeys"
+    directory.mkdir()
+    (directory / "a.journey.mjs").touch()
+    monkeypatch.setattr(ci, "JOURNEYS", directory)
+    monkeypatch.setattr(ci.subprocess, "run", lambda command, **kwargs:
+                        ci.subprocess.CompletedProcess(command, 1, stdout=""))
+    monkeypatch.setattr(ci.subprocess, "check_output", lambda *args, **kwargs:
+                        pytest.fail("unreadable counts must be refused before fetching runs"))
+    path = _weights(tmp_path, {"a.journey.mjs": 123})
+    original = path.read_bytes()
+    with pytest.raises(ValueError, match=r"Cannot read case count for a\.journey\.mjs"):
+        ci.refresh_weights([10], path)
+    assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize("measured_cases", [1, 4])
+def test_refresh_refuses_changed_case_count_after_a_complete_run(
+        tmp_path, monkeypatch, refresh_inventory, measured_cases):
+    path = _weights(tmp_path, {"unchanged.journey.mjs": 123})
+    original = path.read_bytes()
+
+    def gh(command, **kwargs):
+        if command[:3] == ["gh", "repo", "view"]:
+            return "owner/repo\n"
+        if command[:3] == ["gh", "run", "view"]:
+            return _run_state(command)
+        cases = 3 if command[2].endswith("/10/logs") else measured_cases
+        return _archive(_log("a", 30, cases) + _log("b", 10, 2))
+
+    monkeypatch.setattr(ci.subprocess, "check_output", gh)
+    with pytest.raises(ValueError, match=rf"Run 20.*a\.journey\.mjs.*measured {measured_cases}.*checkout 3"):
+        ci.refresh_weights([10, 20], path)
+    assert path.read_bytes() == original
 
 
 def test_refresh_cli_dispatches_run_ids(monkeypatch):
@@ -314,7 +390,7 @@ def test_refresh_refuses_partial_or_wrong_inventory_even_after_a_complete_run(
         if command[:3] == ["gh", "run", "view"]:
             return _run_state(command)
         selected = ("a", "b") if command[2].endswith("/10/logs") else stems
-        return _archive("".join(_log(stem, 30, 3) for stem in selected))
+        return _archive("".join(_log(stem, 30, 3 if stem == "a" else 2) for stem in selected))
 
     monkeypatch.setattr(ci.subprocess, "check_output", gh)
     with pytest.raises(ValueError, match=r"Run 20.*journey coverage.*missing.*b\.journey\.mjs") as error:

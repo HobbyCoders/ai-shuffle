@@ -66,15 +66,21 @@ def journey_files(directory: Path = JOURNEYS) -> list[Path]:
     return sorted(directory.glob("*.journey.mjs"))
 
 
-def case_count(path: Path) -> int:
-    """How many cases ``--list`` names (1 if it cannot say: it still runs)."""
+def case_count(path: Path, *, strict: bool = False) -> int:
+    """Count all listed cases; planning falls back to 1, refresh must fail closed."""
     try:
-        listed = subprocess.run(["node", str(path), "--list"], cwd=FRONTEND, capture_output=True,
-                                text=True, timeout=60, check=False)
-    except (OSError, subprocess.TimeoutExpired):
+        listed = subprocess.run(["node", str(path), "--list", "--only="], cwd=FRONTEND,
+                                capture_output=True, text=True, timeout=60, check=False)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        if strict:
+            raise ValueError(f"Cannot read case count for {path.name}: --list failed") from error
         return 1
     lines = [line for line in listed.stdout.splitlines() if line.strip()]
-    return max(1, len(lines)) if listed.returncode == 0 else 1
+    if listed.returncode != 0 or not lines or len(lines) != len(set(lines)):
+        if strict:
+            raise ValueError(f"Cannot read case count for {path.name}: --list did not return unique cases")
+        return 1
+    return len(lines)
 
 
 def partition(weights: dict[str, float], shards: int) -> list[list[str]]:
@@ -162,7 +168,8 @@ def parse_journey_log(log: str) -> list[tuple[str, float, int]]:
 
 def refresh_weights(run_ids: list[int], weights_path: Path = WEIGHTS) -> None:
     """Recompute medians from complete, clean first-attempt runs matching this checkout."""
-    expected = {path.name for path in journey_files(JOURNEYS)}
+    expected_cases = {path.name: case_count(path, strict=True) for path in journey_files(JOURNEYS)}
+    expected = set(expected_cases)
     repo = subprocess.check_output(["gh", "repo", "view", "--json", "nameWithOwner",
                                     "--jq", ".nameWithOwner"], cwd=ROOT, text=True, timeout=120).strip()
     durations = defaultdict(list)
@@ -202,6 +209,10 @@ def refresh_weights(run_ids: list[int], weights_path: Path = WEIGHTS) -> None:
                              f"missing {sorted(expected - measured)}; unexpected {sorted(measured - expected)}. "
                              "Choose a complete run matching this checkout.")
         for name, seconds, cases in samples:
+            if cases != expected_cases[name]:
+                raise ValueError(f"Run {run_id} has mismatched case count for {name}: "
+                                 f"measured {cases}, checkout {expected_cases[name]}. "
+                                 "Choose a complete run matching this checkout.")
             durations[name].append(seconds)
             per_case.append(seconds / cases)
     data = {
