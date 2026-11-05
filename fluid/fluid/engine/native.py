@@ -1282,7 +1282,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         # Responses lane it gets its own role: a "learner:<key>" cache key and
         # the "learner" wire state, so its calls carry routing identity and
         # never share a turn-state token or a cache key with the main loop.
-        if getattr(self.provider, "name", None) == "openai_responses":
+        if getattr(self.provider, "name", None) in ("openai_responses", "opencode"):
             recorder = self._friction_source()
             bind = getattr(getattr(recorder, "_synthesizer", None), "bind_routing", None)
             if callable(bind):
@@ -1874,6 +1874,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             model=self.model,
             messages=[Message(role="user", content=[Text(prompt)])],
             system="You write precise engineering handoff documents.",
+            session_id=meta.session_id,
             tools=[],
             max_tokens=self.max_tokens,
             cache_breakpoints=0,
@@ -2848,7 +2849,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                         cost = estimator(model, raw)
                     except Exception:
                         pass
-                if cost is None:
+                if cost is None and not getattr(self.provider, "pricing_is_authoritative", False):
                     cost = estimate_cost_from_table(model, raw, resolver=self._pricing_resolver)
                 if getattr(self.provider, "name", None) == LOCAL_PROVIDER_NAME:
                     cost = 0.0
@@ -5000,6 +5001,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             if turn_id is not None:
                 routing[TURN_MARKER_KEY] = turn_id
         return ProviderRequest(
+            session_id=sid,
             model=self.model,
             messages=history,
             system=self.system,
@@ -5036,6 +5038,8 @@ class NativeLoop(BackgroundLifecycleMixin):
         The key is ``"learner:<affinity key>"`` (one cache key per role), and the wire state is this loop's ``learner`` state.
         Empty before a session exists or once the sticky key was dropped.
         """
+        if self.provider.name == "opencode":
+            return {}, self._wire_state("learner")
         key = self._affinity_key()
         if key is None or self._sticky_poisoned:
             return {}, None
@@ -6715,7 +6719,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                     except Exception:  # noqa: BLE001 — accounting is never fatal
                         log.debug("provider cost estimate failed", exc_info=True)
                         cost = None
-                if cost is None:
+                if cost is None and not getattr(self.provider, "pricing_is_authoritative", False):
                     cost = estimate_cost_from_table(
                         self.model, usage, resolver=self._pricing_resolver
                     )
@@ -6809,7 +6813,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                 raw=done,
                 model=model,
             )
-        if origin == "anthropic":
+        if origin in ("anthropic", "kimi", "minimax", "opencode"):
             return Reasoning(
                 origin=origin,
                 summary_text=block["text"],

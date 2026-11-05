@@ -300,6 +300,53 @@ def resolve_price(
     return _table_price(normalize_model_id(model))
 
 
+# Vendor-scoped prices: never price an OpenCode Claude id as direct Anthropic.
+# All sources read 2026-11-05. Plan clients never call this table: an allowance
+# is not cash spend. The app also attributes their usage as subscription.
+_MINIMAX = "https://platform.minimax.io/docs/pricing/overview; 2026-11-05; standard tier"
+COMPATIBLE_PRICES = {
+    "minimax": {
+        "minimax-m3.1-flash": ModelPrice(input=0.15, cached_input=0.015, output=0.60, source=_MINIMAX),
+        "minimax-m3": ModelPrice(input=0.30, cached_input=0.06, output=1.20, source=_MINIMAX + "; <=512K"),
+    },
+    "kimi": {},  # https://platform.kimi.ai/docs/pricing/chat: rate table not available in fetched text
+    # Console's cash price table, NOT Go's similarly dollar-denominated allowance.
+    "opencode": {
+        "minimax-m3": ModelPrice(input=0.30, cached_input=0.06, output=1.20,
+                                 source="https://opencode.ai/docs/zen/; 2026-11-05; Console cash"),
+        "glm-5.3-flash": ModelPrice(input=0.15, cached_input=0.03, output=0.50,
+                                    source="https://opencode.ai/docs/zen/; 2026-11-05; Console cash"),
+        "glm-5.3": ModelPrice(input=1.40, cached_input=0.26, output=4.40,
+                              source="https://opencode.ai/docs/zen/; 2026-11-05; Console cash"),
+        "kimi-k3": ModelPrice(input=3.00, cached_input=0.30, cache_write=3.00, output=15.00,
+                              source="https://opencode.ai/docs/zen/; 2026-11-05; Console cash"),
+        "claude-sonnet-5-5": ModelPrice(input=2.00, cached_input=0.20, cache_write=2.50, output=10.00,
+                                        source="https://opencode.ai/docs/zen/; 2026-11-05; Console cash"),
+        "claude-opus-5-5": ModelPrice(input=4.00, cached_input=0.20, cache_write=5.00, output=20.00,
+                                      source="https://opencode.ai/docs/zen/; 2026-11-05; Console cash"),
+    },
+}
+
+
+def compatible_cost(provider: str, model: str, usage: Mapping[str, Any]) -> float | None:
+    price = COMPATIBLE_PRICES.get(provider, {}).get(model.lower())
+    if provider == "minimax" and model.lower() == "minimax-m3":
+        prompt = sum(usage.get(k, 0) or 0 for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
+        if prompt > 512_000:
+            price = ModelPrice(input=0.60, cached_input=0.12, output=2.40, source=_MINIMAX + "; >512K")
+    if provider == "opencode" and model.lower() in ("gpt-6.1-sol", "gpt-6-luna", "grok-4.7"):
+        prompt = sum(usage.get(k, 0) or 0 for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
+        if model.lower() == "grok-4.7":
+            rates = (4.00, 1.00, None, 12.00) if prompt > 200_000 else (2.00, 0.50, None, 6.00)
+        elif model.lower() == "gpt-6.1-sol":
+            rates = (4.00, 0.20, 5.00, 15.00) if prompt > 272_000 else (2.00, 0.10, 2.50, 10.00)
+        else:
+            rates = (0.20, 0.02, 0.25, 0.75) if prompt > 272_000 else (0.10, 0.01, 0.125, 0.50)
+        price = ModelPrice(input=rates[0], cached_input=rates[1], cache_write=rates[2], output=rates[3],
+                           source="https://opencode.ai/docs/zen/; 2026-11-05; Console cash; context tier")
+    return _cost_from_price(price, usage) if price is not None else None
+
+
 def _cost_from_price(price: ModelPrice, usage: Mapping[str, Any]) -> float | None:
     if not price.priced:
         return None

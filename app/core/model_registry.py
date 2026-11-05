@@ -426,7 +426,7 @@ def _is_subscription_row(row: ModelProviderRow) -> bool:
     """
     ptype = row.get("provider_type")
     mode = row.get("auth_mode")
-    return ptype in ("chatgpt", "grok") or mode in ("chatgpt", "grok")
+    return ptype in ("chatgpt", "grok") or mode in ("chatgpt", "grok", "plan_key")
 
 
 def _provider_plan_types() -> Dict[str, Optional[str]]:
@@ -489,6 +489,17 @@ def _providers_payload() -> List[Dict[str, object]]:
         # empty table is not this branch: the query itself returns [].
         logger.warning("Could not load model providers for registry payload: %s", e)
         return []
+    from app.core.environment import ProviderConfigError
+    from app.core.provider.harness_adapter import _provider_row_kind
+
+    supported_rows = []
+    for row in rows:
+        try:
+            _provider_row_kind(row.get("provider_type"), row.get("auth_mode"), row.get("api_dialect"))
+        except ProviderConfigError:
+            continue  # A newer peer's row must not hide the supported accounts.
+        supported_rows.append(row)
+    rows = supported_rows
     # Plan strings are only meaningful for subscription rows, and only fetched
     # when at least one such row exists (an all-API-key install skips the read).
     plan_types = _provider_plan_types() if any(_is_subscription_row(r) for r in rows) else {}
