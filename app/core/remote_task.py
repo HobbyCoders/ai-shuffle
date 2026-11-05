@@ -2804,6 +2804,7 @@ async def _message_child_locked(msg: Mapping[str, Any], from_device: str) -> Dic
     """Target side: a message from the worker that started this child."""
     from app.core import agent_messaging, provider_agent, turn_scheduler
     from app.core.task_registry import user_stop_holds
+    from app.core.worker_checkout import WorkerCheckoutError
     from app.db import remote_tasks
 
     worker_id = msg["worker_session_id"]
@@ -2820,11 +2821,16 @@ async def _message_child_locked(msg: Mapping[str, Any], from_device: str) -> Dic
             or child.get("stop_requested_at")):
         raise ValueError(_STOPPED_CHILD)
     if child["state"] == remote_tasks.RUNNING:
-        stop_scope = (await asyncio.to_thread(remote_tasks.reserve_message_scope,
-            msg["message_id"], worker_id, from_device) if msg["kind"] != turn_scheduler.PROGRESS_KIND else None)
-        status, turn_id = await agent_messaging.deliver_message(
-            worker_id, msg["sender_session_id"], msg["text"], urgent=msg["urgent"],
-            kind=msg["kind"])
+        stop_scope, reservation = (await asyncio.to_thread(remote_tasks.reserve_message_scope_for_delivery,
+            msg["message_id"], worker_id, from_device) if msg["kind"] != turn_scheduler.PROGRESS_KIND else (None, None))
+        try:
+            status, turn_id = await agent_messaging.deliver_message(
+                worker_id, msg["sender_session_id"], msg["text"], urgent=msg["urgent"],
+                kind=msg["kind"])
+        except WorkerCheckoutError:
+            if reservation is not None:
+                await asyncio.to_thread(remote_tasks.undo_refused_message_scope, reservation)
+            raise
         if status == agent_messaging.STOPPED:
             raise ValueError(_STOPPED_CHILD)
         return {"status": status, "turn_id": turn_id, **({"stop_scope": stop_scope} if stop_scope else {})}
@@ -2846,11 +2852,17 @@ async def _message_child_locked(msg: Mapping[str, Any], from_device: str) -> Dic
             return {"status": agent_messaging.HELD, "turn_id": None}
         return {"status": agent_messaging.QUEUED, "turn_id": turn_id}
     # Reserve before the first delivery await, not after enqueuing a newer turn.
-    stop_scope = await asyncio.to_thread(remote_tasks.reserve_message_scope, msg["message_id"], worker_id, from_device)
+    stop_scope, reservation = await asyncio.to_thread(
+        remote_tasks.reserve_message_scope_for_delivery, msg["message_id"], worker_id, from_device)
     # Known as a worker again, so its settle hook owes the new report at once.
     provider_agent.register_worker_session(worker_id)
-    turn_id = await turn_scheduler.on_agent_message(
-        worker_id, msg["sender_session_id"], msg["text"], urgent=True)
+    try:
+        turn_id = await turn_scheduler.on_agent_message(
+            worker_id, msg["sender_session_id"], msg["text"], urgent=True)
+    except WorkerCheckoutError:
+        if reservation is not None:
+            await asyncio.to_thread(remote_tasks.undo_refused_message_scope, reservation)
+        raise
     if not turn_id or turn_id == turn_scheduler.HELD:
         raise ValueError(_STOPPED_CHILD)
     # After the turn exists: a report owed from here on is the resumed run's.

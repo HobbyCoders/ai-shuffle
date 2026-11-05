@@ -242,3 +242,320 @@ async def test_repeated_interrupt_requires_its_own_accepted_terminal_row(child, 
     finally:
         task_registry.clear_session(session_id)
         await flush()
+
+
+@pytest.fixture
+async def message_child(session_id, monkeypatch):
+    """Real remote birth/scope and parked turn; no provider or signed transport."""
+    from app.core import remote_task, turn_scheduler
+    from app.core.task_registry import task_registry
+    from app.core.task_persistence import flush
+    from app.db import base, remote_tasks, turns
+
+    owner = session_id + "-owner"
+    with base.get_db() as conn:
+        conn.cursor().execute("INSERT INTO sessions (id) VALUES (%s)", (owner,))
+        original = turns.enqueue_turn(session_id, "provider_agent", prompt="original work",
+            profile_id="default", command_id=remote_task.COMMAND_PREFIX + session_id,
+            payload={remote_task.REPORT_DEVICE_KEY: "parent",
+                     remote_task.REPORT_KEY: {"parent_session_id": owner, "owner_session_id": owner}},
+            _conn=conn)
+        remote_tasks.record_child(session_id, "parent", conn=conn, input_order=original["insert_order"])
+    scope = remote_task._answer(session_id, original, {}, created=True)["stop_scope"]
+    assert turns.start_turn(original["id"]) is not None
+    assert turns.park_turn(original["id"]) is not None
+    # Network membership and provider execution are outside this DB/admission test.
+    monkeypatch.setattr(remote_task, "_require_worker_member", lambda _: None)
+    monkeypatch.setattr(turn_scheduler, "kick", lambda _: None)
+    yield original, scope, owner
+    task_registry.clear_session(session_id)
+    task_registry.clear_session(owner)
+    await flush()
+
+
+def _message_body(session_id, owner, message_id="followup", *, kind="alert", completion=None):
+    from app.core import remote_task
+    return {"version": remote_task.WIRE_VERSION, "to": "child", "worker_session_id": session_id,
+            "sender_session_id": owner, "message_id": session_id + message_id, "text": "continue",
+            "kind": kind, "known_completion_id": completion}
+
+
+@pytest.mark.parametrize("resumable", [False, True])
+async def test_checkout_refused_message_preserves_acknowledged_stop(message_child, session_id, monkeypatch, resumable):
+    from app.core import remote_task, scoped_remote_stop, worker_checkout
+    from app.db import remote_tasks, turns
+
+    original, scope, owner = message_child
+    completion = None
+    if resumable:
+        assert turns.settle_parked_turns(session_id) == 1
+        completion = "completed-report"
+        assert remote_tasks.owe_report(session_id, completion, {"status": "completed"})
+    # Controlled admission fault: the real scheduler refuses before enqueue.
+    restore = AsyncMock(return_value=(False, "assigned checkout branch mismatch"))
+    monkeypatch.setattr(worker_checkout, "restore_worker_checkout_async", restore)
+    body = _message_body(session_id, owner, completion=completion)
+    with pytest.raises(ValueError, match="assigned checkout branch mismatch"):
+        await remote_task.handle_task_message(body, "parent")
+    restore.assert_awaited_once_with(session_id)
+    assert turns.get_queued_turns(session_id) == []
+    assert remote_tasks.message_answer(body["message_id"]) is None
+    assert scoped_remote_stop.claim(session_id, scope, "parent")["accepted"] is True
+
+
+@pytest.mark.parametrize("stopped", [False, True])
+async def test_stop_overtakes_limit_resume_checkout_refusal(message_child, session_id, monkeypatch, stopped):
+    from app.core import limit_resume, query_session_lifecycle, turn_scheduler, worker_checkout
+    from app.core.task_registry import task_registry
+    from app.db import wakeups, turns
+
+    _, _, owner = message_child
+    task_registry.start_task(owner, session_id, "agent", "waiting worker")
+    wake = wakeups.create_wakeup(id=session_id + "-wake", session_id=session_id,
+        prompt="automatic resume", fire_at=0, source=limit_resume.LIMIT_RESUME_SOURCE)
+    assert wakeups.claim_wakeup(wake["id"])
+    entered, release = asyncio.Event(), asyncio.Event()
+    async def refuse(_):
+        entered.set()
+        await release.wait()
+        return False, "assigned checkout branch mismatch"
+    monkeypatch.setattr(worker_checkout, "restore_worker_checkout_async", refuse)
+    # Observe the notification and note boundaries; admission, Stop and status
+    # mutations are real, as are the wake's automatically captured stop sequence.
+    terminal, record = AsyncMock(), AsyncMock()
+    monkeypatch.setattr(turn_scheduler, "on_task_terminal", terminal)
+    monkeypatch.setattr(limit_resume, "_record", record)
+    firing = asyncio.create_task(limit_resume._resume_worker(session_id, owner,
+        {"limit_key": "test-limit"}, wake_stop_seq=wake["stop_seq"]))
+    try:
+        await asyncio.wait_for(entered.wait(), 3)
+        if stopped:
+            await query_session_lifecycle.enter_user_stop(session_id)
+            await query_session_lifecycle._settle_stopped_task(owner, session_id)
+            assert task_registry.get_task(owner, session_id)["status"] == "killed"
+            assert turns.wake_cancelled_by_stop({"session_id": session_id,
+                "payload": {"wake_stop_seq": wake["stop_seq"]}})
+        release.set()
+        assert await asyncio.wait_for(firing, 3) is None
+        assert task_registry.get_task(owner, session_id)["status"] == ("killed" if stopped else "error")
+        assert turns.get_queued_turns(session_id) == []
+        assert [call.args[1] for call in record.await_args_list] == ["dropped", "dropped"]
+        if stopped:
+            terminal.assert_not_awaited()
+            assert all(call.args[2]["reason"] == "user_stopped" for call in record.await_args_list)
+        else:
+            terminal.assert_awaited_once()
+            assert terminal.await_args.args[1]["status"] == "error"
+            assert all(call.args[2]["reason"] == "assigned checkout branch mismatch" for call in record.await_args_list)
+    finally:
+        release.set()
+        await asyncio.gather(firing, return_exceptions=True)
+
+
+@pytest.mark.parametrize("path", ["running", "resumable", "pending_retry"])
+async def test_admitted_message_advances_scope_once(message_child, session_id, monkeypatch, path):
+    from app.core import remote_task, scoped_remote_stop, session_runtime
+    from app.db import remote_tasks, turns
+
+    _, old_scope, owner = message_child
+    completion = None
+    if path == "resumable":
+        assert turns.settle_parked_turns(session_id) == 1
+        completion = "completed-report"
+        assert remote_tasks.owe_report(session_id, completion, {"status": "completed"})
+    body = _message_body(session_id, owner, completion=completion)
+    pending = (remote_tasks.reserve_message_scope(body["message_id"], session_id, "parent")
+               if path == "pending_retry" else None)
+    # No provider runs: stop at the real durable enqueue/steering boundary.
+    steer = AsyncMock()
+    monkeypatch.setattr(session_runtime, "try_steer_pending", steer)
+    answer = await remote_task.handle_task_message(body, "parent")
+    scope = answer["stop_scope"]
+    assert scope["generation"] == body["message_id"] and scope["epoch"] > old_scope["epoch"]
+    if pending:
+        assert scope == pending
+    [queued] = turns.get_queued_turns(session_id)
+    assert answer["turn_id"] == queued["id"]
+    assert scoped_remote_stop.claim(session_id, old_scope, "parent") == {"accepted": False}
+    assert await remote_task.handle_task_message(body, "parent") == {**answer, "duplicate": True}
+    assert [turn["id"] for turn in turns.get_queued_turns(session_id)] == [queued["id"]]
+    with pytest.raises(ValueError, match="another message"):
+        await remote_task.handle_task_message(body, "other-device")
+    assert remote_tasks.message_answer(body["message_id"])["direction"] == "child"
+    assert scoped_remote_stop.claim(session_id, scope, "parent")["accepted"] is True
+
+
+async def test_unknown_after_enqueue_keeps_reserved_scope(message_child, session_id, monkeypatch):
+    from app.core import remote_task, scoped_remote_stop, session_runtime
+    from app.db import remote_tasks, turns
+
+    _, old_scope, owner = message_child
+    body = _message_body(session_id, owner)
+    # Fault AFTER actual enqueue is uncertain, not a definite checkout refusal.
+    monkeypatch.setattr(session_runtime, "try_steer_pending", AsyncMock(side_effect=RuntimeError("delivery unknown")))
+    with pytest.raises(RuntimeError, match="delivery unknown"):
+        await remote_task.handle_task_message(body, "parent")
+    assert len(turns.get_queued_turns(session_id)) == 1
+    child = remote_tasks.get_child(session_id)
+    assert child["scope_generation"] == body["message_id"]
+    assert int(child["scope_epoch"]) > old_scope["epoch"]
+    pending = remote_tasks.message_answer(body["message_id"])["answer"]
+    assert pending["_scope_pending"] is True and "_scope_reservation" in pending
+    assert scoped_remote_stop.claim(session_id, old_scope, "parent") == {"accepted": False}
+
+
+async def test_progress_remains_held_without_scope_or_checkout_admission(message_child, session_id, monkeypatch):
+    from app.core import remote_task, scoped_remote_stop, worker_checkout
+    from app.db import remote_tasks, turns
+
+    _, scope, owner = message_child
+    restore = AsyncMock(side_effect=AssertionError("idle progress must not restore checkout"))
+    monkeypatch.setattr(worker_checkout, "restore_worker_checkout_async", restore)
+    answer = await remote_task.handle_task_message(_message_body(session_id, owner, kind="progress"), "parent")
+    assert answer == {"status": "held", "turn_id": None, "duplicate": False}
+    restore.assert_not_awaited()
+    assert turns.get_queued_turns(session_id) == []
+    child = remote_tasks.get_child(session_id)
+    assert child["scope_generation"] == scope["generation"] and int(child["scope_epoch"]) == scope["epoch"]
+    assert scoped_remote_stop.claim(session_id, scope, "parent")["accepted"] is True
+
+
+async def test_local_input_during_refused_checkout_is_not_erased(message_child, session_id, monkeypatch):
+    from app.core import remote_task, scoped_remote_stop, turn_manager, worker_checkout
+    from app.db import turns
+
+    _, scope, owner = message_child
+    entered, release = asyncio.Event(), asyncio.Event()
+    async def refuse(_):
+        entered.set()
+        await release.wait()
+        return False, "assigned checkout branch mismatch"
+    monkeypatch.setattr(worker_checkout, "restore_worker_checkout_async", refuse)
+    message = asyncio.create_task(remote_task.handle_task_message(_message_body(session_id, owner), "parent"))
+    try:
+        await asyncio.wait_for(entered.wait(), 3)
+        local = await asyncio.to_thread(turn_manager.submit, session_id, "user",
+            prompt="new human instruction", profile_id="default", no_kick=True)
+        release.set()
+        with pytest.raises(ValueError, match="assigned checkout branch mismatch"):
+            await asyncio.wait_for(message, 3)
+        assert turns.get_turn(local)["state"] == "queued"
+        assert scoped_remote_stop.claim(session_id, scope, "parent") == {"accepted": False}
+        assert turns.get_turn(local)["state"] == "queued"
+    finally:
+        release.set()
+        await asyncio.gather(message, return_exceptions=True)
+
+
+async def test_definite_refusal_can_retry_then_finalize_once(message_child, session_id, monkeypatch):
+    from app.core import remote_task, session_runtime, worker_checkout
+    from app.db import remote_tasks, turns
+
+    _, _, owner = message_child
+    restore = AsyncMock(side_effect=[(False, "assigned checkout branch mismatch"), (True, None)])
+    monkeypatch.setattr(worker_checkout, "restore_worker_checkout_async", restore)
+    monkeypatch.setattr(session_runtime, "try_steer_pending", AsyncMock())
+    body = _message_body(session_id, owner)
+    with pytest.raises(ValueError, match="assigned checkout branch mismatch"):
+        await remote_task.handle_task_message(body, "parent")
+    assert turns.get_queued_turns(session_id) == []
+    answer = await remote_task.handle_task_message(body, "parent")
+    assert answer["duplicate"] is False
+    assert await remote_task.handle_task_message(body, "parent") == {**answer, "duplicate": True}
+    assert len(turns.get_queued_turns(session_id)) == 1
+    assert restore.await_count == 2
+    assert remote_tasks.message_answer(body["message_id"])["answer"] == {k: v for k, v in answer.items() if k != "duplicate"}
+
+
+@pytest.mark.parametrize("guard", ["newer_scope", "local_input", "stop", "finalized", "pending_retry"])
+async def test_fresh_reservation_undo_cannot_erase_newer_authority(message_child, session_id, guard):
+    from app.core import turn_manager
+    from app.db import remote_tasks, turns
+
+    _, _, owner = message_child
+    mid = session_id + "-fresh"
+    scope, proof = remote_tasks.reserve_message_scope_for_delivery(mid, session_id, "parent")
+    assert proof is not None
+    if guard == "newer_scope":
+        remote_tasks.reserve_message_scope(mid + "-newer", session_id, "parent")
+    elif guard == "local_input":
+        turn_manager.submit(session_id, "user", prompt="new local work", profile_id="default", no_kick=True)
+    elif guard == "stop":
+        turns.read_stop_receipt(session_id)
+    elif guard == "finalized":
+        assert remote_tasks.record_message(mid, worker_session_id=session_id, from_device_id="parent",
+            direction="child", answer={"status": "delivered", "turn_id": None, "stop_scope": scope})
+    else:
+        retry_scope, retry_proof = remote_tasks.reserve_message_scope_for_delivery(mid, session_id, "parent")
+        assert retry_scope == scope and retry_proof is None
+    before, answer = remote_tasks.get_child(session_id), remote_tasks.message_answer(mid)
+    assert remote_tasks.undo_refused_message_scope(proof) is False
+    assert remote_tasks.get_child(session_id) == before
+    assert remote_tasks.message_answer(mid) == answer
+
+
+async def test_refused_pending_retry_never_rewinds_its_original_reservation(message_child, session_id, monkeypatch):
+    from app.core import remote_task, scoped_remote_stop, worker_checkout
+    from app.db import remote_tasks, turns
+
+    _, original, owner = message_child
+    body = _message_body(session_id, owner)
+    scope, proof = remote_tasks.reserve_message_scope_for_delivery(body["message_id"], session_id, "parent")
+    monkeypatch.setattr(worker_checkout, "restore_worker_checkout_async", AsyncMock(return_value=(False, "checkout mismatch")))
+    with pytest.raises(ValueError, match="checkout mismatch"):
+        await remote_task.handle_task_message(body, "parent")
+    assert turns.get_queued_turns(session_id) == []
+    assert remote_tasks.undo_refused_message_scope(proof) is False  # retry revoked even the first caller's proof
+    assert scoped_remote_stop.claim(session_id, original, "parent") == {"accepted": False}
+    assert scoped_remote_stop.claim(session_id, scope, "parent")["accepted"] is True
+
+
+async def test_fresh_undo_removes_only_its_own_pending_intent(message_child, session_id):
+    from app.db import remote_tasks
+
+    unrelated = session_id + "-unrelated"
+    remote_tasks.reserve_message_scope(unrelated, session_id, "parent")
+    prior = remote_tasks.get_child(session_id)
+    pending = remote_tasks.message_answer(unrelated)
+    mid = session_id + "-refused"
+    _, proof = remote_tasks.reserve_message_scope_for_delivery(mid, session_id, "parent")
+    assert remote_tasks.undo_refused_message_scope(proof) is True
+    assert remote_tasks.get_child(session_id) == prior
+    assert remote_tasks.message_answer(mid) is None
+    assert remote_tasks.message_answer(unrelated) == pending
+    assert remote_tasks.undo_refused_message_scope(proof) is False
+
+
+@pytest.mark.parametrize("engine_refuses", [False, True])
+async def test_live_delivery_or_definite_fallback_refusal_keeps_truthful_scope(
+        message_child, session_id, monkeypatch, engine_refuses):
+    from types import SimpleNamespace
+    from app.core import remote_task, scoped_remote_stop, session_pool, session_runtime, worker_checkout
+    from app.db import remote_tasks, turns
+
+    _, original, owner = message_child
+    # Controlled live consumer: exercise actual deliver_message selection and
+    # its RuntimeError (not accepted) fallback, without starting a provider.
+    engine = SimpleNamespace(turn_running=True, submit=AsyncMock(
+        side_effect=RuntimeError("idle") if engine_refuses else None))
+    state = SimpleNamespace(adapter=SimpleNamespace(provider_kind="native", engine=engine))
+    monkeypatch.setattr(session_pool, "get_session_pool", lambda: SimpleNamespace(get=lambda _: state))
+    monkeypatch.setattr(session_runtime, "get_live_runtime", lambda _: object())
+    restore = AsyncMock(return_value=(False, "checkout mismatch"))
+    monkeypatch.setattr(worker_checkout, "restore_worker_checkout_async", restore)
+    body = _message_body(session_id, owner)
+    if engine_refuses:
+        with pytest.raises(ValueError, match="checkout mismatch"):
+            await remote_task.handle_task_message(body, "parent")
+        restore.assert_awaited_once()
+        assert remote_tasks.message_answer(body["message_id"]) is None
+        assert scoped_remote_stop.claim(session_id, original, "parent")["accepted"] is True
+    else:
+        answer = await remote_task.handle_task_message(body, "parent")
+        assert answer["status"] == "delivered" and answer["turn_id"] is None
+        restore.assert_not_awaited()
+        assert answer["stop_scope"]["epoch"] > original["epoch"]
+        assert scoped_remote_stop.claim(session_id, original, "parent") == {"accepted": False}
+        assert await remote_task.handle_task_message(body, "parent") == {**answer, "duplicate": True}
+    engine.submit.assert_awaited_once()
+    assert turns.get_queued_turns(session_id) == []

@@ -1130,7 +1130,12 @@ async def _resume_worker(worker_id: str, owner: str, meta: Dict[str, Any], *,
         from app.db import turns
         if await asyncio.to_thread(turns.wake_cancelled_by_stop,
                                    {"session_id": worker_id, "payload": {"wake_stop_seq": wake_stop_seq}}):
-            turn_id = None
+            # Stop won while admission waited, even if checkout restoration
+            # then failed. Do not replace its killed task with a false error.
+            for sid, extra in ((worker_id, {}), (owner, {"task_id": worker_id})):
+                await _record(sid, _STATUS_DROPPED, {"reason": "user_stopped", **extra,
+                    "limit_key": meta.get("limit_key")})
+            return None
     if not turn_id or turn_id == turn_scheduler.HELD:
         for sid, extra in ((worker_id, {}), (owner, {"task_id": worker_id})):
             await _record(sid, _STATUS_DROPPED, {"reason": refusal, **extra,
