@@ -1351,16 +1351,23 @@ async def sweep() -> int:
     """
     from app.db import remote_tasks
 
-    def _reconcile() -> None:
-        for worker_id in remote_tasks.running_children():
-            try:
-                owe_if_finished(worker_id)
-            except Exception:  # noqa: BLE001 — one child never blocks the others
-                logger.warning("remote_task: could not settle the report of %s", worker_id,
-                               exc_info=True)
-
-    await asyncio.to_thread(_reconcile)
+    for worker_id in await asyncio.to_thread(remote_tasks.running_children):
+        try:
+            await _owe_and_reclaim(worker_id)
+        except Exception:  # noqa: BLE001 — one child never blocks the others
+            logger.warning("remote_task: could not settle the report of %s", worker_id,
+                           exc_info=True)
     return await deliver_due()
+
+
+async def _owe_and_reclaim(session_id: str) -> bool:
+    """Remote settlement uses the same admission lock/busy recheck as local."""
+    if not await asyncio.to_thread(owe_if_finished, session_id):
+        return False
+    from app.core.worker_checkout import reclaim_finished_worker_checkout
+
+    await reclaim_finished_worker_checkout(session_id)
+    return True
 
 
 async def on_child_settled(session_id: str) -> None:
@@ -1374,7 +1381,7 @@ async def on_child_settled(session_id: str) -> None:
 
         if not is_worker_session(session_id):
             return
-        if not await asyncio.to_thread(owe_if_finished, session_id):
+        if not await _owe_and_reclaim(session_id):
             return
         task = asyncio.create_task(deliver_due())
         _delivery_tasks.add(task)
@@ -2420,7 +2427,7 @@ async def handle_task_stop(body: Dict[str, Any], from_device: str) -> Dict[str, 
             children[worker_id] = {"state": CHILD_UNKNOWN}
         # A child at rest whose report the sweep has not stored yet: store it
         # now, so it keeps the report it finished with and answers finished.
-        elif row["state"] == remote_tasks.RUNNING and not await run_sync(owe_if_finished, worker_id):
+        elif row["state"] == remote_tasks.RUNNING and not await _owe_and_reclaim(worker_id):
             logger.info("remote_task: worker %s stopped child %s (%s)", from_device, worker_id,
                         body.get("reason"))
             await stop_child_here(worker_id)
@@ -2857,10 +2864,17 @@ async def handle_task_message(body: Dict[str, Any], from_device: str) -> Dict[st
                     or seen["worker_session_id"] != msg["worker_session_id"]):
                 raise ValueError("This message id was already used for another message.")
             return {**seen["answer"], "duplicate": True}
-        if msg["to"] == TO_CHILD:
-            answer = await _message_child(msg, from_device)
-        else:
-            answer = await _message_main(msg, from_device)
+        from app.core.worker_checkout import WorkerCheckoutError
+
+        try:
+            if msg["to"] == TO_CHILD:
+                answer = await _message_child(msg, from_device)
+            else:
+                answer = await _message_main(msg, from_device)
+        except WorkerCheckoutError as exc:
+            # Refused before enqueue, not an uncertain transport application.
+            # The control layer maps ValueError to a definite HTTP 400 refusal.
+            raise ValueError(str(exc)) from exc
         await run_sync(
             remote_tasks.record_message, msg["message_id"], worker_session_id=msg["worker_session_id"],
             from_device_id=from_device, direction=msg["to"], answer=answer,

@@ -252,7 +252,14 @@
 				"frontend/src/lib/components/chat/WorkLogGroup*",
 				"frontend/src/lib/components/chat/SystemMessageGroup*",
 				"frontend/src/lib/utils/work-log*",
-				"frontend/src/lib/utils/tool-*"
+				"frontend/src/lib/utils/tool-*",
+				"app/core/agent_messaging.py",
+				"app/core/worker_checkout.py",
+				"app/core/turn_scheduler.py",
+				"app/core/provider_agent.py",
+				"app/core/session_pr_state.py",
+				"app/core/model_override.py",
+				"app/core/model_registry.py"
 			]
 		},
 		{

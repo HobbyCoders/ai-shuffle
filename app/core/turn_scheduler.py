@@ -1831,6 +1831,20 @@ async def on_agent_message(
         if (task_registry.stop_invalidated(session_id, generation)
                 or (reply_to and task_registry.stop_invalidated(reply_to, owner_generation))):
             return None
+        # Task rows can still say running after eviction or checkout cleanup.
+        # Availability belongs to admission, not to that stale snapshot.
+        from app.core.worker_checkout import restore_worker_checkout_async, WorkerCheckoutError
+        from fluid.context.peer import message_kind
+
+        # An idle progress note is held, not executed. Do not recreate a
+        # checkout with no future finisher to reclaim it. Keep restoration
+        # inside this lock: moving it out races finisher cleanup before enqueue.
+        held_progress = (message_kind(kind, urgent) == PROGRESS_KIND
+                         and await asyncio.to_thread(turns_db.get_live_turn, session_id) is None)
+        if not held_progress:
+            restored, note = await restore_worker_checkout_async(session_id)
+            if not restored:
+                raise WorkerCheckoutError(note or "Its dedicated checkout could not be restored; dispatch a new Task instead")
         return await _on_agent_message_locked(
             session_id, sender, text, reply_to=reply_to, urgent=urgent,
             continuation_payload=extra_payload, kind=kind,

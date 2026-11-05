@@ -1112,15 +1112,31 @@ async def _fire(row: Dict[str, Any]) -> Optional[str]:
 async def _resume_worker(worker_id: str, owner: str, meta: Dict[str, Any]) -> Optional[str]:
     from app.core import turn_scheduler
 
-    turn_id = await turn_scheduler.on_agent_message(
-        worker_id, RESUME_SENDER, WORKER_RESUME_TEXT, reply_to=owner,
-        extra_payload={PAYLOAD_KEY: {"limit_key": meta.get("limit_key"),
-                                     "reset_at": meta.get("reset_at")}},
-    )
+    from app.core.worker_checkout import WorkerCheckoutError
+
+    refusal = "refused"
+    try:
+        turn_id = await turn_scheduler.on_agent_message(
+            worker_id, RESUME_SENDER, WORKER_RESUME_TEXT, reply_to=owner,
+            extra_payload={PAYLOAD_KEY: {"limit_key": meta.get("limit_key"),
+                                         "reset_at": meta.get("reset_at")}},
+        )
+    except WorkerCheckoutError as exc:
+        refusal, turn_id = str(exc) or "refused", None
     if not turn_id or turn_id == turn_scheduler.HELD:
         for sid, extra in ((worker_id, {}), (owner, {"task_id": worker_id})):
-            await _record(sid, _STATUS_DROPPED, {"reason": "refused", **extra,
-                                                 "limit_key": meta.get("limit_key")})
+            await _record(sid, _STATUS_DROPPED, {"reason": refusal, **extra,
+                **({"content": f"Automatic resume dropped: {refusal}"} if refusal != "refused" else {}),
+                "limit_key": meta.get("limit_key")})
+        if refusal != "refused":
+            from app.core.task_registry import task_registry
+
+            summary = f"Automatic resume could not start: {refusal}"
+            task_registry.complete_task(owner, worker_id, "error", summary=summary)
+            await turn_scheduler.on_task_terminal(owner, {
+                "task_id": worker_id, "tool_use_id": worker_id, "kind": "agent",
+                "status": "error", "summary": summary,
+            })
         return None
     for sid, extra in ((worker_id, {}), (owner, {"task_id": worker_id})):
         await _record(sid, _STATUS_RESUMED, {"limit_key": meta.get("limit_key"), **extra})

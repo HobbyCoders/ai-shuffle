@@ -1,8 +1,8 @@
 """A Claude caller picks a Claude model per Task, like a provider-row caller.
 
 Native targets (no provider) run on Claude: the Claude Code CLI on a
-subscription, or the Anthropic API with a key. A Task ``model`` may be any
-Claude alias, or an unambiguous ID/display name from an enabled provider, which
+subscription, or the Anthropic API with a key. A Task ``model`` may be an eligible
+Claude family name, or an unambiguous ID/display name from an enabled provider, which
 moves that one worker to that provider (#1830, #2030). The user's message in the
 parent names the models, so no owner prompt is involved here.
 """
@@ -40,6 +40,28 @@ def native(mock_db, monkeypatch, tmp_path):
     return db, seen
 
 
+async def test_a_native_family_beside_a_provider_version_keeps_owner_consent(native, monkeypatch):
+    from app.core.agent_types import PermissionResultDeny
+    from app.core.permission_handler import permission_handler
+    from tests.core.test_task_model_choices import _user_says
+
+    _, seen = native
+    _user_says("parent", "Try haiku, opus, fable or gpt-5.6-sol for this.")
+    prompts = []
+
+    async def deny(**kwargs):
+        prompts.append(kwargs)
+        return PermissionResultDeny(message="User denied permission")
+
+    monkeypatch.setattr(permission_handler, "request_permission", deny)
+    result = await td.dispatch_task_tool(
+        {"agent": "helper", "prompt": "go", "model": "haiku", "mode": "sync"},
+        caller_session_id="parent", caller_provider_id=None,
+    )
+    assert result["ok"] and result["model_override"]["source"] == "named_by_user"
+    assert not prompts and seen[0]["model_id"] == "haiku"
+
+
 def test_native_caller_contract_takes_any_model_string(native):
     contract = apm.build_task_contract("caller", None)
     assert "enum" not in contract.input_schema["properties"]["model"]
@@ -49,7 +71,8 @@ def test_native_caller_contract_takes_any_model_string(native):
     ("haiku", "haiku"),
     ("opus", "opus"),
     (" fable ", "fable"),
-    ("claude-haiku-5-5", "haiku"),  # the first-party full id normalizes onto its alias
+    ("H a i k u", "haiku"),
+    ("O-p-u-s", "opus"),
 ])
 async def test_native_dispatch_runs_the_chosen_claude_model(native, model, expected):
     _, seen = native
@@ -60,6 +83,24 @@ async def test_native_dispatch_runs_the_chosen_claude_model(native, model, expec
     assert result["ok"], result
     assert seen[0]["model_id"] == expected
     assert seen[0]["provider_id"] is None
+
+
+@pytest.mark.parametrize("model", [
+    "claude-haiku-5-5", "Haiku 5.5", "claude-opus-5-5", "Opus 5.5",
+    "claude-opus-4-7", "claude-sonnet-4-6", "opus[1m]",
+])
+async def test_explicit_versioned_native_names_require_a_family_name(native, model):
+    # Owner decision (2026-11-03): explicit overrides must not silently upgrade
+    # a pinned Claude version. Saved profile migration is a separate path.
+    _, seen = native
+    result = await td.dispatch_task_tool(
+        {"agent": "helper", "prompt": "go", "model": model, "mode": "sync"},
+        caller_session_id="parent", caller_provider_id=None,
+    )
+    assert not result["ok"]
+    assert "use a family name" in result["error"]
+    assert "Nothing was dispatched" in result["error"]
+    assert not seen
 
 
 async def test_native_dispatch_without_a_model_keeps_the_stored_assignment(native):

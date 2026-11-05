@@ -37,23 +37,27 @@ def worker(runtime, owner, worker_id, name="Helper", roster_name=None):
     return engine
 
 
-async def test_resume_unavailable_preserves_archive_restore_note(runtime, monkeypatch):
+async def test_actual_admission_preserves_archive_restore_note(runtime, monkeypatch):
     from unittest.mock import Mock
     from app.core import provider_agent, worker_checkout, worktree_reclaim
-    from app.db import sessions
+    from app.db import database, sessions
 
     target = "archived-worker"
     note = ("Its checkout could not be restored; " +
             worktree_reclaim.archive_note("/fixture/project", "chore/task-" + target))
-    monkeypatch.setattr(sessions, "get_session", lambda sid: {"id": sid})
+    def bound_worker(sid):
+        return {"id": sid, "branch": "chore/task-" + sid, "worktree_path": "/fixture/worker"}
+    monkeypatch.setattr(sessions, "get_session", bound_worker)
+    monkeypatch.setattr(database, "get_session", bound_worker)
     monkeypatch.setattr(turn_scheduler, "_latest_context_turn", lambda sid: {"id": "turn", "profile_id": "coder"})
     monkeypatch.setattr(provider_agent, "final_turn_outcome", lambda sid: {})
     monkeypatch.setattr(turn_scheduler, "_turn_terminal_payload", lambda *args: {})
     restore = Mock(return_value=(False, note))
     monkeypatch.setattr(worker_checkout, "restore_worker_checkout", restore)
-    refusal = await messaging.resume_unavailable(target, {"status": "completed"})
-    assert refusal == note
-    assert "refs/fluid-archive/chore/task-archived-worker" in refusal
+    assert await messaging.resume_unavailable(target, {"status": "completed"}) is None
+    restore.assert_not_called()  # eligibility is side-effect free
+    with pytest.raises(worker_checkout.WorkerCheckoutError, match="refs/fluid-archive/chore/task-archived-worker"):
+        await turn_scheduler.on_agent_message(target, "parent", "continue")
     restore.assert_called_once_with(target)
 
 

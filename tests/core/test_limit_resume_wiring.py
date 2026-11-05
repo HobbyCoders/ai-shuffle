@@ -95,7 +95,7 @@ async def test_the_parent_hears_once_with_the_resumed_report(monkeypatch):
     terminal = AsyncMock()
     monkeypatch.setattr(turn_scheduler, "on_task_terminal", terminal)
     monkeypatch.setattr("app.core.worker_checkout.reclaim_untouched_worker_checkout",
-                        lambda sid: None)
+                        lambda sid, checkout=None: None)
     await agent_messaging.finish_message_resume("w1", settled, "completed")
     terminal.assert_awaited_once()
     owner, frame = terminal.await_args.args

@@ -4,8 +4,9 @@ An agent may pass ``model`` to run one new chat or subagent on a model other
 than the one it would get anyway (the agent's pin, else the owner's subagent
 default; for a new chat, the caller's own model). Any model this install can
 run is eligible: a Claude registry alias or a model on an enabled provider's
-curated list. Pass the owner's wording: full ids and display names match with
-case and separators ignored, without fuzzy or distinctive-word guesses.
+curated list. Native Claude overrides accept family names only, never version
+pins or legacy ids. Provider ids and display names match with case and separators
+ignored, without fuzzy or distinctive-word guesses.
 Exact app ids (``sonnet``, ``prov:<providerId>:<modelId>``) still work;
 ambiguous names require an exact id and never choose catalog order.
 
@@ -79,7 +80,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from fluid.codemode.routing import affirmed_clauses
+from fluid.codemode.routing import affirmed_clauses, is_instruction
 
 logger = logging.getLogger(__name__)
 
@@ -215,10 +216,14 @@ def resolve(value: Any, leg: Optional[str] = None, *, runs_here: bool = True) ->
             error = gaps[pid]
         return (None, error) if error else (normalized, None)
 
-    # Preserve exact composites and the legacy Claude aliases. A provider id
-    # is opaque: never normalize it or escape its scope to find another match.
+    # Preserve exact composites and family aliases. A provider id is opaque:
+    # never normalize it or escape its scope to find another match.
     wanted = canonical(text, leg)
-    exact = explicit is not None or is_native_claude_model(text)
+    # Legacy normalization may intentionally migrate old stored versions onto
+    # today's alias. An explicit override must instead match the actual route.
+    from app.core.model_registry import model_values
+
+    exact = explicit is not None or text in model_values()
     normalized, reason = checked(wanted) if exact else (None, None)
     if not runs_here and explicit and wanted not in catalog:
         # Known spoken composites can be normalized locally, but a canonical
@@ -260,6 +265,12 @@ def resolve(value: Any, leg: Optional[str] = None, *, runs_here: bool = True) ->
         hint = ("Choose one of: " + ", ".join(available) + " (at most 20 shown)."
                 if available else "No eligible models are configured in this scope.")
         location = "on this worker" if runs_here else "from this worker's enabled registry"
+        words = _tokens(text)
+        if reason is None and not explicit and words and words[0] in {"claude", *model_values()}:
+            reason = ("For native Claude, use a family name (haiku, sonnet or opus); it runs "
+                      "that family's current version. Explicit version pins, legacy ids and [1m] "
+                      "forms are not supported. If the owner asked for a specific version, get "
+                      "their agreement before using a family name; never substitute after refusal.")
         raise ValueError(f"Model '{text}' cannot run {location}: "
                          f"{(reason or 'No matching model id or display name.')[:500]} {hint}")
     decoded = decode_provider_model(normalized)
@@ -299,12 +310,12 @@ def _entries(row: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 def _catalog() -> Dict[str, Tuple[str, ...]]:
     """Every eligible model's app id and the names it goes by."""
-    from app.core.model_registry import API_MODEL_IDS, MODELS
+    from app.core.model_registry import MODELS
 
-    names: Dict[str, Tuple[str, ...]] = {}
-    for option in MODELS:
-        names[option.value] = tuple(filter(None, (
-            option.value, option.label, f"claude {option.value}", API_MODEL_IDS.get(option.value))))
+    # CLI aliases are owned by the CLI and can differ from the native API ids.
+    # Do not infer a native version pin from either table. Stored configuration
+    # migrations use normalize_model separately, not this explicit-request list.
+    names = {option.value: (option.value, option.label) for option in MODELS}
     for row in _provider_rows():
         for entry in _entries(row):
             model_id = str(entry["id"])
@@ -338,30 +349,58 @@ def names_for(model: str, catalog: Optional[Dict[str, Tuple[str, ...]]] = None) 
 
 
 def _mentions(text_tokens: Sequence[str], name: str) -> bool:
-    """Whether ``name`` (separators ignored) spans whole words of the text."""
+    """Whether ``name`` spans whole words, with separators ignored."""
+    from itertools import accumulate
+
     target = "".join(_tokens(name))
-    if not target:
-        return False
-    for start in range(len(text_tokens)):
-        joined = ""
-        for index in range(start, len(text_tokens)):
-            joined += text_tokens[index]
-            if len(joined) >= len(target):
-                break
-        if joined == target:
+    boundaries = set(accumulate(map(len, text_tokens), initial=0))
+    joined = "".join(text_tokens)
+    return bool(target) and any(joined.startswith(target, start) and start + len(target) in boundaries
+                                for start in boundaries)
+
+
+def _directed(text: str, model: str) -> bool:
+    name = re.escape(model)
+    for part in re.split(r"[,:;\n]|(?<=[.!?])\s+", text):
+        if re.search(rf"(?<![\w-]){name}(?![\w-])", part, re.I) and (
+                is_instruction(part) or re.fullmatch(
+                    rf"\s*(?:just\s+)?{name}(?:\s+please)?[.!]?\s*", part, re.I)):
             return True
     return False
+
+
+def _family_consent(model: str, text: str) -> Optional[bool]:
+    """Plain consent, qualification, or no request, within the model's clause."""
+    name = re.escape(model)
+    gap = r"(?:[\W_]|\b(?:model|version|build|release|at|with)\b)*"
+    number = r"(?:v?\d+(?:\.\d+)?|zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand)\b"
+    qualified = (rf"\b(?:old|older|previous|prior|legacy|last|earlier|original|\d+\.\d+|\d{{4}})\s+{name}\b|"
+                 rf"\b(?:claude\s+\d+(?:\.\d+)?|\d+(?:\.\d+)?\s+version\s+of)\s+{name}\b|"
+                 rf"(?<=[\w-])-{name}\b|\b{name}(?:-[\w-]+|{number}|"
+                 rf"\s+(?:(?:model|version|build|release)\s+)?{number}|"
+                 rf"{gap}(?:v?\d+\.\d+|1m)\b|[\s,:/()\[\]{{}}—–-]+{number}(?=[\s)\]}}]*(?:$|[.,;:!?])))")
+    mentioned = False
+    for sentence in re.split(r"(?<=[.!?])\s+|\n", str(text or "")):
+        plain, pins = re.subn(qualified, "", sentence, flags=re.I)
+        mentioned |= bool(pins)
+        if sentence.rstrip().endswith("?") and (pins or not _directed(sentence, model)):
+            continue
+        mentioned |= bool(re.search(rf"\b{name}\b", sentence, re.I))
+        if any(re.search(rf"(?<![\w-]){name}(?![\w-])", part, re.I) for part in affirmed_clauses(plain)):
+            return True
+    return False if mentioned else None
 
 
 def named_by_user(model: str, texts: Iterable[str],
                   catalog: Optional[Dict[str, Tuple[str, ...]]] = None) -> bool:
     """Whether any of ``texts`` names ``model``."""
+    from app.core.model_registry import model_values
+
+    if model in model_values():
+        return any(_family_consent(model, text) is True for text in texts)
     full, words = names_for(model, catalog)
-    for text in texts:
-        tokens = _tokens(text)
-        if any(_mentions(tokens, name) for name in full) or any(word in tokens for word in words):
-            return True
-    return False
+    return any(any(_mentions(_tokens(text), name) for name in full)
+               or any(word in _tokens(text) for word in words) for text in texts)
 
 
 def label(model: Optional[str]) -> str:
@@ -548,14 +587,26 @@ def _user_evidence(session_id: str) -> List[Dict[str, Any]]:
         return []
 
 
+class _NativeSearchIncomplete(RuntimeError):
+    """Unknown newest native request: saved routing cannot grant consent."""
+
+
 def _find_named(session_id: str, model: str, *, recent: bool = True,
                 older: bool = True) -> Optional[Dict[str, Any]]:
     """The user's message naming ``model``: ``recent`` searches the bounded
     newest-first window, ``older`` the paged five-second fallback."""
+    from app.core.model_registry import model_values
+
     catalog = _catalog()
-    if recent:
+    native = model in model_values()
+
+    def mentions(texts):
+        return (any(_family_consent(model, text) is not None for text in texts) if native
+                else named_by_user(model, texts, catalog))
+
+    if recent and not native:
         evidence = _user_evidence(session_id)
-        match = next((row for row in evidence if named_by_user(model, [row["text"]], catalog)), None)
+        match = next((row for row in evidence if mentions([row["text"]])), None)
         if match or not older:
             return match
     # First use after upgrade must not discard an old standing instruction.
@@ -572,6 +623,7 @@ def _find_named(session_id: str, model: str, *, recent: bool = True,
     current = chat_of(session_id)
     principal = session_api_user_id(database.get_session(session_id))
     seen = set()
+    plain_evidence = None
     try:
         with get_db() as conn:
             cursor = conn.cursor()
@@ -581,9 +633,6 @@ def _find_named(session_id: str, model: str, *, recent: bool = True,
                         or session_api_user_id(session) != principal):
                     break
                 seen.add(current)
-                if _has_named(current, model):
-                    payload = interactions.get_interaction(_named_id(current, model))["payload"]
-                    return {k: payload[k] for k in ("turn_id", "session_id", "api_user_id")}
                 before = float("inf")
                 while time.monotonic() < deadline:
                     cursor.execute(
@@ -600,21 +649,44 @@ def _find_named(session_id: str, model: str, *, recent: bool = True,
                         break
                     for turn in rows:
                         if time.monotonic() >= deadline:
+                            if native:
+                                raise _NativeSearchIncomplete
                             return None
                         texts = _typed(cursor, current, [turn], session=session)
-                        if named_by_user(model, texts, catalog):
-                            return {"turn_id": turn["id"], "session_id": current,
-                                    "api_user_id": principal}
+                        if time.monotonic() >= deadline and native:
+                            raise _NativeSearchIncomplete
+                        if mentions(texts):
+                            evidence = {"turn_id": turn["id"], "session_id": current,
+                                        "api_user_id": principal, "text": texts[0]}
+                            if native and _family_consent(model, texts[0]) is True and not _directed(texts[0], model):
+                                # Narrative naming cannot supersede an older qualified request.
+                                plain_evidence = plain_evidence or evidence
+                                continue
+                            return evidence
                     before = rows[-1]["position"]
                 if time.monotonic() >= deadline:
                     break
+                if _has_named(current, model):
+                    return interactions.get_interaction(_named_id(current, model))["payload"]
                 payload = (_start_turn(current) or {}).get("payload") or {}
                 if payload.get("orchestration_remote_origin") or not payload.get("orchestration_sender"):
                     break
                 current = chat_of(payload["orchestration_sender"])
-    except Exception:  # noqa: BLE001 — a failed search never grants consent
+            else:
+                if native:
+                    raise _NativeSearchIncomplete
+    except _NativeSearchIncomplete:
+        raise
+    except Exception as exc:  # noqa: BLE001 — a failed search never grants consent
         logger.warning("Could not search old model naming for %s", session_id, exc_info=True)
-    return None
+        if native:
+            raise _NativeSearchIncomplete from exc
+        return None
+    if time.monotonic() >= deadline:
+        if native:
+            raise _NativeSearchIncomplete
+        return None
+    return plain_evidence
 
 
 def user_texts(session_id: str) -> List[str]:
@@ -639,7 +711,9 @@ _ROUTING_CACHE_LIMIT = 2048
 def memory_names(model: str, text: str,
                  catalog: Optional[Dict[str, Tuple[str, ...]]] = None) -> bool:
     """Whether saved ``text`` names ``model`` outside a negated clause."""
-    return named_by_user(model, affirmed_clauses(text), catalog)
+    from app.core.model_registry import model_values
+
+    return named_by_user(model, [text] if model in model_values() else affirmed_clauses(text), catalog)
 
 
 def _memory_scope(row: Dict[str, Any], cwd: Optional[str] = None) -> Optional[str]:
@@ -726,7 +800,7 @@ def _routed_models(entry: Any, catalog: Dict[str, Tuple[str, ...]], catalog_key:
             # model must appear in the clauses' run of words.
             if not any(token in joined for name in spelled for token in _tokens(name)):
                 continue
-            if named_by_user(model, clauses, catalog):
+            if memory_names(model, entry.text, catalog):
                 named.append(model)
     if len(_ROUTING_CACHE) >= _ROUTING_CACHE_LIMIT:
         _ROUTING_CACHE.clear()
@@ -780,78 +854,72 @@ def _named_id(chat_id: str, model: str) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_URL, json.dumps([_NAMED_KIND, chat_id, model])))
 
 
-def _has_named(chat_id: str, model: str) -> bool:
+def _receipt(chat_id: str, model: str, kind: str, owner_turn: Optional[str] = None) -> dict:
     from app.core.api_user_scope import viewer_api_user_id
     from app.db import interactions
 
     try:
-        row = interactions.get_interaction(_named_id(chat_id, model)) or {}
+        receipt_id = (_named_id(chat_id, model) if kind == _NAMED_KIND
+                      else _approval_id(chat_id, model, owner_turn))
+        row = interactions.get_interaction(receipt_id) or {}
         payload = row.get("payload") or {}
-        return (row.get("session_id") == chat_id and row.get("kind") == _NAMED_KIND
+        if (row.get("session_id") == chat_id and row.get("kind") == kind
                 and row.get("state") == "answered" and row.get("answer") == {"decision": "allow"}
                 and isinstance(payload, dict) and payload.get("model") == model
-                and payload.get("source") == "own_message"
-                and payload.get("api_user_id") == viewer_api_user_id(chat_id)
-                and bool(payload.get("turn_id")) and bool(payload.get("session_id")))
+                and payload.get("api_user_id") == viewer_api_user_id(chat_id)):
+            return payload
     except Exception:  # noqa: BLE001 — missing evidence never grants a switch
-        logger.warning("Could not read model naming for %s", chat_id, exc_info=True)
-        return False
+        logger.warning("Could not read model consent for %s", chat_id, exc_info=True)
+    return {}
+
+
+def _has_named(chat_id: str, model: str) -> bool:
+    from app.core.model_registry import model_values
+
+    payload = _receipt(chat_id, model, _NAMED_KIND)
+    return (payload.get("source") == "own_message" and bool(payload.get("turn_id"))
+            and bool(payload.get("session_id")) and (model not in model_values()
+            or named_by_user(model, [payload.get("text", "")])))
 
 
 def _remember_named(chat_id: str, model: str, evidence: Dict[str, Any]) -> bool:
-    import json
-    from app.db.base import get_db
-    from app.db.session_events import notify_session_write
+    from app.core.model_registry import model_values
 
     payload = {k: evidence[k] for k in ("turn_id", "session_id", "api_user_id")}
     payload.update(model=model, source="own_message")
-    try:
-        with get_db() as conn:
-            conn.cursor().execute(
-                "INSERT INTO pending_interactions "
-                "(id, session_id, kind, payload, state, answer, answered_at) "
-                "VALUES (%s, %s, %s, %s, 'answered', %s, NOW()) "
-                "ON CONFLICT (id) DO UPDATE SET payload=EXCLUDED.payload, "
-                "state=EXCLUDED.state, answer=EXCLUDED.answer, answered_at=EXCLUDED.answered_at",
-                (_named_id(chat_id, model), chat_id, _NAMED_KIND,
-                 json.dumps(payload), json.dumps({"decision": "allow"})))
-        notify_session_write(chat_id, "pending_interactions")
-        return True
-    except Exception:  # noqa: BLE001 — this start has evidence even if caching fails
-        logger.exception("Could not save model naming for %s", chat_id)
-        return False
+    if model in model_values():
+        payload["text"] = evidence.get("text", "")
+    return _save_receipt(_named_id(chat_id, model), chat_id, _NAMED_KIND, payload)
 
 
-def _approval_id(chat_id: str, model: str) -> str:
+def _approval_id(chat_id: str, model: str, owner_turn: Optional[str] = None) -> str:
     import json
 
-    return str(uuid.uuid5(uuid.NAMESPACE_URL, json.dumps([_APPROVAL_KIND, chat_id, model])))
+    key = [_APPROVAL_KIND, chat_id, model] + ([owner_turn] if owner_turn else [])
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, json.dumps(key)))
 
 
-def _has_approval(chat_id: str, model: str) -> bool:
+def _has_approval(chat_id: str, model: str, owner_turn: Optional[str] = None) -> bool:
     from app.core.api_user_scope import viewer_api_user_id
-    from app.db import interactions
 
-    try:
-        row = interactions.get_interaction(_approval_id(chat_id, model)) or {}
-        return (row.get("session_id") == chat_id and row.get("kind") == _APPROVAL_KIND
-                and row.get("state") == "answered"
-                and row.get("payload") == {"model": model, "api_user_id": viewer_api_user_id(chat_id)}
-                and row.get("answer") == {"decision": "allow"})
-    except Exception:  # noqa: BLE001 — missing evidence never grants a switch
-        logger.warning("Could not read model approval for %s", chat_id, exc_info=True)
-        return False
+    return _receipt(chat_id, model, _APPROVAL_KIND, owner_turn) == {
+        "model": model, "api_user_id": viewer_api_user_id(chat_id)}
 
 
-def _remember_approval(chat_id: str, model: str) -> bool:
+def _remember_approval(chat_id: str, model: str, owner_turn: Optional[str] = None) -> bool:
+    from app.core.api_user_scope import viewer_api_user_id
+
+    return _save_receipt(_approval_id(chat_id, model, owner_turn), chat_id, _APPROVAL_KIND,
+                         {"model": model, "api_user_id": viewer_api_user_id(chat_id)})
+
+
+def _save_receipt(receipt_id: str, chat_id: str, kind: str, payload: dict) -> bool:
+    """Atomically save an already-answered receipt, never a pending prompt."""
     import json
-    from app.core.api_user_scope import viewer_api_user_id
     from app.db.base import get_db
     from app.db.session_events import notify_session_write
 
     try:
-        # Insert the receipt atomically, already answered: no transient pending
-        # card, no TTL, and no lost updates when different models are approved.
         with get_db() as conn:
             conn.cursor().execute(
                 "INSERT INTO pending_interactions "
@@ -859,13 +927,11 @@ def _remember_approval(chat_id: str, model: str) -> bool:
                 "VALUES (%s, %s, %s, %s, 'answered', %s, NOW()) "
                 "ON CONFLICT (id) DO UPDATE SET payload=EXCLUDED.payload, "
                 "state=EXCLUDED.state, answer=EXCLUDED.answer, answered_at=EXCLUDED.answered_at",
-                (_approval_id(chat_id, model), chat_id, _APPROVAL_KIND,
-                 json.dumps({"model": model, "api_user_id": viewer_api_user_id(chat_id)}),
-                 json.dumps({"decision": "allow"})))
+                (receipt_id, chat_id, kind, json.dumps(payload), json.dumps({"decision": "allow"})))
         notify_session_write(chat_id, "pending_interactions")
         return True
-    except Exception:  # noqa: BLE001 — do not claim a durable approval was saved
-        logger.exception("Could not save model approval for %s", chat_id)
+    except Exception:  # noqa: BLE001 — do not claim durable consent was saved
+        logger.exception("Could not save model consent for %s", chat_id)
         return False
 
 
@@ -908,40 +974,66 @@ async def accept(session_id: str, profile_id: Optional[str], *, model: str,
     import asyncio
 
     from app.core.api_user_scope import viewer_api_user_id
+    from app.core.model_registry import model_values
 
     key = (await asyncio.to_thread(chat_of, session_id), model)
+    native = model in model_values()
+    try:
+        evidence = await asyncio.to_thread(_find_named, session_id, model) if native else None
+    except _NativeSearchIncomplete:
+        # An unseen newer pin may supersede any saved routing or old approval.
+        # This answer covers only this attempt, not another incomplete search.
+        cache_key = (*key, "incomplete", await asyncio.to_thread(viewer_api_user_id, key[0]))
+        return Acceptance(await _approve(session_id, profile_id, model=model, baseline=baseline,
+            action=action, cache_key=cache_key, key=key, incomplete=True))
+    qualified = evidence is not None and not named_by_user(model, [evidence.get("text", "")])
+    if qualified:
+        # A fresh pin supersedes every older source, including a previous Yes.
+        # Approval for this request survives restart, not a later version request.
+        key = (*key, evidence["turn_id"])
     cache_key = (*key, await asyncio.to_thread(viewer_api_user_id, key[0]))
     if cache_key in _APPROVED:
         return Acceptance(APPROVED)
     if await asyncio.to_thread(_has_approval, *key):
         _APPROVED.add(cache_key)
         return Acceptance(APPROVED)
-    if await asyncio.to_thread(_has_named, *key):
-        return Acceptance(NAMED)
-    evidence = await asyncio.to_thread(lambda: _find_named(session_id, model, older=False))
-    if not evidence:
-        # Read fresh on every start, never saved: a corrected or superseded
-        # memory stops authorizing at once.
-        memory = await asyncio.to_thread(remembered_by_owner, session_id, model)
-        if memory is not None:
-            note = _accepted_note(model, memory.id)
-            logger.info("%s (session %s)", note, session_id)
-            return Acceptance(REMEMBERED, memory_id=str(memory.id), note=note)
-        evidence = await asyncio.to_thread(lambda: _find_named(session_id, model, recent=False))
-    if evidence:
-        await asyncio.to_thread(_remember_named, *key, evidence)
-        return Acceptance(NAMED)
+    if not qualified:
+        if await asyncio.to_thread(_has_named, *key):
+            return Acceptance(NAMED)
+        if not native:
+            evidence = await asyncio.to_thread(lambda: _find_named(session_id, model, older=False))
+        if not evidence:
+            # Read fresh on every start: corrected memory stops authorizing at once.
+            memory = await asyncio.to_thread(remembered_by_owner, session_id, model)
+            if memory is not None:
+                note = _accepted_note(model, memory.id)
+                logger.info("%s (session %s)", note, session_id)
+                return Acceptance(REMEMBERED, memory_id=str(memory.id), note=note)
+            if not native:
+                evidence = await asyncio.to_thread(lambda: _find_named(session_id, model, recent=False))
+        if evidence:
+            await asyncio.to_thread(_remember_named, *key, evidence)
+            return Acceptance(NAMED)
     return Acceptance(await _approve(session_id, profile_id, model=model, baseline=baseline,
-                                     action=action, cache_key=cache_key, key=key))
+                                     action=action, cache_key=cache_key, key=key, check_memory=native and not evidence))
 
 
 async def _approve(session_id: str, profile_id: Optional[str], *, model: str,
                    baseline: Optional[str], action: str, cache_key: Tuple[Any, ...],
-                   key: Tuple[str, str]) -> str:
+                   key: Tuple[str, ...], check_memory: bool = False,
+                   incomplete: bool = False) -> str:
     """:data:`APPROVED` from the owner's prompt (shared by concurrent starts),
     else ``PermissionError`` with the refusal."""
     import asyncio
 
+    why = ("no owner message named it and no applicable chat approval was found" if model.startswith("prov:")
+           else "the current model request did not establish consent and no applicable chat approval was found")
+    if incomplete:
+        why = "the model history search failed or exceeded its five-second budget; a fresh owner answer is required"
+    if check_memory and any(_family_consent(model, entry.text) is False
+            for entry in await asyncio.to_thread(owner_memories, session_id)):
+        why = (f"a saved memory mentioned {label(model)} but was not honored; "
+               f'the owner must reword it using plain wording such as "Use {label(model)} for reviews."')
     while cache_key not in _APPROVED:
         pending = _ASKING.get(cache_key)
         if pending is None:
@@ -950,10 +1042,9 @@ async def _approve(session_id: str, profile_id: Optional[str], *, model: str,
         outcome = await asyncio.shield(pending)
         if outcome is None:
             continue  # that prompt was abandoned before an answer
-        if outcome != APPROVED:
-            raise PermissionError(_refusal(
-                model, baseline,
-                f"no owner message named it and no prior chat approval was found; {outcome}"))
+        if outcome == APPROVED:
+            return APPROVED
+        raise PermissionError(_refusal(model, baseline, f"{why}; {outcome}"))
     if cache_key in _APPROVED:
         return APPROVED
     future = asyncio.get_running_loop().create_future()
@@ -961,7 +1052,7 @@ async def _approve(session_id: str, profile_id: Optional[str], *, model: str,
     outcome = None
     try:
         outcome = await _ask_owner(session_id, profile_id, model=model, baseline=baseline, action=action)
-        if outcome == APPROVED:
+        if outcome == APPROVED and not incomplete:
             if await asyncio.to_thread(_remember_approval, *key):
                 _APPROVED.add(cache_key)
             else:
@@ -973,7 +1064,7 @@ async def _approve(session_id: str, profile_id: Optional[str], *, model: str,
     if outcome != APPROVED:
         raise PermissionError(_refusal(
             model, baseline,
-            f"no owner message named it and no prior chat approval was found; {outcome}"))
+            f"{why}; {outcome}"))
     return APPROVED
 
 
