@@ -237,15 +237,19 @@ async def test_key_check_rejects_only_authentication_and_patch_keeps_old_key(cli
     assert "test-new-key" not in updated.text
 
 
-@pytest.mark.parametrize("members,allowed", [
-    ([], True),
-    ([{"device_id": "self", "name": "This worker"}], True),
-    ([{"device_id": "peer", "name": "Updated worker", "capabilities": {native_providers.CAPABILITY: 1}}], True),
-    ([{"device_id": "peer", "name": "Offline older worker", "capabilities": {}}], False),
-    ([{"device_id": "peer", "name": "Unknown worker"}], False),
-    ([{"device_id": "peer"}], False),
+@pytest.mark.parametrize("members,presence,allowed", [
+    ([], {}, True),
+    ([{"device_id": "self", "name": "This worker"}], {}, True),
+    ([{"device_id": "peer", "name": "Updated worker", "capabilities": {}}],
+     {"peer": {"capabilities": {native_providers.CAPABILITY: 1}}}, True),
+    ([{"device_id": "peer", "name": "Older worker", "capabilities": {native_providers.CAPABILITY: 1}}],
+     {"peer": {"capabilities": {native_providers.CAPABILITY: 0}}}, False),
+    ([{"device_id": "peer", "name": "Contact only", "capabilities": {native_providers.CAPABILITY: 1}}], {}, False),
+    ([{"device_id": "peer", "name": "Offline older worker", "capabilities": {}}], {}, False),
+    ([{"device_id": "peer", "name": "Unknown worker"}], {}, False),
+    ([{"device_id": "peer"}], {}, False),
 ])
-async def test_native_enrollment_requires_every_current_member_capability(client, monkeypatch, members, allowed):
+async def test_native_enrollment_requires_every_current_member_capability(client, monkeypatch, members, presence, allowed):
     from types import SimpleNamespace
     from app.network import engine
     from app.db import network as store
@@ -255,6 +259,7 @@ async def test_native_enrollment_requires_every_current_member_capability(client
         assert not include_revoked
         return members
     monkeypatch.setattr(store, "list_members", current_members)
+    monkeypatch.setattr(engine, "all_presence", lambda: presence)
     async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(200, json={}))) as http:
         with patch("app.core.http_client.get_http_client", return_value=http):
             result = client.post(ROOT, json={"name": "Native", "provider_type": "kimi", "auth_token": "fake"})

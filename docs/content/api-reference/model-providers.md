@@ -165,9 +165,11 @@ OpenCode `https://opencode.ai/console`. The MiniMax plan prefix hint is `sk-cp-`
 
 Creating a native account (or trying to convert another provider into one)
 returns `409` naming the workers to update when any current network member does
-not advertise native Messages support. Offline members and members with unknown
-capabilities also require an update. No network, or a network containing only
-this worker, is allowed. Existing native accounts may still be edited, activated
+not advertise native Messages support in its latest signed presence. Offline
+members are still checked; missing or unsupported signed capabilities require
+an update. Contact metadata alone is not proof of support. No network, or a
+network containing only this worker, is allowed. Existing native accounts may
+still be edited, activated
 or deleted; provider and credential kind remain immutable.
 
 This creation-time check does not protect against an older-build worker joining

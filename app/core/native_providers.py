@@ -27,6 +27,8 @@ def workers_requiring_update() -> list[str]:
 
     Membership, not online presence, defines the set: offline/unknown peers
     can consume the synced credential later. Revoked members cannot sync.
+    Support comes from signed presence, not contact descriptors, which may
+    omit this capability even on an updated worker.
     """
     from app.db import network as store
     from app.network import engine
@@ -34,10 +36,11 @@ def workers_requiring_update() -> list[str]:
     ctx = engine.context()
     if ctx is None:
         return []
+    presence = engine.all_presence()
     return [member.get("name") or member["device_id"]
             for member in store.list_members(include_revoked=False)
             if member["device_id"] != ctx.device_id
-            and (member.get("capabilities") or {}).get(CAPABILITY) != 1]
+            and (presence.get(member["device_id"], {}).get("capabilities") or {}).get(CAPABILITY) != 1]
 
 
 def is_plan_key(row) -> bool:
