@@ -542,3 +542,69 @@ def test_pure_decoder_objects_cannot_escape_and_retain_purity():
         async def handler():
             db.parse_jsonb('turn-id')
     """) == ["db.parse_jsonb"]
+
+
+@pytest.mark.parametrize(("imports", "namespace", "call"), [
+    ("import app.db.base as db", "db", "db.parse_jsonb"),
+    ("from app import db as pkg\nfrom app.db.base import parse_jsonb as decode", "pkg.base", "decode"),
+])
+@pytest.mark.parametrize("exposure", [
+    "for target in (NAMESPACE,):\n    target.parse_jsonb = get_turn",
+    "[setattr(target, 'parse_jsonb', get_turn) for target in (NAMESPACE,)]",
+    "setattr(NAMESPACE if True else None, 'parse_jsonb', get_turn)",
+    "setattr(None if flag else NAMESPACE, 'parse_jsonb', get_turn)",
+    "setattr(NAMESPACE or other, 'parse_jsonb', get_turn)",
+    "setattr(flag and NAMESPACE, 'parse_jsonb', get_turn)",
+    "for target in ((NAMESPACE,) if flag else ()):\n    target.parse_jsonb = get_turn",
+    "{setattr(target, 'parse_jsonb', get_turn) for target in (NAMESPACE,)}",
+    "{key: setattr(target, 'parse_jsonb', get_turn) for key, target in ((0, NAMESPACE),)}",
+    "tuple(setattr(target, 'parse_jsonb', get_turn) for target in (NAMESPACE,))",
+    "for key, target in ((0, NAMESPACE),):\n    target.parse_jsonb = get_turn",
+    "targets = [NAMESPACE for _ in (0,)]\ntargets[0].parse_jsonb = get_turn",
+    "targets = (NAMESPACE for _ in (0,))\nnext(targets).parse_jsonb = get_turn",
+    "for mapping in (NAMESPACE.__dict__,):\n    mapping['parse_jsonb'] = get_turn",
+    "mapping = NAMESPACE.__dict__ if flag else {}\nmapping['parse_jsonb'] = get_turn",
+    "target: object = NAMESPACE if flag else other\ntarget.parse_jsonb = get_turn",
+    "(NAMESPACE if flag else other).__setattr__('parse_jsonb', get_turn)",
+    "def expose():\n    return NAMESPACE if flag else other\nsetattr(expose(), 'parse_jsonb', get_turn)",
+    "target = (lambda: NAMESPACE)()\ntarget.parse_jsonb = get_turn",
+    "class Holder:\n    target = NAMESPACE if flag else other\nHolder.target.parse_jsonb = get_turn",
+    "async def expose():\n    async for target in (NAMESPACE,):\n        target.parse_jsonb = get_turn",
+])
+def test_direct_imported_objects_escape_in_every_expression_context(imports, namespace, call, exposure):
+    # Static fixtures only: no module mutation or database query is executed.
+    source = (imports + "\nfrom app.db.turns import get_turn\n"
+              + exposure.replace("NAMESPACE", namespace)
+              + f"\nasync def handler():\n    {call}('turn-id')\n")
+    assert _calls(source) == [call if "." in call else call + "()"]
+
+
+@pytest.mark.parametrize("exposure", [
+    "for target in (decode,):\n    configure(target)",
+    "[configure(target) for target in (decode,)]",
+    "configure(decode if flag else other)",
+    "configure(decode or other)",
+    "factory = lambda: decode\nconfigure(factory())",
+])
+def test_direct_pure_callable_escape_also_revokes_equivalent_purity(exposure):
+    source = ("from app.db.base import parse_jsonb as decode\n"
+              + exposure + "\nasync def handler():\n    decode('turn-id')\n")
+    assert _calls(source) == ["decode()"]
+
+
+@pytest.mark.parametrize("safe_use", [
+    "for value in (db.parse_jsonb('null'),):\n    consume(value)",
+    "values = [db.parse_jsonb('null') for _ in (0,)]",
+    "values = {db.parse_jsonb('null') for _ in (0,)}",
+    "values = {key: db.parse_jsonb('null') for key in (0,)}",
+    "values = (db.parse_jsonb('null') for _ in (0,))",
+    "selected = db.parse_jsonb('null') if flag else other",
+    "selected = db.parse_jsonb('null') or other",
+    "for target in (other,):\n    configure(target)",
+    "setattr(other if flag else None, 'parse_jsonb', get_turn)",
+    "values = [other for _ in (0,)]",
+])
+def test_decoded_results_and_unrelated_objects_do_not_escape_the_import(safe_use):
+    source = ("import app.db.base as db\nfrom app.db.turns import get_turn\n"
+              + safe_use + "\nasync def handler():\n    db.parse_jsonb('null')\n")
+    assert _calls(source) == []

@@ -216,14 +216,8 @@ def _canonical_paths(node: ast.AST | None, bindings) -> set[str]:
     return paths
 
 
-def _escaped_exports(node: ast.AST | None, bindings) -> set[str]:
-    """Pure exports made uncertain by a namespace/callable or mapping escaping.
-
-    Do not follow result values or construct a call graph. Direct imported
-    objects, namespace views and containers exposing them revoke the exception;
-    unrelated arguments/results do not. This also handles direct mutator calls
-    without relying on a short list of mutator method names.
-    """
+def _namespace_exports(node: ast.AST, bindings) -> set[str]:
+    """Pure exports exposed by this direct namespace/callable/mapping reference."""
     exports: set[str] = set()
     for path in _canonical_paths(node, bindings):
         for canonical in PURE_DB_CALLS:
@@ -232,14 +226,34 @@ def _escaped_exports(node: ast.AST | None, bindings) -> set[str]:
                 exports.add(path)
             elif path.startswith(module + ".__dict__") or path.startswith(canonical + "."):
                 exports.add(module)
-    if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
-        for value in node.elts:
-            exports.update(_escaped_exports(value, bindings))
-    elif isinstance(node, ast.Dict):
-        for value in [*node.keys, *node.values]:
-            exports.update(_escaped_exports(value, bindings))
-    elif isinstance(node, ast.Starred):
-        exports.update(_escaped_exports(node.value, bindings))
+    return exports
+
+
+def _escaped_exports(tree: ast.AST, bindings) -> set[str]:
+    """Find direct imported-object exposure across the whole syntax tree.
+
+    Expression context must not hide a namespace or callable: iteration inputs,
+    branches, defaults and literal containers can all expose the same object.
+    Inspect direct references, not runtime aliases or call results. Qualification
+    alone is not exposure, and calling the canonical pure helper exposes only
+    its result; its arguments are still inspected independently.
+    """
+    parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+    exports: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Name, ast.Attribute, ast.Subscript)) or not isinstance(node.ctx, ast.Load):
+            continue
+        parent = parents.get(node)
+        if isinstance(parent, (ast.Attribute, ast.Subscript)) and parent.value is node:
+            continue  # inspect the complete qualified reference instead
+        if isinstance(parent, ast.Call) and parent.func is node:
+            callee = _canonical_paths(node, bindings)
+            if callee and callee <= PURE_DB_CALLS:
+                continue
+            if isinstance(node, ast.Attribute):
+                # A namespace/view method may mutate its receiver.
+                exports.update(_namespace_exports(node.value, bindings))
+        exports.update(_namespace_exports(node, bindings))
     return exports
 
 
@@ -252,7 +266,7 @@ def _binding_writes(tree, bindings) -> tuple[set[str], set[str]]:
     imported DB object also invalidates equivalent aliases of its pure exports.
     """
     writes: set[str] = set()
-    exports: set[str] = set()
+    exports = _escaped_exports(tree, bindings)
     for node in ast.walk(tree):
         if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
             writes.add(node.id)
@@ -260,9 +274,6 @@ def _binding_writes(tree, bindings) -> tuple[set[str], set[str]]:
             writes.add(node.arg)
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             writes.add(node.name)
-        elif isinstance(node, ast.arguments):
-            for value in [*node.defaults, *node.kw_defaults]:
-                exports.update(_escaped_exports(value, bindings))
         elif isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)):
             if node.name:
                 writes.add(node.name)
@@ -274,17 +285,7 @@ def _binding_writes(tree, bindings) -> tuple[set[str], set[str]]:
                 root = root.value
             if isinstance(root, ast.Name):
                 writes.add(root.id)
-            exports.update(_escaped_exports(node, bindings))
-        elif isinstance(node, ast.Call):
-            # Passing a namespace to setattr/unknown code (including through
-            # containers) or calling a namespace view's methods may mutate it.
-            for value in [*node.args, *(kw.value for kw in node.keywords)]:
-                exports.update(_escaped_exports(value, bindings))
-            callee = _canonical_paths(node.func, bindings)
-            if isinstance(node.func, ast.Attribute) and not (callee and callee <= PURE_DB_CALLS):
-                exports.update(_escaped_exports(node.func.value, bindings))
-        elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr, ast.Return, ast.Yield)):
-            exports.update(_escaped_exports(node.value, bindings))
+            exports.update(_namespace_exports(node, bindings))
     return writes, exports
 
 
