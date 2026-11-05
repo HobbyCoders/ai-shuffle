@@ -255,7 +255,7 @@
 	// that stays on its form after the first save (e.g. a failed follow-up
 	// write) is still the same form, so it keeps the reader's place.
 	let formSession = $state(0);
-	const detailKey = $derived(currentView === 'create' || currentView === 'edit'
+	const detailKey = $derived.by(() => currentView === 'create' || currentView === 'edit'
 		? `form:${formSession}` : `${currentView}:${selectedAutomation?.id ?? ''}`);
 
 	function backToList() {
