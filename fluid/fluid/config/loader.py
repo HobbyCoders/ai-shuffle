@@ -683,7 +683,12 @@ def _build_provider_client(config: HarnessConfig, provider_name: str):
         from fluid.providers.anthropic.client import AnthropicClient
 
         kwargs: dict[str, Any] = {"api_key": api_key, **deadline}
-        if pc.base_url:
+        if pc.compatible_provider:
+            from fluid.providers.compatible import endpoint_root
+
+            kwargs.update(compatible_provider=pc.compatible_provider, plan_key=pc.auth_mode == "plan_key", user_agent=pc.user_agent,
+                          base_url=endpoint_root(pc.compatible_provider, pc.auth_mode, pc.base_url) + "/v1/messages")
+        elif pc.base_url:
             kwargs["base_url"] = pc.base_url
         client: Any = AnthropicClient(**kwargs)
     elif pc.kind == "openai_responses":

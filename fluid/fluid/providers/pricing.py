@@ -300,6 +300,29 @@ def resolve_price(
     return _table_price(normalize_model_id(model))
 
 
+# Vendor-scoped prices: never price an OpenCode Claude id as direct Anthropic.
+# All sources read 2026-11-05. Plan clients never call this table: an allowance
+# is not cash spend. The app also attributes their usage as subscription.
+_MINIMAX = "https://platform.minimax.io/docs/pricing/overview; 2026-11-05; standard tier"
+COMPATIBLE_PRICES = {
+    "minimax": {
+        "minimax-m3.1-flash": ModelPrice(input=0.15, cached_input=0.015, output=0.60, source=_MINIMAX),
+        "minimax-m3": ModelPrice(input=0.30, cached_input=0.06, output=1.20, source=_MINIMAX + "; <=512K"),
+    },
+    "kimi": {},  # https://platform.kimi.ai/docs/pricing/chat: rate table not available in fetched text
+    "opencode": {},  # Go allowance prices are NOT necessarily Console cash rates
+}
+
+
+def compatible_cost(provider: str, model: str, usage: Mapping[str, Any]) -> float | None:
+    price = COMPATIBLE_PRICES.get(provider, {}).get(model.lower())
+    if provider == "minimax" and model.lower() == "minimax-m3":
+        prompt = sum(usage.get(k, 0) or 0 for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
+        if prompt > 512_000:
+            price = ModelPrice(input=0.60, cached_input=0.12, output=2.40, source=_MINIMAX + "; >512K")
+    return _cost_from_price(price, usage) if price is not None else None
+
+
 def _cost_from_price(price: ModelPrice, usage: Mapping[str, Any]) -> float | None:
     if not price.priced:
         return None

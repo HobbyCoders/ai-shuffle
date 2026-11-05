@@ -43,7 +43,7 @@ def provider_billing(provider_type: Optional[str], auth_mode: Optional[str]) -> 
 
     ptype = (provider_type or "").strip().lower()
     mode = (auth_mode or "").strip().lower()
-    if ptype in ("chatgpt", "grok") or mode in _SUBSCRIPTION_AUTH_MODES:
+    if ptype in ("chatgpt", "grok") or mode == "plan_key" or mode in _SUBSCRIPTION_AUTH_MODES:
         return BILLING_SUBSCRIPTION
     return BILLING_API
 

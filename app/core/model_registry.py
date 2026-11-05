@@ -426,7 +426,7 @@ def _is_subscription_row(row: ModelProviderRow) -> bool:
     """
     ptype = row.get("provider_type")
     mode = row.get("auth_mode")
-    return ptype in ("chatgpt", "grok") or mode in ("chatgpt", "grok")
+    return ptype in ("chatgpt", "grok") or mode in ("chatgpt", "grok", "plan_key")
 
 
 def _provider_plan_types() -> Dict[str, Optional[str]]:

@@ -225,7 +225,7 @@ def provider_row_is_subscription(provider_type: Optional[str], auth_mode: Option
 
     ptype = (provider_type or "").strip().lower()
     mode = (auth_mode or "").strip().lower()
-    return ptype in ("chatgpt", "grok") or mode == "codex" or mode in _SUBSCRIPTION_AUTH_MODES
+    return ptype in ("chatgpt", "grok") or mode in ("codex", "plan_key") or mode in _SUBSCRIPTION_AUTH_MODES
 
 
 def claude_cli_uses_subscription() -> bool:
@@ -377,8 +377,8 @@ def provider_id_for_row(row: Mapping[str, Any]) -> str:
         return "openai"
     if auth_mode == "grok" or ptype in ("grok", "xai"):
         return "grok"
-    if ptype == "openrouter":
-        return "openrouter"
+    if ptype in ("openrouter", "kimi", "minimax", "opencode"):
+        return ptype
     return f"gw:{row.get('id')}"
 
 
@@ -433,7 +433,7 @@ def _default_candidate_rows(servable_only: bool) -> List[dict]:
     :func:`~app.core.environment.is_provider_servable` rows, for a caller
     that validates its pick with that rule (the voice delegation).
     """
-    rows = [r for r in usable_provider_rows() if r.get("id")]
+    rows = [r for r in usable_provider_rows() if r.get("id") and r.get("auth_mode") != "plan_key"]
     if servable_only:
         from app.core.environment import is_provider_servable
 

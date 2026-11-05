@@ -56,6 +56,17 @@ API_VERSION = "2023-06-01"
 log = logging.getLogger(__name__)
 
 
+def _redact_key(value, key):
+    """Upstream auth errors sometimes echo the rejected key."""
+    if isinstance(value, str):
+        return value.replace(key, "[redacted]") if key else value
+    if isinstance(value, dict):
+        return {k: _redact_key(v, key) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact_key(v, key) for v in value]
+    return value
+
+
 class AnthropicClient:
     name = "anthropic"
     caps = ProviderCaps(
@@ -75,11 +86,29 @@ class AnthropicClient:
         first_byte_timeout: float | None = DEFAULT_FIRST_BYTE_TIMEOUT_S,
         http_client: httpx.AsyncClient | None = None,
         retry: RetryPolicy | None = None,
+        compatible_provider: str | None = None,
+        plan_key: bool = False,
+        user_agent: str | None = None,
     ) -> None:
         from fluid.tools.child_env import scrub_claude_auth_env
 
         self._api_key = api_key or scrub_claude_auth_env(os.environ).get("ANTHROPIC_API_KEY", "")
         self._base_url = base_url
+        from fluid.providers.compatible import PROVIDERS
+
+        if compatible_provider is not None and compatible_provider not in PROVIDERS:
+            raise ValueError("Unknown Messages provider profile")
+        if compatible_provider and not user_agent:
+            raise ValueError("Messages gateways require the host application's user agent")
+        self._compatible_provider = compatible_provider
+        self._plan_key = plan_key
+        self._user_agent = user_agent
+        if compatible_provider:
+            self.name = compatible_provider
+            self.pricing_is_authoritative = True
+            # No Claude server tools, signed-thinking requirement or explicit
+            # cache markers. The vendors manage caching themselves.
+            self.caps = ProviderCaps()
         self._timeout = timeout
         # Wall clock for one whole model call, above the per-read ``timeout``.
         # None disables it. See fluid.providers._transport.
@@ -95,6 +124,12 @@ class AnthropicClient:
 
     def estimate_cost(self, model: str, usage: dict) -> float | None:
         """Optional engine cost hook: list-price estimate for one model call."""
+        if self._compatible_provider:
+            if self._plan_key:
+                return None  # an allowance is not pay-as-you-go dollar spend
+            from fluid.providers.pricing import compatible_cost
+
+            return compatible_cost(self._compatible_provider, model, usage)
         return _estimate_cost(model, usage)
 
     def _pick_client(
@@ -127,7 +162,17 @@ class AnthropicClient:
             "content-type": "application/json",
             "accept": "text/event-stream",
         }
-        body = build_request_body(request)
+        if self._compatible_provider:
+            headers["User-Agent"] = self._user_agent
+            # Both schemes are documented by these vendors. This is strictly
+            # opt-in: the real Anthropic header set remains unchanged.
+            headers["Authorization"] = f"Bearer {self._api_key}"
+            if self._compatible_provider == "opencode":
+                sid = request.session_id or (request.wire_state.session_id if request.wire_state else None)
+                if not sid:
+                    raise ValueError("OpenCode requires a stable conversation session_id")
+                headers["x-opencode-session"] = sid
+        body = build_request_body(request, compatible_provider=self._compatible_provider)
         owned: httpx.AsyncClient | None = None
         attempt = 0
         try:
@@ -149,6 +194,8 @@ class AnthropicClient:
                         diagnostics.received_headers(resp)
                         if resp.status_code != 200:
                             text = (await resp.aread()).decode(errors="replace")
+                            if self._compatible_provider and self._api_key:
+                                text = text.replace(self._api_key, "[redacted]")
                             refusal = refusal_payload(
                                 resp.status_code, text, resp.headers.get("retry-after"))
                             if refusal["retriable"] and attempt < self._retry.max_retries:
@@ -181,6 +228,8 @@ class AnthropicClient:
                         )
                         async for event_name, data in events:
                             chunk = sse_to_chunk(event_name, data)
+                            if chunk is not None and chunk.kind == "error" and self._compatible_provider:
+                                chunk = StreamChunk("error", _redact_key(chunk.payload, self._api_key))
                             if chunk is None:
                                 continue
                             if chunk.kind == "message_start" and not yielded:

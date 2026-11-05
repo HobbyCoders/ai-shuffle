@@ -74,6 +74,32 @@ XAI_PRESET_MODELS: List[Dict[str, Any]] = [
     {"id": "grok-build-0.1", "label": "Grok Build", "context_window": 256_000},
 ]
 
+# Native Messages vendors: sourced from Kimi Code membership/API Messages,
+# MiniMax text-anthropic-api and OpenCode Go/Console docs, 2026-11-05.
+# Kimi Code windows depend on tier: omit rather than promise 1M to every key.
+KIMI_PLAN_MODELS = [{"id": m, "label": label} for m, label in (
+    ("k3.1-pro", "K3.1 Pro"), ("k3.1-pro-highspeed", "K3.1 Pro Highspeed"),
+    ("k3", "K3"), ("k3-256k", "K3 256K"),
+    ("kimi-for-coding", "K2.8 Preview"), ("kimi-for-coding-highspeed", "K2.7 Code Highspeed"),
+)]
+KIMI_API_MODELS = [{"id": m, "label": label, "context_window": 1_048_576} for m, label in (
+    ("kimi-k3.1-pro", "Kimi K3.1 Pro"), ("kimi-k3.1-pro-highspeed", "Kimi K3.1 Pro Highspeed"),
+    ("kimi-k3", "Kimi K3"),
+)]
+MINIMAX_MODELS = [{"id": m, "label": m, "context_window": 1_000_000}
+                  for m in ("MiniMax-M3.1-Flash", "MiniMax-M3")]
+OPENCODE_PLAN_MODELS = [{"id": m, "label": label} for m, label in (
+    ("minimax-m3.1-flash", "MiniMax M3.1 Flash"), ("minimax-m3", "MiniMax M3"),
+    ("kimi-k3.1-pro", "Kimi K3.1 Pro"), ("kimi-k3", "Kimi K3"),
+    ("gpt-6-luna", "GPT 6 Luna"), ("grok-4.7", "Grok 4.7"),
+    ("glm-5.3-flash", "GLM 5.3 Flash"), ("glm-5.3", "GLM 5.3"),
+)]
+OPENCODE_API_MODELS = [dict(m) for m in OPENCODE_PLAN_MODELS] + [
+    {"id": "claude-sonnet-5-5", "label": "Claude Sonnet 5.5"},
+    {"id": "claude-opus-5-5", "label": "Claude Opus 5.5"},
+    {"id": "gpt-6.1-sol", "label": "GPT 6.1 Sol"},
+]
+
 # Preset kind → roster. The kind is the normalized provider classification
 # produced by :func:`preset_kind_for` (NOT the raw ``provider_type``: an
 # already-enrolled Codex row is ``provider_type='custom'`` +
@@ -82,6 +108,11 @@ _PRESET_ROSTERS: Dict[str, List[Dict[str, Any]]] = {
     "chatgpt": CODEX_PRESET_MODELS,
     "openai": OPENAI_PRESET_MODELS,
     "xai": XAI_PRESET_MODELS,
+    "kimi": KIMI_API_MODELS,
+    "kimi_plan": KIMI_PLAN_MODELS,
+    "minimax": MINIMAX_MODELS,
+    "opencode": OPENCODE_API_MODELS,
+    "opencode_plan": OPENCODE_PLAN_MODELS,
 }
 
 
@@ -102,6 +133,9 @@ def preset_kind_for(provider_row: Optional[Mapping[str, Any]]) -> Optional[str]:
     """
     if not provider_row:
         return None
+    ptype = provider_row.get("provider_type")
+    if ptype in ("kimi", "opencode") and provider_row.get("auth_mode") == "plan_key":
+        return ptype + "_plan"
     if provider_row.get("auth_mode") == "chatgpt":
         return "chatgpt"
     if (

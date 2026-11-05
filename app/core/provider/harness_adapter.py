@@ -6165,6 +6165,10 @@ def _native_api_model(model: Optional[str], options: Optional[SessionOptions]) -
     # A concrete id selected from a bound API catalog is not a legacy preset.
     # Upgrading Opus 4.6 to the current "opus" alias also bypasses its effort
     # clamp. Keep preset migration only on the unbound/short-alias path.
+    if options is not None and options.extra.get("provider_id"):
+        ptype = options.extra.get("provider_type") or _lookup_provider_row_shape(str(options.extra["provider_id"]))[0]
+        if ptype in ("kimi", "minimax", "opencode"):
+            return model
     if (options is not None and options.extra.get("provider_id")
             and (model or "").startswith("claude-")):
         # Stored profiles may still carry the legacy context-window marker;
@@ -6185,7 +6189,9 @@ def _effective_effort(options: SessionOptions, value: Any, route: Optional[str] 
     # Fit remembered Claude picks before metadata validation can drop them;
     # the CLI has no serializer to provide the native API's safety clamp.
     # Other routes and live explicit setting changes retain strict validation.
-    if fit and route in ("anthropic", "delegated") and value in ("low", "medium", "high", "xhigh", "max"):
+    if (fit and route in ("anthropic", "delegated")
+            and (row or {}).get("provider_type") not in ("kimi", "minimax", "opencode")
+            and value in ("low", "medium", "high", "xhigh", "max")):
         from fluid.providers.anthropic.thinking import clamp_effort
         value = clamp_effort(options.model, value)
     return normalize_effort(value, options.model, row, route=route)
@@ -6948,6 +6954,8 @@ def _provider_row_kind(
         or mode in ("chatgpt", "grok")
     ):
         return "openai_responses"
+    if ptype in ("kimi", "minimax", "opencode"):
+        return "anthropic"
     if ptype == "openrouter":
         return "openrouter"
     if ptype == "custom":
@@ -6965,6 +6973,10 @@ def _provider_row_kind(
     if ptype == "anthropic":
         # HARD CONSTRAINT: subscription auth stays on the delegated claude CLI.
         return "delegated" if mode in _SUBSCRIPTION_AUTH_MODES else "anthropic"
+    if ptype:
+        from app.core.environment import ProviderConfigError
+
+        raise ProviderConfigError(f"Provider type {ptype!r} is not supported on this worker; update the worker.")
     return None
 
 
@@ -9104,6 +9116,19 @@ async def _build_provider_client(
     # to that endpoint using the same convention the delegated CLI applies to
     # ANTHROPIC_BASE_URL: append ``/v1/messages``.
     if creds is not None:
+        if creds.compatible_provider:
+            session_http = _session_provider_http(timeouts["timeout"])
+            return (
+                AnthropicClient(
+                    api_key=creds.api_key,
+                    base_url=creds.base_url.rstrip("/") + "/v1/messages",
+                    compatible_provider=creds.compatible_provider,
+                    plan_key=creds.plan_key,
+                    user_agent=f"ai-shuffle/{settings.version}",
+                    http_client=session_http, **timeouts,
+                ),
+                session_http,
+            )
         if creds.base_url:
             # Gateways behind a custom base_url were authenticated by the CLI
             # via ``Authorization: Bearer`` (ANTHROPIC_AUTH_TOKEN); fluid's
