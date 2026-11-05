@@ -310,7 +310,7 @@ with get_db() as conn:
 
 
 def main():
-    p=argparse.ArgumentParser();p.add_argument('--old',required=True);p.add_argument('--candidate',required=True);p.add_argument('--scratch',required=True);p.add_argument('--smoke',action='store_true');p.add_argument('--stage',choices=('upgrade','legacy','matrix'),default='upgrade')
+    p=argparse.ArgumentParser();p.add_argument('--old',required=True);p.add_argument('--candidate',required=True);p.add_argument('--scratch',required=True);p.add_argument('--smoke',action='store_true');p.add_argument('--stage',choices=('upgrade','legacy','matrix','offline'),default='upgrade')
     args=p.parse_args();receipts=[]
     scratch=Path(args.scratch).resolve()
     assert scratch.is_dir() and scratch.stat().st_uid==os.getuid(), 'scratch must be an existing caller-owned directory'
@@ -330,6 +330,9 @@ def main():
         legacy_inputs(args)
     elif args.stage=='matrix':
         from archive_retirement_matrix import run
+        run(args)
+    elif args.stage=='offline':
+        from archive_retirement_offline import run
         run(args)
     else:
         for order in ('AB','BA'):one_order(order,args,receipts)

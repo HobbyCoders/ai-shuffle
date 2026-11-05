@@ -51,6 +51,7 @@ with get_db() as conn:
         c.execute("INSERT INTO sessions (id,profile_id,title,status,is_active,created_at,updated_at,owner_device_id) VALUES (%s,%s,%s,'archived',TRUE,'2020-01-01','2020-01-02',%s)",(str(uuid.uuid4()),pid,'Matrix history %04d'%i,{w.device!r}))
     for wid,sid,source in [('matrix-old-wake',ids['queued'],'schedule_wakeup'),('matrix-held-wake',ids['queued'],'held_peer'),('matrix-notice',ids['queued'],'profile_cancelled'),('matrix-unrelated',ids['active'],'schedule_wakeup')]:
         c.execute("INSERT INTO pending_wakeups (id,session_id,prompt,fire_at,source) VALUES (%s,%s,'retained wake evidence',2000000000,%s)",(wid,sid,source))
+    c.execute('UPDATE sessions SET owner_device_id=%s WHERE owner_device_id IS NULL',({w.device!r},))
     c.execute('SELECT COUNT(*) AS n FROM sessions');total=c.fetchone()['n']
     c.execute("SELECT COUNT(*) AS n FROM sessions WHERE status='archived'");archives=c.fetchone()['n']
 print('RESULT '+json.dumps({{'total':total,'archives':archives,'queued':queued['id'],'parked':parked['id'],'historical':historical['id']}}))
@@ -82,7 +83,10 @@ print('RESULT '+json.dumps({{'total':total,'archives':archives,'queued':queued['
         after=w.sql('SELECT id,created_at,updated_at,profile_id,api_user_id,hidden,is_worker,parent_session_id,owner_device_id,total_cost_usd,total_tokens_in,worktree_branch FROM sessions ORDER BY id')
         # The actual Monitor legitimately updates its own transcript/recency.
         excluded={ids['background'],ids['waits']}
-        assert [r for r in before if r['id'] not in excluded]==[r for r in after if r['id'] not in excluded]
+        original={r['id']:r for r in before if r['id'] not in excluded}
+        changed={r['id']:{k:(original[r['id']][k],r[k]) for k in r if original[r['id']][k]!=r[k]}
+            for r in after if r['id'] in original and original[r['id']]!=r}
+        assert not changed,json.dumps(changed,default=str)
         receipt_count=w.sql("SELECT COUNT(*) AS n FROM session_events WHERE payload->>'subtype'='session_settled'")[0]['n']
         revisions=w.sql('SELECT session_id,local_revision,local_revision_epoch FROM network_session_active ORDER BY session_id')
         # The marker's old epoch must not capture a later prompt, even at the
@@ -129,6 +133,7 @@ session_active.datetime=Frozen
 held=engine.hold_outbox
 def hold(value):held(value or not (D/'release-outbox').exists())
 engine.hold_outbox=hold
+hold(True)
 original=migration.reconcile
 async def reconcile():
     (D/'before-dismissal').touch()
@@ -148,8 +153,8 @@ async def reconcile():
     assert not outcome.is_error,outcome.text
     await original()
     from app.db import database
-    from app.core.session_reservations import has_unfinished_work
-    assert has_unfinished_work(IDS['background'])
+    from app.core.session_reservations import holds_resources
+    assert holds_resources(IDS['background'])
     result={'private_before':private_before,'private_after':chat_access.broker.pending_count(IDS['waits']),
         'stop_latched':task_registry.is_user_stopped(IDS['stopped']),'outbox_held':engine.outbox_held(),
         'monitor_running_after_settlement':True}

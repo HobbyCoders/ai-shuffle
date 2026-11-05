@@ -35,6 +35,13 @@ activity timestamps. Opening history never starts work; sending explicitly
 creates a fresh turn. Settling dismisses owner-facing prompts, not unrelated
 Monitor jobs or subagents, and never clears an explicit Stop.
 
+Upgrade every worker and refresh older clients to remove their cached archive
+controls or read-only UI. During a rolling upgrade, upgraded workers normalize
+old archive requests and signed catalogs. A catalog-only archived row becomes
+Settled when first received; a later archived catalog never overrides newer
+shared membership. An old execution owner can still display its own archive
+state until it upgrades. Signed history is retained, not rewritten or re-signed.
+
 Owner-only disposable test creation may set `disposable_test: true` on
 `POST /api/v1/sessions` or a new-session chat WebSocket query. The chat is hidden
 at birth (also when created on another worker), excluded from ordinary lists,
