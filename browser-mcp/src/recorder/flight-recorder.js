@@ -539,7 +539,7 @@
       case 'mark':
         return `> mark ${JSON.stringify(clip(entry.label, 120))}`;
       case 'mount':
-        return `${entry.op === 'unmount' ? '-' : '+'} ${entry.name} ${entry.op === 'unmount' ? 'unmounted' : 'mounted'}`;
+        return `${entry.op === 'unmount' ? '-' : '+'} ${entry.name} ${entry.op === 'unmount' ? 'unmounted' : 'mounted'}${entry.diagnostic ? ` | diagnostic=${JSON.stringify(entry.diagnostic)}` : ''}`;
       case 'error':
         return `! ${entry.source === 'console' ? 'console.error' : entry.source === 'rejection' ? 'unhandled rejection' : 'error'}: ${clip(entry.message, 160)}`;
       case 'request':
@@ -553,7 +553,7 @@
       case 'visibility':
         return `* page ${entry.state}`;
       case 'note':
-        return `* ${clip(entry.message, 160)}`;
+        return `* ${clip(entry.message, 160)}${entry.diagnostic ? ` | diagnostic=${JSON.stringify(entry.diagnostic)}` : ''}`;
       default:
         return `* ${entry.kind}`;
     }
@@ -651,31 +651,48 @@
 
   var S = null; // the active recording, or null
   var lastResult = null;
+  var transitioning = false; // lifecycle teardown must finish before another start
+
+  function isActive(recording) { return Boolean(recording && S === recording && recording.active); }
+  function owned(recording, callback) {
+    return function () {
+      if (!isActive(recording)) return;
+      return callback.apply(null, [recording].concat(Array.prototype.slice.call(arguments)));
+    };
+  }
 
   function now() {
     var perf = root.performance;
     if (perf && typeof perf.now === 'function' && typeof perf.timeOrigin === 'number') return perf.timeOrigin + perf.now();
     return Date.now();
   }
-  function elapsed() { return S ? Math.max(0, Math.round(now() - S.startEpoch)) : 0; }
+  function elapsed(recording) { recording = recording || S; return recording ? Math.max(0, Math.round(now() - recording.startEpoch)) : 0; }
   function clip(text, max) {
     var value = String(text);
     return value.length > max ? value.slice(0, max - 1) + '…' : value;
   }
-  function note(error) {
-    if (S) S.stats.internalErrors += 1;
-    if (S && !S.firstInternalError) S.firstInternalError = clip(error && error.message ? error.message : error, 160);
+  function note(error, target) {
+    var recording = arguments.length > 1 ? target : S;
+    // Error accessors/coercion can throw, stop, or restart the recorder. Neither
+    // reporting nor its fallback may escape or write through a changed S.
+    try {
+      if (!recording) return;
+      recording.stats.internalErrors += 1;
+      if (recording.firstInternalError) return;
+      try { recording.firstInternalError = clip(error && error.message ? error.message : error, 160); }
+      catch (_) { recording.firstInternalError = 'unreadable diagnostic error'; }
+    } catch (_) { /* diagnostics must never affect the native operation */ }
   }
 
-  function push(entry, force) {
-    if (!S) return -1;
-    if (S.timeline.length >= S.opts.maxEntries && !(force && S.timeline.length < S.opts.maxEntries + 200)) {
-      S.stats.truncated = true;
-      S.stats.dropped += 1;
+  function push(recording, entry, force) {
+    if (!isActive(recording)) return -1;
+    if (recording.timeline.length >= recording.opts.maxEntries && !(force && recording.timeline.length < recording.opts.maxEntries + 200)) {
+      recording.stats.truncated = true;
+      recording.stats.dropped += 1;
       return -1;
     }
-    S.timeline.push(entry);
-    return S.timeline.length - 1;
+    recording.timeline.push(entry);
+    return recording.timeline.length - 1;
   }
 
   // ---- signature -----------------------------------------------------------
@@ -757,27 +774,40 @@
     return changes;
   }
 
-  function sample() {
+  function sample(recording, phase) {
+    if (!isActive(recording)) return;
+    if (phase && recording.messageAreaGap && !recording.gapSampled) {
+      var diagnostic = tryDiagnostic(recording, function () { return { frame: recording.frame,
+        state: diagnosticState(root.document.querySelector('[data-ui-state="chat"]')),
+        visibility: diagnosticVisibility() }; });
+      // Readers and DOM getters can stop/restart us. Never commit the old
+      // callback's note, signature, or sampling bookkeeping into another run.
+      if (!isActive(recording)) return;
+      recording.gapSampled = true;
+      push(recording, { t: elapsed(recording), kind: 'note', message: 'MessageArea gap at ' + phase, diagnostic: diagnostic });
+    }
     var started = root.performance && root.performance.now ? root.performance.now() : 0;
-    var values = readSignature(S.opts);
-    var changes = diff(S.last, values);
+    var values = readSignature(recording.opts);
+    if (!isActive(recording)) return;
+    var changes = diff(recording.last, values);
     if (changes) {
       var merged = {};
       var field;
-      for (field in S.last) merged[field] = S.last[field];
+      for (field in recording.last) merged[field] = recording.last[field];
       for (field in changes) merged[field] = changes[field];
-      S.last = merged;
-      S.stats.stateChanges += 1;
-      push({ t: elapsed(), kind: 'state', frame: S.frame, changes: changes });
+      recording.last = merged;
+      recording.stats.stateChanges += 1;
+      push(recording, { t: elapsed(recording), kind: 'state', frame: recording.frame, changes: changes });
     }
-    if (S.rowsDirty) {
-      S.rowsDirty = false;
-      checkRows();
+    if (recording.rowsDirty) {
+      recording.rowsDirty = false;
+      checkRows(recording);
     }
     if (started) {
       var cost = root.performance.now() - started;
-      S.stats.sampleMsTotal += cost;
-      if (cost > S.stats.sampleMsMax) S.stats.sampleMsMax = cost;
+      if (!isActive(recording)) return;
+      recording.stats.sampleMsTotal += cost;
+      if (cost > recording.stats.sampleMsMax) recording.stats.sampleMsMax = cost;
     }
   }
 
@@ -798,10 +828,12 @@
     + 'overflow:hidden!important;visibility:hidden!important;pointer-events:none!important;contain:strict!important;'
     + 'display:block!important;margin:0!important;padding:0!important;border:0!important;z-index:-2147483647!important;';
 
-  function installProbe() {
-    if (S.probe === false || S.probe || typeof ResizeObserver !== 'function') return;
+  function installProbe(recording) {
+    if (!isActive(recording) || recording.probe === false || recording.probe || typeof ResizeObserver !== 'function') return;
     var doc = root.document;
     if (!doc.body || !doc.documentElement) return; // still parsing; sample in rAF meanwhile
+    var previousTransition = transitioning;
+    transitioning = true;
     try {
       var host = doc.createElement('flight-recorder-probe');
       host.setAttribute('aria-hidden', 'true');
@@ -812,76 +844,88 @@
       shadow.appendChild(box);
       var probe = { host: host, box: box, flip: false, pending: false, misses: 0, observer: null };
       probe.observer = new ResizeObserver(function () {
-        if (!S || !S.active || S.probe !== probe || !probe.pending) return;
+        if (!isActive(recording) || recording.probe !== probe || !probe.pending) return;
         probe.pending = false;
         probe.misses = 0;
-        S.stats.paintedSamples += 1;
-        try { sample(); } catch (error) { note(error); }
+        recording.stats.paintedSamples += 1;
+        try { sample(recording, 'pre-paint'); } catch (error) { note(error, recording); }
       });
       probe.observer.observe(box);
       doc.documentElement.appendChild(host);
-      S.probe = probe;
+      recording.probe = probe;
     } catch (error) {
-      note(error);
-      S.probe = false;
-    }
+      note(error, recording);
+      recording.probe = false;
+    } finally { transitioning = previousTransition; }
   }
 
-  function removeProbe() {
-    var probe = S && S.probe;
-    if (!probe) return;
-    try { probe.observer.disconnect(); } catch (error) { /* gone */ }
-    try { if (probe.host.parentNode) probe.host.parentNode.removeChild(probe.host); } catch (error) { /* gone */ }
-    S.probe = null;
+  function removeProbe(recording) {
+    var probe = recording && recording.probe;
+    if (!probe) return true;
+    var previousTransition = transitioning;
+    transitioning = true;
+    try {
+      probe.observer.disconnect();
+      if (probe.host.parentNode) probe.host.parentNode.removeChild(probe.host);
+      if (recording.probe === probe) recording.probe = null;
+      return true;
+    } catch (error) {
+      // Retain ownership until removal succeeds; never overwrite it with false.
+      note(error, recording);
+      return false;
+    } finally { transitioning = previousTransition; }
   }
 
-  function tick() {
-    if (!S || !S.active) return;
-    S.raf = root.requestAnimationFrame(tick);
+  function tick(recording) {
+    if (!isActive(recording)) return;
+    recording.raf = root.requestAnimationFrame(owned(recording, tick));
     try {
       var at = now();
-      if (S.lastFrameEpoch) {
-        var gap = at - S.lastFrameEpoch;
+      if (recording.lastFrameEpoch) {
+        var gap = at - recording.lastFrameEpoch;
         if (!root.document.hidden) {
-          if (gap > S.stats.maxFrameGapMs) S.stats.maxFrameGapMs = Math.round(gap);
-          if (gap > 50) S.stats.longFrames += 1;
+          if (gap > recording.stats.maxFrameGapMs) recording.stats.maxFrameGapMs = Math.round(gap);
+          if (gap > 50) recording.stats.longFrames += 1;
         }
       }
-      S.lastFrameEpoch = at;
-      S.frame += 1;
-      S.stats.frames += 1;
-      if (at - S.startEpoch > S.opts.maxDurationMs) {
-        halt('reached maxDurationMs (' + S.opts.maxDurationMs + 'ms)');
+      recording.lastFrameEpoch = at;
+      recording.frame += 1;
+      recording.stats.frames += 1;
+      if (at - recording.startEpoch > recording.opts.maxDurationMs) {
+        halt(recording, 'reached maxDurationMs (' + recording.opts.maxDurationMs + 'ms)');
         return;
       }
-      if (!S.probe) installProbe();
-      var probe = S.probe;
+      if (!recording.probe) installProbe(recording);
+      if (!isActive(recording)) return;
+      var probe = recording.probe;
       if (probe && probe.pending) {
         // Last frame's probe never reported (removed by the page, or the
         // frame was skipped). Catch up here; give up on it after a few.
         probe.misses += 1;
-        S.stats.probeMisses += 1;
-        sample();
+        recording.stats.probeMisses += 1;
+        sample(recording);
+        if (!isActive(recording)) return;
         if (probe.misses >= 3 || !probe.host.isConnected) {
-          removeProbe();
-          S.probe = probe.misses >= 3 ? false : null;
+          var removed = removeProbe(recording);
+          if (!isActive(recording)) return;
+          if (removed) recording.probe = probe.misses >= 3 ? false : null;
         }
       }
-      if (S.probe) {
-        S.probe.flip = !S.probe.flip;
-        S.probe.box.style.width = S.probe.flip ? '2px' : '1px';
-        S.probe.pending = true;
+      if (recording.probe) {
+        recording.probe.flip = !recording.probe.flip;
+        recording.probe.box.style.width = recording.probe.flip ? '2px' : '1px';
+        recording.probe.pending = true;
       } else {
-        sample();
+        sample(recording);
       }
     } catch (error) {
-      note(error);
+      note(error, recording);
     }
   }
 
   // ---- rows ----------------------------------------------------------------
 
-  function checkRows() {
+  function checkRows(recording) {
     var rows = root.document.querySelectorAll('[data-ui-row]');
     var active = {};
     var fresh = [];
@@ -893,17 +937,18 @@
         if (seen[id]) {
           if (!active[id]) {
             active[id] = true;
-            if (!S.duplicates[id]) fresh.push(id);
+            if (!recording.duplicates[id]) fresh.push(id);
           }
         } else {
           seen[id] = true;
         }
       }
     }
-    S.duplicates = active;
+    if (!isActive(recording)) return;
+    recording.duplicates = active;
     if (fresh.length) {
-      S.stats.duplicateRows += fresh.length;
-      push({ t: elapsed(), kind: 'duplicate_rows', ids: fresh.slice(0, 20) });
+      recording.stats.duplicateRows += fresh.length;
+      push(recording, { t: elapsed(recording), kind: 'duplicate_rows', ids: fresh.slice(0, 20) });
     }
   }
 
@@ -919,14 +964,197 @@
     }
     return list;
   }
-  function countMount(name, delta) {
-    var counts = S.stats.mounts[name] || (S.stats.mounts[name] = { mounted: 0, unmounted: 0 });
+  // Only MessageArea needs causal evidence. These optional, bounded details
+  // ride the existing mount/note timeline; they never feed anomaly detectors.
+  function diagnosticNode(node) {
+    if (!node || node.nodeType !== 1) return null;
+    var label = node.tagName.toLowerCase();
+    ['chat-view', 'chat-column', 'message-area-wrapper', 'empty-hero'].forEach(function (name) {
+      if (node.classList.contains(name)) label += '.' + name;
+    });
+    var mount = node.getAttribute('data-ui-mount');
+    return label + (mount ? '[' + cleanValue(mount) + ']' : '');
+  }
+  function diagnosticState(carrier) {
+    var state = {};
+    if (!carrier) return state;
+    // Explicit allowlist: never copy text, titles, raw session ids or paths.
+    ['surface', 'session', 'messages', 'loading', 'streaming', 'composer'].forEach(function (key) {
+      if (carrier.hasAttribute('data-ui-' + key)) state[key] = cleanValue(carrier.getAttribute('data-ui-' + key));
+    });
+    if (typeof carrier.__flightRecorderState === 'function') {
+      var live = carrier.__flightRecorderState();
+      if (live) {
+        ['showEmptyHero', 'isEmptyState', 'mirrorWaiting', 'voiceCallActive'].forEach(function (key) {
+          if (typeof live[key] === 'boolean') state[key] = live[key];
+        });
+        ['chatSurface', 'presentedSurface', 'transcriptSurface'].forEach(function (key) {
+          if (live[key] === null || /^(new|cleared|loading|active)$/.test(live[key])) state[key] = live[key];
+        });
+        ['session', 'transcriptSession'].forEach(function (key) {
+          if (/^(none|s:[a-z0-9]{6})$/.test(live[key])) state[key] = live[key];
+        });
+        ['messages', 'transcriptMessages'].forEach(function (key) {
+          if (live[key] === null || (Number.isInteger(live[key]) && live[key] >= 0)) state[key] = live[key] === null ? null : String(live[key]);
+        });
+      }
+    }
+    return state;
+  }
+  function diagnosticVisibility() {
+    var areas = root.document.querySelectorAll('[data-ui-mount="MessageArea"]');
+    var visible = 0;
+    for (var i = 0; i < areas.length; i += 1) {
+      if (areas[i].checkVisibility ? areas[i].checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) : areas[i].getClientRects().length > 0) visible += 1;
+    }
+    return { document: root.document.hidden ? 'hidden' : 'visible', messageAreas: areas.length,
+      visibleMessageAreas: visible, hero: Boolean(root.document.querySelector('.empty-hero')) };
+  }
+  function diagnosticId(recording, node) {
+    if (!recording.nodeIds.has(node)) recording.nodeIds.set(node, ++recording.nextNodeId);
+    return recording.nodeIds.get(node);
+  }
+  function diagnosticStack() {
+    // Emit only filename:line:column, including for bare/Windows sourceURLs.
+    // Unknown frame formats are redacted, never copied as potentially private paths.
+    return (new Error().stack || '').split('\n').slice(1, 10).map(function (line) {
+      var location = line.match(/([^\s()]+):(\d+):(\d+)\)?$/);
+      if (!location) return '[unrecognized stack frame]';
+      var file = location[1].split(/[?#]/)[0].split(/[\\/]/).pop();
+      if (file !== '<anonymous>' && !/^[\w.$-]+$/.test(file)) return '[unrecognized stack frame]';
+      return clip(scrub(file + ':' + location[2] + ':' + location[3]), 240);
+    }).join('\n');
+  }
+  var removalHooks = null;
+  function installRemovalHooks(recording) {
+    if (removalHooks) {
+      removalHooks.active = true;
+      removalHooks.methods.forEach(function (hook) {
+        try { if (hook.proto[hook.name] === hook.original) hook.proto[hook.name] = hook.wrapper; }
+        catch (error) { note(error, recording); }
+      });
+      return;
+    }
+    var hooks = removalHooks = { active: true, methods: [] };
+    [[root.Element.prototype, 'remove', -1], [root.Node.prototype, 'removeChild', 0],
+      [root.Node.prototype, 'replaceChild', 1]].forEach(function (spec) {
+      var proto = spec[0], name = spec[1], index = spec[2];
+      var original = proto[name];
+      if (typeof original !== 'function') return;
+      var wrapper = function () {
+        var recording = S, captured = [];
+        if (hooks.active && recording && recording.active) {
+          try {
+            var removed = index < 0 ? this : arguments[index];
+            var parent = removed && removed.parentNode;
+            var nodes = marked(removed);
+            for (var i = 0; i < nodes.length; i += 1) {
+              var node = nodes[i];
+              if (node.getAttribute('data-ui-mount') !== 'MessageArea' || !node.isConnected) continue;
+              var carrier = node.closest('[data-ui-state="chat"]');
+              captured.push({ node: node, root: removed, parent: parent, detail: {
+                source: name, at: elapsed(recording), removed: diagnosticNode(removed),
+                parent: diagnosticNode(parent), state: diagnosticState(carrier), stack: diagnosticStack() } });
+            }
+          } catch (error) { note(error, recording); }
+        }
+        // A failed/no-op native call must leave no evidence for a later mutation.
+        var result = original.apply(this, arguments);
+        try {
+          if (S === recording && S && S.active) captured.forEach(function (evidence) {
+            if (evidence.root.parentNode !== evidence.parent && isActive(recording)) recording.removalEvidence.set(evidence.node, evidence);
+          });
+        } catch (error) { note(error, recording); }
+        return result;
+      };
+      try { proto[name] = wrapper; hooks.methods.push({ proto: proto, name: name, original: original, wrapper: wrapper }); }
+      catch (error) { note(error, recording); }
+    });
+  }
+  function releaseRemovalHooks(recording) {
+    if (!removalHooks) return;
+    removalHooks.active = false;
+    // All-or-nothing, like the network hooks: a later page wrapper must not
+    // be dropped, and a subsequent start must re-arm every method together.
+    try {
+      if (!removalHooks.methods.every(function (hook) { return hook.proto[hook.name] === hook.wrapper; })) return;
+    } catch (error) { note(error, recording); return; }
+    var restored = true;
+    removalHooks.methods.forEach(function (hook) {
+      try { hook.proto[hook.name] = hook.original; }
+      catch (error) { restored = false; note(error, recording); }
+    });
+    // A frozen prototype may retain our now-inert wrapper. Still return the
+    // recording, and remember all methods so a later start can re-arm them.
+    if (restored) removalHooks = null;
+  }
+  function tryDiagnostic(recording, read) {
+    try { return read(); }
+    catch (error) { note(error, recording); return { unavailable: true }; }
+  }
+  // Rewind only parent links, never the DOM. Current .contains() relationships
+  // cannot attribute a batch: an early removal may have been undone, or a
+  // descendant may have moved again after its ancestor disconnected it.
+  function disconnectingRemoval(node, records) {
+    var parents = new WeakMap();
+    function lineage() {
+      var path = [], current = node;
+      while (current && path.length < 512) {
+        path.push(current);
+        if (current === root.document) return path;
+        current = parents.has(current) ? parents.get(current) : current.parentNode;
+      }
+      return current ? null : path; // excessive/unknown ancestry is ambiguous
+    }
+    var path = lineage();
+    if (!path || path.indexOf(root.document) >= 0) return null;
+    for (var i = records.length - 1; i >= 0; i -= 1) {
+      var record = records[i];
+      if (record.type !== 'childList') continue;
+      var j;
+      for (j = 0; j < record.addedNodes.length; j += 1) parents.set(record.addedNodes[j], null);
+      for (j = 0; j < record.removedNodes.length; j += 1) parents.set(record.removedNodes[j], record.target);
+      path = lineage();
+      if (!path) return null;
+      if (path.indexOf(root.document) < 0) continue;
+      // The first connected pre-mutation state, walking backwards, identifies
+      // the final disconnect. Reinserted transient removals cannot win here.
+      var candidates = [];
+      for (j = 0; j < record.removedNodes.length; j += 1) {
+        if (path.indexOf(record.removedNodes[j]) >= 0) candidates.push(record.removedNodes[j]);
+      }
+      return candidates.length === 1 ? { root: candidates[0], parent: record.target } : null;
+    }
+    return null;
+  }
+  function mountDiagnostic(recording, node, removed, parent, uniqueRemoval, ambiguous) {
+    var carrier = (node.closest && node.closest('[data-ui-state="chat"]'))
+      || (parent && parent.closest && parent.closest('[data-ui-state="chat"]'));
+    var observed = diagnosticState(carrier);
+    if (!isActive(recording)) return;
+    var evidence = removed && recording.removalEvidence.get(node);
+    recording.removalEvidence.delete(node);
+    // Multiple removals of the same root in one delivery are ambiguous: never
+    // attach a transient call's state/stack to the eventual real unmount.
+    var matched = evidence && uniqueRemoval && evidence.root === removed && evidence.parent === parent;
+    var result = (matched && evidence.detail) || { source: 'MutationObserver (no synchronous stack)',
+      removed: removed ? diagnosticNode(removed) : null, parent: diagnosticNode(parent) };
+    if (ambiguous) result.ambiguous = true;
+    result.node = diagnosticId(recording, node);
+    result.observed = observed;
+    result.visibility = diagnosticVisibility();
+    return result;
+  }
+
+  function countMount(recording, name, delta) {
+    var counts = recording.stats.mounts[name] || (recording.stats.mounts[name] = { mounted: 0, unmounted: 0 });
     if (delta > 0) counts.mounted += 1; else counts.unmounted += 1;
   }
-  function onMutations(records) {
-    if (!S || !S.active) return;
+  function onMutations(recording, records) {
+    if (!isActive(recording)) return;
     try {
       var removed = [];
+      var removalCounts = new WeakMap();
       var added = [];
       var i;
       var j;
@@ -934,45 +1162,70 @@
         var record = records[i];
         if (record.type !== 'childList') continue;
         for (j = 0; j < record.removedNodes.length; j += 1) {
-          if (record.removedNodes[j].nodeType === 1) { removed.push(record.removedNodes[j]); S.rowsDirty = true; }
+          if (record.removedNodes[j].nodeType === 1) {
+            var removedNode = record.removedNodes[j];
+            removed.push(removedNode); recording.rowsDirty = true;
+            removalCounts.set(removedNode, (removalCounts.get(removedNode) || 0) + 1);
+          }
         }
         for (j = 0; j < record.addedNodes.length; j += 1) {
-          if (record.addedNodes[j].nodeType === 1) { added.push(record.addedNodes[j]); S.rowsDirty = true; }
+          if (record.addedNodes[j].nodeType === 1) { added.push(record.addedNodes[j]); recording.rowsDirty = true; }
         }
       }
-      var t = elapsed();
+      var t = elapsed(recording);
       for (i = 0; i < removed.length; i += 1) {
         var gone = marked(removed[i]);
         for (j = 0; j < gone.length; j += 1) {
           var el = gone[j];
-          if (el.isConnected || !S.mounted.has(el)) continue;
-          S.mounted.delete(el);
+          if (el.isConnected || !recording.mounted.has(el)) continue;
+          recording.mounted.delete(el);
           var name = cleanValue(el.getAttribute('data-ui-mount'));
-          countMount(name, -1);
-          push({ t: t, kind: 'mount', name: name, op: 'unmount' });
+          countMount(recording, name, -1);
+          var unmount = { t: t, kind: 'mount', name: name, op: 'unmount' };
+          if (name === 'MessageArea') {
+            unmount.diagnostic = tryDiagnostic(recording, function () {
+              var cause = disconnectingRemoval(el, records);
+              return mountDiagnostic(recording, el, cause && cause.root, cause && cause.parent,
+                cause && removalCounts.get(cause.root) === 1, !cause);
+            });
+            if (!isActive(recording)) return;
+            recording.messageAreaGap = true;
+            recording.gapSampled = false;
+          }
+          push(recording, unmount);
         }
       }
       for (i = 0; i < added.length; i += 1) {
         var fresh = marked(added[i]);
         for (j = 0; j < fresh.length; j += 1) {
           var node = fresh[j];
-          if (!node.isConnected) { S.stats.transientMounts += 1; continue; }
-          if (S.mounted.has(node)) continue;
-          S.mounted.add(node);
+          if (!node.isConnected) { recording.stats.transientMounts += 1; continue; }
+          if (recording.mounted.has(node)) continue;
+          recording.mounted.add(node);
           var label = cleanValue(node.getAttribute('data-ui-mount'));
-          countMount(label, 1);
-          push({ t: t, kind: 'mount', name: label, op: 'mount' });
+          countMount(recording, label, 1);
+          var mount = { t: t, kind: 'mount', name: label, op: 'mount' };
+          if (label === 'MessageArea') {
+            mount.diagnostic = tryDiagnostic(recording, function () { return mountDiagnostic(recording, node, null, node.parentNode); });
+            if (!isActive(recording)) return;
+            recording.messageAreaGap = false;
+          }
+          push(recording, mount);
         }
       }
     } catch (error) {
-      note(error);
+      note(error, recording);
+    } finally {
+      // Expire evidence even for ignored mutations, failed reads or a reader
+      // that stopped/restarted the recorder during this delivery.
+      recording.removalEvidence = new WeakMap();
     }
   }
-  function baselineMounts() {
+  function baselineMounts(recording) {
     var counts = {};
     var present = root.document.querySelectorAll('[data-ui-mount]');
     for (var i = 0; i < present.length; i += 1) {
-      S.mounted.add(present[i]);
+      recording.mounted.add(present[i]);
       var name = cleanValue(present[i].getAttribute('data-ui-mount'));
       counts[name] = (counts[name] || 0) + 1;
     }
@@ -989,15 +1242,15 @@
     var where = owner ? ' in ' + cleanValue(owner.getAttribute('data-ui-mount')) : '';
     return clip(tag + cls + where, 80);
   }
-  function onShifts(list) {
-    if (!S || !S.active) return;
+  function onShifts(recording, list) {
+    if (!isActive(recording)) return;
     try {
       var entries = list.getEntries();
       for (var i = 0; i < entries.length; i += 1) {
         var shift = entries[i];
         var value = Number(shift.value) || 0;
         var input = Boolean(shift.hadRecentInput);
-        var ls = S.stats.layoutShift;
+        var ls = recording.stats.layoutShift;
         ls.count += 1;
         if (input) ls.inputTotal += value; else ls.total += value;
         var sources = [];
@@ -1005,17 +1258,17 @@
         for (var j = 0; j < raw.length && sources.length < 5; j += 1) {
           var label = describeNode(raw[j].node);
           if (label) sources.push(label);
-          if (label && !input) S.shiftSources[label] = (S.shiftSources[label] || 0) + value;
+          if (label && !input) recording.shiftSources[label] = (recording.shiftSources[label] || 0) + value;
         }
         if (value >= 0.001) {
           var at = typeof shift.startTime === 'number' && root.performance && typeof root.performance.timeOrigin === 'number'
-            ? Math.max(0, Math.round(root.performance.timeOrigin + shift.startTime - S.startEpoch))
-            : elapsed();
-          push({ t: at, kind: 'layout_shift', value: Number(value.toFixed(4)), input: input, sources: sources });
+            ? Math.max(0, Math.round(root.performance.timeOrigin + shift.startTime - recording.startEpoch))
+            : elapsed(recording);
+          push(recording, { t: at, kind: 'layout_shift', value: Number(value.toFixed(4)), input: input, sources: sources });
         }
       }
     } catch (error) {
-      note(error);
+      note(error, recording);
     }
   }
 
@@ -1064,44 +1317,46 @@
       return '[unreadable ' + typeof value + ']';
     }
   }
-  function recordError(source, message) {
-    if (!S || !S.active) return;
-    S.stats.errors += 1;
-    push({ t: elapsed(), kind: 'error', source: source, message: clip(scrub(message || '(no message)'), 300) });
+  function recordError(recording, source, message) {
+    var entry = { t: elapsed(recording), kind: 'error', source: source, message: clip(scrub(message || '(no message)'), 300) };
+    if (!isActive(recording)) return;
+    recording.stats.errors += 1;
+    push(recording, entry);
   }
-  function onError(event) {
+  function onError(recording, event) {
     try {
       var target = event && event.target;
       if (target && target !== root && target.nodeType === 1) {
         // A resource (img/script/link) failed to load.
         var url = target.currentSrc || target.src || target.href;
-        if (url) recordRequest('GET', cleanUrl(url), { error: 'resource ' + target.tagName.toLowerCase() + ' failed' });
+        if (url) recordRequest(recording, 'GET', cleanUrl(url), { error: 'resource ' + target.tagName.toLowerCase() + ' failed' });
         return;
       }
-      recordError('error', event && (event.message || describeValue(event.error)));
+      recordError(recording, 'error', event && (event.message || describeValue(event.error)));
     } catch (error) {
-      note(error);
+      note(error, recording);
     }
   }
-  function onRejection(event) {
-    try { recordError('rejection', describeValue(event && event.reason)); } catch (error) { note(error); }
+  function onRejection(recording, event) {
+    try { recordError(recording, 'rejection', describeValue(event && event.reason)); } catch (error) { note(error, recording); }
   }
 
   // ---- requests ------------------------------------------------------------
 
-  function recordRequest(method, url, outcome) {
-    if (!S || !S.active) return;
-    var entry = { t: elapsed(), kind: 'request', method: String(method || 'GET').toUpperCase(), url: url };
+  function recordRequest(recording, method, url, outcome) {
+    if (!isActive(recording)) return;
+    var entry = { t: elapsed(recording), kind: 'request', method: String(method || 'GET').toUpperCase(), url: url };
     if (typeof outcome.status === 'number') entry.status = outcome.status;
     if (outcome.error) entry.error = clip(scrub(outcome.error), 120);
     if (outcome.aborted) entry.aborted = true;
-    if (!outcome.aborted) S.stats.failedRequests += 1;
-    push(entry);
+    if (!isActive(recording)) return;
+    if (!outcome.aborted) recording.stats.failedRequests += 1;
+    push(recording, entry);
   }
 
   var hooks = null; // installed page hooks, kept across recordings in this document
 
-  function installHooks() {
+  function installHooks(recording) {
     if (hooks) { hooks.active = true; return; }
     hooks = { active: true, xhr: typeof WeakMap === 'function' ? new WeakMap() : null };
     var h = hooks;
@@ -1111,15 +1366,16 @@
         var originalError = root.console.error;
         var describing = false;
         var wrappedError = function error() {
+          var recording = S;
           // describing: a Proxy trap that logs while we read its object must
           // not recurse through us.
-          if (h.active && S && S.opts.console && !describing) {
+          if (h.active && isActive(recording) && recording.opts.console && !describing) {
             describing = true;
             try {
               var parts = [];
               for (var i = 0; i < arguments.length && i < 6; i += 1) parts.push(describeValue(arguments[i]));
-              recordError('console', parts.join(' '));
-            } catch (failure) { note(failure); }
+              recordError(recording, 'console', parts.join(' '));
+            } catch (failure) { note(failure, recording); }
             describing = false;
           }
           return originalError.apply(this, arguments);
@@ -1128,7 +1384,7 @@
         h.ownsConsole = function () { return root.console.error === wrappedError; };
         h.restoreConsole = function () { root.console.error = originalError; };
       }
-    } catch (error) { note(error); }
+    } catch (error) { note(error, recording); }
     // fetch: hand back a promise that settles exactly like the original
     // (same value or same rejection) so unhandled rejections stay unhandled.
     // The one difference while recording: the page's handlers run one
@@ -1139,23 +1395,24 @@
         var originalFetch = root.fetch;
         // One declared parameter, like the native fetch (fetch.length === 1).
         var wrappedFetch = function fetch(input) {
+          var recording = S;
           var pending = originalFetch.apply(this, arguments);
-          if (!h.active || !S || !S.opts.network || !pending || typeof pending.then !== 'function') return pending;
+          if (!h.active || !isActive(recording) || !recording.opts.network || !pending || typeof pending.then !== 'function') return pending;
           var init = arguments[1];
           var method = 'GET';
           var url = '';
           try {
             method = (init && init.method) || (input && typeof input === 'object' && input.method) || 'GET';
             url = cleanUrl(typeof input === 'string' ? input : input && (input.url || input.href) || String(input));
-          } catch (error) { note(error); }
+          } catch (error) { note(error, recording); }
           return pending.then(function (response) {
-            try { if (response && response.status >= 400) recordRequest(method, url, { status: response.status }); } catch (error) { note(error); }
+            try { if (response && response.status >= 400) recordRequest(recording, method, url, { status: response.status }); } catch (error) { note(error, recording); }
             return response;
           }, function (reason) {
             try {
               var aborted = Boolean(reason && reason.name === 'AbortError');
-              recordRequest(method, url, { error: describeValue(reason), aborted: aborted });
-            } catch (error) { note(error); }
+              recordRequest(recording, method, url, { error: describeValue(reason), aborted: aborted });
+            } catch (error) { note(error, recording); }
             throw reason;
           });
         };
@@ -1163,7 +1420,7 @@
         h.ownsFetch = function () { return root.fetch === wrappedFetch; };
         h.restoreFetch = function () { root.fetch = originalFetch; };
       }
-    } catch (error) { note(error); }
+    } catch (error) { note(error, recording); }
     // XMLHttpRequest. One state object per XHR for its whole life, and one set
     // of listeners, added on its first send while recording. open() replaces
     // the request the state describes. When a request finishes, readystatechange
@@ -1185,11 +1442,12 @@
         var originalSend = proto.send;
         var settle = function (info) {
           if (!info || info.settled) return;
+          var recording = info.recording;
           info.settled = true;
-          if (!h.active || !S || !S.opts.network) return;
-          if (info.status >= 400) recordRequest(info.method, info.url, { status: info.status });
+          if (!h.active || !isActive(recording) || !recording.opts.network) return;
+          if (info.status >= 400) recordRequest(recording, info.method, info.url, { status: info.status });
           else if (info.status === 0) {
-            recordRequest(info.method, info.url, {
+            recordRequest(recording, info.method, info.url, {
               error: info.aborted ? 'aborted' : info.timeout ? 'timeout' : 'network error',
               aborted: info.aborted,
             });
@@ -1202,9 +1460,10 @@
           request.ended = true;
           // An earlier ending whose loadend never came is not overwritten unseen.
           settle(state.ending);
-          state.ending = { method: request.method, url: request.url, status: xhr.status, aborted: false, timeout: false };
+          state.ending = { recording: request.recording, method: request.method, url: request.url, status: xhr.status, aborted: false, timeout: false };
         };
         var wrappedOpen = function open(method, url) {
+          var recording = S;
           var state = null;
           var previous = null;
           try {
@@ -1215,8 +1474,8 @@
               snapshot(this, state);
               if (state.ending && state.ending.status > 0) { settle(state.ending); state.ending = null; }
             }
-            state.request = { method: String(method || 'GET'), url: cleanUrl(url) };
-          } catch (error) { note(error); state = null; }
+            state.request = { recording: recording, method: String(method || 'GET'), url: cleanUrl(url) };
+          } catch (error) { note(error, recording); state = null; }
           try {
             return originalOpen.apply(this, arguments);
           } catch (error) {
@@ -1229,7 +1488,7 @@
           state.hooked = true;
           xhr.addEventListener('readystatechange', function () {
             // DONE (4): the current request is the one ending. A reopened XHR is at 1.
-            try { snapshot(xhr, state); } catch (error) { note(error); }
+            try { snapshot(xhr, state); } catch (error) { note(error, state.request && state.request.recording); }
           });
           xhr.addEventListener('abort', function () { if (state.ending) state.ending.aborted = true; });
           xhr.addEventListener('timeout', function () { if (state.ending) state.ending.timeout = true; });
@@ -1240,14 +1499,18 @@
               var info = state.ending;
               state.ending = null;
               settle(info);
-            } catch (error) { note(error); }
+            } catch (error) { note(error, state.request && state.request.recording); }
           });
         };
         var wrappedSend = function send() {
+          var recording = S;
           try {
             var state = h.xhr.get(this);
-            if (state && !state.hooked && h.active && S && S.opts.network) hookXhr(this, state);
-          } catch (error) { note(error); }
+            if (state && h.active && isActive(recording) && recording.opts.network) {
+              if (state.request) state.request.recording = recording;
+              if (!state.hooked) hookXhr(this, state);
+            }
+          } catch (error) { note(error, recording); }
           return originalSend.apply(this, arguments);
         };
         proto.open = wrappedOpen;
@@ -1258,14 +1521,14 @@
           proto.send = originalSend;
         };
       }
-    } catch (error) { note(error); }
+    } catch (error) { note(error, recording); }
   }
 
   // All or nothing: when every wrapper is still the outermost one, put the
   // originals back and forget the hooks. If the page wrapped any of them after
   // us, unwrapping would drop its wrapper, so ours all stay as inert
   // pass-throughs (active=false) and the next start() simply re-arms them.
-  function releaseHooks() {
+  function releaseHooks(recording) {
     if (!hooks) return;
     hooks.active = false;
     var h = hooks;
@@ -1277,37 +1540,37 @@
       if (h.restoreXhr) h.restoreXhr();
       hooks = null;
     } catch (error) {
-      note(error);
+      note(error, recording);
     }
   }
 
   // ---- lifecycle -----------------------------------------------------------
 
-  function onVisibility() {
-    if (!S || !S.active) return;
+  function onVisibility(recording) {
+    if (!isActive(recording)) return;
     try {
-      push({ t: elapsed(), kind: 'visibility', state: root.document.hidden ? 'hidden' : 'visible' });
-      S.lastFrameEpoch = 0;
-    } catch (error) { note(error); }
+      push(recording, { t: elapsed(recording), kind: 'visibility', state: root.document.hidden ? 'hidden' : 'visible' });
+      recording.lastFrameEpoch = 0;
+    } catch (error) { note(error, recording); }
   }
-  function storageKey() { return KEY_PREFIX + S.id; }
+  function storageKey(recording) { return KEY_PREFIX + recording.id; }
   // The handoff shares the host app's sessionStorage quota, and is written in
   // pagehide, possibly before the app's own pagehide writes. Keep it small.
   var HANDOFF_MAX_CHARS = 1000000;
-  function handoffText() {
-    var text = JSON.stringify(serialize());
+  function handoffText(recording) {
+    var text = JSON.stringify(serialize(recording));
     if (text.length <= HANDOFF_MAX_CHARS) return text;
     // Too long: keep the newest entries that fit and say how many went. These
     // are the EARLIEST entries, so not the size cap's truncated/dropped (which
     // count later entries never kept).
-    var saved = serialize();
+    var saved = serialize(recording);
     var kept = saved.timeline;
     while (kept.length > 1 && text.length > HANDOFF_MAX_CHARS) {
       // Proportional cut with 10% headroom: one pass, rarely two.
       kept = kept.slice(kept.length - Math.max(1, Math.floor(kept.length * 0.9 * HANDOFF_MAX_CHARS / text.length)));
-      saved.timeline = [{ t: kept[0].t, kind: 'note', message: (S.timeline.length - kept.length) + ' earlier entries dropped to fit the page-load handoff' }].concat(kept);
-      saved.stats = JSON.parse(JSON.stringify(S.stats));
-      saved.stats.handoffDropped += S.timeline.length - kept.length;
+      saved.timeline = [{ t: kept[0].t, kind: 'note', message: (recording.timeline.length - kept.length) + ' earlier entries dropped to fit the page-load handoff' }].concat(kept);
+      saved.stats = JSON.parse(JSON.stringify(recording.stats));
+      saved.stats.handoffDropped += recording.timeline.length - kept.length;
       saved.stats.handoffDroppedBeforeMs = Math.max(saved.stats.handoffDroppedBeforeMs, kept[0].t);
       text = JSON.stringify(saved);
     }
@@ -1329,26 +1592,26 @@
       for (var j = 0; j < stale.length; j += 1) storage.removeItem(stale[j]);
     } catch (error) { /* storage blocked */ }
   }
-  function onPageHide(event) {
-    if (!S || !S.active || !S.opts.persist) return;
-    if (event && event.persisted) S.bfcached = true;
+  function onPageHide(recording, event) {
+    if (!isActive(recording) || !recording.opts.persist) return;
+    if (event && event.persisted) recording.bfcached = true;
     try {
-      var text = handoffText();
-      if (text) root.sessionStorage.setItem(storageKey(), text);
+      var text = handoffText(recording);
+      if (text) root.sessionStorage.setItem(storageKey(recording), text);
     } catch (error) {
-      note(error);
+      note(error, recording);
     }
   }
-  function onPageShow(event) {
-    if (!S || !event || !event.persisted) return;
-    try { root.sessionStorage.removeItem(storageKey()); } catch (error) { /* storage blocked */ }
-    push({ t: elapsed(), kind: 'note', message: 'page restored from the back/forward cache' });
+  function onPageShow(recording, event) {
+    if (!recording || !event || !event.persisted) return;
+    try { root.sessionStorage.removeItem(storageKey(recording)); } catch (error) { /* storage blocked */ }
+    push(recording, { t: elapsed(recording), kind: 'note', message: 'page restored from the back/forward cache' });
   }
 
-  function serialize() {
+  function serialize(recording) {
     return {
-      v: VERSION, id: S.id, startEpoch: S.startEpoch, opts: S.opts, timeline: S.timeline, stats: S.stats,
-      last: S.last, frame: S.frame, initialMounts: S.initialMounts, shiftSources: S.shiftSources,
+      v: VERSION, id: recording.id, startEpoch: recording.startEpoch, opts: recording.opts, timeline: recording.timeline, stats: recording.stats,
+      last: recording.last, frame: recording.frame, initialMounts: recording.initialMounts, shiftSources: recording.shiftSources,
     };
   }
 
@@ -1410,95 +1673,116 @@
     return merged;
   }
 
-  function activate() {
-    S.active = true;
-    S.mounted = typeof WeakSet === 'function' ? new WeakSet() : { has: function () { return false; }, add: function () {}, delete: function () {} };
-    S.rowsDirty = true;
-    S.duplicates = S.duplicates || {};
-    S.lastFrameEpoch = 0;
-    S.probe = null;
-    installHooks();
+  function activate(recording) {
+    recording.active = true;
+    recording.mounted = typeof WeakSet === 'function' ? new WeakSet() : { has: function () { return false; }, add: function () {}, delete: function () {} };
+    recording.rowsDirty = true;
+    recording.nodeIds = new WeakMap();
+    recording.nextNodeId = 0;
+    recording.removalEvidence = new WeakMap();
+    recording.messageAreaGap = false;
+    recording.gapSampled = false;
+    installRemovalHooks(recording);
+    recording.duplicates = recording.duplicates || {};
+    recording.lastFrameEpoch = 0;
+    recording.probe = null;
+    installHooks(recording);
     try {
-      S.observer = new MutationObserver(onMutations);
-      S.observer.observe(root.document, { childList: true, subtree: true });
-    } catch (error) { note(error); }
+      recording.observer = new MutationObserver(owned(recording, onMutations));
+      recording.observer.observe(root.document, { childList: true, subtree: true });
+    } catch (error) { note(error, recording); }
     try {
       if (typeof PerformanceObserver === 'function') {
-        S.shifts = new PerformanceObserver(onShifts);
-        S.shifts.observe({ type: 'layout-shift', buffered: false });
+        recording.shifts = new PerformanceObserver(owned(recording, onShifts));
+        recording.shifts.observe({ type: 'layout-shift', buffered: false });
       }
-    } catch (error) { S.shifts = null; /* layout-shift is Chromium-only */ }
-    root.addEventListener('error', onError, true);
-    root.addEventListener('unhandledrejection', onRejection, true);
-    root.document.addEventListener('visibilitychange', onVisibility, true);
-    root.addEventListener('pagehide', onPageHide, true);
-    root.addEventListener('pageshow', onPageShow, true);
-    S.raf = root.requestAnimationFrame(tick);
+    } catch (error) { recording.shifts = null; /* layout-shift is Chromium-only */ }
+    recording.listeners = {
+      error: owned(recording, onError), rejection: owned(recording, onRejection),
+      visibility: owned(recording, onVisibility), hide: owned(recording, onPageHide), show: owned(recording, onPageShow),
+    };
+    root.addEventListener('error', recording.listeners.error, true);
+    root.addEventListener('unhandledrejection', recording.listeners.rejection, true);
+    root.document.addEventListener('visibilitychange', recording.listeners.visibility, true);
+    root.addEventListener('pagehide', recording.listeners.hide, true);
+    root.addEventListener('pageshow', recording.listeners.show, true);
+    recording.raf = root.requestAnimationFrame(owned(recording, tick));
   }
 
-  function halt(reason) {
-    if (!S || !S.active) return;
-    S.active = false;
-    try { root.cancelAnimationFrame(S.raf); } catch (error) { /* gone */ }
-    removeProbe();
-    try { if (S.observer) { onMutations(S.observer.takeRecords()); S.observer.disconnect(); } } catch (error) { note(error); }
-    try { if (S.shifts) { onShifts({ getEntries: function () { return S.shifts.takeRecords ? S.shifts.takeRecords() : []; } }); S.shifts.disconnect(); } } catch (error) { note(error); }
-    root.removeEventListener('error', onError, true);
-    root.removeEventListener('unhandledrejection', onRejection, true);
-    root.document.removeEventListener('visibilitychange', onVisibility, true);
-    root.removeEventListener('pagehide', onPageHide, true);
-    root.removeEventListener('pageshow', onPageShow, true);
-    releaseHooks();
-    // Nothing resumes a halted recording, so a handoff it left (one written on
-    // the way into the back/forward cache, say) must not stay in the app's storage.
-    removeHandoff(S.id);
-    S.endEpoch = now();
-    if (reason !== 'stopped') S.timeline.push({ t: Math.round(S.endEpoch - S.startEpoch), kind: 'note', message: 'recording stopped: ' + reason });
+  function cleanup(recording) {
+    var previousTransition = transitioning;
+    transitioning = true;
+    try {
+      // Ownership reads, restoration and even probe removal can run page code.
+      // Use the captured recording and isolate failures throughout cleanup.
+      try { releaseHooks(recording); } catch (error) { note(error, recording); }
+      try { releaseRemovalHooks(recording); } catch (error) { note(error, recording); }
+      try { root.cancelAnimationFrame(recording.raf); } catch (error) { /* gone */ }
+      try { removeProbe(recording); } catch (error) { note(error, recording); }
+      try { if (recording.observer) { recording.observer.disconnect(); } } catch (error) { note(error, recording); }
+      try { if (recording.shifts) { recording.shifts.disconnect(); } } catch (error) { note(error, recording); }
+      try {
+        root.removeEventListener('error', recording.listeners.error, true);
+        root.removeEventListener('unhandledrejection', recording.listeners.rejection, true);
+        root.document.removeEventListener('visibilitychange', recording.listeners.visibility, true);
+        root.removeEventListener('pagehide', recording.listeners.hide, true);
+        root.removeEventListener('pageshow', recording.listeners.show, true);
+      } catch (error) { note(error, recording); }
+      // Nothing resumes a halted recording, so its handoff must not remain.
+      removeHandoff(recording.id);
+    } finally { transitioning = previousTransition; }
+  }
+  function halt(recording, reason, deferCleanup) {
+    if (!isActive(recording)) return;
+    recording.active = false;
+    recording.endEpoch = now();
+    if (reason !== 'stopped') recording.timeline.push({ t: Math.round(recording.endEpoch - recording.startEpoch), kind: 'note', message: 'recording stopped: ' + reason });
+    if (!deferCleanup) cleanup(recording);
   }
 
-  function build() {
-    var timeline = S.timeline.slice();
+  function build(recording) {
+    var timeline = recording.timeline.slice();
     // Layout shifts carry their own frame time; keep everything in time order.
     var indexed = timeline.map(function (entry, i) { return { entry: entry, i: i }; });
     indexed.sort(function (a, b) { return (a.entry.t - b.entry.t) || (a.i - b.i); });
     timeline = indexed.map(function (item) { return item.entry; });
-    var ls = S.stats.layoutShift;
+    var ls = recording.stats.layoutShift;
     ls.total = Number(ls.total.toFixed(4));
     ls.inputTotal = Number(ls.inputTotal.toFixed(4));
-    ls.top = Object.keys(S.shiftSources).map(function (source) {
-      return { source: source, value: Number(S.shiftSources[source].toFixed(4)) };
+    ls.top = Object.keys(recording.shiftSources).map(function (source) {
+      return { source: source, value: Number(recording.shiftSources[source].toFixed(4)) };
     }).sort(function (a, b) { return b.value - a.value; }).slice(0, 5);
-    var stats = JSON.parse(JSON.stringify(S.stats));
+    var stats = JSON.parse(JSON.stringify(recording.stats));
     stats.sampleMsAvg = stats.frames ? Number((stats.sampleMsTotal / stats.frames).toFixed(3)) : 0;
     stats.sampleMsTotal = Number(stats.sampleMsTotal.toFixed(2));
     stats.sampleMsMax = Number(stats.sampleMsMax.toFixed(3));
-    if (S.firstInternalError) stats.firstInternalError = S.firstInternalError;
-    var end = S.endEpoch || now();
-    var recording = {
+    if (recording.firstInternalError) stats.firstInternalError = recording.firstInternalError;
+    var end = recording.endEpoch || now();
+    var result = {
       version: VERSION,
-      id: S.id,
-      startedAt: Math.round(S.startEpoch),
-      durationMs: Math.max(0, Math.round(end - S.startEpoch)),
-      initial: { mounts: S.initialMounts },
+      id: recording.id,
+      startedAt: Math.round(recording.startEpoch),
+      durationMs: Math.max(0, Math.round(end - recording.startEpoch)),
+      initial: { mounts: recording.initialMounts },
       timeline: timeline,
       stats: stats,
       options: {
-        fields: S.opts.fields.slice(),
-        selectors: S.opts.selectorList.map(function (pair) { return pair[0] + '=' + pair[1]; }),
-        cyclic: S.opts.cyclic.slice(),
-        scope: (S.opts.scope || ANALYZER.DEFAULT_SCOPE_FIELDS).slice(),
+        fields: recording.opts.fields.slice(),
+        selectors: recording.opts.selectorList.map(function (pair) { return pair[0] + '=' + pair[1]; }),
+        cyclic: recording.opts.cyclic.slice(),
+        scope: (recording.opts.scope || ANALYZER.DEFAULT_SCOPE_FIELDS).slice(),
       },
-      recording: Boolean(S.active),
+      recording: Boolean(recording.active),
     };
     try {
-      recording.anomalies = ANALYZER.analyzeRecording(recording);
-      recording.text = ANALYZER.formatReport(recording, { anomalies: recording.anomalies });
+      result.anomalies = ANALYZER.analyzeRecording(result);
+      result.text = ANALYZER.formatReport(result, { anomalies: result.anomalies });
     } catch (error) {
-      recording.anomalies = [];
-      recording.analysisError = clip(error && error.message ? error.message : error, 200);
-      recording.text = 'analysis failed: ' + recording.analysisError;
+      result.anomalies = [];
+      result.analysisError = clip(error && error.message ? error.message : error, 200);
+      result.text = 'analysis failed: ' + result.analysisError;
     }
-    return recording;
+    return result;
   }
 
   function newId() {
@@ -1506,11 +1790,13 @@
   }
 
   function start(raw) {
+    if (transitioning) return { ok: false, error: 'recorder lifecycle transition in progress' };
+    transitioning = true;
     try {
       var input = raw && typeof raw === 'object' ? raw : {};
       if (S && S.active) {
         if (!input.restart) return { ok: false, error: 'already recording', id: S.id };
-        halt('restarted');
+        halt(S, 'restarted');
       }
       var opts = normalizeOptions(input);
       removeStaleHandoffs();
@@ -1519,18 +1805,21 @@
         startEpoch: now(), opts: opts, timeline: [], stats: freshStats(), last: {}, frame: 0,
         shiftSources: {}, duplicates: {},
       };
-      activate();
-      S.initialMounts = baselineMounts();
-      sample();
+      var recording = S;
+      activate(recording);
+      recording.initialMounts = baselineMounts(recording);
+      sample(recording);
       return { ok: true, id: S.id, startedAt: Math.round(S.startEpoch), fields: Object.keys(S.last) };
     } catch (error) {
-      if (S && S.active) halt('failed to start');
+      if (S && S.active) halt(S, 'failed to start');
       S = null;
       return { ok: false, error: clip(error && error.message ? error.message : error, 200) };
-    }
+    } finally { transitioning = false; }
   }
 
   function resume(config) {
+    if (transitioning) return { ok: false, error: 'recorder lifecycle transition in progress' };
+    transitioning = true;
     try {
       if (root.top !== root) return { ok: false, error: 'not the top frame' };
       if (!config || typeof config.id !== 'string') return { ok: false, error: 'missing id' };
@@ -1550,8 +1839,8 @@
           initialMounts: saved.initialMounts || {}, shiftSources: saved.shiftSources || {}, duplicates: {},
         };
         S.stats.segments += 1;
-        activate();
-        push({ t: elapsed(), kind: 'navigation', type: 'load', path: cleanPath() }, true);
+        activate(S);
+        push(S, { t: elapsed(), kind: 'navigation', type: 'load', path: cleanPath() }, true);
       } else {
         var opts = normalizeOptions(config.opts || {});
         S = {
@@ -1560,8 +1849,8 @@
         };
         S.stats.segments += 1;
         S.stats.lostSegments += 1;
-        activate();
-        push({ t: elapsed(), kind: 'navigation', type: 'load', path: cleanPath(), lost: true }, true);
+        activate(S);
+        push(S, { t: elapsed(), kind: 'navigation', type: 'load', path: cleanPath(), lost: true }, true);
       }
       // From an init script the document is still empty; a manual resume on a
       // loaded page records what is already there as mounted at the load.
@@ -1570,45 +1859,56 @@
         if (S.mounted.has(present[i])) continue;
         S.mounted.add(present[i]);
         var name = cleanValue(present[i].getAttribute('data-ui-mount'));
-        countMount(name, 1);
-        push({ t: elapsed(), kind: 'mount', name: name, op: 'mount' });
+        countMount(S, name, 1);
+        push(S, { t: elapsed(), kind: 'mount', name: name, op: 'mount' });
       }
       return { ok: true, id: S.id, resumed: Boolean(saved) };
     } catch (error) {
       return { ok: false, error: clip(error && error.message ? error.message : error, 200) };
-    }
+    } finally { transitioning = false; }
   }
 
   function mark(label) {
+    var recording = S;
     try {
       if (!S || !S.active) return { ok: false, error: 'not recording' };
-      var index = push({ t: elapsed(), kind: 'mark', label: clip(label === undefined ? '' : label, 200) }, true);
+      var index = push(recording, { t: elapsed(), kind: 'mark', label: clip(label === undefined ? '' : label, 200) }, true);
       return { ok: index >= 0, index: index };
     } catch (error) {
-      note(error);
+      note(error, recording);
       return { ok: false, error: 'mark failed' };
     }
   }
 
   function stop() {
+    if (transitioning) return { ok: false, error: 'recorder lifecycle transition in progress' };
+    transitioning = true;
     try {
       if (!S) return lastResult ? lastResult : { ok: false, error: 'not recording' };
-      if (S.active) halt('stopped');
-      var result = build();
+      var recording = S;
+      if (recording.active) halt(recording, 'stopped', true);
+      var result = build(recording);
       result.ok = true;
       lastResult = result;
       S = null;
+      // Commit the result before any page-owned getter or restoration runs.
+      try {
+        cleanup(recording);
+        // Preserve the existing internal-error guard, including cleanup faults.
+        result.stats.internalErrors = recording.stats.internalErrors;
+        if (recording.firstInternalError) result.stats.firstInternalError = recording.firstInternalError;
+      } catch (error) { note(error, recording); }
       return result;
     } catch (error) {
       S = null;
       return { ok: false, error: clip(error && error.message ? error.message : error, 200) };
-    }
+    } finally { transitioning = false; }
   }
 
   function snapshot() {
     try {
       if (!S) return lastResult ? lastResult : { ok: false, error: 'not recording' };
-      var result = build();
+      var result = build(S);
       result.ok = true;
       return result;
     } catch (error) {
