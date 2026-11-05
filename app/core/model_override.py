@@ -377,7 +377,7 @@ def _family_consent(model: str, text: str) -> Optional[bool]:
     qualified = (rf"\b(?:old|older|previous|prior|legacy|last|earlier|original|\d+\.\d+|\d{{4}})\s+{name}\b|"
                  rf"\b(?:claude\s+\d+(?:\.\d+)?|\d+(?:\.\d+)?\s+version\s+of)\s+{name}\b|"
                  rf"(?<=[\w-])-{name}\b|\b{name}(?:-[\w-]+|{number}|"
-                 rf"\s+(?:(?:model|version|build|release)\s+)?{number}|"
+                 rf"\s+(?:(?:(?:at|with)\s+)?(?:model|version|build|release)\s+)?{number}|"
                  rf"{gap}(?:v?\d+\.\d+|1m)\b|[\s,:/()\[\]{{}}—–-]+{number}(?=[\s)\]}}]*(?:$|[.,;:!?])))")
     mentioned = False
     for sentence in re.split(r"(?<=[.!?])\s+|\n", str(text or "")):
@@ -969,8 +969,11 @@ def _accepted_note(model: str, memory_id: str) -> str:
 
 
 async def accept(session_id: str, profile_id: Optional[str], *, model: str,
-                 baseline: Optional[str], action: str) -> Acceptance:
+                 baseline: Optional[str], action: str) -> Optional[Acceptance]:
     """How the user asked for ``model``: named, remembered or approved.
+
+    None for an unchanged baseline with complete, unqualified native history.
+    A same-family retry still needs agreement after a pin or an incomplete scan.
 
     ``action`` completes "Do you want me to ..." in the owner's prompt, e.g.
     "start the chat “Review” on GPT-6 Astra (Lane) instead of Opus".
@@ -992,6 +995,8 @@ async def accept(session_id: str, profile_id: Optional[str], *, model: str,
         return Acceptance(await _approve(session_id, profile_id, model=model, baseline=baseline,
             action=action, cache_key=cache_key, key=key, incomplete=True))
     qualified = evidence is not None and not named_by_user(model, [evidence.get("text", "")])
+    if model == baseline and not qualified:
+        return None
     if qualified:
         # A fresh pin supersedes every older source, including a previous Yes.
         # Approval for this request survives restart, not a later version request.

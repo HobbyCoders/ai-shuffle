@@ -926,10 +926,10 @@ async def _dispatch_worker_with_retries(
         if kind is None:
             return _capacity_worded(outcome, used["rate"])
 
-        # The attempt never started, so its dedicated checkout (if any) holds
-        # no work; the retry provisions its own. Reclaim refuses anything dirty.
-        from app.core.worker_checkout import reclaim_untouched_worker_checkout
-        await asyncio.to_thread(reclaim_untouched_worker_checkout, worker_id)
+        # The failed attempt may already have accepted a follow-up. Use the
+        # locked finisher's fresh busy check before reclaiming its checkout.
+        from app.core.worker_checkout import reclaim_finished_worker_checkout
+        await reclaim_finished_worker_checkout(worker_id)
 
         delay = _retry_backoff(kind, outcome.error, used[kind], backoff_cap)
         used[kind] += 1
@@ -1679,18 +1679,20 @@ async def _dispatch_task_tool(
             return {"ok": False, "error": f"{exc} Nothing was dispatched."}
         baseline = await asyncio.to_thread(
             _task_baseline_model, target, definition, leg, caller_row, str(caller_pid))
-        if choice.model != baseline:
+        if choice.model != baseline or choice.provider_id is None:
             target_label = _task_target_label(target, definition, ref)
-            instead = model_override.label(baseline) if baseline else "its default"
+            action = f"start {target_label} on {model_override.label(choice.model)}"
+            if choice.model != baseline:
+                action += f" instead of {model_override.label(baseline) if baseline else 'its default'}"
             try:
                 accepted = await model_override.accept(
                     caller_session_id, str(caller_pid), model=choice.model, baseline=baseline,
-                    action=(f"start {target_label} on {model_override.label(choice.model)} "
-                            f"instead of {instead}"))
+                    action=action)
             except PermissionError as exc:
                 return {"ok": False, "error": str(exc), "reason": "model_not_requested"}
-            model_override_record = {"source": accepted.source, "instead_of": baseline,
-                                     **accepted.record()}
+            if accepted is not None:
+                model_override_record = {"source": accepted.source, "instead_of": baseline,
+                                         **accepted.record()}
             effective_provider_id = choice.provider_id
         requested_model = choice.model_id
     if requested_model and not effective_provider_id:

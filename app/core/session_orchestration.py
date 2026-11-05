@@ -705,7 +705,7 @@ def _start_model_plan(sender_id, data, remote):
                                         runs_here=remote is None)
     except ValueError as exc:
         raise ValueError(f"{exc} Nothing was started.") from None
-    if choice.model == baseline:
+    if choice.model == baseline and choice.provider_id is not None:
         return None
     command_id = "orchestration:start:" + hashlib.sha256(
         (sender_id + ":" + str(data.get("request_id") or "")).encode()).hexdigest()
@@ -736,10 +736,13 @@ async def _confirm_start_model(sender_id, data, placement):
         plan["source"] = None
         return plan
     title = str(data.get("title") or "").strip()[:80] or "new chat"
-    action = (f"start the chat “{title}” on {model_override.label(plan['model'])} instead of "
-              f"{model_override.label(plan['baseline']) if plan['baseline'] else 'your model'}")
+    action = f"start the chat “{title}” on {model_override.label(plan['model'])}"
+    if plan["model"] != plan["baseline"]:
+        action += f" instead of {model_override.label(plan['baseline']) if plan['baseline'] else 'your model'}"
     accepted = await model_override.accept(
         sender_id, plan["profile_id"], model=plan["model"], baseline=plan["baseline"], action=action)
+    if accepted is None:
+        return False
     plan["source"] = accepted.source
     plan.update(accepted.record())
     return plan

@@ -561,8 +561,14 @@ async def ensure_pending_checkout(
 
     path = session_row.get("worktree_path")
     restored = False
-    if is_worker_branch(branch, session_row.get("id") or "") and path and not Path(path).is_dir():
-        restored, _note = await restore_worker_checkout_async(session_row["id"], follow_live_switch=False)
+    if is_worker_branch(branch, session_row.get("id") or "") and path:
+        from app.core.turn_scheduler import message_resume_lock
+
+        # An old finisher may already be deleting the initially existing cwd.
+        # Wait before checking it; a later finisher sees this queued/live turn.
+        async with message_resume_lock(session_row["id"]):
+            if not Path(path).is_dir():
+                restored, _note = await restore_worker_checkout_async(session_row["id"], follow_live_switch=False)
     # Even after restoration, claim/wait for a queued operation below. Another
     # chat bound to this branch must not pretend it restored the owner's cwd.
     try:
