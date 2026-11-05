@@ -45,7 +45,8 @@ def passive(method: str, path: str, headers=None) -> bool:
     if method == "GET":
         return (route in POLL_GETS or bool(re.fullmatch(r"/api/v1/projects/[^/]+/git/status", route))
                 or (route == "/" and headers.get("Accept") == "text/x-vite-ping"))
-    return method == "PUT" and route.startswith("/api/v1/preferences/")
+    return ((method == "PUT" and route.startswith("/api/v1/preferences/"))
+            or (method == "POST" and route == "/api/v1/model-providers/refresh-capabilities"))
 
 
 def journey_active(directory: Path) -> bool:

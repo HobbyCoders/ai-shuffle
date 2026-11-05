@@ -39,9 +39,10 @@ class ActivityObserver:
                 self.uncertain = True  # Stay awake until TTL, never silently ignore lost evidence.
             self.stopped.wait(0.5)  # At most two tiny writes/s, not one per request/frame.
 
-    def note(self, delta=0):
+    def note(self, delta=0, *, activity=True):
         with self.lock:
-            self.activity = time.monotonic()
+            if activity:
+                self.activity = time.monotonic()
             self.active += delta
 
     def failed(self):
@@ -51,7 +52,7 @@ class ActivityObserver:
         kind = scope["type"]
         if kind not in ("http", "websocket"):
             return await self.app(scope, receive, send)
-        counted = False
+        counted, quiet = False, False
         try:
             names = {b"upgrade": "Upgrade", b"sec-websocket-protocol": "Sec-WebSocket-Protocol",
                      b"accept": "Accept"}
@@ -61,8 +62,8 @@ class ActivityObserver:
             if kind == "websocket":
                 headers["Upgrade"] = "websocket"
             quiet = passive(scope.get("method", "GET"), scope["path"], headers)
-            if not quiet:
-                self.note(1)
+            if kind == "http" or not quiet:
+                self.note(1, activity=not quiet)
                 counted = True
         except Exception:
             self.failed()
@@ -91,6 +92,6 @@ class ActivityObserver:
         finally:
             if counted:
                 try:
-                    self.note(-1)
+                    self.note(-1, activity=not quiet)
                 except Exception:
                     self.failed()

@@ -53,6 +53,7 @@ def test_observed_allowlist_needs_no_browser_guessing():
         assert idle.passive("GET", path + "?query=not-stored")
     assert idle.passive("GET", "/api/v1/projects/seeded/git/status")
     assert idle.passive("PUT", "/api/v1/preferences/browser_panel")
+    assert idle.passive("POST", "/api/v1/model-providers/refresh-capabilities")
     for route in ("/api/v1/ws/chat", "/api/v1/ws/global", "/api/v1/ws/sessions/seeded"):
         assert idle.passive("GET", route, {"Upgrade": "websocket"})
     for protocol in ("vite-hmr", "vite-ping"):
@@ -232,6 +233,18 @@ def test_observer_http_streaming_identity_and_inflight_pin():
         await wrapped(original_scope, receive, send)
         assert wrapped.active == 0 and wrapped.activity > 0 and not wrapped.uncertain
         assert not hasattr(wrapped, "body")
+    asyncio.run(exercise())
+
+
+
+
+def test_passive_finite_http_pins_without_extending_idle_timer():
+    async def exercise():
+        async def app(scope, receive, send):
+            assert wrapped.active == 1 and wrapped.activity == 0
+        wrapped = bare_observer(app)
+        await wrapped({"type": "http", "method": "GET", "path": "/api/v1/owner/status"}, None, None)
+        assert wrapped.active == 0 and wrapped.activity == 0
     asyncio.run(exercise())
 
 

@@ -250,8 +250,7 @@ export async function runJourney(spec) {
 		const lease = join(status.scratch_dir, `journey-${process.pid}.lease`);
 		writeFileSync(lease, `${process.pid} ${fields[19]}`, { mode: 0o600 });
 		process.once('exit', () => { try { unlinkSync(lease); } catch {} });
-		const response = await fetch(new URL('/__devloop/wake', status.urls.preview_listener), { method: 'POST' });
-		if (response.status !== 204) throw new Error(`dev instance wake failed: ${response.status}`);
+		writeFileSync(join(status.scratch_dir, 'wake.request'), JSON.stringify({ pid: status.pid }), { mode: 0o600 });
 		const deadline = Date.now() + 180_000;
 		while (readDevloopStatus().state !== 'ready') {
 			if (Date.now() >= deadline) throw new Error('dev instance did not wake within 180s');

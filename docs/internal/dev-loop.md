@@ -19,7 +19,7 @@ runs such as `--seed long`. CI (`--ci`, including `scripts/devloop/ci.py`) and
 continuous presence and sync, and CI needs stable journey timing.
 
 Idle is not “no network traffic”: an explicit method/path allowlist covers
-observed auth, sidebar, git-status and preference refreshes plus chat/sync/HMR
+observed auth, sidebar, git-status, preference and model-capability refreshes plus chat/sync/HMR
 reconnects. Unknown traffic counts as work. While paused, those background
 requests receive 503 without waking; other requests trigger wake and receive
 a same-URL 307 when both backend and Vite are ready. Holders never forward
