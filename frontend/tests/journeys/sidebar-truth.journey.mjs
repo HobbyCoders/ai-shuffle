@@ -437,12 +437,12 @@ const FAILED_SETTLED = {
 		// going. The /mobile/ shell stays on the chat.
 		if (!inMobileShell(variant)) await waitChat(page, { surface: 'new' }, { timeout: 30_000 });
 		await waitLane(page, chat.id, 'settled');
-		// A settled row is the compact one: no status word to read, but the alert
-		// sign is in the danger colour and assistive tech hears the word.
+		// A settled row prints no status word, but the alert sign is in the danger
+		// colour and assistive tech hears the word.
 		const sign = page.locator(`${CARD(chat.id)} .lead .pip.warn.failed`);
 		await sign.waitFor({ timeout: 5000 });
-		const said = await page.locator(`${CARD(chat.id)} .title .sr-only`).first().textContent();
-		expect(/^Failed: /.test(said ?? ''), `a settled failed row announces it: ${JSON.stringify(said)}`);
+		const said = await page.locator(`${CARD(chat.id)} .details`).first().textContent();
+		expect(/^Failed( · |$)/.test(said ?? ''), `a settled failed row announces it: ${JSON.stringify(said)}`);
 		await expectDangerColour(sign, 'the settled row\'s sign');
 		await page.waitForTimeout(800);
 	},
