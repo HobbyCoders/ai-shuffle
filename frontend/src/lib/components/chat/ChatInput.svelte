@@ -2008,18 +2008,20 @@
 		align-self: stretch;
 	}
 	/* Wrapped: the text takes the whole first row; attach and the circles sit
-	   at the controls row's two ends, centred on it. */
+	   at the controls row's two ends, centred on it. Keep the text insets and
+	   40px controls-row height: changing arrangement alone must not grow the
+	   box (and move a centred composer or clamp a bottom-following reader). */
 	:global(html[data-platform='desktop']) .chat-island.wrapped .textarea-wrapper {
 		grid-column: 1 / -1;
-		padding: 14px 16px 4px;
+		padding: 12px 16px 4px;
 	}
 	:global(html[data-platform='desktop']) .chat-island.wrapped .composer-attach {
 		grid-row: 2;
-		margin: 4px 0 8px 10px;
+		margin: 4px 0 4px 10px;
 	}
 	:global(html[data-platform='desktop']) .chat-island.wrapped .send-cluster {
 		grid-row: 2;
-		margin: 4px 10px 8px 0;
+		margin: 4px 10px 4px 0;
 	}
 	:global(html[data-platform='desktop']) .chat-island.wrapped > :global(.controls-dock) {
 		grid-column: 2;
