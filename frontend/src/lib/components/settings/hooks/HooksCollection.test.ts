@@ -245,6 +245,39 @@ describe('hooks-model', () => {
 		expect(api.createAppHook).not.toHaveBeenCalled();
 	});
 
+	it('does not resurrect a removed form when an older Save completes', async () => {
+		const unsigned = hook({ hook_type: 'webhook', url: 'https://example.test', has_secret: false });
+		api.getAppHooks.mockResolvedValue([unsigned]);
+		const model = new HooksModel();
+		await model.load();
+		model.ensure('h1')!.name = 'Owner edit';
+		api.getAppHooks.mockResolvedValue([hook({ ...unsigned, name: 'Remote edit' })]);
+		await model.load();
+		expect(model.remote.h1).toBe('changed');
+		let finish!: (saved: Hook) => void;
+		api.updateHook.mockReturnValue(new Promise<Hook>((resolve) => { finish = resolve; }));
+		const saving = model.save('h1');
+		expect(model.saving).toBe('h1');
+		model.loadLatest('h1');
+		expect(model.dirty('h1')).toBe(false);
+		api.getAppHooks.mockResolvedValue([hook({ ...unsigned, name: 'New signed version', has_secret: true })]);
+		await model.load();
+		expect(model.form('h1')!.hasSecret).toBe(true);
+		expect(model.dirty('h1')).toBe(false);
+		api.getAppHooks.mockResolvedValue([]);
+		await model.load();
+		expect(model.form('h1')).toBeUndefined();
+		finish(hook({ ...unsigned, name: 'Owner edit' }));
+		expect(await saving).toBeNull();
+		// Exercise the actual store and detail's ensure path, not just a hidden form.
+		expect(hooks.current.hooks).toEqual([]);
+		expect(model.form('h1')).toBeUndefined();
+		expect(model.ensure('h1')).toBeUndefined();
+		expect(await model.save('h1')).toBeNull();
+		expect(api.updateHook).toHaveBeenCalledTimes(1);
+		expect(api.createAppHook).not.toHaveBeenCalled();
+	});
+
 	it('retains newer signing evidence when an older clean toggle response arrives', async () => {
 		const unsigned = hook({ hook_type: 'webhook', url: 'https://example.test', has_secret: false });
 		api.getAppHooks.mockResolvedValue([unsigned]);

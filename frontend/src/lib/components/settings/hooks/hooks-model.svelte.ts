@@ -319,6 +319,8 @@ export class HooksModel {
 				return created.id;
 			}
 			const saved = await hooks.updateHook(id, updatePayload(f));
+			// A newer refresh may have removed the form while this Save was pending.
+			if (!this.forms[id]) return null;
 			this.forms[id] = formFromHook(saved, this.forms[id]?.hasSecret || f.hasSecret);
 			this.baselines[id] = editable(this.forms[id]);
 			delete this.remote[id];
