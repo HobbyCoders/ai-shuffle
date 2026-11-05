@@ -17,7 +17,11 @@
 		done_when: string;
 		tasks: PlanTask[];
 	}
-	let { plan }: { plan: unknown } = $props();
+	let { plan, onBeforeToggle }: {
+		plan: unknown;
+		/** Release transcript following synchronously, before disclosure changes layout. */
+		onBeforeToggle?: (event: MouseEvent) => boolean | void;
+	} = $props();
 	let expanded = $state(false);
 	const instanceId = $props.id();
 	const detailsId = `${instanceId}-steps`;
@@ -56,6 +60,11 @@
 	const current = $derived(view?.tasks.find(t => t.status === 'in_progress') ??
 		view?.tasks.find(t => t.status === 'blocked') ?? view?.tasks.find(t => t.status === 'pending'));
 	const allCompleted = $derived(!!view?.tasks.length && counts.completed === view.tasks.length);
+
+	function toggle(event: MouseEvent) {
+		if (onBeforeToggle?.(event) === false) return;
+		expanded = !expanded;
+	}
 </script>
 
 {#if !view}
@@ -65,7 +74,7 @@
 		<button
 			type="button" class="plan-row" aria-expanded={expanded} aria-controls={detailsId}
 			aria-label={`${expanded ? 'Collapse' : 'Expand'} plan: ${view.goal}`}
-			onclick={() => expanded = !expanded}
+			onclick={toggle}
 		>
 			<span class="plan-bars" aria-hidden="true">
 				{#each view.tasks as task (task.id)}<i class={task.status}></i>{/each}
