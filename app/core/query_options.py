@@ -1791,6 +1791,10 @@ def build_options_from_profile(
             is_admin=not api_user_id,
             model=model_to_use,
             provider_id=provider_id,
+            # This server may outlive newer, equivalent MCP instances on reuse.
+            # Read its connect options: the adapter updates these only after an
+            # acknowledged hot-swap; a provider change still requires reconnect.
+            runtime_model_supplier=lambda: (options.model, options.aih_provider_id),
             # The resolved cwd, so the bridged Task tool can discover the same
             # file/plugin agent definitions a native leg gets from fluid — the
             # delegated (CLI) leg has no engine to publish them (ruling CE6).

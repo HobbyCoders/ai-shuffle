@@ -21,7 +21,7 @@ import sys
 import logging
 import uuid
 from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from app.core.monitor_spawn import MAX_WAIT_SECONDS, WAIT_SECONDS_PARAM
 from app.mcp.config_helpers import _json_default
@@ -1662,6 +1662,7 @@ def create_builtin_tools_server(
     provider_id: Optional[str] = None,
     cwd: Optional[str] = None,
     workflow_guidance: bool = False,
+    runtime_model_supplier: Optional[Callable[[], tuple[Optional[str], Optional[str]]]] = None,
 ) -> Optional[Any]:
     """
     Build the ``mcp__builtins__*`` MCP server for a session.
@@ -1686,6 +1687,8 @@ def create_builtin_tools_server(
             without it those agents are advertised but not dispatchable.
         workflow_guidance: The host prompt supplies delegation/checkout rules;
             omit those duplicates from Task. False keeps standalone callers safe.
+        runtime_model_supplier: Current applied host model/provider, including
+            successful hot-swaps when this server survives pooled-client reuse.
 
     Returns:
         In-process MCP server config, or ``None`` if the tool helpers are
@@ -1930,7 +1933,7 @@ def create_builtin_tools_server(
         async def invoke(args: dict) -> dict:
             ctx = ToolCtx(cwd=cwd or ".", session_id=session_id)
             ctx.extra["session_orchestration"] = orchestration_handler(lambda: session_id)
-            ctx.extra["session_runtime_model"] = lambda: (model, provider_id)
+            ctx.extra["session_runtime_model"] = runtime_model_supplier or (lambda: (model, provider_id))
             return _fluid_outcome_result(await handler(args, ctx))
         return tool(spec.name, spec.description, spec.input_schema)(invoke)
 
