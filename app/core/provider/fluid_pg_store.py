@@ -152,17 +152,23 @@ def _load_session_sync(session_id: str, *, include_nodes: bool = True) -> Option
         meta = SessionMeta(**dict(row))
         if not include_nodes:
             return {"meta": meta, "nodes": {}, "node_sizes": {}}
-        cur.execute(
-            "SELECT node_id, parent_id, ts, message FROM fluid_session_nodes "
-            "WHERE session_id = %s", (session_id,),
-        )
-        rows = cur.fetchall()
-    # Decode off the event loop, and release the connection first.
-    nodes = {r["node_id"]: SessionNode(
-        node_id=r["node_id"], parent_id=r["parent_id"], ts=r["ts"],
-        message=Message.from_dict(_as_dict(r["message"])),
-    ) for r in rows}
-    sizes = {key: len(json.dumps(node.message.to_dict())) for key, node in nodes.items()}
+        nodes, sizes = {}, {}
+        # A normal cursor buffers the entire raw transcript in libpq, even
+        # when Python iterates it. Keep only a small server-cursor batch beside
+        # the decoded tree. This whole read/decode already runs off-loop.
+        with conn.cursor(name="fluid_resume_nodes") as stream:
+            stream.itersize = 32
+            stream.execute(
+                "SELECT node_id, parent_id, ts, message FROM fluid_session_nodes "
+                "WHERE session_id = %s", (session_id,),
+            )
+            for r in stream:
+                node = SessionNode(
+                    node_id=r["node_id"], parent_id=r["parent_id"], ts=r["ts"],
+                    message=Message.from_dict(_as_dict(r["message"])),
+                )
+                nodes[node.node_id] = node
+                sizes[node.node_id] = len(json.dumps(node.message.to_dict()))
     return {"meta": meta, "nodes": nodes, "node_sizes": sizes}
 
 
