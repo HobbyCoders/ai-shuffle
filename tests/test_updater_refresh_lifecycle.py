@@ -1,5 +1,7 @@
 """Refresh keeps the supervisor boundary; subprocess checks are controlled, not a container update."""
+import asyncio
 import importlib.util
+import threading
 import itertools
 import json
 import os
@@ -65,6 +67,70 @@ def test_policy_change_during_verification_is_refused(healthy):
     with pytest.raises(runtime.RestartRejected):
         runtime.prepare_updater_refresh(healthy)
     assert healthy.lifecycle.call_args_list == [(('active-sessions',),)]
+
+
+async def test_refresh_never_stops_turn_admitted_during_signed_verification(healthy, mock_db, monkeypatch):
+    """Drive the real admission and authenticated lifecycle routes across the race."""
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+    from app.api import internal
+    from app.core import session_runtime, startup
+    from app.db import runs, turns
+    from app.serve import IngressApplication
+    from tests.core.test_session_runtime import _runtime_env
+
+    monkeypatch.setenv("SHUFFLE_DESKTOP_LIFECYCLE_TOKEN", "test-child-secret")
+    monkeypatch.setattr(internal, "_shutdown_task", None)
+    monkeypatch.setattr(startup, "is_shutting_down", False)
+    app = FastAPI()
+    app.include_router(internal.router)
+    loop = asyncio.get_running_loop()
+    verifying, began, finish = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    verified = threading.Event()
+    signed_target = module.handover_target
+
+    def verify(*args):
+        loop.call_soon_threadsafe(verifying.set)
+        assert verified.wait(5), "test did not admit work during verification"
+        return signed_target(*args)
+
+    async def pump(**kwargs):
+        began.set()
+        await finish.wait()
+        yield {"type": "done"}
+
+    monkeypatch.setattr(module, "handover_target", verify)
+    turn = turns.enqueue_turn("verification-race", "user", prompt="keep working")
+    async with AsyncClient(transport=ASGITransport(app=IngressApplication(app, 8000)),
+                           base_url="http://localhost:8000") as client:
+        async def request(action):
+            response = await client.request("GET" if action == "active-sessions" else "POST",
+                                            f"/api/v1/internal/desktop/{action}",
+                                            headers={"Authorization": "Bearer test-child-secret"})
+            response.raise_for_status()
+            return response.json()
+
+        healthy.lifecycle.side_effect = lambda action: asyncio.run_coroutine_threadsafe(request(action), loop).result(5)
+        with _runtime_env(pump=pump) as env:
+            env["registry"].active_session_ids.return_value = []
+            preflight = asyncio.create_task(asyncio.to_thread(runtime.prepare_updater_refresh, healthy))
+            await asyncio.wait_for(verifying.wait(), 5)
+            work = asyncio.create_task(session_runtime.execute(turn))
+            try:
+                await asyncio.wait_for(began.wait(), 5)
+                assert runs.get_active_run(turn["session_id"]) is not None
+                verified.set()
+                with pytest.raises(runtime.RestartRejected):
+                    await asyncio.wait_for(preflight, 5)
+                assert not work.done()
+                assert turns.get_turn(turn["id"])["state"] == "running"
+                assert not startup.is_shutting_down
+                assert "stop-sessions" not in [call.args[0] for call in healthy.lifecycle.call_args_list]
+            finally:
+                verified.set()
+                finish.set()
+                await asyncio.gather(preflight, work, return_exceptions=True)
+                startup.is_shutting_down = False
 
 
 def test_explicit_handover_chains_only_to_reverified_target(healthy, monkeypatch, tmp_path):
