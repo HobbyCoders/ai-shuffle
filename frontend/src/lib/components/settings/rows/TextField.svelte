@@ -69,7 +69,7 @@
 <input
 	class="st-txt"
 	class:st-mono={mono}
-	style:width="{width}px"
+	style:--st-text-width="{width}px"
 	{type}
 	{placeholder}
 	{autocomplete}
@@ -93,6 +93,7 @@
 
 <style>
 	.st-txt {
+		width: var(--st-text-width);
 		height: 32px;
 		border-radius: var(--st-radius-md);
 		border: 1px solid var(--st-input);

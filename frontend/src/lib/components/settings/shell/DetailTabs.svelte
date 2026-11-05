@@ -231,7 +231,7 @@
 		scrollbar-width: none;
 		touch-action: pan-x pan-y;
 		/* The baseline stays put while the tabs scroll over it. */
-		background: linear-gradient(var(--st-border), var(--st-border)) left bottom / 100% 1px no-repeat;
+		border-bottom: 1px solid var(--st-border);
 	}
 	.st-tabs::-webkit-scrollbar {
 		display: none;
@@ -266,6 +266,11 @@
 	button:focus-visible {
 		outline-offset: -2px;
 	}
+	@media (max-width: 600px) {
+		.st-tabs-wrap::before, .st-tabs-wrap::after { width: 16px; }
+		button { min-height: 44px; }
+	}
+	@media (prefers-reduced-motion: reduce) { .st-tabs-wrap::before, .st-tabs-wrap::after { transition: none; } }
 	.n {
 		color: var(--st-mfg);
 		margin-left: 4px;

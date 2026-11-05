@@ -46,6 +46,7 @@
 		min-width: 0;
 		color: var(--st-fg);
 	}
+	.st-msearch input, .st-msearch input:focus, .st-msearch input:focus-visible { border: 0; outline: none; box-shadow: none; }
 	input::-webkit-search-cancel-button {
 		-webkit-appearance: none;
 	}
@@ -54,7 +55,8 @@
 	}
 	.st-msearch:focus-within {
 		border-color: var(--st-field-focus);
-		box-shadow: 0 0 0 3px var(--st-primary-soft);
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
 	}
 	.clear {
 		display: grid;

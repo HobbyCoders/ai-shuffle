@@ -25,6 +25,12 @@ describe('DetailPane', () => {
 		const centered = render(DetailPane, { name: 'Project detail', width: 'reading' });
 		expect(centered.container.querySelector('.st-dwrap.reading')).toBeTruthy();
 	});
+	it('uses the shared frame and an explicit Docs width', () => {
+		const { container } = render(DetailPane, { name: 'Remote access', width: 'docs', backLabel: 'Docs' });
+		expect(container.querySelector('.st-dwrap.docs')).toBeTruthy();
+		expect(screen.getByRole('button', { name: 'Back to Docs' })).toBeTruthy();
+		expect(container.querySelector('.st-dh')?.classList.contains('has-identity')).toBe(false);
+	});
 	it('renders header, at most four facts with data, tabs and the danger zone', async () => {
 		const onConfirm = vi.fn();
 		render(DetailPane, {

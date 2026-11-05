@@ -2,8 +2,7 @@
  import { onMount } from 'svelte';
  import { layout } from '$lib/stores/layout.svelte';
  import { platform } from '$lib/stores/platform.svelte';
- import { ViewShell, ViewPanel, ViewMain, ListItem, ListGroupLabel, EmptyDetail } from '$lib/components/layout/view';
- import { ChevronLeft } from 'lucide-svelte';
+ import { ViewShell, ViewPanel, DetailPane, ListItem, ListGroupLabel, EmptyDetail } from '$lib/components/layout/view';
  import { categories, docs, getDocsByCategory, getDocBySlug } from '$lib/docs/index';
  import { DocsSearchEngine } from '$lib/docs/search';
  import type { DocSection } from '$lib/docs/types';
@@ -34,7 +33,7 @@
   headings = [];
   tocOpen = false;
   detailOpen = true;
-  const scroll = articleEl?.closest('.view-main');
+  const scroll = articleEl?.closest('.view-main-slot');
   if (scroll) scroll.scrollTop = 0;
  }
  function handleSearchResult(fullSlug: string) {
@@ -67,32 +66,28 @@
   </ViewPanel>
  {/snippet}
  {#snippet main(back)}
-  <ViewMain width="data">
+  <DetailPane width="docs" name={currentDoc?.title || "Docs"} backLabel="Docs" onBack={back}>
    <div class="docs-layout">
     <article class="doc-content" bind:this={articleEl}>
-     <div class="doc-back"><button type="button" class="st-back" aria-label="Back to Docs" onclick={back}><ChevronLeft size={16} />Docs</button></div>
      {#if currentDoc}
       {#if headings.length}
        <div class="doc-inline-toc">
         <button type="button" class="st-btn" aria-expanded={tocOpen} aria-controls={tocId} onclick={() => tocOpen = !tocOpen}>On this page</button>
-        {#if tocOpen}<div id={tocId}><DocsTableOfContents {headings} showTitle={false} onSelect={() => tocOpen = false} scrollContainer={articleEl?.closest('.view-main') as HTMLElement | null} /></div>{/if}
+        {#if tocOpen}<div id={tocId}><DocsTableOfContents {headings} showTitle={false} onSelect={() => tocOpen = false} scrollContainer={articleEl?.closest('.view-main-slot') as HTMLElement | null} /></div>{/if}
        </div>
       {/if}
-      <DocsContent content={currentDoc.content} onHeadingsExtracted={h => headings = h} />
+      <DocsContent framed content={currentDoc.content} onHeadingsExtracted={h => headings = h} />
      {:else}<EmptyDetail title="Choose a document" message="Browse the guides or search the docs to get started." />{/if}
     </article>
-    <aside class="doc-toc"><DocsTableOfContents {headings} scrollContainer={articleEl?.closest('.view-main') as HTMLElement | null} /></aside>
+    <aside class="doc-toc"><DocsTableOfContents {headings} scrollContainer={articleEl?.closest('.view-main-slot') as HTMLElement | null} /></aside>
    </div>
-  </ViewMain>
+  </DetailPane>
  {/snippet}
 </ViewShell>
 <style>
- .docs-layout { display: grid; grid-template-columns: minmax(0,720px) 184px; justify-content: center; gap: 40px; align-items: start; }
+ .docs-layout { display: grid; grid-template-columns: minmax(0,var(--st-prose-width)) var(--st-toc-width); justify-content: start; gap: var(--st-toc-gap); align-items: start; }
  .doc-content { min-width: 0; }
  .doc-toc { position: sticky; top: 0; }
- .doc-back { display: none; margin-bottom: 24px; }
  .doc-inline-toc { display: none; margin-bottom: 24px; }
- @container settings (max-width: 1000px) { .docs-layout { grid-template-columns: minmax(0,720px); } .doc-toc { display: none; } .doc-inline-toc { display: block; } }
- @media (max-width:600px) { .doc-back { display: block; } }
- :global(.view-shell[data-stacked] .doc-back) { display: block; }
+ @container settings (max-width: 1000px) { .docs-layout { grid-template-columns: minmax(0,var(--st-prose-width)); } .doc-toc { display: none; } .doc-inline-toc { display: block; } }
 </style>

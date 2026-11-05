@@ -10,7 +10,7 @@
 	 *   </PreferencePage>
 	 */
 	import type { Snippet } from 'svelte';
-	import { ChevronLeft } from 'lucide-svelte';
+	import BackRow from './BackRow.svelte';
 	import { settingsNav } from '$lib/settings/navigation.svelte';
 	import { categoryById } from '$lib/settings/categories';
 	import type { CategoryId } from '$lib/settings/types';
@@ -29,10 +29,8 @@
 
 <div class="st-pscroll st-scroll">
 	<div class="st-page">
+		<BackRow label="Settings" onclick={() => settingsNav.back()} />
 		<div class="st-page-h">
-			<button type="button" class="st-back" aria-label="Back to Settings" onclick={() => settingsNav.back()}>
-				<ChevronLeft />
-			</button>
 			<h1 tabindex="-1" data-settings-heading="page">{label}</h1>
 			<SavedTick />
 		</div>
@@ -47,9 +45,10 @@
 		min-height: 0;
 	}
 	.st-page {
-		max-width: 856px;
+		position: relative;
+		max-width: calc(var(--st-reading-width) + 2 * var(--st-gutter));
 		margin: 0 auto;
-		padding: var(--st-page-top) 48px 120px;
+		padding: var(--st-page-top) var(--st-gutter) 120px;
 	}
 	.st-page-h {
 		display: flex;
@@ -60,6 +59,7 @@
 	}
 	h1 {
 		font-size: 24px;
+		line-height: 1.25;
 		font-weight: 600;
 		letter-spacing: -0.012em;
 		margin: 0;

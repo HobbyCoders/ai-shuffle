@@ -34,6 +34,30 @@ describe('ViewShell', () => {
 		await fireEvent.click(control);
 		expect(control.getAttribute('aria-checked')).toBe('true');
 	});
+	it('retires a stacked detail step as soon as its retained destination becomes inactive', async () => {
+		platform.set('mobile');
+		mocks.push.mockImplementation((_url, state) => { page.state = state; });
+		const back = vi.spyOn(history, 'back').mockImplementation(() => {});
+		const view = render(ViewHarness);
+		await tick();
+		await fireEvent.click(screen.getByRole('button', { name: 'Open detail' }));
+		await view.rerender({ active: false });
+		expect(back).toHaveBeenCalledOnce();
+		page.state = {};
+		await tick();
+		await view.rerender({ active: true });
+		expect(mocks.push).toHaveBeenCalledTimes(2);
+	});
+	it('offers content-first phone destinations without an invisible panel or history step', async () => {
+		platform.set('mobile');
+		const view = render(ViewHarness, { contentFirst: true });
+		await tick();
+		expect(view.container.querySelector('[data-content-first][data-pane="detail"]')).toBeTruthy();
+		expect(view.container.querySelector('.inline-panel[hidden]')).toBeTruthy();
+		expect((view.container.querySelector('.inline-panel') as HTMLElement).inert).toBe(true);
+		expect(view.container.querySelector('.view-main-slot[hidden]')).toBeNull();
+		expect(mocks.push).not.toHaveBeenCalled();
+	});
 	it('releases its claim off screen and reclaims only when active', async () => {
 		const view = render(ViewHarness);
 		await tick();
@@ -104,7 +128,7 @@ describe('ViewShell', () => {
 		expect(mocks.push).toHaveBeenCalledTimes(2);
 		expect(view.container.querySelector('[data-pane="detail"]')).toBeTruthy();
 	});
-	it('reuses its current entry after another retained page temporarily owned history', async () => {
+	it('retires its old entry and adopts its current entry without pushing a duplicate', async () => {
 		platform.set('mobile');
 		mocks.push.mockImplementation((_url, state) => { page.state = state; });
 		const back = vi.spyOn(history, 'back').mockImplementation(() => {});
@@ -113,6 +137,7 @@ describe('ViewShell', () => {
 		await fireEvent.click(screen.getByRole('button', { name: 'Open detail' }));
 		const ownEntry = page.state;
 		await view.rerender({ active: false });
+		expect(back).toHaveBeenCalledOnce(); // Retiring the invisible step is now intentional.
 		page.state = { viewPanelDetail: 'another-page' } as App.PageState;
 		await tick();
 		page.state = ownEntry;
@@ -120,7 +145,7 @@ describe('ViewShell', () => {
 		await view.rerender({ active: true });
 		expect(mocks.push).toHaveBeenCalledOnce();
 		await fireEvent.click(screen.getByRole('button', { name: 'Back to panel' }));
-		expect(back).toHaveBeenCalledOnce();
+		expect(back).toHaveBeenCalledTimes(2);
 		page.state = {};
 		await tick();
 		expect(view.container.querySelector('[data-pane="panel"]')).toBeTruthy();

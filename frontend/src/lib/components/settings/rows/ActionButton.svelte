@@ -3,21 +3,23 @@
 	import type { HTMLButtonAttributes } from 'svelte/elements';
 
 	/** The Settings action treatment for dialogs also rendered outside SettingsShell. */
-	let { variant = 'default', icon = false, children, ...props }: HTMLButtonAttributes & {
+	let { variant = 'default', icon = false, compact = false, children, ...props }: HTMLButtonAttributes & {
 		variant?: 'default' | 'primary' | 'ghost' | 'danger';
 		icon?: boolean;
+		/** Keep a 32px visual button with a 44px invisible phone hit area. */
+		compact?: boolean;
 		children?: Snippet;
 	} = $props();
 </script>
 
 <button type="button" {...props} class="st-action" class:primary={variant === 'primary'}
-	class:ghost={variant === 'ghost'} class:danger={variant === 'danger'} class:icon>
+	class:ghost={variant === 'ghost'} class:danger={variant === 'danger'} class:icon class:compact>
 	{@render children?.()}
 </button>
 
 <style>
 	.st-action {
-		display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+		position: relative; display: inline-flex; align-items: center; justify-content: center; gap: 6px;
 		height: 32px; padding: 0 12px; flex-shrink: 0;
 		border-radius: var(--st-radius-md, var(--radius));
 		border: 1px solid var(--st-border-strong, var(--border));
@@ -36,5 +38,6 @@
 	.st-action:active:not(:disabled) { transform: translateY(1px); }
 	.st-action:disabled { opacity: .45; cursor: not-allowed; }
 	@media (max-width: 600px), (pointer: coarse) { .st-action { min-height: 44px; } .st-action.icon { width: 44px; } }
+	@media (max-width: 600px), (pointer: coarse) { .st-action.compact { height: 32px; min-height: 32px; margin-block: 6px; } .st-action.compact::after { content: ""; position: absolute; inset: -6px 0; } }
 	@media (prefers-reduced-motion: reduce) { .st-action { transition: none; } }
 </style>

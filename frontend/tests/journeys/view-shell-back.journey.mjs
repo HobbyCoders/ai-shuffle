@@ -7,6 +7,45 @@ await runJourney({
 	name: 'view-shell-back',
 	allow: DEV_INSTANCE_NOISE,
 	cases: [{
+		name: 'project-drafts-do-not-cross-identity',
+		viewports: ['desktop'],
+		async setup({ page, status }) {
+			await gotoApp(page, status);
+			await page.getByRole('navigation', { name: 'Workspace', exact: true }).getByRole('button', { name: 'Projects', exact: true }).click();
+			await page.getByRole('button', { name: 'Open Dev sandbox', exact: true }).click();
+			await page.getByPlaceholder('Project name').waitFor();
+		},
+		async act({ page, mark }) {
+			await mark('dirty project A without saving');
+			await page.getByPlaceholder('Project name').fill('Unsaved project A');
+			await page.getByPlaceholder('Project path').fill('/unsaved-project-a');
+			await mark('switch to project B');
+			await page.getByRole('button', { name: 'Open Dev other', exact: true }).click();
+			expect(await page.getByPlaceholder('Project name').inputValue() === 'Dev other', 'B never inherits A’s unsaved name');
+			expect(!(await page.getByPlaceholder('Project path').inputValue()).includes('unsaved-project-a'), 'B never inherits A’s unsaved path');
+		}
+	}, {
+		name: 'back-across-retained-destinations',
+		viewports: ['phone'],
+		async setup({ page, status }) {
+			await gotoApp(page, status);
+			await page.getByRole('button', { name: /^Chats(?: \(|$)/ }).first().click();
+			await page.getByRole('navigation', { name: 'Workspace', exact: true }).getByRole('button', { name: 'Notes', exact: true }).click();
+			await page.getByRole('button', { name: 'New note', exact: true }).first().click();
+			await page.locator('[data-view-shell="Notes"][data-pane="detail"]').waitFor();
+		},
+		async act({ page, mark }) {
+			await mark('leave an open note for Files');
+			await page.getByRole('button', { name: /^Chats(?: \(|$)/ }).first().click();
+			await page.getByRole('navigation', { name: 'Workspace', exact: true }).getByRole('button', { name: 'Files', exact: true }).click();
+			await page.getByRole('button', { name: 'Workspace', exact: true }).click();
+			await page.locator('[data-view-shell="Files"][data-pane="detail"]').waitFor();
+			await mark('Back closes Files detail');
+			await page.getByRole('button', { name: 'Back to Files', exact: true }).click();
+			await page.locator('[data-view-shell="Files"][data-pane="panel"]').waitFor();
+			expect(!(await page.evaluate(() => history.state?.['sveltekit:states']?.viewPanelDetail)), 'no hidden Notes detail marker remains after Files Back');
+		}
+	}, {
 		name: 'selected-desktop-detail-resized-to-phone',
 		viewports: ['desktop'],
 		async setup({ page, status }) {
@@ -47,6 +86,15 @@ await runJourney({
 			await page.getByPlaceholder('Search agents').waitFor();
 		},
 		async act({ page, mark }) {
+			await mark('native create action is a reachable 44px top-bar control');
+			const create = page.getByRole('button', { name: 'New agent', exact: true });
+			const rect = await create.boundingBox();
+			expect(rect && rect.width >= 44 && rect.height >= 44 && rect.y < 56 && rect.x >= 0 && rect.x + rect.width <= 390, 'create fits in the native bar, not outside size containment');
+			await create.click();
+			const dialog = page.getByRole('dialog', { name: 'New agent', exact: true });
+			await dialog.waitFor();
+			await dialog.getByRole('button', { name: 'Close', exact: true }).click();
+			await page.getByPlaceholder('Search agents').waitFor();
 			for (let cycle = 1; cycle <= 2; cycle++) {
 				await mark(`open a native detail then return with browser Back (cycle ${cycle})`);
 				await page.locator('[data-view-shell="Agents"] [data-settings-item]').first().click();

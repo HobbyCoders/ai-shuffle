@@ -8,6 +8,7 @@ export { default as PanelIconButton } from './PanelIconButton.svelte';
 export { default as PanelField } from './PanelField.svelte';
 export { default as PanelRowActions } from './PanelRowActions.svelte';
 export { default as DetailPane } from '../../settings/shell/DetailPane.svelte';
+export { default as BackRow } from '../../settings/shell/BackRow.svelte';
 export { default as DetailTabs } from '../../settings/shell/DetailTabs.svelte';
 export { default as EmptyDetail } from '../../settings/shell/EmptyDetail.svelte';
 export { default as ListItem } from '../../settings/rows/ListItem.svelte';

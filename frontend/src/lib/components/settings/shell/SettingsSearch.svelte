@@ -7,6 +7,7 @@
 	 */
 	import { tick } from 'svelte';
 	import { Search } from 'lucide-svelte';
+	import EmptyDetail from './EmptyDetail.svelte';
 	import { query as searchQuery } from '$lib/settings/search';
 	import { settingsNav } from '$lib/settings/navigation.svelte';
 	import type { SearchItem } from '$lib/settings/types';
@@ -120,7 +121,7 @@
 				<span>{hit.where}</span>
 			</div>
 		{:else}
-			<div class="st-res-empty" role="status">No setting matches “{query.trim()}”</div>
+			<div class="st-res-empty" role="status"><EmptyDetail message={`No setting matches “${query.trim()}”`} actionLabel="Clear" onAction={() => { query = ''; input?.focus(); }} /></div>
 		{/each}
 	{/if}
 </div>
@@ -129,6 +130,9 @@
 	.st-search {
 		position: relative;
 		margin-bottom: 6px;
+		border: 1px solid var(--st-input);
+		border-radius: var(--st-radius-md);
+		background: var(--st-field);
 	}
 	.st-search-icon {
 		position: absolute;
@@ -146,8 +150,8 @@
 		width: 100%;
 		height: 32px;
 		border-radius: var(--st-radius-md);
-		border: 1px solid var(--st-input);
-		background: var(--st-field);
+		border: 0;
+		background: transparent;
 		color: var(--st-fg);
 		padding: 0 52px 0 34px;
 		font-size: 13px;
@@ -158,11 +162,8 @@
 	input::placeholder {
 		color: var(--st-subtle);
 	}
-	input:focus {
-		outline: none;
-		border-color: var(--st-field-focus);
-		box-shadow: 0 0 0 3px var(--st-primary-soft);
-	}
+	.st-search:focus-within { outline: 2px solid var(--ring); outline-offset: 2px; }
+	.st-search input, .st-search input:focus, .st-search input:focus-visible { border: 0; outline: none; box-shadow: none; }
 	kbd {
 		position: absolute;
 		right: 8px;
@@ -213,6 +214,6 @@
 	.st-res-empty {
 		font-size: 13px;
 		color: var(--st-mfg);
-		padding: 8px 10px;
+		padding: 0;
 	}
 </style>

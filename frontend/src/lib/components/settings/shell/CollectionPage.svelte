@@ -12,7 +12,8 @@
 	 * sets it). In stacked mode the list and the detail are separate steps.
 	 */
 	import { tick, untrack, type Snippet } from 'svelte';
-	import { ChevronLeft, ListFilter, Plus, Search } from 'lucide-svelte';
+	import { ListFilter, Plus, Search } from 'lucide-svelte';
+	import BackRow from './BackRow.svelte';
 	import { settingsNav } from '$lib/settings/navigation.svelte';
 	import { getSettingsAccess } from '$lib/settings/access.svelte';
 	import { categoryById } from '$lib/settings/categories';
@@ -132,12 +133,8 @@
 	<ListDivider bind:width {containerWidth} />
 	<div class="st-lcol">
 		<div class="st-lhead">
+			{#if onBack !== null}<BackRow label="Settings" onclick={() => (onBack ? onBack() : settingsNav.back())} />{/if}
 			<div class="st-lh-top">
-				{#if onBack !== null}
-					<button type="button" class="st-back" aria-label="Back to Settings" onclick={() => (onBack ? onBack() : settingsNav.back())}>
-						<ChevronLeft />
-					</button>
-				{/if}
 				<h1 tabindex="-1" data-settings-heading="page">{label}</h1>
 				{#if count !== undefined && count !== ''}<span class="n">{count}</span>{/if}
 				<span class="sp"></span>
@@ -191,6 +188,7 @@
 		min-width: 0;
 	}
 	.st-lhead {
+		position: relative;
 		padding: var(--st-page-top) 8px 12px;
 		display: grid;
 		gap: 12px;
@@ -286,10 +284,8 @@
 	.st-filter input::placeholder {
 		color: var(--st-subtle);
 	}
-	.st-filter:focus-within {
-		border-color: var(--st-field-focus);
-		box-shadow: 0 0 0 3px var(--st-primary-soft);
-	}
+	.st-filter:focus-within { outline: 2px solid var(--ring); outline-offset: 2px; }
+	.st-filter input, .st-filter input:focus, .st-filter input:focus-visible { border: 0; outline: none; box-shadow: none; }
 	.st-lscroll {
 		flex: 1;
 		overflow-y: auto;

@@ -15,6 +15,9 @@ describe('Docs shared navigation', () => {
   await fireEvent.keyDown(search,{key:'Enter'});
   await waitFor(() => expect(view.container.querySelector('.docs-content h1')?.textContent).toContain('Remote'));
   expect((search as HTMLInputElement).value).toBe('');
+  expect(view.container.querySelector('.st-dwrap.docs')).toBeTruthy();
+  expect(view.container.querySelector('.docs-content.framed')).toBeTruthy();
+  expect(view.getByRole('button', { name: 'Back to Docs' })).toBeTruthy();
   await fireEvent.input(search,{target:{value:'remote'}});
   await fireEvent.click(view.getByRole('button',{name:'Clear search'}));
   expect((search as HTMLInputElement).value).toBe('');
@@ -26,6 +29,11 @@ describe('Docs shared navigation', () => {
   const search=view.getByRole('searchbox',{name:'Search docs'});
   await fireEvent.input(search,{target:{value:'qzxqzxmissingword'}});
   expect(view.getByRole('status').textContent).toContain('No docs match');
+  expect(view.container.querySelector('.st-empty-detail')).toBeTruthy();
+  await fireEvent.click(view.getByRole('button', { name: /^Clear$/ }));
+  expect(document.activeElement).toBe(search);
+  expect(view.queryByRole('status')).toBeNull();
+  await fireEvent.input(search,{target:{value:'qzxqzxmissingword'}});
   await fireEvent.keyDown(search,{key:'Escape'});
   expect(view.queryByRole('status')).toBeNull();
  });

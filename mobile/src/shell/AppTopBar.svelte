@@ -30,7 +30,7 @@
 	import { pushState } from '$app/navigation';
 	import { page } from '$app/state';
 	import { ChevronLeft, Menu, Mic, X } from 'lucide-svelte';
-	import { categoryById } from '$lib/settings/categories';
+	import { phonePanelActions } from '$lib/components/layout/view/ViewPanel.svelte';
 	import { settingsNav } from '$lib/settings/navigation.svelte';
 	import { hotkeyPreferences } from '$lib/stores/hotkeyPreferences.svelte';
 	import { globalSttState, triggerToggle } from '$lib/services/globalStt';
@@ -115,7 +115,7 @@
 	);
 	const settingsPage = $derived(!!currentType && TITLES[currentType] === 'Settings');
 	const mobileTitle = $derived.by(() => {
-		if (settingsSubPage) return categoryById(settingsNav.category).label;
+		if (settingsSubPage) return 'Settings';
 		if (currentType === 'session') return chatTitle;
 		if (currentType === 'board') return 'Chats';
 		if (buildActive) return 'Agents';
@@ -354,6 +354,7 @@
 	</div>
 
 	<div class="tb-actions">
+		{#if phonePanelActions.label === mobileTitle}{@render phonePanelActions.content?.()}{/if}
 		{@render actions?.()}
 		{#if $hotkeyPreferences.globalSttEnabled && !hideGlobalStt}
 			<button class="tb-hamburger" class:recording={$globalSttState.isRecording}
