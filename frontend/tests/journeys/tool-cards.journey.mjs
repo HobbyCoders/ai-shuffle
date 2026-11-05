@@ -94,6 +94,8 @@ const workerFollowup = {
 	async setup(ctx) {
 		await openNewChat(ctx, { project: PROJECT });
 		await pickAccess(ctx.page, 'Bypass');
+		const agents = await api(ctx.page, 'GET', '/agents');
+		expect(agents.some((agent) => agent.id === 'dev-claude-code'), 'the seeded fake CLI helper is available');
 	},
 	async act({ page, mark, variant, log }) {
 		const fetchRefusals = [];
@@ -118,7 +120,7 @@ const workerFollowup = {
 			const child = await response.json();
 			return child.messages.filter((m) => m.tool_name === 'Bash' && m.toolStatus === 'completed').length >= 2;
 		}, worker.worker_session_id, { timeout: 30_000, polling: 500 });
-		log('worker executed Bash on its first turn and its resumed turn');
+		log('real Task checkout and continuation used the seeded fake CLI helper; both turns emitted scripted Bash results (not real shell execution)');
 		for (const refusal of await Promise.all(fetchRefusals))
 			expect(refusal.detail === 'A session using this worktree or branch is active. Stop it or wait before changing Git state.', 'only the active Git target safety refusal is expected');
 	}
@@ -176,6 +178,15 @@ const nativePinRetry = {
 	}
 };
 
+async function waitNativeCheck(page, id, calls, answers) {
+	await page.waitForFunction(async ({ id, calls, answers }) => {
+		const response = await fetch(`/api/v1/sessions/${id}`);
+		const session = await response.json();
+		return session.messages.filter((m) => m.tool_name === 'StartSession' && m.toolResult).length === calls
+			&& session.messages.filter((m) => m.type === 'text' && m.content?.includes('Newer native request checks complete.')).length === answers;
+	}, { id, calls, answers }, { timeout: 30_000 });
+}
+
 const nativePrecedence = {
 	name: 'native-precedence',
 	viewports: ['desktop'],
@@ -187,10 +198,12 @@ const nativePrecedence = {
 		const token = `native-precedence-${uniq()}`;
 		await typeAndSend(page, `${token}\nUse opus.\n${fakeAiTag(variant, 'tool-native-model-override')}`);
 		await waitTurnSettled(page, { text: 'Native model checks complete.', messagesAtLeast: 2 });
+		const id = await chatIdByToken(page, token);
 		await mark('a newer version request supersedes the saved plain-family naming');
 		await typeAndSend(page, `Can you use Opus version 4?\n${fakeAiTag(variant, 'tool-native-model-precedence')}`);
 		await page.getByText('Reply yes or no in the message box.', { exact: false }).waitFor({ timeout: 20_000 });
 		await typeAndSend(page, 'no');
+		await waitNativeCheck(page, id, 6, 1);
 		await waitTurnSettled(page, { text: 'Newer native request checks complete.', messagesAtLeast: 4 });
 		const parent = await api(page, 'GET', `/sessions/${await chatIdByToken(page, token)}`);
 		const results = parent.messages.filter((m) => m.tool_name === 'StartSession' && m.toolResult);
@@ -203,6 +216,7 @@ const nativePrecedence = {
 ${fakeAiTag(variant, 'tool-native-model-precedence')}`);
 		await page.getByText('Reply yes or no in the message box.', { exact: false }).waitFor({ timeout: 20_000 });
 		await typeAndSend(page, 'no');
+		await waitNativeCheck(page, id, 8, 2);
 		await waitTurnSettled(page, { text: 'Newer native request checks complete.', messagesAtLeast: 6 });
 		const narrative = await api(page, 'GET', `/sessions/${await chatIdByToken(page, token)}`);
 		const narrativeResults = narrative.messages.filter((m) => m.tool_name === 'StartSession' && m.toolResult);
@@ -210,10 +224,11 @@ ${fakeAiTag(variant, 'tool-native-model-precedence')}`);
 		await mark('a short family correction restores plain consent');
 		await typeAndSend(page, `go with opus
 ${fakeAiTag(variant, 'tool-native-model-precedence')}`);
+		await waitNativeCheck(page, id, 10, 3);
 		await waitTurnSettled(page, { text: 'Newer native request checks complete.', messagesAtLeast: 8 });
 		const corrected = await api(page, 'GET', `/sessions/${await chatIdByToken(page, token)}`);
 		const correctedResults = corrected.messages.filter((m) => m.tool_name === 'StartSession' && m.toolResult);
-		expect(correctedResults.length === 10 && correctedResults.at(-1).toolStatus !== 'error', 'short correction started without another prompt');
+		expect(correctedResults.length === 10 && correctedResults.at(-1).toolStatus !== 'error', `short correction started without another prompt: ${JSON.stringify(correctedResults.at(-1))}`);
 		log('newer version request overrides older naming; narrative cannot restore it, a short instruction can');
 	}
 };

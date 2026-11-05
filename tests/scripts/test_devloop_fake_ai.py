@@ -326,6 +326,17 @@ def test_shipped_scenarios_all_load() -> None:
         "error-500", "rate-limit-429", "cut"}
 
 
+def test_worker_followup_uses_an_existing_seeded_cli_helper() -> None:
+    from scripts.devloop.seed import CLAUDE_AGENT_ID
+
+    scenario = json.loads((SCENARIOS_DIR / "tool-worker-followup.json").read_text())
+    task = scenario["steps"][0]["tool_calls"][0]
+    assert task["name"] == "Task"
+    assert task["input"]["agent"] == CLAUDE_AGENT_ID
+    assert task["input"]["mode"] == "sync"
+    assert "scripted" in scenario["description"]
+
+
 @pytest.mark.parametrize("data,message", [
     ({"steps": []}, "non-empty"),
     ({"steps": [{"text": "x", "error": {"status": 500}}]}, "needs text"),
