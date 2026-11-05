@@ -61,6 +61,7 @@ import hashlib
 import logging
 import re
 import time
+from contextlib import nullcontext
 from weakref import WeakValueDictionary
 from typing import Any, Dict, List, Optional, Set
 from uuid import uuid4
@@ -221,7 +222,7 @@ def _continuation_verdict(session_id: str, row: Dict[str, Any]) -> str:
     return "emergency"
 
 
-def _latest_context_turn(session_id: str) -> Optional[Dict[str, Any]]:
+def _latest_context_turn(session_id: str, *, _conn=None) -> Optional[Dict[str, Any]]:
     """The turn whose context an unpark wake inherits, in preference order:
 
     1. the most recent ``parked`` turn — the one whose background work just
@@ -236,7 +237,7 @@ def _latest_context_turn(session_id: str) -> Optional[Dict[str, Any]]:
 
     ``None`` when the session has no usable turns at all.
     """
-    with get_db() as conn:
+    with (nullcontext(_conn) if _conn is not None else get_db()) as conn:
         cursor = conn.cursor()
         row = None
         for state_clause in (

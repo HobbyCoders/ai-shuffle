@@ -363,6 +363,9 @@ jobs:
             tests/db/test_fluid_session_ownership_postgres.py \
             -o addopts="" -p no:cacheprovider --timeout=120 -v
 
+          python -m pytest --durations=50 --junitxml=reports/security-13-3.xml tests/core/test_start_model_replay_scope.py \
+            -o addopts="" -p no:cacheprovider --timeout=120 -v
+
       # Full controls once per database; repeat only both primary ratchets on main.
       # Ordinary backend shards still cover the complete isolated test tree.
       - name: Measure large-fold contention on both databases

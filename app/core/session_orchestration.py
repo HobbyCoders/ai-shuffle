@@ -463,12 +463,14 @@ async def handle_peer_listing(body, from_device):
     return await run_sync(accept_peer_listing, body, from_device)
 
 
-def _context(session_id, *, allow_empty=False):
+def _context(session_id, *, allow_empty=False, _conn=None):
     from app.core import turn_scheduler
     from app.db import sessions, turns
     # A new user/peer turn can be running while an older turn remains parked.
     # Its ancestry and permissions take precedence over the parked context.
-    context = turns.get_live_turn(session_id) or turn_scheduler._latest_context_turn(session_id)
+    db_args = {"_conn": _conn} if _conn is not None else {}
+    context = (turns.get_live_turn(session_id, **db_args)
+               or turn_scheduler._latest_context_turn(session_id, **db_args))
     if not context and allow_empty:
         row = sessions.get_session(session_id)
         return {"id": None, "payload": {}, "worktree_id": row.get("worktree_id"),
@@ -685,19 +687,55 @@ def _inherited_model(sender, overrides):
     return model_override.app_id(provider_id, value)
 
 
-def _start_model_plan(sender_id, data, remote):
-    """What StartSession's ``model`` asks for, before the owner is consulted.
+def _request_identity(sender_id, data, action):
+    request_id = _text(data, "request_id", 120)
+    command_id = "orchestration:" + action + ":" + hashlib.sha256(
+        (sender_id + ":" + request_id).encode()).hexdigest()
+    fingerprint = hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
+    return command_id, fingerprint
 
-    None when it names the model the chat inherits anyway (no check needed).
-    Otherwise ``{model, provider_id, model_id, baseline, profile_id, seen}``;
-    ``seen`` is True when this request_id already has a receipt, so a retry
-    reads it back without asking the owner again. Raises for a model that is
-    not eligible (on this worker when the chat runs here).
+
+def _request_receipt(cursor, root_id, command_id, fingerprint):
+    """One execution scope, shared by consent replay and the locked queue."""
+    from app.db import turns
+    cursor.execute("SELECT * FROM turns WHERE parent_turn_id=%s AND command_id=%s",
+                   (root_id, command_id))
+    previous = turns._row(cursor.fetchone())
+    if previous and previous["payload"].get("orchestration_fingerprint") != fingerprint:
+        raise ValueError("request_id was already used with different arguments.")
+    return previous
+
+
+def _start_model_scope(sender, context, data, principal):
+    """Bind an answer/readback to the caller and input checked before the wait.
+
+    Exclude turn state/lease timestamps: settlement is not a new owner request.
+    Include payload and prompt because an in-place owner wake can keep its id.
+    """
+    command_id, fingerprint = _request_identity(sender["id"], data, "start")
+    return {
+        "root_id": (context.get("payload") or {}).get("orchestration_root") or context["id"],
+        "command_id": command_id, "fingerprint": fingerprint,
+        "context": {key: context.get(key) for key in ("id", "source", "prompt", "payload", "overrides")},
+        "sender": {key: sender.get(key) for key in (
+            "id", "api_user_id", "instance_id", "owner_device_id", "profile_id",
+            "provider_id", "model", "permission_mode", "project_id", "project_v2_id",
+        )},
+        "principal": principal,
+    }
+
+
+def _start_model_plan(sender_id, data, remote):
+    """Resolve the model and exact queue receipt before consulting the owner.
+
+    A receipt only permits readback in its original root with identical args;
+    it is never authority to execute in another owner turn or after deletion.
     """
     from app.core import model_override
     from app.db.base import get_db
     sender = _caller(sender_id)
     context = _context(sender_id)
+    scope = _start_model_scope(sender, context, data, _principal(sender_id))
     overrides = context.get("overrides") or {}
     baseline = _inherited_model(sender, overrides)
     try:
@@ -705,22 +743,27 @@ def _start_model_plan(sender_id, data, remote):
                                         runs_here=remote is None)
     except ValueError as exc:
         raise ValueError(f"{exc} Nothing was started.") from None
-    if choice.model == baseline and choice.provider_id is not None:
-        return None
-    command_id = "orchestration:start:" + hashlib.sha256(
-        (sender_id + ":" + str(data.get("request_id") or "")).encode()).hexdigest()
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT 1 FROM turns WHERE command_id=%s LIMIT 1", (command_id,))
-        seen = cursor.fetchone() is not None
+        cursor.execute("SELECT id FROM turns WHERE id=%s", (scope["root_id"],))
+        if not cursor.fetchone():
+            raise ValueError("Orchestration origin no longer exists.")
+        previous = _request_receipt(cursor, scope["root_id"], scope["command_id"], scope["fingerprint"])
+    record = (previous["payload"].get("model_override") or {}) if previous else {}
+    if record and (record.get("model"), record.get("provider_id")) != (choice.model, choice.provider_id):
+        raise ValueError("Model replay choice changed; use a new request_id to check consent again.")
     return {"model": choice.model, "provider_id": choice.provider_id, "model_id": choice.model_id,
-            "baseline": baseline, "profile_id": sender.get("profile_id"), "seen": seen}
+            "baseline": baseline, "profile_id": sender.get("profile_id"), "scope": scope,
+            "receipt_id": previous["id"] if previous else None,
+            "unchanged": ((choice.model == baseline and choice.provider_id is not None)
+                          or bool(previous and previous["payload"].get("model_unchanged"))),
+            **{key: record[key] for key in ("source", "memory_id", "accepted") if key in record}}
 
 
 async def _confirm_start_model(sender_id, data, placement):
     """Check StartSession's ``model`` and, when it switches models, that the
-    user asked for it (named it, or the owner approved). Returns the plan for
-    :func:`_queue`, False when the model is the inherited one, or None when
+    user asked for it (named it, or the owner approved). Returns a scoped plan
+    for :func:`_queue` (marked unchanged for the inherited model), or None when
     no model was passed. Raises PermissionError with the refusal."""
     if data.get("model") is None:
         return None
@@ -730,10 +773,7 @@ async def _confirm_start_model(sender_id, data, placement):
     else:
         remote = await asyncio.to_thread(_remote_worker, data.get("worker"))
     plan = await asyncio.to_thread(_start_model_plan, sender_id, data, remote)
-    if plan is None:
-        return False
-    if plan["seen"]:
-        plan["source"] = None
+    if plan["receipt_id"] or plan["unchanged"]:
         return plan
     title = str(data.get("title") or "").strip()[:80] or "new chat"
     action = f"start the chat “{title}” on {model_override.label(plan['model'])}"
@@ -742,7 +782,8 @@ async def _confirm_start_model(sender_id, data, placement):
     accepted = await model_override.accept(
         sender_id, plan["profile_id"], model=plan["model"], baseline=plan["baseline"], action=action)
     if accepted is None:
-        return False
+        plan["unchanged"] = True
+        return plan
     plan["source"] = accepted.source
     plan.update(accepted.record())
     return plan
@@ -1479,9 +1520,9 @@ def _create_started_chat(conn, sender, *, new_id, title, overrides, started_mode
 def _queue(sender_id, data, action, placement=None, model_plan=None, discovered_peer=None):
     """``placement`` is :func:`_project_placement`'s answer for a StartSession
     that named a project (the owner's assistant only). ``model_plan`` is
-    :func:`_confirm_start_model`'s answer when the call passed ``model``: a
-    plan for a switched model the user asked for, or False for the model the
-    chat inherits anyway."""
+    :func:`_confirm_start_model`'s scoped answer when the call passed ``model``;
+    an unchanged plan keeps the inherited settings but still binds the check
+    to the caller's input."""
     from app.db import sessions, turns, mobile_tool_identity
     from app.db.base import transaction
     from app.core import turn_scheduler
@@ -1494,7 +1535,7 @@ def _queue(sender_id, data, action, placement=None, model_plan=None, discovered_
         raise PermissionError("Background observation cannot start or message sessions.")
     from app.core import orchestration_limits
     orchestration_limits.assert_can_start(sender_id)  # The owner's daily spending limit.
-    request_id = _text(data, "request_id", 120)
+    command_id, fingerprint = _request_identity(sender_id, data, action)
     text = _text(data, "prompt" if action == "start" else "message", 8000)
     # Human input starts a fresh budget; all automated descendants share it.
     ancestry = context.get("payload") or {}
@@ -1515,9 +1556,9 @@ def _queue(sender_id, data, action, placement=None, model_plan=None, discovered_
         raise ValueError("project applies only to StartSession.")
     if action != "start" and data.get("model") is not None:
         raise ValueError("model applies only to StartSession.")
-    if action == "start" and data.get("model") is not None and model_plan is None:
+    if action == "start" and data.get("model") is not None and not isinstance(model_plan, dict):
         raise ValueError("model was not checked; nothing was started.")
-    plan = model_plan or None
+    plan = model_plan if model_plan and not model_plan.get("unchanged") else None
     if placement is None and data.get("project") is not None:
         raise ValueError("project is available only in the owner's own chats; omit it.")
     if placement is not None:
@@ -1550,9 +1591,6 @@ def _queue(sender_id, data, action, placement=None, model_plan=None, discovered_
                 type(capability) is not int or capability < START_SESSION_PERMISSIONS_VERSION):
             raise ValueError(f"{remote['device_name']} cannot separate report-back from assistant permissions; "
                              "update that worker before retrying. Nothing was started.")
-    command_id = "orchestration:" + action + ":" + hashlib.sha256(
-        (sender_id + ":" + request_id).encode()).hexdigest()
-    fingerprint = hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
     if action != "start":
         peer = _remote_peer(sender, _text(data, "session_id", 200))
         if (peer is None and discovered_peer is not None
@@ -1569,6 +1607,9 @@ def _queue(sender_id, data, action, placement=None, model_plan=None, discovered_
     target = sender if action == "start" else _target(sender, _text(data, "session_id", 200), allow_stopped=True)
     target_context = context if action == "start" else _context(target["id"], allow_empty=True)
     principals = {sid: _principal(sid) for sid in {sender_id, target["id"]}}
+    if model_plan and model_plan.get("scope") != _start_model_scope(
+            sender, context, data, principals[sender_id]):
+        raise ValueError("Model consent context changed; retry from the current owner request.")
     # Never retry a rejected peer's work by waking it through a different tool.
     terminal = turn_scheduler._turn_terminal_payload(target["id"], target_context["id"])
     errors = str(terminal.get("errors") or "").casefold()
@@ -1610,13 +1651,19 @@ def _queue(sender_id, data, action, placement=None, model_plan=None, discovered_
         cursor.execute("SELECT id FROM turns WHERE id=%s FOR UPDATE", (root_id,))
         if not cursor.fetchone():
             raise ValueError("Orchestration origin no longer exists.")
-        cursor.execute("SELECT * FROM turns WHERE parent_turn_id=%s AND command_id=%s",
-                       (root_id, command_id))
-        previous = turns._row(cursor.fetchone())
+        previous = _request_receipt(cursor, root_id, command_id, fingerprint)
         _recheck(cursor, (sender, target), principals)
+        if model_plan:
+            # Re-read on the locked connection, not a nested pool checkout.
+            # A new owner turn or an in-place human wake invalidates the answer.
+            current_context = _context(sender_id, _conn=conn)
+            if model_plan.get("scope") != _start_model_scope(
+                    sender, current_context, data, principals[sender_id]):
+                raise ValueError("Model consent context changed; retry from the current owner request.")
+            if model_plan.get("receipt_id") and (
+                    not previous or previous["id"] != model_plan["receipt_id"]):
+                raise ValueError("Model replay receipt no longer exists; retry to check consent again.")
         if previous:
-            if previous["payload"].get("orchestration_fingerprint") != fingerprint:
-                raise ValueError("request_id was already used with different arguments.")
             made_remotely = previous["session_id"].startswith(REMOTE_RECEIPT_PREFIX)
             if made_remotely and (remote is None or remote["device_id"] != previous["payload"].get("remote_device_id")):
                 # An automatic worker pick may differ on retry; the chat stays
@@ -1656,6 +1703,10 @@ def _queue(sender_id, data, action, placement=None, model_plan=None, discovered_
                                 permission_mode=started_mode)
             receipt_payload = {"orchestration_fingerprint": fingerprint, "remote_device_id": remote["device_id"],
                                "remote_session_id": body["session_id"]}
+            if plan:
+                receipt_payload["model_override"] = _override_record(plan)
+            elif model_plan:
+                receipt_payload["model_unchanged"] = True
             if assistant:
                 # Where that chat's report is delivered, and the chain it belongs to.
                 receipt_payload.update(report_to=sender_id, orchestration_depth=depth + 1)

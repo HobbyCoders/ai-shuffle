@@ -1954,10 +1954,10 @@ def get_turn_by_command(session_id: str, command_id: str, *, _conn=None) -> Opti
     return _row(row)
 
 
-def get_live_turn(session_id: str) -> Optional[Dict[str, Any]]:
+def get_live_turn(session_id: str, *, _conn=None) -> Optional[Dict[str, Any]]:
     """Return the session's single live (running|interrupting|draining) turn, or
     ``None``."""
-    with get_db() as conn:
+    with (nullcontext(_conn) if _conn is not None else get_db()) as conn:
         cursor = conn.cursor()
         cursor.execute(
             "SELECT * FROM turns "
