@@ -138,6 +138,31 @@ interactions.cancel_interaction(fresh['id'])
         assert exported['session']['id']==ids['waits'] and 'messages' in exported
         result.update(scoped_visible_settled_count=count,unique_paged_rows=len(seen),search_total=1000,
             search_beyond_20_opened=old_link,export_readable=True)
+        snapshot=w.run(r"""import io,json,subprocess,tarfile
+from pathlib import Path
+from app.core import checkout_lock,worktree_reclaim
+path=Path(PATH_VALUE)
+def git(*args,raw=False):
+    p=subprocess.check_output(['git','-C',str(path),*args]);return p if raw else p.decode().strip()
+assert not checkout_lock.tool_denial(ACTIVE_VALUE,'Bash',{'command':'git switch -c disposable-next','cwd':str(path)},str(path))
+git('switch','-q','-c','disposable-next')
+head=git('rev-parse','HEAD')
+(path/'evidence.txt').write_text('retained dirty evidence\n')
+(path/'untracked.txt').write_text('retained untracked evidence\n')
+before=git('status','--porcelain')
+sha=worktree_reclaim._snapshot(str(path),head,'disposable-next')
+assert git('status','--porcelain')==before
+assert git('rev-parse',sha+'^1')==head
+git('update-ref',worktree_reclaim.ARCHIVE_REF_PREFIX+'disposable-next',sha)
+git('branch','recovered-fixture',worktree_reclaim.ARCHIVE_REF_PREFIX+'disposable-next')
+restored=path.parent/'recovered-files';restored.mkdir()
+with tarfile.open(fileobj=io.BytesIO(git('archive','recovered-fixture',raw=True))) as tar:
+    tar.extractall(restored,filter='data')
+assert (restored/'evidence.txt').read_text()=='retained dirty evidence\n'
+assert (restored/'untracked.txt').read_text()=='retained untracked evidence\n'
+print('RESULT '+json.dumps({'sha':sha,'dirty_and_untracked_restored':True,'original_checkout_unchanged':True,'new_branch_allowed_after_monitor_completion':True}))
+""".replace('PATH_VALUE',repr(str(directory/'private-checkout'))).replace('ACTIVE_VALUE',repr(ids['active'])))
+        result['recovery_snapshot']=snapshot
         Path(args.scratch,'boot-matrix-results.json').write_text(json.dumps(result,indent=2,default=str))
     print('PASS full boot matrix; app and PostgreSQL stopped',flush=True)
 
@@ -187,17 +212,26 @@ async def reconcile():
     from app.core.config import settings
     project=projects_v2.upsert_project('fixture://archive-retirement/matrix','Disposable claims')
     path=D/'private-checkout';path.mkdir(exist_ok=True)
+    import subprocess
+    def git(*args):
+        return subprocess.check_output(['git','-C',str(path),*args],text=True).strip()
+    git('init','-q','-b','retained')
+    (path/'evidence.txt').write_text('original evidence\n')
+    git('add','evidence.txt')
+    git('-c','user.name=AI Shuffle','-c','user.email=noreply@hobbycoders.com','commit','-q','-s','-m','Disposable checkout fixture','--trailer','Co-Authored-By: AI Shuffle <noreply@hobbycoders.com>')
     checkouts.upsert_checkout(project['id'],settings.effective_instance_id,str(path),branch='retained')
     candidate={'id':IDS['active'],'project_v2_id':project['id']}
     pr=SimpleNamespace(number=789)
     with get_db() as conn:
         conn.cursor().execute("UPDATE sessions SET project_v2_id=%s,branch='retained',pr_number=789,pr_state='open' WHERE id=%s",(project['id'],IDS['stopped']))
     assert not checkout_lock.checkout_owners(str(path),IDS['active'])[1]
+    assert not checkout_lock.tool_denial(IDS['active'],'Bash',{'command':'git switch -c disposable-next','cwd':str(path)},str(path))
     assert not session_pr_state._pull_claimed_elsewhere(pr,candidate,None)
     with get_db() as conn:
         conn.cursor().execute("UPDATE sessions SET project_v2_id=%s,branch='retained',pr_number=789,pr_state='open' WHERE id=%s",(project['id'],IDS['background']))
     assert [row['id'] for row in checkout_lock.checkout_owners(str(path),IDS['active'])[1]]==[IDS['background']]
     assert session_pr_state._pull_claimed_elsewhere(pr,candidate,None)
+    assert checkout_lock.tool_denial(IDS['active'],'Bash',{'command':'git switch -c disposable-next','cwd':str(path)},str(path))
     result={'private_before':private_before,'private_after':chat_access.broker.pending_count(IDS['waits']),
         'stop_latched':task_registry.is_user_stopped(IDS['stopped']),'outbox_held':engine.outbox_held(),
         'monitor_running_after_settlement':True,'idle_history_releases_checkout_and_pr':True,'live_monitor_protects_checkout_and_pr':True}

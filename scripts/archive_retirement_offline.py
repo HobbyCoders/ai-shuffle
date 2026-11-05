@@ -72,8 +72,31 @@ print('RESULT '+json.dumps(asyncio.run(control.call({a.device!r},'session-settle
         command(a,'finish-monitor',sid=sid,task_id=monitor['task_id'])
         wait('actual settled Monitor terminal notification persisted',lambda:a.sql("SELECT 1 FROM background_tasks WHERE session_id=%s AND task_id=%s AND status='completed'",(sid,monitor['task_id'])))
         assert a.row(sid)['owner_device_id']==a.device and b.row(sid)['owner_device_id']==a.device
-        result={'result':'network-partitioned execution owner; offline peer settlement, exact one receipt, owner wait dismissal, real running Monitor survival, other-client reactivation, fresh prompt, three delayed signed deliveries and duplicate current delivery passed',
-            'delayed_deliveries':deliveries,'duplicate':duplicate,'monitor':monitor,'owner_unchanged':True,
+        # A separate truly idle row avoids stealing the Monitor's newly queued
+        # completion report. Move it through the real leased handoff, recreate
+        # membership, and replay a former-owner dismissal against a new question.
+        sid=str(uuid.uuid4())
+        a.run(f"from app.db import database\npid=database.get_all_profiles()[0]['id']\ndatabase.create_session({sid!r},pid,title='Idle ownership transfer',is_active=True)")
+        a.publish();wait('idle transfer fixture mirrored',lambda:b.row(sid))
+        a.request('POST',f'/api/v1/sessions/{sid}/archive')
+        wait('idle transfer fixture settled',lambda:not b.row(sid)['is_active'])
+        prior=a.run(f"import json\nfrom app.db import network as store\nprint('RESULT '+json.dumps([op for op in store.ops_since({{}}) if op['collection']=='session_active' and op['record_id']=={sid!r}][-1]))")
+        moved=b.request('POST',f'/api/v1/sessions/{sid}/adopt',{})
+        assert moved['adopted']
+        wait('intentional leased ownership transfer',lambda:all(w.row(sid)['owner_device_id']==b.device for w in (a,b)))
+        b.sql('DELETE FROM network_session_active WHERE session_id=%s',(sid,))
+        b.request('PATCH',f'/api/v1/sessions/{sid}/active',{'is_active':True})
+        wait('new owner recreated membership epoch',lambda:all(w.row(sid)['is_active'] for w in (a,b)))
+        command(b,'question',sid=sid,request='fresh-after-ownership-transfer')
+        after_transfer=a.run(f"""import asyncio,json
+from app.network import engine,control
+engine.require_context()
+print('RESULT '+json.dumps(asyncio.run(control.call({b.device!r},'session-settle-dismiss',{{'session_id':{sid!r},'is_active':False,'settled_membership':{prior!r}}}))))
+""")
+        assert not after_transfer['dismissed']
+        assert b.sql("SELECT 1 FROM pending_interactions WHERE session_id=%s AND state='pending'",(sid,))
+        result={'result':'network-partitioned execution owner; offline peer settlement, exact one receipt, owner wait dismissal, real running Monitor survival, other-client reactivation, fresh prompt, three delayed signed deliveries and duplicate current delivery; intentional leased ownership transfer and recreated membership epoch passed',
+            'delayed_deliveries':deliveries,'duplicate':duplicate,'monitor':monitor,'owner_unchanged_before_intentional_handoff':True,'intentional_transfer':moved,'post_transfer_stale_dismissal':after_transfer,
             'offline_model':'Both apps stayed alive; the owner peer transport/ASGI edge was partitioned. Its OS job did not need resurrection across process death.'}
         Path(args.scratch,'offline-results.json').write_text(json.dumps(result,indent=2))
     print('PASS offline owner and stale signed delivery; both apps and PostgreSQL stopped',flush=True)
