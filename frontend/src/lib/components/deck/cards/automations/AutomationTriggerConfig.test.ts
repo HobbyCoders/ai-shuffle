@@ -24,6 +24,14 @@ function renderWebhook(currentView: 'create' | 'edit', selectedAutomationId: str
 	});
 }
 
+it('keeps the trigger heading and collapse control inside its card', () => {
+ const view = renderWebhook('edit', 'auto-1a2b');
+ const collapse = screen.getByRole('button', { name: 'Collapse trigger' });
+ expect(collapse.closest('.st-card')).not.toBeNull();
+ expect(view.container.querySelectorAll('.st-grp')).toHaveLength(0);
+ expect(screen.queryByText(/Any trigger firing/)).toBeNull();
+});
+
 it('shows the webhook trigger URL built from the automation id and the page origin', () => {
 	renderWebhook('edit', 'auto-1a2b');
 	const url = screen.getByLabelText('Webhook URL') as HTMLInputElement;

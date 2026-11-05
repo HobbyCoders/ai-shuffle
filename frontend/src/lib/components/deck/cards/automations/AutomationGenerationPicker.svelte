@@ -4,7 +4,8 @@
  import { generationChoices } from '$lib/stores/generation-choices.svelte';
  import { workerInstalls } from '$lib/stores/worker-presence';
  import { getErrorMessage } from '$lib/api/client';
- import { choiceOf, formatValue, modelLabel, priceView, saveOutcome, sourceLabel, workerLabel,
+ import { getProviders, getModelLabel, decodeProviderModel } from '$lib/constants/models';
+ import { choiceOf, formatValue, modelLabel, priceView, saveOutcome, sourceLabel,
   type GenerationChoice, type GenerationKind, type GenerationOption, type GenerationPrice,
   type NativeValue, type SaveOutcome, type SaveQuote, type SchemaField } from '$lib/utils/generation-choice';
  import { SettingRow, SelectField, Switch, InlineBanner } from '$lib/components/layout/view';
@@ -31,6 +32,18 @@
  const current = $derived(options[selected]);
  const currentPrice = $derived(priceView(quotes[selected],kind));
  const here = $derived(generationChoices.worker);
+ function displayModel(model: string): string {
+  if (decodeProviderModel(model)) {
+   const resolved = getModelLabel(model);
+   return resolved.startsWith('prov:') || resolved === decodeProviderModel(model)?.modelId ? 'Saved model' : resolved;
+  }
+  return modelLabel(model);
+ }
+ function optionLabel(option: GenerationOption): string {
+  const account = getProviders().find(p => p.id === option.account)?.name || 'Saved account';
+  const worker = ($workerInstalls ?? []).find(i => i.id === option.worker || i.device_id === option.worker)?.device_name || (option.worker === here ? 'This worker' : 'Saved worker');
+  return `${sourceLabel(option.source)} · ${option.label || displayModel(option.model)} · ${account} · ${worker}`;
+ }
 	interface Field {
 		name: string;
 		title: string;
@@ -192,12 +205,12 @@
  <SettingRow label="Source and model">
   {#snippet expanded()}
    <SelectField label="Source and model" width={620} value={String(selected)}
-    options={options.map((option,index) => ({value:String(index),label:`${sourceLabel(option.source)} · ${modelLabel(option.model)} · ${option.account} · ${workerLabel(option.worker,$workerInstalls,here)}`,disabled:!option.available}))}
+    options={options.map((option,index) => ({value:String(index),label:optionLabel(option),disabled:!option.available}))}
     onchange={(value) => {selected=Number(value);quoteError=null;saveError=null;}} />
   {/snippet}
  </SettingRow>
  {#if current}
-  <p class="st-note">{current.reason || `${sourceLabel(current.source)} · ${modelLabel(current.model)}`}</p>
+  <p class="st-note">{current.reason || `${sourceLabel(current.source)} · ${displayModel(current.model)}`}</p>
   <p class="st-note">{currentPrice.figure} {currentPrice.note}</p>
   <button class="st-btn" aria-expanded={advancedOpen} onclick={() => advancedOpen = !advancedOpen}>Advanced{editedCount ? ` · ${editedCount} changed` : ''}</button>
   {#if advancedOpen}

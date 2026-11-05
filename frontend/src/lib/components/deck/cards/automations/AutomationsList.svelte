@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { automationModelLabel, type Automation } from '$lib/api/automations';
 	import { ListItem, EmptyDetail } from '$lib/components/layout/view';
+	import StatusDot from '$lib/components/settings/rows/StatusDot.svelte';
  import type { Profile } from '$lib/api/client';
 	import {
 		CalendarClock,
@@ -34,7 +35,7 @@
 
 	let {
  selectedId = null, profiles = [],		automations,
-		searchQuery,
+		searchQuery = $bindable(),
 		triggeringId,
 		onOpenDetail,
 		onOpenCreate,
@@ -62,7 +63,8 @@
 </script>
 {#if filteredAutomations().length === 0}
  <EmptyDetail title={searchQuery ? 'No matching automations' : 'No automations yet'}
-  message={searchQuery ? 'Try a different search term.' : 'Create a scheduled or event-driven task.'}>
+  message={searchQuery ? 'Try a different search term.' : 'Create a scheduled or event-driven task.'}
+  actionLabel={searchQuery ? 'Clear search' : undefined} onAction={() => searchQuery = ''}>
   {#if !searchQuery}<button class="st-btn primary" onclick={onOpenCreate}>New automation</button>{/if}
  </EmptyDetail>
 {:else}
@@ -71,9 +73,13 @@
    selected={selectedId === automation.id} onselect={() => onOpenDetail(automation)}
    status={!automation.is_enabled ? 'off' : automation.status === 'error' ? 'err' : 'ok'}
    summary={automation.description || (automation.triggers || [{type: automation.trigger_type}]).map(t => triggerTypeLabel(t.type)).join(' · ')}
-   meta={automation.is_enabled ? automation.status === 'running' ? 'Running' : 'Enabled' : 'Disabled'}>
+   ariaLabel={`${automation.name} — ${!automation.is_enabled ? 'Disabled' : automation.status === 'running' ? 'Running' : automation.status === 'error' ? 'Error' : 'Enabled'}${automation.description ? ` · ${automation.description}` : ''}`}>
+   {#snippet lead()}<span class="automation-state" title={!automation.is_enabled ? 'Disabled' : automation.status === 'running' ? 'Running' : automation.status === 'error' ? 'Error' : 'Enabled'}><StatusDot tone={!automation.is_enabled ? 'off' : automation.status === 'error' ? 'err' : 'ok'} /></span>{/snippet}
    {#snippet badges()}{#if !automation.profile_id}<span>No agent</span>{/if}{/snippet}
   </ListItem>
   {#if automation.last_error}<p class="px-3 pb-2 text-xs text-muted-foreground" role="status">{automation.last_error}</p>{/if}
  {/each}
 {/if}
+<style>
+ .automation-state { display: inline-flex; align-items: center; justify-content: center; width: 10px; }
+</style>

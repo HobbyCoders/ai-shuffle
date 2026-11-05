@@ -47,7 +47,7 @@
       <div class="run-expanded">
        {#if run.response}<h4>Response</h4><p class="response">{run.response}</p>{/if}
        {#if run.error}<h4>Error</h4><p class="response failed">{run.error}</p>{/if}
-       <div class="run-facts"><span>Tokens in: {run.tokens_in}</span><span>Tokens out: {run.tokens_out}</span><span>Output: {run.output_status}</span>{#if run.session_id}<span>Session: {run.session_id.slice(0,8)}...</span>{/if}</div>
+       <div class="run-facts"><span>Tokens in: {run.tokens_in}</span><span>Tokens out: {run.tokens_out}</span><span>Output: {run.output_status}</span>{#if run.session_id}<span title={run.session_id}>Linked chat</span>{/if}</div>
       </div>
      {/if}
     </div>

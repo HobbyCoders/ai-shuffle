@@ -101,7 +101,7 @@
 			case 'cron': return trigger.config.expression ? describeCron(trigger.config.expression) : 'Not configured';
 			case 'interval': return trigger.config.seconds ? `Every ${trigger.config.seconds}s` : 'Not configured';
 			case 'connector_event': return trigger.config.event_type || 'Not configured';
-			case 'connector_trigger': return trigger.config.trigger_id || 'Not configured';
+			case 'connector_trigger': return getTriggersForConnector(trigger.config.connector_id || '').find(t => t.id === trigger.config.trigger_id)?.name || (trigger.config.trigger_id ? 'Saved trigger' : 'Not configured');
 			case 'webhook': return 'Webhook endpoint';
 			default: return 'Not configured';
 		}
@@ -218,15 +218,17 @@
 		return `${h - 12} PM`;
 	}
 </script>
-<p class="st-note">Any trigger firing will run this automation. At least one required.</p>
 {#each triggers as trigger, trigIdx}
- <RowGroup title="Trigger {trigIdx + 1}" bare>
-  {#snippet actions()}
-   <button class="st-btn" aria-expanded={expandedTriggers.has(trigIdx)} onclick={() => onToggleTriggerExpand(trigIdx)}>{expandedTriggers.has(trigIdx) ? 'Collapse' : 'Expand'} trigger</button>
-   {#if triggers.length > 1}<button class="st-btn icon danger" aria-label="Remove trigger" onclick={() => removeTrigger(trigIdx)}><Trash2 size={14} /></button>{/if}
-  {/snippet}
+ <section class="st-card trigger-card" aria-label={`Trigger ${trigIdx + 1}`}>
+  <div class="trigger-header">
+   <h4>{triggerTypeLabel(trigger.type)}</h4>
+   <div class="trigger-actions">
+    <button class="st-btn compact" aria-expanded={expandedTriggers.has(trigIdx)} onclick={() => onToggleTriggerExpand(trigIdx)}>{expandedTriggers.has(trigIdx) ? 'Collapse' : 'Expand'} trigger</button>
+    {#if triggers.length > 1}<button class="st-btn icon danger" aria-label="Remove trigger" onclick={() => removeTrigger(trigIdx)}><Trash2 size={14} /></button>{/if}
+   </div>
+  </div>
   {#if expandedTriggers.has(trigIdx)}
-   <div class="st-card">
+   <div class="trigger-controls">
     <SettingRow label="Trigger type">
      {#snippet expanded()}<Segmented label="Trigger type" value={trigger.type} options={[{value:'cron',label:'Cron'},{value:'interval',label:'Interval'},{value:'connector_event',label:'Event'},{value:'connector_trigger',label:'Connector'},{value:'webhook',label:'Webhook'}]} onchange={(value) => updateTriggerType(trigIdx,value)} />{/snippet}
     </SettingRow>
@@ -269,10 +271,18 @@
     {/if}
    </div>
   {:else}<p class="st-note"><span>{triggerTypeLabel(trigger.type)}</span> · <span>{getTriggerSummary(trigger)}</span></p>{/if}
- </RowGroup>
+ </section>
 {/each}
 <button class="st-btn" onclick={addTrigger}><Plus size={14} />Add trigger</button>
 <style>
+ .trigger-card { margin-bottom: 12px; overflow: hidden; }
+ .trigger-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--st-border); }
+ .trigger-header h4 { margin: 0; font-size: 14px; font-weight: 600; }
+ .trigger-actions { display: flex; align-items: center; gap: 8px; }
+ .trigger-card > p { margin: 0; padding: 12px 16px; }
+ .trigger-controls :global(.st-row:has(+ .st-rowx)) { min-height: 0; padding-bottom: 8px; }
+ .trigger-controls :global(.st-rowx) { padding-top: 0; }
+ .trigger-controls :global(.st-note) { margin: 0 0 8px; }
  details { margin-top: 12px; }
  summary { cursor: pointer; min-height: 32px; font-size: 13px; color: var(--st-mfg); }
  summary:hover { color: var(--st-fg); }

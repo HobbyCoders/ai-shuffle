@@ -37,13 +37,13 @@
 		quoteFromSave,
 		sameChoice,
 		sourceLabel,
-		workerLabel,
 		type GenerationChoice,
 		type GenerationKind,
 		type GenerationOption,
 		type SaveQuote
 	} from '$lib/utils/generation-choice';
 	import AutomationGenerationPicker from './AutomationGenerationPicker.svelte';
+	import { getProviders, getModelLabel, decodeProviderModel } from '$lib/constants/models';
  import { RowGroup, SettingRow, InlineBanner } from '$lib/components/layout/view';
 	import { GENERATION_ICONS, GENERATION_NAMES } from '$lib/components/settings/models/icons';
 
@@ -301,8 +301,19 @@
 			.join(' · ');
 	}
 
+	function choiceWorkerLabel(worker: string | undefined): string {
+		const install = ($workerInstalls ?? []).find(i => i.id === worker || i.device_id === worker);
+		return install?.device_name || (worker === here ? 'This worker' : 'Saved worker');
+	}
+	function displayModel(model: string): string {
+		if (decodeProviderModel(model)) {
+			const resolved = getModelLabel(model);
+			return resolved.startsWith('prov:') || resolved === decodeProviderModel(model)?.modelId ? 'Saved model' : resolved;
+		}
+		return modelLabel(model);
+	}
 	function label(choice: GenerationChoice): string {
-		return `${sourceLabel(choice.source)} · ${modelLabel(choice.model)}`;
+		return `${sourceLabel(choice.source)} · ${displayModel(choice.model)}`;
 	}
 
 	const LADDER: { tier: Exclude<Tier, 'unreadable'>; text: string }[] = [
@@ -407,9 +418,9 @@
 							<strong title={job.model}>{label(job)}</strong>
 						</p>
 						<dl class="ajc-facts">
-							<div><dt>Account</dt><dd >{job.account}</dd></div>
-							<div><dt>Worker</dt><dd>{workerLabel(job.worker, $workerInstalls, here)}</dd></div>
-							<div><dt>Model</dt><dd >{job.model}</dd></div>
+							<div><dt>Account</dt><dd title={job.account}>{getProviders().find(p => p.id === job.account)?.name || sourceLabel(job.source)}</dd></div>
+							<div><dt>Worker</dt><dd title={job.worker}>{choiceWorkerLabel(job.worker)}</dd></div>
+							<div><dt>Model</dt><dd title={job.model}>{displayModel(job.model)}</dd></div>
 							<div><dt>Options</dt><dd title={describe(job)}>{describe(job)}</dd></div>
 						</dl>
 						<p class="ajc-quote" aria-live="polite">
@@ -457,7 +468,7 @@
 						<p class="ajc-fallback">
 							{#if fallback}
 								Remembered: <strong>{label(fallback)}</strong>
-								{#if fallback.worker}<span class="ajc-muted">on {workerLabel(fallback.worker, $workerInstalls, here)}</span>{/if}
+								{#if fallback.worker}<span class="ajc-muted">on {choiceWorkerLabel(fallback.worker)}</span>{/if}
 							{:else}
 								No remembered choice for {plural}, so runs skip this step and report it.
 							{/if}

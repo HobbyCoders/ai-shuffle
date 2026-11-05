@@ -29,6 +29,7 @@ afterEach(() => { cleanup(); resourceSync.clear(); platform.set('desktop'); sess
 it('docks only its list and retains a selected dirty buffer when the rail destination changes', async () => {
 	const view = render(NotesViewHarness);
 	await fireEvent.click(await screen.findByRole('button', { name: /Note A content A/ }));
+		await fireEvent.click(screen.getByRole('tab', { name: 'Edit' }));
 	const body = screen.getByRole('textbox', { name: 'Note body' }) as HTMLTextAreaElement;
 	await fireEvent.input(body, { target: { value: 'Unsaved across rail navigation' } });
 	const host = view.container.querySelector('[data-test-host]')!;
@@ -47,6 +48,7 @@ it('docks only its list and retains a selected dirty buffer when the rail destin
 it('opens an initialItemId even when it is absent from the list', async () => {
 	vi.mocked(getNotes).mockResolvedValue([]);
 	render(NotesCard, { initialItemId: 'linked' });
+	await fireEvent.click(await screen.findByRole('tab', { name: 'Edit' }));
 	await waitFor(() => expect((screen.getByRole('textbox', { name: 'Note body' }) as HTMLTextAreaElement).value).toBe('content A'));
 	expect(getNote).toHaveBeenCalledWith('linked');
 });

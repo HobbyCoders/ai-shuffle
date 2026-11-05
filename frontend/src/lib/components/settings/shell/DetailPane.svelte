@@ -30,6 +30,8 @@
 
 	interface Props {
 		name: string;
+		/** Optional editable heading; keeps the shared header geometry. */
+		heading?: Snippet;
 		/** Settings retains its measure; collection details share one centered reading column. */
 		width?: 'settings' | 'reading' | 'data' | 'docs';
 		/** Only genuine identity art (an agent avatar or provider logo), never a generic decorative tile. */
@@ -74,6 +76,7 @@
 
 	let {
 		name,
+		heading,
 		width = 'settings',
 		identity = false,
 		icon,
@@ -134,7 +137,7 @@
 		{#if tile}{@render tile()}{:else if identity || glyph}<Tile size="lg" {icon} text={glyph} status={statusText ? undefined : status} ring="bg" />{/if}
 		<div class="st-dh-main">
 			<div class="st-dhn">
-				<h2 tabindex="-1" data-settings-heading="detail">{name}</h2>
+				{#if heading}{@render heading()}{:else}<h2 tabindex="-1" data-settings-heading="detail">{name}</h2>{/if}
 				{#if status && !statusText && !tile && !identity && !glyph}<StatusDot tone={status} />{/if}
 				{#if badge}<span class="badge">{badge}</span>{/if}
 				{@render badges?.()}

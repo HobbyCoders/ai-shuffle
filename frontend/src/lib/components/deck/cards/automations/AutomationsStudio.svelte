@@ -64,7 +64,7 @@
  {#if error}<InlineBanner tone="warn">{error}<button class="st-btn" onclick={onClearError}>Dismiss</button></InlineBanner>{/if}
  {#if loading}<p class="p-4 text-sm text-muted-foreground" role="status">Loading automations…</p>
  {:else}
-  <AutomationsList {automations} {searchQuery} {triggeringId} {selectedId} {profiles}
+  <AutomationsList {automations} bind:searchQuery {triggeringId} {selectedId} {profiles}
    {onOpenDetail} {onOpenCreate} {onOpenEdit} {onToggleEnabled} {onTrigger} {onDelete}
    {formatCost} {triggerTypeLabel} formatTime={(value) => value ? new Date(value).toLocaleString() : 'Never'} getStatusColor={() => ''} />
  {/if}
