@@ -80,7 +80,7 @@ describe.each([1280, 390])('list errors at %ipx', (width) => {
 		render(AutomationsCard, { props: { mobile: false } });
 		await fireEvent.click(await screen.findByText('Nightly digest'));
 		await fireEvent.click(await screen.findByRole('switch', { name: 'Enable automation' }));
-		expect(await screen.findByRole('switch', { name: 'Disable automation' })).toHaveAttribute('aria-checked', 'true');
+		expect((await screen.findByRole('switch', { name: 'Disable automation' })).getAttribute('aria-checked')).toBe('true');
 		expect(automationsApi.enableAutomation).toHaveBeenCalledWith('a1');
 	});
 
