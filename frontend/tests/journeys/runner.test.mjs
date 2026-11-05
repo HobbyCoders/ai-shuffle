@@ -2,6 +2,31 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { test } from 'node:test';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { readDevloopStatus } from './runner.mjs';
+
+test('paused transitions are usable without hiding a dead or broken instance', () => {
+	const directory = mkdtempSync(join(tmpdir(), 'journey-idle-'));
+	const path = join(directory, 'status.json');
+	const previous = process.env.DEVLOOP_STATUS;
+	process.env.DEVLOOP_STATUS = path;
+	try {
+		for (const state of ['ready', 'pausing', 'paused', 'waking']) {
+			writeFileSync(path, JSON.stringify({ state, pid: process.pid, access_link: 'http://127.0.0.1:9/' }));
+			assert.equal(readDevloopStatus().state, state);
+		}
+		for (const state of ['starting', 'app-exited', 'stopping']) {
+			writeFileSync(path, JSON.stringify({ state, pid: process.pid, access_link: 'http://127.0.0.1:9/' }));
+			assert.throws(readDevloopStatus, /not ready/);
+		}
+	} finally {
+		if (previous === undefined) delete process.env.DEVLOOP_STATUS;
+		else process.env.DEVLOOP_STATUS = previous;
+		rmSync(directory, { recursive: true });
+	}
+});
 
 const runner = new URL('./runner.mjs', import.meta.url).href;
 function list(args, env = {}) {
