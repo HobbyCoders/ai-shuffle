@@ -27,6 +27,9 @@ let listing: Record<string, FileItem[]>;
 let fail: Partial<Record<string, string>>;
 
 beforeEach(() => {
+	// ViewPanel and the shared detail header observe responsive media and size.
+	vi.stubGlobal('matchMedia', () => ({ matches: false, addEventListener() {}, removeEventListener() {} }));
+	vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
 	files.reset();
 	calls = [];
 	fail = {};
@@ -95,6 +98,16 @@ async function mount() {
 }
 
 describe('FilesStudio listing', () => {
+ it.each([['75c733a3514a', 'Local'], ['Unraid', 'Unraid']])('names the worker %s consistently with Devices', async (name, label) => {
+  const original = globalThis.fetch;
+  vi.stubGlobal('fetch', vi.fn(async (input: string, init: RequestInit = {}) => {
+   if (String(input).includes('/cluster/installs')) return json({ self_instance_id: 'self', installs: [{ id: 'self', device_name: name, is_self: true, online: true }] });
+   return original(input, init);
+  }));
+  await mount();
+  await waitFor(() => expect(screen.getByRole('button', { name: /^Worker:/ }).textContent).toContain(label));
+  expect(document.querySelector('.st-dhs')?.textContent ?? '').not.toContain(name);
+ });
 	it('puts worker, folder navigation and the hidden switch in the shared panel', async () => {
 		await mount();
 		const panel = screen.getByRole('region', { name: 'Folders on this device' }).closest('section')!;

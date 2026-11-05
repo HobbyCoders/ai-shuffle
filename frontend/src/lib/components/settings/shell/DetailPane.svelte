@@ -165,7 +165,7 @@
 			{#if topStatus}{@render topStatus()}{:else}<SavedTick />{/if}
 		</BackRow>
 	{/if}
-	<div class="st-dh">
+	<div class="st-dh" class:phone-inline={phonePrimary === 'inline'}>
 		<div class="st-identity">{#if tile}{@render tile()}{:else if hasIdentity}<Tile size="lg" {icon} text={glyph} status={statusText ? undefined : status} ring="bg" />{/if}</div>
 		<div class="st-dh-main">
 			<div class="st-dhn">
@@ -308,10 +308,14 @@
 		min-width: 0;
 	}
 	/* All multi-action headers reflow together when the content, not the window, is narrow. */
-	@container detail-header (max-width: 720px) {
+	@container detail-header (width < 720px) {
 		.st-dh:has(> .st-dha) { grid-template-columns: minmax(0, 1fr); gap: 8px; }
 		.st-dh:global(:has(> .st-identity > *)):has(> .st-dha) { grid-template-columns: auto minmax(0, 1fr); }
 		.st-dha { grid-column: 1 / -1; justify-content: flex-start; }
+	}
+	@media (max-width: 600px) {
+		.st-dh.phone-inline:has(> .st-dha) { grid-template-columns: minmax(0, 1fr) auto; }
+		.phone-inline > .st-dha { grid-column: auto; }
 	}
 	.phone-detail-actions { display: flex; flex: none; width: 56px; height: auto; min-width: 0; container-type: normal; background: transparent; }
 	.phone-detail-actions:not(:has(:is(button, a, input))) { display: none; }

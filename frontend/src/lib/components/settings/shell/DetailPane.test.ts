@@ -22,6 +22,13 @@ beforeEach(() => {
 afterEach(() => { cleanup(); platform.set('desktop'); vi.unstubAllGlobals(); });
 
 describe('DetailPane', () => {
+ it('marks a single inline phone primary separately from multi-action reflow', () => {
+  platform.set('mobile');
+  const primary=createRawSnippet(() => ({render: () => '<button>Add provider</button>'}));
+  const view=render(DetailPane,{name:'Providers', primary, phonePrimary:'inline'});
+  expect(view.container.querySelector('.st-dh.phone-inline > .st-dha')).toBeTruthy();
+  expect(screen.getByRole('button',{name:'Add provider'})).toBeTruthy();
+ });
  it('keeps desktop actions on the heading without a second More menu', () => {
   const primary=createRawSnippet(() => ({render: () => '<button>Duplicate</button>'}));
   render(DetailPane,{name:'Agent', primary});

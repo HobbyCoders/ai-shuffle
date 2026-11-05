@@ -21,6 +21,7 @@
 	import { startProjectSetup, type ProjectKind, type ProjectOverviewRow, type ProjectWorker } from '$lib/api/project-workers';
 	import { SETUP_POLL_MS } from '$lib/stores/project-setup';
 	import { isOnThisWorker, isRunning, missingCount, selfWorker } from './project-workers-view';
+	import { workerDisplayName } from '$lib/components/ui/worker-name';
 	import './project-tabs.css';
 
 	let stacked = $state(false);
@@ -90,9 +91,9 @@
 	const selfName = $derived.by(() => {
 		for (const row of $projectsOverview) {
 			const self = selfWorker(row.workers);
-			if (self) return self.device_name;
+			if (self) return workerDisplayName(self.device_name, 'Local');
 		}
-		return 'this worker';
+		return 'Local';
 	});
 
 	function fromOverview(row: ProjectOverviewRow): ListRow {

@@ -28,6 +28,7 @@
 	import { startProjectSetup } from '$lib/api/project-workers';
 	import type { GitHubRepo } from '$lib/api/github';
 	import type { Install } from '$lib/api/installs';
+	import { selfWorkerName, workerDisplayName } from '$lib/components/ui/worker-name';
 	import { onMount, untrack } from 'svelte';
 	import Segmented from '$lib/components/settings/rows/Segmented.svelte';
 	import DirectoryBrowser from '$lib/components/DirectoryBrowser.svelte';
@@ -77,7 +78,7 @@
 	});
 
 	const installs = $derived<Install[]>($workerInstalls ?? []);
-	const selfName = $derived(installs.find((i) => i.is_self)?.device_name ?? 'this worker');
+	const selfName = $derived(selfWorkerName(installs));
 	const others = $derived(peerRunners(installs));
 	// The "Set it up on" list needs the cross-worker setup endpoints.
 	const canSetUpElsewhere = $derived($projectsOverviewSupported === true && others.length > 0);
@@ -369,8 +370,8 @@
 						{#each others as w (w.id)}
 							{@const on = ticked.includes(w.id)}
 							<div class="wpick-row" class:dim={!w.online}>
-								<Checkbox block checked={on} disabled={adding} label={w.device_name} onchange={() => toggleTarget(w.id)}><span class="worker-copy">
-								<span class="wpick-name">{w.device_name}{#if !w.online}<span class="hint">&nbsp;· offline</span>{/if}</span>
+								<Checkbox block checked={on} disabled={adding} label={workerDisplayName(w.device_name)} onchange={() => toggleTarget(w.id)}><span class="worker-copy">
+								<span class="wpick-name">{workerDisplayName(w.device_name)}{#if !w.online}<span class="hint">&nbsp;· offline</span>{/if}</span>
 								<span class="hint" class:mono={w.online && source === 'github'}>
 									{#if !w.online}
 										runs when it's back

@@ -8,12 +8,14 @@
 	import Switch from '../rows/Switch.svelte';
 	import InlineBanner from '../rows/InlineBanner.svelte';
 	import { MachineSettingsModel, OUTCOME_TEXT, signInText } from './machine-settings.svelte';
+	import { workerDisplayName } from '$lib/components/ui/worker-name';
 
 	let { deviceId, self = false, showAvailability = true, onAvailabilityChange, model = new MachineSettingsModel() }: {
 		deviceId?: string; self?: boolean; showAvailability?: boolean; onAvailabilityChange?: () => void; model?: MachineSettingsModel;
 	} = $props();
 	const access = getSettingsAccess();
-	const worker = $derived(model.workers.find((w) => self ? w.is_self : w.device_id === deviceId));
+	const workers = $derived(model.workers.map(w => ({ ...w, device_name: workerDisplayName(w.device_name, w.is_self ? 'Local' : 'Worker') })));
+	const worker = $derived(workers.find((w) => self ? w.is_self : w.device_id === deviceId));
 	const cli = $derived(worker?.status?.claude);
 	const channel = $derived(worker?.status?.release_channel);
 	const busy = $derived(model.saving || access.readOnly || model.stale);
@@ -121,7 +123,7 @@
 		{#if model.results.length}
 			<ul class="results" aria-label="Worker action results" aria-live="polite">
 				{#each model.results as result (result.device_id)}
-					<li>{result.device_name}: {OUTCOME_TEXT[result.reason] ?? 'Status unavailable'}</li>
+					<li>{workers.find(w => w.device_id === result.device_id)?.device_name ?? workerDisplayName(result.device_name)}: {OUTCOME_TEXT[result.reason] ?? 'Status unavailable'}</li>
 				{/each}
 			</ul>
 		{/if}

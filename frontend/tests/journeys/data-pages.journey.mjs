@@ -122,11 +122,17 @@ await runJourney({
    await mark('Files keeps an edged card with a folder/file count');
    expect(await page.locator('.fs-main.st-card').count()===1,'F1: file list is a card');
    expect((await page.locator('.fs-footer').innerText()).includes('folders'),'F1: footer counts folders');
+   const edges=await page.locator('.fs-main').evaluate(el=>{
+    const card=el.getBoundingClientRect(), rows=[...el.querySelectorAll('.fs-row')];
+    const first=rows[0].getBoundingClientRect(), last=rows.at(-1).getBoundingClientRect();
+    return {left:first.left-card.left,right:card.right-first.right,bottom:card.bottom-last.bottom,lastBorder:getComputedStyle(rows.at(-1)).borderBottomWidth};
+   });
+   expect(edges.left<=1&&edges.right<=1&&edges.bottom<=1&&edges.lastBorder==='0px','D4: file rows and dividers reach the card edge without a bottom strip '+JSON.stringify(edges));
    if(phone) {
     const actions=page.locator('.fs-phone-actions');
     const upload=await actions.getByRole('button',{name:'Upload',exact:true}).boundingBox();
     const folder=await actions.getByRole('button',{name:'New folder',exact:true}).boundingBox();
-    expect(upload&&folder&&upload.y===folder.y&&Math.abs(upload.width-folder.width)<0.1,'F2: primary file actions share one equal-width row '+JSON.stringify({upload,folder}));
+    expect(upload&&folder&&upload.y===folder.y&&upload.width>folder.width,'D4: Upload grows while New folder fits its content '+JSON.stringify({upload,folder}));
     // R3 deliberately separates the drawn 32px box from its 44px tap area.
     for(const label of ['Upload','New folder']) {
      const target=await actions.getByRole('button',{name:label,exact:true}).evaluate(el=>{
@@ -135,9 +141,9 @@ await runJourney({
      });
      expect(target.drawn>=32&&target.drawn<=36&&target.height>=44&&target.width>=44,'R3: compact file action retains its 44px tap area '+JSON.stringify(target));
     }
-    await actions.getByText('More',{exact:true}).click();
-    expect(await actions.getByRole('button',{name:'Open terminal here',exact:true}).isEnabled(),'F2: guarded terminal action remains reachable');
-    await actions.getByText('More',{exact:true}).click();
+    await page.getByLabel('More file actions',{exact:true}).click();
+    expect(await page.getByRole('button',{name:'Open terminal here',exact:true}).isEnabled(),'R2: guarded terminal action remains reachable from the phone bar');
+    await page.getByLabel('More file actions',{exact:true}).click();
    }
    const create=page.getByRole('button',{name:'New folder',exact:true}).filter({visible:true});
    await mark('new folder keeps its original create/cancel path');
@@ -145,6 +151,33 @@ await runJourney({
    await page.getByRole('textbox',{name:'Folder name',exact:true}).fill('cancelled-r9-folder');
    await page.locator('.fs-newfolder').getByRole('button',{name:'Cancel',exact:true}).click();
    expect(!await page.locator('.fs-newfolder').count(),'folder draft can be cancelled');
+  }
+ }, {
+  name: 'pull-request-fixed-metadata-lines',
+  async setup({page,status,variant}) {
+   const row={repo:'example/workspace',number:142,title:'Bring every destination onto the shared panel',url:'https://github.com/example/workspace/pull/142',author:'preview',head_branch:'feat/unified-workspace',base_branch:'main',state:'open',review:'approved',checks:'passing',updated_at:new Date().toISOString(),projects:[{id:'dev-sandbox',name:'Dev sandbox'}]};
+   await page.route('**/api/v1/github/inbox?*',r=>r.fulfill({json:{items:[row,{...row,number:144,title:'Keep phone navigation one step back',head_branch:'fix/a-longer-branch-name-to-check-clean-desktop-wrapping'}],repos:[row.repo],skipped:[]}}));
+   await gotoApp(page,status,native&&variant.viewport==='phone'?'/mobile/':'/');
+   const workspace=page.getByRole('navigation',{name:'Workspace',exact:true});
+   if(!await workspace.isVisible())await page.getByRole('button',{name:/^(Open menu|Show sidebar|Chats)( \(|$)/}).first().click();
+   const target=workspace.getByRole('button',{name:'Pull requests',exact:true});
+   if(await target.isVisible())await target.click();
+   else {await workspace.getByRole('button',{name:'More',exact:true}).click();await page.getByRole('menuitem',{name:'Pull requests',exact:true}).click();}
+   await page.locator('.pri-row').first().waitFor();
+  },
+  async act({page,mark,variant}) {
+   await mark('keep repository, branch and attribution on clean metadata lines');
+   const rows=await page.locator('.pri-row').evaluateAll(els=>els.map(el=>{
+    const box=s=>{const r=el.querySelector(s).getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height};};
+    return {repo:box('.pri-repo'),branch:box('.pri-branch'),by:box('.pri-attribution'),title:box('.pri-title'),external:box('.pri-external'),separators:[...el.querySelectorAll('.pri-meta > span')].map(s=>getComputedStyle(s,'::before').content)};
+   }));
+   for(const row of rows) {
+    expect(row.separators.every(s=>s==='none'||s==='normal'),'D1: wrapping metadata cannot create a leading separator');
+    expect(row.external.width===20&&row.external.y===row.title.y,'D1: external icon has a fixed top-aligned trailing column');
+    if(variant.viewport==='phone')expect(row.repo.y<row.branch.y&&row.branch.y<row.by.y,'D1: phone metadata has three fixed lines '+JSON.stringify(row));
+   }
+   if(variant.viewport==='phone')expect(rows[0].external.x===rows[1].external.x,'D1: external-link column stays in the same place');
+   expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'D1: no horizontal overflow');
   }
  }, {
   name: 'worker-rows-and-one-local-remove',

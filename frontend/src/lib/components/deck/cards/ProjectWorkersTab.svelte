@@ -18,6 +18,7 @@
 	import { Check, X, Loader2, FolderOpen, MessageSquarePlus, RotateCw, Github } from 'lucide-svelte';
 	import { RowGroup, SettingRow, EmptyDetail, InlineBanner } from '$lib/components/layout/view';
 	import TextField from '$lib/components/settings/rows/TextField.svelte';
+	import { workerDisplayName } from '$lib/components/ui/worker-name';
 	import './project-tabs.css';
 	import {
 		cancelProjectSetup,
@@ -76,7 +77,7 @@
 
 	const refKey = $derived(JSON.stringify(projectRef));
 	const kind = $derived(data?.kind ?? null);
-	const workers = $derived(data?.workers ?? []);
+	const workers = $derived((data?.workers ?? []).map(w => ({ ...w, device_name: workerDisplayName(w.device_name, w.is_self ? 'Local' : 'Worker') })));
 	const missingOnline = $derived(workers.filter((w) => w.online && (w.state === 'missing') && !isRunning(w)));
 	const anyRunning = $derived(workers.some((w) => isRunning(w)));
 

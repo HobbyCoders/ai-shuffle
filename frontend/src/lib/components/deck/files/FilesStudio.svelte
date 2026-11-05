@@ -11,13 +11,14 @@
 		Folder, File as FileIcon, FileCode, FileText, FileImage, FileVideo, FileAudio,
 		FileArchive, FileSpreadsheet, Database, Settings, Package,
 		FolderPlus, Upload, Download, Trash2, Edit3, Home, Check, X, Loader2,
-		ServerOff, FolderX, RotateCw, ChevronDown
+		ServerOff, FolderX, RotateCw, MoreHorizontal
 	} from 'lucide-svelte';
 	import { files, sortedFiles, breadcrumbs, type FileItem } from '$lib/stores/files.svelte';
 
 	import FilesTreeNode from './FilesTreeNode.svelte';
 	import FilesWorkerPicker from './FilesWorkerPicker.svelte';
 	import { findWorker, workerOptions, type WorkerOption } from './files-workers';
+	import { selfWorkerName, workerDisplayName } from '$lib/components/ui/worker-name';
 	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
 	import RowActionMenu from '$lib/components/ui/RowActionMenu.svelte';
 	import FilesTerminalDrawer from './FilesTerminalDrawer.svelte';
@@ -65,7 +66,7 @@
 	let installs = $state<Install[]>([]);
 	let installsLoading = $state(true);
 	let installsFailed = $state(false);
-	const workerChoices = $derived(workerOptions(installs));
+	const workerChoices = $derived(workerOptions(installs).map(w => ({ ...w, name: w.isSelf ? selfWorkerName(installs) : workerDisplayName(w.name) })));
 	const selectedWorker = $derived<WorkerOption>(
 		findWorker(workerChoices, workerId) ?? {
 			// A remembered worker before the list arrives: never show this
@@ -322,23 +323,24 @@
 			<button class="st-btn touch" onclick={openNewFolder} disabled={!!loadError}><FolderPlus size={15} /><span>New folder</span></button>
 			<button class="st-btn touch primary" onclick={triggerUpload} disabled={uploading || !!loadError}>{#if uploading}<Loader2 size={15} class="fs-spin" />{:else}<Upload size={15} />{/if}<span>{uploading ? `Uploading ${uploadProgress}%` : 'Upload'}</span></button>
 		{/snippet}
-		<DetailPane width="data" name={folderName} onBack={back} backLabel="Files" primary={phone ? undefined : desktopActions}>
+		{#snippet phoneMore()}
+				{#if workerId === null}<details class="fs-more"><summary class="st-btn icon" aria-label="More file actions" title="More file actions"><MoreHorizontal size={18} /></summary><div class="fs-more-menu"><button class="st-btn touch" disabled={loading || !!loadError || terminalBusy} onclick={(e) => { e.currentTarget.closest('details')?.removeAttribute('open'); terminalDrawer.open(currentPath); }}>Open terminal here</button></div></details>{/if}
+			{/snippet}
+			{#snippet folderCrumbs()}
+				<nav class="fs-crumbs" aria-label="Breadcrumb">
+					{#each $breadcrumbs as crumb, i (crumb.path)}
+						{#if i > 0}<span aria-hidden="true">/</span>{/if}
+						<button class="st-btn touch ghost dense" aria-current={i === $breadcrumbs.length - 1 ? 'page' : undefined} title={crumb.path || 'Workspace'} onclick={() => navigate(crumb.path)}>{crumb.name}</button>
+					{/each}
+				</nav>
+			{/snippet}
+			<DetailPane width="data" name={folderName} subtitle={currentPath ? folderCrumbs : undefined} onBack={back} backLabel="Files" primary={phone ? undefined : desktopActions} phoneMenu={workerId === null ? phoneMore : undefined}>
 				{#snippet tile()}{/snippet}
 				{#snippet topStatus()}{/snippet}
-				{#snippet subtitle()}
-					<span>{selectedWorker.name}</span>
-					{#if currentPath}<span aria-hidden="true">·</span><nav class="fs-crumbs" aria-label="Breadcrumb">
-						{#each $breadcrumbs as crumb, i (crumb.path)}
-							{#if i > 0}<span aria-hidden="true">/</span>{/if}
-							<button class="st-btn touch ghost dense" aria-current={i === $breadcrumbs.length - 1 ? 'page' : undefined} title={crumb.path || 'Workspace'} onclick={() => navigate(crumb.path)}>{crumb.name}</button>
-						{/each}
-					</nav>{/if}
-				{/snippet}
 				{#if phone}
 					<div class="fs-phone-actions">
 						<button class="st-btn touch primary" onclick={triggerUpload} disabled={uploading || !!loadError}>{#if uploading}<Loader2 size={15} class="fs-spin" />{:else}<Upload size={15} />{/if}<span>{uploading ? `Uploading ${uploadProgress}%` : 'Upload'}</span></button>
 						<button class="st-btn touch" onclick={openNewFolder} disabled={!!loadError}><FolderPlus size={15} /><span>New folder</span></button>
-						{#if workerId === null}<details class="fs-more"><summary class="st-btn touch" aria-label="More file actions">More<ChevronDown size={14} /></summary><div class="fs-more-menu"><button class="st-btn touch" disabled={loading || !!loadError || terminalBusy} onclick={(e) => { e.currentTarget.closest('details')?.removeAttribute('open'); terminalDrawer.open(currentPath); }}>Open terminal here</button></div></details>{/if}
 					</div>
 				{/if}
 				{#if showNewFolder}
@@ -433,18 +435,19 @@
 	.fs-crumbs { display: flex; gap: 2px; align-items: center; flex-wrap: wrap; min-width: 0; }
 	.fs-crumbs button { max-width: 240px; overflow: hidden; text-overflow: ellipsis; display: block; }
 	.fs-crumbs button[aria-current] { color: var(--st-fg); }
-	.fs-main { position: relative; min-width: 0; padding: 0 16px 16px; }
+	.fs-main { position: relative; min-width: 0; padding: 0; overflow: hidden; }
 	.fs-footer { padding-top: 12px; color: var(--st-mfg); font-size: 12px; }
-	.fs-phone-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)) auto; gap: 8px; align-items: center; margin-bottom: 20px; }
-	.fs-phone-actions > button { flex: 1 1 0; min-width: 0; padding-inline: 8px; min-height: 44px; }
+	.fs-phone-actions { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; margin-bottom: 20px; }
+	.fs-phone-actions > button { min-width: 0; padding-inline: 12px; justify-content: center; }
 	.fs-more { position: relative; flex: none; }
-	.fs-more summary { list-style: none; cursor: pointer; min-width: 44px; min-height: 44px; padding-inline: 0; gap: 2px; font-size: 12px; }
+	.fs-more summary { list-style: none; cursor: pointer; }
 	.fs-more summary::-webkit-details-marker { display: none; }
 	.fs-more summary::before { display: none !important; }
 	.fs-more-menu { position: absolute; top: calc(100% + 4px); right: 0; z-index: 20; padding: 8px; min-width: max-content; border: 1px solid var(--st-border); border-radius: var(--st-radius-md); background: var(--st-popover); box-shadow: var(--st-shadow); }
-	.fs-row { display: grid; grid-template-columns: 32px minmax(0, 1fr) 132px 80px 100px; grid-template-areas: "select name actions size modified"; gap: 12px; align-items: center; min-height: 44px; border-bottom: 1px solid var(--st-border); font-size: 13px; cursor: pointer; --ram-reveal: 0; --ram-touch-size: 44px; }
+	.fs-row { display: grid; grid-template-columns: 32px minmax(0, 1fr) 132px 80px 100px; grid-template-areas: "select name actions size modified"; gap: 12px; align-items: center; min-height: 44px; padding-inline: 16px; border-bottom: 1px solid var(--st-border); font-size: 13px; cursor: pointer; --ram-reveal: 0; --ram-touch-size: 44px; }
 	.fs-row:hover, .fs-row:focus-within { background: var(--st-hover); --ram-reveal: 1; }
 	.fs-row.selected { background: var(--st-accent); }
+	.fs-row:last-child { border-bottom: 0; }
 	.fs-row--head { color: var(--st-mfg); cursor: default; font-size: 12px; }
 	.fs-row--head:hover { background: transparent; }
 	.fs-row > :global(:first-child) { grid-area: select; }

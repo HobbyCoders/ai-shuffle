@@ -9,6 +9,9 @@ describe('ProviderGlyph', () => {
 	it.each(['kimi', 'minimax', 'opencode'] as const)('renders a monochrome neutral initial for %s', (kind) => {
 		const { container } = render(ProviderGlyph, { kind });
 		expect(container.querySelector('svg')?.getAttribute('fill')).toBe('currentColor');
+			expect(container.querySelector('rect')?.getAttribute('opacity')).toBe('0.1');
+			expect(container.querySelector('rect')?.getAttribute('rx')).toBe('5');
+			expect(container.querySelector('text')?.getAttribute('y')).toBe('12');
 		expect(container.querySelector('text')?.textContent).toBe(kind === 'kimi' ? 'K' : kind === 'minimax' ? 'M' : 'O');
 	});
 	it.each([
@@ -37,6 +40,7 @@ describe('ProviderGlyph', () => {
 			const { container } = render(ProviderGlyph, { props: { kind } });
 			const logo = container.querySelector<SVGElement>(`[data-provider-logo="${kind}"]`);
 			expect(logo).toBeTruthy();
+				expect(logo?.querySelector('rect')).toBeNull();
 			expect(logo?.querySelector('path')?.getAttribute('d')?.length).toBeGreaterThan(50);
 		}
 	);
