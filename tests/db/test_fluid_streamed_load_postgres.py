@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import contextmanager
 from threading import Event
+from types import SimpleNamespace
 import time
 from uuid import uuid4
 
@@ -36,11 +37,12 @@ async def _transcript():
 
 
 @pytest.fixture
-def short_idle_budget(monkeypatch):
+def load_budgets(monkeypatch):
     from app.core.provider import fluid_pg_store as module
     from app.db import base
 
-    completed = []
+    # Healthy loads use production budgets unless a test explicitly opts in.
+    control = SimpleNamespace(idle=None, statement=None, completed=[])
     real_db = base.get_db
     budgets = ("idle_in_transaction_session_timeout", "statement_timeout", "lock_timeout")
 
@@ -61,8 +63,10 @@ def short_idle_budget(monkeypatch):
                 pid = conn.get_backend_pid()
                 original = conn
                 cur = conn.cursor()
-                cur.execute("SET LOCAL idle_in_transaction_session_timeout = '60ms'")
-                cur.execute("SET LOCAL statement_timeout = '100ms'")
+                if control.idle is not None:
+                    cur.execute("SET LOCAL idle_in_transaction_session_timeout = %s", (control.idle,))
+                if control.statement is not None:
+                    cur.execute("SET LOCAL statement_timeout = %s", (control.statement,))
                 yield conn
         finally:
             # The real get_db has committed/rolled back and returned its slot.
@@ -71,10 +75,10 @@ def short_idle_budget(monkeypatch):
                     if not original.closed:
                         assert conn.get_backend_pid() == pid
                     assert settings(conn) == previous
-                    completed.append(pid)
+                    control.completed.append(pid)
 
     monkeypatch.setattr(module, "get_db", opened)
-    return completed
+    return control
 
 
 def _empty_cache(store, session_id):
@@ -85,7 +89,7 @@ def _empty_cache(store, session_id):
 
 
 @pytest.mark.asyncio
-async def test_slow_decode_survives_idle_budget_and_keeps_pool_available(monkeypatch, short_idle_budget):
+async def test_slow_decode_survives_idle_budget_and_keeps_pool_available(monkeypatch, load_budgets):
     from app.core.provider import fluid_pg_store as module
     from app.db import base
 
@@ -103,16 +107,21 @@ async def test_slow_decode_survives_idle_budget_and_keeps_pool_available(monkeyp
             # Includes the next FETCH: an upper bound on the first batch's work.
             batch_clock["elapsed"] = now - batch_clock["start"]
         entered.set()
-        time.sleep(0.08)  # Longer than idle budget; not an SQL execution.
+        if text == "node-00":
+            time.sleep(3.5)  # Exceeds the control's 3s idle limit, not ordinary jitter.
         return original(raw)
 
     monkeypatch.setattr(module.Message, "from_dict", slow_decode)
     guard = module.transcript_decode_timeouts
-    # Control: the pre-fix path really loses its transaction on this server.
+    # Both attempts tolerate scheduling jitter before the guard, but only the
+    # guarded attempt can survive a longer decode stall between FETCH commands.
+    load_budgets.idle = "3s"
     monkeypatch.setattr(module, "transcript_decode_timeouts", lambda cur: None)
     with pytest.raises((psycopg2.OperationalError, psycopg2.InterfaceError)):
         await cold.get_session(session_id)
+    assert entered.is_set()  # Control reached decode, not an unrelated SQL error.
     _empty_cache(cold, session_id)
+    assert not base._pg_pool._used
     monkeypatch.setattr(module, "transcript_decode_timeouts", guard)
     entered.clear()
     loading = asyncio.create_task(cold.get_session(session_id))
@@ -135,12 +144,12 @@ async def test_slow_decode_survives_idle_budget_and_keeps_pool_available(monkeyp
     assert len(cold._nodes[session_id]) == 33
     assert cold._sessions[session_id].head_node_id == "node-32"
     assert [n.message.text() for n in await cold.load_path(session_id)] == [f"node-{i:02d}" for i in range(33)]
-    assert short_idle_budget  # Success committed and restored all three limits.
+    assert load_budgets.completed  # Success committed and restored all three limits.
     assert not base._pg_pool._used
 
 
 @pytest.mark.asyncio
-async def test_slow_decode_failure_rolls_back_without_publishing_and_retries(monkeypatch, short_idle_budget):
+async def test_slow_decode_failure_rolls_back_without_publishing_and_retries(monkeypatch, load_budgets):
     from app.core.provider import fluid_pg_store as module
     from app.db import base
 
@@ -162,12 +171,12 @@ async def test_slow_decode_failure_rolls_back_without_publishing_and_retries(mon
     monkeypatch.setattr(module.Message, "from_dict", original)
     assert await cold.get_session(session_id)
     assert len(cold._nodes[session_id]) == 33
-    assert short_idle_budget
+    assert load_budgets.completed
     assert not base._pg_pool._used
 
 
 @pytest.mark.asyncio
-async def test_fetch_still_has_statement_deadline_and_can_retry(monkeypatch, short_idle_budget):
+async def test_fetch_still_has_statement_deadline_and_can_retry(monkeypatch, load_budgets):
     from app.core.provider import fluid_pg_store as module
     from app.db import base
 
@@ -184,19 +193,22 @@ async def test_fetch_still_has_statement_deadline_and_can_retry(monkeypatch, sho
             kwargs["cursor_factory"] = SlowFetch
         return real_cursor(conn, *args, **kwargs)
 
+    load_budgets.statement = "100ms"  # Only the negative SQL-timeout attempt.
     monkeypatch.setattr(base._PgDictConnection, "cursor", cursor)
     with pytest.raises(psycopg2.errors.QueryCanceled, match="statement timeout"):
         await cold.get_session(session_id)
     _empty_cache(cold, session_id)
     assert not base._pg_pool._used
     monkeypatch.setattr(base._PgDictConnection, "cursor", real_cursor)
+    load_budgets.statement = None
     assert await cold.get_session(session_id)
     assert len(cold._nodes[session_id]) == 33
-    assert short_idle_budget
+    assert load_budgets.completed
+    assert not base._pg_pool._used
 
 
 @pytest.mark.asyncio
-async def test_stalled_decode_expires_without_publishing_and_retries(monkeypatch, short_idle_budget):
+async def test_stalled_decode_expires_without_publishing_and_retries(monkeypatch, load_budgets):
     from app.core.provider import fluid_pg_store as module
     from app.db import base
 
@@ -226,5 +238,5 @@ async def test_stalled_decode_expires_without_publishing_and_retries(monkeypatch
     monkeypatch.setattr(module, "transcript_decode_timeouts", guard)
     assert await cold.get_session(session_id)
     assert len(cold._nodes[session_id]) == 33
-    assert short_idle_budget
+    assert load_budgets.completed
     assert not base._pg_pool._used
