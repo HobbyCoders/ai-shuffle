@@ -37,6 +37,17 @@ await runJourney({
    await open('Stats');
    await page.locator('[data-view-shell="Stats"] .metrics').waitFor();
    await checkSingleTitle('Stats');
+   if(!phone) {
+    await mark('align Settings and data-page titles on the shared top line');
+    const statsTitle=await page.getByRole('heading',{level:2,name:'Stats',exact:true}).boundingBox();
+    await open('Settings');
+    await page.locator('nav[aria-label=Settings]').getByRole('button',{name:/^General/}).filter({visible:true}).first().click();
+    const general=page.locator('.st-page-h h1').filter({visible:true});
+    await general.waitFor();
+    expect((await general.boundingBox()).y===statsTitle.y,'Settings and data-page title text share the exact top line');
+    await open('Stats');
+    await page.locator('[data-view-shell="Stats"] .metrics').waitFor();
+   }
    if(phone) {
     expect(await page.locator('[data-view-shell="Stats"]').getAttribute('data-pane')==='detail','Stats opens directly on KPIs');
     expect(!await page.locator('[data-view-shell="Stats"] .st-back-row').count(),'Stats adds no Back row');

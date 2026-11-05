@@ -67,7 +67,7 @@
 		{
 			"why": "content-first data destinations keep their shared phone header, ranges, states and filters reachable",
 			"journeys": ["data-pages"],
-			"globs": ["frontend/tests/journeys/data-pages.journey.mjs", "frontend/src/lib/components/deck/cards/StatsCard.svelte", "frontend/src/lib/components/deck/cards/PrInboxCard.svelte", "frontend/src/lib/components/settings/shell/DetailPane.svelte"]
+			"globs": ["frontend/tests/journeys/data-pages.journey.mjs", "frontend/src/lib/components/deck/cards/StatsCard.svelte", "frontend/src/lib/components/deck/cards/PrInboxCard.svelte", "frontend/src/lib/components/settings/shell/DetailPane.svelte", "frontend/src/lib/components/settings/shell/PreferencePage.svelte"]
 		},
 		{
 			"why": "note writing, autosave, Preview and moved actions remain reachable in responsive and native shells",
