@@ -92,9 +92,9 @@
 		untrack(() => {
 			settingsNav.stacked = s;
 			if (s && !stackStarted) {
-				// Entering the stack: start at the index unless a target is landing.
+				// Start at the index so a pending target builds every Back step.
 				stackStarted = true;
-				if (!initialItemId && !targetLanded) settingsNav.resetStack('index');
+				if (!targetLanded) settingsNav.resetStack('index');
 			} else if (!s) {
 				stackStarted = false;
 				settingsNav.depth = 0;
@@ -102,10 +102,13 @@
 		});
 	});
 
+	// The outgoing phone ViewShell pops its detail entry asynchronously. Track
+	// only that marker, so our own Settings pushes do not replay the target.
+	const retiringDetail = $derived((page.state as { viewPanelDetail?: string })?.viewPanelDetail);
 	// Deep links (openSettings / legacy openSettingsTab).
 	$effect(() => {
 		const raw = initialItemId;
-		if (!raw) return;
+		if (!raw || retiringDetail) return;
 		untrack(() => {
 			const target = decodeTarget(raw);
 			settingsNav.stacked = stacked;

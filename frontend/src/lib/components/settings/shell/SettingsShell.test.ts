@@ -370,6 +370,47 @@ describe('SettingsShell deep links', () => {
 });
 
 describe('SettingsShell stacked mode', () => {
+	it('waits for the outgoing phone detail to retire before landing a retained-shell deep link', async () => {
+		platform.set('mobile');
+		const view = render(SettingsShell);
+		await tick();
+		page.state = { viewPanelDetail: 'automations' };
+		await tick();
+		const target = encodeTarget({ category: 'providers', item: 'provider:claude', anchor: 'providers.claudeMode' });
+		await view.rerender({ initialItemId: target });
+		await tick();
+		expect(mocks.pushState).not.toHaveBeenCalled();
+
+		// The outgoing ViewShell's asynchronous history.back() has now completed.
+		mocks.pushState.mockImplementation((_url, state) => { page.state = state; });
+		page.state = {};
+		await tick();
+		await waitFor(() => expect(settingsNav.view).toBe('detail'));
+		expect(mocks.pushState.mock.calls.map(([, state]) => state.settingsView)).toEqual(['page', 'detail']);
+		expect(settingsNav.depth).toBe(2);
+		expect(settingsNav.selectedItem('providers')).toBe('provider:claude');
+		await view.rerender({ initialItemId: undefined });
+
+		page.state = mocks.pushState.mock.calls[0][1];
+		await tick();
+		expect(settingsNav.view).toBe('page');
+		page.state = {};
+		await tick();
+		expect(settingsNav.view).toBe('index');
+	});
+
+	it('builds both Back steps for a cold phone-width deep link after the shell measures', async () => {
+		const originalWidth = window.innerWidth;
+		onTestFinished(() => Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalWidth }));
+		Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 });
+		render(SettingsShell, {
+			initialItemId: encodeTarget({ category: 'providers', item: 'provider:claude', anchor: 'providers.claudeMode' })
+		});
+		await waitFor(() => expect(settingsNav.stacked).toBe(true));
+		await waitFor(() => expect(settingsNav.view).toBe('detail'));
+		expect(mocks.pushState.mock.calls.map(([, state]) => state.settingsView)).toEqual(['page', 'detail']);
+	});
+
 	it('shows one pane at a time and pushes a history entry per step', async () => {
 		platform.set('mobile');
 		const back = vi.spyOn(history, 'back').mockImplementation(() => {});
