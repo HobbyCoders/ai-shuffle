@@ -8,8 +8,13 @@ import { resolve } from 'node:path';
 const source = readFileSync(resolve(process.cwd(), 'src/lib/components/chat/MessageArea.svelte'), 'utf8');
 const binding = source.match(/style:overflow-anchor=\{([^}]+)\}/)?.[1];
 
-it.each([[true, 'none'], [false, 'auto']])('gives native anchoring the correct owner when following=%s', (following, expected) => {
+it.each([
+	[true, null, 'none'],
+	[false, null, 'auto'],
+	[true, 'already-visible error', 'auto'],
+	[false, 'already-visible error', 'auto']
+])('gives native anchoring the correct owner when following=%s and error=%s', (following, error, expected) => {
 	expect(binding, 'the transcript must bind anchoring to its follow owner').toBeDefined();
-	const anchoring = new Function('shouldAutoScroll', `return (${binding});`);
-	expect(anchoring(following)).toBe(expected);
+	const anchoring = new Function('shouldAutoScroll', 'presentedTailError', `return (${binding});`);
+	expect(anchoring(following, error)).toBe(expected);
 });

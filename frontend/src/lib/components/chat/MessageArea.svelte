@@ -246,7 +246,7 @@
 	let tailControlsRef = $state<HTMLDivElement | null>(null);
 	let tailErrorRef = $state<HTMLDivElement | null>(null);
 	let tailErrorOffsetPx = $state(0);
-	let presentedTailError: string | null = null;
+	let presentedTailError = $state<string | null>(null);
 	let followedViewportEnd = 0;
 	let followedFloorSession: string | null = null;
 	let currentTurnAnchorId: string | null = null;
@@ -2416,7 +2416,7 @@
 	aria-label="Conversation messages"
 	aria-busy={$activeSession.isStreaming}
 	class="msg-scroll flex-1 overflow-y-auto overscroll-contain"
-	style:overflow-anchor={shouldAutoScroll ? 'none' : 'auto'}
+	style:overflow-anchor={shouldAutoScroll && !presentedTailError ? 'none' : 'auto'}
 >
 	{#if transcriptRender === 'skeleton'}
 		<!-- Hydration skeleton. NOT the empty hero: this session has a transcript,
@@ -2830,8 +2830,8 @@
 		.chat-error-dismiss { transition: none; }
 	}
 
-	/* Native anchoring protects scrolled-up readers from off-screen resizes.
-	   Followers are positioned by the app instead (inline override): otherwise
+	/* Native anchoring protects scrolled-up readers and the retained error slot.
+	   Ordinary followers are positioned by the app (inline override): otherwise
 	   a temporary composer clamp can be remembered and restored by the browser
 	   when Stop adds rows, moving the already-followed reading surface. */
 	.transcript-shell {
