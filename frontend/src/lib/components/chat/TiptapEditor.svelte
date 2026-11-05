@@ -453,15 +453,19 @@
 		margin: 0;
 	}
 
-	/* Placeholder sits on the text line so it shares the caret's vertical
-	   position. height: 0 keeps it out of layout, matching TipTap's default. */
+	/* The placeholder shares the caret's line, without adding draft height.
+	   It must not wrap outside that line: a float with height:0 let the second
+	   line paint under the controls in the responsive desktop shell (#1011). */
 	.tiptap-editor :global(.ProseMirror p.is-editor-empty:first-child::before) {
 		content: attr(data-placeholder);
 		color: var(--subtle-foreground);
 		font-weight: 400;
 		pointer-events: none;
-		float: left;
-		height: 0;
+		position: absolute;
+		inset-inline: 0;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
 	}
 
 	/* Use the real placeholder line without adding content or height to the draft. */

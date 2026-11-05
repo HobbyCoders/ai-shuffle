@@ -353,6 +353,12 @@ html:root[data-platform='mobile'] .project-name {
 
 /* ── frontend/src/lib/components/layout/ChatView.svelte ────────────────────── */
 
+/* This shell already docks the empty composer beneath the hero. Keep the
+   message reveal, without the shared input's invented -30vh trip (#1073). */
+html:root[data-platform='mobile'] .transitioning-from-empty .input-wrapper {
+	animation: none;
+}
+
 /* The invitation sits just above the pinned composer and never shrinks; when
    it does not fit, the whole empty surface scrolls. The project popup uses the
    top layer. */

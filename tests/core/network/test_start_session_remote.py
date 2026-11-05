@@ -114,9 +114,14 @@ async def test_remote_start_receiver_preference_beats_sender_fallback_not_explic
 @pytest.mark.parametrize("saved", [True, False])
 async def test_remote_sol_start_uses_real_synced_composer_preference(workers, monkeypatch, kicks, saved):
     from types import SimpleNamespace
-    from app.core import preference_identity
+
+    from app.core import encryption, preference_identity
+    from app.core.provider.fluid_credentials import resolve_provider_credentials
+    from app.db import model_providers
 
     a, b, _ = network(workers, monkeypatch)
+    # connect_owner's real app lifespan runs before installing this test key.
+    monkeypatch.setattr(encryption, "_encryption_key", encryption.Fernet.generate_key())
     monkeypatch.setattr(preference_identity, "local_owner_account", lambda: "test-owner")
     with b.active():
         identity = preference_identity.request_preference_identity(
@@ -124,11 +129,18 @@ async def test_remote_sol_start_uses_real_synced_composer_preference(workers, mo
         database.set_user_preference(*identity, "composer.modelFast.gpt-6.1-sol", saved)
         database.create_model_provider("chatgpt-plan", "ChatGPT plan", "chatgpt",
                                        "https://example.invalid", models=[{"id": "gpt-6.1-sol"}])
+        model_providers.set_codex_token_bundle(
+            "chatgpt-plan", access_token=encryption.encrypt_value("fixture-access"),
+            refresh_token=encryption.encrypt_value("fixture-refresh"),
+            account_id="fixture-account", needs_reauth=False, auth_mode="chatgpt")
         database.set_session_run_binding("caller", model="prov:chatgpt-plan:gpt-6.1-sol", fast=not saved)
         engine.scan_all()
     converge([a, b])
     with a.active():
         assert database.get_user_preference(*identity, "composer.modelFast.gpt-6.1-sol")["value"] is saved
+        credentials = await resolve_provider_credentials("openai_responses", "chatgpt-plan")
+        assert credentials.provider_id == "chatgpt-plan" and credentials.use_codex_backend
+        assert await credentials.auth.get_access_token() == "fixture-access"
     with b.active():
         result = await start(ARGS)
         assert not result.is_error, result.text
@@ -140,6 +152,39 @@ async def test_remote_sol_start_uses_real_synced_composer_preference(workers, mo
         assert row["model"] == "prov:chatgpt-plan:gpt-6.1-sol"
         assert bool(row["fast"]) is saved
         assert turn["overrides"]["fast"] is saved
+
+
+
+
+async def test_synced_owner_account_pin_resolves_real_credentials(workers, monkeypatch, kicks):
+    from app.core import encryption, model_override
+    from app.core.provider.fluid_credentials import resolve_provider_credentials
+    from app.db import model_providers
+
+    a, b, _ = network(workers, monkeypatch)
+    monkeypatch.setattr(encryption, "_encryption_key", encryption.Fernet.generate_key())
+    with b.active():
+        database.create_model_provider("old-pin", "Old login", "chatgpt", "https://example.invalid",
+                                       models=[{"id": "gpt-6.1-sol"}])
+        database.create_model_provider("owner-login", "Owner login", "chatgpt", "https://example.invalid",
+                                       models=[{"id": "gpt-6.1-sol"}])
+        model_providers.set_codex_token_bundle(
+            "owner-login", access_token=encryption.encrypt_value("fixture-owner-access"),
+            refresh_token=encryption.encrypt_value("fixture-owner-refresh"),
+            account_id="fixture-owner-account", needs_reauth=False, auth_mode="chatgpt")
+        assert not database.get_model_provider("old-pin")["enabled"]
+        assert not model_providers.get_codex_tokens("old-pin")["codex_access_token"]
+        engine.scan_all()
+    converge([a, b])
+    for worker in (a, b):
+        with worker.active():
+            # Neither eligibility nor actual runtime authentication requires a
+            # token on the disabled pin: both follow the owner's active slot.
+            choice = model_override.resolve("prov:old-pin:gpt-6.1-sol")
+            assert choice.provider_id == "owner-login"
+            credentials = await resolve_provider_credentials("openai_responses", "old-pin")
+            assert credentials.provider_id == "owner-login" and credentials.use_codex_backend
+            assert await credentials.auth.get_access_token() == "fixture-owner-access"
 
 
 @pytest.mark.parametrize("old_receiver", [True, False])

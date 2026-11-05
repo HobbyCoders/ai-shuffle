@@ -20,6 +20,7 @@ import asyncio
 import sys
 import logging
 import uuid
+from collections.abc import Callable
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 
@@ -1671,6 +1672,7 @@ def create_builtin_tools_server(
     provider_id: Optional[str] = None,
     cwd: Optional[str] = None,
     workflow_guidance: bool = False,
+    runtime_model_supplier: Callable[[], tuple[str | None, str | None]] | None = None,
 ) -> Optional[Any]:
     """
     Build the ``mcp__builtins__*`` MCP server for a session.
@@ -1695,6 +1697,8 @@ def create_builtin_tools_server(
             without it those agents are advertised but not dispatchable.
         workflow_guidance: The host prompt supplies delegation/checkout rules;
             omit those duplicates from Task. False keeps standalone callers safe.
+        runtime_model_supplier: Current applied host model/provider, including
+            successful hot-swaps when this server survives pooled-client reuse.
 
     Returns:
         In-process MCP server config, or ``None`` if the tool helpers are
@@ -1939,6 +1943,7 @@ def create_builtin_tools_server(
         async def invoke(args: dict) -> dict:
             ctx = ToolCtx(cwd=cwd or ".", session_id=session_id)
             ctx.extra["session_orchestration"] = orchestration_handler(lambda: session_id)
+            ctx.extra["session_runtime_model"] = runtime_model_supplier or (lambda: (model, provider_id))
             return _fluid_outcome_result(await handler(args, ctx))
         bridged = tool(spec.name, spec.description, spec.input_schema)(invoke)
         bridged.discoverable = spec.discoverable

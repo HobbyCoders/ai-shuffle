@@ -93,6 +93,8 @@ function stopReadingPosition({ scrolled, queued = 3, overflows = false, rounds =
 				const steps = frames.filter((f, i) => i === 0 || f.anchorTop !== frames[i - 1].anchorTop);
 				log(`row top by time: ${steps.map((f) => `${f.at}ms ${f.anchorTop} (scrollTop ${f.scrollTop})`).join(', ')}`);
 				expect(anchorMoved <= 1, `the row being read stayed put (moved ${anchorMoved}px)`);
+				const composerTops = frames.map(f => f.composerTop);
+				expect(Math.max(...composerTops) - Math.min(...composerTops) <= 1, 'Stop leaves the composer docked while its action slot empties');
 				expect(Math.abs(after.top - before.top) <= 1, `the scroll position held: ${before.top} -> ${after.top}`);
 				if (!overflows) {
 					expect(after.atBottom === !scrolled, `the reader is still ${scrolled ? 'scrolled up' : 'at the bottom'}: ${JSON.stringify(after)}`);
@@ -141,8 +143,8 @@ await runJourney({
 	cases: [
 		// Two rows fit under a pinned prompt, so the reader is still at the bottom.
 		{ name: 'stop-holds-the-reader-at-the-bottom', ...stopReadingPosition({ scrolled: false, queued: 2 }) },
-		// Three rows can run past a phone's fold. The settle pin keeps the prompt at
-		// the top, as at the end of any reply, so what the reader sees must not move.
+		// Three rows can run past a phone's fold. Stop preserves the reading point,
+		// independently of ordinary completion following the live edge (#1112).
 		{ name: 'stop-holds-the-reader-when-the-rows-overflow', ...stopReadingPosition({ scrolled: false, overflows: true }) },
 		// More of them, Stop after Stop in one chat with no filler in between.
 		{ name: 'stop-holds-the-reader-with-four-queued', ...stopReadingPosition({ scrolled: false, queued: 4, overflows: true, rounds: 2 }) },

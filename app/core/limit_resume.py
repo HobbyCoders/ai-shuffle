@@ -1113,22 +1113,54 @@ async def _fire(row: Dict[str, Any]) -> Optional[str]:
 async def _resume_worker(worker_id: str, owner: str, meta: Dict[str, Any], *,
                          wake_stop_seq: Optional[int] = None) -> Optional[str]:
     from app.core import turn_scheduler
+    from app.core.task_registry import task_registry
+    from app.core.worker_checkout import WorkerCheckoutError
 
-    turn_id = await turn_scheduler.on_agent_message(
-        worker_id, RESUME_SENDER, WORKER_RESUME_TEXT, reply_to=owner,
-        extra_payload={PAYLOAD_KEY: {"limit_key": meta.get("limit_key"),
-                                     "reset_at": meta.get("reset_at")},
-                       "wake_stop_seq": wake_stop_seq},
-    )
+    # Capture before admission AND reporting waits. Even a later user message
+    # clearing Stop's latch must not revive this wake's terminal commit.
+    worker_generation = task_registry.stop_generation(worker_id)
+    owner_generation = task_registry.stop_generation(owner)
+    refusal = "refused"
+    try:
+        turn_id = await turn_scheduler.on_agent_message(
+            worker_id, RESUME_SENDER, WORKER_RESUME_TEXT, reply_to=owner,
+            extra_payload={PAYLOAD_KEY: {"limit_key": meta.get("limit_key"),
+                                         "reset_at": meta.get("reset_at")},
+                           "wake_stop_seq": wake_stop_seq},
+        )
+    except WorkerCheckoutError as exc:
+        refusal, turn_id = str(exc) or "refused", None
     if wake_stop_seq is not None:
         from app.db import turns
         if await asyncio.to_thread(turns.wake_cancelled_by_stop,
                                    {"session_id": worker_id, "payload": {"wake_stop_seq": wake_stop_seq}}):
-            turn_id = None
+            # Stop won while admission waited, even if checkout restoration
+            # then failed. Do not replace its killed task with a false error.
+            for sid, extra in ((worker_id, {}), (owner, {"task_id": worker_id})):
+                await _record(sid, _STATUS_DROPPED, {"reason": "user_stopped", **extra,
+                    "limit_key": meta.get("limit_key")})
+            return None
     if not turn_id or turn_id == turn_scheduler.HELD:
         for sid, extra in ((worker_id, {}), (owner, {"task_id": worker_id})):
-            await _record(sid, _STATUS_DROPPED, {"reason": "refused", **extra,
-                                                 "limit_key": meta.get("limit_key")})
+            await _record(sid, _STATUS_DROPPED, {"reason": refusal, **extra,
+                **({"content": f"Automatic resume dropped: {refusal}"} if refusal != "refused" else {}),
+                "limit_key": meta.get("limit_key")})
+        if refusal != "refused":
+            # The durable read above can precede Stop, and either note can
+            # await it. Fence the actual terminal commit, not just admission:
+            # no await between this generation check and complete_task below.
+            if (task_registry.stop_invalidated(worker_id, worker_generation)
+                    or task_registry.stop_invalidated(owner, owner_generation)):
+                for sid, extra in ((worker_id, {}), (owner, {"task_id": worker_id})):
+                    await _record(sid, _STATUS_DROPPED, {"reason": "user_stopped", **extra,
+                        "limit_key": meta.get("limit_key")})
+                return None
+            summary = f"Automatic resume could not start: {refusal}"
+            task_registry.complete_task(owner, worker_id, "error", summary=summary)
+            await turn_scheduler.on_task_terminal(owner, {
+                "task_id": worker_id, "tool_use_id": worker_id, "kind": "agent",
+                "status": "error", "summary": summary,
+            })
         return None
     for sid, extra in ((worker_id, {}), (owner, {"task_id": worker_id})):
         await _record(sid, _STATUS_RESUMED, {"limit_key": meta.get("limit_key"), **extra})

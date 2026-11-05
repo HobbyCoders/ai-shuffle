@@ -4,25 +4,47 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import ts from 'typescript';
 
 type Remainder = { scrollTop: number; error: number } | null;
 const source = readFileSync(resolve(process.cwd(), 'src/lib/components/chat/MessageArea.svelte'), 'utf8');
-function statements(start: string, end: string): string {
-	const from = source.indexOf(start), to = source.indexOf(end, from);
-	if (from < 0 || to <= from) throw new Error(`Missing MessageArea compensation block: ${start}`);
-	return source.slice(from, to);
+const instance = source.match(/<script lang="ts">([\s\S]*?)<\/script>/)?.[1];
+if (!instance) throw new Error('Missing MessageArea instance script');
+const script = ts.createSourceFile('MessageArea.ts', instance, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+function statement(start: string, within: ts.Node): ts.Statement {
+	const matches: ts.Statement[] = [];
+	function visit(node: ts.Node) {
+		if (ts.isStatement(node) && node.getText().startsWith(start)) matches.push(node);
+		ts.forEachChild(node, visit);
+	}
+	visit(within);
+	if (matches.length !== 1) throw new Error(`Expected one MessageArea statement: ${start} (found ${matches.length})`);
+	return matches[0];
 }
+function statements(start: string, end: string, within: ts.Node): string {
+	const first = statement(start, within);
+	if (!ts.isBlock(first.parent)) throw new Error(`Expected MessageArea block: ${start}`);
+	const siblings = first.parent.statements;
+	const endings = siblings.filter(node => node.getText().startsWith(end));
+	const from = siblings.indexOf(first), to = siblings.indexOf(endings[0]);
+	if (endings.length !== 1 || to < from) throw new Error(`Missing or misplaced MessageArea sibling: ${end}`);
+	// Complete sibling statements only: an outer delimiter used to include an
+	// unmatched brace and unrelated async follow-maintenance code here.
+	return siblings.slice(from, to + 1).map(node => node.getText()).join('\n');
+}
+const applyRange = statement('function applyMountedRange(', script);
+const handleScroll = statement('function handleScroll(', script);
 const compensate = new Function('container', 'delta', 'anchor', 'previous', 'preserveAnchor', `
 	let anchorRounding = previous;
-	${statements('if (!preserveAnchor) anchorRounding = null;', 'if (next.start === mountedStart')}
-	${statements('const roundingError = anchor && anchorRounding', '// Oversize adjacent bodies')}
-	${statements('const previousScrollTop = container.scrollTop;', 'lastKnownScrollTop = container.scrollTop;')}
+	${statement('if (!preserveAnchor)', applyRange).getText()}
+	${statement('const roundingError =', applyRange).getText()}
+	${statements('const previousScrollTop =', 'anchorRounding =', applyRange)}
 	return anchorRounding;
 `) as (container: HTMLElement, delta: number, anchor: HTMLElement | null, previous: Remainder, preserveAnchor: boolean) => Remainder;
 const scroll = new Function('containerRef', 'previous', `
 	let anchorRounding = previous;
 	const scheduleReadingAnchorCapture = () => {};
-	${statements('if (anchorRounding && containerRef.scrollTop !== anchorRounding.scrollTop)', 'if (programmaticScrollDepth > 0)')}
+	${statements('if (anchorRounding && containerRef.scrollTop !== anchorRounding.scrollTop)', 'scheduleReadingAnchorCapture();', handleScroll)}
 	return anchorRounding;
 `) as (container: HTMLElement, previous: Remainder) => Remainder;
 
@@ -41,8 +63,13 @@ function viewport(quantize = Math.round, initial = 10_000_000) {
 }
 
 describe('MessageArea subpixel anchor compensation', () => {
+	it('rejects missing statements and delimiters outside the compensation block', () => {
+		expect(() => statement('const missingCompensation =', applyRange)).toThrow('Expected one MessageArea statement');
+		expect(() => statements('const previousScrollTop =', 'lastKnownScrollTop =', applyRange))
+			.toThrow('Missing or misplaced MessageArea sibling');
+	});
 	it('clears the scroll remainder before scheduling the rotation reading-anchor capture', () => {
-		const handler = statements('function handleScroll() {', 'if (programmaticScrollDepth > 0)');
+		const handler = statements('if (anchorRounding && containerRef.scrollTop !== anchorRounding.scrollTop)', 'if (programmaticScrollDepth > 0)', handleScroll);
 		const reset = handler.indexOf('if (anchorRounding && containerRef.scrollTop !== anchorRounding.scrollTop)');
 		expect(reset).toBeGreaterThan(-1);
 		expect(handler.indexOf('scheduleReadingAnchorCapture();')).toBeGreaterThan(reset);

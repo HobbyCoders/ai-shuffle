@@ -258,14 +258,10 @@ export function resolveAnchoredRevealDelta(
 	return Math.max(0, Math.ceil(contentEnd - visibleEnd));
 }
 
-/**
- * When a live turn settles, pin the latest user prompt back to the top if
- * the reader was following. Work-log collapse shrinks the column, but the
- * live anchor only ever scrolls down to reveal overflow, so a finished
- * session would sit on the last token until a remount recomputed the tail.
- * A reader who scrolled up is left alone.
- */
-export function shouldPinLatestTurnOnSettle(
+/** Continue following the live edge when a turn settles. Completion is not
+ * navigation to the prompt: a follower keeps reading the final lines, and a
+ * reader who scrolled up is left alone (#1112, owner decision 2026-11-04). */
+export function shouldFollowLatestTurnOnSettle(
 	wasUnsettled: boolean,
 	isUnsettled: boolean,
 	stickToBottom: boolean

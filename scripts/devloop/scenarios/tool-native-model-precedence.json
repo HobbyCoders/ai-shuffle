@@ -1,0 +1,34 @@
+{
+  "description": "A later version request must override earlier family consent before a retry.",
+  "steps": [
+    {
+      "tool_calls": [
+        {
+          "name": "StartSession",
+          "input": {
+            "title": "Refuse newer version",
+            "prompt": "[script:tool-bash]",
+            "request_id": "newer-native-pin",
+            "model": "claude-opus-4-7"
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "StartSession",
+          "input": {
+            "title": "Ask before substituting family",
+            "prompt": "[script:tool-bash]",
+            "request_id": "newer-native-family",
+            "model": "opus"
+          }
+        }
+      ]
+    },
+    {
+      "text": "Newer native request checks complete."
+    }
+  ]
+}

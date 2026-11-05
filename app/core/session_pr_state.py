@@ -73,7 +73,8 @@ def schedule_session_pr_reconcile(
                 if delay:
                     await asyncio.sleep(delay)
                 async with _reconcile_slots:
-                    if await reconcile_session_pr(session_id, force=refresh_forced):
+                    result = await reconcile_session_pr(session_id, force=refresh_forced)
+                    if result is not False:
                         break
             else:
                 logger.warning("PR reconcile exhausted retries for %s", session_id)
@@ -483,7 +484,7 @@ async def _refresh_listed_open_prs(
     return ok
 
 
-async def reconcile_session_pr(session_id: str, *, force: bool = False) -> bool:
+async def reconcile_session_pr(session_id: str, *, force: bool = False) -> Optional[bool]:
     """Best-effort: if this session's branch has a GitHub PR, persist it.
 
     Prefers an open PR on the session branch; otherwise the latest PR for
@@ -496,9 +497,13 @@ async def reconcile_session_pr(session_id: str, *, force: bool = False) -> bool:
 
     Canonical project-only sessions resolve through this runner's checkout;
     a legacy project alias is not required. No remote checkout is materialized.
+    If its checkout is refused, the base supplies only repository identity:
+    the saved branch/PR remains authoritative.
     A failed lookup or write returns False so the scheduler can retry.
-    An authoritative no-op returns True. Never clears state on failure.
-    ``force`` bypasses cached fallback misses after turn-end agent mutations.
+    An authoritative no-op returns True. None means the local checkout cannot
+    supply repository identity: leave state unknown and do not retry this attempt.
+    Never clears state on failure. ``force`` bypasses cached fallback misses
+    after turn-end agent mutations.
     """
     try:
         from app.db import database
@@ -528,12 +533,25 @@ async def reconcile_session_pr(session_id: str, *, force: bool = False) -> bool:
         if not branch and not pr_number and not listed_open:
             return True
 
+        checkout_available = True
         try:
-            from app.api.git_helpers import get_working_dir_async
+            from app.api.git_helpers import get_working_dir_async, SessionCheckoutUnavailable
 
             working_dir = await get_working_dir_async(
                 checkout_project_id, session.get("worktree_id"), session_id
             )
+        except SessionCheckoutUnavailable:
+            # Refused/missing is permanent for this attempt, not a GitHub blip.
+            # Read repo identity from the project's validated base checkout;
+            # never run in the refused folder or adopt its unrelated HEAD.
+            from app.core.project_resolver import resolve_existing_cwd
+
+            checkout_available = False
+            working_dir = await asyncio.to_thread(resolve_existing_cwd, {
+                "project_v2_id": session.get("project_v2_id"), "project_id": project_id,
+            })
+            if not working_dir:
+                return None
         except Exception:
             logger.debug("PR reconcile: working dir for %s failed", session_id, exc_info=True)
             return False
@@ -555,13 +573,16 @@ async def reconcile_session_pr(session_id: str, *, force: bool = False) -> bool:
                 pr = await asyncio.to_thread(
                     _find_pull_for_branch, github_service, repo, branch
                 )
-                if pr is None:
+                if pr is None and checkout_available:
                     pr = await asyncio.to_thread(
                         find_pull_for_checkout_fallback, github_service, repo, branch, working_dir,
                         session_id=session_id, project_id=checkout_project_id,
                         bypass_negative_cache=force,
                     )
-            elif pr_number:
+            if (pr is None and pr_number and (not branch or not checkout_available)
+                    and _repo_owns_url(repo, session.get("pr_url"))):
+                # Discovery may miss a renamed branch. A known PR remains
+                # refreshable without consulting the refused checkout's HEAD.
                 pr = await asyncio.to_thread(github_service.get_pull, repo, int(pr_number))
         except GitHubCliError:
             logger.debug("PR reconcile: gh lookup failed for %s", session_id, exc_info=True)
