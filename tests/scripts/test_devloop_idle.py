@@ -53,6 +53,30 @@ def test_polling_reconnects_and_vite_pings_do_not_count_as_work():
     assert b"pointerdown" in idle.ACTIVITY_SCRIPT
 
 
+def test_http_browser_polling_without_fetch_metadata_is_passive():
+    # Observed on Chromium against the private plain-HTTP, non-loopback preview:
+    # Fetch Metadata is absent, unlike localhost or an HTTPS page.
+    browser = {
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
+        "Accept": "application/json",
+    }
+    for path in ("/api/v1/auth/owner-status", "/api/v1/git/status", "/api/v1/computer-use/status"):
+        assert not idle.foreground("GET", path, browser)
+    browser["Accept"] = "*/*"
+    assert not idle.foreground("GET", "/api/v1/sessions", browser)
+    assert idle.foreground("POST", "/api/v1/sessions", browser)
+    assert not idle.foreground("PUT", "/api/v1/preferences/browser_panel", browser)
+    assert not idle.foreground("PUT", "/api/v1/preferences/chat_task_checks?only_if_missing=true", browser)
+    assert idle.foreground("PUT", "/api/v1/sessions/x", browser)
+    assert idle.foreground("PUT", "/api/v1/preferences/browser_panel", {})
+    assert idle.foreground("POST", "/__devloop/activity", browser)
+    browser["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+    assert idle.foreground("GET", "/api/v1/sessions", browser)
+    assert idle.foreground("GET", "/api/v1/sessions", {"Accept": "application/json"})
+    assert idle.foreground("GET", "/api/v1/sessions", {"User-Agent": "Mozilla/5.0"})
+
+
 def test_busy_and_uncertain_database_reads_prevent_pause():
     db = SimpleNamespace(query=Mock(return_value="f"))
     assert not idle.database_busy(db)

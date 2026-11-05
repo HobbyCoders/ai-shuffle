@@ -50,9 +50,24 @@ def foreground(method: str, path: str, headers) -> bool:
         route = urlsplit(path).path
         passive = route in ("/api/v1/ws/chat", "/api/v1/ws/global") or route.startswith("/api/v1/ws/sessions/")
         return not passive and "vite-hmr" not in headers.get("Sec-WebSocket-Protocol", "")
+    # Chromium omits Fetch Metadata on plain HTTP non-loopback previews. Such
+    # fetches still have the browser UA and a non-document Accept header. The
+    # input listener covers real in-tab actions; navigation and unknown clients
+    # remain foreground, including an explicit API URL opened in the browser.
+    destination = headers.get("Sec-Fetch-Dest")
+    browser_fetch = destination == "empty" or (
+        destination is None and headers.get("User-Agent", "").startswith("Mozilla/5.0")
+        and "text/html" not in headers.get("Accept", "text/html")
+    )
+    if browser_fetch and method == "PUT" and path.startswith("/api/v1/preferences/"):
+        # The minute-long full refresh bootstraps missing preferences (and retries
+        # refused preview-cookie writes). This includes layout's browser_panel
+        # persistence. Real edits have input beacons; no session/turn mutations
+        # are included in this narrow exception.
+        return False
     if method not in ("GET", "HEAD", "OPTIONS"):
         return True
-    return not (path.startswith("/api/") and headers.get("Sec-Fetch-Dest") == "empty")
+    return not (path.startswith("/api/") and browser_fetch)
 
 
 class IdleLease:
