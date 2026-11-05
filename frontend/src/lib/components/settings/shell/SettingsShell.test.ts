@@ -36,6 +36,7 @@ import { FEATURE_PANEL_CONTEXT } from '$lib/components/layout/feature-panel-cont
 import { settingsNav, encodeTarget } from '$lib/settings/navigation.svelte';
 import { aiContentPrefill, supportCaps, supportReportDialog } from '$lib/stores/support-report.svelte';
 import SettingsShell from './SettingsShell.svelte';
+import PanelHost from '../../layout/view/test-fixtures/PanelHost.svelte';
 
 const admin = isAdmin as unknown as { set: (v: boolean) => void };
 
@@ -60,6 +61,16 @@ function nav() {
 }
 
 describe('SettingsShell index', () => {
+	it('keeps / focusing search when the index renders under the Sidebar host', async () => {
+		render(PanelHost);
+		render(SettingsShell);
+		await tick();
+		const general = within(nav()).getByRole('button', { name: 'General' });
+		expect(document.querySelector('[data-test-host]')?.contains(general)).toBe(true);
+		general.focus();
+		await fireEvent.keyDown(general, { key: '/' });
+		await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('combobox', { name: 'Search settings' })));
+	});
 	it('lists categories in three groups and opens General', async () => {
 		render(SettingsShell);
 		const index = nav();
@@ -68,7 +79,6 @@ describe('SettingsShell index', () => {
 			.getAllByRole('button')
 			.map((b) => b.textContent?.trim());
 		expect(names).toEqual([
-			'Back to chats',
 			'General',
 			'Archived chats',
 			'Voice',
@@ -378,31 +388,21 @@ describe('SettingsShell stacked mode', () => {
 	});
 
 	it('keeps a deep link on its page when a narrow window turns stacked after mounting', async () => {
-		// A browser at phone width: the width is 0 until the ResizeObserver
-		// reports it, after the target landed and the layout cleared it.
-		let report: ((entries: { contentRect: { width: number } }[]) => void) | null = null;
-		vi.stubGlobal(
-			'ResizeObserver',
-			class {
-				constructor(cb: typeof report) {
-					report = cb;
-				}
-				observe() {}
-				disconnect() {}
-			}
-		);
+		// ViewShell follows the window breakpoint, not the docked main pane's width.
+		const originalWidth = window.innerWidth;
 		const view = render(SettingsShell, {
 			initialItemId: encodeTarget({ category: 'system', anchor: 'system.reportProblem' })
 		});
 		await tick();
 		await view.rerender({ initialItemId: undefined });
-		report!([{ contentRect: { width: 390 } }]);
+		Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 });
+		await fireEvent(window, new Event('resize'));
 		await tick();
 		const shell = view.container.querySelector('.settings-shell')!;
 		expect(shell.hasAttribute('data-stacked')).toBe(true);
 		expect(shell.getAttribute('data-view')).toBe('page');
 		expect(settingsNav.category).toBe('system');
-		vi.unstubAllGlobals();
+		Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalWidth });
 	});
 
 	it('Ctrl+K returns to the index before focusing search', async () => {

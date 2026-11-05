@@ -13,7 +13,9 @@
 	import type { Attention, CategoryId } from '$lib/settings/types';
 	import StatusDot from '../rows/StatusDot.svelte';
 	import SettingsSearch from './SettingsSearch.svelte';
+	import ViewPanel from '../../layout/view/ViewPanel.svelte';
 
+	let { onkeydown: onPanelKeydown }: { onkeydown?: (event: KeyboardEvent) => void } = $props();
 	let query = $state('');
 	const searching = $derived(query.trim().length > 0);
 
@@ -54,15 +56,14 @@
 	}
 </script>
 
-<nav class="st-index st-scroll" aria-label="Settings">
-	<!-- The phone app's own header carries the way back. -->
-	{#if !platform.isMobile}
-		<button type="button" class="st-chats" onclick={backToChats}>
-			<ChevronLeft /><span>Back to chats</span>
-		</button>
-	{/if}
-	<h1 class="st-ix-title">Settings</h1>
-	<SettingsSearch bind:query />
+{#snippet footer()}
+	<button type="button" class="st-chats" onclick={backToChats}>
+		<ChevronLeft /><span>Back to chats</span>
+	</button>
+{/snippet}
+<ViewPanel title="Settings" listLabel="Settings categories" onkeydown={onPanelKeydown} footer={platform.isMobile ? undefined : footer}>
+	{#snippet search()}<SettingsSearch bind:query />{/snippet}
+	<nav class="settings-index" aria-label="Settings">
 	{#if !searching}
 		{#each CATEGORY_GROUPS as group (group.id)}
 			<div class="st-nav-g" id="st-nav-g-{group.id}">{group.label}</div>
@@ -93,18 +94,14 @@
 			</ul>
 		{/each}
 	{/if}
-</nav>
+	</nav>
+</ViewPanel>
 
 <style>
-	.st-index {
-		border-right: 1px solid var(--st-border);
+	.settings-index {
 		display: flex;
 		flex-direction: column;
-		padding: 10px 8px 12px;
 		min-height: 0;
-		overflow-y: auto;
-		scrollbar-width: none;
-		background: var(--sidebar);
 	}
 	.st-chats {
 		display: flex;
@@ -113,7 +110,7 @@
 		flex: none;
 		height: 36px;
 		padding: 0 12px;
-		margin-bottom: 10px;
+		width: 100%;
 		border: 0;
 		border-radius: var(--st-radius-md);
 		background: none;
@@ -124,13 +121,6 @@
 	.st-chats:hover {
 		background: var(--st-hover);
 		color: var(--st-fg);
-	}
-	.st-ix-title {
-		font-size: 16px;
-		font-weight: 600;
-		letter-spacing: -0.01em;
-		padding: 2px 12px 12px;
-		margin: 0;
 	}
 	.st-nav-g {
 		display: flex;
@@ -215,9 +205,6 @@
 			width: 18px;
 			height: 18px;
 			color: var(--st-mfg);
-		}
-		.st-index {
-			padding: 2px 16px 16px;
 		}
 	}
 	.st-go {

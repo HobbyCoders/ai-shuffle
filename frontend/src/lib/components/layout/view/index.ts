@@ -1,0 +1,18 @@
+/** Shared view grammar; the Settings primitives retain their original APIs. */
+export { default as ViewShell } from './ViewShell.svelte';
+export { default as ViewPanel } from './ViewPanel.svelte';
+export { default as ViewMain } from './ViewMain.svelte';
+export { default as PanelSearch } from './PanelSearch.svelte';
+export { default as PanelIconButton } from './PanelIconButton.svelte';
+export { default as DetailPane } from '../../settings/shell/DetailPane.svelte';
+export { default as DetailTabs } from '../../settings/shell/DetailTabs.svelte';
+export { default as EmptyDetail } from '../../settings/shell/EmptyDetail.svelte';
+export { default as ListItem } from '../../settings/rows/ListItem.svelte';
+export { default as ListGroupLabel } from '../../settings/rows/ListGroupLabel.svelte';
+export { default as RowGroup } from '../../settings/rows/RowGroup.svelte';
+export { default as SettingRow } from '../../settings/rows/SettingRow.svelte';
+export { default as SelectField } from '../../settings/rows/SelectField.svelte';
+export { default as Switch } from '../../settings/rows/Switch.svelte';
+export { default as Segmented } from '../../settings/rows/Segmented.svelte';
+export { default as Tile } from '../../settings/rows/Tile.svelte';
+export { default as InlineBanner } from '../../settings/rows/InlineBanner.svelte';

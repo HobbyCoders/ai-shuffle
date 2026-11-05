@@ -122,7 +122,7 @@
 				</span>
 				<b>No agents of your own yet</b>
 				<span>{hasBuiltins ? 'Start blank, from a built-in, or describe one.' : 'Start blank or describe one.'}</span>
-				<button type="button" class="st-btn sm" onclick={onNew}><Plus />New agent</button>
+				<button type="button" class="st-btn primary sm" onclick={onNew}><Plus />New agent</button>
 			</div>
 		{/if}
 	{/if}

@@ -31,6 +31,19 @@ export type ViewType =
 	| 'docs'
 	| 'terminal';
 
+/** `board` is the retired Chats board: MainPanel renders the chat surface for it. */
+export function viewOwnsPanel(type: ViewType | null | undefined): boolean {
+	return !!type && type !== 'session' && type !== 'board';
+}
+
+/** Title used before a destination's lazy panel has claimed its slot. */
+export const viewPanelTitles: Record<Exclude<ViewType, 'session' | 'board'>, string> = {
+	build: 'Agents', profile: 'Agents', settings: 'Settings', project: 'Projects',
+	'file-browser': 'Files', plugins: 'Settings', mcp: 'Settings', hooks: 'Settings',
+	automations: 'Automations', notes: 'Notes', prs: 'Pull requests', stats: 'Stats',
+	docs: 'Docs', terminal: 'Terminal'
+};
+
 export interface ActiveView {
 	type: ViewType;
 	/** Session ID for the conversation panel, null for a new session */

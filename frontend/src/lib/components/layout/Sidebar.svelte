@@ -56,7 +56,9 @@
 	import { privateAccessPending } from '$lib/stores/chat-access';
 	import { isTranscriptProseDismissed, proseQuestionDismissals, proseQuestionSessions, withoutSession } from '$lib/stores/session/prose-questions';
 	import { chatPreferences } from '$lib/stores/chatPreferences.svelte';
-	import { activeView } from '$lib/stores/layout.svelte';
+	import { activeView, layout, viewOwnsPanel, viewPanelTitles } from '$lib/stores/layout.svelte';
+	import { viewPanel } from '$lib/stores/view-panel.svelte';
+	import ViewPanel from './view/ViewPanel.svelte';
 	import type { ViewType } from '$lib/stores/layout.svelte';
 	import { preloadPanelForView } from '$lib/components/deck/lazy/panels';
 	import { terminals } from '$lib/stores/terminals.svelte';
@@ -105,8 +107,8 @@
 		headerAction?: Snippet;
 		/** Leave a page for the chats. The phone's drawer also closes itself. */
 		onBackToChats?: () => void;
-		/** Only the rail: the open page brings its own navigation column. */
-		railOnly?: boolean;
+		/** Explicit desktop opt-in: the phone drawer must never receive a page panel. */
+		panelHost?: boolean;
 	}
 
 	let {
@@ -119,8 +121,17 @@
 		onSelectMode,
 		headerAction,
 		onBackToChats,
-		railOnly = false
+		panelHost = false
 	}: Props = $props();
+
+	const hostToken = Symbol('sidebar-panel-host');
+	$effect(() => {
+		if (!panelHost || platform.isMobile) return;
+		viewPanel.mountHost(hostToken);
+		return () => viewPanel.unmountHost(hostToken);
+	});
+	const ownsPanel = $derived(panelHost && !platform.isMobile && !layout.current.sidebarOverlay && viewOwnsPanel($activeView?.type));
+	const panelTitle = $derived(ownsPanel ? viewPanelTitles[$activeView!.type as keyof typeof viewPanelTitles] : 'Chats');
 
 	/** Who gets the phone's few tab seats on a list nobody has reordered. */
 	const PHONE_TAB_ORDER: readonly WorkspaceItemId[] = ['project', 'build', 'file-browser', 'notes', 'prs'];
@@ -784,7 +795,16 @@
 		onChats={openChats}
 	/>
 
-	<div class="col" class:selecting class:rail-hidden={railOnly}>
+	{#if ownsPanel}
+		<div class="col page-panel">
+			{#if viewPanel.panel}
+				{@render viewPanel.panel()}
+			{:else}
+				<ViewPanel title={panelTitle} loading />
+			{/if}
+		</div>
+	{/if}
+	<div class="col" class:selecting class:rail-hidden={ownsPanel} inert={ownsPanel} aria-hidden={ownsPanel || undefined}>
 		<!-- Selection bar: slides over the header while rows are selected. -->
 		<div class="selbar" inert={!selecting} aria-hidden={selecting ? undefined : 'true'}>
 			<button class="icon-btn" type="button" aria-label="Cancel selection" onclick={cancelSelection}>

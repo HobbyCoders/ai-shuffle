@@ -83,7 +83,8 @@ vi.mock('$lib/stores/active-session', () => ({
 	backgroundPermissions: mocks.backgroundPermissions,
 }));
 
-vi.mock('$lib/stores/layout.svelte', () => ({
+vi.mock('$lib/stores/layout.svelte', async (importOriginal) => ({
+	...await importOriginal<typeof import('$lib/stores/layout.svelte')>(),
 	activeView: mocks.activeView,
 }));
 
@@ -167,6 +168,8 @@ import { sidebarWorkspace } from '$lib/stores/sidebar-prefs.svelte';
 import { terminals } from '$lib/stores/terminals.svelte';
 import { TerminalApiError } from '$lib/api/terminals';
 import Sidebar from './Sidebar.svelte';
+import { layout } from '$lib/stores/layout.svelte';
+import { viewPanel } from '$lib/stores/view-panel.svelte';
 import { platform } from '$lib/stores/platform.svelte';
 
 function session(
@@ -247,6 +250,8 @@ function cardFrame(title: string): HTMLElement {
 }
 
 beforeEach(() => {
+	layout.setSidebarOverlay(false);
+	mocks.activeView.set(null);
 	localStorage.clear();
 	mocks.adapters.get('sidebar_collapsed_groups')!.apply(undefined);
 	mocks.save.mockClear();
@@ -1739,6 +1744,39 @@ describe('Sidebar unified conversation history', () => {
 		expect(cardIds()).toEqual(['legacy', 'coded']);
 		await fireEvent.click(screen.getByRole('button', { name: 'Clear project filter Visible Project' }));
 		expect(cardIds()).toEqual(['legacy', 'coded', 'chatty', 'spoken']);
+	});
+});
+
+describe('Sidebar page-panel host', () => {
+	it('keeps Chats mounted and its scroll while a lazy page shows only its title', async () => {
+		const view = render(Sidebar, { props: { ...sidebarProps, panelHost: true } });
+		await tick();
+		const ledger = view.container.querySelector('.list') as HTMLDivElement;
+		ledger.scrollTop = 120;
+		const card = view.container.querySelector('[data-session-id="active"]');
+		mocks.activeView.set({ type: 'notes' });
+		await tick();
+		expect(viewPanel.hostMounted).toBe(true);
+		expect(screen.getByRole('heading', { name: 'Notes' })).toBeTruthy();
+		expect(view.container.querySelector('.page-panel [aria-busy="true"]')).toBeTruthy();
+		expect(ledger.closest('.rail-hidden')).toBeTruthy();
+		expect(ledger.scrollTop).toBe(120);
+		mocks.activeView.set({ type: 'session' });
+		await tick();
+		expect(view.container.querySelector('.list')).toBe(ledger);
+		expect(view.container.querySelector('[data-session-id="active"]')).toBe(card);
+		expect(ledger.closest('.rail-hidden')).toBeNull();
+		expect(ledger.scrollTop).toBe(120);
+		view.unmount();
+		expect(viewPanel.hostMounted).toBe(false);
+	});
+	it('does not register or consume claims in the phone drawer', async () => {
+		mocks.activeView.set({ type: 'settings' });
+		const view = render(Sidebar, { props: sidebarProps });
+		await tick();
+		expect(viewPanel.hostMounted).toBe(false);
+		expect(view.container.querySelector('.page-panel')).toBeNull();
+		expect(view.container.querySelector('.list')?.closest('.rail-hidden')).toBeNull();
 	});
 });
 
