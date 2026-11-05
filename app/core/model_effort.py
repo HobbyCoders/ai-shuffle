@@ -48,6 +48,9 @@ def sanitize_effort_metadata(entry: Mapping[str, Any], *, provider_type=None, co
             cap = _capability(levels, reasoning.get("default_effort"), reasoning.get("mandatory"))
         else:
             cap = _capability([] if complete and provider_type == "openrouter" else None)
+    elif provider_type == "opencode" and isinstance(entry.get("capabilities"), Mapping):
+        reasoning = entry["capabilities"].get("reasoning") or {}
+        cap = _capability(reasoning.get("effort") if reasoning.get("supported") else [])
     elif "supported_reasoning_levels" in entry:
         cap = _capability(entry["supported_reasoning_levels"], entry.get("default_reasoning_level"))
     else:
@@ -142,6 +145,11 @@ def effort_capabilities(model: str | None, provider: Mapping[str, Any] | None = 
             cap = _OPENAI.get(model)
         elif provider.get("provider_type") in ("xai", "grok"):
             cap = _XAI.get(model)
+        elif provider.get("provider_type") in ("kimi", "minimax", "opencode"):
+            from fluid.providers.compatible import effort_levels
+
+            levels = effort_levels(provider["provider_type"], model or "")
+            cap = _capability(list(levels) if levels is not None else None)
     cap = cap or _capability(None)
     levels = cap["effort_levels"]
     allowed = (ANTHROPIC_EFFORT_LEVELS if route in ("anthropic", "delegated") else

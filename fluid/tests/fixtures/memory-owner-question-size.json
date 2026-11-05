@@ -5,5 +5,14 @@
   ],
   "footer_chars": 616,
   "section_chars": 1134,
-  "allowance_chars": 80
+  "allowance_chars": 80,
+  "grouped": {
+    "texts": ["Code work goes to Opus.", "Code work goes to Sol.", "Code work goes to Sonnet.",
+              "Code work goes to Haiku.", "Review work goes to Opus.", "Review work goes to Sol."],
+    "when": "When applying the synthetic owner routing rules",
+    "questions": 2,
+    "footer_chars": 1349,
+    "section_chars": 2043,
+    "allowance_chars": 32
+  }
 }

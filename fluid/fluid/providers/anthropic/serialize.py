@@ -34,7 +34,8 @@ from fluid.providers.anthropic.thinking import clamp_effort, resolve_thinking
 from fluid.tools.images import condition_image
 
 
-def _block_to_api(block: Any, model: str | None = None) -> dict[str, Any] | None:
+def _block_to_api(block: Any, model: str | None = None, *,
+                  compatible_provider: str | None = None) -> dict[str, Any] | None:
     if isinstance(block, Text):
         if not block.text:
             return None  # the API rejects an empty text block
@@ -42,7 +43,7 @@ def _block_to_api(block: Any, model: str | None = None) -> dict[str, Any] | None
     if isinstance(block, Thinking):
         return None  # carried via its Reasoning envelope
     if isinstance(block, Reasoning):
-        if block.origin != "anthropic":
+        if block.origin != (compatible_provider or "anthropic"):
             return None  # foreign reasoning is dropped for Anthropic calls
         if block.model is not None and model is not None and block.model != model:
             # Thinking signatures are model-bound: a signature another model
@@ -51,16 +52,21 @@ def _block_to_api(block: Any, model: str | None = None) -> dict[str, Any] | None
             return None
         if block.raw is None:
             return None
-        if block.raw.get("type") == "thinking" and not block.raw.get("signature"):
+        if (not compatible_provider and block.raw.get("type") == "thinking"
+                and not block.raw.get("signature")):
             # A thinking block the stream never signed (cut off, or the
             # stream died) fails verification on every later turn. Dropping
             # it costs the model its memory of that reasoning, nothing more.
             return None
+        if compatible_provider and block.raw.get("type") not in ("thinking", "redacted_thinking"):
+            return None  # no Claude server-tool replay on a compatible endpoint
+        if compatible_provider and not block.raw.get("signature"):
+            return {k: v for k, v in block.raw.items() if k != "signature"}
         return block.raw  # verbatim resend: signed thinking, redacted thinking, server tool blocks
     if isinstance(block, ToolUseBlock):
         return {"type": "tool_use", "id": block.id, "name": block.name, "input": block.input}
     if isinstance(block, ToolResultBlock):
-        content = [b for b in (_block_to_api(c, model) for c in block.content) if b]
+        content = [b for b in (_block_to_api(c, model, compatible_provider=compatible_provider) for c in block.content) if b]
         out: dict[str, Any] = {
             "type": "tool_result",
             "tool_use_id": block.tool_use_id,
@@ -80,11 +86,13 @@ def _block_to_api(block: Any, model: str | None = None) -> dict[str, Any] | None
     return None
 
 
-def build_request_body(request: ProviderRequest) -> dict[str, Any]:
+def build_request_body(request: ProviderRequest, *,
+                       compatible_provider: str | None = None,
+                       model_efforts: dict[str, list[str]] | None = None) -> dict[str, Any]:
     messages: list[dict[str, Any]] = []
     for msg in request.messages:
         content = [
-            b for b in (_block_to_api(blk, request.model) for blk in msg.content) if b
+            b for b in (_block_to_api(blk, request.model, compatible_provider=compatible_provider) for blk in msg.content) if b
         ]
         if not content:
             continue  # nothing this dialect can carry (an unsigned thinking turn)
@@ -141,7 +149,46 @@ def build_request_body(request: ProviderRequest) -> dict[str, Any]:
         if last:
             last[-1] = {**last[-1], "cache_control": {"type": "ephemeral"}}
     body.update(request.extra)
+    if compatible_provider:
+        _compatible_body(body, request, compatible_provider, model_efforts)
     return body
+
+
+def _compatible_body(body: dict[str, Any], request: ProviderRequest, provider: str,
+                     model_efforts: dict[str, list[str]] | None = None) -> None:
+    """Conservative Messages subset; never apply Claude model sniffing here."""
+    from fluid.providers.compatible import effort_levels
+
+    def clean_block(block: dict[str, Any]) -> dict[str, Any]:
+        cleaned = {k: v for k, v in block.items() if k != "cache_control"}
+        # Only descend through protocol content blocks, never tool inputs or
+        # schemas: cache_control is a perfectly valid application field there.
+        if block.get("type") == "tool_result" and isinstance(block.get("content"), list):
+            cleaned["content"] = [clean_block(b) if isinstance(b, dict) else b for b in block["content"]]
+        return cleaned
+
+    if isinstance(body.get("system"), list):
+        body["system"] = [clean_block(b) for b in body["system"]]
+    body["messages"] = [
+        {**message, "content": [clean_block(b) for b in message["content"]]}
+        if isinstance(message.get("content"), list) else message
+        for message in body.get("messages", [])
+    ]
+    if body.get("tools"):
+        body["tools"] = [clean_block(t) for t in body["tools"]]
+    for field in ("thinking", "output_config", "betas", "mcp_servers", "context_management", "container"):
+        body.pop(field, None)
+    if body.get("tools"):
+        body["tools"] = [t for t in body["tools"] if "input_schema" in t and "type" not in t]
+    # Never let Claude max-token tables rewrite an OpenCode Claude model id.
+    body["max_tokens"] = request.max_tokens if request.max_tokens is not None else 8192
+    levels = ((model_efforts or {}).get(request.model) if provider == "opencode"
+              else effort_levels(provider, request.model))
+    if request.effort and levels and request.effort in levels:
+        body["output_config"] = {"effort": request.effort}
+    if provider == "minimax" and request.model == "MiniMax-M3":
+        body["thinking"] = {"type": "adaptive"}
+    # Kimi thinking is mandatory by model default; no Claude thinking config.
 
 
 # Flat usage key carrying the 1-hour share of ``cache_creation_input_tokens``.

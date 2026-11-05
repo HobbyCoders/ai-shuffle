@@ -202,6 +202,7 @@ def _create_hook_tools(is_admin: bool, project_id: Optional[str]) -> list:
         return _tool_result({
             "success": True,
             "hook_id": hook_id,
+            "has_secret": bool(hook.get("secret")),
             "name": args["name"],
             "event": event,
             "hook_type": hook_type,
@@ -220,7 +221,7 @@ def _create_hook_tools(is_admin: bool, project_id: Optional[str]) -> list:
 
     @tool(
         "updateHook",
-        "Update properties of an existing hook.",
+        "Update hook.",
         {
             "type": "object",
             "properties": {
@@ -230,6 +231,8 @@ def _create_hook_tools(is_admin: bool, project_id: Optional[str]) -> list:
                 "hook_type": {"type": "string", "enum": VALID_HOOK_TYPES},
                 "command": {"type": "string"},
                 "url": {"type": "string"},
+                "secret": {"type": "string", "description": "Blank keeps; nonblank replaces."},
+                "clear_secret": {"type": "boolean", "description": "Clear."},
                 "tool_matcher": {"type": "string"},
                 "timeout": {"type": "integer", "description": "Timeout in seconds."},
                 "enabled": {"type": "boolean"},
@@ -258,10 +261,13 @@ def _create_hook_tools(is_admin: bool, project_id: Optional[str]) -> list:
             if not existing:
                 return f"Hook not found: {hook_id}", None, None
 
+            if args.get("clear_secret") and (args.get("secret") or "").strip():
+                return "Cannot replace and clear a hook secret in the same update", None, None
+
             # Build update kwargs — only include provided fields
             kwargs: Dict[str, Any] = {}
-            for field in ("name", "event", "hook_type", "command", "url",
-                          "tool_matcher", "enabled"):
+            for field in ("name", "event", "hook_type", "command", "url", "secret",
+                          "clear_secret", "tool_matcher", "enabled"):
                 if field in args and args[field] is not None:
                     kwargs[field] = args[field]
 
@@ -282,6 +288,7 @@ def _create_hook_tools(is_admin: bool, project_id: Optional[str]) -> list:
         return _tool_result({
             "success": True,
             "hook_id": hook_id,
+            "has_secret": bool(updated.get("secret")),
             "updated_fields": list(kwargs.keys()),
             "message": f"Hook '{updated.get('name')}' updated.",
         })

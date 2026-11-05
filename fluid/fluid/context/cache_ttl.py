@@ -59,6 +59,10 @@ def resolve_cache_ttl(
         # Measured 2026-10-27: 115,210/115,258 delegated main calls wrote 1h;
         # hit rate 98% at 30–60 min idle, 4% at 1–2h (NOT a 2h lifetime).
         return 300.0 if delegated_cache_write_ttl(last_usage) == "5m" else 3600.0
+    if ptype in ("kimi", "minimax", "opencode"):
+        # Automatic vendor caching: no sourced idle-expiry guarantee. In
+        # particular, do not inherit Claude's explicit-breakpoint 5m policy.
+        return None
     if kind == "anthropic":
         # https://platform.claude.com/docs/en/build-with-claude/prompt-caching
         # We send cache_control ephemeral WITHOUT ttl: default 5m, not opt-in 1h.

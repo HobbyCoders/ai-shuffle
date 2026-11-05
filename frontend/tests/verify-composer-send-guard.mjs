@@ -29,6 +29,12 @@ async function open(query, width = 1280, height = 800) {
 	await page.goto(baseUrl + query);
 	const editor = page.locator('.ProseMirror').first();
 	await editor.waitFor();
+	assert.equal(await page.evaluate(() => window.fixtureRequests.some(r =>
+		r.method === 'GET' && r.path === '/api/v1/projects/shuffle-scratch/git/status')), true,
+	'the fixture loads Git capability through the real store');
+	assert.deepEqual(await page.evaluate(() => window.fixtureGit()), {
+		projectId: 'shuffle-scratch', worktreeId: null, sessionId: null, hydrated: true, isGitRepo: true,
+	}, 'the remembered project is a known Git repo, not an existing session checkout');
 	const session = () => page.evaluate(() => window.fixtureSession());
 	const creates = () => page.evaluate(() => window.fixtureRequests
 		.filter(r => r.method === 'POST' && /\/sessions(\/with-worktree)?$/.test(r.path)));
