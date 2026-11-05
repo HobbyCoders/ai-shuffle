@@ -7,6 +7,8 @@ their own fixtures rather than being trusted against the live tree.
 
 import textwrap
 
+import pytest
+
 from scripts.scan_blocking_db import scan_source
 
 
@@ -230,3 +232,79 @@ def test_finding_records_line_and_handler():
     assert findings[0]["handler"] == "my_handler"
     assert findings[0]["line"] == 5
     assert findings[0]["file"] == "fixture.py"
+
+
+@pytest.mark.parametrize(("imports", "decoder"), [
+    ("from app.db.base import parse_jsonb", "parse_jsonb"),
+    ("from app.db.base import parse_jsonb as decode", "decode"),
+    ("from app.db import base", "base.parse_jsonb"),
+    ("from app.db import base as db", "db.parse_jsonb"),
+    ("import app.db.base as db", "db.parse_jsonb"),
+    ("import app.db.base", "app.db.base.parse_jsonb"),
+])
+def test_only_the_known_pure_jsonb_decoder_is_exempt(imports, decoder):
+    # An adjacent real query must remain visible, even renamed parse_jsonb.
+    # Keeping it in the same fixture also exercises fully-qualified calls.
+    source = (f"{imports}\nfrom app.db.turns import get_turn as read_turn\n\n"
+              f"async def handler():\n    value = {decoder}('null')\n    read_turn(1)\n")
+    assert _calls(source) == ["read_turn()"]
+
+
+@pytest.mark.parametrize(("imports", "call", "expected"), [
+    ("from app.db.turns import get_turn as parse_jsonb", "parse_jsonb(1)", "parse_jsonb()"),
+    ("from app.db.turns import parse_jsonb as decode", "decode('null')", "decode()"),
+    ("from app.db import turns as db", "db.parse_jsonb('null')", "db.parse_jsonb"),
+    ("import app.db.turns as db", "db.parse_jsonb('null')", "db.parse_jsonb"),
+    ("from app.db import base as db", "db.get_db()", "db.get_db"),
+])
+def test_jsonb_exception_does_not_hide_queries_or_other_modules(imports, call, expected):
+    source = f"{imports}\n\nasync def handler():\n    {call}\n"
+    assert _calls(source) == [expected]
+
+
+def test_real_query_renamed_parse_jsonb_next_to_the_pure_decoder_still_flags():
+    assert _calls("""
+        from app.db.base import parse_jsonb as decode
+        from app.db.background_tasks import get_stop_order_proofs as parse_jsonb
+
+        async def handler():
+            decode('null')
+            parse_jsonb('s1', ['task'])
+    """) == ["parse_jsonb()"]
+
+
+def test_ambiguous_module_alias_does_not_gain_the_pure_helper_exception():
+    # Import collection is scope-agnostic; do not guess an alias's provenance.
+    assert _calls("""
+        from app.db import turns as db
+
+        async def handler():
+            db.parse_jsonb('null')
+
+        def elsewhere():
+            from app.db import base as db
+    """) == ["db.parse_jsonb"]
+
+
+@pytest.mark.parametrize(("raw", "expected"), [
+    ('{"epoch": 1}', {"epoch": 1}),
+    ('[1, null]', [1, None]),
+    ('"text"', "text"),
+    ("null", None),
+    ("invalid json", None),
+    ("", None),
+    (None, None),
+    ({"epoch": 1}, {"epoch": 1}),
+    ([1, None], [1, None]),
+    (42, 42),
+])
+def test_actual_jsonb_decoder_is_pure_and_preserves_passthrough(raw, expected, monkeypatch):
+    from app.db import base
+
+    def no_db(*args, **kwargs):
+        pytest.fail("the exempt JSON decoder must not access the database")
+    monkeypatch.setattr(base, "get_db", no_db)
+    decoded = base.parse_jsonb(raw)
+    assert decoded == expected
+    if not isinstance(raw, str):
+        assert decoded is raw

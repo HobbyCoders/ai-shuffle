@@ -76,6 +76,11 @@ ALLOWLIST_NAMES = frozenset(
     }
 )
 
+# Exact pure exports, not name-wide exceptions: base.parse_jsonb only decodes
+# JSON/pass-through values and performs no I/O. Other DB modules/aliases with
+# the same function name must still be scanned as possible database calls.
+PURE_DB_CALLS = frozenset({"app.db.base.parse_jsonb"})
+
 # Prefix-matched allowlist entries (pure functions, no I/O).
 ALLOWLIST_PREFIXES = ("hash_",)
 
@@ -113,14 +118,15 @@ def _dotted(node: ast.AST) -> str | None:
     return ".".join(reversed(parts))
 
 
-def collect_db_names(tree: ast.AST) -> tuple[set[str], set[str]]:
+def collect_db_names(tree: ast.AST) -> tuple[dict[str, set[str]], set[str]]:
     """Return (module_aliases, bare_funcs) bound to synchronous app.db code.
 
-    ``module_aliases`` are local names standing for an ``app.db`` module, so
-    ``alias.anything()`` is a DB call. ``bare_funcs`` are local names bound
-    directly to a function pulled out of an ``app.db`` module.
+    ``module_aliases`` maps local names to their candidate ``app.db`` modules,
+    retaining provenance for exact pure-export exceptions. Multiple candidates
+    remain conservative. ``bare_funcs`` are local names bound directly to a
+    non-exempt function pulled out of an ``app.db`` module.
     """
-    module_aliases: set[str] = set()
+    module_aliases: dict[str, set[str]] = {}
     bare_funcs: set[str] = set()
 
     for node in ast.walk(tree):
@@ -138,13 +144,14 @@ def collect_db_names(tree: ast.AST) -> tuple[set[str], set[str]]:
                     local = alias.asname or alias.name
                     if _is_allowlisted(alias.name):
                         continue
-                    module_aliases.add(local)
+                    module_aliases.setdefault(local, set()).add(f"{DB_PACKAGE}.{alias.name}")
             elif mod.startswith(DB_PACKAGE + "."):
                 # from app.db.<module> import fn [as g]
                 if mod == ASYNC_DB_MODULE:
                     continue
                 for alias in node.names:
-                    if _is_allowlisted(alias.name):
+                    if (_is_allowlisted(alias.name)
+                            or f"{mod}.{alias.name}" in PURE_DB_CALLS):
                         continue
                     bare_funcs.add(alias.asname or alias.name)
         elif isinstance(node, ast.Import):
@@ -156,7 +163,7 @@ def collect_db_names(tree: ast.AST) -> tuple[set[str], set[str]]:
                     continue
                 if alias.asname:
                     # import app.db.turns as turns_db
-                    module_aliases.add(alias.asname)
+                    module_aliases.setdefault(alias.asname, set()).add(name)
                 # Plain `import app.db.turns` binds `app`; those call sites are
                 # matched by their full dotted path instead (see _call_label).
 
@@ -164,7 +171,7 @@ def collect_db_names(tree: ast.AST) -> tuple[set[str], set[str]]:
 
 
 def _call_label(
-    node: ast.Call, module_aliases: set[str], bare_funcs: set[str]
+    node: ast.Call, module_aliases: dict[str, set[str]], bare_funcs: set[str]
 ) -> str | None:
     """Label for a call into synchronous app.db code, or None if it isn't one."""
     func = node.func
@@ -181,6 +188,8 @@ def _call_label(
 
     base = func.value
     if isinstance(base, ast.Name) and base.id in module_aliases:
+        if all(f"{module}.{attr}" in PURE_DB_CALLS for module in module_aliases[base.id]):
+            return None
         return f"{base.id}.{attr}"
 
     # Fully qualified: app.db.<module>.fn()
@@ -189,6 +198,7 @@ def _call_label(
         dotted
         and dotted.startswith(DB_PACKAGE + ".")
         and dotted != ASYNC_DB_MODULE
+        and f"{dotted}.{attr}" not in PURE_DB_CALLS
     ):
         return f"{dotted}.{attr}"
 
