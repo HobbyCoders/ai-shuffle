@@ -1217,9 +1217,9 @@
 							<span class="connector-type-desc">{type.description}</span>
 							{#if type.triggers?.length || type.actions?.length || type.tools?.length}
 								<div class="connector-type-variants">
-									{#if type.triggers?.length}<span class="mini-badge">{type.triggers.length}</span>{/if}
-									{#if type.actions?.length}<span class="mini-badge">{type.actions.length}</span>{/if}
-									{#if type.tools?.length}<span class="mini-badge">{type.tools.length}</span>{/if}
+									{#if type.triggers?.length}<span class="mini-badge">{type.triggers.length} triggers</span>{/if}
+									{#if type.actions?.length}<span class="mini-badge">{type.actions.length} actions</span>{/if}
+									{#if type.tools?.length}<span class="mini-badge">{type.tools.length} tools</span>{/if}
 								</div>
 							{/if}
 						</div>
@@ -1310,9 +1310,9 @@
 
 					{#if needsAgent}
 						<div>
-							<label class="block text-xs font-medium text-muted-foreground mb-1" for="connector-agent">
+							<span class="block text-xs font-medium text-muted-foreground mb-1">
 								Agent <span class="text-destructive">*</span>
-							</label>
+							</span>
 							<SelectField label="Agent" bind:value={formProfileId} options={[
 								{ value: '', label: 'Choose an agent', disabled: true },
 								...agents.map((agent) => {
@@ -1340,9 +1340,9 @@
 					<!-- API User -->
 					{#if view === 'setup' && showAdvanced}
 						<div>
-							<label class="block text-xs font-medium text-muted-foreground mb-1" for="connector-api-user">
+							<span class="block text-xs font-medium text-muted-foreground mb-1">
 								API User
-							</label>
+							</span>
 							<SelectField label="API User" bind:value={formApiUserId} options={[
 								{ value: '', label: 'Auto-create dedicated user' },
 								...apiUsers.map((user) => ({ value: user.id, label: user.name + (user.description ? ` — ${user.description}` : '') }))
@@ -1433,7 +1433,6 @@
 												{#each guildRows as g (g.id)}
 													<label class="picker-item">
 														<Checkbox
-
 															checked={selectedGuildIds.has(g.id)}
 															onchange={() => toggleGuild(g.id)}
 														/>
@@ -1480,7 +1479,6 @@
 													{#each grp.channels as c (c.id)}
 														<label class="picker-item picker-item-indent">
 															<Checkbox
-
 																checked={selectedChannelIds.has(c.id)}
 																onchange={() => toggleChannel(c.id)}
 															/>
@@ -1597,7 +1595,6 @@
 							{#each availableEvents as event}
 								<label class="flex items-center gap-2 cursor-pointer group">
 									<Checkbox
-
 										checked={formEvents.includes(event)}
 										onchange={() => toggleEvent(event)}
 									/>
