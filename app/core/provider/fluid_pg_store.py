@@ -42,6 +42,7 @@ from app.core import api_user_scope, artifact_access
 from app.db import session_recall
 from app.db.async_database import run_maintenance, run_sync, run_event_write
 from app.db.base import get_db, get_turn_db, get_event_db
+from app.db.sql_timeouts import transcript_decode_timeouts
 
 # Same Postgres-illegal code-point scrub the Claude session store applies at its
 # own jsonb boundary — see the comment block above ``_PG_ILLEGAL_RE`` there for
@@ -152,6 +153,7 @@ def _load_session_sync(session_id: str, *, include_nodes: bool = True) -> Option
         meta = SessionMeta(**dict(row))
         if not include_nodes:
             return {"meta": meta, "nodes": {}, "node_sizes": {}}
+        transcript_decode_timeouts(cur)
         nodes, sizes = {}, {}
         # A normal cursor buffers the entire raw transcript in libpq, even
         # when Python iterates it. Keep only a small server-cursor batch beside
