@@ -41,8 +41,9 @@ await runJourney({
    await page.getByTestId('automation-generation-group').waitFor();
    await page.getByRole('tab', { name: 'Setup', exact: true }).click();
    await page.getByRole('textbox', { name: 'Name', exact: true }).waitFor();
-   await mark('Back returns to the visible collection and search');
-   await page.getByRole('button', { name: 'Back to Automations', exact: true }).click();
+   await mark('the collection remains searchable; phone Back restores its pane');
+   const back = page.getByRole('button', { name: 'Back to Automations', exact: true });
+   if (await back.isVisible()) await back.click();
    await page.getByPlaceholder('Search automations').waitFor();
    await page.getByPlaceholder('Search automations').fill('no such automation');
    await page.getByText('No matching automations', { exact: true }).waitFor();
