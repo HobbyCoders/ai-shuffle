@@ -202,3 +202,157 @@ async def test_opencode_checkpoint_uses_same_conversation_header():
                                wire_state=WireState(session_id="conversation-1", role="checkpoint"))
         _ = [chunk async for chunk in client.stream(ProviderRequest(model="test", messages=[], session_id="conversation-1"))]
     assert seen == ["conversation-1", "conversation-1"]
+
+
+@pytest.mark.parametrize("provider,mode", BASE_URLS)
+def test_compatible_configuration_round_trip_keeps_destination_and_profile(monkeypatch, provider, mode):
+    from fluid.config.loader import _build_provider_client
+    from fluid.config.model import HarnessConfig
+
+    monkeypatch.setenv("TEST_GATEWAY_KEY", "fake-key")
+    config = HarnessConfig.from_dict({"providers": {"gateway": {
+        "kind": "anthropic", "compatible_provider": provider, "auth_mode": mode,
+        "api_key_env": "TEST_GATEWAY_KEY", "user_agent": "ai-shuffle/test"}}})
+    restored = HarnessConfig.from_dict(json.loads(json.dumps(config.to_dict())))
+    client = _build_provider_client(restored, "gateway")
+    assert client._base_url == BASE_URLS[provider, mode] + "/v1/messages"
+    assert client.name == provider and client._api_key == "fake-key"
+    assert client._plan_key == (mode == "plan_key")
+    assert client._user_agent == "ai-shuffle/test"
+
+
+@pytest.mark.parametrize("provider", ["kimi", "minimax", "opencode"])
+def test_cache_annotations_strip_protocol_only_and_keep_application_data(provider):
+    from fluid.messages import ToolUseBlock, ToolResultBlock
+
+    marker = {"type": "ephemeral"}
+    schema = {"type": "object", "properties": {"cache_control": {"type": "string"}},
+              "required": ["cache_control"]}
+    arguments = {"cache_control": "keep", "nested": {"cache_control": "also keep"}}
+    result = json.dumps(arguments)
+    request = ProviderRequest(model="test-model", system="Stable system", cache_breakpoints=3,
+        tools=[{"name": "hello", "input_schema": schema, "cache_control": marker}],
+        messages=[Message(role="assistant", content=[ToolUseBlock(id="t", name="hello", input=arguments)]),
+                  Message(role="user", content=[ToolResultBlock(tool_use_id="t", content=[Text(result)])])])
+    anthropic_before = json.dumps(to_request(request))
+    body = to_request(request, compatible_provider=provider)
+    assert body["tools"] == [{"name": "hello", "input_schema": schema}]
+    assert body["messages"][0]["content"][0]["input"] == arguments
+    assert body["messages"][1]["content"][0]["content"] == [{"type": "text", "text": result}]
+    assert "cache_control" not in body["system"][0]
+    assert all("cache_control" not in block for msg in body["messages"] for block in msg["content"])
+    assert json.dumps(to_request(request)) == anthropic_before
+    assert arguments["cache_control"] == "keep" and "cache_control" in schema["properties"]
+    # Raw protocol content supplied by a caller has the same boundary: strip
+    # annotations on result blocks, not a nested application value.
+    raw = [{"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t",
+        "cache_control": marker, "content": [{"type": "text", "text": result,
+        "cache_control": marker, "data": arguments}]}]}]
+    request.extra = {"messages": raw}
+    anthropic_before = json.dumps(to_request(request))
+    body = to_request(request, compatible_provider=provider)
+    result_block = body["messages"][0]["content"][0]
+    assert "cache_control" not in result_block and "cache_control" not in result_block["content"][0]
+    assert result_block["content"][0]["data"] == arguments
+    assert json.dumps(to_request(request)) == anthropic_before
+
+
+@pytest.mark.parametrize("provider", ["kimi", "minimax", "opencode"])
+async def test_native_chat_never_forwards_credentials_on_redirect(provider):
+    calls = []
+    def redirect(request):
+        calls.append(request)
+        if request.url.host == "foreign.example":
+            return httpx.Response(200, text=stream(), headers={"content-type": "text/event-stream"})
+        return httpx.Response(307, headers={"location": "https://foreign.example/v1/messages"})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(redirect), follow_redirects=True) as http:
+        client = AnthropicClient(api_key="fake", compatible_provider=provider, user_agent="ai-shuffle/test",
+                                 http_client=http, retry=RetryPolicy(max_retries=0))
+        chunks = [c async for c in client.stream(ProviderRequest(model="test", messages=[], session_id="conversation"))]
+    assert chunks[-1].kind == "error"
+    assert len(calls) == 1 and calls[0].url.host != "foreign.example"
+
+
+@pytest.mark.parametrize("binding", ["scope", "routing", "host", "engine"])
+async def test_opencode_learner_keeps_bound_or_scope_identity_across_passes(tmp_path, binding):
+    from fluid.codemode.continual import Synthesizer
+    from fluid.codemode.skills import SkillStore
+    from fluid.providers.base import WireState
+
+    seen = []
+    def respond(request):
+        seen.append(request)
+        return httpx.Response(200, text=stream(), headers={"content-type": "text/event-stream"})
+    store = SkillStore(tmp_path / "memory", owner="test-owner")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+        client = AnthropicClient(api_key="fake", compatible_provider="opencode", user_agent="ai-shuffle/test", http_client=http)
+        for _ in range(2):
+            synth = Synthesizer(client, "test", store, project="project-scope",
+                                session_id="conversation-1" if binding == "host" else None)
+            loop = None
+            if binding == "routing":
+                synth.bind_routing(lambda: ({"prompt_cache_key": "responses-only"}, WireState(
+                    session_id="conversation-1", role="learner")))
+            elif binding == "engine":
+                from fluid.codemode.journal import ToolJournal
+
+                loop = NativeLoop(provider=client, store=MemoryStore(), model="test",
+                                  session_id="conversation-1", journal=ToolJournal(store, synth))
+                await loop._ensure_session()
+            try:
+                await synth._complete("Synthesize this", reserve=0)
+            finally:
+                if loop is not None:
+                    await loop.aclose()
+    ids = [r.headers["x-opencode-session"] for r in seen]
+    assert ids[0] == ids[1]
+    if binding == "scope":
+        assert ids[0].startswith("learner:")
+    else:
+        assert ids[0] == "conversation-1"
+    assert all("prompt_cache_key" not in json.loads(r.content) for r in seen)
+
+
+async def test_opencode_harvest_uses_stable_project_scope(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from fluid.cli.evolve import draft_anchors
+    from fluid.config import loader
+    from fluid.store.base import project_root_for
+
+    config = SimpleNamespace(cwd=tmp_path, default_provider="p", continual_model=None, model_for=lambda _: "test")
+    project = project_root_for(tmp_path)
+    store = SimpleNamespace(
+        recent_sessions=AsyncMock(return_value=[SimpleNamespace(project_root=project, session_id="s")]),
+        session_slice=AsyncMock(return_value=SimpleNamespace(messages=[SimpleNamespace(
+            role="user", tools=[], text="completed migration")]))
+    )
+    seen = []
+    def respond(request):
+        seen.append(request.headers["x-opencode-session"])
+        return httpx.Response(200, text=stream(), headers={"content-type": "text/event-stream"})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+        client = AnthropicClient(api_key="fake", compatible_provider="opencode", user_agent="ai-shuffle/test", http_client=http)
+        monkeypatch.setattr(loader, "_build_provider_client", lambda *_: client)
+        for _ in range(2):
+            await draft_anchors(config, store)
+    assert len(seen) == 2 and seen[0] == seen[1]
+    assert seen[0].startswith("harvest:") and project not in seen[0]
+
+
+async def test_text_tools_wrapper_preserves_opencode_conversation_identity():
+    from fluid.providers.base import WireState
+    from fluid.providers.local.text_tools import TextToolsAdapter
+
+    seen = []
+    def respond(request):
+        seen.append(request.headers["x-opencode-session"])
+        return httpx.Response(200, text=stream(), headers={"content-type": "text/event-stream"})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+        client = AnthropicClient(api_key="fake", compatible_provider="opencode", user_agent="ai-shuffle/test", http_client=http)
+        wrapped = TextToolsAdapter(client)
+        wire = WireState(session_id="conversation-1", role="main")
+        request = ProviderRequest(model="test", messages=[], session_id="conversation-1", wire_state=wire)
+        assert wrapped._prepare(request).wire_state is wire
+        _ = [chunk async for chunk in wrapped.stream(request)]
+    assert seen == ["conversation-1"]

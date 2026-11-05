@@ -433,7 +433,7 @@ def _default_candidate_rows(servable_only: bool) -> List[dict]:
     :func:`~app.core.environment.is_provider_servable` rows, for a caller
     that validates its pick with that rule (the voice delegation).
     """
-    rows = [r for r in usable_provider_rows() if r.get("id") and r.get("auth_mode") != "plan_key"]
+    rows = [r for r in usable_provider_rows() if r.get("id")]
     if servable_only:
         from app.core.environment import is_provider_servable
 
@@ -480,8 +480,8 @@ def subscription_provider_model(
     """``(row, model id)`` on a usable flat-rate subscription row, or None.
 
     For background work no session names a provider for (the memory learner
-    behind a Claude Code session): only a subscription sign-in (ChatGPT,
-    SuperGrok) qualifies, never an API-key row, whose calls are billed per
+    behind a Claude Code session): only a subscription (ChatGPT, SuperGrok,
+    or a native plan key) qualifies, never a cash API-key row, billed per
     token. Newest row first, as :func:`usable_provider_rows` lists them; the
     first row that curates ``prefer_model`` wins, else the first row's own
     default model (its first curated model when no default is set), the same

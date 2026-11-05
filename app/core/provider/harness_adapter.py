@@ -2995,6 +2995,7 @@ class HarnessAdapter(ProviderAdapter):
             skills,
             project=memory_project,
             workflow_cwd=options.cwd,
+            session_id=fluid_session_id or self._resolve_app_session_id(),
             on_change=_announce,
             session_model=session_model,
             guidance_snapshot=_session_guidance_snapshot(session_model),
@@ -8568,8 +8569,8 @@ def _decide_provider_kind(options: SessionOptions) -> str:
     # on an OpenRouter row sniffs as an OpenRouter slug only by luck, a bare
     # "claude-3.5-sonnet" on that same row sniffs as the DELEGATED claude CLI,
     # and a slugged model on an OpenAI row sniffs as OpenRouter. The row's own
-    # provider_type is authoritative when we have it; the sniff stays as the
-    # fallback for native sessions and rows of unknown shape.
+    # provider_type is authoritative when we have it; unknown row types fail
+    # closed. The sniff stays as the fallback when no row shape is available.
     bound_provider_id = options.extra.get("provider_id")
     if bound_provider_id:
         provider_type = options.extra.get("provider_type")
@@ -9126,6 +9127,7 @@ async def _build_provider_client(
                     base_url=creds.base_url.rstrip("/") + "/v1/messages",
                     compatible_provider=creds.compatible_provider,
                     plan_key=creds.plan_key,
+                    model_efforts=creds.model_efforts,
                     user_agent=f"ai-shuffle/{settings.version}",
                     http_client=session_http, **timeouts,
                 ),

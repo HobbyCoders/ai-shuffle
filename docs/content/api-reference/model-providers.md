@@ -135,8 +135,10 @@ slot rule allows one plan **and** one cash API key active together. Use PATCH wi
 kind are immutable on these rows: create another row to change them.
 
 Saving or replacing a key makes a tiny authenticated Messages request (which can
-consume quota); `401`/`403` returns a clear `400` without saving the replacement.
-Outages and other indeterminate failures do not prevent saving. Explicit
+consume quota). Only `401` or an `authentication_error` rejects it with a clear
+`400`, without saving the replacement. A `403`/permission error (for example a
+model outside the plan tier), redirects, outages and other indeterminate failures
+do not prevent saving. Authenticated requests never follow redirects. Explicit
 `POST /{id}/check-key` returns `{"status":"valid"}` only after successful inference,
 or `{"status":"unavailable"}` when verification is indeterminate. A public model
 list is never proof that an OpenCode key works. `POST /{id}/fetch-models` returns
@@ -149,9 +151,10 @@ keys. Plans do not generate dollar estimates. Cash prices stay unknown unless a
 documented provider-specific price exists. No new balance/allowance meter or
 background polling is enabled: MiniMax's remains response shape is undocumented,
 and Kimi/OpenCode account meters need live-key verification. These accounts can
-be explicitly selected for automations without warnings. Plan rows are excluded
-from automatic unbound/background selection and silent cross-account failover;
-a session explicitly bound to a plan may use its own helper calls on that plan.
+be selected for automations without warnings. Plan rows participate in interactive
+defaults and unbound background selection just like ChatGPT and SuperGrok
+subscriptions, and a bound session may use its own helpers on that plan. Like
+those subscriptions, plan rows are excluded from silent cross-account failover.
 
 Key pages are returned by the metadata endpoint: Kimi Code
 `https://www.kimi.com/code/console`, Kimi API
@@ -160,11 +163,18 @@ Key pages are returned by the metadata endpoint: Kimi Code
 `https://platform.minimax.io/user-center/basic-information/interface-key`, and
 OpenCode `https://opencode.ai/console`. The MiniMax plan prefix hint is `sk-cp-`.
 
-Upgrade all workers before using these providers. Sync preserves encrypted keys
-and accepts legacy rows missing optional metadata, but an older executable that
-does not know these provider types cannot be made routing-safe by a new peer.
-New workers fail closed for an unknown future provider type instead of guessing
-Claude from a model ID.
+Creating a native account (or trying to convert another provider into one)
+returns `409` naming the workers to update when any current network member does
+not advertise native Messages support. Offline members and members with unknown
+capabilities also require an update. No network, or a network containing only
+this worker, is allowed. Existing native accounts may still be edited, activated
+or deleted; provider and credential kind remain immutable.
+
+This creation-time check does not protect against an older-build worker joining
+after an account already exists: upgrade every worker before joining. Sync
+preserves encrypted keys and accepts legacy rows missing optional metadata.
+New workers skip unsupported future rows in registry/capability enumeration and
+fail closed on execution instead of guessing Claude from a model ID.
 
 ### Per-model local sampling and reasoning (backend/API)
 

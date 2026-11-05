@@ -64,7 +64,7 @@ async def test_saved_accounts_slots_encryption_routing_and_automation(client, pr
         assert _is_subscription_session("test-session")
     assert provider_billing(provider, "plan_key") == "subscription"
     assert model_provider_slot(row) == f"{provider}:subscription"
-    assert second["id"] not in {r["id"] for r in _default_candidate_rows(False)}
+    assert second["id"] in {r["id"] for r in _default_candidate_rows(False)}
     creds = await resolve_provider_credentials("anthropic", second["id"])
     assert creds.compatible_provider == provider and creds.api_key == "test-native-secret-value"
     assert creds.base_url == native_providers.endpoint_root(provider, "plan_key")
@@ -184,5 +184,166 @@ async def test_session_client_builds_from_saved_row(client, provider, mode):
         assert isinstance(built, AnthropicClient)
         assert built.name == provider
         assert built._user_agent == f"ai-shuffle/{settings.version}"
+        assert not session_http.follow_redirects
     finally:
         await session_http.aclose()
+
+
+@pytest.mark.parametrize("provider", native_providers.PROVIDERS)
+async def test_authenticated_checks_and_catalogs_never_follow_redirects(client, provider):
+    calls = []
+    redirect = False
+
+    def respond(request):
+        calls.append(request)
+        if redirect:
+            return httpx.Response(307, headers={"location": "https://foreign.example/v1/messages"},
+                                  json={"data": [{"id": "redirected-model"}]})
+        return httpx.Response(200, json={"content": []})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond), follow_redirects=True) as http:
+        with patch("app.core.http_client.get_http_client", return_value=http):
+            row = create(client, provider, "api_key")
+            redirect = True
+            calls.clear()
+            checked = client.post(f"{ROOT}/{row['id']}/check-key")
+            assert checked.status_code == 200 and checked.json()["status"] == "unavailable"
+            catalog = client.post(f"{ROOT}/{row['id']}/fetch-models")
+            assert catalog.status_code == 502
+    assert calls
+    assert all(r.url.host != "foreign.example" for r in calls)
+
+
+@pytest.mark.parametrize("status,error_type,rejected", [
+    (401, "permission_error", True), (400, "authentication_error", True),
+    (403, "authentication_error", True), (403, "permission_error", False),
+    (429, "rate_limit_error", False), (503, "overloaded_error", False),
+])
+async def test_key_check_rejects_only_authentication_and_patch_keeps_old_key(client, status, error_type, rejected):
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(200, json={}))) as http:
+        with patch("app.core.http_client.get_http_client", return_value=http):
+            row = create(client, "kimi", "plan_key")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(
+            status, json={"error": {"type": error_type, "message": "test-new-key"}}))) as http:
+        with patch("app.core.http_client.get_http_client", return_value=http):
+            updated = client.patch(f"{ROOT}/{row['id']}", json={"auth_token": "test-new-key"})
+            assert updated.status_code == (400 if rejected else 200)
+            if not rejected:
+                checked = client.post(f"{ROOT}/{row['id']}/check-key")
+                assert checked.json()["status"] == "unavailable"
+    saved = db.get_model_provider(row["id"], include_token=True)
+    expected = "test-native-secret-value" if rejected else "test-new-key"
+    assert encryption.decrypt_value(saved["auth_token"]) == expected
+    assert "test-new-key" not in updated.text
+
+
+@pytest.mark.parametrize("members,allowed", [
+    ([], True),
+    ([{"device_id": "self", "name": "This worker"}], True),
+    ([{"device_id": "peer", "name": "Updated worker", "capabilities": {native_providers.CAPABILITY: 1}}], True),
+    ([{"device_id": "peer", "name": "Offline older worker", "capabilities": {}}], False),
+    ([{"device_id": "peer", "name": "Unknown worker"}], False),
+    ([{"device_id": "peer"}], False),
+])
+async def test_native_enrollment_requires_every_current_member_capability(client, monkeypatch, members, allowed):
+    from types import SimpleNamespace
+    from app.network import engine
+    from app.db import network as store
+
+    monkeypatch.setattr(engine, "context", lambda: SimpleNamespace(device_id="self"))
+    def current_members(*, include_revoked):
+        assert not include_revoked
+        return members
+    monkeypatch.setattr(store, "list_members", current_members)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(200, json={}))) as http:
+        with patch("app.core.http_client.get_http_client", return_value=http):
+            result = client.post(ROOT, json={"name": "Native", "provider_type": "kimi", "auth_token": "fake"})
+    assert result.status_code == (200 if allowed else 409), result.text
+    if not allowed:
+        assert (members[0].get("name") or "peer") in result.json()["detail"]
+        assert not db.get_all_model_providers()
+
+
+async def test_native_enrollment_without_network_and_existing_row_operations_stay_allowed(client, monkeypatch):
+    from types import SimpleNamespace
+    from app.network import engine
+    from app.db import network as store
+
+    monkeypatch.setattr(engine, "context", lambda: None)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(200, json={}))) as http:
+        with patch("app.core.http_client.get_http_client", return_value=http):
+            row = create(client, "kimi", "plan_key")
+    monkeypatch.setattr(engine, "context", lambda: SimpleNamespace(device_id="self"))
+    monkeypatch.setattr(store, "list_members", lambda **kw: [{"device_id": "old", "name": "Older worker"}])
+    assert client.patch(f"{ROOT}/{row['id']}", json={"name": "Renamed"}).status_code == 200
+    assert client.post(f"{ROOT}/{row['id']}/activate").status_code == 200
+    db.create_model_provider("custom", "Custom", "custom", "https://example.com")
+    converted = client.patch(f"{ROOT}/custom", json={"provider_type": "opencode"})
+    assert converted.status_code == 409 and "Older worker" in converted.text
+    assert client.delete(f"{ROOT}/{row['id']}").status_code == 200
+
+
+@pytest.mark.parametrize("servable_only", [False, True])
+async def test_plan_key_is_interactive_and_background_default_without_claude(client, monkeypatch, servable_only):
+    from app.core import credential_gate
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(200, json={}))) as http:
+        with patch("app.core.http_client.get_http_client", return_value=http):
+            row = create(client, "kimi", "plan_key")
+    monkeypatch.setattr(credential_gate, "_claude_ready_for_default", lambda probe: False)
+    monkeypatch.setattr(credential_gate, "_most_used_ranking", lambda: [])
+    model = row["models"][0]["id"]
+    assert credential_gate.default_run_model(servable_only=servable_only) == (row["id"], model)
+    assert credential_gate.default_run_selection(servable_only=servable_only) == f"prov:{row['id']}:{model}"
+    picked, picked_model = credential_gate.subscription_provider_model()
+    assert picked["id"] == row["id"] and picked_model == model
+
+
+def test_registry_skips_unknown_rows_and_capability_probe_is_safe(client):
+    from app.core.model_registry import _providers_payload
+    from app.core.provider.capabilities import supports_auto_permission
+    from app.core.environment import ProviderConfigError
+
+    unknown = {"id": "future", "name": "Future provider", "provider_type": "future-native",
+               "models_json": [{"id": "claude-future"}], "default_model": "claude-future"}
+    supported = {"id": "supported", "name": "Supported", "provider_type": "kimi",
+                 "models_json": [{"id": "kimi-k3"}], "default_model": "kimi-k3"}
+    with patch.object(db, "get_enabled_model_providers", return_value=[unknown, supported]), \
+         patch.object(db, "list_usable_model_providers", return_value=[unknown, supported]):
+        assert [r["id"] for r in _providers_payload()] == ["supported"]
+    assert not supports_auto_permission("claude-future", unknown)
+    with pytest.raises(ProviderConfigError):
+        _provider_row_kind("future-native", None)
+
+
+async def test_opencode_catalog_effort_reaches_wire_only_when_advertised(client):
+    import json
+    from app.core.model_effort import normalize_effort
+    from app.core.provider.harness_adapter import _build_provider_client
+    from app.core.provider.types import SessionOptions
+    from fluid.providers.base import ProviderRequest
+
+    models = [{"id": "claude-sonnet-5-5", "label": "Sonnet", "reasoning_capabilities": {
+        "version": 1, "effort_levels": ["low", "high"], "default_effort": "low"}}]
+    calls = []
+    def respond(request):
+        calls.append(json.loads(request.content))
+        return httpx.Response(200, json={})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+        with patch("app.core.http_client.get_http_client", return_value=http):
+            saved = create(client, "opencode", "api_key", models=models)
+        row = db.get_model_provider(saved["id"])
+        normalized = normalize_effort("high", models[0]["id"], row, route="anthropic")
+        assert normalized == "high"
+        built, session_http = await _build_provider_client("anthropic", SessionOptions(
+            model=models[0]["id"], extra={"provider_id": saved["id"]}))
+        try:
+            built._http = http
+            calls.clear()
+            for effort in (normalized, "max"):
+                _ = [chunk async for chunk in built.stream(ProviderRequest(
+                    model=models[0]["id"], messages=[], effort=effort, session_id="conversation"))]
+        finally:
+            await session_http.aclose()
+    assert calls[0]["output_config"] == {"effort": "high"}
+    assert "output_config" not in calls[1]

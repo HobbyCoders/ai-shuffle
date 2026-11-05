@@ -52,3 +52,16 @@ def test_keys_sync_and_old_peer_missing_optional_fields_is_safe(workers, monkeyp
 def test_unknown_future_provider_fails_closed_instead_of_claude_sniffing():
     with pytest.raises(ProviderConfigError, match="update the worker"):
         _provider_row_kind("future-native", "plan_key", None)
+
+
+def test_presence_advertises_native_messages_capability(workers):
+    from app.core import native_providers
+    from app.db import network as store
+
+    worker = workers("Current worker")
+    with worker.active():
+        engine.create_network("Native providers")
+        engine.publish_presence()
+        own = store.get_member(engine.context().device_id)
+        assert own["capabilities"][native_providers.CAPABILITY] == 1
+        assert native_providers.workers_requiring_update() == []

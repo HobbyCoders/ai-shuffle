@@ -245,6 +245,14 @@ def _validate_native_auth(provider_type, auth_mode, api_dialect) -> None:
         raise HTTPException(status_code=400, detail="auth_mode is managed by the provider's sign-in flow.")
 
 
+async def _require_native_workers() -> None:
+    workers = await run_sync(native_providers.workers_requiring_update)
+    if workers:
+        raise HTTPException(status_code=409, detail=(
+            "Update these workers before adding Kimi, MiniMax or OpenCode accounts: "
+            + ", ".join(workers)))
+
+
 async def _check_native_key(row, key) -> bool:
     from app.core.http_client import get_http_client
 
@@ -919,6 +927,8 @@ async def create_provider(body: ModelProviderCreate, token: str = Depends(requir
     """Create a new model provider."""
     _validate_provider_type(body.provider_type)
     native = body.provider_type in native_providers.PROVIDERS
+    if native:
+        await _require_native_workers()
     _validate_native_auth(body.provider_type, body.auth_mode, body.api_dialect)
     _validate_base_url(body.base_url, required=not native)
     _validate_api_dialect(body.api_dialect)
@@ -988,6 +998,8 @@ async def update_provider(
 
     _validate_provider_type(body.provider_type)
     effective_type = body.provider_type or existing.get("provider_type")
+    if effective_type in native_providers.PROVIDERS and existing.get("provider_type") not in native_providers.PROVIDERS:
+        await _require_native_workers()
     effective_auth = body.auth_mode if "auth_mode" in body.model_fields_set else existing.get("auth_mode")
     _validate_native_auth(effective_type, effective_auth if effective_type in native_providers.PROVIDERS else body.auth_mode,
                           body.api_dialect)
@@ -1323,9 +1335,10 @@ async def _fetch_models(provider_id: str, *, backfill_context: bool = True) -> F
                 if row["provider_type"] == "opencode":
                     if not await _check_native_key(row, auth_token):
                         raise UpstreamModelsError("key_check_unavailable")
-                response = await client.get(url, headers=native_providers.request_headers(auth_token), timeout=_FETCH_TIMEOUT)
-                if response.status_code >= 400:
-                    if response.status_code in (401, 403):
+                response = await client.get(url, headers=native_providers.request_headers(auth_token),
+                                            timeout=_FETCH_TIMEOUT, follow_redirects=False)
+                if response.status_code >= 300:
+                    if response.status_code == 401:
                         await _record_credential_check(provider_id, accepted=False, row=row)
                     raise UpstreamModelsError(f"http_{response.status_code}")
                 models = _parse_models_response(response.json(), provider_type=row["provider_type"])

@@ -89,6 +89,7 @@ class AnthropicClient:
         compatible_provider: str | None = None,
         plan_key: bool = False,
         user_agent: str | None = None,
+        model_efforts: dict[str, list[str]] | None = None,
     ) -> None:
         from fluid.tools.child_env import scrub_claude_auth_env
 
@@ -103,6 +104,7 @@ class AnthropicClient:
         self._compatible_provider = compatible_provider
         self._plan_key = plan_key
         self._user_agent = user_agent
+        self._model_efforts = model_efforts
         if compatible_provider:
             self.name = compatible_provider
             self.pricing_is_authoritative = True
@@ -172,7 +174,8 @@ class AnthropicClient:
                 if not sid:
                     raise ValueError("OpenCode requires a stable conversation session_id")
                 headers["x-opencode-session"] = sid
-        body = build_request_body(request, compatible_provider=self._compatible_provider)
+        body = build_request_body(request, compatible_provider=self._compatible_provider,
+                                  model_efforts=self._model_efforts)
         owned: httpx.AsyncClient | None = None
         attempt = 0
         try:
@@ -190,6 +193,7 @@ class AnthropicClient:
                         resp = await open_stream(
                             scope, client, "POST", self._base_url,
                             first_byte_timeout=first_byte, json=body, headers=headers,
+                            **({"follow_redirects": False} if self._compatible_provider else {}),
                         )
                         diagnostics.received_headers(resp)
                         if resp.status_code != 200:

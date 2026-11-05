@@ -87,7 +87,8 @@ def _block_to_api(block: Any, model: str | None = None, *,
 
 
 def build_request_body(request: ProviderRequest, *,
-                       compatible_provider: str | None = None) -> dict[str, Any]:
+                       compatible_provider: str | None = None,
+                       model_efforts: dict[str, list[str]] | None = None) -> dict[str, Any]:
     messages: list[dict[str, Any]] = []
     for msg in request.messages:
         content = [
@@ -149,31 +150,40 @@ def build_request_body(request: ProviderRequest, *,
             last[-1] = {**last[-1], "cache_control": {"type": "ephemeral"}}
     body.update(request.extra)
     if compatible_provider:
-        _compatible_body(body, request, compatible_provider)
+        _compatible_body(body, request, compatible_provider, model_efforts)
     return body
 
 
-def _compatible_body(body: dict[str, Any], request: ProviderRequest, provider: str) -> None:
+def _compatible_body(body: dict[str, Any], request: ProviderRequest, provider: str,
+                     model_efforts: dict[str, list[str]] | None = None) -> None:
     """Conservative Messages subset; never apply Claude model sniffing here."""
     from fluid.providers.compatible import effort_levels
 
-    def strip_cache(value: Any) -> Any:
-        if isinstance(value, dict):
-            return {k: strip_cache(v) for k, v in value.items() if k != "cache_control"}
-        if isinstance(value, list):
-            return [strip_cache(v) for v in value]
-        return value
+    def clean_block(block: dict[str, Any]) -> dict[str, Any]:
+        cleaned = {k: v for k, v in block.items() if k != "cache_control"}
+        # Only descend through protocol content blocks, never tool inputs or
+        # schemas: cache_control is a perfectly valid application field there.
+        if block.get("type") == "tool_result" and isinstance(block.get("content"), list):
+            cleaned["content"] = [clean_block(b) if isinstance(b, dict) else b for b in block["content"]]
+        return cleaned
 
-    cleaned = strip_cache(body)
-    body.clear()
-    body.update(cleaned)
+    if isinstance(body.get("system"), list):
+        body["system"] = [clean_block(b) for b in body["system"]]
+    body["messages"] = [
+        {**message, "content": [clean_block(b) for b in message["content"]]}
+        if isinstance(message.get("content"), list) else message
+        for message in body.get("messages", [])
+    ]
+    if body.get("tools"):
+        body["tools"] = [clean_block(t) for t in body["tools"]]
     for field in ("thinking", "output_config", "betas", "mcp_servers", "context_management", "container"):
         body.pop(field, None)
     if body.get("tools"):
         body["tools"] = [t for t in body["tools"] if "input_schema" in t and "type" not in t]
     # Never let Claude max-token tables rewrite an OpenCode Claude model id.
     body["max_tokens"] = request.max_tokens if request.max_tokens is not None else 8192
-    levels = effort_levels(provider, request.model)
+    levels = ((model_efforts or {}).get(request.model) if provider == "opencode"
+              else effort_levels(provider, request.model))
     if request.effort and levels and request.effort in levels:
         body["output_config"] = {"effort": request.effort}
     if provider == "minimax" and request.model == "MiniMax-M3":

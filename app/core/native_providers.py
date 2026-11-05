@@ -11,6 +11,7 @@ from fluid.providers.compatible import PROVIDERS, endpoint_root
 
 # Sources: platform.kimi.ai/docs/api/messages; MiniMax text-anthropic-api;
 # opencode.ai/v2/docs/console/{go,models,api/inference} (2026-11-05).
+CAPABILITY = "native_messages_providers_v1"
 DISPLAY = {"kimi": "Kimi", "minimax": "MiniMax", "opencode": "OpenCode"}
 KEY_PAGES = {
     "kimi": {"plan_key": "https://www.kimi.com/code/console",
@@ -19,6 +20,24 @@ KEY_PAGES = {
                 "api_key": "https://platform.minimax.io/user-center/basic-information/interface-key"},
     "opencode": {"plan_key": "https://opencode.ai/console", "api_key": "https://opencode.ai/console"},
 }
+
+
+def workers_requiring_update() -> list[str]:
+    """All current members must understand these rows before they are created.
+
+    Membership, not online presence, defines the set: offline/unknown peers
+    can consume the synced credential later. Revoked members cannot sync.
+    """
+    from app.db import network as store
+    from app.network import engine
+
+    ctx = engine.context()
+    if ctx is None:
+        return []
+    return [member.get("name") or member["device_id"]
+            for member in store.list_members(include_revoked=False)
+            if member["device_id"] != ctx.device_id
+            and (member.get("capabilities") or {}).get(CAPABILITY) != 1]
 
 
 def is_plan_key(row) -> bool:
@@ -87,9 +106,13 @@ async def check_key(row, key: str, *, client: httpx.AsyncClient) -> bool:
         response = await client.post(url, headers=request_headers(
                                          key, session_id="ai-shuffle-key-check" if row["provider_type"] == "opencode" else None),
                                      json={"model": model, "messages": [{"role": "user", "content": "Hi"}],
-                                           "max_tokens": 1, "stream": False}, timeout=20)
+                                           "max_tokens": 1, "stream": False}, timeout=20, follow_redirects=False)
     except httpx.HTTPError:
         return False
-    if response.status_code in (401, 403):
+    try:
+        error_type = response.json().get("error", {}).get("type")
+    except (ValueError, AttributeError):
+        error_type = None
+    if response.status_code == 401 or error_type == "authentication_error":
         raise KeyCheckError("The provider rejected this key. Check its subscription/API kind and try again.")
     return 200 <= response.status_code < 300

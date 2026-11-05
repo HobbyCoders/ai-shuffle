@@ -1874,7 +1874,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             model=self.model,
             messages=[Message(role="user", content=[Text(prompt)])],
             system="You write precise engineering handoff documents.",
-            session_id=op.session_id,
+            session_id=meta.session_id,
             tools=[],
             max_tokens=self.max_tokens,
             cache_breakpoints=0,

@@ -45,13 +45,15 @@ Every endpoint that returns a provider returns this shape. Stored secrets are ne
 }
 ```
 
-`auth_mode` cannot be set through the API. It becomes `chatgpt` after a [ChatGPT sign-in](#post-apiv1model-providersprovider_idcodexdevicestart) and `grok` after a [Grok sign-in](#post-apiv1model-providersprovider_idxaidevicestart). `needs_reauth` is `true` when a stored sign-in has stopped working and must be done again. `account_email` and `account_plan` are the email and plan id (such as `plus` or `pro`) read from a stored ChatGPT sign-in, for display; each is `null` when the sign-in does not carry it, and the token itself is never returned.
+`auth_mode` can be set to `plan_key` for Kimi, MiniMax and OpenCode (omit or use `null` for their pay-as-you-go API keys). For other providers it is managed by their existing sign-in flow. It becomes `chatgpt` after a [ChatGPT sign-in](#post-apiv1model-providersprovider_idcodexdevicestart) and `grok` after a [Grok sign-in](#post-apiv1model-providersprovider_idxaidevicestart). `needs_reauth` is `true` when a stored sign-in has stopped working and must be done again. `account_email` and `account_plan` are the email and plan id (such as `plus` or `pro`) read from a stored ChatGPT sign-in, for display; each is `null` when the sign-in does not carry it, and the token itself is never returned.
 
 ### Saved accounts and active slots
 
 Save any number of accounts, including multiple ChatGPT or SuperGrok sign-ins.
 `slot` is read-only: `openai:key`, `openai:subscription`, `grok:key`,
-`grok:subscription`, `openrouter:key`, or `null` for an independent custom gateway.
+`grok:subscription`, `openrouter:key`, `kimi:subscription`, `kimi:key`,
+`minimax:subscription`, `minimax:key`, `opencode:subscription`, `opencode:key`,
+or `null` for an independent custom gateway.
 Subscription `auth_mode` wins over `provider_type` (including a `custom` row with
 `auth_mode: "chatgpt"`). API keys and subscriptions occupy separate slots.
 
@@ -79,6 +81,100 @@ accounts across workers. Credentials remain encrypted in transit. On upgrade,
 v93 keeps the earliest-created enabled row per slot (ID breaks creation-time
 ties), disables duplicates without deleting them, and preserves existing off
 selections on subsequent startups.
+
+### Native Kimi, MiniMax and OpenCode keys
+
+These text providers run on Fluid's native agent loop through Anthropic Messages;
+no vendor CLI or OAuth login is used. `GET /api/v1/model-providers/native-options`
+(owner only) returns `{ "providers": [...] }` with six enrollment choices, including
+on a fresh install. Each choice has `provider_type`, plain `display_name`, `auth_mode`,
+`credential_kind` (`subscription` or `api_key`), `credential_label`, `slot`, `base_url`,
+`api_dialect: "anthropic"`, `key_page_url`, `key_prefixes`, and
+`usage_meter_available: false`. An empty `key_prefixes` means no documented prefix
+hint, not an invalid key. Prefixes are not used as credential validation.
+
+| Provider type / display | Plan label / slot | API label / slot |
+| --- | --- | --- |
+| `kimi` / Kimi | Kimi Code membership / `kimi:subscription` | Kimi API (pay as you go) / `kimi:key` |
+| `minimax` / MiniMax | MiniMax M Plan / `minimax:subscription` | MiniMax API (pay as you go) / `minimax:key` |
+| `opencode` / OpenCode | OpenCode Go / `opencode:subscription` | OpenCode Console (pay as you go) / `opencode:key` |
+
+Create through `POST /api/v1/model-providers`, for example:
+
+```json
+{"name":"My Kimi plan","provider_type":"kimi","auth_mode":"plan_key","auth_token":"<private key>","enabled":true}
+```
+
+Use the other provider types from the table for MiniMax and OpenCode. For a cash
+API key omit `auth_mode` (or send `null`); `api_key` is accepted as an input alias
+and stored as `null`, preserving the existing API-key row shape. The server fills
+`base_url`, `api_dialect`, and preset `models` when omitted. An explicit `base_url`
+is an override, such as the Kimi China endpoint. Endpoint roots are:
+
+| Provider | Plan root | Pay-as-you-go root |
+| --- | --- | --- |
+| Kimi | `https://api.kimi.ai/coding` | `https://api.moonshot.ai/anthropic` |
+| MiniMax | `https://api.minimax.io/anthropic` | `https://api.minimax.io/anthropic` |
+| OpenCode | `https://opencode.ai/inference/go/anthropic` | `https://opencode.ai/inference/anthropic` |
+
+Messages append `/v1/messages`. Each request identifies as `ai-shuffle/<version>`;
+OpenCode's conversation header stays stable across turns, checkpoints and learner
+calls. No client impersonation is used. Claude server tools, beta features and
+explicit cache markers are disabled for these providers; translated OpenCode
+models do not inherit Claude aliases, context windows, prices or effort defaults.
+
+The response is the normal saved provider object plus `native_provider` (the same
+enrollment metadata). `auth_token_set: true` indicates a saved key and
+`auth_token_masked: "********"` is its only public key representation, including
+short keys. There is no raw-key readback. List saved accounts with `GET
+/api/v1/model-providers`; a fresh install returns `{ "providers": [] }`. Any number
+may be saved. Select one with `POST /{id}/activate`, or `PATCH /{id}` with
+`{"enabled":true}` (paths relative to `/api/v1/model-providers`). The existing
+slot rule allows one plan **and** one cash API key active together. Use PATCH with
+`auth_token` to replace a key; blank leaves it unchanged. Provider and credential
+kind are immutable on these rows: create another row to change them.
+
+Saving or replacing a key makes a tiny authenticated Messages request (which can
+consume quota). Only `401` or an `authentication_error` rejects it with a clear
+`400`, without saving the replacement. A `403`/permission error (for example a
+model outside the plan tier), redirects, outages and other indeterminate failures
+do not prevent saving. Authenticated requests never follow redirects. Explicit
+`POST /{id}/check-key` returns `{"status":"valid"}` only after successful inference,
+or `{"status":"unavailable"}` when verification is indeterminate. A public model
+list is never proof that an OpenCode key works. `POST /{id}/fetch-models` returns
+the normal catalog response; Kimi Code has no documented models endpoint, so its
+preset stands. MiniMax refresh excludes older models unsupported by its current
+Messages API. OpenCode cash catalogs exclude IDs ending in `-free`.
+
+Usage is attributed as `billing: "subscription"` for plan keys and `api` for cash
+keys. Plans do not generate dollar estimates. Cash prices stay unknown unless a
+documented provider-specific price exists. No new balance/allowance meter or
+background polling is enabled: MiniMax's remains response shape is undocumented,
+and Kimi/OpenCode account meters need live-key verification. These accounts can
+be selected for automations without warnings. Plan rows participate in interactive
+defaults and unbound background selection just like ChatGPT and SuperGrok
+subscriptions, and a bound session may use its own helpers on that plan. Like
+those subscriptions, plan rows are excluded from silent cross-account failover.
+
+Key pages are returned by the metadata endpoint: Kimi Code
+`https://www.kimi.com/code/console`, Kimi API
+`https://platform.kimi.ai/console/api-keys`, MiniMax plan
+`https://platform.minimax.io/console/plan`, MiniMax API
+`https://platform.minimax.io/user-center/basic-information/interface-key`, and
+OpenCode `https://opencode.ai/console`. The MiniMax plan prefix hint is `sk-cp-`.
+
+Creating a native account (or trying to convert another provider into one)
+returns `409` naming the workers to update when any current network member does
+not advertise native Messages support. Offline members and members with unknown
+capabilities also require an update. No network, or a network containing only
+this worker, is allowed. Existing native accounts may still be edited, activated
+or deleted; provider and credential kind remain immutable.
+
+This creation-time check does not protect against an older-build worker joining
+after an account already exists: upgrade every worker before joining. Sync
+preserves encrypted keys and accepts legacy rows missing optional metadata.
+New workers skip unsupported future rows in registry/capability enumeration and
+fail closed on execution instead of guessing Claude from a model ID.
 
 ### Per-model local sampling and reasoning (backend/API)
 
@@ -176,8 +272,9 @@ Create a provider. Returns the new provider object (`200`).
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
 | `name` | string | Yes | Display name |
-| `provider_type` | string | Yes | One of `openrouter`, `custom`, `openai`, `chatgpt`, `xai`, `grok`. Anything else is `400`. |
-| `base_url` | string | Yes | Must not be blank (`400`). For `openrouter`, a trailing `/v1` is removed. |
+| `provider_type` | string | Yes | One of `openrouter`, `custom`, `openai`, `chatgpt`, `xai`, `grok`, `kimi`, `minimax`, `opencode`. Anything else is `400`. |
+| `base_url` | string | Except native vendors | Must not be blank for existing providers (`400`). Native vendors use the server default when omitted. For `openrouter`, a trailing `/v1` is removed. |
+| `auth_mode` | string or null | No | Native vendors only: `plan_key` for subscription keys, omitted/null for pay-as-you-go. |
 | `api_dialect` | string | No | `anthropic` or `openai` (anything else is `400`): the wire format a `custom` endpoint speaks |
 | `auth_token` | string | No | API key. Stored encrypted and never returned. Blank means no key. |
 | `models` | array | No | Objects with string `id` and `label` (`400` otherwise). Audio, voice, image and video models are dropped on save. |
