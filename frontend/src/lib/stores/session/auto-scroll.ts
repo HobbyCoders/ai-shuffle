@@ -30,6 +30,8 @@
  *     upward delta is intentional.
  */
 
+import { isTranscriptOnlyTurn } from './v2/reducer';
+
 /** Geometry of a scroll container at a moment in time. */
 export interface ScrollMetrics {
 	scrollTop: number;
@@ -309,9 +311,9 @@ export function resolveReadingAnchorDelta(anchor: ReadingAnchor, rowTop: number,
  * own entry or it is a new send, whatever its words or the turn it joins. Other
  * rows are matched by the queue row id they run as (a drained row's turn id, or
  * `queuedTurnId`), then by text, because an absorbed row may name only the turn
- * it joined. Text can only hold back a row that no composer sent, so it never
- * costs a sender their reply. An entry matches once, and stays known so a
- * retained or stale queue row cannot count again or re-arm following.
+ * it joined. Voice and brief rows are written directly and never match. An
+ * entry matches once, and stays known so a retained or stale queue row cannot
+ * count again or re-arm following.
  */
 const MAX_TRACKED_QUEUE_ENTRIES = 200;
 
@@ -334,16 +336,21 @@ export function createQueuedPromptTracker() {
 		observe(queue: readonly { id: string; clientMessageId?: string; content: string }[], stopPending: boolean) {
 			if (queue === lastQueue) return;
 			lastQueue = queue;
+			const listed = new Set<Entry>();
 			for (const { id, clientMessageId, content } of queue) {
-				const known = entries.find((e) => e.ids.has(id) || (!!clientMessageId && e.clientMessageId === clientMessageId));
-				if (known) {
-					known.ids.add(id);
-					known.clientMessageId ??= clientMessageId;
+				let entry = entries.find((e) => e.ids.has(id) || (!!clientMessageId && e.clientMessageId === clientMessageId));
+				if (entry) {
+					entry.ids.add(id);
+					entry.clientMessageId ??= clientMessageId;
 				} else {
-					entries.push({ ids: new Set([id]), clientMessageId, content, followOnLanding: stopPending, landed: false });
+					entry = { ids: new Set([id]), clientMessageId, content, followOnLanding: stopPending, landed: false };
+					entries.push(entry);
 				}
+				listed.add(entry);
 			}
-			if (entries.length > MAX_TRACKED_QUEUE_ENTRIES) entries = entries.slice(-MAX_TRACKED_QUEUE_ENTRIES);
+			// History is bounded; a prompt still waiting in the queue is never dropped.
+			let excess = entries.length - MAX_TRACKED_QUEUE_ENTRIES;
+			if (excess > 0) entries = entries.filter((e) => listed.has(e) || excess-- <= 0);
 		},
 		/** The reader scrolled away: a pending send no longer overrides that. */
 		releaseStopFollow() {
@@ -351,6 +358,8 @@ export function createQueuedPromptTracker() {
 		},
 		/** Call once per new user row; a matched entry cannot match again. */
 		classify(row: { content?: string; commandId?: string; turnId?: string; queuedTurnId?: string }) {
+			// A voice exchange or brief writes its own row and never ran from the queue.
+			if (isTranscriptOnlyTurn(row.turnId)) return { fromQueue: false, followsStop: false };
 			const waiting = entries.filter((e) => !e.landed);
 			const queueId = row.queuedTurnId ?? row.turnId;
 			const landed = row.commandId?.startsWith('client-')

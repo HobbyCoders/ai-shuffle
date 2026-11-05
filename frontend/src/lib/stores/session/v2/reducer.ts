@@ -570,7 +570,7 @@ function retireAbandonedToolCards(messages: ChatMessage[]): ChatMessage[] {
  * by the agent. It can land in the middle of the agent's model call, is no part
  * of it, and survives that call being dropped.
  */
-function isTranscriptOnlyTurn(turnId: string | undefined): boolean {
+export function isTranscriptOnlyTurn(turnId: string | undefined): boolean {
 	return !!turnId && (turnId.startsWith('voice-') || turnId.startsWith('brief-'));
 }
 

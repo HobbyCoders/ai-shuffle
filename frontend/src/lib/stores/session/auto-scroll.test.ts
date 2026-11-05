@@ -399,11 +399,26 @@ describe('queued prompt tracker', () => {
 		expect(tracker.classify({ content: 'Other' }).fromQueue).toBe(false);
 	});
 
-	it('stops tracking the oldest entries past its limit', () => {
+	it('never matches a voice or brief row to a withdrawn prompt', () => {
 		const tracker = createQueuedPromptTracker();
-		tracker.observe(Array.from({ length: 201 }, (_, i) => ({ id: `row-${i}`, content: `prompt ${i}` })), false);
-		expect(tracker.classify({ content: 'prompt 0', turnId: 'row-0' }).fromQueue).toBe(false);
-		expect(tracker.classify({ content: 'prompt 200', turnId: 'row-200' }).fromQueue).toBe(true);
+		tracker.observe([{ id: 'row-1', content: 'Continue' }], true);
+		tracker.observe([], false);
+		expect(tracker.classify({ content: 'Continue', turnId: 'voice-abc' })).toEqual({ fromQueue: false, followsStop: false });
+		expect(tracker.classify({ content: 'Continue', turnId: 'brief-abc' })).toEqual({ fromQueue: false, followsStop: false });
+		expect(tracker.classify({ content: 'Continue', turnId: 'row-1' }).fromQueue).toBe(true);
+	});
+
+	it('bounds its history but keeps every prompt still in the queue', () => {
+		const tracker = createQueuedPromptTracker();
+		const rows = (from: number, count: number) => Array.from({ length: count }, (_, i) => ({ id: `row-${from + i}`, content: `prompt ${from + i}` }));
+		tracker.observe(rows(0, 201), false);
+		expect(tracker.classify({ content: 'prompt 0', turnId: 'row-0' }).fromQueue).toBe(true);
+
+		const bounded = createQueuedPromptTracker();
+		bounded.observe(rows(0, 1), false);
+		bounded.observe(rows(1, 200), false);
+		expect(bounded.classify({ content: 'prompt 0', turnId: 'row-0' }).fromQueue).toBe(false);
+		expect(bounded.classify({ content: 'prompt 1', turnId: 'row-1' }).fromQueue).toBe(true);
 	});
 
 	it('does not count a retained delivered row again, or re-arm its follow', () => {
