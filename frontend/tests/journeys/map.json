@@ -65,6 +65,14 @@
 	],
 	"rules": [
 		{
+			"why": "structured Plan event snapshots stay compact, honest and readable across reloads",
+			"journeys": ["session-plan"],
+			"globs": [
+				"frontend/src/lib/components/PlanDisplay.svelte",
+				"frontend/tests/journeys/session-plan.journey.mjs"
+			]
+		},
+		{
 			"why": "resident updater identity and preparation timings stay separate from app version, and refresh is connected-worker only",
 			"journeys": ["update-runtime"],
 			"globs": [
