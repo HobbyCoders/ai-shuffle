@@ -54,6 +54,10 @@ def test_observed_allowlist_needs_no_browser_guessing():
     assert idle.passive("GET", "/api/v1/projects/seeded/git/status")
     assert idle.passive("PUT", "/api/v1/preferences/browser_panel")
     assert idle.passive("POST", "/api/v1/model-providers/refresh-capabilities")
+    # Selected-chat RunningTasksList tracks watches every 30s, even when empty.
+    assert idle.passive("GET", "/api/v1/watches")
+    assert not idle.passive("POST", "/api/v1/watches")
+    assert not idle.passive("GET", "/api/v1/watches/unknown")
     for route in ("/api/v1/ws/chat", "/api/v1/ws/global", "/api/v1/ws/sessions/seeded"):
         assert idle.passive("GET", route, {"Upgrade": "websocket"})
     for protocol in ("vite-hmr", "vite-ping"):

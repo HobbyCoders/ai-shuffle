@@ -31,7 +31,7 @@ POLL_GETS = frozenset({
     "/api/v1/computer-use/status", "/api/v1/preferences/all",
     "/api/v1/projects", "/api/v1/cluster/projects", "/api/v1/agents",
     "/api/v1/tags", "/api/v1/models", "/api/v1/sessions/cursor",
-    "/api/v1/notifications",
+    "/api/v1/notifications", "/api/v1/watches",
 })
 
 
