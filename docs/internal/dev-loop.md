@@ -56,9 +56,15 @@ admission-window race, the current chat client can clear the error and optimisti
 text on reconnect without restoring the draft: the message is not delivered and
 must be retyped. This is distinct from an already-paused tab's preserved draft.
 Use `--no-pause` to avoid that test-copy-only limit. A failed proof aborts
-the pause; a stalled launcher cannot hold the gate closed longer than five
-seconds. An internally scheduled turn starting after the last SQL proof remains
+the pause. An uncommitted close reopens after five seconds; after the final busy
+proof the child atomically commits that cycle's still-unexpired close before
+SIGTERM. A committed gate never reopens, even if the launcher stalls; launcher
+death triggers guardian cleanup. A surviving committed child in `pause-failed`
+continues refusing traffic until `down` or TTL. An internally scheduled turn
+starting after the last SQL proof remains
 a narrow race; use `--no-pause` for workloads requiring uninterrupted scheduling.
+A lost shutdown-commit acknowledgement also fails closed as `pause-failed`,
+never as a supposedly ready child that might still refuse traffic.
 The complete clean pause has a **30-second deadline**. A
 failed or timed-out stop publishes `pause-failed`, retains the data and any
 surviving processes until `down` or TTL, and disables wake/restart rather than

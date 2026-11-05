@@ -23,6 +23,7 @@ class ActivityObserver:
         self.uncertain = False
         self.gate_request = receipt.with_suffix(".gate")
         self.gate_id, self.gate_until = None, 0
+        self.gate_state, self.gate_commit_id = "open", None
         self.stopped = threading.Event()
         self.writer = threading.Thread(target=self.publish, daemon=True, name="devloop-activity")
         self.writer.start()
@@ -37,44 +38,59 @@ class ActivityObserver:
                     record = {"pid": self.pid, "identity": self.identity,
                               "updated": time.monotonic(), "activity": self.activity,
                               "active": self.active, "uncertain": self.uncertain,
-                              "gate_id": self.gate_id, "gate_until": self.gate_until}
+                              "gate_id": self.gate_id, "gate_until": self.gate_until,
+                              "gate_state": self.gate_state, "gate_commit_id": self.gate_commit_id}
                 write_private_json(self.receipt, record)
             except Exception:
                 self.uncertain = True  # Stay awake until TTL, never silently ignore lost evidence.
             self.stopped.wait(0.5)  # At most two tiny writes/s, not one per request/frame.
 
     def control_gate(self):
-        """A private-file command, never an app route; a lost launcher fails open."""
+        """Closed expires fail-open; committed stays closed until child teardown."""
         try:
             command = json.loads(self.gate_request.read_text())
-        except FileNotFoundError:
+        except (FileNotFoundError, OSError, ValueError) as exc:
+            if not isinstance(exc, FileNotFoundError):
+                self.failed()
             with self.lock:
-                self.gate_until = 0
-            return
-        except (OSError, ValueError):
-            self.failed()
-            with self.lock:
-                self.gate_until = 0
+                if self.gate_state != "committed":
+                    self.gate_state, self.gate_until = "open", 0
             return
         with self.lock:
-            if command.get("id") == self.gate_id:
-                return  # Never renew a timed-out close command.
-            self.gate_id, self.gate_until = command.get("id"), 0
+            if self.gate_state == "committed":
+                return  # Neither expiry nor an unlink/replayed command can reopen.
             now = time.monotonic()
+            self.expire_gate(now)
             try:
-                if (command["pid"] == self.pid and command["identity"] == self.identity
-                        and 0 < command["expires"] - now <= 5
+                identity_matches = command["pid"] == self.pid and command["identity"] == self.identity
+                if command.get("action") == "commit":
+                    self.gate_commit_id = command["id"]  # Explicit positive or negative ack.
+                    if (identity_matches and command["id"] == self.gate_id
+                            and self.gate_state == "closed"
+                            and self.active == 0 and not self.uncertain):
+                        self.gate_state = "committed"
+                    return
+                if command.get("id") == self.gate_id:
+                    return  # Never renew a timed-out close command.
+                self.gate_id, self.gate_until, self.gate_state = command["id"], 0, "open"
+                if (identity_matches and 0 < command["expires"] - now <= 5
                         and self.active == 0 and not self.uncertain
                         and self.activity <= command["before"]):
-                    self.gate_until = command["expires"]
+                    self.gate_until, self.gate_state = command["expires"], "closed"
             except (KeyError, TypeError):
                 self.uncertain = True
 
+    def expire_gate(self, now):
+        # Caller holds the admission lock. Committing and admitting a request or
+        # client frame therefore cannot straddle the fail-open expiry boundary.
+        if self.gate_state == "closed" and now >= self.gate_until:
+            self.gate_state, self.gate_until = "open", 0
+
     def note(self, delta=0, *, activity=True, admit=False):
         with self.lock:
-            # The check, activity update and finite-request admission are atomic
-            # with close. No request/frame can slip between the proof and SIGTERM.
-            if admit and time.monotonic() < self.gate_until:
+            # Close, commit, expiry and request/frame admission share this lock.
+            self.expire_gate(time.monotonic())
+            if admit and self.gate_state in ("closed", "committed"):
                 return False
             if activity:
                 self.activity = time.monotonic()

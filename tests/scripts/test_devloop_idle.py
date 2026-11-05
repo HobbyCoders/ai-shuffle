@@ -209,7 +209,7 @@ def bare_observer(app):
     obj = observer.ActivityObserver.__new__(observer.ActivityObserver)
     obj.app, obj.lock = app, threading.Lock()
     obj.active, obj.activity, obj.uncertain = 0, 0, False
-    obj.gate_id, obj.gate_until = None, 0
+    obj.gate_id, obj.gate_until, obj.gate_state, obj.gate_commit_id = None, 0, "open", None
     return obj
 
 
@@ -366,7 +366,7 @@ def test_real_child_process_reaped_before_paused_ttl(tmp_path, monkeypatch, fail
     # These dummy children exercise teardown; the real ASGI gate is covered in
     # test_devloop_shutdown.py, where late requests must complete or get 503.
     monkeypatch.setattr(lease, "close_admission", lambda: True)
-    monkeypatch.setattr(lease, "admission_closed", lambda: True)
+    monkeypatch.setattr(lease, "commit_admission", lambda: True)
     real_popen = subprocess.Popen
     children = []
 
@@ -414,7 +414,7 @@ def test_real_hung_child_hits_pause_deadline_without_deleting_data(tmp_path, mon
     # These dummy children exercise teardown; the real ASGI gate is covered in
     # test_devloop_shutdown.py, where late requests must complete or get 503.
     monkeypatch.setattr(lease, "close_admission", lambda: True)
-    monkeypatch.setattr(lease, "admission_closed", lambda: True)
+    monkeypatch.setattr(lease, "commit_admission", lambda: True)
     real_popen, children = subprocess.Popen, []
     marker = tmp_path / "retained-data"
     marker.write_text("seed and owner work")
@@ -457,7 +457,7 @@ def test_real_hung_child_hits_pause_deadline_without_deleting_data(tmp_path, mon
     assert marker.read_text() == "seed and owner work"
 
 
-@pytest.mark.parametrize("new_work", ["request", "turn"])
+@pytest.mark.parametrize("new_work", ["request", "turn", "expired-gate", "lost-commit-ack"])
 def test_work_appearing_during_final_recheck_aborts_pause(tmp_path, monkeypatch, new_work):
     obj = instance(tmp_path)
     lease = idle.IdleLease(obj, threading.Event(), seconds=0)
@@ -473,17 +473,18 @@ def test_work_appearing_during_final_recheck_aborts_pause(tmp_path, monkeypatch,
         obj.write(state="ready")
 
     monkeypatch.setattr(lease, "close_admission", lambda: True)
-    monkeypatch.setattr(lease, "admission_closed", lambda: True)
-    calls = [True, new_work != "request"]
+    monkeypatch.setattr(lease, "commit_admission", lambda:
+                        None if new_work == "lost-commit-ack" else new_work != "expired-gate")
+    calls = [True, new_work != "request"] + ([True] if new_work in ("expired-gate", "lost-commit-ack") else [])
     lease.idle = lambda: calls.pop(0) if calls else False
-    answers = ["f", "t"]
+    answers = ["f", "t" if new_work == "turn" else "f"]
     db = SimpleNamespace(open=Mock(), publish_descriptor=Mock(), close=Mock(), process=Mock(),
                          query=lambda sql: answers.pop(0))
     obj.on_app_start = on_start
     monkeypatch.setattr(idle.subprocess, "Popen", spawn)
     idle.supervise(obj, {}, db, lease, threading.Event(), start_vite=Mock(), stop_vite=Mock())
     assert "pausing" in obj.states and "paused" not in obj.states
-    assert "pause-failed" not in obj.states
+    assert ("pause-failed" in obj.states) == (new_work == "lost-commit-ack")
     children[0].send_signal.assert_not_called()  # No clean-pause SIGTERM; TTL uses killpg.
 
 

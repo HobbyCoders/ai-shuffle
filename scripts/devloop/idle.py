@@ -111,38 +111,55 @@ class IdleLease:
             self.condition.notify_all()
 
     def close_admission(self):
+        self.gate_id = uuid.uuid4().hex
+        return self._admission_command("close")
+
+    def commit_admission(self):
+        return self.gate_id is not None and self._admission_command("commit")
+
+    def _admission_command(self, action):
         from scripts.devloop.__main__ import write_private_json
 
         app = self.instance.data["app"]
-        self.gate_id = uuid.uuid4().hex
         try:
-            write_private_json(self.gate_request, {"id": self.gate_id,
+            write_private_json(self.gate_request, {"id": self.gate_id, "action": action,
                 "pid": app["pid"], "identity": app["pid_identity"],
                 "before": time.monotonic() - self.seconds,
                 "expires": time.monotonic() + 5})
             until = time.monotonic() + 2
             while time.monotonic() < until and not self.stopped.is_set():
                 record = json.loads(self.receipt.read_text())
-                if record.get("gate_id") == self.gate_id:
+                key = "gate_commit_id" if action == "commit" else "gate_id"
+                if (record.get(key) == self.gate_id and record["pid"] == app["pid"]
+                        and record["identity"] == app["pid_identity"]):
+                    if action == "commit":
+                        # Validate this acknowledgement, not a second read which
+                        # could fail after the child irrevocably committed.
+                        if record.get("gate_state") == "committed" and record.get("gate_id") == self.gate_id:
+                            return True
+                        return False if record.get("gate_state") in ("open", "closed") else None
                     return self.admission_closed()
                 self.stopped.wait(0.05)
         except (OSError, ValueError, KeyError, TypeError):
             pass
-        return False
+        # A commit might have succeeded without its receipt reaching us. Never
+        # publish ready with an indefinitely committed child refusing traffic.
+        return None if action == "commit" else False
 
-    def admission_closed(self):
+    def admission_closed(self, *, committed=False):
         try:
             record = json.loads(self.receipt.read_text())
             app = self.instance.data["app"]
             return (record["pid"] == app["pid"] and record["identity"] == app["pid_identity"]
                     and record.get("gate_id") == self.gate_id
-                    and record["gate_until"] > time.monotonic() + 1
-                    and not record["uncertain"] and record["active"] == 0)
+                    and (record.get("gate_state") == "committed" if committed else
+                         record.get("gate_state") == "closed" and record["gate_until"] > time.monotonic() + 1
+                         and not record["uncertain"] and record["active"] == 0))
         except (OSError, ValueError, KeyError, TypeError):
             return False
 
     def open_admission(self):
-        self.gate_request.unlink(missing_ok=True)  # Child also reopens autonomously in <=5s.
+        self.gate_request.unlink(missing_ok=True)  # Uncommitted closes also expire in <=5s.
 
     def idle(self):
         if journey_active(self.instance.directory):
@@ -347,12 +364,20 @@ def supervise(instance, env, database, lease, restart, *, start_vite, stop_vite)
                     # The child's lock closes admission atomically with its final
                     # finite-request/activity proof. SQL follows the ack: turns
                     # admitted before close must finish, never be cut by SIGTERM.
-                    if (not lease.idle() or not lease.close_admission()
-                            or database_busy(database) or not lease.idle()
-                            or not lease.admission_closed()):
+                    # Commit inside that same child lock after SQL: an expired
+                    # close refuses commit; a committed close cannot auto-reopen.
+                    committed = (lease.idle() and lease.close_admission()
+                                 and not database_busy(database) and lease.idle()
+                                 and lease.commit_admission())
+                    if committed is not True:
                         lease.open_admission()
                         lease.last_activity = time.monotonic()
-                        lease.transition("ready")
+                        if committed is None:
+                            instance.write(pause_error="Shutdown commit acknowledgement lost; "
+                                           "data retained until down/TTL; wake disabled")
+                            lease.transition("pause-failed")
+                        else:
+                            lease.transition("ready")
                         continue
                     try:
                         stop_app(clean=True, pause_deadline=pause_deadline)
@@ -378,7 +403,8 @@ def supervise(instance, env, database, lease, restart, *, start_vite, stop_vite)
                     except (TimeoutError, subprocess.TimeoutExpired, OSError):
                         lease.open_admission()
                         instance.write(pause_error="Clean pause exceeded its deadline or failed; "
-                                       "data retained until down/TTL; wake disabled")
+                                       "data retained until down/TTL; wake disabled; "
+                                       "a surviving committed app keeps refusing traffic")
                         lease.transition("pause-failed")
                         log.error("clean pause failed; retaining data and disabling wake until down/TTL")
                         continue

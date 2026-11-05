@@ -10,6 +10,7 @@ import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -52,7 +53,10 @@ sock = socket.socket()
 sock.bind(('127.0.0.1',0)); sock.listen(128); sock.setblocking(False)
 (root/'port').write_text(str(sock.getsockname()[1]))
 with bounded_shutdown():
-    uvicorn.Server(uvicorn.Config(wrapped, log_level='critical', access_log=False)).run(sockets=[sock])
+    server = uvicorn.Server(uvicorn.Config(wrapped, log_level='critical', access_log=False))
+    if len(sys.argv) > 3:
+        server.handle_exit = lambda *args: None  # Real hung-child/deadline case.
+    server.run(sockets=[sock])
 """
 
 
@@ -107,6 +111,8 @@ def test_gate_refuses_late_work_or_aborts_and_allows_completion_before_sse_teard
             wait_for(lease.idle)
         assert lease.close_admission()
         assert lease.admission_closed()
+        assert lease.commit_admission()
+        assert lease.admission_closed(committed=True)
         refused = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
         connections.append(refused)
         refused.request("POST", "/late-finite-request", body=b"not admitted")
@@ -126,3 +132,105 @@ def test_gate_refuses_late_work_or_aborts_and_allows_completion_before_sse_teard
         if process.poll() is None:
             process.kill()
         process.wait(timeout=5)
+
+
+
+def test_real_guardian_ends_committed_child_after_launcher_sigkill(tmp_path):
+    script = tmp_path / "server.py"
+    script.write_text(SERVER)
+    server = tmp_path / "server"
+    server.mkdir(mode=0o700)
+    launcher = subprocess.Popen([sys.executable, "-c", "import time;time.sleep(30)"],
+                                start_new_session=True)
+    process = subprocess.Popen([sys.executable, str(script), str(server), str(ROOT)],
+        cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    connection = None
+    try:
+        wait_for(lambda: (server / "port").exists())
+        lease = idle.IdleLease(SimpleNamespace(directory=server,
+            data={"app": {"pid": process.pid, "pid_identity": guardian.identity(process.pid)}},
+            fake=SimpleNamespace(log_path=server / "fake.jsonl")), threading.Event(), seconds=0)
+        wait_for(lease.idle)
+        assert lease.close_admission() and lease.commit_admission()
+        lease.open_admission()  # A committed gate refuses even if its command disappears.
+        wait_for(lambda: not lease.gate_request.exists() and lease.admission_closed(committed=True))
+        connection = http.client.HTTPConnection("127.0.0.1", int((server / "port").read_text()), timeout=3)
+        connection.request("GET", "/late-finite-request")
+        assert connection.getresponse().status == 503
+        assert not (server / "finite-started").exists()
+        status = tmp_path / "status.json"
+        status.write_text(json.dumps({"pid": launcher.pid,
+            "pid_identity": guardian.identity(launcher.pid), "state": "pausing",
+            "app": {"pid": process.pid, "pid_identity": guardian.identity(process.pid)}}))
+        guard = guardian.spawn_guardian(status, server, launcher_pid=launcher.pid)
+        assert guard is not None
+        launcher.kill()
+        launcher.wait(timeout=3)
+        wait_for(lambda: process.poll() is not None and not status.exists())
+        assert process.returncode == -signal.SIGKILL
+        wait_for(lambda: not guardian.alive(guard["pid"], guard["pid_identity"]))
+    finally:
+        if connection is not None:
+            connection.close()
+        for child in (launcher, process):
+            if child.poll() is None:
+                child.kill()
+            child.wait(timeout=5)
+
+
+
+def test_real_committed_hung_child_keeps_refusing_in_pause_failed(tmp_path, monkeypatch):
+    script = tmp_path / "server.py"
+    script.write_text(SERVER)
+    children, failures = [], []
+    stopped = threading.Event()
+    obj = SimpleNamespace(directory=tmp_path, data={"state": "starting", "app": {}},
+        args=SimpleNamespace(ttl_seconds=20, host="127.0.0.1"), port=0, vite_port=None,
+        fake=SimpleNamespace(log_path=tmp_path / "fake.jsonl"), record_postgres=Mock())
+    original_popen = subprocess.Popen
+
+    def spawn(*args, **kwargs):
+        process = original_popen([sys.executable, str(script), str(tmp_path), str(ROOT), "hang"],
+            cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        process.send_signal = Mock(wraps=process.send_signal)
+        children.append(process)
+        wait_for(lambda: (tmp_path / "port").exists())
+        return process
+
+    def write(**changes):
+        obj.data.update(changes)
+        if changes.get("state") == "pause-failed":
+            record = json.loads((tmp_path / "activity.json").read_text())
+            assert record["gate_state"] == "committed" and children[0].poll() is None
+            children[0].send_signal.assert_called_once_with(signal.SIGTERM)
+            connection = http.client.HTTPConnection("127.0.0.1", int((tmp_path / "port").read_text()), timeout=3)
+            try:
+                connection.request("POST", "/late-finite-request", body=b"must be refused")
+                assert connection.getresponse().status == 503
+                assert not (tmp_path / "finite-started").exists()
+            finally:
+                connection.close()
+            assert "keeps refusing" in obj.data["pause_error"]
+            failures.append("committed child refused")
+            stopped.set()  # Exercise normal down/TTL final teardown next.
+
+    def on_start(process):
+        obj.write(app={"pid": process.pid, "pid_identity": guardian.identity(process.pid)}, state="ready")
+
+    obj.write, obj.on_app_start = write, on_start
+    obj.on_app_exit, obj.retire = Mock(), lambda: obj.write(state="stopping")
+    db = SimpleNamespace(open=Mock(), publish_descriptor=Mock(), close=Mock(), process=Mock(),
+                         query=Mock(return_value="f"))
+    lease = idle.IdleLease(obj, stopped, seconds=0)
+    monkeypatch.setattr(idle, "PAUSE_SECONDS", 2)
+    monkeypatch.setattr(idle.subprocess, "Popen", spawn)
+    try:
+        assert idle.supervise(obj, {}, db, lease, threading.Event(), start_vite=Mock(), stop_vite=Mock()) == 1
+        assert failures == ["committed child refused"]
+        assert len(children) == 1 and children[0].returncode == -signal.SIGKILL
+        db.open.assert_called_once()
+    finally:
+        for process in children:
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=5)
