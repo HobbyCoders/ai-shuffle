@@ -778,6 +778,10 @@ def install_v2_turns_wiring() -> None:
 is_shutting_down: bool = False
 
 
+# One worker lock_timeout: enough to outlast an ordinary lock holder.
+_SHUTDOWN_EVENT_WRITE_DRAIN_SECONDS = 5.0
+
+
 async def shutdown_services() -> None:
     """Shutdown async services in correct dependency order.
 
@@ -882,6 +886,11 @@ async def shutdown_services() -> None:
 
     from app.core.connectors.manager import connector_manager
     await connector_manager.shutdown_all()
+
+    # A final batch whose caller was cancelled may still be waiting out a lock.
+    # Past this the pool closes under it and the write logs the loss.
+    from app.core.turn_recorder import drain_event_writes
+    await drain_event_writes(_SHUTDOWN_EVENT_WRITE_DRAIN_SECONDS)
 
     # Close the database connection pool (Postgres) VERY LAST: every teardown
     # step above may still persist durable state (terminal chips, reap

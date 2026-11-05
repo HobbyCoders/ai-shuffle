@@ -5,6 +5,7 @@ import httpx
 import pytest
 
 from app.core import provider_agent, remote_task, turn_scheduler
+from app.core.task_registry import task_registry
 from app.db import database, remote_tasks, session_events, turns
 from app.db import network as store
 from app.db.base import get_db
@@ -60,7 +61,14 @@ def network(workers, monkeypatch):
     with b.active():
         database.create_session(session_id="caller", profile_id="default", project_id=None,
                                 title="Windows chat", is_active=True, permission_mode="acceptEdits")
+        parent = turns.enqueue_turn("caller", "user", prompt="Check the disk.")
+        assert turns.start_turn(parent["id"])
+        task_registry.note_turn_live("caller", parent["insert_order"])
+        assert turns.park_turn(parent["id"])
         engine.scan_all()
+    with a.active():
+        # Real owner publication, not seeded enforcement capability/cache data.
+        assert engine.publish_presence()
     converge([a, b])
     with b.active():
         store.touch_member(a.device_id, endpoints=[UNRAID_URL])
@@ -131,6 +139,24 @@ def started_child(a, b):
         result = dispatch(a, b)
     assert result["ok"] is True, result
     return result["worker_session_id"]
+
+
+def test_dispatch_writer_commits_before_each_scenario_loop_closes(workers, monkeypatch, kicks, caplog):
+    from app.core import task_persistence
+    from app.db import background_tasks
+    from app.db.base import parse_jsonb
+
+    a, b, _ = network(workers, monkeypatch)
+    children = [started_child(a, b), started_child(a, b)]
+    with b.active():
+        for child in children:
+            proof = background_tasks.get_background_task(child, "caller")
+            assert proof is not None and proof["status"] == "running"
+            assert proof["turn_order"] == task_registry.task_turn_order("caller", child)
+            assert parse_jsonb(proof["remote_stop_scope"]) == task_registry.remote_stop_scope("caller", child)
+    assert task_persistence.pending_count() == 0
+    assert task_persistence._consumer is None and task_persistence._wakeup is None
+    assert "bound to a different event loop" not in caplog.text
 
 
 # --- task-start ---------------------------------------------------------------

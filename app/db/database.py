@@ -327,7 +327,14 @@ def _savepoint(cursor, name: str):
 #     _run_column_migrations.
 # 93 (2026-10-29): one shared active account per built-in provider/kind slot.
 # 94 (2026-10-29): erase retired OpenAI billing secrets and readings; keep columns for old peers.
-SCHEMA_VERSION = 94
+# 95 (2026-11-03): a user Stop's durable record. ``session_stops`` holds each
+#     session's Stop sequence, in a row no turn or wake lock can hold up;
+#     ``pending_wakeups.stop_seq`` is that sequence when the wake was armed, and
+#     ``background_tasks.turn_order`` the ``insert_order`` of the turn live when
+#     a task started. Additive; lands via the always-run guarded blocks in
+#     _run_column_migrations. A wake already pending reads 0, so the next Stop
+#     cancels it.
+SCHEMA_VERSION = 95
 
 
 def _migrate_omni_tables_to_fluid(cursor):
@@ -1572,6 +1579,27 @@ def _run_column_migrations(cursor: Any) -> None:
         cursor.execute("ALTER TABLE pending_wakeups ADD COLUMN model TEXT")
         migrations_applied.append("pending_wakeups.model")
 
+    # A user Stop's durable record (v95).
+    if not table_exists(cursor, "session_stops"):
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS session_stops (
+                session_id TEXT PRIMARY KEY,
+                stop_seq BIGINT NOT NULL,
+                stopped_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            )
+        """)
+        migrations_applied.append("session_stops")
+    from app.db.stop_receipts import create_schema as create_stop_receipts_schema
+    create_stop_receipts_schema(cursor)
+    from app.db.stop_notices import create_schema as create_stop_notices_schema
+    create_stop_notices_schema(cursor)
+    if not column_exists(cursor, "pending_wakeups", "stop_seq"):
+        # Rows here now read 0, so the next Stop cancels them. An older install
+        # still writing to this database leaves it empty: see _cancelled_by_stop.
+        cursor.execute("ALTER TABLE pending_wakeups ADD COLUMN stop_seq BIGINT")
+        cursor.execute("UPDATE pending_wakeups SET stop_seq = 0")
+        migrations_applied.append("pending_wakeups.stop_seq")
+
     cursor.execute(
         "CREATE INDEX IF NOT EXISTS idx_pending_wakeups_instance "
         "ON pending_wakeups(instance_id, fire_at)"
@@ -1703,7 +1731,7 @@ def _run_column_migrations(cursor: Any) -> None:
         ("summary", "TEXT"), ("reason", "TEXT"),
         ("report_path", "TEXT"), ("report_chars", "BIGINT"),
         ("agent", "TEXT"), ("roster_name", "TEXT"), ("model", "TEXT"),
-        ("remote_device_id", "TEXT"),
+        ("remote_device_id", "TEXT"), ("turn_order", "BIGINT"),
     ):
         if not column_exists(cursor, "background_tasks", name):
             cursor.execute(f"ALTER TABLE background_tasks ADD COLUMN {name} {sql_type}")
@@ -2820,8 +2848,46 @@ def _run_column_migrations(cursor: Any) -> None:
     from app.db.project_setup import create_schema as create_project_setup_schema
     create_project_setup_schema(cursor)
 
+    # Both tables exist now, including on the bootstrap-only schema path.
+    # A legacy remote run predates this snapshot, but its actual launch/resume
+    # turn is unknown. Keep that distinction: only a later-admitted successor
+    # can safely place it. No clock (including a peer's started_at) can do so.
+    if not column_exists(cursor, "background_tasks", "turn_order_upper_bound"):
+        cursor.execute("ALTER TABLE background_tasks ADD COLUMN turn_order_upper_bound BIGINT")
+        migrations_applied.append("background_tasks_turn_order_upper_bound")
+    if not column_exists(cursor, "background_tasks", "turn_order_incarnation"):
+        cursor.execute("ALTER TABLE background_tasks ADD COLUMN turn_order_incarnation TIMESTAMP WITH TIME ZONE")
+        migrations_applied.append("background_tasks_turn_order_incarnation")
+    for column, definition in (("remote_stop_scope", "JSONB"), ("turn_order_write_nonce", "TEXT"),
+                               ("turn_order_invalid_through", "BIGINT NOT NULL DEFAULT -1")):
+        if not column_exists(cursor, "background_tasks", column):
+            cursor.execute(f"ALTER TABLE background_tasks ADD COLUMN {column} {definition}")
+            migrations_applied.append(f"background_tasks.{column}")
+    from app.db.background_tasks import create_order_guard
+    create_order_guard(cursor)
+    _backfill_legacy_task_turn_bounds(cursor)
+
     if migrations_applied:
         logger.info(f"Applied column migrations: {', '.join(migrations_applied)}")
+
+
+def _backfill_legacy_task_turn_bounds(cursor: Any) -> None:
+    """Bound currently untrusted remote runs in ONE guarded statement's snapshot.
+
+    Tasks created concurrently but invisible to this snapshot remain unknown.
+    A successor already queued here is not strictly beyond this bound: cleanup
+    must leave that run alone and report incomplete, not guess its identity.
+    """
+    import uuid
+    cursor.execute(
+        "UPDATE background_tasks SET turn_order = NULL, turn_order_upper_bound = "
+        "(SELECT COALESCE(MAX(insert_order), 0) FROM turns "
+        "WHERE turns.session_id = background_tasks.session_id), "
+        "turn_order_incarnation = started_at, turn_order_write_nonce = %s "
+        "WHERE turn_order_incarnation IS NULL AND started_at IS NOT NULL "
+        "AND status = 'running' AND remote_device_id IS NOT NULL",
+        (uuid.uuid4().hex,),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -3219,7 +3285,7 @@ _ASSISTANT_HOME_WORKER_DEPTH = 16
 #: ``_SESSION_RUNTIME_TABLES``, plus armed wake-ups).
 _ASSISTANT_HOME_RUNTIME_TABLES = (
     "turns", "session_events", "session_event_counters", "runs",
-    "pending_interactions", "background_tasks", "pending_wakeups",
+    "pending_interactions", "background_tasks", "pending_wakeups", "session_stops",
 )
 #: Transcript stores keyed by the session's ``sdk_session_id``.
 _ASSISTANT_HOME_TRANSCRIPT_TABLES = (
@@ -3288,7 +3354,7 @@ def _retire_assistant_home(cursor) -> List[str]:
       and the other session-keyed tables);
     * its runtime rows with no foreign key (``turns``, ``session_events``,
       ``session_event_counters``, ``runs``, ``pending_interactions``,
-      ``background_tasks``, ``pending_wakeups``);
+      ``background_tasks``, ``pending_wakeups``, ``session_stops``);
     * its transcript in ``fluid_*`` and ``session_store_*`` (by
       ``sdk_session_id``).
 
@@ -3330,6 +3396,10 @@ def _retire_assistant_home(cursor) -> List[str]:
                        f"AND id NOT IN ({marks})", params + params)
         if table_exists(cursor, "usage_log"):
             cursor.execute(f"UPDATE usage_log SET session_id = NULL WHERE session_id IN ({marks})", params)
+        from app.db.stop_receipts import prune_consumed
+        for session_id in ids:
+            prune_consumed(cursor, session_id=session_id)
+        # Pending authority survives retirement of its mutable turn/session.
         for table in _ASSISTANT_HOME_RUNTIME_TABLES:
             if table_exists(cursor, table):
                 cursor.execute(f"DELETE FROM {table} WHERE session_id IN ({marks})", params)
@@ -3597,7 +3667,7 @@ def migrations_fingerprint() -> str:
 
     from app.db import (
         schema_postgres, mobile_hub, network, owner_state, working_record, watches, watch_delivery,
-        session_mode_migration, model_provider_slots, project_setup,
+        session_mode_migration, model_provider_slots, project_setup, stop_notices,
     )
     from app.core import owner_auth
 
@@ -3608,7 +3678,7 @@ def migrations_fingerprint() -> str:
     for module in (
         sys.modules[__name__], schema_postgres, mobile_hub, owner_auth, network, owner_state,
         working_record, watches, watch_delivery, session_mode_migration, model_provider_slots,
-        project_setup,
+        project_setup, stop_notices,
     ):
         path = getattr(module, "__file__", None)
         if not path:

@@ -22,7 +22,7 @@ from app.db.base import column_exists
 logger = logging.getLogger("app.db.schema_postgres")
 
 # Must match database.py SCHEMA_VERSION
-SCHEMA_VERSION = 94
+SCHEMA_VERSION = 95
 
 
 def create_session_events_recall_index(cursor) -> None:
@@ -1000,9 +1000,21 @@ def create_postgres_schema(cursor: Any) -> None:
             source TEXT NOT NULL DEFAULT 'schedule_wakeup',
             instance_id TEXT,
             fire_at DOUBLE PRECISION NOT NULL,
-            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            stop_seq BIGINT
         )
     """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS session_stops (
+            session_id TEXT PRIMARY KEY,
+            stop_seq BIGINT NOT NULL,
+            stopped_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )
+    """)
+    from app.db.stop_receipts import create_schema as create_stop_receipts_schema
+    create_stop_receipts_schema(cursor)
+    from app.db.stop_notices import create_schema as create_stop_notices_schema
+    create_stop_notices_schema(cursor)
     cursor.execute("""
         CREATE INDEX IF NOT EXISTS idx_pending_wakeups_instance
         ON pending_wakeups(instance_id, fire_at)
@@ -1100,6 +1112,12 @@ def create_postgres_schema(cursor: Any) -> None:
             assignment_owner BOOLEAN NOT NULL DEFAULT TRUE,
             started_at TIMESTAMP WITH TIME ZONE,
             updated_at TIMESTAMP WITH TIME ZONE,
+            turn_order BIGINT,
+            turn_order_upper_bound BIGINT,
+            turn_order_incarnation TIMESTAMP WITH TIME ZONE,
+            turn_order_write_nonce TEXT,
+            remote_stop_scope JSONB,
+            turn_order_invalid_through BIGINT NOT NULL DEFAULT -1,
             PRIMARY KEY (task_id, session_id)
         )
     """)
@@ -2055,6 +2073,9 @@ def create_postgres_schema(cursor: Any) -> None:
     cursor.execute(
         "CREATE INDEX IF NOT EXISTS idx_turns_session_position ON turns(session_id, position DESC)"
     )
+
+    from app.db.background_tasks import create_order_guard
+    create_order_guard(cursor)
 
     # The existing session-prefixed indexes also cover insertion-order reads.
     # No history rewrite or new writer-blocking index build belongs in bootstrap.
