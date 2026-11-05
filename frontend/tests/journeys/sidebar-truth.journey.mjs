@@ -321,7 +321,7 @@ const ROLLBACK_DELETE = {
 
 /** The element is drawn in the theme's danger colour, whatever the theme makes that. */
 async function expectDangerColour(locator, what, log = () => {}) {
-	// A status mark is a dot, so its colour is its fill; a word's is its text.
+	// A status mark is a drawn shape, so its colour is its fill; a word's is its text.
 	const { colour, danger } = await locator.evaluate((el) => {
 		const probe = document.createElement('span');
 		probe.style.color = 'var(--destructive)';
@@ -335,11 +335,10 @@ async function expectDangerColour(locator, what, log = () => {}) {
 	expect(colour === danger, `${what} is in the danger colour (${colour}, the theme's is ${danger})`);
 }
 
-/** Everything a failed row must show: the word, the lane, and agreement after a reload. */
+/** Everything a failed row must say: the sign, the word for assistive tech, the lane, and agreement after a reload. */
 async function expectFailedRow({ page, mark, log, variant }, id) {
 	await waitStatus(page, id, 'Failed');
 	await waitLane(page, id, 'needs-you');
-	await expectDangerColour(page.locator(`${CARD(id)} .st`).first(), 'the status word', log);
 	await expectDangerColour(page.locator(`${CARD(id)} .lead .pip.warn.failed`), 'the row\'s sign', log);
 	await mark('reload');
 	await page.reload({ waitUntil: 'domcontentloaded' });
@@ -437,12 +436,12 @@ const FAILED_SETTLED = {
 		// going. The /mobile/ shell stays on the chat.
 		if (!inMobileShell(variant)) await waitChat(page, { surface: 'new' }, { timeout: 30_000 });
 		await waitLane(page, chat.id, 'settled');
-		// A settled row is the compact one: no status word to read, but the alert
-		// sign is in the danger colour and assistive tech hears the word.
+		// No row prints a status word, but the alert sign is in the danger colour and
+		// assistive tech hears the word.
 		const sign = page.locator(`${CARD(chat.id)} .lead .pip.warn.failed`);
 		await sign.waitFor({ timeout: 5000 });
-		const said = await page.locator(`${CARD(chat.id)} .title .sr-only`).first().textContent();
-		expect(/^Failed: /.test(said ?? ''), `a settled failed row announces it: ${JSON.stringify(said)}`);
+		const said = await page.locator(`${CARD(chat.id)} .details`).first().textContent();
+		expect(/^Failed( · |$)/.test(said ?? ''), `a settled failed row announces it: ${JSON.stringify(said)}`);
 		await expectDangerColour(sign, 'the settled row\'s sign');
 		await page.waitForTimeout(800);
 	},

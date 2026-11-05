@@ -568,9 +568,21 @@
 		if (ts >= today - 6 * DAY) return 'Earlier this week';
 		return 'Older';
 	}
+	// A project's place follows its most recent chat in ANY lane, archived-but-
+	// not-yet-gone included. Ranking on the lane's own rows made a project swap
+	// places, moving a screenful of rows, whenever its newest chat left the lane,
+	// and swap back if the server then refused the change.
+	const projectRecency = $derived.by(() => {
+		const latest = new Map<string, number>();
+		for (const s of visibleSessions) {
+			const key = projectKey(s);
+			const ts = sessionTimestamp(s);
+			if (ts > (latest.get(key) ?? -Infinity)) latest.set(key, ts);
+		}
+		return latest;
+	});
 	// Inside a lane, rows sit under their project when the lane spans more than
-	// one, so no row has to repeat it. A project's place follows its most recent
-	// row, and rows keep their recency order inside it.
+	// one, so no row has to repeat it. Rows keep their recency order inside it.
 	function byProject(laneRows: CardRow[]): { key: string; label: string | null; rows: CardRow[] }[] {
 		const groups = new Map<string, CardRow[]>();
 		for (const row of laneRows) {
@@ -580,12 +592,18 @@
 			else groups.set(key, [row]);
 		}
 		if (groups.size < 2) return [{ key: 'all', label: null, rows: laneRows }];
-		return [...groups].map(([key, rows]) => ({
-			key,
-			label: key === UNGROUPED_PROJECT ? 'No project' : projectLabel(rows[0].session),
-			rows
-		}));
+		const recency = (key: string) => projectRecency.get(key) ?? 0;
+		return [...groups]
+			.sort(([a], [b]) => recency(b) - recency(a))
+			.map(([key, rows]) => ({
+				key,
+				label: key === UNGROUPED_PROJECT ? 'No project' : projectLabel(rows[0].session),
+				rows
+			}));
 	}
+	// A lane with no project headers still needs its rows to say where they
+	// belong, unless the whole list is one project and it goes without saying.
+	const spansProjects = $derived(new Set(rows.map((r) => projectKey(r.session))).size > 1);
 	const needsYouGroups = $derived(byProject(needsYouRows));
 	const activeGroups = $derived(byProject(activeRows));
 
@@ -734,7 +752,7 @@
 
 <svelte:window onkeydown={handleWindowKeydown} />
 
-{#snippet card(row: CardRow, compact = false)}
+{#snippet card(row: CardRow, compact = false, showProject = false)}
 	<SessionCard
 		session={row.session}
 		status={row.status}
@@ -745,6 +763,7 @@
 		{now}
 		timestamp={row.ts}
 		{compact}
+		{showProject}
 		{selecting}
 		selected={selected.has(row.session.id)}
 		onSelectToggle={toggleSelected}
@@ -760,7 +779,7 @@
 			<div class="proj-head" title={group.label}>{group.label}</div>
 		{/if}
 		{#each group.rows as row (row.session.id)}
-			{@render card(row, compact)}
+			{@render card(row, compact, !group.label && spansProjects)}
 		{/each}
 	{/each}
 {/snippet}
@@ -769,6 +788,7 @@
 	<button
 		class="sect"
 		class:needs={key === 'needs'}
+		class:settled={key === 'settled'}
 		class:closed={collapsedGroups[key]}
 		onclick={() => toggleGroup(key)}
 		aria-expanded={!collapsedGroups[key]}
@@ -1204,13 +1224,20 @@
 		padding: 12px 8px 6px 12px;
 		border: 0;
 		background: linear-gradient(var(--sidebar) 78%, transparent);
-		color: var(--muted-foreground);
+		color: var(--sidebar-foreground);
 		font: inherit;
 		font-size: var(--fs-label);
-		font-weight: 500;
+		font-weight: 600;
 		text-align: left;
 		cursor: pointer;
 	}
+	/* A lane starts with a rule and some air, so the lanes read as separate lists
+	   and not as one list with a label in it. Settled is the quieter of the three. */
+	.sect:not(:first-child) {
+		margin-top: 8px;
+		border-top: 1px solid var(--border);
+	}
+	.sect.settled { font-weight: 500; }
 	.sect .lbl { flex: none; }
 	.sect:hover { color: var(--sidebar-foreground); }
 	.sect:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; border-radius: var(--radius-control); }
@@ -1223,6 +1250,7 @@
 	.sect .chev { margin-left: auto; display: inline-flex; color: var(--subtle-foreground); transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1); }
 	.sect.closed .chev { transform: rotate(-90deg); }
 	.sect.needs .lbl { color: var(--warning); }
+	.sect.settled { color: var(--muted-foreground); }
 
 	.daylabel { padding: 10px 12px 3px; font-size: var(--fs-caption); font-weight: 500; color: var(--subtle-foreground); }
 	.empty {
@@ -1272,7 +1300,7 @@
 	}
 	.phone .selbar { height: calc(56px + env(safe-area-inset-top, 0px)); padding-top: env(safe-area-inset-top, 0px); }
 	.col.selecting .selbar { transform: none; }
-	.cnt { margin-right: auto; padding-left: 4px; font-size: 14px; font-weight: 650; color: var(--foreground); }
+	.cnt { margin-right: auto; padding-left: 2px; font-size: 13px; font-weight: 650; white-space: nowrap; color: var(--foreground); }
 	.act {
 		display: flex;
 		align-items: center;

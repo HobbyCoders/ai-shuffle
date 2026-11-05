@@ -2,18 +2,30 @@
 	/**
 	 * SessionCard — one ledger row in the sidebar.
 	 *
-	 * Every row is one line: the title flush left, then a mark and the total
-	 * working time at the far right. The mark is the session's runtime
-	 * state when it has one (a pulsing dot while it works, a warning when it is
-	 * parked on a prompt or failed), and otherwise where the branch sits between
-	 * edit and merge (see `deriveGitStage`).
+	 * Every row reads at a glance, without hovering, and every row is two lines,
+	 * so a row never changes height when it starts or stops working.
 	 *
-	 * An uncommitted diffstat or a several-PR summary sits before the time. A
-	 * second line appears only on an active row that is running or blocked: the
-	 * status word, PR state and diffstat.
+	 * A fixed state column runs down the left of every row in every lane, and it
+	 * alone says what the row is doing: no status word is printed anywhere. Runtime
+	 * state wins the column, and each state has its own shape, so none of them
+	 * leans on hue or on motion alone: a pulsing dot while working, a flat bar
+	 * squeezing slowly while compacting, a hollow ring while parked on background
+	 * work, an amber diamond when it waits on someone, a red cross when it failed,
+	 * an unplugged glyph when its worker is offline. Otherwise it shows where the
+	 * branch sits between edit and merge (see `deriveGitStage`), and an idle row
+	 * leaves it empty but keeps its width. The exact word is the mark's hover title.
 	 *
-	 * Worker, project, branch and PR state live in the row's hover title and in a
-	 * visually hidden line for screen readers. The sidebar groups rows by project.
+	 * Line one is the title and the total working time, always in one neutral tone.
+	 * Only a row that is working right now ticks seconds; every other row shows
+	 * whole minutes and keeps the exact value in the hover title, so titles get the
+	 * room. Line two is one calm line of facts: PR state, diffstat, then branch, the
+	 * only segment that gives way. A row with no facts shows its age, so the line is
+	 * never blank. The Settled lane is the same row, quieter: colour only on the PR.
+	 *
+	 * The state word and line two are hidden from screen readers; `.details` says
+	 * them once, in order, with the several-PR chip speaking for itself. The row's
+	 * hover tip sits on `.body`, not on the button, so it is not read out again as
+	 * the button's description.
 	 *
 	 * Inbox gestures. A touch or pen swipe LEFT settles an active row (moves a
 	 * settled one back to Active, restores an archived one); a swipe RIGHT
@@ -32,18 +44,19 @@
 		ArchiveRestore,
 		ArrowUpFromLine,
 		Check,
-		Cloud,
 		Diff,
 		GitCommitHorizontal,
 		GitMerge,
 		GitPullRequest,
 		GitPullRequestClosed,
 		Monitor,
-		Undo2
+		Undo2,
+		Unplug
 	} from 'lucide-svelte';
 	import type { Session } from '$lib/api/client';
 
-	/** Every status mark on a row is drawn at this one weight. */
+	/** Every status mark on a row is drawn at this one size and weight. */
+	const MARK_SIZE = 14;
 	const MARK_STROKE = 1.5;
 
 	import { appData } from '$lib/stores/app-data.svelte';
@@ -52,19 +65,18 @@
 	import { notify } from '$lib/stores/notifications';
 	import { platform } from '$lib/stores/platform.svelte';
 	import {
-		GIT_STAGE_LABELS,
 		GIT_STAGE_TONES,
 		GIT_STAGE_TIPS,
-		RUNTIME_STATUS_TONES,
 		runtimeStatusWord,
 		deriveGitStage,
 		diffCounts,
 		isAttentionStatus,
 		isLiveStatus,
-		isTurnLiveStatus,
 		isWorkCountingStatus,
+		gitProgressWord,
 		sessionWorkMs,
-		formatElapsed,
+		formatExactElapsed,
+		formatRowTime,
 		formatAge,
 		deviceLabel,
 		branchLabel,
@@ -90,7 +102,7 @@
 		/** True when this session is the one open in the main panel. */
 		active?: boolean;
 		/** Its conversation is being compacted right now (known for the open
-		 *  session only): the status word reads "Compacting". */
+		 *  session only): the state mark and its word say so. */
 		compacting?: boolean;
 		/** Current clock (ms) supplied by the sidebar's shared ticker. */
 		now: number;
@@ -98,8 +110,11 @@
 		 *  ticking card never re-parses its date (R15). Falls back to parsing the
 		 *  row when the card is used standalone. */
 		timestamp?: number;
-		/** Two-line dense row — used for the settled/archived groups. */
+		/** The quieter, tighter row of the settled/archived groups. */
 		compact?: boolean;
+		/** The row is not under a project header in a list that spans several
+		 *  projects, so it has to name its own. */
+		showProject?: boolean;
 		/** The list is in selection mode: the lead glyph becomes a checkmark and
 		 *  a tap toggles it instead of opening the session. */
 		selecting?: boolean;
@@ -122,6 +137,7 @@
 		now,
 		timestamp,
 		compact = false,
+		showProject = false,
 		selecting = false,
 		selected = false,
 		onSelectToggle,
@@ -131,42 +147,45 @@
 	}: Props = $props();
 
 	const live = $derived(isLiveStatus(status));
-	// Only a turn holding the live slot ticks; a parked turn's interval has
-	// ended, so its timer takes the plain style, not the live accent.
-	const turnLive = $derived(isTurnLiveStatus(status));
-	// A parked session is still working on its background work, so its total
-	// keeps counting even though its timer keeps the plain style.
+	// Seconds tick only while the agent is working right now. A row waiting on
+	// someone or parked keeps counting toward its total, but nothing on it is
+	// happening by the second, and the title needs the room more.
+	const ticking = $derived(status === 'working');
+	// A parked session is still working on its background work, and a blocked
+	// turn still holds the live slot, so both totals keep counting.
 	const counting = $derived(isWorkCountingStatus(status));
 	const lastActivity = $derived(timestamp ?? sessionTimestamp(session));
 	// Every row shows the session's total working time, which survives Done
 	// and settling. A settled row that is idle keeps its age in the hover
 	// title, where it used to be the visible value.
-	const timer = $derived(formatElapsed(sessionWorkMs(session, now, counting, lastActivity)));
+	const workMs = $derived(sessionWorkMs(session, now, counting, lastActivity));
+	const timer = $derived(formatRowTime(workMs, ticking));
 	const timerTitle = $derived.by(() => {
-		if (!compact || live) return 'Total working time';
+		const total = `Total working time ${formatExactElapsed(workMs)}`;
+		if (!compact || live) return total;
 		const age = formatAge(Math.max(0, now - lastActivity));
-		return `Total working time · last activity ${age === 'now' ? 'just now' : `${age} ago`}`;
+		return `${total} · last activity ${age === 'now' ? 'just now' : `${age} ago`}`;
 	});
 	const title = $derived(session.title?.trim() || 'Untitled');
 	const device = $derived(deviceLabel(session));
 	const branch = $derived(branchLabel(session));
 	const statusWord = $derived(runtimeStatusWord(status, compacting));
-	const statusTone = $derived(RUNTIME_STATUS_TONES[status]);
 	const attention = $derived(isAttentionStatus(status));
 	const failed = $derived(status === 'failed');
+	const parked = $derived(status === 'parked');
+	const offline = $derived(status === 'offline');
 	// Only these rows speak up: the open one, and any that is running or waiting
-	// on someone. A finished row stays in secondary text so the eye goes to them.
-	const running = $derived(status === 'working' || status === 'parked');
+	// on someone.
+	const running = $derived(status === 'working' || parked);
 	const emphasized = $derived(active || running || attention || failed);
-	const showStatusLine = $derived(!compact && (running || attention || failed));
 
 	// ── Git state ───────────────────────────────────────────────────────
 	// The session open in the main panel already has its checkout loaded by the
 	// real git store; reading that costs nothing and stays in step with the
 	// header. Every OTHER active card leases a slow poll from the sidebar's own
-	// store. Settled rows lease nothing at all — they read `pr_state`.
+	// store. Settled rows lease nothing at all: they read `pr_state`, plus the
+	// last answer this tab already holds for the checkout, if any.
 	const openGit = $derived.by(() => {
-		if (compact) return null;
 		const current = git.current;
 		// Unhydrated values belong to the previous checkout, not this session.
 		if (!current?.hydrated) return null;
@@ -216,12 +235,10 @@
 	});
 
 	const gitStatus = $derived.by(() => {
-		if (compact) return null;
 		if (openGit) return openGit.status;
 		return sessionGitState.get(session.id, session.project_id ?? null, session.worktree_id ?? null)?.status ?? null;
 	});
 	const gitDiffStats = $derived.by(() => {
-		if (compact) return null;
 		if (openGit) return openGit.diffStats;
 		return sessionGitState.get(session.id, session.project_id ?? null, session.worktree_id ?? null)?.diffStats ?? null;
 	});
@@ -283,25 +300,42 @@
 	$effect(() => {
 		if (!multiPr) prListOpen = false;
 	});
-	/** Compact rows carry one git word; a PR names its number, the rest use the
-	 *  stage's own label ("uncommitted", "pushed", …). */
-	const stageWord = $derived(
-		(stage === 'pr' || stage === 'merged' || stage === 'closed') && prText
-			? prText
-			: GIT_STAGE_LABELS[stage]
-	);
 	// Diff counts belong to uncommitted work only — a merged branch's totals
-	// would read as "still to review".
-	const diff = $derived(gitStatus?.has_changes ? diffCounts(gitDiffStats) : null);
+	// would read as "still to review". A settled row says the word instead.
+	const diff = $derived(!compact && gitStatus?.has_changes ? diffCounts(gitDiffStats) : null);
+	const diffText = $derived(diff ? `${diff.plus} ${diff.minus}` : null);
+	// Numbers already say "uncommitted", so the word only stands in without them.
+	const progressWord = $derived(diff ? null : gitProgressWord(stage, !!gitStatus?.has_changes));
 
+	const remote = $derived(!!session.is_remote);
+	const whereText = $derived([showProject ? projectLabel : null, branch].filter(Boolean).join(' · ') || null);
+	// Nothing to report: the line holds the row's age (and its worker's name, with
+	// room to spell it) so its rhythm stays and it never goes blank.
+	const factless = $derived(!showPr && !diff && !progressWord && !whereText);
+	const ageText = $derived.by(() => {
+		if (!factless) return null;
+		const age = formatAge(Math.max(0, now - lastActivity));
+		return age === 'now' ? 'Just now' : `${age} ago`;
+	});
+	const fallbackText = $derived(factless ? [remote ? device : null, ageText].filter(Boolean).join(' · ') : null);
 
-	// Everything a row no longer spells out stays one hover away.
-	const rowDetails = $derived(
-		[statusWord, prText || (compact ? stageWord : null), device, projectLabel, branch].filter(Boolean).join(' · ')
-	);
+	// The row's whole story, for the hover tip.
+	const rowFacts = $derived([statusWord, prText, progressWord, diffText, device, projectLabel, branch, ageText]);
+	const rowDetails = $derived(rowFacts.filter(Boolean).join(' · '));
 	const rowTip = $derived(`${title}\n${rowDetails}`);
+	// The same for a screen reader, which already hears the several-PR chip by name.
+	const rowSpeech = $derived(
+		rowFacts.filter((fact, i) => fact && !(multiPr && i === 1)).join(' · ')
+	);
+	// What the state column is showing, for whoever hovers it.
+	const runtimeMark = $derived(running || attention || failed || offline);
+	// A row whose checkout was never read has an empty column, not a clean tree:
+	// "no data" must not hover as "No changes".
+	const leadTip = $derived(runtimeMark ? statusWord : stage === 'clean' && !gitFacts ? null : stageTip);
+	// An offline worker's mark says nothing about the branch, so it takes no git colour.
+	const leadTone = $derived(offline ? 'muted' : stageTone);
 	// A row with no recorded work has no time worth a column.
-	const showTimer = $derived(turnLive || counting || timer !== formatElapsed(0));
+	const showTimer = $derived(counting || workMs >= 1000);
 
 	const actions = $derived(cardActions(session));
 	/** Hover order: Archive first, then the state toggle (or Restore). */
@@ -636,86 +670,93 @@
 		aria-pressed={selecting ? selected : undefined}
 		onclick={openCard}
 		onkeydown={handleCardKeydown}
-		title={rowTip}
 		style:transform={innerTransform}
 	>
+		{#snippet multiPrChip()}
+			<!-- The one control for the PR list: pointer, keyboard and
+			     screen readers all use the chip itself. -->
+			<button
+				bind:this={prChipRef}
+				type="button"
+				class="st pr pr-chip multi"
+				class:open={prListOpen}
+				title={`${prText} — show the list`}
+				aria-label={prListLabel}
+				aria-haspopup="dialog"
+				aria-expanded={prListOpen}
+				onclick={togglePrList}
+			>{#each prSummary?.parts ?? [] as part, i (part.state)}{#if i > 0}<span class="sep">{' · '}</span>{/if}<span class:green={part.state === 'open'} class:purple={part.state === 'merged'} class:muted={part.state === 'closed'}>{part.text}</span>{/each}</button>
+		{/snippet}
+
+		<!-- The state column. Every row has one, the same width in every lane, so
+		     the eye runs straight down it. `.details` says all of this in words. -->
 		{#if selecting}
 			<span class="check" aria-hidden="true">
 				{#if selected}<Check size={12} strokeWidth={3} />{/if}
 			</span>
+		{:else}
+			<span class="lead {leadTone}" aria-hidden="true" title={leadTip}>
+				{#if status === 'working'}
+					<span class="pip" class:compacting></span>
+				{:else if parked}
+					<span class="pip held"></span>
+				{:else if failed}
+					<span class="pip warn failed"></span>
+				{:else if attention}
+					<span class="pip warn"></span>
+				{:else if offline}
+					<Unplug size={MARK_SIZE} strokeWidth={MARK_STROKE} />
+				{:else if stage === 'pr'}
+					<GitPullRequest size={MARK_SIZE} strokeWidth={MARK_STROKE} />
+				{:else if stage === 'merged'}
+					<GitMerge size={MARK_SIZE} strokeWidth={MARK_STROKE} />
+				{:else if stage === 'closed'}
+					<GitPullRequestClosed size={MARK_SIZE} strokeWidth={MARK_STROKE} />
+				{:else if stage === 'dirty'}
+					<Diff size={MARK_SIZE} strokeWidth={MARK_STROKE} />
+				{:else if stage === 'committed'}
+					<GitCommitHorizontal size={MARK_SIZE} strokeWidth={MARK_STROKE} />
+				{:else if stage === 'pushed'}
+					<ArrowUpFromLine size={MARK_SIZE} strokeWidth={MARK_STROKE} />
+				{/if}
+				<!-- An idle row draws nothing but keeps the column. -->
+			</span>
 		{/if}
 
-		<span class="body">
-			{#snippet multiPrChip()}
-				<!-- The one control for the PR list: pointer, keyboard and
-				     screen readers all use the chip itself. -->
-				<button
-					bind:this={prChipRef}
-					type="button"
-					class="st pr pr-chip multi"
-					class:open={prListOpen}
-					title={`${prText} — show the list`}
-					aria-label={prListLabel}
-					aria-haspopup="dialog"
-					aria-expanded={prListOpen}
-					onclick={togglePrList}
-				>{#each prSummary?.parts ?? [] as part, i (part.state)}{#if i > 0}<span class="sep">{' · '}</span>{/if}<span class:green={part.state === 'open'} class:purple={part.state === 'merged'} class:muted={part.state === 'closed'}>{part.text}</span>{/each}</button>
-			{/snippet}
-			{#snippet mark()}
-				<span class="lead {stageTone}" role="img" title={stageTip} aria-label={stageTip}>
-					{#if status === 'working'}
-						<span class="pip" aria-hidden="true"></span>
-					{:else if failed}
-						<span class="pip warn failed" aria-hidden="true"></span>
-					{:else if attention}
-						<span class="pip warn" aria-hidden="true"></span>
-					{:else if stage === 'pr'}
-						<GitPullRequest size={12} strokeWidth={MARK_STROKE} />
-					{:else if stage === 'merged'}
-						<GitMerge size={12} strokeWidth={MARK_STROKE} />
-					{:else if stage === 'closed'}
-						<GitPullRequestClosed size={12} strokeWidth={MARK_STROKE} />
-					{:else if stage === 'dirty'}
-						<Diff size={12} strokeWidth={MARK_STROKE} />
-					{:else if stage === 'committed'}
-						<GitCommitHorizontal size={12} strokeWidth={MARK_STROKE} />
-					{:else if stage === 'pushed'}
-						<ArrowUpFromLine size={14} strokeWidth={MARK_STROKE} />
-					{/if}
-					<!-- An idle row draws nothing, and takes no room (see .lead). -->
-				</span>
-			{/snippet}
-			{#snippet timerChip()}
-				{#if showTimer}<span class="timer" class:live={turnLive} title={timerTitle}>{timer}</span>{/if}
-			{/snippet}
-
+		<span class="body" title={rowTip}>
 			<span class="l1">
-				<span class="title">{#if compact && (status === 'working' || failed || attention)}<span class="sr-only">{`${statusWord}: `}</span>{/if}{title}</span>
-				{#if !showStatusLine && multiPr}{@render multiPrChip()}{/if}
-				{#if !showStatusLine && diff}
-					<span class="diff"><span class="p">{diff.plus}</span> <span class="m">{diff.minus}</span></span>
-				{/if}
-				{#if !selecting}{@render mark()}{/if}
-				{@render timerChip()}
+				<span class="title">{title}</span>
+				{#if showTimer}<span class="timer" title={timerTitle}>{timer}</span>{/if}
 			</span>
 
-			{#if showStatusLine}
-				<span class="l2">
-					<span class="st {statusTone}">{statusWord}</span>
-					{#if showPr}
-						{#if multiPr}
-							{@render multiPrChip()}
-						{:else}
-							<span class="st pr" title={prText} class:green={prTone === 'open'} class:purple={prTone === 'merged'}>{prText}</span>
-						{/if}
+			<!-- Always here, so a row keeps its height through every state. -->
+			<span class="l2">
+				{#if showPr}
+					{#if multiPr}
+						{@render multiPrChip()}
+					{:else}
+						<span class="st pr" aria-hidden="true" class:green={prTone === 'open'} class:purple={prTone === 'merged'} class:muted={prTone === 'closed'}>{prText}</span>
 					{/if}
+				{/if}
+				<!-- Whatever no longer fits drops whole, last first (see .rest). -->
+				<span class="rest">
 					{#if diff}
-						<span class="diff"><span class="p">{diff.plus}</span> <span class="m">{diff.minus}</span></span>
+						<span class="diff" aria-hidden="true"><span class="p">{diff.plus}</span> <span class="m">{diff.minus}</span></span>
+					{:else if progressWord}
+						<span class="st progress" class:uncommitted={!compact && stage === 'dirty'} aria-hidden="true">{progressWord}</span>
+					{/if}
+					{#if whereText}
+						<span class="where" aria-hidden="true">{whereText}</span>
+					{:else if fallbackText}
+						<span class="where" aria-hidden="true">{fallbackText}</span>
 					{/if}
 				</span>
-			{/if}
+				{#if remote && !factless}
+					<span class="worker" aria-hidden="true" title={`On ${device}`}><Monitor size={12} strokeWidth={MARK_STROKE} /></span>
+				{/if}
+			</span>
 
-			<span class="details sr-only">{rowDetails}</span>
+			<span class="details sr-only">{rowSpeech}</span>
 		</span>
 	</div>
 
@@ -804,18 +845,19 @@
 	.scard-frame.armed .lane :global(svg) { transform: scale(1.18); }
 
 	/* ── The row itself ─────────────────────────────────────────────────
-	   Opaque, so the lanes never bleed through. A fixed lead column keeps every
-	   mark (and the selection checkmark) lined up down the list. 32px plus the
-	   list's 2px gap is the 34px pitch. */
+	   Opaque, so the lanes never bleed through. Both lines have a fixed height and
+	   line two is always rendered, so no status change can move the rows below.
+	   Active: 6 + 20 + 17 + 6 = 49, plus the list's 2px gap, a 51px pitch.
+	   Settled: 4 + 19 + 16 + 3 = 42, a 44px pitch. */
 	.scard {
 		position: relative;
 		z-index: 1;
 		display: grid;
-		grid-template-columns: minmax(0, 1fr);
-		column-gap: 8px;
+		grid-template-columns: var(--state-col) minmax(0, 1fr);
+		column-gap: 6px;
 		align-items: start;
 		width: 100%;
-		padding: 6px 8px 6px 12px;
+		padding: 6px 8px;
 		border: none;
 		border-radius: var(--radius-control);
 		background: var(--sidebar);
@@ -823,9 +865,15 @@
 		text-align: left;
 		cursor: pointer;
 		transition: transform 300ms cubic-bezier(0.16, 1, 0.3, 1), background-color 120ms ease;
+		--state-col: 16px;
+		--line-1: 20px;
+		--line-2: 17px;
 	}
-	/* Selecting lends the row a checkbox column; titles move over only then. */
-	.scard:has(> .check) { grid-template-columns: 16px minmax(0, 1fr); }
+	.scard.compact {
+		padding: 4px 8px 3px;
+		--line-1: 19px;
+		--line-2: 16px;
+	}
 	.scard-frame.dragging .scard { transition: background-color 120ms ease; }
 	.scard-frame:hover .scard { background: var(--row-hover); }
 	.scard.active,
@@ -836,70 +884,106 @@
 	.scard-frame.selected:hover .scard { background: color-mix(in oklab, var(--primary) 9%, var(--sidebar)); }
 	.scard:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
 
-	/* Selection checkmark, in the lead mark's column. */
+	/* Selection checkmark, in the state column, so titles never move. */
 	.check {
 		display: grid;
 		place-items: center;
 		width: 16px;
 		height: 16px;
-		margin-top: 2px;
+		margin-top: calc((var(--line-1) - 16px) / 2);
 		border: 1.5px solid var(--border-strong);
 		border-radius: 50%;
 		color: var(--primary-foreground);
 	}
 	.scard-frame.selected .check { background: var(--primary); border-color: var(--primary); }
 
-	/* ── Leading mark ─────────────────────────────────────────────────── */
+	/* ── State column ─────────────────────────────────────────────────── */
 	.lead {
 		display: grid;
-		flex: none;
 		place-items: center;
-		width: 16px;
-		height: 20px;
+		width: var(--state-col);
+		height: var(--line-1);
 		color: var(--subtle-foreground);
 	}
-	.lead:not(:has(> *)) { display: none; }
 	.lead :global(svg) { flex: none; }
 	.lead.green { color: var(--success); }
 	.lead.purple { color: var(--status-merged); }
 	.lead.amber { color: var(--warning); }
 	.lead.muted { color: var(--subtle-foreground); }
-	/* One 6px dot for all three live states. Screen readers get the word from the
-	   lead's label, and the title reads it out in compact rows. */
+	/* A settled row's glyph steps back, leaving the colour to the PR word. Runtime
+	   marks do not: a settled row that is somehow running still has to be seen. */
+	.scard.compact .lead :global(svg) { opacity: 0.7; }
+	/* The runtime marks are solid shapes, so they outweigh the thinner git glyphs.
+	   This column is the only place a row says its state, so every mark has its
+	   own shape: with motion reduced, or colour hard to tell, they still differ.
+	   The pulses move by size rather than fading, so a mark stays at 3:1 against
+	   the panel through its whole cycle in both themes.
+	   Working: a dot that pulses. */
 	.pip {
-		width: 6px;
-		height: 6px;
+		width: 8px;
+		height: 8px;
 		border-radius: 50%;
 		background: var(--primary);
+		forced-color-adjust: none;
 		animation: card-ping 1.8s ease-in-out infinite;
 	}
+	/* Compacting is working too, so it keeps the colour, but as a flat bar being
+	   squeezed, at half the pace. */
+	.pip.compacting {
+		width: 12px;
+		height: 5px;
+		border-radius: 3px;
+		animation: card-squeeze 3.6s ease-in-out infinite;
+	}
+	/* Parked: its background work still runs, but no turn is live. Same colour,
+	   hollow and still. */
+	.pip.held {
+		background: transparent;
+		box-shadow: inset 0 0 0 1.5px var(--primary);
+		animation: none;
+	}
+	/* Needs you: an amber diamond, calling gently. Permission and question share
+	   it; the Needs you lane and the hover title say which. */
 	.pip.warn {
+		border-radius: 1.5px;
 		background: var(--warning);
+		transform: rotate(45deg);
 		animation: card-pulse 2.4s ease-in-out infinite;
 	}
-	/* What happened, not something still calling: the danger colour, held still. */
+	/* What happened, not something still calling: a cross in the danger colour,
+	   held still. */
 	.pip.warn.failed {
+		width: 10px;
+		height: 10px;
+		border-radius: 0;
 		background: var(--destructive);
+		transform: none;
+		clip-path: polygon(20% 0, 50% 30%, 80% 0, 100% 20%, 70% 50%, 100% 80%, 80% 100%, 50% 70%, 20% 100%, 0 80%, 30% 50%, 0 20%);
 		animation: none;
 	}
 
 	@keyframes card-ping {
 		0%, 100% { opacity: 1; transform: scale(1); }
-		50% { opacity: 0.55; transform: scale(0.82); }
+		50% { opacity: 0.8; transform: scale(0.72); }
+	}
+	@keyframes card-squeeze {
+		0%, 100% { opacity: 1; transform: scaleX(1); }
+		50% { opacity: 0.8; transform: scaleX(0.62); }
 	}
 	@keyframes card-pulse {
-		0%, 100% { opacity: 0.75; }
-		50% { opacity: 1; }
+		0%, 100% { transform: rotate(45deg) scale(1); }
+		50% { transform: rotate(45deg) scale(0.82); }
 	}
 
-	.body { min-width: 0; }
+	.body { display: block; min-width: 0; }
 
 	.l1 {
 		display: flex;
 		align-items: baseline;
 		gap: 8px;
 		min-width: 0;
-		line-height: 20px;
+		height: var(--line-1);
+		line-height: var(--line-1);
 	}
 	.title {
 		flex: 1 1 auto;
@@ -909,16 +993,20 @@
 		white-space: nowrap;
 		font-size: 13.5px;
 		font-weight: 450;
+		color: var(--sidebar-foreground);
+	}
+	.scard.emphasized .title { font-weight: 500; }
+	/* Settled answers "how did this end", in secondary text. */
+	.scard.compact .title {
+		font-size: 13px;
 		color: var(--sidebar-muted);
 		transition: color 120ms ease;
 	}
-	.scard-frame:hover .title { color: var(--sidebar-foreground); }
-	.scard.emphasized .title {
-		font-weight: 500;
-		color: var(--sidebar-foreground);
-	}
+	.scard-frame:hover .scard.compact .title,
+	.scard.compact.emphasized .title { color: var(--sidebar-foreground); }
 
-	/* Pinned to the right end of the line; the title gives way first. */
+	/* Pinned to the right end of the line; the title gives way first. One tone on
+	   every row in every lane: state belongs to the state column, not the clock. */
 	.timer {
 		flex: none;
 		margin-left: auto;
@@ -927,7 +1015,76 @@
 		color: var(--subtle-foreground);
 		white-space: nowrap;
 	}
-	.timer.live { color: var(--primary); }
+
+	/* Line two: one calm line of facts, in the order PR, diff, branch. It never
+	   wraps visibly and never shows half a number: the PR always stays, and `.rest` wraps onto a second line its fixed height hides, so a fact
+	   that no longer fits disappears whole. */
+	.l2 {
+		display: flex;
+		align-items: flex-start;
+		gap: 8px;
+		min-width: 0;
+		height: var(--line-2);
+		font-size: var(--fs-label);
+		line-height: var(--line-2);
+		white-space: nowrap;
+		color: var(--subtle-foreground);
+	}
+	.rest {
+		display: flex;
+		flex: 1 1 0;
+		flex-wrap: wrap;
+		align-content: flex-start;
+		align-items: flex-start;
+		column-gap: 8px;
+		min-width: 0;
+		height: var(--line-2);
+		overflow: hidden;
+	}
+	/* Holds the first line, so even the first fact wraps out of sight whole when
+	   it does not fit, instead of being cut mid-number. The margin cancels its gap. */
+	.rest::before {
+		content: '';
+		flex: none;
+		width: 0;
+		height: var(--line-2);
+		margin-right: -8px;
+	}
+	.st {
+		flex: none;
+		white-space: nowrap;
+	}
+	/* Always stays, but on a very narrow panel it ends in an ellipsis, not past
+	   the row. */
+	.st.pr {
+		flex: 0 1 auto;
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	.st.pr.green { color: var(--success); }
+	.st.pr.purple { color: var(--status-merged); }
+	.st.pr.muted { color: var(--subtle-foreground); }
+	.st.progress.uncommitted { color: var(--warning); }
+	.diff {
+		flex: none;
+		font-variant-numeric: tabular-nums;
+	}
+	.diff .p { color: var(--success); }
+	.diff .m { color: var(--destructive); }
+	/* The only fact that truncates, and not into a stump. */
+	.where {
+		flex: 1 1 0;
+		min-width: 56px;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	/* Sits under the time; only there when the session is on another worker. */
+	.worker {
+		display: inline-flex;
+		flex: none;
+		align-self: center;
+	}
 
 	/* Several PRs: each count keeps its state's tone; the chip opens the list.
 	   A button that reads as inline text: no box, no font or line-height of its
@@ -937,73 +1094,56 @@
 		position: relative;
 		flex: 0 1 auto;
 		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
 		margin: 0;
 		padding: 0;
 		border: 0;
 		border-radius: 3px;
 		background: none;
 		font: inherit;
-		font-size: var(--fs-label);
 		line-height: inherit;
-		color: var(--sidebar-muted);
+		color: inherit;
 		text-align: inherit;
 		text-transform: none;
 		white-space: nowrap;
 		appearance: none;
 	}
+	.pr-chip.multi .green { color: var(--success); }
+	.pr-chip.multi .purple { color: var(--status-merged); }
+	.pr-chip.multi .muted { color: var(--subtle-foreground); }
 	.pr-chip.multi:focus-visible { outline: 2px solid var(--ring); outline-offset: -1px; }
 	.pr-chip.multi .sep { color: var(--subtle-foreground); }
 	.pr-chip.multi:hover > span:not(.sep),
 	.pr-chip.multi.open > span:not(.sep) { text-decoration: underline dotted; text-underline-offset: 2px; }
 
-	/* Second line, only on a running or blocked row: what it is doing or waiting
-	   on, then what the PR and the diff are doing. */
-	.l2 {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		min-width: 0;
-		padding-bottom: 1px;
-		font-size: var(--fs-label);
-		line-height: 17px;
-		white-space: nowrap;
-		overflow: hidden;
+	/* Phone: larger type and row for thumbs at arm's length, same anatomy. */
+	.scard-frame.phone .scard {
+		column-gap: 8px;
+		padding: 8px 12px 8px 10px;
+		--line-1: 22px;
+		--line-2: 19px;
 	}
-	.st {
-		flex: none;
-		overflow: hidden;
-		text-overflow: ellipsis;
+	.scard-frame.phone .scard.compact {
+		padding: 6px 12px 6px 10px;
+		--line-1: 21px;
+		--line-2: 18px;
 	}
-	.l2 .st.pr { flex: 0 1 auto; min-width: 0; }
-	.st.accent { color: var(--primary); }
-	.st.amber { color: var(--warning); }
-	.st.danger { color: var(--destructive); }
-	.st.green { color: var(--success); }
-	.st.purple { color: var(--status-merged); }
-	.st.muted { color: var(--muted-foreground); }
-	.diff {
-		flex: none;
-		font-size: var(--fs-label);
-		font-variant-numeric: tabular-nums;
-	}
-	.diff .p { color: var(--success); }
-	.diff .m { color: var(--destructive); }
-
-	/* Phone: a 44px row and a larger title for thumbs at arm's length. */
-	.scard-frame.phone .scard { column-gap: 10px; padding: 12px; }
 	.scard-frame.phone .title { font-size: 14.5px; }
-	.scard-frame.phone .l2 { font-size: 13px; line-height: 18px; }
+	.scard-frame.phone .scard.compact .title { font-size: 14px; }
+	.scard-frame.phone .l2 { font-size: 13px; }
 
 	/* ── Hover actions (pointer that hovers) ───────────────────────────── */
 	.hover-acts {
 		position: absolute;
-		top: 50%;
-		right: 6px;
+		top: 0;
+		right: 0;
+		bottom: 0;
 		z-index: 2;
 		display: flex;
+		align-items: center;
 		gap: 2px;
-		padding-left: 18px;
-		transform: translateY(-50%);
+		padding: 0 6px 0 18px;
 		background: linear-gradient(90deg, transparent, var(--row-hover) 18px);
 		opacity: 0;
 		transition: opacity 120ms ease;
@@ -1060,6 +1200,7 @@
 
 	@media (prefers-reduced-motion: reduce) {
 		.pip,
+		.pip.compacting,
 		.pip.warn { animation: none; }
 		.scard-frame,
 		.scard,
