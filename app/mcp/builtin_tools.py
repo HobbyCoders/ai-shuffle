@@ -20,8 +20,9 @@ import asyncio
 import sys
 import logging
 import uuid
+from collections.abc import Callable
 from datetime import datetime, timezone, timedelta
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from app.core.monitor_spawn import MAX_WAIT_SECONDS, WAIT_SECONDS_PARAM
 from app.mcp.config_helpers import _json_default
@@ -1662,7 +1663,7 @@ def create_builtin_tools_server(
     provider_id: Optional[str] = None,
     cwd: Optional[str] = None,
     workflow_guidance: bool = False,
-    runtime_model_supplier: Optional[Callable[[], tuple[Optional[str], Optional[str]]]] = None,
+    runtime_model_supplier: Callable[[], tuple[str | None, str | None]] | None = None,
 ) -> Optional[Any]:
     """
     Build the ``mcp__builtins__*`` MCP server for a session.
