@@ -3,10 +3,10 @@ import json
 from pathlib import Path
 
 import pytest
-from fluid.tools.builtins import note, register_builtins
+from fluid.tools.builtins import note, plan, register_builtins
 from fluid.tools.registry import ToolRegistry
 from app.db import session_events, session_plans
-from scripts.devloop.fake_ai import Scenarios, validate_scenario
+from scripts.devloop.fake_ai import Scenarios, prompt_and_round, validate_scenario, visible
 from tests.core.test_session_plan import active_plan  # noqa: F401
 
 SCENARIOS = Path(__file__).resolve().parents[2] / "scripts" / "devloop" / "scenarios"
@@ -30,7 +30,7 @@ async def produce(name, registry, context):
 
 def test_new_json_contracts_are_loaded_by_existing_fake_ai():
     loaded = Scenarios(SCENARIOS).load()
-    for name in ("plan-update", "plan-complete", "plan-note"):
+    for name in ("plan-update", "plan-complete", "plan-note", "plan-note-setup"):
         assert loaded[name] == fixture(name)
     updates = [call["input"] for name in ("plan-update", "plan-complete")
                for step in fixture(name)["steps"] for call in step.get("tool_calls", [])
@@ -50,8 +50,10 @@ async def test_real_fixture_sequence_preserves_history_and_optional_notes(active
     registry = ToolRegistry()
     register_builtins(registry)
     if has_legacy_note:
-        result = await registry.dispatch("Note", {"action": "add", "text": "Existing optional research scratch; not a Plan checklist."}, context)
-        assert not result.is_error
+        await produce("plan-note-setup", registry, context)
+        assert "Legacy scratch remains a thought, not a completed step" in note.read_notes(context)
+        assert session_plans.read(sid)["plan"]["revision"] == 0
+        assert not [event for event in session_events.get_events(sid) if event["event_type"] == "plan.updated"]
     previous = note.read_notes(context)
     path = note._notes_path(context)
     previous_bytes = path.read_bytes() if path.exists() else None
@@ -81,6 +83,30 @@ async def test_real_fixture_sequence_preserves_history_and_optional_notes(active
     assert (path.read_bytes() if path.exists() else None) == previous_bytes
     assert session_plans.read(sid)["plan"] == current
     assert len([event for event in session_events.get_events(sid) if event["event_type"] == "plan.updated"]) == 4
+
+
+
+
+@pytest.mark.parametrize("revision", [1, 2, 3, 4])
+def test_plan_reminder_uses_real_strip_protocol_and_preserves_scenario_round(revision):
+    # Use states produced by the actual fixture transition inputs. The real
+    # consumer must not mistake a restoration reminder for a new user prompt.
+    states = {}
+    document, receipts = plan.empty_plan(), []
+    for name in ("plan", "plan-update", "plan-complete"):
+        for step in fixture(name)["steps"]:
+            for call in step.get("tool_calls", []):
+                if call["name"] == "Plan" and call["input"]["action"] == "update":
+                    document, receipts, _result, _changed = plan.apply_update(document, receipts, call["input"])
+                    states[document["revision"]] = document
+    reminder = plan.render_reminder(states[revision])
+    assert reminder.startswith("<system-reminder>\n")
+    assert reminder.endswith("\n</system-reminder>")
+    assert visible(reminder) == ""
+    prompt = "[script:plan-complete] Continue the controlled lifecycle."
+    for completed_calls in (1, 2):
+        entries = [("user", prompt), *[("call", "Plan update")] * completed_calls, ("user", reminder)]
+        assert prompt_and_round(entries) == (prompt, completed_calls)
 
 
 async def test_complete_fixture_cannot_skip_required_update(active_plan):

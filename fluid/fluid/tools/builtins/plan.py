@@ -239,7 +239,7 @@ def render_reminder(document: dict) -> str | None:
         if len("\n".join([*lines, line, footer])) > 2400:
             break
         lines.append(line)
-    return "<system•reminder>\n" + "\n".join([*lines, footer]) + "\n</system•reminder>"
+    return "<system-reminder>\n" + "\n".join([*lines, footer]) + "\n</system-reminder>"
 
 
 def reminder(ctx: ToolCtx) -> str | None:
