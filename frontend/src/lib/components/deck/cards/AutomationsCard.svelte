@@ -66,11 +66,11 @@
 		Check,
 		CalendarClock
 	} from 'lucide-svelte';
-	
+
 
 	// Sub-components
 	import Banner from '$lib/components/Banner.svelte';
-	
+
 	import AutomationsStudio from './automations/AutomationsStudio.svelte';
 	import AutomationForm from './automations/AutomationForm.svelte';
 	import AutomationDetail from './automations/AutomationDetail.svelte';

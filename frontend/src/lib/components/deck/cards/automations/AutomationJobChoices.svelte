@@ -351,7 +351,6 @@
 				<div class="ajc-head">
 					<span class="ajc-glyph" aria-hidden="true"><Icon /></span>
 					<div class="ajc-heading">
-						
 						<ol class="ajc-ladder" aria-label="Which choice {plural} runs use">
 							{#each LADDER as rung (rung.tier)}
 								<li
@@ -505,7 +504,6 @@
 								<AutomationGenerationPicker
 									{kind}
 									options={options[kind] ?? []}
-									
 									pickLabel="Pin to this job"
 									onpick={(choice) => pick(kind, choice)}
 								/>
