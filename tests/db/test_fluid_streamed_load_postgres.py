@@ -11,9 +11,9 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 import pytest
 
-from tests.db.postgres_harness import pg_schema
+from tests.db.postgres_harness import pg_schema, requires_real_pg  # noqa: F401 (autouse)
 
-pytestmark = pytest.mark.usefixtures("pg_schema")
+pytestmark = requires_real_pg
 
 
 async def _transcript():
@@ -92,8 +92,16 @@ async def test_slow_decode_survives_idle_budget_and_keeps_pool_available(monkeyp
     cold, session_id = await _transcript()
     original = module.Message.from_dict
     entered = Event()
+    batch_clock = {}
 
     def slow_decode(raw):
+        now = time.monotonic()
+        text = raw["content"][0]["text"]
+        if text == "node-00":
+            batch_clock["start"] = now
+        elif text == "node-32":
+            # Includes the next FETCH: an upper bound on the first batch's work.
+            batch_clock["elapsed"] = now - batch_clock["start"]
         entered.set()
         time.sleep(0.08)  # Longer than idle budget; not an SQL execution.
         return original(raw)
@@ -123,6 +131,7 @@ async def test_slow_decode_survives_idle_budget_and_keeps_pool_available(monkeyp
         print(f"concurrent query during slow decode: {(time.monotonic() - started) * 1000:.1f} ms")
     finally:
         assert await loading
+    print(f"slow 32-row batch plus next FETCH: {batch_clock['elapsed']:.3f} s")
     assert len(cold._nodes[session_id]) == 33
     assert cold._sessions[session_id].head_node_id == "node-32"
     assert [n.message.text() for n in await cold.load_path(session_id)] == [f"node-{i:02d}" for i in range(33)]
@@ -184,3 +193,37 @@ async def test_fetch_still_has_statement_deadline_and_can_retry(monkeypatch, sho
     assert await cold.get_session(session_id)
     assert len(cold._nodes[session_id]) == 33
     assert short_idle_budget
+
+
+@pytest.mark.asyncio
+async def test_stalled_decode_expires_without_publishing_and_retries(monkeypatch, short_idle_budget):
+    from app.core.provider import fluid_pg_store as module
+    from app.db import base
+
+    cold, session_id = await _transcript()
+    guard = module.transcript_decode_timeouts
+    original = module.Message.from_dict
+
+    def short_guard(cur):
+        guard(cur)
+        cur.execute("SHOW idle_in_transaction_session_timeout")
+        assert cur.fetchone()["idle_in_transaction_session_timeout"] == "5min"
+        # Exercise the finite production setting at a subsecond test timescale.
+        cur.execute("SET LOCAL idle_in_transaction_session_timeout = '120ms'")
+
+    def stalled(raw):
+        if raw["content"][0]["text"] == "node-16":
+            time.sleep(0.3)
+        return original(raw)
+
+    monkeypatch.setattr(module, "transcript_decode_timeouts", short_guard)
+    monkeypatch.setattr(module.Message, "from_dict", stalled)
+    with pytest.raises((psycopg2.OperationalError, psycopg2.InterfaceError)):
+        await cold.get_session(session_id)
+    _empty_cache(cold, session_id)
+    assert not base._pg_pool._used
+    monkeypatch.setattr(module.Message, "from_dict", original)
+    assert await cold.get_session(session_id)
+    assert len(cold._nodes[session_id]) == 33
+    assert short_idle_budget
+    assert not base._pg_pool._used
