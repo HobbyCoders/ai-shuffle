@@ -2855,7 +2855,7 @@ def _run_column_migrations(cursor: Any) -> None:
     if not column_exists(cursor, "background_tasks", "turn_order_incarnation"):
         cursor.execute("ALTER TABLE background_tasks ADD COLUMN turn_order_incarnation TIMESTAMP WITH TIME ZONE")
         migrations_applied.append("background_tasks_turn_order_incarnation")
-    for column, definition in (("turn_order_write_nonce", "TEXT"),
+    for column, definition in (("remote_stop_scope", "JSONB"), ("turn_order_write_nonce", "TEXT"),
                                ("turn_order_invalid_through", "BIGINT NOT NULL DEFAULT -1")):
         if not column_exists(cursor, "background_tasks", column):
             cursor.execute(f"ALTER TABLE background_tasks ADD COLUMN {column} {definition}")

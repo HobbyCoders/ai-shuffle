@@ -1292,7 +1292,7 @@ def interrupt_turn(
     mode: str,
     stop_background: bool = False,
     turn_id: Optional[str] = None,
-    *, source: Optional[str] = None, _conn: Any = None,
+    *, source: Optional[str] = None, _conn: Any = None, stop_receipt: Optional[dict] = None,
 ) -> Optional[Dict[str, Any]]:
     """Transition a session's ``running`` turn to ``interrupting``.
 
@@ -1308,7 +1308,13 @@ def interrupt_turn(
     """
     with (nullcontext(_conn) if _conn is not None else get_db()) as conn:
         cursor = conn.cursor()
-        if turn_id is not None:
+        if stop_receipt is not None:
+            cursor.execute(
+                "UPDATE turns SET state='interrupting', interrupt_mode=%s, stop_background=%s "
+                "WHERE session_id=%s AND state='running' AND id=%s "
+                "AND COALESCE(CAST(payload ->> 'accepted_input_order' AS BIGINT),insert_order)<=%s RETURNING *",
+                (mode, bool(stop_background), session_id, turn_id, stop_receipt["input_cutoff"]))
+        elif turn_id is not None:
             cursor.execute(
                 "UPDATE turns SET state='interrupting', interrupt_mode=%s, "
                 "stop_background=%s "
@@ -1335,7 +1341,8 @@ def interrupt_turn(
             if source:
                 result["payload"]["interrupt_source"] = source
             if receipt:
-                result["payload"][STOP_RECEIPT_KEY] = _stop_receipt(cursor, session_id)
+                result["payload"][STOP_RECEIPT_KEY] = (stop_receipt if stop_receipt is not None
+                                                       else _stop_receipt(cursor, session_id))
             cursor.execute("UPDATE turns SET payload=%s WHERE id=%s",
                            (json.dumps(result["payload"]), result["id"]))
             return result

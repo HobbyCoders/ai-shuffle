@@ -77,7 +77,7 @@ _TARGET_DDL = """CREATE TABLE IF NOT EXISTS remote_task_children (
     stop_requested_at TEXT)"""
 
 #: Columns added after the table first shipped (S8).
-_TARGET_ADDED = ("stop_requested_at",)
+_TARGET_ADDED = ("stop_requested_at", "scope_generation", "scope_epoch", "scope_input_order")
 
 RUNNING = "running"
 OWED = "owed"
@@ -89,6 +89,8 @@ REFUSED = "refused"
 STOP_PENDING = "pending"
 STOP_SENT = "sent"
 STOP_REFUSED = "refused"
+STOP_INCOMPLETE = "incomplete"
+STOP_INCOMPLETE_NOTICE = "pending_incomplete"
 
 
 def init_schema(conn=None) -> None:
@@ -290,8 +292,8 @@ def pending_stops() -> List[Dict[str, Any]]:
         init_schema(conn)
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT * FROM remote_tasks WHERE stop_state=%s AND completion_id IS NULL "
-            "ORDER BY stop_requested_at", (STOP_PENDING,))
+            "SELECT * FROM remote_tasks WHERE stop_state IN (%s,%s) AND completion_id IS NULL "
+            "ORDER BY stop_requested_at", (STOP_PENDING, STOP_INCOMPLETE_NOTICE))
         return [_row(row) for row in cursor.fetchall()]
 
 
@@ -307,6 +309,27 @@ def settle_stop(worker_session_ids: List[str], state: str, *, error: Optional[st
                 (state, error[:500] if error else None, worker_session_id, STOP_PENDING))
 
 
+def defer_unscoped_user_stop(worker_id: str, detail: str, *, noted: bool = False) -> None:
+    """Pre-upgrade user Stops lack a boundary; never replay their stable-id RPC.
+
+    Keep the notice pending until a durable transcript note was actually written.
+    This is not STOP_SENT and must never be displayed as an ended remote task.
+    """
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE remote_tasks SET stop_state=%s,stop_error=%s "
+            "WHERE worker_session_id=%s AND stop_state IN (%s,%s)",
+            (STOP_INCOMPLETE if noted else STOP_INCOMPLETE_NOTICE, detail[:500], worker_id,
+             STOP_PENDING, STOP_INCOMPLETE_NOTICE))
+
+
+def record_scoped_stop(worker_id: str, reason: str) -> None:
+    """Positive receiver enforcement: atomically settle WITHOUT a legacy retry."""
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE remote_tasks SET stop_requested_at=COALESCE(stop_requested_at,%s), "
+            "stop_reason=%s,stop_state=%s,stop_error=NULL WHERE worker_session_id=%s",
+            (utc_now_iso(), reason[:200], STOP_SENT, worker_id))
+
+
 def note_stop_failed(worker_session_ids: List[str], error: str) -> None:
     """The target could not be reached: the stops stay pending, with why."""
     with get_db() as conn:
@@ -320,14 +343,16 @@ def note_stop_failed(worker_session_ids: List[str], error: str) -> None:
 
 # --- target side -------------------------------------------------------------
 
-def record_child(worker_session_id: str, parent_device_id: str, *, conn) -> None:
+def record_child(worker_session_id: str, parent_device_id: str, *, conn, input_order: Optional[int] = None) -> None:
     """Called inside the transaction that creates the child."""
     init_schema(conn)
     now = utc_now_iso()
     conn.cursor().execute(
         "INSERT INTO remote_task_children (worker_session_id, parent_device_id, state, created_at, "
-        "updated_at) VALUES (%s, %s, %s, %s, %s) ON CONFLICT (worker_session_id) DO NOTHING",
-        (worker_session_id, parent_device_id, RUNNING, now, now))
+        "updated_at, scope_generation, scope_epoch, scope_input_order) "
+        "VALUES (%s, %s, %s, %s, %s, %s, '1', %s) ON CONFLICT (worker_session_id) DO NOTHING",
+        (worker_session_id, parent_device_id, RUNNING, now, now,
+         worker_session_id if input_order is not None else None, str(input_order) if input_order is not None else None))
 
 
 def get_child(worker_session_id: str) -> Optional[Dict[str, Any]]:
@@ -516,6 +541,37 @@ def message_answer(message_id: str) -> Optional[Dict[str, Any]]:
     return data
 
 
+def reserve_message_scope(message_id: str, worker_id: str, from_device: str) -> dict:
+    """Fence a new remote instruction BEFORE delivery, without replaying old intent.
+
+    A pending intent survives restart. Its retry may continue only while it is
+    still the child's current generation; a newer instruction cannot be replaced
+    by retrying that old id. Final delivery replaces this pending answer.
+    """
+    with get_db() as conn:
+        _init_messaging(conn)
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO remote_task_messages "
+                       "(message_id,worker_session_id,from_device_id,direction,answer,created_at) "
+                       "VALUES (%s,%s,%s,'child',%s,%s) ON CONFLICT(message_id) DO NOTHING RETURNING message_id",
+                       (message_id, worker_id, from_device, json.dumps({"_scope_pending": True}), utc_now_iso()))
+        fresh = cursor.fetchone() is not None
+        if fresh:
+            cursor.execute("UPDATE remote_task_children SET scope_generation=%s, "
+                           "scope_epoch=CAST(COALESCE(CAST(scope_epoch AS BIGINT),0)+1 AS TEXT), "
+                           "scope_input_order=CAST((SELECT COALESCE(MAX(insert_order),0) FROM turns WHERE session_id=%s) AS TEXT) "
+                           "WHERE worker_session_id=%s AND parent_device_id=%s AND stop_requested_at IS NULL "
+                           "RETURNING scope_generation,scope_epoch", (message_id, worker_id, worker_id, from_device))
+        else:
+            cursor.execute("SELECT scope_generation,scope_epoch FROM remote_task_children "
+                           "WHERE worker_session_id=%s AND parent_device_id=%s AND scope_generation=%s "
+                           "AND stop_requested_at IS NULL", (worker_id, from_device, message_id))
+        row = cursor.fetchone()
+        if not row:
+            raise ValueError("The child was stopped or this pending instruction was superseded; it was not delivered.")
+        return {"generation": row["scope_generation"], "epoch": int(row["scope_epoch"])}
+
+
 def record_message(message_id: str, *, worker_session_id: str, from_device_id: str,
                    direction: str, answer: Dict[str, Any],
                    resume_turn_id: Optional[str] = None) -> bool:
@@ -526,7 +582,11 @@ def record_message(message_id: str, *, worker_session_id: str, from_device_id: s
         cursor.execute(
             "INSERT INTO remote_task_messages (message_id, worker_session_id, from_device_id, "
             "direction, answer, resume_turn_id, created_at) VALUES (%s, %s, %s, %s, %s, %s, %s) "
-            "ON CONFLICT (message_id) DO NOTHING RETURNING message_id",
+            "ON CONFLICT (message_id) DO UPDATE SET answer=EXCLUDED.answer, resume_turn_id=EXCLUDED.resume_turn_id "
+            "WHERE CAST(remote_task_messages.answer AS JSONB) ->> '_scope_pending' IS NOT NULL "
+            "AND remote_task_messages.worker_session_id=EXCLUDED.worker_session_id "
+            "AND remote_task_messages.from_device_id=EXCLUDED.from_device_id "
+            "AND remote_task_messages.direction=EXCLUDED.direction RETURNING message_id",
             (message_id, worker_session_id, from_device_id, direction, json.dumps(answer),
              resume_turn_id, utc_now_iso()))
         return cursor.fetchone() is not None

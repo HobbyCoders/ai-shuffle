@@ -1294,10 +1294,17 @@ async def test_no_clock_decides_what_a_late_stop_ends(real_worker, skew_seconds)
                                                  "remote_device_id": "other-install", "started_at": skewed})
         task_registry.hydrate_rows(SID, [background_tasks.get_background_task(task_id, SID)])
 
+    from app.core.query_session_lifecycle import capture_stop_scope
+    # Clock skew must not change which admission the captured scope names.
+    assert [t["id"] for t in capture_stop_scope(SID, before_turn=NEXT_TURN).active] == ["worker-a"]
     await _late_stop_reaches_the_old_runtime()
 
-    assert real_worker.torn_down is True
+    # A known old admission is not proof that an old/unknown owner enforces
+    # the boundary. Compatibility now reports it incomplete rather than acting.
+    assert real_worker.torn_down is False
     assert next_turns_worker.torn_down is False
+    from app.db import session_events
+    assert any("STILL BE RUNNING" in str(e) for e in session_events.get_events(SID))
 
 
 def test_a_task_keeps_its_turn_when_it_comes_back_from_the_database():

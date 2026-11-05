@@ -1114,6 +1114,7 @@ def create_postgres_schema(cursor: Any) -> None:
             turn_order_upper_bound BIGINT,
             turn_order_incarnation TIMESTAMP WITH TIME ZONE,
             turn_order_write_nonce TEXT,
+            remote_stop_scope JSONB,
             turn_order_invalid_through BIGINT NOT NULL DEFAULT -1,
             PRIMARY KEY (task_id, session_id)
         )

@@ -9,23 +9,28 @@ from tests.core.test_event_write_lock_timeout import (
 )
 
 
-def _restore_legacy(bound):
+def _restore_legacy(bound, *, remote=True):
     from app.core.task_registry import task_registry
 
     row = task_registry._tasks[SID].pop("worker-a")
-    row.update(remote_device_id="other-install", turn_order=None,
+    row.update(remote_device_id="other-install" if remote else None, turn_order=None,
                turn_order_upper_bound=bound, turn_order_incarnation=row.get("started_at"))
     task_registry.hydrate_rows(SID, [row])
 
 
-async def test_late_stop_reaches_legacy_task_with_upgrade_bound(real_worker):
+async def test_late_stop_defers_unknown_remote_owner_even_with_upgrade_bound(real_worker):
     from app.core.task_registry import task_registry
 
     _restore_legacy(NEXT_TURN - 1)
     newer = _second_worker()
     signal = await _late_stop_reaches_the_old_runtime()
-    assert real_worker.torn_down is True
-    assert task_registry.get_task(SID, "worker-a")["status"] == "killed"
+    # A legacy upper bound is not affirmative receiver enforcement. The new
+    # compatibility policy must leave this owner alone and say it is incomplete.
+    assert real_worker.torn_down is False
+    assert task_registry.get_task(SID, "worker-a")["status"] == "running"
+    from app.db import session_events
+    assert any("STILL BE RUNNING" in str(e) and "other-install" in str(e)
+               for e in session_events.get_events(SID))
     assert newer.torn_down is False
     signal.assert_not_awaited()
 

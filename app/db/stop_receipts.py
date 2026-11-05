@@ -43,7 +43,7 @@ def publish(cursor: Any, session_id: str, receipt: dict) -> list[str]:
         return []
     cursor.execute("SELECT task_id, session_id, kind, tool_use_id, status, started_at, "
                    "remote_device_id, assignment_owner, turn_order, turn_order_upper_bound, "
-                   "turn_order_incarnation FROM background_tasks "
+                   "turn_order_incarnation, remote_stop_scope FROM background_tasks "
                    "WHERE session_id=%s AND status='running'", (session_id,))
     tasks = [{k: v.isoformat() if isinstance(v, datetime) else v for k, v in dict(row).items()}
              for row in cursor.fetchall()]

@@ -609,6 +609,7 @@ async def teardown_worker(
     reason: str,
     summary: str,
     preview: str,
+    remote_confirmed: bool = False,
 ) -> Dict[str, Any]:
     """Kill ONE live worker, end to end. Never raises.
 
@@ -688,7 +689,7 @@ async def teardown_worker(
     unregister_worker(parent_session_id, record.worker_session_id)
 
     detail = None
-    if record.remote_device_id:
+    if record.remote_device_id and not remote_confirmed:
         # AFTER the record settled here: a report the stop provokes then finds
         # it stopped and wakes nobody.
         stopped = await _stop_remote_worker(record, reason=reason, summary=summary)
