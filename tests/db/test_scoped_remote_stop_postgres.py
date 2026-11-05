@@ -559,3 +559,117 @@ async def test_live_delivery_or_definite_fallback_refusal_keeps_truthful_scope(
         assert await remote_task.handle_task_message(body, "parent") == {**answer, "duplicate": True}
     engine.submit.assert_awaited_once()
     assert turns.get_queued_turns(session_id) == []
+
+
+@pytest.mark.parametrize("report_boundary", [1, 2])
+async def test_stop_during_checkout_refusal_reporting_cannot_publish_error(
+        message_child, session_id, monkeypatch, report_boundary):
+    from app.core import limit_resume, query_session_lifecycle, turn_scheduler, worker_checkout
+    from app.core.task_registry import task_registry
+    from app.core.task_persistence import flush
+    from app.db import background_tasks, turns, wakeups
+
+    _, _, owner = message_child
+    task_registry.start_task(owner, session_id, "agent", "waiting worker")
+    wake = wakeups.create_wakeup(id=session_id + "-report-wake", session_id=session_id,
+        prompt="automatic resume", fire_at=0, source=limit_resume.LIMIT_RESUME_SOURCE)
+    assert wakeups.claim_wakeup(wake["id"])
+    monkeypatch.setattr(worker_checkout, "restore_worker_checkout_async",
+        AsyncMock(return_value=(False, "assigned checkout branch mismatch")))
+    entered, release = asyncio.Event(), asyncio.Event()
+    actual_record, calls = limit_resume._record, []
+    async def report(sid, status, data):
+        calls.append((sid, status, dict(data)))
+        if len(calls) == report_boundary:
+            entered.set()
+            await release.wait()  # controlled logging I/O; actual _record still writes below
+        await actual_record(sid, status, data)
+    monkeypatch.setattr(limit_resume, "_record", report)
+    terminal = AsyncMock()
+    monkeypatch.setattr(turn_scheduler, "on_task_terminal", terminal)
+    firing = asyncio.create_task(limit_resume._resume_worker(session_id, owner,
+        {"limit_key": "reporting-limit"}, wake_stop_seq=wake["stop_seq"]))
+    try:
+        await asyncio.wait_for(entered.wait(), 3)
+        await query_session_lifecycle.enter_user_stop(session_id)
+        await query_session_lifecycle._settle_stopped_task(owner, session_id)
+        await flush()
+        assert task_registry.get_task(owner, session_id)["status"] == "killed"
+        assert background_tasks.get_background_task(session_id, owner)["status"] == "killed"
+        assert turns.wake_cancelled_by_stop({"session_id": session_id,
+            "payload": {"wake_stop_seq": wake["stop_seq"]}})
+        release.set()
+        assert await asyncio.wait_for(firing, 3) is None
+        await flush()
+        assert (task_registry.get_task(owner, session_id)["status"],
+                background_tasks.get_background_task(session_id, owner)["status"]) == ("killed", "killed")
+        terminal.assert_not_awaited()
+        assert turns.get_queued_turns(session_id) == []
+        assert all(status == "dropped" for _, status, _ in calls)
+        assert [(sid, data["reason"]) for sid, _, data in calls[-2:]] == [
+            (session_id, "user_stopped"), (owner, "user_stopped")]
+        from app.db import base
+        for sid in (session_id, owner):
+            with base.get_db() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT payload FROM session_events WHERE session_id=%s "
+                    "AND event_type='system.note' AND payload ->> 'subtype'=%s ORDER BY seq DESC LIMIT 1",
+                    (sid, limit_resume.SYSTEM_SUBTYPE))
+                note = cursor.fetchone()["payload"]["data"]
+            assert note["status"] == "dropped" and note["reason"] == "user_stopped"
+    finally:
+        release.set()
+        await asyncio.gather(firing, return_exceptions=True)
+
+
+async def test_stale_wake_stop_read_cannot_commit_after_stop_and_new_input(
+        message_child, session_id, monkeypatch):
+    from app.core import limit_resume, query_session_lifecycle, turn_manager, turn_scheduler, worker_checkout
+    from app.core.task_registry import task_registry
+    from app.core.task_persistence import flush
+    from app.db import background_tasks, turns, wakeups
+
+    _, _, owner = message_child
+    task_registry.start_task(owner, session_id, "agent", "waiting worker")
+    wake = wakeups.create_wakeup(id=session_id + "-stale-read-wake", session_id=session_id,
+        prompt="automatic resume", fire_at=0, source=limit_resume.LIMIT_RESUME_SOURCE)
+    assert wakeups.claim_wakeup(wake["id"])
+    monkeypatch.setattr(worker_checkout, "restore_worker_checkout_async",
+        AsyncMock(return_value=(False, "assigned checkout branch mismatch")))
+    snapshot, release = threading.Event(), threading.Event()
+    actual_read, reads = turns.wake_cancelled_by_stop, []
+    def delayed_read(turn):
+        result = actual_read(turn)  # actual PostgreSQL snapshot, captured BEFORE Stop
+        reads.append(result)
+        snapshot.set()
+        assert release.wait(5)
+        return result
+    monkeypatch.setattr(turns, "wake_cancelled_by_stop", delayed_read)
+    terminal = AsyncMock()
+    monkeypatch.setattr(turn_scheduler, "on_task_terminal", terminal)
+    firing = asyncio.create_task(limit_resume._resume_worker(session_id, owner,
+        {"limit_key": "stale-read-limit"}, wake_stop_seq=wake["stop_seq"]))
+    try:
+        assert await asyncio.to_thread(snapshot.wait, 3)
+        assert reads == [False]
+        await query_session_lifecycle.enter_user_stop(session_id)
+        await query_session_lifecycle._settle_stopped_task(owner, session_id)
+        await flush()
+        assert background_tasks.get_background_task(session_id, owner)["status"] == "killed"
+        assert actual_read({"session_id": session_id, "payload": {"wake_stop_seq": wake["stop_seq"]}})
+        # A genuine user input clears the latch, but must not revalidate this
+        # already-cancelled automatic operation or lose its own queued input.
+        new_input = await asyncio.to_thread(turn_manager.submit, session_id, "user",
+            prompt="new human instruction", profile_id="default", no_kick=True)
+        assert not task_registry.is_user_stopped(session_id)
+        release.set()
+        assert await asyncio.wait_for(firing, 3) is None
+        await flush()
+        assert (task_registry.get_task(owner, session_id)["status"],
+                background_tasks.get_background_task(session_id, owner)["status"]) == ("killed", "killed")
+        terminal.assert_not_awaited()
+        assert [turn["id"] for turn in turns.get_queued_turns(session_id)] == [new_input]
+        assert reads == [False]  # no repeated async read substituted for the commit fence
+    finally:
+        release.set()
+        await asyncio.gather(firing, return_exceptions=True)
