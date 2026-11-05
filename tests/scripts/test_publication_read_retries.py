@@ -43,8 +43,23 @@ def command_error(status):
     )
 
 
+CLI_TIMEOUTS = [
+    'Get "https://api.github.com/": net/http: TLS handshake timeout',
+    'Get "https://api.github.com/": dial tcp 192.0.2.1:443: i/o timeout',
+    'Get "https://api.github.com/": read tcp 192.0.2.2:1234->192.0.2.1:443: i/o timeout',
+    'Get "https://api.github.com/": net/http: timeout awaiting response headers',
+    'Get "https://api.github.com/": context deadline exceeded (Client.Timeout exceeded while awaiting headers)',
+    'Get "https://api.github.com/": net/http: request canceled (Client.Timeout exceeded while awaiting headers)',
+]
+
+
+def cli_timeout(diagnostic):
+    return subprocess.CalledProcessError(1, ["gh", "api"], stderr=diagnostic + "\n")
+
+
 @pytest.mark.parametrize("error", [command_error(500), command_error(502), command_error(503), command_error(599),
-                                 subprocess.TimeoutExpired(["gh", "api"], 20)])
+                                 subprocess.TimeoutExpired(["gh", "api"], 20),
+                                 *map(cli_timeout, CLI_TIMEOUTS)])
 def test_github_temporary_failure_then_success(monkeypatch, waits, error, capsys):
     run = Mock(side_effect=[error, '{"jobs": []}'])
     monkeypatch.setattr(subprocess, "check_output", run)
@@ -73,6 +88,23 @@ def test_github_permanent_failure_is_one_call(monkeypatch, waits, status, capsys
     assert capsys.readouterr().err == error.stderr
 
 
+@pytest.mark.parametrize("diagnostic", [
+    "not logged in",
+    'Get "https://api.github.com/": tls: failed to verify certificate: x509: certificate expired',
+    'Get "https://api.github.com/": dial tcp 192.0.2.1:443: connect: connection refused',
+    'Get "https://api.github.com/": read tcp 192.0.2.1:443: connection reset by peer',
+    'gh: Forbidden (HTTP 403)\nGet "https://api.github.com/": net/http: TLS handshake timeout',
+])
+def test_cli_non_timeout_transport_and_auth_failures_stay_permanent(monkeypatch, waits, diagnostic):
+    error = cli_timeout(diagnostic)
+    run = Mock(side_effect=error)
+    monkeypatch.setattr(subprocess, "check_output", run)
+    with pytest.raises(subprocess.CalledProcessError) as caught:
+        gate.GitHub()(JOBS)
+    assert caught.value is error
+    assert run.call_count == 1 and waits == []
+
+
 def test_third_attempt_can_succeed_and_success_never_sleeps(monkeypatch, waits):
     run = Mock(side_effect=[command_error(502), command_error(503), "{}", "{}"])
     monkeypatch.setattr(subprocess, "check_output", run)
@@ -92,7 +124,8 @@ def test_unknown_cli_failure_and_invalid_json_are_not_retried(monkeypatch, waits
     assert waits == []
 
 
-@pytest.mark.parametrize("error", [command_error(503), subprocess.TimeoutExpired(["gh", "api"], 20)])
+@pytest.mark.parametrize("error", [command_error(503), subprocess.TimeoutExpired(["gh", "api"], 20),
+                                 *map(cli_timeout, CLI_TIMEOUTS)])
 def test_exhausted_jobs_read_never_writes_publication_permission(monkeypatch, tmp_path, waits, error):
     event, output = tmp_path / "event.json", tmp_path / "output"
     event.write_text('{"schedule": "0 6 * * *"}')

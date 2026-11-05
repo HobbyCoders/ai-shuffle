@@ -20,10 +20,24 @@ def retry_read(read, temporary):
 def temporary_command_error(error):
     if isinstance(error, subprocess.TimeoutExpired):
         return True
+    if not isinstance(error, subprocess.CalledProcessError):
+        return False
     # gh uses exit code 1 for both 4xx and 5xx. Its HTTP diagnostic is on
     # stderr ("gh: Server Error (HTTP 502)"), not the JSON response body.
-    return (isinstance(error, subprocess.CalledProcessError)
-            and re.search(r"^gh: .+ \(HTTP 5[0-9]{2}\)\r?$", error.stderr or "", re.MULTILINE) is not None)
+    diagnostic = error.stderr or ""
+    status = re.search(r"^gh: .+ \(HTTP ([0-9]{3})\)\r?$", diagnostic, re.MULTILINE)
+    if status:
+        return 500 <= int(status[1]) < 600
+    # Go's transport can time out before the subprocess deadline. Match only
+    # timeout diagnostics from our GET, not auth/certificate errors or arbitrary
+    # mentions of timeouts. Connection reset/refused are deliberately not added.
+    return re.search(
+        r'^Get "https://[^"\r\n]+": (?:net/http: TLS handshake timeout|'
+        r'net/http: timeout awaiting response headers|[^\r\n]+: i/o timeout|'
+        r'context deadline exceeded(?: \(Client.Timeout exceeded while awaiting headers\))?|'
+        r'net/http: request canceled \(Client.Timeout exceeded while awaiting headers\))\r?$',
+        diagnostic, re.MULTILINE,
+    ) is not None
 
 
 def temporary_url_error(error):
