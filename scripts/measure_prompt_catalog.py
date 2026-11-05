@@ -87,6 +87,16 @@ def compile_fixture(*, native=True):
         adapter._options = options
         registry = asyncio.run(adapter._build_registry(options, native=native))
         specs = registry.list_tools(loaded_only=False)
+        # This is the full owner surface, not a cheaper stateless fixture.
+        # Keep Plan present exactly once and lazy on both harness legs.
+        assert sum(spec.name == "Plan" for spec in specs) == 1
+        if native:
+            assert "Plan" in {spec.name for spec in registry.deferred_tools()}
+        else:
+            # The CLI bridge, not this in-process registry, owns lazy schemas.
+            from app.core.provider.fluid_tool_bridge import delegated_bridge_deferred
+            deferred = delegated_bridge_deferred()
+            assert deferred is not None and deferred("Plan")
         projection = Projection(specs, deferred=[s.name for s in registry.deferred_tools()])
         codemode = SimpleNamespace(_projection=lambda: projection)
         base = "\n\n".join(("You are a coding assistant.", DEFAULT_SECURITY_INSTRUCTIONS,
