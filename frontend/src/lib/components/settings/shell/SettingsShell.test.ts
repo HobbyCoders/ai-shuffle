@@ -41,6 +41,13 @@ import PanelHost from '../../layout/view/test-fixtures/PanelHost.svelte';
 const admin = isAdmin as unknown as { set: (v: boolean) => void };
 
 beforeEach(() => {
+	vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} });
+	// Shared phone chrome observes the actual viewport breakpoint. jsdom omits this API.
+	vi.stubGlobal('matchMedia', vi.fn((media: string) => ({
+		media, matches: window.innerWidth <= 600, onchange: null,
+		addEventListener: vi.fn(), removeEventListener: vi.fn(),
+		addListener: vi.fn(), removeListener: vi.fn(), dispatchEvent: vi.fn()
+	})));
 	settingsNav.reset();
 	sessionStorage.clear();
 	mocks.pushState.mockReset();
@@ -54,6 +61,7 @@ afterEach(() => {
 	cleanup();
 	platform.set('desktop');
 	vi.restoreAllMocks();
+	vi.unstubAllGlobals();
 });
 
 function nav() {
@@ -374,7 +382,7 @@ describe('SettingsShell stacked mode', () => {
 		platform.set('mobile');
 		const view = render(SettingsShell);
 		await tick();
-		page.state = { viewPanelDetail: 'automations' };
+		page.state = { viewPanelDetail: 'automations' } as App.PageState;
 		await tick();
 		const target = encodeTarget({ category: 'providers', item: 'provider:claude', anchor: 'providers.claudeMode' });
 		await view.rerender({ initialItemId: target });
@@ -401,7 +409,7 @@ describe('SettingsShell stacked mode', () => {
 
 	it('builds both Back steps for a cold phone-width deep link after the shell measures', async () => {
 		const originalWidth = window.innerWidth;
-		onTestFinished(() => Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalWidth }));
+		onTestFinished(() => { Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalWidth }); });
 		Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 });
 		render(SettingsShell, {
 			initialItemId: encodeTarget({ category: 'providers', item: 'provider:claude', anchor: 'providers.claudeMode' })
