@@ -448,6 +448,8 @@ cases.push({
 				const pane = document.querySelector('.msg-scroll');
 				const view = document.querySelector('[data-ui-state="chat"]');
 				const p = window.__errorRebaseProbe = { started: performance.now(), frames: [], shifts: [], tracked: null, errorAt: null, running: true };
+				const ids = new WeakMap(); let nextId = 1;
+				const id = node => { if (!node) return null; if (!ids.has(node)) ids.set(node, nextId++); return ids.get(node); };
 				const sample = reason => {
 					if (!p.tracked) {
 						const row = [...pane.querySelectorAll('[data-user-turn-id]')].find(row => row.textContent.includes(token));
@@ -463,7 +465,7 @@ cases.push({
 					const t = performance.now() - p.started, tracked = p.tracked;
 					const f = { t, reason, top: pane.scrollTop, height: pane.scrollHeight, viewport: pane.getBoundingClientRect().toJSON(),
 						firstIndex: Number(pane.querySelector('[data-transcript-index]')?.dataset.transcriptIndex ?? -1),
-						user: tracked ? { connected: tracked.node.isConnected && tracked.row.isConnected,
+						user: tracked ? { rowId: id(tracked.row), textId: id(tracked.node), connected: tracked.node.isConnected && tracked.row.isConnected,
 							key: tracked.row.dataset.transcriptKey ?? tracked.row.closest('[data-transcript-key]')?.dataset.transcriptKey,
 							text: tracked.range.toString(), rect: tracked.range.getBoundingClientRect().toJSON(), rowRect: tracked.row.getBoundingClientRect().toJSON() } : null };
 					p.frames.push(f);
@@ -472,7 +474,7 @@ cases.push({
 				};
 				p.observer = new PerformanceObserver(list => {
 					for (const entry of list.getEntries()) p.shifts.push({ t: entry.startTime - p.started, value: entry.value, recent: entry.hadRecentInput,
-						sources: (entry.sources ?? []).map(s => ({ key: s.node?.closest?.('[data-transcript-key]')?.dataset.transcriptKey,
+						sources: (entry.sources ?? []).map(s => ({ nodeId: id(s.node), key: s.node?.closest?.('[data-transcript-key]')?.dataset.transcriptKey,
 							previous: s.previousRect.toJSON(), current: s.currentRect.toJSON() })), frame: sample('native-layout-shift') });
 				});
 				p.observer.observe({ type: 'layout-shift' });
@@ -495,7 +497,8 @@ cases.push({
 			const after = observed.frames.filter(f => f.t >= observed.errorAt);
 			expect(after.length >= 2, 'observe the error through multiple painted frames');
 			for (const f of after) {
-				expect(f.user?.connected && f.user.key === before.user.key && f.user.text === before.user.text, 'retain the same connected current-user text range');
+				expect(f.user?.connected && f.user.rowId === before.user.rowId && f.user.textId === before.user.textId
+					&& f.user.key === before.user.key && f.user.text === before.user.text, 'retain the same connected current-user text range');
 				expect(Math.abs(f.user.rect.top - before.user.rect.top) <= 1, `visible current-user text must not bounce at rebase (${f.user.rect.top} vs ${before.user.rect.top})`);
 			}
 			evicted ||= after.some(f => f.firstIndex > before.firstIndex);
