@@ -198,8 +198,9 @@ so failed CI journeys retain it in `ui-journeys-N` → `attempt-1/journeys/` →
   synchronous removal time and ancestor. `remove`, `removeChild` and
   `replaceChild` are patched only during recording. Other APIs use the
   MutationObserver fallback, explicitly labelled **no synchronous stack**.
-- `state` reads the live ChatView derived values at that call; `observed`
-  reads them again in the observer. The dev-only reader includes
+- `state` exists only for a matched synchronous removal call; `observed`
+  contains the observer-time values, including at remount and on fallback.
+  No synchronous state or stack is claimed on fallback. The dev-only reader includes
   `showEmptyHero`, `isEmptyState`, chat/presented/transcript surfaces, mirror
   waiting, voice-call state, hashed target/transcript sessions and message
   counts. Release builds eliminate its registration and cleanup entirely;
@@ -215,12 +216,18 @@ so failed CI journeys retain it in `ui-journeys-N` → `attempt-1/journeys/` →
 
 These details do not participate in signature reversals or remount detection.
 No assertion, noise guard or allow-list is changed. Synchronous evidence is
-used only for a successful removal matching a unique removed root and parent
-in that observer delivery. Ignored transient mutations expire their evidence;
-ambiguous repeated removals use the explicit observer fallback instead of a
-potentially stale stack or state. Diagnostic faults never block native removal.
-Hooks restore at stop (or remain inert if a page wrapper owns them or a frozen
-prototype prevents restoration); restoration faults do not lose the recording.
+used only for a successful removal matching the final disconnecting mutation's
+unique removed root and parent. That mutation is resolved by rewinding parent
+links through the observer batch without changing the DOM; reinserted transient
+removals and later mutations in a detached subtree cannot misattribute it.
+Ignored mutations expire their evidence. Ambiguous attribution uses the explicit
+observer fallback, with no synchronous stack or state; unknown ancestry also
+sets `ambiguous: true`. Diagnostic faults, including errors whose accessors stop
+the recorder, never block native removal or replace its return value/exception.
+The result is committed before stop cleans up hooks or the rendering probe.
+Hooks restore (or remain inert if a page wrapper owns them or a frozen prototype
+prevents restoration); ownership reads and restoration faults cannot lose the
+recording. Cleanup faults still increment the existing internal-error counter.
 No DOM text, HTML, prompts, titles, raw session IDs or URL queries are added to
 this evidence; all stack locations retain only filenames and line/column
 locations, and unrecognized formats are redacted. Nothing is sent to a console

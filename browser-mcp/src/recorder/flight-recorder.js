@@ -662,12 +662,17 @@
     var value = String(text);
     return value.length > max ? value.slice(0, max - 1) + '…' : value;
   }
-  function note(error) {
-    if (!S) return;
-    S.stats.internalErrors += 1;
-    if (S.firstInternalError) return;
-    try { S.firstInternalError = clip(error && error.message ? error.message : error, 160); }
-    catch (_) { S.firstInternalError = 'unreadable diagnostic error'; }
+  function note(error, target) {
+    var recording = target || S;
+    // Error accessors/coercion can throw, stop, or restart the recorder. Neither
+    // reporting nor its fallback may escape or write through a changed S.
+    try {
+      if (!recording) return;
+      recording.stats.internalErrors += 1;
+      if (recording.firstInternalError) return;
+      try { recording.firstInternalError = clip(error && error.message ? error.message : error, 160); }
+      catch (_) { recording.firstInternalError = 'unreadable diagnostic error'; }
+    } catch (_) { /* diagnostics must never affect the native operation */ }
   }
 
   function push(entry, force) {
@@ -837,12 +842,12 @@
     }
   }
 
-  function removeProbe() {
-    var probe = S && S.probe;
+  function removeProbe(recording) {
+    var probe = recording && recording.probe;
     if (!probe) return;
     try { probe.observer.disconnect(); } catch (error) { /* gone */ }
     try { if (probe.host.parentNode) probe.host.parentNode.removeChild(probe.host); } catch (error) { /* gone */ }
-    S.probe = null;
+    recording.probe = null;
   }
 
   function tick() {
@@ -1021,7 +1026,7 @@
                 source: name, at: elapsed(), removed: diagnosticNode(removed),
                 parent: diagnosticNode(parent), state: diagnosticState(carrier), stack: diagnosticStack() } });
             }
-          } catch (error) { note(error); }
+          } catch (error) { note(error, recording); }
         }
         // A failed/no-op native call must leave no evidence for a later mutation.
         var result = original.apply(this, arguments);
@@ -1029,33 +1034,71 @@
           if (S === recording && S && S.active) captured.forEach(function (evidence) {
             if (evidence.root.parentNode !== evidence.parent) S.removalEvidence.set(evidence.node, evidence);
           });
-        } catch (error) { note(error); }
+        } catch (error) { note(error, recording); }
         return result;
       };
       try { proto[name] = wrapper; hooks.methods.push({ proto: proto, name: name, original: original, wrapper: wrapper }); }
       catch (error) { note(error); }
     });
   }
-  function releaseRemovalHooks() {
+  function releaseRemovalHooks(recording) {
     if (!removalHooks) return;
     removalHooks.active = false;
     // All-or-nothing, like the network hooks: a later page wrapper must not
     // be dropped, and a subsequent start must re-arm every method together.
-    if (!removalHooks.methods.every(function (hook) { return hook.proto[hook.name] === hook.wrapper; })) return;
+    try {
+      if (!removalHooks.methods.every(function (hook) { return hook.proto[hook.name] === hook.wrapper; })) return;
+    } catch (error) { note(error, recording); return; }
     var restored = true;
     removalHooks.methods.forEach(function (hook) {
       try { hook.proto[hook.name] = hook.original; }
-      catch (error) { restored = false; note(error); }
+      catch (error) { restored = false; note(error, recording); }
     });
     // A frozen prototype may retain our now-inert wrapper. Still return the
     // recording, and remember all methods so a later start can re-arm them.
     if (restored) removalHooks = null;
   }
   function tryDiagnostic(read) {
+    var recording = S;
     try { return read(); }
-    catch (error) { note(error); return { unavailable: true }; }
+    catch (error) { note(error, recording); return { unavailable: true }; }
   }
-  function mountDiagnostic(node, removed, parent, uniqueRemoval) {
+  // Rewind only parent links, never the DOM. Current .contains() relationships
+  // cannot attribute a batch: an early removal may have been undone, or a
+  // descendant may have moved again after its ancestor disconnected it.
+  function disconnectingRemoval(node, records) {
+    var parents = new WeakMap();
+    function lineage() {
+      var path = [], current = node;
+      while (current && path.length < 512) {
+        path.push(current);
+        if (current === root.document) return path;
+        current = parents.has(current) ? parents.get(current) : current.parentNode;
+      }
+      return current ? null : path; // excessive/unknown ancestry is ambiguous
+    }
+    var path = lineage();
+    if (!path || path.indexOf(root.document) >= 0) return null;
+    for (var i = records.length - 1; i >= 0; i -= 1) {
+      var record = records[i];
+      if (record.type !== 'childList') continue;
+      var j;
+      for (j = 0; j < record.addedNodes.length; j += 1) parents.set(record.addedNodes[j], null);
+      for (j = 0; j < record.removedNodes.length; j += 1) parents.set(record.removedNodes[j], record.target);
+      path = lineage();
+      if (!path) return null;
+      if (path.indexOf(root.document) < 0) continue;
+      // The first connected pre-mutation state, walking backwards, identifies
+      // the final disconnect. Reinserted transient removals cannot win here.
+      var candidates = [];
+      for (j = 0; j < record.removedNodes.length; j += 1) {
+        if (path.indexOf(record.removedNodes[j]) >= 0) candidates.push(record.removedNodes[j]);
+      }
+      return candidates.length === 1 ? { root: candidates[0], parent: record.target } : null;
+    }
+    return null;
+  }
+  function mountDiagnostic(node, removed, parent, uniqueRemoval, ambiguous) {
     var carrier = (node.closest && node.closest('[data-ui-state="chat"]'))
       || (parent && parent.closest && parent.closest('[data-ui-state="chat"]'));
     var observed = diagnosticState(carrier);
@@ -1065,7 +1108,8 @@
     // attach a transient call's state/stack to the eventual real unmount.
     var matched = evidence && uniqueRemoval && evidence.root === removed && evidence.parent === parent;
     var result = (matched && evidence.detail) || { source: 'MutationObserver (no synchronous stack)',
-      removed: removed ? diagnosticNode(removed) : null, parent: diagnosticNode(parent), state: observed };
+      removed: removed ? diagnosticNode(removed) : null, parent: diagnosticNode(parent) };
+    if (ambiguous) result.ambiguous = true;
     result.node = diagnosticId(node);
     result.observed = observed;
     result.visibility = diagnosticVisibility();
@@ -1078,9 +1122,9 @@
   }
   function onMutations(records) {
     if (!S || !S.active) return;
+    var recording = S;
     try {
       var removed = [];
-      var parents = new WeakMap();
       var removalCounts = new WeakMap();
       var added = [];
       var i;
@@ -1091,7 +1135,7 @@
         for (j = 0; j < record.removedNodes.length; j += 1) {
           if (record.removedNodes[j].nodeType === 1) {
             var removedNode = record.removedNodes[j];
-            removed.push(removedNode); parents.set(removedNode, record.target); S.rowsDirty = true;
+            removed.push(removedNode); S.rowsDirty = true;
             removalCounts.set(removedNode, (removalCounts.get(removedNode) || 0) + 1);
           }
         }
@@ -1110,7 +1154,12 @@
           countMount(name, -1);
           var unmount = { t: t, kind: 'mount', name: name, op: 'unmount' };
           if (name === 'MessageArea') {
-            unmount.diagnostic = tryDiagnostic(function () { return mountDiagnostic(el, removed[i], parents.get(removed[i]), removalCounts.get(removed[i]) === 1); });
+            unmount.diagnostic = tryDiagnostic(function () {
+              var cause = disconnectingRemoval(el, records);
+              return mountDiagnostic(el, cause && cause.root, cause && cause.parent,
+                cause && removalCounts.get(cause.root) === 1, !cause);
+            });
+            if (S !== recording || !recording.active) return;
             S.messageAreaGap = true;
             S.gapSampled = false;
           }
@@ -1129,16 +1178,18 @@
           var mount = { t: t, kind: 'mount', name: label, op: 'mount' };
           if (label === 'MessageArea') {
             mount.diagnostic = tryDiagnostic(function () { return mountDiagnostic(node, null, node.parentNode); });
+            if (S !== recording || !recording.active) return;
             S.messageAreaGap = false;
           }
           push(mount);
         }
       }
     } catch (error) {
-      note(error);
+      note(error, recording);
     } finally {
-      // Expire evidence even for ignored transient mutations or failed reads.
-      S.removalEvidence = new WeakMap();
+      // Expire evidence even for ignored mutations, failed reads or a reader
+      // that stopped/restarted the recorder during this delivery.
+      recording.removalEvidence = new WeakMap();
     }
   }
   function baselineMounts() {
@@ -1438,7 +1489,7 @@
   // originals back and forget the hooks. If the page wrapped any of them after
   // us, unwrapping would drop its wrapper, so ours all stay as inert
   // pass-throughs (active=false) and the next start() simply re-arms them.
-  function releaseHooks() {
+  function releaseHooks(recording) {
     if (!hooks) return;
     hooks.active = false;
     var h = hooks;
@@ -1450,7 +1501,7 @@
       if (h.restoreXhr) h.restoreXhr();
       hooks = null;
     } catch (error) {
-      note(error);
+      note(error, recording);
     }
   }
 
@@ -1615,25 +1666,32 @@
     S.raf = root.requestAnimationFrame(tick);
   }
 
-  function halt(reason) {
-    if (!S || !S.active) return;
-    S.active = false;
-    try { root.cancelAnimationFrame(S.raf); } catch (error) { /* gone */ }
-    removeProbe();
-    try { if (S.observer) { onMutations(S.observer.takeRecords()); S.observer.disconnect(); } } catch (error) { note(error); }
-    try { if (S.shifts) { onShifts({ getEntries: function () { return S.shifts.takeRecords ? S.shifts.takeRecords() : []; } }); S.shifts.disconnect(); } } catch (error) { note(error); }
-    root.removeEventListener('error', onError, true);
-    root.removeEventListener('unhandledrejection', onRejection, true);
-    root.document.removeEventListener('visibilitychange', onVisibility, true);
-    root.removeEventListener('pagehide', onPageHide, true);
-    root.removeEventListener('pageshow', onPageShow, true);
-    releaseHooks();
-    releaseRemovalHooks();
-    // Nothing resumes a halted recording, so a handoff it left (one written on
-    // the way into the back/forward cache, say) must not stay in the app's storage.
-    removeHandoff(S.id);
-    S.endEpoch = now();
-    if (reason !== 'stopped') S.timeline.push({ t: Math.round(S.endEpoch - S.startEpoch), kind: 'note', message: 'recording stopped: ' + reason });
+  function cleanup(recording) {
+    // Ownership reads, restoration and even probe removal can run page code.
+    // Use the captured recording and isolate failures throughout cleanup.
+    try { releaseHooks(recording); } catch (error) { note(error, recording); }
+    try { releaseRemovalHooks(recording); } catch (error) { note(error, recording); }
+    try { root.cancelAnimationFrame(recording.raf); } catch (error) { /* gone */ }
+    try { removeProbe(recording); } catch (error) { note(error, recording); }
+    try { if (recording.observer) { recording.observer.disconnect(); } } catch (error) { note(error, recording); }
+    try { if (recording.shifts) { recording.shifts.disconnect(); } } catch (error) { note(error, recording); }
+    try {
+      root.removeEventListener('error', onError, true);
+      root.removeEventListener('unhandledrejection', onRejection, true);
+      root.document.removeEventListener('visibilitychange', onVisibility, true);
+      root.removeEventListener('pagehide', onPageHide, true);
+      root.removeEventListener('pageshow', onPageShow, true);
+    } catch (error) { note(error, recording); }
+    // Nothing resumes a halted recording, so its handoff must not remain.
+    removeHandoff(recording.id);
+  }
+  function halt(reason, deferCleanup) {
+    var recording = S;
+    if (!recording || !recording.active) return;
+    recording.active = false;
+    recording.endEpoch = now();
+    if (reason !== 'stopped') recording.timeline.push({ t: Math.round(recording.endEpoch - recording.startEpoch), kind: 'note', message: 'recording stopped: ' + reason });
+    if (!deferCleanup) cleanup(recording);
   }
 
   function build() {
@@ -1773,11 +1831,19 @@
   function stop() {
     try {
       if (!S) return lastResult ? lastResult : { ok: false, error: 'not recording' };
-      if (S.active) halt('stopped');
+      var recording = S;
+      if (recording.active) halt('stopped', true);
       var result = build();
       result.ok = true;
       lastResult = result;
       S = null;
+      // Commit the result before any page-owned getter or restoration runs.
+      try {
+        cleanup(recording);
+        // Preserve the existing internal-error guard, including cleanup faults.
+        result.stats.internalErrors = recording.stats.internalErrors;
+        if (recording.firstInternalError) result.stats.firstInternalError = recording.firstInternalError;
+      } catch (error) { note(error, recording); }
       return result;
     } catch (error) {
       S = null;
