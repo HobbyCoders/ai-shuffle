@@ -1,4 +1,6 @@
 """Shared fixtures for the multi-worker network tests."""
+import asyncio
+
 import pytest
 
 from app.api import network as network_api
@@ -8,8 +10,31 @@ from tests.core.network.harness import Worker
 
 
 @pytest.fixture
-def workers(tmp_path):
+def workers(tmp_path, monkeypatch):
     """Factory for in-process ``Worker``s; closes them and resets network state."""
+    from app.core import task_persistence
+    from tests.core.network.harness import _ACTIVE
+
+    original_run = asyncio.run
+
+    def run(coro, **kwargs):
+        async def drained():
+            try:
+                return await coro
+            finally:
+                if _ACTIVE.get() is not None:
+                    # The app keeps its loop alive. These scenarios don't: wait
+                    # for the REAL writer (including a popped in-flight snapshot)
+                    # before ending its loop, then release loop-bound primitives.
+                    await task_persistence.flush()
+                    assert task_persistence.pending_count() == 0
+                    consumer = task_persistence._consumer
+                    task_persistence.reset()
+                    if consumer is not None:
+                        await asyncio.gather(consumer, return_exceptions=True)
+        return original_run(drained(), **kwargs)
+
+    monkeypatch.setattr(asyncio, "run", run)
     # A prior app lifespan registers materialization callbacks. Do not inherit
     # them: these workers explicitly drive apply side effects themselves.
     engine.reset_for_tests()

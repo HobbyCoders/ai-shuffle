@@ -625,3 +625,84 @@ async def test_legacy_runtime_user_stop_fallback_does_not_add_a_second_warning(s
     finally:
         task_registry.clear_session(session_id)
         await flush()
+
+
+@pytest.mark.parametrize("quarantine_race", [False, True])
+async def test_fresh_individual_stop_persists_positive_retry_authority(session_id, monkeypatch, quarantine_race):
+    from app.core import provider_agent_supervisor as supervisor, remote_task
+    from app.core.query_session_lifecycle import stop_session_task
+    from app.core.task_persistence import flush
+    from app.core.task_registry import task_registry
+    from app.db import remote_tasks
+    from app.network import control
+
+    child = "explicit-" + uuid4().hex
+    remote_tasks.record_dispatch(worker_session_id=child, target_device_id="offline-owner",
+        owner_session_id=session_id, root_session_id=session_id, tool_use_id=child,
+        mode="background", label="Remote job", agent="Default", target_name="Other worker")
+    supervisor.register_worker(supervisor.WorkerRecord(
+        parent_session_id=session_id, worker_session_id=child, task_id=child,
+        tool_use_id=child, remote_device_id="offline-owner"))
+    task_registry.start_task(session_id, child, "agent", "Remote job", tool_use_id=child,
+        remote_device_id="offline-owner", worker_name="Other worker")
+    calls = []
+    reachable = False
+    async def peer(device, action, body, **kwargs):
+        calls.append((device, action, body))
+        if not reachable:
+            raise control.RunnerUnreachable("controlled offline owner")
+        return {"children": {child: {"state": remote_task.CHILD_STOPPED}}}
+    monkeypatch.setattr(control, "call", peer)
+    entered, release = threading.Event(), threading.Event()
+    old_delivery = None
+    try:
+        # Model the actual pre-upgrade row: no backfilled positive provenance.
+        old = remote_tasks.request_stop(child, "user_stopped")
+        assert old["stop_origin"] is None
+        if quarantine_race:
+            real_defer = remote_tasks.defer_unscoped_user_stop
+            def delayed_defer(*args, **kwargs):
+                entered.set()
+                assert release.wait(3)
+                return real_defer(*args, **kwargs)
+            monkeypatch.setattr(remote_tasks, "defer_unscoped_user_stop", delayed_defer)
+            old_delivery = asyncio.create_task(remote_task.deliver_stops())
+            assert await asyncio.to_thread(entered.wait, 2)
+        else:
+            assert await remote_task.deliver_stops() == 0
+            assert calls == []
+            assert remote_tasks.get_dispatch(child)["stop_state"] == remote_tasks.STOP_INCOMPLETE
+            assert len(_notices(session_id)) == 1
+
+        answer = await stop_session_task(session_id, child)
+        assert answer["ok"] and "sent again when it answers" in answer["detail"]
+        row = remote_tasks.get_dispatch(child)
+        assert row["stop_origin"] == remote_tasks.EXPLICIT_TASK_STOP
+        assert row["stop_requested_at"] == old["stop_requested_at"]
+        assert row["stop_reason"] == old["stop_reason"] == "user_stopped"
+        assert row["stop_state"] == remote_tasks.STOP_PENDING
+        if old_delivery is not None:
+            release.set()
+            assert await asyncio.wait_for(old_delivery, 3) == 0
+            assert remote_tasks.get_dispatch(child)["stop_state"] == remote_tasks.STOP_PENDING
+        await flush()
+        supervisor.reset()
+        task_registry.clear_session(session_id)  # no in-memory replay authority
+        assert await remote_task.deliver_stops() == 0
+        [pending] = [r for r in remote_tasks.pending_stops() if r["worker_session_id"] == child]
+        assert pending["stop_origin"] == remote_tasks.EXPLICIT_TASK_STOP
+        reachable = True
+        assert await remote_task.deliver_stops() == 1
+        assert remote_tasks.get_dispatch(child)["stop_state"] == remote_tasks.STOP_SENT
+        assert await remote_task.deliver_stops() == 0
+        assert all(action == remote_task.TASK_STOP_ACTION for _, action, _ in calls)
+        assert all("stop_origin" not in body and "explicit_task_stop" not in body for _, _, body in calls)
+        assert len(_notices(session_id)) == (0 if quarantine_race else 1)
+    finally:
+        release.set()
+        if old_delivery is not None:
+            await asyncio.gather(old_delivery, return_exceptions=True)
+        await remote_task.drain_stops()
+        supervisor.reset()
+        task_registry.clear_session(session_id)
+        await flush()

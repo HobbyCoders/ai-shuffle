@@ -51,6 +51,7 @@ _PARENT_DDL = """CREATE TABLE IF NOT EXISTS remote_tasks (
     target_state TEXT,
     stop_requested_at TEXT,
     stop_reason TEXT,
+    stop_origin TEXT,
     stop_state TEXT,
     stop_error TEXT,
     offline_notice_at TEXT,
@@ -60,7 +61,7 @@ _PARENT_DDL = """CREATE TABLE IF NOT EXISTS remote_tasks (
 #: Columns added after the table first shipped: tracking (S7), stop (S8),
 #: the notice after a long silence (S12).
 _PARENT_ADDED = ("target_name", "last_contact_at", "unreachable_since", "target_state",
-                 "stop_requested_at", "stop_reason", "stop_state", "stop_error",
+                 "stop_requested_at", "stop_reason", "stop_origin", "stop_state", "stop_error",
                  "offline_notice_at", "unconfirmed_start_at", "published_base")
 
 _TARGET_DDL = """CREATE TABLE IF NOT EXISTS remote_task_children (
@@ -91,6 +92,10 @@ STOP_SENT = "sent"
 STOP_REFUSED = "refused"
 STOP_INCOMPLETE = "incomplete"
 STOP_INCOMPLETE_NOTICE = "pending_incomplete"
+
+# Positive, worker-local provenance, written only by a fresh individual Task
+# Stop. Missing/unknown values on pre-upgrade requests confer no replay authority.
+EXPLICIT_TASK_STOP = "explicit_task_stop_v1"
 
 
 def init_schema(conn=None) -> None:
@@ -263,22 +268,25 @@ def noticed_unstopped(session_id: str) -> List[Dict[str, Any]]:
         return [_row(row) for row in cursor.fetchall()]
 
 
-def request_stop(worker_session_id: str, reason: str) -> Optional[Dict[str, Any]]:
+def request_stop(worker_session_id: str, reason: str, *, explicit_task_stop: bool = False) -> Optional[Dict[str, Any]]:
     """Record that this worker stopped the child: the stop is owed to its target.
 
     The first request's time and reason stand; a stop the target already
     answered stays answered, anything else goes (back) to pending. Returns the
-    row, or None for a child this worker never sent.
+    row, or None for a child this worker never sent. Only a fresh individual
+    Task Stop may set positive replay provenance (including a new gesture after
+    an ambiguous old request); ordinary retries never upgrade that authority.
     """
+    origin = EXPLICIT_TASK_STOP if explicit_task_stop else None
     with get_db() as conn:
         init_schema(conn)
         cursor = conn.cursor()
         cursor.execute(
             "UPDATE remote_tasks SET stop_requested_at=COALESCE(stop_requested_at, %s), "
-            "stop_reason=COALESCE(stop_reason, %s), "
+            "stop_reason=COALESCE(stop_reason, %s), stop_origin=COALESCE(%s, stop_origin), "
             "stop_state=CASE WHEN stop_state=%s THEN stop_state ELSE %s END "
             "WHERE worker_session_id=%s RETURNING *",
-            (utc_now_iso(), reason[:200], STOP_SENT, STOP_PENDING, worker_session_id))
+            (utc_now_iso(), reason[:200], origin, STOP_SENT, STOP_PENDING, worker_session_id))
         return _row(cursor.fetchone())
 
 
@@ -309,17 +317,22 @@ def settle_stop(worker_session_ids: List[str], state: str, *, error: Optional[st
                 (state, error[:500] if error else None, worker_session_id, STOP_PENDING))
 
 
-def defer_unscoped_user_stop(worker_id: str, detail: str, *, noted: bool = False) -> None:
+def defer_unscoped_user_stop(worker_id: str, detail: str, *, noted: bool = False) -> bool:
     """Pre-upgrade user Stops lack a boundary; never replay their stable-id RPC.
 
     Keep the notice pending until a durable transcript note was actually written.
     This is not STOP_SENT and must never be displayed as an ended remote task.
+    A fresh individual Stop may have superseded the caller's old snapshot; never
+    quarantine that positive authority. Return whether this request was deferred.
     """
     with get_db() as conn:
-        conn.cursor().execute("UPDATE remote_tasks SET stop_state=%s,stop_error=%s "
-            "WHERE worker_session_id=%s AND stop_state IN (%s,%s)",
+        cursor = conn.cursor()
+        cursor.execute("UPDATE remote_tasks SET stop_state=%s,stop_error=%s "
+            "WHERE worker_session_id=%s AND stop_state IN (%s,%s) "
+            "AND (stop_origin IS NULL OR stop_origin<>%s) RETURNING worker_session_id",
             (STOP_INCOMPLETE if noted else STOP_INCOMPLETE_NOTICE, detail[:500], worker_id,
-             STOP_PENDING, STOP_INCOMPLETE_NOTICE))
+             STOP_PENDING, STOP_INCOMPLETE_NOTICE, EXPLICIT_TASK_STOP))
+        return cursor.fetchone() is not None
 
 
 def record_scoped_stop(worker_id: str, reason: str) -> None:

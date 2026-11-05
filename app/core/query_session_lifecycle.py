@@ -213,7 +213,10 @@ async def _durable_force_settle(session_id: str, task_id: str) -> Optional[dict]
     return None
 
 
-async def stop_session_task(session_id: str, task_id: str, *, source: str = "user_stop", _remote_confirmed: bool = False) -> dict:
+async def stop_session_task(
+    session_id: str, task_id: str, *, source: str = "user_stop",
+    _remote_confirmed: bool = False, _explicit_task_stop: bool = True,
+) -> dict:
     """Stop ONE background task (sub-agent OR Monitor shell) in a session.
 
     Two kinds of task surface in the UI's ``activeTasks`` strip:
@@ -233,6 +236,8 @@ async def stop_session_task(session_id: str, task_id: str, *, source: str = "use
     ``ok: false``, and the UI strip is left showing a task that can never be
     cleared (its button stuck disabled).
 
+    ``_explicit_task_stop`` is false for automatic stop-all reuse: only a fresh
+    dedicated TaskStop/card Stop may grant legacy per-task retry authority.
     Returns ``{"ok": bool, "kind": ..., "detail"?: ...}``. Never raises.
     """
     from app.core.task_registry import task_registry
@@ -311,6 +316,8 @@ async def stop_session_task(session_id: str, task_id: str, *, source: str = "use
             summary = preview = f"Stopped by host: {source}"
         torn = await provider_agent_supervisor.teardown_worker(
             record, reason=source, summary=summary, preview=preview,
+            **({"explicit_task_stop": True} if (record.remote_device_id and _explicit_task_stop
+                and not _remote_confirmed and source in (USER_STOP_REASON, AGENT_STOP_REASON)) else {}),
             **({"remote_confirmed": True} if _remote_confirmed else {}),
         )
         own = task_registry.get_task(session_id, task_id)
@@ -1031,7 +1038,7 @@ async def stop_all_background_tasks(
                 results.append({"ok": True, "task_id": task_id, "skipped": "resumed"})
                 not_stopped.add(task_id)
                 continue
-        results.append(await stop_session_task(session_id, task_id,
+        results.append(await stop_session_task(session_id, task_id, _explicit_task_stop=False,
             **({"source": source} if source != "user_stop" else {}),
             **({"_remote_confirmed": True} if remote_confirmed else {})))
 

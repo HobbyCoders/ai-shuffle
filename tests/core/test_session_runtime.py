@@ -1813,10 +1813,17 @@ async def test_interrupt_honors_durable_stop_background_on_owning_runner(mock_db
     """A foreign-runner Stop reaches workers through the shared turn-row flag."""
     turn = turns_db.enqueue_turn("s9-bg", "user", prompt="hi")
     turns_db.start_turn(turn["id"], None, "runner")
+    from app.core.task_registry import task_registry
+    from app.core.task_persistence import flush
+    from app.db import stop_receipts
+    task_registry.start_task("s9-bg", "owned-task", "shell", "Job", tool_use_id="launch")
+    await flush()
     turns_db.interrupt_turn("s9-bg", "stop", stop_background=True)
+    [receipt] = stop_receipts.pending("runner", turn_id=turn["id"])
+    assert [task["task_id"] for task in receipt["receipt"]["tasks"]] == ["owned-task"]
     turns_db.settle_turn(turn["id"], "aborted", "racer")
 
-    stop_all = AsyncMock()
+    stop_all = AsyncMock(return_value=[])
     with _interrupt_env(evict=False), patch(
         "app.core.query_session_lifecycle.stop_all_background_tasks",
         new=stop_all,
@@ -1830,22 +1837,29 @@ async def test_interrupt_honors_durable_stop_background_on_owning_runner(mock_db
     # of the session's work and latch the session stopped, HERE — this is the
     # runner that owns the tasks the foreign WebSocket cannot see.
     stop_all.assert_awaited_once_with("s9-bg", user_stop=True, scope=ANY,
-                                      receipt=turns_db.get_turn(turn["id"])["payload"]["stop_receipt"])
+                                      receipt=receipt["receipt"], _receipt_consumer=True)
+    assert stop_receipts.get(receipt["id"])["consumed_at"] is not None
 
 
 @pytest.mark.parametrize("source,user_stop", [("session_closed", False), ("user_stopped", True), ("user_stop", True)])
 async def test_internal_interrupt_preserves_source_on_owning_runner(mock_db, source, user_stop):
     turn = turns_db.enqueue_turn("s9-internal", "provider_agent", prompt="hi")
     turns_db.start_turn(turn["id"], None, "runner")
+    from app.db import stop_receipts
     turns_db.interrupt_turn("s9-internal", "stop", stop_background=True, source=source)
+    pending = stop_receipts.pending("runner", turn_id=turn["id"])
+    assert bool(pending) is user_stop
     turns_db.settle_turn(turn["id"], "aborted", "racer")
-    stop_all = AsyncMock()
+    stop_all = AsyncMock(return_value=[])
     with _interrupt_env(evict=False), patch(
         "app.core.query_session_lifecycle.stop_all_background_tasks", new=stop_all,
     ):
         await session_runtime.SessionRuntime(turn).interrupt(escalation_timeout=0.02)
     stop_all.assert_awaited_once_with("s9-internal", user_stop=user_stop, scope=ANY,
-                                      **({"source": source} if not user_stop else {"receipt": ANY}))
+        **({"source": source} if not user_stop else {
+            "receipt": pending[0]["receipt"], "_receipt_consumer": True}))
+    if user_stop:
+        assert stop_receipts.get(pending[0]["id"])["consumed_at"] is not None
 
 
 async def test_interrupt_cancels_pending_prompts_before_signalling_the_sdk(mock_db):

@@ -36,7 +36,7 @@ def publish(a, b, caps=None):
         actual = runner_capabilities.detect_capabilities()
         assert actual[scoped_remote_stop.CAPABILITY] == 1
         if caps is None:
-            assert engine.publish_presence()
+            assert engine.publish_presence(version="scoped-test")
         else:
             assert engine.publish_presence(capabilities=caps)
     converge([a, b])
@@ -222,18 +222,28 @@ def test_failed_capable_receiver_does_not_fall_back_or_settle_chip(workers, monk
         assert task_registry.get_task("caller", child)["status"] == "running"
 
 
-def test_preupgrade_user_stop_retry_is_durable_incomplete_not_legacy_rpc(workers, monkeypatch, kicks):
+@pytest.mark.parametrize("origin", [None, "", "explicit_task_stop_v2", '{"explicit_task_stop":true}'])
+def test_preupgrade_user_stop_retry_is_durable_incomplete_not_legacy_rpc(workers, monkeypatch, kicks, origin):
     from app.core.task_registry import USER_STOP_REASON
     a, b, router = network(workers, monkeypatch)
     child = started_child(a, b)
     with b.active():
         remote_tasks.request_stop(child, USER_STOP_REASON)
+        from app.db.base import get_db
+        with get_db() as conn:
+            conn.cursor().execute("UPDATE remote_tasks SET stop_origin=%s WHERE worker_session_id=%s", (origin, child))
+        from tests.core.network.test_remote_task_tracking import restart_parent
+        restart_parent()
+        assert asyncio.run(remote_task.deliver_stops()) == 0
         assert asyncio.run(remote_task.deliver_stops()) == 0
         row = remote_tasks.get_dispatch(child)
+        assert row["stop_origin"] == origin
         assert row["stop_state"] == remote_tasks.STOP_INCOMPLETE
         assert "STILL BE RUNNING" in row["stop_error"] and "ServerWorker" in row["stop_error"]
         assert not remote_tasks.pending_stops()
-        assert any("STILL BE RUNNING" in str(e) for e in session_events.get_events("caller"))
+        notes = [e for e in session_events.get_events("caller")
+                 if e["event_type"] == "system.note" and e["payload"].get("subtype") == "stop_incomplete"]
+        assert len(notes) == 1 and "STILL BE RUNNING" in str(notes[0]) and "ServerWorker" in str(notes[0])
     assert not any(r[1].endswith("/task-stop") for r in router.requests(UNRAID_URL))
     with a.active():
         assert not remote_tasks.get_child(child)["stop_requested_at"]

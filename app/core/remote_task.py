@@ -2245,7 +2245,7 @@ async def _send_stops(target_device_id: str, worker_ids: List[str],
 
 
 async def stop_remote_child(worker_id: str, target_device_id: str, *, reason: str,
-                            summary: Optional[str] = None) -> Dict[str, Any]:
+                            summary: Optional[str] = None, explicit_task_stop: bool = False) -> Dict[str, Any]:
     """Stop a Task child on the worker that runs it. Never raises.
 
     The stop is recorded durably first, so a target that cannot be reached
@@ -2260,7 +2260,8 @@ async def stop_remote_child(worker_id: str, target_device_id: str, *, reason: st
     from app.db import remote_tasks
 
     try:
-        row = await asyncio.to_thread(remote_tasks.request_stop, worker_id, reason)
+        row = await asyncio.to_thread(remote_tasks.request_stop, worker_id, reason,
+            **({"explicit_task_stop": True} if explicit_task_stop else {}))
     except Exception:  # noqa: BLE001 — still try to reach it once
         logger.warning("remote_task: could not record the stop of %s", worker_id, exc_info=True)
         row = None
@@ -2348,11 +2349,16 @@ async def deliver_stops() -> int:
     groups: Dict[tuple, List[str]] = {}
     for row in rows:
         from app.core.task_registry import USER_STOP_REASON
-        if row.get("stop_reason") == USER_STOP_REASON or row.get("stop_state") == remote_tasks.STOP_INCOMPLETE_NOTICE:
+        if ((row.get("stop_reason") == USER_STOP_REASON
+                or row.get("stop_state") == remote_tasks.STOP_INCOMPLETE_NOTICE)
+                and row.get("stop_origin") != remote_tasks.EXPLICIT_TASK_STOP):
             from app.core.scoped_remote_stop import incomplete, record_incomplete_note
             result = incomplete(row["worker_session_id"], row["target_device_id"],
                 worker_display_name(row["target_device_id"]), "old queued Stop has no enforceable boundary")
-            await asyncio.to_thread(remote_tasks.defer_unscoped_user_stop, row["worker_session_id"], result["detail"])
+            deferred = await asyncio.to_thread(remote_tasks.defer_unscoped_user_stop,
+                row["worker_session_id"], result["detail"])
+            if not deferred:
+                continue  # a fresh individual Stop superseded this old snapshot
             noted = await record_incomplete_note(row["root_session_id"], [result],
                 notice_key=f"remote:{row['worker_session_id']}:{row.get('stop_requested_at')}")
             if noted:
