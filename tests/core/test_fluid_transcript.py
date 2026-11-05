@@ -265,8 +265,14 @@ def test_a_rewind_and_its_reset_survive_a_restart_together(mock_db, monkeypatch)
 
     with monkeypatch.context() as outage:
         outage.setattr(turns, "set_outcome_baseline", refused)
-        with pytest.raises(RuntimeError, match="database away"):
-            _rewind_in_a_process_that_then_ends(session_id)
+        response, sync_engine = _rewind_in_a_process_that_then_ends(session_id)
+        assert response.success is False
+        assert response.chat_rewound is False
+        assert response.message == "Rewind failed"
+        assert response.error == "Chat rewind failed: database away"
+        assert response.messages_removed == 0
+        sync_engine.broadcast_user_session_updated.assert_not_called()
+        sync_engine.broadcast_session_rewound.assert_not_called()
 
     # Back up, nothing in-process left: the rewind did not happen, and says so. The
     # transcript still shows the failure and the row still reads Failed. They agree.
