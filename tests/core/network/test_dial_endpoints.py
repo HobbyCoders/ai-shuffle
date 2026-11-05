@@ -349,3 +349,11 @@ def test_enrollment_copies_the_snapshot_over_the_inviters_tunnel(workers, monkey
         assert store.get_member(a.device_id)["endpoints"] == [LAN, TUNNEL]
         assert any(u.endswith("/peer/state") for u in served.urls)
         assert all(u.startswith(TUNNEL) for u in served.urls)
+        # complete_enrollment's bare publication must advertise enforcement NOW,
+        # before any periodic presence heartbeat has run.
+        from app.core import scoped_remote_stop
+        from app.network.nested_secret_sync import CAPABILITY as SECRET_CAPABILITY
+        caps = engine.presence_of(b.device_id)["capabilities"]
+        assert caps[scoped_remote_stop.CAPABILITY] == 1
+        assert caps[SECRET_CAPABILITY] == 1
+        assert scoped_remote_stop.advertised(b.device_id)

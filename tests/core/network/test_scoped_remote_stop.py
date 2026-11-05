@@ -35,8 +35,64 @@ def publish(a, b, caps=None):
     with a.active():
         actual = runner_capabilities.detect_capabilities()
         assert actual[scoped_remote_stop.CAPABILITY] == 1
-        assert engine.publish_presence(capabilities=actual if caps is None else caps)
+        if caps is None:
+            assert engine.publish_presence()
+        else:
+            assert engine.publish_presence(capabilities=caps)
     converge([a, b])
+
+
+def test_bare_presence_publishes_enforced_scope_before_any_heartbeat(workers):
+    from app.network.nested_secret_sync import CAPABILITY as SECRET_CAPABILITY
+    a = workers("publisher")
+    with a.active():
+        engine.create_network("Home")
+        # Enrollment/hub/API callers omit capabilities. No presence loop or
+        # manually supplied detector output may be needed for the first Stop.
+        engine.publish_presence(version="initial")
+        caps = engine.presence_of(a.device_id)["capabilities"]
+        assert caps[scoped_remote_stop.CAPABILITY] == 1
+        assert caps[SECRET_CAPABILITY] == 1
+        assert control.known_action(scoped_remote_stop.ACTION)
+        assert scoped_remote_stop.advertised(a.device_id)
+
+
+def test_unenrolled_node_does_not_probe_or_advertise(workers, monkeypatch):
+    a = workers("unenrolled")
+    def unavailable():
+        pytest.fail("A node without a network must not probe or advertise")
+    monkeypatch.setattr(runner_capabilities, "detect_capabilities", unavailable)
+    with a.active():
+        assert engine.context() is None
+        assert engine.publish_presence() is False
+        assert engine.all_presence() == {}
+
+
+@pytest.mark.parametrize("explicit", [{}, {"scoped_task_stop": "1"}])
+def test_explicit_old_or_malformed_capabilities_are_not_replaced(workers, monkeypatch, explicit):
+    from app.network.nested_secret_sync import CAPABILITY as SECRET_CAPABILITY
+    a = workers("explicit-publisher")
+    def unavailable():
+        pytest.fail("An explicit capability publication must not call the detector")
+    monkeypatch.setattr(runner_capabilities, "detect_capabilities", unavailable)
+    with a.active():
+        engine.create_network("Home")
+        engine.publish_presence(capabilities=explicit)
+        assert engine.presence_of(a.device_id)["capabilities"] == {SECRET_CAPABILITY: 1, **explicit}
+        assert not scoped_remote_stop.advertised(a.device_id)
+
+
+def test_bare_presence_with_unavailable_detection_is_unknown(workers, monkeypatch):
+    from app.network.nested_secret_sync import CAPABILITY as SECRET_CAPABILITY
+    a = workers("unknown-publisher")
+    def unavailable():
+        raise RuntimeError("capability cache is not ready")
+    monkeypatch.setattr(runner_capabilities, "detect_capabilities", unavailable)
+    with a.active():
+        engine.create_network("Home")
+        engine.publish_presence()
+        assert engine.presence_of(a.device_id)["capabilities"] == {SECRET_CAPABILITY: 1}
+        assert not scoped_remote_stop.advertised(a.device_id)
 
 
 def stop(b):
