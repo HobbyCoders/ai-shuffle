@@ -19,6 +19,13 @@ await runJourney({
   },
   async act({page,mark,variant}) {
    const phone=variant.viewport==='phone';
+   async function checkSingleTitle(label) {
+    const heading=page.getByRole('heading',{level:2,name:label,exact:true});
+    expect(await heading.count()===1,label+' keeps its semantic detail heading');
+    const size=await heading.boundingBox();
+    expect(phone ? size.width<=1 && size.height<=1 : size.width>1,
+     label+' uses the host title once on phone and its detail title on desktop');
+   }
    const workspace=page.getByRole('navigation',{name:'Workspace',exact:true});
    async function open(label) {
     if(!await workspace.isVisible())await page.getByRole('button',{name:native&&phone?/^Open menu/:/^Chats(?: \(|$)|Show sidebar/}).first().click();
@@ -29,6 +36,7 @@ await runJourney({
    await mark('open Stats directly on content');
    await open('Stats');
    await page.locator('[data-view-shell="Stats"] .metrics').waitFor();
+   await checkSingleTitle('Stats');
    if(phone) {
     expect(await page.locator('[data-view-shell="Stats"]').getAttribute('data-pane')==='detail','Stats opens directly on KPIs');
     expect(!await page.locator('[data-view-shell="Stats"] .st-back-row').count(),'Stats adds no Back row');
@@ -41,6 +49,7 @@ await runJourney({
    await mark('open Pull requests directly on content');
    await open('Pull requests');
    await page.getByRole('heading',{level:2,name:'Pull requests',exact:true}).waitFor();
+   await checkSingleTitle('Pull requests');
    if(phone)expect(!await page.locator('[data-view-shell="Pull requests"] .st-back-row').count(),'Pull requests adds no Back row');
    for(const name of ['Merged','Closed','All','Open']) {
     const control=page.getByRole('button',{name,exact:true}).filter({visible:true});

@@ -15,7 +15,7 @@
   else if (e.key === 'Escape') { query = ''; selectedIndex = -1; }
  }
 </script>
-<PanelSearch clearable bind:input bind:value={query} placeholder="Search docs..." label="Search docs" onkeydown={handleKeydown} oninput={() => selectedIndex = -1} />
+<PanelSearch clearable bind:input bind:value={query} placeholder="Search docs" label="Search docs" onkeydown={handleKeydown} oninput={() => selectedIndex = -1} />
 {#if query.trim().length >= 2}
  <div class="search-results" aria-label="Doc search results">
   {#each results as result,i}

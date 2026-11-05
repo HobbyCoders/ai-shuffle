@@ -199,6 +199,19 @@
 		padding: 0 0 18px;
 	}
 	.st-dh.has-identity { grid-template-columns: auto minmax(0, 1fr) auto; }
+	/* The host bar names content-first pages on phone. Keep their semantic
+	   heading, but do not repeat that title in the shared detail header. */
+	:global(.view-shell[data-stacked][data-content-first]) .st-dh { padding-top: 12px; }
+	:global(.view-shell[data-stacked][data-content-first]) h2 {
+		position: absolute;
+		width: 1px;
+		height: 1px;
+		padding: 0;
+		margin: -1px;
+		overflow: hidden;
+		clip-path: inset(50%);
+		white-space: nowrap;
+	}
 	.st-dh-main {
 		min-width: 0;
 	}

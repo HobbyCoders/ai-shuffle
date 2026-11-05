@@ -134,7 +134,7 @@
   <div class="ui-dialog">
    <div class="spotlight-search flex items-center gap-3 px-4 py-3 border-b border-border">
     <Search size={20} class="text-muted-foreground shrink-0" />
-    <input bind:this={input} bind:value={query} aria-label="Search everything" placeholder="Search everything…" class="min-w-0 flex-1 bg-transparent text-foreground placeholder-muted-foreground focus:outline-hidden text-base" />
+    <input bind:this={input} bind:value={query} aria-label="Search everything" placeholder="Search everything" class="min-w-0 flex-1 bg-transparent text-foreground placeholder-muted-foreground focus:outline-hidden text-base" />
     <kbd class="text-xs text-muted-foreground">esc</kbd>
    </div>
    <div bind:this={list} class="max-h-[65vh] overflow-y-auto" aria-busy={searching}>
