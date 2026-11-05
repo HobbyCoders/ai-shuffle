@@ -1,17 +1,10 @@
 <script lang="ts">
 	import Switch from '$lib/components/settings/rows/Switch.svelte';
-	/**
-	 * FilesStudio — the Studio-v2 Files surface.
-	 *
-	 * Two-column layout per the mockup: a lazy-loading folder tree on the left and
-	 * a columnar file list (Name / Size / Modified / download) on the right, under a
-	 * Studio page header (New folder / Upload) and a breadcrumb + hidden-files
-	 * toolbar. Reuses the `files` store for all data + operations. Theme tokens only.
-	 *
-	 * The breadcrumb starts at a worker chip: the page can show any of the
-	 * owner's workers, relayed through this one (see FilesWorkerPicker).
-	 */
-	import { onMount } from 'svelte';
+	/** Files: shared navigation panel and a full-width workspace table. */
+	import { getContext, onMount } from 'svelte';
+	import { ViewShell, ViewPanel, ViewMain, ViewCheckbox, DetailPane, EmptyDetail, InlineBanner } from '$lib/components/layout/view';
+	import { FEATURE_PANEL_CONTEXT, type FeaturePanelContext } from '$lib/components/layout/feature-panel-context';
+	import FilesPreview from './FilesPreview.svelte';
 	import { withAuth } from '$lib/api/runtime';
 	import { listInstalls, type Install } from '$lib/api/installs';
 	import {
@@ -21,7 +14,7 @@
 		ServerOff, FolderX, RotateCw
 	} from 'lucide-svelte';
 	import { files, sortedFiles, breadcrumbs, type FileItem } from '$lib/stores/files.svelte';
-	import StudioPageHeader from '$lib/components/layout/StudioPageHeader.svelte';
+
 	import FilesTreeNode from './FilesTreeNode.svelte';
 	import FilesWorkerPicker from './FilesWorkerPicker.svelte';
 	import { findWorker, workerOptions, type WorkerOption } from './files-workers';
@@ -31,6 +24,10 @@
 	import { TerminalSquare } from 'lucide-svelte';
 	let terminalDrawer: ReturnType<typeof FilesTerminalDrawer>;
 	let terminalBusy = $state(false);
+	const feature = getContext<FeaturePanelContext | undefined>(FEATURE_PANEL_CONTEXT);
+	let detailOpen = $state(false);
+	let preview = $state<FileItem | null>(null);
+	const folderName = $derived($breadcrumbs.at(-1)?.name || 'Workspace');
 
 	let uploadInput = $state<HTMLInputElement | null>(null);
 	let showNewFolder = $state(false);
@@ -101,6 +98,7 @@
 		pendingDelete = null;
 		pendingBulkDelete = false;
 		actionsOpenPath = null;
+		preview = null;
 		files.setWorker(key);
 	}
 	const showHidden = $derived($files.showHidden);
@@ -142,6 +140,8 @@
 	});
 
 	function navigate(path: string) {
+		detailOpen = true;
+		preview = null;
 		files.navigateTo(path);
 	}
 
@@ -197,6 +197,7 @@
 		if (renameTarget && renameValue.trim() && renameValue.trim() !== renameTarget.name) {
 			// On failure the store shows the error; keep the rename open for a retry.
 			if (!(await files.rename(renameTarget.path, renameValue.trim()))) return;
+			preview = null;
 			await loadRootDirs();
 			refreshTree();
 		}
@@ -210,23 +211,20 @@
 		const t = pendingDelete;
 		pendingDelete = null;
 		if (!t) return;
+		preview = null;
 		await files.delete(t.path);
 		await loadRootDirs();
 		refreshTree();
 	}
 
 	// ── Multi-select delete ──
-	function toggleSelected(item: FileItem, e: Event) {
-		e.stopPropagation();
-		files.toggleSelection(item.path);
-	}
-	function onHeaderSelectAll(e: Event) {
-		const checked = (e.target as HTMLInputElement).checked;
+	function onHeaderSelectAll(checked: boolean) {
 		if (checked) files.selectAll();
 		else files.clearSelection();
 	}
 	async function confirmDeleteSelected() {
 		pendingBulkDelete = false;
+		preview = null;
 		await files.deleteSelected();
 		await loadRootDirs();
 		refreshTree();
@@ -234,7 +232,8 @@
 
 	function rowClick(item: FileItem) {
 		if (renameTarget?.path === item.path) return;
-		if (item.type === 'directory') files.navigateTo(item.path);
+		if (item.type === 'directory') navigate(item.path);
+		else preview = item;
 	}
 
 	function download(item: FileItem, e: Event) {
@@ -254,6 +253,7 @@
 		if (actionsOpenPath !== null) actionsOpenPath = null;
 	}
 	function onWindowKeydown(e: KeyboardEvent) {
+		if (feature && !feature.active) return;
 		if (e.key === 'Escape') actionsOpenPath = null;
 	}
 
@@ -290,513 +290,156 @@
 
 <svelte:window onclick={onWindowClick} onkeydown={onWindowKeydown} />
 
-<div class="fs">
-	<div class="fs-wrap">
-	<div class="fs-head">
-		<StudioPageHeader
-			eyebrow={selectedWorker.isSelf ? 'Browse, upload & manage your workspace' : `Browse, upload & manage files on ${selectedWorker.name}`}
-			title="Project"
-			accent="files"
-		>
-			{#snippet actions()}
-				{#if workerId === null}
-					<button class="fs-btn" disabled={loading || !!loadError || terminalBusy} onclick={() => terminalDrawer.open(currentPath)} title="Open terminal in this folder on this worker">
-						<TerminalSquare size={15} strokeWidth={1.8} /><span>Open terminal here</span>
-					</button>
-				{/if}
-				<button class="fs-btn" onclick={openNewFolder} disabled={!!loadError}>
-					<FolderPlus size={15} strokeWidth={1.8} /><span>New folder</span>
-				</button>
-				<button class="fs-btn fs-btn--primary" onclick={triggerUpload} disabled={uploading || !!loadError}>
-					{#if uploading}<Loader2 size={15} class="fs-spin" />{:else}<Upload size={15} strokeWidth={1.8} />{/if}
-					<span>{uploading ? `Uploading ${uploadProgress}%` : 'Upload'}</span>
-				</button>
+<ViewShell label="Files" {detailOpen} onBack={() => detailOpen = false}>
+	{#snippet panel()}
+		<ViewPanel title="Files" listLabel="Folders on {workerName}">
+			{#snippet filters()}
+				<FilesWorkerPicker options={workerChoices} selected={selectedWorker} loading={installsLoading}
+					failed={installsFailed} onSelect={selectWorker} onRetry={loadWorkers} />
 			{/snippet}
-		</StudioPageHeader>
-	</div>
-
-	<!-- Toolbar: breadcrumbs + hidden toggle -->
-	<div class="fs-toolbar">
-		<FilesWorkerPicker
-			options={workerChoices}
-			selected={selectedWorker}
-			loading={installsLoading}
-			failed={installsFailed}
-			onSelect={selectWorker}
-			onRetry={loadWorkers}
-		/>
-		<span class="fs-crumb-sep fs-crumb-sep--worker" aria-hidden="true">/</span>
-		<nav class="fs-crumbs" aria-label="Breadcrumb">
-			{#each $breadcrumbs as crumb, i (crumb.path)}
-				{#if i > 0}<span class="fs-crumb-sep">/</span>{/if}
-				<button
-					class="fs-crumb"
-					class:last={i === $breadcrumbs.length - 1}
-					onclick={() => navigate(crumb.path)}
-				>
-					{#if i === 0}<Home size={13} strokeWidth={1.9} />{/if}
-					{crumb.name}
-				</button>
-			{/each}
-		</nav>
-		<div class="fs-toolbar-spacer"></div>
-		<label class="fs-toggle">
-			<Switch controlled size="sm" checked={showHidden} label="Toggle hidden files" onchange={() => files.toggleShowHidden()} />
-			Hidden files
-		</label>
-	</div>
-
-	{#if showNewFolder}
-		<div class="fs-newfolder">
-			<FolderPlus size={15} strokeWidth={1.8} />
-			<!-- svelte-ignore a11y_autofocus -->
-			<input
-				type="text"
-				placeholder="Folder name…"
-				bind:value={newFolderName}
-				autofocus
-				onkeydown={(e) => { if (e.key === 'Enter') confirmNewFolder(); else if (e.key === 'Escape') { showNewFolder = false; } }}
-			/>
-			<button class="fs-btn fs-btn--sm fs-btn--primary" onclick={confirmNewFolder} disabled={creatingFolder || !newFolderName.trim()}>Create</button>
-			<button class="fs-btn fs-btn--sm" onclick={() => (showNewFolder = false)}>Cancel</button>
-		</div>
-	{/if}
-
-	{#if selectedCount > 0}
-		<div class="fs-bulkbar">
-			<span>{selectedCount} selected</span>
-			<button class="fs-btn fs-btn--sm" onclick={() => files.clearSelection()}>Clear</button>
-			<button class="fs-btn fs-btn--sm fs-btn--danger" onclick={() => (pendingBulkDelete = true)}>
-				<Trash2 size={14} strokeWidth={1.8} /><span>Delete selected</span>
+			<button class="st-btn touch ghost fs-root" class:on={currentPath === ''} onclick={() => navigate('')}>
+				<Home size={14} /><span>Workspace</span>
 			</button>
-		</div>
-	{/if}
-
-	<!-- Two-column layout -->
-	<div class="fs-layout">
-		<div class="fs-side">
-			<aside class="fs-tree" aria-label="Folders on {workerName}">
-				<button class="fs-tree-root" class:on={currentPath === ''} onclick={() => navigate('')}>
-					<Home size={14} strokeWidth={1.8} /><span>Workspace</span>
-				</button>
-				<!-- Remounted per worker: expanded nodes must not refetch the old worker's paths. -->
-				{#key workerId}
-					{#each rootDirs as dir (dir.path)}
-						<FilesTreeNode name={dir.name} path={dir.path} depth={0} {currentPath} {showHidden} onNavigate={navigate} {treeVersion} />
-					{/each}
-				{/key}
-			</aside>
-		</div>
-
-		<div class="fs-mainwrap">
-		<div
-			class="fs-main"
-			class:drag={isDragging}
-			role="region"
-			aria-label="File list"
-			aria-busy={loading}
-			ondragover={onDragOver}
-			ondragleave={onDragLeave}
-			ondrop={onDrop}
-		>
-			<div class="fs-list">
-				<div class="fs-row fs-row--head">
-					<span class="fs-sel">
-						<input
-							type="checkbox"
-							checked={allSelected}
-							aria-label="Select all"
-							onclick={onHeaderSelectAll}
-						/>
-					</span>
-					<span>Name</span>
-					<span>Size</span>
-					<span>Modified</span>
-					<span></span>
-				</div>
-
-				{#if loadError && workerOffline}
-					<div class="fs-state fs-state--problem" role="alert">
-						<ServerOff size={30} strokeWidth={1.4} />
-						<p class="fs-state-title">{selectedWorker.name} is offline</p>
-						<p class="fs-state-detail">{loadError} Its files will show here once it reconnects.</p>
-						<div class="fs-state-actions">
-							<button class="fs-btn fs-btn--sm" onclick={() => files.loadFiles()} disabled={loading}>
-								{#if loading}<Loader2 size={14} class="fs-spin" />{:else}<RotateCw size={14} strokeWidth={1.8} />{/if}<span>Try again</span>
-							</button>
-							<button class="fs-btn fs-btn--sm fs-btn--primary" onclick={() => selectWorker(null)}>Back to this device</button>
-						</div>
-					</div>
-				{:else if loadError}
-					<div class="fs-state fs-state--problem" role="alert">
-						<FolderX size={30} strokeWidth={1.4} />
-						<p class="fs-state-title">This folder could not be opened</p>
-						<p class="fs-state-detail">{loadError}</p>
-						<div class="fs-state-actions">
-							<button class="fs-btn fs-btn--sm" onclick={() => files.loadFiles()} disabled={loading}>
-								{#if loading}<Loader2 size={14} class="fs-spin" />{:else}<RotateCw size={14} strokeWidth={1.8} />{/if}<span>Try again</span>
-							</button>
-							{#if currentPath}
-								<button class="fs-btn fs-btn--sm" onclick={() => navigate('')}>Go to Workspace</button>
-							{/if}
-							{#if workerId !== null}
-								<button class="fs-btn fs-btn--sm fs-btn--primary" onclick={() => selectWorker(null)}>Back to this device</button>
-							{/if}
-						</div>
-					</div>
-				{:else if loading && $sortedFiles.length === 0}
-					<div class="fs-state" role="status">
-						<Loader2 size={24} class="fs-spin" />
-						<p>{workerId === null ? 'Loading files…' : `Loading files from ${selectedWorker.name}…`}</p>
-					</div>
-				{:else if $sortedFiles.length === 0}
-					<div class="fs-state">
-						<Folder size={30} strokeWidth={1.25} />
-						<p>This folder is empty</p>
-						<button class="fs-link" onclick={triggerUpload}>Upload a file</button>
-					</div>
-				{:else}
-					{#each $sortedFiles as item (item.path)}
-						{#if renameTarget?.path === item.path}
-							<div class="fs-row fs-row--rename">
-								<!-- svelte-ignore a11y_autofocus -->
-								<input
-									type="text"
-									bind:value={renameValue}
-									aria-label="New name for {item.name}"
-									autofocus
-									onkeydown={(e) => { if (e.key === 'Enter') confirmRename(); else if (e.key === 'Escape') cancelRename(); }}
-								/>
-								<button class="fs-icon-btn" title="Save" onclick={confirmRename}><Check size={15} strokeWidth={2} /></button>
-								<button class="fs-icon-btn" title="Cancel" onclick={cancelRename}><X size={15} strokeWidth={2} /></button>
-							</div>
-						{:else}
-							{@const Ic = fileIcon(item)}
-							<div
-								class="fs-row"
-								class:dir={item.type === 'directory'}
-								class:selected={$files.selectedFiles.has(item.path)}
-								role="button"
-								tabindex="0"
-								onclick={() => rowClick(item)}
-								onkeydown={(e) => { if ((e.key === 'Enter' || e.key === ' ') && item.type === 'directory') { e.preventDefault(); rowClick(item); } }}
-							>
-								<span class="fs-sel">
-									<input
-										type="checkbox"
-										checked={$files.selectedFiles.has(item.path)}
-										aria-label="Select {item.name}"
-										onclick={(e) => toggleSelected(item, e)}
-										onkeydown={(e) => e.stopPropagation()}
-									/>
-								</span>
-								<span class="fs-nm">
-									<Ic size={16} strokeWidth={1.8} class={item.type === 'directory' ? 'fs-fold' : 'fs-file'} />
-									<span class="fs-nm-text">{item.name}</span>
-								</span>
-								<span class="fs-sz">{item.type === 'directory' ? '—' : (item.sizeFormatted ?? '—')}</span>
-								<span class="fs-md">{relTime(item.modifiedAt)}</span>
-								<RowActionMenu
-									open={actionsOpenPath === item.path}
-									onToggle={(e) => toggleRowActions(e, item.path)}
-									label="File actions"
-								>
-									{#if workerId === null}
-										<button class="fs-icon-btn" disabled={terminalBusy} title={item.type === 'directory' ? 'Open terminal here' : 'Open terminal in parent folder'} aria-label={`Open terminal ${item.type === 'directory' ? 'in' : 'in parent folder of'} ${item.name}`} onclick={(e) => { e.stopPropagation(); actionsOpenPath = null; void terminalDrawer.open(item.type === 'directory' ? item.path : currentPath); }}><TerminalSquare size={14} strokeWidth={1.8} /></button>
-									{/if}
-									<button class="fs-icon-btn" title="Rename" aria-label="Rename {item.name}" onclick={(e) => startRename(item, e)}><Edit3 size={14} strokeWidth={1.8} /></button>
-									<button class="fs-icon-btn fs-icon-btn--danger" title="Delete" aria-label="Delete {item.name}" onclick={(e) => { e.stopPropagation(); pendingDelete = item; }}><Trash2 size={14} strokeWidth={1.8} /></button>
-									{#if item.type === 'file'}
-										<button class="fs-icon-btn" title="Download" aria-label="Download {item.name}" onclick={(e) => download(item, e)}><Download size={14} strokeWidth={1.8} /></button>
-									{/if}
-								</RowActionMenu>
-							</div>
-						{/if}
-					{/each}
+			{#key `${workerId}:${showHidden}`}
+				{#each rootDirs as dir (dir.path)}
+					<FilesTreeNode name={dir.name} path={dir.path} depth={0} {currentPath} {showHidden} onNavigate={navigate} {treeVersion} />
+				{/each}
+			{/key}
+			{#snippet footer()}
+				<label class="fs-hidden"><span>Hidden files</span><Switch controlled size="sm" checked={showHidden} label="Toggle hidden files" onchange={() => files.toggleShowHidden()} /></label>
+			{/snippet}
+		</ViewPanel>
+	{/snippet}
+	{#snippet main(back)}
+		<ViewMain width="data">
+			<DetailPane name={folderName} dataLayout onBack={back} backLabel="Files">
+				{#snippet tile()}{/snippet}
+				{#snippet topStatus()}{/snippet}
+				{#snippet subtitle()}
+					<span>{selectedWorker.name}</span><span aria-hidden="true">·</span>
+					<nav class="fs-crumbs" aria-label="Breadcrumb">
+						{#each $breadcrumbs as crumb, i (crumb.path)}
+							{#if i > 0}<span aria-hidden="true">/</span>{/if}
+							<button class="st-btn touch ghost dense" aria-current={i === $breadcrumbs.length - 1 ? 'page' : undefined} title={crumb.path || 'Workspace'} onclick={() => navigate(crumb.path)}>{crumb.name}</button>
+						{/each}
+					</nav>
+				{/snippet}
+				{#snippet primary()}
+					{#if workerId === null}
+						<button class="st-btn touch" disabled={loading || !!loadError || terminalBusy} onclick={() => terminalDrawer.open(currentPath)} title="Open terminal in this folder on this worker"><TerminalSquare size={15} /><span>Open terminal here</span></button>
+					{/if}
+					<button class="st-btn touch" onclick={openNewFolder} disabled={!!loadError}><FolderPlus size={15} /><span>New folder</span></button>
+					<button class="st-btn touch primary" onclick={triggerUpload} disabled={uploading || !!loadError}>
+						{#if uploading}<Loader2 size={15} class="fs-spin" />{:else}<Upload size={15} />{/if}<span>{uploading ? `Uploading ${uploadProgress}%` : 'Upload'}</span>
+					</button>
+				{/snippet}
+				{#if showNewFolder}
+					<form class="fs-newfolder" onsubmit={(e) => { e.preventDefault(); confirmNewFolder(); }}>
+						<FolderPlus size={16} />
+						<!-- svelte-ignore a11y_autofocus -->
+						<input aria-label="Folder name" placeholder="Folder name…" bind:value={newFolderName} autofocus onkeydown={(e) => { if (e.key === 'Escape') showNewFolder = false; }} />
+						<button class="st-btn touch primary" disabled={creatingFolder || !newFolderName.trim()}>Create</button>
+						<button type="button" class="st-btn touch" onclick={() => showNewFolder = false}>Cancel</button>
+					</form>
 				{/if}
-			</div>
-
-			{#if isDragging}
-				<div class="fs-droplay"><Upload size={26} strokeWidth={1.6} /><span>Drop files to upload</span></div>
-			{/if}
-		</div>
-		<!-- Floats over the list instead of pushing it down: no layout shift. -->
-		{#if error}
-			<div class="fs-toast" role="alert">
-				<span class="fs-toast-msg">{error}</span>
-				<button class="fs-toast-x" aria-label="Dismiss error" onclick={() => files.clearError()}><X size={14} strokeWidth={2} /></button>
-			</div>
-		{/if}
-		</div>
-	</div>
-	</div>
-</div>
-
-<FilesTerminalDrawer bind:this={terminalDrawer} bind:busy={terminalBusy} />
-
-<input type="file" multiple bind:this={uploadInput} onchange={onUploadChange} style="display:none" />
-
-<ConfirmDialog
-	open={!!pendingDelete}
-	title="Delete {pendingDelete?.type === 'directory' ? 'folder' : 'file'}"
-	message={`Delete "${pendingDelete?.name}"? This cannot be undone.`}
-	confirmLabel="Delete"
-	danger
-	onConfirm={confirmDelete}
-	onCancel={() => (pendingDelete = null)}
-/>
-
-<ConfirmDialog
-	open={pendingBulkDelete}
-	title="Delete selected items"
-	message={`Delete ${selectedCount} selected item${selectedCount === 1 ? '' : 's'}? This cannot be undone.`}
-	confirmLabel="Delete"
-	danger
-	onConfirm={confirmDeleteSelected}
-	onCancel={() => (pendingBulkDelete = false)}
-/>
+				{#if selectedCount > 0}
+					<div class="fs-bulkbar" role="region" aria-label="Selected files">
+						<span>{selectedCount} selected</span>
+						<button class="st-btn touch" onclick={() => files.clearSelection()}>Clear</button>
+						<button class="st-btn touch danger" onclick={() => pendingBulkDelete = true}><Trash2 size={14} /><span>Delete selected</span></button>
+					</div>
+				{/if}
+				{#if error}<div role="alert"><InlineBanner tone="info">{error}{#snippet actions()}<button class="st-btn touch dense" aria-label="Dismiss error" onclick={() => files.clearError()}><X size={14} /></button>{/snippet}</InlineBanner></div>{/if}
+				{#if preview}
+					{#key `${workerId}:${preview.path}`}<FilesPreview item={preview} base={files.base()} onClose={() => preview = null} />{/key}
+				{/if}
+				<div class="fs-main" class:drag={isDragging} role="region" aria-label="File list" aria-busy={loading}
+					ondragover={onDragOver} ondragleave={onDragLeave} ondrop={onDrop}>
+					<div class="fs-row fs-row--head" aria-hidden={!!loadError || ($sortedFiles.length === 0)}>
+						<ViewCheckbox label="Select all" checked={allSelected} mixed={selectedCount > 0 && !allSelected} onchange={onHeaderSelectAll} disabled={loading || !!loadError || !$sortedFiles.length} />
+						<span>Name</span><span class="fs-sz">Size</span><span class="fs-md">Modified</span><span></span>
+					</div>
+					{#if loadError && workerOffline}
+						<div role="alert"><EmptyDetail title="{selectedWorker.name} is offline" message="{loadError} Its files will show here once it reconnects." icon={ServerOff}>
+							<button class="st-btn touch" onclick={() => files.loadFiles()} disabled={loading}><RotateCw size={14} />Try again</button>
+							<button class="st-btn touch primary" onclick={() => selectWorker(null)}>Back to this device</button>
+						</EmptyDetail></div>
+					{:else if loadError}
+						<div role="alert"><EmptyDetail title="This folder could not be opened" message={loadError} icon={FolderX}>
+							<button class="st-btn touch" onclick={() => files.loadFiles()} disabled={loading}><RotateCw size={14} />Try again</button>
+							{#if currentPath}<button class="st-btn touch" onclick={() => navigate('')}>Go to Workspace</button>{/if}
+							{#if workerId !== null}<button class="st-btn touch primary" onclick={() => selectWorker(null)}>Back to this device</button>{/if}
+						</EmptyDetail></div>
+					{:else if loading && $sortedFiles.length === 0}
+						<div class="fs-loading" role="status"><Loader2 size={20} class="fs-spin" />{workerId === null ? 'Loading files…' : `Loading files from ${selectedWorker.name}…`}</div>
+					{:else if $sortedFiles.length === 0}
+						<EmptyDetail title="This folder is empty" message="Upload a file or create a folder to get started." icon={Folder}>
+							<button class="st-btn touch primary" onclick={triggerUpload}>Upload a file</button>
+						</EmptyDetail>
+					{:else}
+						{#each $sortedFiles as item (item.path)}
+							{#if renameTarget?.path === item.path}
+								<form class="fs-rename" onsubmit={(e) => { e.preventDefault(); confirmRename(); }}>
+									<!-- svelte-ignore a11y_autofocus -->
+									<input bind:value={renameValue} aria-label="New name for {item.name}" autofocus onkeydown={(e) => { if (e.key === 'Escape') cancelRename(); }} />
+									<button class="st-btn touch icon ghost" title="Save" aria-label="Save"><Check size={15} /></button>
+									<button type="button" class="st-btn touch icon ghost" title="Cancel" aria-label="Cancel" onclick={cancelRename}><X size={15} /></button>
+								</form>
+							{:else}
+								{@const Ic = fileIcon(item)}
+								<div class="fs-row" class:selected={$files.selectedFiles.has(item.path)} role="button" tabindex="0"
+									onclick={() => rowClick(item)} onkeydown={(e) => { if ((e.key === 'Enter' || e.key === ' ') && e.target === e.currentTarget) { e.preventDefault(); rowClick(item); } }}>
+									<ViewCheckbox label="Select {item.name}" checked={$files.selectedFiles.has(item.path)} onchange={() => files.toggleSelection(item.path)} />
+									<span class="fs-nm" title={item.name}><Ic size={16} /><span class="fs-nm-text">{item.name}</span></span>
+									<span class="fs-sz">{item.type === 'directory' ? '—' : item.sizeFormatted ?? '—'}</span>
+									<span class="fs-md" title={new Date(item.modifiedAt).toLocaleString()}>{relTime(item.modifiedAt)}</span>
+									<RowActionMenu open={actionsOpenPath === item.path} onToggle={(e) => toggleRowActions(e, item.path)} label="File actions">
+										{#if workerId === null}<button class="st-btn touch icon ghost" disabled={terminalBusy} title={item.type === 'directory' ? 'Open terminal here' : 'Open terminal in parent folder'} aria-label={`Open terminal ${item.type === 'directory' ? 'in' : 'in parent folder of'} ${item.name}`} onclick={(e) => { e.stopPropagation(); actionsOpenPath = null; void terminalDrawer.open(item.type === 'directory' ? item.path : currentPath); }}><TerminalSquare size={14} /></button>{/if}
+										<button class="st-btn touch icon ghost" title="Rename" aria-label="Rename {item.name}" onclick={(e) => startRename(item, e)}><Edit3 size={14} /></button>
+										<button class="st-btn touch icon danger ghost" title="Delete" aria-label="Delete {item.name}" onclick={(e) => { e.stopPropagation(); pendingDelete = item; }}><Trash2 size={14} /></button>
+										{#if item.type === 'file'}<button class="st-btn touch icon ghost" title="Download" aria-label="Download {item.name}" onclick={(e) => download(item, e)}><Download size={14} /></button>{/if}
+									</RowActionMenu>
+								</div>
+							{/if}
+						{/each}
+						{/if}
+					{#if isDragging}<div class="fs-droplay"><Upload size={26} /><span>Drop files to upload</span></div>{/if}
+				</div>
+			</DetailPane>
+		</ViewMain>
+	{/snippet}
+</ViewShell>
+<FilesTerminalDrawer bind:this={terminalDrawer} bind:busy={terminalBusy} active={feature?.active ?? true} />
+<input type="file" multiple bind:this={uploadInput} onchange={onUploadChange} hidden />
+<ConfirmDialog open={!!pendingDelete} title="Delete {pendingDelete?.type === 'directory' ? 'folder' : 'file'}" message={`Delete "${pendingDelete?.name}"? This cannot be undone.`} confirmLabel="Delete" danger onConfirm={confirmDelete} onCancel={() => pendingDelete = null} />
+<ConfirmDialog open={pendingBulkDelete} title="Delete selected items" message={`Delete ${selectedCount} selected item${selectedCount === 1 ? '' : 's'}? This cannot be undone.`} confirmLabel="Delete" danger onConfirm={confirmDeleteSelected} onCancel={() => pendingBulkDelete = false} />
 
 <style>
-	.fs {
-		display: flex;
-		flex-direction: column;
-		height: 100%;
-		min-height: 0;
-		overflow: hidden;
-		background: var(--background);
-	}
-	/* Centered, max-width container — matches the mockup's .wrap (not full-bleed). */
-	.fs-wrap {
-		width: 100%;
-		max-width: 1240px;
-		margin: 0 auto;
-		flex: 1;
-		min-height: 0;
-		display: flex;
-		flex-direction: column;
-	}
-	.fs-head { flex-shrink: 0; padding: 22px 28px 0; }
-
-	/* Toolbar */
-	.fs-toolbar {
-		flex-shrink: 0;
-		display: flex;
-		align-items: center;
-		gap: 12px;
-		flex-wrap: wrap;
-		padding: 16px 28px 14px;
-	}
-	.fs-crumbs { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; min-width: 0; }
-	.fs-crumb {
-		display: inline-flex; align-items: center; gap: 5px;
-		padding: 3px 7px; border-radius: 6px;
-		background: transparent; border: none; cursor: pointer;
-		font-family: var(--font-mono, monospace); font-size: 0.78rem;
-		color: var(--muted-foreground);
-		transition: background-color 110ms ease, color 110ms ease;
-	}
-	.fs-crumb:hover { background: var(--hover-overlay); color: var(--foreground); }
-	.fs-crumb.last { color: var(--foreground); font-weight: 600; }
-	.fs-crumb :global(svg) { flex-shrink: 0; }
-	.fs-crumb-sep { color: var(--muted-foreground); opacity: 0.5; font-size: 0.78rem; }
-	.fs-toolbar-spacer { flex: 1; }
-
-	.fs-toggle {
-		display: flex; align-items: center; gap: 8px;
-		font-size: 0.78rem; font-weight: 500; color: var(--muted-foreground); cursor: pointer;
-	}
-
-	/* New folder inline */
-	.fs-newfolder {
-		flex-shrink: 0; display: flex; align-items: center; gap: 8px;
-		margin: 0 28px 12px; padding: 9px 12px;
-		border: 1px solid var(--border); border-radius: calc(var(--radius, 0.75rem) - 2px);
-		background: var(--card);
-	}
-	.fs-newfolder :global(svg) { color: var(--muted-foreground); flex-shrink: 0; }
-	.fs-newfolder input {
-		flex: 1; min-width: 0; height: 28px; padding: 0 8px;
-		background: var(--input-bg); border: 1px solid var(--border); border-radius: 6px;
-		color: var(--foreground); font-size: 0.8125rem; outline: none;
-	}
-	.fs-newfolder input:focus { border-color: var(--ring); }
-
-	/* Buttons */
-	.fs-btn {
-		display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 13px;
-		background: var(--card); color: var(--foreground);
-		border: 1px solid var(--border); border-radius: calc(var(--radius, 0.75rem) - 2px);
-		font-size: 0.8125rem; font-weight: 500; cursor: pointer; white-space: nowrap;
-		transition: background-color 120ms ease, filter 120ms ease;
-	}
-	.fs-btn:hover { background: var(--hover-overlay); }
-	.fs-btn:disabled { opacity: 0.55; cursor: not-allowed; }
-	.fs-btn--sm { height: 30px; padding: 0 11px; font-size: 0.78rem; }
-	.fs-btn--primary { background: var(--primary); color: var(--primary-foreground); border-color: transparent; }
-	.fs-btn--primary:hover { filter: brightness(1.08); background: var(--primary); }
-	.fs-btn--danger { background: var(--destructive); color: white; border-color: transparent; }
-	.fs-btn--danger:hover { filter: brightness(1.08); background: var(--destructive); }
-
-	/* Bulk-selection action bar */
-	.fs-bulkbar {
-		flex-shrink: 0;
-		display: flex; align-items: center; gap: 10px;
-		margin: 0 28px 10px;
-		padding: 8px 14px;
-		border: 1px solid var(--border); border-radius: var(--radius, 0.75rem);
-		background: color-mix(in oklab, var(--primary) 6%, var(--card));
-		font-size: 0.8125rem; font-weight: 500;
-	}
-	.fs-bulkbar span:first-child { color: var(--foreground); }
-	.fs-bulkbar .fs-btn { margin-left: auto; }
-	.fs-bulkbar .fs-btn + .fs-btn { margin-left: 0; }
-
-	/* Two-column layout */
-	.fs-layout {
-		flex: 1; min-height: 0;
-		display: grid; grid-template-columns: 240px 1fr; gap: 18px;
-		padding: 0 28px 28px; overflow: hidden;
-	}
-	/* Left column: a full-height scroll container (no chrome) wrapping a
-	   content-sized bordered panel — mirrors .fs-main + .fs-list on the right. */
-	.fs-side { min-height: 0; overflow-y: auto; }
-	.fs-tree {
-		background: var(--card); border: 1px solid var(--border);
-		border-radius: var(--radius, 0.75rem); padding: 8px;
-	}
-	.fs-tree-root {
-		display: flex; align-items: center; gap: 7px; width: 100%;
-		padding: 6px 8px; border-radius: 7px; margin-bottom: 2px;
-		background: transparent; border: none; cursor: pointer;
-		font-size: 0.8125rem; font-weight: 600; color: var(--foreground);
-		transition: background-color 110ms ease;
-	}
-	.fs-tree-root:hover { background: var(--hover-overlay); }
-	.fs-tree-root.on { background: var(--primary); color: var(--primary-foreground); }
-	.fs-tree-root :global(svg) { color: var(--muted-foreground); flex-shrink: 0; }
-	.fs-tree-root.on :global(svg) { color: var(--primary-foreground); }
-
-	.fs-crumb-sep--worker { margin: 0 -2px 0 2px; }
-	.fs-mainwrap { position: relative; min-height: 0; display: flex; flex-direction: column; }
-	.fs-main { position: relative; flex: 1; min-height: 0; overflow-y: auto; }
-
-	/* Action errors float at the foot of the list: the rows never move. */
-	.fs-toast {
-		position: absolute; left: 50%; bottom: 14px; z-index: 5;
-		transform: translateX(-50%);
-		display: flex; align-items: flex-start; gap: 10px;
-		width: max-content; max-width: min(520px, calc(100% - 24px));
-		padding: 9px 8px 9px 14px; border-radius: calc(var(--radius, 0.75rem) - 2px);
-		background: color-mix(in oklab, var(--destructive) 14%, var(--card));
-		border: 1px solid color-mix(in oklab, var(--destructive) 45%, var(--border));
-		color: var(--foreground); font-size: 0.8125rem; line-height: 1.45;
-		box-shadow: 0 10px 28px -12px rgb(0 0 0 / 0.45);
-		animation: fs-toast-in 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
-	}
-	@keyframes fs-toast-in { from { opacity: 0; transform: translate(-50%, 6px); } }
-	.fs-toast-msg { flex: 1; min-width: 0; padding-top: 2px; overflow-wrap: anywhere; }
-	.fs-toast-x {
-		display: grid; place-items: center; width: 26px; height: 26px; flex-shrink: 0;
-		background: transparent; border: none; border-radius: 6px; color: var(--muted-foreground); cursor: pointer;
-	}
-	.fs-toast-x:hover { background: var(--hover-overlay); color: var(--foreground); }
-	.fs-toast-x:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
-	.fs-main.drag { outline: 2px dashed var(--primary); outline-offset: -4px; border-radius: var(--radius, 0.75rem); }
-
-	.fs-list {
-		border: 1px solid var(--border); border-radius: var(--radius, 0.75rem);
-		overflow: hidden; background: var(--card);
-	}
-	.fs-row {
-		display: grid; grid-template-columns: 28px 1fr 92px 116px 84px; align-items: center; gap: 12px;
-		padding: 10px 16px; border-bottom: 1px solid var(--border-subtle, var(--border)); font-size: 0.8125rem;
-		transition: background-color 110ms ease;
-	}
-	.fs-row.selected { background: color-mix(in oklch, var(--primary) 10%, transparent); }
-	.fs-sel { display: flex; align-items: center; }
-	.fs-sel input { width: 15px; height: 15px; cursor: pointer; accent-color: var(--primary); }
-	.fs-row:last-child { border-bottom: none; }
-	.fs-row--head {
-		font-family: var(--font-mono, monospace); font-size: 0.66rem; text-transform: uppercase;
-		letter-spacing: 0.08em; color: var(--muted-foreground); font-weight: 600;
-		background: color-mix(in oklch, var(--muted) 35%, transparent);
-	}
-	.fs-row.dir { cursor: pointer; }
-	.fs-row:not(.fs-row--head):hover { background: var(--hover-overlay); }
-	.fs-row:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
-
-	.fs-nm { display: flex; align-items: center; gap: 10px; font-weight: 500; min-width: 0; }
-	.fs-nm :global(svg) { flex-shrink: 0; color: var(--muted-foreground); }
-	.fs-nm :global(.fs-fold) { color: var(--warning, #d97706); }
+	.fs-root { width: 100%; justify-content: flex-start; }
+	.fs-root.on { background: var(--st-accent); }
+	.fs-hidden { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 44px; padding: 0 8px; font-size: 13px; color: var(--st-mfg); }
+	.fs-crumbs { display: flex; gap: 2px; align-items: center; flex-wrap: wrap; min-width: 0; }
+	.fs-crumbs button { max-width: 240px; overflow: hidden; text-overflow: ellipsis; display: block; }
+	.fs-crumbs button[aria-current] { color: var(--st-fg); }
+	.fs-main { position: relative; min-width: 0; border-top: 1px solid var(--st-border); }
+	.fs-row { display: grid; grid-template-columns: 32px minmax(0, 1fr) 80px 90px 132px; gap: 12px; align-items: center; min-height: 44px; border-bottom: 1px solid var(--st-border); font-size: 13px; cursor: pointer; --ram-reveal: 0; --ram-touch-size: 44px; }
+	.fs-row:hover, .fs-row:focus-within { background: var(--st-hover); --ram-reveal: 1; }
+	.fs-row.selected { background: var(--st-accent); }
+	.fs-row--head { color: var(--st-mfg); cursor: default; font-size: 12px; }
+	.fs-row--head:hover { background: transparent; }
+	.fs-nm { display: flex; align-items: center; gap: 10px; min-width: 0; }
+	.fs-nm :global(svg) { color: var(--st-mfg); flex: none; }
 	.fs-nm-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-	.fs-sz, .fs-md { font-family: var(--font-mono, monospace); font-size: 0.7rem; color: var(--muted-foreground); }
-
-	/* Hover reveal of the row's actions is signalled to RowActionMenu through the
-	   inherited --ram-reveal custom property (0 hidden / 1 shown); the component
-	   owns the button opacity + the touch/narrow ⋮ collapse + slide-out. */
-	.fs-row { --ram-reveal: 0; }
-	.fs-row:hover, .fs-row:focus-within { --ram-reveal: 1; }
-	.fs-icon-btn {
-		display: grid; place-items: center; width: 26px; height: 26px;
-		background: transparent; border: none; border-radius: 6px;
-		color: var(--muted-foreground); cursor: pointer; transition: color 110ms ease, background-color 110ms ease;
-	}
-	.fs-icon-btn:hover { color: var(--foreground); background: var(--hover-overlay); }
-	.fs-icon-btn--danger:hover { color: var(--destructive); background: color-mix(in oklch, var(--destructive) 12%, transparent); }
-
-	.fs-row--rename { grid-template-columns: 1fr auto auto; }
-	.fs-row--rename input {
-		height: 28px; padding: 0 8px; background: var(--input-bg);
-		border: 1px solid var(--ring); border-radius: 6px; color: var(--foreground); font-size: 0.8125rem; outline: none;
-	}
-
-	.fs-state {
-		display: flex; flex-direction: column; align-items: center; gap: 8px;
-		padding: 44px 24px; text-align: center; color: var(--muted-foreground); font-size: 0.85rem;
-	}
-	.fs-state :global(svg) { color: var(--muted-foreground); opacity: 0.7; }
-	.fs-state--problem :global(svg) { color: var(--destructive); opacity: 0.85; }
-	.fs-state--problem .fs-state-actions :global(svg) { color: currentColor; opacity: 1; }
-	.fs-state-title { margin: 4px 0 0; color: var(--foreground); font-weight: 600; font-size: 0.9rem; }
-	.fs-state-detail { margin: 0; max-width: 44ch; overflow-wrap: anywhere; }
-	.fs-state-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 8px; }
-	.fs-link { background: none; border: none; color: var(--primary); cursor: pointer; font-size: 0.8125rem; }
-	.fs-link:hover { text-decoration: underline; }
-
-	.fs-droplay {
-		position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px;
-		background: color-mix(in oklch, var(--primary) 10%, transparent); color: var(--primary);
-		font-size: 0.9rem; font-weight: 600; border-radius: var(--radius, 0.75rem); pointer-events: none;
-	}
-
+	.fs-sz, .fs-md { color: var(--st-mfg); font-variant-numeric: tabular-nums; white-space: nowrap; }
+	.fs-sz { text-align: right; }
+	.fs-newfolder, .fs-rename, .fs-bulkbar { display: flex; gap: 8px; align-items: center; padding: 12px 0; flex-wrap: wrap; }
+	.fs-newfolder input, .fs-rename input { flex: 1; min-width: 100px; height: 32px; border: 1px solid var(--st-input); border-radius: var(--st-radius-md); background: var(--st-field); color: var(--st-fg); padding: 0 10px; font-size: 13px; }
+	.fs-bulkbar { font-size: 13px; font-variant-numeric: tabular-nums; }
+	.fs-loading { display: flex; align-items: center; gap: 12px; padding: 48px 0; color: var(--st-mfg); font-size: 13px; }
+	.fs-droplay { position: absolute; inset: 0; display: flex; justify-content: center; align-items: center; gap: 12px; min-height: 160px; background: var(--st-card); border: 1px dashed var(--st-border-strong); pointer-events: none; }
 	:global(.fs-spin) { animation: fs-spin 1s linear infinite; }
 	@keyframes fs-spin { to { transform: rotate(360deg); } }
-
-	@media (max-width: 767px) {
-		.fs-head { padding: 16px 16px 0; }
-		.fs-head :global(.sph-actions) { flex-wrap: wrap; flex-shrink: 1; }
-		.fs-btn { min-height: 44px; }
-		.fs-icon-btn { min-width: 44px; min-height: 44px; }
-		.fs-toolbar { padding: 12px 16px 10px; }
-		.fs-newfolder { margin: 0 16px 10px; }
-		.fs-layout { grid-template-columns: 1fr; padding: 0 16px 20px; overflow-y: auto; }
-		/* No folder tree on mobile — a single-column flat file list (mockup #page-files). */
-		.fs-side { display: none; }
-		.fs-row--head { display: none; }
-		.fs-row { grid-template-columns: 28px 1fr auto auto; gap: 10px; }
-		.fs-md { display: none; }
-		.fs-bulkbar { margin: 0 16px 10px; }
-		/* The page scrolls as a whole here, so pin the toast to the viewport. */
-		.fs-toast {
-			position: fixed; left: 16px; right: 16px; bottom: calc(16px + env(safe-area-inset-bottom, 0px));
-			transform: none; width: auto; max-width: none; z-index: 30;
-		}
-		@keyframes fs-toast-in-m { from { opacity: 0; transform: translateY(6px); } }
-		.fs-toast { animation-name: fs-toast-in-m; }
-		.fs-state-actions .fs-btn { min-height: 44px; }
-		.fs-toast-x { width: 36px; height: 36px; }
-	}
-	@media (prefers-reduced-motion: reduce) {
-		.fs-toast { animation: none; }
-	}
+	@container settings (max-width: 850px) { .fs-row { grid-template-columns: 32px minmax(0, 1fr) 64px 80px 132px; gap: 8px; } }
+	@media (max-width: 600px), (pointer: coarse) { .fs-root { min-height: 44px; } .fs-row { grid-template-columns: 44px minmax(0, 1fr) 56px 44px; gap: 6px; min-height: 52px; } .fs-md { display: none; } .fs-crumbs button { max-width: 180px; } .fs-newfolder input, .fs-rename input { height: 44px; font-size: 16px; } }
+	@media (prefers-reduced-motion: reduce) { :global(.fs-spin) { animation: none; } }
 </style>
