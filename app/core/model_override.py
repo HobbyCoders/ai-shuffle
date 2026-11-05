@@ -637,6 +637,7 @@ def _find_named(session_id: str, model: str, *, recent: bool = True,
                 while time.monotonic() < deadline:
                     cursor.execute(
                         "SELECT id, source, position, "
+                        "length(prompt) + length(CAST(payload AS TEXT)) AS scan_chars, "
                         "CASE WHEN length(prompt) + length(CAST(payload AS TEXT)) <= 65536 "
                         "THEN prompt END AS prompt, "
                         "CASE WHEN length(prompt) + length(CAST(payload AS TEXT)) <= 65536 "
@@ -652,6 +653,10 @@ def _find_named(session_id: str, model: str, *, recent: bool = True,
                             if native:
                                 raise _NativeSearchIncomplete
                             return None
+                        # Omitted text may contain a newer pin. Neither saved
+                        # routing nor an older naming receipt can authorize it.
+                        if native and (turn.get("scan_chars") or 0) > 65536:
+                            raise _NativeSearchIncomplete
                         texts = _typed(cursor, current, [turn], session=session)
                         if time.monotonic() >= deadline and native:
                             raise _NativeSearchIncomplete
@@ -1029,7 +1034,8 @@ async def _approve(session_id: str, profile_id: Optional[str], *, model: str,
     why = ("no owner message named it and no applicable chat approval was found" if model.startswith("prov:")
            else "the current model request did not establish consent and no applicable chat approval was found")
     if incomplete:
-        why = "the model history search failed or exceeded its five-second budget; a fresh owner answer is required"
+        why = ("the model history search failed, omitted oversized text, or exceeded its five-second budget; "
+               "a fresh owner answer is required")
     if check_memory and any(_family_consent(model, entry.text) is False
             for entry in await asyncio.to_thread(owner_memories, session_id)):
         why = (f"a saved memory mentioned {label(model)} but was not honored; "

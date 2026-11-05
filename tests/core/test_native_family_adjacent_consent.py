@@ -4,7 +4,7 @@ import json
 import pytest
 
 from app.core import model_override as mo
-from tests.core.test_model_override import ARGS, _start, _turn, chats, world  # noqa: F401
+from tests.core.test_model_override import ARGS, _native_call, _native_request, _start, _turn, chats, world  # noqa: F401
 from tests.core.test_model_override_memory import M260, _save
 
 
@@ -209,6 +209,32 @@ async def test_incomplete_native_search_requires_fresh_agreement(chats, monkeypa
     monkeypatch.setattr(mo, "_typed", incomplete)
     result = await _start({**ARGS, "model": "opus"})
     assert result.is_error and len(chats[2]) == 1 and not chats[1], result.text
+
+
+@pytest.mark.parametrize("entry", ["start", "task"])
+@pytest.mark.parametrize("authority", ["memory", "chat", "approval"])
+@pytest.mark.parametrize("oversized", ["prompt", "payload"])
+async def test_oversized_native_history_requires_fresh_agreement(chats, entry, authority, oversized):
+    from app.core.agent_types import PermissionResultAllow, PermissionResultDeny
+
+    sid = _native_request(chats, entry, "owner", "Start the review")
+    _, seen, prompts, answer = chats
+    if authority == "memory":
+        _save("Use Opus for reviews.")
+    else:
+        if authority == "chat":
+            _turn(sid, "user", "Use Opus for reviews")
+        else:
+            answer["result"] = PermissionResultAllow(updated_input={})
+        assert (await _native_call(entry, "opus", "older"))[0]
+        seen.clear()
+        prompts.clear()
+        answer["result"] = PermissionResultDeny(message="Denied")
+    _turn(sid, "user", "Use Opus version 4" + (" " * 65536 if oversized == "prompt" else ""),
+          payload={"attachment": "x" * 65536} if oversized == "payload" else None)
+    ok, error = await _native_call(entry, "opus", "oversized")
+    assert not ok and len(prompts) == 1 and not seen, error
+    assert "history" in error
 
 
 async def test_incomplete_search_cannot_reuse_or_persist_an_approval(chats, monkeypatch):
