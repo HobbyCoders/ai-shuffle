@@ -358,9 +358,26 @@ def test_child_reaches_normal_startup_with_only_bounded_shutdown_setting(tmp_pat
     assert uvicorn.Config is config and serve.run is normal_run
 
 
+def lifecycle_clock(obj, monkeypatch):
+    """Expire deadlines at lifecycle events, never by racing process startup."""
+    obj.args.ttl_seconds = 60
+    offset = [0]
+    monkeypatch.setattr(idle, "time", SimpleNamespace(monotonic=lambda: time.monotonic() + offset[0]))
+    return offset
+
+
 @pytest.mark.parametrize("failed_pause", [False, True])
 def test_real_child_process_reaped_before_paused_ttl(tmp_path, monkeypatch, failed_pause):
     obj = instance(tmp_path)
+    clock_offset = lifecycle_clock(obj, monkeypatch)
+    original_write = obj.write
+
+    def write(**changes):
+        original_write(**changes)
+        if changes.get("state") in ("paused", "pause-failed"):
+            clock_offset[0] += obj.args.ttl_seconds + 1  # TTL only after the tested stop.
+
+    obj.write = write
     stopped = threading.Event()
     lease = idle.IdleLease(obj, stopped, seconds=0)
     # These dummy children exercise teardown; the real ASGI gate is covered in
@@ -409,6 +426,7 @@ def test_real_child_process_reaped_before_paused_ttl(tmp_path, monkeypatch, fail
 
 def test_real_hung_child_hits_pause_deadline_without_deleting_data(tmp_path, monkeypatch):
     obj = instance(tmp_path)
+    clock_offset = lifecycle_clock(obj, monkeypatch)
     stopped = threading.Event()
     lease = idle.IdleLease(obj, stopped, seconds=0)
     # These dummy children exercise teardown; the real ASGI gate is covered in
@@ -418,12 +436,19 @@ def test_real_hung_child_hits_pause_deadline_without_deleting_data(tmp_path, mon
     real_popen, children = subprocess.Popen, []
     marker = tmp_path / "retained-data"
     marker.write_text("seed and owner work")
-    monkeypatch.setattr(idle, "PAUSE_SECONDS", 0.1)
 
     def spawn(*args, **kwargs):
         code = "import signal,time;signal.signal(signal.SIGTERM,signal.SIG_IGN);print('ready',flush=True);time.sleep(30)"
         process = real_popen([sys.executable, "-c", code], stdout=subprocess.PIPE, start_new_session=True)
         assert process.stdout.readline() == b"ready\n"
+        real_signal = process.send_signal
+
+        def signal_and_expire(signum):
+            real_signal(signum)
+            if signum == idle.signal.SIGTERM:
+                clock_offset[0] += idle.PAUSE_SECONDS + 1
+
+        process.send_signal = Mock(side_effect=signal_and_expire)
         children.append(process)
         return process
 
@@ -436,13 +461,15 @@ def test_real_hung_child_hits_pause_deadline_without_deleting_data(tmp_path, mon
         obj.write(state="ready")
 
     original_write, failure_at = obj.write, []
-    began = time.monotonic()
+    began = idle.time.monotonic()
 
     def write(**changes):
         original_write(**changes)
         if changes.get("state") == "pause-failed":
-            failure_at.append(time.monotonic() - began)
+            failure_at.append(idle.time.monotonic() - began)
             assert children[0].poll() is None and marker.read_text() == "seed and owner work"
+            children[0].send_signal.assert_called_once_with(idle.signal.SIGTERM)
+            clock_offset[0] += obj.args.ttl_seconds + 1  # Exercise TTL after failed pause.
 
     obj.write, obj.on_app_start = write, on_start
     db = SimpleNamespace(open=Mock(), publish_descriptor=Mock(), close=Mock(), process=Mock(),
@@ -460,6 +487,15 @@ def test_real_hung_child_hits_pause_deadline_without_deleting_data(tmp_path, mon
 @pytest.mark.parametrize("new_work", ["request", "turn", "expired-gate", "lost-commit-ack"])
 def test_work_appearing_during_final_recheck_aborts_pause(tmp_path, monkeypatch, new_work):
     obj = instance(tmp_path)
+    clock_offset = lifecycle_clock(obj, monkeypatch)
+    original_write = obj.write
+
+    def write(**changes):
+        original_write(**changes)
+        if "pausing" in obj.states and changes.get("state") in ("ready", "pause-failed"):
+            clock_offset[0] += obj.args.ttl_seconds + 1
+
+    obj.write = write
     lease = idle.IdleLease(obj, threading.Event(), seconds=0)
     real_popen, children = subprocess.Popen, []
 

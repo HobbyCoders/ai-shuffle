@@ -182,17 +182,27 @@ def test_real_guardian_ends_committed_child_after_launcher_sigkill(tmp_path):
 def test_real_committed_hung_child_keeps_refusing_in_pause_failed(tmp_path, monkeypatch):
     script = tmp_path / "server.py"
     script.write_text(SERVER)
-    children, failures = [], []
+    children, failures, clock_offset = [], [], [0]
     stopped = threading.Event()
+    # Do not spend a short shutdown deadline on startup/admission handshakes.
+    # Only the supervisor clock jumps, synchronously after the real SIGTERM.
+    monkeypatch.setattr(idle, "time", SimpleNamespace(monotonic=lambda: time.monotonic() + clock_offset[0]))
     obj = SimpleNamespace(directory=tmp_path, data={"state": "starting", "app": {}},
-        args=SimpleNamespace(ttl_seconds=20, host="127.0.0.1"), port=0, vite_port=None,
+        args=SimpleNamespace(ttl_seconds=60, host="127.0.0.1"), port=0, vite_port=None,
         fake=SimpleNamespace(log_path=tmp_path / "fake.jsonl"), record_postgres=Mock())
     original_popen = subprocess.Popen
 
     def spawn(*args, **kwargs):
         process = original_popen([sys.executable, str(script), str(tmp_path), str(ROOT), "hang"],
             cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
-        process.send_signal = Mock(wraps=process.send_signal)
+        real_signal = process.send_signal
+
+        def signal_and_expire(signum):
+            real_signal(signum)
+            if signum == signal.SIGTERM:
+                clock_offset[0] += idle.PAUSE_SECONDS + 1
+
+        process.send_signal = Mock(side_effect=signal_and_expire)
         children.append(process)
         wait_for(lambda: (tmp_path / "port").exists())
         return process
@@ -222,7 +232,6 @@ def test_real_committed_hung_child_keeps_refusing_in_pause_failed(tmp_path, monk
     db = SimpleNamespace(open=Mock(), publish_descriptor=Mock(), close=Mock(), process=Mock(),
                          query=Mock(return_value="f"))
     lease = idle.IdleLease(obj, stopped, seconds=0)
-    monkeypatch.setattr(idle, "PAUSE_SECONDS", 2)
     monkeypatch.setattr(idle.subprocess, "Popen", spawn)
     try:
         assert idle.supervise(obj, {}, db, lease, threading.Event(), start_vite=Mock(), stop_vite=Mock()) == 1
