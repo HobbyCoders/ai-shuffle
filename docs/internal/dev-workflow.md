@@ -15,6 +15,19 @@ The tools:
 | Flight recorder | The UI's state every frame as text, with automatic flags for screens going backwards, remounts, layout jumps, errors, failed requests and duplicate rows | [flight-recorder.md](flight-recorder.md) |
 | Journeys | Real user flows driven through the real UI against the dev instance, failing on any recorder anomaly, at desktop and phone sizes, fast and slowed down | [frontend/tests/journeys/README.md](../../frontend/tests/journeys/README.md) |
 
+Private one-worker dev instances pause and wake automatically after about five
+idle minutes, keeping data and the same access link; the first use waits for
+startup. Use `--no-vite` when hot reload is unnecessary (about 0.5 GB less memory
+per instance), and `--no-pause` for uninterrupted measurement runs or long manual
+sessions. Journeys, live turns, voice, in-flight requests and client frames are
+protected; local-only typing or scrolling does not extend the idle timer. CI and
+`--workers 2` stay running; a running journey also holds its instance awake.
+The first Send after a pause wakes the copy and reloads the page; the draft
+survives, so press Send again.
+A failed clean stop reports `pause-failed` and retains its data until `down` or
+TTL; it never silently starts a second cluster. See the dev-loop guide for the
+dev-only five-second stream shutdown grace and the whole-pause deadline.
+
 ## The loop
 
 1. **Reproduce first.** A bug is not worked on until it reproduces on a dev
@@ -32,9 +45,11 @@ The tools:
    seconds; Python edits restart only the app. Watch the recorder, not
    screenshots: inject it with `browser_record` (or the eval route in
    flight-recorder.md), act, stop, read the timeline.
-4. **Run the journeys the change touches.** `node frontend/tests/journeys/select.mjs`
-   names them from your diff; run them before pushing. The reproduction
-   journey must now pass and stay in the suite.
+4. **Run only the journey reproducing your bug or the one you are actively
+   fixing locally before pushing.** `node frontend/tests/journeys/select.mjs`
+   names affected journeys, but is not a request to run them all locally.
+   The reproduction journey must now pass and stay in the suite. Every PR
+   already repeats the journeys on GitHub.
 5. **Get a second pair of eyes on the running app.** For any user-visible
    change, a separate tester agent that did not write the code uses the dev
    instance at desktop and phone sizes with the recorder on and tries to break

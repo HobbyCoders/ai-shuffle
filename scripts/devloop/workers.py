@@ -71,6 +71,7 @@ class WorkerStatus:
             state = "restarting" if "restarting" in states else "starting"
         data = {**self.workers[0], "pid": os.getpid(), "pid_identity": self.identity,
                 "checkout": str(devloop.ROOT), "state": state, "worker_count": 2,
+                "pause": {"enabled": False, "reason": "paired workers need continuous presence"},
                 "workers": self.workers, "network": self.network, "guardian": self.guardian,
                 "scratch_dir": str(self.directory), "remotes_dir": str(self.directory / "remotes")}
         devloop.write_private_json(self.args.status, data)

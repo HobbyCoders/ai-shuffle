@@ -367,14 +367,21 @@ class Instance:
         with self.lock:
             self.data["app"].update(pid=process.pid, pid_identity=process_identity(process.pid),
                                     starts=self.starts)
-            postgres = getattr(self.database, "process", None)
-            if postgres is not None and self.data["postgres"] is None:
-                socket = getattr(self.database, "socket", None)
-                self.data["postgres"] = {"pid": postgres.pid,
-                                         "pid_identity": process_identity(postgres.pid),
-                                         "socket_dir": str(socket) if socket else None}
-        self.write(state="starting" if self.starts == 1 else "restarting")
+        self.record_postgres()
+        self.write(state="waking" if self.data["state"] == "waking"
+                   else "starting" if self.starts == 1 else "restarting")
         self.wake.set()
+
+    def record_postgres(self) -> None:
+        """Publish EVERY postmaster identity, before app startup (also after wake)."""
+        from app.core.temp_scratch import process_identity
+
+        postgres = getattr(self.database, "process", None)
+        if postgres is not None:
+            socket = getattr(self.database, "socket", None)
+            self.write(postgres={"pid": postgres.pid,
+                                 "pid_identity": process_identity(postgres.pid),
+                                 "socket_dir": str(socket) if socket else None})
 
     # ── readiness ──
     def on_app_exit(self, process: subprocess.Popen) -> None:
@@ -393,7 +400,8 @@ class Instance:
             self.wake.clear()
             process, started = self.app, self.app_started
             while not self.done.is_set() and process is self.app and process.poll() is None:
-                if answers_http(self.connect, self.port, "/api/preview"):
+                if (answers_http(self.connect, self.port, "/api/preview")
+                        and (not self.vite_port or answers_http(self.connect, self.vite_port))):
                     self._ready(process, round(time.monotonic() - started, 1))
                     break
                 if time.monotonic() - started > FIRST_START_GRACE_SECONDS:
@@ -420,14 +428,6 @@ class Instance:
         if link and self.vite_port:
             link = preview_access.preview_url(access["session_id"], self.browser.strip("[]"),
                                               self.vite_port, token=access["token"])
-        if self.vite_port:
-            deadline = time.monotonic() + 60
-            while not self.done.is_set() and time.monotonic() < deadline:
-                if answers_http(_connect_host(str(self.args.host)), self.vite_port):
-                    break
-                time.sleep(0.25)
-            else:
-                log.warning("Vite did not answer on port %s yet", self.vite_port)
         self.write(state="ready", access_link=link, seed=seed)
         lines = [
             f"app ready in {seconds:.1f}s",
@@ -529,6 +529,8 @@ def _validate(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None
         if args.vite_port is not None:
             parser.error("--ci serves the stamped build; --vite-port does not apply")
         args.no_vite = True
+    # Pair presence and CI need stable processes, even without browser traffic.
+    args.no_pause = getattr(args, "no_pause", False) or args.ci or getattr(args, "workers", 1) == 2
     if args.no_vite:
         problem = stamped_build_problem()
         if problem:
@@ -645,6 +647,7 @@ def up(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
                 port=free_port(exclude=(port, protected, int(env["PORT"]), vite_port or 0)),
             )
             instance = Instance(args, directory, env, fake, vite_port, gate)
+            instance.data["pause"] = {"enabled": not args.no_pause, "idle_seconds": 300}
             instance.database, instance.stopped = database, stopped
             instance.data["guardian"] = guardian
             instance.data["claude_cli"] = claude_cli or {"mode": "none"}
@@ -661,28 +664,59 @@ def up(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
             instance.write()
             if stopped.is_set():  # a signal before the instance existed
                 instance.retire()
-            if vite_port:
+            def start_vite():
+                nonlocal vite
+                if not vite_port:
+                    return
                 from app.core.temp_scratch import process_identity
 
                 api = f"http://{_url_host(instance.connect)}:{port}"
                 vite = subprocess.Popen(_vite_command(str(args.host), vite_port), cwd=FRONTEND,
                                         env=vite_environment(env, api), start_new_session=True)
-                instance.data["vite"] = {"pid": vite.pid,
-                                         "pid_identity": process_identity(vite.pid),
-                                         "port": vite_port, "proxies_to": api}
+                instance.write(vite={"pid": vite.pid,
+                                     "pid_identity": process_identity(vite.pid),
+                                     "port": vite_port,
+                                     "proxies_to": api})
                 log.info("vite dev (pid %s) on port %s, proxying /api to %s", vite.pid,
                          vite_port, api)
+
+            def stop_vite(*, clean=False, timeout=20):
+                nonlocal vite
+                if vite is not None:
+                    if clean:
+                        # A pause is not a teardown: never SIGKILL a live child.
+                        os.killpg(vite.pid, signal.SIGTERM)
+                        vite.wait(timeout=timeout)
+                    else:
+                        stop_group(vite, 10)
+                    vite = None
+                    instance.write(vite=None)
+
+            lease = None
+            if not args.no_pause:
+                from scripts.devloop.idle import IdleLease, SourceActivity
+
+                lease = IdleLease(instance, stopped)
+                SourceActivity(lease, poll=args.poll).start()
+            else:
+                start_vite()
             if not args.ci:  # a CI run tests one fixed revision: no restarts
                 watcher = Watcher(gate, poll=args.poll)
                 watcher.start()
             reporter = threading.Thread(target=instance.report, name="devloop-report",
                                         daemon=True)
             reporter.start()
-            code = supervise([sys.executable, "-m", "app.main"], env, database,
-                             ttl=args.ttl_seconds, owner_pid=os.getppid(), stopped=stopped,
-                             restart=None if args.ci else restart,
-                             on_start=instance.on_app_start, on_exit=instance.on_app_exit,
-                             stop_timeout=APP_STOP_SECONDS)
+            if lease is not None:
+                from scripts.devloop.idle import supervise as idle_supervise
+
+                code = idle_supervise(instance, env, database, lease, restart,
+                                      start_vite=start_vite, stop_vite=stop_vite)
+            else:
+                code = supervise([sys.executable, "-m", "app.main"], env, database,
+                                 ttl=args.ttl_seconds, owner_pid=os.getppid(), stopped=stopped,
+                                 restart=None if args.ci else restart,
+                                 on_start=instance.on_app_start, on_exit=instance.on_app_exit,
+                                 stop_timeout=APP_STOP_SECONDS)
             log.info("lease ended (app exit code %s); tearing down", code)
             if args.ci and not instance.announced and not stopped.is_set():
                 instance.failed = f"the app exited (code {code}) before it was ready"
@@ -752,6 +786,17 @@ def remove_own_status(path: Path, pid: int, identity: str | None = None) -> bool
     return True
 
 
+def wake_instance(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    """Explicitly resume the same lease; status --wait alone never wakes it."""
+    status = load_status(args.status)
+    if status is None or not status_alive(status):
+        parser.error("No live dev instance to wake; run `python -m scripts.devloop up`")
+    if (status.get("pause") or {}).get("enabled"):
+        write_private_json(Path(status["scratch_dir"]) / "wake.request", {"pid": status["pid"]})
+    args.wait = 180
+    return show(parser, args)
+
+
 def show(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     """Print the running instance's status. 0 when it is running (``--wait``: ready).
 
@@ -770,7 +815,7 @@ def show(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
         if status is not None and (ready or not args.wait):
             print(json.dumps(status, indent=2))
             return 0
-        if status is not None and status.get("state") in ("app-exited", "stopping"):
+        if status is not None and status.get("state") in ("app-exited", "stopping", "pause-failed"):
             print(json.dumps(status, indent=2))
             print(f"The dev instance is {status['state']}, not ready", file=sys.stderr)
             return 1
@@ -802,6 +847,8 @@ def main(argv: list[str] | None = None) -> int:
     start.add_argument("--vite-port", type=int, help="Vite dev port (default: free)")
     start.add_argument("--no-vite", action="store_true",
                        help="Serve the stamped frontend build instead of Vite dev")
+    start.add_argument("--no-pause", action="store_true",
+                       help="Keep app, Vite and PostgreSQL running while idle (CI and --workers 2 always do)")
     start.add_argument("--transcript-producer", action="store_true",
                        help="Opt into dark transcript production in this disposable instance only")
     start.add_argument("--seed", default="default", help="Seed name: default, long (performance), or none")
@@ -829,6 +876,7 @@ def main(argv: list[str] | None = None) -> int:
                                 help="Wait up to SECONDS for the instance to be ready; "
                                      "exit 0 only once it is")
     for command in (start, commands.add_parser("down", help="Stop the running instance"),
+                    commands.add_parser("wake", help="Wake a paused instance and wait until ready"),
                     status_command):
         command.add_argument("--status", type=Path, default=default_status_path(),
                              help="Status JSON path in a private (0700) directory (default: "
@@ -837,7 +885,7 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="[devloop] %(message)s", stream=sys.stdout,
                         force=True)
     logging.getLogger("watchfiles").setLevel(logging.WARNING)  # we log each restart ourselves
-    handler = {"up": up, "down": down, "status": show}[args.command]
+    handler = {"up": up, "down": down, "status": show, "wake": wake_instance}[args.command]
     try:
         return handler(parser, args)
     except StatusError as exc:
