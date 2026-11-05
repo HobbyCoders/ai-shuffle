@@ -192,4 +192,3 @@ async def test_stopped_guardrail_has_no_canonical_or_http_reply(replay_api, path
             assert runs.get_active_run(sid) is None
         finally:
             await get_session_pool().remove(sid)
-
