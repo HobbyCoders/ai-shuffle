@@ -1,0 +1,66 @@
+{
+  "description": "After native plan.json revision1: batch genuine model-reported completed, blocked and cancelled states via Plan; no seeded state or execution.",
+  "steps": [
+    {
+      "tool_calls": [
+        {
+          "name": "Plan",
+          "input": {
+            "action": "update",
+            "expected_revision": 1,
+            "request_id": "dev-plan-update",
+            "tasks": [
+              {
+                "id": "inspect",
+                "title": "Inspect current behavior",
+                "status": "completed",
+                "evidence": [
+                  "Controlled fixture retains the initial reported completion; not independent verification."
+                ],
+                "references": [
+                  "session-plan:revision:1"
+                ]
+              },
+              {
+                "id": "implement",
+                "title": "Implement bounded plan",
+                "status": "blocked",
+                "blocked_reason": "Controlled fixture is waiting for owner review; no worker or external job was started.",
+                "depends_on": [
+                  "inspect"
+                ]
+              },
+              {
+                "id": "verify",
+                "title": "Verify with a real provider",
+                "status": "cancelled",
+                "depends_on": [
+                  "implement"
+                ],
+                "evidence": [
+                  "The controlled fixture cancels this check without making a real-provider call."
+                ],
+                "references": [
+                  "session-plan:revision:1"
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "Plan",
+          "input": {
+            "action": "get"
+          }
+        }
+      ]
+    },
+    {
+      "text": "Plan revision 2: implementation is blocked pending owner review; the real-provider check is cancelled, not passed. Evidence and references are model-reported fixture data, not independent verification."
+    }
+  ]
+}
