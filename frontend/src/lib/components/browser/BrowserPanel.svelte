@@ -1178,6 +1178,8 @@
 
 	/* ── Header / toolbar ──────────────────────────────────────────────── */
 	.panel-header {
+		/* Anchors the settings popover (BrowserWorkspaceToolbar) to this row. */
+		position: relative;
 		display: flex;
 		align-items: center;
 		gap: 3px;

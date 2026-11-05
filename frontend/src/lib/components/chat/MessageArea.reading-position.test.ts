@@ -123,6 +123,6 @@ describe('MessageArea reading position', () => {
 		expect(instanceScript).toContain('queuedPromptsSeen.add(entry.content)');
 		const change = block('// Watch for message changes and streaming content updates', '// Update previous values');
 		expect(change).toContain("queuedPromptsSeen.delete(newestMessage.content ?? '')");
-		expect(change).toContain('isNavigableUserTurn(newestMessage) && (!fromQueue || shouldAutoScroll)');
+		expect(change).toContain('isNavigableUserTurn(newestMessage) && (!fromQueue || followsStop || shouldAutoScroll)');
 	});
 });

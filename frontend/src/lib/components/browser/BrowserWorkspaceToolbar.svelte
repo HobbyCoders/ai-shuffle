@@ -212,7 +212,8 @@
 	.workspace-tools { display: contents; font-size: 13px; color: var(--foreground); }
 	.workspace-tools.tabs-only { display: block; flex: 1; min-width: 0; }
 	.viewport { position: static; }
-	.viewport-content { position: absolute; top: 70px; right: 5px; width: min(340px, calc(100% - 10px)); box-sizing: border-box; z-index: 30; background: var(--popover); border: 1px solid var(--menu-border); border-radius: var(--menu-radius); box-shadow: var(--menu-shadow); }
+	/* Opens below the header row, whatever its height, so it never covers its own gear. */
+	.viewport-content { position: absolute; top: 100%; right: 5px; width: min(340px, calc(100% - 10px)); box-sizing: border-box; z-index: 30; background: var(--popover); border: 1px solid var(--menu-border); border-radius: var(--menu-radius); box-shadow: var(--menu-shadow); }
 	.ownership-label { display: none; }
 	.capture-limits { display: grid; gap: 6px; padding-bottom: 10px; border-bottom: 1px solid var(--border); }
 	.capture-limits a { color: var(--primary); text-decoration: underline; }
