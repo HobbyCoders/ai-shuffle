@@ -203,6 +203,18 @@ async function pickNativeAgent({ page, variant }) {
 	}
 }
 
+// These cases measure established queue/handoff geometry, not rapid-start
+// admission (known product bug https://github.com/HobbyCoders/ai-shuffle/issues/1052).
+// Capture the transcript frontier before Send and require this unique prompt in
+// NEW reply prose: old history and optimistic streaming=true are not readiness.
+async function replyFrontier(page) {
+	return page.locator('.chat-column [data-transcript-key]').evaluateAll(rows => rows.map(row => row.dataset.transcriptKey));
+}
+async function waitForCurrentReplyProse(page, frontier, token) {
+	await page.waitForFunction(({ frontier, token }) => [...document.querySelectorAll('.chat-column [data-transcript-key]')]
+		.some(row => !frontier.includes(row.dataset.transcriptKey) && row.querySelector('.prose')?.textContent.includes(token)), { frontier, token });
+}
+
 const cases = [{
 	name: 'fast-completion',
 	async setup(ctx) { await openClaude(ctx); await ensureFast(ctx.page, ctx.variant); },
@@ -254,8 +266,11 @@ const cases = [{
 		await page.waitForTimeout(500);
 		await mark('send a short draft');
 		const stop = await watchFrames(page);
+		const messagesBefore = Number(await page.locator('[data-ui-state="chat"]').getAttribute('data-ui-messages'));
 		await sendButton(page).click();
-		await waitTurnSettled(page, { hold: 3000 });
+		// Old history's idle state must not finish this case while the new turn
+		// is still starting, leaving the next seeded-chat clear to fail with 409.
+		await waitTurnSettled(page, { messagesAtLeast: messagesBefore + 2, hold: 3000 });
 		const frames = await stop();
 		log(`short send ${JSON.stringify(summary(frames))}`);
 		expect(travel(frames, 'rail') <= 2, `short send keeps the turn rail still (${travel(frames, 'rail').toFixed(1)}px)`);
@@ -280,9 +295,11 @@ const cases = [{
 	async act({ page, mark, variant, log }) {
 		for (let i = 0; i < 3; i++) {
 			await mark(`send long turn ${i + 1}`);
-			await typeAndSend(page, `handoff ${uniq()} ${scriptTag(variant, 'long', { tps: 300 })}`);
+			const frontier = await replyFrontier(page), token = uniq();
+			await typeAndSend(page, `handoff ${token} ${scriptTag(variant, 'long', { tps: 300 })}`);
 			await waitChat(page, { streaming: 'true' });
-			await mark('queue next turn');
+			await waitForCurrentReplyProse(page, frontier, token);
+			await mark('queue next turn after the current reply is really running');
 			await typeAndSend(page, `queued ${uniq()} [script:default tps=300]`);
 			await page.locator('.pending-messages [data-queue-confirmed="true"]').waitFor();
 			const stop = await watchFrames(page);
@@ -302,8 +319,10 @@ const cases = [{
 		await pickNativeAgent(ctx); // Exercise native auto-delivery, not CLI steer.
 	},
 	async act({ page, mark, variant, log }) {
-		await typeAndSend(page, `reader handoff ${uniq()} ${scriptTag(variant, 'long', { tps: 120 })}`);
+		const frontier = await replyFrontier(page), token = uniq();
+		await typeAndSend(page, `reader handoff ${token} ${scriptTag(variant, 'long', { tps: 120 })}`);
 		await waitChat(page, { streaming: 'true' });
+		await waitForCurrentReplyProse(page, frontier, token);
 		await typeAndSend(page, `queued reader ${uniq()} [script:default tps=300]`);
 		await page.locator('.pending-messages [data-queue-confirmed="true"]').waitFor();
 		await page.waitForFunction(selector => document.querySelector(selector).scrollTop > 650, LOG);
