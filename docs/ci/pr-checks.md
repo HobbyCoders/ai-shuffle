@@ -747,6 +747,8 @@ protection, not GitHub push protection; the hook must be installed on each clone
 
 ## Out-of-reach changes: draft first, owner acceptance before readiness
 
+All other PRs open as real (ready for review) PRs against `main`, not drafts.
+
 The pre-push update-reach check reads `gh pr view --json isDraft,labels`.
 When the branch has no PR yet or its PR is a draft, an unreachable change is a
 prominent **NOTE — OUT OF REACH**, not a push failure. The note names each group
@@ -762,6 +764,10 @@ push only. Other check failures still fail the push.
    review, have the owner/release agent mark it ready. A ready PR without the
    required labels fails update-reach on subsequent checks/pushes. Cached test
    passes do not cache PR state or labels: pre-push reads them again.
+
+If a later push to a real PR is refused because the change became out of reach,
+convert it to a draft with `gh pr ready --undo <N>` and ask the owner for acceptance
+as above.
 
 **`gh pr ready` and `gh pr merge` themselves are not blocked; edge publication
 is.** There is no GitHub-required PR check (PR CI remains off). The strict

@@ -239,7 +239,7 @@ async def test_empty_log_adopts_first_delivered_identity(mock_db, gw, monkeypatc
 
     monkeypatch.setattr(events_mod._SessionTail, "_seed", controlled_seed)
     initial_read_done = asyncio.Event()
-    if delivery == "mirror-notified-race":
+    if delivery in ("mirror-fallback-race", "mirror-notified-race"):
         real_read = events_mod._SessionTail._read_and_publish
 
         async def observe_initial_read(tail):
@@ -281,9 +281,10 @@ async def test_empty_log_adopts_first_delivered_identity(mock_db, gw, monkeypatc
             "event": "caught_up", "data": {"seq": 0, "epoch": events_mod.EMPTY_LOG_EPOCH}}
         if delivery != "mirror-missed-before-seed":
             await asyncio.wait_for(seeded.wait(), 1)
-        if delivery == "mirror-notified-race":
+        if delivery in ("mirror-fallback-race", "mirror-notified-race"):
             # Seeding alone leaves an empty-log read in flight. Finish it before
-            # A commits, so only the notified probe can start the A -> B race.
+            # A commits, so it cannot deliver A and bypass the intended probe
+            # (fallback or notified) that starts the A -> B race.
             await asyncio.wait_for(initial_read_done.wait(), 1)
         if delivery == "local-push":
             se.append_events(sid, [{"type": "message.user", "payload": {"content": "Local first"}}])

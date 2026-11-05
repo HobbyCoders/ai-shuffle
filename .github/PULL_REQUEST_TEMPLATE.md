@@ -1,6 +1,6 @@
 ## What changed and why?
 
-<!-- Describe the problem, your change and the related issue. Open this PR as a draft against main. -->
+<!-- Describe the problem, your change and the related issue. Open this PR as a real (ready for review) PR against main, not a draft, unless the pre-push check reports NOTE — OUT OF REACH. In that case, keep it as a draft until the owner accepts each reported group with its update-reach:<group> label. -->
 
 ## Local checks
 
@@ -17,4 +17,4 @@
 ## Contributor sign-off
 
 - [ ] Every commit has a DCO `Signed-off-by: Your Name <your-email>` line added with `git commit -s`.
-- [ ] I have read [CONTRIBUTING.md](../CONTRIBUTING.md) and kept this PR in draft for review.
+- [ ] I have read [CONTRIBUTING.md](../CONTRIBUTING.md) and opened this PR ready for review, unless it is out of reach; in that case, it stays a draft until the owner accepts each reported group with its `update-reach:<group>` label.
