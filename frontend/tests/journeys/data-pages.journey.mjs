@@ -107,7 +107,13 @@ await runJourney({
    await gotoApp(page,status,native && phone ? '/mobile/' : '/');
    const workspace=page.getByRole('navigation',{name:'Workspace',exact:true});
    if(!await workspace.isVisible())await page.getByRole('button',{name:native&&phone?/^Open menu/:/^Chats(?: \(|$)|Show sidebar/}).first().click();
-   await workspace.getByRole('button',{name:'Files',exact:true}).click();
+   // Native phone keeps Files under More unless the owner pinned it.
+   const files=workspace.getByRole('button',{name:'Files',exact:true});
+   if(await files.isVisible())await files.click();
+   else {
+    await workspace.getByRole('button',{name:'More',exact:true}).click();
+    await page.getByRole('menu',{name:'More destinations',exact:true}).getByRole('menuitem',{name:'Files',exact:true}).click();
+   }
    await page.getByRole('button',{name:'Workspace',exact:true}).click();
    await page.locator('.fs-row:not(.fs-row--head)').first().waitFor();
   },
