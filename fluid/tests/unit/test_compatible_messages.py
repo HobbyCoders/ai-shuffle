@@ -124,6 +124,16 @@ def test_scoped_pricing_never_inherits_claude_rates():
     assert compatible_cost("kimi", "kimi-for-coding", usage) is None
     assert compatible_cost("minimax", "MiniMax-M3", usage) > 0
     assert compatible_cost("minimax", "unknown", usage) is None
+    # OpenCode Claude IDs use Console's own sourced prices, never direct Claude.
+    assert compatible_cost("opencode", "claude-opus-5-5", usage) == pytest.approx(0.0008)
+    assert compatible_cost("opencode", "kimi-k3.1-pro", usage) is None
+    for model, threshold in (("gpt-6.1-sol", 272_000), ("gpt-6-luna", 272_000), ("grok-4.7", 200_000)):
+        low = compatible_cost("opencode", model, {"input_tokens": threshold})
+        high = compatible_cost("opencode", model, {"input_tokens": threshold + 1})
+        assert high > low * 1.99
+    opencode_plan = AnthropicClient(api_key="fake", compatible_provider="opencode", plan_key=True,
+                                    user_agent="ai-shuffle/test")
+    assert opencode_plan.estimate_cost("claude-opus-5-5", usage) is None
     plan = AnthropicClient(api_key="fake", compatible_provider="minimax", plan_key=True, user_agent="ai-shuffle/test")
     assert plan.estimate_cost("MiniMax-M3", usage) is None
 

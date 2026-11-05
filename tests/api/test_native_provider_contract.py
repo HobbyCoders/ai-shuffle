@@ -88,6 +88,7 @@ async def test_reject_invalid_key_and_do_not_use_public_catalog(client, provider
                                              "auth_token": "test-native-secret-value"})
     assert result.status_code == 400 and "test-native-secret-value" not in result.text
     assert calls[0].method == "POST" and str(calls[0].url).endswith("/v1/messages")
+    assert ("x-opencode-session" in calls[0].headers) is (provider == "opencode")
     assert not client.get(ROOT).json()["providers"]
 
 

@@ -84,7 +84,8 @@ async def check_key(row, key: str, *, client: httpx.AsyncClient) -> bool:
         raise KeyCheckError("Choose a model to check this provider key.")
     url = endpoint_root(row["provider_type"], row.get("auth_mode"), row.get("base_url")) + "/v1/messages"
     try:
-        response = await client.post(url, headers=request_headers(key, session_id="ai-shuffle-key-check"),
+        response = await client.post(url, headers=request_headers(
+                                         key, session_id="ai-shuffle-key-check" if row["provider_type"] == "opencode" else None),
                                      json={"model": model, "messages": [{"role": "user", "content": "Hi"}],
                                            "max_tokens": 1, "stream": False}, timeout=20)
     except httpx.HTTPError:
