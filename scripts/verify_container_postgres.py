@@ -258,6 +258,13 @@ class Check:
             except subprocess.TimeoutExpired:
                 evidence = b'{"unavailable":"diagnostic process timed out"}'
             (self.artifacts / "updater-lifecycle.json").write_bytes(evidence)
+            # Shell/egress/Chromium failures are not in the app's Docker log.
+            # Retain this disposable browser's log on failure as well as success.
+            try:
+                self.docker("cp", app + ":/home/appuser/.config/chrome.log",
+                            self.artifacts / "updater-chrome.log", check=False, timeout=20)
+            except subprocess.TimeoutExpired:
+                pass  # evidence collection must not mask the lifecycle failure
         self.stop(app)
         self.passed("synthetic signed source: real pip/npm assembly, warm tools/browser hits, app-only install keeps "
                     "resident revision; controlled container restart loads the signed source supervisor and preserves "

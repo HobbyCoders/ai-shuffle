@@ -1,4 +1,7 @@
-"""CI-only fixture mounting; no candidate builds or container operations run here."""
+"""Harness unit regressions with synthetic proc/CDP and mocked Docker.
+
+No candidate builds, container operations or live service probes run here.
+"""
 import json
 import runpy
 import subprocess
@@ -85,6 +88,9 @@ def test_candidate_lifecycle_installs_then_gracefully_restarts_into_signed_super
     assert (tmp_path / "updater-restarted.json").read_bytes() == b"0"
     assert json.loads((tmp_path / "updater-container-stop.json").read_text()) == check.state.return_value
     assert (tmp_path / "updater-lifecycle.json").read_bytes() == b"0"
+    chrome_log = ("cp", updated + ":/home/appuser/.config/chrome.log", tmp_path / "updater-chrome.log")
+    assert chrome_log in calls
+    assert calls.index(chrome_log) > calls.index(restarted)
     assert check.system_id.call_count == 3
     assert check.sql.call_count == 3
     check.passed.assert_called_once()
@@ -252,6 +258,9 @@ def test_diagnostics_capture_actual_files_and_read_only_policy(tmp_path, monkeyp
     from app.core.config import settings
     from scripts.ci import updater_candidate_fixture as fixture
     monkeypatch.setattr(fixture, "ROOT", tmp_path)
+    census = {"browser": []}  # diagnostic unit input, not an ownership proof
+    monkeypatch.setattr(fixture, "lifecycle_processes", Mock(return_value=census))
+    monkeypatch.setattr(fixture, "browser_ready", Mock(return_value=False))
     write_json(tmp_path / "state.json", {"pending": "a" * 40, "active": None, "private": "must-not-copy"})
     write_json(tmp_path / "request.json", {"action": "install", "expires_at": 1000})
     write_json(tmp_path / "status.json", {"phase": "ready", "updater": {"revision": "b" * 40}})
@@ -271,6 +280,8 @@ def test_diagnostics_capture_actual_files_and_read_only_policy(tmp_path, monkeyp
     assert report["files"]["handover.json"] == {"unavailable": "ValueError"}
     assert report["files"]["ci-fixture.json"] == {"unavailable": "FileNotFoundError"}
     assert report["policy"] == {"allow_updates": allowed}
+    assert report["processes"] == census
+    assert report["browser_cdp_ready"] is False
     assert "must-not-copy" not in output
     assert connect.call_args.kwargs["connect_timeout"] == 5
     assert "default_transaction_read_only=on" in connect.call_args.kwargs["options"]
@@ -283,6 +294,8 @@ def test_policy_diagnostic_failure_reports_only_exception_type(tmp_path, monkeyp
     from app.core.config import settings
     from scripts.ci import updater_candidate_fixture as fixture
     monkeypatch.setattr(fixture, "ROOT", tmp_path)
+    monkeypatch.setattr(fixture, "lifecycle_processes", Mock(return_value={}))
+    monkeypatch.setattr(fixture, "browser_ready", Mock(return_value=False))
     monkeypatch.setattr(type(settings), "get_database_connection", lambda _: {})
     monkeypatch.setattr(psycopg2, "connect", Mock(side_effect=RuntimeError("must-not-copy connection details")))
     fixture.diagnose()
@@ -291,14 +304,15 @@ def test_policy_diagnostic_failure_reports_only_exception_type(tmp_path, monkeyp
     assert "must-not-copy" not in output
 
 
-def test_failed_install_captures_diagnostics_without_masking_failure(candidate, tmp_path):
+@pytest.mark.parametrize("chrome_timeout", [False, True])
+def test_failed_install_captures_diagnostics_without_masking_failure(candidate, tmp_path, chrome_timeout):
     check, _ = candidate
     result = check.docker.return_value
 
     def docker(*args, **kwargs):
         if args[-1] == "installed":
             raise RuntimeError("original install timeout")
-        if args[-1] == "diagnose":
+        if args[-1] == "diagnose" or (chrome_timeout and args[-1] == tmp_path / "updater-chrome.log"):
             raise subprocess.TimeoutExpired("docker", 20)
         return result
 
@@ -306,13 +320,19 @@ def test_failed_install_captures_diagnostics_without_masking_failure(candidate, 
     with pytest.raises(RuntimeError, match="original install timeout"):
         check.updater_lifecycle()
     assert json.loads((tmp_path / "updater-lifecycle.json").read_text()) == {"unavailable": "diagnostic process timed out"}
+    updated = check.containers[-1]
+    assert check.docker.call_args.args == (
+        "cp", updated + ":/home/appuser/.config/chrome.log", tmp_path / "updater-chrome.log",
+    )
 
 
 def process_fixture(root, revision, *, restarted=False):
     directory = root / "versions" / revision
     resident = directory / "source/docker/container_runtime.py" if restarted else "/app/docker/container_runtime.py"
     argv = {
-        "10": ["/usr/local/bin/python3", "-I", "-B", "-u", str(resident), "run"],
+        # Entrypoint forwards empty argv; only source handover supplies "run".
+        "10": ([str(directory / "venv/bin/python"), str(resident), "run"] if restarted else
+               ["/usr/local/bin/python3", "-I", "-B", "-u", str(resident)]),
         "11": [str(directory / "venv/bin/python"), "-m", "app.main"],
         "12": ["postgres", "-D", "/data/postgres/data"],
         "13": ["/bin/bash", "/tmp/private/chrome-supervisor.sh"],
@@ -328,6 +348,36 @@ def process_fixture(root, revision, *, restarted=False):
     return proc
 
 
+@pytest.mark.parametrize("arguments", [[], ["run"]])
+def test_census_recognizes_entrypoint_default_and_explicit_run(tmp_path, arguments):
+    from scripts.ci import updater_candidate_fixture as fixture
+    proc = process_fixture(tmp_path, "b" * 40)
+    args = ["/usr/local/bin/python3", "-I", "-B", "-u", "/app/docker/container_runtime.py", *arguments]
+    (proc / "10/cmdline").write_bytes(b"\0".join(arg.encode() for arg in args) + b"\0")
+    assert fixture.lifecycle_processes(proc)["supervisor"] == [
+        {"pid": 10, "executable": args[0], "entry": "/app/docker/container_runtime.py"},
+    ]
+
+
+@pytest.mark.parametrize("args", [
+    ["/usr/local/bin/python3", "/app/docker/container_runtime.py", "dump", "--file", "-"],
+    ["/usr/local/bin/python3", "/app/docker/container_runtime.py", "restore", "--file", "/tmp/dump"],
+    ["/usr/local/bin/python3", "/app/docker/container_runtime.py", "validate-isolation"],
+    ["/usr/local/bin/python3", "/app/docker/container_runtime.py", "remap-home"],
+    ["/usr/local/bin/python3", "-c", "/app/docker/container_runtime.py", "run"],
+    ["/usr/local/bin/python3", "-m", "helper", "/app/docker/container_runtime.py", "run"],
+    ["/usr/local/bin/python3", "/tmp/helper.py", "/app/docker/container_runtime.py", "run"],
+    ["/bin/echo", "/app/docker/container_runtime.py", "run"],
+    ["/usr/bin/tini", "--", "/usr/local/bin/python3", "/app/docker/container_runtime.py", "run"],
+    ["/usr/local/bin/python3", "/app/docker/container_runtime.py", "run", "dump"],
+])
+def test_census_does_not_mistake_maintenance_or_argument_mentions_for_supervisor(tmp_path, args):
+    from scripts.ci import updater_candidate_fixture as fixture
+    proc = process_fixture(tmp_path, "b" * 40)
+    (proc / "10/cmdline").write_bytes(b"\0".join(arg.encode() for arg in args) + b"\0")
+    assert fixture.lifecycle_processes(proc)["supervisor"] == []
+
+
 @pytest.mark.parametrize("restarted", [False, True])
 def test_lifecycle_census_counts_owned_roots_not_children(tmp_path, restarted):
     from scripts.ci import updater_candidate_fixture as fixture
@@ -340,15 +390,60 @@ def test_lifecycle_census_counts_owned_roots_not_children(tmp_path, restarted):
     assert (processes["supervisor"][0]["entry"].startswith(str(tmp_path))) is restarted
 
 
+@pytest.mark.parametrize("scenario", [
+    "ready", "connection-failed", "http-error", "invalid-json", "not-object", "missing-websocket", "wrong-listener", "empty-id",
+])
+def test_browser_readiness_checks_cdp_response_without_proxy_env(monkeypatch, scenario):
+    import httpx
+    from scripts.ci import updater_candidate_fixture as fixture
+    client = httpx.Client
+    options, requests = [], []
+    prefix = "ws://127.0.0.1:9221/devtools/browser/"
+
+    def respond(request):
+        requests.append(request)
+        if scenario == "connection-failed":
+            raise httpx.ConnectError("synthetic unavailable listener", request=request)
+        if scenario == "http-error":
+            return httpx.Response(503)
+        if scenario == "invalid-json":
+            return httpx.Response(200, text="not json")
+        body = {
+            "ready": {"webSocketDebuggerUrl": prefix + "synthetic-id"},
+            "not-object": [],
+            "missing-websocket": {},
+            "wrong-listener": {"webSocketDebuggerUrl": "ws://example.invalid/devtools/browser/id"},
+            "empty-id": {"webSocketDebuggerUrl": prefix},
+        }[scenario]
+        return httpx.Response(200, json=body)
+
+    def transport_client(**kwargs):
+        options.append(kwargs)
+        return client(transport=httpx.MockTransport(respond), **kwargs)
+
+    # No service or browser is started by this protocol unit test.
+    monkeypatch.setattr(httpx, "Client", transport_client)
+    assert fixture.browser_ready() is (scenario == "ready")
+    assert options == [{"trust_env": False, "timeout": 1}]
+    assert len(requests) == 1
+    assert requests[0].method == "GET"
+    assert str(requests[0].url) == "http://127.0.0.1:9221/json/version"
+
+
 @pytest.mark.parametrize("mode", ["installed", "restarted"])
-def test_resident_proof_uses_status_process_entry_and_preserves_receipt(tmp_path, monkeypatch, capsys, mode):
+@pytest.mark.parametrize("ready_after", [0, 2])
+def test_resident_proof_uses_status_process_entry_and_preserves_receipt(tmp_path, monkeypatch, capsys, mode, ready_after):
     from scripts.ci import updater_candidate_fixture as fixture
     revision, image = "b" * 40, "a" * 40
     restarted = mode == "restarted"
     monkeypatch.setattr(fixture, "ROOT", tmp_path)
+    clock = Clock()
+    monkeypatch.setattr(fixture, "time", clock)
     proc = process_fixture(tmp_path, revision, restarted=restarted)
     census = fixture.lifecycle_processes(proc)
     monkeypatch.setattr(fixture, "lifecycle_processes", lambda: census)
+    ready = Mock(side_effect=[False] * ready_after + [True])  # CDP startup, not a real browser
+    monkeypatch.setattr(fixture, "browser_ready", ready)
     write_json(tmp_path / "ci-fixture.json", {"revision": revision, "image_revision": image})
     write_json(tmp_path / "ci-request.json", {"action": "install", "expires_at": 1000})
     write_json(tmp_path / "state.json", {"active": revision})
@@ -362,24 +457,39 @@ def test_resident_proof_uses_status_process_entry_and_preserves_receipt(tmp_path
     assert receipt["updater"]["revision"] == (revision if restarted else image)
     assert receipt["app_revision"] == revision
     assert receipt["processes"] == census
+    assert ready.call_count == ready_after + 1
+    assert clock.now == ready_after
     assert "observed_absent_at" in json.loads((tmp_path / "ci-request.json").read_text())
 
 
-@pytest.mark.parametrize("failure", ["old-resident", "booting", "trial", "duplicate-app", "image-app", "image-supervisor"])
+@pytest.mark.parametrize("failure", [
+    "old-resident", "booting", "trial", "image-app", "image-supervisor", "browser-unready",
+    *[f"{fault}-{role}" for fault in ("missing", "duplicate")
+      for role in ("supervisor", "application", "postgres", "browser_supervisor", "browser")],
+    "missing-browser-unready", "duplicate-browser-unready",
+])
 def test_restart_proof_rejects_stale_unhealthy_or_duplicate_owners(tmp_path, monkeypatch, failure):
     from scripts.ci import updater_candidate_fixture as fixture
     revision, image = "b" * 40, "a" * 40
     monkeypatch.setattr(fixture, "ROOT", tmp_path)
     monkeypatch.setattr(fixture, "time", Clock())
+    monkeypatch.setattr(fixture, "browser_ready", Mock(return_value=not failure.endswith("unready")))
     proc = process_fixture(tmp_path, revision, restarted=True)
     census = fixture.lifecycle_processes(proc)
-    if failure == "duplicate-app":
-        census["application"].append(dict(census["application"][0], pid=20))
+    if failure.startswith(("missing-", "duplicate-")):
+        role = failure.split("-")[1]
+        cmdline = proc / str(census[role][0]["pid"]) / "cmdline"
+        if failure.startswith("missing-"):
+            cmdline.unlink()  # only this test's synthetic proc file
+        else:
+            (proc / "20").mkdir()
+            (proc / "20/cmdline").write_bytes(cmdline.read_bytes())
     elif failure == "image-app":
-        census["application"][0]["executable"] = "/usr/local/bin/python3"
+        (proc / "11/cmdline").write_bytes(b"/usr/local/bin/python3\0-m\0app.main\0")
     elif failure == "image-supervisor":
-        census["supervisor"][0]["entry"] = "/app/docker/container_runtime.py"
-    monkeypatch.setattr(fixture, "lifecycle_processes", lambda: census)
+        (proc / "10/cmdline").write_bytes(b"/usr/local/bin/python3\0/app/docker/container_runtime.py\0run\0")
+    read_processes = fixture.lifecycle_processes
+    monkeypatch.setattr(fixture, "lifecycle_processes", lambda: read_processes(proc))
     write_json(tmp_path / "ci-fixture.json", {"revision": revision, "image_revision": image})
     write_json(tmp_path / "ci-request.json", {"action": "install", "expires_at": 1000})
     write_json(tmp_path / "state.json", {"active": revision, **({"booting": revision} if failure == "booting" else {})})
@@ -389,7 +499,9 @@ def test_restart_proof_rejects_stale_unhealthy_or_duplicate_owners(tmp_path, mon
     })
     if failure == "trial":
         write_json(tmp_path / "handover.json", {"revision": revision})
-    expected_error = TimeoutError if failure in ("old-resident", "booting", "trial") else AssertionError
+    expected_error = TimeoutError if failure in (
+        "old-resident", "booting", "trial", "browser-unready", "missing-browser-unready",
+    ) else AssertionError
     with pytest.raises(expected_error):
         fixture.wait_for("restarted")
 

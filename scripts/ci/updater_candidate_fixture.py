@@ -126,7 +126,8 @@ def diagnose():
         "status.json": ("phase", "checked_at", "error", "updater", "diagnostics"),
         "handover.json": ("revision",),
     }
-    report = {"observed_at": time.time(), "files": {}}
+    report = {"observed_at": time.time(), "files": {}, "processes": lifecycle_processes(),
+              "browser_cdp_ready": browser_ready()}
     for name, keys in fields.items():
         try:
             with (ROOT / name).open() as stream:
@@ -170,8 +171,17 @@ def lifecycle_processes(proc=Path("/proc")):
             continue  # a short-lived process may exit during the census
         if not args:
             continue
-        entry = next((arg for index, arg in enumerate(args[:-1])
-                      if Path(arg).name == "container_runtime.py" and args[index + 1] == "run"), None)
+        # Entrypoint forwards empty argv (main defaults to run); signed source
+        # handover supplies an explicit run. Only Python's script position is
+        # an entry, not a mention in tini, maintenance, -c, -m or wrapper args.
+        command = args[1:]
+        if Path(args[0]).name in ("python", "python3"):
+            while command and command[0] in ("-I", "-B", "-u"):
+                command = command[1:]
+            entry = (command[0] if command and Path(command[0]).name == "container_runtime.py"
+                     and command[1:] in ([], ["run"]) else None)
+        else:
+            entry = None
         role = None
         if entry:
             role = "supervisor"
@@ -187,6 +197,26 @@ def lifecycle_processes(proc=Path("/proc")):
         if role:
             processes[role].append({"pid": int(process.name), "executable": args[0], **({"entry": entry} if entry else {})})
     return processes
+
+
+def browser_ready():
+    """The shell eagerly launches Chrome; app readiness is not CDP readiness.
+
+    NativeChrome's shutdown message only describes the app watchdog in Docker,
+    not the separate shell owner. Probe the real listener, without launching a
+    second browser or treating an absent browser as a successful census.
+    """
+    import httpx
+    try:
+        with httpx.Client(trust_env=False, timeout=1) as client:
+            response = client.get("http://127.0.0.1:9221/json/version")
+            response.raise_for_status()
+            version = response.json()
+        endpoint = version.get("webSocketDebuggerUrl") if isinstance(version, dict) else None
+        prefix = "ws://127.0.0.1:9221/devtools/browser/"
+        return isinstance(endpoint, str) and endpoint.startswith(prefix) and len(endpoint) > len(prefix)
+    except (httpx.HTTPError, ValueError):
+        return False
 
 
 def wait_for(mode):
@@ -209,13 +239,20 @@ def wait_for(mode):
             assert status["diagnostics"]["revision"] == revision
             assert any(item["stage"] == "tools_build" and item["outcome"] == "hit" for item in status["diagnostics"]["stages"])
             processes = lifecycle_processes()
-            assert all(len(owned) == 1 for owned in processes.values()), processes
-            directory = ROOT / "versions" / revision
-            assert processes["application"][0]["executable"] == str(directory / "venv/bin/python")
-            resident = directory / "source/docker/container_runtime.py" if mode == "restarted" else Path("/app/docker/container_runtime.py")
-            assert processes["supervisor"][0]["entry"] == str(resident)
-            print(json.dumps({"mode": mode, "app_revision": revision, "updater": status["updater"], "processes": processes}))
-            return
+            # Refuse duplicates and missing non-browser owners even while CDP
+            # is starting/recovering. The existing 240s deadline is unchanged.
+            assert all(len(owned) == 1 for role, owned in processes.items() if role != "browser"), processes
+            assert len(processes["browser"]) <= 1, processes
+            if browser_ready():
+                # A responsive listener never substitutes for the owned roots.
+                processes = lifecycle_processes()
+                assert all(len(owned) == 1 for owned in processes.values()), processes
+                directory = ROOT / "versions" / revision
+                assert processes["application"][0]["executable"] == str(directory / "venv/bin/python")
+                resident = directory / "source/docker/container_runtime.py" if mode == "restarted" else Path("/app/docker/container_runtime.py")
+                assert processes["supervisor"][0]["entry"] == str(resident)
+                print(json.dumps({"mode": mode, "app_revision": revision, "updater": status["updater"], "processes": processes}))
+                return
         if state.get("blocked") or revision in state.get("failed", []):
             raise AssertionError("Candidate update failed or blocked")
         time.sleep(1)
