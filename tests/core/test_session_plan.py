@@ -97,6 +97,7 @@ async def test_both_registries_offer_one_deferred_planner(native):
     if not native:
         assert {"TodoWrite", "TaskCreate", "TaskUpdate", "TaskGet", "TaskList"} <= blocked
         assert "mcp__builtins__TaskList" not in blocked and "mcp__builtins__TaskGet" not in blocked
+        assert "mcp__fluid_bundled__Plan" in ha._delegated_permission_grants(options, registry)
 
 
 @pytest.mark.parametrize("allowed,denied,registered", [(["Read", "TodoWrite", "TaskCreate", "TaskUpdate", "TaskGet", "TaskList"], [], True), (None, ["Plan"], True), (None, [], False)])
@@ -108,13 +109,14 @@ def test_no_effective_plan_leaves_native_cli_planner_alone(allowed, denied, regi
                              disallowed_tools=denied, mcp_servers={})
     blocked = set(ha._delegated_disallowed(options, registry))
     assert not ({"TodoWrite", "TaskCreate", "TaskUpdate", "TaskGet", "TaskList"} & blocked)
+    assert "mcp__fluid_bundled__Plan" not in (ha._delegated_permission_grants(options, registry) or [])
 
 
 async def test_plan_endpoint_uses_transcript_access_before_storage(monkeypatch):
     from app.api import sessions
     denied = AsyncMock(side_effect=HTTPException(403, "private"))
     monkeypatch.setattr(sessions, "require_transcript_session", denied)
-    with patch.object(session_plans, "read") as reader:
+    with patch.object(session_plans, "projection") as reader:
         with pytest.raises(HTTPException) as exc:
             await sessions.get_session_plan(SimpleNamespace(), "private-session")
         assert exc.value.status_code == 403

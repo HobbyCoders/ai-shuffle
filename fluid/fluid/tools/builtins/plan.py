@@ -57,7 +57,9 @@ SPEC = ToolSpec(
         "supply goal, done_when and tasks. IDs are stable within a generation; history "
         "is retained by the host. Dependencies must exist "
         "and be acyclic; completed tasks require completed dependencies. Evidence and "
-        "existing execution references are optional, not proof. " + GUIDANCE
+        "existing execution references are optional, not proof. Reported statuses "
+        "are intent, not independent verification; cancelled is not successful "
+        "completion. This tool never executes work."
     ),
     input_schema={"type": "object", "additionalProperties": False, "properties": {
         "action": {"type": "string", "enum": ["get", "update"]},
@@ -183,6 +185,8 @@ def _local(args: dict, ctx: ToolCtx) -> dict:
     if not ctx.session_id:
         raise ValueError("Plan requires an active session")
     path = project_state_root(ctx) / "plans.sqlite3"
+    if args["action"] == "get" and not path.exists():
+        return {"plan": empty_plan(), "status_source": "model_reported"}
     path.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(path, timeout=5) as conn:
         conn.execute("CREATE TABLE IF NOT EXISTS plans (session_id TEXT PRIMARY KEY, document TEXT, receipts TEXT)")

@@ -1,0 +1,19 @@
+{
+  "description": "Read already-produced app plan after engine restart without reseeding it.",
+  "steps": [
+    {
+      "tool_calls": [
+        {
+          "name": "mcp__fluid_bundled__Plan",
+          "input": {
+            "action": "get"
+          }
+        }
+      ],
+      "compact": true
+    },
+    {
+      "text": "Read durable session plan after a fresh delegated process; statuses are model-reported, not verification."
+    }
+  ]
+}

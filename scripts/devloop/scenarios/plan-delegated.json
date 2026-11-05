@@ -1,0 +1,57 @@
+{
+  "description": "Delegated Plan producer through real bundled bridge, then auto-compaction and fresh read.",
+  "steps": [
+    {
+      "tool_calls": [
+        {
+          "name": "mcp__fluid_bundled__Plan",
+          "input": {
+            "action": "update",
+            "expected_revision": 0,
+            "request_id": "dev-plan-start",
+            "goal": "Prove session-owned planning",
+            "done_when": "Plan is stored, blockers remain visible and completion is explicitly model-reported",
+            "tasks": [
+              {
+                "id": "inspect",
+                "title": "Inspect current behavior",
+                "status": "completed"
+              },
+              {
+                "id": "implement",
+                "title": "Implement bounded plan",
+                "status": "in_progress",
+                "depends_on": [
+                  "inspect"
+                ]
+              },
+              {
+                "id": "verify",
+                "title": "Verify with a real provider",
+                "status": "blocked",
+                "blocked_reason": "No real provider credential in private dev copy",
+                "depends_on": [
+                  "implement"
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "mcp__fluid_bundled__Plan",
+          "input": {
+            "action": "get"
+          }
+        }
+      ],
+      "compact": true
+    },
+    {
+      "text": "Session plan saved. Verification remains blocked; these statuses are model-reported, not independent verification."
+    }
+  ]
+}

@@ -1,6 +1,7 @@
 """Session intent transitions and standalone persistence; no provider or database."""
 import json
 from copy import deepcopy
+from types import SimpleNamespace
 
 import pytest
 from fluid.tools.builtins import plan, note, recall, register_builtins
@@ -120,3 +121,14 @@ def test_plan_prompt_only_when_offered_no_competing_note_checklist():
             assert "Track multi-step work with Note" not in text
     assert "maxItems" not in recall.SPEC.input_schema["properties"]["ids"]
     assert "normalized unique" in recall.SPEC.input_schema["properties"]["ids"]["description"]
+
+async def test_recall_cap_counts_normalized_unique_ids_not_raw_array_length():
+    seen = []
+    def memories(ids, project=None):
+        seen.append(ids)
+        return []
+    ctx = ToolCtx(cwd="/unused", session_id="s", extra={"recall_store": SimpleNamespace(memories_by_id=memories, memories=lambda: [])})
+    await recall.handler({"ids": [" a ", "", "a", "  "] * 100}, ctx)
+    assert seen == [["a"]]
+    rejected = await recall.handler({"ids": [str(i) for i in range(11)]}, ctx)
+    assert rejected.is_error and "10" in rejected.text

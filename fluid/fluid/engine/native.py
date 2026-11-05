@@ -3875,7 +3875,11 @@ class NativeLoop(BackgroundLifecycleMixin):
             nodes = await self._context_path(sid, parent.node_id)
             if num_calls == 0:
                 await self._note_wake_turn_starts(sid, nodes)
-            overhead_tokens = self._context_overhead_tokens()
+            from fluid.tools.builtins.plan import reminder as plan_reminder
+            plan_note = await asyncio.to_thread(plan_reminder, self.ctx) if self._tool_wired("Plan") else None
+            # Reserve the bounded restoration even if the compactor folds the
+            # turn that held it. State is re-read, never inferred from a summary.
+            overhead_tokens = self._context_overhead_tokens() + ((len(plan_note) + 3) // 4 if plan_note else 0)
             # Measured first: on a resumed engine it rehydrates the last
             # call's usage, which also seeds the cache signal's miss rate.
             measured_prompt = await self._measured_window_prompt(sid, nodes)
@@ -3944,6 +3948,13 @@ class NativeLoop(BackgroundLifecycleMixin):
                 promotions.extend(admitted)
                 rendered = self._compactor.view(nodes)
             history = sanitize_assistant_history(repair_dangling_tool_calls(rendered))
+            if plan_note and not any(plan_note in message.text() for message in history):
+                # Ephemeral tail, not a system-prefix change or a transcript write.
+                # Keep tool-result pairing by extending the final user message.
+                if history and history[-1].role == "user":
+                    history[-1] = replace(history[-1], content=[*history[-1].content, Text(plan_note)])
+                else:
+                    history.append(Message(role="user", content=[Text(plan_note)]))
             if self._encrypted_reasoning_poisoned:
                 # A prior call proved the history holds reasoning blobs the
                 # current model+account cannot decrypt; render without them
