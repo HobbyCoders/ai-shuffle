@@ -9,5 +9,6 @@
 	.view-main { flex: 1; min-height: 0; min-width: 0; overflow: auto; }
 	.view-main-inner { width: 100%; min-height: 100%; padding: 48px; margin: 0 auto; }
 	.view-main[data-width='reading'] .view-main-inner { max-width: 856px; }
-	@media (max-width: 600px) { .view-main-inner { padding: 16px; } }
+	.view-main[data-width='data'] .view-main-inner { padding: 32px; }
+	@media (max-width: 600px) { .view-main-inner, .view-main[data-width='data'] .view-main-inner { padding: 16px; } }
 </style>

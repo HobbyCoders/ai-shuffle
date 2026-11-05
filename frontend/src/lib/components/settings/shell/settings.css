@@ -265,6 +265,12 @@
 	height: 15px;
 }
 
+/* Opt-in touch-sized actions for data views; desktop keeps the shared 32px control. */
+@media (max-width: 600px), (pointer: coarse) {
+	.settings-shell .st-btn.touch { min-height: 44px; }
+	.settings-shell .st-btn.touch.icon { min-width: 44px; }
+}
+
 /* Back button: only in stacked mode */
 .settings-shell .st-back {
 	display: none;

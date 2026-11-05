@@ -129,7 +129,7 @@ describe('Files worker picker', () => {
 		const remoteCalls = calls.filter((c) => c.url.pathname.includes('/workers/'));
 		expect(remoteCalls.length).toBeGreaterThan(0);
 		expect(remoteCalls.every((c) => c.url.pathname.startsWith('/api/v1/workspace/workers/dev_pc/files'))).toBe(true);
-		expect(screen.getByText(/manage files on DesktopWorker/)).toBeTruthy();
+		expect(screen.getByRole('navigation', { name: 'Breadcrumb' }).parentElement?.textContent).toContain('DesktopWorker');
 		expect(screen.queryByRole('button', { name: /Open terminal/ })).toBeNull();
 	});
 
