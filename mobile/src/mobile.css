@@ -450,7 +450,7 @@ html:root[data-platform='mobile'] .settings-shell[data-view] .st-lhead {
 html:root[data-platform='mobile'] .settings-shell[data-view] .st-lhead:not(:has(.st-filter, .st-ltools, .st-add)) {
 	padding: 0;
 }
-html:root[data-platform='mobile'] .settings-shell[data-view] .st-dwrap {
+html:root[data-platform='mobile'] .settings-shell[data-view] .st-dwrap:not(.reading) {
 	padding: 16px 16px 90px;
 }
 html:root[data-platform='mobile'] .settings-shell[data-view] .st-dtop {

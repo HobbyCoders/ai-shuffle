@@ -394,11 +394,11 @@
 	padding: 6px 4px 16px;
 }
 .settings-shell[data-stacked] .st-search input {
-	height: 40px;
-	font-size: 15px;
+	height: 44px;
+	font-size: 16px;
 }
 .settings-shell[data-stacked] .st-search .st-search-icon {
-	top: 12px;
+	top: 14px;
 }
 .settings-shell[data-stacked] .st-search kbd {
 	display: none;

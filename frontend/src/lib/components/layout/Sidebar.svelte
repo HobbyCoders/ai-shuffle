@@ -1419,9 +1419,9 @@
 
 	/* Touch sizing on any touch-only pointer, not just the mobile shell. */
 	@media (hover: none) {
-		.search { height: 40px; }
-		.filter-btn { width: 40px; height: 40px; }
-		.opt { height: 36px; }
+		.search { height: 44px; }
+		.filter-btn { width: 44px; height: 44px; }
+		.opt { height: 44px; }
 		.shelf { height: 44px; }
 	}
 

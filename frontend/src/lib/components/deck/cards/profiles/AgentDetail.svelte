@@ -185,7 +185,7 @@
 </script>
 
 {#snippet tile()}
-	<AgentAvatar {avatar} size={46} color={builtin ? null : form.avatar_color} neutral={builtin} />
+	<AgentAvatar {avatar} size={42} color={builtin ? null : form.avatar_color} neutral={builtin} />
 {/snippet}
 
 {#snippet topStatus()}
@@ -423,11 +423,6 @@
 	@container agd (max-width: 560px) {
 		.lbl {
 			display: none;
-		}
-		.agd :global(.st-dh) {
-			grid-template-columns: auto minmax(0, 1fr) auto;
-			align-items: start;
-			gap: 12px;
 		}
 		.agd :global(.st-dha) {
 			grid-column: auto;
