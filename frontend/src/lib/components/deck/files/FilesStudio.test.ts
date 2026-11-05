@@ -95,6 +95,26 @@ async function mount() {
 }
 
 describe('FilesStudio listing', () => {
+	it('puts worker, folder navigation and the hidden switch in the shared panel', async () => {
+		await mount();
+		const panel = screen.getByRole('region', { name: 'Folders on this device' }).closest('section')!;
+		expect(within(panel).getByRole('heading', { name: 'Files' })).toBeTruthy();
+		expect(within(panel).getByRole('button', { name: /^Worker:/ })).toBeTruthy();
+		expect(within(panel).getByRole('switch', { name: 'Toggle hidden files' })).toBeTruthy();
+		expect(within(panel).queryByRole('button', { name: 'Upload' })).toBeNull();
+		expect(screen.getByRole('heading', { name: 'Workspace' }).closest('.data-layout')).toBeTruthy();
+	});
+
+	it('isolates selection clicks from folder navigation and shows the mixed state', async () => {
+		await mount();
+		await fireEvent.click(screen.getByRole('checkbox', { name: 'Select docs' }));
+		expect(screen.getByRole('checkbox', { name: 'Select all' }).getAttribute('aria-checked')).toBe('mixed');
+		expect(within(list()).getByText('notes.md')).toBeTruthy();
+		expect(screen.getByText('1 selected')).toBeTruthy();
+		await fireEvent.click(screen.getByRole('checkbox', { name: 'Select all' }));
+		expect(screen.getByText('2 selected')).toBeTruthy();
+	});
+
 	it('shows the loading state, then the empty folder state', async () => {
 		listing[''] = [];
 		render(FilesStudio);
@@ -121,11 +141,12 @@ describe('FilesStudio listing', () => {
 		await fireEvent.click(within(crumbs).getAllByRole('button')[0]);
 		expect(await within(list()).findByText('notes.md')).toBeTruthy();
 
-		// A file row does not navigate on Enter.
+		// A file row opens a safe preview on Enter, without navigating away.
 		const fileRow = within(list()).getByText('notes.md').closest('[role="button"]') as HTMLElement;
-		const before = calls.length;
+		const before = sent('GET', '/workspace/files').length;
 		await fireEvent.keyDown(fileRow, { key: 'Enter' });
-		expect(calls.length).toBe(before);
+		expect(screen.getByRole('region', { name: 'Preview of notes.md' })).toBeTruthy();
+		expect(sent('GET', '/workspace/files')).toHaveLength(before);
 	});
 
 	it('re-reads the listing with hidden files when the switch flips', async () => {
@@ -142,8 +163,8 @@ describe('FilesStudio operations', () => {
 		const input = screen.getByPlaceholderText('Folder name…');
 		expect((screen.getByRole('button', { name: 'Create' }) as HTMLButtonElement).disabled).toBe(true);
 		await fireEvent.input(input, { target: { value: ' reports ' } });
-		await fireEvent.keyDown(input, { key: 'Enter' });
-		await fireEvent.keyDown(input, { key: 'Enter' });
+		await fireEvent.submit(input.closest('form')!);
+		await fireEvent.submit(input.closest('form')!);
 		await waitFor(() => expect(screen.queryByPlaceholderText('Folder name…')).toBeNull());
 		const posts = sent('POST', '/workspace/files/folder');
 		expect(posts).toHaveLength(1);
@@ -165,7 +186,7 @@ describe('FilesStudio operations', () => {
 		await mount();
 		await fireEvent.click(screen.getByRole('button', { name: 'Rename notes.md' }));
 		const input = screen.getByRole('textbox', { name: 'New name for notes.md' });
-		await fireEvent.keyDown(input, { key: 'Enter' });
+		await fireEvent.submit(input.closest('form')!);
 		expect(sent('PUT', '/workspace/files/rename')).toHaveLength(0);
 
 		await fireEvent.click(screen.getByRole('button', { name: 'Rename notes.md' }));
