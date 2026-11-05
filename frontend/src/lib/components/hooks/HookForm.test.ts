@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import HookForm from './HookForm.svelte';
+import type { Hook } from '$lib/api/hooks';
 
 vi.mock('$lib/stores/app-data.svelte', async () => {
 	const { writable } = await import('svelte/store');
@@ -9,6 +10,17 @@ vi.mock('$lib/stores/app-data.svelte', async () => {
 afterEach(cleanup);
 
 describe('HookForm hook types', () => {
+	it('does not hydrate a signing secret, including legacy responses', () => {
+		const hook = { name: 'Notify', event: 'Stop', hook_type: 'webhook', url: 'https://example.test', has_secret: true, secret: 'dummy-legacy-secret' } as unknown as Hook;
+		const onSave = vi.fn();
+		const { component } = render(HookForm, { hook, onSave });
+		expect((screen.getByPlaceholderText('HMAC secret for signature') as HTMLInputElement).value).toBe('');
+		component.save();
+		expect(onSave.mock.calls[0][0].secret).toBeUndefined();
+		component.refreshRemote(hook);
+		expect((screen.getByPlaceholderText('HMAC secret for signature') as HTMLInputElement).value).toBe('');
+	});
+
 	it('offers exactly the bash and webhook types', () => {
 		render(HookForm, { onSave: vi.fn() });
 		expect(screen.getByRole('button', { name: 'Bash' })).toBeTruthy();

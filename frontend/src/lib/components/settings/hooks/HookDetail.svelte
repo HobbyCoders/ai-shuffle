@@ -51,6 +51,7 @@
 	const errors = $derived(model.errors[id] ?? []);
 	const remote = $derived(model.remote[id]);
 	const enabled = $derived(hook?.enabled ?? form?.enabled ?? true);
+	const needsSecret = $derived(!isDraft && !hook && form?.type === 'webhook' && form.hasSecret);
 
 	const scopeOptions = $derived([
 		{ value: '', label: 'App (all chats)' },
@@ -156,7 +157,7 @@
 					{/snippet}
 				</InlineBanner>
 			{:else if remote === 'deleted'}
-				<InlineBanner tone="warn">Deleted elsewhere. Save adds it back.</InlineBanner>
+				<InlineBanner tone="warn">{needsSecret ? 'Deleted elsewhere. Enter a signing secret before saving it again.' : 'Deleted elsewhere. Save adds it back.'}</InlineBanner>
 			{/if}
 			{#if errors.length}
 				<InlineBanner tone="warn"><span role="alert">{errors.join('. ')}</span></InlineBanner>
@@ -233,7 +234,7 @@
 					<SettingRow label="URL" hint="Receives a POST">
 						<TextField bind:value={form.url} type="url" placeholder="https://ntfy.sh/my-topic" mono width={300} />
 					</SettingRow>
-					<SettingRow label="Secret" hint="Signs each request" help="The signature is sent in the X-Hook-Signature header.">
+					<SettingRow label="Secret" hint={needsSecret ? 'Required to recreate' : 'Signs each request'} help="The signature is sent in the X-Hook-Signature header.">
 						{#if form.secretState === 'saved' || form.secretState === 'remove'}
 							<ValueText tone={form.secretState === 'remove' ? 'muted' : 'fg'} value={form.secretState === 'remove' ? 'Removed when you save' : 'Saved'} />
 							{#if form.secretState === 'saved'}

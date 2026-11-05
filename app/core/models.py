@@ -5,7 +5,7 @@ Pydantic models for API requests and responses
 from datetime import datetime
 from enum import Enum
 from typing import Optional, List, Dict, Any, Union, Literal
-from pydantic import BaseModel, Field, field_validator, computed_field
+from pydantic import BaseModel, Field, field_validator, computed_field, model_validator
 
 # Import-cycle safe: ``session_modes`` only imports ``tool_access``, which has
 # no app imports at all (the same discipline that lets the DB migrations use it).
@@ -1183,15 +1183,14 @@ class HookBase(BaseModel):
     timeout: int = Field(default=30000, ge=1000, le=300000, description="Timeout in ms (1-300 seconds)")
     # For webhook hooks
     url: Optional[str] = Field(None, description="Webhook URL to POST to")
-    secret: Optional[str] = Field(None, description="HMAC secret for webhook signing")
     # Common
     enabled: bool = True
     tool_matcher: Optional[str] = Field(None, description="Tool name pattern for PreToolUse/PostToolUse (e.g., 'Bash|Edit')")
 
 
 class HookCreate(HookBase):
-    """Hook creation request"""
-    pass
+    """Hook creation request; signing secrets are write-only."""
+    secret: Optional[str] = Field(None, description="HMAC secret for webhook signing")
 
 
 class HookUpdate(BaseModel):
@@ -1202,13 +1201,24 @@ class HookUpdate(BaseModel):
     command: Optional[str] = None
     timeout: Optional[int] = Field(None, ge=1000, le=300000)
     url: Optional[str] = None
-    secret: Optional[str] = None
+    secret: Optional[str] = Field(None, description="Nonblank replaces the signing secret; blank keeps it")
+    clear_secret: bool = Field(False, description="Explicitly remove the signing secret")
     enabled: Optional[bool] = None
     tool_matcher: Optional[str] = None
 
 
 class Hook(HookBase):
-    """Full hook response"""
+    """Public hook response; the stored signing secret never leaves the server."""
+    has_secret: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def secret_presence(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "secret" in data:
+            data = {**data, "has_secret": bool(data["secret"])}
+            data.pop("secret")
+        return data
+
     id: str
     project_id: Optional[str] = None
     created_at: datetime

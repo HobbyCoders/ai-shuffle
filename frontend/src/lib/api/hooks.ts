@@ -36,7 +36,7 @@ export interface Hook {
 	command: string | null;
 	timeout: number;
 	url: string | null;
-	secret: string | null;
+	has_secret: boolean;
 	enabled: boolean;
 	tool_matcher: string | null;
 	created_at: string;
@@ -64,7 +64,9 @@ export interface HookUpdate {
 	command?: string | null;
 	timeout?: number;
 	url?: string | null;
+	/** Nonblank replaces the signing secret; blank keeps it. */
 	secret?: string | null;
+	clear_secret?: boolean;
 	enabled?: boolean;
 	tool_matcher?: string | null;
 }

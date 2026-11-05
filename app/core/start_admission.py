@@ -5,6 +5,11 @@ The durable turns queue is authoritative (and remains visible as Queued). Only
 wait deadline defers a kick, NOT the accepted turn. Callers retry without dropping
 work. FIFO applies to this worker's waiting set; durable overflow retries join its
 tail. Remote dispatch is admitted by the executing worker, never by the sender.
+
+An old checkout blocks starts for as long as it could be doing database work, however
+long that is. It stops only when PostgreSQL itself shows no work behind it, or it is
+declared maintenance: queueing then holds every new turn forever without relieving
+anything (#1020). It still counts in utilization: that capacity is gone.
 """
 from __future__ import annotations
 
@@ -33,8 +38,8 @@ def snapshot() -> dict[str, float]:
     return {
         "utilization": pool.get("in_use", 0) / capacity,
         "waiting": pressure.get("waiting", 0) + events["waiting"],
-        "oldest": max(pressure.get("oldest_hold_seconds", 0),
-                      events["oldest_wait_seconds"], events["oldest_write_seconds"]),
+        "oldest": max(pressure.get("oldest_live_hold_seconds", 0),
+                      events["oldest_wait_seconds"], events["oldest_live_write_seconds"]),
         "latency": pressure.get("hold_seconds_total", 0),
         "holds": pressure.get("holds", 0),
         "acquisition": pressure.get("acquisition_seconds_total", 0),

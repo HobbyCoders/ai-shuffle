@@ -8,7 +8,9 @@ All domain modules import from here. Do NOT import domain modules from this file
 
 import json
 import re
+import uuid
 from collections import deque
+from dataclasses import dataclass
 import threading
 import time
 import logging
@@ -24,7 +26,8 @@ import psycopg2.extras
 import psycopg2.extensions
 
 from app.core.config import settings
-from app.db.commit_deadline import bounded_commit
+from app.db.backend_probe import BackendProbe
+from app.db.commit_deadline import bounded_commit, owner_frames, remember_transport
 
 logger = logging.getLogger("app.db")
 
@@ -90,6 +93,28 @@ def parse_database_url(db_url: str) -> Dict[str, Any]:
     return _parse_legacy_database_url(db_url)
 
 
+@dataclass
+class _Hold:
+    """One checkout and what is known about it. See _HOLD_CHECK_SECONDS.
+
+    Three things stop it counting as pressure, and nothing else does: PostgreSQL
+    confirmed its backend exited (final), PostgreSQL recently said it is idle (only
+    until ``idle_until``), or it was declared maintenance.
+    """
+    owner: tuple
+    backend: Optional[tuple]  # (pid, tag); None for doubles, which are never asked about.
+    maintenance: bool = False
+    exited: bool = False
+    idle_until: float = 0.0
+    reported: Optional[bool] = None  # The last verdict logged, so each is logged once.
+
+    def silent(self, now: float) -> bool:
+        return self.exited or now < self.idle_until
+
+    def exempt(self, now: float) -> bool:
+        return self.maintenance or self.silent(now)
+
+
 class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
     """Open the startup minimum, then retain healthy connections up to maxconn."""
 
@@ -119,6 +144,12 @@ class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
         # Only live physical connections and active checkouts; bounded by maxconn.
         self._physical = set()
         self._held_since = {}
+        self._holds = {}
+        # Which backend each physical connection opened with.
+        self._backends = {}
+        self._hold_check_running = False
+        self._next_hold_check = 0.0
+        self._backend_probe = BackendProbe()
         # When each connection last became idle in the pool. Read on checkout to
         # decide whether the socket is old enough to be worth probing; see
         # _get_pg_connection. Entries are dropped when a connection is discarded.
@@ -208,14 +239,113 @@ class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
                 )
 
     def pressure_stats(self):
+        stats = self._read_pressure()
+        due = self._claim_hold_check()
+        if due:
+            try:
+                threading.Thread(target=self._check_holds, args=(due,),
+                                 name="db-hold-check", daemon=True).start()
+            except RuntimeError:  # Out of threads: the same as any other lack of an answer.
+                with self._pressure_lock:
+                    self._record_no_answer()
+                stats = self._read_pressure()  # That just ended any idle answer.
+        return stats
+
+    def _read_pressure(self):
+        now = time.monotonic()
         with self._pressure_lock:
             stats = dict(self._pressure)
             stats["ordinary_capacity"] = self.maxconn - self._reserved
             stats["oldest_hold_seconds"] = (
-                time.monotonic() - min(self._held_since.values())
-                if self._held_since else 0.0
+                now - min(self._held_since.values()) if self._held_since else 0.0
             )
-            return stats
+            stats["oldest_live_hold_seconds"] = max((
+                now - started for key, started in self._held_since.items()
+                if not self._holds[key].exempt(now)
+            ), default=0.0)
+            stats["retained_holds"] = sum(h.silent(now) for h in self._holds.values())
+            stats["maintenance_holds"] = sum(h.maintenance for h in self._holds.values())
+        return stats
+
+    def _claim_hold_check(self):
+        """The checkouts to ask about, if a check should start now."""
+        now = time.monotonic()
+        with self._pressure_lock:
+            if self._hold_check_running or self._closing or now < self._next_hold_check:
+                return None
+            due = {
+                key: hold for key, hold in self._holds.items()
+                if now - self._held_since[key] >= _HOLD_CHECK_SECONDS
+                and hold.backend and not hold.maintenance and not hold.exited
+            }
+            self._hold_check_running = bool(due)
+            return due
+
+    def abandoned_holds(self):
+        """Connection ids PostgreSQL shows no work for; see _HOLD_CHECK_SECONDS."""
+        now = time.monotonic()
+        with self._pressure_lock:
+            return {key for key, hold in self._holds.items() if hold.silent(now)}
+
+    def exempt_hold(self, conn):
+        """This checkout runs long on purpose and is not a stall; ends with its return."""
+        with self._pressure_lock:
+            hold = self._holds.get(id(conn))
+            if hold is not None:
+                hold.maintenance = True
+
+    def _check_holds(self, due):
+        """Ask PostgreSQL about long checkouts; see app/db/backend_probe.py for how."""
+        asked = time.monotonic()
+        backends = None
+        reports = []
+        try:
+            kwargs = {k: v for k, v in self._kwargs.items() if k != "application_name"}
+            backends = self._backend_probe.read(
+                [hold.backend[0] for hold in due.values()], self._args, kwargs,
+                _HOLD_PROBE_SECONDS)
+        except Exception as exc:  # noqa: BLE001 - never decides anything; type only
+            logger.info("Could not check long database checkouts: %s", type(exc).__name__)
+        finally:
+            with self._pressure_lock:
+                if backends is None:
+                    self._record_no_answer()
+                else:
+                    self._hold_check_running = False
+                    self._next_hold_check = time.monotonic() + _HOLD_RECHECK_SECONDS
+                    reports = self._record_answer(due, backends, asked)
+        for report in reports:
+            _report_long_hold(*report)
+
+    def _record_no_answer(self):
+        # Caller holds _pressure_lock. No answer means no verdict, and it also ends any
+        # earlier idle answer: when the database cannot reply, that is exactly the
+        # pressure admission exists for. A confirmed exit stays final.
+        self._hold_check_running = False
+        self._next_hold_check = time.monotonic() + _HOLD_RECHECK_SECONDS
+        for hold in self._holds.values():
+            hold.idle_until = 0.0
+
+    def _record_answer(self, due, backends, asked):
+        # Caller holds _pressure_lock. Returns what to log, outside it.
+        reports = []
+        now = time.monotonic()
+        for key, hold in due.items():
+            if self._holds.get(key) is not hold:
+                continue  # Returned while we asked; the answer is about nobody.
+            pid, tag = hold.backend
+            backend = backends.get(pid)
+            if backend is not None and backend["tag"] != tag:
+                backend = None  # That pid is now another backend, so this one exited.
+            # Final: a backend never returns. An idle answer is only as good as it is fresh.
+            hold.exited = backend is None
+            idle = backend is not None and _backend_shows_no_work(backend)
+            hold.idle_until = asked + _HOLD_ANSWER_SECONDS if idle else 0.0
+            silent = hold.exited or idle
+            if hold.reported is not silent:
+                hold.reported = silent
+                reports.append((silent, now - self._held_since[key], hold.owner, pid, backend))
+        return reports
 
     def _duration(self, prefix, elapsed):
         # Caller holds _pressure_lock.
@@ -242,11 +372,19 @@ class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
                 self._duration("timeout", elapsed)
 
     def _connect(self, key=None):
+        # A pid can be reused. libpq sends this name in its startup packet, so telling
+        # backends apart takes no extra round trip and adds nothing that can fail here.
+        # Always called under the driver's lock or from the constructor.
+        tag = f"ai-shuffle-pool-{uuid.uuid4().hex[:16]}"
+        self._kwargs = {**self._kwargs, "application_name": tag}
         conn = super()._connect(key)
+        remember_transport(conn)
         with self._pressure_lock:
             self._physical.add(id(conn))
             self._last_returned[id(conn)] = time.monotonic()
             self._pressure["connections_opened"] += 1
+            backend_pid = getattr(getattr(conn, "info", None), "backend_pid", None)
+            self._backends[id(conn)] = (backend_pid, tag) if isinstance(backend_pid, int) else None
         return conn
 
     def _getconn(self, key=None):
@@ -260,7 +398,11 @@ class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
             raise psycopg2.pool.PoolError("connection pool exhausted")
         conn = super()._getconn(key)
         with self._pressure_lock:
-            self._held_since.setdefault(id(conn), time.monotonic())
+            if id(conn) not in self._held_since:
+                self._held_since[id(conn)] = time.monotonic()
+                thread = threading.current_thread()
+                self._holds[id(conn)] = _Hold(
+                    (thread.ident, thread.name), self._backends.get(id(conn)))
         return conn
 
     def idle_seconds(self, conn) -> float:
@@ -284,11 +426,13 @@ class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
         # Called under the driver's lock, including the force-reclaim path.
         with self._pressure_lock:
             started = self._held_since.pop(id(conn), None)
+            self._holds.pop(id(conn), None)
             if started is not None:
                 self._pressure["holds"] += 1
                 self._duration("hold", time.monotonic() - started)
             if discarded:
                 self._last_returned.pop(id(conn), None)
+                self._backends.pop(id(conn), None)
                 if id(conn) in self._physical:
                     self._physical.remove(id(conn))
                     self._pressure["connections_discarded"] += 1
@@ -329,6 +473,7 @@ class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
         deadline = time.monotonic() + timeout
         with self._lock:
             self._closing = True
+            self._backend_probe.close()
         self._notify_available()
         while True:
             # Match _acquire's generation protocol: never take the driver lock
@@ -447,6 +592,61 @@ class _PgDictConnection:
 # =============================================================================
 # Connection management
 # =============================================================================
+
+# Past this age a checkout is worth asking PostgreSQL about. Age alone proves
+# nothing: statement_timeout bounds each statement, not the transaction, so one
+# checkout can do useful work for as long as it keeps issuing statements. Only
+# the backend can say. A checkout stops counting as pressure once its backend is
+# gone, or for as long as PostgreSQL keeps saying it has run nothing for this long
+# while the borrower still holds it, for example a borrower polling a descriptor
+# number that now names someone else's socket, which nothing can wake. A running
+# statement always counts, however old.
+_HOLD_CHECK_SECONDS = 60.0
+_HOLD_RECHECK_SECONDS = 15.0
+# An idle answer lapses after this unless a newer one renews it: the borrower can
+# resume at any moment, and a probe that fails or stalls cannot say so.
+_HOLD_ANSWER_SECONDS = 30.0
+# The whole probe, starting its process included. It is then killed.
+_HOLD_PROBE_SECONDS = 5.0
+
+
+def _backend_shows_no_work(backend) -> bool:
+    """The backend is idle and has been since before the check age."""
+    return (backend["state"] in ("idle", "idle in transaction", "idle in transaction (aborted)")
+            and backend["state_age"] >= _HOLD_CHECK_SECONDS)
+
+
+def _report_long_hold(silent, age, owner, backend_pid, backend) -> None:
+    """Name a long checkout once per verdict, with where its thread and backend are.
+
+    Thread, pid, frame locations and wait state only: no SQL, parameters or locals.
+    A log sink cannot stop admission.
+    """
+    try:
+        thread_id, thread_name = owner or (0, "unknown")
+        logger.warning(
+            "Database connection %s %.1fs: thread=%s backend_pid=%s backend=%s frames=%s",
+            "retained, not counted as pressure," if silent else "held, still counted as pressure,",
+            age, thread_name, backend_pid,
+            "gone" if backend is None else "state={state} wait={wait_type}:{wait} "
+            "state_age={state_age:.1f}".format(**backend),
+            owner_frames(thread_id),
+        )
+    except Exception:  # noqa: BLE001 - a diagnostic never decides whether a turn starts
+        pass
+
+
+def exempt_from_start_pressure(conn) -> None:
+    """Declare a maintenance checkout (VACUUM, online index build) not a stall.
+
+    It runs for minutes on purpose under its own raised limits, so holding new
+    turns for its age relieves nothing. Slow interval latency still blocks starts
+    if it really does load the database, and its slot still counts in utilization.
+    """
+    pool = _pg_pool
+    if isinstance(pool, _RetainingThreadedConnectionPool):
+        pool.exempt_hold(getattr(conn, "_conn", conn))
+
 
 # Application callers wait in FIFO order, bounded by the existing deadline.
 _POOL_ACQUIRE_MAX_WAIT_SECONDS = 2.0
@@ -639,6 +839,9 @@ def pressure_stats() -> Optional[Dict[str, Any]]:
     check — a rising count means the server is dropping idle connections
     (restart, failover, an idle NAT timeout shorter than the keepalive).
     Hold durations include return/rollback cleanup, but not acquisition waits.
+    ``oldest_hold_seconds`` is the true age; ``oldest_live_hold_seconds`` leaves
+    out ``retained_holds``, checkouts PostgreSQL shows no work for (see
+    ``_HOLD_CHECK_SECONDS``), and declared ``maintenance_holds``.
     Snapshots are copies; a new pool starts fresh and shutdown returns None.
     """
     pool = _pg_pool
@@ -720,10 +923,13 @@ _event_write_slots = threading.BoundedSemaphore(4)
 _event_pressure_lock = threading.Lock()
 _event_waiting: Dict[object, float] = {}
 _event_active: Dict[object, float] = {}
+_event_connections: Dict[object, int] = {}
 
 
 def event_pressure_stats() -> Dict[str, float]:
     """Non-DB snapshot, including writers waiting BEFORE pool checkout."""
+    pool = _pg_pool
+    abandoned = pool.abandoned_holds() if isinstance(pool, _RetainingThreadedConnectionPool) else ()
     now = time.monotonic()
     with _event_pressure_lock:
         return {
@@ -731,6 +937,10 @@ def event_pressure_stats() -> Dict[str, float]:
             "active": len(_event_active),
             "oldest_wait_seconds": now - min(_event_waiting.values(), default=now),
             "oldest_write_seconds": now - min(_event_active.values(), default=now),
+            "oldest_live_write_seconds": max((
+                now - started for ticket, started in _event_active.items()
+                if _event_connections.get(ticket) not in abandoned
+            ), default=0.0),
         }
 
 
@@ -750,11 +960,14 @@ def get_event_db() -> Iterator[_PgDictConnection]:
         if not acquired:
             raise psycopg2.pool.PoolError("event write admission deadline exceeded")
         with get_turn_db() as conn:
+            with _event_pressure_lock:
+                _event_connections[ticket] = id(getattr(conn, "_conn", conn))
             yield conn
     finally:
         with _event_pressure_lock:
             _event_waiting.pop(ticket, None)
             _event_active.pop(ticket, None)
+            _event_connections.pop(ticket, None)
         if acquired:
             _event_write_slots.release()
 
