@@ -23,7 +23,7 @@ import ProvidersCollection from './ProvidersCollection.svelte';
 import { claudeKeyItem } from './providers-model';
 import { providerDrafts } from './drafts.svelte';
 import { safeKeyHint } from './credential-display';
-import { claudeAccounts, claudeSummary, gatewayRow, row } from './fixtures';
+import { claudeAccounts, claudeSummary, gatewayRow, nativeEnrollment, nativeRow, row } from './fixtures';
 import { fakeWorker } from './fake-worker';
 
 const CIPHERTEXT = 'enc:Z0FBQUFBQm1hc2tlZFNlY3JldFZhbHVlU0VOVElORUxU289';
@@ -48,7 +48,8 @@ function start() {
 	const worker = fakeWorker({
 		rows: [
 			row({ auth_token_set: true, auth_token_masked: OLD_MASK }),
-			gatewayRow({ auth_token_set: true, auth_token_masked: CIPHERTEXT })
+			gatewayRow({ auth_token_set: true, auth_token_masked: CIPHERTEXT }),
+			...nativeEnrollment.map((option) => nativeRow(option, { auth_token_masked: '********' }))
 		],
 		claude: claudeSummary({
 			api_key: { set: true, last4: null },
@@ -98,7 +99,7 @@ describe('stored credentials on the page', () => {
 		await flush();
 		const items = [...document.querySelectorAll('[data-settings-item]')].map((el) => el.getAttribute('data-settings-item') as string);
 		// Each kind of stored key really is on the page, or this proves nothing.
-		expect(items).toEqual(expect.arrayContaining(['mp:p1', 'mp:gw-1', claudeKeyItem('k1'), 'fal:key']));
+		expect(items).toEqual(expect.arrayContaining(['mp:p1', 'mp:gw-1', claudeKeyItem('k1'), 'fal:key', ...nativeEnrollment.map((p) => `mp:${nativeRow(p).id}`)]));
 		for (const item of items) {
 			settingsNav.go({ category: 'providers', item });
 			await flush();
@@ -128,6 +129,7 @@ describe('safeKeyHint', () => {
 		[OLD_MASK, ''],
 		['gAAAAABmabc...wxyz', ''],
 		['Z0FBQUFB...U289', ''],
+		['********', ''],
 		[null, ''],
 		[undefined, ''],
 		['', ''],

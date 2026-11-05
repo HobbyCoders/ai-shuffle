@@ -23,11 +23,12 @@
 	import { providers } from '$lib/stores/providers.svelte';
 	import { fetchProviderModels } from '$lib/api/model-providers';
 	import ProviderGlyph from '$lib/components/settings/ProviderGlyph.svelte';
+	import { loadNativeOptions, nativeOptions } from '$lib/components/settings/providers/native-options.svelte';
 	import { buildProviders, type ProviderId } from '$lib/components/settings/providers/providers-model';
 	import ClaudeConnect from './ClaudeConnect.svelte';
 	import ProviderConnect from './ProviderConnect.svelte';
 	import {
-		SETUP_PROVIDERS, pendingRow, providerReadiness, readyCount, rowsToRecheck, setupReadiness,
+		setupProviders, pendingRow, providerReadiness, readyCount, rowsToRecheck, setupReadiness,
 		type SetupProviderChoice
 	} from './provider-readiness';
 
@@ -57,6 +58,7 @@
 		fal: { keySet: s.falKeySet, masked: s.falKeyMasked, enabled: s.falEnabled },
 	}));
 	const readiness = $derived(setupReadiness(gate, views, s.providers));
+	const choices = $derived(setupProviders());
 
 	const NAMES: Record<string, string> = { claude: 'Claude', openai: 'OpenAI', grok: 'xAI Grok', openrouter: 'OpenRouter' };
 	function nameOf(id: string): string {
@@ -100,6 +102,7 @@
 	}
 
 	onMount(() => {
+		void loadNativeOptions();
 		gate = auth.current.status?.agent_gate ?? null;
 		void recheck();
 		// A sign-in finished elsewhere (another tab, a host terminal) shows up on its own.
@@ -113,8 +116,9 @@
 		Subscriptions (ChatGPT, SuperGrok, Claude) and API keys both work. Your provider bills you directly.
 	</p>
 
+	{#if nativeOptions.error}<p class="text-sm" role="alert">{nativeOptions.error}</p><button type="button" class="ui-button" onclick={() => loadNativeOptions()}>Retry provider options</button>{/if}
 	<ul class="choices" aria-label="AI providers">
-		{#each SETUP_PROVIDERS as p (p.id)}
+		{#each choices as p (p.id)}
 			{@const count = readyCount(p.id, readiness.ready)}
 			<li class="choice" class:open={open === p.id} class:connected={count > 0}>
 				<button type="button" class="choice-head" aria-expanded={open === p.id}

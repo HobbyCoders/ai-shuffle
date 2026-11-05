@@ -42,7 +42,7 @@
 				? 'New provider'
 				: `${provider.name}, new provider`
 			: `${provider?.name}, new ${
-					draft.flavor === 'cli' || draft.flavor === 'device'
+					draft.flavor === 'cli' || draft.flavor === 'device' || draft.flavor === 'plan-key'
 						? 'subscription'
 						: draft.flavor === 'cloud'
 							? 'cloud provider or gateway'
