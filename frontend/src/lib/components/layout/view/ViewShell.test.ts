@@ -35,6 +35,20 @@ describe('ViewShell', () => {
 		expect(desktopStyles).toMatch(/html\.desktop :is\(\.sidebar, \.view-shell, \.reopen-panel\) :is\(button, a, input, textarea, select, summary[^}]+-webkit-app-region: no-drag/s);
 		expect(desktopStyles).toMatch(/:has\(> \.sidebar-slot:is\(\.floating, \.panel-overlay:not\(\.rail-only\)\)\)[^}]+-webkit-app-region: no-drag/s);
 	});
+	it('opens a newly picked item at the top of the detail, not where the last one was scrolled', async () => {
+		const { container } = render(ViewHarness);
+		await fireEvent.click(screen.getByRole('button', { name: 'Open detail' }));
+		await tick();
+		const slot = container.querySelector<HTMLElement>('.view-main-slot')!;
+		const scrollTo = vi.fn();
+		slot.scrollTo = scrollTo as unknown as typeof slot.scrollTo;
+		await fireEvent.click(screen.getByRole('button', { name: 'Open detail' }));
+		await tick();
+		expect(scrollTo).not.toHaveBeenCalled();
+		await fireEvent.click(screen.getByRole('button', { name: 'Open item B' }));
+		await tick();
+		expect(scrollTo).toHaveBeenCalledWith({ top: 0 });
+	});
 	it('bridges feature, row and live Settings access contexts into the docked snippet', async () => {
 		const view = render(ViewHarness);
 		await tick();

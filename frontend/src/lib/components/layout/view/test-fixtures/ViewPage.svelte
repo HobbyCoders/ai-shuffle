@@ -11,11 +11,12 @@
 	setSettingsAccess({ get readOnly() { return readOnly; } });
 	setRowContext({ id: 'probe', label: 'Bridged switch', labelId: 'probe-label', hintId: undefined, expansionId: 'probe-expand' });
 	let detail = $state(false);
+	let item = $state('a');
 </script>
 <span id="probe-label">Bridged switch</span>
-<ViewShell label="Probe" {contentFirst} detailOpen={detail} onBack={() => detail = false}>
+<ViewShell label="Probe" {contentFirst} detailOpen={detail} detailKey={item} onBack={() => detail = false}>
 	{#snippet panel()}
-		<ViewPanel title="Probe"><PanelProbe /><button onclick={() => detail = true}>Open detail</button></ViewPanel>
+		<ViewPanel title="Probe"><PanelProbe /><button onclick={() => detail = true}>Open detail</button><button onclick={() => { detail = true; item = 'b'; }}>Open item B</button></ViewPanel>
 	{/snippet}
 	{#snippet main(back)}<h2>Probe detail</h2><button onclick={back}>Back to panel</button>{/snippet}
 </ViewShell>

@@ -850,7 +850,7 @@
 
 <svelte:window onclick={(event) => { if (!(event.target as Element)?.closest?.('.note-more')) closeMore(); }} onkeydown={(event) => { if (moreOpen && event.key === 'Escape') { event.preventDefault(); closeMore(true); } }} />
 
-<ViewShell label="Notes" detailOpen={!!(editingNote || isCreatingNew)} onBack={closeEditor}>
+<ViewShell label="Notes" detailOpen={!!(editingNote || isCreatingNew)} detailKey={isCreatingNew ? 'new' : editingNote?.id} onBack={closeEditor}>
 	{#snippet panel()}
 		<ViewPanel title="Notes" count={loading ? undefined : notes.length} {loading} listLabel="Notes list">
 			{#snippet actions()}<PanelIconButton label="New note" icon={Plus} onclick={startNewNote} />{/snippet}

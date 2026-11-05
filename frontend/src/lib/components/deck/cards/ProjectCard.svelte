@@ -260,7 +260,7 @@
 
 </script>
 
-<ViewShell label="Projects" detailOpen={!!selectedRow} onBack={handleBack} bind:stacked>
+<ViewShell label="Projects" detailOpen={!!selectedRow} detailKey={selectedKey} onBack={handleBack} bind:stacked>
 	{#snippet panel()}
 		<ViewPanel title="Projects" count={allRows.length}>
 			{#snippet actions()}<PanelIconButton label="New project" icon={Plus} onclick={() => (showAddModal = true)} />{/snippet}

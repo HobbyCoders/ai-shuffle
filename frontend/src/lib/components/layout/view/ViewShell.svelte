@@ -59,15 +59,27 @@ Panel contexts and tokens travel automatically. Off-screen feature pages never c
 		contentFirst?: boolean;
 		/** Optional observation, e.g. a page that auto-selects its first item only on desktop. */
 		stacked?: boolean;
+		/** Identity of the open item. The detail keeps scrolling on its own beside the
+		 *  list, so when this changes the new item opens at its top. */
+		detailKey?: unknown;
 	}
 	let { panel, main, label, detailOpen = false, onBack, manageHistory = true, inheritScope = false, nestedPanes = false, contentFirst = false,
-		stacked = $bindable(false) }: Props = $props();
+		stacked = $bindable(false), detailKey }: Props = $props();
 	const contexts = getAllContexts();
 	const feature = getContext<FeaturePanelContext | undefined>(FEATURE_PANEL_CONTEXT);
 	const active = $derived(feature?.active ?? true);
 	const token = Symbol('view-panel');
 	const historyKey = $props.id();
 	let width = $state(0);
+	let mainSlot: HTMLElement | undefined = $state();
+	let lastKey: unknown;
+	let keyed = false;
+	$effect(() => {
+		const key = detailKey;
+		if (keyed && key !== lastKey) mainSlot?.scrollTo?.({ top: 0 });
+		lastKey = key;
+		keyed = true;
+	});
 	const docked = $derived(viewPanel.hostMounted && !platform.isMobile && (!layout.current?.sidebarOverlay || width >= 768));
 	onMount(() => {
 		const measure = () => { width = window.innerWidth; };
@@ -152,7 +164,7 @@ Panel contexts and tokens travel automatically. Off-screen feature pages never c
 			{@render bridgedPanel()}
 		</div>
 	{/if}
-	<section class="view-main-slot st-scroll" class:settings-viewport={nestedPanes} class:st-dpane={!nestedPanes} aria-label="Details" hidden={stacked && !contentFirst && !detailOpen} inert={stacked && !contentFirst && !detailOpen}>
+	<section class="view-main-slot st-scroll" class:settings-viewport={nestedPanes} class:st-dpane={!nestedPanes} aria-label="Details" bind:this={mainSlot} hidden={stacked && !contentFirst && !detailOpen} inert={stacked && !contentFirst && !detailOpen}>
 		<div class="view-titlebar" aria-hidden="true"></div>
 		{@render main(back)}
 	</section>

@@ -627,7 +627,7 @@
 		else { currentView = 'list'; selectedAutomation = null; remoteChange = 'This item was deleted elsewhere.'; }
 	});
 </script>
-<ViewShell label="Automations" detailOpen={currentView !== 'list'} onBack={backToList}>
+<ViewShell label="Automations" detailOpen={currentView !== 'list'} detailKey={`${currentView}:${selectedAutomation?.id ?? ''}`} onBack={backToList}>
  {#snippet panel()}
   <AutomationsStudio {automations} {pendingApprovals} {profiles} {loading} error={currentView === 'list' ? error : ''} {triggeringId}
    selectedId={currentView === 'detail' || currentView === 'edit' ? selectedAutomation?.id : null}

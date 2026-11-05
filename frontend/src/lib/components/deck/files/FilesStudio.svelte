@@ -301,7 +301,7 @@
 
 <svelte:window onclick={onWindowClick} onkeydown={onWindowKeydown} />
 
-<ViewShell label="Files" {detailOpen} onBack={() => detailOpen = false}>
+<ViewShell label="Files" {detailOpen} detailKey={`${workerId ?? ''}:${currentPath}`} onBack={() => detailOpen = false}>
 	{#snippet panel()}
 		<ViewPanel title="Files" listLabel="Folders on {workerName}">
 			{#snippet filters()}
