@@ -85,6 +85,9 @@ CHAT_MODE_RESOURCE_TOOLS: List[str] = [
 CHAT_MODE_QUESTION_TOOLS: List[str] = ["AskUser"]
 CHAT_MODE_BASIC_TOOL_SURFACE: List[str] = [
     "WebSearch", "WebFetch", "Read", "mcp__attachments__Read",
+    # App-session intent only: the host stores it transactionally, without
+    # project/file access or execution. Agent-specific allow/deny still applies.
+    "Plan",
     # Native generation and unified generation store only session-owned
     # artifacts in chat mode, never local paths.
     "GenerateNativeImage", "GenerateNativeVideo",
