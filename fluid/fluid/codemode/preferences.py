@@ -375,8 +375,8 @@ def coexistence_key(old: dict, new: dict) -> str:
 
 
 def _coexistence_value(e: dict) -> tuple:
-    from fluid.codemode.facts import global_id
-    return (global_id(e), e["text"], e.get("when"), bool(e.get("always")),
+    from fluid.codemode.facts import global_id, written_when
+    return (global_id(e), e["text"], written_when(e), bool(e.get("always")),
             e.get("scope") or "global", e.get("worker"))
 
 
@@ -401,8 +401,11 @@ def protected_conflicts(entries: list[dict], *, skip: set[str] | frozenset[str] 
 
 
 def _conflict_revision(entries: list[dict]) -> tuple:
-    # Raw legacy rows and MemoryEntry rows must have identical scope semantics.
-    return tuple(tuple((e.get(f) or "global") if f == "scope" else e.get(f)
+    # Rendered MemoryEntry rows hide backfill lines after a text correction.
+    # Raw locked writes and validity readers must use that same applicability.
+    from fluid.codemode.facts import written_when
+    return tuple(tuple((e.get(f) or "global") if f == "scope" else
+                       written_when(e) if f == "when" else e.get(f)
                        for f in _CONFLICT_FIELDS) for e in entries)
 
 

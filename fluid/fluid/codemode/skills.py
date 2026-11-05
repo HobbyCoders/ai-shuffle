@@ -2024,7 +2024,11 @@ class SkillStore:
                 findings = screen_findings(entry.text) + screen_findings(entry.when or "")
                 text = "[withheld — suspected injection]" if findings else entry.text
                 line = f"- [{entry.id} r{entry.revision}; owner question] "
-                if entry.id in full_question_ids or findings:
+                if always_applies(entry) and not findings:
+                    # Group membership never downgrades ALWAYS; retain its
+                    # existing full-text budget and replica-overflow handling.
+                    always.append((entry, line + text))
+                elif entry.id in full_question_ids or findings:
                     pinned.append((entry, line + text))
                 else:
                     index.append((entry, line + when_line(entry)))

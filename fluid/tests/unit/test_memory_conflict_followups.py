@@ -123,3 +123,84 @@ async def test_group_write_is_atomic_when_one_pair_has_a_deletion_fence(tmp_path
     result = await answer(store, keys(store)[0])
     assert result.is_error, "no half-closed job when a pair requires explicit restore"
     assert store._facts.snapshot() == before
+
+
+@pytest.mark.asyncio
+async def test_answer_to_ordinary_rewrite_keeps_forgotten_text_fence(tmp_path):
+    store = SkillStore(tmp_path)
+    forgotten = store.save_memory("Code work goes to Sol.", protected=True, key="routing.code")
+    store.delete_memory(forgotten.id, explicit=True)
+    control = store.save_memory("Both stand.", protected=True, key="memory.coexist.example")
+    before = store._facts.snapshot()
+    result = await handler({"text": forgotten.text, "key": "routing.other",
+                            "memory_id": control.id, "expected_revision": control.revision,
+                            "user_requested": True}, ToolCtx(extra={"memory_store": store}))
+    assert result.is_error, "rekeying an answer must not restore forgotten ordinary text"
+    assert store._facts.snapshot() == before
+
+
+@pytest.mark.asyncio
+async def test_fresh_job_key_uses_effective_backfilled_applicability(tmp_path):
+    from fluid.tools.builtins.recall import handler as recall
+    store = SkillStore(tmp_path)
+    legacy = store.save_memory("Code work goes to Sonnet.", protected=True)
+    annotated = store.annotate_memory(legacy.id, when="When assigning the previous code task",
+                                     expected_revision=legacy.revision)
+    ctx = ToolCtx(extra={"memory_store": store, "recall_store": store})
+    corrected = await handler({"text": "Code work goes to Opus.", "memory_id": legacy.id,
+                               "expected_revision": annotated.revision,
+                               "user_requested": True}, ctx)
+    assert not corrected.is_error, corrected.text
+    store.save_memory("Code work goes to Sol.", protected=True)
+    raw = store._facts.snapshot()["entries"]
+    effective = [vars(e) for e in store.memories()]
+    assert next(e for e in raw if e["id"] == legacy.id).get("when_basis")
+    assert next(e for e in effective if e["id"] == legacy.id)["when"] is None
+    key = keys(store)[0]
+    result = await answer(store, key)
+    assert not result.is_error, result.text
+    assert not keys(store)
+    assert pref.coexistence_key(*raw) == pref.coexistence_key(*effective)
+    assert all(pref.coexistence_answer_states(store._facts.snapshot()["entries"]).values())
+    control = next(e for e in store.memories() if str(e.key).startswith(pref.COEXIST_KEY_PREFIX))
+    recalled = await recall({"ids": [control.id]}, ctx)
+    assert "current exact-pair coexistence answer" in recalled.text
+    replica = SkillStore(tmp_path / "replica")
+    replica._facts.merge(store._facts.export())
+    assert not keys(replica), "replication must retain the same effective answer validity"
+
+
+@pytest.mark.asyncio
+async def test_all_grouped_always_rules_keep_full_text_and_budget(tmp_path, monkeypatch):
+    from fluid.codemode import facts as fact_module
+    store = SkillStore(tmp_path)
+    ctx = ToolCtx(extra={"memory_store": store})
+    for model in ("Opus", "Sol", "Sonnet"):
+        result = await handler({"text": f"Code work goes to {model}.", "always": True,
+                                "user_requested": True, "when": "When assigning code"}, ctx)
+        assert not result.is_error, result.text
+    entries = store.memories()
+    section = store.render_memory_section()
+    assert all(e.text in section for e in entries), "grouping cannot downgrade ALWAYS rules"
+    assert store.memory_snapshot_plan()["always"] == 3
+    # A replica can exceed the local save budget: grouping must still use the
+    # existing overflow-to-index path, not pin ALWAYS texts outside that budget.
+    monkeypatch.setattr(fact_module, "ALWAYS_CHARS", 1)
+    plan = store.memory_snapshot_plan()
+    assert plan["always"] == 0
+    assert all(e.text not in "\n".join(plan["lines"]) for e in entries)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("by_id", [True, False])
+async def test_recall_attaches_factored_group_by_structured_membership(tmp_path, by_id):
+    from fluid.tools.builtins.recall import handler as recall
+    store = SkillStore(tmp_path)
+    facts = seed(store, models=("Opus", "Sol", "Sonnet", "Haiku", "Gemini", "Qwen", "Grok", "Terra", "Astra"))
+    key = keys(store)[0]
+    assert "Recall each as '<source>:<ID>'" in store.learner_proposal_footer()
+    result = await recall({"ids": [facts[-1].id]} if by_id else {"query": "Astra"},
+                          ToolCtx(extra={"recall_store": store}))
+    assert not result.is_error, result.text
+    assert "[owner question; unresolved conflict]" in result.text
+    assert key in result.text

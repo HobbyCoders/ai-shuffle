@@ -777,7 +777,9 @@ class FactStore:
             if old is not None and str(key or "").startswith("memory.coexist.") and not old_answer:
                 raise ValueError("An ordinary fact cannot be moved into the answer namespace; "
                                  "save a separate owner answer; nothing was saved")
-            pair_answer = old_answer if old is not None else str(key or "").startswith("memory.coexist.")
+            # Only an answer that stays in its control namespace may ignore a
+            # text fence. Rekeying it to an ordinary rule restores that fence.
+            pair_answer = str(key or (old or {}).get("key") or "").startswith("memory.coexist.")
             suppressed = not pair_answer and barrier_contains(doc.get("forgotten", ""), "text:" + fp)
             if key:
                 suppressed = suppressed or barrier_contains(doc.get("forgotten", ""), "key:" + (scope or "global") + ":" + key)
