@@ -45,6 +45,28 @@ describe('PlanDisplay', () => {
   expect(container.querySelector('[data-plan-task]')).toBeNull();
  });
 
+ it('hands reader intent to the transcript before both disclosure layout changes without losing focus', async () => {
+  const observations: string[] = [];
+  const { getByRole, container } = render(PlanDisplay, { props: { plan, onBeforeToggle: (event: MouseEvent) => {
+   const button = event.currentTarget as HTMLButtonElement;
+   observations.push(`${button.getAttribute('aria-expanded')}:${!!container.querySelector('.plan-details')}`);
+  } } });
+  const button = getByRole('button', { name: /Expand plan/ });
+  button.focus();
+  await fireEvent.click(button);
+  await fireEvent.click(button);
+  expect(observations).toEqual(['false:false', 'true:true']);
+  expect(document.activeElement).toBe(button);
+ });
+
+ it('allows the transcript to veto a stale outgoing disclosure', async () => {
+  const { getByRole, container } = render(PlanDisplay, { props: { plan, onBeforeToggle: () => false } });
+  const button = getByRole('button', { name: /Expand plan/ });
+  await fireEvent.click(button);
+  expect(button.getAttribute('aria-expanded')).toBe('false');
+  expect(container.querySelector('.plan-details')).toBeNull();
+ });
+
  it('does not report cancelled work as successful completion', () => {
   const { getByText, queryByText } = render(PlanDisplay, { props: { plan: { ...plan, tasks: [plan.tasks[4]] } } });
   expect(getByText('1 cancelled')).toBeTruthy();
