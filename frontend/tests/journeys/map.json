@@ -370,6 +370,24 @@
 			]
 		},
 		{
+			"why": "Claude Code Fast mode: mid-turn toggle notices, reported turn speed, refusals and reload persistence",
+			"journeys": ["fast-midturn"],
+			"globs": [
+				"frontend/tests/journeys/fast-midturn.journey.mjs",
+				"frontend/src/lib/constants/models.svelte.ts",
+				"frontend/src/lib/components/chat/ControlsDock.svelte",
+				"frontend/src/lib/components/chat/EffortPopoverCard.svelte",
+				"frontend/src/lib/components/SystemMessage.svelte",
+				"frontend/src/lib/utils/fast-outcome.ts",
+				"app/api/sessions_permissions.py",
+				"app/core/model_override.py",
+				"app/core/fast_outcome.py",
+				"app/core/provider/harness_adapter.py",
+				"fluid/fluid/engine/delegated.py",
+				"fluid/fluid/engine/delegated_proto.py"
+			]
+		},
+		{
 			"why": "Claude Code compaction: the card, the context meter, and the delegated leg and mod that turn the CLI's compaction frames into them",
 			"journeys": ["compaction"],
 			"globs": [
@@ -381,11 +399,6 @@
 				"fluid/fluid/engine/claude_mod_compaction.py",
 				"fluid/fluid/engine/claude_mod/**"
 			]
-		},
-		{
-			"why": "keep the existing Fast-mode journey reachable when its own test changes",
-			"journeys": ["fast-midturn"],
-			"globs": ["frontend/tests/journeys/fast-midturn.journey.mjs"]
 		},
 		{
 			"why": "owner memory questions and their replicated keep-both answers reach real session prompts",

@@ -930,6 +930,20 @@ path filter (no frontend job does).
 
 ### UI journeys
 
+The `JavaScript contracts, docs and frontend audit` job runs
+`node frontend/tests/journeys/select.mjs --check` from the repository root on
+every PR. It fails if a journey lacks its own rule in `map.json`, a rule names
+an unknown journey, or a glob matches no tracked file. The default shallow
+checkout is sufficient: validation uses `git ls-files`, not commit history.
+Before checking the checkout's map, the same required job runs
+`node --test frontend/tests/journeys/select.test.mjs`: temporary maps exercise
+the exported validator and real CLI, requiring exit 0 for a valid map and exit 2
+for an unmatched glob, a rule-less or unknown journey, and a rule missing its
+`why`. The policy test rejects job- or step-level conditions, `continue-on-error`
+and shell overrides on this check, and keeps `contracts` in both the aggregate's
+`needs` and its expected-results list.
+This validates selection metadata; the journey shards still run every journey.
+
 `UI journeys (N/6)`: each shard installs the Python and JavaScript
 dependencies (pip/npm caches) and Chromium (browser-mcp's pinned
 playwright-core build, cached), builds and stamps the desktop UI, then runs
