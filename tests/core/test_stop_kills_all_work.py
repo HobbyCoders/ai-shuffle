@@ -41,11 +41,12 @@ class _StopPatches:
     def __enter__(self):
         self.stopped: list[str] = []
 
-        async def _stop(sid, task_id):
+        async def _stop(sid, task_id, *, _explicit_task_stop):
+            assert _explicit_task_stop is False  # bulk Stop grants no per-task retry authority
             self.stopped.append(task_id)
             return {"ok": True, "task_id": task_id}
 
-        async def _enter_user_stop(sid):
+        async def _enter_user_stop(sid, **_kwargs):
             # The real one also drops wakeups / aborts queued turns / settles
             # parked rows, all of which need a DB. The latch is the half these
             # unit tests are about, so keep that and stub the rest.

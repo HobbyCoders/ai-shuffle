@@ -1936,14 +1936,21 @@ class ChatWebSocketHandler:
             if owner_device:
                 from app.network import control
                 try:
-                    await control.interrupt(owner_device, session_id, "stop", stop_background=True,
-                                            turn_id=target_turn_id, source="user_stop")
+                    result = await control.interrupt(owner_device, session_id, "stop", stop_background=True,
+                                                     turn_id=target_turn_id, source="user_stop")
+                    if result.get("incomplete"):
+                        await self.send_json({"type": "error", "session_id": session_id,
+                                              "message": result.get("message") or "Stop was incomplete. Some background tasks may still be running."})
                 except control.RunnerUnreachable as exc:
                     await self._forward_unreachable(session_id, exc)
                 except control.ControlRefused as exc:
                     await self.send_json({"type": "error", "session_id": session_id, "message": str(exc)})
                 await self._v2_broadcast_queue(session_id)
                 return
+            from app.core.query_session_lifecycle import capture_stop_scope, stop_all_background_tasks
+
+            # Before the flip's wait: once it commits, the next turn can start.
+            scope = capture_stop_scope(session_id)
             flipped = await turn_manager.interrupt_async(
                 session_id,
                 "stop",
@@ -1959,9 +1966,14 @@ class ChatWebSocketHandler:
                 # Mark canceled-task wakes suppressed and stop all owned tasks.
                 # A delayed turn-specific Stop that matched no live turn must
                 # not cancel a successor's work.
-                from app.core.query_session_lifecycle import stop_all_background_tasks
-
-                await stop_all_background_tasks(session_id, user_stop=True)
+                results = await stop_all_background_tasks(
+                    session_id, user_stop=True, scope=scope,
+                    receipt=((flipped or {}).get("payload") or {}).get(turns_db.STOP_RECEIPT_KEY),
+                )
+                if any(result.get("incomplete") for result in results):
+                    from app.core.scoped_remote_stop import incomplete_text
+                    await self.send_json({"type": "error", "session_id": session_id,
+                                          "message": incomplete_text(results)})
                 # The queue was just emptied durably; re-broadcast so the
                 # pending bubbles the client is showing go with it instead of
                 # sitting there implying work that will never run.

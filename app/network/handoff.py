@@ -16,6 +16,7 @@ from app.core.worktree_manager import WorktreeError
 from app.db import database, runs, checkouts, turns as turns_db
 from app.db.base import get_db
 from app.db.async_database import run_sync
+from app.db.wakeups import CURRENT_STOP_SEQ
 from app.network import control, crypto, engine
 
 logger = logging.getLogger(__name__)
@@ -534,12 +535,13 @@ def _finalize_wakes(sid, source, payload, *, recovery_reason=None, discard_all=F
                 elif (not superseded or (row["keep_peer"] and wake.get("source") == "handoff_resume")
                       or (row["keep_peer"] and wake.get("source") == HELD_PEER_SOURCE)):
                     cur.execute("INSERT INTO pending_wakeups "
-                                "(id,session_id,profile_id,project_id,prompt,reason,model,source,instance_id,fire_at) "
-                                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (id) DO NOTHING",
+                                "(id,session_id,profile_id,project_id,prompt,reason,model,source,instance_id,fire_at,"
+                                f"stop_seq) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,{CURRENT_STOP_SEQ}) "
+                                "ON CONFLICT (id) DO NOTHING",
                                 (wake["id"], sid, wake.get("profile_id"), wake.get("project_id"),
                                  wake.get("prompt") or "", wake.get("reason"), wake.get("model"),
                                  wake.get("source") or "schedule_wakeup", settings.effective_instance_id,
-                                 float(wake.get("fire_at") or 0)))
+                                 float(wake.get("fire_at") or 0), sid))
             cur.execute("UPDATE handoff_wakes SET finalized=TRUE,recovery_reason=%s WHERE token=%s",
                         (recovery_reason, token))
         # Return only surviving rows, including on retries. Re-arming a pending
@@ -1765,10 +1767,11 @@ def _accept_owner(sid, device_id, branch=None, token=None, held_messages=None, *
                 # Removing it from staging is the durable receipt: a source
                 # finalize/retry cannot recreate this wake after it has fired.
                 cur.execute("INSERT INTO pending_wakeups "
-                            "(id,session_id,profile_id,project_id,prompt,source,instance_id,fire_at) "
-                            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (id) DO NOTHING",
+                            "(id,session_id,profile_id,project_id,prompt,source,instance_id,fire_at,stop_seq) "
+                            f"VALUES (%s,%s,%s,%s,%s,%s,%s,%s,{CURRENT_STOP_SEQ}) ON CONFLICT (id) DO NOTHING",
                             (wake["id"], sid, wake.get("profile_id"), wake.get("project_id"),
-                             wake["prompt"], "handoff_resume", settings.effective_instance_id, wake["fire_at"]))
+                             wake["prompt"], "handoff_resume", settings.effective_instance_id, wake["fire_at"],
+                             sid))
                 cur.execute("SELECT * FROM pending_wakeups WHERE id=%s", (wake["id"],))
                 row = cur.fetchone()
                 if row:

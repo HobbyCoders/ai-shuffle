@@ -76,6 +76,17 @@ function requests(path) {
 	return existsSync(path) ? readFileSync(path, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) : [];
 }
 
+async function replaceDraft(page, prompt) {
+	// Use the editor's keyboard handling, as in the reserved-name case below:
+	// contenteditable fill() can append instead of replacing a selected draft.
+	await composer(page).focus();
+	await composer(page).press('ControlOrMeta+A');
+	await composer(page).press('Backspace');
+	expect((await composer(page).innerText()).trim() === '', 'keyboard replacement clears the command draft');
+	if (prompt) await composer(page).pressSequentially(prompt);
+	expect((await composer(page).innerText()).trim() === prompt, 'composer contains exactly the intended draft');
+}
+
 await runJourney({
 	name: 'fluid-commands',
 	allow: DEV_INSTANCE_NOISE,
@@ -97,7 +108,7 @@ await runJourney({
 			for (const [index, command] of [name, `${name}-skill`, `${name}:run`, `${name}:guide`].entries()) {
 				await mark(`find and select /${command}`);
 				const response = page.waitForResponse(r => new URL(r.url()).pathname === '/api/v1/commands/' && r.ok());
-				await composer(page).fill(`/${command}`);
+				await replaceDraft(page, `/${command}`);
 				const catalogResponse = await response;
 				const catalog = await catalogResponse.json();
 				expect(catalog.commands.some(c => c.name === command), `${runtime} catalog contains /${command}`);
@@ -113,7 +124,12 @@ await runJourney({
 				const path = runtime === 'native' ? status.fake_ai.request_log : status.claude_cli.log;
 				const offset = requests(path).length;
 				await mark(`invoke /${command}`);
-				await composer(page).fill(`/${command} "two words" release ${scriptTag(variant, 'default')}`);
+				// Selection sets the draft before Tiptap returns focus on an animation frame.
+				await page.waitForFunction(selected => {
+					const box = document.querySelector('[role="textbox"][aria-label="Message"]');
+					return box === document.activeElement && box.innerText.trim() === selected;
+				}, `/${command}`);
+				await replaceDraft(page, `/${command} "two words" release ${scriptTag(variant, 'default')}`);
 				await sendButton(page).click();
 				await waitTurnSettled(page, { text: 'You said:', messagesAtLeast: 2 * (index + 1) });
 				const sent = requests(path).slice(offset).filter(r => runtime === 'native' ? r.method === 'POST' : r.kind === 'turn');
@@ -139,7 +155,7 @@ await runJourney({
 			for (const persisted of [false, true]) {
 				await mark(`Chat excludes file commands ${persisted ? 'after' : 'before'} session creation`);
 				const response = page.waitForResponse(r => new URL(r.url()).pathname === '/api/v1/commands/' && r.ok());
-				await composer(page).fill(`/${name}`);
+				await replaceDraft(page, `/${name}`);
 				const catalogResponse = await response;
 				const catalog = await catalogResponse.json();
 				expect(!catalog.commands.some(c => c.name.startsWith(name)), 'Chat does not advertise isolated Fluid files or installed plugin entries');
@@ -150,7 +166,7 @@ await runJourney({
 					const detail = await page.request.get(new URL(`/api/v1/commands/${encodeURIComponent(command)}?${query}`, status.urls.ui).toString());
 					expect(detail.status() === 404, `Chat detail also excludes /${command}`);
 				}
-				await composer(page).fill('');
+				await replaceDraft(page, '');
 				if (!persisted) {
 					await mark('create a plain Chat');
 					await typeAndSend(page, `Check Chat isolation ${scriptTag(variant, 'default')}`);
@@ -175,7 +191,7 @@ await runJourney({
 			try {
 				await mark('reserved direct command remains a CLI builtin');
 				const response = page.waitForResponse(r => new URL(r.url()).pathname === '/api/v1/commands/' && r.ok());
-				await composer(page).fill('/context');
+				await replaceDraft(page, '/context');
 				const catalogResponse = await response;
 				const catalog = await catalogResponse.json();
 				expect(catalog.commands.find(c => c.name === 'context')?.type === 'sdk_builtin', 'Fluid direct command cannot replace /context');
@@ -225,7 +241,7 @@ await runJourney({
 		async act({ page, status, variant, mark, log, state: { name } }) {
 			await mark('preview caller keeps a saved legacy NULL-mode chat isolated');
 			const response = page.waitForResponse(r => new URL(r.url()).pathname === '/api/v1/commands/' && r.ok());
-			await composer(page).fill(`/${name}`);
+			await replaceDraft(page, `/${name}`);
 			const catalogResponse = await response;
 			const catalog = await catalogResponse.json();
 			expect(!catalog.commands.some(c => c.name.startsWith(name)), 'legacy NULL row omits Fluid direct/plugin entries for preview caller');
@@ -237,7 +253,7 @@ await runJourney({
 			const prompt = `/${name} ${scriptTag(variant, 'default')}`;
 			const logPath = runtime === 'delegated' ? status.claude_cli.log : status.fake_ai.request_log;
 			const before = requests(logPath).length;
-			await composer(page).fill(prompt);
+			await replaceDraft(page, prompt);
 			await sendButton(page).click();
 			await waitTurnSettled(page, { text: runtime === 'delegated' ? 'Fake Claude Code CLI here' : 'You said:' });
 			const sent = requests(logPath).slice(before).filter(row => runtime === 'delegated' ? row.kind === 'turn' : row.method === 'POST');

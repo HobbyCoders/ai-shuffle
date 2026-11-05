@@ -187,6 +187,59 @@ otherwise two deliberate opposite actions read as one reversal.
   navigation to another origin loses the earlier part of the recording. Iframes
   are not recorded.
 
+## MessageArea remount evidence
+
+While recording, MessageArea mount entries carry a `diagnostic` object. The
+same object is printed after `| diagnostic=` in the existing text timeline,
+so failed CI journeys retain it in `ui-journeys-N` → `attempt-1/journeys/` →
+`<journey>/<case>.txt` (and any retry's corresponding directory).
+
+- `source`, `at`, `removed`, `parent` and `stack` identify the removal API,
+  synchronous removal time and ancestor. `remove`, `removeChild` and
+  `replaceChild` are patched only during recording. Other APIs use the
+  MutationObserver fallback, explicitly labelled **no synchronous stack**.
+- `state` exists only for a matched synchronous removal call; `observed`
+  contains the observer-time values, including at remount and on fallback.
+  No synchronous state or stack is claimed on fallback. The dev-only reader includes
+  `showEmptyHero`, `isEmptyState`, chat/presented/transcript surfaces, mirror
+  waiting, voice-call state, hashed target/transcript sessions and message
+  counts. Release builds eliminate its registration and cleanup entirely;
+  there only the existing signature attributes are available.
+- `node` is a recording-local DOM identity: the same number at remount means
+  the same element was reinserted, a different number means a new element.
+- `visibility` reports document visibility, connected and CSS-visible
+  MessageAreas, and hero presence. The first pre-paint probe during a gap
+  also emits a `MessageArea gap at pre-paint` note with this check and state.
+  This shows a rendering opportunity without the transcript, **not proof of
+  compositor paint**. Compare the existing contact-sheet keyframes too. No
+  gap note means no such sample was captured, not proof the gap was invisible.
+
+These details do not participate in signature reversals or remount detection.
+No assertion, noise guard or allow-list is changed. Synchronous evidence is
+used only for a successful removal matching the final disconnecting mutation's
+unique removed root and parent. That mutation is resolved by rewinding parent
+links through the observer batch without changing the DOM; reinserted transient
+removals and later mutations in a detached subtree cannot misattribute it.
+Ignored mutations expire their evidence. Ambiguous attribution uses the explicit
+observer fallback, with no synchronous stack or state; unknown ancestry also
+sets `ambiguous: true`. Diagnostic faults, including errors whose accessors stop
+the recorder, never block native removal or replace its return value/exception.
+The result is committed before stop cleans up hooks or the rendering probe.
+Hooks restore (or remain inert if a page wrapper owns them or a frozen prototype
+prevents restoration); ownership reads and restoration faults cannot lose the
+recording. Cleanup faults still increment the existing internal-error counter.
+Recorder callbacks, listeners and pending requests carry their recording owner;
+entries and sampling state are discarded if a page callback stops or restarts
+that owner. Lifecycle transitions are serialized: `start`, `resume` and `stop`
+refuse re-entry during another transition or cleanup, so callers may retry when
+it returns. Probe fallback disconnects and removes the captured owner's probe
+before marking it disabled, retaining ownership if removal fails.
+No DOM text, HTML, prompts, titles, raw session IDs or URL queries are added to
+this evidence; all stack locations retain only filenames and line/column
+locations, and unrecognized formats are redacted. Nothing is sent to a console
+by the recorder. It is injected by the browser tool or journey harness, never shipped
+as part of the app.
+
 ## Adding a field
 
 1. Put `data-ui-<name>` on ChatView's root, or on any element with

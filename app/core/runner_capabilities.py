@@ -257,6 +257,7 @@ def detect_capabilities() -> Dict[str, Any]:
         "claude_cli_signed_in": _detect_claude_cli_signed_in(),
         "provider_kinds": _detect_provider_kinds(),
         "remote_task": REMOTE_TASK_VERSION,
+        "scoped_task_stop": 1,  # generation + owner-input boundary enforced at receiver
         "start_session_permissions": START_SESSION_PERMISSIONS_VERSION,
         "move_wakes": MOVE_WAKES_VERSION,
         "handoff_target_resume": 1,
