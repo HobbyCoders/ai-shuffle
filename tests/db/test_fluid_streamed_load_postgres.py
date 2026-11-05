@@ -223,6 +223,7 @@ async def test_stalled_decode_expires_without_publishing_and_retries(monkeypatch
     _empty_cache(cold, session_id)
     assert not base._pg_pool._used
     monkeypatch.setattr(module.Message, "from_dict", original)
+    monkeypatch.setattr(module, "transcript_decode_timeouts", guard)
     assert await cold.get_session(session_id)
     assert len(cold._nodes[session_id]) == 33
     assert short_idle_budget
