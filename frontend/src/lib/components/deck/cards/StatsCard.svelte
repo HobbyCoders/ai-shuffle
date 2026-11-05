@@ -370,7 +370,7 @@
 	/* Cost-by-profile rows */
 	.brk { display: flex; flex-direction: column; gap: 11px; margin-top: 2px; }
 	.brk-row { display: grid; grid-template-columns: minmax(64px, 96px) 1fr auto; align-items: center; gap: 10px; }
-	.brk-name { font-size: 0.8125rem; color: var(--foreground); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+	.brk-name { font-size: 13px; color: var(--foreground); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 	.brk-track { height: 6px; background: var(--muted); border-radius: 999px; overflow: hidden; }
 	.brk-fill { display: block; height: 100%; background: var(--st-meter); border-radius: 999px; transition: width 450ms ease; }
 	.brk-val { font-size: 13px; font-weight: 600; color: var(--muted-foreground); text-align: right; }
@@ -386,7 +386,7 @@
 		border-top: none; padding: 0 0 4px;
 		font-size: 12px; color: var(--muted-foreground);
 	}
-	.prov-name { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 0.8125rem; color: var(--foreground); }
+	.prov-name { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 13px; color: var(--foreground); }
 	.prov-label { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 	.prov-chip {
 		flex-shrink: 0; padding: 1px 7px; border-radius: 999px; font-size: 0.65rem; font-weight: 600;
@@ -422,7 +422,7 @@
 		border-radius: 6px; background: color-mix(in oklch, var(--st-meter) 15%, transparent);
 		color: var(--st-mfg); font-size: 0.65rem; font-weight: 600;
 	}
-	.top-name { font-size: 0.8125rem; color: var(--foreground); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+	.top-name { font-size: 13px; color: var(--foreground); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 	.top-track { height: 5px; background: var(--muted); border-radius: 999px; overflow: hidden; }
 	.top-fill { display: block; height: 100%; background: color-mix(in oklch, var(--st-meter) 75%, transparent); border-radius: 999px; }
 	.top-val { font-size: 13px; font-weight: 600; color: var(--muted-foreground); text-align: right; }
