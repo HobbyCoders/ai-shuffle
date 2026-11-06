@@ -92,16 +92,15 @@
 	// Set once boot has reconciled the restored session with the layout's view;
 	// until then the two may disagree on purpose (see onMount).
 	let bootReconciled = $state(false);
-	let bootInitGeneration = $state<number | null>(null);
 	// A new chat whose first send created its session: the layout's view follows
 	// it, so a reload reopens that chat (createdChatToFollow).
 	$effect(() => {
-		// Track adoption even while boot is waiting. Only this boot's admitted
-		// first send may follow early: init cannot restore a stale chat under
-		// that claim, and New chat / session navigation advances the generation.
+		// Track adoption even while boot is waiting. Only an admitted send in
+		// the CURRENT navigation generation may follow early, including after
+		// New Chat resets during boot. Init cannot restore under that claim;
+		// authenticated adoption rejects receipts from before the navigation.
 		const follow = createdChatToFollow($activeView, $activeSession?.sessionId ?? null);
-		if (!bootReconciled && (bootInitGeneration === null ||
-			bootInitGeneration !== getInitGeneration() || !hasBootSendClaim(bootInitGeneration))) return;
+		if (!bootReconciled && !hasBootSendClaim(getInitGeneration())) return;
 		if (follow) layout.openChat(follow);
 	});
 	// Back/Forward onto a chat link's history entry (breadcrumb, transcript
@@ -239,14 +238,13 @@
 		// send never reaches it while the first loads run.
 		const initializing = activeSession.init({ deepLinkSessionId });
 		const initGeneration = getInitGeneration();
-		bootInitGeneration = initGeneration;
 		await initializing;
 		performance.mark?.('shuffle:boot.init.end');
 		// The layout's explicit New Chat wins over an older backend session
 		// snapshot (see below). Settle that now, not after the loads: until then
 		// the composer was bound to the old session, so a send went there and the
 		// late newChat then wiped it from view (#1636).
-		const layoutNewChatWon = !navigationClaimed && !hasBootSendClaim(initGeneration) && !!$activeSession?.sessionId &&
+		const layoutNewChatWon = !navigationClaimed && !hasBootSendClaim(getInitGeneration()) && !!$activeSession?.sessionId &&
 			$activeView?.type === 'session' && ($activeView.sessionId ?? null) === null;
 		if (layoutNewChatWon) activeSession.newChat();
 		// What init left open. The composer works during the loads below, so a
@@ -295,7 +293,7 @@
 		const hasDraft = hasComposerDraft($activeSession.draft);
 		// A first message typed and sent during the loads: its chat (or the send
 		// still creating it) is what the user is looking at now (#811).
-		const changedDuringLoads = hasBootSendClaim(initGeneration) || chatChangedDuringBoot(sessionAfterInit, $activeSession);
+		const changedDuringLoads = hasBootSendClaim(getInitGeneration()) || chatChangedDuringBoot(sessionAfterInit, $activeSession);
 		if (!$activeView) {
 			if (restoredSessionId) {
 				followRestoredLane();
