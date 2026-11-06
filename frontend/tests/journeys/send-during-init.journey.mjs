@@ -33,6 +33,9 @@ await runJourney({
 				// Produce both independent snapshots through the real UI. Replay the
 				// older New Chat layout beside the newly produced tab chat to model a
 				// stale layout write: bootstrap must execute layoutNewChatWon itself.
+				// openNewChat observes the composer, not startup's persisted landing
+				// choice. Capture only once that real producer has reconciled.
+				await waitForBootReconciled(page);
 				const newChatLayout = await page.evaluate(() => localStorage.getItem('ai-shuffle-layout'));
 				expect(JSON.parse(newChatLayout)?.activeView?.type === 'session' && JSON.parse(newChatLayout).activeView.sessionId === null,
 					'the stale New Chat layout snapshot was written by the actual UI');
