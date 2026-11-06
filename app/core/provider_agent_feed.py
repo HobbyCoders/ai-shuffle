@@ -404,15 +404,24 @@ class WorkerFeed:
             "usage": usage if isinstance(usage, dict) and usage else None,
         })
         try:
+            from app.core.task_registry import task_registry
             from app.core.turn_recorder import record_task_settle_frame
 
-            await record_task_settle_frame(
-                self.parent_session_id,
-                self.task_id,
-                status,
-                summary or self.label,
-                tool_use_id=self.task_id,
-            )
+            # Nested Tasks have a registry row on the routing root AND the
+            # dispatching chat (local, remote and swarm dispatch use the same
+            # feed). Both can display a running row after a snapshot. Only the
+            # root owns the progress card, but every task list needs a durable
+            # terminal frame; completing the registry alone cannot settle a
+            # reducer that already adopted its running snapshot.
+            sessions = await asyncio.to_thread(task_registry.sessions_with_task, self.task_id)
+            for session_id in dict.fromkeys((self.parent_session_id, *sessions)):
+                await record_task_settle_frame(
+                    session_id,
+                    self.task_id,
+                    status,
+                    summary or self.label,
+                    tool_use_id=self.task_id,
+                )
         except Exception:  # noqa: BLE001
             logger.warning(
                 "ProviderAgent feed: settle frame failed for parent=%s task=%s",

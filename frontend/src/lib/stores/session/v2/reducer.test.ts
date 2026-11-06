@@ -2309,7 +2309,30 @@ describe('reconcileRunningTasks (the /live registry list)', () => {
 		expect(s.activeTaskSummaries[0].status).toBe('completed');
 	});
 
-	it('ignores rows that are not running and leaves state untouched when nothing moves', () => {
+	it.each(['completed', 'error', 'killed'] as const)('accepts a newer %s snapshot when the terminal frame was missed', (status) => {
+		const running = reduceAll([ev('task.updated', { task_id: W, state: 'running', created_at: '2026-10-21T00:44:29Z' })]);
+		const next = reconcileRunningTasks(running, [registry({ status, summary: 'Finished' })]);
+		expect(next.activeTaskSummaries[0]).toMatchObject({ id: W, status, summary: 'Finished' });
+	});
+
+	it('never lets an old completion snapshot stop a genuinely resumed task', () => {
+		const resumed = reduceAll([ev('task.updated', { task_id: W, state: 'running', created_at: '2026-10-21T00:55:00Z' })]);
+		expect(reconcileRunningTasks(resumed, [registry({ status: 'completed' })])).toBe(resumed);
+		expect(reconcileRunningTasks(resumed, [registry({ status: 'killed', updatedAt: null })])).toBe(resumed);
+		expect(reconcileRunningTasks(resumed, [registry({ status: 'completed', updatedAt: '2026-10-21T00:55:00Z' })])).toBe(resumed);
+		expect(reconcileRunningTasks(resumed, [])).toBe(resumed);
+	});
+
+	it('does not resurrect a terminal snapshot when the dispatching turn parks', () => {
+		const speculative = reduceAll([
+			ev('task.updated', { task_id: W, kind: 'agent', state: 'running', created_at: '2026-10-21T00:44:29Z' }),
+			ev('turn.completed'),
+		]);
+		const settled = reconcileRunningTasks(speculative, [registry({ status: 'completed' })]);
+		expect(reduce(settled, ev('turn.parked')).activeTaskSummaries[0].status).toBe('completed');
+	});
+
+	it('ignores unknown terminal rows and leaves state untouched when nothing moves', () => {
 		const base = reduceAll([ev('task.updated', { task_id: W, state: 'running' })]);
 		expect(reconcileRunningTasks(base, [registry()])).toBe(base);
 		expect(reconcileRunningTasks(base, [registry({ id: 'x', status: 'completed' })])).toBe(base);

@@ -923,7 +923,12 @@ export function withLogEpoch(state: V2SessionState, epoch: string | null): V2Ses
  *
  *   - a running task the log has no summary for is added;
  *   - a summary the log settled is running again only when the registry
- *     updated the task after that settle (`updatedAt` later than the frame).
+ *     updated the task after that settle (`updatedAt` later than the frame);
+ *   - a terminal registry row settles an older running summary, repairing a
+ *     missed terminal frame without settling a newer continuation.
+ *
+ * Absence is not completion: snapshots can race a new start, and completed
+ * registry rows are retained only briefly.
  *
  * Anything the log says later still applies on top, as usual. Not a wire
  * event: it is re-applied from each new snapshot, never replayed. Returns
@@ -935,9 +940,30 @@ export function reconcileRunningTasks(state: V2SessionState, tasks: readonly Tas
 		return Number.isNaN(ms) ? -Infinity : ms;
 	};
 	let summaries = state.activeTaskSummaries;
+	let speculativelySettledTaskIds = state.speculativelySettledTaskIds;
+	let taskSettleTurnIds = state.taskSettleTurnIds;
 	for (const task of tasks) {
-		if (!task?.id || task.status !== 'running') continue;
+		if (!task?.id) continue;
 		const index = summaries.findIndex((t) => t.id === task.id);
+		if (task.status !== 'running') {
+			// /live retains terminal rows briefly. A newer one repairs a missed
+			// terminal frame, but an old completion must never stop a resumed run.
+			if (!['completed', 'error', 'killed'].includes(task.status) || index === -1) continue;
+			const existing = summaries[index];
+			if (at(task.updatedAt) <= at(existing.updatedAt) || !Number.isFinite(at(task.updatedAt))) continue;
+			summaries = summaries.slice();
+			summaries[index] = { ...existing, status: task.status, summary: task.summary, updatedAt: task.updatedAt };
+			// This is an authoritative ending, not turn.completed's speculative
+			// cleanup or an old in-turn report that turn.parked may undo.
+			if (speculativelySettledTaskIds.includes(task.id)) {
+				speculativelySettledTaskIds = speculativelySettledTaskIds.filter(id => id !== task.id);
+			}
+			if (taskSettleTurnIds?.[task.id]) {
+				taskSettleTurnIds = { ...taskSettleTurnIds };
+				delete taskSettleTurnIds[task.id];
+			}
+			continue;
+		}
 		if (index === -1) {
 			summaries = [...summaries, { ...task, kind: task.kind === 'shell' ? 'shell' : 'agent' }];
 			continue;
@@ -954,7 +980,7 @@ export function reconcileRunningTasks(state: V2SessionState, tasks: readonly Tas
 			...(task.worker && !existing.worker ? { worker: task.worker } : {}),
 		};
 	}
-	return summaries === state.activeTaskSummaries ? state : { ...state, activeTaskSummaries: summaries };
+	return summaries === state.activeTaskSummaries ? state : { ...state, activeTaskSummaries: summaries, speculativelySettledTaskIds, taskSettleTurnIds };
 }
 
 /** Prefer an event payload `timestamp` over the envelope `created_at`. */

@@ -441,11 +441,6 @@ export function gateSnapshotPatch(
 	return gated;
 }
 
-/** The `/live` snapshot's running tasks: the registry's own running list. */
-function runningSnapshotTasks(snap: LiveSnapshot): Task[] {
-	return (snap.activeTasks ?? []).filter((t) => t?.status === 'running');
-}
-
 // ─── Factory ─────────────────────────────────────────────────────────────────
 
 export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitcher {
@@ -990,13 +985,14 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		// — but a task that started BEFORE those rows existed, or whose log got a
 		// terminal frame for a run that went on (#320), would leave genuinely
 		// running work with no surface at all. `/live` reports the task
-		// registry's own view: only its RUNNING rows (never the recently-failed
-		// retention rows `get_visible` also carries) go to the feed, which keeps
-		// them on the strip until the log says something newer. Without a feed
-		// for this session they only seed an empty strip, as before.
-		const snapshotTasks = runningSnapshotTasks(snap);
-		if (!feedController.reconcileRunningTasks(sessionId, snapshotTasks) && snapshotTasks.length > 0) {
-			patch.activeTasks = snapshotTasks;
+		// registry's own view, including terminal retention rows, goes to the
+		// feed: a newer completion repairs a missed terminal event as well as a
+		// newer start restoring a resumed task. Without a feed, only running
+		// rows seed the strip.
+		const snapshotTasks = snap.activeTasks ?? [];
+		if (!feedController.reconcileRunningTasks(sessionId, snapshotTasks)) {
+			const running = snapshotTasks.filter((t) => t?.status === 'running');
+			if (running.length > 0) patch.activeTasks = running;
 		}
 
 		// A Fast change still waiting out the running turn. Not over a pick made
@@ -1094,7 +1090,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			return;
 		}
 		if (!snap || generation !== _switchGeneration || getState().sessionId !== sessionId) return;
-		feedController.reconcileRunningTasks(sessionId, runningSnapshotTasks(snap));
+		feedController.reconcileRunningTasks(sessionId, snap.activeTasks ?? []);
 	}
 
 	function newChat() {

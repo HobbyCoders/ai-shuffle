@@ -22,8 +22,10 @@ import asyncio
 import pytest
 
 from app.core import provider_agent_feed as feed_mod
+from app.core.task_registry import task_registry
 from app.db import runs
 from app.db import session_events as se
+from tests.shared_fixtures import clean_task_registry  # noqa: F401
 
 
 PARENT = "parent-session"
@@ -92,6 +94,31 @@ def _types(rows):
 # ---------------------------------------------------------------------------
 # The contract triple on the parent
 # ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["completed", "error", "killed"])
+async def test_nested_worker_settles_every_task_list_not_just_root(db, monkeypatch, status):
+    """The dispatcher can keep working after its helper ends; turn end is no fix."""
+    monkeypatch.setattr(task_registry, "_persist_task_state", lambda *args: None)
+    for session_id in (PARENT, "dispatching-worker"):
+        task_registry.start_task(session_id, WORKER, kind="agent", title="Nested helper")
+    task_registry.start_task("dispatching-worker", "still-working", kind="agent", title="Independent work")
+    feed = _feed()
+    await feed.completed(status, summary="Helper finished")
+    await feed.completed(status, summary="duplicate")
+
+    for session_id in (PARENT, "dispatching-worker"):
+        terminal = [r for r in se.get_events(session_id)
+                    if r["event_type"] == "task.updated"]
+        assert len(terminal) == 1
+        assert terminal[0]["payload"]["task_id"] == WORKER
+        assert terminal[0]["payload"]["state"] == status
+        assert terminal[0]["payload"]["tool_use_id"] == WORKER
+    # The terminal fanout does not end unrelated work or mirror progress cards
+    # into the dispatcher's transcript. Durable rows survive feed/process loss.
+    assert _types(se.get_events("dispatching-worker")) == ["task.updated"]
+    assert task_registry.get_task("dispatching-worker", "still-working")["status"] == "running"
+
 
 class TestParentTriple:
 
