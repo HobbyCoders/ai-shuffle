@@ -906,15 +906,20 @@ def test_a_commit_whose_number_was_closed_fails_as_a_lost_connection(
     real_arm = commit_deadline._watchdog.arm
     stranger: socket.socket | None = None
     stranger_identity: tuple[int, int] | None = None
+    connection_identity: tuple[int, int] | None = None
 
     def arm(fd: int, seconds: float) -> socket.socket:
         nonlocal stranger, stranger_identity
         try:
             return real_arm(fd, seconds)
         except OSError:
+            # Detect unsafe injection even when a lower free number would let
+            # the competing allocation miss libpq's stale descriptor entirely.
+            assert connection_identity is not None
+            assert commit_deadline._identity(fd) == connection_identity, (
+                "fault injection released libpq's descriptor")
             if allocate_on_failure and stranger is None:
-                # Force the allocator's competing open at the failure boundary.
-                # A raw close of libpq's fd lets it steal and later close this socket.
+                # Open a competing socket while the failed connection unwinds.
                 stranger = socket.socket()
                 stranger_identity = commit_deadline._identity(stranger.fileno())
                 assert stranger_identity is not None
@@ -939,6 +944,7 @@ def test_a_commit_whose_number_was_closed_fails_as_a_lost_connection(
                 with base.get_db() as conn:
                     conn.cursor().execute("SELECT 1")
                     number = conn.fileno()
+                    connection_identity = commit_deadline._identity(number)
             assert isinstance(error.value.__cause__, OSError)
             assert error.value.__cause__.errno == errno.EBADF
         assert not private_pool._used
