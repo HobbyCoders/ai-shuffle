@@ -55,6 +55,11 @@ JOURNEYS = FRONTEND / "tests" / "journeys"
 RUN_ALL = "run-all.mjs"
 WEIGHTS = Path(__file__).with_name("journey_weights.json")
 HOSTED_SHARDS = 10
+# Clean shards across six main-suite runs on 2026-11-06 had 7–14s step overhead.
+# Keep the existing 30s setup allowance and also budget 10% runtime variation;
+# neither the 25-minute deadline nor the retry/teardown reserves are relaxed.
+SETUP_SECONDS = 30
+RUNTIME_TOLERANCE = 0.10
 # Conservative planning budgets, NOT hosted measurements. The new 47-case
 # producer took ~17 minutes in red run 42107295628 (job 127526542398), versus
 # 8.6 minutes from the generic per-case fallback. Reserve 18 minutes until a
@@ -122,18 +127,39 @@ def estimated_seconds(directory: Path = JOURNEYS, weights_path: Path = WEIGHTS) 
             for path in files}
 
 
+def shard_budget_seconds(runtime: float) -> float:
+    """Full first pass plus hosted variation, one retry phase and safe teardown."""
+    from scripts.devloop import journey_retry as retry
+
+    if runtime == 0:  # The workflow does not start an instance for empty shards.
+        return 0
+    return (runtime * (1 + RUNTIME_TOLERANCE) + SETUP_SECONDS
+            + retry.RETRY_SECONDS + retry.TEARDOWN_SECONDS)
+
+
 def plan(shards: int, directory: Path = JOURNEYS, weights_path: Path = WEIGHTS) -> list[list[str]]:
     weights = estimated_seconds(directory, weights_path)
     buckets = partition(weights, shards)
+    from scripts.devloop import journey_retry as retry
+
     lines = ["### Estimated UI journey shard loads", "",
-             "Journey runtime only; excludes dev-instance setup and teardown.", "",
-             "| Shard | Journeys | Estimated minutes |", "| --- | --- | --- |"]
+             f"Step estimate includes {SETUP_SECONDS}s setup/normal teardown. "
+             f"Retry budget also reserves {RUNTIME_TOLERANCE:.0%} runtime variation, "
+             f"the full {retry.RETRY_SECONDS}s retry phase and {retry.TEARDOWN_SECONDS}s teardown. "
+             "The step deadline stays 25 minutes.", "",
+             "| Shard | Journeys | Journey minutes | Step minutes | With retry/reserves | Headroom seconds |",
+             "| --- | --- | --- | --- | --- | --- |"]
     for index, bucket in enumerate(buckets, 1):
-        minutes = sum(weights[name] for name in bucket) / 60
+        runtime = sum(weights[name] for name in bucket)
+        step = runtime + SETUP_SECONDS if bucket else 0
+        budget = shard_budget_seconds(runtime)
+        headroom = retry.STEP_SECONDS - budget
         # stdout is the plan's JSON API, consumed by the workflow's command substitution.
-        print(f"[ci] planned shard {index}/{shards}: {minutes:.1f} estimated minutes "
-              f"({len(bucket)} journeys)", file=sys.stderr, flush=True)
-        lines.append(f"| {index}/{shards} | {len(bucket)} | {minutes:.1f} |")
+        print(f"[ci] planned shard {index}/{shards}: {step / 60:.1f} estimated step minutes "
+              f"({len(bucket)} journeys, {budget / 60:.1f}m with retry/reserves, "
+              f"{headroom:.0f}s headroom)", file=sys.stderr, flush=True)
+        lines.append(f"| {index}/{shards} | {len(bucket)} | {runtime / 60:.1f} | {step / 60:.1f} | "
+                     f"{budget / 60:.1f} | {headroom:.0f} |")
     _write_summary("\n".join(lines) + "\n")
     return buckets
 
