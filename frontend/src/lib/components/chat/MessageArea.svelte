@@ -1776,10 +1776,10 @@
 		if (STREAM_DEBUG) console.log(`[AS] disengageAutoScroll (user gesture) ST=${containerRef?.scrollTop} SH=${containerRef?.scrollHeight} CH=${containerRef?.clientHeight}`);
 	}
 
-	// A reader-controlled Plan disclosure is reading intent, not arriving content.
+	// A reader-controlled disclosure is reading intent, not arriving content.
 	// Use the same release as wheel/touch BEFORE its DOM height changes so queued
 	// follow/settle callbacks cannot hide the focused header. No second scroll writer.
-	function handlePlanDisclosure(event: MouseEvent): boolean {
+	function handleReaderDisclosure(event: MouseEvent): boolean {
 		const sessionId = $activeSession.sessionId;
 		if (sessionId !== $liveActiveSession.sessionId ||
 			(transcriptActions && !transcriptActions.isCurrent(sessionId)) ||
@@ -2622,6 +2622,7 @@
 						durationLabel={item.durationLabel}
 						summary={item.summary}
 						compactSummary={item.compactSummary}
+						onBeforeToggle={handleReaderDisclosure}
 						row={messageBody}
 						revealMessageId={revealedTurnId}
 						pagingEnabled={!shouldAutoScroll}
@@ -2909,7 +2910,7 @@
 		<!-- What the owner's answer did, right after that answer (#484). -->
 		<ApprovalOutcome data={message.systemData} content={message.content} />
 	{:else if message.type === 'system' && message.systemSubtype === 'session_plan'}
-		<PlanDisplay plan={message.systemData?.plan} onBeforeToggle={handlePlanDisclosure} />
+		<PlanDisplay plan={message.systemData?.plan} onBeforeToggle={handleReaderDisclosure} />
 	{:else if message.type === 'system'}
 		<div class="w-full">
 			<div class="min-w-0">

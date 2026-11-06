@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { resolveAnchoredTailReserve } from '$lib/stores/session/auto-scroll';
 
 const source = readFileSync(resolve(process.cwd(), 'src/lib/components/chat/MessageArea.svelte'), 'utf8');
-const start = source.indexOf('function handlePlanDisclosure(event: MouseEvent): boolean {');
+const start = source.indexOf('function handleReaderDisclosure(event: MouseEvent): boolean {');
 const end = source.indexOf('\n\t// Wheel/trackpad:', start);
 if (start < 0 || end < start) throw new Error('Missing Plan disclosure adapter');
 const adapter = source.slice(start, end).replace('(event: MouseEvent): boolean', '(event)');
@@ -45,8 +45,8 @@ function reserveFixture({ earlierTurn = false, clientHeight = 693, contentEnd = 
   tailControlsExtent: () => controlsExtent, resolveAnchoredTailReserve,
   disengageAutoScroll: vi.fn()
  };
- const owner = new Function('scope', `with(scope) { ${tailOwner}; ${adapter}; return { latestTurnTailNow, handlePlanDisclosure }; }`)(scope);
- button.addEventListener('click', event => owner.handlePlanDisclosure(event));
+ const owner = new Function('scope', `with(scope) { ${tailOwner}; ${adapter}; return { latestTurnTailNow, handleReaderDisclosure }; }`)(scope);
+ button.addEventListener('click', event => owner.handleReaderDisclosure(event));
  return { scope, details, owner, click: () => button.click() };
 }
 
@@ -97,7 +97,7 @@ function fixture({ current = true, sameSession = true, contained = true } = {}) 
  const button = document.createElement('button');
  if (contained) container.append(button);
  const actions = { isCurrent: vi.fn(() => current) };
- const handle = new Function('$activeSession', '$liveActiveSession', 'transcriptActions', 'containerRef', 'disengageAutoScroll', `${adapter}; return handlePlanDisclosure;`)(
+ const handle = new Function('$activeSession', '$liveActiveSession', 'transcriptActions', 'containerRef', 'disengageAutoScroll', `${adapter}; return handleReaderDisclosure;`)(
   { sessionId: 'presented', isRemote: true }, { sessionId: sameSession ? 'presented' : 'entered' }, actions, container, release
  );
  let accepted: boolean | undefined;
@@ -122,9 +122,9 @@ describe('MessageArea Plan reader intent', () => {
   expect(accepted).toBe(false);
   expect(release).not.toHaveBeenCalled();
  });
- it('wires intent only to Plan disclosure, not every transcript click or arrival', () => {
-  expect(source).toContain('onBeforeToggle={handlePlanDisclosure}');
-  expect(source.match(/onBeforeToggle=/g)).toHaveLength(1);
+ it('wires intent only to reader-controlled Plan and work-log disclosures', () => {
+  expect(source).toContain('onBeforeToggle={handleReaderDisclosure}');
+  expect(source.match(/onBeforeToggle=/g)).toHaveLength(2);
   expect(adapter).not.toMatch(/scrollTop\s*=|scrollToBottom|ResizeObserver|setTimeout/);
  });
 });

@@ -82,6 +82,38 @@ const baseProps = {
 
 afterEach(cleanup);
 
+describe('WorkLogGroup reader intent', () => {
+	it.each(['legacy', 'sequence'] as const)('releases before a %s fold mutates and can veto either header or footer', async (shape) => {
+		let veto = false;
+		const calls: Array<{ expanded: string | null; rows: number }> = [];
+		render(WorkLogGroup, {
+			...baseProps, mode: 'settled',
+			...(shape === 'sequence' ? { sequence: [{ message, index: 0, hiddenWhenCollapsed: true }] } : {}),
+			onBeforeToggle: (event) => {
+				calls.push({ expanded: (event.currentTarget as HTMLElement).getAttribute('aria-expanded'), rows: screen.queryAllByTestId('work-row').length });
+				return !veto;
+			}
+		});
+		expect(calls).toEqual([]);
+		veto = true;
+		await fireEvent.click(screen.getByRole('button', { expanded: false }));
+		expect(screen.queryAllByTestId('work-row')).toHaveLength(0);
+		veto = false;
+		await fireEvent.click(screen.getByRole('button', { expanded: false }));
+		expect(screen.getAllByTestId('work-row')).toHaveLength(1);
+		expect(calls.slice(0, 2)).toEqual([{ expanded: 'false', rows: 0 }, { expanded: 'false', rows: 0 }]);
+		veto = true;
+		await fireEvent.click(screen.getAllByRole('button', { expanded: true })[0]);
+		await fireEvent.click(screen.getByRole('button', { name: 'Hide work details' }));
+		expect(screen.getAllByTestId('work-row')).toHaveLength(1);
+		expect(calls.slice(2)).toEqual([{ expanded: 'true', rows: 1 }, { expanded: 'true', rows: 1 }]);
+		veto = false;
+		await fireEvent.click(screen.getAllByRole('button', { expanded: true })[0], { detail: 0 });
+		expect(screen.queryAllByTestId('work-row')).toHaveLength(0);
+		expect(calls.at(-1)).toEqual({ expanded: 'true', rows: 1 });
+	});
+});
+
 describe('WorkLogGroup', () => {
 	it('reveals a distant protected user turn inside a giant group without exceeding the row cap', async () => {
 		const entries = Array.from({ length: 2000 }, (_, index) => ({
@@ -451,6 +483,35 @@ describe('WorkLogGroup', () => {
 				removeItem: (k) => { data.delete(k); }, setItem: (k, v) => { data.set(k, String(v)); }
 			};
 		};
+
+		it.each(['header', 'footer'] as const)('releases explicit live-run %s input but not automatic settle promotion', async (control) => {
+			let veto = true;
+			const calls: Array<string | null> = [];
+			const view = render(WorkLogGroup, { ...logOf(true), folds: createFoldState(memoryStorage()),
+				onBeforeToggle: (event) => { calls.push((event.currentTarget as HTMLElement).getAttribute('aria-expanded')); return !veto; }
+			});
+			const opener = () => screen.getByRole('button', { name: 'Show work details: Read 1 file' });
+			await fireEvent.click(opener());
+			expect(shown('read-a')).toBe(false);
+			veto = false;
+			await fireEvent.click(opener());
+			expect(shown('read-a')).toBe(true);
+			const closer = () => control === 'header'
+				? screen.getByRole('button', { name: 'Hide work details: Read 1 file' })
+				: screen.getByRole('button', { name: 'Hide work details' });
+			veto = true;
+			await fireEvent.click(closer());
+			expect(shown('read-a')).toBe(true);
+			veto = false;
+			await fireEvent.click(closer(), { detail: 0 });
+			expect(shown('read-a')).toBe(false);
+			expect(calls).toEqual(['false', 'false', 'true', 'true']);
+			await fireEvent.click(opener());
+			const count = calls.length;
+			await view.rerender(logOf(false));
+			expect(shown('read-a')).toBe(true);
+			expect(calls).toHaveLength(count);
+		});
 
 		it('folds the earlier run behind the live label and keeps the boundary and current run open', () => {
 			render(WorkLogGroup, { ...logOf(true), folds: createFoldState(memoryStorage()) });
