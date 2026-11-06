@@ -92,11 +92,16 @@
 	// Set once boot has reconciled the restored session with the layout's view;
 	// until then the two may disagree on purpose (see onMount).
 	let bootReconciled = $state(false);
+	let bootInitGeneration = $state<number | null>(null);
 	// A new chat whose first send created its session: the layout's view follows
 	// it, so a reload reopens that chat (createdChatToFollow).
 	$effect(() => {
-		if (!bootReconciled) return;
+		// Track adoption even while boot is waiting. Only this boot's admitted
+		// first send may follow early: init cannot restore a stale chat under
+		// that claim, and New chat / session navigation advances the generation.
 		const follow = createdChatToFollow($activeView, $activeSession?.sessionId ?? null);
+		if (!bootReconciled && (bootInitGeneration === null ||
+			bootInitGeneration !== getInitGeneration() || !hasBootSendClaim(bootInitGeneration))) return;
 		if (follow) layout.openChat(follow);
 	});
 	// Back/Forward onto a chat link's history entry (breadcrumb, transcript
@@ -234,6 +239,7 @@
 		// send never reaches it while the first loads run.
 		const initializing = activeSession.init({ deepLinkSessionId });
 		const initGeneration = getInitGeneration();
+		bootInitGeneration = initGeneration;
 		await initializing;
 		performance.mark?.('shuffle:boot.init.end');
 		// The layout's explicit New Chat wins over an older backend session
@@ -310,8 +316,8 @@
 			// clicked New Chat (layout persists synchronously) but the async backend
 			// persist may not have completed. Respect the layout's explicit intent.
 			// A session that appeared after init is not that stale one: a send
-			// made it during the loads (the layout follows it once boot is
-			// reconciled, createdChatToFollow), so it stays.
+			// made it during the loads (the boot-send claim lets the layout
+			// follow it early, createdChatToFollow), so it stays.
 			if (!layoutNewChatWon && !changedDuringLoads) activeSession.newChat();
 		} else if ($activeView.type === 'session' && currentViewSessionId !== restoredSessionId) {
 			// Layout view and active session disagree — backend is authoritative
