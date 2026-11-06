@@ -773,6 +773,8 @@ class SessionRuntime:
         # In-flight pump task — interrupt() escalation cancels it: the pump
         # holds the reader token, so nothing else can read until it is gone.
         self._pump_task: Optional[asyncio.Task] = None
+        # Session-wide cleanup is part of this turn, not of its engine iterator.
+        self._admission_lease = None
         # Set by interrupt()'s escalation-keep branch: execute() must run the
         # drain reader (under its still-live lease) instead of finalizing.
         self._drain_after_cancel = False
@@ -1084,6 +1086,14 @@ class SessionRuntime:
         outcome: Optional[str] = None
         settled_here = False
         try:
+            from app.core.provider import session_admission
+
+            try:
+                self._admission_lease = await session_admission.acquire(sid)
+            except session_admission.SessionBusyError:
+                # A direct API turn owns this chat. Leave our input queued and
+                # do not run session-wide cleanup against that turn's workers.
+                return None
             if self._stop_applies() or await asyncio.to_thread(turns_db.wake_cancelled_by_stop, self.turn):
                 await asyncio.to_thread(turns_db.remove_queued_turn, tid, keep_unsent_words=True)
                 return None
@@ -1389,9 +1399,16 @@ class SessionRuntime:
                 cu_abort.request_stop(sid, reason="completed")
             # Cancelling execute() must not cancel this, and neither may it hurry
             # it: a write still being re-sent needs the lease it was fenced on.
-            await asyncio.shield(start_detached(
-                self._release_lease_after_writes(recorder, renew_task, run_id, fence_token)
-            ))
+            async def release() -> None:
+                try:
+                    await self._release_lease_after_writes(recorder, renew_task, run_id, fence_token)
+                finally:
+                    from app.core.provider import session_admission
+
+                    if self._admission_lease is not None:
+                        session_admission.close(self._admission_lease)
+
+            await asyncio.shield(start_detached(release()))
 
         # 8. Settlement callback (the scheduler seam) — after the lease is free,
         #    and ONLY when finalize actually performed the DB transition. A racer
@@ -1664,6 +1681,7 @@ class SessionRuntime:
                 # keeps the row when it holds the turn for confirmation.
                 turn_source=self.source,
                 loop_guard_turn=self.turn,
+                admission_lease=self._admission_lease,
                 # Who sent a connector message, for the owner's-subscription
                 # check. Only a connector turn carries one.
                 connector_sender=(

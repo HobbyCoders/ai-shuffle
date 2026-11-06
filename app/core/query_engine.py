@@ -1844,13 +1844,19 @@ def _stream_to_websocket_impl(
     turn_source: Optional[str] = None,
     loop_guard_turn: Optional[Dict[str, Any]] = None,
     connector_sender: Optional[Dict[str, Any]] = None,
+    admission_lease: Optional[Lease] = None,
 ) -> AsyncGenerator[Dict[str, Any], None]:
-    """Run one pump turn under the chat's lease (see ``session_admission``)."""
-    return session_admission.stream_turn(session_id, lambda lease: _stream_to_websocket_turn(
-        lease, prompt, session_id, profile_id, project_id, overrides, broadcast_func,
-        api_user_id, user_id, upload_blob_ids, resume, turn_source, loop_guard_turn,
-        connector_sender,
-    ))
+    """Run one pump turn; a runtime retains its lease through finalization."""
+    def events(lease: Lease) -> AsyncGenerator[Dict[str, Any], None]:
+        return _stream_to_websocket_turn(
+            lease, prompt, session_id, profile_id, project_id, overrides, broadcast_func,
+            api_user_id, user_id, upload_blob_ids, resume, turn_source, loop_guard_turn,
+            connector_sender,
+        )
+
+    if admission_lease is not None:
+        return events(admission_lease)
+    return session_admission.stream_turn(session_id, events)
 
 
 async def _stream_to_websocket_turn(

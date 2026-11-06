@@ -66,11 +66,11 @@ async def interrupt_session(session_id: str) -> bool:
     state = get_session_pool().peek(session_id)
     if not state:
         logger.warning(f"No active session found for {session_id}")
-        return False
+        return session_admission.stop_requested(session_id)
 
     if not state.is_connected:
         logger.warning(f"Session {session_id} is not connected")
-        return False
+        return session_admission.stop_requested(session_id)
 
     # Set interrupt flag first - this is checked in the streaming loop as a failsafe
     state.interrupt_requested = True

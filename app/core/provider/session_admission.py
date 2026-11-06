@@ -27,8 +27,10 @@ past a limit, with a last frame saying the reply goes on: dropping frames from t
 middle would look like a whole reply, and waiting for it would let a stuck client
 stall the turn.
 
-A Stop for the turn holding the chat, even one still setting up, is a flag on the
-pooled engine. If the holder is out of a Stop's reach (a rewind, a turn that has ended, a
+A Stop for the turn holding the chat, even one still setting up, stays on its
+lease as well as the pooled engine. The adapter reapplies it after submit resets
+an idle Interrupt, before the newly scheduled engine task can start model work.
+If the holder is out of a Stop's reach (a rewind, a turn that has ended, a
 turn off the pool), :func:`stop_waiting_turn` marks the lease of each turn waiting then.
 So the Stop leaves with those turns, however their wait ends, and a later arrival has a
 lease of its own. The turn that gets the chat puts it on the engine it runs on
@@ -130,7 +132,7 @@ class Lease:
     taken_by: Optional["Lease"] = None
     # The turn has announced its end: a next message waits rather than being refused.
     ending: bool = False
-    # A Stop pressed while this turn waited for the chat.
+    # A Stop pressed while this turn waited for the chat or was setting up/running.
     stop_requested: bool = False
     # Set when the route that held this lease has finished, saving included.
     exited: asyncio.Event = field(default_factory=asyncio.Event)
@@ -162,11 +164,20 @@ def stop_waiting_turn(session_id: str) -> bool:
     The engine is left alone, because nothing using it now is what this Stop is for.
     """
     if _stop_is_for_holder(session_id):
+        # The engine may not exist yet, or may clear its idle Interrupt at
+        # submit. Keep the Stop on the turn through every setup boundary.
+        _holders[session_id].stop_requested = True
         return False
     waiters = [lease for lease in _waiting.get(session_id, ()) if lease.stoppable]
     for lease in waiters:
         lease.stop_requested = True
     return bool(waiters)
+
+
+def stop_requested(session_id: Optional[str]) -> bool:
+    """Whether the turn holding this chat received a Stop, including during setup."""
+    holder = _holders.get(session_id) if session_id else None
+    return bool(holder is not None and holder.stoppable and holder.stop_requested)
 
 
 def apply_stop(lease: Lease, state: Any) -> None:

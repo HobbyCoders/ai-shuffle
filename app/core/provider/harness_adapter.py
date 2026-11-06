@@ -1835,6 +1835,16 @@ class HarnessAdapter(ProviderAdapter):
             )
         try:
             await self._engine.submit(op)
+            # UserTurn/Resume submission in both engines claims the turn and
+            # schedules its task without yielding. They reset an idle Interrupt
+            # there. Reapply this admission's Stop before that task can run:
+            # no provider request or CLI user frame may escape setup. Submitting
+            # the interrupted turn also consumes delegated model-switch carryover
+            # and produces the normal terminal event, leaving the next turn clean.
+            from app.core.provider import session_admission
+
+            if session_admission.stop_requested(self._resolve_app_session_id()):
+                await self._engine.submit(Interrupt())
         except BaseException:
             if ctx is not None and previous is not None:
                 ctx.extra["session_plan"] = previous
