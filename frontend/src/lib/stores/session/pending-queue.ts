@@ -185,15 +185,19 @@ function isOptimistic(entry: PendingEntry): boolean {
 	return entry.id === entry.clientMessageId || isLocalPendingId(entry.id);
 }
 
+/** A server re-queue is a new attempt, despite retaining the command id. */
+function answeredByReceipt(entry: PendingEntry, answeredAt: number): boolean {
+	// An echo cannot be a re-queue (those only exist server-side). A server row
+	// is consumed when it predates the receipt on the SAME (server) clock.
+	return isOptimistic(entry) || (Number.isFinite(answeredAt)
+		&& Number.isFinite(entry.queuedAt) && entry.queuedAt < answeredAt);
+}
+
 /** Has replayed history already answered this bubble's command? */
 function answeredByHistory(entry: PendingEntry): boolean {
 	if (!entry.clientMessageId) return false;
 	const answeredAt = replayedCommands.get(entry.clientMessageId);
-	if (answeredAt === undefined) return false;
-	// An echo cannot be a re-queue (those only exist server-side). A server row
-	// is consumed when it predates the receipt on the SAME (server) clock.
-	if (isOptimistic(entry)) return true;
-	return Number.isFinite(answeredAt) && Number.isFinite(entry.queuedAt) && entry.queuedAt < answeredAt;
+	return answeredAt !== undefined && answeredByReceipt(entry, answeredAt);
 }
 
 /** Bind feed observations to a session; cancellation transactions are separate. */
@@ -319,7 +323,13 @@ export const pendingQueue = {
 		if (turnId) deliveredTurnIds.add(turnId);
 		if (commandId) {
 			this.acknowledgeSend(id, commandId);
-			this.applyRemovalVerdict(id, commandId, 'already_delivered');
+			const removal = cancellations.get(id)?.removals.get(commandId);
+			const answeredAt = createdAt ? Date.parse(createdAt) : NaN;
+			// A replayed (or late live) receipt for an interrupted attempt must
+			// not end cancellation of its newer server re-queue.
+			if (!removal || answeredByReceipt(removal, answeredAt) || (live && !Number.isFinite(answeredAt))) {
+				this.applyRemovalVerdict(id, commandId, 'already_delivered');
+			}
 		}
 		if (!live) {
 			// The command id is an exact handle, unlike text, so history may use it.
@@ -389,7 +399,7 @@ export const pendingQueue = {
 		this.removalFailed(id, key, true);
 	},
 
-	applyRemovalVerdict(id: string | null, key: string, verdict: string): void {
+	applyRemovalVerdict(id: string | null, key: string, verdict: string, messageId?: string): void {
 		const { removals, withdrawn, deliveredRows, terminalVerdicts, drafts } = cancellationState(id);
 		const entry = removals.get(key);
 		if (verdict === 'withdrawn' || verdict === 'not_found') {
@@ -402,10 +412,11 @@ export const pendingQueue = {
 			}
 			this.removalFailed(id, key, true);
 			this.acknowledgeSend(id, key);
-		} else if (verdict === 'already_delivered' && entry) {
-			// Retire this row, not every future row for the command. Interrupted
-			// server turns can legitimately re-queue with a fresh id/time.
-			deliveredRows.add(entry.id);
+		} else if (verdict === 'already_delivered') {
+			// Retire both names of this attempt, not future rows for the command.
+			// The durable id can arrive in a verdict before its queue snapshot.
+			if (entry && (!messageId || isOptimistic(entry) || entry.id === messageId)) deliveredRows.add(entry.id);
+			if (messageId) deliveredRows.add(messageId);
 			terminalVerdicts.set(key, verdict);
 			this.removalFailed(id, key, true);
 			this.acknowledgeSend(id, key);

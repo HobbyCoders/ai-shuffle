@@ -1053,11 +1053,21 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 					pendingQueue.rejectSend(sid, data.client_message_id);
 					if (sid !== getState().sessionId) break;
 					const restored = pendingQueue.takeWithdrawnDraft(sid);
-					update(s => ({ ...s,
-						queuedMessages: pendingQueue.reconcile(s.sessionId, s.queuedMessages),
-						error: `Message not sent: ${data.message || 'Please try again.'}`,
-						...(restored !== null ? { pendingRestorePrompt: [s.pendingRestorePrompt, restored].filter(Boolean).join('\n\n') } : {}),
-					}));
+					update(s => {
+						// Idle sends echo on the transcript, not in the pending queue.
+						// Only recover an unconfirmed local row, never a durable receipt.
+						const refused = s.messages.find(m => m.role === 'user' && m.commandId === data.client_message_id
+							&& m.id.startsWith('user-') && !m.serverId && m.seq == null);
+						const recovered = restored ?? refused?.content;
+						const optimisticOnly = refused && s.optimisticStreaming && !s.liveTurnId;
+						return { ...s,
+							...(refused ? { messages: s.messages.filter(m => m !== refused), optimisticStreaming: false } : {}),
+							...(optimisticOnly ? { isStreaming: false, streamStartTime: null } : {}),
+							queuedMessages: pendingQueue.reconcile(s.sessionId, s.queuedMessages),
+							error: `Message not sent: ${data.message || 'Please try again.'}`,
+							...(recovered != null ? { pendingRestorePrompt: [s.pendingRestorePrompt, recovered].filter(Boolean).join('\n\n') } : {}),
+						};
+					});
 					break;
 				}
 
@@ -1141,7 +1151,8 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 					}));
 					break;
 				}
-				pendingQueue.applyRemovalVerdict(sid, key, rawVerdict === 'not_found' ? rawVerdict : verdict);
+				pendingQueue.applyRemovalVerdict(sid, key, rawVerdict === 'not_found' ? rawVerdict : verdict,
+					typeof data.message_id === 'string' ? data.message_id : undefined);
 				if (sid !== state.sessionId) break; // retain for that session's next switch-in
 				const restored = pendingQueue.takeWithdrawnDraft(sid);
 				update(s => ({ ...s,

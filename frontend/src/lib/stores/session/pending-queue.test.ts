@@ -205,6 +205,36 @@ describe('pendingQueue — unsending', () => {
 });
 
 describe('pendingQueue — bounded transactions', () => {
+	it('retires both optimistic and verdict durable identities before the receipt arrives', () => {
+		const entry = { ...row('client-a', 'words', 5000), clientMessageId: 'client-a' };
+		pendingQueue.requestRemoval(SID, entry);
+		pendingQueue.applyRemovalVerdict(SID, 'client-a', 'already_delivered', 'turn-old');
+		expect(authoritative([])).toEqual([]);
+		expect(authoritative([{ ...entry, id: 'turn-old' }])).toEqual([]);
+		const requeue = { ...entry, id: 'turn-new', queuedAt: 15000 };
+		expect(authoritative([requeue])).toEqual([requeue]);
+	});
+
+	it('keeps a newer server row that arrives before the older attempt verdict', () => {
+		const entry = { ...row('client-a', 'words', 5000), clientMessageId: 'client-a' };
+		pendingQueue.requestRemoval(SID, entry);
+		const requeue = { ...entry, id: 'turn-new', queuedAt: 15000 };
+		authoritative([requeue]);
+		pendingQueue.applyRemovalVerdict(SID, 'client-a', 'already_delivered', 'turn-old');
+		expect(authoritative([requeue])).toEqual([requeue]);
+	});
+
+	it.each([false, true])('does not let an older receipt (live=%s) retire a newer cancellation attempt', (live) => {
+		const requeue = { ...row('turn-new', 'words', 15000), clientMessageId: 'client-a' };
+		authoritative([requeue]);
+		pendingQueue.requestRemoval(SID, requeue);
+		pendingQueue.noteDelivered(SID, 'words', 'turn-old', live, 'client-a', new Date(10000).toISOString());
+		expect(authoritative([requeue])).toEqual([{ ...requeue, status: 'cancelling' }]);
+		expect(pendingQueue.removalVerdict(SID, 'client-a')).toBeUndefined();
+		pendingQueue.applyRemovalVerdict(SID, 'client-a', 'withdrawn');
+		expect(pendingQueue.takeWithdrawnDraft(SID)).toBe('words');
+	});
+
 	it('a receipt beats cancellation memory and a first-seen stale row', () => {
 		const entry = { ...row('client-a', 'words'), clientMessageId: 'client-a' };
 		pendingQueue.noteOptimistic(SID, entry.id);

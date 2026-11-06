@@ -9,6 +9,50 @@ await runJourney({
   name: 'steer-lifecycle',
   recorder: { selectors: ['pending=.pending-messages', 'cancelling=[data-queue-status="cancelling"]'] },
   cases: [{
+    name: 'refused-idle-send',
+    async setup(ctx) {
+      await openNewChat(ctx);
+      await typeAndSend(ctx.page, `idle first ${uniq()} [script:default tps=200 latency_ms=0]`);
+      await waitChat(ctx.page, { streaming: 'false', messagesAtLeast: 2 });
+    },
+    async act({ page, mark }) {
+      const text = `recover idle words ${uniq()}`;
+      await mark('idle send with a stale agent selection');
+      await page.evaluate(() => {
+        const send = WebSocket.prototype.send;
+        WebSocket.prototype.send = function(frame) {
+          const data = typeof frame === 'string' ? JSON.parse(frame) : null;
+          if (data?.type === 'query') {
+            data.profile = 'journey-missing-agent';
+            WebSocket.prototype.send = send;
+            const onmessage = this.onmessage;
+            this.onmessage = function(event) {
+              const reply = JSON.parse(event.data);
+              if (reply.type === 'error' && reply.client_message_id === data.client_message_id) {
+                this.onmessage = onmessage;
+                window.__releaseIdleRefusal = () => onmessage.call(this, event);
+                return;
+              }
+              return onmessage.call(this, event);
+            };
+            return send.call(this, JSON.stringify(data));
+          }
+          return send.call(this, frame);
+        };
+      });
+      await typeAndSend(page, text);
+      await page.waitForFunction(() => !!window.__releaseIdleRefusal);
+      expect(await page.locator('[data-ui-row]').filter({ hasText: text }).count() === 1, 'in-flight idle send has its optimistic echo');
+      // Send and the actual server rejection are separate causal steps. The
+      // required optimistic-row retraction is not an unexplained UI reversal.
+      await mark('deliver the real correlated server refusal');
+      await page.evaluate(() => window.__releaseIdleRefusal());
+      await page.waitForFunction(() => document.body.innerText.includes('That agent no longer exists'));
+      await waitChat(page, { streaming: 'false' });
+      expect((await composer(page).innerText()).includes(text), 'idle refusal returns text to the composer');
+      expect(await page.locator('[data-ui-row]').filter({ hasText: text }).count() === 0, 'refused idle echo is not a saved message');
+    }
+  }, {
     name: 'refused-steer',
     async setup(ctx) {
       await openNewChat(ctx);
@@ -110,6 +154,34 @@ await runJourney({
       await unsend.click();
       await page.locator('.pending-messages').waitFor({ state: 'hidden' });
       expect((await composer(page).innerText()).includes(text), 'a retry recovers the cancelled words');
+    }
+  }, {
+    name: 'touch-unsend-targets',
+    viewports: ['phone', 'fold-inner'],
+    async setup(ctx) {
+      await openNewChat(ctx);
+      await typeAndSend(ctx.page, `working ${uniq()} [script:long tps=2 latency_ms=1500]`);
+      await waitChat(ctx.page, { streaming: 'true', messagesAtLeast: 2 });
+    },
+    async act({ page, mark }) {
+      const first = `first touch words ${uniq()}`, second = `second touch words ${uniq()}`;
+      await typeAndSend(page, first);
+      await typeAndSend(page, second);
+      await page.waitForFunction(() => document.querySelectorAll('.pending-messages [data-queue-confirmed="true"]').length === 2);
+      for (const [selector, remaining] of [['.hover-remove', 1], ['.pending-remove', 0]]) {
+        const target = await page.locator(selector).evaluate(el => {
+          const r = el.getBoundingClientRect(), hit = getComputedStyle(el, '::before');
+          const x = r.x + r.width / 2 - 11, y = r.y + r.height / 2;
+          return { x, y, width: parseFloat(hit.width), height: parseFloat(hit.height),
+            hits: document.elementFromPoint(x, y)?.closest('button') === el };
+        });
+        expect(target.width >= 24 && target.height >= 24 && target.hits, `${selector} has a real 24px touch target`);
+        await mark(`unsend via ${selector} outside its visible glyph`);
+        await page.mouse.click(target.x, target.y);
+        await page.waitForFunction(n => document.querySelectorAll('.pending-messages .bubble').length === n, remaining);
+      }
+      const draft = await composer(page).innerText();
+      expect(draft.includes(first) && draft.includes(second), 'both expanded touch targets recover their own message');
     }
   }, {
     name: 'delivery-wins',

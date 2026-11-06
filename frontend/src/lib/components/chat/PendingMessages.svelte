@@ -313,6 +313,24 @@
 		.usercol {
 			max-width: 85%;
 		}
+	}
+
+	@media (pointer: coarse), (max-width: 639px) {
+		/* Extend touch targets without growing the glyph or action row. */
+		.pending-remove {
+			position: relative;
+		}
+
+		.pending-remove::before,
+		.hover-remove::before {
+			content: '';
+			position: absolute;
+			top: 50%;
+			left: 50%;
+			width: 24px;
+			height: 24px;
+			transform: translate(-50%, -50%);
+		}
 
 		/* No hover on touch — keep the per-bubble control reachable. */
 		.hover-remove {
