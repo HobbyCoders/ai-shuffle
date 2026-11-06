@@ -9,6 +9,34 @@ await runJourney({
   name: 'steer-lifecycle',
   recorder: { selectors: ['pending=.pending-messages', 'cancelling=[data-queue-status="cancelling"]'] },
   cases: [{
+    name: 'refused-idle-send',
+    async setup(ctx) {
+      await openNewChat(ctx);
+      await typeAndSend(ctx.page, `idle first ${uniq()} [script:default tps=200 latency_ms=0]`);
+      await waitChat(ctx.page, { streaming: 'false', messagesAtLeast: 2 });
+    },
+    async act({ page, mark }) {
+      const text = `recover idle words ${uniq()}`;
+      await mark('idle send with a stale agent selection');
+      await page.evaluate(() => {
+        const send = WebSocket.prototype.send;
+        WebSocket.prototype.send = function(frame) {
+          const data = typeof frame === 'string' ? JSON.parse(frame) : null;
+          if (data?.type === 'query') {
+            data.profile = 'journey-missing-agent';
+            WebSocket.prototype.send = send;
+            return send.call(this, JSON.stringify(data));
+          }
+          return send.call(this, frame);
+        };
+      });
+      await typeAndSend(page, text);
+      await page.waitForFunction(() => document.body.innerText.includes('That agent no longer exists'));
+      await waitChat(page, { streaming: 'false' });
+      expect((await composer(page).innerText()).includes(text), 'idle refusal returns text to the composer');
+      expect(await page.locator('[data-ui-row]').filter({ hasText: text }).count() === 0, 'refused idle echo is not a saved message');
+    }
+  }, {
     name: 'refused-steer',
     async setup(ctx) {
       await openNewChat(ctx);
