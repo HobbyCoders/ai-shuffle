@@ -65,6 +65,17 @@
 	],
 	"rules": [
 		{
+			"why": "an image click inside an inline HTML preview goes to the page that handles it, or else to the lightbox",
+			"journeys": ["html-preview-image-click"],
+			"globs": [
+				"frontend/src/lib/utils/htmlPreview.ts",
+				"frontend/src/lib/components/chat/HtmlPreview.svelte",
+				"frontend/src/lib/components/chat/HtmlArtifactFrame.svelte",
+				"frontend/src/lib/components/chat/MediaLightbox.svelte",
+				"frontend/tests/journeys/html-preview-image-click.journey.mjs"
+			]
+		},
+		{
 			"why": "structured Plan event snapshots stay compact, honest and readable across reloads",
 			"journeys": ["session-plan"],
 			"globs": [
