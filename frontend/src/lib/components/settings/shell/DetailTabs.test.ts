@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import { tick } from 'svelte';
-import DetailTabs, { partialTabs, revealScrollLeft, tabGap, TAB_GAP, TAB_GAP_TIGHT } from './DetailTabs.svelte';
+import DetailTabs, { partialTabs, revealScrollLeft, tabGap, wholeTabsEnd, TAB_GAP, TAB_GAP_TIGHT } from './DetailTabs.svelte';
 
 const TABS = ['Profile', 'Instructions', 'Tools', 'Subagents', 'Models', 'Advanced'].map((label) => ({
 	id: label.toLowerCase(),
@@ -173,5 +173,30 @@ describe('never a cut label', () => {
 		expect(screen.getByRole('tab', { name: 'Profile' }).hasAttribute('data-cut')).toBe(false);
 		// The selected tab is never marked cut.
 		expect(screen.getByRole('tab', { name: 'Subagents' }).hasAttribute('data-cut')).toBe(false);
+	});
+});
+
+describe('chevron right after the last whole tab', () => {
+	it('finds where the last whole tab ends in the visible strip', () => {
+		const tabs = [{ left: 0, width: 50 }, { left: 70, width: 60 }, { left: 150, width: 80 }, { left: 250, width: 40 }];
+		// Visible 0..200: the second tab ends at 130; the cut third tab does not count.
+		expect(wholeTabsEnd(tabs, { scrollLeft: 0, width: 200 })).toBe(130);
+		// Scrolled to 70: the visible strip starts at the second tab; the third ends at 230 - 70.
+		expect(wholeTabsEnd(tabs, { scrollLeft: 70, width: 200 })).toBe(160);
+		expect(wholeTabsEnd(tabs, { scrollLeft: 0, width: 40 })).toBeNull();
+	});
+
+	it('puts the fade and chevron where the whole tabs end, not at the far edge', async () => {
+		const { strip, container } = setup();
+		overflow(strip, 600, 250);
+		Array.from(strip.querySelectorAll<HTMLElement>('[data-tab-id]')).forEach((el, i) => {
+			Object.defineProperty(el, 'offsetLeft', { configurable: true, value: i * 100 });
+			Object.defineProperty(el, 'offsetWidth', { configurable: true, value: 80 });
+		});
+		await fireEvent.scroll(strip);
+		// Visible 0..250: Instructions (100..180) is the last whole tab, Tools (200..280) is cut.
+		const wrap = container.querySelector<HTMLElement>('.st-tabs-wrap')!;
+		expect(wrap.style.getPropertyValue('--tab-cut')).toBe('180px');
+		expect(container.querySelector('.tabs-more')).not.toBeNull();
 	});
 });

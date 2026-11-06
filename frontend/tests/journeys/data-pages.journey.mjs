@@ -135,13 +135,14 @@ await runJourney({
     // D8: one row of two equal buttons, 8px apart, the same height.
     expect(upload&&folder&&upload.y===folder.y&&Math.abs(upload.width-folder.width)<=1&&upload.height===folder.height&&Math.abs(folder.x-(upload.x+upload.width)-8)<=1,
      'D8: Upload and New folder share one row at equal width with an 8px gap '+JSON.stringify({upload,folder}));
-    // R3 deliberately separates the drawn 32px box from its 44px tap area.
+    // Pass 3 F3: the screen's main actions use the shared phone action size, drawn
+    // the full 44px touch height (not the compact 32px row button).
     for(const label of ['Upload','New folder']) {
      const target=await actions.getByRole('button',{name:label,exact:true}).evaluate(el=>{
-      const box=el.getBoundingClientRect(), hit=getComputedStyle(el,'::after');
-      return {drawn:box.height,height:box.height-parseFloat(hit.top)-parseFloat(hit.bottom),width:box.width-parseFloat(hit.left)-parseFloat(hit.right)};
+      const box=el.getBoundingClientRect();
+      return {drawn:box.height,width:box.width,token:getComputedStyle(el).getPropertyValue('--phone-action-height').trim()};
      });
-     expect(target.drawn>=32&&target.drawn<=36&&target.height>=44&&target.width>=44,'R3: compact file action retains its 44px tap area '+JSON.stringify(target));
+     expect(target.drawn>=44&&target.drawn<=45&&target.width>=44&&target.token==='44px','F3: file action is drawn at the shared 44px phone action size '+JSON.stringify(target));
     }
     await page.getByLabel('More file actions',{exact:true}).click();
     expect(await page.getByRole('button',{name:'Open terminal here',exact:true}).isEnabled(),'R2: guarded terminal action remains reachable from the phone bar');

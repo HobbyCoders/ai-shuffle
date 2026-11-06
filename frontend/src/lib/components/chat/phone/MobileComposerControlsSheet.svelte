@@ -1869,24 +1869,22 @@
 		pointer-events: none;
 	}
 	/* One equal column per action that is actually shown (Call hides itself when the composer has none). */
-	.actions { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 8px; }
-	/* The shared compact phone button (settings kit .st-btn): drawn 32px tall on a
-	   hairline with no fill, its 44px tap area reserved by the margin and an
-	   invisible extension. */
+	.actions { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: var(--phone-action-gap); }
+	/* The shared phone action size (app.css --phone-action-*, as Files' Upload):
+	   drawn the full 44px touch height on a hairline with no fill. */
 	.act {
 		--act-icon: 15px;
 		--act-gap: 6px;
 		position: relative;
 		min-width: 0;
-		height: 32px;
-		margin-block: 6px;
+		height: var(--phone-action-height);
 		display: flex;
 		align-items: center;
 		justify-content: center;
 		gap: var(--act-gap);
 		padding: 0 8px;
 		border: 1px solid color-mix(in oklch, var(--foreground) 16%, transparent);
-		border-radius: var(--radius, 8px);
+		border-radius: var(--phone-action-radius);
 		background: transparent;
 		color: var(--foreground);
 		font: inherit;
@@ -1896,7 +1894,6 @@
 		-webkit-tap-highlight-color: transparent;
 		transition: background-color 0.15s, transform 0.15s;
 	}
-	button.act::after { content: ''; position: absolute; inset: -7px 0; }
 	.act :global(svg) { flex: none; width: var(--act-icon); height: var(--act-icon); color: var(--muted-foreground); }
 	.act:hover:not(:disabled) { background: var(--hover-overlay); }
 	.act:active:not(:disabled) { transform: scale(0.97); }
@@ -1906,12 +1903,11 @@
 	.act-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; pointer-events: none; }
 	/* Four actions: the same row, a step tighter, so every name fits at 360px. */
 	.actions:has(:global(.voice-call-btn)):has(> button:nth-of-type(3)) .act { --act-gap: 4px; padding: 0 4px; font-size: 12px; }
-	/* Call is the composer's own VoiceCallButton, stretched over the cell and its
-	   44px tap band; its icon sits where the other cells draw theirs ("Call" is
-	   about 2em wide). */
+	/* Call is the composer's own VoiceCallButton, stretched over the whole cell;
+	   its icon sits where the other cells draw theirs ("Call" is about 2em wide). */
 	.call-act :global(.voice-call-btn) {
 		position: absolute;
-		inset: -7px 0;
+		inset: 0;
 		width: auto;
 		height: auto;
 		display: flex;

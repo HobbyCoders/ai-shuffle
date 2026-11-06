@@ -123,7 +123,7 @@
 
 	function triggerTypeLabel(type: TriggerType): string {
 		switch (type) {
-			case 'cron': return 'Cron';
+			case 'cron': return 'Schedule';
 			case 'interval': return 'Interval';
 			case 'connector_event': return 'Event';
 			case 'connector_trigger': return 'Connector';
@@ -233,10 +233,11 @@
   {#if expandedTriggers.has(trigIdx)}
    <!-- Direct card children reuse the shared SettingRow dividers. -->
     <SettingRow label="Trigger type" stackOnPhone>
-     <Segmented label="Trigger type" value={trigger.type} options={[{value:'cron',label:'Cron'},{value:'interval',label:'Interval'},{value:'connector_event',label:'Event'},{value:'connector_trigger',label:'Connector'},{value:'webhook',label:'Webhook'}]} onchange={(value) => updateTriggerType(trigIdx,value)} />
+     <Segmented label="Trigger type" value={trigger.type} options={[{value:'cron',label:'Schedule'},{value:'interval',label:'Interval'},{value:'connector_event',label:'Event'},{value:'connector_trigger',label:'Connector'},{value:'webhook',label:'Webhook'}]} onchange={(value) => updateTriggerType(trigIdx,value)} />
     </SettingRow>
     {#if trigger.type === 'cron'}
-     <SettingRow label="Schedule" stackOnPhone><Segmented label="Schedule" value={cronMode} options={[{value:'preset',label:'Preset'},{value:'custom',label:'Custom'}]} onchange={(value) => cronMode = value} /></SettingRow>
+     <!-- The type reads "Schedule" (stored as cron); presets or a custom timing sit under it. -->
+     <SettingRow label="Timing" stackOnPhone><Segmented label="Timing" value={cronMode} options={[{value:'preset',label:'Preset'},{value:'custom',label:'Custom'}]} onchange={(value) => cronMode = value} /></SettingRow>
      {#if cronMode === 'preset'}
       <SettingRow label="Preset" hint="Timezone: {timezone}"><SelectField value={trigger.config.expression || '0 9 * * *'} options={Object.entries(CRON_PRESETS).map(([value,label]) => ({value,label}))} onchange={(value) => {updateTriggerConfig(trigIdx,{...trigger.config,expression:value});syncCronFieldsFromExpression(value);}} /></SettingRow>
       <!-- A preset is described by its name; its raw expression waits behind Advanced. -->

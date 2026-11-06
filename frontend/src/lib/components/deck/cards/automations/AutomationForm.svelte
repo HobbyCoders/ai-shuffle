@@ -313,6 +313,9 @@ import AutomationModelError from './AutomationModelError.svelte';
  .notice-link:active { opacity: 0.7; }
  .notice-link:focus-visible { outline: 2px solid var(--ring); outline-offset: 3px; }
  @media (max-width: 600px) { .notice-link { min-height: 44px; } }
+ /* Steps are appended below the Prompt card, so the button stays after them,
+    12px clear of the card above and on its left edge. */
+ .add-step { align-self: flex-start; margin-top: 12px; }
  .automation-triggers { margin-top: 40px; }
  .automation-triggers header { margin-bottom: 16px; }
  .automation-triggers h3 { margin: 0; font-size: 14px; font-weight: 600; }
@@ -383,7 +386,7 @@ import AutomationModelError from './AutomationModelError.svelte';
     {/if}
    </RowGroup>
   {/each}
-  <button class="st-btn" onclick={() => addActionStep()}><Plus size={14} />Add action step</button>
+  <button class="st-btn add-step" onclick={() => addActionStep()}><Plus size={14} />Add action step</button>
  </RowGroup>
  <!-- The task first: Basics, then Prompt & actions, then when it runs. -->
  <section class="automation-triggers" aria-label="Triggers">
