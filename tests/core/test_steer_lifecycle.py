@@ -202,3 +202,78 @@ async def test_network_remove_has_queue_view_owner_authority(mock_db):
     with patch.object(control, "_require_owned", side_effect=ValueError("not owner")):
         with pytest.raises(ValueError, match="not owner"):
             await control._queue_remove({"session_id": sid, "client_message_id": CMD}, "peer")
+
+
+def test_cancellation_during_handoff_preflight_does_not_deadlock(mock_db):
+    import threading
+    from app.core import session_handoff
+
+    sid = _make_session("handoff-preflight")
+    finished = threading.Event()
+    threads = []
+
+    def holding(*args):
+        def cancel():
+            message_admission.cancel_unknown(sid, CMD)
+            finished.set()
+        thread = threading.Thread(target=cancel)
+        threads.append(thread)
+        thread.start()
+        assert finished.wait(1), "admission must not lock across handoff preflight"
+        return None
+
+    try:
+        with _Patches(), patch.object(session_handoff, "hold", side_effect=holding):
+            with pytest.raises(message_admission.CancelledSend):
+                turn_manager._submit_blocking(sid, "user", prompt="cancel me", command_id=CMD)
+    finally:
+        for thread in threads:
+            thread.join(2)
+    assert turns.get_turn_by_command(sid, CMD) is None
+
+
+def test_system_intake_keeps_its_database_transaction_order():
+    import threading
+
+    finished = threading.Event()
+    def admit():
+        with message_admission.submission("session", "watch", "event-id"):
+            finished.set()
+    with message_admission.guard("session"):
+        thread = threading.Thread(target=admit)
+        thread.start()
+        independent = finished.wait(1)
+    thread.join(2)
+    assert independent, "watch intake must retain its database admission locks"
+
+
+def test_held_write_rechecks_cancellation_without_swallowing_it(mock_db):
+    from app.core import session_handoff
+    from app.db import session_moves
+
+    sid = _make_session("held-fence")
+    message_admission.cancel_unknown(sid, CMD)
+    with patch.object(session_handoff, "holds", return_value=True), patch.object(session_moves, "append_held") as append:
+        with pytest.raises(message_admission.CancelledSend):
+            session_handoff.hold(sid, "user", {"prompt": "cancelled", "command_id": CMD})
+    append.assert_not_called()
+
+
+def test_unknown_cancel_uses_durable_held_rows_without_handoff_state_lock(mock_db):
+    from app.core import session_handoff
+    from app.db import session_moves
+
+    sid = _make_session("held-lookup")
+    row = {"id": "held-row", "command_id": CMD}
+    with patch.object(session_handoff, "held_view", side_effect=AssertionError("lock inversion")), patch.object(session_moves, "get", return_value={"held": [row]}):
+        assert message_admission.cancel_unknown(sid, CMD) == row
+    assert not message_admission._tombstones
+
+
+async def test_local_queue_broadcast_does_not_request_a_remote_watch(mock_db):
+    sid = _make_session("local-broadcast")
+    h, frames = handler(sid)
+    h._read_watch_queue = AsyncMock(side_effect=AssertionError("not a remote queue"))
+    with _Patches():
+        await h._v2_broadcast_queue(sid)
+    assert frames[-1]["data"]["queued_messages"] == []

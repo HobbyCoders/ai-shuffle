@@ -2691,7 +2691,7 @@ class ChatWebSocketHandler:
     # _v2_broadcast_queue — re-source + fan out the queue_updated frame
     # ------------------------------------------------------------------
 
-    async def _v2_broadcast_queue(self, session_id: str) -> None:
+    async def _v2_broadcast_queue(self, session_id: str, *, remote: bool = False) -> None:
         """Build the queue view from the durable turns table and emit the
         ``queue_updated`` frame both to the other devices (via the sync engine)
         and directly to THIS socket (which is unregistered from the sync engine
@@ -2700,13 +2700,17 @@ class ChatWebSocketHandler:
         """
         # Also invalidate when this socket is not currently registered for sync.
         invalidate_queue_snapshot(session_id)
-        snapshot = await self._read_watch_queue(session_id)
-        if snapshot.get("queue_status") != "available":
-            await self.send_json({"type": "sync", "event_type": "queue_updated",
-                                  "session_id": session_id, "data": snapshot})
-            return
-        queue = snapshot["queued_messages"]
-        peer_queue = snapshot["pending_peer_messages"]
+        if remote:
+            snapshot = await self._read_watch_queue(session_id)
+            if snapshot.get("queue_status") != "available":
+                await self.send_json({"type": "sync", "event_type": "queue_updated",
+                                      "session_id": session_id, "data": snapshot})
+                return
+            queue = snapshot["queued_messages"]
+            peer_queue = snapshot["pending_peer_messages"]
+        else:
+            queue = await run_sync(_v2_queue_view, session_id)
+            peer_queue = await run_sync(_v2_peer_queue_view, session_id)
         await sync_engine.broadcast_queue_updated(session_id, queue, pending_peer_messages=peer_queue)
         await self.send_json({
             "type": "sync",
@@ -2878,7 +2882,7 @@ class ChatWebSocketHandler:
                                       "message": "Can't reach the worker running this chat. Try cancelling again when it reconnects."})
                 return  # Never fence a mirror: only the executor can adjudicate.
             await self.send_json(response["removal"])
-            await self._v2_broadcast_queue(session_id)
+            await self._v2_broadcast_queue(session_id, remote=True)
             return
         await self._remove_local_queued_message(data, session_id)
 

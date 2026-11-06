@@ -283,7 +283,6 @@ def _supersede_wakeups(session_id: str) -> None:
         )
 
 
-@message_admission.guarded_submit
 def _submit_blocking(
     session_id: str,
     source: str,
@@ -341,6 +340,7 @@ def _submit_blocking(
     """
     from app.core import archive_guard
 
+    message_admission.check_cancelled(session_id, command_id)
     if archive_guard.is_archived(session_id):
         archive_guard.log_dropped(session_id, source, "refused at submit")
         raise archive_guard.SessionArchived(session_id)
@@ -472,20 +472,21 @@ def _submit_blocking(
             logger.exception(
                 "stop-latch release failed for session %s", session_id
             )
-    turn = turns.enqueue_turn(
-        session_id,
-        source,
-        prompt=prompt,
-        profile_id=profile_id,
-        project_id=project_id,
-        worktree_id=worktree_id,
-        overrides=overrides,
-        explicit_permission=explicit_permission,
-        payload=payload,
-        command_id=command_id,
-        parent_turn_id=parent_turn_id,
-        instance_id=instance_id,
-    )
+    with message_admission.submission(session_id, source, command_id):
+        turn = turns.enqueue_turn(
+            session_id,
+            source,
+            prompt=prompt,
+            profile_id=profile_id,
+            project_id=project_id,
+            worktree_id=worktree_id,
+            overrides=overrides,
+            explicit_permission=explicit_permission,
+            payload=payload,
+            command_id=command_id,
+            parent_turn_id=parent_turn_id,
+            instance_id=instance_id,
+        )
     return turn["id"]
 
 

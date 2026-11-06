@@ -5,7 +5,6 @@ including synchronous handoff release. Tombstones live on the executing worker.
 """
 from collections import OrderedDict
 from contextlib import contextmanager
-from functools import wraps
 from threading import Lock, RLock
 from time import monotonic
 from weakref import WeakValueDictionary
@@ -37,13 +36,14 @@ def _expire():
 
 def cancel_unknown(session_id, command_id):
     """Resolve and fence absence atomically with submit's durable writes."""
-    from app.db import turns
-    from app.core import session_handoff
+    from app.db import session_moves, turns
     with guard(session_id):
         row = turns.get_turn_by_command(session_id, command_id)
         if row is None:
-            row = next((h for h in session_handoff.held_view(session_id)
-                        if h.get("command_id") == command_id), None)
+            # Read the durable held list directly: taking handoff's state lock
+            # here would invert the release -> admission lock order.
+            held = (session_moves.get(session_id) or {}).get("held") or []
+            row = next((h for h in held if h.get("command_id") == command_id), None)
         if row is not None:
             return row
         # A held withdrawal is also terminal; retaining the fence is harmless.
@@ -65,10 +65,12 @@ def check_cancelled(session_id, command_id):
         raise CancelledSend("You cancelled it before it was queued.")
 
 
-def guarded_submit(fn):
-    @wraps(fn)
-    def submit(session_id, source, **kwargs):
-        with guard(session_id):
-            check_cancelled(session_id, kwargs.get("command_id"))
-            return fn(session_id, source, **kwargs)
-    return submit
+@contextmanager
+def submission(session_id, source, command_id):
+    """Fence only the durable user write, never handoff locks or system intake."""
+    if not command_id or source not in {"user", "queue"}:
+        yield
+        return
+    with guard(session_id):
+        check_cancelled(session_id, command_id)
+        yield
