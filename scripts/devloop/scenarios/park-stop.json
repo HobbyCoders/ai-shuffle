@@ -1,0 +1,19 @@
+{
+  "description": "A short real Monitor job for Stop journeys. Unlike park-wait, this is not used to measure twenty seconds of parked timer accumulation.",
+  "steps": [
+    {
+      "text": "I'll start the build in the background.",
+      "tool_calls": [
+        {
+          "name": "Monitor",
+          "input": {
+            "command": "sleep 10 && echo 'build ok'"
+          }
+        }
+      ]
+    },
+    {
+      "text": "The build is running in the background now. I'll wait for it."
+    }
+  ]
+}

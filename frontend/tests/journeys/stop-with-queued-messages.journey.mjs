@@ -40,9 +40,45 @@ const STOP_TIMEOUT_MS = 10_000;
 /** The composer's Stop: a background job's row has a Stop button of its own. */
 const stopGenerating = (page) => page.getByRole('button', { name: 'Stop generating' });
 
-/** The park-wait scenario: its last words before parking, and how long its job runs. */
+/** park-stop runs a real ten-second Monitor; park-wait keeps its timer coverage. */
 const PARKED_REPLY = "I'll wait for it";
-const PARK_JOB_MS = 20_000;
+const PARK_JOB_MS = 10_000;
+const PARK_WAKE_GRACE_MS = 5000;
+
+async function parkForStop(page, variant) {
+	const token = `tok-${uniq()}`;
+	await typeAndSend(page, `park ${token} ${scriptTag(variant, 'park-stop')}`);
+	await page.getByText(PARKED_REPLY, { exact: false }).first().waitFor({ timeout: 60_000 });
+	await waitChat(page, { streaming: 'false' }, { timeout: 30_000 });
+	const sessionId = await chatIdByToken(page, token);
+	const live = await api(page, 'GET', `/sessions/${sessionId}/live`);
+	const job = live.activeTasks.find((task) => task.kind === 'shell' && task.status === 'running');
+	expect(job, 'the turn really parked on a running Monitor job');
+	const startedAt = Date.parse(job.startedAt);
+	expect(Number.isFinite(startedAt), 'the Monitor reports its actual start time');
+	return { sessionId, taskId: job.id, deadline: startedAt + PARK_JOB_MS + PARK_WAKE_GRACE_MS };
+}
+
+async function expectParkJobRunning(page, job) {
+	const live = await api(page, 'GET', `/sessions/${job.sessionId}/live`);
+	expect(live.activeTasks.some((task) => task.id === job.taskId && task.status === 'running'),
+		'the original job is still running when Stop is pressed');
+}
+
+async function waitPastStoppedJob(page, job) {
+	// First prove real completion, not just a missing Stop button. Then retain
+	// the old five-second wake grace past the ORIGINAL job's natural deadline.
+	// Typing, the new turn and Stop already used part of that time; waiting a
+	// fresh full job duration after Stop doubled the observation unnecessarily.
+	await page.waitForFunction(async (sessionId) => {
+		const response = await fetch(`/api/v1/sessions/${sessionId}/live`);
+		if (!response.ok) throw new Error(`live completion probe: HTTP ${response.status}`);
+		const live = await response.json();
+		return !live.has_running_tasks && !live.is_streaming && !live.unpark_pending;
+	}, job.sessionId, { timeout: 15_000 });
+	await page.waitForFunction((deadline) => Date.now() >= deadline, job.deadline,
+		{ timeout: PARK_JOB_MS + PARK_WAKE_GRACE_MS + 1000 });
+}
 
 /** Stop asks first when background work is running, since it ends that too. */
 async function stopEverything(page) {
@@ -551,18 +587,17 @@ await runJourney({
 			},
 			async act({ page, mark, variant, log }) {
 				await mark('park');
-				await typeAndSend(page, `park tok-${uniq()} ${scriptTag(variant, 'park-wait')}`);
-				await page.getByText(PARKED_REPLY, { exact: false }).first().waitFor({ timeout: 60_000 });
-				await waitChat(page, { streaming: 'false' }, { timeout: 30_000 });
+				const job = await parkForStop(page, variant);
 
 				await mark('stop while parked');
+				await expectParkJobRunning(page, job);
 				await stopEverything(page);
 				await stopGenerating(page).waitFor({ state: 'detached', timeout: 15_000 });
 				await page.waitForTimeout(1000);
 				const before = await chatState(page);
 
 				await mark('past the job');
-				await page.waitForTimeout(PARK_JOB_MS + 5000);
+				await waitPastStoppedJob(page, job);
 				const after = await chatState(page);
 				log(`after Stop ${JSON.stringify(before)}; past the job ${JSON.stringify(after)}`);
 				expect(after.streaming === 'false', 'stayed stopped past the job');
@@ -581,19 +616,18 @@ await runJourney({
 			async act({ page, mark, variant }) {
 				const notSent = (text) => page.locator('[data-not-sent="true"]').filter({ hasText: text });
 				await mark('park');
-				await typeAndSend(page, `park tok-${uniq()} ${scriptTag(variant, 'park-wait')}`);
-				await page.getByText(PARKED_REPLY, { exact: false }).first().waitFor({ timeout: 60_000 });
-				await waitChat(page, { streaming: 'false' }, { timeout: 30_000 });
+				const job = await parkForStop(page, variant);
 
 				const texts = await queueDuringASlowTurn(page, mark, variant, 2);
 				const collect = await watchStopFrames(page, texts);
 				await mark('stop');
+				await expectParkJobRunning(page, job);
 				await stopEverything(page);
 				await waitChat(page, { streaming: 'false' }, { timeout: 15_000 });
 				for (const text of texts) await notSent(text).waitFor({ timeout: 8000 });
 
 				await mark('past the job');
-				await page.waitForTimeout(PARK_JOB_MS + 5000);
+				await waitPastStoppedJob(page, job);
 				const frames = await collect();
 				expectEachOnceInEveryFrame(frames);
 				expect((await page.getByText(`You said: “queued`, { exact: false }).count()) === 0, 'neither message ran');
