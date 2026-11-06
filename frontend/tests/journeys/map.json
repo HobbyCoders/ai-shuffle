@@ -233,6 +233,30 @@
 				"app/api/rewind_owner.py"
 			]
 		},
+			{
+				"why": "a rewound sent message comes back whole: its words after a reload and its attachments as chips",
+				"journeys": ["rewind-restore"],
+				"globs": [
+					"frontend/tests/journeys/rewind-restore.journey.mjs",
+					"frontend/src/lib/components/chat/MessageActions.svelte",
+					"frontend/src/lib/components/chat/ChatInput.svelte",
+					"frontend/src/lib/components/chat/tiptap/serialization.ts",
+					"frontend/src/lib/components/chat/tiptap/FileChipNode.ts",
+					"frontend/src/lib/api/rewind.ts",
+					"app/api/commands.py"
+				]
+			},
+			{
+				"why": "a failed turn's error banner and what clears it: a rewind past it, a later clean turn",
+				"journeys": ["turn-error-banner"],
+				"globs": [
+					"frontend/tests/journeys/turn-error-banner.journey.mjs",
+					"frontend/src/lib/components/chat/MessageActions.svelte",
+					"frontend/src/lib/components/chat/MessageArea.svelte",
+					"app/api/chat_ws_handler.py",
+					"app/core/turn_recorder.py"
+				]
+			},
 		{
 			"why": "mirrored chats: the sync check ChatView runs and the gate that shows it",
 			"journeys": ["mirrored-chat", "open-unloaded-chat"],
