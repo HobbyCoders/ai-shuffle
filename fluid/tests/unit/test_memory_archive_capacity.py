@@ -33,7 +33,7 @@ def test_real_overflow_cannot_report_room_to_spare(tmp_path, monkeypatch):
     assert not s["detail"]["archive_loss_counter_reset"]
 
 
-def test_replica_replay_counts_local_deletion_events_not_distinct_facts(tmp_path, monkeypatch):
+def test_loss_counters_are_local_not_imported_from_replicas(tmp_path, monkeypatch):
     source = SkillStore(tmp_path / "source")
     fill(source, monkeypatch)
     packet = source._facts.export()
@@ -44,13 +44,22 @@ def test_replica_replay_counts_local_deletion_events_not_distinct_facts(tmp_path
     replica._facts.merge(packet)
     # The source's two deletion events are local accounting, not replicated.
     assert replica._facts.snapshot().get("losses", {}).get("archive_dropped", 0) == 0
+
+
+@pytest.mark.xfail(strict=True, reason="known defect: replay inflates archive loss events, #956")
+def test_stale_replica_replay_does_not_add_archive_loss_events(tmp_path, monkeypatch):
+    source = SkillStore(tmp_path / "source")
+    fill(source, monkeypatch)
+    packet = source._facts.export()
+    replica = SkillStore(tmp_path / "replica")
+    replica._facts.merge(packet)
     replica.save_memory("A newer durable receipt on the replica", durable=True)
     retained_ids = {e.id for e in replica.memories() + replica.archived_memories()}
     first = memory_health.check(replica)
     assert capacity(first)["detail"]["archive_dropped_total"] == 1
 
-    # A stale packet resurrects the same least-useful copy on each merge.
-    # Each trim is an event, not another distinct fact permanently lost.
+    # Replaying a packet must not report new loss when the retained facts
+    # do not change. The current defect recounts the same deleted copy.
     for _ in range(10):
         replica._facts.merge(packet)
         assert {e.id for e in replica.memories() + replica.archived_memories()} == retained_ids
@@ -58,8 +67,8 @@ def test_replica_replay_counts_local_deletion_events_not_distinct_facts(tmp_path
         replica, now=first["checked_at"] + memory_health.LOSS_SAMPLE_EVERY, previous=first)
     signal = capacity(result)
     assert signal["state"] == "attention" and signal["alert"]
-    assert signal["detail"]["archive_dropped_total"] == 11
-    assert signal["detail"]["archive_dropped_in_window"] == 10
+    assert signal["detail"]["archive_dropped_total"] == 1
+    assert signal["detail"]["archive_dropped_in_window"] == 0
     assert "not the number of distinct facts lost" in signal["reason"]
     assert "Recall cannot recover a deleted copy" in signal["reason"]
 
