@@ -169,15 +169,27 @@ await runJourney({
    await page.locator('.pri-row').first().waitFor();
   },
   async act({page,mark,variant}) {
-   await mark('keep repository, branch and attribution on clean metadata lines');
+   const phone=variant.viewport==='phone';
+   await mark(phone?'phone card: title, one meta line, then the status line':'keep repository, branch and attribution on clean metadata lines');
    const rows=await page.locator('.pri-row').evaluateAll(els=>els.map(el=>{
     const box=s=>{const r=el.querySelector(s).getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height};};
-    return {repo:box('.pri-repo'),branch:box('.pri-branch'),by:box('.pri-attribution'),title:box('.pri-title'),external:box('.pri-external'),separators:[...el.querySelectorAll('.pri-meta > span')].map(s=>getComputedStyle(s,'::before').content)};
+    const meta=el.querySelector('.pri-meta');
+    return {repo:box('.pri-repo'),branch:box('.pri-branch'),by:box('.pri-attribution'),title:box('.pri-title'),external:box('.pri-external'),meta:box('.pri-meta'),badges:box('.pri-badges'),
+     metaWrap:getComputedStyle(meta).whiteSpace,metaLine:parseFloat(getComputedStyle(meta).lineHeight),metaTitle:meta.title,
+     separators:[...el.querySelectorAll('.pri-meta > span')].map(s=>getComputedStyle(s,'::before').content)};
    }));
    for(const row of rows) {
-    expect(row.separators.every(s=>s==='none'||s==='normal'),'D1: wrapping metadata cannot create a leading separator');
     expect(row.external.width===20&&row.external.y===row.title.y,'D1: external icon has a fixed top-aligned trailing column');
-    if(variant.viewport==='phone')expect(row.repo.y<row.branch.y&&row.branch.y<row.by.y,'D1: phone metadata has three fixed lines '+JSON.stringify(row));
+    if(phone) {
+     // Council pass 3 (D6) replaces the three phone lines with one ellipsized
+     // "repo#n · branch → base · by author" line; it never wraps, so a " · " can't lead a line.
+     expect(row.metaWrap==='nowrap'&&row.meta.height<=row.metaLine*1.5,'D6: phone metadata is one unwrapped line '+JSON.stringify(row));
+     expect(Math.abs(row.repo.y-row.branch.y)<=2,'D6: repository and branch share the meta line');
+     expect(row.title.y<row.meta.y&&row.meta.y+row.meta.height<=row.badges.y+1,'D6: title, then meta, then status');
+     expect(/#\d+ · .+ → .+ · by /.test(row.metaTitle),'D6: the full meta stays readable in its tooltip');
+    } else {
+     expect(row.separators.every(s=>s==='none'||s==='normal'),'D1: wrapping metadata cannot create a leading separator');
+    }
    }
    if(variant.viewport==='phone')expect(rows[0].external.x===rows[1].external.x,'D1: external-link column stays in the same place');
    expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'D1: no horizontal overflow');

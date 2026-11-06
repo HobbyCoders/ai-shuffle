@@ -9,6 +9,7 @@
  import DocsContent from './DocsContent.svelte';
  import DocsTableOfContents from './DocsTableOfContents.svelte';
  import DocsSearch from './DocsSearch.svelte';
+ import { ChevronRight } from 'lucide-svelte';
  let { mobile = false, initialItemId }: { mobile?: boolean; initialItemId?: string | null } = $props();
  let consumedItemId: string | null = null;
  let activeCategory = $state(categories[0]?.id || 'getting-started');
@@ -74,8 +75,8 @@
      {#if currentDoc}
       {#if headings.length}
        <div class="doc-inline-toc">
-        <button type="button" class="st-btn" aria-expanded={tocOpen} aria-controls={tocId} onclick={() => tocOpen = !tocOpen}>On this page</button>
-        {#if tocOpen}<div id={tocId}><DocsTableOfContents {headings} showTitle={false} onSelect={() => tocOpen = false} scrollContainer={articleEl?.closest('.view-main-slot') as HTMLElement | null} /></div>{/if}
+        <button type="button" class="doc-inline-toggle" aria-expanded={tocOpen} aria-controls={tocId} onclick={() => tocOpen = !tocOpen}><ChevronRight size={14} strokeWidth={1.8} class="doc-inline-chev" />On this page</button>
+        {#if tocOpen}<div id={tocId} class="doc-inline-list"><DocsTableOfContents {headings} showTitle={false} onSelect={() => tocOpen = false} scrollContainer={articleEl?.closest('.view-main-slot') as HTMLElement | null} /></div>{/if}
        </div>
       {/if}
       <DocsContent framed content={currentDoc.content} onHeadingsExtracted={h => headings = h} />
@@ -88,9 +89,29 @@
 </ViewShell>
 <style>
  .docs-group { margin-left: 8px; }
- .docs-layout { display: grid; grid-template-columns: minmax(0,var(--st-prose-width)) var(--st-toc-width); justify-content: start; gap: var(--st-toc-gap); align-items: start; }
+ /* One column by default; the "On this page" rail only joins it when the
+    canvas is about 1600px wide, so it does not crowd the article or read as a second nav.
+    Below that the contents fold into a disclosure at the top of the article. */
+ .docs-layout { display: grid; grid-template-columns: minmax(0,var(--st-prose-width)); justify-content: start; gap: var(--st-toc-gap); align-items: start; }
  .doc-content { min-width: 0; }
- .doc-toc { position: sticky; top: 0; }
- .doc-inline-toc { display: none; margin-bottom: 24px; }
- @container settings (max-width: 1000px) { .docs-layout { grid-template-columns: minmax(0,var(--st-prose-width)); } .doc-toc { display: none; } .doc-inline-toc { display: block; } }
+ .doc-toc { display: none; position: sticky; top: 0; }
+ .doc-inline-toc { margin: 0 0 24px; }
+ .doc-inline-toggle {
+  display: inline-flex; align-items: center; gap: 6px; min-height: 28px; margin-left: -2px; padding: 0 8px 0 2px;
+  border: 0; border-radius: var(--radius-control); background: none; color: var(--muted-foreground);
+  font: 500 13px/1.4 var(--font-sans); cursor: pointer;
+ }
+ .doc-inline-toggle:hover { color: var(--foreground); }
+ .doc-inline-toggle:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+ .doc-inline-toggle :global(.doc-inline-chev) { flex: none; transition: transform 150ms ease; }
+ .doc-inline-toggle[aria-expanded='true'] :global(.doc-inline-chev) { transform: rotate(90deg); }
+ .doc-inline-list { margin-top: 8px; max-width: 360px; }
+ @media (pointer: coarse) { .doc-inline-toggle { min-height: 44px; } }
+ @media (prefers-reduced-motion: reduce) { .doc-inline-toggle :global(.doc-inline-chev) { transition: none; } }
+ /* A 1600px canvas measures about 1570 inside: the slot keeps a stable scrollbar gutter on both edges. */
+ @container st-detail (min-width: 1560px) {
+  .docs-layout { grid-template-columns: minmax(0,var(--st-prose-width)) var(--st-toc-width); }
+  .doc-toc { display: block; }
+  .doc-inline-toc { display: none; }
+ }
 </style>

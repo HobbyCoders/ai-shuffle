@@ -74,6 +74,12 @@ describe('PrInboxCard', () => {
 		expect(within(list).getByText('Changes requested')).toBeTruthy();
 		expect(within(list).getAllByText('by me')).toHaveLength(3);
 		expect(screen.getByText(/1 project or repository not included/)).toBeTruthy();
+		// Running checks: a still amber dot beside the words, not a spinner.
+		const running = within(list).getByText('Checks running').closest('.pri-checks')!;
+		expect(running.querySelector('.pri-running')).toBeTruthy();
+		expect(running.querySelector('svg')).toBeNull();
+		// The one-line phone meta keeps its full text in a tooltip.
+		expect(list.querySelector('.pri-meta')?.getAttribute('title')).toMatch(/^o\/alpha#1 · feat → main · by me/);
 
 		await fireEvent.click(screen.getByRole('button', { name: 'Filter pull requests' }));
 		await fireEvent.change(screen.getByRole('combobox', { name: 'Checks' }), { target: { value: 'failing' } });

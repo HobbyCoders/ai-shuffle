@@ -10,7 +10,7 @@
 	 */
 	import { onMount } from 'svelte';
  import { platform } from '$lib/stores/platform.svelte';
-	import { GitPullRequest, GitPullRequestDraft, GitMerge, GitPullRequestClosed, RefreshCw, ListFilter, Check, X, MessageSquare, CircleCheck, CircleX, LoaderCircle, ExternalLink } from 'lucide-svelte';
+	import { GitPullRequest, GitPullRequestDraft, GitMerge, GitPullRequestClosed, RefreshCw, ListFilter, Check, X, MessageSquare, CircleCheck, CircleX, ExternalLink } from 'lucide-svelte';
 	import { ViewShell, ViewPanel, PanelIconButton, ListItem, Segmented, SettingRow, SelectField, Switch, DetailPane, EmptyDetail, InlineBanner } from '$lib/components/layout/view';
 	import PanelField from '$lib/components/layout/view/PanelField.svelte';
 	import SidebarSheet from '$lib/components/layout/sidebar/SidebarSheet.svelte';
@@ -75,6 +75,11 @@
 		filters = { ...DEFAULT_FILTERS };
 	}
 
+	/** The whole meta line, for the tooltip when the phone card cuts it short. */
+	function metaLine(pr: InboxPullRequest): string {
+		return `${pr.repo}#${pr.number} · ${pr.head_branch} → ${pr.base_branch} · by ${pr.author} · ${pr.projects.map((p) => p.name).join(', ')}`;
+	}
+
 	function stateLabel(pr: InboxPullRequest): string {
 		return pr.state === 'draft' ? 'Draft' : pr.state === 'merged' ? 'Merged' : pr.state === 'closed' ? 'Closed' : 'Open';
 	}
@@ -130,7 +135,7 @@
 									<a class="pri-title" href={pr.url} target="_blank" rel="noopener noreferrer">
 										<span>{pr.title}</span><span class="pri-external"><ExternalLink size={12} aria-hidden="true" /></span>
 									</a>
-									<div class="pri-meta">
+									<div class="pri-meta" title={metaLine(pr)}>
 										<span class="pri-repo">{pr.repo}#{pr.number}</span>
 										<span class="pri-branch" title="{pr.head_branch} → {pr.base_branch}">{pr.head_branch} → {pr.base_branch}</span>
 										<span class="pri-attribution"><span>by {pr.author}</span><span class="pri-projects" title={pr.projects.map((p) => p.name).join(', ')}>{pr.projects.map((p) => p.name).join(', ')}</span></span>
@@ -146,7 +151,7 @@
 										<span class="pri-checks" data-checks={pr.checks} title={CHECKS_LABELS[pr.checks]} aria-label={CHECKS_LABELS[pr.checks]}>
 											{#if pr.checks === 'passing'}<CircleCheck size={14} />
 											{:else if pr.checks === 'failing'}<CircleX size={14} />
-											{:else}<LoaderCircle size={14} />{/if}<span>{pr.checks === 'passing' ? 'Checks passed' : pr.checks === 'failing' ? 'Checks failed' : 'Checks running'}</span>
+											{:else}<span class="pri-running" aria-hidden="true"><span></span></span>{/if}<span>{pr.checks === 'passing' ? 'Checks passed' : pr.checks === 'failing' ? 'Checks failed' : 'Checks running'}</span>
 										</span>
 									{/if}
 									<span class="pri-age" title={new Date(pr.updated_at).toLocaleString()}>{activityAge(pr.updated_at, now)}</span>
@@ -205,7 +210,9 @@
  .pri-title:hover { color: var(--st-primary); }
  .pri-meta { display: flex; flex-wrap: wrap; gap: 4px 8px; margin-top: 4px; color: var(--sidebar-muted); font-size: 12px; overflow-wrap: anywhere; }
  .pri-attribution { display: flex; flex-wrap: wrap; gap: 4px 12px; }
- @media (max-width: 600px) { .pri-meta { display: grid; gap: 4px; } .pri-title { width: 100%; } }
+ /* Checks running: an amber dot in the 14px icon seat, not a hollow ring that reads as "unchecked". */
+ .pri-running { display: inline-grid; place-items: center; width: 14px; height: 14px; flex: none; }
+ .pri-running span { width: 8px; height: 8px; border-radius: 50%; background: var(--st-warning); }
  .pri-repo { color: var(--secondary-foreground); }
  .pri-branch { font-family: var(--st-mono); }
  .pri-badges { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; color: var(--st-mfg); font-size: 12px; }
@@ -214,5 +221,19 @@
  .pri-empty { padding: 48px 0; color: var(--st-mfg); display: grid; justify-items: center; gap: 16px; text-align: center; }
  .pri-skipped { margin-top: 24px; color: var(--st-mfg); font-size: 13px; }
  .pri-skipped summary { cursor: pointer; }
- @media (max-width:600px) { .pri-toolbar :global(.st-seg button) { min-height: 44px; padding-inline: 10px; } .pri-filter { min-height: 44px; } .pri-filter-actions button { min-height: 44px; } .pri-row { flex-wrap: wrap; } .pri-badges { width: 100%; justify-content: flex-start; padding-left: 28px; } }
+ @media (max-width:600px) { .pri-toolbar :global(.st-seg button) { min-height: 44px; padding-inline: 10px; } .pri-filter { min-height: 44px; } .pri-filter-actions button { min-height: 44px; }}
+ /* Phone card: title; one meta line "repo#142 · branch → base · by author · projects"
+    that ends in an ellipsis where it runs out (projects, then author, go first);
+    status on one line. */
+ @media (max-width: 600px) {
+  .pri-row { display: grid; grid-template-columns: 16px minmax(0, 1fr); column-gap: 12px; row-gap: 6px; align-items: start; }
+  .pri-state { padding-top: 2px; }
+  .pri-title { width: 100%; }
+  .pri-meta { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; overflow-wrap: normal; }
+  .pri-meta > span, .pri-attribution, .pri-attribution > span { display: inline; }
+  .pri-branch::before, .pri-attribution > span::before { content: ' · ' / ''; font-family: var(--font-sans); }
+  .pri-badges { grid-column: 2; flex-wrap: nowrap; justify-content: flex-start; min-width: 0; overflow: hidden; }
+  .pri-chip, .pri-checks { min-width: 0; }
+  .pri-chip > span, .pri-checks > span:last-child { overflow: hidden; text-overflow: ellipsis; }
+ }
 </style>

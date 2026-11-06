@@ -10,8 +10,9 @@
 	 *   per-item mark-read + dismiss, plus mark-all-read and clear-all.
 	 * - Uses the shared `header-dropdowns` store so opening this closes the
 	 *   profile, branch, and git-action popovers (single-open-at-a-time).
-	 * - Rail: the panel opens over the Sidebar's list column, beside the rail.
-	 *   Header instances stay right-anchored under their button.
+	 * - Rail: a 360px panel floats just right of the rail, bottom-aligned with
+	 *   the bell, over the list column and canvas. Header instances stay
+	 *   right-anchored under their button.
 	 * - Outside-click + Escape to close. On the mobile shell the panel is
 	 *   `position: fixed` so the right-edge anchor can't clip it.
 	 */
@@ -66,17 +67,16 @@
 		info: 'Info'
 	};
 
-	// The rail's panel opens over the Sidebar's own list column, beside the
-	// rail, so it never covers the chat or its composer. It narrows to that
-	// column, down to a readable floor, and keeps inside the window.
+	// The rail's panel floats beside the rail, its bottom level with the bell,
+	// at a fixed 360px so a title stays on one line and a body on two. It
+	// covers the list column and the canvas edge, never the rail itself, and
+	// keeps inside the window.
 	let railAnchor = $state({ left: 0, bottom: 8, width: 360 });
 	function positionPanel() {
 		if (!rail || !bellRef) return;
 		const rect = bellRef.getBoundingClientRect();
-		const column = bellRef.closest('aside')?.querySelector('.panel-plane')?.getBoundingClientRect();
-		const start = column ? column.left : rect.right;
-		const room = column ? column.width - 16 : 360;
-		const width = Math.min(360, window.innerWidth - 16, Math.max(200, room));
+		const start = bellRef.closest('nav.rail')?.getBoundingClientRect().right ?? rect.right;
+		const width = Math.min(360, window.innerWidth - 16);
 		railAnchor = {
 			left: Math.max(8, Math.min(start + 8, window.innerWidth - width - 8)),
 			bottom: Math.max(8, window.innerHeight - rect.bottom),
@@ -186,8 +186,8 @@
 							<button type="button" class="item-main" onclick={() => onItemClick(n)}>
 								<span class="item-icon" role="img" aria-label={SEVERITY_LABELS[n.severity]}><Icon size={15} strokeWidth={1.75} aria-hidden="true" /></span>
 								<span class="item-body">
-									{#if n.title}<span class="item-title">{n.title}</span>{/if}
-									<span class="item-message">{n.message}</span>
+									{#if n.title}<span class="item-title" title={n.title}>{n.title}</span>{/if}
+									<span class="item-message" title={n.message}>{n.message}</span>
 									<span class="item-time">{relativeTime(n.created_at)}</span>
 								</span>
 							</button>
@@ -514,6 +514,30 @@
 		word-break: break-word;
 	}
 
+	/* Desktop popover: a title on one line and a body on two; the full text
+	   stays in the row's tooltip and for screen readers. The phone panel keeps full text. */
+	/* Desktop popovers wear the one menu surface the model picker uses; the phone panel keeps its own. */
+	.notif-center:not(.bar) .notif-panel {
+		background: var(--popover);
+		border-color: var(--menu-border);
+		border-radius: var(--menu-radius);
+		box-shadow: var(--menu-shadow);
+	}
+	.notif-center:not(.bar) .item-title {
+		font-size: 13px;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	.notif-center:not(.bar) .item-message {
+		font-size: 13px;
+		display: -webkit-box;
+		-webkit-box-orient: vertical;
+		-webkit-line-clamp: 2;
+		line-clamp: 2;
+		overflow: hidden;
+	}
+
 	.item-time {
 		font-size: 0.6875rem;
 		font-weight: 400;
@@ -531,8 +555,8 @@
 		max-width: 9.5rem;
 	}
 
-	/* A narrow panel (the rail's, in a slim Sidebar) moves the actions onto
-	   their own line under the message, so the message keeps the row's width. */
+	/* A narrow panel, and always the rail's 360px popover, moves the actions
+	   onto their own line under the message, so the message keeps the row's width. */
 	@container (max-width: 320px) {
 		.notif-item { flex-wrap: wrap; }
 		.item-main { order: 1; }
@@ -545,6 +569,17 @@
 			max-width: none;
 			padding-left: 24px;
 		}
+	}
+	.notif-center.rail .notif-item { flex-wrap: wrap; }
+	.notif-center.rail .item-main { order: 1; }
+	.notif-center.rail .item-dismiss { order: 2; }
+	.notif-center.rail .item-actions {
+		order: 3;
+		flex: 1 0 100%;
+		flex-direction: row;
+		flex-wrap: wrap;
+		max-width: none;
+		padding-left: 24px;
 	}
 
 	.item-action {
