@@ -323,7 +323,8 @@ cases.push({
 }, {
 	...growingReply,
 	name: 'same-count-visible-boundary-growth-delayed-delivery',
-	setup: context => growingReply.setup({ ...context, readingBoundary: true, deliveryBurst: true })
+	setup: context => growingReply.setup({ ...context, readingBoundary: true, deliveryBurst: true }),
+	act: context => growingReply.act({ ...context, deliveryBurst: true })
 });
 
 cases.push({
