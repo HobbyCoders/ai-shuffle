@@ -23,6 +23,15 @@ CI (`--ci`, including `scripts/devloop/ci.py`) and
 `--workers 2` **never pause**, regardless of this flag: paired workers need
 continuous presence and sync, and CI needs stable journey timing.
 
+Disposable previews, dev loops (both workers), profiling copies and private test
+clusters use `dynamic_shared_memory_type=mmap`, including during `initdb` and
+retained-data wakeups. Their dynamic shared memory is backed by files in their
+own PostgreSQL data directory, not the container's shared `/dev/shm`, so a forced
+stop or guardian cleanup cannot strand `PostgreSQL.*` files there. Normal stops
+still use PostgreSQL's bounded fast shutdown. Startup warns when `/dev/shm` is
+at least 90% full, but never deletes shared-memory files: other instances may
+still need them. Installed/production PostgreSQL defaults are unchanged.
+
 Idle is not “no network traffic”: an explicit method/path allowlist covers
 observed auth, sidebar, git-status, watch-list, preference and model-capability
 refreshes plus chat/sync/HMR reconnects and the selected chat's read-only event feed. Unknown traffic counts as work. While paused, those background

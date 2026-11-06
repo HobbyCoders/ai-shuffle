@@ -260,7 +260,7 @@ def main():
         with socket.socket() as sock:
             sock.bind(("127.0.0.1", 0))
             port = sock.getsockname()[1]
-        db = runtime.Database(SimpleNamespace(effective_data_dir=directory / "data"), port=port)
+        db = runtime.Database(SimpleNamespace(effective_data_dir=directory / "data"), port=port, disposable=True)
         connection = None
         try:
             db.open()

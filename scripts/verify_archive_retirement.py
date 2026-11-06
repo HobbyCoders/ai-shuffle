@@ -33,7 +33,7 @@ class Worker:
             def command(self,args,**kwargs):
                 if Path(args[0]).name=='initdb' and '-D' in args:args=[*args,'--no-sync']
                 return super().command(args,**kwargs)
-        self.runtime=ThrowawayDatabase(SimpleNamespace(effective_data_dir=Path(self.env['DATA_DIR'])),port=free_port())
+        self.runtime=ThrowawayDatabase(SimpleNamespace(effective_data_dir=Path(self.env['DATA_DIR'])),port=free_port(),disposable=True)
         stack.callback(self.runtime.close)
         self.runtime.open()
         self.runtime.admin_script('ALTER SYSTEM SET fsync = off; SELECT pg_reload_conf();')
