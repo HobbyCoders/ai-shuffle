@@ -61,7 +61,7 @@ def test_missing_shm_mount_does_not_block_start(monkeypatch):
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="/dev/shm and /proc lifecycle check")
-@pytest.mark.parametrize("stop", ["close", "ttl", "guardian", "restart"])
+@pytest.mark.parametrize("stop", ["close", "ttl", "guardian", "restart", "legacy"])
 def test_real_disposable_stop_leaves_no_postgres_shm(tmp_path, monkeypatch, stop, record_property):
     from app.preview_run import free_port, supervise
     from scripts.devloop import guardian
@@ -110,6 +110,15 @@ def test_real_disposable_stop_leaves_no_postgres_shm(tmp_path, monkeypatch, stop
         assert not owned_segments, maps
 
     try:
+        if stop == "legacy":
+            # Retained data from before this opt-in still has the POSIX default.
+            # A disposable launcher must override it without reinitializing data.
+            db = ThrowawayDatabase(SimpleNamespace(effective_data_dir=data), port=free_port())
+            db.open()
+            assert db.query("SHOW dynamic_shared_memory_type", admin=True) == "posix"
+            db.close()
+            db = ThrowawayDatabase(SimpleNamespace(effective_data_dir=data),
+                                   port=free_port(), disposable=True)
         db.open()
         db.query("CREATE TABLE shm_probe AS SELECT generate_series(1, 100000) AS x; "
                  "ANALYZE shm_probe", admin=True)
@@ -125,6 +134,7 @@ def test_real_disposable_stop_leaves_no_postgres_shm(tmp_path, monkeypatch, stop
             guardian.cleanup(tmp_path / "absent-status.json", scratch, 999001, "owned-test")
             db.process.wait(timeout=5)
             assert db.process.returncode == -signal.SIGKILL
+            assert not scratch.exists()
         else:
             db.close()
             if stop == "restart":
@@ -134,6 +144,10 @@ def test_real_disposable_stop_leaves_no_postgres_shm(tmp_path, monkeypatch, stop
                 db.open()
                 check_running()
                 db.close()
+        if stop != "guardian":
+            assert db.process.returncode == 0
+            assert "database system is shut down" in (db.pg / "server.log").read_text()
+            assert not (data / "managed-postgres.json").exists()
         after = set(shm.glob("PostgreSQL.*"))
         record_property("postgres_shm_before_count", len(before))
         record_property("postgres_shm_after_count", len(after))
