@@ -184,10 +184,29 @@ def test_elevation_includes_supervisor_and_preserves_runner_cache(monkeypatch):
 
 def test_apt_config_reuses_installed_packages_without_upgrades(tmp_path):
     helper = load_helper()
+    # A non-root simulation rebuilds an unwritable system package cache from
+    # every host index. Keep exercising real apt, but with one installed package
+    # and no repository lists, independent of runner image size or cache warmth.
+    for directory in ("state/lists", "cache", "etc/apt.conf.d", "etc/preferences.d",
+                      "etc/sources.list.d", "etc/-"):
+        (tmp_path / directory).mkdir(parents=True)
+    (tmp_path / "etc/sources.list.d/ubuntu.sources").touch()
+    (tmp_path / "state/status").write_text(textwrap.dedent("""\
+        Package: libc6
+        Status: install ok installed
+        Architecture: all
+        Version: 1.0
+        Description: installed test package
+
+    """))
     config = tmp_path / "apt.conf"
-    config.write_text(helper.APT_OPTIONS)
-    # Exercise apt itself, without root, network or modifying the database.
-    # libc6 is already part of both the Ubuntu CI and Debian-based test images.
+    config.write_text(helper.APT_OPTIONS + textwrap.dedent(f"""\
+        Dir::State "{tmp_path}/state";
+        Dir::State::status "{tmp_path}/state/status";
+        Dir::Cache "{tmp_path}/cache";
+        Dir::Etc "{tmp_path}/etc";
+    """))
+    # No root, network, host apt configuration, or real package database.
     result = subprocess.run(["apt-get", "--simulate", "install", "libc6"],
                             env={**os.environ, "APT_CONFIG": str(config), "LC_ALL": "C"},
                             text=True, capture_output=True, timeout=10)
