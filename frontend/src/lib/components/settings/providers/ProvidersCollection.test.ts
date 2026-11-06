@@ -18,6 +18,7 @@ vi.mock('$lib/stores/auth.svelte', async (importOriginal) => ({
 }));
 
 import { providers } from '$lib/stores/providers.svelte';
+import { resourceSync } from '$lib/services/resource-sync';
 import { settingsNav } from '$lib/settings/navigation.svelte';
 import { SETTINGS_ACCESS_CONTEXT } from '$lib/settings/access.svelte';
 import { assertCategoryCoverage } from '$lib/settings/testing/coverage';
@@ -69,6 +70,7 @@ beforeEach(() => {
 });
 afterEach(() => {
 	cleanup();
+	resourceSync.clear();
 	vi.useRealTimers();
 	vi.unstubAllGlobals();
 });
@@ -104,6 +106,71 @@ it.each([
 });
 
 describe('the list', () => {
+	it.each([
+		['page open', 1], ['page open', 3], ['Retry', 1], ['Retry', 3]
+	] as const)('replays %s after %i real settings invalidations without losing a credential deletion', async (source, events) => {
+		vi.useFakeTimers();
+		worker = fakeWorker({ rows: [row()] }, {
+			'DELETE /model-providers/:id': (_body, path) => {
+				worker.state.rows = worker.state.rows.filter((r) => r.id !== path.split('/')[2]);
+				return { success: true };
+			}
+		});
+		const heldCycle = source === 'Retry' ? 2 : 1;
+		let registryReads = 0;
+		let claudeReads = 0;
+		let releaseCurrent!: () => void;
+		let releaseTrailing!: () => void;
+		const current = new Promise<void>((resolve) => (releaseCurrent = resolve));
+		const trailing = new Promise<void>((resolve) => (releaseTrailing = resolve));
+		const real = worker.fetch;
+		vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+			const path = new URL(String(input), 'http://localhost').pathname;
+			if ((init?.method ?? 'GET') === 'GET' && path === '/api/v1/model-providers') {
+				registryReads++;
+				const response = await real(input, init); // snapshot this request's worker data
+				if (registryReads === heldCycle + 1) await trailing;
+				return response;
+			}
+			if (path === '/api/v1/settings/claude-auth') {
+				claudeReads++;
+				if (source === 'Retry' && claudeReads === 1) return new Response('unavailable', { status: 503 });
+				if (claudeReads === heldCycle) await current;
+				if (claudeReads === heldCycle + 1) await trailing;
+			}
+			return real(input, init);
+		});
+		render(ProvidersCollection);
+		await vi.advanceTimersByTimeAsync(0);
+		if (source === 'Retry') {
+			await fireEvent.click(screen.getByRole('button', { name: 'Retry providers' }));
+			await vi.advanceTimersByTimeAsync(0);
+		}
+		expect(providers.current.providers.map((p) => p.id)).toEqual(['p1']);
+		expect(registryReads).toBe(heldCycle);
+		expect(providers.current.refreshing).toBe(true);
+		// Another tab changes worker data, then the actual mounted resource watcher runs.
+		expect((await fetch('/api/v1/model-providers/p1', { method: 'DELETE' })).ok).toBe(true);
+		for (let i = 0; i < events; i++) {
+			resourceSync.invalidate(['settings']);
+			await vi.advanceTimersByTimeAsync(100);
+		}
+		expect(registryReads).toBe(heldCycle); // never run overlapping full snapshots
+		releaseCurrent();
+		await vi.advanceTimersByTimeAsync(0);
+		expect(registryReads).toBe(heldCycle + 1); // exactly one trailing read for this burst
+		expect(providers.current.refreshing).toBe(true); // includes the trailing read
+		if (source === 'page open') expect(providers.current.initialSnapshotReady).toBe(false);
+		releaseTrailing();
+		await vi.advanceTimersByTimeAsync(1000);
+		expect(registryReads).toBe(heldCycle + 1); // ResourceSync must not schedule a duplicate
+		expect(providers.current.refreshing).toBe(false);
+		expect(providers.current.providers).toEqual([]);
+		expect(screen.queryByRole('group', { name: 'OpenAI' })).toBeNull();
+		expect(screen.getByText('Not connected')).toBeTruthy();
+		expect(screen.getByRole('button', { name: /^OpenAI / }).getAttribute('data-settings-item')).toBe('provider:openai');
+	});
+
 	it('keeps a timed-out registry unknown while its retry response is held', async () => {
 		vi.useFakeTimers();
 		let registryReads = 0;
@@ -140,7 +207,7 @@ describe('the list', () => {
 		expect(credentialNames('OpenAI')).toEqual(['OpenAI Plus subscription, Active', 'OpenAI API key, Active']);
 	});
 
-	it.each(['second Retry', 'resource refresh'])(
+	it.each(['second Retry', 'another caller'])(
 		'coalesces a held retry with a %s so an older deadline cannot undo recovery',
 		async (source) => {
 			vi.useFakeTimers();
@@ -175,7 +242,7 @@ describe('the list', () => {
 			expect(integrationReads).toBe(2); // no successful request may overtake the held retry
 			expect(retries.every((b) => b.disabled)).toBe(true);
 			expect(providers.current.refreshing).toBe(true);
-			if (source === 'resource refresh') expect(second).toBe(first);
+			if (source === 'another caller') expect(second).toBe(first);
 			await vi.advanceTimersByTimeAsync(10_000);
 			await first;
 			expect(providers.current.refreshing).toBe(false);

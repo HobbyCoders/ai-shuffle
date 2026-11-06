@@ -138,8 +138,9 @@ let _state = $state<ProvidersState>({ ...initialState });
  * `clear()`. Not `$state` — a plain module-scope latch, never rendered.
  */
 let _initialLoadStarted = false;
-// Every full-snapshot entry point joins this read, rather than racing it.
+// Retry/open callers join the flight; data changes require a newer snapshot.
 let _refreshInFlight: Promise<void> | null = null;
+let _refreshInvalidated = false;
 
 const { subscribe, update: _update, notifySubscribers: _notifySubscribers } =
 	createSubscribers<ProvidersState>(
@@ -196,12 +197,18 @@ export const providers = {
 		if (_refreshInFlight) return _refreshInFlight;
 		_initialLoadStarted = true;
 		_update((s) => ({ ...s, refreshing: true }));
-		const flight = Promise.all([
-			providers.loadProviders(true),
-			providers.loadIntegrations(),
-			providers.loadClaude()
-		]).then(() => {
-			// Publish the first list once, including retryable unavailable reads.
+		const flight: Promise<void> = Promise.resolve().then(async () => {
+			do {
+				_refreshInvalidated = false;
+				await Promise.all([
+					providers.loadProviders(true),
+					providers.loadIntegrations(),
+					providers.loadClaude()
+				]);
+				// All invalidations received during this read share one trailing read.
+				// A further mutation during that read can dirty the next pass again.
+			} while (_refreshInFlight === flight && _refreshInvalidated);
+			// Do not publish a cold list until the last invalidation has been read.
 			// A clear() during this read must not complete a newer snapshot.
 			if (_refreshInFlight === flight) _update((s) => ({ ...s, initialSnapshotReady: true }));
 		}).finally(() => {
@@ -212,6 +219,16 @@ export const providers = {
 		});
 		_refreshInFlight = flight;
 		return flight;
+	},
+
+	/**
+	 * A settings mutation is not a duplicate Retry: the current reads may predate
+	 * it. Own the trailing queue here and return void so ResourceSync does not
+	 * await this flight and queue the same invalidations a second time.
+	 */
+	invalidate() {
+		if (_refreshInFlight) _refreshInvalidated = true;
+		else void providers.refreshAll();
 	},
 
 	async loadProviders(silent = false) {
@@ -569,6 +586,7 @@ export const providers = {
 	/** Reset the whole store (test/teardown helper). */
 	clear() {
 		_refreshInFlight = null;
+		_refreshInvalidated = false;
 		_state = { ...initialState };
 		_initialLoadStarted = false;
 		_notifySubscribers();

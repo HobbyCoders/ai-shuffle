@@ -101,7 +101,7 @@
 		// Subscription rows name their plan; the stored snapshot has the freshest one.
 		void providers.loadUsage();
 	});
-	watchResources(['settings'], () => providers.refreshAll());
+	watchResources(['settings'], () => providers.invalidate());
 	onDestroy(() => providerDrafts.discardAll());
 </script>
 
