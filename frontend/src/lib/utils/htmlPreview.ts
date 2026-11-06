@@ -284,9 +284,13 @@ const PINNED_CSS = ':where(html){scrollbar-width:thin}';
 // Runs synchronously in <head> before any page script or body. It reports the
 // content height (scrollHeight only when the page overflows, so a frame can
 // also shrink), applies live theme and scroll-mode updates sent by the parent
-// window only, forwards http(s) link clicks and data: image clicks, blocks
-// every other navigation and form submission, and passes Escape and
-// pointer enter/leave on (the parent cannot see hover inside the frame).
+// window only, forwards http(s) link clicks and data: image clicks the page
+// does not handle itself, blocks every other navigation and form submission,
+// and passes Escape and pointer enter/leave on (the parent cannot see hover
+// inside the frame). An image click belongs to the page when it cancels it,
+// changes the document in response (a gallery that toggles a layout class,
+// say) or has an onclick handler on the image or a container below <body>;
+// opening the lightbox as well would hide the page's change behind it.
 // An inline page cannot scroll, so its #anchor links ask the parent to
 // scroll the transcript to the target instead.
 const BOOTSTRAP_SCRIPT = `(function(){
@@ -308,10 +312,13 @@ e.preventDefault();if(!e.isTrusted||!h)return;var u;try{u=new URL(h);}catch(x){r
 if(u.protocol!=='http:'&&u.protocol!=='https:')return;
 post({jsonrpc:'2.0',id:'ais-link-'+(++linkId),method:M.openLink,params:{url:u.href}});},true);
 document.addEventListener('submit',function(e){e.preventDefault();},true);
-document.addEventListener('click',function(e){var t=e.target;
+function own(t){for(var n=t;n&&n!==document.body&&n!==document.documentElement;n=n.parentNode)if(typeof n.onclick==='function')return true;return false;}
+window.addEventListener('click',function(e){var t=e.target;
 if(!e.isTrusted||e.button!==0||e.metaKey||e.ctrlKey||e.shiftKey||e.altKey||!t||t.tagName!=='IMG'||t.closest('a[href],button'))return;
 var u=t.currentSrc||t.src||'';if(!/^data:image\\//i.test(u))return;
-setTimeout(function(){if(!e.defaultPrevented)post({jsonrpc:'2.0',method:M.openImage,params:{src:u,name:t.alt||t.title||''}});});});
+var moved=false,IO=window.MutationObserver?new MutationObserver(function(){moved=true;}):null;if(IO)IO.observe(document,{subtree:true,childList:true,attributes:true,characterData:true});
+setTimeout(function(){if(IO){if(IO.takeRecords().length)moved=true;IO.disconnect();}
+if(!e.defaultPrevented&&!moved&&!own(t))post({jsonrpc:'2.0',method:M.openImage,params:{src:u,name:t.alt||t.title||''}});});},true);
 document.addEventListener('keydown',function(e){if(e.key==='Escape'&&e.isTrusted&&!e.defaultPrevented)post({jsonrpc:'2.0',method:M.escape});});
 var R=document.documentElement;R.addEventListener('mouseenter',function(){post({jsonrpc:'2.0',method:M.hover,params:{inside:true}});});
 R.addEventListener('mouseleave',function(){post({jsonrpc:'2.0',method:M.hover,params:{inside:false}});});
