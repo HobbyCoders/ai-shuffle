@@ -63,14 +63,74 @@ def test_checked_in_hosted_plan_leaves_retry_headroom():
     buckets = ci.plan(ci.HOSTED_SHARDS)
     assert len(buckets) == ci.HOSTED_SHARDS
     assert sorted(name for bucket in buckets for name in bucket) == sorted(weights)
-    # Include the ENTIRE first pass, 30s startup, all 180s of exact-case retry,
-    # and the existing 180s teardown reserve inside the unchanged 25m step.
+    # Keep the original 1110s bound and all existing allowances: the entire
+    # 180s retry phase and 180s teardown reserve fit inside the unchanged 25m
+    # step, not only the point estimate of the first pass.
     loads = [sum(weights[name] for name in bucket) for bucket in buckets]
     assert max(loads) <= 19 * 60 - 30, loads
     full_budget = max(loads) + 30 + journey_retry.RETRY_SECONDS + journey_retry.TEARDOWN_SECONDS
     assert full_budget <= journey_retry.STEP_SECONDS
+    assert max(ci.shard_budget_seconds(load) for load in loads) == pytest.approx(full_budget)
     assert all(ci.commands_for(bucket, ci.HOSTED_SHARDS) == [["node", str(ci.JOURNEYS / name)] for name in bucket]
                for bucket in buckets)
+
+
+def test_step_budget_includes_setup_and_full_retry_teardown():
+    assert ci.SETUP_SECONDS == 30
+    assert ci.shard_budget_seconds(1000) == 1390
+    assert ci.shard_budget_seconds(1110) == journey_retry.STEP_SECONDS
+    assert ci.shard_budget_seconds(0) == 0
+
+
+def _assert_historical_calibration(tmp_path):
+    # The old partial weights passed the headroom bound while underestimating
+    # tool-cards by ~200s and overestimating new files. Test the actual shard
+    # layouts too, so errors cannot cancel out across the entire suite.
+    fixture = ci.ROOT / "tests/scripts/fixtures/journey_hosted_calibration.json"
+    measured = json.loads(fixture.read_text())
+    # Workload and weights are a matched historical pair. Never compare old
+    # observations with a future revision's cases, names or runtime weights.
+    inputs = measured["estimator"]["weights"]
+    directory = tmp_path / "historical-journeys"
+    directory.mkdir()
+    for name in inputs["seconds"]:
+        (directory / name).touch()
+    path = directory / "weights.json"
+    path.write_text(json.dumps(inputs))
+    weights = ci.estimated_seconds(directory, path)
+    for run in measured["runs"]:
+        for shard in run["shards"]:
+            predicted = sum(weights[name] for name in shard["seconds"]) + ci.SETUP_SECONDS
+            # Independent hosted holdout, not the run used to refresh weights.
+            # Two minutes is the explicit estimate tolerance, NOT more timeout.
+            assert abs(predicted - shard["step_seconds"]) <= 120, (
+                run["run_id"], shard["shard"], predicted, shard["step_seconds"])
+
+
+def test_hosted_step_estimates_match_frozen_clean_measurements(tmp_path):
+    _assert_historical_calibration(tmp_path)
+
+
+def test_valid_one_percent_refresh_does_not_rewrite_historical_calibration(tmp_path, monkeypatch):
+    fixture = ci.ROOT / "tests/scripts/fixtures/journey_hosted_calibration.json"
+    original = fixture.read_bytes()
+    data = json.loads(ci.WEIGHTS.read_text())
+    data["seconds"] = {name: round(seconds * 1.01, 2) for name, seconds in data["seconds"].items()}
+    path = tmp_path / "refreshed-weights.json"
+    path.write_text(json.dumps(data))
+    estimate = ci.estimated_seconds
+    refreshed = estimate(weights_path=path)
+    loads = [sum(refreshed[name] for name in bucket)
+             for bucket in ci.partition(refreshed, ci.HOSTED_SHARDS)]
+    assert max(loads) <= 1110
+    assert max(ci.shard_budget_seconds(load) for load in loads) <= journey_retry.STEP_SECONDS
+
+    def current_weights(directory=ci.JOURNEYS, weights_path=ci.WEIGHTS):
+        return estimate(directory, path if weights_path == ci.WEIGHTS else weights_path)
+
+    monkeypatch.setattr(ci, "estimated_seconds", current_weights)
+    _assert_historical_calibration(tmp_path)
+    assert fixture.read_bytes() == original
 
 
 def test_checked_in_measurements_match_actual_case_lists():
@@ -79,7 +139,10 @@ def test_checked_in_measurements_match_actual_case_lists():
     # Full refreshes record every file, so future additions require remeasurement
     # instead of silently keeping a short runtime for a larger case list.
     assert data["case_counts"]
-    assert set(data["case_counts"]) <= set(data["seconds"])
+    assert set(data["source_revisions"]) == {str(run_id) for run_id in data["source_runs"]}
+    # Every measured file needs its case inventory, not just the last file
+    # refreshed by hand: otherwise added tool-card cases keep an 8-case weight.
+    assert set(data["case_counts"]) == set(data["seconds"])
     for name, cases in data["case_counts"].items():
         assert ci.case_count(ci.JOURNEYS / name, strict=True) == cases, name
 
@@ -169,10 +232,15 @@ def test_plan_stdout_stays_json_and_loads_reach_log_and_summary(tmp_path, monkey
     assert ci.main(["plan", "--shards", "3"]) == 0
     captured = capsys.readouterr()
     assert json.loads(captured.out) == [["a.journey.mjs"], ["b.journey.mjs"], []]
-    for index, minutes in enumerate([1.5, 0.5, 0.0], 1):
-        assert f"planned shard {index}/3: {minutes:.1f} estimated minutes" in captured.err
-        assert f"| {index}/3 | {1 if index < 3 else 0} | {minutes:.1f} |" in summary.read_text()
-    assert "excludes dev-instance setup and teardown" in summary.read_text()
+    for index, (runtime, step, budget) in enumerate([(90, 120, 480), (30, 60, 420), (0, 0, 0)], 1):
+        headroom = 1500 - budget
+        assert f"planned shard {index}/3: {step / 60:.1f} estimated step minutes" in captured.err
+        assert f"{budget / 60:.1f}m with retry/reserves, {headroom}s headroom" in captured.err
+        assert (f"| {index}/3 | {1 if index < 3 else 0} | {runtime / 60:.1f} | {step / 60:.1f} | "
+                f"{budget / 60:.1f} | {headroom} |") in summary.read_text()
+    assert "30s setup/normal teardown" in summary.read_text()
+    assert "180s retry phase and 180s teardown" in summary.read_text()
+    assert "25 minutes" in summary.read_text()
 
 
 # Frozen main 8ea52f8d case counts + PR #929's 16 short open-unloaded-chat cases.
@@ -252,10 +320,15 @@ def refresh_inventory(tmp_path, monkeypatch):
     monkeypatch.setattr(ci, "case_count", lambda path, *, strict=False: {
         "a.journey.mjs": 3, "b.journey.mjs": 2,
     }[path.name])
+    # These producer tests supply fake hosted logs; revision matching has its
+    # own git-boundary tests below rather than consulting this checkout.
+    monkeypatch.setattr(ci, "require_matching_workload", lambda run_id, revision: None)
 
 
-def _run_state(command, *, attempt=1, conclusion="success"):
-    state = {"status": "completed", "conclusion": conclusion, "attempt": attempt}
+def _run_state(command, *, attempt=1, conclusion="success", **metadata):
+    state = {"status": "completed", "conclusion": conclusion, "attempt": attempt,
+             "headSha": "a" * 40, "event": "push", "headBranch": "main", "workflowName": "main-suite"}
+    state.update(metadata)
     # Emulate gh: fields not requested by the implementation are not returned.
     return json.dumps({field: state[field] for field in command[-1].split(",")})
 
@@ -311,6 +384,7 @@ def test_refresh_produces_medians_from_green_archived_job_logs(tmp_path, monkeyp
     assert data["seconds"] == {"a.journey.mjs": 40, "b.journey.mjs": 20}
     assert data["seconds_per_case"] == 12.5
     assert data["source_runs"] == [10, 20]
+    assert data["source_revisions"] == {"10": "a" * 40, "20": "a" * 40}
     assert data["case_counts"] == {"a.journey.mjs": 3, "b.journey.mjs": 2}
     assert "refresh-weights" in data["_comment"]
     assert len(calls) == 5
@@ -493,3 +567,148 @@ def test_refresh_detects_retry_after_unterminated_output_line(tmp_path, monkeypa
     with pytest.raises(ValueError, match="Run 10 contained retries.*cannot be used for runtime weights"):
         ci.refresh_weights([10], path)
     assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize("revision", [None, "", "main", "abc", "z" * 40])
+def test_runtime_refresh_refuses_unidentified_source_revision(revision, monkeypatch):
+    monkeypatch.setattr(ci.subprocess, "run", lambda *args, **kwargs:
+                        pytest.fail("invalid revisions must not invoke git"))
+    with pytest.raises(ValueError, match="no valid source revision"):
+        ci.require_matching_workload(10, revision)
+
+
+@pytest.mark.parametrize("diff_code,untracked", [(0, ""), (1, ""), (128, ""), (0, "frontend/tests/journeys/lib/new.mjs\n")])
+def test_runtime_refresh_checks_workload_not_just_case_counts(monkeypatch, diff_code, untracked):
+    calls = []
+
+    def git(command, **kwargs):
+        calls.append(command)
+        code = diff_code if command[1] == "diff" else 0
+        return ci.subprocess.CompletedProcess(command, code, stdout="" if command[1] == "diff" else untracked)
+
+    monkeypatch.setattr(ci.subprocess, "run", git)
+    if diff_code or untracked:
+        with pytest.raises(ValueError, match="workload differs.*no weights were replaced"):
+            ci.require_matching_workload(10, "a" * 40)
+    else:
+        ci.require_matching_workload(10, "a" * 40)
+    assert calls[0][:5] == ["git", "diff", "--quiet", "a" * 40, "--"]
+    assert {"app", "fluid", "frontend", "browser-mcp", "tools", "scripts/devloop"} <= set(calls[0])
+    assert ":(exclude)scripts/devloop/ci.py" in calls[0]
+    assert ":(exclude)scripts/devloop/journey_weights.json" in calls[0]
+
+
+def test_refresh_refuses_different_revision_workload_before_logs_or_writing(tmp_path, monkeypatch, refresh_inventory):
+    path = _weights(tmp_path, {"a.journey.mjs": 123, "b.journey.mjs": 456})
+    original = path.read_bytes()
+    checked = []
+
+    def gh(command, **kwargs):
+        if command[:3] == ["gh", "repo", "view"]:
+            return "owner/repo\n"
+        assert command[:3] == ["gh", "run", "view"]  # no archive download on mismatch
+        return _run_state(command)
+
+    def mismatch(run_id, revision):
+        checked.append((run_id, revision))
+        raise ValueError("workload differs")
+
+    monkeypatch.setattr(ci.subprocess, "check_output", gh)
+    monkeypatch.setattr(ci, "require_matching_workload", mismatch)
+    with pytest.raises(ValueError, match="workload differs"):
+        ci.refresh_weights([10], path)
+    assert checked == [(10, "a" * 40)]
+    assert path.read_bytes() == original
+
+@pytest.mark.parametrize("metadata", [
+    {"event": "pull_request"},
+    {"event": "workflow_dispatch"},
+    {"headBranch": "feature"},
+    {"workflowName": "ci-frontend"},
+    {"event": None},
+])
+def test_refresh_refuses_ambiguous_checkout_before_logs_or_writing(
+        tmp_path, monkeypatch, refresh_inventory, metadata):
+    path = _weights(tmp_path, {"a.journey.mjs": 123})
+    original = path.read_bytes()
+    calls = []
+
+    def gh(command, **kwargs):
+        calls.append(command)
+        if command[:3] == ["gh", "repo", "view"]:
+            return "owner/repo\n"
+        if command[:3] == ["gh", "run", "view"]:
+            return _run_state(command, **metadata)
+        return _archive(_log("a", 30, 3) + _log("b", 10, 2))
+
+    monkeypatch.setattr(ci.subprocess, "check_output", gh)
+    with pytest.raises(ValueError, match="push to main.*main-suite"):
+        ci.refresh_weights([10], path)
+    assert not any(command[:2] == ["gh", "api"] for command in calls)
+    assert path.read_bytes() == original
+
+
+@pytest.fixture
+def workload_repo(tmp_path, monkeypatch):
+    """Exercise the real git pathspec, not a mocked successful diff."""
+    root = tmp_path / "repo"
+    root.mkdir()
+    monkeypatch.setattr(ci, "ROOT", root)
+
+    def git(*arguments):
+        return ci.subprocess.check_output(["git", *arguments], cwd=root, text=True).strip()
+
+    def commit():
+        git("add", ".")
+        git("-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+            "-c", "commit.gpgsign=false", "commit", "-m", "Test workload")
+        return git("rev-parse", "HEAD")
+
+    git("init", "-q")
+    for name in ("app/feature.py", "frontend/tests/journeys/a.journey.mjs",
+                 "fluid/tests/fixtures/fake_claude_script.py",
+                 "fluid/tests/fixtures/fake_guard_ready.py"):
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("// baseline workload\n")
+    return root, commit(), commit
+
+
+def test_runtime_refresh_accepts_metadata_only_commits(workload_repo):
+    root, revision, commit = workload_repo
+    for name in (
+        "docs/ci/pr-checks.md", "app/README.md", "frontend/docs/development.md",
+        "frontend/tests/journeys/README.md", "frontend/tests/journeys/map.json",
+        "frontend/tests/journeys/select.mjs", "frontend/tests/journeys/select.test.mjs",
+        "frontend/tests/journeys/lib/boot.test.mjs", "frontend/src/lib/panel.test.ts",
+        "frontend/src/lib/panel.spec.ts", "fluid/tests/unit/test_unit.py", "fluid/tests/conftest.py",
+        "tools/tests/unit.test.ts", "browser-mcp/tests/unit.test.ts", "tests/scripts/test_new.py",
+        "frontend/src/lib/__tests__/panel.test.ts",
+    ):
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("unrelated metadata or unit test\n")
+    commit()
+    ci.require_matching_workload(10, revision)
+
+
+@pytest.mark.parametrize("name", [
+    "app/feature.py", "fluid/fluid/core/engine.py", "frontend/src/lib/Panel.svelte",
+    "frontend/tests/journeys/a.journey.mjs", "frontend/tests/journeys/lib/app.mjs",
+    "frontend/package-lock.json", "requirements.txt", "scripts/devloop/fake_claude/cli.py",
+    "browser-mcp/src/index.ts", "tools/src/index.ts",
+    "fluid/tests/fixtures/fake_claude_script.py", "fluid/tests/fixtures/fake_guard_ready.py",
+    "fluid/tests/fixtures/fake_provider_server.py", "frontend/tests/flight-recorder/record.mjs",
+    "browser-mcp/tests/fixtures/frame.html", "tools/tests/fixtures/reply.json",
+    "frontend/src/lib/__tests__/fixtures/reply.json",
+])
+@pytest.mark.parametrize("committed", [False, True])
+def test_runtime_refresh_rejects_producing_changes(workload_repo, name, committed):
+    root, revision, commit = workload_repo
+    path = root / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("changed workload even with identical case counts\n")
+    if committed:
+        commit()
+    with pytest.raises(ValueError, match="workload differs"):
+        ci.require_matching_workload(10, revision)
