@@ -8,7 +8,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 import pytest
 
-from app.db import base, runs, session_events, sessions
+from app.db import base, runs, session_events, sessions, turns
 from tests.db.postgres_harness import requires_real_pg
 from tests.db import schema_lifecycle_helpers as lifecycle
 
@@ -115,3 +115,116 @@ def test_delete_waits_before_removing_event_runtime(private_pool, monkeypatch, f
         for table in sessions._SESSION_RUNTIME_TABLES:
             cur.execute(f"SELECT COUNT(*) AS n FROM {table} WHERE session_id=%s", (sid,))
             assert cur.fetchone()["n"] == 0, f"delete left orphan rows in {table}"
+
+
+def _wait_for_lock_wait(observer, blocker_pid, pending):
+    deadline = time.monotonic() + 5
+    with observer.cursor() as probe:
+        while True:
+            probe.execute("SELECT pg_stat_clear_snapshot()")
+            probe.execute("SELECT pid FROM pg_stat_activity WHERE %s = ANY(pg_blocking_pids(pid))",
+                          (blocker_pid,))
+            if probe.fetchone():
+                return
+            if pending.done():
+                pending.result()
+                pytest.fail("transaction finished without the required lock wait")
+            assert time.monotonic() < deadline, "transaction never waited for its competitor"
+            time.sleep(0.01)
+
+
+def _assert_deleted(sid):
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM sessions WHERE id=%s", (sid,))
+        assert cur.fetchone() is None
+        for table in sessions._SESSION_RUNTIME_TABLES:
+            cur.execute(f"SELECT COUNT(*) AS n FROM {table} WHERE session_id=%s", (sid,))
+            assert cur.fetchone()["n"] == 0, f"delete left orphan rows in {table}"
+
+
+@pytest.mark.parametrize("path", ["park-repair", "expired-settle"])
+@pytest.mark.parametrize("first", ["settler", "delete"])
+def test_delete_vs_settlement_both_lock_orders(private_pool, monkeypatch, path, first):
+    from types import SimpleNamespace
+    from app.core.session_settlement import _capture_and_dismiss
+
+    sid = "delete-settle-" + uuid4().hex
+    with base.get_db() as conn:
+        conn.cursor().execute("INSERT INTO sessions (id) VALUES (%s)", (sid,))
+    run = runs.claim_run(sid, "settlement", 60)
+    turn = turns.enqueue_turn(sid, "user", prompt="settlement interleaving")
+    turns.start_turn(turn["id"], run_id=run["id"])
+    if path == "park-repair":
+        parked = turns.park_turn(turn["id"], usage={"input_tokens": 1})
+        # The real ProviderAgent repair arguments, including the admission guard.
+        settle = lambda: turns.settle_parked_turns(
+            sid, turn_ids=[turn["id"]], only_if_idle=True,
+            observed_park=parked, can_settle=lambda: True,
+        )
+    else:
+        with base.get_db() as conn:
+            conn.cursor().execute("UPDATE runs SET lease_expires_at=NOW()-INTERVAL '1 minute' WHERE id=%s",
+                                  (run["id"],))
+        # An in-process owner wait makes the production capture reach the
+        # expired-run fence, rather than its deliberately empty-snapshot branch.
+        broker = SimpleNamespace(snapshot_pending=lambda _: ([SimpleNamespace(session_id=sid)], [], []))
+        settle = lambda: _capture_and_dismiss(sid, broker, None)
+    session_events.append_events(sid, [{"type": "system.note", "payload": {}}])
+    monkeypatch.setattr(sessions, "_cleanup_working_set_ref", lambda sid: None)
+    monkeypatch.setattr(sessions, "_cleanup_pending_wakeups", lambda sid: None)
+    locked, resume = threading.Event(), threading.Event()
+    first_pid = []
+
+    class InterleavedCursor(RealDictCursor):
+        def execute(self, sql, params=None):
+            result = super().execute(sql, params)
+            name = threading.current_thread().name
+            if not name.startswith(first) or locked.is_set():
+                return result
+            run_lock = "FROM runs WHERE session_id" in sql and "FOR UPDATE" in sql
+            counter_lock = sql.startswith("INSERT INTO session_event_counters")
+            counter_row_lock = "FROM session_event_counters WHERE" in sql and "FOR UPDATE" in sql
+            session_lock = "FROM sessions WHERE id=" in sql and "FOR UPDATE" in sql
+            if first == "delete":
+                boundary = counter_lock if path == "park-repair" else run_lock
+            else:
+                # The old path starts with session/counter; the fixed path
+                # starts with the shared run lock. Pause at either first lock.
+                boundary = run_lock or (session_lock if path == "park-repair" else counter_row_lock)
+            if boundary:
+                first_pid.append(self.connection.get_backend_pid())
+                locked.set()
+                assert resume.wait(10), "test never released the first transaction"
+            return result
+
+    original_cursor = base._PgDictConnection.cursor
+
+    def instrumented(self, *args, **kwargs):
+        kwargs["cursor_factory"] = InterleavedCursor
+        return original_cursor(self, *args, **kwargs)
+
+    monkeypatch.setattr(base._PgDictConnection, "cursor", instrumented)
+    with psycopg2.connect(**private_pool) as observer, \
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="settler") as settler, \
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="delete") as deleter:
+        observer.autocommit = True
+        leading = settler.submit(settle) if first == "settler" else deleter.submit(sessions.delete_session, sid)
+        try:
+            assert locked.wait(5), "first transaction never reached its lock boundary"
+            trailing = deleter.submit(sessions.delete_session, sid) if first == "settler" else settler.submit(settle)
+            _wait_for_lock_wait(observer, first_pid[0], trailing)
+        finally:
+            resume.set()
+        settle_result = (leading if first == "settler" else trailing).result(timeout=5)
+        assert (trailing if first == "settler" else leading).result(timeout=5)
+        if first == "settler":
+            if path == "park-repair":
+                assert settle_result == 1
+            else:
+                assert [row["id"] for row in settle_result["aborted"]] == [turn["id"]]
+        elif path == "park-repair":
+            assert settle_result == 0
+        else:
+            assert settle_result is None
+    _assert_deleted(sid)

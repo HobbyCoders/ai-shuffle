@@ -1852,25 +1852,9 @@ def delete_session(session_id: str) -> bool:
     _ph = ph()
     with get_db() as conn:
         cursor = get_cursor(conn)
-        # Match fenced append/Plan: run -> counter -> session -> dependent rows.
-        # In particular, do not delete events/counters (or lock a child session)
-        # and then wait for the recorder's run fence. That reverses its order
-        # and deadlocks a finishing turn. Taking these locks BEFORE any cleanup
-        # also keeps an unfenced append from inserting after its table was swept.
-        cursor.execute(
-            f"SELECT id FROM runs WHERE session_id = {_ph} ORDER BY id FOR UPDATE",
-            (session_id,),
-        )
-        cursor.fetchall()
-        cursor.execute(
-            f"INSERT INTO session_event_counters (session_id, next_seq) "
-            f"SELECT id, 0 FROM sessions WHERE id = {_ph} "
-            "ON CONFLICT (session_id) DO UPDATE "
-            "SET next_seq = session_event_counters.next_seq",
-            (session_id,),
-        )
-        cursor.execute(f"SELECT id FROM sessions WHERE id = {_ph} FOR UPDATE", (session_id,))
-        cursor.fetchone()
+        # Share the recorder/settlement order before removing ANY runtime rows.
+        from app.db.session_locks import lock_session_runtime
+        lock_session_runtime(cursor, session_id)
         cursor.execute(
             f"UPDATE sessions SET parent_session_id = NULL "
             f"WHERE parent_session_id = {_ph}",
