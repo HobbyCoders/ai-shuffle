@@ -59,6 +59,9 @@ export async function trackSend<T>(send: () => Promise<T>): Promise<T> {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
+// Match the streamed typed-text admission deadline in voiceAudioStream.
+const VOICE_CONTEXT_SAVE_TIMEOUT_MS = 10_000;
+
 /**
  * Who owns the session an unbound compose is about to create. The backend
  * creates it on this worker unless the composer's "Runs on" pick names
@@ -425,11 +428,21 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				return false;
 			}
 			if (_state.sessionId && isCallActiveFor(_state.sessionId)) {
+				let contextTimeout: ReturnType<typeof setTimeout> | undefined;
 				try {
-					await persistVoiceContext(_state.sessionId, voiceContextFor(_state));
+					// Race only persistence, not a continuation that sends: after the
+					// deadline this attempt is dead even if the PATCH later succeeds.
+					await Promise.race([
+						persistVoiceContext(_state.sessionId, voiceContextFor(_state)),
+						new Promise<never>((_, reject) => {
+							contextTimeout = setTimeout(() => reject(new Error('Voice context save timed out')), VOICE_CONTEXT_SAVE_TIMEOUT_MS);
+						})
+					]);
 				} catch {
 					update(s => s.sessionId === _state.sessionId ? { ...s, error: 'Could not save voice execution settings. Your message has been kept.' } : s);
 					return false;
+				} finally {
+					clearTimeout(contextTimeout);
 				}
 				const paths = options?.pendingUploadPaths;
 				if (paths?.length) {
