@@ -10,7 +10,7 @@
 	interface Props {
 		value?: string | number | null;
 		mono?: boolean;
-		/** `fg` for a value that should read as primary text. */
+		/** Retained for callers; read-only values share the secondary-ink style. */
 		tone?: 'muted' | 'fg';
 		status?: StatusTone;
 		children?: Snippet;
@@ -26,7 +26,7 @@
 
 <style>
 	.st-val {
-		font-size: 13.5px;
+		font-size: 13px;
 		color: var(--st-mfg);
 		white-space: nowrap;
 		display: inline-flex;
@@ -37,9 +37,9 @@
 		text-overflow: ellipsis;
 	}
 	.st-val.fg {
-		color: var(--st-fg);
+		color: var(--st-mfg);
 	}
 	.st-val.st-mono {
-		font-size: 12px;
+		font-size: 13px;
 	}
 </style>

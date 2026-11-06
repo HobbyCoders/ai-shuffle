@@ -12,6 +12,7 @@
 	import { Plus } from 'lucide-svelte';
 	import ListItem from '$lib/components/settings/rows/ListItem.svelte';
 	import ListGroupLabel from '$lib/components/settings/rows/ListGroupLabel.svelte';
+ import EmptyDetail from '$lib/components/settings/shell/EmptyDetail.svelte';
 	import AgentAvatar from '$lib/components/agents/AgentAvatar.svelte';
 	import type { AgentSections } from '$lib/components/deck/cards/profiles/agentList';
 
@@ -98,7 +99,7 @@
 {:else}
 	{#if showYours}
 		{#if yoursCount}
-			<ListGroupLabel label="Yours"><span class="c">{yoursCount}</span></ListGroupLabel>
+			<ListGroupLabel compact label="Yours"><span class="c">{yoursCount}</span></ListGroupLabel>
 			{#if draft}
 				<ListItem
 					id="__draft"
@@ -113,30 +114,18 @@
 			{/if}
 			{#each sections.yours as p (p.id)}{@render row(p)}{/each}
 		{:else if noneOfYours && !narrowed}
-			<ListGroupLabel label="Yours"><span class="c">0</span></ListGroupLabel>
-			<div class="l-empty">
-				<span class="avs" aria-hidden="true">
-					<AgentAvatar avatar="fox" size={30} color="warning" />
-					<AgentAvatar avatar="bolt" size={30} color="blue" />
-					<AgentAvatar avatar="sprout" size={30} color="emerald" />
-				</span>
-				<b>No agents of your own yet</b>
-				<span>{hasBuiltins ? 'Start blank, from a built-in, or describe one.' : 'Start blank or describe one.'}</span>
-				<button type="button" class="st-btn sm" onclick={onNew}><Plus />New agent</button>
-			</div>
+			<ListGroupLabel compact label="Yours"><span class="c">0</span></ListGroupLabel>
+			<EmptyDetail message="No agents of your own yet" />
 		{/if}
 	{/if}
 
 	{#if sections.builtin.length}
-		<ListGroupLabel label="Built-in"><span class="c">{sections.builtin.length}</span></ListGroupLabel>
+		<ListGroupLabel compact label="Built-in"><span class="c">{sections.builtin.length}</span></ListGroupLabel>
 		{#each sections.builtin as p (p.id)}{@render row(p)}{/each}
 	{/if}
 
 	{#if narrowed && sections.matches === 0 && !draft}
-		<p class="l-none">
-			No agents match{query.trim() ? ` “${query.trim()}”` : ' this filter'}.
-			<button type="button" class="lnk" onclick={onClear}>Clear</button>
-		</p>
+		<EmptyDetail message={`No agents match${query.trim() ? ` “${query.trim()}”` : ' this filter'}.`} actionLabel="Clear" onAction={onClear} />
 	{/if}
 {/if}
 
@@ -160,49 +149,7 @@
 		background: var(--st-warning-soft);
 		color: var(--st-warning);
 	}
-	.l-empty {
-		margin: 4px 2px;
-		padding: 18px 16px;
-		border: 1px dashed var(--st-border-strong);
-		border-radius: var(--st-radius);
-		display: grid;
-		gap: 4px;
-		justify-items: start;
-		color: var(--st-mfg);
-		font-size: 13px;
-	}
-	.l-empty b {
-		color: var(--st-fg);
-		font-weight: 600;
-		font-size: 13.5px;
-	}
-	.avs {
-		display: flex;
-		margin-bottom: 8px;
-	}
-	.avs > :global(* + *) {
-		margin-left: -8px;
-	}
-	.l-empty .st-btn {
-		margin-top: 8px;
-	}
-	.l-none {
-		padding: 18px 10px;
-		margin: 0;
-		font-size: 13px;
-		color: var(--st-mfg);
-	}
-	.lnk {
-		padding: 0;
-		border: 0;
-		background: none;
-		color: var(--st-primary);
-		font-weight: 600;
-		font-size: inherit;
-	}
-	.lnk:hover {
-		text-decoration: underline;
-	}
+
 	/* Skeleton rows */
 	.sk {
 		display: block;

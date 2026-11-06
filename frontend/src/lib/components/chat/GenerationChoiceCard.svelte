@@ -997,36 +997,36 @@
 		font-variant-numeric: tabular-nums;
 		text-align: right;
 	}
+	/* An <input> rather than the shared Switch (the form reads its value), drawn
+	   to the same measure. */
 	.gcc-switch {
 		appearance: none;
 		position: relative;
-		width: 34px;
-		height: 20px;
+		flex: none;
+		width: 32px;
+		height: 18px;
 		margin: 0;
 		border-radius: 999px;
-		background: var(--muted);
-		box-shadow: inset 0 0 0 1px var(--border);
+		background: var(--switch-off); box-shadow: inset 0 0 0 1px var(--switch-off-edge);
 		cursor: pointer;
 		transition: background-color 0.15s ease;
 	}
 	.gcc-switch::after {
 		content: '';
 		position: absolute;
-		top: 3px;
-		left: 3px;
+		top: 2px;
+		left: 2px;
 		width: 14px;
 		height: 14px;
 		border-radius: 50%;
-		background: var(--background);
-		box-shadow: 0 1px 2px rgb(0 0 0 / 0.25);
-		transition: transform 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+		background: var(--switch-thumb);
+		box-shadow: 0 0 0 0.5px var(--switch-thumb-edge), 0 1px 2px var(--switch-thumb-edge);
+		transition: transform 0.15s;
 	}
 	.gcc-switch:checked {
-		background: var(--primary);
-		box-shadow: none;
+		background: var(--switch-on); box-shadow: none;
 	}
 	.gcc-switch:checked::after {
-		background: var(--primary-foreground, var(--background));
 		transform: translateX(14px);
 	}
 	.gcc-empty {

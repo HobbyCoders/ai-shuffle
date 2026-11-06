@@ -91,7 +91,7 @@ it.each([false, true])(
 		expect(worker.sent('GET', '/model-providers/router/openrouter-usage')).toHaveLength(1);
 		expect(worker.calls.filter((c) => c.path.includes('openrouter-usage') && c.method !== 'GET')).toEqual([]);
 		// The balance also heads the detail.
-		expect(screen.getByText('$20.75', { selector: 'dd' })).toBeTruthy();
+		expect(screen.getByRole('heading', { level: 2 }).parentElement?.parentElement?.textContent).toContain('$20.75 left');
 	}
 );
 

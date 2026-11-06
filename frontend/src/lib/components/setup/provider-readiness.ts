@@ -9,23 +9,24 @@
  * ready). fal.ai is media only and never counts.
  */
 import type { AgentGateStatus } from '$lib/api/client';
-import type { ModelProvider } from '$lib/api/model-providers';
+import { hasModelRefresh, isNativeProvider, type NativeProviderId, type ModelProvider } from '$lib/api/model-providers';
+import { nativeOptions } from '$lib/components/settings/providers/native-options.svelte';
 import {
 	AGENT_PROVIDER_ORDER, flavorOfRow, providerOfRow, type ProviderView
 } from '$lib/components/settings/providers/providers-model';
 
 /** The choices the step offers. `gateway` stands for every custom gateway. */
-export type SetupProviderChoice = 'claude' | 'openai' | 'openrouter' | 'grok' | 'gateway';
+export type SetupProviderChoice = 'claude' | 'openai' | 'openrouter' | 'grok' | 'gateway' | NativeProviderId;
 
 export interface SetupProviderDef {
 	id: SetupProviderChoice;
 	name: string;
 	/** One short line under the name. */
 	blurb: string;
-	glyph: 'claude' | 'openai' | 'openrouter' | 'grok' | 'custom';
+	glyph: 'claude' | 'openai' | 'openrouter' | 'grok' | 'custom' | NativeProviderId;
 }
 
-const BUILT_IN_CHOICES: Record<(typeof AGENT_PROVIDER_ORDER)[number], SetupProviderDef> = {
+const BUILT_IN_CHOICES: Record<Exclude<(typeof AGENT_PROVIDER_ORDER)[number], NativeProviderId>, SetupProviderDef> = {
 	openai: { id: 'openai', name: 'OpenAI', blurb: 'ChatGPT subscription or OpenAI API key', glyph: 'openai' },
 	grok: { id: 'grok', name: 'xAI Grok', blurb: 'SuperGrok subscription or xAI API key', glyph: 'grok' },
 	claude: { id: 'claude', name: 'Claude', blurb: 'Claude subscription or Anthropic API key', glyph: 'claude' },
@@ -33,10 +34,16 @@ const BUILT_IN_CHOICES: Record<(typeof AGENT_PROVIDER_ORDER)[number], SetupProvi
 };
 
 /** Same order as Settings > Providers, then "Your own gateway" last. */
-export const SETUP_PROVIDERS: readonly SetupProviderDef[] = [
-	...AGENT_PROVIDER_ORDER.map((id) => BUILT_IN_CHOICES[id]),
-	{ id: 'gateway', name: 'Your own gateway', blurb: 'Any OpenAI or Anthropic compatible endpoint', glyph: 'custom' }
-];
+export function setupProviders(): SetupProviderDef[] {
+	return [
+		...AGENT_PROVIDER_ORDER.flatMap((id): SetupProviderDef[] => {
+			if (!isNativeProvider(id)) return [BUILT_IN_CHOICES[id]];
+			const options = nativeOptions.providers.filter((p) => p.provider_type === id);
+			return options.length ? [{ id, name: options[0].display_name, blurb: options.map((p) => p.credential_label).join(' or '), glyph: id }] : [];
+		}),
+		{ id: 'gateway', name: 'Your own gateway', blurb: 'Any OpenAI or Anthropic compatible endpoint', glyph: 'custom' }
+	];
+}
 
 export interface ProviderReadiness {
 	/** At least one agent provider can run. */
@@ -69,7 +76,7 @@ export function providerReadiness(
 /** The step's choice a ready provider id belongs to. */
 export function choiceOf(id: string): SetupProviderChoice | null {
 	if (id.startsWith('gw:')) return 'gateway';
-	return (['claude', 'openai', 'openrouter', 'grok'] as const).find((c) => c === id) ?? null;
+	return AGENT_PROVIDER_ORDER.find((c) => c === id) ?? null;
 }
 
 /** How many ready providers sit under a choice (gateways can be several). */
@@ -123,6 +130,6 @@ export function pendingRow(choice: SetupProviderChoice, rows: readonly ModelProv
 /** Rows "Check again" asks for their models again: API keys and gateways not usable yet. */
 export function rowsToRecheck(ready: readonly string[], rows: readonly ModelProvider[]): ModelProvider[] {
 	return rows.filter((r) =>
-		r.enabled && flavorOfRow(r) !== 'device' && (!ready.includes(providerOfRow(r)) || (r.models?.length ?? 0) === 0)
+		r.enabled && hasModelRefresh(r) && flavorOfRow(r) !== 'device' && (!ready.includes(providerOfRow(r)) || (r.models?.length ?? 0) === 0)
 	);
 }

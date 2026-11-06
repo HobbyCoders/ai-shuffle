@@ -1,4 +1,5 @@
 <script lang="ts">
+ import EmptyDetail from '../shell/EmptyDetail.svelte';
 	/**
 	 * ExploreDetail: every app and agent plugin this worker can add, from the
 	 * official connector runtimes and the plugin sources. Search, filter by
@@ -177,7 +178,7 @@
 				{/each}
 			</div>
 		{:else if q}
-			<p class="st-empty">No plugins match your search.</p>
+			<EmptyDetail message="No plugins match your search." actionLabel="Clear" onAction={() => { query = ''; kind = 'all'; }} />
 		{:else}
 			<p class="st-empty">Nothing here yet. Add a source.</p>
 		{/if}

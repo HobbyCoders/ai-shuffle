@@ -1057,8 +1057,7 @@ def _check_attachable_conversation(row):
     owner = voice_remote.owner_of(row)
     if ((not owner and row.get("instance_id") != settings.effective_instance_id)
             or row.get("is_worker") or row.get("parent_session_id")
-            or row.get("hidden")
-            or row.get("status") == "archived"):
+            or row.get("hidden")):
         raise HTTPException(404, "Conversation is not eligible for call attachment.")
     if owner:
         _check_reachable_owner(owner)

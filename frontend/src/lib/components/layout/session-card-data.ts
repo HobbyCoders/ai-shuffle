@@ -49,7 +49,6 @@ export const STATUS_LABELS: Record<SessionCardStatus, string> = {
  * segment. `pr` / `pr_merged` are PR facts rather than runtime facts, so they
  * read as plain "Done" here and let the PR segment say the rest.
  */
-export type StatusTone = 'accent' | 'amber' | 'danger' | 'muted';
 
 export const RUNTIME_STATUS_WORDS: Record<SessionCardStatus, string> = {
 	working: 'Working',
@@ -71,21 +70,6 @@ export const RUNTIME_STATUS_WORDS: Record<SessionCardStatus, string> = {
 export function runtimeStatusWord(status: SessionCardStatus, compacting = false): string {
 	return compacting && status === 'working' ? 'Compacting' : RUNTIME_STATUS_WORDS[status];
 }
-
-export const RUNTIME_STATUS_TONES: Record<SessionCardStatus, StatusTone> = {
-	working: 'accent',
-	parked: 'muted',
-	needs_permission: 'amber',
-	has_question: 'amber',
-	await: 'amber',
-	failed: 'danger',
-	pr: 'muted',
-	pr_merged: 'muted',
-	done: 'muted',
-	idle: 'muted',
-	offline: 'muted',
-	unknown: 'muted'
-};
 
 /** Statuses that park the row on a prompt — they get the amber warning glyph
  *  ahead of the title, where `working` gets the pulsing live dot. */
@@ -327,6 +311,15 @@ export const GIT_STAGE_LABELS: Record<GitStage, string> = {
 	clean: '',
 	none: ''
 };
+
+/** The line-two word for work that has no PR word to carry it. Uncommitted work
+ *  speaks even on top of a PR: stray edits are still at risk. */
+export function gitProgressWord(stage: GitStage, hasChanges = false): string | null {
+	if (hasChanges || stage === 'dirty') return 'Uncommitted';
+	if (stage === 'committed') return 'Committed';
+	if (stage === 'pushed') return 'Pushed';
+	return null;
+}
 
 export const GIT_STAGE_TONES: Record<GitStage, 'green' | 'purple' | 'amber' | 'muted'> = {
 	pr: 'green',
@@ -673,6 +666,25 @@ export function formatElapsed(ms: number): string {
 	return `${hours}h ${String(minutes % 60).padStart(2, '0')}m`;
 }
 
+/** What a sidebar row shows for its total. Only a row working right now ticks
+ *  seconds; any other row shows whole minutes, "<1m", "11m", "1h 06m", and keeps
+ *  the exact value (`formatExactElapsed`) in its hover title. */
+export function formatRowTime(ms: number, ticking: boolean): string {
+	if (ticking) return formatElapsed(ms);
+	const minutes = Math.floor(Math.max(0, ms) / 60_000);
+	if (minutes < 1) return '<1m';
+	if (minutes < 60) return `${minutes}m`;
+	return `${Math.floor(minutes / 60)}h ${String(minutes % 60).padStart(2, '0')}m`;
+}
+
+/** The exact total, seconds and all: "42s", "11m 42s", "1h 06m 09s". */
+export function formatExactElapsed(ms: number): string {
+	const total = Math.max(0, Math.floor(ms / 1000));
+	if (total < 3600) return formatElapsed(total * 1000);
+	const pad = (n: number) => String(n).padStart(2, '0');
+	return `${Math.floor(total / 3600)}h ${pad(Math.floor(total / 60) % 60)}m ${pad(total % 60)}s`;
+}
+
 /** Compact age for settled sessions, e.g. "now", "12m", "2h", "3d". */
 export function formatAge(ms: number): string {
 	const total = Math.max(0, Math.floor(ms / 1000));
@@ -823,11 +835,11 @@ export function sessionModeOf(s: Session): SessionMode {
 
 /** Sessions the archive shelf owns (backend sets status='archived'). */
 export function isArchived(s: Session): boolean {
-	return s.status === 'archived';
+	return s.status === 'archived'; // Decode old metadata only; never a sidebar lane or readonly state.
 }
 
 /** A sidebar row action. */
-export type CardAction = 'settle' | 'activate' | 'archive' | 'restore';
+export type CardAction = 'settle' | 'activate';
 
 /**
  * The actions a row offers. On touch, a left swipe commits the state toggle
@@ -836,9 +848,7 @@ export type CardAction = 'settle' | 'activate' | 'archive' | 'restore';
  * first for its hover actions, so this order is not the on-screen order.
  */
 export function cardActions(s: Pick<Session, 'is_active' | 'status'>): CardAction[] {
-	if (isArchived(s as Session)) return ['restore'];
-	if (s.is_active) return ['archive', 'settle'];
-	return ['activate', 'archive'];
+	return [s.is_active && s.status !== 'archived' ? 'settle' : 'activate'];
 }
 
 /**

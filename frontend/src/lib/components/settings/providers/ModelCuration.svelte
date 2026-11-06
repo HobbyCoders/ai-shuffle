@@ -1,4 +1,6 @@
 <script lang="ts">
+ import EmptyDetail from '../shell/EmptyDetail.svelte';
+	import Checkbox from '$lib/components/ui/Checkbox.svelte';
 	/**
 	 * ModelCuration: which of a credential's models the pickers offer.
 	 *
@@ -28,7 +30,7 @@
 	import { onMount, untrack } from 'svelte';
 	import { RefreshCw } from 'lucide-svelte';
 	import { getErrorMessage } from '$lib/api/client';
-	import { getModelCatalog, updateModelProvider, type ModelCatalogSnapshot, type ModelProvider } from '$lib/api/model-providers';
+	import { hasModelRefresh, getModelCatalog, updateModelProvider, type ModelCatalogSnapshot, type ModelProvider } from '$lib/api/model-providers';
 	import { providers } from '$lib/stores/providers.svelte';
 	import { notify } from '$lib/stores/notifications';
 	import { watchResources } from '$lib/services/watch-resources';
@@ -83,6 +85,7 @@
 
 	const id = $derived(row?.id ?? providerId ?? '');
 	const current = $derived(row ?? providers.current.providers?.find((p) => p.id === id));
+	const canRefresh = $derived(!current || hasModelRefresh(current));
 	/** A catalog may beat its provider row over sync; keep it hidden until matched. */
 	let candidate = $state<ModelCatalogSnapshot | null>(null);
 	const catalog = $derived(candidate?.binding &&
@@ -116,10 +119,12 @@
 
 	function reconcile() {
 		const stored = current?.models ?? [];
-		rows = catalog ? rowsFromFetch(stored, catalog) : rowsFromStored(stored);
+		const listed = catalog ? rowsFromFetch(stored, catalog) : rowsFromStored(stored);
+		// An empty fixed-preset selection is deliberate, not an uncurated default.
+		rows = canRefresh ? listed : listed.map((r) => ({ ...r, checked: stored.some((m) => m.id === r.id) }));
 		selectionRevision = current?.revision;
 		hiddenMedia = catalog?.hidden ?? [];
-		if (candidate) typeable = !!catalog && catalog.models.length === 0;
+		if (candidate) typeable = canRefresh && !!catalog && catalog.models.length === 0;
 		source = catalog?.source ?? '';
 	}
 
@@ -137,6 +142,7 @@
 		failure = null;
 		try {
 			// Setup validates the current key: an old snapshot is not auth evidence.
+			// For Kimi Code the server returns its fixed preset locally, without upstream I/O.
 			const live = refresh || mode === 'setup' || wizard;
 			let res = live ? null : await getModelCatalog(id);
 			if (!live) {
@@ -181,7 +187,7 @@
 				if (!catalog) return;
 			}
 			hiddenMedia = res.hidden ?? [];
-			typeable = (res.models?.length ?? 0) === 0;
+			typeable = canRefresh && (res.models?.length ?? 0) === 0;
 		} catch (e) {
 			const detail = getErrorMessage(e, 'Could not fetch models');
 			if (mode === 'setup' && describeFetchFailure(detail, providerName).kind === 'rejected') {
@@ -189,7 +195,7 @@
 				candidate = null;
 			}
 			// A rejected key needs a new key, not typed model names.
-			typeable = describeFetchFailure(detail, providerName).kind !== 'rejected';
+			typeable = canRefresh && describeFetchFailure(detail, providerName).kind !== 'rejected';
 			if (wizard) {
 				failure = describeFetchFailure(detail, providerName);
 				if (failure.kind === 'rejected') onRejected?.(failure.message);
@@ -293,6 +299,7 @@
 
 <RowGroup {title} {count} bare>
 	{#snippet actions()}
+		{#if canRefresh}
 		<button
 			type="button"
 			class="st-btn icon ghost sm"
@@ -303,6 +310,7 @@
 		>
 			<RefreshCw />
 		</button>
+		{/if}
 	{/snippet}
 	{#if mode === 'setup' && !failure}<p class="pv-msg" aria-live="polite">{setupHint}</p>{/if}
 	{#if catalog?.fetched_at}
@@ -355,13 +363,13 @@
 			<div class="pv-mlist">
 				{#each shown as r (r.id)}
 					<label class="pv-mrow">
-						<input type="checkbox" class="pv-chk" checked={r.checked} disabled={saving} onchange={() => toggle(r.id)} />
+						<Checkbox checked={r.checked} disabled={saving} onchange={() => toggle(r.id)} />
 						<span class="id">{r.id}</span>
 						{#if r.label && r.label !== r.id}<span class="lbl">{r.label}</span>{:else}<span></span>{/if}
 					</label>
 				{/each}
 				{#if shown.length === 0 && !hiddenMatch}
-					<p class="pv-empty">No models match “{filter}”.</p>
+					<EmptyDetail message={`No models match “${filter}”.`} actionLabel="Clear" onAction={() => filter = ''} />
 				{/if}
 			</div>
 			{#if hiddenMatch}
@@ -397,18 +405,11 @@
 	.filter {
 		margin: 0 0 8px;
 	}
-	.filter :global(.st-txt) {
-		width: 100% !important;
-	}
 	.typed {
 		display: flex;
 		flex-wrap: wrap;
 		gap: 8px;
 		margin: 0 0 8px;
-	}
-	.typed :global(.st-txt) {
-		flex: 1 1 200px;
-		width: auto !important;
 	}
 	.pv-fail {
 		display: flex;

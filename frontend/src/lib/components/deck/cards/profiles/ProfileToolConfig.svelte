@@ -379,7 +379,7 @@
 		font-size: 12px;
 		color: var(--st-mfg);
 		font-variant-numeric: tabular-nums;
-		font-family: var(--st-mono);
+		font-family: inherit;
 	}
 	.chev {
 		display: grid;
@@ -407,12 +407,12 @@
 		border: 1.5px solid var(--st-border-strong);
 		background: transparent;
 		padding: 0;
-		color: var(--st-pfg);
+		color: var(--st-action-fg);
 	}
 	.chk.on,
 	.chk.mixed {
-		background: var(--st-primary);
-		border-color: var(--st-primary);
+		background: var(--st-action);
+		border-color: var(--st-action);
 	}
 	.chk :global(svg.lucide) {
 		width: 12px;
@@ -464,7 +464,7 @@
 		min-width: 0;
 	}
 	.tname {
-		font-family: var(--st-mono);
+		font-family: inherit;
 		font-size: 12px;
 		display: flex;
 		align-items: center;
@@ -528,7 +528,7 @@
 		width: 170px;
 		padding: 0 9px;
 		border: 1px solid var(--st-input);
-		background: var(--st-muted);
+		background: var(--st-card);
 		border-radius: var(--st-radius-md);
 		color: var(--st-mfg);
 	}

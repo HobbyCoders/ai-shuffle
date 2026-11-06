@@ -370,6 +370,9 @@ function brandOfEntry(id: string, entry: Pick<ProviderEntry, 'provider_type' | '
 		case 'chatgpt': case 'openai': return 'openai';
 		case 'grok': case 'xai': return 'grok';
 		case 'openrouter': return 'openrouter';
+		case 'kimi': return 'kimi';
+		case 'minimax': return 'minimax';
+		case 'opencode': return 'opencode';
 		default: return `gw:${id}`;
 	}
 }
@@ -492,6 +495,9 @@ const PROVIDER_BRANDS: Readonly<Record<string, string>> = {
 	openai: 'OpenAI',
 	grok: 'Grok',
 	xai: 'Grok',
+	kimi: 'Kimi',
+	minimax: 'MiniMax',
+	opencode: 'OpenCode',
 	fal: 'fal.ai'
 };
 

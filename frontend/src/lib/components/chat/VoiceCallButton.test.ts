@@ -32,12 +32,18 @@ describe('call action on a conversation', () => {
   await fireEvent.click(await callButton());
   expect(mocks.startCallForSession).toHaveBeenCalledWith('legacy', { attach: false });
  });
+ it('does not use stale archive metadata as a read-only call gate', async () => {
+  rows.set([{ id: 'home', status: 'archived', is_active: false }]);
+  render(VoiceCallButton);
+  await fireEvent.click(await callButton());
+  expect(mocks.startCallForSession).toHaveBeenCalledWith('home', { attach: true });
+ });
  it('is absent when the configured voice surface is disabled', async () => {
   mocks.isVoiceEnabled.mockResolvedValue(false); render(VoiceCallButton);
   await Promise.resolve(); expect(screen.queryByRole('button')).toBeNull();
  });
  it.each([
-  ['archived', { status: 'archived' }],
+  ['hidden', { hidden: true }],
   ['subagent', { parent_session_id: 'parent' }],
  ])('stays hidden on a %s conversation', async (_label, row) => {
   rows.set([{ id: 'home', status: 'active' }]); render(VoiceCallButton);

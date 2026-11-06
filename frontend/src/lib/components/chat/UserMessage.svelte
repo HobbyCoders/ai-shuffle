@@ -103,7 +103,7 @@
 		display: flex;
 		align-items: center;
 		gap: 5px;
-		margin-top: 4px;
+		margin-top: 8px;
 		opacity: 0;
 		pointer-events: none;
 		user-select: none;
@@ -118,8 +118,8 @@
 	}
 
 	.user-time {
-		font-family: var(--font-mono);
-		font-size: 10.5px;
+		font-size: var(--fs-label);
+		font-variant-numeric: tabular-nums;
 		color: var(--subtle-foreground);
 		white-space: nowrap;
 	}

@@ -147,7 +147,7 @@ describe('starter team', () => {
 		await screen.findByRole('heading', { level: 2, name: 'Make your first agent' });
 		await waitFor(() => expect(mocks.get).toHaveBeenCalledWith('/agents/team-templates'));
 		expect(installButtons()).toHaveLength(0);
-		expect(screen.getByText('Yours go here.')).toBeTruthy();
+		expect(screen.getByText(/Yours go here\./)).toBeTruthy();
 	});
 
 	it('says why an install failed and lets the owner retry', async () => {
@@ -170,7 +170,8 @@ describe('starter team', () => {
 		// No All / Yours / Built-in filter that would only lead to an empty list.
 		expect(screen.queryByRole('button', { name: 'Built-in' })).toBeNull();
 		expect(screen.queryByRole('button', { name: 'Yours' })).toBeNull();
-		expect(list().getByText('Start blank or describe one.')).toBeTruthy();
+		// The list keeps a one-line empty state; the explanation lives in the main pane.
+		expect(screen.getByText('Start blank, or install a starter team: General Purpose and Frontend Designer.')).toBeTruthy();
 		await fireEvent.click(within(screen.getByRole('region', { name: 'Details' })).getByRole('button', { name: 'New agent' }));
 		const dialog = screen.getByRole('dialog', { name: 'New agent' });
 		expect(within(dialog).queryByRole('radio', { name: /From a built-in/ })).toBeNull();

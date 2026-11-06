@@ -54,6 +54,8 @@ class CreateSessionRequest(BaseModel):
     overrides: Optional[QueryOverrides] = None
     # The worker that runs the conversation ("Runs on"); None runs it here.
     target_instance_id: Optional[str] = None
+    # Explicit test-owned evidence: retained by id/export, never ordinary history.
+    disposable_test: bool = False
 
 
 class CreateSessionResponse(BaseModel):
@@ -82,6 +84,8 @@ async def create_empty_session(
 
     api_user = get_api_user_from_request(request)
     api_user_id = (api_user or {}).get("id")
+    if body.disposable_test and api_user:
+        raise HTTPException(403, "Only the owner can create disposable test chats.")
 
     project = None
     project_v2_id = None
@@ -145,6 +149,7 @@ async def create_empty_session(
                 api_user_id=api_user_id,
                 title="",
                 is_active=True,
+                hidden=body.disposable_test,
                 project_v2_id=project_v2_id,
                 model=overrides.get("model"),
                 effort=overrides.get("effort"),
@@ -262,6 +267,7 @@ async def _create_on_owner(session_id: str, request: Request, *, api_user_id: Op
         "permission_mode": overrides.get("permission_mode"),
         "context_window": row.get("context_window"),
         "fast": overrides.get("fast"), "mode": mode,
+        "hidden": bool(row.get("hidden")),
         # Who started it; the worker that runs it labels it (#1877).
         "provenance_owner": (principal or {}).get("owner"),
     }

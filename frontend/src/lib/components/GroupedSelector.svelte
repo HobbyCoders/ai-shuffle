@@ -47,6 +47,12 @@
 		showDescriptions = false
 	}: Props = $props();
 
+	/** With a description showing, a row is still called by its name alone. */
+	const itemNaming = (item: Item): Record<string, string | undefined> =>
+		showDescriptions && item.description?.trim()
+			? { 'aria-label': item.name, 'aria-description': item.description.trim() }
+			: {};
+
 	// Current view state
 	let activeGroup = $state<string | null>(null);
 	let slideDirection = $state<'forward' | 'back'>('forward');
@@ -170,6 +176,7 @@
 						type="button"
 						class="menu-item"
 						class:selected={selectedId === item.id}
+						{...itemNaming(item)}
 						onclick={() => handleSelect(item.id)}
 					>
 						{#if itemIcon}
@@ -210,6 +217,7 @@
 							type="button"
 							class="menu-item"
 							class:selected={selectedId === item.id}
+							{...itemNaming(item)}
 							onclick={() => handleSelect(item.id)}
 						>
 							{#if itemIcon}

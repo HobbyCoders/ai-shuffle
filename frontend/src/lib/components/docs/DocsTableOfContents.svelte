@@ -6,14 +6,16 @@
 	 * the active section based on scroll position.
 	 */
 	import type { DocSection } from '$lib/docs/types';
-	import { onMount } from 'svelte';
+	import { onMount, tick } from 'svelte';
 
 	interface Props {
 		headings: DocSection[];
 		scrollContainer?: HTMLElement | null;
+		showTitle?: boolean;
+		onSelect?: () => void;
 	}
 
-	let { headings, scrollContainer = null }: Props = $props();
+	let { headings, scrollContainer = null, showTitle = true, onSelect }: Props = $props();
 
 	let activeId = $state('');
 
@@ -33,7 +35,7 @@
 
 		// Small delay to let DOM update
 		const timer = setTimeout(() => {
-			const root = scrollContainer || document.querySelector('.dc-scroll');
+			const root = scrollContainer;
 			if (!root) return;
 
 			observer = new IntersectionObserver(
@@ -63,17 +65,19 @@
 		};
 	});
 
-	function scrollToHeading(id: string) {
+	async function scrollToHeading(id: string) {
+		onSelect?.();
+		await tick();
 		const el = document.getElementById(id);
 		if (!el) return;
-		el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+		el.scrollIntoView({ behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'start' });
 		activeId = id;
 	}
 </script>
 
 {#if headings.length > 0}
-	<nav class="docs-toc">
-		<div class="toc-title">On this page</div>
+	<nav class="docs-toc" aria-label="On this page">
+		{#if showTitle}<div class="toc-title">On this page</div>{/if}
 		<ul class="toc-list">
 			{#each headings as heading}
 				<li class="toc-item" class:level-3={heading.level === 3}>
@@ -91,79 +95,12 @@
 {/if}
 
 <style>
-	.docs-toc {
-		position: sticky;
-		top: 0;
-		width: 100%;
-		max-height: calc(100vh - 120px);
-		overflow-y: auto;
-		padding: 0;
-	}
-
-	.toc-title {
-		font-family: var(--font-mono, 'JetBrains Mono', monospace);
-		font-size: 10px;
-		font-weight: 600;
-		color: var(--muted-foreground);
-		text-transform: uppercase;
-		letter-spacing: 0.1em;
-		margin-bottom: 9px;
-		padding-left: 13px;
-	}
-
-	.toc-list {
-		list-style: none;
-		padding: 0;
-		margin: 0;
-	}
-
-	.toc-item {
-		margin: 0;
-	}
-
-	.toc-item.level-3 .toc-link {
-		padding-left: 24px;
-	}
-
-	.toc-link {
-		display: block;
-		width: 100%;
-		text-align: left;
-		padding: 5px 0 5px 13px;
-		font-size: 12px;
-		color: var(--muted-foreground);
-		background: none;
-		border: none;
-		border-left: 2px solid var(--border);
-		cursor: pointer;
-		transition: color 0.15s, border-color 0.15s;
-		line-height: 1.4;
-		border-radius: 0;
-	}
-
-	.toc-link:hover {
-		color: var(--foreground);
-	}
-
-	.toc-link.active {
-		color: var(--foreground);
-		border-left-color: var(--primary);
-		font-weight: 600;
-	}
-
-	/* Scrollbar */
-	.docs-toc::-webkit-scrollbar {
-		width: 4px;
-	}
-
-	.docs-toc::-webkit-scrollbar-thumb {
-		background: var(--border);
-		border-radius: 2px;
-	}
-
-	@media (max-width: 1200px) {
-		.docs-toc {
-			display: none;
-		}
-	}
+ .docs-toc { width:100%; max-height:calc(100vh - 120px); overflow:auto; }
+ .toc-title { font-size:12px; font-weight:500; color:var(--muted-foreground); margin-bottom:12px; }
+ .toc-list { list-style:none; padding:0; margin:0; }
+ .toc-item.level-3 { padding-left:12px; }
+ .toc-link { display:block; width:100%; text-align:left; padding:7px 8px; font:12px/1.5 var(--font-sans); color:var(--muted-foreground); border:0; border-radius:var(--radius-control); background:none; cursor:pointer; }
+ .toc-link:hover { color:var(--foreground); background:var(--hover-overlay); }
+ .toc-link.active { color:var(--foreground); background:var(--row-selected); }
+ @media (pointer:coarse) { .toc-link { min-height:44px; } }
 </style>

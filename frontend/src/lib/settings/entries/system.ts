@@ -12,6 +12,7 @@ export const entries: SettingEntry[] = [
 		category: 'system',
 		section: 'Workspace',
 		label: 'Workspace folder',
+		hint: 'The folder this worker keeps projects in',
 		keywords: ['directory', 'path', 'validate', 'projects folder']
 	},
 	{
@@ -19,7 +20,7 @@ export const entries: SettingEntry[] = [
 		category: 'system',
 		section: 'Workspace',
 		label: 'Import from Claude Code and Codex',
-		hint: 'Skills, agents, MCP, projects',
+		hint: 'Copy skills, agents, MCP servers and projects into this worker',
 		keywords: ['import settings', 'instructions', 'skills', 'agents', 'mcp', 'codex', 'claude code']
 	},
 	{
@@ -27,7 +28,7 @@ export const entries: SettingEntry[] = [
 		category: 'system',
 		section: 'Your data',
 		label: 'Export all data',
-		hint: 'Every chat, agent, project',
+		hint: 'Download every chat, agent and project',
 		help: 'Downloads one ZIP: every chat as a private backup (.jsonl) and as Markdown, each agent\'s settings and your project list. AI sign-ins, API keys, tokens, settings and agents\' environment variables are never included. Chats are raw backups, so anything typed or shown in a chat is in the file: keep it private. A long history takes a few minutes.',
 		keywords: ['export', 'download', 'backup', 'zip', 'all chats', 'history', 'take out', 'data access', 'markdown', 'jsonl']
 	},

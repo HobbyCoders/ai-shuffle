@@ -13,6 +13,7 @@
 	import { tick, untrack } from 'svelte';
 	import { Copy, FileText, Sparkles, Upload, X } from 'lucide-svelte';
 	import { focusTrap } from '$lib/components/ui/focus-trap';
+	import SelectField from '$lib/components/settings/rows/SelectField.svelte';
 
 	interface Props {
 		open: boolean;
@@ -122,10 +123,8 @@
 					</button>
 					{#if on && opt.id === 'builtin'}
 						<div class="optx">
-							<label class="lab" for="new-agent-builtin">Built-in</label>
-							<select id="new-agent-builtin" class="sel" bind:value={builtin}>
-								{#each builtins as b (b.id)}<option value={b.id}>{b.name}</option>{/each}
-							</select>
+							<span class="lab">Built-in</span>
+							<SelectField label="Built-in agent" bind:value={builtin} options={builtins.map((b) => ({ value: b.id, label: b.name }))} />
 						</div>
 					{:else if on && opt.id === 'describe'}
 						<div class="optx">
@@ -229,8 +228,8 @@
 		border-color: var(--st-border-strong);
 	}
 	.opt[aria-checked='true'] {
-		border-color: var(--st-primary);
-		box-shadow: 0 0 0 1px var(--st-primary);
+		border-color: var(--st-border-strong);
+		background: var(--st-accent);
 	}
 	.ic {
 		width: 32px;
@@ -242,8 +241,8 @@
 		color: var(--st-mfg);
 	}
 	.opt[aria-checked='true'] .ic {
-		color: var(--st-primary);
-		background: var(--st-primary-soft);
+		color: var(--st-fg);
+		background: var(--st-muted);
 	}
 	.tx {
 		display: grid;
@@ -264,7 +263,7 @@
 		border: 1.5px solid var(--st-border-strong);
 	}
 	.opt[aria-checked='true'] .rd {
-		border: 5px solid var(--st-primary);
+		border: 5px solid var(--st-fg);
 	}
 	.optx {
 		padding: 2px 2px 8px 56px;
@@ -281,30 +280,20 @@
 		align-items: center;
 		min-width: 0;
 	}
-	.sel,
 	.area {
 		width: 100%;
 		border: 1px solid var(--st-input);
-		background: var(--st-muted);
+		background: var(--st-card);
 		border-radius: var(--st-radius-md);
 		font-size: 13px;
 		color: var(--st-fg);
 		outline: none;
-	}
-	.sel {
-		height: 32px;
-		padding: 0 8px;
-	}
-	.sel option {
-		background: var(--st-popover);
-		color: var(--st-fg);
 	}
 	.area {
 		padding: 8px 10px;
 		line-height: 1.5;
 		resize: vertical;
 	}
-	.sel:focus,
 	.area:focus {
 		border-color: var(--st-primary);
 		box-shadow: 0 0 0 3px var(--st-primary-soft);

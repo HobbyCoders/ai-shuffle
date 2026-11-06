@@ -27,7 +27,7 @@ describe('ImportSessionModal keyboard and focus', () => {
 		render(ImportSessionModal, { props: { show: true, onclose } });
 		await settle();
 
-		const dialog = screen.getByRole('dialog', { name: 'Import Session' });
+		const dialog = screen.getByRole('dialog', { name: 'Import chat' });
 		expect(dialog.contains(document.activeElement)).toBe(true);
 
 		await fireEvent.keyDown(window, { key: 'Escape' });

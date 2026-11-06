@@ -1,4 +1,5 @@
 <script lang="ts">
+	import Checkbox from '$lib/components/ui/Checkbox.svelte';
 	/**
 	 * This worker: its name, platform and version, whether it stays on for
 	 * watches (#602), and the Network tab
@@ -187,7 +188,7 @@
 </script>
 
 <DetailPane
-	name={model.workerName}
+	name={model.workerLabel}
 	icon={Server}
 	status={TONE[model.uiState]}
 	statusText={NETWORK_STATE_LABELS[model.uiState]}
@@ -209,13 +210,14 @@
 				{#key rev}
 					<SettingRow label="Name" hint={model.enrolled && model.self ? undefined : 'Join a network to rename'}>
 						<TextField
-							value={model.workerName}
+							value={model.workerLabel}
 							maxlength={100}
 							disabled={!model.enrolled || !model.self || model.saving !== null}
 							onchange={rename}
 						/>
 					</SettingRow>
 				{/key}
+				{#if model.workerName !== model.workerLabel}<SettingRow label="Worker ID"><span style="font-size: 12px; color: var(--st-mfg)">{model.workerName}</span></SettingRow>{/if}
 				<SettingRow label="Platform"><ValueText value={status.platform ?? 'Unknown'} tone="fg" /></SettingRow>
 				<SettingRow label="Version"><ValueText value={status.version ?? 'Unknown'} mono tone="fg" /></SettingRow>
 				<SettingRow label="Revision"><ValueText value={status.revision ?? 'Unknown'} mono tone="fg" /></SettingRow>
@@ -349,7 +351,7 @@
 				{#each status.handoff_transfers.pending as transfer (transfer.token)}
 					<SettingRow label={transfer.title || 'Chat'} hint={`Waiting for ${transfer.source}`}>
 						{#if transfer.can_abandon}
-							<label><input type="checkbox" bind:checked={releaseWakes[transfer.token]} /> Resume remaining wake-ups</label>
+							<label><Checkbox checked={releaseWakes[transfer.token] ?? false} onchange={(checked) => releaseWakes[transfer.token] = checked} /> Resume remaining wake-ups</label>
 							<InlineConfirm label="Abandon transfer"
 								question={releaseWakes[transfer.token] ? 'Earlier messages may be missing. Resume remaining wake-ups anyway?' : 'Keep this chat here and discard its paused wake-ups?'}
 								onConfirm={() => abandon(transfer)} />

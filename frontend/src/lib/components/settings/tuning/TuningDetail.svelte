@@ -172,7 +172,7 @@
 	item={model.item}
 >
 	{#snippet tile()}
-		<ProviderTile provider={{ glyph: model.glyph, letter: model.group.slice(0, 1).toUpperCase() }} size="lg" />
+		<ProviderTile provider={{ glyph: model.glyph }} size="lg" />
 	{/snippet}
 
 	<RowGroup title="New chats">

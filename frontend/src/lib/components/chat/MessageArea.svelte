@@ -72,7 +72,8 @@
 		shouldAutoScrollOnChange,
 		shouldFollowLatestTurnOnSettle,
 		shouldShowJumpToLatest,
-		type ScrollMetrics
+		type ScrollMetrics,
+		createQueuedPromptTracker,
 	} from '$lib/stores/session/auto-scroll';
 	import ToolUseMessage from './ToolUseMessage.svelte';
 	import HandoffCard from './HandoffCard.svelte';
@@ -83,6 +84,7 @@
 	import { handoffPending, pollHandoffPending, refreshHandoffPending } from '$lib/stores/handoff-pending';
 	import { HANDOFF_PROGRESS_POLL_MS, progressForEpisode } from '$lib/utils/handoff-progress';
 	import WorkLogGroup from './WorkLogGroup.svelte';
+	import TurnSpeaker from './TurnSpeaker.svelte';
 	import {
 		createTranscriptModelBuilder,
 		createLatestTurnKeyTracker,
@@ -1753,6 +1755,7 @@
 	 * re-sticks via nextStickToBottom().
 	 */
 	function disengageAutoScroll() {
+		queuedPrompts.releaseStopFollow();
 		followedViewportEnd = 0;
 		cancelCurrentTurnAnchor();
 		if (!shouldAutoScroll && !pendingScrollToBottom) return;
@@ -2358,18 +2361,19 @@
 		});
 	});
 
-	// Prompts seen waiting in this session's queue, by text, until their row
-	// lands in the transcript (#863). Cleared on a session switch.
-	const queuedPromptsSeen = new Set<string>();
+	// Prompts seen waiting in this session's queue, until their row lands in the
+	// transcript (#863). Cleared on a session switch.
+	const queuedPrompts = createQueuedPromptTracker();
 	let queuedPromptsSession: string | null | undefined;
 	$effect.pre(() => {
 		const sessionId = $activeSession.sessionId;
 		const queued = $activeSession.queuedMessages;
-		if (sessionId !== queuedPromptsSession) {
-			queuedPromptsSeen.clear();
+		const sameSession = sessionId === queuedPromptsSession;
+		if (!sameSession) {
+			queuedPrompts.reset();
 			queuedPromptsSession = sessionId;
 		}
-		for (const entry of queued) queuedPromptsSeen.add(entry.content);
+		queuedPrompts.observe(queued, sameSession && !!$activeSession.stopRequestedTurnId);
 	});
 
 	// Watch for message changes and streaming content updates
@@ -2398,8 +2402,10 @@
 			: null;
 		// A prompt queued earlier lands here when its turn starts, long after the
 		// send (#863): it follows only a reader already at the bottom.
-		const fromQueue = hasNewMessage && newestMessage?.role === 'user' && queuedPromptsSeen.delete(newestMessage.content ?? '');
-		const newUserMessage = hasNewMessage && !!newestMessage && isNavigableUserTurn(newestMessage) && (!fromQueue || shouldAutoScroll);
+		const { fromQueue, followsStop } = hasNewMessage && newestMessage?.role === 'user'
+			? queuedPrompts.classify(newestMessage)
+			: { fromQueue: false, followsStop: false };
+		const newUserMessage = hasNewMessage && !!newestMessage && isNavigableUserTurn(newestMessage) && (!fromQueue || followsStop || shouldAutoScroll);
 		const newUserCommand = hasNewMessage && newestMessage?.role === 'user' && newestMessage.type === 'command';
 		if (newUserMessage) {
 			shouldAutoScroll = true;
@@ -2595,6 +2601,7 @@
 						summary={item.summary}
 						compactSummary={item.compactSummary}
 						row={messageBody}
+						speaker={turnSpeaker}
 						revealMessageId={revealedTurnId}
 						pagingEnabled={!shouldAutoScroll}
 						{observeTurnAnchor}
@@ -2717,7 +2724,15 @@
 	</div>
 {/snippet}
 
-{#snippet messageBody(message: ChatMessage, messageIndex: number, gallerySources?: ReadonlySet<string>, hiddenMedia?: ReadonlySet<string>)}
+{#snippet turnSpeaker(message: ChatMessage)}
+	<TurnSpeaker
+		name={getModelDisplayName(message) || getProfileName(message)}
+		timestamp={message.timestamp}
+		tight
+	/>
+{/snippet}
+
+{#snippet messageBody(message: ChatMessage, messageIndex: number, gallerySources?: ReadonlySet<string>, hiddenMedia?: ReadonlySet<string>, nameAbove = false)}
 	{@const delivery = agentDelivery(message)}
 	{@const handoff = handoffAnchors.get(message)}
 	{#if handoff}
@@ -2781,6 +2796,7 @@
 				onRewindComplete={presentedRewindComplete}
 				profileName={getProfileName(message)}
 				modelLabel={getModelDisplayName(message)}
+				{nameAbove}
 			/>
 		{/if}
 	{:else if message.type === 'tool_use' && message.toolName === 'TodoWrite'}
@@ -2943,22 +2959,23 @@
 		scroll-padding-block: 24px;
 	}
 
-	/* The reading column. A fixed 768px measure keeps prose at a comfortable
-	   line length no matter how wide the window gets, and every transcript
-	   element (bubbles, work-log rows, subagent cards) aligns to it. */
+	/* The reading column, shared with the composer. A fixed measure keeps prose
+	   at a comfortable line length no matter how wide the window gets, and every
+	   transcript element (bubbles, work-log rows, subagent cards) aligns to it.
+	   The cap includes the 24px gutters, so the content is the column's width. */
 	.chat-column {
-		max-width: 768px;
+		max-width: calc(var(--column-width) + 48px);
 		margin: 0 auto;
 		padding: 26px 24px 0;
 		display: flex;
 		flex-direction: column;
-		gap: 22px;
+		gap: 24px;
 	}
 
 	@media (max-width: 640px) {
 		.chat-column {
-			padding: 18px 14px 0;
-			gap: 18px;
+			padding: 18px 16px 0;
+			gap: 24px;
 		}
 	}
 
@@ -2968,14 +2985,16 @@
 	@media (min-width: 640px) and (pointer: fine) {
 		.chat-column {
 			width: calc(100% - 40px);
-			margin-left: max(40px, calc((100% - 768px) / 2));
+			margin-left: max(40px, calc((100% - var(--column-width) - 48px) / 2));
 			padding-left: 24px;
 		}
 	}
 
-	/* Compact and touch layouts use TurnNavigator's narrower rail; keep the
-	   text clear of it. */
-	@media (max-width: 639px), (pointer: coarse) {
+	/* A touch tablet keeps the text clear of TurnNavigator's narrower rail, and
+	   reserves that lane from the first turn so prose never reflows when the
+	   rail appears. On a phone the margin stays 16px either side and the rail
+	   fits inside it. */
+	@media (min-width: 641px) and (pointer: coarse) {
 		.chat-column { padding-left: 28px; }
 	}
 

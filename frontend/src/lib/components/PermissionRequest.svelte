@@ -918,16 +918,15 @@
 		font-size: 0.875rem;
 		font-weight: 500;
 		border-radius: var(--radius, 0.75rem);
-		background: var(--button-primary-gradient, var(--primary));
-		color: var(--primary-foreground);
+		background: var(--action);
+		color: var(--action-foreground);
 		border: 1px solid transparent;
 		box-shadow: var(--shadow-s);
 		transition: all 0.15s ease;
 	}
 
 	.allow-btn:hover {
-		filter: brightness(1.1);
-		box-shadow: var(--shadow-m), 0 0 20px var(--glow-color-soft);
+		background: var(--action-hover);
 	}
 
 	.allow-btn:active {

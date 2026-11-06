@@ -21,6 +21,7 @@
 //   main-checkout   control: the plain new-chat send in the main checkout
 //                   → WebSocket query path
 import { fakeAiTag, runJourney } from './runner.mjs';
+import { pick, withChatSetup } from './lib/app.mjs';
 import { expectComposerPositions } from './lib/timeline.mjs';
 
 const PROJECT = 'Dev sandbox';
@@ -34,7 +35,7 @@ const uniq = () => `${Date.now().toString(36)}${(counter++).toString(36)}`;
 async function openNewChat({ page, status }, agent = AGENT) {
 	await page.goto(status.urls.ui);
 	await page.locator('[data-ui-state="chat"][data-ui-surface="new"]').waitFor({ timeout: 90_000 });
-	const hero = page.getByRole('region', { name: 'New session' });
+	const hero = page.getByRole('region', { name: 'New chat' });
 	await hero.waitFor();
 	// Pick the engine explicitly; the default only exercises the native harness.
 	await page.getByRole('button', { name: /^Model: / }).waitFor({ timeout: 60_000 });
@@ -46,26 +47,6 @@ async function openNewChat({ page, status }, agent = AGENT) {
 		hero.getByRole('button', { name: `Agent: ${agent}` })
 	);
 	return hero;
-}
-
-/**
- * Open `trigger`'s popup and click `item` in it until `done` shows. The app
- * may re-render the hero while it hydrates (stores loading in), which closes a
- * popup opened too early; retry instead of failing on that setup noise.
- */
-async function pick(trigger, popup, item, done) {
-	for (let attempt = 0; attempt < 5; attempt++) {
-		if (await done.isVisible()) return;
-		try {
-			if (!(await popup.isVisible())) await trigger.click();
-			await item.click({ timeout: 5000 });
-			await done.waitFor({ timeout: 5000 });
-			return;
-		} catch {
-			/* retry */
-		}
-	}
-	await done.waitFor({ timeout: 1000 });
 }
 
 /** Click a trigger until its popup shows (an early click can land before hydration). */
@@ -89,12 +70,23 @@ async function pickProject(page, hero) {
 }
 
 async function worktreeOn(page, hero) {
-	await hero.getByRole('button', { name: /Switch to a worktree$/ }).click();
-	await hero.getByRole('button', { name: /^Worktree branch:/ }).waitFor();
+	await withChatSetup(page, async () => {
+		// A sentence word on a wide screen, a labelled switch in Chat controls.
+		await hero.getByRole('button', { name: /Switch to a worktree$/ }).or(hero.locator('.wt-chip')).click();
+		await hero.getByRole('button', { name: /^Worktree branch:/ }).waitFor();
+	});
+}
+
+/** The worktree's branch reads `name` on the hero (`name` may be a pattern). */
+async function expectBranch(page, hero, name, options) {
+	await withChatSetup(page, () => hero.getByRole('button', { name }).waitFor(options));
 }
 
 async function openBranchMenu(page, hero) {
-	return openPopup(hero.getByRole('button', { name: /^Worktree branch:/ }), page.getByRole('dialog', { name: 'Worktree branch' }));
+	return openPopup(
+		hero.getByRole('button', { name: /^Worktree branch:/ }),
+		page.getByRole('dialog', { name: 'Worktree branch' }).or(hero.locator('.branch-dropdown'))
+	);
 }
 
 /** Type the first message, send it and wait for the fake AI's reply to settle. */
@@ -224,10 +216,11 @@ async function lagNewMirror(page) {
 }
 
 async function pickMirrorWorker(page, hero) {
-	const menu = page.getByRole('menu', { name: 'Where this session runs' });
-	await pick(hero.getByRole('button', { name: /^Runs on / }), menu,
+	// With a project, Chat controls uses the runner chip's names for the same control.
+	const menu = page.getByRole('menu', { name: /^(Where this session runs|Runner selection)$/ });
+	await pick(hero.getByRole('button', { name: /^(Runs on |Runner: )/ }), menu,
 		menu.getByRole('menuitemradio', { name: /Peer worker/ }),
-		hero.getByRole('button', { name: 'Runs on Peer worker', exact: true }));
+		hero.getByRole('button', { name: /^(Runs on |Runner: )Peer worker$/ }));
 }
 
 async function verifyNewMirror({ page, recording }) {
@@ -255,7 +248,7 @@ await runJourney({
 				const hero = await openNewChat(ctx);
 				await pickProject(ctx.page, hero);
 				await worktreeOn(ctx.page, hero);
-				await hero.getByRole('button', { name: /^Worktree branch: a new branch from/ }).waitFor();
+				await expectBranch(ctx.page, hero, /^Worktree branch: (a new branch from|Auto from)/);
 			}),
 			act: (ctx) => sendFirstMessage(ctx, 'auto')
 		},
@@ -265,7 +258,7 @@ await runJourney({
 				const hero = await openNewChat(ctx, CLAUDE_AGENT);
 				await pickProject(ctx.page, hero);
 				await worktreeOn(ctx.page, hero);
-				await hero.getByRole('button', { name: /^Worktree branch: a new branch from/ }).waitFor();
+				await expectBranch(ctx.page, hero, /^Worktree branch: (a new branch from|Auto from)/);
 			}),
 			act: (ctx) => sendFirstMessage(ctx, 'auto-claude')
 		},
@@ -300,12 +293,14 @@ await runJourney({
 				const hero = await openNewChat(ctx);
 				await pickProject(page, hero);
 				await worktreeOn(page, hero);
-				const menu = await openBranchMenu(page, hero);
-				await menu.getByRole('button', { name: /New branch/ }).click();
-				const branch = `journey/${uniq()}`;
-				await page.getByPlaceholder('Enter a branch name').fill(branch);
-				await page.getByRole('button', { name: 'Continue', exact: true }).click();
-				await hero.getByRole('button', { name: `Worktree branch: ${branch}` }).waitFor({ timeout: 20_000 });
+				await withChatSetup(page, async () => {
+					const menu = await openBranchMenu(page, hero);
+					await menu.getByRole('button', { name: /New branch/ }).click();
+					const branch = `journey/${uniq()}`;
+					await page.getByPlaceholder('Enter a branch name').fill(branch);
+					await page.getByRole('button', { name: 'Continue', exact: true }).click();
+					await expectBranch(page, hero, `Worktree branch: ${branch}`, { timeout: 20_000 });
+				});
 			}),
 			act: (ctx) => sendFirstMessage(ctx, 'new-branch')
 		},
@@ -316,9 +311,11 @@ await runJourney({
 				const hero = await openNewChat(ctx);
 				await pickProject(page, hero);
 				await worktreeOn(page, hero);
-				const menu = await openBranchMenu(page, hero);
-				await menu.getByRole('button', { name: SEEDED_BRANCH, exact: true }).click();
-				await hero.getByRole('button', { name: `Worktree branch: ${SEEDED_BRANCH}` }).waitFor({ timeout: 20_000 });
+				await withChatSetup(page, async () => {
+					const menu = await openBranchMenu(page, hero);
+					await menu.getByRole('button', { name: SEEDED_BRANCH, exact: true }).click();
+					await expectBranch(page, hero, `Worktree branch: ${SEEDED_BRANCH}`, { timeout: 20_000 });
+				});
 			}),
 			act: (ctx) => sendFirstMessage(ctx, 'existing-branch')
 		},

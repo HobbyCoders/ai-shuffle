@@ -73,7 +73,7 @@ def _top_level(row, *, allow_settled=False):
     """An open, visible top-level chat row, wherever it runs."""
     return bool(row and not row.get("hidden") and (allow_settled or row.get("is_active"))
                 and not row.get("is_worker") and not row.get("parent_session_id")
-                and row.get("status") != "archived" and row.get("mode") != "voice")
+                and row.get("mode") != "voice")
 
 
 def _local_top_level(row, *, allow_settled=False):
@@ -184,13 +184,6 @@ def _target(caller, session_id, *, allow_stopped=False, owner=None):
     from app.core.task_registry import task_registry
     row = sessions.get_session(session_id)
     expected = owner if owner is not None else _owner(caller)
-    if (row and session_id != caller["id"] and row.get("status") == "archived"
-            and _owner(row) == expected):
-        # Named, unlike the generic refusal below: the caller may have found it
-        # through ListSessions(state='archived') and needs the reason (#1822).
-        from app.core import archive_guard
-        label = f"Session {session_id}" + (f" ({row['title']})" if row.get("title") else "")
-        raise ValueError(archive_guard.refusal(label, "receive messages"))
     if (session_id == caller["id"] or not _local_top_level(row)
             or _owner(row) != expected):
         raise ValueError("Session is not an eligible peer; use ListSessions.")
@@ -234,6 +227,8 @@ def list_sessions(session_id, data):
     caller = _caller(session_id, allow_settled=True)
     scope = data.get("scope", "project")
     state = data.get("state", "active")
+    if state == "archived":
+        state = "settled"  # cached tool input compatibility
     if state not in ("active", "settled", "archived", "all"):
         raise ValueError("state must be active, settled, archived or all")
     if scope not in ("project", "all"):
@@ -253,9 +248,7 @@ def list_sessions(session_id, data):
             eligible = visible_session(row)
         if row["id"] == session_id or not eligible or _owner(row) != caller_owner:
             continue
-        if state == "settled" and (row.get("is_active") or row.get("status") == "archived"):
-            continue
-        if state == "archived" and row.get("status") != "archived":
+        if state == "settled" and row.get("is_active"):
             continue
         if scope == "project" and (
             row.get("project_v2_id") or row.get("project_id")

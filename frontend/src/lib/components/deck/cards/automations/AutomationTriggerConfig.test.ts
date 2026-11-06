@@ -24,6 +24,30 @@ function renderWebhook(currentView: 'create' | 'edit', selectedAutomationId: str
 	});
 }
 
+it('summarises the schedule in its header without duplicating preset copy or timezone', () => {
+ const view = render(AutomationTriggerConfig, {
+  triggers: [{ type: 'cron', config: { expression: '0 9 * * *' } }], expandedTriggers: new Set([0]),
+  connectors: [], connectorTypes: [], connectorsWithTriggers: [], currentView: 'create',
+  selectedAutomationId: null, timezone: 'UTC', onUpdateTriggers: () => {}, onToggleTriggerExpand: () => {}
+ });
+ expect(screen.getByRole('heading', { name: 'Every day at 9 AM' })).toBeTruthy();
+ expect(view.container.textContent?.match(/UTC/g)).toHaveLength(1);
+ expect(view.container.querySelector('.cron-summary-text')).toBeNull();
+ expect(view.container.querySelector('.trigger-card > .st-row + .st-row')).toBeTruthy();
+ expect(screen.getByRole('button', { name: 'Collapse trigger' }).classList.contains('ghost')).toBe(true);
+});
+
+it('keeps the trigger heading and collapse control inside its card', () => {
+ const view = renderWebhook('edit', 'auto-1a2b');
+ const collapse = screen.getByRole('button', { name: 'Collapse trigger' });
+ expect(collapse.closest('.st-card')).not.toBeNull();
+ expect(collapse.textContent).toBe('');
+ expect(collapse.querySelector('svg')).not.toBeNull();
+ expect(screen.getByRole('group', { name: 'Trigger type' }).closest('.st-row')).not.toBeNull();
+ expect(view.container.querySelectorAll('.st-grp')).toHaveLength(0);
+ expect(screen.queryByText(/Any trigger firing/)).toBeNull();
+});
+
 it('shows the webhook trigger URL built from the automation id and the page origin', () => {
 	renderWebhook('edit', 'auto-1a2b');
 	const url = screen.getByLabelText('Webhook URL') as HTMLInputElement;

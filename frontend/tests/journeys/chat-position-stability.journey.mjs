@@ -136,7 +136,7 @@ async function openClaude(ctx, { history = false } = {}) {
 	} else {
 		await gotoApp(page, status, prefix(variant));
 		await waitChat(page, { surface: 'new', loading: 'false' });
-		const hero = page.getByRole('region', { name: 'New session' });
+		const hero = page.getByRole('region', { name: 'New chat' });
 		const menu = page.getByRole('menu', { name: 'Agent selection' });
 		await pick(hero.getByRole('button', { name: /^Agent:/ }), menu,
 			menu.getByRole('button', { name: 'Dev (Claude Code)', exact: true }),
@@ -181,9 +181,13 @@ async function ensureFast(page, variant) {
 		return;
 	}
 	await page.keyboard.press('Escape');
-	const fast = page.getByRole('button', { name: 'Fast mode', exact: true });
-	await openPopup(page.getByRole('button', { name: /^Effort:/ }).first(), fast);
-	if (await fast.getAttribute('aria-pressed') !== 'true') await fast.click();
+	// Fast lives in the effort popover at desktop width and in Chat controls
+	// (as a switch) at phone width.
+	const fast = page.getByRole('button', { name: 'Fast mode', exact: true })
+		.or(page.getByRole('switch', { name: 'Fast mode', exact: true }));
+	await openPopup(page.getByRole('button', { name: /^(Effort:|All chat controls)/ }).first(), fast);
+	const on = (await fast.getAttribute('aria-pressed')) ?? (await fast.getAttribute('aria-checked'));
+	if (on !== 'true') await fast.click();
 	await page.keyboard.press('Escape');
 	await page.waitForTimeout(400);
 }
@@ -406,7 +410,7 @@ const cases = [{
 	async setup(ctx) {
 		await gotoApp(ctx.page, ctx.status, '/mobile/');
 		await waitChat(ctx.page, { surface: 'new', loading: 'false' });
-		await pickAgent(ctx.page, ctx.page.getByRole('region', { name: 'New session' }));
+		await pickAgent(ctx.page, ctx.page.getByRole('region', { name: 'New chat' }));
 		if (action === 'first-send') await composer(ctx.page).fill('hi');
 		await ctx.page.waitForTimeout(1000);
 	},
@@ -638,8 +642,10 @@ cases.push({
 			// Intended Needs-you/Active sidebar reclassification is tested separately;
 			// this extended flow sidebar-visible remains strict RED (0.120), not a
 			// global desktop pass. Existing desktop neighbors keep their sidebar.
-			await ctx.page.getByRole('button', { name: 'Hide sidebar', exact: true }).click();
-			const show = ctx.page.getByRole('button', { name: 'Show sidebar', exact: true });
+			// The redesign offers Hide sidebar in both the title bar and the Chats
+			// panel; either collapses the same sidebar.
+			await ctx.page.getByRole('button', { name: 'Hide sidebar', exact: true }).filter({ visible: true }).first().click();
+			const show = ctx.page.getByRole('button', { name: 'Show sidebar', exact: true }).filter({ visible: true }).first();
 			await show.waitFor({ state: 'visible' });
 			expect(await show.isVisible(), 'the desktop transcript check really collapsed the sidebar');
 		}

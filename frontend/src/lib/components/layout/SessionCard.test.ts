@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import { platform } from '$lib/stores/platform.svelte';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 
 const mocks = vi.hoisted(() => {
 	function store<T>(initial: T) {
@@ -193,34 +195,17 @@ describe('SessionCard archive and undo', () => {
 		expect(mocks.banner).not.toHaveBeenCalled();
 	});
 
-	it('archives an active desktop session directly and Undo restores Active', async () => {
-		renderCard({ is_active: true });
-		await fireEvent.click(screen.getByTitle('Archive session'));
-		expect(mocks.setSessionArchived).toHaveBeenCalledWith('session-a', true);
-		const [message, opts] = lastBanner();
-		expect(message).toBe('Archived “Sidebar work”');
-		expect(opts).toMatchObject({ persist: false, duration_ms: 6000, action: { label: 'Undo' } });
-		opts.action.onClick();
-		expect(mocks.dismissLive).toHaveBeenCalledWith('banner-1');
-		expect(mocks.setSessionArchived).toHaveBeenLastCalledWith('session-a', false, true);
-	});
-
-	it('archives a settled session and Undo restores it where it was', async () => {
-		renderCard({ is_active: false });
-		await fireEvent.click(screen.getByTitle('Archive session'));
-		expect(mocks.setSessionArchived).toHaveBeenCalledWith('session-a', true);
-		const [message, opts] = lastBanner();
-		expect(message).toBe('Archived “Sidebar work”');
-		opts.action.onClick();
-		expect(mocks.setSessionArchived).toHaveBeenLastCalledWith('session-a', false, false);
-	});
-
-	it('offers only Restore on an archived row, with no Undo banner', async () => {
-		renderCard({ is_active: false, status: 'archived' });
+	it.each([true, false])('has no archive or restore control (active=%s)', (is_active) => {
+		renderCard({ is_active });
 		expect(screen.queryByTitle('Archive session')).toBeNull();
-		expect(screen.queryByTitle('Move to Active')).toBeNull();
-		await fireEvent.click(screen.getByTitle('Restore archived session'));
-		expect(mocks.setSessionArchived).toHaveBeenCalledWith('session-a', false);
+		expect(screen.queryByTitle('Restore archived session')).toBeNull();
+	});
+
+	it('reactivates legacy metadata without Restore or Undo', async () => {
+		renderCard({ is_active: false, status: 'archived' });
+		await fireEvent.click(screen.getByTitle('Move to Active'));
+		expect(mocks.setSessionActive).toHaveBeenCalledWith('session-a', true);
+		expect(mocks.setSessionArchived).not.toHaveBeenCalled();
 		expect(mocks.banner).not.toHaveBeenCalled();
 	});
 
@@ -236,50 +221,50 @@ describe('SessionCard actions', () => {
 		expect(screen.queryByTitle('Delete session')).toBeNull();
 	});
 
-	it('recedes a working row that is not the open session', () => {
-		const { container } = renderCard({ is_active: true }, { status: 'working' });
-
-		expect(container.querySelector('.scard.receded')).toBeTruthy();
+	it('gives only open, running or blocked rows the full foreground title', () => {
+		const idle = renderCard({ is_active: true }, { status: 'done' });
+		expect(idle.container.querySelector('.scard.emphasized')).toBeNull();
+		cleanup();
+		for (const status of ['working', 'parked', 'await', 'failed'] as const) {
+			const row = renderCard({ is_active: true }, { status });
+			expect(row.container.querySelector('.scard.emphasized')).toBeTruthy();
+			cleanup();
+		}
+		const open = renderCard({ is_active: true }, { status: 'done', active: true });
+		expect(open.container.querySelector('.scard.emphasized')).toBeTruthy();
 	});
 
-	it('keeps an awaiting row bright (not receded)', () => {
-		const { container } = renderCard({ is_active: true }, { status: 'await' });
-
-		expect(container.querySelector('.scard.receded')).toBeNull();
-	});
-
-	it('renders a settled row as two compact lines, keeping its action', () => {
+	it('renders a settled row on two quiet lines, keeping its details and action', () => {
 		const { container } = renderCard(
-			{ is_active: false, worktree_branch: 'fix/thing' },
+			{ is_active: false, worktree_branch: 'fix/thing', work_ms: 90_000 },
 			{ compact: true }
 		);
 
 		expect(container.querySelector('.scard.compact')).toBeTruthy();
 		expect(container.querySelector('.title')?.textContent).toContain('Sidebar work');
-		// A settled row drops the status line; its meta reads device icon · git · branch
-		// (the project is the group it already sits under).
-		expect(container.querySelector('.l2')).toBeNull();
-		const meta = container.querySelector('.l3');
-		expect(meta).toBeTruthy();
-		// Device shows as leading icon only — label stays on title/aria for hover + a11y.
-		const deviceSeg = meta?.querySelector('.device-seg');
-		expect(meta?.firstElementChild).toBe(deviceSeg);
-		expect(deviceSeg?.getAttribute('aria-label')).toBe('This device');
-		expect(meta?.textContent).not.toContain('This device');
-		expect(meta?.textContent).toContain('fix/thing');
-		expect(meta?.textContent).not.toContain('Project A');
-		// The working time closes the meta line, not the title line.
-		expect(meta?.lastElementChild?.classList.contains('timer')).toBe(true);
-		expect(container.querySelector('.l1 .timer')).toBeNull();
+		expect(container.querySelector('.l2 .where')?.textContent).toBe('fix/thing');
+		expect(container.querySelector('.l1 .timer')?.textContent).toBe('1m');
+		// The rest of the row's facts stay on hover and for screen readers.
+		const tip = container.querySelector('.body')?.getAttribute('title');
+		expect(tip).toContain('Sidebar work');
+		for (const part of ['This device', 'Project A', 'fix/thing']) {
+			expect(tip).toContain(part);
+			expect(container.querySelector('.details')?.textContent).toContain(part);
+		}
 		expect(screen.getByTitle('Move to Active')).toBeTruthy();
 	});
 
-	it('shows the PR chip on a settled row that has no project id', () => {
+	it('leaves the time off a row with no recorded work', () => {
+		const { container } = renderCard({ is_active: false }, { compact: true, status: 'idle' });
+		expect(container.querySelector('.timer')).toBeNull();
+	});
+
+	it('names the PR on a settled row that has no project id', () => {
 		const { container } = renderCard(
 			{ is_active: false, project_id: null, pr_number: 1839, pr_state: 'merged', pr_url: 'https://github.com/o/r/pull/1839' },
 			{ compact: true }
 		);
-		expect(container.querySelector('.l3')?.textContent).toContain('PR #1839 merged');
+		expect(container.querySelector('.details')?.textContent).toContain('PR #1839 merged');
 	});
 
 	it('settles an active session without opening it', async () => {
@@ -382,12 +367,12 @@ describe('SessionCard actions', () => {
 		// The sidebar resolves each row's last-activity time once when it builds
 		// the list; the card must not parse `updated_at` again on every tick.
 		const { container } = renderCard(
-			{ updated_at: 'not-a-date', is_active: false },
+			{ updated_at: 'not-a-date', is_active: false, work_ms: 90_000 },
 			{ timestamp: Date.parse('2026-08-20T12:03:00Z'), compact: true, status: 'idle' }
 		);
 
 		expect(container.querySelector('.timer')?.getAttribute('title')).toBe(
-			'Total working time · last activity 3m ago'
+			'Total working time 1m 30s · last activity 3m ago'
 		);
 	});
 
@@ -400,20 +385,43 @@ describe('SessionCard actions', () => {
 		);
 
 		const timer = container.querySelector('.timer');
-		expect(timer?.textContent).toBe('12m 34s');
-		expect(timer?.getAttribute('title')).toBe('Total working time · last activity 3h ago');
-		expect(timer?.classList.contains('live')).toBe(false);
+		expect(timer?.textContent).toBe('12m');
+		expect(timer?.getAttribute('title')).toBe('Total working time 12m 34s · last activity 3h ago');
 	});
 
-	it('gives a parked card the plain timer style, not the live accent', () => {
-		const parked = renderCard({ work_ms: 90_000, work_started_at: null }, { status: 'parked' });
-		expect(parked.container.querySelector('.timer')?.classList.contains('live')).toBe(false);
+	// Owner decision 2026-11-05: state belongs to the state column, not the clock.
+	it('draws the time in one neutral tone, whatever the row is doing', () => {
+		for (const status of ['working', 'parked', 'needs_permission', 'failed', 'offline', 'done', 'idle']) {
+			for (const compact of [false, true]) {
+				const { container } = renderCard({ work_ms: 90_000, is_active: !compact }, { status, compact });
+				expect(container.querySelector('.timer')?.className.replace(/\s*svelte-\S+/g, '')).toBe('timer');
+				cleanup();
+			}
+		}
+		const source = readFileSync(resolve(import.meta.dirname, 'SessionCard.svelte'), 'utf8');
+		expect(source.match(/\.timer[^{]*\{[^}]*\}/g)?.join()).not.toMatch(/--primary|--warning|--destructive|--success/);
+		expect(source).not.toMatch(/\.timer\.[a-z]/);
+	});
 
-		const working = renderCard(
-			{ work_ms: 0, work_started_at: '2026-08-20T12:05:00Z' },
-			{ status: 'working' }
-		);
-		expect(working.container.querySelector('.timer')?.classList.contains('live')).toBe(true);
+	it('ticks seconds only while the row is working, with the exact total on hover everywhere', () => {
+		const shown = (status: string) => {
+			const { container } = renderCard({ work_ms: 754_000, work_started_at: null }, { status });
+			const timer = container.querySelector('.timer');
+			const out = [timer?.textContent, timer?.getAttribute('title')];
+			cleanup();
+			return out;
+		};
+		expect(shown('working')).toEqual(['12m 34s', 'Total working time 12m 34s']);
+		for (const status of ['parked', 'needs_permission', 'has_question', 'await', 'failed', 'offline', 'done', 'idle']) {
+			expect(shown(status)).toEqual(['12m', 'Total working time 12m 34s']);
+		}
+	});
+
+	it('keeps an hour-long total short, and its seconds on hover', () => {
+		const { container } = renderCard({ work_ms: 3_969_000, work_started_at: null }, { status: 'done' });
+		const timer = container.querySelector('.timer');
+		expect(timer?.textContent).toBe('1h 06m');
+		expect(timer?.getAttribute('title')).toBe('Total working time 1h 06m 09s');
 	});
 
 	// ── #1619: total working time, not time since the last activity ─────
@@ -421,8 +429,8 @@ describe('SessionCard actions', () => {
 		const { container } = renderCard({ work_ms: 754_000 }, { status: 'done' });
 
 		const timer = container.querySelector('.timer');
-		expect(timer?.textContent).toBe('12m 34s');
-		expect(timer?.getAttribute('title')).toBe('Total working time');
+		expect(timer?.textContent).toBe('12m');
+		expect(timer?.getAttribute('title')).toBe('Total working time 12m 34s');
 	});
 
 	it('adds the running turn to the banked total while it works', () => {
@@ -440,11 +448,11 @@ describe('SessionCard actions', () => {
 			{ work_ms: 90_000, work_started_at: null },
 			{ status: 'parked' }
 		);
-		expect(container.querySelector('.timer')?.textContent).toBe('1m 30s');
+		expect(container.querySelector('.timer')?.textContent).toBe('1m');
 
 		// An hour of idle wall-clock later the parked total has not moved.
 		await rerender({ now: Date.parse('2026-08-20T13:06:00Z') } as never);
-		expect(container.querySelector('.timer')?.textContent).toBe('1m 30s');
+		expect(container.querySelector('.timer')?.textContent).toBe('1m');
 
 		// A wake turn starts: the total resumes from the banked value.
 		await rerender({
@@ -460,11 +468,12 @@ describe('SessionCard actions', () => {
 			{ work_ms: 90_000, work_started_at: '2026-08-20T12:05:00Z' },
 			{ status: 'parked' }
 		);
-		expect(container.querySelector('.timer')?.textContent).toBe('2m 30s');
+		expect(container.querySelector('.timer')?.textContent).toBe('2m');
 
 		// Ten minutes later the background work is still running.
 		await rerender({ now: Date.parse('2026-08-20T12:16:00Z') } as never);
-		expect(container.querySelector('.timer')?.textContent).toBe('12m 30s');
+		expect(container.querySelector('.timer')?.textContent).toBe('12m');
+		expect(container.querySelector('.timer')?.getAttribute('title')).toBe('Total working time 12m 30s');
 	});
 
 	it('closes a stale live interval at the last activity once the turn is done', () => {
@@ -475,7 +484,7 @@ describe('SessionCard actions', () => {
 			{ status: 'done', timestamp: Date.parse('2026-08-20T12:05:00Z'), now: Date.parse('2026-08-20T14:00:00Z') }
 		);
 
-		expect(container.querySelector('.timer')?.textContent).toBe('2m 00s');
+		expect(container.querySelector('.timer')?.textContent).toBe('2m');
 	});
 
 	it('shows the working total on a settled row while its turn runs', () => {
@@ -551,22 +560,19 @@ describe('SessionCard swipe gestures', () => {
 		expect(onOpen).not.toHaveBeenCalled();
 	});
 
-	it.each([true, false])('archives on a long right swipe, then offers Undo (active=%s)', async (is_active) => {
+	it.each([true, false])('right swipe has no lifecycle side effects (active=%s)', async (is_active) => {
 		const clock = slowClock();
 		const { container } = renderCard({ is_active });
 		const { frame, card } = parts(container);
 		await down(card, { x: 20 });
 		await move(frame, { x: 220 });
-		const lane = container.querySelector('.lane.l.on');
-		expect(lane?.textContent).toContain('Archive');
-		expect(lane?.classList.contains('archive')).toBe(true);
 		await up(frame, { x: 220 });
 		clock.mockRestore();
-		expect(card.style.transform).toBe('translateX(320px)');
 		await vi.advanceTimersByTimeAsync(450);
-		expect(mocks.setSessionArchived).toHaveBeenCalledWith('session-a', true);
+		expect(container.querySelector('.lane.l')).toBeNull();
+		expect(mocks.setSessionArchived).not.toHaveBeenCalled();
 		expect(mocks.setSessionActive).not.toHaveBeenCalled();
-		expect(mocks.banner.mock.calls.at(-1)?.[0]).toBe('Archived “Sidebar work”');
+		expect(mocks.banner).not.toHaveBeenCalled();
 	});
 
 	it('moves a settled row back to Active on a left swipe', async () => {
@@ -589,11 +595,11 @@ describe('SessionCard swipe gestures', () => {
 		const { frame, card } = parts(container);
 		await down(card, { x: 300 });
 		await move(frame, { x: 100 });
-		expect(container.querySelector('.lane.r.on')?.textContent).toContain('Restore');
+		expect(container.querySelector('.lane.r.on')?.textContent).toContain('Move to Active');
 		await up(frame, { x: 100 });
 		clock.mockRestore();
 		await vi.advanceTimersByTimeAsync(450);
-		expect(mocks.setSessionArchived).toHaveBeenCalledWith('session-a', false);
+		expect(mocks.setSessionActive).toHaveBeenCalledWith('session-a', true);
 	});
 
 	it('springs a short slow drag back and keeps the next tap working', async () => {
@@ -720,7 +726,7 @@ describe('SessionCard git state', () => {
 		mocks.gitCurrent.diffStats = { additions: 70, deletions: 4 };
 		const { container } = renderCard({ worktree_branch: 'feat/new' }, { active: true });
 		expect(container.querySelector('.diff')).toBeNull();
-		expect(container.querySelector('.lead')?.getAttribute('aria-label')).toBe('No changes');
+		expect(container.querySelector('.lead')?.hasAttribute('title')).toBe(false);
 		expect(mocks.watch).toHaveBeenCalled();
 		expect(mocks.remember).not.toHaveBeenCalled();
 	});
@@ -729,7 +735,7 @@ describe('SessionCard git state', () => {
 		const { container, rerender } = renderCard({}, { openPr: true, status: 'done' });
 		for (const status of ['working', 'parked', 'needs_permission', 'done'] as const) {
 			await rerender({ status });
-			expect(container.querySelector('.l2')?.textContent).toContain('PR open');
+			expect(container.querySelector('.details')?.textContent).toContain('PR open');
 		}
 	});
 
@@ -738,32 +744,38 @@ describe('SessionCard git state', () => {
 		mocks.gitCurrent.projectId = 'project-a';
 		mocks.gitCurrent.status = gitStatus({ has_changes: true });
 		const { container } = renderCard({}, { active: true });
-		expect(container.querySelector('.lead')?.getAttribute('aria-label')).toBe('No changes');
+		expect(container.querySelector('.lead')?.hasAttribute('title')).toBe(false);
+	});
+
+	it('claims nothing about a settled row whose checkout was never read', () => {
+		const { container } = renderCard({ is_active: false, worktree_branch: 'feat/left-dirty' });
+		expect(container.querySelector('.lead')?.hasAttribute('title')).toBe(false);
+		expect(container.querySelector('.details')?.textContent).toContain('feat/left-dirty');
 	});
 
 	it('leads a merged session with the purple merge glyph', () => {
 		const { container } = renderCard({ pr_state: 'merged', pr_number: 1071 });
 
 		const lead = container.querySelector('.lead');
-		expect(lead?.getAttribute('aria-label')).toBe('Pull request merged');
+		expect(lead?.getAttribute('title')).toBe('Pull request merged');
 		expect(lead?.classList.contains('purple')).toBe(true);
-		expect(container.querySelector('.l2')?.textContent).toContain('PR #1071 merged');
+		expect(container.querySelector('.details')?.textContent).toContain('PR #1071 merged');
 	});
 
 	it('leads an open PR with the green pull-request glyph', () => {
 		const { container } = renderCard({ pr_state: 'open', pr_number: 42 }, { status: 'pr' });
 
 		const lead = container.querySelector('.lead');
-		expect(lead?.getAttribute('aria-label')).toBe('Pull request open');
+		expect(lead?.getAttribute('title')).toBe('Pull request open');
 		expect(lead?.classList.contains('green')).toBe(true);
-		expect(container.querySelector('.l2')?.textContent).toContain('PR #42 open');
+		expect(container.querySelector('.details')?.textContent).toContain('PR #42 open');
 	});
 
 	it('leads a chat session with the chat glyph and no branch talk', () => {
 		const { container } = renderCard({ project_id: null });
 
-		expect(container.querySelector('.lead')?.getAttribute('aria-label')).toBe('Chat session');
-		expect(container.querySelector('.l2')?.textContent).not.toContain('PR');
+		expect(container.querySelector('.lead')?.getAttribute('title')).toBe('Chat session');
+		expect(container.querySelector('.details')?.textContent).not.toContain('PR');
 	});
 
 	it('shows the amber diff glyph and the diffstat for an uncommitted tree', () => {
@@ -776,7 +788,7 @@ describe('SessionCard git state', () => {
 		const { container } = renderCard({ worktree_branch: 'feat/x' });
 
 		const lead = container.querySelector('.lead');
-		expect(lead?.getAttribute('aria-label')).toBe('Uncommitted changes');
+		expect(lead?.getAttribute('title')).toBe('Uncommitted changes');
 		expect(lead?.classList.contains('amber')).toBe(true);
 		expect(container.querySelector('.diff')?.textContent).toBe('+124 −38');
 	});
@@ -795,11 +807,10 @@ describe('SessionCard git state', () => {
 		});
 
 		const lead = container.querySelector('.lead');
-		expect(lead?.getAttribute('aria-label')).toBe('Uncommitted changes');
+		expect(lead?.getAttribute('title')).toBe('Uncommitted changes');
 		expect(lead?.classList.contains('amber')).toBe(true);
-		expect(container.querySelector('.l2')?.textContent).toContain('PR #1071 merged');
+		expect(container.querySelector('.details')?.textContent).toContain('PR #1071 merged');
 		expect(container.querySelector('.diff')?.textContent).toBe('+12 −3');
-		expect(container.querySelector('.l2 .st.purple')?.textContent).toBe('PR #1071 merged');
 	});
 
 	it('leads a pushed session branch with the upload glyph', () => {
@@ -812,7 +823,7 @@ describe('SessionCard git state', () => {
 
 		const { container } = renderCard({ worktree_branch: 'feat/x' });
 
-		expect(container.querySelector('.lead')?.getAttribute('aria-label')).toBe('Pushed, no PR yet');
+		expect(container.querySelector('.lead')?.getAttribute('title')).toBe('Pushed, no PR yet');
 		// No uncommitted work, so no diffstat to answer for.
 		expect(container.querySelector('.diff')).toBeNull();
 	});
@@ -827,13 +838,13 @@ describe('SessionCard git state', () => {
 
 		const { container } = renderCard({ worktree_branch: 'feat/x' });
 
-		expect(container.querySelector('.lead')?.getAttribute('aria-label')).toBe('No changes');
-		expect(container.querySelector('.lead')?.getAttribute('aria-label')).not.toBe(
+		expect(container.querySelector('.lead')?.getAttribute('title')).toBe('No changes');
+		expect(container.querySelector('.lead')?.getAttribute('title')).not.toBe(
 			'Pushed, no PR yet'
 		);
 	});
 
-	it('lays an active card out as title, status line with project, then device meta', () => {
+	it('gives a running row a status line and keeps the time on the title line', () => {
 		const { container } = renderCard(
 			{ is_active: true, worktree_branch: 'feat/x' },
 			{ status: 'working', projectLabel: 'Project A' }
@@ -841,84 +852,220 @@ describe('SessionCard git state', () => {
 
 		expect(container.querySelector('.title')?.textContent).toContain('Sidebar work');
 		const statusLine = container.querySelector('.l2');
-		// Runtime status leads the middle row; the project moved to the meta line.
-		expect(statusLine?.firstElementChild?.textContent).toBe('Working');
-		expect(statusLine?.querySelector('.proj')).toBeNull();
-		expect(statusLine?.querySelector('.st')?.textContent).toBe('Working');
-		expect(statusLine?.querySelector('.st')?.classList.contains('accent')).toBe(true);
-		// The working time closes the status line; the title keeps the top row.
-		expect(statusLine?.lastElementChild?.classList.contains('timer')).toBe(true);
-		expect(container.querySelector('.l1 .timer')).toBeNull();
-		const meta = container.querySelector('.l3');
-		expect(meta?.querySelector('.timer')).toBeNull();
-		const deviceSeg = meta?.querySelector('.device-seg');
-		// Device icon leads the bottom meta line (same position as settled rows).
-		expect(meta?.firstElementChild).toBe(deviceSeg);
-		expect(deviceSeg?.getAttribute('aria-label')).toBe('This device');
-		expect(meta?.textContent).not.toContain('This device');
-		// Device, then project, then branch.
-		const metaText = meta?.textContent ?? '';
-		expect(meta?.querySelector('.proj')?.textContent).toBe('Project A');
-		expect(metaText.indexOf('Project A')).toBeLessThan(metaText.indexOf('feat/x'));
+		expect(statusLine?.textContent?.trim()).toBe('feat/x');
+		expect(statusLine?.querySelector('.timer')).toBeNull();
+		expect(container.querySelector('.l1 .timer')).toBeTruthy();
 	});
 
-	it.each([true, false])('adds three decorative dots beside Working (selected: %s)', (active) => {
-		const { container } = renderCard({ is_active: true }, { status: 'working', active });
-		const status = container.querySelector('.l2 .st');
-		const dots = status?.querySelector('.working-dots');
-
-		expect(status?.textContent).toBe('Working');
-		expect(dots?.getAttribute('aria-hidden')).toBe('true');
-		expect(dots?.querySelectorAll('span')).toHaveLength(3);
-	});
-
-	it.each(['needs_permission', 'has_question', 'await', 'pr', 'pr_merged', 'done', 'idle'])(
-		'does not show working dots for %s sessions',
-		(status) => {
-			const { container } = renderCard({ is_active: true }, { status });
-			expect(container.querySelector('.working-dots')).toBeNull();
+	// Owner decision 2026-11-05: the state column says the state, without words.
+	it.each([
+		['working', 'Working'],
+		['parked', 'Parked'],
+		['needs_permission', 'Needs permission'],
+		['has_question', 'Has question'],
+		['await', 'Awaiting input'],
+		['failed', 'Failed'],
+		['offline', 'Offline'],
+		['pr', 'Done'],
+		['pr_merged', 'Done'],
+		['done', 'Done'],
+		['idle', 'Idle'],
+	])('prints no status word on a %s row, in either lane', (status, word) => {
+		for (const compact of [false, true]) {
+			const { container } = renderCard(
+				{ is_active: !compact, worktree_branch: 'feat/x' },
+				{ status, compact },
+			);
+			expect(container.querySelector('.l2 .where')?.textContent).toBe('feat/x');
+			expect(container.querySelector('.l2 .st:not(.pr)')).toBeNull();
+			expect(container.querySelector('.l2')?.textContent).not.toContain(word);
+			cleanup();
 		}
-	);
-
-	it('removes the working dots when the session finishes', async () => {
-		const { container, rerender } = renderCard({ is_active: true }, { status: 'working' });
-		expect(container.querySelector('.working-dots')).toBeTruthy();
-
-		await rerender({ status: 'done' });
-
-		expect(container.querySelector('.working-dots')).toBeNull();
-		expect(container.querySelector('.l2 .st')?.textContent).toBe('Done');
 	});
 
-	it('names the pip/warning state for screen readers on compact rows, where no status word shows', () => {
-		const working = renderCard({ is_active: true }, { status: 'working', compact: true });
-		expect(working.container.querySelector('.title .sr-only')?.textContent).toBe('Working: ');
-		cleanup();
-
-		const parked = renderCard({ is_active: true }, { status: 'needs_permission', compact: true });
-		expect(parked.container.querySelector('.title .sr-only')?.textContent).toBe('Needs permission: ');
-		cleanup();
-
-		// Full rows already print the status word on line two.
-		const full = renderCard({ is_active: true }, { status: 'working' });
-		expect(full.container.querySelector('.title .sr-only')).toBeNull();
+	it('says the state once for screen readers: the mark is hidden, the details line speaks', () => {
+		for (const [status, word, compact] of [
+			['working', 'Working', true],
+			['needs_permission', 'Needs permission', true],
+			['working', 'Working', false],
+			['failed', 'Failed', false],
+		] as const) {
+			const { container } = renderCard({ is_active: !compact, title: 'Plain title' }, { status, compact });
+			const details = container.querySelector('.details')?.textContent ?? '';
+			expect(details.split(' · ')[0]).toBe(word);
+			expect(details.split(word)).toHaveLength(2);
+			const lead = container.querySelector('.lead');
+			expect(lead?.getAttribute('aria-hidden')).toBe('true');
+			expect(lead?.getAttribute('title')).toBe(word);
+			for (const printed of container.querySelectorAll('.l2 .st, .l2 .where, .l2 .diff')) {
+				expect(printed.getAttribute('aria-hidden')).toBe('true');
+			}
+			// A title on the button would be read out again as its description.
+			expect(container.querySelector('.scard')?.hasAttribute('title')).toBe(false);
+			expect(container.querySelector('.body')?.getAttribute('title')).toContain(word);
+			cleanup();
+		}
 	});
 
-	it('keeps compact cards free of the working status and dots', () => {
-		const { container } = renderCard({}, { status: 'working', compact: true });
-		expect(container.querySelector('.l2')).toBeNull();
-		expect(container.querySelector('.working-dots')).toBeNull();
+	it('gives each runtime state its own mark and its word as the hover title', () => {
+		const mark = (status: string, compacting = false) => {
+			const { container } = renderCard({ is_active: true }, { status, compacting });
+			const lead = container.querySelector('.lead')!;
+			const out = {
+				word: lead.getAttribute('title'),
+				glyph: lead.querySelector('svg') !== null,
+				classes: [...(lead.querySelector('.pip')?.classList ?? [])].filter((c) => !c.startsWith('svelte-')).join(' '),
+			};
+			cleanup();
+			return out;
+		};
+		expect(mark('working')).toEqual({ word: 'Working', glyph: false, classes: 'pip' });
+		expect(mark('working', true)).toEqual({ word: 'Compacting', glyph: false, classes: 'pip compacting' });
+		expect(mark('parked')).toEqual({ word: 'Parked', glyph: false, classes: 'pip held' });
+		expect(mark('needs_permission')).toEqual({ word: 'Needs permission', glyph: false, classes: 'pip warn' });
+		expect(mark('has_question')).toEqual({ word: 'Has question', glyph: false, classes: 'pip warn' });
+		expect(mark('failed')).toEqual({ word: 'Failed', glyph: false, classes: 'pip warn failed' });
+		expect(mark('offline')).toEqual({ word: 'Offline', glyph: true, classes: '' });
+	});
+
+	it('only says Compacting while the row is actually working', () => {
+		const { container } = renderCard({ is_active: true }, { status: 'idle', compacting: true });
+		expect(container.querySelector('.pip')).toBeNull();
+		expect(container.querySelector('.details')?.textContent).not.toContain('Compacting');
+	});
+
+	it('keeps the marks apart by shape, not hue alone, with motion off too', () => {
+		const source = readFileSync(resolve(import.meta.dirname, 'SessionCard.svelte'), 'utf8');
+		const rule = (selector: string) => source.match(new RegExp(`${selector.replace(/\./g, '\\.')} \\{[^}]*\\}`))?.[0] ?? '';
+		expect(rule('.pip')).toMatch(/border-radius: 50%/);
+		expect(rule('.pip.compacting')).toMatch(/width: 12px[^}]*height: 5px/);
+		expect(rule('.pip.held')).toMatch(/background: transparent/);
+		expect(rule('.pip.warn')).toMatch(/rotate\(45deg\)/);
+		expect(rule('.pip.warn.failed')).toMatch(/clip-path: polygon/);
+		// Compacting moves at half working's pace.
+		expect(rule('.pip')).toMatch(/card-ping 1\.8s/);
+		expect(rule('.pip.compacting')).toMatch(/card-squeeze 3\.6s/);
+		// Motion off stops every mark. `.pip` alone would not beat `.pip.compacting`.
+		expect(source).toMatch(/prefers-reduced-motion: reduce\) \{\s*\.pip,\s*\.pip\.compacting,\s*\.pip\.warn \{ animation: none; \}/);
+	});
+
+	it('never lets a pulse fade a mark below what it needs to stay readable', () => {
+		const source = readFileSync(resolve(import.meta.dirname, 'SessionCard.svelte'), 'utf8');
+		const frames = (name: string) => source.match(new RegExp(`@keyframes ${name} \\{[\\s\\S]*?\\n\\t\\}`))?.[0] ?? '';
+		// 0.8 is the floor where the working colour still holds 3:1 on the light panel.
+		for (const name of ['card-ping', 'card-squeeze']) {
+			const opacities = [...frames(name).matchAll(/opacity: ([\d.]+)/g)].map((m) => Number(m[1]));
+			expect(opacities.length).toBeGreaterThan(0);
+			expect(Math.min(...opacities)).toBeGreaterThanOrEqual(0.8);
+		}
+		// Amber has no headroom on the light panel, so the diamond never fades at all,
+		// and it stays a diamond while it pulses.
+		expect(frames('card-pulse')).not.toMatch(/opacity/);
+		expect(frames('card-pulse')).toMatch(/rotate\(45deg\) scale\(0\.82\)/);
+	});
+
+	it('keeps the row on two lines in every status, so starting or stopping work cannot move it', () => {
+		const statuses = ['working', 'parked', 'needs_permission', 'needs_input', 'failed', 'offline', 'idle', 'done', 'pr', 'pr_merged'];
+		for (const compact of [false, true]) {
+			for (const status of statuses) {
+				const { container } = renderCard({ is_active: !compact }, { status, compact });
+				expect(container.querySelectorAll('.body > .l1')).toHaveLength(1);
+				expect(container.querySelectorAll('.body > .l2')).toHaveLength(1);
+				cleanup();
+			}
+		}
+		// Both lines take their height from the row, not from what they hold.
+		const source = readFileSync(resolve(import.meta.dirname, 'SessionCard.svelte'), 'utf8');
+		expect(source).toMatch(/\.l1 \{[^}]*height: var\(--line-1\)/);
+		expect(source).toMatch(/\.l2 \{[^}]*height: var\(--line-2\)/);
+	});
+
+	it('keeps the PR state and diffstat in view while the row works', () => {
+		mocks.getSessionGit.mockReturnValue({
+			status: gitStatus({ has_changes: true }),
+			diffStats: { additions: 12, deletions: 3, files_changed: 4 },
+			loaded: true,
+		});
+		const { container } = renderCard(
+			{ is_active: true, pr_state: 'open', pr_number: 142, worktree_branch: 'feat/rows' },
+			{ status: 'working' },
+		);
+		expect(container.querySelector('.lead .pip')).toBeTruthy();
+		const pr = container.querySelector('.l2 .st.pr');
+		expect(pr?.textContent).toBe('PR #142 open');
+		expect(pr?.classList.contains('green')).toBe(true);
+		expect(container.querySelector('.l2 .diff')?.textContent).toBe('+12 −3');
+		expect(container.querySelector('.l2 .where')?.textContent).toBe('feat/rows');
+	});
+
+	it('prints no status word on a settled row, working or not, but keeps its PR', () => {
+		for (const status of ['working', 'needs_permission', 'failed', 'done', 'idle']) {
+			const { container } = renderCard(
+				{ is_active: false, pr_state: 'merged', pr_number: 7 },
+				{ status, compact: true },
+			);
+			expect(container.querySelector('.l2')?.textContent?.trim()).toBe('PR #7 merged');
+			expect(container.querySelector('.l2 .st.pr.purple')?.textContent).toBe('PR #7 merged');
+			cleanup();
+		}
+	});
+
+	it('never leaves line two blank: a row with no facts shows its age', () => {
+		const { container } = renderCard(
+			{ is_active: false, worktree_branch: null, branch: null, pr_state: null, pr_number: null, pull_requests: [] },
+			{ compact: true, status: 'idle' },
+		);
+		expect(container.querySelector('.l2 .where')?.textContent).toMatch(/ago$|^Just now$/);
+	});
+
+	it('falls back to the same age on a working row with no facts, never a status word', () => {
+		const bare = { worktree_branch: null, branch: null, pr_state: null, pr_number: null, pull_requests: [] };
+		for (const status of ['working', 'parked', 'needs_permission', 'failed']) {
+			const { container } = renderCard({ ...bare, is_active: true }, { status });
+			expect(container.querySelector('.l2 .where')?.textContent).toMatch(/ago$|^Just now$/);
+			cleanup();
+		}
+		const remote = renderCard(
+			{ ...bare, is_active: true, is_remote: true, device_name: 'Worker B' },
+			{ status: 'working' },
+		);
+		expect(remote.container.querySelector('.l2 .where')?.textContent).toMatch(/^Worker B · (.* ago|Just now)$/);
+	});
+
+	it('names the project only when the row is not under a project header', () => {
+		const under = renderCard({ is_active: true, worktree_branch: 'feat/a' }, { status: 'idle' });
+		expect(under.container.querySelector('.l2 .where')?.textContent).toBe('feat/a');
+		cleanup();
+		const flat = renderCard({ is_active: true, worktree_branch: 'feat/a' }, { status: 'idle', showProject: true });
+		expect(flat.container.querySelector('.l2 .where')?.textContent).toBe('Project A · feat/a');
+	});
+
+	it('marks another worker with an icon, its name on hover and in the details', () => {
+		const { container } = renderCard(
+			{ is_active: true, is_remote: true, device_name: 'Worker B', worktree_branch: 'feat/a' },
+			{ status: 'idle' },
+		);
+		expect(container.querySelector('.l2 .worker')?.getAttribute('title')).toBe('On Worker B');
+		expect(container.querySelector('.details')?.textContent).toContain('Worker B');
+		expect(container.querySelector('.l2 .where')?.textContent).toBe('feat/a');
 	});
 
 	it('marks a working row with the live pip and a parked row with the warning', () => {
 		const working = renderCard({ is_active: true }, { status: 'working' });
-		expect(working.container.querySelector('.title .pip')).toBeTruthy();
+		expect(working.container.querySelector('.lead .pip')).toBeTruthy();
 		cleanup();
 
 		const parked = renderCard({ is_active: true }, { status: 'needs_permission' });
-		expect(parked.container.querySelector('.title .pip')).toBeNull();
-		expect(parked.container.querySelector('.title .warn')).toBeTruthy();
-		expect(parked.container.querySelector('.l2 .st')?.textContent).toBe('Needs permission');
+		expect(parked.container.querySelector('.lead .pip.warn')).toBeTruthy();
+		expect(parked.container.querySelector('.lead .pip.warn.failed')).toBeNull();
+		expect(parked.container.querySelector('.lead')?.getAttribute('title')).toBe('Needs permission');
+	});
+
+	it('draws nothing on an idle row but keeps its gutter', () => {
+		const idle = renderCard({ is_active: true }, { status: 'idle' });
+		const lead = idle.container.querySelector('.lead')!;
+		expect(lead).toBeTruthy();
+		expect(lead.children).toHaveLength(0);
 	});
 
 	it('leases one poll per active card', () => {
@@ -943,7 +1090,7 @@ describe('SessionCard git state', () => {
 
 		expect(mocks.watch).not.toHaveBeenCalled();
 		expect(container.querySelector('.diff')?.textContent).toBe('+7 −1');
-		expect(container.querySelector('.lead')?.getAttribute('aria-label')).toBe('Uncommitted changes');
+		expect(container.querySelector('.lead')?.getAttribute('title')).toBe('Uncommitted changes');
 	});
 });
 
@@ -958,7 +1105,7 @@ describe('SessionCard several pull requests', () => {
 
 	it('keeps one PR exactly as before, with no list control', () => {
 		const { container } = renderCard({ pr_state: 'open', pr_number: 42, pull_requests: [pr(42, 'open')] }, { status: 'pr' });
-		expect(container.querySelector('.l2 .st.pr')?.textContent).toBe('PR #42 open');
+		expect(container.querySelector('.details')?.textContent).toContain('PR #42 open');
 		expect(container.querySelector('.pr-chip.multi')).toBeNull();
 		expect(screen.queryByRole('button', { name: /Pull requests/ })).toBeNull();
 	});
@@ -1090,7 +1237,7 @@ describe('SessionCard several pull requests', () => {
 			{ is_active: false, pull_requests: [pr(1, 'merged'), pr(2, 'open')], pr_state: 'open', pr_number: 2 },
 			{ compact: true },
 		);
-		expect(container.querySelector('.l3 .pr-chip.multi')?.textContent).toBe('1 PR open · 1 merged');
+		expect(container.querySelector('.l2 .pr-chip.multi')?.textContent).toBe('1 PR open · 1 merged');
 	});
 });
 

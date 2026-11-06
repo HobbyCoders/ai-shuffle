@@ -521,9 +521,13 @@ const offCatalogIdentity = async ({ page, variant }) => {
 // answer last — project chats popped in above the loose chats about a second
 // later and pushed every card down (layout shift 0.13 from div.scard-frame).
 // Holding the catalog until the cards have painted makes that ordering
-// deterministic on the seeded list.
-const cardTitles = (page) =>
-	page.evaluate(() => [...document.querySelectorAll('.scard-frame')].map((el) => (el.textContent || '').replace(/\s+/g, ' ').trim()));
+// deterministic on the seeded list. Which card sits where is the contract: a
+// card's second line may still gain its Git word, or tick its age, in place.
+const cardPlacement = (page) =>
+	page.evaluate(() => [...document.querySelectorAll('.scard-frame')].map((el) => {
+		const { top, height } = el.getBoundingClientRect();
+		return `${(el.querySelector('.title')?.textContent || '').trim()} @${Math.round(top)}+${Math.round(height)}`;
+	}));
 
 const deepLinkLateCatalog = async ({ page, status, mark }) => {
 	// Wrap fetch rather than page.route: the app's service worker serves its
@@ -546,14 +550,14 @@ const deepLinkLateCatalog = async ({ page, status, mark }) => {
 	await page.goto(new URL(`/?session=${encodeURIComponent(seededChatId(status, 'no_project'))}`, status.urls.ui).toString());
 	await page.locator('.scard-frame').first().waitFor();
 	await page.waitForTimeout(300);
-	const firstPaint = await cardTitles(page);
+	const firstPaint = await cardPlacement(page);
 	await page.evaluate(() => window.__releaseCatalog());
 	await page.waitForTimeout(2500);
 	expect(await page.evaluate(() => window.__catalogAnswered), 'the held project catalog answered');
-	const settled = await cardTitles(page);
+	const settled = await cardPlacement(page);
 	expect(
 		JSON.stringify(settled) === JSON.stringify(firstPaint),
-		`sidebar cards changed after the catalog answered:\n  first paint: ${firstPaint.slice(0, 6).join(' | ')}\n  settled:     ${settled.slice(0, 6).join(' | ')}`
+		`sidebar cards moved after the catalog answered:\n  first paint: ${firstPaint.slice(0, 6).join(' | ')}\n  settled:     ${settled.slice(0, 6).join(' | ')}`
 	);
 };
 
@@ -710,19 +714,11 @@ await runJourney({
 				await holdIncomingHistory(page, seededChatId(status, 'other_project'), 1500);
 				await gotoApp(page, status, mobileShell && variant.viewport === 'phone' ? '/mobile/' : '/');
 				await waitChat(page, { surface: 'new' });
-				const hero = page.getByRole('region', { name: 'New session' });
+				const hero = page.getByRole('region', { name: 'New chat' });
 				await hero.waitFor();
 				await pickAgent(page, hero);
 				await pickProject(page, hero, PROJECT);
-				if (mobileShell && variant.viewport === 'phone') {
-					// The production phone shell has a quick access picker, not the
-					// desktop Permission mode menu used by pickAccess.
-					await page.getByRole('button', { name: /^Tool access:/ }).click();
-					await page.getByRole('radiogroup', { name: 'Tool access', exact: true })
-						.getByRole('radio', { name: 'Bypass', exact: true }).click();
-					await page.getByRole('button', { name: 'Tool access: Bypass', exact: true }).waitFor();
-					await page.keyboard.press('Escape');
-				} else await pickAccess(page, 'Bypass');
+				await pickAccess(page, 'Bypass');
 				// Produce a scrollable history through the real provider pipeline,
 				// then a real standalone shell task; never seed activeTasks by hand.
 				await typeAndSend(page, `task-retention-${uniq()} ${scriptTag(variant, 'long', { tps: 0, latency_ms: 0 })}`);
@@ -830,7 +826,7 @@ await runJourney({
 					incoming.click();
 					await frame();
 					// Reopen/paint the real drawer while B's native headers are in flight.
-					const menu = document.querySelector('button[aria-label^="Open menu"], button[aria-label="Show sidebar"]');
+					const menu = document.querySelector('button[aria-label^="Open menu"], button[aria-label^="Chats"], button[aria-label="Show sidebar"]');
 					if (menu) { menu.click(); await frame(); }
 					while (window.__switchHydrationHold.started === null) {
 						if (performance.now() - first >= 15_000) {

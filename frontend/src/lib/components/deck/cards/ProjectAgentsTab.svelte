@@ -1,15 +1,6 @@
 <script lang="ts">
 	import { watchResources } from '$lib/services/watch-resources';
-	/**
-	 * ProjectAgentsTab - Agent list tab for project detail view
-	 *
-	 * Studio-v2 grouped-field design (.set-group / .set-row), mirroring the
-	 * Profile editor. Field primitives come from project-tabs.css (.ptab).
-	 *
-	 * - View agents in .fluid/agents/
-	 * - Delete agents (inline confirm)
-	 * - Search/filter
-	 */
+	/** Project-local agents in Settings rows. */
 	import {
 		projectAgents,
 		allProjectAgents,
@@ -19,7 +10,7 @@
 	} from '$lib/stores/projectAgents.svelte';
 	import { Search, Bot, Trash2 } from 'lucide-svelte';
 	import { getModelLabel } from '$lib/constants/models';
-	import Banner from '$lib/components/Banner.svelte';
+	import { RowGroup, SettingRow, PanelSearch, EmptyDetail, InlineBanner } from '$lib/components/layout/view';
 	import RowActionMenu from '$lib/components/ui/RowActionMenu.svelte';
 	import './project-tabs.css';
 
@@ -95,82 +86,30 @@
 	}
 	watchResources(["agents", "projects"], () => projectId ? projectAgents.loadAgents(projectId) : undefined);
 </script>
-
 <svelte:window onclick={onWindowClick} onkeydown={onWindowKeydown} />
-
-<div class="ptab">
-	{#if $projectAgentsLoading}
-		<div class="ptab-loading"><div class="ptab-spinner"></div></div>
+{#if $projectAgentsLoading}
+	<p class="project-muted" role="status">Loading agents…</p>
+{:else}
+	{#if $projectAgentCount > 3}<PanelSearch bind:value={searchQuery} label="Search agents" placeholder="Search agents" />{/if}
+	{#if $projectAgentsError}<InlineBanner>{$projectAgentsError}{#snippet actions()}<button class="st-btn sm" onclick={() => projectAgents.clearError()}>Dismiss</button>{/snippet}</InlineBanner>{/if}
+	{#if filteredAgents().length === 0}
+		<EmptyDetail title={searchQuery ? `No agents match "${searchQuery}"` : 'No agents defined'} message="Create agents from the Subagents card to add specialized capabilities.">
+			{#if searchQuery}<button class="st-btn" onclick={() => (searchQuery = '')}>Clear search</button>{/if}
+		</EmptyDetail>
 	{:else}
-		<!-- Search (show if > 3 agents) -->
-		{#if $projectAgentCount > 3}
-			<div class="tsearch">
-				<Search />
-				<input type="text" bind:value={searchQuery} placeholder="Search agents…" class="inp" />
-			</div>
-		{/if}
-
-		{#if $projectAgentsError}
-			<Banner severity="error" message={$projectAgentsError} dismissible onDismiss={() => projectAgents.clearError()} />
-		{/if}
-
-		{#if filteredAgents().length === 0}
-			<div class="empty-state">
-				{#if searchQuery}
-					<Search />
-					<p class="es-title">No agents match "{searchQuery}"</p>
-					<button class="ed-btn sm es-action" onclick={() => (searchQuery = '')}>Clear search</button>
-				{:else}
-					<Bot />
-					<p class="es-title">No agents defined</p>
-					<p class="es-desc">Create agents from the Subagents card to add specialized capabilities.</p>
-				{/if}
-			</div>
-		{:else}
-			<div class="set-group">
-				<div class="set-grouphead">
-					<h3><Bot />Agents</h3>
-					<p>Custom sub-agents available to this project, from <code>.fluid/agents/</code>.</p>
-				</div>
-				{#each filteredAgents() as agent (agent.name)}
+		<RowGroup title="Agents" count={filteredAgents().length}>
+			{#each filteredAgents() as agent (agent.name)}
+				<SettingRow wrapHint={deletingAgent === agent.name} label={deletingAgent === agent.name ? `Delete “${agent.name}”?` : agent.name} hint={deletingAgent === agent.name ? 'This removes the agent file. This cannot be undone.' : `${getModelDisplay(agent.model)} · ${agent.tools?.length ? `${agent.tools.length} tools` : 'All tools'}`}>
 					{#if deletingAgent === agent.name}
-						<div class="set-row stack">
-							<div class="lab">
-								<h4 class="danger">Delete “{agent.name}”?</h4>
-								<p>This removes the agent file. This cannot be undone.</p>
-							</div>
-							<div class="ctl">
-								<button class="ed-btn sm" onclick={(e) => { e.stopPropagation(); deletingAgent = null; }} disabled={deleteLoading}>Cancel</button>
-								<button class="ed-btn sm danger" onclick={(e) => { e.stopPropagation(); handleDelete(agent.name); }} disabled={deleteLoading}>
-									{deleteLoading ? 'Deleting…' : 'Delete'}
-								</button>
-							</div>
-						</div>
+						<button class="st-btn" onclick={(e) => { e.stopPropagation(); deletingAgent = null; }} disabled={deleteLoading}>Cancel</button>
+						<button class="st-btn danger" onclick={(e) => { e.stopPropagation(); handleDelete(agent.name); }} disabled={deleteLoading}>{deleteLoading ? 'Deleting…' : 'Delete'}</button>
 					{:else}
-						<div class="set-row">
-							<div class="lab">
-								<h4>{agent.name} <span class="badge muted">{getModelDisplay(agent.model)}</span></h4>
-								{#if agent.tools && agent.tools.length > 0}
-									<p>{agent.tools.length} tool{agent.tools.length === 1 ? '' : 's'}</p>
-								{:else}
-									<p>All tools</p>
-								{/if}
-							</div>
-							<div class="ctl">
-								<RowActionMenu
-									open={actionsOpenName === agent.name}
-									onToggle={(e) => toggleRowActions(e, agent.name)}
-									label="Agent actions"
-								>
-									<button class="icon-btn danger" title="Delete agent" onclick={(e) => { e.stopPropagation(); actionsOpenName = null; deletingAgent = agent.name; }}>
-										<Trash2 size={15} />
-									</button>
-								</RowActionMenu>
-							</div>
-						</div>
+						<RowActionMenu open={actionsOpenName === agent.name} onToggle={(e) => toggleRowActions(e, agent.name)} label="Agent actions">
+							<button class="st-btn icon danger" title="Delete agent" aria-label="Delete agent" onclick={(e) => { e.stopPropagation(); actionsOpenName = null; deletingAgent = agent.name; }}><Trash2 /></button>
+						</RowActionMenu>
 					{/if}
-				{/each}
-			</div>
-		{/if}
+				</SettingRow>
+			{/each}
+		</RowGroup>
 	{/if}
-</div>
+{/if}

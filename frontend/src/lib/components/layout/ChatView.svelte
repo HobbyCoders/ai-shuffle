@@ -32,8 +32,6 @@
 	import MirrorSyncGate from '$lib/components/chat/MirrorSyncGate.svelte';
 	import { createMirrorSync, mirrorSyncHeadline } from '$lib/components/chat/mirror-sync.svelte';
 	import ChatInput from '$lib/components/chat/ChatInput.svelte';
-	import ArchivedChatBar from '$lib/components/chat/ArchivedChatBar.svelte';
-	import { archivedChats } from '$lib/stores/archived-chats';
 	import PermissionQueue from '$lib/components/PermissionQueue.svelte';
 	import QuestionTray from '$lib/components/chat/QuestionTray.svelte';
 	import PrivateAccessPrompt from '$lib/components/chat/PrivateAccessPrompt.svelte';
@@ -257,11 +255,6 @@
 
 	// Keep the editor mounted through call transitions so drafts and file chips survive.
 	const showComposer = true;
-	// An archived chat is a read-only transcript until restored (#1822): the
-	// composer slot shows export and restore instead of the editor.
-	const archivedSessionId = $derived(
-		$activeSession.sessionId && $archivedChats.has($activeSession.sessionId) ? $activeSession.sessionId : null
-	);
 	// What the flight recorder reads off this view each frame (ui-signature.ts).
 	// Derived from the same inputs as chatSurface; nothing reads them back.
 	// The surface and message count are what is on screen: a mirrored chat's
@@ -269,7 +262,7 @@
 	// and 0 until then.
 	const uiSignature = $derived({
 		session: uiSessionTag($activeSession.sessionId),
-		composer: uiComposer({ archived: Boolean(archivedSessionId), emptyHero: showEmptyHero, mobile: platform.isMobile }),
+		composer: uiComposer({ archived: false, emptyHero: showEmptyHero, mobile: platform.isMobile }),
 		messages: mirrorSync.waiting ? '0' : String($activeSession.messages.length + ($activeSession.pendingPeerMessages?.length ?? 0)),
 		loading: uiFlag(
 			$activeSession.isLoadingSession || $activeSession.isRestoringSession || historyUnconfirmed
@@ -523,8 +516,7 @@
 						</p>
 					</div>
 				{:else}
-					<!-- New session: the agent leads, then one sentence saying
-					     where it runs. Each part of it opens its menu. -->
+					<!-- New session: one question, directly above the composer. -->
 					<NewSessionHero />
 				{/if}
 			</div>
@@ -543,7 +535,7 @@
 							variant="page"
 							message={$activeSession.wsReconnectRequired
 								? 'Chat controls disconnected. Reconnect to send messages.'
-								: 'Chat controls disconnected. Trying to reconnect; running sessions continue.'}
+								: 'Chat controls disconnected. Trying to reconnect; running chats continue.'}
 							action={{ label: 'Reconnect', onClick: handleReconnect }}
 						/>
 					</NotificationSlot>
@@ -601,9 +593,6 @@
 				<div class="call-dock-slot" bind:clientHeight={callDockHeight}><VoiceCallPanel sessionId={$activeSession.sessionId} compact /></div>
 			{/if}
 			<BackgroundWorkStrip jobs={backgroundJobs} onOpen={openJob} onStop={stopJob} />
-			{#if archivedSessionId}
-				<ArchivedChatBar sessionId={archivedSessionId} />
-			{:else}
 				{#key $sessionOwnerBoundary}
 					{#if PromptDock}
 						<PromptDock
@@ -621,7 +610,6 @@
 					{/if}
 					<ChatInput compact={!showEmptyHero} newSession={showNewSessionHero} {onBrowserToggle} {onBrowserPreload} {browserOpen} {terminal} />
 				{/key}
-			{/if}
 		</div>
 	{/if}
 
@@ -878,14 +866,13 @@
 		position: relative;
 	}
 
-	/* Same 768px measure as the transcript column and the composer dock, so the
-	   hero and the island below it share one edge. */
+	/* The transcript and composer's column, so hero and box share one edge. */
 	.empty-hero-content {
 		display: flex;
 		flex-direction: column;
 		align-items: center;
 		width: 100%;
-		max-width: 768px;
+		max-width: var(--column-width);
 	}
 
 	/* A composer-free surface can center its hero on desktop. */
@@ -894,8 +881,16 @@
 		padding-bottom: 1rem;
 	}
 
+	/* A little more room below than above: the stack sits just over true centre. */
 	.empty-bottom-spacer {
-		flex: 1 1 auto;
+		flex: 1.15 1 auto;
+	}
+	/* A phone-width window keeps the composer under the thumb, with the greeting
+	   sitting on it rather than floating mid-screen. */
+	@media (max-width: 480px) {
+		.empty-bottom-spacer { display: none; }
+		.empty-hero:not(.hero-only) { justify-content: flex-end; padding-bottom: 8px; }
+		.is-empty .input-slot.empty-input-layout { margin-top: 0; }
 	}
 
 	/* Overlay the error so it doesn't shift the vertically-centered content. */
@@ -908,13 +903,13 @@
 	}
 
 	/* Empty-state layout for the persistent input slot: centered and capped at the
-	   same 768px content width as the hero above it. Tailwind preflight makes
+	   same content width as the hero above it. Tailwind preflight makes
 	   box-sizing:border-box global, so the cap includes the gutters — ChatInput
 	   supplies its own dock padding inside, so none is added here. */
 	.input-slot.empty-input-layout {
 		align-self: center;
 		width: 100%;
-		max-width: calc(768px + 3rem);
+		max-width: calc(var(--column-width) + 3rem);
 		margin-top: 0.75rem;
 	}
 
@@ -1094,19 +1089,8 @@
 	.chat-view :global(.prose pre) {
 		background: var(--muted);
 		border: 1px solid var(--border);
-		box-shadow: var(--shadow-s);
-		border-radius: var(--radius, 0.75rem);
+		border-radius: var(--radius-card);
 		margin: 12px 0;
 		padding: 12px 16px;
-	}
-
-	.chat-view :global(.prose code:not(pre code)) {
-		background: var(--muted);
-		color: var(--foreground);
-		border: 1px solid var(--border);
-		padding: 2px 6px;
-		border-radius: calc(var(--radius, 0.75rem) * 0.33);
-		font-size: 0.875em;
-		font-weight: 500;
 	}
 </style>

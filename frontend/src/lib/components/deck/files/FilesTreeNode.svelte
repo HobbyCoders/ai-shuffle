@@ -96,11 +96,13 @@
 	<div
 		class="ftn-row"
 		class:on={isActive}
-		style="padding-left: {8 + depth * 15}px"
+		aria-current={isActive ? 'page' : undefined}
+		title={path}
+		style="padding-left: {8 + Math.min(depth, 7) * 15}px"
 		role="button"
 		tabindex="0"
 		onclick={activate}
-		onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); activate(); } }}
+		onkeydown={(e) => { if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); activate(); } }}
 	>
 		<button class="ftn-caret" class:open={expanded} onclick={toggle} aria-label={expanded ? 'Collapse' : 'Expand'} tabindex="-1">
 			<ChevronRight size={13} strokeWidth={2} />
@@ -114,60 +116,22 @@
 			<FilesTreeNode name={child.name} path={child.path} depth={depth + 1} {currentPath} {showHidden} {onNavigate} {treeVersion} />
 		{/each}
 		{#if children.length === 0 && !loading}
-			<div class="ftn-empty" style="padding-left: {8 + (depth + 1) * 15 + 18}px">empty</div>
+			<div class="ftn-empty" style="padding-left: {8 + Math.min(depth + 1, 7) * 15 + 18}px">No subfolders</div>
 		{/if}
 	{/if}
 </div>
 
 <style>
-	.ftn-row {
-		display: flex;
-		align-items: center;
-		gap: 7px;
-		padding: 6px 8px;
-		border-radius: 7px;
-		font-size: 0.8125rem;
-		font-weight: 500;
-		color: var(--foreground);
-		cursor: pointer;
-		transition: background-color 110ms ease, color 110ms ease;
-		user-select: none;
-	}
-	.ftn-row:hover { background: var(--hover-overlay); }
-	.ftn-row:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
-	.ftn-row.on { background: var(--primary); color: var(--primary-foreground); }
-	.ftn-row.on :global(svg) { color: var(--primary-foreground); }
-	.ftn-row :global(svg) { flex-shrink: 0; color: var(--muted-foreground); }
-
-	.ftn-caret {
-		display: grid;
-		place-items: center;
-		width: 16px;
-		height: 16px;
-		flex-shrink: 0;
-		padding: 0;
-		background: transparent;
-		border: none;
-		color: var(--muted-foreground);
-		cursor: pointer;
-		border-radius: 4px;
-		transition: transform 140ms ease;
-	}
+	.ftn-row { display: flex; align-items: center; gap: 7px; min-height: 34px; padding: 6px 8px; border-radius: var(--st-radius-md); font-size: 13px; color: var(--st-fg); cursor: pointer; user-select: none; }
+	.ftn-row:hover { background: var(--st-hover); }
+	.ftn-row:focus-visible { outline: 2px solid var(--st-primary); outline-offset: -2px; }
+	.ftn-row.on { background: var(--st-accent); }
+	.ftn-row :global(svg) { flex: none; color: var(--st-mfg); }
+	.ftn-caret { display: grid; place-items: center; width: 20px; height: 20px; flex: none; padding: 0; border: 0; background: transparent; color: var(--st-mfg); cursor: pointer; border-radius: var(--st-radius-sm); transition: transform .2s ease; }
+	.ftn-caret:hover { background: var(--st-hover); }
 	.ftn-caret.open { transform: rotate(90deg); }
-	.ftn-row.on .ftn-caret { color: var(--primary-foreground); }
-
-	.ftn-name {
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-	}
-
-	.ftn-empty {
-		font-size: 0.7rem;
-		font-style: italic;
-		color: var(--muted-foreground);
-		padding-top: 2px;
-		padding-bottom: 4px;
-		opacity: 0.7;
-	}
+	.ftn-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+	.ftn-empty { padding: 4px 8px; font-size: 12px; color: var(--st-mfg); }
+	@media (max-width: 600px), (pointer: coarse) { .ftn-row { min-height: 44px; } .ftn-caret { width: 28px; min-height: 32px; } }
+	@media (prefers-reduced-motion: reduce) { .ftn-caret { transition: none; } }
 </style>

@@ -14,12 +14,13 @@
 	import CredentialControl from './CredentialControl.svelte';
 	import BuiltInModels from './tabs/BuiltInModels.svelte';
 	import type { CredentialView, ProviderView } from './providers-model';
+	import { detailLine, safeKeyHint } from './credential-display';
 	import { changeClaudeMode, startSetup } from './provider-actions';
 
 	let { credential, provider }: { credential: CredentialView; provider: ProviderView } = $props();
 	const account = $derived(credential.account);
 	const mode = $derived(providers.current.claude?.mode ?? 'subscription');
-	const masked = $derived(account?.masked_key || providers.current.anthropicKeyMasked || 'No key selected');
+	const masked = $derived(safeKeyHint(account?.masked_key) || safeKeyHint(providers.current.anthropicKeyMasked) || (account || providers.current.anthropicKeySet ? 'Saved' : 'No key selected'));
 	let saving = $state(false);
 	let error = $state('');
 
@@ -54,13 +55,13 @@
 	}] : []);
 </script>
 
-<DetailPane name={credential.name} badge="API key" status={credential.status} statusText={credential.statusText}
-	subtitle={credential.on ? 'Runs every Claude session in API key mode' : account?.active ? 'Used when Claude Code is in API key mode' : 'Saved Anthropic account'}
-	facts={[{ label: 'Key', value: masked, mono: true }, { label: 'Billing', value: 'Per use' }, { label: 'Models', value: 'Built in' }]}
+<DetailPane name={credential.name}
+	status={credential.attention ? credential.status : undefined} statusText={credential.attention ? credential.statusText : undefined}
+	subtitle={detailLine(!credential.attention && credential.statusText, credential.on ? 'Runs every Claude session in API key mode' : account?.active ? 'Used when Claude Code is in API key mode' : 'Saved Anthropic account', 'Billed per use')}
 	tabs={['Overview', 'Models']} {danger} item={credential.item}>
 	{#snippet tile()}<ProviderTile {provider} size="lg" />{/snippet}
 	{#snippet primary()}
-		{#if account}<CredentialControl {credential} />{/if}
+		{#if account}<CredentialControl {credential} showState />{/if}
 		{#if (account?.active || !account && providers.current.anthropicKeySet) && mode !== 'api_key'}
 			<button type="button" class="st-btn" onclick={() => changeClaudeMode('api_key')}>Use API key mode</button>
 		{/if}
@@ -71,7 +72,7 @@
 		{:else}
 			<RowGroup title="Account">
 				{#if account}
-					<SettingRow label="Name"><TextField value={account.label} width={220} maxlength={120} disabled={saving} onchange={rename} /></SettingRow>
+					<SettingRow label="Name"><TextField value={account.label} width={260} maxlength={120} disabled={saving} onchange={rename} /></SettingRow>
 				{/if}
 				<SettingRow id="providers.anthropicKey" label="Key"><ValueText mono tone="fg" value={masked} /></SettingRow>
 				<SettingRow label="Account selection" hint="Changing the selected key keeps the Claude Code mode unchanged">

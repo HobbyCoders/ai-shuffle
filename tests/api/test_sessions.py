@@ -4,7 +4,7 @@ Unit tests for sessions API endpoints.
 Tests cover:
 - Session CRUD operations (list, get, update, delete)
 - Batch operations (batch delete)
-- Session actions (archive, favorite)
+- Session actions (settlement, legacy archive alias, favorite)
 - Sync endpoints (get changes, get state)
 - Export/import functionality
 - Fork session
@@ -1639,14 +1639,16 @@ class TestArchiveSession:
     """Test POST /api/v1/sessions/{session_id}/archive endpoint."""
 
     def test_archive_session_success(self, client, mock_database, sample_session):
-        """Should archive the session through the Active path (it also leaves Active)."""
+        """The retired alias settles through the ordinary Active path, never Stop."""
         mock_database.get_session.return_value = sample_session
-        mock_database.set_session_active.return_value = {**sample_session, "status": "archived", "is_active": False}
+        mock_database.set_session_active.return_value = {**sample_session, "status": "active", "is_active": False}
 
         response = client.post("/api/v1/sessions/test-session-id/archive")
 
         assert response.status_code == 200
-        mock_database.set_session_active.assert_called_once_with("test-session-id", False, True)
+        assert response.json()["session"]["status"] == "active"
+        assert response.json()["session"]["is_active"] is False
+        mock_database.set_session_active.assert_called_once_with("test-session-id", False, None)
 
     def test_archive_session_not_found(self, client, mock_database):
         """Should return 404 for non-existent session."""
@@ -1708,11 +1710,11 @@ class TestSetSessionActive:
         mock_database.set_session_active.assert_called_once_with("test-session-id", True, None)
 
     @pytest.mark.parametrize("archived", [True, False])
-    def test_set_active_passes_archive_state(self, client, mock_database, sample_session, archived):
-        """Archive and restore ride the Active PATCH."""
+    def test_set_active_normalizes_legacy_archive_state(self, client, mock_database, sample_session, archived):
+        """Both legacy flag values return canonical ordinary membership."""
         mock_database.get_session.return_value = sample_session
         mock_database.set_session_active.return_value = {
-            **sample_session, "is_active": False, "status": "archived" if archived else "active"}
+            **sample_session, "is_active": False, "status": "active"}
 
         response = client.patch(
             "/api/v1/sessions/test-session-id/active",
@@ -1720,8 +1722,9 @@ class TestSetSessionActive:
         )
 
         assert response.status_code == 200
-        assert response.json()["status"] == ("archived" if archived else "active")
-        mock_database.set_session_active.assert_called_once_with("test-session-id", False, archived)
+        assert response.json()["status"] == "active"
+        assert response.json()["is_active"] is False
+        mock_database.set_session_active.assert_called_once_with("test-session-id", False, None)
 
     def test_set_active_not_found(self, client, mock_database):
         """Should return 404 for non-existent session."""
@@ -2879,27 +2882,28 @@ class TestGetSessionContextUsage:
 
 
 # =============================================================================
-# Archived chats are read-only until restored (#1822)
+# Legacy archive markers do not create a read-only workflow
 # =============================================================================
 
-class TestArchivedSessionRefusals:
-    """Resume, "Resume here" (adopt) and worker move refuse an archived chat."""
+class TestLegacyArchiveCompatibility:
+    """Normal resume/adopt/move validation still applies, with no archive gate."""
 
-    @pytest.mark.parametrize("method,path,body", [
-        ("post", "/api/v1/sessions/test-session-id/resume", None),
-        ("post", "/api/v1/sessions/test-session-id/adopt", None),
-        ("post", "/api/v1/sessions/test-session-id/move", {"target_instance_id": "other-worker"}),
+    @pytest.mark.parametrize("path,body,status,reason", [
+        ("/api/v1/sessions/test-session-id/resume", None, 409, "resume needs a fluid session"),
+        ("/api/v1/sessions/test-session-id/adopt", None, 409, "currently running"),
+        ("/api/v1/sessions/test-session-id/move", {"target_instance_id": "other-install-xyz"}, 200, "already_there"),
     ])
-    def test_archived_session_is_refused(self, client, mock_database, sample_session, method, path, body):
-        sample_session["status"] = "archived"
-        sample_session["instance_id"] = "other-install-xyz"
+    def test_legacy_marker_uses_normal_validation(self, client, mock_database, sample_session, path, body, status, reason):
+        sample_session.update(status="archived", instance_id="other-install-xyz", sdk_session_id="")
         mock_database.get_session.return_value = sample_session
 
-        with patch("app.core.turn_manager.submit_async", new=AsyncMock()) as submit:
-            response = getattr(client, method)(path, **({"json": body} if body else {}))
+        with patch("app.core.turn_manager.submit_async", new=AsyncMock()) as submit, \
+                patch("app.db.turns.session_has_unsettled_turns", return_value=False), \
+                patch("app.core.streaming_status.has_active_run", return_value=True):
+            response = client.post(path, **({"json": body} if body else {}))
 
-        assert response.status_code == 409
-        assert "archived" in response.json()["detail"]
+        assert response.status_code == status
+        assert reason in str(response.json())
         submit.assert_not_called()
         mock_database.adopt_session.assert_not_called()
         mock_database.unpin_session.assert_not_called()

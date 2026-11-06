@@ -134,13 +134,15 @@ def test_compact_now_is_refused_for_a_voice_chat(
     submit_seam[0].assert_not_called()
 
 
-def test_compact_now_is_refused_for_an_archived_chat(
+def test_compact_now_ignores_a_legacy_archive_marker(
     client, mock_database, mock_api_user, session_row, submit_seam,
 ):
     mock_database.get_session.return_value = {**session_row, "status": "archived"}
-    with patch.object(limit_resume, "session_leg", lambda s: "delegated"):
-        assert client.post("/api/v1/sessions/s1/compact").status_code == 409
-    submit_seam[0].assert_not_called()
+    with patch.object(limit_resume, "session_leg", lambda s: "delegated"), \
+            patch("app.db.turns.session_has_unsettled_turns", return_value=False):
+        assert client.post("/api/v1/sessions/s1/compact").status_code == 200
+    submit_seam[0].assert_called_once()
+    assert submit_seam[0].call_args.args[1:] == ("s1", {"prompt": "/compact"})
 
 
 def test_cache_state_reports_the_verdict(client, mock_database, mock_api_user, session_row):

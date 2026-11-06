@@ -142,20 +142,19 @@ it.each([
 	expect(screen.getByRole('button', { name: /Worker/ })).toBeTruthy();
 });
 
-it('renders only the trail in the phone bar subline: the bar draws the title itself', () => {
+it('renders only the parent link in the phone bar subline: project and title live elsewhere', () => {
 	const store = sessions as unknown as ReturnType<typeof writable<Session[]>>;
 	store.set([row('child', { hidden: true, parent_session_id: 'parent' }), row('parent', { title: 'Plan' })]);
 	const view = render(SessionBreadcrumbs, { projectLabel: 'AI Shuffle', title: 'Worker task', sessionId: 'child', mobile: true });
 	const nav = screen.getByRole('navigation');
-	expect(nav.textContent).toMatch(/AI Shuffle.*Plan/s);
+	expect(nav.textContent).toContain('Plan');
+	expect(nav.textContent).not.toContain('AI Shuffle');
 	expect(nav.textContent).not.toContain('Worker task');
 	expect(document.querySelector('[aria-current="page"]')).toBeNull();
-	expect(nav.querySelectorAll('.crumb-sep')).toHaveLength(1);
 	view.unmount();
 	store.set([row('plain')]);
 	render(SessionBreadcrumbs, { projectLabel: 'AI Shuffle', title: 'Plain chat', sessionId: 'plain', mobile: true });
-	expect(screen.getByRole('navigation').textContent?.trim()).toBe('AI Shuffle');
-	expect(document.querySelectorAll('.crumb-sep')).toHaveLength(0);
+	expect(screen.queryByRole('navigation')).toBeNull();
 });
 
 it.each(['id', 'title', 'hidden', 'parent_session_id'] as const)('falls back for an older worker missing %s without losing the hidden parent label', async field => {
@@ -207,7 +206,7 @@ it('preserves remote-owned hidden ancestry and accepts a parent with no title', 
 		.mockResolvedValueOnce(live('remote-parent', { title: null, is_remote: true, device_name: 'Office PC' }));
 	render(SessionBreadcrumbs, { sessionId: 'remote-child', title: 'Remote worker', mobile: true });
 	expect(await screen.findByRole('link', { name: 'Open parent chat: Untitled chat' })).toBeTruthy();
-	expect(screen.getByRole('navigation').textContent?.trim()).toBe('Parent chat');
+	expect(screen.getByRole('navigation').textContent).toContain('Parent chat');
 	expect(api.getShared).toHaveBeenCalledTimes(2);
 	expect(api.get).not.toHaveBeenCalled();
 });

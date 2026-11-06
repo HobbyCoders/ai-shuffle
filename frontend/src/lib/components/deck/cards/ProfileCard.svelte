@@ -11,8 +11,7 @@
 	 * in the detail's danger zone.
 	 */
 	import { onMount, tick, untrack } from 'svelte';
-	import { page } from '$app/state';
-	import { pushState } from '$app/navigation';
+	import { ViewShell, ViewPanel, PanelSearch, PanelIconButton } from '$lib/components/layout/view';
 	import { Bot, Plus, Users } from 'lucide-svelte';
 	import { watchResources } from '$lib/services/watch-resources';
 	import AIGenerateDialog from './AIGenerateDialog.svelte';
@@ -36,13 +35,10 @@
 	import { EMPTY_TOOL_SURFACE, fetchToolSurface, type ToolSurface, type ToolSurfaceGroup } from '$lib/api/toolSurface';
 	import {
 		getDefaultModel,
-		getProviderDisplay,
-		getProviders,
 		normalizeModel,
 		NATIVE_PROVIDER_KEY
 	} from '$lib/constants/models';
 	import { computerUse } from '$lib/stores/computerUse.svelte';
-	import CollectionPage from '$lib/components/settings/shell/CollectionPage.svelte';
 	import EmptyDetail from '$lib/components/settings/shell/EmptyDetail.svelte';
 	import Segmented from '$lib/components/settings/rows/Segmented.svelte';
 	import SelectField from '$lib/components/settings/rows/SelectField.svelte';
@@ -59,16 +55,13 @@
 		type AgentTemplate,
 		type GroupState,
 		type RosterAgent,
-		invokeModeOf,
-		subagentsFact
+		invokeModeOf
 	} from './profiles/agentForm';
 	import {
 		FOLDER_NONE,
 		folderOf,
 		defaultModelBinding,
-		isPinned,
 		pinnedModel,
-		pinnedProviders,
 		profileModels,
 		sectionAgents,
 		uniqueAgentId,
@@ -91,8 +84,6 @@
 
 	let { initialSelectedId }: Props = $props();
 
-	/** Panes stack at or below this page width (and always in the phone app). */
-	const STACK_WIDTH = 600;
 	const SELECTED_KEY = 'agents.selected';
 
 	// The list shows each agent's avatar.
@@ -250,61 +241,13 @@
 		}
 	}
 
-	// ── Layout: side by side, or two steps ────────────────────────────────
+	// ViewShell owns the responsive split and phone history.
 	let root: HTMLDivElement | undefined = $state();
-	let width = $state(0);
-	const stacked = $derived(platform.isMobile || (width > 0 && width <= STACK_WIDTH));
+	let stacked = $state(platform.isMobile);
 	let pane = $state<'list' | 'detail'>('list');
-	/** History entries pushed for the detail step (stacked mode). */
-	let pushed = 0;
+	function showDetail() { pane = 'detail'; }
+	function backToList() { pane = 'list'; }
 
-	$effect(() => {
-		if (!root) return;
-		width = root.getBoundingClientRect().width;
-		if (typeof ResizeObserver === 'undefined') return;
-		const ro = new ResizeObserver((entries) => {
-			width = entries[0]?.contentRect.width ?? width;
-		});
-		ro.observe(root);
-		return () => ro.disconnect();
-	});
-
-	function showDetail() {
-		if (stacked && pane !== 'detail') {
-			try {
-				pushState('', { ...(page.state ?? {}), agentsView: 'detail' } as App.PageState);
-				pushed += 1;
-			} catch {
-				// Router not ready (tests): the in-page back still works.
-			}
-		}
-		pane = 'detail';
-	}
-
-	function backToList() {
-		if (stacked && pushed > 0 && typeof history !== 'undefined') {
-			pushed -= 1;
-			history.back();
-			return;
-		}
-		pane = 'list';
-	}
-
-	// Android Back / browser Back while stacked pops the detail step.
-	let firstHistory = true;
-	$effect(() => {
-		const view = (page.state as { agentsView?: string } | undefined)?.agentsView;
-		if (firstHistory) {
-			firstHistory = false;
-			return;
-		}
-		untrack(() => {
-			if (view !== 'detail' && pane === 'detail') {
-				pushed = Math.max(0, pushed - 1);
-				pane = 'list';
-			}
-		});
-	});
 
 	// ── List: search and filters ──────────────────────────────────────────
 	let query = $state('');
@@ -430,30 +373,16 @@
 	}
 
 	// ── Model summaries ────────────────────────────────────────────────────
-	function providerNames(models: Record<string, string>): string {
-		const names = pinnedProviders(models).map((key) => {
-			if (key === NATIVE_PROVIDER_KEY) return 'Claude';
-			const provider = getProviders().find((p) => p.id === key);
-			return provider ? getProviderDisplay(provider).name : key;
-		});
-		return names.join(', ');
-	}
-
-	function modelFact(models: Record<string, string>): string {
-		if (isPinned(models)) return subagentDefault ? `Pinned · ${providerNames(models)}` : providerNames(models);
-		if (subagentDefault) {
-			return subagentDefault.model ? `Default · ${modelLabel(subagentDefault.model)}` : 'Default · not set';
-		}
-		return 'Chat only';
-	}
-
 	/** Right-hand meta on a list row: the agent's model. */
 	function metaOf(p: Profile): string {
 		const models =
 			viewMode === 'form' && editingProfile?.id === p.id ? profileForm.provider_models : profileModels(p);
 		const pinned = pinnedModel(models);
 		if (pinned) return modelLabel(pinned);
-		return subagentDefault ? 'Default' : 'Chat only';
+		// Following the subagent default: name the model it resolves to, the same
+		// one the Models tab shows, so the list and the detail cannot disagree.
+		if (subagentDefault) return subagentDefault.model ? modelLabel(subagentDefault.model) : 'Default';
+		return 'Chat only';
 	}
 
 	/**
@@ -470,20 +399,11 @@
 		return allSubagents.filter((a) => a.id !== id).length;
 	}
 
-	const facts = $derived.by(() => {
-		const n = others.length;
-		const reach = invokableCount(editingProfile?.id ?? '', profileForm.agent_invoke_mode, profileForm.enabled_agents);
-		return {
-			tools:
-				toolSelectionMode === 'all'
-					? `All ${totalTools}`
-					: toolSelectionMode === 'none'
-						? 'None'
-						: `${effectiveToolCount} of ${totalTools}`,
-			subagents: subagentsFact(profileForm.agent_invoke_mode, n, reach),
-			model: modelFact(profileForm.provider_models),
-			chats: editingProfile ? (editingProfile.session_count ?? null) : null
-		};
+	/** The tabs carry these counts; `undefined` while the tool list is still loading. */
+	const counts = $derived({
+		tools: !totalTools ? undefined : toolSelectionMode === 'all' ? totalTools : toolSelectionMode === 'none' ? 0 : effectiveToolCount,
+		subagents: invokableCount(editingProfile?.id ?? '', profileForm.agent_invoke_mode, profileForm.enabled_agents),
+		chats: editingProfile ? (editingProfile.session_count ?? null) : null
 	});
 
 	// ── Opening agents ─────────────────────────────────────────────────────
@@ -1154,30 +1074,18 @@
 	{/if}
 {/snippet}
 
-{#snippet starterToolbar()}
-	{@render installTeamButton(true)}
-{/snippet}
-
 <div
 	class="settings-shell agents-shell"
 	bind:this={root}
 	data-stacked={stacked || undefined}
 	data-view={stacked ? (pane === 'detail' ? 'detail' : 'page') : undefined}
 >
-	<CollectionPage
-		title="Agents"
-		count={loading && profiles.length === 0 ? undefined : profiles.length}
-		addLabel="New agent"
-		onAdd={() => (showNewDialog = true)}
-		filterPlaceholder="Search agents"
-		filterIcon="search"
-		bind:filter={query}
-		onBack={null}
-		listLabel="Agent list"
-		toolbar={offerStarterTeam && !loading ? starterToolbar : undefined}
-		filters={hasBuiltins || folders.length > 0 ? listFilters : undefined}
-	>
-		{#snippet list()}
+	<ViewShell label="Agents" inheritScope bind:stacked detailOpen={pane === 'detail'} onBack={() => pane = 'list'}>
+		{#snippet panel()}
+		<ViewPanel title="Agents" count={loading && profiles.length === 0 ? undefined : profiles.length}
+			listLabel="Agent list" filters={hasBuiltins || folders.length > 0 ? listFilters : undefined}>
+			{#snippet actions()}<PanelIconButton label="New agent" icon={Plus} onclick={() => showNewDialog = true} />{/snippet}
+			{#snippet search()}<PanelSearch placeholder="Search agents" bind:value={query} />{/snippet}
 			<AgentList
 				{sections}
 				draft={viewMode === 'form' && !editingProfile
@@ -1202,8 +1110,12 @@
 					folderFilter = '';
 				}}
 			/>
+			{#if offerStarterTeam && !loading}
+				<div class="starter-foot">{@render installTeamButton(false)}</div>
+			{/if}
+		</ViewPanel>
 		{/snippet}
-		{#snippet detail()}
+		{#snippet main(back)}
 			{#if viewMode === 'form'}
 				{#key openKey}
 					<AgentDetail
@@ -1218,7 +1130,7 @@
 						{saveState}
 						{remoteChange}
 						{tab}
-						{facts}
+						{counts}
 						{groups}
 						{templates}
 						{toolSurface}
@@ -1231,7 +1143,7 @@
 						{avatarOf}
 						colorOf={colorOfId}
 						onTab={(t) => (tab = t)}
-						onBack={backToList}
+						onBack={back}
 						onFormChange={handleFormChange}
 						onToolSelectionModeChange={handleToolSelectionModeChange}
 						onToggleTool={toggleTool}
@@ -1268,7 +1180,7 @@
 				<EmptyDetail icon={Bot} title="No agent selected" message="Pick one from the list." />
 			{/if}
 		{/snippet}
-	</CollectionPage>
+	</ViewShell>
 
 	<NewAgentDialog
 		open={showNewDialog}
@@ -1306,30 +1218,21 @@
 		grid-template-columns: none;
 		height: 100%;
 	}
-	.agents-shell :global(.st-coll) {
-		flex: 1;
+	/* Directly under the list, on the rows' edge. */
+	.starter-foot {
+		padding: 12px 0 0;
 	}
+	@media (pointer: coarse) {
+		.starter-foot :global(.st-btn) { min-height: 44px; }
+	}
+
 	.folder-filter {
 		display: inline-flex;
 		flex: 1;
 		min-width: 0;
 		max-width: 170px;
 	}
-	.folder-filter :global(select) {
-		height: 26px;
-		font-size: 12.5px;
-	}
-	/* Phone: header actions stay on the name line (they fit as icons). */
-	.settings-shell.agents-shell[data-stacked] :global(.st-dh) {
-		grid-template-columns: auto minmax(0, 1fr) auto;
-	}
-	.settings-shell.agents-shell[data-stacked] :global(.st-dha) {
-		grid-column: auto;
-		justify-content: flex-end;
-	}
-	.settings-shell.agents-shell[data-stacked] :global(.st-lh-top h1) {
-		font-size: 22px;
-	}
+
 
 	.sk-detail {
 		max-width: 740px;

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
-import { attachComposerOpen } from './mobile-panel-gesture';
+import { attachComposerOpen } from '$lib/components/chat/phone/mobile-panel-gesture';
 const cleanups: (() => void)[] = [];
 afterEach(() => { cleanups.splice(0).forEach(fn => fn()); document.body.replaceChildren(); window.getSelection()?.removeAllRanges(); vi.restoreAllMocks(); });
 function setup() {

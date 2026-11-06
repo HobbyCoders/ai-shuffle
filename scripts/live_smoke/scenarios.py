@@ -176,7 +176,8 @@ def render_markdown(data: dict) -> str:
                 row.get("pass_when"), row.get("past_bug", ""))) + " |")
     out += [
         "",
-        "Cleanup: the runner archives every session it created, also on failure",
+        "Cleanup: the runner explicitly Stops its own unfinished test work, then settles every",
+        "explicitly hidden session it created, also on failure",
         "or interruption. Rows that need the peer are reported \"not run: worker",
         "offline\" when it is not online.",
         "",

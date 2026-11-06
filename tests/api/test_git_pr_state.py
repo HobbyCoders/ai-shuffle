@@ -646,7 +646,8 @@ def test_header_does_not_lookup_default_upstream(pr_client, pr_checkout, mock_gi
     assert all(c.kwargs['head'] != 'main' for c in mock_github_service.list_pulls.call_args_list)
 
 
-def test_header_fallback_claims_are_scoped_per_session(pr_client, pr_checkout, mock_github_service):
+@pytest.mark.parametrize("holds_resources", [True, False], ids=["busy", "idle"])
+def test_header_fallback_claims_are_scoped_per_session(pr_client, pr_checkout, mock_github_service, holds_resources):
     from app.db import database
     from tests.git_repo_helpers import commit_file
 
@@ -657,11 +658,15 @@ def test_header_fallback_claims_are_scoped_per_session(pr_client, pr_checkout, m
     mock_github_service.list_commit_pulls.return_value = [pr]
     owner = {'id': 'owner', 'project_id': 'p1', 'pr_number': pr.number, 'is_worker': False}
     with patch.object(database, 'list_sessions_by_pr_number', return_value=[owner]), \
+            patch('app.core.session_reservations.holds_resources', return_value=holds_resources), \
             patch.object(gitops, 'schedule_session_pr_reconcile'):
         own = pr_client.get('/api/v1/projects/p1/git/pr-state?session_id=owner').json()
         assert own['open_pr']['number'] == pr.number
         other = pr_client.get('/api/v1/projects/p1/git/pr-state?session_id=other').json()
-        assert other['open_pr'] is None
+        if holds_resources:
+            assert other['open_pr'] is None
+        else:
+            assert other['open_pr']['number'] == pr.number
         assert other['pr_lookup_failed'] is False
 
 

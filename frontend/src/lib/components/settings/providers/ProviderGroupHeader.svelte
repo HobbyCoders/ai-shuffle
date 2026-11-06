@@ -1,33 +1,26 @@
 <script lang="ts">
 	/**
-	 * A connected provider's header: tile and name (opens the provider), then
-	 * Claude's "Subscription | API key | Cloud | Off" or the "N on" count with the "+".
-	 * The connector line starts under the tile.
+	 * A connected provider's first row in its card: mark and name (opens the
+	 * provider), then "Add account" at the right where there is one to add.
 	 */
 	import { settingsNav } from '$lib/settings/navigation.svelte';
-	import { providers } from '$lib/stores/providers.svelte';
-	import type { ClaudeAuthMode } from '$lib/api/claude-auth';
 	import { moveListFocus } from '../rows/ListItem.svelte';
-	import Segmented from '../rows/Segmented.svelte';
 	import AddKindMenu from './AddKindMenu.svelte';
 	import ProviderTile from './ProviderTile.svelte';
-	import { addableKinds, MODE_OPTIONS, type ProviderView } from './providers-model';
-	import { pickClaudeMode, startSetup } from './provider-actions';
+	import { addableKinds, type ProviderView } from './providers-model';
+	import { startSetup } from './provider-actions';
 
 	interface Props {
 		provider: ProviderView;
-		/** The stub under the tile leads into a credential that is on. */
-		lit: boolean;
 	}
 
-	let { provider, lit }: Props = $props();
+	let { provider }: Props = $props();
 
 	const selected = $derived(settingsNav.selectedItem('providers') === provider.item);
 	const kinds = $derived(addableKinds(provider));
-	const mode = $derived(providers.current.claude?.mode ?? 'subscription');
 </script>
 
-<div class="pgh" class:lit class:claude={!!provider.claude} class:bare={provider.credentials.length === 0} aria-current={selected ? 'true' : undefined}>
+<div class="pgh" aria-current={selected ? 'true' : undefined}>
 	<button
 		type="button"
 		class="pgn"
@@ -36,131 +29,77 @@
 		onclick={() => settingsNav.selectItem(provider.item, 'providers')}
 		onkeydown={moveListFocus}
 	>
-		<ProviderTile {provider} ring={selected ? 'accent' : 'bg'} />
+		<ProviderTile {provider} bare />
 		<span class="pname">{provider.name}</span>
 	</button>
-	{#if provider.pending}
-		<span class="cnt checking" role="status">Checking…</span>
-	{:else if provider.claude}
-		<span class="mode">
-			<Segmented
-				size="sm"
-				label="Claude runs on"
-				options={MODE_OPTIONS}
-				value={mode}
-				disabled={!providers.current.claude}
-				onchange={(v: ClaudeAuthMode) => pickClaudeMode(provider, v)}
+	<span class="pgr">
+		{#if provider.pending}
+			<span class="cnt checking" role="status">Checking…</span>
+		{:else}
+			<AddKindMenu
+				providerName={provider.name}
+				{kinds}
+				disabled={provider.draft}
+				onpick={(k) => startSetup(provider, k.flavor)}
 			/>
-		</span>
-		<AddKindMenu providerName={provider.name} {kinds} onpick={(k) => startSetup(provider, k.flavor)} />
-	{:else}
-		<span class="cnt">{provider.draft ? 'Setting up' : `${provider.onCount} on`}</span>
-		<AddKindMenu
-			providerName={provider.name}
-			{kinds}
-			disabled={provider.draft}
-			onpick={(k) => startSetup(provider, k.flavor)}
-		/>
-	{/if}
+		{/if}
+	</span>
 </div>
 
 <style>
 	.pgh {
-		position: relative;
-		display: grid;
-		grid-template-columns: minmax(0, auto) minmax(0, 1fr) auto;
+		display: flex;
 		align-items: center;
-		gap: 8px;
-		height: 44px;
-		padding-right: 6px;
-		margin-top: 8px;
-		border-radius: var(--st-radius-md);
+		justify-content: space-between;
+		min-height: 44px;
+	}
+	.pgh:has(.pgn:hover) {
+		background: var(--st-hover);
 	}
 	.pgh[aria-current='true'] {
 		background: var(--st-accent);
 	}
-	.pgh:hover:not([aria-current='true']) {
-		background: var(--st-hover);
-	}
-	/* Connector stub from under the tile to the first credential. */
-	.pgh::after {
-		content: '';
-		position: absolute;
-		left: 25px;
-		top: 35px;
-		bottom: 0;
-		width: var(--st-line);
-		margin-left: calc(var(--st-line) / -2);
-		background: var(--st-border-strong);
-		transition: background 0.25s;
-	}
-	.pgh.lit::after {
-		background: var(--st-primary);
-	}
-	.pgh.bare::after {
-		display: none;
-	}
 	.pgn {
 		display: flex;
+		flex: 1;
 		align-items: center;
-		gap: 10px;
-		height: 44px;
-		padding: 0 4px 0 12px;
+		align-self: stretch;
+		gap: var(--pv-glyph-gap);
+		min-width: 0;
+		padding: 0 8px 0 var(--pv-row-inset);
 		border: 0;
 		background: none;
-		min-width: 0;
 		text-align: left;
-		border-radius: var(--st-radius-md);
-		position: relative;
-		z-index: 1;
+		color: var(--st-fg);
+		border-radius: inherit;
 	}
 	.pgn:focus-visible {
 		outline-offset: -2px;
 	}
 	.pname {
-		font-weight: 600;
+		display: block;
+		font-weight: 500;
 		font-size: 13.5px;
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
 	}
-	/* Claude: the name gives way before the mode switch does, so the switch
-	   never has to scroll. Three columns (name, mode, "+"), so the "+" stays on
-	   the header line instead of wrapping under it onto the first credential. */
-	.pgh.claude {
-		grid-template-columns: minmax(0, 1fr) auto auto;
-	}
-	.mode {
-		justify-self: end;
+	/* "Add account" ends on the chevrons' edge, past its own 8px of padding. */
+	.pgr {
 		display: flex;
 		align-items: center;
+		gap: 4px;
+		flex: none;
 		min-width: 0;
-	}
-	/* A list up to phone width (280-420px) cannot hold the name, the mode
-	   switch and the "+" on one line: the switch moves under the name, the
-	   connector runs past it. */
-	@container st-list (max-width: 419px) {
-		.pgh.claude:has(.mode) {
-			grid-template-columns: minmax(0, 1fr) auto;
-			height: auto;
-			padding-bottom: 6px;
-		}
-		.pgh.claude .pgn { grid-column: 1; }
-		.pgh.claude :global(.plus) { grid-column: 2; grid-row: 1; }
-		.pgh.claude .mode {
-			grid-column: 1 / -1;
-			justify-self: start;
-			padding-left: 46px;
-		}
+		padding-right: calc(var(--pv-row-inset) - 8px);
 	}
 	.cnt {
+		padding-right: 8px;
 		font-size: 12px;
 		color: var(--st-subtle);
-		text-align: right;
 		white-space: nowrap;
 	}
 	.checking {
-		justify-self: end;
 		animation: pgh-pulse 1.4s ease-in-out infinite;
 	}
 	@keyframes pgh-pulse {
@@ -169,9 +108,6 @@
 		}
 	}
 	@media (prefers-reduced-motion: reduce) {
-		.pgh::after {
-			transition: none;
-		}
 		.checking {
 			animation: none;
 		}

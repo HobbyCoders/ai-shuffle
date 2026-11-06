@@ -1,4 +1,5 @@
 <script lang="ts">
+	import '$lib/components/ui/surfaces.css';
 	import Banner from '$lib/components/Banner.svelte';
 	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
@@ -91,10 +92,8 @@
 
 <svelte:head><title>Pair device · AI Shuffle</title></svelte:head>
 
-<main class="pair-shell">
-	<section class="pair-card">
-		<div class="mark"><Link2 size={24} /></div>
-		<p class="eyebrow">AI Shuffle</p>
+<main class="ui-surface ui-onboarding">
+	<section class="ui-onboarding-card">
 		<h1>Connect this device</h1>
 		<p class="intro">Pair this browser with the Shuffle server you opened the link from. The code works once and expires after five minutes.</p>
 
@@ -106,13 +105,13 @@
 		{:else}
 			<label>
 				<span>Device name</span>
-				<input bind:value={deviceName} maxlength="100" autocomplete="off" />
+				<input class="ui-input" bind:value={deviceName} maxlength="100" autocomplete="off" />
 			</label>
 
 			<label>
 				<span>Pairing code</span>
 				<input
-					class="code-input"
+					class="ui-input code-input"
 					bind:value={code}
 					maxlength="64"
 					placeholder="ABCD-EFGH-IJKL"
@@ -126,7 +125,7 @@
 			{/if}
 			{#if error}<Banner message={error} />{/if}
 
-			<button onclick={connect} disabled={connecting || !code.trim() || !deviceName.trim()}>
+			<button class="ui-button primary connect" onclick={connect} disabled={connecting || !code.trim() || !deviceName.trim()}>
 				{connecting ? 'Connecting…' : 'Connect device'}
 			</button>
 		{/if}
@@ -136,22 +135,14 @@
 </main>
 
 <style>
-	.pair-shell { min-height: 100vh; display: grid; place-items: center; padding: 24px; background: radial-gradient(circle at 50% 0%, color-mix(in oklch, var(--primary) 13%, transparent), transparent 42%), var(--background); color: var(--foreground); }
-	.pair-card { width: min(100%, 430px); padding: 34px; border: 1px solid var(--border); border-radius: 20px; background: color-mix(in oklab, var(--background) 96%, var(--primary)); box-shadow: 0 24px 70px rgba(0,0,0,.18); }
-	.mark { width: 48px; height: 48px; display: grid; place-items: center; border-radius: 14px; color: var(--primary-foreground); background: var(--primary); margin-bottom: 22px; }
-	.eyebrow { margin: 0 0 5px; font-size: 11px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; color: var(--primary); }
-	h1 { margin: 0; font-family: var(--font-serif, serif); font-size: 31px; line-height: 1.08; }
-	.intro { margin: 12px 0 26px; color: var(--muted-foreground); line-height: 1.55; font-size: 14px; }
-	label { display: grid; gap: 7px; margin-top: 17px; }
-	label span { font-size: 12px; font-weight: 650; }
-	input { width: 100%; box-sizing: border-box; border: 1px solid var(--border); border-radius: 10px; padding: 11px 12px; color: var(--foreground); background: var(--background); outline: none; }
-	input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px color-mix(in oklch, var(--primary) 15%, transparent); }
-	.code-input { font-family: var(--font-mono, monospace); letter-spacing: .11em; text-transform: uppercase; }
-	button { width: 100%; margin-top: 20px; border: 0; border-radius: 11px; padding: 12px 16px; font-weight: 700; color: var(--primary-foreground); background: var(--primary); cursor: pointer; }
-	button:disabled { opacity: .55; cursor: default; }
-	.notice { display: flex; gap: 10px; align-items: flex-start; margin-top: 18px; padding: 11px 12px; border-radius: 10px; font-size: 12.5px; line-height: 1.4; color: var(--muted-foreground); background: var(--muted); }
-	.notice :global(svg) { flex: 0 0 auto; margin-top: 1px; color: var(--primary); }
-	.notice.warning :global(svg) { color: var(--warning, #d97706); }
-	.foot { margin: 22px 0 0; font-size: 11.5px; line-height: 1.45; color: var(--muted-foreground); }
-	@media (max-width: 520px) { .pair-shell { padding: 0; place-items: stretch; } .pair-card { width: auto; min-height: 100vh; box-sizing: border-box; border: 0; border-radius: 0; padding: 42px 24px; } }
+ .intro, .foot { color: var(--muted-foreground); font-size: 13px; line-height: 1.55; }
+ .intro { margin: 12px 0 24px; }
+ label { display: grid; gap: 6px; margin-top: 16px; }
+ label span { font-size: 12px; color: var(--muted-foreground); }
+ .code-input { font-family: var(--font-mono); }
+ .notice { display: flex; gap: 10px; align-items: start; padding-block: 16px; color: var(--muted-foreground); }
+ .notice :global(svg) { flex: none; }
+ .warning :global(svg) { color: var(--warning); }
+ .connect { margin-top: 20px; width: 100%; }
+ .foot { border-top: 1px solid var(--border); padding-top: 16px; margin-top: 24px; }
 </style>

@@ -1,5 +1,5 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Automation } from '$lib/api/automations';
 import AutomationsStudio from './AutomationsStudio.svelte';
 import AutomationsList from './AutomationsList.svelte';
@@ -20,7 +20,11 @@ beforeAll(() => {
     };
 });
 afterAll(() => { if (!hadAnimate) delete proto.animate; });
-afterEach(cleanup);
+beforeEach(() => {
+    vi.stubGlobal('matchMedia', () => ({ matches: false, addEventListener() {}, removeEventListener() {} }));
+    vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
+});
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 const explanation = 'Built-in Explore was removed; review the General Purpose agent before re-enabling.';
 const automation: Automation = {
@@ -38,17 +42,38 @@ const handlers = {
     onTrigger: vi.fn(), onDelete: vi.fn(), formatCost: () => '$0', triggerTypeLabel: () => 'Interval'
 };
 
+describe('automation list state marks', () => {
+ it.each([
+  ['idle', true, 'Enabled', 'ok'], ['running', true, 'Running', 'ok'],
+  ['paused', true, 'Paused', 'warn'], ['paused', false, 'Paused', 'warn'],
+  ['idle', false, 'Disabled', 'off'], ['error', true, 'Error', 'err']
+ ] as const)('renders the real %s / enabled=%s state without a printed label', (status, is_enabled, label, tone) => {
+  const { container } = render(AutomationsList, { automations: [{ ...automation, status, is_enabled, last_error: null }],
+   searchQuery: '', triggeringId: null, formatTime: () => 'Never', getStatusColor: () => '', ...handlers });
+  const row = screen.getByRole('button', { name: `Saved search — ${label}` });
+  expect(row.textContent).not.toContain(label);
+  expect(container.querySelector('.automation-state')?.getAttribute('title')).toBe(label);
+  expect(screen.getByRole('img', { name: label }).classList.contains(tone)).toBe(true);
+ });
+});
+
 describe('disabled automation explanation', () => {
+    it('keeps the empty list quiet, with creation only in its header', () => {
+        const { container } = render(AutomationsStudio, { automations: [], pendingApprovals: [], profiles: [],
+            onApprove: vi.fn(), onDeny: vi.fn(), onClearError: vi.fn(), ...handlers });
+        expect(screen.getAllByRole('button', { name: 'New automation' })).toHaveLength(1);
+        expect(container.querySelector('.panel-body .st-empty-detail')?.textContent?.trim()).toBe('No automations yet');
+    });
     it('shows the stored error beside the disabled Studio row', () => {
         render(AutomationsStudio, { automations: [automation], pendingApprovals: [], profiles: [],
             onApprove: vi.fn(), onDeny: vi.fn(), onClearError: vi.fn(), ...handlers });
-        expect(screen.getByText('Disabled')).toBeTruthy();
-        expect(screen.getByRole('status').textContent).toBe(explanation);
+        expect(screen.getByRole('button', { name: 'Saved search — Disabled' })).toBeTruthy();
+        expect(screen.getByRole('status').textContent?.trim()).toBe(explanation);
     });
     it('also shows it in the alternate list', () => {
         render(AutomationsList, { automations: [automation], searchQuery: '', triggeringId: null,
             formatTime: () => 'Never', getStatusColor: () => 'var(--muted)', ...handlers });
-        expect(screen.getByRole('status').textContent).toBe(explanation);
+        expect(screen.getByRole('status').textContent?.trim()).toBe(explanation);
     });
     it('shows the explanation in the detail without requiring a failed run', () => {
         render(AutomationDetail, { automation, runs: [], runsLoading: false, expandedRunIds: new Set<string>(),
@@ -56,7 +81,7 @@ describe('disabled automation explanation', () => {
             onToggleRunExpanded: vi.fn(), formatTime: () => 'Never', formatCost: () => '$0',
             formatDuration: () => '0s', getStatusColor: () => 'var(--muted)',
             getRunStatusBadgeClass: () => '', triggerTypeLabel: () => 'Interval' });
-        expect(screen.getByRole('status').textContent).toBe(explanation);
+        expect(screen.getByRole('status').textContent?.trim()).toBe(explanation);
     });
 });
 
@@ -70,6 +95,24 @@ describe('automation detail state', () => {
     });
     const agents = (...ids: string[]) => ids.map((id) => ({ id, name: id })) as never;
 
+    it('keeps all four run metrics in the compact Stats strip', () => {
+        const { container } = render(AutomationDetail, detailProps({
+            detailStats: { total_runs: 12, total_cost_usd: 1.5, successful_runs: 9, failed_runs: 3 },
+            formatCost: () => '$1.50'
+        }));
+        const strip = container.querySelector('.metrics')!;
+        expect([...strip.querySelectorAll('dt')].map(el => el.textContent)).toEqual(['Total runs', 'Total cost', 'Success rate', 'Failures']);
+        expect([...strip.querySelectorAll('dd')].map(el => el.textContent)).toEqual(['12', '$1.50', '75%', '3']);
+    });
+    it('keeps Delete text-only in the shared danger style and preserves its handler', async () => {
+        const onDelete = vi.fn();
+        render(AutomationDetail, detailProps({ onDelete }));
+        const button = screen.getByRole('button', { name: /^Delete$/ });
+        expect(button.classList.contains('danger')).toBe(true);
+        expect(button.querySelector('svg')).toBeNull();
+        await fireEvent.click(button);
+        expect(onDelete).toHaveBeenCalledWith(automation.id);
+    });
     it('marks a disabled automation as Disabled in the detail header', () => {
         render(AutomationDetail, detailProps());
         expect(screen.getByTestId('automation-disabled-badge').textContent).toBe('Disabled');
@@ -99,12 +142,11 @@ describe('automation detail state', () => {
         const missing = { ...automation, profile_id: 'removed-agent' };
         const { container } = render(AutomationDetail, detailProps({ automation: missing, profiles: agents('general-purpose') }));
         const warning = screen.getByTestId('automation-agent-missing');
-        const header = container.querySelector('.auto-detail-header')!;
-        // A direct child of the header grid (spans the card on a phone), after the
-        // action icons, and not inside the info column that shares their row.
-        expect(warning.parentElement).toBe(header);
-        expect(warning.previousElementSibling?.classList.contains('auto-detail-header-actions')).toBe(true);
-        expect(container.querySelector('.auto-detail-header-info')!.contains(warning)).toBe(false);
+        const header = container.querySelector('.st-dh')!;
+        // The shared detail banner sits below the whole header, never next to actions.
+        expect(header.contains(warning)).toBe(false);
+        expect(warning.closest('.st-dwrap')).toBe(header.parentElement);
+        expect(header.compareDocumentPosition(warning) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     });
     it('keeps only the mixed-version retired-ID tombstone exclusion', () => {
         render(AutomationDetail, detailProps({
@@ -134,8 +176,8 @@ describe('automation whose agent was deleted', () => {
             // jsdom does not lay out media queries. Guard the structure: the
             // warning must not live in metadata hidden by the phone breakpoint.
             // Real 390px rendering is checked in the browser as well.
-            expect(chip.closest('.as-body')).toBeTruthy();
-            expect(chip.closest('.as-meta')).toBeNull();
+            expect(chip.closest('.st-it')).toBeTruthy();
+            expect(chip.closest('.meta')).toBeNull();
             expect(screen.queryByText('General Purpose')).toBeNull();
         } finally {
             vi.unstubAllGlobals();

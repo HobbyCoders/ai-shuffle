@@ -1,4 +1,5 @@
 <script lang="ts">
+	import '$lib/components/ui/surfaces.css';
 	/**
 	 * Wizard step: AI Shuffle Cloud, optional. Reads `GET /api/v1/license`.
 	 *
@@ -37,7 +38,7 @@
 	onMount(load);
 </script>
 
-<div class="space-y-4" data-testid="setup-license">
+<div class="ui-surface space-y-4" data-testid="setup-license">
 	{#if loading}
 		<p class="text-sm text-muted-foreground flex items-center gap-2" role="status"><Loader2 size={16} class="animate-spin" /> Reading the Cloud status…</p>
 	{:else if loadError}
@@ -69,8 +70,8 @@
 	{/if}
 
 	<div class="flex gap-3">
-		{#if onBack}<button type="button" onclick={onBack} class="btn btn-secondary flex-1 py-3">Back</button>{/if}
+		{#if onBack}<button type="button" onclick={onBack} class="ui-button flex-1 py-3">Back</button>{/if}
 		<!-- Never waits on the status: a stalled request must not block setup. -->
-		<button type="button" onclick={onContinue} class="btn btn-primary flex-1 py-3">Continue</button>
+		<button type="button" onclick={onContinue} class="ui-button primary flex-1 py-3">Continue</button>
 	</div>
 </div>

@@ -2,21 +2,20 @@
 	/**
 	 * AgentDetail: one agent on the Agents page, in the Settings DetailPane
 	 * anatomy. Header (avatar, name, badges, the visible actions: Duplicate,
-	 * Export, Restore defaults or Delete), the facts strip (each fact opens its
-	 * tab), a sideways-scrolling tab strip, then the tab's row groups. The
+	 * Export or Restore defaults), a sideways-scrolling tab strip whose tabs
+	 * carry the counts, then the tab's row groups. The
 	 * Profile tab ends with the danger zone and its inline confirm.
 	 *
 	 * ProfileCard owns the data and autosave; this component only renders and
 	 * reports.
 	 */
 	import { tick } from 'svelte';
-	import { Check, Copy, Download, LoaderCircle, Lock, RotateCcw, Trash2 } from 'lucide-svelte';
+	import { Check, Copy, Download, LoaderCircle, Lock, RotateCcw } from 'lucide-svelte';
 	import type { Profile } from '$lib/api/client';
 	import type { AvatarId } from '$lib/api/agent-identity';
 	import type { ToolSurface, ToolSurfaceGroup } from '$lib/api/toolSurface';
 	import type { SubagentDefault } from '$lib/api/subagentDefault';
 	import DetailPane from '$lib/components/settings/shell/DetailPane.svelte';
-	import type { Fact } from '$lib/components/settings/shell/FactsStrip.svelte';
 	import SettingRow from '$lib/components/settings/rows/SettingRow.svelte';
 	import InlineConfirm from '$lib/components/settings/rows/InlineConfirm.svelte';
 	import InlineBanner from '$lib/components/settings/rows/InlineBanner.svelte';
@@ -54,7 +53,7 @@
 		saveState: 'idle' | 'saving' | 'saved' | 'error';
 		remoteChange: string;
 		tab: AgentTab;
-		facts: { tools: string; subagents: string; model: string; chats: number | null };
+		counts: { tools: number | undefined; subagents: number; chats: number | null };
 		groups: GroupState;
 		templates: AgentTemplate[];
 		toolSurface: ToolSurface;
@@ -101,7 +100,7 @@
 		saveState,
 		remoteChange,
 		tab,
-		facts,
+		counts,
 		groups,
 		templates,
 		toolSurface,
@@ -142,7 +141,6 @@
 	const title = $derived(form.name.trim() || 'New agent');
 
 	let root: HTMLDivElement | undefined = $state();
-	let deleteArmed = $state(false);
 	let restoreArmed = $state(false);
 
 	const kind = $derived(builtin ? 'Built-in' : 'Yours');
@@ -160,20 +158,13 @@
 		return `Updated ${new Date(ms).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`;
 	});
 
-	const factList = $derived<Fact[]>([
-		{ label: 'Tools', value: facts.tools, onclick: () => onTab('tools'), action: `Tools: ${facts.tools}. Open Tools` },
-		{ label: 'Subagents', value: facts.subagents, onclick: () => onTab('subagents'), action: `Subagents: ${facts.subagents}. Open Subagents` },
-		{ label: 'Model', value: facts.model, onclick: () => onTab('models'), action: `Model: ${facts.model}. Open Models` },
-		{ label: 'Chats', value: facts.chats === null ? null : facts.chats.toLocaleString() }
-	]);
-
-	// None: no count on the Subagents tab (the header fact says "None").
-	// Approvals (saved permission rules) is owner only.
+	// Counts live on the tabs. Approvals (saved permission rules) is owner only.
 	const tabs = $derived(
 		AGENT_TABS.filter((t) => t.id !== 'approvals' || isAdmin).map((t) =>
-			t.id === 'subagents' ? { ...t, count: form.agent_invoke_mode === 'none' ? undefined : others.length } : { ...t }
+			t.id === 'tools' ? { ...t, count: counts.tools } : t.id === 'subagents' ? { ...t, count: counts.subagents } : { ...t }
 		)
 	);
+	const chats = $derived(counts.chats === null ? '' : `${counts.chats.toLocaleString()} ${counts.chats === 1 ? 'chat' : 'chats'}`);
 
 	function pickInvokeMode(mode: AgentInvokeMode) {
 		for (const [field, value] of Object.entries(invokeModePatch(mode))) {
@@ -181,12 +172,11 @@
 		}
 	}
 
-	/** Header Delete / Restore: open the danger zone with its confirm armed. */
-	async function askDanger(which: 'delete' | 'restore') {
+	/** Header Restore: open the bottom section with its confirm armed. */
+	async function askRestore() {
 		onTab('profile');
 		await tick();
-		if (which === 'delete') deleteArmed = true;
-		else restoreArmed = true;
+		restoreArmed = true;
 		await tick();
 		const zone = root?.querySelector<HTMLElement>('.st-grp.danger');
 		zone?.scrollIntoView?.({ block: 'center', behavior: 'smooth' });
@@ -195,7 +185,7 @@
 </script>
 
 {#snippet tile()}
-	<AgentAvatar {avatar} size={46} color={builtin ? null : form.avatar_color} neutral={builtin} />
+	<AgentAvatar {avatar} size={42} color={builtin ? null : form.avatar_color} neutral={builtin} />
 {/snippet}
 
 {#snippet topStatus()}
@@ -219,7 +209,7 @@
 {/snippet}
 
 {#snippet subtitle()}
-	<span>{[kind, folder, updated].filter(Boolean).join(' · ')}</span>
+	<span>{[kind, folder, updated, chats].filter(Boolean).join(' · ')}</span>
 {/snippet}
 
 {#snippet primary()}
@@ -231,14 +221,10 @@
 	</button>
 	{#if builtin}
 		{#if modified}
-			<button type="button" class="st-btn" title="Restore defaults" aria-label="Restore defaults" onclick={() => askDanger('restore')}>
+			<button type="button" class="st-btn" title="Restore defaults" aria-label="Restore defaults" onclick={askRestore}>
 				<RotateCcw /><span class="lbl">Restore</span>
 			</button>
 		{/if}
-	{:else}
-		<button type="button" class="st-btn danger" title="Delete" aria-label="Delete agent" onclick={() => askDanger('delete')}>
-			<Trash2 /><span class="lbl">Delete</span>
-		</button>
 	{/if}
 {/snippet}
 
@@ -272,7 +258,6 @@
 	{:else}
 		<SettingRow label="Delete agent" hint={draft ? 'Discards this draft.' : 'Removes it everywhere.'}>
 			<InlineConfirm
-				bind:armed={deleteArmed}
 				label="Delete"
 				question={`Delete ${draft ? 'this draft' : title}?`}
 				size="sm"
@@ -284,6 +269,7 @@
 
 <div class="agd" bind:this={root}>
 	<DetailPane
+		width="reading"
 		name={title}
 		{tile}
 		{badges}
@@ -291,7 +277,6 @@
 		{primary}
 		{topStatus}
 		{banner}
-		facts={factList}
 		{tabs}
 		{tab}
 		onTabChange={(t) => onTab(t as AgentTab)}
@@ -372,9 +357,7 @@
 		container: agd / inline-size;
 		min-height: 100%;
 	}
-	.agd :global(.st-dwrap) {
-		max-width: 740px;
-	}
+
 	.savetick {
 		margin-left: auto;
 		display: inline-flex;
@@ -424,57 +407,8 @@
 		background: var(--st-warning-soft);
 		color: var(--st-warning);
 	}
-	.agd :global(.st-dha .st-btn:not(.danger)) {
-		color: var(--st-mfg);
-	}
-	.agd :global(.st-dha .st-btn:not(.danger):hover:not(:disabled)) {
-		color: var(--st-fg);
-	}
-
-	/* 601-900px of page: compact header buttons. */
-	@container settings (max-width: 900px) {
-		.lbl {
-			display: none;
-		}
-		.agd :global(.st-dha .st-btn) {
-			width: 32px;
-			padding: 0;
-			justify-content: center;
-		}
-	}
-
-	/* Narrow detail (phone, or a cramped split): icon buttons, rows wrap. */
+	/* Narrow form rows wrap; the shared DetailPane owns the header. */
 	@container agd (max-width: 560px) {
-		.lbl {
-			display: none;
-		}
-		.agd :global(.st-dh) {
-			grid-template-columns: auto minmax(0, 1fr) auto;
-			align-items: start;
-			gap: 12px;
-		}
-		.agd :global(.st-dha) {
-			grid-column: auto;
-			gap: 2px;
-			flex-wrap: nowrap;
-		}
-		.agd :global(.st-dha .st-btn) {
-			width: 38px;
-			height: 38px;
-			padding: 0;
-			justify-content: center;
-			border-color: transparent;
-		}
-		.agd :global(.st-facts) {
-			grid-template-columns: repeat(2, minmax(0, 1fr));
-		}
-		.agd :global(.st-fact:nth-child(odd)) {
-			border-left: 0;
-			padding-left: 0;
-		}
-		.agd :global(.st-fact:nth-child(n + 3)) {
-			border-top: 1px solid var(--st-border);
-		}
 		.agd :global(.st-row:has(> .st-rt)) {
 			display: flex;
 			flex-wrap: wrap;
@@ -500,19 +434,10 @@
 		}
 		.agd :global(.st-row .st-txt) {
 			flex: 1 1 160px;
-			width: auto !important;
 		}
 		.agd :global(.st-rowx) {
 			padding: 4px 14px 14px;
 		}
-	}
-	/* Phone: the tab strip runs edge to edge. */
-	:global(.settings-shell[data-stacked]) .agd :global(.st-tabs-wrap) {
-		margin-left: -14px;
-		margin-right: -14px;
-	}
-	:global(.settings-shell[data-stacked]) .agd :global(.st-tabs) {
-		padding: 0 14px;
 	}
 	@media (prefers-reduced-motion: reduce) {
 		.savetick :global(.spin) {

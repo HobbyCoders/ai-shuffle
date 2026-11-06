@@ -12,6 +12,7 @@
 	import CollectionPage from '../shell/CollectionPage.svelte';
 	import EmptyDetail from '../shell/EmptyDetail.svelte';
 	import ListItem from '../rows/ListItem.svelte';
+ import RowGroup from '../rows/RowGroup.svelte';
 	import SelectField from '../rows/SelectField.svelte';
 	import InlineBanner from '../rows/InlineBanner.svelte';
 	import LogDetail from './LogDetail.svelte';
@@ -72,7 +73,7 @@
 	}
 </script>
 
-<CollectionPage category={CATEGORY} {count} filterPlaceholder="Search logs" filterIcon="search" bind:filter>
+<CollectionPage category={CATEGORY} {count} filterPlaceholder={model.total > 6 || filter ? 'Search logs' : null} filterIcon="search" bind:filter>
 	{#snippet toolbar()}
 		<span class="anchor" data-setting-anchor="logs.level">
 			<SelectField
@@ -116,6 +117,7 @@
 		{#if model.error}
 			<InlineBanner tone="warn"><span role="alert">{model.error}</span></InlineBanner>
 		{/if}
+  <RowGroup title="Recent entries">
 		{#if model.forbidden}
 			<p class="st-empty">{FORBIDDEN_TEXT}</p>
 		{:else if model.loading && !model.loaded}
@@ -140,12 +142,13 @@
 				/>
 			{/each}
 		{/if}
+  </RowGroup>
 	{/snippet}
 	{#snippet detail()}
 		{#if entry}
 			<LogDetail {entry} onSameLogger={sameLogger} />
 		{:else}
-			<EmptyDetail icon={ScrollText} message="Select a log entry." />
+			<EmptyDetail icon={ScrollText} message="Select a log entry." idle />
 		{/if}
 	{/snippet}
 </CollectionPage>
@@ -169,7 +172,7 @@
 		border: 1px solid var(--st-border-strong);
 		border-radius: 999px;
 		background: var(--st-muted);
-		font-family: var(--st-mono);
+		font-family: inherit;
 		font-size: 11.5px;
 		color: var(--st-fg);
 	}

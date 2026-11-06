@@ -62,11 +62,11 @@
 		display: inline-flex;
 		align-items: center;
 		gap: 6px;
-		height: 30px;
-		padding: 0 8px 0 10px;
+		height: 32px;
+		padding: 0 9px 0 10px;
 		border-radius: var(--st-radius-md);
 		border: 1px solid var(--st-input);
-		background: var(--st-muted);
+		background: var(--st-field);
 		font-size: 13px;
 		white-space: nowrap;
 		max-width: 260px;
@@ -80,9 +80,6 @@
 		height: 14px;
 		color: var(--st-mfg);
 		transition: transform 0.15s;
-	}
-	.st-vbtn:hover {
-		border-color: var(--st-border-strong);
 	}
 	.st-vbtn[aria-expanded='true'] :global(svg.lucide) {
 		transform: rotate(180deg);

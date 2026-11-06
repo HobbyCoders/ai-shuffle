@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { Session } from '$lib/api/client';
 import type { ChatMessage } from '$lib/stores/types';
 import {
+	gitProgressWord,
 	cardActions,
 	withinTapTarget,
 	sessionNeedsYou,
@@ -36,9 +37,11 @@ import {
 	UNKNOWN_REMOTE_DEVICE,
 	sessionWorkMs,
 	GIT_STAGE_LABELS,
+	formatElapsed,
+	formatExactElapsed,
+	formatRowTime,
 	GIT_STAGE_TONES,
 	GIT_STAGE_TIPS,
-	RUNTIME_STATUS_TONES,
 	RUNTIME_STATUS_WORDS,
 	runtimeStatusWord,
 	STATUS_LABELS,
@@ -266,7 +269,6 @@ describe('a turn that failed', () => {
 		expect(deriveStatus({ ...base, failed: true })).toBe('failed');
 		expect(STATUS_LABELS.failed).toBe('Failed');
 		expect(runtimeStatusWord('failed')).toBe('Failed');
-		expect(RUNTIME_STATUS_TONES.failed).toBe('danger');
 	});
 
 	it('gives way to whatever is happening now', () => {
@@ -600,9 +602,6 @@ describe('runtime status words', () => {
 		expect(RUNTIME_STATUS_WORDS.pr).toBe('Done');
 		expect(RUNTIME_STATUS_WORDS.pr_merged).toBe('Done');
 		expect(RUNTIME_STATUS_WORDS.working).toBe('Working');
-		expect(RUNTIME_STATUS_TONES.working).toBe('accent');
-		expect(RUNTIME_STATUS_TONES.needs_permission).toBe('amber');
-		expect(RUNTIME_STATUS_TONES.done).toBe('muted');
 	});
 
 	it('flags exactly the prompt-parked statuses for the warning glyph', () => {
@@ -694,9 +693,9 @@ describe('sessionWorkMs (#1619)', () => {
 
 describe('cardActions', () => {
 	it('offers Archive + Settle, then Active + Archive, then Restore', () => {
-		expect(cardActions({ is_active: true, status: 'active' })).toEqual(['archive', 'settle']);
-		expect(cardActions({ is_active: false, status: 'active' })).toEqual(['activate', 'archive']);
-		expect(cardActions({ is_active: false, status: 'archived' })).toEqual(['restore']);
+		expect(cardActions({ is_active: true, status: 'active' })).toEqual(['settle']);
+		expect(cardActions({ is_active: false, status: 'active' })).toEqual(['activate']);
+		expect(cardActions({ is_active: false, status: 'archived' })).toEqual(['activate']);
 	});
 });
 
@@ -984,5 +983,56 @@ describe('the three Needs-you consumers agree (spec §5)', () => {
 		expect(deriveStatus({ ...base, attention: null })).toBe('working');
 		expect(deriveStatus({ ...base, attention: { count: 1, kind: 'permission' } })).toBe('needs_permission');
 		expect(deriveStatus({ ...base, remoteRuntimeState: 'working', attention: null })).toBe('working');
+	});
+});
+
+describe('gitProgressWord', () => {
+	it('names the work that has no PR word to carry it', () => {
+		expect(gitProgressWord('dirty')).toBe('Uncommitted');
+		expect(gitProgressWord('committed')).toBe('Committed');
+		expect(gitProgressWord('pushed')).toBe('Pushed');
+	});
+
+	it('stays quiet when there is nothing to add', () => {
+		for (const stage of ['pr', 'merged', 'closed', 'clean', 'none'] as const) {
+			expect(gitProgressWord(stage)).toBeNull();
+		}
+	});
+
+	it('speaks up for stray edits on top of a PR', () => {
+		expect(gitProgressWord('merged', true)).toBe('Uncommitted');
+	});
+});
+
+describe('formatRowTime', () => {
+	it('ticks seconds only while ticking', () => {
+		expect(formatRowTime(42_000, true)).toBe('42s');
+		expect(formatRowTime(252_000, true)).toBe('4m 12s');
+		expect(formatRowTime(3_969_000, true)).toBe('1h 06m');
+	});
+
+	it('shows whole minutes otherwise, rounded down', () => {
+		expect(formatRowTime(0, false)).toBe('<1m');
+		expect(formatRowTime(59_999, false)).toBe('<1m');
+		expect(formatRowTime(60_000, false)).toBe('1m');
+		expect(formatRowTime(702_000, false)).toBe('11m');
+		expect(formatRowTime(3_599_999, false)).toBe('59m');
+		expect(formatRowTime(3_600_000, false)).toBe('1h 00m');
+		expect(formatRowTime(3_969_000, false)).toBe('1h 06m');
+		expect(formatRowTime(-5, false)).toBe('<1m');
+	});
+
+	it('leaves the shared live format alone', () => {
+		expect(formatElapsed(702_000)).toBe('11m 42s');
+	});
+});
+
+describe('formatExactElapsed', () => {
+	it('keeps the seconds at every size', () => {
+		expect(formatExactElapsed(42_000)).toBe('42s');
+		expect(formatExactElapsed(702_000)).toBe('11m 42s');
+		expect(formatExactElapsed(3_969_000)).toBe('1h 06m 09s');
+		expect(formatExactElapsed(36_000_000)).toBe('10h 00m 00s');
+		expect(formatExactElapsed(-1)).toBe('0s');
 	});
 });

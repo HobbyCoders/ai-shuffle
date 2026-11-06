@@ -17,6 +17,7 @@
 	 * `onchange` that reports a failed save (see `settle`) restores the
 	 * previous value.
 	 */
+	import { ChevronDown } from 'lucide-svelte';
 	import { getSettingsAccess } from '$lib/settings/access.svelte';
 	import { controlAria, getRowContext, settle, type ChangeResult } from './row-context';
 
@@ -48,10 +49,10 @@
 	const flat = $derived(options.map((o): SelectOption => (typeof o === 'string' ? { value: o, label: o } : o)));
 </script>
 
+<span class="st-sel-wrap" style:max-width="{width}px">
 <select
 	class="st-sel"
 	class:st-mono={mono}
-	style:max-width="{width}px"
 	{value}
 	disabled={disabled || access.readOnly}
 	{...controlAria(row, label)}
@@ -85,22 +86,32 @@
 		{/each}
 	{/if}
 </select>
+<ChevronDown aria-hidden="true" />
+</span>
 
 <style>
+	.st-sel-wrap {
+		position: relative;
+		display: inline-flex;
+		min-width: 0;
+		color: var(--st-mfg);
+	}
+	.st-sel-wrap :global(svg.lucide) {
+		position: absolute;
+		right: 9px;
+		top: 50%;
+		width: 14px;
+		height: 14px;
+		transform: translateY(-50%);
+		pointer-events: none;
+	}
 	.st-sel {
+		width: 100%;
 		appearance: none;
-		height: 30px;
+		height: 32px;
 		border-radius: var(--st-radius-md);
 		border: 1px solid var(--st-input);
-		background-color: var(--st-muted);
-		background-image: linear-gradient(45deg, transparent 50%, var(--st-mfg) 50%),
-			linear-gradient(135deg, var(--st-mfg) 50%, transparent 50%);
-		background-position:
-			calc(100% - 15px) 50%,
-			calc(100% - 11px) 50%;
-		background-size:
-			4px 4px,
-			4px 4px;
+		background-color: var(--st-field);
 		background-repeat: no-repeat;
 		padding: 0 30px 0 10px;
 		font-size: 13px;
@@ -118,7 +129,7 @@
 	}
 	.st-sel:focus {
 		outline: none;
-		border-color: var(--st-primary);
+		border-color: var(--st-field-focus);
 		box-shadow: 0 0 0 3px var(--st-primary-soft);
 	}
 	.st-sel:disabled {

@@ -12,12 +12,13 @@ describe('shared session swipe styles', () => {
 
 	it('keeps vertical scroll native and paints the inbox lanes behind the row', () => {
 		expect(card).toMatch(/\.scard-frame\s*\{[^}]*touch-action: pan-y/);
-		// A right swipe uncovers the left lane (Archive), a left swipe the right
-		// lane (Settle / Move to Active / Restore); colour follows the action.
-		expect(card).toContain('class="lane l archive"');
+		// Archive is retired. Only a left swipe reveals Settle / Move to Active.
+		expect(card).not.toContain('class="lane l archive"');
+		expect(card).toContain('<span>Settle</span>');
+		expect(card).toContain('<span>Move to Active</span>');
 		expect(card).toContain('class="lane r toggle"');
 		expect(card).toMatch(/\.lane\.toggle\s*\{[^}]*var\(--primary\)/);
-		expect(card).toMatch(/\.lane\.archive\s*\{[^}]*var\(--info\)/);
+		expect(card).not.toMatch(/\.lane\.archive\s*\{/);
 		expect(card).toContain('data-session-card={session.id}');
 	});
 });

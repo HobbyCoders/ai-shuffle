@@ -28,12 +28,12 @@ it('populates the open picker from first sync without visiting Settings or reloa
  const onSelect = vi.fn();
  render(ModelPicker, { value: encodeProviderModel('synced-provider', 'synced/chat'), onSelect });
  await fireEvent.click(screen.getByRole('button', { name: 'synced/chat' }));
- expect(screen.queryByRole('tab', { name: /Claude/ })).toBeNull();
+ expect(screen.queryByRole('group', { name: /Claude/ })).toBeNull();
  api.get.mockResolvedValue(synced);
  await hydrateModelRegistry();
  await tick();
- expect(screen.getByRole('tab', { name: 'OpenAI · API' })).toBeTruthy();
- expect(screen.queryByRole('tab', { name: /Claude/ })).toBeNull();
+ expect(screen.getByRole('group', { name: /^OpenAI/ })).toBeTruthy();
+ expect(screen.queryByRole('group', { name: /Claude/ })).toBeNull();
  await fireEvent.click(screen.getByRole('option', { name: /My saved model/ }));
  expect(onSelect).toHaveBeenCalledWith(encodeProviderModel('synced-provider', 'synced/chat'));
  expect(api.get.mock.calls.every(([path]) => path === '/models')).toBe(true);
@@ -55,21 +55,19 @@ it('omits empty providers from picker catalogs without removing their registry r
  expect(getProviders().map(p => p.id)).toEqual(['empty', populated.id]);
 });
 
-it('moves the open picker off a provider that loses its last model', async () => {
+it('drops a provider from the open picker when it loses its last model', async () => {
  const first = { ...synced.providers[0], id: 'first', name: 'OpenRouter', provider_type: 'openrouter' };
  api.get.mockResolvedValue({ ...empty, providers: [first, ...synced.providers] });
  await hydrateModelRegistry();
  render(ModelPicker, { value: '', onSelect: vi.fn(), allowEmpty: true, emptyLabel: 'Agent default' });
  await fireEvent.click(screen.getByRole('button', { name: 'Agent default' }));
- await fireEvent.click(screen.getByRole('tab', { name: 'OpenRouter · API' }));
+ expect(screen.getByRole('group', { name: /^OpenRouter/ })).toBeTruthy();
  api.get.mockResolvedValue({ ...empty, providers: [{ ...first, models: [] }, ...synced.providers] });
  await hydrateModelRegistry();
  await tick();
- expect(screen.queryByRole('tab', { name: 'OpenRouter · API' })).toBeNull();
- expect(screen.getByRole('tab', { name: 'OpenAI · API' }).getAttribute('aria-selected')).toBe('true');
+ expect(screen.queryByRole('group', { name: /^OpenRouter/ })).toBeNull();
+ expect(screen.getByRole('group', { name: /^OpenAI/ })).toBeTruthy();
  expect(screen.getByRole('option', { name: /My saved model/ })).toBeTruthy();
- await fireEvent.click(screen.getByRole('tab', { name: /Favorites/ }));
- expect(screen.getByRole('tab', { name: /Favorites/ }).getAttribute('aria-selected')).toBe('true');
 });
 
 it('accepts provider-only snapshots with no native models', async () => {
@@ -123,7 +121,7 @@ it('apiKeyOnly leaves out every subscription sign-in, Claude included', async ()
 it('the apiKeyOnly picker offers no subscription model to choose', async () => {
  api.get.mockResolvedValue(mixed);
  await hydrateModelRegistry();
- render(ModelPicker, { value: '', onSelect: vi.fn(), allowEmpty: true, emptyLabel: 'Agent default', apiKeyOnly: true, startOnAll: true });
+ render(ModelPicker, { value: '', onSelect: vi.fn(), allowEmpty: true, emptyLabel: 'Agent default', apiKeyOnly: true });
  await fireEvent.click(screen.getByRole('button', { name: 'Agent default' }));
  expect(screen.getByRole('option', { name: /My saved model/ })).toBeTruthy();
  expect(screen.queryByRole('option', { name: /GPT-5|Grok 4|Sonnet/ })).toBeNull();

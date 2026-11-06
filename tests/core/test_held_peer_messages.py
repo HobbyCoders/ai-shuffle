@@ -264,7 +264,7 @@ async def test_parked_peer_message_wakes_without_waiting_for_background_completi
 
 
 @pytest.mark.parametrize("blocked", ["stop", "archive"])
-async def test_parked_message_cannot_override_stop_or_archive(mock_db, _quiet, blocked):
+async def test_parked_message_respects_stop_but_legacy_archive_does_not_stop(mock_db, _quiet, blocked):
     from app.core.task_registry import task_registry
     from app.db import sessions
 
@@ -274,10 +274,18 @@ async def test_parked_message_cannot_override_stop_or_archive(mock_db, _quiet, b
         task_registry.mark_user_stopped("blocked-park")
     else:
         sessions.update_session("blocked-park", status="archived")
-    assert await turn_scheduler.on_agent_message("blocked-park", "w1", "wake up") is None
-    assert turns_db.get_queued_turns("blocked-park") == []
+    result = await turn_scheduler.on_agent_message("blocked-park", "w1", "wake up")
     assert _held("blocked-park") == []
-    assert _quiet == []
+    if blocked == "stop":
+        assert result is None
+        assert turns_db.get_queued_turns("blocked-park") == []
+        assert _quiet == []
+    else:
+        assert result not in (None, turn_scheduler.HELD)
+        (queued,) = turns_db.get_queued_turns("blocked-park")
+        assert queued["id"] == result
+        assert _quiet == ["blocked-park"]
+        assert "wake up" in await _run_turn(queued)
 
 
 def _seed(session_id):

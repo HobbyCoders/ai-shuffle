@@ -13,8 +13,8 @@
 	let { value, onSelect }: Props = $props();
 
 	const OPTIONS: { mode: SessionMode; label: string; hint: string; icon: typeof Code2 }[] = [
-		{ mode: 'code', label: 'Workspace', hint: 'New sessions get workspace tools', icon: Code2 },
-		{ mode: 'chat', label: 'Chat', hint: 'New sessions are plain chats', icon: MessagesSquare }
+		{ mode: 'code', label: 'Workspace', hint: 'New chats get workspace tools', icon: Code2 },
+		{ mode: 'chat', label: 'Chat', hint: 'New chats are plain chats', icon: MessagesSquare }
 	];
 
 	let buttons = $state<(HTMLButtonElement | null)[]>([]);

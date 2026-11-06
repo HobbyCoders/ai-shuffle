@@ -640,6 +640,14 @@ const COMPACT_ACTION_LABELS: Record<ToolAction, (count: number) => string> = {
 	other: (n) => `Tools ${n}`
 };
 
+/** Sentences this short fit a phone's fold row, so they stay as written. */
+const PHONE_FULL_SUMMARY_CHARS = 30;
+
+/** The condensed tally for a phone, or null when the sentence itself fits. */
+function phoneSummary(rows: WorkLogEntry[]): string | null {
+	return (summarizeWork(rows)?.length ?? 0) > PHONE_FULL_SUMMARY_CHARS ? summarizeWorkCompact(rows) : null;
+}
+
 /**
  * The same tally as `summarizeWork`, condensed to fit a phone's fold row:
  * "Read 2 · Edit 1 · Ran 4 · Search 3 · 1 failed". Every token still carries
@@ -1179,7 +1187,7 @@ function emitLiveTurn(turn: Positioned[], items: DisplayItem[], sessionId?: stri
 		for (const row of folded) hidden.add(row);
 		if (folded.length > 0) {
 			const rows = folded.map(({ message, index }) => ({ message, index }));
-			runs.push({ index: runIndex, key: runKeyOf(open[0]), folded: rows, summary: summarizeWork(rows), compactSummary: summarizeWorkCompact(rows) });
+			runs.push({ index: runIndex, key: runKeyOf(open[0]), folded: rows, summary: summarizeWork(rows), compactSummary: phoneSummary(rows) });
 		}
 		runIndex++;
 		open = [];
@@ -1211,7 +1219,7 @@ function emitLiveTurn(turn: Positioned[], items: DisplayItem[], sessionId?: stri
 		runs,
 		durationLabel: null,
 		summary: summarizeWork(folded),
-		compactSummary: summarizeWorkCompact(folded)
+		compactSummary: phoneSummary(folded)
 	});
 }
 
@@ -1688,7 +1696,7 @@ export function buildTranscriptModel(
 			})),
 			durationLabel,
 			summary: summarizeWork(folded),
-			compactSummary: summarizeWorkCompact(folded)
+			compactSummary: phoneSummary(folded)
 		});
 	}
 

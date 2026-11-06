@@ -107,7 +107,7 @@ export function firstCopyNotice(status: NetworkStatus | null | undefined): First
 			const done = Math.min(copy.apply_done ?? 0, total);
 			return {
 				title,
-				message: `Saving the data copied from ${peer}. Sessions and workers appear when this finishes.`,
+				message: `Saving the data copied from ${peer}. Chats and workers appear when this finishes.`,
 				severity: 'info',
 				fraction: total ? done / total : null
 			};
@@ -137,7 +137,7 @@ export function transcriptNotice(status: NetworkStatus | null | undefined): Firs
 	const copy = status.hub?.transcripts;
 	if (!copy || !copy.sessions_total) return null;
 	const peer = copy.peer_name || 'another worker';
-	const count = `${copy.sessions_done.toLocaleString('en-US')} of ${copy.sessions_total.toLocaleString('en-US')} sessions`;
+	const count = `${copy.sessions_done.toLocaleString('en-US')} of ${copy.sessions_total.toLocaleString('en-US')} chats`;
 	const fraction = Math.min(1, copy.sessions_done / copy.sessions_total);
 	if (copy.error) {
 		return {

@@ -1,4 +1,5 @@
 <script lang="ts">
+	import ActionButton from '$lib/components/settings/rows/ActionButton.svelte';
 	/**
 	 * ClientSetupForm: the manual fallback for a plugin service with no OAuth
 	 * client from any source. The owner copies the return address into the
@@ -79,7 +80,7 @@
 			<span class="cs-label" id="{uid}-ret">Return address</span>
 			<div class="cs-copy">
 				<code aria-labelledby="{uid}-ret">{redirectUri}</code>
-				<button type="button" class="cs-btn" onclick={copy} aria-label="Copy return address">{copied ? 'Copied' : 'Copy'}</button>
+				<ActionButton type="button"  onclick={copy} aria-label="Copy return address">{copied ? 'Copied' : 'Copy'}</ActionButton>
 			</div>
 			<span class="cs-help">{ownApp ? 'Add this to your own app at the provider' : 'Add this to the provider'}</span>
 		</li>
@@ -103,9 +104,9 @@
 	{#if !secure}<p class="cs-error" role="alert">Needs HTTPS or this computer.</p>{/if}
 	{#if error}<p class="cs-error" role="alert">{error}</p>{/if}
 	<div class="cs-actions">
-		<button type="submit" class="cs-btn cs-primary" disabled={disabled || busy || !secure || !clientId.trim()}>
+		<ActionButton type="submit" variant="primary" disabled={disabled || busy || !secure || !clientId.trim()}>
 			{busy ? 'Saving…' : 'Save client'}
-		</button>
+		</ActionButton>
 	</div>
 </form>
 
@@ -115,8 +116,8 @@
 		gap: 12px;
 		min-width: 0;
 		padding: 12px;
-		border: 1px dashed color-mix(in oklab, var(--border) 100%, var(--foreground) 12%);
-		border-radius: 10px;
+		border: 0;
+		border-radius: var(--radius);
 		background: color-mix(in oklab, var(--muted) 30%, transparent);
 	}
 	.cs-steps {
@@ -166,7 +167,7 @@
 		min-width: 0;
 		padding: 7px 9px;
 		border: 1px solid var(--border);
-		border-radius: 7px;
+		border-radius: var(--radius);
 		background: var(--background);
 		font-family: var(--font-mono, ui-monospace, monospace);
 		font-size: 11.5px;
@@ -181,12 +182,11 @@
 		min-height: 36px;
 		padding: 6px 10px;
 		border: 1px solid var(--border);
-		border-radius: 7px;
+		border-radius: var(--radius);
 		background: var(--background);
 		color: var(--foreground);
 		font: inherit;
 		font-size: 13px;
-		font-family: var(--font-mono, ui-monospace, monospace);
 		transition: border-color .15s ease-out, box-shadow .15s ease-out;
 	}
 	.cs-input:focus-visible {
@@ -196,32 +196,12 @@
 	}
 	.cs-input:disabled { opacity: .55; cursor: not-allowed; }
 	.cs-actions { display: flex; justify-content: flex-end; }
-	.cs-btn {
-		min-height: 32px;
-		padding: 0 12px;
-		border: 1px solid var(--border);
-		border-radius: 7px;
-		background: var(--card);
-		color: var(--foreground);
-		font: inherit;
-		font-size: 12.5px;
-		font-weight: 500;
-		cursor: pointer;
-		white-space: nowrap;
-		transition: background .15s ease-out, border-color .15s ease-out, transform .1s ease-out;
-	}
-	.cs-btn:hover:not(:disabled) { background: color-mix(in oklab, var(--foreground) 5%, var(--card)); }
-	.cs-btn:active:not(:disabled) { transform: translateY(1px); }
-	.cs-btn:focus-visible { outline: 2px solid var(--ring, var(--primary)); outline-offset: 2px; }
-	.cs-btn:disabled { opacity: .5; cursor: not-allowed; }
-	.cs-primary { background: var(--primary); border-color: var(--primary); color: var(--primary-foreground); }
-	.cs-primary:hover:not(:disabled) { background: color-mix(in oklab, var(--primary) 88%, var(--foreground)); }
 	.cs-error { margin: 0; font-size: 12px; color: var(--destructive); }
 	@media (pointer: coarse) {
-		.cs-btn, .cs-input { min-height: 44px; }
+		.cs-input { min-height: 44px; }
 		.cs-input { font-size: 16px; }
 	}
 	@media (prefers-reduced-motion: reduce) {
-		.cs-btn, .cs-input { transition: none; }
+		.cs-input { transition: none; }
 	}
 </style>

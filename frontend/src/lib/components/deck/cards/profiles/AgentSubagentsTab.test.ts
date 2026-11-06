@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import AgentSubagentsTab from './AgentSubagentsTab.svelte';
-import { invokeModeOf, invokeModePatch, subagentsFact, type AgentInvokeMode, type RosterAgent } from './agentForm';
+import { invokeModeOf, invokeModePatch, type AgentInvokeMode, type RosterAgent } from './agentForm';
 
 afterEach(cleanup);
 
@@ -121,12 +121,5 @@ describe('mode helpers', () => {
 		expect(invokeModePatch('none')).toEqual({ agent_invoke_mode: 'none', enabled_agents: [] });
 		expect(invokeModePatch('custom')).toEqual({ agent_invoke_mode: 'custom' });
 		expect(invokeModePatch('all')).toEqual({ agent_invoke_mode: 'all' });
-	});
-
-	it('words the header fact', () => {
-		expect(subagentsFact('none', 5, 0)).toBe('None');
-		expect(subagentsFact('all', 5, 5)).toBe('All 5');
-		expect(subagentsFact('custom', 5, 0)).toBe('0 of 5');
-		expect(subagentsFact('all', 0, 0)).toBe('None');
 	});
 });

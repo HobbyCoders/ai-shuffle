@@ -44,7 +44,7 @@
 	import { buildModelPickerCatalog } from '$lib/constants/model-picker';
 	import { resolveEffortModel, resolveModelEffort, reconcileModelEffort } from '$lib/constants/model-effort';
 	// The controls sheet is the mobile app's; the web build registers none.
-	import { composerShell } from './composer-shell';
+	import { phoneLayout } from './phone/phone-layout.svelte';
 	import { Globe, SlidersHorizontal, Lock, SquareTerminal } from 'lucide-svelte';
 	import type { TerminalToggle } from './composer-shell';
 	import {
@@ -71,6 +71,8 @@
 	import { accessModes, effectiveAccessMode } from './session-scope';
 
 	interface Props {
+		/** No transcript yet: the headline above the composer is what must stay whole. */
+		newChat?: boolean;
 		onBrowserToggle?: () => void;
 		onBrowserPreload?: () => void;
 		browserOpen?: boolean;
@@ -84,7 +86,7 @@
 		callAction?: Snippet;
 	}
 
-	let { callAction, onSheetOpenChange, inertToolbar = false, onBrowserToggle, onBrowserPreload, browserOpen = false, terminal }: Props = $props();
+	let { callAction, onSheetOpenChange, inertToolbar = false, onBrowserToggle, onBrowserPreload, browserOpen = false, terminal, newChat = false }: Props = $props();
 
 	// ── Desktop popovers ──────────────────────────────────────────────
 	// Three anchored popovers, one open at a time: the permission menu, the
@@ -96,6 +98,7 @@
 	// open upward, and in the new-chat state the box sits mid-screen, so a
 	// fixed height would push the tall ones past the top of the viewport.
 	let popoverRoom = $state<number | null>(null);
+	const MODEL_MENU_MIN_ROOM = 260;
 	let permissionWrapRef = $state<HTMLDivElement | null>(null);
 	let modelWrapRef = $state<HTMLDivElement | null>(null);
 	let effortWrapRef = $state<HTMLDivElement | null>(null);
@@ -111,10 +114,39 @@
 		}
 	}
 
+	/** Where the model picker hangs from, relative to its button's wrapper. */
+	let modelMenuAnchor = $state<{ bottom?: number; top?: number; right: number; width: number } | null>(null);
+	let modelLayerRef = $state<HTMLDivElement | null>(null);
+
 	function measurePopoverRoom() {
 		if (!dockRef) return;
+		const dockTop = dockRef.getBoundingClientRect().top;
+		const card = dockRef.closest('.chat-island')?.getBoundingClientRect();
+		const wrapBox = modelWrapRef?.getBoundingClientRect();
+		// A new chat has no transcript to protect but does have a headline above
+		// the composer. Whenever a usable list fits below, the picker opens 8px under
+		// the composer, right edges aligned, over the empty page and at most the
+		// context row, leaving the headline whole.
+		const roomBelow = card ? window.innerHeight - card.bottom - 20 : 0;
+		if (newChat && card && wrapBox && card.width > 0 && roomBelow >= MODEL_MENU_MIN_ROOM) {
+			popoverRoom = Math.max(220, Math.floor(roomBelow));
+			modelMenuAnchor = { top: card.bottom - wrapBox.top + 8, right: wrapBox.right - card.right, width: Math.min(card.width, 380) };
+			return;
+		}
+		// The model picker clears the whole composer so it never covers what you
+		// are typing. With too little room above (a short window, an open phone
+		// keyboard) it falls back to hanging from the controls row.
+		const top = card && card.width > 0 && card.top - 22 >= MODEL_MENU_MIN_ROOM ? card.top : dockTop;
 		// Minus the 10px anchor gap and a 12px margin from the viewport edge.
-		popoverRoom = Math.max(220, Math.floor(dockRef.getBoundingClientRect().top - 22));
+		popoverRoom = Math.max(220, Math.floor(top - 22));
+		const wrap = modelWrapRef?.getBoundingClientRect();
+		modelMenuAnchor = card && wrap && card.width > 0
+			? {
+				bottom: wrap.bottom - top + 8,
+				right: wrap.right - card.right,
+				width: Math.min(card.width, window.innerWidth <= 520 ? card.width : 380)
+			}
+			: null;
 	}
 
 	function togglePopover(kind: DockPopover) {
@@ -129,7 +161,7 @@
 	function handleDocumentClick(e: MouseEvent) {
 		if (!openPopover) return;
 		const wrap = wrapFor(openPopover);
-		if (!wrap || !(e.target instanceof Node) || wrap.contains(e.target)) return;
+		if (!wrap || !(e.target instanceof Node) || wrap.contains(e.target) || modelLayerRef?.contains(e.target)) return;
 		openPopover = null;
 	}
 
@@ -152,7 +184,11 @@
 
 	let mobileSheetOpen = $state(false);
 	const mobilePanelId = $props.id();
-	const ControlsSheet = composerShell().ControlsSheet;
+	const ControlsSheet = $derived(phoneLayout.ControlsSheet);
+	// A window widened past phone width drops the sheet: its open state goes too.
+	$effect(() => {
+		if (!ControlsSheet && mobileSheetOpen) setMobileSheetOpen(false);
+	});
 	export function setMobileSheetOpen(open: boolean) {
 		closePopover();
 		if (!open && document.activeElement?.closest('.mobile-composer-controls')) {
@@ -444,11 +480,13 @@
 	// Effort shows its pinned level when one is set, else "Auto" (the model's
 	// own default); access always names the effective mode (it defaults to
 	// 'default' → Ask, never blank).
+	// Effort only shows when there is something real to say: never "Unknown".
+	const showEffort = $derived(effortCapability.known ? effortLevels.length > 0 : !!effortValue);
 	const effortLabel = $derived(
 		!effortCapability.known ? (effortValue ?? 'Unknown') : !effortLevels.length ? 'Not adjustable' : effortValue ? (effortLevels.find((m) => m.value === effortValue)?.label ?? 'Auto') : 'Auto'
 	);
 	const permissionLabel = $derived(
-		permissionPending ? 'Access' : permissionModes.find((m) => m.value === permissionValue)?.label ?? 'Ask'
+		permissionPending ? 'Access' : permissionModes.find((m) => m.value === permissionValue)?.label ?? 'Ask first'
 	);
 	const permissionDescription = $derived(
 		permissionPending ? "loading this chat's own setting" : permissionModes.find((m) => m.value === permissionValue)?.description ?? ''
@@ -472,12 +510,12 @@
 			aria-expanded={mobileSheetOpen}
 			aria-label={`${mobileSheetOpen ? 'Close' : 'Open'} chat controls. Current model: ${modelButtonLabel}`}
 		>
-			<SlidersHorizontal size={14} strokeWidth={1.8} aria-hidden="true" />
+			<SlidersHorizontal size={16} strokeWidth={1.75} aria-hidden="true" />
 		</button>
 			<div class="dock-pop-wrap desktop-controls" bind:this={permissionWrapRef} data-decision="access">
 				<button
 					type="button"
-					class="dock-txt"
+					class="dock-txt chevron-after"
 					class:open={openPopover === 'permission'}
 					class:binding-pending={permissionPending}
 					onclick={() => togglePopover('permission')}
@@ -555,10 +593,10 @@
 				onpointerenter={onBrowserPreload}
 				onfocus={onBrowserPreload}
 				aria-label="Toggle live browser view"
-				title="Toggle live browser view"
+				title={browserOpen ? 'Live browser view: on. Click to hide it.' : 'Live browser view: off. Click to show it.'}
 				aria-pressed={browserOpen}
 			>
-				<Globe size={14} strokeWidth={1.8} aria-hidden="true" />
+				<Globe size={16} strokeWidth={1.75} aria-hidden="true" />
 			</button>
 		{/if}
 
@@ -575,7 +613,7 @@
 				title={terminal.disabledReason ?? 'Toggle terminal'}
 				aria-pressed={terminal.open}
 			>
-				<SquareTerminal size={14} strokeWidth={1.8} aria-hidden="true" />
+				<SquareTerminal size={16} strokeWidth={1.75} aria-hidden="true" />
 			</button>
 		{/if}
 
@@ -585,10 +623,19 @@
 	<!-- One right group at every width. Only model/effort hide in the phone shell;
 	     the context producer stays mounted, preserving its fetch and open popover. -->
 	<div class="dock-group dock-right">
+		<!-- One producer across responsive web widths, first in the group so an idle
+		     ring leaves no gap between the model and the circles. The registered phone shell
+		     owns its quick-bar ring; its CSS-hidden dock must not start another. -->
+		{#if !ControlsSheet}
+		<div class="mobile-controls">
+			<ContextUsageBar onOpenChange={onUsageOpenChange} />
+		</div>
+		{/if}
 		<div class="dock-pop-wrap desktop-controls model-wrap" bind:this={modelWrapRef}>
 			<button
 				type="button"
 				class="dock-txt model-btn"
+				class:chevron-after={!showEffort}
 				class:open={openPopover === 'model'}
 				class:warn={rerouted && !voiceLane}
 				disabled={modelLocked}
@@ -600,8 +647,13 @@
 			>{#if modelLocked}<Lock size={11} aria-hidden="true" />{/if}<span>{modelButtonLabel}</span></button>
 
 			{#if openPopover === 'model'}
+				<div class="model-layer" bind:this={modelLayerRef} data-composer-owned-overlay="true">
 				<div
 					class="dock-menu model-menu"
+					style:bottom={modelMenuAnchor?.top !== undefined ? 'auto' : modelMenuAnchor?.bottom !== undefined ? `${modelMenuAnchor.bottom}px` : undefined}
+					style:top={modelMenuAnchor?.top !== undefined ? `${modelMenuAnchor.top}px` : undefined}
+					style:right={modelMenuAnchor ? `${modelMenuAnchor.right}px` : undefined}
+					style:width={modelMenuAnchor ? `${modelMenuAnchor.width}px` : undefined}
 					role="dialog"
 					aria-label="Choose model"
 					data-composer-owned-overlay="true"
@@ -622,13 +674,16 @@
 						onRequestClose={closePopover}
 					/>
 				</div>
+			</div>
 			{/if}
 		</div>
 
+		{#if showEffort}
+		<span class="dock-dot desktop-controls" aria-hidden="true">·</span>
 		<div class="dock-pop-wrap desktop-controls" bind:this={effortWrapRef}>
 			<button
 				type="button"
-				class="dock-tag effort-btn"
+				class="dock-txt effort-btn chevron-after"
 				class:open={openPopover === 'effort'}
 				disabled={modelLocked}
 				onclick={() => { if (!modelLocked) togglePopover('effort'); }}
@@ -661,20 +716,18 @@
 				</div>
 			{/if}
 		</div>
-
-		<!-- One producer across responsive web widths. The registered phone shell
-		     owns its quick-bar ring; its CSS-hidden dock must not start another. -->
-		{#if !ControlsSheet}
-		<div class="mobile-controls">
-			<ContextUsageBar onOpenChange={onUsageOpenChange} />
-		</div>
 		{/if}
 	</div>
 </div>
 
+{#if phoneLayout.active && !ControlsSheet}
+	<!-- Holds the quick bar's height for the moment its code takes to arrive. -->
+	<div class="quick-bar-slot" aria-hidden="true"></div>
+{/if}
 {#if ControlsSheet}
 <ControlsSheet
 	open={mobileSheetOpen}
+	{newChat}
 	panelId={mobilePanelId}
 	{inertToolbar}
 	onClose={() => setMobileSheetOpen(false)}
@@ -723,8 +776,9 @@
 {/if}
 
 <style>
-	/* ===== CONTROLS ROW (mockup `.controls`) =====
-	   No surface of its own — the box above provides the hairline frame. */
+	.quick-bar-slot { height: 44px; }
+	/* ===== CONTROLS ROW =====
+	   No surface of its own: the box provides the frame. */
 	.controls-dock {
 		/* Every popover in this row opens UPWARD over the input area directly
 		   above it. That area sets `z-index: 20`, so the row is lifted above it
@@ -735,6 +789,7 @@
 		align-items: center;
 		gap: 12px;
 		padding: 4px 10px 10px 14px;
+		min-width: 0;
 		overflow: visible;
 	}
 
@@ -750,7 +805,6 @@
 	.dock-right {
 		margin-left: auto;
 	}
-	.model-btn:disabled { display: inline-flex; align-items: center; gap: 4px; }
 	.model-btn span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 	.dock-pop-wrap {
@@ -760,32 +814,40 @@
 		align-items: center;
 	}
 
-	/* ===== PLAIN-TEXT CONTROLS (mockup `.txt`) ===== */
+	/* ===== PLAIN-TEXT CONTROLS ===== */
 	.dock-txt {
 		display: inline-flex;
 		align-items: center;
+		gap: 6px;
+		height: 28px;
 		max-width: 100%;
 		min-width: 0;
-		padding: 3px 5px;
+		padding: 0 7px;
 		background: transparent;
 		border: 0;
-		border-radius: 4px;
+		border-radius: var(--radius-control);
 		color: var(--muted-foreground);
 		font: inherit;
-		font-size: 12.5px;
-		font-weight: 500;
+		font-size: var(--fs-small);
+		font-weight: 450;
 		line-height: 1;
 		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
 		cursor: pointer;
 		transition: background-color 0.12s ease, color 0.12s ease;
 	}
 
 	.dock-txt:hover,
 	.dock-txt.open {
-		background: var(--muted);
+		background: var(--hover-overlay);
 		color: var(--foreground);
+	}
+
+	/* Model and effort read as one control: "Fake AI · High ⌄". */
+	.dock-dot {
+		margin: 0 -5px;
+		color: var(--subtle-foreground);
+		font-size: var(--fs-small);
+		pointer-events: none;
 	}
 
 	/* The chat's own value is on its way (#418): a quiet breathing label rather
@@ -806,7 +868,6 @@
 
 	.model-btn {
 		max-width: min(220px, 30vw);
-		display: block;
 	}
 
 	/* Reroute: amber text — the same treatment the old model pill carried, so
@@ -818,23 +879,23 @@
 		background: color-mix(in oklch, var(--warning) 10%, transparent);
 	}
 
-	/* ===== ICON BUTTONS (mockup `.ico`) ===== */
+	/* ===== ICON BUTTONS ===== */
 	.dock-ico {
 		display: grid;
 		place-items: center;
-		width: 24px;
-		height: 24px;
+		width: 28px;
+		height: 28px;
 		padding: 0;
 		background: transparent;
 		border: 0;
-		border-radius: 5px;
+		border-radius: var(--radius-control);
 		color: var(--muted-foreground);
 		cursor: pointer;
 		transition: background-color 0.12s ease, color 0.12s ease;
 	}
 
 	.dock-ico:hover:not(:disabled) {
-		background: var(--muted);
+		background: var(--hover-overlay);
 		color: var(--foreground);
 	}
 
@@ -844,8 +905,8 @@
 
 	.dock-ico.browser-toggle-btn.active,
 	.dock-ico.terminal-toggle-btn.active {
-		background: color-mix(in oklch, var(--primary) 12%, transparent);
-		color: var(--primary);
+		background: var(--muted);
+		color: var(--foreground);
 	}
 
 	.dock-ico:disabled {
@@ -853,38 +914,10 @@
 		cursor: not-allowed;
 	}
 
-	/* ===== EFFORT TAG (mockup `.tag`) ===== */
-	.dock-tag {
-		display: inline-flex;
-		align-items: center;
-		padding: 4px 7px;
-		background: var(--muted);
-		border: 0;
-		border-radius: 4px;
-		color: var(--foreground);
-		font: inherit;
-		font-size: 11.5px;
-		font-weight: 500;
-		line-height: 1;
-		white-space: nowrap;
-		cursor: pointer;
-		transition: background-color 0.12s ease, box-shadow 0.12s ease;
-	}
-
-	.dock-tag:hover {
-		background: color-mix(in oklch, var(--muted) 82%, var(--foreground));
-	}
-
-	.dock-tag.open {
-		background: color-mix(in oklch, var(--muted) 82%, var(--foreground));
-		box-shadow: inset 0 0 0 1px var(--border-strong);
-	}
-
 	.dock-txt:focus-visible,
-	.dock-ico:focus-visible,
-	.dock-tag:focus-visible {
-		outline: 1px solid var(--primary);
-		outline-offset: 2px;
+	.dock-ico:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 1px;
 	}
 
 	/* ===== POPOVERS =====
@@ -895,9 +928,9 @@
 		position: absolute;
 		bottom: calc(100% + 10px);
 		background: var(--popover);
-		border: 1px solid var(--border);
-		border-radius: calc(var(--radius, 0.75rem) * 0.8);
-		box-shadow: var(--shadow-l);
+		border: 1px solid var(--menu-border);
+		border-radius: var(--menu-radius);
+		box-shadow: var(--menu-shadow);
 		z-index: 60;
 		animation: dock-popover-in 0.16s cubic-bezier(0.16, 1, 0.3, 1);
 	}
@@ -911,27 +944,21 @@
 	.model-menu {
 		right: 0;
 		width: min(380px, calc(100vw - 24px));
-		padding: 6px;
+		padding: 0;
 		--mpp-width: 100%;
 		/* The list scrolls above the pinned context footer in short viewports. */
-		--mpp-height: min(400px, calc(var(--dock-pop-max, 454px) - 14px));
+		--mpp-height: min(420px, calc(var(--dock-pop-max, 454px) - 2px));
 	}
 
-	/* On a narrow screen the model button sits mid-row, so a 380px menu hung
-	   off its right edge spills past the left of the screen. Anchor it to the
-	   dock row instead and let it span the composer. */
-	@media (max-width: 520px) {
-		.model-wrap {
-			position: static;
-		}
-
-		.model-menu {
-			left: 0;
-			right: 0;
-			width: auto;
-		}
+	/* The panel fills the menu edge to edge, so it follows the menu's corners. */
+	.model-menu :global(.mpp) {
+		border-radius: calc(var(--menu-radius) - 1px);
 	}
 
+	/* Phone width: a real sheet, the same shape the phone app's picker has. */
+	.model-layer {
+		display: contents;
+	}
 	.effort-menu {
 		right: -6px;
 		width: min(280px, calc(100vw - 24px));
@@ -1031,6 +1058,20 @@
 	.access-check {
 		flex-shrink: 0;
 		color: var(--primary);
+	}
+
+	/* ===== A PHONE-WIDTH WINDOW: 44px targets ===== */
+	@media (max-width: 480px) {
+		.dock-txt { height: 44px; padding: 0 6px; }
+		.dock-ico { width: 40px; height: 44px; }
+		.dock-group { gap: 0; }
+		.dock-dot { margin: 0 -2px; }
+	}
+
+	/* The narrowest phones: the model's name matters more than icon gutters. */
+	@media (max-width: 340px) {
+		.dock-ico { width: 32px; }
+		.model-btn { max-width: 36vw; }
 	}
 
 	/* ===== MOBILE ===== */

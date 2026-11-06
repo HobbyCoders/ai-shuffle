@@ -1,12 +1,4 @@
-"""``exclude_archived`` on the keyset session list (sidebar "Load older sessions").
-
-The sidebar never shows archived chats (they live in Settings), but it used to
-page through them: ``has_more`` counted archived rows, so "Load older sessions"
-kept appearing and each click fetched a page that added nothing visible. The
-filter is part of the shared WHERE clause, so the limit+1 ``has_more`` probe
-and the cursor both skip archived rows.
-"""
-
+"""Legacy exclude_archived is inert; migrated history pages like other Settled chats."""
 import uuid
 
 from app.db import database
@@ -24,7 +16,7 @@ def _mk(conn, updated_at: str, status: str | None = None) -> str:
     return session_id
 
 
-def test_has_more_ignores_archived_rows_when_excluded(mock_db):
+def test_legacy_exclude_archived_cannot_hide_settled_history(mock_db):
     conn = mock_db
     newest = _mk(conn, "2026-10-03T12:00:00")
     _mk(conn, "2026-10-02T12:00:00", status="archived")
@@ -34,20 +26,22 @@ def test_has_more_ignores_archived_rows_when_excluded(mock_db):
         limit=1, exclude_archived=True
     )
     assert [s["id"] for s in rows] == [newest]
-    assert has_more is False
-    assert next_cursor is None and next_cursor_id is None
+    assert has_more is True
+    assert next_cursor is not None and next_cursor_id == newest
 
-    # Default stays unchanged: Settings' archived list and API callers that
-    # want every row still page through archived sessions.
+    # The legacy flag cannot hide history from either pagination or counts.
+    assert database.count_sessions(exclude_archived=True) == 3
+    assert database.count_sessions(exclude_archived=False) == 3
+    assert database.count_sessions(membership="settled", exclude_archived=True) == 3
     rows, _, _, has_more = database.get_sessions_cursor(limit=1)
     assert [s["id"] for s in rows] == [newest]
     assert has_more is True
 
 
-def test_cursor_skips_archived_rows_between_visible_pages(mock_db):
+def test_cursor_traverses_converted_history_between_pages(mock_db):
     conn = mock_db
     first = _mk(conn, "2026-10-03T12:00:00")
-    _mk(conn, "2026-10-02T12:00:00", status="archived")
+    converted = _mk(conn, "2026-10-02T12:00:00", status="archived")
     second = _mk(conn, "2026-10-01T12:00:00")
 
     rows, cursor, cursor_id, has_more = database.get_sessions_cursor(
@@ -56,11 +50,16 @@ def test_cursor_skips_archived_rows_between_visible_pages(mock_db):
     assert [s["id"] for s in rows] == [first]
     assert has_more is True
 
+    rows, cursor, cursor_id, has_more = database.get_sessions_cursor(
+        limit=1, exclude_archived=True, cursor=cursor, cursor_id=cursor_id
+    )
+    assert [s["id"] for s in rows] == [converted]
+    assert has_more is True
     rows, _, _, has_more = database.get_sessions_cursor(
         limit=1, exclude_archived=True, cursor=cursor, cursor_id=cursor_id
     )
     assert [s["id"] for s in rows] == [second]
-    assert has_more is False
+    assert not has_more
 
 
 def test_null_status_is_not_treated_as_archived(mock_db):

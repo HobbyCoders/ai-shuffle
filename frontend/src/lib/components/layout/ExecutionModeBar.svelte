@@ -29,12 +29,14 @@
 	} from './execution-mode-eligibility';
 	import { loadProjectsOverview, projectsOverview, projectsOverviewSupported } from '$lib/stores/projects-overview';
 	import WorkerStatusDot from '$lib/components/ui/WorkerStatusDot.svelte';
+	import { selfWorkerName, workerDisplayName } from '$lib/components/ui/worker-name';
 	import WorkerMenuList, { type WorkerMenuRow } from '$lib/components/ui/WorkerMenuList.svelte';
 
 	// Local's row id; install ids are UUID-like, so this never collides.
 	const LOCAL_ROW_ID = '__local__';
 	import { worktrees as worktreeStore, branches as branchStore, git, currentBranch as gitCurrentBranch } from '$lib/stores/git.svelte';
-	import { ChevronDown, Server, GitBranch, Monitor, GitFork, Plus, Loader2, Check } from 'lucide-svelte';
+	import { ChevronDown, FolderGit2, Server, GitBranch, Monitor, MonitorOff, GitFork, Plus, Loader2, Check } from 'lucide-svelte';
+	import WorktreeGlyph from '$lib/components/ui/WorktreeGlyph.svelte';
 	import { onDestroy, untrack, type Snippet } from 'svelte';
 	import { menuHost } from '$lib/components/ui/menu-host';
 	import { openHeaderDropdown, openDropdown, closeDropdown } from '$lib/stores/header-dropdowns';
@@ -69,22 +71,17 @@
 		 */
 		between?: Snippet;
 		/**
-		 * `sentence`: the new-session hero's "… on <branch> in <a worktree>"
-		 * words instead of chips. The branch word opens the same branch menu,
-		 * dropped down centred under it; the worktree word toggles the worktree.
-		 * The runner is never shown (the hero names it first).
+		 * `sentence`: the new-session row's branch and worktree controls instead
+		 * of chips. The branch one opens the same branch menu, dropped down
+		 * under it; the worktree one toggles the worktree. The runner is never
+		 * shown (the row names it first).
 		 */
 		variant?: 'chips' | 'sentence';
-		/**
-		 * Sentence variant: rendered right after its last word (the full stop),
-		 * so the dialogs mounted after the sentence leave no gap before it.
-		 */
-		after?: Snippet;
 		/** Show the open runner menu inside this element (the phone sheet's "Runs on" page). */
 		runnerMenuHost?: HTMLElement | null;
 	}
 
-	let { sheetMode = false, between, after, runnerMenuHost = null, variant = 'chips' }: Props = $props();
+	let { sheetMode = false, between, runnerMenuHost = null, variant = 'chips' }: Props = $props();
 	const sentence = $derived(variant === 'sentence' && !sheetMode);
 	let branchTriggerRef = $state<HTMLButtonElement | null>(null);
 	/** The open branch menu; the sentence variant floats it to <body>, outside dropdownRef. */
@@ -270,6 +267,7 @@
 	// Live presence (shared store, refreshed while watched below), so a worker
 	// that goes offline while the menu is open turns red and blocked in place.
 	const installs = $derived<Install[]>(installsFailed ? [] : ($workerInstalls ?? []));
+	const selfName = $derived(selfWorkerName(installs));
 
 	// Per-install checkout eligibility for the selected project (ruling D6),
 	// keyed by install id. `null` = UNKNOWN — no project selected, the git-state
@@ -350,7 +348,7 @@
 	const runnerRows = $derived<WorkerMenuRow[]>([
 		{
 			id: LOCAL_ROW_ID,
-			label: 'Local',
+			label: selfName,
 			online: true,
 			disabled: false,
 			title: selfNote === 'not set up · set up' && syncRow
@@ -362,7 +360,7 @@
 		},
 		...peers.map((install): WorkerMenuRow => ({
 			id: install.id,
-			label: install.device_name,
+			label: workerDisplayName(install.device_name),
 			online: install.online,
 			disabled: isBlockedForNewChat(install, worktreeOn, eligibility, syncRow),
 			title: newChatRowTitle(install, worktreeOn, eligibility, syncRow),
@@ -600,38 +598,38 @@
 {/snippet}
 
 {#if sentence}
-<!-- Hero sentence: "… on <branch> in <a worktree>". The parent supplies
-     "in <project>" (and, in local mode, "on <checkout branch>") as `between`. -->
-<span class="execution-mode-sentence">
-	{@render between?.()}
-	{#if $activeSession.worktreeIntent === 'worktree'}
-		on <span class="branch-selector sentence-part" bind:this={dropdownRef}><button
-			bind:this={branchTriggerRef}
-			type="button"
-			class="sentence-tok"
-			class:open={showBranchDropdown}
-			onclick={toggleDropdown}
-			aria-label="Worktree branch: {isAutoMode ? `a new branch from ${baseBranch}` : currentBranch}"
-			aria-haspopup="dialog"
-			aria-expanded={showBranchDropdown}
-			title={isAutoMode ? `A new branch from ${baseBranch}, named from your message.` : `Branch: ${currentBranch}`}
-		>{isAutoMode ? `a new branch from ${baseBranch}` : currentBranch}</button>{#if showBranchDropdown}<div
-				class="branch-dropdown sentence-menu"
-				role="dialog"
-				aria-label="Worktree branch"
-				bind:this={branchMenuRef}
-				use:floatingMenu={{ anchor: branchTriggerRef, align: 'center' }}
-			>{@render branchMenu()}</div>{/if}</span>
-	{/if}
-	{#if isGitRepo}
-		in <button
-			type="button"
-			class="sentence-tok"
-			aria-pressed={worktreeOn}
-			onclick={toggleWorktree}
-			aria-label={worktreeOn ? 'Runs in a worktree. Switch to the main checkout' : 'Runs in the main checkout. Switch to a worktree'}
-			title={worktreeOn ? 'Runs in an isolated git worktree. Click for the main checkout.' : 'Runs in the main checkout. Click for an isolated git worktree.'}
-		>{worktreeOn ? 'a worktree' : 'the main checkout'}</button>{/if}{@render after?.()}</span>
+<!-- The new-session row: the parent supplies the project (and, in local mode,
+     the checkout branch) as `between`. -->
+{@render between?.()}
+{#if $activeSession.worktreeIntent === 'worktree'}
+	<span class="branch-selector sentence-part" bind:this={dropdownRef}><button
+		bind:this={branchTriggerRef}
+		type="button"
+		class="sentence-tok"
+		class:open={showBranchDropdown}
+		onclick={toggleDropdown}
+		aria-label="Worktree branch: {isAutoMode ? `a new branch from ${baseBranch}` : currentBranch}"
+		aria-haspopup="dialog"
+		aria-expanded={showBranchDropdown}
+		title={isAutoMode ? `A new branch from ${baseBranch}, named from your message.` : `Branch: ${currentBranch}`}
+	><GitBranch size={14} strokeWidth={1.75} aria-hidden="true" /><span class="sentence-tok-label">{isAutoMode ? `New branch from ${baseBranch}` : currentBranch}</span></button>{#if showBranchDropdown}<div
+			class="branch-dropdown sentence-menu"
+			role="dialog"
+			aria-label="Worktree branch"
+			bind:this={branchMenuRef}
+			use:floatingMenu={{ anchor: branchTriggerRef, align: 'start' }}
+		>{@render branchMenu()}</div>{/if}</span>
+{/if}
+{#if isGitRepo}
+	<button
+		type="button"
+		class="sentence-tok"
+		aria-pressed={worktreeOn}
+		onclick={toggleWorktree}
+		aria-label={worktreeOn ? 'Runs in a worktree. Switch to the main checkout' : 'Runs in the main checkout. Switch to a worktree'}
+		title={worktreeOn ? 'Runs in an isolated git worktree. Click for the main checkout.' : 'Runs in the main checkout. Click for an isolated worktree.'}
+	><WorktreeGlyph on={worktreeOn} /><span class="sentence-tok-label">Worktree</span></button>
+{/if}
 {:else}
 <div class="execution-mode-bar" class:sheet-mode={sheetMode}>
 	<div class="mode-bar-row">
@@ -646,22 +644,22 @@
 				class:open={showModeDropdown}
 				onclick={toggleModeDropdown}
 				title={deviceIntent ? `Run this session on ${deviceIntent.name}` : 'Run this session on this device'}
-				aria-label="Runner: {deviceIntent ? deviceIntent.name : 'Local'}{deviceIntentOnline === false ? ' (offline)' : ''}"
+				aria-label="Runner: {deviceIntent ? workerDisplayName(deviceIntent.name) : selfName}{deviceIntentOnline === false ? ' (offline)' : ''}"
 				aria-haspopup="menu"
 				aria-expanded={showModeDropdown}
 			>
-				{#if deviceIntent}
+				<!-- The dot replaces the icon; the phone sheet's rows keep their glyph. -->
+				{#if !sheetMode && deviceIntentOnline !== null}
+					<WorkerStatusDot online={deviceIntentOnline} />
+				{:else if deviceIntentOnline === false}
+					<MonitorOff size={12} strokeWidth={1.6} />
+				{:else if deviceIntent}
 					<Server size={12} strokeWidth={1.6} />
 				{:else}
 					<Monitor size={12} strokeWidth={1.6} />
 				{/if}
-				{#if deviceIntentOnline !== null}
-					<WorkerStatusDot online={deviceIntentOnline} />
-				{/if}
-				<span class="ctx-chip-label mode-trigger-label">{deviceIntent ? deviceIntent.name : 'Local'}</span>
-				{#if sheetMode}
-					<ChevronDown size={12} strokeWidth={1.5} />
-				{/if}
+				<span class="ctx-chip-label mode-trigger-label">{deviceIntent ? workerDisplayName(deviceIntent.name) : selfName}</span>
+				<ChevronDown size={12} strokeWidth={1.5} />
 			</button>
 
 			{#if showModeDropdown}
@@ -704,9 +702,7 @@
 			>
 				<GitBranch size={12} strokeWidth={1.6} />
 				<span class="ctx-chip-label branch-name">{branchChipLabel}</span>
-				{#if sheetMode}
-					<ChevronDown size={12} strokeWidth={1.5} />
-				{/if}
+				<ChevronDown size={12} strokeWidth={1.5} />
 			</button>
 
 			{#if showBranchDropdown}
@@ -723,10 +719,10 @@
 		{#if isGitRepo}
 			<label class="ctx-chip wt-chip" title="Run in an isolated git worktree.">
 				<input type="checkbox" checked={worktreeOn} onchange={toggleWorktree} />
-				<span class="ctx-chip-cb" class:checked={worktreeOn} aria-hidden="true">
-					<Check size={9} strokeWidth={2.6} />
-				</span>
-				<span class="ctx-chip-label">worktree</span>
+				{#if sheetMode}<FolderGit2 size={16} aria-hidden="true" />{/if}
+				{#if !sheetMode}<span class="ctx-chip-cb" class:checked={worktreeOn} aria-hidden="true"><WorktreeGlyph on={worktreeOn} /></span>{/if}
+				<span class="ctx-chip-label">Worktree</span>
+				{#if sheetMode}<span class="ctx-chip-cb" class:checked={worktreeOn} aria-hidden="true"></span>{/if}
 			</label>
 		{/if}
 		</div>
@@ -767,10 +763,6 @@
 		overflow: visible;
 	}
 
-	/* Hero sentence: the words flow inline with the parent's sentence. */
-	.execution-mode-sentence { display: inline; }
-	/* inline-flex: one unbreakable word, and the markup's own whitespace
-	   inside it never shows as a gap before the full stop. */
 	.sentence-part { display: inline-flex; position: static; }
 	/* floatingMenu owns its position; it drops down from the word. */
 	.branch-dropdown.sentence-menu {
@@ -890,11 +882,6 @@
 		color: var(--subtle-foreground);
 	}
 
-	/* The worktree checkbox chip's tick must beat the generic muted svg colour. */
-	.wt-chip :global(.ctx-chip-cb svg) {
-		color: var(--primary-foreground);
-	}
-
 	.mode-trigger-label {
 		max-width: min(160px, 40vw);
 	}
@@ -952,7 +939,9 @@
 		max-width: min(320px, calc(100vw - 24px));
 		max-height: 320px;
 		background: var(--popover);
-		border-radius: calc(var(--radius, 0.75rem) * 0.83);
+		border-radius: var(--menu-radius);
+		box-shadow: var(--menu-shadow);
+		border: 1px solid var(--menu-border);
 	}
 
 	@keyframes branchDropdown {
@@ -974,12 +963,13 @@
 		padding: 8px 10px;
 		background: transparent;
 		border: none;
-		border-radius: 7px;
+		border-radius: var(--menu-row-radius);
 		color: var(--foreground);
-		font-size: 0.8125rem;
+		font-size: 13px;
 		cursor: pointer;
 		text-align: left;
 		transition: background-color 120ms ease;
+		min-height: var(--menu-row);
 	}
 
 	.branch-item:hover:not(:disabled) {

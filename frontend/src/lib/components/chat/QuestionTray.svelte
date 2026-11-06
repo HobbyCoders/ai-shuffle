@@ -55,7 +55,7 @@
 <style>
 	.question-tray-dock { padding: 0 0.75rem 0.625rem; }
 	:global(html[data-platform='desktop']) .question-tray-dock { padding-right: 1.5rem; padding-left: 1.5rem; }
-	.question-tray { max-width: 48rem; margin: 0 auto; border: 1px solid var(--border); border-radius: var(--radius, 10px); background: var(--card); color: var(--foreground); overflow: hidden; }
+	.question-tray { max-width: var(--column-width); margin: 0 auto; border: 1px solid var(--border); border-radius: var(--radius, 10px); background: var(--card); color: var(--foreground); overflow: hidden; }
 	.tray-toggle { width: 100%; display: flex; align-items: center; gap: 0.5rem; min-height: 38px; padding: 0.625rem 0.75rem; border: 0; background: none; color: var(--muted-foreground); cursor: pointer; text-align: left; font: inherit; font-size: 0.6875rem; }
 	.tray-toggle:hover { background: var(--muted); }
 	.title { font-weight: 500; color: var(--foreground); }

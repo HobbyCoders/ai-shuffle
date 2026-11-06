@@ -467,7 +467,7 @@ describe('flat worker list (matches the active session runner menu)', () => {
 		id, device_name, online, base_url: null, platform: 'linux', version: null, capabilities: {}, last_seen: null
 	});
 	const fixture = { self_instance_id: 'local', installs: [
-		{ ...peer('local', 'This worker'), is_self: true },
+		{ ...peer('local', 'Local'), is_self: true },
 		peer('runner-1', 'ServerWorker'),
 		peer('runner-2', 'linux-worker', false),
 		peer('runner-3', 'Laptop')

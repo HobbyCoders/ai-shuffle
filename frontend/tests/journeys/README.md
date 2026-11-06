@@ -61,6 +61,18 @@ on every PR, independently of the shards that run every journey. It also runs
 and invalid temporary maps. `--check --map <path>` validates an alternative
 map against the same checkout without changing `map.json`.
 
+## Responsive phone and native phone shell
+
+Hosted CI deliberately builds only the desktop bundle. Phone variants exercise
+that responsive UI, not `/mobile/`. Native cases in `notes-writing`, `rail-more`,
+`view-shell-back`, `automations` and the transcript/composer journeys are opt-in with
+`--mobile-shell`; their default cases retain the same phone-width behaviour.
+For native evidence, build both bundles (`cd frontend && npm run build`), stamp
+with `python -m app.preview stamp`, and start the dev instance with `--no-vite`.
+Run the selected journey with `--mobile-shell` and report it separately from
+hosted responsive results. Native setup must assert it stayed on `/mobile/` so
+a missing bundle cannot silently fall back to the desktop UI.
+
 ## Run one
 
 ```bash

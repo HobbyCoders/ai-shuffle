@@ -91,7 +91,7 @@ export class VelocityTracker {
 
 /** Short labels for the quick bar, where five cells share 390px. */
 export const ACCESS_SHORT: Record<string, string> = {
-	default: 'Ask',
+	default: 'Ask first',
 	auto: 'Auto',
 	acceptEdits: 'Edits',
 	bypassPermissions: 'Bypass'
@@ -99,7 +99,7 @@ export const ACCESS_SHORT: Record<string, string> = {
 
 /** Plain names for the picker and the panel. */
 export const ACCESS_LABEL: Record<string, string> = {
-	default: 'Ask',
+	default: 'Ask first',
 	auto: 'Auto',
 	acceptEdits: 'Accept edits',
 	bypassPermissions: 'Bypass'

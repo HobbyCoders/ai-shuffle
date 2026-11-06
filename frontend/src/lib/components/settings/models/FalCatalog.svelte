@@ -1,4 +1,5 @@
 <script lang="ts">
+ import EmptyDetail from '../shell/EmptyDetail.svelte';
 	/**
 	 * FalCatalog: every fal.ai model the catalog knows. Search across name,
 	 * description, id and tags; category chips. Picking an image, video, audio
@@ -144,7 +145,7 @@
 	{:else if loading}
 		<p class="empty">Loading the catalog…</p>
 	{:else if q || category}
-		<p class="empty">No models match. Clear the search or pick another category.</p>
+		<EmptyDetail message="No models match. Clear the search or pick another category." actionLabel="Clear" onAction={() => { query = ''; category = null; }} />
 	{:else}
 		<p class="empty">The catalog is empty. Refresh to fetch it from fal.ai.</p>
 	{/if}

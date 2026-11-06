@@ -45,10 +45,10 @@ def test_unmeasured_budget_never_overrides_a_green_median(tmp_path, monkeypatch)
     assert ci.estimated_seconds(tmp_path, _weights(tmp_path, {}, per_case=30))[name] == 1410
 
 
-def test_checked_in_nine_shard_plan_leaves_retry_headroom():
+def test_checked_in_ten_shard_plan_leaves_retry_headroom():
     weights = ci.estimated_seconds()
-    buckets = ci.plan(9)
-    assert len(buckets) == 9
+    buckets = ci.plan(10)
+    assert len(buckets) == 10
     assert sorted(name for bucket in buckets for name in bucket) == sorted(weights)
     # Include the ENTIRE first pass, 30s startup, all 180s of exact-case retry,
     # and the existing 180s teardown reserve inside the unchanged 25m step.

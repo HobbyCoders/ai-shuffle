@@ -1,5 +1,7 @@
 <script lang="ts">
 	import { Plus, X, RotateCw, Settings2, MicOff } from 'lucide-svelte';
+	import '../ui/surfaces.css';
+	import { SelectField, Switch } from '$lib/components/layout/view';
 	import { browserPanel } from '$lib/stores/browser-panel.svelte';
 	import {
 		ownsControl,
@@ -75,7 +77,7 @@
 	}
 }} />
 
-<div class="workspace-tools" class:tabs-only={mode === 'tabs'}>
+<div class="workspace-tools ui-surface" class:tabs-only={mode === 'tabs'}>
 	{#if mode !== 'controls'}
 	<nav class="tabs" aria-label="Shared browser tabs">
 		{#if !workspace?.tabs.length}<div class="tab current"><span class="tab-select">New tab</span></div>{/if}
@@ -143,19 +145,9 @@
 					<p>Open the site in your normal browser to use your microphone.</p>
 				{/if}
 			</section>
-			<label
-				>Size <select
-					aria-label="Viewport preset"
-					disabled={!connected || !workspace?.available || other}
-					value=""
-					onchange={(e) => preset(e.currentTarget.value)}
-					><option value="" disabled>Choose viewport</option><option value="fit"
-						>Fit panel</option
-					><option value="1440x900">Desktop · 1440 × 900</option><option
-						value="768x1024">Tablet · 768 × 1024</option
-					><option value="390x844">Mobile · 390 × 844</option></select
-				></label
-			>
+			<div class="preset-field"><span>Size</span><SelectField label="Viewport preset" value=""
+                options={[{value:'',label:'Choose viewport',disabled:true},{value:'fit',label:'Fit panel'},{value:'1440x900',label:'Desktop · 1440 × 900'},{value:'768x1024',label:'Tablet · 768 × 1024'},{value:'390x844',label:'Mobile · 390 × 844'}]}
+                disabled={!connected || !workspace?.available || other} onchange={(value) => preset(value)} /></div>
 			<form
 				onsubmit={(e) => {
 					e.preventDefault();
@@ -205,13 +197,8 @@
 					>Save current as default</button
 				>
 			</div>
-			<label class="policy"
-				><input
-					type="checkbox"
-					checked={browserPanel.current.autoOpen}
-					onchange={(e) => browserPanel.setAutoOpen(e.currentTarget.checked)}
-				/> Open panel when the agent uses the browser</label
-			>
+			<div class="policy"><Switch label="Open panel when the agent uses the browser" checked={browserPanel.current.autoOpen}
+                onchange={(checked) => browserPanel.setAutoOpen(checked)} /><span>Open panel when the agent uses the browser</span></div>
 			<p>
 				Fixed viewports keep their size when you resize this panel. Defaults
 				apply only when you choose them.
@@ -222,26 +209,25 @@
 </div>
 
 <style>
-	.workspace-tools { display: contents; font-size: 11px; color: var(--foreground); }
+	.workspace-tools { display: contents; font-size: 13px; color: var(--foreground); }
 	.workspace-tools.tabs-only { display: block; flex: 1; min-width: 0; }
 	.viewport { position: static; }
-	.viewport-content { position: absolute; top: 70px; right: 5px; width: min(340px, calc(100% - 10px)); box-sizing: border-box; z-index: 30; background: var(--background); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 8px 24px #0003; padding: 12px !important; }
+	/* Opens below the header row, whatever its height, so it never covers its own gear. */
+	.viewport-content { position: absolute; top: 100%; right: 5px; width: min(340px, calc(100% - 10px)); box-sizing: border-box; z-index: 30; background: var(--popover); border: 1px solid var(--menu-border); border-radius: var(--menu-radius); box-shadow: var(--menu-shadow); }
 	.ownership-label { display: none; }
 	.capture-limits { display: grid; gap: 6px; padding-bottom: 10px; border-bottom: 1px solid var(--border); }
 	.capture-limits a { color: var(--primary); text-decoration: underline; }
 	.return-control { font-size: 11px; }
 
 	button,
-	input,
-	select {
+	input {
 		font: inherit;
 		color: inherit;
 	}
 	button,
-	select,
 	input[type='number'] {
 		border: 1px solid var(--border);
-		border-radius: 5px;
+		border-radius: var(--radius);
 		background: var(--background);
 		padding: 5px 7px;
 	}
@@ -249,17 +235,17 @@
 		cursor: pointer;
 		white-space: nowrap;
 	}
+	button:hover:not(:disabled) { background: var(--hover-overlay); }
+        button:active:not(:disabled) { opacity: .8; }
 	button:disabled,
-	select:disabled,
 	input:disabled {
 		opacity: 0.45;
 		cursor: default;
 	}
 	button:focus-visible,
 	summary:focus-visible,
-	input:focus-visible,
-	select:focus-visible {
-		outline: 2px solid var(--primary);
+	input:focus-visible {
+		outline: 2px solid var(--ring);
 		outline-offset: 2px;
 	}
 	.tabs {
@@ -332,18 +318,14 @@
 		cursor: pointer;
 	}
 	.viewport-content {
-		padding: 4px 10px 10px;
+		padding: 12px;
 		display: grid;
 		gap: 9px;
 	}
-	.viewport-content > label {
+	.preset-field {
 		display: flex;
 		align-items: center;
 		gap: 8px;
-	}
-	select {
-		flex: 1;
-		min-width: 0;
 	}
 	form {
 		display: flex;
@@ -380,11 +362,8 @@
 		line-height: 1.5;
 	}
 	@media (max-width: 600px) {
-		button,
-		select,
-		summary {
-			min-height: 28px;
-		}
+		button, summary, input { min-height: 44px; }
+            input { font-size: 16px; }
 		.tabs {
 			padding-block: 3px;
 		}

@@ -32,7 +32,7 @@ it('renders on by default with a short plain description', async () => {
 	show();
 	const sw = await toggle();
 	expect(sw.getAttribute('aria-checked')).toBe('true');
-	const group = screen.getByRole('region', { name: 'Sessions' });
+	const group = screen.getByRole('region', { name: 'Chats' });
 	expect(within(group).getByText('Smarter compaction')).toBeTruthy();
 	expect(within(group).getByText('Keeps more of the conversation')).toBeTruthy();
 	expect(getEntry('providers.claudeCompaction')?.default).toBe(true);

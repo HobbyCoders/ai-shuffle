@@ -57,8 +57,8 @@
 		border-color: var(--st-border-strong);
 	}
 	.swatch[aria-pressed='true'] {
-		border-color: var(--st-primary);
-		box-shadow: inset 0 0 0 1px var(--st-primary);
+		border-color: var(--st-border-strong);
+		background: var(--st-accent);
 	}
 	.name {
 		white-space: nowrap;

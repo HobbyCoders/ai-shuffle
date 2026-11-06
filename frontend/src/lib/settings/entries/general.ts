@@ -13,6 +13,7 @@ export const entries: SettingEntry[] = [
 		category: 'general',
 		section: 'Appearance',
 		label: 'Theme',
+		hint: 'Light, dark, or follow this device',
 		keywords: ['dark', 'light', 'mode', 'color scheme', 'system']
 	},
 	{
@@ -20,6 +21,7 @@ export const entries: SettingEntry[] = [
 		category: 'general',
 		section: 'Appearance',
 		label: 'Theme style',
+		hint: 'A colour and type preset for the whole app',
 		keywords: ['preset', 'colors', 'palette', 'swatches'],
 		default: ''
 	},
@@ -28,32 +30,8 @@ export const entries: SettingEntry[] = [
 		category: 'general',
 		section: 'Conversation',
 		label: 'Suggest next reply',
-		hint: 'Uses an extra model call',
+		hint: 'Offers a draft of your next message. Each one uses an extra model call',
 		keywords: ['reply suggestions', 'next response', 'draft'],
-		default: false
-	},
-	{
-		id: 'general.autoScroll',
-		category: 'general',
-		section: 'Conversation',
-		label: 'Auto-scroll on new messages',
-		keywords: ['scroll', 'follow'],
-		default: true
-	},
-	{
-		id: 'general.timestamps',
-		category: 'general',
-		section: 'Conversation',
-		label: 'Show timestamps',
-		keywords: ['message time', 'clock', 'date'],
-		default: false
-	},
-	{
-		id: 'general.compact',
-		category: 'general',
-		section: 'Conversation',
-		label: 'Compact message view',
-		keywords: ['density', 'spacing'],
 		default: false
 	},
 	{
@@ -61,6 +39,7 @@ export const entries: SettingEntry[] = [
 		category: 'general',
 		section: 'Thinking and tools',
 		label: 'Show thinking blocks',
+		hint: "Show the model's reasoning in the transcript",
 		keywords: ['reasoning'],
 		default: true
 	},
@@ -69,6 +48,7 @@ export const entries: SettingEntry[] = [
 		category: 'general',
 		section: 'Thinking and tools',
 		label: 'Expand thinking by default',
+		hint: 'Open thinking blocks instead of folding them',
 		keywords: ['reasoning', 'collapse'],
 		default: false
 	},
@@ -77,6 +57,7 @@ export const entries: SettingEntry[] = [
 		category: 'general',
 		section: 'Thinking and tools',
 		label: 'Show thinking summary',
+		hint: 'Preview folded thinking in one line',
 		keywords: ['reasoning', 'preview'],
 		default: true
 	},
@@ -85,6 +66,7 @@ export const entries: SettingEntry[] = [
 		category: 'general',
 		section: 'Thinking and tools',
 		label: 'Expand tool calls by default',
+		hint: 'Open tool results instead of folding them',
 		keywords: ['tool results', 'collapse'],
 		default: false
 	},
@@ -93,6 +75,7 @@ export const entries: SettingEntry[] = [
 		category: 'general',
 		section: 'Thinking and tools',
 		label: 'Group tool calls',
+		hint: 'Fold consecutive tool calls into one row',
 		keywords: ['tool results', 'collapse'],
 		default: true
 	},
@@ -101,6 +84,7 @@ export const entries: SettingEntry[] = [
 		category: 'general',
 		section: 'Thinking and tools',
 		label: 'Expand todo list by default',
+		hint: "Open the agent's todo list instead of folding it",
 		keywords: ['tasks', 'checklist'],
 		default: true
 	},
@@ -109,6 +93,7 @@ export const entries: SettingEntry[] = [
 		category: 'general',
 		section: 'Region',
 		label: 'Time zone',
+		hint: 'Used when scheduling automations',
 		keywords: ['timezone', 'clock', 'region', 'utc'],
 		default: 'local'
 	}

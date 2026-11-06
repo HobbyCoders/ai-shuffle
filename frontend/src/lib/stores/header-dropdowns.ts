@@ -24,9 +24,16 @@ type HeaderDropdownId =
 	// ExecutionModeBar's "Runs on" picker for a new chat (the sheet's copy apart).
 	| 'mode-runner'
 	| 'sheet-mode-runner'
+	// A new chat's Runs on and Project rows in Chat controls, before it has a project.
+	| 'sheet-new-runner'
+	| 'sheet-new-project'
 	| 'notifications'
+	// The phone top bar's own bell, beside the drawer's mounted one.
+	| 'notifications-bar'
 	// Bound-chat session title in the header breadcrumb (rename / fork / delete).
 	| 'session-title'
+	// The chat header's one Export button.
+	| 'chat-export'
 	// The chat header's private-access panel (ChatAccess).
 	| 'private-access'
 	// The chat header's git panel (one button opens it) and the option popovers

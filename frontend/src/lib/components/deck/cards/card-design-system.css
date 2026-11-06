@@ -69,7 +69,6 @@
   --surface-selected-emphasis: color-mix(in oklab, var(--selection, var(--ring)) 15%, var(--card));
   --border-selected: color-mix(in oklch, var(--selection, var(--ring)) 50%, transparent);
   --shadow-selected: var(--selection-shadow);
-  --shadow-selected-subtle: var(--selection-shadow-subtle);
 
   /* Borders */
   --border-subtle: color-mix(in oklch, var(--border) 60%, transparent);

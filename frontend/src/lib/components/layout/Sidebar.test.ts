@@ -56,6 +56,7 @@ vi.mock('$lib/stores/app-data.svelte', () => ({
 	clusterProjects: mocks.clusterProjects,
 	projectCatalogReady: mocks.projectCatalogReady,
 	sessionsHasMore: mocks.sessionsHasMore,
+	settledTotal: { subscribe: (run: (count: number) => void) => mocks.sessions.subscribe(rows => run(rows.filter((row: any) => !row.hidden && !row.is_active && row.status !== 'archived').length)) },
 	sessionsLoadingMore: mocks.sessionsLoadingMore,
 	appData: {
 		setSessionActive: mocks.setSessionActive,
@@ -83,7 +84,8 @@ vi.mock('$lib/stores/active-session', () => ({
 	backgroundPermissions: mocks.backgroundPermissions,
 }));
 
-vi.mock('$lib/stores/layout.svelte', () => ({
+vi.mock('$lib/stores/layout.svelte', async (importOriginal) => ({
+	...await importOriginal<typeof import('$lib/stores/layout.svelte')>(),
 	activeView: mocks.activeView,
 }));
 
@@ -167,6 +169,8 @@ import { sidebarWorkspace } from '$lib/stores/sidebar-prefs.svelte';
 import { terminals } from '$lib/stores/terminals.svelte';
 import { TerminalApiError } from '$lib/api/terminals';
 import Sidebar from './Sidebar.svelte';
+import { layout } from '$lib/stores/layout.svelte';
+import { viewPanel } from '$lib/stores/view-panel.svelte';
 import { platform } from '$lib/stores/platform.svelte';
 
 function session(
@@ -210,11 +214,11 @@ function session(
 }
 
 describe('Archived sessions', () => {
-	it('keeps archived history out of the sidebar; Settings owns the archive', () => {
+	it('has no separate archive lane for legacy metadata', () => {
 		mocks.sessions.set([session('history', 'Archived work', null, false, false, { status: 'archived' })]);
 		render(Sidebar, sidebarProps);
-		expect(screen.queryByText('Archived work')).toBeNull();
-		expect(screen.queryByRole('button', { name: /^Archived/ })).toBeNull();
+		expect(screen.queryByText('Archived work')).toBeTruthy();
+		expect(screen.queryByRole('button', { name: /^Archived$/ })).toBeNull();
 	});
 });
 
@@ -247,8 +251,10 @@ function cardFrame(title: string): HTMLElement {
 }
 
 beforeEach(() => {
+	layout.setSidebarOverlay(false);
+	mocks.activeView.set(null);
 	localStorage.clear();
-	mocks.adapters.get('sidebar_collapsed_groups')!.apply(undefined);
+	mocks.adapters.get('sidebar_collapsed_groups')!.apply({ settled: false });
 	mocks.save.mockClear();
 	appMode.set('code');
 	sidebarWorkspace.reset();
@@ -297,16 +303,16 @@ afterEach(() => {
 
 async function openFilter(): Promise<HTMLElement> {
 	await fireEvent.click(screen.getByRole('button', { name: 'Filter' }));
-	return screen.getByRole('dialog', { name: 'Filter sessions' });
+	return screen.getByRole('dialog', { name: 'Filter chats' });
 }
 
 function filterOption(label: string): HTMLElement {
-	const sheet = screen.getByRole('dialog', { name: 'Filter sessions' });
+	const sheet = screen.getByRole('dialog', { name: 'Filter chats' });
 	return within(sheet).getByRole('button', { name: label });
 }
 
 function filterLabels(): string[] {
-	const sheet = screen.getByRole('dialog', { name: 'Filter sessions' });
+	const sheet = screen.getByRole('dialog', { name: 'Filter chats' });
 	return within(sheet).getAllByRole('button').map((node) => node.textContent?.trim() ?? '');
 }
 
@@ -318,6 +324,19 @@ function sectLabels(): string[] {
 }
 
 describe('Sidebar session groups', () => {
+ it('defaults Settled to collapsed without writing over an explicit saved choice', async () => {
+  mocks.adapters.get('sidebar_collapsed_groups')!.apply(undefined);
+  const { container } = render(Sidebar);
+  const header = () => Array.from(container.querySelectorAll<HTMLButtonElement>('.sect')).find(button => button.textContent?.includes('Settled'))!;
+  expect(header().getAttribute('aria-expanded')).toBe('false');
+  expect(screen.queryByText('Settled chat')).toBeNull();
+  expect(mocks.save.mock.calls.some(([key]) => key === 'sidebar_collapsed_groups')).toBe(false);
+  mocks.adapters.get('sidebar_collapsed_groups')!.apply({ settled: false });
+  await tick();
+  expect(header().getAttribute('aria-expanded')).toBe('true');
+  expect(screen.getByText('Settled chat')).toBeTruthy();
+ });
+
 	it('shares collapsed groups with a mounted sidebar and resets them on account change', async () => {
 		const { container } = render(Sidebar);
 		const header = () => Array.from(container.querySelectorAll<HTMLButtonElement>('.sect'))
@@ -406,6 +425,42 @@ describe('Sidebar session groups', () => {
 		mocks.projectCatalogReady.set(true);
 		await tick();
 		expect(titles()).toEqual(before);
+	});
+
+	// A project swapping places moves a screenful of rows, so its newest chat
+	// leaving a lane, for good or until the server refuses it, must not do that.
+	it('keeps a project in its place when its newest chat leaves the lane', async () => {
+		const at = (minutes: number) => ({ updated_at: new Date(Date.now() - minutes * 60_000).toISOString() });
+		const visible = (id: string, title: string, isActive: boolean, minutes: number, extra = {}) =>
+			session(id, title, 'visible-project', isActive, false, { ...at(minutes), ...extra });
+		const other = (id: string, title: string, minutes: number) =>
+			session(id, title, 'other-project', true, false, { ...at(minutes), project_name: 'Other Project' });
+		mocks.projects.set([
+			{ id: 'visible-project', name: 'Visible Project' },
+			{ id: 'other-project', name: 'Other Project' },
+		]);
+		const before = [visible('newest', 'Newest', true, 1), other('middle', 'Middle', 2), visible('oldest', 'Oldest', true, 3)];
+		mocks.sessions.set(before);
+		render(Sidebar, { props: sidebarProps });
+		const activeTitles = () =>
+			[...document.querySelectorAll('[data-group="active"] .scard-frame .title')].map((el) => el.textContent);
+		expect(activeTitles()).toEqual(['Newest', 'Oldest', 'Middle']);
+
+		// Settled: the project keeps its place, though Middle is now newer than
+		// anything of that project left in this lane.
+		mocks.sessions.set([visible('newest', 'Newest', false, 1), before[1], before[2]]);
+		await tick();
+		expect(activeTitles()).toEqual(['Oldest', 'Middle']);
+
+		// Archived, until the server has answered: the row is still in the list.
+		mocks.sessions.set([visible('newest', 'Newest', false, 1, { status: 'archived' }), before[1], before[2]]);
+		await tick();
+		expect(activeTitles()).toEqual(['Oldest', 'Middle']);
+
+		// Refused: it comes back to where it was, and nothing else moved.
+		mocks.sessions.set(before);
+		await tick();
+		expect(activeTitles()).toEqual(['Newest', 'Oldest', 'Middle']);
 	});
 
 	it('keeps a remote-only catalog project in the list and filter', async () => {
@@ -575,7 +630,8 @@ describe('Sidebar session groups', () => {
 		await fireEvent.click(screen.getByRole('button', { name: 'Clear device filter Laptop' }));
 		expect(cardIds()).toEqual(['active', 'peer']);
 		await fireEvent.click(screen.getByRole('button', { name: 'Clear project filter Visible Project' }));
-		expect(cardIds()).toEqual(['active', 'other', 'peer']);
+		// Visible Project holds the newest chat, so it comes first in every lane.
+		expect(cardIds()).toEqual(['active', 'peer', 'other']);
 		expect(document.querySelector('.filter-btn.set')).toBeNull();
 	});
 
@@ -584,11 +640,11 @@ describe('Sidebar session groups', () => {
 
 		await openFilter();
 		await fireEvent.keyDown(window, { key: 'Escape' });
-		expect(screen.queryByRole('dialog', { name: 'Filter sessions' })).toBeNull();
+		expect(screen.queryByRole('dialog', { name: 'Filter chats' })).toBeNull();
 
 		await openFilter();
 		await fireEvent.click(document.querySelector('.sheet-scrim.open') as HTMLElement);
-		expect(screen.queryByRole('dialog', { name: 'Filter sessions' })).toBeNull();
+		expect(screen.queryByRole('dialog', { name: 'Filter chats' })).toBeNull();
 	});
 });
 
@@ -1143,21 +1199,12 @@ describe('Sidebar multi-select (R15)', () => {
 			expect(within(selbar()).getByRole('button', { name: /Active/ })).toBeTruthy();
 			expect(within(selbar()).getByRole('button', { name: /Settle/ })).toBeTruthy();
 
-			await fireEvent.click(within(selbar()).getByRole('button', { name: 'Archive' }));
+			expect(within(selbar()).queryByRole('button', { name: 'Archive' })).toBeNull();
+			await fireEvent.click(within(selbar()).getByRole('button', { name: /Settle/ }));
 			await vi.advanceTimersByTimeAsync(0);
-			expect(mocks.setSessionArchived).toHaveBeenCalledWith('active', true, true);
-			expect(mocks.setSessionArchived).toHaveBeenCalledWith('settled', true, false);
-			// Archive still offers Undo, which puts each row back where it was.
-			expect(mocks.banner).toHaveBeenCalledTimes(1);
-			const [message, options] = mocks.banner.mock.calls[0] as [
-				string,
-				{ action: { label: string; onClick: () => void } },
-			];
-			expect(message).toBe('Archived 2 sessions');
-			expect(options.action.label).toBe('Undo');
-			options.action.onClick();
-			expect(mocks.setSessionArchived).toHaveBeenCalledWith('active', false, true);
-			expect(mocks.setSessionArchived).toHaveBeenCalledWith('settled', false, false);
+			expect(mocks.setSessionActive).toHaveBeenCalledWith('active', false);
+			expect(mocks.setSessionArchived).not.toHaveBeenCalled();
+			expect(mocks.banner).not.toHaveBeenCalled();
 		} finally {
 			vi.useRealTimers();
 		}
@@ -1655,12 +1702,12 @@ describe('Sidebar header', () => {
 		const onNewSession = vi.fn();
 		render(Sidebar, { props: { ...sidebarProps, onNewSession } });
 
-		await fireEvent.click(railItem('New session'));
+		await fireEvent.click(railItem('New chat'));
 		expect(onNewSession).toHaveBeenCalledTimes(1);
 
 		appMode.set('chat');
 		await tick();
-		expect(railItem('New session')).toBeTruthy();
+		expect(railItem('New chat')).toBeTruthy();
 	});
 
 	it('opens the spotlight from the search field', async () => {
@@ -1701,7 +1748,7 @@ describe('Sidebar header', () => {
 		// One kind of session: the project is picked on the new-session screen.
 		expect(head?.querySelector('[role="radiogroup"]')).toBeNull();
 		expect(screen.queryAllByRole('radio')).toHaveLength(0);
-		expect(head?.textContent).toContain('Sessions');
+		expect(head?.textContent).toContain('Chats');
 	});
 });
 
@@ -1721,12 +1768,13 @@ describe('Sidebar unified conversation history', () => {
 		expect(cardIds()).toEqual(['legacy', 'coded', 'chatty', 'spoken']);
 		expect(screen.getByRole('button', { name: 'Filter' })).toBeTruthy();
 	});
-	it('names the empty state of each lane', () => {
+	it('says one thing when there is nothing at all, with no empty Settled lane', () => {
 		mocks.sessions.set([]);
 		appMode.set('voice');
 		render(Sidebar, { props: sidebarProps });
 		const empties = Array.from(document.querySelectorAll('.empty')).map((n) => n.textContent?.trim());
-		expect(empties).toEqual(['Nothing active. Swipe a settled session left to bring it back.', 'No sessions yet']);
+		expect(empties).toEqual(['No chats yet']);
+		expect(Array.from(document.querySelectorAll('.sect')).some((n) => n.textContent?.includes('Settled'))).toBe(false);
 	});
 	it('keeps an explicit project scope across lanes', async () => {
 		mocks.sessions.set(fixture());
@@ -1738,6 +1786,98 @@ describe('Sidebar unified conversation history', () => {
 		expect(cardIds()).toEqual(['legacy', 'coded']);
 		await fireEvent.click(screen.getByRole('button', { name: 'Clear project filter Visible Project' }));
 		expect(cardIds()).toEqual(['legacy', 'coded', 'chatty', 'spoken']);
+	});
+});
+
+describe('Sidebar page-panel host', () => {
+	it('keeps the single notification bell and offered update reachable on Notes', async () => {
+		mocks.activeView.set({ type: 'notes' });
+		mocks.apiGet.mockResolvedValue({ allow_updates: true, update_all_workers: false, workers: [{
+			device_id: 'local', device_name: 'Local', is_self: true, phase: 'available',
+			supported: true, online: true, allow_updates: true, version: '2.0.0', running_version: '1.0.0'
+		}] });
+		render(Sidebar, { props: { ...sidebarProps, panelHost: true } });
+		await tick();
+		const rail = screen.getByRole('navigation', { name: 'Workspace' });
+		for (const name of [/Notifications/, /Download update/]) {
+			const button = await screen.findByRole('button', { name });
+			expect(rail.contains(button)).toBe(true);
+			expect(button.closest('[inert], [aria-hidden="true"]')).toBeNull();
+		}
+		expect(document.querySelectorAll('.notif-center')).toHaveLength(1);
+		expect(document.querySelectorAll('.update-slot')).toHaveLength(1);
+		await fireEvent.click(screen.getByRole('button', { name: /Notifications/ }));
+		expect(screen.getByRole('dialog', { name: 'Notifications' }).closest('[inert], [aria-hidden="true"]')).toBeNull();
+	});
+	it('keeps phone drawer controls in the Chats header, not the bottom tabs', async () => {
+		platform.set('mobile');
+		mocks.activeView.set({ type: 'notes' });
+		render(Sidebar, { props: { ...sidebarProps, panelHost: true } });
+		await tick();
+		const bell = screen.getByRole('button', { name: /Notifications/ });
+		expect(bell.closest('.p-head')).not.toBeNull();
+		expect(bell.closest('[inert], [aria-hidden="true"]')).toBeNull();
+		expect(screen.getByRole('navigation', { name: 'Workspace' }).contains(bell)).toBe(false);
+		expect(document.querySelectorAll('.notif-center')).toHaveLength(1);
+	});
+	it.each(['prs', 'settings', 'build', 'stats', 'docs', 'terminal'])('keeps the rail menu and Customize outside hidden Chats on %s', async (type) => {
+		mocks.activeView.set({ type });
+		terminalTargets.mockResolvedValue({
+			worker: { id: 'w', name: 'ServerWorker', platform: 'linux' }, supported: true, unsupported_reason: null, targets: [],
+			shells: [{ name: 'bash', default: true }], default_shell: 'bash',
+			default_folder: { path: '/workspace', source: 'workspace' }, limit: 8, open: 0,
+		});
+		const onOpenFeature = vi.fn();
+		const view = render(Sidebar, { props: { ...sidebarProps, panelHost: true, isAdmin: true, onOpenFeature } });
+		await terminals.ensureCapability();
+		await tick();
+		const chats = view.container.querySelector('.col.rail-hidden');
+		expect(chats?.getAttribute('aria-hidden')).toBe('true');
+		// Chat-specific controls still belong to Chats, not the global rail.
+		expect(chats?.querySelector('.selbar')).toBeTruthy();
+		expect(chats?.querySelector('[aria-label="Filter chats"]')).toBeTruthy();
+		await openMore();
+		const menu = screen.getByRole('menu', { name: 'More destinations' });
+		expect(menu.closest('[inert], [aria-hidden="true"]')).toBeNull();
+		for (const [label, destination] of [['Docs', 'docs'], ['Stats', 'stats'], ['Terminal', 'terminal']]) {
+			await fireEvent.click(menuItem(label));
+			expect(onOpenFeature).toHaveBeenCalledWith(destination);
+			await openMore();
+		}
+		await fireEvent.click(menuItem('Customize the rail'));
+		const dialog = screen.getByRole('dialog', { name: 'Customize the rail' });
+		expect(dialog.closest('[inert], [aria-hidden="true"]')).toBeNull();
+	});
+	it('keeps Chats mounted and its scroll while a lazy page shows only its title', async () => {
+		const view = render(Sidebar, { props: { ...sidebarProps, panelHost: true } });
+		await tick();
+		const ledger = view.container.querySelector('.list') as HTMLDivElement;
+		ledger.scrollTop = 120;
+		const card = view.container.querySelector('[data-session-id="active"]');
+		mocks.activeView.set({ type: 'notes' });
+		await tick();
+		expect(viewPanel.hostMounted).toBe(true);
+		expect(screen.getByRole('heading', { name: 'Notes' })).toBeTruthy();
+		expect(view.container.querySelector('.page-panel [aria-busy="true"]')).toBeTruthy();
+		expect(ledger.closest('.rail-hidden')).toBeTruthy();
+		expect(ledger.scrollTop).toBe(120);
+		mocks.activeView.set({ type: 'session' });
+		await tick();
+		expect(view.container.querySelector('.list')).toBe(ledger);
+		expect(view.container.querySelector('[data-session-id="active"]')).toBe(card);
+		expect(ledger.closest('.rail-hidden')).toBeNull();
+		expect(ledger.scrollTop).toBe(120);
+		view.unmount();
+		expect(viewPanel.hostMounted).toBe(false);
+	});
+	it.each([false, true])('does not register or consume claims in the phone drawer (host=%s)', async (panelHost) => {
+		platform.set('mobile');
+		mocks.activeView.set({ type: 'settings' });
+		const view = render(Sidebar, { props: { ...sidebarProps, panelHost } });
+		await tick();
+		expect(viewPanel.hostMounted).toBe(false);
+		expect(view.container.querySelector('.page-panel')).toBeNull();
+		expect(view.container.querySelector('.list')?.closest('.rail-hidden')).toBeNull();
 	});
 });
 

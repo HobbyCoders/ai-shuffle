@@ -248,7 +248,7 @@ describe('AutomationJobChoices', () => {
 		const ladder = rowFor('image').querySelectorAll('.ajc-ladder li');
 		expect(ladder[0].getAttribute('aria-current')).toBe('true');
 		expect(ladder[1].classList.contains('overridden')).toBe(true);
-		expect(row.getByText('fal-ai')).toBeTruthy();
+		expect(row.getByText('fal.ai', { selector: 'dd' }).getAttribute('title')).toBe('fal-ai');
 		expect(row.getByText('image size square')).toBeTruthy();
 	});
 

@@ -15,12 +15,13 @@
 	 */
 	import { onDestroy } from 'svelte';
 	import { obscuresTranscript } from '$lib/components/chat/transcript-reading-area';
-	import { ChevronDown, GitFork, Pencil, Trash2, X } from 'lucide-svelte';
+	import { ChevronDown, GitFork, Pencil, X } from 'lucide-svelte';
 	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
 	import { focusTrap } from '$lib/components/ui/focus-trap';
 	import { forkSession } from '$lib/api/client';
 	import { appData } from '$lib/stores/app-data.svelte';
 	import { activeSession } from '$lib/stores/active-session';
+	import ChatExportActions from './ChatExportActions.svelte';
 	import { notify } from '$lib/stores/notifications';
 	import { openHeaderDropdown, toggleDropdown, closeDropdown } from '$lib/stores/header-dropdowns';
 
@@ -174,7 +175,7 @@
 		try {
 			const result = await forkSession(sessionId);
 			await appData.loadSessions();
-			notify('Session forked', { severity: 'success' });
+			notify('Chat forked', { severity: 'success' });
 			window.dispatchEvent(new CustomEvent('open-session', { detail: { sessionId: result.session_id } }));
 		} catch {
 			notify('Failed to fork session', { severity: 'error' });
@@ -252,7 +253,7 @@
 					<div class="stm-list" role="group" aria-label="Session actions">
 						<button type="button" class="sheet-row" disabled={renaming} onclick={startRename}><Pencil size={17} aria-hidden="true" />Rename session</button>
 						<button type="button" class="sheet-row" disabled={renaming} onclick={handleFork}><GitFork size={17} aria-hidden="true" />Fork session</button>
-						<button type="button" class="sheet-row danger" disabled={renaming} onclick={startDelete}><Trash2 size={17} aria-hidden="true" />Delete</button>
+						<button type="button" class="sheet-row danger" disabled={renaming} onclick={startDelete}>Delete</button>
 					</div>
 				</div>
 			</div>
@@ -301,6 +302,12 @@
 				<button type="button" class="dropdown-item" role="menuitem" onclick={handleFork}>
 					Fork session
 				</button>
+				{#if sessionId && activeSession.current.sessionId === sessionId && (activeSession.current.messages?.length ?? 0) > 0}
+					<div class="menu-exports">
+						<div class="dropdown-divider" role="separator"></div>
+						<ChatExportActions {sessionId} menu onStart={() => closeDropdown('session-title')} />
+					</div>
+				{/if}
 				<div class="dropdown-divider" role="separator"></div>
 				<button type="button" class="dropdown-item danger" role="menuitem" onclick={startDelete}>
 					Delete
@@ -422,9 +429,9 @@
 		min-width: 180px;
 		max-width: calc(100vw - 24px);
 		background: var(--card);
-		border: 1px solid var(--border);
-		border-radius: calc(var(--radius, 0.75rem) * 0.83);
-		box-shadow: var(--shadow-l);
+		border: 1px solid var(--menu-border);
+		border-radius: var(--menu-radius);
+		box-shadow: var(--menu-shadow);
 		padding: 4px;
 		z-index: 100;
 		animation: dropdown-in 120ms cubic-bezier(0.16, 1, 0.3, 1);
@@ -439,14 +446,14 @@
 		display: flex;
 		align-items: center;
 		width: 100%;
-		min-height: 32px;
+		min-height: var(--menu-row);
 		padding: 7px 10px;
 		background: transparent;
 		border: none;
-		border-radius: calc(var(--radius, 0.75rem) * 0.58);
+		border-radius: var(--menu-row-radius);
 		color: var(--foreground);
 		font-family: inherit;
-		font-size: 0.8125rem;
+		font-size: 13px;
 		cursor: pointer;
 		text-align: left;
 		transition: background-color 120ms ease, color 120ms ease;
@@ -463,6 +470,12 @@
 	}
 	.dropdown-item.danger:hover {
 		background: color-mix(in oklch, var(--destructive) 12%, transparent);
+	}
+
+	/* The header shows these as icons until a phone-width bar needs the room. */
+	.menu-exports { display: none; }
+	@media (max-width: 480px) {
+		.menu-exports { display: block; }
 	}
 
 	.dropdown-divider {

@@ -120,9 +120,9 @@ describe('MessageArea reading position', () => {
 	});
 
 	it('does not follow a queued prompt whose turn starts while the reader is scrolled up (#863)', () => {
-		expect(instanceScript).toContain('queuedPromptsSeen.add(entry.content)');
+		expect(instanceScript).toContain('queuedPrompts.observe(queued,');
 		const change = block('// Watch for message changes and streaming content updates', '// Update previous values');
-		expect(change).toContain("queuedPromptsSeen.delete(newestMessage.content ?? '')");
-		expect(change).toContain('isNavigableUserTurn(newestMessage) && (!fromQueue || shouldAutoScroll)');
+		expect(change).toContain("queuedPrompts.classify(newestMessage)");
+		expect(change).toContain('isNavigableUserTurn(newestMessage) && (!fromQueue || followsStop || shouldAutoScroll)');
 	});
 });

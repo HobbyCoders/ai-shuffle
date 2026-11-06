@@ -457,6 +457,8 @@ await runJourney({
 				await page.waitForTimeout(300);
 				await openFromSidebar(page, SEEDED.no_project);
 				await waitChatOpen(page, { messagesAtLeast: 2, hold: 500 });
+				// Its own step: leaving Settings shows this chat first, so A, B, A is the route, not a flicker.
+				await mark('back to the chat');
 				await openFromSidebar(page, title);
 				await notSent(departed).waitFor({ timeout: 30_000 });
 				await composerHas(`queued ${answered}`);
@@ -468,6 +470,7 @@ await runJourney({
 				await mark('another chat and back');
 				await openFromSidebar(page, SEEDED.no_project);
 				await waitChatOpen(page, { messagesAtLeast: 2, hold: 500 });
+				await mark('back to the chat');
 				await openFromSidebar(page, title);
 				await composerHas(`queued ${departed}`);
 				await notSent(departed).waitFor({ state: 'detached', timeout: 30_000 });

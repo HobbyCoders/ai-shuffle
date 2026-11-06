@@ -13,7 +13,7 @@
  */
 import { setPlatformForMobileApp } from '$lib/stores/platform.svelte';
 import { registerComposerShell } from '$lib/components/chat/composer-shell';
-import MobileComposerControlsSheet from './MobileComposerControlsSheet.svelte';
+import MobileComposerControlsSheet from '$lib/components/chat/phone/MobileComposerControlsSheet.svelte';
 import MobilePromptDock from './MobilePromptDock.svelte';
 import { reconcileMobileComposerExpanded } from './mobile-composer-collapse';
 

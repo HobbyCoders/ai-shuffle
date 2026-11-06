@@ -8,7 +8,7 @@
  *   open    open an existing chat -> transcript rendered (small and large chat,
  *           cold = first open in a fresh page load, warm = re-open in the same page)
  *   send    send a message -> first agent event visible, first token visible
- *           (creates ONE throwaway chat; archive it afterwards)
+ *           (use an explicitly disposable_test chat; Stop unfinished test work, then settle)
  * Every run records in-page milestones (rAF-sampled, <=16.7 ms resolution),
  * navigation/paint timings, long tasks (>50 ms) and every resource timing, so
  * client work can be separated from server work. Prints nearest-rank p75 and
@@ -301,7 +301,7 @@ async function main() {
 	const sizes = {};
 	for (const [k, p] of [
 		['sessionsActive', '/api/v1/sessions/cursor?limit=100&admin_only=true&exclude_archived=true&active_only=true'],
-		['sessionsRecent', '/api/v1/sessions/cursor?limit=100&admin_only=true&exclude_archived=true'],
+		['sessionsRecent', '/api/v1/sessions/cursor?limit=100&admin_only=true&exclude_archived=true&membership=settled'],
 		['projects', '/api/v1/projects'],
 		['clusterProjects', '/api/v1/cluster/projects'],
 		['preferences', '/api/v1/preferences/all']
@@ -510,6 +510,29 @@ function printTable(out) {
 // ── Journey 3 ────────────────────────────────────────────────────────────────
 async function sendJourney(browser, env, args) {
 	const { ctx, page } = await newPage(browser, env.ctxOpts);
+	let ownedSession = null;
+	let unfinished = false;
+	page.on('websocket', ws => ws.on('framereceived', ({ payload }) => {
+		if (args.sendSession) return;
+		try {
+			const frame = JSON.parse(String(payload));
+			if (frame.type === 'session_created') ownedSession = frame.session_id;
+		} catch { /* unrelated frames */ }
+	}));
+	await ctx.addInitScript(() => {
+		const send = WebSocket.prototype.send;
+		WebSocket.prototype.send = function (data) {
+			if (typeof data === 'string') {
+				try {
+					const frame = JSON.parse(data);
+					if (frame.type === 'query') window.__perfControlSocket = this;
+					if (frame.type === 'query' && !frame.session_id) data = JSON.stringify({ ...frame, disposable_test: true });
+				} catch { /* non-JSON frames pass through */ }
+			}
+			return send.call(this, data);
+		};
+	});
+	try {
 	// Chat lane, cheapest model, low effort, no project (no worktree is created).
 	await ctx.addInitScript((model) => {
 		if (sessionStorage.getItem('__perf_seeded')) return;
@@ -541,6 +564,7 @@ async function sendJourney(browser, env, args) {
 		await page.click(SEL.composer);
 		await page.keyboard.type(args.prompt, { delay: 0 });
 		await page.keyboard.press('Enter');
+		unfinished = true;
 		try {
 			await waitFor(page, () => window.__perf.send && window.__perf.send.done, null, 120000);
 		} catch { /* record what we have */ }
@@ -563,6 +587,8 @@ async function sendJourney(browser, env, args) {
 			} catch { /* none */ }
 			return null;
 		});
+		if (!args.sendSession && sessionId) ownedSession = sessionId;
+		unfinished = !r.send.done;
 		const rec = {
 			i,
 			sessionId,
@@ -586,13 +612,28 @@ async function sendJourney(browser, env, args) {
 		console.error(`send #${i}: ${JSON.stringify({ ...rec, wsTimeline: undefined, wsTypes: undefined })}`);
 		await sleep(2500);
 	}
-	await ctx.close();
 	const follow = sends.slice(1);
 	const summary = {};
 	for (const k of ['userEcho', 'busy', 'activityVisible', 'agentVisible', 'firstToken', 'done', 'wsQueryOut', 'wsFirstIn', 'wsFirstDelta']) {
 		summary[k] = { first: sends[0]?.[k] ?? null, followUps: summarize(follow.map((s) => s[k])) };
 	}
 	return { sessionId: sends.find((s) => s.sessionId)?.sessionId ?? null, summary, sends };
+	} finally {
+		try {
+			if (ownedSession) {
+				if (unfinished) {
+					// Explicit test-owned full Stop, never settlement-as-interrupt.
+					await page.evaluate(sessionId => {
+						const socket = window.__perfControlSocket;
+						if (!socket || socket.readyState !== WebSocket.OPEN) throw new Error('Test Stop needs its control socket');
+						socket.send(JSON.stringify({ type: 'stop', session_id: sessionId }));
+					}, ownedSession);
+				}
+				const settled = await ctx.request.patch(`${env.base}/api/v1/sessions/${ownedSession}/active`, { headers: { Origin: env.base }, data: { is_active: false } });
+				if (!settled.ok()) throw new Error(`Test settlement failed: ${settled.status()}`);
+			}
+		} finally { await ctx.close(); }
+	}
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

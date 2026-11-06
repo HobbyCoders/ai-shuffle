@@ -1,8 +1,11 @@
 <script lang="ts">
+	import { selfWorkerName, workerDisplayName } from '$lib/components/ui/worker-name';
+	import { Monitor } from 'lucide-svelte';
+	import WorkerStatusDot from '$lib/components/ui/WorkerStatusDot.svelte';
 	/**
-	 * RunsOnPicker — the worker word in the new-session sentence ("Runs on
+	 * RunsOnPicker — the worker control in the new-session row ("Runs on
 	 * <worker> in …", NewSessionSentence). The trigger is the worker's name as
-	 * a plain underlined word (no online dot: presence shows in the menu rows),
+	 * a quiet label led by its status dot, as in the row under a running chat,
 	 * and the menu drops down centred under it.
 	 *
 	 * Where a NEW session runs: this worker (the default) or another approved
@@ -29,8 +32,17 @@
 	} from './execution-mode-eligibility';
 	import WorkerMenuList, { type WorkerMenuRow } from '$lib/components/ui/WorkerMenuList.svelte';
 	import { floatingMenu } from '$lib/components/ui/floating-menu';
+	import { menuHost as hostMenu } from '$lib/components/ui/menu-host';
+	import { closeDropdown, openDropdown, openHeaderDropdown } from '$lib/stores/header-dropdowns';
 
 	const LOCAL_ROW_ID = '__local__';
+
+	interface Props {
+		/** The phone sheet's stacked row, with its menu on the sheet's own page. */
+		sheetMode?: boolean;
+		menuHost?: HTMLElement | null;
+	}
+	let { sheetMode = false, menuHost = null }: Props = $props();
 
 	let open = $state(false);
 	let triggerRef = $state<HTMLButtonElement | null>(null);
@@ -41,11 +53,11 @@
 
 	const installs = $derived<Install[]>(failed ? [] : ($workerInstalls ?? []));
 	const peers = $derived(peerRunners(installs));
-	const selfName = $derived(installs.find((i) => i.is_self)?.device_name ?? 'This worker');
+	const selfName = $derived(selfWorkerName(installs));
 	const intent = $derived($activeSession.deviceIntent);
 	const worktreeOn = $derived($activeSession.worktreeIntent === 'worktree');
 	const hasProject = $derived(!!($activeSession.project || $activeSession.projectV2Id));
-	const label = $derived(intent ? intent.name : selfName);
+	const label = $derived(intent ? workerDisplayName(intent.name) : selfName);
 	const online = $derived.by((): boolean | null => (intent ? presenceOf(installs, [intent.id]) : true));
 	// The picked project's per-worker state, when this worker can set projects up elsewhere.
 	const syncRow = $derived(hasProject && $projectsOverviewSupported === true
@@ -100,7 +112,7 @@
 		},
 		...peers.map((install): WorkerMenuRow => ({
 			id: install.id,
-			label: install.device_name,
+			label: workerDisplayName(install.device_name),
 			online: install.online,
 			disabled: isBlockedForNewChat(install, worktreeOn, hasProject ? eligibility : null, syncRow),
 			title: newChatRowTitle(install, worktreeOn, hasProject ? eligibility : null, syncRow),
@@ -130,8 +142,17 @@
 		focusItem(list.find((el) => el.getAttribute('aria-checked') === 'true') ?? list[0]);
 	}
 
+	// In the sheet, its page's Back closes this menu through the shared coordinator.
+	$effect(() => {
+		if (sheetMode && open && $openHeaderDropdown !== 'sheet-new-runner') open = false;
+	});
+
 	function toggle() {
 		open = !open;
+		if (sheetMode) {
+			if (open) openDropdown('sheet-new-runner');
+			else closeDropdown('sheet-new-runner');
+		}
 		if (open) {
 			void load();
 			void focusOnOpen();
@@ -140,6 +161,7 @@
 
 	function closeMenu(focusTrigger: boolean) {
 		open = false;
+		if (sheetMode) closeDropdown('sheet-new-runner');
 		if (focusTrigger) triggerRef?.focus();
 	}
 
@@ -188,7 +210,7 @@
 			if (!install || isBlockedForNewChat(install, worktreeOn, hasProject ? eligibility : null, syncRow)) return;
 			activeSession.setDeviceIntent({ id: install.id, name: install.device_name });
 		}
-		open = false;
+		closeMenu(false);
 	}
 
 	function onWindowClick(e: MouseEvent) {
@@ -206,14 +228,14 @@
 	<button
 		bind:this={triggerRef}
 		type="button"
-		class="sentence-tok"
+		class={sheetMode ? 'ctx-chip runner' : 'sentence-tok'}
 		class:open
 		onclick={toggle}
 		aria-haspopup="menu"
 		aria-expanded={open}
 		aria-label="Runs on {label}{online === false ? ' (offline)' : ''}"
 		title={intent ? `This session will run on ${intent.name}` : 'This session will run on this worker'}
-	>{label}</button>
+	>{#if sheetMode || online === null}<Monitor size={sheetMode ? 16 : 14} strokeWidth={1.75} aria-hidden="true" />{:else}<WorkerStatusDot {online} />{/if}<span class={sheetMode ? 'ctx-chip-label' : 'sentence-tok-label'}>{label}</span></button>
 	{#if open}
 		<!-- Floats to <body>: the hero is its own stacking context, so an
 		     in-place menu painted under the composer below it. -->
@@ -224,7 +246,8 @@
 			aria-label="Where this session runs"
 			bind:this={menuRef}
 			onkeydown={onMenuKeydown}
-			use:floatingMenu={{ anchor: triggerRef, align: 'center' }}
+			use:hostMenu={sheetMode ? menuHost : null}
+			use:floatingMenu={{ anchor: triggerRef, align: 'start', enabled: !sheetMode }}
 		>
 			<WorkerMenuList
 				items={rows}
@@ -240,9 +263,10 @@
 </div>
 
 <style>
-	/* One inline word in the sentence; the look is `.sentence-tok` (app.css). */
+	/* The look is `.sentence-tok` (app.css). */
 	/* inline-flex: the markup's own whitespace never shows beside the word. */
 	.runs-on-wrap { display: inline-flex; }
+	.runs-on-wrap:has(.ctx-chip) { display: flex; width: 100%; }
 	.runs-on-menu:focus { outline: none; }
 	/* Position, z-index and the viewport cap come from floatingMenu. */
 	.runs-on-menu {
@@ -250,9 +274,9 @@
 		max-width: min(320px, calc(100vw - 24px));
 		padding: 6px;
 		background: var(--popover);
-		border: 1px solid var(--border);
-		border-radius: calc(var(--radius, 10px) * 0.83);
-		box-shadow: var(--shadow-l);
+		border: 1px solid var(--menu-border);
+		border-radius: var(--menu-radius);
+		box-shadow: var(--menu-shadow);
 		animation: runs-on-in 150ms cubic-bezier(0.16, 1, 0.3, 1);
 	}
 	.runs-on-menu:global([data-placement='top']) { animation-name: runs-on-in-up; }

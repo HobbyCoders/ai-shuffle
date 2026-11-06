@@ -65,6 +65,8 @@
 	});
 
 	let filter = $state('');
+	/** The list fits on one screen up to here, so a filter would only be noise. */
+	const FILTER_MIN_ROWS = 12;
 
 	interface Row {
 		id: string;
@@ -80,8 +82,7 @@
 			id: `gen-${kind}`,
 			name: GENERATION_NAMES[kind],
 			summary: choice ? `${sourceLabel(choice.source)} · ${modelLabel(choice.model)}` : 'Asks each time',
-			icon: GENERATION_ICONS[kind],
-			status: choice ? undefined : 'off'
+			icon: GENERATION_ICONS[kind]
 		};
 	}
 
@@ -153,22 +154,30 @@
 	);
 </script>
 
-<CollectionPage category="models" count="{taskCount} tasks" filterPlaceholder="Filter default models" bind:filter>
+<CollectionPage
+	category="models"
+	count="{taskCount} tasks"
+	filterPlaceholder={taskCount + 1 > FILTER_MIN_ROWS ? 'Filter default models' : null}
+	replaceOnSelect
+	bind:filter
+>
 	{#snippet list()}
 		{#each visible as group (group.label)}
 			<ListGroupLabel label={group.label} />
-			{#each group.rows as row (row.id)}
-				<ListItem
-					id={row.id}
-					name={row.name}
-					summary={row.summary}
-					icon={row.icon}
-					status={row.status}
-					category="models"
-				/>
-			{/each}
+			<div class="st-card md-group">
+				{#each group.rows as row (row.id)}
+					<ListItem
+						id={row.id}
+						name={row.name}
+						summary={row.summary}
+						status={row.status}
+						category="models"
+						variant="value"
+					/>
+				{/each}
+			</div>
 		{:else}
-			<p class="st-empty">No task matches “{filter.trim()}”.</p>
+			<EmptyDetail message={`No task matches “${filter.trim()}”.`} actionLabel="Clear" onAction={() => filter = ''} />
 		{/each}
 	{/snippet}
 	{#snippet detail()}
@@ -187,7 +196,7 @@
 		{:else if selectedTool && selectedTool.id === READ_ALOUD?.id}
 			<ToolDetail tool={selectedTool} />
 		{:else}
-			<EmptyDetail icon={Sparkles} message="Select a task." />
+			<EmptyDetail icon={Sparkles} message="Select a task." idle />
 		{/if}
 	{/snippet}
 </CollectionPage>

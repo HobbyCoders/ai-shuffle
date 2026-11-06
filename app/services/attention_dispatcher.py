@@ -115,7 +115,7 @@ def _transition(session_id, worker_id, private_needs, explicit_id=None):
             (event_type IN ('turn.started', 'message.user') OR
              (event_type='system.note' AND payload->>'subtype'='session_settled')) ORDER BY seq DESC LIMIT 1""", (session_id,))
         boundary = c.fetchone()
-        active = row.get("status") != "archived" and not (boundary and boundary["event_type"] == "system.note")
+        active = not (boundary and boundary["event_type"] == "system.note")
         state, changed = reduce_attention(previous, needs, position, active=active,
             explicit_id=explicit_id)
         if state != previous:

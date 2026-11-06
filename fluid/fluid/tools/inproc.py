@@ -30,6 +30,7 @@ class InprocTool:
     # Optional per-input risk (``ToolSpec.classify_risk``): one tool whose
     # actions differ, e.g. a status action that only reads. Capped at ``risk``.
     classify_risk: Callable[[dict[str, Any]], str] | None = None
+    discoverable: bool = True
 
     def as_handler(self) -> Callable[[dict[str, Any], Any], Awaitable[Any]]:
         """Adapt the SDK-style ``args``-only handler to the registry's

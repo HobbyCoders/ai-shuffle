@@ -10,7 +10,7 @@
 // Cases:
 //   rollback-settle   Settle fails: only that row goes back; another device's
 //                     settle of a second chat and rename of the first both stay
-//   rollback-archive  the same for Archive
+//   rollback-reactivate  the same for moving Settled history back to Active
 //   rollback-rename   the same for Rename
 //   rollback-delete   the same for Delete: the row returns where it was
 //   failed-open       a provider error on the open chat: the row says Failed,
@@ -37,7 +37,7 @@ import { pathToFileURL } from 'node:url';
 import { runJourney } from './runner.mjs';
 import {
 	api, chatIdByToken, chatState, expect, openNewChat, pick, pickAccess, pickProject, scriptTag, showSidebar as showDesktopSidebar, stopButton, typeAndSend, uniq,
-	waitChat, waitTurnSettled
+	waitChat, waitTurnSettled, withChatSetup
 } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 
@@ -50,7 +50,7 @@ const CARD = (id) => `[data-session-card="${id}"]`;
 /** The list of chats, open: the shared UI's sidebar, or the /mobile/ shell's menu holding the same one. */
 async function showSidebar(page) {
 	if (!new URL(page.url()).pathname.startsWith('/mobile/')) return showDesktopSidebar(page);
-	const sessions = page.getByRole('complementary', { name: 'Sessions' });
+	const sessions = page.getByRole('complementary', { name: 'Chats' });
 	if (await sessions.isVisible()) return sessions;
 	await page.getByRole('button', { name: /^Open menu/ }).click();
 	await sessions.waitFor({ timeout: 10_000 });
@@ -59,10 +59,14 @@ async function showSidebar(page) {
 const laneOf = (page, id) => page.evaluate((selector) => document.querySelector(selector)?.closest('[data-group]')?.getAttribute('data-group') ?? null, CARD(id));
 
 async function waitLane(page, id, lane, timeout = 30_000) {
-	await page.getByRole('complementary', { name: 'Sessions' })
-		.or(page.getByRole('button', { name: /^(Show sidebar|Open menu)/ }))
+	await page.getByRole('complementary', { name: 'Chats' })
+		.or(page.getByRole('button', { name: /^(Show sidebar|Chats|Open menu)/ }))
 		.first().waitFor({ timeout: 60_000 });
 	await showSidebar(page);
+	if (lane === 'settled') {
+		const section = page.getByRole('button', { name: /^Settled/ }).first();
+		if (await section.getAttribute('aria-expanded') === 'false') await section.click();
+	}
 	try {
 		await page.waitForFunction(({ selector, lane }) => document.querySelector(selector)?.closest('[data-group]')?.getAttribute('data-group') === lane,
 			{ selector: CARD(id), lane }, { timeout });
@@ -72,12 +76,13 @@ async function waitLane(page, id, lane, timeout = 30_000) {
 }
 
 /** The row's status word as the user reads it. */
-const statusWord = (page, id) => page.locator(`${CARD(id)} .st`).first().innerText();
+// A quiet row shows no status word; its screen-reader details always start with it.
+const statusWord = async (page, id) => (await page.locator(`${CARD(id)} .details`).first().textContent())?.split(' · ')[0].trim();
 
 async function waitStatus(page, id, word, timeout = 60_000) {
 	await showSidebar(page);
 	try {
-		await page.waitForFunction(({ selector, word }) => document.querySelector(`${selector} .st`)?.textContent?.trim() === word,
+		await page.waitForFunction(({ selector, word }) => document.querySelector(`${selector} .details`)?.textContent?.split(' · ')[0].trim() === word,
 			{ selector: CARD(id), word }, { timeout });
 	} catch {
 		throw new Error(`the row never said "${word}"; it says "${await statusWord(page, id).catch(() => '(no row)')}"`);
@@ -156,7 +161,7 @@ async function makeChat(ctx, label, { agent = null, first = 'hello', again = fal
 	if (again) await backToNew(page);
 	else await openNewChat(ctx);
 	if (agent) {
-		const hero = page.getByRole('region', { name: 'New session' });
+		const hero = page.getByRole('region', { name: 'New chat' });
 		const menu = page.getByRole('menu', { name: 'Agent selection' });
 		await pick(hero.getByRole('button', { name: /^Agent:/ }), menu, menu.getByRole('button', { name: agent, exact: true }), hero.getByRole('button', { name: `Agent: ${agent}` }));
 	}
@@ -170,7 +175,7 @@ async function makeChat(ctx, label, { agent = null, first = 'hello', again = fal
 
 async function backToNew(page) {
 	await showSidebar(page);
-	await page.getByRole('navigation', { name: 'Workspace' }).getByRole('button', { name: 'New session', exact: true }).click();
+	await page.getByRole('navigation', { name: 'Workspace' }).getByRole('button', { name: 'New chat', exact: true }).click();
 	await waitChat(page, { surface: 'new' });
 }
 
@@ -251,19 +256,21 @@ const ROLLBACK_SETTLE = {
 	}
 };
 
-const ROLLBACK_ARCHIVE = {
-	name: 'rollback-archive',
+const ROLLBACK_REACTIVATE = {
+	name: 'rollback-reactivate',
 	setup: twoChats,
 	allow: [...REFUSAL_NOISE],
 	async act(ctx) {
-		const { page, mark, a } = ctx;
-		await mark('archive the first chat; the server holds on to it');
+		const { page, status, mark, a } = ctx;
+		await otherDevice(page, status, 'PATCH', `/sessions/${a.id}/active`, { is_active: false });
+		await waitLane(page, a.id, 'settled');
+		await mark('reactivate the first chat; the server holds on to it');
 		await armHold(page, 'PATCH', `/sessions/${a.id}/active`);
-		await rowAction(page, a.id, 'Archive session');
-		await page.locator(CARD(a.id)).waitFor({ state: 'detached', timeout: 15_000 });
+		await rowAction(page, a.id, 'Move session to Active');
+		await waitLane(page, a.id, 'active');
 
 		const check = await refuseAfterOtherDevice(ctx);
-		await waitLane(page, a.id, 'active');
+		await waitLane(page, a.id, 'settled');
 		await check();
 	}
 };
@@ -320,24 +327,25 @@ const ROLLBACK_DELETE = {
 
 /** The element is drawn in the theme's danger colour, whatever the theme makes that. */
 async function expectDangerColour(locator, what, log = () => {}) {
+	// A status mark is a drawn shape, so its colour is its fill; a word's is its text.
 	const { colour, danger } = await locator.evaluate((el) => {
 		const probe = document.createElement('span');
 		probe.style.color = 'var(--destructive)';
 		document.body.append(probe);
 		const danger = getComputedStyle(probe).color;
 		probe.remove();
-		return { colour: getComputedStyle(el).color, danger };
+		const style = getComputedStyle(el);
+		return { colour: el.classList.contains('pip') ? style.backgroundColor : style.color, danger };
 	});
 	log(`${what}: ${colour}`);
 	expect(colour === danger, `${what} is in the danger colour (${colour}, the theme's is ${danger})`);
 }
 
-/** Everything a failed row must show: the word, the lane, and agreement after a reload. */
+/** Everything a failed row must say: the sign, the word for assistive tech, the lane, and agreement after a reload. */
 async function expectFailedRow({ page, mark, log, variant }, id) {
 	await waitStatus(page, id, 'Failed');
 	await waitLane(page, id, 'needs-you');
-	await expectDangerColour(page.locator(`${CARD(id)} .st`).first(), 'the status word', log);
-	await expectDangerColour(page.locator(`${CARD(id)} .title .warn.failed`), 'the row\'s sign', log);
+	await expectDangerColour(page.locator(`${CARD(id)} .lead .pip.warn.failed`), 'the row\'s sign', log);
 	await mark('reload');
 	await page.reload({ waitUntil: 'domcontentloaded' });
 	// A new step once the recorder has seen the old page go: the reload itself
@@ -428,18 +436,17 @@ const FAILED_SETTLED = {
 		await waitStatus(page, chat.id, 'Failed');
 		await mark('settle it: not now, but still what happened');
 		await rowAction(page, chat.id, 'Settle session');
-		await waitLane(page, chat.id, 'settled');
 		// In the shared UI settling the open chat leaves it (on a phone that closes
 		// the drawer too), so read the row once that has happened, not while it is
 		// going. The /mobile/ shell stays on the chat.
 		if (!inMobileShell(variant)) await waitChat(page, { surface: 'new' }, { timeout: 30_000 });
 		await waitLane(page, chat.id, 'settled');
-		// A settled row is the compact one: no status word to read, but the alert
-		// sign is in the danger colour and assistive tech hears the word.
-		const sign = page.locator(`${CARD(chat.id)} .title .warn.failed`);
+		// No row prints a status word, but the alert sign is in the danger colour and
+		// assistive tech hears the word.
+		const sign = page.locator(`${CARD(chat.id)} .lead .pip.warn.failed`);
 		await sign.waitFor({ timeout: 5000 });
-		const said = await page.locator(`${CARD(chat.id)} .title .sr-only`).first().textContent();
-		expect(/^Failed: /.test(said ?? ''), `a settled failed row announces it: ${JSON.stringify(said)}`);
+		const said = await page.locator(`${CARD(chat.id)} .details`).first().textContent();
+		expect(/^Failed( · |$)/.test(said ?? ''), `a settled failed row announces it: ${JSON.stringify(said)}`);
 		await expectDangerColour(sign, 'the settled row\'s sign');
 		await page.waitForTimeout(800);
 	},
@@ -458,7 +465,7 @@ const FAILED_CLEARED = {
 		await api(page, 'POST', `/sessions/${encodeURIComponent(chat.id)}/clear`);
 		await page.waitForFunction((selector) => {
 			const row = document.querySelector(selector);
-			return row && row.querySelector('.st')?.textContent?.trim() !== 'Failed' && !row.querySelector('.title .warn.failed');
+			return row && row.querySelector('.details')?.textContent?.split(' · ')[0].trim() !== 'Failed' && !row.querySelector('.lead .warn.failed');
 		}, CARD(chat.id), { timeout: 30_000 });
 		expect(await laneOf(page, chat.id) !== 'needs-you', 'a cleared chat no longer needs you');
 		await mark('reload');
@@ -573,13 +580,16 @@ async function projectGainingARemote(ctx, { rememberCatalogRow = false } = {}) {
 /** The worktree toggle, a new branch, and the composer showing it. Drop gets its own error. */
 async function chooseNewWorktreeBranch(page, hero, branch) {
 	try {
-		await hero.getByRole('button', { name: /Switch to a worktree$/ }).click({ timeout: 10_000 });
-		await hero.getByRole('button', { name: /^Worktree branch:/ }).click({ timeout: 10_000 });
-		const menu = page.getByRole('dialog', { name: 'Worktree branch' });
-		await menu.getByRole('button', { name: /New branch/ }).click({ timeout: 10_000 });
-		await page.getByPlaceholder('Enter a branch name').fill(branch, { timeout: 10_000 });
-		await page.getByRole('button', { name: 'Continue', exact: true }).click({ timeout: 10_000 });
-		await hero.getByRole('button', { name: `Worktree branch: ${branch}` }).waitFor({ timeout: 10_000 });
+		// A sentence word on a wide screen, a labelled switch in Chat controls on a phone.
+		await withChatSetup(page, async () => {
+			await hero.getByRole('button', { name: /Switch to a worktree$/ }).or(hero.locator('.wt-chip')).click({ timeout: 10_000 });
+			await hero.getByRole('button', { name: /^Worktree branch:/ }).click({ timeout: 10_000 });
+			const menu = page.getByRole('dialog', { name: 'Worktree branch' }).or(hero.locator('.branch-dropdown'));
+			await menu.getByRole('button', { name: /New branch/ }).click({ timeout: 10_000 });
+			await page.getByPlaceholder('Enter a branch name').fill(branch, { timeout: 10_000 });
+			await page.getByRole('button', { name: 'Continue', exact: true }).click({ timeout: 10_000 });
+			await hero.getByRole('button', { name: `Worktree branch: ${branch}` }).waitFor({ timeout: 10_000 });
+		});
 	} catch (error) {
 		if (await noProjectChosen(hero).isVisible()) throw new Error(`the chosen project was dropped while choosing its worktree branch (#1078): ${error.message.split('\n')[0]}`);
 		throw error;
@@ -606,7 +616,7 @@ const PROJECT_CHOICE_SURVIVES = {
 		if (nudge) await api(page, 'DELETE', `/projects/${nudge}`).catch(() => {});
 	},
 	async act({ page, mark, project }) {
-		const hero = page.getByRole('region', { name: 'New session' });
+		const hero = page.getByRole('region', { name: 'New chat' });
 		const holds = async (when) => {
 			const deadline = Date.now() + 4_000;
 			while (Date.now() < deadline) {
@@ -634,7 +644,7 @@ const PROJECT_ONCE = {
 		if (project) await api(page, 'DELETE', `/projects/${project.id}`).catch(() => {});
 	},
 	async act({ page, mark, log, project, olderId }) {
-		const hero = page.getByRole('region', { name: 'New session' });
+		const hero = page.getByRole('region', { name: 'New chat' });
 		await mark('a worktree on a new branch, then the first message');
 		// This case is about the listing. Losing the choice has its own case above
 		// (#1078), so step around that one failure here and nothing else: the screen
@@ -662,7 +672,7 @@ const PROJECT_ONCE = {
 		await mark('the Filter lists the project once');
 		const sessions = await showSidebar(page);
 		await sessions.getByRole('button', { name: 'Filter', exact: true }).click();
-		const sheet = page.getByRole('dialog', { name: 'Filter sessions' });
+		const sheet = page.getByRole('dialog', { name: 'Filter chats' });
 		await sheet.waitFor({ timeout: 10_000 });
 		const entries = sheet.getByRole('button', { name: project.name, exact: true });
 		const count = await entries.count();
@@ -684,5 +694,5 @@ const PROJECT_ONCE = {
 await runJourney({
 	name: 'sidebar-truth',
 	allow: [...DEV_INSTANCE_NOISE],
-	cases: [ROLLBACK_SETTLE, ROLLBACK_ARCHIVE, ROLLBACK_RENAME, ROLLBACK_DELETE, FAILED_OPEN, FAILED_UNOPENED, FAILED_CLAUDE, FAILED_SETTLED, FAILED_CLEARED, STOPPED, PROJECT_CHOICE_SURVIVES, PROJECT_ONCE]
+	cases: [ROLLBACK_SETTLE, ROLLBACK_REACTIVATE, ROLLBACK_RENAME, ROLLBACK_DELETE, FAILED_OPEN, FAILED_UNOPENED, FAILED_CLAUDE, FAILED_SETTLED, FAILED_CLEARED, STOPPED, PROJECT_CHOICE_SURVIVES, PROJECT_ONCE]
 });

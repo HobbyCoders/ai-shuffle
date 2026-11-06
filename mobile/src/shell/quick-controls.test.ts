@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
 	BYPASS, STEP_DISTANCE, VelocityTracker, dragAxis, knobFraction, settlesClosed, settlesOpen, slideAnswer, stepValue, taskSummary
-} from './quick-controls';
+} from '$lib/components/chat/phone/quick-controls';
 
 const ACCESS = ['default', 'auto', 'acceptEdits', BYPASS];
 const EFFORT = ['low', 'medium', 'high', 'xhigh', 'max'];

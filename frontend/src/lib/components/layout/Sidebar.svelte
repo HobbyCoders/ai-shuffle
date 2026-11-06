@@ -9,7 +9,7 @@
 	 * Active and Settled.
 	 *
 	 * Rows follow the inbox model. Swipe left settles an active session (or
-	 * brings a settled one back); swipe right archives. A long press starts a
+	 * brings a settled one back); swipe right is inert. A long press starts a
 	 * multi-select whose bar offers the same moves in bulk. On desktop the
 	 * same moves sit in each row's hover actions.
 	 *
@@ -28,13 +28,13 @@
 		RefreshCw,
 		X,
 		Check,
-		Archive,
 		Undo2,
 		Files,
-		StickyNote,
+		Notebook,
+		SquarePen,
 		Bot,
 		CalendarClock,
-		FolderKanban,
+		Folder,
 		BarChart3,
 		GitPullRequest,
 		Settings,
@@ -49,13 +49,16 @@
 		projects,
 		clusterProjects,
 		projectCatalogReady,
-		sessionsHasMore
+		sessionsHasMore,
+		settledTotal
 	} from '$lib/stores/app-data.svelte';
 	import { activeSession, streamingSessions, backgroundPermissions } from '$lib/stores/active-session';
 	import { privateAccessPending } from '$lib/stores/chat-access';
 	import { isTranscriptProseDismissed, proseQuestionDismissals, proseQuestionSessions, withoutSession } from '$lib/stores/session/prose-questions';
 	import { chatPreferences } from '$lib/stores/chatPreferences.svelte';
-	import { activeView } from '$lib/stores/layout.svelte';
+	import { activeView, layout, viewOwnsPanel, viewPanelTitles } from '$lib/stores/layout.svelte';
+	import { viewPanel } from '$lib/stores/view-panel.svelte';
+	import ViewPanel from './view/ViewPanel.svelte';
 	import type { ViewType } from '$lib/stores/layout.svelte';
 	import { preloadPanelForView } from '$lib/components/deck/lazy/panels';
 	import { terminals } from '$lib/stores/terminals.svelte';
@@ -63,11 +66,13 @@
 	import type { SessionMode } from '$lib/stores/sessionMode.svelte';
 	import { platform } from '$lib/stores/platform.svelte';
 	import { notify } from '$lib/stores/notifications';
-	import { splitWorkspaceItems, workspacePrefs } from '$lib/stores/sidebar-prefs.svelte';
+	import { splitWorkspaceItems, WORKSPACE_ITEM_IDS, workspacePrefs, type WorkspaceItemId } from '$lib/stores/sidebar-prefs.svelte';
 	import NotificationCenter from '$lib/components/NotificationCenter.svelte';
 	import DesktopUpdateButton from './sidebar/DesktopUpdateButton.svelte';
 	import SessionCard from './SessionCard.svelte';
+	import { backToChats } from '$lib/services/session-navigation';
 	import SidebarRail from './sidebar/SidebarRail.svelte';
+	import PanelToggle from './view/PanelToggle.svelte';
 	import SidebarSheet from './sidebar/SidebarSheet.svelte';
 	import WorkspaceCustomize from './sidebar/WorkspaceCustomize.svelte';
 	import type { WorkspaceNavItem } from './sidebar/workspace-items';
@@ -79,7 +84,6 @@
 		sessionPrState,
 		projectKey,
 		isVisibleSidebarSession,
-		isArchived,
 		sidebarGroup,
 		lastWorkFailed,
 		openSessionNeeds,
@@ -101,6 +105,10 @@
 		onSelectMode?: (mode: SessionMode) => void;
 		/** Extra control for the header row (the drawer's close button). */
 		headerAction?: Snippet;
+		/** Leave a page for the chats. The phone's drawer also closes itself. */
+		onBackToChats?: () => void;
+		/** Explicit desktop opt-in: the phone drawer must never receive a page panel. */
+		panelHost?: boolean;
 	}
 
 	let {
@@ -111,8 +119,22 @@
 		onOpenFeature,
 		onOpenSpotlight,
 		onSelectMode,
-		headerAction
+		headerAction,
+		onBackToChats,
+		panelHost = false
 	}: Props = $props();
+
+	const hostToken = Symbol('sidebar-panel-host');
+	$effect(() => {
+		if (!panelHost || platform.isMobile) return;
+		viewPanel.mountHost(hostToken);
+		return () => viewPanel.unmountHost(hostToken);
+	});
+	const ownsPanel = $derived(panelHost && !platform.isMobile && viewOwnsPanel($activeView?.type));
+	const panelTitle = $derived(ownsPanel ? viewPanelTitles[$activeView!.type as keyof typeof viewPanelTitles] : 'Chats');
+
+	/** Who gets the phone's few tab seats on a list nobody has reordered. */
+	const PHONE_TAB_ORDER: readonly WorkspaceItemId[] = ['project', 'build', 'file-browser', 'notes', 'prs'];
 
 	// Statuses whose elapsed timer ticks live (1s) rather than showing a coarse age.
 	// A parked session's total keeps counting while its background work runs.
@@ -135,7 +157,7 @@
 	// A click that fast belongs to the load, not to a request to collapse.
 	const SHELF_SETTLE_MS = 500;
 
-	const collapsedGroups = $derived($sidebarGroups);
+	const collapsedGroups: Record<string, boolean> = $derived({ settled: true, ...$sidebarGroups });
 	function toggleGroup(name: string) {
 		sidebarGroups.set({ ...collapsedGroups, [name]: !collapsedGroups[name] });
 	}
@@ -203,8 +225,8 @@
 
 	function projectLabel(s: Session): string {
 		if (s.project_name) return s.project_name;
-		if (s.project_id) return projectsById.get(s.project_id)?.name || 'Ungrouped';
-		return 'Ungrouped';
+		if (s.project_id) return projectsById.get(s.project_id)?.name || 'No project';
+		return 'No project';
 	}
 
 	// --- open-PR detection ---------------------------------------------------
@@ -313,7 +335,7 @@
 		const map = new Map<string, string>();
 		for (const s of sidebarSessions) {
 			const key = projectKey(s);
-			if (!map.has(key)) map.set(key, key === UNGROUPED_PROJECT ? 'Ungrouped' : projectLabel(s));
+			if (!map.has(key)) map.set(key, key === UNGROUPED_PROJECT ? 'No project' : projectLabel(s));
 		}
 		return [...map.entries()]
 			.map(([id, label]) => ({ id, label }))
@@ -366,7 +388,6 @@
 
 	const rows = $derived.by((): CardRow[] =>
 		visibleSessions
-			.filter((s) => !isArchived(s))
 			.map((s) => {
 				const branch = branchLabel(s);
 				const prSet = branch && s.project_id ? openPrBranches.get(s.project_id) : undefined;
@@ -422,7 +443,10 @@
 
 	// Each lane names its own nothing-here state; "No sessions yet" under a
 	// voice-only list reads as though the whole app were empty.
-	const emptyLabel = 'No sessions yet';
+	const emptyLabel = 'No chats yet';
+	// An empty Settled lane says nothing the Active lane does not. It stays only
+	// while older chats are one click away, because its shelf is how you get them.
+	const settledLaneShown = $derived(settledRows.length > 0 || ($settledTotal ?? 0) > 0 || loadingOlder || $sessionsHasMore);
 	onMount(() => {
 		if (!isAdmin) return;
 		// Agent names and avatars for the new-session agent card.
@@ -452,12 +476,13 @@
 	// order survives their role lapsing, because nothing rewrote it.
 	const destinations = $derived<WorkspaceNavItem[]>([
 		{ id: 'file-browser', label: 'Files', icon: Files, on: currentType === 'file-browser' },
-		{ id: 'notes', label: 'Notes', icon: StickyNote, on: currentType === 'notes' },
+		// A notebook, not a second sheet of paper: this sits right under Files.
+		{ id: 'notes', label: 'Notes', icon: Notebook, on: currentType === 'notes' },
 		{ id: 'build', label: 'Agents', icon: Bot, on: currentType ? BUILD_MEMBERS.includes(currentType) : false },
 		...(isAdmin
 			? [{ id: 'automations' as const, label: 'Automations', icon: CalendarClock, on: currentType === 'automations' }]
 			: []),
-		{ id: 'project', label: 'Projects', icon: FolderKanban, on: currentType === 'project' },
+		{ id: 'project', label: 'Projects', icon: Folder, on: currentType === 'project' },
 		{ id: 'prs', label: 'Pull requests', icon: GitPullRequest, on: currentType === 'prs' },
 		{ id: 'stats', label: 'Stats', icon: BarChart3, on: currentType === 'stats' },
 		{ id: 'docs', label: 'Docs', icon: BookOpen, on: currentType === 'docs' },
@@ -472,9 +497,37 @@
 			: null
 	);
 	const split = $derived(splitWorkspaceItems(destinations, $workspacePrefs));
-	const moreOn = $derived(split.hidden.some((item) => item.on));
+	// The phone's tab row holds four places plus More, so it has fewer seats than
+	// the rail. Until someone reorders their list, the seats go by real use: the
+	// chat list comes first in the rail itself, then Projects and Agents. A list
+	// the user has reordered keeps their order; nothing but seats change.
+	const phoneTabs = $derived.by<WorkspaceNavItem[]>(() => {
+		const seats = settingsItem ? 2 : 3;
+		const reordered = $workspacePrefs.order.join() !== WORKSPACE_ITEM_IDS.join();
+		const rank = (item: WorkspaceNavItem) => {
+			const at = PHONE_TAB_ORDER.indexOf(item.id);
+			return at < 0 ? PHONE_TAB_ORDER.length : at;
+		};
+		const pool = reordered ? split.shown : [...split.shown].sort((a, b) => rank(a) - rank(b));
+		return pool.slice(0, seats);
+	});
+	const railItems = $derived(phone ? phoneTabs : split.shown);
+	const moreItems = $derived(
+		phone ? destinations.filter((item) => !phoneTabs.some((tab) => tab.id === item.id)) : split.hidden
+	);
+	const moreOn = $derived(moreItems.some((item) => item.on));
+	/** The chat list, and the chat or board it leads to, are what is on screen. */
+	const chatsOn = $derived(currentType === null || currentType === 'session' || currentType === 'board');
+	let listRef = $state<HTMLElement | null>(null);
+
+	function openChats() {
+		sheet = null;
+		// Already here: on the phone the list is the page, so go to its top.
+		if (chatsOn) listRef?.scrollTo({ top: 0, behavior: 'smooth' });
+		else (onBackToChats ?? backToChats)();
+	}
 	// One kind of session; the project is picked (or not) on the new screen.
-	const newLabel = 'New session';
+	const newLabel = 'New chat';
 
 	/** Which overlay is up: the More menu, the filter, or neither. */
 	let sheet = $state<'more' | 'filter' | null>(null);
@@ -514,6 +567,45 @@
 		if (ts >= today - 6 * DAY) return 'Earlier this week';
 		return 'Older';
 	}
+	// A project's place follows its most recent chat in ANY lane, archived-but-
+	// not-yet-gone included. Ranking on the lane's own rows made a project swap
+	// places, moving a screenful of rows, whenever its newest chat left the lane,
+	// and swap back if the server then refused the change.
+	const projectRecency = $derived.by(() => {
+		const latest = new Map<string, number>();
+		for (const s of visibleSessions) {
+			const key = projectKey(s);
+			const ts = sessionTimestamp(s);
+			if (ts > (latest.get(key) ?? -Infinity)) latest.set(key, ts);
+		}
+		return latest;
+	});
+	// Inside a lane, rows sit under their project when the lane spans more than
+	// one, so no row has to repeat it. Rows keep their recency order inside it.
+	function byProject(laneRows: CardRow[]): { key: string; label: string | null; rows: CardRow[] }[] {
+		const groups = new Map<string, CardRow[]>();
+		for (const row of laneRows) {
+			const key = projectKey(row.session);
+			const group = groups.get(key);
+			if (group) group.push(row);
+			else groups.set(key, [row]);
+		}
+		if (groups.size < 2) return [{ key: 'all', label: null, rows: laneRows }];
+		const recency = (key: string) => projectRecency.get(key) ?? 0;
+		return [...groups]
+			.sort(([a], [b]) => recency(b) - recency(a))
+			.map(([key, rows]) => ({
+				key,
+				label: key === UNGROUPED_PROJECT ? 'No project' : projectLabel(rows[0].session),
+				rows
+			}));
+	}
+	// A lane with no project headers still needs its rows to say where they
+	// belong, unless the whole list is one project and it goes without saying.
+	const spansProjects = $derived(new Set(rows.map((r) => projectKey(r.session))).size > 1);
+	const needsYouGroups = $derived(byProject(needsYouRows));
+	const activeGroups = $derived(byProject(activeRows));
+
 	const settledDays = $derived.by(() => {
 		const out: { label: string; rows: CardRow[] }[] = [];
 		for (const row of visibleSettledRows) {
@@ -562,7 +654,7 @@
 
 	function reportBulkFailure(failed: number, total: number) {
 		notify(
-			failed === total ? 'Failed to update the sessions' : `Failed to update ${failed} of ${total} sessions`,
+			failed === total ? 'Failed to update the chats' : `Failed to update ${failed} of ${total} chats`,
 			{ severity: 'error' }
 		);
 	}
@@ -584,18 +676,14 @@
 
 	const plural = (n: number) => `${n} session${n === 1 ? '' : 's'}`;
 
-	async function runBulk(kind: 'settle' | 'activate' | 'archive') {
+	async function runBulk(kind: 'settle' | 'activate') {
 		const targets = selectedRows.filter((r) =>
 			kind === 'settle' ? r.session.is_active : kind === 'activate' ? !r.session.is_active : true
 		);
 		cancelSelection();
 		if (targets.length === 0) return;
 		const ids = targets.map((r) => r.session.id);
-		const wasActive = new Map(targets.map((r) => [r.session.id, !!r.session.is_active]));
-		const apply = (id: string) =>
-			kind === 'archive'
-				? appData.setSessionArchived(id, true, wasActive.get(id))
-				: appData.setSessionActive(id, kind === 'activate');
+		const apply = (id: string) => appData.setSessionActive(id, kind === 'activate');
 		const results = await Promise.allSettled(ids.map(apply));
 		const done = ids.filter((_, i) => results[i].status === 'fulfilled');
 		const failed = ids.length - done.length;
@@ -603,10 +691,6 @@
 		if (done.length === 0) return;
 		if (kind === 'settle') {
 			if (activeId && done.includes(activeId) && !phone) onSettledOpenSession();
-		} else if (kind === 'archive') {
-			offerUndo(`Archived ${plural(done.length)}`, () =>
-				Promise.all(done.map((id) => appData.setSessionArchived(id, false, wasActive.get(id))))
-			);
 		}
 	}
 
@@ -659,7 +743,7 @@
 
 <svelte:window onkeydown={handleWindowKeydown} />
 
-{#snippet card(row: CardRow, compact = false)}
+{#snippet card(row: CardRow, compact = false, showProject = false)}
 	<SessionCard
 		session={row.session}
 		status={row.status}
@@ -670,6 +754,7 @@
 		{now}
 		timestamp={row.ts}
 		{compact}
+		{showProject}
 		{selecting}
 		selected={selected.has(row.session.id)}
 		onSelectToggle={toggleSelected}
@@ -679,23 +764,39 @@
 	/>
 {/snippet}
 
+{#snippet laneRows(groups: { key: string; label: string | null; rows: CardRow[] }[], compact = false)}
+	{#each groups as group (group.key)}
+		{#if group.label}
+			<div class="proj-head" title={group.label}>{group.label}</div>
+		{/if}
+		{#each group.rows as row (row.session.id)}
+			{@render card(row, compact, !group.label && spansProjects)}
+		{/each}
+	{/each}
+{/snippet}
+
 {#snippet sect(key: 'needs' | 'active' | 'settled', label: string, count: number)}
 	<button
 		class="sect"
 		class:needs={key === 'needs'}
+		class:settled={key === 'settled'}
 		class:closed={collapsedGroups[key]}
 		onclick={() => toggleGroup(key)}
 		aria-expanded={!collapsedGroups[key]}
 	>
-		{label} <span class="n">{count}</span>
-		<span class="rule" aria-hidden="true"></span>
+		<span class="lbl">{label}</span> <span class="n">{count}</span>
 		<span class="chev"><ChevronDown size={14} strokeWidth={2} /></span>
 	</button>
 {/snippet}
 
-<aside class="sidebar grain" class:phone aria-label="Sessions">
+{#snippet globalControls(rail: boolean)}
+	<DesktopUpdateButton {rail} bind:this={updater} bind:canCheck />
+	<NotificationCenter {rail} />
+{/snippet}
+
+<aside class="sidebar" class:phone aria-label="Chats">
 	<SidebarRail
-		items={split.shown}
+		items={railItems}
 		settings={settingsItem}
 		{newLabel}
 		moreOpen={sheet === 'more'}
@@ -706,13 +807,27 @@
 		onPreload={preloadPanelForView}
 		onMore={() => toggleSheet('more')}
 		onCustomize={openCustomize}
+		{chatsOn}
+		onChats={openChats}
+		controls={globalControls}
 	/>
 
-	<div class="col" class:selecting>
+	<!-- The rail's overlays share the panel geometry, never Chats' hidden/inert scope. -->
+	<div class="panel-plane">
+	{#if ownsPanel}
+		<div class="col page-panel">
+			{#if viewPanel.panel}
+				{@render viewPanel.panel()}
+			{:else}
+				<ViewPanel title={panelTitle} loading />
+			{/if}
+		</div>
+	{/if}
+	<div class="col" class:selecting class:rail-hidden={ownsPanel} inert={ownsPanel} aria-hidden={ownsPanel || undefined}>
 		<!-- Selection bar: slides over the header while rows are selected. -->
 		<div class="selbar" inert={!selecting} aria-hidden={selecting ? undefined : 'true'}>
 			<button class="icon-btn" type="button" aria-label="Cancel selection" onclick={cancelSelection}>
-				<X size={18} strokeWidth={1.85} />
+				<X size={18} strokeWidth={1.75} />
 			</button>
 			<span class="cnt" aria-live="polite">{selected.size} selected</span>
 			{#if anySelectedSettled}
@@ -720,9 +835,6 @@
 					<Undo2 size={15} strokeWidth={2} />Active
 				</button>
 			{/if}
-			<button class="act" type="button" aria-label="Archive" title="Archive" onclick={() => runBulk('archive')}>
-				<Archive size={15} strokeWidth={2} />
-			</button>
 			{#if anySelectedActive}
 				<button class="act primary" type="button" onclick={() => runBulk('settle')}>
 					<Check size={15} strokeWidth={2.25} />Settle
@@ -732,11 +844,15 @@
 
 		<div class="p-top">
 			<header class="p-head">
-				<span class="p-title">Sessions</span>
-				<DesktopUpdateButton bind:this={updater} bind:canCheck />
-				<!-- The bell's only home: it used to sit in both top bars, which meant
-				     two copies on mobile and none while the drawer was open. -->
-				<NotificationCenter />
+				<span class="p-title">Chats</span>
+				<PanelToggle />
+				<!-- The phone drawer keeps its header controls; desktop has one copy in the rail. -->
+				{#if phone}{@render globalControls(false)}{/if}
+				{#if phone}
+					<button class="icon-btn p-new" type="button" aria-label={newLabel} onclick={() => { sheet = null; cancelSelection(); onNewSession(); }}>
+						<SquarePen size={20} strokeWidth={1.75} />
+					</button>
+				{/if}
 				{#if headerAction}
 					{@render headerAction()}
 				{/if}
@@ -744,7 +860,7 @@
 
 			<div class="searchrow">
 				<button class="search" type="button" onclick={() => onOpenSpotlight?.()} disabled={!onOpenSpotlight}>
-					<Search size={16} strokeWidth={1.85} />
+					<Search size={15} strokeWidth={1.75} />
 					<span>Search</span>
 					{#if !phone}<kbd>Ctrl K</kbd>{/if}
 				</button>
@@ -758,7 +874,7 @@
 					aria-expanded={sheet === 'filter'}
 					onclick={() => toggleSheet('filter')}
 				>
-					<ListFilter size={17} strokeWidth={1.85} />
+					<ListFilter size={17} strokeWidth={1.75} />
 				</button>
 			</div>
 
@@ -779,14 +895,12 @@
 
 		</div>
 
-		<div class="list" class:edge-guard={phone}>
+		<div class="list" class:edge-guard={phone} bind:this={listRef}>
 			{#if needsYouRows.length > 0}
 				{@render sect('needs', 'Needs you', needsYouRows.length)}
 				{#if !collapsedGroups.needs}
 					<div class="cards" data-group="needs-you">
-						{#each needsYouRows as row (row.session.id)}
-							{@render card(row)}
-						{/each}
+						{@render laneRows(needsYouGroups)}
 					</div>
 				{/if}
 			{/if}
@@ -794,30 +908,24 @@
 			{@render sect('active', 'Active', activeRows.length)}
 			{#if !collapsedGroups.active}
 				{#if activeRows.length === 0}
-					<p class="empty">Nothing active. Swipe a settled session left to bring it back.</p>
+					<p class="empty">{settledLaneShown ? 'Nothing active. Swipe a settled session left to bring it back.' : emptyLabel}</p>
 				{:else}
 					<div class="cards" data-group="active">
-						{#each activeRows as row (row.session.id)}
-							{@render card(row)}
-						{/each}
+						{@render laneRows(activeGroups)}
 					</div>
 				{/if}
 			{/if}
 
-			{@render sect('settled', 'Settled', settledRows.length)}
-			{#if !collapsedGroups.settled}
-				{#if visibleSettledRows.length === 0}
-					<p class="empty">{emptyLabel}</p>
-				{:else}
-					{#each settledDays as day (day.label)}
-						<div class="daylabel">{day.label}</div>
-						<div class="cards" data-group="settled">
-							{#each day.rows as row (row.session.id)}
-								{@render card(row, true)}
-							{/each}
-						</div>
-					{/each}
-				{/if}
+			{#if settledLaneShown}
+				{@render sect('settled', filtersSet || $settledTotal === null ? 'Settled · loaded' : 'Settled', filtersSet ? settledRows.length : ($settledTotal ?? settledRows.length))}
+			{/if}
+			{#if settledLaneShown && !collapsedGroups.settled}
+				{#each settledDays as day (day.label)}
+					<div class="daylabel">{day.label}</div>
+					<div class="cards" data-group="settled">
+						{@render laneRows(byProject(day.rows), true)}
+					</div>
+				{/each}
 
 				{#if loadingOlder}
 					<!-- Held for the whole multi-page run so the label cannot flip
@@ -849,7 +957,8 @@
 			{/if}
 		</div>
 
-		<SidebarSheet open={sheet === 'filter'} label="Filter sessions" {phone} placement="popover" onClose={() => (sheet = null)}>
+		<SidebarSheet open={sheet === 'filter'} label="Filter chats" {phone} placement="popover" onClose={() => (sheet = null)}>
+			<p class="text-xs text-muted-foreground px-2 py-1">Filters apply to loaded chats only. Search reaches all history.</p>
 			{#if projectOptions.length > 0}
 				<h4>Project</h4>
 				<div class="opts">
@@ -867,12 +976,13 @@
 				{/each}
 			</div>
 		</SidebarSheet>
+	</div>
 
 		<SidebarSheet open={sheet === 'more'} label="More destinations" role="menu" {phone} placement="flyout" onClose={() => (sheet = null)}>
 			{#if phone}<h4>More</h4>{/if}
-			{#if split.hidden.length > 0}
+			{#if moreItems.length > 0}
 				<div class="wgrid">
-					{#each split.hidden as item (item.id)}
+					{#each moreItems as item (item.id)}
 						<button
 							class="tile"
 							class:on={item.on}
@@ -883,7 +993,7 @@
 							onpointerenter={() => preloadPanelForView(item.id)}
 							onfocus={() => preloadPanelForView(item.id)}
 						>
-							<item.icon size={phone ? 18 : 15} strokeWidth={1.85} />
+							<item.icon size={phone ? 20 : 15} strokeWidth={1.75} />
 							<span>{item.label}</span>
 						</button>
 					{/each}
@@ -892,13 +1002,13 @@
 				<p class="wempty">Everything is on the rail.</p>
 			{/if}
 			<button class="custrow" type="button" role="menuitem" onclick={openCustomize}>
-				<SlidersHorizontal size={phone ? 17 : 15} strokeWidth={1.85} />
+				<SlidersHorizontal size={phone ? 17 : 15} strokeWidth={1.75} />
 				<span>Customize the rail</span>
-				<small>{split.shown.length} on the rail</small>
+				{#if !phone}<small>{split.shown.length} on the rail</small>{/if}
 			</button>
 			{#if isAdmin && canCheck}
 				<button class="custrow" type="button" role="menuitem" onclick={checkForUpdates}>
-					<RefreshCw size={phone ? 17 : 15} strokeWidth={1.85} />
+					<RefreshCw size={phone ? 17 : 15} strokeWidth={1.75} />
 					<span>Check for updates</span>
 				</button>
 			{/if}
@@ -921,10 +1031,19 @@
 		color: var(--sidebar-foreground);
 	}
 
+	.sidebar.phone { flex-direction: column-reverse; }
+
+	/* Matches the old column's bounds, including the phone drawer's tab row. */
+	.panel-plane { position: relative; display: flex; flex: 1; min-width: 0; min-height: 0; }
+
+	/* Hidden, not removed: coming back to chats stays instant. */
+	.col.rail-hidden { display: none; }
+
 	.col {
 		position: relative;
 		flex: 1;
 		min-width: 0;
+		min-height: 0;
 		display: flex;
 		flex-direction: column;
 		/* clip, not hidden: a hidden box can still be scrolled, and focus landing
@@ -939,7 +1058,7 @@
 	.p-top { flex: none; position: relative; padding: 0 8px; background: var(--sidebar); }
 	.phone .p-top { padding-top: env(safe-area-inset-top, 0px); }
 	.p-head { display: flex; align-items: center; gap: 2px; height: 52px; }
-	.p-title { margin-right: auto; padding-left: 6px; font-size: 13px; font-weight: 600; letter-spacing: -0.005em; color: var(--sidebar-foreground); }
+	.p-title { margin-right: auto; padding-left: 12px; font-size: 16px; font-weight: 600; letter-spacing: -0.005em; color: var(--sidebar-foreground); }
 
 	/* The bell is shared with the top bars, where it is right-anchored under a
 	   wide header. Inside the panel that anchor puts most of it off the left
@@ -967,6 +1086,7 @@
 		cursor: pointer;
 	}
 	.icon-btn:hover { background: var(--sidebar-accent); color: var(--foreground); }
+	.icon-btn.p-new { width: 44px; height: 44px; color: var(--sidebar-foreground); }
 
 	.searchrow { display: flex; gap: 6px; padding-bottom: 8px; }
 	.search {
@@ -975,48 +1095,51 @@
 		display: flex;
 		align-items: center;
 		gap: 9px;
-		height: 34px;
-		padding: 0 12px;
-		border: 1px solid var(--sidebar-border);
-		border-radius: 10px;
-		background: oklch(1 0 0 / 0.055);
-		color: var(--subtle-foreground);
+		height: 32px;
+		padding: 0 10px 0 11px;
+		border: 1px solid var(--field-border);
+		border-radius: var(--radius-control);
+		background: var(--field-bg);
+		color: var(--sidebar-muted);
 		font: inherit;
 		font-size: 13px;
 		text-align: left;
 		cursor: pointer;
 		transition: border-color 0.13s ease, color 0.13s ease;
 	}
-	.search:hover:not(:disabled) { border-color: var(--border-strong); color: var(--muted-foreground); }
+	.search:hover:not(:disabled) { color: var(--sidebar-foreground); }
+	.search:focus-visible { outline: 1.5px solid var(--panel-search-ring); outline-offset: 1px; }
 	.search:disabled { cursor: default; }
 	.search :global(svg) { flex: none; }
+	/* No keyboard shortcut to advertise at phone width. */
+	@media (max-width: 480px) {
+		.search kbd { display: none; }
+	}
 	.search kbd {
 		margin-left: auto;
-		padding: 2px 5px;
-		border: 1px solid var(--sidebar-border);
-		border-radius: 5px;
-		font-family: var(--font-mono);
-		font-size: 10.5px;
+		font-family: inherit;
+		font-size: var(--fs-caption);
+		color: var(--subtle-foreground);
 	}
-	.phone .search { height: 40px; border-radius: 12px; font-size: 14px; }
+	.phone .search { height: 44px; font-size: 16px; }
 
 	.filter-btn {
 		position: relative;
-		width: 34px;
-		height: 34px;
+		width: 32px;
+		height: 32px;
 		flex: none;
 		display: grid;
 		place-items: center;
 		padding: 0;
 		border: 0;
-		border-radius: 10px;
-		background: oklch(1 0 0 / 0.05);
+		border-radius: var(--radius-control);
+		background: transparent;
 		color: var(--sidebar-muted);
 		cursor: pointer;
 	}
-	.phone .filter-btn { width: 40px; height: 40px; border-radius: 12px; }
-	.filter-btn:hover,
-	.filter-btn.open { background: var(--sidebar-accent-active); color: var(--foreground); }
+	.phone .filter-btn { width: 44px; height: 44px; }
+	.filter-btn:hover { background: var(--row-hover); color: var(--sidebar-foreground); }
+	.filter-btn.open { background: var(--row-selected); color: var(--sidebar-foreground); }
 	.filter-btn.set { color: var(--primary); }
 	.filter-btn.set::after {
 		content: '';
@@ -1059,7 +1182,7 @@
 		scrollbar-width: thin;
 		scrollbar-color: var(--border-strong) transparent;
 	}
-	.phone .list { padding-bottom: calc(24px + env(safe-area-inset-bottom, 0px)); }
+	.phone .list { padding-bottom: 24px; }
 	/* The mobile drawer is the full screen wide, and Android reserves the
 	   outer ~24dp of each edge for its back gesture. A swipe rail flush with
 	   that edge got taken for a back swipe, and taps on its outer half went
@@ -1068,7 +1191,18 @@
 	   touch area. The left edge needs no guard: the icon rail already keeps
 	   the rows, and the start of a right (archive) swipe, clear of it. */
 	.list.edge-guard { padding-right: 24px; }
-	.cards { display: flex; flex-direction: column; gap: 1px; }
+	.cards { display: flex; flex-direction: column; gap: 2px; }
+	/* Tiers: the lane label, then this quieter project label, then its rows. */
+	.proj-head {
+		padding: 16px 8px 4px 12px;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		font-size: var(--fs-caption);
+		font-weight: 500;
+		color: var(--subtle-foreground);
+	}
+	.proj-head:first-child { padding-top: 4px; }
 
 	.sect {
 		position: sticky;
@@ -1076,33 +1210,40 @@
 		z-index: 6;
 		display: flex;
 		align-items: center;
-		gap: 8px;
+		gap: 6px;
 		width: 100%;
-		padding: 12px 6px 7px;
+		padding: 12px 8px 6px 12px;
 		border: 0;
 		background: linear-gradient(var(--sidebar) 78%, transparent);
-		color: var(--muted-foreground);
+		color: var(--sidebar-foreground);
 		font: inherit;
-		font-size: 12px;
+		font-size: var(--fs-label);
 		font-weight: 600;
 		text-align: left;
 		cursor: pointer;
 	}
+	/* A lane starts with a rule and some air, so the lanes read as separate lists
+	   and not as one list with a label in it. Settled is the quieter of the three. */
+	.sect:not(:first-child) {
+		margin-top: 8px;
+		border-top: 1px solid var(--border);
+	}
+	.sect.settled { font-weight: 500; }
+	.sect .lbl { flex: none; }
+	.sect:hover { color: var(--sidebar-foreground); }
+	.sect:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; border-radius: var(--radius-control); }
 	.sect .n {
-		font-family: var(--font-mono);
-		font-size: 11px;
-		font-weight: 500;
+		font-size: var(--fs-caption);
+		font-weight: 400;
 		font-variant-numeric: tabular-nums;
 		color: var(--subtle-foreground);
 	}
-	.sect .rule { flex: 1; height: 1px; background: var(--sidebar-border); }
-	.sect .chev { display: inline-flex; color: var(--subtle-foreground); transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1); }
+	.sect .chev { margin-left: auto; display: inline-flex; color: var(--subtle-foreground); transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1); }
 	.sect.closed .chev { transform: rotate(-90deg); }
-	.sect.needs,
-	.sect.needs .n { color: var(--warning); }
-	.sect.needs .rule { background: color-mix(in oklab, var(--warning) 35%, var(--sidebar-border)); }
+	.sect.needs .lbl { color: var(--warning); }
+	.sect.settled { color: var(--muted-foreground); }
 
-	.daylabel { padding: 10px 8px 5px; font-size: 11.5px; font-weight: 500; color: var(--subtle-foreground); }
+	.daylabel { padding: 10px 12px 3px; font-size: var(--fs-caption); font-weight: 500; color: var(--subtle-foreground); }
 	.empty {
 		margin: 0;
 		padding: 14px 16px 18px;
@@ -1150,7 +1291,7 @@
 	}
 	.phone .selbar { height: calc(56px + env(safe-area-inset-top, 0px)); padding-top: env(safe-area-inset-top, 0px); }
 	.col.selecting .selbar { transform: none; }
-	.cnt { margin-right: auto; padding-left: 4px; font-size: 14px; font-weight: 650; color: var(--foreground); }
+	.cnt { margin-right: auto; padding-left: 2px; font-size: 13px; font-weight: 650; white-space: nowrap; color: var(--foreground); }
 	.act {
 		display: flex;
 		align-items: center;
@@ -1159,16 +1300,16 @@
 		padding: 0 12px;
 		border: 0;
 		border-radius: 10px;
-		background: oklch(1 0 0 / 0.08);
+		background: var(--row-hover);
 		color: var(--foreground);
 		font: inherit;
 		font-size: 13px;
 		font-weight: 600;
 		cursor: pointer;
 	}
-	.act:hover { background: oklch(1 0 0 / 0.13); }
-	.act.primary { background: var(--primary); color: var(--primary-foreground); }
-	.act.primary:hover { filter: brightness(1.08); }
+	.act:hover { background: var(--row-selected); }
+	.act.primary { background: var(--action); color: var(--action-foreground); }
+	.act.primary:hover { background: var(--action-hover); }
 
 	/* Sheet contents (SidebarSheet supplies the surface). */
 	h4 { margin: 0 4px 8px; font-size: 13px; font-weight: 600; color: var(--muted-foreground); }
@@ -1198,7 +1339,6 @@
 
 	/* More: a tile grid on the phone, a plain menu on desktop. */
 	.wgrid { display: flex; flex-direction: column; gap: 1px; }
-	.phone .wgrid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
 	.tile {
 		display: flex;
 		align-items: center;
@@ -1218,20 +1358,15 @@
 	.tile span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 	.tile:hover,
 	.tile.on { background: var(--sidebar-accent-active); }
+	/* A plain labelled list, the same rows as the two beneath it. */
 	.phone .tile {
-		height: 72px;
-		flex-direction: column;
-		justify-content: center;
-		gap: 6px;
-		padding: 0 4px;
-		border-radius: 11px;
-		background: oklch(1 0 0 / 0.04);
-		color: var(--sidebar-muted);
-		font-size: 12px;
-		text-align: center;
+		height: 48px;
+		gap: 12px;
+		padding: 0 10px;
+		border-radius: 10px;
+		font-size: 14px;
 	}
-	.phone .tile :global(svg) { color: var(--sidebar-foreground); }
-	.phone .tile.on { background: var(--sidebar-accent-active); color: var(--foreground); }
+	.phone .tile.on { font-weight: 600; }
 	.wempty { margin: 0; padding: 6px 8px 4px; font-size: 12.5px; color: var(--muted-foreground); }
 
 	.custrow {
@@ -1275,9 +1410,9 @@
 
 	/* Touch sizing on any touch-only pointer, not just the mobile shell. */
 	@media (hover: none) {
-		.search { height: 40px; }
-		.filter-btn { width: 40px; height: 40px; }
-		.opt { height: 36px; }
+		.search { height: 44px; }
+		.filter-btn { width: 44px; height: 44px; }
+		.opt { height: 44px; }
 		.shelf { height: 44px; }
 	}
 

@@ -74,7 +74,9 @@ async def test_rotation_keeps_all_session_builtins_working(bound):
     assert not sent.is_error, sent.text
     archived = await invoke('archive', {'session_id': child})
     assert not archived.is_error, archived.text
-    assert sessions.get_session(child)['status'] == 'archived'
+    row = sessions.get_session(child)
+    assert row['status'] == 'active'
+    assert not row['is_active']
 
 
 @pytest.mark.parametrize('action,data', [

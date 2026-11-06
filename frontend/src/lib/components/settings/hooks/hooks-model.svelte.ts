@@ -58,7 +58,10 @@ export interface HookForm {
 	/** Seconds in the form; the API stores milliseconds. */
 	timeoutSec: number;
 	url: string;
+	/** Only ever a NEW secret typed here. The stored one never enters the form. */
 	secret: string;
+	/** `saved` reads "Saved"; `replace` shows the blank field; `remove` clears it on save. */
+	secretState: 'none' | 'saved' | 'replace' | 'remove';
 	/** Signing observed during this form's lifetime, not the current server state. */
 	hasSecret: boolean;
 	matcher: string;
@@ -82,6 +85,7 @@ export function emptyForm(projectId: string | null): HookForm {
 		timeoutSec: DEFAULT_TIMEOUT_MS / 1000,
 		url: '',
 		secret: '',
+		secretState: 'none',
 		hasSecret: false,
 		matcher: '',
 		enabled: true
@@ -99,6 +103,7 @@ export function formFromHook(h: Hook, observedSecret = false): HookForm {
 		timeoutSec: Math.round((h.timeout || DEFAULT_TIMEOUT_MS) / 1000),
 		url: h.url ?? '',
 		secret: '',
+		secretState: h.has_secret ? 'saved' : 'none',
 		hasSecret: observedSecret || h.has_secret,
 		matcher: h.tool_matcher ?? '',
 		enabled: h.enabled
@@ -108,7 +113,9 @@ export function formFromHook(h: Hook, observedSecret = false): HookForm {
 /** Owner-editable fields only: Enabled saves separately; signing safety is not an edit. */
 function editable(f: HookForm): string {
 	const { enabled: _enabled, hasSecret: _hasSecret, ...rest } = f;
-	return JSON.stringify(rest);
+	// Opening the Replace field changes nothing until something is typed in it.
+	const secretState = f.secretState === 'replace' && !f.secret.trim() ? 'saved' : f.secretState;
+	return JSON.stringify({ ...rest, secretState });
 }
 
 export function validateForm(f: HookForm): string[] {
@@ -137,8 +144,9 @@ export function createPayload(f: HookForm): HookCreate {
 }
 
 /**
- * The PATCH body. Blank secrets are omitted to preserve the stored value.
- * A cleared matcher is sent as an empty string (it matches every tool).
+ * The PATCH body. The worker skips null fields, so a cleared matcher or
+ * removed secret is sent as an empty string (an empty matcher matches every
+ * tool). A blank secret field keeps the stored secret.
  */
 export function updatePayload(f: HookForm): HookUpdate {
 	const bash = f.type === 'bash';
@@ -149,7 +157,7 @@ export function updatePayload(f: HookForm): HookUpdate {
 		command: bash ? f.command.trim() : undefined,
 		timeout: clampTimeout(f.timeoutSec),
 		url: bash ? undefined : f.url.trim(),
-		secret: !bash && f.secret.trim() ? f.secret.trim() : undefined,
+		secret: bash ? undefined : f.secret.trim() || (f.secretState === 'remove' ? '' : undefined),
 		tool_matcher: isToolEvent(f.event) ? f.matcher.trim() : ''
 	};
 }

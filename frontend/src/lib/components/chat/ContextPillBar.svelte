@@ -1,7 +1,7 @@
 <script lang="ts">
 	/**
-	 * ContextPillBar - the loose row of context chips that floats above the
-	 * chat composer box: agent · | · runner · repository · branch · worktree.
+	 * ContextPillBar - the quiet row of context controls under the chat
+	 * composer box: agent · | · runner · repository · branch · worktree.
 	 *
 	 * New draft (no durable session ID yet): every chip is a selector, because the
 	 * execution context (runner / repository / branch / worktree) has to be
@@ -19,12 +19,13 @@
 	 * session (queued work, no runner online) shows a read-only warning chip.
 	 *
 	 * `sheetMode` renders the same selectors as stacked rows inside the mobile
-	 * controls sheet. The chip dropdowns open upward since this row sits just
-	 * above the input.
+	 * controls sheet. The chip dropdowns open upward, over the box above them.
 	 */
 	import { onDestroy, untrack } from 'svelte';
 	import ProfileSelector from './ProfileSelector.svelte';
 	import WorkspaceFolderSelector from './WorkspaceFolderSelector.svelte';
+	import RunsOnPicker from '$lib/components/layout/RunsOnPicker.svelte';
+	import WorkspaceSelector from '$lib/components/layout/WorkspaceSelector.svelte';
 	import BranchSelector from './BranchSelector.svelte';
 	import ExecutionModeBar from '$lib/components/layout/ExecutionModeBar.svelte';
 	import CreateBranchModal from '$lib/components/git/CreateBranchModal.svelte';
@@ -44,6 +45,7 @@
 	import { subagentChats } from '$lib/stores/subagent-chats';
 	import { openHeaderDropdown, openDropdown, closeDropdown } from '$lib/stores/header-dropdowns';
 	import { getClusterGitState } from '$lib/api/installs';
+	import { selfWorkerName, workerDisplayName } from '$lib/components/ui/worker-name';
 	import { workerInstalls, refreshWorkerPresence, watchWorkerPresence, presenceOf } from '$lib/stores/worker-presence';
 	import {
 		adoptSession,
@@ -55,7 +57,7 @@
 	} from '$lib/api/sessions';
 	import { notify } from '$lib/stores/notifications';
 	import { menuHost } from '$lib/components/ui/menu-host';
-	import { GitBranch, Monitor, MonitorOff, Check, Loader2, X } from 'lucide-svelte';
+	import { ChevronDown, FolderGit2, GitBranch, Lock, Monitor, MonitorOff, Check, Loader2, X } from 'lucide-svelte';
 	import { checkoutEligibility, type EligibilityMap } from '$lib/components/layout/execution-mode-eligibility';
 
 	interface Props {
@@ -65,7 +67,7 @@
 		 * The phone sheet's pages: the Agent and "Runs on" menus open inside
 		 * these elements instead of under their rows (see menuHost).
 		 */
-		menuHosts?: { agent?: HTMLElement | null; runner?: HTMLElement | null };
+		menuHosts?: { agent?: HTMLElement | null; runner?: HTMLElement | null; project?: HTMLElement | null };
 	}
 
 	let { sheetMode = false, menuHosts }: Props = $props();
@@ -176,11 +178,26 @@
 	const readOnlyBranch = $derived.by(() => {
 		if (badge?.branch) return badge.branch;
 		if (isWorktreeSession) {
-			return $activeSession.selectedWorktreeBranch || $activeSession.worktreeBranch || null;
+			// A cleaned-up worktree's git store holds the main repo: never its branch.
+			return $activeSession.selectedWorktreeBranch || $activeSession.worktreeBranch
+				|| ($activeSession.worktreeDeleted ? null : $gitStatus?.current_branch ?? null);
 		}
 		if ($activeSession.project) return $gitStatus?.current_branch ?? null;
 		return null;
 	});
+
+	// A chevron means it can change and a lock means it cannot. A chat keeps its
+	// checkout for life, so a worktree is always locked; only the main checkout's
+	// branch can still be switched, and only where the interactive chip is offered.
+	const branchChangeable = $derived(showBranch && !isWorktreeSelected);
+	const CHECKOUT_FIXED = 'Checkout is fixed for this chat';
+	const checkoutName = $derived(
+		[
+			readOnlyBranch ? `Branch ${readOnlyBranch}` : null,
+			isWorktreeSelected ? 'in a worktree' : 'in the main checkout',
+			'fixed for this chat'
+		].filter(Boolean).join(', ')
+	);
 
 	let showCreateBranchModal = $state(false);
 
@@ -191,6 +208,7 @@
 	// Live presence (shared store, refreshed while the menu is open), so a
 	// worker that goes offline while the menu is open turns red and disabled.
 	const runnerInstalls = $derived($workerInstalls ?? []);
+	const selfName = $derived(selfWorkerName($workerInstalls));
 	let runnerEligibility = $state<EligibilityMap>(null);
 	let runnerMenuLoading = $state(false);
 	let runnerMenuError = $state('');
@@ -511,16 +529,31 @@
 
 {#snippet repoChip()}
 	{#if projectName}
-		<WorkspaceFolderSelector {projectName} {sheetMode} />
+		<WorkspaceFolderSelector
+			{projectName}
+			{sheetMode}
+			onClear={isEmptyState && sheetMode ? () => activeSession.clearProject({ user: true }) : undefined}
+		/>
 	{/if}
 {/snippet}
 
 <div class="context-pill-bar" class:sheet-mode={sheetMode} role="toolbar" aria-label="Session context">
 	<ProfileSelector {sheetMode} menuHost={menuHosts?.agent} />
+	<!-- A new chat with no project yet still picks its worker, and can add one. -->
+	{#if sheetMode && isEmptyState && !$activeSession.project && !$activeSession.projectV2Id}
+		<RunsOnPicker sheetMode menuHost={menuHosts?.runner} />
+		<WorkspaceSelector
+			variant="sentence"
+			sheetMode
+			menuHost={menuHosts?.project}
+			selectedProject={$activeSession.project}
+			selectedProjectV2Id={$activeSession.projectV2Id}
+			onSelectProject={(projectId, projectV2Id) => activeSession.setProject(projectId, projectV2Id ?? null, { user: true })}
+		/>
+	{/if}
 	<!-- A no-project chat has no repository or execution controls, but a saved
 	     one still shows its runner so it can move to another worker (#639). -->
 	{#if $activeSession.mode !== 'chat' || !isEmptyState}
-	<span class="ctx-sep" aria-hidden="true"></span>
 
 	{#if isEmptyState}
 		{#if $activeSession.project || $activeSession.projectV2Id}
@@ -559,7 +592,7 @@
 						: badge?.title || 'Runs on this device — move this session to another worker'}
 					aria-label={runnerBusy
 						? runnerBusy.label
-						: `Runner: ${badge?.runner?.deviceName ?? 'Local'}${badge?.runner && !badge.runner.online ? ' (offline)' : ''}`}
+						: `Runner: ${badge?.runner?.deviceName ? workerDisplayName(badge.runner.deviceName) : selfName}${badge?.runner && !badge.runner.online ? ' (offline)' : ''}`}
 					aria-describedby={sheetMode && !runnerBusy && !runnerDone ? moveHintId : undefined}
 					aria-busy={runnerBusy ? 'true' : undefined}
 					disabled={runnerLocked}
@@ -574,18 +607,22 @@
 						<Check size={12} strokeWidth={2.2} aria-hidden="true" />
 						<span class="ctx-chip-label">{runnerDone.label}</span>
 					{:else}
-						{#if !badge?.runner || badge.runner.online}
+						<!-- The dot says the worker's status and replaces the icon. The
+						     phone sheet's rows keep their glyph column; it says the same. -->
+						{#if !sheetMode}
+							<WorkerStatusDot online={!badge?.runner || badge.runner.online} />
+						{:else if !badge?.runner || badge.runner.online}
 							<Monitor size={12} strokeWidth={1.6} aria-hidden="true" />
 						{:else}
 							<MonitorOff size={12} strokeWidth={1.6} aria-hidden="true" />
 						{/if}
-						<WorkerStatusDot online={!badge?.runner || badge.runner.online} />
-						<span class="ctx-chip-label">{badge?.runner?.deviceName ?? 'Local'}</span>
+						<span class="ctx-chip-label" class:runner-here={!badge?.runner}>{badge?.runner?.deviceName ? workerDisplayName(badge.runner.deviceName) : selfName}</span>
 						{#if sheetMode}
 							<!-- The phone's Chat controls draw this row as "Runs on"; the
 							     caption says the row is where a chat moves (#645). -->
 							<span class="ctx-chip-sub" id={moveHintId}>Move to another worker</span>
 						{/if}
+						<ChevronDown size={12} strokeWidth={1.5} aria-hidden="true" />
 					{/if}
 				</button>
 				{#if canCancelQueued}
@@ -665,13 +702,12 @@
 					? `Runs on ${readOnlyOwner.name}, which is offline`
 					: `Runs on ${readOnlyOwner.name}`}
 			>
-				{#if readOnlyOwner.online === false}
+				{#if !sheetMode && readOnlyOwner.online !== null}
+					<WorkerStatusDot online={readOnlyOwner.online} />
+				{:else if readOnlyOwner.online === false}
 					<MonitorOff size={12} strokeWidth={1.6} aria-hidden="true" />
 				{:else}
 					<Monitor size={12} strokeWidth={1.6} aria-hidden="true" />
-				{/if}
-				{#if readOnlyOwner.online !== null}
-					<WorkerStatusDot online={readOnlyOwner.online} />
 				{/if}
 				<span class="ctx-chip-label">{readOnlyOwner.name}</span>
 				{#if readOnlyOwner.online === false}
@@ -680,9 +716,8 @@
 			</span>
 		{:else}
 			<span class="ctx-chip readonly" title="Runs on this device">
-				<Monitor size={12} strokeWidth={1.6} aria-hidden="true" />
-				<WorkerStatusDot online />
-				<span class="ctx-chip-label">Local</span>
+				{#if sheetMode}<Monitor size={12} strokeWidth={1.6} aria-hidden="true" />{:else}<WorkerStatusDot online />{/if}
+				<span class="ctx-chip-label">{selfName}</span>
 			</span>
 		{/if}
 
@@ -691,28 +726,40 @@
 
 		{#if isGitRepo}
 		<div class="branch-wt-row">
-		{#if showBranch}
+		{#if branchChangeable}
 			<BranchSelector
 				{sheetMode}
 				projectName={sheetMode ? projectName : null}
 				onClickNewBranch={() => (showCreateBranchModal = true)}
 			/>
-		{:else if readOnlyBranch}
-			<span class="ctx-chip readonly" title="Branch: {readOnlyBranch}">
+		{:else if sheetMode}
+			{#if readOnlyBranch}
+				<span class="ctx-chip readonly" role="img" aria-label="Branch {readOnlyBranch}, fixed for this chat" title={CHECKOUT_FIXED}>
+					<GitBranch size={12} strokeWidth={1.6} aria-hidden="true" />
+					<span class="ctx-chip-label branch-name">{readOnlyBranch}</span>
+					<Lock size={14} strokeWidth={1.6} aria-hidden="true" />
+				</span>
+			{/if}
+		{:else if readOnlyBranch || isWorktreeSelected}
+			<span class="ctx-chip readonly checkout-lock" role="img" aria-label={checkoutName} title={CHECKOUT_FIXED}>
 				<GitBranch size={12} strokeWidth={1.6} aria-hidden="true" />
-				<span class="ctx-chip-label branch-name">{readOnlyBranch}</span>
+				{#if readOnlyBranch}<span class="ctx-chip-label branch-name">{readOnlyBranch}</span>{/if}
+				{#if isWorktreeSelected}<span class="checkout-wt">{#if readOnlyBranch}<span class="checkout-dot">·</span>{/if}worktree</span>{/if}
+				<Lock size={12} strokeWidth={1.6} aria-hidden="true" />
 			</span>
 		{/if}
 
-		{#if $activeSession.project && !badge?.degraded}
+		{#if sheetMode && $activeSession.project && !badge?.degraded}
 			<span
 				class="ctx-chip readonly wt-indicator"
-				title={isWorktreeSelected ? 'Runs in an isolated git worktree' : 'Runs in the main checkout'}
+				role="img"
+				aria-label="Worktree {isWorktreeSelected ? 'on' : 'off'}, fixed for this chat"
+				title={CHECKOUT_FIXED}
 			>
-				<span class="ctx-chip-cb" class:checked={isWorktreeSelected} aria-hidden="true">
-					<Check size={9} strokeWidth={2.6} />
-				</span>
-				<span class="ctx-chip-label">worktree</span>
+				<FolderGit2 size={16} aria-hidden="true" />
+				<span class="ctx-chip-label">Worktree</span>
+				<span class="wt-value">{isWorktreeSelected ? 'On' : 'Off'}</span>
+				<Lock size={14} strokeWidth={1.6} aria-hidden="true" />
 			</span>
 		{/if}
 		</div>
@@ -731,23 +778,25 @@
 {/if}
 
 <style>
-	/* The chip row floats above the composer box with a visible gap (mockup
-	   `.ctx`). Its dropdowns open upward; the stacking level keeps them below
-	   the input area's @/slash autocomplete panels.
+	/* The row sits under the composer box. Its dropdowns open upward over the
+	   box, so it stacks above the box's own rows (input area 20, controls 30).
 
-	   One line at every width: on a phone the repository and branch names
-	   shrink to an ellipsis instead of wrapping. The chips fill in after the
-	   first paint (the restored session, then the projects list), so a row
-	   that wrapped grew a second line then and moved the composer (#818). */
+	   One line at every width: the repository and branch names shrink to an
+	   ellipsis instead of wrapping. The chips fill in after the first paint
+	   (the restored session, then the projects list), and a row that wrapped
+	   grew a second line then and moved the composer (#818). */
 	.context-pill-bar {
 		position: relative;
-		z-index: 10;
+		z-index: 40;
 		display: flex;
 		flex-wrap: nowrap;
 		align-items: center;
-		gap: 6px;
-		margin: 0 0 10px 2px;
+		gap: 2px;
+		margin: 8px 0 0 6px;
 		min-width: 0;
+	}
+	@media (max-width: 480px) {
+		.context-pill-bar { margin: 2px 0 0; }
 	}
 
 	.context-pill-bar.sheet-mode {
@@ -760,16 +809,9 @@
 		margin: 0;
 	}
 
-	.sheet-mode .ctx-sep {
-		display: none;
-	}
-
 	/* Who shrinks on a narrow row: the repository and branch names first, the
-	   agent's name less, the runner ("Local" or the worker's name) and the
-	   worktree box not at all. */
-	.context-pill-bar:not(.sheet-mode) > .ctx-sep,
-	.context-pill-bar:not(.sheet-mode) > .runner-badge-wrap,
-	.context-pill-bar:not(.sheet-mode) .wt-indicator {
+	   agent's name less, the runner ("Local" or the worker's name) not at all. */
+	.context-pill-bar:not(.sheet-mode) > .runner-badge-wrap {
 		flex-shrink: 0;
 	}
 
@@ -778,21 +820,20 @@
 		min-width: 0;
 	}
 
-	/* A phone-width row keeps room for the names: the menu chevrons go and the
-	   worktree chip is its tick box alone (its title and label still name it). */
+	/* A phone-width row stays one line of labelled items, each with its word and,
+	   when it opens something, its chevron. Leading icons go first, then the online
+	   dot (an offline worker keeps its dot beside its name). The repository and
+	   branch names give way before anything else. */
 	@media (max-width: 480px) {
-		.context-pill-bar:not(.sheet-mode) :global(.ctx-chip .ctx-chip-chev),
-		.context-pill-bar:not(.sheet-mode) :global(.ctx-chip svg.lucide-chevron-down) {
-			display: none;
+		/* The agent's short name reads whole; the repository and branch give way. */
+		.context-pill-bar:not(.sheet-mode) > :global(.selector-wrapper:first-child) {
+			flex-shrink: 0;
 		}
 
-		.context-pill-bar:not(.sheet-mode) .wt-indicator .ctx-chip-label {
-			position: absolute;
-			width: 1px;
-			height: 1px;
-			overflow: hidden;
-			clip: rect(0 0 0 0);
-			white-space: nowrap;
+		.context-pill-bar:not(.sheet-mode) :global(.ctx-chip > svg:not(.lucide-chevron-down):not(.ctx-chip-chev)),
+		.context-pill-bar:not(.sheet-mode) :global(.ctx-chip > :where(span, div):not(.ctx-chip-cb) > svg:not(.lucide-chevron-down):not(.ctx-chip-chev)),
+		.context-pill-bar:not(.sheet-mode) :global(.worker-status-dot.online) {
+			display: none;
 		}
 	}
 
@@ -818,6 +859,26 @@
 	/* Read-only chips describe the context without inviting a click. */
 	.ctx-chip.readonly {
 		cursor: default;
+	}
+
+	/* An existing chat's checkout: "main · worktree" and a lock. The worktree word
+	   outlasts a long branch name, and the dot has the same space on both sides. */
+	.checkout-wt {
+		flex: none;
+		margin-left: -6px;
+		white-space: nowrap;
+	}
+	.checkout-wt:first-of-type {
+		margin-left: 0;
+	}
+	.checkout-dot {
+		margin: 0 4px;
+	}
+	/* The row's lock is a size below its other icons, which app.css sets to 14px.
+	   The phone sheet's locks stay 14px. */
+	.context-pill-bar:not(.sheet-mode) :global(.ctx-chip > svg.lucide-lock) {
+		width: 12px;
+		height: 12px;
 	}
 
 	.branch-name {
@@ -886,9 +947,9 @@
 		max-height: 320px;
 		overflow-y: auto;
 		background: var(--popover);
-		border: 1px solid var(--border);
-		border-radius: calc(var(--radius, 0.75rem) * 0.83);
-		box-shadow: var(--shadow-l);
+		border: 1px solid var(--menu-border);
+		border-radius: var(--menu-radius);
+		box-shadow: var(--menu-shadow);
 		padding: 4px;
 		z-index: 100;
 	}
@@ -910,11 +971,12 @@
 		padding: 7px 10px;
 		background: transparent;
 		border: none;
-		border-radius: calc(var(--radius, 0.75rem) * 0.58);
+		border-radius: var(--menu-row-radius);
 		color: var(--foreground);
-		font-size: 0.8125rem;
+		font-size: 13px;
 		cursor: pointer;
 		text-align: left;
+		min-height: var(--menu-row);
 	}
 
 	.runner-item:hover:not(:disabled) {
@@ -993,17 +1055,6 @@
 		}
 	}
 
-	/* Remote-placed session: a primary tint so the runner chip is
-	   distinguishable from the local one. */
-	.ctx-chip.runner {
-		color: var(--primary);
-		background: color-mix(in oklab, var(--primary) 12%, var(--muted));
-	}
-
-	.ctx-chip.runner :global(svg) {
-		color: var(--primary);
-	}
-
 	/* A move/continue in flight: the chip carries the progress label and
 	   cannot be clicked again until the request settles. */
 	.ctx-chip.runner.busy {
@@ -1011,12 +1062,10 @@
 		color: var(--foreground);
 	}
 
-	/* Brief confirmation once the session runs on the new worker. Theme
-	   tokens only: no preset defines --success, so it stayed the app's green
-	   under every theme (#1809). The tick carries the meaning. */
+	/* Brief confirmation once the session runs on the new worker. The tick
+	   carries the meaning. */
 	.ctx-chip.runner.done {
 		color: var(--foreground);
-		background: color-mix(in oklab, var(--primary) 18%, var(--muted));
 	}
 
 	/* Long device names in the progress label must not push the row wider
@@ -1029,16 +1078,9 @@
 	   reads as an advisory (informational — there is no adopt/action here). */
 	.ctx-chip.degraded {
 		color: var(--warning);
-		background: color-mix(in oklab, var(--warning) 12%, var(--muted));
 	}
 
 	.ctx-chip.degraded :global(svg) {
 		color: var(--warning);
-	}
-
-	/* The tick inside the read-only worktree indicator must beat the generic
-	   muted svg colour on chips. */
-	.wt-indicator :global(.ctx-chip-cb svg) {
-		color: var(--primary-foreground);
 	}
 </style>

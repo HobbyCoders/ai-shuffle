@@ -14,9 +14,10 @@
  *   remains a separate choice; the cloud configuration stays single.
  * - fal.ai has one credential, the media key, with its own on/off flag.
  *
- * Pure functions only: the components and the tests feed it plain data.
+ * Account facts derive from supplied data; native labels use the shared metadata snapshot.
  */
-import type { ModelProvider } from '$lib/api/model-providers';
+import { isNativeProvider, type ModelProvider, type NativeProviderId } from '$lib/api/model-providers';
+import { nativeOption, nativeOptions } from './native-options.svelte';
 import type {
 	ClaudeAuthMode,
 	ClaudeAuthSummary,
@@ -25,12 +26,13 @@ import type {
 } from '$lib/api/claude-auth';
 import type { ProviderGlyphKind } from '$lib/components/settings/ProviderGlyph.svelte';
 import type { StatusTone } from '$lib/settings/types';
+import { safeKeyHint } from './credential-display';
 
 // ============================================================================
 // Ids
 // ============================================================================
 
-export type BuiltInProviderId = 'claude' | 'openai' | 'grok' | 'openrouter' | 'fal';
+export type BuiltInProviderId = 'claude' | 'openai' | 'grok' | 'openrouter' | 'fal' | NativeProviderId;
 /** Built-in providers, then one `gw:<rowId>` per custom gateway (`gw:draft-<n>` while new). */
 export type ProviderId = BuiltInProviderId | `gw:${string}`;
 
@@ -70,7 +72,7 @@ export function parseRowItem(item: string | null | undefined): string | null {
  * (ChatGPT/SuperGrok sign-in), key (OpenAI/xAI/OpenRouter API key),
  * gateway (custom endpoint), fal (fal.ai media key).
  */
-export type CredentialFlavor = 'cli' | 'anthropic' | 'cloud' | 'device' | 'key' | 'gateway' | 'fal';
+export type CredentialFlavor = 'cli' | 'anthropic' | 'cloud' | 'device' | 'key' | 'gateway' | 'fal' | 'plan-key';
 
 export interface CredentialKindDef {
 	/** Menu and row label: "Subscription", "API key". */
@@ -82,7 +84,7 @@ export interface CredentialKindDef {
 	hint: string;
 }
 
-const KINDS: Record<BuiltInProviderId | 'gateway', CredentialKindDef[]> = {
+const KINDS: Record<Exclude<BuiltInProviderId, NativeProviderId> | 'gateway', CredentialKindDef[]> = {
 	claude: [
 		{ label: 'Subscription', flavor: 'cli', multiple: false, hint: 'Claude Code CLI sign-in' },
 		{ label: 'API key', flavor: 'anthropic', multiple: true, hint: 'Pay per use' },
@@ -102,6 +104,12 @@ const KINDS: Record<BuiltInProviderId | 'gateway', CredentialKindDef[]> = {
 };
 
 export function kindsOf(providerId: ProviderId): CredentialKindDef[] {
+	if (isNativeProvider(providerId)) return nativeOptions.providers.filter((p) => p.provider_type === providerId).map((p) => ({
+		label: p.credential_label,
+		flavor: p.credential_kind === 'subscription' ? 'plan-key' : 'key',
+		multiple: true,
+		hint: 'Paste a key'
+	}));
 	return isGatewayId(providerId) ? KINDS.gateway : KINDS[providerId];
 }
 
@@ -111,13 +119,14 @@ export const isGatewayId = (id: ProviderId): id is `gw:${string}` => id.startsWi
 // Row classification
 // ============================================================================
 
-export type RowClass = 'chatgpt' | 'grok' | 'openai' | 'xai' | 'openrouter' | 'custom';
+export type RowClass = 'chatgpt' | 'grok' | 'openai' | 'xai' | 'openrouter' | 'custom' | NativeProviderId;
 
 /**
  * Which slot a model_providers row belongs to. auth_mode wins (the Codex row
  * can be provider_type 'custom' with auth_mode 'chatgpt'), then provider_type.
  */
 export function classifyRow(p: Pick<ModelProvider, 'auth_mode' | 'provider_type'>): RowClass {
+	if (isNativeProvider(p.provider_type)) return p.provider_type;
 	if (p.auth_mode === 'chatgpt') return 'chatgpt';
 	if (p.auth_mode === 'grok' || p.provider_type === 'grok') return 'grok';
 	if (p.provider_type === 'chatgpt') return 'chatgpt';
@@ -128,6 +137,7 @@ export function classifyRow(p: Pick<ModelProvider, 'auth_mode' | 'provider_type'
 }
 
 export function providerOfRow(p: ModelProvider): ProviderId {
+	if (isNativeProvider(p.provider_type)) return p.provider_type;
 	switch (classifyRow(p)) {
 		case 'chatgpt':
 		case 'openai':
@@ -143,6 +153,7 @@ export function providerOfRow(p: ModelProvider): ProviderId {
 }
 
 export function flavorOfRow(p: ModelProvider): CredentialFlavor {
+	if (isNativeProvider(p.provider_type)) return p.auth_mode === 'plan_key' ? 'plan-key' : 'key';
 	const cls = classifyRow(p);
 	if (cls === 'chatgpt' || cls === 'grok') return 'device';
 	if (cls === 'custom') return 'gateway';
@@ -249,6 +260,9 @@ const BUILT_IN: { id: BuiltInProviderId; name: string; glyph: ProviderGlyphKind;
 	{ id: 'grok', name: 'xAI Grok', glyph: 'grok', letter: 'X' },
 	{ id: 'claude', name: 'Claude', glyph: 'claude', letter: 'C' },
 	{ id: 'openrouter', name: 'OpenRouter', glyph: 'openrouter', letter: 'R' },
+	{ id: 'kimi', name: 'Kimi', glyph: 'kimi', letter: 'K' },
+	{ id: 'minimax', name: 'MiniMax', glyph: 'minimax', letter: 'M' },
+	{ id: 'opencode', name: 'OpenCode', glyph: 'opencode', letter: 'O' },
 	{ id: 'fal', name: 'fal.ai', glyph: 'custom', letter: 'f' }
 ];
 
@@ -338,7 +352,7 @@ function claudeCredentials(claude: ClaudeAuthSummary | null, keyMasked?: string 
 			flavor: 'anthropic',
 			name: account.label || 'Anthropic API key',
 			kind: 'API key',
-			summary: `${account.masked_key}${account.active && !keyActive ? ', selected for API key mode' : ''}`,
+			summary: `${safeKeyHint(account.masked_key) || 'Saved'}${account.active && !keyActive ? ', selected for API key mode' : ''}`,
 			status: on ? 'ok' : 'standby',
 			statusText: account.active ? (keyActive ? 'Active for Claude' : 'Selected for API key mode') : 'Saved',
 			on,
@@ -352,7 +366,7 @@ function claudeCredentials(claude: ClaudeAuthSummary | null, keyMasked?: string 
 	// Compatibility with older workers, plus the missing-key row for the selected mode.
 	if ((!claude.accounts && claude.api_key.set) || (keyActive && !(claude.accounts?.api_key.length) && !claude.api_key.set)) {
 		const ready = claude.api_key.set;
-		const masked = keyMasked || (claude.api_key.last4 ? `sk-ant-…${claude.api_key.last4}` : 'Key stored');
+		const masked = safeKeyHint(keyMasked) || (claude.api_key.last4 ? `sk-ant-…${claude.api_key.last4}` : 'Saved');
 		const status: StatusTone = !ready ? 'warn' : mode === 'off' ? 'off' : keyActive ? 'ok' : 'standby';
 		const statusText = !ready ? 'No key stored' : mode === 'off' ? 'Off' : keyActive ? 'Active for Claude' : 'Standby';
 		out.push({
@@ -572,12 +586,13 @@ export function rowCredential(row: ModelProvider, usagePlan?: string | null): Cr
 		};
 	}
 	const host = hostOf(row.base_url);
+	const native = isNativeProvider(row.provider_type) ? nativeOption(row.provider_type, row.auth_mode === 'plan_key') ?? row.native_provider : null;
 	return {
 		item: rowItem(row.id),
 		providerId,
 		flavor,
 		name: flavor === 'gateway' ? 'Gateway key' : keyName(row.name),
-		kind: flavor === 'gateway' ? 'Gateway' : 'API key',
+		kind: native?.credential_label ?? (flavor === 'plan-key' ? 'Subscription' : flavor === 'gateway' ? 'Gateway' : 'API key'),
 		summary: row.enabled ? `${host}, ${plural(models, 'model')}${row.auth_token_set ? '' : ', no token'}` : 'Off',
 		status: row.enabled ? 'ok' : 'off',
 		statusText: flavor === 'gateway' ? (row.enabled ? 'On' : 'Off') : row.enabled ? 'Active' : 'Saved',
@@ -606,7 +621,7 @@ function falCredential(fal: ProvidersInput['fal']): CredentialView[] {
 			flavor: 'fal',
 			name: 'Media key',
 			kind: 'API key',
-			summary: fal.enabled ? fal.masked || 'Key stored' : 'Off',
+			summary: fal.enabled ? safeKeyHint(fal.masked) || 'Saved' : 'Off',
 			status: fal.enabled ? 'ok' : 'off',
 			statusText: fal.enabled ? 'On' : 'Off',
 			on: fal.enabled,
@@ -651,7 +666,7 @@ export function buildProviders(input: ProvidersInput): ProviderView[] {
 	for (const c of falCredential(input.fal)) push('fal', c);
 	for (const d of drafts) push(d.providerId, draftCredential(d));
 
-	const views: ProviderView[] = BUILT_IN.map((b) => view(b.id, b.name, b.glyph, b.letter, byProvider.get(b.id) ?? []));
+	const views: ProviderView[] = BUILT_IN.map((b) => view(b.id, nativeOption(b.id, false)?.display_name ?? b.name, b.glyph, b.letter, byProvider.get(b.id) ?? []));
 	const claudeView = views.find((v) => v.claude);
 	if (claudeView) claudeView.claudeSubscriptions = !!input.claude?.accounts?.subscription_support?.supported;
 	if (input.claudePending && !input.claude) {
@@ -729,32 +744,6 @@ export function filterProviders(views: ProviderView[], query: string): ProviderV
 }
 
 // ============================================================================
-// Connector line
-// ============================================================================
-
-export interface LineState {
-	/** The header's stub into the first row is teal. */
-	lit: boolean;
-	rows: { on: boolean; nextOn: boolean; last: boolean }[];
-}
-
-/**
- * The connector line runs from the provider tile down through its credentials.
- * A segment is teal (`--primary`) where it leads into a credential that is on;
- * for Claude that is the active credential only.
- */
-export function lineState(credentials: Pick<CredentialView, 'on'>[]): LineState {
-	return {
-		lit: credentials[0]?.on ?? false,
-		rows: credentials.map((c, i) => ({
-			on: c.on,
-			nextOn: credentials[i + 1]?.on ?? false,
-			last: i === credentials.length - 1
-		}))
-	};
-}
-
-// ============================================================================
 // "+" menu and setup
 // ============================================================================
 
@@ -798,7 +787,8 @@ const DRAFT_BASE: Record<CredentialFlavor, (p: ProviderId) => string> = {
 	anthropic: () => 'Anthropic API key',
 	cloud: () => 'Cloud provider or gateway',
 	device: (p) => (p === 'openai' ? 'ChatGPT subscription' : 'SuperGrok subscription'),
-	key: (p) => `${p === 'openai' ? 'OpenAI' : p === 'grok' ? 'Grok' : 'OpenRouter'} API key`,
+	'plan-key': (p) => nativeOption(p, true)?.credential_label ?? 'Subscription key',
+	key: (p) => nativeOption(p, false)?.credential_label ?? `${p === 'openai' ? 'OpenAI' : p === 'grok' ? 'Grok' : 'OpenRouter'} API key`,
 	gateway: () => 'Gateway key',
 	fal: () => 'Media key'
 };

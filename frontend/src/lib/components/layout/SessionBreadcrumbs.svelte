@@ -72,33 +72,46 @@
 </script>
 
 <!--
-	`mobile` is the phone bar's second line: the trail only (project › parent).
-	The bar draws the chat title on its first line and the chat-actions chevron
-	beside it (SessionTitleMenu variant="sheet").
+	`mobile` is the phone bar's second line, after the worker: only the link up to
+	a subagent's parent chat. The bar draws the chat title on its first line, and
+	project and branch live in the line under the composer.
 -->
-<nav class="crumbs" class:mobile class:has-parent={!!parentId} aria-label="Breadcrumb">
-	{#if projectLabel}
-		{#if onOpenProject}
-			<button class="crumb project" title={projectLabel} onclick={onOpenProject}>{projectLabel}</button>
-		{:else}
-			<span class="crumb project" title={projectLabel}>{projectLabel}</span>
-		{/if}
-		{#if mobile ? !!parentId : !!title}<ChevronRight class="crumb-sep" size={mobile ? 11 : 14} aria-hidden="true" />{/if}
-	{/if}
+{#if mobile}
 	{#if parentId}
-		{#if parent}
-			<a class="crumb parent" href={mobile ? sessionHref(parentId, '/mobile/') : sessionHref(parentId)} onclick={(event) => openSessionLink(event, parentId!)} data-sveltekit-reload title={parent.title || 'Parent chat'} aria-label={`Open parent chat: ${parent.title || 'Untitled chat'}`}>{parent.title || 'Parent chat'}</a>
-		{:else}
-			<span class="crumb parent" title="Parent chat unavailable">Parent chat</span>
+		<nav class="crumbs mobile" aria-label="Breadcrumb">
+			<span class="crumb-dot" aria-hidden="true">·</span>
+			{#if parent}
+				<a class="crumb parent" href={sessionHref(parentId, '/mobile/')} onclick={(event) => openSessionLink(event, parentId!)} data-sveltekit-reload title={parent.title || 'Parent chat'} aria-label={`Open parent chat: ${parent.title || 'Untitled chat'}`}>{parent.title || 'Parent chat'}</a>
+			{:else}
+				<span class="crumb parent" title="Parent chat unavailable">Parent chat</span>
+			{/if}
+		</nav>
+	{/if}
+{:else}
+	<nav class="crumbs" class:has-parent={!!parentId} aria-label="Breadcrumb">
+		{#if projectLabel}
+			{#if onOpenProject}
+				<button class="crumb project" title={projectLabel} onclick={onOpenProject}>{projectLabel}</button>
+			{:else}
+				<span class="crumb project" title={projectLabel}>{projectLabel}</span>
+			{/if}
+			{#if title}<ChevronRight class="crumb-sep" size={14} aria-hidden="true" />{/if}
 		{/if}
-		{#if !mobile}<ChevronRight class="crumb-sep" size={14} aria-hidden="true" />{/if}
-	{/if}
-	{#if title && !mobile}
-		<div class="current" aria-current="page">
-			<SessionTitleMenu {title} {sessionId} variant="crumb" />
-		</div>
-	{/if}
-</nav>
+		{#if parentId}
+			{#if parent}
+				<a class="crumb parent" href={sessionHref(parentId)} onclick={(event) => openSessionLink(event, parentId!)} data-sveltekit-reload title={parent.title || 'Parent chat'} aria-label={`Open parent chat: ${parent.title || 'Untitled chat'}`}>{parent.title || 'Parent chat'}</a>
+			{:else}
+				<span class="crumb parent" title="Parent chat unavailable">Parent chat</span>
+			{/if}
+			<ChevronRight class="crumb-sep" size={14} aria-hidden="true" />
+		{/if}
+		{#if title}
+			<div class="current" aria-current="page">
+				<SessionTitleMenu {title} {sessionId} variant="crumb" />
+			</div>
+		{/if}
+	</nav>
+{/if}
 
 <style>
 	/* The nav spans the strip's free width so the crumb caps below are shares of
@@ -113,9 +126,11 @@
 	/* The leading crumbs keep their own text width and give way only past a
 	   share of the strip; the current title absorbs any shortfall first. A
 	   fixed 220px basis on the parent used to reserve empty space after short
-	   names and squeeze "Sessions" to "Se…" beside it (#1799). */
+	   names and squeeze "Chats" to "Ch…" beside it (#1799). */
 	.project, .parent { flex: none; max-width: min(220px, 25%); }
-	.project { max-width: min(220px, max(25%, 4.5rem)); }
+	/* A long project name may take up to 40% before it truncates, but it never
+	   shrinks to make room for the title, so "Chats" stays whole. */
+	.project { max-width: 40%; }
 	@media (max-width: 700px) {
 		.crumbs { gap: 3px; flex: 1; }
 		.project { max-width: 22%; font-size: 11px; }
@@ -126,17 +141,25 @@
 		.current :global(.menu) { left: auto; right: 0; }
 		.crumbs :global(.crumb-sep) { width: 10px; }
 	}
+	/* A phone-width window has room for one name: the chat's. */
+	@media (max-width: 480px) {
+		.crumbs:not(.mobile):has(.current) > .project,
+		.crumbs:not(.mobile):has(.current):not(.has-parent) > :global(.crumb-sep) {
+			display: none;
+		}
+		/* The one name left is the bar's title, as on the real phone shell. */
+		.crumbs:not(.mobile) .current :global(button.title-trigger) {
+			color: var(--foreground);
+			font-size: 15px;
+			font-weight: 600;
+		}
+	}
 	/* Phone bar subline: 11.5px muted text sitting on the bar's baseline. The
 	   parent link stays a 44px-tall tap target whose text rides at the bottom. */
-	.crumbs.mobile { flex: 0 1 auto; gap: 4px; align-items: flex-end; height: 44px; min-width: 0; }
+	.crumbs.mobile { flex: 1 1 0; gap: 5px; align-items: flex-end; height: 44px; min-width: 0; }
+	.crumbs.mobile .crumb-dot { flex: none; margin-bottom: 7px; font-size: 11.5px; line-height: 16px; color: var(--subtle-foreground); }
 	.crumbs.mobile .crumb { font-size: 11.5px; line-height: 16px; max-width: none; margin-bottom: 7px; }
-	.crumbs.mobile .project { flex: 0 1 auto; min-width: 2.5em; }
-	/* Beside a parent link the project keeps its name (up to 45% of the
-	   trail) and the parent's title absorbs the shortfall. */
-	.crumbs.mobile.has-parent .project { flex: 0 0 auto; max-width: 45%; }
 	.crumbs.mobile .parent { flex: 0 1 auto; min-width: 3em; }
-	.crumbs.mobile.has-parent { flex: 1 1 0; }
 	.crumbs.mobile a.crumb { display: block; min-height: 44px; margin-bottom: 0; padding: 21px 0 7px; box-sizing: border-box; color: var(--foreground); font-weight: 500; }
 	.crumbs.mobile a.crumb:hover { text-decoration: underline; }
-	.crumbs.mobile :global(.crumb-sep) { width: 11px; height: 16px; margin-bottom: 7px; }
 </style>

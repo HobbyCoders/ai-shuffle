@@ -1,16 +1,7 @@
 <script lang="ts">
-	/**
-	 * StatsCard — the Studio-v2 Stats surface.
-	 *
-	 * Matches the mockup `#page-stats`: a Studio page header (eyebrow + serif title +
-	 * accent + date-range segment / refresh / export actions) over a bento dashboard —
-	 * four metric cards, usage by provider, a spend-over-time bar chart, cost-by-profile,
-	 * and top sessions.
-	 * Reuses the analytics API + all data/state logic; only the surface is new.
-	 * Theme tokens only — never the mockup palette.
-	 */
+	/** Analytics with shared panel navigation and token-coloured charts. */
 	import { onMount } from 'svelte';
-	import { fade } from 'svelte/transition';
+ import { platform } from '$lib/stores/platform.svelte';
 	import {
 		getAnalyticsSummary,
 		getCostBreakdown,
@@ -25,9 +16,10 @@
 		type ProviderUsage
 	} from '$lib/api/client';
 	import { billingLabel, formatCost, formatTokens, providerCostCell, providerTotals } from './statsProviders';
-	import StudioPageHeader from '$lib/components/layout/StudioPageHeader.svelte';
+	import { tick } from 'svelte';
+	import { ViewShell, ViewPanel, PanelIconButton, ListItem, ListGroupLabel, DetailPane, Segmented, InlineBanner, EmptyDetail } from '$lib/components/layout/view';
 	import UsageEstimatedBadge from '$lib/components/UsageEstimatedBadge.svelte';
-	import { Download, RefreshCw, Loader2, Zap, DollarSign, MessageSquare, Gauge, ChevronRight } from 'lucide-svelte';
+	import { Download, RefreshCw, Loader2, ChevronRight } from 'lucide-svelte';
 
 	interface Props {
 		mobile?: boolean;
@@ -169,71 +161,79 @@
 		initializeDates('30d');
 		loadAnalytics();
 	});
+
+ let detailOpen = $state(false);
+ let stacked = $state(false);
+ let contentEl = $state<HTMLDivElement>();
+ const sections = [{id:'providers', label:'Usage by provider'}, {id:'spend',label:'Estimated spend over time'}, {id:'profiles',label:'Cost by profile'}, {id:'chats',label:'Top chats by cost'}];
+ async function jump(id: string) {
+  detailOpen = true;
+  await tick();
+  contentEl?.querySelector(`[data-section="${id}"]`)?.scrollIntoView({behavior:'smooth',block:'start'});
+ }
 </script>
 
-<div class="st" class:mobile>
-	<div class="st-wrap">
-		<div class="st-head">
-			<StudioPageHeader eyebrow="Usage, spend & activity" title="Your" accent="stats">
-				{#snippet actions()}
-					<div class="st-seg" role="group" aria-label="Date range">
-						{#each PRESETS as p}
-							<button class="st-seg-btn" class:on={selectedPreset === p.id} onclick={() => selectPreset(p.id)}>
-								{p.label}
-							</button>
-						{/each}
-					</div>
-					<button class="st-btn st-btn--icon" onclick={handleRefresh} disabled={refreshing} title="Refresh" aria-label="Refresh">
-						<RefreshCw size={15} strokeWidth={1.9} class={refreshing ? 'st-spin' : ''} />
-					</button>
-					<button class="st-btn st-btn--icon" onclick={handleExport} disabled={exportLoading} title="Export usage by provider (CSV)" aria-label="Export usage by provider as CSV">
-						{#if exportLoading}<Loader2 size={15} class="st-spin" />{:else}<Download size={15} strokeWidth={1.9} />{/if}
-					</button>
-				{/snippet}
-			</StudioPageHeader>
-			<p class="st-sub">{formatDisplayDate(startDate)} — {formatDisplayDate(endDate)}</p>
-		</div>
+<ViewShell label="Stats" contentFirst bind:stacked {detailOpen} onBack={() => detailOpen = false}>
+ {#snippet panel()}
+  <ViewPanel title="Stats" loading={loading || refreshing}>
+   {#snippet actions()}
+    <PanelIconButton label="Refresh" icon={RefreshCw} onclick={handleRefresh} disabled={refreshing || loading} />
+    <PanelIconButton label="Export usage by provider as CSV" icon={exportLoading ? Loader2 : Download} onclick={handleExport} disabled={exportLoading} />
+   {/snippet}
+   <ListGroupLabel label="Range" compact />
+   <div role="group" aria-label="Date range">
+    {#each PRESETS as p}<ListItem variant="plain" id={p.id} name={p.label} selected={selectedPreset === p.id} onselect={() => { selectPreset(p.id); detailOpen = true; }} />{/each}
+   </div>
+   <ListGroupLabel label="Jump to" compact />
+   {#each sections as section}<ListItem variant="plain" id={section.id} name={section.label} selected={false} onselect={() => jump(section.id)} />{/each}
+  </ViewPanel>
+ {/snippet}
+ {#snippet main()}
+  <DetailPane width="data" contentFirst name={`Last ${parseInt(selectedPreset)} days`} subtitle={`${formatDisplayDate(startDate)} — ${formatDisplayDate(endDate)} · Usage, estimated spend and activity`}>
+   {#snippet heading()}<h2 class="stats-title">Last {parseInt(selectedPreset)} days</h2>{/snippet}
+   {#if stacked}
+    <div class="stats-controls">
+     <Segmented label="Date range" options={PRESETS.map(p => ({value: p.id, label: p.label}))} value={selectedPreset} onchange={selectPreset} />
 
-		<div class="st-scroll">
-			{#if error}
-				<div class="st-error" transition:fade={{ duration: 160 }}>{error}</div>
-			{/if}
-
-			{#if loading}
-				<div class="st-loading"><Loader2 size={28} class="st-spin" /><p>Loading analytics…</p></div>
-			{:else}
-				<div class="bento">
+    </div>
+   {/if}
+   {#if error}<div role="alert"><InlineBanner>{error}</InlineBanner></div>{/if}
+   {#if loading}<EmptyDetail title="Loading analytics" message="Gathering usage for this range…" />
+   {:else}<div bind:this={contentEl}>
+				<div class="metrics st-card">
 					<!-- Metric cards -->
-					<div class="bcard">
-						<div class="blabel" title="Estimated by this app from token counts and model prices. Provider-reported spend is in the usage popover."><DollarSign size={14} strokeWidth={2} /> Estimated spend {#if hasEstimates}<UsageEstimatedBadge label="est." />{/if}</div>
-						<div class="bignum">{formatCost(summary?.total_cost ?? 0)}</div>
+					<div class="metric">
+						<div class="blabel" title="Estimated by this app from token counts and model prices. Provider-reported spend is in the usage popover.">Estimated spend {#if hasEstimates}<UsageEstimatedBadge label="est." />{/if}</div>
+						<div class="bignum">{summary?.total_cost ? formatCost(summary.total_cost) : '$0.00'}</div>
 						<div class="bsub">app estimate across {summary?.session_count ?? 0} sessions</div>
 						{#if provTotals.unpriced > 0}
 							<div class="bsub bsub--warn" title="These turns used a model with no known price; their cost is not in this total.">{provTotals.unpriced} {provTotals.unpriced === 1 ? 'turn has' : 'turns have'} no price</div>
 						{/if}
 					</div>
 
-					<div class="bcard">
-						<div class="blabel"><Zap size={14} strokeWidth={2} /> Tokens {#if hasEstimates}<UsageEstimatedBadge label="est." />{/if}</div>
+					<div class="metric">
+						<div class="blabel">Tokens {#if hasEstimates}<UsageEstimatedBadge label="est." />{/if}</div>
 						<div class="bignum">{formatTokens(totalTokens)}</div>
 						<div class="bsub">{formatTokens(summary?.total_input_tokens ?? 0)} in · {formatTokens(summary?.total_output_tokens ?? 0)} out</div>
 					</div>
 
-					<div class="bcard">
-						<div class="blabel"><MessageSquare size={14} strokeWidth={2} /> Sessions</div>
+					<div class="metric">
+						<div class="blabel">Chats</div>
 						<div class="bignum">{summary?.session_count ?? 0}</div>
 						<div class="bsub">conversations in range</div>
 					</div>
 
-					<div class="bcard">
-						<div class="blabel"><Gauge size={14} strokeWidth={2} /> Avg / session {#if hasEstimates}<UsageEstimatedBadge label="est." />{/if}</div>
-						<div class="bignum">{formatCost(summary?.average_cost_per_session ?? 0)}</div>
+					<div class="metric">
+						<div class="blabel">Avg / session {#if hasEstimates}<UsageEstimatedBadge label="est." />{/if}</div>
+						<div class="bignum">{summary?.average_cost_per_session ? formatCost(summary.average_cost_per_session) : '$0.00'}</div>
 						<div class="bsub">mean estimated spend per session</div>
 					</div>
 
+				</div>
 					<!-- Usage by provider (full width) -->
-					<div class="bcard c4 bflex">
-						<div class="blabel">Usage by provider</div>
+					<section class="stats-section" data-section="providers" aria-labelledby="stats-providers">
+						<h3 id="stats-providers">Usage by provider</h3>
+						<div class="stats-content st-card">
 						{#if providersFailed}
 							<div class="bempty">Provider breakdown unavailable</div>
 						{:else if providers.length === 0}
@@ -269,11 +269,13 @@
 								<p class="prov-foot">{provTotals.inferred.toLocaleString()} older {provTotals.inferred === 1 ? 'turn was' : 'turns were'} recorded before per-provider tracking and {provTotals.inferred === 1 ? 'is' : 'are'} shown under {provTotals.inferred === 1 ? 'its' : 'their'} session's current provider.</p>
 							{/if}
 						{/if}
-					</div>
+						</div>
+					</section>
 
 					<!-- Spend over time (tall, wide) -->
-					<div class="bcard c2 r2 bflex">
-						<div class="blabel">Estimated spend over time</div>
+					<section class="stats-section" data-section="spend" aria-labelledby="stats-spend">
+						<h3 id="stats-spend">Estimated spend over time</h3>
+						<div class="stats-content st-card">
 						{#if usageTrends.length === 0}
 							<div class="bempty">No usage in this range</div>
 						{:else}
@@ -287,11 +289,13 @@
 								{/each}
 							</div>
 						{/if}
-					</div>
+						</div>
+					</section>
 
 					<!-- Cost by profile -->
-					<div class="bcard c2 bflex">
-						<div class="blabel">Cost by profile</div>
+					<section class="stats-section" data-section="profiles" aria-labelledby="stats-profiles">
+						<h3 id="stats-profiles">Cost by profile</h3>
+						<div class="stats-content st-card">
 						{#if costBreakdown.length === 0}
 							<div class="bempty">No data</div>
 						{:else}
@@ -305,13 +309,15 @@
 								{/each}
 							</div>
 						{/if}
-					</div>
+						</div>
+					</section>
 
-					<!-- Top sessions by cost -->
-					<div class="bcard c2 bflex">
-						<div class="blabel">Top sessions by cost</div>
+					<!-- Top chats by cost -->
+					<section class="stats-section" data-section="chats" aria-labelledby="stats-chats">
+						<h3 id="stats-chats">Top chats by cost</h3>
+						<div class="stats-content st-card">
 						{#if topSessions.length === 0}
-							<div class="bempty">No sessions</div>
+							<div class="bempty">No chats</div>
 						{:else}
 							<div class="tops">
 								{#each topSessions.slice(0, 5) as s, i}
@@ -325,113 +331,31 @@
 								{/each}
 							</div>
 						{/if}
-					</div>
-				</div>
-			{/if}
-		</div>
-	</div>
-</div>
-
+						</div>
+					</section>
+   </div>{/if}
+  </DetailPane>
+ {/snippet}
+</ViewShell>
 <style>
-	.st {
-		display: flex;
-		flex-direction: column;
-		height: 100%;
-		min-height: 0;
-		overflow: hidden;
-		background: var(--background);
-	}
-	/* Centered, max-width container — matches the mockup's .wrap (not full-bleed). */
-	.st-wrap {
-		width: 100%;
-		max-width: 1240px;
-		margin: 0 auto;
-		flex: 1;
-		min-height: 0;
-		display: flex;
-		flex-direction: column;
-	}
-	.st-head { flex-shrink: 0; padding: 22px 28px 0; }
-	.st-sub { margin: 8px 0 0; font-size: 0.8125rem; color: var(--muted-foreground); font-family: var(--font-mono, monospace); }
-
-	.st-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 18px 28px 28px; }
-
-	/* Header actions: segmented date range + icon buttons */
-	.st-seg { display: inline-flex; padding: 3px; gap: 2px; background: var(--muted); border-radius: calc(var(--radius, 0.75rem) - 2px); }
-	.st-seg-btn {
-		height: 28px; padding: 0 12px; border: none; background: transparent;
-		color: var(--muted-foreground); font-size: 0.78rem; font-weight: 500; cursor: pointer;
-		border-radius: calc(var(--radius, 0.75rem) - 4px); transition: background-color 120ms ease, color 120ms ease;
-	}
-	.st-seg-btn:hover { color: var(--foreground); }
-	.st-seg-btn.on { background: var(--card); color: var(--foreground); box-shadow: 0 1px 2px rgba(0,0,0,0.18); }
-
-	.st-btn {
-		display: inline-flex; align-items: center; justify-content: center; gap: 6px;
-		height: 34px; padding: 0 12px; background: var(--card); color: var(--foreground);
-		border: 1px solid var(--border); border-radius: calc(var(--radius, 0.75rem) - 2px);
-		font-size: 0.8125rem; font-weight: 500; cursor: pointer;
-		transition: background-color 120ms ease, border-color 120ms ease;
-	}
-	.st-btn:hover:not(:disabled) { background: var(--hover-overlay); }
-	.st-btn:disabled { opacity: 0.55; cursor: not-allowed; }
-	.st-btn--icon { width: 34px; padding: 0; color: var(--muted-foreground); }
-	.st-btn--icon:hover:not(:disabled) { color: var(--foreground); }
-
-	:global(.st-spin) { animation: st-spin 1s linear infinite; }
-	@keyframes st-spin { to { transform: rotate(360deg); } }
-
-	/* Error + loading */
-	.st-error {
-		margin-bottom: 14px; padding: 10px 12px;
-		border-radius: calc(var(--radius, 0.75rem) - 2px);
-		background: color-mix(in oklch, var(--destructive) 12%, transparent);
-		color: var(--destructive); font-size: 0.8125rem;
-		border: 1px solid color-mix(in oklch, var(--destructive) 30%, transparent);
-	}
-	.st-loading { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 56px; color: var(--muted-foreground); }
-	.st-loading :global(svg) { color: var(--primary); }
-
-	/* ============================ BENTO ============================ */
-	.bento {
-		display: grid;
-		grid-template-columns: repeat(4, 1fr);
-		gap: 14px;
-		grid-auto-rows: minmax(118px, auto);
-	}
-	.bcard {
-		background: var(--card);
-		border: 1px solid var(--border);
-		border-radius: var(--radius, 0.75rem);
-		padding: 16px 18px;
-		position: relative;
-		overflow: hidden;
-		transition: border-color 160ms ease, box-shadow 160ms ease;
-	}
-	.bcard:hover { border-color: color-mix(in oklab, var(--primary) 40%, var(--border)); }
-	.bcard.c2 { grid-column: span 2; }
-	.bcard.c4 { grid-column: 1 / -1; }
-	.bcard.r2 { grid-row: span 2; }
-	.bflex { display: flex; flex-direction: column; }
-
-	.blabel {
-		display: flex; align-items: center; gap: 6px;
-		font-family: var(--font-mono, monospace);
-		font-size: 0.65rem; letter-spacing: 0.08em; text-transform: uppercase;
-		color: var(--muted-foreground); margin-bottom: 12px;
-	}
-	.blabel :global(svg) { opacity: 0.85; }
-
-	.bignum {
-		font-family: var(--font-display, Georgia, serif);
-		font-weight: 800; font-size: 2.35rem; letter-spacing: -0.03em; line-height: 1;
-		color: var(--foreground); font-variant-numeric: tabular-nums;
-	}
-	.bsub { margin-top: 10px; font-size: 0.75rem; color: var(--muted-foreground); }
-	.bsub--warn { margin-top: 4px; cursor: help; }
-
-	.bempty { margin: auto 0; padding: 18px 0; text-align: center; color: var(--muted-foreground); font-size: 0.8125rem; opacity: 0.7; }
-
+ .stats-controls { display: flex; align-items: center; gap: 4px; margin-bottom: 24px; flex-wrap: wrap; }
+ .stats-controls :global(.st-seg) { margin-right: auto; }
+ .stats-controls :global(.st-seg button) { min-height: 44px; padding-inline: 10px; }
+ .metrics { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); }
+ .metrics > .metric { min-width: 0; padding: 20px; border-radius: 0; }
+ .metric + .metric { border-left: 1px solid var(--st-border); }
+ .blabel { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin: 0 0 8px; color: var(--st-mfg); font-size: 12px; }
+ .bignum { font-size: 28px; font-weight: 600; line-height: 1.2; font-variant-numeric: tabular-nums; }
+ .bsub { font-size: 12px; color: var(--st-mfg); margin-top: 8px; }
+ .bsub--warn { color: var(--st-warning); }
+ .bempty { min-height: 80px; display: grid; place-items: center; color: var(--st-mfg); font-size: 13px; text-align: center; }
+ .stats-title { margin: 0; font-size: 24px; font-weight: 600; letter-spacing: -.01em; line-height: 1.25; }
+ .stats-section { scroll-margin-top: 24px; margin-top: 40px; }
+ .stats-section h3 { font-size: 14px; font-weight: 600; margin: 0 0 20px; }
+ .stats-content { padding: 20px; }
+ .bars { height: 180px; }
+ @container settings (max-width: 800px) { .metrics { grid-template-columns: 1fr 1fr; } .metric:nth-child(3) { border-left: 0; } .metric:nth-child(n+3) { border-top: 1px solid var(--st-border); } }
+ @media (prefers-reduced-motion: reduce) { .bars i, .brk-fill, .prov-fill { transition: none; } }
 	/* Spend-over-time bars */
 	.bars { display: flex; align-items: flex-end; gap: 4px; flex: 1; min-height: 120px; margin-top: auto; padding-top: 14px; }
 	.bars i {
@@ -439,17 +363,17 @@
 		background: color-mix(in oklch, var(--foreground) 55%, transparent);
 		border-radius: 4px 4px 0 0; transition: background-color 160ms ease;
 	}
-	.bars i.acc { background: var(--primary); }
+	.bars i.acc { background: var(--st-meter); }
 	.bars:hover i { background: color-mix(in oklch, var(--foreground) 35%, transparent); }
-	.bars i:hover { background: var(--primary) !important; }
+	.bars i:hover { background: var(--st-fg); }
 
 	/* Cost-by-profile rows */
 	.brk { display: flex; flex-direction: column; gap: 11px; margin-top: 2px; }
 	.brk-row { display: grid; grid-template-columns: minmax(64px, 96px) 1fr auto; align-items: center; gap: 10px; }
-	.brk-name { font-size: 0.8125rem; color: var(--foreground); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+	.brk-name { font-size: 13px; color: var(--foreground); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 	.brk-track { height: 6px; background: var(--muted); border-radius: 999px; overflow: hidden; }
-	.brk-fill { display: block; height: 100%; background: var(--primary); border-radius: 999px; transition: width 450ms ease; }
-	.brk-val { font-family: var(--font-mono, monospace); font-size: 0.75rem; font-weight: 600; color: var(--muted-foreground); text-align: right; }
+	.brk-fill { display: block; height: 100%; background: var(--st-meter); border-radius: 999px; transition: width 450ms ease; }
+	.brk-val { font-size: 13px; font-weight: 600; color: var(--muted-foreground); text-align: right; }
 
 	/* Usage-by-provider rows */
 	.prov { display: flex; flex-direction: column; }
@@ -460,26 +384,25 @@
 	}
 	.prov-head {
 		border-top: none; padding: 0 0 4px;
-		font-family: var(--font-mono, monospace); font-size: 0.6rem; letter-spacing: 0.08em;
-		text-transform: uppercase; color: var(--muted-foreground);
+		font-size: 12px; color: var(--muted-foreground);
 	}
-	.prov-name { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 0.8125rem; color: var(--foreground); }
+	.prov-name { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 13px; color: var(--foreground); }
 	.prov-label { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 	.prov-chip {
 		flex-shrink: 0; padding: 1px 7px; border-radius: 999px; font-size: 0.65rem; font-weight: 600;
 		border: 1px solid var(--border); color: var(--muted-foreground); white-space: nowrap;
 	}
-	.prov-chip[data-billing='subscription'] { color: var(--primary); border-color: color-mix(in oklch, var(--primary) 40%, transparent); }
+	.prov-chip[data-billing='subscription'] { color: var(--st-mfg); }
 	.prov-chip[data-billing='unknown'] { border-style: dashed; }
-	.prov-num { font-family: var(--font-mono, monospace); font-size: 0.75rem; color: var(--muted-foreground); text-align: right; font-variant-numeric: tabular-nums; }
-	.prov-head .prov-num { font-size: 0.6rem; }
+	.prov-num { font-size: 13px; color: var(--muted-foreground); text-align: right; font-variant-numeric: tabular-nums; }
+	.prov-head .prov-num { font-size: 12px; }
 	.prov-mlabel { display: none; }
 	.prov-track { height: 6px; background: var(--muted); border-radius: 999px; overflow: hidden; }
-	.prov-fill { display: block; height: 100%; background: var(--primary); border-radius: 999px; transition: width 450ms ease; }
-	/* Subscription usage priced at API rates: hatched, so it never reads as money spent. */
-	.prov-fill.sub { background: repeating-linear-gradient(135deg, var(--primary) 0 4px, color-mix(in oklch, var(--primary) 45%, transparent) 4px 8px); }
+	.prov-fill { display: block; height: 100%; background: var(--st-meter); border-radius: 999px; transition: width 450ms ease; }
+	/* Subscription equivalent remains labelled, with a quieter token-coloured track. */
+	.prov-fill.sub { background: var(--st-meter); opacity: 0.65; }
 	.prov-cost { display: flex; flex-direction: column; align-items: flex-end; text-align: right; cursor: help; }
-	.prov-cost-val { font-family: var(--font-mono, monospace); font-size: 0.75rem; font-weight: 600; color: var(--foreground); }
+	.prov-cost-val { font-size: 13px; font-weight: 600; color: var(--foreground); }
 	.prov-cost.missing .prov-cost-val { color: var(--muted-foreground); font-weight: 500; font-style: italic; }
 	.prov-cost-note { font-size: 0.65rem; color: var(--muted-foreground); white-space: nowrap; }
 	.prov-foot { margin: 10px 0 0; font-size: 0.72rem; color: var(--muted-foreground); }
@@ -489,20 +412,20 @@
 	.top-row {
 		display: grid; grid-template-columns: 20px minmax(0, 1fr) 56px auto 14px;
 		align-items: center; gap: 10px; width: 100%;
-		padding: 7px 8px; border: none; background: transparent; cursor: pointer;
+		padding: 12px 8px; min-height: 44px; border: none; background: transparent; cursor: pointer;
 		border-radius: calc(var(--radius, 0.75rem) - 4px); text-align: left;
 		transition: background-color 120ms ease;
 	}
 	.top-row:hover { background: var(--hover-overlay); }
 	.top-rank {
 		display: grid; place-items: center; width: 20px; height: 20px;
-		border-radius: 6px; background: color-mix(in oklch, var(--primary) 15%, transparent);
-		color: var(--primary); font-size: 0.65rem; font-weight: 700; font-family: var(--font-mono, monospace);
+		border-radius: 6px; background: color-mix(in oklch, var(--st-meter) 15%, transparent);
+		color: var(--st-mfg); font-size: 0.65rem; font-weight: 600;
 	}
-	.top-name { font-size: 0.8125rem; color: var(--foreground); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+	.top-name { font-size: 13px; color: var(--foreground); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 	.top-track { height: 5px; background: var(--muted); border-radius: 999px; overflow: hidden; }
-	.top-fill { display: block; height: 100%; background: color-mix(in oklch, var(--primary) 75%, transparent); border-radius: 999px; }
-	.top-val { font-family: var(--font-mono, monospace); font-size: 0.75rem; font-weight: 600; color: var(--muted-foreground); text-align: right; }
+	.top-fill { display: block; height: 100%; background: color-mix(in oklch, var(--st-meter) 75%, transparent); border-radius: 999px; }
+	.top-val { font-size: 13px; font-weight: 600; color: var(--muted-foreground); text-align: right; }
 	.top-row :global(.top-arrow) { color: var(--muted-foreground); opacity: 0; transition: opacity 120ms ease; }
 	.top-row:hover :global(.top-arrow) { opacity: 1; }
 	/* Touch / mobile shell: the drill-in arrow can't be hover-revealed — show it so
@@ -511,21 +434,9 @@
 		.top-row :global(.top-arrow) { opacity: 1; }
 	}
 
-	/* Tablet: 2-col grid */
-	@media (max-width: 860px) {
-		.bento { grid-template-columns: 1fr 1fr; }
-		.bcard.c2 { grid-column: span 2; }
-		.bcard.r2 { grid-row: auto; }
-		.bars { min-height: 96px; }
-	}
-
 	/* Mobile: single column */
 	@media (max-width: 539px) {
-		.st-head { padding: 18px 16px 0; }
-		.st-scroll { padding: 14px 16px 22px; }
-		.bento { grid-template-columns: 1fr; }
-		.bcard.c2 { grid-column: span 1; }
-		.bignum { font-size: 2rem; }
+		.metrics { grid-template-columns: 1fr 1fr; }
 		.top-track { display: none; }
 		.top-row { grid-template-columns: 20px minmax(0, 1fr) auto 14px; }
 		/* Provider rows: name and cost on top, turns and tokens beneath. */

@@ -74,7 +74,6 @@ const shot = async (page, file) => { if (shots) await page.screenshot({ path: jo
 
 	// 2. Choose a model: the picker shows it and the helper changes.
 	await picker.click();
-	await page.getByRole('tab', { name: /^Claude/ }).click();
 	await page.getByRole('option', { name: /Opus/ }).click();
 	// The menu may stay open after a pick; the trigger is the picker's button.
 	const trigger = row.locator('#automation-model');

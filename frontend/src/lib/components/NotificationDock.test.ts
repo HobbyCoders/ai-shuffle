@@ -256,6 +256,8 @@ describe('dock position and drag regions (source)', () => {
 
 	it('stops the top bar dragging while the floating sidebar covers it', () => {
 		const app = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../../app.css'), 'utf8');
-		expect(app).toMatch(/html\.desktop \.app-body:has\(> \.sidebar-slot\.floating\) \.topbar \{\s*-webkit-app-region: no-drag;\s*app-region: no-drag;/);
+		// Every title bar the redesign drags by (chat, views, Settings, terminal) stops
+		// dragging under the floating sidebar or an overlaid side panel.
+		expect(app).toMatch(/html\.desktop \.app-body:has\(> \.sidebar-slot:is\(\.floating, \.panel-overlay:not\(\.rail-only\)\)\) :is\(\.topbar, \.view-titlebar, \.st-dtop, \.page-terminal > \.bar\) \{\s*-webkit-app-region: no-drag;\s*app-region: no-drag;/);
 	});
 });

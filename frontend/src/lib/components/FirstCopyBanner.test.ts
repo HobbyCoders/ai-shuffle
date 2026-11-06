@@ -74,7 +74,7 @@ it('counts transcripts after the first copy and offers the reload with them', as
 	expect(screen.getByRole('status').textContent).toContain('Saving the data copied from ServerWorker');
 	await vi.advanceTimersByTimeAsync(3000);
 	expect(screen.getByRole('status').textContent).toContain(
-		'Downloading transcripts from ServerWorker: 312 of 1,152 sessions');
+		'Downloading transcripts from ServerWorker: 312 of 1,152 chats');
 	expect(screen.getByRole('progressbar', { name: 'Copy progress' })).toBeTruthy();
 	expect(screen.getByRole('button', { name: 'Reload' })).toBeTruthy();
 	await vi.advanceTimersByTimeAsync(10_000);

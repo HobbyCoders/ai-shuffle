@@ -8,7 +8,11 @@ const mocks = vi.hoisted(() => ({
 	checkAuth: vi.fn(),
 	fetchModels: vi.fn(),
 }));
-vi.mock('$lib/api/model-providers', () => ({ fetchProviderModels: mocks.fetchModels }));
+vi.mock('$lib/api/model-providers', async (original) => ({
+	...(await original<typeof import('$lib/api/model-providers')>()),
+	fetchProviderModels: mocks.fetchModels,
+	getNativeProviderOptions: vi.fn(async () => ({ providers: nativeEnrollment }))
+}));
 vi.mock('$lib/stores/auth.svelte', () => ({
 	auth: { checkAuth: mocks.checkAuth, get current() { return { status: mocks.status }; } },
 }));
@@ -18,6 +22,8 @@ vi.mock('$lib/stores/providers.svelte', () => ({
 vi.mock('./ClaudeConnect.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
 vi.mock('./ProviderConnect.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
 import ProviderStep from './ProviderStep.svelte';
+import { nativeEnrollment } from '$lib/components/settings/providers/fixtures';
+import { nativeOptions } from '$lib/components/settings/providers/native-options.svelte';
 import { providerReadiness } from './provider-readiness';
 import { buildProviders } from '$lib/components/settings/providers/providers-model';
 
@@ -36,6 +42,8 @@ const gate = (ready: string[], extra: Record<string, unknown> = {}) => ({
 
 beforeEach(() => {
 	vi.resetAllMocks();
+	nativeOptions.providers = nativeEnrollment;
+	nativeOptions.loaded = true;
 	mocks.status = { agent_gate: gate([]) };
 	mocks.store = { providers: [], claude: null, anthropicKeyMasked: null, falKeySet: false, falKeyMasked: '', falEnabled: true };
 	mocks.checkAuth.mockImplementation(async () => mocks.status);
@@ -51,7 +59,7 @@ describe('setup AI provider step', () => {
 		render(ProviderStep, { isAdmin: true, onContinue: vi.fn(), pollMs: 60_000 });
 		const list = await screen.findByRole('list', { name: 'AI providers' });
 		const names = [...list.querySelectorAll('.name')].map((n) => n.textContent);
-		expect(names).toEqual(['OpenAI', 'xAI Grok', 'Claude', 'OpenRouter', 'Your own gateway']);
+		expect(names).toEqual(['OpenAI', 'xAI Grok', 'Claude', 'OpenRouter', 'Kimi', 'MiniMax', 'OpenCode', 'Your own gateway']);
 		const settingsOrder = buildProviders({ rows: [], claude: null, anthropicKeyMasked: null, fal: { keySet: false, masked: '', enabled: true } })
 			.filter((v) => !v.media).map((v) => v.name);
 		expect(names.slice(0, -1)).toEqual(settingsOrder);

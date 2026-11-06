@@ -31,7 +31,7 @@ async function show(readOnly = false) {
 	vi.stubGlobal('fetch', worker.fetch);
 	await providers.refreshAll();
 	render(ProvidersCollection, { context: new Map([[SETTINGS_ACCESS_CONTEXT, { readOnly }]]) });
-	await screen.findByRole('button', { name: 'Add credential to OpenAI' });
+	await screen.findByRole('group', { name: 'OpenAI' });
 }
 beforeEach(() => {
 	vi.clearAllMocks();
@@ -82,7 +82,7 @@ describe('saved account controls', () => {
 
 	it('adds another named Anthropic key and selects it without changing mode', async () => {
 		await show();
-		await fireEvent.click(group('Claude').getByRole('button', { name: 'Add credential to Claude' }));
+		await fireEvent.click(group('Claude').getByRole('button', { name: 'Add account to Claude' }));
 		await fireEvent.click(screen.getByRole('menuitem', { name: /Another API key/ }));
 		await fireEvent.input(screen.getByRole('textbox', { name: 'Name' }), { target: { value: 'Travel' } });
 		await fireEvent.input(screen.getByLabelText('API key'), { target: { value: 'sk-ant-test-not-real-3333' } });
@@ -99,7 +99,7 @@ describe('saved account controls', () => {
 			'POST /model-providers/:id/codex/device/start': () => ({ user_code: 'TEST-CODE', verification_uri: 'https://example.test/sign-in' })
 		});
 		await show();
-		await fireEvent.click(group('OpenAI').getByRole('button', { name: 'Add credential to OpenAI' }));
+		await fireEvent.click(group('OpenAI').getByRole('button', { name: 'Add account to OpenAI' }));
 		await fireEvent.click(screen.getByRole('menuitem', { name: /Another Subscription/ }));
 		expect(screen.getByText(/Becomes active after sign-in/)).toBeTruthy();
 		await fireEvent.click(screen.getByRole('button', { name: 'Start sign-in' }));
@@ -125,7 +125,7 @@ describe('saved Claude subscriptions', () => {
 			'GET /auth/claude/cli-login': runningTerminal
 		});
 		await show();
-		await fireEvent.click(group('Claude').getByRole('button', { name: 'Add credential to Claude' }));
+		await fireEvent.click(group('Claude').getByRole('button', { name: 'Add account to Claude' }));
 		const item = screen.getByRole('menuitem', { name: /Another Subscription/ });
 		expect(item.textContent).toContain('Becomes active after sign-in');
 		await fireEvent.click(item);
@@ -150,7 +150,7 @@ describe('saved Claude subscriptions', () => {
 			claude: claudeSummary({ accounts: claudeAccounts({ subscription: [subAccount()] }) })
 		});
 		await show();
-		await fireEvent.click(group('Claude').getByRole('button', { name: 'Add credential to Claude' }));
+		await fireEvent.click(group('Claude').getByRole('button', { name: 'Add account to Claude' }));
 		await fireEvent.click(screen.getByRole('menuitem', { name: /Another Subscription/ }));
 		await fireEvent.click(await screen.findByRole('button', { name: 'Start sign-in' }));
 		await screen.findByTestId('claude-add-subscription');
@@ -175,7 +175,7 @@ describe('saved Claude subscriptions', () => {
 	const SAVE = 'POST /settings/claude-auth/accounts/subscription/save-current';
 	async function openAdd() {
 		await show();
-		await fireEvent.click(group('Claude').getByRole('button', { name: 'Add credential to Claude' }));
+		await fireEvent.click(group('Claude').getByRole('button', { name: 'Add account to Claude' }));
 		await fireEvent.click(screen.getByRole('menuitem', { name: /Another Subscription/ }));
 		await fireEvent.click(await screen.findByRole('button', { name: 'Start sign-in' }));
 	}

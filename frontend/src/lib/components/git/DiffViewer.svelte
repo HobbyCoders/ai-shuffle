@@ -17,7 +17,7 @@
 	 * line numbers, tap lines on touch, arrow keys when focused) and send one
 	 * comment about it to the current chat. Nothing is written to disk or GitHub.
 	 */
-	import { ArrowLeft, FileText, Loader2, MessageSquareText, Send, X } from 'lucide-svelte';
+	import { ChevronLeft, FileText, Loader2, MessageSquareText, Send, X } from 'lucide-svelte';
 	import { onMount, tick } from 'svelte';
 	import { highlightToInnerHtml, onHighlighterReady, resolveShikiLang } from '$lib/utils/shiki';
 	import { sanitizeHtml } from '$lib/utils/sanitize';
@@ -422,7 +422,7 @@
 				class="flex items-center justify-center w-8 h-8 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors shrink-0 focus:outline-hidden focus:ring-2 focus:ring-ring"
 				aria-label="Back to file list"
 			>
-				<ArrowLeft size={18} />
+				<ChevronLeft size={18} />
 			</button>
 
 			<FileText size={16} class="text-muted-foreground shrink-0" />
@@ -436,7 +436,7 @@
 			</span>
 
 			{#if totalChanges().additions > 0 || totalChanges().deletions > 0}
-				<span class="text-xs font-mono shrink-0 ml-auto flex items-center gap-1.5">
+				<span class="text-xs tabular-nums shrink-0 ml-auto flex items-center gap-1.5">
 					{#if totalChanges().additions > 0}
 						<span class="text-success">+{totalChanges().additions}</span>
 					{/if}
@@ -822,17 +822,17 @@
 	}
 
 	/* ─── Line feedback: selection rail + inline "Ask agent" card ───── */
-	.feedback { --pick: color-mix(in oklch, var(--primary) 17%, transparent); outline: none; }
+	.feedback { --pick: var(--row-selected); outline: none; }
 	.feedback:focus-visible { box-shadow: inset 0 0 0 2px color-mix(in oklch, var(--ring) 70%, transparent); }
 	.feedback .gutter-col, .feedback .sbs-gutter { cursor: pointer; transition: color .12s ease-out, background-color .12s ease-out; }
 	.feedback .gutter-col:hover, .feedback .sbs-gutter:hover {
-		color: var(--primary);
-		background-color: color-mix(in oklch, var(--primary) 10%, transparent);
+		color: var(--foreground);
+		background: var(--row-selected);
 	}
 	/* Tint layers over the add/delete colour so the change type stays readable. */
-	.diff-viewer .row-selected > div { background-image: linear-gradient(var(--pick), var(--pick)); }
-	.diff-viewer .row-selected > div:first-child { box-shadow: inset 3px 0 0 var(--primary); color: var(--primary); }
-	.diff-viewer .row-selected .gutter-col, .diff-viewer .row-selected .sbs-gutter { color: var(--primary); }
+	.diff-viewer .row-selected > div { background-color: var(--pick); }
+	.diff-viewer .row-selected > div:first-child { color: var(--foreground); }
+	.diff-viewer .row-selected .gutter-col, .diff-viewer .row-selected .sbs-gutter { color: var(--foreground); }
 
 	.ask-card {
 		position: sticky;
@@ -844,7 +844,7 @@
 		min-width: 220px;
 		margin: 6px 0 10px 10px;
 		padding: 8px 8px 7px;
-		border: 1px solid color-mix(in srgb, var(--primary) 45%, var(--border));
+		border: 1px solid var(--border);
 		border-radius: 8px;
 		background: var(--popover);
 		color: var(--popover-foreground, var(--foreground));
@@ -862,20 +862,20 @@
 		width: 8px;
 		height: 8px;
 		background: var(--popover);
-		border-left: 1px solid color-mix(in srgb, var(--primary) 45%, var(--border));
-		border-top: 1px solid color-mix(in srgb, var(--primary) 45%, var(--border));
+		border-left: 1px solid var(--border);
+		border-top: 1px solid var(--border);
 		transform: rotate(45deg);
 	}
 	.ask-head { display: flex; align-items: center; gap: 6px; min-width: 0; margin-bottom: 6px; font-size: 12px; }
-	.ask-head :global(svg) { flex-shrink: 0; color: var(--primary); }
-	.ask-title { font-weight: 600; letter-spacing: .01em; }
+	.ask-head :global(svg) { flex-shrink: 0; color: var(--foreground); }
+	.ask-title { font-weight: 600; }
 	.ask-chip {
 		padding: 1px 6px;
 		border-radius: 999px;
-		background: color-mix(in oklch, var(--primary) 16%, transparent);
-		color: var(--primary);
-		font-family: var(--font-mono);
-		font-size: 11px;
+		background: var(--row-selected);
+		color: var(--foreground);
+		font-family: var(--font-sans);
+		font-size: 12px;
 		font-variant-numeric: tabular-nums;
 	}
 	.ask-meta { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted-foreground); font-size: 11px; }
@@ -917,8 +917,8 @@
 	.ask-ghost { border: 1px solid var(--border); background: transparent; color: var(--muted-foreground); }
 	.ask-ghost:hover { background: var(--muted); color: var(--foreground); }
 	.ask-ghost[aria-pressed=true] { color: var(--foreground); border-color: color-mix(in srgb, var(--primary) 45%, var(--border)); }
-	.ask-send { border: 0; background: var(--primary); color: var(--primary-foreground); }
-	.ask-send:hover:not(:disabled) { background: color-mix(in oklch, var(--primary) 88%, white); }
+	.ask-send { border: 0; background: var(--action); color: var(--action-foreground); }
+	.ask-send:hover:not(:disabled) { background: var(--row-selected); }
 	.ask-send:active:not(:disabled), .ask-ghost:active { transform: translateY(1px); }
 	.ask-send:disabled { opacity: .45; cursor: default; }
 	.ask-icon:focus-visible, .ask-ghost:focus-visible, .ask-send:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }

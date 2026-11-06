@@ -54,6 +54,7 @@ def sdk_tool_to_inproc(
         handler=handler,
         risk=risk,
         classify_risk=classify_risk,
+        discoverable=getattr(sdk_tool, "discoverable", True),
     )
 
 

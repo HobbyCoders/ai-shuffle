@@ -36,10 +36,18 @@ import { FEATURE_PANEL_CONTEXT } from '$lib/components/layout/feature-panel-cont
 import { settingsNav, encodeTarget } from '$lib/settings/navigation.svelte';
 import { aiContentPrefill, supportCaps, supportReportDialog } from '$lib/stores/support-report.svelte';
 import SettingsShell from './SettingsShell.svelte';
+import PanelHost from '../../layout/view/test-fixtures/PanelHost.svelte';
 
 const admin = isAdmin as unknown as { set: (v: boolean) => void };
 
 beforeEach(() => {
+	vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} });
+	// Shared phone chrome observes the actual viewport breakpoint. jsdom omits this API.
+	vi.stubGlobal('matchMedia', vi.fn((media: string) => ({
+		media, matches: window.innerWidth <= 600, onchange: null,
+		addEventListener: vi.fn(), removeEventListener: vi.fn(),
+		addListener: vi.fn(), removeListener: vi.fn(), dispatchEvent: vi.fn()
+	})));
 	settingsNav.reset();
 	sessionStorage.clear();
 	mocks.pushState.mockReset();
@@ -53,6 +61,7 @@ afterEach(() => {
 	cleanup();
 	platform.set('desktop');
 	vi.restoreAllMocks();
+	vi.unstubAllGlobals();
 });
 
 function nav() {
@@ -60,6 +69,16 @@ function nav() {
 }
 
 describe('SettingsShell index', () => {
+	it('keeps / focusing search when the index renders under the Sidebar host', async () => {
+		render(PanelHost);
+		render(SettingsShell);
+		await tick();
+		const general = within(nav()).getByRole('button', { name: 'General' });
+		expect(document.querySelector('[data-test-host]')?.contains(general)).toBe(true);
+		general.focus();
+		await fireEvent.keyDown(general, { key: '/' });
+		await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('combobox', { name: 'Search settings' })));
+	});
 	it('lists categories in three groups and opens General', async () => {
 		render(SettingsShell);
 		const index = nav();
@@ -69,7 +88,6 @@ describe('SettingsShell index', () => {
 			.map((b) => b.textContent?.trim());
 		expect(names).toEqual([
 			'General',
-			'Archived chats',
 			'Voice',
 			'Providers',
 			'Default models',
@@ -95,10 +113,13 @@ describe('SettingsShell index', () => {
 		const general = within(nav()).getByRole('button', { name: 'General' });
 		general.focus();
 		await fireEvent.keyDown(general, { key: 'ArrowDown' });
-		expect(document.activeElement).toBe(within(nav()).getByRole('button', { name: 'Archived chats' }));
+		expect(document.activeElement).toBe(within(nav()).getByRole('button', { name: 'Voice' }));
 	});
 
 	it('loads a collection page on first visit and focuses its heading', async () => {
+		// Collection readers poll only when their real Settings host is active.
+		layout.openFeaturePage('settings');
+		onTestFinished(() => layout.openChat(null));
 		render(SettingsShell);
 		await fireEvent.click(within(nav()).getByRole('button', { name: 'Logs' }));
 		// Wait for the real lazy module, not Testing Library's 1s query budget:
@@ -106,7 +127,8 @@ describe('SettingsShell index', () => {
 		// Keep this after the click so we still exercise first-visit loading.
 		await vi.dynamicImportSettled();
 		const heading = await screen.findByRole('heading', { level: 1, name: 'Logs' });
-		expect(screen.getByPlaceholderText('Search logs')).toBeTruthy();
+		expect(await screen.findByText('No logs found.')).toBeTruthy();
+		expect(screen.queryByPlaceholderText('Search logs')).toBeNull();
 		expect(screen.getByRole('separator', { name: 'Resize list' })).toBeTruthy();
 		await waitFor(() => expect(document.activeElement).toBe(heading));
 		expect(within(nav()).getByRole('button', { name: 'Logs' }).getAttribute('aria-current')).toBe('page');
@@ -323,6 +345,24 @@ describe('SettingsShell deep links', () => {
 		);
 	});
 
+	it('returns to the list when the open section is chosen again', async () => {
+		render(SettingsShell);
+		settingsNav.selectCategory('hooks');
+		settingsNav.selectItem('some-hook', 'hooks');
+		await tick();
+		await fireEvent.click(within(nav()).getByRole('button', { name: 'Hooks' }));
+		expect(settingsNav.selectedItem('hooks')).toBeNull();
+	});
+
+	it('keeps the open item when another section is chosen and left again', async () => {
+		render(SettingsShell);
+		settingsNav.selectCategory('hooks');
+		settingsNav.selectItem('some-hook', 'hooks');
+		await tick();
+		await fireEvent.click(within(nav()).getByRole('button', { name: 'Voice' }));
+		expect(settingsNav.selectedItem('hooks')).toBe('some-hook');
+	});
+
 	it('lands legacy tab names', async () => {
 		settingsNav.selectCategory('voice');
 		render(SettingsShell, { initialItemId: 'logs' });
@@ -338,6 +378,48 @@ describe('SettingsShell deep links', () => {
 });
 
 describe('SettingsShell stacked mode', () => {
+	it('waits for the outgoing phone detail to retire before landing a retained-shell deep link', async () => {
+		platform.set('mobile');
+		const view = render(SettingsShell);
+		await tick();
+		page.state = { viewPanelDetail: 'automations' } as App.PageState;
+		await tick();
+		const target = encodeTarget({ category: 'providers', item: 'provider:claude', anchor: 'providers.claudeMode' });
+		await view.rerender({ initialItemId: target });
+		await tick();
+		expect(mocks.pushState).not.toHaveBeenCalled();
+		expect(view.container.querySelector('.settings-shell.awaiting-target')).toBeTruthy();
+
+		// The outgoing ViewShell's asynchronous history.back() has now completed.
+		mocks.pushState.mockImplementation((_url, state) => { page.state = state; });
+		page.state = {};
+		await tick();
+		await waitFor(() => expect(settingsNav.view).toBe('detail'));
+		expect(mocks.pushState.mock.calls.map(([, state]) => state.settingsView)).toEqual(['page', 'detail']);
+		expect(settingsNav.depth).toBe(2);
+		expect(settingsNav.selectedItem('providers')).toBe('provider:claude');
+		await view.rerender({ initialItemId: undefined });
+
+		page.state = mocks.pushState.mock.calls[0][1];
+		await tick();
+		expect(settingsNav.view).toBe('page');
+		page.state = {};
+		await tick();
+		expect(settingsNav.view).toBe('index');
+	});
+
+	it('builds both Back steps for a cold phone-width deep link after the shell measures', async () => {
+		const originalWidth = window.innerWidth;
+		onTestFinished(() => { Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalWidth }); });
+		Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 });
+		render(SettingsShell, {
+			initialItemId: encodeTarget({ category: 'providers', item: 'provider:claude', anchor: 'providers.claudeMode' })
+		});
+		await waitFor(() => expect(settingsNav.stacked).toBe(true));
+		await waitFor(() => expect(settingsNav.view).toBe('detail'));
+		expect(mocks.pushState.mock.calls.map(([, state]) => state.settingsView)).toEqual(['page', 'detail']);
+	});
+
 	it('shows one pane at a time and pushes a history entry per step', async () => {
 		platform.set('mobile');
 		const back = vi.spyOn(history, 'back').mockImplementation(() => {});
@@ -349,6 +431,9 @@ describe('SettingsShell stacked mode', () => {
 
 		await fireEvent.click(within(nav()).getByRole('button', { name: 'Voice' }));
 		expect(shell.getAttribute('data-view')).toBe('page');
+		// Page mode hides inner .st-dpane item details, never the shared outer slot.
+		expect(shell.querySelector('.view-main-slot')?.classList.contains('st-dpane')).toBe(false);
+		expect(shell.querySelector('.view-main-slot')?.hasAttribute('hidden')).toBe(false);
 		expect(mocks.pushState).toHaveBeenCalledWith('', expect.objectContaining({ settingsView: 'page', settingsDepth: 1 }));
 
 		await fireEvent.click(screen.getByRole('button', { name: 'Back to Settings' }));
@@ -359,31 +444,21 @@ describe('SettingsShell stacked mode', () => {
 	});
 
 	it('keeps a deep link on its page when a narrow window turns stacked after mounting', async () => {
-		// A browser at phone width: the width is 0 until the ResizeObserver
-		// reports it, after the target landed and the layout cleared it.
-		let report: ((entries: { contentRect: { width: number } }[]) => void) | null = null;
-		vi.stubGlobal(
-			'ResizeObserver',
-			class {
-				constructor(cb: typeof report) {
-					report = cb;
-				}
-				observe() {}
-				disconnect() {}
-			}
-		);
+		// ViewShell follows the window breakpoint, not the docked main pane's width.
+		const originalWidth = window.innerWidth;
 		const view = render(SettingsShell, {
 			initialItemId: encodeTarget({ category: 'system', anchor: 'system.reportProblem' })
 		});
 		await tick();
 		await view.rerender({ initialItemId: undefined });
-		report!([{ contentRect: { width: 390 } }]);
+		Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 });
+		await fireEvent(window, new Event('resize'));
 		await tick();
 		const shell = view.container.querySelector('.settings-shell')!;
 		expect(shell.hasAttribute('data-stacked')).toBe(true);
 		expect(shell.getAttribute('data-view')).toBe('page');
 		expect(settingsNav.category).toBe('system');
-		vi.unstubAllGlobals();
+		Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalWidth });
 	});
 
 	it('Ctrl+K returns to the index before focusing search', async () => {

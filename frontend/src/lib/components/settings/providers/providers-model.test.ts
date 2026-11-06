@@ -17,7 +17,6 @@ import {
 	FAL_KEY_ITEM,
 	filterProviders,
 	hasPlusMenu,
-	lineState,
 	splitProviders,
 	type ProvidersInput
 } from './providers-model';
@@ -53,7 +52,7 @@ describe('grouping', () => {
 		);
 		const { connected, notConnected } = splitProviders(views);
 		expect(connected.map((p) => p.name)).toEqual(['OpenAI', 'xAI Grok', 'Claude', 'fal.ai', 'ServerWorker vLLM']);
-		expect(notConnected.map((p) => p.name)).toEqual(['OpenRouter']);
+		expect(notConnected.map((p) => p.name)).toEqual(['OpenRouter', 'Kimi', 'MiniMax', 'OpenCode']);
 		// Subscriptions come before keys inside a provider.
 		expect(byId(views, 'openai').credentials.map((c) => c.flavor)).toEqual(['device', 'key']);
 		expect(byId(views, 'gw:gw-1').credentials.map((c) => c.name)).toEqual(['Gateway key']);
@@ -341,21 +340,6 @@ describe('Claude', () => {
 		});
 		const { notConnected } = splitProviders(buildProviders(input({ claude: summary })));
 		expect(notConnected.map((p) => p.id)).toContain('claude');
-	});
-});
-
-describe('connector line', () => {
-	it('is teal into the credentials that are on', () => {
-		expect(lineState([{ on: true }, { on: false }, { on: true }])).toEqual({
-			lit: true,
-			rows: [
-				{ on: true, nextOn: false, last: false },
-				{ on: false, nextOn: true, last: false },
-				{ on: true, nextOn: false, last: true }
-			]
-		});
-		expect(lineState([{ on: false }]).lit).toBe(false);
-		expect(lineState([]).lit).toBe(false);
 	});
 });
 

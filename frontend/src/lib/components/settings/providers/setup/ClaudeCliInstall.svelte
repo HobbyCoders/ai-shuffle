@@ -36,6 +36,19 @@
 <div class="settings-shell cli-install-host">
 {#if !isAdmin}
 	<p class="pv-msg">The worker owner can install Claude Code here.</p>
+{:else if !status && manage && !installer.error}
+	<!-- Hold the installed layout while checking, so the sections below do not
+	     jump down when the answer arrives (most workers have it installed). -->
+	<div class="cli-install" aria-busy="true">
+		<RowGroup title="Claude Code CLI">
+			<SettingRow label="Version"><ValueText mono value="Checking" /></SettingRow>
+			<SettingRow label="Path"><ValueText mono value="Checking" /></SettingRow>
+			<SettingRow id="providers.cliKeepInstalled"><Switch checked={false} disabled /></SettingRow>
+			<p class="cli-helper keep-helper">When on, this worker reinstalls the CLI at start if it is missing. When off, starting the worker never downloads it.</p>
+			<SettingRow id="providers.cliUpdate"><button type="button" class="st-btn" disabled>Check for update</button></SettingRow>
+		</RowGroup>
+		<span class="sr-only" role="status">Checking Claude Code installation</span>
+	</div>
 {:else if !status}
 	<p class="pv-msg" role="status">{installer.error || 'Checking Claude Code installation'}</p>
 	{#if installer.error}<button type="button" class="st-btn" onclick={() => installer.load()}>Try again</button>{/if}

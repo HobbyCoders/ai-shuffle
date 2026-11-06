@@ -1,10 +1,26 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import SettingRowHarness from '$lib/test-stubs/SettingRowHarness.svelte';
+import SettingRow from './SettingRow.svelte';
 
 afterEach(cleanup);
 
 describe('SettingRow', () => {
+ it('opts action helpers into wrapping and a twelve-pixel control gap', async () => {
+  const view = render(SettingRow, { label: 'Remove project', hint: 'Files stay on disk.' });
+  expect(view.container.querySelector('.st-wrap-hint')).toBeNull();
+  await view.rerender({ label: 'Remove project', hint: 'Files stay on disk.', wrapHint: true });
+  const row = view.container.querySelector<HTMLElement>('.st-row.st-wrap-hint')!;
+  expect(row.style.gap).toBe('12px 20px');
+  expect(row.querySelector<HTMLElement>('.st-rt')?.style.flexBasis).toBe('280px');
+  expect(row.textContent).toContain('Files stay on disk.');
+ });
+	it('only opts into the full-width phone selector layout when requested', async () => {
+		const view = render(SettingRow, { label: 'Schedule' });
+		expect(view.container.querySelector('.st-phone-stack')).toBeNull();
+		await view.rerender({ label: 'Schedule', stackOnPhone: true });
+		expect(view.container.querySelector('.st-row.st-phone-stack')).not.toBeNull();
+	});
 	it('takes label and default from the registry and renders its anchor', () => {
 		const { container } = render(SettingRowHarness, { id: 'general.timezone', value: 'local' });
 		const row = container.querySelector('[data-setting-anchor="general.timezone"]');

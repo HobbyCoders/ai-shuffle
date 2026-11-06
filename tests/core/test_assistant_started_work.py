@@ -392,16 +392,29 @@ async def test_away_off_cancels_only_away_not_assistant_started_autonomy(home):
     assert away_mode.turn_note(new_id) == away_mode.ASSISTANT_WORK_NOTE
 
 
-async def test_started_chat_without_a_live_starter_keeps_ordinary_questions(mock_db, monkeypatch):
-    """Answering questions for a chat needs somewhere its approvals are seen:
-    once the starter is archived, the started chat is asked as usual again."""
+@pytest.mark.parametrize("starter_state", ["settled", "legacy_archive_input", "legacy_archived_row", "deleted"])
+async def test_started_chat_routes_approvals_by_starter_membership(mock_db, monkeypatch, starter_state):
+    """Approval routing needs active membership, not a retired archive status check."""
     database.create_profile("agent", "Agent", None, {"model": "sonnet"})
     monkeypatch.setattr(orch, "_principal", lambda sid: None)
     chat("caller")
     new_id = json.loads((await call("caller", "start", start_args())).text)["session_id"]
     assert away_mode.answers_questions(new_id)
-    with get_db() as conn:
-        conn.cursor().execute("UPDATE sessions SET status='archived' WHERE id=%s", ("caller",))
-    assert orch.approval_starter(new_id) is None
-    assert not away_mode.answers_questions(new_id)
-    assert away_mode.turn_note(new_id) is None
+    if starter_state == "deleted":
+        database.delete_session("caller")
+    elif starter_state in ("settled", "legacy_archive_input"):
+        action = "settle" if starter_state == "settled" else "archive"
+        result = await call("caller", action, {"session_id": "caller"})
+        assert not result.is_error, result.text
+        assert not database.get_session("caller")["is_active"]
+    else:
+        with get_db() as conn:
+            conn.cursor().execute("UPDATE sessions SET status='archived' WHERE id=%s", ("caller",))
+    if starter_state != "legacy_archived_row":
+        assert orch.approval_starter(new_id) is None
+        assert not away_mode.answers_questions(new_id)
+        assert away_mode.turn_note(new_id) is None
+    else:
+        assert orch.approval_starter(new_id) == "caller"
+        assert away_mode.answers_questions(new_id)
+        assert away_mode.turn_note(new_id) == away_mode.ASSISTANT_WORK_NOTE

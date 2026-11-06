@@ -51,7 +51,7 @@
 	.loading-transcript {
 		position: relative;
 		width: 100%;
-		max-width: 768px;
+		max-width: calc(var(--column-width) + 48px);
 		margin: 0 auto;
 		padding: 26px 24px 0;
 		display: flex;

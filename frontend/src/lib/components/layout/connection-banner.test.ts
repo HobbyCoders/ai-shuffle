@@ -77,7 +77,7 @@ describe('ChatView connection-banner render + reconnect', () => {
 		return render(Banner, {
 			props: {
 				severity: 'warning',
-				message: 'Chat controls disconnected. Trying to reconnect; running sessions continue.',
+				message: 'Chat controls disconnected. Trying to reconnect; running chats continue.',
 				action: { label: 'Reconnect', onClick: onReconnect }
 			}
 		});

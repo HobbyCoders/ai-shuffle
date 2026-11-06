@@ -93,7 +93,7 @@
 	<button
 		bind:this={trigger}
 		type="button"
-		class="fwp-chip"
+		class="st-btn fwp-chip"
 		class:remote={!selected.isSelf}
 		aria-haspopup="menu"
 		aria-expanded={open}
@@ -153,88 +153,26 @@
 </div>
 
 <style>
-	.fwp { position: relative; flex-shrink: 0; }
-
-	/* The chip reads as the first segment of the path: machine / Workspace / … */
-	.fwp-chip {
-		display: inline-flex; align-items: center; gap: 7px;
-		height: 30px; padding: 0 8px 0 7px; max-width: 260px;
-		background: var(--card); color: var(--foreground);
-		border: 1px solid var(--border); border-radius: 999px;
-		font-size: 0.78rem; font-weight: 600; cursor: pointer;
-		transition: border-color 140ms ease, background-color 140ms ease, box-shadow 140ms ease;
-	}
-	.fwp-chip:hover { background: var(--hover-overlay); }
-	.fwp-chip:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
-	.fwp-chip[aria-expanded='true'] { border-color: var(--ring); }
-	/* Another machine's files: a tinted rim so it is never mistaken for local. */
-	.fwp-chip.remote {
-		border-color: color-mix(in oklab, var(--primary) 55%, var(--border));
-		background: color-mix(in oklab, var(--primary) 9%, var(--card));
-		box-shadow: 0 0 0 3px color-mix(in oklch, var(--primary) 10%, transparent);
-	}
+	.fwp { position: relative; min-width: 0; flex: 1; }
+	.fwp-chip { width: 100%; min-width: 0; justify-content: flex-start; }
 	.fwp-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
-	.fwp-tag {
-		font-family: var(--font-mono, monospace); font-size: 0.64rem; font-weight: 500;
-		letter-spacing: 0.04em; color: var(--muted-foreground); white-space: nowrap;
-	}
-	.fwp-chip :global(.fwp-caret) { color: var(--muted-foreground); flex-shrink: 0; transition: transform 160ms ease; }
-	.fwp-chip[aria-expanded='true'] :global(.fwp-caret) { transform: rotate(180deg); }
-
-	.fwp-ic { position: relative; display: grid; place-items: center; flex-shrink: 0; color: var(--muted-foreground); }
-	.fwp-dot {
-		position: absolute; right: -3px; bottom: -2px; width: 7px; height: 7px; border-radius: 50%;
-		background: var(--success, #16a34a); box-shadow: 0 0 0 2px var(--card);
-	}
-	.fwp-dot.off { background: var(--muted-foreground); opacity: 0.8; }
-
-	.fwp-menu {
-		position: absolute; top: calc(100% + 6px); left: 0; z-index: 40;
-		width: max-content; min-width: 240px; max-width: min(320px, calc(100vw - 32px));
-		padding: 6px; border-radius: var(--radius, 0.75rem);
-		background: var(--popover, var(--card)); color: var(--foreground);
-		border: 1px solid var(--border);
-		box-shadow: 0 12px 32px -12px rgb(0 0 0 / 0.35), 0 2px 6px rgb(0 0 0 / 0.08);
-		animation: fwp-in 140ms cubic-bezier(0.2, 0.8, 0.2, 1);
-		transform-origin: top left;
-	}
-	@keyframes fwp-in { from { opacity: 0; transform: translateY(-4px) scale(0.98); } }
-	.fwp-head {
-		padding: 6px 8px 6px; font-family: var(--font-mono, monospace); font-size: 0.64rem;
-		text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted-foreground); font-weight: 600;
-	}
-	.fwp-item {
-		display: flex; align-items: center; gap: 10px; width: 100%; min-height: 44px;
-		padding: 6px 8px; border: none; border-radius: 8px; background: transparent;
-		color: inherit; text-align: left; cursor: pointer; font-size: 0.8125rem;
-		transition: background-color 110ms ease;
-	}
-	.fwp-item:hover:not([aria-disabled='true']), .fwp-item:focus-visible { background: var(--hover-overlay); outline: none; }
-	.fwp-item:focus-visible { box-shadow: inset 0 0 0 2px var(--ring); }
-	.fwp-item[aria-disabled='true'] { cursor: not-allowed; opacity: 0.55; }
-	.fwp-item[aria-checked='true'] .fwp-item-name { font-weight: 650; }
+	.fwp-tag { color: var(--st-mfg); font-size: 11px; white-space: nowrap; }
+	.fwp-chip :global(.fwp-caret) { margin-left: auto; flex: none; color: var(--st-mfg); }
+	.fwp-ic { position: relative; display: grid; place-items: center; flex: none; color: var(--st-mfg); }
+	.fwp-dot { position: absolute; right: -3px; bottom: -2px; width: 6px; height: 6px; border-radius: 50%; background: var(--st-success); }
+	.fwp-dot.off { background: var(--st-mfg); }
+	.fwp-menu { position: absolute; top: calc(100% + 6px); left: 0; z-index: 40; width: 100%; min-width: 220px; max-width: calc(100vw - 32px); padding: 6px; border: 1px solid var(--menu-border); border-radius: var(--menu-radius); background: var(--st-popover); color: var(--st-fg); box-shadow: var(--menu-shadow); }
+	.fwp-head { padding: 6px 8px; font-size: 12px; color: var(--st-mfg); }
+	.fwp-item { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 44px; padding: 6px 8px; border: 0; border-radius: var(--menu-row-radius); background: transparent; color: inherit; text-align: left; cursor: pointer; font-size: 13px; }
+	.fwp-item:hover:not([aria-disabled='true']), .fwp-item:focus-visible { background: var(--st-hover); }
+	.fwp-item[aria-checked='true'] { background: var(--st-accent); }
+	.fwp-item[aria-disabled='true'] { cursor: not-allowed; opacity: .55; }
 	.fwp-text { display: flex; flex-direction: column; min-width: 0; flex: 1; }
-	.fwp-item-name { font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-	.fwp-hint { font-family: var(--font-mono, monospace); font-size: 0.7rem; font-weight: 500; color: var(--muted-foreground); }
-	.fwp-sub { font-size: 0.7rem; color: var(--muted-foreground); }
-	.fwp-check { width: 16px; display: grid; place-items: center; color: var(--primary); flex-shrink: 0; }
-	.fwp-sep { height: 1px; margin: 4px 6px; background: var(--border-subtle, var(--border)); }
-	.fwp-note {
-		display: flex; align-items: center; gap: 6px; padding: 10px 8px 8px;
-		font-size: 0.75rem; color: var(--muted-foreground);
-	}
-	.fwp-retry {
-		display: inline-flex; align-items: center; gap: 4px; margin-left: auto;
-		background: none; border: none; color: var(--primary); cursor: pointer; font-size: 0.75rem;
-	}
-	.fwp-retry:hover { text-decoration: underline; }
-
-	@media (max-width: 767px) {
-		.fwp-chip { height: 34px; max-width: 200px; }
-		.fwp-tag { display: none; }
-	}
-	@media (prefers-reduced-motion: reduce) {
-		.fwp-menu { animation: none; }
-		.fwp-chip :global(.fwp-caret) { transition: none; }
-	}
+	.fwp-item-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+	.fwp-hint, .fwp-sub { font-size: 12px; color: var(--st-mfg); }
+	.fwp-check { width: 16px; display: grid; place-items: center; flex: none; color: var(--st-fg); }
+	.fwp-sep { height: 1px; margin: 4px 6px; background: var(--st-border); }
+	.fwp-note { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 8px; color: var(--st-mfg); font-size: 12px; }
+	.fwp-retry { display: inline-flex; align-items: center; gap: 4px; background: transparent; color: var(--st-fg); border: 0; text-decoration: underline; }
+	@media (max-width: 600px), (pointer: coarse) { .fwp-chip { min-height: 44px; } }
 </style>

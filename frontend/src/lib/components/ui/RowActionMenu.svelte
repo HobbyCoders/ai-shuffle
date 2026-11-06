@@ -135,7 +135,7 @@
 	/* Touch devices: collapse the rail behind the ⋮. (hover: none) covers real
 	   touch hardware, including touch laptops. */
 	@media (hover: none) {
-		.ram-toggle { display: flex; }
+		.ram-toggle { display: flex; width: var(--ram-touch-size, 26px); height: var(--ram-touch-size, 26px); }
 
 		/* The persistent slot is NOT part of the collapsing tray: it stays in normal
 		   flow just left of the ⋮ and is always shown. There's no row hover on touch,
@@ -154,10 +154,10 @@
 			top: 0;
 			bottom: 0;
 			padding: 0 6px;
-			border-radius: 10px;
+			border-radius: var(--menu-radius);
 			background: var(--popover);
-			border: 1px solid var(--border);
-			box-shadow: var(--shadow-l);
+			border: 1px solid var(--menu-border);
+			box-shadow: var(--menu-shadow);
 			z-index: 6;
 
 			/* Closed: collapsed toward the toggle, anchored at its right edge. */
@@ -199,7 +199,7 @@
 
 	/* Roomier touch target on phones (matches the sessions rail's 38px buttons). */
 	@media (max-width: 639px) {
-		.ram-toggle { width: 38px; height: 38px; }
+		.ram-toggle { width: var(--ram-touch-size, 38px); height: var(--ram-touch-size, 38px); }
 
 		/* Enlarge EVERY tray button to the sessions rail's 38px touch target so
 		   all consumers render at one size on phones regardless of their smaller
@@ -209,8 +209,8 @@
 		   pixel-identical. */
 		.ram-tray > :global(button),
 		.ram-persistent > :global(button) {
-			min-width: 38px;
-			min-height: 38px;
+			min-width: var(--ram-touch-size, 38px);
+			min-height: var(--ram-touch-size, 38px);
 		}
 
 		/* The floating tray is bounded to the row's content height (top/bottom:0

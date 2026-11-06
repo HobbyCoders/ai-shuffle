@@ -185,18 +185,23 @@ export async function holdBootLoad(page, path, ms, { releaseOnSignal = false } =
  * opened too early; retry instead of failing on that setup noise.
  */
 export async function pick(trigger, popup, item, done) {
-	for (let attempt = 0; attempt < 5; attempt++) {
-		if (await done.isVisible()) return;
-		try {
-			if (!(await popup.isVisible())) await trigger.click();
-			await item.click({ timeout: 5000 });
-			await done.waitFor({ timeout: 5000 });
-			return;
-		} catch {
-			/* retry */
+	const steps = async () => {
+		for (let attempt = 0; attempt < 5; attempt++) {
+			if (await done.isVisible()) return;
+			try {
+				if (!(await popup.isVisible())) await trigger.click();
+				await item.click({ timeout: 5000 });
+				await done.waitFor({ timeout: 5000 });
+				return;
+			} catch {
+				/* retry */
+			}
 		}
-	}
-	await done.waitFor({ timeout: 1000 });
+		await done.waitFor({ timeout: 1000 });
+	};
+	// A phone keeps the new chat's setup controls inside Chat controls.
+	if (await trigger.isVisible()) await steps();
+	else await withChatSetup(trigger.page(), steps);
 }
 
 /** Click a trigger until its popup shows (an early click can land before hydration). */
@@ -212,6 +217,51 @@ export async function openPopup(trigger, popup) {
 		}
 	}
 	throw new Error('popup never opened');
+}
+
+/**
+ * Phone width keeps the selectors in Chat controls, reached from the one line
+ * under the composer. Opens the sheet there; does nothing on a wider window.
+ * Returns whether it opened one, so the caller can close it again.
+ */
+export async function openChatSetup(page) {
+	if (await page.getByRole('dialog', { name: 'Chat controls' }).isVisible()) return false;
+	const line = page.getByRole('button', { name: /^Chat context:/ });
+	if (!(await line.isVisible())) return false;
+	await line.click();
+	await page.getByRole('dialog', { name: 'Chat controls' }).waitFor({ timeout: 10_000 });
+	return true;
+}
+
+/** Close the sheet `openChatSetup` opened. */
+export async function closeChatSetup(page, opened) {
+	if (!opened) return;
+	await page.keyboard.press('Escape');
+	await page.getByRole('dialog', { name: 'Chat controls' }).waitFor({ state: 'hidden', timeout: 5000 });
+}
+
+/**
+ * Run `steps` against the new chat's setup controls: inside Chat controls on a
+ * phone, in place on a wider screen. Nests safely; the outermost call closes it.
+ */
+export async function withChatSetup(page, steps) {
+	const sheet = await openChatSetup(page);
+	const result = await steps();
+	await closeChatSetup(page, sheet);
+	return result;
+}
+
+/**
+ * A control of the composer's that phone width keeps in Chat controls (Browser,
+ * Terminal). Same name either way: opens the sheet first when it has to.
+ */
+export async function composerControl(page, name) {
+	const button = page.getByRole('button', { name });
+	if (!(await button.isVisible())) {
+		await page.getByRole('button', { name: /^All chat controls/ }).click();
+		await button.waitFor({ timeout: 10_000 });
+	}
+	return button;
 }
 
 /** Pick the seed's Dev agent on the new-session hero (the preview cookie cannot persist a default). */
@@ -268,13 +318,18 @@ export async function withoutSavedAgentPick(page) {
  * before every Python cell on all platforms.
  */
 export async function pickAccess(page, mode) {
+	// A menu at desktop width; phones share the composer sheet's small picker,
+	// which stays up after a pick so its help line can be read.
 	const menu = page.getByRole('menu', { name: 'Tool access' });
+	const picker = page.getByRole('dialog', { name: 'Tool access' });
+	const name = new RegExp(`^${mode}\\b`);
 	await pick(
 		page.getByRole('button', { name: /^Permission mode:/ }),
-		menu,
-		menu.getByRole('menuitemradio', { name: new RegExp(`^${mode}\\b`) }),
+		menu.or(picker),
+		menu.getByRole('menuitemradio', { name }).or(picker.getByRole('radio', { name })),
 		page.getByRole('button', { name: `Permission mode: ${mode}`, exact: true })
 	);
+	if (await picker.isVisible()) await page.keyboard.press('Escape');
 }
 
 export async function pickProject(page, hero, project = PROJECT) {
@@ -289,7 +344,7 @@ export async function pickProject(page, hero, project = PROJECT) {
 export async function openNewChat({ page, status }, { project = null } = {}) {
 	await gotoApp(page, status);
 	await waitChat(page, { surface: 'new' }, { timeout: 90_000 });
-	const hero = page.getByRole('region', { name: 'New session' });
+	const hero = page.getByRole('region', { name: 'New chat' });
 	await hero.waitFor();
 	await pickAgent(page, hero);
 	if (project) await pickProject(page, hero, project);
@@ -346,9 +401,9 @@ export const isPhone = (variant) => variant.viewport !== 'desktop' && variant.vi
 
 /** Show the sessions sidebar when it is hidden (always on a phone). */
 export async function showSidebar(page) {
-	const sessions = page.getByRole('complementary', { name: 'Sessions' });
+	const sessions = page.getByRole('complementary', { name: 'Chats' });
 	if (await sessions.isVisible()) return sessions;
-	await page.getByRole('button', { name: 'Show sidebar' }).click();
+	await page.getByRole('button', { name: /^(Show sidebar|Chats)\b/ }).click();
 	await sessions.waitFor({ timeout: 10_000 });
 	return sessions;
 }
@@ -361,7 +416,15 @@ export function sidebarRow(sessions, title) {
 /** Open a chat from the sidebar (opening the drawer first on a phone). */
 export async function openFromSidebar(page, title) {
 	const sessions = await showSidebar(page);
+	// Settings and Agents take the session column's room; the rail brings it back.
+	const chats = sessions.getByRole('navigation', { name: 'Workspace' }).getByRole('button', { name: 'Chats', exact: true });
 	const row = sidebarRow(sessions, title);
+	if (!(await row.isVisible()) && (await chats.isVisible())) {
+		await chats.click();
+		// On a phone Chats leaves Settings for the chat and closes the drawer: reopen it for the row.
+		await Promise.race([row.waitFor({ timeout: 5000 }), sessions.waitFor({ state: 'hidden', timeout: 5000 })]).catch(() => {});
+		if (!(await sessions.isVisible())) await showSidebar(page);
+	}
 	await row.scrollIntoViewIfNeeded();
 	await row.click();
 }

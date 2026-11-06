@@ -13,6 +13,7 @@
 	 * with the mobile drawer and never covers the chat beside a docked sidebar.
 	 */
 	import { tick, type Snippet } from 'svelte';
+	import { X } from 'lucide-svelte';
 	import { moveSheetDrag, sheetDragDismisses, startSheetDrag, type SheetDrag } from '$lib/components/ui/sheet-drag';
 
 	interface Props {
@@ -42,7 +43,7 @@
 		if (open) {
 			returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
 			void tick().then(() => {
-				const first = sheetRef?.querySelector<HTMLElement>('button:not([disabled]), [tabindex]:not([tabindex="-1"])');
+				const first = sheetRef?.querySelector<HTMLElement>('button:not([disabled]):not(.sheet-close), [tabindex]:not([tabindex="-1"])');
 				(first ?? sheetRef)?.focus({ preventScroll: true });
 			});
 			return () => {
@@ -107,7 +108,14 @@
 	onpointerup={onPointerEnd}
 	onpointercancel={onPointerEnd}
 >
-	{#if phone}<div class="handle" aria-hidden="true"></div>{/if}
+	{#if phone}
+		<div class="sheet-top">
+			<div class="handle" aria-hidden="true"></div>
+			<button type="button" class="sheet-close" aria-label="Close {label.toLowerCase()}" onclick={onClose}>
+				<X size={18} strokeWidth={1.75} aria-hidden="true" />
+			</button>
+		</div>
+	{/if}
 	{@render children()}
 </div>
 
@@ -144,17 +152,57 @@
 		padding: 6px 12px calc(24px + env(safe-area-inset-bottom, 0px));
 		border-radius: 20px;
 		touch-action: none;
+		/* The plane ends above the phone tabs. Translation alone does not hide
+		   a closed sheet now that rail overlays live outside the clipped list. */
+		visibility: hidden;
+		pointer-events: none;
 		transform: translateY(calc(100% + 12px));
-		transition: transform 0.32s cubic-bezier(0.16, 1, 0.3, 1);
+		transition: transform 0.32s cubic-bezier(0.16, 1, 0.3, 1), visibility 0s linear 0.32s;
 	}
-	.sheet.phone.open { transform: translateY(var(--sheet-drag, 0px)); }
+	.sheet.phone.open {
+		visibility: visible;
+		pointer-events: auto;
+		transform: translateY(var(--sheet-drag, 0px));
+		transition-delay: 0s;
+	}
 	.sheet.phone.dragging { transition: none; }
+	.sheet-top {
+		position: relative;
+		height: 44px;
+		margin-bottom: 4px;
+	}
 	.handle {
+		position: absolute;
+		top: 4px;
+		left: 50%;
 		width: 38px;
 		height: 5px;
+		margin-left: -19px;
 		border-radius: 3px;
 		background: var(--border-strong);
-		margin: 4px auto 12px;
+	}
+	.sheet-close {
+		position: absolute;
+		top: 0;
+		right: -4px;
+		display: grid;
+		place-items: center;
+		width: 44px;
+		height: 44px;
+		padding: 0;
+		border: 0;
+		border-radius: 10px;
+		background: transparent;
+		color: var(--muted-foreground);
+		cursor: pointer;
+	}
+	.sheet-close:active {
+		background: var(--hover-overlay);
+		color: var(--foreground);
+	}
+	.sheet-close:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: -2px;
 	}
 
 	/* Desktop: a small popover that scales in from its anchor corner. */
@@ -187,6 +235,6 @@
 	.sheet.popover.open { opacity: 1; pointer-events: auto; transform: none; }
 
 	@media (prefers-reduced-motion: reduce) {
-		.sheet, .sheet-scrim { transition: none; }
+		.sheet.phone, .sheet.flyout, .sheet.popover, .sheet-scrim { transition: none; }
 	}
 </style>

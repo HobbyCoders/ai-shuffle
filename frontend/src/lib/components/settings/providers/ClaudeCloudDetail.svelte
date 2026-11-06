@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { detailLine } from './credential-display';
 	/**
 	 * Claude through a cloud provider or gateway (Amazon Bedrock, Google Vertex
 	 * AI, Microsoft Foundry or an LLM gateway), chosen by the owner. The warning
@@ -90,16 +91,15 @@
 
 <DetailPane
 	name={credential.name}
-	badge="Cloud"
-	status={credential.status}
-	statusText={credential.statusText}
-	subtitle={position}
-	facts={[
-		{ label: 'Method', value: status?.method_label ?? 'None' },
-		{ label: 'Values', value: status?.ready ? 'All present' : status?.missing.length ? `Missing ${status.missing.join(', ')}` : 'None' },
-		{ label: 'Billing', value: gateway ? 'Through the gateway' : 'Your cloud account' },
-		{ label: 'Models', value: 'Built in' }
-	]}
+	status={credential.attention ? credential.status : undefined}
+	statusText={credential.attention ? credential.statusText : undefined}
+	subtitle={detailLine(
+		!credential.attention && credential.statusText,
+		status?.method_label,
+		position,
+		!status?.ready && status?.missing.length ? `Missing ${status.missing.join(', ')}` : null,
+		gateway ? 'Billed through the gateway' : 'Billed to your cloud account'
+	)}
 	tabs={['Overview', 'Models']}
 	{danger}
 	item={CLAUDE_CLOUD_ITEM}

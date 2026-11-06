@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { detailLine } from './credential-display';
 	/**
 	 * A connected provider: its saved accounts and slot controls, the separate
 	 * Claude mode, the kinds it can still add, and removing everything.
@@ -14,7 +15,6 @@
 	import type { DangerAction } from '../shell/DangerZone.svelte';
 	import RowGroup from '../rows/RowGroup.svelte';
 	import SettingRow from '../rows/SettingRow.svelte';
-	import Segmented from '../rows/Segmented.svelte';
 	import CredentialControl from './CredentialControl.svelte';
 	import ValueText from '../rows/ValueText.svelte';
 	import LinkValue from '../rows/LinkValue.svelte';
@@ -22,17 +22,16 @@
 	import ProviderTile from './ProviderTile.svelte';
 	import ClaudeCliInstall from './setup/ClaudeCliInstall.svelte';
 	import ClaudeCompaction from './ClaudeCompaction.svelte';
+	import ClaudeModeRow from './ClaudeModeRow.svelte';
 	import { getSettingsAccess } from '$lib/settings/access.svelte';
 	import {
 		addableKinds,
 		claudeGateNotice,
 		claudeHeaderStatus,
-		MODE_LABEL,
-		MODE_OPTIONS,
 		type CredentialView,
 		type ProviderView
 	} from './providers-model';
-	import { pickClaudeMode, startSetup } from './provider-actions';
+	import { startSetup } from './provider-actions';
 
 	interface Props {
 		provider: ProviderView;
@@ -55,35 +54,12 @@
 		return { status, text: `${live.length} of ${total} on` } as const;
 	});
 
-	const badge = $derived(provider.gateway ? 'Custom gateway' : provider.media ? 'Media provider' : 'Provider');
-	const subtitle = $derived(
+	const line = $derived(
 		provider.claude
-			? provider.claudeSubscriptions
-				? 'Saved sign-ins and keys, one of each selected'
-				: 'Saved keys, one selected for API key mode'
-			: provider.media ? 'Used by media tools' : provider.gateway ? 'Independent model source' : 'One active account per kind'
-	);
-
-	const facts = $derived(
-		provider.claude
-			? [
-					{ label: 'Runs on', value: MODE_LABEL[mode] },
-					{ label: 'Credentials', value: provider.credentials.length },
-					{ label: 'Models', value: `${getModels().length} built in` },
-					{ label: 'Scope', value: 'This worker' }
-				]
+			? detailLine(`${getModels().length} built-in models`, 'This worker', provider.claudeSubscriptions ? 'One sign-in and one key selected' : 'One key selected for API key mode')
 			: provider.media
-				? [
-						{ label: 'Credentials', value: provider.credentials.length },
-						{ label: 'On', value: live.length },
-						{ label: 'Picker groups', value: 'None' }
-					]
-				: [
-						{ label: 'Credentials', value: provider.credentials.length },
-						{ label: 'On', value: live.length },
-						{ label: 'Models in picker', value: pickerModels },
-						{ label: 'Picker groups', value: live.length }
-					]
+				? detailLine(head.text, 'Used by media tools')
+				: detailLine(head.text, `${pickerModels} models in the picker`, provider.gateway ? 'Independent model source' : 'One active account per kind')
 	);
 
 	const credsCount = $derived(provider.claude ? (mode === 'off' ? 'none active' : 'one active') : `${live.length} on`);
@@ -115,9 +91,6 @@
 				]
 	);
 
-	/** "Cloud" opens its page (the warning is there); the control stays on the current mode. */
-	const pickMode = (v: ClaudeAuthMode) => pickClaudeMode(provider, v);
-
 	function hintFor(c: CredentialView): string {
 		const models = c.row && c.on && c.flavor !== 'fal' ? `, ${c.row.models.length} in picker` : '';
 		return `${c.kind}${models}`;
@@ -126,11 +99,9 @@
 
 <DetailPane
 	name={provider.name}
-	status={head.status}
-	statusText={head.text}
-	{badge}
-	{subtitle}
-	{facts}
+	status={provider.claude ? head.status : undefined}
+	statusText={provider.claude ? head.text : undefined}
+	subtitle={line}
 	{danger}
 	item={provider.item}
 >
@@ -144,16 +115,7 @@
 		{/if}
 	{/snippet}
 	{#if provider.claude}
-		<RowGroup title="Claude Code mode">
-			<SettingRow id="providers.claudeMode">
-				<Segmented
-					options={MODE_OPTIONS}
-					value={mode}
-					disabled={!claude}
-					onchange={pickMode}
-				/>
-			</SettingRow>
-		</RowGroup>
+		<ClaudeModeRow {provider} />
 		<ClaudeCliInstall manage isAdmin={!access.readOnly} />
 		<ClaudeCompaction />
 	{/if}

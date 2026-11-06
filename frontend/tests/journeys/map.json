@@ -65,6 +65,41 @@
 	],
 	"rules": [
 		{
+			"why": "shared Settings titles and the medium desktop frame retain their geometry",
+			"journeys": ["shell-geometry"],
+			"globs": ["frontend/tests/journeys/shell-geometry.journey.mjs", "frontend/src/lib/components/settings/shell/PageTitle.svelte", "frontend/src/lib/components/settings/shell/PreferencePage.svelte", "frontend/src/lib/components/settings/shell/CollectionPage.svelte", "frontend/src/lib/components/layout/view/PanelToggle.svelte"]
+		},
+		{
+			"why": "Settings deep links show the requested phone detail and preserve both Back steps",
+			"journeys": ["settings-detail-link"],
+			"globs": ["frontend/tests/journeys/settings-detail-link.journey.mjs", "frontend/src/lib/components/settings/shell/SettingsShell.svelte", "frontend/src/lib/components/settings/shell/BackRow.svelte", "frontend/src/lib/components/settings/shell/CollectionPage.svelte"]
+		},
+		{
+			"why": "content-first data destinations keep their shared phone header, ranges, states and filters reachable",
+			"journeys": ["data-pages"],
+			"globs": ["frontend/tests/journeys/data-pages.journey.mjs", "frontend/src/lib/components/deck/cards/StatsCard.svelte", "frontend/src/lib/components/deck/cards/PrInboxCard.svelte", "frontend/src/lib/components/settings/shell/DetailPane.svelte", "frontend/src/lib/components/settings/shell/PreferencePage.svelte"]
+		},
+		{
+			"why": "note writing, autosave, Preview and moved actions remain reachable in responsive and native shells",
+			"journeys": ["notes-writing"],
+			"globs": ["frontend/src/lib/components/deck/cards/NotesCard.svelte", "frontend/tests/journeys/notes-writing.journey.mjs"]
+		},
+		{
+			"why": "automation authoring, search, detail tabs and responsive Back use the shared panel grammar",
+			"journeys": ["automations"],
+			"globs": ["frontend/src/lib/components/deck/cards/AutomationsCard.svelte", "frontend/src/lib/components/deck/cards/automations/**", "frontend/src/lib/components/layout/view/TextAreaField.svelte"]
+		},
+		{
+			"why": "responsive feature details keep one usable browser Back step across repeated desktop/stacked transitions",
+			"journeys": ["view-shell-back"],
+			"globs": ["frontend/src/lib/components/layout/view/ViewShell.svelte", "frontend/src/lib/components/deck/cards/ProfileCard.svelte"]
+		},
+		{
+			"why": "rail-owned More and Customize stay reachable while a feature owns the Chats panel, including the real phone drawer",
+			"journeys": ["rail-more"],
+			"globs": ["frontend/src/lib/components/layout/Sidebar.svelte", "frontend/src/lib/components/layout/sidebar/SidebarRail.svelte", "frontend/src/lib/components/layout/sidebar/SidebarSheet.svelte"]
+		},
+		{
 			"why": "resident updater identity and preparation timings stay separate from app version, and refresh is connected-worker only",
 			"journeys": ["update-runtime"],
 			"globs": [

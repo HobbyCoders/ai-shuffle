@@ -101,8 +101,8 @@
 {/snippet}
 {#snippet description()}
 	<textarea
-		class="st-area"
-		rows={2}
+		class="desc-area"
+		rows={3}
 		aria-label="Description"
 		placeholder="Cuts releases and drafts the changelog."
 		value={form.description}
@@ -188,24 +188,28 @@
 
 
 <style>
-	.st-area {
+	.desc-area {
+		font-family: inherit;
 		display: block;
 		width: 100%;
 		padding: 8px 10px;
 		border: 1px solid var(--st-input);
-		background: var(--st-muted);
+		background: var(--st-card);
 		border-radius: var(--st-radius-md);
 		font-size: 13px;
 		line-height: 1.5;
 		color: var(--st-fg);
-		resize: vertical;
+		/* Grows with its content; where field-sizing is missing it scrolls instead. */
+		resize: none;
+		field-sizing: content;
+		min-height: calc(3lh + 18px);
 		outline: none;
 	}
-	.st-area::placeholder,
+	.desc-area::placeholder,
 	.st-txt-local::placeholder {
 		color: var(--st-subtle);
 	}
-	.st-area:focus,
+	.desc-area:focus,
 	.st-txt-local:focus {
 		border-color: var(--st-primary);
 		box-shadow: 0 0 0 3px var(--st-primary-soft);
@@ -216,7 +220,7 @@
 		max-width: 100%;
 		padding: 0 10px;
 		border: 1px solid var(--st-input);
-		background: var(--st-muted);
+		background: var(--st-card);
 		border-radius: var(--st-radius-md);
 		font-size: 13px;
 		color: var(--st-fg);

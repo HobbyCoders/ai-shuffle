@@ -33,6 +33,7 @@ export const entries: SettingEntry[] = [
 		...TEXT,
 		id: 'models.textEffort',
 		label: 'Effort',
+		hint: 'How hard the model thinks on these background tasks',
 		keywords: ['reasoning effort', 'text generation effort', 'thinking'],
 		default: ''
 	},

@@ -39,17 +39,14 @@
 		/** Offer an empty assignment for provider-scoped subagent configuration. */
 		allowEmpty?: boolean;
 		emptyLabel?: string;
+		/** Optional friendly trigger label when a saved value is not in the catalog. */
+		fallbackLabel?: string;
 		/**
 		 * Offer the free-text `Custom…` entry. Off for callers that must end up
 		 * with a real, routable model id — a typo'd custom string would only
 		 * surface as a failed call much later.
 		 */
 		allowCustom?: boolean;
-		/**
-		 * Open the panel on an All-providers list (every catalog row, with
-		 * provider sublines). Used by subagent assignment pickers.
-		 */
-		startOnAll?: boolean;
 		/** List only API-key providers (see `BuildCatalogOptions.apiKeyOnly`). */
 		apiKeyOnly?: boolean;
 	}
@@ -62,8 +59,8 @@
 		providerScope,
 		allowEmpty = false,
 		emptyLabel = 'Unavailable as subagent',
+		fallbackLabel,
 		allowCustom = true,
-		startOnAll = false,
 		apiKeyOnly = false
 	}: Props = $props();
 
@@ -134,6 +131,7 @@
 		if (allowEmpty && !value) return emptyLabel;
 		if (value === CUSTOM_VALUE) return 'Custom…';
 		if (currentOption) return currentOption.label;
+		if (fallbackLabel) return fallbackLabel;
 		// No matching option (registry not hydrated yet, or the provider/model was
 		// removed) — show the bare model id rather than the raw `prov:…` composite.
 		return decodeProviderModel(value)?.modelId ?? (value || 'Select a model');
@@ -205,7 +203,6 @@
 				onSelect={selectOption}
 				{leadingRows}
 				{trailingRows}
-				{startOnAll}
 				onRequestClose={() => (open = false)}
 			/>
 		</div>
@@ -269,9 +266,9 @@
 		   `.set-group` (overflow: hidden), so extra width must grow LEFTWARD. */
 		right: 0;
 		--mpp-width: min(360px, 92vw);
-		border: 1px solid var(--border);
-		border-radius: 10px;
-		box-shadow: 0 16px 40px -18px rgba(0, 0, 0, 0.55);
+		border: 1px solid var(--menu-border);
+		border-radius: var(--menu-radius);
+		box-shadow: var(--menu-shadow);
 		overflow: hidden;
 	}
 

@@ -1141,6 +1141,7 @@
 	<button
 		type="button"
 		class="usage-indicator"
+		class:idle={!showPercent && !(displayBreakdown.totalUsed > 0)}
 		title={windowKnown
 			? `${usedOfMax} tokens${displayBreakdown.overLimit ? ', over the limit' : ''}${nextWindowText ? ` · ${nextWindowText}` : ''} — click for details`
 			: `${usedText} tokens used · context window unknown — click for details`}
@@ -1318,6 +1319,22 @@
 		cursor: pointer;
 		transition: background-color 0.13s ease;
 	}
+	/* Nothing used yet: no ring at rest. It stays mounted and reachable, because
+	   it is also the way to the account's usage limits. It comes back when the
+	   pointer is over the composer or the keyboard reaches it; a touch screen has
+	   no hover, so there it stays. */
+	@media (hover: hover) {
+		.usage-indicator.idle {
+			opacity: 0;
+			transition: opacity 0.12s ease;
+		}
+		:global(.chat-island:hover) .usage-indicator.idle,
+		.usage-indicator.idle:focus-visible,
+		.usage-indicator.idle[aria-expanded='true'] {
+			opacity: 1;
+		}
+	}
+
 	.usage-indicator:hover {
 		background: var(--scrim);
 	}

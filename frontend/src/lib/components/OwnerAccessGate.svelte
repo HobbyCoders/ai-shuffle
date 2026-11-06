@@ -1,4 +1,5 @@
 <script lang="ts">
+	import '$lib/components/ui/surfaces.css';
 	/**
 	 * OwnerAccessGate — what a browser sees before it is the owner, or before
 	 * the owner has a password.
@@ -79,10 +80,10 @@
 
 {#if mode === 'create' && firstRun}
 	<!-- The setup wizard's first two steps, before this browser can sign in. -->
-	<div class="gate-viewport flex flex-col items-center overflow-y-auto p-4">
-		<div class="card my-auto shrink-0 p-6 sm:p-8 w-full max-w-xl">
+	<div class="gate-viewport ui-surface ui-onboarding">
+		<div class="ui-onboarding-card">
 			<div class="text-center mb-6 sm:mb-8">
-				<h1 class="text-xl sm:text-2xl font-bold text-foreground mb-2">{showWelcome ? 'Welcome to AI Shuffle' : 'Set an owner password'}</h1>
+				<h1 class="text-xl sm:text-2xl font-semibold text-foreground mb-2">{showWelcome ? 'Welcome to AI Shuffle' : 'Set an owner password'}</h1>
 				<p class="text-muted-foreground text-sm sm:text-base">
 					{showWelcome ? 'A few steps to set up this worker. It takes about five minutes.' : 'The password every browser on your network signs in with.'}
 				</p>
@@ -98,16 +99,16 @@
 					</p>
 					<div>
 						<label for="owner-new-password" class="block text-xs text-muted-foreground mb-1">New password (at least {minLength} characters)</label>
-						<input id="owner-new-password" type="password" class="input" autocomplete="new-password" bind:value={password} required minlength={minLength} />
+						<input id="owner-new-password" type="password" class="ui-input" autocomplete="new-password" bind:value={password} required minlength={minLength} />
 					</div>
 					<div>
 						<label for="owner-confirm-password" class="block text-xs text-muted-foreground mb-1">Repeat it</label>
-						<input id="owner-confirm-password" type="password" class="input" autocomplete="new-password" bind:value={confirm} required />
+						<input id="owner-confirm-password" type="password" class="ui-input" autocomplete="new-password" bind:value={confirm} required />
 					</div>
 					{#if error}<p role="alert" class="text-destructive text-sm">{error}</p>{/if}
 					<div class="flex gap-3">
-						<button type="button" class="btn btn-secondary flex-1 py-3" onclick={() => (showWelcome = true)} disabled={busy}>Back</button>
-						<button type="submit" class="btn btn-primary flex-1 py-3" disabled={busy}>
+						<button type="button" class="ui-button flex-1 py-3" onclick={() => (showWelcome = true)} disabled={busy}>Back</button>
+						<button type="submit" class="ui-button primary flex-1 py-3" disabled={busy}>
 							{#if busy}<Loader2 size={16} class="inline-block animate-spin mr-2" />{/if}Save password
 						</button>
 					</div>
@@ -117,13 +118,13 @@
 		</div>
 	</div>
 {:else}
-<div class="min-h-screen flex items-center justify-center p-4">
-	<div class="card w-full max-w-md p-6 sm:p-8">
+<div class="ui-surface ui-onboarding">
+	<div class="ui-onboarding-card">
 		{#if mode === 'create'}
 			<form onsubmit={submit} class="space-y-4" aria-labelledby="owner-create-heading">
 				<div class="text-center">
-					<ShieldCheck size={28} strokeWidth={1.5} class="mx-auto mb-3 text-primary" />
-					<h1 id="owner-create-heading" class="text-xl font-bold text-foreground mb-2">Set an owner password</h1>
+					<ShieldCheck size={28} strokeWidth={1.5} class="mx-auto mb-3 text-muted-foreground" />
+					<h1 id="owner-create-heading" class="text-xl font-semibold text-foreground mb-2">Set an owner password</h1>
 					<p class="text-muted-foreground text-sm">
 						Every browser on your network signs in with it once and then stays signed in on that device.
 						Choose a long password you use nowhere else and keep it in a password manager: anyone who has it controls your agents.
@@ -131,14 +132,14 @@
 				</div>
 				<div>
 					<label for="owner-new-password" class="block text-xs text-muted-foreground mb-1">New password (at least {minLength} characters)</label>
-					<input id="owner-new-password" type="password" class="input" autocomplete="new-password" bind:value={password} required minlength={minLength} />
+					<input id="owner-new-password" type="password" class="ui-input" autocomplete="new-password" bind:value={password} required minlength={minLength} />
 				</div>
 				<div>
 					<label for="owner-confirm-password" class="block text-xs text-muted-foreground mb-1">Repeat it</label>
-					<input id="owner-confirm-password" type="password" class="input" autocomplete="new-password" bind:value={confirm} required />
+					<input id="owner-confirm-password" type="password" class="ui-input" autocomplete="new-password" bind:value={confirm} required />
 				</div>
 				{#if error}<p role="alert" class="text-destructive text-sm">{error}</p>{/if}
-				<button type="submit" class="btn btn-primary w-full py-3" disabled={busy}>
+				<button type="submit" class="ui-button primary w-full py-3" disabled={busy}>
 					{#if busy}<Loader2 size={16} class="inline-block animate-spin mr-2" />{/if}Save password
 				</button>
 				<p class="text-xs text-muted-foreground text-center">Phones and browsers linked through your HobbyCoders account keep using their own device sign-in.</p>
@@ -146,16 +147,16 @@
 		{:else if mode === 'login'}
 			<form onsubmit={submit} class="space-y-4" aria-labelledby="owner-login-heading">
 				<div class="text-center">
-					<KeyRound size={28} strokeWidth={1.5} class="mx-auto mb-3 text-primary" />
-					<h1 id="owner-login-heading" class="text-xl font-bold text-foreground mb-2">Sign in to AI Shuffle</h1>
+					<KeyRound size={28} strokeWidth={1.5} class="mx-auto mb-3 text-muted-foreground" />
+					<h1 id="owner-login-heading" class="text-xl font-semibold text-foreground mb-2">Sign in to AI Shuffle</h1>
 					<p class="text-muted-foreground text-sm">Enter the owner password of this install.</p>
 				</div>
 				<div>
 					<label for="owner-password" class="block text-xs text-muted-foreground mb-1">Owner password</label>
-					<input id="owner-password" type="password" class="input" autocomplete="current-password" bind:value={password} required />
+					<input id="owner-password" type="password" class="ui-input" autocomplete="current-password" bind:value={password} required />
 				</div>
 				{#if error}<p role="alert" class="text-destructive text-sm">{error}</p>{/if}
-				<button type="submit" class="btn btn-primary w-full py-3" disabled={busy || !password}>
+				<button type="submit" class="ui-button primary w-full py-3" disabled={busy || !password}>
 					{#if busy}<Loader2 size={16} class="inline-block animate-spin mr-2" />{/if}Sign in
 				</button>
 				<p class="text-xs text-muted-foreground text-center">Forgot it? The Troubleshooting guide explains how to reset it from the server.</p>
@@ -164,7 +165,7 @@
 			<div class="text-center">
 				<p role="status" class="text-foreground mb-2">This browser cannot sign in to AI Shuffle at this address.</p>
 				<p class="text-muted-foreground mb-4 text-sm">Open it from your local network or your Tailscale network, using the server's address, localhost, or a hostname allowed by SHUFFLE_LOCAL_HOSTNAMES. Phones and remote browsers connect through your HobbyCoders account instead.</p>
-				<button type="button" class="btn" onclick={onRetry}>Try again</button>
+				<button type="button" class="ui-button primary" onclick={onRetry}>Try again</button>
 			</div>
 		{/if}
 	</div>

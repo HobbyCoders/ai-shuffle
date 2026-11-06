@@ -8,31 +8,28 @@ import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 
 const ACTIVE_CARD = '[data-session-card] .scard[aria-current="true"]';
 
-/** "42s", "4m 12s", "1h 04m" → seconds. */
+/** The exact total in the hover title, "42s", "4m 12s", "1h 04m 09s" → seconds. */
 function seconds(text) {
-	const t = (text || '').trim();
-	let m = t.match(/^(\d+)s$/);
-	if (m) return Number(m[1]);
-	m = t.match(/^(\d+)m (\d+)s$/);
-	if (m) return Number(m[1]) * 60 + Number(m[2]);
-	m = t.match(/^(\d+)h (\d+)m$/);
-	if (m) return Number(m[1]) * 3600 + Number(m[2]) * 60;
-	return NaN;
+	const m = (text || '').trim().match(/^(?:(\d+)h )?(?:(\d+)m )?(\d+)s$/);
+	return m ? Number(m[1] || 0) * 3600 + Number(m[2] || 0) * 60 + Number(m[3]) : NaN;
 }
 
 function readCard(page) {
 	return page.evaluate((selector) => {
 		const card = document.querySelector(selector);
 		return {
-			status: card?.querySelector('.st')?.textContent?.trim() || null,
-			timer: card?.querySelector('.timer')?.textContent?.trim() || null
+			// No row prints a status word; its screen-reader details always start with it.
+			status: card?.querySelector('.details')?.textContent?.split(' · ')[0].trim() || null,
+			shown: card?.querySelector('.timer')?.textContent?.trim() || null,
+			// Only a working row ticks seconds; every row keeps the exact total on hover.
+			timer: card?.querySelector('.timer')?.getAttribute('title')?.match(/^Total working time ([^·]+)/)?.[1].trim() || null
 		};
 	}, ACTIVE_CARD);
 }
 
 await runJourney({
 	name: 'parked-timer',
-	recorder: { selectors: [`timer=${ACTIVE_CARD} .timer`, `status=${ACTIVE_CARD} .st`] },
+	recorder: { selectors: [`timer=${ACTIVE_CARD} .timer`, `status=${ACTIVE_CARD} .details`] },
 	cases: [
 		{
 			name: 'park',
@@ -52,7 +49,7 @@ await runJourney({
 
 				await mark('parked');
 				await page.waitForFunction(
-					(selector) => document.querySelector(selector)?.querySelector('.st')?.textContent?.trim() === 'Parked',
+					(selector) => document.querySelector(selector)?.querySelector('.details')?.textContent?.split(' · ')[0].trim() === 'Parked',
 					ACTIVE_CARD,
 					{ timeout: 60_000 }
 				);
@@ -63,11 +60,12 @@ await runJourney({
 				expect(second.status === 'Parked', `still parked 4s later (status ${second.status})`);
 				const grew = seconds(second.timer) - seconds(first.timer);
 				expect(grew >= 3, `the parked timer kept counting (${first.timer} → ${second.timer})`);
+				expect(/^(<1m|\d+m|\d+h \d\dm)$/.test(second.shown), `a parked row shows whole minutes (${second.shown})`);
 
 				await mark('woken');
 				await page.waitForFunction(
 					(selector) => {
-						const status = document.querySelector(selector)?.querySelector('.st')?.textContent?.trim();
+						const status = document.querySelector(selector)?.querySelector('.details')?.textContent?.split(' · ')[0].trim();
 						return status && status !== 'Parked' && status !== 'Working';
 					},
 					ACTIVE_CARD,

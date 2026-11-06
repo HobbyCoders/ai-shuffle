@@ -27,7 +27,7 @@
 {#if open}
 	<UniversalModal
 		{open}
-		title="Keyboard Shortcuts"
+		title="Keyboard shortcuts"
 		icon="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"
 		{onClose}
 		showFooter={false}
@@ -38,7 +38,7 @@
 				{@const shortcuts = shortcutsByCategory[categoryKey] || []}
 				{#if shortcuts.length > 0}
 					<div>
-						<h3 class="text-sm font-medium text-muted-foreground uppercase tracking-wider mb-3">
+						<h3 class="text-sm font-medium text-muted-foreground mb-3">
 							{categoryNames[categoryKey] || categoryKey}
 						</h3>
 						<div class="space-y-2">

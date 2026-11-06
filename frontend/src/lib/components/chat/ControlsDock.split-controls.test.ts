@@ -83,6 +83,37 @@ function renderDock(props: Record<string, unknown> = {}) {
 }
 
 describe('ControlsDock split controls', () => {
+ it.each([
+  ['opens 8px under the composer', 900, { top: '48px', bottom: 'auto' }],
+  ['falls back to above the composer in a short window', 700, { top: '', bottom: '110px' }]
+ ])('on a new chat, the picker %s', async (_name, windowHeight, expected) => {
+  const height = window.innerHeight;
+  Object.defineProperty(window, 'innerHeight', { configurable: true, writable: true, value: windowHeight });
+  // A composer low enough that above it is the roomier side, as on a 1440x900 window.
+  const rect = (top: number, bottom: number) => ({ top, bottom, left: 300, right: 900, width: 600, height: bottom - top, x: 300, y: top, toJSON: () => ({}) });
+  const box = vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (this: Element) {
+   if (this.classList.contains('model-wrap')) return rect(530, 562);
+   if (this.classList.contains('chat-island')) return rect(460, 570);
+   return rect(530, 570);
+  });
+  const island = document.body.appendChild(document.createElement('div'));
+  island.className = 'chat-island';
+  try {
+   render(ControlsDock, { target: island, props: { newChat: true } });
+   const button = await screen.findByRole('button', { name: /^Model:/ });
+   await waitFor(() => expect((button as HTMLButtonElement).disabled).toBe(false));
+   await fireEvent.click(button);
+   const menu = await screen.findByRole('dialog', { name: 'Choose model' });
+   await waitFor(() => expect(menu.style.top).toBe(expected.top));
+   expect(menu.style.bottom).toBe(expected.bottom);
+  } finally {
+   box.mockRestore();
+   cleanup();
+   island.remove();
+   Object.defineProperty(window, 'innerHeight', { configurable: true, writable: true, value: height });
+  }
+ });
+
  it.each(['gpt-realtime-2.1', 'fal-ai/personaplex/realtime'])('locks the model block for %s', async model => {
   const request = vi.spyOn(api, 'get').mockImplementation(voiceBinding(model) as never);
   await loadVoiceSettings(true);
@@ -230,7 +261,7 @@ describe('ControlsDock split controls', () => {
 		const browser = screen.getByRole('button', { name: 'Toggle live browser view' });
 		expect(browser.getAttribute('aria-pressed')).toBe('false');
 		expect(browser.classList.contains('active')).toBe(false);
-		expect(browser.getAttribute('title')).toBe('Toggle live browser view');
+		expect(browser.getAttribute('title')).toBe('Live browser view: off. Click to show it.');
 		expect(browser.getAttribute('type')).toBe('button');
 		await fireEvent.pointerEnter(browser);
 		await fireEvent.focus(browser);
@@ -279,7 +310,7 @@ describe('ControlsDock split controls', () => {
 		expect(screen.queryByRole('button', { name: /more input options/i })).toBeNull();
 	});
 
-	it('orders the row access · browser · terminal on the left, model · effort · ring on the right', () => {
+	it('orders the row access · browser · terminal on the left, ring · model · effort on the right', () => {
 		const { container } = renderDock({ onBrowserToggle: vi.fn(),
 			terminal: { open: false, disabledReason: null, toggle: vi.fn(), preload: vi.fn() } });
 
@@ -297,7 +328,7 @@ describe('ControlsDock split controls', () => {
 		expect(left && right && (left.compareDocumentPosition(right) & Node.DOCUMENT_POSITION_FOLLOWING))
 			.toBeTruthy();
 		expect(browser.querySelector('svg.lucide-globe')).toBeTruthy();
-		expect(browser.querySelector('svg')?.getAttribute('width')).toBe('14');
+		expect(browser.querySelector('svg')?.getAttribute('width')).toBe('16');
 	});
 
 	it('leaves attach, dictate and the call to the composer circles', () => {

@@ -61,6 +61,6 @@ describe('composer while a move waits', () => {
 	it('goes back to normal once the move is cancelled', async () => {
 		start([row('queued'), row('cancelled')]);
 		const { container } = render(ChatInput);
-		await waitFor(() => expect(placeholder(container)).toBe('Describe a task or ask a question'));
+		await waitFor(() => expect(placeholder(container)).toBe('Ask anything'));
 	});
 });

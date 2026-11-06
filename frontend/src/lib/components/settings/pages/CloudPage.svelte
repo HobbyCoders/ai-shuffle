@@ -63,16 +63,7 @@
 		return { text: 'Not linked', tone: 'off' };
 	});
 
-	const accountHint = $derived.by(() => {
-		if (!status) return undefined;
-		return status.linked ? 'Linked to AI Shuffle Cloud' : 'Local use stays free';
-	});
-
-	const workersHint = $derived.by(() => {
-		if (tier === 'not_linked') return 'A free account adds two';
-		if (unlimited && used !== null) return `${used} in use`;
-		return undefined;
-	});
+	const accountHint = $derived(status?.linked ? 'Linked to AI Shuffle Cloud' : undefined);
 
 	function shortDate(iso: string | null): string {
 		if (!iso) return '';
@@ -87,7 +78,7 @@
 
 	const tiers = $derived([
 		{ id: 'local', name: 'This worker', figure: 'Free', unit: 'Local use, no account' },
-		{ id: 'free', name: 'Free account', figure: String(FREE_WORKERS), unit: 'remote workers, no card' },
+		{ id: 'free', name: 'Free account', figure: String(tier === 'free' ? cap : FREE_WORKERS), unit: 'remote workers, no card' },
 		{
 			id: 'paid',
 			name: 'Paid plan',
@@ -96,7 +87,6 @@
 		}
 	]);
 	const currentTier = $derived(tier === 'paid' ? 'paid' : tier === 'free' ? 'free' : tier ? 'local' : null);
-	const tierIndex = $derived(tiers.findIndex((t) => t.id === currentTier));
 
 	/* ---------- loading and actions ---------- */
 
@@ -122,237 +112,55 @@
 </script>
 
 <PreferencePage category="cloud">
-	<section class="cl-ladder" aria-label="What AI Shuffle Cloud adds" aria-busy={load === 'loading'} data-testid="cloud-tiers">
-		<ol>
-			{#each tiers as t, i (t.id)}
-				<li
-					class="cl-tier"
-					class:current={t.id === currentTier}
-					class:reached={tierIndex >= 0 && i < tierIndex}
-					aria-current={t.id === currentTier ? 'true' : undefined}
-				>
-					<span class="cl-name">{t.name}</span>
-					<span class="cl-fig"><b>{t.figure}</b><span>{t.unit}</span></span>
-					{#if t.id === currentTier}<span class="cl-here">You are here</span>{/if}
-				</li>
-			{/each}
-		</ol>
-		<div class="cl-foot">
-			<p class="cl-msg" data-testid="cloud-message">
-				{status?.message ?? 'Everything on your own machines and network is free.'}
-			</p>
-			<button type="button" class="st-btn ghost sm" onclick={openDocs}><BookOpen />How Cloud works</button>
-		</div>
-	</section>
-
 	<RowGroup title="Account">
-		<SettingRow id="cloud.account" hint={accountHint}>
+		<SettingRow id="cloud.account" hint={accountHint} stackOnPhone={!!status && !status.linked}>
 			<span data-testid="cloud-state"><ValueText value={accountView.text} status={accountView.tone} /></span>
-		</SettingRow>
-		{#if status && !status.linked}
-			<SettingRow id="cloud.link">
-				<button type="button" class="st-btn primary" onclick={linkAccount}>Link account</button>
-			</SettingRow>
-		{/if}
-	</RowGroup>
-	<p class="st-msg" data-testid="cloud-follows">
-		Your plan follows the Cloud account you sign in with. Sign in with the same account on another worker and it gets the same plan.
-	</p>
-
-	{#if status}
-		<RowGroup title="Plan">
-			<SettingRow id="cloud.remoteWorkers" hint={workersHint}>
-				<span data-testid="cloud-seats">
-					{#if tier === 'not_linked'}
-						<ValueText value="None" />
-					{:else if unlimited}
-						<ValueText value="Unlimited remote workers" tone="fg" />
-					{:else if used !== null}
-						<Meter {used} {cap} unit=" in use" label="Remote workers in use" warnAt={1} />
-					{:else}
-						<ValueText value={`${cap} remote ${cap === 1 ? 'worker' : 'workers'} included`} tone="fg" />
-					{/if}
-				</span>
-			</SettingRow>
-			{#if paid && status.expires_at}
-				<SettingRow id="cloud.renewal">
-					<span data-testid="cloud-renewal"><ValueText value={shortDate(status.expires_at)} tone="fg" /></span>
-				</SettingRow>
+			{#if status && !status.linked}
+				<button type="button" class="st-btn primary" data-setting-anchor="cloud.link" onclick={linkAccount}>Link account</button>
 			{/if}
-			{#if !paid}
-				<SettingRow id="cloud.upgrade">
-					<a class="st-btn" href={CLOUD_PRICING_URL} target="_blank" rel="noopener noreferrer">
-						<ExternalLink />{tier === 'free' ? 'Upgrade' : 'See plans'}
-					</a>
+		</SettingRow>
+	</RowGroup>
+
+	<section aria-label="Plans" aria-busy={load === 'loading'} data-testid="cloud-tiers">
+		<RowGroup title="Plans">
+			{#each tiers as t (t.id)}
+				<SettingRow label={t.name} hint={`${t.figure} · ${t.unit}`} stackOnPhone={t.id === currentTier && used !== null}>
+					{#if t.id === currentTier}
+						<span class="cl-here" aria-current="true">You are here</span>
+						{#if t.id !== 'local'}
+							<span data-testid="cloud-seats" data-setting-anchor="cloud.remoteWorkers">
+								{#if unlimited}
+									<ValueText value={used !== null ? `${used} in use` : 'Unlimited remote workers'} />
+								{:else if used !== null}
+									<Meter {used} {cap} unit=" in use" label="Remote workers in use" warnAt={1} />
+								{:else}
+									<span class="sr-only">{cap} remote {cap === 1 ? 'worker' : 'workers'} included</span>
+								{/if}
+							</span>
+						{/if}
+					{/if}
+					{#if t.id === 'paid'}
+						<a class="st-btn" data-setting-anchor="cloud.upgrade" href={CLOUD_PRICING_URL} target="_blank" rel="noopener noreferrer"><ExternalLink />See plans</a>
+					{/if}
+				</SettingRow>
+			{/each}
+			{#if paid && status?.expires_at}
+				<SettingRow id="cloud.renewal">
+					<span data-testid="cloud-renewal"><ValueText value={shortDate(status.expires_at)} /></span>
 				</SettingRow>
 			{/if}
 		</RowGroup>
-	{/if}
-	{#if error}<p class="st-msg err" role="alert">{error}</p>{/if}
+	</section>
+	<div class="cl-foot st-footnote">
+		<p class="cl-msg" data-testid="cloud-follows">Your plan follows your Cloud account across workers. Local use stays free.</p>
+		<button type="button" class="st-btn ghost sm" onclick={openDocs}><BookOpen />How Cloud works</button>
+	</div>
+	{#if error}<p class="st-msg err" role="alert">{error} <button type="button" class="st-btn" onclick={() => { error = ''; load = 'loading'; void loadStatus(); }}>Try again</button></p>{/if}
 </PreferencePage>
 
 <style>
-	/* The tier ladder: three steps, the current one lifted out of the row. */
-	.cl-ladder {
-		container-type: inline-size;
-		margin-bottom: 28px;
-	}
-	ol {
-		list-style: none;
-		margin: 0;
-		padding: 0;
-		display: grid;
-		grid-template-columns: repeat(3, minmax(0, 1fr));
-		border: 1px solid var(--st-border);
-		border-radius: var(--st-radius);
-		background: var(--st-card);
-	}
-	.cl-tier {
-		position: relative;
-		display: grid;
-		align-content: start;
-		gap: 6px;
-		padding: 14px 16px 16px;
-		min-width: 0;
-		color: var(--st-mfg);
-		transition:
-			background-color 0.25s ease-out,
-			color 0.25s ease-out;
-	}
-	.cl-tier + .cl-tier {
-		border-left: 1px solid var(--st-border);
-	}
-	.cl-tier::before {
-		/* the progress rail along the top edge */
-		content: '';
-		position: absolute;
-		inset: -1px 0 auto;
-		height: 3px;
-		background: transparent;
-		transition: background-color 0.25s ease-out;
-	}
-	.cl-tier:first-child::before {
-		border-top-left-radius: var(--st-radius);
-	}
-	.cl-tier:last-child::before {
-		border-top-right-radius: var(--st-radius);
-	}
-	.cl-tier.reached::before {
-		background: var(--st-primary-line);
-	}
-	.cl-tier.current {
-		background: var(--st-primary-soft);
-		color: var(--st-fg);
-	}
-	.cl-tier.current::before {
-		background: var(--st-primary);
-	}
-	.cl-name {
-		font-size: 12px;
-		font-weight: 500;
-		letter-spacing: 0.04em;
-		text-transform: uppercase;
-	}
-	.cl-fig {
-		display: flex;
-		flex-wrap: wrap;
-		align-items: baseline;
-		gap: 2px 7px;
-		min-width: 0;
-	}
-	.cl-fig b {
-		font-size: 26px;
-		line-height: 1;
-		font-weight: 600;
-		letter-spacing: -0.02em;
-		color: var(--st-fg);
-		font-variant-numeric: tabular-nums;
-	}
-	.cl-tier:not(.current) .cl-fig b {
-		color: var(--st-mfg);
-	}
-	.cl-fig span {
-		font-size: 12.5px;
-		line-height: 1.3;
-	}
-	.cl-here {
-		justify-self: start;
-		font-size: 11px;
-		font-weight: 500;
-		padding: 2px 7px;
-		border-radius: 999px;
-		color: var(--st-primary);
-		border: 1px solid var(--st-primary-line);
-		animation: cl-in 0.3s ease-out;
-	}
-	.cl-foot {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: 12px;
-		margin-top: 10px;
-	}
-	.cl-msg {
-		margin: 0;
-		font-size: 13px;
-		color: var(--st-mfg);
-		min-width: 0;
-	}
-	@keyframes cl-in {
-		from {
-			opacity: 0;
-			transform: translateY(2px);
-		}
-	}
-	@media (prefers-reduced-motion: reduce) {
-		.cl-tier,
-		.cl-tier::before {
-			transition: none;
-		}
-		.cl-here {
-			animation: none;
-		}
-	}
-	/* Narrow (phone): the steps stack, rail on the left. */
-	@container (max-width: 480px) {
-		ol {
-			grid-template-columns: minmax(0, 1fr);
-		}
-		.cl-tier {
-			grid-template-columns: minmax(0, 1fr) auto;
-			align-items: center;
-			padding: 12px 14px;
-		}
-		.cl-tier .cl-name {
-			grid-column: 1;
-		}
-		.cl-tier .cl-fig {
-			grid-column: 1;
-		}
-		.cl-tier .cl-here {
-			grid-column: 2;
-			grid-row: 1 / span 2;
-			align-self: center;
-		}
-		.cl-tier + .cl-tier {
-			border-left: 0;
-			border-top: 1px solid var(--st-border);
-		}
-		.cl-tier::before {
-			inset: 0 auto 0 -1px;
-			width: 3px;
-			height: auto;
-		}
-		.cl-tier:first-child::before {
-			border-radius: var(--st-radius) 0 0 0;
-		}
-		.cl-tier:last-child::before {
-			border-radius: 0 0 0 var(--st-radius);
-		}
-		.cl-foot {
-			flex-direction: column;
-			align-items: flex-start;
-			gap: 6px;
-		}
-	}
+	.cl-here { font-size: 12px; padding: 2px 8px; border: 1px solid var(--st-border-strong); border-radius: 999px; color: var(--st-mfg); white-space: nowrap; }
+	.cl-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+	.cl-msg { margin: 0; min-width: 0; }
+	@media (max-width: 600px) { .cl-foot { flex-direction: column; align-items: flex-start; gap: 6px; } }
 </style>

@@ -1,8 +1,8 @@
 <script lang="ts">
 	/**
 	 * NotificationCenter — the bell + history panel for the unified notification
-	 * system. Lives in the Sidebar header (one bell, independent of
-	 * the chat view) and reads the persisted `history` slice of the notification
+	 * system. Lives in the desktop rail or phone drawer header and
+	 * reads the persisted `history` slice of the notification
 	 * store.
 	 *
 	 * - Bell button with an unread-count badge.
@@ -10,8 +10,8 @@
 	 *   per-item mark-read + dismiss, plus mark-all-read and clear-all.
 	 * - Uses the shared `header-dropdowns` store so opening this closes the
 	 *   profile, branch, and git-action popovers (single-open-at-a-time).
-	 * - Desktop: the panel is right-anchored under the button (the bell sits in the
-	 *   top-bar right cluster) so it expands leftward and can't clip off-screen.
+	 * - Rail: the panel opens beyond the whole Sidebar, leaving its list readable.
+	 *   Header instances stay right-anchored under their button.
 	 * - Outside-click + Escape to close. On the mobile shell the panel is
 	 *   `position: fixed` so the right-edge anchor can't clip it.
 	 */
@@ -36,8 +36,17 @@
 	import { openHeaderDropdown, toggleDropdown, closeDropdown } from '$lib/stores/header-dropdowns';
 
 	const history = $derived($notificationHistory);
+	interface Props {
+		/** The phone top bar's copy: shows only while something is unread (or its panel is open). */
+		bar?: boolean;
+		/** Desktop rail: 18px icon and an outward, fixed-position history panel. */
+		rail?: boolean;
+	}
+	let { bar = false, rail = false }: Props = $props();
+
 	const unread = $derived($unreadCount);
-	const showPanel = $derived($openHeaderDropdown === 'notifications');
+	const dropdownId = $derived(bar ? 'notifications-bar' : 'notifications');
+	const showPanel = $derived($openHeaderDropdown === dropdownId);
 
 	let rootRef = $state<HTMLDivElement | null>(null);
 	let bellRef = $state<HTMLButtonElement | null>(null);
@@ -57,15 +66,27 @@
 		info: 'Info'
 	};
 
+	let railAnchor = $state({ left: 0, bottom: 8 });
+	function positionPanel() {
+		if (!rail || !bellRef) return;
+		const rect = bellRef.getBoundingClientRect();
+		const edge = bellRef.closest('aside')?.getBoundingClientRect().right ?? rect.right;
+		railAnchor = {
+			left: Math.max(8, Math.min(edge + 8, window.innerWidth - Math.min(360, window.innerWidth - 24))),
+			bottom: Math.max(8, window.innerHeight - rect.bottom)
+		};
+	}
+
 	function togglePanel() {
-		const nowOpen = toggleDropdown('notifications');
+		positionPanel();
+		const nowOpen = toggleDropdown(dropdownId);
 		// Opening the bell marks everything seen — the badge is "new since last look".
 		if (nowOpen && unread > 0) notify.markAllRead();
 	}
 
 	function handleClickOutside(e: MouseEvent) {
 		if (!showPanel) return;
-		if (rootRef && !rootRef.contains(e.target as Node)) closeDropdown('notifications');
+		if (rootRef && !rootRef.contains(e.target as Node)) closeDropdown(dropdownId);
 	}
 
 	function handleKeydown(e: KeyboardEvent) {
@@ -73,11 +94,11 @@
 		e.preventDefault();
 		// Hand focus back to the bell rather than dropping it on <body>.
 		const focusWasInside = !!rootRef?.contains(document.activeElement);
-		closeDropdown('notifications');
+		closeDropdown(dropdownId);
 		if (focusWasInside) bellRef?.focus();
 	}
 
-	onDestroy(() => closeDropdown('notifications'));
+	onDestroy(() => closeDropdown(dropdownId));
 
 	function onItemClick(n: AppNotification) {
 		if (!n.read) notify.markRead(n.id);
@@ -85,7 +106,7 @@
 		// session through the shared 'open-session' navigation event.
 		if (n.session_id) {
 			window.dispatchEvent(new CustomEvent('open-session', { detail: { sessionId: n.session_id } }));
-			closeDropdown('notifications');
+			closeDropdown(dropdownId);
 		}
 	}
 
@@ -106,9 +127,10 @@
 	}
 </script>
 
-<svelte:window onclick={handleClickOutside} onkeydown={handleKeydown} />
+<svelte:window onclick={handleClickOutside} onkeydown={handleKeydown} onresize={positionPanel} />
 
-<div class="notif-center" bind:this={rootRef}>
+{#if !bar || unread > 0 || showPanel}
+<div class="notif-center" class:bar class:rail bind:this={rootRef} style:--notif-left={`${railAnchor.left}px`} style:--notif-bottom={`${railAnchor.bottom}px`}>
 	<button
 		bind:this={bellRef}
 		class="notif-btn"
@@ -120,7 +142,7 @@
 		aria-label={unread > 0 ? `Notifications (${unread} unread)` : 'Notifications'}
 		title="Notifications"
 	>
-		<Bell size={18} strokeWidth={1.5} />
+		<Bell size={bar ? 16 : 18} strokeWidth={bar ? 1.8 : 1.75} />
 		{#if unread > 0}
 			<span class="notif-badge" aria-hidden="true">{unread > 99 ? '99+' : unread}</span>
 		{/if}
@@ -196,8 +218,42 @@
 		</div>
 	{/if}
 </div>
+{/if}
 
 <style>
+	/* Rail controls share its 36px rhythm; history opens beyond the list column. */
+	.notif-center.rail .notif-btn { width: 36px; height: 36px; border-radius: var(--radius-control); }
+	.notif-center.rail .notif-btn:hover,
+	.notif-center.rail .notif-btn.open { background: var(--row-hover); }
+	.notif-center.rail .notif-btn:active { background: var(--row-hover); transform: scale(.95); }
+	.notif-center.rail .notif-badge { top: 0; right: -1px; box-shadow: 0 0 0 1.5px var(--sidebar); }
+	.notif-center.rail .notif-panel {
+		position: fixed;
+		top: auto;
+		right: auto;
+		left: var(--notif-left);
+		bottom: var(--notif-bottom);
+		max-height: min(440px, calc(100dvh - var(--notif-bottom) - var(--titlebar-height, 0px) - 8px));
+	}
+
+	/* Phone top bar: a 44x48 target, a 16px bell and the one 16px count. */
+	.notif-center.bar .notif-btn { width: 44px; height: 48px; border-radius: 8px; opacity: 1; }
+	.notif-center.bar .notif-badge {
+		top: 7px;
+		right: auto;
+		left: 23px;
+		border: 0;
+		box-shadow: 0 0 0 1.5px var(--background);
+	}
+	.notif-center.bar .notif-panel {
+		position: fixed;
+		top: 58px;
+		left: 8px;
+		right: 8px;
+		width: auto;
+		max-height: calc(100dvh - 120px);
+	}
+
 	.notif-center {
 		position: relative;
 		display: flex;
@@ -229,6 +285,16 @@
 		opacity: 1;
 	}
 
+	/* In the sidebar header it matches the filter button beside it. */
+	.notif-center:not(.bar) .notif-btn {
+		color: var(--sidebar-muted);
+		opacity: 1;
+	}
+	.notif-center:not(.bar) .notif-btn:hover,
+	.notif-center:not(.bar) .notif-btn.open {
+		color: var(--foreground);
+	}
+
 	.notif-btn:hover,
 	.notif-btn.open {
 		background: var(--hover-overlay);
@@ -243,18 +309,22 @@
 		position: absolute;
 		top: -2px;
 		right: -2px;
-		min-width: 15px;
-		height: 15px;
+		box-sizing: content-box;
+		min-width: 10px;
+		height: 16px;
 		padding: 0 3px;
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
-		font-size: 0.625rem;
-		font-weight: 700;
+		font-size: 11px;
+		font-weight: 600;
+		font-variant-numeric: tabular-nums;
 		line-height: 1;
-		color: var(--destructive-foreground, #fff);
-		background: var(--destructive);
-		border: 1.5px solid var(--card, var(--background));
+		/* Unread is news, not an error: --destructive stays for real failures. */
+		color: var(--primary-foreground);
+		background: var(--primary);
+		border: 0;
+		box-shadow: 0 0 0 1.5px var(--card, var(--background));
 		border-radius: 999px;
 		pointer-events: none;
 	}
@@ -349,7 +419,7 @@
 		display: flex;
 		align-items: flex-start;
 		gap: 9px;
-		padding: 10px 12px;
+		padding: 12px;
 		border-bottom: 1px solid var(--border);
 		transition: background-color 120ms ease;
 	}
@@ -422,21 +492,23 @@
 
 	.item-title {
 		font-size: 0.8125rem;
-		font-weight: 600;
+		font-weight: 500;
 		color: var(--foreground);
 		line-height: 1.3;
 	}
 
 	.item-message {
-		font-size: 0.78125rem;
-		color: var(--foreground);
-		line-height: 1.4;
+		font-size: 0.8125rem;
+		font-weight: 400;
+		color: var(--muted-foreground);
+		line-height: 1.5;
 		word-break: break-word;
 	}
 
 	.item-time {
 		font-size: 0.6875rem;
-		color: var(--muted-foreground);
+		font-weight: 400;
+		color: var(--subtle-foreground);
 		margin-top: 1px;
 	}
 

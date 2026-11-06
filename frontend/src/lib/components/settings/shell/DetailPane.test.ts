@@ -4,6 +4,8 @@ import { createRawSnippet } from 'svelte';
 import { settingsNav } from '$lib/settings/navigation.svelte';
 import { SETTINGS_ACCESS_CONTEXT } from '$lib/settings/access.svelte';
 import DetailPane from './DetailPane.svelte';
+import { platform } from '$lib/stores/platform.svelte';
+import EmptyIdentityFixture from '../../../../../tests/EmptyIdentityFixture.svelte';
 
 // Raw snippets render once; the tab state is asserted on the tabs and the store.
 const body = createRawSnippet((tab: () => string | null) => ({
@@ -11,13 +13,82 @@ const body = createRawSnippet((tab: () => string | null) => ({
 }));
 
 beforeEach(() => {
+	vi.stubGlobal('matchMedia', () => ({ matches: false, addEventListener() {}, removeEventListener() {} }));
+	vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
 	settingsNav.reset();
 	settingsNav.selectCategory('providers');
 	settingsNav.selectItem('c-sub');
 });
-afterEach(cleanup);
+afterEach(() => { cleanup(); platform.set('desktop'); vi.unstubAllGlobals(); });
 
 describe('DetailPane', () => {
+ it('offers compact editorial header spacing without changing default geometry', async () => {
+  const view = render(DetailPane, { name: 'Note' });
+  expect(view.container.querySelector('.compact-header')).toBeNull();
+  await view.rerender({ name: 'Note', compactHeader: true });
+  expect(view.container.querySelector('.st-dh.compact-header')).toBeTruthy();
+ });
+ it('marks a single inline phone primary separately from multi-action reflow', () => {
+  platform.set('mobile');
+  const primary=createRawSnippet(() => ({render: () => '<button>Add provider</button>'}));
+  const view=render(DetailPane,{name:'Providers', primary, phonePrimary:'inline'});
+  expect(view.container.querySelector('.st-dh.phone-inline > .st-dha')).toBeTruthy();
+  expect(screen.getByRole('button',{name:'Add provider'})).toBeTruthy();
+ });
+ it('keeps desktop actions on the heading without a second More menu', () => {
+  const primary=createRawSnippet(() => ({render: () => '<button>Duplicate</button>'}));
+  render(DetailPane,{name:'Agent', primary});
+  expect(screen.getAllByRole('button',{name:'Duplicate'}).length).toBe(1);
+  expect(screen.queryByText('More')).toBeNull();
+ });
+ it('accepts a page-owned phone More snippet without wrapping a second menu', () => {
+  platform.set('mobile');
+  const phoneMenu=createRawSnippet(() => ({render: () => '<button aria-label="More note actions">More</button>'}));
+  const view=render(DetailPane,{name:'Note',phoneMenu});
+  expect(screen.getByRole('button',{name:'More note actions'})).toBeTruthy();
+  expect(view.container.querySelector('.detail-more')).toBeNull();
+ });
+ it('removes the identity grid column when leaving a custom avatar for an anonymous header', async () => {
+  const tile = createRawSnippet(() => ({ render: () => '<span data-testid="avatar">AV</span>' }));
+  const view = render(DetailPane, { name: 'Agent', tile, contentFirst: true });
+  expect(view.container.querySelector('.st-dh:has(> .st-identity > *)')).toBeTruthy();
+  expect(screen.getByTestId('avatar')).toBeTruthy();
+  await view.rerender({ name: 'Workspace', tile: undefined });
+  expect(view.container.querySelector('.st-dh:has(> .st-identity > *)')).toBeNull();
+  expect(screen.queryByTestId('avatar')).toBeNull();
+ });
+ it('does not treat an intentionally empty tile snippet as identity art', () => {
+  const view = render(EmptyIdentityFixture);
+  expect(view.container.querySelector('.st-identity')?.children.length).toBe(0);
+  expect(view.container.querySelector('.st-dh:has(> .st-identity > *)')).toBeNull();
+ });
+ it('does not reserve an identity column without identity art, and preserves a provider glyph', async () => {
+  const view = render(DetailPane, { name: 'Workspace', identity: true, contentFirst: true });
+  expect(view.container.querySelector('.st-dh:has(> .st-identity > *)')).toBeNull();
+  expect(view.container.querySelector('.st-tile')).toBeNull();
+  await view.rerender({ name: 'Provider', identity: false, glyph: 'C' });
+  expect(view.container.querySelector('.st-dh:has(> .st-identity > *)')).toBeTruthy();
+  expect(view.container.querySelector('.st-tile')?.textContent?.trim()).toBe('C');
+ });
+ it('omits the entire Back row for content-first pages, not just its button', () => {
+  const { container } = render(DetailPane, { name: 'Stats', contentFirst: true });
+  expect(container.querySelector('.st-back-row')).toBeNull();
+  expect(container.querySelector('h2')?.textContent).toBe('Stats');
+ });
+
+	it('opts collection pages into the centred reading column without changing Settings defaults', () => {
+		const normal = render(DetailPane, { name: 'Settings detail' });
+		expect(normal.container.querySelector('.st-dwrap.reading')).toBeNull();
+		normal.unmount();
+		const centered = render(DetailPane, { name: 'Project detail', width: 'reading' });
+		expect(centered.container.querySelector('.st-dwrap.reading')).toBeTruthy();
+	});
+	it('uses the shared frame and an explicit Docs width', () => {
+		const { container } = render(DetailPane, { name: 'Remote access', width: 'docs', backLabel: 'Docs' });
+		expect(container.querySelector('.st-dwrap.docs')).toBeTruthy();
+		expect(screen.getByRole('button', { name: 'Back to Docs' })).toBeTruthy();
+		expect(container.querySelector('.st-dh')?.classList.contains('has-identity')).toBe(false);
+	});
 	it('renders header, at most four facts with data, tabs and the danger zone', async () => {
 		const onConfirm = vi.fn();
 		render(DetailPane, {

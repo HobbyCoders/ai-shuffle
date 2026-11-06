@@ -191,8 +191,8 @@ describe('ChatInput mobile collapsed surface', () => {
 	});
 
 	it('keeps the agent context row available in every lane', () => {
-		expect(chatInput).toContain('<div class="context-pill-row"><ContextPillBar /></div>');
-		expect(chatInput).not.toMatch(/\{#if composerMode !== 'chat'\}\s*<div class="context-pill-row">/);
+		expect(chatInput).toContain('<ContextPillBar />');
+		expect(chatInput).not.toMatch(/\{#if composerMode !== 'chat'\}\s*<ContextPillBar/);
 	});
 
 	it('no longer carries a send-later button to hide', () => {
@@ -225,15 +225,10 @@ describe('ChatInput attachments per lane', () => {
 	});
 });
 
-describe('narrow-phone placeholder (#1612)', () => {
-	const narrow = mobileStyles.match(/@media \(max-width: 360px\) \{([\s\S]*?)\n\}/)?.[1] ?? '';
-
-	it('shortens only the code lane placeholder, by the exact value ChatInput sets', () => {
-		const long = narrow.match(/\[data-placeholder='([^']+)'\]::before/)?.[1];
-		expect(long).toBeTruthy();
-		// If ChatInput's wording changes, this rule would silently stop matching.
-		expect(chatInput).toContain(`'${long}'`);
-		expect(narrow).toMatch(/content: 'Ask or describe a task';/);
-		expect(narrow).toContain(MOBILE);
+describe('composer placeholder', () => {
+	it('says the one short line in every lane, from ChatInput itself', () => {
+		expect(chatInput).toMatch(/moveWait \?\? 'Ask anything'/);
+		// No stylesheet rule overrides the placeholder any more.
+		expect(mobileStyles).not.toMatch(/data-placeholder='[^']+'\]::before/);
 	});
 });

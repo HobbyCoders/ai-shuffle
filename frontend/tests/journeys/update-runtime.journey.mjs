@@ -68,8 +68,8 @@ async function openSystem(page, status) {
     // The real mobile shell owns a separate drawer, not the responsive desktop sidebar.
     await page.getByRole('button', { name: 'Open menu', exact: true }).click();
   } else {
-    await page.getByRole('complementary', { name: 'Sessions' })
-      .or(page.getByRole('button', { name: 'Show sidebar' })).filter({ visible: true }).first().waitFor();
+    await page.getByRole('complementary', { name: 'Chats' })
+      .or(page.getByRole('button', { name: /^(Show sidebar|Chats)\b/ })).filter({ visible: true }).first().waitFor();
     await showSidebar(page);
   }
   await page.getByRole('button', { name: 'Settings', exact: true }).click();

@@ -8,6 +8,7 @@
  */
 
 import type { Install } from '$lib/api/installs';
+import { selfWorkerName, workerDisplayName } from '$lib/components/ui/worker-name';
 import {
 	peerRunners,
 	isBlocked,
@@ -63,12 +64,12 @@ function currentRunnerItem(input: RunnerBadgeMenuInput): RunnerBadgeMenuItem {
 	if (!input.isRemote) {
 		// This worker, named like the runner chip and the new-chat picker.
 		return {
-			id: CURRENT_RUNNER_ID, label: 'Local', action: null, disabled: false, online: true,
+			id: CURRENT_RUNNER_ID, label: selfWorkerName(input.installs), action: null, disabled: false, online: true,
 			note: null, checked: true, title: 'This session runs on this device'
 		};
 	}
 	const owner = input.installs.find((i) => i.id === input.ownerId);
-	const name = owner?.device_name || input.ownerName || 'Another worker';
+	const name = workerDisplayName(owner?.device_name || input.ownerName, 'Another worker');
 	const online = owner ? owner.online : input.ownerOnline !== false;
 	return {
 		id: CURRENT_RUNNER_ID,
@@ -103,7 +104,7 @@ export function runnerBadgeMenuItems(input: RunnerBadgeMenuInput): RunnerBadgeMe
 		const blocked = isBlocked(install, input.hasProject, input.eligibility);
 		items.push({
 			id: `move-${install.id}`,
-			label: install.device_name,
+			label: workerDisplayName(install.device_name),
 			action: blocked ? null : { kind: 'move', targetInstanceId: install.id },
 			disabled: blocked,
 			online: install.online,

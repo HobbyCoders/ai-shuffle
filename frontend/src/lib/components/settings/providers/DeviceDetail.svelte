@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { detailLine } from './credential-display';
 	/**
 	 * A ChatGPT or SuperGrok subscription (device-code sign-in). Overview has
 	 * the sign-in state and Reconnect; Models the curation; Usage the weekly
@@ -62,12 +63,12 @@
 				: 'Sign in again to use it'
 	);
 
-	const facts = $derived([
-		{ label: 'Plan', value: planLabel(usageEntry?.plan_type) ?? planLabel(row.account_plan) },
-		{ label: 'Weekly use', value: weekly ? `${Math.round(weekly.utilization)}%` : null },
-		{ label: 'Models', value: `${row.models.length} in picker` },
-		{ label: 'Resets', value: banked.hasLoaded ? `${banked.availableCount} banked` : null }
-	]);
+	const line = $derived(detailLine(
+		position,
+		planLabel(usageEntry?.plan_type) ?? planLabel(row.account_plan),
+		weekly ? `${Math.round(weekly.utilization)}% of the week used` : null,
+		banked.hasLoaded && banked.availableCount ? `${banked.availableCount} banked resets` : null
+	));
 
 	const tabs = $derived([
 		{ id: 'Overview' },
@@ -101,11 +102,9 @@
 
 <DetailPane
 	name={credential.name}
-	badge="Subscription"
-	status={credential.status}
-	statusText={credential.statusText}
-	subtitle={position}
-	{facts}
+	status={credential.attention ? credential.status : undefined}
+	statusText={credential.attention ? credential.statusText : undefined}
+	subtitle={line}
 	{tabs}
 	{danger}
 	item={credential.item}

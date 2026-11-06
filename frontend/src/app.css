@@ -1,5 +1,3 @@
-/* Playfair Display - self-hosted via fontsource (avoids CSP issues with Google Fonts) */
-
 @import 'tailwindcss';
 
 /* Tailwind v4 discovers template sources itself (project root, honouring
@@ -31,6 +29,9 @@
 
 	--color-primary: var(--primary);
 	--color-primary-foreground: var(--primary-foreground);
+
+	--color-action: var(--action);
+	--color-action-foreground: var(--action-foreground);
 
 	--color-secondary: var(--secondary);
 
@@ -79,32 +80,38 @@
 	:root,
 	.dark {
 		/* Background colors */
-		--background: oklch(0.145 0.004 240);
+		--background: oklch(0.214 0.006 265);
 
-		/* Display font */
-		--font-display: 'Playfair Display', Georgia, serif;
-		--foreground: oklch(0.965 0.003 240);
+		/* One sans family in product chrome: the display role is the sans. */
+		--font-display: var(--font-sans);
+		--foreground: oklch(0.928 0.003 265);
 
 		/* Elevated surfaces */
-		--card: oklch(0.178 0.005 240);
-		--card-foreground: oklch(0.955 0.003 240);
-		--popover: oklch(0.185 0.006 240);
-		--popover-foreground: oklch(0.965 0.003 240);
+		--card: oklch(0.247 0.006 265);
+		--card-foreground: oklch(0.928 0.003 265);
+		--popover: oklch(0.262 0.007 265);
+		--popover-foreground: oklch(0.928 0.003 265);
 
-		/* Primary: Teal accent */
-		--primary: oklch(0.72 0.14 180);
-		--primary-foreground: oklch(0.16 0.03 190);
+		/* Accent: teal, only for on-state, focus and small status marks. Never a
+		   large solid area; a primary button is --action. */
+		--primary: oklch(0.72 0.11 175);
+		--primary-foreground: oklch(0.2 0.02 175);
+
+		/* Primary action: neutral, light on dark. Follows a preset's own neutrals. */
+		--action: var(--foreground);
+		--action-foreground: var(--background);
+		--action-hover: color-mix(in oklab, var(--foreground) 88%, var(--background));
 
 		/* Secondary/Muted */
-		--secondary: oklch(0.22 0.006 240);
-		--secondary-foreground: oklch(0.90 0.003 240);
-		--muted: oklch(0.225 0.006 240);
-		--muted-foreground: oklch(0.705 0.008 240);
-		--subtle-foreground: oklch(0.575 0.008 240);
+		--secondary: oklch(0.276 0.008 265);
+		--secondary-foreground: oklch(0.9 0.003 265);
+		--muted: oklch(0.276 0.008 265);
+		--muted-foreground: oklch(0.715 0.008 265);
+		--subtle-foreground: oklch(0.645 0.008 265);
 
 		/* Accent for hover states */
-		--accent: oklch(0.24 0.007 240);
-		--accent-foreground: oklch(0.97 0.003 240);
+		--accent: oklch(0.3 0.008 265);
+		--accent-foreground: oklch(0.95 0.003 265);
 
 		/* Studio Noir accent set */
 		--emerald: oklch(0.76 0.15 155);
@@ -130,35 +137,43 @@
 
 		/* Borders and inputs */
 		--border: oklch(1 0 0 / 0.085);
-		--border-strong: oklch(1 0 0 / 0.15);
-		--input: oklch(1 0 0 / 0.10);
-		--ring: oklch(0.72 0.14 180);
+		--border-strong: oklch(1 0 0 / 0.14);
+		--input: oklch(1 0 0 / 0.1);
+		--ring: oklch(0.72 0.11 175);
+		--panel-search-ring: color-mix(in srgb, var(--ring) 60%, transparent);
 
-		/* Sidebar plane */
-		--sidebar: oklch(0 0 0);
-		--sidebar-foreground: oklch(0.94 0.003 240);
-		--sidebar-border: oklch(1 0 0 / 0.08);
-		--sidebar-accent: oklch(1 0 0 / 0.045);
+		/* One field: every text field, search box and select. Only focus brightens it. */
+		--field-bg: var(--card);
+		--field-border: var(--input);
+		--field-border-focus: var(--ring);
+
+		/* Sidebar plane. The rail shares it. Row fills derive from the plane so a
+		   theme preset's sidebar keeps working. */
+		--row-hover: color-mix(in oklab, var(--sidebar-foreground) 5%, var(--sidebar));
+		--row-selected: color-mix(in oklab, var(--sidebar-foreground) 14%, var(--sidebar));
+		--rail-selected: color-mix(in oklab, var(--sidebar-foreground) 17%, var(--sidebar));
+		--sidebar: oklch(0.185 0.004 265);
+		--sidebar-foreground: oklch(0.928 0.003 265);
+		--sidebar-border: oklch(1 0 0 / 0.085);
+		--sidebar-accent: oklch(1 0 0 / 0.05);
 		--sidebar-accent-active: oklch(1 0 0 / 0.085);
-		--sidebar-muted: oklch(0.68 0.008 240);
+		--sidebar-muted: oklch(0.715 0.008 265);
 
-		/* Studio Noir surface effects */
-		--glow: oklch(0.72 0.14 180 / 0.30);
-		--code-bg: oklch(0.125 0.005 240);
+		/* Surface effects */
+		--code-bg: oklch(0.195 0.004 265);
 		--scrim: oklch(1 0 0 / 0.04);
-		--grain-opacity: 0.05;
 
 		/* Shadow system */
-		--shadow-s: 0 1px 2px rgba(0,0,0,0.35), 0 1px 3px rgba(0,0,0,0.18);
-		--shadow-m: 0 4px 10px rgba(0,0,0,0.32), 0 2px 4px rgba(0,0,0,0.18);
-		--shadow-l: 0 14px 34px rgba(0,0,0,0.42), 0 4px 10px rgba(0,0,0,0.22);
+		--shadow-s: 0 1px 2px oklch(0 0 0 / 0.24);
+		--shadow-m: 0 4px 12px oklch(0 0 0 / 0.26), 0 1px 3px oklch(0 0 0 / 0.16);
+		--shadow-l: 0 12px 32px oklch(0 0 0 / 0.36), 0 2px 8px oklch(0 0 0 / 0.2);
 
 		/* Border radius */
-		--radius: 10px;
+		--radius: 8px;
 
 		/* Scrollbar colors */
-		--scrollbar-thumb: oklch(0.32 0.006 240);
-		--scrollbar-thumb-hover: oklch(0.42 0.006 240);
+		--scrollbar-thumb: oklch(0.36 0.006 265);
+		--scrollbar-thumb-hover: oklch(0.46 0.006 265);
 
 		/* Glass effects (derived from theme variables for preset compatibility) */
 		--glass-bg: color-mix(in oklch, var(--card) 85%, transparent);
@@ -168,21 +183,16 @@
 		--border-subtle: oklch(1 0 0 / 0.06);
 
 		/* Primary variations */
-		--primary-10: oklch(0.72 0.14 180 / 0.1);
-		--primary-20: oklch(0.72 0.14 180 / 0.2);
-
-		/* Glow effect - uses theme primary color */
-		--glow-color-soft: color-mix(in srgb, var(--primary) 30%, transparent);
+		--primary-10: oklch(0.72 0.11 175 / 0.1);
+		--primary-20: oklch(0.72 0.11 175 / 0.2);
 
 		/* Selection state system - derived from --ring for preset compatibility */
 		--selection: var(--ring);
 		--selection-bg: color-mix(in oklch, var(--selection) 10%, transparent);
 		--selection-bg-emphasis: color-mix(in oklch, var(--selection) 15%, transparent);
 		--selection-ring: color-mix(in oklch, var(--selection) 70%, transparent);
-		--selection-glow: color-mix(in oklch, var(--selection) 25%, transparent);
 		--selection-text: var(--selection);
-		--selection-shadow: 0 0 0 1.5px var(--selection-ring), 0 0 10px var(--selection-glow);
-		--selection-shadow-subtle: 0 0 8px var(--selection-glow);
+		--selection-shadow: 0 0 0 1.5px var(--selection-ring);
 
 		/* Interactive hover overlay */
 		--hover-overlay: oklch(1 0 0 / 0.055);
@@ -201,10 +211,10 @@
 		--tool-edit: oklch(0.77 0.14 55);            /* Orange - editing */
 		--tool-glob: oklch(0.72 0.145 300);          /* Purple - glob patterns */
 		--tool-grep: oklch(0.70 0.155 285);          /* Violet - searching */
-		--tool-web: oklch(0.72 0.14 180);            /* Teal - web operations */
+		--tool-web: oklch(0.72 0.11 175);            /* Teal - web operations */
 		--tool-task: oklch(0.70 0.13 265);           /* Indigo - task/agent */
 		--tool-notebook: oklch(0.72 0.15 350);       /* Rose - notebook */
-		--tool-default: oklch(0.575 0.008 240);      /* Gray - fallback */
+		--tool-default: oklch(0.645 0.008 265);      /* Gray - fallback */
 
 		/* Feature colors - for plugin/profile feature indicators */
 		--feature-commands: oklch(0.72 0.115 250);   /* Blue */
@@ -221,8 +231,8 @@
 		--status-error-border: oklch(0.70 0.175 20 / 0.28);
 		--status-info-bg: oklch(0.72 0.115 250 / 0.14);
 		--status-info-border: oklch(0.72 0.115 250 / 0.28);
-		--status-pending-bg: oklch(0.575 0.008 240 / 0.14);
-		--status-pending-border: oklch(0.575 0.008 240 / 0.28);
+		--status-pending-bg: oklch(0.645 0.008 265 / 0.14);
+		--status-pending-border: oklch(0.645 0.008 265 / 0.28);
 		/* Merged: the one state git owns that no semantic token covered.
 		   Purple, same hue as --feature-agents, so a merged PR reads apart
 		   from success green at a glance. */
@@ -234,20 +244,42 @@
 		/* Modal overlay */
 		--modal-overlay: oklch(0 0 0 / 0.6);
 
-		/* Button gradients */
-		--button-primary-gradient: linear-gradient(135deg, var(--primary), oklch(from var(--primary) calc(l - 0.04) c h));
-
 		/* Input states - dark mode (derived from theme variables) */
-		--input-bg: color-mix(in oklch, var(--background) 70%, var(--muted) 30%);
+		--input-bg: var(--field-bg);
 		--input-bg-hover: color-mix(in oklch, var(--background) 50%, var(--muted) 50%);
-		--input-bg-focus: color-mix(in oklch, var(--background) 50%, var(--muted) 50%);
-		--input-border: var(--border);
+		--input-bg-focus: var(--field-bg);
+		--input-border: var(--field-border);
 		--input-border-hover: color-mix(in oklab, var(--border) 70%, var(--primary) 30%);
 
 		/* Typography - font families (can be overridden by theme presets) */
 		--font-sans: 'Inter Variable', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
-		--font-serif: 'Playfair Display', Georgia, ui-serif, serif;
+		--font-serif: var(--font-sans);
 		--font-mono: 'JetBrains Mono Variable', ui-monospace, SFMono-Regular, Menlo, monospace;
+
+		/* Type scale: caption, label, small, body, lead, title, display. */
+		--fs-caption: 11px;
+		--fs-label: 12px;
+		--fs-small: 13px;
+		--fs-body: 14px;
+		--fs-lead: 16px;
+		--fs-title: 20px;
+		--fs-display: 28px;
+
+		/* Radius scale: controls, cards, the composer. */
+		--radius-control: 8px;
+		--radius-card: 12px;
+		--radius-composer: min(18px, calc(var(--radius) * 2.25));
+		/* The one centred column transcript and composer share. */
+		--column-width: 740px;
+
+		/* Switch: the thumb stays white in both states and themes. */
+		--switch-off: color-mix(in oklch, var(--foreground) 16%, transparent);
+		--switch-off-edge: transparent;
+		--switch-on: var(--primary);
+		--switch-thumb: oklch(1 0 0);
+		--switch-thumb-edge: oklch(0 0 0 / 0.18);
+		/* A selected segment rises above its track, like a selected rail item. */
+		--segment-selected: var(--rail-selected);
 	}
 
 	/* ========================================
@@ -255,7 +287,7 @@
 	   ======================================== */
 	.light {
 		/* Background colors */
-		--background: oklch(0.995 0 0);
+		--background: oklch(0.98 0.003 90);
 		--foreground: oklch(0.21 0.005 250);
 
 		/* Elevated surfaces */
@@ -264,20 +296,29 @@
 		--popover: oklch(1 0 0);
 		--popover-foreground: oklch(0.21 0.005 250);
 
-		/* Primary: Teal accent (slightly adjusted for light bg) */
-		--primary: oklch(0.60 0.115 180);
+		/* Accent: teal, darkened for the same contrast on a light surface. */
+		--primary: oklch(0.53 0.09 178);
 		--primary-foreground: oklch(0.99 0 0);
 
+		/* Primary action: neutral, dark on light. */
+		--action: var(--foreground);
+		--action-foreground: var(--background);
+		--action-hover: color-mix(in oklab, var(--foreground) 86%, var(--background));
+		/* The off track is a light fill; its edge carries the 3:1 on a white card. */
+		--switch-off: color-mix(in oklch, var(--foreground) 15%, transparent);
+		--switch-off-edge: color-mix(in oklch, var(--foreground) 44%, transparent);
+		--segment-selected: var(--card);
+
 		/* Secondary/Muted */
-		--secondary: oklch(0.958 0.002 250);
-		--secondary-foreground: oklch(0.28 0.006 250);
-		--muted: oklch(0.965 0.002 250);
-		--muted-foreground: oklch(0.475 0.008 250);
-		--subtle-foreground: oklch(0.565 0.008 250);
+		--secondary: oklch(0.95 0.004 90);
+		--secondary-foreground: oklch(0.28 0.006 90);
+		--muted: oklch(0.95 0.004 90);
+		--muted-foreground: oklch(0.488 0.008 90);
+		--subtle-foreground: oklch(0.525 0.008 90);
 
 		/* Accent for hover states */
-		--accent: oklch(0.955 0.003 250);
-		--accent-foreground: oklch(0.21 0.005 250);
+		--accent: oklch(0.93 0.004 90);
+		--accent-foreground: oklch(0.21 0.005 90);
 
 		/* Studio Noir accent set */
 		--emerald: oklch(0.55 0.14 155);
@@ -294,32 +335,40 @@
 		--info: oklch(0.55 0.16 255);
 
 		/* Borders and inputs */
-		--border: oklch(0.21 0.01 250 / 0.11);
-		--border-strong: oklch(0.21 0.01 250 / 0.20);
+		--border: oklch(0.21 0.01 250 / 0.09);
+		--border-strong: oklch(0.21 0.01 250 / 0.18);
 		--input: oklch(0.21 0.01 250 / 0.14);
-		--ring: oklch(0.60 0.115 180);
+		--ring: oklch(0.53 0.09 178);
+		/* 60% measured 2.38:1; 75% clears 3:1 on the light panel. */
+		--panel-search-ring: color-mix(in srgb, var(--ring) 75%, transparent);
 
-		/* Sidebar plane */
-		--sidebar: oklch(0.968 0.002 250);
-		--sidebar-foreground: oklch(0.21 0.005 250);
-		--sidebar-border: oklch(0.21 0.01 250 / 0.10);
+		/* One field: every text field, search box and select. Only focus brightens it. */
+		--field-bg: var(--card);
+		--field-border: var(--input);
+		--field-border-focus: var(--ring);
+
+		/* Sidebar plane. The rail shares it. */
+		--row-hover: color-mix(in oklab, var(--sidebar-foreground) 2.5%, var(--sidebar));
+		--row-selected: color-mix(in oklab, var(--sidebar-foreground) 4.5%, var(--sidebar));
+		--rail-selected: color-mix(in oklab, var(--sidebar-foreground) 11%, var(--sidebar));
+		--sidebar: oklch(0.955 0.003 90);
+		--sidebar-foreground: oklch(0.21 0.008 90);
+		--sidebar-border: oklch(0.21 0.01 250 / 0.09);
 		--sidebar-accent: oklch(0.21 0.01 250 / 0.045);
 		--sidebar-accent-active: oklch(0.21 0.01 250 / 0.085);
-		--sidebar-muted: oklch(0.455 0.008 250);
+		--sidebar-muted: oklch(0.488 0.008 90);
 
-		/* Studio Noir surface effects */
-		--glow: oklch(0.60 0.115 180 / 0.22);
+		/* Surface effects */
 		--code-bg: oklch(0.975 0.002 250);
 		--scrim: oklch(0.21 0.01 250 / 0.035);
-		--grain-opacity: 0.028;
 
 		/* Shadow system (lighter for light theme) */
-		--shadow-s: 0 1px 2px rgba(0,0,0,0.05), 0 1px 3px rgba(0,0,0,0.08);
-		--shadow-m: 0 4px 10px rgba(0,0,0,0.08), 0 2px 4px rgba(0,0,0,0.06);
-		--shadow-l: 0 14px 34px rgba(0,0,0,0.10), 0 4px 10px rgba(0,0,0,0.05);
+		--shadow-s: 0 1px 2px oklch(0 0 0 / 0.05);
+		--shadow-m: 0 4px 12px oklch(0 0 0 / 0.07), 0 1px 3px oklch(0 0 0 / 0.05);
+		--shadow-l: 0 12px 32px oklch(0 0 0 / 0.1), 0 2px 8px oklch(0 0 0 / 0.05);
 
 		/* Border radius */
-		--radius: 10px;
+		--radius: 8px;
 
 		/* Scrollbar colors */
 		--scrollbar-thumb: oklch(0.82 0.004 250);
@@ -329,23 +378,18 @@
 		--glass-bg: color-mix(in oklch, var(--card) 85%, transparent);
 		--glass-border: color-mix(in oklch, var(--border) 40%, transparent);
 
-		/* Glow effect - uses theme primary color */
-		--glow-color-soft: color-mix(in srgb, var(--primary) 20%, transparent);
-
 		/* Selection state system - light theme adjustments */
 		--selection: var(--ring);
 		--selection-bg: color-mix(in oklch, var(--selection) 8%, transparent);
 		--selection-bg-emphasis: color-mix(in oklch, var(--selection) 12%, transparent);
 		--selection-ring: color-mix(in oklch, var(--selection) 55%, transparent);
-		--selection-glow: color-mix(in oklch, var(--selection) 18%, transparent);
 		--selection-text: var(--selection);
-		--selection-shadow: 0 0 0 1.5px var(--selection-ring), 0 0 8px var(--selection-glow);
-		--selection-shadow-subtle: 0 0 6px var(--selection-glow);
+		--selection-shadow: 0 0 0 1.5px var(--selection-ring);
 
 		/* Interactive hover overlay */
 		--hover-overlay: oklch(0.21 0.01 250 / 0.045);
 		--active-overlay: oklch(0.21 0.01 250 / 0.075);
-		--border-subtle: oklch(0.21 0.01 250 / 0.07);
+		--border-subtle: oklch(0.21 0.01 250 / 0.055);
 
 		/* ========================================
 		   SEMANTIC UI COLORS - LIGHT THEME
@@ -358,10 +402,10 @@
 		--tool-edit: oklch(0.58 0.155 50);
 		--tool-glob: oklch(0.52 0.17 300);
 		--tool-grep: oklch(0.50 0.18 285);
-		--tool-web: oklch(0.60 0.115 180);
+		--tool-web: oklch(0.53 0.09 178);
 		--tool-task: oklch(0.50 0.15 265);
 		--tool-notebook: oklch(0.54 0.17 350);
-		--tool-default: oklch(0.565 0.008 250);
+		--tool-default: oklch(0.525 0.011 258);
 
 		/* Feature colors - light theme */
 		--feature-commands: oklch(0.55 0.16 255);
@@ -378,8 +422,8 @@
 		--status-error-border: oklch(0.55 0.19 22 / 0.25);
 		--status-info-bg: oklch(0.55 0.16 255 / 0.12);
 		--status-info-border: oklch(0.55 0.16 255 / 0.25);
-		--status-pending-bg: oklch(0.565 0.008 250 / 0.12);
-		--status-pending-border: oklch(0.565 0.008 250 / 0.25);
+		--status-pending-bg: oklch(0.525 0.011 258 / 0.12);
+		--status-pending-border: oklch(0.525 0.011 258 / 0.25);
 		/* Merged — light theme; darkened the same way the other purples are. */
 		--status-merged: oklch(0.52 0.17 300);
 
@@ -389,19 +433,16 @@
 		/* Modal overlay - light theme */
 		--modal-overlay: oklch(0 0 0 / 0.5);
 
-		/* Button gradients - light theme */
-		--button-primary-gradient: linear-gradient(135deg, var(--primary), oklch(from var(--primary) calc(l - 0.06) c h));
-
 		/* Input states - light mode (derived from theme variables) */
-		--input-bg: color-mix(in oklch, var(--background) 70%, var(--muted) 30%);
+		--input-bg: var(--field-bg);
 		--input-bg-hover: color-mix(in oklch, var(--background) 50%, var(--muted) 50%);
-		--input-bg-focus: var(--background);
-		--input-border: var(--border);
+		--input-bg-focus: var(--field-bg);
+		--input-border: var(--field-border);
 		--input-border-hover: color-mix(in oklab, var(--border) 70%, var(--primary) 30%);
 
 		/* Primary variations */
-		--primary-10: oklch(0.60 0.115 180 / 0.1);
-		--primary-20: oklch(0.60 0.115 180 / 0.2);
+		--primary-10: oklch(0.53 0.09 178 / 0.1);
+		--primary-20: oklch(0.53 0.09 178 / 0.2);
 	}
 
 	/* Theme transition for smooth changes */
@@ -470,13 +511,12 @@
    COMPOSITING BUDGET  (PERFORMANCE_REVIEW §3.2 R13)
    ------------------------------------------------------------
    Every backdrop-filter over the scrolling transcript makes the compositor
-   re-sample the pixels behind it on each frame the transcript moves, and a
-   `mix-blend-mode` overlay forces the whole stacking context through a blend
-   pass. On integrated GPUs that is the difference between a smooth scroll and
+   re-sample the pixels behind it on each frame the transcript moves. On
+   integrated GPUs that is the difference between a smooth scroll and
    a visibly stepped one.
 
    So the effects are expressed as ONE set of custom properties. Capable
-   machines keep the design's character (glass composer, frosted rails, grain);
+   machines keep the design's character (glass composer, frosted rails);
    a machine that asks for less transparency — or that the app has profiled as
    low-end (`data-fx="low"`, see utils/perf-profile.ts) — gets `none`, which
    removes the compositing work entirely rather than merely reducing the blur
@@ -487,37 +527,18 @@
    above 8px on these small surfaces is marginal. */
 :root {
 	--fx-rail-backdrop: blur(8px) saturate(140%);
-	--fx-grain-blend: overlay;
 }
 
 @media (prefers-reduced-transparency: reduce) {
 	:root {
 		--fx-rail-backdrop: none;
-		--fx-grain-blend: normal;
-		--grain-opacity: 0;
 		--glass-bg: var(--card);
 	}
 }
 
 :root[data-fx='low'] {
 	--fx-rail-backdrop: none;
-	--fx-grain-blend: normal;
-	--grain-opacity: 0;
 	--glass-bg: var(--card);
-}
-
-/* Procedural grain overlay for large surfaces.
-   Host element must be position: relative (or otherwise positioned). */
-.grain::after {
-	content: "";
-	position: absolute;
-	inset: 0;
-	pointer-events: none;
-	z-index: 40;
-	opacity: var(--grain-opacity);
-	mix-blend-mode: var(--fx-grain-blend, overlay);
-	background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='200' height='200' filter='url(%23n)'/%3E%3C/svg%3E");
-	background-size: 200px 200px;
 }
 
 /* Scrollbar styling using CSS variables */
@@ -574,6 +595,7 @@ code {
 /* Button base styles */
 .btn {
 	@apply px-4 py-2 rounded-lg font-medium;
+	border-radius: var(--radius-control);
 	transition: all 150ms ease;
 }
 
@@ -582,14 +604,12 @@ code {
 }
 
 .btn-primary {
-	background: linear-gradient(135deg, var(--primary), oklch(from var(--primary) calc(l - 0.04) calc(c + 0.02) calc(h - 5)));
-	color: var(--primary-foreground);
-	box-shadow: var(--shadow-s);
+	background: var(--action);
+	color: var(--action-foreground);
 }
 
 .btn-primary:hover {
-	box-shadow: var(--shadow-m);
-	filter: brightness(1.1);
+	background: var(--action-hover);
 }
 
 /* Disabled: visibly unavailable. This rule is unlayered and Tailwind v4 utilities
@@ -606,8 +626,7 @@ code {
 }
 
 .btn-primary:disabled:hover {
-	box-shadow: var(--shadow-s);
-	filter: none;
+	background: var(--action);
 }
 
 .btn-secondary {
@@ -626,7 +645,7 @@ code {
 	padding: 0.5rem 1rem;
 	background-color: var(--input);
 	border: 1px solid var(--border);
-	border-radius: 0.5rem;
+	border-radius: var(--radius-control);
 	color: var(--foreground);
 	transition: border-color 0.2s, box-shadow 0.2s, background-color 0.2s;
 }
@@ -681,24 +700,26 @@ select {
 	color-scheme: light dark;
 }
 
+/* One menu surface: every popover and dropdown reads these. */
+:root {
+	--menu-radius: 10px;
+	--menu-row-radius: 6px;
+	--menu-row: 32px;
+	--menu-pad: 4px;
+	--menu-border: var(--border);
+	--menu-shadow: var(--shadow-l);
+}
+
 select option {
 	background-color: var(--popover);
 	color: var(--popover-foreground);
-}
-
-.dark select option {
-	background-color: oklch(0.20 0.01 260);
-}
-
-.light select option {
-	background-color: oklch(1 0 0);
 }
 
 /* Card styles */
 .card {
 	background-color: var(--card);
 	border: 1px solid var(--border);
-	border-radius: 0.5rem;
+	border-radius: var(--radius-card);
 	transition: box-shadow 200ms ease, transform 200ms ease;
 }
 
@@ -730,14 +751,15 @@ select option {
 .prose :where(:not(pre) > code):not(:where([class~="not-prose"] *)) {
 	font-family: var(--font-mono);
 	font-weight: 400;
-	font-size: 12.5px;
-	padding: 1.5px 5px;
+	font-size: 0.9em;
+	padding: 0.1em 0.36em;
 	border-radius: 5px;
 	background-color: var(--muted);
-	border: 1px solid var(--border);
 	color: var(--foreground);
-	word-break: break-all;
-	overflow-wrap: anywhere;
+	/* Wrap at word boundaries; only a token too long for a line of its own breaks. */
+	overflow-wrap: break-word;
+	-webkit-box-decoration-break: clone;
+	box-decoration-break: clone;
 }
 
 .prose :where(pre code):not(:where([class~="not-prose"] *)) {
@@ -972,119 +994,120 @@ button, a, .clickable {
 	height: 2.25rem;
 }
 
-/* ── New-session sentence words ──────────────────────────────────────────────
-   "Runs on <worker> in <project> on <branch> in <a worktree>." Each part is
-   a real button that opens the same menu its composer chip opens. It reads
-   as a word in the sentence: foreground, medium weight, a hairline under it,
-   and a muted fill on hover or while its menu is open. Shared by
-   RunsOnPicker, WorkspaceFolderSelector, WorkspaceSelector, BranchSelector,
-   ExecutionModeBar and NewSessionSentence. */
-.sentence-tok {
-	display: inline;
-	padding: 1px 6px;
-	margin: 0 1px;
-	border: 0;
-	border-radius: 6px;
-	background: transparent;
-	color: var(--foreground);
-	font: inherit;
-	font-weight: 500;
-	line-height: 1.6;
-	white-space: nowrap;
-	cursor: pointer;
-	box-shadow: inset 0 -1px 0 var(--border-strong);
-	-webkit-box-decoration-break: clone;
-	box-decoration-break: clone;
-	transition: background-color 0.12s ease, box-shadow 0.12s ease;
+/* ── Quiet context controls ─────────────────────────────────────────────────
+   The icon-and-text controls in the row under the composer: agent, worker,
+   project, branch, worktree. `.sentence-tok` is the new-session row's, and
+   `.ctx-chip` the same row under a running chat (ProfileSelector,
+   ExecutionModeBar, BranchSelector, WorkspaceFolderSelector, ContextPillBar).
+   No border and no fill at rest: they read as text you can click. Every menu
+   trigger carries the same chevron 4px after its label, and a locked item has
+   none, so the row has one treatment. Icon, label and agent share one colour. */
+:root {
+	--chevron-down-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.25' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
 }
-.sentence-tok:hover:not(:disabled),
-.sentence-tok.open,
-.sentence-tok[aria-expanded='true'] {
-	background: var(--muted);
-	box-shadow: inset 0 -1px 0 transparent;
-}
-.sentence-tok:focus-visible {
-	outline: 2px solid var(--ring);
-	outline-offset: 1px;
-}
-.sentence-tok:disabled {
-	cursor: default;
-	color: var(--muted-foreground);
-}
-.sentence-tok .sentence-count {
-	margin-left: 4px;
-	color: var(--muted-foreground);
-	font-size: 0.75em;
-	font-weight: 500;
-}
-@media (prefers-reduced-motion: reduce) {
-	.sentence-tok { transition: none; }
-}
-
-/* ── Composer context chips ─────────────────────────────────────────────────
-   The small filled chips that float above the chat composer (agent, runner,
-   repository, branch, worktree). Shared by ProfileSelector, ExecutionModeBar,
-   BranchSelector and ContextPillBar, so the look lives here once. Components
-   layer their own scoped rules (sheet-mode rows, open/unset states) on top. */
+.sentence-tok,
 .ctx-chip {
 	position: relative;
 	display: inline-flex;
 	align-items: center;
-	gap: 5px;
-	height: 22px;
+	gap: 6px;
+	height: 28px;
 	max-width: 100%;
 	min-width: 0;
-	padding: 0 7px;
-	background: var(--muted);
+	padding: 0 8px;
+	background: transparent;
 	border: 0;
-	border-radius: 5px;
+	border-radius: var(--radius-control);
 	color: var(--muted-foreground);
 	font: inherit;
-	font-size: 12px;
-	font-weight: 500;
+	font-size: var(--fs-small);
+	font-weight: 450;
 	line-height: 1;
 	white-space: nowrap;
 	transition: background-color 0.12s ease, color 0.12s ease;
 }
+.sentence-tok,
 button.ctx-chip,
 label.ctx-chip {
 	cursor: pointer;
 }
+.sentence-tok:hover:not(:disabled),
+.sentence-tok.open,
+.sentence-tok[aria-expanded='true'],
 button.ctx-chip:hover:not(:disabled),
 label.ctx-chip:hover,
 button.ctx-chip.open {
-	background: color-mix(in oklch, var(--muted) 82%, var(--foreground));
+	background: var(--hover-overlay);
 	color: var(--foreground);
 }
+.sentence-tok:disabled,
 button.ctx-chip:disabled {
 	cursor: default;
 }
+.sentence-tok:focus-visible,
 .ctx-chip:focus-visible,
 .ctx-chip:has(input:focus-visible) {
-	outline: 1px solid var(--primary);
-	outline-offset: 2px;
+	outline: 2px solid var(--ring);
+	outline-offset: 1px;
 }
+.sentence-tok > svg,
 .ctx-chip > svg,
 .ctx-chip > :where(span, div) > svg {
 	flex-shrink: 0;
-	color: var(--subtle-foreground);
+	width: 14px;
+	height: 14px;
+	color: currentColor;
 }
+/* A taller line than the chip's own: `overflow` would crop descenders at 1. */
+.sentence-tok-label,
 .ctx-chip .ctx-chip-label {
 	min-width: 0;
+	line-height: 1.4;
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap;
 }
-/* Trailing chevron on menu chips: smaller and dimmer than the leading glyph. */
-.ctx-chip .ctx-chip-chev {
-	width: 10px;
-	height: 10px;
-	margin-left: -1px;
+.sentence-tok .sentence-count {
 	color: var(--subtle-foreground);
-	opacity: 0.8;
+	font-size: var(--fs-label);
+	font-variant-numeric: tabular-nums;
 }
-/* The checkbox-style worktree chip: a real (visually hidden) input drives a
-   12px box that fills with the accent when checked. */
+/* One chevron: a mask in the text's colour, dimmed. The chip row's inline
+   chevrons are sized to match it. */
+.sentence-tok[aria-haspopup]:not(:disabled)::after,
+.chevron-after::after {
+	content: '';
+	flex-shrink: 0;
+	width: 12px;
+	height: 12px;
+	margin-left: -2px;
+	background: currentColor;
+	opacity: 0.6;
+	-webkit-mask: var(--chevron-down-mask) center / contain no-repeat;
+	mask: var(--chevron-down-mask) center / contain no-repeat;
+}
+.ctx-chip > svg.ctx-chip-chev,
+.ctx-chip > svg.lucide-chevron-down {
+	width: 12px;
+	height: 12px;
+	margin-left: -2px;
+	color: currentColor;
+	opacity: 0.6;
+}
+/* A phone's row is a row of 44px targets, labels only so it stays one line. */
+@media (max-width: 480px) {
+	.sentence-tok,
+	.ctx-chip {
+		height: 44px;
+		padding: 0 8px;
+	}
+	.sentence-tok > svg { display: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+	.sentence-tok,
+	.ctx-chip { transition: none; }
+}
+/* The worktree chip: a real (visually hidden) input drives its switch. */
 .ctx-chip input[type='checkbox'] {
 	position: absolute;
 	width: 1px;
@@ -1095,36 +1118,8 @@ button.ctx-chip:disabled {
 .ctx-chip .ctx-chip-cb {
 	display: grid;
 	place-items: center;
-	width: 12px;
-	height: 12px;
-	border-radius: 3px;
-	box-shadow: inset 0 0 0 1px var(--subtle-foreground);
-	background: transparent;
-	flex-shrink: 0;
-	transition: background-color 0.12s ease, box-shadow 0.12s ease;
-}
-.ctx-chip .ctx-chip-cb > svg {
-	width: 9px;
-	height: 9px;
-	color: var(--primary-foreground);
-	display: none;
-}
-.ctx-chip .ctx-chip-cb.checked {
-	background: var(--primary);
-	box-shadow: none;
-}
-.ctx-chip .ctx-chip-cb.checked > svg {
-	display: block;
-}
-/* Hairline separator between chip groups. */
-.ctx-sep {
-	width: 1px;
-	height: 12px;
-	margin: 0 2px;
-	background: var(--border-strong);
 	flex-shrink: 0;
 }
-
 /* ============================================================
    DESKTOP APP CHROME
    The desktop shell (desktop/) is a frameless Electron window whose
@@ -1150,11 +1145,31 @@ html.desktop:not(.desktop-fullscreen) {
 	--desktop-overlay-top: var(--titlebar-height);
 }
 
-html.desktop .sb-head,
-html.desktop .topbar {
+html.desktop :is(.sb-head, .topbar, .rail-titlebar, .panel-header, .p-head, .view-titlebar, .st-dtop, .page-terminal > .bar) {
 	-webkit-app-region: drag;
 	app-region: drag;
 	user-select: none;
+}
+/* All shared-shell controls, including nested More menus and the collapsed
+   panel launcher, must remain clickable inside the native title-bar band. */
+html.desktop :is(.sidebar, .view-shell, .reopen-panel) :is(button, a, input, textarea, select, summary, [role='button'], [role='menu'], [role='menuitem']),
+html.desktop .reopen-panel {
+	-webkit-app-region: no-drag;
+	app-region: no-drag;
+}
+html.desktop :is(.panel-header, .p-head, .page-terminal > .bar) {
+	height: var(--titlebar-height);
+	min-height: var(--titlebar-height);
+}
+html.desktop .st-dtop {
+	inset-inline-end: max(var(--st-gutter), calc(var(--titlebar-right) + 12px));
+}
+html.desktop .page-terminal > .bar {
+	padding-right: calc(var(--titlebar-right) + 12px);
+}
+/* macOS traffic lights occupy the leading edge of the rail. */
+html.desktop-darwin:not(.desktop-fullscreen) .rail:not(.phone) {
+	padding-top: calc(var(--titlebar-height) + 8px);
 }
 html.desktop .sb-head :is(button, a, input, [role='button'], [role='menu'], [role='menuitem'], .tb-right),
 html.desktop .topbar :is(button, a, input, [role='button'], [role='menu'], [role='menuitem'], .tb-right) {
@@ -1171,7 +1186,7 @@ html.desktop .topbar :is(button, a, input, [role='button'], [role='menu'], [role
      but comes before it in the document, so its header buttons (bell, update)
      lost their clicks to the strip. While it floats, the strip stops dragging;
      its scrim covers the page anyway. */
-html.desktop .app-body:has(> .sidebar-slot.floating) .topbar {
+html.desktop .app-body:has(> .sidebar-slot:is(.floating, .panel-overlay:not(.rail-only))) :is(.topbar, .view-titlebar, .st-dtop, .page-terminal > .bar) {
 	-webkit-app-region: no-drag;
 	app-region: no-drag;
 }

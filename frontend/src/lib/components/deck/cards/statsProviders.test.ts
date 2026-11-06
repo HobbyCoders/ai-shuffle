@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ProviderUsage } from '$lib/api/analytics';
-import { billingLabel, providerCostCell, providerTotals } from './statsProviders';
+import { billingLabel, formatCost, providerCostCell, providerTotals } from './statsProviders';
 
 function usage(overrides: Partial<ProviderUsage> = {}): ProviderUsage {
 	return {
@@ -23,6 +23,20 @@ function usage(overrides: Partial<ProviderUsage> = {}): ProviderUsage {
 		...overrides
 	};
 }
+
+describe('formatCost', () => {
+	it('shows two decimals at every size', () => {
+		expect(formatCost(0)).toBe('$0.00');
+		expect(formatCost(0.01)).toBe('$0.01');
+		expect(formatCost(1.5)).toBe('$1.50');
+		expect(formatCost(250)).toBe('$250.00');
+	});
+
+	it('does not round a real cost under a cent down to zero', () => {
+		expect(formatCost(0.004)).toBe('<$0.01');
+		expect(formatCost(0.0099)).toBe('<$0.01');
+	});
+});
 
 describe('providerCostCell', () => {
 	it('shows a priced API provider as a plain estimate', () => {

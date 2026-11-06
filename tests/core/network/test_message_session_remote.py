@@ -99,7 +99,7 @@ async def test_lists_active_chats_on_another_online_worker(workers, monkeypatch,
     assert not outcome.is_error, outcome.text
     result = json.loads(outcome.text)
     remote = {entry["id"]: entry for entry in result["sessions"] if entry.get("worker")}
-    assert set(remote) == {"target"}
+    assert set(remote) == {"target", "archived-chat"}  # Raw legacy status is no access fence.
     assert remote["target"]["owner_device_id"] == a.device_id and remote["target"]["worker"] == "ServerWorker"
     assert remote["target"]["title"] == "ServerWorker chat"
     assert "MessageSession relays to them" in result["note"]
@@ -136,13 +136,18 @@ async def test_missing_mirror_discovery_keeps_destination_fences(workers, monkey
     with b.active():
         assert database.get_session("target") is None
         listed = await _tool("ListSessions", {"scope": "all"})
-        assert json.loads(listed.text)["sessions"] == []
-        refused = await _tool("MessageSession", MESSAGE)
-        assert refused.is_error
-        assert _receipts() == []
+        outcome = await _tool("MessageSession", MESSAGE)
+        if fields == {"status": "archived"}:
+            assert [entry["id"] for entry in json.loads(listed.text)["sessions"]] == ["target"]
+            assert not outcome.is_error, outcome.text
+            assert len(_receipts()) == 1
+        else:
+            assert json.loads(listed.text)["sessions"] == []
+            assert outcome.is_error
+            assert _receipts() == []
     with a.active():
-        assert agent_turns("target") == []
-    assert kicks == []
+        assert len(agent_turns("target")) == (1 if fields == {"status": "archived"} else 0)
+    assert kicks == (["target"] if fields == {"status": "archived"} else [])
 
 
 async def test_explicit_local_owner_survives_legacy_instance_change(workers, monkeypatch, kicks):
@@ -519,7 +524,7 @@ async def test_owning_worker_applies_its_own_peer_checks(workers, monkeypatch, k
     _api_user(a, user_id="someone-else")
     # Changes the owning worker has not published yet: its own row decides.
     cases = [
-        ({"status": "archived"}, "archived"),
+        ({"is_active": False}, "not an eligible peer"),
         ({"api_user_id": "someone-else"}, "not an eligible peer"),
     ]
     for number, (fields, expected) in enumerate(cases):
@@ -530,7 +535,7 @@ async def test_owning_worker_applies_its_own_peer_checks(workers, monkeypatch, k
             assert expected in outcome.text, outcome.text
             # Nothing was queued, so the reservation is given back.
             assert _receipts() == []
-        _update(a, "target", publish=False, status="active", api_user_id=None)
+        _update(a, "target", publish=False, status="active", is_active=True, api_user_id=None)
     monkeypatch.setattr(task_registry, "is_user_stopped", lambda sid: sid == "target")
     with b.active():
         outcome = await _tool("MessageSession", {**MESSAGE, "request_id": "stopped"})
@@ -691,7 +696,7 @@ async def test_remote_message_steers_a_busy_receiver_with_current_remote_scope(
             caller = Mock(side_effect=AssertionError("relayed message used local sender authority"))
             monkeypatch.setattr(orch, "_caller", caller)
         submitted = await runtime.steer_pending()
-        if invalidate not in {None, "legacy_transport"}:
+        if invalidate not in {None, "legacy_transport", "receiver_archive"}:
             assert submitted == 0
             adapter.steer_peer.assert_not_awaited()
         else:
