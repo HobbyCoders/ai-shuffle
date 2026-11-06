@@ -59,6 +59,8 @@ import {
 // ============================================================================
 
 interface ProvidersState {
+	/** The first registry, integration and Claude reads have all settled. */
+	initialSnapshotReady: boolean;
 	// ----- model_providers registry -----
 	providers: ModelProvider[];
 	providersLoading: boolean;
@@ -99,6 +101,7 @@ interface ProvidersState {
 // ============================================================================
 
 const initialState: ProvidersState = {
+	initialSnapshotReady: false,
 	providers: [],
 	providersLoading: false,
 	providersError: '',
@@ -174,6 +177,10 @@ export const providers = {
 			providers.loadIntegrations(),
 			providers.loadClaude()
 		]);
+		// Until all three reads settle, empty credentials are unknown rather
+		// than Not connected. Publish the first list once; later refreshes keep
+		// the existing rows visible instead of returning to a loading screen.
+		_update((s) => ({ ...s, initialSnapshotReady: true }));
 	},
 
 	async loadProviders(silent = false) {
