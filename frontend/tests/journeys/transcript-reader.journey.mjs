@@ -4,6 +4,7 @@
 import { runJourney, VIEWPORTS } from './runner.mjs';
 import { SLOW_REPLY, expect, openNewChat, scriptTag, typeAndSend, uniq, waitChat, waitChatOpen, waitTurnSettled } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
+import { installSessionEventDeliveryHold } from './lib/event-delivery.mjs';
 
 // Hosted journeys build only the shared desktop UI and exercise it at both
 // widths. Opt in to the separately built production mobile shell for local QA:
@@ -138,7 +139,7 @@ const cases = [{
 		}
 	}, {
 		name: 'same-count-streaming-growth',
-		async setup({ page, status, variant, readingBoundary = false, replyScenario = 'reader-growth', project = null }) {
+		async setup({ page, status, variant, readingBoundary = false, deliveryBurst = false, replyScenario = 'reader-growth', project = null }) {
 			// Produce a fresh native prefix through the real composer/provider, then
 			// replay it into the affected shell. No synthetic feed/state or SDK-only
 			// fork endpoint: default native seed sessions have no SDK session id.
@@ -151,6 +152,7 @@ const cases = [{
 			const id = await page.evaluate(() => JSON.parse(sessionStorage.getItem('ai-shuffle-active-session') || 'null')?.sessionId);
 			expect(typeof id === 'string', 'the real producer bound a fresh native session');
 			const prefix = mobileShell && variant.viewport === 'phone' ? '/mobile/' : '/';
+			if (deliveryBurst) await page.addInitScript(installSessionEventDeliveryHold);
 			await page.goto(new URL(`${prefix}?session=${encodeURIComponent(id)}`, status.urls.ui).toString());
 			await waitChatOpen(page, { messagesAtLeast: 2, hold: 250 });
 			if (project) await page.getByRole('button', { name: /^Git actions:/ }).waitFor();
@@ -165,7 +167,22 @@ const cases = [{
 			await page.mouse.wheel(0, -160);
 			await page.getByRole('button', { name: 'Jump to latest message', exact: true }).waitFor();
 			await twoFrames(page);
-			await page.locator(LOG).evaluate((log, boundary) => {
+			if (deliveryBurst) {
+				// #1159: force repricing BEFORE the reader reaches the user/reply
+				// boundary. No fake messages, dropped frames or changed provider speed.
+				await page.evaluate(() => window.__journeyEventDelivery.pause());
+				await page.waitForFunction(() => window.__journeyEventDelivery.textChars >= 6000, null, { timeout: 12_000 });
+				expect(await page.evaluate(() => !window.__journeyEventDelivery.safetyReleased), 'the held real stream is released by the test, not its safety deadline');
+				await page.evaluate(() => window.__journeyEventDelivery.release());
+				await twoFrames(page);
+				const delta = await page.locator(LOG).evaluate(log => {
+					const user = log.querySelector('[data-transcript-index="2"]');
+					return user.getBoundingClientRect().top - log.getBoundingClientRect().top + 24;
+				});
+				// Real reader input must not prefetch so much older history that it
+				// evicts the still-visible growing reply and leaves blank space.
+				await page.mouse.wheel(0, delta);
+			} else await page.locator(LOG).evaluate((log, boundary) => {
 				const row = [...log.querySelectorAll('[data-transcript-index]')].filter(row => row.textContent.includes('GROWING_READER_START')).at(-1);
 				const key = boundary ? log.querySelector(`[data-transcript-index="${Number(row.dataset.transcriptIndex) - 1}"]`) : row;
 				log.scrollTop += key.getBoundingClientRect().top - log.getBoundingClientRect().top + (boundary ? 24 : 400);
@@ -296,6 +313,10 @@ cases.push({
 	...growingReply,
 	name: 'same-count-visible-boundary-growth',
 	setup: context => growingReply.setup({ ...context, readingBoundary: true })
+}, {
+	...growingReply,
+	name: 'same-count-visible-boundary-growth-delayed-delivery',
+	setup: context => growingReply.setup({ ...context, readingBoundary: true, deliveryBurst: true })
 });
 
 cases.push({
