@@ -92,8 +92,9 @@ def _valid(cursor: Any, name: str) -> bool:
 def _online_cursor() -> Iterator[Any]:
     """Borrow only the initialized database; never bypass test/shim routing.
 
-    Concurrent DDL needs autocommit. Restore both session settings and the
-    transaction mode before returning the slot, and release only our own lock.
+    Concurrent DDL needs autocommit. Take startup's schema lock too: otherwise
+    startup's plain index DDL can queue behind us and indirectly block DML.
+    Restore settings/mode before returning the slot; release only our locks.
     """
     with get_db() as db:
         raw = getattr(db, "_conn", None)
@@ -110,9 +111,16 @@ def _online_cursor() -> Iterator[Any]:
                 cur.execute("SELECT pg_try_advisory_lock(hashtext(current_database()), "
                             "hashtext(current_schema() || '.history_indexing_v1')) AS ok")
                 locked = cur.fetchone()["ok"]
+                schema_locked = False
                 try:
-                    yield cur if locked else None
+                    if locked:
+                        from app.db.database import SCHEMA_INIT_LOCK_KEY
+                        cur.execute("SELECT pg_try_advisory_lock(%s) AS ok", (SCHEMA_INIT_LOCK_KEY,))
+                        schema_locked = cur.fetchone()["ok"]
+                    yield cur if locked and schema_locked else None
                 finally:
+                    if schema_locked:
+                        cur.execute("SELECT pg_advisory_unlock(%s)", (SCHEMA_INIT_LOCK_KEY,))
                     if locked:
                         cur.execute("SELECT pg_advisory_unlock(hashtext(current_database()), "
                                     "hashtext(current_schema() || '.history_indexing_v1'))")

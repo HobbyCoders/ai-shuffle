@@ -422,6 +422,14 @@ _TRIGGER_DDL = {
 }
 
 
+def _try_schema_lock(cursor) -> bool:
+    # Online DDL holds this key across autocommit statements. Never queue a
+    # trigger/table lock behind it: a queued DDL lock could block fresh DML.
+    from app.db.database import SCHEMA_INIT_LOCK_KEY
+    cursor.execute("SELECT pg_try_advisory_xact_lock(%s) AS ok", (SCHEMA_INIT_LOCK_KEY,))
+    return bool(cursor.fetchone()["ok"])
+
+
 def _set_lock_timeout(cursor, ms: int) -> None:
     cursor.execute("SELECT set_config('lock_timeout', %s, true)", (f"{int(ms)}ms",))
 
@@ -449,6 +457,9 @@ def install_objects(cursor, *, lock_timeout_ms: int = LOCK_TIMEOUT_MS) -> bool:
     """
     cursor.execute("SAVEPOINT session_recall_objects")
     try:
+        if not _try_schema_lock(cursor):
+            cursor.execute("RELEASE SAVEPOINT session_recall_objects")
+            return False
         cursor.execute("SELECT current_setting('lock_timeout') AS v")
         previous = cursor.fetchone()["v"]
         _set_lock_timeout(cursor, lock_timeout_ms)
@@ -513,6 +524,9 @@ def install_triggers(*, lock_timeout_ms: int = LOCK_TIMEOUT_MS) -> bool:
                 present = _source_triggers(cur, table)
                 if present == set(wanted):
                     continue
+                if not _try_schema_lock(cur):
+                    complete = False
+                    continue
                 _set_lock_timeout(cur, lock_timeout_ms)
                 for stale in sorted(present - set(wanted)):
                     cur.execute(f'DROP TRIGGER "{stale}" ON {table}')
@@ -534,6 +548,8 @@ def uninstall(*, lock_timeout_ms: int = 2000) -> None:
     for table, _ in _SOURCE_TABLES.values():
         with get_db() as conn:
             cur = conn.cursor()
+            if not _try_schema_lock(cur):
+                raise RuntimeError("schema maintenance busy; retry projection removal")
             names = _source_triggers(cur, table)
             if names:
                 _set_lock_timeout(cur, lock_timeout_ms)
@@ -541,6 +557,8 @@ def uninstall(*, lock_timeout_ms: int = 2000) -> None:
                     cur.execute(f'DROP TRIGGER "{name}" ON {table}')
     with get_db() as conn:
         cur = conn.cursor()
+        if not _try_schema_lock(cur):
+            raise RuntimeError("schema maintenance busy; retry projection removal")
         _set_lock_timeout(cur, lock_timeout_ms)
         cur.execute(f"DROP TABLE IF EXISTS {TABLE}")
         cur.execute("DROP TABLE IF EXISTS session_recall_backfill")

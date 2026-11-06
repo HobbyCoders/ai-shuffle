@@ -244,6 +244,143 @@ def test_waiting_drop_allows_insert_update_and_search(monkeypatch, ready_project
     assert set(retirement.INDEXES).isdisjoint(names())
 
 
+def _wait_for_pg(cur, sql, params=()):
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        cur.execute(sql, params)
+        if cur.fetchone()["ok"]:
+            return
+        time.sleep(0.01)
+    pytest.fail("expected PostgreSQL lock wait was not observed")
+
+
+def test_startup_ddl_cannot_queue_table_lock_behind_waiting_drop(monkeypatch, ready_projection):
+    from app.db import database
+
+    seed_old_indexes()
+    startup_started = threading.Event()
+    ddl_started = threading.Event()
+    startup_pid = []
+    original_db = database.get_db
+
+    @contextmanager
+    def startup_db():
+        with original_db() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT pg_backend_pid() AS pid")
+            startup_pid.append(cur.fetchone()["pid"])
+            startup_started.set()
+            yield conn
+
+    def startup_ddl(cur):
+        ddl_started.set()
+        # The existing-index no-op still requests ShareLock. This is the real
+        # unconditional statement from startup's column-migration pass.
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_sse_main "
+                    "ON session_store_entries(project_key,session_id,id) WHERE subpath IS NULL")
+
+    monkeypatch.setattr(database, "get_db", startup_db)
+    monkeypatch.setattr(database, "migrations_fingerprint", lambda: "retire-queue-order-test")
+    monkeypatch.setattr(database, "_run_column_migrations", startup_ddl)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        with base.get_db() as reader:
+            cur = reader.cursor()
+            cur.execute("SELECT * FROM session_store_entries LIMIT 1")
+            dropping = executor.submit(retirement.run_pass, seconds=10)
+            _wait_for_pg(cur, "SELECT EXISTS (SELECT FROM pg_locks WHERE "
+                         "relation='session_store_entries'::regclass "
+                         "AND mode='ShareUpdateExclusiveLock' AND granted) AS ok")
+            starting = executor.submit(database.init_database)
+            assert startup_started.wait(2)
+            _wait_for_pg(cur, "SELECT wait_event='advisory' AS ok FROM pg_stat_activity WHERE pid=%s",
+                         (startup_pid[0],))
+            assert not ddl_started.is_set()
+            cur.execute("SELECT count(*) AS n FROM pg_locks WHERE pid=%s "
+                        "AND relation='session_store_entries'::regclass AND mode='ShareLock'",
+                        (startup_pid[0],))
+            assert cur.fetchone()["n"] == 0
+            with base.get_db() as writer:
+                write = writer.cursor()
+                write.execute("SET LOCAL statement_timeout='250ms'")
+                write.execute("INSERT INTO session_store_entries(project_key,session_id,entry) "
+                              "VALUES ('retire-queue','retire-queue','{}') RETURNING id")
+                row_id = write.fetchone()["id"]
+                write.execute("UPDATE session_store_entries SET created_at=NOW() WHERE id=%s", (row_id,))
+                write.execute("DELETE FROM session_store_entries WHERE id=%s", (row_id,))
+            listed("needlealpha")
+            assert not dropping.done() and not starting.done()
+        assert dropping.result(timeout=5)
+        starting.result(timeout=5)
+    assert ddl_started.is_set()
+    assert set(retirement.INDEXES).isdisjoint(names())
+
+
+def test_startup_lock_defers_online_and_projection_ddl(monkeypatch, ready_projection):
+    from app.db.database import SCHEMA_INIT_LOCK_KEY
+
+    seed_old_indexes()
+    with base.get_db() as startup:
+        startup.cursor().execute("SELECT pg_advisory_xact_lock(%s)", (SCHEMA_INIT_LOCK_KEY,))
+        before = time.monotonic()
+        assert retirement.run_pass() is False
+        assert time.monotonic() - before < 0.5
+        with history_indexing._online_cursor() as cur:
+            assert cur is None  # history migration uses the same gate
+        with base.get_db() as repair:
+            assert session_recall.install_objects(repair.cursor()) is False
+        with monkeypatch.context() as mp:
+            # Simulate trigger repair in a second app process. It must not issue
+            # CREATE TRIGGER (ShareRowExclusiveLock) while online DDL holds the key.
+            mp.setattr(session_recall, "_source_triggers", lambda *_: set())
+            assert session_recall.install_triggers() is False
+        with pytest.raises(RuntimeError, match="schema maintenance busy"):
+            session_recall.uninstall()
+        assert "idx_fluid_nodes_trgm" in names()
+    assert retirement.run_pass(seconds=10)  # no advisory lock leaked on the skip path
+
+
+def test_slow_tail_index_build_outlives_drop_budget_and_is_not_restarted(monkeypatch, ready_projection):
+    with history_indexing._online_cursor() as cur:
+        cur.execute(f"DROP INDEX CONCURRENTLY {session_recall.NATIVE_TAIL_INDEX}")
+    original = history_indexing._online_cursor
+    builds = []
+    drops = []
+
+    class SlowBuildCursor:
+        def __init__(self, cursor):
+            self.cursor = cursor
+
+        def execute(self, sql, params=None):
+            # Scale down only the drop timeout. A slow build must outlive it.
+            if sql == "SET statement_timeout = '3min'":
+                sql = "SET statement_timeout = '50ms'"
+            if sql.startswith("CREATE INDEX CONCURRENTLY"):
+                self.cursor.execute("SHOW statement_timeout")
+                assert self.cursor.fetchone()["statement_timeout"] == "0"
+                self.cursor.execute("SELECT pg_sleep(0.2)")
+                builds.append(sql)
+            if sql.startswith("DROP INDEX CONCURRENTLY"):
+                self.cursor.execute("SHOW statement_timeout")
+                assert self.cursor.fetchone()["statement_timeout"] == "50ms"
+                drops.append(sql)
+            return self.cursor.execute(sql, params)
+
+        def __getattr__(self, name):
+            return getattr(self.cursor, name)
+
+    @contextmanager
+    def slow_cursor():
+        with original() as cur:
+            yield SlowBuildCursor(cur) if cur is not None else None
+
+    monkeypatch.setattr(history_indexing, "_online_cursor", slow_cursor)
+    assert retirement.run_pass(seconds=0.1) is False  # budget expires after successful build
+    with base.get_db() as conn:
+        assert session_recall.native_tail_index_ready(conn.cursor())
+    assert retirement.run_pass(seconds=10)
+    assert len(builds) == 1 and len(drops) > 1
+
+
 def test_retirement_finishes_while_staggered_writers_keep_running(ready_projection):
     seed_old_indexes()
     stop = threading.Event()

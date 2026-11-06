@@ -23,10 +23,11 @@ INDEXES = (
 def run_pass(*, seconds: float = 2.0) -> bool:
     """Bounded, restart-safe maintenance; False means retry on a later pass.
 
-    Share history indexing's advisory lock so it cannot split an index while
-    we retire it. Autocommit is required for CONCURRENTLY. The pass budget is
-    checked BETWEEN statements; an in-flight statement may take up to three
-    minutes. In particular, do not cancel virtualxid waits for existing writers:
+    Share history indexing's and startup's schema advisory locks so other DDL
+    cannot queue behind us and indirectly block writers. Autocommit is required
+    for CONCURRENTLY. The pass budget is checked BETWEEN statements; a drop may
+    take up to three minutes. The one-time tail index build has no statement
+    timeout, so slow heap scans can finish. Do not cancel virtualxid waits:
     the concurrent DDL's ShareUpdateExclusive lock does not block ordinary DML.
     Failed concurrent DDL is repaired on a later pass. Never CASCADE.
     """
@@ -46,9 +47,16 @@ def run_pass(*, seconds: float = 2.0) -> bool:
             if not session_recall.native_tail_index_ready(cur):
                 name = session_recall.NATIVE_TAIL_INDEX
                 cur.execute(f"DROP INDEX CONCURRENTLY IF EXISTS {name}")
-                cur.execute(f"CREATE INDEX CONCURRENTLY {name} ON {session_recall.TABLE} "
-                            f"(session_id, row_key) WHERE source = 'n' "
-                            f"AND part >= {session_recall.NATIVE_CAPPED_PART}")
+                # Restarting both heap scans every three minutes can starve a
+                # slow worker forever. This one-time concurrent build does not
+                # block DML; schema-lock coordination keeps other DDL off it.
+                cur.execute("SET statement_timeout = '0'")
+                try:
+                    cur.execute(f"CREATE INDEX CONCURRENTLY {name} ON {session_recall.TABLE} "
+                                f"(session_id, row_key) WHERE source = 'n' "
+                                f"AND part >= {session_recall.NATIVE_CAPPED_PART}")
+                finally:
+                    cur.execute("SET statement_timeout = '3min'")
             for name in INDEXES:
                 for suffix in ("", "_h0", "_h2"):
                     if time.monotonic() >= deadline:
