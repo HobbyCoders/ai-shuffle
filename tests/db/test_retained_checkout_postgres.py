@@ -8,6 +8,7 @@ the wire. Two numbers matter. ``fd`` is libpq's own, the one its poll waits on.
 from __future__ import annotations
 
 import asyncio
+import errno
 import logging
 import os
 import re
@@ -897,13 +898,58 @@ async def test_a_pid_reused_before_any_absence_is_seen_is_not_charged_to_the_dea
 # A commit whose number is gone fails like any lost connection
 # ---------------------------------------------------------------------------
 
+@pytest.mark.parametrize("allocate_on_failure", [False, True])
 def test_a_commit_whose_number_was_closed_fails_as_a_lost_connection(
-    private_pool,  # noqa: F811
+    private_pool, monkeypatch, allocate_on_failure,  # noqa: F811
 ) -> None:
     """Callers handle psycopg2 errors; a bare EBADF from arming was none of those."""
-    with pytest.raises(psycopg2.OperationalError, match="statement not sent"):
-        with base.get_db() as conn:
-            conn.cursor().execute("SELECT 1")
-            os.close(conn.fileno())
-    assert not private_pool._used
-    _serve_healthy_reads()
+    real_arm = commit_deadline._watchdog.arm
+    stranger: socket.socket | None = None
+    stranger_identity: tuple[int, int] | None = None
+
+    def arm(fd: int, seconds: float) -> socket.socket:
+        nonlocal stranger, stranger_identity
+        try:
+            return real_arm(fd, seconds)
+        except OSError:
+            if allocate_on_failure and stranger is None:
+                # Force the allocator's competing open at the failure boundary.
+                # A raw close of libpq's fd lets it steal and later close this socket.
+                stranger = socket.socket()
+                stranger_identity = commit_deadline._identity(stranger.fileno())
+                assert stranger_identity is not None
+            raise
+
+    monkeypatch.setattr(commit_deadline._watchdog, "arm", arm)
+    real_dup = socket.dup
+    number = -1
+
+    def lost_number(fd: int) -> int:
+        if fd == number:
+            # Inject the actual arming failure without freeing libpq's number.
+            # A raw os.close leaves libpq owning a stale number: its later close
+            # can hit an unrelated allocation, which can then hit the next read.
+            raise OSError(errno.EBADF, "connection socket was closed")
+        return real_dup(fd)
+
+    try:
+        with monkeypatch.context() as fault:
+            fault.setattr(commit_deadline.socket, "dup", lost_number)
+            with pytest.raises(psycopg2.OperationalError, match="statement not sent") as error:
+                with base.get_db() as conn:
+                    conn.cursor().execute("SELECT 1")
+                    number = conn.fileno()
+            assert isinstance(error.value.__cause__, OSError)
+            assert error.value.__cause__.errno == errno.EBADF
+        assert not private_pool._used
+        _serve_healthy_reads()
+        if allocate_on_failure:
+            assert stranger is not None
+            assert commit_deadline._identity(stranger.fileno()) == stranger_identity
+    finally:
+        if stranger is not None:
+            if commit_deadline._identity(stranger.fileno()) == stranger_identity:
+                stranger.close()
+            else:
+                # A failed regression must not close the next pooled connection.
+                stranger.detach()
