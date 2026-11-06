@@ -327,6 +327,31 @@ describe('session navigation closes header dropdowns', () => {
 		switcher.destroy();
 	});
 
+	it.each(dropdowns)('keeps %s open on the same-surface bootstrap landing', (id) => {
+		const { switcher } = makeSwitcher(fullState({ sessionId: null }));
+		openDropdown(id);
+		switcher.newChat({ initialLanding: true });
+		expect(get(openHeaderDropdown)).toBe(id);
+		openHeaderDropdown.set(null);
+		switcher.destroy();
+	});
+
+	it('still closes an open dropdown if the bootstrap landing leaves a session', () => {
+		const { switcher } = makeSwitcher(fullState());
+		openDropdown('notifications');
+		switcher.newChat({ initialLanding: true });
+		expect(get(openHeaderDropdown)).toBeNull();
+		switcher.destroy();
+	});
+
+	it('closes a dropdown on explicit New chat even when already on New chat', () => {
+		const { switcher } = makeSwitcher(fullState({ sessionId: null }));
+		openDropdown('notifications');
+		switcher.newChat();
+		expect(get(openHeaderDropdown)).toBeNull();
+		switcher.destroy();
+	});
+
 	it.each(dropdowns)('closes %s when starting a new chat', (id) => {
 		const { switcher, getState } = makeSwitcher(fullState());
 		openDropdown(id);
