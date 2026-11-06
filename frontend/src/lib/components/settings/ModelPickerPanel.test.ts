@@ -88,6 +88,22 @@ describe('ModelPickerPanel', () => {
 		}
 	});
 
+	it('fades the list bottom only while more rows wait below', async () => {
+		render(ModelPickerPanel, { props: { ...buildModelPickerCatalog(), value: '', onSelect: vi.fn() } });
+		const list = screen.getByRole('listbox');
+		const size = (scrollTop: number) => {
+			Object.defineProperty(list, 'scrollHeight', { configurable: true, value: 600 });
+			Object.defineProperty(list, 'clientHeight', { configurable: true, value: 300 });
+			list.scrollTop = scrollTop;
+		};
+		size(0);
+		await fireEvent.scroll(list);
+		expect(list.classList.contains('more-below')).toBe(true);
+		size(300);
+		await fireEvent.scroll(list);
+		expect(list.classList.contains('more-below')).toBe(false);
+	});
+
 	it('shows selectable 272K and 1M controls for Sol 6.1', async () => {
 		const onContextChoiceSelect = vi.fn();
 		render(ModelPickerPanel, { props: { ...buildModelPickerCatalog(),

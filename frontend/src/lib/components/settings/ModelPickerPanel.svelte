@@ -98,6 +98,23 @@
 	let query = $state('');
 	let searchEl = $state<HTMLInputElement | null>(null);
 	let listEl = $state<HTMLDivElement | null>(null);
+	// True while rows continue below the visible part of the list: the list
+	// then fades its last 16px, so a row never looks cut off at the edge.
+	let moreBelow = $state(false);
+	function measureMoreBelow() {
+		if (!listEl) return;
+		moreBelow = listEl.scrollTop + listEl.clientHeight < listEl.scrollHeight - 1;
+	}
+	$effect(() => {
+		const el = listEl;
+		if (!el) return;
+		measureMoreBelow();
+		const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measureMoreBelow);
+		ro?.observe(el);
+		const mo = typeof MutationObserver === 'undefined' ? null : new MutationObserver(measureMoreBelow);
+		mo?.observe(el, { childList: true, subtree: true });
+		return () => { ro?.disconnect(); mo?.disconnect(); };
+	});
 
 	const isSearching = $derived(query.trim().length > 0);
 
@@ -565,7 +582,7 @@
 			<div class="mpp-notice">{notice}</div>
 		{/if}
 
-		<div class="mpp-list" role="listbox" aria-label={ariaLabel} bind:this={listEl}>
+		<div class="mpp-list" class:more-below={moreBelow} role="listbox" aria-label={ariaLabel} bind:this={listEl} onscroll={measureMoreBelow}>
 			{#each visibleLeading as r (r.value)}
 				{@render plainRow(r)}
 			{/each}
@@ -967,6 +984,9 @@
 		gap: 2px;
 		scrollbar-width: none;
 	}
+	.mpp-list.more-below {
+		mask-image: linear-gradient(to bottom, #000 calc(100% - 16px), transparent);
+	}
 
 	.mpp-group-name {
 		display: flex;
@@ -975,9 +995,10 @@
 		padding: 12px 8px 4px;
 		font-size: 12px;
 		font-weight: 500;
-		color: var(--secondary-foreground);
+		color: var(--muted-foreground);
 	}
-	.mpp-section:first-child .mpp-group-name { padding-top: 4px; }
+	/* The list's own 6px top padding completes the 12px above the first header. */
+	.mpp-section:first-child .mpp-group-name { padding-top: 6px; }
 	.mpp-group-name small {
 		font-size: 12px;
 		font-weight: 400;
@@ -1027,7 +1048,7 @@
 	}
 	.mpp-row-label {
 		font-size: 13px;
-		font-weight: 500;
+		font-weight: 400;
 		line-height: 1.35;
 		overflow: hidden;
 		text-overflow: ellipsis;
