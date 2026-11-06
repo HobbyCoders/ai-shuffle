@@ -42,6 +42,7 @@ def clean_retirement_state(pg_schema):  # noqa: F811
 @pytest.fixture
 def ready_projection():
     assert session_recall.run_backfill(max_seconds=5, pause_seconds=0)
+    assert retirement.run_pass(seconds=10)
 
 
 SHAPES = (
@@ -191,7 +192,7 @@ def test_not_ready_and_advisory_lock_defer_retirement(monkeypatch, ready_project
     assert set(retirement.INDEXES).isdisjoint(names())
 
 
-def test_drop_is_concurrent_bounded_and_does_not_block_insert(monkeypatch, ready_projection):
+def test_waiting_drop_allows_insert_update_and_search(monkeypatch, ready_projection):
     seed_old_indexes()
     started = threading.Event()
     original = history_indexing._online_cursor
@@ -206,7 +207,7 @@ def test_drop_is_concurrent_bounded_and_does_not_block_insert(monkeypatch, ready
                 assert self.cursor.connection.autocommit
                 assert sql.startswith("DROP INDEX CONCURRENTLY IF EXISTS ")
                 self.cursor.execute("SELECT current_setting('lock_timeout') AS timeout")
-                assert self.cursor.fetchone()["timeout"] == "250ms"
+                assert self.cursor.fetchone()["timeout"] == "0"
                 drops.append(sql)
                 started.set()
             return self.cursor.execute(sql, params)
@@ -222,10 +223,9 @@ def test_drop_is_concurrent_bounded_and_does_not_block_insert(monkeypatch, ready
     monkeypatch.setattr(history_indexing, "_online_cursor", tracked)
     # This reader pins the first GIN until commit. A non-concurrent DROP would
     # queue an ACCESS EXCLUSIVE lock and block the independent INSERT behind it.
-    with base.get_db() as reader:
-        reader.cursor().execute("SELECT * FROM fluid_session_nodes LIMIT 1")
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            before = time.monotonic()
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        with base.get_db() as reader:
+            reader.cursor().execute("SELECT * FROM fluid_session_nodes LIMIT 1")
             future = executor.submit(retirement.run_pass)
             assert started.wait(2)
             with base.get_db() as writer:
@@ -235,11 +235,66 @@ def test_drop_is_concurrent_bounded_and_does_not_block_insert(monkeypatch, ready
                 cur.execute("INSERT INTO fluid_session_nodes(session_id,node_id,ts,message) VALUES "
                             "('retire-concurrent','one',0,%s)",
                             (Json({"role": "user", "content": [{"kind": "text", "text": "insertneedle"}]}),))
-            assert future.result(timeout=3) is False
-            assert time.monotonic() - before < 2
+                cur.execute("UPDATE fluid_session_nodes SET ts = 1 WHERE session_id='retire-concurrent'")
+            listed("needlealpha")  # both real session-list searches while DROP waits
+            assert not future.done()
+        # Release the reader before waiting for the concurrent DROP's result.
+        assert future.result(timeout=5)
     assert drops
-    assert retirement.run_pass()  # completes an invalid/incomplete concurrent drop
     assert set(retirement.INDEXES).isdisjoint(names())
+
+
+def test_retirement_finishes_while_staggered_writers_keep_running(ready_projection):
+    seed_old_indexes()
+    stop = threading.Event()
+    active = [threading.Event(), threading.Event()]
+    commits = [0, 0]
+    latencies = []
+
+    def write(worker):
+        i = 0
+        while not stop.is_set():
+            with base.get_db() as conn:
+                cur = conn.cursor()
+                cur.execute("SET LOCAL statement_timeout = '250ms'")
+                before = time.monotonic()
+                cur.execute("INSERT INTO fluid_session_nodes(session_id,node_id,ts,message) "
+                            "VALUES (%s,%s,0,%s)", (f"retire-busy-{worker}", str(i),
+                            Json({"role": "user", "content": [{"kind": "text", "text": "writerneedle"}]})))
+                cur.execute("UPDATE fluid_session_nodes SET ts=1 WHERE session_id=%s AND node_id=%s",
+                            (f"retire-busy-{worker}", str(i)))
+                latencies.append(time.monotonic() - before)
+                active[worker].set()
+                # Constantly overlap transactions longer than the former 250ms
+                # lock timeout; only the DML itself must obey the small bound.
+                stop.wait(0.6)
+            commits[worker] += 1
+            i += 1
+
+    def retire():
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if retirement.run_pass():
+                return True
+        return False
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        writers = []
+        try:
+            writers.append(executor.submit(write, 0))
+            assert active[0].wait(2)
+            time.sleep(0.3)
+            writers.append(executor.submit(write, 1))
+            assert active[1].wait(2)
+            assert executor.submit(retire).result(timeout=12)
+            assert all(not writer.done() for writer in writers)
+            assert all(commits)  # retirement progressed through real writer commits
+            assert set(retirement.INDEXES).isdisjoint(names())
+        finally:
+            stop.set()
+            for writer in writers:
+                writer.result(timeout=3)
+    assert latencies and max(latencies) < 0.5
 
 
 def test_oversize_marker_stays_searchable_before_promotion(ready_projection):
@@ -271,6 +326,52 @@ def test_oversize_marker_stays_searchable_before_promotion(ready_projection):
         assert "idx_session_recall_text_trgm_n" in plan, plan
         assert "message)::text" not in plan
     assert "retire-marker" in listed("markerneedle")
+
+
+def test_cap_reaching_parts_preserve_historical_promoted_tail_matches(ready_projection):
+    from app.db import sessions
+
+    # Model an already-ready old installation: its capped rows have no pending
+    # markers, and the new small tail index does not exist yet.
+    with history_indexing._online_cursor() as cur:
+        cur.execute(f"DROP INDEX CONCURRENTLY {session_recall.NATIVE_TAIL_INDEX}")
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("INSERT INTO sessions(id,sdk_session_id,title) "
+                    "VALUES ('retire-capped','retire-capped-sdk','Synthetic')")
+        cur.execute("INSERT INTO fluid_session_nodes(session_id,node_id,ts,message) "
+                    "VALUES ('retire-capped-sdk','one',0,jsonb_build_object('role','user','content',"
+                    "jsonb_build_array(jsonb_build_object('kind','text','text',"
+                    "repeat('x',5000010) || ' tailneedle'))))")
+    before = listed("tailneedle")
+    assert set(before) == {"retire-capped"}
+    assert session_recall.promote_overflow(max_seconds=10, pause_seconds=0)
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        assert session_recall.ready(cur) and not session_recall.native_search_ready(cur)
+        cur.execute("SELECT max(part) AS last, min(part) AS first FROM session_recall_text "
+                    "WHERE source='n' AND session_id='retire-capped-sdk'")
+        assert dict(cur.fetchone()) == {"last": session_recall.NATIVE_CAPPED_PART, "first": 0}
+        cur.execute("SELECT pg_relation_filenode('session_recall_text') AS node, "
+                    "(SELECT count(*) FROM session_recall_text) AS rows")
+        original = cur.fetchone()
+    # Before the index is built, legacy fallback must still see beyond the cap.
+    assert listed("tailneedle") == before
+    assert retirement.run_pass(seconds=10)
+    assert listed("tailneedle") == before
+    assert listed("tailneedle absent") == {}
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        assert session_recall.native_search_ready(cur)
+        cur.execute("SELECT pg_relation_filenode('session_recall_text') AS node, "
+                    "(SELECT count(*) FROM session_recall_text) AS rows")
+        assert cur.fetchone() == original  # no rewrite, replay, or shape/version change
+        tail = history_indexing.search_table(cur, "session_recall_text", "r")
+        cur.execute(f"EXPLAIN SELECT r.session_id,r.row_key FROM {tail} "
+                    f"WHERE r.source='n' AND r.part >= {session_recall.NATIVE_CAPPED_PART}")
+        assert session_recall.NATIVE_TAIL_INDEX in str(cur.fetchall())
+        cte, _ = sessions._native_search_cte("s.id", "%s", "", cur, "tailneedle")
+        assert "message::text ILIKE" not in cte
 
 
 def test_pg_trgm_install_failure_keeps_unindexed_search_correct(monkeypatch):

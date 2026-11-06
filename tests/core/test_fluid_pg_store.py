@@ -787,7 +787,7 @@ def test_search_uses_ready_cache_or_legacy_columns(mock_db, monkeypatch, cached)
     from app.core.provider import fluid_pg_store as recall
     from app.db import schema_postgres
 
-    monkeypatch.setattr(schema_postgres, "session_recall_cache_ready", lambda _: cached)
+    monkeypatch.setattr(schema_postgres, "session_recall_cache_ready", lambda _, *, legacy_only=False: cached)
     columns = []
     planner_queries = []
     original = recall.get_db

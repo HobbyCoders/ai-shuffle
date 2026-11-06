@@ -24,27 +24,35 @@ def run_pass(*, seconds: float = 2.0) -> bool:
     """Bounded, restart-safe maintenance; False means retry on a later pass.
 
     Share history indexing's advisory lock so it cannot split an index while
-    we retire it. Autocommit is required for CONCURRENTLY. Both waits and each
-    statement are bounded; a failed concurrent drop may leave an invalid index,
-    which IF EXISTS will finish dropping on the next pass. Never CASCADE.
+    we retire it. Autocommit is required for CONCURRENTLY. The pass budget is
+    checked BETWEEN statements; an in-flight statement may take up to three
+    minutes. In particular, do not cancel virtualxid waits for existing writers:
+    the concurrent DDL's ShareUpdateExclusive lock does not block ordinary DML.
+    Failed concurrent DDL is repaired on a later pass. Never CASCADE.
     """
     deadline = time.monotonic() + seconds
     try:
         with history_indexing._online_cursor() as cur:
             if cur is None:
                 return False
-            cur.execute("SET lock_timeout = '250ms'")
-            cur.execute("SELECT set_config('statement_timeout', %s, false)",
-                        (f"{max(1, int(seconds * 1000))}ms",))
+            cur.execute("SET lock_timeout = '0'")
+            cur.execute("SET statement_timeout = '3min'")
             if not session_recall.ready(cur):
                 return False
+            # A native session-list prefilter must include rows promoted by old
+            # builds whose text was truncated at INDEX_MAX_CHARS. Index the
+            # existing cap-reaching part numbers: no shape/version change or
+            # projection rebuild. Keep old GINs until this access path is valid.
+            if not session_recall.native_tail_index_ready(cur):
+                name = session_recall.NATIVE_TAIL_INDEX
+                cur.execute(f"DROP INDEX CONCURRENTLY IF EXISTS {name}")
+                cur.execute(f"CREATE INDEX CONCURRENTLY {name} ON {session_recall.TABLE} "
+                            f"(session_id, row_key) WHERE source = 'n' "
+                            f"AND part >= {session_recall.NATIVE_CAPPED_PART}")
             for name in INDEXES:
                 for suffix in ("", "_h0", "_h2"):
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
+                    if time.monotonic() >= deadline:
                         return False
-                    cur.execute("SELECT set_config('statement_timeout', %s, false)",
-                                (f"{max(1, int(remaining * 1000))}ms",))
                     cur.execute(f"DROP INDEX CONCURRENTLY IF EXISTS {name}{suffix}")
             return True
     except psycopg2.Error:

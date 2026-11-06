@@ -90,6 +90,11 @@ _RUN = _STRIDE // 4
 # Most characters a user's write indexes; most the background indexes per row.
 MAX_ROW_CHARS = 200_000
 INDEX_MAX_CHARS = 5_000_000
+# Every promoted row truncated at the cap has this piece, including rows
+# promoted by older builds. A near-cap row may also have it: harmless extra
+# candidates for the session-list reader's authoritative full-text check.
+NATIVE_CAPPED_PART = (INDEX_MAX_CHARS - CHUNK_OVERLAP - 1) // _STRIDE
+NATIVE_TAIL_INDEX = "idx_session_recall_native_tail"
 # Marker ``part`` of a row waiting to be cut into pieces (see the docstring).
 PENDING = -1
 LOCK_TIMEOUT_MS = 250
@@ -563,6 +568,19 @@ def ready(cursor) -> bool:
         return False
     cursor.execute("SELECT COUNT(*) AS n FROM session_recall_backfill WHERE done")
     return int(cursor.fetchone()["n"]) == len(SOURCES)
+
+
+def native_tail_index_ready(cursor) -> bool:
+    """The small cap-reaching-piece index is valid, even on an older projection."""
+    cursor.execute("SELECT indisvalid AND indisready AS ok FROM pg_index "
+                   "WHERE indexrelid = to_regclass(%s)", (NATIVE_TAIL_INDEX,))
+    row = cursor.fetchone()
+    return bool(row and row["ok"])
+
+
+def native_search_ready(cursor) -> bool:
+    """Only cut session-list search over once truncated rows are indexed too."""
+    return ready(cursor) and native_tail_index_ready(cursor)
 
 
 # Per source: its primary key, the stored size of the column its extractor

@@ -329,12 +329,20 @@ acceptance on disposable workers before default enablement.
 
 Once the projection is ready, native transcript search in both session-list
 APIs also prefilters through it, then checks the original visible text for
-exact phrase/snippet semantics. Oversized rows waiting for promotion remain
-search candidates. The background recall task retires the six legacy raw-JSON
-and stored-`recall_text` trigram GINs (including history `_h0`/`_h2` variants)
-with `DROP INDEX CONCURRENTLY`, autocommit, a shared history-migration advisory
-lock, a 250 ms lock timeout and a two-second pass budget. Busy/failed drops
-retry on a later pass; sessions keep writing throughout. Generated columns are
+exact phrase/snippet semantics. Oversized rows waiting for promotion and rows
+whose projection reaches the five-million-character cap remain search
+candidates, including text past the cap. A small partial btree on existing
+cap-reaching part numbers is built concurrently; no projection version bump,
+rewrite or replay is needed. Native session-list search keeps its legacy path
+until that index is valid, and only then may legacy GIN retirement begin.
+The background recall task retires the six legacy raw-JSON and stored-
+`recall_text` trigram GINs (including history `_h0`/`_h2` variants) with
+`DROP INDEX CONCURRENTLY`, autocommit and a shared history-migration advisory
+lock. The two-second pass budget is checked between statements; each statement
+may run for up to three minutes. Lock timeout is disabled for this concurrent
+DDL so waits for existing writers can finish even on a busy worker; its lock
+mode does not block ordinary writes or searches. Failed drops retry on a later
+pass; sessions keep writing throughout. Generated columns are
 left in place to avoid an ACCESS EXCLUSIVE table lock. Bootstrap and startup
 migrations never rebuild the raw indexes; unready projections or unavailable
 `pg_trgm` retain correct, potentially unindexed legacy search. The old explicit

@@ -2733,13 +2733,14 @@ def _native_search_cte(
 
     A first-token prefix fits inside one overlapping projection piece, even
     when a phrase spans text blocks or a token exceeds the chunk size. Markers
-    for oversized rows remain candidates until background promotion. The final
-    text/role predicate excludes tool results, metadata and system prompts.
+    for oversized rows and cap-reaching pieces remain candidates even after
+    truncated promotion. The final text/role predicate checks the entire visible
+    text and excludes tool results, metadata and system prompts.
     """
     from app.db import session_recall
     from app.db.history_indexing import search_table
     native_source = search_table(cursor, "fluid_session_nodes", "n")
-    if session_recall.ready(cursor):
+    if session_recall.native_search_ready(cursor):
         recall_source = search_table(cursor, session_recall.TABLE, "r")
         prefilter = f"""(n.session_id, n.node_id) IN (
             SELECT r.session_id, r.row_key FROM {recall_source}
@@ -2747,6 +2748,9 @@ def _native_search_cte(
             UNION ALL
             SELECT r.session_id, r.row_key FROM {recall_source}
             WHERE r.source = 'n' AND r.part = {session_recall.PENDING}
+            UNION ALL
+            SELECT r.session_id, r.row_key FROM {recall_source}
+            WHERE r.source = 'n' AND r.part >= {session_recall.NATIVE_CAPPED_PART}
         )"""
         pattern = _search_literal_pattern(query.split()[0][:session_recall.CHUNK_OVERLAP + 1])
     else:
