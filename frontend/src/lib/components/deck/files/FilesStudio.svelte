@@ -441,7 +441,7 @@
 	.fs-crumbs button[aria-current] { color: var(--st-fg); }
 	.fs-main { position: relative; min-width: 0; padding: 0; overflow: hidden; }
 	.fs-footer { padding-top: 12px; color: var(--st-mfg); font-size: 12px; }
-	.fs-phone-actions { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; margin-bottom: 20px; }
+	.fs-phone-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; align-items: stretch; margin-bottom: 20px; }
 	.fs-phone-actions > button { min-width: 0; padding-inline: 12px; justify-content: center; }
 	.fs-more { position: relative; flex: none; }
 	.fs-more summary { list-style: none; cursor: pointer; }
