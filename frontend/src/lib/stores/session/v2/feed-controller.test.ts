@@ -1432,6 +1432,33 @@ describe('feedController late optimistic echoes', () => {
 		expect(deps.state.messages).toEqual([]);
 	});
 
+	it.each(['remote message', 'unpublished receipt', 'published receipt'])('does not resurrect a rewound %s when a new local send replaces the visible array', (source) => {
+		const { deps } = startEmptyFeed();
+		if (source === 'remote message') {
+			hoisted.onEvent!({ ...userMessage('server-user', 'turn-local', 'do the thing'),
+				seq: 2, command_id: 'remote-command' });
+			hoisted.onEvent!(caughtUp(2));
+		} else {
+			appendEcho(deps);
+			hoisted.onEvent!(caughtUp(0));
+			acknowledgeEcho();
+			if (source === 'published receipt') flushRaf();
+		}
+		const removedId = deps.state.messages[0].id;
+		hoisted.onEvent!({ type: 'transcript.rewound', id: 'rewind-local', session_id: 's1',
+			seq: 3, from_seq: 2 });
+		// The rewind has reduced but not published: the next send still sees U.
+		expect(deps.state.messages.map(m => m.id)).toEqual([removedId]);
+		deps.update(s => ({ ...s, isStreaming: true, optimisticStreaming: true,
+			messages: [...s.messages, { id: 'new-local', role: 'user', content: 'next prompt', commandId: 'new-command' }],
+		}));
+		flushRaf();
+		expect(deps.state.messages.map(m => m.id)).toEqual(['new-local']);
+		expect(deps.state.isStreaming).toBe(true);
+		hoisted.onEvent!(caughtUp(3));
+		expect(deps.state.messages.map(m => m.id)).toEqual(['new-local']);
+	});
+
 	it.each([false, true])('does not re-seed an acknowledged echo removed by rewind (receipt published: %s)', (publishReceipt) => {
 		const { deps } = startEmptyFeed();
 		appendEcho(deps);

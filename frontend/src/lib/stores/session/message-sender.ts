@@ -739,16 +739,18 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					// the feed reducer currently says — rather than forcing false. A
 					// turn that is genuinely live (this send was a steer into it) keeps
 					// its indicator; nothing has to guess.
-					update(s => ({
+					feedController.retractOptimisticSend(_state.sessionId, clientMessageId);
+					update(s => s.sessionId === _state.sessionId ? {
 						...s,
 						...(optimisticQueuedId
 							? { queuedMessages: s.queuedMessages.filter(m => m.id !== optimisticQueuedId) }
 							: {
+									messages: s.messages.filter(m => m.commandId !== clientMessageId),
 									optimisticStreaming: false,
 									isStreaming: feedController.isReducerStreaming(s.sessionId),
 								}),
 						error: 'Connection lost before the message was sent. Please try again.',
-					}));
+					} : s);
 					feedController.clearOptimisticSend(_state.sessionId);
 					return false;
 				}
