@@ -10,7 +10,7 @@
 	 *   per-item mark-read + dismiss, plus mark-all-read and clear-all.
 	 * - Uses the shared `header-dropdowns` store so opening this closes the
 	 *   profile, branch, and git-action popovers (single-open-at-a-time).
-	 * - Rail: the panel opens beyond the whole Sidebar, leaving its list readable.
+	 * - Rail: the panel opens over the Sidebar's list column, beside the rail.
 	 *   Header instances stay right-anchored under their button.
 	 * - Outside-click + Escape to close. On the mobile shell the panel is
 	 *   `position: fixed` so the right-edge anchor can't clip it.
@@ -39,7 +39,7 @@
 	interface Props {
 		/** The phone top bar's copy: shows only while something is unread (or its panel is open). */
 		bar?: boolean;
-		/** Desktop rail: 18px icon and an outward, fixed-position history panel. */
+		/** Desktop rail: 18px icon and a fixed-position history panel over the list column. */
 		rail?: boolean;
 	}
 	let { bar = false, rail = false }: Props = $props();
@@ -66,14 +66,21 @@
 		info: 'Info'
 	};
 
-	let railAnchor = $state({ left: 0, bottom: 8 });
+	// The rail's panel opens over the Sidebar's own list column, beside the
+	// rail, so it never covers the chat or its composer. It narrows to that
+	// column, down to a readable floor, and keeps inside the window.
+	let railAnchor = $state({ left: 0, bottom: 8, width: 360 });
 	function positionPanel() {
 		if (!rail || !bellRef) return;
 		const rect = bellRef.getBoundingClientRect();
-		const edge = bellRef.closest('aside')?.getBoundingClientRect().right ?? rect.right;
+		const column = bellRef.closest('aside')?.querySelector('.panel-plane')?.getBoundingClientRect();
+		const start = column ? column.left : rect.right;
+		const room = column ? column.width - 16 : 360;
+		const width = Math.min(360, window.innerWidth - 16, Math.max(200, room));
 		railAnchor = {
-			left: Math.max(8, Math.min(edge + 8, window.innerWidth - Math.min(360, window.innerWidth - 24))),
-			bottom: Math.max(8, window.innerHeight - rect.bottom)
+			left: Math.max(8, Math.min(start + 8, window.innerWidth - width - 8)),
+			bottom: Math.max(8, window.innerHeight - rect.bottom),
+			width
 		};
 	}
 
@@ -130,7 +137,7 @@
 <svelte:window onclick={handleClickOutside} onkeydown={handleKeydown} onresize={positionPanel} />
 
 {#if !bar || unread > 0 || showPanel}
-<div class="notif-center" class:bar class:rail bind:this={rootRef} style:--notif-left={`${railAnchor.left}px`} style:--notif-bottom={`${railAnchor.bottom}px`}>
+<div class="notif-center" class:bar class:rail bind:this={rootRef} style:--notif-left={`${railAnchor.left}px`} style:--notif-bottom={`${railAnchor.bottom}px`} style:--notif-width={`${railAnchor.width}px`}>
 	<button
 		bind:this={bellRef}
 		class="notif-btn"
@@ -221,7 +228,7 @@
 {/if}
 
 <style>
-	/* Rail controls share its 36px rhythm; history opens beyond the list column. */
+	/* Rail controls share its 36px rhythm; history opens over the list column. */
 	.notif-center.rail .notif-btn { width: 36px; height: 36px; border-radius: var(--radius-control); }
 	.notif-center.rail .notif-btn:hover,
 	.notif-center.rail .notif-btn.open { background: var(--row-hover); }
@@ -233,6 +240,7 @@
 		right: auto;
 		left: var(--notif-left);
 		bottom: var(--notif-bottom);
+		width: var(--notif-width);
 		max-height: min(440px, calc(100dvh - var(--notif-bottom) - var(--titlebar-height, 0px) - 8px));
 	}
 

@@ -103,6 +103,11 @@
 			"globs": ["frontend/src/lib/components/layout/view/ViewShell.svelte", "frontend/src/lib/components/deck/cards/ProfileCard.svelte"]
 		},
 		{
+			"why": "the rail's notification history opens inside the Sidebar, and the empty-chat composer holds no empty Stop seat",
+			"journeys": ["rail-popover-composer-inset"],
+			"globs": ["frontend/src/lib/components/NotificationCenter.svelte", "frontend/src/lib/components/layout/Sidebar.svelte"]
+		},
+		{
 			"why": "rail-owned More and Customize stay reachable while a feature owns the Chats panel, including the real phone drawer",
 			"journeys": ["rail-more"],
 			"globs": ["frontend/src/lib/components/layout/Sidebar.svelte", "frontend/src/lib/components/layout/sidebar/SidebarRail.svelte", "frontend/src/lib/components/layout/sidebar/SidebarSheet.svelte"]

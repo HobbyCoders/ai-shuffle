@@ -1774,6 +1774,10 @@
 						     never torn down by a keystroke. -->
 						<span class="talk-slot" hidden={!showTalk}>{@render talk()}</span>
 						</span>
+						<!-- The empty Stop seat is held only inside a chat, where work
+						     can start and stop under the reader. The empty-chat hero
+						     has no work to stop, so its circles sit flush right. -->
+						{#if compact || circles.includes('stop')}
 						<span class="stop-slot">
 						{#if circles.includes('stop')}
 							<StopButton
@@ -1782,6 +1786,7 @@
 							/>
 						{/if}
 						</span>
+						{/if}
 					</div>
 				</div>
 
