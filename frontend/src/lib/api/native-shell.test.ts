@@ -1,4 +1,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+const call = vi.hoisted(() => ({ active: false, hangup: vi.fn() }));
+vi.mock('$lib/services/voiceCall', async () => {
+	const { writable } = await import('svelte/store');
+	return {
+		voiceCallState: writable({ sessionId: 's1', status: 'live' }),
+		isCallActiveFor: () => call.active,
+		hangup: call.hangup
+	};
+});
+
 import { announceWorkerBar, hasShellBridge, nativeAppSettingsRoute, openNativeAppSettings, openNativeWorkers } from './native-shell';
 
 type TestWindow = Window & { shuffleShell?: unknown };
@@ -13,6 +23,9 @@ function inApp(bridge?: unknown, capabilities?: string[]) {
 }
 
 afterEach(() => {
+	call.active = false;
+	call.hangup.mockReset();
+	vi.restoreAllMocks();
 	delete window.__SHUFFLE_MOBILE__;
 	delete (window as TestWindow).shuffleShell;
 });
@@ -69,5 +82,21 @@ describe('native shell messages', () => {
 	it('reports a bridge that throws as not delivered', () => {
 		inApp({ postMessage: () => { throw new Error('gone'); } });
 		expect(announceWorkerBar(true)).toBe(false);
+	});
+
+	it('asks before opening Workers during a voice call, because the app closes chat and the call with it', () => {
+		const postMessage = vi.fn();
+		inApp({ postMessage }, ['worker-switch']);
+		call.active = true;
+		const confirm = vi.spyOn(window, 'confirm').mockReturnValueOnce(false).mockReturnValueOnce(true);
+
+		expect(openNativeWorkers()).toBe(true);
+		expect(postMessage).not.toHaveBeenCalled();
+		expect(call.hangup).not.toHaveBeenCalled();
+
+		expect(openNativeAppSettings()).toBe(true);
+		expect(confirm).toHaveBeenCalledTimes(2);
+		expect(call.hangup).toHaveBeenCalledWith('user');
+		expect(postMessage.mock.calls.map(([raw]) => JSON.parse(raw))).toEqual([{ type: 'workers' }]);
 	});
 });
