@@ -628,9 +628,9 @@
 		});
 	});
 
-	// Refresh when the checkout is idle, not merely when streaming ends: a
-	// parked turn still owns it. forceRefresh also retries a deferred fetch,
-	// which the server would refuse while that background work is running.
+	// Re-read owner status when the active chat's work ends. These fields also
+	// clear on navigation, so this is only a refresh hint, not proof of an idle
+	// checkout: the store releases deferred fetches only on a fresh idle verdict.
 	let _wasGitBusy = false;
 	$effect(() => {
 		const busy = gitCheckoutBusy;

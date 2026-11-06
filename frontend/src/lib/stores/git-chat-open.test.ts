@@ -58,10 +58,14 @@ function prState(number = 7): PrState {
 	};
 }
 
-function deferred() {
-	let resolve!: () => void;
-	const promise = new Promise<void>((res) => (resolve = res));
+function deferred<T = void>() {
+	let resolve!: (value: T) => void;
+	const promise = new Promise<T>((res) => (resolve = res));
 	return { promise, resolve };
+}
+
+function checkoutStatus(blocked: boolean, branch = 'feat/x') {
+	return transformGitStatus({ is_git_repo: true, current_branch: branch, mutations_blocked: blocked });
 }
 
 /** Let every already-settled promise in the load chain run. */
@@ -74,7 +78,7 @@ beforeEach(() => {
 	git.clear();
 	vi.spyOn(console, 'warn').mockImplementation(() => {});
 	mocks.getGitStatus.mockResolvedValue(
-		transformGitStatus({ is_git_repo: true, current_branch: 'feat/x', default_branch: 'main', modified: [], untracked: [] })
+		transformGitStatus({ is_git_repo: true, current_branch: 'feat/x', default_branch: 'main', modified: [], untracked: [], mutations_blocked: false })
 	);
 	mocks.getBranches.mockResolvedValue([{ name: 'feat/x', current: true, remote: false }]);
 	mocks.getCommitGraph.mockResolvedValue({ commits: [] });
@@ -92,9 +96,9 @@ afterEach(() => {
 });
 
 describe('opening an existing chat', () => {
-	it('does not auto-fetch when the owner reports blocked or unknown checkout activity', async () => {
+	it.each([true, undefined])('does not auto-fetch when owner checkout activity is blocked/unknown (%s)', async (blocked) => {
 		mocks.getGitStatus.mockResolvedValue(transformGitStatus({
-			is_git_repo: true, current_branch: 'feat/x', mutations_blocked: true
+			is_git_repo: true, current_branch: 'feat/x', mutations_blocked: blocked
 		}));
 		await git.loadRepository('p', false, 's1');
 		await settle();
@@ -118,15 +122,175 @@ describe('opening an existing chat', () => {
 		expect(mocks.fetchRemote).toHaveBeenCalledTimes(1);
 	});
 
-	it('runs the skipped fetch once the turn ends (stream-end refresh)', async () => {
-		await git.loadRepository('p', false, 's1', { fetchBlocked: () => true });
+	it('runs the skipped fetch once the turn ends (owner-status refresh)', async () => {
+		let busy = true;
+		await git.loadRepository('p', false, 's1', { fetchBlocked: () => busy });
 		await settle();
 		expect(mocks.fetchRemote).not.toHaveBeenCalled();
+		busy = false;
 		git.forceRefresh();
 		await settle();
 		expect(mocks.fetchRemote).toHaveBeenCalledTimes(1);
 		// Only once: a later stream end does not fetch again.
 		git.forceRefresh();
+		await settle();
+		expect(mocks.fetchRemote).toHaveBeenCalledTimes(1);
+	});
+
+	it("does not release a parked chat's fetch when navigation clears its busy fields", async () => {
+		let busy = true;
+		await git.loadRepository('p', false, 's1', { fetchBlocked: () => busy });
+		await settle();
+		const key = git.current.contextKey;
+
+		// MainPanel restores the sibling's shared cache synchronously, before
+		// its debounced load. Switching clears the active chat's parked/tasks.
+		git.restoreCacheImmediate('p', undefined, 'project', 's2', 'feat/x');
+		expect(git.current.contextKey).toBe(key);
+		busy = false;
+		const owner = deferred<ReturnType<typeof checkoutStatus>>();
+		mocks.getGitStatus.mockReturnValueOnce(owner.promise);
+		git.forceRefresh(); // The busy -> idle effect also runs on navigation.
+		await settle();
+		expect(mocks.fetchRemote).not.toHaveBeenCalled();
+		expect(mocks.getGitStatus).toHaveBeenCalledWith('p', undefined, expect.anything(), 's2');
+
+		owner.resolve(checkoutStatus(true)); // A's job still owns this checkout.
+		await settle();
+		expect(mocks.fetchRemote).not.toHaveBeenCalled();
+
+		// Neither the blocked refresh nor the chat switch consumes the retry.
+		mocks.getGitStatus.mockResolvedValue(checkoutStatus(false));
+		git.forceRefresh();
+		await settle();
+		expect(mocks.fetchRemote).toHaveBeenCalledExactlyOnceWith('p', undefined, 's2');
+		git.forceRefresh();
+		await settle();
+		expect(mocks.fetchRemote).toHaveBeenCalledTimes(1);
+	});
+
+	it.each(['project', 'worktree'])('retries opening an already-busy %s once owner polling says idle', async (mode) => {
+		mocks.getGitStatus.mockResolvedValue(checkoutStatus(true));
+		const worktreeId = mode === 'worktree' ? 'wt1' : undefined;
+		if (worktreeId) await git.loadForWorktree('p', worktreeId, false, 's1');
+		else await git.loadRepository('p', false, 's1');
+		await settle();
+		expect(mocks.fetchRemote).not.toHaveBeenCalled();
+		await git.refreshStatus();
+		expect(mocks.fetchRemote).not.toHaveBeenCalled();
+
+		mocks.getGitStatus.mockResolvedValue(checkoutStatus(false));
+		await git.refreshStatus(); // Read-only polling must release the retry too.
+		await settle();
+		expect(mocks.fetchRemote).toHaveBeenCalledExactlyOnceWith('p', worktreeId, 's1');
+		git.forceRefresh();
+		await settle();
+		expect(mocks.fetchRemote).toHaveBeenCalledTimes(1);
+	});
+
+	it('keeps the live busy gate even when an unchanged owner status says idle', async () => {
+		let busy = true;
+		await git.loadRepository('p', false, 's1', { fetchBlocked: () => busy });
+		await settle();
+		git.forceRefresh();
+		await settle();
+		expect(mocks.fetchRemote).not.toHaveBeenCalled();
+
+		busy = false;
+		// Owner status is unchanged: no-op write suppression must not skip retry.
+		await git.refreshStatus();
+		await settle();
+		expect(mocks.fetchRemote).toHaveBeenCalledTimes(1);
+	});
+
+	it("drops a different checkout's deferral and rekeys the pending fetch to the new target", async () => {
+		await git.loadRepository('p', false, 's1', { fetchBlocked: () => true });
+		await settle();
+		const oldKey = git.current.contextKey;
+		mocks.getGitStatus.mockResolvedValue(checkoutStatus(true, 'feat/y'));
+		git.restoreCacheImmediate('p', undefined, 'project', 's2', 'feat/y');
+		expect(git.current.contextKey).not.toBe(oldKey);
+		git.forceRefresh();
+		await settle();
+		expect(mocks.fetchRemote).not.toHaveBeenCalled();
+
+		await git.loadRepository('p', false, 's2');
+		mocks.getGitStatus.mockResolvedValue(checkoutStatus(false, 'feat/y'));
+		await git.refreshStatus();
+		await settle();
+		expect(mocks.fetchRemote).toHaveBeenCalledExactlyOnceWith('p', undefined, 's2');
+		await git.refreshStatus();
+		await settle();
+		expect(mocks.fetchRemote).toHaveBeenCalledTimes(1);
+	});
+
+	it('ignores a late idle response from the previous chat even on the same checkout', async () => {
+		let busy = true;
+		await git.loadRepository('p', false, 's1', { fetchBlocked: () => busy });
+		await settle();
+		const previousOwner = deferred<ReturnType<typeof checkoutStatus>>();
+		mocks.getGitStatus.mockReturnValueOnce(previousOwner.promise);
+		const refresh = git.refreshStatus();
+
+		git.restoreCacheImmediate('p', undefined, 'project', 's2', 'feat/x');
+		busy = false;
+		previousOwner.resolve(checkoutStatus(false));
+		await refresh;
+		await settle();
+		expect(mocks.fetchRemote).not.toHaveBeenCalled();
+
+		mocks.getGitStatus.mockResolvedValue(checkoutStatus(true));
+		await git.loadRepository('p', false, 's2');
+		await git.refreshStatus();
+		expect(mocks.fetchRemote).not.toHaveBeenCalled();
+		mocks.getGitStatus.mockResolvedValue(checkoutStatus(false));
+		await git.refreshStatus();
+		await settle();
+		expect(mocks.fetchRemote).toHaveBeenCalledExactlyOnceWith('p', undefined, 's2');
+	});
+
+	it('does not release an old chat load while its transcript gate finishes after navigation', async () => {
+		let busy = true;
+		const transcript = deferred();
+		const load = git.loadRepository('p', false, 's1', {
+			fetchBlocked: () => busy, afterCriticalPath: transcript.promise
+		});
+		await settle(); // A's idle status was read before its work parked.
+		git.restoreCacheImmediate('p', undefined, 'project', 's2', 'feat/x');
+		busy = false;
+		transcript.resolve(); // Leaving A also settles its transcript gate.
+		await load;
+		await settle();
+		expect(mocks.fetchRemote).not.toHaveBeenCalled();
+		expect(git.current.sessionId).toBe('s2');
+
+		mocks.getGitStatus.mockResolvedValue(checkoutStatus(true));
+		await git.loadRepository('p', false, 's2');
+		await settle();
+		expect(mocks.fetchRemote).not.toHaveBeenCalled();
+		mocks.getGitStatus.mockResolvedValue(checkoutStatus(false));
+		await git.refreshStatus();
+		await settle();
+		expect(mocks.fetchRemote).toHaveBeenCalledExactlyOnceWith('p', undefined, 's2');
+	});
+
+	it('does not release a deferral from an aborted idle poll', async () => {
+		let busy = true;
+		await git.loadRepository('p', false, 's1', { fetchBlocked: () => busy });
+		await settle();
+		busy = false;
+		const oldOwner = deferred<ReturnType<typeof checkoutStatus>>();
+		mocks.getGitStatus.mockReturnValueOnce(oldOwner.promise);
+		const oldRefresh = git.refreshStatus();
+		mocks.getGitStatus.mockResolvedValue(checkoutStatus(true));
+		git.forceRefresh(); // Cancels the old idle poll, then reads busy status.
+		oldOwner.resolve(checkoutStatus(false));
+		await oldRefresh;
+		await settle();
+		expect(mocks.fetchRemote).not.toHaveBeenCalled();
+
+		mocks.getGitStatus.mockResolvedValue(checkoutStatus(false));
+		await git.refreshStatus();
 		await settle();
 		expect(mocks.fetchRemote).toHaveBeenCalledTimes(1);
 	});
