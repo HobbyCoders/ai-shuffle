@@ -353,6 +353,7 @@
 		box-shadow: var(--shadow-l);
 		overflow: hidden;
 		animation: notif-in 120ms cubic-bezier(0.16, 1, 0.3, 1);
+		container-type: inline-size;
 	}
 
 	@keyframes notif-in {
@@ -528,6 +529,22 @@
 		align-items: stretch;
 		gap: 4px;
 		max-width: 9.5rem;
+	}
+
+	/* A narrow panel (the rail's, in a slim Sidebar) moves the actions onto
+	   their own line under the message, so the message keeps the row's width. */
+	@container (max-width: 320px) {
+		.notif-item { flex-wrap: wrap; }
+		.item-main { order: 1; }
+		.item-dismiss { order: 2; }
+		.item-actions {
+			order: 3;
+			flex: 1 0 100%;
+			flex-direction: row;
+			flex-wrap: wrap;
+			max-width: none;
+			padding-left: 24px;
+		}
 	}
 
 	.item-action {

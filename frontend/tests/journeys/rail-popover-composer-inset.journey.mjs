@@ -53,6 +53,48 @@ await runJourney({ name: 'rail-popover-composer-inset', allow: DEV_INSTANCE_NOIS
 		await panel.waitFor({ state: 'hidden' });
 	}
 })).concat([{
+	// The narrowest Sidebar gives the panel its narrowest width; an error row's
+	// action buttons must not squeeze its message to nothing.
+	name: 'notifications-min-sidebar-actionable-row',
+	viewports: ['desktop'],
+	async setup({ page, status }) {
+		await page.setViewportSize({ width: 1440, height: 900 });
+		await page.addInitScript(() => localStorage.setItem('sidebar-width', '280'));
+		await page.route(/\/api\/v1\/notifications(?:\?|$)/, (route) => route.request().method() !== 'GET' ? route.fallback() : route.fulfill({
+			contentType: 'application/json',
+			body: JSON.stringify({ notifications: [{
+				id: 'journey-api-error', severity: 'error', surface: 'notification', category: 'api_error',
+				title: 'Request failed', message: 'The provider returned an error while starting this chat. Try again or send a report.',
+				read: false, dismissed: false, created_at: Date.now(), session_id: null,
+				action: { kind: 'api_error', payload: { status_code: 500 } }
+			}] })
+		}));
+		await gotoApp(page, status);
+		await page.getByRole('navigation', { name: 'Workspace', exact: true }).waitFor();
+	},
+	async act({ page, mark, log }) {
+		await mark('open the rail bell at the narrowest Sidebar');
+		await page.getByRole('button', { name: /^Notifications( \(\d+ unread\))?$/ }).first().click();
+		const panel = page.getByRole('dialog', { name: 'Notifications', exact: true });
+		await panel.getByText('Request failed', { exact: true }).waitFor();
+		const row = await panel.evaluate(el => {
+			const aside = document.querySelector('aside.sidebar').getBoundingClientRect();
+			const item = el.querySelector('.notif-item');
+			const message = item.querySelector('.item-message').getBoundingClientRect();
+			const actions = [...item.querySelectorAll('.item-action')].map(b => b.getBoundingClientRect());
+			return {
+				panel: Math.round(el.getBoundingClientRect().width), panelRight: el.getBoundingClientRect().right, asideRight: aside.right,
+				message: Math.round(message.width), actions: actions.length,
+				actionsBelow: actions.every(a => a.top >= message.bottom - 1)
+			};
+		});
+		log(JSON.stringify(row));
+		expect(row.panelRight <= row.asideRight, 'the narrow panel still ends inside the Sidebar');
+		// Only the icon, the dismiss button, gaps and padding (about 80px) share the row with the message.
+		expect(row.message >= row.panel - 90, `the message keeps the row's width (${row.message}px of ${row.panel}px)`);
+		if (row.actions) expect(row.actionsBelow, 'in a narrow panel the row actions sit under the message');
+	}
+}, {
 	name: 'empty-chat-composer-has-no-stop-seat',
 	viewports: ['desktop'],
 	async setup(ctx) {
