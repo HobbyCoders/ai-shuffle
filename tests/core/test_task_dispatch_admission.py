@@ -94,6 +94,13 @@ async def _dispatch(args, session_id="s-root"):
     return await td.dispatch_task_tool(args, caller_session_id=session_id)
 
 
+async def _wait_until(condition):
+    # This is a deadlock guard, not a scheduling-speed assertion.
+    async with asyncio.timeout(5):
+        while not condition():
+            await asyncio.sleep(0.005)
+
+
 # ── at the ceiling: a real error, never a receipt ────────────────────────────
 
 
@@ -474,8 +481,9 @@ async def test_no_pool_yet_admits_immediately(agents, monkeypatch):
 
 
 @pytest.mark.parametrize("live_existing", [0, 1])
+@pytest.mark.parametrize("scheduling_delay", [0, 0.15])
 async def test_root_budget_counts_pending_and_live_workers_across_parents(
-    agents, monkeypatch, live_existing,
+    agents, monkeypatch, live_existing, scheduling_delay,
 ):
     """Concurrent branches share a root budget before workers register."""
     from app.core import config as cfg, provider_agent_supervisor as sup
@@ -493,20 +501,36 @@ async def test_root_budget_counts_pending_and_live_workers_across_parents(
     monkeypatch.setattr(td, "_ADMISSION_POLL_SECONDS", 0.005)
     _install_pool(monkeypatch, _FakePool())
 
-    jobs = [asyncio.create_task(td._reserve_admission(
-        f"new-{i}", lane="native", parent_session_id=parent, wait_seconds=1,
-    )) for i, parent in enumerate(parents)]
+    async def reserve(i, parent):
+        # Model a loaded runner that cannot schedule admission within 80ms.
+        # Capacity, not refusal latency, is under test: keep admissions alive
+        # beyond the five-second assertion guard below.
+        await asyncio.sleep(scheduling_delay)
+        return await td._reserve_admission(
+            f"new-{i}", lane="native", parent_session_id=parent, wait_seconds=10,
+        )
+
+    jobs = [asyncio.create_task(reserve(i, parent)) for i, parent in enumerate(parents)]
     try:
-        await asyncio.sleep(0.08)
-        assert sum(job.done() for job in jobs) == 2 - live_existing
-        assert td._pending_admission_count(root="s-root") == 2 - live_existing
+        expected = 2 - live_existing
+        await _wait_until(lambda: sum(job.done() for job in jobs) >= expected)
+        assert sum(job.done() for job in jobs) == expected
+        assert td._pending_admission_count(root="s-root") == expected
         assert all(record.root == "s-root" for record in td._PENDING_ADMISSIONS.values())
-        # Release each admitted slot; every waiting branch then gets a turn.
-        for _ in parents:
+        pending = {job for job in jobs if not job.done()}
+        # Once capacity is full, the other branches must STAY queued, not just
+        # happen to be unscheduled when we first observe the expected count.
+        completed, _ = await asyncio.wait(pending, timeout=0.05, return_when=asyncio.FIRST_COMPLETED)
+        assert not completed, "the root budget admitted an extra branch"
+        # Release admitted slots and wait for actual progress, not a 30ms guess.
+        while pending:
             for i, job in enumerate(jobs):
                 if job.done():
                     td._release_admission(f"new-{i}")
-            await asyncio.sleep(0.03)
+            completed, pending = await asyncio.wait(
+                pending, timeout=5, return_when=asyncio.FIRST_COMPLETED,
+            )
+            assert completed, "waiting branches never acquired a released slot"
         assert all(refusal is None for refusal, _ in await asyncio.gather(*jobs))
     finally:
         for job in jobs:

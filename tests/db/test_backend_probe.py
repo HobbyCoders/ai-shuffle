@@ -12,6 +12,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Iterator
 
 import pytest
@@ -170,7 +171,7 @@ def test_credentials_reach_the_child_only_on_its_private_channel(
             if sys.platform == "linux":
                 captured["cmdline"] = Path(f"/proc/{self.pid}/cmdline").read_bytes()
 
-    monkeypatch.setattr(subprocess, "Popen", Spy)
+    monkeypatch.setattr(backend_probe, "subprocess", SimpleNamespace(**{**vars(subprocess), "Popen": Spy}))
     with pytest.raises(TimeoutError):
         seconds = 5 if os.name == "nt" else 0.5
         backend_probe.BackendProbe().read([1], (), _silent_kwargs(silent_server), seconds)
@@ -236,18 +237,31 @@ def test_null_identity_is_no_answer() -> None:
 
 
 @pytest.mark.parametrize("shutdown", [False, True])
-def test_only_one_lifecycle_owner_can_signal_or_reap(silent_server, monkeypatch, shutdown) -> None:
+@pytest.mark.parametrize("unrelated_process", [False, True])
+def test_only_one_lifecycle_owner_can_signal_or_reap(
+    silent_server, monkeypatch, shutdown, unrelated_process,
+) -> None:
     """Include close(): it requests shutdown, it must not signal alongside the reaper."""
+    probe = backend_probe.BackendProbe()
     owners = set()
     for name in ("poll", "wait", "kill"):
         original = getattr(subprocess.Popen, name)
 
         def observed(self, *args, _original=original, **kwargs):
-            owners.add(threading.get_ident())
+            if self is probe._child:
+                owners.add(threading.get_ident())
             return _original(self, *args, **kwargs)
 
         monkeypatch.setattr(subprocess.Popen, name, observed)
-    probe = backend_probe.BackendProbe()
+    if unrelated_process:
+        # Deterministic stand-in for an earlier test's background process monitor.
+        # Its Popen lifecycle is unrelated to this probe, even in the same worker.
+        monitor = threading.Thread(target=lambda: subprocess.run(
+            [sys.executable, "-c", "pass"], check=True, timeout=5,
+        ))
+        monitor.start()
+        monitor.join(6)
+        assert not monitor.is_alive()
     outcome = []
     caller = threading.Thread(target=lambda: outcome.append(_read_within(probe, silent_server, 0.2, 5)))
     caller.start()
@@ -282,8 +296,12 @@ def test_private_files_are_removed_on_every_exit(outcome, tmp_path, monkeypatch)
     if outcome in ("process", "thread"):
         def refuse(*args, **kwargs):
             raise RuntimeError("unavailable")
-        monkeypatch.setattr(subprocess if outcome == "process" else threading.Thread,
-                            "Popen" if outcome == "process" else "start", refuse)
+        if outcome == "process":
+            monkeypatch.setattr(backend_probe, "subprocess", SimpleNamespace(
+                **{**vars(subprocess), "Popen": refuse},
+            ))
+        else:
+            monkeypatch.setattr(threading.Thread, "start", refuse)
     probe = backend_probe.BackendProbe()
     try:
         if outcome == "success":
@@ -329,17 +347,19 @@ def test_delayed_launch_has_no_late_descriptor_work(tmp_path, monkeypatch) -> No
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX spawn path")
 def test_launch_has_no_internal_error_pipe_and_failures_have_no_slot_cap(monkeypatch) -> None:
-    real_spawn = subprocess.Popen._posix_spawn
     spawned = []
 
-    def spawn(self, *args, **kwargs):
-        spawned.append(1)
-        return real_spawn(self, *args, **kwargs)
+    class Spy(subprocess.Popen):
+        def _posix_spawn(self, *args, **kwargs):
+            spawned.append(1)
+            return super()._posix_spawn(*args, **kwargs)
 
     def no_read(*args):
         pytest.fail("launch or reply must not read a parent descriptor")
 
-    monkeypatch.setattr(subprocess.Popen, "_posix_spawn", spawn)
+    # Only count this probe's spawns. Keep the syscall guard on the real os
+    # module: Popen's internal error pipe also calls os.read in this process.
+    monkeypatch.setattr(backend_probe, "subprocess", SimpleNamespace(**{**vars(subprocess), "Popen": Spy}))
     monkeypatch.setattr(os, "read", no_read)
     probe = backend_probe.BackendProbe()
     with socket.create_server(("127.0.0.1", 0)) as server:
@@ -363,18 +383,23 @@ def test_a_child_that_outlives_its_kill_blocks_a_second_one_until_it_is_gone(
     silent_server: int, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     probe = backend_probe.BackendProbe()
-    real_kill = subprocess.Popen.kill
-    real_start = subprocess.Popen.__init__
-    spawned: list[int] = []
+    real_start = probe._start
+    spawned: list[subprocess.Popen] = []
 
-    def counting(self: Any, *args: Any, **kwargs: Any) -> None:
-        real_start(self, *args, **kwargs)
-        spawned.append(self.pid)
+    def counting(*args):
+        child = real_start(*args)
+        spawned.append(child)
+        return child
 
-    monkeypatch.setattr(subprocess.Popen, "__init__", counting)
+    monkeypatch.setattr(probe, "_start", counting)
     monkeypatch.setattr(backend_probe, "_REAP_SECONDS", 0.1)
     with monkeypatch.context() as stuck:
-        stuck.setattr(subprocess.Popen, "kill", lambda self: None)
+        def unkillable(*args):
+            child = counting(*args)
+            stuck.setattr(child, "kill", lambda: None)
+            return child
+
+        stuck.setattr(probe, "_start", unkillable)
         with pytest.raises(TimeoutError):
             probe.read([1], (), _silent_kwargs(silent_server), 0.3)
         assert probe._child is not None and probe._child.poll() is None
@@ -382,7 +407,7 @@ def test_a_child_that_outlives_its_kill_blocks_a_second_one_until_it_is_gone(
             probe.read([1], (), _silent_kwargs(silent_server), 0.3)
         assert len(spawned) == 1, "never two at a time"
     leftover = probe._child
-    assert subprocess.Popen.kill is real_kill
+    assert leftover.kill == subprocess.Popen.kill.__get__(leftover), "this child's real kill was restored"
     deadline = time.monotonic() + 5
     while probe._child is not None and time.monotonic() < deadline:
         time.sleep(0.01)
