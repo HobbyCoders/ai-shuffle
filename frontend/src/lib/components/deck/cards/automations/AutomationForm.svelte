@@ -312,6 +312,8 @@ import AutomationModelError from './AutomationModelError.svelte';
  .notice-link:hover { color: var(--st-primary); }
  .notice-link:active { opacity: 0.7; }
  .notice-link:focus-visible { outline: 2px solid var(--ring); outline-offset: 3px; }
+ /* Basics: Description is a short two-line field, about 72px tall. */
+ .basics-description :global(textarea) { min-height: 72px; }
  @media (max-width: 600px) { .notice-link { min-height: 44px; } }
  /* Steps are appended below the Prompt card, so the button stays after them,
     12px clear of the card above and on its left edge. */
@@ -337,8 +339,13 @@ import AutomationModelError from './AutomationModelError.svelte';
 <div role="tabpanel" id="automation-form-panel" aria-labelledby="automation-form-tab-{tab}">
 {#if tab === 'setup'}
  <RowGroup title="Basics">
-  <SettingRow label="Name" hint="A label to recognize this automation."><TextField value={formName} oninput={onUpdateFormName} placeholder="e.g. Daily report generator" invalid={!!formError && !formName.trim()} /></SettingRow>
-  <SettingRow label="Description" hint="What this automation does. Optional."><TextField value={formDescription} oninput={onUpdateFormDescription} placeholder="Optional description…" /></SettingRow>
+  <!-- Label and hint first, then the field at the card's full inner width (as Prompt). -->
+  <SettingRow label="Name" hint="A label to recognize this automation.">
+   {#snippet expanded()}<TextField value={formName} oninput={onUpdateFormName} label="Name" width="full" placeholder="e.g. Daily report generator" invalid={!!formError && !formName.trim()} />{/snippet}
+  </SettingRow>
+  <SettingRow label="Description" hint="What this automation does. Optional.">
+   {#snippet expanded()}<div class="basics-description"><TextAreaField value={formDescription} oninput={onUpdateFormDescription} label="Description" rows={2} placeholder="Optional description…" /></div>{/snippet}
+  </SettingRow>
  </RowGroup>
  <RowGroup title="Prompt & actions" bare>
   <div class="st-card">

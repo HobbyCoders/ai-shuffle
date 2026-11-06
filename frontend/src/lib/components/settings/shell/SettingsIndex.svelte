@@ -137,12 +137,14 @@
 		margin: 0;
 		padding: 0;
 	}
+	/* The Chats row grid (SessionCard .scard): 8px inset, the 16px icon in the
+	   leading slot, a 6px gap, so labels start on the Chats title x. */
 	.st-nav-item {
 		display: flex;
 		align-items: center;
-		gap: 10px;
+		gap: 6px;
 		height: 34px;
-		padding: 0 12px;
+		padding: 0 12px 0 8px;
 		border-radius: var(--st-radius-md);
 		border: 0;
 		background: none;

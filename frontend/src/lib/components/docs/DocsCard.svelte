@@ -88,7 +88,7 @@
  {/snippet}
 </ViewShell>
 <style>
- .docs-group { margin-left: 8px; }
+ .docs-group { margin-left: 0; }
  /* One column by default; the "On this page" rail only joins it when the
     canvas is about 1600px wide, so it does not crowd the article or read as a second nav.
     Below that the contents fold into a disclosure at the top of the article. */
