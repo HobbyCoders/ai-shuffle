@@ -198,6 +198,25 @@ def parse_journey_log(log: str) -> list[tuple[str, float, int]]:
     return samples
 
 
+def require_matching_workload(run_id: int, revision: str) -> None:
+    """Do not apply old timings to changed code, even when case counts match."""
+    if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{40}", revision):
+        raise ValueError(f"Run {run_id} has no valid source revision")
+    # CI planning/evidence changes do not change the producing workload. All
+    # app, journey, helper, dependency and fake-provider changes do.
+    paths = ["app", "fluid", "frontend", "browser-mcp", "tools", "requirements*.txt",
+             "scripts/devloop", ":(exclude)scripts/devloop/ci.py",
+             ":(exclude)scripts/devloop/journey_weights.json"]
+    commands = [["git", "diff", "--quiet", revision, "--", *paths],
+                ["git", "ls-files", "--others", "--exclude-standard", "--", *paths]]
+    for command in commands:
+        result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, timeout=120)
+        if result.returncode != 0 or result.stdout.strip():
+            raise ValueError(f"Run {run_id} workload differs from this checkout or revision "
+                             f"{revision} is unavailable. Fetch that revision and choose a "
+                             "complete matching run; no weights were replaced.")
+
+
 def refresh_weights(run_ids: list[int], weights_path: Path = WEIGHTS) -> None:
     """Recompute medians from complete, clean first-attempt runs matching this checkout."""
     expected_cases = {path.name: case_count(path, strict=True) for path in journey_files(JOURNEYS)}
@@ -207,9 +226,10 @@ def refresh_weights(run_ids: list[int], weights_path: Path = WEIGHTS) -> None:
     durations = defaultdict(list)
     per_case = []
     run_ids = sorted(set(run_ids))
+    revisions = {}
     for run_id in run_ids:
         state = json.loads(subprocess.check_output(
-            ["gh", "run", "view", str(run_id), "--repo", repo, "--json", "status,conclusion,attempt"],
+            ["gh", "run", "view", str(run_id), "--repo", repo, "--json", "status,conclusion,attempt,headSha"],
             cwd=ROOT, text=True, timeout=120))
         if state.get("status") != "completed" or state.get("conclusion") != "success":
             raise ValueError(f"Run {run_id} must be completed and green: {state}")
@@ -217,6 +237,9 @@ def refresh_weights(run_ids: list[int], weights_path: Path = WEIGHTS) -> None:
             raise ValueError(f"Run {run_id} cannot be used for runtime weights: "
                              f"attempt {state.get('attempt')} is not 1; re-run logs omit earlier jobs. "
                              "Choose a clean first-attempt run.")
+        revision = state.get("headSha", "")
+        require_matching_workload(run_id, revision)
+        revisions[str(run_id)] = revision
         logs = subprocess.check_output(
             ["gh", "api", f"repos/{repo}/actions/runs/{run_id}/logs"], cwd=ROOT, timeout=120)
         samples = []
@@ -252,6 +275,7 @@ def refresh_weights(run_ids: list[int], weights_path: Path = WEIGHTS) -> None:
                     "green main-suite/ci-frontend runs: python -m scripts.devloop.ci refresh-weights "
                     "RUN_ID [RUN_ID ...]. seconds_per_case is the median of seconds/cases per sample.",
         "source_runs": run_ids,
+        "source_revisions": revisions,
         "case_counts": expected_cases,
         "seconds_per_case": round(median(per_case), 2),
         "seconds": {name: round(median(values), 2) for name, values in sorted(durations.items())},

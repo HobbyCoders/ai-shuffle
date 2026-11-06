@@ -3,6 +3,9 @@
   "source_runs": [
     42295256527
   ],
+  "source_revisions": {
+    "42295256527": "32d3880cbe920faa08e07d14809bf8e3cd9a79af"
+  },
   "case_counts": {
     "automations.journey.mjs": 4,
     "chat-position-stability.journey.mjs": 47,
