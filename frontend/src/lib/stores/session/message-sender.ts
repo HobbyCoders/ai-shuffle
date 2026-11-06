@@ -403,11 +403,6 @@ export function createMessageSender(deps: MessageSenderDeps) {
 		async sendMessage(prompt: string, options?: SendMessageOptions): Promise<boolean> {
 			prompt = prompt.trim();
 
-			// When the send began. An optimistic pending bubble is only worth
-			// appending while the server has said nothing about the queue since this
-			// moment — see the guard on `optimisticQueuedId` below.
-			const dispatchedAt = Date.now();
-
 			// Restore-race guard: right after a page load, init() may have adopted
 			// a persisted sessionId whose history hasn't rendered yet — the UI
 			// looks like "New Chat" but a send here would silently continue the
@@ -596,10 +591,8 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				// server's `queue_updated` replaces this local row, and pendingQueue
 				// retires it once the transcript answers it.
 				//
-				// Skipped when an authoritative `queue_updated` for this session already
-				// landed since the send began: the server has described the queue for
-				// this window, so a local row added on top of it is a second copy that
-				// no later frame is guaranteed to replace.
+				// Admission is command-specific; an unrelated queue snapshot cannot
+				// suppress the echo or its recoverable text.
 				const overrides = buildOverrides(_state);
 				const retryOverrides = { ...overrides };
 				// The worker can acknowledge a newer pin before a lost reply is retried.
@@ -610,10 +603,8 @@ export function createMessageSender(deps: MessageSenderDeps) {
 						project: _state.project, uploadPaths: options.pendingUploadPaths, overrides: retryOverrides }), newLocalPendingId)
 					: newLocalPendingId();
 				const queuedEcho = (sendWhileStreaming || options?.compactFirst) && !options?.skipMessageAppend;
-				const optimisticQueuedId = queuedEcho
-					&& !pendingQueue.authoritySpokeSince(_state.sessionId, dispatchedAt)
-					? clientMessageId
-					: null;
+				// An unrelated snapshot cannot admit this newly minted command.
+				const optimisticQueuedId = queuedEcho ? clientMessageId : null;
 
 				// A fresh local send can clear an error without adding a transcript row
 				// (queued/authoritative/pre-appended paths). Publish that intent in the
@@ -625,13 +616,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 
 				// Single atomic update — avoids intermediate render where streaming
 				// is cleared but the new user message hasn't been appended yet.
-				if (queuedEcho && !optimisticQueuedId) {
-					// The server already described the queue: no echo anywhere. Falling
-					// through to the transcript append below put a send into a live turn
-					// on the transcript, where the steer's own `message.user` was a
-					// second copy of it (#2016).
-					update(s => ({ ...s, error: null, localSendIntent: localSendIntent(s) }));
-				} else if (options?.skipMessageAppend) {
+				if (options?.skipMessageAppend) {
 					update(s => ({
 						...s,
 						// S6: the feed reducer owns isStreaming; this is the declared
@@ -645,6 +630,13 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					}));
 				} else if (optimisticQueuedId) {
 					pendingQueue.noteOptimistic(_state.sessionId, optimisticQueuedId);
+					pendingQueue.trackSend(_state.sessionId, { id: optimisticQueuedId, clientMessageId,
+						content: prompt, queuedAt: Date.now() }, () => {
+						update(s => s.sessionId === _state.sessionId ? { ...s,
+							queuedMessages: s.queuedMessages.map(m => m.clientMessageId === clientMessageId ? { ...m, unconfirmed: true } : m),
+							error: 'Sending was not confirmed. Unsend this message to recover the text and try again.',
+						} : s);
+					});
 					update(s => ({
 						...s,
 						queuedMessages: [...s.queuedMessages, {
@@ -719,9 +711,11 @@ export function createMessageSender(deps: MessageSenderDeps) {
 						if (!result.queued_turn_id) {
 							throw new Error('This worker needs an update to compact and send. Your draft has been kept.');
 						}
+						pendingQueue.acknowledgeSend(_state.sessionId, clientMessageId);
 						clearCompactRetry(_state.sessionId!);
 						spendBindingPicks(_state.sessionId);
 					} catch (error) {
+						pendingQueue.acknowledgeSend(_state.sessionId, clientMessageId);
 						// Remove only our optimistic echo, never a newer session's draft
 						// or an authoritative queue snapshot that arrived in the meantime.
 						update(s => s.sessionId === _state.sessionId ? {
@@ -734,6 +728,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				}
 				querySent = wsConn.send(query);
 				if (!querySent) {
+					pendingQueue.acknowledgeSend(_state.sessionId, clientMessageId);
 					// WS dropped before the frame went out. Roll the optimistic echo back
 					// and surface an error so the caller can restore the input.
 					//
@@ -1309,7 +1304,12 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			const entry = _state.queuedMessages.find(m => m.id === id);
 			if (!entry) return null;
 			if (entry.status) return null;
-			const key = pendingQueue.requestRemoval(_state.sessionId, entry);
+			const key = pendingQueue.requestRemoval(_state.sessionId, entry, () => {
+				update(s => s.sessionId === _state.sessionId ? { ...s,
+					queuedMessages: s.queuedMessages.map(m => (m.clientMessageId ?? m.id) === (entry.clientMessageId ?? entry.id) ? { ...m, status: undefined } : m),
+					error: 'Cancellation was not confirmed. The message has not been withdrawn. Please try again.',
+				} : s);
+			});
 			const sent = wsConn.send({
 				type: 'remove_queued_message',
 				message_id: entry.id,

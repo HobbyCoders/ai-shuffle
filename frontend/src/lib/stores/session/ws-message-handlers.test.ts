@@ -2974,17 +2974,49 @@ describe('queue_updated (the pending "not seen yet" bubbles)', () => {
 		expect(pendingQueue.takeWithdrawnDraft('session-1')).toBeNull();
 	});
 
-	it('retains a delivered chip and does not restore its text when delivery wins', () => {
+	it('retires a delivered chip without restoring its text when delivery wins', () => {
 		const entry = { id: 'turn-q', clientMessageId: 'client-a', content: 'sent', queuedAt: 1 };
 		pendingQueue.requestRemoval('session-1', entry);
 		handlers.handleMessage(frame([]));
 		handlers.handleMessage({ type: 'queued_message_removal', session_id: 'session-1',
 			message_id: 'turn-q', client_message_id: 'client-a', verdict: 'already_delivered' });
-		expect(state.queuedMessages).toEqual([{ ...entry, status: 'delivered' }]);
+		expect(state.queuedMessages).toEqual([]);
 		expect(state.pendingRestorePrompt).toBeNull();
 		expect(notify.warning).toHaveBeenCalledTimes(1);
+		expect(state.error).toBeNull();
 		handlers.handleMessage(frame([]));
-		expect(state.queuedMessages).toHaveLength(1);
+		expect(state.queuedMessages).toHaveLength(0);
+	});
+
+	it('recovers a correlated refused echo without stopping the live turn or overwriting queued restores', () => {
+		const entry = { id: 'client-a', clientMessageId: 'client-a', content: 'recover', queuedAt: 1 };
+		state = { ...state, isStreaming: true, pendingRestorePrompt: 'earlier restore', queuedMessages: [entry] };
+		pendingQueue.trackSend('session-1', entry, vi.fn());
+		handlers.handleMessage({ type: 'error', session_id: 'session-1', client_message_id: 'client-a', message: 'Agent missing' });
+		expect(state.queuedMessages).toEqual([]);
+		expect(state.isStreaming).toBe(true);
+		expect(state.pendingRestorePrompt).toBe('earlier restore\n\nrecover');
+		expect(state.error).toContain('Agent missing');
+	});
+
+	it('a legacy unknown verdict clears the orphan with an honest recovery notice', () => {
+		const entry = { id: 'client-a', clientMessageId: 'client-a', content: 'recover', queuedAt: 1 };
+		state = { ...state, queuedMessages: [entry] };
+		pendingQueue.requestRemoval('session-1', entry);
+		handlers.handleMessage({ type: 'queued_message_removal', session_id: 'session-1', client_message_id: 'client-a', verdict: 'not_found' });
+		expect(state.queuedMessages).toEqual([]);
+		expect(state.pendingRestorePrompt).toBe('recover');
+		expect(state.error).toContain('check the conversation');
+	});
+
+	it('an unreachable executor retains the message with actionable controls', () => {
+		const entry = { id: 'client-a', clientMessageId: 'client-a', content: 'recover', queuedAt: 1 };
+		pendingQueue.requestRemoval('session-1', entry);
+		state = { ...state, queuedMessages: [{ ...entry, status: 'cancelling' }] };
+		handlers.handleMessage({ type: 'queued_message_removal', session_id: 'session-1', client_message_id: 'client-a', verdict: 'unavailable', message: "Can't reach the worker running this chat." });
+		expect(state.queuedMessages[0].status).toBeUndefined();
+		expect(state.error).toContain("Can't reach");
+		expect(state.pendingRestorePrompt).toBeNull();
 	});
 
 	it('renders the server snapshot', () => {

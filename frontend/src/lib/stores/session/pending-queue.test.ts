@@ -177,13 +177,13 @@ describe('pendingQueue — unsending', () => {
 		expect(authoritative([entry])).toEqual([]);
 	});
 
-	it('keeps delivery-first visible as delivered despite receipt and empty snapshot', () => {
+	it('retires delivery-first despite receipt and stale snapshots', () => {
 		const entry = row('turn-q', 'too late');
 		pendingQueue.requestRemoval(SID, entry);
 		pendingQueue.noteDelivered(SID, entry.content, 'turn-live');
 		pendingQueue.applyRemovalVerdict(SID, entry.id, 'already_delivered');
-		expect(authoritative([])).toEqual([{ ...entry, status: 'delivered' }]);
-		expect(authoritative([entry])).toEqual([{ ...entry, status: 'delivered' }]);
+		expect(authoritative([])).toEqual([]);
+		expect(authoritative([entry])).toEqual([]);
 	});
 
 	it('does not claim withdrawal for an unknown id or a failed socket send', () => {
@@ -193,6 +193,84 @@ describe('pendingQueue — unsending', () => {
 		expect(authoritative([entry])).toHaveLength(1);
 		pendingQueue.removalFailed(SID, entry.id);
 		expect(authoritative([entry])).toEqual([entry]);
+	});
+});
+
+describe('pendingQueue — bounded transactions', () => {
+	it('a receipt beats cancellation memory and a first-seen stale row', () => {
+		const entry = { ...row('client-a', 'words'), clientMessageId: 'client-a' };
+		pendingQueue.noteOptimistic(SID, entry.id);
+		pendingQueue.requestRemoval(SID, entry);
+		authoritative([]);
+		pendingQueue.noteDelivered(SID, 'words', 'live', true, 'client-a');
+		expect(authoritative([{ ...entry, id: 'unseen-server-row' }])).toEqual([]);
+		expect(pendingQueue.takeWithdrawnDraft(SID)).toBeNull();
+	});
+	it('retires a first-seen stale row even without cancellation', () => {
+		pendingQueue.noteDelivered(SID, 'words', 'live', true, 'client-a');
+		expect(authoritative([{ ...row('unseen', 'words'), clientMessageId: 'client-a' }])).toEqual([]);
+	});
+	it('expires a missing verdict and allows another cancellation attempt', () => {
+		vi.useFakeTimers();
+		try {
+			const entry = row('turn-q', 'words'), timeout = vi.fn();
+			pendingQueue.requestRemoval(SID, entry, timeout);
+			vi.advanceTimersByTime(10_000);
+			expect(timeout).toHaveBeenCalledOnce();
+			expect(authoritative([entry])).toEqual([entry]);
+			pendingQueue.requestRemoval(SID, entry);
+			pendingQueue.applyRemovalVerdict(SID, entry.id, 'withdrawn');
+			expect(authoritative([entry])).toEqual([]);
+		} finally { pendingQueue.reset(SID, true); vi.useRealTimers(); }
+	});
+	it('recovers the words when a withdrawal verdict arrives after its timeout', () => {
+		vi.useFakeTimers();
+		try {
+			const entry = { ...row('turn-a', 'late recovery'), clientMessageId: 'client-a' };
+			pendingQueue.requestRemoval(SID, entry);
+			vi.advanceTimersByTime(10_000);
+			pendingQueue.applyRemovalVerdict(SID, 'client-a', 'withdrawn');
+			expect(pendingQueue.takeWithdrawnDraft(SID)).toBe('late recovery');
+			expect(authoritative([entry])).toEqual([]);
+		} finally { pendingQueue.reset(SID, true); vi.useRealTimers(); }
+	});
+	it('a delivery winning cancellation does not suppress a legitimate newer server requeue', () => {
+		const entry = { ...row('client-a', 'repeat', 5000), clientMessageId: 'client-a' };
+		pendingQueue.requestRemoval(SID, entry);
+		pendingQueue.noteDelivered(SID, 'repeat', 'turn-old', true, 'client-a', new Date(10000).toISOString());
+		expect(pendingQueue.reconcile(SID, [entry])).toEqual([]);
+		const requeue = { ...row('turn-new', 'repeat', 15000), clientMessageId: 'client-a' };
+		expect(authoritative([requeue])).toEqual([requeue]);
+	});
+	it('keeps an unadmitted echo actionable through unrelated empty snapshots', () => {
+		const entry = { ...row('client-a', 'words'), clientMessageId: 'client-a' };
+		pendingQueue.trackSend(SID, entry, vi.fn());
+		expect(authoritative([])).toEqual([entry]);
+		pendingQueue.acknowledgeSend(SID, 'client-a');
+		expect(authoritative([])).toEqual([]);
+	});
+	it('restores a refused echo once, even after an empty snapshot', () => {
+		const entry = { ...row('client-a', 'recover'), clientMessageId: 'client-a' };
+		pendingQueue.trackSend(SID, entry, vi.fn());
+		authoritative([]);
+		pendingQueue.rejectSend(SID, 'client-a');
+		expect(pendingQueue.takeWithdrawnDraft(SID)).toBe('recover');
+		pendingQueue.rejectSend(SID, 'client-a');
+		expect(pendingQueue.takeWithdrawnDraft(SID)).toBeNull();
+		expect(authoritative([entry])).toEqual([]);
+	});
+	it('bounds admission waiting and cancels the timer on an ack', () => {
+		vi.useFakeTimers();
+		try {
+			const entry = { ...row('client-a', 'words'), clientMessageId: 'client-a' }, timeout = vi.fn();
+			pendingQueue.trackSend(SID, entry, timeout);
+			pendingQueue.acknowledgeSend(SID, 'client-a');
+			vi.advanceTimersByTime(10_000);
+			expect(timeout).not.toHaveBeenCalled();
+			pendingQueue.trackSend(SID, entry, timeout);
+			vi.advanceTimersByTime(10_000);
+			expect(timeout).toHaveBeenCalledOnce();
+		} finally { pendingQueue.reset(SID, true); vi.useRealTimers(); }
 	});
 });
 

@@ -442,6 +442,21 @@ async def test_rate_limited_frames_are_refused_without_dispatch(ws_env, monkeypa
         assert not conn.task.done()
 
 
+@pytest.mark.parametrize("kind", ["query", "queue_message"])
+async def test_rate_limit_refusal_echoes_send_identity(ws_env, monkeypatch, kind):
+    monkeypatch.setattr(settings, "ws_rate_limit_messages", 1)
+    monkeypatch.setattr(settings, "ws_rate_limit_window_seconds", 60.0)
+    command_id = "client-" + "f" * 32
+    async with _connect(ws_env) as conn:
+        conn.wire.push({"type": "close_session"})
+        conn.wire.push({"type": kind, "session_id": "live", "client_message_id": command_id,
+                        "prompt": "recover", "content": "recover"})
+        await conn.wait_for(lambda fs: len(fs) >= 4)
+        assert conn.frames("error") == [{"type": "error", "session_id": "live",
+                                         "client_message_id": command_id,
+                                         "message": cwh.RATE_LIMITED_MESSAGE}]
+
+
 async def test_rate_limit_error_frame_has_the_documented_shape(ws_env, monkeypatch):
     monkeypatch.setattr(settings, "ws_rate_limit_messages", 1)
     monkeypatch.setattr(settings, "ws_rate_limit_window_seconds", 60.0)

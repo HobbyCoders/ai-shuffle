@@ -37,6 +37,7 @@ import threading
 from typing import Any, Callable, Dict, Optional, Set, Tuple
 
 from app.core.db_polling import DB_POLL_ERRORS, DBPollWarnings
+from app.core import message_admission
 from app.db import turns
 
 logger = logging.getLogger(__name__)
@@ -282,6 +283,7 @@ def _supersede_wakeups(session_id: str) -> None:
         )
 
 
+@message_admission.guarded_submit
 def _submit_blocking(
     session_id: str,
     source: str,
@@ -579,6 +581,7 @@ async def submit_async(
     the start and silently drops the nudge from a worker thread. Ordering is
     unchanged: the turn is durably ``queued`` before the kick.
     """
+    message_admission.check_cancelled(session_id, command_id)
     answered: Optional[Dict[str, Any]] = None
     held: Optional[Dict[str, Any]] = None
     if source in _OWNER_ANSWER_SOURCES and prompt and not (payload or {}).get(VOICE_DELEGATION):

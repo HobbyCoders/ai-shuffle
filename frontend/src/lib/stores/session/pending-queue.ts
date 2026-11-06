@@ -48,10 +48,10 @@
  * - Each delivery retires at most ONE entry, so sending the same text twice
  *   never collapses both bubbles onto one answer.
  *
- * It also owns the two send-side edges: an optimistic echo is skipped outright
- * when the server has already spoken about the queue since the send began, and
- * an × carries the same client command id as its send. A cancellation stays
- * visible until its verdict; queue snapshots cannot hide it before that verdict.
+ * It also owns send admission and cancellation: an optimistic echo survives
+ * until its own command is admitted, rejected or receipted. An × carries that
+ * command id. A cancellation stays visible until terminal evidence or a bounded
+ * timeout; stale snapshots cannot resurrect a receipted command.
  *
  * Switching sessions (#524)
  * -------------------------
@@ -88,6 +88,7 @@ export interface PendingEntry {
 	queuedAt: number;
 	clientMessageId?: string;
 	status?: QueuedMessage['status'];
+	unconfirmed?: boolean;
 }
 
 /** Legacy optimistic ids, retained for old snapshots/tests (new sends use client ids). */
@@ -114,6 +115,7 @@ interface Delivery {
 	commandId?: string;
 	/** The entry this delivery retired — a delivery answers exactly one bubble. */
 	matchedEntryId: string | null;
+	createdAt?: number;
 }
 
 let sessionId: string | null = null;
@@ -144,7 +146,10 @@ const parked = new Map<string, PendingEntry[]>();
 interface CancellationState {
 	removals: Map<string, PendingEntry>;
 	withdrawn: Set<string>;
+	deliveredRows: Set<string>;
 	drafts: string[];
+	timers: Map<string, ReturnType<typeof setTimeout>>;
+	sends: Map<string, PendingEntry>;
 }
 // Cancellation transactions belong to a session, not its currently mounted
 // feed. A socket verdict can arrive after that feed has been torn down.
@@ -152,7 +157,7 @@ const cancellations = new Map<string | null, CancellationState>();
 function cancellationState(id: string | null): CancellationState {
 	let state = cancellations.get(id);
 	if (!state) {
-		state = { removals: new Map(), withdrawn: new Set(), drafts: [] };
+		state = { removals: new Map(), withdrawn: new Set(), deliveredRows: new Set(), drafts: [], timers: new Map(), sends: new Map() };
 		cancellations.set(id, state);
 	}
 	return state;
@@ -210,6 +215,7 @@ export const pendingQueue = {
 	reset(id: string | null = null, clearCancellations = false): void {
 		resetState(id);
 		if (clearCancellations) {
+			for (const state of cancellations.values()) for (const timer of state.timers.values()) clearTimeout(timer);
 			cancellations.clear();
 			parked.clear();
 		}
@@ -281,7 +287,10 @@ export const pendingQueue = {
 	noteAuthoritative(id: string | null, rows: PendingEntry[]): void {
 		useSession(id);
 		lastAuthorityAt = Date.now();
-		for (const row of rows) stamp(row.id);
+		for (const row of rows) {
+			stamp(row.id);
+			if (row.clientMessageId) this.acknowledgeSend(id, row.clientMessageId);
+		}
 	},
 
 	/**
@@ -302,6 +311,10 @@ export const pendingQueue = {
 	): void {
 		useSession(id);
 		if (turnId) deliveredTurnIds.add(turnId);
+		if (commandId) {
+			this.acknowledgeSend(id, commandId);
+			this.applyRemovalVerdict(id, commandId, 'already_delivered');
+		}
 		if (!live) {
 			// The command id is an exact handle, unlike text, so history may use it.
 			if (commandId) replayedCommands.set(commandId, createdAt ? Date.parse(createdAt) : NaN);
@@ -309,7 +322,7 @@ export const pendingQueue = {
 		}
 		const text = normalize(content);
 		if (!text && !commandId) return;
-		deliveries.push({ content: text, seq: ++seq, matchedEntryId: null, ...(commandId ? { commandId } : {}) });
+		deliveries.push({ content: text, seq: ++seq, matchedEntryId: null, createdAt: createdAt ? Date.parse(createdAt) : NaN, ...(commandId ? { commandId } : {}) });
 		// A long session delivers a lot of messages and only the recent ones can
 		// still be answering something pending. Forgetting the oldest only ever
 		// makes pruning more conservative.
@@ -319,28 +332,75 @@ export const pendingQueue = {
 	},
 
 	/** An × requests a verdict; it is not evidence of withdrawal. */
-	requestRemoval(id: string | null, entry: PendingEntry): string {
+	requestRemoval(id: string | null, entry: PendingEntry, onTimeout?: () => void): string {
 		const key = removalKey(entry);
-		cancellationState(id).removals.set(key, { ...entry, status: 'cancelling' });
+		stamp(entry.id);
+		const state = cancellationState(id);
+		this.removalFailed(id, key);
+		state.removals.set(key, { ...entry, status: 'cancelling' });
+		state.timers.set(key, setTimeout(() => {
+			this.removalFailed(id, key);
+			onTimeout?.();
+		}, 10_000));
 		return key;
 	},
 
-	removalFailed(id: string | null, key: string): void {
-		cancellations.get(id)?.removals.delete(key);
+	removalFailed(id: string | null, key: string, terminal = false): void {
+		const state = cancellations.get(id);
+		clearTimeout(state?.timers.get(key));
+		state?.timers.delete(key);
+		const entry = state?.removals.get(key);
+		if (terminal) state?.removals.delete(key);
+		else if (entry) state!.removals.set(key, { ...entry, status: undefined });
+		const rows = parked.get(id ?? '');
+		if (rows) parked.set(id!, rows.map(e => removalKey(e) === key ? { ...e, status: undefined } : e));
+	},
+
+	/** Keep recoverable words until an admission, refusal or receipt arrives. */
+	trackSend(id: string | null, entry: PendingEntry, onTimeout: () => void): void {
+		const state = cancellationState(id), key = removalKey(entry);
+		state.sends.set(key, entry);
+		state.timers.set(`send:${key}`, setTimeout(() => {
+			state.timers.delete(`send:${key}`);
+			state.sends.set(key, { ...entry, unconfirmed: true });
+			onTimeout();
+		}, 10_000));
+	},
+
+	acknowledgeSend(id: string | null, key: string): void {
+		const state = cancellations.get(id);
+		clearTimeout(state?.timers.get(`send:${key}`));
+		state?.timers.delete(`send:${key}`);
+		state?.sends.delete(key);
+	},
+
+	rejectSend(id: string | null, key: string): void {
+		const state = cancellationState(id);
+		const entry = state.sends.get(key);
+		if (entry && !state.withdrawn.has(key)) state.drafts.push(entry.content);
+		state.withdrawn.add(key);
+		this.acknowledgeSend(id, key);
+		this.removalFailed(id, key, true);
 	},
 
 	applyRemovalVerdict(id: string | null, key: string, verdict: string): void {
-		const { removals, withdrawn, drafts } = cancellationState(id);
+		const { removals, withdrawn, deliveredRows, drafts } = cancellationState(id);
 		const entry = removals.get(key);
 		if (verdict === 'withdrawn') {
+			if (withdrawn.has(key)) return;
 			withdrawn.add(key);
 			if (entry) {
 				withdrawn.add(entry.id);
 				drafts.push(entry.content);
 			}
-			removals.delete(key);
+			this.removalFailed(id, key, true);
+			this.acknowledgeSend(id, key);
 		} else if (verdict === 'already_delivered' && entry) {
-			removals.set(key, { ...entry, status: 'delivered' });
+			// Retire this row, not every future row for the command. Interrupted
+			// server turns can legitimately re-queue with a fresh id/time.
+			deliveredRows.add(entry.id);
+			this.removalFailed(id, key, true);
+			this.acknowledgeSend(id, key);
 		}
 	},
 
@@ -351,48 +411,34 @@ export const pendingQueue = {
 	 */
 	reconcile(id: string | null, entries: PendingEntry[]): PendingEntry[] {
 		useSession(id);
-		const { removals, withdrawn } = cancellationState(id);
+		const { removals, withdrawn, deliveredRows, sends } = cancellationState(id);
+		const keys = new Set(entries.map(removalKey));
+		const unresolved = new Map([...sends, ...removals]);
+		const candidates = [...entries, ...[...unresolved].filter(([key]) => !keys.has(key)).map(([, entry]) => entry)];
 		const kept: PendingEntry[] = [];
-		const seen = new Set<string>();
-		for (const entry of entries) {
+		for (const entry of candidates) {
 			const key = removalKey(entry);
-			seen.add(key);
-			if (prunedIds.has(key) || withdrawn.has(key) || withdrawn.has(entry.id)) continue;
+			const bornAt = stamp(entry.id), text = normalize(entry.content);
+			// Identity beats first-sighting order; server timestamps still allow a
+			// genuinely new re-queue after an interrupted delivered steer.
+			const delivery = deliveries.find(d => d.commandId && entry.clientMessageId
+				? d.commandId === entry.clientMessageId && (isOptimistic(entry)
+					|| !Number.isFinite(d.createdAt) || entry.queuedAt <= d.createdAt!)
+				: d.matchedEntryId === null && bornAt < d.seq && d.content === text);
+			if (withdrawn.has(key) || withdrawn.has(entry.id)
+				|| deliveredRows.has(entry.id) || deliveredTurnIds.has(entry.id) || prunedIds.has(entry.id)
+				|| answeredByHistory(entry) || delivery) {
+				if (delivery) delivery.matchedEntryId = entry.id;
+				prunedIds.add(entry.id);
+				this.removalFailed(id, key, true);
+				continue;
+			}
 			const removal = removals.get(key);
 			if (removal) {
 				const retained = { ...entry, status: removal.status };
 				removals.set(key, retained);
 				kept.push(retained);
-				continue;
-			}
-			// #588: a drained queue row runs as the turn its id names.
-			if (deliveredTurnIds.has(entry.id) || prunedIds.has(entry.id)) continue;
-			// #524: replayed history already carries this bubble's receipt.
-			if (answeredByHistory(entry)) {
-				prunedIds.add(entry.id);
-				continue;
-			}
-			// First sighting stamps the entry; an entry we meet for the first time
-			// here can never be older than a delivery, so it is never content-pruned.
-			const bornAt = stamp(entry.id);
-			const text = normalize(entry.content);
-			// A receipt that names its command answers that bubble only — never an
-			// identical-text sibling sent under another command id.
-			const answers = (d: Delivery) => d.commandId && entry.clientMessageId
-				? d.commandId === entry.clientMessageId
-				: d.content === text;
-			const delivery = deliveries.find(
-				(d) => d.matchedEntryId === null && bornAt < d.seq && answers(d)
-			);
-			if (delivery) {
-				delivery.matchedEntryId = entry.id;
-				prunedIds.add(entry.id);
-				continue;
-			}
-			kept.push(entry);
-		}
-		for (const [key, entry] of removals) {
-			if (!seen.has(key)) kept.push(entry);
+			} else kept.push(sends.get(key)?.unconfirmed ? { ...entry, unconfirmed: true } : entry);
 		}
 		return kept.length === entries.length && kept.every((e, i) => e === entries[i]) ? entries : kept;
 	},

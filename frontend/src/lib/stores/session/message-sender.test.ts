@@ -1522,10 +1522,9 @@ describe('message-sender pending-bubble edges', () => {
 		pendingQueue.reset('ses-1', true);
 	});
 
-	it('skips the optimistic echo when the server already described the queue', async () => {
-		// The authoritative snapshot for this send lands BEFORE the local append
-		// gets to run — a local row added on top of it is a second copy that no
-		// later frame is guaranteed to replace.
+	it('keeps a new command echo even when an unrelated snapshot races the send', async () => {
+		// This snapshot predates the command id: it cannot admit this send even
+		// when its text is identical. Text is not a send identity.
 		const { deps, getState, wsConn } = makeDeps(streamingState());
 		// Deliver after sendMessage records dispatchedAt, while it reads state.
 		// Preloading before send only passed when both Date.now calls happened
@@ -1545,7 +1544,8 @@ describe('message-sender pending-bubble edges', () => {
 		const result = await sender.sendMessage('answer this too');
 
 		expect(result).toBe(true);
-		expect(getState().queuedMessages).toHaveLength(0);
+		expect(getState().queuedMessages).toHaveLength(1);
+		expect(getState().queuedMessages[0].clientMessageId).toMatch(/^client-/);
 		// Nor on the transcript (#2016): the turn is live, so the steer's own
 		// `message.user` is the only copy that may land there.
 		expect(getState().messages.map((m) => m.id)).toEqual(['u0']);
@@ -1623,6 +1623,26 @@ describe('message-sender pending-bubble edges', () => {
 		expect(getState().queuedMessages).toEqual([entry]);
 		expect(getState().error).toMatch(/cancellation was sent/);
 		expect(pendingQueue.reconcile('ses-1', [entry])).toEqual([entry]);
+	});
+
+	it('makes an unacknowledged send removable and retries cancellation after a lost verdict', async () => {
+		vi.useFakeTimers();
+		try {
+			const { deps, getState, wsConn } = makeDeps(streamingState());
+			const sender = createMessageSender(deps);
+			await sender.sendMessage('keep my words');
+			vi.advanceTimersByTime(10_000);
+			const entry = getState().queuedMessages[0];
+			expect(entry.unconfirmed).toBe(true);
+			expect(getState().error).toContain('Sending was not confirmed');
+			sender.removeQueuedMessage(entry.id);
+			expect(getState().queuedMessages[0].status).toBe('cancelling');
+			vi.advanceTimersByTime(10_000);
+			expect(getState().queuedMessages[0].status).toBeUndefined();
+			expect(getState().error).toContain('Cancellation was not confirmed');
+			sender.removeQueuedMessage(entry.id);
+			expect(wsConn.send.mock.calls.filter(([m]) => m.type === 'remove_queued_message')).toHaveLength(2);
+		} finally { pendingQueue.reset('ses-1', true); vi.useRealTimers(); }
 	});
 
 	it('ignores an × for a message that is no longer pending', () => {

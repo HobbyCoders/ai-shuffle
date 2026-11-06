@@ -65,6 +65,11 @@
 	],
 	"rules": [
 		{
+			"why": "steer admission, cancellation and mirror routing must not strand a pending bubble",
+			"journeys": ["steer-lifecycle"],
+			"globs": ["frontend/tests/journeys/steer-lifecycle.journey.mjs", "frontend/src/lib/stores/session/pending-queue.ts", "frontend/src/lib/stores/session/message-sender.ts", "frontend/src/lib/stores/session/ws-message-handlers.ts", "frontend/src/lib/components/chat/PendingMessages.svelte", "app/api/chat_ws_handler.py", "app/core/message_admission.py", "app/core/turn_manager.py", "app/network/control.py"]
+		},
+		{
 			"why": "structured Plan event snapshots stay compact, honest and readable across reloads",
 			"journeys": ["session-plan"],
 			"globs": [

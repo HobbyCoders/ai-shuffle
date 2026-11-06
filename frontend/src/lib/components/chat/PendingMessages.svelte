@@ -107,6 +107,8 @@
 									class="pending-status"
 									class:is-delivered={msg.status === 'delivered'}
 								>{STATUS_LABEL[msg.status]}</span>
+							{:else if msg.unconfirmed}
+								<span class="pending-hint is-stale" title="Sending was not confirmed. Unsend this message to recover the text and try again.">Send unconfirmed</span>
 							{:else if stale}
 								<span class="pending-hint is-stale" title={staleTitle}>Unconfirmed · retrying…</span>
 							{:else}
