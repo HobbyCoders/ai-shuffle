@@ -642,6 +642,10 @@ function fold(hydrationComplete = false): void {
 	if (!deps) return;
 	// Guard against a session switch that landed mid-batch.
 	if (deps.getState().sessionId !== currentSessionId) return;
+	// A local send can land after the last event (or even after a flush was
+	// scheduled). Every publication must adopt it, including an empty caught_up
+	// or hydration fallback, not just folds preceded by event reduction.
+	seedOptimistic();
 	hiddenStreamDirty = false;
 	const patch = transcriptPatch(reducerState, {
 		hydrationComplete,
