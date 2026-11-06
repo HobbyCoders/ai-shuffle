@@ -373,9 +373,10 @@ export const pendingQueue = {
 	},
 
 	/** Keep recoverable words until an admission, refusal or receipt arrives. */
-	trackSend(id: string | null, entry: PendingEntry, onTimeout: () => void): void {
+	trackSend(id: string | null, entry: PendingEntry, onTimeout?: () => void): void {
 		const state = cancellationState(id), key = removalKey(entry);
 		state.sends.set(key, entry);
+		if (!onTimeout) return;
 		state.timers.set(`send:${key}`, setTimeout(() => {
 			state.timers.delete(`send:${key}`);
 			state.sends.set(key, { ...entry, unconfirmed: true });
@@ -390,10 +391,10 @@ export const pendingQueue = {
 		state?.sends.delete(key);
 	},
 
-	rejectSend(id: string | null, key: string): void {
+	rejectSend(id: string | null, key: string, fallback?: string | null): void {
 		const state = cancellationState(id);
-		const entry = state.sends.get(key);
-		if (entry && !state.withdrawn.has(key)) state.drafts.push(entry.content);
+		const content = state.sends.get(key)?.content ?? fallback;
+		if (content != null && !state.withdrawn.has(key)) state.drafts.push(content);
 		state.withdrawn.add(key);
 		this.acknowledgeSend(id, key);
 		this.removalFailed(id, key, true);

@@ -1050,7 +1050,10 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				// A refused send says nothing about the turn already running.
 				if (typeof data.client_message_id === 'string') {
 					const sid = (data.session_id as string | undefined) ?? getState().sessionId;
-					pendingQueue.rejectSend(sid, data.client_message_id);
+					// Retract/cache the draft before the active-session guard: a refusal
+					// can arrive after switching away from an optimistic idle send.
+					const recovered = feedController.retractOptimisticSend(sid, data.client_message_id);
+					pendingQueue.rejectSend(sid, data.client_message_id, recovered);
 					if (sid !== getState().sessionId) break;
 					const restored = pendingQueue.takeWithdrawnDraft(sid);
 					// Idle sends echo on the transcript, not in the pending queue.
@@ -1068,9 +1071,6 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 							...(recovered != null ? { pendingRestorePrompt: [s.pendingRestorePrompt, recovered].filter(Boolean).join('\n\n') } : {}),
 						};
 					});
-					// Another device's turn may have seeded the rejected row into
-					// the feed authority. Retract it there too, not just its projection.
-					if (refused) feedController.retractOptimisticSend(sid, data.client_message_id);
 					break;
 				}
 

@@ -877,7 +877,7 @@ export interface FeedController {
 	 */
 	noteOptimisticSend: (sessionId: string | null) => void;
 	/** Retract a refused local command from the reducer/cache and both optimistic latches. */
-	retractOptimisticSend: (sessionId: string | null, commandId: string) => void;
+	retractOptimisticSend: (sessionId: string | null, commandId: string) => string | null;
 	/** Withdraw the optimistic flip (send failed, stop confirmed, turn settled). */
 	clearOptimisticSend: (sessionId: string | null) => void;
 }
@@ -1318,15 +1318,23 @@ export const feedController: FeedController = {
 	},
 
 	retractOptimisticSend(sessionId: string | null, commandId: string) {
+		const app = deps?.getState();
+		let content = app?.sessionId === sessionId ? app.messages.find(m => m.role === 'user'
+			&& m.commandId === commandId && !m.serverId && m.seq == null)?.content ?? null : null;
 		const retract = (state: V2SessionState): V2SessionState => {
-			const messages = state.messages.filter(m => !(m.role === 'user' && m.commandId === commandId
-				&& !m.serverId && m.seq == null && !state.messageOriginSeq.has(m.id)));
+			const messages = state.messages.filter(m => {
+				const refused = m.role === 'user' && m.commandId === commandId
+					&& !m.serverId && m.seq == null && !state.messageOriginSeq.has(m.id);
+				if (refused) content ??= m.content;
+				return !refused;
+			});
 			return messages.length === state.messages.length ? state : { ...state, messages };
 		};
 		if (currentSessionId === sessionId) reducerState = retract(reducerState);
 		const cached = sessionId ? transcriptCache.get(sessionId) : undefined;
-		if (cached) transcriptCache.set(sessionId!, { ...cached, state: sealState(retract(cached.state)), optimisticStreaming: false });
-		this.clearOptimisticSend(sessionId);
+		if (cached) transcriptCache.set(sessionId!, { ...cached, state: sealState(retract(cached.state)) });
+		if (content != null) this.clearOptimisticSend(sessionId);
+		return content;
 	},
 
 	clearOptimisticSend(sessionId: string | null) {

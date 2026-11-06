@@ -255,6 +255,7 @@ function interaction(
 }
 
 beforeEach(() => {
+	pendingQueue.reset(null, true);
 	hoisted.onEvent = null;
 	hoisted.onOpen = null;
 	hoisted.onError = null;
@@ -308,7 +309,7 @@ describe('refused sends through the real feed controller', () => {
 		vi.advanceTimersByTime(STREAM_FOLD_MS);
 		flushRaf();
 		expect(deps.state.messages.some(m => m.commandId === 'command-a')).toBe(true);
-		const handlers = createMessageHandlers({ update: deps.update, getState: deps.getState } as MessageHandlerDeps);
+		const handlers = createMessageHandlers({ update: deps.update, getState: deps.getState } as unknown as MessageHandlerDeps);
 		handlers.handleMessage({ type: 'error', session_id: 's1', client_message_id: 'command-a', message: 'Missing agent' });
 		expect(deps.state.pendingRestorePrompt).toBe('recover A');
 		expect(deps.state.messages.some(m => m.commandId === 'command-a')).toBe(false);
@@ -325,6 +326,46 @@ describe('refused sends through the real feed controller', () => {
 		hoisted.onEvent!({ type: 'turn.completed', id: 'done-b', session_id: 's1', turn_id: 'turn-b', seq: 4 });
 		hoisted.onEvent!(caughtUp(4));
 		expect(deps.state.isStreaming).toBe(false);
+	});
+
+	it('defers a background refusal to its own composer and retracts the cached command', () => {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		feedController.start('s1');
+		hoisted.onEvent!(caughtUp(0));
+		deps.update(s => ({ ...s, optimisticStreaming: true, isStreaming: true,
+			messages: [{ id: 'user-refused', role: 'user', content: 'recover in s1', commandId: 'command-a' }],
+		}));
+		feedController.noteOptimisticSend('s1');
+		hoisted.onEvent!({ type: 'turn.started', id: 'start-b', session_id: 's1', turn_id: 'turn-b', seq: 1 });
+		hoisted.onEvent!({ ...textDelta('answer-b', 'B is running'), turn_id: 'turn-b', seq: 2 });
+		vi.advanceTimersByTime(STREAM_FOLD_MS);
+		flushRaf();
+		expect(deps.state.messages.some(m => m.commandId === 'command-a')).toBe(true);
+		deps.update(s => ({ ...s, sessionId: 's2', messages: [], pendingRestorePrompt: null, optimisticStreaming: false }));
+		feedController.start('s2');
+		expect(feedController.cachedPatch('s1')?.messages?.some(m => m.commandId === 'command-a')).toBe(true);
+		hoisted.onEvent!(caughtUp(0));
+		hoisted.onEvent!({ type: 'turn.started', id: 'start-c', session_id: 's2', turn_id: 'turn-c', seq: 1 });
+		vi.advanceTimersByTime(STREAM_FOLD_MS);
+		flushRaf();
+		const handlers = createMessageHandlers({ update: deps.update, getState: deps.getState } as unknown as MessageHandlerDeps);
+		handlers.handleMessage({ type: 'error', session_id: 's1', client_message_id: 'command-a', message: 'Missing agent' });
+		expect(deps.state.sessionId).toBe('s2');
+		expect(deps.state.pendingRestorePrompt).toBeNull();
+		expect(pendingQueue.takeWithdrawnDraft('s2')).toBeNull();
+		expect(deps.state.isStreaming).toBe(true);
+		// Same session-scoped handoff as session-switcher when its composer mounts.
+		deps.update(s => ({ ...s, sessionId: 's1', messages: [], pendingRestorePrompt: pendingQueue.takeWithdrawnDraft('s1') }));
+		feedController.start('s1');
+		expect(deps.state.messages.some(m => m.commandId === 'command-a')).toBe(false);
+		expect(deps.state.pendingRestorePrompt).toBe('recover in s1');
+		expect(pendingQueue.takeWithdrawnDraft('s1')).toBeNull();
+		hoisted.onEvent!({ ...textDelta('answer-b-more', ' still running'), turn_id: 'turn-b', seq: 3 });
+		vi.advanceTimersByTime(STREAM_FOLD_MS);
+		flushRaf();
+		expect(deps.state.messages.some(m => m.commandId === 'command-a')).toBe(false);
+		expect(deps.state.isStreaming).toBe(true);
 	});
 });
 

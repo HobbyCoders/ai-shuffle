@@ -205,7 +205,8 @@ await runJourney({
     name: 'delivery-wins',
     async setup(ctx) {
       await openNewChat(ctx);
-      await typeAndSend(ctx.page, `working ${uniq()} [script:long tps=300 latency_ms=1500]`);
+      // Leave a real producer window for throttled Chromium actionability retries.
+      await typeAndSend(ctx.page, `working ${uniq()} [script:long tps=100 latency_ms=1500]`);
       await waitChat(ctx.page, { streaming: 'true', messagesAtLeast: 2 });
     },
     async act({ page, mark }) {

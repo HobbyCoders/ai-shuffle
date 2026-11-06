@@ -649,6 +649,9 @@ export function createMessageSender(deps: MessageSenderDeps) {
 						localSendIntent: localSendIntent(s),
 					}));
 				} else {
+					// Retain idle drafts by session/command even if navigation evicts
+					// the optimistic transcript before its correlated refusal arrives.
+					pendingQueue.trackSend(_state.sessionId, { id: userMsgId, clientMessageId, content: prompt, queuedAt: Date.now() });
 					update(s => {
 						const baseMessages = s.messages;
 						// eslint-disable-next-line no-console

@@ -2,7 +2,7 @@ import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import { createMessageSender, type MessageSenderDeps } from './message-sender';
 import { reloadBlockers } from '$lib/services/app-update';
 import type { ActiveSessionState } from '../active-session';
-import type { InternalMutableState } from './ws-message-handlers';
+import { createMessageHandlers, type InternalMutableState, type MessageHandlerDeps } from './ws-message-handlers';
 import { reopenWorktree } from '$lib/api/git';
 import { api } from '$lib/api/client';
 import { ATTACHMENTS_NEED_LOCAL_CHECKOUT } from '$lib/components/chat/attach-disable';
@@ -272,6 +272,20 @@ describe('remembered permission on first send', () => {
 		expect(wsConn.send).toHaveBeenCalledWith(expect.objectContaining({
 			type: 'query', overrides: expect.objectContaining({ permission_mode: 'bypassPermissions' }),
 		}));
+	});
+});
+
+describe('background idle send refusals', () => {
+	it('keeps the command draft without a feed/cache and restores only its owning composer', async () => {
+		const { deps, wsConn, getState } = makeDeps(baseState({ sessionId: 's1', title: 'Old chat' }));
+		expect(await createMessageSender(deps).sendMessage('recover while away')).toBe(true);
+		const query = wsConn.send.mock.calls.find(([m]) => (m as any)?.type === 'query')![0] as any;
+		deps.update(s => ({ ...s, sessionId: 's2', messages: [], pendingRestorePrompt: 's2 draft' }));
+		createMessageHandlers(deps as unknown as MessageHandlerDeps).handleMessage({ type: 'error', session_id: 's1',
+			client_message_id: query.client_message_id, message: 'Missing agent' });
+		expect(getState().pendingRestorePrompt).toBe('s2 draft');
+		expect(pendingQueue.takeWithdrawnDraft('s2')).toBeNull();
+		expect(pendingQueue.takeWithdrawnDraft('s1')).toBe('recover while away');
 	});
 });
 
