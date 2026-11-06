@@ -64,6 +64,7 @@
 	import type { PickerGroup } from '$lib/constants/model-picker';
 	import type { ComposerSheetProps as Props } from '$lib/components/chat/composer-shell';
 	import { fastAppliesNotice } from '$lib/utils/fast-outcome';
+	import { NO_ADJUSTABLE_EFFORT, UNKNOWN_EFFORT } from '$lib/constants/model-effort';
 		import {
 		ACCESS_HELP, ACCESS_LABEL, ACCESS_SHORT, BYPASS, VelocityTracker, dragAxis, settlesClosed,
 		settlesOpen, stepValue, taskSummary
@@ -73,7 +74,7 @@
 		open, newChat = false, onClose, onOpenChange, panelId = 'mobile-composer-panel', inertToolbar = false,
 		modelOptions, modelGroups, modelValue, modelLabel, modelNotice, onModelSelect, modelLocked = false,
 		contextChoice, onContextChoiceSelect, contextStandardTokens, onContextStandardChange, effortOptions, effortValue, onEffortSelect,
-		effortExplanation, effortKnown = true, effortDefaultValue = null,
+		effortKnown = true, effortDefaultValue = null,
 		fastSupported = false, fastEnabled = false, fastPending = false, fastWaitsForNextMessage = false, onToggleFast, showCodeControls = true,
 		showSetup = true, permissionOptions, permissionValue, permissionPending = false, permissionUpdating = false, onPermissionSelect,
 		awayEnabled = false, awayAvailable = false, awayBusy = false, onToggleAway,
@@ -125,17 +126,22 @@
 
 	const effortLocked = $derived(modelLocked || !effortKnown || effortOptions.length === 0);
 	const effortLabel = $derived(
-		!effortKnown ? (effortValue ?? 'Effort')
+		!effortKnown ? (effortValue ?? 'Unknown')
 			: !effortOptions.length ? 'Fixed'
 			: effortValue ? (effortOptions.find((o) => o.value === effortValue)?.label ?? 'Auto')
 			: 'Auto'
 	);
 	/**
-	 * Levels the provider has not reported are not a state worth a row: the row
-	 * stays hidden until it has something true to say. A level already pinned to
-	 * this chat still shows, so a setting that is in force never goes invisible.
+	 * Capability refreshes may arrive after the sheet opens. Keep one effort slot
+	 * in every state, with the truthful explanation replacing its controls. All
+	 * explanations share a grid cell and size it even when invisible: neither a
+	 * lost row nor newly wrapped help text can move Permissions/Setup underneath.
 	 */
-	const effortRowShown = $derived(effortKnown || !!effortValue);
+	const effortNotes = $derived([
+		{ text: UNKNOWN_EFFORT, current: !effortKnown },
+		{ text: NO_ADJUSTABLE_EFFORT, current: effortKnown && !effortOptions.length },
+		{ text: 'The model is locked for this chat.', current: effortKnown && !!effortOptions.length && modelLocked }
+	]);
 	/** The effort row's value: the level, or why there is no choice. */
 	const panelEffortValue = $derived(effortLocked && effortKnown ? 'Set by the model' : effortLabel);
 	// Tool access exists in code chats; chat and voice run a fixed tool surface.
@@ -934,27 +940,30 @@
 								</span>
 								<ChevronRight size={18} class="mcp-chev" aria-hidden="true" />
 							</button>
-							{#if effortRowShown}
 							<div class="mcp-stack" data-row="effort">
 								<div class="mcp-rowhead">
 									<span class="mcp-ic" aria-hidden="true"><Lightbulb size={18} /></span>
-									<span class="mcp-lbl"><span>Reasoning effort</span>{#if effortKnown && effortLocked && effortExplanation && effortExplanation !== panelEffortValue}<small>{effortExplanation}</small>{/if}</span>
+									<span class="mcp-lbl"><span>Reasoning effort</span></span>
 									<span class="mcp-val">{panelEffortValue}</span>
 								</div>
-								{#if !effortLocked}
-									<!-- The outlined segment is the model's default, said for screen readers too. -->
-									<span id={effortDefaultNoteId} hidden>Model default</span>
-									<div class="mcp-seg accent" role="radiogroup" aria-label="Reasoning effort" style:--n={effortOptions.length}>
-										{#each effortOptions as option (option.value)}
-											<button type="button" role="radio" aria-checked={option.value === effortValue}
-												class:auto={!effortValue && option.value === effortDefaultValue}
-												aria-describedby={!effortValue && option.value === effortDefaultValue ? effortDefaultNoteId : undefined}
-												title={option.description} onclick={() => pickPanelEffort(option.value)}>{option.label}</button>
-										{/each}
-									</div>
-								{/if}
+								<div class="mcp-effort-body">
+									{#each effortNotes as note}
+										<p class="mcp-effort-note" class:current={note.current} aria-hidden={!note.current}>{note.text}</p>
+									{/each}
+									{#if !effortLocked}
+										<!-- The outlined segment is the model's default, said for screen readers too. -->
+										<div class="mcp-seg accent" role="radiogroup" aria-label="Reasoning effort" style:--n={effortOptions.length}>
+											<span id={effortDefaultNoteId} hidden>Model default</span>
+											{#each effortOptions as option (option.value)}
+												<button type="button" role="radio" aria-checked={option.value === effortValue}
+													class:auto={!effortValue && option.value === effortDefaultValue}
+													aria-describedby={!effortValue && option.value === effortDefaultValue ? effortDefaultNoteId : undefined}
+													title={option.description} onclick={() => pickPanelEffort(option.value)}>{option.label}</button>
+											{/each}
+										</div>
+									{/if}
+								</div>
 							</div>
-							{/if}
 							{#if fastShown}
 								<button type="button" class="mcp-row" role="switch" aria-label={fastPending ? 'Fast mode: loading' : 'Fast mode'}
 									aria-checked={fastPending ? false : fastEnabled} aria-busy={fastPending || undefined} disabled={fastPending}
@@ -1540,6 +1549,12 @@
 	.mcp-rowhead { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; font-size: 15px; }
 	/* The row has no chevron: its value keeps the column the others end on. */
 	.mcp-rowhead .mcp-val { margin-right: 30px; }
+	/* Reserve the intrinsic height of both the choices and their full explanations.
+	   visibility (not display:none) keeps the slot stable at narrow widths/text zoom. */
+	.mcp-effort-body { display: grid; min-height: 46px; }
+	.mcp-effort-body > * { grid-area: 1 / 1; }
+	.mcp-effort-note { align-self: center; margin: 0; font-size: 12.5px; line-height: 16px; color: var(--muted-foreground); visibility: hidden; }
+	.mcp-effort-note.current { visibility: visible; }
 	.mcp-seg {
 		display: grid;
 		grid-template-columns: repeat(var(--n, 4), minmax(0, 1fr));

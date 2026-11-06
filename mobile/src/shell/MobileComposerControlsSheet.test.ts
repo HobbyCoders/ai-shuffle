@@ -163,23 +163,24 @@ describe('quick bar', () => {
 		expect(within(row as HTMLElement).queryByRole('radiogroup')).toBeNull();
 	});
 
-	it('hides the effort row, and never says Unknown, while levels are not reported', () => {
+	it.each([null, 'minimal'])('reserves the unknown effort row with pinned value %s but never offers unreported levels', (effortValue) => {
+		const onEffortSelect = vi.fn();
 		render(MobileComposerControlsSheet, { props: props({
-			open: true, effortKnown: false, effortOptions: [], effortValue: null,
-			effortExplanation: 'Reasoning effort capabilities are not known yet.'
+			open: true, effortKnown: false, effortOptions: [], effortValue,
+			effortExplanation: 'Reasoning effort capabilities are not known yet.', onEffortSelect
 		}) });
-		expect(panel().querySelector('[data-row="effort"]')).toBeNull();
-		expect(panel().textContent).not.toContain('Unknown');
-		expect(panel().textContent).not.toContain('not known yet');
-	});
-
-	it('still shows a pinned level when levels are not reported, without the explanation', () => {
-		render(MobileComposerControlsSheet, { props: props({
-			open: true, effortKnown: false, effortOptions: [], effortValue: 'minimal',
-			effortExplanation: 'Reasoning effort capabilities are not known yet.'
-		}) });
-		expect(panel().querySelector('[data-row="effort"] .mcp-val')?.textContent).toBe('minimal');
-		expect(panel().textContent).not.toContain('not known yet');
+		const row = panel().querySelector<HTMLElement>('[data-row="effort"]');
+		expect(row).not.toBeNull();
+		expect(row!.querySelector('.mcp-val')?.textContent).toBe(effortValue ?? 'Unknown');
+		const explanation = row!.querySelector('.mcp-effort-note.current');
+		expect(explanation?.textContent).toContain('Reasoning effort capabilities are not known yet.');
+		expect(explanation?.getAttribute('aria-hidden')).toBe('false');
+		const inactive = row!.querySelectorAll('.mcp-effort-note:not(.current)');
+		expect(inactive.length).toBe(2);
+		for (const note of inactive) expect(note.getAttribute('aria-hidden')).toBe('true');
+		expect(within(row!).queryByRole('radiogroup')).toBeNull();
+		expect(within(row!).queryAllByRole('radio')).toHaveLength(0);
+		expect(onEffortSelect).not.toHaveBeenCalled();
 	});
 
 	it('marks the usage ring calm so the footer only shows it when it is actionable', () => {
