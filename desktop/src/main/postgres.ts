@@ -98,10 +98,13 @@ export interface InitdbOptions {
 	dataDir: string;
 	pwfile: string;
 	user?: string;
+	/** Disposable clusters only, on platforms supporting mmap DSM. */
+	mmapDsm?: boolean;
 }
 
 export function initdbArgs(opts: InitdbOptions): string[] {
-	return ['-D', opts.dataDir, '-U', opts.user ?? POSTGRES_USER, `--pwfile=${opts.pwfile}`, '--auth=scram-sha-256', '-E', 'UTF8', '--locale=C'];
+	return ['-D', opts.dataDir, '-U', opts.user ?? POSTGRES_USER, `--pwfile=${opts.pwfile}`, '--auth=scram-sha-256', '-E', 'UTF8', '--locale=C',
+		...(opts.mmapDsm ? ['-c', 'dynamic_shared_memory_type=mmap'] : [])];
 }
 
 export interface PgCtlStartOptions {
@@ -113,6 +116,8 @@ export interface PgCtlStartOptions {
 	timeoutSec?: number;
 	/** Defaults to pglz, which every PostgreSQL build accepts. */
 	walCompression?: WalCompression;
+	/** Also override retained clusters created with the POSIX DSM default. */
+	mmapDsm?: boolean;
 }
 
 export type WalCompression = 'lz4' | 'pglz';
@@ -151,6 +156,7 @@ export function walSettingArgs(walCompression: WalCompression): string[] {
  */
 export function pgCtlStartArgs(opts: PgCtlStartOptions): string[] {
 	const options = [`-p ${opts.port}`, `-c listen_addresses=${POSTGRES_HOST}`, ...walSettingArgs(opts.walCompression ?? 'pglz')];
+	if (opts.mmapDsm) options.push('-c dynamic_shared_memory_type=mmap');
 	if (opts.socketDir !== null) options.push(`-k "${opts.socketDir}"`);
 	return ['-D', opts.dataDir, '-l', opts.logPath, '-w', '-t', String(opts.timeoutSec ?? 60), '-o', options.join(' '), 'start'];
 }
@@ -321,6 +327,8 @@ export interface PostgresSupervisorOptions {
 	credentials: PostgresCredentials;
 	runtime?: Partial<PostgresRuntime>;
 	startTimeoutSec?: number;
+	/** Explicit source-preview opt-in; never inferred from environment or installed settings. */
+	disposable?: boolean;
 }
 
 export class PostgresSupervisor extends EventEmitter {
@@ -352,6 +360,11 @@ export class PostgresSupervisor extends EventEmitter {
 
 	get dataDir(): string {
 		return this._state.dataDir;
+	}
+
+	private get mmapDsm(): boolean {
+		// Windows uses its native DSM implementation, not POSIX /dev/shm.
+		return this.opts.disposable === true && (this.rt.platform === 'linux' || this.rt.platform === 'darwin');
 	}
 
 	/** The connection the worker should use; null until the server is ready. */
@@ -474,7 +487,7 @@ export class PostgresSupervisor extends EventEmitter {
 		const pwfile = path.join(this.opts.root, `.initdb-${process.pid}.pw`);
 		await this.rt.writeFile(pwfile, `${password}\n`, 0o600);
 		try {
-			const result = await this.exec(this.opts.binaries.initdb, initdbArgs({ dataDir: this.dataDir, pwfile }), { timeoutMs: 300_000 });
+			const result = await this.exec(this.opts.binaries.initdb, initdbArgs({ dataDir: this.dataDir, pwfile, mmapDsm: this.mmapDsm }), { timeoutMs: 300_000 });
 			if (result.code !== 0) throw new Error(`initdb could not create the database cluster (exit code ${result.code}).\n${lastLines(result)}`);
 		} finally {
 			await this.rt.remove(pwfile);
@@ -491,7 +504,7 @@ export class PostgresSupervisor extends EventEmitter {
 		this.log('no stored password for the bundled server; setting a new one');
 		const password = this.rt.randomPassword();
 		const sql = `ALTER ROLE "${POSTGRES_USER}" WITH PASSWORD '${password.replace(/'/g, "''")}';\n`;
-		const result = await this.exec(this.opts.binaries.postgres, ['--single', '-D', this.dataDir, MAINTENANCE_DATABASE], { input: sql });
+		const result = await this.exec(this.opts.binaries.postgres, ['--single', '-D', this.dataDir, ...(this.mmapDsm ? ['-c', 'dynamic_shared_memory_type=mmap'] : []), MAINTENANCE_DATABASE], { input: sql });
 		if (result.code !== 0) {
 			throw new Error(`Could not set a new password for the bundled server (exit code ${result.code}).\n${lastLines(result)}`);
 		}
@@ -589,7 +602,7 @@ export class PostgresSupervisor extends EventEmitter {
 		const socketDir = chooseSocketDir(this.rt.platform, this.opts.root, this.rt.tmpDir);
 		const timeoutSec = this.opts.startTimeoutSec ?? 60;
 		this.log(`starting PostgreSQL on ${POSTGRES_HOST}:${port}`);
-		const args = pgCtlStartArgs({ dataDir: this.dataDir, logPath: this._state.logPath, port, socketDir, timeoutSec, walCompression: walCompressionFor(this.rt.platform) });
+		const args = pgCtlStartArgs({ dataDir: this.dataDir, logPath: this._state.logPath, port, socketDir, timeoutSec, walCompression: walCompressionFor(this.rt.platform), mmapDsm: this.mmapDsm });
 		this.launched = true;
 		const result = await this.exec(this.opts.binaries.pgCtl, args, { timeoutMs: (timeoutSec + 30) * 1000 });
 		if (result.code !== 0) {

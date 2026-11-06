@@ -188,6 +188,42 @@ test('a fresh data directory gets initdb with a generated password, then a start
 	assert.ok(pg.tail().some((l) => /creating the database cluster/.test(l)));
 });
 
+for (const platform of ['linux', 'darwin', 'win32']) {
+	for (const retained of [false, 'stored', 'password-recovery']) {
+		for (const disposable of [undefined, true]) {
+			test(`disposable DSM: ${platform}, retained=${retained}, opt-in=${!!disposable}`, async () => {
+				const { rt, execs } = fakeRuntime({ platform,
+					files: retained ? { [path.join(DATA, 'PG_VERSION')]: '16\n' } : {},
+					dirs: retained ? [DATA] : [] });
+				// An inherited preview flag alone must not alter installed defaults.
+				rt.env.AI_SHUFFLE_PREVIEW = '1';
+				const stored = retained === 'stored' ? { host: POSTGRES_HOST, port: 54321, user: POSTGRES_USER,
+					database: POSTGRES_DATABASE, password: 'kept', managed: true } : null;
+				const pg = supervisor(rt, credentialsStore(stored).credentials, { disposable });
+				const state = await pg.start();
+				assert.equal(state.phase, 'ready', state.error);
+				const mmap = disposable === true && platform !== 'win32';
+				const init = execs('initdb');
+				assert.equal(init.length, retained ? 0 : 1);
+				if (!retained) assert.equal(init[0].args.includes('dynamic_shared_memory_type=mmap'), mmap);
+				if (retained === 'password-recovery') {
+					assert.equal(execs('postgres')[0].args.includes('dynamic_shared_memory_type=mmap'), mmap);
+				}
+				const [start] = execs('pg_ctl').filter(call => call.args.at(-1) === 'start');
+				const options = start.args[start.args.indexOf('-o') + 1];
+				assert.equal(options.includes('-c dynamic_shared_memory_type=mmap'), mmap);
+			});
+		}
+	}
+}
+
+test('disposable DSM argument helpers opt in at both initdb and start', () => {
+	const init = initdbArgs({ dataDir: 'D', pwfile: 'P', mmapDsm: true });
+	assert.deepEqual(init.slice(-2), ['-c', 'dynamic_shared_memory_type=mmap']);
+	const start = pgCtlStartArgs({ dataDir: 'D', logPath: 'L', port: 5000, socketDir: null, mmapDsm: true });
+	assert.ok(start[start.indexOf('-o') + 1].includes('-c dynamic_shared_memory_type=mmap'));
+});
+
 test('an existing cluster with stored settings skips initdb, keeps its port and does not rewrite the settings', async () => {
 	const { fs, rt, execs } = fakeRuntime({ files: { [path.join(DATA, 'PG_VERSION')]: '16\n' }, dirs: [DATA] });
 	rt.exec = ((original) => async (file, args, opts) => {

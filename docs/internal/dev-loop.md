@@ -25,10 +25,12 @@ continuous presence and sync, and CI needs stable journey timing.
 
 Disposable previews, dev loops (both workers), profiling copies and private test
 clusters use `dynamic_shared_memory_type=mmap`, including during `initdb` and
-retained-data wakeups. Their dynamic shared memory is backed by files in their
+retained-data wakeups. The separate desktop source-preview launcher also opts in
+on Linux/macOS; Windows keeps its native dynamic shared-memory implementation.
+Their dynamic shared memory is backed by files in their
 own PostgreSQL data directory, not the container's shared `/dev/shm`, so a forced
 stop or guardian cleanup cannot strand `PostgreSQL.*` files there. Normal stops
-still use PostgreSQL's bounded fast shutdown. Startup warns when `/dev/shm` is
+still use PostgreSQL's bounded fast shutdown. Python supervisor startup warns when `/dev/shm` is
 at least 90% full, but never deletes shared-memory files: other instances may
 still need them. Installed/production PostgreSQL defaults are unchanged.
 
