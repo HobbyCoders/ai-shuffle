@@ -1,0 +1,20 @@
+{
+  "description": "A real nested Task; open its dispatching worker chat while the child runs.",
+  "steps": [
+    {
+      "tool_calls": [
+        {
+          "name": "Task",
+          "input": {
+            "agent": "nested-worker",
+            "mode": "sync",
+            "prompt": "[script:tool-nested-child]"
+          }
+        }
+      ]
+    },
+    {
+      "text": "Nested worker complete."
+    }
+  ]
+}

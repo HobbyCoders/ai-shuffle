@@ -923,7 +923,12 @@ export function withLogEpoch(state: V2SessionState, epoch: string | null): V2Ses
  *
  *   - a running task the log has no summary for is added;
  *   - a summary the log settled is running again only when the registry
- *     updated the task after that settle (`updatedAt` later than the frame).
+ *     updated the task after that settle (`updatedAt` later than the frame);
+ *   - a terminal registry row settles an older running summary, repairing a
+ *     missed terminal frame without settling a newer continuation.
+ *
+ * Absence is not completion: snapshots can race a new start, and completed
+ * registry rows are retained only briefly.
  *
  * Anything the log says later still applies on top, as usual. Not a wire
  * event: it is re-applied from each new snapshot, never replayed. Returns
@@ -935,15 +940,37 @@ export function reconcileRunningTasks(state: V2SessionState, tasks: readonly Tas
 		return Number.isNaN(ms) ? -Infinity : ms;
 	};
 	let summaries = state.activeTaskSummaries;
+	let presentation = {
+		messages: state.messages,
+		speculativelySettledCardIds: state.speculativelySettledCardIds,
+		speculativelySettledTaskIds: state.speculativelySettledTaskIds,
+	};
+	let taskSettleTurnIds = state.taskSettleTurnIds;
 	for (const task of tasks) {
-		if (!task?.id || task.status !== 'running') continue;
+		if (!task?.id) continue;
 		const index = summaries.findIndex((t) => t.id === task.id);
+		if (task.status !== 'running') {
+			// /live retains terminal rows briefly. A newer one repairs a missed
+			// terminal frame, but an old completion must never stop a resumed run.
+			if (!['completed', 'error', 'killed'].includes(task.status) || index === -1) continue;
+			const existing = summaries[index];
+			if (at(task.updatedAt) <= at(existing.updatedAt) || !Number.isFinite(at(task.updatedAt))) continue;
+			summaries = summaries.slice();
+			summaries[index] = { ...existing, status: task.status, summary: task.summary, updatedAt: task.updatedAt };
+			presentation = settleTaskPresentation({ ...state, ...presentation }, summaries[index]);
+			// This is not an in-turn report that turn.parked may undo.
+			if (taskSettleTurnIds?.[task.id]) {
+				taskSettleTurnIds = { ...taskSettleTurnIds };
+				delete taskSettleTurnIds[task.id];
+			}
+			continue;
+		}
 		if (index === -1) {
 			summaries = [...summaries, { ...task, kind: task.kind === 'shell' ? 'shell' : 'agent' }];
 			continue;
 		}
 		const existing = summaries[index];
-		if (existing.status === 'running' || at(task.updatedAt) <= at(existing.updatedAt)) continue;
+		if (at(task.updatedAt) <= at(existing.updatedAt)) continue;
 		summaries = summaries.slice();
 		summaries[index] = {
 			...existing,
@@ -954,7 +981,37 @@ export function reconcileRunningTasks(state: V2SessionState, tasks: readonly Tas
 			...(task.worker && !existing.worker ? { worker: task.worker } : {}),
 		};
 	}
-	return summaries === state.activeTaskSummaries ? state : { ...state, activeTaskSummaries: summaries };
+	return summaries === state.activeTaskSummaries ? state : { ...state, ...presentation, activeTaskSummaries: summaries, taskSettleTurnIds };
+}
+
+/** Apply an authoritative task ending to its joined card and speculative latches. */
+function settleTaskPresentation(
+	state: Pick<V2SessionState, 'messages' | 'messageOriginSeq' | 'speculativelySettledCardIds' | 'speculativelySettledTaskIds'>,
+	task: Task
+) {
+	let { messages, speculativelySettledCardIds, speculativelySettledTaskIds } = state;
+	// Prefer the launch tool id; older rows and host Monitor shells may only
+	// carry the task id. Preserve richer results on genuinely settled cards.
+	const card = (task.toolUseId
+		? findSubagentByTask(messages, task.toolUseId, state.messageOriginSeq)
+		: undefined) ?? findSubagentByTask(messages, task.id, state.messageOriginSeq);
+	if (card && (card.agentStatus === 'running' || speculativelySettledCardIds.includes(card.id))) {
+		messages = replaceById(messages, card.id, {
+			agentStatus: subagentTerminalStatus(task.status),
+			agentChildren: (card.agentChildren ?? []).map(child => child.streaming ? { ...child, streaming: false } : child),
+			...(task.status === 'killed' && task.summary ? { agentStopNote: task.summary } : {}),
+		});
+	} else if (card && card.agentStatus === 'stopped' && !card.agentStopNote && task.summary) {
+		messages = replaceById(messages, card.id, { agentStopNote: task.summary });
+	}
+	// A genuine ending must not be undone by the dispatching turn parking.
+	if (speculativelySettledTaskIds.includes(task.id)) {
+		speculativelySettledTaskIds = speculativelySettledTaskIds.filter(id => id !== task.id);
+	}
+	if (card && speculativelySettledCardIds.includes(card.id)) {
+		speculativelySettledCardIds = speculativelySettledCardIds.filter(id => id !== card.id);
+	}
+	return { messages, speculativelySettledCardIds, speculativelySettledTaskIds };
 }
 
 /** Prefer an event payload `timestamp` over the envelope `created_at`. */
@@ -2427,39 +2484,8 @@ function reduceInternal(
 			// card key); never downgrade a card subagent.completed already
 			// settled with its richer result.
 			if (status === 'completed' || status === 'error' || status === 'killed') {
-				// Prefer the launch tool_use_id (the card key). Older rows — and
-				// host Monitor shells spawned before the launch id was threaded
-				// through — carry none at all, so fall back to the task_id: a
-				// subagent card launched by the Task tool uses its task_id as
-				// `toolId`, which is why the stale-reap path already settles
-				// cards with `tool_use_id == task_id`.
-				const card =
-					(summary.toolUseId
-						? findSubagentByTask(messages, summary.toolUseId, state.messageOriginSeq)
-						: undefined) ?? findSubagentByTask(messages, taskId, state.messageOriginSeq);
-				if (card && card.agentStatus === 'running') {
-					const children = (card.agentChildren ?? []).map((c) =>
-						c.streaming ? { ...c, streaming: false } : c
-					);
-					messages = replaceById(messages, card.id, {
-						agentStatus: subagentTerminalStatus(status),
-						agentChildren: children,
-						// Who stopped it ("Stopped by user"): the card shows it (#1806).
-						...(status === 'killed' && summary.summary ? { agentStopNote: summary.summary } : {}),
-					});
-				} else if (card && card.agentStatus === 'stopped' && !card.agentStopNote && summary.summary) {
-					// subagent.completed already settled it as stopped without a note.
-					messages = replaceById(messages, card.id, { agentStopNote: summary.summary });
-				}
-				// This is a GENUINE terminal event: drop this summary (and any joined
-				// card) from the speculative-settle record so a following turn.parked
-				// does NOT revive it to 'running' (terminal event wins).
-				if (speculativelySettledTaskIds.includes(taskId)) {
-					speculativelySettledTaskIds = speculativelySettledTaskIds.filter((t) => t !== taskId);
-				}
-				if (card && speculativelySettledCardIds.includes(card.id)) {
-					speculativelySettledCardIds = speculativelySettledCardIds.filter((c) => c !== card.id);
-				}
+				({ messages, speculativelySettledCardIds, speculativelySettledTaskIds } =
+					settleTaskPresentation({ ...state, messages, speculativelySettledCardIds, speculativelySettledTaskIds }, summary));
 			}
 			return {
 				...state,

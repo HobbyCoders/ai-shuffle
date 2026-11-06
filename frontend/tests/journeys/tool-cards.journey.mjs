@@ -8,11 +8,11 @@
 // Cases:
 //   bash    [script:tool-bash]: one Bash call (echo), then the answer
 //   multi   [script:tool-multi]: two parallel calls, one more, then the answer
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fakeAiTag, runJourney } from './runner.mjs';
-import { PROJECT, api, chatIdByToken, countUserRows, expect, openNewChat, pickAccess, typeAndSend, uniq, waitTurnSettled, watchRowFlicker } from './lib/app.mjs';
+import { PROJECT, api, chatIdByToken, countUserRows, expect, openFromSidebar, openNewChat, pickAccess, typeAndSend, uniq, waitTurnSettled, watchRowFlicker } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 import { STOP_SELECTOR, expectNeverDecreases, expectStopFollowsStreaming, markTime } from './lib/timeline.mjs';
 
@@ -149,6 +149,9 @@ const workerFollowup = {
 			const result = session.messages.find((m) => m.type === 'subagent' && m.content);
 			expect(!!result, 'the real Task has a persisted worker receipt');
 			const worker = JSON.parse(result.content);
+			const live = await api(page, 'GET', `/sessions/${id}/live?include_messages=false`);
+			expect(!live.activeTasks?.some((t) => t.id === worker.worker_session_id && t.status === 'running'), `finished Task must not remain running: ${JSON.stringify(live.activeTasks)}`);
+			expect(await page.locator('.run-row').count() === 0, 'finished Task leaves the running list live');
 			const branch = `chore/task-${worker.worker_session_id}`;
 			const path = join(observation.root, branch.replaceAll('/', '-'));
 			await mark('observe real Git reclamation before sending the continuation');
@@ -190,6 +193,68 @@ const workerFollowup = {
 		}
 	}
 };
+async function waitForTaskSnapshot(page, id, predicate) {
+	for (let n = 0; n < 60; n++) {
+		const live = await api(page, 'GET', `/sessions/${id}/live?include_messages=false`);
+		const result = predicate(live.activeTasks || []);
+		if (result) return result;
+		await page.waitForTimeout(300);
+	}
+	throw new Error(`timed out waiting for task in ${id}`);
+}
+
+const nestedCompletion = {
+	name: 'nested-completion',
+	viewports: ['desktop'],
+	async setup(ctx) {
+		const { page, status, variant } = ctx;
+		await openNewChat(ctx, { project: PROJECT });
+		// File agents live only in this disposable instance's home and inherit
+		// its fake provider, but use the real native Task dispatch machinery.
+		const dir = join(status.scratch_dir, 'home', '.fluid', 'agents');
+		mkdirSync(dir, { recursive: true });
+		for (const name of ['nested-worker', 'nested-leaf']) {
+			writeFileSync(join(dir, `${name}.md`), `---\nname: ${name}\ndescription: Disposable nested Task journey helper\n---\nFollow the scripted request.\n`);
+		}
+		await pickAccess(page, 'Bypass');
+		const token = `nested-${uniq()}`;
+		await typeAndSend(page, `${token}\n${fakeAiTag(variant, 'tool-nested-worker')}`);
+		const root = await chatIdByToken(page, token);
+		const worker = (await waitForTaskSnapshot(page, root, tasks => tasks.find(t => t.kind === 'agent' && t.status === 'running'))).id;
+		await waitForTaskSnapshot(page, worker, tasks => tasks.some(t => t.status === 'running'));
+		await page.goto(new URL(`/?session=${worker}`, status.urls.ui).href);
+		await page.locator('.inline').filter({ hasText: 'Agents' }).waitFor({ timeout: 15_000 });
+		ctx.worker = worker;
+		ctx.rootTitle = (await api(page, 'GET', `/sessions/${root}`)).title;
+	},
+	async act({ page, mark, worker, log }) {
+		await mark('nested helper finishes while dispatching chat keeps working');
+		await waitForTaskSnapshot(page, worker, tasks => tasks.some(t => t.status === 'completed') && !tasks.some(t => t.status === 'running'));
+		await mark('finished helper must leave running list without a reload');
+		await page.locator('.inline').filter({ hasText: 'Agents' }).waitFor({ state: 'hidden', timeout: 5_000 });
+		log(`nested Task cleared live in dispatching chat ${worker}`);
+	},
+	async verify({ page, worker, rootTitle }) {
+		const runningList = page.locator('.inline').filter({ hasText: 'Agents' });
+		await page.reload();
+		await page.locator('[data-ui-state="chat"][data-ui-surface="active"]').waitFor({ timeout: 15_000 });
+		expect(await runningList.count() === 0, 'finished nested Task stays off after reload');
+		await openFromSidebar(page, rootTitle);
+		await page.locator('.subagent-card').first().locator('summary').first().click();
+		await page.getByRole('link', { name: /Open transcript/ }).first().click();
+		await page.getByRole('button', { name: 'Task · nested-worker', exact: true }).waitFor({ timeout: 15_000 });
+		expect(await runningList.count() === 0, 'finished nested Task stays off after switching chats');
+		let reconnects = 0;
+		page.on('request', request => {
+			if (request.url().includes(`/sessions/${worker}/events?`)) reconnects++;
+		});
+		await page.evaluate(() => window.dispatchEvent(new Event('online')));
+		for (let n = 0; n < 30 && reconnects === 0; n++) await page.waitForTimeout(200);
+		expect(reconnects > 0, 'the real session feed reconnects');
+		expect(await runningList.count() === 0, 'finished nested Task stays off after reconnect');
+	}
+};
+
 const nativeModel = {
 	name: 'native-model',
 	async setup(ctx) {
@@ -302,6 +367,6 @@ await runJourney({
 	recorder: {
 		selectors: [STOP_SELECTOR, 'worklog=[role="region"][aria-label="Work log"]']
 	},
-	cases: [toolCase('bash'), toolCase('multi'), workerFollowup, nativeModel, nativePinRetry, nativePrecedence],
+	cases: [toolCase('bash'), toolCase('multi'), workerFollowup, nestedCompletion, nativeModel, nativePinRetry, nativePrecedence],
 	allow: [...DEV_INSTANCE_NOISE]
 });
