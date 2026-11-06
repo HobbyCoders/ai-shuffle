@@ -391,10 +391,24 @@ export async function typeAndSend(page, text) {
 	// line breaks without submitting the editor before the explicit Send click.
 	await box.press('ControlOrMeta+A');
 	await box.press('Backspace');
-	const lines = text.split('\n');
-	for (let i = 0; i < lines.length; i++) {
-		if (i) await box.press('Shift+Enter');
-		if (lines[i]) await box.pressSequentially(lines[i]);
+	const typeText = async (value) => {
+		const lines = value.split('\n');
+		for (let i = 0; i < lines.length; i++) {
+			if (i) await box.press('Shift+Enter');
+			if (lines[i]) await box.pressSequentially(lines[i]);
+		}
+	};
+	if (text.length > 256) {
+		// Paste-sized fixtures (20k+ characters) must not spend one CDP round
+		// trip per character. Start with real typing BEFORE bulk growth, then
+		// fill all but a short tail and finish typing. Preserve Unicode points
+		// and literal newlines at both boundaries.
+		const chars = Array.from(text);
+		await typeText(chars.slice(0, 16).join(''));
+		await box.fill(chars.slice(0, -16).join(''));
+		await typeText(chars.slice(-16).join(''));
+	} else {
+		await typeText(text);
 	}
 	traceNote(page, `send helper: before click ${JSON.stringify(await composerSnapshot(page).catch((e) => String(e)))}`);
 	await sendButton(page).click();

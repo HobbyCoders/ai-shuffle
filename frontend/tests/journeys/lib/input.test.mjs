@@ -44,3 +44,23 @@ it('types literal punctuation and Unicode, with only the explicit Send click sub
 	assert.deepEqual(calls.at(-1), ['send']);
 	assert.ok(!calls.some(([kind]) => kind === 'fill'));
 });
+
+it('bounds keyboard entry for large fixtures, attributing bulk growth before filling and preserving all text', async () => {
+	const { page, calls } = fixture();
+	const text = '😀 history\n' + 'history '.repeat(2000) + '\nfinish é';
+	await typeAndSend(page, text);
+	const fillAt = calls.findIndex(([kind]) => kind === 'fill');
+	assert.ok(fillAt > 0, 'large text must use one bulk fill rather than thousands of key events');
+	assert.equal(calls.filter(([kind]) => kind === 'fill').length, 1);
+	assert.ok(calls.slice(0, fillAt).some(([kind]) => kind === 'type'), 'real keyboard input precedes bulk growth');
+	assert.ok(calls.slice(fillAt + 1).some(([kind]) => kind === 'type'), 'finish with real keyboard input');
+	assert.ok(calls.filter(([kind]) => kind === 'type').reduce((n, [, value]) => n + Array.from(value).length, 0) <= 32);
+	let actual = '';
+	for (const [kind, value] of calls) {
+		if (kind === 'fill') actual = value;
+		else if (kind === 'type') actual += value;
+		else if (kind === 'key' && value === 'Shift+Enter') actual += '\n';
+	}
+	assert.equal(actual, text, 'bulk and typed portions preserve multiline Unicode exactly');
+	assert.deepEqual(calls.at(-1), ['send']);
+});
