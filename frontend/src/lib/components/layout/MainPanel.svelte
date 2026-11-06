@@ -413,6 +413,11 @@
 		git.setGithubAuth($githubAuthenticated);
 	});
 
+	// A parked turn is not streaming, but its Monitor/Task can still own the
+	// checkout. Terminal tasks may remain visible; only running ones block.
+	const gitCheckoutBusy = $derived($gitControlsStreaming || !!$activeSession.turnParked ||
+		$activeSession.activeTasks.some((task) => task.status === 'running'));
+
 	// Longest the PR lookup waits for the transcript of the chat being opened.
 	const GIT_OPEN_GATE_MAX_MS = 2000;
 
@@ -460,13 +465,13 @@
 				// the user has moved on, or GIT_OPEN_GATE_MAX_MS has passed.
 				// No remote fetch for a load that starts or ends while a turn runs:
 				// the owner refuses it with 409 then (a new chat's first load runs
-				// as its first reply starts, #803). The status refresh at stream end
-				// still runs; only the optional fetch of remote refs is skipped.
-				// Read live: a reply that is still streaming when the fetch would go
-				// out blocks it (the store retries at stream end); one that already
-				// ended does not, so no deferral waits for a stream end that passed.
+				// as its first reply starts, #803). Read-only status still refreshes;
+				// only the optional fetch of remote refs waits for an idle checkout.
+				// Read live: streaming, a parked turn, or running background work
+				// blocks it. A reply and its work that already ended do not, so the
+				// deferral never waits for an idle transition that already passed.
 				const options: GitLoadOptions = {
-					fetchBlocked: () => gitControlsStreaming.current,
+					fetchBlocked: () => gitCheckoutBusy,
 					...(sessionId && deferGitOnOpen()
 						? { afterCriticalPath: whenTranscriptSettled(activeSession, sessionId, GIT_OPEN_GATE_MAX_MS) }
 						: {})
@@ -623,16 +628,16 @@
 		});
 	});
 
-	// When streaming ends, do an immediate refresh so buttons update promptly.
-	// Uses forceRefresh() to abort any in-flight poll requests whose responses
-	// may predate the session's final git operations.
-	let _wasStreaming = false;
+	// Re-read owner status when the active chat's work ends. These fields also
+	// clear on navigation, so this is only a refresh hint, not proof of an idle
+	// checkout: the store releases deferred fetches only on a fresh idle verdict.
+	let _wasGitBusy = false;
 	$effect(() => {
-		const streaming = $gitControlsStreaming;
-		if (streaming) {
-			_wasStreaming = true;
-		} else if (_wasStreaming) {
-			_wasStreaming = false;
+		const busy = gitCheckoutBusy;
+		if (busy) {
+			_wasGitBusy = true;
+		} else if (_wasGitBusy) {
+			_wasGitBusy = false;
 			if (activeProject) {
 				untrack(() => {
 					// forceRefresh() now covers PR state; a separate refreshPrState()

@@ -170,6 +170,9 @@ function _shallowEqual<T extends Record<string, unknown>>(a: T | null, b: T | nu
 let _loadedKey: string | null = null;
 /** The raw scope (project / worktree / session) that resolved to `_loadedKey`. */
 let _loadedScope: string | null = null;
+// Cache scopes may be shared by legacy-worktree sibling chats. Navigation is
+// a separate freshness boundary, even when the checkout identity stays equal.
+let _navigationGeneration = 0;
 let _loadInFlight: string | null = null;
 let _bgFetchRunning = false;
 
@@ -501,6 +504,9 @@ async function _loadCore(
 	sessionId?: string | undefined,
 	options?: GitLoadOptions
 ) {
+	const generation = _navigationGeneration;
+	const isCurrent = () => generation === _navigationGeneration &&
+		_loadInFlight === scope && _loadedScope === scope;
 	_worktreeGone = false; // Reset on context switch
 	_clearServerBackoff(); // Reset backoff on context switch
 	let key = _identityFor(scope);
@@ -529,7 +535,7 @@ async function _loadCore(
 	_deferredFetch = null; // A new load decides its own fetch.
 	try {
 		const status = await gitApi.getGitStatus(projectId, worktreeId, undefined, requestScope);
-		if (_loadInFlight !== scope) return;
+		if (!isCurrent()) return;
 		// Resolve the scope onto its real checkout identity now that we know the
 		// branch, so sibling sessions on the same checkout share this entry.
 		key = _learnIdentity(scope, projectId, status.current_branch);
@@ -561,12 +567,12 @@ async function _loadCore(
 				(async () => {
 					if (gate) {
 						await gate.catch(() => undefined);
-						if (_loadInFlight !== scope) return null;
+						if (!isCurrent()) return null;
 					}
 					return gitApi.getPrState(projectId, worktreeId ?? undefined, requestScope).catch(() => null);
 				})()
 			]);
-			if (_loadInFlight !== scope) return;
+			if (!isCurrent()) return;
 			if (prState) _lastPrStateFetch.set(key, Date.now());
 
 			// A failed (or failing) PR lookup must NOT be read as "no open PR":
@@ -601,12 +607,10 @@ async function _loadCore(
 
 			_saveToCache(key, newState);
 
-			// Fetch updates refs, so the same safety guard as an explicit mutation
-			// applies. Do not knowingly send a background request that must fail.
-			if (!status.mutations_blocked) {
-				if (options?.fetchBlocked?.()) _deferredFetch = { key, projectId, worktreeId, scope: requestScope };
-				else _backgroundFetch(key, projectId, worktreeId, requestScope);
-			}
+			// Either gate can block this optional mutation. Keep the retry until a
+			// fresh owner status and the live chat gate both say it is safe.
+			_deferredFetch = { key, fetchBlocked: options?.fetchBlocked };
+			_releaseDeferredFetch(status);
 		} else {
 			// Not a git repo — a POSITIVE answer, so clear ALL git state (stale
 			// cached diffStats/prState/branches from a previous load must not
@@ -634,7 +638,7 @@ async function _loadCore(
 			_lastPrStateFetch.delete(key);
 		}
 	} catch (e) {
-		if (_loadInFlight !== scope) return;
+		if (!isCurrent()) return;
 		// A 404 on the initial load means the worktree's folder is gone (cleaned-up
 		// / reused worktree session). _checkWorktreeGone clears state to a definitive
 		// no-repo status so the header hides Ship It rather than showing stale controls.
@@ -653,7 +657,7 @@ async function _loadCore(
 			error: error.detail || error.message || 'Failed to load repository'
 		}));
 	} finally {
-		if (_loadInFlight === scope) _loadInFlight = null;
+		if (isCurrent()) _loadInFlight = null;
 	}
 }
 
@@ -682,13 +686,29 @@ function _keepPreviousPrState(
 	return { ...previous, lookup_failed: true, served_stale: false };
 }
 
-/**
- * Background fetch from remote + silent refresh of status/branches.
- */
-/** A background fetch skipped because a turn was running (#803); the
- *  stream-end forceRefresh() runs it if the same checkout is still loaded. */
-let _deferredFetch: { key: string; projectId: string; worktreeId?: string; scope?: gitApi.GitRequestScope } | null = null;
+/** An optional fetch waiting for this checkout to become idle. */
+let _deferredFetch: { key: string; fetchBlocked?: () => boolean } | null = null;
 
+/** Only a fresh, accepted owner status may release a pending fetch. Cached
+ *  status and active-chat transitions (which also happen on navigation) cannot.
+ *  Both the coherent load and read-only status polling use this one rule. */
+function _releaseDeferredFetch(status: gitApi.GitStatus) {
+	const deferred = _deferredFetch;
+	if (!deferred) return;
+	if (deferred.key !== _loadedKey) {
+		_deferredFetch = null;
+		return;
+	}
+	if (!status.is_git_repo || status.enclosing_repository_root ||
+		status.mutations_blocked !== false || deferred.fetchBlocked?.() || _bgFetchRunning) return;
+	_deferredFetch = null;
+	// A sibling chat may share the checkout. Use the CURRENT request target,
+	// not the chat that originally deferred the fetch.
+	_backgroundFetch(deferred.key, _state.projectId!, _state.worktreeId ?? undefined,
+		_state.sessionId ?? _state.workerTarget ?? undefined);
+}
+
+/** Background fetch from remote + silent refresh of status/branches. */
 function _backgroundFetch(key: string, projectId: string, worktreeId?: string, sessionId?: gitApi.GitRequestScope) {
 	if (_bgFetchRunning) return;
 	_bgFetchRunning = true;
@@ -910,6 +930,9 @@ export const git = {
 		// FIRST visit to a sibling session on a known checkout is instant too —
 		// without the hint we only learn the identity from the status response.
 		const key = branchHint ? _learnIdentity(scope, projectId, branchHint) : _identityFor(scope);
+		if (_deferredFetch?.key !== key) _deferredFetch = null;
+		_navigationGeneration++;
+		_loadInFlight = null;
 		_loadedScope = scope;
 		_loadedKey = key;
 		const cached = _cache.get(key) ?? (!worktreeId && !_branchSessions.has(sessionId ?? '') ? _nonRepoProjects.get(projectId) : undefined);
@@ -951,6 +974,9 @@ export const git = {
 	},
 
 	clearRepository() {
+		_deferredFetch = null;
+		_navigationGeneration++;
+		_loadInFlight = null;
 		_loadedKey = null;
 		_loadedScope = null;
 		_worktreeGone = false;
@@ -1034,6 +1060,7 @@ export const git = {
 		const scope = _loadedScope ?? _scopeKey(_state.projectId, _state.worktreeId, _state.sessionId);
 		const key = _identityFor(scope);
 		const projectId = _state.projectId;
+		const generation = _navigationGeneration;
 
 		_statusAbort?.abort();
 		const controller = new AbortController();
@@ -1049,7 +1076,10 @@ export const git = {
 				{ signal: controller.signal },
 				_state.sessionId ?? _state.workerTarget ?? undefined
 			);
-			if (_loadedKey !== key) return;
+			// A previous chat's poll can share this checkout key. It is not a
+			// current owner verdict after navigation or an abort/forced refresh.
+			if (controller.signal.aborted || generation !== _navigationGeneration ||
+				_loadedScope !== scope || _loadedKey !== key) return;
 			_clearServerBackoff();
 			// Discard a response that a newer one has already superseded.
 			if (!_acceptSeq('status', seq)) return;
@@ -1076,6 +1106,7 @@ export const git = {
 				return;
 			}
 			_nonRepoProjects.delete(projectId);
+			_releaseDeferredFetch(status);
 			// Skip the write when nothing changed — with the canonical flat status
 			// this genuinely suppresses the poll, instead of comparing fresh array
 			// references that never match.
@@ -1653,6 +1684,9 @@ export const git = {
 	},
 
 	clear() {
+		_deferredFetch = null;
+		_navigationGeneration++;
+		_loadInFlight = null;
 		_loadedKey = null;
 		_loadedScope = null;
 		_cache.clear();
@@ -1745,12 +1779,9 @@ export const git = {
 		_statusInFlight = false;
 		_diffStatsInFlight = false;
 		_branchesInFlight = false;
+		// refreshStatus releases a pending fetch only after its response, never
+		// from the cached status that may belong to the chat we just left.
 		git.refreshStatus();
-		const deferred = _deferredFetch;
-		_deferredFetch = null;
-		if (deferred && deferred.key === _loadedKey && !_state.status?.mutations_blocked) {
-			_backgroundFetch(deferred.key, deferred.projectId, deferred.worktreeId, deferred.scope);
-		}
 		if (_state.status?.is_git_repo) {
 			git.refreshDiffStats();
 			git.loadBranches();
