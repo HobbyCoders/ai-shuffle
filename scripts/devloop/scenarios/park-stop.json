@@ -1,5 +1,5 @@
 {
-  "description": "A short real Monitor job for Stop journeys. Unlike park-wait, this is not used to measure twenty seconds of parked timer accumulation.",
+  "description": "A real Monitor job gated by the Stop journey: its ten-second natural lifetime starts only once the queue is staged. Unlike park-wait, this is not used to measure parked timer accumulation.",
   "steps": [
     {
       "text": "I'll start the build in the background.",
@@ -7,7 +7,7 @@
         {
           "name": "Monitor",
           "input": {
-            "command": "sleep 10 && echo 'build ok'"
+            "command": "gate=\"$(git rev-parse --path-format=absolute --git-common-dir)/journey-park-stop\"; while [ ! -f \"$gate/release\" ]; do [ -d \"$gate\" ] || exit 1; sleep 0.05; done; date +%s%3N > \"$gate/started.tmp\"; mv \"$gate/started.tmp\" \"$gate/started\"; sleep 10 && echo 'build ok'"
           }
         }
       ]

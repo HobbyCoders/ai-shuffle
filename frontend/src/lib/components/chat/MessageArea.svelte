@@ -426,7 +426,8 @@
 	const notSentHold = $derived(notSentRows(
 		$activeSession.messages,
 		holdingTurnId,
-		stopRecovery ? [] : $activeSession.queuedMessages ?? []
+		stopRecovery ? [] : $activeSession.queuedMessages ?? [],
+		!stopRecovery && ($activeSession.activeTasks ?? []).some(task => task.status === 'running')
 	));
 
 	const assistantQuestion = $derived(currentAssistantQuestion($activeSession.pendingPermissions ?? []));
