@@ -43,6 +43,17 @@ def test_octet_length_text_counts_utf8_bytes():
         close_connection(raw)
 
 
+@pytest.mark.parametrize("key", [-(2 ** 63), 2 ** 63 - 1])
+def test_try_advisory_transaction_lock_keeps_parameter_and_boolean_contract(key):
+    raw = new_sqlite_connection()
+    try:
+        cur = ShimConnection(raw).cursor()
+        cur.execute("SELECT pg_try_advisory_xact_lock(%s) AS locked", (key,))
+        assert cur.fetchone()["locked"] == 1
+    finally:
+        close_connection(raw)
+
+
 class _FakeRaw:
     """Minimal stand-in for a sqlite3 connection whose commit/rollback raise."""
 

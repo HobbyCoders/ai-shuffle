@@ -713,6 +713,26 @@ function withLogEpoch(state, epoch) {
   }
   return { ...state, logEpoch: epoch, messages };
 }
+function settleTaskPresentation(state, task) {
+  let { messages, speculativelySettledCardIds, speculativelySettledTaskIds } = state;
+  const card = (task.toolUseId ? findSubagentByTask(messages, task.toolUseId, state.messageOriginSeq) : void 0) ?? findSubagentByTask(messages, task.id, state.messageOriginSeq);
+  if (card && (card.agentStatus === "running" || speculativelySettledCardIds.includes(card.id))) {
+    messages = replaceById(messages, card.id, {
+      agentStatus: subagentTerminalStatus(task.status),
+      agentChildren: (card.agentChildren ?? []).map((child) => child.streaming ? { ...child, streaming: false } : child),
+      ...task.status === "killed" && task.summary ? { agentStopNote: task.summary } : {}
+    });
+  } else if (card && card.agentStatus === "stopped" && !card.agentStopNote && task.summary) {
+    messages = replaceById(messages, card.id, { agentStopNote: task.summary });
+  }
+  if (speculativelySettledTaskIds.includes(task.id)) {
+    speculativelySettledTaskIds = speculativelySettledTaskIds.filter((id) => id !== task.id);
+  }
+  if (card && speculativelySettledCardIds.includes(card.id)) {
+    speculativelySettledCardIds = speculativelySettledCardIds.filter((id) => id !== card.id);
+  }
+  return { messages, speculativelySettledCardIds, speculativelySettledTaskIds };
+}
 function stampTs(event, createdAt) {
   return str(event.timestamp) || createdAt;
 }
@@ -1698,26 +1718,7 @@ function reduceInternal(state, event, observe) {
         if (card && Object.keys(patch).length) messages = replaceById(messages, card.id, patch);
       }
       if (status === "completed" || status === "error" || status === "killed") {
-        const card = (summary.toolUseId ? findSubagentByTask(messages, summary.toolUseId, state.messageOriginSeq) : void 0) ?? findSubagentByTask(messages, taskId, state.messageOriginSeq);
-        if (card && card.agentStatus === "running") {
-          const children = (card.agentChildren ?? []).map(
-            (c) => c.streaming ? { ...c, streaming: false } : c
-          );
-          messages = replaceById(messages, card.id, {
-            agentStatus: subagentTerminalStatus(status),
-            agentChildren: children,
-            // Who stopped it ("Stopped by user"): the card shows it (#1806).
-            ...status === "killed" && summary.summary ? { agentStopNote: summary.summary } : {}
-          });
-        } else if (card && card.agentStatus === "stopped" && !card.agentStopNote && summary.summary) {
-          messages = replaceById(messages, card.id, { agentStopNote: summary.summary });
-        }
-        if (speculativelySettledTaskIds.includes(taskId)) {
-          speculativelySettledTaskIds = speculativelySettledTaskIds.filter((t) => t !== taskId);
-        }
-        if (card && speculativelySettledCardIds.includes(card.id)) {
-          speculativelySettledCardIds = speculativelySettledCardIds.filter((c) => c !== card.id);
-        }
+        ({ messages, speculativelySettledCardIds, speculativelySettledTaskIds } = settleTaskPresentation({ ...state, messages, speculativelySettledCardIds, speculativelySettledTaskIds }, summary));
       }
       return {
         ...state,
@@ -2324,7 +2325,7 @@ function materializeProjection(body, records, epoch, runtime) {
 }
 
 // scripts/transcript-reducer-node.ts
-var REDUCER_FINGERPRINT = "a3bb3de736a03ecdad7eb4a3ac92fde01c7d555c7a88499fa74fd17828511451";
+var REDUCER_FINGERPRINT = "ba357e7b2ff3560809b4531f8aa01f4067eb00e407815946f24d9966745087d6";
 var RPC_VERSION = 1;
 var MAX_PACKET_BYTES = 24 * 1024 * 1024;
 function dispatch(method, params) {

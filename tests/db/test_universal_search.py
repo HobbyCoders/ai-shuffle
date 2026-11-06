@@ -2,12 +2,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from app.db import sessions
+from app.db import session_recall, sessions
 
 
 @pytest.mark.parametrize("paginated", [False, True])
 @pytest.mark.parametrize("deferred", [False, True])
-def test_native_search_query_contract(paginated: bool, deferred: bool) -> None:
+@pytest.mark.parametrize("indexed", [False, True])
+def test_native_search_query_contract(paginated: bool, deferred: bool, indexed: bool) -> None:
     cursor = MagicMock()
     cursor.fetchall.return_value = []
     captured: list[tuple[str, list]] = []
@@ -20,6 +21,7 @@ def test_native_search_query_contract(paginated: bool, deferred: bool) -> None:
 
     cursor.fetchone.side_effect = fetchone
     with patch.object(sessions, "get_db"), \
+         patch.object(session_recall, "native_search_ready", return_value=indexed), \
          patch.object(sessions, "get_cursor", return_value=cursor), \
          patch.object(sessions, "_instance_filter",
                       return_value=(" AND s.instance_id = %s", ["install"])):
@@ -30,7 +32,7 @@ def test_native_search_query_contract(paginated: bool, deferred: bool) -> None:
         assert sql.count('%s') == len(params)
         if sql.startswith("SELECT column_name "):
             assert "information_schema.columns" in sql
-            assert params[0] in ("fluid_session_nodes", "session_messages", "session_store_entries")
+            assert params[0] in ("fluid_session_nodes", "session_messages", "session_store_entries", "session_recall_text")
             assert params[1] == "history_index_state"
             continue
         searches += 1
@@ -39,6 +41,8 @@ def test_native_search_query_contract(paginated: bool, deferred: bool) -> None:
         assert "n.message->>'role' IN ('user', 'assistant')" in sql
         assert "block->>'kind' = 'text'" in sql
         assert 'texts.content ILIKE %s' in sql
+        assert ("r.body ILIKE %s" in sql) == indexed
+        assert (f"r.part >= {session_recall.NATIVE_CAPPED_PART}" in sql) == indexed
         assert sql.count('AND s.instance_id = %s') == 4
         assert 'AND project_id = %s' in sql
         assert 'AND api_user_id = %s' in sql

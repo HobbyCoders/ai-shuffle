@@ -1,0 +1,21 @@
+{
+  "description": "A native worker keeps thinking after a nested Task completes, so its turn end cannot hide a missing task settle frame.",
+  "tps": 1,
+  "steps": [
+    {
+      "tool_calls": [
+        {
+          "name": "Task",
+          "input": {
+            "agent": "nested-leaf",
+            "mode": "sync",
+            "prompt": "[script:slow tps=12]"
+          }
+        }
+      ]
+    },
+    {
+      "text": "Nested child complete. I am still doing independent work in the dispatching chat, so the finished helper must leave the running list while this response is still arriving, not wait for this chat to finish its own turn."
+    }
+  ]
+}

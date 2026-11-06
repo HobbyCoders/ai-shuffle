@@ -1308,12 +1308,12 @@ describe('the running strip follows the task registry (#320)', () => {
 		vi.mocked(feedController.reconcileRunningTasks).mockClear();
 	});
 
-	it('hands the snapshot\'s running rows to the feed that owns the strip', async () => {
+	it('hands running and terminal snapshot rows to the feed that owns the strip', async () => {
 		vi.mocked(feedController.reconcileRunningTasks).mockReturnValueOnce(true);
 		vi.mocked(api.get).mockResolvedValueOnce({ activeTasks: [running, finished] });
 		const { switcher, getState } = makeSwitcher(fullState({ sessionId: 'session-A' }));
 		await switcher.refreshSessionMetadata('session-A');
-		expect(feedController.reconcileRunningTasks).toHaveBeenCalledExactlyOnceWith('session-A', [running]);
+		expect(feedController.reconcileRunningTasks).toHaveBeenCalledExactlyOnceWith('session-A', [running, finished]);
 		// The feed publishes the strip; the snapshot does not write it directly.
 		expect(getState().activeTasks).toEqual([]);
 		switcher.destroy();
@@ -1333,7 +1333,7 @@ describe('the running strip follows the task registry (#320)', () => {
 		const { switcher } = makeSwitcher(fullState({ sessionId: 'session-A' }));
 		await switcher.refreshRunningTasks('session-A');
 		expect(api.get).toHaveBeenLastCalledWith('/sessions/session-A/live?since_update_id=0&include_messages=false');
-		expect(feedController.reconcileRunningTasks).toHaveBeenCalledExactlyOnceWith('session-A', [running]);
+		expect(feedController.reconcileRunningTasks).toHaveBeenCalledExactlyOnceWith('session-A', [running, finished]);
 
 		vi.mocked(api.get).mockClear();
 		await switcher.refreshRunningTasks('session-B');

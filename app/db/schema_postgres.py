@@ -25,32 +25,17 @@ logger = logging.getLogger("app.db.schema_postgres")
 SCHEMA_VERSION = 95
 
 
-def create_session_events_recall_index(cursor) -> None:
-    """Index the mirrored-event arm of agent SessionSearch, if pg_trgm is usable.
+def session_recall_cache_ready(cursor, *, legacy_only: bool = False) -> bool:
+    """A ready projection supersedes the optional legacy stored-text cache.
 
-    Called by both bootstrap and the fingerprint-gated upgrade pass. Keep the
-    raw JSON expression and text-event predicate aligned with PgFluidStore's
-    prefilter; token FTS would drop short/punctuation/substring matches.
+    Before projection backfill completes, retain the old cache's validity check.
+    Retiring its indexes must not mark a ready projection as an incomplete cache.
+    A caller selecting generated columns must use legacy_only: projection
+    readiness can change between two READ COMMITTED statements.
     """
-    if session_recall_cache_ready(cursor):
-        return
-    cursor.execute("SAVEPOINT recall_trgm_events")
-    try:
-        cursor.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
-        cursor.execute(
-            "CREATE INDEX IF NOT EXISTS idx_session_events_recall_trgm "
-            "ON session_events USING gin ((payload::text) gin_trgm_ops) "
-            "WHERE event_type IN ('message.user', 'message.assistant', 'assistant.text_delta')"
-        )
-    except Exception:  # noqa: BLE001 — unavailable extension must not prevent boot
-        cursor.execute("ROLLBACK TO SAVEPOINT recall_trgm_events")
-        logger.warning("Mirrored SessionSearch trigram index unavailable; recall remains unindexed")
-    finally:
-        cursor.execute("RELEASE SAVEPOINT recall_trgm_events")
-
-
-def session_recall_cache_ready(cursor) -> bool:
-    """Use the optional cache only after all three indexes are valid."""
+    from app.db import session_recall
+    if not legacy_only and session_recall.ready(cursor):
+        return True
     cursor.execute(
         "SELECT c.relname FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid "
         "JOIN pg_namespace n ON n.oid = c.relnamespace "
@@ -69,6 +54,13 @@ def create_session_recall_text(cursor) -> None:
     the tables. The maintenance entry point checks capacity and sets lock and
     statement timeouts before calling. Failures roll the whole transaction back.
     """
+    from app.db import session_recall
+    if session_recall.ready(cursor):
+        return  # Superseded; never recreate redundant indexes on a ready worker.
+    # A blocking advisory SELECT would retain a snapshot that a concurrent
+    # build needs to drain. This caller-owned transaction must retry in full.
+    if not session_recall._try_schema_lock(cursor):
+        raise RuntimeError("schema maintenance busy; retry the cache command")
     cursor.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
     shapes = (
         ("fluid_session_nodes", "message::text", "TRUE", "idx_fluid_recall_text_trgm"),
@@ -87,12 +79,10 @@ def create_session_recall_text(cursor) -> None:
             f"CREATE INDEX IF NOT EXISTS {index} ON {table} "
             f"USING gin (recall_text gin_trgm_ops) WHERE {predicate}"
         )
-    if not session_recall_cache_ready(cursor):
+    if not session_recall_cache_ready(cursor, legacy_only=True):
         raise RuntimeError("Recall cache indexes are not valid; retain legacy indexes and retry maintenance")
-    # The native expression index still serves the separate session-list API.
-    # The other two expressions are only read by SessionSearch and are now redundant.
-    cursor.execute("DROP INDEX IF EXISTS idx_sse_entry_trgm")
-    cursor.execute("DROP INDEX IF EXISTS idx_session_events_recall_trgm")
+    # Index retirement is exclusively concurrent background maintenance, never
+    # part of this caller-owned transaction (even for legacy offline maintenance).
 
 
 def create_postgres_schema(cursor: Any) -> None:
@@ -1077,21 +1067,9 @@ def create_postgres_schema(cursor: Any) -> None:
         )
     """)
 
-    # Cross-session recall trigram index (the session_store_entries twin is
-    # created after that table, below). Serves SessionSearch's substring-ILIKE
-    # prefilter; savepoint-fenced because CREATE EXTENSION needs privileges
-    # some managed databases refuse — recall then stays unindexed (correct,
-    # just slower) instead of aborting the bootstrap transaction.
-    cursor.execute("SAVEPOINT recall_trgm")
-    try:
-        cursor.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
-        cursor.execute(
-            "CREATE INDEX IF NOT EXISTS idx_fluid_nodes_trgm "
-            "ON fluid_session_nodes USING gin ((message::text) gin_trgm_ops)"
-        )
-        cursor.execute("RELEASE SAVEPOINT recall_trgm")
-    except Exception:  # noqa: BLE001 — degraded recall beats a dead bootstrap
-        cursor.execute("ROLLBACK TO SAVEPOINT recall_trgm")
+    # Transcript substring search uses the compact projection once backfilled.
+    # Never build raw-JSON GINs in the bootstrap transaction; fallback search
+    # remains correct (unindexed) while projection installation is pending.
 
     # ------------------------------------------------------------------
     # 36d. Background tasks. Durable per-task lifecycle snapshots.
@@ -1774,21 +1752,6 @@ def create_postgres_schema(cursor: Any) -> None:
         "ON session_store_entries USING gin (to_tsvector('english', sse_entry_text(entry))) "
         "WHERE subpath IS NULL"
     )
-    # The session_store_entries twin of idx_fluid_nodes_trgm (see the fluid
-    # tables above) — SessionSearch's substring-ILIKE prefilter over the SDK
-    # transcript mirror. Same savepoint fence, same graceful degradation.
-    cursor.execute("SAVEPOINT recall_trgm_sse")
-    try:
-        cursor.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
-        if not session_recall_cache_ready(cursor):
-            cursor.execute(
-                "CREATE INDEX IF NOT EXISTS idx_sse_entry_trgm "
-                "ON session_store_entries USING gin ((entry::text) gin_trgm_ops) "
-                "WHERE subpath IS NULL"
-            )
-        cursor.execute("RELEASE SAVEPOINT recall_trgm_sse")
-    except Exception:  # noqa: BLE001 — degraded recall beats a dead bootstrap
-        cursor.execute("ROLLBACK TO SAVEPOINT recall_trgm_sse")
 
     # Summary sidecar written inside append() via fold_session_summary().
     # Scoped to main transcripts only (subagent appends must not mutate).
@@ -1918,7 +1881,6 @@ def create_postgres_schema(cursor: Any) -> None:
         "ON session_events (session_id, (payload->>'task_id'), (payload->>'task_incarnation')) "
         "WHERE event_type = 'task.updated'"
     )
-    create_session_events_recall_index(cursor)
     # SessionSearch's maintained text projection: only its own (empty) table
     # and functions here. The triggers on the transcript tables and the copy
     # of existing rows come from the startup task (session_recall.run_backfill),

@@ -692,6 +692,9 @@ def _captured_search_ctes(queries: list[str], expected: int) -> list[str]:
             assert "table_schema = 'public'" in sql
             assert "table_name = %s AND column_name = %s" in sql
             continue
+        if sql.startswith("SELECT table_name FROM information_schema.tables "):
+            assert "table_schema = 'public' AND table_name = %s" in sql
+            continue
         assert sql.lstrip().startswith("WITH title_matches AS ("), sql
         searches.append(sql)
     assert len(searches) == expected
@@ -845,6 +848,7 @@ class TestSearchSessionsSql:
         cursor = MagicMock()
         cursor.fetchall.return_value = []
         cursor.execute.side_effect = lambda sql, params=None: captured.append((sql, params))
+        cursor.fetchone.return_value = None  # Projection is not installed in this SQL double.
 
         with patch("app.db.sessions.get_db"), \
              patch("app.db.sessions.get_cursor", return_value=cursor):
@@ -872,7 +876,7 @@ class TestSearchSessionsPaginatedSql:
         cursor.fetchall.return_value = []
         cursor.execute.side_effect = lambda sql, params=None: captured.append(sql)
         cursor.fetchone.side_effect = lambda: (
-            None if captured[-1].startswith("SELECT column_name ") else {"cnt": 0}
+            None if captured[-1].startswith(("SELECT column_name ", "SELECT table_name ")) else {"cnt": 0}
         )
 
         with patch("app.db.sessions.get_db"), \

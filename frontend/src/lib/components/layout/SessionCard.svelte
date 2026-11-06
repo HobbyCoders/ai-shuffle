@@ -46,7 +46,7 @@
 		GitMerge,
 		GitPullRequest,
 		GitPullRequestClosed,
-		Monitor,
+		Server,
 		Undo2,
 		Unplug
 	} from 'lucide-svelte';
@@ -719,7 +719,7 @@
 					{/if}
 				</span>
 				{#if remote && !factless}
-					<span class="worker" aria-hidden="true" title={`On ${device}`}><Monitor size={12} strokeWidth={MARK_STROKE} /></span>
+					<span class="worker" aria-hidden="true" title={`On ${device}`}><Server size={12} strokeWidth={MARK_STROKE} /></span>
 				{/if}
 			</span>
 
@@ -1037,7 +1037,8 @@
 		overflow: hidden;
 		text-overflow: ellipsis;
 	}
-	/* Sits under the time; only there when the session is on another worker. */
+	/* Sits under the time; only there when the session is on another worker.
+	   Server, not Monitor: Monitor means this device (ExecutionModeBar). */
 	.worker {
 		display: inline-flex;
 		flex: none;

@@ -70,6 +70,17 @@
 			"globs": ["frontend/tests/journeys/steer-lifecycle.journey.mjs", "frontend/src/lib/stores/session/pending-queue.ts", "frontend/src/lib/stores/session/message-sender.ts", "frontend/src/lib/stores/session/ws-message-handlers.ts", "frontend/src/lib/components/chat/PendingMessages.svelte", "frontend/src/lib/components/chat/PendingStatusAnnouncer.svelte", "app/core/session_handoff.py", "app/api/chat_ws_handler.py", "app/core/message_admission.py", "app/core/turn_manager.py", "app/network/control.py"]
 		},
 		{
+			"why": "an image click inside an inline HTML preview goes to the page that handles it, or else to the lightbox",
+			"journeys": ["html-preview-image-click"],
+			"globs": [
+				"frontend/src/lib/utils/htmlPreview.ts",
+				"frontend/src/lib/components/chat/HtmlPreview.svelte",
+				"frontend/src/lib/components/chat/HtmlArtifactFrame.svelte",
+				"frontend/src/lib/components/chat/MediaLightbox.svelte",
+				"frontend/tests/journeys/html-preview-image-click.journey.mjs"
+			]
+		},
+		{
 			"why": "structured Plan event snapshots stay compact, honest and readable across reloads",
 			"journeys": ["session-plan"],
 			"globs": [
@@ -106,6 +117,11 @@
 			"why": "responsive feature details keep one usable browser Back step across repeated desktop/stacked transitions",
 			"journeys": ["view-shell-back"],
 			"globs": ["frontend/src/lib/components/layout/view/ViewShell.svelte", "frontend/src/lib/components/deck/cards/ProfileCard.svelte"]
+		},
+		{
+			"why": "the rail's notification history opens inside the Sidebar, and the empty-chat composer holds no empty Stop seat",
+			"journeys": ["rail-popover-composer-inset"],
+			"globs": ["frontend/src/lib/components/NotificationCenter.svelte", "frontend/src/lib/components/layout/Sidebar.svelte"]
 		},
 		{
 			"why": "rail-owned More and Customize stay reachable while a feature owns the Chats panel, including the real phone drawer",

@@ -14,6 +14,7 @@ import hashlib
 import json
 import logging
 import sys
+import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1645,49 +1646,13 @@ def _run_column_migrations(cursor: Any) -> None:
         )
         migrations_applied.append("fluid_sessions.writer_generation")
 
-    # Cross-session recall trigram indexes. SessionSearch's SQL prefilter is a
-    # substring ILIKE over the raw JSON of both transcript stores; without an
-    # index that is a sequential scan of every message row in the install, per
-    # call. pg_trgm GIN expression indexes serve exactly that ILIKE shape.
-    # Fenced by a savepoint because CREATE EXTENSION needs privileges some
-    # managed databases refuse — recall then simply stays unindexed (correct,
-    # just slower) instead of aborting the whole migration transaction.
-    # Idempotent, no version gate (same defensive pattern as the FTS block).
-    if table_exists(cursor, "fluid_session_nodes"):
-        cursor.execute("SAVEPOINT recall_trgm")
-        try:
-            cursor.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
-            cursor.execute(
-                "CREATE INDEX IF NOT EXISTS idx_fluid_nodes_trgm "
-                "ON fluid_session_nodes USING gin ((message::text) gin_trgm_ops)"
-            )
-            from app.db.schema_postgres import session_recall_cache_ready
-
-            if not session_recall_cache_ready(cursor):
-                cursor.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_sse_entry_trgm "
-                    "ON session_store_entries USING gin ((entry::text) gin_trgm_ops) "
-                    "WHERE subpath IS NULL"
-                )
-            cursor.execute("RELEASE SAVEPOINT recall_trgm")
-        except Exception:  # noqa: BLE001 — degraded recall beats a dead boot
-            cursor.execute("ROLLBACK TO SAVEPOINT recall_trgm")
-            logger.info(
-                "pg_trgm unavailable — SessionSearch's prefilter stays unindexed"
-            )
+    # Raw transcript trigram indexes are deliberately not built at startup.
+    # The background projection provides indexed recall after backfill; until
+    # then legacy substring queries remain correct without a GIN.
 
     # Additive session Plan migration; this source fingerprint runs on upgrades.
     from app.db.session_plans import create_schema as create_plan_schema
     create_plan_schema(cursor)
-
-    # #1999 added mirrored session_events to agent recall, but only the two
-    # local transcript stores had trigram indexes. No schema-version bump:
-    # this migration's source fingerprint runs the idempotent index build on
-    # existing installs too, not just databases created by bootstrap.
-    if table_exists(cursor, "session_events"):
-        from app.db.schema_postgres import create_session_events_recall_index
-
-        create_session_events_recall_index(cursor)
 
     # background_tasks (v55). Durable per-task lifecycle snapshots — WRITE-ONLY
     # in Phase 1 (no reader flips): task_registry mirrors its transitions here
@@ -3734,6 +3699,61 @@ def boot_init_lock() -> Iterator[None]:
         yield
 
 
+# Only this tagged online DDL may be interrupted to admit a starting process.
+ONLINE_DDL_APPLICATION_NAME = "ai-shuffle-online-index-maintenance"
+_SCHEMA_MAINTENANCE_GRACE_SECONDS = 10.0
+
+
+def _cancel_schema_maintenance(cursor) -> bool:
+    """Cancel only our current database's tagged holder of the bigint key."""
+    cursor.execute(
+        "SELECT pg_cancel_backend(a.pid) AS cancelled "
+        "FROM pg_locks l JOIN pg_stat_activity a ON a.pid=l.pid "
+        "WHERE l.locktype='advisory' AND l.granted AND l.objsubid=1 "
+        "AND l.database=(SELECT oid FROM pg_database WHERE datname=current_database()) "
+        "AND l.classid=%s::oid AND l.objid=%s::oid "
+        "AND a.application_name=%s AND a.pid<>pg_backend_pid()",
+        ((SCHEMA_INIT_LOCK_KEY >> 32) & 0xffffffff, SCHEMA_INIT_LOCK_KEY & 0xffffffff,
+         ONLINE_DDL_APPLICATION_NAME),
+    )
+    return any(row["cancelled"] for row in cursor.fetchall())
+
+
+def _acquire_schema_init_lock(conn):
+    """Wait without retaining a snapshot that a concurrent build must drain.
+
+    A second server process or the password/pairing CLIs can initialize this
+    same database while maintenance runs. After a short grace, ask only the
+    tagged background DDL holder to yield; cancelled online DDL retries later.
+    """
+    started = time.monotonic()
+    delay = 0.25
+    logged = False
+    while True:
+        cursor = conn.cursor()
+        migration_timeouts(cursor)
+        cursor.execute("SELECT pg_try_advisory_xact_lock(%s) AS locked", (SCHEMA_INIT_LOCK_KEY,))
+        if cursor.fetchone()["locked"]:
+            return cursor  # keep this transaction/lock for bootstrap and migrations
+        conn.rollback()  # no active transaction or snapshot during the backoff
+        if not logged:
+            logger.info("Waiting for database schema lock (startup or background index maintenance)")
+            logged = True
+        elapsed = time.monotonic() - started
+        if elapsed >= _SCHEMA_MAINTENANCE_GRACE_SECONDS:
+            try:
+                migration_timeouts(cursor)
+                if _cancel_schema_maintenance(cursor):
+                    delay = 0.25  # promptly take the lock after maintenance yields
+            finally:
+                conn.rollback()  # the holder lookup must not retain a snapshot either
+            pause = delay
+        else:
+            pause = min(delay, _SCHEMA_MAINTENANCE_GRACE_SECONDS - elapsed)
+        time.sleep(pause)
+        delay = min(2.0, delay * 2)
+
+
 def init_database() -> None:
     """Initialize the PostgreSQL database with schema.
 
@@ -3764,9 +3784,6 @@ def init_database() -> None:
     logger.info("Initializing PostgreSQL database")
 
     with get_db() as conn:
-        cursor = conn.cursor()
-        migration_timeouts(cursor)
-
         # Serialize schema initialisation across processes. Workers sharing
         # one database can boot (or roll out an upgrade) at the same moment;
         # without this both see the same missing table/column, both issue the
@@ -3774,7 +3791,7 @@ def init_database() -> None:
         # column once the winner commits. Transaction-scoped, so it is released
         # by the commit/rollback that ends this block, and everything below
         # (version, fingerprint) is read only after the other boot finished.
-        cursor.execute("SELECT pg_advisory_xact_lock(%s)", (SCHEMA_INIT_LOCK_KEY,))
+        cursor = _acquire_schema_init_lock(conn)
 
         # Create schema version table
         cursor.execute("""

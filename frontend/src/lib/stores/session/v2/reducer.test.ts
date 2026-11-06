@@ -2309,9 +2309,59 @@ describe('reconcileRunningTasks (the /live registry list)', () => {
 		expect(s.activeTaskSummaries[0].status).toBe('completed');
 	});
 
-	it('ignores rows that are not running and leaves state untouched when nothing moves', () => {
+	it.each(['completed', 'error', 'killed'] as const)('accepts a newer %s snapshot when the terminal frame was missed', (status) => {
+		const running = reduceAll([ev('task.updated', { task_id: W, state: 'running', created_at: '2026-10-21T00:44:29Z' })]);
+		const next = reconcileRunningTasks(running, [registry({ status, summary: 'Finished' })]);
+		expect(next.activeTaskSummaries[0]).toMatchObject({ id: W, status, summary: 'Finished' });
+	});
+
+	it('never lets an old completion snapshot stop a genuinely resumed task', () => {
+		const resumed = reduceAll([ev('task.updated', { task_id: W, state: 'running', created_at: '2026-10-21T00:55:00Z' })]);
+		expect(reconcileRunningTasks(resumed, [registry({ status: 'completed' })])).toBe(resumed);
+		expect(reconcileRunningTasks(resumed, [registry({ status: 'killed', updatedAt: undefined })])).toBe(resumed);
+		expect(reconcileRunningTasks(resumed, [registry({ status: 'completed', updatedAt: '2026-10-21T00:55:00Z' })])).toBe(resumed);
+		expect(reconcileRunningTasks(resumed, [])).toBe(resumed);
+	});
+
+	it.each(['completed', 'error', 'killed'] as const)('keeps a newer running snapshot ahead of a delayed %s snapshot', (status) => {
+		const running = reduceAll([ev('task.updated', { task_id: W, state: 'running', created_at: '2026-10-21T00:44:29Z' })]);
+		const resumed = reconcileRunningTasks(running, [registry({ updatedAt: '2026-10-21T00:55:00Z' })]);
+		expect(resumed.activeTaskSummaries[0].updatedAt).toBe('2026-10-21T00:55:00Z');
+		expect(reconcileRunningTasks(resumed, [registry({ status })])).toBe(resumed);
+		expect(resumed.activeTaskSummaries[0].status).toBe('running');
+	});
+
+	it.each(['completed', 'error', 'killed'] as const)('settles the joined card on an authoritative %s snapshot, before or after speculative cleanup', (status) => {
+		for (const speculative of [false, true]) {
+			const running = reduceAll([
+				ev('subagent.started', { task_id: 'launch-tool', description: 'Helper' }),
+				ev('subagent.progress', { task_id: 'launch-tool', kind: 'chunk', note: 'Working' }),
+				ev('task.updated', { task_id: W, tool_use_id: 'launch-tool', state: 'running', created_at: '2026-10-21T00:44:29Z' }),
+			]);
+			expect(running.messages.find(m => m.type === 'subagent')?.agentChildren?.[0].streaming).toBe(true);
+			const before = speculative ? reduce(running, ev('turn.completed')) : running;
+			const settled = reconcileRunningTasks(before, [registry({ status, summary: 'Finished' })]);
+			const card = settled.messages.find(m => m.type === 'subagent')!;
+			expect(card.agentStatus).toBe(status === 'killed' ? 'stopped' : status);
+			expect(card.agentChildren?.every(child => !child.streaming)).toBe(true);
+			if (status === 'killed') expect(card.agentStopNote).toBe('Finished');
+			expect(settled.speculativelySettledCardIds).not.toContain(card.id);
+			expect(reduce(settled, ev('turn.parked')).messages.find(m => m.id === card.id)?.agentStatus).toBe(card.agentStatus);
+		}
+	});
+
+	it('does not resurrect a terminal snapshot when the dispatching turn parks', () => {
+		const speculative = reduceAll([
+			ev('task.updated', { task_id: W, kind: 'agent', state: 'running', created_at: '2026-10-21T00:44:29Z' }),
+			ev('turn.completed'),
+		]);
+		const settled = reconcileRunningTasks(speculative, [registry({ status: 'completed' })]);
+		expect(reduce(settled, ev('turn.parked')).activeTaskSummaries[0].status).toBe('completed');
+	});
+
+	it('ignores unknown terminal rows and leaves state untouched when nothing moves', () => {
 		const base = reduceAll([ev('task.updated', { task_id: W, state: 'running' })]);
-		expect(reconcileRunningTasks(base, [registry()])).toBe(base);
+		expect(reconcileRunningTasks(base, [registry({ updatedAt: base.activeTaskSummaries[0].updatedAt })])).toBe(base);
 		expect(reconcileRunningTasks(base, [registry({ id: 'x', status: 'completed' })])).toBe(base);
 	});
 });
