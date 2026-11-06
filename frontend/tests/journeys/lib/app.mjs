@@ -401,15 +401,16 @@ export async function typeAndSend(page, text) {
 			if (lines[i]) await box.pressSequentially(lines[i]);
 		}
 	};
-	if (text.length > 256) {
-		// Paste-sized fixtures (20k+ characters) must not spend one CDP round
-		// trip per character. Start with real typing BEFORE bulk growth, then
-		// fill all but a short tail and finish typing. Preserve Unicode points
-		// and literal newlines at both boundaries.
+	if (text.length > 24) {
+		// Even ordinary queued prompts must not spend one CDP round trip per
+		// character: CPU4 entry can otherwise outlive a scenario's reply window.
+		// Type a short prefix BEFORE bulk growth, fill all but the final code
+		// point, then finish typing. Preserve Unicode and literal newlines at
+		// both boundaries; real input still precedes and follows the bulk fill.
 		const chars = Array.from(text);
-		await typeText(chars.slice(0, 16).join(''));
-		await box.fill(chars.slice(0, -16).join(''));
-		await typeText(chars.slice(-16).join(''));
+		await typeText(chars.slice(0, 12).join(''));
+		await box.fill(chars.slice(0, -1).join(''));
+		await typeText(chars.slice(-1).join(''));
 	} else {
 		await typeText(text);
 	}

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { it } from 'node:test';
 import { typeAndSend } from './app.mjs';
 
-function fixture() {
+function fixture({ perCharacterMs = 0 } = {}) {
 	const calls = [];
 	// A slow focus round trip outlives Chromium's 500ms recent-input window.
 	// fill() emits insertText but no keydown; keyboard entry must supply its own
@@ -12,7 +12,7 @@ function fixture() {
 		async click() { calls.push(['focus', now]); now += 700; },
 		async fill(text) { calls.push(['fill', text, now]); },
 		async press(key) { calls.push(['key', key, now]); },
-		async pressSequentially(text) { calls.push(['type', text, now]); }
+		async pressSequentially(text) { calls.push(['type', text, now]); now += Array.from(text).length * perCharacterMs; }
 	};
 	const page = {
 		keyboard: { async insertText(text) { calls.push(['literal', text, now]); } },
@@ -25,7 +25,7 @@ function fixture() {
 		// The optional later diagnostic snapshot need not keep this unit test alive.
 		waitForTimeout() { return new Promise(() => {}); }
 	};
-	return { page, calls };
+	return { page, calls, elapsed: () => now };
 }
 
 it('uses keyboard input after slow focus, preserving multiline text without submitting early', async () => {
@@ -81,4 +81,21 @@ it('normalizes CRLF and bare CR before keyboard or bulk segmentation, with exact
 		assert.ok(!calls.some(([kind, key]) => kind === 'key' && key.includes('Enter')), 'literal newlines must not accept autocomplete');
 		assert.deepEqual(calls.at(-1), ['send']);
 	}
+});
+
+it('bounds ordinary queued prompts before their scenario timing window expires', async () => {
+	const { page, calls, elapsed } = fixture({ perCharacterMs: 60 });
+	const text = 'waiting-0 cost-regression [script:slow tps=2]';
+	await typeAndSend(page, text);
+	const fillAt = calls.findIndex(([kind]) => kind === 'fill');
+	assert.ok(fillAt > 0, 'ordinary prompts need the bounded path too, not only paste-sized fixtures');
+	assert.ok(calls.slice(0, fillAt).some(([kind]) => kind === 'type'), 'real typing still precedes growth');
+	assert.ok(elapsed() - 700 <= 1500, 'typing must leave room for two queued sends before the unchanged 4.5s failure');
+	let actual = '';
+	for (const [kind, value] of calls) {
+		if (kind === 'fill') actual = value;
+		else if (kind === 'type' || kind === 'literal') actual += value;
+	}
+	assert.equal(actual, text, 'keep the complete script tag and message');
+	assert.equal(calls.filter(([kind]) => kind === 'send').length, 1);
 });
