@@ -5,6 +5,7 @@ import android.content.ComponentName
 import android.content.Intent
 import android.graphics.Rect
 import android.provider.Settings
+import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
 import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
@@ -63,10 +64,23 @@ class CrossAppFenceTest {
         assertTrue(inject(bounds))
         return true
     }
-    /** For a panel the event fence may close at any moment, even mid-touch: both outcomes must refuse. */
-    private fun touchIfStillUp(text: String) {
-        val bounds = Rect(); (button(text) ?: return).getBoundsInScreen(bounds)
-        inject(bounds)
+    private fun panelButton(text: String) = automation.windows.asSequence()
+        .filter { it.type == AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY }
+        .mapNotNull { it.root }.filter { it.packageName?.toString() == context.packageName }
+        .flatMap { it.findAccessibilityNodeInfosByText(text).asSequence() }
+        .firstOrNull { it.text?.toString() == text && it.isClickable }
+    /**
+     * The fence may remove this panel between lookup and action. Send only to its
+     * captured window/node: a screen-coordinate touch could hit the target below.
+     * Ordinary approvals still use real input in allow(); this optional action is
+     * only for cases where the fence is expected to refuse with or without it.
+     */
+    private fun touchIfStillUp(text: String, beforeAction: () -> Unit = {}) {
+        val target = panelButton(text) ?: return
+        try {
+            beforeAction()
+            target.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+        } finally { target.recycle() }
     }
     private fun inject(bounds: Rect): Boolean {
         val now = android.os.SystemClock.uptimeMillis()
@@ -77,7 +91,7 @@ class CrossAppFenceTest {
         down.recycle(); up.recycle()
         return injected
     }
-    private fun panelUp() = await("Consent panel never appeared") { button("Allow once") != null }
+    private fun panelUp() = await("Consent panel never appeared") { panelButton("Allow once") != null }
     private fun allow() { panelUp(); assertTrue(touch("Allow once")) }
     /** Blocks until the fixture has laid out the change. Safe off the main thread only. */
     private fun fixture(command: String) {
@@ -308,6 +322,27 @@ class CrossAppFenceTest {
         touchIfStillUp("Allow once")
         assertEquals("denied", status(tapping).getString("status"))
         assertNotTapped()
+    }
+    @Test fun approvalClosingBetweenLookupAndActionCannotTapTheTarget() {
+        val tapping = tap(read("Track One"))
+        panelUp()
+        var captured = false
+        touchIfStillUp("Allow once") {
+            captured = true
+            // Force the exact lookup -> close -> action ordering, without a sleep.
+            fixture("swap")
+            assertEquals("denied", status(tapping).getString("status"))
+            await("Denied panel did not close") { panelButton("Allow once") == null }
+        }
+        assertTrue("The test must capture the approval node before closing it", captured)
+        assertNotTapped()
+        // Positive control: keep detecting a real action on a swapped row. The
+        // helper fix must not turn the existing no-target-tap assertion into a pass.
+        val swapped = requireNotNull(button("Track One"))
+        try { assertTrue(swapped.performAction(AccessibilityNodeInfo.ACTION_CLICK)) }
+        finally { swapped.recycle() }
+        await("Fixture did not record the control tap") { shows("Tapped: Track One") }
+        assertThrows(AssertionError::class.java) { assertNotTapped() }
     }
     @Test fun rowsSwappedBeforeTheNextCommandStaleTheReference() {
         val ref = read("Track One")

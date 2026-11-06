@@ -12,7 +12,6 @@ import android.widget.TextView
 import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.espresso.Espresso.onView
-import androidx.test.espresso.action.ViewActions.click
 import androidx.test.espresso.assertion.ViewAssertions.doesNotExist
 import androidx.test.espresso.matcher.ViewMatchers.withContentDescription
 import androidx.test.espresso.matcher.ViewMatchers.withText
@@ -233,8 +232,8 @@ class ChatToolbarSmokeTest {
                 page { assertEquals(webBounds, listOf(it.top, it.height)) }
                 val beforeRefresh = sessions.get()
                 announce(false)
-                onView(withContentDescription("More chat options")).perform(click())
-                onView(withText("Refresh chat")).perform(click())
+                tapNative(onView(withContentDescription("More chat options")))
+                tapNative(onView(withText("Refresh chat")))
                 waitFor("Overflow refresh did not renew the session") { sessions.get() == beforeRefresh + 1 }
                 loaded(Configuration.ORIENTATION_PORTRAIT)
                 // Voice is the page's own; the shell adds no native call button.
@@ -245,7 +244,9 @@ class ChatToolbarSmokeTest {
                 scenario.onActivity { it.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT }
                 loaded(Configuration.ORIENTATION_PORTRAIT); checkViewport()
                 announce(false)
-                onView(withContentDescription("Back")).perform(click())
+                // Focus and a WebView visual frame precede rotation input-window commits.
+                // UiAutomation waits for that platform barrier; never repeat a lost tap.
+                tapNative(onView(withContentDescription("Back")))
                 waitFor("Back did not finish the chat activity") {
                     scenario.state == androidx.lifecycle.Lifecycle.State.DESTROYED
                 }
