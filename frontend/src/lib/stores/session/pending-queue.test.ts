@@ -186,13 +186,21 @@ describe('pendingQueue — unsending', () => {
 		expect(authoritative([entry])).toEqual([]);
 	});
 
-	it('does not claim withdrawal for an unknown id or a failed socket send', () => {
+	it('retires an unknown legacy id and recovers text without claiming withdrawal', () => {
 		const entry = row('turn-q', 'nope');
 		pendingQueue.requestRemoval(SID, entry);
 		pendingQueue.applyRemovalVerdict(SID, entry.id, 'not_found');
-		expect(authoritative([entry])).toHaveLength(1);
+		expect(authoritative([entry])).toEqual([]);
+		expect(pendingQueue.takeWithdrawnDraft(SID)).toBe(entry.content);
+		expect(pendingQueue.removalVerdict(SID, entry.id)).toBe('not_found');
+	});
+
+	it('keeps the bubble actionable after a failed cancellation send', () => {
+		const entry = row('turn-q', 'nope');
+		pendingQueue.requestRemoval(SID, entry);
 		pendingQueue.removalFailed(SID, entry.id);
 		expect(authoritative([entry])).toEqual([entry]);
+		expect(pendingQueue.removalVerdict(SID, entry.id)).toBeUndefined();
 	});
 });
 

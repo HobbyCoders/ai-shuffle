@@ -173,7 +173,7 @@ describe('PendingMessages', () => {
 			}
 		});
 
-		it('follows the real store from pending → cancelling → delivered without losing Interrupt', async () => {
+		it('retires the delivered bubble without losing Interrupt on the remaining queue', async () => {
 			const SID = 'pending-messages-test';
 			pendingQueue.reset(SID, true);
 			const a = makeMessage({ id: 'turn-a', content: 'first' });
@@ -189,7 +189,9 @@ describe('PendingMessages', () => {
 
 			pendingQueue.applyRemovalVerdict(SID, key, 'already_delivered');
 			await view.rerender({ messages: pendingQueue.reconcile(SID, rows) });
-			expect(statusText(view.container.querySelectorAll('.usercol')[1])).toBe('Already sent');
+			expect(view.container.querySelectorAll('.usercol')).toHaveLength(1);
+			expect(screen.queryByText('second')).toBeNull();
+			expect(screen.getByText('first')).toBeTruthy();
 			const interrupt = screen.getByRole('button', { name: 'Interrupt' }) as HTMLButtonElement;
 			expect(interrupt.disabled).toBe(false);
 			await fireEvent.click(interrupt);

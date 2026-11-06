@@ -147,6 +147,7 @@ interface CancellationState {
 	removals: Map<string, PendingEntry>;
 	withdrawn: Set<string>;
 	deliveredRows: Set<string>;
+	terminalVerdicts: Map<string, string>;
 	drafts: string[];
 	timers: Map<string, ReturnType<typeof setTimeout>>;
 	sends: Map<string, PendingEntry>;
@@ -157,7 +158,7 @@ const cancellations = new Map<string | null, CancellationState>();
 function cancellationState(id: string | null): CancellationState {
 	let state = cancellations.get(id);
 	if (!state) {
-		state = { removals: new Map(), withdrawn: new Set(), deliveredRows: new Set(), drafts: [], timers: new Map(), sends: new Map() };
+		state = { removals: new Map(), withdrawn: new Set(), deliveredRows: new Set(), terminalVerdicts: new Map(), drafts: [], timers: new Map(), sends: new Map() };
 		cancellations.set(id, state);
 	}
 	return state;
@@ -254,6 +255,11 @@ export const pendingQueue = {
 	/** Test/diagnostic hook: the bubbles parked for a session. */
 	parkedFor(id: string): PendingEntry[] {
 		return parked.get(id) ?? [];
+	},
+
+	/** Terminal evidence survives the bubble it retires (screen readers). */
+	removalVerdict(id: string | null, key: string): string | undefined {
+		return cancellations.get(id)?.terminalVerdicts.get(key);
 	},
 
 	/** Consume confirmed withdrawals only when their own composer is mounted. */
@@ -384,10 +390,11 @@ export const pendingQueue = {
 	},
 
 	applyRemovalVerdict(id: string | null, key: string, verdict: string): void {
-		const { removals, withdrawn, deliveredRows, drafts } = cancellationState(id);
+		const { removals, withdrawn, deliveredRows, terminalVerdicts, drafts } = cancellationState(id);
 		const entry = removals.get(key);
-		if (verdict === 'withdrawn') {
+		if (verdict === 'withdrawn' || verdict === 'not_found') {
 			if (withdrawn.has(key)) return;
+			terminalVerdicts.set(key, verdict);
 			withdrawn.add(key);
 			if (entry) {
 				withdrawn.add(entry.id);
@@ -399,6 +406,7 @@ export const pendingQueue = {
 			// Retire this row, not every future row for the command. Interrupted
 			// server turns can legitimately re-queue with a fresh id/time.
 			deliveredRows.add(entry.id);
+			terminalVerdicts.set(key, verdict);
 			this.removalFailed(id, key, true);
 			this.acknowledgeSend(id, key);
 		}

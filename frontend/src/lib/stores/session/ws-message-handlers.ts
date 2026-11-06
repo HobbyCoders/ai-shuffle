@@ -1141,7 +1141,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 					}));
 					break;
 				}
-				pendingQueue.applyRemovalVerdict(sid, key, verdict);
+				pendingQueue.applyRemovalVerdict(sid, key, rawVerdict);
 				if (sid !== state.sessionId) break; // retain for that session's next switch-in
 				const restored = pendingQueue.takeWithdrawnDraft(sid);
 				update(s => ({ ...s,

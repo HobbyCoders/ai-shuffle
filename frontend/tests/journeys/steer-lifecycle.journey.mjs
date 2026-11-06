@@ -111,6 +111,49 @@ await runJourney({
       await page.locator('.pending-messages').waitFor({ state: 'hidden' });
       expect((await composer(page).innerText()).includes(text), 'a retry recovers the cancelled words');
     }
+  }, {
+    name: 'delivery-wins',
+    async setup(ctx) {
+      await openNewChat(ctx);
+      await typeAndSend(ctx.page, `working ${uniq()} [script:long tps=300 latency_ms=1500]`);
+      await waitChat(ctx.page, { streaming: 'true', messagesAtLeast: 2 });
+    },
+    async act({ page, mark }) {
+      const text = `delivered before cancellation ${uniq()}`;
+      await typeAndSend(page, text);
+      await page.locator('.pending-messages [data-queue-confirmed="true"]').waitFor();
+      await page.evaluate(() => {
+        const send = WebSocket.prototype.send;
+        WebSocket.prototype.send = function(frame) {
+          const data = typeof frame === 'string' ? JSON.parse(frame) : null;
+          if (data?.type === 'remove_queued_message') {
+            WebSocket.prototype.send = send;
+            const onmessage = this.onmessage;
+            this.onmessage = function(event) {
+              const reply = JSON.parse(event.data);
+              if (reply.type === 'queued_message_removal') {
+                window.__lateCancelVerdict = reply.verdict;
+                this.onmessage = onmessage;
+              }
+              return onmessage.call(this, event);
+            };
+            window.__lateCancel = () => send.call(this, frame);
+            return;
+          }
+          return send.call(this, frame);
+        };
+      });
+      await mark('request cancellation but let real queue delivery win');
+      await page.getByRole('button', { name: 'Unsend message and edit it' }).last().click();
+      await page.getByText('Cancelling…', { exact: true }).waitFor();
+      await page.getByRole('status').filter({ hasText: 'Message already sent' }).waitFor({ timeout: 15_000 });
+      expect(await page.locator('.pending-messages').count() === 0, 'the delivery receipt retires the cancelling bubble');
+      expect(!(await composer(page).innerText()).includes(text), 'delivered words are not recovered as unsent');
+      await mark('release the cancellation after its delivery receipt');
+      await page.evaluate(() => window.__lateCancel());
+      await page.waitForFunction(() => window.__lateCancelVerdict === 'already_delivered');
+      expect(await page.locator('.pending-messages').count() === 0, 'the late verdict cannot resurrect the bubble');
+    }
   }],
   allow: DEV_INSTANCE_NOISE
 });

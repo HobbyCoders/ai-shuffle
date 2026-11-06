@@ -221,13 +221,14 @@ describe('prompt stash', () => {
 });
 
 describe('unsent prompts return to the composer', () => {
-	it('puts the unsent text in front of what the user already typed', async () => {
+	it('appends unsent text after what the user already typed', async () => {
 		activeSession.setDraft('typed after');
 		const { editor } = renderComposer();
 		activeSession.setPendingRestorePrompt('unsent first');
 		await waitFor(() => expect(editor.textContent).toContain('unsent first'));
 		const text = editor.textContent ?? '';
-		expect(text.indexOf('unsent first')).toBeLessThan(text.indexOf('typed after'));
+		expect(text).toContain('typed after');
+		expect(text.indexOf('typed after')).toBeLessThan(text.indexOf('unsent first'));
 		expect(activeSession.current.pendingRestorePrompt).toBeNull();
 	});
 });

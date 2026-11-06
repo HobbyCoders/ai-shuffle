@@ -74,7 +74,9 @@ describe('PendingStatusAnnouncer', () => {
 
 		for (const [verdict, words] of [
 			['withdrawn', 'Message withdrawn'],
-			['already_delivered', 'Message already sent']
+			['not_found', 'Message not found. Text recovered.'],
+			['already_delivered', 'Message already sent'],
+			['receipt', 'Message already sent']
 		] as const) {
 			it(`stays silent across the rename, then announces ${verdict}`, async () => {
 				pendingQueue.reset(SID, true);
@@ -96,8 +98,11 @@ describe('PendingStatusAnnouncer', () => {
 					await view.rerender({ messages: renamed, sessionId: SID });
 					expect(view.region.textContent).toBe(beforeRename);
 
-					pendingQueue.applyRemovalVerdict(SID, key, verdict);
-					await view.rerender({ messages: pendingQueue.reconcile(SID, [server]), sessionId: SID });
+					if (verdict === 'receipt') pendingQueue.noteDelivered(SID, local.content, 'live-turn', true, key);
+					else pendingQueue.applyRemovalVerdict(SID, key, verdict);
+					const terminal = pendingQueue.reconcile(SID, [server]);
+					expect(terminal).toEqual([]);
+					await view.rerender({ messages: terminal, sessionId: SID });
 					expect(view.text()).toBe(words);
 				} finally {
 					pendingQueue.reset(SID, true);
