@@ -1,7 +1,7 @@
 // The rail's notification history opens inside the Sidebar, and the empty-chat
 // composer does not hold an empty Stop seat at its right edge.
 import { runJourney } from './runner.mjs';
-import { expect, gotoApp, openNewChat, seededChatId, waitChat, SEEDED, settleServiceWorker } from './lib/app.mjs';
+import { expect, gotoApp, holdBootLoad, openNewChat, seededChatId, waitChat, SEEDED, settleServiceWorker } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 
 // Distance from the composer box's inner edges to its first and last controls.
@@ -39,6 +39,10 @@ await runJourney({ name: 'rail-popover-composer-inset', allow: DEV_INSTANCE_NOIS
 	viewports: ['desktop'],
 	async setup({ page, status }) {
 		await page.setViewportSize({ width, height: 900 });
+		// The bell is already interactive while bootstrap awaits the agent list.
+		// Hold that read until the panel opens so late reconciliation always
+		// overlaps it, rather than depending on a loaded CI runner to hit the race.
+		await holdBootLoad(page, '/api/v1/agents', 30_000, { releaseOnSignal: true });
 		await gotoApp(page, status);
 		const nav = page.getByRole('navigation', { name: 'Workspace', exact: true });
 		if (!await page.getByRole('complementary', { name: 'Chats', exact: true }).locator('.panel-plane').isVisible()) {
@@ -49,6 +53,10 @@ await runJourney({ name: 'rail-popover-composer-inset', allow: DEV_INSTANCE_NOIS
 	async act({ page, mark, log }) {
 		await mark('open the rail bell');
 		const panel = await openRailBell(page);
+		await mark('bootstrap finishes with the notification panel open');
+		await page.evaluate(() => window.__journeyBootHold.release());
+		await page.waitForFunction(() => performance.getEntriesByName('shuffle:boot.reconciled').length > 0);
+		expect(await panel.isVisible(), 'initial landing reconciliation keeps the notification panel open');
 		const geometry = await panel.evaluate(el => {
 			const aside = document.querySelector('aside.sidebar').getBoundingClientRect();
 			const rail = document.querySelector('aside.sidebar .panel-plane').getBoundingClientRect();
