@@ -2,27 +2,31 @@
 // saved New Chat view. Hold preferences; one additional case holds tags too.
 // #930: a project picked on a fresh browser's new-session screen while init
 // awaits preferences is still the chat's project after boot reconciles.
-import { fakeAiTag, runJourney } from './runner.mjs';
+import { fakeAiTag, runJourney, VIEWPORTS } from './runner.mjs';
 import {
 	PROJECT, composer, countUserRows, expect, holdBootLoad, openNewChat, sendButton,
 	settleServiceWorker, typeAndSend, uniq, waitChat, waitTurnSettled, withChatSetup
 } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
-import { waitForCreatedChat } from './lib/boot.mjs';
+import { waitForBootReconciled, waitForCreatedChat } from './lib/boot.mjs';
 import { STOP_SELECTOR, expectStopFollowsStreaming, markTime } from './lib/timeline.mjs';
 
 const BOOT_HOLD = { path: '/api/v1/preferences/all', ms: 12_000 };
+if (process.argv.includes('--review-desktop')) VIEWPORTS.desktop = { viewport: { width: 1280, height: 800 } };
+const privateScreenshot = async (page, variant, stage) => {
+	if (process.env.JOURNEY_OUT) await page.screenshot({ path: `${process.env.JOURNEY_OUT}/${stage}@${variant.viewport}-${variant.throttle.cpu}x.png` });
+};
 
 await runJourney({
 	name: 'send-during-init',
 	recorder: { selectors: [STOP_SELECTOR] },
-	cases: [...['first-send', 'first-send-late-tags'].map(name => ({
+	cases: [...['first-send', 'first-send-late-tags', 'first-send-reload-before-reconciliation'].map(name => ({
 		name,
 		async setup(ctx) {
 			const { page, status } = ctx;
 			await openNewChat(ctx);
 			await settleServiceWorker(page, status);
-			if (name === 'first-send-late-tags') {
+			if (name !== 'first-send') {
 				// A possible late independent load, NOT the cause of #984: its hosted
 				// tags response was already in. Keep the real response.
 				// Intercept the page's real fetch, including a service-worker response.
@@ -37,11 +41,14 @@ await runJourney({
 						hold.startedAt = performance.now();
 						const response = await original(input, init);
 						await new Promise(resolve => {
-							hold.release = () => setTimeout(() => {
+							const release = () => {
+								clearTimeout(safety);
 								sessionStorage.setItem('__journeyLateTagsDone', 'true');
 								hold.releasedAt = performance.now();
 								resolve();
-							}, 3000);
+							};
+							const safety = setTimeout(release, 20_000);
+							hold.release = () => setTimeout(release, 3000);
 						});
 						return response;
 					};
@@ -70,8 +77,47 @@ await runJourney({
 			await waitTurnSettled(page, { text: 'Fake AI here', messagesAtLeast: 2, hold: 0 });
 			const beforeRelease = await page.evaluate(() => window.__journeyBootHold);
 			expect(beforeRelease.releasedAt === null, 'the first turn finished before preference hydration (not just isStreaming protection)');
+			if (name === 'first-send') {
+				// #984/#1063: a settled first send must already persist its created
+				// chat, independent of how long the remaining boot reads take.
+				await waitForCreatedChat(page);
+			}
 			await mark('preference hydration finishes');
 			await page.evaluate(() => window.__journeyBootHold.release());
+			if (name === 'first-send-reload-before-reconciliation') {
+				// #1063: reload after init but BEFORE the independent boot loads
+				// reconcile. Keep the real tags response held in this document only.
+				await page.waitForFunction(() => performance.getEntriesByName('shuffle:boot.init.end').length > 0
+					&& typeof window.__journeyLateTags?.release === 'function', null, { timeout: BOOT_HOLD.ms });
+				const beforeReload = await page.evaluate(() => ({
+					view: JSON.parse(localStorage.getItem('ai-shuffle-layout') || 'null')?.activeView,
+					session: JSON.parse(sessionStorage.getItem('ai-shuffle-active-session') || 'null')?.sessionId,
+					reconciled: performance.getEntriesByName('shuffle:boot.reconciled').length > 0,
+					tagsReleased: window.__journeyLateTags.releasedAt
+				}));
+				expect(!beforeReload.reconciled && beforeReload.tagsReleased === null, 'reload occurs inside the held reconciliation window');
+				log(`settled first send before reconciliation: ${JSON.stringify(beforeReload)}`);
+				const session = await page.locator('[data-ui-state="chat"]').getAttribute('data-ui-session');
+				await privateScreenshot(page, variant, 'settled-before-reconciliation');
+				// Do not hold tags in the next document; it must fully reconcile so an
+				// empty New Chat cannot be mistaken for a merely unfinished restore.
+				await page.evaluate(() => sessionStorage.setItem('__journeyLateTagsDone', 'true'));
+				await mark('reload the created chat before reconciliation');
+				await page.reload({ waitUntil: 'domcontentloaded' });
+				await page.evaluate(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))));
+				await mark('page reloaded');
+				await page.waitForFunction(() => typeof window.__journeyBootHold?.release === 'function', null, { timeout: 30_000 });
+				await page.evaluate(() => window.__journeyBootHold.release());
+				await waitForBootReconciled(page, { timeout: BOOT_HOLD.ms });
+				const reloaded = await page.locator('[data-ui-state="chat"]').getAttribute('data-ui-session');
+				const count = await countUserRows(page, token);
+				log(`reconciled reload: signature=${reloaded}, first-message rows=${count}`);
+				await privateScreenshot(page, variant, 'reloaded-before-reconciliation');
+				expect(count === 1, `reload before reconciliation reopens the first message exactly once, got ${count}`);
+				expect(reloaded === session, `reload before reconciliation reopens the created chat: ${reloaded}`);
+				expect(ctx.closed.length === 0, 'reload must not close the boot-send-owned created chat');
+				return;
+			}
 			if (name === 'first-send-late-tags') {
 				await page.waitForFunction(() => typeof window.__journeyLateTags?.release === 'function');
 				await page.evaluate(() => window.__journeyLateTags.release());
