@@ -120,8 +120,19 @@ await runJourney({
 				const tabs = await page.getByRole('tablist').boundingBox();
 				expect(tabs && tabs.y + tabs.height <= 240, 'K2: agent tabs finish by y=240');
 				const strip = page.getByRole('tablist');
-				const fade = await strip.locator('..').evaluate(el => ({ width: getComputedStyle(el, '::after').width, background: getComputedStyle(el, '::after').backgroundImage }));
-				expect(fade.width === '32px' && fade.background.includes('12px'), 'K4: the end fade is 32px with its final 12px solid');
+				// Council pass 2 (S1): a ~24px end fade beside the reserved 28px chevron
+				// slot, and at rest a tab is either whole or hidden past the edge.
+				await page.waitForTimeout(300);
+				const fade = await strip.locator('..').evaluate(el => {
+					const after = getComputedStyle(el, '::after');
+					const edge = el.querySelector('[role=tablist]').getBoundingClientRect().right;
+					const cut = [...el.querySelectorAll('[role=tab]')].filter(t => {
+						const r = t.getBoundingClientRect();
+						return getComputedStyle(t).opacity !== '0' && r.left < edge - 1 && r.right > edge + 1;
+					}).map(t => t.textContent.trim());
+					return { width: after.width, right: after.right, cut };
+				});
+				expect(fade.width === '24px' && fade.right === '28px' && fade.cut.length === 0, `K4: 24px end fade beside the 28px chevron slot, no tab cut at rest (${JSON.stringify(fade)})`);
 				const folder = page.locator('.st-row').filter({ has: page.getByRole('combobox', { name: 'Folder', exact: true }) });
 				const selector = await folder.getByRole('combobox').boundingBox();
 				const hint = await folder.locator('.st-rh').boundingBox();
