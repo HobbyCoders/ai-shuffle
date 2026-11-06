@@ -665,7 +665,9 @@ def workload_repo(tmp_path, monkeypatch):
         return git("rev-parse", "HEAD")
 
     git("init", "-q")
-    for name in ("app/feature.py", "frontend/tests/journeys/a.journey.mjs"):
+    for name in ("app/feature.py", "frontend/tests/journeys/a.journey.mjs",
+                 "fluid/tests/fixtures/fake_claude_script.py",
+                 "fluid/tests/fixtures/fake_guard_ready.py"):
         path = root / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("// baseline workload\n")
@@ -679,8 +681,9 @@ def test_runtime_refresh_accepts_metadata_only_commits(workload_repo):
         "frontend/tests/journeys/README.md", "frontend/tests/journeys/map.json",
         "frontend/tests/journeys/select.mjs", "frontend/tests/journeys/select.test.mjs",
         "frontend/tests/journeys/lib/boot.test.mjs", "frontend/src/lib/panel.test.ts",
-        "frontend/src/lib/panel.spec.ts", "fluid/tests/test_unit.py", "tools/tests/unit.py",
-        "browser-mcp/tests/unit.ts", "tests/scripts/test_new.py",
+        "frontend/src/lib/panel.spec.ts", "fluid/tests/unit/test_unit.py", "fluid/tests/conftest.py",
+        "tools/tests/unit.test.ts", "browser-mcp/tests/unit.test.ts", "tests/scripts/test_new.py",
+        "frontend/src/lib/__tests__/panel.test.ts",
     ):
         path = root / name
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -694,6 +697,10 @@ def test_runtime_refresh_accepts_metadata_only_commits(workload_repo):
     "frontend/tests/journeys/a.journey.mjs", "frontend/tests/journeys/lib/app.mjs",
     "frontend/package-lock.json", "requirements.txt", "scripts/devloop/fake_claude/cli.py",
     "browser-mcp/src/index.ts", "tools/src/index.ts",
+    "fluid/tests/fixtures/fake_claude_script.py", "fluid/tests/fixtures/fake_guard_ready.py",
+    "fluid/tests/fixtures/fake_provider_server.py", "frontend/tests/flight-recorder/record.mjs",
+    "browser-mcp/tests/fixtures/frame.html", "tools/tests/fixtures/reply.json",
+    "frontend/src/lib/__tests__/fixtures/reply.json",
 ])
 @pytest.mark.parametrize("committed", [False, True])
 def test_runtime_refresh_rejects_producing_changes(workload_repo, name, committed):

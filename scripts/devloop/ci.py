@@ -202,15 +202,16 @@ def require_matching_workload(run_id: int, revision: str) -> None:
     """Do not apply old timings to changed code, even when case counts match."""
     if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{40}", revision):
         raise ValueError(f"Run {run_id} has no valid source revision")
-    # Ignore documentation, unit tests and selection metadata, not runtime
-    # implementations, shared helpers, dependencies or fake providers.
+    # Ignore documentation, unit-test implementations and selection metadata.
+    # Never exclude whole test directories: fake_claude/cli.py dynamically loads
+    # fluid/tests/fixtures/fake_claude_script.py, which imports fake_guard_ready.
+    # Runtime fixtures, helpers, dependencies and fake providers stay protected.
     paths = ["app", "fluid", "frontend", "browser-mcp", "tools", "requirements*.txt",
              "scripts/devloop", ":(exclude)scripts/devloop/ci.py",
              ":(exclude)scripts/devloop/journey_weights.json",
              ":(exclude,glob)**/README*", ":(exclude,glob)**/docs/**",
              ":(exclude,glob)**/*.test.*", ":(exclude,glob)**/*.spec.*",
-             ":(exclude,glob)**/__tests__/**", ":(exclude)fluid/tests",
-             ":(exclude)browser-mcp/tests", ":(exclude)tools/tests",
+             ":(exclude,glob)**/test_*.py", ":(exclude,glob)**/conftest.py",
              ":(exclude)frontend/tests/journeys/map.json",
              ":(exclude)frontend/tests/journeys/select.mjs"]
     commands = [["git", "diff", "--quiet", revision, "--", *paths],
