@@ -1187,7 +1187,10 @@
 		scrollbar-width: thin;
 		scrollbar-color: var(--border-strong) transparent;
 	}
-	.phone .list { padding-bottom: 24px; }
+	/* The phone card is 4px wider inside (10px inset, 8px gap) than the shared
+	   row, so a 4px list inset puts section labels on the 16px page gutter and
+	   titles at 38, the same x as the Notes, Agents and Projects lists. */
+	.phone .list { padding-left: 4px; padding-bottom: 24px; }
 	/* The mobile drawer is the full screen wide, and Android reserves the
 	   outer ~24dp of each edge for its back gesture. A swipe rail flush with
 	   that edge got taken for a back swipe, and taps on its outer half went
