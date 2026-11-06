@@ -6,7 +6,7 @@
  * so `npm test` stays green in browser-less CI.
  */
 
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, onTestFailed, vi } from "vitest";
 import { spawn, execSync, type ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
 import { createServer as createHttpServer, type Server as HttpServer } from "node:http";
@@ -400,11 +400,15 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
   });
 
   describe("action and settle regressions", () => {
-    async function load(html: string) {
+    async function load(html: string, mark: (phase: string) => void = () => {}) {
+      mark("fixture navigation");
       await runNavigate(session, { url: httpUrl + "prose-app" });
+      mark("fixture page");
       const page = await session.ensurePage();
+      mark("fixture setContent");
       await page.setContent(html);
       session.notifyNavigation();
+      mark("fixture loaded");
       return page;
     }
     async function ref(name: string) {
@@ -1090,11 +1094,22 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       { name: "chat token stream into an action-created paragraph", html: `<button onclick="go()">Start</button><div id="out"></div><script>function go(){out.innerHTML='<div>Question</div><div><p id="answer"></p></div>';let n=0;const timer=setInterval(()=>{answer.textContent+='token '+n+++' ';if(n>=18){clearInterval(timer);out.insertAdjacentHTML('beforeend','<button>Regenerate</button><button>Copy</button>');window.done=true}},60)}</script>`, expected: "Regenerate" },
     ];
     for (const background of [false, true]) {
-      it.each(actionTextCases)(`observes action-started $name through completion (background ticker: ${background})`, async ({ html, expected }) => {
-        const page = await load(html + (background ? '<span id="clock"></span><script>setInterval(()=>clock.textContent=String(Date.now()),100)</script>' : ''));
-        if (background) await page.waitForTimeout(200);
+      it.each(actionTextCases)(`observes action-started $name through completion (background ticker: ${background})`, async ({ name, html, expected }) => {
+        // A test-level timeout otherwise points only at it.each, hiding whether
+        // setup, ref lookup, action/settle or final navigation was pending. Keep
+        // diagnostics Node-only so a stalled renderer cannot hang failure output.
+        const began = performance.now();
+        const phases: { phase: string; ms: number }[] = [];
+        const mark = (phase: string) => { phases.push({ phase, ms: Math.round(performance.now() - began) }); };
+        onTestFailed(() => { console.error("ACTION_TEXT_TIMEOUT_PHASES", JSON.stringify({ name, background, phases })); });
+        const page = await load(html + (background ? '<span id="clock"></span><script>setInterval(()=>clock.textContent=String(Date.now()),100)</script>' : ''), mark);
+        if (background) { mark("ticker baseline"); await page.waitForTimeout(200); }
         const started = Date.now();
-        const result = await runAct(session, { kind: "click", ref: await ref("Start") });
+        mark("ref lookup");
+        const target = await ref("Start");
+        mark("action and settle");
+        const result = await runAct(session, { kind: "click", ref: target });
+        mark("completion assertions");
         expect(body(result)).toMatchObject({ ok: true, dom_mutated: "major", snapshot_stale: true, settle_capped: false, text_churn_ignored: background });
         expect(await page.evaluate(() => (window as unknown as { done: boolean }).done)).toBe(true);
         expect(Date.now() - started).toBeGreaterThanOrEqual(900);
@@ -1102,7 +1117,9 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
         // Snapshot lists intentionally collapse after five siblings. Verify all
         // twenty produced results on the page, not just the emitted preview.
         if (expected === "Result 0") expect(await page.getByRole("link").count()).toBe(20);
+        mark("final navigation");
         await page.goto("about:blank");
+        mark("finished");
       });
     }
     it("reuses pre-action ticker history after settle without retaining active timer hooks", async () => {
