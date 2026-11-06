@@ -106,14 +106,16 @@
 
 <CollectionPage
 	category="providers"
-	count="{connectedCount} connected"
+	count={s.initialSnapshotReady ? `${connectedCount} connected` : 'Loading…'}
 	addLabel="Add provider"
 	onAdd={startGateway}
 	replaceOnSelect
 	bind:filter
 >
 	{#snippet list()}
-		{#if forbidden}
+		{#if !s.initialSnapshotReady}
+			<p class="pv-empty" role="status">Loading providers…</p>
+		{:else if forbidden}
 			<p class="pv-empty">{FORBIDDEN_TEXT}</p>
 		{:else}
 			{#if s.providersError}<p class="pv-msg err" role="alert">{s.providersError}</p>{/if}

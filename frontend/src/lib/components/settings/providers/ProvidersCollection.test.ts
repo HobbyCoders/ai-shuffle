@@ -103,23 +103,47 @@ it.each([
 });
 
 describe('the list', () => {
-	it('shows Claude as Checking, not Not connected, until its status arrives', async () => {
+	it.each(['/settings/claude-auth', '/settings/integrations', '/model-providers'])(
+		'waits for the complete first snapshot when %s is slow, rather than moving provisional groups',
+		async (path) => {
+			let release!: () => void;
+			const held = new Promise<void>((r) => (release = r));
+			const real = worker.fetch;
+			vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+				if (new URL(String(input), 'http://localhost').pathname === `/api/v1${path}`) await held;
+				return real(input, init);
+			});
+			const { container } = render(ProvidersCollection);
+			await flush();
+			expect(screen.getByRole('status').textContent).toBe('Loading providers…');
+			expect(container.querySelector('.pl')).toBeNull();
+			expect(screen.queryByText('Not connected')).toBeNull();
+			release();
+			await flush();
+			expect(screen.queryByText('Loading providers…')).toBeNull();
+			expect(credentialNames('Claude')[0]).toBe('Claude Max subscription, Active for Claude');
+			expect(credentialNames('OpenAI')).toEqual(['OpenAI Plus subscription, Active', 'OpenAI API key, Active']);
+			expect(screen.getAllByText('Claude')).toHaveLength(1);
+			expect(screen.getByText('Not connected')).toBeTruthy();
+		}
+	);
+
+	it('keeps the complete list visible during a later silent refresh', async () => {
+		await show();
+		const before = group('Claude');
 		let release!: () => void;
 		const held = new Promise<void>((r) => (release = r));
 		const real = worker.fetch;
 		vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
-			if (String(input).includes('/settings/claude-auth')) await held;
+			await held;
 			return real(input, init);
 		});
-		render(ProvidersCollection);
+		const refresh = providers.refreshAll();
 		await flush();
-		const claude = group('Claude');
-		expect(within(claude).getByRole('status').textContent).toBe('Checking…');
-		expect(screen.getAllByText('Claude')).toHaveLength(1);
+		expect(group('Claude')).toBe(before);
+		expect(screen.queryByText('Loading providers…')).toBeNull();
 		release();
-		await flush();
-		expect(within(group('Claude')).queryByRole('status')).toBeNull();
-		expect(credentialNames('Claude')[0]).toBe('Claude Max subscription, Active for Claude');
+		await refresh;
 	});
 
 	it('keeps the Add provider name when the narrow list hides its label', async () => {
