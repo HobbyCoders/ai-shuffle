@@ -341,8 +341,15 @@ The background recall task retires the six legacy raw-JSON and stored-
 lock. Online maintenance also non-blockingly takes startup's existing schema
 advisory lock; projection object/trigger repair and explicit offline DDL use
 that same key. This prevents a queued non-concurrent DDL request from making
-ordinary writes queue behind a waiting concurrent drop. The two-second pass
-budget is checked between statements; drops may run for up to three minutes.
+ordinary writes queue behind a waiting concurrent drop. Startup takes the key
+with try-locks, rolling back before each 0.25–2 second backoff: it never holds a
+waiting snapshot that a concurrent build needs to drain. Server startup and
+the owner-password/pairing CLIs can overlap a serving process. After ten seconds,
+startup cancels only the tagged online-maintenance backend currently holding
+that exact schema key in this database. Cancelled builds/drops retry later;
+unrelated backends and another startup's schema work are never cancelled.
+The two-second pass budget is checked between statements; drops may run for
+up to three minutes.
 The one-time concurrent cap-row index build has no statement timeout, so slow
 workers can finish its heap scans instead of restarting them every pass. Lock
 timeout is disabled for concurrent DDL so waits for existing writers can

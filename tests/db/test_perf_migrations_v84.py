@@ -46,15 +46,36 @@ def test_explicit_recall_cache_failure_propagates_for_transaction_rollback(monke
     statements = []
 
     class Cursor:
-        def execute(self, sql):
+        def execute(self, sql, params=None):
             statements.append(sql)
             if sql.startswith(failure):
                 raise RuntimeError("synthetic unavailable extension or index privilege")
 
+        def fetchone(self):
+            return {"ok": True}
+
     monkeypatch.setattr(schema_postgres, "column_exists", lambda *_: False)
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match="synthetic unavailable"):
         schema_postgres.create_session_recall_text(Cursor())
     assert not any(sql.startswith("DROP INDEX") for sql in statements)
+
+
+def test_explicit_recall_cache_retries_instead_of_waiting_on_schema_lock(monkeypatch):
+    from app.db import schema_postgres, session_recall
+
+    monkeypatch.setattr(session_recall, "ready", lambda _: False)
+    statements = []
+
+    class Cursor:
+        def execute(self, sql, params=None):
+            statements.append(sql)
+
+        def fetchone(self):
+            return {"ok": False}
+
+    with pytest.raises(RuntimeError, match="schema maintenance busy"):
+        schema_postgres.create_session_recall_text(Cursor())
+    assert len(statements) == 1 and "pg_try_advisory_xact_lock" in statements[0]
 
 
 def test_startup_never_backfills_optional_recall_cache(mock_db, monkeypatch):

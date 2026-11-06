@@ -2,6 +2,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import asdict
+import logging
 import threading
 import time
 
@@ -247,11 +248,34 @@ def test_waiting_drop_allows_insert_update_and_search(monkeypatch, ready_project
 def _wait_for_pg(cur, sql, params=()):
     deadline = time.monotonic() + 3
     while time.monotonic() < deadline:
+        cur.execute("SELECT pg_stat_clear_snapshot()")
         cur.execute(sql, params)
         if cur.fetchone()["ok"]:
             return
         time.sleep(0.01)
     pytest.fail("expected PostgreSQL lock wait was not observed")
+
+
+def test_startup_cancels_and_later_repairs_a_reader_pinned_drop(monkeypatch, ready_projection):
+    from app.db import database
+
+    database.init_database()  # stamp the current fingerprint before pinning a source table
+    seed_old_indexes()
+    monkeypatch.setattr(database, "_SCHEMA_MAINTENANCE_GRACE_SECONDS", 0.1)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        with base.get_db() as reader:
+            cur = reader.cursor()
+            cur.execute("SELECT * FROM fluid_session_nodes LIMIT 1")
+            dropping = executor.submit(retirement.run_pass, seconds=10)
+            _wait_for_pg(cur, "SELECT EXISTS (SELECT FROM pg_locks WHERE "
+                         "relation='fluid_session_nodes'::regclass "
+                         "AND mode='ShareUpdateExclusiveLock' AND granted) AS ok")
+            executor.submit(database.init_database).result(timeout=5)
+            assert dropping.result(timeout=2) is False
+            cur.execute("SELECT indisvalid FROM pg_index WHERE indexrelid=to_regclass('idx_fluid_nodes_trgm')")
+            assert cur.fetchone()["indisvalid"] is False
+        assert retirement.run_pass(seconds=10)
+    assert set(retirement.INDEXES).isdisjoint(names())
 
 
 def test_startup_ddl_cannot_queue_table_lock_behind_waiting_drop(monkeypatch, ready_projection):
@@ -292,7 +316,8 @@ def test_startup_ddl_cannot_queue_table_lock_behind_waiting_drop(monkeypatch, re
                          "AND mode='ShareUpdateExclusiveLock' AND granted) AS ok")
             starting = executor.submit(database.init_database)
             assert startup_started.wait(2)
-            _wait_for_pg(cur, "SELECT wait_event='advisory' AS ok FROM pg_stat_activity WHERE pid=%s",
+            _wait_for_pg(cur, "SELECT state='idle' AND backend_xmin IS NULL AS ok "
+                         "FROM pg_stat_activity WHERE pid=%s",
                          (startup_pid[0],))
             assert not ddl_started.is_set()
             cur.execute("SELECT count(*) AS n FROM pg_locks WHERE pid=%s "
@@ -379,6 +404,128 @@ def test_slow_tail_index_build_outlives_drop_budget_and_is_not_restarted(monkeyp
         assert session_recall.native_tail_index_ready(conn.cursor())
     assert retirement.run_pass(seconds=10)
     assert len(builds) == 1 and len(drops) > 1
+
+
+@pytest.mark.parametrize("yield_to_startup", [False, True], ids=["natural-completion", "startup-priority"])
+def test_startup_during_concurrent_tail_build_has_no_snapshot_deadlock(
+    monkeypatch, caplog, ready_projection, yield_to_startup,
+):
+    from app.db import database
+
+    with history_indexing._online_cursor() as cur:
+        cur.execute(f"DROP INDEX CONCURRENTLY {session_recall.NATIVE_TAIL_INDEX}")
+    retried = threading.Event()
+    startup_pid = []
+    original_db = database.get_db
+
+    class StartupConnection:
+        def __init__(self, conn):
+            self.conn = conn
+
+        def rollback(self):
+            self.conn.rollback()
+            retried.set()
+
+        def __getattr__(self, name):
+            return getattr(self.conn, name)
+
+    @contextmanager
+    def startup_db():
+        with original_db() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT pg_backend_pid() AS pid")
+            startup_pid.append(cur.fetchone()["pid"])
+            yield StartupConnection(conn)
+
+    monkeypatch.setattr(database, "get_db", startup_db)
+    caplog.set_level(logging.INFO, logger=database.__name__)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        with base.get_db() as old_snapshot:
+            cur = old_snapshot.cursor()
+            cur.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            cur.execute("SELECT * FROM session_recall_text LIMIT 1")
+            building = executor.submit(retirement.run_pass, seconds=10)
+            with base.get_db() as observer:
+                watch = observer.cursor()
+                # A real concurrent CREATE is executing, not a pre-statement
+                # test delay. Pin only its final older-snapshots phase.
+                _wait_for_pg(watch, "SELECT EXISTS (SELECT FROM pg_stat_progress_create_index p "
+                             "JOIN pg_stat_activity a USING (pid) "
+                             "WHERE p.relid='session_recall_text'::regclass "
+                             "AND p.phase='waiting for old snapshots' "
+                             "AND a.application_name=%s) AS ok", (database.ONLINE_DDL_APPLICATION_NAME,))
+            before = time.monotonic()
+            starting = executor.submit(database.init_database)
+            assert retried.wait(2)  # an unsuccessful try-lock transaction has ended
+            with base.get_db() as observer:
+                watch = observer.cursor()
+                _wait_for_pg(watch, "SELECT state='idle' AND backend_xmin IS NULL AS ok "
+                             "FROM pg_stat_activity WHERE pid=%s", (startup_pid[0],))
+            if yield_to_startup:
+                # Keep the old snapshot pinned: only startup's targeted cancel
+                # can make this build yield. Use the real ten-second grace.
+                starting.result(timeout=15)
+                assert time.monotonic() - before < 15
+                assert building.result(timeout=2) is False
+                with base.get_db() as observer:
+                    watch = observer.cursor()
+                    assert not session_recall.native_tail_index_ready(watch)
+                    watch.execute("SELECT indisvalid FROM pg_index WHERE indexrelid=to_regclass(%s)",
+                                  (session_recall.NATIVE_TAIL_INDEX,))
+                    assert watch.fetchone()["indisvalid"] is False
+            else:
+                old_snapshot.commit()
+                assert building.result(timeout=5)
+                starting.result(timeout=5)  # no DeadlockDetected propagates out of startup
+        if yield_to_startup:
+            assert retirement.run_pass(seconds=10)  # repair invalid CIC after reader leaves
+    with base.get_db() as conn:
+        assert session_recall.native_tail_index_ready(conn.cursor())
+    waits = [r for r in caplog.records if r.getMessage().startswith("Waiting for database schema lock")]
+    assert len(waits) == 1
+
+
+@pytest.mark.parametrize("kind", ["ordinary-startup", "wrong-key", "two-integer-namespace"])
+def test_startup_never_cancels_unrelated_lock_holders(kind):
+    from app.db import database
+
+    key = database.SCHEMA_INIT_LOCK_KEY
+    with base.get_db() as holder:
+        cur = holder.cursor()
+        name = "retire-ordinary-startup" if kind == "ordinary-startup" else database.ONLINE_DDL_APPLICATION_NAME
+        cur.execute("SELECT set_config('application_name',%s,true)", (name,))
+        if kind == "two-integer-namespace":
+            high = ((key >> 32) + 2 ** 31) % 2 ** 32 - 2 ** 31
+            low = (key + 2 ** 31) % 2 ** 32 - 2 ** 31
+            cur.execute("SELECT pg_advisory_xact_lock(%s,%s)", (high, low))
+        else:
+            cur.execute("SELECT pg_advisory_xact_lock(%s)", (key + (kind == "wrong-key"),))
+        with base.get_db() as startup:
+            assert database._cancel_schema_maintenance(startup.cursor()) is False
+        cur.execute("SELECT 1 AS ok")
+        assert cur.fetchone()["ok"] == 1
+
+
+def test_online_cursor_restores_application_name_after_error(monkeypatch):
+    from app.db.database import ONLINE_DDL_APPLICATION_NAME
+
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT current_setting('application_name') AS name")
+        previous = cur.fetchone()["name"]
+
+        @contextmanager
+        def same_connection():
+            yield conn
+
+        monkeypatch.setattr(history_indexing, "get_db", same_connection)
+        with pytest.raises(RuntimeError, match="test exit"):
+            with history_indexing._online_cursor() as online:
+                online.execute("SHOW application_name")
+                assert online.fetchone()["application_name"] == ONLINE_DDL_APPLICATION_NAME
+                raise RuntimeError("test exit")
+        cur.execute("SHOW application_name")
+        assert cur.fetchone()["application_name"] == previous
 
 
 def test_retirement_finishes_while_staggered_writers_keep_running(ready_projection):
