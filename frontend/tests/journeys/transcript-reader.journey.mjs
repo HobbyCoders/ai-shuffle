@@ -170,7 +170,10 @@ const cases = [{
 			if (deliveryBurst) {
 				// #1159: force repricing BEFORE the reader reaches the user/reply
 				// boundary. No fake messages, dropped frames or changed provider speed.
-				await page.evaluate(() => window.__journeyEventDelivery.pause());
+				await page.evaluate(selector => {
+					window.__beforeDeliveryWindowStart = Number(document.querySelector(`${selector} [data-transcript-index]`).dataset.transcriptIndex);
+					window.__journeyEventDelivery.pause();
+				}, LOG);
 				await page.waitForFunction(() => window.__journeyEventDelivery.textChars >= 6000, null, { timeout: 12_000 });
 				expect(await page.evaluate(() => !window.__journeyEventDelivery.safetyReleased), 'the held real stream is released by the test, not its safety deadline');
 				await page.evaluate(() => window.__journeyEventDelivery.release());
@@ -198,7 +201,7 @@ const cases = [{
 			});
 			expect(visible.indices[0] === visible.reply - (readingBoundary ? 1 : 0) && visible.indices.includes(visible.reply), `read the growing reply at the intended viewport position (boundary=${readingBoundary}, visible=${visible.indices.join(',')})`);
 		},
-		async act({ page, mark, log, variant, minimumChars = 17000 }) {
+		async act({ page, mark, log, variant, deliveryBurst, minimumChars = 17000 }) {
 			await mark('read the live reply while same-count growth reprices the window');
 			let oversizeSettle, after;
 			if (minimumChars > 48000) await page.evaluate(selector => {
@@ -249,9 +252,10 @@ const cases = [{
 					requestAnimationFrame(sample);
 				};
 				requestAnimationFrame(sample);
+				const start = Number(container.querySelector('[data-transcript-index]').dataset.transcriptIndex);
 				return { chars: row.textContent.length, index: Number(row.dataset.transcriptIndex),
 					top: row.getBoundingClientRect().top - container.getBoundingClientRect().top,
-					start: Number(container.querySelector('[data-transcript-index]').dataset.transcriptIndex) };
+					start, preGrowthStart: window.__beforeDeliveryWindowStart ?? start };
 			}, LOG);
 			try {
 				await page.waitForFunction(minimum => !window.__growingReader.isConnected || window.__growingReader.textContent.length > minimum, minimumChars, { timeout: 45000 });
@@ -272,7 +276,9 @@ const cases = [{
 				log(`same-count growth ${JSON.stringify({ before, after, viewport })}`);
 				expect(after.connected && after.disconnected === 0, 'content repricing must retain the currently-read streaming reply');
 				expect(after.chars > minimumChars && after.chars > before.chars, 'the real native stream grew beyond the old window budget');
-				expect(after.start > before.start && after.sameCount, 'same-count growth evicts offscreen neighbours, not the reading row');
+				// In the delayed-delivery variant repricing is forced before the
+				// reader scrolls; observe eviction from BEFORE that burst, not after it.
+				expect(after.start > before.preGrowthStart && after.start >= before.start && after.sameCount, 'same-count growth evicts offscreen neighbours, not the reading row');
 				expect(viewport.textRows.includes(before.index), 'the retained reply has actual text intersecting the viewport');
 				if (minimumChars > 48000) {
 					const reply = viewport.rows.find(row => row.index === before.index);
@@ -281,6 +287,7 @@ const cases = [{
 					await privateScreenshot(page, variant, 'oversize-reading');
 				} else expect(after.maxDrift <= 1, 'the same reading key keeps its viewport offset during repricing');
 				expect(after.rows <= 120 && after.nodes <= 12000, 'reading preservation keeps the row and nested DOM budgets');
+				if (deliveryBurst) await privateScreenshot(page, variant, 'boundary-reading');
 			} finally {
 				await page.evaluate(() => { window.__sampleGrowingReader = false; });
 				const stop = page.getByRole('button', { name: /^Stop/ });
