@@ -13,9 +13,11 @@ const inputs = [
 
 await runJourney({
 	name: 'composer-helper',
-	// Desktop Enter submits; both CPU profiles exercise the completion handlers.
-	// The existing native-model phone variants cover the shared helper on touch.
+	// Desktop Enter submits; CPU4 exercises all three paths without redundant
+	// fast copies using the hosted plan's retry headroom. Existing native-model
+	// phone variants still cover the shared helper on touch.
 	viewports: ['desktop'],
+	throttles: ['slow'],
 	allow: [...DEV_INSTANCE_NOISE],
 	cases: inputs.map(input => ({
 		name: input.name,
