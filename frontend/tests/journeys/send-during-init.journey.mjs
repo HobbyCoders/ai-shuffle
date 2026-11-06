@@ -5,7 +5,7 @@
 import { fakeAiTag, runJourney, VIEWPORTS } from './runner.mjs';
 import {
 	PROJECT, composer, countUserRows, expect, holdBootLoad, openNewChat, sendButton,
-	settleServiceWorker, typeAndSend, uniq, waitChat, waitTurnSettled, withChatSetup
+	settleServiceWorker, showSidebar, typeAndSend, uniq, waitChat, waitTurnSettled, withChatSetup
 } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 import { waitForBootReconciled, waitForCreatedChat } from './lib/boot.mjs';
@@ -20,12 +20,28 @@ const privateScreenshot = async (page, variant, stage) => {
 await runJourney({
 	name: 'send-during-init',
 	recorder: { selectors: [STOP_SELECTOR] },
-	cases: [...['first-send', 'first-send-late-tags', 'first-send-reload-before-reconciliation'].map(name => ({
+	cases: [...[
+		'first-send', 'first-send-late-tags', 'first-send-reload-before-reconciliation',
+		'new-chat-after-init-reload-before-reconciliation', 'bootstrap-reset-reload-before-reconciliation'
+	].map(name => ({
 		name,
 		async setup(ctx) {
 			const { page, status } = ctx;
 			await openNewChat(ctx);
 			await settleServiceWorker(page, status);
+			if (name === 'bootstrap-reset-reload-before-reconciliation') {
+				// Produce both independent snapshots through the real UI. Replay the
+				// older New Chat layout beside the newly produced tab chat to model a
+				// stale layout write: bootstrap must execute layoutNewChatWon itself.
+				const newChatLayout = await page.evaluate(() => localStorage.getItem('ai-shuffle-layout'));
+				expect(JSON.parse(newChatLayout)?.activeView?.type === 'session' && JSON.parse(newChatLayout).activeView.sessionId === null,
+					'the stale New Chat layout snapshot was written by the actual UI');
+				await typeAndSend(page, `old chat before bootstrap reset ${uniq()} ${fakeAiTag(ctx.variant)}`.trim());
+				await waitTurnSettled(page, { text: 'Fake AI here', messagesAtLeast: 2 });
+				await waitForCreatedChat(page);
+				ctx.staleSession = await page.evaluate(() => JSON.parse(sessionStorage.getItem('ai-shuffle-active-session')).sessionId);
+				await page.evaluate(snapshot => localStorage.setItem('ai-shuffle-layout', snapshot), newChatLayout);
+			}
 			if (name !== 'first-send') {
 				// A possible late independent load, NOT the cause of #984: its hosted
 				// tags response was already in. Keep the real response.
@@ -65,26 +81,52 @@ await runJourney({
 			await page.reload({ waitUntil: 'domcontentloaded' });
 			// Only wait for the composer to exist: never wait for boot to settle.
 			await composer(page).waitFor({ timeout: 60_000 });
+			ctx.initGeneration = await page.evaluate(() => Number(sessionStorage.getItem('__aihub_initGeneration')));
 		},
 		async act(ctx) {
 			const { page, mark, variant, log } = ctx;
 			const token = `tok-${uniq()}`;
+			const afterReset = name === 'new-chat-after-init-reload-before-reconciliation' || name === 'bootstrap-reset-reload-before-reconciliation';
+			if (afterReset) {
+				await page.evaluate(() => window.__journeyBootHold.release());
+				await page.waitForFunction(() => performance.getEntriesByName('shuffle:boot.init.end').length > 0
+					&& typeof window.__journeyLateTags?.release === 'function', null, { timeout: BOOT_HOLD.ms });
+				if (name === 'new-chat-after-init-reload-before-reconciliation') {
+					await mark('explicit New chat after init while tags remain held');
+					await showSidebar(page);
+					await page.getByRole('navigation', { name: 'Workspace' }).getByRole('button', { name: 'New chat', exact: true }).click();
+				}
+				await waitChat(page, { surface: 'new', session: 'none', loading: 'false' });
+				const reset = await page.evaluate(() => ({
+					generation: Number(sessionStorage.getItem('__aihub_initGeneration')),
+					reconciled: performance.getEntriesByName('shuffle:boot.reconciled').length > 0,
+					tagsReleased: window.__journeyLateTags.releasedAt
+				}));
+				expect(reset.generation > ctx.initGeneration && !reset.reconciled && reset.tagsReleased === null,
+					`New Chat reset advanced the generation before reconciliation: ${JSON.stringify(reset)}`);
+				ctx.closedAtSend = ctx.closed.length;
+				log(`reset before send: ${JSON.stringify({ ...reset, initGeneration: ctx.initGeneration, staleSession: ctx.staleSession })}`);
+			}
 			await mark('send immediately during init');
 			await composer(page).fill(`during init ${token} ${fakeAiTag(variant)}`.trim());
 			await sendButton(page).click();
 			const hold = await page.evaluate(() => window.__journeyBootHold);
-			expect(hold?.startedAt != null && hold.releasedAt === null, `init is still awaiting preferences at Send: ${JSON.stringify(hold)}`);
+			expect(hold?.startedAt != null && (afterReset ? hold.releasedAt !== null : hold.releasedAt === null),
+				`send occurs in the intended preference/init window: ${JSON.stringify(hold)}`);
 			await waitTurnSettled(page, { text: 'Fake AI here', messagesAtLeast: 2, hold: 0 });
 			const beforeRelease = await page.evaluate(() => window.__journeyBootHold);
-			expect(beforeRelease.releasedAt === null, 'the first turn finished before preference hydration (not just isStreaming protection)');
+			if (afterReset) expect(await page.evaluate(() => window.__journeyLateTags.releasedAt === null), 'the reset turn settled while tags still held reconciliation');
+			else expect(beforeRelease.releasedAt === null, 'the first turn finished before preference hydration (not just isStreaming protection)');
 			if (name === 'first-send') {
 				// #984/#1063: a settled first send must already persist its created
 				// chat, independent of how long the remaining boot reads take.
 				await waitForCreatedChat(page);
 			}
-			await mark('preference hydration finishes');
-			await page.evaluate(() => window.__journeyBootHold.release());
-			if (name === 'first-send-reload-before-reconciliation') {
+			if (!afterReset) {
+				await mark('preference hydration finishes');
+				await page.evaluate(() => window.__journeyBootHold.release());
+			}
+			if (name.endsWith('reload-before-reconciliation')) {
 				// #1063: reload after init but BEFORE the independent boot loads
 				// reconcile. Keep the real tags response held in this document only.
 				await page.waitForFunction(() => performance.getEntriesByName('shuffle:boot.init.end').length > 0
@@ -98,7 +140,7 @@ await runJourney({
 				expect(!beforeReload.reconciled && beforeReload.tagsReleased === null, 'reload occurs inside the held reconciliation window');
 				log(`settled first send before reconciliation: ${JSON.stringify(beforeReload)}`);
 				const session = await page.locator('[data-ui-state="chat"]').getAttribute('data-ui-session');
-				await privateScreenshot(page, variant, 'settled-before-reconciliation');
+				await privateScreenshot(page, variant, afterReset ? `${name}-settled-before-reconciliation` : 'settled-before-reconciliation');
 				// Do not hold tags in the next document; it must fully reconcile so an
 				// empty New Chat cannot be mistaken for a merely unfinished restore.
 				await page.evaluate(() => sessionStorage.setItem('__journeyLateTagsDone', 'true'));
@@ -116,10 +158,10 @@ await runJourney({
 				const reloaded = await page.locator('[data-ui-state="chat"]').getAttribute('data-ui-session');
 				const count = await countUserRows(page, token);
 				log(`reconciled reload: signature=${reloaded}, first-message rows=${count}`);
-				await privateScreenshot(page, variant, 'reloaded-before-reconciliation');
+				await privateScreenshot(page, variant, afterReset ? `${name}-reloaded-before-reconciliation` : 'reloaded-before-reconciliation');
 				expect(count === 1, `reload before reconciliation reopens the first message exactly once, got ${count}`);
 				expect(reloaded === session, `reload before reconciliation reopens the created chat: ${reloaded}`);
-				expect(ctx.closed.length === 0, 'reload must not close the boot-send-owned created chat');
+				expect(ctx.closed.length === (ctx.closedAtSend ?? 0), 'reload must not close the boot-send-owned created chat');
 				return;
 			}
 			if (name === 'first-send-late-tags') {
