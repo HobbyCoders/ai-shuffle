@@ -177,7 +177,7 @@ async function sampleSwitchFrames(page) {
 		window.__switchHydrationFrames = [];
 		window.__switchGraceClock.timers = [];
 		window.__switchHydrationSampling = true;
-		const record = rafTime => {
+		const record = (rafTime, graceRegistered = false) => {
 			if (!window.__switchHydrationSampling) return;
 			// rAF's timestamp precedes earlier callbacks/layout work in the same
 			// frame. Read the clock when the DOM is actually sampled (#941).
@@ -189,7 +189,7 @@ async function sampleSwitchFrames(page) {
 			const loader = document.querySelector('.loading-transcript');
 			const rows = [...document.querySelectorAll('[role="log"] .msg-virtualized')];
 			window.__switchHydrationFrames.push({
-				t, rafTime, pending, loadingStarted, heldAt: window.__switchHydrationHold.started,
+				t, rafTime, graceRegistered, pending, loadingStarted, heldAt: window.__switchHydrationHold.started,
 				loader: !!loader && getComputedStyle(loader).visibility !== 'hidden',
 				visibleRows: rows.filter(row => getComputedStyle(row).visibility !== 'hidden').length,
 				outgoingConnected: !!firstRow?.isConnected,
@@ -206,9 +206,11 @@ async function sampleSwitchFrames(page) {
 				loading: chat?.dataset.uiLoading
 			});
 		};
-		// Observe the real loading DOM commit as well as painted frames. A slow
-		// style/layout pass may consume the entire grace before the first rAF;
-		// that must not reset the clock or make the positive observation vacuous.
+		// The timer starts before Svelte finishes committing loading attributes.
+		// Synchronous layout can consume the whole grace before either a mutation
+		// observer or rAF runs. Capture the actual retained DOM at registration,
+		// as well as later commits/frames, without moving the product's deadline.
+		window.__switchGraceClock.onRegistered = () => record(null, true);
 		let committedGrace = null;
 		const observer = new MutationObserver(() => {
 			if (!window.__switchHydrationSampling) { observer.disconnect(); return; }

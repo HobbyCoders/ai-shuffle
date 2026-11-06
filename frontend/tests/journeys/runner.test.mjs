@@ -6,6 +6,8 @@ import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { deleteCaseChats, readDevloopStatus } from './runner.mjs';
+import { trackCaseChats } from './lib/case-chats.mjs';
+import { EventEmitter } from 'node:events';
 
 test('paused transitions are usable without hiding a dead or broken instance', () => {
 	const directory = mkdtempSync(join(tmpdir(), 'journey-idle-'));
@@ -82,7 +84,7 @@ test('local default and substring selection retain their behavior', () => {
 });
 
 // Run the real cleanup callback against a fake session API, not a second copy
-// of its filter. A cold devloop can seed the CLI inside the case's 2s lookback.
+// of its filter. Other cases/manual sends can create chats in the same window.
 for (const withCli of [false, true]) {
 	test(`cleanup preserves every seed and deletes only case chats (CLI seed: ${withCli})`, async (t) => {
 		const startedAt = Date.parse('2026-11-04T22:00:00Z');
@@ -94,7 +96,8 @@ for (const withCli of [false, true]) {
 		} };
 		const rows = new Map([
 			['native-seed', recent], ...(withCli ? [['cli-seed', recent]] : []),
-			['previous-case', older], ['case-chat', recent], ['lookback-chat', new Date(startedAt - 2000).toISOString()]
+			['previous-case', older], ['case-chat', recent], ['lookback-chat', new Date(startedAt - 2000).toISOString()],
+			['concurrent-case', recent], ['manual-chat', new Date(startedAt + 100).toISOString()]
 		].map(([id, created_at]) => [id, { id, created_at }]));
 		const deleted = [];
 		t.mock.method(globalThis, 'fetch', async (url, options) => {
@@ -111,10 +114,90 @@ for (const withCli of [false, true]) {
 			evaluate: async (callback, args) => callback(args),
 			close: async () => { closed = true; }
 		}) };
-		const count = await deleteCaseChats(context, status, startedAt);
+		const count = await deleteCaseChats(context, status, startedAt, ['case-chat', 'lookback-chat', 'case-chat', ...Object.values(status.seed.chats), status.seed.claude_cli?.chat].filter(Boolean));
 		assert.deepEqual(deleted, ['case-chat', 'lookback-chat']);
 		assert.equal(count, 2);
-		assert.deepEqual([...rows.keys()], ['native-seed', ...(withCli ? ['cli-seed'] : []), 'previous-case']);
+		assert.deepEqual([...rows.keys()], ['native-seed', ...(withCli ? ['cli-seed'] : []), 'previous-case', 'concurrent-case', 'manual-chat']);
 		assert.equal(closed, true);
 	});
 }
+
+test("chat ownership follows only this context's creates, not shared-socket broadcasts", async () => {
+	const page = new EventEmitter();
+	const context = new EventEmitter();
+	context.pages = () => [page];
+	const owned = trackCaseChats(context);
+	const socket = new EventEmitter();
+	page.emit('websocket', socket);
+	const frame = (direction, value) => socket.emit(direction, { payload: JSON.stringify(value) });
+	frame('framesent', { type: 'query', request_id: 'ours' });
+	frame('framesent', { type: 'query', request_id: 'existing', session_id: 'opened-seed' });
+	frame('framereceived', { type: 'session_created', session_id: 'foreign', request_id: 'another-tab' });
+	frame('framereceived', { type: 'user_session_created', session_id: 'manual-chat' });
+	frame('framereceived', { type: 'start', session_id: 'opened-seed', request_id: 'existing' });
+	frame('framereceived', { type: 'session_created', session_id: 'ws-owned', request_id: 'ours' });
+	frame('framereceived', { type: 'start', session_id: 'ws-owned', request_id: 'ours' });
+	socket.emit('framereceived', { payload: 'not JSON' });
+	const response = (path, method, body, ok = true) => context.emit('response', {
+		url: () => `http://devloop.invalid/api/v1${path}`,
+		request: () => ({ method: () => method }), ok: () => ok,
+		json: async () => body
+	});
+	response('/sessions', 'POST', { session_id: 'http-owned' });
+	response('/sessions/with-worktree', 'POST', { session_id: 'worktree-owned' });
+	response('/sessions', 'GET', [{ id: 'unrelated' }]);
+	response('/sessions/seed/clear', 'POST', { session_id: 'opened-seed' });
+	response('/sessions', 'POST', { session_id: 'refused' }, false);
+	assert.deepEqual((await owned()).sort(), ['http-owned', 'worktree-owned', 'ws-owned']);
+
+	const nextPage = new EventEmitter();
+	context.emit('page', nextPage);
+	const nextSocket = new EventEmitter();
+	nextPage.emit('websocket', nextSocket);
+	nextSocket.emit('framesent', { payload: JSON.stringify({ type: 'query', request_id: 'popup' }) });
+	nextSocket.emit('framereceived', { payload: JSON.stringify({ type: 'start', request_id: 'popup', session_id: 'popup-owned' }) });
+	assert.ok((await owned()).includes('popup-owned'));
+});
+
+test('successful forks belong to the case and cleanup preserves their seed parents', async (t) => {
+	const context = new EventEmitter();
+	context.pages = () => [];
+	const owned = trackCaseChats(context);
+	const response = (path, body, { method = 'POST', ok = true } = {}) => context.emit('response', {
+		url: () => `http://devloop.invalid/api/v1${path}`,
+		request: () => ({ method: () => method }), ok: () => ok,
+		json: async () => body
+	});
+	response('/sessions', { session_id: 'parent' });
+	response('/sessions/parent/fork', { status: 'success', session_id: 'fork-child', parent_session_id: 'parent' });
+	response('/sessions/native-seed/fork', { status: 'success', session_id: 'seed-fork', parent_session_id: 'native-seed' });
+	response('/sessions/parent/fork', { session_id: 'refused-fork' }, { ok: false });
+	response('/sessions/parent/fork', { session_id: 'get-fork' }, { method: 'GET' });
+	response('/sessions/parent/fork/clear', { session_id: 'not-a-fork-create' });
+
+	const rows = new Set(['native-seed', 'cli-seed', 'manual-chat', 'parent', 'fork-child', 'seed-fork']);
+	const deleted = [];
+	t.mock.method(globalThis, 'fetch', async (url, options) => {
+		assert.equal(options.method, 'DELETE');
+		const id = decodeURIComponent(url.slice('/api/v1/sessions/'.length));
+		deleted.push(id);
+		assert.equal(rows.delete(id), true, `unexpected deletion: ${id}`);
+		return { ok: true };
+	});
+	context.newPage = async () => ({
+		goto: async () => {}, evaluate: async (callback, args) => callback(args), close: async () => {}
+	});
+	const ids = await owned();
+	const count = await deleteCaseChats(context, {
+		urls: { ui: 'http://devloop.invalid/' },
+		seed: { chats: { long: 'native-seed' }, claude_cli: { chat: 'cli-seed' } }
+	}, Date.now(), ids);
+	assert.deepEqual({ tracked: ids.sort(), count, deleted: deleted.sort(), remaining: [...rows].sort() }, {
+		tracked: ['fork-child', 'parent', 'seed-fork'], count: 3,
+		deleted: ['fork-child', 'parent', 'seed-fork'], remaining: ['cli-seed', 'manual-chat', 'native-seed']
+	});
+});
+
+test('a case that created no chats cannot sweep the shared instance', async () => {
+	assert.equal(await deleteCaseChats({ newPage: () => assert.fail('must not open cleanup page') }, {}, Date.now(), []), 0);
+});
