@@ -1053,11 +1053,11 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 					pendingQueue.rejectSend(sid, data.client_message_id);
 					if (sid !== getState().sessionId) break;
 					const restored = pendingQueue.takeWithdrawnDraft(sid);
+					// Idle sends echo on the transcript, not in the pending queue.
+					// Only recover an unconfirmed local row, never a durable receipt.
+					const refused = getState().messages.find(m => m.role === 'user' && m.commandId === data.client_message_id
+						&& m.id.startsWith('user-') && !m.serverId && m.seq == null);
 					update(s => {
-						// Idle sends echo on the transcript, not in the pending queue.
-						// Only recover an unconfirmed local row, never a durable receipt.
-						const refused = s.messages.find(m => m.role === 'user' && m.commandId === data.client_message_id
-							&& m.id.startsWith('user-') && !m.serverId && m.seq == null);
 						const recovered = restored ?? refused?.content;
 						const optimisticOnly = refused && s.optimisticStreaming && !s.liveTurnId;
 						return { ...s,
@@ -1068,6 +1068,9 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 							...(recovered != null ? { pendingRestorePrompt: [s.pendingRestorePrompt, recovered].filter(Boolean).join('\n\n') } : {}),
 						};
 					});
+					// Another device's turn may have seeded the rejected row into
+					// the feed authority. Retract it there too, not just its projection.
+					if (refused) feedController.retractOptimisticSend(sid, data.client_message_id);
 					break;
 				}
 

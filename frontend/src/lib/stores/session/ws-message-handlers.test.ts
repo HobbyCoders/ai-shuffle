@@ -46,6 +46,7 @@ vi.mock('./v2/feed-controller', () => ({
 		restart: vi.fn(),
 		isFeeding: vi.fn(() => false),
 		invalidate: vi.fn(),
+		retractOptimisticSend: vi.fn(),
 	},
 	// Mirrors the real constant: `start` marks streaming OPTIMISTICALLY so the
 	// fold clears it once the reducer confirms the turn, instead of competing

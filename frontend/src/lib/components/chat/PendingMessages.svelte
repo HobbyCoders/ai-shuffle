@@ -316,9 +316,16 @@
 	}
 
 	@media (pointer: coarse), (max-width: 639px) {
+		/* The whole transparent Interrupt box is a hit target, including corners. */
+		.pending-action {
+			border-radius: 0;
+		}
+
 		/* Extend touch targets without growing the glyph or action row. */
 		.pending-remove {
 			position: relative;
+			/* The target extends ~6px beyond the glyph: keep it off Interrupt. */
+			margin-inline-start: 6px;
 		}
 
 		.pending-remove::before,

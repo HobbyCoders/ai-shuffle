@@ -102,6 +102,10 @@ import {
 	cachedTranscriptCount,
 } from './feed-controller';
 import { pendingQueue } from '../pending-queue';
+import { createMessageHandlers, type MessageHandlerDeps } from '../ws-message-handlers';
+vi.mock('$lib/services/error-reporter', () => ({ reportClientError: vi.fn() }));
+vi.mock('$lib/services/error-actions', () => ({ serverNotificationActions: vi.fn(() => []) }));
+
 import { swarms } from '../../swarms';
 import { get } from 'svelte/store';
 import { browserPanel } from '../../browser-panel.svelte';
@@ -286,6 +290,42 @@ afterEach(() => {
 	feedController.invalidate();
 	vi.useRealTimers();
 	vi.unstubAllGlobals();
+});
+
+describe('refused sends through the real feed controller', () => {
+	it('retracts an idle command from later live folds and cached resume without stopping another turn', () => {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		feedController.start('s1');
+		hoisted.onEvent!(caughtUp(0));
+		deps.update(s => ({ ...s, optimisticStreaming: true, isStreaming: true,
+			messages: [{ id: 'user-refused', role: 'user', content: 'recover A', commandId: 'command-a' }],
+		}));
+		feedController.noteOptimisticSend('s1');
+		// Another device's turn seeds A before the socket refusal arrives.
+		hoisted.onEvent!({ type: 'turn.started', id: 'start-b', session_id: 's1', turn_id: 'turn-b', seq: 1 });
+		hoisted.onEvent!({ ...textDelta('answer-b', 'B is running'), turn_id: 'turn-b', seq: 2 });
+		vi.advanceTimersByTime(STREAM_FOLD_MS);
+		flushRaf();
+		expect(deps.state.messages.some(m => m.commandId === 'command-a')).toBe(true);
+		const handlers = createMessageHandlers({ update: deps.update, getState: deps.getState } as MessageHandlerDeps);
+		handlers.handleMessage({ type: 'error', session_id: 's1', client_message_id: 'command-a', message: 'Missing agent' });
+		expect(deps.state.pendingRestorePrompt).toBe('recover A');
+		expect(deps.state.messages.some(m => m.commandId === 'command-a')).toBe(false);
+		hoisted.onEvent!({ ...textDelta('answer-b-more', ' still running'), turn_id: 'turn-b', seq: 3 });
+		vi.advanceTimersByTime(STREAM_FOLD_MS);
+		flushRaf();
+		expect(deps.state.messages.some(m => m.commandId === 'command-a')).toBe(false);
+		expect(deps.state.isStreaming).toBe(true);
+		expect(deps.state.optimisticStreaming).toBe(false);
+		feedController.stop();
+		feedController.start('s1');
+		expect(deps.state.messages.some(m => m.commandId === 'command-a')).toBe(false);
+		expect(deps.state.isStreaming).toBe(true);
+		hoisted.onEvent!({ type: 'turn.completed', id: 'done-b', session_id: 's1', turn_id: 'turn-b', seq: 4 });
+		hoisted.onEvent!(caughtUp(4));
+		expect(deps.state.isStreaming).toBe(false);
+	});
 });
 
 describe('feedController live composer activity', () => {

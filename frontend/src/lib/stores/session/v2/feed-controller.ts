@@ -876,6 +876,8 @@ export interface FeedController {
 	 * writing `isStreaming` directly from anywhere but the reducer.
 	 */
 	noteOptimisticSend: (sessionId: string | null) => void;
+	/** Retract a refused local command from the reducer/cache and both optimistic latches. */
+	retractOptimisticSend: (sessionId: string | null, commandId: string) => void;
 	/** Withdraw the optimistic flip (send failed, stop confirmed, turn settled). */
 	clearOptimisticSend: (sessionId: string | null) => void;
 }
@@ -1313,6 +1315,18 @@ export const feedController: FeedController = {
 		// this feed will adopt on `start`) may raise the flag.
 		if (sessionId !== null && currentSessionId !== null && sessionId !== currentSessionId) return;
 		optimisticStreaming = true;
+	},
+
+	retractOptimisticSend(sessionId: string | null, commandId: string) {
+		const retract = (state: V2SessionState): V2SessionState => {
+			const messages = state.messages.filter(m => !(m.role === 'user' && m.commandId === commandId
+				&& !m.serverId && m.seq == null && !state.messageOriginSeq.has(m.id)));
+			return messages.length === state.messages.length ? state : { ...state, messages };
+		};
+		if (currentSessionId === sessionId) reducerState = retract(reducerState);
+		const cached = sessionId ? transcriptCache.get(sessionId) : undefined;
+		if (cached) transcriptCache.set(sessionId!, { ...cached, state: sealState(retract(cached.state)), optimisticStreaming: false });
+		this.clearOptimisticSend(sessionId);
 	},
 
 	clearOptimisticSend(sessionId: string | null) {

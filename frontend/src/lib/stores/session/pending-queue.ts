@@ -415,8 +415,11 @@ export const pendingQueue = {
 		} else if (verdict === 'already_delivered') {
 			// Retire both names of this attempt, not future rows for the command.
 			// The durable id can arrive in a verdict before its queue snapshot.
-			if (entry && (!messageId || isOptimistic(entry) || entry.id === messageId)) deliveredRows.add(entry.id);
 			if (messageId) deliveredRows.add(messageId);
+			// A command survives re-queueing; its old attempt's late verdict
+			// must not clear the newer attempt's cancellation or draft.
+			if (entry && messageId && !isOptimistic(entry) && entry.id !== messageId) return;
+			if (entry) deliveredRows.add(entry.id);
 			terminalVerdicts.set(key, verdict);
 			this.removalFailed(id, key, true);
 			this.acknowledgeSend(id, key);

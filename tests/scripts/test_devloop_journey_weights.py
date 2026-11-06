@@ -45,6 +45,19 @@ def test_unmeasured_budget_never_overrides_a_green_median(tmp_path, monkeypatch)
     assert ci.estimated_seconds(tmp_path, _weights(tmp_path, {}, per_case=30))[name] == 1410
 
 
+def test_steer_lifecycle_keeps_slow_desktop_and_phone_coverage():
+    path = ci.JOURNEYS / "steer-lifecycle.journey.mjs"
+    result = ci.subprocess.run(
+        ["node", str(path), "--list", "--only="], capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    cases = set(result.stdout.splitlines())
+    for name in ("refused-idle-send", "refused-steer", "unadmitted-unsend", "lost-verdict", "delivery-wins"):
+        assert {f"{name}@desktop-slow", f"{name}@phone-slow"} <= cases
+    assert {"touch-unsend-targets@phone-slow", "touch-unsend-targets@fold-inner-slow"} <= cases
+    assert len(cases) == 12  # no redundant fast copies at the expense of retry headroom
+
+
 def test_checked_in_hosted_plan_leaves_retry_headroom():
     weights = ci.estimated_seconds()
     buckets = ci.plan(ci.HOSTED_SHARDS)

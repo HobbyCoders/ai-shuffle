@@ -7,6 +7,8 @@ import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 
 await runJourney({
   name: 'steer-lifecycle',
+  // Keep desktop/phone races at 4x CPU; duplicate fast variants cost hosted retry headroom.
+  throttles: ['slow'],
   recorder: { selectors: ['pending=.pending-messages', 'cancelling=[data-queue-status="cancelling"]'] },
   cases: [{
     name: 'refused-idle-send',
@@ -168,6 +170,22 @@ await runJourney({
       await typeAndSend(page, first);
       await typeAndSend(page, second);
       await page.waitForFunction(() => document.querySelectorAll('.pending-messages [data-queue-confirmed="true"]').length === 2);
+      const isolated = await page.evaluate(() => {
+        const interrupt = document.querySelector('.pending-action');
+        const r = interrupt.getBoundingClientRect();
+        const interruptHits = [0.25, r.width / 2, r.width - 0.25].every(x =>
+          [0.25, r.height / 2, r.height - 0.25].every(y =>
+            document.elementFromPoint(r.x + x, r.y + y)?.closest('button') === interrupt));
+        const textHits = [...document.querySelectorAll('.pending-messages .bubble-text')].every(el => {
+          const t = el.getBoundingClientRect();
+          return [0.25, t.width / 2, t.width - 0.25].every(x =>
+            [0.25, t.height / 2, t.height - 0.25].every(y =>
+              !document.elementFromPoint(t.x + x, t.y + y)?.closest('.hover-remove')));
+        });
+        return { interruptHits, textHits };
+      });
+      expect(isolated.interruptHits, 'the entire Interrupt box hits Interrupt, never Unsend');
+      expect(isolated.textHits, 'the bubble text is not covered by the hovering Unsend target');
       for (const [selector, remaining] of [['.hover-remove', 1], ['.pending-remove', 0]]) {
         const target = await page.locator(selector).evaluate(el => {
           const r = el.getBoundingClientRect(), hit = getComputedStyle(el, '::before');
