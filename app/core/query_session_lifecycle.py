@@ -52,8 +52,8 @@ def _reap_task_killed(session_id: str, task_id: str, *, source: str | None = Non
 async def interrupt_session(session_id: str) -> bool:
     """Interrupt an active streaming session, or the turn waiting for the chat.
 
-    True means a turn has this Stop. A waiting turn keeps it wherever it ends up
-    running, and needs no engine yet, unless the turn holding the chat is the one to stop.
+    True means a turn has this Stop. A waiting or admitted turn keeps it through
+    setup even before its engine exists; an admitted turn also signals any pooled engine.
 
     Otherwise this calls the adapter's interrupt(), which signals the provider to stop
     processing. This is more reliable than just cancelling the
