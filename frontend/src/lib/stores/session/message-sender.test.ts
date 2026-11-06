@@ -277,6 +277,36 @@ describe('remembered permission on first send', () => {
 
 describe('new-chat recovery isolation', () => {
 	beforeEach(() => pendingQueue.reset(null, true));
+	it.each([
+		{ origin: null, destination: null },
+		{ origin: null, destination: 's2' },
+		{ origin: null, destination: 'unadopted-session' },
+		{ origin: 's1', destination: null },
+		{ origin: 's1', destination: 's2' },
+	])('keeps a delayed $destination refusal for $origin in its own composer', async ({ origin, destination }) => {
+		const test = makeDeps(baseState({ sessionId: origin, title: origin ? 'Old chat' : 'New Chat' }));
+		feedController.attach({ update: test.deps.update, getState: test.getState,
+			requestPendingQuestions: vi.fn(), requestPendingPermissions: vi.fn(), resolveInteractionByRequestId: vi.fn() });
+		const switcher = createSessionSwitcher({ update: test.deps.update, getState: test.getState,
+			internal: test.internal, wsSend: test.wsConn.send,
+			sessionEphemeralCache: { save: vi.fn(), restore: () => null }, onPersistTimerChanged: vi.fn() });
+		try {
+			expect(await createMessageSender(test.deps).sendMessage('recover B in its own composer')).toBe(true);
+			const query = test.wsConn.send.mock.calls.find(([m]) => m.type === 'query')![0];
+			await switcher.switchSession('s2');
+			test.deps.update(s => ({ ...s, draft: 's2 draft', pendingRestorePrompt: 's2 recovery' }));
+			createMessageHandlers(test.deps as unknown as MessageHandlerDeps).handleMessage({ type: 'error',
+				session_id: destination, client_message_id: query.client_message_id, message: 'Missing agent' });
+			expect(test.getState().sessionId).toBe('s2');
+			expect(test.getState().draft).toBe('s2 draft');
+			expect(test.getState().pendingRestorePrompt).toBe('s2 recovery');
+			expect(pendingQueue.takeWithdrawnDraft('s2')).toBeNull();
+			if (origin) await switcher.switchSession(origin);
+			else switcher.newChat();
+			expect(test.getState().pendingRestorePrompt).toBe('recover B in its own composer');
+			expect(pendingQueue.takeWithdrawnDraft(origin)).toBeNull();
+		} finally { feedController.stop(); feedController.invalidate(); pendingQueue.reset(null, true); }
+	});
 	it('does not carry a delivered first send through a later refusal and retry', async () => {
 		const first = makeDeps(baseState());
 		expect(await createMessageSender(first.deps).sendMessage('already delivered A')).toBe(true);

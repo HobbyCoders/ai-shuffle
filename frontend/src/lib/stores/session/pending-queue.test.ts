@@ -327,6 +327,13 @@ describe('pendingQueue — bounded transactions', () => {
 });
 
 describe('recovery-only sends', () => {
+	it('does not let a refusal destination claim a New Chat command', () => {
+		pendingQueue.trackSend(null, { ...row('user-b', 'B'), clientMessageId: 'client-b' });
+		pendingQueue.rejectSend('s2', 'client-b');
+		expect(pendingQueue.takeWithdrawnDraft('s2')).toBeNull();
+		pendingQueue.rejectSend(null, 'client-b');
+		expect(pendingQueue.takeWithdrawnDraft(null)).toBe('B');
+	});
 	it('never projects an idle recovery record as a pending row in any session', () => {
 		pendingQueue.trackSend(null, { ...row('user-a', 'A'), clientMessageId: 'client-a' });
 		expect(pendingQueue.reconcile(null, [])).toEqual([]);
@@ -341,13 +348,12 @@ describe('recovery-only sends', () => {
 		else pendingQueue.noteDelivered('s1', 'A', 'turn-a', true, 'client-a');
 		pendingQueue.rejectSend(null, 'client-a');
 		expect(pendingQueue.takeWithdrawnDraft(null)).toBeNull();
-		pendingQueue.rejectSend('s2', 'client-b');
-		expect(pendingQueue.takeWithdrawnDraft('s2')).toBe('B');
+		pendingQueue.rejectSend(null, 'client-b');
+		expect(pendingQueue.takeWithdrawnDraft(null)).toBe('B');
 		expect(pendingQueue.reconcile(null, [])).toEqual([]);
 	});
 	it('does not let another session consume an existing chat recovery record', () => {
 		pendingQueue.trackSend('s1', { ...row('user-a', 'A'), clientMessageId: 'client-a' });
-		pendingQueue.acknowledgeSend('s2', 'client-a');
 		pendingQueue.rejectSend('s2', 'client-a');
 		expect(pendingQueue.takeWithdrawnDraft('s2')).toBeNull();
 		pendingQueue.rejectSend('s1', 'client-a');

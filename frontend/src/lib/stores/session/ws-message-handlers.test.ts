@@ -3024,6 +3024,28 @@ describe('queue_updated (the pending "not seen yet" bubbles)', () => {
 		expect(state.queuedMessages).toEqual([]);
 	});
 
+	it.each(['session_created', 'start'])('keeps draft ownership after authenticated %s adoption', type => {
+		const entry = { id: 'user-b', clientMessageId: 'client-b', content: 'adopted B', queuedAt: 1 };
+		state = { ...state, sessionId: null, messages: [{ id: entry.id, role: 'user', content: entry.content, commandId: entry.clientMessageId }] };
+		pendingQueue.trackSend(null, entry);
+		// Another New Chat command must not be adopted with this request.
+		pendingQueue.trackSend(null, { id: 'user-c', clientMessageId: 'client-c', content: 'still New Chat C', queuedAt: 2 });
+		deps.internal.awaitingNewSession = true;
+		deps.internal.pendingRequestId = 'request-b';
+		handlers.handleMessage({ type, session_id: 'session-1', request_id: 'foreign-request' });
+		expect(state.sessionId).toBeNull();
+		handlers.handleMessage({ type, session_id: 'session-1', request_id: 'request-b' });
+		expect(state.sessionId).toBe('session-1');
+		state = { ...state, sessionId: 'session-2', messages: [], pendingRestorePrompt: 's2 recovery' };
+		handlers.handleMessage({ type: 'error', session_id: null, client_message_id: entry.clientMessageId, message: 'Missing agent' });
+		expect(state.pendingRestorePrompt).toBe('s2 recovery');
+		expect(pendingQueue.takeWithdrawnDraft('session-1')).toBe('adopted B');
+		expect(pendingQueue.takeWithdrawnDraft('session-2')).toBeNull();
+		handlers.handleMessage({ type: 'error', session_id: 'session-1', client_message_id: 'client-c', message: 'Missing agent' });
+		expect(pendingQueue.takeWithdrawnDraft(null)).toBe('still New Chat C');
+		expect(pendingQueue.takeWithdrawnDraft('session-1')).toBeNull();
+	});
+
 	it('recovers a correlated refused echo without stopping the live turn or overwriting queued restores', () => {
 		const entry = { id: 'client-a', clientMessageId: 'client-a', content: 'recover', queuedAt: 1 };
 		state = { ...state, isStreaming: true, pendingRestorePrompt: 'earlier restore', queuedMessages: [entry] };

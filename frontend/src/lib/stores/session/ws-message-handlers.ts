@@ -893,6 +893,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 					!!internal.pendingRequestId && createdRequestId === internal.pendingRequestId;
 				const acceptCreated = currentState.sessionId === sessionId || createdAwaitingMatch;
 				if (acceptCreated) {
+					if (createdAwaitingMatch) pendingQueue.adoptSession(sessionId, currentState.messages.map(m => m.commandId));
 					internal.awaitingNewSession = false;
 					internal.pendingRequestId = null;
 					// Set the sessionId and title so the header shows the correct
@@ -942,6 +943,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				// live task strip.
 				const startAdoptsNewSession = currentState.sessionId !== sessionId;
 				if (acceptStart) {
+					if (startAwaitingMatch) pendingQueue.adoptSession(sessionId, currentState.messages.map(m => m.commandId));
 					internal.awaitingNewSession = false;
 					internal.pendingRequestId = null;
 					// Deliver a Stop deferred before the id existed (see
@@ -1049,7 +1051,14 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 			case 'error': {
 				// A refused send says nothing about the turn already running.
 				if (typeof data.client_message_id === 'string') {
-					const sid = (data.session_id as string | undefined) ?? getState().sessionId;
+					const current = getState();
+					const refused = current.messages.find(m => m.role === 'user' && m.commandId === data.client_message_id
+						&& m.id.startsWith('user-') && !m.serverId && m.seq == null);
+					const owner = pendingQueue.sendOwner(data.client_message_id);
+					// null is a real New Chat owner, never a wildcard for the active chat.
+					// Prefer command identity even when the refusal names another session.
+					const sid = owner ? owner.sessionId : refused ? current.sessionId
+						: typeof data.session_id === 'string' ? data.session_id : null;
 					// Retract/cache the draft before the active-session guard: a refusal
 					// can arrive after switching away from an optimistic idle send.
 					const recovered = feedController.retractOptimisticSend(sid, data.client_message_id);
@@ -1058,8 +1067,6 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 					const restored = pendingQueue.takeWithdrawnDraft(sid);
 					// Idle sends echo on the transcript, not in the pending queue.
 					// Only recover an unconfirmed local row, never a durable receipt.
-					const refused = getState().messages.find(m => m.role === 'user' && m.commandId === data.client_message_id
-						&& m.id.startsWith('user-') && !m.serverId && m.seq == null);
 					update(s => {
 						const recovered = restored ?? refused?.content;
 						const optimisticOnly = refused && s.optimisticStreaming && !s.liveTurnId;

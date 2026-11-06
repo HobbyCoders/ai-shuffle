@@ -167,7 +167,7 @@ function pruneRecoverySends(): void {
 function recoverySend(id: string | null, key: string) {
 	pruneRecoverySends();
 	const send = recoverySends.get(key);
-	return send && (send.sessionId === null || send.sessionId === id) ? send : undefined;
+	return send?.sessionId === id ? send : undefined;
 }
 function cancellationState(id: string | null): CancellationState {
 	let state = cancellations.get(id);
@@ -407,8 +407,28 @@ export const pendingQueue = {
 		}, 10_000));
 	},
 
+	/** Refusals follow the command's compose, not the socket's current session. */
+	sendOwner(key: string): { sessionId: string | null } | undefined {
+		pruneRecoverySends();
+		const send = recoverySends.get(key);
+		if (send) return { sessionId: send.sessionId };
+		for (const [sessionId, state] of cancellations) {
+			if (state.sends.has(key) || state.removals.has(key)) return { sessionId };
+		}
+	},
+
+	/** Only the commands in an authenticated new-session adoption move with it. */
+	adoptSession(id: string, commandIds: (string | undefined)[]): void {
+		pruneRecoverySends();
+		const keys = new Set(commandIds);
+		for (const [key, send] of recoverySends) {
+			if (send.sessionId === null && keys.has(key)) send.sessionId = id;
+		}
+	},
+
 	acknowledgeSend(id: string | null, key: string): void {
-		if (recoverySend(id, key)) recoverySends.delete(key);
+		// Admission/receipt is command-wide; refusal recovery is ownership-scoped.
+		recoverySends.delete(key);
 		const state = cancellations.get(id);
 		clearTimeout(state?.timers.get(`send:${key}`));
 		state?.timers.delete(`send:${key}`);
@@ -416,6 +436,8 @@ export const pendingQueue = {
 	},
 
 	rejectSend(id: string | null, key: string, fallback?: string | null): void {
+		const owner = this.sendOwner(key);
+		if (owner && owner.sessionId !== id) return;
 		const state = cancellationState(id);
 		const content = state.sends.get(key)?.content ?? recoverySend(id, key)?.content ?? fallback;
 		if (content != null && !state.withdrawn.has(key)) state.drafts.push(content);
