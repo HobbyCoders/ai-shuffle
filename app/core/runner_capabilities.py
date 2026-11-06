@@ -265,6 +265,7 @@ def detect_capabilities() -> Dict[str, Any]:
         "move_questions": 1,
         "handoff_poll": 1,
         "handoff_plain_folder": 1,
+        "session_plan": 1,  # transactional plan/receipts included in ownership handoff
         "terminal": _detect_terminal(),
         "generation": GENERATION_VERSION,
     }

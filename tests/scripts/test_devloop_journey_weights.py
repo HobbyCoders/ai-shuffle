@@ -17,7 +17,7 @@ def _weights(tmp_path, seconds, per_case=10.0):
     return path
 
 
-@pytest.mark.parametrize("shards", [1, 4, 8, 9, 30])
+@pytest.mark.parametrize("shards", [1, 4, 8, 9, 10, 30])
 def test_runtime_partition_is_deterministic_and_exact(shards):
     weights = {f"{i}.journey.mjs": (i % 5 + 1) * 0.25 for i in range(25)}
     buckets = ci.partition(weights, shards)
@@ -45,10 +45,10 @@ def test_unmeasured_budget_never_overrides_a_green_median(tmp_path, monkeypatch)
     assert ci.estimated_seconds(tmp_path, _weights(tmp_path, {}, per_case=30))[name] == 1410
 
 
-def test_checked_in_ten_shard_plan_leaves_retry_headroom():
+def test_checked_in_hosted_plan_leaves_retry_headroom():
     weights = ci.estimated_seconds()
-    buckets = ci.plan(10)
-    assert len(buckets) == 10
+    buckets = ci.plan(ci.HOSTED_SHARDS)
+    assert len(buckets) == ci.HOSTED_SHARDS
     assert sorted(name for bucket in buckets for name in bucket) == sorted(weights)
     # Include the ENTIRE first pass, 30s startup, all 180s of exact-case retry,
     # and the existing 180s teardown reserve inside the unchanged 25m step.
@@ -56,8 +56,19 @@ def test_checked_in_ten_shard_plan_leaves_retry_headroom():
     assert max(loads) <= 19 * 60 - 30, loads
     full_budget = max(loads) + 30 + journey_retry.RETRY_SECONDS + journey_retry.TEARDOWN_SECONDS
     assert full_budget <= journey_retry.STEP_SECONDS
-    assert all(ci.commands_for(bucket, 9) == [["node", str(ci.JOURNEYS / name)] for name in bucket]
+    assert all(ci.commands_for(bucket, ci.HOSTED_SHARDS) == [["node", str(ci.JOURNEYS / name)] for name in bucket]
                for bucket in buckets)
+
+
+def test_checked_in_measurements_match_actual_case_lists():
+    data = json.loads(ci.WEIGHTS.read_text())
+    # Case counts for newly measured files remain attached to their timings.
+    # Full refreshes record every file, so future additions require remeasurement
+    # instead of silently keeping a short runtime for a larger case list.
+    assert data["case_counts"]
+    assert set(data["case_counts"]) <= set(data["seconds"])
+    for name, cases in data["case_counts"].items():
+        assert ci.case_count(ci.JOURNEYS / name, strict=True) == cases, name
 
 
 def test_plan_uses_runtime_instead_of_case_counts(tmp_path, monkeypatch):
@@ -287,6 +298,7 @@ def test_refresh_produces_medians_from_green_archived_job_logs(tmp_path, monkeyp
     assert data["seconds"] == {"a.journey.mjs": 40, "b.journey.mjs": 20}
     assert data["seconds_per_case"] == 12.5
     assert data["source_runs"] == [10, 20]
+    assert data["case_counts"] == {"a.journey.mjs": 3, "b.journey.mjs": 2}
     assert "refresh-weights" in data["_comment"]
     assert len(calls) == 5
     first = path.read_bytes()

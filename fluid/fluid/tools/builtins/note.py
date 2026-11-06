@@ -19,20 +19,13 @@ from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
 SPEC = ToolSpec(
     name="Note",
     description=(
-        "Working notes — a scratchpad for the current plan and thoughts "
-        "through a session. Actions: 'add' appends one or more notes "
-        "(text: one note, or several lines for a batch; texts: an array), "
-        "'remove' deletes the notes whose text matches exactly and takes the "
-        "same batch forms as add (retire a finished checklist in one call), "
-        "'list' returns all notes, "
-        "'clear' empties them. Notes live outside the context window; calling "
-        "Note is what brings them back into view, and non-empty notes are "
-        "recited on every later turn, so they cost context while they exist. "
-        "For tasks under ~5 steps skip Note; a long or multi-turn plan is what "
-        "it is for. Add the steps in one call, and batch removals with "
-        "`texts` (retire several finished steps at once) rather than one call "
-        "per step. Keep only notes that still matter; do not leave completed "
-        "work in the list, and do not mark items done in place."
+        "Optional session scratchpad, stored outside context. add appends; "
+        "remove deletes exact whole-note matches; list reads all; clear empties. "
+        "Batch adds/removals with text lines or texts. Calls return the notes; "
+        "non-empty notes recur each turn, costing context. "
+        "While a session Plan exists, use list to read these optional notes; "
+        "they are not automatically recited alongside the plan. "
+        "Keep only relevant notes; remove finished items, not mark done in place."
     ),
     input_schema={
         "type": "object",
@@ -44,16 +37,15 @@ SPEC = ToolSpec(
             "text": {
                 "type": "string",
                 "description": (
-                    "The note (action=add/remove), one note per line to batch "
-                    "several in one call. For remove, each line is a note's "
-                    "full text — matching is whole-note, not substring."
+                    "add/remove: one whole note per line; remove matches exactly, "
+                    "not substrings."
                 ),
             },
             "texts": {
                 "type": "array",
                 "items": {"type": "string"},
                 "description": (
-                    "Batch: several notes in one call (action=add or remove)."
+                    "add/remove batch."
                 ),
             },
         },
@@ -61,6 +53,16 @@ SPEC = ToolSpec(
     },
     risk="safe",
 )
+
+
+def describe(permitted=None) -> str:
+    text = SPEC.description
+    if permitted is not None and "Plan" not in permitted:
+        text = text.replace(
+            "While a session Plan exists, use list to read these optional notes; "
+            "they are not automatically recited alongside the plan. ", "",
+        )
+    return text
 
 
 def _notes_path(ctx: ToolCtx, session_id: str | None = None) -> Path:

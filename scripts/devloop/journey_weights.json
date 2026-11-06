@@ -1,9 +1,13 @@
 {
-  "_comment": "Median hosted journey seconds, excluding instance setup/teardown. Refresh from green main-suite/ci-frontend runs: python -m scripts.devloop.ci refresh-weights RUN_ID [RUN_ID ...]. seconds_per_case is the median of seconds/cases per sample.",
+  "_comment": "Median hosted journey seconds, excluding instance setup/teardown. Refresh from green main-suite/ci-frontend runs: python -m scripts.devloop.ci refresh-weights RUN_ID [RUN_ID ...]. seconds_per_case is the median of seconds/cases per sample. Existing medians and seconds_per_case are unchanged; session-plan has one clean first-pass 12-case sample from successful run 42106210561, job 127521606082 (280.912052 seconds).",
   "source_runs": [
     42013627239,
-    42039523657
+    42039523657,
+    42106210561
   ],
+  "case_counts": {
+    "session-plan.journey.mjs": 12
+  },
   "seconds_per_case": 10.97,
   "seconds": {
     "chat-send-stream.journey.mjs": 207.38,
@@ -32,6 +36,7 @@
     "retired-task-chips.journey.mjs": 132.59,
     "rewind-transcript.journey.mjs": 356.36,
     "send-during-init.journey.mjs": 114.87,
+    "session-plan.journey.mjs": 280.91,
     "side-panels.journey.mjs": 156.2,
     "sidebar-truth.journey.mjs": 624.68,
     "stop-holds-the-reader.journey.mjs": 475.27,

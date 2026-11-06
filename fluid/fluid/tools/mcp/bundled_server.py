@@ -454,6 +454,14 @@ async def _gate_call(
     from fluid.hooks.bus import POST_TOOL_USE, PRE_TOOL_USE, hook_reminder
     from fluid.permissions.engine import non_interactive_denial
 
+    # A pooled host can replace its Plan backend on the next turn. Snapshot
+    # this call's generation before a hook/permission wait; the socket and its
+    # shared ctx outlive turns, but an old request must never borrow a new lease.
+    if name == "Plan" and "session_plan" in ctx.extra:
+        ctx = replace(ctx, extra=_CallExtra(ctx.extra, {
+            "session_plan": ctx.extra["session_plan"],
+        }))  # type: ignore[arg-type]
+
     # Keep the existing main-thread hook/observer payload contract. Only a
     # non-main caller adds the optional field; its ctx overlay is unchanged.
     agent_id = ctx.extra.get("agent_id")

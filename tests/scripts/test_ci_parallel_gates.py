@@ -207,8 +207,9 @@ def test_ui_journeys_and_visual_regression_gate_every_pr():
     journeys = jobs["journeys"]
     assert journeys["strategy"]["fail-fast"] == "false"
     shards = journeys["strategy"]["matrix"]["shard"]
-    assert shards == [str(index) for index in range(1, 11)]
-    assert journeys["name"] == "UI journeys (${{ matrix.shard }}/10)"
+    from scripts.devloop.ci import HOSTED_SHARDS
+    assert shards == [str(index) for index in range(1, HOSTED_SHARDS + 1)]
+    assert journeys["name"] == f"UI journeys (${{{{ matrix.shard }}}}/{HOSTED_SHARDS})"
     steps = {step.get("name"): step for step in journeys["steps"]}
     plan = steps["Plan this shard"]["run"]
     assert f"plan --shards {len(shards)}" in plan

@@ -65,6 +65,14 @@
 	],
 	"rules": [
 		{
+			"why": "structured Plan event snapshots stay compact, honest and readable across reloads",
+			"journeys": ["session-plan"],
+			"globs": [
+				"frontend/src/lib/components/PlanDisplay.svelte",
+				"frontend/tests/journeys/session-plan.journey.mjs"
+			]
+		},
+		{
 			"why": "shared Settings titles and the medium desktop frame retain their geometry",
 			"journeys": ["shell-geometry"],
 			"globs": ["frontend/tests/journeys/shell-geometry.journey.mjs", "frontend/src/lib/components/settings/shell/PageTitle.svelte", "frontend/src/lib/components/settings/shell/PreferencePage.svelte", "frontend/src/lib/components/settings/shell/CollectionPage.svelte", "frontend/src/lib/components/layout/view/PanelToggle.svelte"]

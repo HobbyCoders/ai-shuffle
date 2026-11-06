@@ -470,6 +470,7 @@ TOOL_LEVELS: Dict[str, Level] = {
     # The harness itself: notes, skills, history, memory, questions.
     "Skill": LOW,
     "Note": LOW,
+    "Plan": LOW,
     "ToolSearch": LOW,
     "HistoryExpand": LOW,
     "HistorySearch": LOW,

@@ -397,6 +397,10 @@ def create_postgres_schema(cursor: Any) -> None:
     """)
 
     # ------------------------------------------------------------------
+    # Session intent shares session lifetime and travels with handoff history.
+    from app.db.session_plans import create_schema as create_plan_schema
+    create_plan_schema(cursor)
+
     # Durable migration handoff consumed unconditionally during startup, including
     # bootstrap-only databases. Keep this identical to the guarded upgrade DDL.
     cursor.execute("""CREATE TABLE IF NOT EXISTS session_archive_retirement (

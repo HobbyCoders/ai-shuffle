@@ -18,6 +18,7 @@ from fluid.tools.builtins import (
     list_agents,
     monitor,
     note,
+    plan,
     read,
     recall,
     remember,
@@ -36,7 +37,7 @@ from fluid.tools.builtins import (
 from fluid.tools.registry import ToolRegistry
 
 _MODULES = (
-    read, grep, glob, write, edit, bash, skill, note, task, monitor,
+    read, grep, glob, write, edit, bash, skill, note, plan, task, monitor,
     tool_search, history_expand, history_search, ledger,
     session_search, session_view, ask_user, web, remember, recall, forget,
     list_agents, send_message, swarm, usage, session_orchestration,
@@ -64,6 +65,7 @@ _DESCRIBERS = {
     "WebSearch": web.describe_search,
     "Remember": remember.describe,
     "Recall": recall.describe,
+    "Note": note.describe,
     "ListAgents": list_agents.describe,
     "SendMessage": send_message.describe,
 }

@@ -54,6 +54,7 @@ FRONTEND = ROOT / "frontend"
 JOURNEYS = FRONTEND / "tests" / "journeys"
 RUN_ALL = "run-all.mjs"
 WEIGHTS = Path(__file__).with_name("journey_weights.json")
+HOSTED_SHARDS = 10
 # Conservative planning budgets, NOT hosted measurements. The new 47-case
 # producer took ~17 minutes in red run 42107295628 (job 127526542398), versus
 # 8.6 minutes from the generic per-case fallback. Reserve 18 minutes until a
@@ -227,6 +228,7 @@ def refresh_weights(run_ids: list[int], weights_path: Path = WEIGHTS) -> None:
                     "green main-suite/ci-frontend runs: python -m scripts.devloop.ci refresh-weights "
                     "RUN_ID [RUN_ID ...]. seconds_per_case is the median of seconds/cases per sample.",
         "source_runs": run_ids,
+        "case_counts": expected_cases,
         "seconds_per_case": round(median(per_case), 2),
         "seconds": {name: round(median(values), 2) for name, values in sorted(durations.items())},
     }

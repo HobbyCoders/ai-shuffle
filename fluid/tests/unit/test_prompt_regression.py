@@ -292,6 +292,12 @@ def test_prompt_structure_invariants() -> None:
     assert order == sorted(order)
     # Bounded: the full default prompt stays well under provider minimums.
     assert len(text) < 16_000
+    from fluid.tools.builtins.plan import GUIDANCE
+
+    assert text.count(GUIDANCE) == 1
+    assert "expected_revision" not in text  # mechanics belong to deferred help
+    paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
+    assert len(paragraphs) == len(set(paragraphs))
 
 
 def test_compiled_prompt_section_order(tmp_path, monkeypatch) -> None:

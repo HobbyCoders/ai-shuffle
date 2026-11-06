@@ -13,12 +13,13 @@ from fluid.tools.registry import ToolRegistry
 from tests.unit.test_empty_completion_retry import ScriptedProvider
 
 
-def test_planning_tools_are_not_registered_or_advertised():
+def test_session_plan_is_not_a_permission_mode_or_execution_planner():
     registry = ToolRegistry()
     register_builtins(registry)
-    for name in ("Plan", "StopPlanning"):
-        assert registry.get(name) is None
-        assert name not in BUILTIN_TOOL_NAMES
+    assert registry.get("Plan") is not None
+    assert "Plan" in BUILTIN_TOOL_NAMES
+    assert registry.get("StopPlanning") is None
+    assert "StopPlanning" not in BUILTIN_TOOL_NAMES
     assert "StopPlanning" not in DEFAULT_BASE_PROMPT
     assert "enter plan mode" not in DEFAULT_BASE_PROMPT
     assert "StopPlanning" not in registry.get("AskUser").description

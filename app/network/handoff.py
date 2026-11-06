@@ -26,6 +26,7 @@ TTL = 1800  # Covers commit/push, fetch and context sync; abandoned reservations
 TABLES = {
     "session_messages": ("role", "content", "tool_name", "tool_input", "metadata", "jsonl_uuid", "created_at"),
     "session_events": ("id", "seq", "event_type", "payload", "command_id", "created_at"),
+    "session_plans": ("id", "document", "receipts"),
     "fluid_sessions": ("head_node_id", "created_at", "cli_session_id", "project_root"),
     "fluid_session_nodes": ("node_id", "parent_id", "ts", "message"),
     "fluid_session_events": ("seq", "event"),
@@ -33,8 +34,8 @@ TABLES = {
     "pending_interactions": ("id", "kind", "payload", "state", "answer", "created_at", "answered_at"),
     "turns": ("id", "source", "prompt", "payload", "command_id", "position", "state", "created_at"),
 }
-JSON_COLUMNS = {"tool_input", "metadata", "message", "event", "entry", "payload", "answer"}
-APP_TABLES = {"session_messages", "session_events", "pending_interactions", "turns"}
+JSON_COLUMNS = {"tool_input", "metadata", "message", "event", "entry", "payload", "answer", "document", "receipts"}
+APP_TABLES = {"session_messages", "session_events", "pending_interactions", "turns", "session_plans"}
 # Only settled model receipts and relay-free question cards move. A question
 # answer queues a fresh turn; permission callbacks and private grants stay local.
 _RECEIPTS_SQL = (" AND ((kind IN ('model_switch_approval', 'model_switch_named') AND state='answered')"
@@ -237,6 +238,12 @@ def question_carry(target):
     if not capabilities:
         return None
     return int(capabilities.get("move_questions") or 0) >= 1
+
+
+def plan_carry(target: str) -> bool:
+    from app.network import runners
+    caps = (runners.find(target) or {}).get("capabilities") or {}
+    return caps.get("session_plan") == 1
 
 
 def plain_folder_carry(target: str) -> bool | None:
@@ -846,6 +853,11 @@ def _begin(sid, target, remote, note, wake_barrier, timing, plain: bool = False)
         raise ValueError("The owning worker is busy. Wait for its turn to finish before resuming here.")
     held = {}
     try:
+        # The handoff lease now excludes plan writers. Check here, not before
+        # claiming it, so a last-moment plan cannot travel to an older receiver.
+        from app.db.session_plans import read as read_plan
+        if read_plan(sid)["plan"]["revision"] and not plan_carry(target):
+            raise ValueError("Update the target worker before moving a session with a Plan; ownership has not moved.")
         if project and not plain:
             timing.waiting("checkout_guard")
             # Publication commits and pushes the shared checkout. Exclude other
@@ -1240,7 +1252,7 @@ async def _note_uncarried_wakes(sid, target):
 
 def _history_conflict(table: str, columns: tuple[str, ...], deferred: bool = False) -> str:
     key = {"session_events": ("session_id", "seq"), "pending_interactions": ("id",),
-           "turns": ("id",), "fluid_sessions": ("session_id",),
+           "turns": ("id",), "session_plans": ("session_id",), "fluid_sessions": ("session_id",),
            "fluid_session_nodes": ("session_id", "node_id"),
            "fluid_session_events": ("session_id", "seq")}.get(table)
     if not key:

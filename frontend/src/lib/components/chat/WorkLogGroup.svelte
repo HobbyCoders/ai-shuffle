@@ -71,6 +71,8 @@
 		observeTurnAnchor?: Action<HTMLElement>;
 		revealMessageId?: string | null;
 		pagingEnabled?: boolean;
+		/** Release transcript following before a reader changes a fold; false vetoes stale surfaces. */
+		onBeforeToggle?: (event: MouseEvent) => boolean | void;
 	}
 
 	let {
@@ -90,6 +92,7 @@
 		speaker,
 		revealMessageId = null,
 		pagingEnabled = true,
+		onBeforeToggle,
 		observeTurnAnchor = () => {}
 	}: Props = $props();
 	const gallerySources = $derived(new Set(gallery.map(item => item.src)));
@@ -318,6 +321,11 @@
 		open ? 'Hide work details' : `Show work details: ${collapsedLabel}${summary && mode === 'settled' ? `, ${summary}` : ''}`
 	);
 
+	// Explicit input only: automatic reveal/promotion must not release following.
+	function toggleFromReader(event: MouseEvent, change: () => void) {
+		if (onBeforeToggle?.(event) !== false) change();
+	}
+
 	// ── Header (spec §7) ───────────────────────────────────────────────────
 	const headerLabel = $derived(
 		`Hide work details: ${collapsedLabel}${summary && mode === 'settled' ? `, ${summary}` : ''}`
@@ -334,6 +342,7 @@
 	 * (the chat column), shifting the whole conversation under the top bar.
 	 */
 	function collapseFromHeader(event: MouseEvent, close: () => void) {
+		if (onBeforeToggle?.(event) === false) return;
 		const header = event.currentTarget as HTMLElement;
 		const section = sectionEl;
 		const stuckAt = header.getBoundingClientRect().top;
@@ -350,6 +359,7 @@
 	 * row, not the section top.
 	 */
 	function collapseRunFromHeader(event: MouseEvent, run: WorkLogRun) {
+		if (onBeforeToggle?.(event) === false) return;
 		const header = event.currentTarget as HTMLElement;
 		const drawn = header.dataset.runRange;
 		const stuckAt = header.getBoundingClientRect().top;
@@ -529,7 +539,7 @@
 				<button
 					type="button"
 					class="wlrow fold"
-					onclick={() => setOpen(true)}
+					onclick={(event) => toggleFromReader(event, () => setOpen(true))}
 					aria-expanded="false"
 					aria-label={disclosureLabel}
 				>
@@ -583,7 +593,7 @@
 							class="wlrow fold"
 							data-run-fold={run.index}
 							data-run-range={drawnRange(run)}
-							onclick={(event) => setRunOpen(run, true, drawnOf(event))}
+							onclick={(event) => toggleFromReader(event, () => setRunOpen(run, true, drawnOf(event)))}
 							aria-expanded="false"
 							aria-label={`Show work details: ${runLabel(run)}`}
 						>
@@ -615,7 +625,7 @@
 					</div>
 				{/if}
 				{#if run && runEdges.last.get(run.index) === position && runOpen(run)}
-					<button type="button" class="wlrow fold" data-run-end={run.index} data-run-range={drawnRange(run)} onclick={(event) => setRunOpen(run, false, drawnOf(event))} aria-expanded="true" aria-label="Hide work details">
+					<button type="button" class="wlrow fold" data-run-end={run.index} data-run-range={drawnRange(run)} onclick={(event) => toggleFromReader(event, () => setRunOpen(run, false, drawnOf(event)))} aria-expanded="true" aria-label="Hide work details">
 						<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
 							<path d="m18 15-6-6-6 6" />
 						</svg>
@@ -626,7 +636,7 @@
 			</BoundedTranscriptRows>
 		</div>
 		{#if mode === 'settled' && foldable && open}
-			<button type="button" class="wlrow fold" onclick={() => setOpen(false)} aria-expanded="true" aria-label={disclosureLabel}>
+			<button type="button" class="wlrow fold" onclick={(event) => toggleFromReader(event, () => setOpen(false))} aria-expanded="true" aria-label={disclosureLabel}>
 				<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
 					<path d="m18 15-6-6-6 6" />
 				</svg>
@@ -654,7 +664,7 @@
 		<BoundedTranscriptRows items={[...folded, ...tail]} keyOf={rowKey} rowId={entry => entry.message.id} {pagingEnabled}>
 			{#snippet children(entry)}{@render row(entry.message, entry.index)}{/snippet}
 		</BoundedTranscriptRows>
-		<button type="button" class="wlrow fold" onclick={() => setOpen(false)} aria-expanded="true" aria-label={disclosureLabel}>
+		<button type="button" class="wlrow fold" onclick={(event) => toggleFromReader(event, () => setOpen(false))} aria-expanded="true" aria-label={disclosureLabel}>
 			<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
 				<path d="m18 15-6-6-6 6" />
 			</svg>
@@ -664,7 +674,7 @@
 		<button
 			type="button"
 			class="wlrow fold"
-			onclick={() => setOpen(true)}
+			onclick={(event) => toggleFromReader(event, () => setOpen(true))}
 			aria-expanded="false"
 			aria-label={disclosureLabel}
 		>

@@ -58,7 +58,7 @@ if TYPE_CHECKING:  # pragma: no cover
 # of the tool modules) so composing a prompt stays dependency-light; the
 # regression test asserts it matches the registry, so drift cannot go unseen.
 BUILTIN_TOOL_NAMES: tuple[str, ...] = (
-    "Read", "Grep", "Glob", "Write", "Edit", "Bash", "Skill", "Note", "Task",
+    "Read", "Grep", "Glob", "Write", "Edit", "Bash", "Skill", "Note", "Plan", "Task",
     "Monitor", "ToolSearch", "HistoryExpand", "HistorySearch", "Ledger",
     "AskUser", "SessionSearch", "SessionView", "WebFetch", "WebSearch",
     "Remember", "Recall", "Forget", "ListAgents", "SendMessage", "Swarm", "GetUsage",
@@ -855,20 +855,14 @@ def _instructions_section(p: PromptProfile) -> str | None:
             "lists what the Task tool can delegate to; without one, nothing "
             "is defined to delegate to."
         )
-    if "Note" in t and "Ledger" in t:
-        bullets.append(
-            "- Track multi-step work with Note: add every current step in "
-            "one call before starting (one note per line, or pass texts). "
-            "Remove a note when that step is done — notes are a scratchpad, "
-            "not a checklist. Notes cost nothing until called; Ledger is "
-            "for constraints that must survive the session."
-        )
+    if "Plan" in t:
+        from fluid.tools.builtins.plan import guidance
+        bullets.append("- " + guidance(t))
     elif "Note" in t:
         bullets.append(
-            "- Track multi-step work with Note: add every current step in "
-            "one call before starting (one note per line, or pass texts). "
-            "Remove a note when that step is done — notes are a scratchpad, "
-            "not a checklist. Notes cost nothing until called."
+            "- Note is an optional session scratchpad, not a required checklist."
+            + (" Ledger holds constraints, decisions and open threads that must "
+               "survive the session; keep entries terse." if "Ledger" in t else "")
         )
     elif "Ledger" in t:
         bullets.append(
@@ -896,7 +890,7 @@ def _instructions_section(p: PromptProfile) -> str | None:
         if remember or recall:
             bullet += (
                 " Division of labor: memory holds durable facts"
-                + ("; Note holds this session's working state" if "Note" in t else "")
+                + ("; Note holds optional session notes" if "Note" in t else "")
                 + "; skills hold procedures; past sessions hold what happened."
             )
         if "Forget" in t:
@@ -934,7 +928,7 @@ def _context_section(p: PromptProfile) -> str | None:
             "can no longer see in context is a value you do not know until "
             "you recover it. When a task spans more results than will fit, "
             "record each result's key facts as you go"
-            + (" with Note" if "Note" in t else "")
+            + (" (optionally in Note)" if "Note" in t else "")
             + " rather than relying on recall at the end."
         )
     else:

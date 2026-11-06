@@ -491,7 +491,10 @@ def test_note_monitor_and_run_python_wording() -> None:
     from fluid.codemode.session import _RUN_PYTHON_DESC
 
     note = note_mod.SPEC.description
-    assert "under ~5 steps skip Note" in note and "batch removals with `texts`" in note
+    assert "Optional session scratchpad" in note
+    assert "Batch adds/removals with text lines or texts" in note
+    assert "use list" in note and "not automatically recited alongside the plan" in note
+    assert "under ~5 steps skip Note" not in note
     assert "every current step in one call" not in note
     monitor = monitor_mod.describe()
     assert "BOUNDED summary" in monitor and "TaskOutput has the full buffer" in monitor

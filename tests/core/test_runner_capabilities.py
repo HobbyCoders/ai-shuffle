@@ -25,7 +25,7 @@ def test_shape_has_all_keys_and_types() -> None:
         "desktop", "always_on", "os", "has_display", "computer_use", "has_chrome", "docker",
         "claude_cli_signed_in", "provider_kinds", "remote_task", "move_wakes",
         "start_session_permissions", "terminal", "handoff_poll", "move_questions",
-        "handoff_target_resume", "handoff_receipt", "handoff_plain_folder", "generation", "scoped_task_stop",
+        "handoff_target_resume", "handoff_receipt", "handoff_plain_folder", "generation", "scoped_task_stop", "session_plan",
     }
     assert isinstance(caps["desktop"], bool)
     assert isinstance(caps["always_on"], bool)
@@ -37,6 +37,7 @@ def test_shape_has_all_keys_and_types() -> None:
     assert isinstance(caps["claude_cli_signed_in"], bool)
     assert isinstance(caps["provider_kinds"], list)
     assert type(caps["scoped_task_stop"]) is int and caps["scoped_task_stop"] == 1
+    assert type(caps["session_plan"]) is int and caps["session_plan"] == 1
     assert caps["remote_task"] == rc.REMOTE_TASK_VERSION == 7
     assert caps["start_session_permissions"] == rc.START_SESSION_PERMISSIONS_VERSION == 1
     assert caps["move_wakes"] == rc.MOVE_WAKES_VERSION == 3

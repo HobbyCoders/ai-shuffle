@@ -1291,7 +1291,12 @@ class SessionRuntime:
                             "SessionRuntime: owned Swarm recovery failed for %s",
                             sid, exc_info=True,
                         )
-                    pump = asyncio.create_task(self._run_pump(recorder))
+                    from app.core.session_plan import CURRENT_PLAN_RUN
+                    plan_token = CURRENT_PLAN_RUN.set((sid, run_id, fence_token))
+                    try:
+                        pump = asyncio.create_task(self._run_pump(recorder))
+                    finally:
+                        CURRENT_PLAN_RUN.reset(plan_token)
                     self._pump_task = pump
                     if self._unowned:
                         # Lost before the pump existed: never reach the provider.

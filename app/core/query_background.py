@@ -93,21 +93,24 @@ async def _run_background_query(
     from app.core.turn_recorder import TurnRecorder
 
     recorder = await TurnRecorder.maybe_create(session_id)
-    if recorder:
-        await recorder.start(prompt, profile_id=profile.get("id"))
+    from app.core.session_plan import run_context
+
     try:
-        await _run_background_query_impl(
-            session_id=session_id,
-            prompt=prompt,
-            profile=profile,
-            project=project,
-            overrides=overrides,
-            resume_id=resume_id,
-            device_id=device_id,
-            api_user_id=api_user_id,
-            recorder=recorder,
-            lease=lease,
-        )
+        with run_context(recorder):
+            if recorder:
+                await recorder.start(prompt, profile_id=profile.get("id"))
+            await _run_background_query_impl(
+                session_id=session_id,
+                prompt=prompt,
+                profile=profile,
+                project=project,
+                overrides=overrides,
+                resume_id=resume_id,
+                device_id=device_id,
+                api_user_id=api_user_id,
+                recorder=recorder,
+                lease=lease,
+            )
     finally:
         if recorder:
             await recorder.close()

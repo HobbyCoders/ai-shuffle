@@ -14,7 +14,7 @@ from unittest.mock import patch
 import pytest
 from psycopg2.extras import RealDictCursor
 
-from app.db import base, database, history_indexing, network, session_recall
+from app.db import base, database, history_indexing, network, runs, session_plans, session_recall
 from app.network import handoff
 from tests.db.postgres_harness import pg_schema, requires_real_pg  # noqa: F401
 from tests.db.test_handoff_import_postgres import snapshot
@@ -73,6 +73,29 @@ def statements():
         yield calls
 
 
+PLAN_RECONCILIATION_LOOKUP = "SELECT id FROM session_plans WHERE session_id=%s"
+
+
+def assert_bulk_statement_budget(calls):
+    # Exactly one indexed Plan lookup is new, even for an empty snapshot: it
+    # finds stale local Plan rows to prune. Nothing else is exempt, including
+    # any Plan DELETE/INSERT or a second/per-row lookup.
+    plan_lookups = calls.count(PLAN_RECONCILIATION_LOOKUP)
+    assert plan_lookups == 1
+    assert len(calls) - plan_lookups <= 189
+
+
+@pytest.mark.parametrize("extra", ["SELECT legacy", PLAN_RECONCILIATION_LOOKUP,
+                                   "DELETE FROM session_plans WHERE session_id=%s"])
+def test_bulk_budget_exempts_only_one_plan_lookup(extra):
+    at_limit = ["SELECT legacy"] * 189 + [PLAN_RECONCILIATION_LOOKUP]
+    assert_bulk_statement_budget(at_limit)
+    with pytest.raises(AssertionError):
+        assert_bulk_statement_budget([*at_limit, extra])
+    with pytest.raises(AssertionError):
+        assert_bulk_statement_budget(at_limit[:-1])
+
+
 @pytest.mark.parametrize("mirrored", [False, True])
 def test_issue_295_bundle_has_bounded_round_trips(destination, mirrored):
     sid, cwd = destination
@@ -83,9 +106,9 @@ def test_issue_295_bundle_has_bounded_round_trips(destination, mirrored):
         handoff.install_history(sid, data, cwd)
     with statements() as calls:
         sdk = handoff.install_history(sid, data, cwd)
-    # The ceiling covers the WHOLE producing path, not just its 200-row loop.
-    # Ratchet down if SQL is removed; do not raise it to accommodate per-row work.
-    assert len(calls) <= 189
+    # Preserve the legacy WHOLE producing-path ceiling, not just its 200-row
+    # loop; separately bound the single new empty-Plan reconciliation lookup.
+    assert_bulk_statement_budget(calls)
     inserts = Counter(sql.split()[2] for sql in calls if sql.startswith("INSERT INTO "))
     assert inserts["session_events"] == 40
     assert inserts["fluid_session_events"] == 54
@@ -97,6 +120,63 @@ def test_issue_295_bundle_has_bounded_round_trips(destination, mirrored):
                                   ("fluid_session_nodes", 1741, sdk), ("session_messages", 41, sid)):
             cur.execute(f"SELECT count(*) AS n FROM {table} WHERE session_id=%s", (key,))
             assert cur.fetchone()["n"] == count
+
+
+def produce_plan(sid):
+    run = runs.claim_run(sid, "bulk-runner", 120)
+    try:
+        session_plans.execute(sid, {
+            "action": "update", "request_id": "bulk-plan", "expected_revision": 0,
+            "goal": "Prune stale mirrored work", "done_when": "Source history wins",
+            "tasks": [{"id": "one", "title": "Reconcile", "status": "in_progress"}],
+        }, device_id="source", runner_id="bulk-runner", proof=(sid, run["id"], run["fence_token"]))
+    finally:
+        runs.release_run(run["id"], run["fence_token"])
+    assert session_plans.read(sid)["plan"]["revision"] == 1
+
+
+@pytest.mark.parametrize("explicit_empty", [False, True])
+def test_empty_plan_snapshot_prunes_produced_plan_with_one_lookup(destination, explicit_empty):
+    sid, cwd = destination
+    produce_plan(sid)
+    data = snapshot(events=0, nodes=0, transcript=0, messages=0)
+    if explicit_empty:
+        data["history"]["session_plans"] = []
+    else:
+        assert "session_plans" not in data["history"]  # Pre-Plan source.
+    with statements() as calls:
+        handoff.install_history(sid, data, cwd)
+    assert calls.count(PLAN_RECONCILIATION_LOOKUP) == 1
+    assert sum(sql.startswith("DELETE FROM session_plans ") for sql in calls) == 1
+    assert session_plans.read(sid)["plan"]["revision"] == 0
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT count(*) AS n FROM session_plans WHERE session_id=%s", (sid,))
+        assert cur.fetchone()["n"] == 0
+
+
+def test_stale_plan_pruning_rolls_back_with_failed_publication(destination, monkeypatch):
+    sid, cwd = destination
+    produce_plan(sid)
+    before = session_plans.read(sid)
+    original = handoff._reconcile_app_rows
+
+    def fail(cur, session_id, table, rows):
+        result = original(cur, session_id, table, rows)
+        if table == "session_plans":
+            raise RuntimeError("failure after actual Plan prune")
+        return result
+
+    monkeypatch.setattr(handoff, "_reconcile_app_rows", fail)
+    with statements() as calls, pytest.raises(RuntimeError, match="after actual Plan prune"):
+        handoff.install_history(sid, snapshot(events=0, nodes=0, transcript=0, messages=0), cwd)
+    assert calls.count(PLAN_RECONCILIATION_LOOKUP) == 1
+    assert sum(sql.startswith("DELETE FROM session_plans ") for sql in calls) == 1
+    assert session_plans.read(sid) == before
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT count(*) AS n FROM handoff_history_chunks WHERE session_id=%s", (sid,))
+        assert cur.fetchone()["n"] == 0
 
 
 def portable_bundle():

@@ -5044,6 +5044,11 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             from fluid.state import scratch_prompt
 
             parts.append(scratch_prompt(self.ctx))
+        if self._bridged_tool_name("Plan"):
+            from fluid.tools.builtins.plan import reminder as plan_reminder
+            plan_note = await asyncio.to_thread(plan_reminder, self.ctx)
+            if plan_note:
+                parts.append(plan_note.replace("Plan get", self._bridged_tool_name("Plan") + " get"))
         if source == "compact":
             ledger = self._ledger_context()
             if ledger:

@@ -202,6 +202,8 @@ def test_wired_tool_names_drop_builtins_whose_capability_is_missing():
     ctx = ToolCtx()
     ctx.extra["monitor_spawn"] = object()
     assert "Monitor" in ha._wired_tool_names(registry, None, ha._wired_capabilities(ctx))
+    ctx.extra["session_plan"] = object()
+    assert "Plan" in ha._wired_tool_names(registry, None, ha._wired_capabilities(ctx))
 
 
 def test_permit_within_composes_the_predicate():

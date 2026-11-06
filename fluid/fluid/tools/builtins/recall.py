@@ -31,19 +31,16 @@ def describe(tools: frozenset[str] | None = None) -> str:
     """Recall's description, specialized to the session's surface."""
     has = (lambda name: tools is None or name in tools)
     session_route = (
-        " For past conversations and what happened in them, use "
-        "SessionSearch instead — Recall covers learned facts and skills, "
+        " For past conversations use SessionSearch; Recall retrieves facts/skills, "
         "not transcripts."
         if has("SessionSearch")
         else ""
     )
     return (
-        "Search your long-term memory: every saved fact (archived ones too) "
-        "plus the saved-skill index. Use ids=[...] for the full text of a "
-        "# Memory line before relying on it, and keywords when the task "
-        "touches something you may have learned before — a preference, a "
-        "convention, a port, a past correction. Returns the top matches per "
-        "category with their source." + session_route
+        "Search saved facts (archived too) and the saved-skill index. "
+        "Use ids=[...] for full # Memory text before relying on it; "
+        "query prior preferences, conventions, ports or corrections. "
+        "Returns top matches per category with sources." + session_route
     )
 
 
@@ -63,7 +60,7 @@ SPEC = ToolSpec(
             },
             "ids": {
                 "type": "array", "items": {"type": "string"},
-                "description": "Ids for full text.",
+                "description": "At most 10 normalized unique memory IDs for full text (trimmed; blanks/duplicates ignored).",
             },
         },
     },

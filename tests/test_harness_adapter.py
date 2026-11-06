@@ -2070,7 +2070,7 @@ async def test_delegated_leg_registry_has_search_without_duplicate_file_tools(cl
     """Where the CLI may lack its own search, the bundled copies fill in."""
     adapter = HarnessAdapter()
     options = SessionOptions(
-        model="fable", extra={"fluid_inproc_servers": [_FakeInprocServer()]}
+        model="fable", extra={"fluid_inproc_servers": [_FakeInprocServer()], "app_session_id": "bound"}
     )
     registry = await adapter._build_registry(options, native=False)
     assert registry is not None
@@ -2080,8 +2080,10 @@ async def test_delegated_leg_registry_has_search_without_duplicate_file_tools(cl
     assert not ((_FLUID_BUILTINS - {"Grep"}) & names)
 
     # A session without configured MCP servers still needs working search.
-    bare = await adapter._build_registry(SessionOptions(model="fable"), native=False)
-    assert _names(bare) == {"Glob", "Grep"}
+    bare = await adapter._build_registry(
+        SessionOptions(model="fable", extra={"app_session_id": "bound"}), native=False,
+    )
+    assert _names(bare) == {"Glob", "Grep", "Plan"}
 
 
 @pytest.mark.asyncio
@@ -2885,6 +2887,9 @@ class _FakeRegistry:
 
     def list_tools(self, loaded_only: bool = True):
         return [s for s in self._specs if not loaded_only or s.name not in self._deferred]
+
+    def get(self, name):
+        return next((s for s in self._specs if s.name == name), None)
 
     def deferred_tools(self):
         return [s for s in self._specs if s.name in self._deferred]
@@ -7872,8 +7877,9 @@ def test_memory_block_says_what_remember_is_for():
     # Absence must not read as "the store is empty": a fold or a new turn
     # without the reminder is not an empty store.
     assert "empty" not in text.split("Saved facts arrive", 1)[1]
-    # Note/Ledger never persist.
-    assert "Note and Ledger are" in text and "never persist" in text
+    # Session working files persist without becoming cross-session memory.
+    assert "Note and Ledger are" in text and "session-scoped working files" in text
+    assert "survive compaction and restarts" in text and "never persist" not in text
 
 
 @pytest.mark.asyncio

@@ -23,6 +23,7 @@ import re
 import time
 import uuid
 import asyncio
+from contextlib import AsyncExitStack
 from typing import Optional, Dict, Any, AsyncGenerator, List
 from datetime import datetime, timezone
 
@@ -32,7 +33,7 @@ from datetime import datetime, timezone
 # the dispatch below never sees a claude_agent_sdk message class. Version skew
 # is absorbed inside the translation layer.
 from app.core.provider.events import (
-    AssistantMessage, UserMessage, TextBlock, ToolUseBlock,
+    AssistantMessage, UserMessage, TextBlock, ThinkingBlock, ToolUseBlock,
     ToolResultBlock, ResultMessage, SystemMessage, StreamEvent,
     ServerToolUseBlock, ServerToolResultBlock,
     TaskStartedMessage, TaskProgressMessage, TaskNotificationMessage,
@@ -42,6 +43,7 @@ from app.core.provider.events import (
 _SERVER_TOOL_TYPES: tuple = (ServerToolUseBlock,)
 _SERVER_TOOL_RESULT_TYPES: tuple = (ServerToolResultBlock,)
 from app.core.agent_types import PermissionResultAllow, PermissionResultDeny
+from fluid.context.assistant import quote_assistant_text
 from fluid.engine.delegated import ClaudeCliMissingError
 from fluid.engine.guardrail import GUARDRAIL_TOOL
 
@@ -91,6 +93,7 @@ from app.core.query_persistence import (  # noqa: F401 — re-exports
     log_captured_cli_stderr,
 )
 from app.core.session_context import set_current_session_id
+from app.core.session_plan import recorded_turn
 from app.core.memory_sync import (
     memory_leg_for_options, reconcile_memory, push_memory,
 )
@@ -527,6 +530,50 @@ def _task_notification_frame(message: Any) -> Dict[str, Any]:
     }
 
 
+_QUERY_REPLAY_NOTES = frozenset({
+    "attempt_discarded", "provider_retry", "assistant_text_sanitized", "guardrail_blocked",
+})
+
+
+async def _record_query_message(recorder, message):
+    """Record full HTTP/headless blocks plus the controls that govern replay.
+
+    Partial StreamEvents mirror these blocks and must not be recorded again.
+    Native blocks arrive before the end-of-call sanitization notice, so quote
+    their model-authored control markers before they reach the durable log.
+    """
+    if not recorder:
+        return
+    if isinstance(message, (AssistantMessage, UserMessage)):
+        for block in message.content:
+            if isinstance(block, TextBlock) and isinstance(message, AssistantMessage):
+                await recorder.on_event({"type": "chunk", "content": quote_assistant_text(block.text)})
+            elif isinstance(block, ThinkingBlock) and isinstance(message, AssistantMessage):
+                await recorder.on_event({"type": "stream_delta", "delta_type": "thinking",
+                                         "content": quote_assistant_text(block.thinking)})
+            elif isinstance(block, ToolUseBlock):
+                await recorder.on_event({"type": "tool_use", "name": block.name,
+                                         "id": block.id, "input": block.input})
+            elif isinstance(block, ToolResultBlock):
+                await recorder.on_event({"type": "tool_result", "tool_use_id": block.tool_use_id,
+                                         "output": truncate_large_payload(block.content),
+                                         "is_error": block.is_error})
+        if isinstance(message, AssistantMessage) and message.usage:
+            await recorder.on_event({"type": "turn_usage", "usage": message.usage})
+    elif isinstance(message, SystemMessage) and message.subtype in _QUERY_REPLAY_NOTES:
+        await recorder.on_event({"type": "system", "subtype": message.subtype, "data": message.data})
+    elif isinstance(message, ResultMessage):
+        usage = message.usage or {}
+        metadata = {
+            **vars(message),
+            "tokens_in": usage.get("input_tokens", 0),
+            "tokens_out": usage.get("output_tokens", 0),
+            "cache_creation_tokens": usage.get("cache_creation_input_tokens", 0),
+            "cache_read_tokens": usage.get("cache_read_input_tokens", 0),
+        }
+        await recorder.on_event({"type": "done", "metadata": metadata})
+
+
 async def execute_query(
     prompt: str,
     profile_id: str,
@@ -677,8 +724,10 @@ async def _execute_query_turn(
     # Resolve virtual @Notes/note-id references to actual content
     prompt = _resolve_note_references_for(prompt, api_user_id)
 
-    # Execute query and collect response
+    # Match canonical replay: a discard removes only the current model attempt,
+    # not earlier accepted output preceding a tool result or provider retry.
     response_text = []
+    response_attempt_start = 0
     metadata = {
         "usage_settlement_key": await capture_usage_identity(session_id),
         USAGE_PROVIDER_KEY: getattr(options, "aih_provider_id", None),
@@ -704,6 +753,7 @@ async def _execute_query_turn(
     # send_query(), like the background path does.
     from app.core.provider.factory import make_adapter
     adapter = make_adapter()
+    plan_scope = AsyncExitStack()
 
     try:
         # A rewind that gave up waiting may hold the chat; a claim now would undo it.
@@ -714,14 +764,20 @@ async def _execute_query_turn(
         # Headless metadata is created before connect, unlike the pooled paths.
         # Book the credential account actually bound by lazy client construction.
         metadata[USAGE_PROVIDER_KEY] = getattr(options, "aih_provider_id", None)
+        recorder = await plan_scope.enter_async_context(recorded_turn(session_id, prompt, profile_id))
         await adapter.send_query(prompt)
 
         async for message in adapter.receive_events():
+            await _record_query_message(recorder, message)
             # Mirror background-task lifecycle into the registry (TaskList / /live).
             # Task messages subclass SystemMessage, so this must run before the
             # isinstance chain claims them via the SystemMessage branch below.
             _record_task_message(session_id, message)
             if isinstance(message, SystemMessage):
+                if message.subtype == "attempt_discarded":
+                    del response_text[response_attempt_start:]
+                if message.subtype in ("attempt_discarded", "provider_retry"):
+                    response_attempt_start = len(response_text)
                 # session_id comes in warmup message data after first query
                 if message.subtype == "init" and "session_id" in message.data:
                     sdk_session_id = message.data["session_id"]
@@ -761,7 +817,9 @@ async def _execute_query_turn(
             elif isinstance(message, AssistantMessage):
                 for block in message.content:
                     if isinstance(block, TextBlock):
-                        response_text.append(block.text)
+                        response_text.append(quote_assistant_text(block.text))
+                    elif isinstance(block, (ToolResultBlock, ServerToolResultBlock)):
+                        response_attempt_start = len(response_text)
                 metadata["model"] = message.model
 
                 # Track per-API-call usage so we can persist the LAST call's
@@ -781,6 +839,10 @@ async def _execute_query_turn(
                         metadata["last_call_tokens_in"] = message.usage.get("input_tokens", 0)
                         metadata["last_call_cache_creation_tokens"] = message.usage.get("cache_creation_input_tokens", 0)
                         metadata["last_call_cache_read_tokens"] = message.usage.get("cache_read_input_tokens", 0)
+
+            elif isinstance(message, UserMessage):
+                if any(isinstance(block, (ToolResultBlock, ServerToolResultBlock)) for block in message.content):
+                    response_attempt_start = len(response_text)
 
             elif isinstance(message, RateLimitEvent):
                 logger.debug(f"Rate limit event: status={message.rate_limit_info.status}, type={message.rate_limit_info.rate_limit_type}")
@@ -840,6 +902,7 @@ async def _execute_query_turn(
         logger.error(f"Query execution error: {e}")
         raise
     finally:
+        await plan_scope.aclose()
         # One-shot path owns the adapter outright (never pooled), so tear the
         # subprocess/harness session down here — including on the crash path.
         try:
@@ -1426,7 +1489,9 @@ async def _stream_query_turn(
         state.streaming_started_at = None
         raise
 
+    plan_scope = AsyncExitStack()
     try:
+        recorder = await plan_scope.enter_async_context(recorded_turn(session_id, prompt, profile_id))
         prepare_completions = getattr(
             state.adapter, "prepare_background_completions", None
         )
@@ -1445,6 +1510,7 @@ async def _stream_query_turn(
         await state.adapter.send_query(prompt)
 
         async for message in state.adapter.receive_events():
+            await _record_query_message(recorder, message)
             # Check typed task messages before generic SystemMessage
             # (they are subclasses and would match isinstance SystemMessage)
             # Mirror background-task lifecycle into the registry (TaskList / /live).
@@ -1466,6 +1532,8 @@ async def _stream_query_turn(
                     "description": message.description,
                 }
             elif isinstance(message, SystemMessage):
+                if message.subtype in _QUERY_REPLAY_NOTES:
+                    yield {"type": "system", "subtype": message.subtype, "data": message.data}
                 # session_id comes in init message data after first query
                 if message.subtype == "init" and "session_id" in message.data:
                     sdk_session_id = message.data["session_id"]
@@ -1500,7 +1568,7 @@ async def _stream_query_turn(
             elif isinstance(message, AssistantMessage):
                 for block in message.content:
                     if isinstance(block, TextBlock):
-                        yield {"type": "text", "content": block.text}
+                        yield {"type": "text", "content": quote_assistant_text(block.text)}
 
                     elif isinstance(block, ToolUseBlock):
                         tool_id = getattr(block, 'id', None)
@@ -1672,6 +1740,7 @@ async def _stream_query_turn(
         yield {"type": "error", "message": str(actual)}
 
     finally:
+        await plan_scope.aclose()
         clear_turn_context(session_id, expected=bound_generation_context)
         # Consume this turn's Stop before releasing the pooled state. A later
         # reset (after async setup) could erase a real Stop for this turn.

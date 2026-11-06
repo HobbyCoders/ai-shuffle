@@ -969,10 +969,16 @@ job log and step summary (excluding instance setup/teardown); stdout remains
 the JSON partition consumed by the workflow. A shard with no file stops after
 the plan, and a plan with no journey file at all fails.
 
-Nine shards (eight until the UI redesign added seven journey files) target at most about 18 minutes of journey runtime plus instance
-startup, so the first pass ends by about minute 19 of the 25-minute step. This
-leaves the full 180-second retry window before the minute-22 teardown cutoff;
-the step deadline and retry rules are unchanged.
+Ten standard-runner shards target at most 18.5 minutes of journey runtime plus
+30 seconds for instance startup, so the first pass ends by minute 19 of the
+25-minute step. This leaves the full 180-second retry window before the minute-22
+teardown cutoff; the step deadline and retry rules are unchanged. The combined
+49-file, 847-case plan retains the measured 12-case Plan journey (280.91 seconds)
+and the new heavy producer's conservative unmeasured floor (1080 seconds), for
+10662.02 estimated seconds: more than nine shards' combined 9990-second first-pass
+budget. Ten free standard shards cap the estimated load at 1080.19 seconds while
+preserving both runtime guards. These are static planning estimates, not new
+hosted measurements; checked-in measured weights and retry rules are unchanged.
 
 Refresh after journey runtime changes, using a few recent completed green
 `main-suite.yml` and `ci-frontend.yml` run IDs with authenticated `gh`:

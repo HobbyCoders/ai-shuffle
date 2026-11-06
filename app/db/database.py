@@ -1676,6 +1676,10 @@ def _run_column_migrations(cursor: Any) -> None:
                 "pg_trgm unavailable — SessionSearch's prefilter stays unindexed"
             )
 
+    # Additive session Plan migration; this source fingerprint runs on upgrades.
+    from app.db.session_plans import create_schema as create_plan_schema
+    create_plan_schema(cursor)
+
     # #1999 added mirrored session_events to agent recall, but only the two
     # local transcript stores had trigram indexes. No schema-version bump:
     # this migration's source fingerprint runs the idempotent index build on

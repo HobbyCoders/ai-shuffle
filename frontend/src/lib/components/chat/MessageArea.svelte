@@ -34,7 +34,7 @@
 	import { derived as derivedStore, get } from 'svelte/store';
 	import { activeSession as liveActiveSession, backgroundPermissions } from '$lib/stores/active-session';
 	import { notify } from '$lib/stores/notifications';
-	import { TRANSCRIPT_PRESENTATION, type TranscriptPresentation } from './TranscriptHydrationBoundary.svelte';
+	import { TRANSCRIPT_PRESENTATION, TRANSCRIPT_ACTIONS, type TranscriptPresentation, type TranscriptActions } from './TranscriptHydrationBoundary.svelte';
 	import TranscriptLoadingSkeleton from './TranscriptLoadingSkeleton.svelte';
 	import { sessionEphemeralCache } from '$lib/stores/session-cache';
 	import { createScrollTopPersist, readLeavingScrollTop } from './scroll-top-persist';
@@ -128,6 +128,7 @@
 	import SubagentMessage from '$lib/components/SubagentMessage.svelte';
 	import TeamMemberMessage from '$lib/components/TeamMemberMessage.svelte';
 	import TodoList from '$lib/components/TodoList.svelte';
+	import PlanDisplay from '$lib/components/PlanDisplay.svelte';
 	import NotesList from '$lib/components/NotesList.svelte';
 	import { notesFromToolMessage } from '$lib/utils/note-tool';
 	import { UI_MOUNT } from '$lib/utils/ui-signature';
@@ -147,6 +148,7 @@
 	// Only this subtree can read a frozen outgoing transcript. Mutations and
 	// persistence still address the real incoming session below.
 	const activeSession = getContext<TranscriptPresentation>(TRANSCRIPT_PRESENTATION) ?? liveActiveSession;
+	const transcriptActions = getContext<TranscriptActions>(TRANSCRIPT_ACTIONS);
 
 	/** Exhaustive keyed identity for every presentation-model variant. */
 	function displayItemKey(item: DisplayItem): string {
@@ -1443,7 +1445,7 @@
 	 * screen". Shrinks one-for-one as the response grows, bottoming out at the
 	 * normal breathing-room reserve.
 	 */
-	function latestTurnTailNow(): number | null {
+	function latestTurnTailNow(pendingRemoval?: HTMLElement): number | null {
 		if (!containerRef || !tailSpacerRef || currentTurnAnchorId) return null;
 		const latestTurnId = transcript.latestUserTurnId;
 		if (!latestTurnId) return MIN_TRANSCRIPT_TAIL_RESERVE;
@@ -1452,9 +1454,18 @@
 		const containerBox = containerRef.getBoundingClientRect();
 		const anchorTop = containerRef.scrollTop + anchor.getBoundingClientRect().top - containerBox.top;
 		const contentEnd = transcriptContentEnd();
+		// A disclosure after this anchor consumes its reserve. Restore that room in
+		// the SAME DOM commit as removal, before native layout can clamp scrollTop.
+		// Earlier-turn removal moves both anchor and content end, so has no delta.
+		let removedHeight = 0;
+		if (pendingRemoval && (anchor.compareDocumentPosition(pendingRemoval) & Node.DOCUMENT_POSITION_FOLLOWING)) {
+			const style = getComputedStyle(pendingRemoval);
+			removedHeight = pendingRemoval.getBoundingClientRect().height
+				+ (Number.parseFloat(style.marginTop) || 0) + (Number.parseFloat(style.marginBottom) || 0);
+		}
 		return Math.max(readingFloorReserve(), resolveAnchoredTailReserve({
 			clientHeight: containerRef.clientHeight,
-			contentAfterAnchor: Math.max(0, contentEnd - anchorTop)
+			contentAfterAnchor: Math.max(0, contentEnd - anchorTop - removedHeight)
 		}) + tailControlsExtent());
 	}
 
@@ -1766,6 +1777,23 @@
 		shouldAutoScroll = false;
 		// eslint-disable-next-line no-console
 		if (STREAM_DEBUG) console.log(`[AS] disengageAutoScroll (user gesture) ST=${containerRef?.scrollTop} SH=${containerRef?.scrollHeight} CH=${containerRef?.clientHeight}`);
+	}
+
+	// A reader-controlled disclosure is reading intent, not arriving content.
+	// Use the same release as wheel/touch BEFORE its DOM height changes so queued
+	// follow/settle callbacks cannot hide the focused header. No second scroll writer.
+	function handleReaderDisclosure(event: MouseEvent): boolean {
+		const sessionId = $activeSession.sessionId;
+		if (sessionId !== $liveActiveSession.sessionId ||
+			(transcriptActions && !transcriptActions.isCurrent(sessionId)) ||
+			!(event.currentTarget instanceof HTMLElement) || !containerRef?.contains(event.currentTarget)) return false;
+		disengageAutoScroll();
+		const details = document.getElementById(event.currentTarget.getAttribute('aria-controls') ?? '');
+		if (details && containerRef.contains(details)) {
+			const tail = latestTurnTailNow(details);
+			if (tail !== null) latestTurnTailPx = Math.max(latestTurnTailPx, tail);
+		}
+		return true;
 	}
 
 	// Wheel/trackpad: an upward wheel is an unambiguous intent to read earlier
@@ -2600,6 +2628,7 @@
 						durationLabel={item.durationLabel}
 						summary={item.summary}
 						compactSummary={item.compactSummary}
+						onBeforeToggle={handleReaderDisclosure}
 						row={messageBody}
 						speaker={turnSpeaker}
 						revealMessageId={revealedTurnId}
@@ -2896,6 +2925,8 @@
 	{:else if isApprovalOutcome(message)}
 		<!-- What the owner's answer did, right after that answer (#484). -->
 		<ApprovalOutcome data={message.systemData} content={message.content} />
+	{:else if message.type === 'system' && message.systemSubtype === 'session_plan'}
+		<PlanDisplay plan={message.systemData?.plan} onBeforeToggle={handleReaderDisclosure} />
 	{:else if message.type === 'system'}
 		<div class="w-full">
 			<div class="min-w-0">

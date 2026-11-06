@@ -160,7 +160,8 @@ def test_report_worker_ids_cannot_traverse(state_fixture, sid):
 def test_scratch_prompt_is_absolute_session_scoped_and_survives_compaction(state_fixture, monkeypatch):
     from app.core.provider.harness_adapter import HarnessAdapter
     adapter = HarnessAdapter()
-    adapter._options = SimpleNamespace(cwd=str(state_fixture))
+    from app.core.provider.types import SessionOptions
+    adapter._options = SessionOptions(model="fixture", cwd=str(state_fixture))
     monkeypatch.setattr(adapter, "_resolve_app_session_id", lambda: "session")
     for name in ("_env_note", "_memory_snapshot", "_away_note"):
         monkeypatch.setattr(adapter, name, lambda: None)
