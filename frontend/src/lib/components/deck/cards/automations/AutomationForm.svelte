@@ -337,10 +337,6 @@ import AutomationModelError from './AutomationModelError.svelte';
   <SettingRow label="Name" hint="A label to recognize this automation."><TextField value={formName} oninput={onUpdateFormName} placeholder="e.g. Daily report generator" invalid={!!formError && !formName.trim()} /></SettingRow>
   <SettingRow label="Description" hint="What this automation does. Optional."><TextField value={formDescription} oninput={onUpdateFormDescription} placeholder="Optional description…" /></SettingRow>
  </RowGroup>
- <section class="automation-triggers" aria-label="Triggers">
-  <header><h3>Triggers <span>{formTriggers.length}</span></h3><p>Any trigger firing will run this automation. At least one is required.</p></header>
-  <AutomationTriggerConfig triggers={formTriggers} {expandedTriggers} {connectors} {connectorTypes} {connectorsWithTriggers} {currentView} {selectedAutomationId} {timezone} onUpdateTriggers={onUpdateFormTriggers} {onToggleTriggerExpand} />
- </section>
  <RowGroup title="Prompt & actions" bare>
   <div class="st-card">
    <SettingRow label="Prompt" hint={formActionSteps.length ? 'Optional when action steps are configured. Runs before action steps.' : 'The main instruction sent to the AI agent when this automation runs.'}>
@@ -389,6 +385,11 @@ import AutomationModelError from './AutomationModelError.svelte';
   {/each}
   <button class="st-btn" onclick={() => addActionStep()}><Plus size={14} />Add action step</button>
  </RowGroup>
+ <!-- The task first: Basics, then Prompt & actions, then when it runs. -->
+ <section class="automation-triggers" aria-label="Triggers">
+  <header><h3>Triggers <span>{formTriggers.length}</span></h3><p>Any trigger firing will run this automation. At least one is required.</p></header>
+  <AutomationTriggerConfig triggers={formTriggers} {expandedTriggers} {connectors} {connectorTypes} {connectorsWithTriggers} {currentView} {selectedAutomationId} {timezone} onUpdateTriggers={onUpdateFormTriggers} {onToggleTriggerExpand} />
+ </section>
  <RowGroup title="Configuration">
   <SettingRow label="Agent" hint="The agent this automation runs under.">
    {#if !profiles.length}<button class="st-btn" onclick={() => layout.openFeaturePage('profile')}>No agents yet — create one first</button>

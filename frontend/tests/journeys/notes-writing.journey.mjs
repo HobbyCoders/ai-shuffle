@@ -54,7 +54,8 @@ function writingCase(name, native = false, mid = false) {
    await page.locator('.note-save').filter({ hasText: /^Saved$/ }).waitFor({ state: 'attached' });
    const fieldsRow = page.locator('details.note-fields');
    expect(!await fieldsRow.evaluate(el => el.open), 'Tags & files starts collapsed at every width');
-   if (page.viewportSize().width >= 600) {
+   {
+    // Every width, the phone and native shell included: Tags & files sits under the tabs.
     const gap = await documentGap(page);
     expect(gap >= 24 && gap <= 32, `the Edit document starts 24–32px below Tags & files (${gap}px)`);
    }
@@ -66,12 +67,17 @@ function writingCase(name, native = false, mid = false) {
    expect(await task.evaluate(el => getComputedStyle(el).listStyleType) === 'none', 'task items have no bullet');
    expect(await preview.locator('ul').evaluate(el => parseFloat(getComputedStyle(el).paddingInlineStart)) >= 20, 'lists stay inside the preview column');
    expect(await task.locator('input').evaluate(el => getComputedStyle(el).appearance) === 'none', 'task marks use the theme outline and accent, not disabled browser grey');
-   if (page.viewportSize().width >= 600) {
+   {
+    // Every width, the phone and native shell included: Tags & files sits under the tabs.
     const gap = await documentGap(page);
     expect(gap >= 24 && gap <= 32, `the Preview document starts 24–32px below Tags & files (${gap}px)`);
    }
    if (page.viewportSize().width < 600) {
-    expect(await preview.evaluate(el => getComputedStyle(el).paddingTop) === '24px', 'phone Preview has a 24px document inset');
+    const tapArea = await page.locator('details.note-fields > summary').evaluate(el => parseFloat(getComputedStyle(el, '::after').height));
+    expect(tapArea >= 44, `the phone Tags & files row keeps a 44px tap area (${tapArea}px)`);
+    const tabsBottom = (await page.getByRole('tablist').boundingBox()).y + (await page.getByRole('tablist').boundingBox()).height;
+    const fieldsTop = (await page.locator('details.note-fields > summary').boundingBox()).y;
+    expect(fieldsTop > tabsBottom && fieldsTop - tabsBottom <= 16, 'phone Tags & files sits directly under the tabs, as on desktop');
     const titleBox = await heading.boundingBox();
     const tabsBox = await page.getByRole('tablist').boundingBox();
     expect(tabsBox.y - (titleBox.y + titleBox.height) >= 16 && tabsBox.y - (titleBox.y + titleBox.height) <= 24, 'phone title-to-tabs spacing is 16–24px');

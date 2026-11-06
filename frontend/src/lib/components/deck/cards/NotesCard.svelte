@@ -1026,10 +1026,11 @@
 	.note-preview :global(.note-ref--missing) { color: var(--st-mfg); text-decoration: none; }
 	@media (pointer: coarse), (max-width: 600px) {
 		.note-title { font-size: 22px; line-height: 1.3; }
-		.note-writing { padding-top: 0; gap: 16px; }
-		.note-preview { padding-top: 24px; }
-		.note-fields { order: 2; }
-		.note-fields summary { min-height: 44px; display: flex; align-items: center; }
+		/* Same place as desktop: Tags & files directly under the tabs, the
+		   document 24px below it. The drawn row keeps the desktop height; an
+		   invisible ::after lends the summary its 44px tap area. */
+		.note-fields summary { position: relative; }
+		.note-fields summary::after { content: ''; position: absolute; left: 0; right: 0; top: 50%; height: 44px; transform: translateY(-50%); }
 		.note-tag-input { height: 44px; font-size: 16px; }
 		.note-textarea { font-size: 16px; overflow-y: auto; }
 	}

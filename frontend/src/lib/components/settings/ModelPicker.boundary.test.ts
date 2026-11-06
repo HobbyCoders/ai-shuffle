@@ -57,9 +57,9 @@ async function openPicker({ scrolls = true, triggerTop = 420 } = {}) {
 describe('ModelPicker panel bounds', () => {
 	it('opens upward inside a scrolling dialog body when the footer leaves no room below', async () => {
 		const { panel, height } = await openPicker();
-		// Below the trigger only 600 - 456 - 12 = 132px are visible; above, 296px.
+		// Below the trigger only 600 - 456 - 24 = 120px are visible; above, 284px.
 		expect(panel.classList.contains('mpk-panel-up')).toBe(true);
-		expect(height).toBe(296);
+		expect(height).toBe(284);
 		// The whole panel stays inside the body: its top is at or below 112px.
 		expect(420 - 4 - height).toBeGreaterThanOrEqual(112);
 	});
@@ -67,14 +67,14 @@ describe('ModelPicker panel bounds', () => {
 	it('opens downward, capped to the body, when there is room below', async () => {
 		const { panel, height } = await openPicker({ triggerTop: 150 });
 		expect(panel.classList.contains('mpk-panel-up')).toBe(false);
-		// 600 - 186 - 12 = 402 visible, so the preferred 346px fits.
+		// 600 - 186 - 24 = 390 visible, so the preferred 346px fits.
 		expect(height).toBe(346);
 	});
 
 	it('measures against the window when no ancestor scrolls', async () => {
 		const { panel, height } = await openPicker({ scrolls: false });
-		// The window has 800 - 456 - 12 = 332px below: open down at that height.
+		// The window has 800 - 456 - 24 = 320px below: open down at that height.
 		expect(panel.classList.contains('mpk-panel-up')).toBe(false);
-		expect(height).toBe(332);
+		expect(height).toBe(320);
 	});
 });

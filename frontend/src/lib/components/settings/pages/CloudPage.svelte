@@ -124,11 +124,17 @@
 	<section aria-label="Plans" aria-busy={load === 'loading'} data-testid="cloud-tiers">
 		<RowGroup title="Plans">
 			{#each tiers as t (t.id)}
-				<SettingRow label={t.name} hint={`${t.figure} · ${t.unit}`} stackOnPhone={t.id === currentTier && used !== null}>
-					{#if t.id === currentTier}
-						<span class="cl-here" aria-current="true">You are here</span>
-						{#if t.id !== 'local'}
-							<span data-testid="cloud-seats" data-setting-anchor="cloud.remoteWorkers">
+				<SettingRow label={t.name} hint={`${t.figure} · ${t.unit}`} stackOnPhone={t.id === 'paid' || (t.id === currentTier && used !== null)}>
+					{#snippet badge()}
+						{#if t.id === currentTier}<span class="cl-here" aria-current="true">You are here</span>{/if}
+					{/snippet}
+					{#if t.id === currentTier && t.id !== 'local'}
+						<span class="cl-seats" data-setting-anchor="cloud.remoteWorkers">
+							{#if used !== null && !unlimited}
+								<!-- Phone only: the meter's own line reads "Remote workers … 3 of 7 in use". -->
+								<span class="cl-seats-label" aria-hidden="true">Remote workers</span>
+							{/if}
+							<span class="cl-seats-value" data-testid="cloud-seats">
 								{#if unlimited}
 									<ValueText value={used !== null ? `${used} in use` : 'Unlimited remote workers'} />
 								{:else if used !== null}
@@ -137,7 +143,7 @@
 									<span class="sr-only">{cap} remote {cap === 1 ? 'worker' : 'workers'} included</span>
 								{/if}
 							</span>
-						{/if}
+						</span>
 					{/if}
 					{#if t.id === 'paid'}
 						<a class="st-btn" data-setting-anchor="cloud.upgrade" href={CLOUD_PRICING_URL} target="_blank" rel="noopener noreferrer"><ExternalLink />See plans</a>
@@ -159,7 +165,29 @@
 </PreferencePage>
 
 <style>
-	.cl-here { font-size: 12px; padding: 2px 8px; border: 1px solid var(--st-border-strong); border-radius: 999px; color: var(--st-mfg); white-space: nowrap; }
+	/* A small badge beside the plan name. */
+	.cl-here { flex: none; font-size: 11.5px; font-weight: 400; line-height: 16px; padding: 0 7px; border: 1px solid var(--st-border-strong); border-radius: 999px; color: var(--st-mfg); white-space: nowrap; }
+	.cl-seats-label { display: none; }
+
+	/* Phone: the meter takes its own full-width line (label left, count right,
+	   bar below) and See plans becomes a full-width button 12px under it. */
+	:global(.settings-shell[data-stacked]) .cl-seats { display: grid; width: 100%; }
+	:global(.settings-shell[data-stacked]) .cl-seats > :global(*) { grid-area: 1 / 1; }
+	:global(.settings-shell[data-stacked]) .cl-seats-label { display: block; align-self: start; font-size: 12.5px; line-height: 18px; color: var(--st-mfg); }
+	:global(.settings-shell[data-stacked]) .cl-seats-value { display: grid; }
+	:global(.settings-shell[data-stacked]) .cl-seats :global(.st-meter) { width: 100%; }
+	:global(.settings-shell[data-stacked] .st-row.st-phone-stack:has(.cl-seats, [data-setting-anchor='cloud.upgrade']) > .st-rc) {
+		display: flex;
+		flex-direction: column;
+		align-items: stretch;
+		/* With the button's own 6px tap margin, 12px between meter and button. */
+		gap: 6px;
+	}
+	:global(.settings-shell[data-stacked]) [data-setting-anchor='cloud.upgrade'] { width: 100%; justify-content: center; }
+	/* Phone: the account status sits on the title line, not between title and hint. */
+	:global(.settings-shell[data-stacked] [data-setting-anchor='cloud.account']:not(.st-phone-stack) > .st-rc) { align-self: flex-start; }
+	:global(.settings-shell[data-stacked]) [data-testid='cloud-state'] { display: flex; align-items: center; min-height: 21px; }
+	:global(.settings-shell[data-stacked] [data-setting-anchor='cloud.account']:has(.st-rl .st-help)) [data-testid='cloud-state'] { min-height: 44px; }
 	.cl-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 	.cl-msg { margin: 0; min-width: 0; }
 	@media (max-width: 600px) { .cl-foot { flex-direction: column; align-items: flex-start; gap: 6px; } }
