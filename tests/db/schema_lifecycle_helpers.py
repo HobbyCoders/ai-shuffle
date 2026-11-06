@@ -243,7 +243,7 @@ def private_postgres(bindir: str, data_dir: Path):
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
-    db = ThrowawayDatabase(SimpleNamespace(effective_data_dir=data_dir), port=port)
+    db = ThrowawayDatabase(SimpleNamespace(effective_data_dir=data_dir), port=port, disposable=True)
     try:
         with patch.dict(os.environ, {"PATH": bindir + os.pathsep + os.environ.get("PATH", "")}):
             db.open()

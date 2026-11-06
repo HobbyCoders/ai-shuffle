@@ -45,7 +45,8 @@ def main() -> int:
                                   ttl_seconds=2400, extra=extra)
         db = runtime.Database(
             SimpleNamespace(effective_data_dir=Path(env["DATA_DIR"])),
-            port=free_port(exclude=(args.port, int(env["PORT"]), int(env["SHUFFLE_PROTECTED_PORT"]))))
+            port=free_port(exclude=(args.port, int(env["PORT"]), int(env["SHUFFLE_PROTECTED_PORT"]))),
+            disposable=True)
 
         def on_start(child):
             print("@PERF_APP_SPAWN@", child.pid, flush=True)

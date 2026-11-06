@@ -376,9 +376,25 @@ def offline_client_env(url: str) -> dict[str, str]:
     return env
 
 
+def warn_disposable_shm_pressure():
+    """Diagnose the shared mount, never unlink another cluster's segments."""
+    try:
+        usage = shutil.disk_usage("/dev/shm")
+    except OSError:
+        return
+    if usage.free <= usage.total // 10:
+        log("WARNING: /dev/shm is at least 90% full; disposable PostgreSQL uses "
+            "disk-backed mmap dynamic shared memory instead. Existing shared-memory "
+            "files are not removed; other PostgreSQL instances may still need them.")
+
+
 class Database:
-    def __init__(self, settings, *, port=5432):
+    def __init__(self, settings, *, port=5432, disposable=False):
         self.settings = settings
+        # Explicit launcher opt-in only. Installed/production clusters retain
+        # PostgreSQL's defaults; never infer this from inherited environment.
+        self.disposable = disposable
+        self.dsm_settings = ("dynamic_shared_memory_type=mmap",) if disposable else ()
         self.mode = "embedded"
         self.root = Path(settings.effective_data_dir).absolute()
         self.pg = self.root / "postgres"
@@ -519,6 +535,8 @@ class Database:
         write_private(self.mode_file, json.dumps({"version": 1, "mode": self.mode}), replace=True)
 
     def open(self, purpose="run"):
+        if self.disposable:
+            warn_disposable_shm_pressure()
         safe_path(self.root)
         # Never rename/import a legacy source or replace it with an empty DB.
         if (self.root / "db.sqlite").exists() or (self.root / "db.sqlite").is_symlink():
@@ -628,8 +646,11 @@ class Database:
         write_private(self.pg / "initializing", "initialization in progress\n")
         self.password = secrets.token_hex(48)
         write_private(self.pg / "password", self.password)
+        # initdb itself starts a temporary server: setting mmap only at start()
+        # is too late on a full /dev/shm. Persist it in this disposable cluster.
         self.command(["initdb", "-D", str(self.data), "--username=" + ADMIN,
-            "--auth-local=trust", "--auth-host=scram-sha-256", "--encoding=UTF8", "--locale=C"], timeout=60)
+            "--auth-local=trust", "--auth-host=scram-sha-256", "--encoding=UTF8", "--locale=C",
+            *(arg for setting in self.dsm_settings for arg in ("-c", setting))], timeout=60)
         self.identifier = self.control_identifier()
         self.set_url()
         self.start()
@@ -658,7 +679,7 @@ class Database:
             "-p", str(self.port), "-k", str(self.socket), "-c", "unix_socket_permissions=0700",
             "-c", "hba_file=" + str(hba), "-c", "password_encryption=scram-sha-256",
             "-c", "log_statement=none", "-c", "log_min_error_statement=panic",
-            *(arg for setting in WAL_SETTINGS for arg in ("-c", setting))],
+            *(arg for setting in (*WAL_SETTINGS, *self.dsm_settings) for arg in ("-c", setting))],
             env=client_env(""), stdout=self.pg_log, stderr=self.pg_log, start_new_session=True,
             **isolation().service_spawn())
 

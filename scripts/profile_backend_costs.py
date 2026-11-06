@@ -208,7 +208,7 @@ def main():
         os.environ.clear()
         os.environ.update(env)
         supervisor = runtime()
-        db = supervisor.Database(SimpleNamespace(effective_data_dir=directory / 'data'), port=free_port())
+        db = supervisor.Database(SimpleNamespace(effective_data_dir=directory / 'data'), port=free_port(), disposable=True)
         connection = None
         try:
             db.open()

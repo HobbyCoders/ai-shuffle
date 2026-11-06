@@ -339,7 +339,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             database = runtime.Database(
                 SimpleNamespace(effective_data_dir=Path(env["DATA_DIR"])),
-                port=free_port(exclude=(args.port, protected, int(env["PORT"]))),
+                port=free_port(exclude=(args.port, protected, int(env["PORT"]))), disposable=True,
             )
             return supervise([sys.executable, "-m", "app.main"], env, database,
                              ttl=args.ttl_seconds, owner_pid=os.getppid(), stopped=stopped)
