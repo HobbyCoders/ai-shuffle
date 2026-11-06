@@ -365,8 +365,10 @@ const deepLinkLateIdentity = async ({ page, status, mark, variant, log }) => {
 };
 
 // The other half of #916: the reveal itself. A first message from an empty chat
-// plays messageAreaReveal and inputSlideDown (a cold link must not, above), and
-// the overlays that sit on the message wrapper stay anchored to it throughout.
+// plays messageAreaReveal and, where the hero centred the composer, the
+// composer's measured slide to the dock (a cold link must not, above). A
+// phone-width hero already docks its composer, so it does not slide (#1073).
+// The overlays that sit on the message wrapper stay anchored throughout.
 const sampleReveal = (ctx) => ctx.page.addInitScript(() => {
 	const probe = window.__reveal = { frames: [], armed: false, stop: false, clicked: false };
 	const near = (a, b) => Math.abs(a - b) < 1;
@@ -382,7 +384,7 @@ const sampleReveal = (ctx) => ctx.page.addInitScript(() => {
 				transitioning,
 				pane: !!pane,
 				reveal: wrapper.getAnimations().some(a => a.animationName.includes('messageAreaReveal') && a.playState === 'running'),
-				slide: !!document.querySelector('.input-wrapper')?.getAnimations().some(a => a.animationName.includes('inputSlideDown') && a.playState === 'running'),
+				slide: !!document.querySelector('.input-slot')?.getAnimations().some(a => a.id === 'composer-dock' && a.playState === 'running'),
 				overlayAnchored: document.querySelector('.reconnect-status-slot')?.offsetParent === wrapper,
 				paneAnchored: pane ? pane.offsetParent === wrapper : null,
 				paneFills: rect ? near(rect.left, box.left) && near(rect.top, box.top) && near(rect.width, box.width) && near(rect.height, box.height) : null
@@ -398,7 +400,7 @@ const sampleReveal = (ctx) => ctx.page.addInitScript(() => {
 	requestAnimationFrame(sample);
 });
 
-const firstMessageReveal = async ({ page, mark }) => {
+const firstMessageReveal = async ({ page, mark, variant }) => {
 	await mark('send the first message from a new chat');
 	await page.evaluate(() => { window.__reveal.armed = true; window.__reveal.clicked = true; });
 	await typeAndSend(page, `reveal ${uniq()}`);
@@ -410,7 +412,8 @@ const firstMessageReveal = async ({ page, mark }) => {
 	const frames = await page.evaluate(() => { window.__reveal.stop = true; return window.__reveal.frames; });
 	const revealing = frames.filter(frame => frame.transitioning);
 	expect(revealing.some(frame => frame.reveal), 'the message column must play its reveal on a first message');
-	expect(revealing.some(frame => frame.slide), 'the composer must slide down from the hero on a first message');
+	if (variant.viewport === 'desktop') expect(revealing.some(frame => frame.slide), 'the composer must slide down from the hero on a first message');
+	else expect(frames.every(frame => !frame.slide), 'an already-docked composer must not slide on a first message');
 	expect(frames.every(frame => frame.overlayAnchored), 'the column overlays must keep the message wrapper as their containing block through the reveal');
 	expect(frames.filter(frame => !frame.transitioning).every(frame => !frame.reveal && !frame.slide), 'the reveal must end with its class');
 };

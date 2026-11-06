@@ -3,17 +3,21 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/sv
 import ChatInput from './ChatInput.svelte';
 import { activeSession } from '$lib/stores/active-session';
 import { auth } from '$lib/stores/auth.svelte';
+import { readDraft } from '$lib/stores/session/draft-persistence';
 import '$lib/test-stubs/composer-dom';
 
 // #1831: before a send into a large chat whose provider cache went cold, the
 // composer says what it costs and offers "Compact first" beside "Send anyway".
 const calls: string[] = [];
 let cache: Record<string, unknown> = {};
+// Holds the /cache-state answer, as a slow server would (#933).
+let cacheAnswer: Promise<void> | null = null;
 
 vi.hoisted(() => {
 	vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
 		const url = String(input);
 		calls.push(`${init?.method ?? 'GET'} ${url}`);
+		if (url.includes('/cache-state') && cacheAnswer) await cacheAnswer;
 		const data = url.includes('/auth/status')
 			? { authenticated: true, has_any_credential: true, onboarding_complete: true }
 			: url.includes('/cache-state')
@@ -38,6 +42,7 @@ let sends: MockInstance;
 
 beforeEach(async () => {
 	calls.length = 0;
+	cacheAnswer = null;
 	localStorage.clear();
 	sessionStorage.clear();
 	activeSession.newChat();
@@ -171,6 +176,56 @@ describe('cold send warning', () => {
 		expect(sends).toHaveBeenCalledOnce();
 		accept(true);
 		await waitFor(() => expect(screen.queryByText('Starting compaction. Queuing your message to send next…')).toBeNull());
+	});
+
+	// #933: the composer collapses at Send, not when the check answers.
+	function holdCacheAnswer() {
+		let answer!: () => void;
+		cacheAnswer = new Promise<void>((resolve) => { answer = resolve; });
+		return answer;
+	}
+
+	it('clears the composer at Send while the cache check is pending, then puts held text back', async () => {
+		cache = COLD;
+		const answer = holdCacheAnswer();
+		const { editor } = await submit();
+		expect(editor.textContent).toBe('');
+		expect(calls.some((call) => call.includes('/cache-state'))).toBe(true);
+		expect(sends).not.toHaveBeenCalled();
+		answer();
+		await waitFor(() => expect(screen.getByText(/holds about 412k tokens/)).toBeTruthy());
+		await waitFor(() => expect(editor.textContent).toBe(TEXT));
+		expect(sends).not.toHaveBeenCalled();
+		expect(activeSession.current.draft).toContain(TEXT);
+		// Held, not refused: the notice explains it, with no failure toast.
+		expect(screen.queryByText('Message not sent. Try again.')).toBeNull();
+		await fireEvent.click(screen.getByRole('button', { name: 'Send anyway' }));
+		await waitFor(() => expect(sends).toHaveBeenCalledExactlyOnceWith(TEXT, undefined));
+		expect(editor.textContent).toBe('');
+	});
+
+	it('sends a pending-check message once the check answers warm', async () => {
+		cache = { ...COLD, warn: false, cold: false };
+		const answer = holdCacheAnswer();
+		const { editor } = await submit();
+		expect(editor.textContent).toBe('');
+		expect(sends).not.toHaveBeenCalled();
+		answer();
+		await waitFor(() => expect(sends).toHaveBeenCalledExactlyOnceWith(TEXT, undefined));
+		expect(editor.textContent).toBe('');
+	});
+
+	it('keeps the text with its chat when the view moves during the check', async () => {
+		cache = { ...COLD, warn: false, cold: false };
+		const answer = holdCacheAnswer();
+		const { editor } = await submit();
+		expect(editor.textContent).toBe('');
+		Object.assign(activeSession.current, { sessionId: 'other-chat' });
+		activeSession.setDraft('');
+		answer();
+		await waitFor(() => expect(readDraft('cold')).toContain(TEXT));
+		expect(sends).not.toHaveBeenCalled();
+		expect(editor.textContent).toBe('');
 	});
 
 	it('sends at once when the cache is warm or the chat is small', async () => {

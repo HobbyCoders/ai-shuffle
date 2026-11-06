@@ -1062,9 +1062,18 @@
 			return;
 		}
 
-		// A large chat with a cold provider cache: ask first (#1831).
+		// A large chat with a cold provider cache: ask first (#1831). The check
+		// runs after Send has cleared the composer, so the composer collapses at
+		// the click rather than when the answer lands, which shifted the
+		// transcript on a slow send (#933). A held send puts the text back.
 		const sendingTo = $activeSession.sessionId;
-		if (!compactBeforeSend && sendingTo && !$activeSession.isStreaming && (await coldSendBlocks(sendingTo))) return;
+		const coldCheck = !compactBeforeSend && sendingTo && !$activeSession.isStreaming
+			? async () => {
+				const blocked = await coldSendBlocks(sendingTo);
+				// The view moved during the check: the text stays with its chat.
+				return !blocked && ownsComposer() && get(activeSession).sessionId === sendingTo;
+			}
+			: undefined;
 
 		// Append any legacy uploaded files (from file upload button) to the end
 		// Note: Files added via @ autocomplete are now inline chips, not in uploadedFiles
@@ -1075,10 +1084,9 @@
 		}
 
 		// Send the message, optionally queued behind a server-owned compaction.
-		// sendMessage clears the composer before its first await.
-		const sending = sendMessage(messageToSend, compactBeforeSend);
-		composerCleared();
-		await sending;
+		// sendMessage clears the composer before its first await, and holds the
+		// next send until the cold check has answered so two sends keep order.
+		await sendMessage(messageToSend, compactBeforeSend, coldCheck, composerCleared);
 	}
 
 	/**
@@ -1123,7 +1131,12 @@
 	// turn still goes out, and the backend decides when the model sees it (mid-turn
 	// steer, or the start of the next turn). Until then it renders as a pending
 	// bubble at the tail of the transcript.
-	async function sendMessage(finalPrompt: string, compactBeforeSend = false) {
+	async function sendMessage(
+		finalPrompt: string,
+		compactBeforeSend = false,
+		mayGo?: () => Promise<boolean>,
+		released?: () => void
+	) {
 		if (!ownsComposer()) return;
 		// Enforce the same capability as the hidden worktree checkbox, even if
 		// remembered intent changes before the context bar's effect has flushed.
@@ -1187,14 +1200,23 @@
 		// the component may be destroyed/recreated when isEmptyState changes
 		saveDraftImmediately('');
 
-		const restoreOnFailure = () => {
-			if (!ownsComposer()) return;
+		// `held`: the send was held back before it went out (the cold-cache
+		// notice says why), so the text comes back without a refusal toast.
+		const restoreOnFailure = (held = false) => {
 			// A move to another view hands the text to the session it was typed
 			// in. A New Chat adopting the session its own create made (a worktree
 			// session whose first message was then refused) is still this view
 			// (#1636).
 			const adoptedOwnSession = sendingSessionId === null && getInitGeneration() === sendingNavigation;
-			if ($activeSession.sessionId !== sendingSessionId && !adoptedOwnSession) {
+			const moved = $activeSession.sessionId !== sendingSessionId && !adoptedOwnSession;
+			if (held && (moved || !ownsComposer())) {
+				messageSent = false;
+				activeSession.saveDraftForSession(sendingSessionId, priorDraftJSON);
+				writeDraft(sendingSessionId, priorDraftJSON);
+				return;
+			}
+			if (!ownsComposer()) return;
+			if (moved) {
 				writeDraft(sendingSessionId, priorDraftJSON);
 				return;
 			}
@@ -1202,7 +1224,7 @@
 			// banner; this covers one that does not, including one that left an
 			// earlier attempt's banner standing.
 			const now = get(activeSession);
-			if (!(now.error && reasonSet.error) && !(now.worktreeError && reasonSet.worktreeError)) {
+			if (!held && !(now.error && reasonSet.error) && !(now.worktreeError && reasonSet.worktreeError)) {
 				refuseSend('Message not sent. Try again.', 'warning');
 			}
 			// A slow create can fail after the user started a new message: put
@@ -1244,6 +1266,16 @@
 		};
 
 		try {
+			let mayGoNow = true;
+			try {
+				mayGoNow = mayGo ? await mayGo() : true;
+			} finally {
+				released?.();
+			}
+			if (!mayGoNow) {
+				restoreOnFailure(true);
+				return;
+			}
 			const sent = await activeSession.sendMessage(
 				finalPrompt,
 				compactBeforeSend || pendingPaths?.length
