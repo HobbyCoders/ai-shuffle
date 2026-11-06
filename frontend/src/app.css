@@ -148,6 +148,13 @@
 		--field-border: var(--input);
 		--field-border-focus: var(--ring);
 
+		/* The composer rises one step off the charcoal canvas, with a 14% white
+		   edge and a placeholder that clears 4.5:1 on that surface. */
+		--composer-bg: color-mix(in oklab, var(--foreground) 4%, var(--card));
+		--composer-border: var(--border-strong);
+		--composer-border-focus: color-mix(in oklab, var(--foreground) 24%, transparent);
+		--composer-placeholder: var(--muted-foreground);
+
 		/* Sidebar plane. The rail shares it. Row fills derive from the plane so a
 		   theme preset's sidebar keeps working. */
 		--row-hover: color-mix(in oklab, var(--sidebar-foreground) 5%, var(--sidebar));
@@ -352,6 +359,12 @@
 		--field-bg: var(--card);
 		--field-border: var(--input);
 		--field-border-focus: var(--ring);
+
+		/* The light composer is the plain card. */
+		--composer-bg: var(--card);
+		--composer-border: var(--border);
+		--composer-border-focus: var(--border-strong);
+		--composer-placeholder: var(--subtle-foreground);
 
 		/* Sidebar plane. The rail shares it. */
 		--row-hover: color-mix(in oklab, var(--sidebar-foreground) 2.5%, var(--sidebar));
@@ -780,6 +793,12 @@ select option {
 	overflow-wrap: break-word;
 	-webkit-box-decoration-break: clone;
 	box-decoration-break: clone;
+}
+
+/* Short inline code (up to 40 characters, marked by the renderer) never
+   splits into two pills; a longer span wraps as one cloned chip. */
+.prose :where(:not(pre) > code.code-short):not(:where([class~="not-prose"] *)) {
+	white-space: nowrap;
 }
 
 .prose :where(pre code):not(:where([class~="not-prose"] *)) {

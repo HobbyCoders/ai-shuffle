@@ -1159,7 +1159,7 @@
 	}
 	.mpp-context-caption {
 		color: var(--muted-foreground);
-		font-size: 10.5px;
+		font-size: 11px;
 		font-weight: 400;
 	}
 	.mpp-context-toggle :global(.mpp-context-check) {
@@ -1208,7 +1208,7 @@
 	.mpp-win-note {
 		margin: 0;
 		color: var(--muted-foreground);
-		font-size: 10.5px;
+		font-size: 11px;
 		line-height: 1.4;
 	}
 	.mpp-cap-chip:disabled,
@@ -1363,7 +1363,7 @@
 			color-mix(in srgb, var(--muted-foreground) 14%, transparent) 3px 5px
 		);
 		color: var(--muted-foreground);
-		font-size: 9.5px;
+		font-size: 11px;
 		font-weight: 600;
 		font-variant-numeric: tabular-nums;
 	}
@@ -1375,7 +1375,7 @@
 		margin-top: -3px;
 		padding: 0 2px;
 		color: var(--muted-foreground);
-		font-size: 10px;
+		font-size: 11px;
 		font-variant-numeric: tabular-nums;
 	}
 
@@ -1481,7 +1481,7 @@
 	.mpp-cap-error {
 		margin: 0;
 		color: var(--destructive);
-		font-size: 10.5px;
+		font-size: 11px;
 		line-height: 1.35;
 	}
 

@@ -96,13 +96,14 @@
 
 <style>
  .docs-toc { width:100%; max-height:calc(100vh - 120px); overflow:auto; }
- .toc-title { font-size:12px; font-weight:500; color:var(--muted-foreground); margin-bottom:12px; }
+ .toc-title { font-size:13px; font-weight:500; color:var(--muted-foreground); margin-bottom:12px; }
  .toc-list { list-style:none; padding:0; margin:0; }
  /* A thin guide line, with the current section marked by a 2px bar and the
     primary text colour: never a filled pill that reads as a second nav selection. */
  .toc-list { border-left: 1px solid var(--border); }
  .toc-item.level-3 .toc-link { padding-left:24px; }
- .toc-link { display:block; width:calc(100% + 1px); margin-left:-1px; text-align:left; padding:6px 8px 6px 12px; font:12px/1.5 var(--font-sans); color:var(--muted-foreground); border:0; border-left:2px solid transparent; border-radius:0; background:none; cursor:pointer; }
+ /* 13px rows, 16px apart (8px of padding each side of a 19.5px line). */
+ .toc-link { display:block; width:calc(100% + 1px); margin-left:-1px; text-align:left; padding:8px 8px 8px 12px; font:13px/1.5 var(--font-sans); color:var(--muted-foreground); border:0; border-left:2px solid transparent; border-radius:0; background:none; cursor:pointer; }
  .toc-link:hover { color:var(--foreground); }
  .toc-link:focus-visible { outline:2px solid var(--ring); outline-offset:-2px; }
  .toc-link.active { color:var(--foreground); border-left-color:var(--foreground); }

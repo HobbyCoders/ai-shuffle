@@ -22,7 +22,7 @@ html:root .phone-composer .chat-island {
 	--composer-btn-radius: min(calc(var(--radius, 10px) * 2.5), 20px);
 	border-radius: calc(var(--radius) * 1.6);
 	border-color: var(--border-strong);
-	background: var(--card);
+	background: var(--composer-bg, var(--card));
 	box-shadow: var(--shadow-m);
 	transition:
 	border-radius 180ms ease,

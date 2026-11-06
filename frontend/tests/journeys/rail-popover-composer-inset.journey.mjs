@@ -1,5 +1,6 @@
-// The rail's notification history floats beside the rail (council pass 3: a
-// 360px popover over the list column and canvas, bottom-aligned with the bell),
+// The rail's notification history floats beside the rail (council pass 4: a
+// 300px popover over the list column, bottom-aligned with the bell, that ends
+// before the page content while the list panel is open, so it slices no words),
 // and the empty-chat composer does not hold an empty Stop seat at its right edge.
 import { runJourney } from './runner.mjs';
 import { expect, gotoApp, openNewChat, seededChatId, waitChat, SEEDED } from './lib/app.mjs';
@@ -56,11 +57,13 @@ await runJourney({ name: 'rail-popover-composer-inset', allow: DEV_INSTANCE_NOIS
 			const rail = document.querySelector('aside.sidebar nav.rail').getBoundingClientRect();
 			const bell = document.querySelector('aside.sidebar .notif-center.rail .notif-btn').getBoundingClientRect();
 			const r = el.getBoundingClientRect();
-			return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width, railRight: rail.right, bellBottom: bell.bottom, innerWidth };
+			const scrim = !!document.querySelector('[data-testid="notif-scrim"]');
+			return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width, railRight: rail.right, bellBottom: bell.bottom, innerWidth, scrim };
 		});
 		log(JSON.stringify({ width, ...geometry }));
 		expect(geometry.left >= geometry.railRight && geometry.left <= geometry.railRight + 12, 'the history panel starts just right of the rail, leaving the rail uncovered');
-		expect(Math.abs(geometry.width - 360) <= 1, `the history panel is 360px wide (${geometry.width}px)`);
+		expect(Math.abs(geometry.width - 300) <= 1, `the history panel is 300px wide (${geometry.width}px)`);
+		expect(!geometry.scrim, 'with the list panel open the popover ends before the content, so the page is not dimmed');
 		expect(Math.abs(geometry.bottom - geometry.bellBottom) <= 2, 'the history panel is bottom-aligned with the bell');
 		expect(geometry.top >= 0 && geometry.bottom <= 900, 'the history panel stays in the window');
 		await mark('Escape closes it');
@@ -68,7 +71,7 @@ await runJourney({ name: 'rail-popover-composer-inset', allow: DEV_INSTANCE_NOIS
 		await panel.waitFor({ state: 'hidden' });
 	}
 })).concat([{
-	// The narrowest Sidebar no longer narrows the 360px panel; an error row's
+	// The narrowest Sidebar no longer narrows the 300px panel; an error row's
 	// action buttons must still not squeeze its message to nothing.
 	name: 'notifications-min-sidebar-actionable-row',
 	viewports: ['desktop'],

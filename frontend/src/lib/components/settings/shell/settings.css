@@ -60,7 +60,8 @@
 	--st-data-width: 1120px;
 	--st-prose-width: 720px;
 	--st-toc-width: 184px;
-	--st-toc-gap: 40px;
+	/* The contents rail sits 32px right of the article column. */
+	--st-toc-gap: 32px;
 	--st-gutter: 48px;
 	/* Every destination sits in one centred frame, the wide pages' width. A
 	   reading column keeps its 760px measure but starts at the frame's left

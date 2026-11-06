@@ -13,6 +13,7 @@
 	} from '$lib/components/layout/view';
 	import { tick } from 'svelte';
 	import { Marked } from 'marked';
+	import { renderInlineCode } from '$lib/utils/inline-code';
 	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
 	import NoteFileAutocomplete from './NoteFileAutocomplete.svelte';
 	import { resizeToFitContent } from './notes-textarea-resize';
@@ -797,7 +798,7 @@
 
 	// Marked's GFM task handling is the same parser used by chat. Notes keeps
 	// its own instance: no chat code-block controls or interactive task toggles.
-	const noteMarkdown = new Marked({ gfm: true });
+	const noteMarkdown = new Marked({ gfm: true, renderer: { codespan: renderInlineCode } });
 	function renderMarkdown(content: string): string {
 		return noteMarkdown.parse(renderAttachmentReferences(content), { async: false });
 	}

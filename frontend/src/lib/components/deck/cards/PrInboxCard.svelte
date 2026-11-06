@@ -142,12 +142,12 @@
 									</div>
 								</div>
 								<div class="pri-badges">
-									{#if pr.review !== 'none'}
+									{#if pr.review !== 'none' && REVIEW_LABELS[pr.review]}
 										<span class="pri-chip" data-review={pr.review} title={REVIEW_LABELS[pr.review]} aria-label={REVIEW_LABELS[pr.review]}>
             {#if pr.review === 'approved'}<Check size={14} />{:else if pr.review === 'changes_requested'}<X size={14} />{:else}<MessageSquare size={14} />{/if}<span>{pr.review === 'review_required' ? 'Review pending' : REVIEW_LABELS[pr.review]}</span>
            </span>
 									{/if}
-									{#if pr.checks !== 'none'}
+									{#if pr.checks !== 'none' && CHECKS_LABELS[pr.checks]}
 										<span class="pri-checks" data-checks={pr.checks} title={CHECKS_LABELS[pr.checks]} aria-label={CHECKS_LABELS[pr.checks]}>
 											{#if pr.checks === 'passing'}<CircleCheck size={14} />
 											{:else if pr.checks === 'failing'}<CircleX size={14} />
@@ -208,8 +208,17 @@
  .pri-title { display: grid; grid-template-columns: minmax(0, 1fr) 20px; align-items: start; gap: 6px; width: fit-content; max-width: 100%; font-size: 14px; font-weight: 500; color: var(--st-fg); overflow-wrap: anywhere; }
  .pri-external { display: flex; justify-content: center; padding-top: 3px; }
  .pri-title:hover { color: var(--st-primary); }
- .pri-meta { display: flex; flex-wrap: wrap; gap: 4px 8px; margin-top: 4px; color: var(--sidebar-muted); font-size: 12px; overflow-wrap: anywhere; }
- .pri-attribution { display: flex; flex-wrap: wrap; gap: 4px 12px; }
+ .pri-meta { display: flex; flex-wrap: wrap; row-gap: 4px; margin-top: 4px; color: var(--sidebar-muted); font-size: 12px; overflow-wrap: anywhere; }
+ .pri-attribution { display: contents; }
+ /* Desktop: "repo#142 · branch → base · by author · projects", the phone card's
+    middots with about 6px either side (a 16px seat). Every part carries its dot
+    in front; the row starts 16px early and clips that strip, so the part that
+    begins a wrapped line hides its dot and no line ever starts with "·". */
+ @media (min-width: 601px) {
+  .pri-meta { margin-left: -16px; clip-path: inset(0 0 0 16px); }
+  .pri-meta > span:not(.pri-attribution), .pri-attribution > span { display: flex; min-width: 0; }
+  .pri-meta > span:not(.pri-attribution)::before, .pri-attribution > span::before { content: '·' / ''; flex: none; width: 16px; text-align: center; font-family: var(--font-sans); }
+ }
  /* Checks running: an amber dot in the 14px icon seat, not a hollow ring that reads as "unchecked". */
  .pri-running { display: inline-grid; place-items: center; width: 14px; height: 14px; flex: none; }
  .pri-running span { width: 8px; height: 8px; border-radius: 50%; background: var(--st-warning); }

@@ -447,7 +447,9 @@
 
 	/* Spend-over-time chart */
 	.chart { display: flex; flex-direction: column; gap: 8px; }
-	.chart-readout { display: flex; align-items: center; gap: 8px; min-height: 20px; margin: 0 0 4px; font-size: 13px; font-variant-numeric: tabular-nums; }
+	/* The readout has its own row above the plot: 16px under it clears the top
+	   tick label, which straddles the plot's top edge. */
+	.chart-readout { display: flex; align-items: center; gap: 8px; min-height: 20px; margin: 0 0 16px; font-size: 13px; font-variant-numeric: tabular-nums; }
 	.chart-readout-day { color: var(--st-mfg); }
 	.chart-readout-val { font-weight: 600; color: var(--st-fg); }
 	.chart-body { display: grid; grid-template-columns: auto minmax(0, 1fr); column-gap: 10px; row-gap: 8px; }
@@ -467,7 +469,10 @@
 		display: block; width: 100%; max-width: 40px; background: var(--stats-fill-soft);
 		border-radius: 3px 3px 0 0; transition: background-color 120ms ease;
 	}
-	.chart-col.today .chart-bar, .chart-col.picked .chart-bar { background: var(--stats-fill); }
+	/* Full accent is today's alone. The picked day gets the pale column band and
+	   an 85% accent bar, so it never reads as a second "today". */
+	.chart-col.today .chart-bar { background: var(--stats-fill); }
+	.chart-col.picked:not(.today) .chart-bar { background: color-mix(in oklch, var(--stats-fill) 85%, transparent); }
 	.chart-col.picked { background: var(--st-hover); }
 	.chart-col:focus-visible .chart-bar { outline: 2px solid var(--ring); outline-offset: 2px; }
 	.chart-x { grid-column: 2; position: relative; height: 16px; }
@@ -484,7 +489,7 @@
 	.brk-name { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 13px; color: var(--foreground); }
 	.brk-label { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 	/* The word "Estimated" wears the same pill as the billing chip beside it. */
-	.stats-section :global(.usage-est) { flex-shrink: 0; padding: 1px 7px; border-radius: 999px; border-color: var(--border); font-size: 0.65rem; line-height: 1.4; white-space: nowrap; }
+	.stats-section :global(.usage-est) { flex-shrink: 0; padding: 1px 7px; border-radius: 999px; border-color: var(--border); font-size: 11px; line-height: 1.4; white-space: nowrap; }
 	.brk-track { height: 6px; background: var(--st-meter-track); border-radius: 999px; overflow: hidden; }
 	.brk-fill { display: block; height: 100%; background: var(--stats-fill); border-radius: 999px; transition: width 450ms ease; }
 	.brk-val { font-size: 13px; font-weight: 600; color: var(--muted-foreground); text-align: right; }
@@ -504,7 +509,7 @@
 	.prov-name { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; min-width: 0; font-size: 13px; color: var(--foreground); }
 	.prov-label { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 	.prov-chip {
-		flex-shrink: 0; padding: 1px 7px; border-radius: 999px; font-size: 0.65rem; font-weight: 600;
+		flex-shrink: 0; padding: 1px 7px; border-radius: 999px; font-size: 11px; font-weight: 600;
 		border: 1px solid var(--border); color: var(--muted-foreground); white-space: nowrap;
 	}
 	.prov-chip[data-billing='subscription'] { color: var(--st-mfg); }
@@ -519,8 +524,8 @@
 	.prov-cost { display: flex; flex-direction: column; align-items: flex-end; text-align: right; cursor: help; }
 	.prov-cost-val { font-size: 13px; font-weight: 600; color: var(--foreground); }
 	.prov-cost.missing .prov-cost-val { color: var(--muted-foreground); font-weight: 500; font-style: italic; }
-	.prov-cost-note { font-size: 0.65rem; color: var(--muted-foreground); white-space: nowrap; }
-	.prov-foot { margin: 10px 0 0; font-size: 0.72rem; color: var(--muted-foreground); }
+	.prov-cost-note { font-size: 12px; color: var(--st-mfg); white-space: nowrap; }
+	.prov-foot { margin: 10px 0 0; font-size: 12px; color: var(--st-mfg); }
 
 	/* Top-sessions rows */
 	.tops { display: flex; flex-direction: column; gap: 2px; margin: 0 -8px; }
@@ -535,7 +540,7 @@
 	.top-rank {
 		display: grid; place-items: center; width: 20px; height: 20px;
 		border-radius: 6px; background: color-mix(in oklch, var(--st-meter) 15%, transparent);
-		color: var(--st-mfg); font-size: 0.65rem; font-weight: 600;
+		color: var(--st-mfg); font-size: 11px; font-weight: 600;
 	}
 	.top-name { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 13px; color: var(--foreground); }
 	.top-label { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

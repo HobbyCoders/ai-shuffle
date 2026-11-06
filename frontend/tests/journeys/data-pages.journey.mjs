@@ -177,7 +177,8 @@ await runJourney({
     const meta=el.querySelector('.pri-meta');
     return {repo:box('.pri-repo'),branch:box('.pri-branch'),by:box('.pri-attribution'),title:box('.pri-title'),external:box('.pri-external'),meta:box('.pri-meta'),badges:box('.pri-badges'),
      metaWrap:getComputedStyle(meta).whiteSpace,metaLine:parseFloat(getComputedStyle(meta).lineHeight),metaTitle:meta.title,
-     separators:[...el.querySelectorAll('.pri-meta > span')].map(s=>getComputedStyle(s,'::before').content)};
+     clip:getComputedStyle(meta).clipPath,metaLeft:meta.getBoundingClientRect().left,
+     parts:[...el.querySelectorAll('.pri-repo,.pri-branch,.pri-attribution > span')].map(s=>({left:s.getBoundingClientRect().left,dot:getComputedStyle(s,'::before').content}))};
    }));
    for(const row of rows) {
     expect(row.external.width===20&&row.external.y===row.title.y,'D1: external icon has a fixed top-aligned trailing column');
@@ -189,7 +190,13 @@ await runJourney({
      expect(row.title.y<row.meta.y&&row.meta.y+row.meta.height<=row.badges.y+1,'D6: title, then meta, then status');
      expect(/#\d+ · .+ → .+ · by /.test(row.metaTitle),'D6: the full meta stays readable in its tooltip');
     } else {
-     expect(row.separators.every(s=>s==='none'||s==='normal'),'D1: wrapping metadata cannot create a leading separator');
+     // Council pass 4 (S5) separates the desktop parts with middots too. Each part
+     // carries its dot in a 16px seat in front, and the meta row starts 16px early
+     // and clips that strip: a part that begins a wrapped line sits flush in it, so
+     // its dot is hidden and no line starts with a separator (pass 1 D1).
+     expect(row.parts.every(p=>p.dot!=='none'&&p.dot!=='normal'),'S5: desktop metadata parts are separated by middots '+JSON.stringify(row.parts));
+     expect(row.clip==='inset(0px 0px 0px 16px)'&&Math.abs(row.metaLeft+16-row.title.x)<=1,'S5: the clipped dot strip sits just left of the title edge '+JSON.stringify({clip:row.clip,metaLeft:row.metaLeft,title:row.title.x}));
+     expect(row.parts.every(p=>p.left>=row.metaLeft+16-1||Math.abs(p.left-row.metaLeft)<=1),'D1: wrapping metadata cannot create a leading separator '+JSON.stringify(row.parts));
     }
    }
    if(variant.viewport==='phone')expect(rows[0].external.x===rows[1].external.x,'D1: external-link column stays in the same place');

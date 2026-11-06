@@ -10,7 +10,7 @@
 	 *   per-item mark-read + dismiss, plus mark-all-read and clear-all.
 	 * - Uses the shared `header-dropdowns` store so opening this closes the
 	 *   profile, branch, and git-action popovers (single-open-at-a-time).
-	 * - Rail: a 360px panel floats just right of the rail, bottom-aligned with
+	 * - Rail: a 300px panel floats just right of the rail, bottom-aligned with
 	 *   the bell, over the list column and canvas. Header instances stay
 	 *   right-anchored under their button.
 	 * - Outside-click + Escape to close. On the mobile shell the panel is
@@ -68,20 +68,26 @@
 	};
 
 	// The rail's panel floats beside the rail, its bottom level with the bell,
-	// at a fixed 360px so a title stays on one line and a body on two. It
-	// covers the list column and the canvas edge, never the rail itself, and
-	// keeps inside the window.
-	let railAnchor = $state({ left: 0, bottom: 8, width: 360 });
+	// at 300px: from x=64 its right edge lands at 364, inside the list column
+	// and its gutter, 12px or more left of the page content (x=378 with the
+	// list panel open). It never covers the rail and keeps inside the window.
+	const RAIL_PANEL_WIDTH = 300;
+	// The page's blank inline gutter right of the list column: overrunning the
+	// list panel by up to this much covers only padding, never text.
+	const CONTENT_GUTTER = 48;
+	let railAnchor = $state({ left: 0, bottom: 8, width: RAIL_PANEL_WIDTH, railRight: 0 });
+	// With the list panel collapsed (or a narrow window) the panel has to sit on
+	// page content, so a light scrim dims the page and no sliced words read.
+	let coversPage = $state(false);
 	function positionPanel() {
 		if (!rail || !bellRef) return;
 		const rect = bellRef.getBoundingClientRect();
-		const start = bellRef.closest('nav.rail')?.getBoundingClientRect().right ?? rect.right;
-		const width = Math.min(360, window.innerWidth - 16);
-		railAnchor = {
-			left: Math.max(8, Math.min(start + 8, window.innerWidth - width - 8)),
-			bottom: Math.max(8, window.innerHeight - rect.bottom),
-			width
-		};
+		const railRight = bellRef.closest('nav.rail')?.getBoundingClientRect().right ?? rect.right;
+		const width = Math.min(RAIL_PANEL_WIDTH, window.innerWidth - 16);
+		const left = Math.max(8, Math.min(railRight + 8, window.innerWidth - width - 8));
+		railAnchor = { left, bottom: Math.max(8, window.innerHeight - rect.bottom), width, railRight };
+		const listRight = bellRef.closest('aside')?.getBoundingClientRect().right ?? railRight;
+		coversPage = left + width > listRight + CONTENT_GUTTER;
 	}
 
 	function togglePanel() {
@@ -137,7 +143,7 @@
 <svelte:window onclick={handleClickOutside} onkeydown={handleKeydown} onresize={positionPanel} />
 
 {#if !bar || unread > 0 || showPanel}
-<div class="notif-center" class:bar class:rail bind:this={rootRef} style:--notif-left={`${railAnchor.left}px`} style:--notif-bottom={`${railAnchor.bottom}px`} style:--notif-width={`${railAnchor.width}px`}>
+<div class="notif-center" class:bar class:rail bind:this={rootRef} style:--notif-left={`${railAnchor.left}px`} style:--notif-bottom={`${railAnchor.bottom}px`} style:--notif-width={`${railAnchor.width}px`} style:--notif-rail-right={`${railAnchor.railRight}px`}>
 	<button
 		bind:this={bellRef}
 		class="notif-btn"
@@ -156,6 +162,10 @@
 	</button>
 
 	{#if showPanel}
+		{#if rail && coversPage}
+			<!-- Dims the page the panel sits on; a click here closes like any outside click. -->
+			<button type="button" class="notif-scrim" tabindex="-1" aria-label="Close notifications" data-testid="notif-scrim" onclick={() => closeDropdown(dropdownId)}></button>
+		{/if}
 		<div class="notif-panel" role="dialog" aria-label="Notifications">
 			<div class="panel-head">
 				<span class="panel-title">Notifications</span>
@@ -243,6 +253,18 @@
 		width: var(--notif-width);
 		max-height: min(440px, calc(100dvh - var(--notif-bottom) - var(--titlebar-height, 0px) - 8px));
 	}
+	/* Half the shared modal overlay, from the rail's edge: the rail stays lit. */
+	.notif-scrim {
+		position: fixed;
+		inset: var(--titlebar-height, 0px) 0 0 var(--notif-rail-right);
+		z-index: 99;
+		padding: 0;
+		border: 0;
+		cursor: default;
+		background: color-mix(in oklch, var(--modal-overlay) 50%, transparent);
+		animation: notif-scrim-in 120ms ease-out;
+	}
+	@keyframes notif-scrim-in { from { opacity: 0; } }
 
 	/* Phone top bar: a 44x48 target, a 16px bell and the one 16px count. */
 	.notif-center.bar .notif-btn { width: 44px; height: 48px; border-radius: 8px; opacity: 1; }
@@ -383,12 +405,14 @@
 		gap: 4px;
 	}
 
+	/* Ghost buttons, 28px tall with 13px text. */
 	.head-action {
 		display: inline-flex;
 		align-items: center;
 		gap: 4px;
-		padding: 4px 7px;
-		font-size: 0.6875rem;
+		height: 28px;
+		padding: 0 8px;
+		font-size: 13px;
 		font-weight: 500;
 		color: var(--muted-foreground);
 		background: transparent;
@@ -539,9 +563,9 @@
 	}
 
 	.item-time {
-		font-size: 0.6875rem;
+		font-size: 12px;
 		font-weight: 400;
-		color: var(--subtle-foreground);
+		color: var(--muted-foreground);
 		margin-top: 1px;
 	}
 
@@ -555,7 +579,7 @@
 		max-width: 9.5rem;
 	}
 
-	/* A narrow panel, and always the rail's 360px popover, moves the actions
+	/* A narrow panel, and always the rail's 300px popover, moves the actions
 	   onto their own line under the message, so the message keeps the row's width. */
 	@container (max-width: 320px) {
 		.notif-item { flex-wrap: wrap; }
@@ -651,7 +675,8 @@
 		.notif-btn {
 			transition: none;
 		}
-		.notif-panel {
+		.notif-panel,
+		.notif-scrim {
 			animation: none;
 		}
 	}
