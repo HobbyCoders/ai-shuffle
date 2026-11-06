@@ -20,6 +20,18 @@ if (process.env.FAKE_WORKER_EXIT_BEFORE_READY) {
 	process.exit(Number(process.env.FAKE_WORKER_EXIT_BEFORE_READY));
 }
 let exiting = false;
+let reportedReady = false;
+const started = Date.now();
+const timing = (event) => process.stdout.write(`fake-worker: ${event} at ${Date.now() - started}ms\n`);
+// HTTP /health/ready precedes identity verification, persistence and startup
+// sync. The test supervisor acknowledges its *published* ready state explicitly.
+process.on('SIGUSR2', () => {
+	if (exitAfterReady && !exiting) {
+		exiting = true;
+		timing('crash armed after supervisor ready');
+		setTimeout(() => { timing('exiting (3)'); process.exit(3); }, exitAfterReady);
+	}
+});
 const server = http.createServer((req, res) => {
 	res.setHeader('content-type', 'application/json');
 	if (req.url === '/health') {
@@ -32,17 +44,18 @@ const server = http.createServer((req, res) => {
 			return res.end('{"status":"starting"}');
 		}
 		res.end('{"status":"ready"}');
-		if (exitAfterReady && !exiting) {
-			exiting = true;
-			setTimeout(() => process.exit(3), exitAfterReady);
-		}
+		if (!reportedReady) { reportedReady = true; timing('HTTP ready'); }
 		return;
 	}
 	if (listener && req.headers['x-shuffle-desktop-listener'] !== listener) {
 		res.statusCode = 403;
 		return res.end('{"detail":"Desktop listener token required"}');
 	}
-	if (req.url === '/api/v1/network/startup-sync' && req.method === 'POST') return res.end('{"status":"synced","peers":0}');
+	if (req.url === '/api/v1/network/startup-sync' && req.method === 'POST') {
+		// Deliberately stretch the gap between HTTP readiness and supervisor readiness.
+		setTimeout(() => res.end('{"status":"synced","peers":0}'), Number(process.env.FAKE_WORKER_SYNC_DELAY_MS || 0));
+		return;
+	}
 	if (req.url === '/api/v1/owner/handoff' && req.method === 'POST') return res.end('{"path":"/api/v1/owner/handoff?token=one-time","expires_in":60}');
 	if (req.url === '/api/v1/internal/desktop/stop-sessions') return res.end('{"stopped":true}');
 	if (req.url === '/api/v1/internal/desktop/active-sessions') return res.end('{"active_sessions":0}');
