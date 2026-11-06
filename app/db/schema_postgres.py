@@ -57,10 +57,10 @@ def create_session_recall_text(cursor) -> None:
     from app.db import session_recall
     if session_recall.ready(cursor):
         return  # Superseded; never recreate redundant indexes on a ready worker.
-    # Also serialize this explicit offline command with online maintenance if
-    # backfill becomes ready after the probe above. Its caller bounds lock waits.
-    from app.db.database import SCHEMA_INIT_LOCK_KEY
-    cursor.execute(f"SELECT pg_advisory_xact_lock({SCHEMA_INIT_LOCK_KEY})")
+    # A blocking advisory SELECT would retain a snapshot that a concurrent
+    # build needs to drain. This caller-owned transaction must retry in full.
+    if not session_recall._try_schema_lock(cursor):
+        raise RuntimeError("schema maintenance busy; retry the cache command")
     cursor.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
     shapes = (
         ("fluid_session_nodes", "message::text", "TRUE", "idx_fluid_recall_text_trgm"),

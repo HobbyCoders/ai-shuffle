@@ -106,7 +106,8 @@ def _online_cursor() -> Iterator[Any]:
         try:
             with raw.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute("SELECT current_setting('lock_timeout') AS lock, "
-                            "current_setting('statement_timeout') AS statement")
+                            "current_setting('statement_timeout') AS statement, "
+                            "current_setting('application_name') AS application")
                 previous = cur.fetchone()
                 cur.execute("SELECT pg_try_advisory_lock(hashtext(current_database()), "
                             "hashtext(current_schema() || '.history_indexing_v1')) AS ok")
@@ -114,21 +115,35 @@ def _online_cursor() -> Iterator[Any]:
                 schema_locked = False
                 try:
                     if locked:
-                        from app.db.database import SCHEMA_INIT_LOCK_KEY
+                        from app.db.database import SCHEMA_INIT_LOCK_KEY, ONLINE_DDL_APPLICATION_NAME
                         cur.execute("SELECT pg_try_advisory_lock(%s) AS ok", (SCHEMA_INIT_LOCK_KEY,))
                         schema_locked = cur.fetchone()["ok"]
+                        if schema_locked:
+                            cur.execute("SELECT set_config('application_name',%s,false)",
+                                        (ONLINE_DDL_APPLICATION_NAME,))
                     yield cur if locked and schema_locked else None
                 finally:
-                    if schema_locked:
-                        cur.execute("SELECT pg_advisory_unlock(%s)", (SCHEMA_INIT_LOCK_KEY,))
-                    if locked:
-                        cur.execute("SELECT pg_advisory_unlock(hashtext(current_database()), "
-                                    "hashtext(current_schema() || '.history_indexing_v1'))")
-                    cur.execute("SELECT set_config('lock_timeout',%s,false), "
-                                "set_config('statement_timeout',%s,false)",
-                                (previous["lock"], previous["statement"]))
+                    try:
+                        # Stop advertising cancellable work before returning the
+                        # schema key, settings and connection to ordinary users.
+                        cur.execute("SELECT set_config('application_name',%s,false)",
+                                    (previous["application"],))
+                        if schema_locked:
+                            cur.execute("SELECT pg_advisory_unlock(%s)", (SCHEMA_INIT_LOCK_KEY,))
+                        if locked:
+                            cur.execute("SELECT pg_advisory_unlock(hashtext(current_database()), "
+                                        "hashtext(current_schema() || '.history_indexing_v1'))")
+                        cur.execute("SELECT set_config('lock_timeout',%s,false), "
+                                    "set_config('statement_timeout',%s,false)",
+                                    (previous["lock"], previous["statement"]))
+                    except Exception:
+                        # Cancellation during cleanup must not leak session
+                        # locks or maintenance settings into the pool.
+                        raw.close()
+                        raise
         finally:
-            raw.autocommit = False
+            if not raw.closed:
+                raw.autocommit = False
 
 
 def migrate() -> bool:

@@ -14,6 +14,7 @@ import hashlib
 import json
 import logging
 import sys
+import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -3698,6 +3699,61 @@ def boot_init_lock() -> Iterator[None]:
         yield
 
 
+# Only this tagged online DDL may be interrupted to admit a starting process.
+ONLINE_DDL_APPLICATION_NAME = "ai-shuffle-online-index-maintenance"
+_SCHEMA_MAINTENANCE_GRACE_SECONDS = 10.0
+
+
+def _cancel_schema_maintenance(cursor) -> bool:
+    """Cancel only our current database's tagged holder of the bigint key."""
+    cursor.execute(
+        "SELECT pg_cancel_backend(a.pid) AS cancelled "
+        "FROM pg_locks l JOIN pg_stat_activity a ON a.pid=l.pid "
+        "WHERE l.locktype='advisory' AND l.granted AND l.objsubid=1 "
+        "AND l.database=(SELECT oid FROM pg_database WHERE datname=current_database()) "
+        "AND l.classid=%s::oid AND l.objid=%s::oid "
+        "AND a.application_name=%s AND a.pid<>pg_backend_pid()",
+        ((SCHEMA_INIT_LOCK_KEY >> 32) & 0xffffffff, SCHEMA_INIT_LOCK_KEY & 0xffffffff,
+         ONLINE_DDL_APPLICATION_NAME),
+    )
+    return any(row["cancelled"] for row in cursor.fetchall())
+
+
+def _acquire_schema_init_lock(conn):
+    """Wait without retaining a snapshot that a concurrent build must drain.
+
+    A second server process or the password/pairing CLIs can initialize this
+    same database while maintenance runs. After a short grace, ask only the
+    tagged background DDL holder to yield; cancelled online DDL retries later.
+    """
+    started = time.monotonic()
+    delay = 0.25
+    logged = False
+    while True:
+        cursor = conn.cursor()
+        migration_timeouts(cursor)
+        cursor.execute("SELECT pg_try_advisory_xact_lock(%s) AS locked", (SCHEMA_INIT_LOCK_KEY,))
+        if cursor.fetchone()["locked"]:
+            return cursor  # keep this transaction/lock for bootstrap and migrations
+        conn.rollback()  # no active transaction or snapshot during the backoff
+        if not logged:
+            logger.info("Waiting for database schema lock (startup or background index maintenance)")
+            logged = True
+        elapsed = time.monotonic() - started
+        if elapsed >= _SCHEMA_MAINTENANCE_GRACE_SECONDS:
+            try:
+                migration_timeouts(cursor)
+                if _cancel_schema_maintenance(cursor):
+                    delay = 0.25  # promptly take the lock after maintenance yields
+            finally:
+                conn.rollback()  # the holder lookup must not retain a snapshot either
+            pause = delay
+        else:
+            pause = min(delay, _SCHEMA_MAINTENANCE_GRACE_SECONDS - elapsed)
+        time.sleep(pause)
+        delay = min(2.0, delay * 2)
+
+
 def init_database() -> None:
     """Initialize the PostgreSQL database with schema.
 
@@ -3728,9 +3784,6 @@ def init_database() -> None:
     logger.info("Initializing PostgreSQL database")
 
     with get_db() as conn:
-        cursor = conn.cursor()
-        migration_timeouts(cursor)
-
         # Serialize schema initialisation across processes. Workers sharing
         # one database can boot (or roll out an upgrade) at the same moment;
         # without this both see the same missing table/column, both issue the
@@ -3738,7 +3791,7 @@ def init_database() -> None:
         # column once the winner commits. Transaction-scoped, so it is released
         # by the commit/rollback that ends this block, and everything below
         # (version, fingerprint) is read only after the other boot finished.
-        cursor.execute("SELECT pg_advisory_xact_lock(%s)", (SCHEMA_INIT_LOCK_KEY,))
+        cursor = _acquire_schema_init_lock(conn)
 
         # Create schema version table
         cursor.execute("""
