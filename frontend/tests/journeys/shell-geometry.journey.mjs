@@ -37,7 +37,7 @@ await runJourney({name:'shell-geometry', allow:[...DEV_INSTANCE_NOISE, {
     const geometry=await heading.evaluate(h=>{
      const title=h.closest('.st-page-title'), r=h.getBoundingClientRect(), style=getComputedStyle(h);
      const content=title.nextElementSibling || title.closest('.st-lcol')?.querySelector('.st-lscroll > *');
-     return {y:r.y,height:r.height,font:style.fontSize,line:style.lineHeight,gap:content.getBoundingClientRect().y-title.getBoundingClientRect().bottom,overflow:document.documentElement.scrollWidth>innerWidth};
+     return {x:r.x,y:r.y,height:r.height,font:style.fontSize,line:style.lineHeight,gap:content.getBoundingClientRect().y-title.getBoundingClientRect().bottom,overflow:document.documentElement.scrollWidth>innerWidth};
     });
     log(JSON.stringify({theme,width,category,...geometry}));
     baseline ??= geometry;
@@ -45,6 +45,7 @@ await runJourney({name:'shell-geometry', allow:[...DEV_INSTANCE_NOISE, {
     expect(geometry.font==='24px' && geometry.line==='30px','one Settings title scale');
     expect(geometry.gap===28,'every Settings page has one title-to-content gap');
     expect(!geometry.overflow,'no horizontal overflow');
+    if(width<600) expect(geometry.x===16,'stacked titles, with or without a trailing action, sit on the 16px page gutter');
     if(category==='General' && width<600) {
      for(const label of ['Theme','Theme style']) {
       const row=page.locator('.st-row').filter({has:page.getByText(label,{exact:true})});
@@ -69,6 +70,15 @@ await runJourney({name:'shell-geometry', allow:[...DEV_INSTANCE_NOISE, {
     expect(await nav.isVisible(),'collapsed panel preserves destination switching');
     await page.getByRole('button',{name:'Show sidebar',exact:true}).click();
     expect(await page.getByPlaceholder('Search agents').isVisible(),'reopen restores panel controls');
+    await mark('chat pages show one panel toggle: Hide in the open panel header, Show only while collapsed');
+    await nav.getByRole('button',{name:'Chats',exact:true}).click();
+    await page.locator('.p-head').filter({visible:true}).first().waitFor();
+    const visible=name=>page.getByRole('button',{name,exact:true}).filter({visible:true}).count();
+    expect(await visible('Hide sidebar')===1 && await visible('Show sidebar')===0,'the open Chats panel and the chat bar never both draw a panel toggle');
+    await shown(page.getByRole('button',{name:'Hide sidebar',exact:true})).click();
+    expect(await visible('Show sidebar')===1 && await visible('Hide sidebar')===0,'the collapsed panel keeps one reopen control');
+    await shown(page.getByRole('button',{name:'Show sidebar',exact:true})).click();
+    await page.locator('.p-head').filter({visible:true}).first().waitFor();
    }
   }
  }))) });

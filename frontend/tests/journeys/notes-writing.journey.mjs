@@ -20,6 +20,15 @@ async function openNotes(page, status, native = false) {
  }
  await page.getByPlaceholder('Search notes', { exact: true }).waitFor();
 }
+async function documentGap(page) {
+ // Distance from the Tags & files row to the first thing in the document:
+ // the framed field in Edit, the first rendered block in Preview.
+ return page.evaluate(() => {
+  const row = document.querySelector('details.note-fields > summary').getBoundingClientRect();
+  const doc = document.querySelector('.note-preview > :first-child, .note-textarea').getBoundingClientRect();
+  return doc.top - row.bottom;
+ });
+}
 function writingCase(name, native = false, mid = false) {
  return {
   name, ...(native ? { viewports: ['phone'] } : mid ? { viewports: ['desktop'] } : {}),
@@ -43,6 +52,12 @@ function writingCase(name, native = false, mid = false) {
    expect(await heading.inputValue() === title, 'Enter never inserts a title newline');
    await page.getByRole('textbox', { name: 'Note body', exact: true }).fill('# Release plan\n- [x] **Ready** for [review](https://example.com)');
    await page.locator('.note-save').filter({ hasText: /^Saved$/ }).waitFor({ state: 'attached' });
+   const fieldsRow = page.locator('details.note-fields');
+   expect(!await fieldsRow.evaluate(el => el.open), 'Tags & files starts collapsed at every width');
+   if (page.viewportSize().width >= 600) {
+    const gap = await documentGap(page);
+    expect(gap >= 24 && gap <= 32, `the Edit document starts 24–32px below Tags & files (${gap}px)`);
+   }
    await mark('switch to Preview and keep the phone body above 320px');
    await page.getByRole('tab', { name: 'Preview', exact: true }).click();
    const preview = page.locator('.note-preview');
@@ -51,6 +66,10 @@ function writingCase(name, native = false, mid = false) {
    expect(await task.evaluate(el => getComputedStyle(el).listStyleType) === 'none', 'task items have no bullet');
    expect(await preview.locator('ul').evaluate(el => parseFloat(getComputedStyle(el).paddingInlineStart)) >= 20, 'lists stay inside the preview column');
    expect(await task.locator('input').evaluate(el => getComputedStyle(el).appearance) === 'none', 'task marks use the theme outline and accent, not disabled browser grey');
+   if (page.viewportSize().width >= 600) {
+    const gap = await documentGap(page);
+    expect(gap >= 24 && gap <= 32, `the Preview document starts 24–32px below Tags & files (${gap}px)`);
+   }
    if (page.viewportSize().width < 600) {
     expect(await preview.evaluate(el => getComputedStyle(el).paddingTop) === '24px', 'phone Preview has a 24px document inset');
     const titleBox = await heading.boundingBox();

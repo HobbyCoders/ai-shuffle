@@ -1515,22 +1515,22 @@
 	.mcp-ring.unknown .ring-track { stroke-dasharray: 3 2.7; }
 
 	/* Switch rows */
-	/* The phone's measure of the shared Switch (mobile.css), which sits inside a row here. */
-	.mcp-sw { position: relative; width: 42px; height: 25px; flex: none; border-radius: 999px; background: var(--switch-off); box-shadow: inset 0 0 0 1px var(--switch-off-edge); transition: background-color 0.2s; }
+	/* The shared Switch's phone measure (36x22, 18px thumb); the whole row is its tap area. */
+	.mcp-sw { position: relative; width: 36px; height: 22px; flex: none; border-radius: 999px; background: var(--switch-off); box-shadow: inset 0 0 0 1px var(--switch-off-edge); transition: background-color 0.2s; }
 	.mcp-sw::after {
 		content: '';
 		position: absolute;
-		top: 2.5px;
-		left: 2.5px;
-		width: 20px;
-		height: 20px;
+		top: 2px;
+		left: 2px;
+		width: 18px;
+		height: 18px;
 		border-radius: 50%;
 		background: var(--switch-thumb);
 		box-shadow: 0 0 0 0.5px var(--switch-thumb-edge), 0 1px 2px var(--switch-thumb-edge);
 		transition: transform 0.22s var(--mcp-ease);
 	}
 	.mcp-row[aria-checked='true'] .mcp-sw { background: var(--switch-on); box-shadow: none; }
-	.mcp-row[aria-checked='true'] .mcp-sw::after { transform: translateX(17px); }
+	.mcp-row[aria-checked='true'] .mcp-sw::after { transform: translateX(14px); }
 	.mcp-row[aria-disabled='true'] { cursor: default; }
 	.mcp-row[aria-disabled='true'] .mcp-lbl > span, .mcp-row[aria-disabled='true'] .mcp-ic { opacity: 0.5; }
 	.mcp-row[aria-disabled='true'] .mcp-sw { opacity: 0.4; }
@@ -1728,8 +1728,8 @@
 	.mcp-setup :global(.sheet-mode .ctx-chip .ctx-chip-cb) {
 		order: 2;
 		position: relative;
-		width: 42px;
-		height: 25px;
+		width: 36px;
+		height: 22px;
 		border-radius: 999px;
 		background: var(--switch-off); box-shadow: inset 0 0 0 1px var(--switch-off-edge);
 		transition: background-color 0.2s;
@@ -1739,14 +1739,15 @@
 		position: absolute;
 		top: 2px;
 		left: 2px;
-		width: 21px;
-		height: 21px;
+		width: 18px;
+		height: 18px;
+		box-shadow: 0 0 0 0.5px var(--switch-thumb-edge), 0 1px 2px var(--switch-thumb-edge);
 		border-radius: 50%;
 		background: var(--switch-thumb);
 		transition: transform 0.2s;
 	}
 	.mcp-setup :global(.sheet-mode .ctx-chip .ctx-chip-cb.checked) { background: var(--switch-on); box-shadow: none; }
-	.mcp-setup :global(.sheet-mode .ctx-chip .ctx-chip-cb.checked::after) { transform: translateX(17px); }
+	.mcp-setup :global(.sheet-mode .ctx-chip .ctx-chip-cb.checked::after) { transform: translateX(14px); }
 	.mcp-setup :global(.sheet-mode .degraded::before) { content: 'Runs on'; }
 	/* The Project row names the project; the Branch row shows the branch alone. */
 	.mcp-setup :global(.sheet-mode .branch-btn .project-name),
@@ -1848,14 +1849,14 @@
 	/* The action bar lies over the list's end. The list scrolls clear of it (its
 	   height plus 16px), so its last row can always come fully into view, and
 	   anything passing under the bar's top edge fades out instead of being cut. */
-	.mcp-page[data-page='main'] { --mcp-foot-height: calc(78px + env(safe-area-inset-bottom, 0px)); }
+	.mcp-page[data-page='main'] { --mcp-foot-height: calc(61px + env(safe-area-inset-bottom, 0px)); }
 	.mcp-page[data-page='main'] > .mcp-scroll { padding-bottom: calc(var(--mcp-foot-height) + 16px); }
 	.mcp-foot {
 		position: absolute;
 		inset: auto 0 0;
 		z-index: 1;
 		min-height: var(--mcp-foot-height);
-		padding: 10px 14px calc(12px + env(safe-area-inset-bottom, 0px));
+		padding: 4px 14px calc(6px + env(safe-area-inset-bottom, 0px));
 		border-top: 1px solid var(--border);
 		background: var(--popover);
 	}
@@ -1869,54 +1870,62 @@
 	}
 	/* One equal column per action that is actually shown (Call hides itself when the composer has none). */
 	.actions { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 8px; }
+	/* The shared compact phone button (settings kit .st-btn): drawn 32px tall on a
+	   hairline with no fill, its 44px tap area reserved by the margin and an
+	   invisible extension. */
 	.act {
+		--act-icon: 15px;
+		--act-gap: 6px;
 		position: relative;
 		min-width: 0;
-		height: 46px;
+		height: 32px;
+		margin-block: 6px;
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		gap: 7px;
-		padding: 0 6px;
-		border: 1px solid var(--border);
-		border-radius: calc(var(--radius) * 0.9);
-		background: var(--card);
+		gap: var(--act-gap);
+		padding: 0 8px;
+		border: 1px solid color-mix(in oklch, var(--foreground) 16%, transparent);
+		border-radius: var(--radius, 8px);
+		background: transparent;
 		color: var(--foreground);
 		font: inherit;
-		font-size: 14px;
+		font-size: 13px;
 		font-weight: 500;
 		cursor: pointer;
 		-webkit-tap-highlight-color: transparent;
 		transition: background-color 0.15s, transform 0.15s;
 	}
-	.act :global(svg) { flex: none; color: var(--muted-foreground); }
+	button.act::after { content: ''; position: absolute; inset: -7px 0; }
+	.act :global(svg) { flex: none; width: var(--act-icon); height: var(--act-icon); color: var(--muted-foreground); }
 	.act:hover:not(:disabled) { background: var(--hover-overlay); }
 	.act:active:not(:disabled) { transform: scale(0.97); }
-	.act[aria-pressed='true'] { background: color-mix(in oklab, var(--primary) 14%, var(--card)); border-color: color-mix(in oklab, var(--primary) 45%, transparent); }
+	.act[aria-pressed='true'] { background: color-mix(in oklab, var(--primary) 14%, transparent); border-color: color-mix(in oklab, var(--primary) 45%, transparent); }
 	.act[aria-pressed='true'] :global(svg), .act[aria-pressed='true'] .act-label { color: var(--primary); }
 	.act:disabled { opacity: 0.45; cursor: not-allowed; }
 	.act-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; pointer-events: none; }
-	/* Four actions: icon over label so every name fits at 360px. */
-	.actions:has(:global(.voice-call-btn)):has(> button:nth-of-type(3)) .act { flex-direction: column; gap: 3px; height: 54px; font-size: 12px; }
-	/* Call is the composer's own VoiceCallButton, stretched over the cell. */
+	/* Four actions: the same row, a step tighter, so every name fits at 360px. */
+	.actions:has(:global(.voice-call-btn)):has(> button:nth-of-type(3)) .act { --act-gap: 4px; padding: 0 4px; font-size: 12px; }
+	/* Call is the composer's own VoiceCallButton, stretched over the cell and its
+	   44px tap band; its icon sits where the other cells draw theirs ("Call" is
+	   about 2em wide). */
 	.call-act :global(.voice-call-btn) {
 		position: absolute;
-		inset: 0;
-		width: 100%;
-		height: 100%;
+		inset: -7px 0;
+		width: auto;
+		height: auto;
 		display: flex;
 		align-items: center;
 		justify-content: flex-start;
-		padding: 0 0 0 calc(50% - 28px);
+		padding: 0 0 0 calc(50% - (var(--act-icon) + var(--act-gap) + 2em) / 2);
 		border: 0;
 		border-radius: inherit;
 		background: transparent;
 		color: var(--muted-foreground);
+		font-size: inherit;
 	}
-	.call-act :global(.voice-call-btn svg) { width: 18px; height: 18px; }
-	.call-act .act-label { padding-left: 25px; }
-	.actions:has(:global(.voice-call-btn)):has(> button:nth-of-type(3)) .call-act :global(.voice-call-btn) { justify-content: center; align-items: flex-start; padding: 9px 0 0; }
-	.actions:has(:global(.voice-call-btn)):has(> button:nth-of-type(3)) .call-act .act-label { padding: 21px 0 0; }
+	.call-act :global(.voice-call-btn svg) { width: var(--act-icon); height: var(--act-icon); }
+	.call-act .act-label { padding-left: calc(var(--act-icon) + var(--act-gap)); }
 	.call-act:not(:has(:global(.voice-call-btn))) { display: none; }
 
 	:global(.mcc-spin) { animation: mcc-spin 0.9s linear infinite; }

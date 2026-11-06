@@ -426,6 +426,10 @@
 	:global(.sheet-layout) .opt-radio { min-height: 44px; }
 	:global(.sheet-layout) .opt-input,
 	:global(.sheet-layout) .opt-textarea { font-size: 16px; }
+	/* In a phone sheet the switch takes the shared Switch's phone measure; the row is its tap area. */
+	:global(.sheet-layout) .opt-switch { width: 36px; height: 22px; }
+	:global(.sheet-layout) .opt-switch::after { width: 18px; height: 18px; }
+	:global(.sheet-layout) .opt-switch.on::after { transform: translateX(14px); }
 
 	.opt-field {
 		display: flex;
