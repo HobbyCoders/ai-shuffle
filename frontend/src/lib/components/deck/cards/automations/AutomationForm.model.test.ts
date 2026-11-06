@@ -299,3 +299,16 @@ describe('scheduled-run notice', () => {
 		expect(notice?.textContent).toContain('Claude runs on your subscription');
 	});
 });
+
+describe('AutomationForm basics', () => {
+	it('stacks Name and a two-line Description under their labels', () => {
+		const { getByRole } = renderForm();
+		const name = getByRole('textbox', { name: 'Name' });
+		expect(name.tagName).toBe('INPUT');
+		expect(name.closest('.st-rowx')).toBeTruthy();
+		const description = getByRole('textbox', { name: 'Description' });
+		expect(description.tagName).toBe('TEXTAREA');
+		expect(description.getAttribute('rows')).toBe('2');
+		expect(description.closest('.st-rowx')).toBeTruthy();
+	});
+});

@@ -305,6 +305,20 @@
  .settings-shell :is(.st-num input, textarea) { font-size: 16px; }
 }
 
+/* One phone select: the native select (SelectField) and the value button that
+   opens an editor under its row (ExpandToggle, "Default ⌄") both draw 44px tall
+   with 16px text, 12px inner padding and the chevron on the right edge. */
+.settings-shell[data-stacked] span.st-sel-wrap svg.lucide { right: 13px; width: 16px; height: 16px; }
+.settings-shell[data-stacked] select.st-sel { padding: 0 40px 0 12px; }
+.settings-shell[data-stacked] button.st-vbtn { justify-content: space-between; gap: 8px; height: 44px; padding: 0 12px; font-size: 16px; }
+.settings-shell[data-stacked] button.st-vbtn svg.lucide { width: 16px; height: 16px; flex: none; }
+@media (max-width: 600px), (pointer: coarse) {
+ .settings-shell span.st-sel-wrap svg.lucide { right: 13px; width: 16px; height: 16px; }
+ .settings-shell select.st-sel { padding: 0 40px 0 12px; }
+ .settings-shell button.st-vbtn { justify-content: space-between; gap: 8px; height: 44px; padding: 0 12px; font-size: 16px; }
+ .settings-shell button.st-vbtn svg.lucide { width: 16px; height: 16px; flex: none; }
+}
+
 /* Draw the control at desktop density; reserve a full 44px phone touch pitch. */
 .settings-shell[data-stacked] .st-btn { height: 32px; min-height: 32px; margin-block: 6px; }
 .settings-shell[data-stacked] .st-btn::after { content: ''; position: absolute; inset: -6px min(0px, calc((100% - 44px) / 2)); }
@@ -318,24 +332,27 @@
 }
 
 /* A phone screen's main actions (app.css --phone-action-*), and every phone
-   empty state's create or recovery button: drawn at the full 44px touch
-   height, so no invisible extension or reserved margin is needed. Rows,
-   headers and desktop keep the compact 32px button. */
-.settings-shell[data-stacked] :is(.st-btn.phone-action, .st-empty-detail .acts .st-btn) {
+   empty state's create or recovery button, the page header's actions, every
+   primary button and the buttons beside it: drawn at the full 44px touch
+   height, so no invisible extension or reserved margin is needed. Secondary
+   row buttons and desktop keep the compact 32px button. */
+.settings-shell[data-stacked] :is(.st-btn.phone-action, .st-empty-detail .acts .st-btn, .st-page-title .st-btn, .st-ltools .st-btn, .st-btn.primary, :has(> .st-btn.primary) > .st-btn) {
 	height: var(--phone-action-height);
 	min-height: var(--phone-action-height);
 	margin-block: 0;
 	border-radius: var(--phone-action-radius);
 }
-.settings-shell[data-stacked] :is(.st-btn.phone-action, .st-empty-detail .acts .st-btn)::after { content: none; }
+.settings-shell[data-stacked] :is(.st-btn.phone-action, .st-empty-detail .acts .st-btn, .st-page-title .st-btn, .st-ltools .st-btn, .st-btn.primary, :has(> .st-btn.primary) > .st-btn)::after { content: none; }
+.settings-shell[data-stacked] :is(.st-page-title, .st-ltools) .st-btn.icon { width: var(--phone-action-height); min-width: var(--phone-action-height); margin-inline: 0; }
 @media (max-width: 600px), (pointer: coarse) {
- .settings-shell :is(.st-btn.phone-action, .st-empty-detail .acts .st-btn) {
+ .settings-shell :is(.st-btn.phone-action, .st-empty-detail .acts .st-btn, .st-page-title .st-btn, .st-ltools .st-btn, .st-btn.primary, :has(> .st-btn.primary) > .st-btn) {
 	height: var(--phone-action-height);
 	min-height: var(--phone-action-height);
 	margin-block: 0;
 	border-radius: var(--phone-action-radius);
  }
- .settings-shell :is(.st-btn.phone-action, .st-empty-detail .acts .st-btn)::after { content: none; }
+ .settings-shell :is(.st-btn.phone-action, .st-empty-detail .acts .st-btn, .st-page-title .st-btn, .st-ltools .st-btn, .st-btn.primary, :has(> .st-btn.primary) > .st-btn)::after { content: none; }
+ .settings-shell :is(.st-page-title, .st-ltools) .st-btn.icon { width: var(--phone-action-height); min-width: var(--phone-action-height); margin-inline: 0; }
 }
 
 /* Back button: only in stacked mode */

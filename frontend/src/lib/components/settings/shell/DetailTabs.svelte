@@ -423,11 +423,19 @@
 	@media (prefers-reduced-motion: reduce) {
 		.st-tabs-wrap::before, .st-tabs-wrap::after, button { transition: none; }
 	}
+	/* The count is a small badge, so "Tools 121" never reads as one word:
+	   about 55% of the label colour (over 3:1 on the badge), 6px from the label. */
 	.n {
-		color: var(--st-mfg);
-		margin-left: 4px;
+		display: inline-block;
+		margin-left: 6px;
+		padding: 0 4px;
+		border-radius: 4px;
+		background: var(--st-muted);
+		color: color-mix(in srgb, var(--st-fg) 55%, var(--st-bg));
 		font-size: 11px;
 		font-weight: 500;
+		line-height: 16px;
 		font-variant-numeric: tabular-nums;
+		vertical-align: 1px;
 	}
 </style>

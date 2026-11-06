@@ -24,6 +24,22 @@ function overflow(strip: HTMLElement, scrollWidth = 600, clientWidth = 300) {
 	Object.defineProperty(strip, 'clientWidth', { configurable: true, value: clientWidth });
 }
 
+describe('counts', () => {
+	it('renders a count as its own badge after the label, and none for an empty count', () => {
+		render(DetailTabs, {
+			tabs: [{ id: 'tools', label: 'Tools', count: 121 }, { id: 'models', label: 'Models', count: '' }],
+			current: 'tools',
+			onselect: vi.fn(),
+			label: 'Agent sections',
+			idPrefix: 't'
+		});
+		const badge = screen.getByRole('tab', { name: /Tools/ }).querySelector('.n');
+		expect(badge?.textContent).toBe('121');
+		expect(badge?.previousSibling?.textContent).toBe('Tools');
+		expect(screen.getByRole('tab', { name: 'Models' }).querySelector('.n')).toBeNull();
+	});
+});
+
 describe('keyboard', () => {
 	it('moves and selects with the arrow keys, Home and End, wrapping at the ends', async () => {
 		const { onselect } = setup('profile');

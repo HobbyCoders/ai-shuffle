@@ -146,7 +146,7 @@
 						</span>
 					{/if}
 					{#if t.id === 'paid'}
-						<a class="st-btn" data-setting-anchor="cloud.upgrade" href={CLOUD_PRICING_URL} target="_blank" rel="noopener noreferrer"><ExternalLink />See plans</a>
+						<a class="st-btn phone-action" data-setting-anchor="cloud.upgrade" href={CLOUD_PRICING_URL} target="_blank" rel="noopener noreferrer"><ExternalLink />See plans</a>
 					{/if}
 				</SettingRow>
 			{/each}

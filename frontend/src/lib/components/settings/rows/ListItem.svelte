@@ -118,14 +118,18 @@
 		<span class="vl">{#if status}<StatusDot tone={status} />{/if}<span class="vt">{summary}</span></span>
 		<ChevronRight class="chev" aria-hidden="true" />
 	{:else}
-	{#if lead}
-		{@render lead()}
-	{:else if variant === 'log'}
-		<StatusDot tone={status ?? 'off'} />
-	{:else if variant !== 'plain' && (glyph || meaningfulIcon)}
-		<Tile {icon} text={glyph} {status} ring={isSelected ? 'accent' : 'bg'} />
-	{:else if variant !== 'plain' && status}
-		<StatusDot tone={status} />
+	{#if hasLead}
+		<span class="lead">
+			{#if lead}
+				{@render lead()}
+			{:else if variant === 'log'}
+				<StatusDot tone={status ?? 'off'} />
+			{:else if glyph || meaningfulIcon}
+				<Tile {icon} text={glyph} {status} ring={isSelected ? 'accent' : 'bg'} />
+			{:else}
+				<StatusDot tone={status ?? 'off'} />
+			{/if}
+		</span>
 	{/if}
 	<span class="tx">
 		{#if badges}
@@ -165,6 +169,23 @@
 		outline-offset: -2px;
 	}
 	.st-it.has-lead { grid-template-columns: auto minmax(0, 1fr) auto; }
+	.lead { display: flex; align-items: center; justify-content: center; min-width: 0; }
+	/* A list panel's rows share the Chats session row grid (SessionCard .scard):
+	   an 8px inset, a 16px leading slot that is always reserved, then a 6px gap,
+	   so every panel's titles start on the Chats title x. The pin, status dot or
+	   avatar sits centred in the slot; a row with no marker leaves it empty. On a
+	   phone the inset is the page gutter, so the slot starts on it. */
+	:global(.view-panel) .st-it:not(.value):not(.card) {
+		grid-template-columns: 16px minmax(0, 1fr) auto;
+		column-gap: 6px;
+	}
+	:global(.view-panel) .st-it:not(.value):not(.card) > .tx { grid-column: 2; }
+	:global(.view-panel) .st-it:not(.value):not(.card) > .trailing { margin-left: 4px; }
+	:global(.view-panel) .st-it:not(.value):not(.card) > .trailing:empty { margin-left: 0; }
+	:global(.view-panel) .st-it .lead { width: 16px; overflow: visible; }
+	@media (min-width: 601px) {
+		:global(.view-panel:not(.native)) .st-it:not(.value):not(.card) { padding-left: 8px; }
+	}
 	.st-it.navigation { min-height: 34px; padding-block: 4px; }
 	.st-it.navigation .nm { font-size: 13px; }
 	.st-it:active:not(:disabled) { background: var(--st-accent); }
