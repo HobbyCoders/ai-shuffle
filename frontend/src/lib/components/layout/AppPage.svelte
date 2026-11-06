@@ -29,7 +29,7 @@
 	import { chatPreferences } from '$lib/stores/chatPreferences.svelte';
 	import { appMode } from '$lib/stores/sessionMode.svelte';
 	import { hasComposerDraft } from '$lib/stores/session/composer-suggestion';
-	import { followChatHistory, openSession as handleOpenSession } from '$lib/services/session-navigation';
+	import { followChatHistory, openSession as handleOpenSession, openSessionFromList } from '$lib/services/session-navigation';
 	import { appData, profiles, projects, sessions, sessionsTagFilter } from '$lib/stores/app-data.svelte';
 
 	import { layout, activeView, sidebarCollapsed, sidebarOverlay } from '$lib/stores/layout.svelte';
@@ -37,7 +37,8 @@
 	import { createdChatToFollow } from './follow-created-chat';
 	import { chatChangedDuringBoot } from './boot-landing';
 	import { finishBootReconciliation, getInitGeneration, hasBootProjectPick, hasBootSendClaim } from '$lib/stores/session/session-init';
-	import { isMessageEditorKey, registerShortcut, type ShortcutRegistration } from '$lib/services/keyboard';
+	import { registerShortcut, type ShortcutRegistration } from '$lib/services/keyboard';
+	import { isMessageEditorKey } from '$lib/services/message-editor-key';
 	import { registerSearchShortcut } from '$lib/services/search-shortcut';
 	import { settingsNav, encodeTarget } from '$lib/settings/navigation.svelte';
 	import type { SettingsTarget } from '$lib/settings/types';
@@ -563,7 +564,8 @@
 		isAdmin: $isAdmin,
 		onNewSession: handleNewSession,
 		onSettledOpenSession: handleNewSession,
-		onOpenSession: handleOpenSession,
+		// Picks from the sidebar and phone drawer are one Back step (#953).
+		onOpenSession: openSessionFromList,
 		onOpenFeature: handleOpenFeature,
 		onOpenSpotlight: () => { showSpotlight = true; }
 	})}

@@ -118,7 +118,7 @@ describe('keyboard registry — message editor shortcuts (#1202)', () => {
 	}
 
 	it('fires Ctrl/Cmd+N from the focused message editor, but not from other fields', async () => {
-		const { isMessageEditorKey } = await import('./keyboard');
+		const { isMessageEditorKey } = await import('./message-editor-key');
 		const newChat = shortcut({ id: 'new-chat', key: 'n', allowInInput: isMessageEditorKey, action: vi.fn() });
 		registerShortcut(newChat);
 		const editable = editor();

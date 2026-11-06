@@ -1031,6 +1031,14 @@
 
 	async function submitComposer(compactBeforeSend: boolean, composerCleared: () => void) {
 		if (!ownsComposer() || heldForCatalog || heldForSetup || (compacting && !compactBeforeSend)) return;
+		// The chat this message was typed in. The checks below can await (the
+		// cold-cache check is a request); a New chat or chat switch in that
+		// window must not carry the message into the view the user moved to
+		// (#1077). The store sends to whichever chat is open when it is called.
+		const typedIn = { sessionId: $activeSession.sessionId, editorOwner: prevSessionId, navigation: getInitGeneration() };
+		const typedDraft = getDraftJSON();
+		const stillTypedIn = () => ownsComposer() && get(activeSession).sessionId === typedIn.sessionId
+			&& prevSessionId === typedIn.editorOwner && getInitGeneration() === typedIn.navigation;
 		if (projectLane !== 'chat' && !catalogHoldWaived && activeSession.composerAwaitingProjectCatalog) {
 			if (!(await holdForProjectCatalog())) return;
 		}
@@ -1075,6 +1083,16 @@
 		if (uploadedFiles.length > 0) {
 			const fileRefs = uploadedFiles.map(f => `@${f.path}`).join(' ');
 			messageToSend = [finalPrompt.trim(), fileRefs].filter(Boolean).join('\n\n');
+		}
+
+		// The view moved on while a check awaited: keep the words as that chat's
+		// draft, unsent, and say so, instead of sending them to the new view.
+		if (!stillTypedIn()) {
+			if (!ownsComposer()) return;
+			activeSession.saveDraftForSession(typedIn.sessionId, typedDraft);
+			writeDraft(typedIn.sessionId, typedDraft, { preserveNewChat: composerBootSessionId !== null });
+			refuseSend('Message not sent: the chat changed before it went out. It is kept as a draft in the chat you wrote it in.', 'warning');
+			return;
 		}
 
 		// Send the message, optionally queued behind a server-owned compaction.

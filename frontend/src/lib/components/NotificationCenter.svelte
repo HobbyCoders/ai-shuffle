@@ -91,9 +91,23 @@
 		if (nowOpen && unread > 0) notify.markAllRead();
 	}
 
+	// The phone bar's bell hides once nothing is unread, and opening the panel
+	// marks everything read. Keep it while focus is on it or in its panel, so
+	// closing the history hands focus back to a real control (#1168).
+	let focusInside = $state(false);
+	function handleFocusOut(e: FocusEvent) {
+		if (!rootRef?.contains(e.relatedTarget as Node | null)) focusInside = false;
+	}
+
 	function handleClickOutside(e: MouseEvent) {
 		if (!showPanel) return;
-		if (rootRef && !rootRef.contains(e.target as Node)) closeDropdown(dropdownId);
+		if (rootRef && !rootRef.contains(e.target as Node)) {
+			// A click on empty page drops focus to <body>; give it back to the
+			// bell, which is still mounted until this close renders.
+			const focusDropped = !document.activeElement || document.activeElement === document.body;
+			closeDropdown(dropdownId);
+			if (bar && focusDropped) bellRef?.focus();
+		}
 	}
 
 	function handleKeydown(e: KeyboardEvent) {
@@ -136,8 +150,8 @@
 
 <svelte:window onclick={handleClickOutside} onkeydown={handleKeydown} onresize={positionPanel} />
 
-{#if !bar || unread > 0 || showPanel}
-<div class="notif-center" class:bar class:rail bind:this={rootRef} style:--notif-left={`${railAnchor.left}px`} style:--notif-bottom={`${railAnchor.bottom}px`} style:--notif-width={`${railAnchor.width}px`}>
+{#if !bar || unread > 0 || showPanel || focusInside}
+<div class="notif-center" class:bar class:rail bind:this={rootRef} onfocusin={() => { focusInside = true; }} onfocusout={handleFocusOut} style:--notif-left={`${railAnchor.left}px`} style:--notif-bottom={`${railAnchor.bottom}px`} style:--notif-width={`${railAnchor.width}px`}>
 	<button
 		bind:this={bellRef}
 		class="notif-btn"

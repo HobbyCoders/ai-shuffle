@@ -32,7 +32,7 @@ vi.mock('$lib/stores/layout.svelte', async () => {
 		layout: { openChat: mocks.openChat, openFeaturePage: vi.fn(), setSidebarCollapsed: vi.fn() } };
 });
 vi.mock('$lib/stores/sessionMode.svelte', () => ({ appMode: { current: 'chat', set: vi.fn() }, normalizeSessionMode: (mode: string) => mode || 'code' }));
-vi.mock('$lib/services/session-navigation', () => ({ openSession: vi.fn() }));
+vi.mock('$lib/services/session-navigation', () => ({ openSession: vi.fn(), openSessionFromList: vi.fn(), followChatHistory: vi.fn() }));
 vi.mock('$lib/services/keyboard', () => ({ registerShortcut: vi.fn(() => ({ unregister: vi.fn() })) }));
 vi.mock('$lib/services/watch-resources', () => ({ watchResources: vi.fn() }));
 vi.mock('$lib/services/resource-sync', () => ({ resourceSync: { invalidate: vi.fn() } }));
