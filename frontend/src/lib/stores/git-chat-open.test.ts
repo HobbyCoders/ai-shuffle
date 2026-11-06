@@ -224,15 +224,18 @@ describe('opening an existing chat', () => {
 		expect(mocks.fetchRemote).toHaveBeenCalledTimes(1);
 	});
 
-	it('ignores a late idle response from the previous chat even on the same checkout', async () => {
+	it.each(['project', 'worktree'])("ignores a previous chat's idle poll on the same %s checkout", async (mode) => {
+		const worktreeId = mode === 'worktree' ? 'wt1' : undefined;
 		let busy = true;
-		await git.loadRepository('p', false, 's1', { fetchBlocked: () => busy });
+		const options = { fetchBlocked: () => busy };
+		if (worktreeId) await git.loadForWorktree('p', worktreeId, false, 's1', options);
+		else await git.loadRepository('p', false, 's1', options);
 		await settle();
 		const previousOwner = deferred<ReturnType<typeof checkoutStatus>>();
 		mocks.getGitStatus.mockReturnValueOnce(previousOwner.promise);
 		const refresh = git.refreshStatus();
 
-		git.restoreCacheImmediate('p', undefined, 'project', 's2', 'feat/x');
+		git.restoreCacheImmediate('p', worktreeId, worktreeId ? 'worktree' : 'project', 's2', 'feat/x');
 		busy = false;
 		previousOwner.resolve(checkoutStatus(false));
 		await refresh;
@@ -240,23 +243,26 @@ describe('opening an existing chat', () => {
 		expect(mocks.fetchRemote).not.toHaveBeenCalled();
 
 		mocks.getGitStatus.mockResolvedValue(checkoutStatus(true));
-		await git.loadRepository('p', false, 's2');
+		if (worktreeId) await git.loadForWorktree('p', worktreeId, false, 's2');
+		else await git.loadRepository('p', false, 's2');
 		await git.refreshStatus();
 		expect(mocks.fetchRemote).not.toHaveBeenCalled();
 		mocks.getGitStatus.mockResolvedValue(checkoutStatus(false));
 		await git.refreshStatus();
 		await settle();
-		expect(mocks.fetchRemote).toHaveBeenCalledExactlyOnceWith('p', undefined, 's2');
+		expect(mocks.fetchRemote).toHaveBeenCalledExactlyOnceWith('p', worktreeId, 's2');
 	});
 
-	it('does not release an old chat load while its transcript gate finishes after navigation', async () => {
+	it.each(['project', 'worktree'])("does not release a departed chat's %s load after its transcript gate", async (mode) => {
+		const worktreeId = mode === 'worktree' ? 'wt1' : undefined;
 		let busy = true;
 		const transcript = deferred();
-		const load = git.loadRepository('p', false, 's1', {
-			fetchBlocked: () => busy, afterCriticalPath: transcript.promise
-		});
+		const options = { fetchBlocked: () => busy, afterCriticalPath: transcript.promise };
+		const load = worktreeId
+			? git.loadForWorktree('p', worktreeId, false, 's1', options)
+			: git.loadRepository('p', false, 's1', options);
 		await settle(); // A's idle status was read before its work parked.
-		git.restoreCacheImmediate('p', undefined, 'project', 's2', 'feat/x');
+		git.restoreCacheImmediate('p', worktreeId, worktreeId ? 'worktree' : 'project', 's2', 'feat/x');
 		busy = false;
 		transcript.resolve(); // Leaving A also settles its transcript gate.
 		await load;
@@ -265,13 +271,14 @@ describe('opening an existing chat', () => {
 		expect(git.current.sessionId).toBe('s2');
 
 		mocks.getGitStatus.mockResolvedValue(checkoutStatus(true));
-		await git.loadRepository('p', false, 's2');
+		if (worktreeId) await git.loadForWorktree('p', worktreeId, false, 's2');
+		else await git.loadRepository('p', false, 's2');
 		await settle();
 		expect(mocks.fetchRemote).not.toHaveBeenCalled();
 		mocks.getGitStatus.mockResolvedValue(checkoutStatus(false));
 		await git.refreshStatus();
 		await settle();
-		expect(mocks.fetchRemote).toHaveBeenCalledExactlyOnceWith('p', undefined, 's2');
+		expect(mocks.fetchRemote).toHaveBeenCalledExactlyOnceWith('p', worktreeId, 's2');
 	});
 
 	it('does not release a deferral from an aborted idle poll', async () => {
