@@ -133,7 +133,7 @@ describe('the list', () => {
 				: screen;
 			if (path === '/settings/integrations') expect(settingsNav.selectedItem('providers')).toBe('fal:key');
 			stalled = false;
-			await fireEvent.click(retrySurface.getByRole('button', { name: 'Retry providers', exact: true }));
+			await fireEvent.click(retrySurface.getByRole('button', { name: 'Retry providers' }));
 			await vi.advanceTimersByTimeAsync(0);
 			expect(screen.queryByRole('alert')).toBeNull();
 			expect(credentialNames('fal.ai')).toEqual(['Media key, On']);
