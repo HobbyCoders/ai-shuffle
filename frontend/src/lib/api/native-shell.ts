@@ -59,10 +59,18 @@ export function openNativeWorkers(): boolean {
 	const call = get(voiceCallState);
 	if (isCallActiveFor(call.sessionId)) {
 		if (!window.confirm('Opening Workers ends the current voice call. Continue?')) return true;
-		void hangup('user');
+		// Let the hangup reach the worker before the app tears the page down,
+		// but never leave Workers unreachable behind a slow or failing hangup.
+		const settled = Promise.resolve(hangup('user')).catch(() => undefined);
+		const capped = new Promise((resolve) => setTimeout(resolve, HANGUP_WAIT_MS));
+		void Promise.race([settled, capped]).then(() => post({ type: 'workers' }));
+		return true;
 	}
 	return post({ type: 'workers' });
 }
+
+/** Longest wait for a hangup before opening Workers anyway. */
+export const HANGUP_WAIT_MS = 3000;
 
 /** The app opens its own Settings (account, sign out, phone tools) on `{"type":"app-settings"}`. */
 export const APP_SETTINGS_CAPABILITY = 'app-settings';

@@ -9,7 +9,7 @@ vi.mock('$lib/services/voiceCall', async () => {
 	};
 });
 
-import { announceWorkerBar, hasShellBridge, nativeAppSettingsRoute, openNativeAppSettings, openNativeWorkers } from './native-shell';
+import { announceWorkerBar, hasShellBridge, nativeAppSettingsRoute, openNativeAppSettings, openNativeWorkers, HANGUP_WAIT_MS } from './native-shell';
 
 type TestWindow = Window & { shuffleShell?: unknown };
 
@@ -84,7 +84,7 @@ describe('native shell messages', () => {
 		expect(announceWorkerBar(true)).toBe(false);
 	});
 
-	it('asks before opening Workers during a voice call, because the app closes chat and the call with it', () => {
+	it('asks before opening Workers during a voice call, and opens it only after the hangup settles', async () => {
 		const postMessage = vi.fn();
 		inApp({ postMessage }, ['worker-switch']);
 		call.active = true;
@@ -94,9 +94,32 @@ describe('native shell messages', () => {
 		expect(postMessage).not.toHaveBeenCalled();
 		expect(call.hangup).not.toHaveBeenCalled();
 
+		let finish!: () => void;
+		call.hangup.mockReturnValueOnce(new Promise<void>((resolve) => { finish = resolve; }));
 		expect(openNativeAppSettings()).toBe(true);
 		expect(confirm).toHaveBeenCalledTimes(2);
 		expect(call.hangup).toHaveBeenCalledWith('user');
-		expect(postMessage.mock.calls.map(([raw]) => JSON.parse(raw))).toEqual([{ type: 'workers' }]);
+		await Promise.resolve();
+		expect(postMessage).not.toHaveBeenCalled();
+		finish();
+		await vi.waitFor(() => expect(postMessage.mock.calls.map(([raw]) => JSON.parse(raw))).toEqual([{ type: 'workers' }]));
+	});
+
+	it('still opens Workers when the hangup hangs', async () => {
+		vi.useFakeTimers();
+		try {
+			const postMessage = vi.fn();
+			inApp({ postMessage });
+			call.active = true;
+			vi.spyOn(window, 'confirm').mockReturnValue(true);
+			call.hangup.mockReturnValueOnce(new Promise(() => {}));
+			expect(openNativeWorkers()).toBe(true);
+			await vi.advanceTimersByTimeAsync(HANGUP_WAIT_MS - 1);
+			expect(postMessage).not.toHaveBeenCalled();
+			await vi.advanceTimersByTimeAsync(1);
+			expect(postMessage.mock.calls.map(([raw]) => JSON.parse(raw))).toEqual([{ type: 'workers' }]);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 });
