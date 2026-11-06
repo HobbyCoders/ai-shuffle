@@ -174,12 +174,13 @@ describe('list', () => {
 });
 
 describe('detail', () => {
-	it('shows the facts and opens a tab from its fact', async () => {
-		render(ProfileCard);
+	it('puts counts on the tabs and chats in the metadata, with no facts strip', async () => {
+		const { container } = render(ProfileCard);
 		await heading('Researcher');
-		expect(screen.getByText('Chats')).toBeTruthy();
-		expect(screen.getByText('7')).toBeTruthy();
-		await fireEvent.click(screen.getByRole('button', { name: /^Tools: .*Open Tools/ }));
+		expect(container.querySelector('.st-facts')).toBeNull();
+		expect(screen.getByText(/· 7 chats$/)).toBeTruthy();
+		expect(tab('Subagents').querySelector('.n')).toBeTruthy();
+		await fireEvent.click(tab('Tools'));
 		expect(tab('Tools').getAttribute('aria-selected')).toBe('true');
 		expect(screen.getByRole('radiogroup', { name: 'Tool access mode' })).toBeTruthy();
 	});
@@ -228,7 +229,9 @@ describe('detail', () => {
 		await heading('Researcher');
 		expect(screen.getByRole('button', { name: 'Duplicate' })).toBeTruthy();
 		expect(screen.getByRole('button', { name: 'Export .json' })).toBeTruthy();
-		expect(screen.getByRole('button', { name: 'Delete agent' })).toBeTruthy();
+		// Delete is one row at the bottom of the profile, never in the header.
+		expect(screen.getAllByRole('button', { name: 'Delete' })).toHaveLength(1);
+		expect(screen.queryByRole('button', { name: 'Delete agent' })).toBeNull();
 		expect(screen.queryByRole('button', { name: /More/ })).toBeNull();
 		await fireEvent.click(row(/^Frontend Designer/));
 		await heading('Frontend Designer');
@@ -238,19 +241,19 @@ describe('detail', () => {
 });
 
 describe('subagents roster', () => {
-	const fact = () => screen.getByRole('button', { name: /^Subagents: / });
+	const subagentCount = () => tab('Subagents').querySelector('.n')?.textContent;
 
-	it('saves None with an empty selection and says None in the header', async () => {
+	it('saves None with an empty selection and counts 0 on the tab', async () => {
 		agents = agents.map((a) =>
 			a.id === 'agent' ? { ...a, config: { ...a.config, agent_invoke_mode: 'custom', enabled_agents: ['frontend-designer'] } as never } : a
 		);
 		await appData.loadProfiles();
 		render(ProfileCard, { initialSelectedId: 'agent' });
 		await heading('Researcher');
-		expect(fact().getAttribute('aria-label')).toMatch(/^Subagents: 1 of 1\./);
+		expect(subagentCount()).toBe('1');
 		await fireEvent.click(tab('Subagents'));
 		await fireEvent.click(screen.getByRole('button', { name: 'None' }));
-		expect(fact().getAttribute('aria-label')).toMatch(/^Subagents: None\./);
+		expect(subagentCount()).toBe('0');
 		await waitFor(() => expect(mocks.put).toHaveBeenCalled(), { timeout: 2000 });
 		const [path, payload] = mocks.put.mock.calls.at(-1)!;
 		expect(path).toBe('/agents/agent');
@@ -258,7 +261,7 @@ describe('subagents roster', () => {
 		expect(payload.config.enabled_agents).toEqual([]);
 		// Back to Selected only: the old pick is gone, nothing is selected.
 		await fireEvent.click(screen.getByRole('button', { name: 'Selected only' }));
-		expect(fact().getAttribute('aria-label')).toMatch(/^Subagents: 0 of 1\./);
+		expect(subagentCount()).toBe('0');
 		expect(screen.getByRole('switch', { name: 'Allow Frontend Designer' }).getAttribute('aria-checked')).toBe('false');
 		await waitFor(() => expect(mocks.put.mock.calls.at(-1)![1].config.agent_invoke_mode).toBe('custom'), { timeout: 2000 });
 		expect(mocks.put.mock.calls.at(-1)![1].config.enabled_agents).toEqual([]);
@@ -271,20 +274,20 @@ describe('subagents roster', () => {
 		await appData.loadProfiles();
 		render(ProfileCard, { initialSelectedId: 'agent' });
 		await heading('Researcher');
-		expect(fact().getAttribute('aria-label')).toMatch(/^Subagents: None\./);
+		expect(subagentCount()).toBe('0');
 		await fireEvent.click(tab('Subagents'));
 		expect(screen.getByRole('button', { name: 'None' }).getAttribute('aria-pressed')).toBe('true');
 		expect(screen.queryAllByRole('switch')).toHaveLength(0);
 	});
 
-	it('keeps an older "Selected only" agent with nothing selected as 0 of N', async () => {
+	it('keeps an older "Selected only" agent with nothing selected, counting 0', async () => {
 		agents = agents.map((a) =>
 			a.id === 'agent' ? { ...a, config: { ...a.config, agent_invoke_mode: 'custom', enabled_agents: [] } as never } : a
 		);
 		await appData.loadProfiles();
 		render(ProfileCard, { initialSelectedId: 'agent' });
 		await heading('Researcher');
-		expect(fact().getAttribute('aria-label')).toMatch(/^Subagents: 0 of 1\./);
+		expect(subagentCount()).toBe('0');
 		await fireEvent.click(tab('Subagents'));
 		expect(screen.getByRole('button', { name: 'Selected only' }).getAttribute('aria-pressed')).toBe('true');
 		expect(screen.getByText('Nothing selected. To turn subagents off, pick None.')).toBeTruthy();
@@ -364,7 +367,7 @@ describe('create, duplicate, delete', () => {
 		await fireEvent.click(screen.getByRole('button', { name: 'New agent' }));
 		const dialog = screen.getByRole('dialog', { name: 'New agent' });
 		await fireEvent.click(within(dialog).getByRole('radio', { name: /From a built-in/ }));
-		expect((within(dialog).getByLabelText('Built-in') as HTMLSelectElement).value).toBe('frontend-designer');
+		expect((within(dialog).getByRole('combobox', { name: 'Built-in agent' }) as HTMLSelectElement).value).toBe('frontend-designer');
 		await fireEvent.click(within(dialog).getByRole('button', { name: 'Create' }));
 		await heading('New agent');
 		await fireEvent.click(tab('Instructions'));
@@ -402,8 +405,8 @@ describe('create, duplicate, delete', () => {
 	it('deletes only after the inline confirm in the danger zone', async () => {
 		render(ProfileCard);
 		await heading('Researcher');
-		await fireEvent.click(screen.getByRole('button', { name: 'Delete agent' }));
 		const zone = screen.getByRole('heading', { name: 'Danger zone' }).closest('section') as HTMLElement;
+		await fireEvent.click(within(zone).getByRole('button', { name: 'Delete' }));
 		expect(within(zone).getByText('Delete Researcher?')).toBeTruthy();
 		await fireEvent.click(within(zone).getByRole('button', { name: 'Cancel' }));
 		expect(within(zone).queryByText('Delete Researcher?')).toBeNull();

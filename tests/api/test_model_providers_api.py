@@ -8,6 +8,7 @@ on the token-secrecy contract (Chunk 2 of docs/MULTI_PROVIDER_PLAN.md):
 PATCH must leave the stored token untouched.
 """
 
+from unittest.mock import patch
 import pytest
 
 from app.core import encryption
@@ -70,8 +71,24 @@ class TestCreate:
         # Token contract.
         assert body["auth_token_set"] is True
         assert body["auth_token_masked"] != ""
+        assert not body["auth_token_masked"].startswith("enc:")
         assert "auth_token" not in body
         assert RAW_TOKEN not in resp.text
+
+    def test_masked_token_never_comes_from_ciphertext(self, authenticated_client, mock_db):
+        """The mask is taken from the key, not the ``enc:`` blob stored for it."""
+        from app.api import model_providers as module
+
+        stored = "enc:Z0FBQUFBQmNpcGhlcnRleHRCbG9iVTI4OQ=="
+        with patch.object(module.encryption, "is_encrypted", return_value=True), patch.object(
+            module.encryption, "decrypt_value", return_value="sk-live-abcdefghijklmnop"
+        ):
+            assert module._mask_stored_token(stored) == "sk-live...mnop"
+
+        with patch.object(module.encryption, "is_encrypted", return_value=True), patch.object(
+            module.encryption, "decrypt_value", side_effect=ValueError("bad key")
+        ):
+            assert module._mask_stored_token(stored) == ""
 
     def test_create_without_token(self, authenticated_client, mock_db):
         resp = authenticated_client.post(ROOT, json={

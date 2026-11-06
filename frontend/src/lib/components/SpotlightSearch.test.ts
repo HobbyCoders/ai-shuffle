@@ -39,9 +39,37 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.useRealTimers(); });
 
 describe('universal search', () => {
+ it('reaches chat matches past the first twenty without duplicates', async () => {
+  mocks.sessions.mockImplementation(async (_q, { offset }) => ({
+   items: Array.from({ length: offset ? 5 : 20 }, (_, i) => ({ id: `chat-${offset + i}`, title: `History ${offset + i}` })),
+   total: 25, offset, limit: 20, has_more: offset === 0
+  }));
+  const p = props(); render(SpotlightSearch, { props: p }); await search('history');
+  expect(screen.queryByText('History 24')).toBeNull();
+  await fireEvent.click(screen.getByRole('button', { name: 'More chat results' }));
+  await tick();
+  expect(screen.getAllByText('History 0')).toHaveLength(1);
+  expect(screen.queryByRole('button', { name: 'More chat results' })).toBeNull();
+  await fireEvent.click(screen.getByText('History 24'));
+  expect(p.onSelectSession).toHaveBeenCalledWith(expect.objectContaining({ id: 'chat-24' }));
+ });
+
+ it('ends a repeated continuation page instead of offering an endless no-op', async () => {
+  mocks.sessions.mockImplementation(async (_q, { offset }) => ({
+   items: [{ id: 'chat-0', title: 'Repeated history' }], total: 100, offset, limit: 20, has_more: true
+  }));
+  render(SpotlightSearch, { props: props() }); await search('history');
+  const more = screen.getByRole('button', { name: 'More chat results' });
+  more.focus();
+  expect(await fireEvent.keyDown(more, { key: 'Enter' })).toBe(true);
+  await fireEvent.click(more); await tick();
+  expect(screen.getAllByText('Repeated history')).toHaveLength(1);
+  expect(screen.queryByRole('button', { name: 'More chat results' })).toBeNull();
+ });
+
  it('starts without hardcoded sessions or agents and keeps quick actions', () => {
   render(SpotlightSearch, { props: props() });
-  expect(screen.queryByRole('region', { name: 'Sessions' })).toBeNull();
+  expect(screen.queryByRole('region', { name: 'Chats' })).toBeNull();
   expect(screen.queryByRole('region', { name: 'Agents' })).toBeNull();
   expect(screen.getByText('New conversation')).toBeTruthy();
   expect(mocks.get).not.toHaveBeenCalled();
@@ -49,7 +77,7 @@ describe('universal search', () => {
  it('groups only matching results and opens content-only sessions', async () => {
   const p = props(); render(SpotlightSearch, { props: p });
   await search('orchid');
-  for (const name of ['Sessions', 'Agents', 'MCP servers', 'Plugins', 'Notes', 'Documentation'])
+  for (const name of ['Chats', 'Agents', 'MCP servers', 'Plugins', 'Notes', 'Documentation'])
    expect(screen.getByRole('region', { name })).toBeTruthy();
   expect(screen.queryByRole('region', { name: 'Hooks' })).toBeNull();
   expect(screen.queryByText('never-render')).toBeNull();
@@ -71,7 +99,7 @@ describe('universal search', () => {
   render(SpotlightSearch, { props: { ...props(), currentProjectId: 'project' } });
   for (const value of ['o', 'or', 'orchid']) await fireEvent.input(screen.getByRole('textbox'), { target: { value } });
   await vi.advanceTimersByTimeAsync(260);
-  expect(mocks.sessions).toHaveBeenCalledExactlyOnceWith('orchid', { limit: 20 });
+  expect(mocks.sessions).toHaveBeenCalledExactlyOnceWith('orchid', { limit: 20, offset: 0, adminOnly: true });
  });
  it('keeps keyboard indices aligned across dynamic groups', async () => {
   const p = props(); render(SpotlightSearch, { props: p }); await search('orchid');
@@ -121,7 +149,7 @@ describe('universal search', () => {
   mocks.sessions.mockRejectedValue(new Error('offline'));
   render(SpotlightSearch, { props: props() }); await search('orchid');
   expect(screen.getByText('Orchid note')).toBeTruthy();
-  expect(screen.getByText('Could not search: Sessions. Try again.')).toBeTruthy();
+  expect(screen.getByText('Could not search: Chats. Try again.')).toBeTruthy();
  });
  it('refreshes configuration on reopen', async () => {
   const p = props(); const view = render(SpotlightSearch, { props: p }); await search('orchid');

@@ -49,7 +49,7 @@ async function openControls() {
 }
 
 describe('mobile tool-access persistence', () => {
-	it.each([['Ask', 'default'], ['Accept edits', 'acceptEdits'], ['Bypass', 'bypassPermissions']])('carries the explicit %s choice across sheet reopen and a new compose screen', async (label, mode) => {
+	it.each([['Ask first', 'default'], ['Accept edits', 'acceptEdits'], ['Bypass', 'bypassPermissions']])('carries the explicit %s choice across sheet reopen and a new compose screen', async (label, mode) => {
 		const { component, access } = await openControls();
 		await fireEvent.click(access.getByRole('radio', { name: label }));
 		await waitFor(() => expect(activeSession.current.permissionModeOverride).toBe(mode));
@@ -60,7 +60,7 @@ describe('mobile tool-access persistence', () => {
 		await tick();
 		expect(panelAccess().getByRole('radio', { name: label }).getAttribute('aria-checked')).toBe('true');
 		// The quick bar names the same choice.
-		expect(screen.getByRole('button', { name: new RegExp(`^Tool access: ${label}`, 'i') })).toBeTruthy();
+		expect(document.querySelector('[data-cell="access"]')?.getAttribute('aria-label')).toMatch(new RegExp(`^Permission mode: ${label}`, 'i'));
 	});
 
 	it('offers Accept edits in the phone panel without a project too (#641)', async () => {
@@ -68,7 +68,7 @@ describe('mobile tool-access persistence', () => {
 		const { access } = await openControls();
 		const names = access.getAllByRole('radio').map((r) => r.getAttribute('aria-label') ?? r.textContent ?? '');
 		expect(names.some((n) => /accept/i.test(n))).toBe(true);
-		expect(access.getByRole('radio', { name: 'Ask' })).toBeTruthy();
+		expect(access.getByRole('radio', { name: 'Ask first' })).toBeTruthy();
 		expect(access.getByRole('radio', { name: 'Bypass' })).toBeTruthy();
 	});
 
@@ -79,7 +79,7 @@ describe('mobile tool-access persistence', () => {
 		const { access } = await openControls();
 		await fireEvent.click(access.getByRole('radio', { name: 'Accept edits' }));
 		expect(put).toHaveBeenCalledWith('/sessions/mobile-permissions/permission-mode', { permission_mode: 'acceptEdits' });
-		expect(access.getByRole('radio', { name: 'Ask' }).getAttribute('aria-checked')).toBe('true');
+		expect(access.getByRole('radio', { name: 'Ask first' }).getAttribute('aria-checked')).toBe('true');
 		expect(access.getAllByRole('radio')[0].closest('[data-row="access"]')!.querySelector('.access-help')?.textContent).toContain('Saving');
 		for (const button of access.getAllByRole('radio')) expect((button as HTMLButtonElement).disabled).toBe(true);
 		acknowledge({ permission_mode: 'acceptEdits' });
@@ -114,7 +114,7 @@ describe('mobile tool-access persistence', () => {
 		const edits = access.getByRole('radio', { name: 'Accept edits' }) as HTMLButtonElement;
 		await fireEvent.click(edits);
 		await waitFor(() => expect(edits.disabled).toBe(false));
-		expect(access.getByRole('radio', { name: 'Ask' }).getAttribute('aria-checked')).toBe('true');
+		expect(access.getByRole('radio', { name: 'Ask first' }).getAttribute('aria-checked')).toBe('true');
 		expect(activeSession.current.permissionModeOverride).toBe('default');
 		await fireEvent.click(edits);
 		await waitFor(() => expect(edits.getAttribute('aria-checked')).toBe('true'));

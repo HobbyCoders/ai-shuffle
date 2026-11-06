@@ -597,7 +597,8 @@ describe('Swarm child deduplication', () => {
 		if (work?.kind !== 'work_log') return;
 		expect(work.folded).toEqual([{ message: read, index: 1 }]);
 		expect(work.summary).toBe('Read 1 file');
-		expect(work.compactSummary).toBe('Read 1');
+		// One short sentence fits a phone's row, so it is not condensed.
+		expect(work.compactSummary).toBeNull();
 		expect(work.sequence.map((entry) => entry.index)).toEqual([1, 2, 5, 6]);
 	});
 });
@@ -2033,7 +2034,7 @@ describe('live runs', () => {
 		const log = liveLog(items)!;
 		expect(runsOf(log)).toEqual([[0, [a, failed, b]]]);
 		expect(log.runs![0].summary).toBe('Ran 3 commands, 1 failed');
-		expect(log.runs![0].compactSummary).toBe('Ran 3 · 1 failed');
+		expect(log.runs![0].compactSummary).toBeNull();
 		// Folded, only the boundary and the current run show; the failure is a
 		// row of the run, so opening the run shows it in place.
 		expect(collapsedVisibleMessages(items)).toEqual([prompt, finding, tail]);

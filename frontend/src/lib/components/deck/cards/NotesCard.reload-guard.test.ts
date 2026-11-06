@@ -25,6 +25,7 @@ afterEach(() => { cleanup(); resourceSync.clear(); sessionStorage.clear(); vi.un
 it('an edited note blocks the reload until the panel goes away', async () => {
 	render(NotesCard);
 	await fireEvent.click(await screen.findByRole('button', { name: /Note A content A/ }));
+		await fireEvent.click(screen.getByRole('tab', { name: 'Edit' }));
 	expect(reloadBlockers()).not.toContain('note-unsaved');
 	await fireEvent.input(screen.getByPlaceholderText(/Write your note/), { target: { value: 'Unsaved here' } });
 	expect(reloadBlockers()).toContain('note-unsaved');

@@ -1,21 +1,13 @@
-"""The direct API lanes refuse an archived chat too (#1822).
-
-``/conversation`` enrolls a turn, so ``SessionRuntime.execute`` drops it for
-an archived chat. ``/conversation/stream`` and ``/conversation/start`` run the
-engine directly (``stream_query``, ``start_background_query``), around that
-guard, so an API key could still continue an archived chat through them. The
-routes now refuse with a 409 and the engine entry points refuse as well.
-"""
+"""Converted history uses the same authenticated API admission as ordinary chats."""
 from __future__ import annotations
 
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
-from fastapi import HTTPException
 
 from app.api import query as query_api
 from app.api.auth import hash_api_key
-from app.core import archive_guard, query_background, query_engine
+from app.core import query_background, query_engine
 from app.core.models import ConversationRequest
 from app.db import database
 
@@ -28,8 +20,12 @@ def chats(mock_db, monkeypatch):
     for sid in ("archived-chat", "active-chat"):
         database.create_session(session_id=sid, profile_id="own-profile",
                                 title=sid, api_user_id="u1")
+    from app.db.session_archive_migration import migrate
     mock_db.execute("UPDATE sessions SET status = 'archived' WHERE id = 'archived-chat'")
     mock_db.commit()
+    from app.db.base import get_db
+    with get_db() as conn:
+        migrate(conn.cursor())
     monkeypatch.setattr(query_api, "_refuse_unready_leg", AsyncMock(return_value=None))
     profile = {"id": "own-profile", "config": {}}
     monkeypatch.setattr(query_engine, "get_profile", lambda pid: profile)
@@ -38,32 +34,19 @@ def chats(mock_db, monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("route", ["stream_conversation", "start_conversation"])
-async def test_routes_refuse_an_archived_chat(chats, monkeypatch, route, caplog):
-    engine = AsyncMock()
+@pytest.mark.parametrize("sid", ["active-chat", "archived-chat"])
+async def test_start_route_continues_ordinary_and_converted_chats(chats, monkeypatch, sid):
+    engine = AsyncMock(return_value={"session_id": sid, "status": "started"})
     monkeypatch.setattr(query_api, "start_background_query", engine)
-    monkeypatch.setattr(query_api, "_stream_query_with_failover", engine)
-    request = ConversationRequest(prompt="wake up", session_id="archived-chat")
-    with pytest.raises(HTTPException) as exc:
-        await getattr(query_api, route)(request, chats)
-    assert exc.value.status_code == 409
-    assert "archived" in exc.value.detail and "Restore it" in exc.value.detail
-    engine.assert_not_called()
-    assert "Archived session archived-chat: dropped a api wake" in caplog.text
-
-
-@pytest.mark.asyncio
-async def test_start_route_still_continues_an_active_chat(chats, monkeypatch):
-    engine = AsyncMock(return_value={"session_id": "active-chat", "status": "started"})
-    monkeypatch.setattr(query_api, "start_background_query", engine)
-    request = ConversationRequest(prompt="go on", session_id="active-chat")
+    request = ConversationRequest(prompt="go on", session_id=sid)
     result = await query_api.start_conversation(request, chats)
     assert result["status"] == "started"
-    assert engine.await_args.kwargs["session_id"] == "active-chat"
+    assert engine.await_args.kwargs["session_id"] == sid
 
 
 @pytest.mark.asyncio
-async def test_stream_route_still_continues_an_active_chat(chats, monkeypatch):
+@pytest.mark.parametrize("sid", ["active-chat", "archived-chat"])
+async def test_stream_route_continues_ordinary_and_converted_chats(chats, monkeypatch, sid):
     seen = {}
 
     async def fake_stream(**kwargs):
@@ -71,30 +54,38 @@ async def test_stream_route_still_continues_an_active_chat(chats, monkeypatch):
         yield {"type": "done", "session_id": kwargs["session_id"]}
 
     monkeypatch.setattr(query_api, "_stream_query_with_failover", fake_stream)
-    request = ConversationRequest(prompt="go on", session_id="active-chat")
+    request = ConversationRequest(prompt="go on", session_id=sid)
     response = await query_api.stream_conversation(request, chats)
     body = [chunk async for chunk in response.body_iterator]
-    assert seen["session_id"] == "active-chat"
+    assert seen["session_id"] == sid
     assert any("event: done" in chunk for chunk in body)
 
-
-@pytest.mark.asyncio
-async def test_stream_query_refuses_an_archived_chat(chats):
-    events = [e async for e in query_engine.stream_query(
-        prompt="wake up", profile_id="own-profile", session_id="archived-chat")]
-    assert events == [{"type": "error",
-                       "message": str(archive_guard.SessionArchived("archived-chat"))}]
+class AdmittedPastSessionGate(Exception):
+    pass
 
 
 @pytest.mark.asyncio
-async def test_background_query_refuses_an_archived_chat(chats):
-    with pytest.raises(archive_guard.SessionArchived):
-        await query_background.start_background_query(
-            prompt="wake up", profile_id="own-profile", session_id="archived-chat")
+@pytest.mark.parametrize("lane", ["execute", "stream"])
+async def test_direct_lanes_pass_converted_history_gate(chats, monkeypatch, lane):
+    # Stop at the FIRST post-session-read write, before any actual provider call.
+    write = Mock(side_effect=AdmittedPastSessionGate)
+    monkeypatch.setattr(database, "add_session_message", write)
+    with pytest.raises(AdmittedPastSessionGate):
+        if lane == "execute":
+            await query_engine.execute_query(prompt="fresh", profile_id="own-profile", session_id="archived-chat")
+        else:
+            async for _ in query_engine.stream_query(prompt="fresh", profile_id="own-profile", session_id="archived-chat"):
+                pass
+    write.assert_called_once()
 
 
 @pytest.mark.asyncio
-async def test_execute_query_refuses_an_archived_chat(chats):
-    with pytest.raises(archive_guard.SessionArchived):
-        await query_engine.execute_query(
-            prompt="wake up", profile_id="own-profile", session_id="archived-chat")
+async def test_background_lane_passes_converted_history_gate(chats, monkeypatch):
+    runner = AsyncMock()
+    monkeypatch.setattr(query_background, "_run_background_query", runner)
+    result = await query_background.start_background_query(
+        prompt="fresh", profile_id="own-profile", session_id="archived-chat")
+    task = query_background._pending_background_tasks["archived-chat"]
+    await task
+    assert result["session_id"] == "archived-chat"
+    runner.assert_awaited_once()

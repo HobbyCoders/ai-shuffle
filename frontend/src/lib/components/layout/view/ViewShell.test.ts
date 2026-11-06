@@ -1,0 +1,194 @@
+import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { tick } from 'svelte';
+import { page } from '$app/state';
+import { layout, viewOwnsPanel } from '$lib/stores/layout.svelte';
+import { platform } from '$lib/stores/platform.svelte';
+import { viewPanel } from '$lib/stores/view-panel.svelte';
+import ViewHarness from './test-fixtures/ViewHarness.svelte';
+import { readFileSync } from 'node:fs';
+const desktopStyles = readFileSync('src/app.css', 'utf8');
+
+const mocks = vi.hoisted(() => ({ push: vi.fn() }));
+vi.mock('$app/navigation', () => ({ pushState: mocks.push, goto: vi.fn() }));
+beforeEach(() => {
+	vi.stubGlobal('matchMedia', () => ({ matches: false, addEventListener() {}, removeEventListener() {} }));
+	vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
+	layout.setSidebarOverlay(false); platform.set('desktop'); page.state = {}; mocks.push.mockReset();
+});
+afterEach(() => { cleanup(); platform.set('desktop'); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
+
+async function resize(width: number) {
+	vi.stubGlobal('innerWidth', width);
+	layout.setSidebarOverlay(width <= 1080);
+	window.dispatchEvent(new Event('resize'));
+	await tick();
+}
+
+describe('ViewShell', () => {
+	it('keeps an empty detail title band and covers shared desktop drag/no-drag regions', () => {
+		const { container } = render(ViewHarness);
+		expect(container.querySelector('.view-main-slot > .view-titlebar[aria-hidden="true"]')).toBeTruthy();
+		const dragRule = desktopStyles.match(/html\.desktop :is\(\.sb-head[^}]+}/)?.[0] ?? '';
+		for (const selector of ['.rail-titlebar', '.panel-header', '.p-head', '.view-titlebar', '.st-dtop', '.page-terminal > .bar']) expect(dragRule).toContain(selector);
+		expect(dragRule).toContain('-webkit-app-region: drag');
+		expect(desktopStyles).toMatch(/html\.desktop :is\(\.sidebar, \.view-shell, \.reopen-panel\) :is\(button, a, input, textarea, select, summary[^}]+-webkit-app-region: no-drag/s);
+		expect(desktopStyles).toMatch(/:has\(> \.sidebar-slot:is\(\.floating, \.panel-overlay:not\(\.rail-only\)\)\)[^}]+-webkit-app-region: no-drag/s);
+	});
+	it('opens a newly picked item at the top of the detail, not where the last one was scrolled', async () => {
+		const { container } = render(ViewHarness);
+		await fireEvent.click(screen.getByRole('button', { name: 'Open detail' }));
+		await tick();
+		const slot = container.querySelector<HTMLElement>('.view-main-slot')!;
+		const scrollTo = vi.fn();
+		slot.scrollTo = scrollTo as unknown as typeof slot.scrollTo;
+		await fireEvent.click(screen.getByRole('button', { name: 'Open detail' }));
+		await tick();
+		expect(scrollTo).not.toHaveBeenCalled();
+		await fireEvent.click(screen.getByRole('button', { name: 'Open item B' }));
+		await tick();
+		expect(scrollTo).toHaveBeenCalledWith({ top: 0 });
+	});
+	it('bridges feature, row and live Settings access contexts into the docked snippet', async () => {
+		const view = render(ViewHarness);
+		await tick();
+		const host = view.container.querySelector('[data-test-host]')!;
+		const control = screen.getByRole('switch', { name: 'Bridged switch' }) as HTMLButtonElement;
+		expect(host.contains(control)).toBe(true);
+		expect(control.disabled).toBe(true);
+		expect(host.querySelector('[data-probe-active="true"]')).toBeTruthy();
+		expect(host.querySelector('.settings-shell.view-panel')).toBeTruthy();
+		await view.rerender({ readOnly: false });
+		expect(control.disabled).toBe(false);
+		await fireEvent.click(control);
+		expect(control.getAttribute('aria-checked')).toBe('true');
+	});
+	it('retires a stacked detail step as soon as its retained destination becomes inactive', async () => {
+		platform.set('mobile');
+		mocks.push.mockImplementation((_url, state) => { page.state = state; });
+		const back = vi.spyOn(history, 'back').mockImplementation(() => {});
+		const view = render(ViewHarness);
+		await tick();
+		await fireEvent.click(screen.getByRole('button', { name: 'Open detail' }));
+		await view.rerender({ active: false });
+		expect(back).toHaveBeenCalledOnce();
+		page.state = {};
+		await tick();
+		await view.rerender({ active: true });
+		expect(mocks.push).toHaveBeenCalledTimes(2);
+	});
+	it('offers content-first phone destinations without an invisible panel or history step', async () => {
+		platform.set('mobile');
+		const view = render(ViewHarness, { contentFirst: true });
+		await tick();
+		expect(view.container.querySelector('[data-content-first][data-pane="detail"]')).toBeTruthy();
+		expect(view.container.querySelector('.inline-panel[hidden]')).toBeTruthy();
+		expect((view.container.querySelector('.inline-panel') as HTMLElement).inert).toBe(true);
+		expect(view.container.querySelector('.view-main-slot[hidden]')).toBeNull();
+		expect(mocks.push).not.toHaveBeenCalled();
+	});
+	it('releases its claim off screen and reclaims only when active', async () => {
+		const view = render(ViewHarness);
+		await tick();
+		expect(viewPanel.panel).not.toBeNull();
+		await view.rerender({ active: false });
+		expect(viewPanel.panel).toBeNull();
+		await view.rerender({ active: true });
+		expect(viewPanel.panel).not.toBeNull();
+		view.unmount();
+		expect(viewPanel.panel).toBeNull();
+		expect(viewPanel.hostMounted).toBe(false);
+	});
+	it.each(['no-host', 'overlay', 'mobile'])('renders inline without a claim: %s', async mode => {
+		if (mode === 'overlay') { vi.stubGlobal('innerWidth', 767); layout.setSidebarOverlay(true); }
+		if (mode === 'mobile') platform.set('mobile');
+		const view = render(ViewHarness, { host: mode !== 'no-host' });
+		await tick();
+		expect(viewPanel.panel).toBeNull();
+		expect(view.container.querySelector('.inline-panel .view-panel')).toBeTruthy();
+	});
+	it('pushes the phone detail and follows browser Back without a duplicate history step', async () => {
+		platform.set('mobile');
+		const back = vi.spyOn(history, 'back').mockImplementation(() => {});
+		render(ViewHarness);
+		await tick();
+		await fireEvent.click(screen.getByRole('button', { name: 'Open detail' }));
+		expect(mocks.push).toHaveBeenCalledOnce();
+		const state = mocks.push.mock.calls[0][1];
+		page.state = state;
+		await tick();
+		await fireEvent.click(screen.getByRole('button', { name: 'Back to panel' }));
+		expect(back).toHaveBeenCalledOnce();
+		page.state = {};
+		await tick();
+		expect(screen.getByRole('button', { name: 'Open detail' })).toBeTruthy();
+		expect(back).toHaveBeenCalledOnce();
+	});
+	it('reuses the detail history step across desktop/stacked resize cycles', async () => {
+		vi.stubGlobal('innerWidth', 1440);
+		mocks.push.mockImplementation((_url, state) => { page.state = state; });
+		const back = vi.spyOn(history, 'back').mockImplementation(() => {});
+		const view = render(ViewHarness);
+		await tick();
+		await fireEvent.click(screen.getByRole('button', { name: 'Open detail' }));
+		await resize(1000); await resize(390);
+		expect(mocks.push).toHaveBeenCalledOnce();
+		await resize(1440); await resize(1000); await resize(390);
+		expect(mocks.push).toHaveBeenCalledOnce();
+		await fireEvent.click(screen.getByRole('button', { name: 'Back to panel' }));
+		expect(back).toHaveBeenCalledOnce();
+		page.state = {};
+		await tick();
+		expect(view.container.querySelector('[data-pane="panel"]')).toBeTruthy();
+	});
+	it('drops history ownership popped while wide before re-entering stacked', async () => {
+		vi.stubGlobal('innerWidth', 1440);
+		mocks.push.mockImplementation((_url, state) => { page.state = state; });
+		const view = render(ViewHarness);
+		await tick();
+		await fireEvent.click(screen.getByRole('button', { name: 'Open detail' }));
+		await resize(390);
+		await resize(1440);
+		page.state = {};
+		await tick();
+		// Browser Back while wide must not discard the selected desktop detail.
+		expect(view.container.querySelector('.view-main-slot[hidden]')).toBeNull();
+		await resize(390);
+		expect(mocks.push).toHaveBeenCalledTimes(2);
+		expect(view.container.querySelector('[data-pane="detail"]')).toBeTruthy();
+	});
+	it('retires its old entry and adopts its current entry without pushing a duplicate', async () => {
+		platform.set('mobile');
+		mocks.push.mockImplementation((_url, state) => { page.state = state; });
+		const back = vi.spyOn(history, 'back').mockImplementation(() => {});
+		const view = render(ViewHarness);
+		await tick();
+		await fireEvent.click(screen.getByRole('button', { name: 'Open detail' }));
+		const ownEntry = page.state;
+		await view.rerender({ active: false });
+		expect(back).toHaveBeenCalledOnce(); // Retiring the invisible step is now intentional.
+		page.state = { viewPanelDetail: 'another-page' } as App.PageState;
+		await tick();
+		page.state = ownEntry;
+		await tick();
+		await view.rerender({ active: true });
+		expect(mocks.push).toHaveBeenCalledOnce();
+		await fireEvent.click(screen.getByRole('button', { name: 'Back to panel' }));
+		expect(back).toHaveBeenCalledTimes(2);
+		page.state = {};
+		await tick();
+		expect(view.container.querySelector('[data-pane="panel"]')).toBeTruthy();
+	});
+	it('keeps a newer token claim when an older page releases', () => {
+		const older = Symbol(), newer = Symbol();
+		const snippet = (() => {}) as unknown as NonNullable<typeof viewPanel.panel>;
+		viewPanel.claim(older, snippet); viewPanel.claim(newer, snippet); viewPanel.release(older);
+		expect(viewPanel.panel).toBe(snippet);
+		viewPanel.release(newer); expect(viewPanel.panel).toBeNull();
+	});
+	it('treats the retired board as Chats, every other rail destination owns a panel', () => {
+		expect(viewOwnsPanel('session')).toBe(false); expect(viewOwnsPanel('board')).toBe(false);
+		expect(viewOwnsPanel(null)).toBe(false); expect(viewOwnsPanel('build')).toBe(true);
+		expect(viewOwnsPanel('notes')).toBe(true); expect(viewOwnsPanel('settings')).toBe(true);
+	});
+});

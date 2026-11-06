@@ -449,7 +449,8 @@ class TestSessionOperations:
         )
 
         assert result["title"] == "Updated Title"
-        assert result["status"] == "archived"
+        assert result["status"] == "active"
+        assert not result["is_active"]
         assert result["total_cost_usd"] == 0.05
         assert result["total_tokens_in"] == 100
         assert result["total_tokens_out"] == 200
@@ -504,12 +505,12 @@ class TestSessionOperations:
         result = db.set_session_active("session-1", False)
         assert result["is_active"] == 0
 
-    def test_set_session_active_archives_and_restores(self, mock_db, setup_profile):
-        """Archiving leaves Active; restoring only un-archives an archived row."""
+    def test_legacy_archive_alias_settles_and_preserves_other_statuses(self, mock_db, setup_profile):
+        """Legacy flags never persist archive or overwrite a failure status."""
         db.create_session("session-1", setup_profile, is_active=True)
 
         result = db.set_session_active("session-1", True, archived=True)
-        assert result["status"] == "archived" and not result["is_active"]
+        assert result["status"] == "active" and not result["is_active"]
 
         result = db.set_session_active("session-1", False, archived=False)
         assert result["status"] == "active" and not result["is_active"]
@@ -810,9 +811,9 @@ class TestSearchSessionsSql:
         assert "sse.subpath IS NULL" in store
         assert "sse_entry_text(sse.entry)" in store
         assert "to_tsvector('english', sse_entry_text(sse.entry)) @@ plainto_tsquery" in store
-        assert "s.status NOT IN ('archived','failed')" in store
+        assert "COALESCE(s.status, 'active') <> 'failed'" in store
 
-    def test_every_cte_excludes_archived_and_failed(self):
+    def test_every_cte_keeps_history_but_excludes_failed(self):
         """All four CTEs (title / legacy / SDK / native content) drop
         ``status IN ('archived','failed')``. ``'failed'`` is ProviderAgent's
         verdict on a worker session whose dispatch errored: the transcript stays
@@ -822,7 +823,7 @@ class TestSearchSessionsSql:
         becomes searchable again."""
         sql = self._captured_search_sql()
 
-        assert sql.count("s.status NOT IN ('archived','failed')") == 4
+        assert sql.count("COALESCE(s.status, 'active') <> 'failed'") == 4
         assert "s.status != 'archived'" not in sql
 
     def test_match_count_window_before_dedupe(self):
@@ -889,11 +890,11 @@ class TestSearchSessionsPaginatedSql:
             assert "s.sdk_session_id = sse.session_id" in sql
             assert "COUNT(*) OVER (PARTITION BY id) as match_count" in sql
 
-    def test_paginated_excludes_archived_and_failed_in_every_cte(self):
+    def test_paginated_keeps_history_but_excludes_failed_in_every_cte(self):
         """Same exclusion as the non-paginated variant — a failed worker session
         must not surface in either search surface."""
         for sql in self._captured_paginated_sql():
-            assert sql.count("s.status NOT IN ('archived','failed')") == 4
+            assert sql.count("COALESCE(s.status, 'active') <> 'failed'") == 4
             assert "s.status != 'archived'" not in sql
 
 

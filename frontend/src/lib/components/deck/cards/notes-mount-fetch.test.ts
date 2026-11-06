@@ -29,9 +29,12 @@ import NotesCard from './NotesCard.svelte';
 beforeEach(() => {
 	mocks.getNotes.mockClear();
 	mocks.getNoteTags.mockClear();
+	vi.stubGlobal('matchMedia', vi.fn(() => ({
+		matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn()
+	})));
 });
 
-afterEach(() => cleanup());
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 describe('NotesCard mount', () => {
 	it('fetches the note list exactly once, even after the filter debounce window', async () => {

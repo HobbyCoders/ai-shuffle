@@ -167,7 +167,7 @@
 		aria-haspopup="menu"
 		aria-expanded={showDropdown}
 		title={isStreaming ? 'Branch locked during streaming' : currentBranch ? `Branch: ${currentBranch}` : 'Select branch'}
-	>{displayBranch ?? 'the current branch'}</button>
+	><GitBranch size={14} strokeWidth={1.75} aria-hidden="true" /><span class="sentence-tok-label">{displayBranch ?? 'Current branch'}</span></button>
 	{:else}
 	<button
 		type="button"
@@ -199,16 +199,16 @@
 		{#if checkingOut}
 			<Loader2 size={11} strokeWidth={2} class="spin" />
 		{:else if isWorktreeMode || isStreaming}
-			<Lock size={10} strokeWidth={1.6} />
-		{:else if sheetMode}
-			<ChevronDown size={11} strokeWidth={1.6} />
+			<Lock size={12} strokeWidth={1.6} aria-hidden="true" />
+		{:else if !branchLocked}
+			<ChevronDown size={12} strokeWidth={1.5} aria-hidden="true" />
 		{/if}
 	</button>
 	{/if}
 
 	{#if showDropdown}
 		<div class="branch-dropdown" class:floating={sentence} role="menu" aria-label="Branch selection"
-			bind:this={menuRef} use:floatingMenu={{ anchor: sentenceTrigger, align: 'center', enabled: sentence }}>
+			bind:this={menuRef} use:floatingMenu={{ anchor: sentenceTrigger, align: 'start', enabled: sentence }}>
 			{#if showSearch}
 				<div class="dropdown-search">
 					<input
@@ -333,12 +333,8 @@
 		margin-top: 6px;
 	}
 
-	/* The branch chip: `.ctx-chip` from app.css carries the metrics; only the
-	   locked state and the label widths are specific to this component. */
-	.pill.locked {
-		opacity: 0.85;
-	}
-
+	/* The branch chip: `.ctx-chip` from app.css carries the metrics and the
+	   muted colour, locked or not; only the label widths are specific here. */
 	.pill :global(svg) {
 		flex-shrink: 0;
 	}
@@ -367,9 +363,9 @@
 		max-height: 320px;
 		overflow-y: auto;
 		background: var(--card);
-		border: 1px solid var(--border);
-		border-radius: calc(var(--radius, 0.75rem) * 0.83);
-		box-shadow: var(--shadow-l);
+		border: 1px solid var(--menu-border);
+		border-radius: var(--menu-radius);
+		box-shadow: var(--menu-shadow);
 		padding: 4px;
 		z-index: 100;
 		animation: dropdown-in 120ms cubic-bezier(0.16, 1, 0.3, 1);
@@ -428,12 +424,13 @@
 		padding: 7px 10px;
 		background: transparent;
 		border: none;
-		border-radius: calc(var(--radius, 0.75rem) * 0.58);
+		border-radius: var(--menu-row-radius);
 		color: var(--foreground);
-		font-size: 0.8125rem;
+		font-size: 13px;
 		cursor: pointer;
 		text-align: left;
 		transition: background-color 120ms ease;
+		min-height: var(--menu-row);
 	}
 
 	.dropdown-item:hover {

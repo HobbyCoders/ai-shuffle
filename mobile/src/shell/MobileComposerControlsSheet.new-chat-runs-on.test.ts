@@ -64,7 +64,7 @@ vi.mock('$lib/components/git/CreateBranchModal.svelte', () => import('$lib/test-
 vi.mock('$lib/components/chat/RunningTasksList.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
 vi.mock('$lib/components/chat/ContextUsageBar.svelte', () => import('./test-fixtures/ContextUsageBarStub.svelte'));
 
-import MobileComposerControlsSheet from './MobileComposerControlsSheet.svelte';
+import MobileComposerControlsSheet from '$lib/components/chat/phone/MobileComposerControlsSheet.svelte';
 import { activeSession } from '$lib/stores/active-session';
 import { resetWorkerPresence } from '$lib/stores/worker-presence';
 import { get } from 'svelte/store';

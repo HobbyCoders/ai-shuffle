@@ -69,10 +69,6 @@ export function parseFenceMeta(info: string | undefined | null): FenceMeta {
 	return { lang: lang.toLowerCase(), filename };
 }
 
-const FILE_ICON =
-	'<svg class="cb-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
-	'<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v5h5"/></svg>';
-
 const COPY_ICON =
 	'<svg class="cb-copy" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
 	'<rect width="13" height="13" x="9" y="9" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
@@ -82,7 +78,8 @@ const CHECK_ICON =
 	'<path d="M20 6 9 17l-5-5"/></svg>';
 
 /**
- * Render one fenced block into the Studio Noir code-block chrome.
+ * Render one fenced block into the code-block chrome: one frame, the language
+ * as plain text.
  * Exported for tests; the renderer below is the only production caller.
  */
 export function renderCodeBlock(code: string, info: string | undefined, highlight: boolean): string {
@@ -97,9 +94,8 @@ export function renderCodeBlock(code: string, info: string | undefined, highligh
 
 	const head =
 		'<div class="codehead">' +
-		FILE_ICON +
 		(filename ? `<span class="fname">${escapeHtml(filename)}</span>` : '<span class="fname"></span>') +
-		`<span class="lang">${escapeHtml((lang || 'text').toUpperCase())}</span>` +
+		`<span class="lang">${escapeHtml(lang || 'text')}</span>` +
 		'<button type="button" class="code-copy-btn" aria-label="Copy code">' +
 		COPY_ICON +
 		CHECK_ICON +

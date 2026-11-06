@@ -14,8 +14,11 @@
 	 *
 	 * Read-only mode disables the primary action and the whole body.
 	 */
-	import type { Snippet } from 'svelte';
-	import { ChevronLeft } from 'lucide-svelte';
+	import { getAllContexts, onMount, type Snippet } from 'svelte';
+	import { MoreHorizontal } from 'lucide-svelte';
+	import PanelContext from '../../layout/view/PanelContext.svelte';
+	import { platform } from '$lib/stores/platform.svelte';
+	import BackRow from './BackRow.svelte';
 	import { settingsNav } from '$lib/settings/navigation.svelte';
 	import { getSettingsAccess } from '$lib/settings/access.svelte';
 	import { categoryById, type SettingsIcon } from '$lib/settings/categories';
@@ -30,6 +33,16 @@
 
 	interface Props {
 		name: string;
+		/** Optional editable heading; keeps the shared header geometry. */
+		heading?: Snippet;
+		/** Settings retains its measure; collection details share one centered reading column. */
+		width?: 'settings' | 'reading' | 'data' | 'docs';
+		/** Content-first destinations have no detail-history or Saved row. */
+		contentFirst?: boolean;
+		/** Tight editorial header, e.g. a phone note with its metadata folded away. */
+		compactHeader?: boolean;
+		/** Only genuine identity art (an agent avatar or provider logo), never a generic decorative tile. */
+		identity?: boolean;
 		icon?: SettingsIcon;
 		/** Tile text instead of an icon (provider glyph). */
 		glyph?: string;
@@ -42,6 +55,10 @@
 		subtitle?: string | Snippet;
 		/** The one primary action. */
 		primary?: Snippet;
+		/** Keep a single primary action beside the phone title; multi-action snippets use the bar's More menu. */
+		phonePrimary?: 'menu' | 'inline';
+		/** Optional page-owned More snippet, rendered in the phone bar with its original callbacks. */
+		phoneMenu?: Snippet;
 		facts?: Fact[];
 		/** Notice between facts and tabs. */
 		banner?: Snippet;
@@ -70,6 +87,10 @@
 
 	let {
 		name,
+		heading,
+		width = 'settings',
+		contentFirst = false, compactHeader = false,
+		identity = false,
 		icon,
 		glyph,
 		tile,
@@ -78,6 +99,8 @@
 		badge,
 		subtitle,
 		primary,
+		phonePrimary = 'menu',
+		phoneMenu,
 		facts = [],
 		banner,
 		tabs = [],
@@ -94,6 +117,14 @@
 		badges
 	}: Props = $props();
 
+	const contexts = getAllContexts();
+	let phone = $state(false);
+	onMount(() => {
+		const query = typeof window.matchMedia === 'function' ? window.matchMedia('(max-width: 600px)') : null;
+		const update = () => { phone = !!query?.matches; }; update();
+		query?.addEventListener('change', update);
+		return () => query?.removeEventListener('change', update);
+	});
 	setInDetail();
 	const access = getSettingsAccess();
 	const uid = $props.id();
@@ -112,6 +143,7 @@
 				)
 	);
 	const showTabs = $derived(tabList.length > 1);
+	const hasIdentity = $derived(Boolean(tile || glyph || (identity && icon)));
 	const catLabel = $derived(backLabel ?? categoryById(cat).label);
 
 	function selectTab(t: string) {
@@ -120,18 +152,27 @@
 	}
 </script>
 
-<div class="st-dwrap">
-	<div class="st-dtop">
-		<button type="button" class="st-back" aria-label="Back to {catLabel}" onclick={() => (onBack ? onBack() : settingsNav.back())}>
-			<ChevronLeft /><span>{catLabel}</span>
-		</button>
-		{#if topStatus}{@render topStatus()}{:else}<SavedTick />{/if}
-	</div>
-	<div class="st-dh">
-		{#if tile}{@render tile()}{:else}<Tile size="lg" {icon} text={glyph} status={statusText ? undefined : status} ring="bg" />{/if}
+{#snippet phoneActions()}
+	<PanelContext {contexts}>
+		<div class="settings-shell phone-detail-actions">
+			<fieldset disabled={access.readOnly}>
+				{#if phoneMenu}{@render phoneMenu()}{:else}<details class="detail-more"><summary class="st-btn icon" aria-label="More" title="More"><MoreHorizontal size={18} /></summary><div class="detail-actions">{@render primary?.()}</div></details>{/if}
+			</fieldset>
+		</div>
+	</PanelContext>
+{/snippet}
+<div class="st-dwrap" class:data={width === 'data'} class:reading={width === 'reading'} class:docs={width === 'docs'}>
+	{#if !contentFirst}
+		<BackRow label={catLabel} actions={phoneMenu || (primary && phonePrimary === 'menu') ? phoneActions : undefined} onclick={() => (onBack ? onBack() : settingsNav.stacked ? settingsNav.back() : settingsNav.clearSelection(cat))}>
+			{#if topStatus}{@render topStatus()}{:else}<SavedTick />{/if}
+		</BackRow>
+	{/if}
+	<div class="st-dh" class:compact-header={compactHeader} class:phone-inline={phonePrimary === 'inline'}>
+		<div class="st-identity">{#if tile}{@render tile()}{:else if hasIdentity}<Tile size="lg" {icon} text={glyph} status={statusText ? undefined : status} ring="bg" />{/if}</div>
 		<div class="st-dh-main">
 			<div class="st-dhn">
-				<h2 tabindex="-1" data-settings-heading="detail">{name}</h2>
+				{#if heading}{@render heading()}{:else}<h2 tabindex="-1" data-settings-heading="detail">{name}</h2>{/if}
+				{#if status && !statusText && !tile && !identity && !glyph}<StatusDot tone={status} />{/if}
 				{#if badge}<span class="badge">{badge}</span>{/if}
 				{@render badges?.()}
 			</div>
@@ -142,7 +183,7 @@
 				</div>
 			{/if}
 		</div>
-		{#if primary}
+		{#if primary && ((!phone && !platform.isMobile) || phonePrimary === 'inline' || contentFirst)}
 			<fieldset class="st-dha" disabled={access.readOnly}>{@render primary()}</fieldset>
 		{/if}
 	</div>
@@ -171,25 +212,47 @@
 
 <style>
 	.st-dwrap {
-		max-width: 700px;
-		padding: 20px 32px 96px;
+		container: detail-header / inline-size;
+		position: relative;
+		width: 100%;
+		max-width: calc(var(--st-reading-width) + 2 * var(--st-gutter));
+		margin-inline: auto;
+		padding: var(--st-page-top) var(--st-gutter) 96px;
 	}
-	.st-dtop {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		min-height: 22px;
-	}
+	.st-dwrap.docs { max-width: calc(var(--st-prose-width) + var(--st-toc-width) + var(--st-toc-gap) + 2 * var(--st-gutter)); }
+	.st-dwrap.data { max-width: calc(var(--st-data-width) + 2 * var(--st-gutter)); }
 	.st-dh {
 		display: grid;
-		grid-template-columns: auto minmax(0, 1fr) auto;
+		grid-template-columns: minmax(0, 1fr);
 		gap: 14px;
 		align-items: center;
-		padding: 2px 0 18px;
+		padding: 0 0 18px;
+	}
+	.st-dwrap .st-dh.compact-header { padding-bottom: 6px; }
+	/* Empty tile snippets are truthy functions. Count actual identity elements,
+	   not the empty text/comment placeholders Svelte emits for those snippets. */
+	.st-identity { display: contents; }
+	.st-identity:not(:has(> :global(*))) { display: none; }
+	.st-dh:has(> .st-dha) { grid-template-columns: minmax(0, 1fr) auto; }
+	.st-dh:global(:has(> .st-identity > *)) { grid-template-columns: auto minmax(0, 1fr); }
+	.st-dh:global(:has(> .st-identity > *)):has(> .st-dha) { grid-template-columns: auto minmax(0, 1fr) auto; }
+	/* The host bar names content-first pages on phone. Keep their semantic
+	   heading, but do not repeat that title in the shared detail header. */
+	:global(.view-shell[data-stacked][data-content-first]) .st-dh { padding-top: 12px; }
+	:global(.view-shell[data-stacked][data-content-first]) h2 {
+		position: absolute;
+		width: 1px;
+		height: 1px;
+		padding: 0;
+		margin: -1px;
+		overflow: hidden;
+		clip-path: inset(50%);
+		white-space: nowrap;
 	}
 	.st-dh-main {
 		min-width: 0;
 	}
+
 	.st-dhn {
 		display: flex;
 		gap: 8px;
@@ -197,7 +260,7 @@
 		flex-wrap: wrap;
 	}
 	h2 {
-		font-size: 17px;
+		font-size: 24px;
 		font-weight: 600;
 		letter-spacing: -0.01em;
 		margin: 0;
@@ -223,7 +286,7 @@
 		display: flex;
 		gap: 4px 12px;
 		flex-wrap: wrap;
-		font-size: 12.5px;
+		font-size: 13px;
 		color: var(--st-mfg);
 		margin-top: 4px;
 		align-items: center;
@@ -247,6 +310,24 @@
 		padding: 0;
 		min-width: 0;
 	}
+	/* All multi-action headers reflow together when the content, not the window, is narrow. */
+	@container detail-header (width < 720px) {
+		.st-dh:has(> .st-dha) { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+		.st-dh:global(:has(> .st-identity > *)):has(> .st-dha) { grid-template-columns: auto minmax(0, 1fr); }
+		.st-dha { grid-column: 1 / -1; justify-content: flex-start; }
+	}
+	@media (max-width: 600px) {
+		.st-dh.phone-inline:has(> .st-dha) { grid-template-columns: minmax(0, 1fr) auto; }
+		.phone-inline > .st-dha { grid-column: auto; }
+	}
+	.phone-detail-actions { display: flex; flex: none; width: 56px; height: auto; min-width: 0; container-type: normal; background: transparent; }
+	.phone-detail-actions:not(:has(:is(button, a, input))) { display: none; }
+	.phone-detail-actions fieldset { border: 0; margin: 0; padding: 0 6px; }
+	.phone-detail-actions summary { color: var(--st-fg); }
+	.detail-more { position: relative; }
+	.detail-more summary { list-style: none; cursor: pointer; }
+	.detail-more summary::-webkit-details-marker { display: none; }
+	.detail-actions { position: absolute; right: 0; top: calc(100% + 4px); z-index: 20; display: flex; flex-direction: column; gap: 8px; padding: 8px; min-width: max-content; border: 1px solid var(--st-border); border-radius: var(--st-radius-md); background: var(--st-popover); box-shadow: var(--st-shadow); }
 	.st-dbody {
 		border: 0;
 		margin: 0;

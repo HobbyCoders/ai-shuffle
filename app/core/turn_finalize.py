@@ -58,7 +58,8 @@ def _checkout_shared_with_another_session(
             continue
         if other.get("parent_session_id") == session_id:
             continue
-        if (other.get("status") or "") == "archived":
+        from app.core.session_reservations import holds_resources
+        if not holds_resources(other["id"]):
             continue
         return True
     return False

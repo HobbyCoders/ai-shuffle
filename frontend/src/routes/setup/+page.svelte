@@ -1,4 +1,5 @@
 <script lang="ts">
+	import '$lib/components/ui/surfaces.css';
 	/**
 	 * First-run setup (wizard v2). Docker and the desktop app all land
 	 * here until setup is finished. Steps, in order:
@@ -221,16 +222,16 @@
 	<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
 </svelte:head>
 
-<div class="setup-viewport flex flex-col items-center overflow-y-auto p-4">
-	<div class="card my-auto shrink-0 p-6 sm:p-8 w-full max-w-xl">
+<div class="setup-viewport ui-surface ui-onboarding">
+	<div class="ui-onboarding-card">
 		{#if loadingConfig}
 			<div class="text-center py-8">
-				<Loader2 size={32} strokeWidth={1.5} class="mx-auto mb-4 animate-spin text-muted-foreground" />
+				<Loader2 size={24} strokeWidth={1.5} class="mx-auto mb-4 animate-spin text-muted-foreground" />
 				<p class="text-muted-foreground">Loading...</p>
 			</div>
 		{:else}
 			<div class="text-center mb-6 sm:mb-8">
-				<h1 class="text-xl sm:text-2xl font-bold text-foreground mb-2">Welcome to AI Shuffle</h1>
+				<h1 class="text-xl sm:text-2xl font-semibold text-foreground mb-2">Welcome to AI Shuffle</h1>
 				<p class="text-muted-foreground text-sm sm:text-base">{SUBTITLES[currentStep]}</p>
 			</div>
 
@@ -258,7 +259,7 @@
 					onFixProvider={() => { completedSteps.delete('provider'); goTo('provider'); }} />
 
 			{:else if currentStep === 'extras'}
-				<div class="space-y-4" data-testid="setup-extras">
+				<div class="ui-surface space-y-4" data-testid="setup-extras">
 					<p class="text-sm text-muted-foreground">Each of these is optional. Open the ones you want, or finish now and set them up later in Settings.</p>
 
 					<div class="space-y-3">
@@ -277,7 +278,7 @@
 										{#if !linked}
 											<div>
 												<label for="workerName" class="block text-xs text-muted-foreground mb-1">Name for this worker</label>
-												<input type="text" id="workerName" bind:value={workerName} maxlength="80" class="input text-sm" placeholder="My worker" />
+												<input type="text" id="workerName" bind:value={workerName} maxlength="80" class="ui-input text-sm" placeholder="My worker" />
 											</div>
 										{/if}
 										<AccountPanel {workerName} variant="setup" />
@@ -295,12 +296,12 @@
 											<div role="status" class="text-sm text-muted-foreground flex items-start gap-2"><Loader2 size={16} class="animate-spin shrink-0" /> Connecting this worker to your account…</div>
 										{/if}
 										{#if !linked}
-											<button type="button" onclick={() => chooseNetwork('invite')} class="btn btn-secondary w-full py-2.5 text-sm">Use a worker invite instead</button>
+											<button type="button" onclick={() => chooseNetwork('invite')} class="ui-button w-full py-2.5 text-sm">Use a worker invite instead</button>
 										{/if}
 									{:else}
 										<JoinNetworkPanel status={networkStatus} deviceName={workerName} onChanged={refreshNetwork} />
 										{#if !(networkStatus?.enrollment)}
-											<button type="button" onclick={() => chooseNetwork('account')} class="btn btn-secondary w-full py-2.5 text-sm"><ChevronLeft size={16} class="inline-block" /> Back to account sign-in</button>
+											<button type="button" onclick={() => chooseNetwork('account')} class="ui-button w-full py-2.5 text-sm"><ChevronLeft size={16} class="inline-block" /> Back to account sign-in</button>
 										{/if}
 									{/if}
 								</div>
@@ -319,8 +320,8 @@
 					</div>
 
 					<div class="border-t border-border pt-4 flex gap-3">
-						<button type="button" onclick={() => back('extras')} class="btn btn-secondary flex-1 py-3" disabled={finishing}>Back</button>
-						<button type="button" onclick={finishSetup} class="btn btn-primary flex-[2] py-3" disabled={finishing}>
+						<button type="button" onclick={() => back('extras')} class="ui-button flex-1 py-3" disabled={finishing}>Back</button>
+						<button type="button" onclick={finishSetup} class="ui-button primary flex-[2] py-3" disabled={finishing}>
 							{#if finishing}<Loader2 size={16} class="inline-block animate-spin mr-2" />{/if}Finish setup
 						</button>
 					</div>

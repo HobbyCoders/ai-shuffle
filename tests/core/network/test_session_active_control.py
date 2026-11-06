@@ -413,10 +413,12 @@ async def test_remote_archive_and_restore_update_owner_and_mirror(workers, monke
             api.SessionActiveUpdate(is_active=True, archived=True), token="admin",
         )
         # Archiving always leaves Active, whatever is_active asked for.
-        assert result["status"] == "archived" and not result["is_active"]
+        assert result["status"] == "active" and not result["is_active"]
         assert not database.get_session("archive-remote")["is_active"]
+    converge([a, b])
     with a.active():
-        assert database.get_session("archive-remote")["status"] == "archived"
+        assert database.get_session("archive-remote")["status"] == "active"
+        assert not database.get_session("archive-remote")["is_active"]
     with b.active():
         result = await api.set_session_active(
             Request({"type": "http", "headers": []}), "archive-remote",

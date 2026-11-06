@@ -23,6 +23,13 @@ function ordinarySessionClick(event: MouseEvent): boolean {
 }
 
 /** Shared session selection for the sidebar, deep links and in-app links. */
+/** Leave a full-page view for the chat that was open, or new chat when none was. */
+export function backToChats(): void {
+	const sessionId = get(activeSession).sessionId;
+	if (sessionId) openSession(sessionId);
+	else layout.openChat(null);
+}
+
 export function openSession(sessionId: string, openedSession?: Session): void {
 	// Persistent assistant homes are intentionally absent from ordinary lists.
 	const session = openedSession ?? appData.current.sessions.find((row) => row.id === sessionId);

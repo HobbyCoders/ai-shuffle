@@ -69,7 +69,13 @@ beforeEach(() => {
 afterEach(() => cleanup());
 
 describe('Settings > MCP servers list', () => {
+ it('cards small groups and keeps the filter out until there are more than six rows', async () => {
+  await show();
+  expect(screen.queryByRole('searchbox')).toBeNull();
+  expect(screen.getByRole('button', { name: /^files/ }).closest('.st-card')).toBeTruthy();
+ });
 	it('lists custom servers before built-ins and filters by search', async () => {
+  api.getGlobalMcpServers.mockResolvedValue([...servers(), ...Array.from({ length: 4 }, (_, i) => server({ name: `extra-${i}`, command: 'extra' }))]);
 		await show();
 		expect(screen.getByText('https://mcp.example.com')).toBeTruthy();
 		expect(screen.getByText('Custom')).toBeTruthy();
@@ -80,6 +86,8 @@ describe('Settings > MCP servers list', () => {
 		expect(screen.getByText('https://mcp.example.com')).toBeTruthy();
 		await fireEvent.input(screen.getByRole('searchbox'), { target: { value: 'zzz' } });
 		expect(screen.getByText('Nothing matches.')).toBeTruthy();
+  await fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+  expect((screen.getByRole('searchbox') as HTMLInputElement).value).toBe('');
 	});
 
 	it('reports a load failure and retries', async () => {

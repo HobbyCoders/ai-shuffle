@@ -181,7 +181,7 @@ export function permissionModePayload(
 /** Composer label for a mode, e.g. `Bypass`; unknown values read as Ask. */
 export function permissionModeLabel(mode: string | null | undefined): string {
 	const value = knownMode(mode) ?? 'default';
-	return accessModes({ hasProject: true, autoSupported: true }).find((m) => m.value === value)?.label ?? 'Ask';
+	return accessModes({ hasProject: true, autoSupported: true }).find((m) => m.value === value)?.label ?? 'Ask first';
 }
 
 /**

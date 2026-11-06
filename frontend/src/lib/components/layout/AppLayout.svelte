@@ -16,9 +16,10 @@
 	 * wraps the same MainPanel. See docs/mobile-desktop-ui-split.md.
 	 */
 	import { onMount, onDestroy } from 'svelte';
-	import { layout, sidebarCollapsed } from '$lib/stores/layout.svelte';
+	import { activeView, layout, sidebarCollapsed, viewOwnsPanel } from '$lib/stores/layout.svelte';
 	import type { ViewType } from '$lib/stores/layout.svelte';
-	import { isNarrowViewportWidth } from '$lib/utils/viewport';
+	import { PanelLeft } from 'lucide-svelte';
+	import { backToChats } from '$lib/services/session-navigation';
 	import MainPanel from './MainPanel.svelte';
 	import Sidebar from './Sidebar.svelte';
 	import CredentialStorageBanner from '../CredentialStorageBanner.svelte';
@@ -46,6 +47,8 @@
 
 	/** Window is too narrow for a docked sidebar. */
 	let narrow = $state(false);
+	let rail = $state(false);
+	let viewportWidth = $state(0);
 
 	// --- resizable sidebar ---------------------------------------------------
 	// Matches the layout store's clamp: the icon rail takes 56px of this.
@@ -85,12 +88,15 @@
 	// while the window is narrow.
 	let overlayApplied: boolean | null = null;
 	function syncOverlay() {
-		narrow = isNarrowViewportWidth(window.innerWidth);
+		viewportWidth = window.innerWidth;
+		rail = viewportWidth >= 768;
+		narrow = !rail || viewportWidth - sidebarWidth < 480;
 		if (narrow === overlayApplied) return;
 		overlayApplied = narrow;
 		layout.setSidebarOverlay(narrow);
 	}
 
+	$effect(() => { sidebarWidth; if (viewportWidth) syncOverlay(); });
 	onMount(() => {
 		syncOverlay();
 		window.addEventListener('resize', syncOverlay);
@@ -102,9 +108,11 @@
 		}
 	});
 
-	const showSidebar = $derived(!$sidebarCollapsed);
+	/** Every rail destination owns the same resizable column; Chats is preserved behind it. */
+	const panelOwned = $derived(rail && viewOwnsPanel($activeView?.type));
+	const showSidebar = $derived(rail || !$sidebarCollapsed);
 	/** Narrow window: the open sidebar floats over the main panel. */
-	const sidebarFloating = $derived(showSidebar && narrow);
+	const sidebarFloating = $derived(!$sidebarCollapsed && narrow);
 
 	function closeFloatingSidebar() {
 		if (sidebarFloating) layout.setSidebarCollapsed(true);
@@ -114,12 +122,12 @@
 		onNewSession: () => { onNewSession(); closeFloatingSidebar(); },
 		onSettledOpenSession: () => { onSettledOpenSession(); closeFloatingSidebar(); },
 		onOpenSession: (id: string) => { onOpenSession(id); closeFloatingSidebar(); },
-		onOpenFeature: (type: ViewType) => { onOpenFeature(type); closeFloatingSidebar(); },
+		onOpenFeature: (type: ViewType) => { onOpenFeature(type); if (rail) layout.setSidebarCollapsed(false); else closeFloatingSidebar(); },
 		onOpenSpotlight: onOpenSpotlight ? () => { onOpenSpotlight?.(); closeFloatingSidebar(); } : undefined
 	});
 </script>
 
-<div class="app-shell" class:narrow>
+<div class="app-shell" class:narrow class:with-rail={rail}>
 	<CredentialStorageBanner />
 	<ClaudeReloginBanner />
 	<FirstCopyBanner />
@@ -131,16 +139,25 @@
 			<div class="sidebar-scrim" onclick={closeFloatingSidebar}></div>
 		{/if}
 		{#if showSidebar}
-			<div class="sidebar-slot" class:floating={sidebarFloating} style:width="{sidebarWidth}px">
+			<div
+				class="sidebar-slot"
+				class:floating={sidebarFloating && !rail}
+				class:rail-only={rail && $sidebarCollapsed}
+				class:panel-overlay={rail && narrow}
+				style:--panel-width={`${sidebarWidth - 56}px`}
+				style:width={`${rail && ($sidebarCollapsed || narrow) ? 56 : sidebarWidth}px`}
+			>
 				<Sidebar
 					{isAdmin}
+					panelHost={rail}
+					onBackToChats={() => { backToChats(); if (rail) layout.setSidebarCollapsed(false); else closeFloatingSidebar(); }}
 					onNewSession={sidebarNav.onNewSession}
 					onSettledOpenSession={sidebarNav.onSettledOpenSession}
 					onOpenSession={sidebarNav.onOpenSession}
 					onOpenFeature={sidebarNav.onOpenFeature}
 					onOpenSpotlight={sidebarNav.onOpenSpotlight}
 				/>
-				{#if !sidebarFloating}
+				{#if !sidebarFloating && !$sidebarCollapsed}
 					<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 					<div
 						class="resize-handle"
@@ -156,8 +173,12 @@
 			</div>
 		{/if}
 
+		{#if panelOwned && $sidebarCollapsed}
+			<button class="reopen-panel" type="button" aria-label="Show sidebar" title="Show sidebar" onclick={() => layout.setSidebarCollapsed(false)}><PanelLeft size={17} /></button>
+		{/if}
 		<MainPanel
 			{onOpenSession}
+			hideTopBar={panelOwned}
 			sidebarCollapsed={$sidebarCollapsed}
 			onToggleSidebar={() => layout.toggleSidebar()}
 		/>
@@ -205,6 +226,17 @@
 		box-shadow: 8px 0 32px color-mix(in oklch, black 45%, transparent);
 	}
 
+	/* The rail owns More even while the list is collapsed. Hide only columns,
+	   not the plane containing its overlays. */
+	.sidebar-slot.rail-only :global(.panel-plane) { position: absolute; left: 56px; top: 0; width: var(--panel-width); height: 100%; pointer-events: none; }
+	.sidebar-slot.rail-only :global(.panel-plane > .col) { display: none; }
+	.sidebar-slot.panel-overlay { z-index: 42; }
+	.sidebar-slot.panel-overlay:not(.rail-only) :global(.panel-plane) { position: absolute; left: 56px; top: 0; width: var(--panel-width); height: 100%; background: var(--sidebar); border-right: 1px solid var(--sidebar-border); }
+	.with-rail .sidebar-scrim { left: 56px; }
+	.reopen-panel { position: absolute; top: 10px; left: 66px; z-index: 40; display: grid; place-items: center; width: 28px; height: 28px; border: 0; border-radius: var(--radius-control); background: transparent; color: var(--muted-foreground); cursor: pointer; }
+	.reopen-panel:hover { background: var(--accent); color: var(--foreground); }
+	.reopen-panel:active { background: var(--row-selected); }
+	.reopen-panel:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
 	.sidebar-scrim {
 		position: absolute;
 		inset: 0;

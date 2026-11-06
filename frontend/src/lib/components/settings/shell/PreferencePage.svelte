@@ -10,11 +10,12 @@
 	 *   </PreferencePage>
 	 */
 	import type { Snippet } from 'svelte';
-	import { ChevronLeft } from 'lucide-svelte';
+	import BackRow from './BackRow.svelte';
 	import { settingsNav } from '$lib/settings/navigation.svelte';
 	import { categoryById } from '$lib/settings/categories';
 	import type { CategoryId } from '$lib/settings/types';
 	import SavedTick from './SavedTick.svelte';
+	import PageTitle from './PageTitle.svelte';
 
 	interface Props {
 		category: CategoryId;
@@ -29,13 +30,8 @@
 
 <div class="st-pscroll st-scroll">
 	<div class="st-page">
-		<div class="st-page-h">
-			<button type="button" class="st-back" aria-label="Back to Settings" onclick={() => settingsNav.back()}>
-				<ChevronLeft />
-			</button>
-			<h1 tabindex="-1" data-settings-heading="page">{label}</h1>
-			<SavedTick />
-		</div>
+		<BackRow label="Settings" onclick={() => settingsNav.back()} />
+		<PageTitle title={label}>{#snippet actions()}<SavedTick />{/snippet}</PageTitle>
 		{@render children()}
 	</div>
 </div>
@@ -47,23 +43,10 @@
 		min-height: 0;
 	}
 	.st-page {
-		max-width: 760px;
-		padding: 32px 48px 120px;
+		position: relative;
+		max-width: calc(var(--st-reading-width) + 2 * var(--st-gutter));
+		margin: 0 auto;
+		padding: var(--st-page-top) var(--st-gutter) 120px;
 	}
-	.st-page-h {
-		display: flex;
-		align-items: center;
-		gap: 12px;
-		margin-bottom: 26px;
-		min-height: 32px;
-	}
-	h1 {
-		font-size: 22px;
-		font-weight: 600;
-		letter-spacing: -0.012em;
-		margin: 0;
-	}
-	h1:focus {
-		outline: none;
-	}
+
 </style>

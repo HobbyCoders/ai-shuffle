@@ -8,7 +8,13 @@ declare global {
 		// interface Error {}
 		// interface Locals {}
 		// interface PageData {}
-		// interface PageState {}
+		interface PageState {
+			/** Set while the phone composer's Chat controls Back entry is on the stack. */
+			mobileControls?: boolean;
+			/** The Chat controls page (Model, Agent…) whose own Back entry is on the stack. */
+			mobileControlsPage?: string;
+			mobileDrawer?: boolean;
+		}
 		// interface Platform {}
 	}
 }

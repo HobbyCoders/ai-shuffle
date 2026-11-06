@@ -145,196 +145,12 @@ html:root[data-platform='mobile'] .branch-dropdown {
 
 /* ── frontend/src/lib/components/chat/ChatInput.svelte ─────────────────────── */
 
-/* T3-style mobile composer: an idle chat shrinks to a single input line with
-   the send glyph at its end. Focusing restores the controls row; a
-   successful send blurs it again. Mobile shell only — the desktop shell
-   keeps the full composer at every window width. */
-html:root[data-platform='mobile'] .chat-input-wrapper {
-	padding: 12px 0.5rem calc(0.5rem + env(safe-area-inset-bottom, 0px));
-	background: linear-gradient(to top, var(--background) 68%, transparent);
-}
-
-/* The composer card (issue #1816): + | text | mic · talk/send · stop, with
-   the quick bar (MobileComposerControlsSheet) as its bottom edge. */
-html:root[data-platform='mobile'] .chat-island {
-	--composer-action-size: 40px;
-	/* The composer buttons follow the theme's corners as on desktop, scaled
-	   to the 40px buttons: 0.5rem (8px here) and up makes a full circle,
-	   0.25-0.375rem a rounded square, 0 a square (2.5x, capped at half the
-	   button). */
-	--composer-btn-radius: min(calc(var(--radius, 10px) * 2.5), 20px);
-	border-radius: calc(var(--radius) * 1.6);
-	border-color: var(--border-strong);
-	background: var(--card);
-	box-shadow: var(--shadow-m);
-	transition:
-	border-radius 180ms ease,
-	border-color 180ms ease;
-}
-
-/* Profile, branch and worktree setup live in the mobile controls sheet. */
-html:root[data-platform='mobile'] .context-pill-row {
-	display: none;
-}
-
-/* A 56px row: 8px of padding round a 40px band. The field is 40px tall too
-   (a 24px line plus 8px above and below), so the + circle, the first text
-   line and the right-hand circles share one centre, 8px from the card's top
-   and from the quick bar. The field's vertical padding must stay at
-   (40px - line) / 2: more lifts the text above the bottom-aligned circles and
-   leaves extra room above them. */
-html:root[data-platform='mobile'] .input-area {
-	min-height: 0;
-	align-items: flex-end;
-	gap: 6px;
-	padding: 8px;
-	background: transparent;
-	border-radius: calc(var(--radius) * 1.6) calc(var(--radius) * 1.6) 0 0;
-}
-
-html:root[data-platform='mobile'] .input-area .textarea-wrapper {
-	align-self: stretch;
-	padding: 8px 4px;
-}
-
-/* Attach and dictate: quiet 40px circles (muted fill). Listening, preparing
-   and transcribing keep VoiceRecorder's own pill widths and tints. */
-html:root[data-platform='mobile'] .composer-attach,
-html:root[data-platform='mobile'] .send-cluster .voice-btn {
-	display: grid;
-	place-items: center;
-	height: 40px;
-	flex: none;
-	margin-bottom: 0;
-	padding: 0;
-	border: 0;
-	-webkit-tap-highlight-color: transparent;
-}
-html:root[data-platform='mobile'] .composer-attach,
-html:root[data-platform='mobile'] .send-cluster .voice-btn:not(.expanded):not(.preparing):not(.transcribing) {
-	width: 40px;
-	border-radius: var(--composer-btn-radius);
-}
-html:root[data-platform='mobile'] .composer-attach,
-html:root[data-platform='mobile'] .send-cluster .voice-btn:not(.recording):not(.preparing):not(.transcribing) {
-	background: var(--muted);
-	color: var(--muted-foreground);
-	cursor: pointer;
-}
-
-html:root[data-platform='mobile'] .composer-attach:hover:not(:disabled),
-html:root[data-platform='mobile'] .send-cluster .voice-btn:not(.recording):not(.preparing):not(.transcribing):hover:not(:disabled) {
-	background: color-mix(in oklch, var(--muted) 80%, var(--foreground));
-	color: var(--foreground);
-}
-
-html:root[data-platform='mobile'] .composer-attach:active:not(:disabled) { background: var(--active-overlay); }
-html:root[data-platform='mobile'] .composer-attach:disabled { opacity: 0.4; cursor: not-allowed; }
-html:root[data-platform='mobile'] .composer-attach:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
-html:root[data-platform='mobile'] .composer-attach svg { width: 20px; height: 20px; }
-
-html:root[data-platform='mobile'] .send-cluster .voice-btn-wrapper { margin-bottom: 0; border-radius: var(--composer-btn-radius); }
-html:root[data-platform='mobile'] .send-cluster .voice-btn-wrapper .voice-btn { margin-bottom: 0; }
-html:root[data-platform='mobile'] .send-cluster .voice-btn svg { width: 19px; height: 19px; }
-
-/* Drafts save and restore by themselves; the phone shows no stash control. */
-html:root[data-platform='mobile'] .send-cluster .stash {
-	display: none;
-}
-
-/* Thumb-sized primary actions: 40px circles pinned to the bottom with + and
-   the mic. Talk turns into Send in the same slot; Stop follows while work
-   runs. */
-html:root[data-platform='mobile'] .send-cluster {
-	align-self: flex-end;
-	gap: 6px;
-}
-
-html:root[data-platform='mobile'] .send-btn,
-html:root[data-platform='mobile'] .send-cluster .stop-btn,
-html:root[data-platform='mobile'] .send-cluster .call-circle {
-	width: 40px;
-	height: 40px;
-	margin-bottom: 0;
-	border-radius: var(--composer-btn-radius);
-}
-
-html:root[data-platform='mobile'] .send-btn svg { width: 19px; height: 19px; }
-html:root[data-platform='mobile'] .send-cluster .call-circle svg { width: 19px; height: 19px; }
-html:root[data-platform='mobile'] .send-cluster .stop-btn svg { width: 17px; height: 17px; }
-
-/* Wrapped text (Duet-style): the text takes the card's full width and +
-   moves to the bottom-left, the mic and the send slot to the bottom-right,
-   on their own row above the quick bar. Layout only: nothing remounts. */
-html:root[data-platform='mobile'] .chat-island.wrapped .input-area {
-	display: grid;
-	grid-template-columns: auto minmax(0, 1fr) auto;
-	align-items: center;
-	row-gap: 2px;
-	padding: 8px 8px 8px;
-}
-html:root[data-platform='mobile'] .chat-island.wrapped .textarea-wrapper {
-	grid-row: 1;
-	grid-column: 1 / -1;
-	padding: 8px 8px 4px;
-}
-html:root[data-platform='mobile'] .chat-island.wrapped .composer-attach { grid-row: 2; grid-column: 1; }
-html:root[data-platform='mobile'] .chat-island.wrapped .send-cluster { grid-row: 2; grid-column: 3; align-self: center; }
-
-@media (prefers-reduced-motion: reduce) {
-	html:root[data-platform='mobile'] .composer-attach-spin { animation: none; }
-}
-
-/* Composer text at 16px: readable on a phone, and mobile browsers do not zoom
-   into an editor whose text is at least 16px. The suggestion ghost text sits
-   on the same line, so it follows. A 24px line keeps one line inside the
-   editor's 24px minimum: a taller line would make the idle editor a scroll
-   owner, and the swipe-to-open gesture yields to scroll owners. */
-html:root[data-platform='mobile'] .chat-input-wrapper .tiptap-editor .ProseMirror,
-html:root[data-platform='mobile'] .chat-input-wrapper .inline-suggestion {
-	font-size: 16px;
-	line-height: 24px;
-}
-
-/* At 16px a long placeholder can wrap on a narrow phone, which also turns the
-   idle editor into a scroll owner. Keep it on one line, truncated, the way the
-   editor already lays it out beside a suggestion. */
-html:root[data-platform='mobile'] .chat-input-wrapper .ProseMirror p.is-editor-empty:first-child::before {
-	position: absolute;
-	inset-inline: 0;
-	float: none;
-	height: auto;
-	white-space: nowrap;
-	overflow: hidden;
-	text-overflow: ellipsis;
-}
-
-/* At 360px and narrower the code lane's placeholder no longer fits and would
-   end in an ellipsis, so it says the same thing in fewer words. It matches the
-   value ChatInput sets, which leaves chat's "Ask anything" and suggestion
-   ghost text alone. */
-@media (max-width: 360px) {
-	html:root[data-platform='mobile'] .chat-input-wrapper .ProseMirror p.is-editor-empty:first-child[data-placeholder='Describe a task or ask a question']::before {
-		content: 'Ask or describe a task';
-	}
-
-	/* The mic stays beside send while there is a draft, so the cluster
-	   tightens its gap here and the text field keeps the room. */
-	html:root[data-platform='mobile'] .send-cluster { gap: 4px; }
-}
-
-/* The field's padding makes the target; the editor grows to five lines. */
-html:root[data-platform='mobile'] .chat-input-wrapper:not(.mobile-collapsed) .textarea-wrapper .tiptap-editor {
-	min-height: 24px;
-}
-
+/* The composer's phone layout is shared with a phone-width web window:
+   frontend/src/lib/components/chat/phone/phone-composer.css. What stays here is
+   the phone app's own behaviour: an idle chat shrinks to its input line. */
 html:root[data-platform='mobile'] .mobile-collapsed .chat-island {
 	min-height: 50px;
 	border-radius: 14px;
-}
-
-html:root[data-platform='mobile'] .mobile-collapsed .context-pill-row {
-	display: none;
 }
 
 /* Collapsed: the controls row goes away entirely. The send / stop
@@ -364,14 +180,6 @@ html:root[data-platform='mobile'] .mobile-collapsed .input-area {
 }
 
 /* ── frontend/src/lib/components/chat/ControlsDock.svelte ──────────────────── */
-
-/* Mobile shell only: the quick bar (MobileComposerControlsSheet) is the
-   composer's bottom edge. The dock stays mounted for its state (usage
-   polling, effort range, Away) but shows nothing: attach and the mic sit in
-   the input row, call and browser in Chat controls (issue #1816). */
-html:root[data-platform='mobile'] .controls-dock {
-	display: none;
-}
 
 html:root[data-platform='mobile'] .desktop-controls {
 	display: none;
@@ -551,16 +359,18 @@ html:root[data-platform='mobile'] .transitioning-from-empty .input-wrapper {
 	animation: none;
 }
 
-/* The invitation is centred in the room above the pinned composer and never
-   shrinks; when it does not fit, the whole empty surface scrolls. The
-   project popup uses the top layer. */
+/* The invitation sits just above the pinned composer and never shrinks; when
+   it does not fit, the whole empty surface scrolls. The project popup uses the
+   top layer. */
 html:root[data-platform='mobile'] .chat-view.is-empty { overflow-y: auto;
 }
 
 html:root[data-platform='mobile'] .is-empty .empty-hero {
 	flex: 1 0 auto;
-	justify-content: center;
+	justify-content: flex-end;
 	padding-top: 1rem;
+	/* With the hero's own 20px and the composer's 12px: 40px greeting to box. */
+	padding-bottom: 8px;
 }
 
 html:root[data-platform='mobile'] .is-empty .empty-hero-content { flex-shrink: 0;
@@ -589,6 +399,11 @@ html:root[data-platform='mobile'] .chat-view.is-empty .input-slot.empty-input-la
 /* SessionCard, Sidebar, SidebarRail, SidebarSheet and WorkspaceCustomize size
    their own touch targets (class:phone and @media (hover: none)). */
 
+/* Shared buttons and switches own their drawn size and invisible touch target. */
+html:root[data-platform='mobile'] .ui-checkbox { min-height: 44px; }
+html:root[data-platform='mobile'] .ui-checkbox .control { width: 44px; height: 44px; }
+html:root[data-platform='mobile'] .ui-checkbox .mark { inset: 14px; }
+
 /* ── frontend/src/lib/components/settings/shell (Settings) ───────────────── */
 
 /* Settings always stacks in the app (index, then page, then detail; see
@@ -614,26 +429,14 @@ html:root[data-platform='mobile'] .settings-shell .st-back {
 	min-width: 44px;
 }
 
+/* Shared Settings frames and parent-labelled back rows own phone spacing. */
+
 /* A chevron-only back button centres its icon in the 44px target and pulls
    the title in, so the gap after it matches the labelled back button. */
 html:root[data-platform='mobile'] .settings-shell .st-back:not(:has(span)) {
 	justify-content: center;
 	padding: 0;
 	margin-right: -6px;
-}
-
-html:root[data-platform='mobile'] .settings-shell .st-sw:not(.sm) {
-	width: 42px;
-	height: 25px;
-}
-
-html:root[data-platform='mobile'] .settings-shell .st-sw:not(.sm)::after {
-	width: 20px;
-	height: 20px;
-}
-
-html:root[data-platform='mobile'] .settings-shell .st-sw:not(.sm)[aria-checked='true']::after {
-	transform: translateX(17px);
 }
 
 /* ── frontend/src/lib/components/ui/RowActionMenu.svelte ───────────────────── */
@@ -712,16 +515,12 @@ html:root[data-platform='mobile'] .banner-close {
 	min-height: 44px;
 }
 
-/* ── The new-session screen: centred agent + "Runs on …" sentence ─────────── */
+/* ── The new-session screen: a question over the composer ─────────── */
 
 /* frontend/src/lib/components/layout/NewSessionHero.svelte — the hero is
    centred in the room above the pinned composer; the sentence may take two
    balanced lines. */
 html:root[data-platform='mobile'] .ns-hero { padding: 0 12px 20px; }
-html:root[data-platform='mobile'] .ns-hero .card-name { font-size: 26px; }
-html:root[data-platform='mobile'] .ns-sentence { font-size: 14px; line-height: 2.1; padding: 0 4px; }
-/* Each word stays a comfortable tap target without breaking the line. */
-html:root[data-platform='mobile'] .ns-sentence .sentence-tok { padding: 3px 6px; }
 
 /* frontend/src/lib/components/layout/AttachProjectSheet.svelte — a bottom
    sheet with touch-sized rows and the sidebar sheet's grab handle; dragging

@@ -8,7 +8,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import { writable } from 'svelte/store';
-import MobileComposerControlsSheet from './MobileComposerControlsSheet.svelte';
+import MobileComposerControlsSheet from '$lib/components/chat/phone/MobileComposerControlsSheet.svelte';
 import { git } from '$lib/stores/git.svelte';
 import { tick } from 'svelte';
 import { getQueuedMove, queueMove, cancelQueuedMove, moveSession } from '$lib/api/sessions';
@@ -163,7 +163,7 @@ describe('Move to another worker on the phone (#645)', () => {
 		arrange();
 		render(MobileComposerControlsSheet, { props: props() });
 		const setup = document.querySelector<HTMLElement>('.mcp .mcp-setup')!;
-		await waitFor(() => expect(setup.querySelector('.ctx-chip.readonly .ctx-chip-label')?.textContent).toBe('Local'));
+		await waitFor(() => expect(setup.querySelector('.ctx-chip.readonly .ctx-chip-label')?.textContent).toBe('DesktopWorker'));
 		expect(setup.querySelector('.ctx-chip.runner')).toBeNull();
 		expect(setup.querySelector('.ctx-chip-sub')).toBeNull();
 	});
@@ -175,7 +175,9 @@ describe('Move to another worker on the phone (#645)', () => {
 		render(MobileComposerControlsSheet, { props: props() });
 		await tick();
 		const setup = document.querySelector<HTMLElement>('.mcp .mcp-setup')!;
-		expect(setup.querySelector('.ctx-chip.runner')).toBeNull();
+		// It picks where the chat will run (its own row since the phone's one line
+		// replaced the row under the composer); there is nothing to move yet.
+		expect(setup.querySelector('.ctx-chip.runner')?.getAttribute('aria-label') ?? '').not.toMatch(/move/i);
 		expect(setup.querySelector('.ctx-chip-sub')).toBeNull();
 	});
 });
@@ -205,7 +207,7 @@ describe('Hosted menu on its page (#705)', () => {
 		vi.mocked(getQueuedMove).mockResolvedValue({ busy: { running: false, tasks: [] }, pending: null });
 		const { panel, runsOn } = await openMoveMenu();
 		// The worker this chat already runs on just closes the menu.
-		await fireEvent.click(within(runsOn).getByRole('menuitemradio', { name: 'Local' }));
+		await fireEvent.click(within(runsOn).getByRole('menuitemradio', { name: 'DesktopWorker' }));
 		await waitFor(() => expect(panel.getAttribute('aria-label')).toBe('Chat controls'));
 		expect(runsOn.querySelector('[data-mcp-ghost]')?.textContent).toContain('ServerWorker');
 		await waitFor(() => expect(runsOn.querySelector('[data-mcp-ghost]')).toBeNull(), { timeout: 1500 });

@@ -1,26 +1,27 @@
 <script lang="ts">
 	/**
-	 * NewSessionSentence — where a new session will run, as one sentence under
-	 * the agent's name on the new-session screen:
+	 * NewSessionSentence — the new-session screen's context row under the
+	 * composer: one quiet control each for the agent, the worker, the project
+	 * and, for a git project, its branch and worktree.
 	 *
-	 *   Runs on <worker> in <project> on <a new branch from main> in <a worktree>.
-	 *   Runs on <worker> with <no project>.
+	 *   Overseer ⌄  Workstation ⌄  my-app ⌄  New branch from main ⌄  Worktree
+	 *   Overseer ⌄  Workstation ⌄  No project ⌄
 	 *
-	 * Every underlined word is a real button that opens the menu its composer
-	 * chip opens (RunsOnPicker, WorkspaceFolderSelector, ExecutionModeBar's
+	 * Each is a real button that opens the menu its chat chip opens
+	 * (ProfileSelector, RunsOnPicker, WorkspaceFolderSelector, ExecutionModeBar's
 	 * branch menu or BranchSelector, WorkspaceSelector), in their `sentence`
-	 * variants: the trigger is the word, and the menu drops down centred under
-	 * it. The worktree word toggles the worktree. Which parts show follows the
-	 * composer chip row's rules for a new session (ContextPillBar): branch and
-	 * worktree only for a project that is a git repository, the checkout branch
-	 * only in local mode with GitHub signed in. The worker's online dot lives in
-	 * its menu, never in the sentence.
+	 * variants, whose menus float to <body>; the worktree one toggles the
+	 * worktree. Which parts show follows ContextPillBar's rules for a new
+	 * session: branch and worktree only for a project that is a git repository,
+	 * the checkout branch only in local mode with GitHub signed in. The worker's
+	 * online dot lives in its menu.
 	 */
 	import { activeSession } from '$lib/stores/active-session';
 	import { clusterProjects, projects } from '$lib/stores/app-data.svelte';
 	import { githubAuthenticated } from '$lib/stores/auth.svelte';
 	import { git } from '$lib/stores/git.svelte';
 	import { composerIsGitRepo, shouldShowEmptyStateBranchPill } from '$lib/components/chat/contextPills';
+	import ProfileSelector from '$lib/components/chat/ProfileSelector.svelte';
 	import WorkspaceFolderSelector from '$lib/components/chat/WorkspaceFolderSelector.svelte';
 	import BranchSelector from '$lib/components/chat/BranchSelector.svelte';
 	import CreateBranchModal from '$lib/components/git/CreateBranchModal.svelte';
@@ -53,29 +54,29 @@
 	}
 </script>
 
-<div class="ns-sentence" role="group" aria-label="Where this session runs">
-	Runs on <RunsOnPicker />
-	{#if hasProject}
-		<ExecutionModeBar variant="sentence">
-			{#snippet between()}
-				in {#if projectName}<WorkspaceFolderSelector variant="sentence" {projectName} onClear={() => activeSession.clearProject({ user: true })} />{:else}<span class="ns-pending">a project</span>{/if}
-				{#if showCheckoutBranch}
-					on <BranchSelector variant="sentence" onClickNewBranch={() => (showCreateBranchModal = true)} />
-				{/if}
-			{/snippet}
-			{#snippet after()}<span class="ns-stop" aria-hidden="true">.</span>{/snippet}
-		</ExecutionModeBar>
-	{:else}
-		<!-- inline-flex: the picker's trailing markup whitespace (its add-project
-		     dialog) must not show as a gap before the full stop. -->
-		with <span class="ns-word"><WorkspaceSelector
-			variant="sentence"
-			selectedProject={$activeSession.project}
-			selectedProjectV2Id={$activeSession.projectV2Id}
-			onSelectProject={selectProject}
-		/><span class="ns-stop" aria-hidden="true">.</span></span>
-	{/if}
-</div>
+<section class="ns-context" aria-label="New chat">
+	<ProfileSelector variant="card" />
+	<div class="ns-sentence" role="group" aria-label="Where this session runs">
+		<RunsOnPicker />
+		{#if hasProject}
+			<ExecutionModeBar variant="sentence">
+				{#snippet between()}
+					{#if projectName}<WorkspaceFolderSelector variant="sentence" {projectName} onClear={() => activeSession.clearProject({ user: true })} />{:else}<span class="sentence-tok ns-pending">Project</span>{/if}
+					{#if showCheckoutBranch}
+						<BranchSelector variant="sentence" onClickNewBranch={() => (showCreateBranchModal = true)} />
+					{/if}
+				{/snippet}
+			</ExecutionModeBar>
+		{:else}
+			<WorkspaceSelector
+				variant="sentence"
+				selectedProject={$activeSession.project}
+				selectedProjectV2Id={$activeSession.projectV2Id}
+				onSelectProject={selectProject}
+			/>
+		{/if}
+	</div>
+</section>
 {#if hasProject}
 	<!-- The picked worker lacks the project: say so, and that Send sets it up first. -->
 	<NewChatSetupCallout />
@@ -90,15 +91,29 @@
 {/if}
 
 <style>
-	.ns-sentence {
-		max-width: 46rem;
-		margin: 0;
-		font-size: 0.90625rem;
-		line-height: 2;
-		color: var(--muted-foreground);
-		text-align: center;
-		text-wrap: balance;
+	/* The row wraps rather than clips on a narrow window: nothing above it moves.
+	   On a phone it stays one line that scrolls sideways; its menus float to
+	   <body>, so the scroller cannot clip them. */
+	.ns-context {
+		position: relative;
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 2px;
+		min-width: 0;
+		margin: 8px 0 0 6px;
 	}
-	.ns-pending { color: var(--subtle-foreground); }
-	.ns-word { display: inline-flex; align-items: baseline; }
+	/* The group names its controls; they flow in the row itself. */
+	.ns-sentence { display: contents; }
+	.ns-pending { color: var(--subtle-foreground); cursor: default; }
+	@media (max-width: 480px) {
+		.ns-context {
+			margin: 2px 0 0;
+			flex-wrap: nowrap;
+			overflow-x: auto;
+			scrollbar-width: none;
+		}
+		.ns-context::-webkit-scrollbar { display: none; }
+		.ns-context :global(button) { flex: none; }
+	}
 </style>

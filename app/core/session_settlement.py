@@ -36,7 +36,7 @@ def _capture_and_dismiss(session_id, broker, expected_revision):
         cur.fetchone()
         cur.execute("SELECT * FROM sessions WHERE id=%s FOR UPDATE", (session_id,))
         row = cur.fetchone()
-        if not row or row.get("is_active") or row.get("status") == "archived" or control.owner_of(dict(row)):
+        if not row or row.get("is_active") or control.owner_of(dict(row)):
             return None
         revision = store.get_record(cur, "session_active", session_id)
         cur.execute("SELECT local_revision, local_revision_epoch, local_pending FROM network_session_active WHERE session_id=%s", (session_id,))

@@ -20,7 +20,7 @@ export interface AccessMode {
 	description: string;
 }
 
-const ASK: AccessMode = { value: 'default', label: 'Ask', description: 'Confirm before tools' };
+const ASK: AccessMode = { value: 'default', label: 'Ask first', description: 'Confirm before tools' };
 const AUTO: AccessMode = { value: 'auto', label: 'Auto', description: 'The provider checks each tool call and approves safe ones' };
 const ACCEPT_EDITS: AccessMode = { value: 'acceptEdits', label: 'Accept Edits', description: 'File edits run without asking; every other tool asks' };
 const BYPASS: AccessMode = { value: 'bypassPermissions', label: 'Bypass', description: 'Execute all tools' };
@@ -96,7 +96,7 @@ export function attachBlockedReason(state: AttachState): string | null {
  * What the attach does to the session's access, shown with the warning.
  * The backend resets Auto and Bypass in the same write that attaches.
  */
-export const ATTACH_ACCESS_NOTE = 'Access returns to Ask, so the terminal and file edits ask you first.';
+export const ATTACH_ACCESS_NOTE = 'Access returns to Ask first, so the terminal and file edits ask you first.';
 
 /** The one-way warning the attach sheet shows above its confirm. */
 export function attachWarning(agentName: string | null | undefined, projectName: string | null | undefined): {

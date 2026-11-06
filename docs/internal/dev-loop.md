@@ -274,7 +274,7 @@ It is chosen by the request alone, so it behaves the same after restarts:
   Use a native **Dev agent** chat attached to a project (for example the seeded
   **Cleared chat**) so shell tools are available. In Ask mode, approve the
   `run_python` and `Monitor` requests, then switch away while both the task and
-  reply are active. Stop or archive the session afterwards to reap the shell;
+  reply are active. Stop the disposable test session afterwards to reap the shell, then settle it;
   otherwise it exits after two minutes. The usual tag options can stretch the
   stream further.
 * `[script:ask-question]` asks one question in the question tray (`AskUser`,

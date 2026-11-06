@@ -106,9 +106,7 @@ describe('isClearedSession', () => {
 
 describe('chatHeaderTitle', () => {
 	it('shows "New Chat" for an unbound, empty chat', () => {
-		expect(chatHeaderTitle({ sessionId: null, title: 'New Chat', messageCount: 0 })).toBe(
-			'New Chat'
-		);
+		expect(chatHeaderTitle({ sessionId: null, title: 'New Chat', messageCount: 0 })).toBe('New chat');
 	});
 
 	it('shows the session title for a BOUND empty session (the core fix)', () => {
@@ -148,9 +146,9 @@ describe('chatHeaderTitle', () => {
 		expect(chatHeaderTitle({ sessionId: 'sess-1', title: 'New Chat', messageCount: 0, loading: true })).toBe('Loading…');
 		expect(chatHeaderTitle({ sessionId: 'sess-1', title: '  New Chat ', messageCount: 0, loading: true })).toBe('Loading…');
 		// Settled, it is the chat's stored title like any other.
-		expect(chatHeaderTitle({ sessionId: 'sess-1', title: 'New Chat', messageCount: 0 })).toBe('New Chat');
+		expect(chatHeaderTitle({ sessionId: 'sess-1', title: 'New Chat', messageCount: 0 })).toBe('New chat');
 		// An unbound compose is the new chat.
-		expect(chatHeaderTitle({ sessionId: null, title: 'New Chat', messageCount: 0, loading: true })).toBe('New Chat');
+		expect(chatHeaderTitle({ sessionId: null, title: 'New Chat', messageCount: 0, loading: true })).toBe('New chat');
 	});
 
 	it('falls back to "Untitled" for a bound session with no/blank title', () => {
@@ -176,7 +174,7 @@ describe('chatHeaderTitle', () => {
 		// Settled: the list's title still beats the placeholder.
 		expect(chatHeaderTitle({ ...syncing, loading: false, listTitle: 'Fix the poller' })).toBe('Fix the poller');
 		// An unbound compose never borrows a list title.
-		expect(chatHeaderTitle({ sessionId: null, title: 'New Chat', messageCount: 0, listTitle: 'Other' })).toBe('New Chat');
+		expect(chatHeaderTitle({ sessionId: null, title: 'New Chat', messageCount: 0, listTitle: 'Other' })).toBe('New chat');
 	});
 });
 

@@ -1,4 +1,5 @@
 <script lang="ts">
+	import '$lib/components/ui/surfaces.css';
 	/**
 	 * One optional part of setup's last step, as a summary row that expands.
 	 *
@@ -56,15 +57,12 @@
 
 <style>
 	.extra {
-		border: 1px solid var(--border);
-		border-radius: var(--radius, 10px);
-		background: color-mix(in oklch, var(--muted) 30%, transparent);
+		border-bottom: 1px solid var(--border);
 		transition: border-color 0.2s ease-out, background-color 0.2s ease-out;
 	}
 	.extra[hidden] { display: none; }
 	.extra.open {
-		border-color: color-mix(in oklab, var(--primary) 35%, var(--border));
-		background: var(--card);
+		background: transparent;
 	}
 	.extra-heading { margin: 0; font: inherit; }
 	.extra-row {
@@ -84,8 +82,8 @@
 		position: relative; flex: none;
 		display: flex; align-items: center; justify-content: center;
 		width: 36px; height: 36px; border-radius: 9px;
-		background: color-mix(in oklch, var(--primary) 12%, transparent);
-		color: var(--primary);
+		background: var(--row-selected);
+		color: var(--muted-foreground);
 	}
 	[data-tone='done'] .extra-icon { background: color-mix(in oklch, var(--success) 14%, transparent); color: var(--success); }
 	[data-tone='error'] .extra-icon { background: color-mix(in oklch, var(--destructive) 12%, transparent); color: var(--destructive); }

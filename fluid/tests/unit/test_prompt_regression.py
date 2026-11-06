@@ -35,6 +35,11 @@ def test_prompt_vocabulary_matches_registry_exactly() -> None:
     # builtin, and every registered builtin must be in the vocabulary (else
     # the gating and the mention-scan silently ignore it).
     assert set(BUILTIN_TOOL_NAMES) == _registry_names()
+    registry = ToolRegistry()
+    register_builtins(registry)
+    alias = registry.get("ArchiveSession")
+    assert alias is not None and not alias.discoverable
+    assert "ArchiveSession" not in BUILTIN_TOOL_NAMES
 
 
 def test_every_description_references_only_real_tools() -> None:

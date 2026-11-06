@@ -1,4 +1,9 @@
 <script lang="ts">
+	import Checkbox from '$lib/components/ui/Checkbox.svelte';
+	import ActionButton from './settings/rows/ActionButton.svelte';
+	import SelectField from './settings/rows/SelectField.svelte';
+	import Segmented from './settings/rows/Segmented.svelte';
+	import Switch from '$lib/components/settings/rows/Switch.svelte';
 	import { watchResources } from '$lib/services/watch-resources';
 	/**
 	 * ConnectorManager - Manage external connectors (Telegram, Discord, WhatsApp, Webhook, Slack, LINE, Signal, iMessage)
@@ -762,12 +767,12 @@
 				<div>
 					<h3 class="text-sm font-medium text-foreground">Connections</h3>
 				</div>
-				<button
+				<ActionButton
 					onclick={startAdd}
-					class="px-3 py-1.5 bg-primary hover:bg-primary/90 text-primary-foreground text-sm rounded-md transition-colors"
+					variant="primary"
 				>
 					Connect account
-				</button>
+				</ActionButton>
 			</div>
 
 			<!-- Connector List -->
@@ -962,19 +967,8 @@
 
 										<!-- Actions -->
 										<div class="flex items-center gap-1.5 shrink-0">
-											<!-- Toggle Switch (canonical .switch pattern) -->
-											<button
-												type="button"
-												class="switch"
-												class:on={connector.is_active}
-												role="switch"
-												aria-checked={connector.is_active}
-												aria-label={`${connector.is_active ? 'Deactivate' : 'Activate'} ${connector.name}`}
-												onclick={() => handleToggle(connector)}
-												title={connector.is_active ? 'Deactivate' : 'Activate'}
-											>
-												<i></i>
-											</button>
+											<!-- Toggle -->
+											<Switch controlled size="sm" checked={connector.is_active} label={`${connector.is_active ? 'Deactivate' : 'Activate'} ${connector.name}`} title={connector.is_active ? 'Deactivate' : 'Activate'} onchange={() => handleToggle(connector)} />
 
 											<!-- Test -->
 											<button
@@ -1223,9 +1217,9 @@
 							<span class="connector-type-desc">{type.description}</span>
 							{#if type.triggers?.length || type.actions?.length || type.tools?.length}
 								<div class="connector-type-variants">
-									{#if type.triggers?.length}<span class="mini-badge">&#9889;{type.triggers.length}</span>{/if}
-									{#if type.actions?.length}<span class="mini-badge">&#9654;{type.actions.length}</span>{/if}
-									{#if type.tools?.length}<span class="mini-badge">&#128295;{type.tools.length}</span>{/if}
+									{#if type.triggers?.length}<span class="mini-badge">{type.triggers.length} triggers</span>{/if}
+									{#if type.actions?.length}<span class="mini-badge">{type.actions.length} actions</span>{/if}
+									{#if type.tools?.length}<span class="mini-badge">{type.tools.length} tools</span>{/if}
 								</div>
 							{/if}
 						</div>
@@ -1316,22 +1310,17 @@
 
 					{#if needsAgent}
 						<div>
-							<label class="block text-xs font-medium text-muted-foreground mb-1" for="connector-agent">
+							<span class="block text-xs font-medium text-muted-foreground mb-1">
 								Agent <span class="text-destructive">*</span>
-							</label>
-							<select
-								id="connector-agent"
-								bind:value={formProfileId}
-								class="w-full px-3 py-2 bg-input border border-border rounded-md text-sm text-foreground focus:outline-hidden focus:border-primary transition-colors"
-							>
-								<option value="" disabled>Choose an agent</option>
-								{#each agents as agent (agent.id)}
-									{@const ownerOnly = selectionUsesSubscription(agent.config?.model, agent.config?.provider)}
-									<option value={agent.id} disabled={ownerOnly && !selectedType?.owner_sender}>
-										{agent.name}{ownerOnly ? (selectedType?.owner_sender ? ' (your subscription: your messages only)' : ' (your subscription)') : ''}
-									</option>
-								{/each}
-							</select>
+							</span>
+							<SelectField label="Agent" bind:value={formProfileId} options={[
+								{ value: '', label: 'Choose an agent', disabled: true },
+								...agents.map((agent) => {
+									const ownerOnly = selectionUsesSubscription(agent.config?.model, agent.config?.provider);
+									return { value: agent.id, disabled: ownerOnly && !selectedType?.owner_sender,
+										label: agent.name + (ownerOnly ? (selectedType?.owner_sender ? ' (your subscription: your messages only)' : ' (your subscription)') : '') };
+								})
+							]} />
 							<p class="text-xs text-muted-foreground mt-1">
 								Runs incoming messages. Without an agent, every incoming message is refused.
 							</p>
@@ -1351,21 +1340,13 @@
 					<!-- API User -->
 					{#if view === 'setup' && showAdvanced}
 						<div>
-							<label class="block text-xs font-medium text-muted-foreground mb-1" for="connector-api-user">
+							<span class="block text-xs font-medium text-muted-foreground mb-1">
 								API User
-							</label>
-							<select
-								id="connector-api-user"
-								bind:value={formApiUserId}
-								class="w-full px-3 py-2 bg-input border border-border rounded-md text-sm text-foreground focus:outline-hidden focus:border-primary transition-colors"
-							>
-								<option value="">Auto-create dedicated user</option>
-								{#each apiUsers as user}
-									<option value={user.id}>
-										{user.name}{user.description ? ` — ${user.description}` : ''}
-									</option>
-								{/each}
-							</select>
+							</span>
+							<SelectField label="API User" bind:value={formApiUserId} options={[
+								{ value: '', label: 'Auto-create dedicated user' },
+								...apiUsers.map((user) => ({ value: user.id, label: user.name + (user.description ? ` — ${user.description}` : '') }))
+							]} />
 							<p class="text-xs text-muted-foreground mt-1">
 								Select an existing API user or leave empty to auto-create one.
 								<button
@@ -1401,23 +1382,23 @@
 											type="password"
 											bind:value={formConfig[field.key]}
 											placeholder={field.placeholder || ''}
-											class="flex-1 min-w-0 px-3 py-2 bg-input border border-border rounded-md text-sm text-foreground placeholder:text-muted-foreground focus:outline-hidden focus:border-primary transition-colors font-mono"
+											class="flex-1 min-w-0 px-3 py-2 bg-input border border-border rounded-md text-sm text-foreground placeholder:text-muted-foreground focus:outline-hidden focus:border-primary transition-colors"
 										/>
-										<button
+										<ActionButton
 											type="button"
 											onclick={runDiscover}
 											disabled={discovering || !(formConfig[field.key] || '').trim()}
-											class="px-3 py-2 bg-primary hover:bg-primary/90 disabled:bg-primary/50 text-primary-foreground text-sm rounded-md transition-colors font-medium whitespace-nowrap"
+											variant="primary"
 										>
 											{discovering ? 'Validating…' : discoverResult ? 'Re-validate' : 'Validate'}
-										</button>
+										</ActionButton>
 									</div>
 									{#if field.description}
 										<p class="text-xs text-muted-foreground mt-1">{field.description}</p>
 									{/if}
 									{#if discoverResult}
 										<p class="discord-auth-ok" transition:slide={{ duration: 150 }}>
-											&#10003; Authenticated as <strong>{discoverResult.bot.name}</strong>
+											 Authenticated as <strong>{discoverResult.bot.name}</strong>
 											· {discoverResult.guilds.length} server{discoverResult.guilds.length === 1 ? '' : 's'} visible
 										</p>
 									{/if}
@@ -1451,11 +1432,9 @@
 											<div class="picker-list">
 												{#each guildRows as g (g.id)}
 													<label class="picker-item">
-														<input
-															type="checkbox"
+														<Checkbox
 															checked={selectedGuildIds.has(g.id)}
 															onchange={() => toggleGuild(g.id)}
-															class="w-4 h-4 rounded-sm border-border bg-input text-primary focus:ring-primary focus:ring-offset-background"
 														/>
 														<span class="picker-item-name">{g.name}</span>
 														{#if g.error}
@@ -1499,11 +1478,9 @@
 													{/if}
 													{#each grp.channels as c (c.id)}
 														<label class="picker-item picker-item-indent">
-															<input
-																type="checkbox"
+															<Checkbox
 																checked={selectedChannelIds.has(c.id)}
 																onchange={() => toggleChannel(c.id)}
-																class="w-4 h-4 rounded-sm border-border bg-input text-primary focus:ring-primary focus:ring-offset-background"
 															/>
 															<span class="picker-item-name">#{c.name}</span>
 														</label>
@@ -1544,20 +1521,21 @@
 								{:else if showPickers || view === 'edit'}
 									<div>
 										<span class="block text-xs font-medium text-muted-foreground mb-1">{field.label}</span>
-										<div class="prefix-chips">
-											<button type="button" class="prefix-chip" class:active={prefixMode === 'none'} onclick={selectPrefixNone}>None</button>
-											{#each prefixPresets as p}
-												<button type="button" class="prefix-chip" class:active={prefixMode === 'preset' && formConfig.command_prefix === p} onclick={() => selectPrefixPreset(p)}>{p}</button>
-											{/each}
-											<button type="button" class="prefix-chip" class:active={prefixMode === 'custom'} onclick={selectPrefixCustom}>Custom</button>
-										</div>
+										<Segmented label={field.label}
+											value={prefixMode === 'preset' ? `preset:${formConfig.command_prefix}` : prefixMode}
+											options={[{ value: 'none', label: 'None' }, ...prefixPresets.map((p) => ({ value: `preset:${p}`, label: p })), { value: 'custom', label: 'Custom' }]}
+											onchange={(value) => {
+												if (value === 'none') selectPrefixNone();
+												else if (value === 'custom') selectPrefixCustom();
+												else selectPrefixPreset(value.slice(7));
+											}} />
 										{#if prefixMode === 'custom'}
 											<input
 												type="text"
 												bind:value={customPrefix}
 												oninput={syncCustomPrefix}
 												placeholder="e.g., !!"
-												class="mt-2 w-full px-3 py-2 bg-input border border-border rounded-md text-sm text-foreground placeholder:text-muted-foreground focus:outline-hidden focus:border-primary transition-colors font-mono"
+												class="mt-2 w-full px-3 py-2 bg-input border border-border rounded-md text-sm text-foreground placeholder:text-muted-foreground focus:outline-hidden focus:border-primary transition-colors"
 											/>
 										{/if}
 										{#if field.description}<p class="text-xs text-muted-foreground mt-1">{field.description}</p>{/if}
@@ -1585,7 +1563,7 @@
 											type="password"
 											bind:value={formConfig[field.key]}
 											placeholder={field.placeholder || ''}
-											class="w-full px-3 py-2 bg-input border border-border rounded-md text-sm text-foreground placeholder:text-muted-foreground focus:outline-hidden focus:border-primary transition-colors font-mono"
+											class="w-full px-3 py-2 bg-input border border-border rounded-md text-sm text-foreground placeholder:text-muted-foreground focus:outline-hidden focus:border-primary transition-colors"
 										/>
 									{:else}
 										<input
@@ -1616,11 +1594,9 @@
 						<div class="space-y-2">
 							{#each availableEvents as event}
 								<label class="flex items-center gap-2 cursor-pointer group">
-									<input
-										type="checkbox"
+									<Checkbox
 										checked={formEvents.includes(event)}
 										onchange={() => toggleEvent(event)}
-										class="w-4 h-4 rounded-sm border-border bg-input text-primary focus:ring-primary focus:ring-offset-background"
 									/>
 									<span
 										class="text-sm text-foreground group-hover:text-primary transition-colors"
@@ -1648,7 +1624,7 @@
 								<div transition:slide={{ duration: 150 }} style="margin-top: 8px;">
 									{#if selectedType.triggers?.length}
 										<div class="variant-section">
-											<span class="variant-section-title">&#9889; Triggers</span>
+											<span class="variant-section-title"> Triggers</span>
 											{#each selectedType.triggers as trigger}
 												<div class="variant-item">
 													<span class="variant-item-name">{trigger.name}</span>
@@ -1659,7 +1635,7 @@
 									{/if}
 									{#if selectedType.actions?.length}
 										<div class="variant-section">
-											<span class="variant-section-title">&#9654; Actions</span>
+											<span class="variant-section-title"> Actions</span>
 											{#each selectedType.actions as action}
 												<div class="variant-item">
 													<span class="variant-item-name">{action.name}</span>
@@ -1670,7 +1646,7 @@
 									{/if}
 									{#if selectedType.tools?.length}
 										<div class="variant-section">
-											<span class="variant-section-title">&#128295; AI Tools</span>
+											<span class="variant-section-title"> AI Tools</span>
 											{#each selectedType.tools as tool}
 												<div class="variant-item">
 													<span class="variant-item-name">{tool.name}</span>
@@ -1687,17 +1663,17 @@
 					<!-- Actions -->
 					<div class="flex items-center gap-2 pt-2">
 						{#if !['gmail', 'plaid'].includes(selectedType?.type || '') || view === 'edit' || (showAdvanced && selectedType?.type !== 'plaid')}
-						<button
+						<ActionButton
 							onclick={view === 'edit' ? handleUpdate : handleCreate}
 							disabled={formSaving || (view === 'setup' && isDiscord && !manualMode && !discoverResult)}
-							class="px-4 py-2 bg-primary hover:bg-primary/90 disabled:bg-primary/50 text-primary-foreground text-sm rounded-md transition-colors font-medium"
+							variant="primary"
 						>
 							{formSaving
 								? 'Saving...'
 								: view === 'edit'
 									? 'Update Connector'
 									: 'Create Connector'}
-						</button>
+						</ActionButton>
 						{/if}
 						<button
 							onclick={cancelForm}
@@ -1713,12 +1689,6 @@
 </div>
 
 <style>
-	.switch { width: 32px; height: 18px; border-radius: 999px; background: var(--muted-foreground); border: 1px solid var(--border); padding: 2px; flex-shrink: 0; cursor: pointer; }
-	.switch i { display: block; width: 12px; height: 12px; border-radius: 50%; background: var(--background); transition: transform .15s; }
-	.switch[aria-checked='true'] { background: var(--primary); }
-	.switch[aria-checked='true'] i { transform: translateX(12px); }
-	.switch:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
-	.switch:disabled { opacity: .5; cursor: not-allowed; }
 	/* .connector-manager inherits from parent layout */
 
 	/* ========================================
@@ -1752,31 +1722,12 @@
 		overflow: hidden;
 	}
 
-	.connector-type-card::before {
-		content: '';
-		position: absolute;
-		inset: 0;
-		background: linear-gradient(
-			135deg,
-			color-mix(in oklch, var(--primary) 4%, transparent) 0%,
-			transparent 50%
-		);
-		opacity: 0;
-		transition: opacity 200ms;
-		pointer-events: none;
-	}
 
 	.connector-type-card:hover {
-		border-color: var(--primary);
-		box-shadow:
-			0 4px 6px -1px rgba(0, 0, 0, 0.15),
-			0 0 12px color-mix(in oklch, var(--primary) 20%, transparent);
-		transform: translateY(-2px);
+		border-color: var(--border);
+		background: var(--hover-overlay);
 	}
 
-	.connector-type-card:hover::before {
-		opacity: 1;
-	}
 
 	.connector-type-card:active {
 		transform: translateY(0);
@@ -1793,21 +1744,12 @@
 		justify-content: center;
 		width: 44px;
 		height: 44px;
-		border-radius: 9999px;
-		background: linear-gradient(
-			135deg,
-			color-mix(in oklch, var(--primary) 18%, transparent) 0%,
-			color-mix(in oklch, var(--primary) 8%, transparent) 100%
-		);
-		border: 1px solid color-mix(in oklch, var(--primary) 30%, transparent);
-		color: var(--primary);
+		border-radius: var(--radius);
+		background: var(--muted);
+		color: var(--muted-foreground);
 		transition: all 200ms;
 	}
 
-	.connector-type-card:hover .connector-type-icon {
-		box-shadow: 0 0 12px color-mix(in oklch, var(--primary) 30%, transparent);
-		transform: scale(1.05);
-	}
 
 	.connector-type-info {
 		display: flex;
@@ -1851,7 +1793,7 @@
 	.connector-item {
 		background: var(--muted);
 		border: 1px solid var(--border);
-		border-radius: 10px;
+		border-radius: calc(var(--radius) + 4px);
 		transition: border-color 150ms ease, background 150ms ease;
 	}
 
@@ -1880,7 +1822,7 @@
 		color: var(--muted-foreground);
 		background: transparent;
 		border: 1px solid var(--border);
-		border-radius: 9999px;
+		border-radius: var(--radius);
 		white-space: nowrap;
 	}
 
@@ -1902,22 +1844,19 @@
 
 	/* Canonical status/type pill — copied from the providers row (.sb). */
 	.sb {
-		font-family: var(--font-mono, monospace);
 		font-size: 10px;
 		font-weight: 600;
-		letter-spacing: 0.04em;
-		text-transform: uppercase;
 		padding: 2px 7px;
-		border-radius: 999px;
+		border-radius: calc(var(--radius) - 2px);
 		line-height: 1.5;
 	}
 	.sb.ok {
-		color: var(--success, #16a34a);
-		background: color-mix(in oklch, var(--success, #16a34a) 14%, transparent);
+		color: var(--success);
+		background: color-mix(in oklch, var(--success) 14%, transparent);
 	}
 	.sb.warn {
-		color: var(--warning, #d97706);
-		background: color-mix(in oklch, var(--warning, #d97706) 16%, transparent);
+		color: var(--warning);
+		background: color-mix(in oklch, var(--warning) 16%, transparent);
 	}
 	.sb.danger {
 		color: var(--destructive);
@@ -1958,7 +1897,7 @@
 		border-color: var(--destructive);
 	}
 	.connector-action-btn.active {
-		color: var(--primary);
+		color: var(--foreground);
 		border-color: color-mix(in oklab, var(--primary) 45%, var(--border));
 	}
 	.connector-action-btn:disabled {
@@ -1969,10 +1908,6 @@
 		outline: 2px solid var(--ring);
 		outline-offset: 1px;
 	}
-
-	/* The enable/disable toggle reuses the app's canonical `.switch`
-	   pattern (button.switch > <i>), themed globally by StudioEditorShell's
-	   `.ed-content :global(.switch)` rules — no bespoke toggle CSS here. */
 
 	/* ========================================
 	   Event Log Table
@@ -1993,8 +1928,6 @@
 		border-bottom: 1px solid var(--border);
 		font-weight: 600;
 		color: var(--muted-foreground);
-		text-transform: uppercase;
-		letter-spacing: 0.04em;
 		font-size: 0.625rem;
 	}
 
@@ -2065,8 +1998,8 @@
 	}
 
 	.log-dir-out {
-		background: color-mix(in oklch, var(--primary) 20%, transparent);
-		color: var(--primary);
+		background: var(--muted);
+		color: var(--foreground);
 	}
 
 	.log-dir-in {
@@ -2094,13 +2027,11 @@
 	.event-chip {
 		display: inline-flex;
 		align-items: center;
-		font-family: var(--font-mono, monospace);
 		font-size: 10px;
 		font-weight: 500;
-		letter-spacing: 0.02em;
 		line-height: 1.5;
 		padding: 1px 7px;
-		border-radius: 999px;
+		border-radius: calc(var(--radius) - 2px);
 		color: var(--muted-foreground);
 		background: color-mix(in oklch, var(--foreground) 5%, transparent);
 	}
@@ -2142,7 +2073,6 @@
 	.variant-section-title {
 		font-size: 12px;
 		font-weight: 600;
-		letter-spacing: 0.02em;
 		opacity: 0.8;
 		display: block;
 		margin-bottom: 6px;
@@ -2196,7 +2126,7 @@
 	.discord-auth-ok {
 		font-size: 12px;
 		margin-top: 6px;
-		color: var(--success, oklch(0.7 0.15 150));
+		color: var(--success);
 	}
 
 	.discord-auth-err {
@@ -2208,7 +2138,7 @@
 	.manual-toggle {
 		margin-top: 8px;
 		font-size: 12px;
-		color: var(--primary);
+		color: var(--foreground);
 		background: none;
 		border: none;
 		padding: 0;
@@ -2261,8 +2191,6 @@
 	.picker-group-label {
 		font-size: 11px;
 		font-weight: 600;
-		text-transform: uppercase;
-		letter-spacing: 0.04em;
 		color: var(--muted-foreground);
 		margin-top: 6px;
 		padding: 0 6px;
@@ -2283,7 +2211,7 @@
 
 	.invite-link {
 		font-size: 13px;
-		color: var(--primary);
+		color: var(--foreground);
 		font-weight: 500;
 		text-decoration: none;
 	}
@@ -2292,31 +2220,7 @@
 		text-decoration: underline;
 	}
 
-	.prefix-chips {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 6px;
-	}
 
-	.prefix-chip {
-		min-width: 32px;
-		padding: 4px 10px;
-		font-size: 13px;
-		border: 1px solid var(--border);
-		border-radius: 999px;
-		background: var(--input);
-		color: var(--foreground);
-		cursor: pointer;
-		transition: all 150ms;
-	}
 
-	.prefix-chip:hover {
-		border-color: var(--primary);
-	}
 
-	.prefix-chip.active {
-		background: var(--primary);
-		border-color: var(--primary);
-		color: var(--primary-foreground);
-	}
 </style>

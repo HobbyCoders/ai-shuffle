@@ -1,18 +1,18 @@
 /**
  * Composer shell hooks — the seam between the shared composer and the mobile
- * app's collapse/gesture/sheet behaviour.
+ * app's collapse/gesture/prompt-dock behaviour.
  *
  * `ChatInput` and `ControlsDock` are shared by the desktop web UI and the
  * mobile app (`mobile/`). The mobile-only parts — the collapsed composer, the
  * swipe-to-open gesture and the controls sheet — live in `mobile/src/shell`
  * and are registered here by the mobile app at startup via
  * `registerComposerShell()`. The web build never registers anything, so the
- * defaults below are pure desktop behaviour: nothing collapses, no gesture is
- * attached, and no sheet is rendered.
+ * defaults below are pure desktop behaviour: nothing collapses and no gesture
+ * is attached. Its controls sheet comes from `phone/phone-layout.svelte.ts`,
+ * loaded only when a window reaches phone width.
  *
  * Keeping the hooks in `$lib` (rather than importing mobile code into shared
- * components) is what lets the web build ship without a single line of the
- * mobile UI.
+ * components) is what keeps the rest of the mobile UI out of the web build.
  */
 import type { Component, Snippet } from 'svelte';
 import type { PickerGroup } from '$lib/constants/model-picker';
@@ -91,6 +91,8 @@ export interface ComposerModelOption extends ComposerControlOption {
 /** Props `ControlsDock` hands the mobile controls sheet. */
 export interface ComposerSheetProps {
 	open: boolean;
+	/** A new chat, before its first message: Setup is the `New session` region. */
+	newChat?: boolean;
 	onClose: () => void;
 	/** Ask the dock to open (true) or close (false) the controls; the dock owns the state. */
 	onOpenChange?: (open: boolean) => void;

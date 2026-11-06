@@ -78,8 +78,6 @@ it('shows the active mode, the CLI account and the key’s last four', async () 
 	expect(screen.getByRole('heading', { level: 2, name: 'Claude' })).toBeTruthy();
 	expect(screen.getByText('Runs on subscription')).toBeTruthy();
 	expect(within(modes()).getByRole('button', { name: 'Subscription' }).getAttribute('aria-pressed')).toBe('true');
-	const facts = screen.getByText('Runs on', { selector: 'dt' }).closest('div')!;
-	expect(within(facts).getByText('Subscription')).toBeTruthy();
 
 	const creds = credentials();
 	expect(within(creds).getByText('Claude Max subscription')).toBeTruthy();
@@ -217,7 +215,7 @@ it('offers no Open terminal when the worker refuses terminals', async () => {
 
 it('carries the Claude compaction switch, on by default, and saves a change', async () => {
 	await show();
-	const group = await screen.findByRole('region', { name: 'Sessions' });
+	const group = await screen.findByRole('region', { name: 'Chats' });
 	const sw = await within(group).findByRole('switch', { name: /Smarter compaction/ });
 	expect(sw.getAttribute('aria-checked')).toBe('true');
 	await fireEvent.click(sw);

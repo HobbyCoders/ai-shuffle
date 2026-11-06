@@ -22,7 +22,7 @@
 		id?: string;
 		/** Overrides the registry label (required without `id`). */
 		label?: string;
-		/** Overrides the registry hint, e.g. a hint that follows the value. At most 5 words. */
+		/** Overrides the registry hint, e.g. a hint that follows the value. One line. */
 		hint?: string;
 		help?: string;
 		hintMono?: boolean;
@@ -32,6 +32,10 @@
 		onReset?: () => void;
 		/** Dims label and hint (the setting has no effect right now). */
 		dim?: boolean;
+		/** Keep selector controls full-width beneath their label on phone. */
+		stackOnPhone?: boolean;
+		/** Never clamp action copy; move controls below it when the row is short of room. */
+		wrapHint?: boolean;
 		children?: Snippet;
 		expanded?: Snippet;
 	}
@@ -46,6 +50,8 @@
 		defaultValue,
 		onReset,
 		dim = false,
+		stackOnPhone = false,
+		wrapHint = false,
 		children,
 		expanded
 	}: Props = $props();
@@ -92,10 +98,13 @@
 	class="st-row"
 	class:mod={modified}
 	class:dim
+	class:st-phone-stack={stackOnPhone}
+	class:st-wrap-hint={wrapHint}
+	style:gap={wrapHint ? '12px 20px' : undefined}
 	data-setting-anchor={id}
 	title={modified ? 'Changed from default' : undefined}
 >
-	<div class="st-rt">
+	<div class="st-rt" style:flex-basis={wrapHint ? '280px' : undefined}>
 		<div class="st-rl">
 			<span id={labelId}>{text}</span>
 			{#if helpText}<HelpTip text={helpText} about={text} />{/if}
@@ -134,15 +143,19 @@
 		grid-template-columns: minmax(0, 1fr) auto;
 		align-items: center;
 		gap: 20px;
-		min-height: 52px;
-		padding: 9px 16px;
+		min-height: 56px;
+		padding: 10px 16px;
 	}
 	.st-rt {
 		min-width: 0;
 	}
+	.st-row.st-wrap-hint { display: flex; flex-wrap: wrap; }
+	.st-wrap-hint > .st-rt { flex-grow: 1; }
+	.st-wrap-hint .st-rh { white-space: normal; overflow: visible; overflow-wrap: anywhere; }
+	.st-wrap-hint > .st-rc { margin-left: auto; max-width: 100%; flex-wrap: wrap; }
 	.st-rl {
-		font-size: 14px;
-		font-weight: 450;
+		font-size: 13.5px;
+		font-weight: 500;
 		display: flex;
 		align-items: center;
 		gap: 8px;
@@ -154,17 +167,23 @@
 		text-overflow: ellipsis;
 	}
 	.st-rh {
-		font-size: 12.5px;
+		font-size: 13px;
+		font-weight: 400;
 		color: var(--st-mfg);
-		margin-top: 2px;
+		margin-top: 1px;
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
 	}
+	@media (max-width: 600px) { .st-rh { white-space: normal; } }
 	.st-rh.st-mono {
 		font-size: 11.5px;
 	}
 	.st-rc {
+		/* Plain read-only content inherits the same value style as ValueText.
+		   Buttons, fields and semantic state colours keep their own styles. */
+		font-size: 13px;
+		color: var(--st-mfg);
 		display: flex;
 		align-items: center;
 		gap: 8px;

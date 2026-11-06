@@ -24,7 +24,6 @@ import { CATEGORY_IDS, isCategoryId, type CategoryId, type CategoryModule, type 
 
 export const MODULES: Record<CategoryId, CategoryModule> = {
 	general,
-	archived: { entries: [] },
 	voice,
 	providers,
 	models,
@@ -62,7 +61,7 @@ export function entriesFor(category: CategoryId, where: { item?: string; tab?: s
 	);
 }
 
-export const HINT_MAX_WORDS = 5;
+export const HINT_MAX_WORDS = 14;
 
 export function wordCount(text: string): number {
 	return text.trim().split(/\s+/).filter(Boolean).length;

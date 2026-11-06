@@ -397,33 +397,12 @@ def get_sessions_paginated(
         return sessions, total
 
 
-def get_sessions_cursor(
-    project_id: Optional[str] = None,
-    profile_id: Optional[str] = None,
-    status: Optional[str] = None,
-    api_user_id: Optional[str] = None,
-    api_users_only: bool = False,
-    active_only: bool = False,
-    tag_id: Optional[str] = None,
-    limit: int = 50,
-    cursor: Optional[str] = None,
-    cursor_id: Optional[str] = None,
-    include_hidden: bool = False,
-    exclude_archived: bool = False,
-) -> tuple[List[Dict[str, Any]], Optional[str], Optional[str], bool]:
-    """Get sessions using cursor-based pagination (keyset pagination).
-
-    Uses (updated_at, id) as the cursor key for deterministic ordering.
-
-    Hidden sessions are excluded unless ``include_hidden`` is True —
-    the filter is part of the shared WHERE clause, so the limit+1 has_more
-    probe never counts hidden rows. ``exclude_archived`` works the same way
-    for archived sessions: a list that never shows them (the sidebar) must
-    not be told more rows exist when only archived ones remain.
-
-    Returns:
-        Tuple of (sessions, next_cursor, next_cursor_id, has_more)
-    """
+def _session_list_scope(
+    project_id=None, profile_id=None, status=None, api_user_id=None,
+    api_users_only=False, active_only=False, tag_id=None, include_hidden=False,
+    exclude_archived=False, membership=None, device_id=None,
+):
+    """One visibility/membership predicate for keyset pages and cheap counts."""
     _ph = ph()
     if tag_id:
         inst_sql, inst_params = _instance_filter(_ph, "s.")
@@ -449,9 +428,7 @@ def get_sessions_cursor(
         params.append(status)
     if active_only:
         base_query += f" AND {col_prefix}is_active = TRUE"
-    if exclude_archived:
-        # NULL status is a live row, so it must survive the inequality.
-        base_query += f" AND ({col_prefix}status IS NULL OR {col_prefix}status <> 'archived')"
+    # exclude_archived is a decode-only compatibility argument.
     if api_users_only:
         base_query += f" AND {col_prefix}api_user_id IS NOT NULL"
     elif api_user_id is not None:
@@ -466,6 +443,61 @@ def get_sessions_cursor(
         # probe is needed.
         base_query += f" AND COALESCE({col_prefix}hidden, FALSE) = FALSE"
         base_query += f" AND COALESCE({col_prefix}is_worker, FALSE) = FALSE"
+
+    if membership == "active":
+        base_query += f" AND {col_prefix}is_active = TRUE"
+    elif membership == "settled":
+        base_query += f" AND COALESCE({col_prefix}is_active, FALSE) = FALSE"
+    if device_id:
+        base_query += f" AND {col_prefix}instance_id = {_ph}"
+        params.append(device_id)
+    return base_query, params, col_prefix
+
+
+def count_sessions(**filters) -> int:
+    """Count the same visible cohort as get_sessions_cursor, without enrichment."""
+    base_query, params, col_prefix = _session_list_scope(**filters)
+    with get_db() as conn:
+        cursor = get_cursor(conn)
+        cursor.execute(f"SELECT COUNT(DISTINCT {col_prefix}id) AS cnt {base_query}", params)
+        return cursor.fetchone()["cnt"]
+
+
+def get_sessions_cursor(
+    project_id: Optional[str] = None,
+    profile_id: Optional[str] = None,
+    status: Optional[str] = None,
+    api_user_id: Optional[str] = None,
+    api_users_only: bool = False,
+    active_only: bool = False,
+    tag_id: Optional[str] = None,
+    limit: int = 50,
+    cursor: Optional[str] = None,
+    cursor_id: Optional[str] = None,
+    include_hidden: bool = False,
+    exclude_archived: bool = False,
+    membership: Optional[str] = None,
+    device_id: Optional[str] = None,
+) -> tuple[List[Dict[str, Any]], Optional[str], Optional[str], bool]:
+    """Get sessions using cursor-based pagination (keyset pagination).
+
+    Uses (updated_at, id) as the cursor key for deterministic ordering.
+
+    Hidden sessions are excluded unless ``include_hidden`` is True —
+    the filter is part of the shared WHERE clause, so the limit+1 has_more
+    probe never counts hidden rows. ``exclude_archived`` is accepted as a
+    legacy no-op; converted history belongs in ordinary Settled paging.
+
+    Returns:
+        Tuple of (sessions, next_cursor, next_cursor_id, has_more)
+    """
+    _ph = ph()
+    base_query, params, col_prefix = _session_list_scope(
+        project_id=project_id, profile_id=profile_id, status=status,
+        api_user_id=api_user_id, api_users_only=api_users_only, active_only=active_only,
+        tag_id=tag_id, include_hidden=include_hidden, exclude_archived=exclude_archived,
+        membership=membership, device_id=device_id,
+    )
 
     # Cursor condition: seek past the last seen (updated_at, id)
     if cursor and cursor_id:
@@ -812,7 +844,9 @@ def update_session(
         values.append(title)
     if status is not None:
         updates.append(f"status = {_ph}")
-        values.append(status)
+        values.append("active" if status == "archived" else status)
+        if status == "archived":
+            updates.append("is_active = FALSE")
     # Truthiness (not `!= 0`) on purpose: a None increment passes `!= 0` and
     # emits `col = col + NULL`, which NULLs the column for good — that is what
     # broke GET /api/v1/sessions/cursor (pydantic float validation on
@@ -880,6 +914,15 @@ def update_session(
     # path every turn hits several times.
     with (nullcontext(_conn) if _conn is not None else get_db()) as conn:
         cursor = get_cursor(conn)
+        if status == "archived":
+            # Trusted legacy DB callers must update the shared projection too;
+            # otherwise an older membership row can undo this settle on peers.
+            from app.network import session_active
+            from app.db import network as store
+            store.lock_state(cursor)
+            cursor.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (session_id,))
+            if cursor.fetchone():
+                session_active._record_active(cursor, session_id, False)
         cursor.execute(
             f"UPDATE sessions SET {', '.join(updates)} WHERE id = {_ph} RETURNING *",
             values
@@ -1881,7 +1924,8 @@ def set_session_active(
     On a networked worker a plain membership change is shared sidebar state,
     committed independently of execution ownership."""
     from app.network import engine, session_active
-    if archived is None and engine.context() is not None:
+    is_active = False if archived else is_active
+    if engine.context() is not None:
         return session_active.write_shared(session_id, is_active)
     _ph = ph()
     with get_db() as conn:
@@ -1897,10 +1941,6 @@ def set_session_active(
 
 def archive_status_sql(archived: Optional[bool], placeholder: str) -> tuple[str, tuple]:
     """The ``status`` assignment for an archive change, as SQL plus params."""
-    if archived is None:
-        return "", ()
-    if archived:
-        return f", status = {placeholder}", ("archived",)
     return (f", status = CASE WHEN status = {placeholder} THEN {placeholder} ELSE status END",
             ("archived", "active"))
 
@@ -1942,7 +1982,7 @@ def get_sessions_by_ids(session_ids: List[str]) -> Dict[str, SessionRow]:
 
 
 def get_settled_sessions(api_user_id: str, limit: int, offset: int = 0) -> List[SessionRow]:
-    """Settled (inactive, not archived) list-visible top-level rows, newest first.
+    """Settled (inactive) list-visible top-level rows, newest first.
 
     A coarse prefilter for bulk sidebar management. ``api_user_id`` follows
     ``get_sessions``: an empty string selects admin rows (NULL). Callers still
@@ -1951,10 +1991,10 @@ def get_settled_sessions(api_user_id: str, limit: int, offset: int = 0) -> List[
     _ph = ph()
     inst_sql, params = _instance_filter(_ph, "")
     query = (f"SELECT * FROM sessions WHERE 1=1{inst_sql}"
-             f" AND (is_active IS NULL OR is_active = FALSE) AND (status IS NULL OR status <> {_ph})"
+             " AND (is_active IS NULL OR is_active = FALSE)"
              " AND COALESCE(hidden, FALSE) = FALSE AND COALESCE(is_worker, FALSE) = FALSE"
              " AND parent_session_id IS NULL")
-    params = [*params, "archived"]
+    params = list(params)
     if api_user_id:
         query += f" AND api_user_id = {_ph}"
         params.append(api_user_id)
@@ -2717,7 +2757,7 @@ def _native_search_cte(
             WHERE n.message::text ILIKE {placeholder}
             AND texts.content ILIKE {placeholder}
             AND n.message->>'role' IN ('user', 'assistant')
-            AND s.status NOT IN ('archived','failed'){instance_sql}
+            AND COALESCE(s.status, 'active') <> 'failed'{instance_sql}
             ORDER BY s.id, n.ts DESC
         ),
     """
@@ -2737,7 +2777,7 @@ def search_sessions(
     for title search (titles are short, always fast).
     Returns sessions with matching snippets showing where the match was found.
 
-    Every CTE excludes ``status IN ('archived','failed')``. ``'failed'`` is the
+    Every CTE excludes ``status = 'failed'``. ``'failed'`` is the
     ProviderAgent verdict on a worker session whose dispatch errored (see
     ``app.core.provider_agent.WORKER_FAILED_STATUS``): the transcript stays
     readable from the session lists, but a dead worker must not compete with
@@ -2755,6 +2795,7 @@ def search_sessions(
     # Cross-install sharing (default): no per-install clause. Isolation mode:
     # restrict both CTEs to this install (legacy NULL rows visible everywhere).
     inst_sql, inst_params = _instance_filter(_ph, "s.")
+    inst_sql += " AND COALESCE(s.hidden, FALSE) = FALSE AND COALESCE(s.is_worker, FALSE) = FALSE"
 
     with get_db() as conn:
         cursor = get_cursor(conn)
@@ -2787,7 +2828,7 @@ def search_sessions(
                 s.updated_at as match_time
             FROM sessions s
             WHERE {sql_ilike('s.title')}
-            AND s.status NOT IN ('archived','failed'){inst_sql}
+            AND COALESCE(s.status, 'active') <> 'failed'{inst_sql}
         ),
         content_matches AS (
             SELECT DISTINCT ON (s.id)
@@ -2802,7 +2843,7 @@ def search_sessions(
             INNER JOIN sessions s ON s.id = sm.session_id
             WHERE (sm.content_tsv @@ plainto_tsquery('english', {_ph}) OR sm.content ILIKE {_ph})
             AND sm.role IN ('user', 'assistant')
-            AND s.status NOT IN ('archived','failed'){inst_sql}
+            AND COALESCE(s.status, 'active') <> 'failed'{inst_sql}
             ORDER BY s.id, sm.created_at DESC
         ),
         store_matches AS (
@@ -2819,7 +2860,7 @@ def search_sessions(
             WHERE sse.subpath IS NULL
             AND (to_tsvector('english', sse_entry_text(sse.entry)) @@ plainto_tsquery('english', {_ph})
                  OR sse_entry_text(sse.entry) ILIKE {_ph})
-            AND s.status NOT IN ('archived','failed'){inst_sql}
+            AND COALESCE(s.status, 'active') <> 'failed'{inst_sql}
             ORDER BY s.id, sse.created_at DESC
         ),
         {native_cte}
@@ -2890,7 +2931,7 @@ def search_sessions_paginated(
     Matches titles and user/assistant messages across legacy, SDK and native
     transcripts. Literal substring matching supplements legacy full-text search.
 
-    Excludes ``status IN ('archived','failed')`` in every CTE, for the reasons
+    Excludes ``status = 'failed'`` in every CTE, for the reasons
     spelled out on :func:`search_sessions`.
 
     Returns:
@@ -2907,6 +2948,7 @@ def search_sessions_paginated(
     # Cross-install sharing (default): no per-install clause. Isolation mode:
     # restrict both CTEs to this install (legacy NULL rows visible everywhere).
     inst_sql, inst_params = _instance_filter(_ph, "s.")
+    inst_sql += " AND COALESCE(s.hidden, FALSE) = FALSE AND COALESCE(s.is_worker, FALSE) = FALSE"
 
     with get_db() as conn:
         cursor = get_cursor(conn)
@@ -2933,7 +2975,7 @@ def search_sessions_paginated(
                 s.updated_at as match_time
             FROM sessions s
             WHERE {sql_ilike('s.title')}
-            AND s.status NOT IN ('archived','failed'){inst_sql}
+            AND COALESCE(s.status, 'active') <> 'failed'{inst_sql}
         ),
         content_matches AS (
             SELECT DISTINCT ON (s.id)
@@ -2946,7 +2988,7 @@ def search_sessions_paginated(
             INNER JOIN sessions s ON s.id = sm.session_id
             WHERE (sm.content_tsv @@ plainto_tsquery('english', {_ph}) OR sm.content ILIKE {_ph})
             AND sm.role IN ('user', 'assistant')
-            AND s.status NOT IN ('archived','failed'){inst_sql}
+            AND COALESCE(s.status, 'active') <> 'failed'{inst_sql}
             ORDER BY s.id, sm.created_at DESC
         ),
         store_matches AS (
@@ -2961,7 +3003,7 @@ def search_sessions_paginated(
             WHERE sse.subpath IS NULL
             AND (to_tsvector('english', sse_entry_text(sse.entry)) @@ plainto_tsquery('english', {_ph})
                  OR sse_entry_text(sse.entry) ILIKE {_ph})
-            AND s.status NOT IN ('archived','failed'){inst_sql}
+            AND COALESCE(s.status, 'active') <> 'failed'{inst_sql}
             ORDER BY s.id, sse.created_at DESC
         ),
         {native_cte}
@@ -3026,7 +3068,7 @@ def search_sessions_paginated(
         SELECT * FROM deduped_matches
         ORDER BY
             CASE WHEN match_type = 'title' THEN 0 ELSE 1 END,
-            updated_at DESC
+            updated_at DESC, id DESC
         LIMIT {_ph} OFFSET {_ph}
         """
         cursor.execute(data_sql, base_params + filter_params + [limit, offset])

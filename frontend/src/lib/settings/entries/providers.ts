@@ -40,6 +40,7 @@ export const entries: SettingEntry[] = [
 	{
 		id: 'providers.cliKeepInstalled', category: 'providers', section: 'Claude Code CLI',
 		label: 'Keep Claude Code installed', item: CLAUDE_PROVIDER_ITEM,
+		hint: 'Reinstall the CLI at start if it is missing',
 		help: 'When on, this worker reinstalls the CLI at start if it is missing. When off, starting the worker never downloads it.',
 		keywords: ['claude cli', 'install', 'startup', 'download']
 	},
@@ -56,7 +57,7 @@ export const entries: SettingEntry[] = [
 	{
 		id: 'providers.claudeCompaction',
 		category: 'providers',
-		section: 'Sessions',
+		section: 'Chats',
 		label: 'Smarter compaction',
 		hint: 'Keeps more of the conversation',
 		help: COMPACTION_HELP,
@@ -79,6 +80,7 @@ export const entries: SettingEntry[] = [
 		category: 'providers',
 		section: 'Loop guard',
 		label: 'Hold unattended turns',
+		hint: 'Past an hourly budget, unattended work waits for you',
 		help: LOOP_HELP,
 		item: CLAUDE_SUB_ITEM,
 		tab: 'Policy',
@@ -190,10 +192,10 @@ export function searchSource(): SearchItem[] {
 				at('Banked resets', 'Usage', 'codex rate limit reset use');
 				at('Weekly allowance', 'Usage', 'subscription usage limit');
 			}
-			if (c.flavor === 'device' || c.flavor === 'key' || c.flavor === 'gateway') {
+			if (c.flavor === 'device' || c.flavor === 'plan-key' || c.flavor === 'key' || c.flavor === 'gateway') {
 				at('Model curation', 'Models', 'offered models picker checklist');
 			}
-			if (c.flavor === 'gateway' || c.flavor === 'key') {
+			if (c.flavor === 'gateway' || c.flavor === 'plan-key' || c.flavor === 'key') {
 				at('Connection', 'Overview', 'endpoint token dialect context window max output');
 			}
 			if (c.flavor === 'key' && c.row?.provider_type === 'openrouter') at('OpenRouter credits', 'Usage', 'balance billing');

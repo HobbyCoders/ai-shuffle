@@ -74,7 +74,7 @@ const oldFrames = (sessionId) => [
  * for the read and closes again.
  */
 async function lanes(page) {
-	const sessions = page.getByRole('complementary', { name: 'Sessions' });
+	const sessions = page.getByRole('complementary', { name: 'Chats' });
 	const wasOpen = await sessions.isVisible();
 	await showSidebar(page);
 	await page.locator('[data-group]').first().waitFor({ timeout: 15_000 });

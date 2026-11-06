@@ -635,9 +635,9 @@
 		max-width: calc(100vw - 16px);
 		padding: 4px;
 		background: var(--card);
-		border: 1px solid var(--border);
-		border-radius: calc(var(--radius, 0.75rem) * 0.83);
-		box-shadow: var(--shadow-l);
+		border: 1px solid var(--menu-border);
+		border-radius: var(--menu-radius);
+		box-shadow: var(--menu-shadow);
 		transform-origin: top right;
 		animation: msg-menu-in 140ms cubic-bezier(0.16, 1, 0.3, 1);
 	}
@@ -660,14 +660,14 @@
 		align-items: center;
 		gap: 10px;
 		width: 100%;
-		min-height: 36px;
+		min-height: var(--menu-row);
 		padding: 7px 12px 7px 10px;
 		background: transparent;
 		border: none;
-		border-radius: calc(var(--radius, 0.75rem) * 0.58);
+		border-radius: var(--menu-row-radius);
 		color: var(--foreground);
 		font: inherit;
-		font-size: 0.8125rem;
+		font-size: 13px;
 		text-align: left;
 		cursor: pointer;
 		transition: background-color 120ms ease, color 120ms ease;

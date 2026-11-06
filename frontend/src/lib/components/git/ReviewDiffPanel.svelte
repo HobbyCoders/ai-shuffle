@@ -1,4 +1,6 @@
 <script lang="ts">
+	import '$lib/components/ui/surfaces.css';
+	import SelectField from '$lib/components/settings/rows/SelectField.svelte';
 	// Layout adapted from pingdotgg/t3code's MIT-licensed DiffPanel.
 	// See t3code.LICENSE for the upstream notice.
 	import { tick, untrack, type Snippet } from 'svelte';
@@ -152,7 +154,7 @@
 	}
 </script>
 
-<div class="diff-review">
+<div class="diff-review ui-surface">
 	<header class="toolbar">
 		<div class="scope">
 			<div class="scope-switch" role="group" aria-label="Review scope">
@@ -162,9 +164,7 @@
 					onclick={() => setScope('base')}>Changes vs base</button>
 			</div>
 			{#if reviewScope === 'working'}
-				<select aria-label="Diff scope" bind:value={scope}>
-					<option value="all">All</option><option value="staged">Staged</option><option value="unstaged">Unstaged</option>
-				</select>
+				<SelectField label="Diff scope" bind:value={scope} options={[{value: 'all', label: 'All'}, {value: 'staged', label: 'Staged'}, {value: 'unstaged', label: 'Unstaged'}]} />
 			{/if}
 		</div>
 		<div class="tools">
@@ -260,7 +260,7 @@
 	.scope-switch button { height: 24px; min-width: 0; padding: 0 9px; font-size: 11.5px; font-weight: 500; white-space: nowrap; border-radius: 5px; transition: background-color .15s ease-out, color .15s ease-out, box-shadow .15s ease-out; }
 	.scope-switch button[aria-pressed=true] { background: var(--background); color: var(--foreground); box-shadow: var(--shadow-s); }
 	.scope-switch button:hover:not(:disabled):not([aria-pressed=true]) { background: transparent; color: var(--foreground); }
-	.base-strip { display: flex; align-items: center; gap: 6px; min-height: 28px; padding: 3px 12px; flex-shrink: 0; overflow: hidden; white-space: nowrap; font-size: 11px; color: var(--muted-foreground); border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent); background: linear-gradient(90deg, color-mix(in oklch, var(--primary) 9%, transparent), transparent 70%); }
+	.base-strip { display: flex; align-items: center; gap: 6px; min-height: 28px; padding: 3px 12px; flex-shrink: 0; overflow: hidden; white-space: nowrap; font-size: 11px; color: var(--muted-foreground); border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent); background: var(--muted); }
 	.ask-note { display: flex; align-items: center; gap: 6px; margin: 0; padding: 4px 12px; flex-shrink: 0; font-size: 11px; color: var(--muted-foreground); border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent); }
 	.ask-note :global(svg) { flex-shrink: 0; }
 	.base-strip :global(svg) { flex-shrink: 0; color: var(--primary); }
@@ -277,22 +277,21 @@
 	.error-detail { margin: 0; max-width: 360px; overflow-wrap: anywhere; }
 	.error-actions { display: flex; gap: 6px; margin-top: 4px; }
 	.text-btn { height: 28px; padding: 0 10px; border: 1px solid var(--border); font-size: 12px; color: var(--foreground); }
-	select { color: var(--muted-foreground); background: var(--background); border: 0; font-size: 11px; max-width: 125px; padding: 4px; }
 	.tools { gap: 2px; flex-shrink: 0; }
 	button { display: inline-flex; align-items: center; justify-content: center; height: 28px; min-width: 28px; border: 0; border-radius: 4px; background: transparent; color: var(--muted-foreground); cursor: pointer; }
 	button:hover { background: var(--muted); color: var(--foreground); }
-	button:focus-visible, select:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
+	button:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
 	button:disabled { opacity: .4; cursor: default; }
 	button[aria-pressed=true] { background: var(--muted); color: var(--foreground); }
 	.segmented { gap: 1px; padding: 2px; border: 1px solid var(--border); border-radius: 5px; }
 	.segmented button { height: 22px; min-width: 25px; }
-	.stats { font-family: var(--font-mono); font-size: 11px; white-space: nowrap; font-variant-numeric: tabular-nums; gap: 7px; padding: 0 4px; }
+	.stats { font-family: var(--font-sans); font-size: 12px; white-space: nowrap; font-variant-numeric: tabular-nums; gap: 7px; padding: 0 4px; }
 	.added { color: var(--success); } .deleted { color: var(--destructive); }
 	.body { display: flex; flex: 1; min-height: 0; overflow: hidden; }
 	.diff-files { flex: 1; min-width: 0; overflow: auto; overscroll-behavior: contain; scrollbar-width: thin; container-type: inline-size; }
 	.diff-file { scroll-margin-top: 0; }
 	.file-header { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; gap: 3px; min-height: 34px; padding: 0 8px; background: var(--background); border-bottom: 1px solid color-mix(in srgb, var(--border) 50%, transparent); }
-	.file-header.selected { box-shadow: inset 2px 0 var(--muted-foreground); }
+	.file-header.selected { background: var(--row-selected); }
 	.file-toggle { justify-content: flex-start; gap: 7px; min-width: 0; flex: 1; text-align: left; font-size: 12px; color: var(--foreground); }
 	.file-toggle :global(svg) { flex-shrink: 0; color: var(--muted-foreground); }
 	.file-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -309,6 +308,6 @@
 	.directory :global(svg), .tree-file :global(svg) { flex-shrink: 0; }
 	.tree-file { padding-left: 22px; } .tree-file small { margin-left: auto; }
 	.tree-file[aria-current=true] { background: var(--muted); color: var(--foreground); }
-	@container (max-width: 520px) { .toolbar { flex-wrap: wrap; gap: 2px; padding: 4px 6px; } .scope { flex: 1 0 100%; } .tools { justify-content: flex-end; width: 100%; } .tools > .stats { margin-right: auto; } .body { position: relative; } .file-tree { position: absolute; right: 0; top: 0; bottom: 0; width: 210px; max-width: 80%; background: var(--background); z-index: 3; box-shadow: -6px 0 16px #0002; } .copy { opacity: 1; } }
+	@container (max-width: 520px) { .toolbar { flex-wrap: wrap; gap: 2px; padding: 4px 6px; } .scope { flex: 1 0 100%; } .tools { justify-content: flex-end; width: 100%; } .tools > .stats { margin-right: auto; } .body { position: relative; } .file-tree { position: absolute; right: 0; top: 0; bottom: 0; width: 210px; max-width: 80%; background: var(--background); z-index: 3; box-shadow: var(--menu-shadow); } .copy { opacity: 1; } }
 	@media (pointer: coarse) { button { min-height: 36px; min-width: 36px; } .segmented button { min-height: 32px; } .copy { opacity: 1; } .scope-switch button { min-height: 34px; padding: 0 12px; } .base-strip .sha { min-height: 28px; } }
 </style>

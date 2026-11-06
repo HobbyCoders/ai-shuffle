@@ -116,7 +116,7 @@
 	flex-wrap: wrap;
 }
 .settings-shell .pv-note {
-	margin: 0 2px 20px;
+	margin: 0 0 20px;
 	font-size: 12.5px;
 	line-height: 1.6;
 	color: var(--st-mfg);

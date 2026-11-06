@@ -43,8 +43,12 @@ const WILL_TURN = (state) => `Fast mode turns ${state} with your next message. T
 
 const speedNote = (page) => page.locator('[data-testid="fast-outcome-note"]');
 const notice = (page) => page.locator('[data-testid="fast-applies-notice"]');
-const effortButton = (page) => page.getByRole('button', { name: /^Effort:/ }).first();
-const fastToggle = (page) => page.getByRole('button', { name: 'Fast mode', exact: true });
+// Fast lives in the effort popover at desktop width and in Chat controls on a phone.
+const effortButton = (page) => page.getByRole('button', { name: /^(Effort:|All chat controls)/ }).first();
+const fastToggle = (page) =>
+	page.getByRole('button', { name: 'Fast mode', exact: true }).or(page.getByRole('switch', { name: 'Fast mode', exact: true }));
+const fastState = (on) =>
+	`button[aria-label="Fast mode"][aria-pressed="${on}"], button[aria-label="Fast mode"][aria-checked="${on}"]`;
 
 /** Fresh Claude Code chat on Opus, the model that offers Fast, Dev sandbox, Bypass. */
 async function openClaudeOpusChat({ page, status }) {
@@ -53,7 +57,7 @@ async function openClaudeOpusChat({ page, status }) {
 	}
 	await gotoApp(page, status);
 	await waitChat(page, { surface: 'new' }, { timeout: 90_000 });
-	const hero = page.getByRole('region', { name: 'New session' });
+	const hero = page.getByRole('region', { name: 'New chat' });
 	await hero.waitFor();
 	const agentMenu = page.getByRole('menu', { name: 'Agent selection' });
 	await pick(
@@ -78,7 +82,7 @@ async function openClaudeOpusChat({ page, status }) {
 async function toggleFast(page, wantOn) {
 	await openPopup(effortButton(page), fastToggle(page));
 	await fastToggle(page).click();
-	await page.locator(`button[aria-label="Fast mode"][aria-pressed="${wantOn}"]`).waitFor({ timeout: 10_000 });
+	await page.locator(fastState(wantOn)).waitFor({ timeout: 10_000 });
 }
 
 async function closePopover(page) {
@@ -199,7 +203,7 @@ async function reloadMidTurn(page, mark, wantOn) {
 	await mark('page reloaded: the notice comes back from the worker');
 	await waitChat(page, { surface: 'active', loading: 'false', session: /^s:/ }, { timeout: 60_000 });
 	await openPopup(effortButton(page), fastToggle(page));
-	await page.locator(`button[aria-label="Fast mode"][aria-pressed="${wantOn}"]`).waitFor({ timeout: 10_000 });
+	await page.locator(fastState(wantOn)).waitFor({ timeout: 10_000 });
 	await notice(page).waitFor({ timeout: 15_000 });
 	const said = (await notice(page).innerText()).trim();
 	expect(said === WILL_TURN(wantOn ? 'on' : 'off'), `the notice survives the reload ("${said}")`);

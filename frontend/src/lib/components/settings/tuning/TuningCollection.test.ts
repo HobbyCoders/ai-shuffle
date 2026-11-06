@@ -154,11 +154,13 @@ describe('the model list', () => {
 	it('shows each picker model once, grouped like the picker, with shared routes counted', async () => {
 		await open();
 		const list = screen.getByRole('region', { name: 'Models' });
+  expect(within(list).queryByRole('searchbox')).toBeNull();
+  expect(within(list).getByRole('button', { name: /^GPT-6.1 Sol/ }).closest('.st-card')).toBeTruthy();
 		const names = within(list).getAllByRole('button').map((b) => b.textContent?.replace(/\s+/g, ' ').trim());
 		expect(names).toEqual([
 			'GPT-6.1 Sol Effort High 2 routes',
-			// The tile letter of a gateway without a brand mark comes first.
-			'S Qwen3 Coder No adjustable settings',
+			// A gateway without a brand mark gets a plain icon, not a letter.
+			'Qwen3 Coder No adjustable settings',
 			'Mystery Effort not known yet',
 			'Opus Effort Auto (High)'
 		]);

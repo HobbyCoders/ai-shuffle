@@ -167,7 +167,7 @@
 	</RowGroup>
 	{#snippet changeEditor()}
 		<div class="change">
-			<ModelPicker value={dm ?? ''} allowCustom={false} startOnAll onSelect={(value) => void pickDefault(value)} />
+			<ModelPicker value={dm ?? ''} allowCustom={false} onSelect={(value) => void pickDefault(value)} />
 		</div>
 	{/snippet}
 

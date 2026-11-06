@@ -125,8 +125,8 @@ function saved(fields: Partial<Automation>): Automation {
 
 function checked(row: ReturnType<typeof within>) {
 	return row
-		.getAllByRole('radio')
-		.filter((b: HTMLElement) => b.getAttribute('aria-checked') === 'true')
+		.getAllByRole('button')
+		.filter((b: HTMLElement) => b.getAttribute('aria-pressed') === 'true')
 		.map((b: HTMLElement) => b.textContent);
 }
 
@@ -140,14 +140,14 @@ describe('AutomationForm permission picker', () => {
 	it("offers the composer's modes and emits the pick", async () => {
 		const { row, onUpdateFormPermissionMode } = renderForm();
 		// The run model (worker default Haiku) has no Auto, as in the composer.
-		expect(row.getAllByRole('radio').map((b) => b.textContent)).toEqual(['Ask', 'Accept Edits', 'Bypass']);
-		await fireEvent.click(row.getByRole('radio', { name: 'Accept Edits' }));
+		expect(row.getAllByRole('button').map((b) => b.textContent)).toEqual(['Ask first', 'Accept Edits', 'Bypass']);
+		await fireEvent.click(row.getByRole('button', { name: 'Accept Edits' }));
 		expect(onUpdateFormPermissionMode).toHaveBeenCalledWith('acceptEdits');
 	});
 
 	it('offers Auto when the run model supports it', () => {
 		const { row } = renderForm({ formModel: 'sonnet' });
-		expect(row.getAllByRole('radio').map((b) => b.textContent)).toEqual(['Ask', 'Auto', 'Accept Edits', 'Bypass']);
+		expect(row.getAllByRole('button').map((b) => b.textContent)).toEqual(['Ask first', 'Auto', 'Accept Edits', 'Bypass']);
 	});
 
 	it('hides the Bypass warning on another mode', () => {
@@ -163,7 +163,7 @@ describe('AutomationForm permission picker', () => {
 			savedAutomation: automation,
 			formPermissionMode: formPermissionMode(automation, {})
 		});
-		expect(checked(row)).toEqual(['Ask']);
+		expect(checked(row)).toEqual(['Ask first']);
 		expect(queryByTestId('automation-bypass-hint')).toBeNull();
 	});
 
@@ -226,9 +226,9 @@ describe('permission labels', () => {
 		expect(permissionModeLabel('bypassPermissions')).toBe('Bypass');
 		expect(permissionModeLabel('acceptEdits')).toBe('Accept Edits');
 		expect(permissionModeLabel('auto')).toBe('Auto');
-		expect(permissionModeLabel(null)).toBe('Ask');
+		expect(permissionModeLabel(null)).toBe('Ask first');
 		expect(automationPermissionLabel(saved({ permission_mode: 'bypassPermissions' }))).toBe('Bypass');
-		expect(automationPermissionLabel(saved({}))).toBe('Ask');
+		expect(automationPermissionLabel(saved({}))).toBe('Ask first');
 		expect(
 			automationPermissionLabel(saved({ effective_permission_mode: 'acceptEdits', permission_mode_source: 'agent' }))
 		).toBe('Accept Edits (saved on agent)');

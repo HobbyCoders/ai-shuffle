@@ -84,6 +84,21 @@ describe('openSettings', () => {
 		expect(open).toHaveBeenCalledExactlyOnceWith('settings', 'category=devices&item=req-1');
 	});
 
+	it('leaves a retained off-screen shell target for the shell to apply after outgoing history retires', () => {
+		settingsNav.mounted = 1;
+		settingsNav.stacked = true;
+		settingsNav.resetStack();
+		layout.openFeaturePage('automations');
+		openSettings({ category: 'providers', item: 'provider:claude', anchor: 'providers.claudeMode' });
+		expect(layout.current.activeView).toEqual({
+			type: 'settings',
+			sessionId: null,
+			itemId: 'category=providers&item=provider%3Aclaude&anchor=providers.claudeMode'
+		});
+		expect(nav.pushState).not.toHaveBeenCalled();
+		expect(settingsNav.view).toBe('index');
+	});
+
 	it('moves in place when Settings is mounted and on screen', () => {
 		layout.openFeaturePage('settings');
 		settingsNav.mounted = 1;

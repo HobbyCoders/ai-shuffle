@@ -7,6 +7,7 @@
 	import { APPROVAL_REQUIRED, PENDING_SECONDS, isPeerTarget, localWorkerId, openErrorMessage, peerRow, selectable, type OpenResult } from '$lib/terminal/peer';
 	import { peerTerminals } from '$lib/stores/peer-terminals.svelte';
 	import PeerCode from './PeerCode.svelte';
+	import { SelectField, Segmented } from '$lib/components/layout/view';
 
 	let {
 		probe,
@@ -178,14 +179,9 @@
 			</div>
 		</fieldset>
 	{:else if destinations.length > 1}
-		<label class="field">
-			<span class="label">Target</span>
-			<select bind:value={selected} onchange={() => { folder = selected ? '' : probe.folder ?? ''; }}>
-				{#each destinations as target, index}
-					<option value={index === 0 ? '' : targetKey(target)} disabled={!target.available}>{target.name}{target.kind === 'ssh' ? ' (SSH grant)' : ''}</option>
-				{/each}
-			</select>
-		</label>
+		<div class="field"><span class="label">Target</span>
+   <SelectField bind:value={selected} label="Target" options={destinations.map((target,index) => ({value:index === 0 ? '' : targetKey(target),label:`${target.name}${target.kind === 'ssh' ? ' (SSH grant)' : ''}`,disabled:!target.available}))} onchange={(value) => { pick(value); }} />
+  </div>
 	{/if}
 	{#if peer}
 		{#if stage === 'request' || stage === 'requesting'}
@@ -230,32 +226,28 @@
 	{#if !remote && probe.shells.length > 1}
 		<fieldset class="field">
 			<legend class="label">Shell</legend>
-			<div class="seg">
-				{#each probe.shells as name (name)}
-					<label class="seg-opt"><input type="radio" name="terminal-shell" value={name} bind:group={shell} /><span>{name}</span></label>
-				{/each}
-			</div>
+			<Segmented options={probe.shells} bind:value={shell} label="Shell" />
 		</fieldset>
 	{/if}
 	{#if disabledReason}<p class="cap" role="alert">{disabledReason}</p>{/if}
 	<div class="actions">
-		{#if onCancel}<button type="button" class="ghost" onclick={onCancel}>{stage === 'pending' ? 'Hide' : 'Cancel'}</button>{/if}
+		{#if onCancel}<button type="button" class="st-btn" onclick={onCancel}>{stage === 'pending' ? 'Hide' : 'Cancel'}</button>{/if}
 		{#if peer}
 			{#if stage === 'pending' || stage === 'approved'}
-				<button type="button" class="ghost danger" onclick={revoke}
+				<button type="button" class="st-btn danger" onclick={revoke}
 					disabled={opening} aria-label={stage === 'pending' ? `Cancel the request to ${peer.name}` : `Revoke the approval on ${peer.name}`}>
 					{stage === 'pending' ? 'Cancel request' : 'Revoke'}
 				</button>
 			{/if}
 			{#if stage === 'approved'}
-				<button type="submit" class="go" disabled={busy || opening || !!disabledReason || !!folderError || !!remoteFolderError}>{busy || opening ? 'Opening…' : 'Open terminal'}</button>
+				<button type="submit" class="st-btn primary" disabled={busy || opening || !!disabledReason || !!folderError || !!remoteFolderError}>{busy || opening ? 'Opening…' : 'Open terminal'}</button>
 			{:else if stage !== 'pending'}
-				<button type="submit" class="go" disabled={busy || !!disabledReason || stage === 'requesting' || stage === 'blocked' || (flow?.phase === 'ended' && (!flow.retry || !selectable(peer)))}>
+				<button type="submit" class="st-btn primary" disabled={busy || !!disabledReason || stage === 'requesting' || stage === 'blocked' || (flow?.phase === 'ended' && (!flow.retry || !selectable(peer)))}>
 					{stage === 'requesting' ? 'Requesting…' : stage === 'ended' ? 'Request again' : 'Request approval'}
 				</button>
 			{/if}
 		{:else}
-		<button type="submit" class="go" disabled={busy || !!disabledReason || !!folderError || unavailable}>
+		<button type="submit" class="st-btn primary" disabled={busy || !!disabledReason || !!folderError || unavailable}>
 			{busy ? 'Opening…' : 'Open terminal'}
 		</button>
 		{/if}
@@ -265,44 +257,27 @@
 <style>
 	.picker { display: grid; gap: 12px; padding: 14px; width: min(320px, calc(100vw - 32px)); box-sizing: border-box; font-family: var(--font-sans); }
 	.picker:not(.inline) {
-		border: 1px solid var(--border-strong); border-radius: var(--radius); background: var(--popover);
-		box-shadow: 0 16px 40px oklch(0 0 0 / 0.38); animation: drop 0.18s cubic-bezier(0.2, 0.8, 0.2, 1);
+		border: 1px solid var(--menu-border); border-radius: var(--menu-radius); background: var(--popover);
+		box-shadow: var(--menu-shadow); animation: drop 0.18s cubic-bezier(0.2, 0.8, 0.2, 1);
 	}
 	.picker.inline { width: min(360px, 100%); padding: 0; }
 	.lede { display: flex; gap: 12px; align-items: flex-start; margin-bottom: 4px; }
-	.glyph { display: grid; place-items: center; width: 40px; height: 40px; flex-shrink: 0; border-radius: 10px; color: var(--primary);
-		background: color-mix(in oklch, var(--primary) 12%, transparent); border: 1px solid color-mix(in oklch, var(--primary) 28%, transparent); }
+	.glyph { display:grid; place-items:center; width:28px; height:28px; flex:none; color:var(--muted-foreground); }
 	h3 { margin: 0; font-size: 14px; font-weight: 600; color: var(--foreground); }
 	.lede p { margin: 3px 0 0; font-size: 12.5px; line-height: 1.45; color: var(--muted-foreground); }
 	.field { display: grid; gap: 5px; margin: 0; padding: 0; border: 0; min-width: 0; }
-	select { min-width: 0; width: 100%; min-height: 34px; padding: 0 8px; border: 1px solid var(--input); border-radius: calc(var(--radius) - 4px); background: var(--code-bg); color: var(--foreground); }
-	.label { padding: 0; font: 600 10.5px/1 var(--font-sans); letter-spacing: 0.06em; text-transform: uppercase; color: var(--subtle-foreground); }
+	.label { padding: 0; font: 500 12px/1.4 var(--font-sans); color: var(--subtle-foreground); }
 	.input-wrap { display: flex; align-items: center; gap: 8px; padding: 0 10px; min-height: 34px; border: 1px solid var(--input);
 		border-radius: calc(var(--radius) - 4px); background: var(--code-bg); color: var(--muted-foreground); transition: border-color 0.15s ease-out, box-shadow 0.15s ease-out; }
 	.input-wrap:focus-within { border-color: var(--ring); box-shadow: 0 0 0 3px color-mix(in oklch, var(--ring) 20%, transparent); }
 	.input-wrap.invalid { border-color: var(--destructive); }
-	input:not([type='radio']) { flex: 1; min-width: 0; border: 0; outline: 0; background: transparent; color: var(--foreground); font: 12.5px var(--font-mono); }
+	input:not([type='radio']) { flex: 1; min-width: 0; border: 0; outline: 0; background: transparent; color: var(--foreground); font: 13px var(--st-mono); }
 	.note { font-size: 11.5px; color: var(--muted-foreground); }
 	.invalid + .note, .input-wrap.invalid ~ .note { color: var(--destructive); }
-	.seg { display: inline-flex; padding: 2px; gap: 2px; border-radius: calc(var(--radius) - 3px); background: var(--muted); width: fit-content; }
-	.seg-opt { position: relative; }
-	.seg-opt input { position: absolute; opacity: 0; inset: 0; margin: 0; cursor: pointer; }
-	.seg-opt span { display: block; padding: 5px 14px; border-radius: calc(var(--radius) - 5px); font: 500 12px var(--font-mono); color: var(--muted-foreground); transition: background-color 0.15s, color 0.15s; }
-	.seg-opt input:checked + span { background: var(--background); color: var(--foreground); box-shadow: 0 1px 2px oklch(0 0 0 / 0.25); }
-	.seg-opt input:focus-visible + span { outline: 2px solid var(--ring); outline-offset: 1px; }
 	.cap { margin: 0; padding: 8px 10px; border-radius: calc(var(--radius) - 4px); font-size: 12px; color: var(--warning);
 		background: color-mix(in oklch, var(--warning) 11%, transparent); }
 	.actions { display: flex; justify-content: flex-end; gap: 8px; }
 	.inline .actions { justify-content: flex-start; }
-	button { min-height: 32px; padding: 0 14px; border-radius: calc(var(--radius) - 4px); font: 500 12.5px var(--font-sans); cursor: pointer;
-		transition: background-color 0.15s ease-out, opacity 0.15s; }
-	button:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
-	button:active:not(:disabled) { transform: translateY(1px); }
-	.ghost { border: 1px solid var(--border-strong); background: transparent; color: var(--foreground); }
-	.ghost:hover { background: var(--hover-overlay); }
-	.go { border: 1px solid var(--primary); background: var(--primary); color: var(--primary-foreground); }
-	.go:hover:not(:disabled) { background: color-mix(in oklch, var(--primary) 88%, white); }
-	.go:disabled { opacity: 0.45; cursor: not-allowed; }
 	/* ── Peer targets (#196) ── */
 	.picker.wide { width: min(372px, calc(100vw - 32px)); }
 	.picker.inline.wide { width: min(400px, 100%); }
@@ -311,8 +286,7 @@
 		padding: 8px 10px 8px 12px; border: 1px solid var(--border); border-radius: calc(var(--radius) - 4px); background: var(--code-bg);
 		cursor: pointer; transition: border-color 0.15s ease-out, background-color 0.15s ease-out; }
 	.target:hover:not(.off) { border-color: var(--border-strong); background: color-mix(in oklch, var(--hover-overlay) 60%, var(--code-bg)); }
-	.target.on { border-color: color-mix(in oklch, var(--primary) 60%, transparent);
-		background: color-mix(in oklab, var(--primary) 8%, var(--code-bg)); box-shadow: inset 3px 0 0 var(--primary); }
+	.target.on { border-color:var(--border); background:var(--row-selected); }
 	.target.off { cursor: not-allowed; }
 	.target.off .t-name { color: var(--muted-foreground); }
 	.target input { position: absolute; opacity: 0; inset: 0; margin: 0; cursor: inherit; }
@@ -323,15 +297,15 @@
 	.t-kind { flex-shrink: 0; font-size: 11px; color: var(--subtle-foreground); }
 	.t-reason { grid-column: 1 / -1; font-size: 11.5px; line-height: 1.4; color: var(--muted-foreground); }
 	.chip { display: inline-flex; align-items: center; gap: 5px; padding: 2px 7px; border-radius: 999px; white-space: nowrap;
-		font: 600 10.5px/1.4 var(--font-sans); letter-spacing: 0.02em; color: var(--muted-foreground); background: var(--muted); }
+		font: 600 10.5px/1.4 var(--font-sans); color: var(--muted-foreground); background: var(--muted); }
 	.chip::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 	.chip[data-tone='ok'] { color: var(--success); background: color-mix(in oklch, var(--success) 13%, transparent); }
-	.chip[data-tone='wait'] { color: var(--primary); background: color-mix(in oklch, var(--primary) 13%, transparent); }
+	.chip[data-tone='wait'] { color:var(--muted-foreground); background:var(--muted); }
 	.chip[data-tone='warn'] { color: var(--warning); background: color-mix(in oklch, var(--warning) 13%, transparent); }
 	.chip[data-tone='off']::before { background: var(--subtle-foreground); }
 	.peer-note { margin: 0; line-height: 1.45; }
 	.pending, .ended { display: grid; gap: 10px; padding: 12px; border-radius: calc(var(--radius) - 4px);
-		border: 1px dashed color-mix(in oklch, var(--primary) 50%, transparent); background: color-mix(in oklch, var(--primary) 5%, transparent);
+		border:1px solid var(--border); background:var(--muted);
 		animation: drop 0.2s cubic-bezier(0.2, 0.8, 0.2, 1); }
 	.ended { border-style: solid; border-color: color-mix(in oklab, var(--warning) 40%, var(--border)); background: color-mix(in oklch, var(--warning) 8%, transparent); }
 	.pending p, .ended p { margin: 0; line-height: 1.45; }
@@ -342,13 +316,10 @@
 	.note.warn { color: var(--warning); }
 	.approved { display: flex; align-items: center; gap: 8px; margin: 0; padding: 8px 10px; border-radius: calc(var(--radius) - 4px);
 		font-size: 12px; color: var(--success); background: color-mix(in oklch, var(--success) 10%, transparent); }
-	.approved time { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+	.approved time { font-variant-numeric: tabular-nums; }
 	.approved .left { white-space: nowrap; }
-	.ghost.danger { color: var(--destructive); border-color: color-mix(in oklab, var(--destructive) 45%, var(--border-strong)); }
-	.ghost.danger:hover:not(:disabled) { background: color-mix(in oklch, var(--destructive) 10%, transparent); }
-	.ghost:disabled { opacity: 0.45; cursor: not-allowed; }
 	@keyframes p-spin { to { transform: rotate(360deg); } }
 	@keyframes drop { from { opacity: 0; transform: translateY(-4px) scale(0.98); } to { opacity: 1; transform: none; } }
-	@media (max-width: 700px) { button, .input-wrap { min-height: 44px; } .seg-opt span { padding: 10px 18px; } .target { min-height: 44px; } }
+	@media (max-width: 700px) { button, .input-wrap { min-height:44px; } input:not([type='radio']) { font-size:16px; } .target { min-height: 44px; } }
 	@media (prefers-reduced-motion: reduce) { .picker:not(.inline), .pending, .ended, .pending :global(.p-spin) { animation: none; } }
 </style>

@@ -67,7 +67,7 @@ describe('ModelPicker provider scope', () => {
 		expect(document.activeElement).toBe(trigger);
 	});
 
-	it('badges API-authenticated provider glyphs in the rail', async () => {
+	it('names how a provider signs in as quiet text, not a badge', async () => {
 		const { getByRole } = render(ModelPicker, {
 			props: {
 				value: 'sonnet',
@@ -77,10 +77,8 @@ describe('ModelPicker provider scope', () => {
 
 		await fireEvent.click(getByRole('button', { name: 'Sonnet' }));
 
-		const apiProvider = getByRole('tab', { name: 'OpenAI · API' });
-		const nativeProvider = getByRole('tab', { name: 'Claude' });
-		expect(apiProvider.querySelector('[data-provider-api-badge]')?.textContent).toBe('API');
-		expect(nativeProvider.querySelector('[data-provider-api-badge]')).toBeNull();
+		expect(getByRole('group', { name: /^OpenAI/ }).querySelector('.mpp-group-name')?.textContent).toContain('API');
+		expect(document.querySelector('[data-provider-api-badge]')).toBeNull();
 	});
 
 	it('shows only the selected provider and emits its composite model value', async () => {

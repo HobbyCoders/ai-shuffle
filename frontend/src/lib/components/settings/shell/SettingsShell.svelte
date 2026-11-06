@@ -38,6 +38,7 @@
 		type CollectionCategory
 	} from '../pages/index';
 	import SettingsIndex from './SettingsIndex.svelte';
+	import ViewShell from '../../layout/view/ViewShell.svelte';
 	import ApprovalBanner from './ApprovalBanner.svelte';
 	import './settings.css';
 
@@ -54,7 +55,7 @@
 
 	let root: HTMLDivElement | undefined = $state();
 	let width = $state(0);
-	const stacked = $derived(platform.isMobile || (width > 0 && width <= STACK_WIDTH));
+	let stacked = $state(platform.isMobile);
 	const mid = $derived(!stacked && width > STACK_WIDTH && width <= MID_WIDTH);
 	const category = $derived(settingsNav.category);
 
@@ -91,9 +92,9 @@
 		untrack(() => {
 			settingsNav.stacked = s;
 			if (s && !stackStarted) {
-				// Entering the stack: start at the index unless a target is landing.
+				// Start at the index so a pending target builds every Back step.
 				stackStarted = true;
-				if (!initialItemId && !targetLanded) settingsNav.resetStack('index');
+				if (!targetLanded) settingsNav.resetStack('index');
 			} else if (!s) {
 				stackStarted = false;
 				settingsNav.depth = 0;
@@ -101,10 +102,13 @@
 		});
 	});
 
+	// The outgoing phone ViewShell pops its detail entry asynchronously. Track
+	// only that marker, so our own Settings pushes do not replay the target.
+	const retiringDetail = $derived((page.state as { viewPanelDetail?: string })?.viewPanelDetail);
 	// Deep links (openSettings / legacy openSettingsTab).
 	$effect(() => {
 		const raw = initialItemId;
-		if (!raw) return;
+		if (!raw || retiringDetail) return;
 		untrack(() => {
 			const target = decodeTarget(raw);
 			settingsNav.stacked = stacked;
@@ -219,13 +223,18 @@
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
 	class="settings-shell"
+	class:awaiting-target={Boolean(initialItemId)}
+	aria-busy={Boolean(initialItemId)}
 	bind:this={root}
 	data-stacked={stacked ? '' : undefined}
 	data-mid={mid ? '' : undefined}
 	data-view={stacked ? settingsNav.view : undefined}
 	{onkeydown}
 >
-	<SettingsIndex />
+	<ViewShell label="Settings" inheritScope nestedPanes bind:stacked detailOpen={settingsNav.view !== 'index'}
+		manageHistory={false} onBack={() => settingsNav.back()}>
+		{#snippet panel()}<SettingsIndex {onkeydown} />{/snippet}
+		{#snippet main()}
 	<div class="st-content">
 		{#if settingsAccess.readOnly}<ApprovalBanner />{/if}
 		{#if PreferenceComponent}
@@ -242,9 +251,17 @@
 			{/await}
 		{/if}
 	</div>
+		{/snippet}
+	</ViewShell>
 </div>
 
 <style>
+	.settings-shell {
+		display: flex;
+		flex-direction: column;
+		--st-page-top: 53px;
+		--st-dtop-height: 32px;
+	}
 	.st-loading {
 		flex: 1;
 	}

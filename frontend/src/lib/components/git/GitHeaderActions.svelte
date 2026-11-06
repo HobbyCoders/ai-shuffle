@@ -1,4 +1,5 @@
 <script lang="ts">
+	import '$lib/components/ui/surfaces.css';
 	/**
 	 * GitHeaderActions - the chat header's git cluster, folded into one button.
 	 *
@@ -552,9 +553,8 @@
 				{#if summary.icon === 'alert'}<TriangleAlert size={20} strokeWidth={1.6} />
 				{:else if summary.icon === 'pr'}<GitPullRequest size={20} strokeWidth={1.6} />
 				{:else}<GitBranch size={20} strokeWidth={1.6} />{/if}
-				{#if compactBadge === '✓'}
-					<span class="cg-badge tone-{summary.tone}" aria-hidden="true"><Check size={10} strokeWidth={3} /></span>
-				{:else if compactBadge}
+				<!-- A clean branch is the bare icon: green means worker status, nothing else. -->
+				{#if compactBadge && compactBadge !== '✓'}
 					<span class="cg-badge tone-{summary.tone}" aria-hidden="true">{compactBadge}</span>
 				{/if}
 				{#if prIsLastKnown}<span class="last-known-dot cg-last-known" aria-hidden="true"></span>{/if}
@@ -583,7 +583,7 @@
 	{#if panelOpen}
 		<!-- Scrim only takes effect in the bottom-sheet layout (see CSS). -->
 		<div class="git-scrim" aria-hidden="true"></div>
-		<div class="git-panel" use:obscuresTranscript={sheetLayout} class:dragging-sheet={draggingSheet} style:--sheet-offset={`${sheetOffset}px`} bind:this={panelRef} role="dialog" aria-label="Git actions">
+		<div class="git-panel ui-surface" use:obscuresTranscript={sheetLayout} class:dragging-sheet={draggingSheet} style:--sheet-offset={`${sheetOffset}px`} bind:this={panelRef} role="dialog" aria-label="Git actions">
 			<button
 				class="sheet-handle"
 				aria-label="Close Git panel (drag down or tap)"
@@ -883,7 +883,7 @@
 		width: 5px;
 		height: 5px;
 		border-radius: 50%;
-		background: var(--warning, #d29922);
+		background: var(--warning);
 		opacity: 0.8;
 	}
 
@@ -924,7 +924,7 @@
 	}
 
 	.init-btn:hover:not(:disabled) {
-		background: color-mix(in oklch, var(--primary) 10%, transparent);
+		background: var(--row-selected);
 	}
 
 	.btn-label {
@@ -951,7 +951,21 @@
 	.trigger {
 		gap: 6px;
 		padding: 0 7px 0 9px;
-		font-size: 0.71875rem;
+		font-size: 12px;
+	}
+
+	/* A phone-width window: the icon carries the state, the words stay for
+	   assistive tech. */
+	@media (max-width: 480px) {
+		:global(html[data-platform='desktop']) .trigger .btn-label,
+		:global(html[data-platform='desktop']) .trigger .btn-detail {
+			position: absolute;
+			width: 1px;
+			height: 1px;
+			overflow: hidden;
+			clip: rect(0 0 0 0);
+			white-space: nowrap;
+		}
 	}
 
 	.trigger.open {
@@ -977,7 +991,7 @@
 	.stat-line {
 		display: inline-flex;
 		gap: 5px;
-		font-family: var(--font-mono);
+		font-family: var(--font-sans);
 	}
 
 	.stat {
@@ -1017,10 +1031,10 @@
 		width: min(440px, calc(100vw - 24px));
 		max-height: calc(100vh - 80px);
 		overflow-y: auto;
-		background: var(--popover, var(--card));
-		border: 1px solid var(--border-strong, var(--border));
-		border-radius: calc(var(--radius, 0.75rem) * 1.2);
-		box-shadow: var(--shadow-l);
+		background: var(--popover);
+		border: 0;
+		border-radius: calc(var(--radius) + 8px);
+		box-shadow: var(--ui-dialog-shadow);
 		z-index: 150;
 		text-align: left;
 		animation: panel-in 160ms cubic-bezier(0.2, 0.7, 0.2, 1);
@@ -1203,7 +1217,7 @@
 	.step.done { color: var(--muted-foreground); }
 	.step.done i { background: var(--success); }
 	.step.next { color: var(--foreground); font-weight: 500; }
-	.step.next i { background: var(--primary); box-shadow: 0 0 0 3px color-mix(in oklch, var(--primary) 25%, transparent); }
+	.step.next i { background: var(--primary); }
 	.step.stop { color: var(--destructive); }
 	.step.stop i { background: var(--destructive); }
 
@@ -1230,9 +1244,9 @@
 		box-sizing: border-box;
 		height: 100%;
 		padding: 0 9px;
-		border: 1px solid color-mix(in oklch, var(--primary) 55%, transparent);
-		background: color-mix(in oklch, var(--primary) 10%, transparent);
-		color: var(--primary);
+		border: 1px solid var(--border);
+		background: var(--action);
+		color: var(--action-foreground);
 		font-size: 0.71875rem;
 		font-weight: 600;
 		cursor: pointer;
@@ -1253,7 +1267,7 @@
 	.ship-go .split-main:hover:not(:disabled),
 	.ship-go .split-chevron:hover:not(:disabled),
 	.ship-go .split-chevron.active {
-		background: color-mix(in oklch, var(--primary) 18%, transparent);
+		background: var(--row-selected);
 	}
 
 	.ship-go .split-main:disabled,
@@ -1355,11 +1369,11 @@
 
 	.on-default { color: var(--warning); }
 	.count {
-		font-family: var(--font-mono);
+		font-family: var(--font-sans);
 		font-size: 0.65625rem;
 		font-weight: 600;
-		color: var(--primary);
-		background: color-mix(in oklch, var(--primary) 14%, transparent);
+		color: var(--foreground);
+		background: var(--row-selected);
 		padding: 1px 5px;
 		border-radius: calc(var(--radius, 0.75rem) * 0.5);
 	}
@@ -1527,7 +1541,7 @@
 		display: block;
 		position: fixed;
 		inset: 0;
-		background: rgb(0 0 0 / 0.5);
+		background: var(--modal-overlay);
 		z-index: 140;
 		animation: scrim-in 180ms ease;
 	}
@@ -1687,11 +1701,12 @@
 	.git-actions .git-btn.compact-btn.tone-blocked { color: var(--destructive); }
 	.git-actions .git-btn.compact-btn.init-btn { color: var(--primary); }
 	.cg-glyph { position: relative; display: grid; place-items: center; width: 20px; height: 20px; }
-	/* The ring in the bar's own colour keeps the badge legible over the glyph. */
+	/* The ring in the bar's own colour keeps the badge legible over the glyph. It
+	   rides the icon's outer corner, so the branch stays readable under it. */
 	.cg-badge {
 		position: absolute;
-		top: -7px;
-		left: 11px;
+		top: -8px;
+		left: 13px;
 		box-sizing: border-box;
 		display: inline-flex;
 		align-items: center;
@@ -1705,14 +1720,12 @@
 		font-size: 10px;
 		font-weight: 700;
 		line-height: 1;
-		letter-spacing: -0.01em;
 		font-variant-numeric: tabular-nums;
 		white-space: nowrap;
 	}
 	.cg-badge.tone-changes { background: var(--warning); color: var(--warning-foreground); }
 	.cg-badge.tone-push, .cg-badge.tone-behind { background: var(--info, var(--primary)); color: var(--background); }
 	.cg-badge.tone-blocked { background: var(--destructive); color: var(--destructive-foreground); }
-	.cg-badge.tone-idle { min-width: 14px; width: 14px; height: 14px; padding: 0; top: -5px; left: 12px; border-radius: 50%; background: var(--success); color: var(--success-foreground); }
 	.cg-last-known { position: absolute; bottom: -3px; right: -4px; }
 
 	@media (prefers-reduced-motion: reduce) {

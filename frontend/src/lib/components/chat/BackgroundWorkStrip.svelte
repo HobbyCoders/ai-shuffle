@@ -98,7 +98,7 @@
 
 <style>
 	.work-strip {
-		max-width: 48rem;
+		max-width: var(--column-width);
 		margin: 0 auto 8px;
 		padding: 0 0.75rem;
 		animation: strip-in 220ms cubic-bezier(0.2, 0.8, 0.2, 1) both;

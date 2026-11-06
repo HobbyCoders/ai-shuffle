@@ -1,4 +1,5 @@
 <script lang="ts">
+	import Switch from '$lib/components/settings/rows/Switch.svelte';
 	/**
 	 * HookForm - Inline form for creating/editing hooks
 	 *
@@ -128,10 +129,10 @@
 		<div class="ctl"><input type="text" bind:value={name} placeholder="e.g., Slack Notification" class="inp" /></div>
 	</div>
 	<div class="set-row">
-		<div class="lab"><h4>Scope</h4><p>{scopeProjectId ? 'Fires only for sessions in this project.' : 'Fires for all sessions regardless of project.'}</p></div>
+		<div class="lab"><h4>Scope</h4><p>{scopeProjectId ? 'Fires only for chats in this project.' : 'Fires for all chats regardless of project.'}</p></div>
 		<div class="ctl">
 			<select bind:value={scopeProjectId} class="sel">
-				<option value={null}>App (all sessions)</option>
+				<option value={null}>App (all chats)</option>
 				{#each $projects as project (project.id)}
 					<option value={project.id}>{project.name}</option>
 				{/each}
@@ -203,15 +204,7 @@
 	<div class="set-row">
 		<div class="lab"><h4>Enabled</h4><p>Turn this hook on or off without deleting it.</p></div>
 		<div class="ctl">
-			<button
-				type="button"
-				class="switch"
-				class:on={enabled}
-				role="switch"
-				aria-checked={enabled}
-				aria-label="Toggle hook enabled"
-				onclick={() => (enabled = !enabled)}
-			><i></i></button>
+			<Switch size="sm" bind:checked={enabled} label="Toggle hook enabled" />
 		</div>
 	</div>
 </div>

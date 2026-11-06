@@ -1,16 +1,20 @@
 <script lang="ts">
+	import { detailLine } from './credential-display';
 	/**
 	 * A provider with nothing connected: the kinds it supports, each with Set up.
-	 * Claude also shows the installed CLI (version, keep installed, Remove), so
-	 * an owner without a Claude sign-in can still manage or remove it.
+	 * Claude also shows its mode and the installed CLI (version, keep installed,
+	 * Remove), so an owner without a Claude sign-in can still change or remove them.
 	 */
 	import { providers } from '$lib/stores/providers.svelte';
+	import { isNativeProvider } from '$lib/api/model-providers';
+	import { loadNativeOptions, nativeOptions } from './native-options.svelte';
 	import { getSettingsAccess } from '$lib/settings/access.svelte';
 	import DetailPane from '../shell/DetailPane.svelte';
 	import RowGroup from '../rows/RowGroup.svelte';
 	import SettingRow from '../rows/SettingRow.svelte';
 	import ProviderTile from './ProviderTile.svelte';
 	import ClaudeCliInstall from './setup/ClaudeCliInstall.svelte';
+	import ClaudeModeRow from './ClaudeModeRow.svelte';
 	import { kindsOf, type ProviderView } from './providers-model';
 	import { startSetup } from './provider-actions';
 
@@ -39,17 +43,17 @@
 
 <DetailPane
 	name={provider.name}
-	badge="Provider"
-	status="off"
-	statusText="Not connected"
-	subtitle="Nothing added yet"
-	facts={[
-		{ label: 'Kinds', value: kinds.map((k) => k.label).join(', ') },
-		{ label: 'Models', value: models }
-	]}
+	subtitle={detailLine('Not connected', kinds.map((k) => k.label).join(', '), models)}
 	item={provider.item}
 >
 	{#snippet tile()}<ProviderTile {provider} size="lg" dashed />{/snippet}
+	{#if provider.claude}<ClaudeModeRow {provider} />{/if}
+	{#if isNativeProvider(provider.id) && !kinds.length}
+		{#if nativeOptions.error}
+			<p class="pv-msg err" role="alert">{nativeOptions.error}</p>
+			<button type="button" class="st-btn" onclick={() => loadNativeOptions()}>Retry provider options</button>
+		{:else}<p class="pv-msg" role="status">Loading provider options…</p>{/if}
+	{/if}
 	<RowGroup title="Connect" id="providers-connect">
 		{#each kinds as k (k.flavor)}
 			<SettingRow label={k.label} hint={k.hint}>

@@ -786,6 +786,9 @@ async def test_fallback_primary_claim_guard(mock_db, pr_checkout, owner):
         sid = child
     if owner == 'archived':
         database.update_session(other, status='archived')
+    else:
+        from app.db import turns
+        turns.enqueue_turn(other, "user", prompt="unfinished PR work", profile_id="default")
     database.update_session_pr_state(other, pr_number=12, pr_state='open')
     pr = _checkout_pull(12, 'OPEN', sha)
     ok, _ = await _reconcile_checkout(sid, pr_checkout, commit_pulls=[pr])

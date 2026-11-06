@@ -1,4 +1,5 @@
 <script lang="ts">
+	import Checkbox from '$lib/components/ui/Checkbox.svelte';
 	/**
 	 * One API user (or the draft from "Add API user"): Overview, Run,
 	 * Access and Sessions. Existing users save each change as it is made;
@@ -42,7 +43,7 @@
 	let { model, id }: Props = $props();
 
 	const PERMS_HELP =
-		'Connector sessions never inherit bypass. Tool approval requests go to the connected platform, such as Discord, for the user to approve or deny.';
+		'Connector chats never inherit bypass. Tool approval requests go to the connected platform, such as Discord, for the user to approve or deny.';
 	/** Subscription models are left out of this picker; the server refuses them for API users. */
 	const MODEL_HELP = SUBSCRIPTION_OWNER_ONLY_REASON;
 	/** A connector's key: only the owner's own account on it uses a subscription. */
@@ -60,7 +61,7 @@
 	const tabs = $derived(
 		isDraft
 			? ['Overview', 'Run', 'Access']
-			: ['Overview', 'Run', 'Access', { id: 'Sessions', count: sessions.length || '' }]
+			: ['Overview', 'Run', 'Access', { id: 'Chats', count: sessions.length || '' }]
 	);
 	const revealedKey = $derived(user && model.revealed?.userId === user.id ? model.revealed.key : null);
 
@@ -203,8 +204,8 @@
 				label: 'Last used',
 				value: user.last_used_at ? relativeAgo(user.last_used_at) || shortDate(user.last_used_at) : 'Never'
 			},
-			{ label: 'Sessions', value: sessions.length },
-			{ label: 'Permissions', value: 'Ask' }
+			{ label: 'Chats', value: sessions.length },
+			{ label: 'Permissions', value: 'Ask first' }
 		]}
 		{tabs}
 		danger={[
@@ -282,14 +283,14 @@
 				{@render agentRows(user.profile_ids ?? [], async (pid) => {
 					if (await model.toggleProfile(user, pid)) flashSaved();
 				})}
-			{:else if tab === 'Sessions'}
-				<RowGroup title="Sessions" count={sessions.length}>
+			{:else if tab === 'Chats'}
+				<RowGroup title="Chats" count={sessions.length}>
 					{#snippet actions()}
 						<button
 							type="button"
 							class="st-btn icon ghost sm"
 							class:spin={refreshing}
-							aria-label="Refresh sessions"
+							aria-label="Refresh chats"
 							disabled={refreshing}
 							onclick={refreshSessions}
 						>
@@ -297,7 +298,7 @@
 						</button>
 					{/snippet}
 					{#if sessions.length === 0}
-						<SettingRow label="No sessions yet" />
+						<SettingRow label="No chats yet" />
 					{:else}
 						{#each sessions as session (session.id)}
 							{@const agent = model.profileName(session.profile_id)}
@@ -333,7 +334,7 @@
 			<SelectField value={effort} options={effortChoices(current, effort)} onchange={onEffort} />
 		</SettingRow>
 		<SettingRow label="Permissions" help={PERMS_HELP}>
-			<ValueText tone="fg"><Lock />Ask, always</ValueText>
+			<ValueText tone="fg"><Lock />Ask first, always</ValueText>
 		</SettingRow>
 	</RowGroup>
 {/snippet}
@@ -354,9 +355,7 @@
 		{:else}
 			{#each model.profiles as profile (profile.id)}
 				<label class="st-row agent">
-					<input
-						type="checkbox"
-						class="chk"
+					<Checkbox
 						checked={selected.includes(profile.id)}
 						onchange={() => onToggle(profile.id)}
 					/>
@@ -456,12 +455,6 @@
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
-	}
-	.chk {
-		width: 16px;
-		height: 16px;
-		margin: 0;
-		accent-color: var(--st-primary);
 	}
 	.spin :global(svg.lucide) {
 		animation: st-api-spin 0.9s linear infinite;

@@ -10,7 +10,7 @@
 	 * desktop permission prompt.
 	 */
 	import { Check, ChevronsLeftRight, X } from 'lucide-svelte';
-	import { knobFraction, slideAnswer } from './quick-controls';
+	import { knobFraction, slideAnswer } from '$lib/components/chat/phone/quick-controls';
 
 	interface Props {
 		approveLabel?: string;

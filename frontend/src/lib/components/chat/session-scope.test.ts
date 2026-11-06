@@ -34,7 +34,7 @@ describe('Access without a project', () => {
 
 	it('labels the modes the way the dock always has', () => {
 		expect(accessModes({ hasProject: true, autoSupported: true }).map((m) => m.label)).toEqual([
-			'Ask', 'Auto', 'Accept Edits', 'Bypass'
+			'Ask first', 'Auto', 'Accept Edits', 'Bypass'
 		]);
 	});
 

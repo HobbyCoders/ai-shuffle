@@ -28,6 +28,15 @@ describe('"Connected to" workers', () => {
 		]);
 	});
 
+	it('never names a worker by its container ID', () => {
+		const rows = connectionWorkers(
+			[install('pc', { is_self: true, device_name: '75c733a3514a' }), install('unraid', { device_name: '0123456789ab' })],
+			[],
+			new Set()
+		);
+		expect(rows.map((r) => r.name)).toEqual(['Local', 'Worker 0123']);
+	});
+
 	it('does not assume the current worker is online', () => {
 		const rows = connectionWorkers([install('pc', { is_self: true, online: false })], [], new Set());
 		expect(rows[0]).toMatchObject({ current: true, online: false });

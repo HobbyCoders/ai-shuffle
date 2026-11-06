@@ -4,6 +4,7 @@
 	 * (`onchange`); `oninput` fires on every keystroke for forms with an
 	 * explicit Save (passwords, keys).
 	 */
+	import PathText from './PathText.svelte';
 	import { getSettingsAccess } from '$lib/settings/access.svelte';
 	import { controlAria, getRowContext } from './row-context';
 
@@ -11,11 +12,15 @@
 		value: string;
 		onchange?: (value: string) => void;
 		oninput?: (value: string) => void;
+		/** Optional form keyboard path; preventDefault opts out of the default commit. */
+		onkeydown?: (event: KeyboardEvent) => void;
 		placeholder?: string;
 		type?: 'text' | 'password' | 'url' | 'email' | 'search';
 		mono?: boolean;
-		/** Width in px (default 220). */
-		width?: number;
+		/** Middle-ellipsized path at rest; full unmodified value on focus. */
+		pathDisplay?: boolean;
+		/** Width in px (default 220), or the full available row width. */
+		width?: number | 'full';
 		disabled?: boolean;
 		label?: string;
 		autocomplete?: HTMLInputElement['autocomplete'];
@@ -32,9 +37,11 @@
 		value = $bindable(''),
 		onchange,
 		oninput,
+		onkeydown,
 		placeholder,
 		type = 'text',
 		mono = false,
+		pathDisplay = false,
 		width = 220,
 		disabled = false,
 		label,
@@ -63,10 +70,11 @@
 	}
 </script>
 
+<span class="st-text-field" class:path-display={pathDisplay} style:--st-text-width={width === 'full' ? '100%' : `${width}px`}>
 <input
 	class="st-txt"
 	class:st-mono={mono}
-	style:width="{width}px"
+	style:--st-text-width={width === 'full' ? '100%' : `${width}px`}
 	{type}
 	{placeholder}
 	{autocomplete}
@@ -79,19 +87,30 @@
 	oninput={() => oninput?.(value)}
 	onblur={commit}
 	onkeydown={(e) => {
+		onkeydown?.(e);
+		if (e.defaultPrevented) return;
 		if (e.key === 'Enter') {
 			e.preventDefault();
 			commit();
 		}
 	}}
 />
+{#if pathDisplay}<span class="path-rest" aria-hidden="true"><PathText path={value} /></span>{/if}
+</span>
 
 <style>
+	.st-text-field { position: relative; display: inline-flex; width: var(--st-text-width); max-width: 100%; min-width: 0; }
+	.path-rest { position: absolute; inset: 1px 10px; display: flex; align-items: center; pointer-events: none; color: var(--st-fg); }
+	.path-display:not(:focus-within) .st-txt { color: transparent; }
+	.path-display:focus-within .path-rest { display: none; }
+	.path-display:focus-within .st-txt { color: var(--st-fg); }
+	.path-display .st-txt { transition-property: border-color, box-shadow, background-color; }
 	.st-txt {
+		width: var(--st-text-width);
 		height: 32px;
 		border-radius: var(--st-radius-md);
 		border: 1px solid var(--st-input);
-		background: var(--st-muted);
+		background: var(--st-field);
 		color: var(--st-fg);
 		padding: 0 10px;
 		font-size: 13px;
@@ -106,10 +125,11 @@
 	}
 	.st-txt:focus {
 		outline: none;
-		border-color: var(--st-primary);
+		border-color: var(--st-field-focus);
 		box-shadow: 0 0 0 3px var(--st-primary-soft);
 	}
 	.st-txt:disabled {
+		background: var(--st-muted);
 		opacity: 0.55;
 	}
 </style>

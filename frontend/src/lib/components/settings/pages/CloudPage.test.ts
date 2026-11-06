@@ -50,6 +50,8 @@ let status: Record<string, unknown>;
 
 beforeEach(() => {
 	vi.resetAllMocks();
+	vi.stubGlobal('matchMedia', () => ({ matches: false, addEventListener() {}, removeEventListener() {} }));
+	vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
 	settingsNav.reset();
 	status = { ...notLinked };
 	transport.get.mockImplementation(async (path: string) => (path === '/license' ? { ...status } : {}));
@@ -57,12 +59,13 @@ beforeEach(() => {
 afterEach(() => {
 	cleanup();
 	vi.restoreAllMocks();
+	vi.unstubAllGlobals();
 });
 
 const state = () => screen.getByTestId('cloud-state').textContent ?? '';
 const seats = () => screen.getByTestId('cloud-seats').textContent?.replace(/\s+/g, ' ').trim() ?? '';
 const tierNamed = (name: string) =>
-	within(screen.getByTestId('cloud-tiers')).getByText(name).closest('li') as HTMLElement;
+	within(screen.getByTestId('cloud-tiers')).getByText(name).closest('.st-row') as HTMLElement;
 
 /** Nothing on the page talks about keys, leases or blocked agents any more. */
 function expectNoKeyWording() {
@@ -73,8 +76,7 @@ function expectNoKeyWording() {
 }
 
 function expectPlanFollowsAccount() {
-	expect(screen.getByTestId('cloud-follows').textContent).toMatch(/plan follows the Cloud account you sign in with/);
-	expect(screen.getByTestId('cloud-follows').textContent).toMatch(/another worker .* same plan/);
+	expect(screen.getByTestId('cloud-follows').textContent).toBe('Your plan follows your Cloud account across workers. Local use stays free.');
 }
 
 describe('not linked', () => {
@@ -82,14 +84,14 @@ describe('not linked', () => {
 		render(CloudPage);
 		await waitFor(() => expect(state()).toContain('Not linked'));
 		expect(screen.getByRole('heading', { level: 1, name: 'Cloud' })).toBeTruthy();
-		expect(screen.getByTestId('cloud-message').textContent).toContain('Local use is free');
-		expect(tierNamed('This worker').getAttribute('aria-current')).toBe('true');
+		expect(screen.getAllByRole('heading', { name: 'Plans' })).toHaveLength(1);
+		expect(screen.queryByTestId('cloud-message')).toBeNull();
+		expect(tierNamed('This worker').querySelector('[aria-current]')?.getAttribute('aria-current')).toBe('true');
 		expect(tierNamed('This worker').textContent).toContain('Local use, no account');
-		expect(tierNamed('Free account').textContent).toMatch(/2\s*remote workers, no card/);
-		expect(tierNamed('Paid plan').textContent).toMatch(/4\s*remote workers and sync/);
-		expect(screen.getByText('Local use stays free')).toBeTruthy();
-		expect(screen.getByText('A free account adds two')).toBeTruthy();
-		expect(seats()).toBe('None');
+		expect(tierNamed('Free account').textContent).toMatch(/2\s*·\s*remote workers, no card/);
+		expect(tierNamed('Paid plan').textContent).toMatch(/4\s*·\s*remote workers and sync/);
+		expect(screen.queryByText('A free account adds two')).toBeNull();
+		expect(screen.queryByTestId('cloud-seats')).toBeNull();
 		expect(screen.queryByText('Renews')).toBeNull();
 		const plans = screen.getByRole('link', { name: /See plans/ });
 		expect(plans.getAttribute('href')).toBe('https://hobbycoders.com/ai-shuffle/pricing');
@@ -119,15 +121,23 @@ describe('not linked', () => {
 });
 
 describe('free', () => {
+	it('keeps an account-specific remote-worker limit in the plan row', async () => {
+		status = { ...free, remote_worker_limit: 5, seats_used: 3 };
+		render(CloudPage);
+		await waitFor(() => expect(state()).toContain('Free'));
+		expect(tierNamed('Free account').textContent).toMatch(/5\s*·\s*remote workers/);
+		expect(seats()).toBe('3 of 5 in use');
+	});
+
 	it('shows the 2 included remote workers and an upgrade link', async () => {
 		status = { ...free };
 		render(CloudPage);
 		await waitFor(() => expect(state()).toContain('Free'));
 		expect(screen.getByText('Linked to AI Shuffle Cloud')).toBeTruthy();
 		expect(seats()).toBe('2 remote workers included');
-		expect(tierNamed('Free account').getAttribute('aria-current')).toBe('true');
-		expect(tierNamed('This worker').classList.contains('reached')).toBe(true);
-		const upgrade = screen.getByRole('link', { name: /Upgrade/ });
+		expect(tierNamed('Free account').querySelector('[aria-current]')?.getAttribute('aria-current')).toBe('true');
+		expect(tierNamed('This worker').querySelector('[aria-current]')).toBeNull();
+		const upgrade = screen.getByRole('link', { name: /See plans/ });
 		expect(upgrade.getAttribute('href')).toBe('https://hobbycoders.com/ai-shuffle/pricing');
 		expect(screen.queryByRole('button', { name: 'Link account' })).toBeNull();
 		expect(screen.queryByText('Renews')).toBeNull();
@@ -151,8 +161,8 @@ describe('paid', () => {
 		expect(screen.getByRole('meter', { name: 'Remote workers in use' }).getAttribute('aria-valuetext')).toBe('1 of 4 in use');
 		expect(screen.getByText('Renews')).toBeTruthy();
 		expect(screen.getByTestId('cloud-renewal').textContent).toContain('Oct 25, 2026');
-		expect(tierNamed('Paid plan').getAttribute('aria-current')).toBe('true');
-		expect(screen.queryByRole('link', { name: /Upgrade|See plans/ })).toBeNull();
+		expect(tierNamed('Paid plan').querySelector('[aria-current]')?.getAttribute('aria-current')).toBe('true');
+		expect(screen.getByRole('link', { name: /See plans/ }).closest('.st-row')?.textContent).toContain('Paid plan');
 		expect(screen.queryByRole('button', { name: 'Link account' })).toBeNull();
 		expectPlanFollowsAccount();
 		expectNoKeyWording();
@@ -163,7 +173,7 @@ describe('paid', () => {
 		render(CloudPage);
 		await waitFor(() => expect(state()).toContain('Paid'));
 		expect(seats()).toBe('4 remote workers included');
-		expect(tierNamed('Paid plan').textContent).toMatch(/4\s*remote workers and sync/);
+		expect(tierNamed('Paid plan').textContent).toMatch(/4\s*·\s*remote workers and sync/);
 		expect(screen.queryByRole('meter')).toBeNull();
 	});
 
@@ -171,7 +181,7 @@ describe('paid', () => {
 		status = { ...paid, seats: 12, seats_used: 3, remote_worker_limit: 12 };
 		render(CloudPage);
 		await waitFor(() => expect(state()).toContain('Paid'));
-		expect(tierNamed('Paid plan').textContent).toMatch(/12\s*remote workers and sync/);
+		expect(tierNamed('Paid plan').textContent).toMatch(/12\s*·\s*remote workers and sync/);
 		expect(screen.getByRole('meter', { name: 'Remote workers in use' }).getAttribute('aria-valuetext')).toBe('3 of 12 in use');
 	});
 
@@ -179,7 +189,7 @@ describe('paid', () => {
 		status = { ...paid, seats: 100, seats_used: 2, remote_worker_limit: 100 };
 		render(CloudPage);
 		await waitFor(() => expect(state()).toContain('Paid'));
-		expect(seats()).toBe('Unlimited remote workers');
+		expect(seats()).toBe('2 in use');
 		expect(screen.getByText('2 in use')).toBeTruthy();
 		expect(tierNamed('Paid plan').textContent).toContain('Unlimited');
 		expect(screen.queryByRole('meter')).toBeNull();
@@ -190,7 +200,7 @@ describe('paid', () => {
 		render(CloudPage);
 		await waitFor(() => expect(state()).toContain('Paid'));
 		expect(screen.getByRole('meter', { name: 'Remote workers in use' }).getAttribute('aria-valuetext')).toBe('2 of 99 in use');
-		expect(tierNamed('Paid plan').textContent).toMatch(/99\s*remote workers and sync/);
+		expect(tierNamed('Paid plan').textContent).toMatch(/99\s*·\s*remote workers and sync/);
 		expect(tierNamed('Paid plan').textContent).not.toContain('Unlimited');
 	});
 
@@ -239,8 +249,7 @@ describe('coverage', () => {
 	it('renders a row for every Cloud entry on a paid plan', async () => {
 		status = { ...paid, linked: false };
 		await assertCategoryCoverage('cloud', () => render(CloudPage).container, {
-			settle: () => waitFor(() => expect(state()).toContain('Paid')),
-			skip: { 'cloud.upgrade': 'only when not on a paid plan; the free and not-linked tests render it' }
+			settle: () => waitFor(() => expect(state()).toContain('Paid'))
 		});
 	});
 });

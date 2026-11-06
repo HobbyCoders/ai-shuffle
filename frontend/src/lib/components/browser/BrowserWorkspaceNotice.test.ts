@@ -6,7 +6,7 @@ afterEach(cleanup);
 describe('browser workspace notice', () => {
 	it('shows the runtime notice as a status, and nothing without one', async () => {
 		const view = render(BrowserWorkspaceNotice, { notice: 'This step needs your own browser.' });
-		expect(view.getByRole('status').textContent).toBe('This step needs your own browser.');
+		expect(view.getByRole('status').textContent?.trim()).toBe('This step needs your own browser.');
 		await view.rerender({ notice: undefined });
 		expect(view.queryByRole('status')).toBeNull();
 	});

@@ -233,7 +233,7 @@
 		try {
 			const result = await attachProject(sessionId, pickedItem.project);
 			activeSession.applyAttachedProject(sessionId, result.project_id, result.project_v2_id, result.permission_mode ?? 'default');
-			notify(`${pickedItem.name} attached. ${agentName?.trim() || 'Your agent'} now works in its checkout, on Ask.`, { severity: 'success' });
+			notify(`${pickedItem.name} attached. ${agentName?.trim() || 'Your agent'} now works in its checkout, on Ask first.`, { severity: 'success' });
 			onClose();
 		} catch (e) {
 			error = getErrorMessage(e, 'Could not attach the project.');
@@ -378,6 +378,9 @@
 	.icon-btn { display: grid; place-items: center; width: 30px; height: 30px; border: none; border-radius: 8px; background: transparent; color: var(--subtle-foreground); cursor: pointer; }
 	.icon-btn:hover { background: var(--hover-overlay); color: var(--foreground); }
 	.icon-btn:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+	@media (max-width: 480px) {
+		.icon-btn { width: 44px; height: 44px; flex-shrink: 0; }
+	}
 
 	.proj-list { display: flex; flex-direction: column; gap: 2px; max-height: 220px; overflow-y: auto; padding: 4px; margin: 0 -4px 12px; }
 	.proj-row {

@@ -19,7 +19,7 @@
 	 * handle that was moved keeps focus.
 	 */
 	import { tick } from 'svelte';
-	import { ArrowLeft, Check, GripVertical, Settings, SquarePen } from 'lucide-svelte';
+	import { ChevronLeft, Check, GripVertical, Settings, SquarePen } from 'lucide-svelte';
 	import {
 		orderedWorkspaceItems,
 		sidebarWorkspace,
@@ -122,7 +122,7 @@
 	<div class="cust-head">
 		{#if phone}
 			<button class="back" type="button" aria-label="Back" onclick={onClose}>
-				<ArrowLeft size={20} strokeWidth={1.85} />
+				<ChevronLeft size={20} strokeWidth={1.85} />
 			</button>
 		{/if}
 		<b>Customize the rail</b>

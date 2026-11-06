@@ -401,6 +401,15 @@ def create_postgres_schema(cursor: Any) -> None:
     from app.db.session_plans import create_schema as create_plan_schema
     create_plan_schema(cursor)
 
+    # Durable migration handoff consumed unconditionally during startup, including
+    # bootstrap-only databases. Keep this identical to the guarded upgrade DDL.
+    cursor.execute("""CREATE TABLE IF NOT EXISTS session_archive_retirement (
+        session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+        membership_revision BIGINT NOT NULL,
+        membership_epoch TEXT NOT NULL, done BOOLEAN NOT NULL DEFAULT FALSE,
+        cancelled_peers TEXT NOT NULL DEFAULT '[]',
+        cancelled_wakes TEXT NOT NULL DEFAULT '[]')""")
+
     # Hand-off staging references sessions, unlike the dependency-free network
     # tables bootstrapped above. Keep the FK on fresh databases and upgrades.
     from app.db.network import create_handoff_history_schema

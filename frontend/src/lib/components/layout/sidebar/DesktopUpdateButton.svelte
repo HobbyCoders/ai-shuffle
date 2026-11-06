@@ -40,7 +40,9 @@
 	/** `canCheck` tells the host whether a manual "Check for updates" entry
 	 *  makes sense right now: updates are allowed and this is not an agent
 	 *  preview. The button itself only appears once there is something to show. */
-	let { canCheck = $bindable(false) }: { canCheck?: boolean } = $props();
+	let { canCheck = $bindable(false), rail = false }: { canCheck?: boolean; rail?: boolean } = $props();
+	const iconSize = $derived(rail ? 18 : 16);
+	const iconStroke = $derived(rail ? 1.75 : 1.85);
 	const tooltipId = $props.id();
 	const completionKey = 'application-update-completed';
 	// Poll quickly only while something is moving: a request just sent, a
@@ -74,7 +76,7 @@
 	// Reasons workers gave for refusing the last request, by device id.
 	let refusals = $state<Record<string, string>>({});
 	let tipOpen = $state(false);
-	let tipPosition = $state({ top: 0, left: 0 });
+	let tipPosition = $state({ top: 0, left: 0, bottom: 0 });
 	let panel = $state<Panel | null>(null);
 	let buttonEl = $state<HTMLButtonElement | null>(null);
 	const panelId = `${tooltipId}-panel`;
@@ -271,7 +273,12 @@
 	}
 
 	function anchor(rect: DOMRect) {
-		return { top: rect.bottom + 12, left: Math.max(8, Math.min(rect.left - 170, window.innerWidth - 288)) };
+		const edge = buttonEl?.closest('aside')?.getBoundingClientRect().right ?? rect.right;
+		return {
+			top: rect.bottom + 12,
+			left: Math.max(8, Math.min(rail ? edge + 8 : rect.left - 170, window.innerWidth - 288)),
+			bottom: Math.max(8, window.innerHeight - rect.bottom)
+		};
 	}
 	function showTip(event: MouseEvent | FocusEvent) {
 		if (panel) return;
@@ -595,7 +602,7 @@
 {/snippet}
 
 {#if visible}
-	<div class="update-slot" class:complete={celebrating} class:leaving={celebration === 'leaving'}>
+	<div class="update-slot" class:rail class:complete={celebrating} class:leaving={celebration === 'leaving'}>
 		<button class="update-button" class:ready class:failed={!!error && !waiting && !celebrating && !deferred}
 			class:held={(blocked || deferred) && !error && !waiting && !celebrating} class:attention={outcomeOnly}
 			type="button" onclick={clicked} aria-disabled={busy && !opensPanel} aria-busy={busy && !celebrating} bind:this={buttonEl}
@@ -605,14 +612,14 @@
 			onmouseenter={showTip} onmouseleave={() => tipOpen = false} onfocus={showTip} onblur={() => tipOpen = false}
 			onkeydown={(event) => { if (event.key === 'Escape') tipOpen = false; }}>
 			{#if waiting || celebrating}
-				<svg class="completion-ring" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" aria-hidden="true"><path d="M12 3a9 9 0 1 1-6.36 2.64" /></svg>
-				<svg class="completion-check" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4.5 4.5L19 7" /></svg>
+				<svg class="completion-ring" width={iconSize} height={iconSize} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width={iconStroke} stroke-linecap="round" aria-hidden="true"><path d="M12 3a9 9 0 1 1-6.36 2.64" /></svg>
+				<svg class="completion-check" width={iconSize} height={iconSize} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width={iconStroke} stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4.5 4.5L19 7" /></svg>
 				<span class="halo" aria-hidden="true"></span>
 				<span class="burst" aria-hidden="true">{#each Array(8) as _, i}<i class="spark" style={`--angle:${i * 45 + 12}deg`}></i>{/each}</span>
-			{:else if busy}<LoaderCircle size={16} strokeWidth={1.85} class="update-spinner" />
-			{:else if error || outcomeOnly}<CircleAlert size={16} strokeWidth={1.85} />
-			{:else if ready}<RefreshCw size={16} strokeWidth={1.85} />
-			{:else}<Download size={16} strokeWidth={1.85} />{/if}
+			{:else if busy}<LoaderCircle size={iconSize} strokeWidth={iconStroke} class="update-spinner" />
+			{:else if error || outcomeOnly}<CircleAlert size={iconSize} strokeWidth={iconStroke} />
+			{:else if ready}<RefreshCw size={iconSize} strokeWidth={iconStroke} />
+			{:else}<Download size={iconSize} strokeWidth={iconStroke} />{/if}
 		</button>
 		{#if panel}
 			<NotificationSlot order={DOCK_ORDER.restart}>
@@ -684,7 +691,7 @@
 			</NotificationSlot>
 		{/if}
 		{#if tipOpen}
-			<div class="update-tooltip" id={tooltipId} role="tooltip" style:top={`${tipPosition.top}px`} style:left={`${tipPosition.left}px`}>
+			<div class="update-tooltip" id={tooltipId} role="tooltip" style:top={rail ? undefined : `${tipPosition.top}px`} style:bottom={rail ? `${tipPosition.bottom}px` : undefined} style:left={`${tipPosition.left}px`}>
 				<strong>{headline}</strong>
 				{#if operation && showOperation}
 					{#if operationError || partialNote}<span class="tip-lead">{operationError || partialNote}</span>{/if}
@@ -728,6 +735,12 @@
 	.update-button[aria-disabled='true'] { cursor: wait; }
 	.update-button.ready { box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--primary) 35%, transparent); }
 	.update-button.failed { color: var(--destructive); background: color-mix(in oklch, var(--destructive) 12%, transparent); }
+	.update-slot.rail { width: 36px; height: 36px; }
+	.rail .update-button { border-radius: var(--radius-control); background: transparent; }
+	.rail .update-button:not(.failed) { color: var(--sidebar-muted); }
+	.rail .update-button:hover { color: var(--foreground); background: var(--row-hover); }
+	.rail .update-button:active { transform: scale(.95); }
+	.rail .update-button:focus-visible { outline-offset: -2px; }
 	.update-button :global(.update-spinner), .completion-ring { animation: update-spin 1s linear infinite; }
 	.completion-ring, .completion-check { position: absolute; }
 	.completion-check { opacity: 0; stroke-dasharray: 25; stroke-dashoffset: 25; }

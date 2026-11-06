@@ -15,8 +15,11 @@
 	 * refreshes it. Owner/admin only actions; API users never see folders.
 	 */
 	import { onDestroy, tick, untrack } from 'svelte';
-	import { Check, X, Loader2, FolderOpen, MessageSquarePlus, Trash2, RotateCw, Github } from 'lucide-svelte';
-	import Banner from '$lib/components/Banner.svelte';
+	import { Check, X, Loader2, FolderOpen, MessageSquarePlus, RotateCw, Github } from 'lucide-svelte';
+	import { RowGroup, SettingRow, EmptyDetail, InlineBanner } from '$lib/components/layout/view';
+	import TextField from '$lib/components/settings/rows/TextField.svelte';
+	import { workerDisplayName } from '$lib/components/ui/worker-name';
+	import './project-tabs.css';
 	import {
 		cancelProjectSetup,
 		getProjectWorkers,
@@ -74,7 +77,7 @@
 
 	const refKey = $derived(JSON.stringify(projectRef));
 	const kind = $derived(data?.kind ?? null);
-	const workers = $derived(data?.workers ?? []);
+	const workers = $derived((data?.workers ?? []).map(w => ({ ...w, device_name: workerDisplayName(w.device_name, w.is_self ? 'Local' : 'Worker') })));
 	const missingOnline = $derived(workers.filter((w) => w.online && (w.state === 'missing') && !isRunning(w)));
 	const anyRunning = $derived(workers.some((w) => isRunning(w)));
 
@@ -242,7 +245,7 @@
 	}
 
 	function focusFolder(id: string) {
-		const input = document.getElementById(`pw-folder-${id}`) as HTMLInputElement | null;
+		const input = document.getElementById(`pw-folder-${id}`)?.querySelector<HTMLInputElement>('input');
 		input?.focus();
 		input?.select();
 	}
@@ -274,301 +277,76 @@
 
 	const placeName = (w: ProjectWorkerDetail) => (w.is_self ? 'here' : `on ${w.device_name}`);
 </script>
-
-<div class="pw" data-ui-project-workers={loading ? 'loading' : loadError ? 'error' : 'ready'}>
-	{#if loading && !data}
-		<div class="pw-grid" aria-busy="true" aria-label="Loading workers">
-			{#each [0, 1, 2] as i (i)}<div class="pw-card pw-skel"></div>{/each}
-		</div>
+<div data-ui-project-workers={loading ? 'loading' : loadError ? 'error' : 'ready'}>
+	{#if loading && !data}<p class="project-muted" role="status" aria-busy="true" aria-label="Loading workers">Loading workers…</p>
 	{:else if loadError && !data}
-		<Banner severity="error" message={loadError} action={{ label: 'Try again', onClick: () => { loading = true; void load(); } }} />
+		<InlineBanner>{loadError}{#snippet actions()}<button class="st-btn" onclick={() => { loading = true; void load(); }}>Try again</button>{/snippet}</InlineBanner>
 	{:else if data}
-		{#if actionError}
-			<Banner severity="error" message={actionError} dismissible onDismiss={() => (actionError = null)} />
-		{/if}
-
+		{#if actionError}<InlineBanner>{actionError}{#snippet actions()}<button class="st-btn" onclick={() => (actionError = null)}>Dismiss</button>{/snippet}</InlineBanner>{/if}
 		{#if $isAdmin && missingOnline.length > 0}
-			{@const names = nameList(missingOnline.map((w) => w.device_name))}
-			<div class="pw-callout" role="status">
-				<p><b>{names} {missingOnline.length === 1 ? "doesn't" : "don't"} have this project yet.</b> Set it up there and you can start chats on {names} too.</p>
-				<button type="button" class="pc-btn pc-btn--primary pc-btn--sm" onclick={setUpAllMissing} disabled={missingOnline.some((w) => busy[w.install_id])}>
-					Set up on all missing
-				</button>
-			</div>
+			{@const names = nameList(missingOnline.map(w => w.device_name))}
+			<InlineBanner tone="info">{names} {missingOnline.length === 1 ? "doesn't" : "don't"} have this project yet. Set it up there to start chats on {names} too.
+				{#snippet actions()}<button class="st-btn" onclick={setUpAllMissing} disabled={missingOnline.some(w => busy[w.install_id])}>Set up on all missing</button>{/snippet}
+			</InlineBanner>
 		{/if}
-
-		{#if workers.length === 0}
-			<div class="pw-empty">
-				<FolderOpen size={30} strokeWidth={1.25} />
-				<p>No other workers in this network yet. Pair one in Settings → Workers to run this project there too.</p>
-			</div>
+		{#if !workers.length}<EmptyDetail title="No other workers" message="Pair a worker in Settings to run this project there too." />
 		{:else}
-			<div class="pw-grid">
-				{#each workers as w (w.install_id)}
-					{@const running = isRunning(w)}
-					{@const has = hasProject(w.state)}
-					{@const failed = w.state === 'failed'}
-					{@const missing = !running && !has && !failed && (w.state === 'missing' || w.state === 'offline_missing')}
-					{@const action = failed ? errorAction(w.setup?.error_code, w.device_name) : null}
-					<article
-						id="pw-card-{w.install_id}"
-						class="pw-card"
-						class:pw-card--missing={missing || w.state === 'queued_offline'}
-						class:pw-card--failed={failed}
-						tabindex="-1"
-						aria-labelledby="pw-name-{w.install_id}"
-						data-worker-state={w.state}
-					>
-						<header class="pw-top">
-							<b id="pw-name-{w.install_id}">{w.device_name}</b>
-							{#if w.is_self}<span class="pw-tag">this worker</span>{/if}
-							<span class="sp"></span>
-							<span class="pw-pres" class:off={!w.online}>
-								<i aria-hidden="true"></i>{w.online ? 'online' : ['offline', seenAgo(w.last_seen)].filter(Boolean).join(' · ')}
-							</span>
-						</header>
-
-						{#if running}
-							{@const p = w.setup?.progress}
-							<div class="pw-state pw-state--busy">
-								<Loader2 size={14} class="pw-spin" aria-hidden="true" />
-								{kind === 'folder' ? 'Setting up…' : 'Cloning…'}{#if typeof p === 'number'} {Math.round(p)}%{/if}
-							</div>
-							<div
-								class="pw-bar"
-								class:indeterminate={typeof p !== 'number'}
-								role="progressbar"
-								aria-label="Setting up on {w.device_name}"
-								aria-valuemin={0}
-								aria-valuemax={100}
-								aria-valuenow={typeof p === 'number' ? Math.round(p) : undefined}
-							><i style:width={typeof p === 'number' ? `${Math.max(3, Math.min(100, p))}%` : undefined}></i></div>
-							<p class="pw-hint">You can leave this page; it keeps going on {w.device_name}.</p>
-							{#if $isAdmin && w.setup?.op_id}
-								<div class="pw-acts">
-									<button type="button" class="pc-btn pc-btn--sm" onclick={() => cancel(w)} disabled={busy[w.install_id]}>Cancel</button>
-								</div>
+			{#each workers as w (w.install_id)}
+				{@const running = isRunning(w)}
+				{@const has = hasProject(w.state)}
+				{@const failed = w.state === 'failed'}
+				{@const action = failed ? errorAction(w.setup?.error_code, w.device_name) : null}
+				<article id="pw-card-{w.install_id}" tabindex="-1" aria-label={w.device_name} data-worker-state={w.state}>
+					{#snippet statusDetail()}
+						{#if w.state === 'queued_offline'}<p class="project-muted">It sets up when {w.device_name} comes back online.</p>
+						{:else if w.state === 'unknown'}<p class="project-muted">{w.device_name} is online but didn't answer. It may still have this project.</p>
+						{:else if failed}<p class="project-error">{failureReason(w)}</p>{/if}
+					{/snippet}
+					<RowGroup title={w.device_name}>
+						<SettingRow label="Status" hint={[w.is_self ? 'This worker' : '', w.online ? 'Online' : ['Offline', seenAgo(w.last_seen)].filter(Boolean).join(' · ')].filter(Boolean).join(' · ')} expanded={w.state === 'queued_offline' || w.state === 'unknown' || failed ? statusDetail : undefined}>
+							<span class:project-error={failed} class="project-muted">{running ? (kind === 'folder' ? 'Setting up…' : 'Cloning…') : has ? 'Ready' : w.state === 'queued_offline' ? `Waiting for ${w.device_name}` : failed ? (kind === 'folder' ? "Couldn't set it up" : "Couldn't clone") : w.state === 'unknown' ? `Couldn't check ${w.device_name}` : `Not set up ${w.is_self ? 'on this worker' : 'here'}`}</span>
+							{#if running}
+								{@const p = w.setup?.progress}
+								<progress class="project-progress" max="100" value={typeof p === 'number' ? p : undefined} aria-label="Setting up on {w.device_name}"></progress>
 							{/if}
-						{:else if has}
-							<div class="pw-state pw-state--ok"><Check size={14} strokeWidth={2.4} aria-hidden="true" />Ready</div>
-							{#if w.folder || branchLine(w)}
-								<dl class="pw-kv">
-									{#if w.folder}<dt>Folder</dt><dd><code>{w.folder}</code></dd>{/if}
-									{#if branchLine(w)}<dt>Branch</dt><dd><code>{branchLine(w)}</code></dd>{/if}
-								</dl>
-							{/if}
-							<div class="pw-acts">
-								{#if w.online}
-									<button type="button" class="pc-btn pc-btn--sm pc-btn--ghost" onclick={() => newChatHere(w)}>
-										<MessageSquarePlus size={13} strokeWidth={1.8} aria-hidden="true" />New chat here
-									</button>
-								{/if}
-								{#if $isAdmin && (w.online || w.is_self)}
-									{#if confirmingRemove === w.install_id}
-										<span class="pw-confirm">Remove from {w.device_name}? Its files stay.</span>
-										<button type="button" class="pc-btn pc-btn--sm" onclick={() => (confirmingRemove = null)} disabled={busy[w.install_id]}>Cancel</button>
-										<button type="button" class="pc-btn pc-btn--sm pc-btn--danger" onclick={() => remove(w)} disabled={busy[w.install_id]}>
-											{#if busy[w.install_id]}<Loader2 size={13} class="pw-spin" />{/if}Remove
-										</button>
-									{:else}
-										<button type="button" class="pc-btn pc-btn--sm pc-btn--ghost pc-btn--danger-text" onclick={() => (confirmingRemove = w.install_id)}>
-											<Trash2 size={13} strokeWidth={1.8} aria-hidden="true" />Remove from {w.device_name}
-										</button>
-									{/if}
-								{/if}
-							</div>
-						{:else if w.state === 'queued_offline'}
-							<div class="pw-state pw-state--mut"><Loader2 size={14} class="pw-spin pw-spin--slow" aria-hidden="true" />Waiting for {w.device_name}</div>
-							<p class="pw-hint">It sets up when {w.device_name} comes back online.</p>
-							{#if $isAdmin && w.setup?.op_id}
-								<div class="pw-acts">
-									<button type="button" class="pc-btn pc-btn--sm pc-btn--ghost" onclick={() => cancel(w)} disabled={busy[w.install_id]}>Withdraw</button>
-								</div>
-							{/if}
-						{:else if w.state === 'unknown'}
-							<div class="pw-state pw-state--mut">Couldn't check {w.device_name}</div>
-							<p class="pw-hint">{w.device_name} is online but didn't answer. It may still have this project.</p>
-							<div class="pw-acts">
-								<button type="button" class="pc-btn pc-btn--sm pc-btn--ghost" onclick={() => load()}><RotateCw size={13} aria-hidden="true" />Check again</button>
-							</div>
-						{:else}
-							{#if failed}
-								<div class="pw-state pw-state--err"><X size={14} strokeWidth={2.4} aria-hidden="true" />{kind === 'folder' ? "Couldn't set it up" : "Couldn't clone"}</div>
-								<p class="pw-hint pw-hint--fg">{failureReason(w)}</p>
-							{:else}
-								<div class="pw-state pw-state--mut">Not set up {w.is_self ? 'on this worker' : 'here'}</div>
-							{/if}
+						</SettingRow>
+						{#if has || running}
+							<SettingRow label="Folder" hint={w.folder || folders[w.install_id] || w.suggested_folder || 'Not reported'} hintMono />
+							{#if kind === 'git'}<SettingRow label="Branch" hint={branchLine(w) || (running ? 'Pending setup' : 'Not reported')} />{/if}
+						{:else if w.state !== 'queued_offline' && w.state !== 'unknown'}
 							{#if $isAdmin && w.online}
-								<label class="pw-field" for="pw-folder-{w.install_id}">
-									<span>{adopting[w.install_id] ? `Folder already on ${w.device_name}` : `Folder on ${w.device_name}`}</span>
-									<input
-										id="pw-folder-{w.install_id}"
-										type="text"
-										class="pw-input"
-										bind:value={folders[w.install_id]}
-										placeholder={w.suggested_folder ?? data.default_folder}
-										spellcheck="false"
-										autocomplete="off"
-										onkeydown={(e) => { if (e.key === 'Enter') setUp(w, adopting[w.install_id] ? 'adopt' : 'auto'); }}
-									/>
-									<span class="pw-hint">{setupHint(w)}</span>
-								</label>
-							{:else if !w.online}
-								<p class="pw-hint">Turn {w.device_name} on to set it up — or queue it and it runs when {w.device_name} comes back.</p>
-							{/if}
-							{#if githubHelp === w.install_id}
-								<p class="pw-help" role="note">
-									<Github size={13} aria-hidden="true" />
-									On {w.device_name}, open AI Shuffle, go to Settings → Integrations → GitHub and sign in. Then press Retry here.
-								</p>
-							{/if}
-							{#if $isAdmin}
-								<div class="pw-acts">
-									{#if !w.online}
-										<button type="button" class="pc-btn pc-btn--sm" onclick={() => setUp(w)} disabled={busy[w.install_id]}>
-											{#if busy[w.install_id]}<Loader2 size={13} class="pw-spin" />{/if}Set up when online
-										</button>
-									{:else if failed}
-										{#if action}
-											<button type="button" class="pc-btn pc-btn--sm" onclick={() => onErrorAction(w)}>{action.label}</button>
-										{/if}
-										<button type="button" class="pc-btn pc-btn--sm pc-btn--ghost" onclick={() => setUp(w)} disabled={busy[w.install_id]}>
-											{#if busy[w.install_id]}<Loader2 size={13} class="pw-spin" />{:else}<RotateCw size={13} aria-hidden="true" />{/if}Retry
-										</button>
-									{:else if adopting[w.install_id]}
-										<button type="button" class="pc-btn pc-btn--primary pc-btn--sm" onclick={() => setUp(w, 'adopt')} disabled={busy[w.install_id] || !(folders[w.install_id] ?? '').trim()}>
-											{#if busy[w.install_id]}<Loader2 size={13} class="pw-spin" />{/if}Use this folder
-										</button>
-										<button type="button" class="pc-btn pc-btn--sm pc-btn--ghost" onclick={() => (adopting = { ...adopting, [w.install_id]: false })}>Back</button>
-									{:else}
-										<button type="button" class="pc-btn pc-btn--primary pc-btn--sm" onclick={() => setUp(w)} disabled={busy[w.install_id]}>
-											{#if busy[w.install_id]}<Loader2 size={13} class="pw-spin" />{/if}Set up {placeName(w)}
-										</button>
-										<button type="button" class="pc-btn pc-btn--sm pc-btn--ghost" onclick={() => { adopting = { ...adopting, [w.install_id]: true }; void tick().then(() => focusFolder(w.install_id)); }}>
-											Use a folder already there…
-										</button>
-									{/if}
-								</div>
-							{/if}
+								<SettingRow label={adopting[w.install_id] ? `Folder already on ${w.device_name}` : `Folder on ${w.device_name}`} hint={setupHint(w)}>
+									{#snippet expanded()}
+										<form id="pw-folder-{w.install_id}" onsubmit={(e) => { e.preventDefault(); setUp(w, adopting[w.install_id] ? 'adopt' : 'auto'); }}>
+											<TextField onkeydown={(e) => { if (e.key === 'Enter') { e.preventDefault(); setUp(w, adopting[w.install_id] ? 'adopt' : 'auto'); } }} value={folders[w.install_id] ?? ''} oninput={(v) => (folders = { ...folders, [w.install_id]: v })} mono width={600} placeholder={w.suggested_folder ?? data?.default_folder} label={adopting[w.install_id] ? `Folder already on ${w.device_name}` : `Folder on ${w.device_name}`} disabled={busy[w.install_id]} />
+										</form>
+									{/snippet}
+								</SettingRow>
+							{:else if !w.online}<SettingRow label="Worker offline" hint={`Turn ${w.device_name} on to set it up — or queue it and it runs when ${w.device_name} comes back.`} />{/if}
 						{/if}
-					</article>
-				{/each}
-			</div>
-			<p class="pw-foot">Each worker keeps its own copy and clones with its own GitHub sign-in. Removing a project from a worker never deletes its files.</p>
+						{#if githubHelp === w.install_id}<SettingRow label="GitHub sign-in" hint={`On ${w.device_name}, open AI Shuffle, go to Settings → Integrations → GitHub and sign in. Then press Retry here.`} />{/if}
+						<SettingRow label="Actions" hint={confirmingRemove === w.install_id ? `Remove from ${w.device_name}? Its files stay.` : undefined}>
+							{#if running && $isAdmin && w.setup?.op_id}<button class="st-btn" onclick={() => cancel(w)} disabled={busy[w.install_id]}>Cancel</button>
+							{:else if has}
+								{#if w.online}<button class="st-btn" onclick={() => newChatHere(w)}><MessageSquarePlus />New chat here</button>{/if}
+								{#if $isAdmin && !w.is_self && w.online}
+									{#if confirmingRemove === w.install_id}<button class="st-btn" onclick={() => (confirmingRemove = null)} disabled={busy[w.install_id]}>Cancel</button><button class="st-btn danger" onclick={() => remove(w)} disabled={busy[w.install_id]}>{busy[w.install_id] ? 'Removing…' : 'Remove'}</button>
+									{:else}<button class="st-btn danger" onclick={() => (confirmingRemove = w.install_id)}>Remove project and chats from {w.device_name}</button>{/if}
+								{/if}
+							{:else if w.state === 'queued_offline' && $isAdmin && w.setup?.op_id}<button class="st-btn" onclick={() => cancel(w)} disabled={busy[w.install_id]}>Withdraw</button>
+							{:else if w.state === 'unknown'}<button class="st-btn" onclick={() => load()}><RotateCw />Check again</button>
+							{:else if !running && $isAdmin}
+								{#if !w.online}<button class="st-btn" onclick={() => setUp(w)} disabled={busy[w.install_id]}>Set up when online</button>
+								{:else if failed}
+									{#if action}<button class="st-btn" onclick={() => onErrorAction(w)}>{action.label}</button>{/if}<button class="st-btn" onclick={() => setUp(w)} disabled={busy[w.install_id]}><RotateCw />Retry</button>
+								{:else if adopting[w.install_id]}<button class="st-btn primary" onclick={() => setUp(w, 'adopt')} disabled={busy[w.install_id] || !(folders[w.install_id] ?? '').trim()}>Use this folder</button><button class="st-btn" onclick={() => (adopting = { ...adopting, [w.install_id]: false })}>Back</button>
+								{:else}<button class="st-btn primary" onclick={() => setUp(w)} disabled={busy[w.install_id]}>Set up {placeName(w)}</button><button class="st-btn" onclick={() => { adopting = { ...adopting, [w.install_id]: true }; void tick().then(() => focusFolder(w.install_id)); }}>Use a folder already there…</button>{/if}
+							{/if}
+						</SettingRow>
+					</RowGroup>
+				</article>
+			{/each}
+			<p class="st-footnote">Each worker keeps its own copy and clones with its own GitHub sign-in. Removing a project from a worker leaves its files on disk. You can leave this page; setup keeps going on the worker.</p>
 		{/if}
 	{/if}
 </div>
-
-<style>
-	.pw { display: flex; flex-direction: column; gap: 12px; padding-top: 14px; }
-	.pw-callout {
-		display: flex;
-		align-items: center;
-		gap: 12px;
-		flex-wrap: wrap;
-		padding: 11px 13px;
-		border: 1px solid color-mix(in oklch, var(--primary) 35%, transparent);
-		background: color-mix(in oklch, var(--primary) 8%, transparent);
-		border-radius: calc(var(--radius, 0.75rem) - 1px);
-		font-size: 0.8125rem;
-		color: var(--foreground);
-	}
-	.pw-callout p { flex: 1; min-width: 200px; margin: 0; }
-
-	.pw-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 10px; align-items: start; }
-	.pw-card {
-		display: flex;
-		flex-direction: column;
-		gap: 8px;
-		min-width: 0;
-		padding: 13px 14px;
-		border: 1px solid var(--border);
-		border-radius: var(--radius, 0.75rem);
-		background: var(--card);
-		transition: border-color 160ms ease, box-shadow 160ms ease;
-	}
-	.pw-card:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
-	.pw-card--missing { border-style: dashed; background: transparent; }
-	.pw-card--failed { border-color: color-mix(in oklab, var(--destructive) 40%, var(--border)); }
-	.pw-skel { min-height: 132px; background: linear-gradient(90deg, var(--card), var(--hover-overlay), var(--card)); background-size: 200% 100%; animation: pw-shimmer 1.4s ease-in-out infinite; }
-
-	.pw-top { display: flex; align-items: center; gap: 8px; min-width: 0; }
-	.pw-top b { font-size: 0.875rem; font-weight: 650; color: var(--foreground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-	.pw-top .sp { flex: 1; }
-	.pw-tag { flex: none; font-size: 0.6875rem; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted-foreground); }
-	.pw-pres { flex: none; display: inline-flex; align-items: center; gap: 5px; font-size: 0.72rem; color: var(--muted-foreground); white-space: nowrap; }
-	.pw-pres i { width: 7px; height: 7px; border-radius: 50%; background: var(--success); }
-	.pw-pres.off i { background: var(--muted-foreground); }
-
-	.pw-state { display: flex; align-items: center; gap: 6px; font-size: 0.8rem; font-weight: 600; }
-	.pw-state--ok { color: var(--success); }
-	.pw-state--mut { color: var(--muted-foreground); font-weight: 500; }
-	.pw-state--err { color: var(--destructive); }
-	.pw-state--busy { color: var(--primary); }
-
-	.pw-kv { display: grid; grid-template-columns: 58px minmax(0, 1fr); gap: 3px 8px; margin: 0; font-size: 0.75rem; color: var(--muted-foreground); }
-	.pw-kv dd { margin: 0; min-width: 0; }
-	.pw-kv code { font-family: var(--font-mono, monospace); font-size: 0.72rem; color: var(--foreground); word-break: break-all; }
-
-	.pw-bar { position: relative; height: 5px; border-radius: 99px; overflow: hidden; background: color-mix(in oklch, var(--primary) 18%, transparent); }
-	.pw-bar i { display: block; height: 100%; border-radius: 99px; background: var(--primary); transition: width 400ms ease; }
-	.pw-bar.indeterminate i { position: absolute; width: 35%; animation: pw-indeterminate 1.3s ease-in-out infinite; }
-
-	.pw-hint { margin: 0; font-size: 0.72rem; line-height: 1.45; color: var(--muted-foreground); }
-	.pw-hint--fg { color: var(--foreground); font-size: 0.78rem; }
-	.pw-help { display: flex; gap: 6px; align-items: flex-start; margin: 0; padding: 8px 10px; border-radius: 8px; background: var(--hover-overlay); font-size: 0.75rem; color: var(--foreground); }
-	.pw-field { display: flex; flex-direction: column; gap: 4px; font-size: 0.75rem; color: var(--muted-foreground); }
-	.pw-input {
-		width: 100%;
-		min-height: 32px;
-		padding: 6px 9px;
-		border: 1px solid var(--border);
-		border-radius: 8px;
-		background: var(--background);
-		color: var(--foreground);
-		font-family: var(--font-mono, monospace);
-		font-size: 0.75rem;
-		outline: none;
-		transition: border-color 120ms ease, box-shadow 120ms ease;
-	}
-	.pw-input:focus { border-color: var(--ring); box-shadow: 0 0 0 2px color-mix(in oklch, var(--ring) 15%, transparent); }
-
-	.pw-acts { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 2px; }
-	.pw-confirm { font-size: 0.75rem; color: var(--foreground); }
-	.pw-empty { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 40px 20px; text-align: center; color: var(--muted-foreground); font-size: 0.8rem; }
-	.pw-empty p { max-width: 380px; margin: 0; }
-	.pw-foot { margin: 2px 0 0; font-size: 0.72rem; color: var(--muted-foreground); }
-
-	/* Buttons: the Studio-v2 .pc-btn look (ProjectCard's are scoped there). */
-	.pc-btn {
-		display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 11px;
-		background: var(--card); color: var(--foreground);
-		border: 1px solid var(--border); border-radius: calc(var(--radius, 0.75rem) - 3px);
-		font: inherit; font-size: 0.78rem; font-weight: 500; cursor: pointer; white-space: nowrap;
-		transition: background-color 120ms ease, border-color 120ms ease, filter 120ms ease;
-	}
-	.pc-btn:hover:not(:disabled) { background: var(--hover-overlay); }
-	.pc-btn:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
-	.pc-btn:disabled { opacity: 0.55; cursor: not-allowed; }
-	.pc-btn--primary { background: var(--primary); color: var(--primary-foreground); border-color: transparent; }
-	.pc-btn--primary:hover:not(:disabled) { filter: brightness(1.08); background: var(--primary); }
-	.pc-btn--ghost { background: transparent; }
-	.pc-btn--danger { color: var(--destructive); border-color: color-mix(in oklab, var(--destructive) 35%, var(--border)); }
-	.pc-btn--danger-text { color: var(--destructive); }
-	.pc-btn--danger:hover:not(:disabled), .pc-btn--danger-text:hover:not(:disabled) { background: color-mix(in oklch, var(--destructive) 12%, transparent); }
-
-	:global(.pw-spin) { animation: pw-spin 0.9s linear infinite; }
-	:global(.pw-spin--slow) { animation-duration: 2.4s; }
-	@keyframes pw-spin { to { transform: rotate(360deg); } }
-	@keyframes pw-indeterminate { from { left: -35%; } to { left: 100%; } }
-	@keyframes pw-shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
-
-	@media (max-width: 639px) {
-		.pw-grid { grid-template-columns: 1fr; }
-		.pc-btn { height: 36px; }
-	}
-	@media (prefers-reduced-motion: reduce) {
-		:global(.pw-spin), .pw-skel, .pw-bar.indeterminate i { animation: none; }
-		.pw-bar.indeterminate i { left: 0; width: 100%; opacity: 0.5; }
-	}
-</style>

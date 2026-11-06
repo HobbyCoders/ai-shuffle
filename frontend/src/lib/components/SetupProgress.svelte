@@ -34,7 +34,7 @@
 	.number { display: flex; align-items: center; justify-content: center; width: 1.75rem; height: 1.75rem; flex: none; border-radius: 50%; background: var(--muted); font-size: .75rem; font-weight: 600; }
 	.label { max-width: 100%; overflow-wrap: anywhere; font-size: .75rem; line-height: 1.35; }
 	li[aria-current] { color: var(--foreground); font-weight: 600; }
-	li[aria-current] .number { background: var(--primary); color: var(--primary-foreground); }
+	li[aria-current] .number { background: var(--action); color: var(--action-foreground); }
 	li.complete .number { background: var(--success); color: var(--success-foreground); }
 	.caption { display: none; margin: .6rem 0 0; text-align: center; font-size: .75rem; font-weight: 600; color: var(--foreground); }
 	/* Seven steps do not fit a phone with every label: the caption names the

@@ -60,6 +60,16 @@ def _created(db):
     return db.create_session.call_args.kwargs
 
 
+def test_disposable_test_is_hidden_at_birth_and_retains_owner_scope(client, db, api_user):
+    response = client.post("/api/v1/sessions", json={"profile_id": "agent-b", "disposable_test": True})
+    assert response.status_code == 200
+    assert _created(db)["hidden"] is True
+    db.create_session.reset_mock()
+    api_user.return_value = {"id": "api-user"}
+    assert client.post("/api/v1/sessions", json={"disposable_test": True}).status_code == 403
+    db.create_session.assert_not_called()
+
+
 def test_creates_a_projectless_conversation_with_the_composer_picks(client, db):
     response = client.post("/api/v1/sessions", json={
         "profile_id": "agent-b",

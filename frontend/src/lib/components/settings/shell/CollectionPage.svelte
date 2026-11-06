@@ -11,14 +11,17 @@
 	 * Selection lives in the navigation store per category (ListItem reads and
 	 * sets it). In stacked mode the list and the detail are separate steps.
 	 */
-	import { untrack, type Snippet } from 'svelte';
-	import { ChevronLeft, ListFilter, Plus, Search } from 'lucide-svelte';
+	import { tick, untrack, type Snippet } from 'svelte';
+	import { ListFilter, Plus, Search } from 'lucide-svelte';
+	import BackRow from './BackRow.svelte';
 	import { settingsNav } from '$lib/settings/navigation.svelte';
 	import { getSettingsAccess } from '$lib/settings/access.svelte';
 	import { categoryById } from '$lib/settings/categories';
 	import { clampListWidth, readListWidth } from '$lib/settings/list-width';
 	import type { CategoryId } from '$lib/settings/types';
 	import ListDivider from './ListDivider.svelte';
+	import PageTitle from './PageTitle.svelte';
+	import ListEmptyScope from './ListEmptyScope.svelte';
 
 	interface Props {
 		/** Settings category; pages outside Settings pass `title` instead. */
@@ -43,6 +46,11 @@
 		onBack?: (() => void) | null;
 		/** Accessible name of the list region. */
 		listLabel?: string;
+		/**
+		 * Opening an item replaces the list at every width, with the detail's back
+		 * control returning to it (what stacked mode does on a phone).
+		 */
+		replaceOnSelect?: boolean;
 		list: Snippet;
 		detail: Snippet;
 	}
@@ -61,6 +69,7 @@
 		filters,
 		onBack,
 		listLabel,
+		replaceOnSelect = false,
 		list,
 		detail
 	}: Props = $props();
@@ -72,6 +81,38 @@
 	);
 
 	let el: HTMLDivElement | undefined = $state();
+	const openItem = $derived(category ? settingsNav.selectedItem(category) : null);
+
+	// The open detail scrolls on its own beside the list, so a newly picked item
+	// starts at its top rather than where the previous item was scrolled to.
+	let pane: HTMLElement | undefined = $state();
+	let lastScrolled: string | null | undefined;
+	$effect(() => {
+		const current = openItem ?? null;
+		if (lastScrolled !== undefined && lastScrolled !== current) pane?.scrollTo?.({ top: 0 });
+		lastScrolled = current;
+	});
+
+	// The list and the detail swap in place, so focus has to move with them:
+	// into the detail's title, or back to the row it was opened from.
+	let lastOpen: string | null | undefined;
+	$effect(() => {
+		const current = openItem ?? null;
+		const previous = lastOpen;
+		lastOpen = current;
+		if (!replaceOnSelect || settingsNav.stacked || previous === undefined || previous === current) return;
+		void tick().then(() => {
+			const row = [...(el?.querySelectorAll<HTMLElement>('[data-settings-item]') ?? [])].find(
+				(item) => item.dataset.settingsItem === previous
+			);
+			const target = current
+				? el?.querySelector<HTMLElement>('[data-settings-heading="detail"]')
+				: row?.matches('[data-settings-nav-item]')
+					? row
+					: row?.querySelector<HTMLElement>('[data-settings-nav-item]');
+			target?.focus({ preventScroll: !current });
+		});
+	});
 	let width = $state(readListWidth());
 	let containerWidth = $state(0);
 
@@ -95,19 +136,18 @@
 	});
 </script>
 
-<div class="st-coll" bind:this={el} style:--st-list-width="{width}px">
+<div
+	class="st-coll"
+	bind:this={el}
+	style:--st-list-width="{width}px"
+	data-replace={replaceOnSelect ? (openItem ? 'detail' : 'list') : undefined}
+>
 	<ListDivider bind:width {containerWidth} />
 	<div class="st-lcol">
 		<div class="st-lhead">
-			<div class="st-lh-top">
-				{#if onBack !== null}
-					<button type="button" class="st-back" aria-label="Back to Settings" onclick={() => (onBack ? onBack() : settingsNav.back())}>
-						<ChevronLeft />
-					</button>
-				{/if}
-				<h1 tabindex="-1" data-settings-heading="page">{label}</h1>
-				{#if count !== undefined && count !== ''}<span class="n">{count}</span>{/if}
-				<span class="sp"></span>
+			{#if onBack !== null}<BackRow label="Settings" onclick={() => (onBack ? onBack() : settingsNav.back())} />{/if}
+			<PageTitle title={label} {count}>
+				{#snippet actions()}
 				{#if addLabel}
 					<button
 						type="button"
@@ -119,7 +159,8 @@
 						<Plus /><span class="st-add-l">{addLabel}</span>
 					</button>
 				{/if}
-			</div>
+				{/snippet}
+			</PageTitle>
 			{#if toolbar}<div class="st-ltools">{@render toolbar()}</div>{/if}
 			{#if placeholder !== null}
 				<label class="st-filter">
@@ -131,10 +172,10 @@
 			{#if filters}<div class="st-lfilters">{@render filters()}</div>{/if}
 		</div>
 		<div class="st-lscroll st-scroll" data-settings-list role={listLabel ? 'region' : undefined} aria-label={listLabel}>
-			{@render list()}
+			<ListEmptyScope>{@render list()}</ListEmptyScope>
 		</div>
 	</div>
-	<section class="st-dpane st-scroll" aria-label="Details">
+	<section class="st-dpane st-scroll" aria-label="Details" bind:this={pane}>
 		{@render detail()}
 	</section>
 </div>
@@ -158,35 +199,14 @@
 		min-width: 0;
 	}
 	.st-lhead {
-		padding: 32px 14px 10px 16px;
-		display: grid;
-		gap: 12px;
-	}
-	.st-lh-top {
+		position: relative;
+		padding: var(--st-page-top) 8px 12px;
 		display: flex;
-		align-items: center;
-		gap: 10px;
-		min-height: 32px;
+		flex-direction: column;
 	}
-	h1 {
-		font-size: 22px;
-		font-weight: 600;
-		letter-spacing: -0.012em;
-		margin: 0;
-		white-space: nowrap;
-	}
-	h1:focus {
-		outline: none;
-	}
-	.n {
-		color: var(--st-subtle);
-		font-size: 13px;
-		font-variant-numeric: tabular-nums;
-		white-space: nowrap;
-	}
-	.sp {
-		flex: 1;
-	}
+	.st-lhead > :global(.st-page-title) { padding-left: 12px; }
+	.st-filter + .st-lfilters, .st-ltools + .st-filter { margin-top: 12px; }
+
 	.st-add {
 		flex-shrink: 0;
 	}
@@ -225,9 +245,9 @@
 		gap: 8px;
 		height: 32px;
 		border: 1px solid var(--st-input);
-		background: var(--st-muted);
+		background: var(--st-field);
 		border-radius: var(--st-radius-md);
-		padding: 0 10px;
+		padding: 0 10px 0 11px;
 		color: var(--st-mfg);
 		min-width: 0;
 	}
@@ -251,10 +271,8 @@
 	.st-filter input::placeholder {
 		color: var(--st-subtle);
 	}
-	.st-filter:focus-within {
-		border-color: var(--st-primary);
-		box-shadow: 0 0 0 3px var(--st-primary-soft);
-	}
+	.st-filter:focus-within { outline: 1.5px solid color-mix(in srgb, var(--ring) 60%, transparent); outline-offset: 1px; }
+	.st-filter input, .st-filter input:focus, .st-filter input:focus-visible { border: 0; outline: none; box-shadow: none; }
 	.st-lscroll {
 		flex: 1;
 		overflow-y: auto;

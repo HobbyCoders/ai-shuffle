@@ -2,68 +2,78 @@
 	/**
 	 * SessionCard — one ledger row in the sidebar.
 	 *
-	 * Every row leads with ONE glyph in a fixed left column: where the branch
-	 * sits between edit and merge (see `deriveGitStage`). The session's own
-	 * runtime state rides on the title — a pulsing dot while it works, an amber
-	 * warning when it is parked on a prompt.
+	 * Every row reads at a glance, without hovering, and every row is two lines,
+	 * so a row never changes height when it starts or stops working.
 	 *
-	 * Active card (three lines):
-	 *   L1  glyph · title · total working time
-	 *   L2  project · status word · PR state · diffstat
-	 *   L3  device icon · branch
+	 * A fixed state column runs down the left of every row in every lane, and it
+	 * alone says what the row is doing: no status word is printed anywhere. Runtime
+	 * state wins the column, and each state has its own shape, so none of them
+	 * leans on hue or on motion alone: a pulsing dot while working, a flat bar
+	 * squeezing slowly while compacting, a hollow ring while parked on background
+	 * work, an amber diamond when it waits on someone, a red cross when it failed,
+	 * an unplugged glyph when its worker is offline. Otherwise it shows where the
+	 * branch sits between edit and merge (see `deriveGitStage`), and an idle row
+	 * leaves it empty but keeps its width. The exact word is the mark's hover title.
 	 *
-	 * Settled row (compact, two lines):
-	 *   L1  glyph · title · total working time (age in the hover title)
-	 *   L2  device icon · git-state word · branch
+	 * Line one is the title and the total working time, always in one neutral tone.
+	 * Only a row that is working right now ticks seconds; every other row shows
+	 * whole minutes and keeps the exact value in the hover title, so titles get the
+	 * room. Line two is one calm line of facts: PR state, diffstat, then branch, the
+	 * only segment that gives way. A row with no facts shows its age, so the line is
+	 * never blank. The Settled lane is the same row, quieter: colour only on the PR.
+	 *
+	 * The state word and line two are hidden from screen readers; `.details` says
+	 * them once, in order, with the several-PR chip speaking for itself. The row's
+	 * hover tip sits on `.body`, not on the button, so it is not read out again as
+	 * the button's description.
 	 *
 	 * Inbox gestures. A touch or pen swipe LEFT settles an active row (moves a
-	 * settled one back to Active, restores an archived one); a swipe RIGHT
-	 * archives. Past 40% of
+	 * settled one back to Active); a swipe RIGHT is inert. Past 40% of
 	 * the row the lane goes solid and letting go commits; a fast flick commits
 	 * too. The row then slides out and folds away. A press-and-hold starts
 	 * selection, where a tap toggles the row's checkmark. A mouse never
 	 * swipes: on a pointer that hovers, the same actions sit at the row's right
-	 * edge on hover. Archive offers Undo; Settle does not, since a settled
+	 * edge on hover. Settle has no Undo, since a settled
 	 * session is one tap from Active. Rename, Fork, and Delete
 	 * live on the header session-title menu.
 	 */
 	import { untrack } from 'svelte';
 	import {
-		Archive,
-		ArchiveRestore,
 		ArrowUpFromLine,
 		Check,
-		Cloud,
 		Diff,
 		GitCommitHorizontal,
 		GitMerge,
 		GitPullRequest,
 		GitPullRequestClosed,
-		MessageSquare,
 		Monitor,
-		TriangleAlert,
-		Undo2
+		Undo2,
+		Unplug
 	} from 'lucide-svelte';
 	import type { Session } from '$lib/api/client';
+
+	/** Every status mark on a row is drawn at this one size and weight. */
+	const MARK_SIZE = 14;
+	const MARK_STROKE = 1.5;
+
 	import { appData } from '$lib/stores/app-data.svelte';
 	import { git } from '$lib/stores/git.svelte';
 	import { sessionGitState } from '$lib/stores/session-git-state.svelte';
 	import { notify } from '$lib/stores/notifications';
 	import { platform } from '$lib/stores/platform.svelte';
 	import {
-		GIT_STAGE_LABELS,
 		GIT_STAGE_TONES,
 		GIT_STAGE_TIPS,
-		RUNTIME_STATUS_TONES,
 		runtimeStatusWord,
 		deriveGitStage,
 		diffCounts,
 		isAttentionStatus,
 		isLiveStatus,
-		isTurnLiveStatus,
 		isWorkCountingStatus,
+		gitProgressWord,
 		sessionWorkMs,
-		formatElapsed,
+		formatExactElapsed,
+		formatRowTime,
 		formatAge,
 		deviceLabel,
 		branchLabel,
@@ -89,7 +99,7 @@
 		/** True when this session is the one open in the main panel. */
 		active?: boolean;
 		/** Its conversation is being compacted right now (known for the open
-		 *  session only): the status word reads "Compacting". */
+		 *  session only): the state mark and its word say so. */
 		compacting?: boolean;
 		/** Current clock (ms) supplied by the sidebar's shared ticker. */
 		now: number;
@@ -97,8 +107,11 @@
 		 *  ticking card never re-parses its date (R15). Falls back to parsing the
 		 *  row when the card is used standalone. */
 		timestamp?: number;
-		/** Two-line dense row — used for the settled/archived groups. */
+		/** The quieter, tighter row of the settled/archived groups. */
 		compact?: boolean;
+		/** The row is not under a project header in a list that spans several
+		 *  projects, so it has to name its own. */
+		showProject?: boolean;
 		/** The list is in selection mode: the lead glyph becomes a checkmark and
 		 *  a tap toggles it instead of opening the session. */
 		selecting?: boolean;
@@ -121,6 +134,7 @@
 		now,
 		timestamp,
 		compact = false,
+		showProject = false,
 		selecting = false,
 		selected = false,
 		onSelectToggle,
@@ -130,39 +144,45 @@
 	}: Props = $props();
 
 	const live = $derived(isLiveStatus(status));
-	// Only a turn holding the live slot ticks; a parked turn's interval has
-	// ended, so its timer takes the plain style, not the live accent.
-	const turnLive = $derived(isTurnLiveStatus(status));
-	// A parked session is still working on its background work, so its total
-	// keeps counting even though its timer keeps the plain style.
+	// Seconds tick only while the agent is working right now. A row waiting on
+	// someone or parked keeps counting toward its total, but nothing on it is
+	// happening by the second, and the title needs the room more.
+	const ticking = $derived(status === 'working');
+	// A parked session is still working on its background work, and a blocked
+	// turn still holds the live slot, so both totals keep counting.
 	const counting = $derived(isWorkCountingStatus(status));
 	const lastActivity = $derived(timestamp ?? sessionTimestamp(session));
 	// Every row shows the session's total working time, which survives Done
 	// and settling. A settled row that is idle keeps its age in the hover
 	// title, where it used to be the visible value.
-	const timer = $derived(formatElapsed(sessionWorkMs(session, now, counting, lastActivity)));
+	const workMs = $derived(sessionWorkMs(session, now, counting, lastActivity));
+	const timer = $derived(formatRowTime(workMs, ticking));
 	const timerTitle = $derived.by(() => {
-		if (!compact || live) return 'Total working time';
+		const total = `Total working time ${formatExactElapsed(workMs)}`;
+		if (!compact || live) return total;
 		const age = formatAge(Math.max(0, now - lastActivity));
-		return `Total working time · last activity ${age === 'now' ? 'just now' : `${age} ago`}`;
+		return `${total} · last activity ${age === 'now' ? 'just now' : `${age} ago`}`;
 	});
 	const title = $derived(session.title?.trim() || 'Untitled');
 	const device = $derived(deviceLabel(session));
 	const branch = $derived(branchLabel(session));
 	const statusWord = $derived(runtimeStatusWord(status, compacting));
-	const statusTone = $derived(RUNTIME_STATUS_TONES[status]);
 	const attention = $derived(isAttentionStatus(status));
-	// In-flight (working) rows that aren't the open session recede so the list
-	// triages at a glance; prompt-parked / PR / done rows stay prominent.
-	const receded = $derived(status === 'working' && !active);
+	const failed = $derived(status === 'failed');
+	const parked = $derived(status === 'parked');
+	const offline = $derived(status === 'offline');
+	// Only these rows speak up: the open one, and any that is running or waiting
+	// on someone.
+	const running = $derived(status === 'working' || parked);
+	const emphasized = $derived(active || running || attention || failed);
 
 	// ── Git state ───────────────────────────────────────────────────────
 	// The session open in the main panel already has its checkout loaded by the
 	// real git store; reading that costs nothing and stays in step with the
 	// header. Every OTHER active card leases a slow poll from the sidebar's own
-	// store. Settled rows lease nothing at all — they read `pr_state`.
+	// store. Settled rows lease nothing at all: they read `pr_state`, plus the
+	// last answer this tab already holds for the checkout, if any.
 	const openGit = $derived.by(() => {
-		if (compact) return null;
 		const current = git.current;
 		// Unhydrated values belong to the previous checkout, not this session.
 		if (!current?.hydrated) return null;
@@ -212,12 +232,10 @@
 	});
 
 	const gitStatus = $derived.by(() => {
-		if (compact) return null;
 		if (openGit) return openGit.status;
 		return sessionGitState.get(session.id, session.project_id ?? null, session.worktree_id ?? null)?.status ?? null;
 	});
 	const gitDiffStats = $derived.by(() => {
-		if (compact) return null;
 		if (openGit) return openGit.diffStats;
 		return sessionGitState.get(session.id, session.project_id ?? null, session.worktree_id ?? null)?.diffStats ?? null;
 	});
@@ -279,49 +297,55 @@
 	$effect(() => {
 		if (!multiPr) prListOpen = false;
 	});
-	/** Compact rows carry one git word; a PR names its number, the rest use the
-	 *  stage's own label ("uncommitted", "pushed", …). */
-	const stageWord = $derived(
-		(stage === 'pr' || stage === 'merged' || stage === 'closed') && prText
-			? prText
-			: GIT_STAGE_LABELS[stage]
-	);
 	// Diff counts belong to uncommitted work only — a merged branch's totals
-	// would read as "still to review".
-	const diff = $derived(gitStatus?.has_changes ? diffCounts(gitDiffStats) : null);
+	// would read as "still to review". A settled row says the word instead.
+	const diff = $derived(!compact && gitStatus?.has_changes ? diffCounts(gitDiffStats) : null);
+	const diffText = $derived(diff ? `${diff.plus} ${diff.minus}` : null);
+	// Numbers already say "uncommitted", so the word only stands in without them.
+	const progressWord = $derived(diff ? null : gitProgressWord(stage, !!gitStatus?.has_changes));
 
+	const remote = $derived(!!session.is_remote);
+	const whereText = $derived([showProject ? projectLabel : null, branch].filter(Boolean).join(' · ') || null);
+	// Nothing to report: the line holds the row's age (and its worker's name, with
+	// room to spell it) so its rhythm stays and it never goes blank.
+	const factless = $derived(!showPr && !diff && !progressWord && !whereText);
+	const ageText = $derived.by(() => {
+		if (!factless) return null;
+		const age = formatAge(Math.max(0, now - lastActivity));
+		return age === 'now' ? 'Just now' : `${age} ago`;
+	});
+	const fallbackText = $derived(factless ? [remote ? device : null, ageText].filter(Boolean).join(' · ') : null);
+
+	// The row's whole story, for the hover tip.
+	const rowFacts = $derived([statusWord, prText, progressWord, diffText, device, projectLabel, branch, ageText]);
+	const rowDetails = $derived(rowFacts.filter(Boolean).join(' · '));
+	const rowTip = $derived(`${title}\n${rowDetails}`);
+	// The same for a screen reader, which already hears the several-PR chip by name.
+	const rowSpeech = $derived(
+		rowFacts.filter((fact, i) => fact && !(multiPr && i === 1)).join(' · ')
+	);
+	// What the state column is showing, for whoever hovers it.
+	const runtimeMark = $derived(running || attention || failed || offline);
+	// A row whose checkout was never read has an empty column, not a clean tree:
+	// "no data" must not hover as "No changes".
+	const leadTip = $derived(runtimeMark ? statusWord : stage === 'clean' && !gitFacts ? null : stageTip);
+	// An offline worker's mark says nothing about the branch, so it takes no git colour.
+	const leadTone = $derived(offline ? 'muted' : stageTone);
+	// A row with no recorded work has no time worth a column.
+	const showTimer = $derived(counting || workMs >= 1000);
 
 	const actions = $derived(cardActions(session));
-	/** Hover order: Archive first, then the state toggle (or Restore). */
-	const hoverActions = $derived([...actions].sort((a, b) => (a === 'archive' ? -1 : b === 'archive' ? 1 : 0)));
-	/** What a left swipe does (the state toggle); a right swipe always archives. */
+	/** The single membership toggle is also available to assistive technology. */
+	const hoverActions = $derived(actions);
+	/** Left swipe toggles membership; right swipe never changes the session. */
 	const leftAction = $derived<CardAction>(
-		actions.includes('restore') ? 'restore' : session.is_active ? 'settle' : 'activate'
+		actions[0]
 	);
-	const canArchive = $derived(actions.includes('archive'));
 
 	const ACTION_META: Record<CardAction, { title: string; aria: string; label: string }> = {
 		settle: { title: 'Settle session', aria: 'Settle session', label: 'Settle' },
-		activate: { title: 'Move to Active', aria: 'Move session to Active', label: 'Move to Active' },
-		archive: { title: 'Archive session', aria: 'Archive session', label: 'Archive' },
-		restore: { title: 'Restore archived session', aria: 'Restore archived session', label: 'Restore' }
+		activate: { title: 'Move to Active', aria: 'Move session to Active', label: 'Move to Active' }
 	};
-
-	/** A short banner whose Undo reverts the change it reports. */
-	function offerUndo(message: string, undo: () => Promise<unknown>) {
-		const id = notify.banner(message, {
-			severity: 'info',
-			persist: false,
-			duration_ms: 6000,
-			action: {
-				label: 'Undo',
-				onClick: () => {
-					notify.dismissLive(id);
-					undo().catch((err) => reportFailure(err));
-				}
-			}
-		});
-	}
 
 	function reportFailure(err: unknown) {
 		// The server says why (owner offline, owner still syncing); pass that
@@ -335,7 +359,6 @@
 
 	async function commitAction(action: CardAction) {
 		const id = session.id;
-		const wasActive = !!session.is_active;
 		try {
 			switch (action) {
 				case 'settle':
@@ -346,13 +369,6 @@
 					break;
 				case 'activate':
 					await appData.setSessionActive(id, true);
-					break;
-				case 'archive':
-					await appData.setSessionArchived(id, true);
-					offerUndo(`Archived “${title}”`, () => appData.setSessionArchived(id, false, wasActive));
-					break;
-				case 'restore':
-					await appData.setSessionArchived(id, false);
 					break;
 			}
 		} catch (err) {
@@ -450,8 +466,9 @@
 			clearLongPress();
 			pressing = false;
 			const horizontal = Math.abs(dx) > Math.abs(dy);
-			const allowed = dx < 0 || canArchive;
+			const allowed = dx < 0;
 			if (!horizontal || pointerType === 'mouse' || selecting || !allowed) {
+				if (horizontal && pointerType !== 'mouse' && !selecting && !allowed) suppressNextClick = true;
 				pointerId = null;
 				return;
 			}
@@ -465,8 +482,8 @@
 		if (elapsed > 0) velocity = (event.clientX - lastX) / elapsed;
 		lastX = event.clientX;
 		lastT = t;
-		// A row that cannot archive only travels left.
-		if (!canArchive) dx = Math.min(0, dx);
+		// There is no action on a right swipe.
+		dx = Math.min(0, dx);
 		const lim = rowWidth * EASE_RATIO;
 		dragX = Math.abs(dx) <= lim ? dx : Math.sign(dx) * (lim + (Math.abs(dx) - lim) * 0.35);
 		lane = dx > 0 ? 'l' : dx < 0 ? 'r' : null;
@@ -498,7 +515,8 @@
 		const flick = Math.abs(velocity) > FLICK_VELOCITY && Math.abs(dx) > FLICK_MIN_DX;
 		if (dx !== 0 && (armed || flick)) {
 			const dir = dx < 0 ? -1 : 1;
-			slideOut(dir, dir < 0 ? leftAction : 'archive');
+			if (dir < 0) slideOut(dir, leftAction);
+			else springBack();
 		} else {
 			springBack();
 		}
@@ -600,23 +618,18 @@
 >
 	{#if lane}
 		<!-- Lane `l` is uncovered by a right swipe, lane `r` by a left one. -->
-		<div class="lane l archive" aria-hidden="true" class:on={lane === 'l'}>
-			<Archive size={20} strokeWidth={2} /><span>Archive</span>
-		</div>
 		<div class="lane r toggle" aria-hidden="true" class:on={lane === 'r'}>
 			{#if leftAction === 'settle'}
 				<span>Settle</span><Check size={20} strokeWidth={2} />
 			{:else if leftAction === 'activate'}
 				<span>Move to Active</span><Undo2 size={20} strokeWidth={2} />
-			{:else}
-				<span>Restore</span><ArchiveRestore size={20} strokeWidth={2} />
 			{/if}
 		</div>
 	{/if}
 	<div
 		class="scard"
 		class:active
-		class:receded
+		class:emphasized
 		class:compact
 		role="button"
 		tabindex="0"
@@ -624,117 +637,93 @@
 		aria-pressed={selecting ? selected : undefined}
 		onclick={openCard}
 		onkeydown={handleCardKeydown}
-		title={title}
 		style:transform={innerTransform}
 	>
+		{#snippet multiPrChip()}
+			<!-- The one control for the PR list: pointer, keyboard and
+			     screen readers all use the chip itself. -->
+			<button
+				bind:this={prChipRef}
+				type="button"
+				class="st pr pr-chip multi"
+				class:open={prListOpen}
+				title={`${prText} — show the list`}
+				aria-label={prListLabel}
+				aria-haspopup="dialog"
+				aria-expanded={prListOpen}
+				onclick={togglePrList}
+			>{#each prSummary?.parts ?? [] as part, i (part.state)}{#if i > 0}<span class="sep">{' · '}</span>{/if}<span class:green={part.state === 'open'} class:purple={part.state === 'merged'} class:muted={part.state === 'closed'}>{part.text}</span>{/each}</button>
+		{/snippet}
+
+		<!-- The state column. Every row has one, the same width in every lane, so
+		     the eye runs straight down it. `.details` says all of this in words. -->
 		{#if selecting}
 			<span class="check" aria-hidden="true">
 				{#if selected}<Check size={12} strokeWidth={3} />{/if}
 			</span>
 		{:else}
-		<span class="lead {stageTone}" role="img" title={stageTip} aria-label={stageTip}>
-			{#if stage === 'pr'}
-				<GitPullRequest size={14} strokeWidth={2} />
-			{:else if stage === 'merged'}
-				<GitMerge size={14} strokeWidth={2} />
-			{:else if stage === 'closed'}
-				<GitPullRequestClosed size={14} strokeWidth={2} />
-			{:else if stage === 'dirty'}
-				<Diff size={14} strokeWidth={2} />
-			{:else if stage === 'committed'}
-				<GitCommitHorizontal size={14} strokeWidth={2} />
-			{:else if stage === 'pushed'}
-				<ArrowUpFromLine size={14} strokeWidth={2} />
-			{:else if stage === 'none'}
-				<MessageSquare size={14} strokeWidth={2} />
-			{:else}
-				<span class="stage-dot"></span>
-			{/if}
-		</span>
+			<span class="lead {leadTone}" aria-hidden="true" title={leadTip}>
+				{#if status === 'working'}
+					<span class="pip" class:compacting></span>
+				{:else if parked}
+					<span class="pip held"></span>
+				{:else if failed}
+					<span class="pip warn failed"></span>
+				{:else if attention}
+					<span class="pip warn"></span>
+				{:else if offline}
+					<Unplug size={MARK_SIZE} strokeWidth={MARK_STROKE} />
+				{:else if stage === 'pr'}
+					<GitPullRequest size={MARK_SIZE} strokeWidth={MARK_STROKE} />
+				{:else if stage === 'merged'}
+					<GitMerge size={MARK_SIZE} strokeWidth={MARK_STROKE} />
+				{:else if stage === 'closed'}
+					<GitPullRequestClosed size={MARK_SIZE} strokeWidth={MARK_STROKE} />
+				{:else if stage === 'dirty'}
+					<Diff size={MARK_SIZE} strokeWidth={MARK_STROKE} />
+				{:else if stage === 'committed'}
+					<GitCommitHorizontal size={MARK_SIZE} strokeWidth={MARK_STROKE} />
+				{:else if stage === 'pushed'}
+					<ArrowUpFromLine size={MARK_SIZE} strokeWidth={MARK_STROKE} />
+				{/if}
+				<!-- An idle row draws nothing but keeps the column. -->
+			</span>
 		{/if}
 
-		<span class="body">
+		<span class="body" title={rowTip}>
 			<span class="l1">
-				<span class="title">
-					{#if status === 'working'}
-						<span class="pip" aria-hidden="true"></span>
-					{:else if status === 'failed'}
-						<TriangleAlert size={12} strokeWidth={2.2} class="warn failed" aria-hidden="true" />
-					{:else if attention}
-						<TriangleAlert size={12} strokeWidth={2.2} class="warn" aria-hidden="true" />
-					{/if}{#if compact && (status === 'working' || status === 'failed' || attention)}<span class="sr-only">{`${statusWord}: `}</span>{/if}{title}
-				</span>
+				<span class="title">{title}</span>
+				{#if showTimer}<span class="timer" title={timerTitle}>{timer}</span>{/if}
 			</span>
 
-			<!-- The working time sits at the end of the row that carries the
-			     session's state: the status line on active rows, the meta line
-			     on settled ones. The title keeps the full width. -->
-			{#snippet multiPrChip()}
-				<!-- The one control for the PR list: pointer, keyboard and
-				     screen readers all use the chip itself. -->
-				<button
-					bind:this={prChipRef}
-					type="button"
-					class="st pr pr-chip multi"
-					class:open={prListOpen}
-					title={`${prText} — show the list`}
-					aria-label={prListLabel}
-					aria-haspopup="dialog"
-					aria-expanded={prListOpen}
-					onclick={togglePrList}
-				>{#each prSummary?.parts ?? [] as part, i (part.state)}{#if i > 0}<span class="sep">{' · '}</span>{/if}<span class:green={part.state === 'open'} class:purple={part.state === 'merged'} class:muted={part.state === 'closed'}>{part.text}</span>{/each}</button>
-			{/snippet}
-			{#snippet timerChip()}
-				<span class="timer" class:live={turnLive} title={timerTitle}>{timer}</span>
-			{/snippet}
-
-			{#if !compact}
-				<span class="l2">
-					<span class="st {statusTone}">{statusWord}{#if status === 'working'}<span class="working-dots" aria-hidden="true">
-							<span></span><span></span><span></span>
-						</span>{/if}</span>
-					{#if showPr}
-						<span class="dot" aria-hidden="true"></span>
-						{#if multiPr}
-							{@render multiPrChip()}
-						{:else}
-							<span class="st pr" title={prText} class:green={prTone === 'open'} class:purple={prTone === 'merged'}>{prText}</span>
-						{/if}
-					{/if}
-					{#if diff}
-						<span class="dot" aria-hidden="true"></span>
-						<span class="diff"><span class="p">{diff.plus}</span> <span class="m">{diff.minus}</span></span>
-					{/if}
-					{@render timerChip()}
-				</span>
-			{/if}
-
-			<span class="l3">
-				<span class="seg device-seg" title={device} aria-label={device}>
-					{#if session.is_remote}
-						<Cloud size={12} strokeWidth={1.9} />
-					{:else}
-						<Monitor size={12} strokeWidth={1.9} />
-					{/if}
-				</span>
-				{#if !compact}
-					<span class="dot" aria-hidden="true"></span>
-					<span class="seg proj-seg"><span class="proj">{projectLabel}</span></span>
-				{/if}
-				{#if compact && stageWord}
-					<span class="dot" aria-hidden="true"></span>
-					{#if multiPr && (stage === 'pr' || stage === 'merged' || stage === 'closed')}
+			<!-- Always here, so a row keeps its height through every state. -->
+			<span class="l2">
+				{#if showPr}
+					{#if multiPr}
 						{@render multiPrChip()}
 					{:else}
-						<span class="st {stageTone}">{stageWord}</span>
+						<span class="st pr" aria-hidden="true" class:green={prTone === 'open'} class:purple={prTone === 'merged'} class:muted={prTone === 'closed'}>{prText}</span>
 					{/if}
 				{/if}
-				{#if branch}
-					<span class="dot" aria-hidden="true"></span>
-					<span class="seg branch-seg"><span class="branch">{branch}</span></span>
+				<!-- Whatever no longer fits drops whole, last first (see .rest). -->
+				<span class="rest">
+					{#if diff}
+						<span class="diff" aria-hidden="true"><span class="p">{diff.plus}</span> <span class="m">{diff.minus}</span></span>
+					{:else if progressWord}
+						<span class="st progress" class:uncommitted={!compact && stage === 'dirty'} aria-hidden="true">{progressWord}</span>
+					{/if}
+					{#if whereText}
+						<span class="where" aria-hidden="true">{whereText}</span>
+					{:else if fallbackText}
+						<span class="where" aria-hidden="true">{fallbackText}</span>
+					{/if}
+				</span>
+				{#if remote && !factless}
+					<span class="worker" aria-hidden="true" title={`On ${device}`}><Monitor size={12} strokeWidth={MARK_STROKE} /></span>
 				{/if}
-				{#if compact}{@render timerChip()}{/if}
 			</span>
+
+			<span class="details sr-only">{rowSpeech}</span>
 		</span>
 	</div>
 
@@ -751,13 +740,9 @@
 					onclick={(e) => handleActionClick(e, action)}
 				>
 					{#if action === 'settle'}
-						<Check size={15} strokeWidth={1.9} />
+						<Check size={14} strokeWidth={1.75} />
 					{:else if action === 'activate'}
-						<Undo2 size={15} strokeWidth={1.9} />
-					{:else if action === 'archive'}
-						<Archive size={15} strokeWidth={1.9} />
-					{:else}
-						<ArchiveRestore size={15} strokeWidth={1.9} />
+						<Undo2 size={14} strokeWidth={1.75} />
 					{/if}
 				</button>
 			{/each}
@@ -778,18 +763,15 @@
 	.scard-frame {
 		position: relative;
 		width: 100%;
-		margin-bottom: 2px;
-		border-radius: 12px;
+		border-radius: var(--radius-control);
 		overflow: hidden;
 		/* Vertical scroll stays native; a horizontal drag is the row's own. */
 		touch-action: pan-y;
 		transition:
 			height 260ms cubic-bezier(0.16, 1, 0.3, 1),
-			opacity 200ms ease,
-			margin 260ms cubic-bezier(0.16, 1, 0.3, 1);
+			opacity 200ms ease;
 	}
 	.scard-frame.folded {
-		margin-bottom: 0;
 		opacity: 0;
 	}
 
@@ -814,107 +796,152 @@
 		background: color-mix(in oklab, var(--primary) 28%, var(--sidebar));
 		color: var(--primary);
 	}
-	.lane.archive {
-		background: color-mix(in oklab, var(--info) 22%, var(--sidebar));
-		color: var(--info);
-	}
 	.lane span { opacity: 0.55; transition: opacity 150ms ease; }
 	.lane :global(svg) { flex: none; transition: transform 180ms cubic-bezier(0.16, 1, 0.3, 1); }
 	.scard-frame.armed .lane.toggle { background: var(--primary); color: var(--primary-foreground); }
-	.scard-frame.armed .lane.archive { background: var(--info); color: oklch(0.18 0.04 250); }
 	.scard-frame.armed .lane span { opacity: 1; }
 	.scard-frame.armed .lane :global(svg) { transform: scale(1.18); }
 
 	/* ── The row itself ─────────────────────────────────────────────────
-	   Opaque, so the lanes never bleed through. A fixed 18px lead column keeps
-	   every glyph (and the selection checkmark) lined up down the list. */
+	   Opaque, so the lanes never bleed through. Both lines have a fixed height and
+	   line two is always rendered, so no status change can move the rows below.
+	   Active: 6 + 20 + 17 + 6 = 49, plus the list's 2px gap, a 51px pitch.
+	   Settled: 4 + 19 + 16 + 3 = 42, a 44px pitch. */
 	.scard {
 		position: relative;
 		z-index: 1;
 		display: grid;
-		grid-template-columns: 18px minmax(0, 1fr);
-		column-gap: 8px;
+		grid-template-columns: var(--state-col) minmax(0, 1fr);
+		column-gap: 6px;
 		align-items: start;
 		width: 100%;
-		padding: 8px 10px 9px 9px;
+		padding: 6px 8px;
 		border: none;
-		border-radius: 12px;
+		border-radius: var(--radius-control);
 		background: var(--sidebar);
 		color: inherit;
 		text-align: left;
 		cursor: pointer;
-		transition: transform 300ms cubic-bezier(0.16, 1, 0.3, 1), background-color 150ms ease;
+		transition: transform 300ms cubic-bezier(0.16, 1, 0.3, 1), background-color 120ms ease;
+		--state-col: 16px;
+		--line-1: 20px;
+		--line-2: 17px;
 	}
-	.scard-frame.phone .scard { column-gap: 10px; padding: 10px 10px 11px 9px; }
-	.scard-frame.dragging .scard { transition: background-color 150ms ease; }
-	.scard-frame:hover .scard { background: color-mix(in oklch, var(--sidebar-foreground) 5%, var(--sidebar)); }
+	.scard.compact {
+		padding: 4px 8px 3px;
+		--line-1: 19px;
+		--line-2: 16px;
+	}
+	.scard-frame.dragging .scard { transition: background-color 120ms ease; }
+	.scard-frame:hover .scard { background: var(--row-hover); }
 	.scard.active,
-	.scard-frame:hover .scard.active { background: color-mix(in oklch, var(--sidebar-foreground) 10%, var(--sidebar)); }
-	.scard.active::before {
-		content: '';
-		position: absolute;
-		left: 0;
-		top: 10px;
-		bottom: 10px;
-		width: 2.5px;
-		border-radius: 2px;
-		background: var(--primary);
-		box-shadow: 0 0 8px -1px var(--glow);
-	}
-	.scard.compact.active::before { top: 8px; bottom: 8px; }
-	.scard-frame.pressing .scard {
-		background: color-mix(in oklch, var(--sidebar-foreground) 8%, var(--sidebar));
-		transform: scale(0.985);
-	}
+	.scard-frame:hover .scard.active,
+	.scard-frame.pressing .scard { background: var(--row-selected); }
+	.scard-frame.pressing .scard { transform: scale(0.985); }
 	.scard-frame.selected .scard,
 	.scard-frame.selected:hover .scard { background: color-mix(in oklab, var(--primary) 9%, var(--sidebar)); }
 	.scard:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
 
-	/* Selection checkmark, in the lead glyph's column. */
+	/* Selection checkmark, in the state column, so titles never move. */
 	.check {
 		display: grid;
 		place-items: center;
-		width: 18px;
-		height: 18px;
-		margin-top: 1px;
+		width: 16px;
+		height: 16px;
+		margin-top: calc((var(--line-1) - 16px) / 2);
 		border: 1.5px solid var(--border-strong);
 		border-radius: 50%;
 		color: var(--primary-foreground);
 	}
 	.scard-frame.selected .check { background: var(--primary); border-color: var(--primary); }
 
-	.scard.compact .l3 { margin-top: 3px; }
-
-	/* ── Leading git glyph ───────────────────────────────────────────── */
+	/* ── State column ─────────────────────────────────────────────────── */
 	.lead {
 		display: grid;
 		place-items: center;
-		height: 17px;
+		width: var(--state-col);
+		height: var(--line-1);
 		color: var(--subtle-foreground);
 	}
-	.scard.compact .lead { height: 16px; }
 	.lead :global(svg) { flex: none; }
 	.lead.green { color: var(--success); }
 	.lead.purple { color: var(--status-merged); }
 	.lead.amber { color: var(--warning); }
 	.lead.muted { color: var(--subtle-foreground); }
-	/* "Repo, nothing to report" is a dot rather than an icon — it should read
-	   as an absence, not as one more thing to decode. */
-	.stage-dot {
-		width: 5px;
-		height: 5px;
+	/* A settled row's glyph steps back, leaving the colour to the PR word. Runtime
+	   marks do not: a settled row that is somehow running still has to be seen. */
+	.scard.compact .lead :global(svg) { opacity: 0.7; }
+	/* The runtime marks are solid shapes, so they outweigh the thinner git glyphs.
+	   This column is the only place a row says its state, so every mark has its
+	   own shape: with motion reduced, or colour hard to tell, they still differ.
+	   The pulses move by size rather than fading, so a mark stays at 3:1 against
+	   the panel through its whole cycle in both themes.
+	   Working: a dot that pulses. */
+	.pip {
+		width: 8px;
+		height: 8px;
 		border-radius: 50%;
-		background: currentColor;
-		opacity: 0.75;
+		background: var(--primary);
+		forced-color-adjust: none;
+		animation: card-ping 1.8s ease-in-out infinite;
+	}
+	/* Compacting is working too, so it keeps the colour, but as a flat bar being
+	   squeezed, at half the pace. */
+	.pip.compacting {
+		width: 12px;
+		height: 5px;
+		border-radius: 3px;
+		animation: card-squeeze 3.6s ease-in-out infinite;
+	}
+	/* Parked: its background work still runs, but no turn is live. Same colour,
+	   hollow and still. */
+	.pip.held {
+		background: transparent;
+		box-shadow: inset 0 0 0 1.5px var(--primary);
+		animation: none;
+	}
+	/* Needs you: an amber diamond, calling gently. Permission and question share
+	   it; the Needs you lane and the hover title say which. */
+	.pip.warn {
+		border-radius: 1.5px;
+		background: var(--warning);
+		transform: rotate(45deg);
+		animation: card-pulse 2.4s ease-in-out infinite;
+	}
+	/* What happened, not something still calling: a cross in the danger colour,
+	   held still. */
+	.pip.warn.failed {
+		width: 10px;
+		height: 10px;
+		border-radius: 0;
+		background: var(--destructive);
+		transform: none;
+		clip-path: polygon(20% 0, 50% 30%, 80% 0, 100% 20%, 70% 50%, 100% 80%, 80% 100%, 50% 70%, 20% 100%, 0 80%, 30% 50%, 0 20%);
+		animation: none;
 	}
 
-	.body { min-width: 0; }
+	@keyframes card-ping {
+		0%, 100% { opacity: 1; transform: scale(1); }
+		50% { opacity: 0.8; transform: scale(0.72); }
+	}
+	@keyframes card-squeeze {
+		0%, 100% { opacity: 1; transform: scaleX(1); }
+		50% { opacity: 0.8; transform: scaleX(0.62); }
+	}
+	@keyframes card-pulse {
+		0%, 100% { transform: rotate(45deg) scale(1); }
+		50% { transform: rotate(45deg) scale(0.82); }
+	}
+
+	.body { display: block; min-width: 0; }
 
 	.l1 {
 		display: flex;
 		align-items: baseline;
 		gap: 8px;
 		min-width: 0;
+		height: var(--line-1);
+		line-height: var(--line-1);
 	}
 	.title {
 		flex: 1 1 auto;
@@ -922,255 +949,176 @@
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
-		font-size: 13px;
-		font-weight: 500;
-		letter-spacing: -0.008em;
+		font-size: 13.5px;
+		font-weight: 450;
 		color: var(--sidebar-foreground);
 	}
-	.scard:not(.compact) .title { font-size: 13.5px; font-weight: 600; }
-	/* Runtime state rides IN the title, so it truncates with it and never
-	   steals a column from the branch line. */
-	.pip {
-		display: inline-block;
-		width: 6px;
-		height: 6px;
-		border-radius: 50%;
-		background: var(--primary);
-		margin-right: 6px;
-		vertical-align: 1px;
-		box-shadow: 0 0 6px -1px var(--glow);
-		animation: card-ping 1.8s ease-in-out infinite;
+	.scard.emphasized .title { font-weight: 500; }
+	/* Settled answers "how did this end", in secondary text. */
+	.scard.compact .title {
+		font-size: 13px;
+		color: var(--sidebar-muted);
+		transition: color 120ms ease;
 	}
-	.title :global(.warn) {
-		display: inline-block;
-		color: var(--warning);
-		margin-right: 5px;
-		vertical-align: -2px;
-		animation: card-pulse 2.4s ease-in-out infinite;
-	}
-	/* What happened, not something still calling: the danger colour, held still. */
-	.title :global(.warn.failed) {
-		color: var(--destructive);
-		animation: none;
-	}
+	.scard-frame:hover .scard.compact .title,
+	.scard.compact.emphasized .title { color: var(--sidebar-foreground); }
 
-	.dot {
-		width: 3px;
-		height: 3px;
-		border-radius: 50%;
-		background: var(--subtle-foreground);
-		opacity: 0.6;
-		flex: none;
-	}
-
-	@keyframes card-ping {
-		0%, 100% { opacity: 1; transform: scale(1); }
-		50% { opacity: 0.55; transform: scale(0.82); }
-	}
-	@keyframes card-pulse {
-		0%, 100% { opacity: 0.75; }
-		50% { opacity: 1; }
-	}
-
-	/* Pinned to the right end of its line; the segments before it give way. */
+	/* Pinned to the right end of the line; the title gives way first. One tone on
+	   every row in every lane: state belongs to the state column, not the clock. */
 	.timer {
 		flex: none;
 		margin-left: auto;
-		padding-left: 6px;
-		font-family: var(--font-mono);
 		font-variant-numeric: tabular-nums;
-		font-size: 11px;
-		color: var(--sidebar-muted);
+		font-size: var(--fs-label);
+		color: var(--subtle-foreground);
 		white-space: nowrap;
-		transition: opacity 120ms ease;
 	}
-	.timer.live { color: var(--primary); }
-	/* A long PR label ellipsizes before it can push the timer off the line. */
-	.l2 .st.pr,
-	.l3 .st.pr { flex: 0 1 auto; min-width: 0; white-space: nowrap; }
-	/* Several PRs: each count keeps its state's tone; the chip opens the list. */
-	/* A button that reads as inline text: no box, no font or line-height of
-	   its own, so the row keeps its height in the normal and compact lines. */
+
+	/* Line two: one calm line of facts, in the order PR, diff, branch. It never
+	   wraps visibly and never shows half a number: the PR always stays, and `.rest` wraps onto a second line its fixed height hides, so a fact
+	   that no longer fits disappears whole. */
+	.l2 {
+		display: flex;
+		align-items: flex-start;
+		gap: 8px;
+		min-width: 0;
+		height: var(--line-2);
+		font-size: var(--fs-label);
+		line-height: var(--line-2);
+		white-space: nowrap;
+		color: var(--subtle-foreground);
+	}
+	.rest {
+		display: flex;
+		flex: 1 1 0;
+		flex-wrap: wrap;
+		align-content: flex-start;
+		align-items: flex-start;
+		column-gap: 8px;
+		min-width: 0;
+		height: var(--line-2);
+		overflow: hidden;
+	}
+	/* Holds the first line, so even the first fact wraps out of sight whole when
+	   it does not fit, instead of being cut mid-number. The margin cancels its gap. */
+	.rest::before {
+		content: '';
+		flex: none;
+		width: 0;
+		height: var(--line-2);
+		margin-right: -8px;
+	}
+	.st {
+		flex: none;
+		white-space: nowrap;
+	}
+	/* Always stays, but on a very narrow panel it ends in an ellipsis, not past
+	   the row. */
+	.st.pr {
+		flex: 0 1 auto;
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	.st.pr.green { color: var(--success); }
+	.st.pr.purple { color: var(--status-merged); }
+	.st.pr.muted { color: var(--subtle-foreground); }
+	.st.progress.uncommitted { color: var(--warning); }
+	.diff {
+		flex: none;
+		font-variant-numeric: tabular-nums;
+	}
+	.diff .p { color: var(--success); }
+	.diff .m { color: var(--destructive); }
+	/* The only fact that truncates, and not into a stump. */
+	.where {
+		flex: 1 1 0;
+		min-width: 56px;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	/* Sits under the time; only there when the session is on another worker. */
+	.worker {
+		display: inline-flex;
+		flex: none;
+		align-self: center;
+	}
+
+	/* Several PRs: each count keeps its state's tone; the chip opens the list.
+	   A button that reads as inline text: no box, no font or line-height of its
+	   own, so the row keeps its height. */
 	.pr-chip.multi {
 		cursor: pointer;
 		position: relative;
+		flex: 0 1 auto;
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
 		margin: 0;
 		padding: 0;
 		border: 0;
 		border-radius: 3px;
 		background: none;
 		font: inherit;
-		font-weight: 500;
 		line-height: inherit;
-		letter-spacing: inherit;
 		color: inherit;
 		text-align: inherit;
 		text-transform: none;
+		white-space: nowrap;
 		appearance: none;
 	}
-	.l3 .pr-chip.multi { font-weight: 400; }
+	.pr-chip.multi .green { color: var(--success); }
+	.pr-chip.multi .purple { color: var(--status-merged); }
+	.pr-chip.multi .muted { color: var(--subtle-foreground); }
 	.pr-chip.multi:focus-visible { outline: 2px solid var(--ring); outline-offset: -1px; }
 	.pr-chip.multi .sep { color: var(--subtle-foreground); }
 	.pr-chip.multi:hover > span:not(.sep),
 	.pr-chip.multi.open > span:not(.sep) { text-decoration: underline dotted; text-underline-offset: 2px; }
-	/* On the meta line the project and the branch share the squeeze, so
-	   neither collapses to a stub. */
-	.seg.proj-seg { flex: 0 1 auto; min-width: 4.5em; }
-	.l3 .timer { font-size: 10.5px; }
 
-	/* Receded rows dim the title + meta line but keep the status line, glyph
-	   and timer lit; hover (desktop) restores the whole row. */
-	.scard.receded .title,
-	.scard.receded .l3 { opacity: 0.62; transition: opacity 0.13s ease; }
-	.scard-frame:hover .scard.receded .title,
-	.scard-frame:hover .scard.receded .l3,
-	.scard-frame:has(:focus-visible) .scard.receded .title,
-	.scard-frame:has(:focus-visible) .scard.receded .l3 { opacity: 1; }
-
-	/* Line 2 (active cards): what the agent is doing · what the PR is doing ·
-	   how much has changed. */
-	.l2 {
-		display: flex;
-		align-items: center;
-		gap: 6px;
-		margin-top: 4px;
-		min-width: 0;
-		font-size: 11.5px;
-		white-space: nowrap;
-		overflow: hidden;
+	/* Phone: larger type and row for thumbs at arm's length, same anatomy. */
+	.scard-frame.phone .scard {
+		column-gap: 8px;
+		padding: 8px 12px 8px 10px;
+		--line-1: 22px;
+		--line-2: 19px;
 	}
-	.st {
-		flex: none;
-		font-weight: 500;
-		overflow: hidden;
-		text-overflow: ellipsis;
+	.scard-frame.phone .scard.compact {
+		padding: 6px 12px 6px 10px;
+		--line-1: 21px;
+		--line-2: 18px;
 	}
-	.st.accent { color: var(--primary); }
-	.st.amber { color: var(--warning); }
-	.st.danger { color: var(--destructive); }
-	.st.green { color: var(--success); }
-	.st.purple { color: var(--status-merged); }
-	.st.muted { color: var(--muted-foreground); }
-	.working-dots {
-		display: inline-flex;
-		align-items: center;
-		gap: 2px;
-		margin-left: 4px;
-		vertical-align: middle;
-	}
-	.working-dots > span {
-		width: 3px;
-		height: 3px;
-		border-radius: 50%;
-		background: currentColor;
-		opacity: 0.65;
-		animation: working-dot-pulse 1.2s ease-in-out infinite;
-	}
-	.working-dots > span:nth-child(2) { animation-delay: 0.16s; }
-	.working-dots > span:nth-child(3) { animation-delay: 0.32s; }
-	@keyframes working-dot-pulse {
-		0%, 60%, 100% { opacity: 0.35; }
-		30% { opacity: 1; }
-	}
-	.diff {
-		flex: none;
-		font-family: var(--font-mono);
-		font-size: 10.5px;
-		font-variant-numeric: tabular-nums;
-	}
-	.diff .p { color: var(--success); }
-	.diff .m { color: var(--destructive); }
-
-	.l3 {
-		margin-top: 4px;
-		display: flex;
-		align-items: center;
-		gap: 5px;
-		font-size: 11px;
-		color: var(--sidebar-muted);
-		min-width: 0;
-		flex-wrap: nowrap;
-		overflow: hidden;
-	}
-	.l3 :global(svg) { color: var(--subtle-foreground); flex: none; }
-	.l3 .st { font-size: 10.5px; font-weight: 400; }
-	.seg {
-		display: inline-flex;
-		align-items: center;
-		gap: 3.5px;
-		min-width: 0;
-		flex: none;
-		white-space: nowrap;
-	}
-	/* Branch gives back space first: it grows to fit long names when line 3
-	   has room and only ellipsizes once the row actually fills up. */
-	.seg.branch-seg {
-		flex: 0 1 auto;
-	}
-	.proj {
-		display: block;
-		min-width: 0;
-		max-width: 96px;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-		color: var(--sidebar-muted);
-		font-weight: 400;
-	}
-	.device-seg {
-		flex: none;
-	}
-	.branch {
-		min-width: 0;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-		font-family: var(--font-mono);
-		font-size: 10px;
-	}
-
-	/* Phone type is a step larger: thumbs, arm's length. */
-	.scard-frame.phone .scard:not(.compact) .title { font-size: 14.5px; }
+	.scard-frame.phone .title { font-size: 14.5px; }
 	.scard-frame.phone .scard.compact .title { font-size: 14px; }
-	.scard-frame.phone .l2 { font-size: 12px; }
-	.scard-frame.phone .l3 { font-size: 11.5px; }
-	.scard-frame.phone .branch { font-size: 11px; }
+	.scard-frame.phone .l2 { font-size: 13px; }
 
 	/* ── Hover actions (pointer that hovers) ───────────────────────────── */
 	.hover-acts {
 		position: absolute;
-		top: 50%;
-		right: 6px;
+		top: 0;
+		right: 0;
+		bottom: 0;
 		z-index: 2;
 		display: flex;
+		align-items: center;
 		gap: 2px;
-		padding-left: 18px;
-		transform: translateY(-50%);
-		background: linear-gradient(
-			90deg,
-			transparent,
-			color-mix(in oklch, var(--sidebar-foreground) 5%, var(--sidebar)) 18px
-		);
+		padding: 0 6px 0 18px;
+		background: linear-gradient(90deg, transparent, var(--row-hover) 18px);
 		opacity: 0;
 		transition: opacity 120ms ease;
 	}
 	.scard-frame:hover .hover-acts,
 	.hover-acts:focus-within { opacity: 1; }
 	.scard-frame.active .hover-acts {
-		background: linear-gradient(
-			90deg,
-			transparent,
-			color-mix(in oklch, var(--sidebar-foreground) 10%, var(--sidebar)) 18px
-		);
+		background: linear-gradient(90deg, transparent, var(--row-selected) 18px);
 	}
 	.row-action {
 		display: grid;
 		place-items: center;
-		width: 28px;
-		height: 28px;
+		width: 24px;
+		height: 24px;
 		padding: 0;
 		border: 0;
-		border-radius: 7px;
+		border-radius: 6px;
 		background: transparent;
 		color: var(--muted-foreground);
 		cursor: pointer;
@@ -1210,8 +1158,8 @@
 
 	@media (prefers-reduced-motion: reduce) {
 		.pip,
-		.working-dots > span,
-		.title :global(.warn) { animation: none; }
+		.pip.compacting,
+		.pip.warn { animation: none; }
 		.scard-frame,
 		.scard,
 		.lane,

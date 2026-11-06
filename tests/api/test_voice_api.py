@@ -2514,10 +2514,10 @@ class TestConversationAttachment:
         assert bool(db.get_session("ordinary")["is_active"]) is True
 
     @pytest.mark.parametrize("change", [{"status": "archived"}, {"hidden": True}])
-    def test_hangup_detaches_after_the_chat_is_archived_mid_call(
+    def test_hangup_detaches_after_legacy_settlement_or_hiding_mid_call(
         self, attach_client, mock_db, sidebands, change,
     ):
-        """An ineligible row must still hang up, or the sideband keeps billing."""
+        """Both shapes hang up cleanly; settlement never makes a chat read-only."""
         from app.core import voice_bridge
         self._attached_webrtc_chat()
         assert attach_client.post("/api/v1/voice/sessions/ordinary/call", json={"call_id": "rtc-1"}).status_code == 200
@@ -2530,10 +2530,15 @@ class TestConversationAttachment:
         assert attach_client.post("/api/v1/voice/sessions/ordinary/hangup").status_code == 200
         assert voice_bridge.registry.get("ordinary") is None
         assert sidebands[0].closed is True
-        # Starting a new call on the ineligible row is still refused.
-        assert attach_client.post(
+        # Hidden rows remain ineligible; ordinary settled history is usable.
+        response = attach_client.post(
             "/api/v1/voice/sessions/ordinary/call", json={"call_id": "rtc-2"},
-        ).status_code == 404
+        )
+        assert response.status_code == (404 if "hidden" in change else 200)
+        if "hidden" not in change:
+            assert db.get_session("ordinary")["status"] == "active"
+            assert attach_client.post("/api/v1/voice/sessions/ordinary/hangup").status_code == 200
+            assert voice_bridge.registry.get("ordinary") is None
 
 class TestVoiceSessionAccess:
     @pytest.fixture(autouse=True)

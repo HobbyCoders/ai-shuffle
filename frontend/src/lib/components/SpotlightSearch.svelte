@@ -1,4 +1,5 @@
 <script lang="ts">
+	import '$lib/components/ui/surfaces.css';
  import { tick, untrack } from 'svelte';
  import { Search, ArrowUpRight, SlidersHorizontal } from 'lucide-svelte';
  import type { Session } from '$lib/api/client';
@@ -33,6 +34,7 @@
  let results = $state<SearchGroup[]>([]);
  let failures = $state<string[]>([]);
  let searching = $state(false);
+ let loadingMore = $state(false);
  let sources = $state.raw(createSearchSources());
  // The Settings page's own index, built once per opening (some rows come from
  // live lists). Loaded on first use so the registry stays out of the startup bundle.
@@ -55,7 +57,7 @@
   ...results,
   ...(trimmed && onOpenFeature ? [{ id: 'pages', label: 'App pages', items: pages.filter(item => matches(item, trimmed)) }] : []),
   { id: 'actions', label: 'Quick actions', items: actions.filter(item => !trimmed || matches(item, trimmed)) }
- ].filter(group => group.items.length));
+ ].filter(group => group.items.length || group.hasMore));
  const items = $derived(groups.flatMap(group => group.items));
 
  $effect(() => {
@@ -90,12 +92,33 @@
    const settled = await Promise.allSettled(currentSources.map(source => source.load(text)));
    if (cancelled) return;
    results = settled.flatMap((result, index) => result.status === 'fulfilled'
-    ? [{ id: currentSources[index].id, label: currentSources[index].label, items: result.value }] : []);
+    ? [{ id: currentSources[index].id, label: currentSources[index].label, items: result.value, total: currentSources[index].total, hasMore: currentSources[index].hasMore, nextOffset: currentSources[index].nextOffset }] : []);
    failures = settled.flatMap((result, index) => result.status === 'rejected' ? [currentSources[index].label] : []);
    searching = false;
   }, 250);
   return () => { cancelled = true; clearTimeout(timer); };
  });
+
+ async function moreChats(group: SearchGroup) {
+  if (loadingMore || !group.hasMore || group.nextOffset === undefined) return;
+  const text = trimmed;
+  const currentSources = sources;
+  const source = currentSources.find(source => source.id === group.id);
+  if (!source) return;
+  loadingMore = true;
+  try {
+   const more = await source.load(text, group.nextOffset);
+   if (!visible || trimmed !== text || sources !== currentSources) return;
+   const seen = new Set(group.items.map(item => item.id));
+   const added = more.filter(item => !seen.has(item.id) && !!seen.add(item.id));
+   results = results.map(row => row.id !== group.id ? row : {
+    ...row, items: [...row.items, ...added],
+    total: source.total, hasMore: added.length > 0 && source.hasMore && (source.nextOffset ?? 0) > group.nextOffset!, nextOffset: source.nextOffset
+   });
+  } catch {
+   if (visible && trimmed === text && sources === currentSources) failures = [...new Set([...failures, 'More chats'])];
+  } finally { loadingMore = false; }
+ }
 
  function select(item: SearchItem) {
   if (item.session) onSelectSession(item.session);
@@ -128,12 +151,12 @@
 
 <svelte:window onkeydown={handleKeyDown} />
 {#if visible}
- <div class="fixed inset-0 z-50 flex items-start justify-center pt-[10vh] px-3" role="dialog" aria-modal="true" aria-label="Search everything" tabindex="-1" use:focusTrap={{ initial: 'input' }}>
-  <button class="absolute inset-0 w-full h-full bg-black/60 backdrop-blur-xs border-none p-0 cursor-default" onclick={onClose} tabindex="-1" aria-label="Close search"></button>
-  <div class="relative w-full max-w-xl bg-card border border-border rounded-xl overflow-hidden" style="box-shadow: var(--shadow-l)">
-   <div class="flex items-center gap-3 px-4 py-3 border-b border-border">
+ <div class="ui-overlay ui-surface spotlight-overlay" role="dialog" aria-modal="true" aria-label="Search everything" tabindex="-1" use:focusTrap={{ initial: 'input' }}>
+  <button class="ui-scrim" onclick={onClose} tabindex="-1" aria-label="Close search"></button>
+  <div class="ui-dialog">
+   <div class="spotlight-search flex items-center gap-3 px-4 py-3 border-b border-border">
     <Search size={20} class="text-muted-foreground shrink-0" />
-    <input bind:this={input} bind:value={query} aria-label="Search everything" placeholder="Search everything…" class="min-w-0 flex-1 bg-transparent text-foreground placeholder-muted-foreground focus:outline-hidden text-base" />
+    <input bind:this={input} bind:value={query} aria-label="Search everything" placeholder="Search everything" class="min-w-0 flex-1 bg-transparent text-foreground placeholder-muted-foreground focus:outline-hidden text-base" />
     <kbd class="text-xs text-muted-foreground">esc</kbd>
    </div>
    <div bind:this={list} class="max-h-[65vh] overflow-y-auto" aria-busy={searching}>
@@ -141,7 +164,7 @@
     {#if searching}<p role="status" class="px-4 py-3 text-sm text-muted-foreground">Searching…</p>{/if}
     {#each groups as group, groupIndex (group.id)}
      <section aria-label={group.label}>
-      <h3 class="px-4 py-2 text-xs font-medium text-muted-foreground uppercase tracking-wider border-t border-border">{group.label} <span class="opacity-60">{group.items.length}</span></h3>
+      <h3 class="px-4 py-2 text-xs font-medium text-muted-foreground border-t border-border">{group.label} <span class="opacity-60">{group.total ?? group.items.length}</span></h3>
       {#each group.items as item, index (item.id)}
        {@const globalIndex = indexOf(groupIndex, index)}
        <button type="button" data-index={globalIndex} class="spotlight-item w-full px-4 py-2.5 flex items-start gap-3 text-left transition-colors {selectedIndex === globalIndex ? 'selected' : ''}" onmouseenter={() => selectedIndex = globalIndex} onclick={() => select(item)}>
@@ -153,6 +176,9 @@
         <ArrowUpRight size={14} class="mt-1 text-muted-foreground shrink-0" />
        </button>
       {/each}
+      {#if group.hasMore}
+       <button type="button" class="spotlight-item w-full px-4 py-2.5 text-left text-sm text-muted-foreground" disabled={loadingMore} onclick={() => moreChats(group)}>{loadingMore ? 'Loading chats…' : 'More chat results'}</button>
+      {/if}
      </section>
     {/each}
     {#if trimmed && !searching && !items.length}<p class="px-4 py-8 text-center text-muted-foreground">No results found.</p>{/if}
@@ -164,12 +190,16 @@
 {/if}
 
 <style>
+ .spotlight-search:focus-within { outline: 2px solid var(--ring); outline-offset: -2px; }
+ .spotlight-search input, .spotlight-search input:focus, .spotlight-search input:focus-visible { border: 0; outline: none; box-shadow: none; }
+ .spotlight-overlay { align-items: start; padding-top: 10dvh; }
+ @media (max-width: 600px) { .spotlight-overlay { padding: 0; align-items: end; } .spotlight-item { min-height: 44px; } }
   .spotlight-item:hover {
     background: var(--hover-overlay);
   }
 
   .spotlight-item.selected {
-    background: color-mix(in oklab, var(--selection) 10%, var(--card));
+    background: var(--row-selected);
   }
 
   .spotlight-item:focus-visible {

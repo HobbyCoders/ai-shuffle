@@ -104,7 +104,8 @@ describe('AppTopBar actions', () => {
 		const git = screen.getByRole('button', { name: 'Git actions: 3 files changed' });
 		expect(container.querySelector('.tb-actions')?.contains(git)).toBe(true);
 		const order = [...container.querySelectorAll('header button')].map((b) => b.getAttribute('aria-label') ?? b.textContent);
-		expect(order).toEqual(['Open menu', 'Connected to Stub. Switch worker', 'Chat actions', 'Git actions: 3 files changed']);
+		// The title's menu sits right after the title; the worker status runs under it.
+		expect(order).toEqual(['Open menu', 'Chat actions', 'Connected to Stub. Switch worker', 'Git actions: 3 files changed']);
 	});
 
 	it('retains global voice input in the single bar except when the chat owns it', async () => {
@@ -126,10 +127,15 @@ describe('AppTopBar title', () => {
 		expect(screen.getByText('Settings')).toBeTruthy();
 		activeView.set({ type: 'board' });
 		await tick();
-		expect(screen.getByText('Sessions')).toBeTruthy();
+		expect(screen.getByText('Chats')).toBeTruthy();
 		activeView.set({ type: 'profile' });
 		await tick();
-		expect(screen.getByText('Build')).toBeTruthy();
+		expect(screen.getByText('Agents')).toBeTruthy();
+		for (const [type, title] of Object.entries({ 'file-browser': 'Files', notes: 'Notes', automations: 'Automations', project: 'Projects', prs: 'Pull requests', stats: 'Stats', docs: 'Docs', terminal: 'Terminal' })) {
+			activeView.set({ type });
+			await tick();
+			expect(screen.getByText(title)).toBeTruthy();
+		}
 		// MCP servers moved into Settings (#1684).
 		activeView.set({ type: 'mcp' });
 		await tick();
@@ -139,15 +145,15 @@ describe('AppTopBar title', () => {
 		expect(screen.getByText('AI Shuffle')).toBeTruthy();
 	});
 
-	it('shows "New Chat" for a session view with no session yet, with no trail or chat-actions chevron', async () => {
+	it('shows "New chat" for a session view with no session yet, with no trail or chat-actions chevron', async () => {
 		activeView.set({ type: 'session' });
 		renderBar();
-		expect(screen.getByText('New Chat')).toBeTruthy();
+		expect(screen.getByText('New chat')).toBeTruthy();
 		expect(screen.queryByRole('navigation', { name: 'Breadcrumbs' })).toBeNull();
 		expect(screen.queryByRole('button', { name: 'Chat actions' })).toBeNull();
 	});
 
-	it('puts the chat title on line 1 and the worker chip, then the project trail, on line 2', async () => {
+	it('puts the chat title on line 1 and the worker on line 2; the project stays in the line under the composer', async () => {
 		projects.set([{ id: 'p1', name: 'Website' }]);
 		activeSession.set({ sessionId: 's-1', title: 'Fix login', messages: [], project: 'p1' });
 		activeView.set({ type: 'session' });
@@ -160,7 +166,7 @@ describe('AppTopBar title', () => {
 		expect(chip.compareDocumentPosition(crumbs) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 		expect(crumbs.getAttribute('data-session-id')).toBe('s-1');
 		expect(crumbs.getAttribute('data-mobile')).toBe('true');
-		expect(crumbs.textContent).toBe('Website');
+		expect(crumbs.textContent).not.toContain('Website');
 	});
 
 	it('opens the chat-actions sheet from a chevron that knows the chat, its title and project', () => {
@@ -172,12 +178,11 @@ describe('AppTopBar title', () => {
 		expect(chevron.dataset).toMatchObject({ variant: 'sheet', sessionId: 's-1', title: 'Fix login', project: 'Website' });
 	});
 
-	it('labels an untitled bound session and falls back to "Sessions" for an unknown project', async () => {
+	it('labels an untitled bound session', async () => {
 		activeSession.set({ sessionId: 's-1', title: '  ', messages: [], project: 'gone' });
 		activeView.set({ type: 'session' });
 		const { container } = renderBar();
 		expect(container.querySelector('.tb-title')?.textContent).toBe('Untitled');
-		expect(screen.getByRole('navigation', { name: 'Breadcrumbs' }).textContent).toBe('Sessions');
 	});
 
 	it('keeps the worker chip on every page, with no trail off-chat', async () => {
@@ -190,15 +195,13 @@ describe('AppTopBar title', () => {
 });
 
 describe('AppTopBar unread indicator', () => {
-	it('names the unread count on the menu button and shows the dot only while the drawer is closed', async () => {
+	it('names the unread count on the menu button, which never carries a pip', async () => {
 		const { container } = renderBar();
 		expect(menuButton().getAttribute('aria-label')).toBe('Open menu');
 		expect(container.querySelector('.tb-unread')).toBeNull();
 		unreadCount.set(3);
 		await tick();
 		expect(menuButton().getAttribute('aria-label')).toBe('Open menu (3 unread notifications)');
-		expect(container.querySelector('.tb-unread')).toBeTruthy();
-		await fireEvent.click(menuButton());
 		expect(container.querySelector('.tb-unread')).toBeNull();
 	});
 });

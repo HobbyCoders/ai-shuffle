@@ -26,12 +26,6 @@ export function invokeModePatch(mode: AgentInvokeMode): Partial<AgentForm> {
 	return mode === 'none' ? { agent_invoke_mode: 'none', enabled_agents: [] } : { agent_invoke_mode: mode };
 }
 
-/** The header's "Subagents" fact: None, All N, or k of N (N = other agents). */
-export function subagentsFact(mode: AgentInvokeMode, others: number, reach: number): string {
-	if (mode === 'none' || others === 0) return 'None';
-	return mode === 'custom' ? `${reach} of ${others}` : `All ${others}`;
-}
-
 /** The editable shape of one agent on the Agents page (ProfileCard owns it). */
 export interface AgentForm {
 	id: string;

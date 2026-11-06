@@ -129,8 +129,7 @@ describe('AutomationForm model picker', () => {
 		expect(row.queryByText(/Sonnet/)).toBeNull();
 		expect(row.queryByText(/agent/i)).toBeNull();
 
-		await fireEvent.click(row.getByRole('button', { name: 'Worker default' }));
-		await fireEvent.click(row.getByRole('tab', { name: /^Claude/ }));
+		await fireEvent.click(row.getByRole('button', { name: 'Reasoning model' }));
 		await fireEvent.click(row.getByRole('option', { name: /Haiku/ }));
 		expect(onUpdateFormModel).toHaveBeenCalledWith('haiku');
 	});
@@ -138,8 +137,7 @@ describe('AutomationForm model picker', () => {
 	it('emits a provider model as its picker value', async () => {
 		const { getByTestId, onUpdateFormModel } = renderForm();
 		const row = within(getByTestId('automation-model-row'));
-		await fireEvent.click(row.getByRole('button', { name: 'Worker default' }));
-		await fireEvent.click(row.getByRole('tab', { name: /OpenAI/ }));
+		await fireEvent.click(row.getByRole('button', { name: 'Reasoning model' }));
 		await fireEvent.click(row.getByRole('option', { name: /GPT-5\.6/ }));
 		expect(onUpdateFormModel).toHaveBeenCalledWith(encodeProviderModel('openai-row', 'gpt-5.6'));
 	});
@@ -155,7 +153,7 @@ describe('AutomationForm model picker', () => {
 		});
 		const row = within(getByTestId('automation-model-row'));
 		expect(row.getByText('Every run uses this model.')).toBeTruthy();
-		await fireEvent.click(row.getByRole('button', { name: /GPT-5\.6/ }));
+		await fireEvent.click(row.getByRole('button', { name: 'Reasoning model' }));
 		expect(queryByText('Custom…')).toBeNull();
 	});
 
@@ -166,7 +164,7 @@ describe('AutomationForm model picker', () => {
 		});
 		const row = within(getByTestId('automation-model-row'));
 		expect(row.getByText("Uses GPT-5.6, the worker's default for unattended runs.")).toBeTruthy();
-		expect(row.getByRole('button', { name: 'Worker default' })).toBeTruthy();
+		expect(row.getByRole('button', { name: 'Reasoning model' })).toBeTruthy();
 	});
 
 	it('says so when the agent still carries a legacy saved model', () => {
@@ -175,7 +173,7 @@ describe('AutomationForm model picker', () => {
 		});
 		const row = within(getByTestId('automation-model-row'));
 		expect(row.getByText('Uses GPT-5.6, saved on this agent (legacy).')).toBeTruthy();
-		expect(row.getByRole('button', { name: 'Saved on agent (legacy)' })).toBeTruthy();
+		expect(row.getByRole('button', { name: 'Reasoning model' })).toBeTruthy();
 	});
 
 	it("takes the server's report for a saved automation on its own agent", () => {
@@ -212,7 +210,7 @@ describe('AutomationForm model picker', () => {
 			savedAutomation: saved({ model: 'prov:gone:gpt-x', model_source: 'automation', model_error: error })
 		});
 		const hint = within(getByTestId('automation-model-row')).getByText(error);
-		expect(hint.classList.contains('model-error')).toBe(true);
+		expect(hint.closest('[role="alert"]')).toBeTruthy();
 	});
 
 	it('offers a per-step model that defaults to the automation', async () => {
@@ -225,7 +223,6 @@ describe('AutomationForm model picker', () => {
 		const trigger = getByRole('button', { name: 'Model (optional)' });
 		expect(trigger.textContent).toContain('Same as automation');
 		await fireEvent.click(trigger);
-		await fireEvent.click(getByRole('tab', { name: /^Claude/ }));
 		await fireEvent.click(getByRole('option', { name: /Haiku/ }));
 		expect(onUpdateFormActionSteps).toHaveBeenCalledWith([
 			{ type: 'send_prompt', prompt: 'next', model: 'haiku', provider_id: undefined }
@@ -287,6 +284,16 @@ describe('scheduled-run notice', () => {
 		expect(notice?.textContent).toContain('Claude runs on your subscription');
 	});
 
+	it('keeps compact notice detail reachable without changing regular error banners', async () => {
+		const notice = await noticeFor(signedIn, { formError: 'Could not save' });
+		expect(notice?.querySelector('.st-banner.compact')).not.toBeNull();
+		expect(within(notice as HTMLElement).getByRole('button', { name: 'Open Claude settings' }).textContent).toBe('Use an API key');
+		await fireEvent.click(within(notice as HTMLElement).getByRole('button', { name: 'About scheduled Claude runs' }));
+		expect(within(document.body).getByRole('tooltip').textContent).toContain('holds unattended turns past its budget until you confirm them');
+		const error = within(document.body).getByRole('alert');
+		expect(error.querySelector('.st-banner')?.classList.contains('compact')).toBe(false);
+		expect(error.querySelector('.acts')?.textContent).toBe('Dismiss');
+	});
 	it('shows for a Claude model on a signed-in Claude subscription', async () => {
 		const notice = await noticeFor(signedIn, { formModel: 'haiku' });
 		expect(notice?.textContent).toContain('Claude runs on your subscription');

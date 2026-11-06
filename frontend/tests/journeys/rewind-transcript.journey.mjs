@@ -25,7 +25,8 @@ import {
 	typeAndSend,
 	uniq,
 	waitChat,
-	waitTurnSettled
+	waitTurnSettled,
+	withChatSetup
 } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 import { frames, markTime, spans } from './lib/timeline.mjs';
@@ -95,7 +96,7 @@ async function startClaudeChat({ page, status, variant }) {
 		await gotoApp(page, status);
 	}
 	await waitChat(page, { surface: 'new' });
-	const hero = page.getByRole('region', { name: 'New session' });
+	const hero = page.getByRole('region', { name: 'New chat' });
 	const menu = page.getByRole('menu', { name: 'Agent selection' });
 	await pick(
 		hero.getByRole('button', { name: /^Agent:/ }),
@@ -103,7 +104,9 @@ async function startClaudeChat({ page, status, variant }) {
 		menu.getByRole('button', { name: 'Dev (Claude Code)', exact: true }),
 		hero.getByRole('button', { name: 'Agent: Dev (Claude Code)' })
 	);
-	expect(await hero.getByRole('button', { name: /^No project/ }).isVisible(), 'fresh chat has no project');
+	await withChatSetup(page, async () => {
+		expect(await hero.getByRole('button', { name: /^No project/ }).isVisible(), 'fresh chat has no project');
+	});
 }
 
 /**

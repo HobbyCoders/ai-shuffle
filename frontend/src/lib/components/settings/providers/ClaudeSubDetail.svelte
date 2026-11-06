@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { detailLine } from './credential-display';
 	/**
 	 * The Claude subscription: the stock CLI's own sign-in on this worker.
 	 * Overview has the CLI facts and the sign-in (in-app terminal on the
@@ -99,22 +100,15 @@
 					: 'Selected, not ready'
 	);
 
-	const facts = $derived(inactive ? [
-		{ label: 'Account', value: account?.email ?? null },
-		{ label: 'Plan', value: claudePlan(account?.plan) },
-		{ label: 'Organization', value: account?.org_name ?? null },
-		{ label: 'Checked', value: checkedLabel(account?.checked_at) }
-	] : [
-		{ label: 'Account', value: signedIn ? (status?.email ?? summaryCli?.email ?? null) : 'None' },
-		{ label: 'Plan', value: claudePlan(status?.plan ?? summaryCli?.plan) },
-		{
-			label: 'Unattended',
-			value: guard.status?.applies
-				? `${guard.status.usage.install_last_hour} of ${guard.status.install_turns_per_hour} this hour`
-				: null
-		},
-		{ label: 'CLI', value: status?.cli_version ?? null, mono: true }
-	]);
+	const line = $derived(inactive
+		? detailLine(position, account?.email, claudePlan(account?.plan), account?.org_name, checkedLabel(account?.checked_at))
+		: detailLine(
+				position,
+				signedIn ? (status?.email ?? summaryCli?.email) : 'Not signed in',
+				claudePlan(status?.plan ?? summaryCli?.plan),
+				guard.status?.applies ? `${guard.status.usage.install_last_hour} of ${guard.status.install_turns_per_hour} unattended turns this hour` : null,
+				status?.cli_version && `CLI ${status.cli_version}`
+			));
 
 	const tabs = $derived(inactive ? [{ id: 'Overview' }, { id: 'Models' }] : [
 		{ id: 'Overview' },
@@ -220,17 +214,15 @@
 
 <DetailPane
 	name={credential.name}
-	badge="Subscription"
-	status={credential.status}
-	statusText={credential.statusText}
-	subtitle={position}
-	{facts}
+	status={credential.attention ? credential.status : undefined}
+	statusText={credential.attention ? credential.statusText : undefined}
+	subtitle={line}
 	{tabs}
 	{danger}
 >
 	{#snippet tile()}<ProviderTile {provider} size="lg" />{/snippet}
 	{#snippet primary()}
-		{#if account}<CredentialControl {credential} />{/if}
+		{#if account}<CredentialControl {credential} showState />{/if}
 		{#if inactive}
 			{#if account?.needs_sign_in}
 				<button type="button" class="st-btn primary" disabled={access.readOnly} onclick={signInAgain}><SquareTerminal />Sign in again</button>

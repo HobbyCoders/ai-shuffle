@@ -7,6 +7,7 @@
 	 */
 	import { tick } from 'svelte';
 	import { Search } from 'lucide-svelte';
+	import EmptyDetail from './EmptyDetail.svelte';
 	import { query as searchQuery } from '$lib/settings/search';
 	import { settingsNav } from '$lib/settings/navigation.svelte';
 	import type { SearchItem } from '$lib/settings/types';
@@ -120,7 +121,7 @@
 				<span>{hit.where}</span>
 			</div>
 		{:else}
-			<div class="st-res-empty" role="status">No setting matches “{query.trim()}”</div>
+			<div class="st-res-empty" role="status"><EmptyDetail message={`No setting matches “${query.trim()}”`} actionLabel="Clear" onAction={() => { query = ''; input?.focus(); }} /></div>
 		{/each}
 	{/if}
 </div>
@@ -129,11 +130,14 @@
 	.st-search {
 		position: relative;
 		margin-bottom: 6px;
+		border: 1px solid var(--st-input);
+		border-radius: var(--st-radius-md);
+		background: var(--st-field);
 	}
 	.st-search-icon {
 		position: absolute;
-		left: 10px;
-		top: 9px;
+		left: 12px;
+		top: 8px;
 		display: flex;
 		color: var(--st-mfg);
 		pointer-events: none;
@@ -144,12 +148,12 @@
 	}
 	input {
 		width: 100%;
-		height: 33px;
+		height: 32px;
 		border-radius: var(--st-radius-md);
-		border: 1px solid var(--st-input);
-		background: var(--st-muted);
+		border: 0;
+		background: transparent;
 		color: var(--st-fg);
-		padding: 0 52px 0 32px;
+		padding: 0 52px 0 34px;
 		font-size: 13px;
 	}
 	input::-webkit-search-cancel-button {
@@ -158,21 +162,16 @@
 	input::placeholder {
 		color: var(--st-subtle);
 	}
-	input:focus {
-		outline: none;
-		border-color: var(--st-primary);
-		box-shadow: 0 0 0 3px var(--st-primary-soft);
-	}
+	.st-search:focus-within { outline: 1.5px solid var(--panel-search-ring); outline-offset: 1px; }
+	.st-search input, .st-search input:focus, .st-search input:focus-visible { border: 0; outline: none; box-shadow: none; }
 	kbd {
 		position: absolute;
 		right: 8px;
-		top: 7px;
-		font-family: var(--st-mono);
-		font-size: 10.5px;
+		top: 6px;
+		font-family: inherit;
+		font-size: 12px;
 		color: var(--st-subtle);
-		border: 1px solid var(--st-border-strong);
-		border-radius: 4px;
-		padding: 0 5px;
+		padding: 0 2px;
 		line-height: 17px;
 	}
 	.st-results {
@@ -215,6 +214,6 @@
 	.st-res-empty {
 		font-size: 13px;
 		color: var(--st-mfg);
-		padding: 8px 10px;
+		padding: 0;
 	}
 </style>

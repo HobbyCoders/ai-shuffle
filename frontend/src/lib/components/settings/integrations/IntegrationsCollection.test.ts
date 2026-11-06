@@ -120,6 +120,8 @@ describe('list', () => {
 		expect(screen.getByRole('button', { name: /Home Assistant/ }).textContent).toContain('Disabled');
 		expect(screen.getByText('3')).toBeTruthy();
 		expect(searchSource().map((s) => s.title)).toContain('Discord Bot');
+  expect(screen.queryByRole('searchbox')).toBeNull();
+  expect(screen.getByRole('button', { name: /Discord Bot/ }).closest('.st-card')).toBeTruthy();
 	});
 
 	it('shows the empty state and keeps Add available after a load failure', async () => {
@@ -264,7 +266,7 @@ describe('one API user', () => {
 
 	it('says permissions always ask', async () => {
 		await open('u1', 'Run');
-		expect(screen.getByText('Ask, always')).toBeTruthy();
+		expect(screen.getByText('Ask first, always')).toBeTruthy();
 	});
 
 	it('rotates the key only after "Replace the key now?"', async () => {
@@ -323,8 +325,8 @@ describe('one API user', () => {
 			},
 			{ id: 'other', title: 'Not mine', api_user_id: 'u9', updated_at: '2026-03-01T00:00:00Z' }
 		);
-		await open('u1', 'Sessions');
-		expect(screen.getByRole('tab', { name: /Sessions/ }).textContent).toContain('2');
+		await open('u1', 'Chats');
+		expect(screen.getByRole('tab', { name: /Chats/ }).textContent).toContain('2');
 		const rows = screen.getAllByRole('button').filter((b) => b.classList.contains('ses'));
 		expect(rows.map((r) => r.querySelector('.ses-name')?.textContent)).toEqual(['sess-new', 'Older']);
 		expect(within(rows[1]).getByText('Helper, Website')).toBeTruthy();
@@ -342,7 +344,7 @@ describe('one API user', () => {
 			null
 		);
 		expect(openChat).toHaveBeenCalledWith('sess-new-5678');
-		await fireEvent.click(screen.getByRole('button', { name: 'Refresh sessions' }));
+		await fireEvent.click(screen.getByRole('button', { name: 'Refresh chats' }));
 		expect(loadApiUserSessions).toHaveBeenCalledOnce();
 	});
 });

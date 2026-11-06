@@ -27,7 +27,7 @@
 		gap: 8px;
 		height: 32px;
 		border: 1px solid var(--st-input);
-		background: var(--st-muted);
+		background: var(--st-field);
 		border-radius: var(--st-radius-md);
 		padding: 0 4px 0 10px;
 		color: var(--st-mfg);
@@ -46,6 +46,7 @@
 		min-width: 0;
 		color: var(--st-fg);
 	}
+	.st-msearch input, .st-msearch input:focus, .st-msearch input:focus-visible { border: 0; outline: none; box-shadow: none; }
 	input::-webkit-search-cancel-button {
 		-webkit-appearance: none;
 	}
@@ -53,8 +54,9 @@
 		color: var(--st-subtle);
 	}
 	.st-msearch:focus-within {
-		border-color: var(--st-primary);
-		box-shadow: 0 0 0 3px var(--st-primary-soft);
+		border-color: var(--st-field-focus);
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
 	}
 	.clear {
 		display: grid;

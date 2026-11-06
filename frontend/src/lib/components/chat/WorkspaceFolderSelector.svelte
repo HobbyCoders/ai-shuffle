@@ -107,7 +107,7 @@
 	<button type="button" class="sentence-tok" class:open bind:this={trigger}
 		aria-label="Workspace folders: {projectName}{folderIds.length ? ` and ${folderIds.length} more` : ''}"
 		aria-haspopup="dialog" aria-expanded={open} title="Workspace folders" onclick={toggle}
-	>{projectName}{#if folderIds.length}<span class="sentence-count">+{folderIds.length}</span>{/if}</button>
+	><FolderClosed size={14} strokeWidth={1.75} aria-hidden="true" /><span class="sentence-tok-label">{projectName}</span>{#if folderIds.length}<span class="sentence-count">+{folderIds.length}</span>{/if}</button>
 	{:else}
 	<button type="button" class="ctx-chip repo-chip" class:open bind:this={trigger}
 		aria-label="Workspace folders: {projectName}" aria-haspopup="dialog" aria-expanded={open}
@@ -120,7 +120,7 @@
 	{/if}
 	{#if open}
 		<div class="workspace-dropdown" class:floating={sentence} role="dialog" aria-label="Workspace folders" aria-busy={saving}
-			bind:this={panel} use:floatingMenu={{ anchor: trigger, align: 'center', enabled: sentence }}>
+			bind:this={panel} use:floatingMenu={{ anchor: trigger, align: 'start', enabled: sentence }}>
 			<div class="menu-heading">Workspace folders</div>
 			<div class="folder-list">
 				<div class="folder-row" title={mainProject?.path ?? projectName}>
@@ -142,7 +142,7 @@
 			</div>
 			{#if error}<p class="menu-error" role="alert">{error}</p>{/if}
 			{#if adding}
-				<div class="project-search"><Search size={14} aria-hidden="true" /><input bind:this={searchInput} bind:value={search} placeholder="Search projects…" aria-label="Search projects" /></div>
+				<div class="project-search"><Search size={14} aria-hidden="true" /><input bind:this={searchInput} bind:value={search} placeholder="Search projects" aria-label="Search projects" /></div>
 				<div class="project-options">
 					{#each available as project (project.id)}
 						<button type="button" class="project-option" disabled={saving} onclick={() => save([...folderIds, project.id])}>
@@ -172,7 +172,7 @@
 	@media (prefers-reduced-motion: reduce) { .workspace-dropdown.floating { animation: none; } }
 	.repo-name { max-width: 140px; }
 	.folder-count { color: var(--muted-foreground); font-size: 0.6875rem; }
-	.workspace-dropdown { position: absolute; bottom: calc(100% + 6px); left: 0; width: 320px; max-width: calc(100vw - 32px); max-height: min(440px, 65dvh); overflow-y: auto; padding: 6px; background: var(--popover); border: 1px solid var(--border); border-radius: calc(var(--radius, 0.75rem) * 0.83); box-shadow: var(--shadow-l); z-index: 100; color: var(--foreground); }
+	.workspace-dropdown { position: absolute; bottom: calc(100% + 6px); left: 0; width: 320px; max-width: calc(100vw - 32px); max-height: min(440px, 65dvh); overflow-y: auto; padding: 6px; background: var(--popover); border: 1px solid var(--menu-border); border-radius: var(--menu-radius); box-shadow: var(--menu-shadow); z-index: 100; color: var(--foreground); }
 	.menu-heading { padding: 7px 9px; font-size: 0.75rem; font-weight: 600; }
 	.folder-list, .project-options { max-height: 180px; overflow-y: auto; }
 	.folder-row, .project-option { display: flex; align-items: center; gap: 9px; padding: 8px 9px; min-width: 0; }

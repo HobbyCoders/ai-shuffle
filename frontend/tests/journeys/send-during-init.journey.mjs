@@ -5,7 +5,7 @@
 import { fakeAiTag, runJourney } from './runner.mjs';
 import {
 	PROJECT, composer, countUserRows, expect, holdBootLoad, openNewChat, sendButton,
-	settleServiceWorker, typeAndSend, uniq, waitChat, waitTurnSettled
+	settleServiceWorker, typeAndSend, uniq, waitChat, waitTurnSettled, withChatSetup
 } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 import { waitForCreatedChat } from './lib/boot.mjs';
@@ -130,7 +130,8 @@ await runJourney({
 			await page.waitForFunction(() => JSON.parse(localStorage.getItem('ai-shuffle-layout') || 'null')?.activeView != null,
 				null, { timeout: BOOT_HOLD.ms + 30_000 });
 			const picked = page.getByRole('button', { name: `Workspace folders: ${PROJECT}` });
-			expect(await picked.isVisible(), 'the picked project is still on the new-session screen after boot reconciled');
+			// In place on a wide screen, in Chat controls on a phone.
+			expect(await withChatSetup(page, () => picked.isVisible()), 'the picked project is still on the new-session screen after boot reconciled');
 			await mark('send');
 			await typeAndSend(page, `picked during init tok-${uniq()} ${fakeAiTag(variant)}`.trim());
 			await waitTurnSettled(page, { text: 'Fake AI here', messagesAtLeast: 2, hold: 0 });

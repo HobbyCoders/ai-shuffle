@@ -210,7 +210,7 @@ describe('firstCopyNotice', () => {
 
 	it('names the applying and failed phases, and the wait before a copy starts', () => {
 		expect(firstCopyNotice(syncing({ first_copy: copy({ phase: 'applying' }) }))?.message)
-			.toBe('Saving the data copied from ServerWorker. Sessions and workers appear when this finishes.');
+			.toBe('Saving the data copied from ServerWorker. Chats and workers appear when this finishes.');
 		const failed = firstCopyNotice(syncing({ first_copy: copy({ phase: 'failed', error: 'Peer transfer interrupted.' }) }));
 		expect(failed?.message).toBe('Copying from ServerWorker stopped: Peer transfer interrupted. It will retry on its own.');
 		expect(failed?.severity).toBe('warning');
@@ -239,7 +239,7 @@ describe('transcriptNotice', () => {
 		const notice = transcriptNotice(ready(copy()));
 		expect(notice?.title).toBe('Downloading transcripts');
 		expect(notice?.message).toBe(
-			'Downloading transcripts from ServerWorker: 312 of 1,152 sessions. Older chats fill in as they arrive; ' +
+			'Downloading transcripts from ServerWorker: 312 of 1,152 chats. Older chats fill in as they arrive; ' +
 				'a chat you open is fetched first.'
 		);
 		expect(notice?.fraction).toBeCloseTo(312 / 1152);
@@ -249,7 +249,7 @@ describe('transcriptNotice', () => {
 	it('says why it paused, and nothing when there is nothing left or the first copy still runs', () => {
 		const paused = transcriptNotice(ready(copy({ error: 'HTTP 503.' })));
 		expect(paused?.message).toBe(
-			'Downloading transcripts from ServerWorker paused at 312 of 1,152 sessions: HTTP 503. It will retry on its own.'
+			'Downloading transcripts from ServerWorker paused at 312 of 1,152 chats: HTTP 503. It will retry on its own.'
 		);
 		expect(paused?.severity).toBe('warning');
 		expect(transcriptNotice(ready(null))).toBeNull();

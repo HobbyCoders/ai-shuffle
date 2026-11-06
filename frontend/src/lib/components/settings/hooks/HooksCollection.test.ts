@@ -77,7 +77,16 @@ beforeEach(() => {
 afterEach(() => cleanup());
 
 describe('Settings > Hooks list', () => {
+ it('cards the app group and hides filtering for the short list', async () => {
+  await show();
+  expect(screen.queryByRole('searchbox')).toBeNull();
+  expect(screen.getByRole('button', { name: /^Guard rm/ }).closest('.st-card')).toBeTruthy();
+ });
 	it('groups app and plugin hooks and filters by search', async () => {
+  api.getAppHooks.mockResolvedValue([
+   hook(), hook({ id: 'h2', name: 'Notify', event: 'Stop', hook_type: 'webhook', command: null, url: 'https://ntfy.sh/x', tool_matcher: null, enabled: false }),
+   ...Array.from({ length: 4 }, (_, i) => hook({ id: `extra-${i}`, name: `Extra ${i}`, event: 'Stop', command: 'extra' }))
+  ]);
 		await show();
 		expect(screen.getByText('PreToolUse, Bash')).toBeTruthy();
 		expect(screen.getByText('Off, Stop')).toBeTruthy();
@@ -88,6 +97,48 @@ describe('Settings > Hooks list', () => {
 		expect(screen.getByText('Off, Stop')).toBeTruthy();
 		await fireEvent.input(screen.getByRole('searchbox'), { target: { value: 'zzz' } });
 		expect(screen.getByText('Nothing matches.')).toBeTruthy();
+  await fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+  expect((screen.getByRole('searchbox') as HTMLInputElement).value).toBe('');
+	});
+});
+
+describe('Settings > Hooks webhook secret', () => {
+	const SECRET = 'whsec_STORED_PLAINTEXT_9931';
+
+	async function openWebhook() {
+		api.getAppHooks.mockResolvedValue([
+			hook(),
+			hook({ id: 'h2', name: 'Notify', event: 'Stop', hook_type: 'webhook', command: null, url: 'https://ntfy.sh/x', tool_matcher: null, has_secret: true })
+		]);
+		await show('h2');
+		await waitFor(() => expect(screen.getByRole('button', { name: 'Replace' })).toBeTruthy());
+	}
+
+	function expectNotOnPage() {
+		expect(document.body.innerHTML).not.toContain(SECRET);
+		for (const input of document.querySelectorAll('input')) expect(input.value).not.toContain(SECRET);
+	}
+
+	it('reads Saved, and the stored secret never enters a field', async () => {
+		await openWebhook();
+		expect(screen.getByText('Saved')).toBeTruthy();
+		expectNotOnPage();
+		await fireEvent.click(screen.getByRole('button', { name: 'Replace' }));
+		expect((screen.getByLabelText('Secret') as HTMLInputElement).value).toBe('');
+		expectNotOnPage();
+	});
+
+	it('keeps the stored secret when a save leaves the field blank', () => {
+		const form = formFromHook(hook({ hook_type: 'webhook', has_secret: true }));
+		expect(form.secret).toBe('');
+		expect(updatePayload(form).secret).toBeUndefined();
+		expect(updatePayload({ ...form, secretState: 'replace' }).secret).toBeUndefined();
+	});
+
+	it('sends a new secret, and an empty one only for Remove', () => {
+		const form = formFromHook(hook({ hook_type: 'webhook', has_secret: true }));
+		expect(updatePayload({ ...form, secret: ' new ', secretState: 'replace' }).secret).toBe('new');
+		expect(updatePayload({ ...form, secretState: 'remove' }).secret).toBe('');
 	});
 });
 
@@ -109,8 +160,9 @@ describe('Settings > Hooks editing', () => {
 	it('shows saved-secret presence without hydrating it on an unrelated save', async () => {
 		api.getAppHooks.mockResolvedValue([hook({ hook_type: 'webhook', url: 'https://example.test', has_secret: true })]);
 		await show('h1');
-		expect(field('Leave blank to keep').value).toBe('');
-		expect(screen.getByText('Secret saved')).toBeTruthy();
+		expect(screen.getByText('Saved')).toBeTruthy();
+		await fireEvent.click(screen.getByRole('button', { name: 'Replace' }));
+		expect(field('New secret').value).toBe('');
 		await type(field('Block rm -rf'), 'Renamed');
 		await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 		await waitFor(() => expect(api.updateHook).toHaveBeenCalledWith('h1', expect.objectContaining({ name: 'Renamed', secret: undefined })));

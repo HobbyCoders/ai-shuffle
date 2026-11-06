@@ -154,6 +154,9 @@ class ToolSpec:
     # capabilities at attach time, before the first turn — the surface is
     # stable for the whole session.
     requires_extra: tuple[str, ...] = ()
+    # Retired compatibility aliases remain callable with normal permissions,
+    # but are never advertised to a new model context.
+    discoverable: bool = True
 
     def scope_of(self, input: dict[str, Any]) -> frozenset[str] | None:
         """Labels an ``allow_always`` for this call would cover (None = all)."""
@@ -445,6 +448,7 @@ class ToolRegistry:
                 name=name, description=tool.description, input_schema=tool.input_schema,
                 risk=tool.risk, source="inproc",
                 classify_risk=getattr(tool, "classify_risk", None),
+                discoverable=getattr(tool, "discoverable", True),
             )
             self._entries[name] = _Entry(
                 spec=spec, handler=tool.as_handler(), server=server.name,
@@ -512,7 +516,7 @@ class ToolRegistry:
     def list_tools(self, *, loaded_only: bool = True) -> list[ToolSpec]:
         return [
             e.spec for name, e in self._entries.items()
-            if (not loaded_only or name in self._loaded)
+            if e.spec.discoverable and (not loaded_only or name in self._loaded)
             and (e.spec.check_available is None or self.available(name))
         ]
 
@@ -520,7 +524,8 @@ class ToolRegistry:
         """Known-but-unloaded tools — the name+description tier of progressive
         disclosure. Their schemas enter the prompt only after ``load_schema``."""
         return [
-            e.spec for name, e in self._entries.items() if name not in self._loaded
+            e.spec for name, e in self._entries.items()
+            if e.spec.discoverable and name not in self._loaded
         ]
 
     def search_tools(self, query: str) -> list[ToolSpec]:
@@ -528,6 +533,8 @@ class ToolRegistry:
         tokens = [t for t in query.lower().split() if t]
         scored: list[tuple[int, str, ToolSpec]] = []
         for name, entry in self._entries.items():
+            if not entry.spec.discoverable:
+                continue
             hay = f"{name} {entry.spec.description}".lower()
             score = sum(1 for t in tokens if t in hay)
             if not tokens and query.lower() in hay:

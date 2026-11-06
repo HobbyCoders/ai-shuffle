@@ -7,7 +7,7 @@ import '../src/app.css';
 const params = new URLSearchParams(location.search);
 const phone = params.get('ui') === 'mobile';
 // `?older=1`: the server also holds older history behind the first page:
-// settled chats, a long run of archived ones (Settings owns those), a page and
+// settled chats, a long run of migrated history, a page and
 // a half of chats from a deleted project (the sidebar drops them), and a last
 // few settled ones. Exercises the "Load older sessions" shelf.
 const olderHistory = params.get('older') === '1';
@@ -43,7 +43,7 @@ let rows: Record<string, unknown>[] = [
 const olderRows: Record<string, unknown>[] = olderHistory
 	? [
 		...Array.from({ length: 90 }, (_, i) => ({ id: `older${i}`, title: `Older settled chat ${i + 1}`, status: 'idle', project: 'shuffle' })),
-		...Array.from({ length: 150 }, (_, i) => ({ id: `ar${i}`, title: `Archived chat ${i + 1}`, status: 'archived', project: 'shuffle' })),
+		...Array.from({ length: 150 }, (_, i) => ({ id: `ar${i}`, title: `Migrated settled chat ${i + 1}`, status: 'active', project: 'shuffle' })),
 		...Array.from({ length: 150 }, (_, i) => ({ id: `gone${i}`, title: `Deleted project chat ${i + 1}`, status: 'idle', project: 'deleted' })),
 		...Array.from({ length: 3 }, (_, i) => ({ id: `oldest${i}`, title: `Oldest settled chat ${i + 1}`, status: 'idle', project: 'notes' })),
 	].map(({ id, title, status, project }, i) => ({
@@ -57,7 +57,8 @@ const olderRows: Record<string, unknown>[] = olderHistory
 function cursorPage(url: URL) {
 	window.fixture.cursorRequests.push(url.search);
 	let pool = [...rows, ...olderRows];
-	if (url.searchParams.get('exclude_archived') === 'true') pool = pool.filter((r) => r.status !== 'archived');
+	const membership = url.searchParams.get('membership');
+	if (membership) pool = pool.filter((r) => Boolean(r.is_active) === (membership === 'active'));
 	if (url.searchParams.get('active_only') === 'true') pool = pool.filter((r) => r.is_active);
 	if (!olderHistory) return { items: pool, has_more: false, next_cursor: null, next_cursor_id: null };
 	const limit = Number(url.searchParams.get('limit') || 50);
@@ -86,9 +87,12 @@ window.fetch = async (input, init) => {
 		const request = JSON.parse(String(init.body));
 		window.fixture.patches.push({ id: active[1], body: request });
 		const row = rows.find((r) => r.id === active[1])!;
-		row.is_active = request.is_active;
-		if (request.archived !== undefined) row.status = request.archived ? 'archived' : 'idle';
+		row.is_active = request.archived ? false : request.is_active;
+		if (row.status === 'archived') row.status = 'active';
 		body = row;
+	} else if (path === '/sessions/count') {
+		const membership = url.searchParams.get('membership');
+		body = { total: [...rows, ...olderRows].filter((r) => !membership || Boolean(r.is_active) === (membership === 'active')).length };
 	} else if (path.startsWith('/sessions/cursor')) body = cursorPage(url);
 	else if (path === '/sessions') body = rows;
 	else if (path === '/projects') body = projects;

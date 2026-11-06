@@ -47,7 +47,7 @@
 	} from '$lib/stores/derived/git-action-options';
 	import { computeOperationSideEffects, resolveCommitPlan, branchNameFromMessage } from '$lib/stores/derived/git-action-options';
 	import { isApiError } from '$lib/api/client';
-	import ChatExportActions from './ChatExportActions.svelte';
+	import ChatExportMenu from './ChatExportMenu.svelte';
 	import { notify } from '$lib/stores/notifications';
 	import { pullNotification } from './git-pull-notification';
 	import { browserPanel } from '$lib/stores/browser-panel.svelte';
@@ -61,14 +61,14 @@
 	import { platform } from '$lib/stores/platform.svelte';
 	import type { MainPanelHeaderContext } from './main-panel-header';
 	import StudioTopBar from './StudioTopBar.svelte';
+	import { phoneLayout } from '$lib/components/chat/phone/phone-layout.svelte';
 	import NotificationDock from '$lib/components/NotificationDock.svelte';
 	import FeaturePanelHost from './FeaturePanelHost.svelte';
-	import { pageHeader } from '$lib/stores/page-header.svelte';
 	import NoProjectPill from './NoProjectPill.svelte';
 	import GitHeaderActions from '$lib/components/git/GitHeaderActions.svelte';
 	import { workerGitTargetFromKey, workerGitTargetKey } from './worker-git-target';
 	import { shouldShowHeaderGitActions } from './git-header-visibility';
-	import { chatHeaderTitle } from './chat-empty-state';
+	import { chatHeaderTitle, NEW_CHAT_LABEL } from './chat-empty-state';
 	import { warmHighlighter } from '$lib/utils/shiki';
 	import {
 		gitPollIntervalMs,
@@ -108,6 +108,8 @@
 		 * uses this for its one-bar AppTopBar; the web UI leaves it unset.
 		 */
 		header?: Snippet<[MainPanelHeaderContext]>;
+		/** The page on screen titles itself and the rail is its only chrome. */
+		hideTopBar?: boolean;
 		/** Desktop shell: sidebar state + toggle, surfaced in the top bar. */
 		sidebarCollapsed?: boolean;
 		onToggleSidebar?: () => void;
@@ -118,6 +120,7 @@
 	let {
 		onOpenSession,
 		header,
+		hideTopBar = false,
 		sidebarCollapsed = false,
 		navigationOverlayOpen,
 		onToggleSidebar
@@ -139,10 +142,11 @@
 		'plugins': 'Plugins',
 		'mcp': 'MCP Servers',
 		'notes': 'Notes',
+		'automations': 'Automations',
 		'hooks': 'Hooks',
 		'prs': 'Pull requests',
 		'stats': 'Stats',
-		'docs': 'Documentation',
+		'docs': 'Docs',
 		'terminal': 'Terminal',
 	};
 
@@ -270,16 +274,26 @@
 	// Breadcrumbs for the desktop top bar: `project › session title` in a chat,
 	// just the section name everywhere else. The project crumb returns to the
 	// sessions board.
+	// The empty New Chat has no crumbs: the greeting is all the page says.
+	const onEmptyNewChat = $derived(
+		$activeView?.type === 'session' && !activeTab?.sessionId && !activeTab?.messages.length
+	);
+	// The bar draws its rule only once the chat has a title of its own: an empty
+	// or still-unnamed chat has nothing for the line to sit under.
+	const topBarRule = $derived(
+		$activeView?.type !== 'session' || (!onEmptyNewChat && headerTitle !== NEW_CHAT_LABEL)
+	);
 	const crumbProject = $derived(
-		$activeView?.type === 'session' ? (headerProjectName || 'Sessions') : null
+		$activeView?.type === 'session' && !onEmptyNewChat ? (headerProjectName || 'Chats') : null
 	);
 	const crumbTitle = $derived.by(() => {
 		const type = $activeView?.type;
-		if (!type) return 'Sessions';
+		if (!type) return 'Chats';
+		if (onEmptyNewChat) return '';
 		if (type === 'session') return headerTitle;
-		if (type === 'board') return 'Sessions';
+		if (type === 'board') return 'Chats';
 		if (isBuildView) return 'Agents';
-		if (type === 'plugins' || type === 'mcp' || type === 'hooks') return 'Settings';
+		if (type === 'settings' || type === 'plugins' || type === 'mcp' || type === 'hooks') return 'Settings';
 		return viewTitles[type] || '';
 	});
 
@@ -942,7 +956,7 @@
 -->
 {#snippet downloadAction()}
 	{#if $activeView?.type === 'session' && activeTab?.sessionId && activeTab.messages.length > 0}
-		<ChatExportActions sessionId={activeTab.sessionId} />
+		<span class="header-exports"><ChatExportMenu sessionId={activeTab.sessionId} /></span>
 	{/if}
 {/snippet}
 
@@ -950,7 +964,7 @@
 	<!-- A running session without a project: the pill opens the one-way
 	     attach sheet (#371 step 4). It hides itself everywhere else. -->
 	{#if $activeView?.type === 'session' && activeTab?.sessionId}
-		<NoProjectPill compact={!!header} />
+		<NoProjectPill compact={!!header || phoneLayout.active} />
 	{/if}
 	<!-- Not in a subagent's chat: its requests and approvals show in its main
 	     chat's panel, labelled with the subagent. -->
@@ -994,7 +1008,7 @@
 				onClickShipIt={handleShipIt}
 				onOpenDiffReview={openDiffPanel}
 				showChatExports={!header}
-				compact={!!header}
+				compact={!!header || phoneLayout.active}
 			/>
 		</div>
 	{/if}
@@ -1011,24 +1025,21 @@
 			headerActions,
 			subagentChat: activeIsSubagent
 		})}
-	{:else}
+	{:else if !hideTopBar}
 		<!-- Desktop: one bar for the whole main panel — sidebar toggle,
 		     breadcrumbs, and the action cluster. -->
 		<StudioTopBar
 			projectLabel={crumbProject}
 			title={crumbTitle}
 			sessionId={activeTab?.sessionId ?? null}
+			newChat={onEmptyNewChat}
 			{sidebarCollapsed}
 			{onToggleSidebar}
+			rule={topBarRule}
 		>
 			{#snippet actions()}
 				{@render downloadAction()}
 				{@render headerActions()}
-				{#if pageHeader.actions}
-					<!-- Desktop app: the page on screen lends its header actions to
-					     the strip (see StudioPageHeader). -->
-					<div class="page-actions">{@render pageHeader.actions()}</div>
-				{/if}
 			{/snippet}
 		</StudioTopBar>
 	{/if}
@@ -1137,6 +1148,13 @@
 
 <!-- Git modals (rendered outside main-panel for proper z-index stacking) -->
 <style>
+	.header-exports { display: contents; }
+	/* A phone-width bar gives its room to the title; the chat's title menu
+	   carries these actions there (SessionTitleMenu). */
+	@media (max-width: 480px) {
+		.header-exports { display: none; }
+	}
+
 	.main-content { position: relative; display: flex; flex: 1; min-width: 0; min-height: 0; overflow: hidden; }
 	/* Keep composer popovers below the sibling side-panel overlay. */
 	.main-surface { isolation: isolate; display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; overflow: hidden; }
@@ -1151,13 +1169,6 @@
 		min-width: 0;
 		overflow: hidden;
 		background: var(--background);
-	}
-
-	/* Anchor for the git progress popover so it drops under the header actions. */
-	.page-actions {
-		display: flex;
-		align-items: center;
-		gap: 8px;
 	}
 
 	.git-actions-host {

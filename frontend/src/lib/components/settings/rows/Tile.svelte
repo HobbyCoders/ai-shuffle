@@ -65,6 +65,21 @@
 		border-style: dashed;
 		color: var(--st-mfg);
 	}
+	/* One phone row style: the glyph alone at 18px, no bordered tile. */
+	@media (max-width: 480px) {
+		.st-tile.sm,
+		.st-tile.dashed {
+			width: 18px;
+			height: 18px;
+			border: 0;
+			border-radius: 0;
+			background: none;
+		}
+		.st-tile.sm :global(svg) {
+			width: 18px;
+			height: 18px;
+		}
+	}
 	.corner {
 		position: absolute;
 		right: -3px;

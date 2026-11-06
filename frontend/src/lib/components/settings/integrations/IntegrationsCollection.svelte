@@ -13,7 +13,7 @@
 	import CollectionPage from '../shell/CollectionPage.svelte';
 	import EmptyDetail from '../shell/EmptyDetail.svelte';
 	import ListItem from '../rows/ListItem.svelte';
-	import ListGroupLabel from '../rows/ListGroupLabel.svelte';
+	import RowGroup from '../rows/RowGroup.svelte';
 	import InlineBanner from '../rows/InlineBanner.svelte';
 	import GitHubDetail from './GitHubDetail.svelte';
 	import ApiUserDetail from './ApiUserDetail.svelte';
@@ -82,13 +82,14 @@
 	category={CATEGORY}
 	count={1 + model.users.length}
 	addLabel="Add API user"
+ filterPlaceholder={1 + model.users.length + Number(!!model.draft) > 6 ? 'Filter integrations' : null}
 	onAdd={add}
 	addDisabled={model.forbidden}
 	bind:filter
 >
 	{#snippet list()}
 		{#if showGithub}
-			<ListGroupLabel label="Accounts" />
+			<RowGroup title="Accounts">
 			<ListItem
 				id="github"
 				name="GitHub"
@@ -97,9 +98,10 @@
 				status={github.authenticated ? 'ok' : 'off'}
 				summary={githubSummary}
 			/>
+   </RowGroup>
 		{/if}
 		<div data-setting-anchor="integrations.apiUsers">
-			<ListGroupLabel label="API users" />
+			<RowGroup title="API users">
 			{#if model.error === 'Failed to load data'}
 				<InlineBanner tone="warn">
 					<span role="alert">Could not load API users</span>
@@ -135,8 +137,9 @@
 			{:else if model.users.length === 0 && !model.draft}
 				<p class="st-empty">No API users yet.</p>
 			{:else if q && shownUsers.length === 0 && !showDraft}
-				<p class="st-empty">Nothing matches.</p>
+				<EmptyDetail message="Nothing matches." actionLabel="Clear" onAction={() => filter = ''} />
 			{/if}
+   </RowGroup>
 		</div>
 	{/snippet}
 	{#snippet detail()}
@@ -149,7 +152,7 @@
 		{:else if selected && selected !== DRAFT_ID && !model.loading}
 			<EmptyDetail icon={Plug} title="Not found" message="This API user was deleted." />
 		{:else}
-			<EmptyDetail icon={Plug} message="Select GitHub or an API user." />
+			<EmptyDetail icon={Plug} message="Select GitHub or an API user." idle />
 		{/if}
 	{/snippet}
 </CollectionPage>

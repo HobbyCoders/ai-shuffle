@@ -1,4 +1,5 @@
 <script lang="ts">
+	import ActionButton from '$lib/components/settings/rows/ActionButton.svelte';
 	import { onMount, onDestroy } from 'svelte';
 	import { api } from '$lib/api/client';
 	let { name = '', config = {}, connectorId, onConnected }: { name?: string; config?: Record<string, any>; connectorId?: string; onConnected: () => void } = $props();
@@ -62,19 +63,19 @@
 	{#if error}<p role="alert">{error}</p>{/if}
 	{#if status?.configured}
 		<p>Connect your own Gmail account—not a bot. Agents can use Gmail tools when you ask; connecting does not start email chats or auto-replies. Google will ask you to allow reading, composing, sending, and organizing email. AI Shuffle keeps your account credentials encrypted on this installation.</p>
-		<button class="connect" disabled={busy} onclick={connect}>{busy ? 'Waiting for Google…' : connectorId ? 'Reconnect with Google' : 'Connect with Google'}</button>
+		<ActionButton variant="primary" disabled={busy} onclick={connect}>{busy ? 'Waiting for Google…' : connectorId ? 'Reconnect with Google' : 'Connect with Google'}</ActionButton>
 	{:else if status}
 		<p>Google sign-in needs a one-time administrator setup for this installation. After that, accounts connect through Google without copying tokens.</p>
 	{:else}<p role="status">Loading Google sign-in…</p>{/if}
 	{#if status && !status.environment_managed}
-		<button class="settings" aria-expanded={setup} disabled={busy} onclick={() => setup = !setup}>{setup ? 'Hide Google app setup' : 'Google app setup (administrator)'}</button>
+		<ActionButton  aria-expanded={setup} disabled={busy} onclick={() => setup = !setup}>{setup ? 'Hide Google app setup' : 'Google app setup (administrator)'}</ActionButton>
 		{#if setup}
 			<p>Create a Web application OAuth client in <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener noreferrer">Google Cloud</a>. Enable the Gmail API and configure the consent screen. During testing, add the Google accounts that may connect. Public distribution requires Google's review of the requested Gmail permission.</p>
 			<label>Google client ID<input autocomplete="off" bind:value={clientId} /></label>
 			<label>Google client secret<input type="password" autocomplete="new-password" bind:value={clientSecret} /></label>
 			<label>Authorized redirect URI<input readonly value={redirectUri} /></label>
 			<p>Register this exact URI with Google. Use localhost or HTTPS. Saving replaces the Google app settings for this installation; existing connected accounts retain their credentials.</p>
-			<button disabled={busy || !clientId || !clientSecret} onclick={saveApp}>Save Google app settings</button>
+			<ActionButton disabled={busy || !clientId || !clientSecret} onclick={saveApp}>Save Google app settings</ActionButton>
 		{/if}
 	{:else if status?.environment_managed}<p>Google app settings are managed by this host's environment.</p>{/if}
 </section>
@@ -83,10 +84,6 @@
 	.google-signin { display: grid; gap: .75rem; font-size: .875rem; }
 	p { color: var(--muted-foreground); line-height: 1.5; }
 	[role='alert'] { color: var(--destructive); }
-	button { border: 1px solid var(--border); border-radius: .5rem; padding: .6rem .85rem; justify-self: start; }
-	.connect { background: var(--primary); color: var(--primary-foreground); }
-	.settings { font-size: .8rem; }
-	button:disabled { opacity: .5; }
 	label { display: grid; gap: .3rem; }
 	input { min-width: 0; width: 100%; padding: .5rem; border: 1px solid var(--border); border-radius: .35rem; background: var(--input); }
 	a { text-decoration: underline; }

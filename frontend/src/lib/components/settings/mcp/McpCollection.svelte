@@ -13,7 +13,7 @@
 	import CollectionPage from '../shell/CollectionPage.svelte';
 	import EmptyDetail from '../shell/EmptyDetail.svelte';
 	import ListItem from '../rows/ListItem.svelte';
-	import ListGroupLabel from '../rows/ListGroupLabel.svelte';
+	import RowGroup from '../rows/RowGroup.svelte';
 	import InlineBanner from '../rows/InlineBanner.svelte';
 	import McpServerDetail from './McpServerDetail.svelte';
 	import { DRAFT_ID, McpModel, detailLine, typeIcon } from './mcp-model.svelte';
@@ -50,7 +50,7 @@
 	category={CATEGORY}
 	count={model.servers.length}
 	addLabel="Add server"
-	filterPlaceholder="Filter servers"
+	filterPlaceholder={model.servers.length + Number(!!model.draft) > 6 ? 'Filter servers' : null}
 	onAdd={add}
 	addDisabled={model.forbidden}
 	bind:filter
@@ -66,8 +66,7 @@
 				</InlineBanner>
 			{/if}
 			{#if showDraft || custom.length}
-				<ListGroupLabel label="Custom" />
-			{/if}
+				<RowGroup title="Custom">
 			{#if showDraft && model.draft}
 				<ListItem
 					id={DRAFT_ID}
@@ -90,8 +89,10 @@
 					mono
 				/>
 			{/each}
+				</RowGroup>
+			{/if}
 			{#if builtins.length}
-				<ListGroupLabel label="Built-in" />
+				<RowGroup title="Built-in">
 				{#each builtins as s (s.name)}
 					<ListItem
 						id={s.name}
@@ -104,15 +105,16 @@
 						mono
 					/>
 				{/each}
+				</RowGroup>
 			{/if}
 			{#if model.forbidden}
-				<p class="st-empty">{FORBIDDEN_TEXT}</p>
+				<div class="st-card"><p class="st-empty">{FORBIDDEN_TEXT}</p></div>
 			{:else if model.loading && !model.loaded}
-				<p class="st-empty" role="status">Loading servers…</p>
+				<div class="st-card"><p class="st-empty" role="status">Loading servers…</p></div>
 			{:else if model.loaded && model.servers.length === 0 && !model.draft}
-				<p class="st-empty">No servers yet.</p>
+				<div class="st-card"><p class="st-empty">No servers yet.</p></div>
 			{:else if q && custom.length === 0 && builtins.length === 0 && !showDraft}
-				<p class="st-empty">Nothing matches.</p>
+				<EmptyDetail message="Nothing matches." actionLabel="Clear" onAction={() => filter = ''} />
 			{/if}
 		</div>
 	{/snippet}
@@ -124,7 +126,7 @@
 		{:else if selected && selected !== DRAFT_ID && model.loaded}
 			<EmptyDetail icon={Cable} title="Not found" message="This server was deleted." />
 		{:else}
-			<EmptyDetail icon={Cable} message="Select a server, or add one." />
+			<EmptyDetail icon={Cable} message="Select a server, or add one." idle />
 		{/if}
 	{/snippet}
 </CollectionPage>

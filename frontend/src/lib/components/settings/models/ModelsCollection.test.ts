@@ -158,8 +158,9 @@ describe('ModelsCollection', () => {
 		expect(labels).toEqual(['Generation', 'App tasks', 'Catalog']);
 		await waitFor(() => expect(item('Video').textContent).toContain('fal.ai · LTX 2'));
 		expect(item('Images').textContent).toContain('Asks each time');
-		expect(item('Images').querySelector('.st-dot.off')).toBeTruthy();
-		expect(item('Video').querySelector('.st-dot.off')).toBeNull();
+		// The words say it: no mark beside them.
+		expect(item('Images').querySelector('.st-dot')).toBeNull();
+		expect(item('Video').querySelector('.st-dot')).toBeNull();
 		await waitFor(() => expect(item('Text tasks').textContent).toContain('Sonnet, low effort'));
 		await waitFor(() => expect(item('Dictation').textContent).toContain('GPT-4o Transcribe'));
 		expect(item('Read aloud').textContent).toContain('Kokoro');
@@ -170,13 +171,10 @@ describe('ModelsCollection', () => {
 		}
 	});
 
-	it('filters by name, choice and group', async () => {
+	it('keeps the short list free of a filter', async () => {
 		render(ModelsCollection);
-		await fireEvent.input(screen.getByPlaceholderText('Filter default models'), { target: { value: 'generation' } });
-		const names = () => [...document.querySelectorAll('[data-settings-item]')].map((e) => e.getAttribute('data-settings-item'));
-		expect(names()).toEqual(['gen-image', 'gen-video', 'gen-audio', 'gen-3d', 'catalog']);
-		await fireEvent.input(screen.getByPlaceholderText('Filter default models'), { target: { value: 'aloud' } });
-		expect(names()).toEqual(['tts']);
+		expect(document.querySelectorAll('[data-settings-item]').length).toBeLessThanOrEqual(12);
+		expect(screen.queryByPlaceholderText('Filter default models')).toBeNull();
 	});
 
 	it('redirects the removed media tool items', () => {
@@ -318,7 +316,8 @@ describe('CatalogDetail, fal.ai models', () => {
 		}
 		await fireEvent.input(search, { target: { value: 'nothing-like-this' } });
 		expect(screen.getByText(/No models match/)).toBeTruthy();
-		await fireEvent.click(screen.getByRole('button', { name: 'Clear search' }));
+		await fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+  expect((search as HTMLInputElement).value).toBe('');
 		expect(rows()).toHaveLength(5);
 	});
 

@@ -1,4 +1,6 @@
 <script lang="ts">
+	import '$lib/components/ui/surfaces.css';
+	import Checkbox from '$lib/components/ui/Checkbox.svelte';
 	import Banner from '$lib/components/Banner.svelte';
 	/**
 	 * AddProjectModal - the shared "New project" dialog.
@@ -26,7 +28,9 @@
 	import { startProjectSetup } from '$lib/api/project-workers';
 	import type { GitHubRepo } from '$lib/api/github';
 	import type { Install } from '$lib/api/installs';
+	import { selfWorkerName, workerDisplayName } from '$lib/components/ui/worker-name';
 	import { onMount, untrack } from 'svelte';
+	import Segmented from '$lib/components/settings/rows/Segmented.svelte';
 	import DirectoryBrowser from '$lib/components/DirectoryBrowser.svelte';
 	import GitHubRepoPicker from '$lib/components/git/GitHubRepoPicker.svelte';
 	import { focusTrap } from '$lib/components/ui/focus-trap';
@@ -74,7 +78,7 @@
 	});
 
 	const installs = $derived<Install[]>($workerInstalls ?? []);
-	const selfName = $derived(installs.find((i) => i.is_self)?.device_name ?? 'this worker');
+	const selfName = $derived(selfWorkerName(installs));
 	const others = $derived(peerRunners(installs));
 	// The "Set it up on" list needs the cross-worker setup endpoints.
 	const canSetUpElsewhere = $derived($projectsOverviewSupported === true && others.length > 0);
@@ -176,7 +180,7 @@
 			? (progressText ?? 'Creating…')
 			: canSetUpElsewhere
 				? `Create on ${workerCount} ${workerCount === 1 ? 'worker' : 'workers'}`
-				: source === 'github' ? 'Clone project' : 'Add Project'
+				: source === 'github' ? 'Clone project' : 'Add project'
 	);
 
 	function toggleTarget(id: string) {
@@ -267,44 +271,39 @@
 <svelte:window onkeydown={handleWindowKeydown} />
 
 {#if open}
-	<div class="create-modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="add-project-title" tabindex="-1" use:portal use:focusTrap>
-		<button class="create-modal-backdrop-btn" onclick={onClose} tabindex="-1" aria-label="Close dialog"></button>
-		<div class="create-modal add-project-modal">
-			<div class="create-modal-header">
+	<div class="ui-overlay ui-surface" role="dialog" aria-modal="true" aria-labelledby="add-project-title" tabindex="-1" use:portal use:focusTrap>
+		<button class="ui-scrim" onclick={onClose} tabindex="-1" aria-label="Close dialog"></button>
+		<div class="ui-dialog">
+			<div class="ui-dialog-header">
 				<div>
-					<h3 id="add-project-title" class="create-modal-title">New project</h3>
-					<p class="create-modal-sub">Add a folder, or clone a repo from GitHub.</p>
+					<h3 id="add-project-title" class="ui-dialog-title">New project</h3>
+					<p class="ui-dialog-subtitle">Add a folder, or clone a repo from GitHub.</p>
 				</div>
-				<button class="create-modal-close" onclick={onClose} aria-label="Close">
+				<button class="ui-button ghost icon" onclick={onClose} aria-label="Close">
 					<X size={16} strokeWidth={1.5} />
 				</button>
 			</div>
 
+			<div class="ui-dialog-body project-body">
 			{#if addError}
 				<Banner message={addError} />
 			{/if}
 
-			<div class="src" role="radiogroup" aria-label="Source">
-				<button type="button" role="radio" aria-checked={source === 'folder'} class:on={source === 'folder'} onclick={() => (source = 'folder')} disabled={adding}>
-					<Folder size={14} strokeWidth={1.8} aria-hidden="true" /><span>Folder on {selfName}</span>
-				</button>
-				<button type="button" role="radio" aria-checked={source === 'github'} class:on={source === 'github'} onclick={() => (source = 'github')} disabled={adding}>
-					<Github size={14} strokeWidth={1.8} aria-hidden="true" /><span>Clone from GitHub</span>
-				</button>
-			</div>
+			<Segmented label="Source" selection="radio" stretch bind:value={source} disabled={adding}
+				options={[{ value: 'folder', label: `Folder on ${selfName}`, icon: Folder }, { value: 'github', label: 'Clone from GitHub', icon: Github }]} />
 
 			{#if source === 'folder'}
-				<div class="create-modal-field">
-					<span class="create-modal-label">Location</span>
+				<div class="ui-field">
+					<span class="ui-label">Location</span>
 					<DirectoryBrowser selectedPath={projectPath} onSelect={handleDirectorySelect} />
 				</div>
 
-				<div class="create-modal-field">
-					<label class="create-modal-label" for="add-project-path">Path</label>
+				<div class="ui-field">
+					<label class="ui-label" for="add-project-path">Path</label>
 					<input
 						id="add-project-path"
 						type="text"
-						class="create-modal-input create-modal-input--mono"
+						class="ui-input mono"
 						placeholder={isLocalMode ? '/path/to/project' : 'my-project'}
 						value={projectPath}
 						oninput={handlePathInput}
@@ -313,16 +312,16 @@
 					<span class="path-hint">Select a folder above or type a path. New folders will be created automatically.</span>
 				</div>
 			{:else}
-				<div class="create-modal-field" data-repo-picker>
-					<span class="create-modal-label">Repository</span>
+				<div class="ui-field" data-repo-picker>
+					<span class="ui-label">Repository</span>
 					<GitHubRepoPicker selectedUrl={cloneUrl} disabled={adding} onSelect={pickRepo} onConnect={openGitHubSettings} />
 				</div>
-				<div class="create-modal-field">
-					<label class="create-modal-label" for="add-project-url">Or paste a clone URL</label>
+				<div class="ui-field">
+					<label class="ui-label" for="add-project-url">Or paste a clone URL</label>
 					<input
 						id="add-project-url"
 						type="text"
-						class="create-modal-input create-modal-input--mono"
+						class="ui-input mono"
 						placeholder="https://github.com/owner/repo.git"
 						value={cloneUrl}
 						oninput={(e) => setCloneUrl((e.target as HTMLInputElement).value)}
@@ -333,24 +332,24 @@
 			{/if}
 
 			<div class="create-modal-row">
-				<div class="create-modal-field create-modal-field--half">
-					<label class="create-modal-label" for="add-project-name">Display Name</label>
+				<div class="ui-field ui-field--half">
+					<label class="ui-label" for="add-project-name">Display name</label>
 					<input
 						id="add-project-name"
 						type="text"
-						class="create-modal-input"
-						placeholder="My Project"
+						class="ui-input"
+						placeholder="My project"
 						bind:value={projectName}
 						oninput={() => { nameManuallyEdited = true; }}
 						onkeydown={onFieldEnter}
 					/>
 				</div>
-				<div class="create-modal-field create-modal-field--half">
-					<label class="create-modal-label" for="add-project-id">Project ID</label>
+				<div class="ui-field ui-field--half">
+					<label class="ui-label" for="add-project-id">Project ID</label>
 					<input
 						id="add-project-id"
 						type="text"
-						class="create-modal-input create-modal-input--mono"
+						class="ui-input mono"
 						placeholder="my-project"
 						bind:value={projectId}
 						oninput={() => { idManuallyEdited = true; }}
@@ -370,16 +369,9 @@
 						</div>
 						{#each others as w (w.id)}
 							{@const on = ticked.includes(w.id)}
-							<label class="wpick-row" class:dim={!w.online}>
-								<input
-									type="checkbox"
-									class="sr-only"
-									checked={on}
-									disabled={adding}
-									onchange={() => toggleTarget(w.id)}
-								/>
-								<span class="box" class:on aria-hidden="true">{#if on}<Check size={11} strokeWidth={3} />{/if}</span>
-								<span class="wpick-name">{w.device_name}{#if !w.online}<span class="hint">&nbsp;· offline</span>{/if}</span>
+							<div class="wpick-row" class:dim={!w.online}>
+								<Checkbox block checked={on} disabled={adding} label={workerDisplayName(w.device_name)} onchange={() => toggleTarget(w.id)}><span class="worker-copy">
+								<span class="wpick-name">{workerDisplayName(w.device_name)}{#if !w.online}<span class="hint">&nbsp;· offline</span>{/if}</span>
 								<span class="hint" class:mono={w.online && source === 'github'}>
 									{#if !w.online}
 										runs when it's back
@@ -389,7 +381,8 @@
 										creates an empty {folderLeaf} folder; files aren't copied
 									{/if}
 								</span>
-							</label>
+                            </span></Checkbox>
+							</div>
 						{/each}
 					</div>
 					<p class="hint foot">
@@ -402,185 +395,30 @@
 				</fieldset>
 			{/if}
 
-			<div class="create-modal-actions">
-				<button class="modal-btn cancel" onclick={onClose}>Cancel</button>
-				<button class="modal-btn create" disabled={!canSubmit} onclick={handleAddProject}>{submitLabel}</button>
+			</div>
+			<div class="ui-dialog-footer">
+				<button class="ui-button" onclick={onClose}>Cancel</button>
+				<button class="ui-button primary" disabled={!canSubmit} onclick={handleAddProject}>{submitLabel}</button>
 			</div>
 		</div>
 	</div>
 {/if}
 
 <style>
-	.create-modal-backdrop {
-		position: fixed;
-		inset: 0;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		z-index: 1000;
-		padding: 12px;
-	}
+ .project-body { display: grid; gap: 12px; }
 
-	.create-modal-backdrop-btn {
-		position: absolute;
-		inset: 0;
-		width: 100%;
-		height: 100%;
-		background: color-mix(in oklch, var(--background) 70%, transparent);
-		backdrop-filter: blur(4px);
-		border: none;
-		cursor: default;
-		padding: 0;
-	}
-
-	.create-modal {
-		position: relative;
-		z-index: 1;
-		background: var(--card);
-		border: 1px solid var(--border);
-		border-radius: 12px;
-		padding: 20px;
-		width: 380px;
-		max-width: 100%;
-		max-height: calc(100dvh - 24px);
-		overflow-y: auto;
-		box-shadow: var(--shadow-l);
-		display: flex;
-		flex-direction: column;
-		gap: 12px;
-	}
-
-	.add-project-modal { width: 520px; }
-
-	.create-modal-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
-	.create-modal-title { font-size: 0.9375rem; font-weight: 600; color: var(--foreground); margin: 0; }
-	.create-modal-sub { margin: 3px 0 0; font-size: 0.78rem; color: var(--muted-foreground); }
-
-	.create-modal-close {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		width: 28px;
-		height: 28px;
-		flex: none;
-		background: transparent;
-		border: none;
-		border-radius: 6px;
-		color: var(--muted-foreground);
-		cursor: pointer;
-		transition: all 150ms ease;
-	}
-	.create-modal-close:hover { background: var(--hover-overlay); color: var(--foreground); }
-	.create-modal-close:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
-
-	/* Source choice */
-	.src { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
-	.src button {
-		display: inline-flex;
-		align-items: center;
-		gap: 7px;
-		min-height: 38px;
-		padding: 8px 10px;
-		border: 1px solid var(--border);
-		border-radius: 9px;
-		background: transparent;
-		color: var(--muted-foreground);
-		font: inherit;
-		font-size: 0.8rem;
-		text-align: left;
-		cursor: pointer;
-		transition: border-color 120ms ease, color 120ms ease, background-color 120ms ease;
-	}
-	.src button span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-	.src button:hover:not(:disabled) { color: var(--foreground); background: var(--hover-overlay); }
-	.src button.on { border-color: var(--primary); color: var(--foreground); background: color-mix(in oklch, var(--primary) 10%, transparent); }
-	.src button:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
-	.src button:disabled { opacity: 0.6; cursor: not-allowed; }
-
-	.create-modal-field { display: flex; flex-direction: column; gap: 4px; }
-	.create-modal-field--half { flex: 1; min-width: 0; }
-	.create-modal-row { display: flex; gap: 12px; }
-	.create-modal-label { font-size: 0.75rem; font-weight: 500; color: var(--muted-foreground); }
-
-	.create-modal-input {
-		width: 100%;
-		padding: 8px 12px;
-		background: var(--background);
-		border: 1px solid var(--border);
-		border-radius: 8px;
-		color: var(--foreground);
-		font-size: 0.8125rem;
-		outline: none;
-		transition: border-color 150ms ease;
-	}
-	.create-modal-input--mono { font-family: var(--font-mono, 'JetBrains Mono', 'SF Mono', monospace); font-size: 0.75rem; }
-	.create-modal-input:focus { border-color: var(--primary); box-shadow: 0 0 0 2px color-mix(in oklch, var(--primary) 15%, transparent); }
-
-	.path-hint { font-size: 0.6875rem; color: var(--muted-foreground); opacity: 0.8; }
-	.path-hint code { font-family: var(--font-mono, monospace); color: var(--foreground); word-break: break-all; }
-
-	/* Set it up on */
-	.wpick-set { border: none; margin: 0; padding: 0; min-width: 0; }
-	.sect { padding: 0; margin: 2px 0 6px; font-size: 0.6875rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted-foreground); }
-	.wpick { border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
-	.wpick-row {
-		display: grid;
-		grid-template-columns: 18px minmax(0, auto) minmax(0, 1fr);
-		gap: 10px;
-		align-items: center;
-		min-height: 40px;
-		padding: 8px 11px;
-		border-top: 1px solid var(--border);
-		font-size: 0.8125rem;
-		color: var(--foreground);
-		cursor: pointer;
-	}
-	.wpick-row:first-child { border-top: 0; }
-	.wpick-row.locked { cursor: default; }
-	.wpick-row:not(.locked):hover { background: var(--hover-overlay); }
-	.wpick-row:has(input:focus-visible) { outline: 2px solid var(--ring); outline-offset: -2px; }
-	.wpick-row.dim .wpick-name { color: var(--muted-foreground); }
-	.wpick-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-	.wpick-row > .hint:last-child { justify-self: end; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
-	.box {
-		display: grid;
-		place-items: center;
-		width: 16px;
-		height: 16px;
-		border-radius: 4px;
-		border: 1.5px solid var(--muted-foreground);
-		color: var(--primary-foreground);
-		transition: background-color 120ms ease, border-color 120ms ease;
-	}
-	.box.on { background: var(--primary); border-color: var(--primary); }
-	.box.lock { background: color-mix(in oklch, var(--muted-foreground) 30%, transparent); border-color: transparent; color: var(--foreground); }
-	.hint { font-size: 0.72rem; color: var(--muted-foreground); }
-	.mono { font-family: var(--font-mono, monospace); }
-	.foot { margin: 8px 0 0; }
-
-	.create-modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
-
-	.modal-btn {
-		padding: 6px 14px;
-		min-height: 32px;
-		font-size: 0.8125rem;
-		font-weight: 500;
-		border-radius: 8px;
-		border: none;
-		cursor: pointer;
-		transition: all 150ms ease;
-	}
-	.modal-btn:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
-	.modal-btn.cancel { background: var(--secondary); color: var(--muted-foreground); }
-	.modal-btn.cancel:hover { background: var(--hover-overlay); color: var(--foreground); }
-	.modal-btn.create { background: var(--primary); color: var(--primary-foreground); }
-	.modal-btn.create:hover { opacity: 0.9; }
-	.modal-btn.create:disabled { opacity: 0.4; cursor: not-allowed; }
-
-	@media (max-width: 480px) {
-		.create-modal-row { flex-direction: column; }
-		.src { grid-template-columns: 1fr; }
-		.wpick-row { grid-template-columns: 18px minmax(0, 1fr); }
-		.wpick-row > .hint:last-child { grid-column: 2; justify-self: start; text-align: left; white-space: normal; }
-	}
+ .create-modal-row { display: flex; gap: 12px; }
+ .create-modal-row > div { flex: 1; }
+ .path-hint, .hint { font-size: 12px; color: var(--muted-foreground); }
+ .mono, code { font-family: var(--font-mono); }
+ code { overflow-wrap: anywhere; }
+ .wpick-set { border: 0; margin: 0; padding: 0; min-width: 0; }
+ .sect { font-size: 12px; color: var(--muted-foreground); margin-bottom: 6px; }
+ .wpick-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; min-height: 40px; padding: 8px 0; border-bottom: 1px solid var(--border); }
+ .wpick-name { min-width: 0; overflow-wrap: anywhere; }
+ .worker-copy { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+ .worker-copy > .hint:last-child { margin-left: auto; }
+ .box { display: grid; place-items: center; width: 16px; height: 16px; border: 1px solid var(--border); border-radius: 4px; background: var(--muted); color: var(--foreground); }
+ .foot { margin: 8px 0 0; }
+ @media (max-width: 600px) { .create-modal-row { flex-direction: column; } }
 </style>

@@ -104,10 +104,7 @@
 	type ChatKey = keyof ChatPreferences;
 	/** Row id -> chat preference it edits, in page order per group. */
 	const CONVERSATION: [string, ChatKey][] = [
-		['general.suggestReply', 'suggestNextResponse'],
-		['general.autoScroll', 'autoScrollOnNewMessage'],
-		['general.timestamps', 'showMessageTimestamps'],
-		['general.compact', 'compactMessageView']
+		['general.suggestReply', 'suggestNextResponse']
 	];
 	const THINKING: [string, ChatKey][] = [
 		['general.showThinking', 'showThinkingBlocks'],

@@ -112,7 +112,8 @@
 	<button
 		bind:this={cardNameRef}
 		type="button"
-		class="card-name {profileUnset ? 'unset' : ''}"
+		class="sentence-tok card-name"
+		class:unset={profileUnset}
 		class:open={showProfileDropdown}
 		class:pending={profilePending}
 		aria-busy={profilePending || undefined}
@@ -122,10 +123,10 @@
 		aria-haspopup="menu"
 		aria-expanded={showProfileDropdown}
 	>
-		<span class="card-name-text">{$activeSession.profile || hasNoAgents || profilePending ? selectedProfileName : 'Pick an agent'}</span>
-		<svg class="card-name-chev" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-			<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+		<svg fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+			<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.75" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
 		</svg>
+		<span class="sentence-tok-label card-name-text">{$activeSession.profile || hasNoAgents || profilePending ? selectedProfileName : 'Pick an agent'}</span>
 	</button>
 	{:else}
 	<button
@@ -144,8 +145,8 @@
 			<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.6" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
 		</svg>
 		<span class="ctx-chip-label selector-text">{selectedProfileName}</span>
-		<svg class="ctx-chip-chev" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-			<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+		<svg class="ctx-chip-chev" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" aria-hidden="true">
+			<path stroke-linecap="round" stroke-linejoin="round" d="m6 9 6 6 6-6" />
 		</svg>
 	</button>
 	{/if}
@@ -157,7 +158,7 @@
 			role="menu"
 			aria-label="Agent selection"
 			bind:this={dropdownRef}
-			use:floatingMenu={{ anchor: cardNameRef, align: 'center', enabled: floating }}
+			use:floatingMenu={{ anchor: cardNameRef, align: 'start', enabled: floating }}
 			use:menuHost={menuHostEl}
 		>
 			<GroupedSelector
@@ -226,20 +227,12 @@
 		min-height: 44px;
 	}
 
-	/* The agent chip is the first item in the composer's context row. It shares
-	   the `.ctx-chip` look (app.css) and only differs from its neighbours by
-	   carrying the foreground colour: the agent reads as the composer's subject. */
-	.context-selector-btn {
-		color: var(--foreground);
-	}
-
 	/* No agent picked (or none exist): amber so the missing choice is visible. */
 	.context-selector-btn.unset {
 		color: var(--warning);
 	}
 
 	.context-selector-btn.unset:hover {
-		background: color-mix(in oklab, var(--warning) 12%, var(--muted));
 		color: var(--warning);
 	}
 
@@ -255,11 +248,6 @@
 	@keyframes agent-pending {
 		0%, 100% { opacity: 0.5; }
 		50% { opacity: 1; }
-	}
-
-	.selector-icon {
-		width: 12px;
-		height: 12px;
 	}
 
 	.context-selector-btn.unset .selector-icon,
@@ -289,9 +277,9 @@
 		max-height: 60vh;
 		overflow-y: auto;
 		background: var(--popover);
-		border: 1px solid var(--border);
-		border-radius: var(--radius, 0.75rem);
-		box-shadow: var(--shadow-l);
+		border: 1px solid var(--menu-border);
+		border-radius: var(--menu-radius);
+		box-shadow: var(--menu-shadow);
 		z-index: 50;
 		padding: 6px;
 		animation: dropdown-fade-in 0.15s ease;
@@ -310,36 +298,9 @@
 
 	/* Scrollbar styling for dropdown */
 	/* ===== CARD VARIANT (new-session hero) ===== */
-	.card-name {
-		display: inline-flex;
-		align-items: center;
-		gap: 6px;
-		max-width: 100%;
-		padding: 0 8px;
-		border: none;
-		border-radius: calc(var(--radius, 10px) * 0.8);
-		background: transparent;
-		color: var(--foreground);
-		font-family: var(--font-display, Georgia, serif);
-		font-size: clamp(1.5rem, 3.2vw, 1.875rem);
-		font-weight: 700;
-		line-height: 1.15;
-		letter-spacing: -0.02em;
-		cursor: pointer;
-		transition: background 150ms cubic-bezier(0.4, 0, 0.2, 1);
-	}
-	.card-name:hover, .card-name.open { background: var(--hover-overlay); }
-	.card-name:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
-	.card-name.unset { color: var(--warning); }
-	.card-name-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-	.card-name-chev {
-		flex: none;
-		width: 16px;
-		height: 16px;
-		color: var(--subtle-foreground);
-		transition: transform 200ms cubic-bezier(0.16, 1, 0.3, 1);
-	}
-	.card-name.open .card-name-chev { transform: rotate(180deg); }
+	/* The agent reads as the row's subject; no agent is amber. */
+	.card-name.unset,
+	.card-name.unset:hover:not(:disabled) { color: var(--warning); }
 	/* The card sits above the composer: its menu floats to <body>
 	   (floatingMenu owns its position) and opens downward, or upward when it
 	   flips. Styled by its own class — once moved it is no longer inside
@@ -355,7 +316,6 @@
 		to { opacity: 1; transform: translateY(0); }
 	}
 	@media (prefers-reduced-motion: reduce) {
-		.card-name, .card-name-chev { transition: none; }
 		.context-selector-btn.pending .selector-text,
 		.card-name.pending .card-name-text { animation: none; }
 		.selector-dropdown { animation: none; }

@@ -9,7 +9,8 @@
 	 *    mode, without changing the Claude Code mode.
 	 */
 	import { getErrorMessage } from '$lib/api/client';
-	import { createModelProvider, updateModelProvider } from '$lib/api/model-providers';
+	import { createModelProvider, updateModelProvider, isNativeProvider } from '$lib/api/model-providers';
+	import { nativeOption } from '../native-options.svelte';
 	import { providers } from '$lib/stores/providers.svelte';
 	import RowGroup from '../../rows/RowGroup.svelte';
 	import SettingRow from '../../rows/SettingRow.svelte';
@@ -33,7 +34,9 @@
 			? KEY_CONFIG[draft.providerId]
 			: null
 	);
-	const placeholder = $derived(draft.flavor === 'anthropic' ? 'sk-ant-…' : (config?.placeholder ?? ''));
+	const native = $derived(isNativeProvider(draft.providerId));
+	const option = $derived(native ? nativeOption(draft.providerId, draft.flavor === 'plan-key') : undefined);
+	const placeholder = $derived(draft.flavor === 'anthropic' ? 'sk-ant-…' : option?.key_prefixes.length ? `${option.key_prefixes[0]}…` : (config?.placeholder ?? ''));
 
 	let key = $state('');
 	let label = $state('');
@@ -53,14 +56,14 @@
 				onFinish(claudeKeyItem(id));
 				return;
 			}
-			if (!config) return;
+			if (!config && !option) return;
 			// Keep the row on a refresh failure so a retry never creates a duplicate.
 			let rowId = draft.rowId;
 			if (!rowId) {
 				const row = await createModelProvider({
-					name: draft.name,
-					provider_type: config.provider_type,
-					base_url: config.base_url,
+					name: native ? label.trim() || draft.name : draft.name,
+					provider_type: option?.provider_type ?? config!.provider_type,
+					...(option ? (option.auth_mode === 'plan_key' ? { auth_mode: 'plan_key' as const } : {}) : { base_url: config!.base_url }),
 					auth_token: value
 				});
 				rowId = row.id;
@@ -88,21 +91,27 @@
 {:else}
 	<p class="pv-note">{draft.flavor === 'anthropic'
 		? 'This becomes the selected Anthropic key. The Claude Code mode stays unchanged.'
-		: 'This key becomes active. Other saved API keys for this provider turn off; subscriptions stay as they are.'}</p>
+		: draft.flavor === 'plan-key'
+			? 'This plan key becomes active. Other saved plan keys for this provider turn off; API keys stay as they are.'
+			: 'This key becomes active. Other saved API keys for this provider turn off; subscriptions stay as they are.'}</p>
+	{#if option}<p class="pv-note">Saving makes a tiny request to check the key and may use provider quota.</p>{/if}
 	<RowGroup title="Key">
-		{#if draft.flavor === 'anthropic'}
+		{#if draft.flavor === 'anthropic' || native}
 			<SettingRow label="Name" hint="Optional, to tell your accounts apart">
 				<TextField bind:value={label} placeholder="e.g. Work" maxlength={120} width={240} disabled={busy} />
 			</SettingRow>
 		{/if}
-		<SettingRow label="API key" hint={draft.flavor === 'anthropic' ? 'Pay per use' : undefined}>
+		{#if option}
+			<SettingRow label="Get a key"><a class="pv-link" href={option.key_page_url} target="_blank" rel="noopener noreferrer">{option.credential_label} ↗</a></SettingRow>
+		{/if}
+		<SettingRow label={option?.credential_label ?? 'API key'} hint={option?.key_prefixes.length ? `Usually starts with ${option.key_prefixes.join(' or ')}; other keys can still be saved` : draft.flavor === 'anthropic' ? 'Pay per use' : undefined}>
 			<TextField bind:value={key} type="password" mono {placeholder} width={240} disabled={busy} />
 		</SettingRow>
 	</RowGroup>
 	{#if error}<p class="pv-msg err" role="alert">{error}</p>{/if}
 	<div class="pv-acts">
 		<button type="button" class="st-btn ghost" disabled={busy} onclick={onCancel}>Cancel</button>
-		<button type="button" class="st-btn primary" disabled={busy || !key.trim()} onclick={submit}>
+		<button type="button" class="st-btn primary" disabled={busy || !key.trim() || (native && !option)} onclick={submit}>
 			{#if busy}Saving{:else if draft.flavor === 'anthropic'}Use this key{:else}{submitLabel}{/if}
 		</button>
 	</div>

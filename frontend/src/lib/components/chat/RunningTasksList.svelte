@@ -43,7 +43,7 @@
 	import { readable } from 'svelte/store';
 	import { TRANSCRIPT_ACTIONS, type TranscriptActions } from './TranscriptHydrationBoundary.svelte';
 	import {
-		ArrowLeft,
+		ChevronLeft,
 		ArrowRightLeft,
 		Bot,
 		ChevronDown,
@@ -1172,7 +1172,7 @@
 		<div class="rt-top">
 			{#if !embedded}
 				<button bind:this={closeRef} type="button" class="icon-btn back" aria-label="Close running tasks" onclick={closeSheet}>
-					<ArrowLeft size={20} class="back-arrow" /><X size={18} class="back-x" />
+					<ChevronLeft size={20} class="back-arrow" /><X size={18} class="back-x" />
 				</button>
 			{/if}
 			<div class="rt-title">

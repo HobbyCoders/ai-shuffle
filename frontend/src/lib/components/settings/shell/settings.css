@@ -14,12 +14,16 @@
 	--st-card: var(--card);
 	--st-popover: var(--popover);
 	--st-muted: var(--muted);
-	--st-accent: var(--accent);
+	/* The one selected fill, shared with the sidebar's rows. */
+	--st-accent: var(--row-selected);
 	--st-fg: var(--foreground);
 	--st-mfg: var(--muted-foreground);
-	--st-subtle: color-mix(in oklch, var(--muted-foreground) 72%, var(--background));
+	--st-subtle: var(--subtle-foreground);
 	--st-primary: var(--primary);
 	--st-pfg: var(--primary-foreground);
+	--st-action: var(--action);
+	--st-action-fg: var(--action-foreground);
+	--st-action-hover: var(--action-hover);
 	--st-primary-soft: color-mix(in oklch, var(--primary) 13%, transparent);
 	--st-primary-line: color-mix(in oklch, var(--primary) 45%, transparent);
 	--st-destructive: var(--destructive);
@@ -32,17 +36,29 @@
 	--st-warning-line: color-mix(in oklch, var(--warning) 50%, transparent);
 	--st-border: var(--border);
 	--st-border-strong: color-mix(in oklch, var(--foreground) 16%, transparent);
-	--st-input: var(--input);
+	--st-input: var(--field-border);
+	--st-field: var(--field-bg);
+	--st-field-focus: var(--field-border-focus);
 	--st-hover: color-mix(in oklch, var(--foreground) 4%, transparent);
 	--st-meter: color-mix(in oklch, var(--foreground) 42%, transparent);
 	--st-code-bg: var(--code-bg, var(--muted));
-	--st-knob: var(--card);
 	--st-shadow: 0 14px 40px color-mix(in oklch, var(--foreground) 14%, transparent), 0 0 0 1px var(--st-border-strong);
-	--st-radius: var(--radius, 10px);
-	--st-radius-md: calc(var(--radius, 10px) - 2px);
-	--st-radius-sm: calc(var(--radius, 10px) - 4px);
+	/* Cards 12, controls 8. */
+	--st-radius: calc(var(--radius, 8px) + 4px);
+	--st-radius-md: var(--radius, 8px);
+	--st-radius-sm: calc(var(--radius, 8px) - 2px);
 	--st-line: 1.5px;
-	--st-index-width: 224px;
+	--st-index-width: 264px; /* The chat list pane's default width (320 less the 56 rail). */
+	/* Where every page title sits, and the row above it that holds the back link.
+	   See `.settings-shell:has(> .st-index)` for the Settings pages' values. */
+	--st-page-top: 53px;
+	--st-reading-width: 760px;
+	--st-data-width: 1120px;
+	--st-prose-width: 720px;
+	--st-toc-width: 184px;
+	--st-toc-gap: 40px;
+	--st-gutter: 48px;
+	--st-dtop-height: 22px;
 	--st-mono: var(--font-mono, ui-monospace, 'JetBrains Mono', monospace);
 
 	container: settings / inline-size;
@@ -58,8 +74,10 @@
 	line-height: 1.4;
 }
 
+/* A requested target must land before the retained shell paints its old page. */
+.settings-shell.awaiting-target { visibility: hidden; }
+
 .dark .settings-shell {
-	--st-knob: var(--foreground);
 	--st-shadow: 0 14px 40px color-mix(in oklch, var(--background) 70%, transparent), 0 0 0 1px var(--st-border-strong);
 }
 
@@ -96,6 +114,8 @@
 .settings-shell .st-mono {
 	font-family: var(--st-mono);
 	font-size: 12px;
+	/* Otherwise the mono font draws "http://" as "http: //". */
+	font-variant-ligatures: none;
 }
 
 /* Lucide icons inside Settings */
@@ -113,6 +133,57 @@
 	display: flex;
 	flex-direction: column;
 	overflow: hidden;
+}
+
+/*
+ * A master/detail page with nothing selected: no empty third pane. The list
+ * takes the page's centred column until something opens.
+ */
+.settings-shell:not([data-stacked]) .st-coll:has(> .st-dpane > .st-empty-detail[data-idle]) {
+	grid-template-columns: minmax(0, 1fr);
+	justify-items: center;
+}
+.settings-shell:not([data-stacked]) .st-coll:has(> .st-dpane > .st-empty-detail[data-idle]) > .st-divider,
+.settings-shell:not([data-stacked]) .st-coll:has(> .st-dpane > .st-empty-detail[data-idle]) > .st-dpane {
+	display: none;
+}
+.settings-shell:not([data-stacked]) .st-coll:has(> .st-dpane > .st-empty-detail[data-idle]) > .st-lcol {
+	width: min(100%, 856px);
+	border-right: 0;
+	padding: 0 32px;
+}
+/* One centred column: heading, filter and rows share its one left edge. */
+.settings-shell:not([data-stacked]) .st-coll:has(> .st-dpane > .st-empty-detail[data-idle]) > .st-lcol .st-lhead {
+	padding-inline: 16px;
+}
+.settings-shell:not([data-stacked]) .st-coll:has(> .st-dpane > .st-empty-detail[data-idle]) > .st-lcol .st-page-title {
+	padding-left: 0;
+}
+.settings-shell:not([data-stacked]) .st-coll:has(> .st-dpane > .st-empty-detail[data-idle]) > .st-lcol .st-lscroll {
+	padding-inline: 16px;
+}
+
+/* A collection whose open item replaces the list: one pane, centred like the list. */
+.settings-shell:not([data-stacked]) .st-coll[data-replace='detail'] {
+	grid-template-columns: minmax(0, 1fr);
+}
+.settings-shell:not([data-stacked]) .st-coll[data-replace='detail'] > .st-divider,
+.settings-shell:not([data-stacked]) .st-coll[data-replace='detail'] > .st-lcol {
+	display: none;
+}
+.settings-shell:not([data-stacked]) .st-coll[data-replace='detail'] .st-dwrap {
+	width: 100%;
+	margin-inline: auto;
+}
+.settings-shell:not([data-stacked]) .st-coll[data-replace='detail'] .st-back {
+	display: inline-flex;
+	/* The chevron's stroke, not its 16px box, sits on the column's left edge. */
+	margin-left: -8px;
+}
+/* A detail that fills the page is the page: it takes the page title's size. */
+.settings-shell[data-stacked] .st-dhn h2,
+.settings-shell:not([data-stacked]) .st-coll[data-replace='detail'] .st-dhn h2 {
+	font-size: 24px;
 }
 
 /* ---------- row cards ---------- */
@@ -139,18 +210,24 @@
 
 /* ---------- shared buttons (used by several primitives and pages) ---------- */
 .settings-shell .st-btn {
+	position: relative;
+	justify-content: center;
 	display: inline-flex;
 	align-items: center;
 	gap: 6px;
-	height: 30px;
+	/* Two heights: 32 in rows and headers, 26 (.dense) only in dense popovers. */
+	height: 32px;
 	padding: 0 12px;
 	border-radius: var(--st-radius-md);
 	border: 1px solid var(--st-border-strong);
 	background: transparent;
+	color: var(--st-fg);
 	font-size: 13px;
 	font-weight: 500;
 	white-space: nowrap;
 }
+/* Secondary labels remain primary ink even inside a muted list summary. */
+.settings-shell .st-btn:not(.primary, .danger, .warn) { color: var(--st-fg); }
 .settings-shell .st-btn:hover:not(:disabled) {
 	background: var(--st-hover);
 }
@@ -158,13 +235,12 @@
 	opacity: 0.45;
 }
 .settings-shell .st-btn.primary {
-	background: var(--st-primary);
-	color: var(--st-pfg);
+	background: var(--st-action);
+	color: var(--st-action-fg);
 	border-color: transparent;
 }
 .settings-shell .st-btn.primary:hover:not(:disabled) {
-	background: var(--st-primary);
-	filter: brightness(1.06);
+	background: var(--st-action-hover);
 }
 .settings-shell .st-btn.danger {
 	color: var(--st-destructive);
@@ -177,49 +253,79 @@
 }
 .settings-shell .st-btn.ghost {
 	border-color: transparent;
-	color: var(--st-mfg);
-}
-.settings-shell .st-btn.ghost:hover:not(:disabled) {
-	color: var(--st-fg);
 }
 .settings-shell .st-btn.warn {
 	color: var(--st-warning);
 	border-color: var(--st-warning-line);
 }
 .settings-shell .st-btn.sm {
+	padding: 0 10px;
+}
+.settings-shell .st-btn.dense {
 	height: 26px;
-	padding: 0 9px;
-	font-size: 12.5px;
+	padding: 0 8px;
+	font-size: 12px;
 }
 .settings-shell .st-btn.icon {
-	width: 30px;
+	width: 32px;
 	padding: 0;
 	justify-content: center;
-}
-.settings-shell .st-btn.icon.sm {
-	width: 26px;
 }
 .settings-shell .st-btn svg.lucide {
 	width: 15px;
 	height: 15px;
 }
 
+/* Phone geometry belongs to the kit, not individual destination overrides.
+   data-stacked also covers the native shell on a wide/foldable viewport. */
+.settings-shell[data-stacked] :is(.st-btn, .st-back, .st-vbtn, .st-hotkey, .st-reset, .st-vlink, .st-help),
+.settings-shell[data-stacked] .st-seg button {
+ min-height: 44px;
+}
+.settings-shell[data-stacked] :is(.st-btn.icon, .st-vbtn, .st-reset, .st-help) { min-width: 44px; }
+.settings-shell[data-stacked] :is(input.st-txt, select.st-sel, .st-num) { min-height: 44px; font-size: 16px; }
+.settings-shell[data-stacked] :is(.st-num input, textarea) { font-size: 16px; }
+@media (max-width: 600px), (pointer: coarse) {
+ .settings-shell :is(.st-btn, .st-back, .st-vbtn, .st-hotkey, .st-reset, .st-vlink, .st-help),
+ .settings-shell .st-seg button { min-height: 44px; }
+ .settings-shell :is(.st-btn.icon, .st-vbtn, .st-reset, .st-help) { min-width: 44px; }
+ .settings-shell :is(input.st-txt, select.st-sel, .st-num) { min-height: 44px; font-size: 16px; }
+ .settings-shell :is(.st-num input, textarea) { font-size: 16px; }
+}
+
+/* Draw the control at desktop density; reserve a full 44px phone touch pitch. */
+.settings-shell[data-stacked] .st-btn { height: 32px; min-height: 32px; margin-block: 6px; }
+.settings-shell[data-stacked] .st-btn::after { content: ''; position: absolute; inset: -6px min(0px, calc((100% - 44px) / 2)); }
+.settings-shell[data-stacked] .st-btn.icon { min-width: 32px; margin-inline: 6px; }
+@media (max-width: 600px), (pointer: coarse) {
+ .settings-shell .st-btn { height: 32px; min-height: 32px; margin-block: 6px; }
+ .settings-shell .st-btn::after { content: ''; position: absolute; inset: -6px min(0px, calc((100% - 44px) / 2)); }
+ .settings-shell .st-btn.icon { min-width: 32px; margin-inline: 6px; }
+ .settings-shell .st-page-title .st-btn { margin-block: 0; }
+ .settings-shell .st-lhead { gap: 0; }
+}
+
 /* Back button: only in stacked mode */
 .settings-shell .st-back {
 	display: none;
 	align-items: center;
-	gap: 2px;
+	gap: 8px;
 	height: 32px;
 	padding: 0 8px 0 2px;
 	border: 0;
 	background: none;
 	border-radius: var(--st-radius-md);
-	font-size: 14px;
+	color: var(--st-mfg);
+	font-size: 13px;
 	flex: none;
 }
+.settings-shell .st-back:hover {
+	color: var(--st-fg);
+	background: var(--st-hover);
+}
 .settings-shell .st-back svg.lucide {
-	width: 20px;
-	height: 20px;
+	width: 16px;
+	height: 16px;
 }
 
 /* Search jump highlight */
@@ -244,6 +350,24 @@
 	font-size: 13px;
 }
 
+/* Preference and collection pages scroll in the same outer frame. Inner
+   max-widths no longer choose whether the column loses a scrollbar's width. */
+.settings-shell .settings-viewport > .st-content { overflow: visible; flex: 1 0 auto; }
+.settings-shell .settings-viewport :is(.st-pscroll, .st-lscroll, .st-dpane) { overflow: visible; }
+.settings-shell .settings-viewport .st-coll { min-height: 100%; }
+.settings-shell .settings-viewport .st-lcol { min-height: 0; }
+/* A split collection shares that outer scroller with its list, so a row picked
+   far down a long list must not open a detail scrolled out of view above it:
+   the open detail stays pinned while the list scrolls beneath it. */
+.settings-shell .settings-viewport .st-coll:not([data-replace]) > .st-dpane {
+	position: sticky;
+	top: 0;
+	align-self: start;
+	max-height: 100dvh;
+	overflow-y: auto;
+	overscroll-behavior: contain;
+}
+
 /* Scrollbars in the scroll panes */
 .settings-shell .st-scroll {
 	scrollbar-width: thin;
@@ -251,6 +375,13 @@
 }
 
 /* ---------- 601-900px of shell width: narrower index, fixed list ---------- */
+/* Settings pages share one title position: the page title centres on the index's
+   "Settings" title, and a back link sits in its own row above it. */
+.settings-shell:has(> .st-index) {
+	--st-page-top: 53px;
+	--st-dtop-height: 32px;
+}
+
 @container settings (max-width: 900px) {
 	.settings-shell .st-coll .st-divider {
 		display: none;
@@ -258,12 +389,7 @@
 	.settings-shell .st-coll {
 		--st-list-width: 280px !important;
 	}
-	.settings-shell .st-page {
-		padding: 28px 28px 100px;
-	}
-	.settings-shell .st-dwrap {
-		padding: 18px 22px 80px;
-	}
+	.settings-shell { --st-gutter: 28px; }
 }
 
 .settings-shell[data-mid] {
@@ -278,6 +404,7 @@
 
 /* ---------- stacked (phone app, or the shell is 600px or less) ---------- */
 .settings-shell[data-stacked] {
+	--st-gutter: 16px;
 	grid-template-columns: minmax(0, 1fr);
 }
 .settings-shell[data-stacked][data-view='index'] .st-content {
@@ -289,20 +416,26 @@
 .settings-shell[data-stacked] .st-back {
 	display: inline-flex;
 }
+/* Often the whole control on a phone, so the chevron keeps a thumb's size. */
+.settings-shell[data-stacked] .st-back svg.lucide {
+	width: 20px;
+	height: 20px;
+}
 .settings-shell[data-stacked] .st-index {
 	border-right: 0;
-	padding: 18px 14px 32px;
+	padding: 18px 16px 32px;
+	background: var(--st-bg);
 }
 .settings-shell[data-stacked] .st-ix-title {
 	font-size: 24px;
 	padding: 6px 4px 16px;
 }
 .settings-shell[data-stacked] .st-search input {
-	height: 40px;
-	font-size: 15px;
+	height: 44px;
+	font-size: 16px;
 }
 .settings-shell[data-stacked] .st-search .st-search-icon {
-	top: 12px;
+	top: 14px;
 }
 .settings-shell[data-stacked] .st-search kbd {
 	display: none;
@@ -319,21 +452,24 @@
 .settings-shell[data-stacked] .st-nav-item .st-go {
 	display: inline-flex;
 }
+/* Phone: the same card row as Providers and the sheets, glyph on one x. */
+@media (max-width: 480px) {
+	.settings-shell[data-stacked] .st-nav-g {
+		padding: 18px 8px 6px;
+	}
+	.settings-shell[data-stacked] .st-nav-item {
+		padding: 0 14px;
+	}
+}
 .settings-shell[data-stacked] .st-page {
-	padding: 0 14px 100px;
+	padding: 12px 16px 100px;
 }
 .settings-shell[data-stacked] .st-page-h {
-	position: sticky;
-	top: 0;
-	z-index: 5;
-	background: var(--st-bg);
-	margin: 0 -14px 14px;
-	padding: 10px 10px 10px 6px;
-	border-bottom: 1px solid var(--st-border);
-	gap: 4px;
+	min-height: 30px;
+	gap: 12px;
 }
 .settings-shell[data-stacked] .st-page-h h1 {
-	font-size: 17px;
+	font-size: 24px;
 }
 /*
  * SettingRow on the phone: label and control share a line while they fit and
@@ -360,12 +496,22 @@
 	margin-left: auto;
 	flex-wrap: wrap;
 }
-.settings-shell[data-stacked] .st-row:has(> .st-rc :is(.st-txt, .st-meter)) > .st-rc {
+.settings-shell[data-stacked] .st-row:has(> .st-rc :is(.st-txt, .st-meter, .st-text-field, .st-path, textarea, input:not([type='checkbox']):not([type='range']):not([type='radio']))) > .st-rc {
 	flex: 1 1 100%;
+	width: 100%;
+	margin-left: 0;
 	flex-wrap: nowrap;
 }
+.settings-shell[data-stacked] .st-row > .st-rc :is(.st-text-field, .st-path, form) { flex: 1; width: 100%; }
+.settings-shell[data-stacked] .st-row > .st-rc :is(input:not([type='checkbox']):not([type='range']):not([type='radio']), textarea) { width: 100%; min-width: 0; }
+@media (max-width: 600px) {
+	.settings-shell { --st-gutter: 16px; }
+	.settings-shell .st-row:has(> .st-rc :is(.st-txt, .st-text-field, .st-path, textarea, input:not([type='checkbox']):not([type='range']):not([type='radio']))) { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+	.settings-shell .st-row > .st-rc:has(:is(.st-text-field, .st-path, textarea, input:not([type='checkbox']):not([type='range']):not([type='radio']))) { width: 100%; justify-content: flex-start; }
+	.settings-shell .st-row > .st-rc :is(.st-text-field, .st-path, form) { flex: 1; width: 100%; }
+}
 .settings-shell[data-stacked] .st-row .st-txt {
-	flex: 1 1 160px;
+	flex: 1 1 100%;
 }
 .settings-shell[data-stacked] .st-row.mod .st-reset {
 	visibility: visible;
@@ -389,50 +535,56 @@
 	border-right: 0;
 }
 .settings-shell[data-stacked] .st-lhead {
-	padding: 10px 14px 10px 6px;
-	gap: 10px;
-	border-bottom: 1px solid var(--st-border);
+	padding: 12px 16px;
+	gap: 0;
+	border-bottom: 0;
 }
+/* PageTitle owns the title-to-content gap, including lists without a filter. */
+.settings-shell .st-lhead:not(:has(.st-filter, .st-ltools, .st-lfilters)) {
+	padding-bottom: 0;
+}
+.settings-shell .st-lscroll > .st-lg:first-child { padding-top: 0; }
 .settings-shell[data-stacked] .st-lhead .st-filter,
 .settings-shell[data-stacked] .st-lhead .st-ltools {
-	margin-left: 8px;
+	margin-left: 0;
 }
-.settings-shell[data-stacked] .st-lh-top h1 {
-	font-size: 17px;
+.settings-shell[data-stacked] .st-page-title {
+	font-size: 24px;
+	padding-left: 0;
 }
 .settings-shell[data-stacked] .st-lscroll {
-	padding: 0 6px 60px;
+	padding: 0 16px 60px;
 }
 .settings-shell[data-stacked] .st-it {
-	min-height: 54px;
+	min-height: 48px;
 }
+.settings-shell[data-stacked] .st-it.navigation { min-height: 44px; }
 .settings-shell[data-stacked] .st-dwrap {
-	padding: 0 14px 90px;
-}
-.settings-shell[data-stacked] .st-dtop {
-	position: sticky;
-	top: 0;
-	z-index: 5;
-	background: var(--st-bg);
-	margin: 0 -14px 14px;
-	padding: 10px 10px 10px 6px;
-	border-bottom: 1px solid var(--st-border);
+	padding: 12px 16px 90px;
 }
 .settings-shell[data-stacked] .st-dh {
-	grid-template-columns: auto minmax(0, 1fr);
+	align-items: center;
 }
+.settings-shell[data-stacked] .st-dhn {
+	min-height: 0;
+}
+
+.settings-shell[data-stacked] .st-dh { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+.settings-shell[data-stacked] .st-dh:has(> .st-dha) { grid-template-columns: minmax(0, 1fr) auto; }
+.settings-shell[data-stacked] .st-dh:has(> .st-identity > *) { grid-template-columns: auto minmax(0, 1fr); }
+.settings-shell[data-stacked] .st-dh:has(> .st-identity > *):has(> .st-dha) { grid-template-columns: auto minmax(0, 1fr) auto; }
 .settings-shell[data-stacked] .st-dha {
-	grid-column: 1 / -1;
-	justify-content: flex-start;
+	grid-column: auto;
+	justify-content: flex-end;
 }
-.settings-shell[data-stacked] .st-facts {
+.settings-shell[data-stacked] .st-facts:not(.line) {
 	grid-template-columns: repeat(2, minmax(0, 1fr));
 }
-.settings-shell[data-stacked] .st-fact:nth-child(odd) {
+.settings-shell[data-stacked] .st-facts:not(.line) .st-fact:nth-child(odd) {
 	border-left: 0;
 	padding-left: 0;
 }
-.settings-shell[data-stacked] .st-fact:nth-child(n + 3) {
+.settings-shell[data-stacked] .st-facts:not(.line) .st-fact:nth-child(n + 3) {
 	border-top: 1px solid var(--st-border);
 }
 .settings-shell[data-stacked] .st-meter {
@@ -485,14 +637,61 @@
 	.settings-shell:not([data-stacked]) .st-dpane .st-row .st-txt {
 		flex: 1 1 160px;
 	}
-	.settings-shell:not([data-stacked]) .st-dpane .st-facts {
+	.settings-shell:not([data-stacked]) .st-dpane .st-facts:not(.line) {
 		grid-template-columns: repeat(2, minmax(0, 1fr));
 	}
-	.settings-shell:not([data-stacked]) .st-dpane .st-fact:nth-child(odd) {
+	.settings-shell:not([data-stacked]) .st-dpane .st-facts:not(.line) .st-fact:nth-child(odd) {
 		border-left: 0;
 		padding-left: 0;
 	}
-	.settings-shell:not([data-stacked]) .st-dpane .st-fact:nth-child(n + 3) {
+	.settings-shell:not([data-stacked]) .st-dpane .st-facts:not(.line) .st-fact:nth-child(n + 3) {
 		border-top: 1px solid var(--st-border);
 	}
 }
+
+/* Phone section headings share the cards' 16px page edge and 15px labels. */
+.settings-shell[data-stacked] .st-grp .st-gt,
+.settings-shell[data-stacked] .st-nav-g,
+.settings-shell[data-stacked] .st-lg {
+	font-size: 15px;
+	font-weight: 500;
+	letter-spacing: 0;
+	color: var(--st-mfg);
+	padding-left: 0;
+}
+.settings-shell[data-stacked] .st-gt {
+	margin-bottom: 7px;
+}
+.settings-shell[data-stacked] .st-lg:not(.compact) {
+	padding-bottom: 7px;
+}
+/* Phone rows share one content edge, with selectors below their label and helper. */
+@media (max-width: 600px) {
+	.settings-shell[data-stacked] .st-row.st-phone-stack { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
+	.settings-shell[data-stacked] .st-row.st-phone-stack > .st-rc { width: 100%; margin-left: 0; }
+	.settings-shell .st-row.st-phone-stack > .st-rc > .st-seg { flex: 1; }
+	.settings-shell .st-row:has(.st-rh):has(> .st-rc :is(select, [role='combobox'], [aria-haspopup], .st-vbtn, .st-seg)) { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
+	.settings-shell .st-row:has(.st-rh) > .st-rc:has(:is(select, [role='combobox'], [aria-haspopup], .st-vbtn, .st-seg)) { display: flex; flex-wrap: nowrap; width: 100%; margin-left: 0; }
+	.settings-shell .st-row:has(.st-rh) > .st-rc :is(.st-sel-wrap, [role='combobox'], [aria-haspopup], .st-vbtn, .st-seg) { flex: 1; max-width: none !important; }
+	.settings-shell .st-row:has(.st-rh) > .st-rc > .st-btn:has(svg):not([aria-haspopup]) { flex: none; min-width: 44px; }
+	.settings-shell :is(.st-rl, .st-it .nm, .st-lg, .st-lg.compact) { font-size: 15px; }
+	.settings-shell .st-lg.compact { padding-inline: 0; }
+	.settings-shell :is(.st-nav-g, .st-lg, .st-gt) { color: var(--st-mfg); font-size: 15px; font-weight: 500; letter-spacing: 0; padding-inline: 0; }
+	.settings-shell .st-it:not(.navigation) { padding-inline: 0; }
+	.settings-shell .st-gt { padding-inline: 0; }
+}
+/* Native phone shells stay stacked even in an unfolded viewport. */
+.settings-shell[data-stacked] :is(.st-rl, .st-it .nm, .st-lg) { font-size: 15px; }
+.settings-shell[data-stacked] :is(.st-gt, .st-lg) { padding-inline: 0; }
+/* Only non-transcript disclosures: native triangles are replaced by the same line chevron. */
+.settings-shell details:not(.detail-more) > summary { list-style: none; display: flex; align-items: center; gap: 8px; }
+.settings-shell details:not(.detail-more) > summary::-webkit-details-marker { display: none; }
+.settings-shell details:not(.detail-more) > summary::before { content: ''; flex: none; width: 7px; height: 7px; margin: 0 4px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(-45deg); }
+.settings-shell details[open]:not(.detail-more) > summary::before { transform: rotate(45deg); }
+/* Additive content helpers: opt in to the shared card → footnote → section rhythm. */
+.settings-shell .st-footnote { margin: 12px 0 40px; color: var(--st-mfg); font-size: 13px; line-height: 1.45; }
+.settings-shell .st-grp:has(+ .st-footnote),
+.settings-shell article:has(+ .st-footnote) > .st-grp { margin-bottom: 0; }
+.settings-shell .st-card + .st-grp { margin-top: 40px; }
+.settings-shell .st-it.card { padding-inline: 16px; }
+.settings-shell .st-note:has(+ .st-grp) { margin-bottom: 40px; }

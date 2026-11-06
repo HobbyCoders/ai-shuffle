@@ -63,14 +63,14 @@ BUILTIN_TOOL_NAMES: tuple[str, ...] = (
     "AskUser", "SessionSearch", "SessionView", "WebFetch", "WebSearch",
     "Remember", "Recall", "Forget", "ListAgents", "SendMessage", "Swarm", "GetUsage",
     "ListSessions", "MessageSession", "StartSession",
-    "SettleSession", "UnsettleSession", "ArchiveSession",
+    "SettleSession", "UnsettleSession",
 )
 
 # These require the embedding app's owner/session database. Standalone Fluid
 # has no such authority on either leg; a host must explicitly wire it.
 HOST_ONLY_TOOL_NAMES = frozenset({
     "ListSessions", "MessageSession", "StartSession",
-    "SettleSession", "UnsettleSession", "ArchiveSession",
+    "SettleSession", "UnsettleSession",
 })
 _FULL_TOOLSET = frozenset(BUILTIN_TOOL_NAMES) - HOST_ONLY_TOOL_NAMES
 
@@ -106,7 +106,6 @@ TOOL_CAPABILITIES: dict[str, tuple[str, ...]] = {
     "StartSession": ("session_orchestration",),
     "SettleSession": ("session_orchestration",),
     "UnsettleSession": ("session_orchestration",),
-    "ArchiveSession": ("session_orchestration",),
     "Swarm": ("swarm", "task_dispatch"),
     "SessionSearch": ("session_search",),
     "SessionView": ("session_view",),

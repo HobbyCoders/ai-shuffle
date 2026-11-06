@@ -35,7 +35,7 @@ class FakeWorker:
         self.answer = answer or (lambda prompt: ("OK", []))
         self.tokens = tokens
         self.sessions = {}
-        self.sent, self.archived, self.stopped, self.compacted = [], [], [], []
+        self.sent, self.settled, self.stopped, self.compacted = [], [], [], []
         self.raise_on_send = None
         self.calls = 0
         self.compact_note = None
@@ -130,8 +130,8 @@ class FakeWorker:
         self.stopped.append(sid)
         self.sessions[sid]["queue"].clear()
 
-    def archive(self, sid):
-        self.archived.append(sid)
+    def settle(self, sid):
+        self.settled.append(sid)
 
 
 def _data(*rows, cap=600000):
@@ -153,7 +153,7 @@ def _run(worker, data, tmp_path, **kw):
 # -- runner ------------------------------------------------------------------
 
 
-def test_pass_writes_result_file_and_archives(tmp_path):
+def test_pass_writes_result_file_and_settles(tmp_path):
     worker = FakeWorker()
     data = _data(_script("t.1"), {"id": "t.2", "check": "Stop", "kind": "browser"},
                  {"id": "t.3", "check": "Quit", "kind": "owner"},
@@ -176,8 +176,8 @@ def test_pass_writes_result_file_and_archives(tmp_path):
     assert rows["t.3"]["reason"] == "owner step"
     assert rows["t.4"]["status"] == "not_run" and rows["t.4"]["reason"] == "UI journey in CI"
     assert result["tokens"] == {"input": 100, "output": 0, "cache_write": 0, "cache_read": 50, "counted": 100}
-    assert result["sessions"] == [{"session_id": "s1", "row": "t.1", "archived": True}]
-    assert worker.archived == ["s1"]
+    assert result["sessions"] == [{"session_id": "s1", "row": "t.1", "settled": True}]
+    assert worker.settled == ["s1"]
     assert worker.sent[0]["model"] == "haiku" and worker.sent[0]["permission_mode"] == "bypassPermissions"
     text = path.read_text().lower()
     assert "authorization" not in text and "password" not in text and "token\":" not in text
@@ -191,7 +191,7 @@ def test_failing_reply_is_a_fail_with_evidence(tmp_path):
     assert "does not match" in row["reason"]
     assert row["evidence"]["sessions"] == {"a": "s1"} and row["evidence"]["message_index"] == 1
     assert result["outcome"] == "fail"
-    assert worker.archived == ["s1"]
+    assert worker.settled == ["s1"]
 
 
 def test_missing_tool_and_user_count_checks(tmp_path):
@@ -213,7 +213,7 @@ def test_token_cap_stops_the_run(tmp_path):
     assert status[2] == ("t.3", "not_run", "token cap reached")
     assert result["cap_exceeded"] is True and result["outcome"] == "fail"
     assert "s2" in worker.stopped
-    assert sorted(worker.archived) == ["s1", "s2"]
+    assert sorted(worker.settled) == ["s1", "s2"]
     assert len(worker.sent) == 2
     verdict = gate.evaluate(tmp_path, REV, ["ServerWorker"], data["suites"][0]["rows"])
     assert verdict["verdict"] == "block"
@@ -250,7 +250,7 @@ def test_peer_session_is_targeted_and_ownership_checked(tmp_path):
     assert worker.sent[0]["target"] == "dev_peer"
 
 
-def test_interrupted_run_still_archives_and_writes(tmp_path):
+def test_interrupted_run_still_settles_and_writes(tmp_path):
     worker = FakeWorker()
 
     class Stop:
@@ -264,16 +264,16 @@ def test_interrupted_run_still_archives_and_writes(tmp_path):
     assert result["outcome"] == "interrupted"
     assert [r["status"] for r in result["rows"]] == ["pass", "not_run", "not_run"]
     assert [r["reason"] for r in result["rows"][1:]] == ["interrupted", "interrupted"]
-    assert worker.archived == ["s1"]
+    assert worker.settled == ["s1"]
     assert json.loads(path.read_text())["outcome"] == "interrupted"
 
 
-def test_interrupt_while_polling_archives_the_running_session(tmp_path):
+def test_interrupt_while_polling_settles_the_running_session(tmp_path):
     worker = FakeWorker()
     real_session = worker.session
 
     def session(sid):
-        if worker.calls >= 1 and not worker.archived:
+        if worker.calls >= 1 and not worker.settled:
             worker.calls += 1
             if worker.calls == 2:
                 raise KeyboardInterrupt
@@ -281,7 +281,7 @@ def test_interrupt_while_polling_archives_the_running_session(tmp_path):
     worker.session = session
     result, _ = _run(worker, _data(_script("t.1")), tmp_path)
     assert result["outcome"] == "interrupted"
-    assert worker.archived == ["s1"]
+    assert worker.settled == ["s1"]
 
 
 def test_unreachable_worker_writes_nothing(tmp_path):
@@ -656,7 +656,7 @@ def test_named_row_runs_and_is_recorded_without_renumbering(tmp_path: Path) -> N
     assert result["rows"][0]["status"] == "pass"
     assert results.read(path)["rows"] == result["rows"]
     assert result["partial"] is True
-    assert worker.archived == ["s1"]
+    assert worker.settled == ["s1"]
 
 
 # -- gate --------------------------------------------------------------------
@@ -811,13 +811,13 @@ def test_http_client_sends_origin_and_no_credentials():
         return httpx.Response(200, json={"workers": []})
     client = HttpWorkerClient("http://127.0.0.1:8000", transport=httpx.MockTransport(handler))
     assert client.deploy_status() == {"workers": []}
-    client.archive("s1")
+    client.settle("s1")
     with pytest.raises(AuthRefused, match="--token-file"):
         client.projects()
     for req in seen:
         assert req.headers["origin"] == "http://127.0.0.1:8000"
         assert "authorization" not in req.headers and "cookie" not in req.headers
-    assert seen[1].method == "PATCH" and json.loads(seen[1].content) == {"is_active": False, "archived": True}
+    assert seen[1].method == "PATCH" and json.loads(seen[1].content) == {"is_active": False}
 
 
 def test_http_client_sends_an_owner_token_only_when_given_one(tmp_path):
@@ -910,7 +910,7 @@ def test_client_calls_exist_on_the_real_worker():
     client.session("s1")
     client.state("s1")
     client.compact("s1")
-    client.archive("s1")
+    client.settle("s1")
     ws_path = urlsplit(client._ws_url()).path
 
     assert seen[0] == ("GET", "/api/v1/settings/application-updates/deploy-status")
@@ -960,6 +960,7 @@ def test_ws_send_starts_session_with_origin(ws_stub):
     assert sid == "new1"
     query = frames[0]
     assert query["type"] == "query" and query["prompt"] == "hello"
+    assert query["disposable_test"] is True
     assert query["overrides"] == {"model": "haiku", "permission_mode": "bypassPermissions"}
     assert query["target_instance_id"] == "dev_peer"
     assert {"type": "pong"} in frames
@@ -1005,7 +1006,7 @@ def test_harness_rows_ignore_model_wording_and_tool_choice(tmp_path):
     assert worker.deliveries == [("s3", "s2", "Live smoke r1: delivery probe; no reply required.", "r1-9")]
     evidence = result["rows"][1]["evidence"]["peer_delivery"]
     assert evidence["turn_id"] == "peer-turn-1" and evidence["delivery_status"] == "consumed"
-    assert len(worker.archived) == 3
+    assert len(worker.settled) == 3
 
 
 @pytest.mark.parametrize("receipt", ["queued", "begun", "stopped", "unknown"])
@@ -1151,7 +1152,7 @@ def test_preview_run_is_written_as_a_marked_preview_result(tmp_path):
                                  "worktree_id": WORKTREE, "verified_at_end": True}
     rows = {r["id"]: r for r in result["rows"]}
     # The real code path ran: a session was started and checked through the API.
-    assert rows["t.1"]["status"] == "pass" and worker.sent and worker.archived == ["s1"]
+    assert rows["t.1"]["status"] == "pass" and worker.sent and worker.settled == ["s1"]
     assert rows["t.2"]["status"] == "not_run" and "no other worker is paired" in rows["t.2"]["reason"]
     assert result["outcome"] == "incomplete"
 

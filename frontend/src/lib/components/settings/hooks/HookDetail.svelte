@@ -54,7 +54,7 @@
 	const needsSecret = $derived(!isDraft && !hook && form?.type === 'webhook' && form.hasSecret);
 
 	const scopeOptions = $derived([
-		{ value: '', label: 'App (all sessions)' },
+		{ value: '', label: 'App (all chats)' },
 		...$projects.map((p) => ({ value: p.id, label: p.name }))
 	]);
 	const scopeName = $derived.by(() => {
@@ -194,7 +194,7 @@
 							onchange={(v) => (form.projectId = v || null)}
 						/>
 					{:else}
-						<ValueText value={form.projectId ? `Project: ${scopeName}` : 'App (all sessions)'} tone="fg" />
+						<ValueText value={form.projectId ? `Project: ${scopeName}` : 'App (all chats)'} tone="fg" />
 					{/if}
 				</SettingRow>
 				<SettingRow label="Event" hint={EVENT_HINTS[form.event]}>
@@ -234,8 +234,21 @@
 					<SettingRow label="URL" hint="Receives a POST">
 						<TextField bind:value={form.url} type="url" placeholder="https://ntfy.sh/my-topic" mono width={300} />
 					</SettingRow>
-					<SettingRow label="Secret" hint={needsSecret ? 'Required to recreate' : hook?.has_secret ? 'Secret saved' : 'Signs each request'} help={needsSecret ? 'The previous secret cannot be recovered. Enter it again or choose a new signing secret before saving.' : 'The signature is sent in the X-Hook-Signature header. Leave blank to keep the saved secret.'}>
-						<TextField bind:value={form.secret} type="password" placeholder={needsSecret ? 'Required to recreate' : hook?.has_secret ? 'Leave blank to keep' : 'Optional'} mono width={220} />
+					<SettingRow label="Secret" hint={needsSecret ? 'Required to recreate' : 'Signs each request'} help="The signature is sent in the X-Hook-Signature header.">
+						{#if !needsSecret && (form.secretState === 'saved' || form.secretState === 'remove')}
+							<ValueText tone={form.secretState === 'remove' ? 'muted' : 'fg'} value={form.secretState === 'remove' ? 'Removed when you save' : 'Saved'} />
+							{#if form.secretState === 'saved'}
+								<button type="button" class="st-btn" onclick={() => (form.secretState = 'replace')}>Replace</button>
+								<button type="button" class="st-btn ghost" onclick={() => (form.secretState = 'remove')}>Remove</button>
+							{:else}
+								<button type="button" class="st-btn ghost" onclick={() => (form.secretState = 'saved')}>Keep</button>
+							{/if}
+						{:else}
+							<TextField bind:value={form.secret} type="password" label="Secret" autocomplete="new-password" placeholder={needsSecret ? 'Required to recreate' : form.secretState === 'replace' ? 'New secret' : 'Optional'} mono width={260} />
+							{#if form.secretState === 'replace'}
+								<button type="button" class="st-btn ghost" onclick={() => { form.secret = ''; form.secretState = 'saved'; }}>Cancel</button>
+							{/if}
+						{/if}
 					</SettingRow>
 					<SettingRow label="Timeout">
 						<NumberField bind:value={form.timeoutSec} min={1} max={300} unit="s" />

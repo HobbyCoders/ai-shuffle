@@ -14,7 +14,7 @@ export const SPEND_LIMIT_HELP =
 export const JOB_LIMIT_HELP =
 	'A background job that runs longer than this is stopped. Turns you started yourself are never stopped.';
 export const LIMIT_RESUME_HELP =
-	'When any provider stops a chat or a background worker at its usage limit and says when the limit resets, the chat resumes by itself shortly after that time, once. Either way, a usage limit is never retried before it resets. A chat you stopped, archived or moved is not resumed, and sending a message cancels it. Without a reset time nothing is scheduled.';
+	'When any provider stops a chat or a background worker at its usage limit and says when the limit resets, the chat resumes by itself shortly after that time, once. Either way, a usage limit is never retried before it resets. A chat you stopped, settled or moved is not resumed, and sending a message cancels it. Without a reset time nothing is scheduled.';
 export const LIMIT_COMPACT_HELP =
 	'Resuming does not make the next turn cheaper: by then the provider cache has expired, so it reads the whole conversation again. Compacting first makes that read much smaller. Applies only while Resume when the limit resets is on.';
 

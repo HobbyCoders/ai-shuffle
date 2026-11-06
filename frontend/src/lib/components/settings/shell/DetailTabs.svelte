@@ -3,6 +3,8 @@
 		id: string;
 		label?: string;
 		count?: number | string;
+		disabled?: boolean;
+		title?: string;
 	}
 
 	/** Extra room kept beside the active tab when it is scrolled into view. */
@@ -35,6 +37,7 @@
 	 * kept in view (after selection, keyboard moves and resizes).
 	 */
 	import { tick } from 'svelte';
+	import { ChevronRight } from 'lucide-svelte';
 
 	interface Props {
 		tabs: DetailTab[];
@@ -89,17 +92,19 @@
 	});
 
 	function onkeydown(event: KeyboardEvent) {
-		const i = tabs.findIndex((t) => t.id === current);
+		const enabled = tabs.filter((t) => !t.disabled);
+		if (!enabled.length) return;
+		const i = enabled.findIndex((t) => t.id === current);
 		let next = -1;
-		if (event.key === 'ArrowRight') next = (i + 1) % tabs.length;
-		else if (event.key === 'ArrowLeft') next = (i - 1 + tabs.length) % tabs.length;
+		if (event.key === 'ArrowRight') next = (i + 1) % enabled.length;
+		else if (event.key === 'ArrowLeft') next = (i - 1 + enabled.length) % enabled.length;
 		else if (event.key === 'Home') next = 0;
-		else if (event.key === 'End') next = tabs.length - 1;
+		else if (event.key === 'End') next = enabled.length - 1;
 		if (next < 0) return;
 		event.preventDefault();
-		onselect(tabs[next].id);
-		list?.querySelectorAll<HTMLElement>('[role="tab"]')[next]?.focus({ preventScroll: true });
-		reveal(tabs[next].id);
+		onselect(enabled[next].id);
+		list?.querySelector<HTMLElement>(`[data-tab-id="${enabled[next].id}"]`)?.focus({ preventScroll: true });
+		reveal(enabled[next].id);
 	}
 
 	/** A vertical wheel scrolls the strip sideways, until it reaches an end. */
@@ -176,6 +181,9 @@
 				role="tab"
 				id="{idPrefix}-tab-{tab.id}"
 				data-tab-id={tab.id}
+				disabled={tab.disabled}
+				aria-disabled={tab.disabled || undefined}
+				title={tab.title}
 				aria-selected={tab.id === current}
 				aria-controls="{idPrefix}-panel"
 				tabindex={tab.id === current ? 0 : -1}
@@ -185,9 +193,11 @@
 			</button>
 		{/each}
 	</div>
+	{#if moreRight}<span class="tabs-more" aria-hidden="true"><ChevronRight size={12} strokeWidth={1.8} /></span>{/if}
 </div>
 
 <style>
+	.tabs-more { position: absolute; right: 0; top: 0; bottom: 1px; z-index: 2; display: grid; place-items: center; width: 16px; color: var(--st-mfg); pointer-events: none; }
 	.st-tabs-wrap {
 		position: relative;
 		margin-top: 14px;
@@ -224,7 +234,7 @@
 		scrollbar-width: none;
 		touch-action: pan-x pan-y;
 		/* The baseline stays put while the tabs scroll over it. */
-		background: linear-gradient(var(--st-border), var(--st-border)) left bottom / 100% 1px no-repeat;
+		border-bottom: 1px solid var(--st-border);
 	}
 	.st-tabs::-webkit-scrollbar {
 		display: none;
@@ -242,7 +252,7 @@
 	button {
 		flex: none;
 		padding: 9px 0 10px;
-		font-size: 13.5px;
+		font-size: 13px;
 		color: var(--st-mfg);
 		border: 0;
 		background: none;
@@ -255,15 +265,23 @@
 	button[aria-selected='true'] {
 		color: var(--st-fg);
 		border-bottom-color: var(--st-fg);
-		font-weight: 500;
 	}
 	button:focus-visible {
 		outline-offset: -2px;
 	}
+	@media (max-width: 600px) {
+		.st-tabs-wrap::before, .st-tabs-wrap::after { width: 32px; }
+		.st-tabs-wrap::after { background: linear-gradient(to left, var(--st-bg) 12px, transparent 32px); }
+		.st-tabs-wrap::before { background: linear-gradient(to right, var(--st-bg) 12px, transparent 32px); }
+		.st-tabs { padding-inline-end: 24px; }
+		button { min-height: 44px; }
+	}
+	@media (prefers-reduced-motion: reduce) { .st-tabs-wrap::before, .st-tabs-wrap::after { transition: none; } }
 	.n {
-		font-size: 11.5px;
-		color: var(--st-subtle);
-		margin-left: 5px;
+		color: var(--st-mfg);
+		margin-left: 4px;
+		font-size: 11px;
+		font-weight: 500;
 		font-variant-numeric: tabular-nums;
 	}
 </style>

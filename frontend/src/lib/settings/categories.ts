@@ -41,7 +41,6 @@ export const CATEGORY_GROUPS: { id: CategoryGroup; label: string }[] = [
 
 const ROWS: CategoryRow[] = [
 	{ id: 'general', label: 'General', icon: SlidersHorizontal, group: 'personal' },
-	{ id: 'archived', label: 'Archived chats', icon: Archive, group: 'personal' },
 	{ id: 'voice', label: 'Voice', icon: AudioLines, group: 'personal' },
 	{ id: 'providers', label: 'Providers', icon: KeyRound, group: 'ai' },
 	{ id: 'models', label: 'Default models', icon: Sparkles, group: 'ai' },

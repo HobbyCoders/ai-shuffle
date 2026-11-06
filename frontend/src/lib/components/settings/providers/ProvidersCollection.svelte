@@ -32,6 +32,7 @@
 		parseProviderItem
 	} from './providers-model';
 	import { startGateway } from './provider-actions';
+	import { loadNativeOptions, nativeOptions } from './native-options.svelte';
 
 	let filter = $state('');
 
@@ -95,6 +96,7 @@
 
 	onMount(() => {
 		void providers.refreshAll();
+		void loadNativeOptions();
 		// Subscription rows name their plan; the stored snapshot has the freshest one.
 		void providers.loadUsage();
 	});
@@ -107,6 +109,7 @@
 	count="{connectedCount} connected"
 	addLabel="Add provider"
 	onAdd={startGateway}
+	replaceOnSelect
 	bind:filter
 >
 	{#snippet list()}
@@ -114,6 +117,10 @@
 			<p class="pv-empty">{FORBIDDEN_TEXT}</p>
 		{:else}
 			{#if s.providersError}<p class="pv-msg err" role="alert">{s.providersError}</p>{/if}
+			{#if nativeOptions.error}
+				<p class="pv-msg err" role="alert">{nativeOptions.error}</p>
+				<button type="button" class="st-btn ghost" onclick={() => loadNativeOptions()}>Retry provider options</button>
+			{/if}
 			<ProviderList {views} {filter} />
 		{/if}
 	{/snippet}
@@ -137,7 +144,7 @@
 		{:else if selected && loading}
 			<EmptyDetail icon={KeyRound} message="Loading providers" />
 		{:else}
-			<EmptyDetail icon={KeyRound} message="Select a provider or credential." />
+			<EmptyDetail icon={KeyRound} message="Select a provider or credential." idle />
 		{/if}
 	{/snippet}
 </CollectionPage>

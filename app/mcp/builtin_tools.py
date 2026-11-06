@@ -1945,7 +1945,9 @@ def create_builtin_tools_server(
             ctx.extra["session_orchestration"] = orchestration_handler(lambda: session_id)
             ctx.extra["session_runtime_model"] = runtime_model_supplier or (lambda: (model, provider_id))
             return _fluid_outcome_result(await handler(args, ctx))
-        return tool(spec.name, spec.description, spec.input_schema)(invoke)
+        bridged = tool(spec.name, spec.description, spec.input_schema)(invoke)
+        bridged.discoverable = spec.discoverable
+        return bridged
 
     all_tools.extend(_orchestration_bridge(spec, handler)
                      for spec, handler in orchestration_specs)
@@ -3060,6 +3062,7 @@ def get_builtin_tool_names() -> List[str]:
         "mcp__builtins__StartSession",
         "mcp__builtins__SettleSession",
         "mcp__builtins__UnsettleSession",
+        # Permission spelling for cached contexts, not a discoverable schema.
         "mcp__builtins__ArchiveSession",
         "mcp__builtins__HandOffSession",
         "mcp__builtins__WorktreeReport",

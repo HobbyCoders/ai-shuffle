@@ -65,7 +65,9 @@
 		compactSummary?: string | null;
 		gallery?: GalleryMedia[];
 		/** (message, index, gallery sources a prose row drops, generated media a tool row leaves to others) */
-		row: Snippet<[ChatMessage, number, ReadonlySet<string>?, ReadonlySet<string>?]>;
+		row: Snippet<[ChatMessage, number, ReadonlySet<string>?, ReadonlySet<string>?, boolean?]>;
+		/** The turn's name line. Set, it heads the settled turn, above its fold row. */
+		speaker?: Snippet<[ChatMessage]>;
 		observeTurnAnchor?: Action<HTMLElement>;
 		revealMessageId?: string | null;
 		pagingEnabled?: boolean;
@@ -87,6 +89,7 @@
 		summary = null,
 		compactSummary = null,
 		row,
+		speaker,
 		revealMessageId = null,
 		pagingEnabled = true,
 		onBeforeToggle,
@@ -490,7 +493,17 @@
 	function isAssistantProse(entry: WorkLogSequenceEntry): boolean {
 		return entry.message.role === 'assistant' && (entry.message.type === 'text' || !entry.message.type);
 	}
+
+	/** The reply whose name line moves up to head the turn; it then leaves its own out. */
+	const namedReply = $derived(
+		speaker && mode === 'settled' && foldable
+			? sequence.find((entry) => isAssistantProse(entry) && entry.message.content?.trim() && rowVisible(entry))
+			: undefined
+	);
 </script>
+
+<!-- A failure in a summary is the one part of it worth colouring. -->
+{#snippet summaryText(text: string)}{#each text.split(/(\b\d+ failed\b)/) as part, index}{#if index % 2}<span class="fold-failed">{part}</span>{:else}{part}{/if}{/each}{/snippet}
 
 <section
 	bind:this={sectionEl}
@@ -504,10 +517,11 @@
 	{#if sequence.length > 0}
 		<!-- One keyed row list for live and settled: settling must not remount rows. -->
 		{#if mode === 'settled' && foldable}
+			{#if namedReply && speaker}{@render speaker(namedReply.message)}{/if}
 			{#if open}
 				<button
 					type="button"
-					class="wlrow fold hairline"
+					class="wlrow fold"
 					data-fold-header
 					onclick={(event) => collapseFromHeader(event, () => setOpen(false))}
 					aria-expanded="true"
@@ -518,13 +532,13 @@
 					</svg>
 					<span class="fold-label">{collapsedLabel}</span>
 					{#if summary}
-						<span class="fold-summary" title={summary}>· {#if compactSummary}<span class="fold-prose">{summary}</span><span class="fold-compact">{compactSummary}</span>{:else}{summary}{/if}</span>
+						<span class="fold-summary" title={summary}>· {#if compactSummary}<span class="fold-prose">{@render summaryText(summary)}</span><span class="fold-compact">{@render summaryText(compactSummary)}</span>{:else}{@render summaryText(summary)}{/if}</span>
 					{/if}
 				</button>
 			{:else}
 				<button
 					type="button"
-					class="wlrow fold hairline"
+					class="wlrow fold"
 					onclick={(event) => toggleFromReader(event, () => setOpen(true))}
 					aria-expanded="false"
 					aria-label={disclosureLabel}
@@ -534,7 +548,7 @@
 					</svg>
 					<span class="fold-label">{collapsedLabel}</span>
 					{#if summary}
-						<span class="fold-summary" title={summary}>· {#if compactSummary}<span class="fold-prose">{summary}</span><span class="fold-compact">{compactSummary}</span>{:else}{summary}{/if}</span>
+						<span class="fold-summary" title={summary}>· {#if compactSummary}<span class="fold-prose">{@render summaryText(summary)}</span><span class="fold-compact">{@render summaryText(compactSummary)}</span>{:else}{@render summaryText(summary)}{/if}</span>
 					{/if}
 				</button>
 			{/if}
@@ -607,7 +621,7 @@
 						use:observeTurnAnchor
 						use:trackTouch={rowKey(entry)}
 					>
-						{@render row(entry.message, entry.index, mode === 'settled' && !open && entry.inGallery ? gallerySources : undefined, mediaShownElsewhere(entry))}
+						{@render row(entry.message, entry.index, mode === 'settled' && !open && entry.inGallery ? gallerySources : undefined, mediaShownElsewhere(entry), entry === namedReply)}
 					</div>
 				{/if}
 				{#if run && runEdges.last.get(run.index) === position && runOpen(run)}
@@ -634,7 +648,6 @@
 		<button
 			type="button"
 			class="wlrow fold"
-			class:hairline={mode === 'settled'}
 			data-fold-header
 			onclick={(event) => collapseFromHeader(event, () => setOpen(false))}
 			aria-expanded="true"
@@ -645,7 +658,7 @@
 			</svg>
 			<span class="fold-label">{collapsedLabel}</span>
 			{#if mode === 'settled' && summary}
-				<span class="fold-summary" title={summary}>· {summary}</span>
+				<span class="fold-summary" title={summary}>· {@render summaryText(summary)}</span>
 			{/if}
 		</button>
 		<BoundedTranscriptRows items={[...folded, ...tail]} keyOf={rowKey} rowId={entry => entry.message.id} {pagingEnabled}>
@@ -661,7 +674,6 @@
 		<button
 			type="button"
 			class="wlrow fold"
-			class:hairline={mode === 'settled'}
 			onclick={(event) => toggleFromReader(event, () => setOpen(true))}
 			aria-expanded="false"
 			aria-label={disclosureLabel}
@@ -680,7 +692,7 @@
 				{/if}
 			</span>
 			{#if mode === 'settled' && summary}
-				<span class="fold-summary" title={summary}>· {#if compactSummary}<span class="fold-prose">{summary}</span><span class="fold-compact">{compactSummary}</span>{:else}{summary}{/if}</span>
+				<span class="fold-summary" title={summary}>· {#if compactSummary}<span class="fold-prose">{@render summaryText(summary)}</span><span class="fold-compact">{@render summaryText(compactSummary)}</span>{:else}{@render summaryText(summary)}{/if}</span>
 			{/if}
 		</button>
 		<BoundedTranscriptRows items={tail} keyOf={rowKey} rowId={entry => entry.message.id} startAtTail={mode === 'live'} {pagingEnabled}>
@@ -738,7 +750,10 @@
 		display: flex;
 		align-items: center;
 		gap: 7px;
-		width: 100%;
+		/* The chevron sits on the transcript's text edge; the hover fill bleeds
+		   past it by the row's own padding. */
+		width: calc(100% + 16px);
+		margin-inline: -8px;
 		padding: 6px 8px;
 		border: none;
 		background: transparent;
@@ -751,6 +766,11 @@
 		transition: background-color 180ms ease-out, color 180ms ease-out;
 	}
 
+	.wlrow.fold > svg {
+		flex: none;
+		margin-left: -3px;
+	}
+
 	.fold-label {
 		flex: 0 1 auto;
 		min-width: 0;
@@ -759,12 +779,17 @@
 		font-variant-numeric: tabular-nums;
 	}
 
+	.fold-failed {
+		color: var(--destructive);
+	}
+
 	.fold-summary {
+		/* The row's 7px gap less 3px: the same space before the dot as its own after. */
+		margin-left: -3px;
 		min-width: 0;
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
-		font-size: 11.5px;
 		color: var(--subtle-foreground);
 	}
 
@@ -819,11 +844,6 @@
 	.wlrow.fold:focus-visible {
 		outline: 2px solid var(--ring);
 		outline-offset: -2px;
-	}
-
-	.wlrow.fold.hairline {
-		border-bottom: 1px solid color-mix(in oklch, var(--border) 72%, transparent);
-		border-radius: 8px 8px 0 0;
 	}
 
 	@keyframes worklog-settle {

@@ -174,6 +174,8 @@ export function isClearedSession(input: ChatSurfaceInput): boolean {
 
 /** The title an unstarted or not-yet-named chat carries in the session store. */
 export const NEW_CHAT_TITLE = 'New Chat';
+/** How that placeholder reads on screen. The stored value above does not change. */
+export const NEW_CHAT_LABEL = 'New chat';
 
 export interface ChatHeaderTitleInput {
 	/** The session id the chat is bound to, or null for an unstarted New Chat. */
@@ -215,9 +217,10 @@ export function chatHeaderTitle(input: ChatHeaderTitleInput): string {
 		if (loading && sessionId && (!known || known === NEW_CHAT_TITLE)) return 'Loading…';
 		// A deep link binds before its title is known: say it is loading rather
 		// than call the chat Untitled for the moment before /live answers.
+		if (known === NEW_CHAT_TITLE) return NEW_CHAT_LABEL;
 		return known || (loading ? 'Loading…' : 'Untitled');
 	}
-	return NEW_CHAT_TITLE;
+	return NEW_CHAT_LABEL;
 }
 
 /**

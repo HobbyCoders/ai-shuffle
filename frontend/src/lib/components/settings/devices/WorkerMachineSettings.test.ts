@@ -38,6 +38,18 @@ it('shows CLI-produced account/plan, version and GitHub status without remote si
 	expect(mocks.get).toHaveBeenCalledWith('/settings/worker-settings');
 });
 
+it('uses Local rather than a container hostname in sign-in and result copy', async () => {
+	workers[0].device_name = '75c733a3514a';
+	render(WorkerMachineSettings, { self: true });
+	expect(await screen.findByText(/Signed in on Local · person@example.com · Max/)).toBeTruthy();
+	expect(screen.getByText('Not signed in on Local')).toBeTruthy();
+	await fireEvent.click(screen.getByRole('button', { name: 'Apply…' }));
+	await fireEvent.click(screen.getByRole('button', { name: 'Apply to all workers' }));
+	const results = await screen.findByRole('list', { name: 'Worker action results' });
+	expect(results.textContent).toContain('Local:');
+	expect(document.body.textContent).not.toContain('75c733a3514a');
+});
+
 it('targets the selected worker, not the worker serving this UI', async () => {
 	render(WorkerMachineSettings, { deviceId: 'laptop-two' });
 	await fireEvent.click(await screen.findByRole('button', { name: 'Update Claude CLI' }));

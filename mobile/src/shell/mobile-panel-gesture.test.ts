@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createPanelGesture, finishPanelGesture, updatePanelGesture } from './mobile-panel-gesture';
+import { createPanelGesture, finishPanelGesture, updatePanelGesture } from '$lib/components/chat/phone/mobile-panel-gesture';
 
 const start = { x: 100, y: 100, time: 0 };
 const point = (x: number, y: number, time = 500) => ({ x, y, time });

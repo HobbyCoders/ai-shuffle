@@ -145,7 +145,7 @@ describe('SessionTitleMenu', () => {
 		expect(mocks.forkSession).toHaveBeenCalledWith('session-a');
 		await vi.waitFor(() => expect(opened).toEqual(['forked-session']));
 		expect(mocks.loadSessions).toHaveBeenCalledOnce();
-		expect(mocks.toastPush).toHaveBeenCalledWith('Session forked', { severity: 'success' });
+		expect(mocks.toastPush).toHaveBeenCalledWith('Chat forked', { severity: 'success' });
 		window.removeEventListener('open-session', onOpen);
 	});
 
@@ -201,6 +201,7 @@ describe('SessionTitleMenu', () => {
 			expect(sheet.parentElement?.parentElement).toBe(document.body);
 			expect(sheet.textContent).toContain('AI Shuffle');
 			expect(sheet.textContent).toContain(longTitle);
+			expect(screen.getByRole('button', { name: 'Delete' }).querySelector('svg')).toBeNull();
 			for (const name of ['Rename session', 'Fork session', 'Delete']) {
 				expect(screen.getByRole('button', { name })).toBeTruthy();
 			}

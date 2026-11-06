@@ -44,7 +44,7 @@
 	const freshComposer = $derived(!$activeSession.sessionId);
 	// A conversation another worker runs takes a call too: the call runs here
 	// and forwards to that worker (#700).
-	const permittedSurface = $derived(freshComposer || (!sessionRow?.hidden && !sessionRow?.parent_session_id && sessionRow?.status !== 'archived'));
+	const permittedSurface = $derived(freshComposer || (!sessionRow?.hidden && !sessionRow?.parent_session_id));
 	const show = $derived(voiceEnabled && permittedSurface && !isCallSurfaceActive($voiceCallState, $activeSession.sessionId));
 	// Every conversation takes a call at any time, even while it works (see
 	// callBusyReason); only one whose worker is offline is refused.
@@ -169,9 +169,8 @@
 
 	.voice-call-btn:focus-visible { outline:2px solid var(--ring); outline-offset:3px; }
 
-	/* Circle variant: the call button in the composer's button row: the
-	   waveform in the accent on a light accent tint. Its corners follow the
-	   composer's (--composer-btn-radius, set by ChatInput), so it is square
+	/* Circle variant: the composer's one filled action while there is nothing
+	   to send, in the slot Send takes once there is. Its corners follow the composer's (--composer-btn-radius, set by ChatInput), so it is square
 	   on a square theme and round on the rest. */
 	.call-circle {
 		display: grid;
@@ -182,14 +181,13 @@
 		padding: 0;
 		border: none;
 		border-radius: var(--composer-btn-radius, 50%);
-		background: color-mix(in oklch, var(--primary) 10%, transparent);
-		box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--primary) 22%, transparent);
-		color: var(--primary);
+		background: var(--action);
+		color: var(--action-foreground);
 		cursor: pointer;
 		transition: background-color 150ms ease, transform 100ms ease;
 	}
 	.call-circle:hover:not(:disabled):not(.blocked) {
-		background: color-mix(in oklch, var(--primary) 17%, transparent);
+		background: var(--action-hover);
 	}
 	.call-circle:active:not(:disabled):not(.blocked) { transform: scale(0.94); }
 	.call-circle:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }

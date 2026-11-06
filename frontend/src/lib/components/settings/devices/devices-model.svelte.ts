@@ -20,6 +20,7 @@
  * - Account registrations are matched to local rows by identity, never name
  *   (`account-devices.ts`).
  */
+import { workerDisplayName } from '$lib/components/ui/worker-name';
 import { getErrorMessage } from '$lib/api/client';
 import { appData } from '$lib/stores/app-data.svelte';
 import { notify } from '$lib/stores/notifications';
@@ -143,6 +144,10 @@ export class DevicesModel {
 				via: 'account' as const
 			}))
 		];
+	}
+	/** What the Devices list shows. `workerName` stays the stored name for editing. */
+	get workerLabel(): string {
+		return workerDisplayName(this.workerName, 'Local');
 	}
 	get workerName(): string {
 		return (

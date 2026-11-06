@@ -2,7 +2,7 @@
 	/** In-panel Git action editor. One parent owns scrolling and dismissal.
 	 * Saved preferences persist; message/force/PR overrides reset on mount.
 	 */
-	import { ArrowLeft } from 'lucide-svelte';
+	import { ChevronLeft } from 'lucide-svelte';
 	import GenerationModelSelect from '$lib/components/settings/GenerationModelSelect.svelte';
 	import { gitActionPreferences } from '$lib/stores/gitActionPreferences.svelte';
 	import {
@@ -222,7 +222,7 @@
 
 <section class="options-dropdown" {id} bind:this={panelRef} aria-label="{action} options">
 	<div class="opt-heading">
-		<button type="button" class="opt-back" onclick={onClose} aria-label="Back to Git actions"><ArrowLeft size={16} /> Back</button>
+		<button type="button" class="opt-back" onclick={onClose} aria-label="Back to Git actions"><ChevronLeft size={16} /> Back</button>
 		<div><h3>{titles[action]}</h3><p>{descriptions[action]}</p></div>
 	</div>
 	{#if busy}<p class="opt-blocked" role="status">This action is currently unavailable. Return to Git to check its status.</p>
@@ -534,10 +534,10 @@
 	.opt-switch {
 		position: relative;
 		flex-shrink: 0;
-		width: 30px;
-		height: 17px;
+		width: 26px;
+		height: 16px;
 		border-radius: 999px;
-		background: var(--border);
+		background: var(--switch-off); box-shadow: inset 0 0 0 1px var(--switch-off-edge);
 		transition: background 150ms ease;
 	}
 	.opt-switch::after {
@@ -545,18 +545,18 @@
 		position: absolute;
 		top: 2px;
 		left: 2px;
-		width: 13px;
-		height: 13px;
+		width: 12px;
+		height: 12px;
 		border-radius: 50%;
-		background: var(--card);
-		box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+		background: var(--switch-thumb);
+		box-shadow: 0 0 0 0.5px var(--switch-thumb-edge), 0 1px 2px var(--switch-thumb-edge);
 		transition: transform 150ms ease;
 	}
 	.opt-switch.on {
-		background: var(--primary);
+		background: var(--switch-on); box-shadow: none;
 	}
 	.opt-switch.on::after {
-		transform: translateX(13px);
+		transform: translateX(10px);
 	}
 	.opt-switch.danger.on {
 		background: var(--destructive);

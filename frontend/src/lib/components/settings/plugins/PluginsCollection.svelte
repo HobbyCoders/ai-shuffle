@@ -14,7 +14,8 @@
 	import CollectionPage from '../shell/CollectionPage.svelte';
 	import EmptyDetail from '../shell/EmptyDetail.svelte';
 	import ListItem from '../rows/ListItem.svelte';
-	import ListGroupLabel from '../rows/ListGroupLabel.svelte';
+	import RowGroup from '../rows/RowGroup.svelte';
+	import SettingRow from '../rows/SettingRow.svelte';
 	import InlineBanner from '../rows/InlineBanner.svelte';
 	import { PluginsModel, parseItem, plural, setPluginsModel, type PluginEntry } from './plugins-model.svelte';
 	import { EXPLORE_ICON, PACKAGE_ICON, PROJECTS_ICON, REVIEW_ICON, SOURCES_ICON, connectionIcon } from './icons';
@@ -149,7 +150,7 @@
 	const showProjects = $derived(matches('Project plugins', 'project folder scope local', projectsSummary));
 </script>
 
-<CollectionPage category={CATEGORY} count={model.loading ? undefined : `${installedCount} added`} bind:filter>
+<CollectionPage category={CATEGORY} count={model.loading ? undefined : `${installedCount} added`} filterPlaceholder={installedCount + (access.readOnly ? 2 : 3) > 6 || filter ? "Filter plugins" : null} bind:filter>
 	{#snippet list()}
 		{#if model.forbidden}
 			<p class="st-empty">{FORBIDDEN_TEXT}</p>
@@ -162,9 +163,9 @@
 			</InlineBanner>
 		{/if}
 		{#each groups as group (group.label)}
-			<ListGroupLabel label={group.label} />
+			<RowGroup title={group.label}>
 			{#each group.rows as row (row.entry.item)}
-				<ListItem
+				<ListItem variant="card"
 					id={row.entry.item}
 					name={row.entry.name}
 					summary={row.summary}
@@ -178,18 +179,19 @@
 					category={CATEGORY}
 				/>
 			{/each}
+   </RowGroup>
 		{/each}
 		{#if model.loading}
 			<p class="st-empty" role="status">Loading plugins…</p>
 		{:else if !model.forbidden && !model.error && installedCount === 0 && !q}
-			<p class="st-empty">Nothing added yet.</p>
+			<div class="st-card"><SettingRow label="Nothing added yet." /></div>
 		{:else if q && !groups.length && !showExplore && !showSources && !showProjects}
-			<p class="st-empty">No plugin matches “{filter.trim()}”.</p>
+			<EmptyDetail message={`No plugin matches “${filter.trim()}”.`} actionLabel="Clear search" onAction={() => filter = ''} />
 		{/if}
 		{#if showExplore || showSources || showProjects}
-			<ListGroupLabel label="More" />
+			<RowGroup title="More">
 			{#if showExplore}
-				<ListItem
+				<ListItem variant="card"
 					id="explore"
 					name="Explore plugins"
 					summary={exploreSummary}
@@ -198,7 +200,7 @@
 				/>
 			{/if}
 			{#if showProjects}
-				<ListItem
+				<ListItem variant="card"
 					id="projects"
 					name="Project plugins"
 					summary={projectsSummary}
@@ -207,7 +209,7 @@
 				/>
 			{/if}
 			{#if showSources}
-				<ListItem
+				<ListItem variant="card"
 					id="sources"
 					name="Sources and updates"
 					summary={sourcesSummary}
@@ -216,6 +218,7 @@
 					category={CATEGORY}
 				/>
 			{/if}
+   </RowGroup>
 		{/if}
 	{/snippet}
 	{#snippet detail()}
@@ -240,7 +243,7 @@
 		{:else if selected && parsed}
 			<EmptyDetail icon={Puzzle} title="Not found" message="This plugin is not available here." />
 		{:else}
-			<EmptyDetail icon={Puzzle} message="Select a plugin or app." />
+			<EmptyDetail icon={Puzzle} message="Select a plugin or app." idle />
 		{/if}
 	{/snippet}
 </CollectionPage>

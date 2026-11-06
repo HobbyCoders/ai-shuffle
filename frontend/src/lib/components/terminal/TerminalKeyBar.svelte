@@ -41,7 +41,7 @@
 	}
 	.keybar::-webkit-scrollbar { display: none; }
 	.key {
-		flex: 0 0 auto; min-width: 44px; height: 40px; padding: 0 10px;
+		flex: 0 0 auto; min-width: 44px; height: 44px; padding: 0 10px;
 		border: 1px solid var(--border-strong); border-bottom-width: 2px; border-radius: 7px;
 		background: var(--background); color: var(--foreground); font: 500 13px var(--font-mono);
 		touch-action: manipulation; cursor: pointer; transition: background-color 0.12s, transform 0.08s;
@@ -49,6 +49,6 @@
 	.key:active:not(:disabled) { transform: translateY(1px); border-bottom-width: 1px; }
 	.key:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
 	.key:disabled { opacity: 0.4; cursor: not-allowed; }
-	.mod[aria-pressed='true'] { background: var(--primary); border-color: var(--primary); color: var(--primary-foreground); }
+	.mod[aria-pressed='true'] { background: var(--row-selected); border-color: var(--primary); color: var(--foreground); }
 	@media (prefers-reduced-motion: reduce) { .key { transition: none; } }
 </style>

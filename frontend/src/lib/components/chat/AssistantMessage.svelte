@@ -62,6 +62,7 @@
 	import { extractHtmlPreviews, placeHtmlPreviews, streamingPreviewName, HTML_PREVIEW_INITIAL_HEIGHT } from '$lib/utils/htmlPreview';
 	import UsageEstimatedBadge from '$lib/components/UsageEstimatedBadge.svelte';
 	import { formatMessageTime, formatMessageTimeFull, messageTimeISO } from '$lib/utils/message-time';
+	import TurnSpeaker from './TurnSpeaker.svelte';
 	import { taskChecks, taskMessageKey, type TaskChecks } from '$lib/stores/task-checks';
 	import { terminals } from '$lib/stores/terminals.svelte';
 	import { lookupCommandBlock } from '$lib/terminal/commands';
@@ -83,6 +84,8 @@
 		profileName?: string;
 		/** Model display name for this specific message, when the turn reported one. */
 		modelLabel?: string | null;
+		/** The transcript already shows this turn's name above its activity row. */
+		nameAbove?: boolean;
 	}
 
 	let {
@@ -97,7 +100,8 @@
 		metadata,
 		onRewindComplete,
 		profileName = 'Assistant',
-		modelLabel = null
+		modelLabel = null,
+		nameAbove = false
 	}: Props = $props();
 
 	/** The name line's text: the model that produced this message when we know
@@ -746,12 +750,9 @@
 	role="article"
 >
 	<div class="min-w-0 max-w-full">
-		<div class="aname" title={formatMessageTimeFull(timestamp)}>
-			{#if streaming}
-				<span class="live" aria-label="Streaming"></span>
-			{/if}
-			<span class="aname-text">{speakerName}</span>
-		</div>
+		{#if !nameAbove}
+			<TurnSpeaker name={speakerName} {timestamp} {streaming} />
+		{/if}
 		<div class="overflow-hidden max-w-full">
 			<!-- svelte-ignore a11y_click_events_have_key_events -->
 			<!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -857,7 +858,8 @@
 		position: absolute;
 		left: 14px;
 		bottom: 12px;
-		font: 11px/1 var(--font-mono);
+		font-size: var(--fs-caption);
+		line-height: 1;
 		color: var(--subtle-foreground);
 	}
 	@keyframes artifact-sweep { to { transform: translateX(100%); } }
@@ -879,51 +881,13 @@
 		position: relative;
 	}
 
-	/* ── Name line ─────────────────────────────────────────────────────── */
-	.aname {
-		display: flex;
-		align-items: center;
-		gap: 7px;
-		font-size: 11.5px;
-		font-weight: 500;
-		letter-spacing: 0.02em;
-		color: var(--subtle-foreground);
-		margin-bottom: 9px;
-		min-height: 16px;
-	}
-
-	.aname-text {
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
-	}
-
-	.live {
-		width: 5px;
-		height: 5px;
-		flex: none;
-		border-radius: 50%;
-		background: var(--primary);
-		box-shadow: 0 0 8px 0 var(--glow);
-		animation: aname-pulse 1.4s ease-in-out infinite;
-	}
-
-	@keyframes aname-pulse {
-		0%, 100% { opacity: 1; }
-		50% { opacity: 0.35; }
-	}
-
-	@media (prefers-reduced-motion: reduce) {
-		.live { animation: none; }
-	}
-
 	.ameta {
 		margin-top: 10px;
 		display: flex;
 		align-items: center;
 		gap: 12px;
-		font-size: 11px;
-		font-family: var(--font-mono);
+		font-size: var(--fs-label);
+		font-variant-numeric: tabular-nums;
 		color: var(--subtle-foreground);
 	}
 
@@ -948,8 +912,8 @@
 	}
 
 	.assistant-time {
-		font-family: var(--font-mono);
-		font-size: 10.5px;
+		font-size: var(--fs-label);
+		font-variant-numeric: tabular-nums;
 		color: var(--subtle-foreground);
 		white-space: nowrap;
 	}
@@ -1044,7 +1008,7 @@
 	/* ── Code block chrome (markup produced by $lib/utils/chat-markdown) ── */
 	.abody :global(.codeblock) {
 		margin: 0 0 14px;
-		border-radius: 10px;
+		border-radius: var(--radius-card);
 		border: 1px solid var(--border);
 		background: var(--code-bg);
 		overflow: hidden;
@@ -1054,19 +1018,20 @@
 		display: flex;
 		align-items: center;
 		gap: 7px;
-		padding: 6px 8px 6px 11px;
-		border-bottom: 1px solid var(--border);
-		background: color-mix(in oklch, var(--muted) 45%, transparent);
+		padding: 6px 6px 0 14px;
 	}
 
-	.abody :global(.codehead .cb-icon) {
-		color: var(--subtle-foreground);
-		flex: none;
+	/* No filename: the language leads the row. */
+	.abody :global(.codehead .fname:empty) {
+		display: none;
+	}
+	.abody :global(.codehead .fname:empty + .lang) {
+		margin-right: auto;
 	}
 
 	.abody :global(.codehead .fname) {
 		font-family: var(--font-mono);
-		font-size: 11.5px;
+		font-size: var(--fs-label);
 		color: var(--muted-foreground);
 		margin-right: auto;
 		min-width: 0;
@@ -1076,13 +1041,8 @@
 	}
 
 	.abody :global(.codehead .lang) {
-		font-size: 10px;
-		letter-spacing: 0.06em;
-		text-transform: uppercase;
-		color: var(--subtle-foreground);
-		padding: 2px 6px;
-		border-radius: 5px;
-		border: 1px solid var(--border);
+		font-size: var(--fs-label);
+		color: var(--muted-foreground);
 		flex: none;
 	}
 
@@ -1270,13 +1230,14 @@
 
 	.abody :global(.codeblock .cb-pre) {
 		margin: 0;
-		padding: 11px 13px 13px;
+		padding: 4px 14px 14px;
 		overflow-x: auto;
 		background: transparent;
+		border: 0;
 		border-radius: 0;
 		font-family: var(--font-mono);
-		font-size: 12.25px;
-		line-height: 1.72;
+		font-size: var(--fs-small);
+		line-height: 1.6;
 		color: var(--muted-foreground);
 	}
 
