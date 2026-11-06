@@ -384,7 +384,18 @@ export function composerSnapshot(page) {
 export async function typeAndSend(page, text) {
 	const box = composer(page);
 	await box.click();
-	await box.fill(text);
+	// fill() uses insertText without a keydown. After a slow focus round trip,
+	// Chromium then counts the draft's immediate growth as non-input layout
+	// shift (#1164). Exercise the keyboard path instead of relying on the
+	// earlier pointer event's 500ms input window. Shift+Enter inserts literal
+	// line breaks without submitting the editor before the explicit Send click.
+	await box.press('ControlOrMeta+A');
+	await box.press('Backspace');
+	const lines = text.split('\n');
+	for (let i = 0; i < lines.length; i++) {
+		if (i) await box.press('Shift+Enter');
+		if (lines[i]) await box.pressSequentially(lines[i]);
+	}
 	traceNote(page, `send helper: before click ${JSON.stringify(await composerSnapshot(page).catch((e) => String(e)))}`);
 	await sendButton(page).click();
 	traceNote(page, `send helper: after click ${JSON.stringify(await composerSnapshot(page).catch((e) => String(e)))}`);
