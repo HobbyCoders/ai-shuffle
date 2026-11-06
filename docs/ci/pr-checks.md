@@ -1004,8 +1004,8 @@ the latest attempt's jobs, so it cannot prove earlier attempts had no retries.
 A retry marker anywhere in a journey log, including after unterminated output,
 also refuses the run. Each run must measure every `*.journey.mjs` in the current
 checkout exactly once, with no extra journeys; each measured case count must
-also match this checkout's unfiltered `--list` count. Unreadable case lists
-refuse the refresh rather than using the planner's fallback. Missing coverage
+also match this checkout's unfiltered `--list` count. Both planning and refresh
+refuse unreadable case lists rather than fabricating a one-case inventory. Missing coverage
 cannot be filled by another run or by an already-incomplete weights file. Use
 complete runs whose journey inventory and case counts match this checkout. Failed, incomplete,
 duplicate, partial or retried measurements are refused with a clear message

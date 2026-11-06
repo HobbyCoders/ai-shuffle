@@ -79,7 +79,7 @@ def journey_files(directory: Path = JOURNEYS) -> list[Path]:
 
 
 def case_count(path: Path, *, strict: bool = False) -> int:
-    """Count all listed cases; planning falls back to 1, refresh must fail closed."""
+    """Count all listed cases; strict callers reject unreadable inventories."""
     try:
         listed = subprocess.run(["node", str(path), "--list", "--only="], cwd=FRONTEND,
                                 capture_output=True, text=True, timeout=60, check=False)
@@ -128,7 +128,7 @@ def estimated_seconds(directory: Path = JOURNEYS, weights_path: Path = WEIGHTS) 
         raise ValueError(f"{weights_path}: inventory must contain positive integer case counts")
     weights = {}
     for path in files:
-        name, cases = path.name, case_count(path)
+        name, cases = path.name, case_count(path, strict=True)
         recorded_cases = inventory.get(name)
         if name in measured and cases == recorded_cases:
             weights[name] = measured[name]
