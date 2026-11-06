@@ -382,19 +382,22 @@ export function composerSnapshot(page) {
 
 /** Type into the composer and press its Send button. */
 export async function typeAndSend(page, text) {
+	// Match contenteditable.fill(): CRLF and bare CR each mean one newline.
+	// Playwright would otherwise map a typed CR to Enter and submit early.
+	text = text.replace(/\r\n?/g, '\n');
 	const box = composer(page);
 	await box.click();
 	// fill() uses insertText without a keydown. After a slow focus round trip,
 	// Chromium then counts the draft's immediate growth as non-input layout
 	// shift (#1164). Exercise the keyboard path instead of relying on the
-	// earlier pointer event's 500ms input window. Shift+Enter inserts literal
-	// line breaks without submitting the editor before the explicit Send click.
+	// earlier pointer event's 500ms input window. Insert line breaks as literal
+	// text: even Shift+Enter can accept an open command or mention completion.
 	await box.press('ControlOrMeta+A');
 	await box.press('Backspace');
 	const typeText = async (value) => {
 		const lines = value.split('\n');
 		for (let i = 0; i < lines.length; i++) {
-			if (i) await box.press('Shift+Enter');
+			if (i) await page.keyboard.insertText('\n');
 			if (lines[i]) await box.pressSequentially(lines[i]);
 		}
 	};

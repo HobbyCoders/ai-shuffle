@@ -15,6 +15,7 @@ function fixture() {
 		async pressSequentially(text) { calls.push(['type', text, now]); }
 	};
 	const page = {
+		keyboard: { async insertText(text) { calls.push(['literal', text, now]); } },
 		getByRole(role, options) {
 			if (role === 'textbox' && options.name === 'Message') return box;
 			assert.equal(options.name, 'Send');
@@ -32,8 +33,8 @@ it('uses keyboard input after slow focus, preserving multiline text without subm
 	await typeAndSend(page, 'one\n\nthree');
 	assert.deepEqual(calls, [
 		['focus', 0], ['key', 'ControlOrMeta+A', 700], ['key', 'Backspace', 700],
-		['type', 'one', 700], ['key', 'Shift+Enter', 700],
-		['key', 'Shift+Enter', 700], ['type', 'three', 700], ['send']
+		['type', 'one', 700], ['literal', '\n', 700],
+		['literal', '\n', 700], ['type', 'three', 700], ['send']
 	]);
 });
 
@@ -59,8 +60,25 @@ it('bounds keyboard entry for large fixtures, attributing bulk growth before fil
 	for (const [kind, value] of calls) {
 		if (kind === 'fill') actual = value;
 		else if (kind === 'type') actual += value;
-		else if (kind === 'key' && value === 'Shift+Enter') actual += '\n';
+		else if (kind === 'literal') actual += value;
 	}
 	assert.equal(actual, text, 'bulk and typed portions preserve multiline Unicode exactly');
 	assert.deepEqual(calls.at(-1), ['send']);
+});
+
+it('normalizes CRLF and bare CR before keyboard or bulk segmentation, with exactly one Send', async () => {
+	for (const text of ['first\r\nsecond\rthird', '😀 first\r\n' + 'history '.repeat(2000) + '\r\nfinish é']) {
+		const { page, calls } = fixture();
+		await typeAndSend(page, text);
+		let actual = '';
+		for (const [kind, value] of calls) {
+			if (kind === 'fill') actual = value;
+			else if (kind === 'type' || kind === 'literal') actual += value;
+			if (kind === 'type' || kind === 'fill') assert.ok(!value.includes('\r'), 'no CR may generate an Enter key');
+		}
+		assert.equal(actual, text.replace(/\r\n?/g, '\n'));
+		assert.equal(calls.filter(([kind]) => kind === 'send').length, 1);
+		assert.ok(!calls.some(([kind, key]) => kind === 'key' && key.includes('Enter')), 'literal newlines must not accept autocomplete');
+		assert.deepEqual(calls.at(-1), ['send']);
+	}
 });
