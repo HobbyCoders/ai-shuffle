@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import { tick } from 'svelte';
-import DetailTabs, { revealScrollLeft } from './DetailTabs.svelte';
+import DetailTabs, { partialTabs, revealScrollLeft, tabGap, TAB_GAP, TAB_GAP_TIGHT } from './DetailTabs.svelte';
 
 const TABS = ['Profile', 'Instructions', 'Tools', 'Subagents', 'Models', 'Advanced'].map((label) => ({
 	id: label.toLowerCase(),
@@ -129,5 +129,49 @@ describe('wheel and drag', () => {
 		expect(wrap.classList.contains('more-l')).toBe(true);
 		expect(wrap.classList.contains('more-r')).toBe(false);
 		expect(container.querySelector('.tabs-more')).toBeNull();
+	});
+});
+
+describe('never a cut label', () => {
+	it('keeps the wide gap while the tabs fit, and tightens it only when they would not', () => {
+		const widths = [40, 70, 32, 62, 44, 58];
+		const natural = widths.reduce((a, b) => a + b, 0) + 5 * TAB_GAP;
+		expect(tabGap(widths, natural)).toBe(TAB_GAP);
+		expect(tabGap(widths, natural - 1)).toBe(TAB_GAP_TIGHT);
+	});
+
+	it('finds the tabs that are only partly inside the strip', () => {
+		const tabs = [{ left: 0, width: 50 }, { left: 70, width: 60 }, { left: 150, width: 80 }, { left: 250, width: 40 }];
+		// Visible 0..200: the third tab (150..230) is cut, the fourth is fully past the edge.
+		expect(partialTabs(tabs, { scrollLeft: 0, width: 200 })).toEqual([2]);
+		// Visible 100..300: the second tab (70..130) is cut on the left.
+		expect(partialTabs(tabs, { scrollLeft: 100, width: 200 })).toEqual([1]);
+		expect(partialTabs(tabs, { scrollLeft: 0, width: 400 })).toEqual([]);
+	});
+
+	it('hides a cut tab at rest but never the selected one', async () => {
+		const { strip } = setup('subagents');
+		overflow(strip);
+		const els = Array.from(strip.querySelectorAll<HTMLElement>('[data-tab-id]'));
+		els.forEach((el, i) => {
+			Object.defineProperty(el, 'offsetLeft', { configurable: true, value: i * 100 });
+			Object.defineProperty(el, 'offsetWidth', { configurable: true, value: 80 });
+		});
+		// Visible 0..250: Tools (200..280) is cut; Subagents (300..380) is selected.
+		await fireEvent.scroll(strip);
+		await new Promise((r) => setTimeout(r, 200));
+		await tick();
+		expect(screen.getByRole('tab', { name: 'Tools' }).hasAttribute('data-cut')).toBe(false);
+		Object.defineProperty(strip, 'clientWidth', { configurable: true, value: 250 });
+		strip.scrollLeft = 0;
+		await fireEvent.scroll(strip);
+		// While moving, every tab shows.
+		expect(screen.getByRole('tab', { name: 'Tools' }).hasAttribute('data-cut')).toBe(false);
+		await new Promise((r) => setTimeout(r, 200));
+		await tick();
+		expect(screen.getByRole('tab', { name: 'Tools' }).hasAttribute('data-cut')).toBe(true);
+		expect(screen.getByRole('tab', { name: 'Profile' }).hasAttribute('data-cut')).toBe(false);
+		// The selected tab is never marked cut.
+		expect(screen.getByRole('tab', { name: 'Subagents' }).hasAttribute('data-cut')).toBe(false);
 	});
 });

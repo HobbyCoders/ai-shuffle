@@ -241,7 +241,7 @@
 		position: absolute;
 		inset: 0;
 		z-index: 41;
-		background: color-mix(in oklch, black 45%, transparent);
+		background: var(--modal-overlay);
 	}
 
 	/* Drag handle on the sidebar's right edge. Slightly overhangs the border so

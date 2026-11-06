@@ -62,7 +62,7 @@
 	});
 </script>
 {#if filteredAutomations().length === 0}
- <EmptyDetail title={searchQuery ? 'No matching automations' : 'No automations yet'}
+ <EmptyDetail icon={CalendarClock} title={searchQuery ? 'No matching automations' : 'No automations yet'}
   message={searchQuery ? 'Try a different search term.' : 'Create a scheduled or event-driven task.'}
   actionLabel={searchQuery ? 'Clear search' : undefined} onAction={() => searchQuery = ''}>
   {#if !searchQuery}<button class="st-btn primary" onclick={onOpenCreate}>New automation</button>{/if}

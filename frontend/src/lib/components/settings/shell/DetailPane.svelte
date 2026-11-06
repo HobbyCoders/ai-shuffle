@@ -171,7 +171,7 @@
 		<div class="st-identity">{#if tile}{@render tile()}{:else if hasIdentity}<Tile size="lg" {icon} text={glyph} status={statusText ? undefined : status} ring="bg" />{/if}</div>
 		<div class="st-dh-main">
 			<div class="st-dhn">
-				{#if heading}{@render heading()}{:else}<h2 tabindex="-1" data-settings-heading="detail">{name}</h2>{/if}
+				{#if heading}{@render heading()}{:else}<h2 tabindex="-1" data-settings-heading="detail" title={primary ? name : undefined}>{name}</h2>{/if}
 				{#if status && !statusText && !tile && !identity && !glyph}<StatusDot tone={status} />{/if}
 				{#if badge}<span class="badge">{badge}</span>{/if}
 				{@render badges?.()}
@@ -219,7 +219,9 @@
 		margin-inline: auto;
 		padding: var(--st-page-top) var(--st-gutter) 96px;
 	}
-	.st-dwrap.docs { max-width: calc(var(--st-prose-width) + var(--st-toc-width) + var(--st-toc-gap) + 2 * var(--st-gutter)); }
+	/* Wide pages (Stats, Pull requests, Files, Docs) share one container, so the
+	   title never moves between them. Docs' contents column sits inside it. */
+	.st-dwrap.docs,
 	.st-dwrap.data { max-width: calc(var(--st-data-width) + 2 * var(--st-gutter)); }
 	.st-dh {
 		display: grid;
@@ -228,6 +230,10 @@
 		align-items: center;
 		padding: 0 0 18px;
 	}
+	/* Like the Settings page title: the title starts at the top of the row and the
+	   actions sit on the title line, whatever the actions' height. */
+	.st-dh > .st-dha { align-self: start; min-height: 30px; }
+	.st-dh:not(:has(> .st-identity > *)) > .st-dh-main { align-self: start; }
 	.st-dwrap .st-dh.compact-header { padding-bottom: 6px; }
 	/* Empty tile snippets are truthy functions. Count actual identity elements,
 	   not the empty text/comment placeholders Svelte emits for those snippets. */
@@ -258,6 +264,17 @@
 		gap: 8px;
 		align-items: center;
 		flex-wrap: wrap;
+		min-width: 0;
+	}
+	/* With actions beside it, a long title shrinks to one line with an ellipsis
+	   so the actions stay on the title row (the full name is its tooltip). */
+	.st-dh:has(> .st-dha) h2 {
+		min-width: 0;
+		max-width: 100%;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		overflow-wrap: normal;
 	}
 	h2 {
 		font-size: 24px;
@@ -311,7 +328,8 @@
 		min-width: 0;
 	}
 	/* All multi-action headers reflow together when the content, not the window, is narrow. */
-	@container detail-header (width < 720px) {
+	@container detail-header (width < 520px) {
+		.st-dh:has(> .st-dha) h2 { white-space: normal; overflow-wrap: anywhere; }
 		.st-dh:has(> .st-dha) { grid-template-columns: minmax(0, 1fr); gap: 8px; }
 		.st-dh:global(:has(> .st-identity > *)):has(> .st-dha) { grid-template-columns: auto minmax(0, 1fr); }
 		.st-dha { grid-column: 1 / -1; justify-content: flex-start; }
@@ -320,10 +338,16 @@
 		.st-dh.phone-inline:has(> .st-dha) { grid-template-columns: minmax(0, 1fr) auto; }
 		.phone-inline > .st-dha { grid-column: auto; }
 	}
-	.phone-detail-actions { display: flex; flex: none; width: 56px; height: auto; min-width: 0; container-type: normal; background: transparent; }
+	.phone-detail-actions { display: flex; flex: none; width: max-content; height: auto; min-width: 0; container-type: normal; background: transparent; }
 	.phone-detail-actions:not(:has(:is(button, a, input))) { display: none; }
-	.phone-detail-actions fieldset { border: 0; margin: 0; padding: 0 6px; }
-	.phone-detail-actions summary { color: var(--st-fg); }
+	.phone-detail-actions fieldset { border: 0; margin: 0; padding: 0; }
+	/* The top bar's icon buttons are borderless 44x48 targets (like the menu and
+	   bell beside them), with only a hover/pressed fill. */
+	.phone-detail-actions :global(:is(summary, button).st-btn.icon) { width: 44px; min-width: 44px; height: 48px; min-height: 48px; margin: 0; border-color: transparent; border-radius: 8px; background: transparent; color: var(--st-fg); }
+	.phone-detail-actions :global(:is(summary, button).st-btn.icon::after) { content: none; }
+	.phone-detail-actions :global(:is(summary, button).st-btn.icon:hover) { background: var(--hover-overlay, var(--st-hover)); }
+	.phone-detail-actions :global(:is(summary, button).st-btn.icon:active),
+	.phone-detail-actions details[open] > summary.st-btn.icon { background: var(--active-overlay, var(--st-hover)); }
 	.detail-more { position: relative; }
 	.detail-more summary { list-style: none; cursor: pointer; }
 	.detail-more summary::-webkit-details-marker { display: none; }

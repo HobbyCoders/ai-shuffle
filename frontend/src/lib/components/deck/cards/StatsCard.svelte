@@ -371,7 +371,7 @@
 	.brk { display: flex; flex-direction: column; gap: 11px; margin-top: 2px; }
 	.brk-row { display: grid; grid-template-columns: minmax(64px, 96px) 1fr auto; align-items: center; gap: 10px; }
 	.brk-name { font-size: 13px; color: var(--foreground); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-	.brk-track { height: 6px; background: var(--muted); border-radius: 999px; overflow: hidden; }
+	.brk-track { height: 6px; background: var(--st-meter-track); border-radius: 999px; overflow: hidden; }
 	.brk-fill { display: block; height: 100%; background: var(--st-meter); border-radius: 999px; transition: width 450ms ease; }
 	.brk-val { font-size: 13px; font-weight: 600; color: var(--muted-foreground); text-align: right; }
 
@@ -397,10 +397,10 @@
 	.prov-num { font-size: 13px; color: var(--muted-foreground); text-align: right; font-variant-numeric: tabular-nums; }
 	.prov-head .prov-num { font-size: 12px; }
 	.prov-mlabel { display: none; }
-	.prov-track { height: 6px; background: var(--muted); border-radius: 999px; overflow: hidden; }
+	.prov-track { height: 6px; background: var(--st-meter-track); border-radius: 999px; overflow: hidden; }
 	.prov-fill { display: block; height: 100%; background: var(--st-meter); border-radius: 999px; transition: width 450ms ease; }
 	/* Subscription equivalent remains labelled, with a quieter token-coloured track. */
-	.prov-fill.sub { background: var(--st-meter); opacity: 0.65; }
+	.prov-fill.sub { background: var(--st-meter-quiet); }
 	.prov-cost { display: flex; flex-direction: column; align-items: flex-end; text-align: right; cursor: help; }
 	.prov-cost-val { font-size: 13px; font-weight: 600; color: var(--foreground); }
 	.prov-cost.missing .prov-cost-val { color: var(--muted-foreground); font-weight: 500; font-style: italic; }
@@ -423,8 +423,8 @@
 		color: var(--st-mfg); font-size: 0.65rem; font-weight: 600;
 	}
 	.top-name { font-size: 13px; color: var(--foreground); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-	.top-track { height: 5px; background: var(--muted); border-radius: 999px; overflow: hidden; }
-	.top-fill { display: block; height: 100%; background: color-mix(in oklch, var(--st-meter) 75%, transparent); border-radius: 999px; }
+	.top-track { height: 5px; background: var(--st-meter-track); border-radius: 999px; overflow: hidden; }
+	.top-fill { display: block; height: 100%; background: var(--st-meter); border-radius: 999px; }
 	.top-val { font-size: 13px; font-weight: 600; color: var(--muted-foreground); text-align: right; }
 	.top-row :global(.top-arrow) { color: var(--muted-foreground); opacity: 0; transition: opacity 120ms ease; }
 	.top-row:hover :global(.top-arrow) { opacity: 1; }

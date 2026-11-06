@@ -1307,7 +1307,7 @@
 		position: fixed;
 		inset: 0;
 		z-index: 120;
-		background: var(--modal-overlay, color-mix(in oklch, var(--background) 60%, transparent));
+		background: var(--modal-overlay);
 		opacity: 0;
 		pointer-events: none;
 		transition: opacity 0.3s ease;

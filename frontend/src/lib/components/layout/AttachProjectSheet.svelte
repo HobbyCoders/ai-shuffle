@@ -353,7 +353,7 @@
 		position: absolute;
 		inset: 0;
 		border: none;
-		background: var(--modal-overlay, color-mix(in oklch, var(--background) 60%, transparent));
+		background: var(--modal-overlay);
 		animation: fade-in 200ms ease both;
 		cursor: default;
 	}

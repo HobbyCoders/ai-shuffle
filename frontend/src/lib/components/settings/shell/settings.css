@@ -40,7 +40,11 @@
 	--st-field: var(--field-bg);
 	--st-field-focus: var(--field-border-focus);
 	--st-hover: color-mix(in oklch, var(--foreground) 4%, transparent);
-	--st-meter: color-mix(in oklch, var(--foreground) 42%, transparent);
+	/* Bars and meters: the track steps off the card (>=1.5:1 in both themes) and
+	   the fill steps off the track (>=3:1). Quiet fill is still >=3:1. */
+	--st-meter-track: color-mix(in oklch, var(--foreground) 20%, transparent);
+	--st-meter: color-mix(in oklch, var(--foreground) 70%, transparent);
+	--st-meter-quiet: color-mix(in oklch, var(--foreground) 60%, transparent);
 	--st-code-bg: var(--code-bg, var(--muted));
 	--st-shadow: 0 14px 40px color-mix(in oklch, var(--foreground) 14%, transparent), 0 0 0 1px var(--st-border-strong);
 	/* Cards 12, controls 8. */

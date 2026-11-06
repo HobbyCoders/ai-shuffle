@@ -398,9 +398,9 @@
 		inset: 0;
 		width: 100%;
 		height: 100%;
-		background: color-mix(in oklch, var(--background) 85%, transparent);
-		backdrop-filter: blur(8px);
-		-webkit-backdrop-filter: blur(8px);
+		background: var(--modal-overlay);
+		backdrop-filter: blur(var(--modal-blur, 2px));
+		-webkit-backdrop-filter: blur(var(--modal-blur, 2px));
 		border: none;
 		cursor: default;
 		padding: 0;

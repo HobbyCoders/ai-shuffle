@@ -871,7 +871,7 @@
 			{:else if error && !editingNote && !isCreatingNew}
 				<InlineBanner tone="warn">{error}<button class="st-btn" onclick={() => loadData()}>Retry</button></InlineBanner>
 			{:else if notes.length === 0}
-				<EmptyDetail title={searchQuery || selectedTag ? 'No notes match' : 'No notes yet'}
+				<EmptyDetail icon={Notebook} title={searchQuery || selectedTag ? 'No notes match' : 'No notes yet'}
 					message={searchQuery || selectedTag ? 'Try another search or tag.' : 'Keep ideas, plans and files together.'}
 					actionLabel={selectedTag ? 'Clear filters' : searchQuery ? 'Clear search' : undefined} onAction={() => { searchQuery = ''; selectedTag = null; }}>
 					{#if !searchQuery && !selectedTag}

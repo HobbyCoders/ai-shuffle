@@ -23,6 +23,22 @@ describe('shared list and detail empty states', () => {
 		await fireEvent.click(screen.getByRole('button', { name: 'Clear search' }));
 		expect(screen.getByText('No items yet')).toBeTruthy();
 	});
+	it('shows the full state with its create action when a phone list is truly empty', () => {
+		vi.stubGlobal('matchMedia', () => ({ matches: true, addEventListener() {}, removeEventListener() {} }));
+		const { container } = render(EmptyListHarness);
+		const hero = container.querySelector('.panel-body .st-empty-detail.list-hero');
+		expect(hero).toBeTruthy();
+		expect(hero?.querySelector('h2')?.textContent).toBe('No items yet');
+		expect(hero?.querySelector('p')?.textContent).toBe('Create an item to get started.');
+		expect(hero?.querySelector('.acts button')?.textContent).toBe('New item');
+	});
+	it('keeps the muted line and Clear on a phone when a search finds nothing', () => {
+		vi.stubGlobal('matchMedia', () => ({ matches: true, addEventListener() {}, removeEventListener() {} }));
+		const { container } = render(EmptyListHarness, { filtered: true });
+		expect(container.querySelector('.list-hero')).toBeNull();
+		expect(container.querySelector('.st-empty-detail.in-list p')?.textContent).toBe('No matching items');
+		expect(screen.getByRole('button', { name: 'Clear search' })).toBeTruthy();
+	});
 	it('retains the full explanation and action outside a list', () => {
 		const onAction = vi.fn();
 		render(EmptyDetail, { title: 'No items yet', message: 'Create an item to get started.', actionLabel: 'New item', onAction });

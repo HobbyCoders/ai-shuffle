@@ -107,7 +107,8 @@
 		--secondary-foreground: oklch(0.9 0.003 265);
 		--muted: oklch(0.276 0.008 265);
 		--muted-foreground: oklch(0.715 0.008 265);
-		--subtle-foreground: oklch(0.645 0.008 265);
+		/* 4.7:1 on a selected row, 4.9:1 on --muted; still a step under --muted-foreground. */
+		--subtle-foreground: oklch(0.67 0.008 265);
 
 		/* Accent for hover states */
 		--accent: oklch(0.3 0.008 265);
@@ -158,6 +159,8 @@
 		--sidebar-accent: oklch(1 0 0 / 0.05);
 		--sidebar-accent-active: oklch(1 0 0 / 0.085);
 		--sidebar-muted: oklch(0.715 0.008 265);
+		/* Rail, list panel and canvas read as three layers: a hairline between rail and panel. */
+		--rail-seam: color-mix(in oklab, var(--sidebar-foreground) 8%, transparent);
 
 		/* Surface effects */
 		--code-bg: oklch(0.195 0.004 265);
@@ -241,8 +244,10 @@
 		/* Chip/badge colors - derived from theme primary */
 		--chip-primary-bg: color-mix(in srgb, var(--primary) 15%, transparent);
 
-		/* Modal overlay */
-		--modal-overlay: oklch(0 0 0 / 0.6);
+		/* Modal overlay: one dim scrim for every dialog and bottom sheet. */
+		--modal-overlay: oklch(0 0 0 / 0.55);
+		--modal-blur: 2px;
+		--shadow-dialog: 0 16px 40px oklch(0 0 0 / 0.45);
 
 		/* Input states - dark mode (derived from theme variables) */
 		--input-bg: var(--field-bg);
@@ -314,7 +319,8 @@
 		--secondary-foreground: oklch(0.28 0.006 90);
 		--muted: oklch(0.95 0.004 90);
 		--muted-foreground: oklch(0.488 0.008 90);
-		--subtle-foreground: oklch(0.525 0.008 90);
+		/* 4.6:1 on a selected row (was 4.3:1). */
+		--subtle-foreground: oklch(0.508 0.008 90);
 
 		/* Accent for hover states */
 		--accent: oklch(0.93 0.004 90);
@@ -357,6 +363,7 @@
 		--sidebar-accent: oklch(0.21 0.01 250 / 0.045);
 		--sidebar-accent-active: oklch(0.21 0.01 250 / 0.085);
 		--sidebar-muted: oklch(0.488 0.008 90);
+		--rail-seam: transparent;
 
 		/* Surface effects */
 		--code-bg: oklch(0.975 0.002 250);
@@ -430,8 +437,9 @@
 		/* Chip/badge colors - derived from theme primary */
 		--chip-primary-bg: color-mix(in srgb, var(--primary) 12%, transparent);
 
-		/* Modal overlay - light theme */
-		--modal-overlay: oklch(0 0 0 / 0.5);
+		/* Modal overlay - light theme: a dim scrim, not a white fog. */
+		--modal-overlay: oklch(0.18 0 0 / 0.4);
+		--shadow-dialog: 0 16px 40px oklch(0 0 0 / 0.25);
 
 		/* Input states - light mode (derived from theme variables) */
 		--input-bg: var(--field-bg);
