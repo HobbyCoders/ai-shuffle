@@ -103,3 +103,22 @@ it('shows an honest empty state for a runtime without slash dispatch',async()=>{
  render(CommandAutocomplete,{inputValue:'/',visible:true,model:'gpt-test',onSelect:vi.fn(),onClose:vi.fn()});
  await waitFor(()=>expect(screen.getByText('No slash commands available for this runtime')).toBeTruthy());
 });
+it('treats Shift+Enter as a new line: closes without selecting or sending (#1194)', async () => {
+ vi.stubGlobal('fetch',vi.fn().mockResolvedValue(response([item('compact')])));
+ const onSelect=vi.fn(), onClose=vi.fn();
+ const {component}=render(CommandAutocomplete,{inputValue:'/compact',visible:true,onSelect,onClose});
+ await waitFor(()=>expect(screen.getAllByRole('option')).toHaveLength(1));
+ const shiftEnter=new KeyboardEvent('keydown',{key:'Enter',shiftKey:true,cancelable:true});
+ expect(component.handleKeyDown(shiftEnter)).toBe(false);
+ expect(shiftEnter.defaultPrevented).toBe(false);
+ expect(onSelect).not.toHaveBeenCalled();
+ expect(onClose).toHaveBeenCalledTimes(1);
+ // Plain Enter still selects and submits; Tab still selects without submitting.
+ const enter=new KeyboardEvent('keydown',{key:'Enter',cancelable:true});
+ expect(component.handleKeyDown(enter)).toBe(true);
+ expect(enter.defaultPrevented).toBe(true);
+ expect(onSelect).toHaveBeenLastCalledWith(expect.objectContaining({name:'compact'}),true);
+ expect(component.handleKeyDown(new KeyboardEvent('keydown',{key:'Tab',cancelable:true}))).toBe(true);
+ expect(onSelect).toHaveBeenLastCalledWith(expect.objectContaining({name:'compact'}));
+ expect(onSelect.mock.calls[1]).toHaveLength(1);
+});

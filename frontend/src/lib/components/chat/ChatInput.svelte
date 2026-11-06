@@ -967,8 +967,10 @@
 			const slashContent = inputValue.slice(1);
 			const spaceIndex = slashContent.indexOf(' ');
 			// Dismiss once user types text after a space (they've moved past command selection)
-			// e.g., "/compact " still shows (trailing space only), but "/compact arg" dismisses
-			showCommandAutocomplete = spaceIndex === -1 || slashContent.slice(spaceIndex + 1).trim().length === 0;
+			// e.g., "/compact " still shows (trailing space only), but "/compact arg" dismisses.
+			// A new line (Shift+Enter) also moves past the command.
+			showCommandAutocomplete = !/[\r\n]/.test(slashContent) &&
+				(spaceIndex === -1 || slashContent.slice(spaceIndex + 1).trim().length === 0);
 		} else {
 			showCommandAutocomplete = false;
 		}
@@ -979,8 +981,9 @@
 			const atInfo = extractAtMentionQuery(plainTextValue);
 			if (atInfo) {
 				const query = atInfo.query;
-				if (query.length > 0 && /^\s/.test(query)) {
-					// @ followed immediately by whitespace → not a mention
+				if ((query.length > 0 && /^\s/.test(query)) || /[\r\n]/.test(query)) {
+					// @ followed immediately by whitespace → not a mention; a new line
+					// (Shift+Enter) ends the mention too
 					showFileAutocomplete = false;
 				} else if (!query.includes('/') && query.includes(' ')) {
 					// Root level query contains a space → only keep open if user is typing

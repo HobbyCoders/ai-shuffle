@@ -379,6 +379,7 @@
 	<div
 		bind:this={editorElement}
 		class="tiptap-editor"
+		data-message-editor
 		class:has-suggestion={!!suggestion}
 		data-testid={suggestion ? 'composer-suggestion' : undefined}
 		class:focused={isFocused}

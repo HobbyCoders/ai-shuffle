@@ -34,9 +34,10 @@ export interface KeyboardShortcut {
 	preventDefault?: boolean;
 	/**
 	 * Whether shortcut should work when in input fields. A function is asked
-	 * at key time, for a shortcut whose answer depends on what is on screen.
+	 * at key time with the key event, for a shortcut whose answer depends on
+	 * what is on screen or which field has focus.
 	 */
-	allowInInput?: boolean | (() => boolean);
+	allowInInput?: boolean | ((event: KeyboardEvent) => boolean);
 }
 
 export interface ShortcutRegistration {
@@ -109,6 +110,20 @@ function isInputElement(target: EventTarget | null): boolean {
 	return false;
 }
 
+/** Marks the chat message editor, so a shortcut can work there but not in other fields. */
+export const MESSAGE_EDITOR_ATTRIBUTE = 'data-message-editor';
+
+/**
+ * True when a key event comes from the chat message editor and is a finished
+ * key press (not part of an IME composition). Lets a modifier shortcut that
+ * types nothing, such as Ctrl/Cmd+N, work while the user is writing.
+ */
+export function isMessageEditorKey(e: KeyboardEvent): boolean {
+	if (e.isComposing || e.keyCode === 229) return false;
+	const target = e.target;
+	return target instanceof Element && !!target.closest(`[${MESSAGE_EDITOR_ATTRIBUTE}]`);
+}
+
 /**
  * Handle keydown events
  */
@@ -126,7 +141,7 @@ function handleKeyDown(e: KeyboardEvent): void {
 	if (shortcut) {
 		// Check if we should ignore when in input fields
 		const allowInInput =
-			typeof shortcut.allowInInput === 'function' ? shortcut.allowInInput() : shortcut.allowInInput;
+			typeof shortcut.allowInInput === 'function' ? shortcut.allowInInput(e) : shortcut.allowInInput;
 		if (!allowInInput && isInputElement(e.target)) {
 			// Exception: Allow Escape to always work
 			if (shortcut.key.toLowerCase() !== 'escape') {

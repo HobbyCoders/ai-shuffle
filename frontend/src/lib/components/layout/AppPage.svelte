@@ -37,7 +37,7 @@
 	import { createdChatToFollow } from './follow-created-chat';
 	import { chatChangedDuringBoot } from './boot-landing';
 	import { finishBootReconciliation, getInitGeneration, hasBootProjectPick, hasBootSendClaim } from '$lib/stores/session/session-init';
-	import { registerShortcut, type ShortcutRegistration } from '$lib/services/keyboard';
+	import { isMessageEditorKey, registerShortcut, type ShortcutRegistration } from '$lib/services/keyboard';
 	import { registerSearchShortcut } from '$lib/services/search-shortcut';
 	import { settingsNav, encodeTarget } from '$lib/settings/navigation.svelte';
 	import type { SettingsTarget } from '$lib/settings/types';
@@ -381,6 +381,9 @@
 				key: 'n',
 				cmdOrCtrl: true,
 				category: 'chat',
+				// Ctrl/Cmd+N types nothing, so it also works from the message
+				// editor, where the cursor usually is. Other fields keep it off.
+				allowInInput: isMessageEditorKey,
 				action: () => handleNewSession()
 			}),
 			registerShortcut({

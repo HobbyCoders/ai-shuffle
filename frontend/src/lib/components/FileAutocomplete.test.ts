@@ -157,3 +157,18 @@ it('clears notes when the next request loses authorization', async () => {
     await waitFor(() => expect(screen.getByText('No matching items')).toBeTruthy());
     await waitFor(() => expect(screen.queryByText((_, element) => element?.classList.contains('autocomplete-item-name') === true && element.textContent === 'Allowed note')).toBeNull());
 });
+
+it.each([false, true])('treats Shift+Enter as a new line, never a selection (pending query: %s) (#1194)', async (pendingQuery) => {
+    getNotesAutocomplete.mockResolvedValue([note('Result A')]);
+    const onSelect = vi.fn(), onClose = vi.fn();
+    const { component } = render(FileAutocomplete, { ...props, onSelect, onClose, inputValue: '@Notes/alpha' });
+    await screen.findByText('Result A');
+    const event = new KeyboardEvent('keydown', { key: 'Enter', shiftKey: true, cancelable: true });
+    expect(component.handleKeyDown(event, pendingQuery ? '@Notes/beta' : '@Notes/alpha')).toBe(false);
+    expect(event.defaultPrevented).toBe(false);
+    expect(onSelect).not.toHaveBeenCalled();
+    expect(onClose).toHaveBeenCalledTimes(1);
+    const enter = new KeyboardEvent('keydown', { key: 'Enter', cancelable: true });
+    expect(component.handleKeyDown(enter, '@Notes/alpha')).toBe(true);
+    expect(onSelect).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ name: 'Result A' }));
+});

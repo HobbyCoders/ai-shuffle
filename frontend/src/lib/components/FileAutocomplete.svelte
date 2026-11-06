@@ -433,6 +433,12 @@
 
   export function handleKeyDown(event: KeyboardEvent, latestInput = inputValue): boolean {
     if (!visible) return false;
+    // Shift+Enter is always a new line, even while results load: close the menu
+    // and let the editor insert it instead of picking a suggestion.
+    if (event.key === 'Enter' && event.shiftKey) {
+      onClose();
+      return false;
+    }
 
     // Read the live composer value too: its next prop/effect update may still be queued.
     const latestQuery = extractAtMentionQuery(latestInput)?.query ?? null;
