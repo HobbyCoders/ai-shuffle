@@ -24,7 +24,7 @@
 	import { notify } from '$lib/stores/notifications';
 	import { openSettings } from '$lib/settings/navigation.svelte';
 	import { connectionWorkers, switchRoute, WORKER_SWITCH_CAPABILITY, type ConnectionWorker } from './worker-connection';
-	import { announceWorkerBar, hasShellBridge, nativeAppSettingsRoute, openNativeAppSettings, openNativeWorkers } from './native-shell';
+	import { announceWorkerBar, hasShellBridge, nativeAppSettingsRoute, openNativeAppSettings, openNativeWorkers } from '$lib/api/native-shell';
 
 	/** How long "Connecting to" waits before giving the bar back (the app refused, or nothing happened). */
 	const CONNECT_TIMEOUT_MS = 5000;

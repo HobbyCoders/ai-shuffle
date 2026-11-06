@@ -185,6 +185,25 @@ function show(item?: string, tab?: string) {
 }
 
 describe('Devices list', () => {
+	it('offers Add worker only inside the phone app, opening the app Workers screen', async () => {
+		show();
+		expect(screen.queryByRole('button', { name: 'Add worker' })).toBeNull();
+		cleanup();
+
+		const postMessage = vi.fn();
+		window.__SHUFFLE_MOBILE__ = { apiOrigin: 'https://pc.test', token: 'shc_test' };
+		(window as Window & { shuffleShell?: unknown }).shuffleShell = { postMessage };
+		try {
+			show();
+			expect(screen.getByText('Connect this phone to another worker with its QR code or pairing code.')).toBeTruthy();
+			await fireEvent.click(screen.getByRole('button', { name: 'Add worker' }));
+			expect(postMessage.mock.calls.map(([raw]) => JSON.parse(raw))).toEqual([{ type: 'workers' }]);
+		} finally {
+			delete window.__SHUFFLE_MOBILE__;
+			delete (window as Window & { shuffleShell?: unknown }).shuffleShell;
+		}
+	});
+
  it('uses card groups and only exposes filtering after six rows, with Clear recovery', async () => {
   const view = show();
   expect(screen.queryByRole('searchbox', { name: 'Filter devices' })).toBeNull();
