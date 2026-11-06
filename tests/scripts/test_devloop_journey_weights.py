@@ -63,14 +63,39 @@ def test_checked_in_hosted_plan_leaves_retry_headroom():
     buckets = ci.plan(ci.HOSTED_SHARDS)
     assert len(buckets) == ci.HOSTED_SHARDS
     assert sorted(name for bucket in buckets for name in bucket) == sorted(weights)
-    # Include the ENTIRE first pass, 30s startup, all 180s of exact-case retry,
-    # and the existing 180s teardown reserve inside the unchanged 25m step.
+    # Keep the original 1110s bound and all existing allowances: the entire
+    # 180s retry phase and 180s teardown reserve fit inside the unchanged 25m
+    # step, not only the point estimate of the first pass.
     loads = [sum(weights[name] for name in bucket) for bucket in buckets]
     assert max(loads) <= 19 * 60 - 30, loads
     full_budget = max(loads) + 30 + journey_retry.RETRY_SECONDS + journey_retry.TEARDOWN_SECONDS
     assert full_budget <= journey_retry.STEP_SECONDS
+    assert max(ci.shard_budget_seconds(load) for load in loads) == pytest.approx(full_budget)
     assert all(ci.commands_for(bucket, ci.HOSTED_SHARDS) == [["node", str(ci.JOURNEYS / name)] for name in bucket]
                for bucket in buckets)
+
+
+def test_step_budget_includes_setup_and_full_retry_teardown():
+    assert ci.SETUP_SECONDS == 30
+    assert ci.shard_budget_seconds(1000) == 1390
+    assert ci.shard_budget_seconds(1110) == journey_retry.STEP_SECONDS
+    assert ci.shard_budget_seconds(0) == 0
+
+
+def test_hosted_step_estimates_match_frozen_clean_measurements():
+    # The old partial weights passed the headroom bound while underestimating
+    # tool-cards by ~200s and overestimating new files. Test the actual shard
+    # layouts too, so errors cannot cancel out across the entire suite.
+    fixture = ci.ROOT / "tests/scripts/fixtures/journey_hosted_calibration.json"
+    measured = json.loads(fixture.read_text())
+    weights = ci.estimated_seconds()
+    for run in measured["runs"]:
+        for shard in run["shards"]:
+            predicted = sum(weights[name] for name in shard["seconds"]) + ci.SETUP_SECONDS
+            # Independent hosted holdout, not the run used to refresh weights.
+            # Two minutes is the explicit estimate tolerance, NOT more timeout.
+            assert abs(predicted - shard["step_seconds"]) <= 120, (
+                run["run_id"], shard["shard"], predicted, shard["step_seconds"])
 
 
 def test_checked_in_measurements_match_actual_case_lists():
@@ -79,7 +104,9 @@ def test_checked_in_measurements_match_actual_case_lists():
     # Full refreshes record every file, so future additions require remeasurement
     # instead of silently keeping a short runtime for a larger case list.
     assert data["case_counts"]
-    assert set(data["case_counts"]) <= set(data["seconds"])
+    # Every measured file needs its case inventory, not just the last file
+    # refreshed by hand: otherwise added tool-card cases keep an 8-case weight.
+    assert set(data["case_counts"]) == set(data["seconds"])
     for name, cases in data["case_counts"].items():
         assert ci.case_count(ci.JOURNEYS / name, strict=True) == cases, name
 
@@ -169,10 +196,15 @@ def test_plan_stdout_stays_json_and_loads_reach_log_and_summary(tmp_path, monkey
     assert ci.main(["plan", "--shards", "3"]) == 0
     captured = capsys.readouterr()
     assert json.loads(captured.out) == [["a.journey.mjs"], ["b.journey.mjs"], []]
-    for index, minutes in enumerate([1.5, 0.5, 0.0], 1):
-        assert f"planned shard {index}/3: {minutes:.1f} estimated minutes" in captured.err
-        assert f"| {index}/3 | {1 if index < 3 else 0} | {minutes:.1f} |" in summary.read_text()
-    assert "excludes dev-instance setup and teardown" in summary.read_text()
+    for index, (runtime, step, budget) in enumerate([(90, 120, 480), (30, 60, 420), (0, 0, 0)], 1):
+        headroom = 1500 - budget
+        assert f"planned shard {index}/3: {step / 60:.1f} estimated step minutes" in captured.err
+        assert f"{budget / 60:.1f}m with retry/reserves, {headroom}s headroom" in captured.err
+        assert (f"| {index}/3 | {1 if index < 3 else 0} | {runtime / 60:.1f} | {step / 60:.1f} | "
+                f"{budget / 60:.1f} | {headroom} |") in summary.read_text()
+    assert "30s setup/normal teardown" in summary.read_text()
+    assert "180s retry phase and 180s teardown" in summary.read_text()
+    assert "25 minutes" in summary.read_text()
 
 
 # Frozen main 8ea52f8d case counts + PR #929's 16 short open-unloaded-chat cases.

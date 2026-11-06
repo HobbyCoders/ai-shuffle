@@ -1,0 +1,100 @@
+{
+  "_comment": "Frozen clean first-pass shard measurements from the keyboard-input helper revision. Full step seconds include setup/teardown; per-file seconds come from timestamped runner start/footer lines. Shards 3 and 9 retried elsewhere in this green run and are excluded, not treated as short measurements. Keep this fixture when refreshing weights.",
+  "runs": [
+    {
+      "run_id": 42291819110,
+      "head_sha": "3cc8e8127acd028efb8f88abdf2911fdfb4f811a",
+      "shards": [
+        {
+          "shard": 1,
+          "step_seconds": 1006.0,
+          "seconds": {
+            "chat-position-stability.journey.mjs": 989.079,
+            "settings-detail-link.journey.mjs": 9.262
+          }
+        },
+        {
+          "shard": 2,
+          "step_seconds": 1035.0,
+          "seconds": {
+            "native-scratch-context.journey.mjs": 44.125,
+            "stop-with-queued-messages.journey.mjs": 921.295,
+            "update-runtime.journey.mjs": 58.608
+          }
+        },
+        {
+          "shard": 4,
+          "step_seconds": 994.0,
+          "seconds": {
+            "compaction.journey.mjs": 587.693,
+            "new-chat-project.journey.mjs": 89.271,
+            "project-workers.journey.mjs": 57.995,
+            "shell-geometry.journey.mjs": 77.569,
+            "steer-lifecycle.journey.mjs": 131.672,
+            "type-at-boot.journey.mjs": 39.734
+          }
+        },
+        {
+          "shard": 5,
+          "step_seconds": 1082.0,
+          "seconds": {
+            "cleared-chat.journey.mjs": 55.715,
+            "composer-reload.journey.mjs": 183.643,
+            "data-pages.journey.mjs": 40.278,
+            "html-preview-image-click.journey.mjs": 48.385,
+            "mirrored-chat.journey.mjs": 251.635,
+            "open-unloaded-chat.journey.mjs": 493.003
+          }
+        },
+        {
+          "shard": 6,
+          "step_seconds": 1314.0,
+          "seconds": {
+            "automations.journey.mjs": 22.061,
+            "session-plan.journey.mjs": 239.687,
+            "side-panels.journey.mjs": 186.158,
+            "stop-holds-the-reader.journey.mjs": 504.638,
+            "stop-midstream.journey.mjs": 53.245,
+            "tool-cards.journey.mjs": 296.667
+          }
+        },
+        {
+          "shard": 7,
+          "step_seconds": 994.0,
+          "seconds": {
+            "notes-writing.journey.mjs": 42.197,
+            "provider-errors.journey.mjs": 274.126,
+            "rail-more.journey.mjs": 44.615,
+            "retired-task-chips.journey.mjs": 132.031,
+            "transcript-boundary.journey.mjs": 40.563,
+            "transcript-reader.journey.mjs": 450.324
+          }
+        },
+        {
+          "shard": 8,
+          "step_seconds": 1131.0,
+          "seconds": {
+            "composer-helper.journey.mjs": 24.298,
+            "fluid-commands.journey.mjs": 338.818,
+            "phone-composer.journey.mjs": 99.73,
+            "queue-while-busy.journey.mjs": 441.918,
+            "reload-midstream.journey.mjs": 147.777,
+            "voice-provider-endings.journey.mjs": 67.786
+          }
+        },
+        {
+          "shard": 10,
+          "step_seconds": 1145.0,
+          "seconds": {
+            "composer-large-input.journey.mjs": 72.075,
+            "provider-account-switch.journey.mjs": 26.612,
+            "question-tray.journey.mjs": 337.195,
+            "rewind-transcript.journey.mjs": 358.286,
+            "send-during-init.journey.mjs": 119.298,
+            "voice-call.journey.mjs": 221.076
+          }
+        }
+      ]
+    }
+  ]
+}
