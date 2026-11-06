@@ -88,32 +88,33 @@ def _valid(cursor: Any, name: str) -> bool:
     return bool(row and row["ok"])
 
 
+class _OnlineCursorComplete(Exception):
+    """Let get_db reclaim a closed autocommit connection without committing it."""
+
+
 @contextmanager
 def _online_cursor() -> Iterator[Any]:
     """Borrow only the initialized database; never bypass test/shim routing.
 
     Concurrent DDL needs autocommit. Take startup's schema lock too: otherwise
     startup's plain index DDL can queue behind us and indirectly block DML.
-    Restore settings/mode before returning the slot; release only our locks.
+    Always close before returning the pool slot: startup may already have
+    selected this backend for cancellation, even after its tag/locks are gone.
     """
-    with get_db() as db:
-        raw = getattr(db, "_conn", None)
-        if not isinstance(raw, psycopg2.extensions.connection):
-            raise RuntimeError("online history indexing requires PostgreSQL")
-        exempt_from_start_pressure(raw)
-        raw.commit()
-        raw.autocommit = True
-        try:
-            with raw.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute("SELECT current_setting('lock_timeout') AS lock, "
-                            "current_setting('statement_timeout') AS statement, "
-                            "current_setting('application_name') AS application")
-                previous = cur.fetchone()
-                cur.execute("SELECT pg_try_advisory_lock(hashtext(current_database()), "
-                            "hashtext(current_schema() || '.history_indexing_v1')) AS ok")
-                locked = cur.fetchone()["ok"]
-                schema_locked = False
-                try:
+    try:
+        with get_db() as db:
+            raw = getattr(db, "_conn", None)
+            if not isinstance(raw, psycopg2.extensions.connection):
+                raise RuntimeError("online history indexing requires PostgreSQL")
+            try:
+                exempt_from_start_pressure(raw)
+                raw.commit()
+                raw.autocommit = True
+                with raw.cursor(cursor_factory=RealDictCursor) as cur:
+                    cur.execute("SELECT pg_try_advisory_lock(hashtext(current_database()), "
+                                "hashtext(current_schema() || '.history_indexing_v1')) AS ok")
+                    locked = cur.fetchone()["ok"]
+                    schema_locked = False
                     if locked:
                         from app.db.database import SCHEMA_INIT_LOCK_KEY, ONLINE_DDL_APPLICATION_NAME
                         cur.execute("SELECT pg_try_advisory_lock(%s) AS ok", (SCHEMA_INIT_LOCK_KEY,))
@@ -122,28 +123,16 @@ def _online_cursor() -> Iterator[Any]:
                             cur.execute("SELECT set_config('application_name',%s,false)",
                                         (ONLINE_DDL_APPLICATION_NAME,))
                     yield cur if locked and schema_locked else None
-                finally:
-                    try:
-                        # Stop advertising cancellable work before returning the
-                        # schema key, settings and connection to ordinary users.
-                        cur.execute("SELECT set_config('application_name',%s,false)",
-                                    (previous["application"],))
-                        if schema_locked:
-                            cur.execute("SELECT pg_advisory_unlock(%s)", (SCHEMA_INIT_LOCK_KEY,))
-                        if locked:
-                            cur.execute("SELECT pg_advisory_unlock(hashtext(current_database()), "
-                                        "hashtext(current_schema() || '.history_indexing_v1'))")
-                        cur.execute("SELECT set_config('lock_timeout',%s,false), "
-                                    "set_config('statement_timeout',%s,false)",
-                                    (previous["lock"], previous["statement"]))
-                    except Exception:
-                        # Cancellation during cleanup must not leak session
-                        # locks or maintenance settings into the pool.
-                        raw.close()
-                        raise
-        finally:
-            if not raw.closed:
-                raw.autocommit = False
+            finally:
+                # Closing also releases our advisory locks and settings. Do it
+                # before get_db returns the slot, not after another borrower
+                # could have acquired the same backend.
+                raw.close()
+            # get_db normally commits on success. Its exception path instead
+            # rolls back quietly and reclaims this already-closed connection.
+            raise _OnlineCursorComplete
+    except _OnlineCursorComplete:
+        pass
 
 
 def migrate() -> bool:

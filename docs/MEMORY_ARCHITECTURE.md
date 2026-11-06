@@ -348,6 +348,8 @@ the owner-password/pairing CLIs can overlap a serving process. After ten seconds
 startup cancels only the tagged online-maintenance backend currently holding
 that exact schema key in this database. Cancelled builds/drops retry later;
 unrelated backends and another startup's schema work are never cancelled.
+Online maintenance closes its backend before returning the pool slot, so even
+an already-selected, delayed cancellation cannot hit a subsequent request.
 The two-second pass budget is checked between statements; drops may run for
 up to three minutes.
 The one-time concurrent cap-row index build has no statement timeout, so slow

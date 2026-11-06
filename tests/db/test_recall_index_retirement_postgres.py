@@ -1,6 +1,6 @@
 """Online retirement and reader parity on disposable PostgreSQL only."""
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import asdict
 import logging
 import threading
@@ -506,26 +506,41 @@ def test_startup_never_cancels_unrelated_lock_holders(kind):
         assert cur.fetchone()["ok"] == 1
 
 
-def test_online_cursor_restores_application_name_after_error(monkeypatch):
+@pytest.mark.parametrize("fail", [False, True])
+def test_online_cursor_discards_backend_before_pool_handoff(monkeypatch, fail):
     from app.db.database import ONLINE_DDL_APPLICATION_NAME
 
     with base.get_db() as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT current_setting('application_name') AS name")
-        previous = cur.fetchone()["name"]
-
-        @contextmanager
-        def same_connection():
-            yield conn
-
-        monkeypatch.setattr(history_indexing, "get_db", same_connection)
-        with pytest.raises(RuntimeError, match="test exit"):
+        dsn = conn._conn.dsn
+    # One slot forces ordinary traffic to reuse maintenance's physical backend
+    # unless it was discarded, exercising the real get_db/pool return path.
+    pool = base._RetainingThreadedConnectionPool(1, 1, dsn=dsn)
+    monkeypatch.setattr(base, "_pg_pool", pool)
+    try:
+        expected = pytest.raises(RuntimeError, match="test exit") if fail else nullcontext()
+        with expected:
             with history_indexing._online_cursor() as online:
+                raw = online.connection
+                maintenance_pid = raw.get_backend_pid()
                 online.execute("SHOW application_name")
                 assert online.fetchone()["application_name"] == ONLINE_DDL_APPLICATION_NAME
-                raise RuntimeError("test exit")
-        cur.execute("SHOW application_name")
-        assert cur.fetchone()["application_name"] == previous
+                if fail:
+                    raise RuntimeError("test exit")
+        assert raw.closed
+        assert base.pool_stats()["in_use"] == 0
+        assert base.pressure_stats()["connections_discarded"] == 1
+        with base.get_db() as conn:
+            assert conn._conn.get_backend_pid() != maintenance_pid
+            cur = conn.cursor()
+            # Startup's already-selected cancellation may arrive after handoff.
+            # It can only target the old maintenance process, never this request.
+            cur.execute("SELECT pg_cancel_backend(%s)", (maintenance_pid,))
+            cur.execute("SELECT pg_sleep(0.01), 42 AS answer")
+            assert cur.fetchone()["answer"] == 42
+        assert base.pool_stats()["in_use"] == 0
+        assert base.pressure_stats()["connections_opened"] == 2
+    finally:
+        pool.closeall()
 
 
 def test_retirement_finishes_while_staggered_writers_keep_running(ready_projection):
