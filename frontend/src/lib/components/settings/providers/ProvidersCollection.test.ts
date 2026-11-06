@@ -104,6 +104,96 @@ it.each([
 });
 
 describe('the list', () => {
+	it('keeps a timed-out registry unknown while its retry response is held', async () => {
+		vi.useFakeTimers();
+		let registryReads = 0;
+		let releaseRetry!: () => void;
+		const heldRetry = new Promise<void>((resolve) => (releaseRetry = resolve));
+		const real = worker.fetch;
+		vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+			if (new URL(String(input), 'http://localhost').pathname === '/api/v1/model-providers') {
+				registryReads++;
+				if (registryReads === 1) return new Promise<Response>(() => {});
+				if (registryReads === 2) await heldRetry;
+			}
+			return real(input, init);
+		});
+		render(ProvidersCollection);
+		await vi.advanceTimersByTimeAsync(10_000);
+		expect(providers.current.providersError).toContain('did not respond');
+		await fireEvent.click(screen.getByRole('button', { name: 'Retry providers' }));
+		await vi.advanceTimersByTimeAsync(0);
+		expect(registryReads).toBe(2);
+		expect(providers.current.providersError).toContain('did not respond');
+		expect(screen.queryByText('Not connected')).toBeNull();
+		expect(screen.queryByRole('button', { name: /^OpenAI/ })).toBeNull();
+		settingsNav.go({ category: 'providers', item: 'provider:openai' });
+		await vi.advanceTimersByTimeAsync(9_000);
+		expect(settingsNav.selectedItem('providers')).toBe('provider:openai');
+		expect(screen.queryByRole('heading', { level: 2, name: 'OpenAI' })).toBeNull();
+		expect(screen.queryByText(/Not connected/)).toBeNull();
+		expect(screen.getAllByRole('button', { name: 'Retry providers', hidden: true }).every((b) => (b as HTMLButtonElement).disabled)).toBe(true);
+		releaseRetry();
+		await vi.advanceTimersByTimeAsync(0);
+		expect(providers.current.providersError).toBe('');
+		expect(screen.getByRole('heading', { level: 2, name: 'OpenAI' })).toBeTruthy();
+		expect(credentialNames('OpenAI')).toEqual(['OpenAI Plus subscription, Active', 'OpenAI API key, Active']);
+	});
+
+	it.each(['second Retry', 'resource refresh'])(
+		'coalesces a held retry with a %s so an older deadline cannot undo recovery',
+		async (source) => {
+			vi.useFakeTimers();
+			let integrationReads = 0;
+			let releaseOld!: () => void;
+			const heldOld = new Promise<void>((resolve) => (releaseOld = resolve));
+			const real = worker.fetch;
+			vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+				if (new URL(String(input), 'http://localhost').pathname === '/api/v1/settings/integrations') {
+					integrationReads++;
+					if (integrationReads === 1) return new Response('unavailable', { status: 503 });
+					if (integrationReads === 2) {
+						await heldOld;
+						return new Response('obsolete error', { status: 503 });
+					}
+				}
+				return real(input, init);
+			});
+			settingsNav.stacked = true;
+			settingsNav.go({ category: 'providers', item: 'fal:key' });
+			render(ProvidersCollection);
+			await vi.advanceTimersByTimeAsync(0);
+			const retries = screen.getAllByRole('button', { name: 'Retry providers', hidden: true }) as HTMLButtonElement[];
+			expect(retries).toHaveLength(2);
+			await fireEvent.click(retries[1]);
+			await vi.advanceTimersByTimeAsync(0);
+			const first = providers.refreshAll();
+			const second = source === 'second Retry'
+				? fireEvent.click(retries[0])
+				: providers.refreshAll();
+			await vi.advanceTimersByTimeAsync(0);
+			expect(integrationReads).toBe(2); // no successful request may overtake the held retry
+			expect(retries.every((b) => b.disabled)).toBe(true);
+			expect(providers.current.refreshing).toBe(true);
+			if (source === 'resource refresh') expect(second).toBe(first);
+			await vi.advanceTimersByTimeAsync(10_000);
+			await first;
+			expect(providers.current.refreshing).toBe(false);
+			expect(retries.every((b) => !b.disabled)).toBe(true);
+			expect(providers.current.integrationsError).toContain('did not respond');
+			await fireEvent.click(retries[1]);
+			await vi.advanceTimersByTimeAsync(0);
+			expect(integrationReads).toBe(3);
+			expect(screen.queryByRole('alert')).toBeNull();
+			expect(screen.getByRole('heading', { level: 2, name: 'Media key' })).toBeTruthy();
+			releaseOld();
+			await vi.advanceTimersByTimeAsync(10_000);
+			expect(providers.current.integrationsError).toBeNull();
+			expect(screen.queryByRole('alert')).toBeNull();
+			expect(settingsNav.selectedItem('providers')).toBe('fal:key');
+		}
+	);
+
 	it.each(['/settings/claude-auth', '/settings/integrations', '/model-providers'])(
 		'shows loaded providers and a working retry when %s never responds',
 		async (path) => {

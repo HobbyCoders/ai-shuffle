@@ -61,6 +61,8 @@ import {
 interface ProvidersState {
 	/** The first registry, integration and Claude reads have all settled. */
 	initialSnapshotReady: boolean;
+	/** A shared full-snapshot read is active (open, resource event or Retry). */
+	refreshing: boolean;
 	// ----- model_providers registry -----
 	providers: ModelProvider[];
 	providersLoading: boolean;
@@ -102,6 +104,7 @@ interface ProvidersState {
 
 const initialState: ProvidersState = {
 	initialSnapshotReady: false,
+	refreshing: false,
 	providers: [],
 	providersLoading: false,
 	providersError: '',
@@ -135,6 +138,8 @@ let _state = $state<ProvidersState>({ ...initialState });
  * `clear()`. Not `$state` — a plain module-scope latch, never rendered.
  */
 let _initialLoadStarted = false;
+// Every full-snapshot entry point joins this read, rather than racing it.
+let _refreshInFlight: Promise<void> | null = null;
 
 const { subscribe, update: _update, notifySubscribers: _notifySubscribers } =
 	createSubscribers<ProvidersState>(
@@ -187,25 +192,35 @@ export const providers = {
 	 * Refetch everything on every open, silently: each loader raises its loading
 	 * flag only while its data is still empty, so rendered rows never flicker.
 	 */
-	async refreshAll() {
+	refreshAll(): Promise<void> {
+		if (_refreshInFlight) return _refreshInFlight;
 		_initialLoadStarted = true;
-		await Promise.all([
+		_update((s) => ({ ...s, refreshing: true }));
+		const flight = Promise.all([
 			providers.loadProviders(true),
 			providers.loadIntegrations(),
 			providers.loadClaude()
-		]);
-		// Until all three reads settle, empty credentials are unknown rather
-		// than Not connected. Publish the first list once; later refreshes keep
-		// the existing rows visible instead of returning to a loading screen.
-		_update((s) => ({ ...s, initialSnapshotReady: true }));
+		]).then(() => {
+			// Publish the first list once, including retryable unavailable reads.
+			// A clear() during this read must not complete a newer snapshot.
+			if (_refreshInFlight === flight) _update((s) => ({ ...s, initialSnapshotReady: true }));
+		}).finally(() => {
+			if (_refreshInFlight === flight) {
+				_refreshInFlight = null;
+				_update((s) => ({ ...s, refreshing: false }));
+			}
+		});
+		_refreshInFlight = flight;
+		return flight;
 	},
 
 	async loadProviders(silent = false) {
 		const showLoading = !silent || _state.providers.length === 0;
-		_update((s) => ({ ...s, providersError: '', ...(showLoading ? { providersLoading: true } : {}) }));
+		// Retain unknown/error state through Retry; only a successful read clears it.
+		if (showLoading) _update((s) => ({ ...s, providersLoading: true }));
 		try {
 			const res = await boundedProviderRead(listModelProviders(), 'Provider registry');
-			_update((s) => ({ ...s, providers: res.providers ?? [] }));
+			_update((s) => ({ ...s, providers: res.providers ?? [], providersError: '' }));
 		} catch (e) {
 			_update((s) => ({ ...s, providersError: getErrorMessage(e, 'Failed to load providers') }));
 		} finally {
@@ -553,6 +568,7 @@ export const providers = {
 
 	/** Reset the whole store (test/teardown helper). */
 	clear() {
+		_refreshInFlight = null;
 		_state = { ...initialState };
 		_initialLoadStarted = false;
 		_notifySubscribers();

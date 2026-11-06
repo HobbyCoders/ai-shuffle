@@ -121,7 +121,7 @@
 		{:else}
 			{#if readError}
 				<p class="pv-msg err" role="alert">{readError}</p>
-				<button type="button" class="st-btn ghost" onclick={() => providers.refreshAll()}>Retry providers</button>
+				<button type="button" class="st-btn ghost" disabled={s.refreshing} aria-busy={s.refreshing} onclick={() => providers.refreshAll()}>Retry providers</button>
 			{/if}
 			{#if nativeOptions.error}
 				<p class="pv-msg err" role="alert">{nativeOptions.error}</p>
@@ -135,7 +135,9 @@
 		{#if selected && !s.initialSnapshotReady}
 			<EmptyDetail icon={KeyRound} message="Loading providers" />
 		{:else if selected && readError && (!target || (target.kind === 'provider' && !isConnected(target.provider)))}
-			<EmptyDetail icon={KeyRound} message={readError} actionLabel="Retry providers" onAction={() => providers.refreshAll()} />
+			<EmptyDetail icon={KeyRound} message={readError}>
+				<button type="button" class="st-btn" disabled={s.refreshing} aria-busy={s.refreshing} onclick={() => providers.refreshAll()}>Retry providers</button>
+			</EmptyDetail>
 		{:else if target?.kind === 'draft'}
 			{#key target.draft.item}<DraftDetail draft={target.draft} provider={target.provider} />{/key}
 		{:else if target?.kind === 'provider'}
