@@ -3,7 +3,8 @@
 // click itself. A page that toggles a gallery on click (an onclick handler, or
 // an addEventListener one that changes the document) must keep the click: the
 // lightbox opening on top hid the page's change, and closing it showed the
-// pair stacked, the bug this guards. A plain image still opens the lightbox.
+// pair stacked, the bug this guards. A plain image still opens the lightbox,
+// also while the page keeps changing something else in tasks of its own.
 import { unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { runJourney } from './runner.mjs';
@@ -25,7 +26,13 @@ body{margin:0;padding:12px;font:14px system-ui}
 <div class="pair" id="listener">
 <img src="${PNG}" alt="Listener before"><img src="${PNG}" alt="Listener after"></div>
 <div class="pair"><img src="${PNG}" alt="Plain image"></div>
-<script>document.getElementById('listener').addEventListener('click',function(){this.toggleAttribute('data-picked');});</script>
+<div class="pair" id="busy"><img src="${PNG}" alt="Busy page image"></div><p id="ticker">0</p>
+<script>document.getElementById('listener').addEventListener('click',function(){this.toggleAttribute('data-picked');});
+// Something else on the page keeps changing in tasks of its own (a clock, a
+// progress counter): from a press on the last image for a moment, one update per task, so
+// the click lands while it runs.
+var ch=new MessageChannel(),until=0,n=0;ch.port1.onmessage=function(){document.getElementById('ticker').textContent=String(++n);if(Date.now()<until)ch.port2.postMessage(0);};
+document.getElementById('busy').addEventListener('pointerdown',function(){var run=Date.now()<until;until=Date.now()+600;if(!run)ch.port2.postMessage(0);});</script>
 </body></html>`;
 
 const written = [];
@@ -85,6 +92,19 @@ await runJourney({
 				expect((await opens()) === 1, 'a plain data: image opens the lightbox once');
 
 				await mark('close the lightbox');
+				await page.keyboard.press('Escape');
+				await lightbox.waitFor({ state: 'detached', timeout: 10_000 });
+				await page.waitForTimeout(800);
+
+				// Changes the page makes in later tasks are not a reply to the click.
+				await mark('click a plain image while the page updates something else');
+				const ticks = await frame.locator('#ticker').textContent();
+				await frame.getByRole('img', { name: 'Busy page image' }).click();
+				await lightbox.waitFor({ timeout: 10_000 });
+				expect((await frame.locator('#ticker').textContent()) !== ticks, 'the page was updating while the click landed');
+				expect((await opens()) === 2, 'the lightbox opens despite the unrelated updates');
+
+				await mark('close the lightbox again');
 				await page.keyboard.press('Escape');
 				await lightbox.waitFor({ state: 'detached', timeout: 10_000 });
 				await page.waitForTimeout(800);

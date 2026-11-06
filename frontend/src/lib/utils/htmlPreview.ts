@@ -288,9 +288,12 @@ const PINNED_CSS = ':where(html){scrollbar-width:thin}';
 // does not handle itself, blocks every other navigation and form submission,
 // and passes Escape and pointer enter/leave on (the parent cannot see hover
 // inside the frame). An image click belongs to the page when it cancels it,
-// changes the document in response (a gallery that toggles a layout class,
-// say) or has an onclick handler on the image or a container below <body>;
-// opening the lightbox as well would hide the page's change behind it.
+// changes the document while the click is dispatched (a gallery that toggles
+// a layout class, say; observer records arrive at the microtask checkpoint
+// after each listener, while eventPhase is set, so a timer, animation frame
+// or theme update in a later task does not count) or has an onclick handler
+// on the image or a container below <body>; opening the lightbox as well
+// would hide the page's change behind it.
 // An inline page cannot scroll, so its #anchor links ask the parent to
 // scroll the transcript to the target instead.
 const BOOTSTRAP_SCRIPT = `(function(){
@@ -316,8 +319,8 @@ function own(t){for(var n=t;n&&n!==document.body&&n!==document.documentElement;n
 window.addEventListener('click',function(e){var t=e.target;
 if(!e.isTrusted||e.button!==0||e.metaKey||e.ctrlKey||e.shiftKey||e.altKey||!t||t.tagName!=='IMG'||t.closest('a[href],button'))return;
 var u=t.currentSrc||t.src||'';if(!/^data:image\\//i.test(u))return;
-var moved=false,IO=window.MutationObserver?new MutationObserver(function(){moved=true;}):null;if(IO)IO.observe(document,{subtree:true,childList:true,attributes:true,characterData:true});
-setTimeout(function(){if(IO){if(IO.takeRecords().length)moved=true;IO.disconnect();}
+var moved=false,IO=window.MutationObserver?new MutationObserver(function(){if(e.eventPhase)moved=true;}):null;if(IO)IO.observe(document,{subtree:true,childList:true,attributes:true,characterData:true});
+setTimeout(function(){if(IO)IO.disconnect();
 if(!e.defaultPrevented&&!moved&&!own(t))post({jsonrpc:'2.0',method:M.openImage,params:{src:u,name:t.alt||t.title||''}});});},true);
 document.addEventListener('keydown',function(e){if(e.key==='Escape'&&e.isTrusted&&!e.defaultPrevented)post({jsonrpc:'2.0',method:M.escape});});
 var R=document.documentElement;R.addEventListener('mouseenter',function(){post({jsonrpc:'2.0',method:M.hover,params:{inside:true}});});
