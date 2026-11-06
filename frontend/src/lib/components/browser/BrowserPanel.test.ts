@@ -96,6 +96,30 @@ describe('point-and-prompt delivery', () => {
   await waitFor(() => expect(view.getByText(/^Sent —/)).toBeTruthy());
   expect(view.input.value).toBe('');
  });
+ it('recovers its draft and retry button when sender admission reaches its deadline', async () => {
+  vi.useFakeTimers();
+  try {
+   // The sender owns the voice-context deadline; this is its caller contract.
+   mocks.sendMessage.mockImplementationOnce(() => new Promise(resolve => setTimeout(() => resolve(false), 10_000)));
+   const view = await setupPrompt();
+   await fireEvent.click(view.send);
+   await vi.advanceTimersByTimeAsync(9_999);
+   expect(view.send.disabled).toBe(true);
+   expect(view.input.value).toBe(draft);
+   expect(view.queryByText(/^Sent —/)).toBeNull();
+   await vi.advanceTimersByTimeAsync(1);
+   await tick();
+   expect(view.getByRole('alert').textContent).toContain('Could not send');
+   expect(view.input.value).toBe(draft);
+   expect(view.send.disabled).toBe(false);
+   await fireEvent.click(view.send);
+   await tick();
+   expect(view.getByText(/^Sent —/)).toBeTruthy();
+   expect(view.input.value).toBe('');
+  } finally {
+   cleanup(); vi.useRealTimers();
+  }
+ });
  it('does not erase a replacement draft typed while acceptance is pending', async () => {
   let accept!: (sent: boolean) => void;
   mocks.sendMessage.mockReturnValueOnce(new Promise(resolve => { accept = resolve; }));
