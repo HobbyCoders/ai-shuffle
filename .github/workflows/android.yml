@@ -282,6 +282,7 @@ jobs:
           python3 ci/test-ci-webview.py
           python3 ci/test-instrumentation-parser.py
           python3 ci/test-ui-runner.py
+          python3 ci/test-instrumentation-races.py
       - name: Enable emulator acceleration
         run: sudo chmod 666 /dev/kvm
       # The emulator action catches launch-hook errors and still attempts boot.
