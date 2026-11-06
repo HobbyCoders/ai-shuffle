@@ -62,6 +62,13 @@
 	--st-toc-width: 184px;
 	--st-toc-gap: 40px;
 	--st-gutter: 48px;
+	/* Every destination sits in one centred frame, the wide pages' width. A
+	   reading column keeps its 760px measure but starts at the frame's left
+	   edge (margin-left: var(--st-frame-inset)), so the title and content
+	   never move between pages; the spare width goes on the right. The 100%
+	   resolves against the element that uses it (the page's scroller). */
+	--st-frame-width: calc(var(--st-data-width) + 2 * var(--st-gutter));
+	--st-frame-inset: max(0px, (100% - var(--st-frame-width)) / 2);
 	--st-dtop-height: 22px;
 	--st-mono: var(--font-mono, ui-monospace, 'JetBrains Mono', monospace);
 
@@ -145,18 +152,20 @@
  */
 .settings-shell:not([data-stacked]) .st-coll:has(> .st-dpane > .st-empty-detail[data-idle]) {
 	grid-template-columns: minmax(0, 1fr);
-	justify-items: center;
+	justify-items: start;
 }
 .settings-shell:not([data-stacked]) .st-coll:has(> .st-dpane > .st-empty-detail[data-idle]) > .st-divider,
 .settings-shell:not([data-stacked]) .st-coll:has(> .st-dpane > .st-empty-detail[data-idle]) > .st-dpane {
 	display: none;
 }
 .settings-shell:not([data-stacked]) .st-coll:has(> .st-dpane > .st-empty-detail[data-idle]) > .st-lcol {
-	width: min(100%, 856px);
+	width: min(100%, calc(var(--st-reading-width) + 2 * var(--st-gutter)));
+	margin-left: var(--st-frame-inset);
 	border-right: 0;
-	padding: 0 32px;
+	padding: 0 calc(var(--st-gutter) - 16px);
 }
-/* One centred column: heading, filter and rows share its one left edge. */
+/* One column at the shared frame's left edge: heading, filter and rows share
+   its one left edge, the same x as every other page title. */
 .settings-shell:not([data-stacked]) .st-coll:has(> .st-dpane > .st-empty-detail[data-idle]) > .st-lcol .st-lhead {
 	padding-inline: 16px;
 }
@@ -167,7 +176,7 @@
 	padding-inline: 16px;
 }
 
-/* A collection whose open item replaces the list: one pane, centred like the list. */
+/* A collection whose open item replaces the list: one pane, at the list's left edge. */
 .settings-shell:not([data-stacked]) .st-coll[data-replace='detail'] {
 	grid-template-columns: minmax(0, 1fr);
 }
@@ -177,7 +186,6 @@
 }
 .settings-shell:not([data-stacked]) .st-coll[data-replace='detail'] .st-dwrap {
 	width: 100%;
-	margin-inline: auto;
 }
 .settings-shell:not([data-stacked]) .st-coll[data-replace='detail'] .st-back {
 	display: inline-flex;
@@ -307,6 +315,27 @@
  .settings-shell .st-btn.icon { min-width: 32px; margin-inline: 6px; }
  .settings-shell .st-page-title .st-btn { margin-block: 0; }
  .settings-shell .st-lhead { gap: 0; }
+}
+
+/* A phone screen's main actions (app.css --phone-action-*), and every phone
+   empty state's create or recovery button: drawn at the full 44px touch
+   height, so no invisible extension or reserved margin is needed. Rows,
+   headers and desktop keep the compact 32px button. */
+.settings-shell[data-stacked] :is(.st-btn.phone-action, .st-empty-detail .acts .st-btn) {
+	height: var(--phone-action-height);
+	min-height: var(--phone-action-height);
+	margin-block: 0;
+	border-radius: var(--phone-action-radius);
+}
+.settings-shell[data-stacked] :is(.st-btn.phone-action, .st-empty-detail .acts .st-btn)::after { content: none; }
+@media (max-width: 600px), (pointer: coarse) {
+ .settings-shell :is(.st-btn.phone-action, .st-empty-detail .acts .st-btn) {
+	height: var(--phone-action-height);
+	min-height: var(--phone-action-height);
+	margin-block: 0;
+	border-radius: var(--phone-action-radius);
+ }
+ .settings-shell :is(.st-btn.phone-action, .st-empty-detail .acts .st-btn)::after { content: none; }
 }
 
 /* Back button: only in stacked mode */

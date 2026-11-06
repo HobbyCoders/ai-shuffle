@@ -57,6 +57,29 @@
 		});
 		return out;
 	}
+
+	/**
+	 * Where the last whole tab ends, measured from the strip's visible left edge,
+	 * or null when no tab is whole. The trailing fade starts here and the chevron
+	 * follows it, so no hidden tab leaves a dead gap before the chevron.
+	 */
+	export function wholeTabsEnd(
+		tabs: { left: number; width: number }[],
+		view: { scrollLeft: number; width: number },
+		slack = 1
+	): number | null {
+		const lo = view.scrollLeft - slack;
+		const hi = view.scrollLeft + view.width + slack;
+		let end: number | null = null;
+		for (const t of tabs) {
+			const r = t.left + t.width;
+			if (t.left >= lo && r <= hi) end = Math.max(end ?? 0, r - view.scrollLeft);
+		}
+		return end;
+	}
+
+	/** The visible gap between the last whole tab and the chevron. */
+	export const TAB_CHEVRON_GAP = 8;
 </script>
 
 <script lang="ts">
@@ -68,8 +91,9 @@
 	 * still do not fit, the strip scrolls sideways: touch and trackpad natively,
 	 * a vertical mouse wheel turns into sideways scroll, a mouse can drag it.
 	 * Scrolling snaps to whole tabs, the edge with more tabs fades, and the
-	 * trailing chevron has its own reserved slot. At rest a tab that does not
-	 * fit whole is hidden, never shown cut. The selected tab is always kept in
+	 * trailing chevron sits 8px after the last whole tab (a slot is reserved so
+	 * it always fits). At rest a tab that does not fit whole is hidden, never
+	 * shown cut, and the fade starts where the whole tabs end. The selected tab is always kept in
 	 * view (after selection, keyboard moves and resizes).
 	 */
 	import { tick } from 'svelte';
@@ -95,6 +119,8 @@
 	let tight = $state(false);
 	/** Ids of tabs that are only partly visible (hidden at rest). */
 	let partial = $state<string[]>([]);
+	/** px from the row's left edge where the last whole tab ends (null: unknown). */
+	let cutAt = $state<number | null>(null);
 	let scrolling = $state(false);
 	let restTimer: ReturnType<typeof setTimeout> | undefined;
 	let dragging = $state(false);
@@ -124,10 +150,12 @@
 		moreLeft = list.scrollLeft > 2;
 		moreRight = max > 2 && list.scrollLeft < max - 2;
 		const els = tabEls();
-		const idx = partialTabs(
-			els.map((e) => ({ left: e.offsetLeft - list!.offsetLeft, width: e.offsetWidth })),
-			{ scrollLeft: list.scrollLeft, width: list.clientWidth }
-		);
+		const boxes = els.map((e) => ({ left: e.offsetLeft - list!.offsetLeft, width: e.offsetWidth }));
+		const view = { scrollLeft: list.scrollLeft, width: list.clientWidth };
+		const idx = partialTabs(boxes, view);
+		const end = wholeTabsEnd(boxes, view);
+		const nextCut = end === null ? null : Math.round(list.offsetLeft + end);
+		if (nextCut !== cutAt) cutAt = nextCut;
 		const ids = idx.map((i) => els[i].dataset.tabId ?? '');
 		if (ids.join() !== partial.join()) partial = ids;
 	}
@@ -239,7 +267,7 @@
 	});
 </script>
 
-<div class="st-tabs-wrap" class:more-l={moreLeft} class:more-r={moreRight} class:overflowing class:tight bind:this={wrap}>
+<div class="st-tabs-wrap" class:more-l={moreLeft} class:more-r={moreRight} class:overflowing class:tight style:--tab-cut={cutAt === null ? undefined : `${cutAt}px`} bind:this={wrap}>
 	<div
 		class="st-tabs"
 		class:dragging
@@ -282,7 +310,10 @@
 	.st-tabs-wrap {
 		--tab-gap: 20px;
 		--tab-fade: 24px;
-		--tab-slot: 28px;
+		/* Chevron gap (TAB_CHEVRON_GAP) plus its 12px glyph: room for it after a
+		   tab that ends at the very edge. */
+		--tab-chevron-gap: 8px;
+		--tab-slot: calc(var(--tab-chevron-gap) + 12px);
 		position: relative;
 		display: flex;
 		margin-top: 14px;
@@ -303,18 +334,21 @@
 		/* Tabs sit on the row's baseline. */
 		margin-bottom: -1px;
 	}
-	/* The trailing chevron lives in its own slot; it never sits over a label. */
+	/* A slot is reserved so the chevron always fits; it never sits over a label. */
 	.overflowing .st-tabs { margin-right: var(--tab-slot); }
+	/* The chevron follows the last whole tab by 8px (the space a hidden tab
+	   leaves is empty), never parked at the far edge behind a dead gap. */
 	.tabs-more {
 		position: absolute;
-		right: 0;
+		left: calc(var(--tab-cut, calc(100% - var(--tab-slot))) + var(--tab-chevron-gap));
 		top: 0;
 		bottom: 0;
-		width: var(--tab-slot);
+		width: 12px;
 		display: grid;
 		place-items: center;
 		color: var(--st-mfg);
 		pointer-events: none;
+		z-index: 2;
 	}
 	/* The fades sit at the scrolling edges, over the space a hidden tab leaves. */
 	.st-tabs-wrap::before,
@@ -333,9 +367,13 @@
 		left: 0;
 		background: linear-gradient(to right, var(--st-bg), transparent);
 	}
+	/* The trailing fade starts right after the last whole tab and covers the
+	   rest of the row, so a tab sliding in while the strip moves fades in there. */
 	.st-tabs-wrap::after {
-		right: var(--tab-slot);
-		background: linear-gradient(to left, var(--st-bg), transparent);
+		left: var(--tab-cut, calc(100% - var(--tab-slot) - var(--tab-fade)));
+		right: 0;
+		width: auto;
+		background: linear-gradient(to right, transparent, var(--st-bg) var(--tab-fade));
 	}
 	.st-tabs-wrap.more-l::before,
 	.st-tabs-wrap.more-r::after {

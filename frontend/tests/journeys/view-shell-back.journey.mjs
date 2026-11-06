@@ -120,19 +120,27 @@ await runJourney({
 				const tabs = await page.getByRole('tablist').boundingBox();
 				expect(tabs && tabs.y + tabs.height <= 240, 'K2: agent tabs finish by y=240');
 				const strip = page.getByRole('tablist');
-				// Council pass 2 (S1): a ~24px end fade beside the reserved 28px chevron
-				// slot, and at rest a tab is either whole or hidden past the edge.
+				// Council pass 3 (F5, replacing pass 2's fixed 28px chevron slot): the
+				// end fade starts right after the last whole tab, the chevron sits at
+				// that edge no further than the normal tab gap, and at rest a tab is
+				// either whole or hidden past the edge.
 				await page.waitForTimeout(300);
 				const fade = await strip.locator('..').evaluate(el => {
 					const after = getComputedStyle(el, '::after');
+					const box = el.getBoundingClientRect();
 					const edge = el.querySelector('[role=tablist]').getBoundingClientRect().right;
-					const cut = [...el.querySelectorAll('[role=tab]')].filter(t => {
-						const r = t.getBoundingClientRect();
-						return getComputedStyle(t).opacity !== '0' && r.left < edge - 1 && r.right > edge + 1;
-					}).map(t => t.textContent.trim());
-					return { width: after.width, right: after.right, cut };
+					const shown = [...el.querySelectorAll('[role=tab]')].filter(t => getComputedStyle(t).opacity !== '0').map(t => ({ t, r: t.getBoundingClientRect() }));
+					const cut = shown.filter(({ r }) => r.left < edge - 1 && r.right > edge + 1).map(({ t }) => t.textContent.trim());
+					const lastWhole = Math.max(...shown.filter(({ r }) => r.right <= edge + 1).map(({ r }) => r.right));
+					const chevron = el.querySelector('.tabs-more svg')?.getBoundingClientRect();
+					return {
+						fadeStart: Math.round(box.left + parseFloat(after.left)), lastWhole: Math.round(lastWhole),
+						chevronGap: chevron ? Math.round(chevron.left - lastWhole) : null,
+						tabGap: parseFloat(getComputedStyle(el.querySelector('[role=tablist]')).columnGap), cut
+					};
 				});
-				expect(fade.width === '24px' && fade.right === '28px' && fade.cut.length === 0, `K4: 24px end fade beside the 28px chevron slot, no tab cut at rest (${JSON.stringify(fade)})`);
+				expect(Math.abs(fade.fadeStart - fade.lastWhole) <= 1 && fade.chevronGap !== null && fade.chevronGap >= 0 && fade.chevronGap <= fade.tabGap && fade.cut.length === 0,
+					`K4: fade from the last whole tab, chevron within one tab gap of it, no tab cut at rest (${JSON.stringify(fade)})`);
 				const folder = page.locator('.st-row').filter({ has: page.getByRole('combobox', { name: 'Folder', exact: true }) });
 				const selector = await folder.getByRole('combobox').boundingBox();
 				const hint = await folder.locator('.st-rh').boundingBox();

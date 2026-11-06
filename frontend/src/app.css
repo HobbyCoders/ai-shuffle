@@ -718,6 +718,18 @@ select {
 	--menu-shadow: var(--shadow-l);
 }
 
+/* One phone action size: the buttons that are a phone screen's main actions
+   (Files' Upload and New folder, the chat controls sheet's Call, Browser,
+   Terminal and Export, a phone empty state's create button) draw at the full
+   touch height instead of the compact 32px row button. Colours stay the
+   button's own; the radius matches the phone inputs. Desktop is unchanged.
+   The settings kit's .st-btn.phone-action and the sheet's .act read these. */
+:root {
+	--phone-action-height: 44px;
+	--phone-action-radius: var(--radius, 8px);
+	--phone-action-gap: 8px;
+}
+
 select option {
 	background-color: var(--popover);
 	color: var(--popover-foreground);

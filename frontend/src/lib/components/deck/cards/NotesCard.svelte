@@ -875,7 +875,7 @@
 					message={searchQuery || selectedTag ? 'Try another search or tag.' : 'Keep ideas, plans and files together.'}
 					actionLabel={selectedTag ? 'Clear filters' : searchQuery ? 'Clear search' : undefined} onAction={() => { searchQuery = ''; selectedTag = null; }}>
 					{#if !searchQuery && !selectedTag}
-						<button class="st-btn primary" onclick={startNewNote}>Create your first note</button>
+						<button class="st-btn primary" onclick={startNewNote}><Plus />New note</button>
 					{/if}
 				</EmptyDetail>
 			{:else}

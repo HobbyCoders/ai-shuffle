@@ -216,11 +216,13 @@
 		position: relative;
 		width: 100%;
 		max-width: calc(var(--st-reading-width) + 2 * var(--st-gutter));
-		margin-inline: auto;
+		/* Left-aligned in the shared frame (settings.css), never centred on its own. */
+		margin-inline: var(--st-frame-inset) auto;
 		padding: var(--st-page-top) var(--st-gutter) 96px;
 	}
-	/* Wide pages (Stats, Pull requests, Files, Docs) share one container, so the
-	   title never moves between them. Docs' contents column sits inside it. */
+	/* Wide pages (Stats, Pull requests, Files, Docs) fill the shared frame; reading
+	   pages start at its left edge, so the title never moves between any of them.
+	   Docs' contents column sits inside it. */
 	.st-dwrap.docs,
 	.st-dwrap.data { max-width: calc(var(--st-data-width) + 2 * var(--st-gutter)); }
 	.st-dh {

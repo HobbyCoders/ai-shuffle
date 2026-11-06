@@ -343,8 +343,8 @@
 				{#snippet topStatus()}{/snippet}
 				{#if phone}
 					<div class="fs-phone-actions">
-						<button class="st-btn touch primary" onclick={triggerUpload} disabled={uploading || !!loadError}>{#if uploading}<Loader2 size={15} class="fs-spin" />{:else}<Upload size={15} />{/if}<span>{uploading ? `Uploading ${uploadProgress}%` : 'Upload'}</span></button>
-						<button class="st-btn touch" onclick={openNewFolder} disabled={!!loadError}><FolderPlus size={15} /><span>New folder</span></button>
+						<button class="st-btn phone-action primary" onclick={triggerUpload} disabled={uploading || !!loadError}>{#if uploading}<Loader2 size={15} class="fs-spin" />{:else}<Upload size={15} />{/if}<span>{uploading ? `Uploading ${uploadProgress}%` : 'Upload'}</span></button>
+						<button class="st-btn phone-action" onclick={openNewFolder} disabled={!!loadError}><FolderPlus size={15} /><span>New folder</span></button>
 					</div>
 				{/if}
 				{#if showNewFolder}
@@ -441,7 +441,7 @@
 	.fs-crumbs button[aria-current] { color: var(--st-fg); }
 	.fs-main { position: relative; min-width: 0; padding: 0; overflow: hidden; }
 	.fs-footer { padding-top: 12px; color: var(--st-mfg); font-size: 12px; }
-	.fs-phone-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; align-items: stretch; margin-bottom: 20px; }
+	.fs-phone-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--phone-action-gap); align-items: stretch; margin-bottom: 20px; }
 	.fs-phone-actions > button { min-width: 0; padding-inline: 12px; justify-content: center; }
 	.fs-more { position: relative; flex: none; }
 	.fs-more summary { list-style: none; cursor: pointer; }
