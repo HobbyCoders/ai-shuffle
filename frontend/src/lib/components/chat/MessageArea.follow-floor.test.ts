@@ -5,6 +5,7 @@ import { createMessageSender, type MessageSenderDeps } from '$lib/stores/session
 import type { ActiveSessionState } from '$lib/stores/active-session';
 import { pendingQueue } from '$lib/stores/session/pending-queue';
 import { isUserScrollUpGesture } from '$lib/stores/session/auto-scroll';
+import { createTranscriptWindow } from './transcript-window';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
@@ -501,20 +502,24 @@ const readerScrollEdge = between('// Shift only in the reader\'s direction', '//
 const readerWheel = between('function handleWheel(', '// Touch: accumulate').replace('e: WheelEvent', 'e');
 const readerTouch = between('let touchLastY = 0;', '/**\n\t * Put a reader').replaceAll('e: TouchEvent', 'e');
 const readerLoadOlder = between('function loadOlderItems()', 'function loadNewerItems()');
-function readerEdgeProbe(kind: 'scroll' | 'wheel' | 'touch', top: number, gap: number, overrides = {}) {
-	const env = { top, gap, up: true, shifting: false, held: false, older: 0, follows: true, ...overrides };
+function readerEdgeProbe(kind: 'scroll' | 'wheel' | 'touch' | 'explicit', top: number, gap: number, overrides = {}) {
+	const env = { top, gap, up: true, shifting: false, held: false, older: 0, follows: true, preserveReading: false, ...overrides };
 	new Function('env', 'kind', 'isUserScrollUpGesture', `
 		let leadingGap = env.gap, windowShifting = env.shifting, mountedStart = 10, mountedEnd = 100;
 		const containerRef = { scrollTop: env.top, scrollHeight: 10000, clientHeight: 634 };
 		const currentScrollTop = env.top, lastScrollMetrics = { scrollTop: env.top + (env.up ? 120 : -120) };
 		const manualNavigationReleaseUntil = env.held ? Date.now() + 10000 : 0, displayItems = Array(100);
 		const disengageAutoScroll = () => { env.follows = false; };
-		const transcriptWindow = { loadOlder: () => ({ start: 6, end: 30 }) };
+		const transcriptWindow = { loadOlder: options => {
+				env.preserveReading = options?.preserveReading === true;
+				return { start: 6, end: 30 };
+			} };
 		const applyMountedRange = () => { env.older++; }, loadNewerItems = () => {};
 		${olderEdgeRule}
 		${readerLoadOlder}
 		${readerWheel}
 		${readerTouch}
+		if (kind === 'explicit') loadOlderItems();
 		if (kind === 'scroll') { ${readerScrollEdge} }
 		if (kind === 'wheel') handleWheel({ deltaY: env.up ? -120 : 120 });
 		if (kind === 'touch') {
@@ -534,7 +539,7 @@ describe('older paging uses the retained mounted origin', () => {
 			expect(readerEdgeProbe(kind, 4285.7, 3285.7).older).toBe(0);
 		});
 		it(`${kind} retains the zero-gap boundary behavior`, () => {
-			expect(readerEdgeProbe(kind, kind === 'scroll' ? 899 : 0, 0)).toMatchObject({ older: 1, follows: false });
+			expect(readerEdgeProbe(kind, kind === 'scroll' ? 899 : 0, 0)).toMatchObject({ older: 1, follows: false, preserveReading: true });
 		});
 		it(`${kind} does not load older history while moving newer`, () => {
 			expect(readerEdgeProbe(kind, 1500, 3285.7, { up: false }).older).toBe(0);
@@ -545,5 +550,77 @@ describe('older paging uses the retained mounted origin', () => {
 	}
 	it('ordinary scroll still respects an explicit navigation hold', () => {
 		expect(readerEdgeProbe('scroll', 1500, 3285.7, { held: true }).older).toBe(0);
+	});
+	it('Show earlier is explicit navigation, not speculative older paging', () => {
+		expect(readerEdgeProbe('explicit', 0, 0)).toMatchObject({ older: 1, follows: false, preserveReading: false });
+		expect(source).toContain('class="earlier-button" onclick={loadOlderItems}');
+	});
+});
+
+const readerScroll = between('function handleScroll()', '/**\n\t * Release stick-to-bottom');
+describe('programmatic scrolls do not request automatic paging', () => {
+	it.each(['event', 'queued frame'])('ignores a marked programmatic scroll at the %s stage', stage => {
+		const probe = new Function('stage', `
+			const containerRef = { scrollTop: 24 };
+			let anchorRounding = null, lastKnownScrollTop = 0, lastScrollMetrics = null, scrollRafPending = false;
+			let programmaticScrollDepth = stage === 'event' ? 1 : 0, callback = null;
+			const scheduleReadingAnchorCapture = () => {}, readScrollMetrics = () => ({ scrollTop: 24 });
+			const requestAnimationFrame = next => { callback = next; };
+			${readerScroll}
+			handleScroll();
+			if (callback) { programmaticScrollDepth = 1; callback(); }
+			return { known: lastKnownScrollTop, metrics: lastScrollMetrics, pending: scrollRafPending };
+		`)(stage);
+		expect(probe).toEqual({ known: 24, metrics: { scrollTop: 24 }, pending: false });
+	});
+});
+
+// Execute the real automatic loader and anchor compensation, not just a stub
+// asserting its option. Geometry alone models the prepended DOM in jsdom.
+function olderPagingAnchorProbe(expensive: boolean) {
+	const env = { top: 24, ticks: [] as (() => void)[] };
+	const state = new Function('env', 'expensive', 'createTranscriptWindow', `
+		let costs = [1000, expensive ? 8000 : 1000, 1000, 2000];
+		const transcriptWindow = createTranscriptWindow({ cost: i => costs[i], budget: 12000, getReadingIndex: () => 3 });
+		transcriptWindow.setItemCount(4);
+		transcriptWindow.setItemCount(4, { followTail: false });
+		costs = [1000, expensive ? 8000 : 1000, 1000, 6000];
+		const repriced = transcriptWindow.setItemCount(4, { followTail: false });
+		let mountedRange = expensive ? repriced : transcriptWindow.restoreRange({ start: 2, end: 4 });
+		const mountedStart = mountedRange.start, mountedEnd = mountedRange.end;
+		let windowShiftVersion = 0, windowShifting = false, followedViewportEnd = 0, leadingGap = 0;
+		let selectionBlocksNavigation = false, shouldAutoScroll = false, anchorRounding = null;
+		let lastKnownScrollTop = env.top, lastScrollMetrics = null;
+		const currentTurnAnchorId = null, pinnedTranscriptRange = () => null;
+		const rows = [0, 1, 2, 3].map(index => ({ dataset: { transcriptIndex: String(index) },
+			get isConnected() { return index >= mountedRange.start && index < mountedRange.end; },
+			getBoundingClientRect: () => ({ top: (index - mountedRange.start) * 130 - env.top,
+				bottom: (index - mountedRange.start + 1) * 130 - env.top }) }));
+		const containerRef = { get scrollTop() { return env.top; }, set scrollTop(top) { env.top = top; },
+			getBoundingClientRect: () => ({ top: 0 }), querySelectorAll: () => rows.filter(row => row.isConnected) };
+		const windowSessionKey = 'reader', mountedRangeCache = new Map(), SCROLL_CACHE_MAX = 1;
+		const evictOldest = () => {}, markProgrammaticScrollSettling = () => {};
+		const readScrollMetrics = () => ({ scrollTop: env.top });
+		const tick = () => new Promise(resolve => env.ticks.push(resolve));
+		const refreshLatestTurnTailReserve = () => {}, disengageAutoScroll = () => {};
+		${rangeShift}
+		${readerLoadOlder}
+		const before = rows[3].getBoundingClientRect().top;
+		loadOlderItemsAutomatically();
+		return () => ({ range: mountedRange, before, top: rows[3].getBoundingClientRect().top,
+			connected: rows[3].isConnected, shifting: windowShifting });
+	`)(env, expensive, createTranscriptWindow) as () => { range: { start: number; end: number }; before: number; top: number; connected: boolean; shifting: boolean };
+	return { state, async flush() {
+		for (let i = 0; i < 6; i++) { env.ticks.splice(0).forEach(resolve => resolve()); await Promise.resolve(); }
+	} };
+}
+
+describe('automatic older paging preserves the reading reply anchor', () => {
+	it.each([true, false])('retains the reply position after a streaming reprice (expensive prefix=%s)', async expensive => {
+		const probe = olderPagingAnchorProbe(expensive);
+		await probe.flush();
+		const state = probe.state();
+		expect(state).toMatchObject({ connected: true, shifting: false, range: { start: expensive ? 2 : 0, end: 4 } });
+		expect(state.top).toBe(state.before);
 	});
 });

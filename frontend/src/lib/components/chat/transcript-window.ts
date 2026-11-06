@@ -106,7 +106,7 @@ export function createTranscriptWindow({ cap = TRANSCRIPT_WINDOW_CAP, step = 30,
 	cap?: number; step?: number; cost?: (index: number) => number; budget?: number;
 	/** Only currently mounted, selected rows may be pinned; never retained DOM trees. */
 	getPinnedRange?: () => TranscriptRange | null;
-	/** Resolve the dominant visible reading key only when automatic repricing may evict it. */
+	/** Resolve the dominant visible reading key when automatic repricing/paging may evict it. */
 	getReadingIndex?: () => number | null
 } = {}) {
 	if (!Number.isInteger(cap) || cap < 1 || !Number.isInteger(step) || step < 1 || !(budget > 0)) {
@@ -212,18 +212,23 @@ export function createTranscriptWindow({ cap = TRANSCRIPT_WINDOW_CAP, step = 30,
 	}
 	const shift = () => weighted ? Math.min(step, Math.max(1, Math.floor((range.end - range.start) / 4))) : step;
 	function toTail(): TranscriptRange { followsTail = true; return endingAt(count); }
-	function extendOlder(): TranscriptRange {
+	function extendOlder({ preserveReading = false }: { preserveReading?: boolean } = {}): TranscriptRange {
 		followsTail = false;
-		if (!weighted) return move(range.start - step);
+		if (!weighted && !preserveReading) return move(range.start - step);
 		if (!range.start) return range;
+		// Scroll-edge paging is speculative, not permission to replace what the
+		// reader can still see. Pin the same dominant key as automatic repricing;
+		// if no older row fits beside it, leave the range/DOM anchor untouched.
+		// Explicit Show earlier/jump navigation deliberately does not pin it.
+		const reading = preserveReading ? getReadingIndex?.() ?? range.end - 1 : undefined;
 		const previous = range;
-		let next = endingRange(range.end - shift());
-		if (next.start >= previous.start || next.end <= previous.start) {
+		let next = weighted ? endingRange(range.end - shift()) : startingRange(range.start - step);
+		if (weighted && (next.start >= previous.start || next.end <= previous.start)) {
 			// Include the first older row, then keep the largest overlapping prefix
 			// that fits. Compute candidates without committing/pinning twice.
 			next = endingRange(startingRange(previous.start - 1).end);
 		}
-		return commit(next.start, next.end);
+		return commit(next.start, next.end, reading);
 	}
 	return {
 		cap,

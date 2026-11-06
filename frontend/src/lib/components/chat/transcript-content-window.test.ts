@@ -2,6 +2,52 @@ import { describe, expect, it } from 'vitest';
 import { createTranscriptWindow, dominantReadingIndex, type TranscriptRange } from './transcript-window';
 
 describe('nested transcript mount budget', () => {
+ it('does not evict the dominant growing reply when automatic older paging follows a reprice', () => {
+  const rows = [
+   { index: 2, getBoundingClientRect: () => ({ top: -24, bottom: 106 }) },
+   { index: 3, getBoundingClientRect: () => ({ top: 106, bottom: 4000 }) }
+  ];
+  let costs = [1000, 8000, 1000, 2000];
+  const window = createTranscriptWindow({ cost: i => costs[i], budget: 12000,
+   getReadingIndex: () => dominantReadingIndex(rows, { top: 0, bottom: 622 }, row => row.index) });
+  window.onStreamingChange(true);
+  expect(window.setItemCount(4)).toEqual({ start: 0, end: 4 });
+  window.setItemCount(4, { followTail: false });
+  costs = [1000, 8000, 1000, 6000];
+  const repriced = window.setItemCount(4, { followTail: false });
+  expect(repriced).toEqual({ start: 2, end: 4 });
+  expect(window.loadOlder({ preserveReading: true })).toBe(repriced);
+  expect(window.selectionLimited).toBe(false);
+  // An explicit Show earlier is allowed to leave the visible reply.
+  expect(window.loadOlder()).toEqual({ start: 0, end: 3 });
+ });
+ it('automatically admits affordable older rows without dropping the visible tail', () => {
+  const window = createTranscriptWindow({ cost: () => 1000, budget: 12000, getReadingIndex: () => 3 });
+  window.setItemCount(4);
+  window.restoreRange({ start: 2, end: 4 });
+  expect(window.extendOlder({ preserveReading: true })).toEqual({ start: 0, end: 4 });
+ });
+ it('can page older automatically once the reader moves off the expensive reply', () => {
+  let reading = 3;
+  const costs = [1000, 8000, 1000, 6000];
+  const window = createTranscriptWindow({ cost: i => costs[i], budget: 12000, getReadingIndex: () => reading });
+  window.setItemCount(4);
+  expect(window.loadOlder({ preserveReading: true })).toEqual({ start: 2, end: 4 });
+  reading = 2;
+  expect(window.loadOlder({ preserveReading: true })).toEqual({ start: 0, end: 3 });
+ });
+ it('protects the reading row under the outer cap even without weighted costs', () => {
+  const window = createTranscriptWindow({ cap: 4, step: 2, getReadingIndex: () => 9 });
+  window.setItemCount(10);
+  expect(window.loadOlder({ preserveReading: true })).toEqual({ start: 6, end: 10 });
+  expect(window.loadOlder()).toEqual({ start: 4, end: 8 });
+ });
+ it('keeps explicit selection priority over automatic paging reading protection', () => {
+  const window = createTranscriptWindow({ cap: 4, step: 2, getReadingIndex: () => 9,
+   getPinnedRange: () => ({ start: 6, end: 8 }) });
+  window.setItemCount(10);
+  expect(window.loadOlder({ preserveReading: true })).toEqual({ start: 4, end: 8 });
+ });
  it('keeps the trailing mounted reply through same-count streaming growth when no viewport is available', () => {
   let costs = [6000, 2000, 2000];
   const window = createTranscriptWindow({ cost: i => costs[i], budget: 12000 });
