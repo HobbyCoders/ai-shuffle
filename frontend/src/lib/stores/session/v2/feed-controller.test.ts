@@ -1314,6 +1314,170 @@ describe('feedController cross-device interaction settle (#606 item 4)', () => {
 	});
 });
 
+describe('feedController late optimistic echoes', () => {
+	function startEmptyFeed() {
+		const deps = makeDeps({ isLoadingSession: true, isRestoringSession: true });
+		// Observe every publication, not just the eventual reconciled state: even
+		// one empty list between the echo and its receipt unmounts MessageArea.
+		const publications: string[][] = [];
+		const update = deps.update.getMockImplementation()!;
+		deps.update.mockImplementation(fn => {
+			update(fn);
+			publications.push(deps.state.messages.map(m => m.id));
+		});
+		feedController.attach(deps);
+		feedController.start('s1');
+		hoisted.onOpen!();
+		publications.length = 0;
+		return { deps, publications };
+	}
+
+	function appendEcho(deps: ReturnType<typeof makeDeps>) {
+		deps.update(s => ({ ...s, isStreaming: true, optimisticStreaming: true,
+			messages: [...s.messages, {
+				id: 'local-echo', role: 'user', content: 'do the thing', commandId: 'local-command',
+			}],
+		}));
+	}
+
+	function acknowledgeEcho() {
+		hoisted.onEvent!({ ...userMessage('server-user', 'turn-local', 'do the thing'),
+			seq: 2, command_id: 'local-command' });
+	}
+
+	it('never publishes an empty list when caught_up lands between a local echo and its receipt', () => {
+		const { deps, publications } = startEmptyFeed();
+		appendEcho(deps);
+		hoisted.onEvent!(caughtUp(0));
+		expect(deps.state.messages.map(m => m.id)).toEqual(['local-echo']);
+		expect(deps.state.isStreaming).toBe(true);
+		expect(deps.state.isRestoringSession).toBe(false);
+		// Seeding an unconfirmed echo must not make an empty log cacheable.
+		expect(feedController.hasCachedTranscript('s1')).toBe(false);
+
+		hoisted.onEvent!({ type: 'turn.started', id: 'start-local', session_id: 's1',
+			turn_id: 'turn-local', seq: 1 });
+		acknowledgeEcho();
+		flushRaf();
+		expect(deps.state.messages).toHaveLength(1);
+		expect(deps.state.messages[0]).toMatchObject({ id: 'local-echo', serverId: 'server-user', commandId: 'local-command', turnId: 'turn-local' });
+		expect(publications.length).toBeGreaterThan(1);
+		for (const ids of publications) expect(ids).toEqual(['local-echo']);
+	});
+
+	it.each(['rAF', 'timer'] as const)('seeds a local echo appended after an empty %s flush was scheduled', (clock) => {
+		const { deps, publications } = startEmptyFeed();
+		hoisted.onEvent!(caughtUp(0));
+		// No transcript row, but this live lifecycle event schedules a fold.
+		hoisted.onEvent!(interaction('interaction.expired', 'absent'));
+		publications.length = 0;
+		appendEcho(deps);
+		if (clock === 'rAF') flushRaf();
+		else vi.advanceTimersByTime(250);
+		expect(publications).toEqual([['local-echo'], ['local-echo']]);
+		expect(deps.state.isStreaming).toBe(true);
+		// The losing callback must not publish again, let alone clear the echo.
+		flushRaf();
+		vi.advanceTimersByTime(250);
+		expect(publications).toHaveLength(2);
+	});
+
+	it.each(['idle', 'ceiling', 'error'] as const)('preserves a late echo through the %s hydration fallback', (fallback) => {
+		const { deps, publications } = startEmptyFeed();
+		if (fallback === 'idle') hoisted.onEvent!(interaction('interaction.expired', 'absent'));
+		appendEcho(deps);
+		if (fallback === 'error') {
+			vi.advanceTimersByTime(FIRST_FRAME_BUDGET_MS);
+			hoisted.onError!(new Error('SSE feed HTTP 503'));
+		} else {
+			vi.advanceTimersByTime(fallback === 'idle' ? CATCHUP_FALLBACK_MS : HYDRATION_CEILING_MS);
+		}
+		expect(deps.state.messages.map(m => m.id)).toEqual(['local-echo']);
+		expect(deps.state.isStreaming).toBe(true);
+		expect(deps.state.isRestoringSession).toBe(false);
+		expect(deps.state.historyStall).toBe(fallback === 'idle' ? null : fallback === 'error' ? 'error' : 'timeout');
+		expect(feedController.hasCachedTranscript('s1')).toBe(false);
+		// A real, empty sentinel still owes no answer to this pending command.
+		hoisted.onEvent!(caughtUp(0));
+		expect(deps.state.historyStall).toBeNull();
+		for (const ids of publications) expect(ids).toEqual(['local-echo']);
+	});
+
+	it('still publishes a confirmed empty session when there is no local echo', () => {
+		const { deps, publications } = startEmptyFeed();
+		hoisted.onEvent!(caughtUp(0));
+		expect(publications).toEqual([[]]);
+		expect(deps.state.messages).toEqual([]);
+		expect(deps.state.isRestoringSession).toBe(false);
+		expect(deps.state.historyStall).toBeNull();
+		expect(deps.state.isStreaming).toBe(false);
+		expect(feedController.hasCachedTranscript('s1')).toBe(true);
+	});
+
+	it('does not resurrect a late-seeded echo after the send is refused', () => {
+		const { deps } = startEmptyFeed();
+		appendEcho(deps);
+		hoisted.onEvent!(caughtUp(0));
+		expect(deps.state.messages.map(m => m.id)).toEqual(['local-echo']);
+		const handlers = createMessageHandlers({ update: deps.update, getState: deps.getState } as unknown as MessageHandlerDeps);
+		handlers.handleMessage({ type: 'error', session_id: 's1', client_message_id: 'local-command', message: 'Missing agent' });
+		expect(deps.state.pendingRestorePrompt).toBe('do the thing');
+		hoisted.onEvent!(interaction('interaction.expired', 'absent'));
+		vi.advanceTimersByTime(250);
+		hoisted.onEvent!(caughtUp(0));
+		expect(deps.state.messages).toEqual([]);
+		expect(deps.state.isStreaming).toBe(false);
+		feedController.stop();
+		feedController.start('s1');
+		expect(deps.state.messages).toEqual([]);
+	});
+
+	it.each(['remote message', 'unpublished receipt', 'published receipt'])('does not resurrect a rewound %s when a new local send replaces the visible array', (source) => {
+		const { deps } = startEmptyFeed();
+		if (source === 'remote message') {
+			hoisted.onEvent!({ ...userMessage('server-user', 'turn-local', 'do the thing'),
+				seq: 2, command_id: 'remote-command' });
+			hoisted.onEvent!(caughtUp(2));
+		} else {
+			appendEcho(deps);
+			hoisted.onEvent!(caughtUp(0));
+			acknowledgeEcho();
+			if (source === 'published receipt') flushRaf();
+		}
+		const removedId = deps.state.messages[0].id;
+		hoisted.onEvent!({ type: 'transcript.rewound', id: 'rewind-local', session_id: 's1',
+			seq: 3, from_seq: 2 });
+		// The rewind has reduced but not published: the next send still sees U.
+		expect(deps.state.messages.map(m => m.id)).toEqual([removedId]);
+		deps.update(s => ({ ...s, isStreaming: true, optimisticStreaming: true,
+			messages: [...s.messages, { id: 'new-local', role: 'user', content: 'next prompt', commandId: 'new-command' }],
+		}));
+		flushRaf();
+		expect(deps.state.messages.map(m => m.id)).toEqual(['new-local']);
+		expect(deps.state.isStreaming).toBe(true);
+		hoisted.onEvent!(caughtUp(3));
+		expect(deps.state.messages.map(m => m.id)).toEqual(['new-local']);
+	});
+
+	it.each([false, true])('does not re-seed an acknowledged echo removed by rewind (receipt published: %s)', (publishReceipt) => {
+		const { deps } = startEmptyFeed();
+		appendEcho(deps);
+		hoisted.onEvent!(caughtUp(0));
+		expect(deps.state.messages.map(m => m.id)).toEqual(['local-echo']);
+		acknowledgeEcho();
+		if (publishReceipt) flushRaf();
+		hoisted.onEvent!({ type: 'transcript.rewound', id: 'rewind-local', session_id: 's1',
+			seq: 3, from_seq: 2 });
+		flushRaf();
+		expect(deps.state.messages).toEqual([]);
+		hoisted.onEvent!(caughtUp(3));
+		expect(deps.state.messages).toEqual([]);
+		feedController.stop();
+		feedController.start('s1');
+		expect(deps.state.messages).toEqual([]);
+	});
+});
+
 describe('feedController optimistic seeding (worktree double-load fix)', () => {
 	it('(d) preserves the optimistic user message + isStreaming through the immediate fold', () => {
 		// A freshly committed worktree session: an optimistic user message and

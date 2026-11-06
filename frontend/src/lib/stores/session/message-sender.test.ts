@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
-import { createMessageSender, type MessageSenderDeps } from './message-sender';
+import { createMessageSender, pendingSendReason, type MessageSenderDeps } from './message-sender';
 import { reloadBlockers } from '$lib/services/app-update';
 import type { ActiveSessionState } from '../active-session';
 import { createMessageHandlers, type InternalMutableState, type MessageHandlerDeps } from './ws-message-handlers';
@@ -346,6 +346,49 @@ describe('background idle send refusals', () => {
 	});
 });
 
+describe('transport rollback through the real feed controller', () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+		pendingQueue.reset(null, true);
+	});
+	afterEach(() => {
+		feedController.stop();
+		feedController.invalidate();
+		pendingQueue.reset(null, true);
+		vi.clearAllTimers();
+		vi.useRealTimers();
+	});
+
+	it.each([false, true])('does not re-adopt a failed idle send on a scheduled fold (seeded before failure: %s)', async (seedBeforeFailure) => {
+		const test = makeDeps(baseState({ sessionId: 's1', title: 'Old chat' }));
+		feedController.attach({ update: test.deps.update, getState: test.getState,
+			requestPendingQuestions: vi.fn(), requestPendingPermissions: vi.fn(), resolveInteractionByRequestId: vi.fn() });
+		feedController.start('s1');
+		feed.onEvent!({ type: 'caught_up', seq: 0 });
+		feed.onEvent!({ type: 'interaction.expired', id: 'expiry', seq: 1, session_id: 's1', request_id: 'absent' });
+		test.wsConn.send.mockImplementation(data => {
+			if (data.type === 'query') {
+				if (seedBeforeFailure) feed.onEvent!({ type: 'caught_up', seq: 1 });
+				return false;
+			}
+			return true;
+		});
+		expect(await createMessageSender(test.deps).sendMessage('keep this draft')).toBe(false);
+		expect(test.getState().error).toBe('Connection lost before the message was sent. Please try again.');
+		expect(test.getState().isStreaming).toBe(false);
+		expect(test.getState().optimisticStreaming).toBe(false);
+		vi.advanceTimersByTime(250);
+		expect(test.getState().isStreaming).toBe(false);
+		expect(test.getState().optimisticStreaming).toBe(false);
+		expect(test.getState().messages).toEqual([]);
+		feed.onEvent!({ type: 'caught_up', seq: 1 });
+		feedController.stop();
+		feedController.start('s1');
+		expect(test.getState().messages).toEqual([]);
+		expect(test.getState().isStreaming).toBe(false);
+	});
+});
+
 describe('remembered worker on send', () => {
 	it('sends to the remembered worker, consumes the active intent but keeps the default', async () => {
 		const pick = { id: 'runner-1', name: 'ServerWorker' };
@@ -364,6 +407,61 @@ describe('remembered worker on send', () => {
 });
 
 describe('message-sender voice ownership', () => {
+	it('releases a never-settling context save after ten seconds without sending', async () => {
+		vi.useFakeTimers();
+		try {
+			voice.isCallActiveFor.mockReturnValueOnce(true);
+			context.persistVoiceContext.mockReturnValueOnce(new Promise<void>(() => {}));
+			const { deps, wsConn, getState } = makeDeps(baseState({ sessionId: 'owner' }));
+			const priorCalls = voice.sendVoiceText.mock.calls.length;
+			const settled = vi.fn();
+			const attempt = createMessageSender(deps).sendMessage('Keep this');
+			void attempt.then(settled);
+			expect(pendingSendReason()).toBe('message-sending');
+			await vi.advanceTimersByTimeAsync(9_999);
+			expect(settled).not.toHaveBeenCalled();
+			await vi.advanceTimersByTimeAsync(1);
+			expect(settled).toHaveBeenCalledExactlyOnceWith(false);
+			expect(await attempt).toBe(false);
+			expect(getState().error).toBe('Could not save voice execution settings. Your message has been kept.');
+			expect(pendingSendReason()).toBeNull();
+			expect(voice.sendVoiceText.mock.calls).toHaveLength(priorCalls);
+			expect(wsConn.send).not.toHaveBeenCalled();
+		} finally { vi.useRealTimers(); }
+	});
+	it.each(['resolve', 'reject'] as const)('does not send after a timed-out context save later %ss', async (lateResult) => {
+		vi.useFakeTimers();
+		try {
+			let resolve!: () => void;
+			let reject!: (error: Error) => void;
+			voice.isCallActiveFor.mockReturnValueOnce(true);
+			context.persistVoiceContext.mockReturnValueOnce(new Promise<void>((ok, fail) => { resolve = ok; reject = fail; }));
+			const { deps, wsConn, getState } = makeDeps(baseState({ sessionId: 'owner' }));
+			const priorCalls = voice.sendVoiceText.mock.calls.length;
+			const settled = vi.fn();
+			const attempt = createMessageSender(deps).sendMessage('Do not send late');
+			void attempt.then(settled);
+			await vi.advanceTimersByTimeAsync(10_000);
+			expect(settled).toHaveBeenCalledExactlyOnceWith(false);
+			if (lateResult === 'resolve') resolve(); else reject(new Error('late failure'));
+			await vi.advanceTimersByTimeAsync(0);
+			expect(voice.sendVoiceText.mock.calls).toHaveLength(priorCalls);
+			expect(wsConn.send).not.toHaveBeenCalled();
+			expect(getState().error).toContain('Could not save voice execution settings');
+		} finally { vi.useRealTimers(); }
+	});
+	it('admits a normal voice send and clears the context deadline', async () => {
+		vi.useFakeTimers();
+		try {
+			voice.isCallActiveFor.mockReturnValueOnce(true);
+			const { deps, getState } = makeDeps(baseState({ sessionId: 'owner' }));
+			expect(await createMessageSender(deps).sendMessage('Send normally')).toBe(true);
+			expect(voice.sendVoiceText).toHaveBeenLastCalledWith('owner', 'Send normally');
+			expect(vi.getTimerCount()).toBe(0);
+			await vi.advanceTimersByTimeAsync(10_000);
+			expect(getState().error).toBeNull();
+		} finally { vi.useRealTimers(); }
+	});
 	it('awaits streaming admission and retains the draft on an explicit rejection', async () => {
 		voice.isCallActiveFor.mockReturnValueOnce(true);
 		voice.sendVoiceText.mockRejectedValueOnce(new Error('This voice engine does not support text or attachments.'));
@@ -1102,6 +1200,26 @@ describe('Stop timeout recovery', () => {
 			onPersistTimerChanged: vi.fn(),
 		});
 	}
+
+	it('does not revive an unacknowledged local send after Stop timeout on a later fold', async () => {
+		const test = stopping(null);
+		test.deps.update(s => ({ ...s, isStreaming: false, title: 'Old chat' }));
+		feedController.start('sess-1');
+		feed.onEvent!({ type: 'caught_up', seq: 0 });
+		expect(await test.sender.sendMessage('stop before receipt')).toBe(true);
+		test.sender.stopGeneration();
+		vi.advanceTimersByTime(10000);
+		expect(test.getState().isStreaming).toBe(false);
+		const commandId = test.getState().messages[0].commandId;
+		expect(test.getState().stopTimedOutCommandId).toBe(commandId);
+		feed.onEvent!({ type: 'interaction.expired', id: 'expiry', seq: 1, session_id: 'sess-1', request_id: 'absent' });
+		vi.advanceTimersByTime(250);
+		expect(test.getState().isStreaming).toBe(false);
+		expect(test.getState().optimisticStreaming).toBe(false);
+		// Keep the pending row and its identity for a delayed receipt/recovery.
+		expect(test.getState().messages).toHaveLength(1);
+		expect(test.getState().messages[0].commandId).toBe(commandId);
+	});
 
 	it('times out an unnamed Stop then releases Not-sent rows from the delayed feed without a terminal event', () => {
 		const test = stopping(null);
