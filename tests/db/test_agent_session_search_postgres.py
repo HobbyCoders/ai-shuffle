@@ -21,8 +21,8 @@ def _reset_recall_state():
     """Return the shared database to a fresh install's recall schema.
 
     Several tests here run the explicit recall-cache maintenance, which adds a
-    stored ``recall_text`` column to three tables, builds the cache indexes and
-    drops the legacy ``idx_sse_entry_trgm`` and ``idx_session_events_recall_trgm``.
+    stored ``recall_text`` column to three tables and builds legacy cache indexes
+    (only before the compact projection is ready).
     That is persistent DDL, so without this a second run on the same database
     starts with the cache already applied and the bootstrap/upgrade tests fail.
     """
@@ -43,7 +43,7 @@ def _reset_recall_state():
                 cur.execute(f"DELETE FROM {table} WHERE session_id LIKE %s", (prefix,))
             cur.execute("DELETE FROM sessions WHERE id LIKE %s", (prefix,))
         cur.execute("DELETE FROM session_store_entries WHERE project_key IN ('test', 'producer', 'tied')")
-        # With the cache gone, bootstrap recreates the legacy trigram indexes.
+        # Bootstrap never recreates raw transcript trigram indexes.
         create_postgres_schema(cur)
         cur.execute("DELETE FROM system_settings WHERE key = %s", (MIGRATIONS_FINGERPRINT_KEY,))
 
@@ -119,8 +119,8 @@ def _index_names():
         return {r["indexname"] for r in cur.fetchall()}
 
 
-def test_bootstrap_creates_all_agent_recall_indexes():
-    assert {"idx_fluid_nodes_trgm", "idx_sse_entry_trgm", "idx_session_events_recall_trgm"} <= _index_names()
+def test_bootstrap_never_builds_raw_agent_recall_indexes():
+    assert {"idx_fluid_nodes_trgm", "idx_sse_entry_trgm", "idx_session_events_recall_trgm"}.isdisjoint(_index_names())
     assert "idx_fluid_recall_text_trgm" not in _index_names()
 
 
@@ -143,11 +143,11 @@ def test_module_reset_undoes_a_previous_runs_recall_cache():
         cur.execute("SELECT COUNT(*) AS n FROM sessions WHERE id = 'recall-leftover'")
         assert cur.fetchone()["n"] == 0
     names = _index_names()
-    assert {"idx_fluid_nodes_trgm", "idx_sse_entry_trgm", "idx_session_events_recall_trgm"} <= names
+    assert {"idx_fluid_nodes_trgm", "idx_sse_entry_trgm", "idx_session_events_recall_trgm"}.isdisjoint(names)
     assert {"idx_fluid_recall_text_trgm", "idx_sse_recall_text_trgm", "idx_events_recall_text_trgm"}.isdisjoint(names)
 
 
-def test_upgrade_creates_mirror_index_and_is_idempotent(monkeypatch):
+def test_upgrade_never_recreates_mirror_index_and_is_idempotent(monkeypatch):
     from app.db import base, database, schema_postgres
 
     database.init_database()
@@ -164,9 +164,9 @@ def test_upgrade_creates_mirror_index_and_is_idempotent(monkeypatch):
 
     monkeypatch.setattr(schema_postgres, "create_postgres_schema", unexpected_bootstrap)
     database.init_database()
-    assert "idx_session_events_recall_trgm" in _index_names()
+    assert "idx_session_events_recall_trgm" not in _index_names()
     database.init_database()
-    assert "idx_session_events_recall_trgm" in _index_names()
+    assert "idx_session_events_recall_trgm" not in _index_names()
 
 
 def test_capacity_and_column_failure_leave_startup_and_legacy_search_intact(monkeypatch):
@@ -207,7 +207,7 @@ def test_capacity_and_column_failure_leave_startup_and_legacy_search_intact(monk
     from app.core.provider.fluid_pg_store import _search_sync
 
     assert _search_sync(["absentneedle"], 5, None) == []
-    assert {"idx_fluid_nodes_trgm", "idx_sse_entry_trgm", "idx_session_events_recall_trgm"} <= _index_names()
+    assert {"idx_fluid_nodes_trgm", "idx_sse_entry_trgm", "idx_session_events_recall_trgm"}.isdisjoint(_index_names())
 
 
 def test_maintenance_lock_wait_is_bounded_and_rolls_back():

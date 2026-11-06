@@ -1188,7 +1188,7 @@ def _search_sync(
         # The maintained projection once backfilled; until then the legacy
         # raw-JSON queries (over the opt-in stored cache when present).
         indexed = session_recall.ready(cur)
-        cached = not indexed and session_recall_cache_ready(cur)
+        cached = not indexed and session_recall_cache_ready(cur, legacy_only=True)
         if cached:
             # The heap can contain little but TOAST pointers. PG's default
             # per-tuple cost misses fetching/scanning the stored transcript,

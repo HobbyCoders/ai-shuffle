@@ -28,11 +28,9 @@ TABLES = {
     "session_messages": ("id", "content"),
     "session_recall_text": ("source, session_id, row_key, part", "body"),
 }
-# Optional cached-text indexes and the raw indexes can coexist on old installs.
+# Only reader-backed indexes are split. Legacy raw/cached JSON GINs (including
+# any _h0/_h2 left by an interrupted older migration) are retired separately.
 INDEXES = (
-    "idx_fluid_nodes_trgm", "idx_fluid_recall_text_trgm",
-    "idx_sse_entry_trgm", "idx_sse_recall_text_trgm",
-    "idx_session_events_recall_trgm", "idx_events_recall_text_trgm",
     "idx_session_recall_text_trgm_n", "idx_session_recall_text_trgm_s",
     "idx_session_recall_text_trgm_e",
     "idx_sse_fts", "idx_session_messages_fts",

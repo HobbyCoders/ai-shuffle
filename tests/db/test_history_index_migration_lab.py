@@ -22,10 +22,8 @@ def test_million_event_migration(capsys: pytest.CaptureFixture[str]) -> None:
         cur = conn.cursor()
         assert not hi.enabled(cur), "use a fresh disposable database"
         cur.execute("SELECT pg_get_indexdef(indexrelid) AS ddl FROM pg_index "
-                    "WHERE indexrelid IN (to_regclass('idx_session_events_recall_trgm'), "
-                    "to_regclass('idx_session_recall_text_trgm_e'))")
+                    "WHERE indexrelid = to_regclass('idx_session_recall_text_trgm_e')")
         definitions = [r["ddl"] for r in cur.fetchall()]
-        cur.execute("DROP INDEX idx_session_events_recall_trgm")
         cur.execute("DROP INDEX idx_session_recall_text_trgm_e")
     # Seed without row triggers or GIN write amplification. These are 1M real
     # source rows and 1M projection rows; setup is outside the migration timing.

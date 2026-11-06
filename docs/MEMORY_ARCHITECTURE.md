@@ -327,6 +327,19 @@ running. An index build or promotion statement already in progress still finishe
 Catch-up does not force checkpoints. Total WAL and live-write tails still require
 acceptance on disposable workers before default enablement.
 
+Once the projection is ready, native transcript search in both session-list
+APIs also prefilters through it, then checks the original visible text for
+exact phrase/snippet semantics. Oversized rows waiting for promotion remain
+search candidates. The background recall task retires the six legacy raw-JSON
+and stored-`recall_text` trigram GINs (including history `_h0`/`_h2` variants)
+with `DROP INDEX CONCURRENTLY`, autocommit, a shared history-migration advisory
+lock, a 250 ms lock timeout and a two-second pass budget. Busy/failed drops
+retry on a later pass; sessions keep writing throughout. Generated columns are
+left in place to avoid an ACCESS EXCLUSIVE table lock. Bootstrap and startup
+migrations never rebuild the raw indexes; unready projections or unavailable
+`pg_trgm` retain correct, potentially unindexed legacy search. The old explicit
+offline cache command is a no-op once the projection is ready.
+
 The table takes roughly the size of the searchable text once more, plus its
 trigram index; text from mirrored sessions (event rows) is kept twice, as
 pieces and as the original text the search folds. An app version from before
