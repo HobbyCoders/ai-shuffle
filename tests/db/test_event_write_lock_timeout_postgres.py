@@ -51,7 +51,8 @@ def cluster(tmp_path_factory):
     root = tmp_path_factory.mktemp("event-lock-pg")
     data = root / "data"
     subprocess.run([str(bin_path / "initdb"), "-D", str(data), "-U", "postgres", "-A", "trust",
-                    "--no-sync", "--encoding=UTF8", "--no-locale"],
+                    "--no-sync", "--encoding=UTF8", "--no-locale",
+                    "-c", "dynamic_shared_memory_type=mmap"],
                    check=True, capture_output=True, timeout=60)
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
@@ -73,8 +74,8 @@ def cluster(tmp_path_factory):
     finally:
         base.close_pool()
         object.__setattr__(settings, "get_database_connection", original)
-        subprocess.run([str(bin_path / "pg_ctl"), "-D", str(data), "-m", "immediate", "stop"],
-                       capture_output=True, timeout=60)
+        subprocess.run([str(bin_path / "pg_ctl"), "-D", str(data), "-m", "fast", "-w", "-t", "30", "stop"],
+                       check=True, capture_output=True, timeout=35)
 
 
 @pytest.fixture
