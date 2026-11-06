@@ -5,11 +5,13 @@ import BrowserPanel from './BrowserPanel.svelte';
 import SessionSidePanel from '../layout/SessionSidePanel.test.svelte';
 import type { BrowserStreamConfig } from '$lib/browser-panel/stream-client';
 import type { BrowserWorkspaceState } from '$lib/browser-panel/workspace';
+import type { SelectedElement } from '$lib/browser-panel/inspect';
 
 const mocks = vi.hoisted(() => ({
  config: null as BrowserStreamConfig | null,
  send: vi.fn((_payload: unknown) => true),
- panel: { open: true, expanded: false, width: 500, status: 'live', url: 'https://example.test', pageLoading: false, inspectMode: false, selectedElement: null },
+ sendMessage: vi.fn<(prompt: string) => Promise<boolean>>(),
+ panel: { open: true, expanded: false, width: 500, status: 'live', url: 'https://example.test', pageLoading: false, inspectMode: false, selectedElement: null as SelectedElement | null },
 }));
 vi.mock('$lib/browser-panel/stream-client', () => ({ createBrowserStreamClient: (config: BrowserStreamConfig) => {
  mocks.config = config;
@@ -19,7 +21,7 @@ vi.mock('$lib/stores/browser-panel.svelte', () => ({ browserPanel: {
  forSession: () => mocks.panel, current: { defaultViewport: { mode: 'fixed', width: 1280, height: 800 } },
  setStatus: vi.fn(), setPage: vi.fn(), resetPageTracking: vi.fn(), setSelectedElement: vi.fn(),
 } }));
-vi.mock('$lib/stores/active-session', () => ({ activeSession: { subscribe: (callback: (value: null) => void) => { callback(null); return () => {}; } } }));
+vi.mock('$lib/stores/active-session', () => ({ activeSession: { sendMessage: mocks.sendMessage, subscribe: (callback: (value: null) => void) => { callback(null); return () => {}; } } }));
 vi.mock('$lib/api/browser-panel', () => ({ startPanelBrowser: vi.fn(), uploadPanelFiles: vi.fn() }));
 
 const state = (owner: 'agent' | 'human', pending = false): BrowserWorkspaceState => ({
@@ -39,9 +41,86 @@ async function setup(workspace = state('human')) {
 }
 beforeEach(() => {
  vi.clearAllMocks();
+ mocks.sendMessage.mockReset().mockResolvedValue(true);
+ mocks.panel.selectedElement = null;
  vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+
+describe('point-and-prompt delivery', () => {
+ const draft = 'Make this button blue';
+ async function setupPrompt() {
+  mocks.panel.selectedElement = { selector: '#cta', tag: 'button', id: 'cta', classes: [], rect: { x: 0, y: 0, width: 80, height: 30 } };
+  const view = await setup();
+  const input = view.getByRole('textbox', { name: 'Describe the change for the selected element' }) as HTMLTextAreaElement;
+  await fireEvent.input(input, { target: { value: draft } });
+  return { ...view, input, send: view.getByRole('button', { name: 'Send to the AI' }) as HTMLButtonElement };
+ }
+ it('retains the draft and selected context when transport refuses, then allows a retry', async () => {
+  mocks.sendMessage.mockResolvedValueOnce(false);
+  const view = await setupPrompt();
+  await fireEvent.click(view.send);
+  await waitFor(() => expect(view.getByRole('alert').textContent).toContain('Could not send'));
+  expect(view.input.value).toBe(draft);
+  expect(view.getByText('button#cta')).toBeTruthy();
+  expect(view.queryByText(/^Sent —/)).toBeNull();
+  expect(view.send.disabled).toBe(false);
+  await fireEvent.click(view.send);
+  await waitFor(() => expect(view.getByText(/^Sent —/)).toBeTruthy());
+  expect(view.input.value).toBe('');
+  expect(view.queryByRole('alert')).toBeNull();
+  expect(mocks.sendMessage).toHaveBeenCalledTimes(2);
+  expect(mocks.sendMessage.mock.calls[1][0]).toContain('- selector: #cta');
+  expect(mocks.sendMessage.mock.calls[1][0]).toContain(draft);
+ });
+ it('retains the draft and shows the existing error state for a rejected send', async () => {
+  mocks.sendMessage.mockRejectedValueOnce(new Error('Chat disconnected'));
+  const view = await setupPrompt();
+  await fireEvent.click(view.send);
+  await waitFor(() => expect(view.getByRole('alert').textContent).toContain('Chat disconnected'));
+  expect(view.input.value).toBe(draft);
+  expect(view.queryByText(/^Sent —/)).toBeNull();
+  expect(view.send.disabled).toBe(false);
+ });
+ it('waits for acceptance and prevents duplicate Enter submissions', async () => {
+  let accept!: (sent: boolean) => void;
+  mocks.sendMessage.mockReturnValueOnce(new Promise(resolve => { accept = resolve; }));
+  const view = await setupPrompt();
+  await fireEvent.click(view.send);
+  expect(view.input.value).toBe(draft);
+  expect(view.send.disabled).toBe(true);
+  expect(view.queryByText(/^Sent —/)).toBeNull();
+  await fireEvent.keyDown(view.input, { key: 'Enter' });
+  expect(mocks.sendMessage).toHaveBeenCalledOnce();
+  accept(true);
+  await waitFor(() => expect(view.getByText(/^Sent —/)).toBeTruthy());
+  expect(view.input.value).toBe('');
+ });
+ it('does not erase a replacement draft typed while acceptance is pending', async () => {
+  let accept!: (sent: boolean) => void;
+  mocks.sendMessage.mockReturnValueOnce(new Promise(resolve => { accept = resolve; }));
+  const view = await setupPrompt();
+  await fireEvent.click(view.send);
+  await fireEvent.input(view.input, { target: { value: 'And make it bigger' } });
+  accept(true);
+  await waitFor(() => expect(view.getByText(/^Sent —/)).toBeTruthy());
+  expect(view.input.value).toBe('And make it bigger');
+  expect(view.send.disabled).toBe(false);
+ });
+ it('ignores a late acceptance after switching to another session', async () => {
+  let accept!: (sent: boolean) => void;
+  mocks.sendMessage.mockReturnValueOnce(new Promise(resolve => { accept = resolve; }));
+  const view = await setupPrompt();
+  await fireEvent.click(view.send);
+  await view.rerender({ sessionId: 'other-session' });
+  await fireEvent.input(view.input, { target: { value: 'Other chat draft' } });
+  accept(true);
+  await tick();
+  expect(view.input.value).toBe('Other chat draft');
+  expect(view.queryByText(/^Sent —/)).toBeNull();
+  expect(view.send.disabled).toBe(false);
+ });
+});
 
 describe('native keyboard in fit viewport', () => {
  it.each(['agent', 'human'] as const)('freezes remote resizing while focused and resyncs on blur (initial owner: %s)', async (owner) => {
