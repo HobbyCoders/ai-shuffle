@@ -275,6 +275,33 @@ describe('remembered permission on first send', () => {
 	});
 });
 
+describe('new-chat recovery isolation', () => {
+	beforeEach(() => pendingQueue.reset(null, true));
+	it('does not carry a delivered first send through a later refusal and retry', async () => {
+		const first = makeDeps(baseState());
+		expect(await createMessageSender(first.deps).sendMessage('already delivered A')).toBe(true);
+		const a = first.wsConn.send.mock.calls.find(([m]) => m.type === 'query')![0];
+		// The first command was sent before s1 existed; admission/receipt name s1.
+		first.deps.update(s => ({ ...s, sessionId: 's1' }));
+		pendingQueue.acknowledgeSend('s1', a.client_message_id as string);
+		pendingQueue.noteDelivered('s1', 'already delivered A', 'turn-a', true, a.client_message_id as string);
+		const second = makeDeps(baseState());
+		const sender = createMessageSender(second.deps);
+		expect(await sender.sendMessage('recover B')).toBe(true);
+		const b = second.wsConn.send.mock.calls.find(([m]) => m.type === 'query')![0];
+		createMessageHandlers(second.deps as unknown as MessageHandlerDeps).handleMessage({ type: 'error',
+			client_message_id: b.client_message_id, message: 'Missing agent' });
+		expect(second.getState().pendingRestorePrompt).toBe('recover B');
+		expect(second.getState().queuedMessages).toEqual([]);
+		expect(second.getState().messages).toEqual([]);
+		second.deps.update(s => ({ ...s, pendingRestorePrompt: null }));
+		expect(await sender.sendMessage('recover B')).toBe(true);
+		second.deps.update(s => ({ ...s, sessionId: 's2' }));
+		expect(pendingQueue.reconcile('s2', second.getState().queuedMessages)).toEqual([]);
+		expect(pendingQueue.reconcile(null, [])).toEqual([]);
+	});
+});
+
 describe('background idle send refusals', () => {
 	it('keeps the command draft without a feed/cache and restores only its owning composer', async () => {
 		const { deps, wsConn, getState } = makeDeps(baseState({ sessionId: 's1', title: 'Old chat' }));

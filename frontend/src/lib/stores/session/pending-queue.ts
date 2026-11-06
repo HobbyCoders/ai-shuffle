@@ -155,6 +155,20 @@ interface CancellationState {
 // Cancellation transactions belong to a session, not its currently mounted
 // feed. A socket verdict can arrive after that feed has been torn down.
 const cancellations = new Map<string | null, CancellationState>();
+// Idle transcript echoes are recoverable drafts, not queue authority. The
+// command survives null -> assigned-session adoption; receipts clear it by id.
+const recoverySends = new Map<string, { sessionId: string | null; content: string; expiresAt: number }>();
+const MAX_RECOVERY_SENDS = 50;
+const RECOVERY_SEND_TTL_MS = 30 * 60_000;
+function pruneRecoverySends(): void {
+	const now = Date.now();
+	for (const [key, send] of recoverySends) if (send.expiresAt <= now) recoverySends.delete(key);
+}
+function recoverySend(id: string | null, key: string) {
+	pruneRecoverySends();
+	const send = recoverySends.get(key);
+	return send && (send.sessionId === null || send.sessionId === id) ? send : undefined;
+}
 function cancellationState(id: string | null): CancellationState {
 	let state = cancellations.get(id);
 	if (!state) {
@@ -223,6 +237,7 @@ export const pendingQueue = {
 			for (const state of cancellations.values()) for (const timer of state.timers.values()) clearTimeout(timer);
 			cancellations.clear();
 			parked.clear();
+			recoverySends.clear();
 		}
 	},
 
@@ -372,11 +387,19 @@ export const pendingQueue = {
 		if (rows) parked.set(id!, rows.map(e => removalKey(e) === key ? { ...e, status: undefined } : e));
 	},
 
-	/** Keep recoverable words until an admission, refusal or receipt arrives. */
+	/** Keep recoverable words until admission/refusal/receipt. Without a timeout
+	 * callback this is an idle transcript draft, never an optimistic queue row. */
 	trackSend(id: string | null, entry: PendingEntry, onTimeout?: () => void): void {
-		const state = cancellationState(id), key = removalKey(entry);
+		const key = removalKey(entry);
+		if (!onTimeout) {
+			pruneRecoverySends();
+			recoverySends.delete(key);
+			recoverySends.set(key, { sessionId: id, content: entry.content, expiresAt: Date.now() + RECOVERY_SEND_TTL_MS });
+			if (recoverySends.size > MAX_RECOVERY_SENDS) recoverySends.delete(recoverySends.keys().next().value!);
+			return;
+		}
+		const state = cancellationState(id);
 		state.sends.set(key, entry);
-		if (!onTimeout) return;
 		state.timers.set(`send:${key}`, setTimeout(() => {
 			state.timers.delete(`send:${key}`);
 			state.sends.set(key, { ...entry, unconfirmed: true });
@@ -385,6 +408,7 @@ export const pendingQueue = {
 	},
 
 	acknowledgeSend(id: string | null, key: string): void {
+		if (recoverySend(id, key)) recoverySends.delete(key);
 		const state = cancellations.get(id);
 		clearTimeout(state?.timers.get(`send:${key}`));
 		state?.timers.delete(`send:${key}`);
@@ -393,7 +417,7 @@ export const pendingQueue = {
 
 	rejectSend(id: string | null, key: string, fallback?: string | null): void {
 		const state = cancellationState(id);
-		const content = state.sends.get(key)?.content ?? fallback;
+		const content = state.sends.get(key)?.content ?? recoverySend(id, key)?.content ?? fallback;
 		if (content != null && !state.withdrawn.has(key)) state.drafts.push(content);
 		state.withdrawn.add(key);
 		this.acknowledgeSend(id, key);

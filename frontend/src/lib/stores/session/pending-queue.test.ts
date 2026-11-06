@@ -326,6 +326,53 @@ describe('pendingQueue — bounded transactions', () => {
 	});
 });
 
+describe('recovery-only sends', () => {
+	it('never projects an idle recovery record as a pending row in any session', () => {
+		pendingQueue.trackSend(null, { ...row('user-a', 'A'), clientMessageId: 'client-a' });
+		expect(pendingQueue.reconcile(null, [])).toEqual([]);
+		expect(pendingQueue.reconcile('s1', [])).toEqual([]);
+		pendingQueue.rejectSend(null, 'client-a');
+		expect(pendingQueue.takeWithdrawnDraft(null)).toBe('A');
+	});
+	it.each(['ack', 'receipt'] as const)('clears the first-send recovery by command on an assigned-session %s', kind => {
+		pendingQueue.trackSend(null, { ...row('user-a', 'A'), clientMessageId: 'client-a' });
+		pendingQueue.trackSend(null, { ...row('user-b', 'B'), clientMessageId: 'client-b' });
+		if (kind === 'ack') pendingQueue.acknowledgeSend('s1', 'client-a');
+		else pendingQueue.noteDelivered('s1', 'A', 'turn-a', true, 'client-a');
+		pendingQueue.rejectSend(null, 'client-a');
+		expect(pendingQueue.takeWithdrawnDraft(null)).toBeNull();
+		pendingQueue.rejectSend('s2', 'client-b');
+		expect(pendingQueue.takeWithdrawnDraft('s2')).toBe('B');
+		expect(pendingQueue.reconcile(null, [])).toEqual([]);
+	});
+	it('does not let another session consume an existing chat recovery record', () => {
+		pendingQueue.trackSend('s1', { ...row('user-a', 'A'), clientMessageId: 'client-a' });
+		pendingQueue.acknowledgeSend('s2', 'client-a');
+		pendingQueue.rejectSend('s2', 'client-a');
+		expect(pendingQueue.takeWithdrawnDraft('s2')).toBeNull();
+		pendingQueue.rejectSend('s1', 'client-a');
+		expect(pendingQueue.takeWithdrawnDraft('s1')).toBe('A');
+	});
+	it('bounds recovery records to the newest 50 sends', () => {
+		for (let i = 0; i <= 50; i++) pendingQueue.trackSend(null, {
+			...row(`user-${i}`, `words-${i}`), clientMessageId: `client-${i}`,
+		});
+		pendingQueue.rejectSend(null, 'client-0');
+		expect(pendingQueue.takeWithdrawnDraft(null)).toBeNull();
+		pendingQueue.rejectSend(null, 'client-50');
+		expect(pendingQueue.takeWithdrawnDraft(null)).toBe('words-50');
+	});
+	it('expires recovery-only text after 30 minutes', () => {
+		vi.useFakeTimers();
+		try {
+			pendingQueue.trackSend(null, { ...row('user-a', 'A'), clientMessageId: 'client-a' });
+			vi.advanceTimersByTime(30 * 60_000);
+			pendingQueue.rejectSend(null, 'client-a');
+			expect(pendingQueue.takeWithdrawnDraft(null)).toBeNull();
+		} finally { vi.useRealTimers(); }
+	});
+});
+
 describe('pendingQueue — session scoping', () => {
 	it('forgets everything when the session changes', () => {
 		authoritative([row('turn-q', 'steer me')]);
