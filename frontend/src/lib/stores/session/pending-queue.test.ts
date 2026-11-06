@@ -177,22 +177,205 @@ describe('pendingQueue — unsending', () => {
 		expect(authoritative([entry])).toEqual([]);
 	});
 
-	it('keeps delivery-first visible as delivered despite receipt and empty snapshot', () => {
+	it('retires delivery-first despite receipt and stale snapshots', () => {
 		const entry = row('turn-q', 'too late');
 		pendingQueue.requestRemoval(SID, entry);
 		pendingQueue.noteDelivered(SID, entry.content, 'turn-live');
 		pendingQueue.applyRemovalVerdict(SID, entry.id, 'already_delivered');
-		expect(authoritative([])).toEqual([{ ...entry, status: 'delivered' }]);
-		expect(authoritative([entry])).toEqual([{ ...entry, status: 'delivered' }]);
+		expect(authoritative([])).toEqual([]);
+		expect(authoritative([entry])).toEqual([]);
 	});
 
-	it('does not claim withdrawal for an unknown id or a failed socket send', () => {
+	it('retires an unknown legacy id and recovers text without claiming withdrawal', () => {
 		const entry = row('turn-q', 'nope');
 		pendingQueue.requestRemoval(SID, entry);
 		pendingQueue.applyRemovalVerdict(SID, entry.id, 'not_found');
-		expect(authoritative([entry])).toHaveLength(1);
+		expect(authoritative([entry])).toEqual([]);
+		expect(pendingQueue.takeWithdrawnDraft(SID)).toBe(entry.content);
+		expect(pendingQueue.removalVerdict(SID, entry.id)).toBe('not_found');
+	});
+
+	it('keeps the bubble actionable after a failed cancellation send', () => {
+		const entry = row('turn-q', 'nope');
+		pendingQueue.requestRemoval(SID, entry);
 		pendingQueue.removalFailed(SID, entry.id);
 		expect(authoritative([entry])).toEqual([entry]);
+		expect(pendingQueue.removalVerdict(SID, entry.id)).toBeUndefined();
+	});
+});
+
+describe('pendingQueue — bounded transactions', () => {
+	it('retires both optimistic and verdict durable identities before the receipt arrives', () => {
+		const entry = { ...row('client-a', 'words', 5000), clientMessageId: 'client-a' };
+		pendingQueue.requestRemoval(SID, entry);
+		pendingQueue.applyRemovalVerdict(SID, 'client-a', 'already_delivered', 'turn-old');
+		expect(authoritative([])).toEqual([]);
+		expect(authoritative([{ ...entry, id: 'turn-old' }])).toEqual([]);
+		const requeue = { ...entry, id: 'turn-new', queuedAt: 15000 };
+		expect(authoritative([requeue])).toEqual([requeue]);
+	});
+
+	it('keeps the newer cancellation transaction and draft after an older delivered verdict', () => {
+		const old = { ...row('turn-old', 'words', 5000), clientMessageId: 'client-a' };
+		pendingQueue.requestRemoval(SID, old);
+		pendingQueue.removalFailed(SID, 'client-a'); // old cancellation timed out
+		const newer = { ...old, id: 'turn-new', queuedAt: 15000 };
+		authoritative([newer]);
+		pendingQueue.requestRemoval(SID, newer);
+		pendingQueue.applyRemovalVerdict(SID, 'client-a', 'already_delivered', 'turn-old');
+		expect(authoritative([newer])).toEqual([{ ...newer, status: 'cancelling' }]);
+		expect(pendingQueue.removalVerdict(SID, 'client-a')).toBeUndefined();
+		pendingQueue.applyRemovalVerdict(SID, 'client-a', 'withdrawn', 'turn-new');
+		expect(pendingQueue.takeWithdrawnDraft(SID)).toBe('words');
+	});
+
+	it('keeps a newer server row that arrives before the older attempt verdict', () => {
+		const entry = { ...row('client-a', 'words', 5000), clientMessageId: 'client-a' };
+		pendingQueue.requestRemoval(SID, entry);
+		const requeue = { ...entry, id: 'turn-new', queuedAt: 15000 };
+		authoritative([requeue]);
+		pendingQueue.applyRemovalVerdict(SID, 'client-a', 'already_delivered', 'turn-old');
+		expect(authoritative([requeue])).toEqual([{ ...requeue, status: 'cancelling' }]);
+	});
+
+	it.each([false, true])('does not let an older receipt (live=%s) retire a newer cancellation attempt', (live) => {
+		const requeue = { ...row('turn-new', 'words', 15000), clientMessageId: 'client-a' };
+		authoritative([requeue]);
+		pendingQueue.requestRemoval(SID, requeue);
+		pendingQueue.noteDelivered(SID, 'words', 'turn-old', live, 'client-a', new Date(10000).toISOString());
+		expect(authoritative([requeue])).toEqual([{ ...requeue, status: 'cancelling' }]);
+		expect(pendingQueue.removalVerdict(SID, 'client-a')).toBeUndefined();
+		pendingQueue.applyRemovalVerdict(SID, 'client-a', 'withdrawn');
+		expect(pendingQueue.takeWithdrawnDraft(SID)).toBe('words');
+	});
+
+	it('a receipt beats cancellation memory and a first-seen stale row', () => {
+		const entry = { ...row('client-a', 'words'), clientMessageId: 'client-a' };
+		pendingQueue.noteOptimistic(SID, entry.id);
+		pendingQueue.requestRemoval(SID, entry);
+		authoritative([]);
+		pendingQueue.noteDelivered(SID, 'words', 'live', true, 'client-a');
+		expect(authoritative([{ ...entry, id: 'unseen-server-row' }])).toEqual([]);
+		expect(pendingQueue.takeWithdrawnDraft(SID)).toBeNull();
+	});
+	it('retires a first-seen stale row even without cancellation', () => {
+		pendingQueue.noteDelivered(SID, 'words', 'live', true, 'client-a');
+		expect(authoritative([{ ...row('unseen', 'words'), clientMessageId: 'client-a' }])).toEqual([]);
+	});
+	it('expires a missing verdict and allows another cancellation attempt', () => {
+		vi.useFakeTimers();
+		try {
+			const entry = row('turn-q', 'words'), timeout = vi.fn();
+			pendingQueue.requestRemoval(SID, entry, timeout);
+			vi.advanceTimersByTime(10_000);
+			expect(timeout).toHaveBeenCalledOnce();
+			expect(authoritative([entry])).toEqual([entry]);
+			pendingQueue.requestRemoval(SID, entry);
+			pendingQueue.applyRemovalVerdict(SID, entry.id, 'withdrawn');
+			expect(authoritative([entry])).toEqual([]);
+		} finally { pendingQueue.reset(SID, true); vi.useRealTimers(); }
+	});
+	it('recovers the words when a withdrawal verdict arrives after its timeout', () => {
+		vi.useFakeTimers();
+		try {
+			const entry = { ...row('turn-a', 'late recovery'), clientMessageId: 'client-a' };
+			pendingQueue.requestRemoval(SID, entry);
+			vi.advanceTimersByTime(10_000);
+			pendingQueue.applyRemovalVerdict(SID, 'client-a', 'withdrawn');
+			expect(pendingQueue.takeWithdrawnDraft(SID)).toBe('late recovery');
+			expect(authoritative([entry])).toEqual([]);
+		} finally { pendingQueue.reset(SID, true); vi.useRealTimers(); }
+	});
+	it('a delivery winning cancellation does not suppress a legitimate newer server requeue', () => {
+		const entry = { ...row('client-a', 'repeat', 5000), clientMessageId: 'client-a' };
+		pendingQueue.requestRemoval(SID, entry);
+		pendingQueue.noteDelivered(SID, 'repeat', 'turn-old', true, 'client-a', new Date(10000).toISOString());
+		expect(pendingQueue.reconcile(SID, [entry])).toEqual([]);
+		const requeue = { ...row('turn-new', 'repeat', 15000), clientMessageId: 'client-a' };
+		expect(authoritative([requeue])).toEqual([requeue]);
+	});
+	it('keeps an unadmitted echo actionable through unrelated empty snapshots', () => {
+		const entry = { ...row('client-a', 'words'), clientMessageId: 'client-a' };
+		pendingQueue.trackSend(SID, entry, vi.fn());
+		expect(authoritative([])).toEqual([entry]);
+		pendingQueue.acknowledgeSend(SID, 'client-a');
+		expect(authoritative([])).toEqual([]);
+	});
+	it('restores a refused echo once, even after an empty snapshot', () => {
+		const entry = { ...row('client-a', 'recover'), clientMessageId: 'client-a' };
+		pendingQueue.trackSend(SID, entry, vi.fn());
+		authoritative([]);
+		pendingQueue.rejectSend(SID, 'client-a');
+		expect(pendingQueue.takeWithdrawnDraft(SID)).toBe('recover');
+		pendingQueue.rejectSend(SID, 'client-a');
+		expect(pendingQueue.takeWithdrawnDraft(SID)).toBeNull();
+		expect(authoritative([entry])).toEqual([]);
+	});
+	it('bounds admission waiting and cancels the timer on an ack', () => {
+		vi.useFakeTimers();
+		try {
+			const entry = { ...row('client-a', 'words'), clientMessageId: 'client-a' }, timeout = vi.fn();
+			pendingQueue.trackSend(SID, entry, timeout);
+			pendingQueue.acknowledgeSend(SID, 'client-a');
+			vi.advanceTimersByTime(10_000);
+			expect(timeout).not.toHaveBeenCalled();
+			pendingQueue.trackSend(SID, entry, timeout);
+			vi.advanceTimersByTime(10_000);
+			expect(timeout).toHaveBeenCalledOnce();
+		} finally { pendingQueue.reset(SID, true); vi.useRealTimers(); }
+	});
+});
+
+describe('recovery-only sends', () => {
+	it('does not let a refusal destination claim a New Chat command', () => {
+		pendingQueue.trackSend(null, { ...row('user-b', 'B'), clientMessageId: 'client-b' });
+		pendingQueue.rejectSend('s2', 'client-b');
+		expect(pendingQueue.takeWithdrawnDraft('s2')).toBeNull();
+		pendingQueue.rejectSend(null, 'client-b');
+		expect(pendingQueue.takeWithdrawnDraft(null)).toBe('B');
+	});
+	it('never projects an idle recovery record as a pending row in any session', () => {
+		pendingQueue.trackSend(null, { ...row('user-a', 'A'), clientMessageId: 'client-a' });
+		expect(pendingQueue.reconcile(null, [])).toEqual([]);
+		expect(pendingQueue.reconcile('s1', [])).toEqual([]);
+		pendingQueue.rejectSend(null, 'client-a');
+		expect(pendingQueue.takeWithdrawnDraft(null)).toBe('A');
+	});
+	it.each(['ack', 'receipt'] as const)('clears the first-send recovery by command on an assigned-session %s', kind => {
+		pendingQueue.trackSend(null, { ...row('user-a', 'A'), clientMessageId: 'client-a' });
+		pendingQueue.trackSend(null, { ...row('user-b', 'B'), clientMessageId: 'client-b' });
+		if (kind === 'ack') pendingQueue.acknowledgeSend('s1', 'client-a');
+		else pendingQueue.noteDelivered('s1', 'A', 'turn-a', true, 'client-a');
+		pendingQueue.rejectSend(null, 'client-a');
+		expect(pendingQueue.takeWithdrawnDraft(null)).toBeNull();
+		pendingQueue.rejectSend(null, 'client-b');
+		expect(pendingQueue.takeWithdrawnDraft(null)).toBe('B');
+		expect(pendingQueue.reconcile(null, [])).toEqual([]);
+	});
+	it('does not let another session consume an existing chat recovery record', () => {
+		pendingQueue.trackSend('s1', { ...row('user-a', 'A'), clientMessageId: 'client-a' });
+		pendingQueue.rejectSend('s2', 'client-a');
+		expect(pendingQueue.takeWithdrawnDraft('s2')).toBeNull();
+		pendingQueue.rejectSend('s1', 'client-a');
+		expect(pendingQueue.takeWithdrawnDraft('s1')).toBe('A');
+	});
+	it('bounds recovery records to the newest 50 sends', () => {
+		for (let i = 0; i <= 50; i++) pendingQueue.trackSend(null, {
+			...row(`user-${i}`, `words-${i}`), clientMessageId: `client-${i}`,
+		});
+		pendingQueue.rejectSend(null, 'client-0');
+		expect(pendingQueue.takeWithdrawnDraft(null)).toBeNull();
+		pendingQueue.rejectSend(null, 'client-50');
+		expect(pendingQueue.takeWithdrawnDraft(null)).toBe('words-50');
+	});
+	it('expires recovery-only text after 30 minutes', () => {
+		vi.useFakeTimers();
+		try {
+			pendingQueue.trackSend(null, { ...row('user-a', 'A'), clientMessageId: 'client-a' });
+			vi.advanceTimersByTime(30 * 60_000);
+			pendingQueue.rejectSend(null, 'client-a');
+			expect(pendingQueue.takeWithdrawnDraft(null)).toBeNull();
+		} finally { vi.useRealTimers(); }
 	});
 });
 

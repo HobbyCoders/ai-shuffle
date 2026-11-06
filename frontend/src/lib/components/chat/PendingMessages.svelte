@@ -107,6 +107,8 @@
 									class="pending-status"
 									class:is-delivered={msg.status === 'delivered'}
 								>{STATUS_LABEL[msg.status]}</span>
+							{:else if msg.unconfirmed}
+								<span class="pending-hint is-stale" title="Sending was not confirmed. Unsend this message to recover the text and try again.">Send unconfirmed</span>
 							{:else if stale}
 								<span class="pending-hint is-stale" title={staleTitle}>Unconfirmed · retrying…</span>
 							{:else}
@@ -310,6 +312,31 @@
 	@media (max-width: 639px) {
 		.usercol {
 			max-width: 85%;
+		}
+	}
+
+	@media (pointer: coarse), (max-width: 639px) {
+		/* The whole transparent Interrupt box is a hit target, including corners. */
+		.pending-action {
+			border-radius: 0;
+		}
+
+		/* Extend touch targets without growing the glyph or action row. */
+		.pending-remove {
+			position: relative;
+			/* The target extends ~6px beyond the glyph: keep it off Interrupt. */
+			margin-inline-start: 6px;
+		}
+
+		.pending-remove::before,
+		.hover-remove::before {
+			content: '';
+			position: absolute;
+			top: 50%;
+			left: 50%;
+			width: 24px;
+			height: 24px;
+			transform: translate(-50%, -50%);
 		}
 
 		/* No hover on touch — keep the per-bubble control reachable. */

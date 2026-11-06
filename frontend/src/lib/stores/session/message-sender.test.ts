@@ -2,7 +2,7 @@ import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import { createMessageSender, type MessageSenderDeps } from './message-sender';
 import { reloadBlockers } from '$lib/services/app-update';
 import type { ActiveSessionState } from '../active-session';
-import type { InternalMutableState } from './ws-message-handlers';
+import { createMessageHandlers, type InternalMutableState, type MessageHandlerDeps } from './ws-message-handlers';
 import { reopenWorktree } from '$lib/api/git';
 import { api } from '$lib/api/client';
 import { ATTACHMENTS_NEED_LOCAL_CHECKOUT } from '$lib/components/chat/attach-disable';
@@ -272,6 +272,77 @@ describe('remembered permission on first send', () => {
 		expect(wsConn.send).toHaveBeenCalledWith(expect.objectContaining({
 			type: 'query', overrides: expect.objectContaining({ permission_mode: 'bypassPermissions' }),
 		}));
+	});
+});
+
+describe('new-chat recovery isolation', () => {
+	beforeEach(() => pendingQueue.reset(null, true));
+	it.each([
+		{ origin: null, destination: null },
+		{ origin: null, destination: 's2' },
+		{ origin: null, destination: 'unadopted-session' },
+		{ origin: 's1', destination: null },
+		{ origin: 's1', destination: 's2' },
+	])('keeps a delayed $destination refusal for $origin in its own composer', async ({ origin, destination }) => {
+		const test = makeDeps(baseState({ sessionId: origin, title: origin ? 'Old chat' : 'New Chat' }));
+		feedController.attach({ update: test.deps.update, getState: test.getState,
+			requestPendingQuestions: vi.fn(), requestPendingPermissions: vi.fn(), resolveInteractionByRequestId: vi.fn() });
+		const switcher = createSessionSwitcher({ update: test.deps.update, getState: test.getState,
+			internal: test.internal, wsSend: test.wsConn.send,
+			sessionEphemeralCache: { save: vi.fn(), restore: () => null }, onPersistTimerChanged: vi.fn() });
+		try {
+			expect(await createMessageSender(test.deps).sendMessage('recover B in its own composer')).toBe(true);
+			const query = test.wsConn.send.mock.calls.find(([m]) => m.type === 'query')![0];
+			await switcher.switchSession('s2');
+			test.deps.update(s => ({ ...s, draft: 's2 draft', pendingRestorePrompt: 's2 recovery' }));
+			createMessageHandlers(test.deps as unknown as MessageHandlerDeps).handleMessage({ type: 'error',
+				session_id: destination, client_message_id: query.client_message_id, message: 'Missing agent' });
+			expect(test.getState().sessionId).toBe('s2');
+			expect(test.getState().draft).toBe('s2 draft');
+			expect(test.getState().pendingRestorePrompt).toBe('s2 recovery');
+			expect(pendingQueue.takeWithdrawnDraft('s2')).toBeNull();
+			if (origin) await switcher.switchSession(origin);
+			else switcher.newChat();
+			expect(test.getState().pendingRestorePrompt).toBe('recover B in its own composer');
+			expect(pendingQueue.takeWithdrawnDraft(origin)).toBeNull();
+		} finally { feedController.stop(); feedController.invalidate(); pendingQueue.reset(null, true); }
+	});
+	it('does not carry a delivered first send through a later refusal and retry', async () => {
+		const first = makeDeps(baseState());
+		expect(await createMessageSender(first.deps).sendMessage('already delivered A')).toBe(true);
+		const a = first.wsConn.send.mock.calls.find(([m]) => m.type === 'query')![0];
+		// The first command was sent before s1 existed; admission/receipt name s1.
+		first.deps.update(s => ({ ...s, sessionId: 's1' }));
+		pendingQueue.acknowledgeSend('s1', a.client_message_id as string);
+		pendingQueue.noteDelivered('s1', 'already delivered A', 'turn-a', true, a.client_message_id as string);
+		const second = makeDeps(baseState());
+		const sender = createMessageSender(second.deps);
+		expect(await sender.sendMessage('recover B')).toBe(true);
+		const b = second.wsConn.send.mock.calls.find(([m]) => m.type === 'query')![0];
+		createMessageHandlers(second.deps as unknown as MessageHandlerDeps).handleMessage({ type: 'error',
+			client_message_id: b.client_message_id, message: 'Missing agent' });
+		expect(second.getState().pendingRestorePrompt).toBe('recover B');
+		expect(second.getState().queuedMessages).toEqual([]);
+		expect(second.getState().messages).toEqual([]);
+		second.deps.update(s => ({ ...s, pendingRestorePrompt: null }));
+		expect(await sender.sendMessage('recover B')).toBe(true);
+		second.deps.update(s => ({ ...s, sessionId: 's2' }));
+		expect(pendingQueue.reconcile('s2', second.getState().queuedMessages)).toEqual([]);
+		expect(pendingQueue.reconcile(null, [])).toEqual([]);
+	});
+});
+
+describe('background idle send refusals', () => {
+	it('keeps the command draft without a feed/cache and restores only its owning composer', async () => {
+		const { deps, wsConn, getState } = makeDeps(baseState({ sessionId: 's1', title: 'Old chat' }));
+		expect(await createMessageSender(deps).sendMessage('recover while away')).toBe(true);
+		const query = wsConn.send.mock.calls.find(([m]) => (m as any)?.type === 'query')![0] as any;
+		deps.update(s => ({ ...s, sessionId: 's2', messages: [], pendingRestorePrompt: 's2 draft' }));
+		createMessageHandlers(deps as unknown as MessageHandlerDeps).handleMessage({ type: 'error', session_id: 's1',
+			client_message_id: query.client_message_id, message: 'Missing agent' });
+		expect(getState().pendingRestorePrompt).toBe('s2 draft');
+		expect(pendingQueue.takeWithdrawnDraft('s2')).toBeNull();
+		expect(pendingQueue.takeWithdrawnDraft('s1')).toBe('recover while away');
 	});
 });
 
@@ -1522,10 +1593,9 @@ describe('message-sender pending-bubble edges', () => {
 		pendingQueue.reset('ses-1', true);
 	});
 
-	it('skips the optimistic echo when the server already described the queue', async () => {
-		// The authoritative snapshot for this send lands BEFORE the local append
-		// gets to run — a local row added on top of it is a second copy that no
-		// later frame is guaranteed to replace.
+	it('keeps a new command echo even when an unrelated snapshot races the send', async () => {
+		// This snapshot predates the command id: it cannot admit this send even
+		// when its text is identical. Text is not a send identity.
 		const { deps, getState, wsConn } = makeDeps(streamingState());
 		// Deliver after sendMessage records dispatchedAt, while it reads state.
 		// Preloading before send only passed when both Date.now calls happened
@@ -1545,7 +1615,8 @@ describe('message-sender pending-bubble edges', () => {
 		const result = await sender.sendMessage('answer this too');
 
 		expect(result).toBe(true);
-		expect(getState().queuedMessages).toHaveLength(0);
+		expect(getState().queuedMessages).toHaveLength(1);
+		expect(getState().queuedMessages[0].clientMessageId).toMatch(/^client-/);
 		// Nor on the transcript (#2016): the turn is live, so the steer's own
 		// `message.user` is the only copy that may land there.
 		expect(getState().messages.map((m) => m.id)).toEqual(['u0']);
@@ -1623,6 +1694,26 @@ describe('message-sender pending-bubble edges', () => {
 		expect(getState().queuedMessages).toEqual([entry]);
 		expect(getState().error).toMatch(/cancellation was sent/);
 		expect(pendingQueue.reconcile('ses-1', [entry])).toEqual([entry]);
+	});
+
+	it('makes an unacknowledged send removable and retries cancellation after a lost verdict', async () => {
+		vi.useFakeTimers();
+		try {
+			const { deps, getState, wsConn } = makeDeps(streamingState());
+			const sender = createMessageSender(deps);
+			await sender.sendMessage('keep my words');
+			vi.advanceTimersByTime(10_000);
+			const entry = getState().queuedMessages[0];
+			expect(entry.unconfirmed).toBe(true);
+			expect(getState().error).toContain('Sending was not confirmed');
+			sender.removeQueuedMessage(entry.id);
+			expect(getState().queuedMessages[0].status).toBe('cancelling');
+			vi.advanceTimersByTime(10_000);
+			expect(getState().queuedMessages[0].status).toBeUndefined();
+			expect(getState().error).toContain('Cancellation was not confirmed');
+			sender.removeQueuedMessage(entry.id);
+			expect(wsConn.send.mock.calls.filter(([m]) => m.type === 'remove_queued_message')).toHaveLength(2);
+		} finally { pendingQueue.reset('ses-1', true); vi.useRealTimers(); }
 	});
 
 	it('ignores an × for a message that is no longer pending', () => {

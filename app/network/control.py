@@ -1018,8 +1018,32 @@ async def _queue_view(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
             "pending_peer_messages": peers}
 
 
+async def _queue_remove(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
+    """Same owner authority as queue-view; never adjudicate on a mirror."""
+    from app.api.chat_ws_handler import ChatWebSocketHandler, _valid_client_message_id
+
+    session_id = str(body.get("session_id") or "")
+    await run_sync(_require_owned, session_id)
+    command_id = body.get("client_message_id")
+    if command_id is not None and not _valid_client_message_id(command_id):
+        raise ValueError("Invalid client message id")
+
+    class RemovalSender(ChatWebSocketHandler):
+        async def send_json(self, frame):
+            if frame.get("type") == "queued_message_removal":
+                self.removal = frame
+
+    sender = RemovalSender(None, None, None, None, None)
+    sender.removal = None
+    await sender._remove_local_queued_message(body, session_id)
+    if sender.removal is None:
+        raise ValueError("Cancellation was not confirmed")
+    return {"removal": sender.removal}
+
+
 _HANDLERS = {
     "queue-view": _queue_view,
+    "queue-remove": _queue_remove,
     "turns": _turns,
     "compact-first": _turns,
     "sessions": _sessions,

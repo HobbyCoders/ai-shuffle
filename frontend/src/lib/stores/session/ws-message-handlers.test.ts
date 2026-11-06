@@ -46,6 +46,7 @@ vi.mock('./v2/feed-controller', () => ({
 		restart: vi.fn(),
 		isFeeding: vi.fn(() => false),
 		invalidate: vi.fn(),
+		retractOptimisticSend: vi.fn(),
 	},
 	// Mirrors the real constant: `start` marks streaming OPTIMISTICALLY so the
 	// fold clears it once the reducer confirms the turn, instead of competing
@@ -2895,7 +2896,7 @@ describe('queue_updated (the pending "not seen yet" bubbles)', () => {
 	let deps: MessageHandlerDeps;
 	let handlers: ReturnType<typeof createMessageHandlers>;
 
-	function frame(rows: Array<{ id: string; content: string }>): Record<string, unknown> {
+	function frame(rows: Array<{ id: string; content: string; client_message_id?: string }>): Record<string, unknown> {
 		return {
 			type: 'sync',
 			event_type: 'queue_updated',
@@ -2974,17 +2975,106 @@ describe('queue_updated (the pending "not seen yet" bubbles)', () => {
 		expect(pendingQueue.takeWithdrawnDraft('session-1')).toBeNull();
 	});
 
-	it('retains a delivered chip and does not restore its text when delivery wins', () => {
+	it('retires a delivered chip without restoring its text when delivery wins', () => {
 		const entry = { id: 'turn-q', clientMessageId: 'client-a', content: 'sent', queuedAt: 1 };
 		pendingQueue.requestRemoval('session-1', entry);
 		handlers.handleMessage(frame([]));
 		handlers.handleMessage({ type: 'queued_message_removal', session_id: 'session-1',
 			message_id: 'turn-q', client_message_id: 'client-a', verdict: 'already_delivered' });
-		expect(state.queuedMessages).toEqual([{ ...entry, status: 'delivered' }]);
+		expect(state.queuedMessages).toEqual([]);
 		expect(state.pendingRestorePrompt).toBeNull();
 		expect(notify.warning).toHaveBeenCalledTimes(1);
+		expect(state.error).toBeNull();
 		handlers.handleMessage(frame([]));
-		expect(state.queuedMessages).toHaveLength(1);
+		expect(state.queuedMessages).toHaveLength(0);
+	});
+
+	it.each(['Agent missing', 'Too many messages'])('recovers an idle optimistic send refused with %s', (message) => {
+		const refused = { id: 'user-123', role: 'user' as const, content: 'recover idle words', commandId: 'client-idle' };
+		const saved = { id: 'saved', role: 'user' as const, content: 'older exchange' };
+		state = { ...state, messages: [saved, refused], queuedMessages: [],
+			isStreaming: true, optimisticStreaming: true, liveTurnId: null,
+			streamStartTime: 123, pendingRestorePrompt: 'earlier restore' };
+		handlers.handleMessage({ type: 'error', session_id: 'session-1', client_message_id: 'client-idle', message });
+		expect(state.messages).toEqual([saved]);
+		expect(state.pendingRestorePrompt).toBe('earlier restore\n\nrecover idle words');
+		expect(state.isStreaming).toBe(false);
+		expect(state.optimisticStreaming).toBe(false);
+		expect(state.streamStartTime).toBeNull();
+		expect(state.error).toContain(message);
+	});
+
+	it('recovers a refused transcript echo without clearing a concurrently started real turn', () => {
+		state = { ...state, messages: [{ id: 'user-123', role: 'user', content: 'recover', commandId: 'client-idle' }],
+			isStreaming: true, optimisticStreaming: false, liveTurnId: 'real-live', streamStartTime: 123 };
+		handlers.handleMessage({ type: 'error', session_id: 'session-1', client_message_id: 'client-idle', message: 'Agent missing' });
+		expect(state.messages).toEqual([]);
+		expect(state.pendingRestorePrompt).toBe('recover');
+		expect(state.isStreaming).toBe(true);
+		expect(state.liveTurnId).toBe('real-live');
+		expect(state.streamStartTime).toBe(123);
+	});
+
+	it('uses the removal verdict durable id to suppress a delayed pre-receipt snapshot', () => {
+		const entry = { id: 'client-a', clientMessageId: 'client-a', content: 'sent', queuedAt: 1 };
+		pendingQueue.requestRemoval('session-1', entry);
+		handlers.handleMessage({ type: 'queued_message_removal', session_id: 'session-1',
+			message_id: 'turn-q', client_message_id: 'client-a', verdict: 'already_delivered' });
+		handlers.handleMessage(frame([{ id: 'turn-q', content: 'sent', client_message_id: 'client-a' }]));
+		expect(state.queuedMessages).toEqual([]);
+	});
+
+	it.each(['session_created', 'start'])('keeps draft ownership after authenticated %s adoption', type => {
+		const entry = { id: 'user-b', clientMessageId: 'client-b', content: 'adopted B', queuedAt: 1 };
+		state = { ...state, sessionId: null, messages: [{ id: entry.id, role: 'user', content: entry.content, commandId: entry.clientMessageId }] };
+		pendingQueue.trackSend(null, entry);
+		// Another New Chat command must not be adopted with this request.
+		pendingQueue.trackSend(null, { id: 'user-c', clientMessageId: 'client-c', content: 'still New Chat C', queuedAt: 2 });
+		deps.internal.awaitingNewSession = true;
+		deps.internal.pendingRequestId = 'request-b';
+		handlers.handleMessage({ type, session_id: 'session-1', request_id: 'foreign-request' });
+		expect(state.sessionId).toBeNull();
+		handlers.handleMessage({ type, session_id: 'session-1', request_id: 'request-b' });
+		expect(state.sessionId).toBe('session-1');
+		state = { ...state, sessionId: 'session-2', messages: [], pendingRestorePrompt: 's2 recovery' };
+		handlers.handleMessage({ type: 'error', session_id: null, client_message_id: entry.clientMessageId, message: 'Missing agent' });
+		expect(state.pendingRestorePrompt).toBe('s2 recovery');
+		expect(pendingQueue.takeWithdrawnDraft('session-1')).toBe('adopted B');
+		expect(pendingQueue.takeWithdrawnDraft('session-2')).toBeNull();
+		handlers.handleMessage({ type: 'error', session_id: 'session-1', client_message_id: 'client-c', message: 'Missing agent' });
+		expect(pendingQueue.takeWithdrawnDraft(null)).toBe('still New Chat C');
+		expect(pendingQueue.takeWithdrawnDraft('session-1')).toBeNull();
+	});
+
+	it('recovers a correlated refused echo without stopping the live turn or overwriting queued restores', () => {
+		const entry = { id: 'client-a', clientMessageId: 'client-a', content: 'recover', queuedAt: 1 };
+		state = { ...state, isStreaming: true, pendingRestorePrompt: 'earlier restore', queuedMessages: [entry] };
+		pendingQueue.trackSend('session-1', entry, vi.fn());
+		handlers.handleMessage({ type: 'error', session_id: 'session-1', client_message_id: 'client-a', message: 'Agent missing' });
+		expect(state.queuedMessages).toEqual([]);
+		expect(state.isStreaming).toBe(true);
+		expect(state.pendingRestorePrompt).toBe('earlier restore\n\nrecover');
+		expect(state.error).toContain('Agent missing');
+	});
+
+	it('a legacy unknown verdict clears the orphan with an honest recovery notice', () => {
+		const entry = { id: 'client-a', clientMessageId: 'client-a', content: 'recover', queuedAt: 1 };
+		state = { ...state, queuedMessages: [entry] };
+		pendingQueue.requestRemoval('session-1', entry);
+		handlers.handleMessage({ type: 'queued_message_removal', session_id: 'session-1', client_message_id: 'client-a', verdict: 'not_found' });
+		expect(state.queuedMessages).toEqual([]);
+		expect(state.pendingRestorePrompt).toBe('recover');
+		expect(state.error).toContain('check the conversation');
+	});
+
+	it('an unreachable executor retains the message with actionable controls', () => {
+		const entry = { id: 'client-a', clientMessageId: 'client-a', content: 'recover', queuedAt: 1 };
+		pendingQueue.requestRemoval('session-1', entry);
+		state = { ...state, queuedMessages: [{ ...entry, status: 'cancelling' }] };
+		handlers.handleMessage({ type: 'queued_message_removal', session_id: 'session-1', client_message_id: 'client-a', verdict: 'unavailable', message: "Can't reach the worker running this chat." });
+		expect(state.queuedMessages[0].status).toBeUndefined();
+		expect(state.error).toContain("Can't reach");
+		expect(state.pendingRestorePrompt).toBeNull();
 	});
 
 	it('renders the server snapshot', () => {

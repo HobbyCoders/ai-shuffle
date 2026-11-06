@@ -37,6 +37,7 @@ import threading
 from typing import Any, Callable, Dict, Optional, Set, Tuple
 
 from app.core.db_polling import DB_POLL_ERRORS, DBPollWarnings
+from app.core import message_admission
 from app.db import turns
 
 logger = logging.getLogger(__name__)
@@ -339,6 +340,7 @@ def _submit_blocking(
     """
     from app.core import archive_guard
 
+    message_admission.check_cancelled(session_id, command_id)
     if archive_guard.is_archived(session_id):
         archive_guard.log_dropped(session_id, source, "refused at submit")
         raise archive_guard.SessionArchived(session_id)
@@ -470,20 +472,21 @@ def _submit_blocking(
             logger.exception(
                 "stop-latch release failed for session %s", session_id
             )
-    turn = turns.enqueue_turn(
-        session_id,
-        source,
-        prompt=prompt,
-        profile_id=profile_id,
-        project_id=project_id,
-        worktree_id=worktree_id,
-        overrides=overrides,
-        explicit_permission=explicit_permission,
-        payload=payload,
-        command_id=command_id,
-        parent_turn_id=parent_turn_id,
-        instance_id=instance_id,
-    )
+    with message_admission.submission(session_id, source, command_id):
+        turn = turns.enqueue_turn(
+            session_id,
+            source,
+            prompt=prompt,
+            profile_id=profile_id,
+            project_id=project_id,
+            worktree_id=worktree_id,
+            overrides=overrides,
+            explicit_permission=explicit_permission,
+            payload=payload,
+            command_id=command_id,
+            parent_turn_id=parent_turn_id,
+            instance_id=instance_id,
+        )
     return turn["id"]
 
 
@@ -579,6 +582,7 @@ async def submit_async(
     the start and silently drops the nudge from a worker thread. Ordering is
     unchanged: the turn is durably ``queued`` before the kick.
     """
+    message_admission.check_cancelled(session_id, command_id)
     answered: Optional[Dict[str, Any]] = None
     held: Optional[Dict[str, Any]] = None
     if source in _OWNER_ANSWER_SOURCES and prompt and not (payload or {}).get(VOICE_DELEGATION):

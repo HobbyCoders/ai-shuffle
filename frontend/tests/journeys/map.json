@@ -65,6 +65,11 @@
 	],
 	"rules": [
 		{
+			"why": "steer admission, cancellation and mirror routing must not strand a pending bubble",
+			"journeys": ["steer-lifecycle"],
+			"globs": ["frontend/tests/journeys/steer-lifecycle.journey.mjs", "frontend/src/lib/stores/session/pending-queue.ts", "frontend/src/lib/stores/session/message-sender.ts", "frontend/src/lib/stores/session/ws-message-handlers.ts", "frontend/src/lib/components/chat/PendingMessages.svelte", "frontend/src/lib/components/chat/PendingStatusAnnouncer.svelte", "app/core/session_handoff.py", "app/api/chat_ws_handler.py", "app/core/message_admission.py", "app/core/turn_manager.py", "app/network/control.py"]
+		},
+		{
 			"why": "an image click inside an inline HTML preview goes to the page that handles it, or else to the lightbox",
 			"journeys": ["html-preview-image-click"],
 			"globs": [

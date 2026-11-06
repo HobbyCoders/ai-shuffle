@@ -1189,7 +1189,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			liveRerouted: null,
 			liveRerouteReason: null,
 			liveCompaction: null,
-			pendingRestorePrompt: null,
+			pendingRestorePrompt: pendingQueue.takeWithdrawnDraft(null),
 			error: null,
 			title: 'New Chat',
 			totalTokensIn: 0,

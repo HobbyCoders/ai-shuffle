@@ -893,6 +893,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 					!!internal.pendingRequestId && createdRequestId === internal.pendingRequestId;
 				const acceptCreated = currentState.sessionId === sessionId || createdAwaitingMatch;
 				if (acceptCreated) {
+					if (createdAwaitingMatch) pendingQueue.adoptSession(sessionId, currentState.messages.map(m => m.commandId));
 					internal.awaitingNewSession = false;
 					internal.pendingRequestId = null;
 					// Set the sessionId and title so the header shows the correct
@@ -942,6 +943,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				// live task strip.
 				const startAdoptsNewSession = currentState.sessionId !== sessionId;
 				if (acceptStart) {
+					if (startAwaitingMatch) pendingQueue.adoptSession(sessionId, currentState.messages.map(m => m.commandId));
 					internal.awaitingNewSession = false;
 					internal.pendingRequestId = null;
 					// Deliver a Stop deferred before the id existed (see
@@ -1047,6 +1049,38 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 			}
 
 			case 'error': {
+				// A refused send says nothing about the turn already running.
+				if (typeof data.client_message_id === 'string') {
+					const current = getState();
+					const refused = current.messages.find(m => m.role === 'user' && m.commandId === data.client_message_id
+						&& m.id.startsWith('user-') && !m.serverId && m.seq == null);
+					const owner = pendingQueue.sendOwner(data.client_message_id);
+					// null is a real New Chat owner, never a wildcard for the active chat.
+					// Prefer command identity even when the refusal names another session.
+					const sid = owner ? owner.sessionId : refused ? current.sessionId
+						: typeof data.session_id === 'string' ? data.session_id : null;
+					// Retract/cache the draft before the active-session guard: a refusal
+					// can arrive after switching away from an optimistic idle send.
+					const recovered = feedController.retractOptimisticSend(sid, data.client_message_id);
+					pendingQueue.rejectSend(sid, data.client_message_id, recovered);
+					if (sid !== getState().sessionId) break;
+					const restored = pendingQueue.takeWithdrawnDraft(sid);
+					// Idle sends echo on the transcript, not in the pending queue.
+					// Only recover an unconfirmed local row, never a durable receipt.
+					update(s => {
+						const recovered = restored ?? refused?.content;
+						const optimisticOnly = refused && s.optimisticStreaming && !s.liveTurnId;
+						return { ...s,
+							...(refused ? { messages: s.messages.filter(m => m !== refused), optimisticStreaming: false } : {}),
+							...(optimisticOnly ? { isStreaming: false, streamStartTime: null } : {}),
+							queuedMessages: pendingQueue.reconcile(s.sessionId, s.queuedMessages),
+							error: `Message not sent: ${data.message || 'Please try again.'}`,
+							...(recovered != null ? { pendingRestorePrompt: [s.pendingRestorePrompt, recovered].filter(Boolean).join('\n\n') } : {}),
+						};
+					});
+					break;
+				}
+
 				// Route by the EVENT's session_id, not the active session — mirror
 				// handleDone / handleStoppedOrInterrupted. A BACKGROUND session's
 				// error must never reset the ACTIVE session's isStreaming. The
@@ -1112,7 +1146,10 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				const removalSessionId = data.session_id as string | undefined;
 				const sid = removalSessionId ?? getState().sessionId;
 				const key = (data.client_message_id ?? data.message_id) as string;
-				const verdict = data.verdict ?? (data.outcome === 'cancelled' ? 'withdrawn' : data.outcome);
+				const rawVerdict = data.verdict ?? (data.outcome === 'cancelled' ? 'withdrawn' : data.outcome);
+				// Old workers cannot fence an unknown id. Retire the orphan without
+				// claiming it was withdrawn, and warn before the words are resent.
+				const verdict = rawVerdict === 'not_found' ? 'withdrawn' : rawVerdict;
 				const state = getState();
 				const entry = state.queuedMessages.find(m => (m.clientMessageId ?? m.id) === key);
 				if (verdict !== 'withdrawn' && verdict !== 'already_delivered') {
@@ -1120,16 +1157,18 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 					if (sid !== state.sessionId) break;
 					update(s => ({ ...s,
 						queuedMessages: s.queuedMessages.map(m => m === entry ? { ...m, status: undefined } : m),
-						error: 'Cancellation was not confirmed. The message has not been withdrawn.',
+						error: typeof data.message === 'string' ? data.message : 'Cancellation was not confirmed. The message has not been withdrawn. Please try again.',
 					}));
 					break;
 				}
-				pendingQueue.applyRemovalVerdict(sid, key, verdict);
+				pendingQueue.applyRemovalVerdict(sid, key, rawVerdict === 'not_found' ? rawVerdict : verdict,
+					typeof data.message_id === 'string' ? data.message_id : undefined);
 				if (sid !== state.sessionId) break; // retain for that session's next switch-in
 				const restored = pendingQueue.takeWithdrawnDraft(sid);
 				update(s => ({ ...s,
 					queuedMessages: pendingQueue.reconcile(s.sessionId, s.queuedMessages),
-					...(restored !== null ? { pendingRestorePrompt: restored } : {}),
+					error: rawVerdict === 'not_found' ? 'No pending message was found. Your text was recovered; check the conversation before resending.' : null,
+					...(restored !== null ? { pendingRestorePrompt: [s.pendingRestorePrompt, restored].filter(Boolean).join('\n\n') } : {}),
 				}));
 				if (verdict !== 'already_delivered') break;
 				notify.warning(
@@ -1140,6 +1179,9 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 			}
 
 			case 'query_queued':
+				if (typeof data.client_message_id === 'string') {
+					pendingQueue.acknowledgeSend((data.session_id as string | undefined) ?? getState().sessionId, data.client_message_id);
+				}
 				// Ack that a send landed in the queue instead of starting a turn —
 				// the ordinary outcome of sending while a turn is live. The live turn
 				// is untouched, so this frame must NOT clear isStreaming or prune the

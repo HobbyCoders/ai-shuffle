@@ -48,6 +48,19 @@ afterEach(() => {
 	vi.restoreAllMocks();
 });
 
+describe('recovering refused words into the composer', () => {
+	it('appends to an existing draft instead of overwriting or prepending it', async () => {
+		activeSession.setDraft('my new draft');
+		const view = render(ChatInput, { props: { newSession: true } });
+		const editor = view.container.querySelector<HTMLElement>('.tiptap')!;
+		await waitFor(() => expect(editor.textContent).toBe('my new draft'));
+		activeSession.current.pendingRestorePrompt = 'refused words';
+		await waitFor(() => expect(editor.textContent).toContain('refused words'));
+		expect(editor.textContent!.indexOf('my new draft')).toBeLessThan(editor.textContent!.indexOf('refused words'));
+		expect(activeSession.current.pendingRestorePrompt).toBeNull();
+	});
+});
+
 describe('a send refused for a missing agent', () => {
 	it('says why in a live banner at once and keeps the text', async () => {
 		const view = render(ChatInput, { props: { newSession: true } });

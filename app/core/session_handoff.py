@@ -314,12 +314,17 @@ def hold(session_id: str, source: str, submit: Dict[str, Any]) -> Optional[str]:
         held_id = HELD_PREFIX + uuid.uuid4().hex
         entry = {"id": held_id, "source": source, "held_at": time.time(),
                  **{key: value for key, value in submit.items() if value is not None}}
-        try:
-            if not session_moves.append_held(session_id, json.loads(json.dumps(entry, default=str))):
+        from app.core import message_admission
+
+        # Hold/release keeps its established lock order. The cancellation fence
+        # covers only this durable write, not the call that acquired _hold_lock.
+        with message_admission.submission(session_id, source, submit.get("command_id")):
+            try:
+                if not session_moves.append_held(session_id, json.loads(json.dumps(entry, default=str))):
+                    return None
+            except Exception:  # noqa: BLE001 — never lose the message: send it normally
+                logger.warning("Could not hold a message for the queued move of %s", session_id, exc_info=True)
                 return None
-        except Exception:  # noqa: BLE001 — never lose the message: send it normally
-            logger.warning("Could not hold a message for the queued move of %s", session_id, exc_info=True)
-            return None
     return held_id
 
 

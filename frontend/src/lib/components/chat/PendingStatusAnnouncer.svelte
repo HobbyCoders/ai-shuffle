@@ -12,7 +12,11 @@
 	 *
 	 *   no status → cancelling          "Cancelling message…"
 	 *   cancelling → delivered          "Message already sent"
-	 *   cancelling → gone               "Message withdrawn"
+	 *   cancelling → gone, delivered    "Message already sent"
+	 *   cancelling → gone, withdrawn    "Message withdrawn"
+	 *
+	 * Delivery retires the bubble immediately; its terminal arbiter evidence
+	 * distinguishes it from withdrawal even though both remove the visual row.
 	 *
 	 * A cancelling entry that drops back to no status (the store could not
 	 * confirm the cancel) is announced by the error path, not here. Switching
@@ -28,6 +32,7 @@
 	 * changes `id` but is the same message, and must not read as withdrawn.
 	 */
 	import type { QueuedMessage } from '$lib/stores/types';
+	import { pendingQueue } from '$lib/stores/session/pending-queue';
 
 	interface Props {
 		messages: QueuedMessage[];
@@ -58,7 +63,11 @@
 			else if (msg.status === 'delivered') text = 'Message already sent';
 		}
 		for (const [key, status] of prev) {
-			if (status === 'cancelling' && !nextKeys.has(key)) text = 'Message withdrawn';
+			if (status === 'cancelling' && !nextKeys.has(key)) {
+				const verdict = pendingQueue.removalVerdict(sessionId, key);
+				text = verdict === 'already_delivered' ? 'Message already sent'
+					: verdict === 'not_found' ? 'Message not found. Text recovered.' : 'Message withdrawn';
+			}
 		}
 		return text;
 	}

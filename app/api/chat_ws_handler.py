@@ -7,6 +7,7 @@ become methods.  Behaviour is identical to the original implementation.
 """
 
 import asyncio
+from contextvars import ContextVar
 import json
 import logging
 import time
@@ -35,6 +36,9 @@ from app.api.worktree_session_meta import enrich_session_worktree_meta
 from app.api.ws_utils import WSPayloadEncodeError
 
 logger = logging.getLogger(__name__)
+
+# Task-local so helper refusals cannot borrow another socket or stream's id.
+_query_context = ContextVar("chat_query_context", default=None)
 
 
 def _valid_client_message_id(value: Any) -> bool:
@@ -619,6 +623,11 @@ class ChatWebSocketHandler:
         frame's queue position, so a supersede shows up there as one skipped
         number, which is exactly what it is.
         """
+        query = _query_context.get()
+        if (query and query["sender"] is self and not query["closed"]
+                and data.get("type") in {"error", "runner_unreachable"}):
+            data = {**data, "client_message_id": query["command_id"],
+                    "session_id": data.get("session_id") or query["session_id"]}
         # Fast path: skip everything if already known dead.
         if not self.connection_healthy:
             return False
@@ -745,6 +754,10 @@ class ChatWebSocketHandler:
                             await self.send_json({
                                 "type": "error",
                                 "message": RATE_LIMITED_MESSAGE,
+                                **({"client_message_id": data["client_message_id"],
+                                    "session_id": data.get("session_id")}
+                                   if msg_type in {"query", "queue_message"}
+                                   and _valid_client_message_id(data.get("client_message_id")) else {}),
                             })
                             continue
 
@@ -1299,6 +1312,36 @@ class ChatWebSocketHandler:
         return True
 
     async def handle_query(self, data: dict, *, compact_first: bool = False) -> Optional[dict]:
+        return await self._correlated_send(data, self._handle_query, compact_first=compact_first)
+
+    async def _correlated_send(self, data: dict, handler, **kwargs) -> Optional[dict]:
+        """Correlate every pre-admission refusal, including shared helper gates."""
+        from app.core.message_admission import CancelledSend
+
+        command_id = data.get("client_message_id")
+        if not _valid_client_message_id(command_id):
+            return await handler(data, **kwargs)
+        query = {"sender": self, "command_id": command_id,
+                 "session_id": data.get("session_id"), "closed": False}
+        token = _query_context.set(query)
+        try:
+            try:
+                result = await handler(data, **kwargs)
+            except CancelledSend as exc:
+                await self.send_json({"type": "error", "message": str(exc),
+                                      "client_message_id": command_id,
+                                      "session_id": data.get("session_id")})
+                return None
+            if result and result.get("turn_id"):
+                await self.send_json({"type": "query_queued", "client_message_id": command_id,
+                                      "session_id": result.get("session_id") or data.get("session_id"),
+                                      "turn_id": result["turn_id"]})
+            return result
+        finally:
+            query["closed"] = True
+            _query_context.reset(token)
+
+    async def _handle_query(self, data: dict, *, compact_first: bool = False) -> Optional[dict]:
         """Handle 'query' message type."""
 
         prompt = data.get("prompt", "").strip()
@@ -1314,6 +1357,8 @@ class ChatWebSocketHandler:
         if session_id and not await self._authorize_mobile_session(
                 session_id, claim=data.get("claim_mobile_authority") is True):
             return
+        from app.core import message_admission
+        message_admission.check_cancelled(session_id, client_message_id)
         # Resolve an omitted follow-up agent from the session, including a
         # remote-owned mirror. Do this AFTER the session access gates, and pass
         # the resolved id through the same profile restriction as an explicit
@@ -1724,7 +1769,10 @@ class ChatWebSocketHandler:
         from app.core import session_handoff
 
         held_for_move = session_handoff.holds(session_id)
-        if not had_live and not held_for_move and not compact_first:
+        # A correlated existing-session send may still be cancelled at its
+        # durable admission gate. Never dual-write it into history before then.
+        defer_record = had_live or held_for_move or (bool(client_message_id) and not is_new_session)
+        if not defer_record and not compact_first:
             try:
                 if not is_new_session:
                     _msg_role = "user"
@@ -1767,7 +1815,7 @@ class ChatWebSocketHandler:
                 payload["upload_paths"] = upload_paths
         if request_id and is_new_session:
             payload["request_id"] = request_id
-        if had_live or held_for_move:
+        if defer_record:
             # The persist above was skipped — tell the turn to write it when it
             # runs. Harmless if the turn is instead absorbed by a mid-turn
             # steer: that path records the message itself and the row never
@@ -1830,7 +1878,8 @@ class ChatWebSocketHandler:
             except control.ControlRefused as exc:
                 await self.send_json({"type": "error", "session_id": session_id, "message": str(exc)})
                 return
-            await self.send_json({"type": "query_queued", "session_id": session_id})
+            if not client_message_id:
+                await self.send_json({"type": "query_queued", "session_id": session_id})
             return submitted
 
         # ``submit`` performs up to three DB writes (run binding, wakeup
@@ -1853,7 +1902,8 @@ class ChatWebSocketHandler:
 
         if str(turn_id or "").startswith(session_handoff.HELD_PREFIX):
             await self._v2_broadcast_queue(session_id)
-            await self.send_json({"type": "query_queued", "session_id": session_id})
+            if not client_message_id:
+                await self.send_json({"type": "query_queued", "session_id": session_id})
             # No compact turn exists yet; the held request will admit both
             # turns together after the move. Do not invent a compact turn id.
             return {"turn_id": turn_id, "compact_turn_id": None, "held": True}
@@ -1881,9 +1931,10 @@ class ChatWebSocketHandler:
             from app.core import turn_claim
             await run_sync(turn_claim.notify_turns_changed, session_id)
             await self._v2_broadcast_queue(session_id)
-            await self.send_json(
-                {"type": "query_queued", "session_id": session_id}
-            )
+            if not client_message_id:
+                await self.send_json(
+                    {"type": "query_queued", "session_id": session_id}
+                )
             return {"turn_id": turn_id}
 
         if had_live:
@@ -1892,9 +1943,10 @@ class ChatWebSocketHandler:
             # client leaves its optimistic streaming state instead of spinning
             # forever.
             await self._v2_broadcast_queue(session_id)
-            await self.send_json(
-                {"type": "query_queued", "session_id": session_id}
-            )
+            if not client_message_id:
+                await self.send_json(
+                    {"type": "query_queued", "session_id": session_id}
+                )
             # ...then try to get it in front of the model NOW rather than at the
             # next turn. The engine folds it into the running turn if it can;
             # if not, the row stays queued and the settle-drain runs it. Either
@@ -2639,7 +2691,7 @@ class ChatWebSocketHandler:
     # _v2_broadcast_queue — re-source + fan out the queue_updated frame
     # ------------------------------------------------------------------
 
-    async def _v2_broadcast_queue(self, session_id: str) -> None:
+    async def _v2_broadcast_queue(self, session_id: str, *, remote: bool = False) -> None:
         """Build the queue view from the durable turns table and emit the
         ``queue_updated`` frame both to the other devices (via the sync engine)
         and directly to THIS socket (which is unregistered from the sync engine
@@ -2648,8 +2700,17 @@ class ChatWebSocketHandler:
         """
         # Also invalidate when this socket is not currently registered for sync.
         invalidate_queue_snapshot(session_id)
-        queue = await run_sync(_v2_queue_view, session_id)
-        peer_queue = await run_sync(_v2_peer_queue_view, session_id)
+        if remote:
+            snapshot = await self._read_watch_queue(session_id)
+            if snapshot.get("queue_status") != "available":
+                await self.send_json({"type": "sync", "event_type": "queue_updated",
+                                      "session_id": session_id, "data": snapshot})
+                return
+            queue = snapshot["queued_messages"]
+            peer_queue = snapshot["pending_peer_messages"]
+        else:
+            queue = await run_sync(_v2_queue_view, session_id)
+            peer_queue = await run_sync(_v2_peer_queue_view, session_id)
         await sync_engine.broadcast_queue_updated(session_id, queue, pending_peer_messages=peer_queue)
         await self.send_json({
             "type": "sync",
@@ -2662,10 +2723,17 @@ class ChatWebSocketHandler:
     # handle_queue_message
     # ------------------------------------------------------------------
 
-    async def handle_queue_message(self, data: dict) -> None:
+    async def handle_queue_message(self, data: dict) -> Optional[dict]:
+        return await self._correlated_send(data, self._handle_queue_message)
+
+    async def _handle_queue_message(self, data: dict) -> Optional[dict]:
         """Handle 'queue_message' — add a message to the server-side queue."""
 
         content = (data.get("content") or "").strip()
+        client_message_id = data.get("client_message_id")
+        if client_message_id is not None and not _valid_client_message_id(client_message_id):
+            await self.send_json({"type": "error", "message": "Invalid client message id"})
+            return
         session_id = data.get("session_id") or self.current_session_id
         profile_id = data.get("profile")
         project_id = data.get("project")
@@ -2751,10 +2819,10 @@ class ChatWebSocketHandler:
             from app.network import control
             try:
                 await turn_manager.reactivate_for_send(session_id, "queue", payload)
-                await control.submit_turn(
+                submitted = await control.submit_turn(
                     owner_device, session_id, source="queue", prompt=content, profile_id=queue_profile_id,
                     project_id=project_id, payload=payload or None, owner_send=True,
-                    caller=self._caller,
+                    command_id=client_message_id, caller=self._caller,
                 )
             except control.RunnerUnreachable as exc:
                 await self._forward_unreachable(session_id, exc)
@@ -2763,8 +2831,8 @@ class ChatWebSocketHandler:
                 await self.send_json({"type": "error", "session_id": session_id, "message": str(exc)})
                 return
             await self._v2_broadcast_queue(session_id)
-            return
-        await turn_manager.submit_async(
+            return submitted
+        turn_id = await turn_manager.submit_async(
             session_id,
             "queue",
             explicit_permission=True,
@@ -2772,6 +2840,7 @@ class ChatWebSocketHandler:
             profile_id=queue_profile_id,
             project_id=project_id,
             payload=payload or None,
+            command_id=client_message_id,
             no_kick=placed_remote,
             caller=self._caller,
         )
@@ -2779,7 +2848,7 @@ class ChatWebSocketHandler:
             from app.core import turn_claim
             await run_sync(turn_claim.notify_turns_changed, session_id)
         await self._v2_broadcast_queue(session_id)
-        return
+        return {"turn_id": turn_id, "session_id": session_id}
 
     # ------------------------------------------------------------------
     # handle_remove_queued_message
@@ -2797,6 +2866,30 @@ class ChatWebSocketHandler:
             await self.send_json({"type": "error", "session_id": session_id,
                                   "message": "Invalid client message id"})
             return
+        from app.network import control
+        session = await run_sync(database.get_session, session_id)
+        owner = control.owner_of(session) if session else None
+        if owner:
+            try:
+                response = await control.call(owner, "queue-remove", {
+                    "session_id": session_id, "message_id": message_id,
+                    "client_message_id": client_message_id,
+                })
+            except (control.RunnerUnreachable, control.ControlRefused) as exc:
+                await self.send_json({"type": "queued_message_removal", "session_id": session_id,
+                                      "message_id": message_id, "client_message_id": client_message_id,
+                                      "outcome": "unavailable", "verdict": "unavailable",
+                                      "message": "Can't reach the worker running this chat. Try cancelling again when it reconnects."})
+                return  # Never fence a mirror: only the executor can adjudicate.
+            await self.send_json(response["removal"])
+            await self._v2_broadcast_queue(session_id, remote=True)
+            return
+        await self._remove_local_queued_message(data, session_id)
+
+    async def _remove_local_queued_message(self, data: dict, session_id: str) -> None:
+        """Owner-only cancellation shared with the authenticated network op."""
+        message_id = data.get("message_id")
+        client_message_id = data.get("client_message_id")
         if client_message_id:
             logger.info("steer cancel-request session=%s client_id=%s at=%.6f",
                         session_id, client_message_id, time.time())
@@ -2811,17 +2904,14 @@ class ChatWebSocketHandler:
                     session_id, withdrawn["id"], "cancelled", client_message_id=client_message_id,
                 )
                 return
-            row = await run_sync(turns_db.get_turn_by_command, session_id, client_message_id)
-            if row is None:
-                from app.core import session_handoff
-
-                row = next((h for h in await run_sync(session_handoff.held_view, session_id)
-                            if h.get("command_id") == client_message_id), None)
+            from app.core import message_admission
+            row = await run_sync(message_admission.cancel_unknown, session_id, client_message_id)
             if row is None:
                 await self._send_removal_outcome(
-                    session_id, message_id, "not_found", client_message_id=client_message_id,
+                    session_id, message_id, "cancelled", client_message_id=client_message_id,
                 )
-                return  # unknown is NOT a successful withdrawal
+                await self._v2_broadcast_queue(session_id)
+                return  # Absence is fenced against a delayed enqueue on this owner.
             message_id = row["id"]
         if not message_id:
             return

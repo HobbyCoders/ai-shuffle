@@ -473,7 +473,7 @@
 	// is stopped before any assistant output, by a successful rewind that
 	// truncated away the target user message, and by unsending a pending
 	// message. An empty editor takes the prompt as is; text the user already
-	// typed is kept and the prompt goes in front of it, so neither is lost.
+	// typed is kept and the recovered prompt is appended, so neither is lost.
 	// Either way clear the pending prompt so it fires exactly once.
 	$effect(() => {
 		const pending = $activeSession.pendingRestorePrompt;
@@ -482,7 +482,7 @@
 		if (!pending && paths.length === 0) return;
 		const current = (editorRef?.getMessage() ?? inputValue ?? '').trim();
 		const restored = JSON.stringify(restoreMessageDocument(pending ?? '', paths));
-		setComposerDraft(current.length === 0 ? restored : joinDrafts(restored, getDraftJSON()));
+		setComposerDraft(current.length === 0 ? restored : joinDrafts(getDraftJSON(), restored));
 		recall.reset();
 		tick().then(() => editorRef?.focus());
 		activeSession.clearPendingRestorePrompt();
