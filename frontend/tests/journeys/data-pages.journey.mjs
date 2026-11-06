@@ -132,7 +132,9 @@ await runJourney({
     const actions=page.locator('.fs-phone-actions');
     const upload=await actions.getByRole('button',{name:'Upload',exact:true}).boundingBox();
     const folder=await actions.getByRole('button',{name:'New folder',exact:true}).boundingBox();
-    expect(upload&&folder&&upload.y===folder.y&&upload.width>folder.width,'D4: Upload grows while New folder fits its content '+JSON.stringify({upload,folder}));
+    // D8: one row of two equal buttons, 8px apart, the same height.
+    expect(upload&&folder&&upload.y===folder.y&&Math.abs(upload.width-folder.width)<=1&&upload.height===folder.height&&Math.abs(folder.x-(upload.x+upload.width)-8)<=1,
+     'D8: Upload and New folder share one row at equal width with an 8px gap '+JSON.stringify({upload,folder}));
     // R3 deliberately separates the drawn 32px box from its 44px tap area.
     for(const label of ['Upload','New folder']) {
      const target=await actions.getByRole('button',{name:label,exact:true}).evaluate(el=>{
