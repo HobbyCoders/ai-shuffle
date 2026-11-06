@@ -40,6 +40,27 @@ describe('the switch sampler follows the production grace clock (#941)', () => {
 		assert.equal(received, 'real callback');
 	});
 
+	it('captures the retained DOM at registration even if loading attributes commit after grace', () => {
+		const f = fixture();
+		const frames = [];
+		let loading = 'false';
+		f.window.__switchGraceClock.onRegistered = entry => {
+			assert.ok(f.timers.has(entry.id), 'the real timer must already be scheduled');
+			frames.push({ loading, loadingStarted: entry.at, t: entry.at, graceRegistered: true, loader: false });
+		};
+		f.at(10);
+		const id = f.window.setTimeout(() => {}, 350);
+		// The loading commit can be delayed by synchronous app style/layout.
+		f.at(600);
+		loading = 'true';
+		frames.push({ loading, loadingStarted: 10, t: 600, loader: true });
+		assert.deepEqual(framesDuringSwitchGrace(frames, 350), [frames[0]]);
+		assert.equal(framesDuringSwitchGrace(frames, 350).every(frame => !frame.loader), true);
+		assert.equal(f.timers.get(id).delay, 350, 'sampling must not extend grace');
+		// Registration is evidence of loading, not permission for early skeletons.
+		assert.equal(framesDuringSwitchGrace([{ ...frames[0], loader: true }], 350).every(frame => !frame.loader), false);
+	});
+
 	it('does not restart grace at a late first rAF or use its stale frame timestamp', () => {
 		const early = { loading: 'true', loadingStarted: 10, t: 350, rafTime: 100 };
 		const beforeCallback = { ...early, t: 600, rafTime: 580 };

@@ -27,7 +27,7 @@
 		void providers.refreshAll();
 		return tuningRevision.follow();
 	});
-	watchResources(['settings'], () => providers.refreshAll());
+	watchResources(['settings'], () => providers.invalidate());
 
 	const rows = $derived(providers.current.providers);
 	const models = $derived(collectTuningModels());

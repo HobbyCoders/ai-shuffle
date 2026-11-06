@@ -95,6 +95,7 @@ export async function startPreview(env = process.env) {
   let credential = null;
   const postgres = new PostgresSupervisor({
     binaries, root: path.join(options.root, 'postgres'), logDir: options.logDir,
+    disposable: true,
     runtime: { env: childEnv },
     credentials: { load: () => credential, save: async value => { credential = value; } },
   });

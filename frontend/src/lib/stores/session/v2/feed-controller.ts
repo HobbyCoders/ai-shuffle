@@ -494,6 +494,7 @@ function seedOptimistic(): void {
 	if (!deps) return;
 	const app = deps.getState();
 	if (app.sessionId !== currentSessionId || app.messages === seededMessages) return;
+	const previousMessages = seededMessages;
 	seededMessages = app.messages;
 	// Runs for a new local array, so it must not be O(user rows x
 	// reducer rows): index the reducer's ids/command ids once per call (#1282).
@@ -503,7 +504,9 @@ function seedOptimistic(): void {
 		const m = app.messages[i];
 		if (m.role !== 'user') continue;
 		if (!knownIds || !knownCommandIds) {
-			knownIds = new Set();
+			// A local append also carries the last published rows. They are not
+			// new sends, even if a pending rewind removed them from the reducer.
+			knownIds = new Set(previousMessages?.map(m => m.id));
 			knownCommandIds = new Set();
 			for (const r of reducerState.messages) {
 				knownIds.add(r.id);
@@ -518,10 +521,10 @@ function seedOptimistic(): void {
 				...reducerState,
 				messages: [...reducerState.messages, { ...m }],
 			};
-			// An un-reconciled optimistic user message means a send is in flight.
-			// Expressed as the optimistic LATCH rather than a lie in the reducer
-			// state, so the fold clears it the moment `turn.started` lands (S6).
-			optimisticStreaming = true;
+			// Preserve the echo after a Stop timeout without reviving its withdrawn
+			// latch. A still-pending send declares its streaming intent in the app;
+			// the reducer remains authoritative once `turn.started` lands (S6).
+			if (app.isStreaming || app.optimisticStreaming) optimisticStreaming = true;
 		}
 	}
 }
@@ -642,6 +645,10 @@ function fold(hydrationComplete = false): void {
 	if (!deps) return;
 	// Guard against a session switch that landed mid-batch.
 	if (deps.getState().sessionId !== currentSessionId) return;
+	// A local send can land after the last event (or even after a flush was
+	// scheduled). Every publication must adopt it, including an empty caught_up
+	// or hydration fallback, not just folds preceded by event reduction.
+	seedOptimistic();
 	hiddenStreamDirty = false;
 	const patch = transcriptPatch(reducerState, {
 		hydrationComplete,

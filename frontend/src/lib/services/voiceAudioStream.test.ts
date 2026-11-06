@@ -222,6 +222,24 @@ describe('voice PCM stream', () => {
   expect(await sent).toBe(true);
   await stream.close();
  });
+ it('bounds text acknowledgement and ignores a late acceptance without resending', async () => {
+  const stream = await openVoiceAudioStream('owner', {} as MediaStream, handlers(), new AbortController().signal);
+  vi.useFakeTimers();
+  try {
+   const sent = stream.sendText('Keep until confirmed');
+   const event = JSON.parse(sockets[0].send.mock.calls[0][0]);
+   const settled = vi.fn();
+   void sent.then(settled, settled);
+   await vi.advanceTimersByTimeAsync(9999);
+   expect(settled).not.toHaveBeenCalled();
+   await vi.advanceTimersByTimeAsync(1);
+   expect(settled).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ message: 'Could not confirm message delivery. Check the conversation before retrying.' }));
+   sockets[0].onmessage({ data: JSON.stringify({ type: 'text.accepted', id: event.id }) });
+   await vi.advanceTimersByTimeAsync(0);
+   expect(settled).toHaveBeenCalledTimes(1);
+   expect(sockets[0].send).toHaveBeenCalledTimes(1);
+  } finally { await stream.close(); }
+ });
  it('keeps rejected messages and pending messages on disconnect', async () => {
   const stream = await openVoiceAudioStream('owner', {} as MediaStream, handlers(), new AbortController().signal);
   const rejected = stream.sendText('Keep this');

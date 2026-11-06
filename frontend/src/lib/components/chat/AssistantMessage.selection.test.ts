@@ -3,7 +3,7 @@ import { tick } from 'svelte';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import AssistantMessage from './AssistantMessage.svelte';
 
-afterEach(() => { document.getSelection()?.removeAllRanges(); cleanup(); });
+afterEach(() => { vi.useRealTimers(); document.getSelection()?.removeAllRanges(); cleanup(); });
 
 function textNodeContaining(root: Element, needle: string): Text {
 	const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
@@ -54,6 +54,65 @@ describe('selection inside a streaming reply (#870)', () => {
 		await vi.waitFor(() => expect(prose.textContent).toContain('Third paragraph lands.'));
 	});
 
+	it('keeps selected nodes when a delta arrives before the queued selectionchange event', async () => {
+		const first = 'First paragraph to select from.\n\nSecond paragraph still';
+		const view = render(AssistantMessage, { content: first, streaming: true });
+		const prose = view.container.querySelector('.abody') as HTMLElement;
+		await vi.waitFor(() => expect(prose.textContent).toContain('Second paragraph still'));
+		const anchor = textNodeContaining(prose, 'Second paragraph');
+		// Keep jsdom's queued selectionchange pending while this already-delivered
+		// large delta flushes. A large chunk bypasses cosmetic typewriter pacing.
+		vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+		const range = document.createRange();
+		range.setStart(anchor, 5);
+		range.setEnd(anchor, 18);
+		const selection = document.getSelection()!;
+		selection.removeAllRanges();
+		selection.addRange(range);
+		const selected = selection.toString();
+
+		// The browser queues selectionchange; an already-delivered stream delta
+		// may flush before that task. Do not dispatch a synthetic early event.
+		const burst = first + ' arriving'.repeat(100);
+		await view.rerender({ content: burst, streaming: true });
+		await tick();
+		expect(anchor.isConnected).toBe(true);
+		expect(selection.toString()).toBe(selected);
+
+		document.dispatchEvent(new Event('selectionchange'));
+		await view.rerender({ content: burst + ' with more words.', streaming: true });
+		expect(anchor.isConnected).toBe(true);
+		expect(selection.toString()).toBe(selected);
+
+		selection.removeAllRanges();
+		document.dispatchEvent(new Event('selectionchange'));
+		// The small follow-up delta uses the cosmetic typewriter timer. Drain it
+		// after the race assertions, before restoring (and discarding) fake timers.
+		await vi.runAllTimersAsync();
+		vi.useRealTimers();
+		await vi.waitFor(() => expect(prose.textContent).toContain('with more words.'));
+	});
+
+	it('releases on a delta when the selection clears before its queued event', async () => {
+		const first = 'Select the streaming paragraph.';
+		const view = render(AssistantMessage, { content: first, streaming: true });
+		const prose = view.container.querySelector('.abody') as HTMLElement;
+		await vi.waitFor(() => expect(prose.textContent).toContain(first));
+		vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+		const range = document.createRange();
+		range.selectNodeContents(textNodeContaining(prose, first));
+		const selection = document.getSelection()!;
+		selection.addRange(range);
+		const burst = first + ' arriving'.repeat(100);
+		await view.rerender({ content: burst, streaming: true });
+		expect(prose.textContent).not.toContain('arriving');
+
+		selection.removeAllRanges();
+		// No selectionchange task has run for either selecting or clearing.
+		await view.rerender({ content: burst + ' released'.repeat(100), streaming: true });
+		expect(prose.textContent).toContain('released');
+	});
+
 	it('shows the settled reply when the stream ends with the selection still held', async () => {
 		const first = 'Select from here.\n\nStill streaming';
 		const view = render(AssistantMessage, { content: first, streaming: true });
@@ -74,19 +133,25 @@ describe('selection inside a streaming reply (#870)', () => {
 		await vi.waitFor(() => expect(prose.textContent).toContain('Final words.'));
 	});
 
-	it('does not hold a reply whose selection is elsewhere', async () => {
-		const outside = document.createElement('p');
-		outside.textContent = 'Another turn';
-		document.body.appendChild(outside);
+	it.each(['reply', 'composer'])('does not hold a reply whose selection is in another %s', async (target) => {
+		const otherReply = target === 'reply'
+			? render(AssistantMessage, { content: 'Another turn', streaming: false }) : null;
+		const outside = otherReply?.container.querySelector('.abody') ?? document.createElement('div');
+		if (!otherReply) {
+			outside.setAttribute('contenteditable', 'true');
+			outside.textContent = 'Unsent composer text';
+			document.body.appendChild(outside);
+		}
 		const view = render(AssistantMessage, { content: 'Streaming start', streaming: true });
 		const prose = view.container.querySelector('.abody') as HTMLElement;
 		await vi.waitFor(() => expect(prose.textContent).toContain('Streaming start'));
+		vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
 		const range = document.createRange();
 		range.selectNodeContents(outside);
 		document.getSelection()!.addRange(range);
-		document.dispatchEvent(new Event('selectionchange'));
-		await view.rerender({ content: 'Streaming start and more', streaming: true });
-		await vi.waitFor(() => expect(prose.textContent).toContain('and more'));
-		outside.remove();
+		// Check the DOM selection, not an early synthetic selectionchange event.
+		await view.rerender({ content: 'Streaming start' + ' and more'.repeat(100), streaming: true });
+		expect(prose.textContent).toContain('and more');
+		if (!otherReply) outside.remove();
 	});
 });

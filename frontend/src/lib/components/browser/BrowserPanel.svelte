@@ -261,6 +261,10 @@
 			releasingControl = false;
 			scope.close();
 			if (operation === scope) operation = null;
+			promptSending = false;
+			sentFlash = false;
+			if (sentFlashTimer !== null) clearTimeout(sentFlashTimer);
+			sentFlashTimer = null;
 			submitting = false;
 			navigationPending = false;
 			c.destroy();
@@ -484,21 +488,37 @@
 	// ── Point-and-prompt composer ──────────────────────────────────────────
 	let promptText = $state('');
 	let promptEl: HTMLTextAreaElement | undefined = $state();
+	let promptSending = $state(false);
 	let sentFlash = $state(false);
 	let sentFlashTimer: ReturnType<typeof setTimeout> | null = null;
 
-	function sendElementPrompt() {
+	async function sendElementPrompt() {
 		const el = selectedElement;
-		const text = promptText.trim();
-		if (!el || !text) return;
-		void activeSession.sendMessage(composeElementPrompt(el, url, text));
-		promptText = '';
-		sentFlash = true;
+		const draft = promptText;
+		const text = draft.trim();
+		if (!el || !text || promptSending || !operation) return;
+		const scope = operation;
+		promptSending = true;
+		commandError = '';
+		sentFlash = false;
 		if (sentFlashTimer !== null) clearTimeout(sentFlashTimer);
-		sentFlashTimer = setTimeout(() => {
-			sentFlash = false;
-			sentFlashTimer = null;
-		}, 3000);
+		sentFlashTimer = null;
+		try {
+			const sent = await activeSession.sendMessage(composeElementPrompt(el, url, text));
+			if (operation !== scope) return;
+			if (!sent) throw new Error('Could not send your request. Your text is still here; try again.');
+			// Do not erase a replacement draft entered while the send was pending.
+			if (promptText === draft && selectedElement === el) promptText = '';
+			sentFlash = true;
+			sentFlashTimer = setTimeout(() => {
+				sentFlash = false;
+				sentFlashTimer = null;
+			}, 3000);
+		} catch (error) {
+			if (operation === scope) commandError = error instanceof Error ? error.message : 'Could not send your request. Try again.';
+		} finally {
+			if (operation === scope) promptSending = false;
+		}
 	}
 
 	function onPromptKeydown(e: KeyboardEvent) {
@@ -1055,11 +1075,13 @@
 					<button
 						type="submit"
 						class="composer-send"
-						disabled={!promptText.trim()}
+						disabled={!promptText.trim() || promptSending}
+						aria-busy={promptSending}
 						aria-label="Send to the AI"
 						title="Send to the AI (Enter)"
 					>
-						<Send size={15} strokeWidth={1.75} />
+						{#if promptSending}<Loader2 size={15} strokeWidth={1.75} class="animate-spin" />
+						{:else}<Send size={15} strokeWidth={1.75} />{/if}
 					</button>
 				</form>
 				{#if sentFlash}

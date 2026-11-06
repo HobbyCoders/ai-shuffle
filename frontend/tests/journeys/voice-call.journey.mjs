@@ -91,6 +91,55 @@ const startEnd = {
 	}
 };
 
+// A stalled execution-settings PATCH must not keep Send waiting forever.
+// Release it only after the deadline: the expired attempt must stay dead.
+const contextAdmissionTimeout = {
+	name: 'context-admission-timeout',
+	throttles: ['fast', 'slow'],
+	async setup(ctx) {
+		ctx.typedFrames = [];
+		ctx.page.on('websocket', socket => socket.on('framesent', ({ payload }) => {
+			if (typeof payload !== 'string') return;
+			try {
+				const frame = JSON.parse(payload);
+				if (frame.type === 'input_text') ctx.typedFrames.push(frame);
+			} catch { /* microphone PCM, not typed text */ }
+		}));
+		ctx.token = await chatWithScenario(ctx, 'default');
+		await startCall(ctx.page);
+	},
+	async act(ctx) {
+		const { page, mark } = ctx;
+		let held = null;
+		await page.route('**/api/v1/voice/sessions/*/context', route => {
+			if (route.request().method() === 'PATCH' && !held) { held = route; return; }
+			return route.continue();
+		});
+		try {
+			const draft = `keep-voice-draft-${ctx.token}`;
+			await mark('send while execution settings never answer');
+			await typeAndSend(page, draft);
+			await page.getByText('Could not save voice execution settings. Your message has been kept.', { exact: true }).waitFor({ timeout: 12_000 });
+			expect(held !== null, 'the real context PATCH was held');
+			expect((await page.getByRole('textbox', { name: 'Message' }).innerText()).trim() === draft, 'the composer restores the refused draft');
+			expect(ctx.typedFrames.length === 0, 'no text was sent before saving context');
+			await mark('let the expired context save succeed');
+			const response = page.waitForResponse(r => r.url() === held.request().url() && r.request().method() === 'PATCH');
+			// The preview cookie cannot mutate execution settings. Inject only the
+			// late success response; no real settings are changed by this test.
+			await held.fulfill({ status: 200, contentType: 'application/json', body: held.request().postData() });
+			await response;
+			await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+			expect(ctx.typedFrames.length === 0, 'late settings do not send the expired message');
+			await mark('end the call with the draft still kept');
+			await endCall(page);
+			expect((await page.getByRole('textbox', { name: 'Message' }).innerText()).trim() === draft, 'ending the call keeps the draft');
+		} finally {
+			await page.unroute('**/api/v1/voice/sessions/*/context');
+		}
+	}
+};
+
 const relay = {
 	name: 'relay',
 	async setup(ctx) {
@@ -172,6 +221,6 @@ const busy = {
 await runJourney({
 	name: 'voice-call',
 	browser: voiceBrowser,
-	cases: [startEnd, relay, waitUpdate, busy],
+	cases: [startEnd, relay, waitUpdate, busy, contextAdmissionTimeout],
 	allow: [...DEV_INSTANCE_NOISE]
 });

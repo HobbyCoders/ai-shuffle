@@ -41,7 +41,7 @@ vi.mock('$lib/api/client', () => ({ api: { get: mocks.get, post: vi.fn(), put: v
 vi.mock('$lib/services/voiceCall', () => ({ isCallActiveFor: () => false, sendVoiceText: vi.fn() }));
 vi.mock('$lib/services/voiceExecutionContext', () => ({ persistVoiceContext: vi.fn(), voiceContextFor: vi.fn() }));
 vi.mock('$lib/stores/session/v2/feed-controller', () => ({
-	feedController: { start: vi.fn(), stop: vi.fn(), isFeeding: () => false, isReducerStreaming: () => false, clearOptimisticSend: vi.fn(), cachedPatch: () => null, reconcileRunningTasks: () => false, hasAppliedUsage: () => false },
+	feedController: { start: vi.fn(), stop: vi.fn(), isFeeding: () => false, isReducerStreaming: () => false, retractOptimisticSend: vi.fn(), clearOptimisticSend: vi.fn(), cachedPatch: () => null, reconcileRunningTasks: () => false, hasAppliedUsage: () => false },
 	OPTIMISTIC_STREAMING_ON: { isStreaming: true, optimisticStreaming: true }
 }));
 vi.mock('$lib/components/voice/ActiveVoiceCallBar.svelte', () => ({ default: () => ({}) }));
