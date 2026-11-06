@@ -43,6 +43,8 @@ function formCase(native = false) {
     const scheduleRow = schedule.locator('xpath=ancestor::div[contains(@class,"st-row")]');
     expect(Math.abs((await schedule.boundingBox()).width - (await scheduleRow.locator('.st-rc').boundingBox()).width) < 1, 'Schedule spans the stacked phone control row');
    }
+   expect(await trigger.getByRole('textbox', { name: 'Cron expression', exact: true }).count() === 0, 'a preset hides its raw expression behind Advanced');
+   await trigger.getByRole('button', { name: 'Show expression', exact: true }).click();
    await page.getByRole('textbox', { name: 'Cron expression', exact: true }).fill('*/15 * * * *');
    await trigger.getByRole('heading', { name: 'Every 15 minutes', exact: true }).waitFor();
    const actions = page.locator('details.detail-more');
