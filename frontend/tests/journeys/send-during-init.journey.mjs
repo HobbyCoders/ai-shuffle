@@ -82,16 +82,25 @@ await runJourney({
 			// Only wait for the composer to exist: never wait for boot to settle.
 			await composer(page).waitFor({ timeout: 60_000 });
 			ctx.initGeneration = await page.evaluate(() => Number(sessionStorage.getItem('__aihub_initGeneration')));
+			if (name === 'bootstrap-reset-reload-before-reconciliation') {
+				// Establish the intended loading -> New Chat reset before recording
+				// the send/reload journey. Its setup motion is not a send reversal.
+				await page.evaluate(() => window.__journeyBootHold.release());
+				await page.waitForFunction(() => performance.getEntriesByName('shuffle:boot.init.end').length > 0
+					&& typeof window.__journeyLateTags?.release === 'function', null, { timeout: BOOT_HOLD.ms });
+				await waitChat(page, { surface: 'new', session: 'none', loading: 'false' });
+				await page.evaluate(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))));
+			}
 		},
 		async act(ctx) {
 			const { page, mark, variant, log } = ctx;
 			const token = `tok-${uniq()}`;
 			const afterReset = name === 'new-chat-after-init-reload-before-reconciliation' || name === 'bootstrap-reset-reload-before-reconciliation';
 			if (afterReset) {
-				await page.evaluate(() => window.__journeyBootHold.release());
-				await page.waitForFunction(() => performance.getEntriesByName('shuffle:boot.init.end').length > 0
-					&& typeof window.__journeyLateTags?.release === 'function', null, { timeout: BOOT_HOLD.ms });
 				if (name === 'new-chat-after-init-reload-before-reconciliation') {
+					await page.evaluate(() => window.__journeyBootHold.release());
+					await page.waitForFunction(() => performance.getEntriesByName('shuffle:boot.init.end').length > 0
+						&& typeof window.__journeyLateTags?.release === 'function', null, { timeout: BOOT_HOLD.ms });
 					await mark('explicit New chat after init while tags remain held');
 					await showSidebar(page);
 					await page.getByRole('navigation', { name: 'Workspace' }).getByRole('button', { name: 'New chat', exact: true }).click();
