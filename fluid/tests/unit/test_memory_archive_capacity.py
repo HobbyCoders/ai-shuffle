@@ -33,6 +33,51 @@ def test_real_overflow_cannot_report_room_to_spare(tmp_path, monkeypatch):
     assert not s["detail"]["archive_loss_counter_reset"]
 
 
+def test_replica_replay_counts_local_deletion_events_not_distinct_facts(tmp_path, monkeypatch):
+    source = SkillStore(tmp_path / "source")
+    fill(source, monkeypatch)
+    packet = source._facts.export()
+    assert "losses" not in packet
+    assert source._facts.snapshot()["losses"]["archive_dropped"] == 2
+
+    replica = SkillStore(tmp_path / "replica")
+    replica._facts.merge(packet)
+    # The source's two deletion events are local accounting, not replicated.
+    assert replica._facts.snapshot().get("losses", {}).get("archive_dropped", 0) == 0
+    replica.save_memory("A newer durable receipt on the replica", durable=True)
+    retained_ids = {e.id for e in replica.memories() + replica.archived_memories()}
+    first = memory_health.check(replica)
+    assert capacity(first)["detail"]["archive_dropped_total"] == 1
+
+    # A stale packet resurrects the same least-useful copy on each merge.
+    # Each trim is an event, not another distinct fact permanently lost.
+    for _ in range(10):
+        replica._facts.merge(packet)
+        assert {e.id for e in replica.memories() + replica.archived_memories()} == retained_ids
+    result = memory_health.check(
+        replica, now=first["checked_at"] + memory_health.LOSS_SAMPLE_EVERY, previous=first)
+    signal = capacity(result)
+    assert signal["state"] == "attention" and signal["alert"]
+    assert signal["detail"]["archive_dropped_total"] == 11
+    assert signal["detail"]["archive_dropped_in_window"] == 10
+    assert "not the number of distinct facts lost" in signal["reason"]
+    assert "Recall cannot recover a deleted copy" in signal["reason"]
+
+
+def test_repeated_local_save_deduplicates_before_archive_eviction(tmp_path, monkeypatch):
+    store = SkillStore(tmp_path)
+    fill(store, monkeypatch)
+    existing = store.archived_memories()[0]
+    before = store._facts.snapshot()
+    ids = {e["id"] for e in before["entries"] + before["archived"]}
+    for _ in range(10):
+        saved = store.save_memory(existing.text, durable=True)
+        assert saved.id == existing.id
+    after = store._facts.snapshot()
+    assert {e["id"] for e in after["entries"] + after["archived"]} == ids
+    assert after["losses"] == before["losses"]
+
+
 def test_loss_growth_is_sampled_and_quiet_full_tiers_do_not_alert_forever(tmp_path, monkeypatch):
     store = SkillStore(tmp_path)
     fill(store, monkeypatch)
