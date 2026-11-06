@@ -159,6 +159,45 @@ test("chat ownership follows only this context's creates, not shared-socket broa
 	assert.ok((await owned()).includes('popup-owned'));
 });
 
+test('successful forks belong to the case and cleanup preserves their seed parents', async (t) => {
+	const context = new EventEmitter();
+	context.pages = () => [];
+	const owned = trackCaseChats(context);
+	const response = (path, body, { method = 'POST', ok = true } = {}) => context.emit('response', {
+		url: () => `http://devloop.invalid/api/v1${path}`,
+		request: () => ({ method: () => method }), ok: () => ok,
+		json: async () => body
+	});
+	response('/sessions', { session_id: 'parent' });
+	response('/sessions/parent/fork', { status: 'success', session_id: 'fork-child', parent_session_id: 'parent' });
+	response('/sessions/native-seed/fork', { status: 'success', session_id: 'seed-fork', parent_session_id: 'native-seed' });
+	response('/sessions/parent/fork', { session_id: 'refused-fork' }, { ok: false });
+	response('/sessions/parent/fork', { session_id: 'get-fork' }, { method: 'GET' });
+	response('/sessions/parent/fork/clear', { session_id: 'not-a-fork-create' });
+
+	const rows = new Set(['native-seed', 'cli-seed', 'manual-chat', 'parent', 'fork-child', 'seed-fork']);
+	const deleted = [];
+	t.mock.method(globalThis, 'fetch', async (url, options) => {
+		assert.equal(options.method, 'DELETE');
+		const id = decodeURIComponent(url.slice('/api/v1/sessions/'.length));
+		deleted.push(id);
+		assert.equal(rows.delete(id), true, `unexpected deletion: ${id}`);
+		return { ok: true };
+	});
+	context.newPage = async () => ({
+		goto: async () => {}, evaluate: async (callback, args) => callback(args), close: async () => {}
+	});
+	const ids = await owned();
+	const count = await deleteCaseChats(context, {
+		urls: { ui: 'http://devloop.invalid/' },
+		seed: { chats: { long: 'native-seed' }, claude_cli: { chat: 'cli-seed' } }
+	}, Date.now(), ids);
+	assert.deepEqual({ tracked: ids.sort(), count, deleted: deleted.sort(), remaining: [...rows].sort() }, {
+		tracked: ['fork-child', 'parent', 'seed-fork'], count: 3,
+		deleted: ['fork-child', 'parent', 'seed-fork'], remaining: ['cli-seed', 'manual-chat', 'native-seed']
+	});
+});
+
 test('a case that created no chats cannot sweep the shared instance', async () => {
 	assert.equal(await deleteCaseChats({ newPage: () => assert.fail('must not open cleanup page') }, {}, Date.now(), []), 0);
 });

@@ -25,7 +25,7 @@ export function trackCaseChats(context) {
 	for (const page of context.pages()) observePage(page);
 	context.on('response', response => {
 		if (response.request().method() !== 'POST' || !response.ok()
-			|| !/^\/api\/v1\/sessions(?:\/with-worktree)?$/.test(new URL(response.url()).pathname)) return;
+			|| !/^\/api\/v1\/sessions(?:\/with-worktree|\/[^/]+\/fork)?$/.test(new URL(response.url()).pathname)) return;
 		pending.push(response.json().then(body => {
 			if (typeof body.session_id === 'string') ids.add(body.session_id);
 		}).catch(error => errors.push(error)));
