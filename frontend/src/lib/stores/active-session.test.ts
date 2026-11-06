@@ -49,6 +49,8 @@ vi.mock('./session/ws-connection', () => ({
 
 vi.mock('$app/navigation', () => ({ goto: hoisted.goto }));
 
+import { get } from 'svelte/store';
+import { openDropdown, openHeaderDropdown } from './header-dropdowns';
 import { fastChangeWaits } from '$lib/utils/fast-outcome';
 import { activeSession } from './active-session';
 import { api, recheckAuthOn401 } from '$lib/api/client';
@@ -60,6 +62,18 @@ import { selectedContextWindow, standardContextCap } from './session/context-win
 import { appMode } from './sessionMode.svelte';
 import { bindSessionOwner } from './session-owner';
 import { finishBootReconciliation, getInitGeneration, hasBootProjectPick } from './session/session-init';
+
+describe('bootstrap new-chat landing', () => {
+	it('forwards the same-surface landing intent without changing explicit New chat', () => {
+		sessionEphemeralCache.clear();
+		activeSession.current.sessionId = null;
+		openDropdown('notifications');
+		activeSession.newChat({ initialLanding: true });
+		expect(get(openHeaderDropdown)).toBe('notifications');
+		activeSession.newChat();
+		expect(get(openHeaderDropdown)).toBeNull();
+	});
+});
 
 describe('chat authentication close recovery', () => {
 	afterEach(() => { vi.unstubAllGlobals(); vi.clearAllMocks(); });
