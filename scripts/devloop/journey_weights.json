@@ -1,5 +1,5 @@
 {
-  "_comment": "Median hosted journey seconds, excluding instance setup/teardown. Refresh from green main-suite/ci-frontend runs: python -m scripts.devloop.ci refresh-weights RUN_ID [RUN_ID ...]. seconds_per_case is the median of seconds/cases per sample.",
+  "_comment": "Median hosted journey seconds, excluding instance setup/teardown. Refresh from green main-suite push-to-main runs: python -m scripts.devloop.ci refresh-weights RUN_ID [RUN_ID ...]. seconds_per_case is the median of seconds/cases per sample.",
   "source_runs": [
     42295256527
   ],

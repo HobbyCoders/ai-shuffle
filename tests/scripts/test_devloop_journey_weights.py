@@ -325,9 +325,10 @@ def refresh_inventory(tmp_path, monkeypatch):
     monkeypatch.setattr(ci, "require_matching_workload", lambda run_id, revision: None)
 
 
-def _run_state(command, *, attempt=1, conclusion="success"):
+def _run_state(command, *, attempt=1, conclusion="success", **metadata):
     state = {"status": "completed", "conclusion": conclusion, "attempt": attempt,
-             "headSha": "a" * 40}
+             "headSha": "a" * 40, "event": "push", "headBranch": "main", "workflowName": "main-suite"}
+    state.update(metadata)
     # Emulate gh: fields not requested by the implementation are not returned.
     return json.dumps({field: state[field] for field in command[-1].split(",")})
 
@@ -618,3 +619,89 @@ def test_refresh_refuses_different_revision_workload_before_logs_or_writing(tmp_
         ci.refresh_weights([10], path)
     assert checked == [(10, "a" * 40)]
     assert path.read_bytes() == original
+
+@pytest.mark.parametrize("metadata", [
+    {"event": "pull_request"},
+    {"event": "workflow_dispatch"},
+    {"headBranch": "feature"},
+    {"workflowName": "ci-frontend"},
+    {"event": None},
+])
+def test_refresh_refuses_ambiguous_checkout_before_logs_or_writing(
+        tmp_path, monkeypatch, refresh_inventory, metadata):
+    path = _weights(tmp_path, {"a.journey.mjs": 123})
+    original = path.read_bytes()
+    calls = []
+
+    def gh(command, **kwargs):
+        calls.append(command)
+        if command[:3] == ["gh", "repo", "view"]:
+            return "owner/repo\n"
+        if command[:3] == ["gh", "run", "view"]:
+            return _run_state(command, **metadata)
+        return _archive(_log("a", 30, 3) + _log("b", 10, 2))
+
+    monkeypatch.setattr(ci.subprocess, "check_output", gh)
+    with pytest.raises(ValueError, match="push to main.*main-suite"):
+        ci.refresh_weights([10], path)
+    assert not any(command[:2] == ["gh", "api"] for command in calls)
+    assert path.read_bytes() == original
+
+
+@pytest.fixture
+def workload_repo(tmp_path, monkeypatch):
+    """Exercise the real git pathspec, not a mocked successful diff."""
+    root = tmp_path / "repo"
+    root.mkdir()
+    monkeypatch.setattr(ci, "ROOT", root)
+
+    def git(*arguments):
+        return ci.subprocess.check_output(["git", *arguments], cwd=root, text=True).strip()
+
+    def commit():
+        git("add", ".")
+        git("-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+            "-c", "commit.gpgsign=false", "commit", "-m", "Test workload")
+        return git("rev-parse", "HEAD")
+
+    git("init", "-q")
+    for name in ("app/feature.py", "frontend/tests/journeys/a.journey.mjs"):
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("// baseline workload\n")
+    return root, commit(), commit
+
+
+def test_runtime_refresh_accepts_metadata_only_commits(workload_repo):
+    root, revision, commit = workload_repo
+    for name in (
+        "docs/ci/pr-checks.md", "app/README.md", "frontend/docs/development.md",
+        "frontend/tests/journeys/README.md", "frontend/tests/journeys/map.json",
+        "frontend/tests/journeys/select.mjs", "frontend/tests/journeys/select.test.mjs",
+        "frontend/tests/journeys/lib/boot.test.mjs", "frontend/src/lib/panel.test.ts",
+        "frontend/src/lib/panel.spec.ts", "fluid/tests/test_unit.py", "tools/tests/unit.py",
+        "browser-mcp/tests/unit.ts", "tests/scripts/test_new.py",
+    ):
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("unrelated metadata or unit test\n")
+    commit()
+    ci.require_matching_workload(10, revision)
+
+
+@pytest.mark.parametrize("name", [
+    "app/feature.py", "fluid/fluid/core/engine.py", "frontend/src/lib/Panel.svelte",
+    "frontend/tests/journeys/a.journey.mjs", "frontend/tests/journeys/lib/app.mjs",
+    "frontend/package-lock.json", "requirements.txt", "scripts/devloop/fake_claude/cli.py",
+    "browser-mcp/src/index.ts", "tools/src/index.ts",
+])
+@pytest.mark.parametrize("committed", [False, True])
+def test_runtime_refresh_rejects_producing_changes(workload_repo, name, committed):
+    root, revision, commit = workload_repo
+    path = root / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("changed workload even with identical case counts\n")
+    if committed:
+        commit()
+    with pytest.raises(ValueError, match="workload differs"):
+        ci.require_matching_workload(10, revision)

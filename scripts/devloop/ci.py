@@ -202,11 +202,17 @@ def require_matching_workload(run_id: int, revision: str) -> None:
     """Do not apply old timings to changed code, even when case counts match."""
     if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{40}", revision):
         raise ValueError(f"Run {run_id} has no valid source revision")
-    # CI planning/evidence changes do not change the producing workload. All
-    # app, journey, helper, dependency and fake-provider changes do.
+    # Ignore documentation, unit tests and selection metadata, not runtime
+    # implementations, shared helpers, dependencies or fake providers.
     paths = ["app", "fluid", "frontend", "browser-mcp", "tools", "requirements*.txt",
              "scripts/devloop", ":(exclude)scripts/devloop/ci.py",
-             ":(exclude)scripts/devloop/journey_weights.json"]
+             ":(exclude)scripts/devloop/journey_weights.json",
+             ":(exclude,glob)**/README*", ":(exclude,glob)**/docs/**",
+             ":(exclude,glob)**/*.test.*", ":(exclude,glob)**/*.spec.*",
+             ":(exclude,glob)**/__tests__/**", ":(exclude)fluid/tests",
+             ":(exclude)browser-mcp/tests", ":(exclude)tools/tests",
+             ":(exclude)frontend/tests/journeys/map.json",
+             ":(exclude)frontend/tests/journeys/select.mjs"]
     commands = [["git", "diff", "--quiet", revision, "--", *paths],
                 ["git", "ls-files", "--others", "--exclude-standard", "--", *paths]]
     for command in commands:
@@ -229,7 +235,8 @@ def refresh_weights(run_ids: list[int], weights_path: Path = WEIGHTS) -> None:
     revisions = {}
     for run_id in run_ids:
         state = json.loads(subprocess.check_output(
-            ["gh", "run", "view", str(run_id), "--repo", repo, "--json", "status,conclusion,attempt,headSha"],
+            ["gh", "run", "view", str(run_id), "--repo", repo, "--json",
+             "status,conclusion,attempt,headSha,event,headBranch,workflowName"],
             cwd=ROOT, text=True, timeout=120))
         if state.get("status") != "completed" or state.get("conclusion") != "success":
             raise ValueError(f"Run {run_id} must be completed and green: {state}")
@@ -237,6 +244,14 @@ def refresh_weights(run_ids: list[int], weights_path: Path = WEIGHTS) -> None:
             raise ValueError(f"Run {run_id} cannot be used for runtime weights: "
                              f"attempt {state.get('attempt')} is not 1; re-run logs omit earlier jobs. "
                              "Choose a clean first-attempt run.")
+        # main-suite push jobs use actions/checkout without a ref override, so
+        # headSha is their checkout. PR runs instead check out a merge revision;
+        # the run's headSha cannot identify that producing tree. Fail closed.
+        if (state.get("event"), state.get("headBranch"), state.get("workflowName")) != (
+                "push", "main", "main-suite"):
+            raise ValueError(f"Run {run_id} must be a push to main from main-suite; "
+                             "PR/other runs do not establish the checkout revision. "
+                             "No weights were replaced.")
         revision = state.get("headSha", "")
         require_matching_workload(run_id, revision)
         revisions[str(run_id)] = revision
@@ -272,7 +287,7 @@ def refresh_weights(run_ids: list[int], weights_path: Path = WEIGHTS) -> None:
             per_case.append(seconds / cases)
     data = {
         "_comment": "Median hosted journey seconds, excluding instance setup/teardown. Refresh from "
-                    "green main-suite/ci-frontend runs: python -m scripts.devloop.ci refresh-weights "
+                    "green main-suite push-to-main runs: python -m scripts.devloop.ci refresh-weights "
                     "RUN_ID [RUN_ID ...]. seconds_per_case is the median of seconds/cases per sample.",
         "source_runs": run_ids,
         "source_revisions": revisions,
