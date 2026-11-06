@@ -109,6 +109,10 @@ await runJourney({
 				await page.waitForFunction(() => typeof window.__journeyBootHold?.release === 'function', null, { timeout: 30_000 });
 				await page.evaluate(() => window.__journeyBootHold.release());
 				await waitForBootReconciled(page, { timeout: BOOT_HOLD.ms });
+				// Boot selection and transcript hydration have different milestones.
+				// Empty New Chat also settles loading=false, so the pre-fix failure
+				// still reaches the exact identity/count assertions rather than hiding.
+				await waitChat(page, { loading: 'false', streaming: 'false' });
 				const reloaded = await page.locator('[data-ui-state="chat"]').getAttribute('data-ui-session');
 				const count = await countUserRows(page, token);
 				log(`reconciled reload: signature=${reloaded}, first-message rows=${count}`);
