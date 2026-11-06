@@ -69,6 +69,7 @@ beforeEach(() => {
 });
 afterEach(() => {
 	cleanup();
+	vi.useRealTimers();
 	vi.unstubAllGlobals();
 });
 
@@ -104,6 +105,71 @@ it.each([
 
 describe('the list', () => {
 	it.each(['/settings/claude-auth', '/settings/integrations', '/model-providers'])(
+		'shows loaded providers and a working retry when %s never responds',
+		async (path) => {
+			vi.useFakeTimers();
+			let stalled = true;
+			const real = worker.fetch;
+			vi.stubGlobal('fetch', (input: RequestInfo | URL, init?: RequestInit) => {
+				if (stalled && new URL(String(input), 'http://localhost').pathname === `/api/v1${path}`) {
+					return new Promise<Response>(() => {});
+				}
+				return real(input, init);
+			});
+			if (path === '/settings/integrations') {
+				settingsNav.stacked = true;
+				settingsNav.go({ category: 'providers', item: 'fal:key' });
+			}
+			const { container } = render(ProvidersCollection);
+			await vi.advanceTimersByTimeAsync(0);
+			expect(providers.current.initialSnapshotReady).toBe(false);
+			await vi.advanceTimersByTimeAsync(10_000);
+			expect(providers.current.initialSnapshotReady).toBe(true);
+			expect(container.querySelector('.pl')).not.toBeNull();
+			expect(screen.getByRole('alert').textContent).toContain('did not respond');
+			expect(screen.queryByText('Not connected')).toBeNull();
+			const retrySurface = path === '/settings/integrations'
+				? within(container.querySelector('.st-empty-detail') as HTMLElement)
+				: screen;
+			if (path === '/settings/integrations') expect(settingsNav.selectedItem('providers')).toBe('fal:key');
+			stalled = false;
+			await fireEvent.click(retrySurface.getByRole('button', { name: 'Retry providers', exact: true }));
+			await vi.advanceTimersByTimeAsync(0);
+			expect(screen.queryByRole('alert')).toBeNull();
+			expect(credentialNames('fal.ai')).toEqual(['Media key, On']);
+			if (path === '/settings/integrations') {
+				expect(settingsNav.selectedItem('providers')).toBe('fal:key');
+				expect(screen.getByRole('heading', { level: 2, name: 'Media key' })).toBeTruthy();
+			}
+		}
+	);
+
+	it.each(['fal:key', 'provider:fal'])(
+		'keeps the cold %s deep link selected without classifying partial details',
+		async (item) => {
+			let release!: () => void;
+			const held = new Promise<void>((r) => (release = r));
+			const real = worker.fetch;
+			vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+				if (new URL(String(input), 'http://localhost').pathname === '/api/v1/settings/integrations') await held;
+				return real(input, init);
+			});
+			settingsNav.stacked = true;
+			settingsNav.go({ category: 'providers', item });
+			render(ProvidersCollection);
+			await flush();
+			expect(settingsNav.selectedItem('providers')).toBe(item);
+			expect(screen.getByText('Loading providers', { exact: true })).toBeTruthy();
+			expect(screen.queryByText(/Not connected/)).toBeNull();
+			release();
+			await flush();
+			expect(settingsNav.selectedItem('providers')).toBe(item);
+			expect(screen.queryByText('Loading providers', { exact: true })).toBeNull();
+			expect(screen.getByRole('heading', { level: 2, name: item === 'fal:key' ? 'Media key' : 'fal.ai' })).toBeTruthy();
+		}
+	);
+
+	it.each(['/settings/claude-auth', '/settings/integrations', '/model-providers'])(
 		'waits for the complete first snapshot when %s is slow, rather than moving provisional groups',
 		async (path) => {
 			let release!: () => void;
@@ -116,11 +182,14 @@ describe('the list', () => {
 			const { container } = render(ProvidersCollection);
 			await flush();
 			expect(screen.getByRole('status').textContent).toBe('Loading providers…');
+			const idle = container.querySelector('.st-dpane > .st-empty-detail[data-idle]');
+			expect(idle).not.toBeNull(); // keeps the unselected desktop list full-width
 			expect(container.querySelector('.pl')).toBeNull();
 			expect(screen.queryByText('Not connected')).toBeNull();
 			release();
 			await flush();
 			expect(screen.queryByText('Loading providers…')).toBeNull();
+			expect(container.querySelector('.st-dpane > .st-empty-detail[data-idle]')).toBe(idle);
 			expect(credentialNames('Claude')[0]).toBe('Claude Max subscription, Active for Claude');
 			expect(credentialNames('OpenAI')).toEqual(['OpenAI Plus subscription, Active', 'OpenAI API key, Active']);
 			expect(screen.getAllByText('Claude')).toHaveLength(1);

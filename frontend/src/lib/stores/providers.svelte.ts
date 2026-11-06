@@ -144,6 +144,23 @@ const { subscribe, update: _update, notifySubscribers: _notifySubscribers } =
 		}
 	);
 
+// A stalled read must not hold the first snapshot (or a retry) indefinitely.
+// Race the complete read, including JSON parsing; late answers cannot publish
+// over a retry after this deadline has rejected.
+async function boundedProviderRead<T>(read: Promise<T>, label: string): Promise<T> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		return await Promise.race([
+			read,
+			new Promise<never>((_, reject) => {
+				timer = setTimeout(() => reject(new Error(`${label} did not respond. Retry providers.`)), 10_000);
+			})
+		]);
+	} finally {
+		if (timer !== undefined) clearTimeout(timer);
+	}
+}
+
 // ============================================================================
 // Exported Store
 // ============================================================================
@@ -187,7 +204,7 @@ export const providers = {
 		const showLoading = !silent || _state.providers.length === 0;
 		_update((s) => ({ ...s, providersError: '', ...(showLoading ? { providersLoading: true } : {}) }));
 		try {
-			const res = await listModelProviders();
+			const res = await boundedProviderRead(listModelProviders(), 'Provider registry');
 			_update((s) => ({ ...s, providers: res.providers ?? [] }));
 		} catch (e) {
 			_update((s) => ({ ...s, providersError: getErrorMessage(e, 'Failed to load providers') }));
@@ -206,9 +223,13 @@ export const providers = {
 	 */
 	async loadIntegrations() {
 		try {
-			const res = await fetch(`${apiBase()}/settings/integrations`, withAuth({}));
-			if (!res.ok) return;
-			const data = await res.json();
+			const data = await boundedProviderRead(
+				fetch(`${apiBase()}/settings/integrations`, withAuth({})).then((res) => {
+					if (!res.ok) throw new Error(`Could not read integrations (HTTP ${res.status})`);
+					return res.json();
+				}),
+				'Integrations'
+			);
 			_update((s) => ({
 				...s,
 				anthropicKeySet: !!data.anthropic_api_key_set,
@@ -327,7 +348,7 @@ export const providers = {
 	/** Read the mode, the CLI account, the key's last four and the gate. Never throws. */
 	async loadClaude(refresh = false) {
 		try {
-			const claude = await getClaudeAuth(refresh);
+			const claude = await boundedProviderRead(getClaudeAuth(refresh), 'Claude account status');
 			_update((s) => ({ ...s, claude, claudeError: null, claudeForbidden: false }));
 		} catch (e) {
 			const forbidden = (e as { status?: unknown } | null)?.status === 403;
