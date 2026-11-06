@@ -283,6 +283,7 @@ def translate_sql(sql: str) -> str:
     # Advisory serialization is exercised against disposable PostgreSQL. This
     # single-connection shim only models the functional query contract.
     s = re.sub(r"pg_advisory_xact_lock\(\?\)", "?", s, flags=re.I)
+    s = re.sub(r"pg_try_advisory_xact_lock\(\?\)", "(? IS NOT NULL)", s, flags=re.I)
     # Deadline/lock behavior is covered by real PostgreSQL tests; SQLite only
     # models functional statements inside the bounded transaction.
     s = re.sub(r"^\s*SET\s+LOCAL\s+(?:lock|statement)_timeout\b.*$", "SELECT 1", s, flags=re.I)

@@ -327,6 +327,41 @@ running. An index build or promotion statement already in progress still finishe
 Catch-up does not force checkpoints. Total WAL and live-write tails still require
 acceptance on disposable workers before default enablement.
 
+Once the projection is ready, native transcript search in both session-list
+APIs also prefilters through it, then checks the original visible text for
+exact phrase/snippet semantics. Oversized rows waiting for promotion and rows
+whose projection reaches the five-million-character cap remain search
+candidates, including text past the cap. A small partial btree on existing
+cap-reaching part numbers is built concurrently; no projection version bump,
+rewrite or replay is needed. Native session-list search keeps its legacy path
+until that index is valid, and only then may legacy GIN retirement begin.
+The background recall task retires the six legacy raw-JSON and stored-
+`recall_text` trigram GINs (including history `_h0`/`_h2` variants) with
+`DROP INDEX CONCURRENTLY`, autocommit and a shared history-migration advisory
+lock. Online maintenance also non-blockingly takes startup's existing schema
+advisory lock; projection object/trigger repair and explicit offline DDL use
+that same key. This prevents a queued non-concurrent DDL request from making
+ordinary writes queue behind a waiting concurrent drop. Startup takes the key
+with try-locks, rolling back before each 0.25–2 second backoff: it never holds a
+waiting snapshot that a concurrent build needs to drain. Server startup and
+the owner-password/pairing CLIs can overlap a serving process. After ten seconds,
+startup cancels only the tagged online-maintenance backend currently holding
+that exact schema key in this database. Cancelled builds/drops retry later;
+unrelated backends and another startup's schema work are never cancelled.
+Online maintenance closes its backend before returning the pool slot, so even
+an already-selected, delayed cancellation cannot hit a subsequent request.
+The two-second pass budget is checked between statements; drops may run for
+up to three minutes.
+The one-time concurrent cap-row index build has no statement timeout, so slow
+workers can finish its heap scans instead of restarting them every pass. Lock
+timeout is disabled for concurrent DDL so waits for existing writers can
+finish even on a busy worker; ordinary writes and searches continue. Failed
+drops retry on a later pass; sessions keep writing throughout. Generated columns are
+left in place to avoid an ACCESS EXCLUSIVE table lock. Bootstrap and startup
+migrations never rebuild the raw indexes; unready projections or unavailable
+`pg_trgm` retain correct, potentially unindexed legacy search. The old explicit
+offline cache command is a no-op once the projection is ready.
+
 The table takes roughly the size of the searchable text once more, plus its
 trigram index; text from mirrored sessions (event rows) is kept twice, as
 pieces and as the original text the search folds. An app version from before

@@ -2727,15 +2727,36 @@ def _search_literal_pattern(text: str) -> str:
 
 
 def _native_search_cte(
-    projection: str, placeholder: str, instance_sql: str, cursor: Any,
-) -> str:
-    """Search visible user/assistant text, never tool payloads or system prompts.
+    projection: str, placeholder: str, instance_sql: str, cursor: Any, query: str,
+) -> tuple[str, str]:
+    """Prefilter on the compact projection, then check visible text exactly.
 
-    The raw JSON prefilter uses the existing trigram index. The extracted text
-    predicate is authoritative so metadata cannot produce a false match.
+    A first-token prefix fits inside one overlapping projection piece, even
+    when a phrase spans text blocks or a token exceeds the chunk size. Markers
+    for oversized rows and cap-reaching pieces remain candidates even after
+    truncated promotion. The final text/role predicate checks the entire visible
+    text and excludes tool results, metadata and system prompts.
     """
+    from app.db import session_recall
     from app.db.history_indexing import search_table
     native_source = search_table(cursor, "fluid_session_nodes", "n")
+    if session_recall.native_search_ready(cursor):
+        recall_source = search_table(cursor, session_recall.TABLE, "r")
+        prefilter = f"""(n.session_id, n.node_id) IN (
+            SELECT r.session_id, r.row_key FROM {recall_source}
+            WHERE r.source = 'n' AND r.part >= 0 AND r.body ILIKE {placeholder}
+            UNION ALL
+            SELECT r.session_id, r.row_key FROM {recall_source}
+            WHERE r.source = 'n' AND r.part = {session_recall.PENDING}
+            UNION ALL
+            SELECT r.session_id, r.row_key FROM {recall_source}
+            WHERE r.source = 'n' AND r.part >= {session_recall.NATIVE_CAPPED_PART}
+        )"""
+        pattern = _search_literal_pattern(query.split()[0][:session_recall.CHUNK_OVERLAP + 1])
+    else:
+        # Correct degraded mode on old/partial installs or without pg_trgm.
+        prefilter = f"n.message::text ILIKE {placeholder}"
+        pattern = _search_literal_pattern(json.dumps(query.split()[0], ensure_ascii=False)[1:-1])
     return f"""
         native_matches AS (
             SELECT DISTINCT ON (s.id)
@@ -2754,13 +2775,13 @@ def _native_search_cte(
                 ) WITH ORDINALITY AS blocks(block, ord)
                 WHERE block->>'kind' = 'text'
             ) texts
-            WHERE n.message::text ILIKE {placeholder}
+            WHERE {prefilter}
             AND texts.content ILIKE {placeholder}
             AND n.message->>'role' IN ('user', 'assistant')
             AND COALESCE(s.status, 'active') <> 'failed'{instance_sql}
             ORDER BY s.id, n.ts DESC
         ),
-    """
+    """, pattern
 
 
 def search_sessions(
@@ -2788,7 +2809,6 @@ def search_sessions(
         return []
 
     literal_pattern = _search_literal_pattern(query.strip())
-    raw_pattern = _search_literal_pattern(json.dumps(query.split()[0], ensure_ascii=False)[1:-1])
     search_term = literal_pattern
     fts_query = _fts_query_term(query)
     _ph = ph()
@@ -2812,10 +2832,10 @@ def search_sessions(
         # session_messages. Joined to sessions on sdk_session_id.
         # match_count = COUNT(*) OVER (PARTITION BY id) taken BEFORE the final
         # dedupe, i.e. how many of {title, legacy-content, store-content} hit.
-        native_cte = _native_search_cte(
+        native_cte, native_pattern = _native_search_cte(
             "s.id, s.project_id, s.profile_id, s.api_user_id, s.title, s.status, s.is_active, "
             "s.total_cost_usd, s.total_tokens_in, s.total_tokens_out, s.turn_count, "
-            "s.created_at, s.updated_at", _ph, inst_sql, cursor,
+            "s.created_at, s.updated_at", _ph, inst_sql, cursor, query,
         )
         sql = f"""
         WITH title_matches AS (
@@ -2888,7 +2908,7 @@ def search_sessions(
             search_term, *inst_params,
             fts_query, fts_query, literal_pattern, *inst_params,
             fts_query, fts_query, literal_pattern, *inst_params,
-            query.strip(), raw_pattern, literal_pattern, *inst_params,
+            query.strip(), native_pattern, literal_pattern, *inst_params,
         ]
 
         # Add filters
@@ -2941,7 +2961,6 @@ def search_sessions_paginated(
         return [], 0
 
     literal_pattern = _search_literal_pattern(query.strip())
-    raw_pattern = _search_literal_pattern(json.dumps(query.split()[0], ensure_ascii=False)[1:-1])
     search_term = literal_pattern
     fts_query = _fts_query_term(query)
     _ph = ph()
@@ -2965,7 +2984,7 @@ def search_sessions_paginated(
         # sessions on sdk_session_id. match_count = COUNT(*) OVER (PARTITION BY
         # id) taken BEFORE the final dedupe, i.e. how many of {title,
         # legacy-content, store-content} hit.
-        native_cte = _native_search_cte("s.*", _ph, inst_sql, cursor)
+        native_cte, native_pattern = _native_search_cte("s.*", _ph, inst_sql, cursor, query)
         base_cte = f"""
         WITH title_matches AS (
             SELECT
@@ -3032,7 +3051,7 @@ def search_sessions_paginated(
             search_term, *inst_params,
             fts_query, fts_query, literal_pattern, *inst_params,
             fts_query, fts_query, literal_pattern, *inst_params,
-            query.strip(), raw_pattern, literal_pattern, *inst_params,
+            query.strip(), native_pattern, literal_pattern, *inst_params,
         ]
 
         # Build filter conditions

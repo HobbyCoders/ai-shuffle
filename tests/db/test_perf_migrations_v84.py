@@ -25,46 +25,57 @@ from app.db import database
 from tests.db.migration_helpers import column_names, schema_version
 
 
-@pytest.mark.parametrize("failure", ["CREATE EXTENSION", "CREATE INDEX"])
-def test_mirror_recall_index_failure_does_not_abort_boot(failure, caplog):
-    from app.db.schema_postgres import create_session_events_recall_index
+def test_ready_projection_supersedes_legacy_cache_indexes(monkeypatch):
+    from app.db import schema_postgres, session_recall
 
-    statements = []
+    monkeypatch.setattr(session_recall, "ready", lambda _: True)
 
     class Cursor:
         def execute(self, sql):
-            statements.append(sql)
-            if sql.startswith(failure):
-                raise RuntimeError("synthetic unavailable extension or index privilege")
+            pytest.fail("Ready projection must not inspect or recreate legacy indexes")
 
-        def fetchall(self):
-            return []
-
-    create_session_events_recall_index(Cursor())
-    assert "SAVEPOINT recall_trgm_events" in statements
-    assert statements[-2:] == [
-        "ROLLBACK TO SAVEPOINT recall_trgm_events",
-        "RELEASE SAVEPOINT recall_trgm_events",
-    ]
-    assert "Mirrored SessionSearch trigram index unavailable" in caplog.text
+    assert schema_postgres.session_recall_cache_ready(Cursor())
+    schema_postgres.create_session_recall_text(Cursor())
 
 
 @pytest.mark.parametrize("failure", ["CREATE EXTENSION", "CREATE INDEX"])
 def test_explicit_recall_cache_failure_propagates_for_transaction_rollback(monkeypatch, failure):
-    from app.db import schema_postgres
+    from app.db import schema_postgres, session_recall
 
+    monkeypatch.setattr(session_recall, "ready", lambda _: False)
     statements = []
 
     class Cursor:
-        def execute(self, sql):
+        def execute(self, sql, params=None):
             statements.append(sql)
             if sql.startswith(failure):
                 raise RuntimeError("synthetic unavailable extension or index privilege")
 
+        def fetchone(self):
+            return {"ok": True}
+
     monkeypatch.setattr(schema_postgres, "column_exists", lambda *_: False)
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match="synthetic unavailable"):
         schema_postgres.create_session_recall_text(Cursor())
     assert not any(sql.startswith("DROP INDEX") for sql in statements)
+
+
+def test_explicit_recall_cache_retries_instead_of_waiting_on_schema_lock(monkeypatch):
+    from app.db import schema_postgres, session_recall
+
+    monkeypatch.setattr(session_recall, "ready", lambda _: False)
+    statements = []
+
+    class Cursor:
+        def execute(self, sql, params=None):
+            statements.append(sql)
+
+        def fetchone(self):
+            return {"ok": False}
+
+    with pytest.raises(RuntimeError, match="schema maintenance busy"):
+        schema_postgres.create_session_recall_text(Cursor())
+    assert len(statements) == 1 and "pg_try_advisory_xact_lock" in statements[0]
 
 
 def test_startup_never_backfills_optional_recall_cache(mock_db, monkeypatch):
@@ -143,8 +154,11 @@ def test_maintenance_failure_does_not_print_connection_details(monkeypatch, caps
 @pytest.mark.parametrize("indexes,ready", [([], False), (["idx_fluid_recall_text_trgm"], False), (
     ["idx_fluid_recall_text_trgm", "idx_sse_recall_text_trgm", "idx_events_recall_text_trgm"], True,
 )])
-def test_cache_requires_all_valid_ready_indexes(indexes, ready):
+def test_legacy_cache_requires_all_valid_ready_indexes(indexes, ready, monkeypatch):
+    from app.db import session_recall
     from app.db.schema_postgres import session_recall_cache_ready
+
+    monkeypatch.setattr(session_recall, "ready", lambda _: False)
 
     class Cursor:
         def execute(self, sql):

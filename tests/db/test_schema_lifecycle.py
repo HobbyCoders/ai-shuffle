@@ -535,7 +535,7 @@ def test_init_takes_the_schema_lock_before_anything_else(tmp_path, monkeypatch):
 
         monkeypatch.setattr(cursor_class, "execute", recording)
         database.init_database()
-    assert "pg_advisory_xact_lock" in seen[0][0]
+    assert "pg_try_advisory_xact_lock" in seen[0][0]
     assert seen[0][1] == (database.SCHEMA_INIT_LOCK_KEY,)
     assert -(2 ** 63) <= database.SCHEMA_INIT_LOCK_KEY < 2 ** 63
 

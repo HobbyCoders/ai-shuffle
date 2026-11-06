@@ -28,11 +28,9 @@ TABLES = {
     "session_messages": ("id", "content"),
     "session_recall_text": ("source, session_id, row_key, part", "body"),
 }
-# Optional cached-text indexes and the raw indexes can coexist on old installs.
+# Only reader-backed indexes are split. Legacy raw/cached JSON GINs (including
+# any _h0/_h2 left by an interrupted older migration) are retired separately.
 INDEXES = (
-    "idx_fluid_nodes_trgm", "idx_fluid_recall_text_trgm",
-    "idx_sse_entry_trgm", "idx_sse_recall_text_trgm",
-    "idx_session_events_recall_trgm", "idx_events_recall_text_trgm",
     "idx_session_recall_text_trgm_n", "idx_session_recall_text_trgm_s",
     "idx_session_recall_text_trgm_e",
     "idx_sse_fts", "idx_session_messages_fts",
@@ -90,39 +88,51 @@ def _valid(cursor: Any, name: str) -> bool:
     return bool(row and row["ok"])
 
 
+class _OnlineCursorComplete(Exception):
+    """Let get_db reclaim a closed autocommit connection without committing it."""
+
+
 @contextmanager
 def _online_cursor() -> Iterator[Any]:
     """Borrow only the initialized database; never bypass test/shim routing.
 
-    Concurrent DDL needs autocommit. Restore both session settings and the
-    transaction mode before returning the slot, and release only our own lock.
+    Concurrent DDL needs autocommit. Take startup's schema lock too: otherwise
+    startup's plain index DDL can queue behind us and indirectly block DML.
+    Always close before returning the pool slot: startup may already have
+    selected this backend for cancellation, even after its tag/locks are gone.
     """
-    with get_db() as db:
-        raw = getattr(db, "_conn", None)
-        if not isinstance(raw, psycopg2.extensions.connection):
-            raise RuntimeError("online history indexing requires PostgreSQL")
-        exempt_from_start_pressure(raw)
-        raw.commit()
-        raw.autocommit = True
-        try:
-            with raw.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute("SELECT current_setting('lock_timeout') AS lock, "
-                            "current_setting('statement_timeout') AS statement")
-                previous = cur.fetchone()
-                cur.execute("SELECT pg_try_advisory_lock(hashtext(current_database()), "
-                            "hashtext(current_schema() || '.history_indexing_v1')) AS ok")
-                locked = cur.fetchone()["ok"]
-                try:
-                    yield cur if locked else None
-                finally:
+    try:
+        with get_db() as db:
+            raw = getattr(db, "_conn", None)
+            if not isinstance(raw, psycopg2.extensions.connection):
+                raise RuntimeError("online history indexing requires PostgreSQL")
+            try:
+                exempt_from_start_pressure(raw)
+                raw.commit()
+                raw.autocommit = True
+                with raw.cursor(cursor_factory=RealDictCursor) as cur:
+                    cur.execute("SELECT pg_try_advisory_lock(hashtext(current_database()), "
+                                "hashtext(current_schema() || '.history_indexing_v1')) AS ok")
+                    locked = cur.fetchone()["ok"]
+                    schema_locked = False
                     if locked:
-                        cur.execute("SELECT pg_advisory_unlock(hashtext(current_database()), "
-                                    "hashtext(current_schema() || '.history_indexing_v1'))")
-                    cur.execute("SELECT set_config('lock_timeout',%s,false), "
-                                "set_config('statement_timeout',%s,false)",
-                                (previous["lock"], previous["statement"]))
-        finally:
-            raw.autocommit = False
+                        from app.db.database import SCHEMA_INIT_LOCK_KEY, ONLINE_DDL_APPLICATION_NAME
+                        cur.execute("SELECT pg_try_advisory_lock(%s) AS ok", (SCHEMA_INIT_LOCK_KEY,))
+                        schema_locked = cur.fetchone()["ok"]
+                        if schema_locked:
+                            cur.execute("SELECT set_config('application_name',%s,false)",
+                                        (ONLINE_DDL_APPLICATION_NAME,))
+                    yield cur if locked and schema_locked else None
+            finally:
+                # Closing also releases our advisory locks and settings. Do it
+                # before get_db returns the slot, not after another borrower
+                # could have acquired the same backend.
+                raw.close()
+            # get_db normally commits on success. Its exception path instead
+            # rolls back quietly and reclaims this already-closed connection.
+            raise _OnlineCursorComplete
+    except _OnlineCursorComplete:
+        pass
 
 
 def migrate() -> bool:

@@ -77,9 +77,11 @@ def _lifecycle_classes():
     class _LifecycleCursor(ShimCursor):
         def execute(self, sql, params=None):
             raw = self._cur.connection
-            if "pg_advisory_xact_lock" in sql:
+            if "pg_advisory_xact_lock" in sql or "pg_try_advisory_xact_lock" in sql:
                 if not raw.in_transaction:
                     raw.execute("BEGIN IMMEDIATE")
+                if "pg_try_advisory_xact_lock" in sql:
+                    return super().execute("SELECT 1 AS locked")
                 return self
             match = _DROP_FKEY.match(sql)
             if match:
