@@ -23,6 +23,8 @@ Open **Settings → Devices** (owner only). A worker not yet in a network shows 
 
 To add a phone or browser, use **Add device → Phone or browser**. A phone signed in to your account needs no code.
 
+To connect the phone you are holding to another worker by code, open **Settings → Devices** in the Shuffle app and tap **Add worker**. It opens the app's Workers screen, where you scan the other worker's QR code or enter its pairing code.
+
 Invites are meant for your home network or a VPN such as Tailscale. Workers signed in to your account always reach each other through your secure remote access connection.
 
 ## What syncs

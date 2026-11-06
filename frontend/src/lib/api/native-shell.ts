@@ -14,7 +14,9 @@
  * The bridge object exists only in app builds that install the listener;
  * everywhere else these calls do nothing and report false.
  */
+import { get } from 'svelte/store';
 import { isBundledMobile, nativeCapability } from '$lib/api/runtime';
+import { hangup, isCallActiveFor, voiceCallState } from '$lib/services/voiceCall';
 
 interface ShellBridge {
 	postMessage(message: string): void;
@@ -47,10 +49,37 @@ export function announceWorkerBar(shown: boolean): boolean {
 	return post({ type: 'worker-bar', shown });
 }
 
-/** Open the app's native Workers screen. */
+/**
+ * Open the app's native Workers screen. The app opens it with CLEAR_TOP, which
+ * closes the chat screen and with it any voice call, so a live call is ended
+ * only after the user agrees. Returns true when handled (opened or declined).
+ */
 export function openNativeWorkers(): boolean {
+	if (!hasShellBridge()) return false;
+	// A tap while a hangup is still settling joins that one opening: the call
+	// already reads as ended, so it would otherwise post at once.
+	if (workersPending) return true;
+	const call = get(voiceCallState);
+	if (isCallActiveFor(call.sessionId)) {
+		if (!window.confirm('Opening Workers ends the current voice call. Continue?')) return true;
+		// Let the hangup reach the worker before the app tears the page down,
+		// but never leave Workers unreachable behind a slow or failing hangup.
+		const settled = Promise.resolve(hangup('user')).catch(() => undefined);
+		const capped = new Promise((resolve) => setTimeout(resolve, HANGUP_WAIT_MS));
+		workersPending = true;
+		void Promise.race([settled, capped]).then(() => {
+			workersPending = false;
+			post({ type: 'workers' });
+		});
+		return true;
+	}
 	return post({ type: 'workers' });
 }
+
+let workersPending = false;
+
+/** Longest wait for a hangup before opening Workers anyway. */
+export const HANGUP_WAIT_MS = 3000;
 
 /** The app opens its own Settings (account, sign out, phone tools) on `{"type":"app-settings"}`. */
 export const APP_SETTINGS_CAPABILITY = 'app-settings';

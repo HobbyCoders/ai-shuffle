@@ -1,5 +1,15 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { announceWorkerBar, hasShellBridge, nativeAppSettingsRoute, openNativeAppSettings, openNativeWorkers } from './native-shell';
+const call = vi.hoisted(() => ({ active: false, hangup: vi.fn() }));
+vi.mock('$lib/services/voiceCall', async () => {
+	const { writable } = await import('svelte/store');
+	return {
+		voiceCallState: writable({ sessionId: 's1', status: 'live' }),
+		isCallActiveFor: () => call.active,
+		hangup: call.hangup
+	};
+});
+
+import { announceWorkerBar, hasShellBridge, nativeAppSettingsRoute, openNativeAppSettings, openNativeWorkers, HANGUP_WAIT_MS } from './native-shell';
 
 type TestWindow = Window & { shuffleShell?: unknown };
 
@@ -13,6 +23,9 @@ function inApp(bridge?: unknown, capabilities?: string[]) {
 }
 
 afterEach(() => {
+	call.active = false;
+	call.hangup.mockReset();
+	vi.restoreAllMocks();
 	delete window.__SHUFFLE_MOBILE__;
 	delete (window as TestWindow).shuffleShell;
 });
@@ -69,5 +82,49 @@ describe('native shell messages', () => {
 	it('reports a bridge that throws as not delivered', () => {
 		inApp({ postMessage: () => { throw new Error('gone'); } });
 		expect(announceWorkerBar(true)).toBe(false);
+	});
+
+	it('asks before opening Workers during a voice call, and opens it only after the hangup settles', async () => {
+		const postMessage = vi.fn();
+		inApp({ postMessage }, ['worker-switch']);
+		call.active = true;
+		const confirm = vi.spyOn(window, 'confirm').mockReturnValueOnce(false).mockReturnValueOnce(true);
+
+		expect(openNativeWorkers()).toBe(true);
+		expect(postMessage).not.toHaveBeenCalled();
+		expect(call.hangup).not.toHaveBeenCalled();
+
+		let finish!: () => void;
+		call.hangup.mockReturnValueOnce(new Promise<void>((resolve) => { finish = resolve; }));
+		expect(openNativeAppSettings()).toBe(true);
+		expect(confirm).toHaveBeenCalledTimes(2);
+		expect(call.hangup).toHaveBeenCalledWith('user');
+		await Promise.resolve();
+		expect(postMessage).not.toHaveBeenCalled();
+		// Hangup marks the call ended before its request finishes; a second tap
+		// must join the pending opening, not post at once or post twice.
+		call.active = false;
+		expect(openNativeWorkers()).toBe(true);
+		expect(postMessage).not.toHaveBeenCalled();
+		finish();
+		await vi.waitFor(() => expect(postMessage.mock.calls.map(([raw]) => JSON.parse(raw))).toEqual([{ type: 'workers' }]));
+	});
+
+	it('still opens Workers when the hangup hangs', async () => {
+		vi.useFakeTimers();
+		try {
+			const postMessage = vi.fn();
+			inApp({ postMessage });
+			call.active = true;
+			vi.spyOn(window, 'confirm').mockReturnValue(true);
+			call.hangup.mockReturnValueOnce(new Promise(() => {}));
+			expect(openNativeWorkers()).toBe(true);
+			await vi.advanceTimersByTimeAsync(HANGUP_WAIT_MS - 1);
+			expect(postMessage).not.toHaveBeenCalled();
+			await vi.advanceTimersByTimeAsync(1);
+			expect(postMessage.mock.calls.map(([raw]) => JSON.parse(raw))).toEqual([{ type: 'workers' }]);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 });

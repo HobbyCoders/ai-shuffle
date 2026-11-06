@@ -36,6 +36,7 @@
 	import { isPendingRequest, requestId, requestStatusText } from './device-requests.svelte';
 	import { KIND_NAME } from './pairing-codes.svelte';
 	import { accountStatus } from './device-status';
+	import { hasShellBridge, openNativeWorkers } from '$lib/api/native-shell';
 
 	interface Props {
 		/** Tests pass their own model. */
@@ -202,6 +203,11 @@
 	);
 	const selected = $derived(settingsNav.selectedItem(CATEGORY));
 
+	// Inside the phone app, a phone connects to another worker through the app's
+	// own Workers screen (scan its QR or enter its code). "Add device" here makes
+	// a code for some other device, which this phone cannot scan from itself.
+	const inPhoneApp = hasShellBridge();
+
 	async function add() {
 		const id = await model.pairing.add();
 		settingsNav.selectItem(id, CATEGORY);
@@ -210,6 +216,14 @@
 
 <CollectionPage category={CATEGORY} {count} addLabel="Add device" onAdd={add} filterPlaceholder={rowCount > 6 || filter ? "Filter devices" : null} bind:filter>
 	{#snippet list()}
+		{#if inPhoneApp}
+			<InlineBanner tone="info" icon={Smartphone}>
+				Connect this phone to another worker with its QR code or pairing code.
+				{#snippet actions()}<button type="button" class="st-btn sm" onclick={() => openNativeWorkers()}
+						>Add worker</button
+					>{/snippet}
+			</InlineBanner>
+		{/if}
 		{#if model.statusError}
 			<InlineBanner tone="warn">
 				<span role="alert">{model.statusError}</span>
