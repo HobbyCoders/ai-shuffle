@@ -65,6 +65,11 @@
 	],
 	"rules": [
 		{
+			"why": "the real-editor input driver must preserve literal multiline text without command or mention completion submitting early",
+			"journeys": ["composer-helper"],
+			"globs": ["frontend/tests/journeys/composer-helper.journey.mjs", "frontend/src/lib/components/CommandAutocomplete.svelte", "frontend/src/lib/components/FileAutocomplete.svelte"]
+		},
+		{
 			"why": "steer admission, cancellation and mirror routing must not strand a pending bubble",
 			"journeys": ["steer-lifecycle"],
 			"globs": ["frontend/tests/journeys/steer-lifecycle.journey.mjs", "frontend/src/lib/stores/session/pending-queue.ts", "frontend/src/lib/stores/session/message-sender.ts", "frontend/src/lib/stores/session/ws-message-handlers.ts", "frontend/src/lib/components/chat/PendingMessages.svelte", "frontend/src/lib/components/chat/PendingStatusAnnouncer.svelte", "app/core/session_handoff.py", "app/api/chat_ws_handler.py", "app/core/message_admission.py", "app/core/turn_manager.py", "app/network/control.py"]
