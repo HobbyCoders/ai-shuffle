@@ -21,6 +21,19 @@ const composerInsets = page => page.evaluate(() => {
 	};
 });
 
+// The rail mounts before the shell finishes loading preferences, so a click in
+// the first moments can land before the bell is live; click until it opens.
+async function openRailBell(page) {
+	const bell = page.getByRole('button', { name: /^Notifications( \(\d+ unread\))?$/ }).first();
+	const panel = page.getByRole('dialog', { name: 'Notifications', exact: true });
+	for (let i = 0; i < 5; i++) {
+		await bell.click();
+		try { await panel.waitFor({ timeout: 3000 }); return panel; } catch {}
+	}
+	await panel.waitFor({ timeout: 3000 });
+	return panel;
+}
+
 await runJourney({ name: 'rail-popover-composer-inset', allow: DEV_INSTANCE_NOISE, cases: [1440, 1000].map(width => ({
 	name: `notifications-inside-sidebar-${width}`,
 	viewports: ['desktop'],
@@ -35,9 +48,7 @@ await runJourney({ name: 'rail-popover-composer-inset', allow: DEV_INSTANCE_NOIS
 	},
 	async act({ page, mark, log }) {
 		await mark('open the rail bell');
-		await page.getByRole('button', { name: /^Notifications( \(\d+ unread\))?$/ }).first().click();
-		const panel = page.getByRole('dialog', { name: 'Notifications', exact: true });
-		await panel.waitFor();
+		const panel = await openRailBell(page);
 		const geometry = await panel.evaluate(el => {
 			const aside = document.querySelector('aside.sidebar').getBoundingClientRect();
 			const rail = document.querySelector('aside.sidebar .panel-plane').getBoundingClientRect();
@@ -74,8 +85,7 @@ await runJourney({ name: 'rail-popover-composer-inset', allow: DEV_INSTANCE_NOIS
 	},
 	async act({ page, mark, log }) {
 		await mark('open the rail bell at the narrowest Sidebar');
-		await page.getByRole('button', { name: /^Notifications( \(\d+ unread\))?$/ }).first().click();
-		const panel = page.getByRole('dialog', { name: 'Notifications', exact: true });
+		const panel = await openRailBell(page);
 		await panel.getByText('Request failed', { exact: true }).waitFor();
 		const row = await panel.evaluate(el => {
 			const aside = document.querySelector('aside.sidebar').getBoundingClientRect();
