@@ -1,7 +1,7 @@
 // The rail's notification history opens inside the Sidebar, and the empty-chat
 // composer does not hold an empty Stop seat at its right edge.
 import { runJourney } from './runner.mjs';
-import { expect, gotoApp, openNewChat, seededChatId, waitChat, SEEDED } from './lib/app.mjs';
+import { expect, gotoApp, openNewChat, seededChatId, waitChat, SEEDED, settleServiceWorker } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 
 // Distance from the composer box's inner edges to its first and last controls.
@@ -71,17 +71,31 @@ await runJourney({ name: 'rail-popover-composer-inset', allow: DEV_INSTANCE_NOIS
 	async setup({ page, status }) {
 		await page.setViewportSize({ width: 1440, height: 900 });
 		await page.addInitScript(() => localStorage.setItem('sidebar-width', '280'));
-		await page.route(/\/api\/v1\/notifications(?:\?|$)/, (route) => route.request().method() !== 'GET' ? route.fallback() : route.fulfill({
-			contentType: 'application/json',
-			body: JSON.stringify({ notifications: [{
-				id: 'journey-api-error', severity: 'error', surface: 'notification', category: 'api_error',
-				title: 'Request failed', message: 'The provider returned an error while starting this chat. Try again or send a report.',
-				read: false, dismissed: false, created_at: Date.now(), session_id: null,
-				action: { kind: 'api_error', payload: { status_code: 500 } }
-			}] })
-		}));
+		// The built app's SW forwards API GETs from the worker. page.route can
+		// miss those requests once it claims the page; intercept at the caller,
+		// leaving the real SW and every other read/write enabled.
+		await page.addInitScript(() => {
+			const original = window.fetch.bind(window);
+			window.__journeyNotificationReads = 0;
+			window.fetch = async (input, init) => {
+				const method = (init?.method || (input instanceof Request && input.method) || 'GET').toUpperCase();
+				const url = new URL(input instanceof Request ? input.url : String(input), location.href);
+				if (method !== 'GET' || url.origin !== location.origin || url.pathname !== '/api/v1/notifications') return original(input, init);
+				window.__journeyNotificationReads++;
+				return Response.json({ notifications: [{
+					id: 'journey-api-error', severity: 'error', surface: 'notification', category: 'api_error',
+					title: 'Request failed', message: 'The provider returned an error while starting this chat. Try again or send a report.',
+					read: false, dismissed: false, created_at: Date.now(), session_id: null,
+					action: { kind: 'api_error', payload: { status_code: 500 } }
+				}] });
+			};
+		});
 		await gotoApp(page, status);
+		// Exercise both the initial visit and a controlled document, so a mock
+		// that only wins the SW-installation race cannot pass this case.
+		await settleServiceWorker(page, status);
 		await page.getByRole('navigation', { name: 'Workspace', exact: true }).waitFor();
+		expect(await page.evaluate(() => window.__journeyNotificationReads > 0), 'the page consumed the notification fixture');
 	},
 	async act({ page, mark, log }) {
 		await mark('open the rail bell at the narrowest Sidebar');
@@ -102,7 +116,8 @@ await runJourney({ name: 'rail-popover-composer-inset', allow: DEV_INSTANCE_NOIS
 		expect(row.panelRight <= row.asideRight, 'the narrow panel still ends inside the Sidebar');
 		// Only the icon, the dismiss button, gaps and padding (about 80px) share the row with the message.
 		expect(row.message >= row.panel - 90, `the message keeps the row's width (${row.message}px of ${row.panel}px)`);
-		if (row.actions) expect(row.actionsBelow, 'in a narrow panel the row actions sit under the message');
+		expect(row.actions === 2, 'the API error row rebuilds both history actions');
+		expect(row.actionsBelow, 'in a narrow panel the row actions sit under the message');
 	}
 }, {
 	name: 'empty-chat-composer-has-no-stop-seat',

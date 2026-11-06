@@ -51,7 +51,8 @@
 		})
 	);
 	const connectedCount = $derived(views.filter((p) => isConnected(p) && !p.draft).length);
-	const loading = $derived(s.providersLoading || (!s.claude && !s.claudeError && !s.claudeForbidden));
+	const loading = $derived(!s.initialSnapshotReady || s.providersLoading || (!s.claude && !s.claudeError && !s.claudeForbidden));
+	const readError = $derived(s.providersError || s.integrationsError || s.claudeError);
 	const forbidden = $derived(s.claudeForbidden && s.providers.length === 0);
 
 	const selected = $derived(settingsNav.selectedItem('providers'));
@@ -91,7 +92,7 @@
 	// was deleted. A settled missing target must show the phone list, not an
 	// empty detail with no Back control. Keep pending loads selected.
 	$effect(() => {
-		if (selected && !target && !loading) settingsNav.clearSelection('providers');
+		if (selected && !target && !loading && !readError) settingsNav.clearSelection('providers');
 	});
 
 	onMount(() => {
@@ -100,32 +101,44 @@
 		// Subscription rows name their plan; the stored snapshot has the freshest one.
 		void providers.loadUsage();
 	});
-	watchResources(['settings'], () => providers.refreshAll());
+	watchResources(['settings'], () => providers.invalidate());
 	onDestroy(() => providerDrafts.discardAll());
 </script>
 
 <CollectionPage
 	category="providers"
-	count="{connectedCount} connected"
+	count={s.initialSnapshotReady ? `${connectedCount} connected` : 'Loading…'}
 	addLabel="Add provider"
 	onAdd={startGateway}
 	replaceOnSelect
 	bind:filter
 >
 	{#snippet list()}
-		{#if forbidden}
+		{#if !s.initialSnapshotReady}
+			<p class="pv-empty" role="status">Loading providers…</p>
+		{:else if forbidden}
 			<p class="pv-empty">{FORBIDDEN_TEXT}</p>
 		{:else}
-			{#if s.providersError}<p class="pv-msg err" role="alert">{s.providersError}</p>{/if}
+			{#if readError}
+				<p class="pv-msg err" role="alert">{readError}</p>
+				<button type="button" class="st-btn ghost" disabled={s.refreshing} aria-busy={s.refreshing} onclick={() => providers.refreshAll()}>Retry providers</button>
+			{/if}
 			{#if nativeOptions.error}
 				<p class="pv-msg err" role="alert">{nativeOptions.error}</p>
 				<button type="button" class="st-btn ghost" onclick={() => loadNativeOptions()}>Retry provider options</button>
 			{/if}
-			<ProviderList {views} {filter} />
+			<!-- Failed reads are unknown, not evidence that a provider is disconnected. -->
+			<ProviderList views={readError ? views.filter(isConnected) : views} {filter} />
 		{/if}
 	{/snippet}
 	{#snippet detail()}
-		{#if target?.kind === 'draft'}
+		{#if selected && !s.initialSnapshotReady}
+			<EmptyDetail icon={KeyRound} message="Loading providers" />
+		{:else if selected && readError && (!target || (target.kind === 'provider' && !isConnected(target.provider)))}
+			<EmptyDetail icon={KeyRound} message={readError}>
+				<button type="button" class="st-btn" disabled={s.refreshing} aria-busy={s.refreshing} onclick={() => providers.refreshAll()}>Retry providers</button>
+			</EmptyDetail>
+		{:else if target?.kind === 'draft'}
 			{#key target.draft.item}<DraftDetail draft={target.draft} provider={target.provider} />{/key}
 		{:else if target?.kind === 'provider'}
 			{#if target.provider.pending}

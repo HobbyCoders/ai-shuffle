@@ -18,6 +18,7 @@ vi.mock('$lib/stores/auth.svelte', async (importOriginal) => ({
 }));
 
 import { providers } from '$lib/stores/providers.svelte';
+import { resourceSync } from '$lib/services/resource-sync';
 import { settingsNav } from '$lib/settings/navigation.svelte';
 import { SETTINGS_ACCESS_CONTEXT } from '$lib/settings/access.svelte';
 import { assertCategoryCoverage } from '$lib/settings/testing/coverage';
@@ -69,6 +70,8 @@ beforeEach(() => {
 });
 afterEach(() => {
 	cleanup();
+	resourceSync.clear();
+	vi.useRealTimers();
 	vi.unstubAllGlobals();
 });
 
@@ -103,23 +106,270 @@ it.each([
 });
 
 describe('the list', () => {
-	it('shows Claude as Checking, not Not connected, until its status arrives', async () => {
+	it.each([
+		['page open', 1], ['page open', 3], ['Retry', 1], ['Retry', 3]
+	] as const)('replays %s after %i real settings invalidations without losing a credential deletion', async (source, events) => {
+		vi.useFakeTimers();
+		worker = fakeWorker({ rows: [row()] }, {
+			'DELETE /model-providers/:id': (_body, path) => {
+				worker.state.rows = worker.state.rows.filter((r) => r.id !== path.split('/')[2]);
+				return { success: true };
+			}
+		});
+		const heldCycle = source === 'Retry' ? 2 : 1;
+		let registryReads = 0;
+		let claudeReads = 0;
+		let releaseCurrent!: () => void;
+		let releaseTrailing!: () => void;
+		const current = new Promise<void>((resolve) => (releaseCurrent = resolve));
+		const trailing = new Promise<void>((resolve) => (releaseTrailing = resolve));
+		const real = worker.fetch;
+		vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+			const path = new URL(String(input), 'http://localhost').pathname;
+			if ((init?.method ?? 'GET') === 'GET' && path === '/api/v1/model-providers') {
+				registryReads++;
+				const response = await real(input, init); // snapshot this request's worker data
+				if (registryReads === heldCycle + 1) await trailing;
+				return response;
+			}
+			if (path === '/api/v1/settings/claude-auth') {
+				claudeReads++;
+				if (source === 'Retry' && claudeReads === 1) return new Response('unavailable', { status: 503 });
+				if (claudeReads === heldCycle) await current;
+				if (claudeReads === heldCycle + 1) await trailing;
+			}
+			return real(input, init);
+		});
+		render(ProvidersCollection);
+		await vi.advanceTimersByTimeAsync(0);
+		if (source === 'Retry') {
+			await fireEvent.click(screen.getByRole('button', { name: 'Retry providers' }));
+			await vi.advanceTimersByTimeAsync(0);
+		}
+		expect(providers.current.providers.map((p) => p.id)).toEqual(['p1']);
+		expect(registryReads).toBe(heldCycle);
+		expect(providers.current.refreshing).toBe(true);
+		// Another tab changes worker data, then the actual mounted resource watcher runs.
+		expect((await fetch('/api/v1/model-providers/p1', { method: 'DELETE' })).ok).toBe(true);
+		for (let i = 0; i < events; i++) {
+			resourceSync.invalidate(['settings']);
+			await vi.advanceTimersByTimeAsync(100);
+		}
+		expect(registryReads).toBe(heldCycle); // never run overlapping full snapshots
+		releaseCurrent();
+		await vi.advanceTimersByTimeAsync(0);
+		expect(registryReads).toBe(heldCycle + 1); // exactly one trailing read for this burst
+		expect(providers.current.refreshing).toBe(true); // includes the trailing read
+		if (source === 'page open') expect(providers.current.initialSnapshotReady).toBe(false);
+		releaseTrailing();
+		await vi.advanceTimersByTimeAsync(1000);
+		expect(registryReads).toBe(heldCycle + 1); // ResourceSync must not schedule a duplicate
+		expect(providers.current.refreshing).toBe(false);
+		expect(providers.current.providers).toEqual([]);
+		expect(screen.queryByRole('group', { name: 'OpenAI' })).toBeNull();
+		expect(screen.getByText('Not connected')).toBeTruthy();
+		expect(screen.getByRole('button', { name: /^OpenAI / }).getAttribute('data-settings-item')).toBe('provider:openai');
+	});
+
+	it('keeps a timed-out registry unknown while its retry response is held', async () => {
+		vi.useFakeTimers();
+		let registryReads = 0;
+		let releaseRetry!: () => void;
+		const heldRetry = new Promise<void>((resolve) => (releaseRetry = resolve));
+		const real = worker.fetch;
+		vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+			if (new URL(String(input), 'http://localhost').pathname === '/api/v1/model-providers') {
+				registryReads++;
+				if (registryReads === 1) return new Promise<Response>(() => {});
+				if (registryReads === 2) await heldRetry;
+			}
+			return real(input, init);
+		});
+		render(ProvidersCollection);
+		await vi.advanceTimersByTimeAsync(10_000);
+		expect(providers.current.providersError).toContain('did not respond');
+		await fireEvent.click(screen.getByRole('button', { name: 'Retry providers' }));
+		await vi.advanceTimersByTimeAsync(0);
+		expect(registryReads).toBe(2);
+		expect(providers.current.providersError).toContain('did not respond');
+		expect(screen.queryByText('Not connected')).toBeNull();
+		expect(screen.queryByRole('button', { name: /^OpenAI/ })).toBeNull();
+		settingsNav.go({ category: 'providers', item: 'provider:openai' });
+		await vi.advanceTimersByTimeAsync(9_000);
+		expect(settingsNav.selectedItem('providers')).toBe('provider:openai');
+		expect(screen.queryByRole('heading', { level: 2, name: 'OpenAI' })).toBeNull();
+		expect(screen.queryByText(/Not connected/)).toBeNull();
+		expect(screen.getAllByRole('button', { name: 'Retry providers', hidden: true }).every((b) => (b as HTMLButtonElement).disabled)).toBe(true);
+		releaseRetry();
+		await vi.advanceTimersByTimeAsync(0);
+		expect(providers.current.providersError).toBe('');
+		expect(screen.getByRole('heading', { level: 2, name: 'OpenAI' })).toBeTruthy();
+		expect(credentialNames('OpenAI')).toEqual(['OpenAI Plus subscription, Active', 'OpenAI API key, Active']);
+	});
+
+	it.each(['second Retry', 'another caller'])(
+		'coalesces a held retry with a %s so an older deadline cannot undo recovery',
+		async (source) => {
+			vi.useFakeTimers();
+			let integrationReads = 0;
+			let releaseOld!: () => void;
+			const heldOld = new Promise<void>((resolve) => (releaseOld = resolve));
+			const real = worker.fetch;
+			vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+				if (new URL(String(input), 'http://localhost').pathname === '/api/v1/settings/integrations') {
+					integrationReads++;
+					if (integrationReads === 1) return new Response('unavailable', { status: 503 });
+					if (integrationReads === 2) {
+						await heldOld;
+						return new Response('obsolete error', { status: 503 });
+					}
+				}
+				return real(input, init);
+			});
+			settingsNav.stacked = true;
+			settingsNav.go({ category: 'providers', item: 'fal:key' });
+			render(ProvidersCollection);
+			await vi.advanceTimersByTimeAsync(0);
+			const retries = screen.getAllByRole('button', { name: 'Retry providers', hidden: true }) as HTMLButtonElement[];
+			expect(retries).toHaveLength(2);
+			await fireEvent.click(retries[1]);
+			await vi.advanceTimersByTimeAsync(0);
+			const first = providers.refreshAll();
+			const second = source === 'second Retry'
+				? fireEvent.click(retries[0])
+				: providers.refreshAll();
+			await vi.advanceTimersByTimeAsync(0);
+			expect(integrationReads).toBe(2); // no successful request may overtake the held retry
+			expect(retries.every((b) => b.disabled)).toBe(true);
+			expect(providers.current.refreshing).toBe(true);
+			if (source === 'another caller') expect(second).toBe(first);
+			await vi.advanceTimersByTimeAsync(10_000);
+			await first;
+			expect(providers.current.refreshing).toBe(false);
+			expect(retries.every((b) => !b.disabled)).toBe(true);
+			expect(providers.current.integrationsError).toContain('did not respond');
+			await fireEvent.click(retries[1]);
+			await vi.advanceTimersByTimeAsync(0);
+			expect(integrationReads).toBe(3);
+			expect(screen.queryByRole('alert')).toBeNull();
+			expect(screen.getByRole('heading', { level: 2, name: 'Media key' })).toBeTruthy();
+			releaseOld();
+			await vi.advanceTimersByTimeAsync(10_000);
+			expect(providers.current.integrationsError).toBeNull();
+			expect(screen.queryByRole('alert')).toBeNull();
+			expect(settingsNav.selectedItem('providers')).toBe('fal:key');
+		}
+	);
+
+	it.each(['/settings/claude-auth', '/settings/integrations', '/model-providers'])(
+		'shows loaded providers and a working retry when %s never responds',
+		async (path) => {
+			vi.useFakeTimers();
+			let stalled = true;
+			const real = worker.fetch;
+			vi.stubGlobal('fetch', (input: RequestInfo | URL, init?: RequestInit) => {
+				if (stalled && new URL(String(input), 'http://localhost').pathname === `/api/v1${path}`) {
+					return new Promise<Response>(() => {});
+				}
+				return real(input, init);
+			});
+			if (path === '/settings/integrations') {
+				settingsNav.stacked = true;
+				settingsNav.go({ category: 'providers', item: 'fal:key' });
+			}
+			const { container } = render(ProvidersCollection);
+			await vi.advanceTimersByTimeAsync(0);
+			expect(providers.current.initialSnapshotReady).toBe(false);
+			await vi.advanceTimersByTimeAsync(10_000);
+			expect(providers.current.initialSnapshotReady).toBe(true);
+			expect(container.querySelector('.pl')).not.toBeNull();
+			expect(screen.getByRole('alert').textContent).toContain('did not respond');
+			expect(screen.queryByText('Not connected')).toBeNull();
+			const retrySurface = path === '/settings/integrations'
+				? within(container.querySelector('.st-empty-detail') as HTMLElement)
+				: screen;
+			if (path === '/settings/integrations') expect(settingsNav.selectedItem('providers')).toBe('fal:key');
+			stalled = false;
+			await fireEvent.click(retrySurface.getByRole('button', { name: 'Retry providers' }));
+			await vi.advanceTimersByTimeAsync(0);
+			expect(screen.queryByRole('alert')).toBeNull();
+			expect(credentialNames('fal.ai')).toEqual(['Media key, On']);
+			if (path === '/settings/integrations') {
+				expect(settingsNav.selectedItem('providers')).toBe('fal:key');
+				expect(screen.getByRole('heading', { level: 2, name: 'Media key' })).toBeTruthy();
+			}
+		}
+	);
+
+	it.each(['fal:key', 'provider:fal'])(
+		'keeps the cold %s deep link selected without classifying partial details',
+		async (item) => {
+			let release!: () => void;
+			const held = new Promise<void>((r) => (release = r));
+			const real = worker.fetch;
+			vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+				if (new URL(String(input), 'http://localhost').pathname === '/api/v1/settings/integrations') await held;
+				return real(input, init);
+			});
+			settingsNav.stacked = true;
+			settingsNav.go({ category: 'providers', item });
+			render(ProvidersCollection);
+			await flush();
+			expect(settingsNav.selectedItem('providers')).toBe(item);
+			expect(screen.getByText('Loading providers', { exact: true })).toBeTruthy();
+			expect(screen.queryByText(/Not connected/)).toBeNull();
+			release();
+			await flush();
+			expect(settingsNav.selectedItem('providers')).toBe(item);
+			expect(screen.queryByText('Loading providers', { exact: true })).toBeNull();
+			expect(screen.getByRole('heading', { level: 2, name: item === 'fal:key' ? 'Media key' : 'fal.ai' })).toBeTruthy();
+		}
+	);
+
+	it.each(['/settings/claude-auth', '/settings/integrations', '/model-providers'])(
+		'waits for the complete first snapshot when %s is slow, rather than moving provisional groups',
+		async (path) => {
+			let release!: () => void;
+			const held = new Promise<void>((r) => (release = r));
+			const real = worker.fetch;
+			vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+				if (new URL(String(input), 'http://localhost').pathname === `/api/v1${path}`) await held;
+				return real(input, init);
+			});
+			const { container } = render(ProvidersCollection);
+			await flush();
+			expect(screen.getByRole('status').textContent).toBe('Loading providers…');
+			const idle = container.querySelector('.st-dpane > .st-empty-detail[data-idle]');
+			expect(idle).not.toBeNull(); // keeps the unselected desktop list full-width
+			expect(container.querySelector('.pl')).toBeNull();
+			expect(screen.queryByText('Not connected')).toBeNull();
+			release();
+			await flush();
+			expect(screen.queryByText('Loading providers…')).toBeNull();
+			expect(container.querySelector('.st-dpane > .st-empty-detail[data-idle]')).toBe(idle);
+			expect(credentialNames('Claude')[0]).toBe('Claude Max subscription, Active for Claude');
+			expect(credentialNames('OpenAI')).toEqual(['OpenAI Plus subscription, Active', 'OpenAI API key, Active']);
+			expect(screen.getAllByText('Claude')).toHaveLength(1);
+			expect(screen.getByText('Not connected')).toBeTruthy();
+		}
+	);
+
+	it('keeps the complete list visible during a later silent refresh', async () => {
+		await show();
+		const before = group('Claude');
 		let release!: () => void;
 		const held = new Promise<void>((r) => (release = r));
 		const real = worker.fetch;
 		vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
-			if (String(input).includes('/settings/claude-auth')) await held;
+			await held;
 			return real(input, init);
 		});
-		render(ProvidersCollection);
+		const refresh = providers.refreshAll();
 		await flush();
-		const claude = group('Claude');
-		expect(within(claude).getByRole('status').textContent).toBe('Checking…');
-		expect(screen.getAllByText('Claude')).toHaveLength(1);
+		expect(group('Claude')).toBe(before);
+		expect(screen.queryByText('Loading providers…')).toBeNull();
 		release();
-		await flush();
-		expect(within(group('Claude')).queryByRole('status')).toBeNull();
-		expect(credentialNames('Claude')[0]).toBe('Claude Max subscription, Active for Claude');
+		await refresh;
 	});
 
 	it('keeps the Add provider name when the narrow list hides its label', async () => {
