@@ -56,6 +56,9 @@ export function announceWorkerBar(shown: boolean): boolean {
  */
 export function openNativeWorkers(): boolean {
 	if (!hasShellBridge()) return false;
+	// A tap while a hangup is still settling joins that one opening: the call
+	// already reads as ended, so it would otherwise post at once.
+	if (workersPending) return true;
 	const call = get(voiceCallState);
 	if (isCallActiveFor(call.sessionId)) {
 		if (!window.confirm('Opening Workers ends the current voice call. Continue?')) return true;
@@ -63,11 +66,17 @@ export function openNativeWorkers(): boolean {
 		// but never leave Workers unreachable behind a slow or failing hangup.
 		const settled = Promise.resolve(hangup('user')).catch(() => undefined);
 		const capped = new Promise((resolve) => setTimeout(resolve, HANGUP_WAIT_MS));
-		void Promise.race([settled, capped]).then(() => post({ type: 'workers' }));
+		workersPending = true;
+		void Promise.race([settled, capped]).then(() => {
+			workersPending = false;
+			post({ type: 'workers' });
+		});
 		return true;
 	}
 	return post({ type: 'workers' });
 }
+
+let workersPending = false;
 
 /** Longest wait for a hangup before opening Workers anyway. */
 export const HANGUP_WAIT_MS = 3000;

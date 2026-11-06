@@ -101,6 +101,11 @@ describe('native shell messages', () => {
 		expect(call.hangup).toHaveBeenCalledWith('user');
 		await Promise.resolve();
 		expect(postMessage).not.toHaveBeenCalled();
+		// Hangup marks the call ended before its request finishes; a second tap
+		// must join the pending opening, not post at once or post twice.
+		call.active = false;
+		expect(openNativeWorkers()).toBe(true);
+		expect(postMessage).not.toHaveBeenCalled();
 		finish();
 		await vi.waitFor(() => expect(postMessage.mock.calls.map(([raw]) => JSON.parse(raw))).toEqual([{ type: 'workers' }]));
 	});
