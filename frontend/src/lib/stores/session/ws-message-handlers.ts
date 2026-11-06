@@ -36,6 +36,7 @@ import { sessionEphemeralCache } from '../session-cache';
 import { markBindingHydrated } from './composer-binding';
 import { unmarkQuestionSent } from './sent-questions';
 import { keepStopRecovery } from '$lib/utils/not-sent-hold';
+import { turnErrorAnchor } from './turn-error-banner';
 
 // ─── Interfaces ──────────────────────────────────────────────────────────────
 
@@ -1111,9 +1112,15 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 					// `offer_fork`: the worker that owns this session is unreachable —
 					// the chat renders a "Fork here" action for POST /network/sessions/{id}/fork-here.
 					const forkOffer = data.offer_fork === true && erroredSessionId ? erroredSessionId : null;
+					// The banner belongs to the failed turn: anchor it where the feed
+					// stands, so the feed clears it once that turn is rewound away or
+					// a later turn finishes (turn-error-banner.ts, #1082 / #1175).
+					const at = erroredSessionId ? feedController.position(erroredSessionId) : null;
+					const frameTurnId = typeof data.turn_id === 'string' ? data.turn_id : null;
 					update(s => ({
 						...s,
 						error: errMessage,
+						turnErrorAnchor: turnErrorAnchor(errMessage, at?.seq ?? null, frameTurnId ?? at?.liveTurnId ?? null),
 						forkOfferSessionId: forkOffer,
 						isStreaming: false,
 						optimisticStreaming: false,

@@ -8,7 +8,7 @@ vi.mock('$lib/stores/session-cache', () => ({
 	},
 }));
 
-import { addRestoredWordsToDraft, noteRestoreFinished, noteRestoreStarted, takeUnfinishedRestores } from './restored-draft';
+import { addRestoredWordsToDraft, noteRestoreFinished, noteRestoreStarted, sentRewindRowId, sentRowIdsOnScreen, takeUnfinishedRestores } from './restored-draft';
 import { readDraft, writeDraft } from './draft-persistence';
 
 const doc = (text: string) => JSON.stringify({ type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text }] }] });
@@ -84,5 +84,29 @@ describe('restores a reload cut off', () => {
 		noteRestoreFinished('s1', 'row-1');
 		expect(takeUnfinishedRestores('s1', new Set(), LATER_PAGE)).toEqual([]);
 		expect(takeUnfinishedRestores('s2', new Set(), LATER_PAGE)).toMatchObject([{ rowId: 'row-2' }]);
+	});
+});
+
+describe('sent rewind notes (#1083)', () => {
+	beforeEach(() => { cached.clear(); sessionStorage.clear(); });
+	const user = (content: string) => ({ role: 'user', content });
+
+	it('names a sent prompt by its text and occurrence, as the rewind finds it', () => {
+		const rows = [user('again'), { role: 'assistant', content: 'ok' }, user('again'), { role: 'user', type: 'command', content: 'again' }];
+		expect(sentRowIdsOnScreen(rows)).toEqual([sentRewindRowId('again', 0), sentRewindRowId(' again ', 1)]);
+		expect(sentRewindRowId('again', 0)).not.toBe(sentRewindRowId('agaim', 0));
+	});
+
+	it('hands words back on the next page only when the server dropped the row', () => {
+		const id = sentRewindRowId('rewound words', 0);
+		noteRestoreStarted('s1', id, 'rewound words', ['/w/uploads/a.txt']);
+		// Same page: its own answer is still coming.
+		expect(takeUnfinishedRestores('s1', new Set())).toEqual([]);
+		// Next page, row still there: the rewind did not happen, the note waits.
+		expect(takeUnfinishedRestores('s1', new Set(sentRowIdsOnScreen([user('rewound words')])), 'next')).toEqual([]);
+		// Next page, row gone: the words come back once.
+		const [note] = takeUnfinishedRestores('s1', new Set(sentRowIdsOnScreen([user('kept')])), 'next');
+		expect(note).toMatchObject({ prompt: 'rewound words', uploadPaths: ['/w/uploads/a.txt'] });
+		expect(takeUnfinishedRestores('s1', new Set(), 'next')).toEqual([]);
 	});
 });

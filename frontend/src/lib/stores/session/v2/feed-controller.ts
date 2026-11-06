@@ -33,6 +33,7 @@ import type { SdkContextUsage } from '$lib/api/sessions';
 import type { QueuedMessage, Task } from '../../types';
 import { browserPanel } from '../../browser-panel.svelte';
 import { pendingQueue, reconcilePendingPeerMessages } from '../pending-queue';
+import { turnErrorOutlived } from '../turn-error-banner';
 import { nameStoppedTurn, nameStopRecovery, STOP_TURN_NOT_NAMED } from '$lib/utils/not-sent-hold';
 import { swarms } from '../../swarms';
 
@@ -676,6 +677,11 @@ function fold(hydrationComplete = false): void {
 					stopTimedOutTurnId: nameRecoveryFrom(s, reducerState.liveTurnId),
 					queuedMessages: reconcileQueuedMessages(s.queuedMessages),
 					pendingPeerMessages: reconcilePendingPeerMessages(s.pendingPeerMessages ?? [], patch.messages ?? s.messages),
+					// A failed turn's banner leaves once the transcript has moved past
+					// that turn: rewound away, or followed by a turn that finished.
+					...(turnErrorOutlived(s.turnErrorAnchor, s.error, reducerState)
+						? { error: null, forkOfferSessionId: null, turnErrorAnchor: null }
+						: {}),
 				}
 			: s
 	);
@@ -827,6 +833,9 @@ export interface FeedController {
 	stop: () => void;
 	/** True when currently feeding (optionally: feeding this specific session). */
 	isFeeding: (sessionId?: string) => boolean;
+	/** The last seq reduced for this session and the turn live at it, or null
+	 *  when not feeding it. Anchors a turn-error banner (turn-error-banner.ts). */
+	position: (sessionId: string) => { seq: number; liveTurnId: string | null } | null;
 
 	// ── Transcript cache (S2) ──────────────────────────────────────
 	/**
@@ -1262,6 +1271,11 @@ export const feedController: FeedController = {
 	isFeeding(sessionId?: string) {
 		if (feed === null || currentSessionId === null) return false;
 		return sessionId === undefined || sessionId === currentSessionId;
+	},
+
+	position(sessionId: string) {
+		if (currentSessionId === null || sessionId !== currentSessionId) return null;
+		return { seq: reducerState.lastSeq, liveTurnId: reducerState.liveTurnId };
 	},
 
 	cachedPatch(sessionId: string) {

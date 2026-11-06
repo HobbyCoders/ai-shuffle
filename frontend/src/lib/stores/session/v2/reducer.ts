@@ -209,6 +209,13 @@ export interface V2SessionState {
 	 *  rewind, so a lost close can never leave it stuck. Optional so a cached
 	 *  state from before the field reads as none. */
 	compaction?: LiveCompaction | null;
+	/** The latest `turn.completed` (turn id and seq): a turn that finished
+	 *  cleanly. Read by the turn-error banner rule (turn-error-banner.ts).
+	 *  Optional so a cached state from before the field reads as none. */
+	lastCompletedTurn?: { id: string; seq: number } | null;
+	/** Seq of the latest `transcript.rewound`, for the same rule. Optional so a
+	 *  cached state from before the field reads as 0. */
+	lastRewindSeq?: number;
 }
 
 /** See `V2SessionState.compaction`. */
@@ -307,6 +314,8 @@ export function initialState(): V2SessionState {
 		speculativelySettledTaskIds: [],
 		attemptStartSeq: 0,
 		compaction: null,
+		lastCompletedTurn: null,
+		lastRewindSeq: 0,
 	};
 }
 
@@ -1480,6 +1489,7 @@ function reduceInternal(
 					pumpAckBuffer: '',
 					usage: obj(event.usage) ?? state.usage,
 					outputTokensTotal: (state.outputTokensTotal ?? 0) + turnOutputTokens(event.usage),
+					lastCompletedTurn: { id: str(event.turn_id) || '', seq },
 				})
 			);
 			// A retry card left mid-count is finished business now — the turn
@@ -2736,6 +2746,7 @@ function reduceInternal(
 				activeTaskSummaries,
 				openTextId,
 				openThinkingId,
+				lastRewindSeq: seq,
 			};
 		}
 
