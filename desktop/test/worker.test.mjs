@@ -268,11 +268,21 @@ async function fakeSupervisor(t, extraEnv = {}, options = {}) {
 		postgres: () => ({ host: '127.0.0.1', port: 5432, user: 'u', password: 'pw', database: 'd' }), ...options
 	});
 	const states = [];
-	supervisor.on('state', (state) => states.push(state));
+	const timeline = [];
+	const started = Date.now();
+	const acknowledged = new Set();
+	supervisor.on('state', (state) => {
+		states.push(state);
+		timeline.push({ ms: Date.now() - started, phase: state.phase, step: state.startupStep, exitCode: state.exitCode });
+		if (extraEnv.FAKE_WORKER_EXIT_AFTER_READY && state.phase === 'ready' && state.pid && !acknowledged.has(state.pid)) {
+			acknowledged.add(state.pid);
+			process.kill(state.pid, 'SIGUSR2');
+		}
+	});
 	t.after(async () => { await supervisor.stop().catch(() => {}); });
 	const spawns = async () => { try { return (await readFile(log, 'utf8')).trim().split('\n').filter(Boolean); } catch { return []; } };
 	const processFile = path.join(dir, 'worker', 'worker-process.json');
-	return { dir, port, protectedPort, baseEnv, supervisor, states, spawns, processFile };
+	return { dir, port, protectedPort, baseEnv, supervisor, states, timeline, spawns, processFile };
 }
 
 function waitFor(supervisor, predicate, timeoutMs = 30_000) {
@@ -321,15 +331,20 @@ test('a worker log file that cannot be opened does not crash the app', { skip: !
 });
 
 test('DESK-01: a worker that crashes after becoming ready is respawned, twice per five minutes, then reported', { skip: !posix }, async (t) => {
-	const f = await fakeSupervisor(t, { FAKE_WORKER_EXIT_AFTER_READY: '300' });
+	const f = await fakeSupervisor(t, { FAKE_WORKER_EXIT_AFTER_READY: '300', FAKE_WORKER_SYNC_DELAY_MS: '1000' });
+	const started = Date.now();
 	const first = await f.supervisor.start();
-	assert.equal(first.phase, 'ready');
+	assert.equal(first.phase, 'ready', JSON.stringify({
+		error: first.error?.replace(/[a-f0-9]{64}/gi, '[redacted]').slice(0, 500), exitCode: first.exitCode,
+		elapsedMs: Date.now() - started, timeline: f.timeline,
+		fixtureTiming: f.supervisor.tail().filter(line => line.startsWith('fake-worker:')).slice(-10)
+	}));
 	assert.equal(first.external, false);
 	const firstPid = first.pid;
 	const failed = await waitFor(f.supervisor, (s) => s.phase === 'failed', 60_000);
 	assert.match(failed.error, /keeps stopping unexpectedly/);
 	const spawns = await f.spawns();
-	assert.equal(spawns.length, 3, `expected the original spawn plus two restarts, got ${spawns.join(' | ')}`);
+	assert.equal(spawns.length, 3, `expected the original spawn plus two restarts, got ${spawns.length}`);
 	assert.equal(new Set(spawns.map((line) => line.split(' ')[0])).size, 3);
 	assert.equal(spawns[0].split(' ')[0], String(firstPid));
 	assert.equal(new Set(spawns.map((line) => line.split(' ')[1])).size, 3, 'every spawn gets a fresh attach token');
