@@ -1470,6 +1470,25 @@ def _deleted_parent(cursor, ctx: NetworkContext, env: Envelope) -> Optional[str]
     return None
 
 
+def _lock_mirror_event_counters(cursor, record_ids: Iterable[str]) -> None:
+    """After network_state, take sorted counters BEFORE any mirror event rows.
+
+    Delete takes C before sweeping events. Reconciliation's UPSERT can lock an
+    existing committed event, so event -> C deadlocks against that sweep. Batch
+    callers reserve the entire page/window here, not one session at a time.
+    Keep this inside the synchronous DB transaction, never across network I/O.
+    """
+    session_ids = sorted({rid.split("|", 1)[0] for rid in record_ids
+                          if isinstance(rid, str) and "|" in rid})
+    for sid in session_ids:
+        cursor.execute(
+            "INSERT INTO session_event_counters (session_id, next_seq) "
+            "SELECT id, 0 FROM sessions WHERE id = %s "
+            "ON CONFLICT (session_id) DO UPDATE SET next_seq = session_event_counters.next_seq",
+            (sid,),
+        )
+
+
 def _apply_next(cursor, ctx: NetworkContext, env: Envelope, member: Member, result: ApplyResult) -> str:
     """Apply the next op of a stream; classify what cannot be applied.
 
@@ -1625,6 +1644,10 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
             # No absent default row enters scan's tombstone path, which would
             # fail an older peer's automation FK before its rewrite arrives.
             return "applied"
+
+    if coll.name == "session_events":
+        # _observe_clock (or the enclosing chunk) already owns network_state.
+        _lock_mirror_event_counters(cursor, [env.record_id])
 
     if coll.name == "session_active":
         if env.op == OP_UPSERT and (
@@ -2020,10 +2043,15 @@ def _apply_pending_chunk(origin: str, incarnation: int, ctx: NetworkContext,
             store.lock_state(cursor)
             locked = True
             first_seq = next_seq = store.get_watermark(cursor, origin, incarnation) + 1
-            window = (store.pending_prefix(cursor, origin, incarnation, next_seq, limit=APPLY_CHUNK)
-                      if _try_append else [])
+            window = store.pending_prefix(cursor, origin, incarnation, next_seq, limit=APPLY_CHUNK)
+            _lock_mirror_event_counters(cursor, (data.get("record_id") for data in window
+                                                if isinstance(data, Mapping)
+                                                and data.get("collection") == "session_events"))
             # Keep event and metadata runs inside the same bounded lock hold.
-            # The no-peek path is the shim's rollback-and-retry fallback.
+            # The shim's rollback fallback still reserves the whole window's
+            # counters before applying envelopes individually.
+            if not _try_append:
+                window = []
             runs = (groupby(window, key=lambda data: isinstance(data, Mapping)
                             and data.get("collection") == "session_events"
                             and data.get("op") == OP_UPSERT) if window else [(False, ())])
@@ -2239,6 +2267,7 @@ def _apply_event_append(cursor, chunk: Sequence[Mapping[str, Any]], ctx: Network
                    tuple(value for row in rows for value in (row["session_id"], row["seq"])))
     if cursor.fetchone() is not None:
         return False
+    _lock_mirror_event_counters(cursor, ids)
     store.insert_event_batch(cursor, coll, rows, [env.to_dict() for env in envs],
                              [content_hash(coll, row) for row in rows])
     for sid in sessions:
@@ -2284,6 +2313,9 @@ def _apply_chunk(chunk: Sequence[Mapping[str, Any]], ctx: NetworkContext, result
                 store.observe_clock(cursor, seen)
             else:
                 store.lock_state(cursor)
+            _lock_mirror_event_counters(cursor, (data.get("record_id") for data in chunk
+                                                if isinstance(data, Mapping)
+                                                and data.get("collection") == "session_events"))
             bulk_pending = os.environ.get("AI_SHUFFLE_PERF_BULK_PENDING", "").strip().lower() not in (
                 "0", "false", "off", "no")
             stream = _wire_stream(cursor, chunk, ctx) if bulk_pending else None
@@ -2701,6 +2733,8 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
         return 0, touched
     store.observe_clock(cursor, max(int(item["clock"]) for item in items))
     ids = [item["record_id"] for item in items]
+    if coll.name == "session_events":
+        _lock_mirror_event_counters(cursor, ids)
     # A page names each record once; anything else is read one by one.
     known = _records_by_id(cursor, coll.name, ids) if len(set(ids)) == len(ids) else None
     applied = 0

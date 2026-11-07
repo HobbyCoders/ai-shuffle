@@ -331,15 +331,30 @@ def test_post_delete_stop_notice_delivery_drains_oldest_batch(private_pool, monk
 
 
 
-def _delete_behind_writer(private_pool, monkeypatch, sid, write, old_boundary, *, lock_session=None):
+def _delete_behind_writer(private_pool, monkeypatch, sid, write, old_boundary, *, lock_session=None,
+                          mirror_sessions=None):
     locked, resume = threading.Event(), threading.Event()
     writer_pid = []
+    counter_order = []
     original_cursor = base._PgDictConnection.cursor
 
     class InterleavedCursor(RealDictCursor):
         def execute(self, sql, params=None):
-            result = super().execute(sql, params)
             name = threading.current_thread().name
+            if name.startswith("writer") and mirror_sessions is not None:
+                text = sql.decode() if isinstance(sql, bytes) else sql
+                if text.startswith("INSERT INTO session_event_counters"):
+                    if not counter_order:
+                        # Prove the real state row, not merely its table lock,
+                        # was acquired before the mirror's first C lock.
+                        with psycopg2.connect(**private_pool) as probe:
+                            with pytest.raises(psycopg2.errors.LockNotAvailable):
+                                probe.cursor().execute("SELECT id FROM network_state WHERE id=1 FOR UPDATE NOWAIT")
+                            probe.rollback()
+                    counter_order.append(params[0])
+                if text.startswith("INSERT INTO session_events"):
+                    assert set(counter_order) == set(mirror_sessions)
+            result = super().execute(sql, params)
             if name.startswith(("writer", "asyncio")) and not locked.is_set():
                 text = sql.decode() if isinstance(sql, bytes) else sql
                 run_lock = "FROM runs WHERE session_id" in text and "FOR UPDATE" in text and self.rowcount > 0
@@ -371,6 +386,8 @@ def _delete_behind_writer(private_pool, monkeypatch, sid, write, old_boundary, *
         writing.result(timeout=5)
         assert deleting.result(timeout=5)
     _assert_deleted(sid)
+    if mirror_sessions is not None:
+        assert list(dict.fromkeys(counter_order)) == sorted(mirror_sessions)
 
 
 @pytest.mark.parametrize("path", ["deferred-report", "clear", "question-answer"])
@@ -717,3 +734,95 @@ def test_delete_vs_reachable_top_level_message(private_pool, monkeypatch, delete
     boundary = lambda sql: "FROM sessions WHERE id=" in sql and "FOR UPDATE" in sql
     sid = sender if deleted == "sender" else receiver
     _delete_behind_writer(private_pool, monkeypatch, sid, write, boundary, lock_session=sid)
+
+
+@pytest.mark.parametrize(("path", "family"), [
+    (path, False) for path in ("envelope", "append", "chunk", "pending", "pending-fallback",
+                               "snapshot-rewrite", "snapshot-fresh")
+] + [(path, True) for path in ("chunk", "pending", "pending-fallback", "snapshot-rewrite", "snapshot-fresh")])
+def test_delete_vs_ordinary_mirror_ingestion(private_pool, monkeypatch, path, family):
+    """Drive the signed wire and snapshot producers, including a committed-row UPSERT."""
+    from app.db import network as store
+    from app.network import crypto, engine, envelope, identity, membership, policy
+
+    def device():
+        return identity.DeviceIdentity(crypto.generate_signing_key(), crypto.generate_encryption_key(),
+                                       1, "2026-01-01T00:00:00Z")
+
+    local, remote = device(), device()
+    member = membership.Member(remote.device_id, remote.signing_public, remote.encryption_public,
+                               "Remote owner", "worker", 0)
+    ctx = engine.NetworkContext(local, "mirror-lock-" + uuid4().hex, "Mirror locks", remote.device_id,
+                                0, 1, {1: crypto.generate_network_key()}, {remote.device_id: member}, "ready")
+    sid = "z-delete-mirror-" + uuid4().hex
+    child = "a-delete-mirror-" + uuid4().hex
+    # Wire/page order is deliberately the opposite of runtime-prefix order.
+    session_ids = [sid, child] if family else [sid]
+    coll = policy.collection("session_events")
+    with base.get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO network_state (id,network_id,founder_device_id) VALUES (1,%s,%s) "
+                       "ON CONFLICT(id) DO UPDATE SET network_id=EXCLUDED.network_id",
+                       (ctx.network_id, remote.device_id))
+        cursor.execute("INSERT INTO sessions (id,owner_device_id) VALUES (%s,%s)", (sid, remote.device_id))
+        if family:
+            cursor.execute("INSERT INTO sessions (id,owner_device_id,parent_session_id) VALUES (%s,%s,%s)",
+                           (child, remote.device_id, sid))
+    envs, items = [], []
+    for index, session_id in enumerate(session_ids, 1):
+        session_events.append_events(session_id, [{"type": "system.note", "payload": {"content": "committed"}}])
+        with base.get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM session_events WHERE session_id=%s", (session_id,))
+            record = engine.serialize_row(coll, dict(cursor.fetchone()))
+        record["payload"] = {"content": "remote reconciliation"}
+        if path in ("append", "snapshot-fresh"):
+            record.update(id="mirror-event-" + uuid4().hex, seq=2)
+        rid = coll.record_id(record)
+        envs.append(envelope.build(
+            network_id=ctx.network_id, collection=coll.name, record_id=rid,
+            op="upsert", clock=2, origin_device_id=remote.device_id,
+            origin_incarnation=1, origin_seq=index, schema_version=1, key_version=1,
+            network_key=ctx.network_key, signing_private=remote.signing_private,
+            record=record, order_seq=record["seq"],
+        ).to_dict())
+        items.append({"record_id": rid, "record": record, "clock": 2, "origin_device_id": remote.device_id,
+                      "deleted": False, "order_seq": record["seq"]})
+
+    if path.startswith("pending"):
+        with base.get_db() as conn:
+            for env in envs:
+                store.stash_pending(conn.cursor(), env)
+
+    def ingest():
+        result = engine.ApplyResult()
+        if path == "chunk":
+            assert engine._apply_chunk(envs, ctx, result)
+            assert result.applied == len(session_ids) and result.retry == 0
+            return
+        if path.startswith("pending"):
+            assert engine._apply_pending_chunk(remote.device_id, 1, ctx, result,
+                                               _try_append=path != "pending-fallback")
+            assert result.applied == len(session_ids) and result.retry == 0
+            return
+        with base.get_db() as conn:
+            cursor = conn.cursor()
+            if path.startswith("snapshot"):
+                applied, _ = engine.apply_snapshot_items(cursor, coll, items, ctx=ctx)
+                assert applied == len(session_ids)
+            else:
+                store.lock_state(cursor)
+                if path == "append":
+                    assert engine._apply_event_append(cursor, envs, ctx, engine.ApplyResult())
+                else:
+                    assert engine.apply_envelope(cursor, envs[0], ctx=ctx) == "applied"
+
+    # Before the fix the writer pauses owning an event tuple; delete then
+    # owns C and waits for that tuple, while the resumed mirror waits for C.
+    # After the fix the same barrier pauses at its earlier C lock instead.
+    boundary = lambda sql: (sql.startswith("INSERT INTO session_events")
+                            or sql.startswith("INSERT INTO session_event_counters"))
+    _delete_behind_writer(private_pool, monkeypatch, sid, ingest, boundary, mirror_sessions=session_ids)
+    if family:
+        assert sessions.get_session(child)["parent_session_id"] is None
+        assert len(session_events.get_events(child)) == (2 if path == "snapshot-fresh" else 1)
