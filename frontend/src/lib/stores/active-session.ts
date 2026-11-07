@@ -1039,7 +1039,7 @@ export const activeSession = {
 
 	// ── Messaging (delegated to message-sender) ─────────────────────
 
-	sendMessage: (prompt: string, options?: { skipWorktreeSetup?: boolean; skipMessageAppend?: boolean; pendingUploadPaths?: string[]; compactFirst?: boolean }) =>
+	sendMessage: (prompt: string, options?: { skipWorktreeSetup?: boolean; skipMessageAppend?: boolean; pendingUploadPaths?: string[]; compactFirst?: boolean; stillAtDestination?: () => boolean }) =>
 		messageSender.sendMessage(prompt, options),
 
 	stopGeneration: () => messageSender.stopGeneration(),

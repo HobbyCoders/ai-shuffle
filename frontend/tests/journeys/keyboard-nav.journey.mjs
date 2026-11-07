@@ -162,6 +162,108 @@ await runJourney({
 			await page.waitForTimeout(500);
 		}
 	}, {
+		// An edit made while the send waits is the newest draft; the called-off
+		// send must not put back the text as it was at Send.
+		name: 'edits-made-while-a-send-waits-stay-in-the-draft',
+		viewports: ['desktop'],
+		throttles: ['fast'],
+		async setup({ page, status }) {
+			await watchQueries(page);
+			await gotoApp(page, status);
+			await openFromSidebar(page, SEEDED.no_project);
+			await waitChatOpen(page);
+		},
+		async act({ page, mark, log }) {
+			const token = `kept-${uniq()}`;
+			const fix = `fix-${uniq()}`;
+			let release;
+			let held = 0;
+			const released = new Promise((resolve) => { release = resolve; });
+			await page.route('**/cache-state*', async (route) => { held += 1; await released; await route.continue().catch(() => {}); });
+			await composer(page).click();
+			await composer(page).pressSequentially(token);
+			await mark('Send, correct the message while it waits, then New chat');
+			await sendButton(page).click();
+			await composer(page).press('End');
+			await composer(page).pressSequentially(` ${fix}`);
+			await page.keyboard.press('Control+N');
+			await waitChat(page, { surface: 'new' }, { timeout: 10_000 });
+			expect(held > 0, 'the send was still waiting on its cold-cache check');
+			release();
+			await page.unroute('**/cache-state*');
+			await page.waitForTimeout(2000);
+			expect(!(await queries(page)).some((q) => q.includes(token)), 'the message was not sent anywhere');
+
+			await mark('back to the chat it was written in');
+			await openFromSidebar(page, SEEDED.no_project);
+			await waitChatOpen(page);
+			const draft = await editorText(page);
+			log(`draft: ${JSON.stringify(draft)}`);
+			expect(draft.includes(token) && draft.includes(fix), 'the draft holds the message with the correction made while it waited');
+			await clearComposer(page);
+			await page.waitForTimeout(500);
+		}
+	}, {
+		// After a reload the store waits for the chat's history before it sends.
+		// New chat in that wait used to send the message into the new chat.
+		name: 'new-chat-during-a-reloaded-chats-restore-keeps-the-message',
+		viewports: ['desktop'],
+		throttles: ['fast'],
+		async setup({ page, status }) {
+			await watchQueries(page);
+			await gotoApp(page, status);
+			await openFromSidebar(page, SEEDED.no_project);
+			await waitChatOpen(page);
+		},
+		async act({ page, mark, log }) {
+			const token = `kept-${uniq()}`;
+			const chatA = (await chatState(page)).session;
+			await composer(page).click();
+			await composer(page).pressSequentially(token);
+			await page.waitForTimeout(500);
+			// Hold the chat's history feed so the reload stays in its restore.
+			let release;
+			let held = 0;
+			const released = new Promise((resolve) => { release = resolve; });
+			// The page state names chats by a hash, and only this chat's feed is
+			// asked for after the reload, so hold any chat's.
+			const feed = (url) => /\/sessions\/[^/]+\/events$/.test(url.pathname);
+			await page.route(feed, async (route) => { held += 1; await released; await route.continue().catch(() => {}); });
+			await mark('reload with the history held');
+			await page.reload({ waitUntil: 'domcontentloaded' });
+			// A reload is an intentional document replacement, not a boot reversal.
+			await page.evaluate(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))));
+			await mark('page reloaded: Send');
+			await composer(page).waitFor();
+			await page.waitForFunction((t) => document.querySelector('[data-message-editor]')?.textContent?.includes(t), token, { timeout: 15_000 });
+			// The draft paints from the tab's mirror before the history is asked for.
+			for (let waited = 0; held === 0 && waited < 15_000; waited += 100) await page.waitForTimeout(100);
+			expect(held > 0, 'the reloaded chat is waiting for its history');
+			await sendButton(page).click();
+			// The cold-cache check answers; the send then waits for the restore.
+			await page.waitForTimeout(800);
+			await mark('New chat while the send waits for the history');
+			await page.keyboard.press('Control+N');
+			await waitChat(page, { surface: 'new' }, { timeout: 10_000 });
+			release();
+			await page.unroute(feed);
+			await page.waitForTimeout(2000);
+			const sent = await queries(page);
+			log(`queries: ${JSON.stringify(sent)}`);
+			expect(!sent.some((q) => q.includes(token)), 'the message was not sent anywhere');
+			expect((await chatState(page)).surface === 'new', 'the new chat stays empty: no chat was started with the message');
+			expect(await page.getByText('Message not sent: the chat changed before it went out', { exact: false }).first().isVisible(), 'the composer says the message was kept, not sent');
+
+			await mark('back to the chat it was written in');
+			await openFromSidebar(page, SEEDED.no_project);
+			await waitChatOpen(page);
+			expect((await chatState(page)).session === chatA, 'the first chat is open again');
+			expect((await editorText(page)).includes(token), 'the message waits there as its draft');
+			expect((await countUserRows(page, token)) === 0, 'and it was not sent in that chat either');
+			await clearComposer(page);
+			await page.waitForTimeout(500);
+		}
+	}, {
 		name: 'browser-back-after-a-sidebar-switch',
 		throttles: ['fast'],
 		async setup({ page, status }) {
