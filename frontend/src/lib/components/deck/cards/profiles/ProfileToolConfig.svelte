@@ -118,7 +118,8 @@
 	/** Strip the `mcp__server__` prefix inside a server's own card. */
 	function shortName(group: ToolSurfaceGroup, name: string): string {
 		const server = group.server?.trim();
-		return group.kind === 'mcp' && server && name.startsWith(`mcp__${server}__`)
+		const ownCard = group.kind === 'mcp' || group.kind === 'private_access';
+		return ownCard && server && name.startsWith(`mcp__${server}__`)
 			? name.slice(`mcp__${server}__`.length)
 			: name;
 	}

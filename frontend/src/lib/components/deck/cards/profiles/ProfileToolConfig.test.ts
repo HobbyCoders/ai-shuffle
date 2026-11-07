@@ -405,4 +405,29 @@ describe('private access group', () => {
 		await fireEvent.click(box);
 		expect(saved.list).toEqual(['Read', ...names]);
 	});
+
+	it('labels tiles without the mcp__chat-access__ prefix', async () => {
+		const toggled: string[] = [];
+		const { getByRole, queryByText } = render(ProfileToolConfig, {
+			props: {
+				toolSelectionMode: 'allow',
+				allowedTools: [],
+				disallowedTools: [],
+				surface: { discovered_at: '', errors: [], groups: [privateAccess] },
+				isAdmin: false,
+				onToolSelectionModeChange: vi.fn(),
+				onToggleTool: (_g: ToolSurfaceGroup, name: string) => toggled.push(name),
+				onToggleGroup: vi.fn(),
+				onRefresh: vi.fn()
+			}
+		});
+		await fireEvent.click(getByRole('button', { name: /Toggle Private access section/ }));
+		// Accessible name stays exact; only the visible label drops the prefix.
+		const tile = getByRole('checkbox', { name: 'mcp__chat-access__RequestChatAccess' });
+		expect(tile.querySelector('.tname')?.textContent?.trim()).toBe('RequestChatAccess');
+		expect(queryByText('mcp__chat-access__RequestChatAccess')).toBeNull();
+		await fireEvent.click(tile);
+		// The saved entry is still the exact runtime name.
+		expect(toggled).toEqual(['mcp__chat-access__RequestChatAccess']);
+	});
 });
