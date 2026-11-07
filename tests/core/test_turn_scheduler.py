@@ -552,9 +552,19 @@ async def test_failover_surfaces_then_queue_drains(mock_db):
     execute.assert_awaited_once()
     assert execute.await_args.args[0]["id"] == queued["id"]
 
-    # No re-append: the log still holds only the seeded terminal event.
-    types = [r["event_type"] for r in se_db.get_events("f1")]
-    assert types == ["turn.completed"]
+    # Account rotation is retired: attempt_failover only notifies, so this
+    # remains a real 429 with no known reset. Persist that warning without
+    # re-appending the terminal event or retrying instead of the queued human.
+    events = se_db.get_events("f1")
+    assert [row["event_type"] for row in events] == ["turn.completed", "system.note"]
+    assert events[0]["turn_id"] == settled["id"]
+    note = events[1]["payload"]
+    assert note["subtype"] == "limit_resume"
+    assert note["data"]["status"] == "no_reset"
+    assert note["data"]["turn_id"] == settled["id"]
+    assert note["data"]["reset_known"] is False
+    assert note["data"]["armed"] is False
+    assert note["data"]["resume_at"] is None
 
 
 async def test_chained_failover_exhaustion_terminates(mock_db):

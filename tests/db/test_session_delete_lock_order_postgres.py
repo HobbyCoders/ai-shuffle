@@ -512,6 +512,61 @@ def test_delete_vs_private_history_publication(private_pool, monkeypatch):
 
 
 
+@pytest.mark.xfail(
+    strict=True,
+    raises=psycopg2.errors.DeadlockDetected,
+    reason="pre-existing delete vs handoff publication deadlock, #1215",
+)
+def test_delete_vs_private_history_publication_delete_first(private_pool, monkeypatch):
+    from app.network import handoff
+
+    sid, token = "history-delete-first-" + uuid4().hex, uuid4().hex
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("INSERT INTO sessions (id) VALUES (%s)", (sid,))
+        cur.execute("INSERT INTO session_event_counters (session_id,next_seq) VALUES (%s,0)", (sid,))
+        cur.execute("INSERT INTO handoff_history_chunks "
+                    "(token,session_id,sdk_session_id,table_name,batch_no,rows) "
+                    "VALUES (%s,%s,NULL,'',0,'{}')", (token, sid))
+    deleting_locked, resume = threading.Event(), threading.Event()
+    delete_pid = []
+    original_cursor = base._PgDictConnection.cursor
+
+    class InterleavedCursor(RealDictCursor):
+        def execute(self, sql, params=None):
+            if sql.startswith("DELETE FROM session_events WHERE") and params == (sid,):
+                delete_pid.append(self.connection.get_backend_pid())
+                deleting_locked.set()
+                assert resume.wait(10)
+            return super().execute(sql, params)
+
+    def instrumented(self, *args, **kwargs):
+        kwargs["cursor_factory"] = InterleavedCursor
+        return original_cursor(self, *args, **kwargs)
+
+    def publish():
+        with base.get_db() as conn:
+            return handoff._publish_history(conn.cursor(), sid, token)
+
+    monkeypatch.setattr(base._PgDictConnection, "cursor", instrumented)
+    monkeypatch.setattr(sessions, "_cleanup_working_set_ref", lambda sid: None)
+    monkeypatch.setattr(sessions, "_cleanup_pending_wakeups", lambda sid: None)
+    with psycopg2.connect(**private_pool) as observer, ThreadPoolExecutor(max_workers=2) as workers:
+        observer.autocommit = True
+        deleting = workers.submit(sessions.delete_session, sid)
+        assert deleting_locked.wait(5)
+        publishing = workers.submit(publish)
+        try:
+            # Main reproduces this too: deletion owns C, publication owns its
+            # private header and waits for C, then delete's FK cascade needs H.
+            _wait_for_lock_wait(observer, delete_pid[0], publishing)
+        finally:
+            resume.set()
+        assert deleting.result(timeout=5)
+        publishing.result(timeout=5)
+    _assert_deleted(sid)
+
+
 def test_private_history_fence_has_only_two_counter_round_trips(private_pool, monkeypatch):
     from app.network import handoff
 
