@@ -1854,9 +1854,7 @@ def _stream_to_websocket_impl(
             connector_sender,
         )
 
-    if admission_lease is not None:
-        return events(admission_lease)
-    return session_admission.stream_turn(session_id, events)
+    return session_admission.stream_turn(session_id, events, lease=admission_lease)
 
 
 async def _stream_to_websocket_turn(

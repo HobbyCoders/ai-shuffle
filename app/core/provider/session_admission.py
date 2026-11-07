@@ -307,13 +307,16 @@ def _disown(task: asyncio.Task) -> None:
 
 async def stream_turn(
     session_id: str, turn: Callable[[Lease], AsyncGenerator[Dict[str, Any], None]],
+    *, lease: Optional[Lease] = None,
 ) -> AsyncGenerator[Dict[str, Any], None]:
-    """Run a streaming route under the chat's lease; a refusal is its error frame."""
-    try:
-        lease = await acquire(session_id)
-    except SessionBusyError as busy:
-        yield {"type": "error", "message": str(busy)}
-        return
+    """Drain abandoned readers, retaining a runtime's lease through persistence."""
+    owns_lease = lease is None
+    if owns_lease:
+        try:
+            lease = await acquire(session_id)
+        except SessionBusyError as busy:
+            yield {"type": "error", "message": str(busy)}
+            return
     events = turn(lease)
     handed_over = False
     try:
@@ -322,21 +325,35 @@ async def stream_turn(
     except GeneratorExit:
         # The reader left with the turn parked at a frame, so it is still alive.
         handed_over = True
-        _own(_finish_turn(events, lease))
+        finishing = _own(_finish_turn(events, lease, release=owns_lease))
+        if not owns_lease:
+            # The runtime cannot finalize before the engine and persistence
+            # tail finish. Repeated cancellation must not detach that work.
+            cancelled = False
+            while not finishing.done():
+                try:
+                    await asyncio.shield(finishing)
+                except asyncio.CancelledError:
+                    cancelled = True
+            if cancelled:
+                raise asyncio.CancelledError
         raise
     finally:
-        if not handed_over:
+        if not handed_over and owns_lease:
             close(lease)
 
 
-async def _finish_turn(events: AsyncGenerator[Dict[str, Any], None], lease: Lease) -> None:
+async def _finish_turn(
+    events: AsyncGenerator[Dict[str, Any], None], lease: Lease, *, release: bool = True,
+) -> None:
     try:
         async for _ in events:
             pass
     except Exception:
         logger.exception("A turn nobody is reading failed for %s", lease.session_id)
     finally:
-        close(lease)
+        if release:
+            close(lease)
 
 
 def _frame_size(frame: Dict[str, Any]) -> int:
