@@ -33,7 +33,14 @@ import type { SdkContextUsage } from '$lib/api/sessions';
 import type { QueuedMessage, Task } from '../../types';
 import { browserPanel } from '../../browser-panel.svelte';
 import { pendingQueue, reconcilePendingPeerMessages } from '../pending-queue';
-import { followTurnError, type TurnErrorFacts } from '../turn-error-banner';
+import {
+	followTurnError,
+	placeTurnError,
+	raiseTurnError,
+	unplaceTurnError,
+	type TurnErrorAnchor,
+	type TurnErrorFacts,
+} from '../turn-error-banner';
 import { nameStoppedTurn, nameStopRecovery, STOP_TURN_NOT_NAMED } from '$lib/utils/not-sent-hold';
 import { swarms } from '../../swarms';
 
@@ -114,6 +121,10 @@ let sentinelPending = false;
 // the gap since lastSeq at live cadence, so `caughtUp` alone does not say the
 // reduced log is the whole log. Read by the turn-error banner rule.
 let connectionCaughtUp = false;
+// The current session's turn-error banner, tied to its failed turn and stepped
+// through every reduced event (turn-error-banner.ts). Null when no banner of
+// the current session came from the socket's `error` frame.
+let bannerAnchor: TurnErrorAnchor | null = null;
 // A requested event during hydration is only a hint. Hold one dirty bit until
 // the authoritative history boundary (or hydration fallback) so a long replay
 // cannot issue one WS snapshot request per SSE chunk. Tracked per kind so a
@@ -646,7 +657,6 @@ function transcriptPatch(
 	};
 }
 
-/** See `FeedController.turnOutcomes`. */
 function turnErrorFacts(): TurnErrorFacts {
 	return {
 		outcomes: reducerState.turnOutcomes,
@@ -681,12 +691,12 @@ function fold(hydrationComplete = false): void {
 	// Every published row already belongs to the reducer; do not re-index it
 	// before the next event. Only a subsequent local array needs seeding.
 	seededMessages = patch.messages ?? null;
-	const bannerFacts = turnErrorFacts();
+	const anchor = bannerAnchor;
 	deps.update((s) => {
 		if (s.sessionId !== currentSessionId) return s;
 		// A failed turn's banner leaves once the log has moved past that
 		// failure: rewound away, or followed by a turn that finished cleanly.
-		const anchor = followTurnError(s.turnErrorAnchor, s.error, bannerFacts);
+		const outlived = anchor?.outlived === true && s.error === anchor.message;
 		return {
 			...s,
 			...patch,
@@ -694,11 +704,14 @@ function fold(hydrationComplete = false): void {
 			stopTimedOutTurnId: nameRecoveryFrom(s, reducerState.liveTurnId),
 			queuedMessages: reconcileQueuedMessages(s.queuedMessages),
 			pendingPeerMessages: reconcilePendingPeerMessages(s.pendingPeerMessages ?? [], patch.messages ?? s.messages),
-			...(anchor === 'outlived'
-				? { error: null, forkOfferSessionId: null, turnErrorAnchor: null }
-				: anchor !== s.turnErrorAnchor ? { turnErrorAnchor: anchor } : {}),
+			...(outlived ? { error: null, forkOfferSessionId: null } : {}),
 		};
 	});
+	// Done with, or the banner it was taken for is gone (sent, dismissed,
+	// replaced): nothing is left to follow.
+	if (anchor && bannerAnchor === anchor && (anchor.outlived || deps.getState().error !== anchor.message)) {
+		bannerAnchor = null;
+	}
 }
 
 // ─── Flush scheduling ─────────────────────────────────────────────────────────
@@ -847,10 +860,12 @@ export interface FeedController {
 	stop: () => void;
 	/** True when currently feeding (optionally: feeding this specific session). */
 	isFeeding: (sessionId?: string) => boolean;
-	/** What the reduced log says about this session's failed turns, and whether
-	 *  it is the whole log yet, or null when not feeding it. Ties a turn-error
-	 *  banner to its failure (turn-error-banner.ts). */
-	turnOutcomes: (sessionId: string) => TurnErrorFacts | null;
+	/** The socket raised an `error` banner for this session: tie it to its
+	 *  failed turn (`turnId` from the frame, or null) so the feed clears it once
+	 *  the log moves past that failure (turn-error-banner.ts). 'outlived' when
+	 *  the frame names a turn whose failure is already behind the log: show
+	 *  nothing. 'shown' otherwise, including when this session is not fed. */
+	raiseTurnError: (sessionId: string, message: string, turnId: string | null) => 'shown' | 'outlived';
 
 	// ── Transcript cache (S2) ──────────────────────────────────────
 	/**
@@ -919,6 +934,7 @@ function resetFeedFlags(): void {
 	everCaughtUp = false;
 	sentinelPending = false;
 	connectionCaughtUp = false;
+	bannerAnchor = null;
 	pendingResyncDirty.clear();
 	eventsReduced = 0;
 	transcriptPublished = false;
@@ -1051,6 +1067,8 @@ export const feedController: FeedController = {
 					everCaughtUp = true;
 					sentinelPending = false;
 					connectionCaughtUp = true;
+					// A message-only banner raised mid-replay learns where it arrived.
+					if (bannerAnchor) bannerAnchor = placeTurnError(bannerAnchor, turnErrorFacts());
 					clearCatchupFallback();
 					applyPendingRegistryTasks(false);
 					fold(true);
@@ -1131,6 +1149,7 @@ export const feedController: FeedController = {
 				if (ev.type === 'swarm.updated') swarms.receive(ev.swarm, sessionId);
 				if (typeof ev.command_id === 'string') clearCompactRetry(sessionId, ev.command_id);
 				reducerState = reduce(reducerState, ev);
+				if (bannerAnchor) bannerAnchor = followTurnError(bannerAnchor, ev);
 				// A replay can end a turn before any fold saw it live: name the unnamed
 				// Stop's recovery from that end, or it would bind to the next turn.
 				if ((ev.type === 'turn.completed' || ev.type === 'turn.aborted') && deps?.getState().stopTimedOutTurnId) {
@@ -1272,8 +1291,11 @@ export const feedController: FeedController = {
 				? { ...s, messages: pending, isLoadingSession: true, isHydrationSlow: false, historyStall: null }
 				: s
 		);
+		// The banner outlives the replaced log; it finds its failure in the new one.
+		const anchor = currentSessionId === sessionId && bannerAnchor ? unplaceTurnError(bannerAnchor) : null;
 		teardown(false);
 		this.start(sessionId);
+		if (currentSessionId === sessionId) bannerAnchor = anchor;
 	},
 
 	revive(sessionId?: string) {
@@ -1291,9 +1313,12 @@ export const feedController: FeedController = {
 		return sessionId === undefined || sessionId === currentSessionId;
 	},
 
-	turnOutcomes(sessionId: string) {
-		if (currentSessionId === null || sessionId !== currentSessionId) return null;
-		return turnErrorFacts();
+	raiseTurnError(sessionId: string, message: string, turnId: string | null) {
+		if (currentSessionId === null || sessionId !== currentSessionId) return 'shown';
+		const anchor = raiseTurnError(message, turnId, turnErrorFacts());
+		if (anchor === 'outlived') return 'outlived';
+		bannerAnchor = anchor;
+		return 'shown';
 	},
 
 	cachedPatch(sessionId: string) {

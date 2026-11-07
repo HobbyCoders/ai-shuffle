@@ -23,7 +23,6 @@ import type { SessionAttention } from './session/ws-message-handlers';
 import { dismissSettledSessionPrompts, snapshotSessionPrompts, type SettlePromptSnapshot } from './session/settle-prompts';
 import type { SdkContextUsage } from '$lib/api/sessions';
 import type { LiveCompaction } from './session/v2/reducer';
-import type { TurnErrorAnchor } from './session/turn-error-banner';
 
 // Session infrastructure
 import { createWsConnection, type WsConnection } from './session/ws-connection';
@@ -204,10 +203,6 @@ export interface ActiveSessionState {
 	 *  `offer_fork` means the worker that owns the session is unreachable.
 	 *  Cleared together with `error`. */
 	forkOfferSessionId?: string | null;
-	/** Set when a failed turn's `error` frame raised `error`: the feed position
-	 *  that banner belongs to, so the feed can clear it once the transcript has
-	 *  moved past the failure (turn-error-banner.ts). */
-	turnErrorAnchor?: TurnErrorAnchor | null;
 	profile: string;
 	sessionProfileId: string | null;
 	currentQueryProfileId: string | null;
@@ -424,7 +419,6 @@ function defaultState(): ActiveSessionState {
 		wsReconnectRequired: false,
 		error: null,
 		forkOfferSessionId: null,
-		turnErrorAnchor: null,
 		profile: getPersistedProfile(),
 		sessionProfileId: null,
 		currentQueryProfileId: null,

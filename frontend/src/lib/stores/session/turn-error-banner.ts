@@ -7,38 +7,48 @@
  *   - a different turn finished cleanly after it (a queued follow-up, or the
  *     owner's next message), so the latest send no longer reads as failed.
  *
- * Both are read from the event log, never from when the socket's `error` frame
- * happened to arrive: that frame can reach the browser before or after the
- * feed's own events, and a reload or resume replays the log afterwards. The log
- * records each failure as `turn.aborted(reason='error', message)`, with the
- * same message the frame carries (the reducer's `turnOutcomes`). So the banner
- * follows that durable failure:
+ * Both are read from the event log, in log order, never from when the
+ * socket's `error` frame happened to arrive: that frame usually reaches the
+ * browser before its turn's failure is logged, a lagging or hydrating feed can
+ * be far behind it, and a reload or reconnect replays the log afterwards.
  *
- *   - A frame that names its turn (`turn_id`) belongs to that turn's failure,
- *     whenever the feed reduces it. That is exact at any point of a replay.
- *   - A frame named by its message alone could be for any failure with the
- *     same words, so it is only matched against a log that is complete: the
- *     feed has caught up (hydrated, and not replaying a reconnect's gap). Until
- *     then the banner stays and nothing about it is decided, because a partly
- *     replayed log can hold an old failure with these words and its successor
- *     but not yet the failure this frame is for. Once caught up, the banner
- *     follows the newest failure with its words that the log has not moved
- *     past. When there is none, its failure is still on the way, so it follows
- *     the first one logged after that point.
+ * The runtime names the failed turn on the frame (`turn_id`, the id on that
+ * turn's `turn.aborted` / `turn.completed`, #1238), and that is the only exact
+ * tie. The feed controller holds the anchor and steps it through every event
+ * it reduces (`followTurnError`), not only at a fold, so a replay folded in
+ * batches, or in one, ends where the log says:
  *
- * Whether a failure is outlived is read from facts the reducer keeps for every
- * failure ever logged (`failureOutlived`), so a failure that has dropped out of
- * the reducer's short list of recent failures still retires its banner.
+ *   1. waiting: until the log records the end of the frame's turn. Nothing
+ *      before that end can retire the banner, whatever its words.
+ *   2. bound to that end's seq. A clean finish of another turn, or a rewind
+ *      that cuts at or before it, logged after it, retires the banner.
+ *   3. outlived: the next fold clears the banner.
  *
- * A message-only frame whose failure never shows up after that point was a
- * late repeat of an old one. Its banner stays until the next clean finish or
- * rewind is logged, which it could only precede if it were already logged.
- * A pre-stream refusal that never becomes a turn keeps its old behaviour.
+ * A frame that arrives after its turn's failure was reduced binds to it at
+ * once from the reducer's recent failures; a frame for a failure the log has
+ * already moved past raises nothing.
+ *
+ * A frame with no `turn_id` comes from an older worker (or is not about a
+ * turn). Its words can match any failure, so it is followed conservatively:
+ * it never clears for anything logged before a failure with the same words
+ * that was logged after the frame arrived. "Arrived" is the feed's position
+ * then, once that position is the end of a complete log: during hydration or
+ * a reconnect's replay it is the server's `caught_up` point instead. A frame
+ * whose failure the feed had already passed (or one that never becomes a
+ * turn) is never matched, and stays until the owner sends or dismisses it, as
+ * every banner did before. The one residual: a feed that lags the socket by a
+ * whole earlier failed turn with the very same words can bind to that one.
  *
  * Only the exact banner the anchor was taken for is cleared: any other message
  * written into `error` since (a take-over, a refused send) keeps its own rules.
  */
-import { failureOutlived, NO_TURN_OUTCOMES, type TurnFailureFact, type TurnOutcomes } from './v2/reducer';
+import {
+	completedCleanly,
+	failureOutlived,
+	NO_TURN_OUTCOMES,
+	type TurnOutcomes,
+	type WireEvent,
+} from './v2/reducer';
 
 /** What ties a banner to the failed turn that raised it. */
 export interface TurnErrorAnchor {
@@ -46,82 +56,79 @@ export interface TurnErrorAnchor {
 	message: string;
 	/** The frame's own turn id, when it named one. */
 	turnId: string | null;
-	/** The logged failure the banner follows, once known. */
+	/** The logged end of the banner's failed turn, once the feed reduced it. */
 	failure: { seq: number; turnId: string } | null;
-	/** With no failure yet: only a failure logged after this seq can be the
-	 *  banner's. Null until a message-only frame has been matched against a
-	 *  caught-up log. */
+	/** A message-only frame: only a failure logged after this seq can be its
+	 *  own. Null until that position is known (see `placeTurnError`). */
 	afterSeq: number | null;
+	/** The log has moved past `failure`: the next fold clears the banner. */
+	outlived: boolean;
 }
 
-/** The feed facts the rule reads. */
+/** The feed facts read when a frame arrives. */
 export interface TurnErrorFacts {
 	outcomes?: TurnOutcomes;
 	/** The seq the feed has reduced up to. */
 	lastSeq?: number;
-	/** Whether the reduced log is the whole log as of now: hydration finished on
-	 *  the server's sentinel, and no reconnect is replaying a gap. */
+	/** The reduced log is the whole log as of the last `caught_up`: hydration
+	 *  ended on the server's sentinel and no reconnect is replaying a gap. */
 	caughtUp?: boolean;
 }
 
-function belongsTo(anchor: TurnErrorAnchor, failure: TurnFailureFact): boolean {
-	return anchor.turnId ? failure.turnId === anchor.turnId : failure.message === anchor.message;
-}
-
-function newestMatch(anchor: TurnErrorAnchor, failures: readonly TurnFailureFact[], afterSeq: number): TurnFailureFact | null {
-	for (let i = failures.length - 1; i >= 0; i--) {
-		const f = failures[i];
-		if (f.seq <= afterSeq) return null;
-		if (belongsTo(anchor, f)) return f;
-	}
-	return null;
-}
+const str = (v: unknown): string => (typeof v === 'string' ? v : '');
 
 /**
- * Tie a banner the socket just raised to its failure. 'outlived' when the frame
- * names a turn whose failure the log has already moved past: it came late.
+ * Tie a banner the socket just raised to its failure. 'outlived' when the
+ * frame names a turn whose failure the log has already moved past: it came
+ * late, and raises nothing.
  */
 export function raiseTurnError(message: string, turnId: string | null, facts: TurnErrorFacts): TurnErrorAnchor | 'outlived' | null {
 	if (!message) return null;
-	return followTurnError({ message, turnId, failure: null, afterSeq: null }, message, facts);
+	const anchor: TurnErrorAnchor = { message, turnId, failure: null, afterSeq: null, outlived: false };
+	if (!turnId) return placeTurnError(anchor, facts);
+	const outcomes = facts.outcomes ?? NO_TURN_OUTCOMES;
+	const known = outcomes.failures.findLast((f) => f.turnId === turnId);
+	// Not logged yet (the usual case): followed event by event from here.
+	if (!known) return anchor;
+	return failureOutlived(outcomes, known) ? 'outlived' : { ...anchor, failure: { seq: known.seq, turnId } };
 }
 
 /**
- * The banner's anchor after the feed reduced more of the log: the same object
- * when nothing changed, a new one when it found or moved to its failure, or
- * 'outlived' once the log has moved past that failure and the banner goes.
- * `error` is the banner shown now; an anchor taken for other text is left be.
+ * Give a message-only anchor its arrival position, once the reduced log is
+ * complete: at the frame when the feed was caught up, else at the next
+ * `caught_up` sentinel. The same anchor when there is nothing to place.
  */
-export function followTurnError(
-	anchor: TurnErrorAnchor | null | undefined,
-	error: string | null,
-	facts: TurnErrorFacts
-): TurnErrorAnchor | 'outlived' | null {
-	if (!anchor || error !== anchor.message) return anchor ?? null;
-	// Message-only: nothing is decided against a log still catching up.
-	if (!anchor.turnId && !facts.caughtUp) return anchor;
-	const outcomes = facts.outcomes ?? NO_TURN_OUTCOMES;
-	let a = anchor;
-	if (!a.failure && a.afterSeq === null) {
-		const known = newestMatch(a, outcomes.failures, -1);
-		if (known && !failureOutlived(outcomes, known)) {
-			a = { ...a, failure: { seq: known.seq, turnId: known.turnId } };
-		} else if (a.turnId) {
-			// Its own failure, already outlived: a late frame. Not logged yet: wait.
-			return known ? 'outlived' : a;
-		} else {
-			// Every failure with these words is behind us: this one is still on the way.
-			a = { ...a, afterSeq: facts.lastSeq ?? 0 };
-		}
+export function placeTurnError(anchor: TurnErrorAnchor, facts: TurnErrorFacts): TurnErrorAnchor {
+	if (anchor.turnId || anchor.failure || anchor.afterSeq !== null || !facts.caughtUp) return anchor;
+	return { ...anchor, afterSeq: facts.lastSeq ?? 0 };
+}
+
+/** Step the anchor through one reduced log event; the same object when it
+ *  changes nothing. */
+export function followTurnError(anchor: TurnErrorAnchor, event: WireEvent): TurnErrorAnchor {
+	if (anchor.outlived) return anchor;
+	const seq = typeof event.seq === 'number' ? event.seq : null;
+	if (seq === null) return anchor;
+	const ended = event.type === 'turn.aborted' || event.type === 'turn.completed';
+	if (!anchor.failure) {
+		if (!ended) return anchor;
+		const turnId = str(event.turn_id);
+		const own = anchor.turnId
+			? turnId === anchor.turnId
+			: anchor.afterSeq !== null && seq > anchor.afterSeq && event.type === 'turn.aborted'
+				&& event.reason === 'error' && str(event.message) === anchor.message;
+		return own ? { ...anchor, failure: { seq, turnId } } : anchor;
 	}
-	// A newer failure with the same words (or of the same turn) is the one the
-	// banner now reports.
-	const newer = newestMatch(a, outcomes.failures, a.failure?.seq ?? a.afterSeq ?? -1);
-	if (newer) a = { ...a, failure: { seq: newer.seq, turnId: newer.turnId } };
-	if (a.failure) return failureOutlived(outcomes, a.failure) ? 'outlived' : a;
-	if (a.turnId || a.afterSeq === null) return a;
-	// Still no failure since `afterSeq`, yet a clean finish or a rewind was
-	// logged after it: the frame's failure came before that point after all.
-	const latestFinish = outcomes.finishes[0]?.seq ?? 0;
-	return latestFinish > a.afterSeq || outcomes.lastRewindSeq > a.afterSeq ? 'outlived' : a;
+	if (seq <= anchor.failure.seq) return anchor;
+	const finishedAfter = event.type === 'turn.completed' && str(event.turn_id) !== anchor.failure.turnId
+		&& completedCleanly(event as Record<string, unknown>);
+	const cutAway = event.type === 'transcript.rewound' && typeof event.from_seq === 'number'
+		&& event.from_seq <= anchor.failure.seq;
+	return finishedAfter || cutAway ? { ...anchor, outlived: true } : anchor;
+}
+
+/** A replaced log (the feed restarted on it) means old seqs say nothing: the
+ *  anchor waits for its failure again, unless it is already outlived. */
+export function unplaceTurnError(anchor: TurnErrorAnchor): TurnErrorAnchor {
+	return anchor.outlived ? anchor : { ...anchor, failure: null, afterSeq: null };
 }

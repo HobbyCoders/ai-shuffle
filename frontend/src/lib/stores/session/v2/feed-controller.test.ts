@@ -2639,54 +2639,109 @@ describe('feedController usage ownership (W7)', () => {
 	});
 });
 
-describe('feedController turn-error banner (#1082, #1175)', () => {
+describe('feedController turn-error banner (#1082, #1175, #1238)', () => {
 	const FAILED = 'provider returned HTTP 500';
 	const logged = (type: string, seq: number, fields: Record<string, unknown> = {}) =>
 		({ type, id: `ev-${seq}`, seq, session_id: 's1', created_at: '2026-07-12T00:00:00.000Z', ...fields });
-	const failure = (turn: string, seq: number) => [
+	const failure = (turn: string, seq: number, message = FAILED) => [
 		logged('turn.started', seq, { turn_id: turn }),
-		logged('turn.aborted', seq + 1, { turn_id: turn, reason: 'error', message: FAILED }),
+		logged('turn.aborted', seq + 1, { turn_id: turn, reason: 'error', message }),
 	];
 	const success = (turn: string, seq: number) => [
 		logged('turn.started', seq, { turn_id: turn }),
 		logged('turn.completed', seq + 1, { turn_id: turn }),
 	];
 
-	function chatWithBanner() {
+	function chat(history: Record<string, unknown>[] = [], hydrated = true) {
 		const deps = makeDeps();
 		feedController.attach(deps);
 		feedController.start('s1');
-		for (const e of failure('t1', 1)) hoisted.onEvent!(e);
-		hoisted.onEvent!(caughtUp(2));
-		// The socket's frame for t1, by its words alone, as runtime errors arrive.
-		createMessageHandlers({ update: deps.update, getState: deps.getState } as unknown as MessageHandlerDeps)
-			.handleMessage({ type: 'error', session_id: 's1', message: FAILED });
-		expect(deps.state.error).toBe(FAILED);
-		return deps;
+		for (const e of history) hoisted.onEvent!(e);
+		if (hydrated) hoisted.onEvent!(caughtUp(history.length ? (history.at(-1)!.seq as number) : 0));
+		const socket = createMessageHandlers({ update: deps.update, getState: deps.getState } as unknown as MessageHandlerDeps);
+		// The runtime's `error` frame, naming its turn (#1238) or, from an older worker, not.
+		const raise = (turnId: string | null) => {
+			socket.handleMessage({ type: 'error', session_id: 's1', message: FAILED, ...(turnId ? { turn_id: turnId } : {}) });
+		};
+		/** Live events, each folded on its own frame: the banner after each. */
+		const live = (events: Record<string, unknown>[]) =>
+			events.map((e) => {
+				hoisted.onEvent!(e);
+				flushRaf();
+				return deps.state.error === FAILED ? 'shown' : 'cleared';
+			});
+		return { deps, raise, live };
 	}
 
-	it('clears the banner on the live fold once another turn finishes cleanly', () => {
-		const deps = chatWithBanner();
-		for (const e of success('t2', 3)) hoisted.onEvent!(e);
-		flushRaf();
-		expect(deps.state.error).toBeNull();
-		expect(deps.state.turnErrorAnchor).toBeNull();
+	it('clears the banner on the live fold once another turn finishes cleanly, not before', () => {
+		const { deps, raise, live } = chat([logged('turn.started', 1, { turn_id: 't1' })]);
+		raise('t1');
+		expect(deps.state.error).toBe(FAILED);
+		expect(live([logged('turn.aborted', 2, { turn_id: 't1', reason: 'error', message: FAILED }), ...success('t2', 3)]))
+			.toEqual(['shown', 'shown', 'cleared']);
 	});
 
-	it('keeps a message-only banner through every fold of a reconnect gap, then follows the newest failure', () => {
-		const deps = chatWithBanner();
-		// The connection drops; the reconnect replays the gap at live cadence.
-		hoisted.onOpen!();
-		for (const e of [...success('t2', 3), ...failure('t3', 5)]) {
-			hoisted.onEvent!(e);
-			flushRaf();
-			expect(deps.state.error, `after seq ${e.seq}`).toBe(FAILED);
-		}
-		hoisted.onEvent!(caughtUp(6));
-		expect(deps.state.error).toBe(FAILED);
-		expect(deps.state.turnErrorAnchor?.failure).toEqual({ seq: 6, turnId: 't3' });
-		for (const e of success('t4', 7)) hoisted.onEvent!(e);
+	it('S2 (a): a caught-up feed behind at an old same-words failure; every fold until its own turn\'s successor shows it', () => {
+		const { raise, live } = chat(failure('t0', 1));
+		raise('t1');
+		expect(live([...success('tx', 3), ...failure('t1', 5), ...success('t2', 7)]))
+			.toEqual(['shown', 'shown', 'shown', 'shown', 'shown', 'cleared']);
+	});
+
+	it('S2 (a) by words alone (older worker): the old failure\'s success does not clear it; its own successor does', () => {
+		const { raise, live } = chat(failure('t0', 1));
+		raise(null);
+		expect(live([...success('tx', 3), ...failure('t1', 5), ...success('t2', 7)]))
+			.toEqual(['shown', 'shown', 'shown', 'shown', 'shown', 'cleared']);
+	});
+
+	it('S6 by words alone: placed at the sentinel, it follows its failure past 16 others to the clean finish', () => {
+		const { deps, raise } = chat(success('t0', 1));
+		raise(null);
+		const others = Array.from({ length: 16 }, (_, i) => failure(`o${i}`, 10 + i * 2, `other ${i}`)).flat();
+		for (const e of [...failure('t1', 3), ...others, ...success('t2', 50)]) hoisted.onEvent!(e);
 		flushRaf();
 		expect(deps.state.error).toBeNull();
+	});
+
+	it('S2 (b) and S6: raised during hydration, then one atomic replay of its failure, 16 others and a clean finish', () => {
+		const { deps, raise } = chat([], false);
+		raise('t1');
+		const others = Array.from({ length: 16 }, (_, i) => failure(`o${i}`, 10 + i * 2, `other ${i}`)).flat();
+		for (const e of [...failure('t1', 1), ...others, ...success('t2', 50)]) hoisted.onEvent!(e);
+		flushRaf();
+		expect(deps.state.error).toBe(FAILED);
+		hoisted.onEvent!(caughtUp(51));
+		expect(deps.state.error).toBeNull();
+	});
+
+	it('a turn-named banner follows a reconnect gap fold by fold', () => {
+		const { raise, live } = chat([logged('turn.started', 1, { turn_id: 't1' })]);
+		raise('t1');
+		hoisted.onOpen!();
+		expect(live([logged('turn.aborted', 2, { turn_id: 't1', reason: 'error', message: FAILED }), ...success('t2', 3)]))
+			.toEqual(['shown', 'shown', 'cleared']);
+	});
+
+	it('a turn-named banner survives a restart onto a replaced log and finds its failure in it', () => {
+		const { deps, raise, live } = chat(failure('t1', 1));
+		raise('t1');
+		feedController.restart('s1');
+		for (const e of failure('t1', 1)) hoisted.onEvent!(e);
+		hoisted.onEvent!(caughtUp(2));
+		expect(deps.state.error).toBe(FAILED);
+		expect(live(success('t2', 3))).toEqual(['shown', 'cleared']);
+	});
+
+	it('a message-only frame (older worker) never clears on what came before a same-words failure logged after it', () => {
+		// Raised mid-gap: the gap's same-words failure and its success may be its own or not, so they decide nothing.
+		const { deps, raise, live } = chat(success('t0', 1));
+		hoisted.onOpen!();
+		raise(null);
+		expect(live([...failure('t1', 3), ...success('t2', 5)])).toEqual(['shown', 'shown', 'shown', 'shown']);
+		hoisted.onEvent!(caughtUp(6));
+		expect(deps.state.error).toBe(FAILED);
+		// Placed at the sentinel: the next same-words failure is its own, and its successor clears it.
+		expect(live([...failure('t3', 7), ...success('t4', 9)])).toEqual(['shown', 'shown', 'shown', 'cleared']);
 	});
 });

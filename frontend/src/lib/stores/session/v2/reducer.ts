@@ -215,12 +215,13 @@ export interface V2SessionState {
 	turnOutcomes?: TurnOutcomes;
 }
 
-/** One failed turn (`turn.aborted` reason 'error'), as the log recorded it. */
+/** One failed turn, as the log recorded it: a `turn.aborted` with reason
+ *  'error', or a `turn.completed` carrying the provider's failure. */
 export interface TurnFailureFact {
 	turnId: string;
-	/** Seq of its `turn.aborted` event. */
+	/** Seq of the event that ended it. */
 	seq: number;
-	/** The abort's error message ('' when it carried none). */
+	/** The abort's error message ('' when it carried none, and for a failed completion). */
 	message: string;
 }
 
@@ -239,10 +240,11 @@ export interface RewindCut {
 /**
  * The facts that say whether the log has moved past a failed turn: a rewind
  * cut it away, or a different turn finished cleanly after it (see
- * `failureOutlived`). Only `failures` is capped, and it is only used to find
- * which failure an error banner belongs to; whether that failure is outlived
- * is read from `finishes` and `cuts`, which stay exact for every failure ever
- * logged, kept in the list or not.
+ * `failureOutlived`). Only `failures` is capped. It is only read when an
+ * error frame arrives after the feed already reduced its turn's failure (the
+ * feed follows a banner raised earlier event by event, see
+ * turn-error-banner.ts), and whether a failure is outlived is read from
+ * `finishes` and `cuts`, which stay exact for every failure ever logged.
  */
 export interface TurnOutcomes {
 	/** The most recent failures, oldest first, at most TURN_FAILURES_KEPT. */
@@ -255,14 +257,12 @@ export interface TurnOutcomes {
 	 *  that reaches as far back replaces earlier ones, so `fromSeq` ascends
 	 *  too, and the first cut after a failure is the deepest one after it. */
 	cuts: readonly RewindCut[];
-	/** Seq of the latest rewind of any kind (0 = none). */
-	lastRewindSeq: number;
 }
 
 /** How many failed turns `TurnOutcomes.failures` keeps. */
 const TURN_FAILURES_KEPT = 16;
 
-export const NO_TURN_OUTCOMES: TurnOutcomes = { failures: [], finishes: [], cuts: [], lastRewindSeq: 0 };
+export const NO_TURN_OUTCOMES: TurnOutcomes = { failures: [], finishes: [], cuts: [] };
 
 /** Whether the log has moved past `failure`: a different turn finished
  *  cleanly after it, or a later rewind cut it away. */
@@ -287,12 +287,16 @@ function recordRewind(outcomes: TurnOutcomes, cut: RewindCut): TurnOutcomes {
 	const cuts = newest && newest.seq >= cut.fromSeq
 		? [...outcomes.cuts.filter((c) => c.fromSeq < cut.fromSeq), cut]
 		: outcomes.cuts;
-	return { ...outcomes, cuts, lastRewindSeq: cut.seq };
+	return cuts === outcomes.cuts ? outcomes : { ...outcomes, cuts };
+}
+
+function recordFailure(outcomes: TurnOutcomes, failure: TurnFailureFact): TurnOutcomes {
+	return { ...outcomes, failures: [...outcomes.failures, failure].slice(-TURN_FAILURES_KEPT) };
 }
 
 /** A `turn.completed` that carries the provider's failure (a usage-limit 429,
  *  an `is_error` result) ended the turn without a clean answer. */
-function completedCleanly(event: Record<string, unknown>): boolean {
+export function completedCleanly(event: Record<string, unknown>): boolean {
 	if (event.api_error_status !== undefined && event.api_error_status !== null) return false;
 	if (event.is_error) return false;
 	const errors = event.errors;
@@ -1570,10 +1574,11 @@ function reduceInternal(
 					usage: obj(event.usage) ?? state.usage,
 					outputTokensTotal: (state.outputTokensTotal ?? 0) + turnOutputTokens(event.usage),
 					// A clean finish of another turn moves the transcript past every
-					// earlier failure (#1175); a failed completion moves it past none.
+					// earlier failure (#1175); a failed completion moves it past none,
+					// and is a failure of its own turn.
 					turnOutcomes: completedCleanly(event)
 						? recordCleanFinish(state.turnOutcomes ?? NO_TURN_OUTCOMES, { seq, turnId: str(event.turn_id) })
-						: state.turnOutcomes,
+						: recordFailure(state.turnOutcomes ?? NO_TURN_OUTCOMES, { turnId: str(event.turn_id), seq, message: '' }),
 				})
 			);
 			// A retry card left mid-count is finished business now — the turn
@@ -1643,9 +1648,8 @@ function reduceInternal(
 			let next = dismissProseThrough(closeOpen(state), seq, seq, observe);
 			if (reason === 'error') {
 				// Both returns below spread `next`, so the failure is recorded once.
-				const outcomes = next.turnOutcomes ?? NO_TURN_OUTCOMES;
 				const failure: TurnFailureFact = { turnId: str(event.turn_id), seq, message: str(event.message) };
-				next = { ...next, turnOutcomes: { ...outcomes, failures: [...outcomes.failures, failure].slice(-TURN_FAILURES_KEPT) } };
+				next = { ...next, turnOutcomes: recordFailure(next.turnOutcomes ?? NO_TURN_OUTCOMES, failure) };
 			}
 			if (reason === 'interrupt') {
 				// Mark any still-running tool card as errored (mirrors the legacy
