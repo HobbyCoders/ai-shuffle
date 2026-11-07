@@ -592,6 +592,24 @@ def test_single_session_append_turn_and_park_repair_never_take_multi_gate(
     assert multi_session_gate_is_first == []
 
 
+def test_creation_and_first_event_can_share_the_uncommitted_transaction(private_pool):
+    from app.db import database
+
+    sid, profile = "first-event-" + uuid4().hex, "agent-" + uuid4().hex
+    database.create_profile(profile, "Creation audit", None, {})
+    with base.transaction() as conn:
+        sessions.create_session(sid, profile, _conn=conn)
+        assert session_events.append_events(sid, [{"type": "system.note", "payload": {}}], _conn=conn) == (1, 1)
+        with psycopg2.connect(**private_pool) as observer:
+            with observer.cursor() as cursor:
+                cursor.execute("SELECT id FROM sessions WHERE id=%s", (sid,))
+                assert cursor.fetchone() is None  # creation has not committed yet
+    # Independent writers are started after creation returns/commits in the
+    # audited API, remote-control and worker-dispatch paths.
+    assert session_events.append_events(sid, [{"type": "system.note", "payload": {}}]) == (2, 2)
+    assert len(session_events.get_events(sid)) == 2
+
+
 @pytest.mark.parametrize("deleted", ["sender", "receiver"])
 def test_delete_vs_reachable_top_level_message(private_pool, monkeypatch, deleted):
     from app.db import database
