@@ -388,6 +388,64 @@ it('does not revive a deferred local branch after a newer explicit clear on the 
  expect(p.worktreeForProject(shared)).toEqual({intent:'worktree',checkout:null});
  expect(p.worktreeForProject(local).checkout).toBeNull();
 });
+// #1078: the catalog retires the identity a branch was picked under (O) for a
+// replacement (N, then maybe M) while a create holds that branch. One rule: the
+// held branch lands at the final identity only where no choice is saved, and is
+// dropped where a newer or explicit owner choice exists; that choice is kept.
+type Id='O'|'N'|'M';
+const chainRows:{name:string; script:string; ends:Partial<Record<Id,string|null>>; auto?:Id; retryAt?:Id}[]=[
+ {name:'a single replacement', script:'claim O>N ?N release', ends:{O:null,N:'topic/old',M:null}},
+ {name:'a failed create, then a retry that spends it', script:'claim O>N release', ends:{N:'topic/old'}, retryAt:'N'},
+ {name:'two creates: the older one settling first never takes the newer hold', script:'claim claim2 O>N release !O release2', ends:{O:null,N:'topic/old'}, retryAt:'N'},
+ {name:'a chain to an identity with no choice', script:'claim O>N N>M release', ends:{O:null,N:null,M:'topic/old'}},
+ {name:'a chain back home with no edits', script:'claim O>N N>O release', ends:{O:'topic/old',N:null}},
+ {name:'a chain back home after the owner cleared the replacement', script:'claim O>N clearN N>O release', ends:{O:null,N:null}, auto:'O'},
+ {name:'a chain to an identity with an explicit Auto', script:'autoM claim O>N N>M release', ends:{O:null,N:null,M:null}, auto:'M'},
+ {name:'a chain back home after a newer choice arrived there from another device', script:'claim O>N clearN remoteO N>O release', ends:{O:'topic/newer',N:null}},
+ {name:'a chain that returns to an identity it left, with no edits', script:'claim O>N N>M M>N release', ends:{O:null,N:'topic/old',M:null}},
+];
+it.each(chainRows)('lands or drops a held branch move: $name', async ({script, ends, auto, retryAt}) => {
+ const {composerPreferences:p, projectWorktreeKey:key}=await import('./composer-preferences');
+ const ids:Record<Id,{projectId:string;projectV2Id:string}>={O:{projectId:'a',projectV2Id:'pv2-o'}, N:{projectId:'a',projectV2Id:'pv2-n'}, M:{projectId:'a',projectV2Id:'pv2-m'}};
+ const branch=(id:Id,name:string)=>({...ids[id],kind:'branch' as const,branch:name,baseBranch:'main',createNew:true});
+ p.rememberWorktreeIntent(ids.O,'worktree');
+ p.rememberCheckout(ids.O,branch('O','topic/old'));
+ const claims:Record<string,{release():void}>={};
+ for (const step of script.split(' ')) {
+  const link=/^([ONM])>([ONM])$/.exec(step);
+  if (link) p.linkWorktreeProject(ids[link[2] as Id],ids[link[1] as Id]);
+  else if (step==='claim' || step==='claim2') claims[step]=p.claimBranchChoice(ids.O,'topic/old',true);
+  else if (step==='release') claims.claim.release();
+  else if (step==='release2') claims.claim2.release();
+  else if (step==='clearN') p.rememberCheckout(ids.N,null); // The owner picks Auto under N.
+  else if (step==='autoM') p.rememberWorktreeIntent(ids.M,'worktree'); // Explicit Auto under M.
+  else if (step==='remoteO') mocks.adapters.get(key(ids.O))!.apply({intent:'worktree',checkout:branch('O','topic/newer')});
+  else if (step==='?N') expect(p.worktreeForProject(ids.N)).toEqual({intent:'worktree',checkout:null}); // Intent follows at once.
+  else if (step==='!O') expect(p.worktreeForProject(ids.N).checkout).toBeNull(); // Still held by the newer create.
+  else throw new Error(step);
+ }
+ for (const [id,name] of Object.entries(ends) as [Id,string|null][]) {
+  expect(p.worktreeForProject(ids[id]).checkout?.branch ?? null, id).toBe(name);
+  // The branch arrives whole, rebound to its identity, with the worktree intent.
+  if (name) expect(p.worktreeForProject(ids[id]), id).toEqual({intent:'worktree',checkout:branch(id,name)});
+ }
+ if (auto) expect(p.worktreeForProject(ids[auto])).toEqual({intent:'worktree',checkout:null});
+ if (ends.O===null && auto!=='O') expect(mocks.save).toHaveBeenCalledWith(key(ids.O),null); // O retired and synced as gone.
+ if (retryAt) {
+  p.claimBranchChoice(ids[retryAt],'topic/old',true).consume();
+  for (const id of ['O','N','M'] as Id[]) expect(p.worktreeForProject(ids[id]).checkout, id).toBeNull();
+ }
+});
+it('keeps a saved choice for the replacement identity, and never links across local projects', async () => {
+ const {composerPreferences:p}=await import('./composer-preferences');
+ const old={projectId:'a',projectV2Id:'pv2-local'}, next={projectId:'a',projectV2Id:'pv2-shared'};
+ p.rememberCheckout(old,{...old,kind:'branch',branch:'topic/old',baseBranch:'main',createNew:true});
+ p.linkWorktreeProject({projectId:'b',projectV2Id:'pv2-shared'},old);
+ expect(p.worktreeForProject(old).checkout?.branch).toBe('topic/old');
+ p.rememberCheckout(next,{...next,kind:'branch',branch:'topic/remote',baseBranch:'main',createNew:false});
+ p.linkWorktreeProject(next,old);
+ expect(p.worktreeForProject(next).checkout?.branch).toBe('topic/remote');
+});
 it('migrates the legacy fast flag only for the last selected model', async () => {
  localStorage.setItem('aihub_lastModel','prov:api:claude-opus-5'); localStorage.setItem('aihub_lastFastMode','1');
  const {composerPreferences:p} = await import('./composer-preferences');

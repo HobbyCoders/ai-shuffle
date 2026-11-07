@@ -12,6 +12,8 @@
 //   type-and-send        focus, type, send in an open chat; reply settles
 //   sheets               model, tool access, effort and context sheets: open, close
 //   new-chat-needs-agent tap Send with no agent: told why, text kept; pick one, send
+//   controls-pages       Chat controls: Project page fills the sheet; pick and remove
+//                        a project, then Runs on and back never shift the pages sideways
 import { fakeAiTag, runJourney } from './runner.mjs';
 import {
 	composer,
@@ -86,6 +88,45 @@ const SHEETS = [
 	// A chat with nothing used shows no ring on the composer: Chat controls keeps the row.
 	{ trigger: /^Context and usage/, inControls: true, sheet: (page) => page.getByRole('dialog', { name: 'Context and usage' }) }
 ];
+
+/**
+ * Chat controls' sliding pages: the pages box's sideways scroll, the active
+ * page and its hosted menu's boxes, and the main page's Setup rows.
+ */
+const controlsPages = (page) =>
+	page.evaluate(() => {
+		const box = (el) => {
+			if (!el) return null;
+			const r = el.getBoundingClientRect();
+			return { left: Math.round(r.left), right: Math.round(r.right), width: Math.round(r.width) };
+		};
+		const pages = document.querySelector('.mcp-pages');
+		const active = document.querySelector('.mcp-page.active');
+		const menu = active?.querySelector('.mcp-host > *');
+		return {
+			vw: innerWidth,
+			scrollLeft: pages?.scrollLeft ?? null,
+			page: active?.dataset.page ?? null,
+			pageBox: box(active),
+			menuBox: box(menu),
+			rows: [...document.querySelectorAll('.mcp-page[data-page="main"] .mcp-setup .ctx-chip')].map((el) => ({
+				label: el.getAttribute('aria-label'),
+				...box(el)
+			}))
+		};
+	});
+
+function expectPagesInPlace(state, what) {
+	expect(state.scrollLeft === 0, `${what}: the pages are not scrolled sideways (scrollLeft ${state.scrollLeft})`);
+	expect(state.pageBox && state.pageBox.left >= -1 && state.pageBox.right <= state.vw + 1, `${what}: the ${state.page} page is on screen (${JSON.stringify(state.pageBox)})`);
+}
+
+function expectMenuFillsPage(state, what) {
+	const { menuBox, pageBox } = state;
+	// The hosted menu sits inside the page's own side padding (16px each side).
+	expect(menuBox && pageBox && menuBox.width >= pageBox.width - 48, `${what}: the menu fills the page (${JSON.stringify({ menuBox, pageBox })})`);
+	expect(menuBox.left >= pageBox.left - 1 && menuBox.right <= pageBox.right + 1, `${what}: the menu stays inside the page (${JSON.stringify({ menuBox, pageBox })})`);
+}
 
 await runJourney({
 	name: 'phone-composer',
@@ -192,6 +233,72 @@ await runJourney({
 				await sendButton(page).tap();
 				await waitTurnSettled(page, { text: `You said: “no agent yet ${token}`, messagesAtLeast: 2 });
 				expect((await countUserRows(page, token)) === 1, 'the message shows once');
+			}
+		},
+		{
+			name: 'controls-pages',
+			async setup({ page, status }) {
+				await gotoApp(page, status);
+				await waitChat(page, { surface: 'new' });
+				await page.waitForTimeout(1000);
+			},
+			async act({ page, mark }) {
+				const sheet = page.locator('.mcp[role="dialog"]');
+				const settle = () => page.waitForTimeout(500);
+				const onPage = (name) =>
+					page.waitForFunction((n) => document.querySelector('.mcp-page.active')?.dataset.page === n, name, { timeout: 5000 });
+				const openPage = async (name, trigger) => {
+					await sheet.locator('.mcp-page[data-page="main"]').getByRole('button', { name: trigger }).first().tap();
+					await onPage(name);
+					await settle();
+				};
+
+				await mark('open Chat controls');
+				await page.getByRole('button', { name: /^All chat controls/ }).tap();
+				await page.getByRole('dialog', { name: 'Chat controls' }).waitFor({ timeout: 5000 });
+				await settle();
+
+				await mark('open the Project page');
+				await openPage('project', /^No project/);
+				let state = await controlsPages(page);
+				expectPagesInPlace(state, 'Project page');
+				expectMenuFillsPage(state, 'Project page');
+
+				await mark('pick a project');
+				await sheet.locator('.mcp-page[data-page="project"]').getByRole('button', { name: 'Dev sandbox' }).tap();
+				await onPage('main');
+				await settle();
+
+				// The bug: removing the project, then Runs on, left the pages box
+				// scrolled sideways (its menu focused a row on a page still off screen).
+				await mark('remove the project');
+				await sheet.getByRole('button', { name: /^Workspace folders: / }).first().tap();
+				await sheet.getByRole('button', { name: /: start without a project$/ }).tap();
+				await sheet.getByRole('button', { name: /^No project/ }).first().waitFor({ timeout: 5000 });
+				await settle();
+
+				await mark('open Runs on');
+				await openPage('runner', /^Runs on/);
+				state = await controlsPages(page);
+				expectPagesInPlace(state, 'Runs on after removing the project');
+				expectMenuFillsPage(state, 'Runs on after removing the project');
+
+				await mark('back to Chat controls');
+				await sheet.getByRole('button', { name: 'Back to chat controls' }).tap();
+				await onPage('main');
+				await settle();
+				state = await controlsPages(page);
+				expectPagesInPlace(state, 'Chat controls after Runs on');
+				expect(state.rows.length >= 3, `the Setup rows are there (${JSON.stringify(state.rows)})`);
+				for (const row of state.rows) {
+					expect(row.left >= 0 && row.right <= state.vw, `the "${row.label}" row is fully in view (${JSON.stringify(row)} in ${state.vw})`);
+				}
+
+				await mark('open the Project page again');
+				await openPage('project', /^No project/);
+				state = await controlsPages(page);
+				expectPagesInPlace(state, 'Project page after removing the project');
+				expectMenuFillsPage(state, 'Project page after removing the project');
 			}
 		}
 	],
