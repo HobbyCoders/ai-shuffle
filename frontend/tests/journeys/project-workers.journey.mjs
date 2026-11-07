@@ -24,7 +24,8 @@
 //                       jump down when the overview lands (#1210).
 //   filter-before-registry, filter-space-unsupported, remote-only-bootstrap,
 //   registry-fails-then-overview, revisit-after-failed-overview,
-//   stalled-requests    the same rule through a slow or failing registry, an
+//   stalled-requests, late-long-worker-name
+//                       the same rule through a slow or failing registry, an
 //                       older worker, a worker with no projects of its own, a
 //                       revisit and stalled requests (#1210 review).
 //   new-chat-fails      a new chat on pop-os: the Runs-on row says "not set up
@@ -48,11 +49,19 @@ import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
  * `installsStatus` answers the install registry with that error status.
  * `overviewFailFirst` answers the first overview request with a 500 at once
  * and holds the later ones (with `holdOverview`), like a peer that was down
- * on the first visit.
+ * on the first visit. `selfName` is this worker's name in the overview.
+ * `holdDeadline` hands the Projects page's filter deadline to the case, which
+ * passes it with `window.__passFilterDeadline()` (startFilterDeadline), so a
+ * slow runner cannot reach it before the case measures.
  */
-async function simulateWorkers(page, { overview404 = false, failOn = {}, holdOverview = false, holdInstalls = false, overviewStatus = 0, noLocalProjects = false, installsStatus = 0, overviewFailFirst = false } = {}) {
+async function simulateWorkers(page, { overview404 = false, failOn = {}, holdOverview = false, holdInstalls = false, overviewStatus = 0, noLocalProjects = false, installsStatus = 0, overviewFailFirst = false, selfName = 'This worker', holdDeadline = false } = {}) {
 	await page.addInitScript(
-		({ overview404, failOn, holdOverview, holdInstalls, overviewStatus, noLocalProjects, installsStatus, overviewFailFirst }) => {
+		({ overview404, failOn, holdOverview, holdInstalls, overviewStatus, noLocalProjects, installsStatus, overviewFailFirst, selfName, holdDeadline }) => {
+			if (holdDeadline) {
+				const passes = [];
+				window.__projectsFilterDeadline = (pass) => passes.push(pass);
+				window.__passFilterDeadline = () => { for (const pass of passes.splice(0)) pass(); };
+			}
 			const original = window.fetch.bind(window);
 			const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 			const pathOf = (input) => {
@@ -77,7 +86,7 @@ async function simulateWorkers(page, { overview404 = false, failOn = {}, holdOve
 				{ install_id: 'laptop', device_name: 'Laptop', online: false }
 			];
 			const workers = () => [
-				{ install_id: selfId, device_name: 'This worker', is_self: true, online: true, approved: true },
+				{ install_id: selfId, device_name: selfName, is_self: true, online: true, approved: true },
 				...peers.map((p) => ({ ...p, is_self: false, approved: true }))
 			];
 			const P = [
@@ -180,7 +189,7 @@ async function simulateWorkers(page, { overview404 = false, failOn = {}, holdOve
 				return original(input, init);
 			};
 		},
-		{ overview404, failOn, holdOverview, holdInstalls, overviewStatus, noLocalProjects, installsStatus, overviewFailFirst }
+		{ overview404, failOn, holdOverview, holdInstalls, overviewStatus, noLocalProjects, installsStatus, overviewFailFirst, selfName, holdDeadline }
 	);
 }
 
@@ -217,6 +226,9 @@ async function listGeometry(page) {
 	const box = await body.boundingBox();
 	return { top: Math.round(box?.y ?? -1), empty: (await body.locator('.st-empty-detail').count()) > 0 };
 }
+
+/** A worker name longer than the Projects panel is wide (#1210 review). */
+const LONG_WORKER_NAME = 'My Very Long Workstation Name In The Upstairs Office';
 
 const projectRow = (page, name) => page.getByRole('button', { name: new RegExp(`^Open ${name}( \\(|$)`) });
 const listMode = (page) => page.locator('[data-ui-projects]').getAttribute('data-ui-projects');
@@ -440,26 +452,37 @@ await runJourney({
 		{
 			// #1210 review: this worker has no projects but a peer does. The empty
 			// state hid the filter region until the peer's projects arrived, then
-			// the row appeared above the list. The list waits for the overview.
+			// the row appeared above the list. The list waits for the overview,
+			// up to the filter deadline; the case holds that deadline itself, so
+			// a slow registry or runner cannot pass it before the measurement.
 			name: 'remote-only-bootstrap',
 			viewports: ['desktop', 'phone'],
 			async setup(ctx) {
-				await simulateWorkers(ctx.page, { holdOverview: true, noLocalProjects: true });
+				await simulateWorkers(ctx.page, { holdOverview: true, holdInstalls: true, noLocalProjects: true, holdDeadline: true });
 				await gotoApp(ctx.page, ctx.status);
 			},
 			async act({ page, mark, variant }) {
-				await mark('open Projects with no local projects while the overview is still out');
+				await mark('open Projects with no local projects while the registry and the overview are still out');
 				// Not openProjects: an empty list adds its own "New project" button.
 				if (isPhone(variant)) await showSidebar(page);
 				await page.getByRole('navigation', { name: 'Workspace' }).getByRole('button', { name: 'Projects', exact: true }).click();
 				await page.locator('[data-view-shell="Projects"]').filter({ visible: true }).waitFor({ timeout: 30_000 });
-				// Measure once the registry has answered and the row's space is held, not after a guess.
+				// Longer than the 2 s default deadline: a slow registry.
+				await page.waitForTimeout(2500);
+				await mark('the registry answers');
+				await page.evaluate(() => window.__releaseInstalls());
 				await page.waitForFunction(() => window.__installsAnswers > 0, null, { timeout: 20_000 });
 				await waitReservedFilter(page);
 				// Nothing painted moves here (the empty state is replaced, which the
 				// recorder does not count), so measure the list region itself.
 				const before = await listGeometry(page);
 				expect(!before.empty, 'no "No projects" state while the peers may still bring projects');
+				await mark('the filter deadline passes');
+				await page.evaluate(() => window.__passFilterDeadline());
+				await page.locator('section.view-panel[aria-label="Projects"]').filter({ visible: true }).locator('.st-empty-detail').waitFor({ timeout: 20_000 });
+				const empty = await listGeometry(page);
+				expect(empty.empty, 'after the deadline the list shows what is known: no local projects');
+				expect(empty.top === before.top, `"No projects" keeps the held row (list top ${before.top}px, then ${empty.top}px)`);
 				await page.waitForTimeout(800);
 				await mark('the overview answers with the peers\' projects');
 				await page.evaluate(() => window.__releaseOverview());
@@ -470,6 +493,45 @@ await runJourney({
 				expect(after.top === before.top, `the list stays where it was painted (top ${before.top}px, then ${after.top}px)`);
 				await page.waitForTimeout(1000);
 			}
+		},
+		{
+			// #1210 review: the row's space was held for "On Local" (the registry
+			// failed, so no name yet) and local projects painted under it. The
+			// overview then named this worker with a long name; the filter wrapped
+			// onto a second line and pushed the list down. The row is one line.
+			name: 'late-long-worker-name',
+			viewports: ['desktop', 'phone'],
+			async setup(ctx) {
+				await simulateWorkers(ctx.page, { holdOverview: true, installsStatus: 500, selfName: LONG_WORKER_NAME });
+				await gotoApp(ctx.page, ctx.status);
+			},
+			async act({ page, mark, variant }) {
+				await mark('open Projects: the registry fails, the overview is still out');
+				await openProjects(page, variant);
+				await projectRow(page, PROJECT).waitFor({ timeout: 30_000 });
+				await waitReservedFilter(page);
+				const panel = page.locator('section.view-panel[aria-label="Projects"]').filter({ visible: true });
+				const heldRow = await panel.locator('.worker-filter').boundingBox();
+				const before = await listGeometry(page);
+				await page.waitForTimeout(800);
+				await mark('the overview answers with a long name for this worker');
+				await page.evaluate(() => window.__releaseOverview());
+				await page.locator('[data-ui-projects="overview"]').waitFor({ timeout: 20_000 });
+				const group = page.getByRole('group', { name: 'Show projects' });
+				expect(await group.isVisible(), 'the All workers / On this worker filter shows');
+				const here = group.getByRole('button', { name: `On ${LONG_WORKER_NAME}`, exact: true });
+				expect(await here.isVisible(), 'the filter names this worker in full to assistive technology');
+				expect((await here.getAttribute('title')) === `Show only projects on ${LONG_WORKER_NAME}`, 'and in its tooltip');
+				expect(await group.getByRole('button', { name: 'All workers', exact: true }).isVisible(), 'both choices stay on screen');
+				const filledRow = await panel.locator('.worker-filter').boundingBox();
+				expect(Math.round(filledRow?.height ?? -1) === Math.round(heldRow?.height ?? -2), `the filled row is as tall as the held one (${heldRow?.height}px, then ${filledRow?.height}px)`);
+				const after = await listGeometry(page);
+				expect(after.top === before.top, `the list stays where it was painted (top ${before.top}px, then ${after.top}px)`);
+				await page.waitForTimeout(1000);
+			},
+			allow: [
+				{ kind: 'failed_requests', status: 500, url: /\/cluster\/installs(\?|$)/, reason: 'the failing install registry this case simulates' }
+			]
 		},
 		{
 			// #1210 review: the registry fails while the overview is still out. The

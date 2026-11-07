@@ -178,8 +178,32 @@ export function seenAgo(iso: string | null | undefined, now = Date.now()): strin
  *
  * Until it decides the list paints nothing (`unknown`), so a stalled request
  * holds local projects back for that long at most.
+ *
+ * The row is one line whatever this worker's name is (the name is shortened,
+ * with the full name in its tooltip), so filling the held space with a longer
+ * name than the one it was held for cannot change its height either.
  */
 export const FILTER_DECISION_MS = 2000;
+
+/** A journey's own clock for the deadline: it is handed `pass` and calls it when it chooses. */
+type FilterDeadlineHook = (pass: () => void) => void;
+
+/**
+ * Start this visit's `FILTER_DECISION_MS` wait: `pass` runs when it is over.
+ * Returns the cancel. A UI journey that must measure before the deadline on a
+ * slow runner sets `window.__projectsFilterDeadline` before the app loads and
+ * passes the deadline itself; nothing else sets it.
+ */
+export function startFilterDeadline(pass: () => void): () => void {
+	const hook = typeof window === 'undefined' ? undefined : (window as Window & { __projectsFilterDeadline?: FilterDeadlineHook }).__projectsFilterDeadline;
+	if (typeof hook === 'function') {
+		let live = true;
+		hook(() => { if (live) pass(); });
+		return () => { live = false; };
+	}
+	const timer = setTimeout(pass, FILTER_DECISION_MS);
+	return () => clearTimeout(timer);
+}
 
 export type FilterGeometry = 'row' | 'none';
 

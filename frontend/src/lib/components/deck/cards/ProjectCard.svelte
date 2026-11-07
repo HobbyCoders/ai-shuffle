@@ -19,7 +19,7 @@
 	import { activeView } from '$lib/stores/layout.svelte';
 	import { startProjectSetup, type ProjectKind, type ProjectOverviewRow, type ProjectWorker } from '$lib/api/project-workers';
 	import { SETUP_POLL_MS } from '$lib/stores/project-setup';
-	import { isOnThisWorker, isRunning, missingCount, selfWorker, filterGeometry, workerFilterSlot, FILTER_DECISION_MS, type FilterGeometry } from './project-workers-view';
+	import { isOnThisWorker, isRunning, missingCount, selfWorker, filterGeometry, workerFilterSlot, startFilterDeadline, type FilterGeometry } from './project-workers-view';
 	import { refreshWorkerPresence, workerInstalls } from '$lib/stores/worker-presence';
 	import { workerDisplayName } from '$lib/components/ui/worker-name';
 	import './project-tabs.css';
@@ -99,9 +99,9 @@
 		void loadProjectsOverview().finally(() => { if (id === visit) overviewSettled = true; });
 		// The registry decides the filter row's space when the overview is slower (filterGeometry).
 		if (untrack(() => $workerInstalls) === null) refreshWorkerPresence().catch(() => { if (id === visit) registryFailed = true; });
-		const deadline = setTimeout(() => { if (id === visit) deadlinePassed = true; }, FILTER_DECISION_MS);
+		const cancelDeadline = startFilterDeadline(() => { if (id === visit) deadlinePassed = true; });
 		return () => {
-			clearTimeout(deadline); visit++;
+			cancelDeadline(); visit++;
 			overviewSettled = false; registryFailed = false; deadlinePassed = false; filterGeometryDecided = null;
 		};
 	});
@@ -303,7 +303,7 @@
 			{#snippet filters()}
 				{#if filterSlot === 'shown' || filterSlot === 'reserved'}
 					<div class="worker-filter" class:reserved={filterSlot === 'reserved'} aria-hidden={filterSlot === 'reserved' || undefined} inert={filterSlot === 'reserved'}>
-						<Segmented label="Show projects" size="sm" bind:value={workerFilter} options={[{ value: 'all', label: 'All workers' }, { value: 'here', label: `On ${selfName}` }]} />
+						<Segmented label="Show projects" size="sm" bind:value={workerFilter} options={[{ value: 'all', label: 'All workers' }, { value: 'here', label: `On ${selfName}`, title: `Show only projects on ${selfName}` }]} />
 					</div>
 				{/if}
 			{/snippet}
@@ -376,8 +376,14 @@
 
 <style>
 	/* The filter's space, held while the overview may still show it (filterGeometry). */
-	.worker-filter { display: flex; align-items: center; }
+	.worker-filter { display: flex; align-items: center; min-width: 0; max-width: 100%; }
 	.worker-filter.reserved { visibility: hidden; }
+	/* One line whatever the worker's name: the held row and the filled one keep the same height. A
+	   long name is shortened with an ellipsis; the button's name and tooltip keep it whole. */
+	.worker-filter :global(.st-seg) { flex-wrap: nowrap; min-width: 0; }
+	.worker-filter :global(.st-seg button) { min-width: 0; }
+	.worker-filter :global(.st-seg button:first-child) { flex-shrink: 0; }
+	.worker-filter :global(.st-seg-label) { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 	/* While the list's shape is unknown (listPending) its region holds nothing; it is not painted
 	   until then, so its first paint already sits under the filter row's final space. */
 	:global(.view-panel[aria-label="Projects"][aria-busy="true"] > .panel-body) { visibility: hidden; }

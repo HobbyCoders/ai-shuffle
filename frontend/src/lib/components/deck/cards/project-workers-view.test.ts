@@ -3,13 +3,15 @@
  * tab's badge, and the new-chat "Runs on" row notes. One wording table for
  * every surface (cross-worker project sync).
  */
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ProjectWorker } from '$lib/api/project-workers';
 import {
 	errorAction,
 	failureReason,
 	isOnThisWorker,
 	isPending,
+	startFilterDeadline,
+	FILTER_DECISION_MS,
 	isRunning,
 	missingCount,
 	missingOnline,
@@ -147,5 +149,42 @@ describe('workerFilterSlot', () => {
 		expect(workerFilterSlot('row', null, 0)).toBe('reserved');
 		expect(workerFilterSlot('row', true, 1)).toBe('reserved');
 		expect(workerFilterSlot('row', false, 0)).toBe('reserved');
+	});
+});
+
+describe('startFilterDeadline', () => {
+	afterEach(() => {
+		vi.useRealTimers();
+		delete (window as Window & { __projectsFilterDeadline?: unknown }).__projectsFilterDeadline;
+	});
+
+	it('passes after FILTER_DECISION_MS unless cancelled', () => {
+		vi.useFakeTimers();
+		const pass = vi.fn();
+		startFilterDeadline(pass);
+		vi.advanceTimersByTime(FILTER_DECISION_MS - 1);
+		expect(pass).not.toHaveBeenCalled();
+		vi.advanceTimersByTime(1);
+		expect(pass).toHaveBeenCalledOnce();
+		const cancelled = vi.fn();
+		startFilterDeadline(cancelled)();
+		vi.advanceTimersByTime(FILTER_DECISION_MS * 2);
+		expect(cancelled).not.toHaveBeenCalled();
+	});
+
+	it("follows a journey's own clock when one is set, and ignores it once cancelled", () => {
+		vi.useFakeTimers();
+		const passes: Array<() => void> = [];
+		(window as Window & { __projectsFilterDeadline?: unknown }).__projectsFilterDeadline = (p: () => void) => passes.push(p);
+		const pass = vi.fn();
+		startFilterDeadline(pass);
+		vi.advanceTimersByTime(FILTER_DECISION_MS * 10);
+		expect(pass).not.toHaveBeenCalled();
+		passes[0]();
+		expect(pass).toHaveBeenCalledOnce();
+		const cancelled = vi.fn();
+		startFilterDeadline(cancelled)();
+		passes[1]();
+		expect(cancelled).not.toHaveBeenCalled();
 	});
 });
