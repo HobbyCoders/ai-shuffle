@@ -1518,6 +1518,24 @@ describe('Stop timeout recovery', () => {
 			expect(stopRecoveryAppliesToTurn(state.stopTimedOutTurnId, state.liveTurnId)).toBe(true);
 		});
 
+		// A new chat's first send is made before its session exists; messages queued
+		// once the session is adopted still sit behind that send (running app, W8-E c).
+		it('keeps a new chat\'s first send as the turn\'s send after the session is adopted', async () => {
+			const test = stopping(null);
+			test.deps.update(s => ({ ...s, sessionId: null, isStreaming: false }));
+			expect(await test.sender.sendMessage('go')).toBe(true);
+			const [started] = test.getState().localSendIntent?.commandIds ?? [];
+			expect(test.getState().localSendIntent?.sessionId).toBeNull();
+			expect(test.getState().messages.some(m => m.commandId === started)).toBe(true);
+			test.deps.update(s => ({ ...s, sessionId: 'sess-1', isStreaming: true }));
+			expect(await test.sender.sendMessage('queued behind it')).toBe(true);
+			expect(test.getState().localSendIntent?.commandIds).toEqual([started, expect.any(String)]);
+
+			test.sender.stopGeneration();
+			vi.advanceTimersByTime(10000);
+			expect(test.getState().stopTimedOutCommandId).toBe(started);
+		});
+
 		// Review S2: once A has run, the message queued behind it is what runs next.
 		// A Stop pressed as B starts (its WS start ahead of its feed) is B's.
 		it('names a queued message that has taken over from the finished send', async () => {

@@ -32,6 +32,19 @@ import { claimBootSend, releaseBootSend } from './session-init';
 /** How many sends of one run (a turn's send plus what queues behind it) a timed-out Stop can name. */
 const RECENT_SENDS = 20;
 
+/**
+ * This page's current run of sends in `sessionId`, oldest first. A new chat's
+ * first send is made before its session exists, so a run recorded without a
+ * session belongs to the session that adopted that send's row.
+ */
+function sendRunIn(s: Pick<ActiveSessionState, 'localSendIntent' | 'messages'>, sessionId: string | null): string[] {
+	const intent = s.localSendIntent;
+	const run = intent?.commandIds ?? [];
+	if (!run.length) return [];
+	if (intent?.sessionId === sessionId) return run;
+	return intent?.sessionId === null && sessionId !== null && s.messages.some(m => m.commandId === run[0]) ? run : [];
+}
+
 // ─── Sends in flight ─────────────────────────────────────────────────────────
 
 /**
@@ -641,8 +654,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					// a turn plus what queues behind it, oldest first: each queued
 					// message runs next once the one before it has (stopGeneration).
 					commandIds: sendWhileStreaming || options?.compactFirst
-						? [...(s.localSendIntent?.sessionId === _state.sessionId ? s.localSendIntent.commandIds ?? [] : []),
-							clientMessageId].slice(-RECENT_SENDS)
+						? [...sendRunIn(s, _state.sessionId), clientMessageId].slice(-RECENT_SENDS)
 						: [clientMessageId],
 				});
 
@@ -806,10 +818,8 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			// The send this Stop is pressed on: the oldest of the run the feed has not
 			// receipted. A message queued behind a turn the feed has shown is the one
 			// that runs once that turn ends, not the send that started it.
-			const intent = _state.localSendIntent;
-			const pressedOnCommand = intent?.sessionId === _state.sessionId
-				? intent?.commandIds?.find(id => !feedController.hasReceipt?.(_state.sessionId, id)) ?? null
-				: null;
+			const pressedOnCommand = sendRunIn(_state, _state.sessionId)
+				.find(id => !feedController.hasReceipt?.(_state.sessionId, id)) ?? null;
 			if (_state.sessionId) {
 				// The interrupt is always a full stop (the query-scoped SDK interrupt
 				// tears down in-flight background sub-agents too).
