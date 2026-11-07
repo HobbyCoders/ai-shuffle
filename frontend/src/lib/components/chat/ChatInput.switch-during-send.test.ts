@@ -276,6 +276,67 @@ describe('New chat right after Send (#1077)', () => {
 		expect(kept.split(TEXT)).toHaveLength(2);
 	});
 
+	// PR #1212 review S4, and the one rule behind S2 and S4: while a send is
+	// held, what the user last left in the composer, empty included, is the
+	// chat's draft, saved with it when they leave. The held message comes back
+	// in front of that draft exactly once, whether the check answers after the
+	// user reopened the chat or while they were away.
+	const later = (draft: string) => JSON.stringify({ type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: draft }] }] });
+	type Edit = { name: string; steps: (editor: Editor) => Promise<void>; left: string | null };
+	const settle = () => new Promise((resolve) => setTimeout(resolve, 150));
+	const edits: Edit[] = [
+		{ name: 'nothing typed after Send', steps: async () => {}, left: null },
+		{ name: 'typed, left inside the save delay', steps: async (e) => { e.commands.insertContent('later words'); }, left: 'later words' },
+		{ name: 'typed and saved', steps: async (e) => { e.commands.insertContent('later words'); await settle(); }, left: 'later words' },
+		{ name: 'typed, saved, then deleted', steps: async (e) => {
+			e.commands.insertContent('later-deleted-draft');
+			await settle();
+			expect(readDraft('chat-a')).toContain('later-deleted-draft');
+			e.commands.clearContent(true);
+		}, left: null },
+		{ name: 'typed, saved, then replaced', steps: async (e) => {
+			e.commands.insertContent('first try');
+			await settle();
+			e.commands.setContent(later('second try'), { emitUpdate: true });
+		}, left: 'second try' },
+	];
+	const forgotten = ['later-deleted-draft', 'first try'];
+	describe.each([
+		['the check answers after chat A is reopened', true],
+		['the check answers while New chat is open', false],
+	])('%s', (_when, reopenFirst) => {
+		it.each(edits)('keeps exactly what was left: $name', async ({ steps, left }) => {
+			const view = render(ChatInput);
+			const editor = view.container.querySelector<HTMLElement>('.tiptap')! as HTMLElement & { editor: Editor };
+			await waitFor(() => expect(editor.textContent).toBe(TEXT));
+			await fireEvent.submit(view.container.querySelector('form')!);
+			await waitFor(() => expect(gate.release).toBeTruthy());
+			expect(editor.textContent).toBe('');
+			await steps(editor.editor);
+			activeSession.newChat();
+			await waitFor(() => expect(editor.textContent).toBe(''));
+			const reopen = async () => {
+				Object.assign(activeSession.current, { sessionId: 'chat-a', mode: 'chat', profile: 'coding', isStreaming: false });
+				activeSession.setDraft(sessionEphemeralCache.peekDraft('chat-a') || readDraft('chat-a') || '');
+			};
+			if (reopenFirst) await reopen();
+			gate.release!();
+			await new Promise((resolve) => setTimeout(resolve, 30));
+			if (!reopenFirst) await reopen();
+
+			expect(sends).not.toHaveBeenCalled();
+			await waitFor(() => expect(editor.textContent).toContain(TEXT));
+			for (const shown of [editor.textContent ?? '', readDraft('chat-a') ?? '']) {
+				expect(shown.split(TEXT)).toHaveLength(2);
+				for (const gone of forgotten) expect(shown).not.toContain(gone);
+				if (left) {
+					expect(shown.split(left)).toHaveLength(2);
+					expect(shown.indexOf(left)).toBeGreaterThan(shown.indexOf(TEXT));
+				}
+			}
+		});
+	});
+
 	// Review S3: an editor first mounted in New chat, later moved to chat A.
 	it('leaves a New chat draft typed during the wait in place', async () => {
 		activeSession.newChat();

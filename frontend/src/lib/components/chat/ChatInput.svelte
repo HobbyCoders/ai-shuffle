@@ -451,11 +451,16 @@
 			// overwrite it. Reading the editor directly (not the debounced store
 			// draft) guarantees the text follows the session it was typed in,
 			// even when the switch happens within the debounce window.
-			// After a send the composer was already emptied and saved, so only text
-			// typed since then is kept, and it is never New chat's: a first send's
-			// own chat adopts that slot (PR #1212 review S2).
-			const leavingDraft = editorRef ? getDraftJSON() : '';
-			if (editorRef && (!messageSent || (prevSessionId !== null && hasComposerDraft(leavingDraft)))) {
+			// One rule, before and after a send alike: what the user leaves in the
+			// composer, empty included, is the leaving chat's draft. Send cleared
+			// the editor at once, so it can only hold what was typed or deleted
+			// since. A send held for this chat puts its words back in front of
+			// this draft later (send-destination.ts), so nothing here overwrites
+			// that. The one exception is New chat after its first send: that is
+			// the new chat adopting its id, not a leave, and the send has already
+			// emptied the New chat slot (PR #1212 review S2, S4).
+			if (editorRef && !(messageSent && prevSessionId === null)) {
+				const leavingDraft = getDraftJSON();
 				activeSession.saveDraftForSession(prevSessionId, leavingDraft);
 				// Keep the persisted mirror aligned with the ephemeral cache so the
 				// leaving session's draft also survives a reload.
