@@ -130,16 +130,18 @@
 	}
 
 	/** Roving tabindex: only the focused row is in the Tab order. */
-	function focusItem(target: HTMLButtonElement | undefined) {
+	function focusItem(target: HTMLButtonElement | undefined, preventScroll = false) {
 		if (!target) return;
 		for (const el of menuItems()) el.tabIndex = el === target ? 0 : -1;
-		target.focus();
+		target.focus({ preventScroll });
 	}
 
 	async function focusOnOpen() {
 		await tick();
 		const list = menuItems();
-		focusItem(list.find((el) => el.getAttribute('aria-checked') === 'true') ?? list[0]);
+		// In the phone sheet the menu is on a page still sliding in from off
+		// screen: scrolling it into view would shift the whole sheet sideways.
+		focusItem(list.find((el) => el.getAttribute('aria-checked') === 'true') ?? list[0], sheetMode);
 	}
 
 	// In the sheet, its page's Back closes this menu through the shared coordinator.

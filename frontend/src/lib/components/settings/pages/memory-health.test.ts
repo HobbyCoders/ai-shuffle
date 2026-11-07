@@ -35,6 +35,31 @@ describe('memory health', () => {
 		expect(rows[1].text).toMatch(/^Archived 2 exact duplicates\./);
 	});
 
+	it('shows a healthy capacity note quietly instead of "nothing needs attention"', () => {
+		const reason =
+			'2 live facts; saves have room. Automatic cleanup has recorded 80 permanent deletions of older facts ' +
+			'(80 at the archive limit; 0 on expiry). Some older deletion times are unknown.';
+		const quiet: MemoryHealth = {
+			state: 'healthy',
+			checked_at: now,
+			signals: [
+				{ id: 'capacity', label: 'Capacity', state: 'healthy', note: true, reason },
+				{ id: 'saves', label: 'Saving', state: 'healthy', note: false, reason: 'Saves are writing normally.' }
+			],
+			repairs: []
+		};
+		expect(memorySummary(quiet)).toBe('Healthy, 1 note');
+		expect(memoryRows(quiet, now)).toEqual([{ id: 'note-capacity', name: 'Capacity', tone: 'off', text: reason }]);
+		// An attention signal still comes first and is the only warning.
+		const mixed = { ...health, signals: [...health.signals, quiet.signals[0]] };
+		expect(memoryRows(mixed, now).map((r) => [r.name, r.tone])).toEqual([
+			['Session snapshot', 'warn'],
+			['Capacity', 'off'],
+			['Repaired', 'ok']
+		]);
+		expect(memorySummary(mixed)).toBe('Needs attention');
+	});
+
 	it('says so when nothing needs attention', () => {
 		const rows = memoryRows({ state: 'healthy', checked_at: now, signals: [], repairs: [] }, now);
 		expect(rows).toEqual([{ id: 'ok', name: 'All checks', tone: 'ok', text: 'Nothing needs attention' }]);

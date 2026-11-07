@@ -11,6 +11,12 @@ export interface MemorySignal {
 	label: string;
 	state: 'healthy' | 'attention';
 	reason: string;
+	/**
+	 * A healthy signal whose reason is still worth reading (past permanent
+	 * deletions, unknown earlier history), so "Healthy" is not read as
+	 * "nothing was lost". Shown quietly; never a warning or a notification.
+	 */
+	note?: boolean;
 }
 
 export interface MemoryRepair {
@@ -31,10 +37,17 @@ export function fetchMemoryHealth(): Promise<MemoryHealth> {
 	return api.get<MemoryHealth>('/memory/health');
 }
 
+function notes(health: MemoryHealth): MemorySignal[] {
+	return (health.signals ?? []).filter((s) => s.state === 'healthy' && s.note);
+}
+
 /** One-line value for the collapsed row. */
 export function memorySummary(health: MemoryHealth | null): string {
 	if (!health) return 'Loading';
-	if (health.state === 'healthy') return 'Healthy';
+	if (health.state === 'healthy') {
+		const n = notes(health).length;
+		return n ? `Healthy, ${n === 1 ? '1 note' : `${n} notes`}` : 'Healthy';
+	}
 	const n = (health.signals ?? []).filter((s) => s.state === 'attention').length;
 	return n === 1 ? 'Needs attention' : `${n} need attention`;
 }
@@ -47,13 +60,15 @@ function when(at: number): string {
 }
 
 /**
- * The expanded list: the signals that need attention, then what was repaired
- * this week. A healthy store with nothing repaired shows one line.
+ * The expanded list: the signals that need attention, then healthy signals
+ * with a note (a neutral dot, e.g. past archive deletions), then what was
+ * repaired this week. A healthy store with nothing else to say shows one line.
  */
 export function memoryRows(health: MemoryHealth, now = Date.now() / 1000): UpdateResultRow[] {
 	const rows: UpdateResultRow[] = (health.signals ?? [])
 		.filter((s) => s.state === 'attention')
 		.map((s) => ({ id: `signal-${s.id}`, name: s.label, tone: 'warn', text: s.reason }));
+	for (const s of notes(health)) rows.push({ id: `note-${s.id}`, name: s.label, tone: 'off', text: s.reason });
 	for (const [i, repair] of (health.repairs ?? []).entries()) {
 		if (now - repair.at > WEEK) continue;
 		rows.push({ id: `repair-${i}`, name: 'Repaired', tone: 'ok', text: `${repair.summary} ${when(repair.at)}`.trim() });

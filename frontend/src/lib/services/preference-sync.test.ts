@@ -94,7 +94,7 @@ describe('authoritative preference coordination', () => {
   f.edit('new-pick');
   expect(f.transport.put).toHaveBeenCalledTimes(1);
   migration.resolve({value:'legacy',version:'v1'}); await ready;
-  expect(f.transport.put).toHaveBeenLastCalledWith('theme','new-pick',false,'v1');
+  expect(f.transport.put).toHaveBeenLastCalledWith('theme','new-pick',false,'v1',expect.any(String));
   expect(f.value()).toBe('new-pick');
  });
  it('reconciles a stale offline edit instead of overwriting another device', async () => {
@@ -109,8 +109,62 @@ describe('authoritative preference coordination', () => {
   // Other device commits, before this device observes its invalidation.
   f.server.theme='other-device'; version='other-version';
   f.edit('stale-local'); await settle();
-  expect(f.transport.put).toHaveBeenCalledWith('theme','stale-local',false,'v1');
+  expect(f.transport.put).toHaveBeenCalledWith('theme','stale-local',false,'v1',expect.any(String));
   expect(f.server.theme).toBe('other-device'); expect(f.value()).toBe('other-device');
+ });
+ it('never mistakes its own committed write, whose response was lost, for a conflict', async () => {
+  const f=fixture(); let version='v1'; let lose=true;
+  f.transport.allWithVersions=async()=>({preferences:{...f.server},versions:{theme:version}});
+  f.transport.get=async()=>({value:f.server.theme,version});
+  // Like the backend: the write ID becomes the version, and a retry of the
+  // write the row already holds is applied, not a conflict.
+  f.transport.put=vi.fn(async (_key,value,_missing,expected,writeId)=>{
+   if (expected !== version) { if (writeId && writeId === version) return {value:f.server.theme,version}; throw {status:409}; }
+   f.server.theme=value; version=writeId ?? 'v-unversioned';
+   if (lose) { lose=false; throw new Error('network'); }
+   return {value,version};
+  });
+  await f.sync.reconnect();
+  f.edit('mine'); await settle();
+  expect(f.server.theme).toBe('mine');
+  // A newer edit before reconnect still builds on the write that committed.
+  f.edit('newer'); await f.sync.reconnect(); await settle();
+  expect(f.server.theme).toBe('newer'); expect(f.value()).toBe('newer');
+  const [first, replay] = vi.mocked(f.transport.put).mock.calls;
+  expect(replay).toEqual(first);
+ });
+ // A versioned account store; `fail(value)` may throw before the write applies.
+ function versioned(f: ReturnType<typeof fixture>, fail: (value: unknown) => unknown) {
+  const row = {value:f.server.theme, version:'v1'};
+  f.transport.allWithVersions=async()=>({preferences:{theme:row.value},versions:{theme:row.version}});
+  f.transport.get=async()=>({...row});
+  f.transport.put=vi.fn(async (_key,value,_missing,expected,writeId)=>{
+   const error = fail(value); if (error) throw error;
+   if (expected !== row.version) { if (writeId && writeId === row.version) return {...row}; throw {status:409}; }
+   Object.assign(row, {value, version:writeId ?? 'v-unversioned'}); return {...row};
+  });
+  return row;
+ }
+ it('retries an unanswered edit against the version it first saw, never a newer one', async () => {
+  const f=fixture(); let offline=true;
+  const row=versioned(f, () => offline && {status:503});
+  // Queued before the first snapshot, so the version comes from hydration.
+  f.edit('queued'); await f.sync.reconnect(); await settle();
+  f.edit('newer'); await settle();
+  Object.assign(row, {value:'other-device', version:'v2'}); offline=false;
+  await f.sync.reconnect(); await settle();
+  expect(row.value).toBe('other-device'); expect(f.value()).toBe('other-device');
+  expect(vi.mocked(f.transport.put).mock.calls.every(call => call[3] === 'v1')).toBe(true);
+ });
+ it('lets a newer edit go ahead once a replayed edit is definitively rejected', async () => {
+  const f=fixture(); let lose=true;
+  const row=versioned(f, value => value === 'too-large' && (lose ? (lose=false, new Error('network')) : {status:413}));
+  await f.sync.reconnect();
+  f.edit('too-large'); await settle();
+  f.edit('small'); await settle();
+  expect(row.value).toBe('small');
+  f.edit('later'); await f.sync.reconnect(); await settle();
+  expect(row.value).toBe('later'); expect(f.value()).toBe('later');
  });
  it('applies remote values and deletions without echo saves', async () => {
   const f=fixture(); await f.sync.reconnect(); expect(f.value()).toBe('server');
