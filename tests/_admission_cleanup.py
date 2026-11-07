@@ -1,9 +1,35 @@
 """Keep admission-owned test tasks inside their event-loop fixture's lifetime."""
 import asyncio
+import os
 import sys
+import threading
 from functools import partial
 
 import pytest
+
+_CLEANUP_SECONDS = 5.0
+_deadlines = {}
+
+
+def _abort_cleanup(loop, nodeid, initial, seconds, capture):
+    # pytest.fail/exit still run Runner.close(), whose cancellation and executor
+    # shutdown can wait forever. A genuine immortal thread requires terminating
+    # this test process; do not hide it by removing executor/thread registrations.
+    try:
+        # FD capture otherwise takes this diagnostic into a buffer that the
+        # emergency exit cannot replay. No resume: this process is terminating.
+        if capture is not None:
+            capture.suspend(in_=True)
+        os.write(2, (f"\nERROR {nodeid}: admission cleanup exceeded {seconds:g}s "
+                     "(drain + Runner cleanup)\n").encode())
+        admission = sys.modules.get("app.core.provider.session_admission")
+        owned = tuple(admission._unattended) if admission is not None else ()
+        tasks = set(initial) | {task for task in owned if task.get_loop() is loop}
+        tasks.update(asyncio.all_tasks(loop))
+        for task in sorted(tasks, key=repr):
+            os.write(2, ("  " + repr(task) + "\n").encode(errors="replace"))
+    finally:
+        os._exit(int(pytest.ExitCode.TESTS_FAILED))
 
 
 async def _drain(admission, loop):
@@ -17,10 +43,19 @@ async def _drain(admission, loop):
     return leaked
 
 
-def _check_loop(loop, nodeid):
+def _check_loop(loop, nodeid, fixturedef, capture):
     admission = sys.modules.get("app.core.provider.session_admission")
-    if admission is None or not admission._unattended:
+    owned = tuple(task for task in tuple(admission._unattended)
+                  if task.get_loop() is loop) if admission else ()
+    if not owned:
         return
+    # One wall-clock budget, not a fresh timeout per owner or cancellation. Keep
+    # it armed until the fixture's Runner/loop cleanup has also finished.
+    deadline = threading.Timer(_CLEANUP_SECONDS, _abort_cleanup,
+                               args=(loop, nodeid, owned, _CLEANUP_SECONDS, capture))
+    deadline.daemon = True
+    _deadlines[fixturedef] = deadline
+    deadline.start()
     leaked = loop.run_until_complete(_drain(admission, loop))
     if leaked:
         names = sorted(task.get_coro().__qualname__ for task in leaked)
@@ -41,8 +76,16 @@ def pytest_fixture_setup(fixturedef, request):
     # LIFO makes it run before Runner.close(), but after dependent fixtures have
     # cleaned up. Do not add an async fixture/extra loop to synchronous tests or
     # touch TestClient loops still running their independently owned lifespan.
-    request.addfinalizer(partial(_check_loop, loop, request.node.nodeid))
+    capture = request.config.pluginmanager.getplugin("capturemanager")
+    request.addfinalizer(partial(_check_loop, loop, request.node.nodeid, fixturedef, capture))
     return value
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_fixture_post_finalizer(fixturedef, request):
+    deadline = _deadlines.pop(fixturedef, None)
+    if deadline is not None:
+        deadline.cancel()
 
 
 @pytest.hookimpl(wrapper=True, tryfirst=True)

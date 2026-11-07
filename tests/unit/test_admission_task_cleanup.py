@@ -11,9 +11,7 @@ def test_guard_drains_and_names_source_without_poisoning_next_test(pytester, mon
     root = Path(__file__).resolve().parents[2]
     monkeypatch.setenv("PYTHONPATH", str(root))
     pytester.makeini("[pytest]\nasyncio_mode=auto")
-    pytester.makeconftest(
-        "from tests._admission_cleanup import pytest_fixture_setup, pytest_runtest_teardown"
-    )
+    pytester.makeconftest('pytest_plugins = ["tests._admission_cleanup"]')
     pytester.makepyfile(f"""
 import asyncio
 import threading
@@ -75,6 +73,8 @@ async def test_source(monkeypatch):
 
 
 async def test_next_test_is_clean():
+    from tests import _admission_cleanup as cleanup
+    assert not cleanup._deadlines, "the previous Runner finished within its deadline"
     assert state["settled"]
     assert not admission._unattended
     if "lease" in state:
@@ -87,3 +87,64 @@ async def test_next_test_is_clean():
     if kind not in ("completed", "fixture"):
         result.stdout.fnmatch_lines(["*test_source leaked unfinished admission tasks (drained):*"])
     assert "Event loop is closed" not in result.stdout.str()
+
+
+@pytest.mark.parametrize("kind", ["owner", "shielded_thread", "runner_shutdown"])
+def test_stalled_cleanup_exits_with_source_and_tasks(pytester, monkeypatch, kind):
+    root = Path(__file__).resolve().parents[2]
+    monkeypatch.setenv("PYTHONPATH", str(root))
+    pytester.makeini("[pytest]\nasyncio_mode=auto")
+    pytester.makeconftest("""
+from tests import _admission_cleanup as cleanup
+cleanup._CLEANUP_SECONDS = 0.2
+pytest_plugins = ["tests._admission_cleanup"]
+""")
+    pytester.makepyfile(f"""
+import asyncio
+import threading
+from types import SimpleNamespace
+
+import pytest
+from app.core.provider import session_admission as admission
+from app.db import async_database as adb
+
+
+async def test_stalled_source(monkeypatch):
+    admission.clear()
+    monkeypatch.setattr(admission, "get_session_pool", lambda: SimpleNamespace(peek=lambda sid: None))
+    loop = asyncio.get_running_loop()
+    kind = {kind!r}
+    if kind == "owner":
+        async def stalled_owner():
+            await asyncio.Event().wait()
+        admission._own(stalled_owner())
+        return
+
+    started, never = threading.Event(), threading.Event()
+    def stalled_write():
+        started.set()
+        never.wait()  # Only exiting the child process can stop this thread.
+
+    if kind == "runner_shutdown":
+        async def issued_thread():
+            loop.run_in_executor(None, stalled_write)
+            await asyncio.sleep(0.02)
+        admission._own(issued_thread())
+        return  # Owner drains, but Runner.close() cannot join the executor.
+
+    lease = await admission.acquire("stalled")
+    issuing = asyncio.create_task(adb.run_sync(stalled_write))
+    assert await asyncio.to_thread(started.wait, 2)
+    issuing.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await issuing
+    admission.close(lease)
+""")
+    # This outer cap is an assertion, not cleanup: the child must stop itself
+    # after its single 0.2s teardown deadline, even with an immortal thread.
+    result = pytester.runpytest_subprocess("-q", "--tb=short", timeout=8)
+    assert result.ret == pytest.ExitCode.TESTS_FAILED
+    result.stderr.fnmatch_lines([
+        "*test_stalled_source*admission cleanup exceeded 0.2s*",
+        "*<Task*",
+    ])

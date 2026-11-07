@@ -190,6 +190,7 @@ def _no_session_admission_across_tests():
 # Keep admission tasks inside their loop fixture's lifetime, after dependent
 # fixture cleanup but before Runner.close() can strand a release owner.
 from tests._admission_cleanup import (  # noqa: F401, E402
+    pytest_fixture_post_finalizer,
     pytest_fixture_setup,
     pytest_runtest_teardown,
 )
