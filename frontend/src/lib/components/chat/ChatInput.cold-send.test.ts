@@ -74,6 +74,20 @@ async function submit(withAttachment = false) {
 }
 
 describe('cold send warning', () => {
+    it.each([false, true])('sends restored chip identity, not a fresh local path (compact first: %s)', async (compactFirst) => {
+        const path = '/same-checkout/uploads/photo.png';
+        const ref = { owner_id: 'owner', event_id: 'sent-upload', index: 0, path };
+        cache = compactFirst ? COLD : { ...COLD, cold: false, warn: false };
+        activeSession.setDraft('');
+        const view = render(ChatInput);
+        activeSession.setPendingRestorePrompt('inspect @' + path, [path], [ref]);
+        await waitFor(() => expect(view.container.querySelectorAll('[data-file-chip]')).toHaveLength(1));
+        await fireEvent.submit(view.container.querySelector('form')!);
+        if (compactFirst) await fireEvent.click(await screen.findByRole('button', { name: 'Compact first' }));
+        await waitFor(() => expect(sends).toHaveBeenCalledOnce());
+        expect(sends.mock.calls[0][1]).toMatchObject({ pendingUploadReferences: [ref] });
+        expect(sends.mock.calls[0][1].pendingUploadPaths).toBeUndefined();
+    });
 	it.each(['see @/uploads/proof.png please', ''])('restores and sends attachments exactly once: %s', async (prompt) => {
 		cache = { ...COLD, cold:false, warn:false };
 		activeSession.setDraft('');

@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 # Metadata columns, excluding the ``data`` BYTEA blob (note_attachments idiom).
 _META_COLS = (
     "id, project_v2_id, session_id, source_path, filename, size, "
-    "created_at, materialized_at"
+    "created_at, materialized_at, materialized_path"
 )
 
 
@@ -114,16 +114,16 @@ def get_blob_data(blob_id: str) -> Optional[bytes]:
         return bytes(row["data"])
 
 
-def clear_data(blob_id: str) -> None:
+def clear_data(blob_id: str, materialized_path: Optional[str] = None) -> None:
     """Drop a blob's bytes once it has been written to the executing install's
-    disk, stamping ``materialized_at``. The metadata row survives so a later
-    materialization attempt can tell "already delivered" from "never existed"."""
+    disk, atomically recording its actual (possibly collision-renamed) destination.
+    Old consumed rows without a destination cannot safely reconstruct one."""
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "UPDATE upload_blobs SET data = NULL, materialized_at = NOW() "
+            "UPDATE upload_blobs SET data = NULL, materialized_at = NOW(), materialized_path = %s "
             "WHERE id = %s",
-            (blob_id,),
+            (materialized_path, blob_id),
         )
 
 

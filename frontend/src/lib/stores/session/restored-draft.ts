@@ -12,12 +12,12 @@ import { sessionEphemeralCache } from '$lib/stores/session-cache';
 import { hasComposerDraft } from './composer-suggestion';
 import { readDraft, writeDraft } from './draft-persistence';
 
-export function addRestoredWordsToDraft(sessionId: string, prompt: string, uploadPaths: string[] = [], openDraft = ''): string {
+export function addRestoredWordsToDraft(sessionId: string, prompt: string, uploadPaths: string[] = [], openDraft = '', references: import('$lib/api/rewind').UploadReference[] = []): string {
 	// Same preference as opening the chat: the open chat's draft, then memory,
 	// then the reload mirror.
 	const existing = openDraft || sessionEphemeralCache.peekDraft(sessionId) || readDraft(sessionId) || '';
 	if (!prompt && uploadPaths.length === 0) return existing;
-	const restored = JSON.stringify(restoreMessageDocument(prompt, uploadPaths));
+	const restored = JSON.stringify(restoreMessageDocument(prompt, uploadPaths, references));
 	const draft = hasComposerDraft(existing) ? joinDrafts(restored, existing) : restored;
 	sessionEphemeralCache.patchDraft(sessionId, draft);
 	writeDraft(sessionId, draft);
@@ -36,6 +36,8 @@ export interface UnfinishedRestore {
 	rowId: string;
 	prompt: string;
 	uploadPaths: string[];
+	uploadReferences?: import('$lib/api/rewind').UploadReference[];
+	composerAtConfirm?: string | null;
 	page: string;
 }
 
@@ -57,9 +59,9 @@ if (typeof window !== 'undefined') {
 }
 export const pageIsLeaving = () => leaving;
 
-export function noteRestoreStarted(sessionId: string, rowId: string, prompt: string, uploadPaths: string[] = []): void {
+export function noteRestoreStarted(sessionId: string, rowId: string, prompt: string, uploadPaths: string[] = [], composerAtConfirm: string | null = null, uploadReferences: import('$lib/api/rewind').UploadReference[] = []): void {
 	try {
-		const note: UnfinishedRestore = { rowId, prompt, uploadPaths, page: THIS_PAGE };
+		const note: UnfinishedRestore = { rowId, prompt, uploadPaths, uploadReferences, composerAtConfirm, page: THIS_PAGE };
 		sessionStorage.setItem(noteKey(sessionId, rowId), JSON.stringify(note));
 	} catch { /* Storage is a safety net: the restore itself still runs. */ }
 }

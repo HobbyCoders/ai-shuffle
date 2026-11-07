@@ -78,6 +78,158 @@ def session_upload_dir(session_id: str) -> Path:
     return settings.effective_workspace_dir / "session-uploads" / key
 
 
+def validate_upload_paths(paths: List[str], session: Dict[str, Any]) -> None:
+    """Admit provenance only from this session's attachment staging areas.
+
+    Reuse the lift path's resolved containment check, even for local sends that
+    never lift bytes. A symlink or traversal must not turn arbitrary client text
+    into a trusted attachment when the message is later restored.
+    """
+    from app.core.config import settings
+    from app.core import project_resolver
+    from app.core.session_modes import chat_uploads_dir, owner_chat_dir, runs_in_owner_chat_folder
+
+    if not paths:
+        return
+    if not session or not session.get("id"):
+        raise UploadLiftError("Attachment session is unavailable.")
+    workspace = settings.effective_workspace_dir.resolve()
+    roots = [(session_upload_dir(session["id"]), workspace)]
+    if runs_in_owner_chat_folder(session):
+        roots.append((owner_chat_dir() / UPLOADS_SUBDIR, workspace))
+    if session.get("mode") == "chat":
+        roots.append((chat_uploads_dir(), workspace))
+    elif session.get("project_id") or session.get("project_v2_id"):
+        cwd = project_resolver.resolve_existing_cwd(session)
+        if cwd:
+            base = Path(cwd).resolve()
+            roots.append((base / UPLOADS_SUBDIR, base))
+        # New Chat stages uploads in this project's base checkout before the
+        # explicit branch exists. The subsequent WS send still names that copy.
+        if session.get("project_id"):
+            from app.db import database
+            project = database.get_project(session["project_id"])
+            if project:
+                base = _project_dir(project)
+                roots.append((base / UPLOADS_SUBDIR, base))
+    allowed = [root.resolve() for root, base in roots
+               if _is_under(root.resolve(), base)]
+    for raw in paths:
+        path = Path(raw)
+        if not path.is_absolute() or not any(_is_under(path.resolve(), root) for root in allowed):
+            raise UploadLiftError("Attachment path is outside this session's upload area.")
+
+
+def upload_owner_id(owner: Optional[str] = None) -> str:
+    """Canonical worker identity across legacy instance ids and network aliases."""
+    from app.core.config import settings
+    from app.network import runners
+    owner = owner or settings.effective_instance_id
+    return runners.resolve_runner_id(owner) or owner
+
+
+def _recorded_upload_events(session_id: str, event_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    from app.db.base import get_db, rows_to_list
+    from app.db.session_events import _parse_payload
+    with get_db() as conn:
+        cursor = conn.cursor()
+        sql = "SELECT id, payload FROM session_events WHERE session_id=%s AND event_type='message.user'"
+        args = [session_id]
+        if event_id is not None:
+            sql += " AND id=%s"
+            args.append(event_id)
+        cursor.execute(sql + " ORDER BY seq DESC", args)
+        rows = rows_to_list(cursor.fetchall())
+    for row in rows:
+        row["payload"] = _parse_payload(row.get("payload"))
+    return rows
+
+
+def recorded_upload_references(session_id: str, event: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Mint explicit restore identities from a recorded user event, not a path guess."""
+    from app.db import database
+    metadata = event.get("payload") or {}
+    owner = upload_owner_id(metadata.get("upload_owner_id") or (database.get_session(session_id) or {}).get("instance_id"))
+    paths = metadata.get("upload_paths") or []
+    if not isinstance(paths, list):
+        return []
+    return [{"owner_id": owner, "event_id": event["id"], "index": index, "path": path}
+            for index, path in enumerate(paths) if isinstance(path, str) and path]
+
+
+def partition_upload_paths(paths: List[str], session: Dict[str, Any], *,
+                           references: Optional[List[Dict[str, Any]]] = None) -> tuple[List[str], List[Dict[str, Any]]]:
+    """Fresh paths stay fresh; only explicit owner/event/index chips are restores."""
+    if not session or not session.get("id"):
+        raise UploadLiftError("Attachment session is unavailable.")
+    validate_upload_paths(paths, session)
+    owner = upload_owner_id(session.get("instance_id"))
+    checked = []
+    if not isinstance(references or [], list):
+        raise UploadLiftError("Invalid attachment references.")
+    for ref in references or []:
+        if not isinstance(ref, dict) or not isinstance(ref.get("owner_id"), str) or upload_owner_id(ref["owner_id"]) != owner:
+            raise UploadLiftError("Attachment reference belongs to another owner.")
+        events = _recorded_upload_events(session["id"], str(ref.get("event_id") or ""))
+        allowed = recorded_upload_references(session["id"], events[0]) if events else []
+        if type(ref.get("index")) is not int or ref not in allowed:
+            raise UploadLiftError("Attachment reference is not recorded in this session.")
+        if ref["path"] in paths:
+            raise UploadLiftError("Fresh and restored attachments share a path; reattach them separately.")
+        checked.append(ref)
+    return list(paths), checked
+
+
+def resolve_upload_references(payload: Dict[str, Any], session: Dict[str, Any]) -> Dict[str, Any]:
+    """Resolve an event/index identity on its owner, never trust a remote path."""
+    from app.db import upload_blobs
+    resolved = dict(payload)
+    blob_ids = list(payload.get("upload_blob_ids") or [])
+    paths = list(payload.get("upload_paths") or [])
+    for ref in payload.get("upload_references") or []:
+        if (not isinstance(ref, dict) or not isinstance(ref.get("owner_id"), str)
+                or not ref["owner_id"] or upload_owner_id(ref["owner_id"]) != upload_owner_id()):
+            raise UploadLiftError("Attachment reference belongs to another owner.")
+        events = _recorded_upload_events(session["id"], ref.get("event_id") or "")
+        metadata = events[0]["payload"] if events else {}
+        index = ref.get("index")
+        attachments = metadata.get("upload_paths") or []
+        if (upload_owner_id(metadata.get("upload_owner_id", ref["owner_id"])) != upload_owner_id(ref["owner_id"])
+                or type(index) is not int or index < 0 or index >= len(attachments)):
+            raise UploadLiftError("Attachment reference is not recorded in this session.")
+        path = attachments[index]
+        if path not in paths or ref.get("path") != path:
+            raise UploadLiftError("Attachment reference does not match this message.")
+        # A failed, not-yet-materialized send keeps its durable blob identity.
+        pending = [blob for blob in upload_blobs.get_blobs(metadata.get("upload_blob_ids") or [])
+                   if blob["session_id"] == session["id"] and blob["source_path"] == path]
+        if metadata.get("not_sent") and pending:
+            blob_ids.extend(blob["id"] for blob in pending)
+        else:
+            validate_upload_paths([path], session)
+            if not Path(path).is_file():
+                raise UploadLiftError("Recorded attachment is no longer on this owner; reattach it.")
+    resolved.pop("upload_references", None)
+    if blob_ids:
+        resolved["upload_blob_ids"] = list(dict.fromkeys(blob_ids))
+    return resolved
+
+
+def validate_turn_uploads(payload: Dict[str, Any], session: Dict[str, Any]) -> None:
+    """Every queued path is either an owned file or the source of a session blob."""
+    from app.db import upload_blobs
+    ids = payload.get("upload_blob_ids") or []
+    blobs = upload_blobs.get_blobs(ids)
+    if len(blobs) != len(ids) or any(blob["session_id"] != session["id"] for blob in blobs):
+        raise UploadLiftError("Attachment blob does not belong to this session.")
+    sources = {blob["source_path"] for blob in blobs}
+    for path in payload.get("upload_paths") or []:
+        if path not in sources:
+            validate_upload_paths([path], session)
+            if not Path(path).is_file():
+                raise UploadLiftError("Attachment is no longer on this owner; reattach it.")
+
+
 def lift_session_paths_to_blobs(paths: List[str], session: Dict[str, Any]) -> List[str]:
     """Lift only this session's staged files, never arbitrary workspace paths."""
     session_id = session["id"]
@@ -196,10 +348,11 @@ def materialize_blobs_for_turn(
         filename = meta["filename"]
         data = upload_blobs_db.get_blob_data(blob_id)
         if data is None:
-            # Already delivered on an earlier attempt — accept it only if the
-            # file is genuinely still there.
-            existing = target_dir / Path(filename).name
-            if existing.is_file():
+            # Never reconstruct a consumed destination from the original name:
+            # upload() may have collision-renamed it before a later item failed.
+            recorded = meta.get("materialized_path")
+            existing = Path(recorded) if recorded else None
+            if existing is not None and existing.resolve().parent == target_dir.resolve() and existing.is_file():
                 mapping[source_path] = str(existing)
                 continue
             raise UploadLiftError(
@@ -213,7 +366,7 @@ def materialize_blobs_for_turn(
             raise UploadLiftError(
                 f"Could not write attachment '{filename}' to {target_dir}: {exc}"
             ) from exc
-        upload_blobs_db.clear_data(blob_id)
+        upload_blobs_db.clear_data(blob_id, str(dest))
         mapping[source_path] = str(dest)
     logger.info(
         "Materialized %d upload blob(s) into %s", len(mapping), target_dir

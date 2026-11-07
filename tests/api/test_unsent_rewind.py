@@ -1,7 +1,7 @@
 """An unsent row is restored durably without touching any provider transcript."""
 from unittest.mock import Mock
 import pytest
-from tests.api.test_compact_first import compact_chat, send
+from tests.api.test_compact_first import compact_chat, compact_upload, send
 from tests.api.test_compact_first_delivery import query
 from app.api import commands
 from app.core import query_session_lifecycle
@@ -20,9 +20,9 @@ def rewind_chat(compact_chat,monkeypatch):
         # Keep the request's own loop alive until its tracked writes release it.
         compact_chat.portal.call(wait_for_rewind_release, 'compact-chat')
 
-async def test_unsent_api_restores_only_row_and_uploads_idempotently_after_reload(rewind_chat):
+async def test_unsent_api_restores_only_row_and_uploads_idempotently_after_reload(rewind_chat,compact_upload):
     session_events.append_events('compact-chat',[{'type':'message.user','payload':{'content':'earlier sent'}}])
-    pair=send(rewind_chat,{'then_send':query(upload_paths=['/uploads/proof.png'])}).json()
+    pair=send(rewind_chat,{'then_send':query(upload_paths=[compact_upload])}).json()
     turns.start_turn(pair['turn_id'])
     await query_session_lifecycle.enter_user_stop('compact-chat')
     unsent=next(e for e in session_events.get_events('compact-chat') if e['payload'].get('not_sent'))
@@ -34,7 +34,7 @@ async def test_unsent_api_restores_only_row_and_uploads_idempotently_after_reloa
         body=result.json()
         assert body['success'] and body['unsent_restored'] and not body['chat_rewound']
         assert body['restored_prompt']==query()['prompt']
-        assert body['restored_upload_paths']==['/uploads/proof.png']
+        assert body['restored_upload_paths']==[compact_upload]
     assert [r['payload']['content'] for r in commands._load_message_events('compact-chat')]==['earlier sent','later real history']
     notes=[r for r in session_events.get_events('compact-chat') if r['payload'].get('subtype')=='unsent_restored']
     assert len(notes)==1

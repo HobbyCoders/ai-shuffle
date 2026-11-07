@@ -37,6 +37,7 @@
 	import { attachComposerDictation, detachComposerDictation, startComposerDictation } from '$lib/services/composerDictation';
 	import { flushPendingDraft, holdPendingDraft, readDraft, releasePendingDraft, writeDraft } from '$lib/stores/session/draft-persistence';
 	import { sentRowIdsOnScreen, takeUnfinishedRestores } from '$lib/stores/session/restored-draft';
+	import { rewoundWordsKeptApart } from '$lib/stores/session/rewound-words';
 	import { trackSend } from '$lib/stores/session/message-sender';
 	import { dropPendingSend, notePendingSend, takePendingSends } from '$lib/stores/session/pending-send-note';
 	import { promptStash } from '$lib/stores/session/prompt-stash';
@@ -503,7 +504,7 @@
 		const paths = $activeSession.pendingRestoreUploadPaths ?? [];
 		if (!pending && paths.length === 0) return;
 		const current = (editorRef?.getMessage() ?? inputValue ?? '').trim();
-		const restored = JSON.stringify(restoreMessageDocument(pending ?? '', paths));
+		const restored = JSON.stringify(restoreMessageDocument(pending ?? '', paths, $activeSession.pendingRestoreUploadReferences));
 		setComposerDraft(current.length === 0 ? restored : joinDrafts(getDraftJSON(), restored));
 		recall.reset();
 		tick().then(() => editorRef?.focus());
@@ -522,6 +523,9 @@
 		unfinishedRestoresCheckedFor = null;
 		if (!sessionId || !editorRef || !ownsComposer() || isLoadingSession || isRestoringSession || error || wsReconnectRequired || historyStall) return;
 		unfinishedRestoresCheckedFor = sessionId;
+		// What the owner had in the composer before anything is recovered: a
+		// rewind's words stay apart from words typed since its confirm (#1083).
+		const draftBeforeRecovery = getDraftJSON();
 		// Not-sent rows by their id; sent prompts by text and occurrence (#1083).
 		const onScreen = new Set([
 			...messages.map((m) => m.metadata?.not_sent_id).filter((id): id is string => typeof id === 'string'),
@@ -534,9 +538,10 @@
 			const current = getDraftJSON();
 			setComposerDraft(hasComposerDraft(current) ? joinDrafts(pending, current) : pending);
 		}
-		const notes = takeUnfinishedRestores(sessionId, onScreen);
+		const notes = takeUnfinishedRestores(sessionId, onScreen)
+			.filter((n) => !rewoundWordsKeptApart(sessionId, n.composerAtConfirm, n.prompt, n.uploadPaths, draftBeforeRecovery, n.uploadReferences));
 		if (notes.length === 0) return;
-		activeSession.setPendingRestorePrompt(notes.map((n) => n.prompt).filter(Boolean).join('\n\n'), notes.flatMap((n) => n.uploadPaths));
+		activeSession.setPendingRestorePrompt(notes.map((n) => n.prompt).filter(Boolean).join('\n\n'), notes.flatMap((n) => n.uploadPaths), notes.flatMap((n) => n.uploadReferences ?? []));
 	});
 
 	// Text handed over from another surface (the terminal's "Send selection to
@@ -1243,10 +1248,13 @@
 		// then — so they are always collected and the decision is made there.
 		// Extract from both uploadedFiles (legacy) and inline file chips in the editor.
 		let pendingPaths: string[] | undefined;
+        let pendingReferences: import('$lib/api/rewind').UploadReference[] = [];
 		{
-			const chipPaths = editorRef?.getEditor()
-				? extractFileChips(editorRef.getEditor()!).map(c => c.fullPath).filter(Boolean)
-				: [];
+            const chips = editorRef?.getEditor() ? extractFileChips(editorRef.getEditor()!) : [];
+            // Identity is carried by restored chips. A new chip at the same path
+            // is still a fresh upload and must lift its own bytes.
+            pendingReferences = chips.flatMap(c => c.uploadReference ? [c.uploadReference] : []);
+            const chipPaths = chips.filter(c => !c.uploadReference).map(c => c.fullPath).filter(Boolean);
 			const legacyPaths = uploadedFiles.map(f => f.full_path);
 			const allPaths = [...new Set([...chipPaths, ...legacyPaths])];
 			pendingPaths = allPaths.length ? allPaths : undefined;
@@ -1372,6 +1380,7 @@
 			}
 			const sent = await activeSession.sendMessage(finalPrompt, {
 				...(pendingPaths?.length ? { pendingUploadPaths: pendingPaths } : {}),
+                ...(pendingReferences.length ? { pendingUploadReferences: pendingReferences } : {}),
 				...(compactBeforeSend ? { compactFirst: true } : {}),
 				// Re-checked once the store knows its target (after a reload's
 				// restore wait); false sends nothing and lands in restoreOnFailure.

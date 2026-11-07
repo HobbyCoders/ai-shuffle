@@ -181,6 +181,16 @@ def test_materialize_raises_for_a_purged_blob(mock_db, tmp_path):
         upload_transfer.materialize_blobs_for_turn(["ub-gone"], str(working_dir))
 
 
+def test_consumed_blob_without_a_recorded_destination_never_guesses_the_filename(mock_db, project, project_dir, tmp_path):
+    src = _stage(project_dir, "legacy.txt", b"lost bytes")
+    ids = upload_transfer.lift_paths_to_blobs([src], project, "sess-1")
+    upload_blobs_db.clear_data(ids[0])  # Old consumed rows have no destination.
+    (tmp_path / "uploads").mkdir()
+    (tmp_path / "uploads" / "legacy.txt").write_bytes(b"unrelated bytes")
+    with pytest.raises(upload_transfer.UploadLiftError, match="resend the file"):
+        upload_transfer.materialize_blobs_for_turn(ids, str(tmp_path))
+
+
 # ═══ rewrite_prompt ══════════════════════════════════════════════════════════
 
 

@@ -253,6 +253,9 @@
 					"frontend/src/lib/components/chat/tiptap/serialization.ts",
 					"frontend/src/lib/components/chat/tiptap/FileChipNode.ts",
 					"frontend/src/lib/api/rewind.ts",
+					"frontend/src/lib/stores/session/restored-draft.ts",
+					"frontend/src/lib/stores/session/prompt-stash.ts",
+					"app/core/turn_recorder.py",
 					"app/api/commands.py"
 				]
 			},

@@ -54,10 +54,11 @@ export function joinDrafts(earlier: string, later: string): string {
 }
 
 /** Restore serialized @path mentions as chips in place, preserving surrounding text. */
-export function restoreMessageDocument(text: string, uploadPaths: string[] = []): JSONContent {
+export function restoreMessageDocument(text: string, uploadPaths: string[] = [], references: import('$lib/api/rewind').UploadReference[] = []): JSONContent {
 	const paths = [...new Set(uploadPaths.filter(Boolean))].sort((a, b) => b.length - a.length);
 	const found = new Set<string>();
 	const chip = (path: string): JSONContent => ({ type: 'fileChip', attrs: {
+        ...(references.find(ref => ref.path === path) ? { uploadReference: references.find(ref => ref.path === path) } : {}),
 		path, fullPath: path, filename: path.split(/[/\\]/).pop() || 'attachment', size: 0, type: 'file'
 	} });
 	const paragraphs = text.split('\n').map(line => {

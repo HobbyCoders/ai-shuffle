@@ -5,6 +5,15 @@ const serialize = (text: string, paths: string[]) => {
     return serializeToMessage({ getJSON: () => doc } as Parameters<typeof serializeToMessage>[0]);
 };
 describe('restored attachment document', () => {
+    it('keeps explicit owner identity in a restored chip across draft JSON, without marking a fresh chip', () => {
+        const path = '/project/uploads/photo.png';
+        const reference = { owner_id: 'owner', event_id: 'sent-event', index: 0, path };
+        const restored = restoreMessageDocument('read @' + path, [path], [reference]);
+        const chip = JSON.parse(JSON.stringify(restored)).content[0].content[1];
+        expect(chip.attrs.uploadReference).toEqual(reference);
+        const fresh = restoreMessageDocument('read @' + path, [path]);
+        expect(fresh.content![0].content![1].attrs?.uploadReference).toBeUndefined();
+    });
     it.each([
         ['see @/uploads/proof.png please', ['/uploads/proof.png']],
         ['@/uploads/proof.png\n@/uploads/proof.png again', ['/uploads/proof.png']],
