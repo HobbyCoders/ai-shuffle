@@ -345,8 +345,9 @@ def close(lease: Lease) -> None:
 
         def completed(task: asyncio.Task) -> None:
             # Cancellation before the coroutine's first instruction cannot run
-            # its finally. Resume the release owner; never abandon its tracker.
-            if not lease.exited.is_set():
+            # cleanup. Retry cancellation, never a failed drain: its proof is
+            # broken, so admission stays held until explicit recovery/restart.
+            if not lease.exited.is_set() and task.cancelled():
                 lease.closing = False
                 close(lease)
 
@@ -358,7 +359,15 @@ def close(lease: Lease) -> None:
 async def _close_after_writes(lease: Lease) -> None:
     try:
         await finish_saving(lease.work.drain())
-    finally:
+    except asyncio.CancelledError:
+        # finish_saving propagates cancellation only after its drain settles.
+        if not lease.work.pending:
+            _close_now(lease)
+        raise
+    except Exception:
+        logger.exception("Failed to drain turn writes for %s; keeping admission held", lease.session_id)
+        raise
+    else:
         _close_now(lease)
 
 

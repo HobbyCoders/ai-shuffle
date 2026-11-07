@@ -444,3 +444,146 @@ async def test_slow_real_away_receipt_settles_before_successor(mock_db, tmp_path
             if direct is not None:
                 admission.close(direct)
             await adapter.disconnect_transport()
+
+
+@pytest.mark.parametrize("reader", ["runtime", "direct"])
+async def test_permission_insert_during_engine_retirement_settles_before_successor(
+    mock_db, tmp_path, monkeypatch, reader,
+):
+    import threading
+
+    from app.core.permission_handler import PermissionHandler
+    from app.core.session_pool import SessionPool
+    from app.db import database, interactions
+    from fluid.permissions.engine import PermissionEngine
+    from fluid.tools.builtins import bash
+    from fluid.tools.registry import ToolRegistry
+
+    insert_started, release_insert, insert_done = threading.Event(), threading.Event(), threading.Event()
+    yielded, retiring = asyncio.Event(), asyncio.Event()
+    writes = []
+
+    class AskingProvider:
+        name = "fake"
+        caps = ProviderCaps()
+
+        async def stream(self, request):
+            yield StreamChunk("message_start", {})
+            yield StreamChunk("block_start", {
+                "index": 0, "block_type": "tool_use", "tool_name": "Bash", "tool_use_id": "slow-permission",
+            })
+            yield StreamChunk("tool_args_delta", {"index": 0, "partial_json": '{"command":"not executed"}'})
+            yield StreamChunk("block_stop", {"index": 0})
+            yield StreamChunk("usage", {"stop_reason": "tool_use"})
+
+    async def must_not_execute(*args):
+        raise AssertionError("the permission must never be granted")
+
+    registry = ToolRegistry()
+    registry.register_builtin(bash.SPEC, must_not_execute)
+    engine = NativeLoop(
+        provider=AskingProvider(), store=MemoryStore(), model="m", registry=registry,
+        permissions=PermissionEngine("always_ask"),
+    )
+    database.create_session(SID, "default")
+    real_insert = interactions.create_interaction
+
+    def delayed_insert(*args, **kwargs):
+        insert_started.set()
+        assert release_insert.wait(5), "test did not release the permission insert thread"
+        try:
+            row = real_insert(*args, **kwargs)
+            writes.append("A permission insert")
+            return row
+        finally:
+            insert_done.set()
+
+    monkeypatch.setattr(interactions, "create_interaction", delayed_insert)
+    monkeypatch.setattr(admission, "_ABANDONED_DRAIN_SECONDS", 0.1)
+    handler = PermissionHandler()
+
+    async def can_use_tool(name, tool_input, context):
+        return await handler.request_permission(
+            request_id="slow-permission", session_id=SID, profile_id="default",
+            tool_name=name, tool_input=tool_input, tool_use_id=context.tool_use_id,
+            broadcast_func=AsyncMock(),
+        )
+
+    adapter = HarnessAdapter()
+    adapter._engine, adapter._connected = engine, True
+    adapter._can_use_tool = can_use_tool
+    adapter._options = SessionOptions(model="m", include_partial_messages=True, extra={"app_session_id": SID})
+    monkeypatch.setattr(adapter, "_turn_context_note", lambda *args: None)
+    for name in ("_refresh_task_roster", "_memory_held", "_native_scratch_held"):
+        monkeypatch.setattr(adapter, name, AsyncMock(return_value=None))
+    pool = SessionPool()
+    pool.put(SID, SessionState(adapter=adapter, is_connected=True))
+    real_pump = qe._stream_to_websocket_impl
+    turn = turns.enqueue_turn(SID, "user", prompt="hello")
+    rt = session_runtime.SessionRuntime(turn)
+
+    async def record(event):
+        if event.get("subtype") == "model_info":
+            yielded.set()
+            await asyncio.Event().wait()
+
+    direct = None
+    with ExitStack() as stack:
+        env = stack.enter_context(_runtime_env(pump=real_pump))
+        b = engine_patches(stack, cwd=str(tmp_path), session_row={"id": SID}, pool=pool)
+        b.options.include_partial_messages = True
+        b.options.permission_mode = "default"
+        env["recorder"].on_event.side_effect = record
+        stack.enter_context(patch("app.core.query_session_lifecycle.interrupt_session", new=AsyncMock()))
+        if reader == "runtime":
+            closing = asyncio.create_task(rt.execute())
+            await asyncio.wait_for(yielded.wait(), 5)
+        else:
+            events = real_pump(prompt="hello", session_id=SID, profile_id="claude-code")
+            while (await asyncio.wait_for(anext(events), 5)).get("subtype") != "model_info":
+                pass
+        origin = admission._holders[SID]
+        real_retire = origin.abandon
+
+        async def retire():
+            assert insert_started.is_set(), "the real permission bridge must have issued its insert"
+            await real_retire()
+            retiring.set()
+
+        origin.abandon = retire
+        if reader == "runtime":
+            rt._pump_task.cancel()
+        else:
+            closing = asyncio.create_task(events.aclose())
+        try:
+            assert await asyncio.to_thread(insert_started.wait, 5)
+            await asyncio.wait_for(retiring.wait(), 5)
+            # Let the release owner run; the write remains held by the barrier.
+            try:
+                await asyncio.wait_for(origin.exited.wait(), 0.05)
+            except asyncio.TimeoutError:
+                pass
+            try:
+                direct = await admission.acquire(SID)
+            except admission.SessionBusyError:
+                pass
+            else:
+                database.update_session(SID, last_input_tokens=999)
+                writes.append("B successor mutation")
+            release_insert.set()
+            assert await asyncio.to_thread(insert_done.wait, 5)
+            await asyncio.wait_for(closing, 5)
+            await asyncio.wait_for(origin.exited.wait(), 5)
+            if direct is None:
+                direct = await admission.acquire(SID)
+                database.update_session(SID, last_input_tokens=999)
+                writes.append("B successor mutation")
+            assert writes == ["A permission insert", "B successor mutation"]
+            assert origin.abandoned
+            b.persist.assert_not_awaited()
+        finally:
+            release_insert.set()
+            await asyncio.wait_for(closing, 5)
+            if direct is not None:
+                admission.close(direct)
+            await adapter.disconnect_transport()

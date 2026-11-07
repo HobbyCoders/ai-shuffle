@@ -28,8 +28,15 @@ class TurnWork:
 
     def __init__(self) -> None:
         self.pending: set[asyncio.Future] = set()
+        self.loop: asyncio.AbstractEventLoop | None = None
 
     def add(self, future: asyncio.Future) -> None:
+        # A sync dispatch can call asyncio.run(), inheriting this ContextVar
+        # into a second loop. Its outer dispatch is already tracked here;
+        # asyncio.run joins that loop's default executor before returning.
+        # Never mix foreign-loop futures into the release owner's gather.
+        if future.get_loop() is not self.loop or future in self.pending:
+            return
         self.pending.add(future)
         future.add_done_callback(self._settled)
 
@@ -46,7 +53,38 @@ class TurnWork:
 _turn_work: contextvars.ContextVar[TurnWork | None] = contextvars.ContextVar("turn_work", default=None)
 
 
+def _track_executor_dispatch(loop: asyncio.AbstractEventLoop) -> None:
+    """Capture issued executor jobs, including raw asyncio.to_thread callers.
+
+    Install once per admission loop. Outside a turn this delegates unchanged;
+    inside one, shield the underlying executor future *before* returning it to
+    any cancellable coroutine. Registering only selected DB helpers missed
+    permission bridges and would miss the next adapter/tool helper as well.
+    """
+    dispatch = loop.run_in_executor
+    if getattr(dispatch, "_tracks_turn_work", False):
+        return
+
+    @functools.wraps(dispatch)
+    def tracked(executor, func, *args):
+        future = dispatch(executor, func, *args)
+        work = _turn_work.get()
+        if work is None or work.loop is not loop:
+            return future
+        work.add(future)
+        return asyncio.shield(future)
+
+    tracked._tracks_turn_work = True
+    loop.run_in_executor = tracked
+
+
 def bind_turn_work(work: TurnWork | None) -> None:
+    if work is not None:
+        loop = asyncio.get_running_loop()
+        if work.loop is None:
+            work.loop = loop
+        if work.loop is loop:
+            _track_executor_dispatch(loop)
     _turn_work.set(work)
 
 
@@ -66,6 +104,20 @@ async def _await_thread(future: asyncio.Future) -> Any:
     work = _turn_work.get()
     if work is None:
         return await future
+    if future.get_loop() is not work.loop:
+        # Foreign-loop children belong to the tracked outer sync dispatch.
+        # asyncio.run joins its default pool, but not our custom pools: keep
+        # that outer dispatch alive until even a cancelled custom write returns.
+        cancelled = False
+        while not future.done():
+            try:
+                await asyncio.shield(future)
+            except asyncio.CancelledError:
+                cancelled = True
+        result = future.result()
+        if cancelled:
+            raise asyncio.CancelledError
+        return result
     work.add(future)
     return await asyncio.shield(future)
 
