@@ -124,7 +124,7 @@
 		position: absolute;
 		inset: 0;
 		z-index: 20;
-		background: oklch(0 0 0 / 0.5);
+		background: var(--modal-overlay);
 		opacity: 0;
 		pointer-events: none;
 		transition: opacity 0.26s cubic-bezier(0.16, 1, 0.3, 1);

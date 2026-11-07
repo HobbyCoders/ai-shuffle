@@ -1524,6 +1524,35 @@ describe('message-sender restored-session race guard', () => {
 		}
 	});
 
+	// #1077 review: the composer checked its chat before calling the store; New
+	// chat pressed while the store waited on the restore moved the send there.
+	it('sends nowhere when the caller\'s chat changed during the restore', async () => {
+		vi.useFakeTimers();
+		try {
+			const { deps, wsConn, getState } = makeDeps(baseState({
+				sessionId: 'restored-1',
+				messages: [],
+				isRestoringSession: true,
+			} as any));
+			const sender = createMessageSender(deps);
+
+			const pending = sender.sendMessage('meant for restored-1', {
+				stillAtDestination: () => getState().sessionId === 'restored-1',
+			});
+			await vi.advanceTimersByTimeAsync(300);
+			// New chat: the restore is called off and the compose is empty.
+			deps.update(s => ({ ...s, sessionId: null, isRestoringSession: false, messages: [], title: 'New Chat' }));
+			await vi.advanceTimersByTimeAsync(200);
+
+			expect(await pending).toBe(false);
+			expect(querySends(wsConn)).toHaveLength(0);
+			// The caller says why; the store sets no error of its own.
+			expect(getState().error).toBeFalsy();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	it('refuses the send when the restore never settles', async () => {
 		vi.useFakeTimers();
 		try {

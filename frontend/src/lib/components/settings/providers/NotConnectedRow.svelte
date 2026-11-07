@@ -32,7 +32,7 @@
 		<span class="nm">{provider.name}</span>
 		<span class="sm">{kinds}</span>
 	</span>
-	<span class="st-btn sm connect" aria-hidden="true">Connect</span>
+	<span class="st-btn sm connect phone-action" aria-hidden="true">Connect</span>
 </button>
 
 <style>

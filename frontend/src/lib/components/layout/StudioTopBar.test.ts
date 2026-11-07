@@ -54,6 +54,14 @@ it('keeps the sidebar toggle and project navigation', async () => {
 	expect(screen.getByRole('button', { name: 'Show sidebar' }).getAttribute('aria-pressed')).toBe('false');
 });
 
+it('leaves Hide to the open panel header and keeps the bar toggle only as the reopen control', async () => {
+	const view = render(StudioTopBar, { title: 'Example session', onToggleSidebar: vi.fn() });
+	// From 768px a docked panel's own header holds Hide sidebar (PanelToggle), so this copy is hidden there.
+	expect(screen.getByRole('button', { name: 'Hide sidebar' }).classList.contains('docked')).toBe(true);
+	await view.rerender({ sidebarCollapsed: true });
+	expect(screen.getByRole('button', { name: 'Show sidebar' }).classList.contains('docked')).toBe(false);
+});
+
 it('lends Back and the page actions to the phone bar, without a duplicate global menu', async () => {
  vi.stubGlobal('matchMedia', () => ({ matches: true, addEventListener() {}, removeEventListener() {} }));
  const back = vi.fn(); const menu = vi.fn();

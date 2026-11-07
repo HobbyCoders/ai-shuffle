@@ -73,15 +73,38 @@ let historyChat: string | null = null;
 function pushChatHistory(sessionId: string): void {
 	const from = get(activeSession).sessionId;
 	if (!from || from === sessionId) return;
-	const base = (page.state ?? {}) as App.PageState & ChatHistoryState;
-	try {
-		if (base.chatSession !== from) replaceState('', { ...base, chatSession: from } as App.PageState);
-		pushState('', { ...base, chatSession: sessionId } as App.PageState);
-		historyChat = sessionId;
-	} catch {
-		// Router not ready (tests, early boot): the link still opens the chat.
+	const push = () => {
+		const base = (page.state ?? {}) as App.PageState & ChatHistoryState & { mobileDrawer?: boolean };
+		try {
+			if (base.chatSession !== from) replaceState('', { ...base, chatSession: from } as App.PageState);
+			pushState('', { ...base, chatSession: sessionId } as App.PageState);
+			historyChat = sessionId;
+		} catch {
+			// Router not ready (tests, early boot): the link still opens the chat.
+		}
+	};
+	// The phone drawer's own entry is being popped (its dismissal calls
+	// history.back(), which lands later). Push after that Back lands, or the
+	// pending Back would step off the new chat entry again.
+	if ((page.state as { mobileDrawer?: boolean } | undefined)?.mobileDrawer && typeof window !== 'undefined') {
+		let done = false;
+		const go = () => {
+			if (done) return;
+			done = true;
+			window.removeEventListener('popstate', settle);
+			clearTimeout(fallback);
+			push();
+		};
+		// SvelteKit's own popstate handler updates page.state first; read it after.
+		const settle = () => queueMicrotask(go);
+		window.addEventListener('popstate', settle);
+		const fallback = setTimeout(go, DRAWER_BACK_WAIT_MS);
+		return;
 	}
+	push();
 }
+/** How long a chat pick waits for the phone drawer's Back before pushing anyway. */
+const DRAWER_BACK_WAIT_MS = 600;
 
 /**
  * Called by AppPage whenever `page.state` changes: a Back/Forward step onto
@@ -93,6 +116,16 @@ export function followChatHistory(state: unknown): void {
 	if (!id || id === historyChat) return;
 	historyChat = id;
 	if (get(activeSession).sessionId !== id) openSession(id);
+}
+
+/**
+ * A chat picked from a chat list (the sidebar, the phone drawer): one Back
+ * step returns to the chat being left, Forward opens the pick again (#953).
+ * Picking the chat already open, or opening one from New chat, adds no entry.
+ */
+export function openSessionFromList(sessionId: string): void {
+	pushChatHistory(sessionId);
+	openSession(sessionId);
 }
 
 /** Consume ordinary link clicks in the current app; retain native new-tab gestures. */

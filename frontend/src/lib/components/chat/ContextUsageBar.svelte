@@ -1319,16 +1319,19 @@
 		cursor: pointer;
 		transition: background-color 0.13s ease;
 	}
-	/* Nothing used yet: no ring at rest. It stays mounted and reachable, because
-	   it is also the way to the account's usage limits. It comes back when the
-	   pointer is over the composer or the keyboard reaches it; a touch screen has
-	   no hover, so there it stays. */
+	/* Nothing used yet: no ring, so a new chat never shows an empty grey circle.
+	   It stays mounted and reachable, because it is also the way to the account's
+	   usage limits: it shows (with its tooltip) when the keyboard reaches it, the
+	   pointer is on its own spot, or its popover is open. Not when the pointer is
+	   merely over the composer: the model picker opens inside it, and the empty
+	   ring used to appear beside the model chip. A touch screen has no hover, so
+	   there it stays. */
 	@media (hover: hover) {
 		.usage-indicator.idle {
 			opacity: 0;
 			transition: opacity 0.12s ease;
 		}
-		:global(.chat-island:hover) .usage-indicator.idle,
+		.usage-indicator.idle:hover,
 		.usage-indicator.idle:focus-visible,
 		.usage-indicator.idle[aria-expanded='true'] {
 			opacity: 1;

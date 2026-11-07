@@ -236,6 +236,7 @@
 	.btn.primary { background: var(--primary); border-color: var(--primary); color: var(--primary-foreground); }
 	.btn.primary:hover:not(:disabled) { filter: brightness(1.08); }
 	.btn:disabled { opacity: 0.45; cursor: not-allowed; }
+	.btn.primary:disabled { opacity: var(--action-disabled-opacity, 0.4); }
 	.btn:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
 	@keyframes picker-in { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: none; } }
 	@keyframes picker-spin { to { transform: rotate(360deg); } }

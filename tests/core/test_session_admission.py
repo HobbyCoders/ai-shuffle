@@ -967,9 +967,15 @@ async def test_a_stopping_app_abandons_a_rewind_before_its_claim(monkeypatch):
     rewinding = _Rewinding(monkeypatch, pooled=False, rewind=stalled_rewind)
     rewind = rewinding.start()
     await asyncio.to_thread(entered.wait, 5)
-    stopping = asyncio.ensure_future(admission.stop_unattended())
-    with pytest.raises(asyncio.CancelledError):
-        await rewind
-    await asyncio.wait_for(stopping, 7)
-    assert stops[0].is_set(), "its thread must not claim the chat after this"
-    proceed.set()
+    lease = admission._rewinds["app-id"]
+    try:
+        stopping = asyncio.ensure_future(admission.stop_unattended())
+        with pytest.raises(asyncio.CancelledError):
+            await rewind
+        await asyncio.wait_for(stopping, 7)
+        assert stops[0].is_set(), "its thread must not claim the chat after this"
+    finally:
+        proceed.set()
+        # Cancelling the rewind request does not stop its executor thread.
+        # Keep this test's loop/fixtures alive through that thread's release.
+        await admission.close_and_wait(lease)

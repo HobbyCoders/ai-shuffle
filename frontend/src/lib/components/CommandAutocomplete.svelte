@@ -215,6 +215,11 @@
         return false;
 
       case 'Enter':
+        // Shift+Enter is always a new line: close the menu and let the editor insert it.
+        if (event.shiftKey) {
+          onClose();
+          return false;
+        }
         // Select the highlighted command and submit it
         if (filteredCommands[selectedIndex]) {
           event.preventDefault();

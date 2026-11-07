@@ -13,6 +13,7 @@
 	} from '$lib/components/layout/view';
 	import { tick } from 'svelte';
 	import { Marked } from 'marked';
+	import { renderInlineCode } from '$lib/utils/inline-code';
 	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
 	import NoteFileAutocomplete from './NoteFileAutocomplete.svelte';
 	import { resizeToFitContent } from './notes-textarea-resize';
@@ -67,13 +68,14 @@
 	let moreOpen = $state(false);
 	let moreButton = $state<HTMLButtonElement>();
 	let moreMenu = $state<HTMLDivElement>();
-	let fieldsOpen = $state(true);
+	// Tags & files is a compact disclosure: it starts closed on every width so the
+	// document sits directly under the tabs, and opens only when asked for.
+	let fieldsOpen = $state(false);
 	let narrow = $state(false);
 	onMount(() => {
 		const media = window.matchMedia('(max-width: 600px)');
 		const sync = () => { narrow = media.matches; };
 		sync();
-		fieldsOpen = !media.matches;
 		media.addEventListener('change', sync);
 		return () => media.removeEventListener('change', sync);
 	});
@@ -796,7 +798,7 @@
 
 	// Marked's GFM task handling is the same parser used by chat. Notes keeps
 	// its own instance: no chat code-block controls or interactive task toggles.
-	const noteMarkdown = new Marked({ gfm: true });
+	const noteMarkdown = new Marked({ gfm: true, renderer: { codespan: renderInlineCode } });
 	function renderMarkdown(content: string): string {
 		return noteMarkdown.parse(renderAttachmentReferences(content), { async: false });
 	}
@@ -870,11 +872,11 @@
 			{:else if error && !editingNote && !isCreatingNew}
 				<InlineBanner tone="warn">{error}<button class="st-btn" onclick={() => loadData()}>Retry</button></InlineBanner>
 			{:else if notes.length === 0}
-				<EmptyDetail title={searchQuery || selectedTag ? 'No notes match' : 'No notes yet'}
+				<EmptyDetail icon={Notebook} title={searchQuery || selectedTag ? 'No notes match' : 'No notes yet'}
 					message={searchQuery || selectedTag ? 'Try another search or tag.' : 'Keep ideas, plans and files together.'}
 					actionLabel={selectedTag ? 'Clear filters' : searchQuery ? 'Clear search' : undefined} onAction={() => { searchQuery = ''; selectedTag = null; }}>
 					{#if !searchQuery && !selectedTag}
-						<button class="st-btn primary" onclick={startNewNote}>Create your first note</button>
+						<button class="st-btn primary" onclick={startNewNote}><Plus />New note</button>
 					{/if}
 				</EmptyDetail>
 			{:else}
@@ -995,7 +997,8 @@
 	.note-more { position: relative; }
 	.note-menu { position: absolute; right: 0; top: calc(100% + 4px); z-index: 20; min-width: 160px; padding: 4px; border: 1px solid var(--st-border); border-radius: var(--st-radius-md); background: var(--popover); box-shadow: var(--menu-shadow); }
 	.note-menu button { width: 100%; justify-content: flex-start; }
-	.note-writing { display: flex; flex-direction: column; gap: 16px; padding-top: 12px; }
+	/* The document starts 24px under the collapsed Tags & files row, framed (Edit) or not (Preview). */
+	.note-writing { display: flex; flex-direction: column; gap: 24px; padding-top: 12px; }
 	.note-fields { min-width: 0; }
 	.note-fields summary { width: fit-content; cursor: pointer; color: var(--st-mfg); font-size: 13px; padding-block: 6px; }
 	.note-fields summary:hover { color: var(--st-fg); }
@@ -1012,7 +1015,8 @@
 	.note-textarea { display: block; width: 100%; min-height: 320px; padding: 14px 16px; border: 1px solid var(--st-input); border-radius: var(--st-radius-md); background: var(--st-field); color: var(--st-fg); font: inherit; font-size: 14px; line-height: 1.7; resize: none; overflow: hidden; }
 	.note-textarea:focus-visible { outline-offset: 4px; }
 	.note-drop { position: absolute; inset: 0; display: grid; place-items: center; background: var(--st-bg); color: var(--st-fg); font-size: 14px; pointer-events: none; }
-	.note-preview { max-width: none; min-height: 320px; padding: 12px 0; color: var(--st-fg); font-size: 14px; line-height: 1.7; overflow-wrap: anywhere; }
+	.note-preview { max-width: none; min-height: 320px; padding: 0 0 12px; color: var(--st-fg); font-size: 14px; line-height: 1.7; overflow-wrap: anywhere; }
+	.note-preview :global(> :first-child) { margin-top: 0; }
 	.note-preview :global(ul), .note-preview :global(ol) { padding-inline-start: 24px; }
 	.note-preview :global(li:has(> input[type='checkbox'])),
 	.note-preview :global(li:has(> p > input[type='checkbox'])) { position: relative; list-style: none; margin-inline-start: -24px; padding-inline-start: 24px; }
@@ -1023,11 +1027,11 @@
 	.note-preview :global(.note-ref--missing) { color: var(--st-mfg); text-decoration: none; }
 	@media (pointer: coarse), (max-width: 600px) {
 		.note-title { font-size: 22px; line-height: 1.3; }
-		.note-writing { padding-top: 0; }
-		.note-preview { padding-top: 24px; }
-		.note-preview :global(> :first-child) { margin-top: 0; }
-		.note-fields { order: 2; }
-		.note-fields summary { min-height: 44px; display: flex; align-items: center; }
+		/* Same place as desktop: Tags & files directly under the tabs, the
+		   document 24px below it. The drawn row keeps the desktop height; an
+		   invisible ::after lends the summary its 44px tap area. */
+		.note-fields summary { position: relative; }
+		.note-fields summary::after { content: ''; position: absolute; left: 0; right: 0; top: 50%; height: 44px; transform: translateY(-50%); }
 		.note-tag-input { height: 44px; font-size: 16px; }
 		.note-textarea { font-size: 16px; overflow-y: auto; }
 	}
