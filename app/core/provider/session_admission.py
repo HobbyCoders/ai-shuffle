@@ -79,6 +79,9 @@ _ENDING_WAIT_SECONDS = 15.0
 _REWIND_WAIT_SECONDS = 60.0
 # How long a stopping app gives unfinished turns to save what they have.
 _SHUTDOWN_WAIT_SECONDS = 5.0
+# A reader exit must not turn a wedged engine into an immortal chat holder.
+_ABANDONED_DRAIN_SECONDS = 15.0
+_ABANDONED_CANCEL_SECONDS = 1.0
 # How far behind a stream's reader may fall. Far past anything a live connection
 # gets to, as a turn writes kilobytes a second apart from the odd large tool result.
 _READER_BUFFER_BYTES = 8 * 1024 * 1024
@@ -138,6 +141,9 @@ class Lease:
     exited: asyncio.Event = field(default_factory=asyncio.Event)
     # While it waits for the chat: what is in its way may have changed.
     wake: asyncio.Event = field(default_factory=asyncio.Event)
+    # Captures the originating adapter/context, never a fresh session-id lookup.
+    abandon: Optional[Callable[[], Awaitable[None]]] = None
+    abandoned: bool = False
 
     @property
     def stopped(self) -> bool:
@@ -351,12 +357,29 @@ async def stream_turn(
 async def _finish_turn(
     events: AsyncGenerator[Dict[str, Any], None], lease: Lease, *, release: bool = True,
 ) -> None:
-    try:
+    async def drain() -> None:
         async for _ in events:
             pass
+
+    draining = _own(drain())
+    try:
+        finished, _ = await asyncio.wait({draining}, timeout=_ABANDONED_DRAIN_SECONDS)
+        if not finished:
+            logger.warning("Abandoned turn drain timed out for %s; retiring its engine", lease.session_id)
+            # Retire/fence before cancelling the reader or releasing admission.
+            # Cancellation alone does not stop the independently running engine.
+            lease.abandoned = True
+            if lease.abandon is not None:
+                await lease.abandon()
+            draining.cancel()
+            await asyncio.wait({draining}, timeout=_ABANDONED_CANCEL_SECONDS)
+        else:
+            await draining
     except Exception:
         logger.exception("A turn nobody is reading failed for %s", lease.session_id)
     finally:
+        if not draining.done():
+            draining.cancel()
         if release:
             close(lease)
 

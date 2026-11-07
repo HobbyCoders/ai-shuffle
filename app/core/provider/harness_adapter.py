@@ -3962,6 +3962,14 @@ class HarnessAdapter(ProviderAdapter):
             model_calls=1, turn_increment=0, **attribution,
         )
 
+    def abandon_turn(self) -> None:
+        """Stop admitting calls/writes from this engine before asynchronous teardown."""
+        self._connected = False
+        if self._store is not None:
+            fence = getattr(self._store, "abandon_writes", None)
+            if fence is not None:
+                fence()
+
     async def interrupt(self) -> None:
         if self._engine is not None:
             await self._engine.submit(Interrupt())

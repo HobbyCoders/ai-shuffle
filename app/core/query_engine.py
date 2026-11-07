@@ -2885,6 +2885,31 @@ async def _stream_to_websocket_turn(
     from app.core.generation_resolver import bind_turn_context, clear_turn_context
     bound_generation_context = bind_turn_context(options, session_id=session_id, client=state)
 
+    originating_adapter = state.adapter
+    originating_engine = originating_adapter.engine
+
+    async def abandon_engine() -> None:
+        from app.core.detached_tasks import spawn_detached
+
+        # The rewind/successor may already have replaced the pool entry, or
+        # reconnected this adapter. Never retire the replacement engine.
+        if originating_adapter.engine is not originating_engine:
+            return
+        originating_adapter.abandon_turn()
+        removed = await pool.remove_broken(
+            session_id, expected_context=bound_generation_context, preserve_session=True,
+        )
+        interruption = spawn_detached(originating_adapter.interrupt())
+        if removed is None:
+            # A rewind already evicted it. Finish this engine's transport only,
+            # never session-owned Swarm/Task work belonging to a successor.
+            spawn_detached(originating_adapter.disconnect_transport(session_id=session_id))
+        if interruption is not None:
+            # A stuck checkpoint/CLI interrupt must not become the next wedge.
+            await asyncio.wait({interruption}, timeout=0.25)
+
+    lease.abandon = abandon_engine
+
     # Mark as streaming (both reuse and create paths)
     state.is_streaming = True
     session_admission.apply_stop(lease, state)
@@ -4324,6 +4349,11 @@ async def _stream_to_websocket_turn(
         else:
             # Normal case: keep in pool for reuse!
             logger.debug(f"[WS] Kept session {session_id} in pool for reuse")
+
+    # A timed-out drain was fenced/evicted before its reader was cancelled.
+    # It may unwind late, but may not persist or publish as a finished engine.
+    if lease.abandoned:
+        return
 
     # Persist session data to database in a batched write.
     await _persist_turn_results(
