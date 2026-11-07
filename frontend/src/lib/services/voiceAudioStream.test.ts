@@ -211,11 +211,16 @@ describe('voice PCM stream', () => {
   expect(sockets[1].url).toBe('ws://localhost/api/v1/voice/sessions/owner/audio?resume=1');
   await first.close(); await reopened.close();
  });
- it('admits typed attachment references only after the server acknowledges them', async () => {
+ it.each(['missing', 'throwing'])('admits typed attachment references on HTTP with %s randomUUID, only after acknowledgement', async (mode) => {
+  vi.stubGlobal('crypto', {
+   getRandomValues: crypto.getRandomValues.bind(crypto),
+   randomUUID: mode === 'missing' ? undefined : () => { throw new Error('Insecure context'); },
+  });
   const stream = await openVoiceAudioStream('owner', {} as MediaStream, handlers(), new AbortController().signal);
   const sent = stream.sendText('Inspect /workspace/uploads/report.pdf');
   const event = JSON.parse(sockets[0].send.mock.calls[0][0]);
   expect(event).toMatchObject({ type: 'input_text', text: 'Inspect /workspace/uploads/report.pdf' });
+  expect(event.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
   let settled = false; void sent.then(() => { settled = true; });
   await Promise.resolve(); expect(settled).toBe(false);
   sockets[0].onmessage({ data: JSON.stringify({ type: 'text.accepted', id: event.id }) });
