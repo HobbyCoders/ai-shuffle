@@ -1847,6 +1847,12 @@ def _run_column_migrations(cursor: Any) -> None:
         """)
         migrations_applied.append("projects_v2")
 
+    # Additive and local-only; the migration fingerprint applies this on upgrade.
+    if not table_exists(cursor, "project_catalog_aliases"):
+        from app.db.project_catalog_aliases import create_schema as create_catalog_alias_schema
+        create_catalog_alias_schema(cursor)
+        migrations_applied.append("project_catalog_aliases")
+
     if not table_exists(cursor, "checkouts"):
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS checkouts (
@@ -3639,6 +3645,7 @@ def migrations_fingerprint() -> str:
     from app.db import (
         schema_postgres, mobile_hub, network, owner_state, working_record, watches, watch_delivery,
         session_mode_migration, session_archive_migration, model_provider_slots, project_setup, stop_notices,
+        project_catalog_aliases,
     )
     from app.core import owner_auth
 
@@ -3649,7 +3656,7 @@ def migrations_fingerprint() -> str:
     for module in (
         sys.modules[__name__], schema_postgres, mobile_hub, owner_auth, network, owner_state,
         working_record, watches, watch_delivery, session_mode_migration, session_archive_migration, model_provider_slots,
-        project_setup, stop_notices,
+        project_setup, stop_notices, project_catalog_aliases,
     ):
         path = getattr(module, "__file__", None)
         if not path:

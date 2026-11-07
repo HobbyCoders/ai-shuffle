@@ -435,13 +435,16 @@ async def handle_project_git(body, from_device):
     from app.core.checkout_manager import _dir_is_worktree, _resolve_checkout_path
     from app.core.config import settings
     from app.core.git_service import git_service
-    from app.db import checkouts, projects_v2
+    from app.db import checkouts
 
     name = body.get("action")
     if name not in _PROJECT_ACTIONS or name not in _actions:
         raise ValueError("Unsupported project Git action")
+    from app.core.project_resolver import catalog_project_read_ids, resolve_catalog_project
+
     project_id = body.get("project_id")
-    if not await run_sync(projects_v2.get_project_v2, project_id):
+    project = await run_sync(resolve_catalog_project, project_id)
+    if not project:
         return {"status": 404, "detail": "Project not found on selected worker"}
     endpoint, signature, hints = _actions[name]
     params = body.get("params")
@@ -452,7 +455,12 @@ async def handle_project_git(body, from_device):
     branch = body.get("branch") or None
     if branch is not None and (not isinstance(branch, str) or not control._BRANCH_RE.fullmatch(branch)):
         raise ValueError("Invalid checkout branch")
-    rows = await run_sync(checkouts.list_checkouts, project_id)
+    rows = []
+    for read_id in await run_sync(catalog_project_read_ids, project):
+        registered = await run_sync(checkouts.list_checkouts, read_id)
+        # Linking retains branch rows for bound sessions, but an old base must
+        # never become eligible merely because the current identity is live.
+        rows.extend(r for r in registered if read_id == project["id"] or r.get("branch"))
     candidates = [r for r in rows if r["runner_id"] == settings.effective_instance_id
                   and (r.get("status") or "active") == "active"
                   and (not r.get("branch") or r.get("branch") == branch)]
@@ -481,6 +489,14 @@ async def handle_project_git(body, from_device):
             continue
         found.setdefault(os.path.normcase(os.path.realpath(path)), (path, row, plain_folder))
     if not found:
+        # Linking can commit after the identity lookup but before the checkout
+        # read. Retry only an exact, proven replacement, never another folder.
+        current = await run_sync(resolve_catalog_project, project_id)
+        if current and current["id"] != project["id"]:
+            return await handle_project_git({
+                **body, "project_id": current["id"],
+                "params": {**params, "project_id": current["id"]},
+            }, from_device)
         return {"status": 409, "detail": "No matching Git checkout exists on the selected worker. Restore the checkout or select another worker or branch."}
     if len(found) > 1:
         return {"status": 409, "detail": "Multiple Git checkouts match on the selected worker. Select a specific checkout branch."}
