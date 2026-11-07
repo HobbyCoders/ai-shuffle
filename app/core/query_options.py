@@ -24,6 +24,7 @@ from app.core.agent_types import AgentOptions
 
 from app.db import database
 from app.core.config import settings
+from app.core.git_worktree_ops import WorktreeAddError, worktree_error_detail
 from app.core.platform import detect_deployment_mode, DeploymentMode
 
 from app.core.project_utils import get_project_working_dir
@@ -366,6 +367,7 @@ class WorktreeUnavailableError(Exception):
         reason: str = "",
         path: Optional[str] = None,
         mismatch: Optional[str] = None,
+        checkout_error: Optional[str] = None,
     ):
         self.session_id = session_id
         self.branch_name = branch_name
@@ -383,6 +385,13 @@ class WorktreeUnavailableError(Exception):
                 f"Refusing to run on the wrong branch or in the main checkout."
             )
             return
+        if checkout_error:
+            super().__init__(
+                f"This session's worktree{branch} could not be prepared: "
+                f"{worktree_error_detail(checkout_error)}. Fix the Git error and retry. "
+                "Refusing to run in the main checkout."
+            )
+            return
         where = f" at {path}" if path else ""
         detail = f" ({reason})" if reason else ""
         hint = (
@@ -394,6 +403,34 @@ class WorktreeUnavailableError(Exception):
             f"{where}{detail}. Start a new session{hint}. Refusing to run in the "
             f"main checkout."
         )
+
+
+def _resolve_checkout_for_options(session_row: Dict[str, Any]) -> Optional[str]:
+    from app.core import project_resolver
+
+    try:
+        return project_resolver.resolve_cwd(session_row)
+    except WorktreeAddError as exc:
+        raise WorktreeUnavailableError(
+            session_row.get("id"),
+            branch_name=session_row.get("branch") or session_row.get("worktree_branch"),
+            checkout_error=str(exc),
+        ) from exc
+
+
+def _last_checkout_error(project_id: str, branch: str) -> Optional[str]:
+    """Retain an inline/async claim's Git diagnostic if no ref was left to retry."""
+    from app.db import git_ops as git_ops_db
+
+    try:
+        for row in git_ops_db.list_ops_for_runner(settings.effective_instance_id, "ensure_worktree"):
+            if (row.get("project_v2_id") == project_id
+                    and (row.get("params") or {}).get("branch") == branch):
+                error = (row.get("result") or {}).get("error")
+                return worktree_error_detail(error) if row.get("status") == "error" and error else None
+    except Exception:  # noqa: BLE001 — diagnostic lookup must not change refusal
+        logger.debug("Could not read checkout failure", exc_info=True)
+    return None
 
 
 def _claim_and_run_pending_checkout(
@@ -619,7 +656,9 @@ async def ensure_pending_checkout(
                         "Inline ensure_worktree claim failed for branch %s: %s",
                         branch, exc,
                     )
-                    await run_sync(git_ops_db.fail_op, claimed["id"], str(exc))
+                    # Keep the bounded Git diagnostic on the durable op; option
+                    # building reads it even if the failed -b left no branch.
+                    await run_sync(git_ops_db.fail_op, claimed["id"], worktree_error_detail(str(exc)))
                     return False
                 await run_sync(git_ops_db.complete_op, claimed["id"], result)
                 logger.info(
@@ -932,7 +971,7 @@ def build_options_from_profile(
         if session_row:
             _rescue_pending_checkout(session_row)
 
-        v2_cwd = project_resolver.resolve_cwd(session_row) if session_row else None
+        v2_cwd = _resolve_checkout_for_options(session_row) if session_row else None
         if v2_cwd is not None:
             working_dir = v2_cwd
             working_dir_source = "project-v2"
@@ -972,7 +1011,7 @@ def build_options_from_profile(
                     if session_row and _claim_and_run_pending_checkout(
                         project_v2, branch
                     ):
-                        retry_cwd = project_resolver.resolve_cwd(session_row)
+                        retry_cwd = _resolve_checkout_for_options(session_row)
                     if retry_cwd is None:
                         mismatch = None
                         if session_row:
@@ -988,6 +1027,7 @@ def build_options_from_profile(
                                 "(or could not be prepared — see server logs)"
                             ),
                             mismatch=mismatch,
+                            checkout_error=_last_checkout_error(project_v2["id"], branch) if branch else None,
                         )
                     working_dir = retry_cwd
                     working_dir_source = "project-v2"

@@ -219,13 +219,16 @@ def _branch(cwd, branch):
         raise ValueError("The worker checkout is on a different branch.")
 
 
-def _status(cwd):
-    return git(cwd, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+def _status(cwd, *, lfs_passthrough=False):
+    from app.core.git_worktree_ops import LFS_PASSTHROUGH_CONFIG
+
+    config = LFS_PASSTHROUGH_CONFIG if lfs_passthrough else ()
+    return git(cwd, *config, "status", "--porcelain=v1", "-z", "--untracked-files=all")
 
 
-def _transfer_status(cwd):
+def _transfer_status(cwd, *, lfs_passthrough=False):
     """Owner scratch stays untracked and does not participate in a task handoff."""
-    entries = iter(_status(cwd).split(b"\0"))
+    entries = iter(_status(cwd, lfs_passthrough=lfs_passthrough).split(b"\0"))
     kept = []
     for entry in entries:
         if entry.startswith((b"?? mockups/", b"?? uploads/")):
@@ -254,9 +257,9 @@ def _default_branch(cwd):
     raise ValueError(message)
 
 
-def fingerprint(cwd):
+def fingerprint(cwd, *, lfs_passthrough=False):
     """Only a checkout clean apart from untracked owner scratch can finish a handoff."""
-    if _transfer_status(cwd):
+    if _transfer_status(cwd, lfs_passthrough=lfs_passthrough):
         raise ValueError("The owning worker's files changed during resume; ownership was not moved.")
     return git(cwd, "rev-parse", "HEAD").decode().strip()
 
@@ -410,6 +413,7 @@ def import_checkout(base, destination, state):
         raise ValueError("The remote branch changed during resume. Retry from the owning worker.")
     published = [head] + ([fetched] if fetched != head else [])
     dest = receiving_checkout(base, destination, branch)
+    lfs_passthrough = False
     if dest.exists() or dest.is_symlink():
         known = [line.removeprefix("worktree ") for line in git(base, "worktree", "list", "--porcelain").decode().splitlines() if line.startswith("worktree ")]
         if not any(Path(p).resolve() == dest.resolve() for p in known) or dest.is_symlink():
@@ -426,16 +430,22 @@ def import_checkout(base, destination, state):
             # strands nothing. Ignored files are still never overwritten.
             git(dest, "checkout", "--no-overwrite-ignore", "-B", branch, head)
     else:
-        from app.core.git_worktree_ops import exclude_app_worktrees
-        exclude_app_worktrees(str(base), str(dest))
+        from app.core.git_service import git_service
+
         old = git(base, "for-each-ref", "--format=%(objectname)", "refs/heads/" + branch).decode().strip()
         if old:
             _require_published(base, branch, old, head, published, f"the receiving worker's repository {base}")
             git(base, "update-ref", "refs/heads/" + branch, head, old)
-            git(base, "worktree", "add", str(dest), branch)
-        else:
-            git(base, "worktree", "add", "-b", branch, str(dest), head)
-    if fingerprint(dest) != head:
+        success, detail = git_service.add_worktree(
+            str(base), str(dest), branch, new_branch=not bool(old),
+            base_branch=head, fetch_base=False,
+        )
+        if not success:
+            raise ValueError(f"Git failed to import checkout: {detail}")
+        lfs_passthrough = bool(detail)
+    # A fresh fallback has pointer bytes, which can be verified without invoking
+    # the broken clean filter again. This read also uses command-only overrides.
+    if fingerprint(dest, lfs_passthrough=lfs_passthrough) != head:
         raise ValueError("The receiving checkout changed during resume; ownership was not moved.")
     git(dest, "branch", "--set-upstream-to=origin/" + branch, branch)
     return str(dest)

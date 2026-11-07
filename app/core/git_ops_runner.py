@@ -181,6 +181,8 @@ def execute_ensure_worktree(op_row: Dict[str, Any]) -> Dict[str, Any]:
             create_new_branch=False,
         )
     if not path:
+        # Actual worktree-add failures raise WorktreeAddError from ensure_checkout;
+        # only an unavailable base/branch reaches this generic diagnosis.
         raise RuntimeError(
             f"Branch '{branch}' could not be materialized on this device "
             f"(no base checkout here, or the branch exists neither locally nor "

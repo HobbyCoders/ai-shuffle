@@ -50,6 +50,7 @@ from fluid.tools.child_env import scrub_child_env
 
 from app.core.config import settings
 from app.core.git_service import git_service
+from app.core.git_worktree_ops import WorktreeAddError, worktree_error_detail
 from app.core.project_links import auto_link_group_id
 from app.core.worktree_manager import (
     WorktreeError,
@@ -742,7 +743,9 @@ def _ensure_branch_checkout(
             dest_str,
             err,
         )
-        return None
+        raise WorktreeAddError(
+            f"Git worktree add failed for branch '{branch}': {worktree_error_detail(err)}"
+        )
 
     # Verify the materialization too: a successful add must not bind a checkout
     # that changed HEAD before it reached the session/checkout registry.
@@ -1617,8 +1620,9 @@ def ensure_checkout(
 
     Returns the absolute checkout path, or ``None`` when it is not materializable
     on this device (no base checkout here and none self-seeded, or a branch that
-    exists nowhere and was not requested as new). Idempotent and safe to call on
-    every send.
+    exists nowhere and was not requested as new). Raises WorktreeAddError with
+    Git's diagnostic if checkout was attempted but failed. Idempotent and safe
+    to call on every send.
     """
     if not project_v2_row:
         return None
