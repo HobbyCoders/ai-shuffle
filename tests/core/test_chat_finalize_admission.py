@@ -186,3 +186,53 @@ async def test_rewind_timeout_fences_old_finalizer_from_direct_successor(mock_db
                 if direct is not None:
                     admission.close(direct)
                 supervisor.unregister_worker(SID, worker.worker_session_id)
+
+
+@pytest.mark.parametrize("effect", ["computer_use", "done"])
+async def test_replaced_runtime_deregisters_without_stopping_or_completing_direct_successor(mock_db, effect):
+    from app.mcp.computer_use import abort as cu_abort
+
+    entered, resume = asyncio.Event(), asyncio.Event()
+    turn = turns.enqueue_turn(SID, "user", prompt="old turn")
+    rt = session_runtime.SessionRuntime(turn)
+
+    async def persist(*args, **kwargs):
+        entered.set()
+        await resume.wait()
+
+    with _runtime_env(pump=pump) as env, patch(
+        "app.core.turn_finalize.persist_turn_end_state", side_effect=persist,
+    ):
+        running = asyncio.create_task(rt.execute())
+        direct = None
+        try:
+            await asyncio.wait_for(entered.wait(), 5)
+            rewind = await admission.begin_rewind(SID)
+            assert admission.take_for_rewind(rewind) is rt._admission_lease
+            admission.close(rewind)
+            direct = await admission.acquire(SID)
+            # A direct-API successor never replaces _live_runtimes[sid].
+            assert session_runtime._live_runtimes[SID] is rt
+            cu_abort.resume(SID)
+            generation = cu_abort.generation(SID)
+            env["broadcaster"].reset_mock()
+            resume.set()
+            assert await asyncio.wait_for(running, 5) == "aborted"
+            if effect == "computer_use":
+                assert not cu_abort.is_stopped(SID), "A halted B's newly armed computer use"
+                assert cu_abort.generation(SID) == generation
+            else:
+                assert not any(
+                    call.args[1].get("type") == "done"
+                    for call in env["broadcaster"].await_args_list
+                ), "A's stale done frame completed B's chat"
+            assert SID not in session_runtime._live_runtimes
+            assert rt._admission_lease.exited.is_set()
+            assert admission._holders[SID] is direct
+            from app.db import runs
+            assert runs.get_active_run(SID) is None
+        finally:
+            resume.set()
+            await asyncio.wait_for(running, 5)
+            if direct is not None:
+                admission.close(direct)

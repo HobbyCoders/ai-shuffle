@@ -1376,6 +1376,7 @@ class SessionRuntime:
             if (
                 self._pending_done is not None
                 and self._abort_reason != "recording_failed"
+                and self._owns_admission()
             ):
                 # The pump ending does not prove the session is finished: the
                 # park gate above may still find background work. Deliver the
@@ -1399,8 +1400,9 @@ class SessionRuntime:
                 _live_runtimes.pop(sid, None)
                 # End the persistent desktop indicator and release held input.
                 # Invalidate workers that outlived cancellation before re-arming.
-                from app.mcp.computer_use import abort as cu_abort
-                cu_abort.request_stop(sid, reason="completed")
+                if self._owns_admission():
+                    from app.mcp.computer_use import abort as cu_abort
+                    cu_abort.request_stop(sid, reason="completed")
             # Cancelling execute() must not cancel this, and neither may it hurry
             # it: a write still being re-sent needs the lease it was fenced on.
             async def release() -> None:
@@ -2736,6 +2738,12 @@ class SessionRuntime:
     # ------------------------------------------------------------------
     # finalize — always runs; decides completed | aborted | parked
     # ------------------------------------------------------------------
+
+    def _owns_admission(self) -> bool:
+        from app.core.provider import session_admission
+
+        lease = self._admission_lease
+        return lease is not None and session_admission.is_current(lease)
 
     def _check_finalization(self) -> None:
         from app.core.provider import session_admission

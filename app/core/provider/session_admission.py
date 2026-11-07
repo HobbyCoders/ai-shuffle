@@ -272,6 +272,11 @@ def turn_ended(lease: Lease) -> None:
     lease.ending = True
 
 
+def is_current(lease: Lease) -> bool:
+    """Only this admission generation may publish a terminal or change Stop state."""
+    return _holders.get(lease.session_id) is lease
+
+
 def holds_chat(lease: Lease) -> bool:
     """Whether session-wide cleanup is still this turn's to do.
 
