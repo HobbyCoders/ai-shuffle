@@ -96,7 +96,7 @@
 		{
 			"why": "shared Settings titles and the medium desktop frame retain their geometry",
 			"journeys": ["shell-geometry"],
-			"globs": ["frontend/tests/journeys/shell-geometry.journey.mjs", "frontend/src/lib/components/settings/shell/PageTitle.svelte", "frontend/src/lib/components/settings/shell/PreferencePage.svelte", "frontend/src/lib/components/settings/shell/CollectionPage.svelte", "frontend/src/lib/components/layout/view/PanelToggle.svelte"]
+			"globs": ["frontend/tests/journeys/shell-geometry.journey.mjs", "frontend/src/lib/components/settings/shell/PageTitle.svelte", "frontend/src/lib/components/settings/shell/PreferencePage.svelte", "frontend/src/lib/components/settings/shell/CollectionPage.svelte", "frontend/src/lib/components/layout/view/PanelToggle.svelte", "frontend/src/lib/components/layout/AppLayout.svelte"]
 		},
 		{
 			"why": "Settings deep links show the requested phone detail and preserve both Back steps",

@@ -29,7 +29,7 @@ await runJourney({name:'shell-geometry', allow:[...DEV_INSTANCE_NOISE, {
      const back=page.locator('.topbar').getByRole('button',{name:'Back to Settings',exact:true});
      if(await back.count()) await back.click();
     }
-    const reopen=page.getByRole('button',{name:'Show sidebar',exact:true});
+    const reopen=page.getByRole('button',{name:/^Show sidebar\b/});
     if(width>=768 && await reopen.isVisible()) await reopen.click();
     await page.getByRole('navigation',{name:'Settings',exact:true}).getByRole('button',{name:category,exact:true}).click();
     const heading=shown(page.getByRole('heading',{name:category,exact:true,level:1}));
@@ -65,10 +65,16 @@ await runJourney({name:'shell-geometry', allow:[...DEV_INSTANCE_NOISE, {
     // Detail headings start at 53px at 1440; PageTitle centres its 30px h1 in a 32px row (54px).
     expect((await heading.boundingBox()).y===53,'detail title keeps its 1440px baseline at medium widths');
     expect(await page.locator('.topbar').count()===0,'no empty full-width top bar');
-    if(await page.getByRole('button',{name:'Show sidebar',exact:true}).isVisible()) await page.getByRole('button',{name:'Show sidebar',exact:true}).click();
+    // A list page's reopen control names the list it brings back, so a window
+    // that opens straight on a detail still shows where the list went.
+    const reopenList=page.getByRole('button',{name:'Show sidebar, Agents list',exact:true});
+    if(await reopenList.isVisible()) await reopenList.click();
     await shown(page.getByRole('button',{name:'Hide sidebar',exact:true})).click();
     expect(await nav.isVisible(),'collapsed panel preserves destination switching');
-    await page.getByRole('button',{name:'Show sidebar',exact:true}).click();
+    const label=await reopenList.evaluate(b=>{const r=b.getBoundingClientRect(),t=b.querySelector('span');return {text:t?.textContent.trim(),w:t?.getBoundingClientRect().width,x:r.x,bottom:r.bottom};});
+    expect(label.text==='Agents'&&label.w>0,'the collapsed list reopen control shows the list name '+JSON.stringify(label));
+    expect(label.bottom<=(await heading.boundingBox()).y,'the reopen label stays above the detail title '+JSON.stringify(label));
+    await reopenList.click();
     expect(await page.getByPlaceholder('Search agents').isVisible(),'reopen restores panel controls');
     await mark('chat pages show one panel toggle: Hide in the open panel header, Show only while collapsed');
     await nav.getByRole('button',{name:'Chats',exact:true}).click();
