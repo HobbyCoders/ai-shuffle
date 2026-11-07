@@ -862,24 +862,34 @@
 		margin-top: 6px;
 	}
 
-	/* The chip row names give way before the row wraps.
+	/* The staged chip row's layout never reads the branch name.
 
-	   The repository and branch chips line up at a fixed floor (flex-basis)
-	   and grow toward their full name (max-width: max-content), so where the
-	   row breaks depends only on that floor, never on how long a name is.
-	   Between Send and the session binding, Auto turns into the generated
-	   branch name; when line breaks followed name length, that pushed Worktree
-	   to a second line and lifted the composer 34px for that moment. Now the
-	   longer name only ellipsizes (full name in its title), so the row keeps
-	   its lines across Send. A composer too narrow for the floors still wraps,
-	   and each chip keeps at least its floor (icon, a few characters, chevron),
-	   so nothing collapses or overlaps.
+	   Between Send and the session binding, the branch chip turns from "Auto
+	   from main" into the generated name. When any width in this row came from
+	   that text, the row broke its lines differently and the composer jumped
+	   34px for that moment. So every width here comes from the container or
+	   from text that does not change across Send:
+	   - The bar takes all the room the agent chip leaves (`flex: 1 1 0`, not
+	     its content width), and the row fills the bar. The agent keeps its own
+	     width unless the bar would drop below half the row.
+	   - The branch chip is a slot: an 88px basis that grows to a fixed cap. The
+	     name ellipsizes inside it (full name in its title). Its width, its line
+	     and where the row breaks are the same for any name.
+	   - The repository chip has the same 88px basis and grows to its own name,
+	     which Send does not change. The runner and Worktree keep their width,
+	     each capped at the row so one alone on a line never pokes out.
+	   A composer too narrow for the bases wraps, and each chip keeps at least
+	   its basis (icon, a few characters, chevron), so nothing collapses or
+	   overlaps. The phone sheet's rows (`display: contents`) lay out on their
+	   own grid, so none of this applies there. */
+	.execution-mode-bar:not(.sheet-mode) {
+		flex: 1 1 0;
+		min-width: 50%;
+	}
 
-	   The runner and Worktree keep their width. Each is capped at the row, so
-	   one alone on a line never pokes out of it. The phone sheet's rows
-	   (`display: contents`) lay out on their own grid, so this stays off it. */
 	.mode-bar-row {
-		--chip-floor: 96px;
+		--chip-floor: 88px;
+		--branch-slot-max: 200px;
 		display: flex;
 		flex-wrap: wrap;
 		align-items: center;
@@ -888,12 +898,22 @@
 		max-width: 100%;
 	}
 
+	.execution-mode-bar:not(.sheet-mode) > .mode-bar-row {
+		align-self: stretch;
+	}
+
 	.execution-mode-bar:not(.sheet-mode) .mode-bar-row :global(.workspace-selector),
 	.execution-mode-bar:not(.sheet-mode) .mode-bar-row :global(.branch-selector) {
 		display: flex;
 		flex: 1 0 var(--chip-floor);
 		min-width: 0;
 		max-width: max-content;
+	}
+
+	/* After the rule above (same specificity): the cap is a constant, never the
+	   name's max-content, so a short name can't pull the slot below its basis. */
+	.execution-mode-bar:not(.sheet-mode) .mode-bar-row :global(.branch-selector) {
+		max-width: min(var(--branch-slot-max), 100%);
 	}
 
 	.execution-mode-bar:not(.sheet-mode) .mode-bar-row :global(.workspace-selector > .ctx-chip),
