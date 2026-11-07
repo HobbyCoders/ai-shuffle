@@ -36,7 +36,7 @@ import { sessionEphemeralCache } from '../session-cache';
 import { markBindingHydrated } from './composer-binding';
 import { unmarkQuestionSent } from './sent-questions';
 import { keepStopRecovery } from '$lib/utils/not-sent-hold';
-import { turnErrorAnchor } from './turn-error-banner';
+import { raiseTurnError } from './turn-error-banner';
 
 // ─── Interfaces ──────────────────────────────────────────────────────────────
 
@@ -1115,11 +1115,10 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 					// The banner belongs to the failed turn the log records, so the feed
 					// clears it once that failure is rewound away or a later turn
 					// finishes cleanly (turn-error-banner.ts, #1082 / #1175). A frame
-					// whose failure the log has already moved past raises nothing.
+					// that names a turn the log has already moved past raises nothing.
 					const outcomes = erroredSessionId ? feedController.turnOutcomes(erroredSessionId) : null;
 					const frameTurnId = typeof data.turn_id === 'string' && data.turn_id ? data.turn_id : null;
-					const anchor = turnErrorAnchor(errMessage, frameTurnId, outcomes ?? {},
-						errState.isStreaming || errState.optimisticStreaming === true || !!outcomes?.liveTurnId);
+					const anchor = raiseTurnError(errMessage, frameTurnId, outcomes ?? {});
 					if (anchor === 'outlived') break;
 					update(s => ({
 						...s,

@@ -1107,7 +1107,7 @@ describe('ws-message-handlers', () => {
 			expect(applied?.forkOfferSessionId).toBeNull();
 		});
 
-		it('ties the banner to its logged failure, and raises none for a failure the log already moved past', () => {
+		it('ties the banner to its logged failure; a frame naming an outlived turn raises none, a message-only one always shows', () => {
 			const state = { ...mockState(), isStreaming: false, optimisticStreaming: false };
 			let applied: ActiveSessionState | undefined;
 			deps = createMockDeps({
@@ -1116,16 +1116,25 @@ describe('ws-message-handlers', () => {
 			});
 			handlers = createMessageHandlers(deps);
 			const outcomes = feedController.turnOutcomes as ReturnType<typeof vi.fn>;
-			outcomes.mockReturnValueOnce({ liveTurnId: null, turnFailures: [{ turnId: 't1', seq: 7, message: 'boom', outlived: false }] });
+			const failed = { failures: [{ turnId: 't1', seq: 7, message: 'boom' }], finishes: [], cuts: [], lastRewindSeq: 0 };
+			outcomes.mockReturnValueOnce({ outcomes: failed, lastSeq: 7, caughtUp: true });
 			handlers.handleMessage({ type: 'error', session_id: 'session-1', message: 'boom' });
 			expect(applied?.error).toBe('boom');
-			expect(applied?.turnErrorAnchor).toEqual({ message: 'boom', turnId: null, afterSeq: 6 });
+			expect(applied?.turnErrorAnchor).toEqual({ message: 'boom', turnId: null, failure: { seq: 7, turnId: 't1' }, afterSeq: null });
 
-			// Its successor already finished cleanly in the log: the late frame is stale.
+			// Its successor already finished cleanly in the log: a frame naming that turn is stale.
+			const outlived = { ...failed, finishes: [{ seq: 10, turnId: 't2' }] };
 			applied = undefined;
-			outcomes.mockReturnValueOnce({ liveTurnId: null, turnFailures: [{ turnId: 't1', seq: 7, message: 'late', outlived: true }] });
-			handlers.handleMessage({ type: 'error', session_id: 'session-1', message: 'late' });
+			outcomes.mockReturnValueOnce({ outcomes: outlived, lastSeq: 10, caughtUp: true });
+			handlers.handleMessage({ type: 'error', session_id: 'session-1', message: 'boom', turn_id: 't1' });
 			expect(applied).toBeUndefined();
+
+			// By its words alone it may be a new failure the feed has not reduced yet.
+			outcomes.mockReturnValueOnce({ outcomes: outlived, lastSeq: 10, caughtUp: true });
+			handlers.handleMessage({ type: 'error', session_id: 'session-1', message: 'boom' });
+			const raised = applied as ActiveSessionState | undefined;
+			expect(raised?.error).toBe('boom');
+			expect(raised?.turnErrorAnchor).toEqual({ message: 'boom', turnId: null, failure: null, afterSeq: 10 });
 		});
 
 		it.each([

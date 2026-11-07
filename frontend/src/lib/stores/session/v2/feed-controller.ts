@@ -27,14 +27,13 @@ import {
 	type V2SessionState,
 	withLogEpoch,
 } from './reducer';
-import type { TurnFailureFact } from './reducer';
 import { createSseFeed, type SseFeed } from './sse-feed';
 import type { ActiveSessionState } from '../../active-session';
 import type { SdkContextUsage } from '$lib/api/sessions';
 import type { QueuedMessage, Task } from '../../types';
 import { browserPanel } from '../../browser-panel.svelte';
 import { pendingQueue, reconcilePendingPeerMessages } from '../pending-queue';
-import { turnErrorOutlived } from '../turn-error-banner';
+import { followTurnError, type TurnErrorFacts } from '../turn-error-banner';
 import { nameStoppedTurn, nameStopRecovery, STOP_TURN_NOT_NAMED } from '$lib/utils/not-sent-hold';
 import { swarms } from '../../swarms';
 
@@ -111,6 +110,10 @@ let everCaughtUp = false;
 // this state means the backfill is flowing after all, so we RE-ENTER batch mode
 // (see onEvent) instead of repainting the rest of history frame by frame.
 let sentinelPending = false;
+// False from each connection's open until its `caught_up`: a reconnect replays
+// the gap since lastSeq at live cadence, so `caughtUp` alone does not say the
+// reduced log is the whole log. Read by the turn-error banner rule.
+let connectionCaughtUp = false;
 // A requested event during hydration is only a hint. Hold one dirty bit until
 // the authoritative history boundary (or hydration fallback) so a long replay
 // cannot issue one WS snapshot request per SSE chunk. Tracked per kind so a
@@ -643,6 +646,15 @@ function transcriptPatch(
 	};
 }
 
+/** See `FeedController.turnOutcomes`. */
+function turnErrorFacts(): TurnErrorFacts {
+	return {
+		outcomes: reducerState.turnOutcomes,
+		lastSeq: reducerState.lastSeq,
+		caughtUp: caughtUp && !sentinelPending && connectionCaughtUp,
+	};
+}
+
 function fold(hydrationComplete = false): void {
 	if (!deps) return;
 	// Guard against a session switch that landed mid-batch.
@@ -669,23 +681,24 @@ function fold(hydrationComplete = false): void {
 	// Every published row already belongs to the reducer; do not re-index it
 	// before the next event. Only a subsequent local array needs seeding.
 	seededMessages = patch.messages ?? null;
-	deps.update((s) =>
-		s.sessionId === currentSessionId
-			? {
-					...s,
-					...patch,
-					stopRequestedTurnId: nameStoppedTurn(s.stopRequestedTurnId, reducerState.liveTurnId, patch.isStreaming === true),
-					stopTimedOutTurnId: nameRecoveryFrom(s, reducerState.liveTurnId),
-					queuedMessages: reconcileQueuedMessages(s.queuedMessages),
-					pendingPeerMessages: reconcilePendingPeerMessages(s.pendingPeerMessages ?? [], patch.messages ?? s.messages),
-					// A failed turn's banner leaves once the log has moved past that
-					// failure: rewound away, or followed by a turn that finished cleanly.
-					...(turnErrorOutlived(s.turnErrorAnchor, s.error, reducerState)
-						? { error: null, forkOfferSessionId: null, turnErrorAnchor: null }
-						: {}),
-				}
-			: s
-	);
+	const bannerFacts = turnErrorFacts();
+	deps.update((s) => {
+		if (s.sessionId !== currentSessionId) return s;
+		// A failed turn's banner leaves once the log has moved past that
+		// failure: rewound away, or followed by a turn that finished cleanly.
+		const anchor = followTurnError(s.turnErrorAnchor, s.error, bannerFacts);
+		return {
+			...s,
+			...patch,
+			stopRequestedTurnId: nameStoppedTurn(s.stopRequestedTurnId, reducerState.liveTurnId, patch.isStreaming === true),
+			stopTimedOutTurnId: nameRecoveryFrom(s, reducerState.liveTurnId),
+			queuedMessages: reconcileQueuedMessages(s.queuedMessages),
+			pendingPeerMessages: reconcilePendingPeerMessages(s.pendingPeerMessages ?? [], patch.messages ?? s.messages),
+			...(anchor === 'outlived'
+				? { error: null, forkOfferSessionId: null, turnErrorAnchor: null }
+				: anchor !== s.turnErrorAnchor ? { turnErrorAnchor: anchor } : {}),
+		};
+	});
 }
 
 // ─── Flush scheduling ─────────────────────────────────────────────────────────
@@ -834,10 +847,10 @@ export interface FeedController {
 	stop: () => void;
 	/** True when currently feeding (optionally: feeding this specific session). */
 	isFeeding: (sessionId?: string) => boolean;
-	/** The failed turns reduced for this session and the turn live now, or null
-	 *  when not feeding it. Ties a turn-error banner to its failure
-	 *  (turn-error-banner.ts). */
-	turnOutcomes: (sessionId: string) => { turnFailures: readonly TurnFailureFact[]; liveTurnId: string | null } | null;
+	/** What the reduced log says about this session's failed turns, and whether
+	 *  it is the whole log yet, or null when not feeding it. Ties a turn-error
+	 *  banner to its failure (turn-error-banner.ts). */
+	turnOutcomes: (sessionId: string) => TurnErrorFacts | null;
 
 	// ── Transcript cache (S2) ──────────────────────────────────────
 	/**
@@ -905,6 +918,7 @@ function resetFeedFlags(): void {
 	caughtUp = false;
 	everCaughtUp = false;
 	sentinelPending = false;
+	connectionCaughtUp = false;
 	pendingResyncDirty.clear();
 	eventsReduced = 0;
 	transcriptPublished = false;
@@ -1004,6 +1018,7 @@ export const feedController: FeedController = {
 			epoch: cached ? cached.epoch : null,
 			onOpen: () => {
 				if (generation !== feedGeneration) return;
+				connectionCaughtUp = false;
 				swarms.refreshKnown(sessionId);
 				// Initial hydration remains atomic until the backend's `caught_up`
 				// sentinel, floored by the idle fallback. Reconnects after that
@@ -1035,6 +1050,7 @@ export const feedController: FeedController = {
 					caughtUp = true;
 					everCaughtUp = true;
 					sentinelPending = false;
+					connectionCaughtUp = true;
 					clearCatchupFallback();
 					applyPendingRegistryTasks(false);
 					fold(true);
@@ -1277,7 +1293,7 @@ export const feedController: FeedController = {
 
 	turnOutcomes(sessionId: string) {
 		if (currentSessionId === null || sessionId !== currentSessionId) return null;
-		return { turnFailures: reducerState.turnFailures ?? [], liveTurnId: reducerState.liveTurnId };
+		return turnErrorFacts();
 	},
 
 	cachedPatch(sessionId: string) {

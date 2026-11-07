@@ -2638,3 +2638,55 @@ describe('feedController usage ownership (W7)', () => {
 		expect(feedController.hasAppliedUsage('s1')).toBe(true);
 	});
 });
+
+describe('feedController turn-error banner (#1082, #1175)', () => {
+	const FAILED = 'provider returned HTTP 500';
+	const logged = (type: string, seq: number, fields: Record<string, unknown> = {}) =>
+		({ type, id: `ev-${seq}`, seq, session_id: 's1', created_at: '2026-07-12T00:00:00.000Z', ...fields });
+	const failure = (turn: string, seq: number) => [
+		logged('turn.started', seq, { turn_id: turn }),
+		logged('turn.aborted', seq + 1, { turn_id: turn, reason: 'error', message: FAILED }),
+	];
+	const success = (turn: string, seq: number) => [
+		logged('turn.started', seq, { turn_id: turn }),
+		logged('turn.completed', seq + 1, { turn_id: turn }),
+	];
+
+	function chatWithBanner() {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		feedController.start('s1');
+		for (const e of failure('t1', 1)) hoisted.onEvent!(e);
+		hoisted.onEvent!(caughtUp(2));
+		// The socket's frame for t1, by its words alone, as runtime errors arrive.
+		createMessageHandlers({ update: deps.update, getState: deps.getState } as unknown as MessageHandlerDeps)
+			.handleMessage({ type: 'error', session_id: 's1', message: FAILED });
+		expect(deps.state.error).toBe(FAILED);
+		return deps;
+	}
+
+	it('clears the banner on the live fold once another turn finishes cleanly', () => {
+		const deps = chatWithBanner();
+		for (const e of success('t2', 3)) hoisted.onEvent!(e);
+		flushRaf();
+		expect(deps.state.error).toBeNull();
+		expect(deps.state.turnErrorAnchor).toBeNull();
+	});
+
+	it('keeps a message-only banner through every fold of a reconnect gap, then follows the newest failure', () => {
+		const deps = chatWithBanner();
+		// The connection drops; the reconnect replays the gap at live cadence.
+		hoisted.onOpen!();
+		for (const e of [...success('t2', 3), ...failure('t3', 5)]) {
+			hoisted.onEvent!(e);
+			flushRaf();
+			expect(deps.state.error, `after seq ${e.seq}`).toBe(FAILED);
+		}
+		hoisted.onEvent!(caughtUp(6));
+		expect(deps.state.error).toBe(FAILED);
+		expect(deps.state.turnErrorAnchor?.failure).toEqual({ seq: 6, turnId: 't3' });
+		for (const e of success('t4', 7)) hoisted.onEvent!(e);
+		flushRaf();
+		expect(deps.state.error).toBeNull();
+	});
+});
