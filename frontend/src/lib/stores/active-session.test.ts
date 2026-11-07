@@ -18,8 +18,9 @@ const hoisted = vi.hoisted(() => ({
 	onMessage: null as ((data: Record<string, unknown>) => void) | null,
 	onDisconnected: null as ((code: number, reason: string, wasClean: boolean) => void) | null,
 	onConnected: null as (() => void) | null,
+	onManualReconnectFailed: null as ((code: number, reason: string) => void) | null,
 	connect: vi.fn(),
-	reconnect: vi.fn(),
+	reconnect: vi.fn((): boolean => true),
 	resetReconnectAttempts: vi.fn(),
 	goto: vi.fn(),
 }));
@@ -29,7 +30,9 @@ vi.mock('./session/ws-connection', () => ({
 		onMessage: (data: Record<string, unknown>) => void;
 		onDisconnected: (code: number, reason: string, wasClean: boolean) => void;
 		onConnected: () => void;
+		onManualReconnectFailed?: (code: number, reason: string) => void;
 	}) => {
+		hoisted.onManualReconnectFailed = config.onManualReconnectFailed ?? null;
 		hoisted.onMessage = config.onMessage;
 		hoisted.onDisconnected = config.onDisconnected;
 		hoisted.onConnected = config.onConnected;
@@ -101,6 +104,68 @@ describe('chat authentication close recovery', () => {
 			expect(auth.current.status?.authenticated).toBe(false);
 			expect(activeSession.current.wsReconnectRequired).toBe(true);
 		}
+	});
+});
+
+describe('manual reconnect feedback', () => {
+	afterEach(() => {
+		// Leave the singleton connected and idle for the next suite.
+		hoisted.onConnected?.();
+		vi.clearAllMocks();
+		hoisted.reconnect.mockImplementation(() => true);
+	});
+
+	it('marks the tap in flight at once and ignores repeat taps until it ends', () => {
+		hoisted.onDisconnected!(1006, '', false);
+		activeSession.reconnect();
+		expect(activeSession.current.wsManualReconnect).toBe('connecting');
+		activeSession.reconnect();
+		activeSession.reconnect();
+		expect(hoisted.reconnect).toHaveBeenCalledOnce();
+		// The socket layer's own close notice during the swap keeps it in flight.
+		hoisted.onDisconnected!(4000, 'Manual reconnect', false);
+		expect(activeSession.current.wsManualReconnect).toBe('connecting');
+		hoisted.onConnected!();
+		expect(activeSession.current.wsManualReconnect).toBe('idle');
+		expect(activeSession.current.wsConnected).toBe(true);
+	});
+
+	it('reports a failed tap and lets the next tap try again', () => {
+		hoisted.onDisconnected!(1006, '', false);
+		activeSession.reconnect();
+		hoisted.onDisconnected!(1006, 'Refused', false);
+		hoisted.onManualReconnectFailed!(1006, 'Refused');
+		expect(activeSession.current.wsManualReconnect).toBe('failed');
+		activeSession.reconnect();
+		expect(hoisted.reconnect).toHaveBeenCalledTimes(2);
+		expect(activeSession.current.wsManualReconnect).toBe('connecting');
+	});
+
+	it('clears a failed tap when an automatic retry connects', () => {
+		hoisted.onDisconnected!(1006, '', false);
+		activeSession.reconnect();
+		hoisted.onManualReconnectFailed!(4000, 'Connection attempt timed out');
+		hoisted.onConnected!();
+		expect(activeSession.current.wsManualReconnect).toBe('idle');
+	});
+
+	it('never leaves the control stuck busy when nothing could start', () => {
+		hoisted.onDisconnected!(1006, '', false);
+		hoisted.reconnect.mockImplementationOnce(() => false);
+		activeSession.reconnect();
+		expect(activeSession.current.wsManualReconnect).toBe('failed');
+		hoisted.reconnect.mockImplementationOnce(() => { throw new Error('bad url'); });
+		const quiet = vi.spyOn(console, 'error').mockImplementation(() => {});
+		activeSession.reconnect();
+		expect(activeSession.current.wsManualReconnect).toBe('failed');
+		quiet.mockRestore();
+	});
+
+	it('drops an in-flight tap on an intentional disconnect', () => {
+		hoisted.onDisconnected!(1006, '', false);
+		activeSession.reconnect();
+		hoisted.onDisconnected!(1000, '', true);
+		expect(activeSession.current.wsManualReconnect).toBe('idle');
 	});
 });
 

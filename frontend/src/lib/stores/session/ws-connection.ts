@@ -23,6 +23,9 @@ const RESUME_HEALTH_TIMEOUT_MS = PING_INTERVAL_MS + 5_000;
 
 // ─── Interfaces ──────────────────────────────────────────────────────────────
 
+/** Where the user's own Reconnect tap stands (see ActiveSessionState). */
+export type ManualReconnectState = 'idle' | 'connecting' | 'failed';
+
 export interface WsConnectionConfig {
 	/** Returns the auth token from cookies, or null if none. */
 	getAuthToken: () => string | null;
@@ -45,6 +48,12 @@ export interface WsConnectionConfig {
 	hasPendingTools: () => boolean;
 	/** Called when max reconnect attempts have been exhausted. */
 	onMaxReconnectAttempts?: () => void;
+	/**
+	 * The socket a manual `reconnect()` opened was lost before it opened
+	 * (refused, closed, or timed out). Fires after `onDisconnected`. Success
+	 * needs no separate callback: it is `onConnected`.
+	 */
+	onManualReconnectFailed?: (code: number, reason: string) => void;
 	/** Called when the tab becomes hidden — allows the consumer to pause polling, etc. */
 	onVisibilityHidden?: () => void;
 	/** Called when the tab becomes visible — allows the consumer to resume polling, etc. */
@@ -56,8 +65,11 @@ export interface WsConnection {
 	activate: () => void;
 	/** Establish the WebSocket connection. No-op if already connected or connecting. */
 	connect: () => void;
-	/** Replace the current socket immediately, including a stuck OPEN/CONNECTING socket. */
-	reconnect: () => void;
+	/**
+	 * Replace the current socket immediately, including a stuck OPEN/CONNECTING
+	 * socket. Returns false when nothing was started (the connection is destroyed).
+	 */
+	reconnect: () => boolean;
 	/** Intentionally disconnect (no auto-reconnect). Clears all timers. */
 	disconnect: () => void;
 	/** Send a JSON-serializable payload. Returns false if not connected. */
@@ -85,6 +97,8 @@ export function createWsConnection(config: WsConnectionConfig): WsConnection {
 	let enabled = true;
 	let lastMessageTime = 0;
 	let destroyed = false;
+	// The socket the last manual reconnect() opened, until it opens or is lost.
+	let manualSocket: WebSocket | null = null;
 
 	// Server-side sequence tracking for delivery gap diagnostics
 	let lastSeq = 0;
@@ -146,10 +160,13 @@ export function createWsConnection(config: WsConnectionConfig): WsConnection {
 	}
 
 	function connectionLost(code: number, reason: string) {
-		retireSocket(code, reason);
+		const lost = retireSocket(code, reason);
+		const manualFailed = lost !== null && lost === manualSocket;
+		if (manualFailed) manualSocket = null;
 		console.warn(`[WsConnection] Connection lost: code=${code}, reason=${reason || '(none)'}`);
 		if (code !== 4001) scheduleReconnect();
 		config.onDisconnected(code, reason, false);
+		if (manualFailed) config.onManualReconnectFailed?.(code, reason);
 	}
 
 	// ── Ping / Health Check ──────────────────────────────────────────────
@@ -215,6 +232,7 @@ export function createWsConnection(config: WsConnectionConfig): WsConnection {
 		ws.onopen = () => {
 			if (destroyed || socket !== ws) return;
 			stopConnectTimer();
+			if (socket === manualSocket) manualSocket = null;
 			reconnectAttempts = 0;
 			lastSeq = 0; // Reset sequence tracking for new connection
 			startPing();
@@ -262,19 +280,24 @@ export function createWsConnection(config: WsConnectionConfig): WsConnection {
 
 	function disconnect() {
 		enabled = false;
+		manualSocket = null;
 		stopReconnectTimer();
 		const socket = retireSocket(1000, '');
 		if (socket && !destroyed) config.onDisconnected(1000, '', true);
 	}
 
-	function reconnect() {
-		if (destroyed) return;
+	function reconnect(): boolean {
+		if (destroyed) return false;
 		enabled = true;
 		reconnectAttempts = 0;
 		stopReconnectTimer();
+		// A superseded manual attempt is replaced, not failed.
+		manualSocket = null;
 		const socket = retireSocket(4000, 'Manual reconnect');
 		if (socket) config.onDisconnected(4000, 'Manual reconnect', false);
 		connect();
+		manualSocket = ws;
+		return ws !== null;
 	}
 
 	// ── Send ─────────────────────────────────────────────────────────────

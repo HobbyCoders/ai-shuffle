@@ -12,7 +12,7 @@
 	 * For the bell, use `notify.*` from
 	 * `$lib/stores/notifications` instead — this component is for in-flow messages.
 	 */
-	import { AlertTriangle, AlertOctagon, Info, CheckCircle2, X } from 'lucide-svelte';
+	import { AlertTriangle, AlertOctagon, Info, CheckCircle2, X, LoaderCircle } from 'lucide-svelte';
 	import type { Snippet } from 'svelte';
 	import type { NotificationSeverity } from '$lib/stores/notifications';
 
@@ -34,7 +34,9 @@
 		title?: string;
 		dismissible?: boolean;
 		onDismiss?: () => void;
-		action?: { label: string; onClick: () => void; disabled?: boolean };
+		/** `busy`: the action is running. It shows a spinner, reports aria-busy
+		 *  and ignores taps, but stays focusable so focus is not dropped. */
+		action?: { label: string; onClick: () => void; disabled?: boolean; busy?: boolean };
 		/** A second, quieter action after `action`. */
 		secondaryAction?: { label: string; onClick: () => void };
 		icon?: boolean;
@@ -69,7 +71,18 @@
 		{/if}
 	</div>
 	{#if action}
-		<button type="button" class="banner-action" onclick={action.onClick} disabled={action.disabled}>{action.label}</button>
+		<button
+			type="button"
+			class="banner-action"
+			class:is-busy={action.busy}
+			onclick={() => { if (!action.busy) action.onClick(); }}
+			disabled={action.disabled}
+			aria-disabled={action.busy || undefined}
+			aria-busy={action.busy || undefined}
+		>
+			{#if action.busy}<LoaderCircle size={13} aria-hidden="true" class="banner-action-spin" />{/if}
+			<span>{action.label}</span>
+		</button>
 	{/if}
 	{#if secondaryAction}
 		<button type="button" class="banner-action secondary" onclick={secondaryAction.onClick}>{secondaryAction.label}</button>
@@ -160,11 +173,33 @@
 		white-space: normal;
 		border-radius: 6px;
 		cursor: pointer;
-		transition: opacity 0.15s ease;
+		transition: opacity 0.15s ease, transform 0.1s ease-out, background-color 0.15s ease, border-color 0.15s ease;
 	}
-	.banner-action:hover:not(:disabled) {
+	.banner-action {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		gap: 6px;
+	}
+	.banner-action:hover:not(:disabled):not(.is-busy) {
 		opacity: 0.88;
 	}
+	.banner-action:active:not(:disabled):not(.is-busy) {
+		transform: scale(0.97);
+	}
+	/* Running, not unavailable: keep full contrast, tint it with the
+	   banner's accent and show progress instead of a dimmed control. */
+	.banner-action.is-busy {
+		cursor: progress;
+		border-color: color-mix(in oklch, var(--banner-accent) 45%, var(--border));
+		background: color-mix(in oklch, var(--banner-accent) 12%, var(--secondary));
+	}
+	.banner-action :global(.banner-action-spin) {
+		flex-shrink: 0;
+		color: var(--banner-accent);
+		animation: banner-action-spin 0.9s linear infinite;
+	}
+	@keyframes banner-action-spin { to { transform: rotate(360deg); } }
 	.banner-action:disabled {
 		opacity: 0.6;
 		cursor: default;
@@ -220,5 +255,7 @@
 	}
 	@media (prefers-reduced-motion: reduce) {
 		.banner-action, .banner-close { transition: none; }
+		.banner-action:active { transform: none; }
+		.banner-action :global(.banner-action-spin) { animation-duration: 2.4s; }
 	}
 </style>
