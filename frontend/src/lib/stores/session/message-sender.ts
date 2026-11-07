@@ -21,7 +21,7 @@ import { parkedSendTurnId } from '$lib/utils/work-log';
 // V2 Phase 1: SSE-fed reducer — the transcript authority for a session.
 import { feedController, OPTIMISTIC_STREAMING_ON } from './v2/feed-controller';
 // Arbiter of which pending ("not seen yet") bubbles survive.
-import { pendingQueue, newLocalPendingId } from './pending-queue';
+import { pendingQueue, newLocalPendingId, SEND_MAYBE_APPLIED_MESSAGE } from './pending-queue';
 import { selectedContextWindow } from './context-window';
 import { getDefaultModel, getServerDefaultModel } from '$lib/constants/models';
 import { composerPreferences } from '../composer-preferences';
@@ -672,7 +672,8 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					});
 					update(s => ({
 						...s,
-						queuedMessages: [...s.queuedMessages, {
+						// A compact retry reuses the command id of a send still shown unconfirmed.
+						queuedMessages: [...s.queuedMessages.filter(m => m.id !== optimisticQueuedId), {
 							id: optimisticQueuedId,
 							clientMessageId,
 							content: prompt,
@@ -755,19 +756,28 @@ export function createMessageSender(deps: MessageSenderDeps) {
 						clearCompactRetry(_state.sessionId!);
 						spendBindingPicks(_state.sessionId);
 					} catch (error) {
-						pendingQueue.acknowledgeSend(_state.sessionId, clientMessageId);
 						// Only a refusal proves the worker did not take it. A lost or
-						// unreadable reply may follow acceptance, so that send stays in the
-						// run until its receipt or a withdrawal settles it (send-run.ts).
+						// unreadable reply, a timeout or a 5xx (504: the owner may have it)
+						// may follow acceptance: like an ambiguous WS answer, the send is
+						// unconfirmed, not refused. Its chip stays and can be unsent, its
+						// words are not handed back (a resend gets a new command id the
+						// worker cannot dedupe, so it could run twice), and it stays in the
+						// run until its receipt, a snapshot or a withdrawal settles it.
 						const status = (error as { status?: unknown } | null)?.status;
 						const notTaken = refused || (typeof status === 'number' && status >= 400 && status < 500);
-						const settle = <T extends ActiveSessionState>(st: T): T => notTaken ? retireSends(st, clientMessageId) : st;
+						if (!notTaken) {
+							if (!pendingQueue.answerLost(_state.sessionId, clientMessageId)) {
+								update(s => s.sessionId === _state.sessionId ? { ...s, error: SEND_MAYBE_APPLIED_MESSAGE } : s);
+							}
+							return true;
+						}
+						pendingQueue.acknowledgeSend(_state.sessionId, clientMessageId);
 						// Remove only our optimistic echo, never a newer session's draft
 						// or an authoritative queue snapshot that arrived in the meantime.
 						update(s => s.sessionId === _state.sessionId ? {
-							...settle(s), queuedMessages: s.queuedMessages.filter(m => m.id !== optimisticQueuedId),
+							...retireSends(s, clientMessageId), queuedMessages: s.queuedMessages.filter(m => m.id !== optimisticQueuedId),
 							error: error instanceof Error ? error.message : 'Could not compact and send.',
-						} : settle(s));
+						} : retireSends(s, clientMessageId));
 						throw error;
 					}
 					return true;

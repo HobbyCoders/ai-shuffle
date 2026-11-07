@@ -67,6 +67,10 @@
 import type { ChatMessage, PendingPeerMessage, QueuedMessage } from '../types';
 
 /** Peer delivery uses durable turn ids ONLY, never the user's text/unsend arbiter. */
+/** A send the owner may have taken with its answer lost: it may still run. */
+export const SEND_MAYBE_APPLIED_MESSAGE =
+	'The worker that runs this chat did not answer in time. Your message may still run.';
+
 export function reconcilePendingPeerMessages(
 	rows: PendingPeerMessage[], messages: ChatMessage[]
 ): PendingPeerMessage[] {

@@ -49,6 +49,8 @@ vi.mock('./v2/feed-controller', () => ({
 		invalidate: vi.fn(),
 		retractOptimisticSend: vi.fn(),
 		raiseTurnError: vi.fn(() => 'shown'),
+		settleRetiredSends: vi.fn(),
+		noteTurnStart: vi.fn(),
 	},
 	// Mirrors the real constant: `start` marks streaming OPTIMISTICALLY so the
 	// fold clears it once the reducer confirms the turn, instead of competing
@@ -181,6 +183,7 @@ describe('ws-message-handlers', () => {
 
 	beforeEach(() => {
 		(feedController.start as ReturnType<typeof vi.fn>).mockClear();
+		(feedController.noteTurnStart as ReturnType<typeof vi.fn>).mockClear();
 		(feedController.isFeeding as ReturnType<typeof vi.fn>).mockReturnValue(false);
 		deps = createMockDeps();
 		handlers = createMessageHandlers(deps);
@@ -941,6 +944,7 @@ describe('ws-message-handlers', () => {
 			// Must NOT be adopted: state untouched, feed not started, still awaiting.
 			expect(deps.update).not.toHaveBeenCalled();
 			expect(feedController.start).not.toHaveBeenCalled();
+			expect(feedController.noteTurnStart).not.toHaveBeenCalled();
 			expect(deps.internal.awaitingNewSession).toBe(true);
 			expect(deps.internal.pendingRequestId).toBe('req-mine-123');
 		});
@@ -1052,6 +1056,8 @@ describe('ws-message-handlers', () => {
 			// sessionId did NOT change → activeTasks preserved (reset is adoption-only).
 			expect(applied?.activeTasks).toHaveLength(1);
 			expect(feedController.start).toHaveBeenCalledWith('session-1');
+			// A turn the worker announced is live: retiring sends never hides it (round 6 S3).
+			expect(feedController.noteTurnStart).toHaveBeenCalledWith('session-1');
 		});
 	});
 
@@ -3245,5 +3251,19 @@ describe('queue_updated (the pending "not seen yet" bubbles)', () => {
 		expect(pendingIds()).toHaveLength(0);
 		expect(state.pendingRestorePrompt).toBe('nope');
 		expect(deps.wsSend).not.toHaveBeenCalled();
+	});
+
+	// Review round 6 S3: a withdrawn send leaves the run, so the feed re-checks
+	// whether anything this page sent may still start a turn ("working").
+	it('has the feed settle the page once a withdrawal verdict retires a send', () => {
+		const entry = { id: 'client-a', clientMessageId: 'client-a', content: 'nope', queuedAt: 1 };
+		state = { ...state, localSendIntent: { sessionId: 'session-1', revision: 1, commandIds: ['client-a'] } };
+		pendingQueue.noteOptimistic('session-1', entry.id);
+		pendingQueue.requestRemoval('session-1', entry);
+		(feedController.settleRetiredSends as ReturnType<typeof vi.fn>).mockClear();
+		handlers.handleMessage({ type: 'queued_message_removal', session_id: 'session-1',
+			message_id: 'turn-q', client_message_id: 'client-a', verdict: 'withdrawn' });
+		expect(state.localSendIntent?.commandIds).toEqual([]);
+		expect(feedController.settleRetiredSends).toHaveBeenCalledWith('session-1');
 	});
 });

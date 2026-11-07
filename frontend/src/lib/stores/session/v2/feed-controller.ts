@@ -17,7 +17,7 @@
  */
 
 import { clearCompactRetry } from '../compact-first-retry';
-import { retireSends } from '../send-run';
+import { retireSends, sendRunIn } from '../send-run';
 import {
 	reduce,
 	parseWireEvent,
@@ -161,6 +161,9 @@ let usageApplied = false;
 // confirms a live turn, so a fold that lands between the two can no longer flip
 // the indicator back to false (the turn-start stutter).
 let optimisticStreaming = false;
+// The worker announced a turn start (WS `start`) the feed has not shown yet: a
+// genuine live turn, so retiring sends never withdraws the flip (settleRetiredSends).
+let turnStartAnnounced = false;
 
 // The task registry's running list from a `/live` snapshot that landed while
 // the feed was still backfilling (#320). Applied at `caught_up`, after the
@@ -712,7 +715,7 @@ function fold(hydrationComplete = false): void {
 	});
 	// The reducer confirmed a live turn — the optimistic flip has served its
 	// purpose and must not survive into the next turn boundary.
-	if (reducerState.isStreaming) optimisticStreaming = false;
+	if (reducerState.isStreaming) { optimisticStreaming = false; turnStartAnnounced = false; }
 	// W7: from the first fold that carries `turn.usage`-derived numbers, the feed
 	// owns the usage fields and a late `/live` snapshot must not overwrite them.
 	// Set HERE, not in transcriptPatch, so a mere cache peek for another session
@@ -964,6 +967,10 @@ export interface FeedController {
 	retractOptimisticSend: (sessionId: string | null, commandId: string) => string | null;
 	/** Withdraw the optimistic flip (send failed, stop confirmed, turn settled). */
 	clearOptimisticSend: (sessionId: string | null) => void;
+	/** After sends left the run: withdraws the optimistic flip if none is still waiting to run. */
+	settleRetiredSends: (sessionId: string | null) => void;
+	/** The worker's WS `start`: a turn is live even before the feed shows it. */
+	noteTurnStart: (sessionId: string | null) => void;
 }
 
 /** Reset every per-feed flag. Shared by start() and teardown(). */
@@ -1008,6 +1015,7 @@ function teardown(capture: boolean): void {
 	lastFoldAt = 0;
 	resetFeedFlags();
 	optimisticStreaming = false;
+	turnStartAnnounced = false;
 	currentSessionId = null;
 	seededMessages = null;
 	reducerState = initialState();
@@ -1188,6 +1196,7 @@ export const feedController: FeedController = {
 				if (ev.type === 'queued_message.withdrawn' && typeof ev.command_id === 'string' && ev.command_id) {
 					const withdrawn = ev.command_id;
 					deps?.update(s => retireSends(s, withdrawn));
+					feedController.settleRetiredSends(sessionId);
 				}
 				reducerState = reduce(reducerState, ev);
 				if (ev.type === 'turn.started') turnStartedSeq = reducerState.lastSeq;
@@ -1204,6 +1213,7 @@ export const feedController: FeedController = {
 				// leaves the compose's working flag stuck on. No history paints here.
 				if (reducerState.isStreaming && (optimisticStreaming || deps?.getState().optimisticStreaming)) {
 					optimisticStreaming = false;
+					turnStartAnnounced = false;
 					deps?.update(s => s.optimisticStreaming ? { ...s, optimisticStreaming: false } : s);
 				}
 				// An empty log learns its epoch from this first row (sse-feed).
@@ -1453,9 +1463,30 @@ export const feedController: FeedController = {
 		return content;
 	},
 
+	/**
+	 * The optimistic flip stands for a send of this page's about to start a turn.
+	 * Once every send in the run has run (receipted) or left it (withdrawn,
+	 * refused, failed), nothing is behind it: withdraw it, or an idle chat whose
+	 * only send Stop withdrew would show "working" until a reload. A turn the feed
+	 * shows live keeps streaming (clearOptimisticSend falls back to the reducer).
+	 */
+	noteTurnStart(sessionId: string | null) {
+		if (sessionId !== null && currentSessionId !== null && sessionId !== currentSessionId) return;
+		turnStartAnnounced = true;
+	},
+
+	settleRetiredSends(sessionId: string | null) {
+		if (!deps || sessionId === null || sessionId !== currentSessionId) return;
+		const s = deps.getState();
+		if (turnStartAnnounced || s.sessionId !== sessionId || !(optimisticStreaming || s.optimisticStreaming)) return;
+		if (sendRunIn(s, sessionId).some(command => !receiptFor(command))) return;
+		this.clearOptimisticSend(sessionId);
+	},
+
 	clearOptimisticSend(sessionId: string | null) {
 		if (sessionId !== null && currentSessionId !== null && sessionId !== currentSessionId) return;
 		optimisticStreaming = false;
+		turnStartAnnounced = false;
 		// Withdraw the flip on BOTH channels — the module latch above and the
 		// state field the fold reads — or the next fold would re-raise it. The
 		// published `isStreaming` falls back to the authoritative reducer value,

@@ -148,8 +148,9 @@ describe('compact first send', () => {
 		const state = baseState({ sessionId: 'retry-chat', title: 'Old chat' });
 		apiMocks.post.mockRejectedValueOnce(new Error('Timeout after the worker may have accepted it'));
 		const first = makeDeps(state);
-		await expect(createMessageSender(first.deps).sendMessage('send once', { compactFirst: true }))
-			.rejects.toThrow('Timeout');
+		// Ambiguous, not refused: it stays an unconfirmed chip (review round 6 S5).
+		expect(await createMessageSender(first.deps).sendMessage('send once', { compactFirst: true })).toBe(true);
+		expect(first.getState().queuedMessages).toEqual([expect.objectContaining({ content: 'send once', unconfirmed: true })]);
 		const firstId = apiMocks.post.mock.calls.at(-1)![1].then_send.client_message_id;
 		const retry = makeDeps(state);
 		apiMocks.post.mockResolvedValueOnce({ turn_id: 'c', queued_turn_id: 'q', session_id: 'retry-chat' });
@@ -165,7 +166,7 @@ describe('compact first send', () => {
 		const { deps } = makeDeps(baseState({ sessionId: 's1', title: 'Old chat' }));
 		const sender = createMessageSender(deps);
 		apiMocks.post.mockRejectedValueOnce(new Error('offline'));
-		await expect(sender.sendMessage('continue', { compactFirst: true })).rejects.toThrow('offline');
+		expect(await sender.sendMessage('continue', { compactFirst: true })).toBe(true);
 		expect(sessionStorage.getItem('compact-first-retry:s1')).not.toBeNull();
 		expect(await sender.sendMessage('normal message')).toBe(true);
 		expect(sessionStorage.getItem('compact-first-retry:s1')).toBeNull();
@@ -175,7 +176,7 @@ describe('compact first send', () => {
 		const { deps } = makeDeps(baseState({ sessionId: 's1', title: 'Old chat' }));
 		const sender = createMessageSender(deps);
 		apiMocks.post.mockRejectedValueOnce(new Error('offline'));
-		await expect(sender.sendMessage('old text', { compactFirst: true })).rejects.toThrow('offline');
+		expect(await sender.sendMessage('old text', { compactFirst: true })).toBe(true);
 		const oldId = apiMocks.post.mock.calls.at(-1)![1].then_send.client_message_id;
 		apiMocks.post.mockResolvedValueOnce({ turn_id: null, queued_turn_id: 'held-1', held: true, session_id: 's1' });
 		expect(await sender.sendMessage('new text', { compactFirst: true, pendingUploadPaths: ['/uploads/new.png'] })).toBe(true);
@@ -215,9 +216,10 @@ describe('compact first send', () => {
 
 	it('rejects and removes its echo on an HTTP refusal so the composer restores the draft', async () => {
 		const { deps, getState, wsConn } = makeDeps(baseState({ sessionId: 's1', title: 'Old chat' }));
-		apiMocks.post.mockRejectedValueOnce(new Error('No capable device online'));
+		// The API client's refusal: an HTTP status with the worker's reason.
+		apiMocks.post.mockRejectedValueOnce({ detail: 'No capable device online', status: 409, body: null });
 		await expect(createMessageSender(deps).sendMessage('keep this', { compactFirst: true }))
-			.rejects.toThrow('No capable device online');
+			.rejects.toMatchObject({ detail: 'No capable device online', status: 409 });
 		expect(getState().queuedMessages).toEqual([]);
 		expect(getState().messages).toEqual([]);
 		expect(wsConn.send).not.toHaveBeenCalled();
@@ -241,10 +243,10 @@ describe('a send in flight holds off an update reload (#711)', () => {
 
 	it('a refused send releases the guard too', async () => {
 		const { deps } = makeDeps(baseState({ sessionId: 's1', title: 'Old chat' }));
-		apiMocks.post.mockRejectedValueOnce(new Error('No capable device online'));
+		apiMocks.post.mockRejectedValueOnce({ detail: 'No capable device online', status: 409, body: null });
 		const sending = createMessageSender(deps).sendMessage('refused', { compactFirst: true });
 		expect(reloadBlockers()).toContain('message-sending');
-		await expect(sending).rejects.toThrow('No capable device online');
+		await expect(sending).rejects.toMatchObject({ status: 409 });
 		expect(reloadBlockers()).not.toContain('message-sending');
 	});
 
@@ -1770,6 +1772,47 @@ describe('Stop timeout recovery', () => {
 				expect(stopRecoveryAppliesToTurn(state.stopTimedOutTurnId, state.liveTurnId)).toBe(false);
 			});
 
+		// Review round 6 S3: a Stop that withdraws every send it was pressed on, in a
+		// chat with nothing running, leaves no turn to wait for: the page stops
+		// showing work at once instead of until a reload. A turn the worker has
+		// already announced is genuine work and keeps showing.
+		it.each(['nothing else running', 'a turn the worker already announced'] as const)(
+			'settles the page once a Stop withdrew every send it was pressed on, with %s', async other => {
+				const test = stopping(null);
+				test.deps.update(s => ({ ...s, isStreaming: false }));
+				feedController.start('sess-1');
+				feed.onEvent!({ type: 'caught_up', seq: 0 });
+				expect(await test.sender.sendMessage('A')).toBe(true);
+				expect(await test.sender.sendMessage('B')).toBe(true);
+				const [a, b] = test.getState().localSendIntent!.commandIds!;
+				expect(test.getState().isStreaming).toBe(true);
+				test.sender.stopGeneration();
+				const announced = other === 'a turn the worker already announced';
+				if (announced) {
+					// The WS `start` of a turn none of these sends began, ahead of its feed.
+					test.deps.update(s => ({ ...s, isStreaming: true, optimisticStreaming: true }));
+					feedController.noteTurnStart('sess-1');
+				}
+				event('queued_message.withdrawn', 'turn-queued-a', 1, { command_id: a, message_id: 'turn-queued-a' });
+				vi.advanceTimersByTime(300);
+				// B may still run: the page keeps showing it is about to.
+				expect(test.getState().isStreaming).toBe(true);
+				event('queued_message.withdrawn', 'turn-queued-b', 2, { command_id: b, message_id: 'turn-queued-b' });
+				vi.advanceTimersByTime(300);
+				let state = test.getState();
+				expect(state.stopRequestedTurnId).toBeNull();
+				expect(state.isStreaming).toBe(announced);
+				expect(state.optimisticStreaming).toBe(announced);
+				vi.advanceTimersByTime(10000);
+				state = test.getState();
+				expect(state.isStreaming).toBe(announced);
+				expect(state.stopTimedOutTurnId).toBeNull();
+				expect(state.stopTimedOutCommandId ?? null).toBeNull();
+				feed.onEvent!({ type: 'interaction.expired', id: 'expiry', seq: 3, session_id: 'sess-1', request_id: 'absent' });
+				vi.advanceTimersByTime(300);
+				expect(test.getState().isStreaming).toBe(announced);
+			});
+
 		it('names a Stop pressed on sends by their receipt even after a turn started elsewhere', async () => {
 			const test = stopping(null);
 			test.deps.update(s => ({ ...s, isStreaming: false }));
@@ -1848,7 +1891,10 @@ describe('Stop timeout recovery', () => {
 			event('message.user', 'turn-a', 2, { command_id: a, content: 'A' });
 			vi.advanceTimersByTime(300);
 			answer();
-			await expect(test.sender.sendMessage('B', { compactFirst: true })).rejects.toBeDefined();
+			// Round 6 S5: only a refusal fails into the composer's restore path.
+			const sent = test.sender.sendMessage('B', { compactFirst: true });
+			if (expected === 'b') expect(await sent).toBe(true);
+			else await expect(sent).rejects.toBeDefined();
 			const b = apiMocks.post.mock.calls.at(-1)![1].then_send.client_message_id as string;
 			expect(await test.sender.sendMessage('C')).toBe(true);
 			const c = test.getState().localSendIntent!.commandIds!.at(-1)!;
@@ -1882,15 +1928,69 @@ describe('Stop timeout recovery', () => {
 			event('message.user', 'turn-a', 2, { command_id: a, content: 'A' });
 			vi.advanceTimersByTime(300);
 			apiMocks.post.mockRejectedValueOnce(new TypeError('Failed to fetch'));
-			await expect(test.sender.sendMessage('B', { compactFirst: true })).rejects.toBeDefined();
+			expect(await test.sender.sendMessage('B', { compactFirst: true })).toBe(true);
 			const b = apiMocks.post.mock.calls.at(-1)![1].then_send.client_message_id as string;
 			// The retry is the same command (the worker takes it once), not a second send.
 			apiMocks.post.mockResolvedValueOnce({ turn_id: 'compact', queued_turn_id: 'q-b', session_id: 'sess-1' });
 			expect(await test.sender.sendMessage('B', { compactFirst: true })).toBe(true);
 			expect(apiMocks.post.mock.calls.at(-1)![1].then_send.client_message_id).toBe(b);
+			// ...and one chip, not a second one beside the unconfirmed first.
+			expect(test.getState().queuedMessages.filter(m => m.clientMessageId === b)).toHaveLength(1);
 			expect(await test.sender.sendMessage('C')).toBe(true);
 			const c = test.getState().localSendIntent!.commandIds!.at(-1)!;
 			expect(test.getState().localSendIntent?.commandIds).toEqual([b, c]);
+		});
+
+		// Review round 6 S5: a compact-and-send the worker may have taken takes the
+		// same unconfirmed path as an ordinary send whose answer was lost. Its chip
+		// stays (Unsend recovers the words), nothing is handed back to resend under
+		// a new command id the worker cannot dedupe, and it does not fail into the
+		// composer's restore path, so it cannot run twice.
+		it.each([
+			['its reply was lost', () => apiMocks.post.mockRejectedValueOnce(new TypeError('Failed to fetch'))],
+			['the owner may have taken it', () => apiMocks.post.mockRejectedValueOnce({ detail: 'did not answer in time', status: 504, body: null })],
+		] as const)('keeps a compact-and-send unconfirmed, never handed back to resend, when %s', async (_case, answer) => {
+			sessionStorage.clear();
+			const test = stopping(null);
+			test.deps.update(s => ({ ...s, isStreaming: false }));
+			feedController.start('sess-1');
+			feed.onEvent!({ type: 'caught_up', seq: 0 });
+			expect(await test.sender.sendMessage('A')).toBe(true);
+			const [a] = test.getState().localSendIntent?.commandIds ?? [];
+			event('turn.started', 'turn-a', 1);
+			event('message.user', 'turn-a', 2, { command_id: a, content: 'A' });
+			vi.advanceTimersByTime(300);
+			answer();
+			// Resolves as sent: the composer restores words only on false or a throw.
+			expect(await test.sender.sendMessage('B', { compactFirst: true })).toBe(true);
+			const b = apiMocks.post.mock.calls.at(-1)![1].then_send.client_message_id as string;
+			let state = test.getState();
+			expect(state.queuedMessages.filter(m => m.clientMessageId === b))
+				.toEqual([expect.objectContaining({ content: 'B', unconfirmed: true })]);
+			expect(state.pendingRestorePrompt ?? null).toBeNull();
+			expect(state.error).toMatch(/not confirmed/);
+
+			// Recovery through an ordinary Send is a new message, and B is untouched.
+			expect(await test.sender.sendMessage('C')).toBe(true);
+			const c = test.getState().localSendIntent!.commandIds!.at(-1)!;
+			expect(test.getState().queuedMessages.map(m => m.clientMessageId)).toEqual([b, c]);
+			expect(test.getState().localSendIntent?.commandIds).toEqual([b, c]);
+
+			// Past the compact retry window B is still shown, unconfirmed, and next to run.
+			vi.advanceTimersByTime(5 * 60 * 1000 + 1000);
+			state = test.getState();
+			expect(state.queuedMessages.find(m => m.clientMessageId === b)?.unconfirmed).toBe(true);
+			expect(state.pendingRestorePrompt ?? null).toBeNull();
+			expect(state.localSendIntent?.commandIds).toEqual([b, c]);
+			// B was sent to the worker once, under one command id.
+			expect(apiMocks.post.mock.calls.filter(call => call[1]?.then_send?.client_message_id === b)).toHaveLength(1);
+			// Its receipt settles it: a Stop pressed now is on C, the send still to run.
+			event('turn.completed', 'turn-a', 3);
+			event('turn.started', 'turn-b', 4);
+			event('message.user', 'turn-b', 5, { command_id: b, content: 'B' });
+			vi.advanceTimersByTime(300);
+			test.sender.stopGeneration();
+			expect(test.getState().stopRequestedTurnId).toBe('turn-b');
 		});
 
 		// Review round 2 S4: nothing still waiting to run is ever dropped from the

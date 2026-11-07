@@ -23,7 +23,7 @@ import { serverNotificationActions } from '$lib/services/error-actions';
 // The SSE-fed reducer store — the transcript authority for a session.
 import { feedController, OPTIMISTIC_STREAMING_ON } from './v2/feed-controller';
 // Arbiter of which pending ("not seen yet") bubbles survive.
-import { pendingQueue, reconcilePendingPeerMessages } from './pending-queue';
+import { pendingQueue, reconcilePendingPeerMessages, SEND_MAYBE_APPLIED_MESSAGE } from './pending-queue';
 import { queueHydration } from './queue-hydration';
 import { composerSuggestion } from './composer-suggestion';
 import { swarms } from '../swarms';
@@ -159,9 +159,7 @@ export interface MessageHandlerDeps {
  */
 export const SESSION_LIST_RELOAD_DEBOUNCE_MS = 700;
 
-/** A send the owner may have taken with its answer lost (`maybe_applied`). */
-export const SEND_MAYBE_APPLIED_MESSAGE =
-	'The worker that runs this chat did not answer in time. Your message may still run.';
+export { SEND_MAYBE_APPLIED_MESSAGE } from './pending-queue';
 
 /**
  * Fields of a `session_updated` / `user_session_updated` payload that can be
@@ -971,6 +969,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 					if (!feedController.isFeeding(sessionId)) {
 						feedController.start(sessionId);
 					}
+					feedController.noteTurnStart?.(sessionId);
 					onPersistSession();
 				}
 				break;
@@ -1210,7 +1209,10 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 					typeof data.message_id === 'string' ? data.message_id : undefined);
 				// A withdrawn message will never run, so a Stop cannot be pressed on
 				// it. One already delivered won the race and stays (send-run.ts).
-				if (verdict === 'withdrawn') update(s => retireSends(s, key, entry?.clientMessageId));
+				if (verdict === 'withdrawn') {
+					update(s => retireSends(s, key, entry?.clientMessageId));
+					feedController.settleRetiredSends?.(sid);
+				}
 				if (sid !== state.sessionId) break; // retain for that session's next switch-in
 				const restored = pendingQueue.takeWithdrawnDraft(sid);
 				update(s => ({ ...s,
