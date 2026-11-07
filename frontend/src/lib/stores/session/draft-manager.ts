@@ -41,7 +41,7 @@ export function createDraftManager(deps: DraftManagerDeps) {
 			update(s => ({ ...s, draft: text }));
 		},
 
-		setPendingRestorePrompt(prompt: string, uploadPaths?: string[]) {
+		setPendingRestorePrompt(prompt: string, uploadPaths?: string[], uploadReferences?: import('$lib/api/rewind').UploadReference[]) {
 			// Adds to words not yet taken: two restores can finish before a composer
 			// runs, and by then the server has dropped both rows.
 			update(s => {
@@ -49,14 +49,15 @@ export function createDraftManager(deps: DraftManagerDeps) {
 				return {
 					...s,
 					pendingRestorePrompt: [s.pendingRestorePrompt, prompt].filter(Boolean).join('\n\n'),
-					pendingRestoreUploadPaths: paths.length > 0 ? paths : undefined
+					pendingRestoreUploadPaths: paths.length > 0 ? paths : undefined,
+                    pendingRestoreUploadReferences: [...(s.pendingRestoreUploadReferences ?? []), ...(uploadReferences ?? [])]
 				};
 			});
 		},
 
 		clearPendingRestorePrompt() {
 			update(s => s.pendingRestorePrompt != null || s.pendingRestoreUploadPaths?.length
-				? { ...s, pendingRestorePrompt: null, pendingRestoreUploadPaths: undefined } : s);
+				? { ...s, pendingRestorePrompt: null, pendingRestoreUploadPaths: undefined, pendingRestoreUploadReferences: undefined } : s);
 		},
 
 		setScrollTop(pos: number) {

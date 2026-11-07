@@ -509,11 +509,11 @@ def test_fresh_transcript_delta_uses_bulk_sql_and_one_mirror_wake_per_chunk(work
     reservations = []
     real_reserve = engine._lock_mirror_event_counters
 
-    def reserve(cursor, record_ids):
+    def reserve(cursor, record_ids, **kwargs):
         ids = list(record_ids)
         if ids:
             reservations.append(ids)
-        return real_reserve(cursor, ids)
+        return real_reserve(cursor, ids, **kwargs)
 
     monkeypatch.setattr(engine, "_lock_mirror_event_counters", reserve)
     statements = []

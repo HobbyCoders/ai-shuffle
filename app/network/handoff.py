@@ -13,8 +13,9 @@ import uuid
 from app.core import checkout_transfer, project_resolver, checkout_manager
 from app.core.config import settings
 from app.core.worktree_manager import WorktreeError
-from app.db import database, runs, checkouts, turns as turns_db
+from app.db import database, runs, checkouts, network as network_store, turns as turns_db
 from app.db.base import get_db
+from app.db.session_locks import HANDOFF_HOLD_PREFIX, lock_handoff_holds
 from app.db.async_database import run_sync
 from app.db.wakeups import CURRENT_STOP_SEQ
 from app.network import control, crypto, engine
@@ -496,7 +497,7 @@ def _finalize_wakes(sid, source, payload, *, recovery_reason=None, discard_all=F
             raise ValueError("Unknown moved wake reservation")
         wakes = parse_jsonb(row["wakes"])
         device = engine.require_context().device_id
-        _lock_history_headers(cur, sid)
+        locked = _lock_history_headers(cur, sid)
         # Already-published wake release is short and still shares the owner
         # lock with admission. Only cold publication needs an optimistic read.
         owner_lock = " FOR UPDATE" if row["finalized"] else ""
@@ -505,7 +506,10 @@ def _finalize_wakes(sid, source, payload, *, recovery_reason=None, discard_all=F
         owner = session["owner_device_id"] if session else None
         if row["finalized"] and owner != device:
             return []  # A late receipt after a later move must not re-arm here.
-        if not session or owner not in (source, device):
+        if not session:
+            # Deletion won the hand-off headers and committed first.
+            raise ValueError("The chat was deleted during the hand-off; ownership was not changed.")
+        if owner not in (source, device):
             raise ValueError("This wake reservation belongs to an earlier move; ownership was not changed.")
         if not row["finalized"]:
             if recovery_reason in ("owner_discarded_wakes", "owner_resumed_wakes"):
@@ -522,7 +526,7 @@ def _finalize_wakes(sid, source, payload, *, recovery_reason=None, discard_all=F
             # even when the earlier commit response never reached this worker.
             metadata = _publish_history(cur, sid, token)
             _lock_published_owner(cur, sid, device, token, session, metadata)
-            _accept_owner_row(cur, sid, device, row["branch"], token)
+            _accept_owner_row(cur, sid, device, row["branch"], token, locked)
             # This authenticated committed transfer also supersedes older
             # abandoned imports whose cancellation reply never arrived.
             cur.execute("UPDATE handoff_wakes SET finalized=TRUE,wakes='[]' "
@@ -571,7 +575,7 @@ async def _arm_moved_wakes(sid, wakes):
 
 HANDOFF = "handoff:"
 # Runner id prefix for a handoff's reservation of another session's run slot.
-HOLD = "handoff-hold:"
+HOLD = HANDOFF_HOLD_PREFIX
 BUSY_CHECKOUT = ("Another session is working in this checkout or on this branch. "
                  "Wait for it to finish before moving this session.")
 UNVERIFIED_CHECKOUT = ("Cannot verify which sessions use this checkout or branch. "
@@ -915,6 +919,9 @@ def finish(sid, target, payload):
     if payload.get("phase") == "cancel":
         with get_db() as conn:
             cur = conn.cursor()
+            # The lease and the hold runs (other chats) in one sorted lock, as
+            # _commit and a family delete take them (app/db/session_locks.py).
+            lock_handoff_holds(cur, [token], run_ids=[token])
             run = _lease(cur, sid, target, token)
             cur.execute("UPDATE runs SET state='released' WHERE id=%s", (run["id"],))
             _release_holds(cur, HOLD + run["id"])
@@ -932,6 +939,7 @@ def finish(sid, target, payload):
             cur.execute("SELECT 1 FROM runs WHERE id=%s AND session_id=%s AND runner_id=%s AND state='active'",
                         (token, sid, HANDOFF + target))
             if cur.fetchone():
+                lock_handoff_holds(cur, [token])  # sorted, like a family delete
                 _release_holds(cur, HOLD + token)
         raise
 
@@ -958,6 +966,7 @@ def _commit(sid, target, payload, token):
             cur.execute("SELECT 1 FROM runs WHERE id=%s AND session_id=%s AND runner_id=%s AND state='transferred'",
                         (token, sid, HANDOFF + target))
             if cur.fetchone():
+                lock_handoff_holds(cur, [token])  # sorted, like a family delete
                 _release_holds(cur, HOLD + token)
                 _announce_owner(sid, target, session)
                 from app.db.base import parse_jsonb
@@ -994,6 +1003,12 @@ def _commit(sid, target, payload, token):
 
     with session_handoff.commit_holding(sid, target), get_db() as conn:
         cur = conn.cursor()
+        # engine.record below writes network_state: take it before the run
+        # and session rows, the order in app/db/session_locks.py.
+        network_store.lock_state(cur)
+        # The lease and the hold runs (released after the session row flips)
+        # in one sorted lock, like a family delete takes them.
+        lock_handoff_holds(cur, [token], run_ids=[token])
         _lease(cur, sid, target, token)
         _idle(cur, sid)
         moving = payload.get("wake_ids")
@@ -1452,18 +1467,31 @@ def _delete_history(cur, sid, token, sdk):
 
 
 def _lock_history_headers(cur, sid):
-    # Supersession cleans older headers at the final flip. Lock them before
-    # the session row too, so a concurrent expiry sweep cannot invert the order.
-    cur.execute("SELECT token FROM handoff_history_chunks WHERE session_id=%s "
-                "AND table_name='' AND batch_no=0 ORDER BY token FOR UPDATE", (sid,))
-    cur.fetchall()
+    # Supersession cleans older headers at the final flip, and acceptance
+    # releases hold runs. Lock headers and hold runs before the counter and
+    # session row, the order deletion also uses (app/db/session_locks.py).
+    # Returns the locked tokens: supersession may retire only those.
+    from app.db.session_locks import lock_handoff_history
+
+    return lock_handoff_history(cur, sid)
 
 
-def _discard_superseded_history(cur, sid, token):
+def _discard_superseded_history(cur, sid, token, locked):
+    """Retire older committed imports among the headers this transaction locked.
+
+    ``locked`` comes from ``_lock_history_headers``, taken before C/S. A
+    header created after that scan belongs to a newer import, and scanning
+    for it now, after the session lock, would wait on its cleanup while that
+    cleanup waits for this session row (review S7).
+    """
     from app.db.base import parse_jsonb
 
+    older = sorted({str(t) for t in (locked or ())} - {str(token)})
+    if not older:
+        return
     cur.execute("SELECT token,sdk_session_id,rows FROM handoff_history_chunks "
-                "WHERE session_id=%s AND token<>%s AND table_name='' AND batch_no=0 FOR UPDATE", (sid, token))
+                f"WHERE session_id=%s AND token IN ({', '.join(['%s'] * len(older))}) "
+                "AND table_name='' AND batch_no=0", (sid, *older))
     for row in cur.fetchall():
         if (parse_jsonb(row["rows"]) or {}).get("commit_sent"):
             _delete_history(cur, sid, row["token"], row["sdk_session_id"])
@@ -1484,6 +1512,9 @@ def _discard_history(sid, token, *, expired_only=False):
         row = cur.fetchone()
         if not row:
             return
+        # _delete_history releases this token's hold runs: lock them with the
+        # header, before the session row (app/db/session_locks.py).
+        lock_handoff_holds(cur, [token])
         cur.execute("SELECT owner_device_id,placement FROM sessions WHERE id=%s FOR UPDATE", (sid,))
         session = cur.fetchone()
         if expired_only:
@@ -1599,6 +1630,7 @@ def install_history(sid, data, cwd):
     from psycopg2.extras import Json
     from app.core.cli_sessions import project_key_for_directory
     from app.db.network import _insert_rows
+    from app.db.session_locks import handoff_creation_key
 
     old_sdk = data.get("sdk_session_id")
     # New store identity prevents replacing another local session's native tree
@@ -1610,9 +1642,17 @@ def install_history(sid, data, cwd):
     facts = {}
     try:
         with get_db() as conn:
-            conn.cursor().execute("INSERT INTO handoff_history_chunks "
-                                  "(token,session_id,sdk_session_id,table_name,batch_no,rows) "
-                                  "VALUES (%s,%s,%s,'',0,'[]')", (token, sid, sdk))
+            cur = conn.cursor()
+            # X before the header (app/db/session_locks.py): a delete that has
+            # scanned this chat's headers finishes first, and this INSERT then
+            # fails on the session FK instead of racing its cascade (#1215).
+            # One statement (bulk import's round-trip budget): a volatile,
+            # materialized CTE runs before the row is inserted.
+            cur.execute("WITH creation AS MATERIALIZED (SELECT pg_advisory_xact_lock(%s)) "
+                        "INSERT INTO handoff_history_chunks "
+                        "(token,session_id,sdk_session_id,table_name,batch_no,rows) "
+                        "SELECT %s,%s,%s,'',0,'[]' FROM creation",
+                        (handoff_creation_key(sid), token, sid, sdk))
         for table, columns in TABLES.items():
             started = monotonic()
             if timing:
@@ -1704,7 +1744,7 @@ def install_history(sid, data, cwd):
     return sdk
 
 
-def _accept_owner_row(cur, sid, device_id, branch, token=None):
+def _accept_owner_row(cur, sid, device_id, branch, token=None, locked=()):
     # instance_id moves too (as adopt/unpin do): left on the previous
     # worker's id, the session listed as remote with an unknown state here.
     placement = {"where": "runner:" + device_id}
@@ -1716,7 +1756,7 @@ def _accept_owner_row(cur, sid, device_id, branch, token=None):
         cur.execute("UPDATE sessions SET worktree_id=NULL, worktree_branch=NULL, worktree_path=NULL WHERE id=%s", (sid,))
     if token:
         _release_holds(cur, HOLD + token)
-        _discard_superseded_history(cur, sid, token)
+        _discard_superseded_history(cur, sid, token, locked)
 
 
 def _adopt_outcome(cur, sid, failed):
@@ -1761,12 +1801,17 @@ def _accept_owner(sid, device_id, branch=None, token=None, held_messages=None, *
         cur.execute("SELECT token,wakes,superseded,keep_peer,resume_wait,finalized FROM handoff_wakes "
                     "WHERE session_id=%s ORDER BY token FOR UPDATE", (sid,))
         staged_rows = [row for row in cur.fetchall() if row["token"] == token and not row["finalized"]]
-        _lock_history_headers(cur, sid)
+        locked = _lock_history_headers(cur, sid)
         # The durable import admission fence prevents target turns throughout
         # publication. Let ownership sync/session metadata writes proceed; lock
         # and revalidate the owner only at the final context/ownership flip.
         cur.execute("SELECT owner_device_id,placement FROM sessions WHERE id=%s", (sid,))
         session = cur.fetchone()
+        if session is None:
+            if recovering:
+                return []
+            # Deletion won the hand-off headers and committed first.
+            raise ValueError("The chat was deleted during the hand-off; ownership was not changed.")
         receipt = (parse_jsonb(session["placement"]) or {}).get("handoff") or {}
         if recovering:
             cur.execute("SELECT rows FROM handoff_history_chunks WHERE session_id=%s AND token=%s "
@@ -1780,7 +1825,7 @@ def _accept_owner(sid, device_id, branch=None, token=None, held_messages=None, *
         receipt = (parse_jsonb(session["placement"]) or {}).get("handoff") or {}
         if held_messages is None:
             held_messages = receipt.get("held_messages", 0) if receipt.get("token") == token else 0
-        _accept_owner_row(cur, sid, device_id, branch, token)
+        _accept_owner_row(cur, sid, device_id, branch, token, locked)
         if metadata is not None:
             _adopt_outcome(cur, sid, metadata.get("last_turn_failed"))
         for staged in staged_rows:

@@ -173,10 +173,10 @@ def test_buffer_phase_has_a_transaction_work_and_round_trip_budget(request, use_
     counter_reservations = []
     real_reserve = engine._lock_mirror_event_counters
 
-    def reserve(cursor, record_ids):
+    def reserve(cursor, record_ids, **kwargs):
         ids = list(record_ids)
         counter_reservations.extend(ids)
-        return real_reserve(cursor, ids)
+        return real_reserve(cursor, ids, **kwargs)
 
     monkeypatch.setattr(engine, "_lock_mirror_event_counters", reserve)
     with b.active(), measured_apply(monkeypatch, b) as (transactions, statements):

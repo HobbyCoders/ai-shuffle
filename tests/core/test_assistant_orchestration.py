@@ -82,9 +82,11 @@ async def test_peer_message_joins_safe_boundary_with_non_user_attribution(mock_d
             recorder.record_steered_user_message.assert_awaited_once_with(
                 content, profile_id="agent", command_id=queued.get("command_id"),
                 queued_turn_id=row_id, checkpoint_backed=False, source="agent_message",
+                upload_paths=None,
             )
             runtime._persist_user_message.assert_awaited_once_with(
                 content, profile_id="agent", source="agent_message",
+                upload_paths=None,
             )
             # Persistent peer envelope and lack of native checkpoint remain
             # separate from user authority even though the transcript stores it.

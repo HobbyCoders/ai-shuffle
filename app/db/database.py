@@ -2644,6 +2644,10 @@ def _run_column_migrations(cursor: Any) -> None:
         "ON upload_blobs(session_id)"
     )
 
+    if not column_exists(cursor, "upload_blobs", "materialized_path"):
+        cursor.execute("ALTER TABLE upload_blobs ADD COLUMN materialized_path TEXT")
+        migrations_applied.append("upload_blobs.materialized_path")
+
     # session_moves (#1819) — a queued move to another worker and the owner's
     # messages held for it, so a restart resumes the move. Same idempotent
     # guard as git_ops above; no SCHEMA_VERSION bump (the migrations

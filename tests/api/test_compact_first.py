@@ -41,6 +41,15 @@ def test_compact_preserves_owner_bound_provenance(compact_chat):
     assert store.read("compact-chat")["owner"] == "install-admin"
 
 
+@pytest.fixture
+def compact_upload(compact_chat):
+    from app.core.upload_transfer import session_upload_dir
+    upload = session_upload_dir("compact-chat") / "photo.png"
+    upload.parent.mkdir(parents=True, exist_ok=True)
+    upload.write_bytes(b"image")
+    return str(upload)
+
+
 def send(client, payload=None):
     return client.post("/api/v1/sessions/compact-chat/compact", **({"json": payload} if payload else {}))
 
@@ -77,12 +86,12 @@ async def test_settle_wait_then_compact_starts_fresh(compact_chat, unsettle, the
 
 
 @pytest.mark.parametrize("busy", [False, True])
-def test_compact_followup_is_exactly_next_and_keeps_options(compact_chat, busy):
+def test_compact_followup_is_exactly_next_and_keeps_options(compact_chat, compact_upload, busy):
     if busy:
         old = turns.enqueue_turn("compact-chat", "user", prompt="already working")
         turns.start_turn(old["id"])
-    payload = {"type": "query", "prompt": "Read /uploads/photo.png", "profile": "default",
-               "session_id": "cannot-change-route-id", "upload_paths": ["/uploads/photo.png"],
+    payload = {"type": "query", "prompt": f"Read {compact_upload}", "profile": "default",
+               "session_id": "cannot-change-route-id", "upload_paths": [compact_upload],
                "client_message_id": "client-" + "a" * 32,
                "overrides": {"model": "test-model", "effort": "high", "fast": False,
                              "permission_mode": "default"}}
@@ -164,7 +173,7 @@ def test_old_peer_refusal_reaches_composer_without_admitting_message(compact_cha
 
 
 @pytest.mark.parametrize("lift_fails", [False, True])
-def test_remote_attachments_use_normal_lift_before_pair_admission(compact_chat, monkeypatch, lift_fails):
+def test_remote_attachments_use_normal_lift_before_pair_admission(compact_chat, compact_upload, monkeypatch, lift_fails):
     from types import SimpleNamespace
     from app.api.chat_ws_handler import ChatWebSocketHandler
     from app.core import placement
@@ -174,8 +183,8 @@ def test_remote_attachments_use_normal_lift_before_pair_admission(compact_chat, 
     monkeypatch.setattr(ChatWebSocketHandler, "_network_owner", AsyncMock(return_value=None))
     lift = AsyncMock(side_effect=ValueError("file missing")) if lift_fails else AsyncMock(return_value=["blob-1"])
     monkeypatch.setattr(ChatWebSocketHandler, "_lift_uploads", lift)
-    result = send(compact_chat, {"then_send": {"prompt": "inspect file", "upload_paths": ["/uploads/a.png"]}})
-    lift.assert_awaited_once_with(["/uploads/a.png"], None, "compact-chat")
+    result = send(compact_chat, {"then_send": {"prompt": "inspect file", "upload_paths": [compact_upload]}})
+    lift.assert_awaited_once_with([compact_upload], None, "compact-chat")
     rows = turns.get_queued_turns("compact-chat")
     if lift_fails:
         assert result.status_code == 400

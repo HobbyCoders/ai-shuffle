@@ -27,6 +27,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import app.api.chat_ws_handler as cwh
 from app.core import placement as placement_mod
+from app.core.upload_transfer import session_upload_dir
 from app.db import database
 from tests.api.helpers import not_streaming  # noqa: F401  (autouse fixture)
 from tests.helpers import sent_frames
@@ -620,6 +621,13 @@ async def test_live_run_blocks_auto_adopt(mock_db, monkeypatch):
     assert p.submit.call_args.kwargs["no_kick"] is True
 
 
+def _staged_upload(name="a.txt"):
+    path = session_upload_dir("sess-1") / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"attachment")
+    return str(path)
+
+
 async def test_upload_paths_are_lifted_only_for_a_remote_turn(mock_db, monkeypatch):
     """A locally-executed turn's attachments are already on the disk the agent
     will read — lifting them would just duplicate bytes into the database."""
@@ -635,7 +643,7 @@ async def test_upload_paths_are_lifted_only_for_a_remote_turn(mock_db, monkeypat
             "prompt": "look at this",
             "session_id": "sess-1",
             "project": None,
-            "upload_paths": ["/tmp/a.txt"],
+            "upload_paths": [_staged_upload()],
         })
 
     assert "upload_blob_ids" not in (p.submit.call_args.kwargs.get("payload") or {})
@@ -661,7 +669,7 @@ async def test_remote_turn_attaches_lifted_blob_ids_to_the_turn(
             "prompt": "look at this",
             "session_id": "sess-1",
             "project": "proj-1",
-            "upload_paths": ["/tmp/a.txt", "/tmp/b.txt"],
+            "upload_paths": [_staged_upload(), _staged_upload("b.txt")],
         })
 
     handler._lift_uploads.assert_awaited_once()
@@ -689,7 +697,7 @@ async def test_a_failed_lift_refuses_the_send(mock_db, monkeypatch, tmp_path):
             "prompt": "look at this",
             "session_id": "sess-1",
             "project": "proj-1",
-            "upload_paths": ["/etc/passwd"],
+            "upload_paths": [_staged_upload()],
         })
 
     assert "outside the project directory" in sent_frames(handler, "error")[0]["message"]
@@ -710,10 +718,10 @@ async def test_remote_turn_without_local_project_carries_staged_attachments(
             "prompt": "look at this",
             "session_id": "sess-1",
             "project": None,
-            "upload_paths": ["/tmp/a.txt"],
+            "upload_paths": [_staged_upload()],
         })
 
-    handler._lift_uploads.assert_awaited_once_with(["/tmp/a.txt"], None, "sess-1")
+    handler._lift_uploads.assert_awaited_once_with([_staged_upload()], None, "sess-1")
     assert p.submit.call_args.kwargs["payload"]["upload_blob_ids"] == ["staged-blob"]
     assert p.submit.call_args.kwargs["no_kick"] is True
 

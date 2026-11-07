@@ -2167,7 +2167,8 @@ def create_postgres_schema(cursor: Any) -> None:
             size BIGINT NOT NULL DEFAULT 0,
             data BYTEA,
             created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-            materialized_at TIMESTAMP WITH TIME ZONE
+            materialized_at TIMESTAMP WITH TIME ZONE,
+            materialized_path TEXT
         )
     """)
     cursor.execute(

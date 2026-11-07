@@ -113,8 +113,9 @@ describe('retained transcript action lifetime', () => {
 		await fireEvent.click(screen.getByRole('button', { name: 'Restore to composer' }));
 		live.set(state('B')); await tick();
 		live.set(state('A', true)); await tick();
-		finish({ success: true, unsent_restored: true, restored_prompt: 'A words', restored_upload_paths: ['/uploads/a.png'] });
-		await waitFor(() => expect(mocks.pendingRestore).toHaveBeenCalledWith('A words', ['/uploads/a.png']));
+		const references = [{ owner_id: 'owner-a', event_id: 'event-a', index: 0, path: '/uploads/a.png' }];
+		finish({ success: true, unsent_restored: true, restored_prompt: 'A words', restored_upload_paths: ['/uploads/a.png'], restored_upload_references: references });
+		await waitFor(() => expect(mocks.pendingRestore).toHaveBeenCalledWith('A words', ['/uploads/a.png'], references));
 		expect(complete).not.toHaveBeenCalled();
 	});
 
@@ -127,7 +128,7 @@ describe('retained transcript action lifetime', () => {
 		live.set(state('B')); await tick();
 		live.set(state('A', true)); await tick();
 		finish({ success: true, chat_rewound: true });
-		await waitFor(() => expect(mocks.pendingRestore).toHaveBeenCalledWith('Outgoing prompt', undefined));
+		await waitFor(() => expect(mocks.pendingRestore).toHaveBeenCalledWith('Outgoing prompt', undefined, []));
 		expect(complete).not.toHaveBeenCalled();
 		expect(readDraft('B')).toBeNull();
 	});

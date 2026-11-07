@@ -17,7 +17,10 @@ pytestmark = requires_real_pg
 
 @pytest.fixture(autouse=True)
 def multi_session_gate_is_first(monkeypatch):
-    """Catch a gate acquired after ANY mutation/admission lock, not just R/C/S."""
+    """Catch a gate acquired after ANY mutation/admission lock, not just R/C/S.
+
+    No exception: the hand-off headers come after the gate too (#1215).
+    """
     from app.db import session_locks
 
     original = session_locks.lock_multi_session_mutation
@@ -529,59 +532,106 @@ def test_delete_vs_private_history_publication(private_pool, monkeypatch):
 
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=psycopg2.errors.DeadlockDetected,
-    reason="pre-existing delete vs handoff publication deadlock, #1215",
-)
-def test_delete_vs_private_history_publication_delete_first(private_pool, monkeypatch):
+@pytest.mark.parametrize("path", ["publish", "accept-owner", "finalize-wakes", "discard"])
+@pytest.mark.parametrize("first", ["delete", "handoff"])
+def test_delete_vs_handoff_history_both_lock_orders(private_pool, monkeypatch, path, first):
+    """#1215: delete and every hand-off history writer share one H -> C -> S order.
+
+    Before the fix delete took C and S first and only reached the private
+    hand-off header H through its FK cascade, while the hand-off paths hold H
+    and then need C (publication) or S (staging cleanup): DeadlockDetected in
+    both start orders.
+    """
+    from types import SimpleNamespace
+
     from app.network import handoff
 
-    sid, token = "history-delete-first-" + uuid4().hex, uuid4().hex
+    sid, token = "handoff-delete-" + uuid4().hex, uuid4().hex
+    source, target = "source-" + uuid4().hex, "target-" + uuid4().hex
     with base.get_db() as conn:
         cur = conn.cursor()
-        cur.execute("INSERT INTO sessions (id) VALUES (%s)", (sid,))
-        cur.execute("INSERT INTO session_event_counters (session_id,next_seq) VALUES (%s,0)", (sid,))
+        cur.execute("INSERT INTO sessions (id,owner_device_id) VALUES (%s,%s)", (sid, source))
+        # The same durable header install_history stages before publication.
+        # An empty snapshot still prunes/reserves events through the real SQL.
         cur.execute("INSERT INTO handoff_history_chunks "
                     "(token,session_id,sdk_session_id,table_name,batch_no,rows) "
                     "VALUES (%s,%s,NULL,'',0,'{}')", (token, sid))
-    deleting_locked, resume = threading.Event(), threading.Event()
-    delete_pid = []
+        cur.execute("INSERT INTO handoff_wakes (token,session_id,source_id,wakes) VALUES (%s,%s,%s,'[]')",
+                    (token, sid, source))
+    session_events.append_events(sid, [{"type": "system.note", "payload": {}}])
+    monkeypatch.setattr(handoff.engine, "require_context", lambda: SimpleNamespace(device_id=target))
+
+    def write():
+        if path == "publish":
+            with base.get_db() as conn:
+                return handoff._publish_history(conn.cursor(), sid, token)
+        if path == "accept-owner":
+            return handoff._accept_owner(sid, target, None, token)
+        if path == "finalize-wakes":
+            return handoff._finalize_wakes(sid, source, {"token": token})
+        return handoff._discard_history(sid, token)
+
+    locked, resume = threading.Event(), threading.Event()
+    first_pid = []
     original_cursor = base._PgDictConnection.cursor
 
     class InterleavedCursor(RealDictCursor):
         def execute(self, sql, params=None):
-            if sql.startswith("DELETE FROM session_events WHERE") and params == (sid,):
-                delete_pid.append(self.connection.get_backend_pid())
-                deleting_locked.set()
-                assert resume.wait(10)
-            return super().execute(sql, params)
+            result = super().execute(sql, params)
+            if threading.current_thread().name.startswith(first) and not locked.is_set():
+                if first == "delete":
+                    # Delete owns its whole lock prefix (old: C and S; new: H too).
+                    boundary = sql.startswith("DELETE FROM session_events WHERE") and params == (sid,)
+                else:
+                    # The hand-off owns its first private header, nothing else yet.
+                    boundary = "FROM handoff_history_chunks" in sql and "FOR UPDATE" in sql
+                if boundary:
+                    first_pid.append(self.connection.get_backend_pid())
+                    locked.set()
+                    assert resume.wait(10), "test never released the first transaction"
+            return result
 
     def instrumented(self, *args, **kwargs):
         kwargs["cursor_factory"] = InterleavedCursor
         return original_cursor(self, *args, **kwargs)
 
-    def publish():
-        with base.get_db() as conn:
-            return handoff._publish_history(conn.cursor(), sid, token)
-
     monkeypatch.setattr(base._PgDictConnection, "cursor", instrumented)
     monkeypatch.setattr(sessions, "_cleanup_working_set_ref", lambda sid: None)
     monkeypatch.setattr(sessions, "_cleanup_pending_wakeups", lambda sid: None)
-    with psycopg2.connect(**private_pool) as observer, ThreadPoolExecutor(max_workers=2) as workers:
+    with psycopg2.connect(**private_pool) as observer, \
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="handoff") as handing, \
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="delete") as deleter:
         observer.autocommit = True
-        deleting = workers.submit(sessions.delete_session, sid)
-        assert deleting_locked.wait(5)
-        publishing = workers.submit(publish)
+        if first == "delete":
+            leading = deleting = deleter.submit(sessions.delete_session, sid)
+        else:
+            leading = writing = handing.submit(write)
         try:
-            # Main reproduces this too: deletion owns C, publication owns its
-            # private header and waits for C, then delete's FK cascade needs H.
-            _wait_for_lock_wait(observer, delete_pid[0], publishing)
+            if not locked.wait(5):
+                pytest.fail(f"first transaction never reached its boundary: {leading.result(timeout=1)!r}")
+            if first == "delete":
+                writing = handing.submit(write)
+            else:
+                deleting = deleter.submit(sessions.delete_session, sid)
+            # A real PostgreSQL lock wait on the leader, never a sleep.
+            _wait_for_lock_wait(observer, first_pid[0], writing if first == "delete" else deleting)
         finally:
             resume.set()
-        assert deleting.result(timeout=5)
-        publishing.result(timeout=5)
+        assert deleting.result(timeout=10)
+        if first == "handoff":
+            # The hand-off committed whole before deletion could start.
+            assert writing.result(timeout=10) == ({} if path == "publish" else [] if path != "discard" else None)
+        elif path in ("accept-owner", "finalize-wakes"):
+            with pytest.raises(ValueError, match="deleted"):
+                writing.result(timeout=10)
+        else:
+            # Deletion's cascade removed the staging rows the writer waited for.
+            assert writing.result(timeout=10) is None
     _assert_deleted(sid)
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) AS n FROM handoff_history_chunks WHERE session_id=%s", (sid,))
+        assert cur.fetchone()["n"] == 0
 
 
 def test_private_history_fence_has_only_two_counter_round_trips(private_pool, monkeypatch):
@@ -830,7 +880,11 @@ def test_delete_vs_ordinary_mirror_ingestion(private_pool, monkeypatch, path, fa
 
 @pytest.mark.parametrize("path", ["envelope", "snapshot", "chunk", "pending", "pending-fallback"])
 def test_delete_first_mirror_tombstone_cannot_recreate_counter(private_pool, monkeypatch, path):
-    """A reservation's INSERT snapshot can outlive the session it selected."""
+    """A reservation's INSERT snapshot can outlive the session it selected.
+
+    The tombstone is consumed (the stream moves on) but applies nothing for
+    a chat whose delete committed while it waited (#1222).
+    """
     from app.db import network as store
     from app.network import crypto, engine, envelope, identity, membership, policy
 
@@ -866,11 +920,11 @@ def test_delete_first_mirror_tombstone_cannot_recreate_counter(private_pool, mon
         result = engine.ApplyResult()
         if path == "chunk":
             assert engine._apply_chunk([env], ctx, result)
-            assert result.applied == 1 and result.retry == 0
+            assert (result.applied, result.duplicate, result.retry) == (0, 1, 0)
         elif path.startswith("pending"):
             assert engine._apply_pending_chunk(remote.device_id, 1, ctx, result,
                                                _try_append=path != "pending-fallback")
-            assert result.applied == 1 and result.retry == 0
+            assert (result.applied, result.duplicate, result.retry) == (0, 1, 0)
         else:
             with base.get_db() as conn:
                 cursor = conn.cursor()
@@ -879,10 +933,10 @@ def test_delete_first_mirror_tombstone_cannot_recreate_counter(private_pool, mon
                             "origin_device_id": remote.device_id, "deleted": True, "order_seq": 1}
                     applied, _ = engine.apply_snapshot_items(cursor, policy.collection("session_events"),
                                                              [item], ctx=ctx)
-                    assert applied == 1
+                    assert applied == 0
                 else:
                     store.lock_state(cursor)
-                    assert engine.apply_envelope(cursor, env, ctx=ctx) == "applied"
+                    assert engine.apply_envelope(cursor, env, ctx=ctx) == "duplicate"
 
     locked, resume = threading.Event(), threading.Event()
     delete_pid = []
@@ -923,6 +977,149 @@ def test_delete_first_mirror_tombstone_cannot_recreate_counter(private_pool, mon
     _assert_deleted(sid)
 
 
+@pytest.mark.parametrize("path", ["chunk", "append", "envelope", "pending", "pending-fallback", "snapshot"])
+def test_delete_first_fresh_mirror_events_are_dropped(private_pool, monkeypatch, path):
+    """#1222: fresh events waiting behind delete's counter must not land after it.
+
+    Before the fix the waiting mirror inserted both events and
+    after_event_mirrored recreated the counter at next_seq=3 for a chat
+    that no longer existed, while reporting two applied events.
+    """
+    from app.db import network as store
+    from app.network import crypto, engine, envelope, identity, membership, policy
+
+    def device():
+        return identity.DeviceIdentity(crypto.generate_signing_key(), crypto.generate_encryption_key(),
+                                       1, "2026-01-01T00:00:00Z")
+
+    local, remote = device(), device()
+    member = membership.Member(remote.device_id, remote.signing_public, remote.encryption_public,
+                               "Remote owner", "worker", 0)
+    ctx = engine.NetworkContext(local, "delete-fresh-" + uuid4().hex, "Fresh mirror race", remote.device_id,
+                                0, 1, {1: crypto.generate_network_key()}, {remote.device_id: member}, "ready")
+    sid = "delete-fresh-" + uuid4().hex
+    coll = policy.collection("session_events")
+    with base.get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO network_state (id,network_id,founder_device_id) VALUES (1,%s,%s) "
+                       "ON CONFLICT(id) DO UPDATE SET network_id=EXCLUDED.network_id",
+                       (ctx.network_id, remote.device_id))
+        cursor.execute("INSERT INTO sessions (id,owner_device_id) VALUES (%s,%s)", (sid, remote.device_id))
+    session_events.append_events(sid, [{"type": "system.note", "payload": {"content": "local"}}])
+    with base.get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM session_events WHERE session_id=%s", (sid,))
+        template = engine.serialize_row(coll, dict(cursor.fetchone()))
+    envs, items = [], []
+    for index, seq in enumerate((2, 3), 1):
+        record = {**template, "id": "fresh-event-" + uuid4().hex, "seq": seq,
+                  "payload": {"content": f"remote {seq}"}}
+        rid = coll.record_id(record)
+        envs.append(envelope.build(
+            network_id=ctx.network_id, collection=coll.name, record_id=rid,
+            op="upsert", clock=2 + index, origin_device_id=remote.device_id,
+            origin_incarnation=1, origin_seq=index, schema_version=1, key_version=1,
+            network_key=ctx.network_key, signing_private=remote.signing_private,
+            record=record, order_seq=seq,
+        ).to_dict())
+        items.append({"record_id": rid, "record": record, "clock": 2 + index,
+                      "origin_device_id": remote.device_id, "deleted": False, "order_seq": seq})
+    if path.startswith("pending"):
+        with base.get_db() as conn:
+            for env in envs:
+                store.stash_pending(conn.cursor(), env)
+
+    def ingest():
+        result = engine.ApplyResult()
+        if path == "chunk":
+            assert engine._apply_chunk(envs, ctx, result)
+        elif path.startswith("pending"):
+            assert engine._apply_pending_chunk(remote.device_id, 1, ctx, result,
+                                               _try_append=path != "pending-fallback")
+        else:
+            with base.get_db() as conn:
+                cursor = conn.cursor()
+                if path == "snapshot":
+                    assert engine.apply_snapshot_items(cursor, coll, items, ctx=ctx) == (0, [])
+                    return
+                store.lock_state(cursor)
+                if path == "append":
+                    assert engine._apply_event_append(cursor, envs, ctx, result)
+                else:
+                    assert [engine.apply_envelope(cursor, env, ctx=ctx, result=result)
+                            for env in envs] == ["duplicate", "duplicate"]
+                    return
+        # Consumed (the stream moves on) but nothing applied for a deleted chat.
+        assert (result.applied, result.duplicate, result.retry, result.rejected) == (0, 2, 0, 0)
+        with base.get_db() as conn:
+            assert store.get_watermark(conn.cursor(), remote.device_id, 1) == 2
+
+    locked, resume = threading.Event(), threading.Event()
+    delete_pid = []
+    original_cursor = base._PgDictConnection.cursor
+
+    class InterleavedCursor(RealDictCursor):
+        def execute(self, sql, params=None):
+            result = super().execute(sql, params)
+            if (threading.current_thread().name.startswith("delete") and not locked.is_set()
+                    and sql.startswith("INSERT INTO session_event_counters")):
+                delete_pid.append(self.connection.get_backend_pid())
+                locked.set()
+                assert resume.wait(10), "test never released deletion"
+            return result
+
+    def instrumented(self, *args, **kwargs):
+        kwargs["cursor_factory"] = InterleavedCursor
+        return original_cursor(self, *args, **kwargs)
+
+    monkeypatch.setattr(base._PgDictConnection, "cursor", instrumented)
+    monkeypatch.setattr(sessions, "_cleanup_working_set_ref", lambda sid: None)
+    monkeypatch.setattr(sessions, "_cleanup_pending_wakeups", lambda sid: None)
+    with psycopg2.connect(**private_pool) as observer, \
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="delete") as deleter, \
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="mirror") as mirror:
+        observer.autocommit = True
+        deleting = deleter.submit(sessions.delete_session, sid)
+        try:
+            assert locked.wait(5), "delete never acquired the counter"
+            applying = mirror.submit(ingest)
+            # The mirror has seen S and really waits on delete's C.
+            _wait_for_lock_wait(observer, delete_pid[0], applying)
+        finally:
+            resume.set()
+        assert deleting.result(timeout=5)
+        applying.result(timeout=5)
+    _assert_deleted(sid)
+    with base.get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) AS n FROM sync_records WHERE collection='session_events' "
+                       "AND record_id LIKE %s", (sid + "|%",))
+        assert cursor.fetchone()["n"] == 0
+        cursor.execute("SELECT COUNT(*) AS n FROM sync_pending WHERE origin_device_id=%s",
+                       (remote.device_id,))
+        assert cursor.fetchone()["n"] == 0
+
+
+def test_mirror_deleted_mark_holds_only_while_the_session_is_absent(private_pool, monkeypatch):
+    """The window -> per-op memory never drops events for a chat that exists."""
+    from app.db import network as store, session_locks
+    from app.network import engine
+
+    gone, back = "mark-gone-" + uuid4().hex, "mark-back-" + uuid4().hex
+    monkeypatch.setattr(session_locks, "_DELETED", {gone: None, back: None})
+    with base.get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO network_state (id,network_id,founder_device_id) VALUES (1,%s,%s) "
+                       "ON CONFLICT(id) DO NOTHING", ("mark-test", "mark-device"))
+        # A locally deleted mirror whose owner re-sent the catalog.
+        cursor.execute("INSERT INTO sessions (id) VALUES (%s)", (back,))
+        store.lock_state(cursor)
+        assert engine._lock_mirror_event_counters(cursor, [gone + "|1", back + "|1"]) == {gone}
+        cursor.execute("SELECT COUNT(*) AS n FROM session_event_counters WHERE session_id=%s", (gone,))
+        assert cursor.fetchone()["n"] == 0
+    assert session_locks._DELETED == {gone: None}
+
+
 def test_mirror_reservation_preserves_durable_post_delete_stop_runtime(private_pool, monkeypatch):
     from app.db import network as store, stop_notices
     from app.network import engine
@@ -945,3 +1142,851 @@ def test_mirror_reservation_preserves_durable_post_delete_stop_runtime(private_p
         assert cursor.fetchone()["next_seq"] == 1
     assert sessions.get_session(sid) is None
     assert [event["id"] for event in session_events.get_events(sid)] == [notice_id]
+
+
+def _remote_network(prefix):
+    """A ready network context whose single remote member signs the test ops."""
+    from app.network import crypto, engine, identity, membership
+
+    def device():
+        return identity.DeviceIdentity(crypto.generate_signing_key(), crypto.generate_encryption_key(),
+                                       1, "2026-01-01T00:00:00Z")
+
+    local, remote = device(), device()
+    member = membership.Member(remote.device_id, remote.signing_public, remote.encryption_public,
+                               "Remote owner", "worker", 0)
+    ctx = engine.NetworkContext(local, prefix + uuid4().hex, "Lock order", remote.device_id,
+                                0, 1, {1: crypto.generate_network_key()}, {remote.device_id: member}, "ready")
+    with base.get_db() as conn:
+        conn.cursor().execute("INSERT INTO network_state (id,network_id,founder_device_id) VALUES (1,%s,%s) "
+                              "ON CONFLICT(id) DO UPDATE SET network_id=EXCLUDED.network_id",
+                              (ctx.network_id, remote.device_id))
+    return ctx, remote
+
+
+def _session_tombstone(ctx, remote, sid):
+    from app.network import envelope
+
+    return envelope.build(
+        network_id=ctx.network_id, collection="sessions", record_id=sid,
+        op="delete", clock=2, origin_device_id=remote.device_id,
+        origin_incarnation=1, origin_seq=1, schema_version=1, key_version=1,
+        network_key=ctx.network_key, signing_private=remote.signing_private,
+    ).to_dict()
+
+
+def _stage_handoff_header(cur, sid, token):
+    # The same durable header install_history stages before publication.
+    cur.execute("INSERT INTO handoff_history_chunks "
+                "(token,session_id,sdk_session_id,table_name,batch_no,rows) "
+                "VALUES (%s,%s,NULL,'',0,'{}')", (token, sid))
+
+
+class _Barriers:
+    """Pause named threads at chosen SQL statements and record their backend pids."""
+
+    def __init__(self, monkeypatch, rules):
+        # rules: thread-name prefix -> (predicate(sql, params), pause_before)
+        self.rules, self.reached, self.pids = rules, {}, {}
+        self.resume = {name: threading.Event() for name in rules}
+        for name in rules:
+            self.reached[name] = threading.Event()
+        barriers, original_cursor = self, base._PgDictConnection.cursor
+
+        class InterleavedCursor(RealDictCursor):
+            def execute(self, sql, params=None):
+                name = next((n for n in barriers.rules if threading.current_thread().name.startswith(n)), None)
+                if name is not None:
+                    barriers.pids.setdefault(name, self.connection.get_backend_pid())
+                hit = name is not None and not barriers.reached[name].is_set() and barriers.rules[name][0](sql, params)
+                if hit and barriers.rules[name][1]:
+                    barriers._pause(name)
+                result = super().execute(sql, params)
+                if hit and not barriers.rules[name][1]:
+                    barriers._pause(name)
+                return result
+
+        def instrumented(self, *args, **kwargs):
+            kwargs["cursor_factory"] = InterleavedCursor
+            return original_cursor(self, *args, **kwargs)
+
+        monkeypatch.setattr(base._PgDictConnection, "cursor", instrumented)
+        monkeypatch.setattr(sessions, "_cleanup_working_set_ref", lambda sid, row=None: None)
+        monkeypatch.setattr(sessions, "_cleanup_pending_wakeups", lambda sid: None)
+
+    def _pause(self, name):
+        self.reached[name].set()
+        assert self.resume[name].wait(10), f"test never released {name}"
+
+    def wait(self, name, future):
+        if not self.reached[name].wait(5):
+            pytest.fail(f"{name} never reached its barrier: {future.result(timeout=1)!r}")
+
+    def release_all(self):
+        for event in self.resume.values():
+            event.set()
+
+
+@pytest.mark.parametrize("marked", [True, False], ids=["same-process", "other-process"])
+def test_delete_committed_just_before_append_reservation_drops_events(private_pool, monkeypatch, marked):
+    """#1222 (review): fast append read the chat, then the delete committed.
+
+    The reservation INSERT then finds no session row at all, so nothing
+    "vanished" under it. Before the fix both events were stored for a chat
+    that no longer existed. The caller's own read proves the chat existed
+    (``other-process``: no in-memory delete mark can help).
+    """
+    from app.db import network as store, session_locks
+    from app.network import engine, envelope, policy
+
+    ctx, remote = _remote_network("delete-before-reserve-")
+    sid = "delete-before-reserve-" + uuid4().hex
+    coll = policy.collection("session_events")
+    with base.get_db() as conn:
+        conn.cursor().execute("INSERT INTO sessions (id,owner_device_id) VALUES (%s,%s)", (sid, remote.device_id))
+    session_events.append_events(sid, [{"type": "system.note", "payload": {"content": "local"}}])
+    with base.get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM session_events WHERE session_id=%s", (sid,))
+        template = engine.serialize_row(coll, dict(cursor.fetchone()))
+    envs = []
+    for index, seq in enumerate((2, 3), 1):
+        record = {**template, "id": "fresh-event-" + uuid4().hex, "seq": seq,
+                  "payload": {"content": f"remote {seq}"}}
+        envs.append(envelope.build(
+            network_id=ctx.network_id, collection=coll.name, record_id=coll.record_id(record),
+            op="upsert", clock=2 + index, origin_device_id=remote.device_id,
+            origin_incarnation=1, origin_seq=index, schema_version=1, key_version=1,
+            network_key=ctx.network_key, signing_private=remote.signing_private,
+            record=record, order_seq=seq,
+        ).to_dict())
+
+    def ingest():
+        result = engine.ApplyResult()
+        with base.get_db() as conn:
+            cursor = conn.cursor()
+            store.lock_state(cursor)
+            assert engine._apply_event_append(cursor, envs, ctx, result)
+        return result
+
+    # Pause BEFORE the reservation: the owner read is done, no counter is held.
+    barriers = _Barriers(monkeypatch, {"mirror": (
+        lambda sql, params: sql.startswith("INSERT INTO session_event_counters"), True)})
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="mirror") as mirror:
+        applying = mirror.submit(ingest)
+        try:
+            barriers.wait("mirror", applying)
+            # Nothing the paused mirror holds is on deletion's path: it commits whole.
+            assert sessions.delete_session(sid)
+            if not marked:
+                monkeypatch.setattr(session_locks, "_DELETED", {})
+        finally:
+            barriers.release_all()
+        result = applying.result(timeout=10)
+    assert (result.applied, result.duplicate, result.retry, result.rejected) == (0, 2, 0, 0)
+    _assert_deleted(sid)
+    with base.get_db() as conn:
+        cursor = conn.cursor()
+        assert store.get_watermark(cursor, remote.device_id, 1) == 2
+        cursor.execute("SELECT COUNT(*) AS n FROM sync_records WHERE collection='session_events' "
+                       "AND record_id LIKE %s", (sid + "|%",))
+        assert cursor.fetchone()["n"] == 0
+
+
+def test_bulk_membership_incoming_tombstone_and_local_delete_share_one_order(private_pool, monkeypatch):
+    """Review S2: gate -> network_state -> hand-off header, never back.
+
+    Bulk membership holds the gate and waits for network_state; an incoming
+    session tombstone holds network_state and needs the chat's hand-off
+    header (its FK cascade deletes it); a local delete of the same chat
+    waits for the gate. With delete taking the header BEFORE the gate this
+    closed a three-transaction cycle (DeadlockDetected).
+    """
+    from app.db import network as store
+    from app.network import engine, session_active
+
+    ctx, remote = _remote_network("three-way-")
+    sid, token = "three-way-" + uuid4().hex, uuid4().hex
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("INSERT INTO sessions (id,owner_device_id) VALUES (%s,%s)", (sid, remote.device_id))
+        _stage_handoff_header(cur, sid, token)
+    env = _session_tombstone(ctx, remote, sid)
+
+    def incoming():
+        with base.get_db() as conn:
+            cursor = conn.cursor()
+            store.lock_state(cursor)
+            return engine.apply_envelope(cursor, env, ctx=ctx)
+
+    barriers = _Barriers(monkeypatch, {"incoming": (
+        lambda sql, params: "FROM network_state WHERE id = 1 FOR UPDATE" in sql, False)})
+    with psycopg2.connect(**private_pool) as observer, \
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="incoming") as syncing, \
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="bulk") as bulk, \
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="delete") as deleter:
+        observer.autocommit = True
+        applying = syncing.submit(incoming)
+        try:
+            barriers.wait("incoming", applying)
+            # 1. Bulk membership owns the gate and really waits for network_state.
+            settling = bulk.submit(session_active.write_shared_many, [], False)
+            _wait_for_lock_wait(observer, barriers.pids["incoming"], settling)
+            # 2. The local delete really waits behind the bulk writer's gate.
+            deleting = deleter.submit(sessions.delete_session, sid)
+            with observer.cursor() as probe:
+                probe.execute("SELECT pid FROM pg_stat_activity WHERE %s = ANY(pg_blocking_pids(pid))",
+                              (barriers.pids["incoming"],))
+                bulk_pid = probe.fetchone()[0]
+            _wait_for_lock_wait(observer, bulk_pid, deleting)
+        finally:
+            barriers.release_all()
+        assert applying.result(timeout=10) == "applied"
+        assert settling.result(timeout=10) == []
+        assert deleting.result(timeout=10) is False  # The tombstone already removed it.
+    _assert_deleted(sid)
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) AS n FROM handoff_history_chunks WHERE session_id=%s", (sid,))
+        assert cur.fetchone()["n"] == 0
+
+
+@pytest.mark.parametrize("path", ["envelope", "snapshot"])
+def test_incoming_session_tombstone_vs_handoff_staging_cleanup(private_pool, monkeypatch, path):
+    """Review S3: a tombstone takes the hand-off header before the session row.
+
+    Before the fix the tombstone's DELETE locked the session and its FK
+    cascade then waited for the header, while ``_discard_history`` held the
+    header and next locked the session: DeadlockDetected.
+    """
+    from app.db import network as store
+    from app.network import engine, handoff, policy
+
+    ctx, remote = _remote_network("tombstone-discard-")
+    sid, token = "tombstone-discard-" + uuid4().hex, uuid4().hex
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("INSERT INTO sessions (id,owner_device_id) VALUES (%s,%s)", (sid, remote.device_id))
+        _stage_handoff_header(cur, sid, token)
+    env = _session_tombstone(ctx, remote, sid)
+
+    def incoming():
+        with base.get_db() as conn:
+            cursor = conn.cursor()
+            if path == "snapshot":
+                item = {"record_id": sid, "record": None, "clock": 2,
+                        "origin_device_id": remote.device_id, "deleted": True, "order_seq": None}
+                return engine.apply_snapshot_items(cursor, policy.collection("sessions"), [item], ctx=ctx)[0]
+            store.lock_state(cursor)
+            return engine.apply_envelope(cursor, env, ctx=ctx)
+
+    barriers = _Barriers(monkeypatch, {"discard": (
+        lambda sql, params: "FROM handoff_history_chunks" in sql and "FOR UPDATE" in sql, False)})
+    with psycopg2.connect(**private_pool) as observer, \
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="discard") as cleaning, \
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="incoming") as syncing:
+        observer.autocommit = True
+        discarding = cleaning.submit(handoff._discard_history, sid, token)
+        try:
+            barriers.wait("discard", discarding)
+            applying = syncing.submit(incoming)
+            _wait_for_lock_wait(observer, barriers.pids["discard"], applying)
+        finally:
+            barriers.release_all()
+        assert discarding.result(timeout=10) is None
+        assert applying.result(timeout=10) in ("applied", 1)
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM sessions WHERE id=%s", (sid,))
+        assert cur.fetchone() is None
+        cur.execute("SELECT COUNT(*) AS n FROM handoff_history_chunks WHERE session_id=%s", (sid,))
+        assert cur.fetchone()["n"] == 0
+
+
+@pytest.mark.parametrize("path", ["accept-owner", "discard"])
+@pytest.mark.parametrize("first", ["handoff", "delete"])
+def test_handoff_hold_runs_are_locked_before_counter_and_session(private_pool, monkeypatch, path, first):
+    """Review S4: hand-off hold runs belong to step H, before C and S.
+
+    The hold run reserves the parent chat's run slot. Deleting the parent
+    locks the family's runs, counters and sessions in session order (the
+    parent sorts first). Before the fix acceptance/cleanup held the child's
+    counter or session and only then released the parent's hold run, which
+    the delete already held while waiting for the child: DeadlockDetected.
+    """
+    from types import SimpleNamespace
+
+    from app.network import handoff
+
+    parent, sid = "a-hold-parent-" + uuid4().hex, "z-hold-child-" + uuid4().hex
+    token, source, target = uuid4().hex, "source-" + uuid4().hex, "target-" + uuid4().hex
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("INSERT INTO sessions (id,owner_device_id) VALUES (%s,%s)", (parent, source))
+        cur.execute("INSERT INTO sessions (id,owner_device_id,parent_session_id) VALUES (%s,%s,%s)",
+                    (sid, source, parent))
+        _stage_handoff_header(cur, sid, token)
+        cur.execute("INSERT INTO handoff_wakes (token,session_id,source_id,wakes) VALUES (%s,%s,%s,'[]')",
+                    (token, sid, source))
+    session_events.append_events(sid, [{"type": "system.note", "payload": {}}])
+    hold = runs.claim_run(parent, handoff.HOLD + token, 60)
+    assert hold is not None
+    monkeypatch.setattr(handoff.engine, "require_context", lambda: SimpleNamespace(device_id=target))
+
+    def write():
+        if path == "accept-owner":
+            return handoff._accept_owner(sid, target, None, token)
+        return handoff._discard_history(sid, token)
+
+    if first == "handoff":
+        # Holding the child's session row (and, accepting, its counter).
+        rules = {"handoff": (lambda sql, params: sql.startswith(
+            "SELECT owner_device_id,placement FROM sessions WHERE id=%s FOR UPDATE"), False)}
+    else:
+        # Holding the whole family's runs, counters and sessions.
+        rules = {"delete": (lambda sql, params: sql.startswith("DELETE FROM session_events WHERE")
+                            and params == (parent,), False)}
+    barriers = _Barriers(monkeypatch, rules)
+    with psycopg2.connect(**private_pool) as observer, \
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="handoff") as handing, \
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="delete") as deleter:
+        observer.autocommit = True
+        if first == "handoff":
+            writing = handing.submit(write)
+            try:
+                barriers.wait("handoff", writing)
+                deleting = deleter.submit(sessions.delete_session, parent)
+                _wait_for_lock_wait(observer, barriers.pids["handoff"], deleting)
+            finally:
+                barriers.release_all()
+        else:
+            deleting = deleter.submit(sessions.delete_session, parent)
+            try:
+                barriers.wait("delete", deleting)
+                writing = handing.submit(write)
+                _wait_for_lock_wait(observer, barriers.pids["delete"], writing)
+            finally:
+                barriers.release_all()
+        assert deleting.result(timeout=10)
+        assert writing.result(timeout=10) == ([] if path == "accept-owner" else None)
+    _assert_deleted(parent)
+    child = sessions.get_session(sid)
+    assert child is not None and child["parent_session_id"] is None
+    if path == "accept-owner":
+        assert child["owner_device_id"] == target
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) AS n FROM runs WHERE runner_id=%s AND state='active'", (handoff.HOLD + token,))
+        assert cur.fetchone()["n"] == 0
+
+
+def _late_events_for_deleted_chat(prefix, *, published):
+    """A deleted mirror chat and two valid late event envelopes for it.
+
+    ``published``: the chat's sync record is a tombstone (a peer's delete, or
+    a local delete the scan published); otherwise it is the live record of a
+    local delete the scan has not published yet. Either survives a restart.
+    """
+    from app.db import network as store
+    from app.network import engine, envelope, policy
+
+    ctx, remote = _remote_network(prefix)
+    sid = prefix + uuid4().hex
+    coll = policy.collection("session_events")
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("INSERT INTO sessions (id,owner_device_id) VALUES (%s,%s)", (sid, remote.device_id))
+        store.put_record(cur, "sessions", sid, clock=1, origin_device_id=remote.device_id,
+                         content_hash="synced", deleted=False)
+    session_events.append_events(sid, [{"type": "system.note", "payload": {"content": "local"}}])
+    with base.get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM session_events WHERE session_id=%s", (sid,))
+        template = engine.serialize_row(coll, dict(cursor.fetchone()))
+    envs, items = [], []
+    for index, seq in enumerate((2, 3), 1):
+        record = {**template, "id": "late-event-" + uuid4().hex, "seq": seq,
+                  "payload": {"content": f"remote {seq}"}}
+        rid = coll.record_id(record)
+        envs.append(envelope.build(
+            network_id=ctx.network_id, collection=coll.name, record_id=rid,
+            op="upsert", clock=2 + index, origin_device_id=remote.device_id,
+            origin_incarnation=1, origin_seq=index, schema_version=1, key_version=1,
+            network_key=ctx.network_key, signing_private=remote.signing_private,
+            record=record, order_seq=seq,
+        ).to_dict())
+        items.append({"record_id": rid, "record": record, "clock": 2 + index,
+                      "origin_device_id": remote.device_id, "deleted": False, "order_seq": seq})
+    assert sessions.delete_session(sid)
+    if published:
+        with base.get_db() as conn:
+            store.put_record(conn.cursor(), "sessions", sid, clock=2, origin_device_id=remote.device_id,
+                             content_hash="", deleted=True)
+    return ctx, remote, sid, envs, items
+
+
+def _reserve_in_fresh_process(private_pool, sid):
+    """Run the mirror reservation in a new interpreter: no in-memory marks."""
+    import json
+    import os
+    import subprocess
+    import sys
+
+    script = (
+        "import json, sys\n"
+        "from app.core.config import settings\n"
+        "from app.db import base, network as store, session_locks\n"
+        "from app.network import engine\n"
+        "kwargs, sid = json.loads(sys.argv[1]), sys.argv[2]\n"
+        "object.__setattr__(settings, 'get_database_connection', lambda: dict(kwargs))\n"
+        "base.init_pool(min_conn=1, max_conn=1)\n"
+        "assert session_locks._DELETED == {}\n"
+        "with base.get_db() as conn:\n"
+        "    cursor = conn.cursor()\n"
+        "    store.lock_state(cursor)\n"
+        "    print(json.dumps(sorted(engine._lock_mirror_event_counters(cursor, [sid + '|e']))))\n"
+        "base.close_pool()\n"
+    )
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    done = subprocess.run([sys.executable, "-c", script, json.dumps(private_pool), sid], cwd=root,
+                          capture_output=True, text=True, timeout=60, check=False)
+    assert done.returncode == 0, done.stderr[-2000:]
+    return json.loads(done.stdout.strip().splitlines()[-1])
+
+
+@pytest.mark.parametrize("path", ["envelope", "chunk", "pending", "snapshot"])
+@pytest.mark.parametrize("cause", ["evicted", "restart"])
+@pytest.mark.parametrize("published", [True, False], ids=["tombstone", "unpublished-local-delete"])
+def test_deleted_chat_late_events_rely_on_the_durable_record(private_pool, monkeypatch, path, cause, published):
+    """#1222 (review S5): the in-memory delete marks are only a cache.
+
+    Before the fix, once 1,025 newer deletions evicted the chat's mark (or a
+    restart emptied the cache), two valid late envelopes for the deleted chat
+    were applied: 0 sessions, 2 events, counter 3, tombstone still present.
+    sync_records knowing the chat while its row is gone is the durable answer.
+    (Fast append declines a chat with no row; ``chunk`` covers that fallback.)
+    """
+    from app.db import network as store
+    from app.db import session_locks
+    from app.network import engine, policy
+
+    monkeypatch.setattr(session_locks, "_DELETED", dict(session_locks._DELETED))
+    ctx, remote, sid, envs, items = _late_events_for_deleted_chat("durable-delete-", published=published)
+    assert sid in session_locks._DELETED  # delete_session marked it
+    if cause == "evicted":
+        session_locks.mark_sessions_deleted(f"evict-{index}-{uuid4().hex}"
+                                            for index in range(session_locks._DELETED_MAX + 1))
+    else:
+        # A new process starts with no marks at all, and still finds the deletion.
+        assert _reserve_in_fresh_process(private_pool, sid) == [sid]
+        monkeypatch.setattr(session_locks, "_DELETED", {})
+    assert sid not in session_locks._DELETED
+
+    result = engine.ApplyResult()
+    if path == "chunk":
+        assert engine._apply_chunk(envs, ctx, result)
+    elif path == "pending":
+        with base.get_db() as conn:
+            for env in envs:
+                store.stash_pending(conn.cursor(), env)
+        assert engine._apply_pending_chunk(remote.device_id, 1, ctx, result)
+    else:
+        with base.get_db() as conn:
+            cursor = conn.cursor()
+            if path == "snapshot":
+                assert engine.apply_snapshot_items(cursor, policy.collection("session_events"),
+                                                   items, ctx=ctx) == (0, [])
+            else:
+                store.lock_state(cursor)
+                assert [engine.apply_envelope(cursor, env, ctx=ctx, result=result)
+                        for env in envs] == ["duplicate", "duplicate"]
+    if path in ("chunk", "pending"):
+        assert (result.applied, result.duplicate, result.retry, result.rejected) == (0, 2, 0, 0)
+    _assert_deleted(sid)
+    with base.get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) AS n FROM sync_records WHERE collection='session_events' "
+                       "AND record_id LIKE %s", (sid + "|%",))
+        assert cursor.fetchone()["n"] == 0
+        if path != "snapshot":
+            assert store.get_watermark(cursor, remote.device_id, 1) == 2
+        cursor.execute("SELECT COUNT(*) AS n FROM sync_pending WHERE origin_device_id=%s", (remote.device_id,))
+        assert cursor.fetchone()["n"] == 0
+
+
+def test_absent_chat_without_a_sync_record_is_not_arrived_yet(private_pool, monkeypatch):
+    """Review S5: the durable check never refuses a chat whose create is in flight."""
+    from app.db import network as store
+    from app.db import session_locks
+    from app.network import engine
+
+    monkeypatch.setattr(session_locks, "_DELETED", {})
+    unknown, deleted = "not-arrived-" + uuid4().hex, "durably-deleted-" + uuid4().hex
+    with base.get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO network_state (id,network_id,founder_device_id) VALUES (1,%s,%s) "
+                       "ON CONFLICT(id) DO NOTHING", ("not-arrived-test", "not-arrived-device"))
+        store.put_record(cursor, "sessions", deleted, clock=2, origin_device_id="peer",
+                         content_hash="", deleted=True)
+        store.lock_state(cursor)
+        assert engine._lock_mirror_event_counters(cursor, [unknown + "|1", deleted + "|1"]) == {deleted}
+        cursor.execute("SELECT COUNT(*) AS n FROM session_event_counters WHERE session_id IN (%s,%s)",
+                       (unknown, deleted))
+        assert cursor.fetchone()["n"] == 0
+    assert session_locks._DELETED == {deleted: None}
+
+
+@pytest.mark.parametrize("first", ["cancel", "delete"])
+def test_handoff_cancel_vs_deleting_the_moving_chats_parent(private_pool, monkeypatch, first):
+    """Review S4: cancellation takes its lease and hold runs in one sorted lock.
+
+    Child z is moving and its hold run reserves parent a's run slot. Before
+    the fix cancellation locked z's lease first; deleting a then locked a's
+    runs and waited for z's; cancellation released the hold on a and waited
+    for the delete: DeadlockDetected.
+    """
+    from app.network import handoff
+
+    parent, sid = "a-cancel-parent-" + uuid4().hex, "z-cancel-child-" + uuid4().hex
+    target = "target-" + uuid4().hex
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("INSERT INTO sessions (id) VALUES (%s)", (parent,))
+        cur.execute("INSERT INTO sessions (id,parent_session_id) VALUES (%s,%s)", (sid, parent))
+    lease = runs.claim_run(sid, handoff.HANDOFF + target, 60)
+    assert lease is not None
+    token = lease["id"]
+    assert runs.claim_run(parent, handoff.HOLD + token, 60) is not None
+
+    if first == "cancel":
+        # Holding its first run lock: z's lease before the fix, both runs after.
+        rules = {"cancel": (lambda sql, params: "FROM runs WHERE" in sql and "FOR UPDATE" in sql, False)}
+    else:
+        # Holding the whole family's runs, counters and sessions.
+        rules = {"delete": (lambda sql, params: sql.startswith("DELETE FROM session_events WHERE")
+                            and params == (parent,), False)}
+    barriers = _Barriers(monkeypatch, rules)
+
+    def cancel():
+        return handoff.finish(sid, target, {"phase": "cancel", "token": token})
+
+    with psycopg2.connect(**private_pool) as observer, \
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="cancel") as cancelling, \
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="delete") as deleter:
+        observer.autocommit = True
+        if first == "cancel":
+            cancelled = cancelling.submit(cancel)
+            try:
+                barriers.wait("cancel", cancelled)
+                deleting = deleter.submit(sessions.delete_session, parent)
+                _wait_for_lock_wait(observer, barriers.pids["cancel"], deleting)
+            finally:
+                barriers.release_all()
+        else:
+            deleting = deleter.submit(sessions.delete_session, parent)
+            try:
+                barriers.wait("delete", deleting)
+                cancelled = cancelling.submit(cancel)
+                _wait_for_lock_wait(observer, barriers.pids["delete"], cancelled)
+            finally:
+                barriers.release_all()
+        assert deleting.result(timeout=10)
+        assert cancelled.result(timeout=10) == {"cancelled": True}
+    _assert_deleted(parent)
+    child = sessions.get_session(sid)
+    assert child is not None and child["parent_session_id"] is None
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) AS n FROM runs WHERE state='active' AND (id=%s OR runner_id=%s)",
+                    (token, handoff.HOLD + token))
+        assert cur.fetchone()["n"] == 0
+
+
+def _wait_blocked_or_done(observer, blocker_pid, pending):
+    """Return "blocked" once ``pending`` waits on ``blocker_pid``, or "done"."""
+    deadline = time.monotonic() + 5
+    with observer.cursor() as probe:
+        while True:
+            probe.execute("SELECT pg_stat_clear_snapshot()")
+            probe.execute("SELECT pid FROM pg_stat_activity WHERE %s = ANY(pg_blocking_pids(pid))",
+                          (blocker_pid,))
+            if probe.fetchone():
+                return "blocked"
+            if pending.done():
+                return "done"
+            assert time.monotonic() < deadline, "transaction neither finished nor waited"
+            time.sleep(0.01)
+
+
+def test_header_created_after_delete_scan_cannot_deadlock_cleanup(private_pool, monkeypatch):
+    """Review S6: header creation is serialized with delete's header scan (X).
+
+    Before the fix the delete scanned no header, ``install_history`` then
+    committed one, the delete took the chat's run/counter/session locks,
+    ``_discard_history`` locked the new header and waited for the session,
+    and the delete's FK cascade waited for that header: DeadlockDetected.
+    Now the install waits for the delete (a real lock wait) and then fails on
+    the session FK, so nothing is staged for a deleted chat.
+    """
+    from app.network import handoff
+
+    sid, token = "s6-header-race-" + uuid4().hex, uuid4().hex
+    with base.get_db() as conn:
+        conn.cursor().execute("INSERT INTO sessions (id) VALUES (%s)", (sid,))
+    session_events.append_events(sid, [{"type": "system.note", "payload": {}}])
+    monkeypatch.setattr(sessions, "_cleanup_working_set_ref", lambda sid: None)
+    monkeypatch.setattr(sessions, "_cleanup_pending_wakeups", lambda sid: None)
+
+    # The delete pauses twice: after its header scan (holding G and, fixed,
+    # X), then once it holds the chat's runs, counter and session row.
+    stages = [lambda sql, params: "FROM handoff_history_chunks" in sql and "FOR UPDATE" in sql,
+              lambda sql, params: sql.startswith("DELETE FROM session_events WHERE") and params == (sid,)]
+    reached = [threading.Event() for _ in stages]
+    resume = [threading.Event() for _ in stages]
+    pids = {}
+    original_cursor = base._PgDictConnection.cursor
+
+    class StagedCursor(RealDictCursor):
+        def execute(self, sql, params=None):
+            result = super().execute(sql, params)
+            if threading.current_thread().name.startswith("delete"):
+                pids.setdefault("delete", self.connection.get_backend_pid())
+                stage = next((i for i, hit in enumerate(stages) if not reached[i].is_set()), None)
+                if stage is not None and stages[stage](sql, params):
+                    reached[stage].set()
+                    assert resume[stage].wait(10), "test never released the delete"
+            return result
+
+    def instrumented(self, *args, **kwargs):
+        kwargs["cursor_factory"] = StagedCursor
+        return original_cursor(self, *args, **kwargs)
+
+    monkeypatch.setattr(base._PgDictConnection, "cursor", instrumented)
+    data = {"history": {}, "token": token, "sdk_session_id": None, "_prepare_history": True}
+    with psycopg2.connect(**private_pool) as observer, \
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="delete") as deleter, \
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="install") as installer, \
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="discard") as cleaner:
+        observer.autocommit = True
+        deleting = deleter.submit(sessions.delete_session, sid)
+        try:
+            if not reached[0].wait(5):
+                pytest.fail(f"delete never scanned headers: {deleting.result(timeout=1)!r}")
+            installing = installer.submit(handoff.install_history, sid, data, "/tmp/handoff-lab")
+            install_state = _wait_blocked_or_done(observer, pids["delete"], installing)
+            resume[0].set()
+            if not reached[1].wait(5):
+                pytest.fail(f"delete never locked the chat: {deleting.result(timeout=1)!r}")
+            discarding = cleaner.submit(handoff._discard_history, sid, token)
+            _wait_blocked_or_done(observer, pids["delete"], discarding)
+        finally:
+            for event in resume:
+                event.set()
+        assert deleting.result(timeout=10) is True
+        assert discarding.result(timeout=10) is None
+        assert install_state == "blocked", "header creation must wait for the delete's scan"
+        with pytest.raises(psycopg2.errors.ForeignKeyViolation):
+            installing.result(timeout=10)
+    _assert_deleted(sid)
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) AS n FROM handoff_history_chunks WHERE session_id=%s", (sid,))
+        assert cur.fetchone()["n"] == 0
+
+
+@pytest.mark.parametrize("path", ["envelope", "snapshot"])
+def test_header_created_after_tombstone_scan_cannot_deadlock_cleanup(private_pool, monkeypatch, path):
+    """Review S6, incoming sync: a session tombstone takes X before its header scan.
+
+    Before the fix the tombstone scanned no header, ``install_history``
+    committed one, ``_discard_history`` locked it, the tombstone's DELETE
+    locked the session and its cascade waited for the header, and the
+    cleanup then waited for the session: DeadlockDetected.
+    """
+    from app.db import network as store
+    from app.network import engine, handoff, policy
+
+    ctx, remote = _remote_network("s6-tombstone-")
+    sid, token = "s6-tombstone-" + uuid4().hex, uuid4().hex
+    with base.get_db() as conn:
+        conn.cursor().execute("INSERT INTO sessions (id,owner_device_id) VALUES (%s,%s)", (sid, remote.device_id))
+    env = _session_tombstone(ctx, remote, sid)
+
+    def incoming():
+        with base.get_db() as conn:
+            cursor = conn.cursor()
+            if path == "snapshot":
+                item = {"record_id": sid, "record": None, "clock": 2,
+                        "origin_device_id": remote.device_id, "deleted": True, "order_seq": None}
+                return engine.apply_snapshot_items(cursor, policy.collection("sessions"), [item], ctx=ctx)[0]
+            store.lock_state(cursor)
+            return engine.apply_envelope(cursor, env, ctx=ctx)
+
+    scan = (lambda sql, params: "FROM handoff_history_chunks" in sql and "FOR UPDATE" in sql, False)
+    barriers = _Barriers(monkeypatch, {"incoming": scan, "discard": scan})
+    data = {"history": {}, "token": token, "sdk_session_id": None, "_prepare_history": True}
+    with psycopg2.connect(**private_pool) as observer, \
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="incoming") as syncing, \
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="install") as installer, \
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="discard") as cleaner:
+        observer.autocommit = True
+        applying = syncing.submit(incoming)
+        try:
+            barriers.wait("incoming", applying)
+            installing = installer.submit(handoff.install_history, sid, data, "/tmp/handoff-lab")
+            install_state = _wait_blocked_or_done(observer, barriers.pids["incoming"], installing)
+            discarding = cleaner.submit(handoff._discard_history, sid, token)
+            barriers.wait("discard", discarding)
+            barriers.resume["incoming"].set()
+            _wait_blocked_or_done(observer, barriers.pids["discard"], applying)
+        finally:
+            barriers.release_all()
+        assert applying.result(timeout=10) in ("applied", 1)
+        assert discarding.result(timeout=10) is None
+        assert install_state == "blocked", "header creation must wait for the tombstone's scan"
+        with pytest.raises(psycopg2.errors.ForeignKeyViolation):
+            installing.result(timeout=10)
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM sessions WHERE id=%s", (sid,))
+        assert cur.fetchone() is None
+        cur.execute("SELECT COUNT(*) AS n FROM handoff_history_chunks WHERE session_id=%s", (sid,))
+        assert cur.fetchone()["n"] == 0
+
+
+def test_acceptance_retires_only_headers_from_its_own_scan(private_pool, monkeypatch):
+    """Review S7: supersession never scans for headers after the session lock.
+
+    Before the fix acceptance locked the existing headers, a newer import then
+    committed its header and its cleanup locked it, and acceptance (holding
+    the session) scanned for superseded headers again: it waited on cleanup's
+    header while cleanup waited on the session row, DeadlockDetected.
+    """
+    from types import SimpleNamespace
+
+    from app.network import handoff
+
+    sid, old, new = "s7-supersede-" + uuid4().hex, uuid4().hex, uuid4().hex
+    with base.get_db() as conn:
+        conn.cursor().execute("INSERT INTO sessions (id,owner_device_id) VALUES (%s,'source')", (sid,))
+    handoff.install_history(sid, {"history": {}, "token": old, "_prepare_history": True}, "/tmp/handoff-lab")
+    monkeypatch.setattr(handoff.engine, "require_context", lambda: SimpleNamespace(device_id="target"))
+    barriers = _Barriers(monkeypatch, {
+        # Acceptance: right after its header scan (before C/S).
+        "accept": (lambda sql, params: sql.startswith("SELECT token FROM handoff_history_chunks")
+                   and "FOR UPDATE" in sql, False),
+        # Cleanup of the newer import: holding its header, before the session.
+        "discard": (lambda sql, params: sql.startswith("SELECT sdk_session_id,created_at,rows FROM "
+                                                       "handoff_history_chunks"), False),
+    })
+    with psycopg2.connect(**private_pool) as observer, \
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="accept") as accepting, \
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="discard") as cleaning:
+        observer.autocommit = True
+        accepted = accepting.submit(handoff._accept_owner, sid, "target", None, old)
+        try:
+            barriers.wait("accept", accepted)
+            handoff.install_history(sid, {"history": {}, "token": new, "_prepare_history": True},
+                                    "/tmp/handoff-lab")
+            discarding = cleaning.submit(handoff._discard_history, sid, new)
+            barriers.wait("discard", discarding)
+            barriers.resume["accept"].set()
+            state = _wait_blocked_or_done(observer, barriers.pids["discard"], accepted)
+        finally:
+            barriers.release_all()
+        assert accepted.result(timeout=10) == []
+        assert discarding.result(timeout=10) is None
+        assert state == "done", "acceptance must not wait on a header created after its scan"
+    session = sessions.get_session(sid)
+    assert session["owner_device_id"] == "target"
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) AS n FROM handoff_history_chunks WHERE session_id=%s", (sid,))
+        assert cur.fetchone()["n"] == 0
+
+
+def test_project_delete_takes_the_ordered_session_delete(private_pool, monkeypatch):
+    """Review S8: deleting a project deletes its chats through ``delete_session``.
+
+    Before the fix ``delete_project`` ran a raw ``DELETE FROM sessions``: it
+    locked the chat row, its FK cascade then waited for a hand-off header
+    that staging cleanup held, and cleanup next waited for the chat row:
+    DeadlockDetected. Now the delete waits at the header scan instead.
+    """
+    from app.db import projects
+    from app.network import handoff
+
+    project, sid, token = "s8-project-" + uuid4().hex, "s8-chat-" + uuid4().hex, uuid4().hex
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("INSERT INTO projects (id,name,path) VALUES (%s,'Lock order','/tmp/s8')", (project,))
+        cur.execute("INSERT INTO sessions (id,project_id) VALUES (%s,%s)", (sid, project))
+        _stage_handoff_header(cur, sid, token)
+    session_events.append_events(sid, [{"type": "system.note", "payload": {}}])
+    barriers = _Barriers(monkeypatch, {"discard": (
+        lambda sql, params: "FROM handoff_history_chunks" in sql and "FOR UPDATE" in sql, False)})
+    with psycopg2.connect(**private_pool) as observer, \
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="discard") as cleaning, \
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="project") as deleter:
+        observer.autocommit = True
+        discarding = cleaning.submit(handoff._discard_history, sid, token)
+        try:
+            barriers.wait("discard", discarding)
+            deleting = deleter.submit(projects.delete_project, project)
+            _wait_for_lock_wait(observer, barriers.pids["discard"], deleting)
+        finally:
+            barriers.release_all()
+        assert discarding.result(timeout=10) is None
+        assert deleting.result(timeout=10) is True
+    _assert_deleted(sid)
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM projects WHERE id=%s", (project,))
+        assert cur.fetchone() is None
+        cur.execute("SELECT COUNT(*) AS n FROM handoff_history_chunks WHERE session_id=%s", (sid,))
+        assert cur.fetchone()["n"] == 0
+
+
+def test_project_delete_keeps_a_chat_moved_to_another_project(private_pool, monkeypatch):
+    """Review S10: project delete re-checks membership under the chat's locks.
+
+    ``delete_project`` lists its chats, then deletes each in its own ordered
+    transaction. A chat moved to another project in between (a cross-device
+    resume or worktree reopen) is no longer this project's: before the fix
+    the unconditional delete destroyed it and its transcript. A barrier holds
+    the delete right after its project read while the move commits.
+    """
+    from app.db import projects
+
+    old, new, sid = "s10-old-" + uuid4().hex, "s10-new-" + uuid4().hex, "s10-chat-" + uuid4().hex
+    stayed = "s10-stay-" + uuid4().hex
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("INSERT INTO projects (id,name,path) VALUES (%s,'Old','/tmp/s10-old'),"
+                    "(%s,'New','/tmp/s10-new')", (old, new))
+        cur.execute("INSERT INTO sessions (id,project_id) VALUES (%s,%s),(%s,%s)", (sid, old, stayed, old))
+    session_events.append_events(sid, [{"type": "system.note", "payload": {}}])
+    # After the project's chat list is read, before any chat is deleted.
+    barriers = _Barriers(monkeypatch, {"project": (
+        lambda sql, params: sql.startswith("SELECT id FROM sessions WHERE project_id"), False)})
+    cleanups = []
+    monkeypatch.setattr(sessions, "_cleanup_working_set_ref", lambda s, row=None: cleanups.append(("ref", s)))
+    monkeypatch.setattr(sessions, "_cleanup_pending_wakeups", lambda s: cleanups.append(("wake", s)))
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="project") as deleter:
+        deleting = deleter.submit(projects.delete_project, old)
+        try:
+            barriers.wait("project", deleting)
+            assert sessions.set_session_project(sid, new)["project_id"] == new
+        finally:
+            barriers.release_all()
+        assert deleting.result(timeout=10) is True
+    moved = sessions.get_session(sid)
+    assert moved is not None and moved["project_id"] == new
+    assert session_events.get_events(sid), "the moved chat's transcript must survive"
+    assert ("ref", sid) not in cleanups and ("wake", sid) not in cleanups
+    _assert_deleted(stayed)
+    assert ("ref", stayed) in cleanups and ("wake", stayed) in cleanups
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM projects WHERE id IN (%s,%s) ORDER BY id", (old, new))
+        assert [row["id"] for row in cur.fetchall()] == [new]

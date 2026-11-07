@@ -15,6 +15,16 @@ const doc = (text: string) => JSON.stringify({ type: 'doc', content: [{ type: 'p
 const words = (draft: string | null) => JSON.stringify(JSON.parse(draft ?? '{}'));
 
 describe('addRestoredWordsToDraft', () => {
+    it('keeps explicit restored-chip identity in the reload note and the saved draft', () => {
+        const path = '/project/uploads/photo.png';
+        const refs = [{ owner_id: 'owner', event_id: 'event', index: 0, path }];
+        noteRestoreStarted('identity', 'row', 'read @' + path, [path], 'baseline', refs);
+        const note = takeUnfinishedRestores('identity', new Set(), 'next-page')[0];
+        expect(note.uploadReferences).toEqual(refs);
+        const draft = addRestoredWordsToDraft('identity', note.prompt, note.uploadPaths, '', note.uploadReferences);
+        expect(JSON.parse(draft).content[0].content[1].attrs.uploadReference).toEqual(refs[0]);
+        expect(readDraft('identity')).toBe(draft);
+    });
 	beforeEach(() => { cached.clear(); sessionStorage.clear(); });
 
 	it('fills an empty draft so reopening the chat finds the words', () => {
@@ -64,6 +74,14 @@ describe('restores a reload cut off', () => {
 		noteRestoreStarted('s1', 'row-1', 'kept words', ['/uploads/proof.png']);
 		expect(takeUnfinishedRestores('s1', new Set(), LATER_PAGE)).toMatchObject([{ rowId: 'row-1', prompt: 'kept words', uploadPaths: ['/uploads/proof.png'] }]);
 		expect(takeUnfinishedRestores('s1', new Set(), LATER_PAGE)).toEqual([]);
+	});
+
+	it('round-trips the confirmation baseline while not-sent restores keep null', () => {
+		noteRestoreStarted('s1', 'sent', 'old words', [], 'words at confirm');
+		noteRestoreStarted('s1', 'unsent', 'not sent');
+		const notes = takeUnfinishedRestores('s1', new Set(), LATER_PAGE);
+		expect(notes.find(n => n.rowId === 'sent')?.composerAtConfirm).toBe('words at confirm');
+		expect(notes.find(n => n.rowId === 'unsent')?.composerAtConfirm).toBeNull();
 	});
 
 	it('keeps the note while the row is still on screen, in case the request lands late', () => {
