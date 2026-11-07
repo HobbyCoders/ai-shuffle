@@ -740,9 +740,11 @@ async def test_dispatched_worker_native_continuation_lifecycle(
     monkeypatch.setattr(session_runtime, "get_live_runtime", _real_get_live_runtime)
     monkeypatch.setattr(session_runtime, "start_idle_reader", lambda sid: None)
     monkeypatch.setattr("app.core.turn_finalize.persist_turn_end_state", AsyncMock())
-    from app.db import database, sessions
-    sessions.create_session(session_id="native-child", profile_id=None)
-    sessions.create_session(session_id="root", profile_id=None)
+    from app.db import database
+    from tests.shared_fixtures import seed_session
+    # Worker dispatch already created its real session; retain that metadata.
+    seed_session("native-child")
+    seed_session("root")
     get_session = database.get_session
     monkeypatch.setattr(database, "get_session", lambda sid: {
         **get_session(sid), "instance_id": None,
