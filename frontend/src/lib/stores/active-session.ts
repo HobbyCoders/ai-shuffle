@@ -1026,11 +1026,11 @@ export const activeSession = {
 		void switcher.switchSession(sessionId, projectId, worktreeInfo, title, projectV2Id);
 	},
 
-	newChat: () => {
+	newChat: (options?: { initialLanding?: boolean }) => {
 		clearUnavailableChat();
 		setSkipRestore(true);
 		bumpInitGeneration();
-		const { restoredDraft, keptPlace } = switcher.newChat();
+		const { restoredDraft, keptPlace } = switcher.newChat(options);
 		// The run binding follows the account defaults. A compose left unsent
 		// keeps its project, branch and worktree as picked; otherwise the
 		// project is the owner's last choice (rememberedComposeMode).

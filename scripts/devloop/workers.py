@@ -247,7 +247,7 @@ def up_workers(args: argparse.Namespace) -> int:
                     db_port = free_port(exclude=used)
                     used.add(db_port)
                     instance.database = runtime.Database(SimpleNamespace(effective_data_dir=Path(env["DATA_DIR"])),
-                                                         port=db_port)
+                                                         port=db_port, disposable=True)
                     instance.data["urls"]["peer"] = env["CLUSTER_ADVERTISE_URL"]
                     control_host = instance.browser if str(args.fake_voice_host) == "0.0.0.0" else "127.0.0.1"
                     instance.data["fake_voice"] = {

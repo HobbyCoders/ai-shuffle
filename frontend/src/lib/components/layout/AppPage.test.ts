@@ -112,6 +112,19 @@ describe('AppPage initial landing', () => {
   expect(mocks.newChat).toHaveBeenCalledOnce(); expect(mocks.openChat).toHaveBeenCalledWith(null);
   expect(mocks.openFeaturePage).not.toHaveBeenCalled(); expect(get(activeView)).toEqual(emptyView);
  });
+ it('marks only the same-surface bootstrap landing, not explicit New conversation', async () => {
+  let release!: () => void;
+  mocks.load.mockReturnValue(new Promise<void>(resolve => { release = resolve; }));
+  views.set(null);
+  render(AppPage, { shell });
+  await waitFor(() => expect(mocks.load).toHaveBeenCalled());
+  release(); await waitFor(() => expect(mocks.initGlobalStt).toHaveBeenCalledOnce());
+  expect(mocks.newChat).toHaveBeenCalledExactlyOnceWith({ initialLanding: true });
+
+  await fireEvent.click(screen.getByRole('button', { name: 'New conversation' }));
+  expect(mocks.newChat).toHaveBeenLastCalledWith();
+  expect(mocks.newChat).toHaveBeenCalledTimes(2);
+ });
  // #975: opening the phone drawer is not a New conversation navigation.
  it('keeps a drawer opened during bootstrap, but still closes it for explicit New conversation', async () => {
   let release!: () => void;

@@ -382,9 +382,38 @@ export function composerSnapshot(page) {
 
 /** Type into the composer and press its Send button. */
 export async function typeAndSend(page, text) {
+	// Match contenteditable.fill(): CRLF and bare CR each mean one newline.
+	// Playwright would otherwise map a typed CR to Enter and submit early.
+	text = text.replace(/\r\n?/g, '\n');
 	const box = composer(page);
 	await box.click();
-	await box.fill(text);
+	// fill() uses insertText without a keydown. After a slow focus round trip,
+	// Chromium then counts the draft's immediate growth as non-input layout
+	// shift (#1164). Exercise the keyboard path instead of relying on the
+	// earlier pointer event's 500ms input window. Insert line breaks as literal
+	// text: even Shift+Enter can accept an open command or mention completion.
+	await box.press('ControlOrMeta+A');
+	await box.press('Backspace');
+	const typeText = async (value) => {
+		const lines = value.split('\n');
+		for (let i = 0; i < lines.length; i++) {
+			if (i) await page.keyboard.insertText('\n');
+			if (lines[i]) await box.pressSequentially(lines[i]);
+		}
+	};
+	if (text.length > 24) {
+		// Even ordinary queued prompts must not spend one CDP round trip per
+		// character: CPU4 entry can otherwise outlive a scenario's reply window.
+		// Type a short prefix BEFORE bulk growth, fill all but the final code
+		// point, then finish typing. Preserve Unicode and literal newlines at
+		// both boundaries; real input still precedes and follows the bulk fill.
+		const chars = Array.from(text);
+		await typeText(chars.slice(0, 12).join(''));
+		await box.fill(chars.slice(0, -1).join(''));
+		await typeText(chars.slice(-1).join(''));
+	} else {
+		await typeText(text);
+	}
 	traceNote(page, `send helper: before click ${JSON.stringify(await composerSnapshot(page).catch((e) => String(e)))}`);
 	await sendButton(page).click();
 	traceNote(page, `send helper: after click ${JSON.stringify(await composerSnapshot(page).catch((e) => String(e)))}`);

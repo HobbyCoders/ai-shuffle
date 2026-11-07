@@ -148,7 +148,7 @@ interface SessionSwitcher {
 	refreshRunningTasks: (sessionId: string) => Promise<void>;
 	/** `restoredDraft`: a typed draft came back. `keptPlace`: so did the
 	 *  project and checkout of a compose left unsent. */
-	newChat: () => { restoredDraft: boolean; keptPlace: boolean };
+	newChat: (options?: { initialLanding?: boolean }) => { restoredDraft: boolean; keptPlace: boolean };
 	persistSession: () => void;
 	loadPersistedSession: () => Promise<PersistedSession | null>;
 	getPersistedProfile: () => string;
@@ -1093,10 +1093,12 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		feedController.reconcileRunningTasks(sessionId, snap.activeTasks ?? []);
 	}
 
-	function newChat() {
-		openHeaderDropdown.set(null);
-		++_switchGeneration;
+	function newChat(options?: { initialLanding?: boolean }) {
 		const state = getState();
+		// Bootstrap may reconcile the new-chat surface the user is already on.
+		// Only that landing preserves a popover; actual navigation still closes it.
+		if (!options?.initialLanding || state.sessionId !== null) openHeaderDropdown.set(null);
+		++_switchGeneration;
 		const leavingSessionId = state.sessionId;
 		// newChat: leaving sessionId=${leavingSessionId}
 

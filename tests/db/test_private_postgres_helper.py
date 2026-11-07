@@ -27,6 +27,8 @@ def test_private_cluster_shutdown_checkpoint_syncs_nothing(tmp_path):
             cur = conn.cursor()
             cur.execute("SHOW fsync")
             assert cur.fetchone()["fsync"] == "off"
+            cur.execute("SHOW dynamic_shared_memory_type")
+            assert cur.fetchone()["dynamic_shared_memory_type"] == "mmap"
             # Dirty many relation files, as creating the app schema does.
             for i in range(200):
                 cur.execute(f"CREATE TABLE fsync_probe_{i} (id int PRIMARY KEY, body text)")

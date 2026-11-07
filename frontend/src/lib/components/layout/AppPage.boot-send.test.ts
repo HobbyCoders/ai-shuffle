@@ -1,7 +1,7 @@
 /** #821: exercise the actual sender, init, adoption and tab persistence through AppPage. */
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { cleanup, render, waitFor } from '@testing-library/svelte';
-import { createRawSnippet } from 'svelte';
+import { createRawSnippet, tick } from 'svelte';
 import { get, type Writable, writable } from 'svelte/store';
 import type { ActiveSessionState } from '$lib/stores/active-session';
 import type { AppShellProps } from './app-shell';
@@ -41,7 +41,7 @@ vi.mock('$lib/api/client', () => ({ api: { get: mocks.get, post: vi.fn(), put: v
 vi.mock('$lib/services/voiceCall', () => ({ isCallActiveFor: () => false, sendVoiceText: vi.fn() }));
 vi.mock('$lib/services/voiceExecutionContext', () => ({ persistVoiceContext: vi.fn(), voiceContextFor: vi.fn() }));
 vi.mock('$lib/stores/session/v2/feed-controller', () => ({
-	feedController: { start: vi.fn(), stop: vi.fn(), isFeeding: () => false, isReducerStreaming: () => false, clearOptimisticSend: vi.fn(), cachedPatch: () => null, reconcileRunningTasks: () => false, hasAppliedUsage: () => false },
+	feedController: { start: vi.fn(), stop: vi.fn(), invalidate: vi.fn(), isFeeding: () => false, isReducerStreaming: () => false, retractOptimisticSend: vi.fn(), clearOptimisticSend: vi.fn(), cachedPatch: () => null, reconcileRunningTasks: () => false, hasAppliedUsage: () => false },
 	OPTIMISTIC_STREAMING_ON: { isStreaming: true, optimisticStreaming: true }
 }));
 vi.mock('$lib/components/voice/ActiveVoiceCallBar.svelte', () => ({ default: () => ({}) }));
@@ -62,6 +62,9 @@ import { createMessageHandlers } from '$lib/stores/session/ws-message-handlers';
 import { feedController } from '$lib/stores/session/v2/feed-controller';
 import { TAB_ACTIVE_SESSION_KEY } from '$lib/stores/device-id';
 
+// Use the real synchronous layout writer as well as the real tab-session writer.
+const { layout: persistedLayout } = await vi.importActual<typeof import('$lib/stores/layout.svelte')>('$lib/stores/layout.svelte');
+const persistedView = () => JSON.parse(localStorage.getItem('ai-shuffle-layout')!).activeView;
 const state = activeSession as unknown as Writable<ActiveSessionState>;
 const views = activeView as unknown as Writable<{ type: 'session'; sessionId: string | null } | null>;
 const shell = createRawSnippet<[AppShellProps]>(() => ({ render: () => '<div>shell</div>' }));
@@ -90,7 +93,7 @@ function setup() {
 		persistTimer: { get: () => null, clear: vi.fn() } });
 	mocks.init.mockImplementation(init.init);
 	mocks.destroy.mockImplementation(() => { init.destroy(); switcher.destroy(); });
-	mocks.newChat.mockImplementation(() => { switcher.newChat(); });
+	mocks.newChat.mockImplementation(() => { bumpInitGeneration(); switcher.newChat(); });
 	const createWorktree = vi.fn(async (): Promise<string | null> => null);
 	const autoCreateWorktree = vi.fn<ReturnType<typeof createMessageSender>['autoCreateWorktree']>(async () => false);
 	const resend = vi.fn<ReturnType<typeof createMessageSender>['sendMessage']>();
@@ -104,17 +107,219 @@ function setup() {
 		appLoadSessions: vi.fn(), appLoadApiUserSessions: vi.fn(), mergeSessionPatch: () => false,
 		onNewChat: mocks.newChat, onPersistSession: switcher.persistSession, onNotifySessionComplete: vi.fn(),
 		onNotifyWaitingForResponse: vi.fn(), wsIsConnected: () => true, clearStopTimeout: vi.fn() });
-	return { sender, init, preferences, send, wsConn, switcher, createWorktree, autoCreateWorktree, resend, adopt: () => handlers.handleMessage({ type: 'session_created', session_id: 'created', request_id: internal.pendingRequestId }) };
+	return { sender, init, preferences, send, wsConn, switcher, createWorktree, autoCreateWorktree, resend, handlers, requestId: () => internal.pendingRequestId, adopt: (type = 'session_created') => handlers.handleMessage({ type, session_id: 'created', request_id: internal.pendingRequestId }) };
 }
 
 beforeEach(() => {
-	vi.clearAllMocks(); sessionStorage.clear(); localStorage.clear(); window.history.replaceState({}, '', '/');
+	vi.clearAllMocks(); mocks.load.mockImplementation(async () => {}); sessionStorage.clear(); localStorage.clear(); window.history.replaceState({}, '', '/');
 	state.set(base()); views.set({ type: 'session', sessionId: null });
-	mocks.openChat.mockImplementation(sessionId => views.set({ type: 'session', sessionId }));
+	persistedLayout.openChat(null);
+	mocks.openChat.mockImplementation(sessionId => {
+		persistedLayout.openChat(sessionId);
+		views.set({ type: 'session', sessionId });
+	});
 	mocks.ready.mockReturnValue(vi.fn()); mocks.reconcileSessionMode.mockReturnValue('chat');
 	vi.stubGlobal('fetch', vi.fn(async () => new Response('{}')));
 });
 afterEach(() => { cleanup(); mocks.destroy(); vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
+
+// #1063: the turn may finish while preferences or the independent boot loads
+// are still held. A reload must already have BOTH local persistence records.
+for (const hold of ['preferences', 'data'] as const) {
+	it.each(['session_created', 'start'])(`persists a settled boot-send before ${hold} reconcile (%s)`, async frame => {
+		mocks.get.mockResolvedValue({ value: { sessionId: 'stale' } });
+		const data = deferred<void>();
+		mocks.load.mockImplementation(() => data.promise);
+		const ctx = setup();
+		render(AppPage, { shell });
+		await waitFor(() => expect(mocks.init).toHaveBeenCalledOnce());
+		expect(await ctx.sender.sendMessage('settled before boot')).toBe(true);
+		ctx.adopt(frame);
+		state.update(s => ({ ...s, isStreaming: false }));
+		if (hold === 'data') {
+			ctx.preferences.resolve(null);
+			await waitFor(() => expect(ctx.wsConn.activate).toHaveBeenCalledOnce());
+		}
+		try {
+			await waitFor(() => expect(persistedView()).toEqual({ type: 'session', sessionId: 'created' }));
+			expect(JSON.parse(sessionStorage.getItem(TAB_ACTIVE_SESSION_KEY)!)).toMatchObject({ sessionId: 'created' });
+			expect(mocks.ready).not.toHaveBeenCalled(); // no reconciliation yet
+		} finally {
+			ctx.preferences.resolve(null);
+			data.resolve();
+			await waitFor(() => expect(mocks.ready).toHaveBeenCalledOnce());
+		}
+	});
+}
+
+// A boot can outlive its first init generation: both the owner's New Chat
+// and the bootstrap stale-layout reset advance it while data is still held.
+for (const reset of ['explicit', 'layoutNewChatWon'] as const) {
+	it.each(['session_created', 'start'])(`persists a send after ${reset} advances boot's generation (%s)`, async frame => {
+		mocks.get.mockResolvedValue(reset === 'layoutNewChatWon' ? { value: { sessionId: 'stale' } } : null);
+		const data = deferred<void>();
+		mocks.load.mockImplementation(() => data.promise);
+		const ctx = setup();
+		render(AppPage, { shell });
+		await waitFor(() => expect(mocks.init).toHaveBeenCalledOnce());
+		const originalGeneration = getInitGeneration();
+		ctx.preferences.resolve(null);
+		await waitFor(() => expect(ctx.wsConn.activate).toHaveBeenCalledOnce());
+		if (reset === 'explicit') {
+			mocks.newChat();
+			mocks.openChat(null);
+		} else {
+			await waitFor(() => expect(mocks.newChat).toHaveBeenCalledOnce());
+		}
+		const sendGeneration = getInitGeneration();
+		expect(sendGeneration).toBeGreaterThan(originalGeneration);
+		expect(await ctx.sender.sendMessage('sent after new chat reset')).toBe(true);
+		ctx.adopt(frame);
+		state.update(s => ({ ...s, isStreaming: false }));
+		try {
+			await waitFor(() => expect(persistedView()).toEqual({ type: 'session', sessionId: 'created' }));
+			expect(JSON.parse(sessionStorage.getItem(TAB_ACTIVE_SESSION_KEY)!)).toMatchObject({ sessionId: 'created' });
+			expect(hasBootSendClaim(sendGeneration)).toBe(true);
+			expect(mocks.ready).not.toHaveBeenCalled();
+		} finally {
+			data.resolve();
+			await waitFor(() => expect(mocks.ready).toHaveBeenCalledOnce());
+		}
+		// Reconciliation must retire current claims using its original boot id.
+		expect(hasBootSendClaim(sendGeneration)).toBe(false);
+	});
+}
+
+it.each(['session_created', 'start'])('does not adopt a pre-navigation %s under a later send claim', async type => {
+	const data = deferred<void>();
+	mocks.load.mockImplementation(() => data.promise);
+	const ctx = setup();
+	render(AppPage, { shell });
+	await waitFor(() => expect(mocks.init).toHaveBeenCalledOnce());
+	ctx.preferences.resolve(null);
+	await waitFor(() => expect(ctx.wsConn.activate).toHaveBeenCalledOnce());
+	expect(await ctx.sender.sendMessage('old pending send')).toBe(true);
+	const oldRequest = ctx.requestId();
+	mocks.newChat();
+	mocks.openChat(null);
+	ctx.handlers.handleMessage({ type, session_id: 'old-created', request_id: oldRequest });
+	await tick();
+	expect(get(state).sessionId).toBeNull();
+	expect(hasBootSendClaim(getInitGeneration())).toBe(false);
+	expect(await ctx.sender.sendMessage('current pending send')).toBe(true);
+	expect(ctx.requestId()).not.toBe(oldRequest);
+	ctx.handlers.handleMessage({ type, session_id: 'old-created', request_id: oldRequest });
+	await tick();
+	expect(get(state).sessionId).toBeNull();
+	expect(persistedView()).toEqual({ type: 'session', sessionId: null });
+	ctx.adopt(type);
+	try {
+		await waitFor(() => expect(persistedView()).toEqual({ type: 'session', sessionId: 'created' }));
+		expect(mocks.openChat).not.toHaveBeenCalledWith('old-created');
+	} finally {
+		data.resolve();
+		await waitFor(() => expect(mocks.ready).toHaveBeenCalledOnce());
+	}
+});
+
+it.each(['session_created', 'start'])('keeps existing-chat navigation over a post-reset %s', async type => {
+	const data = deferred<void>();
+	mocks.load.mockImplementation(() => data.promise);
+	const ctx = setup();
+	render(AppPage, { shell });
+	await waitFor(() => expect(mocks.init).toHaveBeenCalledOnce());
+	ctx.preferences.resolve(null);
+	await waitFor(() => expect(ctx.wsConn.activate).toHaveBeenCalledOnce());
+	mocks.newChat();
+	mocks.openChat(null);
+	expect(await ctx.sender.sendMessage('new generation pending send')).toBe(true);
+	const requestId = ctx.requestId();
+	bumpInitGeneration();
+	void ctx.switcher.switchSession('selected-existing');
+	mocks.openChat('selected-existing');
+	ctx.handlers.handleMessage({ type, session_id: 'late-created', request_id: requestId });
+	await tick();
+	expect(get(state).sessionId).toBe('selected-existing');
+	expect(persistedView()).toEqual({ type: 'session', sessionId: 'selected-existing' });
+	expect(mocks.openChat).not.toHaveBeenCalledWith('late-created');
+	data.resolve();
+	await waitFor(() => expect(mocks.ready).toHaveBeenCalledOnce());
+	expect(persistedView()).toEqual({ type: 'session', sessionId: 'selected-existing' });
+});
+
+it.each(['new-chat', 'other-chat', 'settings'])('keeps explicit %s intent after a boot-send', async intent => {
+	const ctx = setup();
+	render(AppPage, { shell });
+	await waitFor(() => expect(mocks.init).toHaveBeenCalledOnce());
+	expect(await ctx.sender.sendMessage('send then navigate')).toBe(true);
+	ctx.adopt();
+	// Navigate in the same turn, before AppPage's effect can follow the creation.
+	if (intent === 'new-chat') {
+		mocks.newChat();
+		mocks.openChat(null);
+	} else if (intent === 'other-chat') {
+		bumpInitGeneration();
+		void ctx.switcher.switchSession('other');
+		mocks.openChat('other');
+	} else {
+		persistedLayout.openFeaturePage('settings');
+		views.set({ type: 'settings' } as never);
+	}
+	const intended = persistedView();
+	await tick();
+	expect(mocks.openChat).not.toHaveBeenCalledWith('created');
+	expect(persistedView()).toEqual(intended);
+	ctx.preferences.resolve(null);
+	await waitFor(() => expect(mocks.ready).toHaveBeenCalledOnce());
+	expect(persistedView()).toEqual(intended);
+});
+
+it('does not follow the stale restored chat before reconciliation', async () => {
+	mocks.get.mockResolvedValue({ value: { sessionId: 'stale' } });
+	const data = deferred<void>();
+	mocks.load.mockImplementation(() => data.promise);
+	const ctx = setup();
+	render(AppPage, { shell });
+	await waitFor(() => expect(mocks.init).toHaveBeenCalledOnce());
+	ctx.preferences.resolve(null);
+	await waitFor(() => expect(ctx.wsConn.activate).toHaveBeenCalledOnce());
+	await tick();
+	expect(mocks.openChat).not.toHaveBeenCalledWith('stale');
+	expect(persistedView()).toEqual({ type: 'session', sessionId: null });
+	data.resolve();
+	await waitFor(() => expect(mocks.ready).toHaveBeenCalledOnce());
+});
+
+it.each(['session_created', 'start'])('does not follow a foreign %s even with a pending boot-send claim', async type => {
+	const ctx = setup();
+	render(AppPage, { shell });
+	await waitFor(() => expect(mocks.init).toHaveBeenCalledOnce());
+	expect(await ctx.sender.sendMessage('owned send')).toBe(true);
+	ctx.handlers.handleMessage({ type, session_id: 'foreign', request_id: 'another-tab' });
+	await tick();
+	expect(get(state).sessionId).toBeNull();
+	expect(mocks.openChat).not.toHaveBeenCalledWith('foreign');
+	expect(persistedView()).toEqual({ type: 'session', sessionId: null });
+	ctx.preferences.resolve(null);
+	await waitFor(() => expect(mocks.ready).toHaveBeenCalledOnce());
+});
+
+it.each(['session_not_found', 'user_session_deleted'])('does not persist creation cleared by a rejected load/deletion (%s)', async type => {
+	const ctx = setup();
+	render(AppPage, { shell });
+	await waitFor(() => expect(mocks.init).toHaveBeenCalledOnce());
+	expect(await ctx.sender.sendMessage('unavailable chat')).toBe(true);
+	ctx.adopt();
+	// The live/history rejection arrives before the follow effect runs.
+	ctx.handlers.handleMessage({ type, session_id: 'created' });
+	await tick();
+	expect(get(state).sessionId).toBeNull();
+	expect(mocks.openChat).not.toHaveBeenCalledWith('created');
+	expect(persistedView()).toEqual({ type: 'session', sessionId: null });
+	ctx.preferences.resolve(null);
+	await waitFor(() => expect(mocks.ready).toHaveBeenCalledOnce());
+	expect(persistedView()).toEqual({ type: 'session', sessionId: null });
+});
 
 for (const view of ['absent', 'new-chat'] as const) {
 	for (const snapshot of ['absent', 'null', 'old'] as const) {

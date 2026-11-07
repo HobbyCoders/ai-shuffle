@@ -75,10 +75,12 @@ def _production_feature_references(root: Path) -> list[str]:
                 weights = json.loads(text)
                 journeys = {p.name for p in (root / "frontend/tests/journeys").glob("*.journey.mjs")
                             if p.is_file()}
-                # Only measured filenames are test inventory, not production references.
-                # Keep every value (even for exempt keys) and all metadata in the scan.
-                weights["seconds"] = [[None if name in journeys else name, value]
-                                      for name, value in weights["seconds"].items()]
+                # Only existing journey filename keys in these named inventory maps
+                # are not production references. Keep every value and all metadata.
+                for inventory in ("seconds", "case_counts"):
+                    if inventory in weights:
+                        weights[inventory] = [[None if name in journeys else name, value]
+                                              for name, value in weights[inventory].items()]
                 text = json.dumps(weights)
             if relative in INERT_TABLE_FILES:
                 text = text.replace("session_task_chips", "").replace("idx_session_task_chips", "")
@@ -91,22 +93,27 @@ def test_no_production_source_names_the_feature():
     assert _production_feature_references(ROOT) == []
 
 
+@pytest.mark.parametrize("inventory", ["seconds", "case_counts"])
 @pytest.mark.parametrize("reference", [None, "metadata", "unknown-key", "value", "other-map", "production"])
-def test_journey_weight_exemption_only_covers_existing_journey_keys(tmp_path, reference):
+def test_journey_weight_exemption_only_covers_existing_journey_keys(tmp_path, reference, inventory):
     journey = "retired-task-chips.journey.mjs"
     journey_path = tmp_path / "frontend/tests/journeys" / journey
     journey_path.parent.mkdir(parents=True)
     journey_path.write_text("", encoding="utf-8")
     weights_path = tmp_path / "scripts/devloop/journey_weights.json"
     weights_path.parent.mkdir(parents=True)
-    weights = {"_comment": "Hosted runtime measurements", "seconds": {journey: 10}}
+    weights = {
+        "_comment": "Hosted runtime measurements",
+        "seconds": {journey: 10},
+        "case_counts": {journey: 2},
+    }
     expected = "scripts/devloop/journey_weights.json"
     if reference == "metadata":
         weights["_comment"] = TOOL
     elif reference == "unknown-key":
-        weights["seconds"]["missing-task-chips.journey.mjs"] = 20
+        weights[inventory]["missing-task-chips.journey.mjs"] = 20
     elif reference == "value":
-        weights["seconds"][journey] = TOOL
+        weights[inventory][journey] = TOOL
     elif reference == "other-map":
         weights["other"] = {journey: 10}
     elif reference == "production":

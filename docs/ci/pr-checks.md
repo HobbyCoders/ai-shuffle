@@ -961,10 +961,18 @@ the shard's `frontend/tests/journeys/*.journey.mjs` files in Chromium, then
 `down`. The plan step splits the journey files across the ten shards by
 measured hosted runtime, longest first, each file exactly once
 (`python -m scripts.devloop.ci plan --shards 10`). The checked-in medians are
-in `scripts/devloop/journey_weights.json`; an unmeasured journey uses its
-`--list` case count times the measured median seconds per case. Adding short
-cases to a measured journey therefore cannot reshuffle all the slow journeys
-based on case count alone. Planned loads in estimated minutes appear in the
+in `scripts/devloop/journey_weights.json`, when the current unfiltered `--list`
+case count matches the recorded inventory. New files and changed case counts
+use the current count times the measured median seconds per case, with explicit
+conservative floors. For stale measurements the estimate is also at least the
+old runtime, scaled by the old per-case cost when the case count grows. Thus a
+grown slow file cannot silently keep its old short runtime or become cheaper
+because of the global median. Only that file switches to the fallback; matching
+inventories keep their hosted medians. The fallback is reported on stderr, and
+historical timing/count rows stay unchanged: estimates are not measurements.
+Feature PRs may add/remove cases without hand-measuring or waiting for a green
+post-merge run; refresh matched green evidence afterward. The normal headroom
+bound still applies to the resulting estimates. Planned loads in estimated minutes appear in the
 job log and step summary (excluding instance setup/teardown); stdout remains
 the JSON partition consumed by the workflow. A shard with no file stops after
 the plan, and a plan with no journey file at all fails.
@@ -996,8 +1004,8 @@ the latest attempt's jobs, so it cannot prove earlier attempts had no retries.
 A retry marker anywhere in a journey log, including after unterminated output,
 also refuses the run. Each run must measure every `*.journey.mjs` in the current
 checkout exactly once, with no extra journeys; each measured case count must
-also match this checkout's unfiltered `--list` count. Unreadable case lists
-refuse the refresh rather than using the planner's fallback. Missing coverage
+also match this checkout's unfiltered `--list` count. Both planning and refresh
+refuse unreadable case lists rather than fabricating a one-case inventory. Missing coverage
 cannot be filled by another run or by an already-incomplete weights file. Use
 complete runs whose journey inventory and case counts match this checkout. Failed, incomplete,
 duplicate, partial or retried measurements are refused with a clear message

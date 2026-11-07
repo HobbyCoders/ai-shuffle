@@ -33,7 +33,7 @@ with tempfile.TemporaryDirectory(prefix='shuffle-idle-') as temp:
     directory = Path(temp); data = directory / 'data'; home = directory / 'home'; home.mkdir()
     workspace = directory / 'workspace'; workspace.mkdir()
     empty = directory / 'empty.env'; empty.write_text('')
-    db = runtime.Database(SimpleNamespace(effective_data_dir=data), port=helpers._free_port())
+    db = runtime.Database(SimpleNamespace(effective_data_dir=data), port=helpers._free_port(), disposable=True)
     app = sampler = None; proxy = helpers.OutboundRecorder()
     try:
         db.open(); db.publish_descriptor()

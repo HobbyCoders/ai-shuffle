@@ -971,6 +971,13 @@
 		disengageAutoScroll();
 		applyMountedRange(transcriptWindow.loadOlder());
 	}
+	function loadOlderItemsAutomatically() {
+		disengageAutoScroll();
+		// Near-edge scrolls (including unmarked browser/layout scrolls) must not
+		// undo a reprice by evicting the dominant reply still in the viewport.
+		// The explicit earlier button above remains free to navigate away.
+		applyMountedRange(transcriptWindow.loadOlder({ preserveReading: true }));
+	}
 	function loadNewerItems() {
 		applyMountedRange(transcriptWindow.extendNewer());
 	}
@@ -1701,7 +1708,7 @@
 			if (!windowShifting && Date.now() >= manualNavigationReleaseUntil) {
 				const previousTop = lastScrollMetrics?.scrollTop ?? currentScrollTop;
 				if (currentScrollTop < previousTop && mountedStart > 0 && olderEdgeDistance(currentScrollTop) < 900) {
-					loadOlderItems();
+					loadOlderItemsAutomatically();
 				} else if (currentScrollTop > previousTop && mountedEnd < displayItems.length &&
 					containerRef.scrollHeight - currentScrollTop - containerRef.clientHeight < 900) {
 					loadNewerItems();
@@ -1802,7 +1809,7 @@
 		if (isUserScrollUpGesture(e.deltaY, 0)) disengageAutoScroll();
 		// At the boundary the browser cannot emit another scroll event. This
 		// also covers a gesture arriving during the last programmatic frame.
-		if (e.deltaY < 0 && containerRef && olderEdgeDistance(containerRef.scrollTop) <= 1 && mountedStart > 0 && !windowShifting) loadOlderItems();
+		if (e.deltaY < 0 && containerRef && olderEdgeDistance(containerRef.scrollTop) <= 1 && mountedStart > 0 && !windowShifting) loadOlderItemsAutomatically();
 	}
 
 	// Touch: accumulate downward travel from the gesture's lowest clientY.
@@ -1818,7 +1825,7 @@
 		touchLastY = Math.min(touchLastY, y);
 		if (isUserScrollUpGesture(0, touchDeltaY)) {
 			disengageAutoScroll();
-			if (containerRef && olderEdgeDistance(containerRef.scrollTop) <= 1 && mountedStart > 0 && !windowShifting) loadOlderItems();
+			if (containerRef && olderEdgeDistance(containerRef.scrollTop) <= 1 && mountedStart > 0 && !windowShifting) loadOlderItemsAutomatically();
 			touchLastY = y;
 		}
 	}

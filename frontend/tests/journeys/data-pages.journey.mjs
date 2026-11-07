@@ -1,7 +1,7 @@
 // Content-first data destinations must expose the real content and every moved
 // control without taking a panel/detail history step on responsive and native phone.
 import { runJourney } from './runner.mjs';
-import { expect, gotoApp } from './lib/app.mjs';
+import { expect, gotoApp, holdBootLoad } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 const native = process.argv.includes('--mobile-shell');
 await runJourney({
@@ -99,6 +99,42 @@ await runJourney({
    await page.getByRole('button',{name:'Clear filters',exact:true}).click();
    await page.getByRole('button',{name:'Done',exact:true}).click();
    expect(await page.getByRole('button',{name:'Filter pull requests',exact:true}).isVisible(),'filters can be cleared');
+  }
+ }, {
+  name: 'providers-first-snapshot',
+  throttles: ['fast', 'slow'],
+  async setup({page,status,variant}) {
+   // Release explicitly after inspecting the first frame; a busy runner must
+   // not use up the hold before the test reaches Providers.
+   await holdBootLoad(page, '/api/v1/model-providers', 10_000, {releaseOnSignal:true});
+   await gotoApp(page,status,native && variant.viewport === 'phone' ? '/mobile/' : '/');
+  },
+  async act({page,mark,log,variant}) {
+   const workspace=page.getByRole('navigation',{name:'Workspace',exact:true});
+   if(!await workspace.isVisible())await page.getByRole('button',{name:native&&variant.viewport==='phone'?/^Open menu/:/^Chats(?: \(|$)|Show sidebar/}).first().click();
+   await mark('open Providers before its first registry snapshot arrives');
+   await workspace.getByRole('button',{name:'Settings',exact:true}).click();
+   const providers=page.getByRole('navigation',{name:'Settings',exact:true}).getByRole('button',{name:'Providers',exact:true});
+   await providers.click();
+   await page.waitForFunction(() => window.__journeyBootHold?.startedAt !== null);
+   expect(await page.getByRole('status').filter({hasText:'Loading providers…'}).isVisible(), 'the first snapshot has an explicit loading state');
+   expect(await page.locator('.pl').count() === 0, 'no provisional Connected / Not connected rows can move under the user');
+   // Put the response beyond Chromium's 500ms recent-input exclusion window.
+   await page.waitForTimeout(700);
+   await page.evaluate(() => window.__journeyBootHold.release());
+   await page.waitForFunction(() => window.__journeyBootHold?.releasedAt !== null);
+   await page.locator('.pl .pgn').filter({hasText:'Fake AI (dev)'}).waitFor();
+   expect(await page.locator('.pl .checking').count() === 0, 'the initial account status has settled too');
+   await page.waitForTimeout(700);
+   log('first provider snapshot settled without provisional groups');
+   await mark('a later refresh keeps the existing provider rows');
+   if(variant.viewport==='phone')await page.getByRole('button',{name:'Back to Settings',exact:true}).click();
+   await page.getByRole('navigation',{name:'Settings',exact:true}).getByRole('button',{name:/^General/}).filter({visible:true}).first().click();
+   if(variant.viewport==='phone')await page.getByRole('button',{name:'Back to Settings',exact:true}).click();
+   await providers.click();
+   expect(!await page.getByText('Loading providers…',{exact:true}).count(), 'warm opens do not replace the list with loading');
+   await page.locator('.pl .pgn').filter({hasText:'Fake AI (dev)'}).waitFor();
+   await page.waitForTimeout(700);
   }
  }, {
   name: 'files-actions-and-card',

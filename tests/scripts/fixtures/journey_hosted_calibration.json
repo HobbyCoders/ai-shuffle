@@ -1,0 +1,220 @@
+{
+  "_comment": "Frozen clean first-pass shard measurements and their matched estimator inputs. Full step seconds include setup/teardown; per-file seconds come from timestamped runner start/footer lines. Shards 3 and 9 retried elsewhere in the holdout run and are excluded. Keep both estimator inputs and observations pinned when refreshing current weights.",
+  "runs": [
+    {
+      "run_id": 42291819110,
+      "head_sha": "3cc8e8127acd028efb8f88abdf2911fdfb4f811a",
+      "shards": [
+        {
+          "shard": 1,
+          "step_seconds": 1006.0,
+          "seconds": {
+            "chat-position-stability.journey.mjs": 989.079,
+            "settings-detail-link.journey.mjs": 9.262
+          }
+        },
+        {
+          "shard": 2,
+          "step_seconds": 1035.0,
+          "seconds": {
+            "native-scratch-context.journey.mjs": 44.125,
+            "stop-with-queued-messages.journey.mjs": 921.295,
+            "update-runtime.journey.mjs": 58.608
+          }
+        },
+        {
+          "shard": 4,
+          "step_seconds": 994.0,
+          "seconds": {
+            "compaction.journey.mjs": 587.693,
+            "new-chat-project.journey.mjs": 89.271,
+            "project-workers.journey.mjs": 57.995,
+            "shell-geometry.journey.mjs": 77.569,
+            "steer-lifecycle.journey.mjs": 131.672,
+            "type-at-boot.journey.mjs": 39.734
+          }
+        },
+        {
+          "shard": 5,
+          "step_seconds": 1082.0,
+          "seconds": {
+            "cleared-chat.journey.mjs": 55.715,
+            "composer-reload.journey.mjs": 183.643,
+            "data-pages.journey.mjs": 40.278,
+            "html-preview-image-click.journey.mjs": 48.385,
+            "mirrored-chat.journey.mjs": 251.635,
+            "open-unloaded-chat.journey.mjs": 493.003
+          }
+        },
+        {
+          "shard": 6,
+          "step_seconds": 1314.0,
+          "seconds": {
+            "automations.journey.mjs": 22.061,
+            "session-plan.journey.mjs": 239.687,
+            "side-panels.journey.mjs": 186.158,
+            "stop-holds-the-reader.journey.mjs": 504.638,
+            "stop-midstream.journey.mjs": 53.245,
+            "tool-cards.journey.mjs": 296.667
+          }
+        },
+        {
+          "shard": 7,
+          "step_seconds": 994.0,
+          "seconds": {
+            "notes-writing.journey.mjs": 42.197,
+            "provider-errors.journey.mjs": 274.126,
+            "rail-more.journey.mjs": 44.615,
+            "retired-task-chips.journey.mjs": 132.031,
+            "transcript-boundary.journey.mjs": 40.563,
+            "transcript-reader.journey.mjs": 450.324
+          }
+        },
+        {
+          "shard": 8,
+          "step_seconds": 1131.0,
+          "seconds": {
+            "composer-helper.journey.mjs": 24.298,
+            "fluid-commands.journey.mjs": 338.818,
+            "phone-composer.journey.mjs": 99.73,
+            "queue-while-busy.journey.mjs": 441.918,
+            "reload-midstream.journey.mjs": 147.777,
+            "voice-provider-endings.journey.mjs": 67.786
+          }
+        },
+        {
+          "shard": 10,
+          "step_seconds": 1145.0,
+          "seconds": {
+            "composer-large-input.journey.mjs": 72.075,
+            "provider-account-switch.journey.mjs": 26.612,
+            "question-tray.journey.mjs": 337.195,
+            "rewind-transcript.journey.mjs": 358.286,
+            "send-during-init.journey.mjs": 119.298,
+            "voice-call.journey.mjs": 221.076
+          }
+        }
+      ]
+    }
+  ],
+  "estimator": {
+    "revision": "32d3880cbe920faa08e07d14809bf8e3cd9a79af",
+    "weights": {
+      "_comment": "Median hosted journey seconds, excluding instance setup/teardown. Refresh from green main-suite/ci-frontend runs: python -m scripts.devloop.ci refresh-weights RUN_ID [RUN_ID ...]. seconds_per_case is the median of seconds/cases per sample.",
+      "source_runs": [
+        42295256527
+      ],
+      "case_counts": {
+        "automations.journey.mjs": 4,
+        "chat-position-stability.journey.mjs": 47,
+        "chat-send-stream.journey.mjs": 20,
+        "claude-rewind-cwd.journey.mjs": 12,
+        "cleared-chat.journey.mjs": 8,
+        "compaction.journey.mjs": 32,
+        "composer-helper.journey.mjs": 3,
+        "composer-large-input.journey.mjs": 12,
+        "composer-reload.journey.mjs": 24,
+        "data-pages.journey.mjs": 12,
+        "fast-midturn.journey.mjs": 20,
+        "first-visit.journey.mjs": 1,
+        "fluid-commands.journey.mjs": 28,
+        "html-preview-image-click.journey.mjs": 4,
+        "mirrored-chat.journey.mjs": 24,
+        "native-scratch-context.journey.mjs": 1,
+        "new-chat-project.journey.mjs": 8,
+        "new-worktree-session.journey.mjs": 28,
+        "notes-writing.journey.mjs": 6,
+        "open-unloaded-chat.journey.mjs": 86,
+        "owner-memory-question.journey.mjs": 4,
+        "parked-timer.journey.mjs": 4,
+        "phone-composer.journey.mjs": 12,
+        "project-workers.journey.mjs": 11,
+        "provider-account-switch.journey.mjs": 4,
+        "provider-errors.journey.mjs": 16,
+        "question-tray.journey.mjs": 20,
+        "queue-while-busy.journey.mjs": 28,
+        "rail-more.journey.mjs": 10,
+        "rail-popover-composer-inset.journey.mjs": 8,
+        "reload-midstream.journey.mjs": 8,
+        "retired-task-chips.journey.mjs": 12,
+        "rewind-transcript.journey.mjs": 22,
+        "send-during-init.journey.mjs": 12,
+        "session-plan.journey.mjs": 12,
+        "settings-detail-link.journey.mjs": 2,
+        "shell-geometry.journey.mjs": 20,
+        "side-panels.journey.mjs": 24,
+        "sidebar-truth.journey.mjs": 46,
+        "steer-lifecycle.journey.mjs": 12,
+        "stop-holds-the-reader.journey.mjs": 28,
+        "stop-midstream.journey.mjs": 4,
+        "stop-with-queued-messages.journey.mjs": 52,
+        "switch-chats.journey.mjs": 12,
+        "tool-cards.journey.mjs": 22,
+        "transcript-boundary.journey.mjs": 8,
+        "transcript-reader.journey.mjs": 32,
+        "type-at-boot.journey.mjs": 5,
+        "update-runtime.journey.mjs": 22,
+        "view-shell-back.journey.mjs": 8,
+        "voice-call.journey.mjs": 14,
+        "voice-provider-endings.journey.mjs": 6,
+        "worker-machine-settings.journey.mjs": 4
+      },
+      "seconds_per_case": 9.78,
+      "seconds": {
+        "automations.journey.mjs": 20.49,
+        "chat-position-stability.journey.mjs": 1081.4,
+        "chat-send-stream.journey.mjs": 154.72,
+        "claude-rewind-cwd.journey.mjs": 176.01,
+        "cleared-chat.journey.mjs": 52.63,
+        "compaction.journey.mjs": 558.11,
+        "composer-helper.journey.mjs": 18.02,
+        "composer-large-input.journey.mjs": 70.08,
+        "composer-reload.journey.mjs": 159.26,
+        "data-pages.journey.mjs": 40.57,
+        "fast-midturn.journey.mjs": 366.23,
+        "first-visit.journey.mjs": 6.57,
+        "fluid-commands.journey.mjs": 343.18,
+        "html-preview-image-click.journey.mjs": 39.3,
+        "mirrored-chat.journey.mjs": 250.33,
+        "native-scratch-context.journey.mjs": 36.59,
+        "new-chat-project.journey.mjs": 85.33,
+        "new-worktree-session.journey.mjs": 273.91,
+        "notes-writing.journey.mjs": 34.49,
+        "open-unloaded-chat.journey.mjs": 490.93,
+        "owner-memory-question.journey.mjs": 37.72,
+        "parked-timer.journey.mjs": 119.83,
+        "phone-composer.journey.mjs": 99.05,
+        "project-workers.journey.mjs": 56.02,
+        "provider-account-switch.journey.mjs": 24.4,
+        "provider-errors.journey.mjs": 250.49,
+        "question-tray.journey.mjs": 329.72,
+        "queue-while-busy.journey.mjs": 449.42,
+        "rail-more.journey.mjs": 28.59,
+        "rail-popover-composer-inset.journey.mjs": 20.4,
+        "reload-midstream.journey.mjs": 148.68,
+        "retired-task-chips.journey.mjs": 108.94,
+        "rewind-transcript.journey.mjs": 348.02,
+        "send-during-init.journey.mjs": 110.94,
+        "session-plan.journey.mjs": 230.98,
+        "settings-detail-link.journey.mjs": 12.59,
+        "shell-geometry.journey.mjs": 90.66,
+        "side-panels.journey.mjs": 180.46,
+        "sidebar-truth.journey.mjs": 563.67,
+        "steer-lifecycle.journey.mjs": 125.27,
+        "stop-holds-the-reader.journey.mjs": 479.52,
+        "stop-midstream.journey.mjs": 51.31,
+        "stop-with-queued-messages.journey.mjs": 846.38,
+        "switch-chats.journey.mjs": 128.85,
+        "tool-cards.journey.mjs": 278.65,
+        "transcript-boundary.journey.mjs": 28.95,
+        "transcript-reader.journey.mjs": 404.39,
+        "type-at-boot.journey.mjs": 41.45,
+        "update-runtime.journey.mjs": 42.68,
+        "view-shell-back.journey.mjs": 25.9,
+        "voice-call.journey.mjs": 219.6,
+        "voice-provider-endings.journey.mjs": 67.73,
+        "worker-machine-settings.journey.mjs": 14.34
+      }
+    }
+  }
+}

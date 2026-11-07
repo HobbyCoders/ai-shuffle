@@ -644,7 +644,7 @@ def up(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
                          claude_cli["path"], claude_cli["log"])
             database = runtime.Database(
                 SimpleNamespace(effective_data_dir=Path(env["DATA_DIR"])),
-                port=free_port(exclude=(port, protected, int(env["PORT"]), vite_port or 0)),
+                port=free_port(exclude=(port, protected, int(env["PORT"]), vite_port or 0)), disposable=True,
             )
             instance = Instance(args, directory, env, fake, vite_port, gate)
             instance.data["pause"] = {"enabled": not args.no_pause, "idle_seconds": 300}

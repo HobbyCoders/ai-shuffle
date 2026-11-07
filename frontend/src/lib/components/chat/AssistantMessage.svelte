@@ -238,21 +238,31 @@
 	// as it was; the newest text appears as soon as the selection is cleared.
 	// The hold ends with the stream: a finished reply always shows its settled
 	// markup, even if that drops a selection still inside it.
-	let heldRendered = $state.raw<{ prefix: string; tail: string } | null>(null);
-	const rendered = $derived(streaming && heldRendered ? heldRendered : latestRendered);
+	// selectionchange is queued: a stream flush can run before that event. Check
+	// the native selection at the rendering boundary, retaining the LAST SHOWN
+	// markup (not latestRendered, which may already include the incoming delta).
+	// Like _cache, this is nonreactive bookkeeping inside a derived calculation.
+	const selectionRender = { shown: null as { prefix: string; tail: string } | null };
+	let selectionEpoch = $state(0);
+	const rendered = $derived.by(() => {
+		selectionEpoch;
+		const latest = latestRendered;
+		if (streaming && selectionRender.shown && selectionTouchesReply()) return selectionRender.shown;
+		selectionRender.shown = latest;
+		return latest;
+	});
 	function selectionTouchesReply(): boolean {
 		const selection = proseEl?.ownerDocument.getSelection();
 		if (!proseEl || !selection || selection.isCollapsed || !selection.rangeCount) return false;
 		return selection.getRangeAt(0).intersectsNode(proseEl);
 	}
 	$effect(() => {
-		if (!streaming) { heldRendered = null; return; }
+		if (!streaming) return;
 		const doc = proseEl?.ownerDocument;
 		if (!doc) return;
-		const changed = () => {
-			if (!selectionTouchesReply()) heldRendered = null;
-			else if (!heldRendered && streaming) heldRendered = latestRendered;
-		};
+		// Clearing a selection must release the newest markup even if no more
+		// deltas arrive. The event invalidates the read; it never captures HTML.
+		const changed = () => { selectionEpoch += 1; };
 		doc.addEventListener('selectionchange', changed);
 		return () => doc.removeEventListener('selectionchange', changed);
 	});

@@ -33,6 +33,7 @@ import { fileURLToPath } from 'node:url';
 import { contactSheet, withRecording } from '../flight-recorder/record.mjs';
 import { composerSnapshot } from './lib/app.mjs';
 import { attachTrace } from './lib/trace.mjs';
+import { trackCaseChats } from './lib/case-chats.mjs';
 import { checkExpectShift, classifyKnownBug, designedShifts } from './lib/verdict.mjs';
 
 const require = createRequire(import.meta.url);
@@ -106,35 +107,30 @@ export function fakeAiTag(variant, scenario = 'default') {
 }
 
 /**
- * Delete the chats a case created (any chat newer than the case's start that
- * is not a seeded one), pass or fail. The sidebar lists only the newest chats,
+ * Delete only chats created by this case's context, pass or fail. A time-window
+ * sweep can delete another running case's or manual tester's chat mid-turn.
+ * The sidebar lists only the newest chats,
  * so chats left behind push the seeded ones out of it and break later journeys.
  * Returns how many were deleted; never throws (a report line says why).
  */
-export async function deleteCaseChats(context, status, startedAt) {
-	// The fake CLI project chat is seeded outside `chats`. A cold instance can
-	// put it inside the 2s cleanup lookback; it belongs to later cases too.
+export async function deleteCaseChats(context, status, _startedAt, createdIds = []) {
 	const seeded = [...Object.values(status.seed?.chats || {}), status.seed?.claude_cli?.chat].filter(Boolean);
+	const owned = [...new Set(createdIds)].filter(id => !seeded.includes(id));
+	if (!owned.length) return 0;
 	const page = await context.newPage();
 	try {
 		await page.goto(new URL('/api/v1/auth/status', status.urls.ui).toString());
 		return await page.evaluate(
-			async ({ seeded, since }) => {
+			async ids => {
 				let deleted = 0;
-				for (let pass = 0; pass < 5; pass++) {
-					const response = await fetch('/api/v1/sessions?limit=100');
-					if (!response.ok) throw new Error(`list sessions: HTTP ${response.status}`);
-					const doomed = (await response.json()).filter((r) => !seeded.includes(r.id) && Date.parse(r.created_at) >= since);
-					if (!doomed.length) break;
-					for (const row of doomed) {
-						const del = await fetch(`/api/v1/sessions/${encodeURIComponent(row.id)}`, { method: 'DELETE' });
-						if (del.ok || del.status === 404) deleted += 1;
-						else throw new Error(`delete ${row.id}: HTTP ${del.status}`);
-					}
+				for (const id of ids) {
+					const del = await fetch(`/api/v1/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' });
+					if (del.ok || del.status === 404) deleted += 1;
+					else throw new Error(`delete ${id}: HTTP ${del.status}`);
 				}
 				return deleted;
 			},
-			{ seeded, since: startedAt - 2000 }
+			owned
 		);
 	} finally {
 		await page.close().catch(() => {});
@@ -283,6 +279,7 @@ export async function runJourney(spec) {
 			const variant = { viewport: item.viewport, throttle: THROTTLES[item.throttle], throttleName: item.throttle };
 			const context = await browser.newContext({ ...VIEWPORTS[item.viewport], ...(extra.context || {}) });
 			await context.addCookies(cookies);
+			const createdChats = trackCaseChats(context);
 			const page = await context.newPage();
 			// Unrecorded evidence (setup's sends above all), printed when the case fails.
 			const trace = attachTrace(page);
@@ -354,7 +351,8 @@ export async function runJourney(spec) {
 				}
 				await page.screenshot({ path: join(out, `${item.id}.error.png`) }).catch(() => {});
 			} finally {
-				const cleaned = await deleteCaseChats(context, status, started).catch((error) => `failed: ${error.message}`);
+				const cleaned = await createdChats().then(ids => deleteCaseChats(context, status, started, ids))
+					.catch((error) => `failed: ${error.message}`);
 				if (typeof cleaned !== 'number') lines.push(`cleanup of this case's chats ${cleaned}`);
 				await context.close();
 			}

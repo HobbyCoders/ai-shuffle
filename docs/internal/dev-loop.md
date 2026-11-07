@@ -23,6 +23,17 @@ CI (`--ci`, including `scripts/devloop/ci.py`) and
 `--workers 2` **never pause**, regardless of this flag: paired workers need
 continuous presence and sync, and CI needs stable journey timing.
 
+Disposable previews, dev loops (both workers), profiling copies and private test
+clusters use `dynamic_shared_memory_type=mmap`, including during `initdb` and
+retained-data wakeups. The separate desktop source-preview launcher also opts in
+on Linux/macOS; Windows keeps its native dynamic shared-memory implementation.
+Their dynamic shared memory is backed by files in their
+own PostgreSQL data directory, not the container's shared `/dev/shm`, so a forced
+stop or guardian cleanup cannot strand `PostgreSQL.*` files there. Normal stops
+still use PostgreSQL's bounded fast shutdown. Python supervisor startup warns when `/dev/shm` is
+at least 90% full, but never deletes shared-memory files: other instances may
+still need them. Installed/production PostgreSQL defaults are unchanged.
+
 Idle is not “no network traffic”: an explicit method/path allowlist covers
 observed auth, sidebar, git-status, watch-list, preference and model-capability
 refreshes plus chat/sync/HMR reconnects and the selected chat's read-only event feed. Unknown traffic counts as work. While paused, those background
@@ -579,8 +590,11 @@ parent lease is the driver), waits for the ready line and `status`, runs the
 journeys, then `down`. With one shard it runs
 `frontend/tests/journeys/run-all.mjs` when there is one, else every
 `*.journey.mjs`; with N shards it splits the journey files by measured
-hosted runtime from `scripts/devloop/journey_weights.json`. Unmeasured files
-use their `--list` case count times the measured median seconds per case.
+hosted runtime from `scripts/devloop/journey_weights.json` when the current
+`--list` case count matches the recorded inventory. Unmeasured files or changed
+case counts automatically use a conservative case-count estimate (global median
+plus explicit floors, and at least the old runtime scaled up for case growth).
+Historical rows remain unchanged; feature PRs do not need a pre-merge measurement.
 `python -m scripts.devloop.ci plan --shards N` prints the JSON split, with
 estimated minutes in stderr and `$GITHUB_STEP_SUMMARY`. Refresh the medians
 with `python -m scripts.devloop.ci refresh-weights RUN_ID [RUN_ID ...]` using

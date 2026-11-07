@@ -28,6 +28,9 @@ export function installSwitchGraceClock({ graceMs }) {
 		}, delay);
 		clock.timers.push(entry);
 		if (gated) gate.registered.push(entry);
+		// Observe the retained DOM before the caller's synchronous style work can
+		// consume the whole grace. The real timer is already running, unchanged.
+		clock.onRegistered?.(entry);
 		return entry.id;
 	};
 	window.clearTimeout = function (id) {
@@ -40,6 +43,7 @@ export function installSwitchGraceClock({ graceMs }) {
 /** Use the actual registration time and sampling time, not a late first rAF
  * or its stale frame timestamp. The production deadline is never extended. */
 export function framesDuringSwitchGrace(frames, graceMs) {
-	return frames.filter(frame => frame.loading === 'true'
-		&& frame.loadingStarted !== null && frame.t - frame.loadingStarted < graceMs);
+	return frames.filter(frame => (frame.loading === 'true' || frame.graceRegistered === true)
+		&& frame.loadingStarted !== null && frame.t - frame.loadingStarted >= 0
+		&& frame.t - frame.loadingStarted < graceMs);
 }
