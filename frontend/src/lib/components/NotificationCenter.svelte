@@ -103,6 +103,28 @@
 		return false;
 	}
 
+	/** The sidebar's list columns: the Chats column and a destination's own panel. */
+	function listColumns(): Element[] {
+		const plane = bellRef?.closest('aside')?.querySelector(':scope > .panel-plane');
+		return plane ? [...plane.querySelectorAll(':scope > .col')] : [];
+	}
+	/**
+	 * The right edge of the list the user actually sees. Measured from the shown
+	 * column, not the <aside>: when the window is narrow the list floats over the
+	 * page and the aside stays rail-wide, and when the list is collapsed only the
+	 * rail is left.
+	 */
+	function visibleListRight(railRight: number): number {
+		const columns = listColumns();
+		if (!columns.length) return bellRef?.closest('aside')?.getBoundingClientRect().right ?? railRight;
+		let right = railRight;
+		for (const col of columns) {
+			const r = col.getBoundingClientRect();
+			if (r.width > 0 && r.height > 0) right = Math.max(right, r.right);
+		}
+		return right;
+	}
+
 	function positionPanel() {
 		if (!rail || !bellRef) return;
 		const rect = bellRef.getBoundingClientRect();
@@ -111,16 +133,17 @@
 		const left = Math.max(8, Math.min(railRight + 8, window.innerWidth - width - 8));
 		const bottomGap = Math.max(8, window.innerHeight - rect.bottom);
 		railAnchor = { left, bottom: bottomGap, width, railRight };
-		const listRight = bellRef.closest('aside')?.getBoundingClientRect().right ?? railRight;
+		const listRight = visibleListRight(railRight);
 		const right = left + width;
 		const bottom = window.innerHeight - bottomGap;
 		coversPage = right > listRight + CONTENT_GUTTER
 			|| (right > listRight && stripHasContent(listRight, right, Math.max(0, bottom - RAIL_PANEL_MAX_HEIGHT), bottom));
 	}
 
-	// While the rail panel is open, the list column can change width without a
-	// window resize (a drag, a collapse, or a width synced from another device),
-	// which moves the page under the panel. Re-measure then, so the scrim never
+	// While the rail panel is open, the list can change width or hide without a
+	// window resize (a width or collapse synced from another device), which moves
+	// the page under the panel. Watch the aside and each list column (a column
+	// that stops rendering reports a zero box) and re-measure, so the scrim never
 	// goes stale in either direction.
 	$effect(() => {
 		if (!rail || !showPanel || !bellRef) return;
@@ -128,6 +151,7 @@
 		if (!aside || typeof ResizeObserver === 'undefined') return;
 		const observer = new ResizeObserver(() => positionPanel());
 		observer.observe(aside);
+		for (const col of listColumns()) observer.observe(col);
 		return () => observer.disconnect();
 	});
 

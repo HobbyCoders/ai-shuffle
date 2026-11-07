@@ -56,41 +56,83 @@ describe('NotificationCenter', () => {
 		expect(screen.getByText('No notifications')).toBeTruthy();
 	});
 
-	it('re-measures the scrim when the list column changes width while the rail panel is open', async () => {
-		// A width synced from another device resizes the list without a window resize.
+	describe('rail popover scrim follows the visible list edge', () => {
+		// The 300px panel lands at x8–308 here (jsdom's bell sits at x0).
 		const observers: Array<() => void> = [];
 		const original = globalThis.ResizeObserver;
-		globalThis.ResizeObserver = class {
-			constructor(private cb: () => void) {}
-			observe() { observers.push(this.cb); }
-			unobserve() {}
-			disconnect() { const i = observers.indexOf(this.cb); if (i >= 0) observers.splice(i, 1); }
-		} as unknown as typeof ResizeObserver;
-		try {
+		let observed: Element[] = [];
+		beforeEach(() => {
+			observers.length = 0;
+			observed = [];
+			globalThis.ResizeObserver = class {
+				constructor(private cb: () => void) {}
+				observe(el: Element) { observed.push(el); if (!observers.includes(this.cb)) observers.push(this.cb); }
+				unobserve() {}
+				disconnect() { const i = observers.indexOf(this.cb); if (i >= 0) observers.splice(i, 1); }
+			} as unknown as typeof ResizeObserver;
+		});
+		afterEach(() => {
+			globalThis.ResizeObserver = original;
+			document.body.replaceChildren();
+		});
+
+		/** The real sidebar shape: aside > (rail with the bell) + .panel-plane > .col. */
+		function mountSidebar(geometry: { aside: number; col: number }) {
 			const aside = document.body.appendChild(document.createElement('aside'));
-			let listRight = 440;
-			aside.getBoundingClientRect = () => ({ right: listRight } as DOMRect);
+			const nav = aside.appendChild(document.createElement('div'));
+			const plane = aside.appendChild(document.createElement('div'));
+			plane.className = 'panel-plane';
+			const col = plane.appendChild(document.createElement('div'));
+			col.className = 'col';
+			aside.getBoundingClientRect = () => ({ right: geometry.aside } as DOMRect);
+			// A collapsed column stops rendering: a zero box.
+			col.getBoundingClientRect = () => (geometry.col > 0
+				? { right: geometry.col, width: geometry.col - 56, height: 800 }
+				: { right: 0, width: 0, height: 0 }) as DOMRect;
 			notify.info('Deploy finished');
-			render(NotificationCenter, { props: { rail: true }, target: aside });
+			render(NotificationCenter, { props: { rail: true }, target: nav });
+			return { col };
+		}
+		const reMeasure = () => observers.forEach((cb) => cb());
+		const scrim = () => screen.queryByTestId('notif-scrim');
+
+		it('re-measures when a synced width or collapse changes the list while the panel is open', async () => {
+			const geometry = { aside: 440, col: 440 };
+			const { col } = mountSidebar(geometry);
 			await fireEvent.click(screen.getByRole('button', { name: /Notifications/ }));
-			// The 300px panel (x8–308 here) ends inside a 440px list: no scrim.
-			expect(screen.queryByTestId('notif-scrim')).toBeNull();
-			expect(observers).toHaveLength(1);
+			expect(scrim()).toBeNull(); // ends inside a 440px list
+			expect(observed).toContain(col);
 
-			listRight = 200;
-			observers.forEach((cb) => cb());
-			await vi.waitFor(() => expect(screen.queryByTestId('notif-scrim')).not.toBeNull());
+			geometry.aside = geometry.col = 200;
+			reMeasure();
+			await vi.waitFor(() => expect(scrim()).not.toBeNull());
 
-			listRight = 440;
-			observers.forEach((cb) => cb());
-			await vi.waitFor(() => expect(screen.queryByTestId('notif-scrim')).toBeNull());
+			geometry.aside = geometry.col = 440;
+			reMeasure();
+			await vi.waitFor(() => expect(scrim()).toBeNull());
+
+			// Collapsed to the rail: only the rail is left, so the panel is on the page.
+			geometry.aside = 56;
+			geometry.col = 0;
+			reMeasure();
+			await vi.waitFor(() => expect(scrim()).not.toBeNull());
 
 			await fireEvent.keyDown(window, { key: 'Escape' });
 			await vi.waitFor(() => expect(observers).toHaveLength(0));
-			aside.remove();
-		} finally {
-			globalThis.ResizeObserver = original;
-		}
+		});
+
+		it('measures the floating list, not the rail-wide aside, in a narrow window', async () => {
+			// Narrow window: the aside stays 56px and the list plane floats out to 440.
+			const geometry = { aside: 56, col: 440 };
+			mountSidebar(geometry);
+			await fireEvent.click(screen.getByRole('button', { name: /Notifications/ }));
+			expect(scrim()).toBeNull();
+
+			// A synced width shrinks only the floating column.
+			geometry.col = 200;
+			reMeasure();
+			await vi.waitFor(() => expect(scrim()).not.toBeNull());
+		});
 	});
 
 	it('names each item severity for assistive tech', async () => {
