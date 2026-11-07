@@ -19,7 +19,7 @@
 	import { activeView } from '$lib/stores/layout.svelte';
 	import { startProjectSetup, type ProjectKind, type ProjectOverviewRow, type ProjectWorker } from '$lib/api/project-workers';
 	import { SETUP_POLL_MS } from '$lib/stores/project-setup';
-	import { isOnThisWorker, isRunning, missingCount, selfWorker, workerFilterSlot } from './project-workers-view';
+	import { isOnThisWorker, isRunning, missingCount, selfWorker, filterGeometry, workerFilterSlot, FILTER_DECISION_MS, type FilterGeometry } from './project-workers-view';
 	import { refreshWorkerPresence, workerInstalls } from '$lib/stores/worker-presence';
 	import { workerDisplayName } from '$lib/components/ui/worker-name';
 	import './project-tabs.css';
@@ -85,13 +85,25 @@
 	// Ask for the overview each time the page shows (it stays mounted while
 	// hidden); live-sync's `projects` refresh keeps it fresh while it is used.
 	const shown = $derived(($activeView?.type ?? 'project') === 'project');
+	// Each visit decides the worker filter row's space afresh (filterGeometry): this visit's
+	// answers, failures and deadline only, never a previous visit's.
 	let overviewSettled = $state(false);
-	let registrySettled = $state(false);
+	let registryFailed = $state(false);
+	let deadlinePassed = $state(false);
+	let filterGeometryDecided = $state<FilterGeometry | null>(null);
+	let visit = 0;
 	$effect(() => {
 		if (!shown) return;
-		void loadProjectsOverview().finally(() => { overviewSettled = true; });
-		// The registry hints at the worker filter until the overview answers (workerFilterSlot).
-		if (untrack(() => $workerInstalls) === null) refreshWorkerPresence().catch(() => {}).finally(() => { registrySettled = true; });
+		const id = ++visit;
+		overviewSettled = false; registryFailed = false; deadlinePassed = false; filterGeometryDecided = null;
+		void loadProjectsOverview().finally(() => { if (id === visit) overviewSettled = true; });
+		// The registry decides the filter row's space when the overview is slower (filterGeometry).
+		if (untrack(() => $workerInstalls) === null) refreshWorkerPresence().catch(() => { if (id === visit) registryFailed = true; });
+		const deadline = setTimeout(() => { if (id === visit) deadlinePassed = true; }, FILTER_DECISION_MS);
+		return () => {
+			clearTimeout(deadline); visit++;
+			overviewSettled = false; registryFailed = false; deadlinePassed = false; filterGeometryDecided = null;
+		};
 	});
 
 	const overviewOn = $derived($projectsOverviewSupported === true);
@@ -143,19 +155,19 @@
 		for (const row of $projectsOverview) for (const w of row.workers) ids.add(w.install_id);
 		return ids.size;
 	});
-	/** This visit already reserved or showed the filter row: it keeps that space until the page hides. */
-	let filterKept = $state(false);
-	const filterSlot = $derived(workerFilterSlot({ supported: $projectsOverviewSupported, overviewSettled, overviewWorkerCount: workerCount,
-		installs: $workerInstalls, registrySettled, kept: filterKept }));
-	$effect(() => {
-		if (!shown) filterKept = false;
-		else if (filterSlot === 'reserved' || filterSlot === 'shown') filterKept = true;
+	// The first decision of the visit stands: later answers fill or blank the row, never add or remove it.
+	$effect.pre(() => {
+		if (!shown || filterGeometryDecided !== null) return;
+		filterGeometryDecided = filterGeometry({ supported: $projectsOverviewSupported, overviewWorkerCount: workerCount,
+			installs: $workerInstalls, registryFailed, deadlinePassed });
 	});
+	const filterSlot = $derived(workerFilterSlot(filterGeometryDecided, $projectsOverviewSupported, workerCount));
 
 	// Filtered projects
 	const filteredRows = $derived.by(() => {
 		let rows = allRows;
-		if (overviewOn && workerFilter === 'here') rows = rows.filter((r) => r.onHere);
+		// Only a filter the user can see narrows the list.
+		if (filterSlot === 'shown' && workerFilter === 'here') rows = rows.filter((r) => r.onHere);
 		if (!searchQuery.trim()) return rows;
 		const q = searchQuery.toLowerCase();
 		return rows.filter(
@@ -167,10 +179,11 @@
 		);
 	});
 
-	/** Until the list's final shape is known it paints nothing that could move: no rows before the
-	 *  registry answers, and no empty state while peers may still bring projects. */
+	/** Until the list's shape is decided it paints nothing that could move: no rows before the filter
+	 *  row's space is decided, and no empty state while peers may still bring projects. Both end at
+	 *  the visit's deadline, so stalled requests cannot hold the list back for long. */
 	const listPending = $derived(filterSlot === 'unknown' || (filterSlot === 'reserved' && $projectsOverviewSupported === null
-		&& !overviewSettled && !filteredRows.length && !searchQuery.trim()));
+		&& !overviewSettled && !deadlinePassed && !filteredRows.length && !searchQuery.trim()));
 
 	// While a setup runs somewhere, re-read the overview every 2 s (the
 	// resources_changed refresh also lands; this is the fail-safe).
@@ -362,10 +375,15 @@
 <AddProjectModal open={showAddModal} onClose={() => (showAddModal = false)} onCreated={() => void loadProjectsOverview()} />
 
 <style>
-	/* The filter's space, held while the overview may still show it (workerFilterSlot). */
+	/* The filter's space, held while the overview may still show it (filterGeometry). */
 	.worker-filter { display: flex; align-items: center; }
 	.worker-filter.reserved { visibility: hidden; }
 	/* While the list's shape is unknown (listPending) its region holds nothing; it is not painted
 	   until then, so its first paint already sits under the filter row's final space. */
 	:global(.view-panel[aria-label="Projects"][aria-busy="true"] > .panel-body) { visibility: hidden; }
+	/* ViewPanel folds the filter row and the search field's gap away beside an empty state; once this
+	   visit holds the row's space it keeps it, so "No projects" giving way to a peer's projects moves
+	   nothing. */
+	:global(.view-panel.view-panel[aria-label="Projects"]:has(.worker-filter) > .panel-filters.panel-filters) { display: flex; }
+	:global(.view-panel.view-panel[aria-label="Projects"]:has(.worker-filter) > .panel-search.panel-search) { padding-bottom: 8px; }
 </style>

@@ -16,6 +16,7 @@ import {
 	runsOnNote,
 	seenAgo,
 	workerFilterSlot,
+	filterGeometry,
 	workerChip
 } from './project-workers-view';
 
@@ -98,40 +99,53 @@ describe('failures', () => {
 	});
 });
 
-describe('workerFilterSlot (#1210: the filter row never appears or vanishes under a painted list)', () => {
+describe('filterGeometry (#1210: the filter row never appears or vanishes under a painted list)', () => {
 	const two = [{ approved: true }, { approved: true }];
-	const base = { supported: null, overviewSettled: false, overviewWorkerCount: 0, installs: two, registrySettled: false, kept: false };
+	const none = { supported: null, overviewWorkerCount: 0, installs: null, registryFailed: false, deadlinePassed: false };
 
-	it('waits for the registry before the list paints', () => {
-		expect(workerFilterSlot({ ...base, installs: null })).toBe('unknown');
-		// A failed registry gives no hint: no space held.
-		expect(workerFilterSlot({ ...base, installs: null, registrySettled: true })).toBe('hidden');
+	it('waits while nothing is known', () => {
+		expect(filterGeometry(none)).toBeNull();
 	});
 
-	it('holds the space while the overview may still show the row', () => {
-		expect(workerFilterSlot(base)).toBe('reserved');
+	it('follows the overview when it has answered', () => {
+		expect(filterGeometry({ ...none, supported: true, overviewWorkerCount: 3 })).toBe('row');
+		expect(filterGeometry({ ...none, supported: true, overviewWorkerCount: 1, installs: two })).toBe('none');
+		// An older worker without the overview never shows the control.
+		expect(filterGeometry({ ...none, supported: false, installs: two })).toBe('none');
+	});
+
+	it('follows the registry while the overview is out', () => {
+		expect(filterGeometry({ ...none, installs: two })).toBe('row');
 		// An older server leaves `approved` out: that means approved.
-		expect(workerFilterSlot({ ...base, installs: [{}, {}] })).toBe('reserved');
-	});
-
-	it('holds no space for the only approved worker', () => {
-		expect(workerFilterSlot({ ...base, installs: [{ approved: true }] })).toBe('hidden');
+		expect(filterGeometry({ ...none, installs: [{}, {}] })).toBe('row');
+		expect(filterGeometry({ ...none, installs: [{ approved: true }] })).toBe('none');
 		// A peer waiting for approval is not in the overview either.
-		expect(workerFilterSlot({ ...base, installs: [{ approved: true }, { approved: false }] })).toBe('hidden');
+		expect(filterGeometry({ ...none, installs: [{ approved: true }, { approved: false }] })).toBe('none');
 	});
 
-	it('follows the overview once it has answered', () => {
-		expect(workerFilterSlot({ ...base, supported: true, overviewWorkerCount: 3, installs: null })).toBe('shown');
-		expect(workerFilterSlot({ ...base, supported: true, overviewWorkerCount: 1 })).toBe('hidden');
-		expect(workerFilterSlot({ ...base, supported: false })).toBe('hidden');
-		expect(workerFilterSlot({ ...base, overviewSettled: true })).toBe('hidden');
+	it('holds the row when the registry fails or the deadline passes with nothing known', () => {
+		// A row is the only choice a late overview can never move.
+		expect(filterGeometry({ ...none, registryFailed: true })).toBe('row');
+		expect(filterGeometry({ ...none, deadlinePassed: true })).toBe('row');
+		// An answer that is in still decides.
+		expect(filterGeometry({ ...none, deadlinePassed: true, installs: [{ approved: true }] })).toBe('none');
+	});
+});
+
+describe('workerFilterSlot', () => {
+	it('waits until the visit has decided', () => {
+		expect(workerFilterSlot(null, true, 3)).toBe('unknown');
 	});
 
-	it('keeps the space it held this visit when the answer is "no filter"', () => {
-		// An older worker (no overview), a single worker after all, a failed load.
-		expect(workerFilterSlot({ ...base, supported: false, kept: true })).toBe('reserved');
-		expect(workerFilterSlot({ ...base, supported: true, overviewWorkerCount: 1, kept: true })).toBe('reserved');
-		expect(workerFilterSlot({ ...base, overviewSettled: true, kept: true })).toBe('reserved');
-		expect(workerFilterSlot({ ...base, supported: true, overviewWorkerCount: 2, kept: true })).toBe('shown');
+	it('never adds the row when the visit decided against it', () => {
+		expect(workerFilterSlot('none', true, 3)).toBe('hidden');
+		expect(workerFilterSlot('none', null, 0)).toBe('hidden');
+	});
+
+	it('fills the held row only when the overview reports more than one worker, else keeps it blank', () => {
+		expect(workerFilterSlot('row', true, 2)).toBe('shown');
+		expect(workerFilterSlot('row', null, 0)).toBe('reserved');
+		expect(workerFilterSlot('row', true, 1)).toBe('reserved');
+		expect(workerFilterSlot('row', false, 0)).toBe('reserved');
 	});
 });

@@ -161,44 +161,58 @@ export function seenAgo(iso: string | null | undefined, now = Date.now()): strin
 }
 
 /**
- * Where the Projects list stands on its "All workers / On <this worker>"
- * filter row. One rule (#1210): the row's space never appears or disappears
- * under a painted list during a visit, whichever answer comes first or late.
+ * The Projects list's "All workers / On <this worker>" filter row (#1210).
+ * One rule: whether the row takes space is decided once per visit, from what
+ * is known when the list first paints, and never changes under the painted
+ * list. Later answers only fill the space with the control or leave it blank.
  *
- * - `shown`: the overview answered with more than one worker.
- * - `reserved`: the row's space is kept, its control invisible and inert,
- *   because the overview may still show it (it asks every online peer, so
- *   it can take seconds) or because this visit already kept that space
- *   (`kept`): an answer of "no filter" (an older worker without the
- *   overview, a single worker after all, a failed load) leaves a blank row
- *   rather than pulling the list up under the user. The next visit starts
- *   from that answer.
- * - `hidden`: no row, and no space: the answer is in, or the install
- *   registry (a plain database read) says this is the only approved worker,
- *   the same approved installs the overview reports.
- * - `unknown`: the registry has not answered yet, so the list waits (it is a
- *   fast read) rather than painting and then gaining or losing the row.
+ * `filterGeometry` makes that decision, or returns null while it cannot yet:
+ * - the overview has answered: a row when it reports more than one worker,
+ *   none when it reports one or the worker has no overview (an older one);
+ * - else the install registry (a plain database read) has answered: a row
+ *   when it holds more than one approved worker (the same approved installs
+ *   the overview reports), else none;
+ * - else, once the registry has failed or `FILTER_DECISION_MS` has passed
+ *   with neither answer, a row: more than one worker might be present, and a
+ *   blank row is the only choice a late answer can never move.
+ *
+ * Until it decides the list paints nothing (`unknown`), so a stalled request
+ * holds local projects back for that long at most.
  */
-export type WorkerFilterSlot = 'unknown' | 'hidden' | 'reserved' | 'shown';
+export const FILTER_DECISION_MS = 2000;
 
-export function workerFilterSlot(state: {
+export type FilterGeometry = 'row' | 'none';
+
+export function filterGeometry(known: {
 	/** `projectsOverviewSupported`: null until the overview has answered. */
 	supported: boolean | null;
-	/** A load finished without an answer (a failed request). */
-	overviewSettled: boolean;
 	overviewWorkerCount: number;
 	/** The install registry, null until loaded. */
 	installs: ReadonlyArray<{ approved?: boolean }> | null;
-	/** The registry request failed: treat it as giving no hint. */
-	registrySettled: boolean;
-	/** This visit already reserved or showed the row. */
-	kept: boolean;
-}): WorkerFilterSlot {
-	const { supported, overviewSettled, overviewWorkerCount, installs, registrySettled, kept } = state;
-	if (supported === true && overviewWorkerCount > 1) return 'shown';
-	if (kept) return 'reserved';
-	if (supported !== null || overviewSettled) return 'hidden';
-	if (!installs) return registrySettled ? 'hidden' : 'unknown';
+	/** This visit's registry request failed. */
+	registryFailed: boolean;
+	/** This visit has waited `FILTER_DECISION_MS` for an answer. */
+	deadlinePassed: boolean;
+}): FilterGeometry | null {
+	if (known.supported === true) return known.overviewWorkerCount > 1 ? 'row' : 'none';
+	if (known.supported === false) return 'none';
 	// An older server leaves `approved` out: that means approved.
-	return installs.filter((i) => i.approved !== false).length > 1 ? 'reserved' : 'hidden';
+	if (known.installs) return known.installs.filter((i) => i.approved !== false).length > 1 ? 'row' : 'none';
+	if (known.registryFailed || known.deadlinePassed) return 'row';
+	return null;
+}
+
+/**
+ * What the filter region shows, given the visit's decision: `unknown` (not
+ * decided: the list waits), `hidden` (no row, no space), `shown` (the control:
+ * the overview reports more than one worker) or `reserved` (the row's space,
+ * its control invisible and inert, because the overview has not answered yet,
+ * failed, or answered "no filter" after the space was taken).
+ */
+export type WorkerFilterSlot = 'unknown' | 'hidden' | 'reserved' | 'shown';
+
+export function workerFilterSlot(geometry: FilterGeometry | null, supported: boolean | null, overviewWorkerCount: number): WorkerFilterSlot {
+	if (geometry === null) return 'unknown';
+	if (geometry === 'none') return 'hidden';
+	return supported === true && overviewWorkerCount > 1 ? 'shown' : 'reserved';
 }

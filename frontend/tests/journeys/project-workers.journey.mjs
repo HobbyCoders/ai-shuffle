@@ -22,6 +22,11 @@
 //                       peer): the worker filter is already above the list
 //                       when the Projects page shows, so the list does not
 //                       jump down when the overview lands (#1210).
+//   filter-before-registry, filter-space-unsupported, remote-only-bootstrap,
+//   registry-fails-then-overview, revisit-after-failed-overview,
+//   stalled-requests    the same rule through a slow or failing registry, an
+//                       older worker, a worker with no projects of its own, a
+//                       revisit and stalled requests (#1210 review).
 //   new-chat-fails      a new chat on pop-os: the Runs-on row says "not set up
 //                       · set up" (selectable), offline Laptop is blocked; the
 //                       callout shows, Send reads "Set up & send", the setup
@@ -40,10 +45,14 @@ import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
  * overview with that error status while the peers stay in the registry (an
  * older worker that has approved peers). `noLocalProjects` leaves this
  * worker with no projects of its own, so every project is on a peer.
+ * `installsStatus` answers the install registry with that error status.
+ * `overviewFailFirst` answers the first overview request with a 500 at once
+ * and holds the later ones (with `holdOverview`), like a peer that was down
+ * on the first visit.
  */
-async function simulateWorkers(page, { overview404 = false, failOn = {}, holdOverview = false, holdInstalls = false, overviewStatus = 0, noLocalProjects = false } = {}) {
+async function simulateWorkers(page, { overview404 = false, failOn = {}, holdOverview = false, holdInstalls = false, overviewStatus = 0, noLocalProjects = false, installsStatus = 0, overviewFailFirst = false } = {}) {
 	await page.addInitScript(
-		({ overview404, failOn, holdOverview, holdInstalls, overviewStatus, noLocalProjects }) => {
+		({ overview404, failOn, holdOverview, holdInstalls, overviewStatus, noLocalProjects, installsStatus, overviewFailFirst }) => {
 			const original = window.fetch.bind(window);
 			const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 			const pathOf = (input) => {
@@ -112,6 +121,8 @@ async function simulateWorkers(page, { overview404 = false, failOn = {}, holdOve
 				if (noLocalProjects && path === '/api/v1/projects' && method === 'GET') return json([]);
 				if (path === '/api/v1/cluster/installs' && method === 'GET') {
 					if (holdInstalls) await installsGate;
+					window.__installsAnswers = (window.__installsAnswers ?? 0) + 1;
+					if (installsStatus) return json({ detail: 'Internal Server Error' }, installsStatus);
 					const res = await original(input, init);
 					const body = await res.clone().json().catch(() => null);
 					const self = body?.installs?.find((i) => i.is_self);
@@ -129,6 +140,11 @@ async function simulateWorkers(page, { overview404 = false, failOn = {}, holdOve
 					selfId = body?.installs?.find((i) => i.is_self)?.id ?? 'self-install';
 				}
 				if (path === '/api/v1/projects/overview' && method === 'GET') {
+					if (overviewFailFirst && !window.__overviewFailed) {
+						window.__overviewFailed = true;
+						window.__overviewAnswers = (window.__overviewAnswers ?? 0) + 1;
+						return json({ detail: 'Internal Server Error' }, 500);
+					}
 					if (holdOverview) await overviewGate;
 					window.__overviewAnswers = (window.__overviewAnswers ?? 0) + 1;
 					if (overviewStatus) return json({ detail: 'Not Found' }, overviewStatus);
@@ -164,7 +180,7 @@ async function simulateWorkers(page, { overview404 = false, failOn = {}, holdOve
 				return original(input, init);
 			};
 		},
-		{ overview404, failOn, holdOverview, holdInstalls, overviewStatus, noLocalProjects }
+		{ overview404, failOn, holdOverview, holdInstalls, overviewStatus, noLocalProjects, installsStatus, overviewFailFirst }
 	);
 }
 
@@ -175,6 +191,24 @@ async function openProjects(page, variant) {
 	// K1 moves the phone title/create action into the top bar, without a list heading.
 	await page.locator('[data-view-shell="Projects"]').filter({ visible: true }).waitFor({ timeout: 30_000 });
 	await page.getByRole('button', { name: 'New project', exact: true }).filter({ visible: true }).waitFor();
+}
+
+/** Open another rail page (under More when the phone's tab row has no seat for it). */
+async function openPage(page, variant, label) {
+	if (isPhone(variant)) await showSidebar(page);
+	const workspace = page.getByRole('navigation', { name: 'Workspace' });
+	const target = workspace.getByRole('button', { name: label, exact: true });
+	if (await target.count()) await target.click();
+	else {
+		await workspace.getByRole('button', { name: 'More', exact: true }).click();
+		await page.getByRole('menuitem', { name: label, exact: true }).click();
+	}
+	await page.locator(`[data-view-shell="${label}"]`).filter({ visible: true }).waitFor({ timeout: 30_000 });
+}
+
+/** The Projects page has decided to hold the worker filter row's space (blank until the overview fills it). */
+async function waitReservedFilter(page) {
+	await page.locator('section.view-panel[aria-label="Projects"]').filter({ visible: true }).locator('.worker-filter.reserved').waitFor({ state: 'attached', timeout: 20_000 });
 }
 
 /** The visible Projects list region: its top edge and whether it shows an empty state. */
@@ -419,11 +453,14 @@ await runJourney({
 				if (isPhone(variant)) await showSidebar(page);
 				await page.getByRole('navigation', { name: 'Workspace' }).getByRole('button', { name: 'Projects', exact: true }).click();
 				await page.locator('[data-view-shell="Projects"]').filter({ visible: true }).waitFor({ timeout: 30_000 });
-				await page.waitForTimeout(800);
+				// Measure once the registry has answered and the row's space is held, not after a guess.
+				await page.waitForFunction(() => window.__installsAnswers > 0, null, { timeout: 20_000 });
+				await waitReservedFilter(page);
 				// Nothing painted moves here (the empty state is replaced, which the
 				// recorder does not count), so measure the list region itself.
 				const before = await listGeometry(page);
 				expect(!before.empty, 'no "No projects" state while the peers may still bring projects');
+				await page.waitForTimeout(800);
 				await mark('the overview answers with the peers\' projects');
 				await page.evaluate(() => window.__releaseOverview());
 				await projectRow(page, 'couch-cash').waitFor({ timeout: 20_000 });
@@ -431,6 +468,94 @@ await runJourney({
 				expect(await page.getByRole('group', { name: 'Show projects' }).isVisible(), 'the All workers / On this worker filter shows');
 				const after = await listGeometry(page);
 				expect(after.top === before.top, `the list stays where it was painted (top ${before.top}px, then ${after.top}px)`);
+				await page.waitForTimeout(1000);
+			}
+		},
+		{
+			// #1210 review: the registry fails while the overview is still out. The
+			// list painted without the row, then the overview inserted it. A failed
+			// registry gives no answer, so the row's space is held instead.
+			name: 'registry-fails-then-overview',
+			viewports: ['desktop', 'phone'],
+			async setup(ctx) {
+				await simulateWorkers(ctx.page, { holdOverview: true, installsStatus: 500 });
+				await gotoApp(ctx.page, ctx.status);
+			},
+			async act({ page, mark, variant }) {
+				await mark('open Projects: the registry fails, the overview is still out');
+				await openProjects(page, variant);
+				await projectRow(page, PROJECT).waitFor({ timeout: 30_000 });
+				expect((await listMode(page)) === 'local', 'the overview has not answered yet');
+				await page.waitForTimeout(800);
+				await mark('the overview answers');
+				await page.evaluate(() => window.__releaseOverview());
+				await page.locator('[data-ui-projects="overview"]').waitFor({ timeout: 20_000 });
+				expect(await page.getByRole('group', { name: 'Show projects' }).isVisible(), 'the All workers / On this worker filter shows');
+				await page.waitForTimeout(1000);
+			},
+			allow: [
+				{ kind: 'failed_requests', status: 500, url: /\/cluster\/installs(\?|$)/, reason: 'the failing install registry this case simulates' }
+			]
+		},
+		{
+			// #1210 review: the overview failed on the first visit. On the next
+			// visit the old "settled" flag still said answered, so the list painted
+			// without the row and the overview then inserted it. Each visit decides
+			// from its own answers.
+			name: 'revisit-after-failed-overview',
+			viewports: ['desktop', 'phone'],
+			async setup(ctx) {
+				await simulateWorkers(ctx.page, { holdOverview: true, overviewFailFirst: true });
+				await gotoApp(ctx.page, ctx.status);
+			},
+			async act({ page, mark, variant }) {
+				await mark('first visit: the overview fails');
+				await openProjects(page, variant);
+				await projectRow(page, PROJECT).waitFor({ timeout: 30_000 });
+				await page.waitForFunction(() => window.__overviewAnswers > 0, null, { timeout: 20_000 });
+				await mark('leave Projects');
+				await openPage(page, variant, 'Notes');
+				await mark('come back while the overview is still out');
+				await openProjects(page, variant);
+				await projectRow(page, PROJECT).waitFor({ timeout: 30_000 });
+				expect((await listMode(page)) === 'local', 'the overview has not answered yet');
+				await page.waitForTimeout(800);
+				await mark('the overview answers');
+				await page.evaluate(() => window.__releaseOverview());
+				await page.locator('[data-ui-projects="overview"]').waitFor({ timeout: 20_000 });
+				expect(await page.getByRole('group', { name: 'Show projects' }).isVisible(), 'the All workers / On this worker filter shows');
+				await page.waitForTimeout(1000);
+			},
+			allow: [
+				{ kind: 'failed_requests', status: 500, url: /\/projects\/overview(\?|$)/, reason: 'the first overview failure this case simulates' },
+				{ kind: 'errors', message: /Failed to load projects overview: .*"status":500/, reason: 'the console line of that same simulated overview failure' }
+			]
+		},
+		{
+			// #1210 review: with the registry and the overview both stalled, the
+			// list waited for them for ever. It shows local projects after a short
+			// wait, holding the row's space, so the late answers move nothing.
+			name: 'stalled-requests',
+			viewports: ['desktop', 'phone'],
+			async setup(ctx) {
+				await simulateWorkers(ctx.page, { holdOverview: true, holdInstalls: true });
+				await gotoApp(ctx.page, ctx.status);
+			},
+			async act({ page, mark, variant }) {
+				await mark('open Projects while the registry and the overview stall');
+				await openProjects(page, variant);
+				await projectRow(page, PROJECT).waitFor({ timeout: 10_000 });
+				await waitReservedFilter(page);
+				expect((await page.getByRole('group', { name: 'Show projects' }).count()) === 0, 'no filter control before an answer');
+				await page.waitForTimeout(800);
+				await mark('the registry answers');
+				await page.evaluate(() => window.__releaseInstalls());
+				await page.waitForFunction(() => window.__installsAnswers > 0, null, { timeout: 20_000 });
+				await page.waitForTimeout(800);
+				await mark('the overview answers');
+				await page.evaluate(() => window.__releaseOverview());
+				await page.locator('[data-ui-projects="overview"]').waitFor({ timeout: 20_000 });
+				expect(await page.getByRole('group', { name: 'Show projects' }).isVisible(), 'the All workers / On this worker filter shows');
 				await page.waitForTimeout(1000);
 			}
 		},
