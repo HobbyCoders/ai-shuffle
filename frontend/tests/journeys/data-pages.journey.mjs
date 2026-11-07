@@ -101,6 +101,51 @@ await runJourney({
    expect(await page.getByRole('button',{name:'Filter pull requests',exact:true}).isVisible(),'filters can be cleared');
   }
  }, {
+  // Phone list rows reach into the page gutter and pad back, so the highlight
+  // keeps the desktop inset round the avatar and trailing text while every
+  // panel's title stays on the shared x.
+  name: 'phone-list-rows-inset',
+  async setup({page,status,variant}) {
+   await gotoApp(page,status,native && variant.viewport === 'phone' ? '/mobile/' : '/');
+  },
+  async act({page,mark,variant}) {
+   if(variant.viewport!=='phone')return;
+   const workspace=page.getByRole('navigation',{name:'Workspace',exact:true});
+   async function open(label) {
+    if(!await workspace.isVisible())await page.getByRole('button',{name:native?/^Open menu/:/^Chats(?: \(|$)|Show sidebar/}).first().click();
+    const target=workspace.getByRole('button',{name:label,exact:true});
+    if(await target.count())await target.click();
+    else {await workspace.getByRole('button',{name:'More',exact:true}).click();await page.getByRole('menuitem',{name:label,exact:true}).click();}
+   }
+   const titles={};
+   for(const label of ['Agents','Projects']) {
+    await mark('measure '+label+' rows');
+    await open(label);
+    await page.locator('.view-panel .st-it').filter({visible:true}).first().waitFor();
+    const m=await page.evaluate(() => {
+     const vis=e=>e.getClientRects().length>0;
+     const panel=[...document.querySelectorAll('.view-panel')].find(vis);
+     const body=panel.querySelector('.panel-body');
+     const B=e=>{const r=e.getBoundingClientRect();return {l:r.left,r:r.right};};
+     const rows=[...panel.querySelectorAll('.st-it:not(.value):not(.card)')].filter(vis).map(row=>{
+      const marks=[row.querySelector('.lead > *'),row.querySelector('.trailing')].filter(e=>e&&vis(e)&&e.getBoundingClientRect().width>0);
+      return {row:B(row),nm:B(row.querySelector('.nm')),marks:marks.map(B)};
+     });
+     return {vw:innerWidth,rows,overflow:body.scrollWidth-body.clientWidth};
+    });
+    expect(m.rows.length>0,label+' shows rows');
+    expect(m.overflow<=0,label+' list gains no sideways scroll '+m.overflow);
+    for(const r of m.rows) {
+     expect(r.row.l>=8&&r.row.r<=m.vw-8,label+' row highlight stays off the screen edges '+JSON.stringify(r.row));
+     for(const k of r.marks)expect(k.l-r.row.l>=4&&r.row.r-k.r>=8,
+      label+' avatar/trailing text sits inside the highlight with the desktop inset '+JSON.stringify({row:r.row,mark:k}));
+    }
+    titles[label]=m.rows.map(r=>Math.round(r.nm.l));
+   }
+   const xs=new Set(Object.values(titles).flat());
+   expect(xs.size===1&&xs.has(38),'Agents and Projects titles share the phone title x (38) '+JSON.stringify(titles));
+  }
+ }, {
   name: 'providers-first-snapshot',
   throttles: ['fast', 'slow'],
   async setup({page,status,variant}) {

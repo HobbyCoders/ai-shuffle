@@ -31,6 +31,31 @@ describe('NotificationCenter', () => {
 		expect(document.activeElement).toBe(bell);
 	});
 
+	it('keeps focus in the panel after a dismiss: next row, then previous row, then the panel', async () => {
+		notify.info('Third');
+		notify.info('Second');
+		notify.info('First');
+		render(NotificationCenter);
+		await fireEvent.click(screen.getByRole('button', { name: /Notifications/ }));
+		const panel = screen.getByRole('dialog', { name: 'Notifications' });
+		const rowOf = (el: Element | null) => el?.closest('.notif-item')?.querySelector('.item-message')?.textContent;
+		const dismissFor = (text: string) => [...panel.querySelectorAll<HTMLButtonElement>('.item-dismiss')].find(b => rowOf(b) === text)!;
+		expect([...panel.querySelectorAll('.item-message')].map(e => e.textContent)).toEqual(['First', 'Second', 'Third']);
+
+		// Middle row: focus moves to the next row's dismiss.
+		dismissFor('Second').focus();
+		await fireEvent.click(dismissFor('Second'));
+		await vi.waitFor(() => expect(rowOf(document.activeElement)).toBe('Third'));
+		expect(document.activeElement?.classList.contains('item-dismiss')).toBe(true);
+		// Last row: no next one, so the previous row's dismiss.
+		await fireEvent.click(dismissFor('Third'));
+		await vi.waitFor(() => expect(rowOf(document.activeElement)).toBe('First'));
+		// The only row: the panel itself, never the page body.
+		await fireEvent.click(dismissFor('First'));
+		await vi.waitFor(() => expect(document.activeElement).toBe(panel));
+		expect(screen.getByText('No notifications')).toBeTruthy();
+	});
+
 	it('names each item severity for assistive tech', async () => {
 		notify.warning('Disk almost full');
 		render(NotificationCenter);

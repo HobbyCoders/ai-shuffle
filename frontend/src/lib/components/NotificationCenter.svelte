@@ -16,7 +16,7 @@
 	 * - Outside-click + Escape to close. On the mobile shell the panel is
 	 *   `position: fixed` so the right-edge anchor can't clip it.
 	 */
-	import { onDestroy } from 'svelte';
+	import { onDestroy, tick } from 'svelte';
 	import {
 		Bell,
 		AlertOctagon,
@@ -118,6 +118,24 @@
 			|| (right > listRight && stripHasContent(listRight, right, Math.max(0, bottom - RAIL_PANEL_MAX_HEIGHT), bottom));
 	}
 
+	let panelRef = $state<HTMLDivElement | null>(null);
+	/**
+	 * Dismiss one row and keep keyboard focus in the panel: on the next row's
+	 * dismiss button, else the previous row's, else the (now empty) panel.
+	 */
+	async function dismissRow(id: string) {
+		const index = history.findIndex((n) => n.id === id);
+		const nextId = history[index + 1]?.id ?? history[index - 1]?.id;
+		notify.dismiss(id);
+		await tick();
+		if (!panelRef?.isConnected) return;
+		const row = nextId
+			? [...panelRef.querySelectorAll<HTMLElement>('.notif-item')].find((el) => el.dataset.notifId === nextId)
+			: undefined;
+		const target = row?.querySelector<HTMLButtonElement>('.item-dismiss');
+		(target ?? panelRef).focus();
+	}
+
 	function togglePanel() {
 		positionPanel();
 		const nowOpen = toggleDropdown(dropdownId);
@@ -194,7 +212,7 @@
 			<!-- Dims the page the panel sits on; a click here closes like any outside click. -->
 			<button type="button" class="notif-scrim" tabindex="-1" aria-label="Close notifications" data-testid="notif-scrim" onclick={() => closeDropdown(dropdownId)}></button>
 		{/if}
-		<div class="notif-panel" role="dialog" aria-label="Notifications">
+		<div class="notif-panel" role="dialog" aria-label="Notifications" tabindex="-1" bind:this={panelRef}>
 			<div class="panel-head">
 				<span class="panel-title">Notifications</span>
 				<div class="panel-head-actions">
@@ -204,7 +222,7 @@
 								<Check size={13} strokeWidth={1.75} /> Mark read
 							</button>
 						{/if}
-						<button class="head-action danger" onclick={() => notify.clearAll()} title="Clear all">
+						<button class="head-action danger" onclick={async () => { notify.clearAll(); await tick(); panelRef?.focus(); }} title="Clear all">
 							<Trash2 size={13} strokeWidth={1.75} /> Clear
 						</button>
 					{/if}
@@ -220,7 +238,7 @@
 				{:else}
 					{#each history as n (n.id)}
 						{@const Icon = ICONS[n.severity]}
-						<div class="notif-item sev-{n.severity}" class:unread={!n.read}>
+						<div class="notif-item sev-{n.severity}" class:unread={!n.read} data-notif-id={n.id}>
 							<button type="button" class="item-main" onclick={() => onItemClick(n)}>
 								<span class="item-icon" role="img" aria-label={SEVERITY_LABELS[n.severity]}><Icon size={15} strokeWidth={1.75} aria-hidden="true" /></span>
 								<span class="item-body">
@@ -249,7 +267,7 @@
 								class="item-dismiss"
 								onclick={(e) => {
 									e.stopPropagation();
-									notify.dismiss(n.id);
+									void dismissRow(n.id);
 								}}
 								aria-label="Dismiss notification"
 								title="Dismiss"
@@ -408,6 +426,9 @@
 		animation: notif-in 120ms cubic-bezier(0.16, 1, 0.3, 1);
 		container-type: inline-size;
 	}
+	/* Focus rests on the dialog itself once its last row is dismissed: the
+	   card is the focused thing, so no ring is drawn around it. */
+	.notif-panel:focus { outline: none; }
 
 	@keyframes notif-in {
 		from { opacity: 0; transform: translateY(-4px); }

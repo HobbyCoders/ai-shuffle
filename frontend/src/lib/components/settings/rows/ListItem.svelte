@@ -174,7 +174,9 @@
 	   an 8px inset, a 16px leading slot that is always reserved, then a 6px gap,
 	   so every panel's titles start on the Chats title x. The pin, status dot or
 	   avatar sits centred in the slot; a row with no marker leaves it empty. On a
-	   phone the inset is the page gutter, so the slot starts on it. */
+	   phone the slot starts on the 16px page gutter, so the row reaches 8px into
+	   the gutter and pads back by the same 8px: the highlight gets the desktop
+	   inset round its avatar and trailing text, and the title x does not move. */
 	:global(.view-panel) .st-it:not(.value):not(.card) {
 		grid-template-columns: 16px minmax(0, 1fr) auto;
 		column-gap: 6px;
@@ -185,6 +187,13 @@
 	:global(.view-panel) .st-it .lead { width: 16px; overflow: visible; }
 	@media (min-width: 601px) {
 		:global(.view-panel:not(.native)) .st-it:not(.value):not(.card) { padding-left: 8px; }
+	}
+	@media (max-width: 600px) {
+		:global(.view-panel) .st-it:not(.value):not(.card) {
+			width: calc(100% + 16px);
+			margin-inline: -8px;
+			padding-inline: 8px 10px;
+		}
 	}
 	.st-it.navigation { min-height: 34px; padding-block: 4px; }
 	.st-it.navigation .nm { font-size: 13px; }
