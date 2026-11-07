@@ -13,16 +13,17 @@ vi.mock('$lib/stores/notifications', () => ({ notify: { banner: mocks.banner, di
 vi.mock('./prompt-stash', async (original) => ({ ...await original<typeof import('./prompt-stash')>(), promptStash: { push: mocks.push, take: mocks.take } }));
 import { activeSession } from '$lib/stores/active-session';
 import { chatDraftNow, composerBaseline, composerWordsOf, rewoundWordsKeptApart } from './rewound-words';
+const session = activeSession as unknown as { set: (value: unknown) => void };
 
 beforeEach(() => {
 	vi.clearAllMocks(); mocks.cache.clear(); mocks.read.mockReturnValue('');
-	activeSession.set({ sessionId: 'open', draft: '' } as never);
+	session.set({ sessionId: 'open', draft: '' } as never);
 	mocks.push.mockReturnValue({ durable: true, entry: { id: 'entry' } });
 	mocks.take.mockReturnValue(true);
 });
 
 it('uses the open draft, otherwise memory before storage, after flushing', () => {
-	activeSession.set({ sessionId: 'open', draft: 'live' } as never);
+	session.set({ sessionId: 'open', draft: 'live' } as never);
 	mocks.cache.set('other', 'cached'); mocks.read.mockReturnValue('stored');
 	expect(chatDraftNow('open')).toBe('live'); expect(chatDraftNow('other')).toBe('cached');
 	mocks.cache.clear(); expect(chatDraftNow('other')).toBe('stored');
