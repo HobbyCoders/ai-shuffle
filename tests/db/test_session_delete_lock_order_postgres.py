@@ -429,11 +429,27 @@ def test_fork_cannot_message_parent_before_or_during_admission(private_pool, mon
 
 
 
-def test_copy_rejects_destination_deleted_while_waiting_for_counter(private_pool, monkeypatch):
+@pytest.mark.parametrize("writer", ["copy", "history"])
+def test_copy_or_history_rejects_destination_deleted_while_waiting_for_counter(private_pool, monkeypatch, writer):
     source, dest = "copy-source-" + uuid4().hex, "copy-dest-" + uuid4().hex
     with base.get_db() as conn:
         conn.cursor().executemany("INSERT INTO sessions (id) VALUES (%s)", [(source,), (dest,)])
     session_events.append_events(source, [{"type": "system.note", "payload": {"content": "keep source"}}])
+    if writer == "history":
+        from app.network import handoff
+
+        token = uuid4().hex
+        with base.get_db() as conn:
+            conn.cursor().execute("INSERT INTO handoff_history_chunks "
+                                  "(token,session_id,sdk_session_id,table_name,batch_no,rows) "
+                                  "VALUES (%s,%s,NULL,'',0,'{}')", (token, dest))
+
+        def write():
+            with base.get_db() as conn:
+                return handoff._publish_history(conn.cursor(), dest, token)
+    else:
+        def write():
+            return session_events.copy_session_events(source, dest)
     deleting_locked, resume = threading.Event(), threading.Event()
     delete_pid = []
     original_cursor = base._PgDictConnection.cursor
@@ -457,7 +473,7 @@ def test_copy_rejects_destination_deleted_while_waiting_for_counter(private_pool
         observer.autocommit = True
         deleting = workers.submit(sessions.delete_session, dest)
         assert deleting_locked.wait(5)
-        copying = workers.submit(session_events.copy_session_events, source, dest)
+        copying = workers.submit(write)
         try:
             _wait_for_lock_wait(observer, delete_pid[0], copying)
         finally:
@@ -510,6 +526,38 @@ def test_delete_vs_private_history_publication(private_pool, monkeypatch):
                             or sql.startswith("INSERT INTO session_event_counters"))
     _delete_behind_writer(private_pool, monkeypatch, sid, publish, boundary)
 
+
+
+def test_private_history_fence_has_only_two_counter_round_trips(private_pool, monkeypatch):
+    from app.network import handoff
+
+    sid, token = "history-budget-" + uuid4().hex, uuid4().hex
+    with base.get_db() as conn:
+        conn.cursor().execute("INSERT INTO sessions (id) VALUES (%s)", (sid,))
+        conn.cursor().execute("INSERT INTO handoff_history_chunks "
+                              "(token,session_id,sdk_session_id,table_name,batch_no,rows) "
+                              "VALUES (%s,%s,NULL,'',0,'{}')", (token, sid))
+    calls = []
+    original_cursor = base._PgDictConnection.cursor
+
+    class CountedCursor(RealDictCursor):
+        def execute(self, sql, params=None):
+            if ("session_event_counters" in sql or sql.startswith("SELECT COALESCE(MAX(seq)")
+                    or sql.startswith("SELECT id FROM sessions")):
+                calls.append(sql)
+            return super().execute(sql, params)
+
+    def instrumented(self, *args, **kwargs):
+        kwargs["cursor_factory"] = CountedCursor
+        return original_cursor(self, *args, **kwargs)
+
+    monkeypatch.setattr(base._PgDictConnection, "cursor", instrumented)
+    with base.get_db() as conn:
+        handoff._publish_history(conn.cursor(), sid, token)
+    # Reserve C before reconciliation and advance its watermark afterwards.
+    # Reuse publication's mandatory final session UPDATE as the fresh existence
+    # check rather than adding round trips to the large-history ratchet.
+    assert len(calls) == 2, calls
 
 
 def test_child_inserted_after_delete_discovery_cannot_invert_batch(private_pool, monkeypatch):
