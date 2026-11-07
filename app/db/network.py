@@ -1147,6 +1147,23 @@ def insert_event_batch(cursor, coll, rows: List[dict], envelopes: List[dict], ha
            "ON CONFLICT (origin_device_id, incarnation, seq) DO NOTHING")
 
 
+def insert_published_events(cursor, envelopes: List[dict], hashes: List[str]) -> None:
+    """Fresh local outbox rows, under the publisher's network-state lock.
+
+    Event rows already exist. No conflict suppression: a failed insertion must
+    roll back the clock reservation and catalog cursor with this whole window.
+    """
+    now = _now()
+    _insert_rows(cursor, "sync_ops", ("origin_device_id", "incarnation", "seq", "collection", "record_id", "op",
+                                     "clock", "lane", "envelope", "created_at"),
+                 [(env["origin_device_id"], env["origin_incarnation"], env["origin_seq"], env["collection"],
+                   env["record_id"], env["op"], env["clock"], LANE_HISTORY, _json(env), now) for env in envelopes])
+    _insert_rows(cursor, "sync_records", ("collection", "record_id", "clock", "origin_device_id", "content_hash",
+                                         "deleted", "order_seq", "updated_at"),
+                 [(env["collection"], env["record_id"], env["clock"], env["origin_device_id"], digest,
+                   False, env.get("order_seq"), now) for env, digest in zip(envelopes, hashes)])
+
+
 def get_record(cursor, collection: str, record_id: str) -> Optional[dict]:
     cursor.execute("SELECT * FROM sync_records WHERE collection = %s AND record_id = %s", (collection, record_id))
     row = cursor.fetchone()

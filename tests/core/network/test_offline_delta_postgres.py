@@ -29,6 +29,38 @@ def private_cluster(tmp_path_factory):
 
 
 @pytest.fixture
+def publisher(private_cluster, workers, monkeypatch):
+    """A real producer connection factory; all its state is disposable."""
+    worker = workers("publisher")
+    schema = "publication_" + uuid4().hex
+    with closing(pg_connect(private_cluster)) as admin:
+        admin.cursor().execute("CREATE SCHEMA " + schema)
+
+    def connect():
+        conn = pg_connect(private_cluster)
+        conn.cursor().execute("SET search_path TO " + schema)
+        conn.cursor().execute("SET statement_timeout TO 10000")
+        conn.autocommit = False
+        return conn
+
+    try:
+        with closing(connect()) as conn, conn:
+            create_postgres_schema(conn.cursor())
+        with worker.active():
+            monkeypatch.setattr(base, "get_connection", connect)
+            monkeypatch.setattr(database, "get_connection", connect)
+            monkeypatch.setattr(base, "_close_connection", lambda conn: conn.close())
+            database.create_profile(profile_id="default", name="Default", description=None,
+                                    config={"model": "claude-sonnet-4-20250514"})
+            engine.create_network("Publication")
+            _session("s1")
+            yield connect
+    finally:
+        with closing(pg_connect(private_cluster)) as admin:
+            admin.cursor().execute("DROP SCHEMA " + schema + " CASCADE")
+
+
+@pytest.fixture
 def receiver(private_cluster, workers, monkeypatch):
     source, target = workers("source"), workers("target")
     schemas = []
@@ -238,3 +270,183 @@ def test_postgres_large_offline_backlog_measurement(receiver, monkeypatch, recor
     record_property("backlog_publish_seconds", publish_seconds)
     record_property("backlog_apply_seconds", apply_seconds)
     print(f"BACKLOG events=3000 chunks={len(chunks)} publish_seconds={publish_seconds:.3f} apply_seconds={apply_seconds:.3f}")
+
+
+@pytest.mark.parametrize("size", [1, catalog.EVENT_CHUNK, 1000])
+def test_postgres_publication_statements_are_per_window(publisher, monkeypatch, record_property, size):
+    from psycopg2.extras import RealDictCursor
+
+    _append("s1", size)
+    execute = RealDictCursor.execute
+    statements = []
+
+    def counted(self, sql, params=None):
+        # The private fixture's two connection-setup SETs are not publisher SQL.
+        if not sql.startswith("SET "):
+            statements.append(sql)
+        return execute(self, sql, params)
+
+    monkeypatch.setattr(RealDictCursor, "execute", counted)
+    assert catalog.publish_events(session_ids=["s1"], limit=size) == size
+    windows = (size + catalog.EVENT_CHUNK - 1) // catalog.EVENT_CHUNK
+    record_property("publisher_statements", len(statements))
+    print(f"PUBLICATION events={size} windows={windows} statements={len(statements)}")
+    assert len(statements) <= 9 * windows + 2
+    assert sum("FOR UPDATE" in q and "network_state" in q for q in statements) == windows
+
+
+class PublicationRollback(Exception):
+    pass
+
+
+def _publication_state(cursor):
+    cursor.execute("SELECT clock FROM network_state WHERE id=1")
+    clock = cursor.fetchone()["clock"]
+    cursor.execute("SELECT envelope FROM sync_ops ORDER BY seq")
+    ops = [r["envelope"] for r in cursor.fetchall()]
+    cursor.execute("SELECT collection, record_id, clock, origin_device_id, content_hash, deleted, order_seq "
+                   "FROM sync_records ORDER BY collection, record_id")
+    records = [dict(r) for r in cursor.fetchall()]
+    return clock, ops, records, store.catalog_cursor(cursor, "s1")
+
+
+@pytest.mark.parametrize("size", [1, catalog.EVENT_CHUNK])
+def test_postgres_publication_matches_single_event_bytes(publisher, monkeypatch, size):
+    """Same DB snapshot, keys, nonce stream and timestamp => identical signed v1 bytes."""
+    from datetime import datetime, timezone
+    from unittest.mock import Mock
+    from app.network import crypto, envelope, policy
+
+    _append("s1", size)
+    coll = policy.collection("session_events")
+    with store.get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM session_events WHERE session_id='s1' ORDER BY seq")
+        rows = [dict(r) for r in cursor.fetchall()]
+    fixed = datetime(2026, 11, 7, tzinfo=timezone.utc)
+    monkeypatch.setattr(envelope, "datetime", Mock(now=Mock(return_value=fixed)))
+    results = []
+    for bulk in (False, True):
+        nonces = iter(range(1, size + 1))
+        monkeypatch.setattr(crypto.os, "urandom", lambda n: next(nonces).to_bytes(n, "big"))
+        with pytest.raises(PublicationRollback), store.get_db() as conn:
+            cursor = conn.cursor()
+            if bulk:
+                assert engine.record_event_batch(cursor, rows, ctx=engine.context()) == size
+            else:
+                for row in rows:
+                    assert engine.record(cursor, coll.name, coll.record_id(row), row,
+                                         order_seq=int(row["seq"])) is not None
+            results.append(_publication_state(cursor))
+            raise PublicationRollback()
+    assert results[0][0] == results[1][0]
+    assert crypto.canonical_json(results[0][1]) == crypto.canonical_json(results[1][1])
+    assert results[0][2:] == results[1][2:]
+
+
+@pytest.mark.parametrize("fault", ["sync_ops", "sync_records", "cursor"])
+def test_postgres_publication_window_rollback_and_restart(publisher, monkeypatch, fault):
+    _append("s1", catalog.EVENT_CHUNK)
+    with store.get_db() as conn:
+        before = _publication_state(conn.cursor())
+    insert, set_cursor = store._insert_rows, store.set_catalog_cursor
+
+    def failed_insert(cursor, table, *args, **kwargs):
+        insert(cursor, table, *args, **kwargs)
+        if table == fault:
+            raise PublicationRollback()
+
+    def failed_cursor(*args):
+        set_cursor(*args)
+        if fault == "cursor":
+            raise PublicationRollback()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(store, "_insert_rows", failed_insert)
+        patch.setattr(store, "set_catalog_cursor", failed_cursor)
+        with pytest.raises(PublicationRollback):
+            catalog.publish_events(session_ids=["s1"], limit=catalog.EVENT_CHUNK)
+    with store.get_db() as conn:
+        assert _publication_state(conn.cursor()) == before
+    # Reload the persisted network context, as a restarted scanner does.
+    monkeypatch.setattr(engine, "_context", None)
+    assert catalog.publish_events(session_ids=["s1"], limit=catalog.EVENT_CHUNK) == catalog.EVENT_CHUNK
+    with store.get_db() as conn:
+        clock, ops, records, published = _publication_state(conn.cursor())
+    assert published == catalog.EVENT_CHUNK
+    assert clock == before[0] + catalog.EVENT_CHUNK
+    tail = ops[len(before[1]):]
+    start = before[1][-1]["origin_seq"] + 1
+    assert [o["origin_seq"] for o in tail] == list(range(start, start + catalog.EVENT_CHUNK))
+    assert len(records) == len(before[2]) + catalog.EVENT_CHUNK
+
+
+def test_postgres_publication_clear_retracts_then_restarts(publisher, monkeypatch):
+    _append("s1", 5)
+    assert catalog.publish_events(session_ids=["s1"]) == 5
+    database.clear_session_conversation("s1")
+    _append("s1", 2)
+    monkeypatch.setattr(engine, "_context", None)
+    # Three tombstones and the two rewritten low sequence numbers.
+    assert catalog.publish_events(session_ids=["s1"]) == 5
+    with store.get_db() as conn:
+        cursor = conn.cursor()
+        assert store.catalog_cursor(cursor, "s1") == 2
+        known = store.records_for_collection(cursor, "session_events")
+    assert [known[f"s1|{i}"]["deleted"] for i in range(1, 6)] == [False, False, True, True, True]
+    _append("s1", 1)
+    assert catalog.publish_events(session_ids=["s1"]) == 1
+
+
+def test_postgres_publication_allows_local_append_and_serializes_network_writer(publisher, monkeypatch):
+    _append("s1", catalog.EVENT_CHUNK + 1)
+    ctx = engine.context()
+    locked, release, writer_waiting = threading.Event(), threading.Event(), threading.Event()
+    insert, lock = store.insert_published_events, store.lock_state
+    publisher_thread = []
+    durations = []
+
+    def paused_insert(*args):
+        if not locked.is_set():
+            publisher_thread.append(threading.get_ident())
+            locked.set()
+            assert release.wait(5), "publication test did not release its window"
+        return insert(*args)
+
+    def writer_lock(cursor):
+        if publisher_thread and threading.get_ident() != publisher_thread[0]:
+            writer_waiting.set()
+        return lock(cursor)
+
+    monkeypatch.setattr(store, "insert_published_events", paused_insert)
+    monkeypatch.setattr(store, "lock_state", writer_lock)
+
+    def write_network():
+        with store.get_db() as conn:
+            return engine.record(conn.cursor(), "user_preferences", "admin|__owner__|theme",
+                                 {"user_type": "admin", "user_id": "__owner__", "key": "theme", "value": "dark"},
+                                 ctx=ctx)
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        publishing = pool.submit(catalog.publish_events, ctx=ctx, session_ids=["s1"], limit=catalog.EVENT_CHUNK)
+        try:
+            assert locked.wait(5)
+            # The production append's R/C/S locks must not wait for the network state lock.
+            started = time.perf_counter()
+            pool.submit(_append, "s1", 1).result(timeout=3)
+            durations.append(time.perf_counter() - started)
+            writing = pool.submit(write_network)
+            assert writer_waiting.wait(3)
+            assert not writing.done()
+        finally:
+            release.set()
+        assert publishing.result(timeout=5) == catalog.EVENT_CHUNK
+        assert writing.result(timeout=5) is not None
+    assert catalog.publish_events(session_ids=["s1"]) == 2
+    with store.get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT seq FROM sync_ops ORDER BY seq")
+        seqs = [r["seq"] for r in cursor.fetchall()]
+        assert seqs == list(range(1, len(seqs) + 1))
+        assert store.catalog_cursor(cursor, "s1") == catalog.EVENT_CHUNK + 2
+    assert durations[0] < 3

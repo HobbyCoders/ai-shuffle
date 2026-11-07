@@ -278,6 +278,118 @@ def test_hydrate_publishes_a_long_transcript_in_chunks(workers, monkeypatch):
         assert _cursors("s1") == {"s1": 10}
 
 
+@pytest.mark.parametrize("size", [1, catalog.EVENT_CHUNK])
+def test_fresh_publication_has_constant_statement_count(workers, monkeypatch, size):
+    """One state lock and two bulk inserts, not six statements per event."""
+    from tests.pg_shim import ShimCursor
+
+    worker = workers("publish-query-ratchet")
+    with worker.active():
+        engine.create_network("Publication ratchet")
+        _session("fresh")
+        _append("fresh", size)
+        queries = []
+        execute = ShimCursor.execute
+
+        def counted(self, sql, params=None):
+            queries.append(sql)
+            return execute(self, sql, params)
+
+        monkeypatch.setattr(ShimCursor, "execute", counted)
+        single = Mock(wraps=engine.record)
+        monkeypatch.setattr(engine, "record", single)
+        assert catalog.publish_events(session_ids=["fresh"], limit=size) == size
+        assert len(queries) <= 12, f"{size} events used {len(queries)} statements"
+        assert sum("FROM network_state" in q and "FOR UPDATE" in q for q in queries) == 1
+        assert sum(q.startswith("INSERT INTO sync_ops") for q in queries) == 1
+        assert sum(q.startswith("INSERT INTO sync_records") for q in queries) == 1
+        assert single.call_count == 0
+
+
+def test_publication_skips_oversize_without_reserving_a_sequence(workers, monkeypatch):
+    worker = workers("publish-oversize")
+    monkeypatch.setattr(catalog, "MAX_EVENT_BYTES", 1000)
+    with worker.active():
+        engine.create_network("Oversize")
+        _session("s1")
+        events_db.append_events("s1", [
+            {"type": "message.user", "payload": {"content": text}}
+            for text in ("first", "x" * 2000, "last")])
+        assert catalog.publish_events(session_ids=["s1"]) == 2
+        assert _cursors("s1") == {"s1": 3}
+        ops = [o for o in store.ops_since({}) if o["collection"] == "session_events"]
+        assert [o["order_seq"] for o in ops] == [1, 3]
+        assert ops[1]["origin_seq"] == ops[0]["origin_seq"] + 1
+        assert ops[1]["clock"] == ops[0]["clock"] + 1
+
+
+def test_publication_existing_records_use_single_record_fallback(workers, monkeypatch):
+    worker = workers("publish-fallback")
+    with worker.active():
+        engine.create_network("Fallback")
+        _session("s1")
+        _append("s1", 1)
+        assert catalog.publish_events(session_ids=["s1"]) == 1
+        _append("s1", 2)
+        with store.get_db() as conn:
+            store.set_catalog_cursor(conn.cursor(), "s1", 0)
+        single = Mock(wraps=engine.record)
+        monkeypatch.setattr(engine, "record", single)
+        assert catalog.publish_events(session_ids=["s1"]) == 2
+        assert single.call_count == 3
+        ops = [o for o in store.ops_since({}) if o["collection"] == "session_events"]
+        assert [o["order_seq"] for o in ops] == [1, 2, 3]
+
+
+def test_imported_transcript_is_not_republished_after_cursor_reset(workers):
+    source, peer = workers("publication-source"), workers("publication-peer")
+    with source.active():
+        engine.create_network("Publication echo")
+        _session("shared", owner=source.device_id)
+        _append("shared", 3)
+        catalog.publish_owned()
+    join(source, peer)
+    converge([source, peer])
+    with peer.active():
+        # A mirrored session is not an owned publication target.
+        catalog.publish_owned()
+        before = [o for o in store.ops_since({}) if o["collection"] == "session_events"]
+        assert all(o["origin_device_id"] == source.device_id for o in before)
+        with store.get_db() as conn:
+            store.set_catalog_cursor(conn.cursor(), "shared", 0)
+        # Even an explicit scan with a reset cursor must retain imported hashes
+        # and origins, rather than freshly signing identical local event rows.
+        assert catalog.publish_events(session_ids=["shared"]) == 0
+        after = [o for o in store.ops_since({}) if o["collection"] == "session_events"]
+        assert after == before
+
+
+def test_publication_invalid_envelope_falls_back_before_reserving_range(workers, monkeypatch):
+    from app.network import envelope
+
+    worker = workers("publish-invalid")
+    build = envelope.build
+
+    def reject_middle(**kwargs):
+        if kwargs.get("order_seq") == 2:
+            raise envelope.EnvelopeError("invalid event")
+        return build(**kwargs)
+
+    with worker.active():
+        engine.create_network("Invalid event")
+        _session("s1")
+        _append("s1", 3)
+        monkeypatch.setattr(envelope, "build", reject_middle)
+        with store.get_db() as conn:
+            clock = store.lock_state(conn.cursor())["clock"]
+        assert catalog.publish_events(session_ids=["s1"]) == 2
+        assert _cursors("s1") == {"s1": 3}
+        ops = [o for o in store.ops_since({}) if o["collection"] == "session_events"]
+        assert [o["order_seq"] for o in ops] == [1, 3]
+        assert [o["clock"] for o in ops] == [clock + 1, clock + 3]
+        assert ops[1]["origin_seq"] == ops[0]["origin_seq"] + 1
+
+
 # ---------------------------------------------------------------------------
 # C. Chunked apply
 # ---------------------------------------------------------------------------
