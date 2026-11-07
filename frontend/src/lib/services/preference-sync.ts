@@ -19,6 +19,7 @@ export interface PreferenceTransport {
  put(key: string, value: unknown, onlyIfMissing?: boolean, expectedVersion?: string | null, writeId?: string): Promise<{ value: unknown; version?: string | null }>;
 }
 // `sent`: a request carried this edit and its outcome is unknown (it may have committed).
+// `version` is frozen at the first send, so every retry checks what the edit saw.
 type Edit = { value: unknown; revision: number; version?: string | null; writeId: string; sent?: boolean };
 // `inDoubt`: an earlier edit that may have committed. It is replayed (same write
 // ID) before `pending`, so a newer edit is based on this device's own write.
@@ -183,15 +184,17 @@ export class PreferenceSync {
    }
   } catch { /* reconnect retries authoritative reads, never migrates a failed GET */ }
  }
- private async flush(key: string, e: Entry) {
+ private async flush(key: string, e: Entry): Promise<void> {
   if (!this.ready || !this.active || e.running || !e.pending) return;
   const epoch = this.epoch;
   e.running = true;
   let edit: Edit | undefined;
+  let proceed = false;
   try {
    while (e.pending && epoch === this.epoch) {
     edit = e.inDoubt ?? e.pending;
     const expected = edit.version === undefined ? e.version : edit.version;
+    edit.version = expected;
     const response = expected === undefined
      ? await this.transport.put(key, edit.value)
      : await this.transport.put(key, edit.value, false, expected, edit.writeId);
@@ -206,15 +209,21 @@ export class PreferenceSync {
    // A stale snapshot cannot overwrite another device. Reconcile conflicts;
    // retain ordinary transport failures for reconnect or the next local edit.
    const status = (error as { status?: number }).status;
-   if (epoch !== this.epoch) { /* superseded */ }
+   if (epoch !== this.epoch || !edit) { /* superseded */ }
    else if (status === 409) { e.pending = undefined; e.inDoubt = undefined; e.adapter.conflict?.(); }
-   // No answer (or a server error): the write may have committed, so its retry
-   // must reuse its write ID. A 4xx answer means it did not.
-   else if (edit && edit !== e.inDoubt && (status === undefined || status >= 500)) {
-    if (edit === e.pending) edit.sent = true; else e.inDoubt = edit;
+   // A 4xx answer: this edit did not commit and never will. Keep it only as
+   // the latest edit; a newer edit goes ahead under its own version check.
+   else if (status !== undefined && status >= 400 && status < 500) {
+    edit.sent = false;
+    if (e.inDoubt === edit) e.inDoubt = undefined;
+    proceed = edit !== e.pending;
    }
+   // No answer (or a server error): the write may have committed, so its retry
+   // must reuse its write ID and expected version.
+   else if (edit !== e.inDoubt) { if (edit === e.pending) edit.sent = true; else e.inDoubt = edit; }
   }
   finally { if (epoch === this.epoch) e.running = false; }
+  if (proceed && epoch === this.epoch) return this.flush(key, e);
   // Reconcile response/event ordering from the source of truth after the queue drains.
   if (epoch === this.epoch && !e.pending) await this.refresh(key);
  }
