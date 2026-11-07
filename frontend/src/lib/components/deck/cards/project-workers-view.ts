@@ -159,3 +159,84 @@ export function seenAgo(iso: string | null | undefined, now = Date.now()): strin
 	if (h < 48) return `seen ${h}h ago`;
 	return `seen ${Math.round(h / 24)}d ago`;
 }
+
+/**
+ * The Projects list's "All workers / On <this worker>" filter row (#1210).
+ * One rule: whether the row takes space is decided once per visit, from what
+ * is known when the list first paints, and never changes under the painted
+ * list. Later answers only fill the space with the control or leave it blank.
+ *
+ * `filterGeometry` makes that decision, or returns null while it cannot yet:
+ * - the overview has answered: a row when it reports more than one worker,
+ *   none when it reports one or the worker has no overview (an older one);
+ * - else the install registry (a plain database read) has answered: a row
+ *   when it holds more than one approved worker (the same approved installs
+ *   the overview reports), else none;
+ * - else, once the registry has failed or `FILTER_DECISION_MS` has passed
+ *   with neither answer, a row: more than one worker might be present, and a
+ *   blank row is the only choice a late answer can never move.
+ *
+ * Until it decides the list paints nothing (`unknown`), so a stalled request
+ * holds local projects back for that long at most.
+ *
+ * The row is one line whatever this worker's name is (the name is shortened,
+ * with the full name in its tooltip), so filling the held space with a longer
+ * name than the one it was held for cannot change its height either.
+ */
+export const FILTER_DECISION_MS = 2000;
+
+/** A journey's own clock for the deadline: it is handed `pass` and calls it when it chooses. */
+type FilterDeadlineHook = (pass: () => void) => void;
+
+/**
+ * Start this visit's `FILTER_DECISION_MS` wait: `pass` runs when it is over.
+ * Returns the cancel. A UI journey that must measure before the deadline on a
+ * slow runner sets `window.__projectsFilterDeadline` before the app loads and
+ * passes the deadline itself; nothing else sets it.
+ */
+export function startFilterDeadline(pass: () => void): () => void {
+	const hook = typeof window === 'undefined' ? undefined : (window as Window & { __projectsFilterDeadline?: FilterDeadlineHook }).__projectsFilterDeadline;
+	if (typeof hook === 'function') {
+		let live = true;
+		hook(() => { if (live) pass(); });
+		return () => { live = false; };
+	}
+	const timer = setTimeout(pass, FILTER_DECISION_MS);
+	return () => clearTimeout(timer);
+}
+
+export type FilterGeometry = 'row' | 'none';
+
+export function filterGeometry(known: {
+	/** `projectsOverviewSupported`: null until the overview has answered. */
+	supported: boolean | null;
+	overviewWorkerCount: number;
+	/** The install registry, null until loaded. */
+	installs: ReadonlyArray<{ approved?: boolean }> | null;
+	/** This visit's registry request failed. */
+	registryFailed: boolean;
+	/** This visit has waited `FILTER_DECISION_MS` for an answer. */
+	deadlinePassed: boolean;
+}): FilterGeometry | null {
+	if (known.supported === true) return known.overviewWorkerCount > 1 ? 'row' : 'none';
+	if (known.supported === false) return 'none';
+	// An older server leaves `approved` out: that means approved.
+	if (known.installs) return known.installs.filter((i) => i.approved !== false).length > 1 ? 'row' : 'none';
+	if (known.registryFailed || known.deadlinePassed) return 'row';
+	return null;
+}
+
+/**
+ * What the filter region shows, given the visit's decision: `unknown` (not
+ * decided: the list waits), `hidden` (no row, no space), `shown` (the control:
+ * the overview reports more than one worker) or `reserved` (the row's space,
+ * its control invisible and inert, because the overview has not answered yet,
+ * failed, or answered "no filter" after the space was taken).
+ */
+export type WorkerFilterSlot = 'unknown' | 'hidden' | 'reserved' | 'shown';
+
+export function workerFilterSlot(geometry: FilterGeometry | null, supported: boolean | null, overviewWorkerCount: number): WorkerFilterSlot {
+	if (geometry === null) return 'unknown';
+	if (geometry === 'none') return 'hidden';
+	return supported === true && overviewWorkerCount > 1 ? 'shown' : 'reserved';
+}

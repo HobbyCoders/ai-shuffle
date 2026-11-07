@@ -9,7 +9,8 @@
 	import { getSettingsAccess } from '$lib/settings/access.svelte';
 	import { getRowContext, settle, type ChangeResult } from './row-context';
 
-	type Option = T | { value: T; label: string; icon?: SettingsIcon; disabled?: boolean };
+	/** `title` names the option in full where a page shortens its label to one line. */
+	type Option = T | { value: T; label: string; icon?: SettingsIcon; disabled?: boolean; title?: string };
 
 	interface Props {
 		options: readonly Option[];
@@ -30,7 +31,7 @@
 	const row = getRowContext();
 	const off = $derived(disabled || access.readOnly);
 	const items = $derived(
-		options.map((o) => (typeof o === 'string' ? { value: o as T, label: o as string, icon: undefined, disabled: false } : { disabled: false, ...o }))
+		options.map((o) => (typeof o === 'string' ? { value: o as T, label: o as string, icon: undefined, disabled: false, title: undefined } : { disabled: false, ...o }))
 	);
 
 	function pick(next: T) {
@@ -56,7 +57,8 @@
 			aria-pressed={selection === 'pressed' ? item.value === value : undefined}
 			aria-checked={selection === 'radio' ? item.value === value : undefined}
 			disabled={off || item.disabled}
-			onclick={() => pick(item.value)}>{#if item.icon}<item.icon size={14} strokeWidth={1.8} aria-hidden="true" />{/if}{item.label}</button
+			title={item.title}
+			onclick={() => pick(item.value)}>{#if item.icon}<item.icon size={14} strokeWidth={1.8} aria-hidden="true" />{/if}<span class="st-seg-label">{item.label}</span></button
 		>
 	{/each}
 </div>
