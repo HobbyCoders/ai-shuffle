@@ -13,6 +13,7 @@ import uuid
 from typing import Dict, Any, List, Optional
 
 from app.core.config import settings
+from app.db.async_database import run_sync
 
 logger = logging.getLogger(__name__)
 
@@ -267,7 +268,7 @@ def get_user_attention_snapshot(user_id: str) -> List[Dict[str, Any]]:
 async def publish_session_attention(session_id: str) -> None:
     """Fan a session's durable pending-prompt count to its owner. Never raises."""
     try:
-        info = await asyncio.to_thread(get_session_attention, session_id)
+        info = await run_sync(get_session_attention, session_id)
         if info is None:
             return
         user_id, count, kind = info
@@ -407,7 +408,7 @@ class UserQuestionHandler:
             create_kwargs["interaction_id"] = str(uuid.uuid5(
                 uuid.NAMESPACE_URL, f"question:{session_id}:{request_id}"
             ))
-        row = await asyncio.to_thread(
+        row = await run_sync(
             interactions.create_interaction, session_id, QUESTION_KIND, payload, ttl,
             **create_kwargs,
         )
@@ -509,7 +510,7 @@ class UserQuestionHandler:
         from app.db import interactions
 
         try:
-            cancelled = await asyncio.to_thread(
+            cancelled = await run_sync(
                 interactions.cancel_interaction, interaction_id
             )
         except Exception:  # noqa: BLE001
@@ -604,7 +605,7 @@ class UserQuestionHandler:
         session_id = row["session_id"]
         request_id = row["payload"]["request_id"]
         if envelope.get(DISMISSED_KEY):
-            cancelled = await asyncio.to_thread(interactions.cancel_interaction, row["id"])
+            cancelled = await run_sync(interactions.cancel_interaction, row["id"])
             if cancelled:
                 await self._retire_native_question(session_id)
                 interaction_wait.notify_changed(session_id)
@@ -624,14 +625,14 @@ class UserQuestionHandler:
             f"{key}\n{', '.join(map(str, value)) if isinstance(value, list) else value}"
             for key, value in answers.items()
         )
-        handoff_context = await asyncio.to_thread(_confirmed_handoff_context, session_id, row["payload"])
+        handoff_context = await run_sync(_confirmed_handoff_context, session_id, row["payload"])
         if handoff_context:
             prompt = handoff_context + "\n\n" + prompt
         # Inherit the latest runnable context, not settings from when a days-old
         # question was posted. Keep only transport attribution from its payload.
-        context = await asyncio.to_thread(turn_scheduler._latest_context_turn, session_id) or {}
+        context = await run_sync(turn_scheduler._latest_context_turn, session_id) or {}
         context = {**context, "payload": turn_scheduler._context_payload(context)}
-        accepted = await asyncio.to_thread(
+        accepted = await run_sync(
             interactions.answer_question_and_enqueue, row, envelope,
             answered_by_device, prompt, context, human_input=human_input,
             handoff_context_confirmed=bool(handoff_context),
@@ -643,7 +644,7 @@ class UserQuestionHandler:
         try:
             from app.core import wakeup_service
             from app.core.task_registry import task_registry
-            await asyncio.to_thread(
+            await run_sync(
                 wakeup_service.cancel_session_wakeups, session_id,
                 exclude_source=wakeup_service.HELD_PEER_SOURCE,
             )
@@ -660,7 +661,7 @@ class UserQuestionHandler:
         # Delivery records it in the transcript and clears the bubble.
         await _broadcast_queue_after_start(session_id)
         try:
-            await asyncio.to_thread(turn_claim.notify_turns_changed, session_id)
+            await run_sync(turn_claim.notify_turns_changed, session_id)
         except Exception:
             logger.warning("Question answer claim notification failed for %s", session_id, exc_info=True)
         await interaction_events.emit_interaction_answered(
@@ -696,7 +697,7 @@ class UserQuestionHandler:
         envelope = build_answer_envelope(answers, dismissed=dismissed, skipped=skipped)
         if (row.get("payload") or {}).get("nonblocking"):
             return await self._answer_nonblocking(row, envelope, answered_by_device, human_input=human_input)
-        answered = await asyncio.to_thread(
+        answered = await run_sync(
             interactions.answer_interaction, row["id"], envelope, answered_by_device
         )
         if answered:
@@ -772,7 +773,7 @@ class UserQuestionHandler:
         for row in self._v2_pending_questions(session_id):
             if not include_nonblocking and (row.get("payload") or {}).get("nonblocking"):
                 continue
-            if await asyncio.to_thread(interactions.cancel_interaction, row["id"]):
+            if await run_sync(interactions.cancel_interaction, row["id"]):
                 cancelled += 1
                 cancelled_rows.append(
                     (row["id"], (row.get("payload") or {}).get("request_id"))
