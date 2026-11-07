@@ -262,14 +262,35 @@ async def test_failed_drain_does_not_release_admission(monkeypatch, caplog):
         admission.clear()
 
 
-async def test_terminal_reader_queues_followup_behind_its_finishing_route(monkeypatch):
+async def test_string_frames_pass_through_without_terminal_inspection(monkeypatch):
+    admission.clear()
+    monkeypatch.setattr(admission, "get_session_pool", lambda: SimpleNamespace(peek=lambda sid: None))
+    frame = "opaque string frame"
+
+    async def events(lease):
+        yield frame
+
+    reader = admission.stream_turn("string-frame", events)
+    try:
+        assert await anext(reader) is frame
+        assert not admission._holders["string-frame"].ending
+        with pytest.raises(StopAsyncIteration):
+            await anext(reader)
+        assert "string-frame" not in admission._holders
+    finally:
+        await reader.aclose()
+        admission.clear()
+
+
+@pytest.mark.parametrize("terminal", ["done", "interrupted", "error"])
+async def test_terminal_reader_queues_followup_behind_its_finishing_route(monkeypatch, terminal):
     admission.clear()
     monkeypatch.setattr(admission, "get_session_pool", lambda: SimpleNamespace(peek=lambda sid: None))
     async def events(lease):
-        yield {"type": "done"}
+        yield {"type": terminal}
 
     reader = admission.stream_turn("terminal-followup", events)
-    assert (await anext(reader))["type"] == "done"
+    assert (await anext(reader))["type"] == terminal
     lease = admission._holders["terminal-followup"]
     following = asyncio.create_task(admission.acquire("terminal-followup"))
     try:

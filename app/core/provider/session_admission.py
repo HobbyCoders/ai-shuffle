@@ -426,7 +426,7 @@ async def stream_turn(
                 event = await anext(events)
             except StopAsyncIteration:
                 break
-            if event.get("type") in {"done", "interrupted", "error"}:
+            if isinstance(event, dict) and event.get("type") in {"done", "interrupted", "error"}:
                 # The reader may send its next message before release finishes.
                 # Queue it behind saving rather than refusing an idle-looking chat.
                 turn_ended(lease)
