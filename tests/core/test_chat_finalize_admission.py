@@ -8,6 +8,7 @@ import pytest
 from app.core import session_runtime
 from app.core.provider import session_admission as admission
 from app.db import turns
+from tests._admission_cleanup import wait_for_lease_release
 from tests.core.test_session_runtime import _runtime_env
 
 SID = "chat-finalize-admission"
@@ -37,7 +38,7 @@ async def test_direct_successor_waits_until_chat_finalization_has_finished(mock_
         try:
             admitted.set()
         finally:
-            admission.close(lease)
+            await wait_for_lease_release(lease)
 
     with _runtime_env(pump=pump), patch(
         "app.core.turn_finalize.persist_turn_end_state", side_effect=persist,
@@ -71,7 +72,7 @@ async def test_busy_direct_turn_keeps_chat_queued_without_session_cleanup(mock_d
         teardown.assert_not_awaited()
         env["recorder"].start.assert_not_awaited()
     finally:
-        admission.close(direct)
+        await wait_for_lease_release(direct)
 
 
 @pytest.mark.parametrize("cancel", [False, True], ids=["error", "cancelled"])
@@ -162,7 +163,7 @@ async def test_rewind_timeout_fences_old_finalizer_from_direct_successor(mock_db
                 with pytest.raises(asyncio.TimeoutError):
                     await asyncio.wait_for(old.exited.wait(), 0.01)
                 assert not old.exited.is_set()
-                admission.close(rewind)
+                await wait_for_lease_release(rewind)
                 direct = await admission.acquire(SID)
                 # This is the supervisor's actual live-worker lookup. Teardown
                 # is real, only the process-stop boundary is intercepted.
@@ -184,7 +185,7 @@ async def test_rewind_timeout_fences_old_finalizer_from_direct_successor(mock_db
                 resume.set()
                 await asyncio.wait_for(running, 5)
                 if direct is not None:
-                    admission.close(direct)
+                    await wait_for_lease_release(direct)
                 supervisor.unregister_worker(SID, worker.worker_session_id)
 
 
@@ -209,7 +210,7 @@ async def test_replaced_runtime_deregisters_without_stopping_or_completing_direc
             await asyncio.wait_for(entered.wait(), 5)
             rewind = await admission.begin_rewind(SID)
             assert admission.take_for_rewind(rewind) is rt._admission_lease
-            admission.close(rewind)
+            await wait_for_lease_release(rewind)
             direct = await admission.acquire(SID)
             # A direct-API successor never replaces _live_runtimes[sid].
             assert session_runtime._live_runtimes[SID] is rt
@@ -235,4 +236,4 @@ async def test_replaced_runtime_deregisters_without_stopping_or_completing_direc
             resume.set()
             await asyncio.wait_for(running, 5)
             if direct is not None:
-                admission.close(direct)
+                await wait_for_lease_release(direct)
