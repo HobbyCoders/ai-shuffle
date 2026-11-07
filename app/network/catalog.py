@@ -362,19 +362,31 @@ def _publish_session_events(ctx: engine.NetworkContext, coll: policy.Collection,
                 (session_id, published_seq, take))
             rows = [dict(r) for r in cursor.fetchall()]
             skipped = 0
+            eligible = []
             for row in rows:
-                record_id = coll.record_id(row)
                 # One event the envelope cannot carry (over the size cap)
                 # must not freeze this session or the ones after it.
                 try:
                     plaintext = engine.serialize_row(coll, row)
                     if plaintext is not None and len(envelope_mod.record_bytes(plaintext)) > MAX_EVENT_BYTES:
                         raise envelope_mod.EnvelopeError("Event exceeds the envelope size cap")
-                    if engine.record(cursor, "session_events", record_id, row, ctx=ctx, order_seq=int(row["seq"])) is not None:
-                        count += 1
+                    eligible.append(row)
                 except (envelope_mod.EnvelopeError, engine.ApplyError, ValueError, TypeError):
                     skipped += 1
                 published_seq = int(row["seq"])
+            bulk = engine.record_event_batch(cursor, eligible, ctx=ctx)
+            if bulk is not None:
+                count += bulk
+            else:
+                # Existing/mixed windows and individual validation failures keep
+                # the original per-event rewrite, echo and skip behavior.
+                for row in eligible:
+                    try:
+                        if engine.record(cursor, "session_events", coll.record_id(row), row,
+                                         ctx=ctx, order_seq=int(row["seq"])) is not None:
+                            count += 1
+                    except (envelope_mod.EnvelopeError, engine.ApplyError, ValueError, TypeError):
+                        skipped += 1
             if skipped:
                 logger.warning("Skipped %d unpublishable transcript event(s) of session %s", skipped, session_id)
             if rows:
