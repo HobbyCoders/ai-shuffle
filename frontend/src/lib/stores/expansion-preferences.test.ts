@@ -152,7 +152,7 @@ describe('account expansion preferences', () => {
 			versions: { context_breakdown_open: 'v1' } });
 		await load;
 		expect(breakdown.current).toBe(false);
-		expect(put).toHaveBeenCalledWith('context_breakdown_open', false, false, 'v1');
+		expect(put).toHaveBeenCalledWith('context_breakdown_open', false, false, 'v1', expect.any(String));
 	});
 	it('ignores a previous account snapshot after resetting and hydrating the next account', async () => {
 		const old = deferred<Record<string, unknown>>();

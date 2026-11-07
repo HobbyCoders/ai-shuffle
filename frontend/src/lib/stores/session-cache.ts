@@ -92,6 +92,15 @@ class SessionEphemeralCache {
 		if (entry) entry.draft = draft;
 	}
 
+	/**
+	 * Move a cached entry still on project `projectId` under the retired shared
+	 * ID `from` to `to`, in place; the draft and checkout stay. No-op otherwise.
+	 */
+	patchProjectIdentity(sessionId: string, projectId: string, from: string | null, to: string): void {
+		const entry = this.cache.get(sessionId);
+		if (entry && entry.project === projectId && (entry.projectV2Id || null) === from) entry.projectV2Id = to;
+	}
+
 	/** A cached session's draft, without touching its place in the cache. */
 	peekDraft(sessionId: string): string | undefined {
 		return this.cache.get(sessionId)?.draft;

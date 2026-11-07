@@ -527,8 +527,6 @@ const PROJECT_ALLOW = [
 	{ kind: 'layout_shift', reason: 'the first send moves the composer down' }
 ];
 
-const NO_PROJECT_DROP = /the chosen project was dropped/;
-
 const noProjectChosen = (hero) => hero.getByRole('button', { name: /^No project/ });
 
 /** Choose the project unless the screen already holds it (it keeps the last one chosen). */
@@ -605,11 +603,6 @@ const PROJECT_CHOICE_SURVIVES = {
 	// only say the choice holds up to the link. The store under test is the same one.
 	viewports: ['desktop'],
 	allow: PROJECT_ALLOW,
-	knownBug: {
-		issue: 1078,
-		error: NO_PROJECT_DROP,
-		reason: 'the app remembers a project by its catalog row, and gaining a remote retires that row, so it reads the project as gone'
-	},
 	setup: (ctx) => projectGainingARemote(ctx, { rememberCatalogRow: true }),
 	async cleanup({ page, project, nudge }) {
 		if (project) await api(page, 'DELETE', `/projects/${project.id}`).catch(() => {});
@@ -646,22 +639,8 @@ const PROJECT_ONCE = {
 	async act({ page, mark, log, project, olderId }) {
 		const hero = page.getByRole('region', { name: 'New chat' });
 		await mark('a worktree on a new branch, then the first message');
-		// This case is about the listing. Losing the choice has its own case above
-		// (#1078), so step around that one failure here and nothing else: the screen
-		// saying "No project" is the only thing that sends it round again.
-		const branch = `journey/${uniq()}`;
-		for (let attempt = 1; ; attempt++) {
-			try {
-				if (await noProjectChosen(hero).isVisible()) log('known bug #1078: the screen dropped the project; choosing it again');
-				await chooseProject(page, hero, project.name);
-				await chooseNewWorktreeBranch(page, hero, branch);
-				break;
-			} catch (error) {
-				if (attempt === 3 || !NO_PROJECT_DROP.test(error.message)) throw error;
-				log(`known bug #1078 on attempt ${attempt}: choosing the project again`);
-				await page.keyboard.press('Escape');
-			}
-		}
+		await chooseProject(page, hero, project.name);
+		await chooseNewWorktreeBranch(page, hero, `journey/${uniq()}`);
 		const token = `once-${uniq()}`;
 		await typeAndSend(page, `first message ${token}`);
 		await waitTurnSettled(page, { timeout: 120_000 });

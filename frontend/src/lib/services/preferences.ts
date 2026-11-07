@@ -7,7 +7,8 @@ export const preferenceSync = new PreferenceSync({
   try { return await api.get<{ value: unknown; version: string | null }>(`/preferences/${encodeURIComponent(key)}`); }
   catch (error) { if ((error as { status?: number }).status === 404) return null; throw error; }
  },
- put: (key, value, onlyIfMissing, expectedVersion) => api.put<{ value: unknown; version: string | null }>(
+ put: (key, value, onlyIfMissing, expectedVersion, writeId) => api.put<{ value: unknown; version: string | null }>(
   `/preferences/${encodeURIComponent(key)}${onlyIfMissing ? '?only_if_missing=true' : ''}`,
-  { key, value, ...(expectedVersion !== undefined ? {expected_version: expectedVersion} : {}) })
+  { key, value, ...(expectedVersion !== undefined ? {expected_version: expectedVersion} : {}),
+   ...(writeId ? {write_id: writeId} : {}) })
 });

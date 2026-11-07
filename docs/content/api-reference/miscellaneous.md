@@ -1562,7 +1562,7 @@ curl -X PUT http://localhost:8000/api/v1/preferences/theme \
   -d '{"key": "theme", "value": "dark"}'
 ```
 
-The body must include `key` as well as `value`. Send `expected_version` (the `version` from a previous read) to get `409` instead of overwriting a newer value. Add `?only_if_missing=true` to write only when no value is set.
+The body must include `key` as well as `value`. Send `expected_version` (the `version` from a previous read) to get `409` instead of overwriting a newer value. An optional `write_id` (a UUID you choose for this edit) becomes the new `version`. Send the same `write_id` when you retry the edit: if that write already went through, the retry returns the saved value instead of `409`. Add `?only_if_missing=true` to write only when no value is set.
 
 ### DELETE /api/v1/preferences/{key}
 
