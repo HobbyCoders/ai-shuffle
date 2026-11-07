@@ -68,6 +68,11 @@ _BRANCH_REF = re.compile(
     r"|\b[a-z0-9]+(?:-[a-z0-9]+)+\s+(?:(?:Linux|Windows)\s+)?(?:worktree|checkout)\b"
     r"|\.fluid/worktrees/[\w.-]+")
 MAX_TOMBSTONES = 256
+# Local loss accounting remembers this many recently deleted copies (a short
+# hash of origin:id and text each, ~32 KB at most) so a replica replaying a
+# copy this store already deleted is not counted as a second loss (#956).
+# Several peers' full archives fit; sync and retention are unchanged.
+MAX_LOSS_KEYS = 2048
 BLOOM_BYTES = 16 * 1024
 MAX_DOCUMENT_BYTES = 2 * 1024 * 1024
 # The # Memory snapshot (see SkillStore.memory_snapshot_plan) is one style of
@@ -581,7 +586,7 @@ class FactStore:
         if ended:
             gone = {id(e) for e in ended}
             doc["archived"] = [e for e in doc["archived"] if id(e) not in gone]
-            self._note_loss(doc, "expired_archived", len(ended), now)
+            self._note_loss(doc, "expired_archived", ended, now)
         self._repair_supersession_links(doc)
         live = doc["entries"]
         inferred = [e for e in live if tier(e) == "inferred" and not retained(e)]
@@ -601,21 +606,40 @@ class FactStore:
         explicit = [e for e in archived if retained(e)]
         rest = sorted((e for e in archived if not retained(e)),
                       key=lambda e: (tier(e) == "durable", usefulness(e) if e.get("durable") else e.get("updated_at", 0), str(e.get("id"))))
-        doc["archived"] = rest[max(0, len(rest) - MAX_ARCHIVED_MEMORIES):] + explicit
-        if len(rest) > MAX_ARCHIVED_MEMORIES:
-            self._note_loss(doc, "archive_dropped", len(rest) - MAX_ARCHIVED_MEMORIES, now)
+        cut = max(0, len(rest) - MAX_ARCHIVED_MEMORIES)
+        doc["archived"] = rest[cut:] + explicit
+        if cut:
+            self._note_loss(doc, "archive_dropped", rest[:cut], now)
         self._repair_supersession_links(doc)
         # Compact deletion bodies; the monotonic barrier survives compaction.
         doc["tombstones"] = doc["tombstones"][-MAX_TOMBSTONES:]
         return before != json.dumps(doc, sort_keys=True)
 
     @staticmethod
-    def _note_loss(doc, kind, count, now):
+    def _note_loss(doc, kind, gone, now):
         """Count facts that left the store without a Forget (local, not
-        replicated): totals plus the time of the latest one per kind."""
+        replicated): totals plus the time of the latest one per kind.
+
+        A copy is counted once. A replica replaying a copy this store
+        already deleted (same origin:id and text) brings it back only for
+        the next trim to delete it again; that is not a new loss, so it
+        neither adds to the total nor refreshes the time (#956). The copy
+        still returns and is trimmed exactly as before."""
         losses = doc.get("losses") if isinstance(doc.get("losses"), dict) else {}
-        losses[kind] = int(losses.get(kind, 0) or 0) + int(count)
-        losses[f"last_{kind}_at"] = now
+        seen = [k for k in losses.get("deleted_keys", []) if isinstance(k, str)]
+        known = set(seen)
+        new = 0
+        for e in gone:
+            key = hashlib.sha256(f"{global_id(e)}\0{fingerprint(e['text'])}".encode()).hexdigest()[:12]
+            if key in known:
+                continue
+            known.add(key)
+            seen.append(key)
+            new += 1
+        losses["deleted_keys"] = seen[-MAX_LOSS_KEYS:]
+        if new:
+            losses[kind] = int(losses.get(kind, 0) or 0) + new
+            losses[f"last_{kind}_at"] = now
         doc["losses"] = losses
 
     def reap(self):

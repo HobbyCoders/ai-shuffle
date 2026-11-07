@@ -125,3 +125,59 @@ def test_unresolved_legacy_conflict_never_bypasses_injection_screen(tmp_path):
     store._facts.merge(packet)
     section = store.render_memory_section()
     assert unsafe not in section and "withheld" in section
+
+
+# The generalized #958 shape: several owner-kept rules in one project, each on
+# its own subject, all sharing the project's vocabulary (product name, model
+# names, a date). No path may link any ordered pair as a replacement.
+SHARED = "AI Shuffle owner rule from 2026-10-26 for Claude Opus and GPT Sol sessions"
+UNRELATED_RULES = [
+    f"{SHARED}: multi-worker sign-in stays on each worker; the phone chip shows which worker is active.",
+    f"{SHARED}: delegated CLI sessions reach parity with native ones, including the journal and learner.",
+    f"{SHARED}: bypass mode still runs the command safety check before every shell command.",
+    f"{SHARED}: the speed sprint job uses Sol for implementation, including UI work.",
+    f"{SHARED}: the live-testing workflow job uses Opus because it must be bullet proof.",
+]
+
+
+def test_no_path_links_unrelated_owner_rules_that_share_project_vocabulary(tmp_path):
+    from types import SimpleNamespace
+
+    from fluid.codemode.continual import Synthesizer
+
+    scope = "project:fixture"
+    store = SkillStore(tmp_path / "source")
+    # Every save runs the automatic save-time supersession check.
+    saved = [store.save_memory(text, protected=True, scope=scope) for text in UNRELATED_RULES]
+    for a in saved:
+        for b in saved:
+            if a.id != b.id:
+                assert len(subject_terms(a.text) & subject_terms(b.text)) >= 3
+    assert not store._facts.reconcile_supersessions()
+
+    learner = SimpleNamespace(_store=store)
+    for old in saved:
+        for new in saved:
+            if old.id == new.id:
+                continue
+            current = {e.id: e for e in store.memories()}
+            revisions = {i: e.revision for i, e in current.items()}
+            errors = []
+            # The learner's own parser and apply path over a model's proposal.
+            assert Synthesizer._apply_supersession_proposals(
+                learner, f'<supersede-memory old="{old.id}" new="{new.id}"/>', revisions, errors) == []
+            assert not errors
+            # The owner-conflict curator path (protected_conflict) as well.
+            assert not store.propose_memory_supersession(
+                old.id, new.id, old_revision=revisions[old.id], new_revision=revisions[new.id],
+                protected_conflict=True)
+
+    replica = SkillStore(tmp_path / "replica")
+    for target in (store, replica):
+        if target is replica:
+            replica._facts.merge(store._facts.export())
+        rows = target.memories()
+        assert {e.text for e in rows} == set(UNRELATED_RULES)
+        assert not any(e.superseded_by for e in rows + target.archived_memories())
+        assert set(target.memory_snapshot_plan(scope)["shown_ids"]) == {e.id for e in rows}
+        assert "do not use the old value" not in target.render_memory_section(scope)

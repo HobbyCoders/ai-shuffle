@@ -46,7 +46,6 @@ def test_loss_counters_are_local_not_imported_from_replicas(tmp_path, monkeypatc
     assert replica._facts.snapshot().get("losses", {}).get("archive_dropped", 0) == 0
 
 
-@pytest.mark.xfail(strict=True, reason="known defect: replay inflates archive loss events, #956")
 def test_stale_replica_replay_does_not_add_archive_loss_events(tmp_path, monkeypatch):
     source = SkillStore(tmp_path / "source")
     fill(source, monkeypatch)
@@ -59,7 +58,7 @@ def test_stale_replica_replay_does_not_add_archive_loss_events(tmp_path, monkeyp
     assert capacity(first)["detail"]["archive_dropped_total"] == 1
 
     # Replaying a packet must not report new loss when the retained facts
-    # do not change. The current defect recounts the same deleted copy.
+    # do not change: the same deleted copy is not counted twice (#956).
     for _ in range(10):
         replica._facts.merge(packet)
         assert {e.id for e in replica.memories() + replica.archived_memories()} == retained_ids
@@ -71,6 +70,52 @@ def test_stale_replica_replay_does_not_add_archive_loss_events(tmp_path, monkeyp
     assert signal["detail"]["archive_dropped_in_window"] == 0
     assert "not the number of distinct facts lost" in signal["reason"]
     assert "Recall cannot recover a deleted copy" in signal["reason"]
+
+
+def test_replay_neither_counts_nor_refreshes_time_but_a_new_distinct_loss_does(tmp_path, monkeypatch):
+    source = SkillStore(tmp_path / "source")
+    fill(source, monkeypatch)
+    packet = source._facts.export()
+    replica = SkillStore(tmp_path / "replica")
+    replica._facts.merge(packet)
+    replica.save_memory("A newer durable receipt on the replica", durable=True)
+    losses = replica._facts.snapshot()["losses"]
+    assert losses["archive_dropped"] == 1
+    stamp = losses["last_archive_dropped_at"]
+    for _ in range(10):
+        replica._facts.merge(packet)
+    losses = replica._facts.snapshot()["losses"]
+    # Replays of an already-deleted copy leave both the count and the time,
+    # so a quiet store does not look as if it were still losing facts.
+    assert losses["archive_dropped"] == 1 and losses["last_archive_dropped_at"] == stamp
+    assert len(losses["deleted_keys"]) == 1
+    # A genuinely new deletion is still counted and stamped.
+    replica.save_memory("A second newer durable receipt on the replica", durable=True)
+    losses = replica._facts.snapshot()["losses"]
+    assert losses["archive_dropped"] == 2 and losses["last_archive_dropped_at"] >= stamp
+
+
+def test_expired_copy_replayed_by_a_replica_is_counted_once(tmp_path, monkeypatch):
+    source = SkillStore(tmp_path / "source")
+    source.save_memory("An inferred receipt that will expire")
+    packet = source._facts.export()
+    replica = SkillStore(tmp_path / "replica")
+    future = time.time() + 1000 * memory_health.DAY
+    monkeypatch.setattr(facts.time, "time", lambda: future)
+    for _ in range(5):
+        replica._facts.merge(packet)
+    assert replica._facts.snapshot()["losses"]["expired_archived"] == 1
+
+
+def test_deleted_copy_memory_is_bounded(tmp_path, monkeypatch):
+    monkeypatch.setattr(facts, "MAX_LOSS_KEYS", 3)
+    store = SkillStore(tmp_path)
+    fill(store, monkeypatch)
+    for i in range(4):
+        store.save_memory(f"Extra durable backend receipt {i}", durable=True)
+    losses = store._facts.snapshot()["losses"]
+    assert losses["archive_dropped"] == 6
+    assert len(losses["deleted_keys"]) == 3
 
 
 def test_repeated_local_save_deduplicates_before_archive_eviction(tmp_path, monkeypatch):
@@ -214,3 +259,27 @@ def test_archive_cleanup_excludes_live_and_archived_owner_kept_facts(tmp_path, m
     snapshot = store._facts.snapshot()
     assert {old.text, new.text, live.text} <= {
         e["text"] for e in snapshot["entries"] + snapshot["archived"]}
+
+
+def test_healthy_capacity_with_past_or_unknown_loss_is_a_readable_note(tmp_path, monkeypatch):
+    # Quiet history: real deletions, then nothing for longer than the window.
+    store = SkillStore(tmp_path / "quiet")
+    fill(store, monkeypatch)
+    now = time.time()
+    first = memory_health.check(store, now=now)
+    assert capacity(first)["state"] == "attention" and not capacity(first)["note"]
+    quiet = memory_health.check(store, now=now + 30 * memory_health.DAY, previous=first)
+    s = capacity(quiet)
+    assert s["state"] == "healthy" and not s["alert"] and s["note"]
+    view = next(v for v in memory_health.summary(quiet)["signals"] if v["id"] == "capacity")
+    assert view["note"] and "recorded 2 permanent deletions" in view["reason"]
+
+    # A counter without timing history (written by an older build).
+    _, detail = memory_health._archive_loss_samples({"losses": {"archive_dropped": 80}}, now, {})
+    legacy = memory_health._capacity_signal(SkillStore(tmp_path / "legacy"), [], [], detail)
+    assert legacy["state"] == "healthy" and legacy["note"]
+    assert "Some older deletion times are unknown" in legacy["reason"]
+
+    # Nothing was ever deleted: no note.
+    empty = capacity(memory_health.check(SkillStore(tmp_path / "empty")))
+    assert empty["state"] == "healthy" and not empty["note"]
