@@ -21,7 +21,10 @@ function setup() {
 		entityType: 'projects',
 		selectedId: null,
 		onSelect: vi.fn(),
-		extraGroups: [{ name: 'Folders', items: [{ id: 'f1', name: 'Beta' }] }]
+		extraGroups: [
+			{ name: 'Folders', items: [{ id: 'f1', name: 'Beta' }] },
+			{ name: 'Archive', items: [{ id: 'a1', name: 'Gamma' }] }
+		]
 	});
 	const main = container.querySelector<HTMLElement>('.main-panel')!;
 	const sub = container.querySelector<HTMLElement>('.sub-panel')!;
@@ -30,7 +33,7 @@ function setup() {
 
 describe('GroupedSelector panels', () => {
 	it('keeps only the visible panel reachable', async () => {
-		const { main, sub } = setup();
+		const { sub } = setup();
 		expect(isInert(main)).toBe(false);
 		expect(isInert(sub)).toBe(true);
 
@@ -40,9 +43,9 @@ describe('GroupedSelector panels', () => {
 	});
 
 	it('moves keyboard focus with the slide without scrolling', async () => {
-		const { main, sub } = setup();
+		const { sub } = setup();
 		const focus = vi.spyOn(HTMLElement.prototype, 'focus');
-		const group = screen.getByRole('button', { name: /Folders/ });
+		const group = screen.getByRole('button', { name: /Archive/ });
 		group.focus();
 		focus.mockClear();
 
@@ -53,7 +56,9 @@ describe('GroupedSelector panels', () => {
 		focus.mockClear();
 		await new Promise((r) => setTimeout(r, 300)); // let the slide finish
 		await fireEvent.click(sub.querySelector<HTMLElement>('.back-button')!);
-		await waitFor(() => expect(main.contains(document.activeElement)).toBe(true));
+		// Back to the row that opened it, not the first row: in a scrolled list
+		// the first row can be out of view.
+		await waitFor(() => expect(document.activeElement).toBe(group));
 		expect(focus).toHaveBeenLastCalledWith({ preventScroll: true });
 		focus.mockRestore();
 	});

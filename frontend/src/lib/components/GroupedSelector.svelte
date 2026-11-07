@@ -97,6 +97,8 @@
 	let mainPanelEl = $state<HTMLDivElement | null>(null);
 	let subPanelEl = $state<HTMLDivElement | null>(null);
 	let containerHeight = $state<number | null>(null);
+	/** The group row that opened the sub-panel by keyboard, focused again on Back. */
+	let opener: HTMLElement | null = null;
 
 	function openGroup(groupName: string) {
 		if (isAnimating) return;
@@ -104,7 +106,9 @@
 		isAnimating = true;
 		// Capture current height
 		if (mainPanelEl) containerHeight = mainPanelEl.scrollHeight;
-		const hadFocus = mainPanelEl?.contains(document.activeElement) ?? false;
+		const active = document.activeElement;
+		const hadFocus = active instanceof HTMLElement && (mainPanelEl?.contains(active) ?? false);
+		opener = hadFocus ? (active as HTMLElement) : null;
 		activeGroup = groupName;
 		// After render, update height to sub-panel
 		tick().then(() => {
@@ -124,7 +128,10 @@
 		activeGroup = null;
 		tick().then(() => {
 			if (mainPanelEl) containerHeight = mainPanelEl.scrollHeight;
-			if (hadFocus) focusFirst(mainPanelEl);
+			// Back to the group row that opened it: the list kept its scroll, so
+			// that row is still in view where the first row may not be.
+			if (hadFocus) (opener?.isConnected ? opener : mainPanelEl?.querySelector<HTMLElement>('button'))?.focus({ preventScroll: true });
+			opener = null;
 			setTimeout(() => {
 				isAnimating = false;
 				containerHeight = null; // Let it be auto again
@@ -145,6 +152,7 @@
 		activeGroup = null;
 		containerHeight = null;
 		isAnimating = false;
+		opener = null;
 	}
 
 	// Reset state when menu closes/opens (items change significantly)
@@ -152,6 +160,7 @@
 		activeGroup = null;
 		containerHeight = null;
 		isAnimating = false;
+		opener = null;
 	}
 </script>
 
