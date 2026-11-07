@@ -1,20 +1,21 @@
 """Live tool-surface discovery — the one inventory.
 
 Everything a session can be given, enumerated from the registries that actually
-build it, never from a hardcoded list. Seven group kinds:
+build it, never from a hardcoded list. Eight group kinds:
 
-============  ==================================================  ==================
-group         source                                              names
-============  ==================================================  ==================
-harness       fluid's ``register_builtins`` into a throwaway
-              ``ToolRegistry``                                    bare (``Read``…)
-app           ``app.mcp.builtin_tools`` server definitions        ``mcp__builtins__*``
-ai            ``app.mcp.ai_tools_sdk`` (``TOOL_CONFIG_MAP``)      ``mcp__ai-tools__*``
-computer_use  ``app.mcp.computer_use_sdk._TOOL_NAMES``            ``mcp__computer-use__*``
-browser       the bundled browser server's ``list_tools``         ``mcp__browser__*``
-app_config    ``app.mcp.app_config_sdk``                          ``mcp__app-config__*``
-mcp:<server>  each configured user MCP server's ``list_tools``    ``mcp__<server>__*``
-============  ==================================================  ==================
+==============  ================================================  ======================
+group           source                                            names
+==============  ================================================  ======================
+harness         fluid's ``register_builtins`` into a throwaway
+                ``ToolRegistry``                                  bare (``Read``…)
+app             ``app.mcp.builtin_tools`` server definitions      ``mcp__builtins__*``
+private_access  ``app.mcp.chat_access_sdk`` server definitions    ``mcp__chat-access__*``
+ai              ``app.mcp.ai_tools_sdk`` (``TOOL_CONFIG_MAP``)    ``mcp__ai-tools__*``
+computer_use    ``app.mcp.computer_use_sdk._TOOL_NAMES``          ``mcp__computer-use__*``
+browser         the bundled browser server's ``list_tools``       ``mcp__browser__*``
+app_config      ``app.mcp.app_config_sdk``                        ``mcp__app-config__*``
+mcp:<server>    each configured user MCP server's ``list_tools``  ``mcp__<server>__*``
+==============  ================================================  ======================
 
 MCP enumeration (``browser`` and every ``mcp:<server>`` group) runs through
 fluid's own MCP client, which spawns/dials the server, handshakes, and calls
@@ -404,6 +405,35 @@ def app_config_tools() -> List[Dict[str, Any]]:
     return rows
 
 
+#: The one-line hint the picker shows under the private-access group's label.
+PRIVATE_ACCESS_NOTE = "Machines, folders and services you approve in a private card"
+
+
+def private_access_tools() -> List[Dict[str, Any]]:
+    """``mcp__chat-access__*`` — the private-access tools (RequestChatAccess…).
+
+    ``query_options`` attaches the chat-access server only when at least one
+    of these names is permitted by the agent's tool lists, so an agent in
+    "Allow only selected" mode needs them in its list to get private access.
+    The server factory only closes over the session id (used when a tool is
+    called, never at construction), so an empty id yields the real
+    definitions. Rows keep the server's own order, which leads with
+    RequestChatAccess and ChatResources.
+    """
+    from app.mcp.chat_access_sdk import TOOL_NAMES, create_chat_access_server
+
+    described: Dict[str, Any] = {}
+    try:
+        server = create_chat_access_server("")
+        for t in _sdk_server_tools(server):
+            described[f"mcp__chat-access__{t.name}"] = t.description
+    except Exception:
+        logger.warning("could not build the chat-access server for discovery", exc_info=True)
+
+    names = list(dict.fromkeys(list(TOOL_NAMES) + list(described)))
+    return [_tool_row(name, described.get(name)) for name in names]
+
+
 # ---------------------------------------------------------------------------
 # MCP groups (browser + user servers)
 # ---------------------------------------------------------------------------
@@ -507,6 +537,7 @@ def _group(
     server: Optional[str] = None,
     available: bool = True,
     admin_only: bool = False,
+    note: Optional[str] = None,
 ) -> Dict[str, Any]:
     return {
         "id": gid,
@@ -515,6 +546,7 @@ def _group(
         "server": server,
         "available": available,
         "admin_only": admin_only,
+        "note": note,
         "tools": tools,
     }
 
@@ -522,8 +554,8 @@ def _group(
 async def build_tool_surface(*, refresh: bool = False) -> Dict[str, Any]:
     """Every tool a session can be given, grouped.
 
-    Group order is the editor's: harness, app, ai, browser, computer_use,
-    app_config, then MCP servers alphabetically.
+    Group order is the editor's: harness, app, private_access, ai, browser,
+    computer_use, app_config, then MCP servers alphabetically.
     """
     errors: List[Dict[str, str]] = []
     groups: List[Dict[str, Any]] = []
@@ -541,6 +573,18 @@ async def build_tool_surface(*, refresh: bool = False) -> Dict[str, Any]:
 
     app = _safe("app", app_tools)
     groups.append(_group("app", "App tools", "app", app or []))
+
+    private = _safe("private_access", private_access_tools)
+    groups.append(
+        _group(
+            "private_access",
+            "Private access",
+            "private_access",
+            private or [],
+            server="chat-access",
+            note=PRIVATE_ACCESS_NOTE,
+        )
+    )
 
     ai_result = _safe("ai", ai_tools)
     ai_rows, ai_available = ai_result if ai_result else ([], False)

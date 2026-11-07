@@ -33,6 +33,7 @@ const MODES: ToolSelectionMode[] = ['all', 'none', 'allow', 'disallow'];
 const KIND_ORDER: ToolGroupKind[] = [
 	'harness',
 	'app',
+	'private_access',
 	'ai',
 	'browser',
 	'computer_use',

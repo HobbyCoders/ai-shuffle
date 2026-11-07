@@ -19,7 +19,8 @@
 	import { activeView } from '$lib/stores/layout.svelte';
 	import { startProjectSetup, type ProjectKind, type ProjectOverviewRow, type ProjectWorker } from '$lib/api/project-workers';
 	import { SETUP_POLL_MS } from '$lib/stores/project-setup';
-	import { isOnThisWorker, isRunning, missingCount, selfWorker } from './project-workers-view';
+	import { isOnThisWorker, isRunning, missingCount, selfWorker, filterGeometry, workerFilterSlot, startFilterDeadline, type FilterGeometry } from './project-workers-view';
+	import { refreshWorkerPresence, workerInstalls } from '$lib/stores/worker-presence';
 	import { workerDisplayName } from '$lib/components/ui/worker-name';
 	import './project-tabs.css';
 
@@ -84,7 +85,26 @@
 	// Ask for the overview each time the page shows (it stays mounted while
 	// hidden); live-sync's `projects` refresh keeps it fresh while it is used.
 	const shown = $derived(($activeView?.type ?? 'project') === 'project');
-	$effect(() => { if (shown) void loadProjectsOverview(); });
+	// Each visit decides the worker filter row's space afresh (filterGeometry): this visit's
+	// answers, failures and deadline only, never a previous visit's.
+	let overviewSettled = $state(false);
+	let registryFailed = $state(false);
+	let deadlinePassed = $state(false);
+	let filterGeometryDecided = $state<FilterGeometry | null>(null);
+	let visit = 0;
+	$effect(() => {
+		if (!shown) return;
+		const id = ++visit;
+		overviewSettled = false; registryFailed = false; deadlinePassed = false; filterGeometryDecided = null;
+		void loadProjectsOverview().finally(() => { if (id === visit) overviewSettled = true; });
+		// The registry decides the filter row's space when the overview is slower (filterGeometry).
+		if (untrack(() => $workerInstalls) === null) refreshWorkerPresence().catch(() => { if (id === visit) registryFailed = true; });
+		const cancelDeadline = startFilterDeadline(() => { if (id === visit) deadlinePassed = true; });
+		return () => {
+			cancelDeadline(); visit++;
+			overviewSettled = false; registryFailed = false; deadlinePassed = false; filterGeometryDecided = null;
+		};
+	});
 
 	const overviewOn = $derived($projectsOverviewSupported === true);
 	const selfName = $derived.by(() => {
@@ -92,7 +112,8 @@
 			const self = selfWorker(row.workers);
 			if (self) return workerDisplayName(self.device_name, 'Local');
 		}
-		return 'Local';
+		// Before the overview answers, the registry names this worker the same way.
+		return workerDisplayName($workerInstalls?.find((i) => i.is_self)?.device_name, 'Local');
 	});
 
 	function fromOverview(row: ProjectOverviewRow): ListRow {
@@ -134,11 +155,19 @@
 		for (const row of $projectsOverview) for (const w of row.workers) ids.add(w.install_id);
 		return ids.size;
 	});
+	// The first decision of the visit stands: later answers fill or blank the row, never add or remove it.
+	$effect.pre(() => {
+		if (!shown || filterGeometryDecided !== null) return;
+		filterGeometryDecided = filterGeometry({ supported: $projectsOverviewSupported, overviewWorkerCount: workerCount,
+			installs: $workerInstalls, registryFailed, deadlinePassed });
+	});
+	const filterSlot = $derived(workerFilterSlot(filterGeometryDecided, $projectsOverviewSupported, workerCount));
 
 	// Filtered projects
 	const filteredRows = $derived.by(() => {
 		let rows = allRows;
-		if (overviewOn && workerFilter === 'here') rows = rows.filter((r) => r.onHere);
+		// Only a filter the user can see narrows the list.
+		if (filterSlot === 'shown' && workerFilter === 'here') rows = rows.filter((r) => r.onHere);
 		if (!searchQuery.trim()) return rows;
 		const q = searchQuery.toLowerCase();
 		return rows.filter(
@@ -149,6 +178,12 @@
 				(r.remote ?? '').toLowerCase().includes(q)
 		);
 	});
+
+	/** Until the list's shape is decided it paints nothing that could move: no rows before the filter
+	 *  row's space is decided, and no empty state while peers may still bring projects. Both end at
+	 *  the visit's deadline, so stalled requests cannot hold the list back for long. */
+	const listPending = $derived(filterSlot === 'unknown' || (filterSlot === 'reserved' && $projectsOverviewSupported === null
+		&& !overviewSettled && !deadlinePassed && !filteredRows.length && !searchQuery.trim()));
 
 	// While a setup runs somewhere, re-read the overview every 2 s (the
 	// resources_changed refresh also lands; this is the fail-safe).
@@ -262,15 +297,18 @@
 
 <ViewShell label="Projects" detailOpen={!!selectedRow} detailKey={selectedKey} onBack={handleBack} bind:stacked>
 	{#snippet panel()}
-		<ViewPanel title="Projects" count={allRows.length}>
+		<ViewPanel title="Projects" count={allRows.length} loading={listPending}>
 			{#snippet actions()}<PanelIconButton label="New project" icon={Plus} onclick={() => (showAddModal = true)} />{/snippet}
 			{#snippet search()}<PanelSearch bind:value={searchQuery} label="Search projects" placeholder="Search projects" />{/snippet}
 			{#snippet filters()}
-				{#if overviewOn && workerCount > 1}
-					<Segmented label="Show projects" size="sm" bind:value={workerFilter} options={[{ value: 'all', label: 'All workers' }, { value: 'here', label: `On ${selfName}` }]} />
+				{#if filterSlot === 'shown' || filterSlot === 'reserved'}
+					<div class="worker-filter" class:reserved={filterSlot === 'reserved'} aria-hidden={filterSlot === 'reserved' || undefined} inert={filterSlot === 'reserved'}>
+						<Segmented label="Show projects" size="sm" bind:value={workerFilter} options={[{ value: 'all', label: 'All workers' }, { value: 'here', label: `On ${selfName}`, title: `Show only projects on ${selfName}` }]} />
+					</div>
 				{/if}
 			{/snippet}
 			<div data-ui-projects={overviewOn ? 'overview' : 'local'}>
+				{#if !listPending}
 				{#each filteredRows as row (row.key)}
 					<div data-project-key={row.key}>
 						<ListItem id={row.key} name={row.name} summary={rowMeta(row)} icon={row.kind === 'git' ? FolderGit2 : FolderOpen}
@@ -284,6 +322,7 @@
 						<button class="st-btn primary" onclick={() => (showAddModal = true)}><Plus />New project</button>
 					</EmptyDetail>
 				{/each}
+				{/if}
 			</div>
 		</ViewPanel>
 	{/snippet}
@@ -334,3 +373,23 @@
 	{/snippet}
 </ViewShell>
 <AddProjectModal open={showAddModal} onClose={() => (showAddModal = false)} onCreated={() => void loadProjectsOverview()} />
+
+<style>
+	/* The filter's space, held while the overview may still show it (filterGeometry). */
+	.worker-filter { display: flex; align-items: center; min-width: 0; max-width: 100%; }
+	.worker-filter.reserved { visibility: hidden; }
+	/* One line whatever the worker's name: the held row and the filled one keep the same height. A
+	   long name is shortened with an ellipsis; the button's name and tooltip keep it whole. */
+	.worker-filter :global(.st-seg) { flex-wrap: nowrap; min-width: 0; }
+	.worker-filter :global(.st-seg button) { min-width: 0; }
+	.worker-filter :global(.st-seg button:first-child) { flex-shrink: 0; }
+	.worker-filter :global(.st-seg-label) { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+	/* While the list's shape is unknown (listPending) its region holds nothing; it is not painted
+	   until then, so its first paint already sits under the filter row's final space. */
+	:global(.view-panel[aria-label="Projects"][aria-busy="true"] > .panel-body) { visibility: hidden; }
+	/* ViewPanel folds the filter row and the search field's gap away beside an empty state; once this
+	   visit holds the row's space it keeps it, so "No projects" giving way to a peer's projects moves
+	   nothing. */
+	:global(.view-panel.view-panel[aria-label="Projects"]:has(.worker-filter) > .panel-filters.panel-filters) { display: flex; }
+	:global(.view-panel.view-panel[aria-label="Projects"]:has(.worker-filter) > .panel-search.panel-search) { padding-bottom: 8px; }
+</style>
