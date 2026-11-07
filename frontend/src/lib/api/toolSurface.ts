@@ -12,6 +12,7 @@ import { api } from './client';
 export type ToolGroupKind =
 	| 'harness'
 	| 'app'
+	| 'private_access'
 	| 'ai'
 	| 'computer_use'
 	| 'browser'
@@ -52,6 +53,8 @@ export interface ToolSurfaceGroup {
 	available?: boolean;
 	/** True for groups only admins may grant (the app-config server). */
 	admin_only?: boolean;
+	/** One-line hint shown under the label instead of the generic source line. */
+	note?: string | null;
 	tools: ToolSurfaceTool[];
 }
 
