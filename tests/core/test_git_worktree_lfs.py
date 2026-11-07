@@ -1,5 +1,9 @@
 """Real-Git regression coverage for unavailable LFS during worktree creation."""
+import hashlib
+import os
+import shlex
 import subprocess
+import sys
 
 import pytest
 
@@ -160,6 +164,49 @@ def test_lfs_hook_failure_keeps_registered_worktree(checkout_project, lfs_repo, 
     assert "git-lfs: not found" in hook.read_text()
 
 
+@pytest.mark.parametrize("damage", ["missing-file", "missing-index", "staged-deletion"])
+def test_registered_partial_checkout_fails_closed(lfs_repo, tmp_path, monkeypatch, damage):
+    from pathlib import Path
+    from fluid.context.runtime_facts import lfs_fallback_warning
+
+    repo, dest = lfs_repo, tmp_path / "registered-partial"
+    git(repo, "config", "filter.lfs.process", "")
+    git(repo, "config", "filter.lfs.smudge", "")
+    git(repo, "config", "filter.lfs.required", "false")
+    hook = repo / ".git" / "hooks" / "post-checkout"
+    hook.write_text("#!/bin/sh\necho 'git-lfs: not found' >&2\nexit 2\n")
+    service, mutations = GitService(), []
+    run = service._run_git
+
+    def traced(cwd, args, **kwargs):
+        result = run(cwd, args, **kwargs)
+        if args[:2] in (["worktree", "add"], ["worktree", "remove"], ["worktree", "prune"]):
+            mutations.append(args[:2])
+        if args[:2] == ["worktree", "add"]:
+            assert result.returncode == 2
+            assert str(dest) in git(repo, "worktree", "list", "--porcelain")
+            # A real registered checkout with incomplete files/index simulates
+            # the state left when an OS lock prevents Git's checkout rollback.
+            if damage == "missing-index":
+                index = Path(git(dest, "rev-parse", "--git-path", "index"))
+                (index if index.is_absolute() else dest / index).unlink()
+            elif damage == "staged-deletion":
+                git(dest, "rm", "--cached", "--", "asset.bin")
+            else:
+                (dest / "asset.bin").unlink()
+            (dest / "agent-work.txt").write_text("must survive failed recovery")
+        return result
+
+    monkeypatch.setattr(service, "_run_git", traced)
+    success, error = service.add_worktree(str(repo), str(dest), "partial", new_branch=True)
+    assert not success and "git-lfs: not found" in error
+    assert git(dest, "symbolic-ref", "--short", "HEAD") == "partial"
+    assert (dest / "agent-work.txt").read_text() == "must survive failed recovery"
+    assert str(dest) in git(repo, "worktree", "list", "--porcelain")
+    assert mutations == [["worktree", "add"]]
+    assert lfs_fallback_warning(str(dest)) is None
+
+
 def test_unrelated_hook_failure_does_not_retry(lfs_repo, tmp_path, monkeypatch):
     git(lfs_repo, "config", "filter.lfs.process", "")
     git(lfs_repo, "config", "filter.lfs.smudge", "")
@@ -315,6 +362,80 @@ def test_checkout_transfer_uses_same_lfs_fallback(lfs_repo, tmp_path, existing_b
     (dest / "untracked.txt").write_text("agent work\n")
     with pytest.raises(ValueError, match="files changed during resume"):
         fingerprint(dest)
+
+
+@pytest.mark.parametrize("driver, receipt", [("lfs", False), ("other", True)])
+def test_status_override_requires_lfs_error_and_receipt(lfs_repo, tmp_path, monkeypatch, driver, receipt):
+    from app.core import checkout_transfer as transfer
+    from fluid.context.runtime_facts import record_lfs_fallback
+
+    if driver == "other":
+        (lfs_repo / ".gitattributes").write_text("*.bin filter=other\n")
+        git(lfs_repo, "config", "filter.other.process", str(tmp_path / "missing-other-filter"))
+        git(lfs_repo, "config", "filter.other.required", "true")
+    if receipt:
+        record_lfs_fallback(str(lfs_repo))
+    asset = lfs_repo / "asset.bin"
+    stat = asset.stat()
+    os.utime(asset, ns=(stat.st_atime_ns, stat.st_mtime_ns + 2_000_000_000))
+    run, commands = transfer._run, []
+
+    def traced(cwd, *args, **kwargs):
+        commands.append(args)
+        return run(cwd, *args, **kwargs)
+
+    monkeypatch.setattr(transfer, "_run", traced)
+    with pytest.raises(ValueError, match="Git status failed during resume"):
+        transfer.fingerprint(lfs_repo)
+    assert len(commands) == 1 and commands[0][0] == "status"
+
+
+def test_repaired_lfs_filter_is_used_despite_fallback_receipt(lfs_repo, tmp_path):
+    from app.core.checkout_transfer import fingerprint
+    from app.core.git_worktree_ops import LFS_PASSTHROUGH_CONFIG
+    from fluid.context.runtime_facts import record_lfs_fallback
+
+    repo, asset = lfs_repo, lfs_repo / "asset.bin"
+    hydrated = b"hydrated LFS asset contents\n"
+    pointer = ("version https://git-lfs.github.com/spec/v1\n"
+               f"oid sha256:{hashlib.sha256(hydrated).hexdigest()}\nsize {len(hydrated)}\n")
+    asset.write_text(pointer)
+    git(repo, *LFS_PASSTHROUGH_CONFIG, "add", "asset.bin")
+    git(repo, *LFS_PASSTHROUGH_CONFIG, "commit", "-m", "Real asset pointer")
+    record_lfs_fallback(str(repo))
+    # A real Git clean driver implements LFS's content-to-pointer comparison.
+    clean = tmp_path / "lfs_clean.py"
+    clean.write_text(
+        "import hashlib, sys\ndata = sys.stdin.buffer.read()\n"
+        "if data.startswith(b'version https://git-lfs.github.com/spec/v1\\n'):\n"
+        "    sys.stdout.buffer.write(data)\n"
+        "else:\n"
+        "    print('version https://git-lfs.github.com/spec/v1')\n"
+        "    print('oid sha256:' + hashlib.sha256(data).hexdigest())\n"
+        "    print('size ' + str(len(data)))\n"
+    )
+    git(repo, "config", "--unset", "filter.lfs.process")
+    git(repo, "config", "filter.lfs.smudge", "")
+    git(repo, "config", "filter.lfs.clean", f"{shlex.quote(sys.executable)} {shlex.quote(str(clean))}")
+    asset.write_bytes(hydrated)
+    assert git(repo, "show", "HEAD:asset.bin") == pointer.strip()
+    assert git(repo, "hash-object", "--path=asset.bin", "asset.bin") == git(repo, "rev-parse", "HEAD:asset.bin")
+    # Hydration also refreshes the index stat; the clean blob remains HEAD's pointer.
+    git(repo, "add", "asset.bin")
+    git(repo, "diff", "--cached", "--quiet")
+    assert git(repo, "status", "--porcelain") == ""
+
+    def touch():
+        stat = asset.stat()
+        os.utime(asset, ns=(stat.st_atime_ns, stat.st_mtime_ns + 2_000_000_000))
+
+    touch()
+    assert git(repo, "status", "--porcelain") == ""  # Clean after real clean filtering.
+    touch()  # Invalidate the refreshed index stat without changing any bytes.
+    assert fingerprint(repo) == git(repo, "rev-parse", "HEAD")
+    asset.write_bytes(hydrated + b"a genuine edit\n")
+    with pytest.raises(ValueError, match="files changed during resume"):
+        fingerprint(repo)
 
 
 def test_unregistered_partial_directory_is_cleaned(lfs_repo, tmp_path, monkeypatch):

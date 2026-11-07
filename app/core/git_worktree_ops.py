@@ -430,12 +430,15 @@ class GitWorktreeMixin:
                 registered = any(os.path.normcase(os.path.abspath(wt["path"])) == target
                                  for wt in self.list_worktrees(main_dir))
                 if registered:
-                    # Git rolls back a failed checkout, but not a failed
-                    # post-checkout hook. Another session may already have
-                    # adopted this complete checkout: never remove or reset it.
+                    # Registration can survive a failed checkout rollback too.
+                    # Never remove/reset an adoptable checkout, and only accept
+                    # a hook-only failure with independent completeness evidence.
                     from app.core.checkout_manager import _require_branch_binding
 
                     _require_branch_binding(path, branch)
+                    if not self._checkout_is_complete(path):
+                        logger.warning("LFS setup failed at %s; keeping incomplete checkout: %s", path, original_error)
+                        return False, original_error
                     logger.warning("LFS hook failed at %s; keeping completed checkout: %s", path, original_error)
                 else:
                     logger.warning("LFS checkout failed at %s; retrying without LFS: %s", path, original_error)
@@ -473,6 +476,19 @@ class GitWorktreeMixin:
             error_msg = worktree_error_detail(str(e))
             logger.error("Error adding worktree: %s", error_msg)
             return False, error_msg
+
+    def _checkout_is_complete(self, path: str) -> bool:
+        """Check index/HEAD and missing files without invoking clean/smudge filters."""
+        index = self._run_git(path, ["rev-parse", "--git-path", "index"], timeout=10)
+        if index.returncode or not os.path.isfile(os.path.join(path, index.stdout.strip())):
+            return False
+        cached = self._run_git(
+            path, ["diff", "--cached", "--quiet", "--no-ext-diff", "--no-textconv", "HEAD", "--"], timeout=10
+        )
+        if cached.returncode:
+            return False
+        deleted = self._run_git(path, ["ls-files", "--deleted", "-z"], timeout=10)
+        return deleted.returncode == 0 and not deleted.stdout
 
     def _cleanup_failed_lfs_checkout(self, main_dir: str, path: str) -> bool:
         """Clean only unregistered remnants, never an adoptable checkout."""

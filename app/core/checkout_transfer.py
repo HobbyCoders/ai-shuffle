@@ -220,13 +220,19 @@ def _branch(cwd, branch):
 
 
 def _status(cwd):
-    from app.core.git_worktree_ops import LFS_PASSTHROUGH_CONFIG
+    from app.core.git_worktree_ops import LFS_PASSTHROUGH_CONFIG, _is_lfs_failure
     from fluid.context.runtime_facts import lfs_fallback_warning
 
-    # Every handoff verification, including callers after import, must avoid
-    # re-entering a broken clean filter in a known placeholder checkout.
-    config = LFS_PASSTHROUGH_CONFIG if lfs_fallback_warning(str(cwd)) else ()
-    return git(cwd, *config, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+    # A receipt can outlive broken LFS. Honor repaired clean filters first so
+    # hydrated files still compare against their committed pointer correctly.
+    args = ("status", "--porcelain=v1", "-z", "--untracked-files=all")
+    result = _run(cwd, *args)
+    if (result.returncode and _is_lfs_failure(result.stderr.decode(errors="replace"))
+            and lfs_fallback_warning(str(cwd))):
+        result = _run(cwd, *LFS_PASSTHROUGH_CONFIG, *args)
+    if result.returncode:
+        raise ValueError("Git status failed during resume. Check Git credentials, hooks and branch conflicts on that worker; ownership has not moved.")
+    return result.stdout
 
 
 def _transfer_status(cwd):
