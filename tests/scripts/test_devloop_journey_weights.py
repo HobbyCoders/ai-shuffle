@@ -20,7 +20,7 @@ def _weights(tmp_path, seconds, per_case=10.0, *, counts=None):
     return path
 
 
-@pytest.mark.parametrize("shards", [1, 4, 8, 9, 10, 30])
+@pytest.mark.parametrize("shards", [1, 4, 8, 9, 10, ci.HOSTED_SHARDS, 30])
 def test_runtime_partition_is_deterministic_and_exact(shards):
     weights = {f"{i}.journey.mjs": (i % 5 + 1) * 0.25 for i in range(25)}
     buckets = ci.partition(weights, shards)
@@ -120,7 +120,8 @@ def test_hosted_step_estimates_match_frozen_clean_measurements(tmp_path):
     _assert_historical_calibration(tmp_path)
 
 
-def test_valid_one_percent_refresh_does_not_rewrite_historical_calibration(tmp_path, monkeypatch):
+@pytest.mark.parametrize("new_case_counts", [(), (4, 8)], ids=["current", "two-new-journeys"])
+def test_valid_one_percent_refresh_does_not_rewrite_historical_calibration(tmp_path, monkeypatch, new_case_counts):
     fixture = ci.ROOT / "tests/scripts/fixtures/journey_hosted_calibration.json"
     original = fixture.read_bytes()
     data = json.loads(ci.WEIGHTS.read_text())
@@ -129,6 +130,10 @@ def test_valid_one_percent_refresh_does_not_rewrite_historical_calibration(tmp_p
     path.write_text(json.dumps(data))
     estimate = ci.estimated_seconds
     refreshed = estimate(weights_path=path)
+    # A small feature adding two journeys (12 cases) must fit alongside the
+    # refresh, without altering historical measurements or the 1110s bound.
+    for index, cases in enumerate(new_case_counts):
+        refreshed[f"new-{index}.journey.mjs"] = cases * data["seconds_per_case"]
     loads = [sum(refreshed[name] for name in bucket)
              for bucket in ci.partition(refreshed, ci.HOSTED_SHARDS)]
     assert max(loads) <= 1110
