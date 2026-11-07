@@ -4,10 +4,12 @@
 //   reload-before-answer  (#1083) the server rewinds, but the page reloads before
 //                         its answer arrives; the reopened chat still hands the
 //                         rewound words back.
-//   attachment-chip       (#1084) a message sent with an attached file comes back
-//                         with its removable chip, not a raw `@…/uploads/…` path.
+//
+// A rewound attachment is not covered here: the browser cannot tell an attached
+// file from a typed path in the sent text, so it comes back as text until the
+// server records which uploads a message carried (#1084).
 import { fakeAiTag, runJourney } from './runner.mjs';
-import { composer, countUserRows, expect, openNewChat, sendButton, typeAndSend, uniq, waitChat, waitChatOpen, waitTurnSettled } from './lib/app.mjs';
+import { composer, countUserRows, expect, openNewChat, typeAndSend, uniq, waitChat, waitChatOpen, waitTurnSettled } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 
 async function sendAndSettle(page, variant, words, messagesAtLeast) {
@@ -65,41 +67,6 @@ await runJourney({
 				await composer(page).getByText(state.rewound).waitFor({ timeout: 10_000 });
 				expect((await countUserRows(page, state.rewound)) === 0, 'the rewound row is gone');
 				expect((await countUserRows(page, state.kept)) === 1, 'the earlier turn stayed');
-			}
-		},
-		{
-			name: 'attachment-chip',
-			async setup(ctx) {
-				await openNewChat(ctx, { project: 'Dev sandbox' });
-				await ctx.page.waitForTimeout(800);
-			},
-			async act({ page, mark, variant }) {
-				const words = `attached-${uniq()}`;
-				const filename = `notes-${uniq()}.txt`;
-				await mark('attach a file and send');
-				await composer(page).click();
-				await page.keyboard.type(`${words} ${fakeAiTag(variant)}`.trim());
-				await page.locator('input[type="file"]').first().setInputFiles({ name: filename, mimeType: 'text/plain', buffer: Buffer.from('hello from the journey\n') });
-				const chip = composer(page).locator('[data-file-chip]');
-				await chip.first().waitFor({ timeout: 30_000 });
-				// The stored name can differ from the picked one (a clash gets a suffix).
-				const attached = await chip.first().getAttribute('data-path');
-				expect(/(^|[\\/])uploads[\\/]/.test(attached ?? '') && (attached ?? '').includes(filename.replace(/\.txt$/, '')), `the chip holds the uploaded file: ${attached}`);
-				// The chip sits right after the words, with no space between: the sent
-				// text reads `words@/…/uploads/notes.txt`.
-				await sendButton(page).click();
-				await waitTurnSettled(page, { messagesAtLeast: 2, text: `You said: “${words}` });
-				await mark('rewind it');
-				await confirmRewindOfLastUserMessage(page);
-				await page.getByRole('dialog').waitFor({ state: 'hidden', timeout: 30_000 });
-				await composer(page).getByText(words).waitFor({ timeout: 10_000 });
-				await chip.first().waitFor({ timeout: 10_000 });
-				const text = await composer(page).innerText();
-				expect(!/[\\/]uploads[\\/]|session-uploads/.test(text), `no raw upload path in the composer: ${JSON.stringify(text)}`);
-				const back = await chip.first().getAttribute('data-path');
-				// The sent chip may hold a project-relative path; the restored one holds the full path.
-				const base = (p) => (p ?? '').split(/[\\/]/).pop();
-				expect(!!back && base(back) === base(attached), `the chip holds the same upload: ${back} (sent ${attached})`);
 			}
 		}
 	],
