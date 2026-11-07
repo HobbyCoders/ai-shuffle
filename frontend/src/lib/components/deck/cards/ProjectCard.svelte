@@ -19,7 +19,8 @@
 	import { activeView } from '$lib/stores/layout.svelte';
 	import { startProjectSetup, type ProjectKind, type ProjectOverviewRow, type ProjectWorker } from '$lib/api/project-workers';
 	import { SETUP_POLL_MS } from '$lib/stores/project-setup';
-	import { isOnThisWorker, isRunning, missingCount, selfWorker } from './project-workers-view';
+	import { isOnThisWorker, isRunning, missingCount, selfWorker, showsWorkerFilter } from './project-workers-view';
+	import { refreshWorkerPresence, workerInstalls } from '$lib/stores/worker-presence';
 	import { workerDisplayName } from '$lib/components/ui/worker-name';
 	import './project-tabs.css';
 
@@ -84,7 +85,12 @@
 	// Ask for the overview each time the page shows (it stays mounted while
 	// hidden); live-sync's `projects` refresh keeps it fresh while it is used.
 	const shown = $derived(($activeView?.type ?? 'project') === 'project');
-	$effect(() => { if (shown) void loadProjectsOverview(); });
+	$effect(() => {
+		if (!shown) return;
+		void loadProjectsOverview();
+		// The registry decides the worker filter until the overview answers (showsWorkerFilter).
+		if (untrack(() => $workerInstalls) === null) refreshWorkerPresence().catch(() => {});
+	});
 
 	const overviewOn = $derived($projectsOverviewSupported === true);
 	const selfName = $derived.by(() => {
@@ -92,7 +98,8 @@
 			const self = selfWorker(row.workers);
 			if (self) return workerDisplayName(self.device_name, 'Local');
 		}
-		return 'Local';
+		// Before the overview answers, the registry names this worker the same way.
+		return workerDisplayName($workerInstalls?.find((i) => i.is_self)?.device_name, 'Local');
 	});
 
 	function fromOverview(row: ProjectOverviewRow): ListRow {
@@ -134,6 +141,7 @@
 		for (const row of $projectsOverview) for (const w of row.workers) ids.add(w.install_id);
 		return ids.size;
 	});
+	const workerFilterShown = $derived(showsWorkerFilter($projectsOverviewSupported, workerCount, $workerInstalls));
 
 	// Filtered projects
 	const filteredRows = $derived.by(() => {
@@ -266,7 +274,7 @@
 			{#snippet actions()}<PanelIconButton label="New project" icon={Plus} onclick={() => (showAddModal = true)} />{/snippet}
 			{#snippet search()}<PanelSearch bind:value={searchQuery} label="Search projects" placeholder="Search projects" />{/snippet}
 			{#snippet filters()}
-				{#if overviewOn && workerCount > 1}
+				{#if workerFilterShown}
 					<Segmented label="Show projects" size="sm" bind:value={workerFilter} options={[{ value: 'all', label: 'All workers' }, { value: 'here', label: `On ${selfName}` }]} />
 				{/if}
 			{/snippet}

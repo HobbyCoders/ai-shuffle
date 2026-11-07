@@ -159,3 +159,24 @@ export function seenAgo(iso: string | null | undefined, now = Date.now()): strin
 	if (h < 48) return `seen ${h}h ago`;
 	return `seen ${Math.round(h / 24)}d ago`;
 }
+
+/**
+ * Whether the Projects list shows its "All workers / On <this worker>" filter.
+ *
+ * Once the overview has answered, it decides: more than one worker across its
+ * rows. Before that (the overview asks every online peer, so it can take
+ * seconds), the install registry, which is a plain database read loaded
+ * early, says whether it will: the same approved installs the overview
+ * reports. The filter row then sits above the list from its first paint
+ * instead of pushing the whole list down when the overview lands (#1210). A
+ * worker without the overview (`supported === false`) never shows it.
+ */
+export function showsWorkerFilter(
+	supported: boolean | null,
+	overviewWorkerCount: number,
+	installs: ReadonlyArray<{ approved?: boolean }> | null
+): boolean {
+	if (supported === true) return overviewWorkerCount > 1;
+	if (supported === false || !installs) return false;
+	return installs.filter((i) => i.approved !== false).length > 1;
+}

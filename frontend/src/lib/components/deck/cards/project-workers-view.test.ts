@@ -15,6 +15,7 @@ import {
 	missingOnline,
 	runsOnNote,
 	seenAgo,
+	showsWorkerFilter,
 	workerChip
 } from './project-workers-view';
 
@@ -94,5 +95,29 @@ describe('failures', () => {
 		const now = Date.parse('2026-10-31T12:00:00Z');
 		expect(seenAgo('2026-10-28T12:00:00Z', now)).toBe('seen 3d ago');
 		expect(seenAgo(null, now)).toBeNull();
+	});
+});
+
+describe('showsWorkerFilter (#1210: the filter row must not pop in above the list)', () => {
+	const self = { approved: true };
+	const peer = { approved: true };
+
+	it('decides from the approved installs while the overview is still out', () => {
+		expect(showsWorkerFilter(null, 0, [self, peer])).toBe(true);
+		expect(showsWorkerFilter(null, 0, [self])).toBe(false);
+		// An older server leaves `approved` out: that means approved.
+		expect(showsWorkerFilter(null, 0, [{}, {}])).toBe(true);
+		// A peer waiting for approval is not in the overview either.
+		expect(showsWorkerFilter(null, 0, [self, { approved: false }])).toBe(false);
+		expect(showsWorkerFilter(null, 0, null)).toBe(false);
+	});
+
+	it('follows the overview once it has answered', () => {
+		expect(showsWorkerFilter(true, 3, [self])).toBe(true);
+		expect(showsWorkerFilter(true, 1, [self, peer])).toBe(false);
+	});
+
+	it('never shows on a worker without the overview', () => {
+		expect(showsWorkerFilter(false, 0, [self, peer, peer])).toBe(false);
 	});
 });
