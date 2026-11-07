@@ -160,8 +160,9 @@ await runJourney({
 			},
 			async act({ page, mark, variant, log }) {
 				await mark('send');
-				// Fast enough to arrive in large pieces, slow enough to outlast typing two messages on a slow device.
-				await typeAndSend(page, `stream tok-${uniq()} ${scriptTag(variant, 'long', { tps: 150 })}`);
+				// Keep the same fast chunks and reply, but only Stop can end the turn:
+				// a slow browser may take longer to queue than the whole reply takes to stream.
+				await typeAndSend(page, `stream tok-${uniq()} ${scriptTag(variant, 'long', { tps: 150, hold_open: true })}`);
 				await page.getByText('Here is a long answer', { exact: false }).last().waitFor({ timeout: 60_000 });
 				await mark('queue');
 				const texts = [`tok-${uniq()}`, `tok-${uniq()}`];

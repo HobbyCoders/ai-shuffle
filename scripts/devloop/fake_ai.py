@@ -13,7 +13,9 @@ Reply selection is stateless and keyed off the request alone:
   ``<system-reminder>`` blocks do not count).
 * ``[script:NAME]`` in the prompt picks ``NAME.json`` from the scenarios
   directory; otherwise the ``default`` scenario answers. Options ride in the
-  tag: ``[script:slow tps=4 latency_ms=800]``.
+  tag: ``[script:slow tps=4 latency_ms=800]``. ``hold_open=true`` keeps the
+  stream open after its text until the client cancels it (Stop), with SSE
+  comment heartbeats rather than a fixed sleep.
 * A scenario is a list of ``steps``. The step played is the number of tool
   rounds (assistant tool calls) the request already carries after the prompt,
   so turn 1 can call a tool and turn 2, which sends the tool result back,
@@ -56,6 +58,7 @@ if __package__ in (None, ""):  # ``python scripts/devloop/fake_ai.py``
 
 from scripts.devloop.fake_wire import (
     CUT,
+    HOLD,
     Chat,
     FakeProviderServer,
     Messages,
@@ -315,6 +318,7 @@ class Plan:
     cut_after: int | None = None
     tps: float = 0.0
     latency_ms: float = 0.0
+    hold_open: bool = False  # after text, wait for Stop instead of completing
     served_model: str | None = None  # the model the reply says answered
     refusal: dict | None = None  # the safety check declined this request
 
@@ -341,6 +345,8 @@ def _streamed(text: str, plan: Plan, frame: Callable[[str], bytes]) -> tuple[lis
         if plan.cut_after is not None and sent >= plan.cut_after:
             frames.append(CUT)
             return frames, True
+    if plan.hold_open:
+        frames.append(HOLD)
     return frames, False
 
 
@@ -590,6 +596,7 @@ class FakeAI:
             latency_ms=_number(params.get("latency_ms"),
                                _number(scenario.get("latency_ms"), self.latency_ms)),
             cut_after=step.get("cut_after_chars"),
+            hold_open=params.get("hold_open") == "true",
             served_model=step.get("served_model") or params.get("served_model"),
         )
         if "error" in step:
