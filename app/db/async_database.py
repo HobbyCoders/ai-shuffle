@@ -11,10 +11,23 @@ no connection is shared across threads.
 import asyncio
 import contextvars
 import functools
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, TypeVar
 
 T = TypeVar("T")
+
+# Propagated into off-loop work; nested dispatch must also observe its parent's
+# cancellation. Cooperative waiters may stop, but already-running writes still
+# finish and remain tracked by TurnWork.
+_sync_stops: contextvars.ContextVar[tuple[threading.Event, ...]] = contextvars.ContextVar(
+    "sync_stops", default=(),
+)
+
+
+def sync_cancelled() -> bool:
+    """Whether an awaiting run_sync caller cancelled this worker's dispatch."""
+    return any(stop.is_set() for stop in _sync_stops.get())
 
 
 class TurnWork:
@@ -109,7 +122,7 @@ def keep_in_turn(future: asyncio.Future) -> None:
         work.add(future)
 
 
-async def _await_thread(future: asyncio.Future) -> Any:
+async def _await_thread(future: asyncio.Future, *, stop: threading.Event | None = None) -> Any:
     work = _turn_work.get()
     if work is None:
         return await future
@@ -123,6 +136,8 @@ async def _await_thread(future: asyncio.Future) -> Any:
                 await asyncio.shield(future)
             except asyncio.CancelledError:
                 cancelled = True
+                if stop is not None:
+                    stop.set()
         result = future.result()
         if cancelled:
             raise asyncio.CancelledError
@@ -163,10 +178,18 @@ async def run_sync(fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
 
         session = await run_sync(database.get_session, session_id)
     """
-    if _turn_work.get() is None:
-        return await asyncio.to_thread(fn, *args, **kwargs)
-    # Keep the actual task alive when its awaiting coroutine is cancelled.
-    return await _await_thread(asyncio.create_task(asyncio.to_thread(fn, *args, **kwargs)))
+    stop = threading.Event()
+    token = _sync_stops.set((*_sync_stops.get(), stop))
+    try:
+        if _turn_work.get() is None:
+            return await asyncio.to_thread(fn, *args, **kwargs)
+        # Keep the actual task alive when its awaiting coroutine is cancelled.
+        return await _await_thread(asyncio.create_task(asyncio.to_thread(fn, *args, **kwargs)), stop=stop)
+    except asyncio.CancelledError:
+        stop.set()
+        raise
+    finally:
+        _sync_stops.reset(token)
 
 
 async def run_maintenance(function, *args, **kwargs):

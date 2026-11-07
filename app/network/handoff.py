@@ -1910,6 +1910,23 @@ async def _receive(session, timing):
             _wake_queued()
 
 
+def _publish_receiving_checkout(project_id, base, cwd, state):
+    """Synchronous readiness/publication transaction; never span an await."""
+    from app.core.git_worktree_ops import repo_worktree_lock
+
+    with repo_worktree_lock(str(base)):
+        checkout_transfer._branch(cwd, state["branch"])
+        if checkout_transfer.fingerprint(cwd) != state["head"]:
+            raise ValueError("The receiving checkout changed during context sync; ownership was not moved.")
+        # A base retains its branch-NULL registry role across subsequent resumes.
+        branch = None if Path(cwd).resolve() == Path(base).resolve() else state["branch"]
+        checkouts.upsert_checkout(
+            project_id, settings.effective_instance_id, cwd,
+            branch=branch or "", head_sha=state["head"], dirty=False, status="active",
+        )
+        return branch
+
+
 def _receiving_path(base, branch):
     try:
         dest = checkout_manager._branch_checkout_path(base, branch)
@@ -2080,15 +2097,9 @@ async def _pull_steps(session, owner, ctx, project, base, remote, held, holder, 
         await run_sync(install_history, sid, data, cwd)
         timing.step("install_history", tables=json.dumps(data.get("_history_metrics", {}), separators=(",", ":")))
         timing.waiting("verify_checkout")
-        await run_sync(checkout_transfer._branch, cwd, state["branch"])
-        if await run_sync(checkout_transfer.fingerprint, cwd) != state["head"]:
-            raise ValueError("The receiving checkout changed during context sync; ownership was not moved.")
-        # A base checkout must retain its branch-NULL role in the registry.
-        # Relabeling it as a worktree would make later project resolution and
-        # subsequent resumes report that this worker has no base clone.
-        session_branch = None if Path(cwd).resolve() == Path(base).resolve() else state["branch"]
-        await run_sync(checkouts.upsert_checkout, project["id"], settings.effective_instance_id, cwd,
-                       branch=session_branch or "", head_sha=state["head"], dirty=False, status="active")
+        session_branch = await run_sync(
+            _publish_receiving_checkout, project["id"], base, cwd, state,
+        )
         if data.get("wake_barrier"):
             await run_sync(_stage_wakes, sid, owner, data, session_branch)
         timing.waiting("owner_commit")

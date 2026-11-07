@@ -174,15 +174,23 @@ def resync_session_branch_from_head(session_id: str) -> Optional[Tuple[str, str]
         )
         return None
 
-    if head != recorded:
-        checkouts_db.upsert_checkout(
-            project_id,
-            runner_id,
-            path,
-            branch=head,
-            status=checkout.get("status") or "active",
-        )
-    database.resync_session_branch(session_id, head)
+    from app.core.git_worktree_ops import WorktreeAddError, repo_worktree_lock
+
+    with repo_worktree_lock(path):
+        try:
+            git_service.require_complete_worktree(path)
+        except WorktreeAddError:
+            return None
+        if head != recorded:
+            current = checkouts_db.get_checkout(project_id, runner_id, branch=recorded)
+            checkouts_db.upsert_checkout(
+                project_id,
+                runner_id,
+                path,
+                branch=head,
+                status=(current or checkout).get("status") or "active",
+            )
+        database.resync_session_branch(session_id, head)
     return (session_branch or recorded, head)
 
 
