@@ -276,3 +276,34 @@ def test_delete_wins_late_event_write_cannot_resurrect_runtime(private_pool, mon
         with pytest.raises(ValueError, match="session.*does not exist"):
             writing.result(timeout=5)
     _assert_deleted(sid)
+
+
+
+def test_post_delete_stop_notice_delivery_drains_oldest_batch(private_pool, monkeypatch):
+    from app.db import stop_notices
+
+    sid = "deleted-stop-notices-" + uuid4().hex
+    with base.get_db() as conn:
+        conn.cursor().execute("INSERT INTO sessions (id) VALUES (%s)", (sid,))
+    notice_ids = ["stop-incomplete-" + uuid4().hex for _ in range(17)]
+    for notice_id in notice_ids:
+        stop_notices.save(notice_id, sid, {"content": "cleanup is incomplete"})
+    monkeypatch.setattr(sessions, "_cleanup_working_set_ref", lambda sid: None)
+    monkeypatch.setattr(sessions, "_cleanup_pending_wakeups", lambda sid: None)
+    assert sessions.delete_session(sid)
+    # Knowing an outbox id cannot grant an ordinary writer post-delete access.
+    with pytest.raises(ValueError, match="session.*does not exist"):
+        session_events.append_events(sid, [{"id": notice_ids[0], "type": "system.note",
+                                           "payload": {"subtype": "stop_incomplete", "data": {"forged": True}}}])
+    _assert_deleted(sid)
+    first = stop_notices.pending()
+    assert len(first) == 16
+    assert all(stop_notices.deliver(notice_id) for notice_id in first)
+    remaining = stop_notices.pending()
+    assert len(remaining) == 1
+    assert stop_notices.deliver(remaining[0])
+    assert stop_notices.pending() == []
+    assert all(stop_notices.deliver(notice_id) for notice_id in notice_ids)  # idempotent acknowledgements
+    events = session_events.get_events(sid)
+    assert {event["id"] for event in events} == set(notice_ids)
+    assert all(event["payload"]["subtype"] == "stop_incomplete" for event in events)

@@ -121,7 +121,7 @@ class FenceViolation(Exception):
     (run missing, not active, or token superseded)."""
 
 
-def _require_session(cursor: Any, session_id: str) -> None:
+def _require_session(cursor: Any, session_id: str, *, events=None) -> None:
     """Recheck AFTER the counter lock, with a fresh READ COMMITTED snapshot.
 
     Delete takes that same lock before removing the session. Its commit may
@@ -130,8 +130,23 @@ def _require_session(cursor: Any, session_id: str) -> None:
     including a counter recreated by the upsert.
     """
     cursor.execute("SELECT id FROM sessions WHERE id = %s", (session_id,))
-    if cursor.fetchone() is None:
-        raise ValueError(f"session {session_id!r} does not exist")
+    if cursor.fetchone() is not None:
+        return
+    # Stop's durable warning outbox intentionally survives chat deletion. Only
+    # replaying its EXACT stored warning may cross that boundary: no caller flag,
+    # backfill/copy exemption, arbitrary subtype or forged payload grants access.
+    if events and len(events) == 1:
+        event = events[0]
+        if event.get("type") == "system.note" and event.get("id"):
+            cursor.execute("SELECT session_id, data FROM stop_incomplete_notices WHERE id=%s",
+                           (event["id"],))
+            notice = cursor.fetchone()
+            if notice and notice["session_id"] == session_id and event == {
+                "id": event["id"], "type": "system.note",
+                "payload": {"subtype": "stop_incomplete", "data": _parse_payload(notice["data"])},
+            }:
+                return
+    raise ValueError(f"session {session_id!r} does not exist")
 
 
 def _parse_payload(raw: Any) -> Dict[str, Any]:
@@ -206,7 +221,7 @@ def append_events(
         )
         last_seq = int(cursor.fetchone()["next_seq"])
         first_seq = last_seq - n + 1
-        _require_session(cursor, session_id)
+        _require_session(cursor, session_id, events=events)
 
         # 3. Insert one row per event.
         params = [
