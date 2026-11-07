@@ -2043,6 +2043,29 @@ describe('Stop timeout recovery', () => {
 				expect(resend).toMatchObject({ prompt, upload_paths: [path], upload_references: [reference] });
 			});
 
+		// Review round 8 S7: a send still waiting to run never loses its attachments,
+		// however many attachment sends queue behind a long turn.
+		it('hands back the attachments of the oldest of 51 queued sends once it is withdrawn', async () => {
+			const test = stopping(null);
+			const handlers = createMessageHandlers(test.deps as unknown as MessageHandlerDeps);
+			test.deps.update(s => ({ ...s, isStreaming: true }));
+			const sent: { b: string; path: string }[] = [];
+			for (let i = 0; i < 51; i++) {
+				const path = `/uploads/staged/file-${i}.pdf`;
+				expect(await test.sender.sendMessage(`Read @${path}`, { pendingUploadPaths: [path],
+					pendingUploadReferences: [{ owner_id: 'worker-1', event_id: `evt-${i}`, index: 0, path }] })).toBe(true);
+				sent.push({ b: test.getState().localSendIntent!.commandIds!.at(-1)!, path });
+			}
+			const [oldest] = sent;
+			const chip = test.getState().queuedMessages.find(m => m.clientMessageId === oldest.b)!;
+			test.sender.removeQueuedMessage(chip.id);
+			handlers.handleMessage({ type: 'queued_message_removal', session_id: 'sess-1', client_message_id: oldest.b, verdict: 'withdrawn' });
+			const state = test.getState();
+			expect(state.pendingRestorePrompt).toBe(`Read @${oldest.path}`);
+			expect(state.pendingRestoreUploadPaths).toEqual([oldest.path]);
+			expect(state.pendingRestoreUploadReferences).toEqual([expect.objectContaining({ event_id: 'evt-0', path: oldest.path })]);
+		});
+
 		// Review round 2 S4: nothing still waiting to run is ever dropped from the
 		// run, however many messages queue behind a turn whose feed is late.
 		it('keeps the turn\'s send however many messages queue behind it', async () => {

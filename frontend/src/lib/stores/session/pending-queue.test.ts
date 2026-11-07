@@ -463,3 +463,41 @@ describe('pendingQueue — command-id receipts (#524)', () => {
 		expect(pendingQueue.reconcile(SID, [server])).toEqual([server]);
 	});
 });
+
+// Review round 8 S7: a send's attachments are never evicted while it may still
+// run; every terminal outcome removes them, so the store cannot grow unbounded.
+describe('pendingQueue — a send\'s attachments', () => {
+	const uploads = (key: string) => pendingQueue.noteSendUploads(key, [`/uploads/${key}.pdf`]);
+	const queued = (key: string): PendingEntry => ({ id: key, clientMessageId: key, content: `Read ${key}`, queuedAt: 1 });
+
+	it('keeps them for every send still waiting, however many', () => {
+		for (let i = 0; i < 60; i++) uploads(`client-${i}`);
+		expect(pendingQueue.hasSendUploads('client-0')).toBe(true);
+		for (let i = 0; i < 60; i++) pendingQueue.forgetSendUploads(`client-${i}`);
+	});
+
+	it.each([
+		['its receipt', (key: string) => pendingQueue.noteDelivered('s1', `Read ${key}`, 'turn-1', true, key)],
+		['a delivery verdict', (key: string) => pendingQueue.applyRemovalVerdict('s1', key, 'already_delivered')],
+		['a withdrawal verdict it did not ask for', (key: string) => pendingQueue.applyRemovalVerdict('s1', key, 'withdrawn')],
+		['a refusal', (key: string) => pendingQueue.rejectSend('s1', key, `Read ${key}`)],
+		['a withdrawal receipt from another page', (key: string) => pendingQueue.forgetSendUploads(key)],
+	] as const)('drops them on %s', (_case, end) => {
+		pendingQueue.reset('s1');
+		uploads('client-x');
+		end('client-x');
+		expect(pendingQueue.hasSendUploads('client-x')).toBe(false);
+		pendingQueue.takeWithdrawnRestore('s1');
+	});
+
+	it('keeps them past a withdrawal receipt until this page\'s own verdict hands them back', () => {
+		pendingQueue.reset('s1');
+		uploads('client-y');
+		pendingQueue.requestRemoval('s1', queued('client-y'));
+		pendingQueue.forgetSendUploads('client-y');
+		expect(pendingQueue.hasSendUploads('client-y')).toBe(true);
+		pendingQueue.applyRemovalVerdict('s1', 'client-y', 'withdrawn');
+		expect(pendingQueue.hasSendUploads('client-y')).toBe(false);
+		expect(pendingQueue.takeWithdrawnRestore('s1')).toEqual({ prompt: 'Read client-y', uploadPaths: ['/uploads/client-y.pdf'], uploadReferences: [] });
+	});
+});

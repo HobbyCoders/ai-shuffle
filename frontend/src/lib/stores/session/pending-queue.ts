@@ -180,8 +180,10 @@ export function restoredDraftFields(s: RestoreSlots, restore: WithdrawnRestore |
 // A send's attachments, by command id (unique across chats), kept past admission
 // until its receipt: the chip keeps only text, and a confirmed withdrawal must hand
 // back the file chips and upload fields too, or the resend cannot transfer the file.
+// Never capped: a send still waiting to run keeps them. Every terminal outcome
+// removes its entry instead (receipt, delivery verdict, withdrawal verdict or
+// receipt, refusal, a frame that never left; see forgetSendUploads).
 const sendUploads = new Map<string, SendUploads>();
-const MAX_SEND_UPLOADS = 50;
 function draftOf(key: string, content: string): WithdrawnDraft {
 	const uploads = sendUploads.get(key);
 	sendUploads.delete(key);
@@ -270,6 +272,7 @@ export const pendingQueue = {
 			cancellations.clear();
 			parked.clear();
 			recoverySends.clear();
+			sendUploads.clear();
 		}
 	},
 
@@ -333,11 +336,20 @@ export const pendingQueue = {
 		sendUploads.delete(key);
 		if (!paths.length && !references.length) return;
 		sendUploads.set(key, { paths: [...paths], references: [...references] });
-		while (sendUploads.size > MAX_SEND_UPLOADS) {
-			const oldest = sendUploads.keys().next().value;
-			if (oldest === undefined) break;
-			sendUploads.delete(oldest);
-		}
+	},
+
+	/** Test/diagnostic hook: whether a send's attachments are still kept. */
+	hasSendUploads(key: string): boolean {
+		return sendUploads.has(key);
+	},
+
+	/**
+	 * The send reached a terminal outcome with nothing to hand back here. A
+	 * withdrawal this page asked for keeps them until its own verdict takes them.
+	 */
+	forgetSendUploads(key: string): void {
+		for (const state of cancellations.values()) if (state.removals.has(key)) return;
+		sendUploads.delete(key);
 	},
 
 	/**
@@ -514,6 +526,7 @@ export const pendingQueue = {
 		const state = cancellationState(id);
 		const content = state.sends.get(key)?.content ?? recoverySend(id, key)?.content ?? fallback;
 		if (content != null && !state.withdrawn.has(key)) state.drafts.push(draftOf(key, content));
+		sendUploads.delete(key);
 		state.withdrawn.add(key);
 		this.acknowledgeSend(id, key);
 		this.removalFailed(id, key, true);
@@ -530,6 +543,7 @@ export const pendingQueue = {
 				withdrawn.add(entry.id);
 				drafts.push(draftOf(key, entry.content));
 			}
+			sendUploads.delete(key);
 			this.removalFailed(id, key, true);
 			this.acknowledgeSend(id, key);
 		} else if (verdict === 'already_delivered') {
@@ -540,6 +554,7 @@ export const pendingQueue = {
 			// must not clear the newer attempt's cancellation or draft.
 			if (entry && messageId && !isOptimistic(entry) && entry.id !== messageId) return;
 			if (entry) deliveredRows.add(entry.id);
+			sendUploads.delete(key);
 			terminalVerdicts.set(key, verdict);
 			this.removalFailed(id, key, true);
 			this.acknowledgeSend(id, key);

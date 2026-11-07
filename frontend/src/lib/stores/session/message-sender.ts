@@ -774,6 +774,8 @@ export function createMessageSender(deps: MessageSenderDeps) {
 							return true;
 						}
 						pendingQueue.acknowledgeSend(_state.sessionId, clientMessageId);
+						// Refused: the composer restores the draft, attachments included.
+						pendingQueue.forgetSendUploads(clientMessageId);
 						// Remove only our optimistic echo, never a newer session's draft
 						// or an authoritative queue snapshot that arrived in the meantime.
 						update(s => s.sessionId === _state.sessionId ? {
@@ -787,6 +789,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				querySent = wsConn.send(query);
 				if (!querySent) {
 					pendingQueue.acknowledgeSend(_state.sessionId, clientMessageId);
+					pendingQueue.forgetSendUploads(clientMessageId);
 					// WS dropped before the frame went out. Roll the optimistic echo back
 					// and surface an error so the caller can restore the input.
 					//

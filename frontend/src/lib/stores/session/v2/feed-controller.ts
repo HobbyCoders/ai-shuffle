@@ -1195,6 +1195,7 @@ export const feedController: FeedController = {
 				// never run: it leaves this page's run of sends (send-run.ts).
 				if (ev.type === 'queued_message.withdrawn' && typeof ev.command_id === 'string' && ev.command_id) {
 					const withdrawn = ev.command_id;
+					pendingQueue.forgetSendUploads(withdrawn);
 					deps?.update(s => retireSends(s, withdrawn));
 					feedController.settleRetiredSends(sessionId);
 				}
