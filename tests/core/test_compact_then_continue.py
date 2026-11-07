@@ -74,6 +74,9 @@ CUT = {"terminal_reason": "needs_compaction"}
 
 
 def _cut_turn(session_id, *, source="user", **kw):
+    from tests.shared_fixtures import seed_session
+
+    seed_session(session_id)
     return _run(turns_db.enqueue_turn(session_id, source, prompt="long task", **kw), terminal=CUT)
 
 
@@ -181,6 +184,9 @@ async def test_generations_stop_after_the_runaway_cap(mock_db, execute, notes):
 
 
 async def test_only_the_engine_outcome_starts_a_pair(mock_db, execute):
+    from tests.shared_fixtures import seed_session
+
+    seed_session('c5')
     plain = _run(turns_db.enqueue_turn("c5", "user", prompt="x"),
                  terminal={"stop_reason": "tool_use"})
     await _settle("c5", plain)
@@ -253,6 +259,9 @@ async def test_stop_after_admission_aborts_the_pair_without_a_not_sent_row(mock_
 
 
 async def test_never_beside_a_parked_turn(mock_db, execute):
+    from tests.shared_fixtures import seed_session
+
+    seed_session('c13')
     # Parked work continues through its unpark wake; a turn started beside a
     # parked SendMessage continuation is what lost a worker its parent (#123).
     turn = turns_db.enqueue_turn("c13", "agent_message", prompt="continue",
@@ -388,6 +397,9 @@ async def test_an_emergency_no_op_drops_at_the_limit(mock_db, execute, notes):
 
 
 def test_the_mechanism_is_read_from_the_card(mock_db):
+    from tests.shared_fixtures import seed_session
+
+    seed_session('c16')
     t = turns_db.enqueue_turn("c16", cc.SOURCE, prompt="/compact")
     assert turn_scheduler._compaction_outcome("c16", t["id"]) == ("failed", None)
     _compacted(t)

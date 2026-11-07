@@ -1332,6 +1332,7 @@ class SessionPool:
 
     async def remove_broken(
         self, session_id: str, *, expected_context=_ANY_GENERATION_CONTEXT,
+        preserve_session: bool = False,
     ) -> Optional[SessionState]:
         """Evict a session whose subprocess is alive but in an unknown state.
 
@@ -1358,7 +1359,9 @@ class SessionPool:
             # it runs off the loop.
             descendants = await asyncio.to_thread(snapshot_descendants, pid)
             try:
-                await graceful_disconnect(state.adapter, session_id)
+                await graceful_disconnect(
+                    state.adapter, session_id, preserve_session=preserve_session,
+                )
             finally:
                 await reap_closed_subprocess(pid, descendants)
 

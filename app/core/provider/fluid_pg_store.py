@@ -1691,6 +1691,17 @@ class PgFluidStore:
             self._claim_when_found.discard(session_id)
             self._generations[session_id] = generation
 
+    def abandon_writes(self) -> None:
+        """Fence an evicted engine locally before admission can pass to its successor.
+
+        Generations in the DB are positive. In-flight old writes still serialize
+        with the next engine's claim on the same row; new writes cannot pass.
+        """
+        for session_id in self._generations:
+            self._generations[session_id] = -1
+            self._note_replaced(session_id)
+        self._claim_when_found.clear()
+
     def claimed_generation(self, session_id: str) -> Optional[int]:
         """The generation this store writes the session under, once claimed."""
         return self._generations.get(session_id)

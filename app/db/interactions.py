@@ -135,6 +135,12 @@ def answer_question_and_enqueue(
     overrides = {key: value for key, value in (context.get("overrides") or {}).items()
                  if key != "workspace_project_ids"}
     with get_db() as conn:
+        # Admission precedes the prompt row, as in settlement/deletion. Taking
+        # the interaction first reverses enqueue_turn's session lock below.
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (row["session_id"],))
+        if cursor.fetchone() is None:
+            return False
         if not answer_interaction(row["id"], answer, answered_by_device, _conn=conn):
             return False
         if handoff_context_confirmed:

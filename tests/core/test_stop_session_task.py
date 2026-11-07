@@ -424,6 +424,9 @@ class TestStopSessionTaskDurableFallback:
 
     @pytest.mark.asyncio
     async def test_orphan_subagent_from_event_log_reaped(self, mock_db):
+        from tests.shared_fixtures import seed_session
+
+        seed_session("s1")
         import app.core.turn_recorder as tr
         from app.db import session_events as se
 
@@ -486,6 +489,9 @@ class TestStopSessionTaskDurableFallback:
     @pytest.mark.asyncio
     async def test_double_stop_orphan_emits_frame_once(self, mock_db):
         """Same once-only settle for the orphan-subagent (event-log) branch."""
+        from tests.shared_fixtures import seed_session
+
+        seed_session('s1')
         import app.core.turn_recorder as tr
         from app.db import session_events as se
 

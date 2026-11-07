@@ -90,6 +90,9 @@ def test_is_prompt_event_excludes_task_notification():
 # ---------------------------------------------------------------------------
 
 async def test_backfilled_uuid_short_circuit(mock_db, monkeypatch):
+    from tests.shared_fixtures import seed_session
+
+    seed_session('sess-rewind')
     se.append_events(SID, [
         _user_ev("first", uuid="u-1"),
         _asst_ev("reply one", uuid="a-1"),
@@ -104,6 +107,9 @@ async def test_backfilled_uuid_short_circuit(mock_db, monkeypatch):
 
 
 async def test_include_response_uses_next_user_prompt(mock_db, monkeypatch):
+    from tests.shared_fixtures import seed_session
+
+    seed_session('sess-rewind')
     se.append_events(SID, [
         _user_ev("first", uuid="u-1"),
         _asst_ev("reply one"),
@@ -117,6 +123,9 @@ async def test_include_response_uses_next_user_prompt(mock_db, monkeypatch):
 
 
 async def test_include_response_at_tail_is_noop(mock_db, monkeypatch):
+    from tests.shared_fixtures import seed_session
+
+    seed_session('sess-rewind')
     se.append_events(SID, [
         _user_ev("only", uuid="u-1"),
         _asst_ev("reply"),
@@ -129,6 +138,9 @@ async def test_include_response_at_tail_is_noop(mock_db, monkeypatch):
 
 
 async def test_assistant_target_resolves_by_uuid(mock_db, monkeypatch):
+    from tests.shared_fixtures import seed_session
+
+    seed_session('sess-rewind')
     se.append_events(SID, [
         _user_ev("first", uuid="u-1"),
         _asst_ev("reply one", uuid="a-1"),
@@ -146,6 +158,9 @@ async def test_assistant_target_resolves_by_uuid(mock_db, monkeypatch):
 # ---------------------------------------------------------------------------
 
 async def test_content_resolution_maps_to_matching_prompt(mock_db, monkeypatch):
+    from tests.shared_fixtures import seed_session
+
+    seed_session('sess-rewind')
     # Live v2 events: no uuids stamped.
     se.append_events(SID, [
         {"type": "turn.started"},
@@ -165,6 +180,9 @@ async def test_content_resolution_maps_to_matching_prompt(mock_db, monkeypatch):
 
 
 async def test_duplicate_content_disambiguated_by_occurrence(mock_db, monkeypatch):
+    from tests.shared_fixtures import seed_session
+
+    seed_session('sess-rewind')
     # Two identical prompts — occurrence among same-text checkpoints picks
     # the right one on each side.
     se.append_events(SID, [
@@ -186,6 +204,9 @@ async def test_duplicate_content_disambiguated_by_occurrence(mock_db, monkeypatc
 
 
 async def test_command_prompts_do_not_shift_resolution(mock_db, monkeypatch):
+    from tests.shared_fixtures import seed_session
+
+    seed_session('sess-rewind')
     # A backfilled command prompt does not appear in the checkpoint list and
     # must not shift resolution.
     se.append_events(SID, [
@@ -208,6 +229,9 @@ async def test_command_prompts_do_not_shift_resolution(mock_db, monkeypatch):
 # ---------------------------------------------------------------------------
 
 async def test_fail_closed_on_content_mismatch(mock_db, monkeypatch):
+    from tests.shared_fixtures import seed_session
+
+    seed_session('sess-rewind')
     se.append_events(SID, [_user_ev("what the log recorded")])
     _patch_checkpoints(monkeypatch, [_cp("u-1", "what the jsonl says")])
 
@@ -217,6 +241,9 @@ async def test_fail_closed_on_content_mismatch(mock_db, monkeypatch):
 
 
 async def test_fail_closed_when_target_not_in_checkpoints(mock_db, monkeypatch):
+    from tests.shared_fixtures import seed_session
+
+    seed_session('sess-rewind')
     se.append_events(SID, [_user_ev("hello")])
     _patch_checkpoints(monkeypatch, [_cp("u-1", "hello")])
 
@@ -226,6 +253,9 @@ async def test_fail_closed_when_target_not_in_checkpoints(mock_db, monkeypatch):
 
 
 async def test_fail_closed_when_log_has_fewer_prompts(mock_db, monkeypatch):
+    from tests.shared_fixtures import seed_session
+
+    seed_session('sess-rewind')
     se.append_events(SID, [_user_ev("only one")])
     _patch_checkpoints(monkeypatch, [
         _cp("u-1", "only one", index=0),
@@ -238,6 +268,9 @@ async def test_fail_closed_when_log_has_fewer_prompts(mock_db, monkeypatch):
 
 
 async def test_fail_closed_on_empty_log(mock_db, monkeypatch):
+    from tests.shared_fixtures import seed_session
+
+    seed_session('sess-rewind')
     _patch_checkpoints(monkeypatch, [_cp("u-1", "hello")])
     from_seq, err = _resolve_rewind_from_seq(SID, SDK, WD, "u-1", False, "user")
     assert from_seq is None
@@ -245,6 +278,9 @@ async def test_fail_closed_on_empty_log(mock_db, monkeypatch):
 
 
 async def test_fail_closed_assistant_target_without_uuid_match(mock_db, monkeypatch):
+    from tests.shared_fixtures import seed_session
+
+    seed_session('sess-rewind')
     se.append_events(SID, [_user_ev("hello"), _asst_ev("reply")])
     _patch_checkpoints(monkeypatch, [_cp("a-1", "reply", role="assistant")])
 
@@ -321,6 +357,9 @@ async def test_content_affordance_empty_content_refused(mock_db, monkeypatch):
 # ---------------------------------------------------------------------------
 
 async def test_load_message_events_drops_rewound_rows(mock_db):
+    from tests.shared_fixtures import seed_session
+
+    seed_session('sess-rewind')
     # Rows logically erased by a later transcript.rewound must not take part
     # in resolution — they mirror messages the client no longer renders.
     se.append_events(SID, [
@@ -403,6 +442,9 @@ def rewind_env(mock_db, monkeypatch):
 
 
 async def test_execute_rewind_appends_transcript_rewound(rewind_env, monkeypatch):
+    from tests.shared_fixtures import seed_session
+
+    seed_session('sess-rewind')
     se.append_events(SID, [
         _user_ev("first", uuid="u-1"),
         _asst_ev("reply one"),
@@ -426,6 +468,9 @@ async def test_execute_rewind_appends_transcript_rewound(rewind_env, monkeypatch
 
 
 async def test_full_rewind_clears_sdk_session_pointer(rewind_env, monkeypatch):
+    from tests.shared_fixtures import seed_session
+
+    seed_session('sess-rewind')
     # Rewinding to the very first message empties the JSONL. Resuming the old
     # sdk_session_id then fails ("No conversation found"), bricking the
     # session — the pointer must be cleared so the next message starts fresh.
@@ -443,6 +488,9 @@ async def test_full_rewind_clears_sdk_session_pointer(rewind_env, monkeypatch):
 
 
 async def test_partial_rewind_keeps_sdk_session_pointer(rewind_env, monkeypatch):
+    from tests.shared_fixtures import seed_session
+
+    seed_session('sess-rewind')
     # A rewind that leaves user turns behind must NOT touch the resume pointer.
     rewind_env.remaining_user_turns = 1
     se.append_events(SID, [
@@ -462,6 +510,9 @@ async def test_partial_rewind_keeps_sdk_session_pointer(rewind_env, monkeypatch)
 
 
 async def test_execute_rewind_refuses_before_truncating(rewind_env, monkeypatch):
+    from tests.shared_fixtures import seed_session
+
+    seed_session('sess-rewind')
     se.append_events(SID, [_user_ev("recorded content")])
     _patch_checkpoints(monkeypatch, [_cp("u-1", "different content")])
 
@@ -477,6 +528,9 @@ async def test_execute_rewind_refuses_before_truncating(rewind_env, monkeypatch)
 
 
 async def test_execute_rewind_content_payload_resolves_uuid(rewind_env, monkeypatch):
+    from tests.shared_fixtures import seed_session
+
+    seed_session('sess-rewind')
     se.append_events(SID, [
         _user_ev("first", uuid="u-1"),
         _user_ev("second", uuid="u-2"),
@@ -498,6 +552,9 @@ async def test_execute_rewind_content_payload_resolves_uuid(rewind_env, monkeypa
 
 
 async def test_execute_rewind_content_guard_refuses(rewind_env, monkeypatch):
+    from tests.shared_fixtures import seed_session
+
+    seed_session('sess-rewind')
     se.append_events(SID, [_user_ev("first", uuid="u-1")])
     _patch_checkpoints(monkeypatch, [_cp("u-1", "first", index=0)])
 
@@ -510,6 +567,9 @@ async def test_execute_rewind_content_guard_refuses(rewind_env, monkeypatch):
 
 
 async def test_execute_steer_rewind_refuses_before_any_mutation(rewind_env, monkeypatch):
+    from tests.shared_fixtures import seed_session
+
+    seed_session('sess-rewind')
     steer = _user_ev("mid-turn only")
     steer["payload"]["checkpoint_backed"] = False
     se.append_events(SID, [_user_ev("normal"), steer])
@@ -526,6 +586,9 @@ async def test_execute_steer_rewind_refuses_before_any_mutation(rewind_env, monk
 
 
 async def test_execute_rewind_missing_target_refused(rewind_env, monkeypatch):
+    from tests.shared_fixtures import seed_session
+
+    seed_session('sess-rewind')
     _patch_checkpoints(monkeypatch, [])
     resp = await execute_rewind(SID, RewindRequestV2(target_uuid=""))
     assert resp.success is False
@@ -533,6 +596,9 @@ async def test_execute_rewind_missing_target_refused(rewind_env, monkeypatch):
 
 
 async def test_execute_rewind_non_v2_session_unchanged(rewind_env, monkeypatch):
+    from tests.shared_fixtures import seed_session
+
+    seed_session('sess-rewind')
     # Non-v2 sessions must keep the legacy behavior: no resolution, no event.
     rewind_env.session_row["v2_stream"] = False
     _patch_checkpoints(monkeypatch, [])
@@ -882,6 +948,9 @@ async def test_native_steered_turn_rewind_keeps_native_and_replay_aligned(
 async def test_keep_response_skips_steers_but_retains_real_legacy_boundaries(
     mock_db, monkeypatch, legacy, boundary_kind,
 ):
+    from tests.shared_fixtures import seed_session
+
+    seed_session('sess-rewind')
     first, interjection = _user_ev("again"), _user_ev("again")
     first["turn_id"] = interjection["turn_id"] = "live-turn"
     if not legacy:
@@ -899,6 +968,9 @@ async def test_keep_response_skips_steers_but_retains_real_legacy_boundaries(
 
 @pytest.mark.parametrize("legacy", [False, True])
 async def test_keep_response_tail_steer_is_not_a_next_prompt(mock_db, monkeypatch, legacy):
+    from tests.shared_fixtures import seed_session
+
+    seed_session('sess-rewind')
     first, steer = _user_ev("first"), _user_ev("mid-turn")
     first["turn_id"] = steer["turn_id"] = "live-turn"
     if not legacy:
@@ -911,6 +983,9 @@ async def test_keep_response_tail_steer_is_not_a_next_prompt(mock_db, monkeypatc
 
 @pytest.mark.parametrize("legacy", [False, True])
 async def test_assistant_checkpoint_boundary_skips_same_turn_steer(mock_db, monkeypatch, legacy):
+    from tests.shared_fixtures import seed_session
+
+    seed_session('sess-rewind')
     first, steer = _user_ev("first"), _user_ev("mid-turn")
     first["turn_id"] = steer["turn_id"] = "live-turn"
     if not legacy:
@@ -925,6 +1000,9 @@ async def test_assistant_checkpoint_boundary_skips_same_turn_steer(mock_db, monk
 
 
 async def test_legacy_same_turn_steer_does_not_shift_normal_checkpoint(mock_db, monkeypatch):
+    from tests.shared_fixtures import seed_session
+
+    seed_session('sess-rewind')
     first, steer, following = _user_ev("again"), _user_ev("again"), _user_ev("again")
     first["turn_id"] = steer["turn_id"] = "real-turn"
     following["turn_id"] = "next-turn"

@@ -854,7 +854,7 @@ async def test_a_rewind_during_connect_stops_the_turn_before_it_starts(mock_db, 
 
 
 @pytest.mark.parametrize("route", ["chat", "rest", "background", "headless"])
-async def test_a_turn_a_rewind_stopped_before_its_connect_never_claims(mock_db, route):
+async def test_a_turn_a_rewind_stopped_before_its_connect_never_claims(mock_db, route, request):
     """A rewind can give up waiting on a turn stuck in its preparation. If that
     turn then connected, its claim would outrank the rewind and whatever follows."""
     sessions_db.create_session("sess-early", "default")
@@ -881,7 +881,13 @@ async def test_a_turn_a_rewind_stopped_before_its_connect_never_claims(mock_db, 
     assert world.connects == [], "a stopped turn must not reach its claim"
     assert world.sent == []
     assert session_admission._holders["sess-early"] is rewind, "the rewind keeps the chat"
-    session_admission.close(rewind)
+    # The fake rewind runs inside the turn's task, so its context also reaches
+    # status-refresh reads. Settle its owned release before pytest closes this
+    # loop; a synchronous close may still be draining those inherited reads.
+    await session_admission.close_and_wait(rewind)
+    unfinished = [task for task in session_admission._unattended
+                  if task.get_loop() is asyncio.get_running_loop() and not task.done()]
+    assert not unfinished, f"{request.node.nodeid} left admission tasks on its test loop: {unfinished!r}"
 
 
 @pytest.mark.parametrize("route", ["chat", "rest", "background"])

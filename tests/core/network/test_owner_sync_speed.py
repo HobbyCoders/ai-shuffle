@@ -349,6 +349,30 @@ def test_membership_replay_uses_generation_even_when_receive_timestamps_tie(work
         assert [row["record"]["generation"] for row in store.list_membership_records()] == [0, 1, 2]
 
 
+@pytest.mark.parametrize("incarnation,pending", [(1, False), (2, True), (3, True), (4, False)])
+def test_wire_stream_snapshot_matches_individual_metadata_reads(workers, incarnation, pending):
+    from tests.core.network.test_ownership_revocation import _network
+
+    a, b = _network(workers, "stream-a", "stream-b")
+    set_owner_pref(a, "stream-frontier", True)
+    wire = _pref_ops(a, b, {"stream-frontier"})[-1]
+    with b.active(), store.get_db() as conn:
+        cursor = conn.cursor()
+        store.lock_state(cursor)
+        store.set_watermark(cursor, a.device_id, 2, 11)
+        store.set_watermark(cursor, a.device_id, 4, 29)
+        if pending:
+            store.stash_pending(cursor, dict(wire, origin_incarnation=incarnation))
+        stream = engine._wire_stream(cursor, [dict(wire, origin_incarnation=incarnation)],
+                                     engine.cached_context())
+        assert stream is not None
+        assert (stream.highest, stream.watermark, stream.pending) == (
+            store.highest_incarnation(cursor, a.device_id),
+            store.get_watermark(cursor, a.device_id, incarnation),
+            store.count_pending(cursor, a.device_id, incarnation),
+        )
+
+
 def test_fresh_transcript_delta_uses_bulk_sql_and_one_mirror_wake_per_chunk(workers, monkeypatch):
     from tests.core.network.test_ownership_revocation import _network
     a, b = _network(workers, "bulk-a", "bulk-b")
@@ -370,6 +394,16 @@ def test_fresh_transcript_delta_uses_bulk_sql_and_one_mirror_wake_per_chunk(work
     mirrored = Mock(wraps=catalog.after_event_mirrored)
     monkeypatch.setattr(store, "insert_event_batch", bulk)
     monkeypatch.setattr(catalog, "after_event_mirrored", mirrored)
+    reservations = []
+    real_reserve = engine._lock_mirror_event_counters
+
+    def reserve(cursor, record_ids):
+        ids = list(record_ids)
+        if ids:
+            reservations.append(ids)
+        return real_reserve(cursor, ids)
+
+    monkeypatch.setattr(engine, "_lock_mirror_event_counters", reserve)
     statements = []
     b.raw.set_trace_callback(statements.append)
     try:
@@ -380,6 +414,10 @@ def test_fresh_transcript_delta_uses_bulk_sql_and_one_mirror_wake_per_chunk(work
         b.raw.set_trace_callback(None)
     assert result.applied == 401 and result.retry == result.rejected == result.pending == 0
     assert bulk.call_count == mirrored.call_count == 7  # ceil(400 / APPLY_CHUNK=64)
+    assert len(reservations) == bulk.call_count  # one complete C prefix, not nested reservations
+    # Only the initial zero reservation needs a fresh delete-wins check;
+    # subsequent hot chunks already own a positive counter.
+    assert sum(sql.startswith("DELETE FROM session_event_counters") for sql in statements) == 1
     assert len(statements) <= 20 * 7  # not ~19 statements * 400 envelopes
     assert [row["seq"] for row in b.sql("SELECT seq FROM session_events WHERE session_id = ? ORDER BY seq", ("bulk",))] == list(range(1, 401))
     assert b.sql("SELECT next_seq FROM session_event_counters WHERE session_id = ?", ("bulk",))[0]["next_seq"] == 400

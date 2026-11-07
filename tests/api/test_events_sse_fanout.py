@@ -89,6 +89,9 @@ async def _collect_comments(agen, n, timeout=5.0):
 async def test_one_db_read_per_batch_regardless_of_client_count(
     mock_db, gw, monkeypatch
 ):
+    from tests.shared_fixtures import seed_session
+
+    seed_session('sess-fan')
     monkeypatch.setattr(events_mod, "KEEPALIVE_SECONDS", 30.0)
     se.append_events("sess-fan", [{"type": "turn.started"}])
 
@@ -127,6 +130,9 @@ async def test_serialization_is_shared_not_repeated_per_client(
     mock_db, gw, monkeypatch
 ):
     """Every client is handed the SAME frame string object — serialize once."""
+    from tests.shared_fixtures import seed_session
+
+    seed_session('sess-share')
     monkeypatch.setattr(events_mod, "KEEPALIVE_SECONDS", 30.0)
     se.append_events("sess-share", [{"type": "turn.started"}])
 
@@ -160,6 +166,9 @@ async def test_serialization_is_shared_not_repeated_per_client(
 async def test_pushed_batches_preserve_order_and_are_gap_free(
     mock_db, gw, monkeypatch
 ):
+    from tests.shared_fixtures import seed_session
+
+    seed_session('sess-ord')
     monkeypatch.setattr(events_mod, "KEEPALIVE_SECONDS", 30.0)
     se.append_events("sess-ord", [{"type": "turn.started"}])
 
@@ -189,6 +198,9 @@ async def test_reconnect_cursor_semantics_hold_on_the_push_path(
     mock_db, gw, monkeypatch
 ):
     """``from_seq`` stays exclusive: a resumed client sees seq > from_seq only."""
+    from tests.shared_fixtures import seed_session
+
+    seed_session('sess-res')
     monkeypatch.setattr(events_mod, "KEEPALIVE_SECONDS", 30.0)
     se.append_events("sess-res", [{"type": "a"}, {"type": "b"}, {"type": "c"}])
 
@@ -214,6 +226,9 @@ async def test_discontinuous_batch_is_never_emitted_but_read_instead(
     (slow client, queue overflow) or a late attach leaves a discontinuity, and
     the client must fall back to a read rather than emit what it was handed.
     """
+    from tests.shared_fixtures import seed_session
+
+    seed_session('sess-gap')
     monkeypatch.setattr(events_mod, "KEEPALIVE_SECONDS", 30.0)
     se.append_events("sess-gap", [{"type": "turn.started"}])
 
@@ -244,6 +259,9 @@ async def test_discontinuous_batch_is_never_emitted_but_read_instead(
 async def test_already_seen_batch_is_dropped_not_duplicated(
     mock_db, gw, monkeypatch
 ):
+    from tests.shared_fixtures import seed_session
+
+    seed_session('sess-dup')
     monkeypatch.setattr(events_mod, "KEEPALIVE_SECONDS", 30.0)
     se.append_events("sess-dup", [{"type": "turn.started"}])
 
@@ -273,6 +291,9 @@ async def test_event_appended_between_backfill_and_seed_still_arrives(
     mock_db, gw, monkeypatch
 ):
     """The reader starts at min(client cursor, tail) — never above a client."""
+    from tests.shared_fixtures import seed_session
+
+    seed_session('sess-race')
     monkeypatch.setattr(events_mod, "KEEPALIVE_SECONDS", 30.0)
     se.append_events("sess-race", [{"type": "turn.started"}])
 
@@ -292,6 +313,9 @@ async def test_event_appended_between_backfill_and_seed_still_arrives(
 
 async def test_bogus_from_seq_cannot_starve_other_clients(mock_db, gw, monkeypatch):
     """``from_seq`` is caller-supplied; the reader must clamp it to the tail."""
+    from tests.shared_fixtures import seed_session
+
+    seed_session('sess-bogus')
     monkeypatch.setattr(events_mod, "KEEPALIVE_SECONDS", 30.0)
     se.append_events("sess-bogus", [{"type": "turn.started"}])
 
@@ -314,6 +338,9 @@ async def test_bogus_from_seq_cannot_starve_other_clients(mock_db, gw, monkeypat
 
 async def test_reader_failure_falls_back_to_reads(mock_db, gw, monkeypatch):
     """A dead shared reader must not strand clients — they poll again."""
+    from tests.shared_fixtures import seed_session
+
+    seed_session('sess-dead')
     monkeypatch.setattr(events_mod, "KEEPALIVE_SECONDS", 0.05)
     se.append_events("sess-dead", [{"type": "turn.started"}])
 
@@ -335,6 +362,9 @@ async def test_reader_failure_falls_back_to_reads(mock_db, gw, monkeypatch):
 
 
 async def test_last_client_tears_down_the_shared_reader(mock_db, gw, monkeypatch):
+    from tests.shared_fixtures import seed_session
+
+    seed_session("sess-tear")
     monkeypatch.setattr(events_mod, "KEEPALIVE_SECONDS", 30.0)
     se.append_events("sess-tear", [{"type": "turn.started"}])
 
@@ -359,6 +389,9 @@ async def test_last_client_tears_down_the_shared_reader(mock_db, gw, monkeypatch
 async def test_keepalive_skips_the_db_read_while_delivery_is_healthy(
     mock_db, gw, monkeypatch
 ):
+    from tests.shared_fixtures import seed_session
+
+    seed_session('sess-quiet')
     monkeypatch.setattr(events_mod, "KEEPALIVE_SECONDS", 0.02)
     monkeypatch.setattr(events_mod, "LIVE_RESYNC_SECONDS", 600.0)
     monkeypatch.setattr(gw, "is_connected", lambda: True)
@@ -383,6 +416,9 @@ async def test_keepalive_still_polls_when_the_gateway_is_degraded(
     mock_db, gw, monkeypatch
 ):
     """The documented fallback stays intact: no notifies -> poll every tick."""
+    from tests.shared_fixtures import seed_session
+
+    seed_session('sess-degraded')
     monkeypatch.setattr(events_mod, "KEEPALIVE_SECONDS", 0.02)
     monkeypatch.setattr(events_mod, "LIVE_RESYNC_SECONDS", 600.0)
     monkeypatch.setattr(gw, "is_connected", lambda: False)
@@ -409,6 +445,9 @@ async def test_periodic_resync_still_reconciles_a_healthy_feed(
 ):
     """The skipped read is deferred, not abandoned: a low-frequency re-sync
     still catches anything the push path could ever miss."""
+    from tests.shared_fixtures import seed_session
+
+    seed_session('sess-resync')
     monkeypatch.setattr(events_mod, "KEEPALIVE_SECONDS", 0.02)
     monkeypatch.setattr(events_mod, "LIVE_RESYNC_SECONDS", 0.05)
     monkeypatch.setattr(gw, "is_connected", lambda: True)
@@ -433,6 +472,9 @@ async def test_periodic_resync_still_reconciles_a_healthy_feed(
 
 
 async def test_populated_log_never_calls_ensure_backfilled(mock_db, gw, monkeypatch):
+    from tests.shared_fixtures import seed_session
+
+    seed_session('sess-lazy')
     monkeypatch.setattr(events_mod, "KEEPALIVE_SECONDS", 30.0)
     calls = []
 
@@ -472,6 +514,9 @@ async def test_reconnect_never_reseeds_legacy_history(mock_db, gw, monkeypatch):
 
 
 async def test_empty_log_on_a_fresh_load_still_seeds(mock_db, gw, monkeypatch):
+    from tests.shared_fixtures import seed_session
+
+    seed_session('sess-lazy-3')
     monkeypatch.setattr(events_mod, "KEEPALIVE_SECONDS", 30.0)
     calls = []
 

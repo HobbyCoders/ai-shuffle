@@ -1,5 +1,7 @@
 """Milestone 5 collections: memory facts and skills, plugin desired state, blobs, owners."""
 
+import time
+
 import pytest
 
 from app.core import automation_service
@@ -116,8 +118,12 @@ def test_network_sync_cannot_answer_a_pending_prompt_on_an_owned_chat(workers):
         assert interactions.get_interaction(prompt["id"])["answer"] == {"decision": "deny"}
 
 
-def test_facts_and_skills_reach_other_workers(workers):
+def test_facts_and_skills_reach_other_workers(workers, monkeypatch):
+    from fluid.codemode import transactions
     from fluid.codemode.skills import SkillStore
+    monkeypatch.setattr(transactions, "_change_callback", None)
+    monkeypatch.setattr(memory_records, "_write_window", None)
+    memory_records.install_write_hook()
     a, b = workers("a"), workers("b")
     with a.active():
         engine.create_network("Home", device_name="A")
@@ -127,6 +133,8 @@ def test_facts_and_skills_reach_other_workers(workers):
         origin_a = facts_a._facts.snapshot()["store_id"]
         (root / "greet.py").write_text("def run():\n    return 'hi'\n")
         (root / "journal.jsonl").write_text('{"kind": "cell"}\n')
+        # The publisher now batches committed file writes until the quiet gap.
+        time.sleep(memory_records.WRITE_QUIET_SECONDS + .01)
         assert memory_records.publish() >= 2
         ops = [o for o in store.ops_since({}) if o["collection"] == "memory"]
         ids_a = [o["record_id"] for o in ops]
@@ -145,6 +153,7 @@ def test_facts_and_skills_reach_other_workers(workers):
         assert (root / "greet.py").read_text().startswith("def run")
         assert not (root / "journal.jsonl").exists()
         facts_b.save_memory("B likes spaces.", protected=True)
+        time.sleep(memory_records.WRITE_QUIET_SECONDS + .01)
         assert memory_records.publish() == 1
         ids_b = [o["record_id"] for o in store.ops_since({}) if o["collection"] == "memory" and o["origin_device_id"] == b.device_id]
         assert len(ids_b) == 1 and ids_b[0].startswith("memory-v2:")
@@ -155,6 +164,7 @@ def test_facts_and_skills_reach_other_workers(workers):
         # A forget is explicit state, not absence from a hot file.
         assert facts_a.delete_memory(first.id, explicit=True, expected_revision=1)
         (_skills_root(a) / "greet.py").unlink()
+        time.sleep(memory_records.WRITE_QUIET_SECONDS + .01)
         assert memory_records.publish() >= 2
     converge([a, b])
     with b.active():

@@ -170,12 +170,23 @@ def test_buffer_phase_has_a_transaction_work_and_round_trip_budget(request, use_
     factory = request.getfixturevalue("pg_workers" if use_postgres else "workers")
     a, b, ops = backlog(factory, 193, buffer=False)
     chunks = (len(ops) - 2) // engine.APPLY_CHUNK + 1
+    counter_reservations = []
+    real_reserve = engine._lock_mirror_event_counters
+
+    def reserve(cursor, record_ids):
+        ids = list(record_ids)
+        counter_reservations.extend(ids)
+        return real_reserve(cursor, ids)
+
+    monkeypatch.setattr(engine, "_lock_mirror_event_counters", reserve)
     with b.active(), measured_apply(monkeypatch, b) as (transactions, statements):
         result = engine.apply_batch(ops[1:])
     assert result.pending == len(ops) - 1 and result.applied == result.retry == result.rejected == 0
     assert len(transactions) == chunks
     assert sum(t["ops"] for t in transactions) == len(ops) - 1
     assert max(t["ops"] for t in transactions) <= engine.APPLY_CHUNK
+    # Pure gap buffering never materializes an event or needs its counter.
+    assert counter_reservations == []
     # Five statements plus commit/release per bounded buffering transaction.
     assert len(statements) <= chunks * 7
 

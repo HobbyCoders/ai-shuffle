@@ -213,6 +213,9 @@ async def test_pooled_swarm_resume_repairs_after_claim_before_pump(mock_db, monk
     Disabling only the new boundary reproduces the old pre-pump phantom,
     despite the unrelated end-of-turn pending reconciliation still existing.
     """
+    from tests.shared_fixtures import seed_session
+
+    seed_session('pooled-swarm')
     from types import SimpleNamespace
     from fluid.engine.native import NativeLoop
     from fluid.store.base import MemoryStore
@@ -817,6 +820,9 @@ async def test_monitor_worker_park_lifecycle(
 
 
 async def test_main_monitor_park_preserves_recorded_intake_usage(mock_db, spawner_harness):
+    from tests.shared_fixtures import seed_session
+
+    seed_session("s-spawn")
     from app.core import monitor_spawn, turn_outcome
     from app.core.task_registry import task_registry
 
@@ -852,6 +858,9 @@ async def test_main_monitor_park_preserves_recorded_intake_usage(mock_db, spawne
 async def test_stopping_only_monitor_cannot_leave_an_unwakeable_park(
     mock_db, native_scheduler, spawner_harness, monkeypatch, stop_at, other_work,
 ):
+    from tests.shared_fixtures import seed_session
+
+    seed_session("s-spawn")
     from app.core import monitor_spawn, turn_scheduler
     from app.core.task_registry import task_registry
     from app.mcp import builtin_tools
@@ -1299,7 +1308,10 @@ async def test_native_monitor_park_is_recovered_when_shell_is_gone_after_restart
     from app.core import monitor_spawn, startup_reconcile
     from app.core.task_registry import task_registry
 
+    from tests.shared_fixtures import seed_session
+
     sid = "monitor-restarted-worker"
+    seed_session(sid)
     task, _ = spawner_harness
     turn = turns_db.enqueue_turn(sid, "provider_agent", prompt="run tests")
 

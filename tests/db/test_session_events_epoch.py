@@ -33,6 +33,7 @@ def test_empty_log_has_the_empty_epoch(mock_db):
 
 
 def test_epoch_is_stable_across_appends(mock_db):
+    database.create_session("s1", "default")
     se.append_events("s1", [{"type": "turn.started"}])
     epoch = se.get_log_epoch("s1")
     se.append_events("s1", _deltas(3))
@@ -57,6 +58,7 @@ def test_epoch_changes_when_the_session_is_cleared(mock_db):
 def test_compacting_a_leading_delta_run_keeps_the_epoch(mock_db):
     """Compaction moves the run's first id onto the survivor, so the epoch of a
     log that starts with a delta run survives it."""
+    database.create_session("s1", "default")
     se.append_events("s1", _deltas(5))
     se.append_events("s1", [{"type": "turn.completed", "turn_id": "t1"}])
     epoch = se.get_log_epoch("s1")
@@ -66,6 +68,7 @@ def test_compacting_a_leading_delta_run_keeps_the_epoch(mock_db):
 
 
 def test_has_event_at(mock_db):
+    database.create_session("s1", "default")
     se.append_events("s1", _deltas(3))
     se.append_events("s1", [{"type": "turn.completed", "turn_id": "t1"}])
     se.compact_session_deltas("s1", keep_tail_events=0)
@@ -76,6 +79,7 @@ def test_has_event_at(mock_db):
 
 
 def test_get_tool_use_seqs(mock_db):
+    database.create_session("s1", "default")
     se.append_events("s1", [
         {"type": "tool.input_delta", "payload": {"tool_use_id": "a", "partial_json": "{"},
          "turn_id": "t1"},

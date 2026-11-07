@@ -252,6 +252,34 @@ python -m scripts.perf.sync_bench run --runs 10 --long-seed \
   --catchup 1000 10000 --idle-seconds 600 --output /tmp/sync-bench.json
 ```
 
+For a memory-only comparison (ten warm saves, ten ten-save bursts, ten saves
+following a quiet 65-second interval), use:
+
+```sh
+python -m scripts.perf.sync_bench run --runs 10 --memory-only \
+  --output /tmp/memory-sync.json
+```
+
+`--memory-cold-seconds` must exceed the scanner's 60-second maximum backoff.
+Warm samples first change a normal preference to wake the scanner; cold samples
+make no probe requests during the quiet interval. Bursts use ten independent
+production saves in one thread, wait for all facts to be recallable on B, then
+observe three more seconds and count A's committed memory envelopes (not scan
+requests). Their write duration and actual envelope bytes are included. This
+uses the default memory seed, not an 800 kB field store. Count recorded samples
+against requested attempts and inspect teardown, not just the command exit.
+
+Committed fact changes (including local imports, metadata edits, retirement and
+forget), Python skill save/delete and skill curation now request the targeted
+memory publisher through the existing fixed 100 ms scanner debounce. The
+publisher also waits for a 100 ms write-quiet gap so a burst straddling scanner
+passes does not emit intermediate whole-store snapshots; sustained writes are
+flushed within two seconds rather than starving synchronization. The hint
+runs after all enclosing file locks release. Peer materialization suppresses
+hints; recall/inference accounting is not an urgent mutation. External edits
+(including prose skill folders) still use periodic full reconciliation. The
+wire format and whole-store fact snapshots are unchanged.
+
 The JSON contains raw samples, nearest-rank p50/p75/max/n (same convention as
 `stats.mjs`), signed-operation-correlated stages, envelope bytes, seed sizes,
 per-scope SQL counts/elapsed time and thread-offload CPU. Failed/censored attempts

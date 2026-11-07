@@ -129,6 +129,92 @@ space reclaim or production after-count has been verified. The follow-up is
 `two-worker-smoke.transcript-op-retention` in the generated live-smoke checklist;
 format-1 protocol coverage is not a claim to have run an older installed binary.
 
+## Memory op compaction
+
+The `memory` collection syncs one whole-store record per worker and owner
+(`memory-v2:<device>:<owner-hash>`), so every memory change appends a signed
+copy of the entire fact store. A later field measurement found 792 kB average
+envelopes (961 kB max) and 1,666 copies of one worker's record in 30 days
+(1.3 GB), 2.1 GB for 27 records, nearly all superseded. The generic pass only
+dropped them after 30 days.
+
+`compact_memory_ops` runs in the same daily maintenance loop, after the
+transcript pass, with the same captured heads and peer observations. It deletes
+a `memory` envelope only when **all** of these hold:
+
+1. A newer envelope of the same record (same collection and record id, later
+   ingest, strictly higher Lamport clock) is still in the log. The newest
+   envelope of each record is never deleted.
+2. It is at or below the minimum advertised frontier of every recent active
+   worker peer (the transcript pass's rule, grace and fail-closed behaviour).
+   So no online peer, whatever its version, ever sees a gap.
+3. It is strictly below its stream's retained head.
+
+There is no age floor. This is safe because the record is whole-state: a
+receiver applies only the current materialized `network_memory_records` row
+(`memory_records.apply_to_files` reads it by id, even when one batch carried
+several copies), and state copies read `sync_records` plus that row, never old
+envelopes. A peer beyond the contact grace meets a gap and takes the existing
+state copy, as after `prune_ops`. Nothing changes on the wire: older peers keep
+their own 30-day retention and still exchange, forward and copy normally.
+
+The first pass on an upgraded worker is also the one-time cleanup of the
+already superseded copies; nothing else is migrated. It runs in committed
+batches of 100 rows (`MEMORY_COMPACTION_BATCH`, about 80 MB of envelopes at the
+field size) under the 30-second statement deadline and stops between batches on
+cancel. Each pass logs `Memory sync operation compaction` with `deleted_ops`,
+`bytes_estimate`, peer frontiers and expired peers. Disable it with
+`AI_SHUFFLE_SYNC_MEMORY_OP_COMPACTION=0` (`false`/`off` also work).
+
+What it does not change: bytes **written** per memory change are the same
+(one whole-store envelope). What it bounds is bytes **kept**: roughly one
+envelope per memory record plus whatever recent peers have not yet received
+and up to a day of new copies, instead of 30 days. Per-fact or delta records
+would also cut the bytes written, but would need a new record format, merge
+rules shared with the fact store, and a mixed-version plan (older peers would
+ignore per-fact records and stop converging). That is left as a follow-up.
+
+`tests/core/network/test_memory_op_compaction_postgres.py` covers it with real
+PostgreSQL workers, the real memory producer and signed exchange through the
+peer router. With 60 seed facts and 12 changes, main kept 13 of 13 copies
+(807 kB) after the maintenance pass; with compaction it keeps 1 (66 kB, the
+newest). The online peer then receives later changes through ordinary op sync
+with no state copy. A lagging recent peer pins what it lacks, the kill switch
+holds everything, and an expired peer recovers through a state copy to the same
+records and facts.
+
+## Transcript op volume: findings only
+
+The second half of the same report (about 1.1 million `session_events` ops a
+week) is one op per saved transcript event. The turn recorder saves streamed
+text, thinking and tool-input in **chunks**, not per token: one event per kind
+when 150 ms have passed since the first buffered delta, or at 2,048 characters,
+or before any other event (`app/core/turn_recorder.py`). The catalog publisher
+then publishes every new event row once, by its cursor
+(`catalog._publish_session_events`). The later idle-session delta compaction
+(`compact_session_deltas`) merges rows after publication and adds no ops. So
+about 6–7 ops per second of streaming per running chat, plus tool and status
+events. 1.1 million a week is about 1.8 ops per second around the clock, about
+seven hours of streaming a day across all chats. That fits several agents
+running in parallel. It grows with use, not because of a bug.
+
+These ops are already retired after 30 days by the transcript pass above, so
+their total is bounded at about four weeks of activity. Options to lower the
+rate, none changed here:
+
+- Publish deltas coalesced: merge consecutive delta rows of one turn into one
+  envelope at publish time. That needs a mirror format for merged runs (the
+  owner's dense `seq` is the mirror's order), so it is a protocol change.
+- Don't sync delta rows of finished turns at all and rely on the final message
+  events. Mirrors replay deltas for text today, so this needs reader changes.
+- A longer flush window (for example 500 ms) would cut ops about 3x but makes
+  local streaming feel slower. Not recommended.
+
+To confirm on a busy worker (read-only), compare
+`SELECT event_type, COUNT(*) FROM session_events WHERE created_at > NOW() - INTERVAL '7 days' GROUP BY 1 ORDER BY 2 DESC`
+with the week's `session_events` op count. Delta compaction merges older rows,
+so the table undercounts the deltas that were published.
+
 ## Other measured tables: findings only
 
 | Supplied field size | Why it exists / options (not changed here) |

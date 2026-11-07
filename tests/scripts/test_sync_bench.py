@@ -108,6 +108,24 @@ def test_project_and_stream_only_cannot_silently_skip_every_journey(monkeypatch)
     assert error.value.code == 2
 
 
+def test_memory_only_cli_keeps_the_real_scanner_idle_interval(monkeypatch, tmp_path):
+    import sys
+    from scripts.perf import sync_bench
+    captured = []
+    monkeypatch.setattr(sync_bench, "run", captured.append)
+    monkeypatch.setattr(sys, "argv", ["sync_bench", "run", "--memory-only", "--runs", "10",
+                                    "--output", str(tmp_path / "result.json")])
+    sync_bench.main()
+    assert captured[0].memory_only
+    assert captured[0].memory_cold_seconds == 65
+    assert captured[0].runs == 10
+    monkeypatch.setattr(sys, "argv", sys.argv + ["--memory-cold-seconds", "60"])
+    with pytest.raises(SystemExit) as error:
+        sync_bench.main()
+    assert error.value.code == 2
+    assert len(captured) == 1
+
+
 def test_child_cannot_attach_to_unowned_app(monkeypatch):
     from scripts.perf.sync_bench import child
     monkeypatch.delenv("AI_SHUFFLE_PREVIEW", raising=False)

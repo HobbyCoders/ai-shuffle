@@ -887,6 +887,59 @@ TRANSCRIPT_OP_RETENTION_ENV = "AI_SHUFFLE_PERF_TRANSCRIPT_OP_RETENTION"
 PEER_GRACE_DAYS_ENV = "AI_SHUFFLE_SYNC_OP_PEER_GRACE_DAYS"
 
 
+def _peer_grace_days(purpose: str) -> Optional[int]:
+    """The contact grace in days, or None (fail closed) when misconfigured."""
+    try:
+        grace_days = int(os.environ.get(PEER_GRACE_DAYS_ENV, "30"))
+        if grace_days < 1:
+            raise ValueError("peer grace must be positive")
+    except ValueError:
+        logger.warning("Skipping %s: invalid %s", purpose, PEER_GRACE_DAYS_ENV)
+        return None
+    return grace_days
+
+
+def _recent_peers(cur, local_device_id: str, peer_observations: dict, *, now: datetime,
+                  grace_days: int) -> Tuple[Dict[str, dict], List[str]]:
+    """Watermarks of recently contacted active worker peers, and the expired ones.
+
+    A recent peer without an observed frontier maps to ``{}`` and so pins
+    every stream at zero. Persists authenticated contact times in sync_peers.
+    """
+    peer_cutoff = now - timedelta(days=grace_days)
+    peers: Dict[str, dict] = {}
+    expired: List[str] = []
+    cur.execute("SELECT device_id FROM network_members WHERE status = 'active' "
+                "AND kind = 'worker' AND device_id <> %s", (local_device_id,))
+    members = [row["device_id"] for row in cur.fetchall()]
+    for device_id in members:
+        observation = peer_observations.get(device_id) or {}
+        seen_at = observation.get("seen_at")
+        seen = datetime.fromtimestamp(seen_at, timezone.utc).isoformat() if seen_at is not None else None
+        # updated_at is a one-time grace baseline for a never-contacted peer,
+        # NOT network_members.last_seen (directory refreshes change that).
+        cur.execute("""INSERT INTO sync_peers (device_id, last_contact, updated_at)
+                       VALUES (%s, %s, %s) ON CONFLICT (device_id) DO UPDATE SET
+                       last_contact = EXCLUDED.last_contact
+                       WHERE sync_peers.last_contact IS NULL OR sync_peers.last_contact < EXCLUDED.last_contact""",
+                    (device_id, seen, now.isoformat()))
+        cur.execute("SELECT last_contact, updated_at FROM sync_peers WHERE device_id = %s", (device_id,))
+        row = cur.fetchone()
+        contact = row["last_contact"] or row["updated_at"]
+        if isinstance(contact, str):
+            contact = datetime.fromisoformat(contact)
+        if contact >= peer_cutoff:
+            peers[device_id] = observation.get("watermarks") or {}
+        else:
+            expired.append(device_id)
+    return peers, expired
+
+
+def _stream_frontier(origin: str, incarnation: int, head: int, peers: Dict[str, dict]) -> int:
+    """Highest seq of a stream that every recent peer already holds (<= head)."""
+    return min([head, *(int((marks.get(origin) or {}).get(str(incarnation), 0)) for marks in peers.values())])
+
+
 def prune_transcript_ops(local_device_id: str, peer_observations: dict, *,
                          keep_days: int = 30, _conn=None, stop=None, _heads: Optional[List[dict]] = None) -> int:
     """Retire redundant transcript envelopes, never transcript/record rows.
@@ -903,51 +956,22 @@ def prune_transcript_ops(local_device_id: str, peer_observations: dict, *,
 
     if stop is not None and stop.is_set():
         return 0
-    try:
-        grace_days = int(os.environ.get(PEER_GRACE_DAYS_ENV, "30"))
-        if grace_days < 1:
-            raise ValueError("peer grace must be positive")
-    except ValueError:
-        logger.warning("Skipping transcript op retention: invalid %s", PEER_GRACE_DAYS_ENV)
+    grace_days = _peer_grace_days("transcript op retention")
+    if grace_days is None:
         return 0
     now = datetime.now(timezone.utc)
     cutoff = (now - timedelta(days=keep_days)).isoformat()
-    peer_cutoff = now - timedelta(days=grace_days)
-    peers, expired = {}, []
     with nullcontext(_conn) if _conn is not None else get_db() as conn:
         cur = conn.cursor()
         set_timeout(cur)
-        cur.execute("SELECT device_id FROM network_members WHERE status = 'active' "
-                    "AND kind = 'worker' AND device_id <> %s", (local_device_id,))
-        members = [row["device_id"] for row in cur.fetchall()]
-        for device_id in members:
-            observation = peer_observations.get(device_id) or {}
-            seen_at = observation.get("seen_at")
-            seen = datetime.fromtimestamp(seen_at, timezone.utc).isoformat() if seen_at is not None else None
-            # updated_at is a one-time grace baseline for a never-contacted peer,
-            # NOT network_members.last_seen (directory refreshes change that).
-            cur.execute("""INSERT INTO sync_peers (device_id, last_contact, updated_at)
-                           VALUES (%s, %s, %s) ON CONFLICT (device_id) DO UPDATE SET
-                           last_contact = EXCLUDED.last_contact
-                           WHERE sync_peers.last_contact IS NULL OR sync_peers.last_contact < EXCLUDED.last_contact""",
-                        (device_id, seen, now.isoformat()))
-            cur.execute("SELECT last_contact, updated_at FROM sync_peers WHERE device_id = %s", (device_id,))
-            row = cur.fetchone()
-            contact = row["last_contact"] or row["updated_at"]
-            if isinstance(contact, str):
-                contact = datetime.fromisoformat(contact)
-            if contact >= peer_cutoff:
-                peers[device_id] = observation.get("watermarks") or {}
-            else:
-                expired.append(device_id)
+        peers, expired = _recent_peers(cur, local_device_id, peer_observations, now=now, grace_days=grace_days)
         heads = _log_heads(cur) if _heads is None else _heads
 
     total = bytes_estimate = 0
     frontiers = {}
     for stream in heads:
         origin, incarnation, head = stream["origin_device_id"], int(stream["incarnation"]), int(stream["s"])
-        frontier = min([head, *(int((marks.get(origin) or {}).get(str(incarnation), 0))
-                                for marks in peers.values())])
+        frontier = _stream_frontier(origin, incarnation, head, peers)
         frontiers.setdefault(origin, {})[str(incarnation)] = frontier
         if frontier <= 0:
             continue
@@ -979,6 +1003,81 @@ def prune_transcript_ops(local_device_id: str, peer_observations: dict, *,
         "deleted_ops": total, "bytes_estimate": bytes_estimate,
         "peer_grace_days": grace_days, "peer_frontiers": peers,
         "expired_peers": expired, "retained_frontiers": frontiers}))
+    return total
+
+
+MEMORY_OP_COMPACTION_ENV = "AI_SHUFFLE_SYNC_MEMORY_OP_COMPACTION"
+# A memory envelope carries a whole store (hundreds of kB); keep each
+# committed delete small so it finishes well inside the statement deadline.
+MEMORY_COMPACTION_BATCH = 100
+
+
+def compact_memory_ops(local_device_id: str, peer_observations: dict, *,
+                       _conn=None, stop=None, _heads: Optional[List[dict]] = None) -> int:
+    """Drop superseded ``memory`` envelopes every recent peer already holds.
+
+    A memory record (``memory-v2:<device>:<owner>``, a skill, a draft) is a
+    whole-state record: receivers apply only its current materialized row, and
+    state copies read sync_records, so an older envelope of the same record
+    carries nothing a peer still needs once a newer one (higher clock) is in
+    the log. Unlike the 30-day passes this has no age floor; it never deletes
+    the newest envelope of a record, any stream's head, or anything above the
+    minimum frontier of the recent active worker peers (the same pins as
+    :func:`prune_transcript_ops`), so no online peer meets a gap. A peer past
+    the contact grace recovers through the existing state copy.
+    """
+    if os.environ.get(MEMORY_OP_COMPACTION_ENV, "").strip().lower() in ("0", "false", "off"):
+        return 0
+    from app.db.retention import delete_batches, set_timeout
+
+    if stop is not None and stop.is_set():
+        return 0
+    grace_days = _peer_grace_days("memory op compaction")
+    if grace_days is None:
+        return 0
+    now = datetime.now(timezone.utc)
+    with nullcontext(_conn) if _conn is not None else get_db() as conn:
+        cur = conn.cursor()
+        set_timeout(cur)
+        peers, expired = _recent_peers(cur, local_device_id, peer_observations, now=now, grace_days=grace_days)
+        heads = _log_heads(cur) if _heads is None else _heads
+    bounds = []
+    for stream in heads:
+        origin, incarnation, head = stream["origin_device_id"], int(stream["incarnation"]), int(stream["s"])
+        frontier = _stream_frontier(origin, incarnation, head, peers)
+        if frontier > 0:
+            bounds.append((origin, incarnation, frontier, head))
+    total = bytes_estimate = 0
+    if bounds:
+        values = ", ".join("(%s, %s, %s, %s)" for _ in bounds)
+        flat = tuple(value for bound in bounds for value in bound)
+        # Driven by the (collection, record_id, ingest_id) index: only memory
+        # rows are visited, never the whole stream's transcript backlog.
+        sql = """DELETE FROM sync_ops WHERE ingest_id IN (
+                     SELECT o.ingest_id FROM sync_ops o
+                     JOIN (VALUES """ + values + """) AS f(origin_device_id, incarnation, frontier, head)
+                       ON o.origin_device_id = f.origin_device_id AND o.incarnation = f.incarnation
+                     WHERE o.collection = 'memory' AND o.ingest_id > %s
+                       AND o.seq <= f.frontier AND o.seq < f.head
+                       AND EXISTS (
+                           SELECT 1 FROM sync_ops n
+                           WHERE n.collection = o.collection AND n.record_id = o.record_id
+                             AND n.ingest_id > o.ingest_id AND n.clock > o.clock)
+                     ORDER BY o.ingest_id LIMIT %s)
+                 RETURNING ingest_id, pg_column_size(envelope) AS bytes_estimate"""
+
+        def advance(cursor):
+            nonlocal bytes_estimate
+            rows = cursor.fetchall()
+            bytes_estimate += sum(int(row["bytes_estimate"]) for row in rows)
+            return (*flat, max((row["ingest_id"] for row in rows), default=0), MEMORY_COMPACTION_BATCH)
+
+        total = delete_batches(sql, (*flat, 0, MEMORY_COMPACTION_BATCH), advance=advance, stop=stop,
+                               cursor=_conn.cursor() if _conn is not None else None,
+                               batch_size=MEMORY_COMPACTION_BATCH)
+    logger.info("Memory sync operation compaction %s", _json({
+        "deleted_ops": total, "bytes_estimate": bytes_estimate,
+        "peer_grace_days": grace_days, "peer_frontiers": peers, "expired_peers": expired}))
     return total
 
 
