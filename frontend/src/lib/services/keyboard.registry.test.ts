@@ -103,3 +103,50 @@ describe('keyboard registry — input-focus guard', () => {
 		expect(plain.action).toHaveBeenCalledTimes(1);
 	});
 });
+
+describe('keyboard registry — message editor shortcuts (#1202)', () => {
+	function editor(): HTMLElement {
+		const root = document.createElement('div');
+		root.setAttribute('data-message-editor', '');
+		const editable = document.createElement('div');
+		editable.contentEditable = 'true';
+		// jsdom does not derive isContentEditable from the attribute.
+		Object.defineProperty(editable, 'isContentEditable', { value: true });
+		root.appendChild(editable);
+		document.body.appendChild(root);
+		return editable;
+	}
+
+	it('fires Ctrl/Cmd+N from the focused message editor, but not from other fields', async () => {
+		const { isMessageEditorKey } = await import('./message-editor-key');
+		const newChat = shortcut({ id: 'new-chat', key: 'n', allowInInput: isMessageEditorKey, action: vi.fn() });
+		registerShortcut(newChat);
+		const editable = editor();
+		const settingsField = document.createElement('input');
+		const otherEditable = document.createElement('div');
+		otherEditable.contentEditable = 'true';
+		Object.defineProperty(otherEditable, 'isContentEditable', { value: true });
+		document.body.append(settingsField, otherEditable);
+
+		const ctrl = press(editable, { key: 'n', ctrlKey: true });
+		expect(newChat.action).toHaveBeenCalledTimes(1);
+		expect(ctrl.defaultPrevented).toBe(true);
+		press(editable, { key: 'n', metaKey: true });
+		expect(newChat.action).toHaveBeenCalledTimes(2);
+
+		// Plain N, Shift+N and IME composition in the editor do nothing.
+		expect(press(editable, { key: 'n' }).defaultPrevented).toBe(false);
+		expect(press(editable, { key: 'N', shiftKey: true }).defaultPrevented).toBe(false);
+		expect(press(editable, { key: 'n', ctrlKey: true, isComposing: true }).defaultPrevented).toBe(false);
+		expect(newChat.action).toHaveBeenCalledTimes(2);
+
+		// Other inputs keep the old rule: the shortcut stays off there.
+		expect(press(settingsField, { key: 'n', ctrlKey: true }).defaultPrevented).toBe(false);
+		expect(press(otherEditable, { key: 'n', ctrlKey: true }).defaultPrevented).toBe(false);
+		expect(newChat.action).toHaveBeenCalledTimes(2);
+
+		// Outside any field it still works as before.
+		press(document.body, { key: 'n', ctrlKey: true });
+		expect(newChat.action).toHaveBeenCalledTimes(3);
+	});
+});

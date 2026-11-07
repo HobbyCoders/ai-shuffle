@@ -70,6 +70,11 @@
 			"globs": ["frontend/tests/journeys/composer-helper.journey.mjs", "frontend/src/lib/components/CommandAutocomplete.svelte", "frontend/src/lib/components/FileAutocomplete.svelte"]
 		},
 		{
+			"why": "Shift+Enter with a menu open, Ctrl+N from the editor, New chat right after Send, Back after a sidebar switch and the phone bell's focus are keyboard and navigation paths only a real browser walks",
+			"journeys": ["keyboard-nav"],
+			"globs": ["frontend/tests/journeys/keyboard-nav.journey.mjs", "frontend/src/lib/components/CommandAutocomplete.svelte", "frontend/src/lib/components/FileAutocomplete.svelte", "frontend/src/lib/components/NotificationCenter.svelte", "frontend/src/lib/services/session-navigation.ts", "frontend/src/lib/services/message-editor-key.ts", "frontend/src/lib/services/keyboard.ts", "frontend/src/lib/components/chat/ChatInput.svelte", "frontend/src/lib/components/chat/send-destination.ts", "frontend/src/lib/stores/session/message-sender.ts"]
+		},
+		{
 			"why": "steer admission, cancellation and mirror routing must not strand a pending bubble",
 			"journeys": ["steer-lifecycle"],
 			"globs": ["frontend/tests/journeys/steer-lifecycle.journey.mjs", "frontend/src/lib/stores/session/pending-queue.ts", "frontend/src/lib/stores/session/message-sender.ts", "frontend/src/lib/stores/session/ws-message-handlers.ts", "frontend/src/lib/components/chat/PendingMessages.svelte", "frontend/src/lib/components/chat/PendingStatusAnnouncer.svelte", "app/core/session_handoff.py", "app/api/chat_ws_handler.py", "app/core/message_admission.py", "app/core/turn_manager.py", "app/network/control.py"]
