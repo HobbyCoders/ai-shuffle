@@ -88,6 +88,26 @@ def resolve_catalog_project(project_v2_id: str) -> Optional[Dict[str, Any]]:
     return project
 
 
+def catalog_project_read_ids(project: Dict[str, Any]) -> list[str]:
+    """Current identity plus exact live legacy aliases that retain branch rows.
+
+    Only project-scoped reads use this union: sessions stay bound to their
+    recorded identity, and callers must not use an alias's retired base. The
+    join proves the relationship in either direction without paths or names;
+    deleting/relinking the legacy row immediately stops sharing its branches.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT original.id FROM projects_v2 original "
+            "JOIN projects legacy ON original.origin = 'local:' || legacy.id "
+            "WHERE legacy.link_group_id = %s AND original.id <> %s "
+            "ORDER BY original.id",
+            (project["origin"], project["id"]),
+        )
+        return [project["id"], *(row["id"] for row in cursor.fetchall())]
+
+
 def _persist_session_project_v2(session_id: str, project_v2_id: str) -> None:
     """One-shot self-heal write: bind a session to its project_v2, only if still
     NULL (never clobbers an existing binding, never touches legacy ``project_id``)."""

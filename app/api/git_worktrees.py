@@ -632,14 +632,17 @@ async def list_worktrees(
             uses this; the full shape stays the default.
     """
     from app.api.common import require_origin_access
+    from app.core.project_resolver import catalog_project_read_ids
     from app.db.projects_v2 import get_project_v2
 
+    read_ids = [project_id]
     if await run_sync(get_project_v2, project_id):
         # A canonical project need not have a legacy project or even a base
         # checkout here. Follow a late-linked placeholder before listing rows.
         # Listing is read-only and never materializes a checkout.
         access = await run_sync(require_origin_access, request=request, project_v2_id=project_id)
         project_id = access["project_v2"]["id"]
+        read_ids = await run_sync(catalog_project_read_ids, access["project_v2"])
     else:
         check_project_access(request, project_id)
         working_dir = get_project_path(project_id)
@@ -649,18 +652,18 @@ async def list_worktrees(
                 detail="Project is not a git repository"
             )
 
+    list_kwargs = {}
     if compact:
-        session_filter = _session_may_be_hot(
+        list_kwargs["session_filter"] = _session_may_be_hot(
             _streaming_session_ids(), time.time() - _WORKTREE_HOT_ACTIVITY_SECONDS
         )
-        worktrees = await run_sync(
-            worktree_manager.get_worktrees_for_project, project_id, session_filter=session_filter
-        )
+    worktrees = []
+    for read_id in read_ids:
+        worktrees.extend(await run_sync(worktree_manager.get_worktrees_for_project, read_id, **list_kwargs))
+    if compact:
         # Keep stale active rows visible for diagnosis, but not records already
         # explicitly retired by lifecycle cleanup.
         worktrees = [wt for wt in worktrees if wt.get("status") not in {"completed", "deleted", "archived"}]
-    else:
-        worktrees = await run_sync(worktree_manager.get_worktrees_for_project, project_id)
 
     # Optionally attach git status for each existing worktree. This serves the
     # last known statuses and refreshes hot worktrees in the background, off the

@@ -248,6 +248,20 @@ def update_project(
                 f"UPDATE projects SET {', '.join(updates)} WHERE id = %s",
                 values
             )
+            if path is not None and path != existing.get("path"):
+                # Move only this legacy row's live base registration. Retired
+                # identities keep their old folder for retained sessions; branch
+                # checkouts and other runners are independent materializations.
+                current_id = _catalog_project_v2_id(cursor, _catalog_origin(existing))
+                runners = _catalog_runners(existing)
+                placeholders = ", ".join(["%s"] * len(runners))
+                cursor.execute(
+                    "UPDATE checkouts SET path = %s, updated_at = NOW() "
+                    f"WHERE project_id = %s AND runner_id IN ({placeholders}) "
+                    "AND path = %s AND (branch IS NULL OR branch = '') "
+                    "AND (status IS NULL OR status = '' OR status = 'active')",
+                    (path, current_id, *runners, existing.get("path")),
+                )
 
     return get_project(project_id)
 

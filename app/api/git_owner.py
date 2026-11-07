@@ -440,7 +440,7 @@ async def handle_project_git(body, from_device):
     name = body.get("action")
     if name not in _PROJECT_ACTIONS or name not in _actions:
         raise ValueError("Unsupported project Git action")
-    from app.core.project_resolver import resolve_catalog_project
+    from app.core.project_resolver import catalog_project_read_ids, resolve_catalog_project
 
     project_id = body.get("project_id")
     project = await run_sync(resolve_catalog_project, project_id)
@@ -455,7 +455,12 @@ async def handle_project_git(body, from_device):
     branch = body.get("branch") or None
     if branch is not None and (not isinstance(branch, str) or not control._BRANCH_RE.fullmatch(branch)):
         raise ValueError("Invalid checkout branch")
-    rows = await run_sync(checkouts.list_checkouts, project["id"])
+    rows = []
+    for read_id in await run_sync(catalog_project_read_ids, project):
+        registered = await run_sync(checkouts.list_checkouts, read_id)
+        # Linking retains branch rows for bound sessions, but an old base must
+        # never become eligible merely because the current identity is live.
+        rows.extend(r for r in registered if read_id == project["id"] or r.get("branch"))
     candidates = [r for r in rows if r["runner_id"] == settings.effective_instance_id
                   and (r.get("status") or "active") == "active"
                   and (not r.get("branch") or r.get("branch") == branch)]
