@@ -1726,6 +1726,7 @@ def _queue(sender_id, data, action, placement=None, model_plan=None, discovered_
         # Lock both session rows in a stable order before the chain root:
         # enqueue_turn locks the recipient too, so sender-first would deadlock
         # simultaneous X->Y / Y->X replies. This also serializes reply credits.
+        # This path enqueues turns only: it never appends or locks runs/counters.
         for sid in sorted({sender_id, target["id"]}):
             cursor.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (sid,))
         cursor.execute("SELECT id FROM turns WHERE id=%s FOR UPDATE", (root_id,))
@@ -2089,12 +2090,11 @@ async def defer_started_report(starter_id, frame):
             cursor = conn.cursor()
             # Keep the durable receipt on the child, including if the starter
             # disappeared between settlement and delivery. Never recreate it.
+            from app.db.session_locks import lock_session_runtime
             receipt_session = frame.get("task_id")
-            cursor.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (receipt_session,))
-            if not cursor.fetchone():
+            if not lock_session_runtime(cursor, receipt_session):
                 receipt_session = starter_id
-                cursor.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (receipt_session,))
-                if not cursor.fetchone():
+                if not lock_session_runtime(cursor, receipt_session):
                     return False
             cursor.execute("SELECT id FROM session_events WHERE id=%s", (event_id,))
             if cursor.fetchone():

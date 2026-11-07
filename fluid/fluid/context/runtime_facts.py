@@ -21,6 +21,14 @@ from fluid.tools.child_env import scrub_child_env
 _log = logging.getLogger(__name__)
 
 _RECEIPT = "fluid-runtime-provisioning.json"
+_LFS_RECEIPT = "fluid-lfs-placeholders"
+LFS_FALLBACK_WARNING = (
+    "Git LFS was unavailable or broken during worktree setup on this worker; "
+    "large LFS files in this worktree may be pointer-text placeholders. "
+    "Install or repair git-lfs and run `git lfs pull` in the worktree to fetch them. "
+    "LFS filters and checkout hooks are bypassed only when retrying checkout; "
+    "repository config and hooks are not changed."
+)
 _KEYS = ("linked", "installed", "synced", "skipped", "errors")
 
 
@@ -37,6 +45,32 @@ def _receipt_path(root: Path) -> Path | None:
         return path if path.is_absolute() else root / path
     except (OSError, subprocess.SubprocessError, ValueError):
         return None
+
+
+def _lfs_receipt_path(cwd: str) -> Path | None:
+    receipt = _receipt_path(Path(cwd))
+    return receipt.with_name(_LFS_RECEIPT) if receipt is not None else None
+
+
+def record_lfs_fallback(cwd: str) -> None:
+    """Remember the checkout's degraded mode in its own Git admin dir, not source."""
+    try:
+        path = _lfs_receipt_path(cwd)
+        if path is not None and not path.is_symlink():
+            path.write_bytes(b"1\n")
+    except OSError:
+        _log.warning("Could not record LFS placeholder warning for %s", cwd)
+
+
+def lfs_fallback_warning(cwd: str) -> str | None:
+    try:
+        path = _lfs_receipt_path(cwd)
+        if (path is not None and not path.is_symlink() and path.is_file()
+                and path.stat().st_size == 2 and path.read_bytes() == b"1\n"):
+            return LFS_FALLBACK_WARNING
+    except (OSError, ValueError):
+        pass
+    return None
 
 
 def record_provisioning(cwd: str, summary: dict) -> None:
@@ -105,6 +139,9 @@ def runtime_facts(cwd: str) -> str:
     receipt = _provisioning_fact(root)
     if receipt:
         lines.append(receipt)
+    lfs_warning = lfs_fallback_warning(cwd)
+    if lfs_warning:
+        lines.append(lfs_warning)
     try:
         packages = ([root] if (root / "package.json").is_file() else []) + [
             child for child in sorted(root.iterdir())

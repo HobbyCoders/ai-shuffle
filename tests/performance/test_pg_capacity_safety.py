@@ -199,6 +199,8 @@ class WorkloadTests(unittest.TestCase):
         result = asyncio.run(harness.workload(payload, base))
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["counts"]["verified_turns"], 2)
+        from app.db import sessions
+        self.assertTrue(all(sessions.get_session(f"capacity-shim-{i}") is not None for i in range(2)))
         self.assertGreater(result["counts"]["lease_renewals"], 0)
         self.assertEqual(result["counts"]["expected_text_bytes"],
                          result["counts"]["actual_text_bytes"])

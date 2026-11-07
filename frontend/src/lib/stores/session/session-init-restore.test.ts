@@ -101,6 +101,26 @@ describe('boot send claim lifetime (#821)', () => {
 		claimBootSend(); // normal post-boot sends do not leave a sticky claim
 		expect(hasBootSendClaim(generation)).toBe(false);
 	});
+	it('keeps boot lifetime separate from send ownership after navigation (#1063)', async () => {
+		const { init } = makeInit(null);
+		await init();
+		const bootGeneration = getInitGeneration();
+		const oldClaim = claimBootSend();
+		const current = bumpInitGeneration();
+		expect(hasBootSendClaim(bootGeneration)).toBe(false);
+		expect(hasBootSendClaim(current)).toBe(false);
+		const currentClaim = claimBootSend();
+		expect(currentClaim).not.toBeNull();
+		expect(hasBootSendClaim(current)).toBe(true);
+		releaseBootSend(oldClaim);
+		expect(hasBootSendClaim(current)).toBe(true);
+		releaseBootSend(currentClaim);
+		expect(hasBootSendClaim(current)).toBe(false);
+		claimBootSend();
+		finishBootReconciliation(bootGeneration);
+		expect(hasBootSendClaim(current)).toBe(false);
+		expect(claimBootSend()).toBeNull();
+	});
 	it('does not carry a claim into another boot or let an old reconcile clear a new claim', async () => {
 		const { init, destroy } = makeInit(null);
 		await init(); const old = getInitGeneration(); const oldClaim = claimBootSend();

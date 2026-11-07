@@ -450,6 +450,9 @@ async def test_repeated_working_set_warning_is_durable_and_recovery_still_runs(
     env, ref_store, monkeypatch
 ):
     """Two turns/recreated runtimes warn once; a later clean checkout recovers."""
+    from tests.shared_fixtures import seed_session
+
+    seed_session('sess-q6')
     from app.core import session_runtime, project_resolver
     from app.db import database, session_events
 
@@ -497,6 +500,9 @@ async def test_repeated_working_set_warning_is_durable_and_recovery_still_runs(
 
 
 async def test_working_set_warning_changes_and_new_snapshots_remain_visible(monkeypatch, tmp_path):
+    from tests.shared_fixtures import seed_session
+
+    seed_session('sess-q6')
     from app.core import session_runtime, project_resolver
     from app.db import database, session_events
 
@@ -537,6 +543,9 @@ async def test_snapshot_hook_preserves_unresolved_foreign_work(monkeypatch, tmp_
     assert len(calls) == expected_calls
 
 async def test_working_set_history_lookup_failure_does_not_hide_warning(monkeypatch, tmp_path):
+    from tests.shared_fixtures import seed_session
+
+    seed_session(SID)
     from app.core import session_runtime, project_resolver
     from app.db import database, session_events
     monkeypatch.setattr(database,'get_session',lambda sid: {'working_set_ref':'snapshot'})

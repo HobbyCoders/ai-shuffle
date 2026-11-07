@@ -113,10 +113,15 @@ def test_stop_locks_counter_before_session_and_notifies_only_after_commit(compac
     monkeypatch.setattr(turns, "get_db", traced_db)
     monkeypatch.setattr(session_events, "notify_session_write", notified)
     turns.remove_queued_turn(pair["queued_turn_id"], keep_unsent_words=True)
-    counter = next(i for i, sql in enumerate(trace) if "FROM session_event_counters" in sql and "FOR UPDATE" in sql)
+    # The shared prefix reserves C with a no-op UPSERT, which locks the
+    # counter tuple just as the previous standalone SELECT FOR UPDATE did.
+    run = next(i for i, sql in enumerate(trace) if "FROM runs" in sql and "FOR UPDATE" in sql)
+    counter = next(i for i, sql in enumerate(trace)
+                   if "INSERT INTO session_event_counters" in sql and "ON CONFLICT" in sql
+                   and "DO UPDATE" in sql)
     session = next(i for i, sql in enumerate(trace) if "FROM sessions" in sql and "FOR UPDATE" in sql)
     abort = next(i for i, sql in enumerate(trace) if "UPDATE turns SET state='aborted'" in sql)
-    assert counter < session < abort
+    assert run < counter < session < abort
     assert trace[-2:] == ["committed", "notified"]
 
 

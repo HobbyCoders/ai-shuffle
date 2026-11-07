@@ -252,6 +252,9 @@ async def test_only_the_stalled_worker_of_a_mixed_park_is_settled(mock_db):
 async def test_shell_tasks_keep_the_original_force(mock_db):
     """Only a Task worker has a session to read; a shell row with a session-like
     id that happens to have fresh events is still forced as before."""
+    from tests.shared_fixtures import seed_session
+
+    seed_session("sh-task")
     database.create_session(session_id="sh-coord", profile_id=None, title="c")
     _park("sh-coord", ["sh-task"])
     upsert_background_task({

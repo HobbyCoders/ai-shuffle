@@ -1338,6 +1338,12 @@ def _publish_history(cur, sid, token):
     chunks = cur.fetchall()
     if not chunks:
         return
+    # Publication can prune/update existing event rows. Serialize on their
+    # counter BEFORE reconciliation, matching deletion (not event → counter).
+    # Do not take S here: staging cleanup intentionally locks headers before S.
+    cur.execute("INSERT INTO session_event_counters (session_id,next_seq) "
+                "SELECT id,0 FROM sessions WHERE id=%s "
+                "ON CONFLICT(session_id) DO UPDATE SET next_seq=session_event_counters.next_seq", (sid,))
     timing = _import_timing.get()
     grouped = {table: [] for table in APP_TABLES}
     for chunk in chunks:
@@ -1366,13 +1372,20 @@ def _publish_history(cur, sid, token):
                     metrics["execute_seconds"], metrics["max_statement_seconds"])
         if timing:
             timing.steps.append(f"publish_history.{table}={seconds:.3f}s rows={count}")
-    cur.execute("SELECT COALESCE(MAX(seq), 0) AS seq FROM session_events WHERE session_id=%s", (sid,))
-    ceiling = cur.fetchone()["seq"]
-    cur.execute("INSERT INTO session_event_counters (session_id,next_seq) VALUES (%s,%s) "
+    cur.execute("INSERT INTO session_event_counters (session_id,next_seq) "
+                "SELECT %s,COALESCE(MAX(seq),0) FROM session_events WHERE session_id=%s "
                 "ON CONFLICT(session_id) DO UPDATE SET next_seq=CASE "
                 "WHEN session_event_counters.next_seq > EXCLUDED.next_seq THEN session_event_counters.next_seq "
-                "ELSE EXCLUDED.next_seq END", (sid, ceiling))
+                "ELSE EXCLUDED.next_seq END", (sid, sid))
     cur.execute("UPDATE sessions SET sdk_session_id=%s WHERE id=%s", (chunks[0]["sdk_session_id"], sid))
+    if not cur.rowcount:
+        # A fresh READ COMMITTED statement AFTER C, not the snapshot from its
+        # potentially waiting upsert. If delete won, unwind ALL imported rows
+        # and any recreated counter. Reuse this mandatory projection write so
+        # the fence adds no round trips to the whole-history import budget.
+        from app.db.session_events import SessionMissingError
+
+        raise SessionMissingError(f"session {sid} does not exist")
     cur.execute("DELETE FROM handoff_history_chunks WHERE token=%s AND session_id=%s", (token, sid))
     header = chunks[0] if chunks[0]["table_name"] == "" else None
     return (parse_jsonb(header["rows"]) or {}) if header else {}

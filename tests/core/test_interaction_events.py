@@ -75,6 +75,9 @@ async def _wait_pending(session_id, request_id, kind="permission", timeout=2.0):
 # ---------------------------------------------------------------------------
 
 async def test_emit_requested_appends_unfenced_event(mock_db):
+    from tests.shared_fixtures import seed_session
+
+    seed_session('s1')
     await interaction_events.emit_interaction_requested(
         "s1", "int-1", "req-1", "permission", {"request_id": "req-1", "tool_name": "Bash"},
     )
@@ -90,6 +93,9 @@ async def test_emit_requested_appends_unfenced_event(mock_db):
 
 
 async def test_emit_answered_appends_event(mock_db):
+    from tests.shared_fixtures import seed_session
+
+    seed_session('s1')
     await interaction_events.emit_interaction_answered(
         "s1", "int-1", "req-1", {"decision": "allow"},
     )
@@ -101,6 +107,9 @@ async def test_emit_answered_appends_event(mock_db):
 
 
 async def test_emit_expired_carries_reason(mock_db):
+    from tests.shared_fixtures import seed_session
+
+    seed_session('s1')
     await interaction_events.emit_interaction_expired(
         "s1", "int-1", "req-1", "cancelled",
     )
@@ -153,6 +162,9 @@ async def test_emit_swallows_append_failure(mock_db, monkeypatch):
 # ---------------------------------------------------------------------------
 
 async def test_permission_request_emits_requested(mock_db):
+    from tests.shared_fixtures import seed_session
+
+    seed_session('s1')
     h = PermissionHandler()
     broadcast = AsyncMock()
     task = asyncio.create_task(h.request_permission(
@@ -171,6 +183,9 @@ async def test_permission_request_emits_requested(mock_db):
 
 
 async def test_permission_answer_emits_once_second_answer_nothing(mock_db):
+    from tests.shared_fixtures import seed_session
+
+    seed_session("s1")
     h = PermissionHandler()
     broadcast = AsyncMock()
     task = asyncio.create_task(h.request_permission(
@@ -195,6 +210,9 @@ async def test_permission_answer_emits_once_second_answer_nothing(mock_db):
 
 
 async def test_permission_cancel_emits_expired_once_lost_race_nothing(mock_db):
+    from tests.shared_fixtures import seed_session
+
+    seed_session("s1")
     h = PermissionHandler()
     broadcast = AsyncMock()
     task = asyncio.create_task(h.request_permission(
@@ -217,6 +235,9 @@ async def test_permission_cancel_emits_expired_once_lost_race_nothing(mock_db):
 
 
 async def test_permission_defer_emits_answered(mock_db):
+    from tests.shared_fixtures import seed_session
+
+    seed_session('s1')
     h = PermissionHandler()
     broadcast = AsyncMock()
     task = asyncio.create_task(h.request_permission(
@@ -241,6 +262,9 @@ async def test_permission_defer_emits_answered(mock_db):
 
 
 async def test_permission_cancel_all_emits_expired_per_row(mock_db):
+    from tests.shared_fixtures import seed_session
+
+    seed_session("s1")
     h = PermissionHandler()
     broadcast = AsyncMock()
     tasks = []
@@ -266,6 +290,9 @@ async def test_permission_cancel_all_emits_expired_per_row(mock_db):
 # ---------------------------------------------------------------------------
 
 async def test_question_request_and_answer_emit(mock_db):
+    from tests.shared_fixtures import seed_session
+
+    seed_session('s1')
     h = UserQuestionHandler()
     broadcast = AsyncMock(return_value=True)
     task = asyncio.create_task(h.request_answers(
@@ -293,6 +320,9 @@ async def test_question_request_and_answer_emit(mock_db):
 
 
 async def test_question_cancel_all_emits_expired(mock_db):
+    from tests.shared_fixtures import seed_session
+
+    seed_session('s1')
     h = UserQuestionHandler()
     broadcast = AsyncMock(return_value=True)
     task = asyncio.create_task(h.request_answers(

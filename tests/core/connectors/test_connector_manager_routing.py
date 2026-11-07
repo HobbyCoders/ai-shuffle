@@ -657,7 +657,7 @@ class TestIncomingMessage:
         routed.update_connector_event_dispatched.assert_called_once_with("c1", success=True)
 
     async def test_completed_then_parked_reply_uses_latest_attempt(
-        self, mgr, routed, not_enrolled, turns, mock_db, monkeypatch,
+        self, mgr, routed, not_enrolled, turns, mock_db, monkeypatch, session_factory,
     ):
         from app.core import turn_outcome
         from app.db import session_events
@@ -666,6 +666,7 @@ class TestIncomingMessage:
         routed.get_connector_session.return_value = {"id": "cs-1", "session_id": "ai-existing"}
         monkeypatch.setattr(turn_outcome, "final_turn_outcome", turns.real_outcome)
         monkeypatch.setattr(turn_outcome, "extract_final_assistant_text", turns.real_text)
+        session_factory("ai-existing")
         session_events.append_events("ai-existing", [
             {"type": "turn.started", "turn_id": "old"},
             {"type": "assistant.text_delta", "turn_id": "old", "payload": {"text": "OLD ANSWER"}},

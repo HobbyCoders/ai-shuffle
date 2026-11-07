@@ -47,9 +47,10 @@ THINKING = "assistant.thinking_delta"
 TEXT = "assistant.text_delta"
 
 
-async def test_delta_runs_collapse_to_one_frame_per_turn(mock_db, gw):
+async def test_delta_runs_collapse_to_one_frame_per_turn(mock_db, gw, session_factory):
     """3 turns of 50 thinking + 10 text deltas replay as 3 + 3 + 3 frames."""
     sid = "sess-coalesce-turns"
+    session_factory(sid)
     ranges = []
     for t in range(3):
         turn = f"turn-{t}"
@@ -86,8 +87,9 @@ async def test_delta_runs_collapse_to_one_frame_per_turn(mock_db, gw):
         assert text["id"] == last_seq
 
 
-async def test_a_run_split_across_a_page_boundary_still_merges(mock_db, gw, monkeypatch):
+async def test_a_run_split_across_a_page_boundary_still_merges(mock_db, gw, monkeypatch, session_factory):
     sid = "sess-coalesce-paged"
+    session_factory(sid)
     monkeypatch.setattr(events_mod, "_PAGE", 7)
     first_seq, last_seq = se.append_events(
         sid,
@@ -103,8 +105,9 @@ async def test_a_run_split_across_a_page_boundary_still_merges(mock_db, gw, monk
     assert frames[-1]["data"]["seq"] == last_seq
 
 
-async def test_deltas_are_not_merged_across_a_turn_boundary(mock_db, gw):
+async def test_deltas_are_not_merged_across_a_turn_boundary(mock_db, gw, session_factory):
     sid = "sess-coalesce-turn-split"
+    session_factory(sid)
     se.append_events(
         sid,
         [_delta(THINKING, f"a{i}|", "turn-a") for i in range(5)]
@@ -122,8 +125,9 @@ async def test_deltas_are_not_merged_across_a_turn_boundary(mock_db, gw):
     assert frames[1]["id"] == 10
 
 
-async def test_a_tool_use_splits_two_delta_runs(mock_db, gw):
+async def test_a_tool_use_splits_two_delta_runs(mock_db, gw, session_factory):
     sid = "sess-coalesce-tool"
+    session_factory(sid)
     se.append_events(
         sid,
         [_delta(THINKING, f"a{i}|", "t1") for i in range(3)]
@@ -145,8 +149,9 @@ async def test_a_tool_use_splits_two_delta_runs(mock_db, gw):
     assert [frames[0]["id"], frames[1]["id"], frames[2]["id"]] == [3, 4, 7]
 
 
-async def test_reconnect_from_cursor_skips_everything_at_or_below_it(mock_db, gw):
+async def test_reconnect_from_cursor_skips_everything_at_or_below_it(mock_db, gw, session_factory):
     sid = "sess-coalesce-resume"
+    session_factory(sid)
     first_seq, last_seq = se.append_events(
         sid,
         [{"type": "message.user", "payload": {"content": "one"}, "turn_id": "t1"}]
