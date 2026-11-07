@@ -3116,9 +3116,28 @@ async def _stream_to_websocket_turn(
         if _query_send_elapsed > 1.0:
             logger.warning(f"[WS] client.query() took {_query_send_elapsed:.1f}s for session {session_id}")
 
+        async def engine_events():
+            events = state.adapter.receive_events()
+            try:
+                while not lease.abandoned:
+                    lease.engine_waiting.set()
+                    try:
+                        message = await anext(events)
+                    except StopAsyncIteration:
+                        return
+                    finally:
+                        lease.engine_waiting.clear()
+                    # An evicted reader may ignore cancellation, but it cannot
+                    # hand another frame to app-session mutation helpers.
+                    if lease.abandoned:
+                        return
+                    yield message
+            finally:
+                lease.engine_finished.set()
+
         _stream_start = time.monotonic()
         _event_count = 0
-        async for message in state.adapter.receive_events():
+        async for message in engine_events():
             # Don't break immediately on interrupt_requested — let receive_events()
             # end naturally so remaining in-flight tool calls reach the UI.
             # The adapter's interrupt() causes receive_events() to end after
@@ -4318,6 +4337,9 @@ async def _stream_to_websocket_turn(
         # frame since we've already emitted an `error`.
 
     finally:
+        # Engine drain has ended. Its deadline must never cancel the app-session
+        # persistence below (nor any cleanup write already issued in a thread).
+        lease.engine_finished.set()
         clear_turn_context(session_id, expected=bound_generation_context)
         # Mark as not streaming and reset interrupt flag
         state.is_streaming = False
@@ -4355,25 +4377,26 @@ async def _stream_to_websocket_turn(
     if lease.abandoned:
         return
 
-    # Persist session data to database in a batched write.
-    await _persist_turn_results(
-        session_id=session_id,
-        sdk_session_id=sdk_session_id,
-        metadata=metadata,
-        profile_id=profile_id,
-        interrupted=interrupted,
-        log_prefix="[WS] ",
-    )
+    async def save_results() -> None:
+        # Cancelling an await does not stop an issued DB thread. Run the entire
+        # persistence tail to completion before admission can pass to a successor.
+        await _persist_turn_results(
+            session_id=session_id,
+            sdk_session_id=sdk_session_id,
+            metadata=metadata,
+            profile_id=profile_id,
+            interrupted=interrupted,
+            log_prefix="[WS] ",
+        )
 
-    # Capture the context-usage breakdown. Runs DETACHED and self-guards on
-    # the pool's live adapter (a no-op if the subprocess died mid-turn), so it
-    # never delays the terminal event below.
-    schedule_context_usage_capture(session_id, log_prefix="[WS] ")
+        # Existing detached context capture is independently reconciled; the
+        # full generation fence for detached helpers is a separate follow-up.
+        schedule_context_usage_capture(session_id, log_prefix="[WS] ")
+        await push_memory(
+            project_id, getattr(options, "cwd", None), memory_leg_for_options(options)
+        )
 
-    # Push any agent-memory the CLI wrote this turn up to the shared DB.
-    await push_memory(
-        project_id, getattr(options, "cwd", None), memory_leg_for_options(options)
-    )
+    await session_admission.finish_saving(save_results())
 
     # For slash commands that produced no visible content, yield a notification
     # CLI built-in commands like /memory, /cost, /model execute inside the subprocess

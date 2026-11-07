@@ -144,6 +144,9 @@ class Lease:
     # Captures the originating adapter/context, never a fresh session-id lookup.
     abandon: Optional[Callable[[], Awaitable[None]]] = None
     abandoned: bool = False
+    # The deadline applies only to engine reads, never app-session writes.
+    engine_waiting: asyncio.Event = field(default_factory=asyncio.Event)
+    engine_finished: asyncio.Event = field(default_factory=asyncio.Event)
 
     @property
     def stopped(self) -> bool:
@@ -354,32 +357,74 @@ async def stream_turn(
             close(lease)
 
 
+async def finish_saving(work: Awaitable[T]) -> T:
+    """Cancellation cannot detach an issued mutation's off-loop thread.
+
+    Keep a strong reference and wait through cancellation, then propagate it.
+    DB/pool timeouts, not an engine deadline, bound these writes.
+    """
+    saving = asyncio.ensure_future(work)
+    cancelled = False
+    while not saving.done():
+        try:
+            await asyncio.shield(saving)
+        except asyncio.CancelledError:
+            cancelled = True
+    result = saving.result()
+    if cancelled:
+        raise asyncio.CancelledError
+    return result
+
+
 async def _finish_turn(
     events: AsyncGenerator[Dict[str, Any], None], lease: Lease, *, release: bool = True,
 ) -> None:
-    async def drain() -> None:
-        async for _ in events:
-            pass
+    async def finish() -> None:
+        async def drain() -> None:
+            async for _ in events:
+                pass
 
-    draining = _own(drain())
-    try:
-        finished, _ = await asyncio.wait({draining}, timeout=_ABANDONED_DRAIN_SECONDS)
-        if not finished:
-            logger.warning("Abandoned turn drain timed out for %s; retiring its engine", lease.session_id)
-            # Retire/fence before cancelling the reader or releasing admission.
-            # Cancellation alone does not stop the independently running engine.
-            lease.abandoned = True
-            if lease.abandon is not None:
-                await lease.abandon()
-            draining.cancel()
-            await asyncio.wait({draining}, timeout=_ABANDONED_CANCEL_SECONDS)
-        else:
+        # Only this owner cancels its reader, and only while it awaits engine
+        # events. App-session writes between frames and the saving tail settle
+        # before admission can be released, even on shutdown cancellation.
+        draining = asyncio.create_task(drain())
+        engine_finished = asyncio.create_task(lease.engine_finished.wait())
+        try:
+            await asyncio.wait(
+                {draining, engine_finished}, timeout=_ABANDONED_DRAIN_SECONDS,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            while not draining.done() and not lease.engine_finished.is_set():
+                if lease.engine_waiting.is_set() or lease.abandon is None:
+                    logger.warning(
+                        "Abandoned engine drain timed out for %s; retiring its engine", lease.session_id,
+                    )
+                    lease.abandoned = True
+                    if lease.abandon is not None:
+                        await lease.abandon()
+                    draining.cancel()
+                    await asyncio.wait({draining}, timeout=_ABANDONED_CANCEL_SECONDS)
+                    if not draining.done():
+                        _own(draining)  # fenced engine-only reader; never an app write
+                    return
+                # A frame's app-session mutation is still in flight. Do not
+                # cancel it; retire only when the next engine read is reached.
+                waiting = asyncio.create_task(lease.engine_waiting.wait())
+                try:
+                    await asyncio.wait(
+                        {draining, engine_finished, waiting}, return_when=asyncio.FIRST_COMPLETED,
+                    )
+                finally:
+                    waiting.cancel()
             await draining
+        finally:
+            engine_finished.cancel()
+
+    try:
+        await finish_saving(finish())
     except Exception:
         logger.exception("A turn nobody is reading failed for %s", lease.session_id)
     finally:
-        if not draining.done():
-            draining.cancel()
         if release:
             close(lease)
 

@@ -210,3 +210,128 @@ async def test_abandoned_never_releasing_engine_is_fenced_and_evicted(mock_db, t
             await asyncio.wait_for(closing, 5)
             if pool._background_teardowns:
                 await asyncio.wait_for(asyncio.gather(*pool._background_teardowns), 5)
+
+
+@pytest.mark.parametrize("reader", ["runtime", "direct", "cancelled_finisher"])
+async def test_engine_deadline_does_not_release_issued_threaded_session_update(mock_db, tmp_path, monkeypatch, reader):
+    import threading
+
+    from app.core.query_persistence import _persist_turn_results
+    from app.core.session_pool import SessionPool
+    from app.db import database
+
+    yielded, engine_release = asyncio.Event(), asyncio.Event()
+    saving, save_release, saved = threading.Event(), threading.Event(), threading.Event()
+
+    class CompletingProvider:
+        name = "fake"
+        caps = ProviderCaps()
+
+        async def stream(self, request):
+            yield StreamChunk("message_start", {})
+            yield StreamChunk("block_start", {"index": 0, "block_type": "text"})
+            yield StreamChunk("text_delta", {"index": 0, "text": "first frame"})
+            await engine_release.wait()
+            yield StreamChunk("block_stop", {"index": 0})
+            yield StreamChunk("usage", {"input_tokens": 1, "stop_reason": "end_turn"})
+
+    database.create_session(SID, "default")
+    update_session = database.update_session
+
+    def delayed_update(*args, **kwargs):
+        if kwargs.get("last_input_tokens") == 1:
+            saving.set()
+            assert save_release.wait(5), "test did not release the threaded update"
+            try:
+                return update_session(*args, **kwargs)
+            finally:
+                saved.set()
+        return update_session(*args, **kwargs)
+
+    monkeypatch.setattr(database, "update_session", delayed_update)
+    monkeypatch.setattr(admission, "_ABANDONED_DRAIN_SECONDS", 0.02)
+    engine = NativeLoop(provider=CompletingProvider(), store=MemoryStore(), model="m")
+    adapter = HarnessAdapter()
+    adapter._engine, adapter._connected = engine, True
+    adapter._can_use_tool = AsyncMock()
+    adapter._options = SessionOptions(model="m", include_partial_messages=True, extra={"app_session_id": SID})
+    monkeypatch.setattr(adapter, "_turn_context_note", lambda *args: None)
+    for name in ("_refresh_task_roster", "_memory_held", "_native_scratch_held"):
+        monkeypatch.setattr(adapter, name, AsyncMock(return_value=None))
+    pool = SessionPool()
+    pool.put(SID, SessionState(adapter=adapter, is_connected=True))
+    real_pump = qe._stream_to_websocket_impl
+    turn = turns.enqueue_turn(SID, "user", prompt="hello")
+    rt = session_runtime.SessionRuntime(turn)
+
+    async def record(event):
+        if event.get("type") == "stream_delta":
+            yielded.set()
+            await asyncio.Event().wait()
+
+    with ExitStack() as stack:
+        env = stack.enter_context(_runtime_env(pump=real_pump))
+        b = engine_patches(stack, cwd=str(tmp_path), session_row={"id": SID}, pool=pool)
+        b.options.include_partial_messages = True
+        # Restore the REAL persistence helper and its REAL run_sync/to_thread
+        # dispatch. Only the sync DB boundary has a controlled scheduling gate.
+        stack.enter_context(patch.object(qe, "_persist_turn_results", new=_persist_turn_results))
+        env["recorder"].on_event.side_effect = record
+        stack.enter_context(patch("app.core.query_session_lifecycle.interrupt_session", new=AsyncMock()))
+        direct = None
+        if reader == "runtime":
+            closing = asyncio.create_task(rt.execute())
+            await asyncio.wait_for(yielded.wait(), 5)
+            rt._pump_task.cancel()
+        else:
+            events = real_pump(prompt="hello", session_id=SID, profile_id="claude-code")
+            while (await asyncio.wait_for(anext(events), 5)).get("type") != "stream_delta":
+                pass
+            closing = asyncio.create_task(events.aclose())
+        origin = admission._holders[SID]
+        engine_release.set()
+        try:
+            assert await asyncio.to_thread(saving.wait, 5)
+            await asyncio.wait_for(engine._turn_task, 5)
+            assert not engine.turn_running, "this is slow saving, not a wedged engine"
+            if reader == "runtime" and rt._pump_task is not None:
+                rt._pump_task.cancel()  # watchdog cancellation cannot detach the write
+            elif reader == "cancelled_finisher":
+                finishing = [
+                    task for task in admission._unattended
+                    if task.get_coro().__name__ == "_finish_turn"
+                ]
+                assert len(finishing) == 1
+                finishing[0].cancel()  # shutdown cannot detach the write either
+                await asyncio.sleep(0)
+                finishing[0].cancel()
+            # The real DB update lasts much longer than the engine-drain budget.
+            try:
+                await asyncio.wait_for(origin.exited.wait(), 0.15)
+            except asyncio.TimeoutError:
+                pass
+            try:
+                direct = await admission.acquire(SID)
+            except admission.SessionBusyError:
+                admitted_while_saving = False
+            else:
+                admitted_while_saving = True
+                update_session(SID, last_input_tokens=999)
+            assert not saved.is_set()
+            save_release.set()
+            await asyncio.wait_for(closing, 5)
+            await asyncio.wait_for(origin.exited.wait(), 5)
+            assert await asyncio.to_thread(saved.wait, 5)
+            if direct is None:
+                direct = await admission.acquire(SID)
+                update_session(SID, last_input_tokens=999)
+            current = database.get_session(SID)["last_input_tokens"]
+            assert current == 999, "A's uncancellable thread overwrote B's 999 with " + str(current)
+            assert not admitted_while_saving, "B started while A still owned an issued DB mutation"
+            assert not origin.abandoned, "a healthy finished engine was retired for slow saving"
+        finally:
+            save_release.set()
+            await asyncio.wait_for(closing, 5)
+            if direct is not None:
+                admission.close(direct)
+            await adapter.disconnect_transport()
