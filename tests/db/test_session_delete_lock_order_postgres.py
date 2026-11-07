@@ -1211,7 +1211,7 @@ class _Barriers:
             return original_cursor(self, *args, **kwargs)
 
         monkeypatch.setattr(base._PgDictConnection, "cursor", instrumented)
-        monkeypatch.setattr(sessions, "_cleanup_working_set_ref", lambda sid: None)
+        monkeypatch.setattr(sessions, "_cleanup_working_set_ref", lambda sid, row=None: None)
         monkeypatch.setattr(sessions, "_cleanup_pending_wakeups", lambda sid: None)
 
     def _pause(self, name):
@@ -1945,3 +1945,48 @@ def test_project_delete_takes_the_ordered_session_delete(private_pool, monkeypat
         assert cur.fetchone() is None
         cur.execute("SELECT COUNT(*) AS n FROM handoff_history_chunks WHERE session_id=%s", (sid,))
         assert cur.fetchone()["n"] == 0
+
+
+def test_project_delete_keeps_a_chat_moved_to_another_project(private_pool, monkeypatch):
+    """Review S10: project delete re-checks membership under the chat's locks.
+
+    ``delete_project`` lists its chats, then deletes each in its own ordered
+    transaction. A chat moved to another project in between (a cross-device
+    resume or worktree reopen) is no longer this project's: before the fix
+    the unconditional delete destroyed it and its transcript. A barrier holds
+    the delete right after its project read while the move commits.
+    """
+    from app.db import projects
+
+    old, new, sid = "s10-old-" + uuid4().hex, "s10-new-" + uuid4().hex, "s10-chat-" + uuid4().hex
+    stayed = "s10-stay-" + uuid4().hex
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("INSERT INTO projects (id,name,path) VALUES (%s,'Old','/tmp/s10-old'),"
+                    "(%s,'New','/tmp/s10-new')", (old, new))
+        cur.execute("INSERT INTO sessions (id,project_id) VALUES (%s,%s),(%s,%s)", (sid, old, stayed, old))
+    session_events.append_events(sid, [{"type": "system.note", "payload": {}}])
+    # After the project's chat list is read, before any chat is deleted.
+    barriers = _Barriers(monkeypatch, {"project": (
+        lambda sql, params: sql.startswith("SELECT id FROM sessions WHERE project_id"), False)})
+    cleanups = []
+    monkeypatch.setattr(sessions, "_cleanup_working_set_ref", lambda s, row=None: cleanups.append(("ref", s)))
+    monkeypatch.setattr(sessions, "_cleanup_pending_wakeups", lambda s: cleanups.append(("wake", s)))
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="project") as deleter:
+        deleting = deleter.submit(projects.delete_project, old)
+        try:
+            barriers.wait("project", deleting)
+            assert sessions.set_session_project(sid, new)["project_id"] == new
+        finally:
+            barriers.release_all()
+        assert deleting.result(timeout=10) is True
+    moved = sessions.get_session(sid)
+    assert moved is not None and moved["project_id"] == new
+    assert session_events.get_events(sid), "the moved chat's transcript must survive"
+    assert ("ref", sid) not in cleanups and ("wake", sid) not in cleanups
+    _assert_deleted(stayed)
+    assert ("ref", stayed) in cleanups and ("wake", stayed) in cleanups
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM projects WHERE id IN (%s,%s) ORDER BY id", (old, new))
+        assert [row["id"] for row in cur.fetchall()] == [new]

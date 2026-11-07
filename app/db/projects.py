@@ -290,7 +290,10 @@ def delete_project(project_id: str) -> bool:
         cursor.execute("SELECT id FROM sessions WHERE project_id = %s ORDER BY id", (project_id,))
         session_ids = [row["id"] for row in cursor.fetchall()]
     for session_id in session_ids:
-        delete_session(session_id)
+        # Conditional: a chat moved to another project after this read (a
+        # cross-device resume or worktree reopen) is not this project's to
+        # delete (review S10). The old WHERE project_id delete kept it too.
+        delete_session(session_id, expected_project_id=project_id)
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT id, instance_id, link_group_id FROM projects WHERE id = %s", (project_id,))

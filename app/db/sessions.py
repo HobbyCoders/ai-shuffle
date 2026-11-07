@@ -1815,7 +1815,7 @@ _SESSION_RUNTIME_TABLES = (
 )
 
 
-def delete_session(session_id: str) -> bool:
+def delete_session(session_id: str, *, expected_project_id: Optional[str] = None) -> bool:
     """Delete a session, its messages, and its session-scoped runtime rows.
 
     Three different lifetimes, deliberately:
@@ -1842,13 +1842,36 @@ def delete_session(session_id: str) -> bool:
 
     All of it runs in the single transaction that drops the session row, so a
     failure leaves the session and its dependents intact together.
+
+    ``expected_project_id`` makes the delete conditional (project deletion):
+    the chat is deleted only if it still belongs to that project once its
+    session row is locked. A chat moved to another project meanwhile (a
+    cross-device resume or worktree reopen) is left untouched and this returns
+    False. Nothing outside the transaction runs before that check: the
+    wake and scratch-ref cleanup run after the delete commits.
     """
-    # Best-effort scratch-ref cleanup before the row dies, so a
-    # hard-deleted session leaves no dangling working-set ref on origin. Fully
-    # flag-gated and failure-swallowed — flag OFF (or no ref) issues ZERO git
-    # commands, and any git failure never blocks the delete.
-    _cleanup_working_set_ref(session_id)
-    _cleanup_pending_wakeups(session_id)
+    conditional = expected_project_id is not None
+    if not conditional:
+        # Best-effort scratch-ref cleanup before the row dies, so a
+        # hard-deleted session leaves no dangling working-set ref on origin. Fully
+        # flag-gated and failure-swallowed — flag OFF (or no ref) issues ZERO git
+        # commands, and any git failure never blocks the delete.
+        _cleanup_working_set_ref(session_id)
+        _cleanup_pending_wakeups(session_id)
+    deleted = _delete_session_rows(session_id, expected_project_id)
+    if conditional and deleted:
+        _cleanup_working_set_ref(session_id, row=deleted)
+        _cleanup_pending_wakeups(session_id)
+    return bool(deleted)
+
+
+def _delete_session_rows(session_id: str, expected_project_id: Optional[str]):
+    """The transaction of :func:`delete_session`.
+
+    Unconditional: returns whether the row was deleted. Conditional: returns
+    the deleted row (for post-commit cleanup), or None when the chat is gone
+    or now belongs to another project.
+    """
     _ph = ph()
     with get_db() as conn:
         cursor = get_cursor(conn)
@@ -1872,7 +1895,12 @@ def delete_session(session_id: str) -> bool:
         # header may be created between this scan and the cascade.
         lock_handoff_creation(cursor, [session_id])
         lock_handoff_history(cursor, session_id)
-        lock_session_runtimes(cursor, family)
+        locked = lock_session_runtimes(cursor, family)
+        row = locked.get(session_id)
+        if expected_project_id is not None and (row is None or row["project_id"] != expected_project_id):
+            # Re-checked under the session lock: a chat moved to another
+            # project after the caller listed it keeps its data (review S10).
+            return None
         # Under this chat's counter: a mirror op that arrives after this
         # delete commits must store nothing (#1222).
         mark_sessions_deleted([session_id])
@@ -1895,6 +1923,8 @@ def delete_session(session_id: str) -> bool:
                 f"DELETE FROM {table} WHERE session_id = {_ph}", (session_id,)
             )
         cursor.execute(f"DELETE FROM sessions WHERE id = {_ph}", (session_id,))
+        if expected_project_id is not None:
+            return dict(row) if cursor.rowcount > 0 else None
         return cursor.rowcount > 0
 
 
@@ -1916,12 +1946,13 @@ def _cleanup_pending_wakeups(session_id: str) -> None:
         )
 
 
-def _cleanup_working_set_ref(session_id: str) -> None:
+def _cleanup_working_set_ref(session_id: str, *, row: Optional[dict] = None) -> None:
     """Delete the session's working-set scratch ref (local + origin) on hard
     delete. No-op unless the row actually carries a ref, so sessions without
-    one make no new git calls. Swallows everything."""
+    one make no new git calls. Swallows everything. ``row`` is the already
+    deleted row when the cleanup runs after the delete commits."""
     try:
-        row = get_session(session_id)
+        row = row if row is not None else get_session(session_id)
         if not row or not row.get("working_set_ref"):
             return
         from app.core import project_resolver
