@@ -1550,8 +1550,10 @@ describe('Stop timeout recovery', () => {
 			vi.advanceTimersByTime(300);
 			expect(test.getState().liveTurnId).toBe('turn-a');
 			expect(await test.sender.sendMessage('B')).toBe(true);
-			const [, b] = test.getState().localSendIntent?.commandIds ?? [];
-			expect(b).toEqual(expect.any(String));
+			// A has run, so it leaves the run as B joins it (send-run.ts: confirmed).
+			const [b] = test.getState().localSendIntent?.commandIds ?? [];
+			expect(test.getState().localSendIntent?.commandIds).toEqual([b]);
+			expect(b).not.toBe(a);
 			event('turn.completed', 'turn-a', 3);
 			vi.advanceTimersByTime(300);
 			expect(test.getState().liveTurnId).toBeNull();
@@ -1575,6 +1577,80 @@ describe('Stop timeout recovery', () => {
 			vi.advanceTimersByTime(300);
 			state = test.getState();
 			expect(state.stopTimedOutTurnId).toBe('turn-b');
+			expect(stopRecoveryAppliesToTurn(state.stopTimedOutTurnId, state.liveTurnId)).toBe(true);
+		});
+
+		// Review round 2 S2: a queued message that will never run leaves the run, so
+		// it cannot take the Stop from the one that runs next. One that delivery won
+		// the race for stays.
+		it.each([
+			['withdrawn', 'c'],
+			['refused', 'c'],
+			['failed to send', 'c'],
+			['already delivered when withdrawn', 'b'],
+		] as const)('hands a Stop past a queued message that was %s', async (outcome, expected) => {
+			const test = stopping(null);
+			const handlers = createMessageHandlers(test.deps as unknown as MessageHandlerDeps);
+			test.deps.update(s => ({ ...s, isStreaming: false }));
+			feedController.start('sess-1');
+			feed.onEvent!({ type: 'caught_up', seq: 0 });
+			expect(await test.sender.sendMessage('A')).toBe(true);
+			const [a] = test.getState().localSendIntent?.commandIds ?? [];
+			event('turn.started', 'turn-a', 1);
+			event('message.user', 'turn-a', 2, { command_id: a, content: 'A' });
+			vi.advanceTimersByTime(300);
+			if (outcome === 'failed to send') test.wsConn.send.mockReturnValueOnce(false);
+			expect(await test.sender.sendMessage('B')).toBe(outcome !== 'failed to send');
+			const b = test.wsConn.send.mock.calls.findLast(([m]) => m.type === 'query')![0].client_message_id as string;
+			expect(await test.sender.sendMessage('C')).toBe(true);
+			expect(await test.sender.sendMessage('D')).toBe(true);
+			const [c, d] = test.getState().localSendIntent!.commandIds!.slice(-2);
+			if (outcome === 'refused') handlers.handleMessage({ type: 'error', session_id: 'sess-1', client_message_id: b, message: 'Queue is full' });
+			if (outcome === 'withdrawn' || outcome === 'already delivered when withdrawn') {
+				handlers.handleMessage({ type: 'queued_message_removal', session_id: 'sess-1', client_message_id: b,
+					verdict: outcome === 'withdrawn' ? 'withdrawn' : 'already_delivered' });
+			}
+			expect.soft(test.getState().localSendIntent?.commandIds).toEqual(expected === 'c' ? [c, d] : [b, c, d]);
+			event('turn.completed', 'turn-a', 3);
+			vi.advanceTimersByTime(300);
+
+			// The next message's WS start arrives ahead of its feed.
+			test.deps.update(s => ({ ...s, isStreaming: true }));
+			test.sender.stopGeneration();
+			vi.advanceTimersByTime(10000);
+			expect(test.getState().stopTimedOutCommandId).toBe(expected === 'c' ? c : b);
+
+			const next = expected === 'c' ? c : b;
+			event('turn.started', 'turn-next', 4);
+			event('message.user', 'turn-next', 5, { command_id: next, content: 'next' });
+			vi.advanceTimersByTime(300);
+			const state = test.getState();
+			expect(state.stopTimedOutTurnId).toBe('turn-next');
+			expect(stopRecoveryAppliesToTurn(state.stopTimedOutTurnId, state.liveTurnId)).toBe(true);
+		});
+
+		// Review round 2 S4: nothing still waiting to run is ever dropped from the
+		// run, however many messages queue behind a turn whose feed is late.
+		it('keeps the turn\'s send however many messages queue behind it', async () => {
+			const test = stopping(null);
+			test.deps.update(s => ({ ...s, isStreaming: false }));
+			expect(await test.sender.sendMessage('A')).toBe(true);
+			const [a] = test.getState().localSendIntent?.commandIds ?? [];
+			test.deps.update(s => ({ ...s, isStreaming: true }));
+			for (let i = 1; i <= 21; i++) expect(await test.sender.sendMessage(`Q${i}`)).toBe(true);
+			expect.soft(test.getState().localSendIntent?.commandIds).toHaveLength(22);
+			expect.soft(test.getState().localSendIntent?.commandIds?.[0]).toBe(a);
+
+			test.sender.stopGeneration();
+			vi.advanceTimersByTime(10000);
+			expect(test.getState().stopTimedOutCommandId).toBe(a);
+			feedController.start('sess-1');
+			event('turn.started', 'turn-a', 1);
+			event('message.user', 'turn-a', 2, { command_id: a, content: 'A' });
+			feed.onEvent!({ type: 'caught_up', seq: 2 });
+			vi.advanceTimersByTime(300);
+			const state = test.getState();
+			expect(state.stopTimedOutTurnId).toBe('turn-a');
 			expect(stopRecoveryAppliesToTurn(state.stopTimedOutTurnId, state.liveTurnId)).toBe(true);
 		});
 	});

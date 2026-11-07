@@ -36,6 +36,7 @@ import { sessionEphemeralCache } from '../session-cache';
 import { markBindingHydrated } from './composer-binding';
 import { unmarkQuestionSent } from './sent-questions';
 import { keepStopRecovery } from '$lib/utils/not-sent-hold';
+import { retireSends } from './send-run';
 
 // ─── Interfaces ──────────────────────────────────────────────────────────────
 
@@ -1081,6 +1082,9 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 					// can arrive after switching away from an optimistic idle send.
 					const recovered = feedController.retractOptimisticSend(sid, data.client_message_id);
 					pendingQueue.rejectSend(sid, data.client_message_id, recovered);
+					// A refused send will never run, so a Stop cannot be pressed on it.
+					const refusedId = data.client_message_id;
+					update(s => retireSends(s, refusedId));
 					if (sid !== getState().sessionId) break;
 					const restored = pendingQueue.takeWithdrawnDraft(sid);
 					// Idle sends echo on the transcript, not in the pending queue.
@@ -1188,6 +1192,9 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				}
 				pendingQueue.applyRemovalVerdict(sid, key, rawVerdict === 'not_found' ? rawVerdict : verdict,
 					typeof data.message_id === 'string' ? data.message_id : undefined);
+				// A withdrawn message will never run, so a Stop cannot be pressed on
+				// it. One already delivered won the race and stays (send-run.ts).
+				if (verdict === 'withdrawn') update(s => retireSends(s, key, entry?.clientMessageId));
 				if (sid !== state.sessionId) break; // retain for that session's next switch-in
 				const restored = pendingQueue.takeWithdrawnDraft(sid);
 				update(s => ({ ...s,

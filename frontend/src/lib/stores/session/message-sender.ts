@@ -28,22 +28,7 @@ import { composerPreferences } from '../composer-preferences';
 import { sendableComposerBinding } from './composer-binding';
 import { registerReloadBlocker } from '$lib/services/app-update';
 import { claimBootSend, releaseBootSend } from './session-init';
-
-/** How many sends of one run (a turn's send plus what queues behind it) a timed-out Stop can name. */
-const RECENT_SENDS = 20;
-
-/**
- * This page's current run of sends in `sessionId`, oldest first. A new chat's
- * first send is made before its session exists, so a run recorded without a
- * session belongs to the session that adopted that send's row.
- */
-function sendRunIn(s: Pick<ActiveSessionState, 'localSendIntent' | 'messages'>, sessionId: string | null): string[] {
-	const intent = s.localSendIntent;
-	const run = intent?.commandIds ?? [];
-	if (!run.length) return [];
-	if (intent?.sessionId === sessionId) return run;
-	return intent?.sessionId === null && sessionId !== null && s.messages.some(m => m.commandId === run[0]) ? run : [];
-}
+import { retireSends, runWithSend, sendRunIn } from './send-run';
 
 // ─── Sends in flight ─────────────────────────────────────────────────────────
 
@@ -650,12 +635,10 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					revision: (s.localSendIntent?.revision ?? 0) + 1,
 					// A Stop that times out names its turn from the receipt of the send
 					// it was pressed on, whether or not that send has a transcript row
-					// (steered, queued, pre-appended). The run is the send that starts
-					// a turn plus what queues behind it, oldest first: each queued
-					// message runs next once the one before it has (stopGeneration).
-					commandIds: sendWhileStreaming || options?.compactFirst
-						? [...sendRunIn(s, _state.sessionId), clientMessageId].slice(-RECENT_SENDS)
-						: [clientMessageId],
+					// (steered, queued, pre-appended). See send-run.ts for the run.
+					commandIds: runWithSend(s, _state.sessionId, clientMessageId,
+						sendWhileStreaming || !!options?.compactFirst,
+						id => !!feedController.hasReceipt?.(_state.sessionId, id)),
 				});
 
 				// Single atomic update — avoids intermediate render where streaming
@@ -766,9 +749,9 @@ export function createMessageSender(deps: MessageSenderDeps) {
 						// Remove only our optimistic echo, never a newer session's draft
 						// or an authoritative queue snapshot that arrived in the meantime.
 						update(s => s.sessionId === _state.sessionId ? {
-							...s, queuedMessages: s.queuedMessages.filter(m => m.id !== optimisticQueuedId),
+							...retireSends(s, clientMessageId), queuedMessages: s.queuedMessages.filter(m => m.id !== optimisticQueuedId),
 							error: error instanceof Error ? error.message : 'Could not compact and send.',
-						} : s);
+						} : retireSends(s, clientMessageId));
 						throw error;
 					}
 					return true;
@@ -785,7 +768,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					// its indicator; nothing has to guess.
 					feedController.retractOptimisticSend(_state.sessionId, clientMessageId);
 					update(s => s.sessionId === _state.sessionId ? {
-						...s,
+						...retireSends(s, clientMessageId),
 						...(optimisticQueuedId
 							? { queuedMessages: s.queuedMessages.filter(m => m.id !== optimisticQueuedId) }
 							: {
@@ -794,7 +777,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 									isStreaming: feedController.isReducerStreaming(s.sessionId),
 								}),
 						error: 'Connection lost before the message was sent. Please try again.',
-					} : s);
+					} : retireSends(s, clientMessageId));
 					feedController.clearOptimisticSend(_state.sessionId);
 					return false;
 				}
@@ -816,8 +799,9 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			// Anything the feed has already shown came before this Stop.
 			const pressedAfterSeq = feedController.reducerSeq?.(_state.sessionId) ?? null;
 			// The send this Stop is pressed on: the oldest of the run the feed has not
-			// receipted. A message queued behind a turn the feed has shown is the one
-			// that runs once that turn ends, not the send that started it.
+			// receipted. The run holds only sends that may still run (send-run.ts),
+			// so a message queued behind a turn the feed has shown is the one that
+			// runs once that turn ends, not the send that started it.
 			const pressedOnCommand = sendRunIn(_state, _state.sessionId)
 				.find(id => !feedController.hasReceipt?.(_state.sessionId, id)) ?? null;
 			if (_state.sessionId) {

@@ -129,7 +129,8 @@ export interface ActiveSessionState {
 	/** Locally admitted text-send intent, including sends with no transcript echo.
 	 * Published atomically with error dismissal; automatic queue handoff and Stop
 	 * never advance it. Session-scoped so a delayed send cannot reset another view. */
-	/** `commandIds`: this page's recent sends in this session, oldest first (see stopGeneration). */
+	/** `commandIds`: this page's sends in this session that may still run, oldest first
+	 *  (session/send-run.ts). Retiring one does not bump `revision`: it is not a send. */
 	localSendIntent?: { sessionId: string | null; revision: number; commandIds?: string[] };
 	/** Whether a turn is live for this session.
 	 *
