@@ -388,6 +388,31 @@ it('does not revive a deferred local branch after a newer explicit clear on the 
  expect(p.worktreeForProject(shared)).toEqual({intent:'worktree',checkout:null});
  expect(p.worktreeForProject(local).checkout).toBeNull();
 });
+// #1078: the catalog retires a project's local identity for a shared one.
+it('moves a branch picked under a retired identity to its replacement, after an in-flight create', async () => {
+ const {composerPreferences:p}=await import('./composer-preferences');
+ const old={projectId:'a',projectV2Id:'pv2-local'}, next={projectId:'a',projectV2Id:'pv2-shared'};
+ p.rememberWorktreeIntent(old,'worktree');
+ p.rememberCheckout(old,{...old,kind:'branch',branch:'topic/a',baseBranch:'main',createNew:true});
+ const claim=p.claimBranchChoice(old,'topic/a',true);
+ p.linkWorktreeProject(next,old);
+ // Intent follows at once; the branch waits for the create that is spending it.
+ expect(p.worktreeForProject(next)).toEqual({intent:'worktree',checkout:null});
+ claim.release();
+ expect(p.worktreeForProject(next)).toEqual({intent:'worktree',checkout:{...next,kind:'branch',branch:'topic/a',baseBranch:'main',createNew:true}});
+ expect(p.worktreeForProject(old)).toEqual({intent:'local',checkout:null});
+ expect(mocks.save).toHaveBeenCalledWith('composer.projectWorktree.shared%3Apv2-local',null);
+});
+it('keeps a saved choice for the replacement identity, and never links across local projects', async () => {
+ const {composerPreferences:p}=await import('./composer-preferences');
+ const old={projectId:'a',projectV2Id:'pv2-local'}, next={projectId:'a',projectV2Id:'pv2-shared'};
+ p.rememberCheckout(old,{...old,kind:'branch',branch:'topic/old',baseBranch:'main',createNew:true});
+ p.linkWorktreeProject({projectId:'b',projectV2Id:'pv2-shared'},old);
+ expect(p.worktreeForProject(old).checkout?.branch).toBe('topic/old');
+ p.rememberCheckout(next,{...next,kind:'branch',branch:'topic/remote',baseBranch:'main',createNew:false});
+ p.linkWorktreeProject(next,old);
+ expect(p.worktreeForProject(next).checkout?.branch).toBe('topic/remote');
+});
 it('migrates the legacy fast flag only for the last selected model', async () => {
  localStorage.setItem('aihub_lastModel','prov:api:claude-opus-5'); localStorage.setItem('aihub_lastFastMode','1');
  const {composerPreferences:p} = await import('./composer-preferences');

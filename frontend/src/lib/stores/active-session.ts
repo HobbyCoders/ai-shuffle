@@ -1497,14 +1497,27 @@ export const activeSession = {
 	 * ordinary rules. Idempotent.
 	 */
 	linkDiscoveredProjects(projects: {local_project_id:string | null; project_v2_id:string}[]) {
+		// Called with the incoming catalog before it replaces the previous one,
+		// so the previous one can prove an identity was retired (#1078).
+		const previous = appData.current.clusterProjects;
 		for (const project of projects) {
 			if (!project.local_project_id) continue;
 			const pick = {projectId:project.local_project_id, projectV2Id:project.project_v2_id};
-			composerPreferences.linkWorktreeProject(pick);
-			const selected = composerPreferences.current.project;
-			if (selected.projectId === pick.projectId && !selected.projectV2Id) composerPreferences.set('project', pick);
-			if (!_state.sessionId && !composerBusy() && _state.project === pick.projectId && !_state.projectV2Id)
-				_update(s => ({...s, projectV2Id:pick.projectV2Id}));
+			// A local project gains its shared ID (null), or the catalog swaps the
+			// ID this local project was listed under for a new one: proven only
+			// when the old ID was this same local project's and is listed no more.
+			const retired = previous.filter(p => p.local_project_id === pick.projectId && p.project_v2_id !== pick.projectV2Id
+				&& !projects.some(next => next.project_v2_id === p.project_v2_id)).map(p => p.project_v2_id);
+			for (const from of [null, ...retired]) {
+				composerPreferences.linkWorktreeProject(pick, {projectId:pick.projectId, projectV2Id:from});
+				const selected = composerPreferences.current.project;
+				if (selected.projectId === pick.projectId && (selected.projectV2Id || null) === from) composerPreferences.set('project', pick);
+				// An open chat keeps the identity it was bound under.
+				if (!_state.sessionId && !composerBusy() && _state.project === pick.projectId && (_state.projectV2Id || null) === from) {
+					_update(s => ({...s, projectV2Id:pick.projectV2Id}));
+					persistSession();
+				}
+			}
 		}
 	},
 	resolveComposerDefaultsAfterCatalog() {

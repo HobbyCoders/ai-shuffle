@@ -204,14 +204,17 @@ function saveWorktree(project: ProjectPick, value: WorktreePick) {
  applyWorktree(key, value);
  preferenceSync.save(key, projectWorktrees[key]);
 }
-const pendingWorktreeLinks = new Map<string, {project:ProjectPick; revision:number}>();
-// Git discovery can link a local project after its first compose pick. Promote
-// only that proven pair; bootstrap uses only_if_missing so a saved shared choice
-// on another device wins. Never move a branch while its create is in flight.
-function linkWorktreeProject(project: ProjectPick) {
- if (!project.projectId || !project.projectV2Id) return;
- const localKey = projectWorktreeKey({...project, projectV2Id:null});
+const pendingWorktreeLinks = new Map<string, {project:ProjectPick; from:ProjectPick; revision:number}>();
+// Git discovery can link a local project after its first compose pick, or the
+// catalog can retire the identity it was picked under for a shared one (#1078).
+// Promote only that proven pair (`from` is the identity it replaces); bootstrap
+// uses only_if_missing so a saved shared choice on another device wins. Never
+// move a branch while its create is in flight.
+function linkWorktreeProject(project: ProjectPick, from: ProjectPick = {...project, projectV2Id:null}) {
+ if (!project.projectId || !project.projectV2Id || from.projectId !== project.projectId) return;
+ const localKey = projectWorktreeKey(from);
  const key = projectWorktreeKey(project);
+ if (localKey === key) return;
  const local = projectWorktrees[localKey];
  if (!local || (local.intent === 'local' && !local.checkout && !pendingWorktreeLinks.has(localKey))) return;
  const claimed = [...claims].some(claim => claim.key === localKey && claim.ownerEpoch === sessionOwnerEpoch());
@@ -220,7 +223,7 @@ function linkWorktreeProject(project: ProjectPick) {
   // Intent must follow discovery immediately, even while a create owns the branch.
   applyWorktree(key, {...local, checkout:!claimed && local.checkout ? {...local.checkout, ...project} : null});
   if (!registeredWorktrees.has(key)) preferenceSync.register(key, worktreeAdapter(key));
-  if (claimed) pendingWorktreeLinks.set(localKey, {project, revision:checkoutRevisions.get(key) ?? 0});
+  if (claimed) pendingWorktreeLinks.set(localKey, {project, from, revision:checkoutRevisions.get(key) ?? 0});
  }
  if (claimed) {
   if (promote) void preferenceSync.reconnect();
@@ -439,12 +442,12 @@ export const composerPreferences = {
      composerPreferences.rememberCheckout(project, null);
     }
     const linked = pendingWorktreeLinks.get(key);
-    if (linked) linkWorktreeProject(linked.project);
+    if (linked) linkWorktreeProject(linked.project, linked.from);
    },
    release() {
     claims.delete(claim);
     const linked = pendingWorktreeLinks.get(key);
-    if (linked) linkWorktreeProject(linked.project);
+    if (linked) linkWorktreeProject(linked.project, linked.from);
    },
   };
  },
