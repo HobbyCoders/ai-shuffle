@@ -15,6 +15,8 @@ const TOKEN_ALLOWLIST = new Set([
 	'frontend/src/lib/services/voiceAudioStream.ts',
 	// Imports and calls the shared helper for the persistent pairing device ID.
 	'frontend/src/routes/pair/+page.svelte',
+	// Imports and calls the shared helper for preference write IDs.
+	'frontend/src/lib/services/preference-sync.ts',
 	// Only the comment names the native API; IDs already use getRandomValues.
 	'frontend/src/lib/stores/session/pending-queue.ts'
 ]);
