@@ -16,7 +16,7 @@
 		type ProviderUsage
 	} from '$lib/api/client';
 	import { billingLabel, formatCost, formatTokens, providerCostCell, providerTotals } from './statsProviders';
-	import { formatScale, labelIndexes, spendScale } from './statsChart';
+	import { fillDays, formatScale, labelIndexes, shiftDay, spendScale } from './statsChart';
 	import { tick } from 'svelte';
 	import { ViewShell, ViewPanel, PanelIconButton, ListItem, ListGroupLabel, DetailPane, Segmented, InlineBanner, EmptyDetail } from '$lib/components/layout/view';
 	import UsageEstimatedBadge from '$lib/components/UsageEstimatedBadge.svelte';
@@ -53,12 +53,11 @@
 
 	// Date helpers
 	function initializeDates(preset: PresetRange) {
-		const end = new Date();
-		const start = new Date();
 		const days = preset === '7d' ? 7 : preset === '30d' ? 30 : 90;
-		start.setDate(end.getDate() - days);
-		startDate = formatDate(start);
-		endDate = formatDate(end);
+		// Today's UTC day, the day the trends API groups by; the start is counted
+		// back in calendar days so a local DST change cannot shift it.
+		endDate = formatDate(new Date());
+		startDate = shiftDay(endDate, -days);
 	}
 
 	function formatDate(date: Date): string {
@@ -76,21 +75,23 @@
 	// Load all analytics data
 	async function loadAnalytics() {
 		if (!startDate || !endDate) return;
+		const [start, end] = [startDate, endDate];
 		error = null;
 		loading = true;
 
 		try {
 			const [summaryData, breakdownData, trendsData, sessionsData, providerData] = await Promise.all([
-				getAnalyticsSummary(startDate, endDate).catch(() => null),
-				getCostBreakdown(startDate, endDate, 'profile').catch(() => []),
-				getUsageTrends(startDate, endDate).catch(() => []),
-				getTopSessions(startDate, endDate, 5).catch(() => []),
-				getProviderBreakdown(startDate, endDate).catch(() => null)
+				getAnalyticsSummary(start, end).catch(() => null),
+				getCostBreakdown(start, end, 'profile').catch(() => []),
+				getUsageTrends(start, end).catch(() => []),
+				getTopSessions(start, end, 5).catch(() => []),
+				getProviderBreakdown(start, end).catch(() => null)
 			]);
 
 			summary = summaryData;
 			costBreakdown = breakdownData;
-			usageTrends = trendsData;
+			// Every day of the range gets a bar, zero when it had no usage.
+			usageTrends = fillDays(trendsData, start, end);
 			topSessions = sessionsData;
 			providers = providerData ?? [];
 			providersFailed = providerData === null;
@@ -187,6 +188,9 @@
 
 	// Nothing at all in range: one page-level empty state instead of four empty cards.
 	const trendsEmpty = $derived(!usageTrends.some((d) => d.cost > 0 || d.input_tokens > 0 || d.output_tokens > 0));
+	// The spend chart needs spend: a range of free tokens (or of zero-filled
+	// days) folds to its empty row instead of drawing an empty $0–$3 grid.
+	const spendEmpty = $derived(!usageTrends.some((d) => d.cost > 0));
 	const providersEmpty = $derived(!providersFailed && providers.length === 0);
 	const allEmpty = $derived(providersEmpty && trendsEmpty && costBreakdown.length === 0 && topSessions.length === 0);
 	const rangeDays = $derived(parseInt(selectedPreset));
@@ -321,7 +325,7 @@
 						{/if}
 
 						<!-- Spend over time: currency scale, gridlines, date ticks, a readout for the picked day -->
-						{#if trendsEmpty}{@render emptyRow('spend', 'Estimated spend over time', 'No spend in this range')}
+						{#if spendEmpty}{@render emptyRow('spend', 'Estimated spend over time', 'No spend in this range')}
 						{:else}
 						{@const shown = usageTrends[shownDay]}
 						<section class="stats-section" data-section="spend" aria-labelledby="stats-spend">

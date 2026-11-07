@@ -80,6 +80,29 @@ describe('Stats shared view', () => {
   const rows = [...view.container.querySelectorAll('.stats-empty-row')].map(r => r.textContent);
   expect(rows).toEqual(['Usage by providerNo usage in this range', 'Cost by profileNo profile costs in this range', 'Top chats by costNo chats']);
  });
+ it('draws one bar per day of the range, with zero days in the gaps and today last', async () => {
+  // The API returns only days with usage: three of the 31, and not today.
+  const sparse = trendDays(31).filter((_, i) => i === 0 || i === 10 || i === 20);
+  api.summary.mockResolvedValue(SUMMARY); api.providers.mockResolvedValue([]); api.trends.mockResolvedValue(sparse);
+  const view = render(StatsCard);
+  const group = await screen.findByRole('group', { name: /^Daily spend/ });
+  const cols = [...group.querySelectorAll<HTMLButtonElement>('.chart-col')];
+  expect(cols).toHaveLength(31);
+  const heights = cols.map(c => (c.querySelector('.chart-bar') as HTMLElement).style.height);
+  expect(heights.filter(h => h !== '0%')).toHaveLength(3);
+  expect(cols.at(-1)?.classList.contains('today')).toBe(true);
+  expect(cols.at(-1)?.getAttribute('aria-label')).toMatch(/^Today, .+: \$0\.00$/);
+  expect([...view.container.querySelectorAll('.chart-x span')].map(e => e.textContent).at(-1)).toBe('Today');
+ });
+ it('folds a range with tokens but no spend to the empty spend row, not an empty grid', async () => {
+  api.summary.mockResolvedValue(SUMMARY); api.providers.mockResolvedValue([]);
+  api.trends.mockResolvedValue(trendDays(4).map(d => ({ ...d, cost: 0 })));
+  const view = render(StatsCard);
+  await screen.findByText('No spend in this range');
+  expect(screen.queryByRole('group', { name: /^Daily spend/ })).toBeNull();
+  expect(view.container.querySelector('.chart-grid')).toBeNull();
+  expect(screen.queryByText(/^No usage in the last/)).toBeNull();
+ });
  it('labels the spend chart with a currency scale, a few dates and Today, and lets the keyboard pick a day', async () => {
   api.summary.mockResolvedValue(SUMMARY); api.providers.mockResolvedValue([]); api.trends.mockResolvedValue(trendDays(31));
   const view = render(StatsCard);
