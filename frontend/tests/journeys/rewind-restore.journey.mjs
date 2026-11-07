@@ -4,12 +4,16 @@
 //   reload-before-answer  (#1083) the server rewinds, but the page reloads before
 //                         its answer arrives; the reopened chat still hands the
 //                         rewound words back.
-//
-// A rewound attachment is not covered here: the browser cannot tell an attached
-// file from a typed path in the sent text, so it comes back as text until the
-// server records which uploads a message carried (#1084).
+//   typed-while-rewinding (#1083) the row leaves on the feed before the answer
+//                         comes, and the owner types a new prompt in that gap;
+//                         the rewound words go to the prompt stash, never into
+//                         the new prompt, and the new prompt is sent alone.
+//   attachment-chip       (#1084) a rewound message with an attached file comes
+//                         back with its chip, not the raw upload path. The
+//                         server names the uploads; the browser never reads them
+//                         out of the text.
 import { fakeAiTag, runJourney } from './runner.mjs';
-import { composer, countUserRows, expect, openNewChat, typeAndSend, uniq, waitChat, waitChatOpen, waitTurnSettled } from './lib/app.mjs';
+import { PROJECT, composer, countUserRows, expect, openNewChat, typeAndSend, uniq, waitChat, waitChatOpen, waitTurnSettled } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 
 async function sendAndSettle(page, variant, words, messagesAtLeast) {
@@ -21,6 +25,20 @@ async function confirmRewindOfLastUserMessage(page) {
 	await page.getByTitle('Rewind to before this message', { exact: true }).last().focus();
 	await page.keyboard.press('Enter');
 	await page.getByRole('dialog').getByRole('button', { name: 'Rewind', exact: true }).click();
+}
+
+/** Hold the rewind's answer until `release()`; resolves `carriedOut` with the server's result. */
+async function holdRewindAnswer(page) {
+	let done, release;
+	const carriedOut = new Promise((resolve) => { done = resolve; });
+	const released = new Promise((resolve) => { release = resolve; });
+	await page.route('**/rewind/execute/**', async (route) => {
+		const response = await route.fetch();
+		done(await response.json());
+		await released;
+		await route.fulfill({ response }).catch(() => {});
+	});
+	return { carriedOut, release };
 }
 
 await runJourney({
@@ -67,6 +85,72 @@ await runJourney({
 				await composer(page).getByText(state.rewound).waitFor({ timeout: 10_000 });
 				expect((await countUserRows(page, state.rewound)) === 0, 'the rewound row is gone');
 				expect((await countUserRows(page, state.kept)) === 1, 'the earlier turn stayed');
+			}
+		},
+		{
+			name: 'typed-while-rewinding',
+			async setup(ctx) {
+				await openNewChat(ctx);
+				const kept = `kept-${uniq()}`;
+				await sendAndSettle(ctx.page, ctx.variant, kept, 2);
+				const rewound = `rewound-${uniq()}`;
+				await sendAndSettle(ctx.page, ctx.variant, rewound, 4);
+				ctx.state = { kept, rewound, fresh: `fresh-${uniq()}` };
+			},
+			async act({ page, mark, state }) {
+				const { carriedOut, release } = await holdRewindAnswer(page);
+				await mark('confirm the rewind');
+				await confirmRewindOfLastUserMessage(page);
+				const result = await carriedOut;
+				expect(result.success && result.chat_rewound, `the server rewound: ${JSON.stringify(result)}`);
+				// The row and its dialog leave on the feed; the answer is still held.
+				await waitChat(page, { messages: '2' }, { timeout: 30_000 });
+				await mark('type a new prompt before the answer');
+				const box = composer(page);
+				await box.click();
+				await box.pressSequentially(state.fresh);
+				await mark('the answer arrives');
+				release();
+				await page.getByText('Your rewound message is in the prompt stash', { exact: false }).waitFor({ timeout: 15_000 });
+				const text = (await box.innerText()).trim();
+				expect(text === state.fresh, `the composer holds only the new prompt: ${JSON.stringify(text)}`);
+				await page.unrouteAll({ behavior: 'ignoreErrors' });
+				await mark('send the new prompt');
+				await page.getByRole('button', { name: 'Send', exact: true }).click();
+				await waitTurnSettled(page, { messagesAtLeast: 4, text: `You said: “${state.fresh}` });
+				expect((await countUserRows(page, state.fresh)) === 1, 'the new prompt was sent');
+				expect((await countUserRows(page, state.rewound)) === 0, 'the rewound words were not sent with it');
+				// They are kept: adding them back is the owner's choice.
+				await page.getByRole('button', { name: 'Add to composer', exact: true }).click();
+				await box.getByText(state.rewound).waitFor({ timeout: 10_000 });
+			}
+		},
+		{
+			name: 'attachment-chip',
+			async setup(ctx) {
+				await openNewChat(ctx, { project: PROJECT });
+				const kept = `kept-${uniq()}`;
+				await sendAndSettle(ctx.page, ctx.variant, kept, 2);
+				ctx.state = { kept, words: `attached-${uniq()}`, file: `note-${uniq()}.txt` };
+			},
+			async act({ page, mark, state, variant }) {
+				const box = composer(page);
+				await mark('attach a file');
+				await page.locator('input[type="file"]').setInputFiles({ name: state.file, mimeType: 'text/plain', buffer: Buffer.from('rewind me\n') });
+				await box.locator('[data-file-chip]').first().waitFor({ timeout: 20_000 });
+				await box.click();
+				await page.keyboard.press('End');
+				await box.pressSequentially(` ${state.words} ${fakeAiTag(variant)}`.trimEnd());
+				await page.getByRole('button', { name: 'Send', exact: true }).click();
+				await waitTurnSettled(page, { messagesAtLeast: 4, text: `You said:` });
+				await mark('rewind the message with the attachment');
+				await confirmRewindOfLastUserMessage(page);
+				await waitChat(page, { messages: '2' }, { timeout: 30_000 });
+				await box.getByText(state.words).waitFor({ timeout: 15_000 });
+				const chips = await box.locator('[data-file-chip]').count();
+				const text = await box.innerText();
+				expect(chips === 1, `the attachment came back as one chip (found ${chips})`);
+				expect(!/@\/\S*uploads\//.test(text), `no raw upload path in the composer: ${JSON.stringify(text)}`);
 			}
 		}
 	],

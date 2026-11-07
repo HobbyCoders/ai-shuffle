@@ -9,6 +9,8 @@ import { aiContentPrefill, supportCaps } from '$lib/stores/support-report.svelte
 import { activeSession } from '$lib/stores/active-session';
 import { readDraft } from '$lib/stores/session/draft-persistence';
 import { takeUnfinishedRestores } from '$lib/stores/session/restored-draft';
+import { promptStash } from '$lib/stores/session/prompt-stash';
+import { liveBanners, notify } from '$lib/stores/notifications';
 import MessageActions from './MessageActions.svelte';
 
 beforeEach(() => { sessionStorage.clear(); rewind.mockReset(); vi.spyOn(console, 'error').mockImplementation(() => {}); });
@@ -65,7 +67,7 @@ describe('MessageActions gating', () => {
 	it('notes the words before asking and clears the note once the server answers', async () => {
 		let answer!: (value: unknown) => void;
 		rewind.mockReturnValue(new Promise(resolve => { answer = resolve; }));
-		render(MessageActions, {...base, notSentMessageId:'unsent-id', notSentUploadPaths:['/uploads/proof.png'], onRewindComplete: vi.fn()});
+		render(MessageActions, {...base, notSentMessageId:'unsent-id', uploadPaths:['/uploads/proof.png'], onRewindComplete: vi.fn()});
 		await fireEvent.click(screen.getByRole('button', {name:'Restore to composer'}));
 		expect(sessionStorage.getItem('restore-note:s1:unsent-id')).toContain('/uploads/proof.png');
 		answer({success:true, unsent_restored:true, restored_prompt:'kept words', restored_upload_paths:[]});
@@ -135,7 +137,7 @@ describe('MessageActions gating', () => {
 	])('copies the words to the composer once when the outcome is unknown after %s', async (_label, failure) => {
 		rewind.mockRejectedValue(failure);
 		const onRewindComplete = vi.fn();
-		render(MessageActions, {...base, notSentMessageId:'unsent-id', notSentUploadPaths:['/uploads/proof.png'], onRewindComplete});
+		render(MessageActions, {...base, notSentMessageId:'unsent-id', uploadPaths:['/uploads/proof.png'], onRewindComplete});
 		await fireEvent.click(screen.getByRole('button', {name:'Restore to composer'}));
 		await waitFor(() => expect(onRewindComplete).toHaveBeenCalledTimes(1));
 		expect(onRewindComplete).toHaveBeenCalledWith(undefined, base.messageContent, ['/uploads/proof.png'], true);
@@ -268,6 +270,92 @@ describe('MessageActions rewind', () => {
 		await fireEvent.click(rewindButton()!);
 		await fireEvent.click(screen.getByRole('button', { name: 'Rewind' }));
 		await waitFor(() => expect(named).toHaveBeenCalledWith(undefined, prompt, ['/work/uploads/real.txt']));
+	});
+
+	it('hands back the uploads the server recorded on a sent row, in its note and to the composer (#1084)', async () => {
+		let answer!: (value: unknown) => void;
+		rewind.mockReturnValue(new Promise(resolve => { answer = resolve; }));
+		const onRewindComplete = vi.fn();
+		render(MessageActions, { ...base, messageContent: 'see @/work/uploads/a.txt', userPromptOccurrence: 0, uploadPaths: ['/work/uploads/a.txt'], onRewindComplete });
+		await fireEvent.click(rewindButton()!);
+		await fireEvent.click(screen.getByRole('button', { name: 'Rewind' }));
+		// A reload before the answer still has the chip, not the raw path.
+		expect(takeUnfinishedRestores('s1', new Set(), 'a-later-page').map(n => n.uploadPaths)).toEqual([['/work/uploads/a.txt']]);
+		answer({ success: true, chat_rewound: true });
+		await waitFor(() => expect(onRewindComplete).toHaveBeenCalledWith(undefined, 'see @/work/uploads/a.txt', ['/work/uploads/a.txt']));
+	});
+
+	describe('words typed while a rewind is on its way (#1083)', () => {
+		const sentRow = { ...base, messageContent: 'rewound words', userPromptOccurrence: 0 };
+		const typed = (text: string) => JSON.stringify({ type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text }] }] });
+		let answer!: (value: unknown) => void;
+		beforeEach(() => {
+			localStorage.clear();
+			promptStash.setOwner('tester');
+			activeSession.newChat();
+			activeSession.current.sessionId = 's1';
+			rewind.mockReturnValue(new Promise(resolve => { answer = resolve; }));
+		});
+		afterEach(() => {
+			for (const b of banners()) notify.dismissLive(b.id);
+			promptStash.setOwner(null);
+			activeSession.newChat();
+		});
+		const confirmRewind = async (onRewindComplete: (...args: unknown[]) => void) => {
+			render(MessageActions, { ...sentRow, onRewindComplete });
+			await fireEvent.click(rewindButton()!);
+			await fireEvent.click(screen.getByRole('button', { name: 'Rewind' }));
+		};
+		const banners = () => { let list: { id: string; message: string; action?: { label: string; onClick: () => void } }[] = []; liveBanners.subscribe(v => { list = v; })(); return list; };
+
+		it('keeps them apart: the rewound words go to the stash and the composer keeps the new ones', async () => {
+			activeSession.setDraft('');
+			const onRewindComplete = vi.fn();
+			await confirmRewind(onRewindComplete);
+			activeSession.setDraft(typed('a brand new prompt'));
+			answer({ success: true, chat_rewound: true, warning: null });
+			await waitFor(() => expect(onRewindComplete).toHaveBeenCalledOnce());
+			// The parent still catches the transcript up, but gets no words to merge.
+			expect(onRewindComplete.mock.calls[0]).toEqual([undefined]);
+			let stash: { preview: string }[] = []; promptStash.subscribe(v => { stash = v; })();
+			expect(stash.map(e => e.preview)).toEqual(['rewound words']);
+			const [banner] = banners();
+			expect(banner.message).toContain('prompt stash');
+			// Adding them is the owner's choice, and takes them out of the stash.
+			banner.action!.onClick();
+			expect(activeSession.current.pendingRestorePrompt).toBe('rewound words');
+			promptStash.subscribe(v => { stash = v; })();
+			expect(stash).toEqual([]);
+		});
+
+		it('fills the composer as before when nothing was typed, or the draft from before the rewind is untouched', async () => {
+			activeSession.setDraft(typed('draft from before'));
+			const onRewindComplete = vi.fn();
+			await confirmRewind(onRewindComplete);
+			answer({ success: true, chat_rewound: true });
+			await waitFor(() => expect(onRewindComplete).toHaveBeenCalledWith(undefined, 'rewound words'));
+			expect(banners()).toEqual([]);
+		});
+
+		it('says so when the stash cannot keep them and they have to join the composer', async () => {
+			promptStash.setOwner(null);
+			activeSession.setDraft('');
+			const onRewindComplete = vi.fn();
+			await confirmRewind(onRewindComplete);
+			activeSession.setDraft(typed('typed meanwhile'));
+			answer({ success: true, chat_rewound: true });
+			await waitFor(() => expect(onRewindComplete).toHaveBeenCalledWith(undefined, 'rewound words'));
+			expect(banners().map(b => b.message)).toEqual([expect.stringContaining('added after what you typed')]);
+		});
+	});
+
+	it('cannot be dismissed from the backdrop once the rewind was asked for', async () => {
+		rewind.mockReturnValue(new Promise(() => {}));
+		render(MessageActions, { ...base, messageUuid: 'u-1', onRewindComplete: vi.fn() });
+		await fireEvent.click(rewindButton()!);
+		await fireEvent.click(screen.getByRole('button', { name: 'Rewind' }));
+		await fireEvent.click(screen.getByRole('button', { name: 'Close dialog' }));
+		expect(dialog()).not.toBeNull();
 	});
 
 	it('refuses to guess without a checkpoint id, shows server failures, and cancel closes the dialog', async () => {
