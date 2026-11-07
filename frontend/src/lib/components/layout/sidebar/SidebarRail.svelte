@@ -195,9 +195,15 @@
 </nav>
 
 <style>
+	/* The rail's z-index makes it a stacking context, so its hover labels
+	   (.tip, z 9) and the notification popover only count inside it. It must
+	   sit above every layer of the list panel beside it (the sticky section
+	   header, z 6, and the selection bar, z 8, in Sidebar.svelte), or a label
+	   slides under them. It stays below SidebarSheet (20/21), WorkspaceCustomize
+	   (30/31) and the AppLayout overlays (40-42). */
 	.rail {
 		position: relative;
-		z-index: 5;
+		z-index: 10;
 		flex: none;
 		width: 56px;
 		display: flex;
