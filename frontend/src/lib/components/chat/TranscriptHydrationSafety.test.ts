@@ -118,6 +118,20 @@ describe('retained transcript action lifetime', () => {
 		expect(complete).not.toHaveBeenCalled();
 	});
 
+	it('gives a late sent-message rewind to A’s composer when A is back on screen but still loading', async () => {
+		let finish!: (value: unknown) => void;
+		mocks.rewind.mockReturnValue(new Promise(resolve => { finish = resolve; }));
+		const complete = vi.fn();
+		render(Harness, { onRewindComplete: complete });
+		await fireEvent.click(await openRewind());
+		live.set(state('B')); await tick();
+		live.set(state('A', true)); await tick();
+		finish({ success: true, chat_rewound: true });
+		await waitFor(() => expect(mocks.pendingRestore).toHaveBeenCalledWith('Outgoing prompt', undefined));
+		expect(complete).not.toHaveBeenCalled();
+		expect(readDraft('B')).toBeNull();
+	});
+
 	it('closes the body-portaled message menu without reporting an outgoing reply', async () => {
 		render(Harness, { role: 'assistant' });
 		await fireEvent.click(screen.getByRole('button', { name: 'More actions' }));

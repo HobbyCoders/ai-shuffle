@@ -53,26 +53,6 @@ export function joinDrafts(earlier: string, later: string): string {
 	return [earlier, later].join('\n\n');
 }
 
-// An attached file serializes as `@<full path>`, and every upload lands in an
-// `uploads/` folder (a project's) or a chat's `session-uploads/<sha256>/` stage.
-// A chip dropped straight after a word serializes with no space before its `@`.
-const ATTACHMENT_MENTION = /@((?:[A-Za-z]:)?[^\s@]*[\\/](?:session-uploads[\\/][0-9a-f]{64}|uploads)[\\/][^\s\\/@]+)/g;
-
-/**
- * The attachments a sent prompt carried, read back from its `@path` mentions,
- * so a rewound message returns its chips instead of raw paths (#1084). The
- * recorded prompt keeps no list of its uploads; a name with a space in it
- * cannot be told apart from the words after it, so it stays as text.
- */
-export function attachmentMentions(text: string): string[] {
-	const paths: string[] = [];
-	for (const match of text.matchAll(ATTACHMENT_MENTION)) {
-		const path = match[1].replace(/[,;:!?]+$|\.$/, '');
-		if (!paths.includes(path)) paths.push(path);
-	}
-	return paths;
-}
-
 /** Restore serialized @path mentions as chips in place, preserving surrounding text. */
 export function restoreMessageDocument(text: string, uploadPaths: string[] = []): JSONContent {
 	const paths = [...new Set(uploadPaths.filter(Boolean))].sort((a, b) => b.length - a.length);

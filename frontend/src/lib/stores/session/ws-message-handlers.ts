@@ -1112,15 +1112,19 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 					// `offer_fork`: the worker that owns this session is unreachable —
 					// the chat renders a "Fork here" action for POST /network/sessions/{id}/fork-here.
 					const forkOffer = data.offer_fork === true && erroredSessionId ? erroredSessionId : null;
-					// The banner belongs to the failed turn: anchor it where the feed
-					// stands, so the feed clears it once that turn is rewound away or
-					// a later turn finishes (turn-error-banner.ts, #1082 / #1175).
-					const at = erroredSessionId ? feedController.position(erroredSessionId) : null;
-					const frameTurnId = typeof data.turn_id === 'string' ? data.turn_id : null;
+					// The banner belongs to the failed turn the log records, so the feed
+					// clears it once that failure is rewound away or a later turn
+					// finishes cleanly (turn-error-banner.ts, #1082 / #1175). A frame
+					// whose failure the log has already moved past raises nothing.
+					const outcomes = erroredSessionId ? feedController.turnOutcomes(erroredSessionId) : null;
+					const frameTurnId = typeof data.turn_id === 'string' && data.turn_id ? data.turn_id : null;
+					const anchor = turnErrorAnchor(errMessage, frameTurnId, outcomes ?? {},
+						errState.isStreaming || errState.optimisticStreaming === true || !!outcomes?.liveTurnId);
+					if (anchor === 'outlived') break;
 					update(s => ({
 						...s,
 						error: errMessage,
-						turnErrorAnchor: turnErrorAnchor(errMessage, at?.seq ?? null, frameTurnId ?? at?.liveTurnId ?? null),
+						turnErrorAnchor: anchor,
 						forkOfferSessionId: forkOffer,
 						isStreaming: false,
 						optimisticStreaming: false,

@@ -16,7 +16,6 @@
 	import { get, readable } from 'svelte/store';
 	import { activeSession } from '$lib/stores/active-session';
 	import { addRestoredWordsToDraft, LEAVING_MS, noteRestoreFinished, noteRestoreStarted, pageIsLeaving, sentRewindRowId } from '$lib/stores/session/restored-draft';
-	import { attachmentMentions } from './tiptap/serialization';
 	import { TRANSCRIPT_ACTIONS, type TranscriptActions } from './TranscriptHydrationBoundary.svelte';
 	import { Ellipsis, Flag } from 'lucide-svelte';
 	import { executeRewind } from '$lib/api/client';
@@ -219,12 +218,13 @@
 		// page that reloads before the answer still gets them back (#1083).
 		const sentRowId = !notSentRequest && removedPrompt && userPromptOccurrence != null
 			? sentRewindRowId(removedPrompt, userPromptOccurrence) : null;
-		const sentUploads = removedPrompt && !notSentRequest ? attachmentMentions(removedPrompt) : [];
 		let answerLost = false;
 		isRewinding = true;
 		rewindError = null;
 		if (restoringRowId) noteRestoreStarted(requestedSessionId, restoringRowId, removedPrompt ?? '', unsentUploads);
-		if (sentRowId) noteRestoreStarted(requestedSessionId, sentRowId, removedPrompt ?? '', sentUploads);
+		// No attachments: a sent row's text can mention a path that was never
+		// attached, and only the server knows what was (#1084).
+		if (sentRowId) noteRestoreStarted(requestedSessionId, sentRowId, removedPrompt ?? '');
 
 		try {
 			// For user messages: include_response=false removes this message and everything after.
@@ -244,10 +244,16 @@
 			}
 			// The API may finish after this row unmounts or the user changes chats.
 			// Never hand an outgoing result to the incoming session's composer/store.
-			const sentUploadsBack = result.restored_upload_paths?.length ? result.restored_upload_paths : sentUploads;
+			// Attachments come back as chips only when the server names them;
+			// mentions in the text stay text (#1084).
+			const sentUploadsBack = result.restored_upload_paths?.length ? result.restored_upload_paths : undefined;
 			if (sessionId !== requestedSessionId || !canAct(requestedSessionId)) {
-				// The server dropped the row: its words wait in that chat's draft.
-				if ((result.success || result.chat_rewound) && removedPrompt) addRestoredWordsToDraft(requestedSessionId, removedPrompt, sentUploadsBack);
+				// The server dropped the row: its words go back to that chat, which
+				// takes them as it finishes loading if it is open again, or keeps
+				// them in its saved draft if not.
+				if ((result.success || result.chat_rewound) && removedPrompt) {
+					handBackRestoredWords(requestedSessionId, complete, result.warning ?? undefined, removedPrompt, sentUploadsBack);
+				}
 				return;
 			}
 			if (result.success || result.chat_rewound) {
@@ -257,8 +263,7 @@
 				// Assistant-message rewinds keep their preceding prompt in the
 				// transcript, so there is nothing to restore.
 				// Pass warning to parent to show as system message (for partial success)
-				// Attachments come back as chips, not raw paths (#1084).
-				if (sentUploadsBack.length) complete?.(result.warning ?? undefined, removedPrompt, sentUploadsBack);
+				if (sentUploadsBack) complete?.(result.warning ?? undefined, removedPrompt, sentUploadsBack);
 				else complete?.(result.warning ?? undefined, removedPrompt);
 			} else {
 				rewindError = result.error || 'Rewind failed';

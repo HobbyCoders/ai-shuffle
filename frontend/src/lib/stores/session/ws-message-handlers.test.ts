@@ -47,7 +47,7 @@ vi.mock('./v2/feed-controller', () => ({
 		isFeeding: vi.fn(() => false),
 		invalidate: vi.fn(),
 		retractOptimisticSend: vi.fn(),
-		position: vi.fn(() => null),
+		turnOutcomes: vi.fn(() => null),
 	},
 	// Mirrors the real constant: `start` marks streaming OPTIMISTICALLY so the
 	// fold clears it once the reducer confirms the turn, instead of competing
@@ -1105,6 +1105,27 @@ describe('ws-message-handlers', () => {
 
 			handlers.handleMessage({ type: 'error', session_id: 'session-1', message: 'plain failure' });
 			expect(applied?.forkOfferSessionId).toBeNull();
+		});
+
+		it('ties the banner to its logged failure, and raises none for a failure the log already moved past', () => {
+			const state = { ...mockState(), isStreaming: false, optimisticStreaming: false };
+			let applied: ActiveSessionState | undefined;
+			deps = createMockDeps({
+				getState: vi.fn(() => state),
+				update: vi.fn((fn) => { applied = fn(state); return applied; }),
+			});
+			handlers = createMessageHandlers(deps);
+			const outcomes = feedController.turnOutcomes as ReturnType<typeof vi.fn>;
+			outcomes.mockReturnValueOnce({ liveTurnId: null, turnFailures: [{ turnId: 't1', seq: 7, message: 'boom', outlived: false }] });
+			handlers.handleMessage({ type: 'error', session_id: 'session-1', message: 'boom' });
+			expect(applied?.error).toBe('boom');
+			expect(applied?.turnErrorAnchor).toEqual({ message: 'boom', turnId: null, afterSeq: 6 });
+
+			// Its successor already finished cleanly in the log: the late frame is stale.
+			applied = undefined;
+			outcomes.mockReturnValueOnce({ liveTurnId: null, turnFailures: [{ turnId: 't1', seq: 7, message: 'late', outlived: true }] });
+			handlers.handleMessage({ type: 'error', session_id: 'session-1', message: 'late' });
+			expect(applied).toBeUndefined();
 		});
 
 		it.each([

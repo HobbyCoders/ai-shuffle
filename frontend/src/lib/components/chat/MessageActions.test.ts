@@ -251,15 +251,23 @@ describe('MessageActions rewind', () => {
 		expect(Object.keys(sessionStorage).filter(k => k.startsWith('restore-note:'))).toEqual([]);
 	});
 
-	it('hands a rewound prompt\'s attachments back as uploads, not raw paths (#1084)', async () => {
-		const path = '/work/chat/session-uploads/' + 'a'.repeat(64) + '/notes.txt';
-		const prompt = `look at this @${path}`;
+	it('never turns a typed upload path into an attachment; only the server names those (#1084)', async () => {
+		const prompt = 'Explain @/work/uploads/private.txt and @/work/uploads/my file.txt without opening them';
 		rewind.mockResolvedValue({ success: true, chat_rewound: true });
 		const onRewindComplete = vi.fn();
 		render(MessageActions, { ...base, messageContent: prompt, userPromptOccurrence: 0, onRewindComplete });
 		await fireEvent.click(rewindButton()!);
 		await fireEvent.click(screen.getByRole('button', { name: 'Rewind' }));
-		await waitFor(() => expect(onRewindComplete).toHaveBeenCalledWith(undefined, prompt, [path]));
+		await waitFor(() => expect(onRewindComplete).toHaveBeenCalledWith(undefined, prompt));
+		expect(onRewindComplete.mock.calls[0]).toHaveLength(2);
+
+		cleanup();
+		rewind.mockResolvedValue({ success: true, chat_rewound: true, restored_upload_paths: ['/work/uploads/real.txt'] });
+		const named = vi.fn();
+		render(MessageActions, { ...base, messageContent: prompt, userPromptOccurrence: 0, onRewindComplete: named });
+		await fireEvent.click(rewindButton()!);
+		await fireEvent.click(screen.getByRole('button', { name: 'Rewind' }));
+		await waitFor(() => expect(named).toHaveBeenCalledWith(undefined, prompt, ['/work/uploads/real.txt']));
 	});
 
 	it('refuses to guess without a checkpoint id, shows server failures, and cancel closes the dialog', async () => {

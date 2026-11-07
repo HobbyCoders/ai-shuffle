@@ -209,13 +209,42 @@ export interface V2SessionState {
 	 *  rewind, so a lost close can never leave it stuck. Optional so a cached
 	 *  state from before the field reads as none. */
 	compaction?: LiveCompaction | null;
-	/** The latest `turn.completed` (turn id and seq): a turn that finished
-	 *  cleanly. Read by the turn-error banner rule (turn-error-banner.ts).
-	 *  Optional so a cached state from before the field reads as none. */
-	lastCompletedTurn?: { id: string; seq: number } | null;
-	/** Seq of the latest `transcript.rewound`, for the same rule. Optional so a
-	 *  cached state from before the field reads as 0. */
-	lastRewindSeq?: number;
+	/** The most recent failed turns (`turn.aborted` reason 'error'), oldest
+	 *  first, each marked once the transcript has moved past it. Read by the
+	 *  turn-error banner rule (turn-error-banner.ts). Optional so a cached state
+	 *  from before the field reads as none. */
+	turnFailures?: readonly TurnFailureFact[];
+}
+
+/** One failed turn, as the log recorded it. See `V2SessionState.turnFailures`. */
+export interface TurnFailureFact {
+	turnId: string;
+	/** Seq of its `turn.aborted` event. */
+	seq: number;
+	/** The abort's error message ('' when it carried none). */
+	message: string;
+	/** True once a rewind cut it away or a different turn later finished cleanly. */
+	outlived: boolean;
+}
+
+/** How many failed turns `turnFailures` keeps. */
+const TURN_FAILURES_KEPT = 16;
+
+function outliveFailures(
+	failures: readonly TurnFailureFact[] | undefined,
+	outlives: (failure: TurnFailureFact) => boolean
+): readonly TurnFailureFact[] | undefined {
+	if (!failures?.some((f) => !f.outlived && outlives(f))) return failures;
+	return failures.map((f) => (!f.outlived && outlives(f) ? { ...f, outlived: true } : f));
+}
+
+/** A `turn.completed` that carries the provider's failure (a usage-limit 429,
+ *  an `is_error` result) ended the turn without a clean answer. */
+function completedCleanly(event: Record<string, unknown>): boolean {
+	if (event.api_error_status !== undefined && event.api_error_status !== null) return false;
+	if (event.is_error) return false;
+	const errors = event.errors;
+	return !(Array.isArray(errors) ? errors.length > 0 : errors);
 }
 
 /** See `V2SessionState.compaction`. */
@@ -314,8 +343,7 @@ export function initialState(): V2SessionState {
 		speculativelySettledTaskIds: [],
 		attemptStartSeq: 0,
 		compaction: null,
-		lastCompletedTurn: null,
-		lastRewindSeq: 0,
+		turnFailures: [],
 	};
 }
 
@@ -1489,7 +1517,11 @@ function reduceInternal(
 					pumpAckBuffer: '',
 					usage: obj(event.usage) ?? state.usage,
 					outputTokensTotal: (state.outputTokensTotal ?? 0) + turnOutputTokens(event.usage),
-					lastCompletedTurn: { id: str(event.turn_id) || '', seq },
+					// A clean finish of another turn moves the transcript past every
+					// earlier failure (#1175); a failed completion moves it past none.
+					turnFailures: completedCleanly(event)
+						? outliveFailures(state.turnFailures, (f) => f.seq < seq && f.turnId !== str(event.turn_id))
+						: state.turnFailures,
 				})
 			);
 			// A retry card left mid-count is finished business now — the turn
@@ -1557,6 +1589,11 @@ function reduceInternal(
 		case 'turn.aborted': {
 			const reason = str(event.reason);
 			let next = dismissProseThrough(closeOpen(state), seq, seq, observe);
+			if (reason === 'error') {
+				// Both returns below spread `next`, so the failure is recorded once.
+				const failure: TurnFailureFact = { turnId: str(event.turn_id), seq, message: str(event.message), outlived: false };
+				next = { ...next, turnFailures: [...(next.turnFailures ?? []), failure].slice(-TURN_FAILURES_KEPT) };
+			}
 			if (reason === 'interrupt') {
 				// Mark any still-running tool card as errored (mirrors the legacy
 				// interrupt cleanup in message-sender).
@@ -2746,7 +2783,8 @@ function reduceInternal(
 				activeTaskSummaries,
 				openTextId,
 				openThinkingId,
-				lastRewindSeq: seq,
+				// A rewind removes every failure at or after its cut (#1082).
+				turnFailures: outliveFailures(state.turnFailures, (f) => f.seq >= fromSeq),
 			};
 		}
 

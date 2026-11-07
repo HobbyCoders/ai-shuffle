@@ -354,6 +354,17 @@ function parseWireEvent(value) {
   }
   return event;
 }
+var TURN_FAILURES_KEPT = 16;
+function outliveFailures(failures, outlives) {
+  if (!failures?.some((f) => !f.outlived && outlives(f))) return failures;
+  return failures.map((f) => !f.outlived && outlives(f) ? { ...f, outlived: true } : f);
+}
+function completedCleanly(event) {
+  if (event.api_error_status !== void 0 && event.api_error_status !== null) return false;
+  if (event.is_error) return false;
+  const errors = event.errors;
+  return !(Array.isArray(errors) ? errors.length > 0 : errors);
+}
 var COMPACTION_CLEARING_EVENTS = /* @__PURE__ */ new Set([
   "turn.started",
   "turn.parked",
@@ -409,8 +420,7 @@ function initialState() {
     speculativelySettledTaskIds: [],
     attemptStartSeq: 0,
     compaction: null,
-    lastCompletedTurn: null,
-    lastRewindSeq: 0
+    turnFailures: []
   };
 }
 function replaceById(messages, id, patch) {
@@ -1013,7 +1023,9 @@ function reduceInternal(state, event, observe) {
           pumpAckBuffer: "",
           usage: obj(event.usage) ?? state.usage,
           outputTokensTotal: (state.outputTokensTotal ?? 0) + turnOutputTokens(event.usage),
-          lastCompletedTurn: { id: str(event.turn_id) || "", seq }
+          // A clean finish of another turn moves the transcript past every
+          // earlier failure (#1175); a failed completion moves it past none.
+          turnFailures: completedCleanly(event) ? outliveFailures(state.turnFailures, (f) => f.seq < seq && f.turnId !== str(event.turn_id)) : state.turnFailures
         })
       );
       const retrySettled = settleRetryCards(drained.messages, drained.hasRetryCards);
@@ -1058,6 +1070,10 @@ function reduceInternal(state, event, observe) {
     case "turn.aborted": {
       const reason = str(event.reason);
       let next = dismissProseThrough(closeOpen(state), seq, seq, observe);
+      if (reason === "error") {
+        const failure = { turnId: str(event.turn_id), seq, message: str(event.message), outlived: false };
+        next = { ...next, turnFailures: [...next.turnFailures ?? [], failure].slice(-TURN_FAILURES_KEPT) };
+      }
       if (reason === "interrupt") {
         next = {
           ...next,
@@ -1908,7 +1924,8 @@ function reduceInternal(state, event, observe) {
         activeTaskSummaries,
         openTextId,
         openThinkingId,
-        lastRewindSeq: seq
+        // A rewind removes every failure at or after its cut (#1082).
+        turnFailures: outliveFailures(state.turnFailures, (f) => f.seq >= fromSeq)
       };
     }
     // ── Approvals asked in words (#483) ─────────────────────────────
@@ -2329,7 +2346,7 @@ function materializeProjection(body, records, epoch, runtime) {
 }
 
 // scripts/transcript-reducer-node.ts
-var REDUCER_FINGERPRINT = "77d04c2160c5a1840300cdaefb281f04fad3d10199a4d6e21f383ff1307fc607";
+var REDUCER_FINGERPRINT = "c2daefe7108dabad976a17472633fb7409265987922f621e0abf2f9794f04795";
 var RPC_VERSION = 1;
 var MAX_PACKET_BYTES = 24 * 1024 * 1024;
 function dispatch(method, params) {
