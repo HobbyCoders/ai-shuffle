@@ -228,3 +228,70 @@ def test_base_resolution_survives_unrelated_worktree_inspection_error(
     assert checkouts_db.get_checkout(project["id"], RUNNER, branch="fix/bad") is None
     assert checkouts_db.get_checkout(project["id"], RUNNER, branch="fix/good")["path"] == str(good)
     assert "inspection" in caplog.text.lower() or "timed out" in caplog.text.lower()
+
+
+@pytest.mark.parametrize("edit", ["staged-rename", "unstaged-delete", "untracked-add"])
+def test_pre_upgrade_established_checkout_continues_on_first_resolution(
+    project, base_checkout, workspace_root, monkeypatch, edit,
+):
+    from datetime import datetime, timezone
+    from app.core.query_options import _resolve_checkout_for_options
+    from app.db.base import get_db
+
+    branch = "fix/pre-upgrade"
+    path = checkout_manager._branch_checkout_path(str(base_checkout), branch)
+    # Pre-PR setup used real Git then recorded successful materialization. Do
+    # not resolve via new code: there must be no validation marker beforehand.
+    _add_legacy_worktree(base_checkout, path, branch)
+    row = checkouts_db.upsert_checkout(project["id"], RUNNER, str(path), branch=branch)
+    with get_db() as conn:
+        # The shim's NOW() truncates to whole seconds; use the precise value
+        # PostgreSQL stores so physical-creation ordering is not discarded.
+        conn.cursor().execute("UPDATE checkouts SET created_at = %s WHERE id = %s",
+                              (datetime.now(timezone.utc), row["id"]))
+    if edit == "staged-rename":
+        _git(path, "mv", "README.md", "RENAMED.md")
+    elif edit == "unstaged-delete":
+        (path / "README.md").unlink()
+    else:
+        (path / "user-work.txt").write_text("work predating upgrade\n")
+    before = _snapshot(path)
+    monkeypatch.setattr(
+        type(checkout_manager.settings), "effective_instance_id", property(lambda _: RUNNER),
+    )
+    session = {"id": "pre-upgrade", "project_v2_id": project["id"], "branch": branch}
+
+    assert _resolve_checkout_for_options(session) == str(path)
+    assert _snapshot(path) == before
+    # Once migrated, later resolutions rely on physical validation metadata,
+    # not whether subsequent development still looks complete against HEAD.
+    monkeypatch.setattr(checkout_manager.git_service, "_checkout_is_complete",
+                        lambda _: pytest.fail("established checkout was revalidated"))
+    assert _resolve_checkout_for_options(session) == str(path)
+
+
+def test_pre_upgrade_row_does_not_validate_recreated_partial_checkout(
+    project, base_checkout, workspace_root,
+):
+    from datetime import datetime, timezone
+    from app.db.base import get_db
+
+    branch = "fix/stale-pre-upgrade"
+    path = checkout_manager._branch_checkout_path(str(base_checkout), branch)
+    _add_legacy_worktree(base_checkout, path, branch)
+    row = checkouts_db.upsert_checkout(project["id"], RUNNER, str(path), branch=branch)
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE checkouts SET created_at = %s WHERE id = %s",
+                              (datetime.now(timezone.utc), row["id"]))
+    # Recreating the same path keeps the stale active row but replaces the
+    # per-worktree admin metadata. An old success is no evidence for this add.
+    _git(base_checkout, "worktree", "remove", str(path))
+    _git(base_checkout, "worktree", "add", str(path), branch)
+    (path / "README.md").unlink()
+    before = _snapshot(path)
+    before_rows = checkouts_db.list_checkouts(project["id"])
+
+    with pytest.raises(WorktreeAddError, match="incomplete"):
+        _resolve(project, branch, raise_add_errors=True)
+    assert _snapshot(path) == before
+    assert checkouts_db.list_checkouts(project["id"]) == before_rows

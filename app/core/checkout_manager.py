@@ -33,6 +33,7 @@ Reuses ``git_service`` and ``worktree_manager._sanitize_branch_name`` by import.
 from __future__ import annotations
 
 from contextlib import nullcontext
+from datetime import datetime, timezone
 import json
 import logging
 import ntpath
@@ -262,7 +263,26 @@ def _require_branch_binding(path: str, branch: str) -> None:
         )
 
 
-def _require_complete_checkout(path: str) -> None:
+def _legacy_checkout_is_established(marker: Path, row: Optional[Dict[str, Any]]) -> bool:
+    """Bridge pre-marker successes, but never a stale row for a recreated path.
+
+    An active row records successful setup. Its original creation must postdate
+    this linked worktree's commondir file, which ordinary commits/edits do not
+    rewrite. A removed/recreated worktree has newer metadata, even at the same
+    path/branch. Missing/unknown evidence fails closed; updated_at is not proof.
+    """
+    if not row or row.get("status") != "active":
+        return False
+    try:
+        registered = datetime.fromisoformat(str(row.get("created_at")))
+        if registered.tzinfo is None:
+            registered = registered.replace(tzinfo=timezone.utc)
+        return (marker.parent / "commondir").stat().st_mtime <= registered.timestamp()
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def _require_complete_checkout(path: str, *, row: Optional[Dict[str, Any]] = None) -> None:
     """Validate materialization once, not the user's subsequent development.
 
     Keep evidence in Git's per-worktree metadata: it survives process restarts
@@ -280,7 +300,7 @@ def _require_complete_checkout(path: str) -> None:
     if marker.is_file():
         return
     # This shared check never invokes LFS clean/smudge filters.
-    if not git_service._checkout_is_complete(path):
+    if not _legacy_checkout_is_established(marker, row) and not git_service._checkout_is_complete(path):
         raise WorktreeAddError(
             f"Checkout {path!r} is incomplete (missing index or committed files); "
             "refusing to use or repair it because local changes may be present. "
@@ -682,7 +702,7 @@ def _ensure_branch_checkout(
         resolved = _resolve_checkout_path(path) if path else path
         if resolved and os.path.isdir(resolved):
             if _dir_is_worktree(resolved):
-                _require_complete_checkout(resolved)
+                _require_complete_checkout(resolved, row=row)
                 # The row says this folder IS this branch's checkout, so a
                 # detached HEAD here is the session's own agent having left
                 # it (e.g. after merging and deleting the branch). Reattach
