@@ -94,16 +94,13 @@ def test_replay_neither_counts_nor_refreshes_time_but_a_new_distinct_loss_does(t
     assert losses["archive_dropped"] == 2 and losses["last_archive_dropped_at"] >= stamp
 
 
-def test_expired_copy_replayed_by_a_replica_is_counted_once(tmp_path, monkeypatch):
-    source = SkillStore(tmp_path / "source")
-    source.save_memory("An inferred receipt that will expire")
-    packet = source._facts.export()
-    replica = SkillStore(tmp_path / "replica")
-    future = time.time() + 1000 * memory_health.DAY
-    monkeypatch.setattr(facts.time, "time", lambda: future)
-    for _ in range(5):
-        replica._facts.merge(packet)
-    assert replica._facts.snapshot()["losses"]["expired_archived"] == 1
+class Clock:
+    def __init__(self, monkeypatch):
+        self.now = time.time()
+        monkeypatch.setattr(facts.time, "time", lambda: self.now)
+
+    def past_retention(self):
+        self.now += facts.ARCHIVE_RETENTION + 3 * memory_health.DAY
 
 
 def _copy(origin, n, at, expires_at, topic):
@@ -117,90 +114,160 @@ def _packet(store, origin, entries):
             "entries": entries, "tombstones": [], "forgotten": ""}
 
 
+def _held(store):
+    return {e.id for e in store.memories() + store.archived_memories()}
+
+
+def test_expired_copy_replayed_by_a_replica_is_counted_once(tmp_path, monkeypatch):
+    clock = Clock(monkeypatch)
+    source = SkillStore(tmp_path / "source")
+    source.save_memory("An inferred receipt that will expire")
+    packet = source._facts.export()
+    replica = SkillStore(tmp_path / "replica")
+    replica._facts.merge(packet)
+    clock.now += facts.INFERRED_TTL
+    clock.past_retention()
+    for _ in range(5):
+        replica._facts.merge(packet)
+    assert replica._facts.snapshot()["losses"]["expired_archived"] == 1
+
+
+def test_copy_never_held_here_is_not_a_local_loss(tmp_path, monkeypatch):
+    clock = Clock(monkeypatch)
+    replica = SkillStore(tmp_path)
+    ended = clock.now - 2 * facts.ARCHIVE_RETENTION
+    replica._facts.merge(_packet(replica, "peer-a", [_copy("peer-a", n, ended, ended, "expired")
+                                                    for n in range(40)]))
+    # The peer that kept them counts its own deletions; this store never did.
+    assert "losses" not in replica._facts.snapshot()
+    assert _held(replica) == set()
+
+
 # Past the 2048 keys the first version of this fix kept, so an evicting
-# list forgets the first packet's copies before it is replayed.
+# list would forget the first packet's copies before it is replayed.
 FLOOD = 2100
 
 
-def test_expired_copies_replayed_after_many_later_deletions_stay_counted_once(tmp_path):
+def test_expired_copies_replayed_after_many_later_deletions_stay_counted_once(tmp_path, monkeypatch):
+    monkeypatch.setattr(skills, "MAX_ARCHIVED_MEMORIES", 3000)
+    clock = Clock(monkeypatch)
     replica = SkillStore(tmp_path)
-    old = time.time() - 2 * facts.ARCHIVE_RETENTION
-    first = _packet(replica, "peer-a", [_copy("peer-a", n, old, old, "expired") for n in range(40)])
+    first = _packet(replica, "peer-a", [_copy("peer-a", n, clock.now, clock.now + memory_health.DAY, "first")
+                                        for n in range(40)])
     replica._facts.merge(first)
-    losses = replica._facts.snapshot()["losses"]
-    assert losses["expired_archived"] == 40
-    flood = _packet(replica, "peer-b", [_copy("peer-b", n, old, old, "expired") for n in range(FLOOD)])
-    replica._facts.merge(flood)
+    clock.past_retention()
+    assert replica._facts.snapshot()["losses"]["expired_archived"] == 40
+    replica._facts.merge(_packet(replica, "peer-b", [
+        _copy("peer-b", n, clock.now, clock.now + memory_health.DAY, "flood") for n in range(FLOOD)]))
+    clock.past_retention()
     losses = replica._facts.snapshot()["losses"]
     total, stamp = losses["expired_archived"], losses["last_expired_archived_at"]
     assert total == 40 + FLOOD
     for _ in range(3):
+        clock.now += memory_health.DAY
         replica._facts.merge(first)
         losses = replica._facts.snapshot()["losses"]
         assert losses["expired_archived"] == total
         assert losses["last_expired_archived_at"] == stamp
-    assert replica.memories() == [] and replica.archived_memories() == []
+    assert _held(replica) == set()
 
 
 def test_overflow_copies_replayed_after_many_later_deletions_stay_counted_once(tmp_path, monkeypatch):
-    monkeypatch.setattr(skills, "MAX_ARCHIVED_MEMORIES", 2)
+    monkeypatch.setattr(skills, "MAX_ARCHIVED_MEMORIES", 20)
+    clock = Clock(monkeypatch)
     replica = SkillStore(tmp_path)
-    now = time.time()
-    later = now + 365 * memory_health.DAY
-    # Newer copies fill the store; the first packet's older copies rank last
-    # and are dropped at the archive limit each time they arrive.
-    keep = _packet(replica, "peer-k", [_copy("peer-k", n, now, later, "kept") for n in range(60)])
-    replica._facts.merge(keep)
-    retained = {e.id for e in replica.memories() + replica.archived_memories()}
-    first = _packet(replica, "peer-a", [_copy("peer-a", n, now - 9 * memory_health.DAY, later, "stale")
+    later = clock.now + 365 * memory_health.DAY
+    # The first packet's older copies are held, then newer copies push them
+    # out at the archive limit.
+    first = _packet(replica, "peer-a", [_copy("peer-a", n, clock.now - 9 * memory_health.DAY, later, "stale")
                                         for n in range(40)])
     replica._facts.merge(first)
-    base = replica._facts.snapshot()["losses"]["archive_dropped"]
-    assert {e.id for e in replica.memories() + replica.archived_memories()} == retained
-    flood = _packet(replica, "peer-b", [_copy("peer-b", n, now - 8 * memory_health.DAY, later, "flood")
-                                        for n in range(FLOOD)])
-    replica._facts.merge(flood)
+    assert len(_held(replica)) == 40
+    replica._facts.merge(_packet(replica, "peer-k", [_copy("peer-k", n, clock.now, later, "kept")
+                                                     for n in range(60)]))
+    assert replica._facts.snapshot()["losses"]["archive_dropped"] == 40
+    retained = _held(replica)
+    assert len(retained) == 60
+    # Many more held copies are dropped at the limit later on.
+    monkeypatch.setattr(skills, "MAX_ARCHIVED_MEMORIES", 3000)
+    replica._facts.merge(_packet(replica, "peer-b", [
+        _copy("peer-b", n, clock.now - 8 * memory_health.DAY, later, "flood") for n in range(FLOOD)]))
+    monkeypatch.setattr(skills, "MAX_ARCHIVED_MEMORIES", 20)
+    clock.now += 1
     losses = replica._facts.snapshot()["losses"]
     total, stamp = losses["archive_dropped"], losses["last_archive_dropped_at"]
-    assert total == base + FLOOD
+    assert total == 40 + FLOOD
+    assert _held(replica) == retained
     for _ in range(3):
+        clock.now += 1
         replica._facts.merge(first)
         losses = replica._facts.snapshot()["losses"]
         assert losses["archive_dropped"] == total
         assert losses["last_archive_dropped_at"] == stamp
-    assert {e.id for e in replica.memories() + replica.archived_memories()} == retained
+        assert _held(replica) == retained
 
 
-def test_replay_record_survives_a_restart_and_stays_fixed_size(tmp_path, monkeypatch):
+def test_new_losses_still_count_after_two_hundred_thousand_deletions(tmp_path, monkeypatch):
+    # A lifetime replay record of fixed size (the round-1 filter) saturates
+    # well before this and then takes new losses for replays.
+    monkeypatch.setattr(skills, "MAX_ARCHIVED_MEMORIES", 3000)
+    clock = Clock(monkeypatch)
+    replica = SkillStore(tmp_path)
+    batch, rounds = 2500, 81
+    for r in range(rounds):
+        replica._facts.merge(_packet(replica, f"peer-{r}", [
+            _copy(f"peer-{r}", n, clock.now, clock.now + memory_health.DAY, "bulk") for n in range(batch)]))
+        clock.past_retention()
+        replica._facts.snapshot()
+    losses = replica._facts.snapshot()["losses"]
+    assert losses["expired_archived"] == batch * rounds > 200_000
+    stamp = losses["last_expired_archived_at"]
+    replica._facts.merge(_packet(replica, "peer-new", [
+        _copy("peer-new", n, clock.now, clock.now + memory_health.DAY, "fresh") for n in range(1000)]))
+    clock.past_retention()
+    losses = replica._facts.snapshot()["losses"]
+    assert losses["expired_archived"] == batch * rounds + 1000
+    assert losses["last_expired_archived_at"] > stamp
+    assert capacity(memory_health.check(replica, now=clock.now))["state"] == "attention"
+
+
+def test_loss_record_keeps_no_replay_memory_and_survives_a_restart(tmp_path, monkeypatch):
+    clock = Clock(monkeypatch)
     store = SkillStore(tmp_path)
     fill(store, monkeypatch)
     for i in range(4):
         store.save_memory(f"Extra durable backend receipt {i}", durable=True)
-    losses = store._facts.snapshot()["losses"]
-    assert losses["archive_dropped"] == 6
-    assert len(losses["counted"]) == 2 * facts.BLOOM_BYTES
-    reopened = SkillStore(tmp_path)
     packet = store._facts.export()
-    old = time.time() - 2 * facts.ARCHIVE_RETENTION
-    replay = _packet(reopened, "peer-a", [_copy("peer-a", n, old, old, "expired") for n in range(3)])
-    reopened._facts.merge(replay)
-    reopened._facts.merge(replay)
-    reopened._facts.merge(packet)
-    losses = reopened._facts.snapshot()["losses"]
-    assert losses["expired_archived"] == 3 and losses["archive_dropped"] == 6
-    assert len(losses["counted"]) == 2 * facts.BLOOM_BYTES
+    losses = store._facts.snapshot()["losses"]
+    assert set(losses) == {"archive_dropped", "last_archive_dropped_at"}
+    assert losses["archive_dropped"] == 6
+    reopened = SkillStore(tmp_path)
+    clock.now += 1
+    for _ in range(3):
+        reopened._facts.merge(packet)
+    assert reopened._facts.snapshot()["losses"] == losses
 
 
-def test_same_id_new_text_and_same_text_new_id_are_separate_losses(tmp_path):
+def test_held_fact_replaced_and_dropped_counts_but_its_replays_do_not(tmp_path, monkeypatch):
+    clock = Clock(monkeypatch)
     replica = SkillStore(tmp_path)
-    old = time.time() - 2 * facts.ARCHIVE_RETENTION
-    copy = _copy("peer-a", 1, old, old, "expired")
-    replica._facts.merge(_packet(replica, "peer-a", [copy]))
-    edited = dict(copy, text="A rewritten synthetic receipt for replay accounting",
-                  revision=2, clock={"peer-a": 2})
+    soon = clock.now + memory_health.DAY
+    copy = _copy("peer-a", 1, clock.now, soon, "held")
+    twin = dict(copy, id="m2")  # the same text under another ID
+    replica._facts.merge(_packet(replica, "peer-a", [copy, twin]))
+    clock.past_retention()
+    assert replica._facts.snapshot()["losses"]["expired_archived"] == 2
+    kept = _copy("peer-a", 3, clock.now, clock.now + 365 * memory_health.DAY, "kept")
+    replica._facts.merge(_packet(replica, "peer-a", [kept]))
+    # A peer's newer version of a fact held here arrives already expired:
+    # this store loses a fact it held, so that counts once.
+    ended = clock.now - 2 * facts.ARCHIVE_RETENTION
+    edited = dict(kept, text="A rewritten synthetic receipt for replay accounting", revision=2,
+                  clock={"peer-a": 2}, expires_at=ended)
     replica._facts.merge(_packet(replica, "peer-a", [edited]))
-    replica._facts.merge(_packet(replica, "peer-a", [dict(copy, id="m2")]))
-    replica._facts.merge(_packet(replica, "peer-a", [copy, edited, dict(copy, id="m2")]))
+    assert replica._facts.snapshot()["losses"]["expired_archived"] == 3
+    for _ in range(3):
+        replica._facts.merge(_packet(replica, "peer-a", [copy, twin, edited]))
     assert replica._facts.snapshot()["losses"]["expired_archived"] == 3
 
 
