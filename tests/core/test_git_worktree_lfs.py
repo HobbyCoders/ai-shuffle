@@ -185,7 +185,7 @@ def test_hook_staged_changes_still_count_as_complete(lfs_repo, tmp_path):
     assert lfs_fallback_warning(str(dest)) == warning
 
 
-@pytest.mark.parametrize("damage", ["missing-file", "missing-index", "staged-deletion"])
+@pytest.mark.parametrize("damage", ["missing-file", "missing-index", "staged-deletion", "staged-rename"])
 def test_registered_partial_checkout_fails_closed(lfs_repo, tmp_path, monkeypatch, damage):
     from pathlib import Path
     from fluid.context.runtime_facts import lfs_fallback_warning
@@ -213,6 +213,9 @@ def test_registered_partial_checkout_fails_closed(lfs_repo, tmp_path, monkeypatc
                 (index if index.is_absolute() else dest / index).unlink()
             elif damage == "staged-deletion":
                 git(dest, "rm", "--cached", "--", "asset.bin")
+            elif damage == "staged-rename":
+                # Rename detection would report R100 and hide the deletion.
+                git(dest, "mv", "--", "asset.bin", "renamed.bin")
             else:
                 (dest / "asset.bin").unlink()
             (dest / "agent-work.txt").write_text("must survive failed recovery")

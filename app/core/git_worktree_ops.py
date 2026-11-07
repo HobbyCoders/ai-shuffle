@@ -483,9 +483,10 @@ class GitWorktreeMixin:
         if index.returncode or not os.path.isfile(os.path.join(path, index.stdout.strip())):
             return False
         # Only staged deletions mean the checkout is missing committed content;
-        # a hook may legitimately stage generated or modified files.
+        # a hook may legitimately stage generated or modified files. --no-renames
+        # keeps a staged rename visible as the deletion it is.
         cached = self._run_git(
-            path, ["diff", "--cached", "--quiet", "--diff-filter=D", "--no-ext-diff", "--no-textconv",
+            path, ["diff", "--cached", "--quiet", "--no-renames", "--diff-filter=D", "--no-ext-diff", "--no-textconv",
                    "HEAD", "--"], timeout=10
         )
         if cached.returncode:
