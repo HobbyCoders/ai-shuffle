@@ -7,6 +7,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 vi.mock('$lib/api/client', () => ({ api: { get: vi.fn(), post: vi.fn(() => Promise.resolve({})), delete: vi.fn(() => Promise.resolve({})), patch: vi.fn(() => Promise.resolve({})) } }));
 vi.mock('$lib/stores/auth.svelte', () => ({ auth: { current: { status: { authenticated: true } } } }));
 import { render, screen, fireEvent, cleanup } from '@testing-library/svelte';
+import { tick } from 'svelte';
 import { notify } from '$lib/stores/notifications';
 import NotificationCenter from './NotificationCenter.svelte';
 
@@ -211,5 +212,45 @@ describe('NotificationCenter', () => {
 		await fireEvent.click(screen.getByRole('button', { name: 'Fix with AI' }));
 		expect(report).toHaveBeenCalledTimes(1);
 		expect(fix).toHaveBeenCalledTimes(1);
+	});
+
+	it('phone bar: Escape keeps the read-out bell and hands focus back to it (#1168)', async () => {
+		notify.error('Build failed');
+		render(NotificationCenter, { bar: true });
+		const bell = screen.getByRole('button', { name: /Notifications/ });
+		await fireEvent.click(bell);
+		const dismiss = screen.getByRole('button', { name: 'Dismiss notification' });
+		dismiss.focus();
+		await fireEvent.keyDown(dismiss, { key: 'Escape' });
+		await tick();
+
+		expect(screen.queryByRole('dialog', { name: 'Notifications' })).toBeNull();
+		// Everything is read now, but the bell stays until focus moves on.
+		expect(document.activeElement).toBe(bell);
+		expect(bell.isConnected).toBe(true);
+
+		// Moving focus to another control lets the read-out bell go.
+		const next = document.createElement('button');
+		document.body.appendChild(next);
+		next.focus();
+		await tick();
+		expect(screen.queryByRole('button', { name: /Notifications/ })).toBeNull();
+		next.remove();
+	});
+
+	it('phone bar: an outside click on empty page returns focus to the bell (#1168)', async () => {
+		notify.error('Build failed');
+		render(NotificationCenter, { bar: true });
+		const bell = screen.getByRole('button', { name: /Notifications/ });
+		await fireEvent.click(bell);
+		screen.getByRole('button', { name: 'Dismiss notification' }).focus();
+		// Clicking empty page blurs to <body> before the click arrives.
+		(document.activeElement as HTMLElement).blur();
+		await fireEvent.click(document.body);
+		await tick();
+
+		expect(screen.queryByRole('dialog', { name: 'Notifications' })).toBeNull();
+		expect(document.activeElement).toBe(bell);
+		expect(bell.isConnected).toBe(true);
 	});
 });
