@@ -169,15 +169,28 @@ describe('one-time branch choice (#1528)', () => {
 	describe('identity replaced during the create', () => {
 		// Fresh identities per case: the top-level reset clears only the no-ID key.
 		type CatalogRow = { project_v2_id: string; local_project_id: string; origin: string };
-		let run = 0, LOCAL: CatalogRow, SHARED: CatalogRow;
-		let local: { projectId: string; projectV2Id: string }, shared: typeof local;
+		let run = 0, LOCAL: CatalogRow, SHARED: CatalogRow, MOVED: CatalogRow;
+		let local: { projectId: string; projectV2Id: string }, shared: typeof local, moved: typeof local;
 		beforeEach(() => {
 			run++;
 			LOCAL = { project_v2_id: `pv2-local-${run}`, local_project_id: PROJECT, origin: `local:${PROJECT}` };
 			SHARED = { project_v2_id: `pv2-shared-${run}`, local_project_id: PROJECT, origin: `git:shared-${run}` };
+			MOVED = { project_v2_id: `pv2-moved-${run}`, local_project_id: PROJECT, origin: `git:moved-${run}` };
 			local = { projectId: PROJECT, projectV2Id: LOCAL.project_v2_id };
 			shared = { projectId: PROJECT, projectV2Id: SHARED.project_v2_id };
+			moved = { projectId: PROJECT, projectV2Id: MOVED.project_v2_id };
 		});
+		/** The catalog replaces the listed identity with `next`. */
+		function replaceWith(next: CatalogRow) {
+			activeSession.linkDiscoveredProjects([next]);
+			listCatalog([next]);
+		}
+		/** The compose holds the local identity with the branch staged. */
+		function composeUnderLocal() {
+			composerPreferences.set('project', local);
+			Object.assign(activeSession.current, { project: PROJECT, projectV2Id: local.projectV2Id, worktreeIntent: 'worktree' });
+			stagePick();
+		}
 		function listCatalog(clusterProjects: unknown[]) {
 			const base = appData.current;
 			vi.spyOn(appData, 'current', 'get').mockReturnValue({ ...base, clusterProjects } as unknown as typeof appData.current);
@@ -214,6 +227,53 @@ describe('one-time branch choice (#1528)', () => {
 			await createWhileReplaced('succeed');
 			expect(activeSession.current).toMatchObject({ sessionId: 'session-c', projectV2Id: local.projectV2Id });
 			expect(composerPreferences.worktreeForProject(shared).checkout).toBeNull();
+		});
+
+		it('an older create settling first leaves the swap held for the newer one', async () => {
+			listCatalog([LOCAL]);
+			composeUnderLocal();
+			const older = deferred();
+			post.mockReturnValueOnce(older.promise);
+			const olderDone = activeSession.createWorktree();
+			activeSession.newChat();
+			composeUnderLocal();
+			const newer = deferred();
+			post.mockReturnValueOnce(newer.promise);
+			const newerDone = activeSession.createWorktree();
+			replaceWith(SHARED);
+			older.reject({ status: 500, detail: 'worktree add failed' });
+			await olderDone;
+			expect(activeSession.current).toMatchObject({ isCreatingWorktree: true, projectV2Id: local.projectV2Id });
+			newer.reject({ status: 500, detail: 'worktree add failed' });
+			await newerDone;
+			expect(activeSession.current).toMatchObject({ sessionId: null, projectV2Id: shared.projectV2Id, worktreeBranch: BRANCH });
+			expect(composerPreferences.worktreeForProject(shared).checkout?.branch).toBe(BRANCH);
+
+			post.mockResolvedValueOnce(created('session-r'));
+			await activeSession.createWorktree();
+			expect(activeSession.current.sessionId).toBe('session-r');
+			expect(composerPreferences.worktreeForProject(shared).checkout).toBeNull();
+		});
+
+		it('follows a second replacement to the newest identity, branch included', async () => {
+			listCatalog([LOCAL]);
+			composeUnderLocal();
+			const first = deferred();
+			post.mockReturnValueOnce(first.promise);
+			const pending = activeSession.createWorktree();
+			replaceWith(SHARED);
+			replaceWith(MOVED);
+			first.reject({ status: 500, detail: 'worktree add failed' });
+			await pending;
+			expect(activeSession.current).toMatchObject({ sessionId: null, projectV2Id: moved.projectV2Id, worktreeBranch: BRANCH });
+			expect(composerPreferences.current.project).toEqual(moved);
+			expect(composerPreferences.worktreeForProject(moved).checkout?.branch).toBe(BRANCH);
+			expect(composerPreferences.worktreeForProject(shared).checkout).toBeNull();
+
+			post.mockResolvedValueOnce(created('session-r'));
+			await activeSession.createWorktree();
+			expect(activeSession.current.sessionId).toBe('session-r');
+			expect(composerPreferences.worktreeForProject(moved).checkout).toBeNull();
 		});
 	});
 

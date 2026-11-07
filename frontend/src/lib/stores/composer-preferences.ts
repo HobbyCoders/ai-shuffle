@@ -215,6 +215,13 @@ function linkWorktreeProject(project: ProjectPick, from: ProjectPick = {...proje
  const localKey = projectWorktreeKey(from);
  const key = projectWorktreeKey(project);
  if (localKey === key) return;
+ // A branch move deferred onto the identity now retired in turn ends at its
+ // replacement; one a newer choice under that identity already cancelled stays cancelled.
+ for (const [heldKey, link] of pendingWorktreeLinks) {
+  if (projectWorktreeKey(link.project) !== localKey) continue;
+  const live = link.revision === (checkoutRevisions.get(localKey) ?? 0);
+  pendingWorktreeLinks.set(heldKey, {...link, project, revision:live ? checkoutRevisions.get(key) ?? 0 : -1});
+ }
  const local = projectWorktrees[localKey];
  if (!local || (local.intent === 'local' && !local.checkout && !pendingWorktreeLinks.has(localKey))) return;
  const claimed = [...claims].some(claim => claim.key === localKey && claim.ownerEpoch === sessionOwnerEpoch());

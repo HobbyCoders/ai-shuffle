@@ -935,8 +935,8 @@ function composerBusy() {
 
 /** A project identity the catalog proved replaced: `from` (null = none yet) became `to` (#1078). */
 type IdentitySwap = {projectId:string; from:string | null; to:string};
-/** Proven swaps a worktree create in flight kept from the compose. */
-let _swapsAfterCreate: IdentitySwap[] = [];
+/** Proven swaps a worktree create in flight kept from the compose, by the create generation that owns it. */
+let _swapsAfterCreate: (IdentitySwap & {gen:number})[] = [];
 function onSwappedIdentity(swap: IdentitySwap) {
 	return _state.project === swap.projectId && (_state.projectV2Id || null) === swap.from;
 }
@@ -946,11 +946,17 @@ function followIdentitySwap(swap: IdentitySwap) {
 	_update(s => ({...s, projectV2Id:swap.to}));
 	persistSession();
 }
-/** A create settled: a compose it left unbound follows the swaps it held back. */
-function settleSwapsAfterCreate() {
-	const swaps = _swapsAfterCreate;
-	_swapsAfterCreate = [];
+/** The create of generation `gen` settled: a compose it left unbound follows the swaps held for it.
+ *  Swaps held for a newer create wait for that one. */
+function settleSwapsAfterCreate(gen: number) {
+	const swaps = _swapsAfterCreate.filter(s => s.gen === gen);
+	_swapsAfterCreate = _swapsAfterCreate.filter(s => s.gen !== gen);
 	for (const swap of swaps) followIdentitySwap(swap);
+}
+/** Run a worktree create; once it settles, apply the swaps held for its compose. */
+function withHeldSwaps<T>(create: () => Promise<T>): Promise<T> {
+	const gen = internal.worktreeCreationGeneration;
+	return create().finally(() => settleSwapsAfterCreate(gen));
 }
 
 type CheckoutSnapshot = Pick<ActiveSessionState, 'mode' | 'project' | 'projectV2Id' | 'worktreeIntent' | 'worktreeId' | 'selectedWorktreeBranch' | 'worktreeBranch' | 'worktreeMode'>;
@@ -1535,8 +1541,11 @@ export const activeSession = {
 				// A New Chat compose parked while another chat is open follows too.
 				sessionEphemeralCache.patchProjectIdentity('__new_chat__', pick.projectId, from, pick.projectV2Id);
 				const swap = {projectId:pick.projectId, from, to:pick.projectV2Id};
+				// A held swap whose target is retired in turn now ends at the new ID.
+				for (const held of _swapsAfterCreate) if (from && held.projectId === swap.projectId && held.to === from) held.to = swap.to;
 				// A create in flight owns the compose: follow once it settles unbound.
-				if (_state.isCreatingWorktree && !_state.sessionId && onSwappedIdentity(swap)) _swapsAfterCreate.push(swap);
+				if (_state.isCreatingWorktree && !_state.sessionId && onSwappedIdentity(swap))
+					_swapsAfterCreate.push({...swap, gen:internal.worktreeCreationGeneration});
 				else followIdentitySwap(swap);
 			}
 		}
@@ -1558,10 +1567,10 @@ export const activeSession = {
 	},
 
 	createWorktree: (prompt?: string, pendingUploadPaths?: string[]) =>
-		messageSender.createWorktree(prompt, pendingUploadPaths).finally(settleSwapsAfterCreate),
+		withHeldSwaps(() => messageSender.createWorktree(prompt, pendingUploadPaths)),
 
 	autoCreateWorktree: (prompt: string, pendingUploadPaths?: string[]) =>
-		messageSender.autoCreateWorktree(prompt, pendingUploadPaths).finally(settleSwapsAfterCreate),
+		withHeldSwaps(() => messageSender.autoCreateWorktree(prompt, pendingUploadPaths)),
 
 	/** Create the composed session with no first message (the call button). */
 	startSessionWithoutPrompt: () => messageSender.startSessionWithoutPrompt(),
