@@ -190,7 +190,6 @@ def _local_snapshot() -> Dict[str, Any]:
                 pv2s[seeded["id"]] = seeded
     return {
         "pv2s": pv2s,
-        "own_rows": own_rows,
         "own_by_origin": setup._own_rows_by_origin(),
         "superseded": setup._superseded_local_origins(own_rows),
         "repos": setup._repo_info_by_origin(),
@@ -422,30 +421,17 @@ def _find_install(installs: List[Dict[str, Any]], install_id: str) -> Dict[str, 
     return row
 
 
-def _current_identity(pv2: Dict[str, Any], snapshot: Dict[str, Any]) -> Dict[str, Any]:
-    """The identity to set up: a remote-less ``local:<id>`` this worker has since
-    linked to its remote (#802) is that remote's project now.
-
-    The request may name the old identity: a project added from a folder before
-    its remote was read, or a page that loaded before the link. Setting that up
-    elsewhere made an empty folder instead of a clone.
-    """
-    from app.db.projects_v2 import project_v2_id_for_origin
-
-    origin = pv2.get("origin") or ""
-    if origin not in snapshot["superseded"]:
-        return pv2
-    legacy_id = origin[len("local:"):]
-    row = next((r for r in snapshot["own_rows"] if str(r.get("id")) == legacy_id), None)
-    current = snapshot["pv2s"].get(project_v2_id_for_origin(setup._origin_of(row))) if row else None
-    return current or pv2
-
-
 async def _spec_for(pv2: Dict[str, Any], body: SetupRequest, installs: List[Dict[str, Any]],
                     me: str) -> Dict[str, Any]:
     """What the target needs: identity, kind, remote and folder."""
     snapshot = await run_sync(_local_snapshot)
-    pv2 = _current_identity(pv2, snapshot)
+    if (pv2.get("origin") or "").startswith("local:"):
+        # The snapshot may just have linked a remote-less placeholder to its
+        # remote (#802): set up what it PROVABLY became, per this worker's
+        # first-link record, never by matching names or legacy ids.
+        from app.core.project_resolver import resolve_catalog_project
+
+        pv2 = await run_sync(resolve_catalog_project, pv2["id"]) or pv2
     views: Dict[str, Dict[str, Any]] = {}
     info = _project_info(pv2, snapshot, views)
     origin = pv2.get("origin") or ""

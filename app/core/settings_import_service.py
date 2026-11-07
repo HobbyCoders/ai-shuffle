@@ -276,13 +276,19 @@ def _register_project(path: Path) -> dict[str, Any]:
     project_id = _project_slug(resolved)
     if database.get_project(project_id):
         return {"path": str(resolved), "status": "conflict", "project_id": project_id}
+    from app.api.projects import record_remote_repository, remote_link_group
+
+    # Under its Git remote's identity from the start, as adding a folder does,
+    # so no local:<id> twin is seeded for a repository that already has one.
     project = database.create_project(
         project_id=project_id,
         name=resolved.name,
         description="Imported from provider settings",
         path=db_path,
         settings_dict=None,
+        link_group_id=remote_link_group(resolved),
     )
+    record_remote_repository(project, resolved)
     return {"path": str(resolved), "status": "imported", "project_id": project["id"]}
 
 

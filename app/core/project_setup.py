@@ -823,13 +823,30 @@ def _clone(job: _Job, clone_url: str, final_path: Path) -> None:
             job.temp_dir = None
 
 
+def _is_this_project(origin: str, row: Dict[str, Any]) -> bool:
+    """Whether the request's identity is this worker's project ``row``: its
+    current identity, or a remote-less placeholder this worker has PROVABLY
+    linked to it (its local first-link record, #802). A matching name or legacy
+    id is not proof: another worker's ``local:demo`` is not our ``demo``."""
+    from app.db import project_catalog_aliases
+    from app.db.projects_v2 import project_v2_id_for_origin
+
+    current = _origin_of(row)
+    if origin == current:
+        return True
+    if not origin.startswith("local:"):
+        return False
+    return project_catalog_aliases.replacement_for(project_v2_id_for_origin(origin)) == \
+        project_v2_id_for_origin(current)
+
+
 def execute_setup(op_row: Dict[str, Any]) -> Dict[str, Any]:
     """Run one claimed ``setup_project`` op on THIS worker (sync, in a thread).
 
     Returns the op's result; raises :class:`SetupError` with a stable code.
-    Never deletes or overwrites a folder it did not create. A folder that is
-    already this worker's copy of the project, or (for a plain folder project)
-    any existing folder, is adopted as it is.
+    Never deletes or overwrites a folder it did not create. A plain folder
+    project uses an existing folder as it is, unless that folder is this
+    worker's own other project.
     """
     from app.db import git_ops as git_ops_db
 
@@ -858,16 +875,16 @@ def execute_setup(op_row: Dict[str, Any]) -> Dict[str, Any]:
         params["path"] = path_text
     path = Path(path_text)
     registered = _own_row_at(path)
-    if registered is not None:
-        if origin in (_origin_of(registered), "local:" + str(registered["id"])):
-            # This worker's own project already lives in that folder: the request
-            # names it, or names its remote-less identity this worker has since
-            # linked to its remote (#802). Nothing to set up.
-            return {"project_id": registered["id"], "already": True, "adopted": True, "progress": 100}
-        if kind == "folder" and registered.get("link_group_id") not in (None, "", "local:" + str(registered["id"])):
-            # Never relink another logical project's folder (its Git identity, its chats).
-            raise SetupError(FOLDER_EXISTS, f"{path} is already the project {registered.get('name') or registered['id']} "
-                                            "on this worker. Choose another folder.")
+    if registered is not None and path.is_dir() and _is_this_project(origin, registered):
+        # This worker's own copy already lives in that folder. Nothing to set up.
+        return {"project_id": registered["id"], "already": True, "adopted": True, "progress": 100}
+    if (kind == "folder" and registered is not None and _origin_of(registered) != origin
+            and (mode != "adopt" or registered.get("link_group_id") not in (None, "", "local:" + str(registered["id"])))):
+        # The folder is this worker's own other project: using it would relink
+        # that project (its identity, its chats) to this one. Only an explicit
+        # "use a folder already there" may take an unlinked one; never a linked one.
+        raise SetupError(FOLDER_EXISTS, f"{path} is already the project {registered.get('name') or registered['id']} "
+                                        "on this worker. Choose another folder.")
     adopted = False
     if kind == "git":
         if path.exists() or path.is_symlink():
