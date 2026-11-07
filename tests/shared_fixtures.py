@@ -12,6 +12,22 @@ from app.core.config import settings
 LOCAL_ME = "local-me"
 
 
+def seed_session(session_id, **kwargs):
+    """Explicit setup for a real session; never intercept an event writer.
+
+    Setup helpers may share a chat, so preserve a row already created by the
+    test. Callers must invoke this before the operation under test, not to
+    recover a missing row after deletion.
+    """
+    from app.db import sessions
+
+    row = sessions.get_session(session_id)
+    if row is not None:
+        return row
+    kwargs.setdefault("profile_id", None)
+    return sessions.create_session(session_id=session_id, **kwargs)
+
+
 @pytest.fixture(autouse=True)
 def pin_runner(monkeypatch):
     """Pin ``settings.effective_instance_id`` to ``LOCAL_ME``."""

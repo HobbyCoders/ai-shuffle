@@ -108,6 +108,9 @@ def _settled_turn(
     **enqueue_kw,
 ):
     """Enqueue → start → settle one turn, seeding its terminal event."""
+    from tests.shared_fixtures import seed_session
+
+    seed_session(session_id)
     turn = turns_db.enqueue_turn(session_id, source, prompt=prompt, **enqueue_kw)
     assert turns_db.start_turn(turn["id"], None, "runner") is not None
     turns_db.settle_turn(turn["id"], outcome)
@@ -155,6 +158,9 @@ async def test_peer_wakes_preserve_order_and_cannot_forge_user_authority(mock_db
 
 @pytest.mark.asyncio
 async def test_message_resume_rearms_failed_task_and_preserves_context(mock_db):
+    from tests.shared_fixtures import seed_session
+
+    seed_session('owner')
     task_registry.start_task("owner", "child", "agent", "Implement once", name="helper", tool_use_id="child")
     task_registry.complete_task("owner", "child", "error", summary="connection interrupted")
     previous = _settled_turn("child", profile_id="worker-profile", project_id="project",
@@ -206,6 +212,9 @@ async def test_parent_stop_during_continuation_enqueue_cannot_admit_work(mock_db
 
 @pytest.mark.asyncio
 async def test_resumed_report_is_new_turn_only_and_wakes_parent(mock_db):
+    from tests.shared_fixtures import seed_session
+
+    seed_session('child')
     from types import SimpleNamespace
     from app.core import swarm
     from app.core.agent_messaging import finish_message_resume
@@ -282,6 +291,9 @@ async def test_continuations_keep_order_and_dedupe_each_completion(mock_db):
 
 @pytest.mark.asyncio
 async def test_resumed_worker_error_is_not_reported_as_success(mock_db):
+    from tests.shared_fixtures import seed_session
+
+    seed_session('child')
     from app.core.agent_messaging import finish_message_resume
     task_registry.start_task("owner", "child", "agent", "Continue", tool_use_id="child")
     se_db.append_events("child", [{"type": "turn.completed", "turn_id": "failed",
@@ -298,6 +310,10 @@ async def test_resumed_worker_error_is_not_reported_as_success(mock_db):
 @pytest.mark.parametrize("ending", ["completed", "error", "stopped"])
 @pytest.mark.parametrize("oversized", [False, True], ids=["above-task-cap", "above-byte-cap"])
 async def test_continuation_report_is_durable_bounded_and_deduped(mock_db, ending, oversized):
+    from tests.shared_fixtures import seed_session
+
+    seed_session("owner")
+    seed_session('child')
     import json
     from app.api.events import _frame
     from app.core.agent_messaging import finish_message_resume
@@ -330,6 +346,10 @@ async def test_continuation_report_is_durable_bounded_and_deduped(mock_db, endin
 
 @pytest.mark.asyncio
 async def test_continuation_supervisor_stop_persists_one_killed_report(mock_db):
+    from tests.shared_fixtures import seed_session
+
+    seed_session("owner")
+    seed_session("child")
     from app.core import provider_agent_supervisor as supervisor
     from app.core.agent_messaging import finish_message_resume
 
@@ -532,9 +552,19 @@ async def test_failover_surfaces_then_queue_drains(mock_db):
     execute.assert_awaited_once()
     assert execute.await_args.args[0]["id"] == queued["id"]
 
-    # No re-append: the log still holds only the seeded terminal event.
-    types = [r["event_type"] for r in se_db.get_events("f1")]
-    assert types == ["turn.completed"]
+    # Account rotation is retired: attempt_failover only notifies, so this
+    # remains a real 429 with no known reset. Persist that warning without
+    # re-appending the terminal event or retrying instead of the queued human.
+    events = se_db.get_events("f1")
+    assert [row["event_type"] for row in events] == ["turn.completed", "system.note"]
+    assert events[0]["turn_id"] == settled["id"]
+    note = events[1]["payload"]
+    assert note["subtype"] == "limit_resume"
+    assert note["data"]["status"] == "no_reset"
+    assert note["data"]["turn_id"] == settled["id"]
+    assert note["data"]["reset_known"] is False
+    assert note["data"]["armed"] is False
+    assert note["data"]["resume_at"] is None
 
 
 async def test_chained_failover_exhaustion_terminates(mock_db):
@@ -2790,6 +2820,9 @@ async def test_a_retried_wake_that_dies_again_is_surfaced_not_retried(mock_db):
 async def test_a_wake_that_died_after_real_work_is_not_retried(mock_db):
     """A retry would redo billed work, which is worse than surfacing the
     failure — the recovery is only for wakes that never reached the provider."""
+    from tests.shared_fixtures import seed_session
+
+    seed_session('wr3')
     dead = _dead_wake_turn("wr3")
     _usage_event("wr3", dead["id"])
 

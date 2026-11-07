@@ -527,6 +527,9 @@ async def test_sweeper_start_stop(mock_db):
 async def test_sweep_once_emits_expired_ttl_with_request_id(mock_db):
     """A swept overdue row emits exactly one interaction.expired (reason=ttl)
     carrying the row's request_id (nested in payload)."""
+    from tests.shared_fixtures import seed_session
+
+    seed_session('s1')
     interactions.create_interaction(
         "s1", "permission", {"request_id": "req-x"}, -1,   # overdue
     )
@@ -546,6 +549,9 @@ async def test_sweep_once_answered_row_emits_nothing(mock_db):
     """A row that lost the guarded UPDATE race (already answered, not pending)
     is never swept, so the sweeper emits no interaction.expired for it —
     preserving the exactly-once-terminal-event invariant."""
+    from tests.shared_fixtures import seed_session
+
+    seed_session("s1")
     answered = interactions.create_interaction(
         "s1", "permission", {"request_id": "req-answered"}, 60,
     )

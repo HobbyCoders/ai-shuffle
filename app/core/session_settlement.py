@@ -27,15 +27,18 @@ def _capture_and_dismiss(session_id, broker, expected_revision):
 
     with get_db() as conn:
         cur = conn.cursor()
+        from app.db.session_locks import lock_multi_session_mutation, lock_session_runtimes
+        lock_multi_session_mutation(cur)
         store.lock_state(cur)
-        # Transcript appends lock their counter before projecting the session.
-        # Use that order too; the durable revision receipt is an ordinary event.
-        cur.execute("INSERT INTO session_event_counters (session_id,next_seq) VALUES (%s,0) "
-                    "ON CONFLICT (session_id) DO NOTHING", (session_id,))
-        cur.execute("SELECT session_id FROM session_event_counters WHERE session_id=%s FOR UPDATE", (session_id,))
-        cur.fetchone()
-        cur.execute("SELECT * FROM sessions WHERE id=%s FOR UPDATE", (session_id,))
-        row = cur.fetchone()
+        # A captured orphan can expire a run and a captured park can append a
+        # completion. Discover under the gate, then take sorted runtime prefixes.
+        cur.execute("""WITH RECURSIVE family AS (
+            SELECT id FROM sessions WHERE id=%s
+            UNION ALL SELECT s.id FROM sessions s JOIN family f ON s.parent_session_id=f.id
+        ) SELECT id FROM family ORDER BY id""", (session_id,))
+        family = [r["id"] for r in cur.fetchall()]
+        locked = lock_session_runtimes(cur, [session_id, *family])
+        row = locked[session_id]
         if not row or row.get("is_active") or control.owner_of(dict(row)):
             return None
         revision = store.get_record(cur, "session_active", session_id)
@@ -53,19 +56,8 @@ def _capture_and_dismiss(session_id, broker, expected_revision):
                 revision.get(key) != expected_revision.get(key) for key in ("clock", "origin_device_id")
             )):
                 return None
-        # Holding the parent's admission lock also fences new children. Lock
-        # existing child counters before their rows, then take one wait snapshot.
-        cur.execute("""WITH RECURSIVE family AS (
-            SELECT id FROM sessions WHERE id=%s
-            UNION ALL SELECT s.id FROM sessions s JOIN family f ON s.parent_session_id=f.id
-        ) SELECT id FROM family ORDER BY id""", (session_id,))
-        family = [r["id"] for r in cur.fetchall()]
-        placeholders = ",".join(["%s"] * len(family))
-        cur.execute("SELECT session_id FROM session_event_counters WHERE session_id IN (" + placeholders +
-                    ") ORDER BY session_id FOR UPDATE", tuple(family))
-        cur.fetchall()
-        cur.execute("SELECT id FROM sessions WHERE id IN (" + placeholders + ") ORDER BY id FOR UPDATE", tuple(family))
-        cur.fetchall()
+        # All captured members already hold runtime prefixes in session-ID
+        # order, before any dependent turn/prompt/event row can be mutated.
         # Fast delivery and replication can race on the SAME revision. A
         # committed receipt prevents their second snapshot sweeping later waits.
         token = str(expected_revision["session_updated_at"] if expected_revision and "session_updated_at" in expected_revision

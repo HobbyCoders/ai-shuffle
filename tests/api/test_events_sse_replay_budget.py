@@ -284,8 +284,9 @@ async def _wire_events(sid: str) -> list[dict]:
     return [parse_frame(f)["data"] for f in await _replay(sid)]
 
 
-async def test_legacy_rows_replay_slim(mock_db, gw):
+async def test_legacy_rows_replay_slim(mock_db, gw, session_factory):
     sid = "sess-legacy-slim"
+    session_factory(sid)
     se.append_events(sid, legacy_rows())
     events = await _wire_events(sid)
     for ev in events:
@@ -300,8 +301,9 @@ async def test_legacy_rows_replay_slim(mock_db, gw):
     assert seqs[-1] == se.get_max_seq(sid)
 
 
-async def test_kill_switches_restore_the_old_replay(mock_db, gw, monkeypatch):
+async def test_kill_switches_restore_the_old_replay(mock_db, gw, monkeypatch, session_factory):
     sid = "sess-legacy-fat"
+    session_factory(sid)
     rows = legacy_rows()
     se.append_events(sid, rows)
     monkeypatch.setenv("AI_SHUFFLE_PERF_SLIM_USAGE_REPLAY", "0")
@@ -313,11 +315,12 @@ async def test_kill_switches_restore_the_old_replay(mock_db, gw, monkeypatch):
     assert all("gridRows" in e["usage"]["context_usage"] for e in usage)
 
 
-async def test_progress_coalescing_merges_only_consecutive_rows(mock_db, gw):
+async def test_progress_coalescing_merges_only_consecutive_rows(mock_db, gw, session_factory):
     # A frame's seq is the client's resume cursor: every row at or below it
     # must be in that frame or an earlier one, so interleaved streams from two
     # subagents are merged only within their consecutive stretches.
     sid = "sess-progress-cursor"
+    session_factory(sid)
     se.append_events(sid, legacy_rows())
     events = await _wire_events(sid)
     rows = se.get_events(sid)
@@ -332,9 +335,10 @@ async def test_progress_coalescing_merges_only_consecutive_rows(mock_db, gw):
         covered = ev["seq"]
 
 
-async def test_replay_fixture_matches_the_committed_copy(mock_db, gw, monkeypatch):
+async def test_replay_fixture_matches_the_committed_copy(mock_db, gw, monkeypatch, session_factory):
     """The frontend equivalence test reads both replays from this fixture."""
     sid = "sess-replay-fixture"
+    session_factory(sid)
     se.append_events(sid, legacy_rows())
     slim = await _wire_events(sid)
     monkeypatch.setenv("AI_SHUFFLE_PERF_SLIM_USAGE_REPLAY", "0")

@@ -24,6 +24,11 @@ from tests.shared_fixtures import reset_backfill_memo  # noqa: F401  (autouse fi
 SID = "sess-backfill"
 
 
+@pytest.fixture(autouse=True)
+def existing_session(session_factory):
+    session_factory(SID)
+
+
 def _one(msg):
     """Convert a single message, asserting exactly one event came out."""
     events = convert_messages_to_events(SID, [msg])
@@ -370,6 +375,9 @@ async def test_loader_failure_degrades_to_noop(mock_db, monkeypatch):
 
 
 async def test_conversion_failure_is_a_retryable_noop(mock_db, monkeypatch):
+    from tests.shared_fixtures import seed_session
+
+    seed_session(SID)
     monkeypatch.setattr(hb, "_load_legacy_history", lambda sid, **kwargs: list(LEGACY))
 
     def fail_conversion(*args):
@@ -613,6 +621,9 @@ async def test_concurrent_backfills_exactly_one_wins(mock_db, counter_state):
 
 @pytest.mark.parametrize("counter_state", ["absent", "zero", "cancelled"])
 async def test_backfill_aborts_after_recorder_append(mock_db, counter_state):
+    from tests.shared_fixtures import seed_session
+
+    seed_session(SID)
     if counter_state == "zero":
         with get_db() as conn:
             conn.cursor().execute("INSERT INTO session_event_counters (session_id,next_seq) VALUES (%s,0)", (SID,))

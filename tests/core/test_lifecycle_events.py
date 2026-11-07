@@ -33,6 +33,9 @@ async def test_runtime_enqueues_only_winning_start_and_settlement(monkeypatch, m
 
 @pytest.mark.parametrize("metadata", [{"is_error": True}, {"errors": ["max turns exceeded"]}])
 async def test_durable_failed_result_reaches_error_lifecycle(monkeypatch, mock_db, metadata):
+    from tests.shared_fixtures import seed_session
+
+    seed_session("failed-result")
     from tests.core.helpers import make_pump
     from tests.core.test_session_runtime import _runtime_env
     from app.core.turn_recorder import TurnRecorder

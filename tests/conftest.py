@@ -505,6 +505,19 @@ def mock_db(_raw_sqlite: sqlite3.Connection, _auto_db_shim) -> sqlite3.Connectio
     return _raw_sqlite
 
 
+@pytest.fixture
+def session_factory(_auto_db_shim):
+    """Persist an explicit session before exercising its turns or event log.
+
+    Resolve the sessions module at call time so file-local database routing is
+    already installed. This is opt-in setup, never an append-time auto-create:
+    deleting the row must still make later event writes fail.
+    """
+    from tests.shared_fixtures import seed_session
+
+    return seed_session
+
+
 @pytest.fixture(scope="function")
 def bare_db(_raw_sqlite: sqlite3.Connection, _auto_db_shim) -> sqlite3.Connection:
     """Like ``mock_db`` but without the seeded "default" profile.

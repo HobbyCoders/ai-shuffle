@@ -13,6 +13,22 @@ from app.mcp import builtin_tools
 
 
 @pytest.mark.asyncio
+async def test_late_drained_event_is_disposed_without_recreating_a_deleted_log(mock_db, caplog):
+    from app.core.turn_recorder import record_drained_event
+    from app.db import session_events
+
+    sid = "late-drained-delete"
+    sessions.create_session(sid, "default")
+    assert sessions.delete_session(sid)
+    await record_drained_event(sid, {"type": "system", "subtype": "late-monitor-result",
+                                     "content": "finished after deletion"})
+    assert session_events.get_events(sid) == []
+    assert mock_db.execute("SELECT COUNT(*) FROM session_event_counters WHERE session_id=?",
+                           (sid,)).fetchone()[0] == 0
+    assert not any(record.exc_info for record in caplog.records)
+
+
+@pytest.mark.asyncio
 async def test_monitor_completion_after_session_deletion(mock_db, monkeypatch, tmp_path, caplog):
     sid = "deleted-monitor-owner"
     sessions.create_session(sid, "default")
