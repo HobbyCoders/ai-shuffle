@@ -16,8 +16,32 @@ def lock_multi_session_mutation(cursor: Any) -> None:
     Ordinary append, turn admission and single-session repair MUST NOT use it.
     PostgreSQL is the only runtime DB; the serialized unit-test shim treats
     advisory transaction locks as no-ops, like the existing schema/slot locks.
+
+    One exception precedes it: deletion first takes its own chat's hand-off
+    headers (``lock_handoff_history``). A publication can hold those for a
+    whole history import, which must not stall every gated writer, and no
+    gate holder ever waits for another chat's hand-off rows.
     """
     cursor.execute("SELECT pg_advisory_xact_lock(%s)", (_MULTI_SESSION_LOCK_KEY,))
+
+
+def lock_handoff_history(cursor: Any, session_id: str) -> None:
+    """Lock a chat's private hand-off headers (token order): the OUTERMOST lock.
+
+    Order for a chat with staged hand-off history: headers H -> run -> event
+    counter C -> session S. Publication, finalize and acceptance take H and
+    then C/S; staging cleanup takes H then S. Deletion takes H here before its
+    runtime prefix, because its FK cascade deletes the staged rows. Taking C
+    or S first and reaching H through that cascade deadlocks (#1215). A
+    header covers its token's chunk rows: nothing locks a chunk without it.
+    """
+    placeholder = ph()
+    cursor.execute(
+        f"SELECT token FROM handoff_history_chunks WHERE session_id = {placeholder} "
+        "AND table_name = '' AND batch_no = 0 ORDER BY token FOR UPDATE",
+        (session_id,),
+    )
+    cursor.fetchall()
 
 
 def lock_session_runtime(cursor: Any, session_id: str):

@@ -1480,17 +1480,32 @@ def _deleted_parent(cursor, ctx: NetworkContext, env: Envelope) -> Optional[str]
     return None
 
 
-def _lock_mirror_event_counters(cursor, record_ids: Iterable[str]) -> None:
+# Sessions a mirror reservation saw deleted under it (#1222). It carries that
+# fact from a batch's window reservation to the per-op reservation after it,
+# which can no longer tell "deleted" from "not arrived yet". Trusted only
+# while the session stays absent: a reservation that finds the row again
+# forgets it. Bounded: only the current window needs it.
+_MIRROR_DELETED: dict[str, None] = {}
+_MIRROR_DELETED_MAX = 1024
+
+
+def _lock_mirror_event_counters(cursor, record_ids: Iterable[str]) -> set[str]:
     """After network_state, take sorted counters BEFORE any mirror event rows.
 
     Delete takes C before sweeping events. Reconciliation's UPSERT can lock an
     existing committed event, so event -> C deadlocks against that sweep. Batch
     callers reserve the entire page/window here, not one session at a time.
     Keep this inside the synchronous DB transaction, never across network I/O.
+
+    Returns the sessions whose delete committed while this reservation waited
+    on its counter. Callers MUST drop those sessions' events: inserting them
+    would recreate orphan events and a positive counter for a deleted chat
+    (#1222). A session merely absent (not yet arrived) is never in the set.
     """
     session_ids = sorted({rid.split("|", 1)[0] for rid in record_ids
                           if isinstance(rid, str) and "|" in rid})
-    reserved = []
+    reserved, present = [], set()
+    gone: set[str] = set()
     for sid in session_ids:
         cursor.execute(
             "INSERT INTO session_event_counters (session_id, next_seq) "
@@ -1502,20 +1517,34 @@ def _lock_mirror_event_counters(cursor, record_ids: Iterable[str]) -> None:
         row = cursor.fetchone()
         # A post-delete recreation is always zero. A positive locked counter
         # already serializes deletion, so hot ingestion needs no cleanup SQL.
-        if row is not None and int(row["next_seq"]) == 0:
-            reserved.append(sid)
+        if row is not None:
+            present.add(sid)
+            if int(row["next_seq"]) == 0:
+                reserved.append(sid)
     if reserved:
         # INSERT's snapshot may see S, wait behind deletion's C, then recreate
         # C after deletion commits. This MUST be a fresh statement/snapshot.
         # Only clean zero-valued reservations we actually acquired: a durable
         # post-delete Stop warning can legitimately own a positive counter.
         placeholders = ", ".join(["%s"] * len(reserved))
+        # The INSERT saw the session; this fresh statement does not: the
+        # delete committed while we waited. Same statement, no extra trip.
         cursor.execute(
             f"DELETE FROM session_event_counters WHERE session_id IN ({placeholders}) "
             "AND next_seq = 0 AND NOT EXISTS (SELECT 1 FROM sessions "
-            "WHERE sessions.id = session_event_counters.session_id)",
+            "WHERE sessions.id = session_event_counters.session_id) RETURNING session_id",
             tuple(reserved),
         )
+        gone = {row["session_id"] for row in cursor.fetchall()}
+        present -= gone
+    with _lock:
+        for sid in present:
+            _MIRROR_DELETED.pop(sid, None)
+        for sid in gone:
+            _MIRROR_DELETED[sid] = None
+        while len(_MIRROR_DELETED) > _MIRROR_DELETED_MAX:
+            _MIRROR_DELETED.pop(next(iter(_MIRROR_DELETED)))
+        return {sid for sid in session_ids if sid in _MIRROR_DELETED}
 
 
 def _apply_next(cursor, ctx: NetworkContext, env: Envelope, member: Member, result: ApplyResult) -> str:
@@ -1674,9 +1703,10 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
             # fail an older peer's automation FK before its rewrite arrives.
             return "applied"
 
-    if coll.name == "session_events":
-        # _observe_clock (or the enclosing chunk) already owns network_state.
-        _lock_mirror_event_counters(cursor, [env.record_id])
+    # _observe_clock (or the enclosing chunk) already owns network_state.
+    if coll.name == "session_events" and _lock_mirror_event_counters(cursor, [env.record_id]):
+        # The chat was deleted under us: consume the op, store nothing.
+        return "duplicate"
 
     if coll.name == "session_active":
         if env.op == OP_UPSERT and (
@@ -2305,13 +2335,21 @@ def _apply_event_append(cursor, chunk: Sequence[Mapping[str, Any]], ctx: Network
                    tuple(value for row in rows for value in (row["session_id"], row["seq"])))
     if cursor.fetchone() is not None:
         return False
-    _lock_mirror_event_counters(cursor, ids)
-    store.insert_event_batch(cursor, coll, rows, [env.to_dict() for env in envs],
-                             [content_hash(coll, row) for row in rows])
+    deleted = _lock_mirror_event_counters(cursor, ids)
+    last_seq = envs[-1].origin_seq
+    if deleted:
+        # Chats deleted while we waited: consume their ops, store nothing.
+        kept = [index for index, row in enumerate(rows) if row["session_id"] not in deleted]
+        result.duplicate += len(envs) - len(kept)
+        envs, rows = [envs[index] for index in kept], [rows[index] for index in kept]
+        sessions = [sid for sid in sessions if sid not in deleted]
+    if rows:
+        store.insert_event_batch(cursor, coll, rows, [env.to_dict() for env in envs],
+                                 [content_hash(coll, row) for row in rows])
     for sid in sessions:
         catalog.after_event_mirrored(cursor, max((row for row in rows if row["session_id"] == sid),
                                                 key=lambda row: int(row["seq"])))
-    store.set_watermark(cursor, origin, incarnation, envs[-1].origin_seq)
+    store.set_watermark(cursor, origin, incarnation, last_seq)
     if incarnation > highest and highest:
         store.clear_pending_stream(cursor, origin, highest)
     result.applied += len(envs)
@@ -2775,7 +2813,13 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
     store.observe_clock(cursor, max(int(item["clock"]) for item in items))
     ids = [item["record_id"] for item in items]
     if coll.name == "session_events":
-        _lock_mirror_event_counters(cursor, ids)
+        deleted = _lock_mirror_event_counters(cursor, ids)
+        if deleted:
+            # Chats deleted while we waited keep no snapshot events (#1222).
+            items = [item for item in items if item["record_id"].split("|", 1)[0] not in deleted]
+            ids = [item["record_id"] for item in items]
+            if not items:
+                return 0, touched
     # A page names each record once; anything else is read one by one.
     known = _records_by_id(cursor, coll.name, ids) if len(set(ids)) == len(ids) else None
     applied = 0

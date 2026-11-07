@@ -17,7 +17,11 @@ pytestmark = requires_real_pg
 
 @pytest.fixture(autouse=True)
 def multi_session_gate_is_first(monkeypatch):
-    """Catch a gate acquired after ANY mutation/admission lock, not just R/C/S."""
+    """Catch a gate acquired after ANY mutation/admission lock, not just R/C/S.
+
+    The one documented exception is the deleted chat's own hand-off headers
+    (``lock_handoff_history``): no gate holder ever waits for those (#1215).
+    """
     from app.db import session_locks
 
     original = session_locks.lock_multi_session_mutation
@@ -25,7 +29,9 @@ def multi_session_gate_is_first(monkeypatch):
 
     def checked(cursor):
         cursor.execute("SELECT mode FROM pg_locks WHERE pid=pg_backend_pid() AND granted "
-                       "AND mode IN ('RowShareLock','RowExclusiveLock')")
+                       "AND mode IN ('RowShareLock','RowExclusiveLock') "
+                       "AND relation NOT IN (SELECT 'handoff_history_chunks'::regclass UNION ALL "
+                       "SELECT indexrelid FROM pg_index WHERE indrelid='handoff_history_chunks'::regclass)")
         assert cursor.fetchall() == [], "multi-session gate must precede every row lock"
         calls.append(True)
         original(cursor)
@@ -529,59 +535,106 @@ def test_delete_vs_private_history_publication(private_pool, monkeypatch):
 
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=psycopg2.errors.DeadlockDetected,
-    reason="pre-existing delete vs handoff publication deadlock, #1215",
-)
-def test_delete_vs_private_history_publication_delete_first(private_pool, monkeypatch):
+@pytest.mark.parametrize("path", ["publish", "accept-owner", "finalize-wakes", "discard"])
+@pytest.mark.parametrize("first", ["delete", "handoff"])
+def test_delete_vs_handoff_history_both_lock_orders(private_pool, monkeypatch, path, first):
+    """#1215: delete and every hand-off history writer share one H -> C -> S order.
+
+    Before the fix delete took C and S first and only reached the private
+    hand-off header H through its FK cascade, while the hand-off paths hold H
+    and then need C (publication) or S (staging cleanup): DeadlockDetected in
+    both start orders.
+    """
+    from types import SimpleNamespace
+
     from app.network import handoff
 
-    sid, token = "history-delete-first-" + uuid4().hex, uuid4().hex
+    sid, token = "handoff-delete-" + uuid4().hex, uuid4().hex
+    source, target = "source-" + uuid4().hex, "target-" + uuid4().hex
     with base.get_db() as conn:
         cur = conn.cursor()
-        cur.execute("INSERT INTO sessions (id) VALUES (%s)", (sid,))
-        cur.execute("INSERT INTO session_event_counters (session_id,next_seq) VALUES (%s,0)", (sid,))
+        cur.execute("INSERT INTO sessions (id,owner_device_id) VALUES (%s,%s)", (sid, source))
+        # The same durable header install_history stages before publication.
+        # An empty snapshot still prunes/reserves events through the real SQL.
         cur.execute("INSERT INTO handoff_history_chunks "
                     "(token,session_id,sdk_session_id,table_name,batch_no,rows) "
                     "VALUES (%s,%s,NULL,'',0,'{}')", (token, sid))
-    deleting_locked, resume = threading.Event(), threading.Event()
-    delete_pid = []
+        cur.execute("INSERT INTO handoff_wakes (token,session_id,source_id,wakes) VALUES (%s,%s,%s,'[]')",
+                    (token, sid, source))
+    session_events.append_events(sid, [{"type": "system.note", "payload": {}}])
+    monkeypatch.setattr(handoff.engine, "require_context", lambda: SimpleNamespace(device_id=target))
+
+    def write():
+        if path == "publish":
+            with base.get_db() as conn:
+                return handoff._publish_history(conn.cursor(), sid, token)
+        if path == "accept-owner":
+            return handoff._accept_owner(sid, target, None, token)
+        if path == "finalize-wakes":
+            return handoff._finalize_wakes(sid, source, {"token": token})
+        return handoff._discard_history(sid, token)
+
+    locked, resume = threading.Event(), threading.Event()
+    first_pid = []
     original_cursor = base._PgDictConnection.cursor
 
     class InterleavedCursor(RealDictCursor):
         def execute(self, sql, params=None):
-            if sql.startswith("DELETE FROM session_events WHERE") and params == (sid,):
-                delete_pid.append(self.connection.get_backend_pid())
-                deleting_locked.set()
-                assert resume.wait(10)
-            return super().execute(sql, params)
+            result = super().execute(sql, params)
+            if threading.current_thread().name.startswith(first) and not locked.is_set():
+                if first == "delete":
+                    # Delete owns its whole lock prefix (old: C and S; new: H too).
+                    boundary = sql.startswith("DELETE FROM session_events WHERE") and params == (sid,)
+                else:
+                    # The hand-off owns its first private header, nothing else yet.
+                    boundary = "FROM handoff_history_chunks" in sql and "FOR UPDATE" in sql
+                if boundary:
+                    first_pid.append(self.connection.get_backend_pid())
+                    locked.set()
+                    assert resume.wait(10), "test never released the first transaction"
+            return result
 
     def instrumented(self, *args, **kwargs):
         kwargs["cursor_factory"] = InterleavedCursor
         return original_cursor(self, *args, **kwargs)
 
-    def publish():
-        with base.get_db() as conn:
-            return handoff._publish_history(conn.cursor(), sid, token)
-
     monkeypatch.setattr(base._PgDictConnection, "cursor", instrumented)
     monkeypatch.setattr(sessions, "_cleanup_working_set_ref", lambda sid: None)
     monkeypatch.setattr(sessions, "_cleanup_pending_wakeups", lambda sid: None)
-    with psycopg2.connect(**private_pool) as observer, ThreadPoolExecutor(max_workers=2) as workers:
+    with psycopg2.connect(**private_pool) as observer, \
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="handoff") as handing, \
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="delete") as deleter:
         observer.autocommit = True
-        deleting = workers.submit(sessions.delete_session, sid)
-        assert deleting_locked.wait(5)
-        publishing = workers.submit(publish)
+        if first == "delete":
+            leading = deleting = deleter.submit(sessions.delete_session, sid)
+        else:
+            leading = writing = handing.submit(write)
         try:
-            # Main reproduces this too: deletion owns C, publication owns its
-            # private header and waits for C, then delete's FK cascade needs H.
-            _wait_for_lock_wait(observer, delete_pid[0], publishing)
+            if not locked.wait(5):
+                pytest.fail(f"first transaction never reached its boundary: {leading.result(timeout=1)!r}")
+            if first == "delete":
+                writing = handing.submit(write)
+            else:
+                deleting = deleter.submit(sessions.delete_session, sid)
+            # A real PostgreSQL lock wait on the leader, never a sleep.
+            _wait_for_lock_wait(observer, first_pid[0], writing if first == "delete" else deleting)
         finally:
             resume.set()
-        assert deleting.result(timeout=5)
-        publishing.result(timeout=5)
+        assert deleting.result(timeout=10)
+        if first == "handoff":
+            # The hand-off committed whole before deletion could start.
+            assert writing.result(timeout=10) == ({} if path == "publish" else [] if path != "discard" else None)
+        elif path in ("accept-owner", "finalize-wakes"):
+            with pytest.raises(ValueError, match="deleted"):
+                writing.result(timeout=10)
+        else:
+            # Deletion's cascade removed the staging rows the writer waited for.
+            assert writing.result(timeout=10) is None
     _assert_deleted(sid)
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) AS n FROM handoff_history_chunks WHERE session_id=%s", (sid,))
+        assert cur.fetchone()["n"] == 0
 
 
 def test_private_history_fence_has_only_two_counter_round_trips(private_pool, monkeypatch):
@@ -830,7 +883,11 @@ def test_delete_vs_ordinary_mirror_ingestion(private_pool, monkeypatch, path, fa
 
 @pytest.mark.parametrize("path", ["envelope", "snapshot", "chunk", "pending", "pending-fallback"])
 def test_delete_first_mirror_tombstone_cannot_recreate_counter(private_pool, monkeypatch, path):
-    """A reservation's INSERT snapshot can outlive the session it selected."""
+    """A reservation's INSERT snapshot can outlive the session it selected.
+
+    The tombstone is consumed (the stream moves on) but applies nothing for
+    a chat whose delete committed while it waited (#1222).
+    """
     from app.db import network as store
     from app.network import crypto, engine, envelope, identity, membership, policy
 
@@ -866,11 +923,11 @@ def test_delete_first_mirror_tombstone_cannot_recreate_counter(private_pool, mon
         result = engine.ApplyResult()
         if path == "chunk":
             assert engine._apply_chunk([env], ctx, result)
-            assert result.applied == 1 and result.retry == 0
+            assert (result.applied, result.duplicate, result.retry) == (0, 1, 0)
         elif path.startswith("pending"):
             assert engine._apply_pending_chunk(remote.device_id, 1, ctx, result,
                                                _try_append=path != "pending-fallback")
-            assert result.applied == 1 and result.retry == 0
+            assert (result.applied, result.duplicate, result.retry) == (0, 1, 0)
         else:
             with base.get_db() as conn:
                 cursor = conn.cursor()
@@ -879,10 +936,10 @@ def test_delete_first_mirror_tombstone_cannot_recreate_counter(private_pool, mon
                             "origin_device_id": remote.device_id, "deleted": True, "order_seq": 1}
                     applied, _ = engine.apply_snapshot_items(cursor, policy.collection("session_events"),
                                                              [item], ctx=ctx)
-                    assert applied == 1
+                    assert applied == 0
                 else:
                     store.lock_state(cursor)
-                    assert engine.apply_envelope(cursor, env, ctx=ctx) == "applied"
+                    assert engine.apply_envelope(cursor, env, ctx=ctx) == "duplicate"
 
     locked, resume = threading.Event(), threading.Event()
     delete_pid = []
@@ -921,6 +978,149 @@ def test_delete_first_mirror_tombstone_cannot_recreate_counter(private_pool, mon
         assert deleting.result(timeout=5)
         applying.result(timeout=5)
     _assert_deleted(sid)
+
+
+@pytest.mark.parametrize("path", ["chunk", "append", "envelope", "pending", "pending-fallback", "snapshot"])
+def test_delete_first_fresh_mirror_events_are_dropped(private_pool, monkeypatch, path):
+    """#1222: fresh events waiting behind delete's counter must not land after it.
+
+    Before the fix the waiting mirror inserted both events and
+    after_event_mirrored recreated the counter at next_seq=3 for a chat
+    that no longer existed, while reporting two applied events.
+    """
+    from app.db import network as store
+    from app.network import crypto, engine, envelope, identity, membership, policy
+
+    def device():
+        return identity.DeviceIdentity(crypto.generate_signing_key(), crypto.generate_encryption_key(),
+                                       1, "2026-01-01T00:00:00Z")
+
+    local, remote = device(), device()
+    member = membership.Member(remote.device_id, remote.signing_public, remote.encryption_public,
+                               "Remote owner", "worker", 0)
+    ctx = engine.NetworkContext(local, "delete-fresh-" + uuid4().hex, "Fresh mirror race", remote.device_id,
+                                0, 1, {1: crypto.generate_network_key()}, {remote.device_id: member}, "ready")
+    sid = "delete-fresh-" + uuid4().hex
+    coll = policy.collection("session_events")
+    with base.get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO network_state (id,network_id,founder_device_id) VALUES (1,%s,%s) "
+                       "ON CONFLICT(id) DO UPDATE SET network_id=EXCLUDED.network_id",
+                       (ctx.network_id, remote.device_id))
+        cursor.execute("INSERT INTO sessions (id,owner_device_id) VALUES (%s,%s)", (sid, remote.device_id))
+    session_events.append_events(sid, [{"type": "system.note", "payload": {"content": "local"}}])
+    with base.get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM session_events WHERE session_id=%s", (sid,))
+        template = engine.serialize_row(coll, dict(cursor.fetchone()))
+    envs, items = [], []
+    for index, seq in enumerate((2, 3), 1):
+        record = {**template, "id": "fresh-event-" + uuid4().hex, "seq": seq,
+                  "payload": {"content": f"remote {seq}"}}
+        rid = coll.record_id(record)
+        envs.append(envelope.build(
+            network_id=ctx.network_id, collection=coll.name, record_id=rid,
+            op="upsert", clock=2 + index, origin_device_id=remote.device_id,
+            origin_incarnation=1, origin_seq=index, schema_version=1, key_version=1,
+            network_key=ctx.network_key, signing_private=remote.signing_private,
+            record=record, order_seq=seq,
+        ).to_dict())
+        items.append({"record_id": rid, "record": record, "clock": 2 + index,
+                      "origin_device_id": remote.device_id, "deleted": False, "order_seq": seq})
+    if path.startswith("pending"):
+        with base.get_db() as conn:
+            for env in envs:
+                store.stash_pending(conn.cursor(), env)
+
+    def ingest():
+        result = engine.ApplyResult()
+        if path == "chunk":
+            assert engine._apply_chunk(envs, ctx, result)
+        elif path.startswith("pending"):
+            assert engine._apply_pending_chunk(remote.device_id, 1, ctx, result,
+                                               _try_append=path != "pending-fallback")
+        else:
+            with base.get_db() as conn:
+                cursor = conn.cursor()
+                if path == "snapshot":
+                    assert engine.apply_snapshot_items(cursor, coll, items, ctx=ctx) == (0, [])
+                    return
+                store.lock_state(cursor)
+                if path == "append":
+                    assert engine._apply_event_append(cursor, envs, ctx, result)
+                else:
+                    assert [engine.apply_envelope(cursor, env, ctx=ctx, result=result)
+                            for env in envs] == ["duplicate", "duplicate"]
+                    return
+        # Consumed (the stream moves on) but nothing applied for a deleted chat.
+        assert (result.applied, result.duplicate, result.retry, result.rejected) == (0, 2, 0, 0)
+        with base.get_db() as conn:
+            assert store.get_watermark(conn.cursor(), remote.device_id, 1) == 2
+
+    locked, resume = threading.Event(), threading.Event()
+    delete_pid = []
+    original_cursor = base._PgDictConnection.cursor
+
+    class InterleavedCursor(RealDictCursor):
+        def execute(self, sql, params=None):
+            result = super().execute(sql, params)
+            if (threading.current_thread().name.startswith("delete") and not locked.is_set()
+                    and sql.startswith("INSERT INTO session_event_counters")):
+                delete_pid.append(self.connection.get_backend_pid())
+                locked.set()
+                assert resume.wait(10), "test never released deletion"
+            return result
+
+    def instrumented(self, *args, **kwargs):
+        kwargs["cursor_factory"] = InterleavedCursor
+        return original_cursor(self, *args, **kwargs)
+
+    monkeypatch.setattr(base._PgDictConnection, "cursor", instrumented)
+    monkeypatch.setattr(sessions, "_cleanup_working_set_ref", lambda sid: None)
+    monkeypatch.setattr(sessions, "_cleanup_pending_wakeups", lambda sid: None)
+    with psycopg2.connect(**private_pool) as observer, \
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="delete") as deleter, \
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="mirror") as mirror:
+        observer.autocommit = True
+        deleting = deleter.submit(sessions.delete_session, sid)
+        try:
+            assert locked.wait(5), "delete never acquired the counter"
+            applying = mirror.submit(ingest)
+            # The mirror has seen S and really waits on delete's C.
+            _wait_for_lock_wait(observer, delete_pid[0], applying)
+        finally:
+            resume.set()
+        assert deleting.result(timeout=5)
+        applying.result(timeout=5)
+    _assert_deleted(sid)
+    with base.get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) AS n FROM sync_records WHERE collection='session_events' "
+                       "AND record_id LIKE %s", (sid + "|%",))
+        assert cursor.fetchone()["n"] == 0
+        cursor.execute("SELECT COUNT(*) AS n FROM sync_pending WHERE origin_device_id=%s",
+                       (remote.device_id,))
+        assert cursor.fetchone()["n"] == 0
+
+
+def test_mirror_deleted_mark_holds_only_while_the_session_is_absent(private_pool, monkeypatch):
+    """The window -> per-op memory never drops events for a chat that exists."""
+    from app.db import network as store
+    from app.network import engine
+
+    gone, back = "mark-gone-" + uuid4().hex, "mark-back-" + uuid4().hex
+    monkeypatch.setattr(engine, "_MIRROR_DELETED", {gone: None, back: None})
+    with base.get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO network_state (id,network_id,founder_device_id) VALUES (1,%s,%s) "
+                       "ON CONFLICT(id) DO NOTHING", ("mark-test", "mark-device"))
+        # A locally deleted mirror whose owner re-sent the catalog.
+        cursor.execute("INSERT INTO sessions (id) VALUES (%s)", (back,))
+        store.lock_state(cursor)
+        assert engine._lock_mirror_event_counters(cursor, [gone + "|1", back + "|1"]) == {gone}
+        cursor.execute("SELECT COUNT(*) AS n FROM session_event_counters WHERE session_id=%s", (gone,))
+        assert cursor.fetchone()["n"] == 0
+    assert engine._MIRROR_DELETED == {gone: None}
 
 
 def test_mirror_reservation_preserves_durable_post_delete_stop_runtime(private_pool, monkeypatch):

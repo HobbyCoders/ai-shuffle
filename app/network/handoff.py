@@ -505,7 +505,10 @@ def _finalize_wakes(sid, source, payload, *, recovery_reason=None, discard_all=F
         owner = session["owner_device_id"] if session else None
         if row["finalized"] and owner != device:
             return []  # A late receipt after a later move must not re-arm here.
-        if not session or owner not in (source, device):
+        if not session:
+            # Deletion won the hand-off headers and committed first.
+            raise ValueError("The chat was deleted during the hand-off; ownership was not changed.")
+        if owner not in (source, device):
             raise ValueError("This wake reservation belongs to an earlier move; ownership was not changed.")
         if not row["finalized"]:
             if recovery_reason in ("owner_discarded_wakes", "owner_resumed_wakes"):
@@ -1453,10 +1456,11 @@ def _delete_history(cur, sid, token, sdk):
 
 def _lock_history_headers(cur, sid):
     # Supersession cleans older headers at the final flip. Lock them before
-    # the session row too, so a concurrent expiry sweep cannot invert the order.
-    cur.execute("SELECT token FROM handoff_history_chunks WHERE session_id=%s "
-                "AND table_name='' AND batch_no=0 ORDER BY token FOR UPDATE", (sid,))
-    cur.fetchall()
+    # the counter and session row too, the order deletion also uses, so a
+    # concurrent expiry sweep or delete cannot invert it.
+    from app.db.session_locks import lock_handoff_history
+
+    lock_handoff_history(cur, sid)
 
 
 def _discard_superseded_history(cur, sid, token):
@@ -1767,6 +1771,11 @@ def _accept_owner(sid, device_id, branch=None, token=None, held_messages=None, *
         # and revalidate the owner only at the final context/ownership flip.
         cur.execute("SELECT owner_device_id,placement FROM sessions WHERE id=%s", (sid,))
         session = cur.fetchone()
+        if session is None:
+            if recovering:
+                return []
+            # Deletion won the hand-off headers and committed first.
+            raise ValueError("The chat was deleted during the hand-off; ownership was not changed.")
         receipt = (parse_jsonb(session["placement"]) or {}).get("handoff") or {}
         if recovering:
             cur.execute("SELECT rows FROM handoff_history_chunks WHERE session_id=%s AND token=%s "
