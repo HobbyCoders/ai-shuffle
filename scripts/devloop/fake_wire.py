@@ -38,6 +38,7 @@ Frame items in :attr:`Reply.frames`:
   ``bytes`` / ``str``     written verbatim (use :func:`sse` for SSE frames)
   ``Sleep(s)``            pause mid-stream (a stall); aborts early on close
   ``CUT``                 drop the connection here without a terminal frame
+  ``HOLD``                SSE heartbeats until client disconnect or server close
 
 ``Reply.framing`` is ``"close"`` (HTTP/1.0 style: the body ends when the
 socket closes, so a CUT looks like a clean EOF) or ``"chunked"`` (HTTP/1.1
@@ -70,6 +71,14 @@ class _Cut:
 
 
 CUT = _Cut()
+
+
+class _Hold:
+    def __repr__(self) -> str:
+        return "HOLD"
+
+
+HOLD = _Hold()
 
 
 @dataclass
@@ -393,6 +402,17 @@ class _Handler(BaseHTTPRequestHandler):
                     if owner._stopping.wait(item.seconds):
                         return
                     continue
+                if item is HOLD:
+                    # A real open stream, not a guessed duration. Heartbeats
+                    # detect Stop's disconnect without busy-waiting or leaving
+                    # a handler behind; close() also releases it immediately.
+                    while not owner._stopping.wait(0.1):
+                        data = b": hold-open\n\n"
+                        if reply.framing == "chunked":
+                            data = f"{len(data):x}\r\n".encode() + data + b"\r\n"
+                        self.wfile.write(data)
+                        self.wfile.flush()
+                    return
                 if item is CUT:
                     self._abort()
                     return
