@@ -4,6 +4,7 @@ import ChatInput from './ChatInput.svelte';
 import { activeSession } from '$lib/stores/active-session';
 import { auth } from '$lib/stores/auth.svelte';
 import { readDraft } from '$lib/stores/session/draft-persistence';
+import { reloadBlockers } from '$lib/services/app-update';
 import '$lib/test-stubs/composer-dom';
 
 // #1831: before a send into a large chat whose provider cache went cold, the
@@ -192,6 +193,8 @@ describe('cold send warning', () => {
 		expect(editor.textContent).toBe('');
 		expect(calls.some((call) => call.includes('/cache-state'))).toBe(true);
 		expect(sends).not.toHaveBeenCalled();
+		// The cleared draft is only in the pending send: an update must not reload.
+		expect(reloadBlockers()).toContain('message-sending');
 		answer();
 		await waitFor(() => expect(screen.getByText(/holds about 412k tokens/)).toBeTruthy());
 		await waitFor(() => expect(editor.textContent).toBe(TEXT));

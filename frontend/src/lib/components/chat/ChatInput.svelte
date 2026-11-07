@@ -37,6 +37,7 @@
 	import { attachComposerDictation, detachComposerDictation, startComposerDictation } from '$lib/services/composerDictation';
 	import { flushPendingDraft, holdPendingDraft, readDraft, releasePendingDraft, writeDraft } from '$lib/stores/session/draft-persistence';
 	import { takeUnfinishedRestores } from '$lib/stores/session/restored-draft';
+	import { trackSend } from '$lib/stores/session/message-sender';
 	import { promptStash } from '$lib/stores/session/prompt-stash';
 	import { promptHistory, createPromptRecall } from '$lib/stores/session/prompt-recall';
 	import { pastedTextFile } from './tiptap/large-paste';
@@ -1268,7 +1269,9 @@
 		try {
 			let mayGoNow = true;
 			try {
-				mayGoNow = mayGo ? await mayGo() : true;
+				// The draft is already cleared, so the check counts as part of the
+				// send: an update reload waits for it as it waits for the request.
+				mayGoNow = mayGo ? await trackSend(mayGo) : true;
 			} finally {
 				released?.();
 			}
