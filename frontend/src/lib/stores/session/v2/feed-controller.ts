@@ -544,16 +544,28 @@ function seedOptimistic(): void {
  * send's receipt names. Any turn the feed shows before that receipt came earlier,
  * and a message with the same text can claim the optimistic row, so only the
  * send's own command id counts.
+ *
+ * `ended` is a turn the feed just showed ending. History the feed had already
+ * shown when Stop was pressed is older than the Stop, so a replay of it names
+ * nothing (#1114). A send with no receipt by the time a turn after the Stop has
+ * ended never reached the worker before it: the recovery then ends on that turn,
+ * so it cannot carry over to every later one. Only a feed that was caught up
+ * when Stop was pressed, and still is, can tell such a turn from older history.
  */
 function nameRecoveryFrom(
-	s: Pick<ActiveSessionState, 'stopTimedOutTurnId' | 'stopTimedOutCommandId'>,
-	turnId: string | null
+	s: Pick<ActiveSessionState, 'stopTimedOutTurnId' | 'stopTimedOutCommandId' | 'stopTimedOutAfterSeq'>,
+	turnId: string | null,
+	ended = false
 ): string | null {
 	const timedOut = s.stopTimedOutTurnId;
+	if (timedOut !== STOP_TURN_NOT_NAMED) return nameStopRecovery(timedOut, turnId);
+	const after = s.stopTimedOutAfterSeq;
+	if (after != null && reducerState.lastSeq <= after) return timedOut;
 	const command = s.stopTimedOutCommandId;
-	if (timedOut !== STOP_TURN_NOT_NAMED || !command) return nameStopRecovery(timedOut, turnId);
+	if (!command) return nameStopRecovery(timedOut, turnId);
 	const receipt = reducerState.messages.find(m => m.commandId === command && reducerState.messageOriginSeq.has(m.id));
-	return receipt ? receipt.turnId || turnId || timedOut : timedOut;
+	if (receipt) return receipt.turnId || turnId || timedOut;
+	return ended && turnId && after != null && caughtUp ? turnId : timedOut;
 }
 
 // ─── Fold reducer state → activeSession (rAF-coalesced) ───────────────────────
@@ -899,6 +911,9 @@ export interface FeedController {
 	 *  flip restore the authoritative value instead of guessing `false` and
 	 *  killing the indicator for a turn that is genuinely live. */
 	isReducerStreaming: (sessionId: string | null) => boolean;
+	/** The last event seq the reducer has applied for this session, once it has
+	 *  caught up (null while it replays history or feeds another session). */
+	reducerSeq?: (sessionId: string | null) => number | null;
 
 	// ── Optimistic streaming (S6) ──────────────────────────────────
 	/**
@@ -1135,7 +1150,7 @@ export const feedController: FeedController = {
 				// Stop's recovery from that end, or it would bind to the next turn.
 				if ((ev.type === 'turn.completed' || ev.type === 'turn.aborted') && deps?.getState().stopTimedOutTurnId) {
 					const endedTurnId = typeof ev.turn_id === 'string' ? ev.turn_id : null;
-					deps.update(s => ({ ...s, stopTimedOutTurnId: nameRecoveryFrom(s, endedTurnId) }));
+					deps.update(s => ({ ...s, stopTimedOutTurnId: nameRecoveryFrom(s, endedTurnId, true) }));
 				}
 				// A lagged mirror can replay an entire turn before the next fold.
 				// Consume optimism when the reducer confirms the turn, not only
@@ -1354,6 +1369,11 @@ export const feedController: FeedController = {
 	isReducerStreaming(sessionId: string | null) {
 		if (sessionId === null || currentSessionId !== sessionId) return false;
 		return reducerState.isStreaming;
+	},
+
+	reducerSeq(sessionId: string | null) {
+		if (sessionId === null || currentSessionId !== sessionId || !caughtUp) return null;
+		return reducerState.lastSeq;
 	},
 
 	noteOptimisticSend(sessionId: string | null) {

@@ -752,6 +752,42 @@ describe('ws-message-handlers', () => {
 		});
 	});
 
+	// #1109: a Stop for a turn that had already ended reached nothing.
+	describe('stop_result handler', () => {
+		function waitingOn(stopRequestedTurnId: string | null, stopTimedOutTurnId: string | null = null) {
+			let state = { ...mockState(), sessionId: 'session-1', stopRequestedTurnId, stopTimedOutTurnId, error: null };
+			deps = createMockDeps({
+				getState: vi.fn(() => state),
+				update: vi.fn((fn) => { state = fn(state); }),
+			});
+			handlers = createMessageHandlers(deps);
+			return () => state;
+		}
+		const missed = { type: 'stop_result', session_id: 'session-1', turn_id: 'turn-1', stopped: false,
+			message: 'Nothing was stopped: that reply had already finished.' };
+
+		it('ends the Stop it answers, for no turn, and says why', () => {
+			const read = waitingOn('turn-1', 'turn-1');
+			handlers.handleMessage(missed);
+			expect(deps.clearStopTimeout).toHaveBeenCalled();
+			expect(read().stopRequestedTurnId).toBeNull();
+			expect(read().stopTimedOutTurnId).toBeNull();
+			expect(read().error).toBe(missed.message);
+		});
+
+		it.each([
+			['a newer Stop', { stopRequested: 'turn-2' }, {}],
+			['another session', { stopRequested: 'turn-1' }, { session_id: 'session-2' }],
+			['a Stop that stopped something', { stopRequested: 'turn-1' }, { stopped: true }],
+		])('leaves %s alone', (_label, { stopRequested }, frame) => {
+			const read = waitingOn(stopRequested);
+			handlers.handleMessage({ ...missed, ...frame });
+			expect(deps.clearStopTimeout).not.toHaveBeenCalled();
+			expect(read().stopRequestedTurnId).toBe(stopRequested);
+			expect(read().error).toBeNull();
+		});
+	});
+
 	describe('queued_message_removal handler (outcome of x on a pending message)', () => {
 		beforeEach(() => {
 			(notify.warning as ReturnType<typeof vi.fn>).mockClear();

@@ -608,6 +608,10 @@ async def test_handle_stop_stale_turn_id_spares_successor(mock_db):
     # Successor untouched (still running); the stale target stays completed.
     assert turns_db.get_turn(n1)["state"] == "running"
     assert turns_db.get_turn(n)["state"] == "completed"
+    # The Stop reached nothing, and the page is told so instead of nothing (#1109).
+    [missed] = sent_frames(handler, "stop_result")
+    assert missed["session_id"] == "sess-1" and missed["turn_id"] == n and missed["stopped"] is False
+    assert missed["message"]
 
 
 @contextmanager
@@ -640,11 +644,13 @@ async def test_handle_stop_on_a_parked_turn_ends_its_work(mock_db, newer):
         "app.core.query_session_lifecycle.stop_all_background_tasks",
         new=AsyncMock(return_value=[]),
     ) as stop_bg:
-        await _make_handler().handle_stop({"session_id": "sess-1", "turn_id": parked})
+        handler = _make_handler()
+        await handler.handle_stop({"session_id": "sess-1", "turn_id": parked})
 
     if newer in ("started", "completed"):
         stop_bg.assert_not_awaited()
         assert turns_db.get_turn(successor)["state"] == ("running" if newer == "started" else "completed")
+        assert [f["stopped"] for f in sent_frames(handler, "stop_result")] == [False]
     else:
         [scope] = captured
         # A parked turn has no live-row flip/owner receipt. Cleanup must bind
@@ -652,6 +658,8 @@ async def test_handle_stop_on_a_parked_turn_ends_its_work(mock_db, newer):
         assert turns_db.STOP_RECEIPT_KEY not in turns_db.get_turn(parked)["payload"]
         stop_bg.assert_awaited_once_with("sess-1", user_stop=True, scope=scope, receipt=None)
         assert stop_bg.await_args.kwargs["scope"] is scope
+        # The parked turn's work was stopped: no "nothing was stopped" notice.
+        assert sent_frames(handler, "stop_result") == []
 
 
 async def test_handle_stop_for_a_parked_turn_spares_a_later_turn(mock_db):
@@ -719,6 +727,29 @@ async def test_stop_relayed_to_the_owning_worker_ends_a_parked_turns_work(mock_d
         stop_bg.assert_awaited_once_with("sess-1", user_stop=True, scope=scope, receipt=None)
         assert stop_bg.await_args.kwargs["scope"] is scope
         assert reply["interrupted"] is True
+
+
+@pytest.mark.parametrize("reply, missed", [
+    ({"interrupted": False, "turn_id": None}, True),
+    ({"interrupted": True, "turn_id": "t-live"}, False),
+    ({"turn_id": None}, False),  # an older owner that does not say
+])
+async def test_relayed_stop_tells_the_page_when_it_reached_nothing(mock_db, reply, missed):
+    """A Stop relayed to the owning worker that matched no turn and no parked
+    work must not end silently on the page that pressed it (#1109)."""
+    from app.network import control
+
+    _make_session("sess-1")
+    with _Patches(), patch.object(control, "interrupt", new=AsyncMock(return_value=reply)) as relay:
+        handler = _make_handler()
+        handler._network_owner = AsyncMock(return_value="owner-device")
+        handler._v2_broadcast_queue = AsyncMock()
+        await handler.handle_stop({"session_id": "sess-1", "turn_id": "t-old"})
+
+    relay.assert_awaited_once()
+    frames = sent_frames(handler, "stop_result")
+    assert frames == ([{"type": "stop_result", "session_id": "sess-1", "turn_id": "t-old", "stopped": False,
+                        "message": frames[0]["message"]}] if missed else [])
 
 
 # ═══ handle_interrupt_for_query — interrupt(send_now) + confirm ══════════════

@@ -981,11 +981,11 @@ describe('message-sender local-send presentation intent', () => {
 			for (const revision of [8, 9]) {
 				const start = snapshots.length;
 				expect(await sender.sendMessage('fresh local send', { skipMessageAppend: skip })).toBe(true);
-				expect(getState().localSendIntent).toEqual({ sessionId: 'intent-session', revision });
+				expect(getState().localSendIntent).toEqual({ sessionId: 'intent-session', revision, commandId: expect.any(String) });
 				const cleared = snapshots.slice(start).filter(s => s.error === null);
 				expect(cleared.length).toBeGreaterThan(0);
 				for (const snapshot of cleared) {
-					expect(snapshot.localSendIntent).toEqual({ sessionId: 'intent-session', revision });
+					expect(snapshot.localSendIntent).toEqual({ sessionId: 'intent-session', revision, commandId: expect.any(String) });
 				}
 			}
 			if (streaming || skip) expect(getState().messages).toBe(initial.messages);
@@ -1405,6 +1405,60 @@ describe('Stop timeout recovery', () => {
 			vi.advanceTimersByTime(300);
 			const state = test.getState();
 			expect(state.liveTurnId).toBe('turn-2');
+			expect(state.stopTimedOutTurnId).toBeNull();
+			expect(stopRecoveryAppliesToTurn(state.stopTimedOutTurnId, state.liveTurnId)).toBe(false);
+		});
+
+		// #1114: a steered send's row carries the parked turn's id, and a queued
+		// or pre-appended send has no row at all. Both are named by their receipt.
+		it.each([
+			['steered into a parked turn', [{ id: 'optimistic-1', role: 'user', content: 'go', commandId: 'cmd-1', turnId: 'parked' }]],
+			['with no row of its own', []],
+		])('names a send %s from its receipt, not from a replayed older turn', (_label, rows) => {
+			const test = stopping(null);
+			test.deps.update(s => ({ ...s, messages: rows as ActiveSessionState['messages'],
+				localSendIntent: { sessionId: 'sess-1', revision: 1, commandId: 'cmd-1' } }));
+			test.sender.stopGeneration();
+			vi.advanceTimersByTime(10000);
+			expect(test.getState().stopTimedOutCommandId).toBe('cmd-1');
+			feedController.start('sess-1');
+			event('turn.completed', 'parked', 1);
+			event('turn.started', 'wake', 2);
+			feed.onEvent!({ type: 'caught_up', seq: 2 });
+			vi.advanceTimersByTime(300);
+			let state = test.getState();
+			expect(state.liveTurnId).toBe('wake');
+			expect(stopRecoveryAppliesToTurn(state.stopTimedOutTurnId, state.liveTurnId)).toBe(true);
+
+			event('message.user', 'wake', 3, { command_id: 'cmd-1', content: 'go' });
+			vi.advanceTimersByTime(300);
+			state = test.getState();
+			expect(state.stopTimedOutTurnId).toBe('wake');
+			expect(stopRecoveryAppliesToTurn(state.stopTimedOutTurnId, state.liveTurnId)).toBe(true);
+		});
+
+		// #1114: the stopped send never reached the worker, so no receipt comes.
+		it('ends a recovery whose send never gets a receipt on the next turn, not every later one', async () => {
+			const test = stopping(null);
+			test.deps.update(s => ({ ...s, isStreaming: false }));
+			feedController.start('sess-1');
+			feed.onEvent!({ type: 'caught_up', seq: 0 });
+			expect(await test.sender.sendMessage('lost on the way')).toBe(true);
+			test.sender.stopGeneration();
+			vi.advanceTimersByTime(10000);
+			expect(test.getState().stopTimedOutTurnId).toBe(STOP_TURN_NOT_NAMED);
+
+			// Another device's turn runs and ends; this page's send is not in it.
+			event('turn.started', 'elsewhere', 1);
+			event('message.user', 'elsewhere', 2, { command_id: 'other-device', content: 'hi' });
+			event('turn.completed', 'elsewhere', 3);
+			vi.advanceTimersByTime(300);
+			expect(test.getState().stopTimedOutTurnId).toBe('elsewhere');
+
+			event('turn.started', 'later', 4);
+			vi.advanceTimersByTime(300);
+			const state = test.getState();
+			expect(state.liveTurnId).toBe('later');
 			expect(state.stopTimedOutTurnId).toBeNull();
 			expect(stopRecoveryAppliesToTurn(state.stopTimedOutTurnId, state.liveTurnId)).toBe(false);
 		});

@@ -57,6 +57,7 @@ ws.send(JSON.stringify({
 | `done` | Turn complete | `session_id`, `metadata` (`total_cost_usd`, `tokens_in`, `tokens_out`, `model`, `duration_ms`, ...) |
 | `interrupted` | Turn ended by an interrupt | `session_id`, `message` |
 | `interrupt_confirmed` / `interrupt_failed` | Reply to `interrupt_for_query` | `session_id`, `message` (on failure) |
+| `stop_result` | Reply to a `stop` whose `turn_id` names a turn that had already ended with no work still running from it, so nothing was stopped (`stopped: false`). Show the message and stop waiting for that Stop; a Stop that stopped something is answered by the turn's own end instead | `session_id`, `turn_id`, `stopped`, `message` |
 | `query_queued` | The send was admitted durably (locally or by the executing worker). Correlated sends receive `client_message_id` and `turn_id`; older queued-only acknowledgements may omit them | `session_id`, `client_message_id`, `turn_id` |
 | `session_not_found` | Reply to `load_session` for an unknown session (and, for an API key, for another principal's session) | `session_id` |
 | `session_closed` | Reply to `close_session` | `session_id` (null when no session was selected) |
@@ -86,7 +87,7 @@ Other devices watching the same session receive the same control frames. Content
 | `load_session` | Load/switch to a session and receive its history | `session_id` |
 | `watch_session` | Follow a session without loading its history. The server answers with one `sync` `queue_updated` frame for it (see Message Queue below); send it again to retry when that frame says `queue_status: "unavailable"` | `session_id` |
 | `close_session` | Stop following the current session; replies `session_closed` (with a null `session_id` when none was selected) | — |
-| `stop` | Stop the current turn, its background work and queued messages | `session_id`, `turn_id` (optional) |
+| `stop` | Stop the current turn, its background work and queued messages. A `turn_id` for a turn parked on background work stops that work; one for a turn that has ended and left nothing running replies `stop_result` | `session_id`, `turn_id` (optional) |
 | `permission_response` | Approve, deny or defer a tool use | `request_id`, `session_id`, `decision`, `remember`, `pattern` |
 | `get_pending_permissions` | List open and deferred permission requests for the current session | — |
 | `requeue_deferred_permissions` | Send deferred permission requests again as new `permission_request` frames | `session_id` |

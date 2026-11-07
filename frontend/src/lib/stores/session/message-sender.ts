@@ -632,6 +632,9 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				const localSendIntent = (s: ActiveSessionState) => ({
 					sessionId: _state.sessionId,
 					revision: (s.localSendIntent?.revision ?? 0) + 1,
+					// A Stop that times out names its turn from this send's receipt,
+					// whether or not the send has a transcript row of its own.
+					commandId: clientMessageId,
 				});
 
 				// Single atomic update — avoids intermediate render where streaming
@@ -789,6 +792,8 @@ export function createMessageSender(deps: MessageSenderDeps) {
 		stopGeneration() {
 			const _state = getState();
 			let recorded = false;
+			// Anything the feed has already shown came before this Stop.
+			const pressedAfterSeq = feedController.reducerSeq?.(_state.sessionId) ?? null;
 			if (_state.sessionId) {
 				// The interrupt is always a full stop (the query-scoped SDK interrupt
 				// tears down in-flight background sub-agents too).
@@ -842,11 +847,20 @@ export function createMessageSender(deps: MessageSenderDeps) {
 							return m.streaming ? { ...m, streaming: false } : m;
 						});
 						messages = messages.filter(m => !(m.type === 'text' && m.role === 'assistant' && !m.content));
-						// A newest user row with no turn yet is the send this Stop was pressed on.
+						// The page's latest send is the one this Stop was pressed on: a Stop
+						// still waiting for the feed to name a turn only times out while
+						// that send's turn has not shown up. Steered and row-less sends
+						// count too (#1114). Without one, a newest user row with no turn
+						// yet is that send.
+						const intent = s.localSendIntent;
 						const newestUser = s.messages.findLast(m => m.role === 'user');
+						const sentCommand = intent?.sessionId === s.sessionId && intent.commandId
+							? intent.commandId
+							: newestUser && !newestUser.turnId ? newestUser.commandId ?? null : null;
 						return { ...s, messages, isStreaming: false, optimisticStreaming: false,
 							stopTimedOutTurnId: s.liveTurnId ?? s.stopRequestedTurnId ?? STOP_TURN_NOT_NAMED,
-							stopTimedOutCommandId: newestUser && !newestUser.turnId ? newestUser.commandId ?? null : null };
+							stopTimedOutCommandId: sentCommand,
+							stopTimedOutAfterSeq: pressedAfterSeq };
 					});
 				}
 				stopTimeout.set(null);
