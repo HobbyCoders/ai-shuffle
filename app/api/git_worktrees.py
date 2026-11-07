@@ -636,8 +636,10 @@ async def list_worktrees(
 
     if await run_sync(get_project_v2, project_id):
         # A canonical project need not have a legacy project or even a base
-        # checkout here. Listing is read-only and never materializes a checkout.
-        await run_sync(require_origin_access, request=request, project_v2_id=project_id)
+        # checkout here. Follow a late-linked placeholder before listing rows.
+        # Listing is read-only and never materializes a checkout.
+        access = await run_sync(require_origin_access, request=request, project_v2_id=project_id)
+        project_id = access["project_v2"]["id"]
     else:
         check_project_access(request, project_id)
         working_dir = get_project_path(project_id)

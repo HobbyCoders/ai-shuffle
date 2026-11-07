@@ -69,6 +69,25 @@ def origin_for_legacy_project(project_row: Dict[str, Any]) -> str:
     return project_row.get("link_group_id") or ("local:" + str(project_row.get("id")))
 
 
+def resolve_catalog_project(project_v2_id: str) -> Optional[Dict[str, Any]]:
+    """Follow a late-linked placeholder for project-level reads, never sessions.
+
+    The exact ``local:<legacy primary key>`` origin proves the replacement;
+    names and paths cannot. A deleted legacy row is not an alias. Do not seed
+    anything here: creation/linking commits the replacement atomically, and
+    missing/removed checkouts must retain their normal 404/409 behavior.
+    """
+    project = projects_v2.get_project_v2(project_v2_id)
+    origin = (project or {}).get("origin") or ""
+    if origin.startswith("local:"):
+        legacy = projects_db.get_project(origin[len("local:"):])
+        if legacy:
+            current_origin = origin_for_legacy_project(legacy)
+            if current_origin != origin:
+                return projects_v2.get_project_v2_by_origin(current_origin) or project
+    return project
+
+
 def _persist_session_project_v2(session_id: str, project_v2_id: str) -> None:
     """One-shot self-heal write: bind a session to its project_v2, only if still
     NULL (never clobbers an existing binding, never touches legacy ``project_id``)."""
