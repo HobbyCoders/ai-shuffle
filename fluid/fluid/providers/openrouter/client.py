@@ -8,6 +8,7 @@ from the arg or ``OPENROUTER_API_KEY``. The streaming/retry loop is the shared
 
 from __future__ import annotations
 
+import asyncio
 import os
 from collections.abc import AsyncIterator
 
@@ -133,8 +134,9 @@ class OpenRouterClient:
             "content-type": "application/json",
             "accept": "text/event-stream",
         }
-        body = build_request_body(
-            request, allow_fallbacks=self._allow_fallbacks, openrouter=self._openrouter,
+        body = await asyncio.to_thread(
+            build_request_body, request,
+            allow_fallbacks=self._allow_fallbacks, openrouter=self._openrouter,
         )
         if not is_usable_client(self._http):
             # A host-injected client its owner has closed can never send again;
