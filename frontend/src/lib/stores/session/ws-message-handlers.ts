@@ -1031,6 +1031,24 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				handleStoppedOrInterrupted(data);
 				break;
 
+			case 'stop_result': {
+				// The worker says this page's Stop reached nothing: the turn it named
+				// had already ended and left no work running (#1109). The Stop is
+				// over, for no turn, so nothing below waits on it or restores for it.
+				const current = getState();
+				if (data.stopped !== false || (data.session_id && data.session_id !== current.sessionId)) break;
+				const turnId = typeof data.turn_id === 'string' ? data.turn_id : null;
+				if (!turnId || current.stopRequestedTurnId !== turnId) break;
+				clearStopTimeout();
+				update(s => ({
+					...s,
+					stopRequestedTurnId: null,
+					stopTimedOutTurnId: s.stopTimedOutTurnId === turnId ? null : s.stopTimedOutTurnId,
+					error: typeof data.message === 'string' && data.message ? data.message : s.error,
+				}));
+				break;
+			}
+
 			case 'user_message_discarded': {
 				// The user pressed Stop before any assistant output. The backend
 				// removed the orphan user message from the live store (so the

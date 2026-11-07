@@ -941,7 +941,14 @@ async def _interrupt(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
             session_id, user_stop=True, scope=scope,
             receipt=((row or {}).get("payload") or {}).get(turns.STOP_RECEIPT_KEY),
         )
-    return {"interrupted": row is not None or reaches_work,
+    interrupted = row is not None or reaches_work
+    # "finished" (not merely "not interrupted"): only an ENDED target lets the
+    # relaying page say nothing was stopped; an interrupting one is still busy.
+    finished = bool(is_stop and not interrupted and await run_sync(
+        turn_manager.stop_target_finished, session_id, body.get("turn_id") or None,
+    ))
+    return {"interrupted": interrupted,
+            "finished": finished,
             "turn_id": (row or {}).get("id"),
             **({"incomplete": True, "tasks": results,
                 "message": incomplete_text(results)}

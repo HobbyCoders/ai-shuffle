@@ -129,7 +129,8 @@ export interface ActiveSessionState {
 	/** Locally admitted text-send intent, including sends with no transcript echo.
 	 * Published atomically with error dismissal; automatic queue handoff and Stop
 	 * never advance it. Session-scoped so a delayed send cannot reset another view. */
-	localSendIntent?: { sessionId: string | null; revision: number };
+	/** `commandIds`: this page's recent sends in this session, oldest first (see stopGeneration). */
+	localSendIntent?: { sessionId: string | null; revision: number; commandIds?: string[] };
 	/** Whether a turn is live for this session.
 	 *
 	 *  SINGLE WRITER (finding S6): the SSE feed's reducer, folded through
@@ -164,6 +165,8 @@ export interface ActiveSessionState {
 	stopTimedOutTurnId?: string | null;
 	/** The send a timed-out Stop was pressed on; its receipt names STOP_TURN_NOT_NAMED's turn. */
 	stopTimedOutCommandId?: string | null;
+	/** The feed's last seq when that Stop was pressed: history up to it is older than the Stop. */
+	stopTimedOutAfterSeq?: number | null;
 	/** The latest turn is parked on background work (v2 feed `turn.parked`,
 	 *  cleared by the next `turn.*`). Keeps the transcript from folding a parked
 	 *  turn in the moment between its last task finishing and the wake turn
