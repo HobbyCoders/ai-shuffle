@@ -171,6 +171,9 @@ type WorktreePick = {intent: Picks['worktreeIntent']; checkout: CheckoutPick | n
 const WORKTREE_CACHE_KEY = 'ai-shuffle-composer:projectWorktrees';
 let projectWorktrees: Record<string, WorktreePick> = {};
 const registeredWorktrees = new Set<string>();
+// Keys whose account row holds a retired-identity null. A promotion onto one
+// must replace that null (version-checked), or the next sync deletes it again.
+const retiredWorktrees = new Set<string>();
 const hasProject = (project: ProjectPick) => !!(project.projectId || project.projectV2Id);
 const emptyWorktree = (): WorktreePick => ({intent:'local', checkout:null});
 function worktreeFor(project: ProjectPick): WorktreePick {
@@ -190,7 +193,10 @@ function worktreeAdapter(key: string) {
  registeredWorktrees.add(key);
  return {read: () => projectWorktrees[key] ?? null,
   // A synced null is a retired identity: no entry, not an empty choice.
-  apply(value: unknown) { applyWorktree(key, value ?? undefined); notifyRemote(); }};
+  apply(value: unknown) {
+   if (value === null) retiredWorktrees.add(key); else retiredWorktrees.delete(key);
+   applyWorktree(key, value ?? undefined); notifyRemote();
+  }};
 }
 function validWorktreeKey(key: string) {
  try {
@@ -202,6 +208,7 @@ function saveWorktree(project: ProjectPick, value: WorktreePick) {
  if (!hasProject(project)) return;
  const key = projectWorktreeKey(project);
  if (!registeredWorktrees.has(key)) preferenceSync.register(key, worktreeAdapter(key));
+ retiredWorktrees.delete(key);
  applyWorktree(key, value);
  preferenceSync.save(key, projectWorktrees[key]);
 }
@@ -244,6 +251,10 @@ function linkWorktreeProject(project: ProjectPick, from: ProjectPick = {...proje
   // Intent must follow discovery immediately, even while a create owns the branch.
   applyWorktree(key, {...local, checkout:!claimed && local.checkout ? {...local.checkout, ...project} : null});
   if (!registeredWorktrees.has(key)) preferenceSync.register(key, worktreeAdapter(key));
+  // Over a retired null the account must take the replacement; a concurrent
+  // choice from another device wins the version check. Otherwise bootstrap's
+  // only_if_missing keeps a choice another device already saved.
+  if (retiredWorktrees.delete(key)) preferenceSync.save(key, projectWorktrees[key]);
   if (claimed) pendingWorktreeLinks.set(localKey, {project, from, revision:checkoutRevisions.get(key) ?? 0, held:checkoutRevisions.get(localKey) ?? 0});
  }
  if (claimed) {
@@ -257,6 +268,7 @@ function linkWorktreeProject(project: ProjectPick, from: ProjectPick = {...proje
   saveWorktree(project, {...worktreeFor(project), checkout:{...local.checkout, ...project}});
  }
  applyWorktree(localKey, undefined);
+ retiredWorktrees.add(localKey);
  preferenceSync.save(localKey, null);
  if (promote) void preferenceSync.reconnect();
 }

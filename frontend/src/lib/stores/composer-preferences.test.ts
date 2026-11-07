@@ -394,7 +394,7 @@ it('does not revive a deferred local branch after a newer explicit clear on the 
 // dropped where a newer or explicit owner choice exists; that choice is kept.
 type Id='O'|'N'|'M';
 const chainRows:{name:string; script:string; ends:Partial<Record<Id,string|null>>; auto?:Id; retryAt?:Id}[]=[
- {name:'a single replacement', script:'claim O>N release', ends:{O:null,N:'topic/old',M:null}},
+ {name:'a single replacement', script:'claim O>N ?N release', ends:{O:null,N:'topic/old',M:null}},
  {name:'a failed create, then a retry that spends it', script:'claim O>N release', ends:{N:'topic/old'}, retryAt:'N'},
  {name:'two creates: the older one settling first never takes the newer hold', script:'claim claim2 O>N release !O release2', ends:{O:null,N:'topic/old'}, retryAt:'N'},
  {name:'a chain to an identity with no choice', script:'claim O>N N>M release', ends:{O:null,N:null,M:'topic/old'}},
@@ -420,12 +420,14 @@ it.each(chainRows)('lands or drops a held branch move: $name', async ({script, e
   else if (step==='clearN') p.rememberCheckout(ids.N,null); // The owner picks Auto under N.
   else if (step==='autoM') p.rememberWorktreeIntent(ids.M,'worktree'); // Explicit Auto under M.
   else if (step==='remoteO') mocks.adapters.get(key(ids.O))!.apply({intent:'worktree',checkout:branch('O','topic/newer')});
+  else if (step==='?N') expect(p.worktreeForProject(ids.N)).toEqual({intent:'worktree',checkout:null}); // Intent follows at once.
   else if (step==='!O') expect(p.worktreeForProject(ids.N).checkout).toBeNull(); // Still held by the newer create.
   else throw new Error(step);
  }
  for (const [id,name] of Object.entries(ends) as [Id,string|null][]) {
   expect(p.worktreeForProject(ids[id]).checkout?.branch ?? null, id).toBe(name);
-  if (name) expect(p.worktreeForProject(ids[id]).intent, id).toBe('worktree');
+  // The branch arrives whole, rebound to its identity, with the worktree intent.
+  if (name) expect(p.worktreeForProject(ids[id]), id).toEqual({intent:'worktree',checkout:branch(id,name)});
  }
  if (auto) expect(p.worktreeForProject(ids[auto])).toEqual({intent:'worktree',checkout:null});
  if (ends.O===null && auto!=='O') expect(mocks.save).toHaveBeenCalledWith(key(ids.O),null); // O retired and synced as gone.
