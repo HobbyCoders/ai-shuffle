@@ -266,11 +266,25 @@ def _default_branch(cwd):
     raise ValueError(message)
 
 
+def _require_materialized(cwd):
+    from app.core.git_service import git_service
+    from app.core.git_worktree_ops import WorktreeAddError
+
+    try:
+        git_service.require_complete_worktree(str(cwd))
+    except WorktreeAddError as exc:
+        raise ValueError(str(exc)) from exc
+
+
 def fingerprint(cwd):
-    """Only a checkout clean apart from untracked owner scratch can finish a handoff."""
-    if _transfer_status(cwd):
-        raise ValueError("The owning worker's files changed during resume; ownership was not moved.")
-    return git(cwd, "rev-parse", "HEAD").decode().strip()
+    """Only a finished checkout clean apart from owner scratch can finish a handoff."""
+    from app.core.git_worktree_ops import repo_worktree_lock
+
+    with repo_worktree_lock(str(cwd)):
+        _require_materialized(cwd)
+        if _transfer_status(cwd):
+            raise ValueError("The owning worker's files changed during resume; ownership was not moved.")
+        return git(cwd, "rev-parse", "HEAD").decode().strip()
 
 
 def _preflight(cwd):
@@ -316,6 +330,15 @@ def _is_credential_file(path):
 
 
 def export_checkout(cwd, branch, expected_remote=None):
+    """Never auto-commit a checkout whose materialization is unfinished."""
+    from app.core.git_worktree_ops import repo_worktree_lock
+
+    with repo_worktree_lock(str(cwd)):
+        _require_materialized(cwd)
+        return _export_checkout_locked(cwd, branch, expected_remote)
+
+
+def _export_checkout_locked(cwd, branch, expected_remote=None):
     """Commit and push the owner branch; return identifiers, never file bytes."""
     _branch(cwd, branch)
     remote = remote_identity(cwd)
@@ -402,6 +425,14 @@ def receiving_checkout(base, destination, branch):
 
 
 def import_checkout(base, destination, state):
+    """Fetch and accept under the same lock as any in-flight materialization."""
+    from app.core.git_worktree_ops import repo_worktree_lock
+
+    with repo_worktree_lock(str(base)):
+        return _import_checkout_locked(base, destination, state)
+
+
+def _import_checkout_locked(base, destination, state):
     """Fetch using local configuration; preserve dirty or divergent branches."""
     if state.get("protocol") != "git-origin-v1":
         raise ValueError("Update both workers to use Git-based resume.")
@@ -426,6 +457,7 @@ def import_checkout(base, destination, state):
         known = [line.removeprefix("worktree ") for line in git(base, "worktree", "list", "--porcelain").decode().splitlines() if line.startswith("worktree ")]
         if not any(Path(p).resolve() == dest.resolve() for p in known) or dest.is_symlink():
             raise ValueError("A local checkout already exists at the destination; its files were not changed.")
+        _require_materialized(dest)
         _branch(dest, branch)
         _require_clean(dest, branch, f"the receiving worker's checkout {dest}")
         _preflight(dest)

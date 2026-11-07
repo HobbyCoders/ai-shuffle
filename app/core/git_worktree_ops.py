@@ -4,12 +4,14 @@ Git Worktree Operations Mixin
 Provides worktree management: list, add, remove, and prune worktrees.
 """
 
+import errno
 import hashlib
 import logging
 import os
 import re
 import tempfile
 import threading
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -35,6 +37,10 @@ def _common_git_dir(path: str) -> Path:
     return Path(os.path.normcase(os.path.realpath(git_dir)))
 
 
+def _lock_contention(exc: OSError) -> bool:
+    return exc.errno in (errno.EACCES, errno.EAGAIN, errno.EDEADLK) or getattr(exc, "winerror", None) == 33
+
+
 class _RepositoryLock:
     """Reentrant per-thread lock plus a stable cross-process metadata lock."""
 
@@ -54,13 +60,22 @@ class _RepositoryLock:
                     if os.name == "nt":
                         import msvcrt
                         handle.seek(0)
-                        msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK if blocking else msvcrt.LK_NBLCK, 1)
+                        # LK_LOCK gives up after ten retries. Implement actual
+                        # blocking semantics ourselves, retrying contention only.
+                        while True:
+                            try:
+                                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                                break
+                            except OSError as exc:
+                                if not blocking or not _lock_contention(exc):
+                                    raise
+                                time.sleep(.1)
                     else:
                         import fcntl
                         fcntl.flock(handle.fileno(), fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
-                except OSError:
+                except OSError as exc:
                     handle.close()
-                    if blocking:
+                    if blocking or not _lock_contention(exc):
                         raise
                     self.thread_lock.release()
                     return False

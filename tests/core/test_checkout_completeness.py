@@ -731,3 +731,208 @@ def test_validation_failure_restores_evidence_and_invalidates_active_row(
     with pytest.raises(WorktreeAddError, match="incomplete"):
         _resolve(project, branch, raise_add_errors=True)
     assert checkouts_db.get_checkout(project["id"], RUNNER, branch=branch)["status"] == "incomplete"
+
+
+@pytest.mark.parametrize("consumer", ["import", "fingerprint", "publication"])
+def test_overlapping_handoff_cannot_accept_inflight_checkout(
+    project, base_checkout, workspace_root, tmp_path, consumer,
+):
+    import shlex
+    from app.core import checkout_transfer
+
+    branch = "fix/overlapping-handoff"
+    _git(base_checkout, "branch", branch)
+    origin = tmp_path / "origin.git"
+    _git(tmp_path, "init", "--bare", str(origin))
+    _git(base_checkout, "remote", "add", "origin", str(origin))
+    _git(base_checkout, "push", "origin", branch)
+    head = checkout_transfer.git(base_checkout, "rev-parse", "HEAD").decode().strip()
+    state = {"protocol": "git-origin-v1", "branch": branch, "head": head,
+             "remote": checkout_transfer.remote_identity(base_checkout)}
+    path = checkout_manager._branch_checkout_path(str(base_checkout), branch)
+    ready, release = tmp_path / "handoff-ready", tmp_path / "handoff-release"
+    script = tmp_path / "handoff-hook.py"
+    script.write_text(f"""
+import time
+from pathlib import Path
+Path({str(ready)!r}).write_text("ready")
+deadline = time.monotonic() + 10
+while not Path({str(release)!r}).exists():
+    if time.monotonic() > deadline:
+        raise RuntimeError("test did not release hook")
+    time.sleep(.01)
+Path("README.md").unlink()
+""")
+    hook = base_checkout / ".git/hooks/post-checkout"
+    hook.write_text(f"#!/bin/sh\n{shlex.quote(sys.executable)} {shlex.quote(str(script))}\n")
+    hook.chmod(0o755)
+    added, accepted, refused, errors = [], [], [], []
+    entered, done = threading.Event(), threading.Event()
+
+    def add():
+        try:
+            added.append(_resolve(project, branch))
+        except BaseException as exc:
+            errors.append(exc)
+
+    def receive():
+        entered.set()
+        try:
+            if consumer == "import":
+                accepted.append(checkout_transfer.import_checkout(base_checkout, path, state))
+            elif consumer == "publication":
+                from app.network import handoff
+                accepted.append(handoff._publish_receiving_checkout(project["id"], base_checkout, str(path), state))
+            else:
+                accepted.append(checkout_transfer.fingerprint(path))
+        except (ValueError, WorktreeAddError) as exc:
+            refused.append(str(exc))
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            done.set()
+
+    producer, receiver = threading.Thread(target=add), threading.Thread(target=receive)
+    producer.start()
+    try:
+        deadline = time.monotonic() + 5
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(.01)
+        assert ready.exists(), errors
+        assert (path / "README.md").is_file()
+        receiver.start()
+        assert entered.wait(5)
+        returned_during_add = done.wait(.5)
+        marker_during_add = _materializing_marker(base_checkout, path).is_file()
+    finally:
+        release.write_text("release")
+        producer.join(10)
+        if receiver.ident is not None:
+            receiver.join(10)
+    assert not producer.is_alive() and not receiver.is_alive()
+    assert not errors
+    assert not returned_during_add, "handoff accepted an in-flight materialization"
+    assert marker_during_add and _materializing_marker(base_checkout, path).is_file()
+    assert added == [None] and not accepted and refused
+    assert not checkouts_db.get_checkout(project["id"], RUNNER, branch=branch)
+
+
+@pytest.mark.parametrize("blocking", [True, False])
+def test_windows_repository_lock_waits_past_ten_seconds(base_checkout, monkeypatch, blocking):
+    import errno
+    from types import SimpleNamespace
+    from app.core import git_worktree_ops as ops
+
+    lock = ops._RepositoryLock(base_checkout / ".git")
+    elapsed, calls = [], []
+
+    def locking(fd, mode, count):
+        calls.append(mode)
+        if len(calls) <= 110:
+            raise OSError(errno.EACCES, "byte range is locked")
+
+    monkeypatch.setitem(sys.modules, "msvcrt", SimpleNamespace(LK_LOCK=1, LK_NBLCK=2, locking=locking))
+    monkeypatch.setattr(ops, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(ops, "time", SimpleNamespace(sleep=lambda seconds: elapsed.append(seconds)))
+    assert lock.acquire(blocking=blocking) is blocking
+    if blocking:
+        assert sum(elapsed) > 10
+        assert len(calls) == 111 and all(mode == 2 for mode in calls)
+        lock.release()
+    else:
+        assert len(calls) == 1 and not elapsed
+    assert lock.depth == 0 and lock.file is None
+
+
+@pytest.mark.parametrize("base_role", [True, False])
+def test_handoff_publication_keeps_validation_and_active_upsert_locked(
+    project, base_checkout, tmp_path, monkeypatch, base_role,
+):
+    from app.core import checkout_transfer
+    from app.core.git_worktree_ops import repo_worktree_lock
+    from app.network import handoff
+
+    branch = checkout_transfer.git(base_checkout, "branch", "--show-current").decode().strip()
+    path = base_checkout
+    if not base_role:
+        branch, path = "fix/publish-ready", tmp_path / "publish-ready"
+        _add_legacy_worktree(base_checkout, path, branch)
+    head = checkout_transfer.git(path, "rev-parse", "HEAD").decode().strip()
+    original = checkouts_db.upsert_checkout
+    probes = []
+
+    def probe():
+        lock = repo_worktree_lock(str(path))
+        acquired = lock.acquire(blocking=False)
+        probes.append(acquired)
+        if acquired:
+            lock.release()
+
+    def guarded_upsert(*args, **kwargs):
+        contender = threading.Thread(target=probe)
+        contender.start()
+        contender.join(5)
+        assert not contender.is_alive() and probes == [False]
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(checkouts_db, "upsert_checkout", guarded_upsert)
+    result = handoff._publish_receiving_checkout(
+        project["id"], base_checkout, str(path), {"branch": branch, "head": head},
+    )
+    assert result == (None if base_role else branch)
+    row = checkouts_db.get_checkout(project["id"], handoff.settings.effective_instance_id, branch=result)
+    assert row["status"] == "active" and row["path"] == str(path) and row["head_sha"] == head
+
+
+@pytest.mark.parametrize("blocking", [True, False])
+def test_windows_repository_lock_does_not_retry_noncontention(base_checkout, monkeypatch, blocking):
+    import errno
+    from types import SimpleNamespace
+    from app.core import git_worktree_ops as ops
+
+    lock = ops._RepositoryLock(base_checkout / ".git")
+
+    def broken(*args):
+        raise OSError(errno.EBADF, "not a contention error")
+
+    monkeypatch.setitem(sys.modules, "msvcrt", SimpleNamespace(LK_NBLCK=2, locking=broken))
+    monkeypatch.setattr(ops, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(ops, "time", SimpleNamespace(sleep=lambda _: pytest.fail("retried a permanent lock error")))
+    with pytest.raises(OSError, match="not a contention error"):
+        lock.acquire(blocking=blocking)
+    assert lock.depth == 0 and lock.file is None
+    assert lock.thread_lock.acquire(blocking=False)
+    lock.thread_lock.release()
+
+
+@pytest.mark.parametrize("consumer", ["export", "worker_restore"])
+def test_handoff_export_and_worker_restore_refuse_failed_existing_directory(
+    project, base_checkout, workspace_root, monkeypatch, consumer,
+):
+    from app.core import checkout_transfer, project_resolver, worker_checkout
+    from app.db import database
+
+    worker = "resume-race"
+    branch = worker_checkout.worker_branch(worker)
+    _git(base_checkout, "branch", branch)
+    hook = base_checkout / ".git/hooks/post-checkout"
+    hook.write_text("#!/bin/sh\nrm -- README.md\nexit 0\n")
+    hook.chmod(0o755)
+    assert _resolve(project, branch) is None
+    path = checkout_manager._branch_checkout_path(str(base_checkout), branch)
+    before = _snapshot(path)
+    if consumer == "export":
+        monkeypatch.setattr(checkout_transfer, "_export_checkout_locked",
+                            lambda *args: pytest.fail("export started before readiness validation"))
+        with pytest.raises(ValueError, match="incomplete"):
+            checkout_transfer.export_checkout(path, branch)
+    else:
+        monkeypatch.setattr(database, "get_session", lambda _: {
+            "id": worker, "project_v2_id": project["id"], "branch": branch, "worktree_path": str(path),
+        })
+        monkeypatch.setattr(project_resolver, "resolve_project_v2", lambda _: project)
+        monkeypatch.setattr(worker_checkout, "_base_checkout_path", lambda _: str(base_checkout))
+        ready, _ = worker_checkout.restore_worker_checkout(worker, follow_live_switch=False)
+        assert not ready, "existing-directory shortcut accepted an unfinished checkout"
+    assert _snapshot(path) == before
+    assert _materializing_marker(base_checkout, path).is_file()
