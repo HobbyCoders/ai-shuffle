@@ -954,7 +954,7 @@ export interface TurnProviderAlive {
   [k: string]: unknown;
 }
 /**
- * Content-free receipt for a held message withdrawn before it became a turn.
+ * Content-free receipt: an owner's queued or held message was withdrawn and will never run.
  */
 export interface QueuedMessageWithdrawn {
   command_id?: CommandId31;

@@ -17,6 +17,7 @@
  */
 
 import { clearCompactRetry } from '../compact-first-retry';
+import { retireSends } from '../send-run';
 import {
 	reduce,
 	parseWireEvent,
@@ -1171,6 +1172,12 @@ export const feedController: FeedController = {
 				if (caughtUp && sentinelPending) caughtUp = false;
 				if (ev.type === 'swarm.updated') swarms.receive(ev.swarm, sessionId);
 				if (typeof ev.command_id === 'string') clearCompactRetry(sessionId, ev.command_id);
+				// A queued send withdrawn anywhere (another tab or device too) will
+				// never run: it leaves this page's run of sends (send-run.ts).
+				if (ev.type === 'queued_message.withdrawn' && typeof ev.command_id === 'string' && ev.command_id) {
+					const withdrawn = ev.command_id;
+					deps?.update(s => retireSends(s, withdrawn));
+				}
 				reducerState = reduce(reducerState, ev);
 				if (ev.type === 'turn.started') turnStartedSeq = reducerState.lastSeq;
 				if (bannerAnchor) bannerAnchor = followTurnError(bannerAnchor, ev);

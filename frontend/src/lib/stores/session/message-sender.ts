@@ -28,7 +28,7 @@ import { composerPreferences } from '../composer-preferences';
 import { sendableComposerBinding } from './composer-binding';
 import { registerReloadBlocker } from '$lib/services/app-update';
 import { claimBootSend, releaseBootSend } from './session-init';
-import { retireSends, runWithSend, sendRunIn } from './send-run';
+import { retireSends, runWithSend, sendRunIn, stillPressedOn } from './send-run';
 
 // ─── Sends in flight ─────────────────────────────────────────────────────────
 
@@ -736,9 +736,12 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					overrides,
 				};
 				if (options?.compactFirst) {
+					// Whether the worker answered that it did not queue this send.
+					let refused = false;
 					try {
 						const result = await compactSession(_state.sessionId!, query);
 						if (!result.queued_turn_id) {
+							refused = true;
 							throw new Error('This worker needs an update to compact and send. Your draft has been kept.');
 						}
 						pendingQueue.acknowledgeSend(_state.sessionId, clientMessageId);
@@ -746,12 +749,18 @@ export function createMessageSender(deps: MessageSenderDeps) {
 						spendBindingPicks(_state.sessionId);
 					} catch (error) {
 						pendingQueue.acknowledgeSend(_state.sessionId, clientMessageId);
+						// Only a refusal proves the worker did not take it. A lost or
+						// unreadable reply may follow acceptance, so that send stays in the
+						// run until its receipt or a withdrawal settles it (send-run.ts).
+						const status = (error as { status?: unknown } | null)?.status;
+						const notTaken = refused || (typeof status === 'number' && status >= 400 && status < 500);
+						const settle = <T extends ActiveSessionState>(st: T): T => notTaken ? retireSends(st, clientMessageId) : st;
 						// Remove only our optimistic echo, never a newer session's draft
 						// or an authoritative queue snapshot that arrived in the meantime.
 						update(s => s.sessionId === _state.sessionId ? {
-							...retireSends(s, clientMessageId), queuedMessages: s.queuedMessages.filter(m => m.id !== optimisticQueuedId),
+							...settle(s), queuedMessages: s.queuedMessages.filter(m => m.id !== optimisticQueuedId),
 							error: error instanceof Error ? error.message : 'Could not compact and send.',
-						} : retireSends(s, clientMessageId));
+						} : settle(s));
 						throw error;
 					}
 					return true;
@@ -802,8 +811,10 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			// receipted. The run holds only sends that may still run (send-run.ts),
 			// so a message queued behind a turn the feed has shown is the one that
 			// runs once that turn ends, not the send that started it.
-			const pressedOnCommand = sendRunIn(_state, _state.sessionId)
-				.find(id => !feedController.hasReceipt?.(_state.sessionId, id)) ?? null;
+			const pressedRun = sendRunIn(_state, _state.sessionId);
+			const pressedAt = pressedRun.findIndex(id => !feedController.hasReceipt?.(_state.sessionId, id));
+			// If it is retired before the timeout, the next send in the run takes its place.
+			const pressedOn = pressedAt < 0 ? [] : pressedRun.slice(pressedAt);
 			if (_state.sessionId) {
 				// The interrupt is always a full stop (the query-scoped SDK interrupt
 				// tears down in-flight background sub-agents too).
@@ -862,7 +873,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 						// Steered and row-less sends count too (#1114). Without one, a
 						// newest user row with no turn yet is that send.
 						const newestUser = s.messages.findLast(m => m.role === 'user');
-						const sentCommand = pressedOnCommand
+						const sentCommand = (pressedOn.length ? stillPressedOn(s, _state.sessionId, pressedOn) : null)
 							?? (newestUser && !newestUser.turnId ? newestUser.commandId ?? null : null);
 						return { ...s, messages, isStreaming: false, optimisticStreaming: false,
 							stopTimedOutTurnId: s.liveTurnId ?? s.stopRequestedTurnId ?? STOP_TURN_NOT_NAMED,

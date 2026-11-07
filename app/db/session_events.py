@@ -357,7 +357,8 @@ def append_events(
 
 
 def can_backfill_events(session_id: str, *, allow_empty: bool = True, _conn: Any = None) -> bool:
-    """Whether the log is empty or contains only cancellation events.
+    """Whether the log is empty or contains only cancellation events (a peer
+    cancelled from the queue, or a queued send withdrawn: neither has a row).
 
     A reconnect uses ``allow_empty=False``: a cancellation-only log may still
     need history, but an empty log cannot validate a client's existing cursor.
@@ -371,7 +372,8 @@ def can_backfill_events(session_id: str, *, allow_empty: bool = True, _conn: Any
         cursor = conn.cursor()
         cursor.execute(
             "SELECT NOT EXISTS (SELECT 1 FROM session_events WHERE session_id = %s "
-            "AND event_type <> 'queue.cancelled')" + populated + " AS eligible", params,
+            "AND event_type NOT IN ('queue.cancelled', 'queued_message.withdrawn'))"
+            + populated + " AS eligible", params,
         )
         return bool(cursor.fetchone()["eligible"])
 

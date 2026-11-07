@@ -515,6 +515,61 @@ async def test_handle_clear_queued_messages_aborts_only_user_chips(mock_db):
     assert cwh._v2_queue_view("sess-1") == []
 
 
+def _withdrawal_receipts(session_id):
+    from app.db import session_events
+
+    return [(e["command_id"], e["payload"]) for e in session_events.get_events(session_id)
+            if e["event_type"] == "queued_message.withdrawn"]
+
+
+@pytest.mark.parametrize("by", ["message_id", "client_message_id", "clear"])
+async def test_a_withdrawal_reaches_every_page_through_the_session_log(mock_db, by):
+    """Page 1 withdraws B; page 2 (which sent B) learns it from the session log,
+    which every page's feed reads, live or on reconnect. The receipt carries
+    B's command id and no words (#1114, review round 3 S2)."""
+    _make_session("sess-1")
+    b_cmd, c_cmd = "client-" + "b" * 32, "client-" + "c" * 32
+    b = turns_db.enqueue_turn("sess-1", "user", prompt="B words", command_id=b_cmd)["id"]
+    c = turns_db.enqueue_turn("sess-1", "queue", prompt="C words", command_id=c_cmd)["id"]
+
+    with _Patches():
+        page_1 = _make_handler()
+        if by == "clear":
+            await page_1.handle_clear_queued_messages({"session_id": "sess-1"})
+        else:
+            await page_1.handle_remove_queued_message(
+                {"session_id": "sess-1", by: b if by == "message_id" else b_cmd})
+
+    withdrawn = [(b_cmd, {"message_id": b})] + ([(c_cmd, {"message_id": c})] if by == "clear" else [])
+    assert _withdrawal_receipts("sess-1") == withdrawn
+    from app.db import session_events
+    # A content-free receipt has no transcript row: legacy history can still be imported.
+    assert session_events.can_backfill_events("sess-1")
+    # A repeated × is answered from the receipt, and writes no second one.
+    with _Patches():
+        await _make_handler().handle_remove_queued_message({"session_id": "sess-1", "client_message_id": b_cmd})
+    assert _withdrawal_receipts("sess-1") == withdrawn
+
+
+def test_every_queued_send_that_will_not_run_gets_a_receipt(mock_db):
+    """The receipt is written by the one guarded queued -> aborted transition, so
+    Stop's queue and the scheduler's removals send it too. A send that ran, a peer
+    message and a row with no command id get none."""
+    _make_session("sess-1")
+    cmd = "client-" + "d" * 32
+    stopped = turns_db.enqueue_turn("sess-1", "user", prompt="stopped words", command_id=cmd)["id"]
+    no_command = turns_db.enqueue_turn("sess-1", "user", prompt="legacy")["id"]
+    peer = turns_db.enqueue_turn("sess-1", "agent_message", prompt="peer", command_id="peer-cmd")["id"]
+    ran = turns_db.enqueue_turn("sess-1", "user", prompt="ran", command_id="client-" + "e" * 32)["id"]
+    assert turns_db.start_turn(ran) is not None
+
+    turns_db.stop_queued_turns("sess-1", [stopped, no_command])
+    turns_db.remove_queued_turn(peer)
+    assert turns_db.remove_queued_turn(ran) is None
+
+    assert _withdrawal_receipts("sess-1") == [(cmd, {"message_id": stopped})]
+
+
 # ═══ handle_stop — interrupt(stop) ════════════════════════════════════════════
 
 
