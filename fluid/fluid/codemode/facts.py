@@ -346,13 +346,16 @@ class FactStore:
                 doc[key] = []
         return doc
 
-    def _write(self, doc):
+    def _write(self, doc, *, notify=True):
         from fluid.codemode.skills import atomic_write_text
         doc.update(schema=SCHEMA, owner=self.owner)
         payload = json.dumps(doc, ensure_ascii=False, indent=2)
         if len(payload.encode()) > MAX_DOCUMENT_BYTES:
             raise ValueError("Memory capacity reached; no changes saved")
         atomic_write_text(self.path, payload)
+        if notify:
+            from fluid.codemode.transactions import committed_change
+            committed_change(self.path)
 
     def _prepare(self):
         doc = self._load()
@@ -636,12 +639,12 @@ class FactStore:
             share = cap - max(0, reserve)
             if calls >= share:
                 if self._note_budget_spent(doc, day):
-                    self._write(doc)
+                    self._write(doc, notify=False)
                 return False
             doc["inference_budget"] = {"day": day, "calls": calls + 1, "last_at": time.time()}
             if calls + 1 >= share:
                 self._note_budget_spent(doc, day)
-            self._write(doc)
+            self._write(doc, notify=False)
             return True
 
     @staticmethod
@@ -1459,7 +1462,9 @@ class FactStore:
                     # A fact that is still being looked up is not stale.
                     if not e.get("protected"):
                         e["expires_at"] = max(e.get("expires_at", 0), now + lifetime(e))
-            self._write(doc)
+            # Recall/budget bookkeeping must not turn a read into an urgent
+            # whole-store publish. Periodic reconciliation still sees it.
+            self._write(doc, notify=False)
 
     def export(self):
         doc = self.snapshot()

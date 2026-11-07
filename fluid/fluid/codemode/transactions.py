@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from contextvars import ContextVar
+import logging
 import os
 from pathlib import Path
 import threading
@@ -11,10 +13,63 @@ import weakref
 _guard = threading.Lock()
 _locks = weakref.WeakValueDictionary()
 _depth = threading.local()
+_change_callback = None
+_changes_suppressed = ContextVar("file_changes_suppressed", default=False)
+_log = logging.getLogger(__name__)
+
+
+def _emit_changes(paths):
+    if paths and _change_callback is not None:
+        try:
+            _change_callback(paths)
+        except Exception:  # A sync hint must never turn a durable save into a failure.
+            _log.warning("File change notification failed; reconciliation will retry", exc_info=True)
+
+
+def committed_change(path: Path) -> None:
+    """Notify the host after a durable write and after all enclosing file locks.
+
+    A transaction can contain nested saves (including a replacement). Coalesce
+    their paths until its outer lock is released; never publish inside a writer.
+    Standalone Fluid has no callback and needs no application dependency.
+    """
+    if _changes_suppressed.get():
+        return
+    path = Path(path)
+    if getattr(_depth, "held", set()):
+        if not hasattr(_depth, "changes"):
+            _depth.changes = set()
+        _depth.changes.add(path)
+    else:
+        _emit_changes({path})
+
+
+@contextmanager
+def suppress_changes():
+    """Peer materialization is not a local mutation, even through normal stores."""
+    token = _changes_suppressed.set(True)
+    try:
+        yield
+    finally:
+        _changes_suppressed.reset(token)
 
 
 @contextmanager
 def file_transaction(path: Path):
+    try:
+        with _file_transaction(path):
+            yield
+    finally:
+        if not getattr(_depth, "held", set()):
+            changes = getattr(_depth, "changes", set())
+            _depth.changes = set()
+            # Atomic file replacements cannot be rolled back. If a later step
+            # raised, already committed changes still need reconciliation.
+            _emit_changes(changes)
+
+
+@contextmanager
+def _file_transaction(path: Path):
     key = str(path.resolve())
     with _guard:
         lock = _locks.get(key)

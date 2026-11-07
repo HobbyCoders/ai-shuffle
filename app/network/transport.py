@@ -1703,6 +1703,7 @@ def request_scan(collections: Optional[List[str]] = None, *,
     with _scan_requests_lock:
         if not collections or any(
                 name not in policy.SCANNED_COLLECTIONS and name not in policy.CATALOG_COLLECTIONS
+                and name != "memory"
                 for name in collections):
             _full_scan_requested = True
         else:
