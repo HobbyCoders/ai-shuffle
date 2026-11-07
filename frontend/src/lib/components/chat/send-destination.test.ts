@@ -76,6 +76,19 @@ describe('send destination (#1077)', () => {
 		}
 	});
 
+	// Review S7: a revisit between two recoveries used to forget the first one's place.
+	it('keeps send order when the chat is revisited between two recoveries', () => {
+		const sent = [captureDestination({ sessionId: 'a', editorOwner: 'a' }), captureDestination({ sessionId: 'a', editorOwner: 'a' })];
+		noteLeftDraft('a', doc('third'));
+		keepUnsentDraft(sent[0], doc('first'), true);
+		expect(texts(readDraft('a'))).toEqual(['first', 'third']);
+		// Reopen chat A (its draft shows) and leave it again.
+		noteLeftDraft('b', EMPTY);
+		noteLeftDraft('a', readDraft('a')!);
+		keepUnsentDraft(sent[1], doc('second'), true);
+		expect(texts(readDraft('a'))).toEqual(['first', 'second', 'third']);
+	});
+
 	it('a later called-off send does not bring back messages already recovered', () => {
 		const first = captureDestination({ sessionId: 'a', editorOwner: 'a' });
 		noteLeftDraft('a', EMPTY);

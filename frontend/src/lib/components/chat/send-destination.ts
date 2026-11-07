@@ -108,28 +108,81 @@ export function draftToKeep(destination: SendDestination, unsent: string, cleare
 }
 
 /**
- * Called-off sends for one chat since the user last left it. Several can be
- * outstanding at once (Send, Send again once the composer cleared, then New
- * chat while a reload restores), and each is kept, in send order, ahead of
- * what the composer held.
+ * Called-off sends whose words were put back into a chat's draft, in send
+ * order. Several can be outstanding at once (Send, Send again once the
+ * composer cleared, then a timeout or New chat), and they can come back at
+ * different times, with the chat revisited in between. Each one put back
+ * takes its send-order place among those still at the head of the draft,
+ * ahead of the text the user typed later. Sending the composer retires them
+ * (retirePutBack); one edited away is no longer matched and drops out.
  */
-interface KeptForChat {
-	leave: number;
-	unsent: { order: number; draft: string }[];
-	/** The composer's document, from a send called off before it cleared. */
-	held: string | null;
+interface PutBack {
+	order: number;
+	blocks: unknown[];
+	keys: string[];
 }
-const kept = new Map<string | null, KeptForChat>();
+const putBack = new Map<string | null, PutBack[]>();
 
-function keptFor(chat: string | null): KeptForChat {
-	const leave = leftDrafts.get(chat)?.at ?? 0;
-	const current = kept.get(chat);
-	if (current?.leave === leave) return current;
-	const fresh: KeptForChat = { leave, unsent: [], held: null };
-	kept.delete(chat);
-	kept.set(chat, fresh);
-	if (kept.size > LEFT_DRAFTS_KEPT) kept.delete(kept.keys().next().value!);
-	return fresh;
+/** A stable key for a document block, whatever its property order. */
+function blockKey(block: unknown): string {
+	const sorted = (value: unknown): unknown =>
+		Array.isArray(value) ? value.map(sorted)
+		: value && typeof value === 'object'
+			? Object.fromEntries(Object.keys(value).sort().map(key => [key, sorted((value as Record<string, unknown>)[key])]))
+			: value;
+	return JSON.stringify(sorted(block));
+}
+
+function docOf(draft: string | null): { type: 'doc'; content?: unknown[] } | null {
+	if (!draft) return { type: 'doc', content: [] };
+	try {
+		const doc = JSON.parse(draft);
+		return doc?.type === 'doc' ? doc : null;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Put a called-off send's words back into `current`, the chat's draft now,
+ * in send order among the earlier ones put back, and return the result.
+ */
+export function putBackUnsent(destination: SendDestination, unsent: string, current: string | null): string {
+	const chat = destination.chat;
+	const unsentDoc = docOf(unsent);
+	const currentDoc = docOf(current);
+	if (!unsentDoc || !currentDoc) {
+		putBack.delete(chat);
+		return current && hasComposerDraft(current) ? joinDrafts(unsent, current) : unsent;
+	}
+	const blocks = currentDoc.content ?? [];
+	const keys = blocks.map(blockKey);
+	// The earlier sends put back that still lead the draft, untouched.
+	const still: PutBack[] = [];
+	let at = 0;
+	for (const entry of putBack.get(chat) ?? []) {
+		const n = entry.keys.length;
+		if (n && entry.keys.every((key, k) => keys[at + k] === key)) {
+			still.push(entry);
+			at += n;
+		}
+	}
+	const rest = blocks.slice(at);
+	const unsentBlocks = unsentDoc.content ?? [];
+	const entries = hasComposerDraft(unsent)
+		? [...still, { order: destination.order, blocks: unsentBlocks, keys: unsentBlocks.map(blockKey) }].sort((a, b) => a.order - b.order)
+		: still;
+	putBack.delete(chat);
+	putBack.set(chat, entries);
+	if (putBack.size > LEFT_DRAFTS_KEPT) putBack.delete(putBack.keys().next().value!);
+	const tail = hasComposerDraft(JSON.stringify({ type: 'doc', content: rest })) ? rest : [];
+	const content = [...entries.flatMap(entry => entry.blocks), ...tail];
+	return content.length ? JSON.stringify({ ...unsentDoc, content }) : '';
+}
+
+/** The composer is sending this chat's draft: the words put back go with it. */
+export function retirePutBack(chat: string | null): void {
+	putBack.delete(chat);
 }
 
 /**
@@ -138,17 +191,13 @@ function keptFor(chat: string | null): KeptForChat {
  * included, is left alone.
  */
 export function keepUnsentDraft(destination: SendDestination, unsent: string, cleared: boolean): void {
-	const entry = keptFor(destination.chat);
-	if (cleared) {
-		entry.unsent.push({ order: destination.order, draft: unsent });
-		entry.unsent.sort((a, b) => a.order - b.order);
-	} else {
-		entry.held = draftToKeep(destination, unsent, false);
-	}
-	const tail = entry.held ?? laterThan(destination);
-	const parts = [...entry.unsent.map(u => u.draft), ...(tail && hasComposerDraft(tail) ? [tail] : [])];
-	const draft = parts.length ? parts.reduce(joinDrafts) : '';
-	activeSession.saveDraftForSession(destination.chat, draft);
-	writeDraft(destination.chat, draft, { preserveNewChat: true });
-	notify.banner(parts.length ? SEND_MOVED_MESSAGE : SEND_CALLED_OFF_MESSAGE, { severity: 'warning', persist: false, duration_ms: 6000 });
+	const left = leftDrafts.get(destination.chat);
+	const later = laterThan(destination);
+	const draft = cleared ? putBackUnsent(destination, unsent, later) : draftToKeep(destination, unsent, false);
+	// A send called off after this one builds on this draft, not the one left.
+	if (left && later !== null) left.draft = draft;
+	const kept = hasComposerDraft(draft);
+	activeSession.saveDraftForSession(destination.chat, kept ? draft : '');
+	writeDraft(destination.chat, kept ? draft : '', { preserveNewChat: true });
+	notify.banner(kept ? SEND_MOVED_MESSAGE : SEND_CALLED_OFF_MESSAGE, { severity: 'warning', persist: false, duration_ms: 6000 });
 }

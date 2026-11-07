@@ -152,6 +152,44 @@ describe('New chat right after Send (#1077)', () => {
 		expect(at('third draft')).toBeGreaterThan(at('second message'));
 	});
 
+	// Review S7: two sends refused in the chat that stays open (a connection
+	// timeout) used to come back in reverse order.
+	it('puts two refused sends back in the order they were sent', async () => {
+		const results: ((sent: boolean) => void)[] = [];
+		sends.mockImplementation(() => new Promise<boolean>((resolve) => { results.push(resolve); }));
+		const view = render(ChatInput);
+		const editor = view.container.querySelector<HTMLElement>('.tiptap')! as HTMLElement & { editor: Editor };
+		const form = view.container.querySelector('form')!;
+		await waitFor(() => expect(editor.textContent).toBe(TEXT));
+		await fireEvent.submit(form);
+		await waitFor(() => expect(gate.release).toBeTruthy());
+		gate.release!();
+		await waitFor(() => expect(sends).toHaveBeenCalledTimes(1));
+		await waitFor(() => expect(editor.textContent).toBe(''));
+
+		gate.release = null;
+		editor.editor.commands.insertContent('second message');
+		await waitFor(() => expect(editor.textContent).toBe('second message'));
+		await fireEvent.submit(form);
+		await waitFor(() => expect(gate.release).toBeTruthy());
+		gate.release!();
+		await waitFor(() => expect(sends).toHaveBeenCalledTimes(2));
+		await waitFor(() => expect(editor.textContent).toBe(''));
+
+		editor.editor.commands.insertContent('later text');
+		await waitFor(() => expect(editor.textContent).toBe('later text'));
+		results[0](false);
+		await waitFor(() => expect(editor.textContent).toContain(TEXT));
+		results[1](false);
+		await waitFor(() => expect(editor.textContent).toContain('second message'));
+
+		const shown = editor.textContent ?? '';
+		const at = (text: string) => shown.indexOf(text);
+		expect(at(TEXT)).toBeGreaterThanOrEqual(0);
+		expect(at('second message')).toBeGreaterThan(at(TEXT));
+		expect(at('later text')).toBeGreaterThan(at('second message'));
+	});
+
 	// Review S5: emptying the composer during the wait is a choice, not a gap.
 	it('keeps the composer empty when the text was deleted during the wait', async () => {
 		const view = render(ChatInput);

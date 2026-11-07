@@ -41,7 +41,7 @@
 	import { promptHistory, createPromptRecall } from '$lib/stores/session/prompt-recall';
 	import { pastedTextFile } from './tiptap/large-paste';
 	import { joinDrafts, restoreMessageDocument } from './tiptap/serialization';
-	import { captureDestination, keepUnsentDraft, movedAwayFrom, noteLeftDraft, SEND_MOVED_MESSAGE, stillAtDestination, type SendDestination } from './send-destination';
+	import { captureDestination, keepUnsentDraft, movedAwayFrom, noteLeftDraft, putBackUnsent, retirePutBack, SEND_MOVED_MESSAGE, stillAtDestination, type SendDestination } from './send-destination';
 	import { composerInsert, completeComposerInsert } from '$lib/stores/composer-insert';
 	import PromptStashMenu from './PromptStashMenu.svelte';
 	import { sessionOwnerEpoch } from '$lib/stores/session-owner';
@@ -1207,8 +1207,10 @@
 		uploadedFiles = [];
 		recall.reset();
 
-		// Clear editor content
+		// Clear editor content. Words an earlier refused send put back go out
+		// with this one.
 		editorRef?.clear();
+		retirePutBack(destination.chat);
 
 		// Clear draft immediately (not debounced) - important because
 		// the component may be destroyed/recreated when isEmptyState changes
@@ -1235,8 +1237,8 @@
 			}
 			// A slow create can fail after the user started a new message: put
 			// the refused one back in front of it instead of replacing it.
-			const laterDraft = getDraftJSON();
-			const restored = hasComposerDraft(laterDraft) ? joinDrafts(priorDraftJSON, laterDraft) : priorDraftJSON;
+			// Several refused sends come back in the order they were sent.
+			const restored = putBackUnsent(destination, priorDraftJSON, getDraftJSON());
 			uploadedFiles = [...priorUploadedFiles, ...uploadedFiles];
 			editorRef?.setContent(restored);
 			inputValue = editorRef?.getMessage() ?? priorInputValue;
