@@ -175,6 +175,17 @@ describe('ModelPickerPanel', () => {
 		expect(row(/opus/i).querySelector('.mpp-check svg')).toBeNull();
 	});
 
+	it('draws a 16px star that turns on when favourited', async () => {
+		render(ModelPickerPanel, { props: { groups, options, value: 'sonnet', onSelect: vi.fn() } });
+		const star = screen.getByRole('button', { name: /add opus to favorites/i });
+		expect(star.querySelector('svg')?.getAttribute('width')).toBe('16');
+		expect(star.classList.contains('on')).toBe(false);
+		await fireEvent.click(star);
+		const on = screen.getByRole('button', { name: /remove opus from favorites/i });
+		expect(on.classList.contains('on')).toBe(true);
+		expect(on.querySelector('svg')?.getAttribute('width')).toBe('16');
+	});
+
 	it('moves through every provider from the search box with the arrow keys', async () => {
 		const onSelect = vi.fn();
 		render(ModelPickerPanel, { props: { groups, options, value: options[0].value, onSelect } });

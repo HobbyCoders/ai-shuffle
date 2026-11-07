@@ -618,7 +618,7 @@
 								title={fav ? 'Remove from favorites' : 'Add to favorites'}
 								onclick={(e) => toggleFavorite(e, o.value)}
 							>
-								<Star size={14} strokeWidth={1.5} />
+								<Star size={16} strokeWidth={1.75} />
 							</button>
 							<span class="mpp-check" aria-hidden="true">{#if value === o.value}<Check size={16} />{/if}</span>
 						</div>
@@ -893,6 +893,8 @@
 <style>
 	.mpp {
 		--mpp-hover: color-mix(in srgb, var(--popover) 90%, var(--foreground));
+		/* A model row under the pointer: half the chosen row's tint step. */
+		--mpp-row-hover: color-mix(in srgb, var(--popover) 95%, var(--foreground));
 		display: flex;
 		flex-direction: column;
 		width: var(--mpp-width, 360px);
@@ -1018,12 +1020,13 @@
 		user-select: none;
 		transition: background-color 0.1s ease;
 	}
-	/* The chosen row keeps its fill and check. A hover fill needs a real pointer,
-	   so a tap on a phone never leaves a second row lit; the arrow keys draw a
-	   thin outline instead. */
+	/* The chosen row keeps its check and the stronger fill (10% foreground); the
+	   row under the pointer gets the lighter step (5%), so the two never read as
+	   the same state. A hover fill needs a real pointer, so a tap on a phone
+	   never leaves a second row lit; the arrow keys draw a thin outline instead. */
 	.mpp-row.selected { background: var(--mpp-hover); }
 	@media (hover: hover) {
-		.mpp-row:hover { background: var(--mpp-hover); }
+		.mpp-row:not(.selected):hover { background: var(--mpp-row-hover); }
 	}
 	.mpp-row.highlighted { outline: 1px solid var(--ring); outline-offset: -1px; }
 	.mpp-row.selected .mpp-row-label { font-weight: 500; }
@@ -1066,7 +1069,8 @@
 		border: 0;
 		border-radius: 6px;
 		background: transparent;
-		color: var(--muted-foreground);
+		/* A 16px star at 40% foreground: present on hover, quieter than the label. */
+		color: color-mix(in oklab, var(--foreground) 40%, transparent);
 		opacity: 0;
 		cursor: pointer;
 		transition: opacity 0.12s ease, color 0.12s ease;
@@ -1081,10 +1085,13 @@
 	}
 	.mpp-fav:focus-visible {
 		opacity: 1;
+		color: var(--foreground);
 		outline: 2px solid var(--ring);
-		outline-offset: -1px;
+		outline-offset: -2px;
 	}
-	.mpp-fav.on {
+	/* A favourite: the accent, filled, on every row. */
+	.mpp-fav.on,
+	.mpp-fav.on:hover {
 		opacity: 1;
 		color: var(--primary);
 	}
