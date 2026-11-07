@@ -6,11 +6,51 @@ permission mode, system prompt, etc.).
 """
 
 import logging
-from typing import Any, Dict, cast
+from typing import Any, Dict, Optional, cast
 
 from app.mcp.config_helpers import _tool_result, _error
 
 logger = logging.getLogger(__name__)
+
+
+_TOOL_MODE_SCHEMA = {
+    "type": "string",
+    "enum": ["all", "none", "allow", "disallow"],
+    "description": (
+        "What the tool lists mean. 'all': every tool (both lists ignored). "
+        "'none': no tools at all. 'allow': only the tools in allowed_tools. "
+        "'disallow': every tool except those in disallowed_tools."
+    ),
+}
+
+_ALLOW_EMPTY_ERROR = (
+    "allowed_tools is empty while tool_selection_mode is 'allow', which leaves "
+    "the agent with no tools at all. Pass tool_selection_mode 'all' to give it "
+    "every tool, 'none' to remove every tool on purpose, or list the tools it "
+    "should keep."
+)
+
+
+def _tool_mode_error(args: Dict[str, Any]) -> Optional[str]:
+    """Why ``args["tool_selection_mode"]`` is invalid, or None when absent/valid."""
+    from app.core.tool_access import TOOL_SELECTION_MODES
+
+    mode = args.get("tool_selection_mode")
+    if mode is None or mode in TOOL_SELECTION_MODES:
+        return None
+    return (
+        f"Invalid tool_selection_mode {mode!r}; use one of: "
+        + ", ".join(TOOL_SELECTION_MODES) + "."
+    )
+
+
+def _allow_list_empty(config: Dict[str, Any]) -> bool:
+    """True when ``config`` resolves to "allow only selected" with nothing selected."""
+    from app.core.tool_access import apply_legacy_tool_aliases, tool_selection_mode
+
+    return tool_selection_mode(config) == "allow" and not apply_legacy_tool_aliases(
+        config.get("allowed_tools") or []
+    )
 
 
 def _create_profile_tools(is_admin: bool) -> list:
@@ -98,15 +138,28 @@ def _create_profile_tools(is_admin: bool) -> list:
                     "type": "string",
                     "description": "Text to append to the preset system prompt.",
                 },
+                "tool_selection_mode": {
+                    **_TOOL_MODE_SCHEMA,
+                    "description": _TOOL_MODE_SCHEMA["description"] + (
+                        " Omit to infer it: a non-empty allowed_tools means "
+                        "'allow', else a non-empty disallowed_tools means "
+                        "'disallow', else 'all'."
+                    ),
+                },
                 "allowed_tools": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Explicit tool whitelist (e.g., ['Read', 'Grep', 'Glob']).",
+                    "description": (
+                        "Tools the agent may use in 'allow' mode (e.g., ['Read', "
+                        "'Grep', 'Glob']; mcp__<server>__* selects a whole MCP "
+                        "server). Required and non-empty when "
+                        "tool_selection_mode is 'allow'."
+                    ),
                 },
                 "disallowed_tools": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Tool blacklist (e.g., ['Bash', 'Write']).",
+                    "description": "Tools the agent may not use in 'disallow' mode (e.g., ['Bash', 'Write']).",
                 },
                 "max_turns": {"type": "integer"},
                 "app_config_tools": {
@@ -120,6 +173,15 @@ def _create_profile_tools(is_admin: bool) -> list:
     async def create_profile(args: dict) -> dict:
         if not _is_admin:
             return _error("App configuration tools require admin access.")
+        mode_error = _tool_mode_error(args)
+        if mode_error:
+            return _error(mode_error)
+        # Judge the tool keys exactly as they will be stored (only truthy values
+        # are kept), so blank-only names or an inferred mode can't save "no tools".
+        stored_tools = {key: args[key] for key in ("tool_selection_mode", "allowed_tools", "disallowed_tools")
+                        if args.get(key)}
+        if _allow_list_empty(stored_tools):
+            return _error(_ALLOW_EMPTY_ERROR)
 
         import re
         # Generate ID from name
@@ -158,6 +220,8 @@ def _create_profile_tools(is_admin: bool) -> list:
                 config["allowed_tools"] = args["allowed_tools"]
             if args.get("disallowed_tools"):
                 config["disallowed_tools"] = args["disallowed_tools"]
+            if args.get("tool_selection_mode"):
+                config["tool_selection_mode"] = args["tool_selection_mode"]
             if args.get("app_config_tools"):
                 config["app_config_tools"] = True
 
@@ -222,8 +286,30 @@ def _create_profile_tools(is_admin: bool) -> list:
                 "app_config_tools": {"type": "boolean"},
                 "system_prompt_content": {"type": "string", "description": "Custom system prompt content. Pass non-empty string to switch profile to custom system prompt; omit to leave unchanged."},
                 "system_prompt_append": {"type": "string", "description": "Text to append to the preset system prompt. Pass non-empty string to switch profile to preset+append; omit to leave unchanged."},
-                "allowed_tools": {"type": "array", "items": {"type": "string"}, "description": "Explicit tool whitelist. Pass [] to clear; omit to leave unchanged."},
-                "disallowed_tools": {"type": "array", "items": {"type": "string"}, "description": "Tool blacklist. Pass [] to clear; omit to leave unchanged."},
+                "tool_selection_mode": {
+                    **_TOOL_MODE_SCHEMA,
+                    "description": _TOOL_MODE_SCHEMA["description"] + " Omit to leave unchanged.",
+                },
+                "allowed_tools": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Tools the agent may use in 'allow' mode; replaces the "
+                        "stored list. Omit to leave unchanged. Ignored in other "
+                        "modes. An empty list is refused while the mode is "
+                        "'allow' (it would remove every tool): to lift the "
+                        "restriction pass tool_selection_mode 'all' instead."
+                    ),
+                },
+                "disallowed_tools": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Tools the agent may not use in 'disallow' mode; replaces "
+                        "the stored list. Pass [] to block nothing; omit to leave "
+                        "unchanged. Ignored in other modes."
+                    ),
+                },
             },
             "required": ["profile_id"],
         },
@@ -234,6 +320,9 @@ def _create_profile_tools(is_admin: bool) -> list:
         from app.db.owner_state import AGENT_ID as ASSISTANT_AGENT_ID
         if args.get("profile_id") == ASSISTANT_AGENT_ID:
             return _error("The assistant's built-in agent cannot be changed or deleted.")
+        mode_error = _tool_mode_error(args)
+        if mode_error:
+            return _error(mode_error)
 
         def _read_merge_write():
             """READ-MODIFY-WRITE — must stay in ONE hop.
@@ -262,10 +351,42 @@ def _create_profile_tools(is_admin: bool) -> list:
                     config[field] = args[field]
                     updated_fields.append(field)
 
+            from app.core.tool_access import tool_selection_mode
+
+            mode_before = tool_selection_mode(config)
             for field in ("allowed_tools", "disallowed_tools"):
                 if field in args:
                     config[field] = args[field]
                     updated_fields.append(field)
+            if args.get("tool_selection_mode") is not None:
+                config["tool_selection_mode"] = args["tool_selection_mode"]
+                updated_fields.append("tool_selection_mode")
+
+            # The mode, not list emptiness, decides access
+            # (app.core.tool_access): an empty allow list in "allow" mode
+            # resolves to no tools at all. Refuse a call that would land there
+            # instead of silently stripping the agent. Only calls that touch
+            # the tool settings are checked, so renaming an agent that the
+            # owner deliberately left with nothing ticked still works.
+            touches_tools = "allowed_tools" in args or "tool_selection_mode" in updated_fields
+            if touches_tools and _allow_list_empty(config):
+                return _ALLOW_EMPTY_ERROR, None, None
+            # A profile saved without a mode infers one from its lists, and
+            # there an empty allow list reads as "none". Don't let a "clear the
+            # list" call flip such a profile to no tools by inference.
+            if (
+                "allowed_tools" in args
+                and not args.get("allowed_tools")
+                and args.get("tool_selection_mode") is None
+                and mode_before != "none"
+                and tool_selection_mode(config) == "none"
+            ):
+                return (
+                    "allowed_tools: [] would leave this agent with no tools at "
+                    "all: it has no saved tool_selection_mode, so an empty list "
+                    "reads as 'none'. Pass tool_selection_mode 'all' to lift the "
+                    "restriction, or 'none' to remove every tool on purpose."
+                ), None, None
 
             # System prompt merge — mirrors createProfile semantics
             if args.get("system_prompt_content"):

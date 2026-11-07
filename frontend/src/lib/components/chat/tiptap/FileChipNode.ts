@@ -11,6 +11,7 @@ export interface FileChipAttributes {
 	fullPath: string;
 	size: number;
 	type: 'file' | 'chat_history' | 'note' | 'subagent';
+	uploadReference?: import('$lib/api/rewind').UploadReference;
 }
 
 declare module '@tiptap/core' {
@@ -40,6 +41,8 @@ export const FileChipNode = Node.create({
 
 	addAttributes() {
 		return {
+            // JSON draft state only. Pasted HTML must not mint owner identities.
+            uploadReference: { default: null, rendered: false },
 			path: {
 				default: '',
 				parseHTML: (element) => element.getAttribute('data-path'),

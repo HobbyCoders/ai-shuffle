@@ -205,6 +205,7 @@ interface SendMessageOptions {
 	skipWorktreeSetup?: boolean;
 	skipMessageAppend?: boolean;
 	pendingUploadPaths?: string[];
+	pendingUploadReferences?: import('$lib/api/rewind').UploadReference[];
 	compactFirst?: boolean;
 	/** The composer's check that the user is still where they sent from
 	 *  (send-destination.ts). Read once the send knows its target; false
@@ -484,6 +485,11 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			// Worktree sessions never block on send: the backend resolves/validates
 			// the cwd on the query path (worktreeDeleted is a display-only badge).
 
+            if (!_state.sessionId && options?.pendingUploadReferences?.length) {
+                update(s => ({ ...s, error: 'Restored attachments belong to their original chat. Reattach the files to send them in a new chat.' }));
+                return false;
+            }
+
 			// Worktree setup on first message
 			if (!options?.skipWorktreeSetup && _state.worktreeIntent === 'worktree' && !_state.sessionId && _state.messages.length === 0) {
 				if (_state.worktreeMode === 'existing' && !_state.worktreeId) {
@@ -621,7 +627,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				delete retryOverrides.context_window_base;
 				const clientMessageId = options?.compactFirst
 					? compactRetryId(_state.sessionId!, JSON.stringify({ prompt, profile: queryProfileId,
-						project: _state.project, uploadPaths: options.pendingUploadPaths, overrides: retryOverrides }), newLocalPendingId)
+						project: _state.project, uploadPaths: options.pendingUploadPaths, uploadReferences: options.pendingUploadReferences, overrides: retryOverrides }), newLocalPendingId)
 					: newLocalPendingId();
 				const queuedEcho = (sendWhileStreaming || options?.compactFirst) && !options?.skipMessageAppend;
 				// An unrelated snapshot cannot admit this newly minted command.
@@ -730,6 +736,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					upload_paths: (!remoteOnly || !!_state.sessionId) && options?.pendingUploadPaths?.length
 						? options.pendingUploadPaths
 						: undefined,
+                    upload_references: options?.pendingUploadReferences?.length ? options.pendingUploadReferences : undefined,
 					// Adoption token — present only for a new-session query (see requestId).
 					// The backend echoes it in session_created + the first start frame.
 					request_id: requestId || undefined,

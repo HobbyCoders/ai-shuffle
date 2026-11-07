@@ -1845,13 +1845,14 @@ def _stream_to_websocket_impl(
     loop_guard_turn: Optional[Dict[str, Any]] = None,
     connector_sender: Optional[Dict[str, Any]] = None,
     admission_lease: Optional[Lease] = None,
+    on_uploads_prepared: Optional[callable] = None,
 ) -> AsyncGenerator[Dict[str, Any], None]:
     """Run one pump turn; a runtime retains its lease through finalization."""
     def events(lease: Lease) -> AsyncGenerator[Dict[str, Any], None]:
         return _stream_to_websocket_turn(
             lease, prompt, session_id, profile_id, project_id, overrides, broadcast_func,
             api_user_id, user_id, upload_blob_ids, resume, turn_source, loop_guard_turn,
-            connector_sender,
+            connector_sender, on_uploads_prepared,
         )
 
     return session_admission.stream_turn(session_id, events, lease=admission_lease)
@@ -1872,6 +1873,7 @@ async def _stream_to_websocket_turn(
     turn_source: Optional[str],
     loop_guard_turn: Optional[Dict[str, Any]],
     connector_sender: Optional[Dict[str, Any]],
+    on_uploads_prepared: Optional[callable] = None,
 ) -> AsyncGenerator[Dict[str, Any], None]:
     """
     Stream Claude response directly to WebSocket.
@@ -1910,6 +1912,8 @@ async def _stream_to_websocket_turn(
             loop guard (``app.core.loop_guard``).
         loop_guard_turn: The turn row itself, kept by the loop guard when it
             holds the turn for confirmation.
+        on_uploads_prepared: Runtime callback given the source-to-local path map,
+            before the engine receives the prompt, to record local attachment paths.
     """
     from app.core.startup_timing import TurnStartupTiming
 
@@ -2132,6 +2136,8 @@ async def _stream_to_websocket_turn(
                 str(getattr(options, "cwd", "") or ""),
             )
             prompt = upload_transfer.rewrite_prompt(prompt, _mapping)
+            if on_uploads_prepared is not None:
+                await on_uploads_prepared(_mapping)
         except Exception as e:  # noqa: BLE001 — surface, never run with dead paths
             logger.error(
                 f"[WS] Upload materialization failed for {session_id}: {e}"

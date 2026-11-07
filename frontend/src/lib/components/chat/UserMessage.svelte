@@ -19,14 +19,15 @@
 		userPromptOccurrence?: number | null;  // 0-based occurrence among identical-content user prompts — rewind fallback when uuid is absent
 		rewindEligible?: boolean;
 		streaming?: boolean;
-		onRewindComplete?: (warning?: string, rewoundPrompt?: string, uploadPaths?: string[], unsentRestored?: boolean) => void;  // Optional warning for partial success
+		onRewindComplete?: (warning?: string, rewoundPrompt?: string, uploadPaths?: string[], unsentRestored?: boolean, uploadReferences?: import('$lib/api/rewind').UploadReference[]) => void;  // Optional warning for partial success
 		notSent?: boolean;
 		notSentMessageId?: string | null;
-		notSentUploadPaths?: string[];
+		uploadPaths?: string[];
+		uploadReferences?: import('$lib/api/rewind').UploadReference[];
 		midTurn?: boolean;  // Steered into a turn already under way: the time line says so
 	}
 
-	let { content, timestamp, sessionId = null, messageUuid = null, userPromptOccurrence = null, rewindEligible = true, streaming = false, onRewindComplete, midTurn = false, notSent = false, notSentMessageId = null, notSentUploadPaths = [] }: Props = $props();
+	let { content, timestamp, sessionId = null, messageUuid = null, userPromptOccurrence = null, rewindEligible = true, streaming = false, onRewindComplete, midTurn = false, notSent = false, notSentMessageId = null, uploadPaths = [], uploadReferences = [] }: Props = $props();
 
 	let isHovered = $state(false);
 	let expanded = $state(false);
@@ -70,7 +71,8 @@
 				messageRole="user"
 				{messageUuid}
 				{notSentMessageId}
-				{notSentUploadPaths}
+				{uploadPaths}
+				{uploadReferences}
 				{userPromptOccurrence}
 				{rewindEligible}
 				{onRewindComplete}

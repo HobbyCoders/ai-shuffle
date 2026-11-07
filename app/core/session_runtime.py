@@ -1552,30 +1552,65 @@ class SessionRuntime:
         engine_prompt = _with_voice_note(engine_prompt, self.turn.get("payload"))
         held_peer = ""
         engine_started = False
+        turn_payload = self.turn.get("payload") or {}
+        awaiting_uploads = bool(turn_payload.get("upload_blob_ids") or turn_payload.get("upload_references")) and not resume and not already_recorded
+        upload_prompt = prompt
+        uploads_recorded = False
+
+        async def record_prepared_uploads(mapping: Dict[str, str]) -> None:
+            nonlocal uploads_recorded
+            # Materialization is still owned by the pump's resolved cwd. Only
+            # then can the event and legacy row name paths on the recording disk.
+            from app.core.upload_transfer import rewrite_prompt
+            recorded_prompt = rewrite_prompt(upload_prompt, mapping)
+            paths = [mapping.get(path, path) for path in turn_payload.get("upload_paths") or []]
+            await recorder.record_user_message(
+                recorded_prompt, profile_id=self.turn.get("profile_id"),
+                source=fluid_turn_source(app_source), upload_paths=paths or None,
+                accepted_input_id=turn_payload.get("accepted_input_id"),
+            )
+            if self._abort_reason == "recording_failed":
+                raise RuntimeError("Could not record the message's prepared attachments")
+            uploads_recorded = True
+            if turn_payload.get("deferred_user_record"):
+                await self._persist_user_message(recorded_prompt, source=app_source, upload_paths=paths)
+            from app.core import owner_confirm
+            await owner_confirm.after_owner_message(self.session_id, turn_payload)
+
         if (
-            not resume
+            not awaiting_uploads
+            and not resume
             and not already_recorded
             and (self.turn.get("payload") or {}).get("deferred_user_record")
         ):
-            await self._persist_user_message(prompt, source=app_source)
+            await self._persist_user_message(prompt, source=app_source, upload_paths=turn_payload.get("upload_paths"))
         done_event = None
         turn_events = None
         try:
-            turn_payload = self.turn.get("payload") or {}
+            if turn_payload.get("upload_paths") or turn_payload.get("upload_blob_ids") or turn_payload.get("upload_references"):
+                from app.core import upload_transfer
+                from app.db import database
+                session = await asyncio.to_thread(database.get_session, self.session_id)
+                turn_payload = await asyncio.to_thread(upload_transfer.resolve_upload_references, turn_payload, session)
+                await asyncio.to_thread(upload_transfer.validate_turn_uploads, turn_payload, session)
+                self.turn["payload"] = turn_payload
             await recorder.start(
                 prompt,
                 profile_id=self.turn.get("profile_id"),
-                record_user=not resume and not already_recorded,
+                record_user=not resume and not already_recorded and not awaiting_uploads,
                 source=fluid_turn_source(app_source),
+                upload_paths=turn_payload.get("upload_paths") or None,
                 **({"continued": True} if turn_payload.get("continued_turn") else {}),
                 **({"accepted_input_id": turn_payload["accepted_input_id"]}
                    if turn_payload.get("accepted_input_id") else {}),
             )
             if self._abort_reason == "recording_failed":
                 return
+            if awaiting_uploads and not turn_payload.get("upload_blob_ids"):
+                await record_prepared_uploads({path: path for path in turn_payload.get("upload_paths") or []})
             from app.core import owner_confirm
 
-            if not resume and not already_recorded:
+            if not resume and not already_recorded and not awaiting_uploads:
                 # The owner's message answered an approval in words: its outcome
                 # goes right after the message it came from (#484).
                 await owner_confirm.after_owner_message(self.session_id, self.turn.get("payload"))
@@ -1704,6 +1739,7 @@ class SessionRuntime:
                 turn_source=self.source,
                 loop_guard_turn=self.turn,
                 admission_lease=self._admission_lease,
+                **({"on_uploads_prepared": record_prepared_uploads} if awaiting_uploads else {}),
                 # Who sent a connector message, for the owner's-subscription
                 # check. Only a connector turn carries one.
                 connector_sender=(
@@ -1772,6 +1808,24 @@ class SessionRuntime:
                         await self._broadcast(ws_event)
         finally:
             try:
+                if awaiting_uploads and not uploads_recorded:
+                    # Every exit before preparation (gate refusal, disk failure,
+                    # cancellation or exception) must leave recoverable words.
+                    metadata = {
+                        "not_sent": True, "checkpoint_backed": False,
+                        "queued_turn_id": self.turn_id,
+                        "upload_paths": turn_payload.get("upload_paths") or [],
+                        "upload_blob_ids": turn_payload.get("upload_blob_ids") or [],
+                    }
+                    await recorder.record_user_message(
+                        upload_prompt, profile_id=self.turn.get("profile_id"),
+                        source=fluid_turn_source(app_source), extra_payload=metadata,
+                    )
+                    from app.db import database
+                    await asyncio.to_thread(
+                        database.add_session_message, self.session_id, "user", upload_prompt,
+                        profile_id=self.turn.get("profile_id"), metadata=metadata,
+                    )
                 # A pump that leaves early (cancelled, or its recording failed) hands
                 # a turn parked at its yield over to finish on its own task.
                 if turn_events is not None:
@@ -2341,7 +2395,7 @@ class SessionRuntime:
                 return "peer message without an attributed sender"
             # The asynchronous sweep revalidates scope immediately before
             # hand-over; this predicate is also used by the startup probe.
-        if payload.get("upload_blob_ids"):
+        if payload.get("upload_blob_ids") or payload.get("upload_references"):
             return "attachments need turn setup"
         # Never steer external observation into a foreground/broad-permission
         # turn (or vice versa). Admission is part of the execution identity.
@@ -2487,6 +2541,7 @@ class SessionRuntime:
                     content,
                     profile_id=profile_id,
                     command_id=row.get("command_id"),
+                    upload_paths=(row.get("payload") or {}).get("upload_paths") or None,
                     **({"queued_turn_id": row_id, "checkpoint_backed": False,
                         "source": "agent_message"}
                        if row.get("source") == "agent_message" else {}),
@@ -2500,6 +2555,7 @@ class SessionRuntime:
                 await owner_confirm.after_owner_message(self.session_id, row.get("payload"))
                 await self._persist_user_message(
                     content, profile_id=profile_id, source=row.get("source") or "user",
+                    upload_paths=(row.get("payload") or {}).get("upload_paths"),
                 )
             if await self._absorb_delivered_row(row_id):
                 absorbed = True
@@ -2710,7 +2766,7 @@ class SessionRuntime:
 
     async def _persist_user_message(
         self, content: str, *, profile_id: Optional[str] = None,
-        source: Optional[str] = None,
+        source: Optional[str] = None, upload_paths: Optional[List[str]] = None,
     ) -> None:
         """Dual-write one user message to ``session_messages`` + fan it out.
 
@@ -2725,6 +2781,8 @@ class SessionRuntime:
 
             role = "user"
             metadata = {"source": source or self.source}
+            if upload_paths:
+                metadata["upload_paths"] = upload_paths
             if content.strip().startswith("/"):
                 parts = content.strip().split(None, 1)
                 role = "command"

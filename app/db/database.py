@@ -1847,6 +1847,12 @@ def _run_column_migrations(cursor: Any) -> None:
         """)
         migrations_applied.append("projects_v2")
 
+    # Additive and local-only; the migration fingerprint applies this on upgrade.
+    if not table_exists(cursor, "project_catalog_aliases"):
+        from app.db.project_catalog_aliases import create_schema as create_catalog_alias_schema
+        create_catalog_alias_schema(cursor)
+        migrations_applied.append("project_catalog_aliases")
+
     if not table_exists(cursor, "checkouts"):
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS checkouts (
@@ -2637,6 +2643,10 @@ def _run_column_migrations(cursor: Any) -> None:
         "CREATE INDEX IF NOT EXISTS idx_upload_blobs_session "
         "ON upload_blobs(session_id)"
     )
+
+    if not column_exists(cursor, "upload_blobs", "materialized_path"):
+        cursor.execute("ALTER TABLE upload_blobs ADD COLUMN materialized_path TEXT")
+        migrations_applied.append("upload_blobs.materialized_path")
 
     # session_moves (#1819) — a queued move to another worker and the owner's
     # messages held for it, so a restart resumes the move. Same idempotent
@@ -3639,6 +3649,7 @@ def migrations_fingerprint() -> str:
     from app.db import (
         schema_postgres, mobile_hub, network, owner_state, working_record, watches, watch_delivery,
         session_mode_migration, session_archive_migration, model_provider_slots, project_setup, stop_notices,
+        project_catalog_aliases,
     )
     from app.core import owner_auth
 
@@ -3649,7 +3660,7 @@ def migrations_fingerprint() -> str:
     for module in (
         sys.modules[__name__], schema_postgres, mobile_hub, owner_auth, network, owner_state,
         working_record, watches, watch_delivery, session_mode_migration, session_archive_migration, model_provider_slots,
-        project_setup, stop_notices,
+        project_setup, stop_notices, project_catalog_aliases,
     ):
         path = getattr(module, "__file__", None)
         if not path:

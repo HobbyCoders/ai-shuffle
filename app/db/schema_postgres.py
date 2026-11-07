@@ -1979,6 +1979,10 @@ def create_postgres_schema(cursor: Any) -> None:
         )
     """)
 
+    # Local provenance, never replicated with the project catalog.
+    from app.db.project_catalog_aliases import create_schema as create_catalog_alias_schema
+    create_catalog_alias_schema(cursor)
+
     # ------------------------------------------------------------------
     # 55. checkouts — per-runner working-tree checkouts of a v2 project.
     # ------------------------------------------------------------------
@@ -2163,7 +2167,8 @@ def create_postgres_schema(cursor: Any) -> None:
             size BIGINT NOT NULL DEFAULT 0,
             data BYTEA,
             created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-            materialized_at TIMESTAMP WITH TIME ZONE
+            materialized_at TIMESTAMP WITH TIME ZONE,
+            materialized_path TEXT
         )
     """)
     cursor.execute(

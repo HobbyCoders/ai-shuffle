@@ -98,6 +98,7 @@ def _record_checkout_state(
     """
     from app.core.config import settings
     from app.core.git_service import git_service
+    from app.core.git_worktree_ops import repo_worktree_lock
     from app.db import checkouts as checkouts_db
 
     try:
@@ -109,14 +110,16 @@ def _record_checkout_state(
 
         if head_sha is None and dirty is None:
             return
-        checkouts_db.upsert_checkout(
-            project_v2_id,
-            settings.effective_instance_id,
-            path,
-            branch=branch or None,
-            head_sha=head_sha,
-            dirty=dirty,
-        )
+        with repo_worktree_lock(path):
+            git_service.require_complete_worktree(path)
+            checkouts_db.upsert_checkout(
+                project_v2_id,
+                settings.effective_instance_id,
+                path,
+                branch=branch or None,
+                head_sha=head_sha,
+                dirty=dirty,
+            )
     except Exception:  # noqa: BLE001 — display metadata, never the op's problem.
         logger.debug(
             "git_ops: head_sha/dirty capture skipped for %s", path, exc_info=True

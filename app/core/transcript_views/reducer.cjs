@@ -1240,6 +1240,7 @@ function reduceInternal(state, event, observe) {
       const stamp = stampTs(event, createdAt);
       const senderProfileId = str(event.profile_id) || (idx >= 0 ? state.messages[idx].profileId : "") || state.liveTurnProfileId || "";
       const turnId2 = str(event.turn_id);
+      const uploadPaths = Array.isArray(event.upload_paths) && event.upload_paths.length > 0 && event.upload_paths.every((path) => typeof path === "string" && path.length > 0) ? event.upload_paths : null;
       const userMsg = (id) => ({
         id,
         role: "user",
@@ -1247,14 +1248,22 @@ function reduceInternal(state, event, observe) {
         content,
         timestamp: stamp || void 0,
         ...turnId2 ? { turnId: turnId2 } : {},
-        ...startsAgentTurn || event.not_sent ? { metadata: {
+        ...startsAgentTurn || event.not_sent || uploadPaths ? { metadata: {
           ...startsAgentTurn ? { agent_wake: true } : {},
+          ...uploadPaths ? {
+            upload_paths: uploadPaths,
+            ...str(event.upload_owner_id) && str(event.id) ? { upload_references: uploadPaths.map((path, index) => ({
+              owner_id: str(event.upload_owner_id),
+              event_id: str(event.id),
+              index,
+              path
+            })) } : {}
+          } : {},
           ...event.not_sent ? {
             not_sent: true,
             not_sent_id: event.id,
             // The turn still running when Stop wrote this row (see not-sent-hold).
-            ...state.liveTurnId ? { not_sent_during_turn: state.liveTurnId } : {},
-            ...Array.isArray(event.upload_paths) && event.upload_paths.length ? { upload_paths: event.upload_paths } : {}
+            ...state.liveTurnId ? { not_sent_during_turn: state.liveTurnId } : {}
           } : {}
         } } : {},
         ...typeof event.queued_turn_id === "string" ? { queuedTurnId: event.queued_turn_id } : {},
@@ -2357,7 +2366,7 @@ function materializeProjection(body, records, epoch, runtime) {
 }
 
 // scripts/transcript-reducer-node.ts
-var REDUCER_FINGERPRINT = "3e097d8778820c04f151ea7d1b30ca18e5ff9152ac768a17cfd8c0a73c2dd651";
+var REDUCER_FINGERPRINT = "ba4d43b5d2eeba8751edd37c1d2222b06da85d6c5fb8041fc43b35fe108f358c";
 var RPC_VERSION = 1;
 var MAX_PACKET_BYTES = 24 * 1024 * 1024;
 function dispatch(method, params) {

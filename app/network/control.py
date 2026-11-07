@@ -796,6 +796,11 @@ async def _submit_forwarded_turn(body: Dict[str, Any], from_device: str,
             raise ValueError("Invalid upload transfer")
         from app.network import git
         await run_sync(git.import_uploads, session_id, uploads)
+    # Plain paths may be steered before runtime preparation. References must
+    # stay queued until the owner resolves their immutable event identity.
+    if not payload.get("upload_references") and (payload.get("upload_paths") or blob_ids):
+        from app.core import upload_transfer
+        await run_sync(upload_transfer.validate_turn_uploads, payload, row)
     payload.setdefault("forwarded_by_device", from_device)
     # Forwarded turns bypass the chat WebSocket's first-message title backfill.
     # Only the owner can persist a title that survives catalog replication.

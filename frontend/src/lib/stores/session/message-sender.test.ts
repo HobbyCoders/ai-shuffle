@@ -182,6 +182,18 @@ describe('compact first send', () => {
 		expect(apiMocks.post.mock.calls.at(-1)![1].then_send.client_message_id).not.toBe(oldId);
 	});
 
+	it('carries explicit restored chip identities through normal and compact-first sends', async () => {
+        const refs = [{ owner_id: 'owner', event_id: 'sent-event', index: 0, path: '/project/uploads/photo.png' }];
+        const normal = makeDeps(baseState({ sessionId: 'existing', title: 'Existing' }));
+        await createMessageSender(normal.deps).sendMessage('read the restored file', { pendingUploadReferences: refs });
+        expect(normal.wsConn.send.mock.calls[0][0].upload_references).toEqual(refs);
+        expect(normal.wsConn.send.mock.calls[0][0].upload_paths).toBeUndefined();
+        const compact = makeDeps(baseState({ sessionId: 'existing', title: 'Existing' }));
+        apiMocks.post.mockResolvedValueOnce({ turn_id: 'c', queued_turn_id: 'q', session_id: 'existing' });
+        await createMessageSender(compact.deps).sendMessage('read the restored file', { compactFirst: true, pendingUploadReferences: refs });
+        expect(apiMocks.post.mock.calls.at(-1)![1].then_send.upload_references).toEqual(refs);
+    });
+
 	it('posts the exact normal query payload and uses only a queued optimistic echo', async () => {
 		const settings = { sessionId: 'compact-chat', title: 'Old chat', modelOverride: 'sonnet',
 			effortLevelOverride: 'high', permissionModeOverride: 'default', fastMode: false };
