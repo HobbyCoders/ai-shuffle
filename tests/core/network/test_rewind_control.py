@@ -13,6 +13,7 @@ from app.network import catalog, control, engine
 from tests.core.network.harness import converge, join
 from tests.core.network.test_transport import ServedBy
 from tests.core.test_fluid_transcript import _seed, load_fluid_path
+from tests.rewind_helpers import wait_for_rewind_release
 
 
 @pytest.fixture
@@ -47,7 +48,11 @@ async def pair(workers, monkeypatch):
     pool.contains.return_value = False
     monkeypatch.setattr(commands, "get_session_pool", lambda: pool)
     monkeypatch.setattr(commands.sync_engine, "broadcast_session_rewound", AsyncMock())
-    return owner, mirror, sdk, served
+    try:
+        yield owner, mirror, sdk, served
+    finally:
+        with owner.active():
+            await wait_for_rewind_release("s-rewind")
 
 
 async def test_mirror_restores_unsent_row_without_touching_owner_transcript(pair):

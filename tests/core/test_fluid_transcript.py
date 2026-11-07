@@ -239,17 +239,15 @@ def _rewind_in_a_process_that_then_ends(session_id):
     from unittest.mock import AsyncMock, patch
 
     from app.api import commands
+    from tests.rewind_helpers import execute_rewind_and_wait
 
     async def rewind():
         with patch.object(commands, "sync_engine") as sync_engine:
             sync_engine.broadcast_user_session_updated = AsyncMock()
             sync_engine.broadcast_session_rewound = AsyncMock()
-            try:
-                return await commands.execute_rewind(
-                    "chat", commands.RewindRequestV2(target_uuid="n6", include_response=False),
-                ), sync_engine
-            finally:
-                await asyncio.sleep(0)
+            return await execute_rewind_and_wait(
+                "chat", commands.RewindRequestV2(target_uuid="n6", include_response=False),
+            ), sync_engine
 
     return asyncio.run(rewind())
 

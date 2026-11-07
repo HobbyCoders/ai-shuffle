@@ -21,6 +21,8 @@ import uuid
 
 import pytest
 
+from tests.rewind_helpers import execute_rewind_and_wait
+
 # Skipped by default: this module opens a REAL Postgres pool and truncates
 # session-store tables, so it must never run against the app's configured
 # DATABASE_URL (commonly shared/production). Opt in with ALLOW_REAL_PG=1 against
@@ -211,7 +213,6 @@ class TestRewindResetCommitsWithTheCut:
         self, monkeypatch, tmp_path, refusal,
     ):
         """A readable/writable JSONL copy is not permission to cut a refused chat."""
-        import asyncio
         from unittest.mock import AsyncMock, Mock
 
         from app.api import commands
@@ -252,10 +253,9 @@ class TestRewindResetCommitsWithTheCut:
                 if refusal == "reset":
                     # Fail after the DELETE, while writing the reset in that transaction.
                     outage.setattr(turns, "set_outcome_baseline", refused)
-                response = await commands.execute_rewind(chat, commands.RewindRequestV2(
+                response = await execute_rewind_and_wait(chat, commands.RewindRequestV2(
                     target_uuid="u2", include_response=False,
                 ))
-                await asyncio.sleep(0)
 
             assert response.success is False
             assert response.message == "Rewind failed"
@@ -271,10 +271,9 @@ class TestRewindResetCommitsWithTheCut:
             # Retrying after the refusal is gone cuts all three copies and resets together.
             if refusal == "target":
                 _insert(entries[2:])
-            response = await commands.execute_rewind(chat, commands.RewindRequestV2(
+            response = await execute_rewind_and_wait(chat, commands.RewindRequestV2(
                 target_uuid="u2", include_response=False,
             ))
-            await asyncio.sleep(0)
             assert response.success is True
             assert _load() == entries[:2]
             assert [json.loads(line) for line in transcript.read_text().splitlines()] == entries[:2]
