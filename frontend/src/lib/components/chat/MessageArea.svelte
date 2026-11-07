@@ -423,12 +423,20 @@
 			? $activeSession.liveTurnId
 			: null
 	);
+	let notSentRecoveryClock = $state(0);
 	const notSentHold = $derived(notSentRows(
 		$activeSession.messages,
 		holdingTurnId,
 		stopRecovery ? [] : $activeSession.queuedMessages ?? [],
-		!stopRecovery && ($activeSession.activeTasks ?? []).some(task => task.status === 'running')
+		!stopRecovery && ($activeSession.activeTasks ?? []).some(task => task.status === 'running'),
+		Math.max(notSentRecoveryClock, Date.now())
 	));
+	$effect(() => {
+		const deadline = notSentHold.recoverAt;
+		if (deadline === undefined) return;
+		const timer = setTimeout(() => { notSentRecoveryClock = deadline; }, Math.max(0, deadline - Date.now()));
+		return () => clearTimeout(timer);
+	});
 
 	const assistantQuestion = $derived(currentAssistantQuestion($activeSession.pendingPermissions ?? []));
 	const activeApprovalId = $derived(assistantQuestion?.request.request_id ?? null);

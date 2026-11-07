@@ -76,7 +76,33 @@ describe('createNotSentHold', () => {
 		expect(ending.bubbles).toHaveLength(2);
 		// Only the task flag changes: it must invalidate the memoized hold too.
 		// This update removes RunningTasksList: only now may taller rows appear.
-		expect(hold(messages, null, queued, false).messages).toBe(messages);
+		const settled = hold(messages, null, queued, false);
+		expect(settled.messages).toBe(messages);
+		expect(settled.recoverAt).toBeUndefined();
+	});
+
+	it('releases stopped words within ten seconds even if a task survives Stop', () => {
+		const hold = createNotSentHold();
+		const messages = [reply, row('1', 'live')];
+		const queued: QueuedMessage[] = [];
+		hold(messages, 'live', queued, true, 1000);
+		const settling = hold(messages, null, queued, true, 1000);
+		expect(settling.bubbles).toHaveLength(1);
+		expect(settling.recoverAt).toBe(11_000);
+		expect(hold(messages, null, queued, true, 10_999).bubbles).toHaveLength(1);
+		// No event, task flag or array changes: only the recovery clock advances.
+		expect(hold(messages, null, queued, true, 11_000).messages).toBe(messages);
+		expect(hold(messages, null, queued, true, 12_000).bubbles).toEqual([]);
+	});
+
+	it('does not extend task-settlement recovery when more feed updates arrive', () => {
+		const hold = createNotSentHold();
+		const messages = [reply, row('1', 'live')];
+		hold(messages, 'live', [], true, 1000);
+		hold(messages, null, [], true, 1000);
+		const updated = [...messages];
+		expect(hold(updated, null, [], true, 10_000).bubbles).toHaveLength(1);
+		expect(hold(updated, null, [], true, 11_000).messages).toBe(updated);
 	});
 
 	it('does not start a background-work hold for rows already shown', () => {
