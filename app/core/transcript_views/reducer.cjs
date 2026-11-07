@@ -354,6 +354,28 @@ function parseWireEvent(value) {
   }
   return event;
 }
+var TURN_FAILURES_KEPT = 1024;
+var NO_TURN_OUTCOMES = { failures: [], finishes: [], cuts: [] };
+function recordCleanFinish(outcomes, finish2) {
+  const [latest, other] = outcomes.finishes;
+  const otherTurn = latest && latest.turnId !== finish2.turnId ? latest : other;
+  return { ...outcomes, finishes: otherTurn ? [finish2, otherTurn] : [finish2] };
+}
+function recordRewind(outcomes, cut) {
+  const newest = outcomes.failures[outcomes.failures.length - 1];
+  const cuts = newest && newest.seq >= cut.fromSeq ? [...outcomes.cuts.filter((c) => c.fromSeq < cut.fromSeq), cut] : outcomes.cuts;
+  return cuts === outcomes.cuts ? outcomes : { ...outcomes, cuts };
+}
+function recordFailure(outcomes, failure) {
+  if (!failure.turnId || outcomes.failures.some((f) => f.turnId === failure.turnId)) return outcomes;
+  return { ...outcomes, failures: [...outcomes.failures, failure].slice(-TURN_FAILURES_KEPT) };
+}
+function completedCleanly(event) {
+  if (event.api_error_status !== void 0 && event.api_error_status !== null) return false;
+  if (event.is_error) return false;
+  const errors = event.errors;
+  return !(Array.isArray(errors) ? errors.length > 0 : errors);
+}
 var COMPACTION_CLEARING_EVENTS = /* @__PURE__ */ new Set([
   "turn.started",
   "turn.parked",
@@ -408,7 +430,8 @@ function initialState() {
     speculativelySettledCardIds: [],
     speculativelySettledTaskIds: [],
     attemptStartSeq: 0,
-    compaction: null
+    compaction: null,
+    turnOutcomes: NO_TURN_OUTCOMES
   };
 }
 function replaceById(messages, id, patch) {
@@ -1010,7 +1033,11 @@ function reduceInternal(state, event, observe) {
           pendingPumpAck: null,
           pumpAckBuffer: "",
           usage: obj(event.usage) ?? state.usage,
-          outputTokensTotal: (state.outputTokensTotal ?? 0) + turnOutputTokens(event.usage)
+          outputTokensTotal: (state.outputTokensTotal ?? 0) + turnOutputTokens(event.usage),
+          // A clean finish of another turn moves the transcript past every
+          // earlier failure (#1175); a failed completion moves it past none,
+          // and is a failure of its own turn.
+          turnOutcomes: completedCleanly(event) ? recordCleanFinish(state.turnOutcomes ?? NO_TURN_OUTCOMES, { seq, turnId: str(event.turn_id) }) : recordFailure(state.turnOutcomes ?? NO_TURN_OUTCOMES, { turnId: str(event.turn_id), seq })
         })
       );
       const retrySettled = settleRetryCards(drained.messages, drained.hasRetryCards);
@@ -1055,6 +1082,9 @@ function reduceInternal(state, event, observe) {
     case "turn.aborted": {
       const reason = str(event.reason);
       let next = dismissProseThrough(closeOpen(state), seq, seq, observe);
+      if (reason === "error") {
+        next = { ...next, turnOutcomes: recordFailure(next.turnOutcomes ?? NO_TURN_OUTCOMES, { turnId: str(event.turn_id), seq }) };
+      }
       if (reason === "interrupt") {
         next = {
           ...next,
@@ -1904,7 +1934,9 @@ function reduceInternal(state, event, observe) {
         mayHaveLiveRetry: state.mayHaveLiveRetry && hasRetryCards,
         activeTaskSummaries,
         openTextId,
-        openThinkingId
+        openThinkingId,
+        // A rewind removes every failure at or after its cut (#1082).
+        turnOutcomes: recordRewind(state.turnOutcomes ?? NO_TURN_OUTCOMES, { seq, fromSeq })
       };
     }
     // ── Approvals asked in words (#483) ─────────────────────────────
@@ -2325,7 +2357,7 @@ function materializeProjection(body, records, epoch, runtime) {
 }
 
 // scripts/transcript-reducer-node.ts
-var REDUCER_FINGERPRINT = "9fbe9c65e577a67d0637375ee2dd3101029d2ebc9fd146a65700884d40f31ced";
+var REDUCER_FINGERPRINT = "ccc10cf9661d34ce3cd9bcadcebd4bcd62cb08d38de6ff8e8cd08d7912a7c2f7";
 var RPC_VERSION = 1;
 var MAX_PACKET_BYTES = 24 * 1024 * 1024;
 function dispatch(method, params) {

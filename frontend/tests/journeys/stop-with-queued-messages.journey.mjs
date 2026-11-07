@@ -2,6 +2,9 @@
 // confirms, or that never leaves the page; a turn the feed has not named yet; a
 // parked turn and its background job; a reload or a chat switch straight after.
 // Words stay shown exactly once and can always be got back.
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { runJourney } from './runner.mjs';
 import {
 	SEEDED,
@@ -15,6 +18,7 @@ import {
 	chatState,
 	openNewChat,
 	pickAccess,
+	pickProject,
 	scriptTag,
 	sendButton,
 	stopButton,
@@ -45,7 +49,31 @@ const PARKED_REPLY = "I'll wait for it";
 const PARK_JOB_MS = 10_000;
 const PARK_WAKE_GRACE_MS = 5000;
 
-async function parkForStop(page, variant) {
+async function withParkForStop(page, variant, status, act) {
+	// This is the disposable devloop's seeded git directory, never a live home
+	// or checkout. Exclusive creation refuses a concurrent case instead of
+	// letting one case release another's job. Always clean up our own gate.
+	const gate = join(status.seed.projects['dev-sandbox'], '.git', 'journey-park-stop');
+	await mkdir(gate);
+	let job;
+	try {
+		job = await parkForStop(page, variant, gate);
+		return await act(job);
+	} finally {
+		// A failed staging step must not leave a waiter that the next case's
+		// release could wake. The API waits for this job's real process stop.
+		try {
+			if (job) {
+				const stopped = await api(page, 'POST', `/sessions/${job.sessionId}/tasks/${job.taskId}/stop`, {});
+				expect(stopped.ok, 'the fixture-owned Monitor stopped before gate cleanup');
+			}
+		} finally {
+			await rm(gate, { recursive: true });
+		}
+	}
+}
+
+async function parkForStop(page, variant, gate) {
 	const token = `tok-${uniq()}`;
 	await typeAndSend(page, `park ${token} ${scriptTag(variant, 'park-stop')}`);
 	await page.getByText(PARKED_REPLY, { exact: false }).first().waitFor({ timeout: 60_000 });
@@ -56,13 +84,28 @@ async function parkForStop(page, variant) {
 	expect(job, 'the turn really parked on a running Monitor job');
 	const startedAt = Date.parse(job.startedAt);
 	expect(Number.isFinite(startedAt), 'the Monitor reports its actual start time');
-	return { sessionId, taskId: job.id, deadline: startedAt + PARK_JOB_MS + PARK_WAKE_GRACE_MS };
+	return { sessionId, taskId: job.id, gate, deadline: null };
 }
 
 async function expectParkJobRunning(page, job) {
 	const live = await api(page, 'GET', `/sessions/${job.sessionId}/live`);
 	expect(live.activeTasks.some((task) => task.id === job.taskId && task.status === 'running'),
 		'the original job is still running when Stop is pressed');
+	await writeFile(join(job.gate, 'release'), '');
+	// Observe the shell's actual clock, rather than assuming its release poll
+	// ran at the same instant as this write. Stop must interrupt the timed body.
+	const until = Date.now() + 5000;
+	while (true) {
+		try {
+			const startedAt = Number(await readFile(join(job.gate, 'started'), 'utf8'));
+			expect(Number.isFinite(startedAt) && startedAt > 0, 'the timed Monitor body started');
+			job.deadline = startedAt + PARK_JOB_MS + PARK_WAKE_GRACE_MS;
+			break;
+		} catch (error) {
+			if (error.code !== 'ENOENT' || Date.now() >= until) throw error;
+			await delay(25);
+		}
+	}
 }
 
 async function waitPastStoppedJob(page, job) {
@@ -537,7 +580,8 @@ await runJourney({
 			// wake turn that sends what Stop refused.
 			name: 'stop-with-a-background-job-keeps-the-words-out',
 			async setup(ctx) {
-				await openNewChat(ctx, { project: PROJECT });
+				await openStopChat(ctx);
+				await pickProject(ctx.page, ctx.page.getByRole('region', { name: 'New chat' }), PROJECT);
 				await pickAccess(ctx.page, 'Bypass');
 				await ctx.page.waitForTimeout(800);
 			},
@@ -581,27 +625,29 @@ await runJourney({
 			// waiting for must not come, and there is no turn left to jump around.
 			name: 'stop-on-a-parked-turn-ends-the-job',
 			async setup(ctx) {
-				await openNewChat(ctx, { project: PROJECT });
+				await openStopChat(ctx);
+				await pickProject(ctx.page, ctx.page.getByRole('region', { name: 'New chat' }), PROJECT);
 				await pickAccess(ctx.page, 'Bypass');
 				await ctx.page.waitForTimeout(800);
 			},
-			async act({ page, mark, variant, log }) {
+			async act({ page, mark, variant, log, status }) {
 				await mark('park');
-				const job = await parkForStop(page, variant);
+				await withParkForStop(page, variant, status, async (job) => {
 
-				await mark('stop while parked');
-				await expectParkJobRunning(page, job);
-				await stopEverything(page);
-				await stopGenerating(page).waitFor({ state: 'detached', timeout: 15_000 });
-				await page.waitForTimeout(1000);
-				const before = await chatState(page);
+					await mark('stop while parked');
+					await expectParkJobRunning(page, job);
+					await stopEverything(page);
+					await stopGenerating(page).waitFor({ state: 'detached', timeout: 15_000 });
+					await page.waitForTimeout(1000);
+					const before = await chatState(page);
 
-				await mark('past the job');
-				await waitPastStoppedJob(page, job);
-				const after = await chatState(page);
-				log(`after Stop ${JSON.stringify(before)}; past the job ${JSON.stringify(after)}`);
-				expect(after.streaming === 'false', 'stayed stopped past the job');
-				expect(after.messages === before.messages, `the job did not wake the chat (${before.messages} → ${after.messages} messages)`);
+					await mark('past the job');
+					await waitPastStoppedJob(page, job);
+					const after = await chatState(page);
+					log(`after Stop ${JSON.stringify(before)}; past the job ${JSON.stringify(after)}`);
+					expect(after.streaming === 'false', 'stayed stopped past the job');
+					expect(after.messages === before.messages, `the job did not wake the chat (${before.messages} → ${after.messages} messages)`);
+				});
 			}
 		},
 		{
@@ -609,29 +655,31 @@ await runJourney({
 			// wake must not run what Stop refused.
 			name: 'stop-after-a-parked-turn-keeps-the-words-out',
 			async setup(ctx) {
-				await openNewChat(ctx, { project: PROJECT });
+				await openStopChat(ctx);
+				await pickProject(ctx.page, ctx.page.getByRole('region', { name: 'New chat' }), PROJECT);
 				await pickAccess(ctx.page, 'Bypass');
 				await ctx.page.waitForTimeout(800);
 			},
-			async act({ page, mark, variant }) {
+			async act({ page, mark, variant, status }) {
 				const notSent = (text) => page.locator('[data-not-sent="true"]').filter({ hasText: text });
 				await mark('park');
-				const job = await parkForStop(page, variant);
+				await withParkForStop(page, variant, status, async (job) => {
 
-				const texts = await queueDuringASlowTurn(page, mark, variant, 2);
-				const collect = await watchStopFrames(page, texts);
-				await mark('stop');
-				await expectParkJobRunning(page, job);
-				await stopEverything(page);
-				await waitChat(page, { streaming: 'false' }, { timeout: 15_000 });
-				for (const text of texts) await notSent(text).waitFor({ timeout: 8000 });
+					const texts = await queueDuringASlowTurn(page, mark, variant, 2);
+					const collect = await watchStopFrames(page, texts);
+					await mark('stop');
+					await expectParkJobRunning(page, job);
+					await stopEverything(page);
+					await waitChat(page, { streaming: 'false' }, { timeout: 15_000 });
+					for (const text of texts) await notSent(text).waitFor({ timeout: 8000 });
 
-				await mark('past the job');
-				await waitPastStoppedJob(page, job);
-				const frames = await collect();
-				expectEachOnceInEveryFrame(frames);
-				expect((await page.getByText(`You said: “queued`, { exact: false }).count()) === 0, 'neither message ran');
-				for (const text of texts) expect((await notSent(text).count()) === 1, 'each is still one not-sent row');
+					await mark('past the job');
+					await waitPastStoppedJob(page, job);
+					const frames = await collect();
+					expectEachOnceInEveryFrame(frames);
+					expect((await page.getByText(`You said: “queued`, { exact: false }).count()) === 0, 'neither message ran');
+					for (const text of texts) expect((await notSent(text).count()) === 1, 'each is still one not-sent row');
+				});
 			}
 		},
 		{

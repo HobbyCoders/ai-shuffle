@@ -25,7 +25,7 @@ TTL = 1800  # Covers commit/push, fetch and context sync; abandoned reservations
 # Explicit columns only: no credentials, arbitrary tables, paths or executable jobs.
 TABLES = {
     "session_messages": ("role", "content", "tool_name", "tool_input", "metadata", "jsonl_uuid", "created_at"),
-    "session_events": ("id", "seq", "event_type", "payload", "command_id", "created_at"),
+    "session_events": ("id", "seq", "event_type", "payload", "command_id", "created_at", "turn_id"),
     "session_plans": ("id", "document", "receipts"),
     "fluid_sessions": ("head_node_id", "created_at", "cli_session_id", "project_root"),
     "fluid_session_nodes": ("node_id", "parent_id", "ts", "message"),
@@ -1356,6 +1356,13 @@ def _publish_history(cur, sid, token):
         count = len(snapshot)
         metrics = {"statements": 0, "execute_seconds": 0.0, "max_statement_seconds": 0.0}
         measured = _HistoryCursor(cur, metrics)
+        if table == "session_events":
+            # A move staged before turn_id was exported has the old positional
+            # shape. The new field is appended so those receipts stay readable.
+            snapshot = [
+                [*values, None] if len(values) == len(TABLES[table]) - 1 else values
+                for values in snapshot
+            ]
         snapshot = _reconcile_app_rows(measured, sid, table, snapshot)
         columns = ("session_id", *TABLES[table])
         rows = [(sid, *[Json(v) if c in JSON_COLUMNS and v is not None else v

@@ -85,7 +85,10 @@ describe('retained transcript action lifetime', () => {
 		await tick(); await tick();
 		expect(complete).not.toHaveBeenCalled();
 		expect(screen.queryByRole('dialog')).toBeNull();
-		expect(readDraft('A')).toBeNull();
+		// The server dropped A's row, so its words wait in A's own draft (#1083),
+		// never in B's composer or draft.
+		expect(readDraft('A')).toContain('Outgoing prompt');
+		expect(readDraft('B')).toBeNull();
 	});
 
 	it('keeps a late restore in A’s own draft and away from B’s composer', async () => {
@@ -113,6 +116,20 @@ describe('retained transcript action lifetime', () => {
 		finish({ success: true, unsent_restored: true, restored_prompt: 'A words', restored_upload_paths: ['/uploads/a.png'] });
 		await waitFor(() => expect(mocks.pendingRestore).toHaveBeenCalledWith('A words', ['/uploads/a.png']));
 		expect(complete).not.toHaveBeenCalled();
+	});
+
+	it('gives a late sent-message rewind to A’s composer when A is back on screen but still loading', async () => {
+		let finish!: (value: unknown) => void;
+		mocks.rewind.mockReturnValue(new Promise(resolve => { finish = resolve; }));
+		const complete = vi.fn();
+		render(Harness, { onRewindComplete: complete });
+		await fireEvent.click(await openRewind());
+		live.set(state('B')); await tick();
+		live.set(state('A', true)); await tick();
+		finish({ success: true, chat_rewound: true });
+		await waitFor(() => expect(mocks.pendingRestore).toHaveBeenCalledWith('Outgoing prompt', undefined));
+		expect(complete).not.toHaveBeenCalled();
+		expect(readDraft('B')).toBeNull();
 	});
 
 	it('closes the body-portaled message menu without reporting an outgoing reply', async () => {

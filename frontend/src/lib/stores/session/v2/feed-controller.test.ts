@@ -2638,3 +2638,140 @@ describe('feedController usage ownership (W7)', () => {
 		expect(feedController.hasAppliedUsage('s1')).toBe(true);
 	});
 });
+
+describe('feedController turn-error banner (#1082, #1175, #1238)', () => {
+	const FAILED = 'provider returned HTTP 500';
+	const logged = (type: string, seq: number, fields: Record<string, unknown> = {}) =>
+		({ type, id: `ev-${seq}`, seq, session_id: 's1', created_at: '2026-07-12T00:00:00.000Z', ...fields });
+	const failure = (turn: string, seq: number, message = FAILED) => [
+		logged('turn.started', seq, { turn_id: turn }),
+		logged('turn.aborted', seq + 1, { turn_id: turn, reason: 'error', message }),
+	];
+	const success = (turn: string, seq: number) => [
+		logged('turn.started', seq, { turn_id: turn }),
+		logged('turn.completed', seq + 1, { turn_id: turn }),
+	];
+
+	function chat(history: Record<string, unknown>[] = [], hydrated = true) {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		feedController.start('s1');
+		for (const e of history) hoisted.onEvent!(e);
+		if (hydrated) hoisted.onEvent!(caughtUp(history.length ? (history.at(-1)!.seq as number) : 0));
+		const socket = createMessageHandlers({ update: deps.update, getState: deps.getState } as unknown as MessageHandlerDeps);
+		// The runtime's `error` frame, naming its turn (#1238) or, from an older worker, not.
+		const raise = (turnId: string | null) => {
+			socket.handleMessage({ type: 'error', session_id: 's1', message: FAILED, ...(turnId ? { turn_id: turnId } : {}) });
+		};
+		/** Live events, each folded on its own frame: the banner after each. */
+		const live = (events: Record<string, unknown>[]) =>
+			events.map((e) => {
+				hoisted.onEvent!(e);
+				flushRaf();
+				return deps.state.error === FAILED ? 'shown' : 'cleared';
+			});
+		return { deps, raise, live };
+	}
+
+	it('clears the banner on the live fold once another turn finishes cleanly, not before', () => {
+		const { deps, raise, live } = chat([logged('turn.started', 1, { turn_id: 't1' })]);
+		raise('t1');
+		expect(deps.state.error).toBe(FAILED);
+		expect(live([logged('turn.aborted', 2, { turn_id: 't1', reason: 'error', message: FAILED }), ...success('t2', 3)]))
+			.toEqual(['shown', 'shown', 'cleared']);
+	});
+
+	it('S2 (a): a caught-up feed behind at an old same-words failure; every fold until its own turn\'s successor shows it', () => {
+		const { raise, live } = chat(failure('t0', 1));
+		raise('t1');
+		expect(live([...success('tx', 3), ...failure('t1', 5), ...success('t2', 7)]))
+			.toEqual(['shown', 'shown', 'shown', 'shown', 'shown', 'cleared']);
+	});
+
+	it('round 4 S2: a frame naming no turn survives a whole-turn lag (old same-words failure, its success, then its own)', () => {
+		// Caught up, but at seq 0 when the current failure's frame arrives.
+		const { deps, raise, live } = chat();
+		raise(null);
+		expect(live([...failure('t0', 1), ...success('tx', 3), ...failure('t1', 5)]))
+			.toEqual(['shown', 'shown', 'shown', 'shown', 'shown', 'shown']);
+		expect(deps.state.error).toBe(FAILED);
+	});
+
+	it('round 4 S6: hydrated t0, 16 more failures and a clean finish; t0\'s delayed frame raises nothing', () => {
+		const others = Array.from({ length: 16 }, (_, i) => failure(`o${i}`, 10 + i * 2, `other ${i}`)).flat();
+		const { deps, raise, live } = chat([...failure('t0', 1), ...others, ...success('t2', 50)]);
+		raise('t0');
+		expect(deps.state.error ?? null).toBeNull();
+		expect(live([logged('stream.delta', 52, { turn_id: 't3', text: 'hi' })])).toEqual(['cleared']);
+	});
+
+	it('S2 (b) and S6: raised during hydration, then one atomic replay of its failure, 16 others and a clean finish', () => {
+		const { deps, raise } = chat([], false);
+		raise('t1');
+		const others = Array.from({ length: 16 }, (_, i) => failure(`o${i}`, 10 + i * 2, `other ${i}`)).flat();
+		for (const e of [...failure('t1', 1), ...others, ...success('t2', 50)]) hoisted.onEvent!(e);
+		flushRaf();
+		expect(deps.state.error).toBe(FAILED);
+		hoisted.onEvent!(caughtUp(51));
+		expect(deps.state.error).toBeNull();
+	});
+
+	it('a turn-named banner follows a reconnect gap fold by fold', () => {
+		const { raise, live } = chat([logged('turn.started', 1, { turn_id: 't1' })]);
+		raise('t1');
+		hoisted.onOpen!();
+		expect(live([logged('turn.aborted', 2, { turn_id: 't1', reason: 'error', message: FAILED }), ...success('t2', 3)]))
+			.toEqual(['shown', 'shown', 'cleared']);
+	});
+
+	it('a turn-named banner survives a restart onto a replaced log and finds its failure in it', () => {
+		const { deps, raise, live } = chat(failure('t1', 1));
+		raise('t1');
+		feedController.restart('s1');
+		for (const e of failure('t1', 1)) hoisted.onEvent!(e);
+		hoisted.onEvent!(caughtUp(2));
+		expect(deps.state.error).toBe(FAILED);
+		expect(live(success('t2', 3))).toEqual(['shown', 'cleared']);
+	});
+
+	// Round 5 S7: a voice tool result persists through a synthetic `voice-tool-*`
+	// turn whose lifecycle the reducer ignores; its turn.completed is no successor.
+	const voiceTool = (seq: number) => [
+		logged('turn.started', seq, { turn_id: 'voice-tool-call' }),
+		logged('tool.use', seq + 1, { turn_id: 'voice-tool-call', tool_use_id: 'call', name: 'WebSearch', input: {} }),
+		logged('tool.result', seq + 2, { turn_id: 'voice-tool-call', tool_use_id: 'call', is_error: true, content_preview: 'search failed' }),
+		logged('turn.completed', seq + 3, { turn_id: 'voice-tool-call', stop_reason: 'tool_result' }),
+	];
+
+	it('round 5 S7: a timely frame survives a voice tool\'s synthetic turn finishing, then clears on a real successor', () => {
+		const { raise, live } = chat(failure('t1', 1));
+		raise('t1');
+		expect(live(voiceTool(3))).toEqual(['shown', 'shown', 'shown', 'shown']);
+		expect(live(success('t2', 7))).toEqual(['shown', 'cleared']);
+	});
+
+	it('round 5 S7: a frame raised before its failure is logged survives a voice tool turn ending first', () => {
+		const { raise, live } = chat([logged('turn.started', 1, { turn_id: 't1' })]);
+		raise('t1');
+		expect(live([...voiceTool(2), logged('turn.aborted', 6, { turn_id: 't1', reason: 'error', message: FAILED }), ...success('t2', 7)]))
+			.toEqual(['shown', 'shown', 'shown', 'shown', 'shown', 'shown', 'cleared']);
+	});
+
+	it('round 5 S7: a late frame, with the voice tool turn already logged, shows and then clears on a real successor', () => {
+		const { deps, raise, live } = chat([...failure('t1', 1), ...voiceTool(3)]);
+		raise('t1');
+		expect(deps.state.error).toBe(FAILED);
+		expect(live(success('t2', 7))).toEqual(['shown', 'cleared']);
+	});
+
+	it('a frame naming no turn (older worker) stays through a reconnect gap and later outcomes until sent', () => {
+		const { deps, raise, live } = chat(success('t0', 1));
+		hoisted.onOpen!();
+		raise(null);
+		expect(live([...failure('t1', 3), ...success('t2', 5)])).toEqual(['shown', 'shown', 'shown', 'shown']);
+		hoisted.onEvent!(caughtUp(6));
+		expect(live([...failure('t3', 7), ...success('t4', 9)])).toEqual(['shown', 'shown', 'shown', 'shown']);
+		expect(deps.state.error).toBe(FAILED);
+	});
+
+});

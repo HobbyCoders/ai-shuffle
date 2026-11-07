@@ -205,6 +205,7 @@ def test_ui_journeys_and_visual_regression_gate_every_pr():
     jobs = workflow("ci-frontend.yml")["jobs"]
     assert {"journeys", "visual"} <= set(jobs["javascript"]["needs"])
     journeys = jobs["journeys"]
+    assert journeys["runs-on"] == "ubuntu-latest"
     assert journeys["strategy"]["fail-fast"] == "false"
     shards = journeys["strategy"]["matrix"]["shard"]
     from scripts.devloop.ci import HOSTED_SHARDS
@@ -214,7 +215,10 @@ def test_ui_journeys_and_visual_regression_gate_every_pr():
     plan = steps["Plan this shard"]["run"]
     assert f"plan --shards {len(shards)}" in plan
     assert f"UI journeys shard ${{{{ matrix.shard }}}}/{len(shards)}:" in plan
-    run = steps["Run the journeys on a fresh dev instance"]["run"]
+    journey_step = steps["Run the journeys on a fresh dev instance"]
+    assert journey_step["timeout-minutes"] == "25"
+    run = journey_step["run"]
+    assert "--retry-failures" in run
     assert f'--shard "${{{{ matrix.shard }}}}/{len(shards)}"' in run
     assert "/usr/lib/postgresql/16/bin" in run and "||" not in run
     assert "python -m app.preview stamp" in steps["Build and stamp the desktop UI"]["run"]

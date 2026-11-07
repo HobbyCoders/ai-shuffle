@@ -47,6 +47,7 @@ vi.mock('./v2/feed-controller', () => ({
 		isFeeding: vi.fn(() => false),
 		invalidate: vi.fn(),
 		retractOptimisticSend: vi.fn(),
+		raiseTurnError: vi.fn(() => 'shown'),
 	},
 	// Mirrors the real constant: `start` marks streaming OPTIMISTICALLY so the
 	// fold clears it once the reducer confirms the turn, instead of competing
@@ -1105,6 +1106,31 @@ describe('ws-message-handlers', () => {
 
 			handlers.handleMessage({ type: 'error', session_id: 'session-1', message: 'plain failure' });
 			expect(applied?.forkOfferSessionId).toBeNull();
+		});
+
+		it('hands the banner to the feed with the frame\'s turn id; raises none for a turn the log has moved past', () => {
+			const state = { ...mockState(), isStreaming: false, optimisticStreaming: false };
+			let applied: ActiveSessionState | undefined;
+			deps = createMockDeps({
+				getState: vi.fn(() => state),
+				update: vi.fn((fn) => { applied = fn(state); return applied; }),
+			});
+			handlers = createMessageHandlers(deps);
+			const raise = feedController.raiseTurnError as ReturnType<typeof vi.fn>;
+			raise.mockClear();
+			handlers.handleMessage({ type: 'error', session_id: 'session-1', message: 'boom', turn_id: 't1' });
+			expect(raise).toHaveBeenLastCalledWith('session-1', 'boom', 't1');
+			expect(applied?.error).toBe('boom');
+
+			// A frame from an older worker names no turn.
+			handlers.handleMessage({ type: 'error', session_id: 'session-1', message: 'boom' });
+			expect(raise).toHaveBeenLastCalledWith('session-1', 'boom', null);
+
+			// Its failure is already behind the log: the late frame is stale.
+			applied = undefined;
+			raise.mockReturnValueOnce('outlived');
+			handlers.handleMessage({ type: 'error', session_id: 'session-1', message: 'boom', turn_id: 't1' });
+			expect(applied).toBeUndefined();
 		});
 
 		it.each([
