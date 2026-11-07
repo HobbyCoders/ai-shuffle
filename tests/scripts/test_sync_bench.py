@@ -99,6 +99,15 @@ def test_op_key_does_not_conflate_incarnations():
     assert op_key(dict(origin_device_id="A", origin_incarnation=2, origin_seq=7)) == ["A", 2, 7]
 
 
+def test_project_and_stream_only_cannot_silently_skip_every_journey(monkeypatch):
+    from scripts.perf.sync_bench import main
+    monkeypatch.setattr("sys.argv", ["sync_bench", "run", "--output", "unused.json",
+                                    "--projects-only", "--stream-only"])
+    with pytest.raises(SystemExit) as error:
+        main()
+    assert error.value.code == 2
+
+
 def test_child_cannot_attach_to_unowned_app(monkeypatch):
     from scripts.perf.sync_bench import child
     monkeypatch.delenv("AI_SHUFFLE_PREVIEW", raising=False)
