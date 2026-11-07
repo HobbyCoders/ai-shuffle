@@ -502,10 +502,10 @@ def _checkout_detail(project_v2_id: str, runner_id: str) -> Dict[str, Any]:
     from app.core.git_service import git_service
     from app.core.project_utils import get_project_working_dir
     from app.db import checkouts as checkouts_db
-    from app.db import projects_v2
+    from app.core.project_resolver import resolve_catalog_project
 
     detail: Dict[str, Any] = {"folder": None, "branch": None, "dirty": None, "changed_files": None}
-    pv2 = projects_v2.get_project_v2(project_v2_id)
+    pv2 = resolve_catalog_project(project_v2_id)
     if not pv2:
         return detail
     row = _own_rows_by_origin().get(pv2.get("origin") or "") if runner_id == _me() else None
@@ -516,7 +516,7 @@ def _checkout_detail(project_v2_id: str, runner_id: str) -> Dict[str, Any]:
     except (OSError, ValueError):
         return detail
     detail["folder"] = folder
-    base = next((ck for ck in checkouts_db.list_checkouts(project_v2_id)
+    base = next((ck for ck in checkouts_db.list_checkouts(pv2["id"])
                  if ck.get("runner_id") == runner_id and not ck.get("branch")), None)
     if base is not None and base.get("dirty") is not None:
         detail["dirty"] = bool(base["dirty"])

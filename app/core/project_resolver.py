@@ -69,6 +69,36 @@ def origin_for_legacy_project(project_row: Dict[str, Any]) -> str:
     return project_row.get("link_group_id") or ("local:" + str(project_row.get("id")))
 
 
+def resolve_catalog_project(project_v2_id: str) -> Optional[Dict[str, Any]]:
+    """Follow a late-linked placeholder for project-level reads, never sessions.
+
+    The local first-link record proves the exact legacy generation and target;
+    names, paths and a reused legacy primary key cannot. Do not seed anything
+    here: creation/linking commits the proof with the replacement atomically.
+    """
+    from app.db import project_catalog_aliases
+
+    project = projects_v2.get_project_v2(project_v2_id)
+    if project and (project.get("origin") or "").startswith("local:"):
+        replacement = project_catalog_aliases.replacement_for(project_v2_id)
+        if replacement:
+            return projects_v2.get_project_v2(replacement) or project
+    return project
+
+
+def catalog_project_read_ids(project: Dict[str, Any]) -> list[str]:
+    """Current identity plus proven, non-revoked first-link branch identities.
+
+    Only project-scoped reads use this union: sessions stay bound to their
+    recorded identity, and callers must not use an alias's retired base.
+    Missing historical provenance fails closed, never inferring a generation
+    from mutable legacy metadata or exposing branches after deletion/ID reuse.
+    """
+    from app.db import project_catalog_aliases
+
+    return [project["id"], *project_catalog_aliases.originals_for(project["id"])]
+
+
 def _persist_session_project_v2(session_id: str, project_v2_id: str) -> None:
     """One-shot self-heal write: bind a session to its project_v2, only if still
     NULL (never clobbers an existing binding, never touches legacy ``project_id``)."""
@@ -146,20 +176,8 @@ def _seed_pv2_from_legacy(
     Idempotent (a concurrent seed loses the race harmlessly). Returns the
     resulting projects_v2 row, or ``None`` if it somehow could not be resolved.
     """
-    pv2_id = projects_v2.project_v2_id_for_origin(origin)
     try:
-        with get_db() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "INSERT INTO projects_v2 (id, origin, name, settings) "
-                "VALUES (%s, %s, %s, %s) "
-                "ON CONFLICT (origin) DO NOTHING",
-                (pv2_id, origin, legacy.get("name") or origin, "{}"),
-            )
-            checkouts_db.seed_legacy_base_checkout(
-                cursor, str(legacy.get("id")), pv2_id,
-                legacy.get("instance_id") or "", legacy.get("path"),
-            )
+        return projects_db.seed_project_catalog(legacy)
     except Exception as e:  # pragma: no cover - best-effort self-seed
         logger.warning(
             "project_resolver: failed to self-seed project_v2 for origin %s: %s",
