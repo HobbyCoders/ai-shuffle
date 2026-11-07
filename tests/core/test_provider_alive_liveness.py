@@ -53,9 +53,11 @@ def test_the_runtime_keeps_the_frame_off_the_ws_leg():
 
 
 async def _run_worker_turn(tmp_path, fluid_events):
+    from tests.shared_fixtures import seed_session
     """One worker turn through the real pump and recorder; returns its id."""
     sid = f"worker-{uuid.uuid4()}"
     database.create_session(session_id=sid, profile_id="default")
+    seed_session("parent-of-" + sid)
 
     async def receive():
         translator = HarnessAdapter()

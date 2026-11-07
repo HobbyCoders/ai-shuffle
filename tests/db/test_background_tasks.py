@@ -129,7 +129,8 @@ def test_mark_background_task_killed_flips_single_row(mock_db):
 # session_events.has_subagent_started
 # =============================================================================
 
-def test_has_subagent_started_matches_payload_task_id(mock_db):
+def test_has_subagent_started_matches_payload_task_id(mock_db, session_factory):
+    session_factory("se-1")
     se.append_events("se-1", [
         {"type": "subagent.started", "payload": {"task_id": "sub-a"}},
         {"type": "subagent.progress", "payload": {"task_id": "sub-a"}},

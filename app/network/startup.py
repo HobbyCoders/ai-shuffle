@@ -207,6 +207,8 @@ def repair_stamped_mirror_pins(device_id: str) -> int:
 def _install_resource_hook() -> None:
     """Resource invalidations (post-commit) ask the scanner to look now."""
     from app.core import resource_sync
+    from app.network import memory_records
+    memory_records.install_write_hook()
     if getattr(resource_sync, "_network_hooked", False):
         return
     original = resource_sync._emit

@@ -92,10 +92,11 @@ async def _run_background_query(
     """
     from app.core.turn_recorder import TurnRecorder
 
-    recorder = await TurnRecorder.maybe_create(session_id)
+    recorder = None
     from app.core.session_plan import run_context
 
     try:
+        recorder = await TurnRecorder.maybe_create(session_id)
         with run_context(recorder):
             if recorder:
                 await recorder.start(prompt, profile_id=profile.get("id"))
@@ -112,8 +113,12 @@ async def _run_background_query(
                 lease=lease,
             )
     finally:
-        if recorder:
-            await recorder.close()
+        try:
+            if recorder:
+                await recorder.close()
+        finally:
+            if lease is not None:
+                await session_admission.close_and_wait(lease)
 
 
 async def _run_background_query_impl(
@@ -741,7 +746,7 @@ async def start_background_query(
             session_id, api_user_id, device_id,
         )
     except BaseException:
-        session_admission.close(lease)
+        await session_admission.close_and_wait(lease)
         raise
 
 

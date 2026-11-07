@@ -27,8 +27,10 @@ past a limit, with a last frame saying the reply goes on: dropping frames from t
 middle would look like a whole reply, and waiting for it would let a stuck client
 stall the turn.
 
-A Stop for the turn holding the chat, even one still setting up, is a flag on the
-pooled engine. If the holder is out of a Stop's reach (a rewind, a turn that has ended, a
+A Stop for the turn holding the chat, even one still setting up, stays on its
+lease as well as the pooled engine. The adapter reapplies it after submit resets
+an idle Interrupt, before the newly scheduled engine task can start model work.
+If the holder is out of a Stop's reach (a rewind, a turn that has ended, a
 turn off the pool), :func:`stop_waiting_turn` marks the lease of each turn waiting then.
 So the Stop leaves with those turns, however their wait ends, and a later arrival has a
 lease of its own. The turn that gets the chat puts it on the engine it runs on
@@ -57,12 +59,14 @@ Every function runs on the event loop.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import logging
 from dataclasses import dataclass, field
 from typing import Any, AsyncGenerator, Awaitable, Callable, Dict, List, Optional, Set, TypeVar
 
 from app.core.session_pool import get_session_pool
+from app.db.async_database import TurnWork, bind_turn_work, unbind_turn_work
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +81,9 @@ _ENDING_WAIT_SECONDS = 15.0
 _REWIND_WAIT_SECONDS = 60.0
 # How long a stopping app gives unfinished turns to save what they have.
 _SHUTDOWN_WAIT_SECONDS = 5.0
+# A reader exit must not turn a wedged engine into an immortal chat holder.
+_ABANDONED_DRAIN_SECONDS = 15.0
+_ABANDONED_CANCEL_SECONDS = 1.0
 # How far behind a stream's reader may fall. Far past anything a live connection
 # gets to, as a turn writes kilobytes a second apart from the odd large tool result.
 _READER_BUFFER_BYTES = 8 * 1024 * 1024
@@ -130,17 +137,51 @@ class Lease:
     taken_by: Optional["Lease"] = None
     # The turn has announced its end: a next message waits rather than being refused.
     ending: bool = False
-    # A Stop pressed while this turn waited for the chat.
+    # A Stop pressed while this turn waited for the chat or was setting up/running.
     stop_requested: bool = False
     # Set when the route that held this lease has finished, saving included.
     exited: asyncio.Event = field(default_factory=asyncio.Event)
     # While it waits for the chat: what is in its way may have changed.
     wake: asyncio.Event = field(default_factory=asyncio.Event)
+    # Captures the originating adapter/context, never a fresh session-id lookup.
+    abandon: Optional[Callable[[], Awaitable[None]]] = None
+    abandoned: bool = False
+    # The deadline applies only to engine reads, never app-session writes.
+    engine_waiting: asyncio.Event = field(default_factory=asyncio.Event)
+    engine_finished: asyncio.Event = field(default_factory=asyncio.Event)
+    work: TurnWork = field(default_factory=TurnWork)
+    closing: bool = False
 
     @property
     def stopped(self) -> bool:
         """A rewind took the chat: a turn still connecting must not start."""
         return self.taken_by is not None
+
+
+_current_lease: contextvars.ContextVar[Optional[Lease]] = contextvars.ContextVar("admission_lease", default=None)
+
+
+def _bind(lease: Lease) -> None:
+    _current_lease.set(lease)
+    bind_turn_work(lease.work)
+
+
+async def raw_engine_events(events: Any) -> Any:
+    """Mark only the raw engine advance, never adapter-side app work."""
+    lease = _current_lease.get()
+    while lease is None or not lease.abandoned:
+        if lease is not None:
+            lease.engine_waiting.set()
+        try:
+            event = await anext(events)
+        except StopAsyncIteration:
+            return
+        finally:
+            if lease is not None:
+                lease.engine_waiting.clear()
+        if lease is not None and lease.abandoned:
+            return
+        yield event
 
 
 _holders: Dict[str, Lease] = {}
@@ -162,11 +203,20 @@ def stop_waiting_turn(session_id: str) -> bool:
     The engine is left alone, because nothing using it now is what this Stop is for.
     """
     if _stop_is_for_holder(session_id):
+        # The engine may not exist yet, or may clear its idle Interrupt at
+        # submit. Keep the Stop on the turn through every setup boundary.
+        _holders[session_id].stop_requested = True
         return False
     waiters = [lease for lease in _waiting.get(session_id, ()) if lease.stoppable]
     for lease in waiters:
         lease.stop_requested = True
     return bool(waiters)
+
+
+def stop_requested(session_id: Optional[str]) -> bool:
+    """Whether the turn holding this chat received a Stop, including during setup."""
+    holder = _holders.get(session_id) if session_id else None
+    return bool(holder is not None and holder.stoppable and holder.stop_requested)
 
 
 def apply_stop(lease: Lease, state: Any) -> None:
@@ -232,6 +282,7 @@ async def acquire(session_id: str, *, stoppable: bool = True) -> Lease:
     if state is not None and not state.is_streaming:
         state.interrupt_requested = False
     _holders[session_id] = lease
+    _bind(lease)
     return lease
 
 
@@ -243,6 +294,7 @@ async def begin_rewind(session_id: str) -> Lease:
     lease = Lease(session_id, stoppable=False)
     await _wait_for_chat(lease, lambda: session_id in _rewinds)
     _rewinds[session_id] = lease
+    _bind(lease)
     _wake_waiters(session_id)
     return lease
 
@@ -261,6 +313,11 @@ def turn_ended(lease: Lease) -> None:
     lease.ending = True
 
 
+def is_current(lease: Lease) -> bool:
+    """Only this admission generation may publish a terminal or change Stop state."""
+    return _holders.get(lease.session_id) is lease
+
+
 def holds_chat(lease: Lease) -> bool:
     """Whether session-wide cleanup is still this turn's to do.
 
@@ -272,7 +329,57 @@ def holds_chat(lease: Lease) -> bool:
 
 
 def close(lease: Lease) -> None:
-    """The route is done. Safe to repeat, and for a lease that was taken over."""
+    """Release only after every issued app thread has actually returned.
+
+    The API stays synchronous for callers, but a cancelled caller's outstanding
+    work retains its exact admission generation until the owned drain finishes.
+    """
+    if _current_lease.get() is lease:
+        _current_lease.set(None)
+    unbind_turn_work(lease.work)
+    if lease.exited.is_set() or lease.closing:
+        return
+    # Preserve synchronous release when only scheduled discard callbacks remain.
+    lease.work.reap_done()
+    if lease.work.pending:
+        lease.closing = True
+        closing = _own(_close_after_writes(lease))
+
+        def completed(task: asyncio.Task) -> None:
+            # Cancellation before the coroutine's first instruction cannot run
+            # cleanup. Retry cancellation, never a failed drain: its proof is
+            # broken, so admission stays held until explicit recovery/restart.
+            if not lease.exited.is_set() and task.cancelled():
+                lease.closing = False
+                close(lease)
+
+        closing.add_done_callback(completed)
+        return
+    _close_now(lease)
+
+
+async def close_and_wait(lease: Lease) -> None:
+    """An owning route is not complete until its issued threads have settled."""
+    close(lease)
+    await finish_saving(lease.exited.wait())
+
+
+async def _close_after_writes(lease: Lease) -> None:
+    try:
+        await finish_saving(lease.work.drain())
+    except asyncio.CancelledError:
+        # finish_saving propagates cancellation only after its drain settles.
+        if not lease.work.pending:
+            _close_now(lease)
+        raise
+    except Exception:
+        logger.exception("Failed to drain turn writes for %s; keeping admission held", lease.session_id)
+        raise
+    else:
+        _close_now(lease)
+
+
+def _close_now(lease: Lease) -> None:
     if _holders.get(lease.session_id) is lease:
         del _holders[lease.session_id]
     if _rewinds.get(lease.session_id) is lease:
@@ -296,36 +403,126 @@ def _disown(task: asyncio.Task) -> None:
 
 async def stream_turn(
     session_id: str, turn: Callable[[Lease], AsyncGenerator[Dict[str, Any], None]],
+    *, lease: Optional[Lease] = None,
 ) -> AsyncGenerator[Dict[str, Any], None]:
-    """Run a streaming route under the chat's lease; a refusal is its error frame."""
-    try:
-        lease = await acquire(session_id)
-    except SessionBusyError as busy:
-        yield {"type": "error", "message": str(busy)}
-        return
+    """Drain abandoned readers, retaining a runtime's lease through persistence."""
+    owns_lease = lease is None
+    if owns_lease:
+        try:
+            lease = await acquire(session_id)
+        except SessionBusyError as busy:
+            yield {"type": "error", "message": str(busy)}
+            return
+    _bind(lease)
     events = turn(lease)
     handed_over = False
     try:
-        async for event in events:
+        while True:
+            # Async generators may be advanced by a fresh consumer task for
+            # every frame (e.g. wait_for(anext(...))); bind the exact generation
+            # at each advance, not only when the generator was first entered.
+            _bind(lease)
+            try:
+                event = await anext(events)
+            except StopAsyncIteration:
+                break
+            if isinstance(event, dict) and event.get("type") in {"done", "interrupted", "error"}:
+                # The reader may send its next message before release finishes.
+                # Queue it behind saving rather than refusing an idle-looking chat.
+                turn_ended(lease)
             yield event
     except GeneratorExit:
         # The reader left with the turn parked at a frame, so it is still alive.
+        _bind(lease)
         handed_over = True
-        _own(_finish_turn(events, lease))
+        finishing = _own(_finish_turn(events, lease, release=owns_lease))
+        if not owns_lease:
+            # The runtime cannot finalize before the engine and persistence
+            # tail finish. Repeated cancellation must not detach that work.
+            cancelled = False
+            while not finishing.done():
+                try:
+                    await asyncio.shield(finishing)
+                except asyncio.CancelledError:
+                    cancelled = True
+            if cancelled:
+                raise asyncio.CancelledError
         raise
     finally:
-        if not handed_over:
-            close(lease)
+        if not handed_over and owns_lease:
+            await close_and_wait(lease)
 
 
-async def _finish_turn(events: AsyncGenerator[Dict[str, Any], None], lease: Lease) -> None:
+async def finish_saving(work: Awaitable[T]) -> T:
+    """Cancellation cannot detach an issued mutation's off-loop thread.
+
+    Keep a strong reference and wait through cancellation, then propagate it.
+    DB/pool timeouts, not an engine deadline, bound these writes.
+    """
+    saving = asyncio.ensure_future(work)
+    cancelled = False
+    while not saving.done():
+        try:
+            await asyncio.shield(saving)
+        except asyncio.CancelledError:
+            cancelled = True
+    result = saving.result()
+    if cancelled:
+        raise asyncio.CancelledError
+    return result
+
+
+async def _finish_turn(
+    events: AsyncGenerator[Dict[str, Any], None], lease: Lease, *, release: bool = True,
+) -> None:
+    async def finish() -> None:
+        async def drain() -> None:
+            async for _ in events:
+                pass
+
+        # Only this owner cancels its reader, and only while it awaits engine
+        # events. App-session writes between frames and the saving tail settle
+        # before admission can be released, even on shutdown cancellation.
+        draining = asyncio.create_task(drain())
+        engine_finished = asyncio.create_task(lease.engine_finished.wait())
+        try:
+            await asyncio.wait(
+                {draining, engine_finished}, timeout=_ABANDONED_DRAIN_SECONDS,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            while not draining.done() and not lease.engine_finished.is_set():
+                if lease.engine_waiting.is_set() or lease.abandon is None:
+                    logger.warning(
+                        "Abandoned engine drain timed out for %s; retiring its engine", lease.session_id,
+                    )
+                    lease.abandoned = True
+                    if lease.abandon is not None:
+                        await lease.abandon()
+                    draining.cancel()
+                    await asyncio.wait({draining}, timeout=_ABANDONED_CANCEL_SECONDS)
+                    if not draining.done():
+                        _own(draining)  # fenced engine-only reader; never an app write
+                    return
+                # A frame's app-session mutation is still in flight. Do not
+                # cancel it; retire only when the next engine read is reached.
+                waiting = asyncio.create_task(lease.engine_waiting.wait())
+                try:
+                    await asyncio.wait(
+                        {draining, engine_finished, waiting}, return_when=asyncio.FIRST_COMPLETED,
+                    )
+                finally:
+                    waiting.cancel()
+            await draining
+        finally:
+            engine_finished.cancel()
+
     try:
-        async for _ in events:
-            pass
+        await finish_saving(finish())
     except Exception:
         logger.exception("A turn nobody is reading failed for %s", lease.session_id)
     finally:
-        close(lease)
+        if release:
+            await close_and_wait(lease)
 
 
 def _frame_size(frame: Dict[str, Any]) -> int:
@@ -428,3 +625,5 @@ def clear() -> None:
     _holders.clear()
     _rewinds.clear()
     _waiting.clear()
+    _current_lease.set(None)
+    bind_turn_work(None)

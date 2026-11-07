@@ -187,6 +187,16 @@ def _no_session_admission_across_tests():
     yield
 
 
+# Keep admission tasks inside their loop fixture's lifetime, after dependent
+# fixture cleanup but before Runner.close() can strand a release owner.
+from tests._admission_cleanup import (  # noqa: F401, E402
+    pytest_fixture_post_finalizer,
+    pytest_fixture_setup,
+    pytest_runtest_protocol,
+    pytest_runtest_teardown,
+)
+
+
 @pytest.fixture(autouse=True)
 def _no_real_claude_on_path_each_test():
     """Re-apply the session guard before every test.
@@ -503,6 +513,19 @@ def mock_db(_raw_sqlite: sqlite3.Connection, _auto_db_shim) -> sqlite3.Connectio
     is active for the whole test regardless.
     """
     return _raw_sqlite
+
+
+@pytest.fixture
+def session_factory(_auto_db_shim):
+    """Persist an explicit session before exercising its turns or event log.
+
+    Resolve the sessions module at call time so file-local database routing is
+    already installed. This is opt-in setup, never an append-time auto-create:
+    deleting the row must still make later event writes fail.
+    """
+    from tests.shared_fixtures import seed_session
+
+    return seed_session
 
 
 @pytest.fixture(scope="function")

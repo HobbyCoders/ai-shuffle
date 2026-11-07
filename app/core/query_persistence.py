@@ -13,7 +13,7 @@ import uuid
 from typing import Any, Deque, Optional, Callable, Set
 
 from app.db import database
-from app.db.async_database import run_sync
+from app.db.async_database import keep_in_turn, run_sync
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +112,7 @@ def schedule_context_usage_capture(session_id: str, log_prefix: str = "") -> Non
     task = asyncio.create_task(
         capture_context_usage(session_id, log_prefix=log_prefix)
     )
+    keep_in_turn(task)
     _context_usage_capture_tasks.add(task)
     task.add_done_callback(_context_usage_capture_tasks.discard)
 

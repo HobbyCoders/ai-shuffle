@@ -101,7 +101,7 @@ class _FakeTurnManager:
 
 
 @pytest.fixture
-def worker_env(monkeypatch, tmp_path):
+def worker_env(monkeypatch, tmp_path, session_factory):
     """Stub every out-of-process dependency of ``dispatch_worker``."""
     from app.core import project_resolver
     from app.core import turn_manager as tm_mod
@@ -127,7 +127,14 @@ def worker_env(monkeypatch, tmp_path):
     monkeypatch.setattr(
         db, "get_session", lambda sid: {"id": sid, "project_id": "task-project", "worktree_path": str(checkout)}
     )
-    monkeypatch.setattr(db, "create_session", lambda **kw: {"id": kw["session_id"]})
+    for session_id in ("root-1", "owner-1", "parent-1"):
+        session_factory(session_id)
+
+    def create_session(**kw):
+        session_factory(kw["session_id"], parent_session_id=kw.get("parent_session_id"))
+        return {"id": kw["session_id"]}
+
+    monkeypatch.setattr(db, "create_session", create_session)
     monkeypatch.setattr(
         db, "set_session_branch", lambda session_id, branch, project_v2_id=None: None
     )

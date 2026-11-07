@@ -981,6 +981,8 @@ class SkillStore:
         self._save_meta(meta)
         skill = self.get(name)
         assert skill is not None
+        from fluid.codemode.transactions import committed_change
+        committed_change(self._path(name))
         return skill
 
     def _enforce_live_cap(self, meta: dict, *, keep: str) -> list[str]:
@@ -1026,6 +1028,9 @@ class SkillStore:
         meta = self._load_meta()
         if meta.get("skills", {}).pop(name, None) is not None:
             self._save_meta(meta)
+        if existed:
+            from fluid.codemode.transactions import committed_change
+            committed_change(path)
         return existed
 
     def get(self, name: str) -> Skill | None:
@@ -2208,6 +2213,7 @@ class SkillStore:
             return actions
         meta["last_curated_at"] = now
         archive_dir = self.archive_dir
+        archived_paths = set()
         for name, info in sorted((meta.get("skills") or {}).items()):
             if not isinstance(info, dict) or info.get("pinned"):
                 continue
@@ -2237,6 +2243,7 @@ class SkillStore:
                 except OSError:
                     continue
                 info["state"] = "archived"
+                archived_paths.add(path)
                 why = "never imported" if never_imported else "unused"
                 actions.append(
                     f"archived {name} ({why}, {idle_days:.0f}d) -> "
@@ -2258,6 +2265,10 @@ class SkillStore:
                     fh.write(json.dumps({"ts": now, "actions": actions}) + "\n")
             except OSError:
                 pass
+        if archived_paths:
+            from fluid.codemode.transactions import committed_change
+            # One hint suffices: the memory publisher reconciles all skills.
+            committed_change(next(iter(archived_paths)))
         # Cleanup rides the same tick — deterministic, silent, never fatal.
         dropped = self.reap()
         if dropped:

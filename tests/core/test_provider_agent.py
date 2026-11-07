@@ -486,7 +486,7 @@ class _FakeTurnManager:
 
 
 @pytest.fixture
-def dispatch_env(monkeypatch, tmp_path):
+def dispatch_env(monkeypatch, tmp_path, session_factory):
     """Stub every out-of-process dependency of dispatch_worker.
 
     Returns a namespace with the fake turn manager, the recorded
@@ -550,6 +550,9 @@ def dispatch_env(monkeypatch, tmp_path):
 
     def _create_session(**kwargs):
         created.update(kwargs)
+        if kwargs.get("parent_session_id"):
+            session_factory(kwargs["parent_session_id"])
+        session_factory(kwargs["session_id"], parent_session_id=kwargs.get("parent_session_id"))
         return {"id": kwargs.get("session_id")}
 
     monkeypatch.setattr(db, "create_session", _create_session)

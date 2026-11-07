@@ -330,6 +330,9 @@ async def test_real_state_changes_during_generation(mock_db, change):
     {"type": "chunk", "content": "Final answer."},
 ])
 async def test_native_and_delegated_recorder_frames(mock_db, frame):
+    from tests.shared_fixtures import seed_session
+
+    seed_session("s")
     from app.core.turn_recorder import TurnRecorder
     recorder = await TurnRecorder.maybe_create("s")
     try:

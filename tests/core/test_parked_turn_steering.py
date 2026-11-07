@@ -222,6 +222,9 @@ async def test_each_resumed_attempt_books_once(mock_db):
 
 @pytest.mark.parametrize("after_insert", [False, True])
 def test_park_settlement_and_completion_roll_back_together(mock_db, after_insert):
+    from tests.shared_fixtures import seed_session
+
+    seed_session("park-atomic")
     sid = "park-atomic"
     first = turns.enqueue_turn(sid, "user", prompt="work")
     turns.start_turn(first["id"])
