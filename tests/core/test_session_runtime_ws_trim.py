@@ -19,11 +19,19 @@ type (done / error / tool_use / tool_result / permission / question / session
 lifecycle) still goes out in full.
 """
 
+import asyncio
 import json
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
 from app.core import session_runtime as sr
+from app.db import session_events, sessions, turns
+from tests.core.helpers import make_pump
+from tests.core.test_session_runtime import (
+    _clean_module_state,  # noqa: F401 — fixture
+    _runtime_env,
+)
 
 
 # ─── W3: text / thinking_block are trimmed off the WS leg ───────────────────
@@ -117,3 +125,91 @@ def test_unserializable_tool_input_still_caps_instead_of_raising():
     capped = sr._cap_ws_tool_input(event)
     assert capped is not event
     assert capped["input"]["_ws_truncated"] is True
+
+
+# Error frames must identify the same durable turn as the recorder's failure.
+@pytest.mark.parametrize("source", ["user", "queue", "unpark"])
+@pytest.mark.parametrize("supplied_turn_id", [None, "a-stale-provider-turn"])
+async def test_pump_error_frame_identifies_recorded_failure(mock_db, source, supplied_turn_id):
+    sid = "error-correlation"
+    sessions.create_session(session_id=sid, profile_id=None)
+    turn = turns.enqueue_turn(sid, source, prompt="do the thing")
+    event = {"type": "error", "message": "The provider rejected this turn."}
+    if supplied_turn_id is not None:
+        event["turn_id"] = supplied_turn_id
+    create_recorder = sr.TurnRecorder.create_for_run
+
+    with _runtime_env(pump=make_pump([event])) as env, patch.object(
+        sr.TurnRecorder, "create_for_run", wraps=create_recorder,
+    ) as recorder_factory:
+        assert await sr.SessionRuntime(turn).execute() == "aborted"
+
+    (failure,) = [
+        row for row in session_events.get_events(sid)
+        if row["event_type"] == "turn.aborted"
+    ]
+    (frame,) = [
+        call.args[1] for call in env["broadcaster"].await_args_list
+        if call.args[1].get("type") == "error"
+    ]
+    assert failure["payload"]["message"] == frame["message"]
+    assert frame["session_id"] == sid
+    assert frame.get("turn_id") == failure["turn_id"] == turn["id"]
+    assert recorder_factory.call_args.kwargs["turn_id"] == frame["turn_id"]
+
+
+async def test_watchdog_error_frame_identifies_recorded_failure(mock_db):
+    sid = "watchdog-error-correlation"
+    sessions.create_session(session_id=sid, profile_id=None)
+    turn = turns.enqueue_turn(sid, "user", prompt="run a tool")
+    rt = sr.SessionRuntime(turn)
+    create_recorder = sr.TurnRecorder.create_for_run
+
+    async def wedged_pump(**kwargs):
+        yield {"type": "tool_use", "id": "tool", "name": "Bash"}
+        # Drive the watchdog's real terminalization after the recorder starts,
+        # without a wall-clock delay or a live provider/tool dependency.
+        await rt._terminalize_silent_turn(300)
+        await asyncio.Event().wait()
+
+    with _runtime_env(pump=wedged_pump) as env, patch.object(
+        sr.TurnRecorder, "create_for_run", wraps=create_recorder,
+    ):
+        assert await asyncio.wait_for(rt.execute(), timeout=5) == "aborted"
+
+    (failure,) = [
+        row for row in session_events.get_events(sid)
+        if row["event_type"] == "turn.aborted"
+    ]
+    (frame,) = [
+        call.args[1] for call in env["broadcaster"].await_args_list
+        if call.args[1].get("type") == "error"
+    ]
+    assert "progress watchdog" in frame["message"]
+    assert frame["session_id"] == sid
+    assert frame.get("turn_id") == failure["turn_id"] == turn["id"]
+    assert turns.get_turn(turn["id"])["state"] == "aborted"
+
+
+async def test_error_turn_id_survives_origin_and_device_fanout(monkeypatch):
+    from app.core.sync_engine import SyncEngine
+
+    origin = AsyncMock()
+    engine = SyncEngine()
+    viewer = AsyncMock()
+    viewer.device_id = "watcher"
+    # The device writer enqueues synchronously (it never waits for the socket).
+    viewer.send_text = Mock(return_value=True)
+    engine._connections["session"] = {"watcher": viewer}
+    monkeypatch.setattr("app.core.sync_engine.sync_engine", engine)
+    frame = {"type": "error", "session_id": "session", "turn_id": "durable-turn",
+             "message": "The provider rejected this turn."}
+
+    await sr._default_broadcast(
+        "session", frame, source="user", origin_send=origin, origin_device_id="sender",
+    )
+
+    origin.assert_awaited_once_with(frame)
+    wire_event = json.loads(viewer.send_text.call_args.args[0])
+    assert wire_event["event_type"] == "stream_frame"
+    assert wire_event["data"] == frame

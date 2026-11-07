@@ -1745,6 +1745,10 @@ class SessionRuntime:
                     if isinstance(event, dict):
                         # FE cross-session guard tag.
                         event["session_id"] = self.session_id
+                        if etype == "error":
+                            # Match the durable failure recorded with the turn
+                            # id injected into TurnRecorder.create_for_run.
+                            event["turn_id"] = self.turn_id
                         # Keep the frame, drop a multi-MB tool input that no
                         # WS consumer reads (copies rather than mutating, so the
                         # recorder's already-handed-over dict is untouched).
@@ -1870,6 +1874,7 @@ class SessionRuntime:
                 "type": "error",
                 "message": message,
                 "session_id": self.session_id,
+                "turn_id": self.turn_id,
             })
         except Exception:  # noqa: BLE001
             logger.debug(
