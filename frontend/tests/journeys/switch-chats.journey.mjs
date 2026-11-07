@@ -26,6 +26,7 @@ import {
 	waitChatOpen
 } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
+import { holdFocusTimer } from './lib/focus-timer.mjs';
 
 // The long chat's last answer (scripts/devloop/seed.py: LONG_TURNS = 70 turns, 280 rows).
 const LAST_WORDS = 'Step 70 is done.';
@@ -120,14 +121,17 @@ await runJourney({
 			name: 'draft-caret',
 			async setup(ctx) {
 				const { page, status } = ctx;
+				// Keys right after the click meet ProseMirror's focus timer at its
+				// worst moment on every run, not only on a loaded runner (#1241).
+				await page.addInitScript(holdFocusTimer);
 				await warmOtherChat(page, status);
 				const box = composer(page);
 				await box.click();
 				await box.pressSequentially('ABCDEFGHIJ');
 				for (let i = 0; i < 5; i++) await box.press('ArrowLeft');
 				await page.waitForTimeout(800);
-				// Where the caret really is before leaving: a fast run can drop a key
-				// press, and the case checks the caret comes back, not the keyboard.
+				// Every arrow press moves the caret: none may be undone by the
+				// editor's focus handling (prosemirror-view before 1.42.9).
 				caretBeforeSwitch = await box.evaluate((el) => {
 					const sel = el.ownerDocument.getSelection();
 					if (!sel?.rangeCount) return -1;
@@ -136,7 +140,7 @@ await runJourney({
 					range.setEnd(sel.focusNode, sel.focusOffset);
 					return range.toString().length;
 				});
-				expect(caretBeforeSwitch > 0 && caretBeforeSwitch < 10, `caret is mid-draft before the switch (${caretBeforeSwitch})`);
+				expect(caretBeforeSwitch === 5, `caret is five characters from the end before the switch (${caretBeforeSwitch}, want 5)`);
 			},
 			async act({ page, mark }) {
 				await mark('open another chat');
