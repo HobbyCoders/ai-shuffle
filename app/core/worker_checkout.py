@@ -538,7 +538,11 @@ def restore_worker_checkout(worker_session_id: str, *, follow_live_switch: bool 
                                f"the saved work; {worktree_reclaim.archive_note(base_path, branch)}. "
                                "Dispatch a new Task instead")
             try:
-                checkout_manager._require_branch_binding(path, branch)
+                from app.core.git_worktree_ops import repo_worktree_lock
+
+                with repo_worktree_lock(path):
+                    git_service.require_complete_worktree(path)
+                    checkout_manager._require_branch_binding(path, branch)
             except checkout_manager.WorktreeError:
                 return False, ("its dedicated checkout is no longer on its assigned branch. "
                                f"Switch that checkout back to '{branch}' without discarding work, "

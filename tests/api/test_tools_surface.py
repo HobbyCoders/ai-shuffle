@@ -62,7 +62,8 @@ def test_response_shape(client):
             "id", "label", "kind", "server", "available", "admin_only", "tools",
         }
         assert group["kind"] in (
-            "harness", "app", "ai", "computer_use", "browser", "app_config", "mcp",
+            "harness", "app", "private_access", "ai", "computer_use", "browser",
+            "app_config", "mcp",
         )
         for entry in group["tools"]:
             assert set(entry) >= {"name", "description", "risk"}

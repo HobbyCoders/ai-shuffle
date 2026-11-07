@@ -26,6 +26,7 @@ from typing import Callable, Optional, Tuple, Dict, Any, List
 from app.core.config import settings
 from app.core.git_cache import _git_cache
 from app.core.git_service import git_service
+from app.core.git_worktree_ops import WorktreeError, repo_worktree_lock
 from app.core.scrub import strip_url_userinfo
 from app.core.project_utils import (
     get_project_working_dir, get_worktree_working_dir,
@@ -37,11 +38,6 @@ from app.db.async_database import run_sync
 from app.db.base import WorktreeStatus
 
 logger = logging.getLogger(__name__)
-
-
-class WorktreeError(Exception):
-    """Exception raised for worktree creation/management errors with user-friendly messages."""
-    pass
 
 
 def _external_worktree_branch_name(git_wt: Dict[str, Any]) -> str:
@@ -1192,6 +1188,12 @@ class WorktreeManager:
                 return wt
         return None
 
+    def _require_finished_materialization(self, path: str) -> None:
+        try:
+            self.git_service.require_complete_worktree(path)
+        except Exception as exc:
+            raise WorktreeError(f"Cannot resume unfinished checkout: {exc}") from exc
+
     def _adopt_existing_worktree(
         self,
         worktree_id: str,
@@ -1216,17 +1218,19 @@ class WorktreeManager:
         sibling forks, which stay bound to their home device.
         """
         adopt_path = Path(adopted["path"])
-        stored_path = self._get_relative_worktree_path_from_full(
-            adopt_path, project["path"]
-        )
-        updated = database.update_worktree(
-            worktree_id,
-            status=WorktreeStatus.ACTIVE,
-            worktree_path=stored_path,
-            branch_name=branch_name,
-            repository_id=repository_id,
-        )
-        self._repoint_rebound_session(rebind_session_id, rebind_project_id)
+        with repo_worktree_lock(str(adopt_path)):
+            self._require_finished_materialization(str(adopt_path))
+            stored_path = self._get_relative_worktree_path_from_full(
+                adopt_path, project["path"]
+            )
+            updated = database.update_worktree(
+                worktree_id,
+                status=WorktreeStatus.ACTIVE,
+                worktree_path=stored_path,
+                branch_name=branch_name,
+                repository_id=repository_id,
+            )
+            self._repoint_rebound_session(rebind_session_id, rebind_project_id)
         logger.info(
             f"Adopted existing on-disk worktree for branch '{branch_name}' "
             f"(worktree_id={worktree_id}, path={adopt_path}, "
@@ -1286,7 +1290,10 @@ class WorktreeManager:
         if worktree["status"] == WorktreeStatus.ACTIVE:
             # Already active — check if valid on disk
             if self.is_worktree_valid(worktree):
-                return worktree
+                path = str(get_worktree_working_dir_as_path(worktree))
+                with repo_worktree_lock(path):
+                    self._require_finished_materialization(path)
+                    return worktree
             # Active but missing on disk — proceed with recreation
 
         # Recreate regardless of prior status (COMPLETED, DELETED, ORPHANED, or
@@ -1442,14 +1449,16 @@ class WorktreeManager:
 
         # Update existing DB record back to ACTIVE with new path (and, on a
         # rebind, the local repository id + re-pointed sessions).
-        updated = database.update_worktree(
-            worktree_id,
-            status=WorktreeStatus.ACTIVE,
-            worktree_path=relative_worktree_path,
-            branch_name=branch_name,
-            repository_id=rebound_repo_id,
-        )
-        self._repoint_rebound_session(rebind_session_id, rebound_project_id)
+        with repo_worktree_lock(str(worktree_path)):
+            self._require_finished_materialization(str(worktree_path))
+            updated = database.update_worktree(
+                worktree_id,
+                status=WorktreeStatus.ACTIVE,
+                worktree_path=relative_worktree_path,
+                branch_name=branch_name,
+                repository_id=rebound_repo_id,
+            )
+            self._repoint_rebound_session(rebind_session_id, rebound_project_id)
 
         # NOTE: sdk_session_id is intentionally preserved on reopen.
         # JSONL history lives in ~/.claude/projects/ (not in the worktree dir),

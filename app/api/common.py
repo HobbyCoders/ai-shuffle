@@ -221,7 +221,6 @@ def require_origin_access(
     compose by ``project_v2_id``).
     """
     from app.core import project_resolver
-    from app.db import projects_v2 as projects_v2_db
 
     project_id = (project_id or "").strip() or None
     project_v2_id = (project_v2_id or "").strip() or None
@@ -247,7 +246,7 @@ def require_origin_access(
         # before this helper — a missing projects_v2 row is not a 404 here.
         pv2 = project_resolver.resolve_project_v2({"project_id": project_id})
     else:
-        pv2 = projects_v2_db.get_project_v2(project_v2_id)
+        pv2 = project_resolver.resolve_catalog_project(project_v2_id)
         if not pv2:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
