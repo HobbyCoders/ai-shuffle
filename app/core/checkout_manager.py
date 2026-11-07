@@ -33,7 +33,6 @@ Reuses ``git_service`` and ``worktree_manager._sanitize_branch_name`` by import.
 from __future__ import annotations
 
 from contextlib import nullcontext
-from datetime import datetime, timezone
 import json
 import logging
 import ntpath
@@ -51,7 +50,9 @@ from fluid.tools.child_env import scrub_child_env
 
 from app.core.config import settings
 from app.core.git_service import git_service
-from app.core.git_worktree_ops import WorktreeAddError, worktree_error_detail
+from app.core.git_worktree_ops import (
+    WORKTREE_ADD_FAILED_MARKER, WorktreeAddError, worktree_error_detail,
+)
 from app.core.project_links import auto_link_group_id
 from app.core.worktree_manager import (
     WorktreeError,
@@ -263,53 +264,39 @@ def _require_branch_binding(path: str, branch: str) -> None:
         )
 
 
-def _legacy_checkout_is_established(marker: Path, row: Optional[Dict[str, Any]]) -> bool:
-    """Bridge pre-marker successes, but never a stale row for a recreated path.
-
-    An active row records successful setup. Its original creation must postdate
-    this linked worktree's commondir file, which ordinary commits/edits do not
-    rewrite. A removed/recreated worktree has newer metadata, even at the same
-    path/branch. Missing/unknown evidence fails closed; updated_at is not proof.
-    """
-    if not row or row.get("status") != "active":
-        return False
-    try:
-        registered = datetime.fromisoformat(str(row.get("created_at")))
-        if registered.tzinfo is None:
-            registered = registered.replace(tzinfo=timezone.utc)
-        return (marker.parent / "commondir").stat().st_mtime <= registered.timestamp()
-    except (OSError, ValueError, TypeError):
-        return False
+def _failed_add_marker(path: str) -> Path:
+    result = git_service._run_git(
+        path, ["rev-parse", "--git-path", WORKTREE_ADD_FAILED_MARKER], timeout=10,
+    )
+    if result.returncode or not (result.stdout or "").strip():
+        raise WorktreeAddError(f"Cannot locate checkout failure metadata for {path!r}")
+    return Path(path) / result.stdout.strip()
 
 
 def _require_complete_checkout(path: str, *, row: Optional[Dict[str, Any]] = None) -> None:
-    """Validate materialization once, not the user's subsequent development.
+    """Inspect fresh adoptions and known failed adds, not ordinary user edits.
 
-    Keep evidence in Git's per-worktree metadata: it survives process restarts
-    but not removal/recreation of that worktree. A validated checkout may later
-    have intentional deletes/renames, so completeness must not gate every send.
-    Unvalidated partial states remain ambiguous and are never reset or repaired.
+    Existing active rows remain trusted across upgrades and successful historical
+    recreations unless a later failed add flagged this physical checkout. A failed
+    add from before failure markers existed with a stale active row is unknowable.
     """
     _require_checkout_root(path)
-    result = git_service._run_git(
-        path, ["rev-parse", "--git-path", "ai-shuffle-checkout-validated"], timeout=10,
-    )
-    if result.returncode or not (result.stdout or "").strip():
-        raise WorktreeAddError(f"Cannot locate checkout validation metadata for {path!r}")
-    marker = Path(path) / result.stdout.strip()
-    if marker.is_file():
+    marker = _failed_add_marker(path)
+    failed_add = marker.exists()
+    if row and (row.get("status") or "active") == "active" and not failed_add:
         return
     # This shared check never invokes LFS clean/smudge filters.
-    if not _legacy_checkout_is_established(marker, row) and not git_service._checkout_is_complete(path):
+    if not git_service._checkout_is_complete(path):
         raise WorktreeAddError(
             f"Checkout {path!r} is incomplete (missing index or committed files); "
             "refusing to use or repair it because local changes may be present. "
             "Inspect and repair the checkout, then retry."
         )
-    try:
-        marker.touch()
-    except OSError as exc:
-        raise WorktreeAddError(f"Cannot record checkout validation for {path!r}: {exc}") from exc
+    if failed_add:
+        try:
+            marker.unlink()
+        except OSError as exc:
+            raise WorktreeAddError(f"Cannot clear checkout failure for {path!r}: {exc}") from exc
 
 
 def _branch_plan(
@@ -790,6 +777,16 @@ def _ensure_branch_checkout(
             fetch_base=not create_new_branch,
         )
     if not success:
+        # If Git metadata is locked/unwritable, an existing row must still not
+        # hide this failed materialization on the next send. New failures have
+        # no row and therefore always take completeness checks on adoption.
+        if row:
+            try:
+                recorded = _failed_add_marker(dest_str).is_file()
+            except Exception:  # noqa: BLE001 - retain Git's original diagnostic
+                recorded = False
+            if not recorded:
+                checkouts_db.set_checkout_status(row["id"], "incomplete")
         logger.warning(
             "checkout_manager: git worktree add failed for branch %r at %s: %s",
             branch,

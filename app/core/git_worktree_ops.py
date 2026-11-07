@@ -9,6 +9,7 @@ import os
 import re
 import tempfile
 import threading
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -66,6 +67,7 @@ LFS_PASSTHROUGH_CONFIG = (
 )
 
 APP_WORKTREES_EXCLUDE = ".fluid/worktrees/"
+WORKTREE_ADD_FAILED_MARKER = "ai-shuffle-worktree-add-failed"
 
 
 def exclude_app_worktrees(main_dir: str, path: Optional[str] = None) -> None:
@@ -266,8 +268,46 @@ class GitWorktreeMixin:
         """Add a worktree; return (success, error or successful-fallback warning)."""
         with repo_worktree_lock(main_dir):
             exclude_app_worktrees(main_dir, path)
-            return self._add_worktree_unlocked(main_dir, path, branch, new_branch=new_branch,
-                                               base_branch=base_branch, fetch_base=fetch_base)
+            had_git_marker = os.path.lexists(os.path.join(path, ".git"))
+            result = self._add_worktree_unlocked(main_dir, path, branch, new_branch=new_branch,
+                                                 base_branch=base_branch, fetch_base=fetch_base)
+            # Do not reclassify an existing user's checkout when Git simply
+            # refuses to add over it. Newly registered remnants are our failure.
+            if result[0] or not had_git_marker:
+                self._record_worktree_add_result(main_dir, path, failed=not result[0])
+            return result
+
+    def _record_worktree_add_result(self, main_dir: str, path: str, *, failed: bool) -> None:
+        """Keep failure evidence in the registered worktree's private Git dir.
+
+        Resolve through common metadata so even a registered remnant with no
+        working directory/.git file can be flagged. Never change working files.
+        """
+        try:
+            result = self._run_git(main_dir, ["rev-parse", "--git-common-dir"], timeout=10)
+            if result.returncode or not (result.stdout or "").strip():
+                return
+            metadata = Path(main_dir) / result.stdout.strip() / "worktrees"
+            if not metadata.is_dir():
+                return
+            target = os.path.normcase(os.path.abspath(os.path.join(path, ".git")))
+            for admin in metadata.iterdir():
+                if not admin.is_dir():
+                    continue
+                try:
+                    registered = (admin / "gitdir").read_text(encoding="utf-8").strip()
+                except OSError:
+                    continue
+                if os.path.normcase(os.path.abspath(registered)) != target:
+                    continue
+                marker = admin / WORKTREE_ADD_FAILED_MARKER
+                if failed:
+                    marker.write_text("incomplete: failed add\n", encoding="utf-8")
+                else:
+                    marker.unlink(missing_ok=True)
+                return
+        except Exception as exc:  # noqa: BLE001 - preserve Git's original outcome
+            logger.warning("Could not record worktree add outcome at %s: %s", path, exc)
 
     def remove_worktree(self, main_dir: str, path: str, force: bool = False) -> bool:
         """Remove a worktree; serialised per repository (see repo_worktree_lock)."""

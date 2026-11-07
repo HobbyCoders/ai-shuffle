@@ -21,6 +21,14 @@ def _resolve(project, branch, **kwargs):
     )
 
 
+def _failure_marker(path):
+    result = checkout_manager.git_service._run_git(
+        str(path), ["rev-parse", "--git-path", "ai-shuffle-worktree-add-failed"], timeout=10,
+    )
+    assert result.returncode == 0
+    return Path(path) / result.stdout.strip()
+
+
 def _snapshot(path):
     """Include ignored/untracked files and Git's private worktree index."""
     index = checkout_manager.git_service._run_git(
@@ -40,8 +48,7 @@ def test_failed_add_partial_checkout_is_not_adopted(
     path = checkout_manager._branch_checkout_path(str(base_checkout), branch)
     if previously_materialized:
         assert _resolve(project, branch) == str(path)
-        # Validation belongs to this physical materialization, not its reused
-        # path/branch/row. Git removes the old evidence with its metadata.
+        # Leave a stale active row; a known failed add must override it.
         _git(base_checkout, "worktree", "remove", str(path))
     before_rows = checkouts_db.list_checkouts(project["id"])
     # Git really fails *after* registration. Removing a file in a failing hook
@@ -52,6 +59,7 @@ def test_failed_add_partial_checkout_is_not_adopted(
     with pytest.raises(WorktreeAddError, match="checkout interrupted"):
         _resolve(project, branch, raise_add_errors=True)
     assert path.is_dir() and not (path / "README.md").exists()
+    assert _failure_marker(path).read_text() == "incomplete: failed add\n"
     assert str(path).replace("\\", "/") in checkout_manager.git_service._run_git(
         str(base_checkout), ["worktree", "list", "--porcelain"], timeout=10,
     ).stdout.replace("\\", "/")
@@ -234,21 +242,14 @@ def test_base_resolution_survives_unrelated_worktree_inspection_error(
 def test_pre_upgrade_established_checkout_continues_on_first_resolution(
     project, base_checkout, workspace_root, monkeypatch, edit,
 ):
-    from datetime import datetime, timezone
     from app.core.query_options import _resolve_checkout_for_options
-    from app.db.base import get_db
 
     branch = "fix/pre-upgrade"
     path = checkout_manager._branch_checkout_path(str(base_checkout), branch)
     # Pre-PR setup used real Git then recorded successful materialization. Do
     # not resolve via new code: there must be no validation marker beforehand.
     _add_legacy_worktree(base_checkout, path, branch)
-    row = checkouts_db.upsert_checkout(project["id"], RUNNER, str(path), branch=branch)
-    with get_db() as conn:
-        # The shim's NOW() truncates to whole seconds; use the precise value
-        # PostgreSQL stores so physical-creation ordering is not discarded.
-        conn.cursor().execute("UPDATE checkouts SET created_at = %s WHERE id = %s",
-                              (datetime.now(timezone.utc), row["id"]))
+    checkouts_db.upsert_checkout(project["id"], RUNNER, str(path), branch=branch)
     if edit == "staged-rename":
         _git(path, "mv", "README.md", "RENAMED.md")
     elif edit == "unstaged-delete":
@@ -263,35 +264,137 @@ def test_pre_upgrade_established_checkout_continues_on_first_resolution(
 
     assert _resolve_checkout_for_options(session) == str(path)
     assert _snapshot(path) == before
-    # Once migrated, later resolutions rely on physical validation metadata,
-    # not whether subsequent development still looks complete against HEAD.
+    # Trusted active rows without a failed-add marker never revalidate the
+    # user's intentional work against HEAD, even on their first upgraded send.
     monkeypatch.setattr(checkout_manager.git_service, "_checkout_is_complete",
                         lambda _: pytest.fail("established checkout was revalidated"))
     assert _resolve_checkout_for_options(session) == str(path)
 
 
-def test_pre_upgrade_row_does_not_validate_recreated_partial_checkout(
-    project, base_checkout, workspace_root,
+@pytest.mark.parametrize("edit", ["staged-rename", "unstaged-delete"])
+def test_pre_upgrade_successful_recreation_continues_after_intentional_changes(
+    project, base_checkout, workspace_root, monkeypatch, edit,
 ):
-    from datetime import datetime, timezone
-    from app.db.base import get_db
+    from app.core.query_options import _resolve_checkout_for_options
 
-    branch = "fix/stale-pre-upgrade"
+    branch = "fix/recreated-pre-upgrade"
     path = checkout_manager._branch_checkout_path(str(base_checkout), branch)
     _add_legacy_worktree(base_checkout, path, branch)
-    row = checkouts_db.upsert_checkout(project["id"], RUNNER, str(path), branch=branch)
-    with get_db() as conn:
-        conn.cursor().execute("UPDATE checkouts SET created_at = %s WHERE id = %s",
-                              (datetime.now(timezone.utc), row["id"]))
-    # Recreating the same path keeps the stale active row but replaces the
-    # per-worktree admin metadata. An old success is no evidence for this add.
+    first = checkouts_db.upsert_checkout(project["id"], RUNNER, str(path), branch=branch)
     _git(base_checkout, "worktree", "remove", str(path))
     _git(base_checkout, "worktree", "add", str(path), branch)
+    # This is the old successful setup writer; its upsert retains created_at.
+    second = checkouts_db.upsert_checkout(project["id"], RUNNER, str(path), branch=branch)
+    assert second["created_at"] == first["created_at"]
+    if edit == "staged-rename":
+        _git(path, "mv", "README.md", "RENAMED.md")
+    else:
+        (path / "README.md").unlink()
+    before = _snapshot(path)
+    monkeypatch.setattr(
+        type(checkout_manager.settings), "effective_instance_id", property(lambda _: RUNNER),
+    )
+    session = {"id": "pre-upgrade-recreated", "project_v2_id": project["id"], "branch": branch}
+
+    assert _resolve_checkout_for_options(session) == str(path)
+    assert _snapshot(path) == before
+
+
+def test_successful_add_clears_failure_marker(project, base_checkout, workspace_root):
+    branch = "fix/success-clears-failure"
+    _git(base_checkout, "branch", branch)
+    # A successful real add leaves a previously-created flag in its admin dir.
+    # The public add_worktree success path must clear it before accepting it.
+    hook = base_checkout / ".git/hooks/post-checkout"
+    hook.write_text('#!/bin/sh\ntouch "$(git rev-parse --git-path ai-shuffle-worktree-add-failed)"\n')
+    hook.chmod(0o755)
+    path = Path(_resolve(project, branch))
+    assert not _failure_marker(path).exists()
+    (path / "README.md").unlink()
+    assert _resolve(project, branch, raise_add_errors=True) == str(path)
+
+
+def test_repaired_failed_checkout_clears_failure_marker(
+    project, base_checkout, workspace_root,
+):
+    branch = "fix/repaired"
+    _git(base_checkout, "branch", branch)
+    hook = base_checkout / ".git/hooks/post-checkout"
+    hook.write_text("#!/bin/sh\nrm -- README.md\nexit 1\n")
+    hook.chmod(0o755)
+    assert _resolve(project, branch) is None
+    path = checkout_manager._branch_checkout_path(str(base_checkout), branch)
+    assert _failure_marker(path).is_file()
+    # The user repairs the failed materialization; the app never resets it.
+    _git(path, "-c", "core.hooksPath=unused-hooks", "restore", "--source=HEAD",
+         "--staged", "--worktree", "README.md")
+
+    assert _resolve(project, branch, raise_add_errors=True) == str(path)
+    assert not _failure_marker(path).exists()
+    (path / "README.md").unlink()
+    assert _resolve(project, branch, raise_add_errors=True) == str(path)
+
+
+def test_failed_add_registration_without_git_file_is_marked(
+    project, base_checkout, workspace_root,
+):
+    branch = "fix/registration-only"
+    _git(base_checkout, "branch", branch)
+    hook = base_checkout / ".git/hooks/post-checkout"
+    hook.write_text("#!/bin/sh\ncp .git saved-git-pointer\nrm -- .git README.md\nexit 1\n")
+    hook.chmod(0o755)
+    assert _resolve(project, branch) is None
+    path = checkout_manager._branch_checkout_path(str(base_checkout), branch)
+    pointer = (path / "saved-git-pointer").read_text()
+    admin = Path(pointer.removeprefix("gitdir: ").strip())
+    assert (admin / "ai-shuffle-worktree-add-failed").is_file()
+    # Simulate the user restoring only Git's pointer; tracked files remain absent.
+    (path / ".git").write_text(pointer)
+    checkouts_db.upsert_checkout(project["id"], "local", str(path), branch)
+    with pytest.raises(WorktreeAddError, match="incomplete"):
+        _resolve(project, branch, raise_add_errors=True)
+
+
+def test_refused_add_over_existing_checkout_does_not_flag_user_changes(
+    project, base_checkout, workspace_root,
+):
+    branch = "fix/existing-refusal"
+    _git(base_checkout, "branch", branch)
+    path = Path(_resolve(project, branch))
     (path / "README.md").unlink()
     before = _snapshot(path)
-    before_rows = checkouts_db.list_checkouts(project["id"])
+    success, error = checkout_manager.git_service.add_worktree(
+        str(base_checkout), str(path), branch,
+    )
+    assert not success and error
+    assert not _failure_marker(path).exists()
+    assert _resolve(project, branch, raise_add_errors=True) == str(path)
+    assert _snapshot(path) == before
 
+
+def test_failed_add_uses_negative_row_status_when_metadata_is_unwritable(
+    project, base_checkout, workspace_root, monkeypatch, caplog,
+):
+    branch = "fix/locked-failure-metadata"
+    _git(base_checkout, "branch", branch)
+    path = Path(_resolve(project, branch))
+    _git(base_checkout, "worktree", "remove", str(path))
+    hook = base_checkout / ".git/hooks/post-checkout"
+    hook.write_text("#!/bin/sh\nrm -- README.md\nexit 1\n")
+    hook.chmod(0o755)
+    write_text = Path.write_text
+
+    def locked_marker(self, *args, **kwargs):
+        if self.name == "ai-shuffle-worktree-add-failed":
+            raise PermissionError("failure metadata is locked")
+        return write_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", locked_marker)
+    assert _resolve(project, branch) is None
+    assert "Could not record worktree add outcome" in caplog.text
+    assert not _failure_marker(path).exists()
+    assert checkouts_db.get_checkout(project["id"], RUNNER, branch=branch)["status"] == "incomplete"
+    before = _snapshot(path)
     with pytest.raises(WorktreeAddError, match="incomplete"):
         _resolve(project, branch, raise_add_errors=True)
     assert _snapshot(path) == before
-    assert checkouts_db.list_checkouts(project["id"]) == before_rows
