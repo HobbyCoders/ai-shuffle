@@ -168,7 +168,8 @@ describe('one-time branch choice (#1528)', () => {
 	// while the create is in flight.
 	describe('identity replaced during the create', () => {
 		// Fresh identities per case: the top-level reset clears only the no-ID key.
-		let run = 0, LOCAL: Record<string, string>, SHARED: Record<string, string>;
+		type CatalogRow = { project_v2_id: string; local_project_id: string; origin: string };
+		let run = 0, LOCAL: CatalogRow, SHARED: CatalogRow;
 		let local: { projectId: string; projectV2Id: string }, shared: typeof local;
 		beforeEach(() => {
 			run++;
