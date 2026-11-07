@@ -19,17 +19,91 @@ logger = logging.getLogger(__name__)
 # concurrent `git worktree add` calls on one repository can read each other's
 # half-written `.git/worktrees/<name>/commondir` and die with "failed to read
 # ... commondir". Every worktree mutation of a repository takes its lock.
-_REPO_LOCKS: Dict[str, threading.RLock] = {}
+def _common_git_dir(path: str) -> Path:
+    """Resolve main/linked/bare paths to the same lock identity without Git."""
+    root = Path(os.path.realpath(path))
+    git_dir = root / ".git"
+    if git_dir.is_file():
+        pointer = git_dir.read_text(encoding="utf-8").strip()
+        if pointer.startswith("gitdir: "):
+            git_dir = root / pointer.removeprefix("gitdir: ")
+    elif not git_dir.is_dir():
+        git_dir = root
+    common = git_dir / "commondir"
+    if common.is_file():
+        git_dir = git_dir / common.read_text(encoding="utf-8").strip()
+    return Path(os.path.normcase(os.path.realpath(git_dir)))
+
+
+class _RepositoryLock:
+    """Reentrant per-thread lock plus a stable cross-process metadata lock."""
+
+    def __init__(self, common: Path):
+        self.common = common
+        self.thread_lock = threading.RLock()
+        self.depth = 0
+        self.file = None
+
+    def acquire(self, blocking: bool = True) -> bool:
+        if not self.thread_lock.acquire(blocking=blocking):
+            return False
+        try:
+            if self.depth == 0 and (self.common / "HEAD").is_file():
+                handle = (self.common / "ai-shuffle-worktrees.lock").open("a+b")
+                try:
+                    if os.name == "nt":
+                        import msvcrt
+                        handle.seek(0)
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK if blocking else msvcrt.LK_NBLCK, 1)
+                    else:
+                        import fcntl
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+                except OSError:
+                    handle.close()
+                    if blocking:
+                        raise
+                    self.thread_lock.release()
+                    return False
+                self.file = handle
+            self.depth += 1
+            return True
+        except BaseException:
+            self.thread_lock.release()
+            raise
+
+    def release(self) -> None:
+        try:
+            self.depth -= 1
+            if self.depth == 0 and self.file is not None:
+                # Closing releases the OS lock, also automatically on SIGKILL.
+                self.file.close()
+                self.file = None
+        finally:
+            self.thread_lock.release()
+
+    def __enter__(self):
+        self.acquire()
+        return self
+
+    def __exit__(self, *exc):
+        self.release()
+
+
+_REPO_LOCKS: Dict[str, _RepositoryLock] = {}
 _REPO_LOCKS_GUARD = threading.Lock()
 
 
-def repo_worktree_lock(main_dir: str) -> threading.RLock:
-    """The process-wide lock serialising worktree add/remove/prune for a repository."""
-    key = os.path.realpath(main_dir)
+def repo_worktree_lock(main_dir: str) -> _RepositoryLock:
+    """One common-Git-dir lock for mutation, validation and row publication.
+
+    Never unlink its sidecar: waiters must keep locking the same inode.
+    """
+    common = _common_git_dir(main_dir)
+    key = str(common)
     with _REPO_LOCKS_GUARD:
         lock = _REPO_LOCKS.get(key)
         if lock is None:
-            lock = _REPO_LOCKS[key] = threading.RLock()
+            lock = _REPO_LOCKS[key] = _RepositoryLock(common)
         return lock
 
 
@@ -308,6 +382,10 @@ class GitWorktreeMixin:
         Path-scoped write-ahead state survives SIGKILL, even before Git creates
         its private worktree dir. Clear negative evidence only after validation.
         """
+        with repo_worktree_lock(path):
+            self._require_complete_worktree_locked(path, force=force)
+
+    def _require_complete_worktree_locked(self, path: str, *, force: bool) -> None:
         pending = self._worktree_materializing_marker(path, path)
         result = self._run_git(path, ["rev-parse", "--git-path", WORKTREE_ADD_FAILED_MARKER], timeout=10)
         if result.returncode or not (result.stdout or "").strip():
@@ -316,6 +394,10 @@ class GitWorktreeMixin:
         if not force and not pending.exists() and not failed.exists():
             return
         if not self._checkout_is_complete(path):
+            # Preserve negative evidence even if an older/foreign reader
+            # removed it. Row publication is separately guarded by this lock.
+            pending.parent.mkdir(exist_ok=True)
+            pending.write_text("incomplete: validation failed\n", encoding="utf-8")
             raise WorktreeAddError(
                 f"Checkout {path!r} is incomplete (missing index or committed files); "
                 "refusing to use or repair it because local changes may be present. "

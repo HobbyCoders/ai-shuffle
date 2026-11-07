@@ -4,6 +4,8 @@ import os
 import signal
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -580,4 +582,152 @@ def test_unwritable_write_ahead_metadata_prevents_git_add(
     with pytest.raises(WorktreeAddError, match="Cannot record checkout materialization"):
         _resolve(project, branch, raise_add_errors=True)
     assert not path.exists()
+    assert checkouts_db.get_checkout(project["id"], RUNNER, branch=branch)["status"] == "incomplete"
+
+
+def test_overlapping_sweep_cannot_publish_inflight_partial_checkout(
+    project, base_checkout, workspace_root, tmp_path, monkeypatch,
+):
+    import shlex
+
+    branch = "fix/overlapping-sweep"
+    _git(base_checkout, "branch", branch)
+    path = checkout_manager._branch_checkout_path(str(base_checkout), branch)
+    ready, release = tmp_path / "hook-ready", tmp_path / "hook-release"
+    script = tmp_path / "paused-hook.py"
+    script.write_text(f"""
+import time
+from pathlib import Path
+Path({str(ready)!r}).write_text("ready")
+deadline = time.monotonic() + 10
+while not Path({str(release)!r}).exists():
+    if time.monotonic() > deadline:
+        raise RuntimeError("test did not release hook")
+    time.sleep(.01)
+Path("README.md").unlink()
+""")
+    hook = base_checkout / ".git/hooks/post-checkout"
+    hook.write_text(f"#!/bin/sh\n{shlex.quote(sys.executable)} {shlex.quote(str(script))}\n")
+    hook.chmod(0o755)
+    materialized, swept, errors = [], [], []
+    entered_sweep, sweep_done = threading.Event(), threading.Event()
+    base_resolver = checkout_manager._ensure_base_checkout
+
+    def observed_base(*args, **kwargs):
+        result = base_resolver(*args, **kwargs)
+        if threading.current_thread().name == "overlapping-sweep":
+            entered_sweep.set()
+        return result
+
+    monkeypatch.setattr(checkout_manager, "_ensure_base_checkout", observed_base)
+
+    def materialize():
+        try:
+            materialized.append(_resolve(project, branch))
+        except BaseException as exc:
+            errors.append(exc)
+
+    def sweep():
+        try:
+            swept.append(_resolve(project, None))
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            sweep_done.set()
+
+    producer = threading.Thread(target=materialize)
+    adopter = threading.Thread(target=sweep, name="overlapping-sweep")
+    producer.start()
+    try:
+        deadline = time.monotonic() + 5
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(.01)
+        assert ready.exists(), errors
+        assert (path / "README.md").is_file()  # Temporarily complete, hook still running.
+        adopter.start()
+        assert entered_sweep.wait(5), errors
+        swept_before_hook_finished = sweep_done.wait(.5)
+        pending_before_hook_finished = _materializing_marker(base_checkout, path).is_file()
+    finally:
+        release.write_text("release")
+        producer.join(10)
+        if adopter.ident is not None:
+            adopter.join(10)
+    assert not producer.is_alive() and not adopter.is_alive()
+    assert not errors
+    assert materialized == [None] and swept == [str(base_checkout)]
+    assert not (path / "README.md").exists()
+    with pytest.raises(WorktreeAddError, match="incomplete"):
+        _resolve(project, branch, raise_add_errors=True)
+    assert not swept_before_hook_finished, "sweep must wait for the whole add, including its hook"
+    assert pending_before_hook_finished
+    assert _materializing_marker(base_checkout, path).is_file()
+    row = checkouts_db.get_checkout(project["id"], RUNNER, branch=branch)
+    assert not row or row["status"] != "active"
+
+
+def test_repository_lock_unifies_linked_paths_and_processes(base_checkout, tmp_path):
+    from app.core.git_worktree_ops import repo_worktree_lock
+
+    path = tmp_path / "linked-lock"
+    _add_legacy_worktree(base_checkout, path, "fix/lock-alias")
+    lock = repo_worktree_lock(str(base_checkout))
+    assert repo_worktree_lock(str(path)) is lock
+    assert repo_worktree_lock(str(base_checkout / ".git")) is lock
+    with lock:
+        script = (
+            "from app.core.git_worktree_ops import repo_worktree_lock; "
+            f"lock = repo_worktree_lock({str(path)!r}); "
+            "acquired = lock.acquire(blocking=False); print(acquired); "
+            "lock.release() if acquired else None"
+        )
+        child = subprocess.run([sys.executable, "-c", script], capture_output=True,
+                               text=True, timeout=10, cwd=Path(__file__).resolve().parents[2])
+        assert child.returncode == 0, child.stderr
+        assert child.stdout.strip() == "False", "another process must share the same lock"
+    assert lock.acquire(blocking=False)
+    lock.release()
+
+
+def test_metadata_refresh_cannot_reactivate_failed_materialization(
+    project, base_checkout, workspace_root, monkeypatch,
+):
+    from app.core import git_ops_runner, project_resolver, turn_finalize
+    from app.db import database
+
+    branch = "fix/failed-refresh"
+    _git(base_checkout, "branch", branch)
+    hook = base_checkout / ".git/hooks/post-checkout"
+    hook.write_text("#!/bin/sh\nrm -- README.md\nexit 0\n")
+    hook.chmod(0o755)
+    assert _resolve(project, branch) is None
+    path = checkout_manager._branch_checkout_path(str(base_checkout), branch)
+    monkeypatch.setattr(checkouts_db, "upsert_checkout",
+                        lambda *args, **kwargs: pytest.fail("metadata activated a partial checkout"))
+    git_ops_runner._record_checkout_state(project["id"], str(path), branch)
+    checkout = {"path": str(path), "project_id": project["id"], "runner_id": RUNNER,
+                "branch": "fix/old", "status": "active"}
+    monkeypatch.setattr(project_resolver, "resolve_local_checkout", lambda _: checkout)
+    monkeypatch.setattr(database, "get_session",
+                        lambda _: {"id": "refresh", "branch": "fix/old"})
+    monkeypatch.setattr(turn_finalize, "_checkout_shared_with_another_session", lambda *args: False)
+    monkeypatch.setattr(database, "resync_session_branch",
+                        lambda *args: pytest.fail("session rebound to a partial checkout"))
+    assert turn_finalize.resync_session_branch_from_head("refresh") is None
+    assert _materializing_marker(base_checkout, path).is_file()
+
+
+def test_validation_failure_restores_evidence_and_invalidates_active_row(
+    project, base_checkout, workspace_root,
+):
+    branch = "fix/restore-evidence"
+    _git(base_checkout, "branch", branch)
+    path = Path(_resolve(project, branch))
+    # Simulate an old reader clearing state, then a failed full validation.
+    (path / "README.md").unlink()
+    with pytest.raises(WorktreeAddError, match="incomplete"):
+        checkout_manager.git_service.require_complete_worktree(str(path), force=True)
+    assert _materializing_marker(base_checkout, path).is_file()
+    with pytest.raises(WorktreeAddError, match="incomplete"):
+        _resolve(project, branch, raise_add_errors=True)
     assert checkouts_db.get_checkout(project["id"], RUNNER, branch=branch)["status"] == "incomplete"
