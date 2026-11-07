@@ -489,6 +489,7 @@ async def test_receipt_records_the_message_and_absorbs_the_row(mock_db):
     # so the frontend collapses its pending bubble onto this message.
     env["recorder"].record_steered_user_message.assert_awaited_once_with(
         "also check the logs", profile_id="coder", command_id="req-7",
+        upload_paths=None,
     )
     # ...and in the legacy store, exactly once.
     assert _messages(mock_db, "s5") == [("user", "also check the logs")]
@@ -1052,6 +1053,7 @@ async def test_a_plain_run_does_log_its_message_user(mock_db):
 
     env["recorder"].start.assert_awaited_once_with(
         "sent while idle", profile_id=None, record_user=True, source="user",
+        upload_paths=None,
     )
 
 
@@ -1069,6 +1071,7 @@ async def test_a_requeued_steer_records_nothing_when_it_runs(mock_db):
 
     env["recorder"].start.assert_awaited_once_with(
         "wait, also check the logs", profile_id=None, record_user=False, source="user",
+        upload_paths=None,
     )
     assert _messages(mock_db, "s15") == []
     env["sync"].broadcast_message_added.assert_not_awaited()
@@ -1245,6 +1248,7 @@ async def test_the_flagged_re_run_tells_the_model_about_the_duplicate(mock_db):
     assert seen["prompt"].endswith("also check the logs")
     env["recorder"].start.assert_awaited_once_with(
         "also check the logs", profile_id=None, record_user=True, source="user",
+        upload_paths=None,
     )
 
 
