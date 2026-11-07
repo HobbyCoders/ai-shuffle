@@ -4,10 +4,10 @@
 	 * Agents page's Tools tab.
 	 *
 	 * Every tool a session can be given comes from `GET /tools/surface`, grouped
-	 * by where it lives: the harness builtins, the app's bridged servers, the AI
-	 * tools, the browser, computer use, app config, then each configured MCP
-	 * server (in its own card). There is no hardcoded list — a builtin added
-	 * upstream shows up here on the next refresh.
+	 * by where it lives: the harness builtins, the app's bridged servers, the
+	 * private-access tools, the AI tools, the browser, computer use, app config,
+	 * then each configured MCP server (in its own card). There is no hardcoded
+	 * list — a builtin added upstream shows up here on the next refresh.
 	 *
 	 * The access control says what the checkboxes mean. In "all"/"none" they are
 	 * read-only and simply show what the agent gets; in "allow"/"disallow" they
@@ -151,6 +151,8 @@
 	function hintFor(group: ToolSurfaceGroup, blocked: string | null, error: string | undefined): string {
 		if (error) return error;
 		if (blocked) return blocked;
+		const note = group.note?.trim();
+		if (note) return note;
 		return group.kind === 'mcp' ? 'MCP server' : 'Included with the app';
 	}
 </script>
@@ -162,6 +164,7 @@
 		{@const state = groupState(group)}
 		{@const blocked = groupBlockedReason(group, ctx)}
 		{@const error = errorsByGroup[group.id]}
+		{@const hint = hintFor(group, blocked, error)}
 		{#if rows.length > 0 || !searching}
 			<div class="tg" class:blocked={!!blocked || (!!error && group.tools.length === 0)}>
 				<button
@@ -185,8 +188,8 @@
 					onclick={() => toggleExpanded(group)}
 				>
 					<span class="tn">{group.label}</span>
-					<span class="th" class:err={!!error}>
-						{#if error}<TriangleAlert />{/if}{hintFor(group, blocked, error)}
+					<span class="th" class:err={!!error} title={hint}>
+						{#if error}<TriangleAlert />{/if}{hint}
 					</span>
 				</button>
 				<span class="cnt">{selectedInGroup(group)}/{group.tools.length}</span>

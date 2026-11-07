@@ -358,3 +358,51 @@ describe('search', () => {
 		expect(queryByRole('checkbox', { name: 'Read' })).toBeNull();
 	});
 });
+
+describe('private access group', () => {
+	afterEach(() => cleanup());
+
+	const names = [
+		'mcp__chat-access__RequestChatAccess',
+		'mcp__chat-access__ChatResources'
+	];
+	const privateAccess: ToolSurfaceGroup = {
+		id: 'private_access',
+		label: 'Private access',
+		kind: 'private_access',
+		server: 'chat-access',
+		available: true,
+		admin_only: false,
+		note: 'Machines, folders and services you approve in a private card',
+		tools: names.map((name) => ({ name, description: `${name}.`, risk: null }))
+	};
+
+	it('shows its note, and ticking it in allow mode yields the exact names to save', async () => {
+		cuMocks.enabled = true;
+		const ctx = { computerUseEnabled: true, isAdmin: false };
+		const saved: { list: string[] } = { list: ['Read'] };
+		const { getByRole, getByText } = render(ProfileToolConfig, {
+			props: {
+				toolSelectionMode: 'allow',
+				allowedTools: saved.list,
+				disallowedTools: [],
+				surface: { discovered_at: '', errors: [], groups: [privateAccess] },
+				isAdmin: false,
+				onToolSelectionModeChange: vi.fn(),
+				onToggleTool: (g: ToolSurfaceGroup, name: string) => {
+					saved.list = toggleToolSelection(saved.list, g, name, ctx);
+				},
+				onToggleGroup: (g: ToolSurfaceGroup) => {
+					saved.list = toggleGroupSelection(saved.list, g, ctx);
+				},
+				onRefresh: vi.fn()
+			}
+		});
+		expect(getByText(privateAccess.note as string)).toBeTruthy();
+		const box = groupBox(getByRole, 'Private access');
+		// Not admin-only: a non-admin owner can grant it too.
+		expect(box.disabled).toBe(false);
+		await fireEvent.click(box);
+		expect(saved.list).toEqual(['Read', ...names]);
+	});
+});

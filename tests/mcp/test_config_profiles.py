@@ -270,14 +270,14 @@ class TestUpdateProfile:
         _, kwargs = mock_update.call_args
         assert kwargs["config"]["allowed_tools"] == ["Read", "Grep"]
 
-        # Clear the whitelist with empty list
-        with patch("app.db.database.get_profile", return_value=original), \
+        # Clearing the list on a profile in "all" mode keeps every tool.
+        stamped = _make_profile(
+            id="update-allowed", name="Update Allowed",
+            config={"tool_selection_mode": "all", "allowed_tools": ["Read"]},
+        )
+        with patch("app.db.database.get_profile", return_value=stamped), \
              patch("app.db.database.update_profile") as mock_update2:
-            mock_update2.return_value = _make_profile(
-                id="update-allowed",
-                name="Update Allowed",
-                config={"allowed_tools": []},
-            )
+            mock_update2.return_value = stamped
             result2 = await tool.handler({
                 "profile_id": "update-allowed",
                 "allowed_tools": [],
@@ -286,6 +286,20 @@ class TestUpdateProfile:
         assert body2["success"] is True
         _, kwargs2 = mock_update2.call_args
         assert kwargs2["config"]["allowed_tools"] == []
+        assert kwargs2["config"]["tool_selection_mode"] == "all"
+
+        # On a profile with no saved mode an empty list would read as "none"
+        # (no tools), so the "clear" call is refused rather than stripping it.
+        with patch("app.db.database.get_profile", return_value=original), \
+             patch("app.db.database.update_profile") as mock_update3:
+            result3 = await tool.handler({
+                "profile_id": "update-allowed",
+                "allowed_tools": [],
+            })
+        body3 = tool_result_json(result3)
+        assert body3["success"] is False
+        assert "tool_selection_mode" in body3["error"]
+        mock_update3.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_update_profile_disallowed_tools(self, admin_tools):
@@ -479,6 +493,147 @@ class TestUpdateProfile:
         # Confirm allow_builtin=True was passed through to the DB layer
         _, kwargs = mock_update.call_args
         assert kwargs.get("allow_builtin") is True
+
+
+# =============================================================================
+# tool_selection_mode (create + update)
+# =============================================================================
+
+class TestToolSelectionMode:
+    @pytest.mark.asyncio
+    async def test_update_switches_mode_and_list_together(self, admin_tools):
+        original = _make_profile(
+            id="overseer", config={"tool_selection_mode": "all", "system_prompt": {"type": "preset"}},
+        )
+        names = ["Read", "mcp__chat-access__RequestChatAccess"]
+        tool = get_tool(admin_tools, "updateProfile")
+        with patch("app.db.database.get_profile", return_value=original), \
+             patch("app.db.database.update_profile", return_value=original) as mock_update:
+            result = await tool.handler({
+                "profile_id": "overseer",
+                "tool_selection_mode": "allow",
+                "allowed_tools": names,
+            })
+        body = tool_result_json(result)
+        assert body["success"] is True
+        assert set(body["updated_fields"]) >= {"tool_selection_mode", "allowed_tools"}
+        config = mock_update.call_args.kwargs["config"]
+        assert config["tool_selection_mode"] == "allow"
+        assert config["allowed_tools"] == names
+        assert config["system_prompt"] == {"type": "preset"}
+
+    @pytest.mark.asyncio
+    async def test_update_mode_alone_lifts_the_restriction(self, admin_tools):
+        original = _make_profile(
+            id="overseer", config={"tool_selection_mode": "allow", "allowed_tools": ["Read"]},
+        )
+        tool = get_tool(admin_tools, "updateProfile")
+        with patch("app.db.database.get_profile", return_value=original), \
+             patch("app.db.database.update_profile", return_value=original) as mock_update:
+            result = await tool.handler({"profile_id": "overseer", "tool_selection_mode": "all"})
+        assert tool_result_json(result)["updated_fields"] == ["tool_selection_mode"]
+        assert mock_update.call_args.kwargs["config"]["tool_selection_mode"] == "all"
+
+    @pytest.mark.asyncio
+    async def test_update_refuses_empty_allow_list_in_allow_mode(self, admin_tools):
+        """The footgun: "Pass [] to clear" on an allow-mode profile removed every tool."""
+        original = _make_profile(
+            id="overseer", config={"tool_selection_mode": "allow", "allowed_tools": ["Read"]},
+        )
+        tool = get_tool(admin_tools, "updateProfile")
+        with patch("app.db.database.get_profile", return_value=original), \
+             patch("app.db.database.update_profile") as mock_update:
+            result = await tool.handler({"profile_id": "overseer", "allowed_tools": []})
+        body = tool_result_json(result)
+        assert body["success"] is False
+        text = body["error"]
+        assert "no tools at all" in text and "'all'" in text and "'none'" in text
+        mock_update.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_update_refuses_switching_to_allow_with_nothing_listed(self, admin_tools):
+        original = _make_profile(id="p", config={"tool_selection_mode": "all"})
+        tool = get_tool(admin_tools, "updateProfile")
+        with patch("app.db.database.get_profile", return_value=original), \
+             patch("app.db.database.update_profile") as mock_update:
+            result = await tool.handler({"profile_id": "p", "tool_selection_mode": "allow"})
+        assert tool_result_json(result)["success"] is False
+        mock_update.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_update_none_mode_with_empty_list_is_deliberate(self, admin_tools):
+        original = _make_profile(
+            id="p", config={"tool_selection_mode": "allow", "allowed_tools": ["Read"]},
+        )
+        tool = get_tool(admin_tools, "updateProfile")
+        with patch("app.db.database.get_profile", return_value=original), \
+             patch("app.db.database.update_profile", return_value=original) as mock_update:
+            result = await tool.handler({
+                "profile_id": "p", "tool_selection_mode": "none", "allowed_tools": [],
+            })
+        assert tool_result_json(result)["success"] is True
+        assert mock_update.call_args.kwargs["config"]["tool_selection_mode"] == "none"
+
+    @pytest.mark.asyncio
+    async def test_update_rename_still_works_on_an_allow_profile_with_nothing_ticked(self, admin_tools):
+        original = _make_profile(
+            id="p", config={"tool_selection_mode": "allow", "allowed_tools": []},
+        )
+        tool = get_tool(admin_tools, "updateProfile")
+        with patch("app.db.database.get_profile", return_value=original), \
+             patch("app.db.database.update_profile", return_value=original) as mock_update:
+            result = await tool.handler({"profile_id": "p", "name": "Renamed"})
+        assert tool_result_json(result)["success"] is True
+        mock_update.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_update_rejects_unknown_mode(self, admin_tools):
+        tool = get_tool(admin_tools, "updateProfile")
+        with patch("app.db.database.get_profile") as mock_get:
+            result = await tool.handler({"profile_id": "p", "tool_selection_mode": "some"})
+        assert "Invalid tool_selection_mode" in tool_result_json(result)["error"]
+        mock_get.assert_not_called()
+
+    def test_update_schema_offers_the_mode_and_truthful_list_descriptions(self, admin_tools):
+        tool = get_tool(admin_tools, "updateProfile")
+        props = tool.input_schema["properties"]
+        assert props["tool_selection_mode"]["enum"] == ["all", "none", "allow", "disallow"]
+        assert "Pass [] to clear" not in props["allowed_tools"]["description"]
+        assert "refused" in props["allowed_tools"]["description"]
+        create_props = get_tool(admin_tools, "createProfile").input_schema["properties"]
+        assert create_props["tool_selection_mode"]["enum"] == ["all", "none", "allow", "disallow"]
+
+    @pytest.mark.asyncio
+    async def test_create_stamps_the_mode(self, admin_tools):
+        tool = get_tool(admin_tools, "createProfile")
+        names = ["mcp__chat-access__RequestChatAccess"]
+        with patch("app.db.database.get_profile", return_value=None), \
+             patch("app.db.database.create_profile", return_value=_make_profile()) as mock_create:
+            result = await tool.handler({
+                "name": "Scoped", "tool_selection_mode": "allow", "allowed_tools": names,
+            })
+        assert tool_result_json(result)["success"] is True
+        config = mock_create.call_args.kwargs["config"]
+        assert config["tool_selection_mode"] == "allow"
+        assert config["allowed_tools"] == names
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("extra", [{}, {"allowed_tools": []}])
+    async def test_create_refuses_allow_mode_with_nothing_listed(self, admin_tools, extra):
+        tool = get_tool(admin_tools, "createProfile")
+        with patch("app.db.database.get_profile", return_value=None), \
+             patch("app.db.database.create_profile") as mock_create:
+            result = await tool.handler({"name": "Empty", "tool_selection_mode": "allow", **extra})
+        assert tool_result_json(result)["success"] is False
+        mock_create.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_create_rejects_unknown_mode(self, admin_tools):
+        tool = get_tool(admin_tools, "createProfile")
+        with patch("app.db.database.create_profile") as mock_create:
+            result = await tool.handler({"name": "X", "tool_selection_mode": "everything"})
+        assert tool_result_json(result)["success"] is False
+        mock_create.assert_not_called()
 
 
 # =============================================================================
