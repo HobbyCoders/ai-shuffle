@@ -1486,10 +1486,13 @@ def _lock_mirror_event_counters(cursor, record_ids: Iterable[str]) -> None:
             "INSERT INTO session_event_counters (session_id, next_seq) "
             "SELECT id, 0 FROM sessions WHERE id = %s "
             "ON CONFLICT (session_id) DO UPDATE SET next_seq = session_event_counters.next_seq "
-            "RETURNING session_id",
+            "RETURNING session_id, next_seq",
             (sid,),
         )
-        if cursor.fetchone() is not None:
+        row = cursor.fetchone()
+        # A post-delete recreation is always zero. A positive locked counter
+        # already serializes deletion, so hot ingestion needs no cleanup SQL.
+        if row is not None and int(row["next_seq"]) == 0:
             reserved.append(sid)
     if reserved:
         # INSERT's snapshot may see S, wait behind deletion's C, then recreate
@@ -2182,10 +2185,19 @@ def _wire_stream(cursor, chunk: Sequence[Mapping[str, Any]], ctx: NetworkContext
     if (first.network_id != ctx.network_id or first.origin_device_id == ctx.device_id
             or member is None or member.status != membership.STATUS_ACTIVE):
         return None
+    # These three nonlocking stream reads share the same state-locked snapshot.
+    # Fetch them together to retain the existing per-chunk round-trip budget
+    # while keeping the counter reservation's separate fresh existence check.
+    cursor.execute(
+        "SELECT COALESCE(MAX(incarnation), 0) AS highest, "
+        "COALESCE(MAX(CASE WHEN incarnation = %s THEN last_seq END), 0) AS watermark, "
+        "(SELECT COUNT(*) FROM sync_pending WHERE origin_device_id = %s AND incarnation = %s) AS pending "
+        "FROM sync_watermarks WHERE origin_device_id = %s",
+        (first.origin_incarnation, first.origin_device_id, first.origin_incarnation, first.origin_device_id),
+    )
+    stream = cursor.fetchone()
     return _WireStream(first.origin_device_id, first.origin_incarnation, first.origin_seq,
-                       store.highest_incarnation(cursor, first.origin_device_id),
-                       store.get_watermark(cursor, first.origin_device_id, first.origin_incarnation),
-                       store.count_pending(cursor, first.origin_device_id, first.origin_incarnation))
+                       int(stream["highest"]), int(stream["watermark"]), int(stream["pending"]))
 
 
 def _buffer_pending_chunk(cursor, chunk: Sequence[Mapping[str, Any]], ctx: NetworkContext,
@@ -2334,12 +2346,13 @@ def _apply_chunk(chunk: Sequence[Mapping[str, Any]], ctx: NetworkContext, result
             stream = _wire_stream(cursor, chunk, ctx) if bulk_pending else None
             appended = (stream is not None and _buffer_pending_chunk(cursor, chunk, ctx, part, stream))
             if not appended:
-                # Pure gap buffering never touches an event row or its counter.
-                # Otherwise reserve the whole chunk before any materialization.
-                _lock_mirror_event_counters(cursor, (data.get("record_id") for data in chunk
-                                                    if isinstance(data, Mapping)
-                                                    and data.get("collection") == "session_events"))
+                # Fast append reserves the whole chunk itself. Pure gap
+                # buffering needs no C; only the per-op fallback reserves here.
                 appended = _apply_event_append(cursor, chunk, ctx, part, _stream=stream)
+                if not appended:
+                    _lock_mirror_event_counters(cursor, (data.get("record_id") for data in chunk
+                                                        if isinstance(data, Mapping)
+                                                        and data.get("collection") == "session_events"))
             for data in (() if appended else chunk):
                 if savepoints:
                     cursor.execute("SAVEPOINT apply_envelope")
