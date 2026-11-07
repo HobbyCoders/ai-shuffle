@@ -104,10 +104,12 @@
 		isAnimating = true;
 		// Capture current height
 		if (mainPanelEl) containerHeight = mainPanelEl.scrollHeight;
+		const hadFocus = mainPanelEl?.contains(document.activeElement) ?? false;
 		activeGroup = groupName;
 		// After render, update height to sub-panel
 		tick().then(() => {
 			if (subPanelEl) containerHeight = subPanelEl.scrollHeight;
+			if (hadFocus) focusFirst(subPanelEl);
 			setTimeout(() => { isAnimating = false; }, 280);
 		});
 	}
@@ -118,14 +120,23 @@
 		isAnimating = true;
 		// Capture current height
 		if (subPanelEl) containerHeight = subPanelEl.scrollHeight;
+		const hadFocus = subPanelEl?.contains(document.activeElement) ?? false;
 		activeGroup = null;
 		tick().then(() => {
 			if (mainPanelEl) containerHeight = mainPanelEl.scrollHeight;
+			if (hadFocus) focusFirst(mainPanelEl);
 			setTimeout(() => {
 				isAnimating = false;
 				containerHeight = null; // Let it be auto again
 			}, 280);
 		});
+	}
+
+	/** The hidden panel is inert, so keyboard focus follows the slide. No
+	 *  scroll: the panel is still sliding in, and scrolling it into view would
+	 *  push the clipped track sideways. */
+	function focusFirst(panel: HTMLElement | null) {
+		panel?.querySelector<HTMLElement>('button')?.focus({ preventScroll: true });
 	}
 
 	function handleSelect(id: string) {
@@ -162,6 +173,7 @@
 		class="panel main-panel"
 		class:active={activeGroup === null}
 		class:slide-out-left={activeGroup !== null}
+		inert={activeGroup !== null}
 		bind:this={mainPanelEl}
 	>
 		{#if label}
@@ -267,6 +279,7 @@
 		class:active={activeGroup !== null}
 		class:slide-in-right={activeGroup !== null}
 		class:offscreen-right={activeGroup === null}
+		inert={activeGroup === null}
 		bind:this={subPanelEl}
 	>
 		<button type="button" class="back-button" onclick={goBack}>
@@ -301,9 +314,12 @@
 </div>
 
 <style>
+	/* `clip`, not only `hidden`: a hidden box can still be scrolled sideways by
+	   focus, which would slide the off-screen panel into view. */
 	.grouped-selector {
 		position: relative;
 		overflow: hidden;
+		overflow: clip;
 		transition: height 250ms cubic-bezier(0.32, 0.72, 0, 1);
 	}
 
