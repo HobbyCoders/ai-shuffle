@@ -47,9 +47,15 @@ await runJourney({
 				await confirmRewindOfLastUserMessage(page);
 				const result = await carriedOut;
 				expect(result.success && result.chat_rewound, `the server rewound: ${JSON.stringify(result)}`);
+				// The feed tells this page the row went, but the answer still hasn't come.
+				await waitChat(page, { messages: '2' }, { timeout: 30_000 });
 				await mark('reload before the answer');
-				await page.unrouteAll({ behavior: 'ignoreErrors' });
+				// Reload while the route still holds the request: removing the last
+				// route turns interception off, and the browser then lets held
+				// requests through, which would send this rewind a second time and
+				// answer the old page after all. The reload drops the held request.
 				await page.reload({ waitUntil: 'domcontentloaded' });
+				await page.unrouteAll({ behavior: 'ignoreErrors' });
 				// A new step once the recorder has seen the old page go: the reload
 				// itself (chat → nothing) is not the app going backwards.
 				await page.evaluate(() => new Promise((ok) => requestAnimationFrame(() => requestAnimationFrame(() => ok()))));
