@@ -1480,12 +1480,28 @@ def _lock_mirror_event_counters(cursor, record_ids: Iterable[str]) -> None:
     """
     session_ids = sorted({rid.split("|", 1)[0] for rid in record_ids
                           if isinstance(rid, str) and "|" in rid})
+    reserved = []
     for sid in session_ids:
         cursor.execute(
             "INSERT INTO session_event_counters (session_id, next_seq) "
             "SELECT id, 0 FROM sessions WHERE id = %s "
-            "ON CONFLICT (session_id) DO UPDATE SET next_seq = session_event_counters.next_seq",
+            "ON CONFLICT (session_id) DO UPDATE SET next_seq = session_event_counters.next_seq "
+            "RETURNING session_id",
             (sid,),
+        )
+        if cursor.fetchone() is not None:
+            reserved.append(sid)
+    if reserved:
+        # INSERT's snapshot may see S, wait behind deletion's C, then recreate
+        # C after deletion commits. This MUST be a fresh statement/snapshot.
+        # Only clean zero-valued reservations we actually acquired: a durable
+        # post-delete Stop warning can legitimately own a positive counter.
+        placeholders = ", ".join(["%s"] * len(reserved))
+        cursor.execute(
+            f"DELETE FROM session_event_counters WHERE session_id IN ({placeholders}) "
+            "AND next_seq = 0 AND NOT EXISTS (SELECT 1 FROM sessions "
+            "WHERE sessions.id = session_event_counters.session_id)",
+            tuple(reserved),
         )
 
 

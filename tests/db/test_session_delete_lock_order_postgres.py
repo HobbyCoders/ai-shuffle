@@ -826,3 +826,122 @@ def test_delete_vs_ordinary_mirror_ingestion(private_pool, monkeypatch, path, fa
     if family:
         assert sessions.get_session(child)["parent_session_id"] is None
         assert len(session_events.get_events(child)) == (2 if path == "snapshot-fresh" else 1)
+
+
+@pytest.mark.parametrize("path", ["envelope", "snapshot", "chunk", "pending", "pending-fallback"])
+def test_delete_first_mirror_tombstone_cannot_recreate_counter(private_pool, monkeypatch, path):
+    """A reservation's INSERT snapshot can outlive the session it selected."""
+    from app.db import network as store
+    from app.network import crypto, engine, envelope, identity, membership, policy
+
+    def device():
+        return identity.DeviceIdentity(crypto.generate_signing_key(), crypto.generate_encryption_key(),
+                                       1, "2026-01-01T00:00:00Z")
+
+    local, remote = device(), device()
+    member = membership.Member(remote.device_id, remote.signing_public, remote.encryption_public,
+                               "Remote owner", "worker", 0)
+    ctx = engine.NetworkContext(local, "delete-tombstone-" + uuid4().hex, "Tombstone race", remote.device_id,
+                                0, 1, {1: crypto.generate_network_key()}, {remote.device_id: member}, "ready")
+    sid = "delete-tombstone-" + uuid4().hex
+    with base.get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO network_state (id,network_id,founder_device_id) VALUES (1,%s,%s) "
+                       "ON CONFLICT(id) DO UPDATE SET network_id=EXCLUDED.network_id",
+                       (ctx.network_id, remote.device_id))
+        cursor.execute("INSERT INTO sessions (id,owner_device_id) VALUES (%s,%s)", (sid, remote.device_id))
+    session_events.append_events(sid, [{"type": "system.note", "payload": {}}])
+    rid = sid + "|1"
+    env = envelope.build(
+        network_id=ctx.network_id, collection="session_events", record_id=rid,
+        op="delete", clock=2, origin_device_id=remote.device_id,
+        origin_incarnation=1, origin_seq=1, schema_version=1, key_version=1,
+        network_key=ctx.network_key, signing_private=remote.signing_private, order_seq=1,
+    ).to_dict()
+    if path.startswith("pending"):
+        with base.get_db() as conn:
+            store.stash_pending(conn.cursor(), env)
+
+    def ingest():
+        result = engine.ApplyResult()
+        if path == "chunk":
+            assert engine._apply_chunk([env], ctx, result)
+            assert result.applied == 1 and result.retry == 0
+        elif path.startswith("pending"):
+            assert engine._apply_pending_chunk(remote.device_id, 1, ctx, result,
+                                               _try_append=path != "pending-fallback")
+            assert result.applied == 1 and result.retry == 0
+        else:
+            with base.get_db() as conn:
+                cursor = conn.cursor()
+                if path == "snapshot":
+                    item = {"record_id": rid, "record": None, "clock": 2,
+                            "origin_device_id": remote.device_id, "deleted": True, "order_seq": 1}
+                    applied, _ = engine.apply_snapshot_items(cursor, policy.collection("session_events"),
+                                                             [item], ctx=ctx)
+                    assert applied == 1
+                else:
+                    store.lock_state(cursor)
+                    assert engine.apply_envelope(cursor, env, ctx=ctx) == "applied"
+
+    locked, resume = threading.Event(), threading.Event()
+    delete_pid = []
+    original_cursor = base._PgDictConnection.cursor
+
+    class InterleavedCursor(RealDictCursor):
+        def execute(self, sql, params=None):
+            result = super().execute(sql, params)
+            if (threading.current_thread().name.startswith("delete") and not locked.is_set()
+                    and sql.startswith("INSERT INTO session_event_counters")):
+                delete_pid.append(self.connection.get_backend_pid())
+                locked.set()
+                assert resume.wait(10), "test never released deletion"
+            return result
+
+    def instrumented(self, *args, **kwargs):
+        kwargs["cursor_factory"] = InterleavedCursor
+        return original_cursor(self, *args, **kwargs)
+
+    monkeypatch.setattr(base._PgDictConnection, "cursor", instrumented)
+    monkeypatch.setattr(sessions, "_cleanup_working_set_ref", lambda sid: None)
+    monkeypatch.setattr(sessions, "_cleanup_pending_wakeups", lambda sid: None)
+    with psycopg2.connect(**private_pool) as observer, \
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="delete") as deleter, \
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="tombstone") as mirror:
+        observer.autocommit = True
+        deleting = deleter.submit(sessions.delete_session, sid)
+        try:
+            assert locked.wait(5), "delete never acquired the counter"
+            applying = mirror.submit(ingest)
+            # The mirror's INSERT SELECT has seen S and is actually waiting
+            # on delete's C; release only after PostgreSQL confirms that wait.
+            _wait_for_lock_wait(observer, delete_pid[0], applying)
+        finally:
+            resume.set()
+        assert deleting.result(timeout=5)
+        applying.result(timeout=5)
+    _assert_deleted(sid)
+
+
+def test_mirror_reservation_preserves_durable_post_delete_stop_runtime(private_pool, monkeypatch):
+    from app.db import network as store, stop_notices
+    from app.network import engine
+
+    sid, notice_id = "mirror-stop-" + uuid4().hex, "stop-warning-" + uuid4().hex
+    with base.get_db() as conn:
+        conn.cursor().execute("INSERT INTO sessions (id) VALUES (%s)", (sid,))
+    stop_notices.save(notice_id, sid, {"content": "cleanup is incomplete"})
+    monkeypatch.setattr(sessions, "_cleanup_working_set_ref", lambda sid: None)
+    monkeypatch.setattr(sessions, "_cleanup_pending_wakeups", lambda sid: None)
+    assert sessions.delete_session(sid)
+    assert stop_notices.deliver(notice_id)
+    with base.get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO network_state (id,network_id,founder_device_id) VALUES (1,%s,%s) "
+                       "ON CONFLICT(id) DO NOTHING", ("mirror-stop-test", "mirror-stop-device"))
+        store.lock_state(cursor)
+        engine._lock_mirror_event_counters(cursor, [sid + "|1"])
+        cursor.execute("SELECT next_seq FROM session_event_counters WHERE session_id=%s", (sid,))
+        assert cursor.fetchone()["next_seq"] == 1
+    assert sessions.get_session(sid) is None
+    assert [event["id"] for event in session_events.get_events(sid)] == [notice_id]
