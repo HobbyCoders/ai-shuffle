@@ -1750,11 +1750,15 @@ class ChatWebSocketHandler:
             await run_sync(turns_db.get_live_turn, session_id) is not None
         )
 
+        local_upload_paths = upload_paths
+        upload_references = []
         if upload_paths:
             from app.core import upload_transfer
             try:
                 upload_session = await run_sync(database.get_session, session_id)
-                await run_sync(upload_transfer.validate_upload_paths, upload_paths, upload_session)
+                local_upload_paths, upload_references = await run_sync(
+                    upload_transfer.partition_upload_paths, upload_paths, upload_session, remote=placed_remote,
+                )
             except (upload_transfer.UploadLiftError, OSError, ValueError, RuntimeError):
                 await self.send_json({
                     "type": "error", "session_id": session_id,
@@ -1784,7 +1788,7 @@ class ChatWebSocketHandler:
         held_for_move = session_handoff.holds(session_id)
         # A correlated existing-session send may still be cancelled at its
         # durable admission gate. Never dual-write it into history before then.
-        defer_record = had_live or held_for_move or placed_remote or (bool(client_message_id) and not is_new_session)
+        defer_record = had_live or held_for_move or placed_remote or bool(upload_references) or (bool(client_message_id) and not is_new_session)
         if not defer_record and not compact_first:
             try:
                 if not is_new_session:
@@ -1826,6 +1830,8 @@ class ChatWebSocketHandler:
             payload["deferred_user_record"] = True
         if upload_paths:
             payload["upload_paths"] = upload_paths
+        if upload_references:
+            payload["upload_references"] = upload_references
         if request_id and is_new_session:
             payload["request_id"] = request_id
         if defer_record:
@@ -1849,10 +1855,10 @@ class ChatWebSocketHandler:
         # A lift failure FAILS THE SEND: submitting a turn whose prompt points at
         # files the executing install cannot see is exactly the silent loss this
         # mechanism exists to prevent.
-        if placed_remote and upload_paths:
+        if placed_remote and local_upload_paths:
             try:
                 blob_ids = await self._lift_uploads(
-                    upload_paths, project_id, session_id
+                    local_upload_paths, project_id, session_id
                 )
             except Exception as lift_exc:  # noqa: BLE001 — refuse, never half-send
                 logger.warning(

@@ -125,6 +125,7 @@ def _migrate_uploads_to_dir(
     project_id: str,
     target_dir: Path,
     file_paths: List[str],
+    migrated_paths: Optional[dict] = None,
 ) -> List[str]:
     """Copy uploaded files from the project dir into ``target_dir``.
 
@@ -140,13 +141,16 @@ def _migrate_uploads_to_dir(
     if not target_dir.exists():
         return [f"Target directory does not exist: {target_dir}"]
 
-    project_dir = Path(get_project_working_dir(project_id))
-    # When the target IS the project dir, the files are already in place.
-    if target_dir.resolve() == project_dir.resolve():
-        return errors
+    project = database.get_project(project_id)
+    project_dir = Path(get_project_working_dir(project or project_id)).resolve()
+    from app.core import upload_transfer
+    # Validate before copying too: a symlink in uploads must not escape the
+    # staging root, nor may the destination uploads directory point elsewhere.
+    base_session = {"id": "branch-compose", "project_id": project_id}
     for file_path in file_paths:
         try:
-            src = Path(file_path)
+            upload_transfer.validate_upload_paths([file_path], base_session)
+            src = Path(file_path).resolve()
             if not src.exists():
                 errors.append(f"File not found: {file_path}")
                 continue
@@ -156,8 +160,13 @@ def _migrate_uploads_to_dir(
                 errors.append(f"File not in project directory: {file_path}")
                 continue
             dest = target_dir / rel
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(str(src), str(dest))
+            if not upload_transfer._is_under(dest.resolve(), target_dir.resolve()):
+                raise upload_transfer.UploadLiftError("Upload destination escapes the checkout")
+            if dest.resolve() != src:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(str(src), str(dest))
+            if migrated_paths is not None:
+                migrated_paths[file_path] = str(dest)
         except Exception as e:  # noqa: BLE001
             errors.append(f"Failed to copy {file_path}: {e}")
     return errors
@@ -388,6 +397,9 @@ async def _create_remote_branch_session(
         upload_blob_ids: List[str] = []
         if body.pending_upload_paths and prompt:
             try:
+                await run_sync(upload_transfer.validate_upload_paths, body.pending_upload_paths, {
+                    "id": session_id, "project_id": body.project_id, "project_v2_id": pv2["id"],
+                })
                 upload_blob_ids = await run_sync(
                     upload_transfer.lift_paths_to_blobs,
                     body.pending_upload_paths,
@@ -510,6 +522,7 @@ async def _create_remote_branch_session(
                 payload["api_user_id"] = api_user_id
             if upload_blob_ids:
                 payload["upload_blob_ids"] = upload_blob_ids
+                payload["upload_paths"] = list(body.pending_upload_paths or [])
             portable_profile = None if profile_id == "claude-code" else profile_id
             if remote_device:
                 await turn_manager.reactivate_for_send(session_id, "worktree", payload)
@@ -718,6 +731,7 @@ async def _create_v2_branch_session(
     # Migrate pending uploads into the materialized checkout — BEFORE any turn
     # submit and regardless of whether a prompt was supplied (a promptless
     # compose still needs its attachments to land, else real data loss).
+    migrated_paths: dict = {}
     if body.pending_upload_paths:
         try:
             upload_migration_errors = await run_sync(
@@ -725,6 +739,7 @@ async def _create_v2_branch_session(
                 body.project_id,
                 Path(checkout_path),
                 body.pending_upload_paths,
+                migrated_paths,
             ) or None
             if upload_migration_errors:
                 logger.warning(
@@ -735,7 +750,8 @@ async def _create_v2_branch_session(
             logger.warning(f"Upload migration failed: {e}")
             upload_migration_errors = [str(e)]
 
-    prompt = (body.prompt or "").strip()
+    from app.core import upload_transfer
+    prompt = upload_transfer.rewrite_prompt((body.prompt or "").strip(), migrated_paths)
     if prompt:
         await _persist_and_broadcast_first_message(session_id, prompt, profile_id)
 
@@ -744,6 +760,8 @@ async def _create_v2_branch_session(
         # project_v2_id (materializing the same checkout idempotently).
         try:
             from app.core import turn_manager
+            if upload_migration_errors:
+                raise upload_transfer.UploadLiftError("Attachments could not be migrated; reattach before sending")
             await turn_manager.submit_async(
                 session_id,
                 "worktree",
@@ -752,7 +770,10 @@ async def _create_v2_branch_session(
                 project_id=body.project_id or None,
                 overrides=body.overrides,
                 explicit_permission=True,
-                payload={"api_user_id": api_user_id} if api_user_id else None,
+                payload={
+                    **({"api_user_id": api_user_id} if api_user_id else {}),
+                    **({"upload_paths": list(migrated_paths.values())} if migrated_paths else {}),
+                } or None,
             )
             query_started = True
         except Exception as e:  # noqa: BLE001

@@ -173,6 +173,12 @@ def test_project_upload_validation_uses_the_session_checkout(mock_db, tmp_path):
     upload = project / "uploads" / "file.txt"
     upload.write_bytes(b"file")
     validate_upload_paths([str(upload)], row)
+    # A newly-created explicit branch still receives the base-checkout staging
+    # path from New Chat's follow-up WS send. Only that project's uploads count.
+    checkout = tmp_path / "bound-branch"
+    checkout.mkdir()
+    with patch("app.core.project_resolver.resolve_existing_cwd", return_value=str(checkout)):
+        validate_upload_paths([str(upload)], row)
     outside = project / "not-an-upload.txt"
     outside.write_bytes(b"file")
     with pytest.raises(UploadLiftError, match="upload area"):
