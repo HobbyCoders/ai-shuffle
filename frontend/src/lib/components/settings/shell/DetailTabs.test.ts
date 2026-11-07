@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import { tick } from 'svelte';
-import DetailTabs, { partialTabs, revealScrollLeft, tabGap, wholeTabsEnd, TAB_GAP, TAB_GAP_TIGHT } from './DetailTabs.svelte';
+import DetailTabs, { partialTabs, revealScrollLeft, snapRevealScrollLeft, tabGap, wholeTabsEnd, TAB_GAP, TAB_GAP_TIGHT } from './DetailTabs.svelte';
 
 const TABS = ['Profile', 'Instructions', 'Tools', 'Subagents', 'Models', 'Advanced'].map((label) => ({
 	id: label.toLowerCase(),
@@ -89,6 +89,34 @@ describe('keeping the active tab in view', () => {
 		expect(revealScrollLeft({ left: 10, width: 60 }, view)).toBe(0);
 		// Off to the right.
 		expect(revealScrollLeft({ left: 380, width: 60 }, view)).toBe(380 + 60 + 32 - 300);
+	});
+
+	describe('lands on a snap position, so the mandatory snap cannot pull the tab back under the fade', () => {
+		// Tabs 0..50, 70..140, 160..230, 250..340, 360..420 in a 300px strip; snap inset 24 (the fade).
+		const tabs = [{ left: 0, width: 50 }, { left: 70, width: 70 }, { left: 160, width: 70 }, { left: 250, width: 90 }, { left: 360, width: 60 }];
+		const max = 420 - 300;
+
+		it('moving right, picks the first snap at or past the room the tab needs', () => {
+			// The half-visible fourth tab needs scrollLeft >= 72 (340 + 32 - 300). The
+			// nearest snap (46, the second tab's) would leave it under the fade; the
+			// next one is the end of the strip.
+			expect(snapRevealScrollLeft(tabs, 3, { scrollLeft: 0, width: 300 }, max, 24)).toBe(120);
+			// The tab then ends inside the strip with room to spare.
+			expect(340 - 120).toBeLessThanOrEqual(300 - 32);
+			// A tab that needs only a little room takes the first snap that gives it.
+			expect(snapRevealScrollLeft(tabs, 2, { scrollLeft: 0, width: 230 }, 420 - 230, 24)).toBe(46);
+		});
+
+		it('moving left, puts the tab just clear of the leading fade (its own snap)', () => {
+			expect(snapRevealScrollLeft(tabs, 1, { scrollLeft: 120, width: 300 }, max, 24)).toBe(46);
+			expect(snapRevealScrollLeft(tabs, 0, { scrollLeft: 120, width: 300 }, max, 24)).toBe(0);
+		});
+
+		it('leaves a tab that already fits alone, and keeps a tab wider than the strip starting in view', () => {
+			expect(snapRevealScrollLeft(tabs, 1, { scrollLeft: 0, width: 300 }, max, 24)).toBeNull();
+			const wide = [{ left: 0, width: 80 }, { left: 100, width: 250 }];
+			expect(snapRevealScrollLeft(wide, 1, { scrollLeft: 0, width: 200 }, 150, 24)).toBe(76);
+		});
 	});
 });
 

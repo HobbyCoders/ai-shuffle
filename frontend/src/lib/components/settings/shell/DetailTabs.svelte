@@ -25,6 +25,32 @@
 		return null;
 	}
 
+	/**
+	 * The strip snaps each tab's start to its leading inset (the fade's width),
+	 * so a free scrollLeft is pulled back to the nearest snap and can leave the
+	 * tab just revealed under the trailing fade. This picks a snap position
+	 * instead: the tab's own snap when moving left (it lands just clear of the
+	 * leading fade), and the first snap far enough right when moving right, so
+	 * it ends whole with its room to spare. Null when the tab already fits.
+	 */
+	export function snapRevealScrollLeft(
+		tabs: { left: number; width: number }[],
+		index: number,
+		view: { scrollLeft: number; width: number },
+		max: number,
+		inset: number,
+		pad = TAB_REVEAL_PAD
+	): number | null {
+		const tab = tabs[index];
+		if (!tab) return null;
+		const want = revealScrollLeft(tab, view, pad);
+		if (want === null) return null;
+		const snap = (t: { left: number }) => Math.min(Math.max(0, max), Math.max(0, t.left - inset));
+		if (want < view.scrollLeft) return snap(tab);
+		const after = tabs.map(snap).filter((s) => s >= want - 0.5).sort((a, b) => a - b);
+		return Math.min(after[0] ?? Math.max(0, max), snap(tab));
+	}
+
 	/** Gap between tabs, and the tighter gap used only when the wide one would overflow. */
 	export const TAB_GAP = 20;
 	export const TAB_GAP_TIGHT = 12;
@@ -170,11 +196,18 @@
 
 	function reveal(id: string | null) {
 		if (!list || !id) return;
-		const el = tabEls().find((t) => t.dataset.tabId === id);
-		if (!el) return;
-		const next = revealScrollLeft(
-			{ left: el.offsetLeft - list.offsetLeft, width: el.offsetWidth },
-			{ scrollLeft: list.scrollLeft, width: list.clientWidth }
+		const els = tabEls();
+		const index = els.findIndex((t) => t.dataset.tabId === id);
+		if (index < 0) return;
+		// Land on a snap position, or the strip's mandatory snap pulls a mouse-
+		// picked tab back under the trailing fade (it asked 65px, snapped to 27).
+		const inset = parseFloat(getComputedStyle(list).scrollPaddingInlineStart) || 0;
+		const next = snapRevealScrollLeft(
+			els.map((e) => ({ left: e.offsetLeft - list!.offsetLeft, width: e.offsetWidth })),
+			index,
+			{ scrollLeft: list.scrollLeft, width: list.clientWidth },
+			list.scrollWidth - list.clientWidth,
+			inset
 		);
 		if (next !== null) list.scrollLeft = next;
 		updateFades();
