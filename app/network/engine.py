@@ -719,6 +719,12 @@ def materialize(
                     record.get("session_id"), (existing or {}).get("session_id")))):
             return existing
     if record is None:
+        if coll.name == "sessions":
+            # The FK cascade deletes staged hand-off rows: hold their headers
+            # before this DELETE locks the session (#1215). Batch callers
+            # already took them after network_state; this re-lock is free.
+            from app.db.session_locks import lock_handoff_history
+            lock_handoff_history(cursor, record_id)
         cursor.execute(f"DELETE FROM {coll.table} WHERE {where}", keys)
         return None
     record = dict(record)
@@ -1480,16 +1486,25 @@ def _deleted_parent(cursor, ctx: NetworkContext, env: Envelope) -> Optional[str]
     return None
 
 
-# Sessions a mirror reservation saw deleted under it (#1222). It carries that
-# fact from a batch's window reservation to the per-op reservation after it,
-# which can no longer tell "deleted" from "not arrived yet". Trusted only
-# while the session stays absent: a reservation that finds the row again
-# forgets it. Bounded: only the current window needs it.
-_MIRROR_DELETED: dict[str, None] = {}
-_MIRROR_DELETED_MAX = 1024
+def _lock_deleted_session_handoffs(cursor, items: Iterable[Mapping[str, Any]]) -> None:
+    """Lock the hand-off headers of every session this batch deletes (H).
+
+    Right after network_state, before any counter: the tombstone's FK cascade
+    deletes those staged rows, and a local delete or hand-off holding H waits
+    for the counter or session rows (order: app/db/session_locks.py, #1215).
+    """
+    from app.db.session_locks import lock_handoff_history
+
+    deleted = sorted({item.get("record_id") for item in items
+                      if isinstance(item, Mapping) and item.get("collection") == "sessions"
+                      and (item.get("op") == OP_DELETE or bool(item.get("deleted")))
+                      and isinstance(item.get("record_id"), str)})
+    for sid in deleted:
+        lock_handoff_history(cursor, sid)
 
 
-def _lock_mirror_event_counters(cursor, record_ids: Iterable[str]) -> set[str]:
+def _lock_mirror_event_counters(cursor, record_ids: Iterable[str], *,
+                                existed: Iterable[str] = ()) -> set[str]:
     """After network_state, take sorted counters BEFORE any mirror event rows.
 
     Delete takes C before sweeping events. Reconciliation's UPSERT can lock an
@@ -1497,15 +1512,19 @@ def _lock_mirror_event_counters(cursor, record_ids: Iterable[str]) -> set[str]:
     callers reserve the entire page/window here, not one session at a time.
     Keep this inside the synchronous DB transaction, never across network I/O.
 
-    Returns the sessions whose delete committed while this reservation waited
-    on its counter. Callers MUST drop those sessions' events: inserting them
-    would recreate orphan events and a positive counter for a deleted chat
-    (#1222). A session merely absent (not yet arrived) is never in the set.
+    Returns the sessions deleted before or while this reservation ran.
+    Callers MUST drop those sessions' events: inserting them would recreate
+    orphan events and a positive counter for a deleted chat (#1222). A chat
+    counts as deleted when the fresh-snapshot cleanup sees it vanish, when
+    ``existed`` (the caller saw its row earlier in this transaction) names a
+    chat now absent, or when this process deleted it (``mark_sessions_deleted``)
+    and the row has not come back. Absence alone means "not arrived yet".
     """
+    from app.db.session_locks import deleted_sessions, mark_sessions_deleted
+
     session_ids = sorted({rid.split("|", 1)[0] for rid in record_ids
                           if isinstance(rid, str) and "|" in rid})
     reserved, present = [], set()
-    gone: set[str] = set()
     for sid in session_ids:
         cursor.execute(
             "INSERT INTO session_event_counters (session_id, next_seq) "
@@ -1521,6 +1540,9 @@ def _lock_mirror_event_counters(cursor, record_ids: Iterable[str]) -> set[str]:
             present.add(sid)
             if int(row["next_seq"]) == 0:
                 reserved.append(sid)
+    # A delete that committed between the caller's read and this INSERT left
+    # no row for the INSERT to find: the caller's observation proves it.
+    gone = {sid for sid in existed if sid in session_ids and sid not in present}
     if reserved:
         # INSERT's snapshot may see S, wait behind deletion's C, then recreate
         # C after deletion commits. This MUST be a fresh statement/snapshot.
@@ -1535,16 +1557,14 @@ def _lock_mirror_event_counters(cursor, record_ids: Iterable[str]) -> set[str]:
             "WHERE sessions.id = session_event_counters.session_id) RETURNING session_id",
             tuple(reserved),
         )
-        gone = {row["session_id"] for row in cursor.fetchall()}
-        present -= gone
-    with _lock:
-        for sid in present:
-            _MIRROR_DELETED.pop(sid, None)
-        for sid in gone:
-            _MIRROR_DELETED[sid] = None
-        while len(_MIRROR_DELETED) > _MIRROR_DELETED_MAX:
-            _MIRROR_DELETED.pop(next(iter(_MIRROR_DELETED)))
-        return {sid for sid in session_ids if sid in _MIRROR_DELETED}
+        vanished = {row["session_id"] for row in cursor.fetchall()}
+        present -= vanished
+        gone |= vanished
+    if gone:
+        # Carry the fact to a later reservation in this batch (per-op apply),
+        # which can no longer tell "deleted" from "not arrived yet".
+        mark_sessions_deleted(gone)
+    return deleted_sessions(session_ids, present=present)
 
 
 def _apply_next(cursor, ctx: NetworkContext, env: Envelope, member: Member, result: ApplyResult) -> str:
@@ -2103,6 +2123,7 @@ def _apply_pending_chunk(origin: str, incarnation: int, ctx: NetworkContext,
             locked = True
             first_seq = next_seq = store.get_watermark(cursor, origin, incarnation) + 1
             window = store.pending_prefix(cursor, origin, incarnation, next_seq, limit=APPLY_CHUNK)
+            _lock_deleted_session_handoffs(cursor, window)
             _lock_mirror_event_counters(cursor, (data.get("record_id") for data in window
                                                 if isinstance(data, Mapping)
                                                 and data.get("collection") == "session_events"))
@@ -2335,7 +2356,9 @@ def _apply_event_append(cursor, chunk: Sequence[Mapping[str, Any]], ctx: Network
                    tuple(value for row in rows for value in (row["session_id"], row["seq"])))
     if cursor.fetchone() is not None:
         return False
-    deleted = _lock_mirror_event_counters(cursor, ids)
+    # ``owners`` read these sessions in this transaction: one missing at
+    # reservation was deleted in between, not "not arrived yet" (#1222).
+    deleted = _lock_mirror_event_counters(cursor, ids, existed=owners)
     last_seq = envs[-1].origin_seq
     if deleted:
         # Chats deleted while we waited: consume their ops, store nothing.
@@ -2398,6 +2421,7 @@ def _apply_chunk(chunk: Sequence[Mapping[str, Any]], ctx: NetworkContext, result
                 # buffering needs no C; only the per-op fallback reserves here.
                 appended = _apply_event_append(cursor, chunk, ctx, part, _stream=stream)
                 if not appended:
+                    _lock_deleted_session_handoffs(cursor, chunk)
                     _lock_mirror_event_counters(cursor, (data.get("record_id") for data in chunk
                                                         if isinstance(data, Mapping)
                                                         and data.get("collection") == "session_events"))
@@ -2795,7 +2819,8 @@ SNAPSHOT_SQL_BATCH = 500
 
 
 def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mapping[str, Any]], *,
-                         ctx: NetworkContext, validated_membership: bool = False
+                         ctx: NetworkContext, validated_membership: bool = False,
+                         existed: Iterable[str] = ()
                          ) -> Tuple[int, List[Tuple[str, str, str]]]:
     """Apply one page of opened snapshot items in the caller's transaction.
 
@@ -2804,7 +2829,8 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
     millions of updates of the one ``network_state`` row inside a single
     transaction made a large first copy crawl. Transcript events this worker
     has never held are inserted in bulk; everything else goes through the
-    per-record path (last writer wins, conflicts, hooks).
+    per-record path (last writer wins, conflicts, hooks). ``existed`` names
+    sessions whose rows the caller read in this transaction (#1222).
     """
     items = list(items)
     touched: List[Tuple[str, str, str]] = []
@@ -2812,8 +2838,10 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
         return 0, touched
     store.observe_clock(cursor, max(int(item["clock"]) for item in items))
     ids = [item["record_id"] for item in items]
+    if coll.name == "sessions":
+        _lock_deleted_session_handoffs(cursor, ({**item, "collection": coll.name} for item in items))
     if coll.name == "session_events":
-        deleted = _lock_mirror_event_counters(cursor, ids)
+        deleted = _lock_mirror_event_counters(cursor, ids, existed=existed)
         if deleted:
             # Chats deleted while we waited keep no snapshot events (#1222).
             items = [item for item in items if item["record_id"].split("|", 1)[0] not in deleted]
