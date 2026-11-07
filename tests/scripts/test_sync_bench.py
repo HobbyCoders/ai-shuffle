@@ -3,7 +3,16 @@ import math
 
 import pytest
 
-from scripts.perf.sync_bench import delta_lags, op_key, recall_visible, sanitize_log, stages, summarize
+from scripts.perf.sync_bench import committed_at, delta_lags, op_key, recall_visible, sanitize_log, stages, summarize
+
+
+def test_project_creation_starts_at_first_domain_commit_not_response_or_read():
+    result = {"trace": "create", "end": 7}
+    metrics = {"events": [{"kind": "commit", "trace": "other", "t": 1},
+                          {"kind": "commit", "trace": "create", "t": 4},
+                          {"kind": "commit", "trace": "create", "t": 3}]}
+    assert committed_at(result, metrics) == 3
+    assert committed_at(result, {"events": []}) == 7
 
 
 def test_stream_lags_match_common_seq_endpoints_not_frame_positions():

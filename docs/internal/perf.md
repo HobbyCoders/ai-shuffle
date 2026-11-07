@@ -267,9 +267,17 @@ is polled every 100 ms; that sampling delay is included, not subtracted. Publica
 are timed after their database commits. The exchange boundary is the matching
 push dispatch (or pull response receipt), not a guessed whole-round-trip time.
 Memory's start is file-save return, an upper bound on its durable write time.
-`project_create` is checked without seeding missing catalog rows; the separate
-`project_resolve` stage uses the same origin-access resolution as starting its
-first chat. These are intentionally not represented as the same journey.
+`project_create` measures the actual creation commit to B's catalog visibility,
+without seeding missing catalog rows, and retains censored three-second attempts.
+The separate `project_resolve` stage uses the same origin-access resolution as
+starting a first chat, against an independent pre-upgrade legacy-row fixture.
+That fixture has no identity or checkout: after eager creation is fixed,
+resolving the already-visible create journey would otherwise measure a read,
+not publication. These are intentionally not the same journey. Use
+`--projects-only --runs 10` to omit unrelated mutation, streaming, catch-up and
+idle phases. Compare before/after with this same fixture; the historical
+resolution baseline below used the plain-create row after its observation
+window instead.
 
 Two-worker devloop currently rejects `--seed long`, so `--long-seed` loads the
 unchanged `seed_long()` fixture **after pairing**, waits for B's durable event

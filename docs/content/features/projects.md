@@ -25,7 +25,7 @@ Creation follows the same approval rules as other app configuration writes: Ask 
 
 ## Projects across workers
 
-A project is shared by every worker in your network, but each worker needs its own copy of the folder before a chat can run there. The Projects page shows one chip per worker on every project: ready, missing (dashed), setting up, failed, or offline. Select a missing chip to set the project up on that worker.
+A new project appears in connected workers' project catalogs as soon as it is added; you do not need to start a chat first. Each worker still needs its own copy of the folder before a chat can run there. The Projects page shows one chip per worker on every project: ready, missing (dashed), setting up, failed, or offline. Select a missing chip to set the project up on that worker.
 
 A project's **Workers** tab lists each worker's folder and branch. From there you can:
 

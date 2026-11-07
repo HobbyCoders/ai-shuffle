@@ -320,6 +320,16 @@ def child():
                 from app.api.projects import create_project_record
                 from app.core.models import ProjectCreate
                 result = await create_project_record(ProjectCreate(id=body["id"], name=body["id"]))
+            elif kind == "legacy_project":
+                # Fixture: an existing pre-upgrade row, deliberately no catalog
+                # identity. Resolution below is still the production writer.
+                def legacy_project():
+                    with database.get_db() as conn:
+                        conn.cursor().execute(
+                            "INSERT INTO projects (id, name, path, instance_id) VALUES (%s, %s, %s, %s)",
+                            (body["id"], body["id"], body["id"], settings.effective_instance_id))
+                await run_sync(legacy_project)
+                result = {"id": body["id"]}
             elif kind == "project_resolve":
                 # Same access resolution used when starting a chat in this project.
                 from app.api.common import require_origin_access
@@ -503,6 +513,12 @@ def wait_for(predicate, timeout=150, interval=.1):
     raise TimeoutError("benchmark convergence deadline exceeded")
 
 
+def committed_at(result, metrics):
+    commits = [e["t"] for e in metrics["events"]
+               if e["kind"] == "commit" and e["trace"] == result["trace"]]
+    return min(commits) if commits else result["end"]
+
+
 def stages(start, visible, source, peer, collection, record_id=None):
     """Correlate by signed origin sequence, never by whichever op arrived last."""
     published = [e for e in source["events"] if e["kind"] == "published"
@@ -584,8 +600,7 @@ def run(args):
                 result = action()
                 _, end = wait_for(visible)
                 sm, pm = a.probe("/metrics"), b.probe("/metrics")
-                commits = [e["t"] for e in sm["events"] if e["kind"] == "commit" and e["trace"] == result["trace"]]
-                committed = min(commits) if commits else result["end"]
+                committed = committed_at(result, sm)
                 row = dict(journey=name, total_ms=(end-committed)*1000,
                            write_ms=(result["end"]-result["start"])*1000,
                            **stages(committed, end, sm, pm, collection, record_id))
@@ -595,35 +610,44 @@ def run(args):
                 return result
 
             for i in range(0 if args.stream_only else args.runs):
-                key, value = "lastSelectedModel", f"sync-bench-{i}"
-                measure("preference", lambda: a.action("preference", key=key, value=value),
-                        lambda: (b.api("preferences/" + key) or {}).get("value") == value,
-                        "user_preferences")
-                sid = str(uuid.uuid4())
-                measure("new_chat", lambda: a.action("new_chat", sid=sid),
-                        lambda: any(r["id"] == sid for r in b.api("sessions")), "sessions", sid)
-                title = "Sync rename " + uuid.uuid4().hex[:8]
-                measure("rename", lambda: a.action("rename", sid=sid, title=title),
-                        lambda: any(r["id"] == sid and r["title"] == title for r in b.api("sessions")), "sessions", sid)
-                measure("settle", lambda: a.action("settle", sid=sid),
-                        lambda: not any(r["id"] == sid for r in b.api("sessions?active_only=true&limit=100")), "session_active")
+                if not args.projects_only:
+                    key, value = "lastSelectedModel", f"sync-bench-{i}"
+                    measure("preference", lambda: a.action("preference", key=key, value=value),
+                            lambda: (b.api("preferences/" + key) or {}).get("value") == value,
+                            "user_preferences")
+                    sid = str(uuid.uuid4())
+                    measure("new_chat", lambda: a.action("new_chat", sid=sid),
+                            lambda: any(r["id"] == sid for r in b.api("sessions")), "sessions", sid)
+                    title = "Sync rename " + uuid.uuid4().hex[:8]
+                    measure("rename", lambda: a.action("rename", sid=sid, title=title),
+                            lambda: any(r["id"] == sid and r["title"] == title for r in b.api("sessions")), "sessions", sid)
+                    measure("settle", lambda: a.action("settle", sid=sid),
+                            lambda: not any(r["id"] == sid for r in b.api("sessions?active_only=true&limit=100")), "session_active")
                 pid = "sync-bench-" + uuid.uuid4().hex[:10]
-                a.action("project", id=pid)
-                created = time.monotonic()
+                result = a.action("project", id=pid)
+                created = committed_at(result, a.probe("/metrics"))
                 try:
                     _, seen = wait_for(lambda: any(r["name"] == pid for r in b.api("cluster/projects")["projects"]),
                                        timeout=3)
-                    samples.append(dict(journey="project_create", total_ms=(seen-created)*1000, visible=True))
+                    samples.append(dict(journey="project_create", total_ms=(seen-created)*1000, visible=True,
+                                        **stages(created, seen, a.probe("/metrics"), b.probe("/metrics"), "projects_v2")))
                 except TimeoutError:
                     samples.append(dict(journey="project_create", visible=False, observed_seconds=time.monotonic()-created))
                 save()
+                # Keep resolution measurable after eager creation is fixed:
+                # resolve an independent pre-upgrade legacy fixture, not the
+                # already-visible project above (which would just be a read).
+                pid = "sync-resolve-" + uuid.uuid4().hex[:10]
+                a.action("legacy_project", id=pid)
                 measure("project_resolve", lambda: a.action("project_resolve", id=pid),
                         lambda: any(r["name"] == pid for r in b.api("cluster/projects")["projects"]), "projects_v2")
+                if args.projects_only:
+                    continue
                 text = "benchmarkfruit" + uuid.uuid4().hex[:10]
                 measure("memory", lambda: a.action("memory", text=text),
                         lambda: b.action("recall", text=text)["result"] is True, "memory")
 
-            for i in range(args.runs):
+            for i in range(0 if args.projects_only else args.runs):
                 sid = str(uuid.uuid4())
                 a.action("new_chat", sid=sid)
                 wait_for(lambda: any(r["id"] == sid for r in b.api("sessions?limit=100")))
@@ -646,7 +670,7 @@ def run(args):
                 print("stream", i + 1, "matched deltas", len(lags), flush=True)
 
             # Offline is SIGSTOP of this lab's exact B child, never an installed worker.
-            for count in ([] if args.stream_only else args.catchup):
+            for count in ([] if args.stream_only or args.projects_only else args.catchup):
                 for i in range(args.runs):
                     sid = str(uuid.uuid4())
                     a.action("new_chat", sid=sid)
@@ -667,7 +691,7 @@ def run(args):
                     save()
                     print(f"catchup_{count}", round((end-start)*1000), "ms", flush=True)
 
-            if args.long_seed and not args.stream_only:
+            if args.long_seed and not args.stream_only and not args.projects_only:
                 report["setup"]["long"] = a.action("long_seed")["result"]
                 # Baseline idle only after the peer has all seeded durable events.
                 for size in report["setup"]["long"]["sizes"].values():
@@ -677,7 +701,7 @@ def run(args):
                 time.sleep(90)
             before = [w.probe("/idle") for w in (a, b)]
             report["idle"] = []
-            remaining = 0 if args.stream_only else args.idle_seconds
+            remaining = 0 if args.stream_only or args.projects_only else args.idle_seconds
             while remaining > 0:
                 seconds = min(60, remaining)
                 time.sleep(seconds)
@@ -736,6 +760,7 @@ def main():
     p.add_argument("--idle-seconds", type=float, default=180)
     p.add_argument("--long-seed", action="store_true")
     p.add_argument("--stream-only", action="store_true", help="fresh paired lab; omit mutations/catch-up/idle")
+    p.add_argument("--projects-only", action="store_true", help="only create and pre-upgrade first-chat resolution")
     args = parser.parse_args()
     if args.mode == "child":
         child()

@@ -154,6 +154,39 @@ def _restore_to_catalog(cursor, project: Dict[str, Any]) -> None:
         restore_removed_base_checkouts(cursor, project_v2_id, _catalog_runners(project))
 
 
+def _seed_catalog(cursor, project: Dict[str, Any]) -> str:
+    """Seed the collapse identity and base checkout in the caller's transaction.
+
+    Reuse the migration's deterministic keys and conflict handling, including
+    the alternate checkout id for a relinked folder. Never refresh an existing
+    identity or reactivate a removed checkout merely by resolving it.
+    """
+    from app.db import checkouts, projects_v2
+
+    origin = _catalog_origin(project)
+    project_v2_id = projects_v2.project_v2_id_for_origin(origin)
+    cursor.execute(
+        "INSERT INTO projects_v2 (id, origin, name, settings) "
+        "VALUES (%s, %s, %s, %s) ON CONFLICT (origin) DO NOTHING",
+        (project_v2_id, origin, project.get("name") or origin, "{}"),
+    )
+    project_v2_id = _catalog_project_v2_id(cursor, origin)
+    checkouts.seed_legacy_base_checkout(
+        cursor, str(project["id"]), project_v2_id,
+        project.get("instance_id") or "", project.get("path"),
+    )
+    return project_v2_id
+
+
+def seed_project_catalog(project: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Post-commit hooked fallback for projects written by pre-upgrade workers."""
+    from app.db import projects_v2
+
+    with get_db() as conn:
+        _seed_catalog(conn.cursor(), project)
+    return projects_v2.get_project_v2_by_origin(_catalog_origin(project))
+
+
 def create_project(
     project_id: str,
     name: str,
@@ -171,7 +204,9 @@ def create_project(
                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
             (project_id, name, description, path, json.dumps(settings_dict or {}), instance_id, now, now)
         )
-        _restore_to_catalog(cursor, {"id": project_id, "instance_id": instance_id})
+        project = {"id": project_id, "name": name, "path": path, "instance_id": instance_id}
+        _seed_catalog(cursor, project)
+        _restore_to_catalog(cursor, project)
     return get_project(project_id)
 
 
@@ -225,17 +260,21 @@ def set_project_link_group(project_id: str, link_group_id: Optional[str]) -> Opt
     """
     with get_db() as conn:
         cursor = conn.cursor()
+        cursor.execute("SELECT * FROM projects WHERE id = %s FOR UPDATE", (project_id,))
+        previous = row_to_dict(cursor.fetchone())
         cursor.execute(
             "UPDATE projects SET link_group_id = %s, updated_at = %s WHERE id = %s",
             (link_group_id, datetime.now(timezone.utc).isoformat(), project_id),
         )
-        if link_group_id and cursor.rowcount:
-            # A re-added clone of a deleted project regains its origin here,
-            # once its remote is read: bring that checkout back too.
-            cursor.execute("SELECT id, instance_id, link_group_id FROM projects WHERE id = %s", (project_id,))
-            project = row_to_dict(cursor.fetchone())
-            if project:
-                _restore_to_catalog(cursor, project)
+        if previous and cursor.rowcount:
+            project = {**previous, "link_group_id": link_group_id}
+            if _catalog_origin(previous) != _catalog_origin(project):
+                # Keep old identities/checkouts for bound chats, but do not
+                # advertise an abandoned origin as another runnable project.
+                _retire_from_catalog(cursor, previous)
+            _seed_catalog(cursor, project)
+            # Explicit re-add/relink is allowed to restore a removed base.
+            _restore_to_catalog(cursor, project)
     return get_project(project_id)
 
 
@@ -294,6 +333,6 @@ from app.core.resource_sync import install_database_mutations as _install_resour
 
 _install_resource_sync(
     globals(), 'projects',
-    'create_project update_project delete_project set_project_link_group',
+    'create_project update_project delete_project set_project_link_group seed_project_catalog',
     scope='shared',
 )
