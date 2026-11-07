@@ -26,7 +26,7 @@ type Edit = { value: unknown; revision: number; version?: string | null; writeId
 type Entry = { adapter: PreferenceAdapter; revision: number; request: number;
  version?: string | null; pending?: Edit; inDoubt?: Edit; running: boolean; initialized: boolean };
 const clone = (value: unknown) => JSON.parse(JSON.stringify(value));
-// A UUID v4 from getRandomValues, which works on LAN HTTP, unlike randomUUID.
+// A UUID v4 from getRandomValues, which works on LAN HTTP, unlike the native UUID call.
 function newWriteId() {
  const b = crypto.getRandomValues(new Uint8Array(16));
  b[6] = (b[6] & 0x0f) | 0x40; b[8] = (b[8] & 0x3f) | 0x80;
