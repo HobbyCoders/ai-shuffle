@@ -121,6 +121,19 @@ class FenceViolation(Exception):
     (run missing, not active, or token superseded)."""
 
 
+def _require_session(cursor: Any, session_id: str) -> None:
+    """Recheck AFTER the counter lock, with a fresh READ COMMITTED snapshot.
+
+    Delete takes that same lock before removing the session. Its commit may
+    have won while our counter upsert waited, so the upsert alone is not proof
+    that the session still exists. Raising unwinds the writer transaction,
+    including a counter recreated by the upsert.
+    """
+    cursor.execute("SELECT id FROM sessions WHERE id = %s", (session_id,))
+    if cursor.fetchone() is None:
+        raise ValueError(f"session {session_id!r} does not exist")
+
+
 def _parse_payload(raw: Any) -> Dict[str, Any]:
     """Parse the payload field, handling both str (test shim TEXT) and dict."""
     if isinstance(raw, str):
@@ -145,7 +158,7 @@ def append_events(
     All work happens in one transaction: fence check, atomic seq allocation and
     row inserts. A best-effort wake follows the commit. Raises :class:`FenceViolation` if a
     supplied ``run_id`` no longer owns the session, ``ValueError`` if ``events``
-    is empty or ``run_id`` is given without ``fence_token``.
+    is empty, the session no longer exists, or ``run_id`` has no ``fence_token``.
 
     An optional stable ``id`` makes replay inserts idempotent. Duplicate IDs
     still reserve sequence slots; the returned range is the allocation, not
@@ -193,6 +206,7 @@ def append_events(
         )
         last_seq = int(cursor.fetchone()["next_seq"])
         first_seq = last_seq - n + 1
+        _require_session(cursor, session_id)
 
         # 3. Insert one row per event.
         params = [
@@ -356,7 +370,7 @@ def append_backfill_events(
     lock is acquired so a writer that waited sees the preceding writer's events.
 
     Returns the ``(first_seq, last_seq)`` range, with unfenced ``run_id=None``.
-    Raises ``ValueError`` if ``events`` is empty.
+    Raises ``ValueError`` if ``events`` is empty or the session no longer exists.
     """
     if not events:
         raise ValueError("events must be non-empty")
@@ -374,6 +388,7 @@ def append_backfill_events(
             (session_id,),
         )
         cursor.fetchone()
+        _require_session(cursor, session_id)
         if not can_backfill_events(session_id, _conn=conn):
             return None
         cursor.execute(

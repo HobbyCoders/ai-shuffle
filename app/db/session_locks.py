@@ -26,4 +26,10 @@ def lock_session_runtime(cursor: Any, session_id: str):
         (session_id,),
     )
     cursor.execute(f"SELECT * FROM sessions WHERE id = {placeholder} FOR UPDATE", (session_id,))
-    return cursor.fetchone()
+    row = cursor.fetchone()
+    if row is None:
+        # With no run row to wait on, the INSERT's snapshot can predate a
+        # delete whose counter lock it then waits behind. A no-op settlement
+        # must not commit the counter that INSERT recreated after deletion.
+        cursor.execute(f"DELETE FROM session_event_counters WHERE session_id = {placeholder}", (session_id,))
+    return row
