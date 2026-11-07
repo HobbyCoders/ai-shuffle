@@ -6,7 +6,9 @@ Real PostgreSQL, independent worker schemas, the real memory producer
 and the scheduled maintenance loop. Never the configured application database.
 """
 import json
+import time
 
+import pytest
 from fluid.codemode.skills import SkillStore
 
 from app.db import network as store
@@ -25,6 +27,19 @@ from tests.core.network.test_transport import ServedBy
 SEED_FACTS = 60
 
 
+@pytest.fixture(autouse=True)
+def write_hook(_isolate_memory_publisher, monkeypatch):
+    """The production post-commit hook (#1224), on the shared clean publisher state."""
+    monkeypatch.setattr(transport, "request_scan", lambda *args, **kwargs: None)
+    memory_records.install_write_hook()
+
+
+def publish():
+    """Publish the way the scanner does: after the saves' quiet gap."""
+    time.sleep(memory_records.WRITE_QUIET_SECONDS + .01)
+    return memory_records.publish()
+
+
 def facts(worker):
     return SkillStore(worker.data_dir / "fluid" / "skills")
 
@@ -35,14 +50,14 @@ def seed(worker):
         for n in range(SEED_FACTS):
             store_.save_memory(f"Seed fact {n}: " + "the owner prefers concise, plain answers. " * 6,
                                protected=True)
-        assert memory_records.publish() >= 1
+        assert publish() >= 1
 
 
 def change(worker, n):
     """One memory change through the real producer: one new whole-store envelope."""
     with worker.active():
         facts(worker).save_memory(f"Change {n}: remember detail number {n}.", protected=True)
-        assert memory_records.publish() == 1
+        assert publish() == 1
 
 
 def memory_ops(worker):
@@ -179,7 +194,7 @@ def test_compaction_keeps_heads_newest_records_and_reports_bytes(pg_workers, cap
     with source.active():
         # A skill record shares the collection; its single op is its newest.
         (source.data_dir / "fluid" / "skills" / "greet.py").write_text("def run():\n    return 'hi'\n")
-        assert memory_records.publish() == 1
+        assert publish() == 1
     ops = memory_ops(source)
     with source.active(), caplog.at_level("INFO", logger=store.__name__):
         assert store.compact_memory_ops(source.device_id, {}) == 3
