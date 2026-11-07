@@ -632,9 +632,13 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				const localSendIntent = (s: ActiveSessionState) => ({
 					sessionId: _state.sessionId,
 					revision: (s.localSendIntent?.revision ?? 0) + 1,
-					// A Stop that times out names its turn from this send's receipt,
-					// whether or not the send has a transcript row of its own.
-					commandId: clientMessageId,
+					// A Stop that times out names its turn from the receipt of the send
+					// that started it, whether or not that send has a transcript row.
+					// A message queued behind the live turn did not start it, so it
+					// keeps the earlier send's command.
+					commandId: sendWhileStreaming || options?.compactFirst
+						? (s.localSendIntent?.sessionId === _state.sessionId ? s.localSendIntent?.commandId : undefined)
+						: clientMessageId,
 				});
 
 				// Single atomic update — avoids intermediate render where streaming

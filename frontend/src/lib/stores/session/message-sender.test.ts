@@ -981,11 +981,11 @@ describe('message-sender local-send presentation intent', () => {
 			for (const revision of [8, 9]) {
 				const start = snapshots.length;
 				expect(await sender.sendMessage('fresh local send', { skipMessageAppend: skip })).toBe(true);
-				expect(getState().localSendIntent).toEqual({ sessionId: 'intent-session', revision, commandId: expect.any(String) });
+				expect(getState().localSendIntent).toEqual({ sessionId: 'intent-session', revision, commandId: streaming ? undefined : expect.any(String) });
 				const cleared = snapshots.slice(start).filter(s => s.error === null);
 				expect(cleared.length).toBeGreaterThan(0);
 				for (const snapshot of cleared) {
-					expect(snapshot.localSendIntent).toEqual({ sessionId: 'intent-session', revision, commandId: expect.any(String) });
+					expect(snapshot.localSendIntent).toEqual({ sessionId: 'intent-session', revision, commandId: streaming ? undefined : expect.any(String) });
 				}
 			}
 			if (streaming || skip) expect(getState().messages).toBe(initial.messages);
@@ -1461,6 +1461,31 @@ describe('Stop timeout recovery', () => {
 			expect(state.liveTurnId).toBe('later');
 			expect(state.stopTimedOutTurnId).toBeNull();
 			expect(stopRecoveryAppliesToTurn(state.stopTimedOutTurnId, state.liveTurnId)).toBe(false);
+		});
+
+		// A message queued behind the live turn did not start it: the turn's own
+		// send still names the Stop once the delayed feed shows its receipt.
+		it('names the turn from the send that started it, not from a message queued behind it', async () => {
+			const test = stopping(null);
+			test.deps.update(s => ({ ...s, isStreaming: false }));
+			expect(await test.sender.sendMessage('go')).toBe(true);
+			const started = test.getState().localSendIntent?.commandId;
+			expect(started).toEqual(expect.any(String));
+			test.deps.update(s => ({ ...s, isStreaming: true }));
+			expect(await test.sender.sendMessage('queued behind it')).toBe(true);
+			expect(test.getState().localSendIntent?.commandId).toBe(started);
+
+			test.sender.stopGeneration();
+			vi.advanceTimersByTime(10000);
+			expect(test.getState().stopTimedOutCommandId).toBe(started);
+			feedController.start('sess-1');
+			event('turn.started', 'turn-1', 1);
+			event('message.user', 'turn-1', 2, { command_id: started, content: 'go' });
+			feed.onEvent!({ type: 'caught_up', seq: 2 });
+			vi.advanceTimersByTime(300);
+			const state = test.getState();
+			expect(state.stopTimedOutTurnId).toBe('turn-1');
+			expect(stopRecoveryAppliesToTurn(state.stopTimedOutTurnId, state.liveTurnId)).toBe(true);
 		});
 	});
 
