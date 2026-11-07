@@ -407,38 +407,8 @@
 		background: var(--st-warning-soft);
 		color: var(--st-warning);
 	}
-	/* Narrow form rows wrap; the shared DetailPane owns the header. */
-	@container agd (max-width: 560px) {
-		.agd :global(.st-row:has(> .st-rt)) {
-			display: flex;
-			flex-wrap: wrap;
-			align-items: center;
-			gap: 8px 12px;
-			padding: 10px 14px;
-		}
-		.agd :global(.st-row > .st-rt) {
-			flex: 1 1 128px;
-		}
-		.agd :global(.st-row > .st-rt .st-rh) {
-			white-space: normal;
-		}
-		.agd :global(.st-row > .st-rc) {
-			flex: 0 1 auto;
-			max-width: 100%;
-			margin-left: auto;
-			flex-wrap: wrap;
-		}
-		.agd :global(.st-row:has(> .st-rc .st-txt) > .st-rc) {
-			flex: 1 1 100%;
-			flex-wrap: nowrap;
-		}
-		.agd :global(.st-row .st-txt) {
-			flex: 1 1 160px;
-		}
-		.agd :global(.st-rowx) {
-			padding: 4px 14px 14px;
-		}
-	}
+	/* Narrow form rows stack through the shared settings.css row rules; the
+	   shared DetailPane owns the header. */
 	@media (prefers-reduced-motion: reduce) {
 		.savetick :global(.spin) {
 			animation: none;

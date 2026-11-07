@@ -10,12 +10,13 @@
 	 *   per-item mark-read + dismiss, plus mark-all-read and clear-all.
 	 * - Uses the shared `header-dropdowns` store so opening this closes the
 	 *   profile, branch, and git-action popovers (single-open-at-a-time).
-	 * - Rail: the panel opens over the Sidebar's list column, beside the rail.
-	 *   Header instances stay right-anchored under their button.
+	 * - Rail: a 300px panel floats just right of the rail, bottom-aligned with
+	 *   the bell, over the list column and canvas. Header instances stay
+	 *   right-anchored under their button.
 	 * - Outside-click + Escape to close. On the mobile shell the panel is
 	 *   `position: fixed` so the right-edge anchor can't clip it.
 	 */
-	import { onDestroy } from 'svelte';
+	import { onDestroy, tick } from 'svelte';
 	import {
 		Bell,
 		AlertOctagon,
@@ -66,22 +67,150 @@
 		info: 'Info'
 	};
 
-	// The rail's panel opens over the Sidebar's own list column, beside the
-	// rail, so it never covers the chat or its composer. It narrows to that
-	// column, down to a readable floor, and keeps inside the window.
-	let railAnchor = $state({ left: 0, bottom: 8, width: 360 });
+	// The rail's panel floats beside the rail, its bottom level with the bell,
+	// at 300px: from x=64 its right edge lands at 364. The default list panel
+	// ends at x=319, so the panel overruns it by about 45px into the page. It
+	// never covers the rail and keeps inside the window.
+	const RAIL_PANEL_WIDTH = 300;
+	// Past this far over the page the panel always sits on content (the old
+	// rule, kept: a collapsed list panel always gets the scrim).
+	const CONTENT_GUTTER = 48;
+	// The panel's tallest height (its max-height), for the strip checked below.
+	const RAIL_PANEL_MAX_HEIGHT = 440;
+	let railAnchor = $state({ left: 0, bottom: 8, width: RAIL_PANEL_WIDTH, railRight: 0 });
+	// When the panel sits on page content (the list panel collapsed, or a chat
+	// whose transcript and composer start right of the list at 800-1000px), the
+	// dialog scrim dims the page so no sliced words read beside the card. Only
+	// a strip of blank page under it (a centred chat at 1440px) stays undimmed.
+	let coversPage = $state(false);
+
+	const CONTENT = 'button, a[href], input, textarea, select, img, svg, canvas, video, [role="button"], [contenteditable=""], [contenteditable="true"]';
+	function isContent(el: Element): boolean {
+		if (el.matches(CONTENT) || el.closest('svg')) return true;
+		for (const node of el.childNodes) if (node.nodeType === Node.TEXT_NODE && node.textContent?.trim()) return true;
+		return false;
+	}
+	/** Whether anything readable or usable lies under the page strip the panel will cover. */
+	function stripHasContent(fromX: number, toX: number, top: number, bottom: number): boolean {
+		if (typeof document.elementsFromPoint !== 'function') return true;
+		for (let x = fromX + 2; x < toX; x += 8) {
+			for (let y = top + 4; y < bottom; y += 12) {
+				// The topmost element under the point, ignoring this panel and its scrim.
+				const hit = document.elementsFromPoint(x, y).find((el) => !rootRef?.contains(el));
+				if (hit && isContent(hit)) return true;
+			}
+		}
+		return false;
+	}
+
+	/** The sidebar's list columns: the Chats column and a destination's own panel. */
+	function listColumns(): Element[] {
+		const plane = bellRef?.closest('aside')?.querySelector(':scope > .panel-plane');
+		return plane ? [...plane.querySelectorAll(':scope > .col')] : [];
+	}
+	/**
+	 * The right edge of the list the user actually sees. Measured from the shown
+	 * column, not the <aside>: when the window is narrow the list floats over the
+	 * page and the aside stays rail-wide, and when the list is collapsed only the
+	 * rail is left.
+	 */
+	function visibleListRight(railRight: number): number {
+		const columns = listColumns();
+		if (!columns.length) return bellRef?.closest('aside')?.getBoundingClientRect().right ?? railRight;
+		let right = railRight;
+		for (const col of columns) {
+			const r = col.getBoundingClientRect();
+			if (r.width > 0 && r.height > 0) right = Math.max(right, r.right);
+		}
+		return right;
+	}
+
 	function positionPanel() {
 		if (!rail || !bellRef) return;
 		const rect = bellRef.getBoundingClientRect();
-		const column = bellRef.closest('aside')?.querySelector('.panel-plane')?.getBoundingClientRect();
-		const start = column ? column.left : rect.right;
-		const room = column ? column.width - 16 : 360;
-		const width = Math.min(360, window.innerWidth - 16, Math.max(200, room));
-		railAnchor = {
-			left: Math.max(8, Math.min(start + 8, window.innerWidth - width - 8)),
-			bottom: Math.max(8, window.innerHeight - rect.bottom),
-			width
+		const railRight = bellRef.closest('nav.rail')?.getBoundingClientRect().right ?? rect.right;
+		const width = Math.min(RAIL_PANEL_WIDTH, window.innerWidth - 16);
+		const left = Math.max(8, Math.min(railRight + 8, window.innerWidth - width - 8));
+		const bottomGap = Math.max(8, window.innerHeight - rect.bottom);
+		const a = railAnchor;
+		if (a.left !== left || a.bottom !== bottomGap || a.width !== width || a.railRight !== railRight) {
+			railAnchor = { left, bottom: bottomGap, width, railRight };
+		}
+		const listRight = visibleListRight(railRight);
+		const right = left + width;
+		const bottom = window.innerHeight - bottomGap;
+		coversPage = right > listRight + CONTENT_GUTTER
+			|| (right > listRight && stripHasContent(listRight, right, Math.max(0, bottom - RAIL_PANEL_MAX_HEIGHT), bottom));
+	}
+
+	// While the rail panel is open, the list can change width or hide without a
+	// window resize (a width or collapse synced from another device), which moves
+	// the page under the panel. Watch the aside and each list column (a column
+	// that stops rendering reports a zero box) and re-measure, so the scrim never
+	// goes stale in either direction. Opening a destination (Ctrl+, for
+	// Settings) mounts a new column while the panel stays open, so also watch
+	// the plane's children and re-target the observer when the column set changes.
+	$effect(() => {
+		if (!rail || !showPanel || !bellRef) return;
+		const aside = bellRef.closest('aside');
+		if (!aside || typeof ResizeObserver === 'undefined') return;
+		const observer = new ResizeObserver(() => positionPanel());
+		const watch = () => {
+			observer.disconnect();
+			observer.observe(aside);
+			for (const col of listColumns()) observer.observe(col);
 		};
+		watch();
+		const plane = aside.querySelector(':scope > .panel-plane');
+		const columnsChanged =
+			plane && typeof MutationObserver !== 'undefined'
+				? new MutationObserver(() => {
+						watch();
+						positionPanel();
+					})
+				: null;
+		if (plane) columnsChanged?.observe(plane, { childList: true });
+		// The page under the panel can also fill in after it opens (a chat still
+		// loading when the bell is clicked), so the strip that was blank at open
+		// now holds the transcript or composer. Re-check the page on DOM changes
+		// outside this panel, at most once a frame, so the scrim follows it.
+		const body = aside.closest('.app-body') ?? document.body;
+		let frame = 0;
+		const pageChanged =
+			typeof MutationObserver !== 'undefined'
+				? new MutationObserver((records) => {
+						if (frame || records.every((r) => rootRef?.contains(r.target))) return;
+						frame = requestAnimationFrame(() => {
+							frame = 0;
+							positionPanel();
+						});
+					})
+				: null;
+		pageChanged?.observe(body, { childList: true, subtree: true, characterData: true });
+		return () => {
+			if (frame) cancelAnimationFrame(frame);
+			pageChanged?.disconnect();
+			columnsChanged?.disconnect();
+			observer.disconnect();
+		};
+	});
+
+	let panelRef = $state<HTMLDivElement | null>(null);
+	/**
+	 * Dismiss one row and keep keyboard focus in the panel: on the next row's
+	 * dismiss button, else the previous row's, else the (now empty) panel.
+	 */
+	async function dismissRow(id: string) {
+		const index = history.findIndex((n) => n.id === id);
+		const nextId = history[index + 1]?.id ?? history[index - 1]?.id;
+		notify.dismiss(id);
+		await tick();
+		if (!panelRef?.isConnected) return;
+		const row = nextId
+			? [...panelRef.querySelectorAll<HTMLElement>('.notif-item')].find((el) => el.dataset.notifId === nextId)
+			: undefined;
+		const target = row?.querySelector<HTMLButtonElement>('.item-dismiss');
+		(target ?? panelRef).focus();
 	}
 
 	function togglePanel() {
@@ -91,9 +220,23 @@
 		if (nowOpen && unread > 0) notify.markAllRead();
 	}
 
+	// The phone bar's bell hides once nothing is unread, and opening the panel
+	// marks everything read. Keep it while focus is on it or in its panel, so
+	// closing the history hands focus back to a real control (#1168).
+	let focusInside = $state(false);
+	function handleFocusOut(e: FocusEvent) {
+		if (!rootRef?.contains(e.relatedTarget as Node | null)) focusInside = false;
+	}
+
 	function handleClickOutside(e: MouseEvent) {
 		if (!showPanel) return;
-		if (rootRef && !rootRef.contains(e.target as Node)) closeDropdown(dropdownId);
+		if (rootRef && !rootRef.contains(e.target as Node)) {
+			// A click on empty page drops focus to <body>; give it back to the
+			// bell, which is still mounted until this close renders.
+			const focusDropped = !document.activeElement || document.activeElement === document.body;
+			closeDropdown(dropdownId);
+			if (bar && focusDropped) bellRef?.focus();
+		}
 	}
 
 	function handleKeydown(e: KeyboardEvent) {
@@ -136,8 +279,8 @@
 
 <svelte:window onclick={handleClickOutside} onkeydown={handleKeydown} onresize={positionPanel} />
 
-{#if !bar || unread > 0 || showPanel}
-<div class="notif-center" class:bar class:rail bind:this={rootRef} style:--notif-left={`${railAnchor.left}px`} style:--notif-bottom={`${railAnchor.bottom}px`} style:--notif-width={`${railAnchor.width}px`}>
+{#if !bar || unread > 0 || showPanel || focusInside}
+<div class="notif-center" class:bar class:rail bind:this={rootRef} onfocusin={() => { focusInside = true; }} onfocusout={handleFocusOut} style:--notif-left={`${railAnchor.left}px`} style:--notif-bottom={`${railAnchor.bottom}px`} style:--notif-width={`${railAnchor.width}px`} style:--notif-rail-right={`${railAnchor.railRight}px`}>
 	<button
 		bind:this={bellRef}
 		class="notif-btn"
@@ -156,7 +299,11 @@
 	</button>
 
 	{#if showPanel}
-		<div class="notif-panel" role="dialog" aria-label="Notifications">
+		{#if rail && coversPage}
+			<!-- Dims the page the panel sits on; a click here closes like any outside click. -->
+			<button type="button" class="notif-scrim" tabindex="-1" aria-label="Close notifications" data-testid="notif-scrim" onclick={() => closeDropdown(dropdownId)}></button>
+		{/if}
+		<div class="notif-panel" role="dialog" aria-label="Notifications" tabindex="-1" bind:this={panelRef}>
 			<div class="panel-head">
 				<span class="panel-title">Notifications</span>
 				<div class="panel-head-actions">
@@ -166,7 +313,7 @@
 								<Check size={13} strokeWidth={1.75} /> Mark read
 							</button>
 						{/if}
-						<button class="head-action danger" onclick={() => notify.clearAll()} title="Clear all">
+						<button class="head-action danger" onclick={async () => { notify.clearAll(); await tick(); panelRef?.focus(); }} title="Clear all">
 							<Trash2 size={13} strokeWidth={1.75} /> Clear
 						</button>
 					{/if}
@@ -182,12 +329,12 @@
 				{:else}
 					{#each history as n (n.id)}
 						{@const Icon = ICONS[n.severity]}
-						<div class="notif-item sev-{n.severity}" class:unread={!n.read}>
+						<div class="notif-item sev-{n.severity}" class:unread={!n.read} data-notif-id={n.id}>
 							<button type="button" class="item-main" onclick={() => onItemClick(n)}>
 								<span class="item-icon" role="img" aria-label={SEVERITY_LABELS[n.severity]}><Icon size={15} strokeWidth={1.75} aria-hidden="true" /></span>
 								<span class="item-body">
-									{#if n.title}<span class="item-title">{n.title}</span>{/if}
-									<span class="item-message">{n.message}</span>
+									{#if n.title}<span class="item-title" title={n.title}>{n.title}</span>{/if}
+									<span class="item-message" title={n.message}>{n.message}</span>
 									<span class="item-time">{relativeTime(n.created_at)}</span>
 								</span>
 							</button>
@@ -211,7 +358,7 @@
 								class="item-dismiss"
 								onclick={(e) => {
 									e.stopPropagation();
-									notify.dismiss(n.id);
+									void dismissRow(n.id);
 								}}
 								aria-label="Dismiss notification"
 								title="Dismiss"
@@ -243,6 +390,21 @@
 		width: var(--notif-width);
 		max-height: min(440px, calc(100dvh - var(--notif-bottom) - var(--titlebar-height, 0px) - 8px));
 	}
+	/* The shared modal overlay at full strength, from the rail's edge: the rail
+	   stays lit, and the page under the card dims as far as under a dialog, so
+	   its cut-off words no longer read beside the card. */
+	.notif-scrim {
+		position: fixed;
+		inset: var(--titlebar-height, 0px) 0 0 var(--notif-rail-right);
+		z-index: 99;
+		padding: 0;
+		border: 0;
+		cursor: default;
+		background: var(--modal-overlay);
+		backdrop-filter: blur(var(--modal-blur, 2px));
+		animation: notif-scrim-in 120ms ease-out;
+	}
+	@keyframes notif-scrim-in { from { opacity: 0; } }
 
 	/* Phone top bar: a 44x48 target, a 16px bell and the one 16px count. */
 	.notif-center.bar .notif-btn { width: 44px; height: 48px; border-radius: 8px; opacity: 1; }
@@ -355,6 +517,9 @@
 		animation: notif-in 120ms cubic-bezier(0.16, 1, 0.3, 1);
 		container-type: inline-size;
 	}
+	/* Focus rests on the dialog itself once its last row is dismissed: the
+	   card is the focused thing, so no ring is drawn around it. */
+	.notif-panel:focus { outline: none; }
 
 	@keyframes notif-in {
 		from { opacity: 0; transform: translateY(-4px); }
@@ -383,12 +548,14 @@
 		gap: 4px;
 	}
 
+	/* Ghost buttons, 28px tall with 13px text. */
 	.head-action {
 		display: inline-flex;
 		align-items: center;
 		gap: 4px;
-		padding: 4px 7px;
-		font-size: 0.6875rem;
+		height: 28px;
+		padding: 0 8px;
+		font-size: 13px;
 		font-weight: 500;
 		color: var(--muted-foreground);
 		background: transparent;
@@ -514,10 +681,34 @@
 		word-break: break-word;
 	}
 
+	/* Desktop popover: a title on one line and a body on two; the full text
+	   stays in the row's tooltip and for screen readers. The phone panel keeps full text. */
+	/* Desktop popovers wear the one menu surface the model picker uses; the phone panel keeps its own. */
+	.notif-center:not(.bar) .notif-panel {
+		background: var(--popover);
+		border-color: var(--menu-border);
+		border-radius: var(--menu-radius);
+		box-shadow: var(--menu-shadow);
+	}
+	.notif-center:not(.bar) .item-title {
+		font-size: 13px;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	.notif-center:not(.bar) .item-message {
+		font-size: 13px;
+		display: -webkit-box;
+		-webkit-box-orient: vertical;
+		-webkit-line-clamp: 2;
+		line-clamp: 2;
+		overflow: hidden;
+	}
+
 	.item-time {
-		font-size: 0.6875rem;
+		font-size: 12px;
 		font-weight: 400;
-		color: var(--subtle-foreground);
+		color: var(--muted-foreground);
 		margin-top: 1px;
 	}
 
@@ -531,8 +722,8 @@
 		max-width: 9.5rem;
 	}
 
-	/* A narrow panel (the rail's, in a slim Sidebar) moves the actions onto
-	   their own line under the message, so the message keeps the row's width. */
+	/* A narrow panel, and always the rail's 300px popover, moves the actions
+	   onto their own line under the message, so the message keeps the row's width. */
 	@container (max-width: 320px) {
 		.notif-item { flex-wrap: wrap; }
 		.item-main { order: 1; }
@@ -545,6 +736,17 @@
 			max-width: none;
 			padding-left: 24px;
 		}
+	}
+	.notif-center.rail .notif-item { flex-wrap: wrap; }
+	.notif-center.rail .item-main { order: 1; }
+	.notif-center.rail .item-dismiss { order: 2; }
+	.notif-center.rail .item-actions {
+		order: 3;
+		flex: 1 0 100%;
+		flex-direction: row;
+		flex-wrap: wrap;
+		max-width: none;
+		padding-left: 24px;
 	}
 
 	.item-action {
@@ -616,7 +818,8 @@
 		.notif-btn {
 			transition: none;
 		}
-		.notif-panel {
+		.notif-panel,
+		.notif-scrim {
 			animation: none;
 		}
 	}

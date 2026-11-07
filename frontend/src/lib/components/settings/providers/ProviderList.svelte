@@ -51,7 +51,7 @@
 	/* The card's text edge (17px from its outside, 16px on the phone), then the
 	   glyph column. Accounts have no glyph, so they start on that edge. */
 	.pl {
-		--pv-glyph: 16px;
+		--pv-glyph: 28px;
 		--pv-glyph-gap: 10px;
 		--pv-row-inset: 16px;
 	}

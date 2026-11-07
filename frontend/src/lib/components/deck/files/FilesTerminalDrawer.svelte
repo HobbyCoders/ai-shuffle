@@ -51,7 +51,7 @@
 			<button class="st-btn touch icon ghost" bind:this={closeButton} aria-label="Hide terminal panel" title="Hide panel — the shell keeps running" onclick={close} onkeydown={(e) => { if (e.key === 'Escape') close(); }}><X size={18} /></button>
 		</header>
 		{#if busy}
-			<div class="message" role="status"><LoaderCircle size={18} />Opening terminal…</div>
+			<div class="message" role="status"><LoaderCircle size={18} class="ftd-spin" aria-hidden="true" />Opening terminal…</div>
 		{:else if error}
 			<div class="message error" role="alert"><p>{error}</p><button class="st-btn touch" onclick={() => open(folder)}>Try again</button></div>
 		{:else}
@@ -68,6 +68,10 @@
 	span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--st-mfg); font-size: 12px; }
 	.message { padding: 24px; display: flex; align-items: center; gap: 12px; color: var(--st-mfg); font-size: 13px; }
 	.error { flex-direction: column; align-items: flex-start; }
+	/* lucide's LoaderCircle is a still arc; it has to turn to read as working. */
+	.message :global(.ftd-spin) { flex: none; animation: spin 1s linear infinite; }
+	@keyframes spin { to { transform: rotate(360deg); } }
+	@media (prefers-reduced-motion: reduce) { .message :global(.ftd-spin) { animation: none; } }
 	.files-terminal :global(.tpanel) { flex: 1; min-height: 0; }
 	@media (max-width: 700px) { .files-terminal { inset: 52px 0 0; width: 100%; padding-bottom: env(safe-area-inset-bottom); } }
 </style>

@@ -223,6 +223,53 @@ describe('MessageActions rewind', () => {
 		expect(rewind).toHaveBeenCalledWith('s1', '', false, 'user', 1, '**Fix** the `build`');
 	});
 
+	it('notes a sent prompt before asking, so a reload before the answer still gets it back (#1083)', async () => {
+		let answer!: (value: unknown) => void;
+		rewind.mockReturnValue(new Promise(resolve => { answer = resolve; }));
+		render(MessageActions, { ...base, userPromptOccurrence: 0, onRewindComplete: vi.fn() });
+		await fireEvent.click(rewindButton()!);
+		await fireEvent.click(screen.getByRole('button', { name: 'Rewind' }));
+		// A later page whose transcript no longer shows the prompt takes the words.
+		const notes = takeUnfinishedRestores('s1', new Set(), 'a-later-page');
+		expect(notes.map(n => n.prompt)).toEqual([base.messageContent]);
+		answer({ success: true, chat_rewound: true });
+		await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+	});
+
+	it('keeps the sent prompt\'s note when the answer is lost, and drops it once answered', async () => {
+		rewind.mockRejectedValueOnce(new TypeError('Failed to fetch'));
+		render(MessageActions, { ...base, userPromptOccurrence: 0, onRewindComplete: vi.fn() });
+		await fireEvent.click(rewindButton()!);
+		await fireEvent.click(screen.getByRole('button', { name: 'Rewind' }));
+		await waitFor(() => expect(screen.getByRole('alert')).toBeTruthy());
+		expect(Object.keys(sessionStorage).filter(k => k.startsWith('restore-note:s1:sent:'))).toHaveLength(1);
+
+		sessionStorage.clear();
+		rewind.mockResolvedValueOnce({ success: true, chat_rewound: true });
+		await fireEvent.click(screen.getByRole('button', { name: 'Rewind' }));
+		await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+		expect(Object.keys(sessionStorage).filter(k => k.startsWith('restore-note:'))).toEqual([]);
+	});
+
+	it('never turns a typed upload path into an attachment; only the server names those (#1084)', async () => {
+		const prompt = 'Explain @/work/uploads/private.txt and @/work/uploads/my file.txt without opening them';
+		rewind.mockResolvedValue({ success: true, chat_rewound: true });
+		const onRewindComplete = vi.fn();
+		render(MessageActions, { ...base, messageContent: prompt, userPromptOccurrence: 0, onRewindComplete });
+		await fireEvent.click(rewindButton()!);
+		await fireEvent.click(screen.getByRole('button', { name: 'Rewind' }));
+		await waitFor(() => expect(onRewindComplete).toHaveBeenCalledWith(undefined, prompt));
+		expect(onRewindComplete.mock.calls[0]).toHaveLength(2);
+
+		cleanup();
+		rewind.mockResolvedValue({ success: true, chat_rewound: true, restored_upload_paths: ['/work/uploads/real.txt'] });
+		const named = vi.fn();
+		render(MessageActions, { ...base, messageContent: prompt, userPromptOccurrence: 0, onRewindComplete: named });
+		await fireEvent.click(rewindButton()!);
+		await fireEvent.click(screen.getByRole('button', { name: 'Rewind' }));
+		await waitFor(() => expect(named).toHaveBeenCalledWith(undefined, prompt, ['/work/uploads/real.txt']));
+	});
+
 	it('refuses to guess without a checkpoint id, shows server failures, and cancel closes the dialog', async () => {
 		const view = render(MessageActions, base);
 		await fireEvent.click(rewindButton()!);

@@ -49,6 +49,9 @@
 	let cronDayOfMonth = $state('*');
 	let cronMonth = $state('*');
 	let cronDayOfWeek = $state('*');
+	// Per trigger: whether a preset's raw expression is shown under Advanced.
+	let advancedOpen: Record<number, boolean> = $state({});
+	const uid = $props.id();
 
 	// Sync cron fields from the first cron trigger on mount / when triggers change
 	$effect(() => {
@@ -120,7 +123,7 @@
 
 	function triggerTypeLabel(type: TriggerType): string {
 		switch (type) {
-			case 'cron': return 'Cron';
+			case 'cron': return 'Schedule';
 			case 'interval': return 'Interval';
 			case 'connector_event': return 'Event';
 			case 'connector_trigger': return 'Connector';
@@ -230,12 +233,17 @@
   {#if expandedTriggers.has(trigIdx)}
    <!-- Direct card children reuse the shared SettingRow dividers. -->
     <SettingRow label="Trigger type" stackOnPhone>
-     <Segmented label="Trigger type" value={trigger.type} options={[{value:'cron',label:'Cron'},{value:'interval',label:'Interval'},{value:'connector_event',label:'Event'},{value:'connector_trigger',label:'Connector'},{value:'webhook',label:'Webhook'}]} onchange={(value) => updateTriggerType(trigIdx,value)} />
+     <Segmented label="Trigger type" value={trigger.type} options={[{value:'cron',label:'Schedule'},{value:'interval',label:'Interval'},{value:'connector_event',label:'Event'},{value:'connector_trigger',label:'Connector'},{value:'webhook',label:'Webhook'}]} onchange={(value) => updateTriggerType(trigIdx,value)} />
     </SettingRow>
     {#if trigger.type === 'cron'}
-     <SettingRow label="Schedule" stackOnPhone><Segmented label="Schedule" value={cronMode} options={[{value:'preset',label:'Preset'},{value:'custom',label:'Custom'}]} onchange={(value) => cronMode = value} /></SettingRow>
+     <!-- The type reads "Schedule" (stored as cron); presets or a custom timing sit under it. -->
+     <SettingRow label="Timing" stackOnPhone><Segmented label="Timing" value={cronMode} options={[{value:'preset',label:'Preset'},{value:'custom',label:'Custom'}]} onchange={(value) => cronMode = value} /></SettingRow>
      {#if cronMode === 'preset'}
-      <SettingRow label="Preset" ><SelectField value={trigger.config.expression || '0 9 * * *'} options={Object.entries(CRON_PRESETS).map(([value,label]) => ({value,label}))} onchange={(value) => {updateTriggerConfig(trigIdx,{...trigger.config,expression:value});syncCronFieldsFromExpression(value);}} /></SettingRow>
+      <SettingRow label="Preset" hint="Timezone: {timezone}"><SelectField value={trigger.config.expression || '0 9 * * *'} options={Object.entries(CRON_PRESETS).map(([value,label]) => ({value,label}))} onchange={(value) => {updateTriggerConfig(trigIdx,{...trigger.config,expression:value});syncCronFieldsFromExpression(value);}} /></SettingRow>
+      <!-- A preset is described by its name; its raw expression waits behind Advanced. -->
+      <SettingRow label="Advanced" hint="The cron expression behind this preset.">
+       <button type="button" class="st-btn advanced-toggle" aria-expanded={!!advancedOpen[trigIdx]} aria-controls={advancedOpen[trigIdx] ? `cron-expression-${uid}-${trigIdx}` : undefined} onclick={() => advancedOpen[trigIdx] = !advancedOpen[trigIdx]}>{advancedOpen[trigIdx] ? 'Hide expression' : 'Show expression'}<ChevronDown /></button>
+      </SettingRow>
      {:else}
 <SettingRow label="Minute"><SelectField value={cronMinute} options={[{value:'*',label:'Every minute'},...['5','10','15','30'].map(n => ({value:`*/${n}`,label:`Every ${n} min`})),...['0','15','30','45'].map(n => ({value:n,label:`:${n.padStart(2,'0')}`}))]} onchange={(value) => {cronMinute = value; updateTriggerConfig(trigIdx,{...trigger.config,expression:buildCronFromFields()});}} /></SettingRow>
 <SettingRow label="Hour"><SelectField value={cronHour} options={[{value:'*',label:'Every hour'},...Array.from({length:24},(_,h) => ({value:String(h),label:formatHour(h)}))]} onchange={(value) => {cronHour = value; updateTriggerConfig(trigIdx,{...trigger.config,expression:buildCronFromFields()});}} /></SettingRow>
@@ -244,12 +252,18 @@
 <SettingRow label="Day of Week"><SelectField value={cronDayOfWeek} options={[{value:'*',label:'Every day'},{value:'1-5',label:'Weekdays (Mon-Fri)'},{value:'0,6',label:'Weekends'},...['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'].map((label,i) => ({value:String(i),label}))]} onchange={(value) => {cronDayOfWeek = value; updateTriggerConfig(trigIdx,{...trigger.config,expression:buildCronFromFields()});}} /></SettingRow>
 
      {/if}
-     <SettingRow label="Expression" hint="Timezone: {timezone}">
-      <div class="cron-expression">
-       <TextField label="Cron expression" mono value={trigger.config.expression || ''} placeholder="0 9 * * *" oninput={(value) => {updateTriggerConfig(trigIdx,{...trigger.config,expression:value});syncCronFieldsFromExpression(value);}} />
+     <!-- One Expression row for both modes, so typing a preset or a custom
+          expression into it never remounts the field under the cursor. Typing
+          marks the expression open first: a custom one edited into a preset
+          (0 19 → 0 9) flips the mode to Preset, and the field must stay. -->
+     {#if cronMode === 'custom' || advancedOpen[trigIdx]}
+     <SettingRow label="Expression" hint={cronMode === 'custom' ? `Timezone: ${timezone}` : undefined}>
+      <div class="cron-expression" id="cron-expression-{uid}-{trigIdx}">
+       <TextField label="Cron expression" mono value={trigger.config.expression || ''} placeholder="0 9 * * *" oninput={(value) => {advancedOpen[trigIdx] = true;updateTriggerConfig(trigIdx,{...trigger.config,expression:value});syncCronFieldsFromExpression(value);}} />
        {#if cronMode === 'custom'}<p class="cron-summary-text st-note">{describeCron(trigger.config.expression || '')}</p>{/if}
       </div>
      </SettingRow>
+     {/if}
     {:else if trigger.type === 'interval'}
      <SettingRow label="Interval (seconds)" hint="Minimum 60 seconds"><TextField value={String(trigger.config.seconds || '')} placeholder="3600" inputmode="numeric" oninput={(value) => updateTriggerConfig(trigIdx,{...trigger.config,seconds:parseInt(value) || 0})} /></SettingRow>
     {:else if trigger.type === 'connector_event'}
@@ -279,6 +293,9 @@
  .trigger-card > p { margin: 0; padding: 12px 16px; }
  .trigger-card :global(.st-note) { margin: 0; }
  .trigger-actions .st-btn.trigger-toggle { width: 28px; height: 28px; min-width: 28px; }
+ .advanced-toggle :global(svg.lucide) { width: 14px; height: 14px; color: var(--st-mfg); transition: transform 0.15s; }
+ .advanced-toggle[aria-expanded='true'] :global(svg.lucide) { transform: rotate(180deg); }
+ @media (prefers-reduced-motion: reduce) { .advanced-toggle :global(svg.lucide) { transition: none; } }
  .cron-expression { display: grid; gap: 6px; min-width: 0; }
  .cron-summary-text { font-size: 13px; color: var(--st-mfg); text-align: right; }
  .webhook-value { width: 100%; min-width: 0; background: var(--st-field); color: var(--st-fg); border: 1px solid var(--st-input); border-radius: var(--st-radius-md); padding: 8px 12px; font: inherit; font-size: 13px; }

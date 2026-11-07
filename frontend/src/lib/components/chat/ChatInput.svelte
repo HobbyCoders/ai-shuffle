@@ -36,11 +36,14 @@
 	import { persistVoiceContext, voiceContextFor } from '$lib/services/voiceExecutionContext';
 	import { attachComposerDictation, detachComposerDictation, startComposerDictation } from '$lib/services/composerDictation';
 	import { flushPendingDraft, holdPendingDraft, readDraft, releasePendingDraft, writeDraft } from '$lib/stores/session/draft-persistence';
-	import { takeUnfinishedRestores } from '$lib/stores/session/restored-draft';
+	import { sentRowIdsOnScreen, takeUnfinishedRestores } from '$lib/stores/session/restored-draft';
+	import { trackSend } from '$lib/stores/session/message-sender';
+	import { dropPendingSend, notePendingSend, takePendingSends } from '$lib/stores/session/pending-send-note';
 	import { promptStash } from '$lib/stores/session/prompt-stash';
 	import { promptHistory, createPromptRecall } from '$lib/stores/session/prompt-recall';
 	import { pastedTextFile } from './tiptap/large-paste';
 	import { joinDrafts, restoreMessageDocument } from './tiptap/serialization';
+	import { captureDestination, keepUnsentDraft, movedAwayFrom, noteLeftDraft, putBackUnsent, retirePutBack, SEND_MOVED_MESSAGE, stillAtDestination, type SendDestination } from './send-destination';
 	import { composerInsert, completeComposerInsert } from '$lib/stores/composer-insert';
 	import PromptStashMenu from './PromptStashMenu.svelte';
 	import { sessionOwnerEpoch } from '$lib/stores/session-owner';
@@ -195,6 +198,10 @@
 	// Flag to prevent onDestroy from overwriting draft after we've already cleared it.
 	// Using plain variable (not $state) to avoid reactivity issues with onDestroy capture.
 	let messageSent = false;
+	// The navigation count when this composer last sent from New chat, or null
+	// when its last send was to an existing chat: the session that send creates
+	// is adopted by New chat, which is not leaving it (switch effect below).
+	let newChatSendNavigation: number | null = null;
 	// A new chat's remembered project and branch resolve against the project
 	// catalog. A send before it answers is held with the text in place (#1636).
 	let heldForCatalog = $state(false);
@@ -441,11 +448,26 @@
 		if (newSessionId !== prevSessionId) {
 			// Move capture off the shared editor before replacing its document.
 			detachComposerDictation(editorRef?.getEditor());
+			// A send still waiting for the chat being left keeps this, the newest
+			// text, if it is called off (send-destination.ts).
+			if (editorRef) noteLeftDraft(prevSessionId, getDraftJSON());
 			// Persist the LEAVING session's draft from the live editor before we
 			// overwrite it. Reading the editor directly (not the debounced store
 			// draft) guarantees the text follows the session it was typed in,
 			// even when the switch happens within the debounce window.
-			if (!messageSent && editorRef) {
+			// One rule, before and after a send alike: what the user leaves in the
+			// composer, empty included, is the leaving chat's draft. Send cleared
+			// the editor at once, so it can only hold what was typed or deleted
+			// since. A send held for this chat puts its words back in front of
+			// this draft later (send-destination.ts), so nothing here overwrites
+			// that. The one exception is New chat taking the id its own send
+			// created, with no navigation since: that is not a leave, and the send
+			// has already emptied the New chat slot. New chat and every chat
+			// switch move the navigation count on, so leaving New chat for another
+			// chat is always saved, whatever was sent elsewhere (PR #1212 review
+			// S2, S4, S5).
+			const adoptingOwnSend = prevSessionId === null && newChatSendNavigation === getInitGeneration();
+			if (editorRef && !adoptingOwnSend) {
 				const leavingDraft = getDraftJSON();
 				activeSession.saveDraftForSession(prevSessionId, leavingDraft);
 				// Keep the persisted mirror aligned with the ephemeral cache so the
@@ -498,9 +520,20 @@
 		const { sessionId, messages, isLoadingSession, isRestoringSession, error, wsReconnectRequired, historyStall } = $activeSession;
 		if (sessionId === unfinishedRestoresCheckedFor) return;
 		unfinishedRestoresCheckedFor = null;
-		if (!sessionId || !ownsComposer() || isLoadingSession || isRestoringSession || error || wsReconnectRequired || historyStall) return;
+		if (!sessionId || !editorRef || !ownsComposer() || isLoadingSession || isRestoringSession || error || wsReconnectRequired || historyStall) return;
 		unfinishedRestoresCheckedFor = sessionId;
-		const onScreen = new Set(messages.map((m) => m.metadata?.not_sent_id).filter((id): id is string => typeof id === 'string'));
+		// Not-sent rows by their id; sent prompts by text and occurrence (#1083).
+		const onScreen = new Set([
+			...messages.map((m) => m.metadata?.not_sent_id).filter((id): id is string => typeof id === 'string'),
+			...sentRowIdsOnScreen(messages),
+		]);
+		// A send still waiting for the cold-cache check when the page went away
+		// (pending-send-note.ts) comes back in front of the chat's draft.
+		const pending = takePendingSends(sessionId);
+		if (hasComposerDraft(pending)) {
+			const current = getDraftJSON();
+			setComposerDraft(hasComposerDraft(current) ? joinDrafts(pending, current) : pending);
+		}
 		const notes = takeUnfinishedRestores(sessionId, onScreen);
 		if (notes.length === 0) return;
 		activeSession.setPendingRestorePrompt(notes.map((n) => n.prompt).filter(Boolean).join('\n\n'), notes.flatMap((n) => n.uploadPaths));
@@ -673,9 +706,12 @@
 	// while there is nothing to send and a call can start here, and Send once
 	// there is. Stop follows it while work runs (composer-wrap.ts).
 	let callAvailable = $state(false);
+	// Sends that still hold the Send circle's seat (holdSendCircle).
+	let sendCircleHolds = $state(0);
 	const circles = $derived(composerCircles({
 		callAvailable,
-		hasContent: hasMessageContent,
+		// A send just went from here: Send keeps its seat (holdSendCircle).
+		hasContent: hasMessageContent || sendCircleHolds > 0,
 		working: stoppableWork,
 		busy: $activeSession.isCreatingWorktree || heldForCatalog || heldForSetup
 	}));
@@ -967,8 +1003,10 @@
 			const slashContent = inputValue.slice(1);
 			const spaceIndex = slashContent.indexOf(' ');
 			// Dismiss once user types text after a space (they've moved past command selection)
-			// e.g., "/compact " still shows (trailing space only), but "/compact arg" dismisses
-			showCommandAutocomplete = spaceIndex === -1 || slashContent.slice(spaceIndex + 1).trim().length === 0;
+			// e.g., "/compact " still shows (trailing space only), but "/compact arg" dismisses.
+			// A new line (Shift+Enter) also moves past the command.
+			showCommandAutocomplete = !/[\r\n]/.test(slashContent) &&
+				(spaceIndex === -1 || slashContent.slice(spaceIndex + 1).trim().length === 0);
 		} else {
 			showCommandAutocomplete = false;
 		}
@@ -979,8 +1017,9 @@
 			const atInfo = extractAtMentionQuery(plainTextValue);
 			if (atInfo) {
 				const query = atInfo.query;
-				if (query.length > 0 && /^\s/.test(query)) {
-					// @ followed immediately by whitespace → not a mention
+				if ((query.length > 0 && /^\s/.test(query)) || /[\r\n]/.test(query)) {
+					// @ followed immediately by whitespace → not a mention; a new line
+					// (Shift+Enter) ends the mention too
 					showFileAutocomplete = false;
 				} else if (!query.includes('/') && query.includes(' ')) {
 					// Root level query contains a space → only keep open if user is typing
@@ -1016,18 +1055,44 @@
 	// Held until the composer is cleared, so a new message may go at once.
 	let submitPending = false;
 
+	// Send clears the composer at the click, and an empty composer offers Talk
+	// in Send's place. The Send circle keeps the slot through a double click's
+	// window, and until the send has passed its checks, so the second click of
+	// a double click on Send cannot start a call.
+	const DOUBLE_ACTIVATION_MS = 500;
+	function holdSendCircle(): () => void {
+		sendCircleHolds += 1;
+		let windowOver = false;
+		let sendSettled = false;
+		let held = true;
+		const end = () => {
+			if (!held || !windowOver || !sendSettled) return;
+			held = false;
+			sendCircleHolds -= 1;
+		};
+		setTimeout(() => { windowOver = true; end(); }, DOUBLE_ACTIVATION_MS);
+		return () => { sendSettled = true; end(); };
+	}
+
 	async function handleSubmit(compactBeforeSend = false) {
 		if (submitPending) return;
 		submitPending = true;
+		const releaseSendCircle = holdSendCircle();
 		try {
-			await submitComposer(compactBeforeSend, () => { submitPending = false; });
+			await submitComposer(compactBeforeSend, () => { submitPending = false; releaseSendCircle(); });
 		} finally {
 			submitPending = false;
+			releaseSendCircle();
 		}
 	}
 
 	async function submitComposer(compactBeforeSend: boolean, composerCleared: () => void) {
 		if (!ownsComposer() || heldForCatalog || heldForSetup || (compacting && !compactBeforeSend)) return;
+		// The chat this message was typed in. The checks below and the store's
+		// restore wait can await; a New chat or chat switch in that window must
+		// not carry the message into the view the user moved to (#1077).
+		const destination = captureDestination(composerPlace());
+		const typedDraft = getDraftJSON();
 		if (projectLane !== 'chat' && !catalogHoldWaived && activeSession.composerAwaitingProjectCatalog) {
 			if (!(await holdForProjectCatalog())) return;
 		}
@@ -1062,9 +1127,18 @@
 			return;
 		}
 
-		// A large chat with a cold provider cache: ask first (#1831).
+		// A large chat with a cold provider cache: ask first (#1831). The check
+		// runs after Send has cleared the composer, so the composer collapses at
+		// the click rather than when the answer lands, which shifted the
+		// transcript on a slow send (#933). A held send puts the text back.
 		const sendingTo = $activeSession.sessionId;
-		if (!compactBeforeSend && sendingTo && !$activeSession.isStreaming && (await coldSendBlocks(sendingTo))) return;
+		const coldCheck = !compactBeforeSend && sendingTo && !$activeSession.isStreaming
+			? async () => {
+				const blocked = await coldSendBlocks(sendingTo);
+				// The view moved during the check: the text stays with its chat.
+				return !blocked && ownsComposer() && stillAtDestination(destination, composerPlace());
+			}
+			: undefined;
 
 		// Append any legacy uploaded files (from file upload button) to the end
 		// Note: Files added via @ autocomplete are now inline chips, not in uploadedFiles
@@ -1074,11 +1148,21 @@
 			messageToSend = [finalPrompt.trim(), fileRefs].filter(Boolean).join('\n\n');
 		}
 
+		// The view moved on while a check awaited: keep the words as that chat's
+		// draft, unsent, and say so, instead of sending them to the new view.
+		if (!ownsComposer()) return;
+		if (!stillAtDestination(destination, composerPlace())) {
+			// Still on that chat (it was reopened): the words are in front of
+			// the user, edits included, so only say why nothing went out.
+			if (movedAwayFrom(destination, composerPlace())) keepUnsentDraft(destination, typedDraft, false);
+			else refuseSend(SEND_MOVED_MESSAGE, 'warning');
+			return;
+		}
+
 		// Send the message, optionally queued behind a server-owned compaction.
-		// sendMessage clears the composer before its first await.
-		const sending = sendMessage(messageToSend, compactBeforeSend);
-		composerCleared();
-		await sending;
+		// sendMessage clears the composer before its first await, and holds the
+		// next send until the cold check has answered so two sends keep order.
+		await sendMessage(messageToSend, destination, compactBeforeSend, coldCheck, composerCleared);
 	}
 
 	/**
@@ -1123,7 +1207,18 @@
 	// turn still goes out, and the backend decides when the model sees it (mid-turn
 	// steer, or the start of the next turn). Until then it renders as a pending
 	// bubble at the tail of the transcript.
-	async function sendMessage(finalPrompt: string, compactBeforeSend = false) {
+	/** Where this composer is now, for the send-destination checks. */
+	function composerPlace() {
+		return { sessionId: get(activeSession).sessionId, editorOwner: prevSessionId };
+	}
+
+	async function sendMessage(
+		finalPrompt: string,
+		destination: SendDestination,
+		compactBeforeSend = false,
+		mayGo?: () => Promise<boolean>,
+		released?: () => void
+	) {
 		if (!ownsComposer()) return;
 		// Enforce the same capability as the hidden worktree checkbox, even if
 		// remembered intent changes before the context bar's effect has flushed.
@@ -1138,6 +1233,7 @@
 		// Mark that we're sending - prevents onDestroy from overwriting the cleared draft
 		// This is critical for the first message when the component gets destroyed/recreated
 		messageSent = true;
+		newChatSendNavigation = destination.chat === null ? destination.navigation : null;
 
 		// Collect the staged upload paths this message references, BEFORE the
 		// composer state is cleared below. Two consumers, both server-side:
@@ -1159,7 +1255,6 @@
 		// Snapshot state needed to restore the input on failure. Capturing BEFORE
 		// clearing means a failed interrupt / dropped WS doesn't lose the user's
 		// typed prompt or uploaded attachments — we repopulate the editor.
-		const sendingSessionId = $activeSession.sessionId;
 		const sendingNavigation = getInitGeneration();
 		// A refusal names its reason by setting the error or worktree banner. One
 		// already showing from an earlier attempt is not that reason, so watch
@@ -1173,6 +1268,11 @@
 		const priorDraftJSON = getDraftJSON();
 		const priorInputValue = inputValue;
 		const priorUploadedFiles = uploadedFiles;
+		// The draft is cleared below, before the cold-cache check lets the
+		// message go: a reload in that wait finds the words here (S3).
+		const pendingNote = mayGo
+			? notePendingSend(destination.chat, priorDraftJSON, priorUploadedFiles.map((f) => f.full_path).filter(Boolean))
+			: null;
 
 		inputValue = '';
 		// Clearing text and its wrapped layout are one render, not a later rAF.
@@ -1180,22 +1280,29 @@
 		uploadedFiles = [];
 		recall.reset();
 
-		// Clear editor content
+		// Clear editor content. Words an earlier refused send put back go out
+		// with this one.
 		editorRef?.clear();
+		retirePutBack(destination.chat);
 
 		// Clear draft immediately (not debounced) - important because
 		// the component may be destroyed/recreated when isEmptyState changes
 		saveDraftImmediately('');
 
-		const restoreOnFailure = () => {
-			if (!ownsComposer()) return;
+		// `held`: the send was held back before it went out (the cold-cache
+		// notice says why), so the text comes back without a refusal toast.
+		const restoreOnFailure = (held = false) => {
 			// A move to another view hands the text to the session it was typed
-			// in. A New Chat adopting the session its own create made (a worktree
-			// session whose first message was then refused) is still this view
-			// (#1636).
-			const adoptedOwnSession = sendingSessionId === null && getInitGeneration() === sendingNavigation;
-			if ($activeSession.sessionId !== sendingSessionId && !adoptedOwnSession) {
-				writeDraft(sendingSessionId, priorDraftJSON);
+			// in, with whatever was typed after it, and says so. A New Chat
+			// adopting the session its own create made (a worktree session whose
+			// first message was then refused) is still this view (#1636).
+			// An account change or log-out retired this composer and cleared
+			// every draft; nothing of the old account's words comes back, held
+			// or not (PR #1212 review S1).
+			if (!ownsComposer()) return;
+			if (movedAwayFrom(destination, composerPlace())) {
+				if (held) messageSent = false;
+				keepUnsentDraft(destination, priorDraftJSON, true);
 				return;
 			}
 			// Every refusal names its reason in the session's error or worktree
@@ -1203,12 +1310,16 @@
 			// earlier attempt's banner standing.
 			const now = get(activeSession);
 			if (!(now.error && reasonSet.error) && !(now.worktreeError && reasonSet.worktreeError)) {
-				refuseSend('Message not sent. Try again.', 'warning');
+				// Left and reopened this chat while the send waited: it was called off.
+				// A send held by the cold-cache check is otherwise named by its notice.
+				const calledOff = !stillAtDestination(destination, composerPlace(), { adoptedOwnChat: true });
+				if (calledOff) refuseSend(SEND_MOVED_MESSAGE, 'warning');
+				else if (!held) refuseSend('Message not sent. Try again.', 'warning');
 			}
 			// A slow create can fail after the user started a new message: put
 			// the refused one back in front of it instead of replacing it.
-			const laterDraft = getDraftJSON();
-			const restored = hasComposerDraft(laterDraft) ? joinDrafts(priorDraftJSON, laterDraft) : priorDraftJSON;
+			// Several refused sends come back in the order they were sent.
+			const restored = putBackUnsent(destination, priorDraftJSON, getDraftJSON());
 			uploadedFiles = [...priorUploadedFiles, ...uploadedFiles];
 			editorRef?.setContent(restored);
 			inputValue = editorRef?.getMessage() ?? priorInputValue;
@@ -1244,12 +1355,28 @@
 		};
 
 		try {
-			const sent = await activeSession.sendMessage(
-				finalPrompt,
-				compactBeforeSend || pendingPaths?.length
-					? { pendingUploadPaths: pendingPaths, ...(compactBeforeSend ? { compactFirst: true } : {}) }
-					: undefined,
-			);
+			let mayGoNow = true;
+			try {
+				// The draft is already cleared, so the check counts as part of the
+				// send: an update reload waits for it as it waits for the request.
+				mayGoNow = mayGo ? await trackSend(mayGo) : true;
+			} finally {
+				released?.();
+				// Handed over or about to be put back: either way the note is done,
+				// so a reload never brings back words the server already has.
+				dropPendingSend(pendingNote);
+			}
+			if (!mayGoNow) {
+				restoreOnFailure(true);
+				return;
+			}
+			const sent = await activeSession.sendMessage(finalPrompt, {
+				...(pendingPaths?.length ? { pendingUploadPaths: pendingPaths } : {}),
+				...(compactBeforeSend ? { compactFirst: true } : {}),
+				// Re-checked once the store knows its target (after a reload's
+				// restore wait); false sends nothing and lands in restoreOnFailure.
+				stillAtDestination: () => stillAtDestination(destination, composerPlace()),
+			});
 			if (sent === false) restoreOnFailure();
 			else if (ownsComposer() && !mobileComposerDestroyed && getInitGeneration() === sendingNavigation) {
 				if (compactBeforeSend) coldNotice = null;
@@ -1950,14 +2077,14 @@
 		display: flex;
 		flex-direction: column;
 		border-radius: var(--radius-composer);
-		border: 1px solid var(--border);
-		background: var(--card);
-		box-shadow: var(--shadow-s);
+		border: 1px solid var(--composer-border, var(--border));
+		background: var(--composer-bg, var(--card));
+		box-shadow: var(--composer-shadow, var(--shadow-s));
 		transition: border-color 0.2s ease;
 	}
 
 	.chat-island:focus-within {
-		border-color: var(--border-strong);
+		border-color: var(--composer-border-focus, var(--border-strong));
 	}
 
 	/* ===== THE EDITOR ROW ===== */

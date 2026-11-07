@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 
 import httpx
@@ -306,6 +307,50 @@ def test_cut_scenario_drops_the_stream_without_a_terminal_frame(fake: FakeAI) ->
         _chat(fake, [{"role": "user", "content": "[script:cut tps=0]"}])
     entry = _log(fake)[0]
     assert (entry["scenario"], entry["reply"]) == ("cut", "cut")
+
+
+@pytest.mark.parametrize("path,prompt_key,terminal", [
+    ("/v1/chat/completions", "messages", "[DONE]"),
+    ("/v1/messages", "messages", "message_stop"),
+    ("/v1/responses", "input", "response.completed"),
+])
+def test_hold_open_stream_waits_for_client_stop(fake: FakeAI, monkeypatch, path, prompt_key, terminal) -> None:
+    # Once all text has arrived, the same request must stay open until the
+    # consumer cancels it (the journey's Stop), not merely a longer sleep.
+    finished = threading.Event()
+    original_finish = fake_wire._Handler.finish
+
+    def finish(handler):
+        try:
+            original_finish(handler)
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(fake_wire._Handler, "finish", finish)
+    prompt = [{"role": "user", "content": "hold me [script:default tps=0 hold_open=true]"}]
+    body = {"model": "fake-ai", "max_tokens": 1000, "stream": True, prompt_key: prompt}
+    lines = []
+    heartbeats = 0
+    with httpx.stream("POST", fake.url + path, json=body, timeout=5) as response:
+        assert response.status_code == 200
+        for line in response.iter_lines():
+            lines.append(line)
+            if line == ": hold-open":
+                heartbeats += 1
+                if heartbeats == 3:
+                    break
+        assert heartbeats == 3, "the completed text must not complete the turn"
+        events = _sse("\n".join(lines))
+        if path == "/v1/chat/completions":
+            text = "".join(c["delta"].get("content", "") for e in events for c in e.get("choices", []))
+        elif path == "/v1/messages":
+            text = "".join(e.get("delta", {}).get("text", "") for e in events)
+        else:
+            text = "".join(e["delta"] for e in events if e.get("type") == "response.output_text.delta")
+        assert "You said: “hold me”" in text
+        assert terminal not in "\n".join(lines)
+        assert not finished.is_set(), "the request is still running before Stop"
+    assert finished.wait(5), "disconnect must release the held request handler"
 
 
 def test_timing_knobs_come_from_tag_scenario_then_globals(tmp_path: Path) -> None:

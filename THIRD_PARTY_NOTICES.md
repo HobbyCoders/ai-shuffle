@@ -518,12 +518,12 @@ From `frontend/package-lock.json`, all locked packages (the build bundles from t
 | prosemirror-history | 1.5.0 | MIT | https://www.npmjs.com/package/prosemirror-history/v/1.5.0 |
 | prosemirror-inputrules | 1.5.1 | MIT | https://www.npmjs.com/package/prosemirror-inputrules/v/1.5.1 |
 | prosemirror-keymap | 1.2.3 | MIT | https://www.npmjs.com/package/prosemirror-keymap/v/1.2.3 |
-| prosemirror-model | 1.25.11 | MIT | https://www.npmjs.com/package/prosemirror-model/v/1.25.11 |
+| prosemirror-model | 1.25.12 | MIT | https://www.npmjs.com/package/prosemirror-model/v/1.25.12 |
 | prosemirror-schema-list | 1.5.1 | MIT | https://www.npmjs.com/package/prosemirror-schema-list/v/1.5.1 |
 | prosemirror-state | 1.4.4 | MIT | https://www.npmjs.com/package/prosemirror-state/v/1.4.4 |
 | prosemirror-tables | 1.8.5 | MIT | https://www.npmjs.com/package/prosemirror-tables/v/1.8.5 |
 | prosemirror-transform | 1.12.1 | MIT | https://www.npmjs.com/package/prosemirror-transform/v/1.12.1 |
-| prosemirror-view | 1.42.3 | MIT | https://www.npmjs.com/package/prosemirror-view/v/1.42.3 |
+| prosemirror-view | 1.42.9 | MIT | https://www.npmjs.com/package/prosemirror-view/v/1.42.9 |
 | punycode | 2.3.1 | MIT | https://www.npmjs.com/package/punycode/v/2.3.1 |
 | react-is | 17.0.2 | MIT | https://www.npmjs.com/package/react-is/v/17.0.2 |
 | readdirp | 4.1.2 | MIT | https://www.npmjs.com/package/readdirp/v/4.1.2 |

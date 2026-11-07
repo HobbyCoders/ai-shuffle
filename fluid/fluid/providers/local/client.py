@@ -23,6 +23,7 @@ chat/completions normalizer.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -79,7 +80,7 @@ class LocalClient:
             "content-type": "application/json",
             "accept": "text/event-stream",
         }
-        body = build_request_body(request, extra=self._extra)
+        body = await asyncio.to_thread(build_request_body, request, extra=self._extra)
         if not is_usable_client(self._http):
             # A host-injected client its owner has closed can never send again.
             self._http = None

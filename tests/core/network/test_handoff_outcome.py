@@ -4,12 +4,18 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from app.api.sessions_helpers import _annotate_cluster_fields
-from app.db import database, runs, turns
+from app.core import session_runtime
+from app.db import database, runs, session_events, turns
 from app.network import catalog, control, engine, handoff
 from tests.core.network.harness import converge
 from tests.core.network.test_handoff import pair  # noqa: F401
 from tests.core.network.test_handoff_receipts import SID, plain
 from tests.core.test_checkout_transfer import repositories  # noqa: F401
+from tests.core.helpers import make_pump
+from tests.core.test_session_runtime import (
+    _clean_module_state,  # noqa: F401 — fixture
+    _runtime_env,
+)
 
 
 def end_turn(outcome="completed", stop_reason=None, error=None):
@@ -205,3 +211,63 @@ async def test_recovery_of_a_lost_commit_reply_keeps_the_outcome(pair, monkeypat
         handoff._mark_commit_sent(SID, "lost-reply", a.device_id, True, carried)
         handoff._accept_owner(SID, b.device_id, None, "lost-reply")
         assert failed_here()
+
+
+@pytest.mark.asyncio
+async def test_a_runtime_failure_keeps_its_turn_id_when_the_chat_moves(pair, monkeypatch):
+    a, b, _, _ = pair
+    plain(a, b)
+    with a.active():
+        turn = turns.enqueue_turn(SID, "user", prompt="go")
+        create_recorder = session_runtime.TurnRecorder.create_for_run
+        with _runtime_env(pump=make_pump([{"type": "error", "message": "HTTP 400"}])) as env, patch.object(
+            session_runtime.TurnRecorder, "create_for_run", wraps=create_recorder,
+        ):
+            assert await session_runtime.SessionRuntime(turn).execute() == "aborted"
+        (frame,) = [call.args[1] for call in env["broadcaster"].await_args_list
+                    if call.args[1].get("type") == "error"]
+        (failure,) = [row for row in session_events.get_events(SID)
+                      if row["event_type"] == "turn.aborted"]
+        assert failure["turn_id"] == frame["turn_id"] == turn["id"]
+        exported = handoff._history(database.get_session(SID))["session_events"]
+        (exported_failure,) = [row for row in exported if row["event_type"] == "turn.aborted"]
+        assert exported_failure.get("turn_id") == frame["turn_id"]
+
+    wire(monkeypatch, a, b)
+    await move(a, b)
+
+    with b.active():
+        (received_failure,) = [row for row in session_events.get_events(SID)
+                               if row["event_type"] == "turn.aborted"]
+        assert received_failure["turn_id"] == frame["turn_id"]
+        assert turns.get_turn(turn["id"]) is None  # Correlation is history, not execution.
+
+
+@pytest.mark.parametrize("legacy", ["source", "staging"])
+def test_a_history_move_without_the_new_turn_id_field_still_publishes(mock_db, legacy):
+    from psycopg2.extras import Json
+    from app.db.base import get_db, parse_jsonb
+
+    sid = "legacy-error-correlation"
+    database.create_session(sid, profile_id=None)
+    session_events.append_events(sid, [{
+        "type": "turn.aborted", "turn_id": "old-turn", "payload": {"reason": "error"},
+    }])
+    data = {"token": "old-move", "sdk_session_id": None, "_prepare_history": True,
+            "history": handoff._history(database.get_session(sid))}
+    if legacy == "source":
+        for row in data["history"]["session_events"]:
+            row.pop("turn_id")
+    handoff.install_history(sid, data, ".")
+    with get_db() as conn:
+        cur = conn.cursor()
+        if legacy == "staging":
+            cur.execute("SELECT rows FROM handoff_history_chunks WHERE token=%s AND table_name=%s",
+                        ("old-move", "session_events"))
+            old_shape = [values[:-1] for values in parse_jsonb(cur.fetchone()["rows"])]
+            cur.execute("UPDATE handoff_history_chunks SET rows=%s WHERE token=%s AND table_name=%s",
+                        (Json(old_shape), "old-move", "session_events"))
+        handoff._publish_history(cur, sid, "old-move")
+    (failure,) = session_events.get_events(sid)
+    assert failure["event_type"] == "turn.aborted"
+    assert failure["turn_id"] is None  # Older senders never supplied an identity.

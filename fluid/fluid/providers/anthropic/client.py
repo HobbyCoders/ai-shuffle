@@ -174,8 +174,10 @@ class AnthropicClient:
                 if not sid:
                     raise ValueError("OpenCode requires a stable conversation session_id")
                 headers["x-opencode-session"] = sid
-        body = build_request_body(request, compatible_provider=self._compatible_provider,
-                                  model_efforts=self._model_efforts)
+        body = await asyncio.to_thread(
+            build_request_body, request, compatible_provider=self._compatible_provider,
+            model_efforts=self._model_efforts,
+        )
         owned: httpx.AsyncClient | None = None
         attempt = 0
         try:

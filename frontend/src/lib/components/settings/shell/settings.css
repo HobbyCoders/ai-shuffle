@@ -40,7 +40,11 @@
 	--st-field: var(--field-bg);
 	--st-field-focus: var(--field-border-focus);
 	--st-hover: color-mix(in oklch, var(--foreground) 4%, transparent);
-	--st-meter: color-mix(in oklch, var(--foreground) 42%, transparent);
+	/* Bars and meters: the track steps off the card (>=1.5:1 in both themes) and
+	   the fill steps off the track (>=3:1). Quiet fill is still >=3:1. */
+	--st-meter-track: color-mix(in oklch, var(--foreground) 20%, transparent);
+	--st-meter: color-mix(in oklch, var(--foreground) 70%, transparent);
+	--st-meter-quiet: color-mix(in oklch, var(--foreground) 60%, transparent);
 	--st-code-bg: var(--code-bg, var(--muted));
 	--st-shadow: 0 14px 40px color-mix(in oklch, var(--foreground) 14%, transparent), 0 0 0 1px var(--st-border-strong);
 	/* Cards 12, controls 8. */
@@ -56,8 +60,16 @@
 	--st-data-width: 1120px;
 	--st-prose-width: 720px;
 	--st-toc-width: 184px;
-	--st-toc-gap: 40px;
+	/* The contents rail sits 32px right of the article column. */
+	--st-toc-gap: 32px;
 	--st-gutter: 48px;
+	/* Every destination sits in one centred frame, the wide pages' width. A
+	   reading column keeps its 760px measure but starts at the frame's left
+	   edge (margin-left: var(--st-frame-inset)), so the title and content
+	   never move between pages; the spare width goes on the right. The 100%
+	   resolves against the element that uses it (the page's scroller). */
+	--st-frame-width: calc(var(--st-data-width) + 2 * var(--st-gutter));
+	--st-frame-inset: max(0px, (100% - var(--st-frame-width)) / 2);
 	--st-dtop-height: 22px;
 	--st-mono: var(--font-mono, ui-monospace, 'JetBrains Mono', monospace);
 
@@ -141,18 +153,20 @@
  */
 .settings-shell:not([data-stacked]) .st-coll:has(> .st-dpane > .st-empty-detail[data-idle]) {
 	grid-template-columns: minmax(0, 1fr);
-	justify-items: center;
+	justify-items: start;
 }
 .settings-shell:not([data-stacked]) .st-coll:has(> .st-dpane > .st-empty-detail[data-idle]) > .st-divider,
 .settings-shell:not([data-stacked]) .st-coll:has(> .st-dpane > .st-empty-detail[data-idle]) > .st-dpane {
 	display: none;
 }
 .settings-shell:not([data-stacked]) .st-coll:has(> .st-dpane > .st-empty-detail[data-idle]) > .st-lcol {
-	width: min(100%, 856px);
+	width: min(100%, calc(var(--st-reading-width) + 2 * var(--st-gutter)));
+	margin-left: var(--st-frame-inset);
 	border-right: 0;
-	padding: 0 32px;
+	padding: 0 calc(var(--st-gutter) - 16px);
 }
-/* One centred column: heading, filter and rows share its one left edge. */
+/* One column at the shared frame's left edge: heading, filter and rows share
+   its one left edge, the same x as every other page title. */
 .settings-shell:not([data-stacked]) .st-coll:has(> .st-dpane > .st-empty-detail[data-idle]) > .st-lcol .st-lhead {
 	padding-inline: 16px;
 }
@@ -163,7 +177,7 @@
 	padding-inline: 16px;
 }
 
-/* A collection whose open item replaces the list: one pane, centred like the list. */
+/* A collection whose open item replaces the list: one pane, at the list's left edge. */
 .settings-shell:not([data-stacked]) .st-coll[data-replace='detail'] {
 	grid-template-columns: minmax(0, 1fr);
 }
@@ -173,7 +187,6 @@
 }
 .settings-shell:not([data-stacked]) .st-coll[data-replace='detail'] .st-dwrap {
 	width: 100%;
-	margin-inline: auto;
 }
 .settings-shell:not([data-stacked]) .st-coll[data-replace='detail'] .st-back {
 	display: inline-flex;
@@ -239,6 +252,10 @@
 	color: var(--st-action-fg);
 	border-color: transparent;
 }
+.settings-shell .st-btn.primary:disabled {
+	opacity: var(--action-disabled-opacity, 0.4);
+	cursor: not-allowed;
+}
 .settings-shell .st-btn.primary:hover:not(:disabled) {
 	background: var(--st-action-hover);
 }
@@ -293,6 +310,20 @@
  .settings-shell :is(.st-num input, textarea) { font-size: 16px; }
 }
 
+/* One phone select: the native select (SelectField) and the value button that
+   opens an editor under its row (ExpandToggle, "Default ⌄") both draw 44px tall
+   with 16px text, 12px inner padding and the chevron on the right edge. */
+.settings-shell[data-stacked] span.st-sel-wrap svg.lucide { right: 13px; width: 16px; height: 16px; }
+.settings-shell[data-stacked] select.st-sel { padding: 0 40px 0 12px; }
+.settings-shell[data-stacked] button.st-vbtn { justify-content: space-between; gap: 8px; height: 44px; padding: 0 12px; font-size: 16px; }
+.settings-shell[data-stacked] button.st-vbtn svg.lucide { width: 16px; height: 16px; flex: none; }
+@media (max-width: 600px), (pointer: coarse) {
+ .settings-shell span.st-sel-wrap svg.lucide { right: 13px; width: 16px; height: 16px; }
+ .settings-shell select.st-sel { padding: 0 40px 0 12px; }
+ .settings-shell button.st-vbtn { justify-content: space-between; gap: 8px; height: 44px; padding: 0 12px; font-size: 16px; }
+ .settings-shell button.st-vbtn svg.lucide { width: 16px; height: 16px; flex: none; }
+}
+
 /* Draw the control at desktop density; reserve a full 44px phone touch pitch. */
 .settings-shell[data-stacked] .st-btn { height: 32px; min-height: 32px; margin-block: 6px; }
 .settings-shell[data-stacked] .st-btn::after { content: ''; position: absolute; inset: -6px min(0px, calc((100% - 44px) / 2)); }
@@ -303,6 +334,30 @@
  .settings-shell .st-btn.icon { min-width: 32px; margin-inline: 6px; }
  .settings-shell .st-page-title .st-btn { margin-block: 0; }
  .settings-shell .st-lhead { gap: 0; }
+}
+
+/* A phone screen's main actions (app.css --phone-action-*), and every phone
+   empty state's create or recovery button, the page header's actions, every
+   primary button and the buttons beside it: drawn at the full 44px touch
+   height, so no invisible extension or reserved margin is needed. Secondary
+   row buttons and desktop keep the compact 32px button. */
+.settings-shell[data-stacked] :is(.st-btn.phone-action, .st-empty-detail .acts .st-btn, .st-page-title .st-btn, .st-ltools .st-btn, .st-btn.primary, :has(> .st-btn.primary) > .st-btn) {
+	height: var(--phone-action-height);
+	min-height: var(--phone-action-height);
+	margin-block: 0;
+	border-radius: var(--phone-action-radius);
+}
+.settings-shell[data-stacked] :is(.st-btn.phone-action, .st-empty-detail .acts .st-btn, .st-page-title .st-btn, .st-ltools .st-btn, .st-btn.primary, :has(> .st-btn.primary) > .st-btn)::after { content: none; }
+.settings-shell[data-stacked] :is(.st-page-title, .st-ltools) .st-btn.icon { width: var(--phone-action-height); min-width: var(--phone-action-height); margin-inline: 0; }
+@media (max-width: 600px), (pointer: coarse) {
+ .settings-shell :is(.st-btn.phone-action, .st-empty-detail .acts .st-btn, .st-page-title .st-btn, .st-ltools .st-btn, .st-btn.primary, :has(> .st-btn.primary) > .st-btn) {
+	height: var(--phone-action-height);
+	min-height: var(--phone-action-height);
+	margin-block: 0;
+	border-radius: var(--phone-action-radius);
+ }
+ .settings-shell :is(.st-btn.phone-action, .st-empty-detail .acts .st-btn, .st-page-title .st-btn, .st-ltools .st-btn, .st-btn.primary, :has(> .st-btn.primary) > .st-btn)::after { content: none; }
+ .settings-shell :is(.st-page-title, .st-ltools) .st-btn.icon { width: var(--phone-action-height); min-width: var(--phone-action-height); margin-inline: 0; }
 }
 
 /* Back button: only in stacked mode */
@@ -605,38 +660,66 @@
 	display: none;
 }
 
-/* ---------- narrow detail pane beside the list (desktop, ~1100-1440px) ----------
- * A wide app sidebar leaves the detail pane 420-460px wide. Fixed-width fields
- * then squeezed their labels to "En…", so rows reflow as on the phone: the
- * control drops under its label when both do not fit, text fields take the
- * full width, hints wrap, and the facts strip uses two columns.
+/* ---------- narrow rows beside the list (desktop) ----------
+ * Rows sit one reading gutter (2 x ~49px) inside the st-detail container, so
+ * 620px here is a row of about 520px: too narrow for a label with its helper
+ * and a 260px field side by side. Rows then stack the way the phone does:
+ * label, helper, then the control at the full row width on the same inset.
+ * Text fields, meters and the phone-stacked selectors always stack; other
+ * selectors stack when the row has a helper. Toggles, buttons and plain
+ * values stay beside the label and only wrap (right-aligned) when they must.
  */
-@container st-detail (max-width: 520px) {
-	.settings-shell:not([data-stacked]) .st-dpane .st-row:has(> .st-rt) {
+@container st-detail (max-width: 620px) {
+	.settings-shell:not([data-stacked]) .st-row:has(> .st-rt) {
 		display: flex;
 		flex-wrap: wrap;
 		align-items: center;
 		gap: 8px 12px;
 	}
-	.settings-shell:not([data-stacked]) .st-dpane .st-row > .st-rt {
+	.settings-shell:not([data-stacked]) .st-row > .st-rt {
 		flex: 1 1 128px;
 	}
-	.settings-shell:not([data-stacked]) .st-dpane .st-row > .st-rt .st-rh {
+	.settings-shell:not([data-stacked]) .st-row > .st-rt .st-rh {
 		white-space: normal;
 	}
-	.settings-shell:not([data-stacked]) .st-dpane .st-row > .st-rc {
+	.settings-shell:not([data-stacked]) .st-row > .st-rc {
 		flex: 0 1 auto;
 		max-width: 100%;
 		margin-left: auto;
 		flex-wrap: wrap;
 	}
-	.settings-shell:not([data-stacked]) .st-dpane .st-row:has(> .st-rc :is(.st-txt, .st-meter)) > .st-rc {
+	.settings-shell:not([data-stacked]) .st-row:is(
+			:has(> .st-rc :is(.st-txt, .st-meter, .st-text-field, .st-path, textarea, input:not([type='checkbox']):not([type='range']):not([type='radio']))),
+			.st-phone-stack,
+			:has(.st-rh):has(> .st-rc :is(select, [role='combobox'], [aria-haspopup], .st-vbtn, .st-seg))
+		) > .st-rc {
 		flex: 1 1 100%;
+		width: 100%;
+		margin-left: 0;
+		justify-content: flex-start;
 		flex-wrap: nowrap;
 	}
-	.settings-shell:not([data-stacked]) .st-dpane .st-row .st-txt {
-		flex: 1 1 160px;
+	.settings-shell:not([data-stacked]) .st-row:is(
+			:has(> .st-rc :is(.st-txt, .st-meter, .st-text-field, .st-path, textarea, input:not([type='checkbox']):not([type='range']):not([type='radio']))),
+			.st-phone-stack,
+			:has(.st-rh):has(> .st-rc :is(select, [role='combobox'], [aria-haspopup], .st-vbtn, .st-seg))
+		) > .st-rc :is(.st-text-field, .st-path, form, .st-sel-wrap, [role='combobox'], [aria-haspopup], .st-vbtn, .st-seg) {
+		flex: 1 1 auto;
+		width: 100%;
+		max-width: none !important;
 	}
+	.settings-shell:not([data-stacked]) .st-row > .st-rc > .st-seg button {
+		flex: 1;
+	}
+	.settings-shell:not([data-stacked]) .st-row > .st-rc :is(input:not([type='checkbox']):not([type='range']):not([type='radio']), textarea) {
+		width: 100%;
+		min-width: 0;
+	}
+	.settings-shell:not([data-stacked]) .st-row > .st-rc > .st-btn:has(svg):not([aria-haspopup]) {
+		flex: none;
+	}
+}
+@container st-detail (max-width: 520px) {
 	.settings-shell:not([data-stacked]) .st-dpane .st-facts:not(.line) {
 		grid-template-columns: repeat(2, minmax(0, 1fr));
 	}

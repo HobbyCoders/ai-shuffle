@@ -10,9 +10,10 @@
 	 * before its usage arrived, so the harness counted the text itself. The
 	 * amount still counts toward budgets; only its precision is in question.
 	 *
-	 * `label` is "≈" (default, inline next to a cost) or "est." (tile labels).
+	 * `label` is "≈" (default, inline next to a cost), "est." (tile labels) or
+	 * "Estimated" (a row whose own meaning must read without the tooltip).
 	 */
-	let { label = '≈' }: { label?: '≈' | 'est.' } = $props();
+	let { label = '≈' }: { label?: '≈' | 'est.' | 'Estimated' } = $props();
 </script>
 
 <span class="usage-est" title={USAGE_ESTIMATED_TITLE} aria-label={USAGE_ESTIMATED_TITLE} data-testid="usage-estimated">{label}</span>

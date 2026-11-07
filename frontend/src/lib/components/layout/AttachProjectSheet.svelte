@@ -353,7 +353,7 @@
 		position: absolute;
 		inset: 0;
 		border: none;
-		background: var(--modal-overlay, color-mix(in oklch, var(--background) 60%, transparent));
+		background: var(--modal-overlay);
 		animation: fade-in 200ms ease both;
 		cursor: default;
 	}
@@ -435,6 +435,7 @@
 	.btn.primary { background: var(--primary); color: var(--primary-foreground); }
 	.btn.primary:hover:not(:disabled) { background: color-mix(in oklab, var(--primary) 88%, var(--foreground)); }
 	.btn:disabled { opacity: 0.45; cursor: not-allowed; }
+	.btn.primary:disabled { opacity: var(--action-disabled-opacity, 0.4); }
 	.btn :global(.spin) { animation: spin 0.9s linear infinite; }
 
 	@keyframes fade-in { from { opacity: 0; } }

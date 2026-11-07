@@ -24,6 +24,88 @@
 		if (right + pad > view.scrollLeft + view.width) return right + pad - view.width;
 		return null;
 	}
+
+	/**
+	 * The strip snaps each tab's start to its leading inset (the fade's width),
+	 * so a free scrollLeft is pulled back to the nearest snap and can leave the
+	 * tab just revealed under the trailing fade. This picks a snap position
+	 * instead: the tab's own snap when moving left (it lands just clear of the
+	 * leading fade), and the first snap far enough right when moving right, so
+	 * it ends whole with its room to spare. Null when the tab already fits.
+	 */
+	export function snapRevealScrollLeft(
+		tabs: { left: number; width: number }[],
+		index: number,
+		view: { scrollLeft: number; width: number },
+		max: number,
+		inset: number,
+		pad = TAB_REVEAL_PAD
+	): number | null {
+		const tab = tabs[index];
+		if (!tab) return null;
+		const want = revealScrollLeft(tab, view, pad);
+		if (want === null) return null;
+		const snap = (t: { left: number }) => Math.min(Math.max(0, max), Math.max(0, t.left - inset));
+		if (want < view.scrollLeft) return snap(tab);
+		const after = tabs.map(snap).filter((s) => s >= want - 0.5).sort((a, b) => a - b);
+		return Math.min(after[0] ?? Math.max(0, max), snap(tab));
+	}
+
+	/** Gap between tabs, and the tighter gap used only when the wide one would overflow. */
+	export const TAB_GAP = 20;
+	export const TAB_GAP_TIGHT = 12;
+
+	/** The gap to use: the wide one unless the tabs only fit with the tight one. */
+	export function tabGap(widths: number[], available: number): number {
+		const total = widths.reduce((a, b) => a + b, 0);
+		const gaps = Math.max(0, widths.length - 1);
+		return total + gaps * TAB_GAP > available ? TAB_GAP_TIGHT : TAB_GAP;
+	}
+
+	/**
+	 * Indexes of the tabs that are only partly inside the visible strip. At rest
+	 * they are hidden, so a label is never shown cut mid-word: a tab is either
+	 * whole or fully past the edge (still reachable by scrolling).
+	 */
+	export function partialTabs(
+		tabs: { left: number; width: number }[],
+		view: { scrollLeft: number; width: number },
+		slack = 1
+	): number[] {
+		const lo = view.scrollLeft - slack;
+		const hi = view.scrollLeft + view.width + slack;
+		const out: number[] = [];
+		tabs.forEach((t, i) => {
+			const r = t.left + t.width;
+			const inside = t.left >= lo && r <= hi;
+			const outside = r <= lo || t.left >= hi;
+			if (!inside && !outside) out.push(i);
+		});
+		return out;
+	}
+
+	/**
+	 * Where the last whole tab ends, measured from the strip's visible left edge,
+	 * or null when no tab is whole. The trailing fade starts here and the chevron
+	 * follows it, so no hidden tab leaves a dead gap before the chevron.
+	 */
+	export function wholeTabsEnd(
+		tabs: { left: number; width: number }[],
+		view: { scrollLeft: number; width: number },
+		slack = 1
+	): number | null {
+		const lo = view.scrollLeft - slack;
+		const hi = view.scrollLeft + view.width + slack;
+		let end: number | null = null;
+		for (const t of tabs) {
+			const r = t.left + t.width;
+			if (t.left >= lo && r <= hi) end = Math.max(end ?? 0, r - view.scrollLeft);
+		}
+		return end;
+	}
+
+	/** The visible gap between the last whole tab and the chevron. */
+	export const TAB_CHEVRON_GAP = 8;
 </script>
 
 <script lang="ts">
@@ -31,10 +113,14 @@
 	 * DetailTabs: tabs of one detail (role=tablist). Arrow keys, Home and End
 	 * move and select. DetailPane renders it only when there are 2+ tabs.
 	 *
-	 * When the tabs do not fit, the strip scrolls sideways: touch and trackpad
-	 * natively, a vertical mouse wheel turns into sideways scroll, a mouse can
-	 * drag it, and the edge with more tabs fades. The selected tab is always
-	 * kept in view (after selection, keyboard moves and resizes).
+	 * When the tabs do not fit, the gap first tightens from 20 to 12px; if they
+	 * still do not fit, the strip scrolls sideways: touch and trackpad natively,
+	 * a vertical mouse wheel turns into sideways scroll, a mouse can drag it.
+	 * Scrolling snaps to whole tabs, the edge with more tabs fades, and the
+	 * trailing chevron sits 8px after the last whole tab (a slot is reserved so
+	 * it always fits). At rest a tab that does not fit whole is hidden, never
+	 * shown cut, and the fade starts where the whole tabs end. The selected tab is always kept in
+	 * view (after selection, keyboard moves and resizes).
 	 */
 	import { tick } from 'svelte';
 	import { ChevronRight } from 'lucide-svelte';
@@ -51,27 +137,77 @@
 
 	let { tabs, current, onselect, label, idPrefix }: Props = $props();
 	let list: HTMLDivElement | undefined = $state();
+	let wrap: HTMLDivElement | undefined = $state();
 	let moreLeft = $state(false);
 	let moreRight = $state(false);
+	/** The tabs overflow the row: reserve the chevron slot. */
+	let overflowing = $state(false);
+	let tight = $state(false);
+	/** Ids of tabs that are only partly visible (hidden at rest). */
+	let partial = $state<string[]>([]);
+	/** px from the row's left edge where the last whole tab ends (null: unknown). */
+	let cutAt = $state<number | null>(null);
+	let scrolling = $state(false);
+	let restTimer: ReturnType<typeof setTimeout> | undefined;
 	let dragging = $state(false);
 	let drag: { x: number; left: number; moved: boolean; id: number } | null = null;
 	/** A drag ends with a click on the tab under the pointer; swallow it. */
 	let dragEndedAt = 0;
+
+	function tabEls(): HTMLElement[] {
+		return list ? Array.from(list.querySelectorAll<HTMLElement>('[data-tab-id]')) : [];
+	}
+
+	/** Pick the gap and whether the chevron slot is needed, from the row's own width. */
+	function measure() {
+		if (!list || !wrap) return;
+		const els = tabEls();
+		const avail = wrap.clientWidth;
+		if (!els.length || !avail) return;
+		tight = tabGap(els.map((e) => e.offsetWidth), avail) === TAB_GAP_TIGHT;
+		const gap = tight ? TAB_GAP_TIGHT : TAB_GAP;
+		const natural = els.reduce((a, e) => a + e.offsetWidth, 0) + gap * (els.length - 1);
+		overflowing = natural > avail + 0.5;
+	}
 
 	function updateFades() {
 		if (!list) return;
 		const max = list.scrollWidth - list.clientWidth;
 		moreLeft = list.scrollLeft > 2;
 		moreRight = max > 2 && list.scrollLeft < max - 2;
+		const els = tabEls();
+		const boxes = els.map((e) => ({ left: e.offsetLeft - list!.offsetLeft, width: e.offsetWidth }));
+		const view = { scrollLeft: list.scrollLeft, width: list.clientWidth };
+		const idx = partialTabs(boxes, view);
+		const end = wholeTabsEnd(boxes, view);
+		const nextCut = end === null ? null : Math.round(list.offsetLeft + end);
+		if (nextCut !== cutAt) cutAt = nextCut;
+		const ids = idx.map((i) => els[i].dataset.tabId ?? '');
+		if (ids.join() !== partial.join()) partial = ids;
+	}
+
+	/** While the strip moves every tab shows; once it rests, cut tabs hide again. */
+	function onscroll() {
+		scrolling = true;
+		updateFades();
+		clearTimeout(restTimer);
+		restTimer = setTimeout(() => { scrolling = false; updateFades(); }, 140);
 	}
 
 	function reveal(id: string | null) {
 		if (!list || !id) return;
-		const el = Array.from(list.querySelectorAll<HTMLElement>('[data-tab-id]')).find((t) => t.dataset.tabId === id);
-		if (!el) return;
-		const next = revealScrollLeft(
-			{ left: el.offsetLeft - list.offsetLeft, width: el.offsetWidth },
-			{ scrollLeft: list.scrollLeft, width: list.clientWidth }
+		const els = tabEls();
+		const index = els.findIndex((t) => t.dataset.tabId === id);
+		if (index < 0) return;
+		// Land on a snap position, or the strip's mandatory snap pulls a mouse-
+		// picked tab back under the trailing fade (it asked 65px, snapped to 27).
+		const inset = parseFloat(getComputedStyle(list).scrollPaddingInlineStart) || 0;
+		const next = snapRevealScrollLeft(
+			els.map((e) => ({ left: e.offsetLeft - list!.offsetLeft, width: e.offsetWidth })),
+			index,
+			{ scrollLeft: list.scrollLeft, width: list.clientWidth },
+			list.scrollWidth - list.clientWidth,
+			inset
 		);
 		if (next !== null) list.scrollLeft = next;
 		updateFades();
@@ -83,12 +219,16 @@
 		void tick().then(() => reveal(id));
 	});
 
-	// ...and when the strip changes size.
+	// ...and when the row changes size (or the tab labels/counts change).
 	$effect(() => {
-		if (!list || typeof ResizeObserver === 'undefined') return;
-		const ro = new ResizeObserver(() => reveal(current));
-		ro.observe(list);
-		return () => ro.disconnect();
+		void tabs;
+		if (!list || !wrap) return;
+		measure();
+		void tick().then(() => reveal(current));
+		if (typeof ResizeObserver === 'undefined') return;
+		const ro = new ResizeObserver(() => { measure(); void tick().then(() => reveal(current)); });
+		ro.observe(wrap);
+		return () => { ro.disconnect(); clearTimeout(restTimer); };
 	});
 
 	function onkeydown(event: KeyboardEvent) {
@@ -160,16 +300,17 @@
 	});
 </script>
 
-<div class="st-tabs-wrap" class:more-l={moreLeft} class:more-r={moreRight}>
+<div class="st-tabs-wrap" class:more-l={moreLeft} class:more-r={moreRight} class:overflowing class:tight style:--tab-cut={cutAt === null ? undefined : `${cutAt}px`} bind:this={wrap}>
 	<div
 		class="st-tabs"
 		class:dragging
+		class:scrolling
 		role="tablist"
 		aria-label={label}
 		bind:this={list}
 		tabindex="-1"
 		{onkeydown}
-		onscroll={updateFades}
+		{onscroll}
 		{onpointerdown}
 		{onpointermove}
 		onpointerup={endDrag}
@@ -181,6 +322,7 @@
 				role="tab"
 				id="{idPrefix}-tab-{tab.id}"
 				data-tab-id={tab.id}
+				data-cut={!scrolling && !dragging && tab.id !== current && partial.includes(tab.id) ? '' : undefined}
 				disabled={tab.disabled}
 				aria-disabled={tab.disabled || undefined}
 				title={tab.title}
@@ -197,18 +339,58 @@
 </div>
 
 <style>
-	.tabs-more { position: absolute; right: 0; top: 0; bottom: 1px; z-index: 2; display: grid; place-items: center; width: 16px; color: var(--st-mfg); pointer-events: none; }
+	/* The baseline spans the whole row, chevron slot included. */
 	.st-tabs-wrap {
+		--tab-gap: 20px;
+		--tab-fade: 24px;
+		/* Chevron gap (TAB_CHEVRON_GAP) plus its 12px glyph: room for it after a
+		   tab that ends at the very edge. */
+		--tab-chevron-gap: 8px;
+		--tab-slot: calc(var(--tab-chevron-gap) + 12px);
 		position: relative;
+		display: flex;
 		margin-top: 14px;
+		border-bottom: 1px solid var(--st-border);
 	}
+	.st-tabs-wrap.tight { --tab-gap: 12px; }
+	.st-tabs {
+		flex: 1;
+		min-width: 0;
+		display: flex;
+		gap: var(--tab-gap);
+		overflow-x: auto;
+		overscroll-behavior-x: contain;
+		scrollbar-width: none;
+		touch-action: pan-x pan-y;
+		scroll-snap-type: x mandatory;
+		scroll-padding-inline: var(--tab-fade);
+		/* Tabs sit on the row's baseline. */
+		margin-bottom: -1px;
+	}
+	/* A slot is reserved so the chevron always fits; it never sits over a label. */
+	.overflowing .st-tabs { margin-right: var(--tab-slot); }
+	/* The chevron follows the last whole tab by 8px (the space a hidden tab
+	   leaves is empty), never parked at the far edge behind a dead gap. */
+	.tabs-more {
+		position: absolute;
+		left: calc(var(--tab-cut, calc(100% - var(--tab-slot))) + var(--tab-chevron-gap));
+		top: 0;
+		bottom: 0;
+		width: 12px;
+		display: grid;
+		place-items: center;
+		color: var(--st-mfg);
+		pointer-events: none;
+		z-index: 2;
+	}
+	/* The fades sit at the scrolling edges, over the space a hidden tab leaves. */
 	.st-tabs-wrap::before,
 	.st-tabs-wrap::after {
 		content: '';
 		position: absolute;
 		top: 0;
 		bottom: 0;
-		width: 36px;
+		width: var(--tab-fade);
 		pointer-events: none;
 		opacity: 0;
 		transition: opacity 0.15s;
@@ -216,25 +398,19 @@
 	}
 	.st-tabs-wrap::before {
 		left: 0;
-		background: linear-gradient(to right, var(--st-bg) 15%, transparent);
+		background: linear-gradient(to right, var(--st-bg), transparent);
 	}
+	/* The trailing fade starts right after the last whole tab and covers the
+	   rest of the row, so a tab sliding in while the strip moves fades in there. */
 	.st-tabs-wrap::after {
+		left: var(--tab-cut, calc(100% - var(--tab-slot) - var(--tab-fade)));
 		right: 0;
-		background: linear-gradient(to left, var(--st-bg) 15%, transparent);
+		width: auto;
+		background: linear-gradient(to right, transparent, var(--st-bg) var(--tab-fade));
 	}
 	.st-tabs-wrap.more-l::before,
 	.st-tabs-wrap.more-r::after {
 		opacity: 1;
-	}
-	.st-tabs {
-		display: flex;
-		gap: 20px;
-		overflow-x: auto;
-		overscroll-behavior-x: contain;
-		scrollbar-width: none;
-		touch-action: pan-x pan-y;
-		/* The baseline stays put while the tabs scroll over it. */
-		border-bottom: 1px solid var(--st-border);
 	}
 	.st-tabs::-webkit-scrollbar {
 		display: none;
@@ -242,6 +418,7 @@
 	.st-tabs.dragging {
 		cursor: grabbing;
 		user-select: none;
+		scroll-snap-type: none;
 	}
 	.st-tabs.dragging button {
 		pointer-events: none;
@@ -251,6 +428,7 @@
 	}
 	button {
 		flex: none;
+		scroll-snap-align: start;
 		padding: 9px 0 10px;
 		font-size: 13px;
 		color: var(--st-mfg);
@@ -258,7 +436,10 @@
 		background: none;
 		border-bottom: 2px solid transparent;
 		white-space: nowrap;
+		transition: opacity 0.12s;
 	}
+	/* A tab that does not fit whole waits fully past the edge (scroll to reach it). */
+	button[data-cut] { opacity: 0; }
 	button:hover {
 		color: var(--st-fg);
 	}
@@ -270,18 +451,24 @@
 		outline-offset: -2px;
 	}
 	@media (max-width: 600px) {
-		.st-tabs-wrap::before, .st-tabs-wrap::after { width: 32px; }
-		.st-tabs-wrap::after { background: linear-gradient(to left, var(--st-bg) 12px, transparent 32px); }
-		.st-tabs-wrap::before { background: linear-gradient(to right, var(--st-bg) 12px, transparent 32px); }
-		.st-tabs { padding-inline-end: 24px; }
 		button { min-height: 44px; }
 	}
-	@media (prefers-reduced-motion: reduce) { .st-tabs-wrap::before, .st-tabs-wrap::after { transition: none; } }
+	@media (prefers-reduced-motion: reduce) {
+		.st-tabs-wrap::before, .st-tabs-wrap::after, button { transition: none; }
+	}
+	/* The count is a small badge, so "Tools 121" never reads as one word:
+	   about 55% of the label colour (over 3:1 on the badge), 6px from the label. */
 	.n {
-		color: var(--st-mfg);
-		margin-left: 4px;
+		display: inline-block;
+		margin-left: 6px;
+		padding: 0 4px;
+		border-radius: 4px;
+		background: var(--st-muted);
+		color: color-mix(in srgb, var(--st-fg) 55%, var(--st-bg));
 		font-size: 11px;
 		font-weight: 500;
+		line-height: 16px;
 		font-variant-numeric: tabular-nums;
+		vertical-align: 1px;
 	}
 </style>

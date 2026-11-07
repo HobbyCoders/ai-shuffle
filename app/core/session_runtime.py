@@ -1573,12 +1573,25 @@ class SessionRuntime:
             )
             if self._abort_reason == "recording_failed":
                 return
+            from app.core import owner_confirm
+
             if not resume and not already_recorded:
                 # The owner's message answered an approval in words: its outcome
                 # goes right after the message it came from (#484).
-                from app.core import owner_confirm
-
                 await owner_confirm.after_owner_message(self.session_id, self.turn.get("payload"))
+            answer = turn_payload.get(owner_confirm.ANSWER_KEY)
+            if (self.source in ("user", "queue") and isinstance(answer, dict)
+                    and answer.get("decision") in ("approved", "declined")
+                    and answer.get("released") is False):
+                # Intake already delivered this reply to a permission waiter.
+                # Keep its durable answer/outcome, but do not let an undelivered
+                # steer (or an enqueue racing the final round) call the model
+                # again with a bare yes/no (#1092). Released calls are different:
+                # their reply must still reach the model to resume that work.
+                self._terminal = "done"
+                self._pending_done = {"type": "done", "metadata": {}}
+                await recorder.on_event(self._pending_done)
+                return
             completion_frames, prompt = await refresh_completion_prompt()
             if completion_frames:
                 # The wake turn is the claimed completions' delivery point, so this
@@ -1745,6 +1758,10 @@ class SessionRuntime:
                     if isinstance(event, dict):
                         # FE cross-session guard tag.
                         event["session_id"] = self.session_id
+                        if etype == "error":
+                            # Match the durable failure recorded with the turn
+                            # id injected into TurnRecorder.create_for_run.
+                            event["turn_id"] = self.turn_id
                         # Keep the frame, drop a multi-MB tool input that no
                         # WS consumer reads (copies rather than mutating, so the
                         # recorder's already-handed-over dict is untouched).
@@ -1870,6 +1887,7 @@ class SessionRuntime:
                 "type": "error",
                 "message": message,
                 "session_id": self.session_id,
+                "turn_id": self.turn_id,
             })
         except Exception:  # noqa: BLE001
             logger.debug(
