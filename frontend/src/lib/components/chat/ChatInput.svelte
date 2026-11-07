@@ -38,6 +38,7 @@
 	import { flushPendingDraft, holdPendingDraft, readDraft, releasePendingDraft, writeDraft } from '$lib/stores/session/draft-persistence';
 	import { sentRowIdsOnScreen, takeUnfinishedRestores } from '$lib/stores/session/restored-draft';
 	import { trackSend } from '$lib/stores/session/message-sender';
+	import { dropPendingSend, notePendingSend, takePendingSends } from '$lib/stores/session/pending-send-note';
 	import { promptStash } from '$lib/stores/session/prompt-stash';
 	import { promptHistory, createPromptRecall } from '$lib/stores/session/prompt-recall';
 	import { pastedTextFile } from './tiptap/large-paste';
@@ -450,8 +451,11 @@
 			// overwrite it. Reading the editor directly (not the debounced store
 			// draft) guarantees the text follows the session it was typed in,
 			// even when the switch happens within the debounce window.
-			if (!messageSent && editorRef) {
-				const leavingDraft = getDraftJSON();
+			// After a send the composer was already emptied and saved, so only text
+			// typed since then is kept, and it is never New chat's: a first send's
+			// own chat adopts that slot (PR #1212 review S2).
+			const leavingDraft = editorRef ? getDraftJSON() : '';
+			if (editorRef && (!messageSent || (prevSessionId !== null && hasComposerDraft(leavingDraft)))) {
 				activeSession.saveDraftForSession(prevSessionId, leavingDraft);
 				// Keep the persisted mirror aligned with the ephemeral cache so the
 				// leaving session's draft also survives a reload.
@@ -503,13 +507,20 @@
 		const { sessionId, messages, isLoadingSession, isRestoringSession, error, wsReconnectRequired, historyStall } = $activeSession;
 		if (sessionId === unfinishedRestoresCheckedFor) return;
 		unfinishedRestoresCheckedFor = null;
-		if (!sessionId || !ownsComposer() || isLoadingSession || isRestoringSession || error || wsReconnectRequired || historyStall) return;
+		if (!sessionId || !editorRef || !ownsComposer() || isLoadingSession || isRestoringSession || error || wsReconnectRequired || historyStall) return;
 		unfinishedRestoresCheckedFor = sessionId;
 		// Not-sent rows by their id; sent prompts by text and occurrence (#1083).
 		const onScreen = new Set([
 			...messages.map((m) => m.metadata?.not_sent_id).filter((id): id is string => typeof id === 'string'),
 			...sentRowIdsOnScreen(messages),
 		]);
+		// A send still waiting for the cold-cache check when the page went away
+		// (pending-send-note.ts) comes back in front of the chat's draft.
+		const pending = takePendingSends(sessionId);
+		if (hasComposerDraft(pending)) {
+			const current = getDraftJSON();
+			setComposerDraft(hasComposerDraft(current) ? joinDrafts(pending, current) : pending);
+		}
 		const notes = takeUnfinishedRestores(sessionId, onScreen);
 		if (notes.length === 0) return;
 		activeSession.setPendingRestorePrompt(notes.map((n) => n.prompt).filter(Boolean).join('\n\n'), notes.flatMap((n) => n.uploadPaths));
@@ -1243,6 +1254,11 @@
 		const priorDraftJSON = getDraftJSON();
 		const priorInputValue = inputValue;
 		const priorUploadedFiles = uploadedFiles;
+		// The draft is cleared below, before the cold-cache check lets the
+		// message go: a reload in that wait finds the words here (S3).
+		const pendingNote = mayGo
+			? notePendingSend(destination.chat, priorDraftJSON, priorUploadedFiles.map((f) => f.full_path).filter(Boolean))
+			: null;
 
 		inputValue = '';
 		// Clearing text and its wrapped layout are one render, not a later rAF.
@@ -1266,20 +1282,13 @@
 			// in, with whatever was typed after it, and says so. A New Chat
 			// adopting the session its own create made (a worktree session whose
 			// first message was then refused) is still this view (#1636).
-			// A held send had already cleared the composer, so its words come
-			// back even when this composer has given way to another.
-			if (!held && !ownsComposer()) return;
+			// An account change or log-out retired this composer and cleared
+			// every draft; nothing of the old account's words comes back, held
+			// or not (PR #1212 review S1).
+			if (!ownsComposer()) return;
 			if (movedAwayFrom(destination, composerPlace())) {
 				if (held) messageSent = false;
 				keepUnsentDraft(destination, priorDraftJSON, true);
-				return;
-			}
-			if (!ownsComposer()) {
-				// Held, same chat, another composer now owns it: keep the words
-				// as that chat's draft.
-				messageSent = false;
-				activeSession.saveDraftForSession(destination.chat, priorDraftJSON);
-				writeDraft(destination.chat, priorDraftJSON);
 				return;
 			}
 			// Every refusal names its reason in the session's error or worktree
@@ -1339,6 +1348,9 @@
 				mayGoNow = mayGo ? await trackSend(mayGo) : true;
 			} finally {
 				released?.();
+				// Handed over or about to be put back: either way the note is done,
+				// so a reload never brings back words the server already has.
+				dropPendingSend(pendingNote);
 			}
 			if (!mayGoNow) {
 				restoreOnFailure(true);

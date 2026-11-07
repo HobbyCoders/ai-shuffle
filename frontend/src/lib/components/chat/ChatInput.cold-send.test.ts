@@ -5,6 +5,8 @@ import { activeSession } from '$lib/stores/active-session';
 import { auth } from '$lib/stores/auth.svelte';
 import { readDraft } from '$lib/stores/session/draft-persistence';
 import { reloadBlockers } from '$lib/services/app-update';
+import { bindSessionOwner } from '$lib/stores/session-owner';
+import { sessionEphemeralCache } from '$lib/stores/session-cache';
 import '$lib/test-stubs/composer-dom';
 
 // #1831: before a send into a large chat whose provider cache went cold, the
@@ -229,6 +231,85 @@ describe('cold send warning', () => {
 		await waitFor(() => expect(readDraft('cold')).toContain(TEXT));
 		expect(sends).not.toHaveBeenCalled();
 		expect(editor.textContent).toBe('');
+	});
+
+	// Review S1: an account change while the check waits retires this
+	// composer's text. Nothing of it may come back, in any place a draft lives.
+	function nothingOf(text: string) {
+		const stored = Object.keys(sessionStorage).map((key) => sessionStorage.getItem(key) ?? '');
+		expect(stored.filter((value) => value.includes(text))).toEqual([]);
+		expect(sessionEphemeralCache.peekDraft('cold') ?? '').not.toContain(text);
+		expect(activeSession.current.draft ?? '').not.toContain(text);
+	}
+	it.each([
+		['the cache answers cold', COLD],
+		['the cache answers warm', { ...COLD, warn: false, cold: false }],
+	])('puts nothing back after an account change during the check (%s)', async (_name, answerWith) => {
+		cache = answerWith;
+		const answer = holdCacheAnswer();
+		const { editor } = await submit();
+		expect(editor.textContent).toBe('');
+		bindSessionOwner('account-a', 'account-b');
+		answer();
+		await new Promise((resolve) => setTimeout(resolve, 30));
+		expect(sends).not.toHaveBeenCalled();
+		expect(editor.textContent).toBe('');
+		nothingOf(TEXT);
+	});
+	it('puts nothing back after a log-out that opens New chat during the check', async () => {
+		cache = { ...COLD, warn: false, cold: false };
+		const answer = holdCacheAnswer();
+		const { editor } = await submit();
+		bindSessionOwner('account-a', null);
+		activeSession.newChat();
+		answer();
+		await new Promise((resolve) => setTimeout(resolve, 30));
+		expect(sends).not.toHaveBeenCalled();
+		expect(editor.textContent).toBe('');
+		expect(readDraft('cold')).toBeNull();
+		nothingOf(TEXT);
+	});
+
+	// Review S3: a browser refresh while the check waits. The draft was already
+	// cleared and nothing reached the server, so the words live in a note.
+	const pendingNotes = () => Object.keys(sessionStorage).filter((key) => key.includes('pending-send'));
+	it('brings a held message back, chips included, after a reload during the check', async () => {
+		cache = COLD;
+		holdCacheAnswer();
+		activeSession.setDraft(JSON.stringify({ type: 'doc', content: [{ type: 'paragraph', content: [
+			{ type: 'text', text: TEXT + ' ' },
+			{ type: 'fileChip', attrs: { path: 'notes.txt', fullPath: '/uploads/notes.txt', filename: 'notes.txt', type: 'file' } }
+		] }] }));
+		const { editor } = await submit(true);
+		expect(editor.textContent).toBe('');
+		expect(readDraft('cold')).toBeNull();
+		expect(pendingNotes()).toHaveLength(1);
+		// The reload: the page goes, memory goes, this tab's storage stays.
+		const [key] = pendingNotes();
+		sessionStorage.setItem(key, JSON.stringify({ ...JSON.parse(sessionStorage.getItem(key)!), page: 'an-earlier-page' }));
+		cleanup();
+		sessionEphemeralCache.clear();
+		activeSession.newChat();
+		Object.assign(activeSession.current, { sessionId: 'cold', mode: 'chat', profile: 'coding', isStreaming: false });
+		activeSession.setDraft('');
+		const reloaded = render(ChatInput);
+		const after = reloaded.container.querySelector<HTMLElement>('.tiptap')!;
+		await waitFor(() => expect(after.textContent).toContain(TEXT));
+		expect(after.querySelector('[data-file-chip]')).toBeTruthy();
+		expect(readDraft('cold')).toContain(TEXT);
+		expect(pendingNotes()).toEqual([]);
+		expect(sends).not.toHaveBeenCalled();
+	});
+	it.each([
+		['put back by the notice', COLD],
+		['handed over once the check answers warm', { ...COLD, warn: false, cold: false }],
+	])('forgets the reload note once the message is %s', async (_name, answerWith) => {
+		cache = answerWith;
+		const answer = holdCacheAnswer();
+		await submit();
+		expect(pendingNotes()).toHaveLength(1);
+		answer();
+		await waitFor(() => expect(pendingNotes()).toEqual([]));
 	});
 
 	it('sends at once when the cache is warm or the chat is small', async () => {

@@ -5,6 +5,7 @@ import { activeSession } from '$lib/stores/active-session';
 import { auth } from '$lib/stores/auth.svelte';
 import { readDraft } from '$lib/stores/session/draft-persistence';
 import { notify } from '$lib/stores/notifications';
+import { sessionEphemeralCache } from '$lib/stores/session-cache';
 import type { Editor } from '@tiptap/core';
 import '$lib/test-stubs/composer-dom';
 
@@ -239,6 +240,40 @@ describe('New chat right after Send (#1077)', () => {
 		const kept = readDraft('chat-a') ?? '';
 		expect(kept.indexOf(TEXT)).toBeGreaterThanOrEqual(0);
 		expect(kept.indexOf('and the correction')).toBeGreaterThan(kept.indexOf(TEXT));
+	});
+
+	// PR #1212 review S2: Send, type a new draft, press New chat inside the
+	// draft debounce, then reopen chat A before the check answers. The newer
+	// text must come back with the called-off message, once.
+	it('keeps text typed after Send when New chat and reopening chat A both land during the check', async () => {
+		const view = render(ChatInput);
+		const editor = view.container.querySelector<HTMLElement>('.tiptap')! as HTMLElement & { editor: Editor };
+		await waitFor(() => expect(editor.textContent).toBe(TEXT));
+		await fireEvent.submit(view.container.querySelector('form')!);
+		await waitFor(() => expect(gate.release).toBeTruthy());
+		expect(editor.textContent).toBe('');
+
+		editor.editor.commands.insertContent('typed after send');
+		await waitFor(() => expect(editor.textContent).toBe('typed after send'));
+		// Inside the 100 ms debounce: nothing has saved the new words yet.
+		activeSession.newChat();
+		await waitFor(() => expect(editor.textContent).toBe(''));
+		// Reopen chat A the way the store does: its remembered draft comes back.
+		Object.assign(activeSession.current, { sessionId: 'chat-a', mode: 'chat', profile: 'coding', isStreaming: false });
+		activeSession.setDraft(sessionEphemeralCache.peekDraft('chat-a') || readDraft('chat-a') || '');
+		await waitFor(() => expect(editor.textContent).toBe('typed after send'));
+		gate.release!();
+		await new Promise((resolve) => setTimeout(resolve, 30));
+
+		expect(sends).not.toHaveBeenCalled();
+		await waitFor(() => expect(editor.textContent).toContain(TEXT));
+		const shown = editor.textContent ?? '';
+		expect(shown.indexOf('typed after send')).toBeGreaterThan(shown.indexOf(TEXT));
+		expect(shown.split('typed after send')).toHaveLength(2);
+		expect(shown.split(TEXT)).toHaveLength(2);
+		const kept = readDraft('chat-a') ?? '';
+		expect(kept.split('typed after send')).toHaveLength(2);
+		expect(kept.split(TEXT)).toHaveLength(2);
 	});
 
 	// Review S3: an editor first mounted in New chat, later moved to chat A.
