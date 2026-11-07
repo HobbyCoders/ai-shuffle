@@ -115,6 +115,54 @@ class _Hold:
         return self.maintenance or self.silent(now)
 
 
+# Cleanup runs off the driver lock and has a client-side bound even when
+# libpq's own connection lock stays held. Timed-out daemon owners retain their
+# connection reference until it is safe to close; it is never reused meanwhile.
+_POOL_CLEANUP_SECONDS = 0.5
+
+
+def _start_connection_cleanup(action, operation):
+    done = threading.Event()
+    succeeded = []
+
+    def run():
+        try:
+            action()
+            succeeded.append(True)
+        except Exception as exc:
+            logger.debug("PostgreSQL connection %s failed: %s", operation, type(exc).__name__)
+        finally:
+            done.set()
+
+    threading.Thread(target=run, name=f"db-{operation}", daemon=True).start()
+    return done, succeeded
+
+
+def _connection_cleanup(action, operation):
+    done, succeeded = _start_connection_cleanup(action, operation)
+    if not done.wait(_POOL_CLEANUP_SECONDS):
+        logger.warning("PostgreSQL connection %s exceeded cleanup deadline; discarded", operation)
+        return False
+    return bool(succeeded)
+
+
+def _close_connections(connections):
+    def close(conn):
+        if not conn.closed:
+            try:
+                conn.cancel()
+            except Exception:
+                pass
+            conn.close()
+
+    deadline = time.monotonic() + _POOL_CLEANUP_SECONDS
+    # One blocked cancel/close must not prevent any other socket's cleanup.
+    jobs = [_start_connection_cleanup(lambda conn=conn: close(conn), "close")
+            for conn in connections]
+    for done, _ in jobs:
+        done.wait(max(0, deadline - time.monotonic()))
+
+
 class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
     """Open the startup minimum, then retain healthy connections up to maxconn."""
 
@@ -128,6 +176,7 @@ class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
         self._waiters = deque()
         self._generation = 0
         self._closing = False
+        self._returning = set()
         self._exhaustion_logged = False
         self._pressure_lock = threading.Lock()
         self._pressure = dict.fromkeys((
@@ -158,7 +207,8 @@ class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
         self.startup_minconn = self.minconn
         # psycopg2 also uses minconn as its idle-retention limit in _putconn.
         # Raise it only AFTER construction so we don't eagerly open maxconn.
-        # Inherit the driver's locking, rollback/discard and shutdown paths.
+        # Keep driver admission/key bookkeeping, but never clean up libpq while
+        # holding its lock (rollback, cancel and close can all block).
         self.minconn = self.maxconn
 
 
@@ -389,8 +439,11 @@ class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
 
     def _getconn(self, key=None):
         # Called under the driver lock: admission is atomic with returns.
-        if self._closing:
+        if self._closing and not self.closed:
             raise psycopg2.pool.PoolError("connection pool is closing")
+        # A keyed caller must not reuse libpq while return is rolling it back.
+        if key in self._used and id(self._used[key]) in self._returning:
+            raise psycopg2.pool.PoolError("connection is being returned")
         # Existing keyed checkouts do not consume another slot.
         if (self._reserved and not _lease_checkout.get()
                 and key not in self._used
@@ -439,36 +492,59 @@ class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
             else:
                 self._last_returned[id(conn)] = time.monotonic()
 
-    def _putconn(self, conn, key=None, close=False):
-        try:
-            if self.closed and id(conn) in self._rused:
-                # closeall() also closes checked-out sockets, but psycopg2
-                # retains their bookkeeping and rejects their later returns.
-                # A borrower finishing during shutdown must discard, not try
-                # to roll back/reuse the socket or report a broken-pool error.
-                # Both paths run under the driver's same lock, so closeall
-                # cannot race this check or put the socket back in service.
-                if not conn.closed:
-                    conn.close()
-                held_key = self._rused.pop(id(conn), None)
-                if held_key is not None:
-                    self._used.pop(held_key, None)
+    def putconn(self, conn, key=None, close=False):
+        # Reserve the checkout while rolling back, but do not monopolize the
+        # driver lock. A timeout permanently removes it from service; the
+        # cleanup threads may still own libpq and must never race a new borrower.
+        with self._lock:
+            if self.closed:
+                self._putconn(conn, key, close=True)
                 return
-            super()._putconn(conn, key, close)
-        finally:
-            try:
-                if id(conn) not in self._rused:
-                    self._returned(conn, conn not in self._pool)
-            finally:
-                self._notify_available()
+            held_key = self._rused.get(id(conn))
+            if held_key is None or (key is not None and key != held_key):
+                raise psycopg2.pool.PoolError("trying to put unkeyed connection")
+            if id(conn) in self._returning:
+                raise psycopg2.pool.PoolError("connection is being returned")
+            self._returning.add(id(conn))
+        try:
+            if not close and not conn.closed:
+                status = conn.info.transaction_status
+                if status == psycopg2.extensions.TRANSACTION_STATUS_UNKNOWN:
+                    close = True
+                elif status != psycopg2.extensions.TRANSACTION_STATUS_IDLE:
+                    close = not _connection_cleanup(conn.rollback, "rollback")
+        except Exception:
+            # Shutdown may close the connection while cleanup is being prepared.
+            close = True
+        with self._lock:
+            discarded = self._putconn(conn, held_key, close)
+        if discarded and not conn.closed:
+            _connection_cleanup(conn.close, "close")
+
+    def _putconn(self, conn, key=None, close=False):
+        """Bookkeeping only, under the driver lock. No libpq calls here."""
+        held_key = self._rused.get(id(conn))
+        if held_key is None:
+            reason = "connection pool is closed" if self.closed else "trying to put unkeyed connection"
+            raise psycopg2.pool.PoolError(reason)
+        discarded = close or self.closed or self._closing or conn.closed
+        self._rused.pop(id(conn))
+        self._used.pop(held_key, None)
+        self._returning.discard(id(conn))
+        if not discarded:
+            self._pool.append(conn)
+        self._returned(conn, discarded)
+        self._notify_available()
+        # Shutdown already owns socket cleanup for late returns.
+        return discarded and not self.closed
 
     def shutdown(self, timeout: float = 3.0) -> None:
-        """Stop admission and let in-flight DB threads finish before socket close.
+        """Drain for timeout seconds, then allow one bounded cleanup window.
 
         Cancelling an asyncio.to_thread await does not stop its running thread.
-        Shutdown callers must leave the pool alive for those borrowers, but a
-        stuck query must not hang process shutdown indefinitely. The ordinary
-        closeall() remains an immediate force-close operation.
+        Neither cancel() nor close() is a client-side deadline: each can block
+        in libpq. Retire sockets atomically, then clean them up outside the
+        driver lock, allowing at most _POOL_CLEANUP_SECONDS after the drain.
         """
         deadline = time.monotonic() + timeout
         with self._lock:
@@ -487,32 +563,33 @@ class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
                 if not self._used or remaining <= 0:
                     borrowed = len(self._used)
                     if borrowed:
-                        # close() itself takes the connection lock, so closing
-                        # an executing query can outlive the drain deadline.
-                        # Cancel first to release that lock before socket close.
                         logger.warning("Closing PostgreSQL pool with %d borrowed connection(s) "
                                        "after %.1fs shutdown drain", borrowed, timeout)
-                        for conn in self._used.values():
-                            try:
-                                conn.cancel()
-                            except Exception:
-                                # Best effort: one failed cancellation must not
-                                # prevent cancelling the remaining borrowers.
-                                pass
-                    self._closeall()
+                    connections = self._closeall()
                     break
             with self._available:
                 if generation == self._generation:
                     self._available.wait(max(0, remaining))
 
+        _close_connections(connections)
+
+    def closeall(self):
+        with self._lock:
+            connections = self._closeall()
+        _close_connections(connections)
+
     def _closeall(self):
-        try:
-            super()._closeall()
-            # Discard means removed from service, even if socket close failed.
-            for conn in self._pool + list(self._used.values()):
-                self._returned(conn, True)
-        finally:
-            self._notify_available()
+        """Retire under the driver lock; callers clean up after releasing it."""
+        if self.closed:
+            raise psycopg2.pool.PoolError("connection pool is closed")
+        connections = self._pool + list(self._used.values())
+        self.closed = True
+        self._pool = []
+        # Retain borrowed keys so late returns are recognized, but never reused.
+        for conn in connections:
+            self._returned(conn, True)
+        self._notify_available()
+        return connections
 
 
 def init_pool(min_conn: int = 2, max_conn: int = 10) -> None:
@@ -838,7 +915,8 @@ def pressure_stats() -> Optional[Dict[str, Any]]:
     ``connections_stale`` counts the subset that failed their checkout health
     check — a rising count means the server is dropping idle connections
     (restart, failover, an idle NAT timeout shorter than the keepalive).
-    Hold durations include return/rollback cleanup, but not acquisition waits.
+    Hold durations include return/rollback cleanup, but not acquisition waits
+    or socket cleanup after a connection has been retired from service.
     ``oldest_hold_seconds`` is the true age; ``oldest_live_hold_seconds`` leaves
     out ``retained_holds``, checkouts PostgreSQL shows no work for (see
     ``_HOLD_CHECK_SECONDS``), and declared ``maintenance_holds``.

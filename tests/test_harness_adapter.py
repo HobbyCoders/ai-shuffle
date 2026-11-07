@@ -1134,6 +1134,9 @@ def _fluid_question_request(*, name="AskUser", message="Pick one?", schema=None)
 
 @pytest.mark.asyncio
 async def test_real_native_askuser_posts_continues_and_consumes_host_answer_once(monkeypatch):
+    from tests.shared_fixtures import seed_session
+
+    seed_session("real-native")
     import json
     from unittest.mock import AsyncMock
     from fluid.engine.native import NativeLoop
@@ -1379,6 +1382,9 @@ async def test_nonblocking_question_posts_before_terminal_without_response_op():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("answered_before_crash", [False, True])
 async def test_reconnect_retires_durable_host_answer_without_injecting_twice(monkeypatch, answered_before_crash):
+    from tests.shared_fixtures import seed_session
+
+    seed_session("native-post")
     from unittest.mock import AsyncMock
     from dataclasses import replace
     from app.core.user_question_handler import UserQuestionHandler

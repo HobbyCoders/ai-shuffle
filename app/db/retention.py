@@ -7,8 +7,8 @@ from app.db.base import get_db
 BATCH_SIZE = 5000
 
 
-def delete_batches(sql, params, *, cursor=None, advance=None, stop=None) -> int:
-    """Run a DELETE limited to ``BATCH_SIZE`` rows until it is drained.
+def delete_batches(sql, params, *, cursor=None, advance=None, stop=None, batch_size=None) -> int:
+    """Run a DELETE limited to ``batch_size`` (default ``BATCH_SIZE``) rows until it is drained.
 
     The SQL/params must include that limit. A supplied cursor retains its caller's
     transaction ownership AND the 30s timeout for the rest of that transaction;
@@ -32,7 +32,7 @@ def delete_batches(sql, params, *, cursor=None, advance=None, stop=None) -> int:
             with get_db() as conn:
                 deleted = delete(conn.cursor())
         total += deleted
-        if deleted < BATCH_SIZE:
+        if deleted < (batch_size or BATCH_SIZE):
             break
     return total
 

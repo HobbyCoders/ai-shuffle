@@ -96,8 +96,12 @@
 	// A new chat whose first send created its session: the layout's view follows
 	// it, so a reload reopens that chat (createdChatToFollow).
 	$effect(() => {
-		if (!bootReconciled) return;
+		// Track adoption even while boot is waiting. Only an admitted send in
+		// the CURRENT navigation generation may follow early, including after
+		// New Chat resets during boot. Init cannot restore under that claim;
+		// authenticated adoption rejects receipts from before the navigation.
 		const follow = createdChatToFollow($activeView, $activeSession?.sessionId ?? null);
+		if (!bootReconciled && !hasBootSendClaim(getInitGeneration())) return;
 		if (follow) layout.openChat(follow);
 	});
 	// Back/Forward onto a chat link's history entry (breadcrumb, transcript
@@ -241,7 +245,7 @@
 		// snapshot (see below). Settle that now, not after the loads: until then
 		// the composer was bound to the old session, so a send went there and the
 		// late newChat then wiped it from view (#1636).
-		const layoutNewChatWon = !navigationClaimed && !hasBootSendClaim(initGeneration) && !!$activeSession?.sessionId &&
+		const layoutNewChatWon = !navigationClaimed && !hasBootSendClaim(getInitGeneration()) && !!$activeSession?.sessionId &&
 			$activeView?.type === 'session' && ($activeView.sessionId ?? null) === null;
 		if (layoutNewChatWon) activeSession.newChat();
 		// What init left open. The composer works during the loads below, so a
@@ -290,7 +294,7 @@
 		const hasDraft = hasComposerDraft($activeSession.draft);
 		// A first message typed and sent during the loads: its chat (or the send
 		// still creating it) is what the user is looking at now (#811).
-		const changedDuringLoads = hasBootSendClaim(initGeneration) || chatChangedDuringBoot(sessionAfterInit, $activeSession);
+		const changedDuringLoads = hasBootSendClaim(getInitGeneration()) || chatChangedDuringBoot(sessionAfterInit, $activeSession);
 		if (!$activeView) {
 			if (restoredSessionId) {
 				followRestoredLane();
@@ -311,8 +315,8 @@
 			// clicked New Chat (layout persists synchronously) but the async backend
 			// persist may not have completed. Respect the layout's explicit intent.
 			// A session that appeared after init is not that stale one: a send
-			// made it during the loads (the layout follows it once boot is
-			// reconciled, createdChatToFollow), so it stays.
+			// made it during the loads (the boot-send claim lets the layout
+			// follow it early, createdChatToFollow), so it stays.
 			if (!layoutNewChatWon && !changedDuringLoads) activeSession.newChat();
 		} else if ($activeView.type === 'session' && currentViewSessionId !== restoredSessionId) {
 			// Layout view and active session disagree — backend is authoritative

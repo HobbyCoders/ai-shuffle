@@ -6,6 +6,7 @@ from tests.api.test_compact_first_delivery import query
 from app.api import commands
 from app.core import query_session_lifecycle
 from app.db import database,session_events,turns
+from tests.rewind_helpers import wait_for_rewind_release
 
 @pytest.fixture
 def rewind_chat(compact_chat,monkeypatch):
@@ -13,7 +14,11 @@ def rewind_chat(compact_chat,monkeypatch):
     transcript=Mock(side_effect=AssertionError("unsent restore must not inspect a model transcript"))
     monkeypatch.setattr(commands,'_get_checkpoints',transcript)
     monkeypatch.setattr(commands.jsonl_rewind_service,'truncate_to_checkpoint',transcript)
-    return compact_chat
+    try:
+        yield compact_chat
+    finally:
+        # Keep the request's own loop alive until its tracked writes release it.
+        compact_chat.portal.call(wait_for_rewind_release, 'compact-chat')
 
 async def test_unsent_api_restores_only_row_and_uploads_idempotently_after_reload(rewind_chat):
     session_events.append_events('compact-chat',[{'type':'message.user','payload':{'content':'earlier sent'}}])

@@ -138,12 +138,14 @@ export function bumpInitGeneration(): number {
 // this claim separate from the navigation epoch: adopting one's own new chat
 // is NOT navigation (ChatInput uses that distinction for draft recovery and
 // collapsing the phone composer). AppPage retires it after both boot reconciles.
-let bootSend: { generation: number; pendingSends: Set<symbol>; projectPicked: boolean } | null = null;
+// The lifetime belongs to the original init, but a send belongs to its CURRENT
+// navigation generation: New Chat can advance it while boot still awaits tags.
+let bootSend: { generation: number; pendingSends: Map<symbol, number>; projectPicked: boolean } | null = null;
 
 export function claimBootSend(): symbol | null {
-	if (bootSend?.generation !== getInitGeneration()) return null;
+	if (!bootSend) return null;
 	const claim = Symbol('boot-send');
-	bootSend.pendingSends.add(claim);
+	bootSend.pendingSends.set(claim, getInitGeneration());
 	return claim;
 }
 
@@ -152,7 +154,8 @@ export function releaseBootSend(claim: symbol | null): void {
 }
 
 export function hasBootSendClaim(generation: number): boolean {
-	return bootSend?.generation === generation && bootSend.pendingSends.size > 0;
+	return generation === getInitGeneration() && !!bootSend &&
+		[...bootSend.pendingSends.values()].includes(generation);
 }
 
 /**
@@ -214,7 +217,7 @@ export function createSessionInit(deps: SessionInitDeps) {
 	 */
 	async function init(options: { deepLinkSessionId?: string | null } = {}) {
 		const initGen = bumpInitGeneration();
-		bootSend = { generation: initGen, pendingSends: new Set(), projectPicked: false };
+		bootSend = { generation: initGen, pendingSends: new Map(), projectPicked: false };
 
 		const deepLinkSessionId = options.deepLinkSessionId || null;
 		const skipRestore = getSkipRestore() || deepLinkSessionId !== null;

@@ -6,6 +6,22 @@ from app.db import session_events as se
 from app.db import runs
 
 
+@pytest.fixture(autouse=True)
+def existing_sessions(mock_db):
+    # Event logs belong to sessions; these tests isolate allocation/projection,
+    # not creation. Missing-session rejection is covered explicitly below.
+    mock_db.executemany("INSERT INTO sessions (id) VALUES (?)", [(sid,) for sid in ("s1", "s2", "src", "dst")])
+    mock_db.commit()
+
+
+@pytest.mark.parametrize("writer", [se.append_events, se.append_backfill_events])
+def test_missing_session_rejects_and_rolls_back_counter(mock_db, writer):
+    with pytest.raises(ValueError, match="session.*does not exist"):
+        writer("missing", [{"type": "system.note", "payload": {}}])
+    for table in ("session_events", "session_event_counters"):
+        assert mock_db.execute(f"SELECT COUNT(*) FROM {table} WHERE session_id='missing'").fetchone()[0] == 0
+
+
 def test_swarm_projection_is_session_scoped_latest_and_first_publication_order(mock_db):
     def event(key, status):
         return {"type": "swarm.updated", "payload": {"swarm": {"id": key, "status": status}}}

@@ -220,7 +220,19 @@ def _branch(cwd, branch):
 
 
 def _status(cwd):
-    return git(cwd, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+    from app.core.git_worktree_ops import LFS_PASSTHROUGH_CONFIG, _is_lfs_failure
+    from fluid.context.runtime_facts import lfs_fallback_warning
+
+    # A receipt can outlive broken LFS. Honor repaired clean filters first so
+    # hydrated files still compare against their committed pointer correctly.
+    args = ("status", "--porcelain=v1", "-z", "--untracked-files=all")
+    result = _run(cwd, *args)
+    if (result.returncode and _is_lfs_failure(result.stderr.decode(errors="replace"))
+            and lfs_fallback_warning(str(cwd))):
+        result = _run(cwd, *LFS_PASSTHROUGH_CONFIG, *args)
+    if result.returncode:
+        raise ValueError("Git status failed during resume. Check Git credentials, hooks and branch conflicts on that worker; ownership has not moved.")
+    return result.stdout
 
 
 def _transfer_status(cwd):
@@ -426,15 +438,20 @@ def import_checkout(base, destination, state):
             # strands nothing. Ignored files are still never overwritten.
             git(dest, "checkout", "--no-overwrite-ignore", "-B", branch, head)
     else:
-        from app.core.git_worktree_ops import exclude_app_worktrees
-        exclude_app_worktrees(str(base), str(dest))
+        from app.core.git_service import git_service
+
         old = git(base, "for-each-ref", "--format=%(objectname)", "refs/heads/" + branch).decode().strip()
         if old:
             _require_published(base, branch, old, head, published, f"the receiving worker's repository {base}")
             git(base, "update-ref", "refs/heads/" + branch, head, old)
-            git(base, "worktree", "add", str(dest), branch)
-        else:
-            git(base, "worktree", "add", "-b", branch, str(dest), head)
+        success, detail = git_service.add_worktree(
+            str(base), str(dest), branch, new_branch=not bool(old),
+            base_branch=head, fetch_base=False,
+        )
+        if not success:
+            raise ValueError(f"Git failed to import checkout: {detail}")
+    # add_worktree records any fallback receipt before this verification; later
+    # handoff checks use the same receipt-aware, command-only filter overrides.
     if fingerprint(dest) != head:
         raise ValueError("The receiving checkout changed during resume; ownership was not moved.")
     git(dest, "branch", "--set-upstream-to=origin/" + branch, branch)

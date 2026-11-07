@@ -97,10 +97,12 @@ def write_shared_many(session_ids: list[str], active: bool) -> list[dict]:
     rows = []
     with get_db() as conn:
         cur = conn.cursor()
+        from app.db.session_locks import lock_multi_session_mutation, lock_session_runtimes
+        lock_multi_session_mutation(cur)
         store.lock_state(cur)
+        locked = lock_session_runtimes(cur, session_ids)
         for session_id in session_ids:
-            cur.execute("SELECT * FROM sessions WHERE id=%s FOR UPDATE", (session_id,))
-            if cur.fetchone() is None:
+            if locked[session_id] is None:
                 continue
             membership_envelope = _record_active(cur, session_id, active)
             cur.execute("SELECT * FROM sessions WHERE id=%s", (session_id,))

@@ -53,7 +53,6 @@ The gate and the baseline are therefore keyed per dir, not per memory_key.
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import logging
 import re
@@ -66,6 +65,7 @@ from app.core.jsonl_parser import get_project_dir_name
 from app.core.project_utils import get_project_working_dir
 from app.db import agent_memory as memdb
 from app.db import database
+from app.db.async_database import run_sync
 
 logger = logging.getLogger(__name__)
 
@@ -423,7 +423,7 @@ async def reconcile_memory(project_id: Optional[str], working_dir: Optional[str]
     if not settings.agent_memory_sync:
         return
     try:
-        await asyncio.to_thread(reconcile_memory_sync, project_id, working_dir, leg)
+        await run_sync(reconcile_memory_sync, project_id, working_dir, leg)
     except Exception:  # noqa: BLE001
         logger.debug("memory_sync: reconcile failed", exc_info=True)
 
@@ -433,6 +433,6 @@ async def push_memory(project_id: Optional[str], working_dir: Optional[str],
     if not settings.agent_memory_sync:
         return
     try:
-        await asyncio.to_thread(push_memory_sync, project_id, working_dir, leg)
+        await run_sync(push_memory_sync, project_id, working_dir, leg)
     except Exception:  # noqa: BLE001
         logger.debug("memory_sync: push failed", exc_info=True)

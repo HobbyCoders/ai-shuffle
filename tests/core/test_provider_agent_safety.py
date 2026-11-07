@@ -44,12 +44,14 @@ PARENT = "parent-session"
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
-def db():
+def db(session_factory):
     """Route the DB layer at a fresh in-memory schema for this test."""
     from tests.pg_shim import new_sqlite_connection, route_db_to
 
     conn = new_sqlite_connection()
     with route_db_to(conn):
+        for session_id in (PARENT, PARENT + "-b", "a", "b", *(f"w{i}" for i in range(20))):
+            session_factory(session_id)
         yield conn
     conn.close()
 

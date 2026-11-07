@@ -389,6 +389,10 @@ async def test_page_probe_recovers_a_wedged_renderer_without_touching_profile(mo
             elif method == "Target.createTarget":
                 repaired = True
                 result = {"targetId": "new"}
+            if failure is None and not docker:
+                # Reproduce a loaded runner's healthy reply arriving after the
+                # old blanket 0.5s test deadline, without depending on CPU load.
+                await asyncio.sleep(0.6)
             await ws.send(json.dumps({"id": message["id"], "result": result}))
 
     async with websockets.serve(endpoint, "127.0.0.1", 0) as server:
@@ -402,10 +406,20 @@ async def test_page_probe_recovers_a_wedged_renderer_without_touching_profile(mo
             return [{"type": "page", "id": target, "webSocketDebuggerUrl": base + "/page/" + target}]
 
         monkeypatch.setattr(nc, "cdp_get", get)
-        # Bounds every CDP command, including the cleanup closeTarget: 50 ms
-        # was shorter than a loaded CI runner's connect + handshake, so that
-        # close was swallowed and never reached the fake endpoint.
-        monkeypatch.setattr(nc, "_PAGE_PROBE_TIMEOUT_S", 0.5)
+        # Accelerate ONLY intentionally wedged requests. Healthy CDP transport
+        # keeps the production deadline: a blanket 0.5s budget timed out valid
+        # replies/handshakes on loaded runners and falsely failed page repair.
+        real_command = nc._cdp_command
+
+        async def command(url, method, params):
+            wedged = url.endswith("/page/stuck") or (url.endswith("/page/new") and failure == "replacement")
+            if wedged:
+                with monkeypatch.context() as patch:
+                    patch.setattr(nc, "_PAGE_PROBE_TIMEOUT_S", 0.5)
+                    return await real_command(url, method, params)
+            return await real_command(url, method, params)
+
+        monkeypatch.setattr(nc, "_cdp_command", command)
         monkeypatch.setattr(nc, "_health_states", {})
         monkeypatch.setattr(nc, "_browser_in_use", lambda: False)
         monkeypatch.setattr(nc, "_health_now", lambda: clock[0])

@@ -1,4 +1,6 @@
 """Owner links require replacement evidence, not a few coincidental words."""
+import pytest
+
 from fluid.codemode.skills import SkillStore
 from fluid.codemode.facts import global_id
 from fluid.codemode.supersession import subject_terms
@@ -7,17 +9,59 @@ OLD = "Owner project rule: Claude Code parity includes journal learning and mult
 NEW = "Owner project rule: speed sprint jobs use Sol; Claude Code handles the review."
 
 
-def test_unrelated_owner_rules_cannot_be_proposed_as_replacements(tmp_path):
+@pytest.mark.parametrize(("old_text", "new_text"), [
+    pytest.param(OLD, NEW, id="parity-vs-job-routing"),
+    pytest.param(
+        "Project collaboration rule: Claude CLI sign-in stays local to each worker; "
+        "the shared dashboard manages all workers and provider accounts.",
+        "Project coding rule: a speed sprint uses Sol for all workers and provider "
+        "dashboard work; Claude CLI follows the ordinary routing after the sprint.",
+        id="worker-sign-in-vs-job-routing",
+    ),
+    pytest.param(
+        "Project testing rule: bypass mode in Claude CLI still performs safety checks "
+        "before executing commands in the live workflow.",
+        "Project testing workflow: use Sol for live workflow implementation and "
+        "Claude CLI for review; this coding assignment has its own model routing.",
+        id="cli-safety-vs-job-routing",
+    ),
+])
+def test_unrelated_owner_rules_cannot_be_proposed_as_replacements(tmp_path, old_text, new_text):
     store = SkillStore(tmp_path)
-    old = store.save_memory(OLD, protected=True, scope="project:fixture")
-    new = store.save_memory(NEW, protected=True, scope="project:fixture")
-    assert len(subject_terms(OLD) & subject_terms(NEW)) >= 3
+    old = store.save_memory(old_text, protected=True, scope="project:fixture")
+    new = store.save_memory(new_text, protected=True, scope="project:fixture")
+    assert len(subject_terms(old_text) & subject_terms(new_text)) >= 3
     assert not store.propose_memory_supersession(
         old.id, new.id, old_revision=old.revision, new_revision=new.revision,
         protected_conflict=True)
     assert not next(e for e in store.memories() if e.id == old.id).superseded_by
     section = store.render_memory_section("project:fixture")
-    assert OLD in section and NEW in section
+    assert set(store.memory_snapshot_plan("project:fixture")["shown_ids"]) == {old.id, new.id}
+    assert {e.text for e in store.memories()} == {old_text, new_text}
+    assert "do not use the old value" not in section
+
+
+def test_genuine_protected_replacement_is_still_accepted(tmp_path, monkeypatch):
+    old_text = "Project code review runs on model Astra; backend implementation uses Sol."
+    new_text = "Project code review runs on model Vega, replacing Astra; backend implementation uses Sol."
+    store = SkillStore(tmp_path)
+    # Recreate a pair saved before automatic linking, then use the learner's
+    # public producing path rather than only the replacement-evidence helper.
+    with monkeypatch.context() as patch:
+        patch.setattr(store._facts, "_apply_supersessions", lambda *args, **kwargs: [])
+        old = store.save_memory(old_text, protected=True, scope="project:fixture")
+        new = store.save_memory(new_text, protected=True, scope="project:fixture")
+    assert store.propose_memory_supersession(
+        old.id, new.id, old_revision=old.revision, new_revision=new.revision,
+        protected_conflict=True)
+    current = next(e for e in store.memories() if e.id == old.id)
+    assert current.superseded_by == global_id(vars(new))
+    # Both texts are owner-kept and the newer one explicitly names the old
+    # value: automatic repair can confirm this genuine owner correction.
+    assert current.supersession_confirmed
+    assert store.memory_snapshot_plan("project:fixture")["shown_ids"] == [new.id]
+    assert {e.text for e in store.memories()} == {old_text, new_text}
+    assert not store.archived_memories()
 
 
 def test_existing_false_owner_link_is_repaired_and_stale_replica_cannot_restore_it(tmp_path):
