@@ -22,7 +22,9 @@
 //                          (from a chat, the new-session screen or a link;
 //                          held, or answered with a server error then Retry)
 //   first-message-reveal   the column's reveal and the composer's slide play
-//                          when a first message leaves the hero
+//                          when a first message leaves the hero; the composer
+//                          travels one way, hero to dock (#1085), and not at
+//                          all where the hero already docks it (#1073)
 //   mirror-pane-during-live-reveal
 //                          #916: the mirror pane stays anchored when a chat of
 //                          unknown owner opens while that reveal runs
@@ -365,13 +367,18 @@ const deepLinkLateIdentity = async ({ page, status, mark, variant, log }) => {
 };
 
 // The other half of #916: the reveal itself. A first message from an empty chat
-// plays messageAreaReveal and inputSlideDown (a cold link must not, above), and
-// the overlays that sit on the message wrapper stay anchored to it throughout.
+// plays messageAreaReveal and, where the hero centred the composer, the
+// composer's measured slide to the dock (a cold link must not, above). A
+// phone-width hero already docks its composer, so it does not slide (#1073).
+// The overlays that sit on the message wrapper stay anchored throughout.
 const sampleReveal = (ctx) => ctx.page.addInitScript(() => {
-	const probe = window.__reveal = { frames: [], armed: false, stop: false, clicked: false };
+	const probe = window.__reveal = { frames: [], tops: [], armed: false, stop: false, clicked: false };
 	const near = (a, b) => Math.abs(a - b) < 1;
 	const sample = () => {
 		if (probe.stop) return;
+		// The composer's top every frame from before the send, hero included.
+		const slot = probe.armed && document.querySelector('.input-slot');
+		if (slot) probe.tops.push(slot.getBoundingClientRect().top);
 		const wrapper = document.querySelector('.message-area-wrapper');
 		const transitioning = !!document.querySelector('.chat-view.transitioning-from-empty');
 		if (probe.armed && wrapper) {
@@ -382,7 +389,7 @@ const sampleReveal = (ctx) => ctx.page.addInitScript(() => {
 				transitioning,
 				pane: !!pane,
 				reveal: wrapper.getAnimations().some(a => a.animationName.includes('messageAreaReveal') && a.playState === 'running'),
-				slide: !!document.querySelector('.input-wrapper')?.getAnimations().some(a => a.animationName.includes('inputSlideDown') && a.playState === 'running'),
+				slide: !!document.querySelector('.input-slot')?.getAnimations().some(a => a.id === 'composer-dock' && a.playState === 'running'),
 				overlayAnchored: document.querySelector('.reconnect-status-slot')?.offsetParent === wrapper,
 				paneAnchored: pane ? pane.offsetParent === wrapper : null,
 				paneFills: rect ? near(rect.left, box.left) && near(rect.top, box.top) && near(rect.width, box.width) && near(rect.height, box.height) : null
@@ -398,7 +405,7 @@ const sampleReveal = (ctx) => ctx.page.addInitScript(() => {
 	requestAnimationFrame(sample);
 });
 
-const firstMessageReveal = async ({ page, mark }) => {
+const firstMessageReveal = async ({ page, mark, log, variant }) => {
 	await mark('send the first message from a new chat');
 	await page.evaluate(() => { window.__reveal.armed = true; window.__reveal.clicked = true; });
 	await typeAndSend(page, `reveal ${uniq()}`);
@@ -407,10 +414,28 @@ const firstMessageReveal = async ({ page, mark }) => {
 		return frames.some(frame => frame.transitioning) && !frames.at(-1).transitioning;
 	});
 	await waitTurnSettled(page, { messagesAtLeast: 2 });
-	const frames = await page.evaluate(() => { window.__reveal.stop = true; return window.__reveal.frames; });
+	const { frames, tops } = await page.evaluate(() => { window.__reveal.stop = true; return window.__reveal; });
+	// #1085, #1073: the composer travels from where it was to where it lands, in
+	// one direction: no first frame above the hero (a fixed -30vh start), no dip
+	// past the dock (an overshooting curve), and no move where the hero docks it.
+	expect(tops.length > 4, 'the composer was sampled through the first send');
+	const [from, to] = [tops[0], tops.at(-1)];
+	let direction = 0, reversals = 0;
+	for (let i = 1; i < tops.length; i++) {
+		const step = Math.sign(Math.round(tops[i] - tops[i - 1]));
+		if (step && direction && step !== direction) reversals++;
+		if (step) direction = step;
+	}
+	log(`first send composer tops ${JSON.stringify([...new Set(tops.map(Math.round))])}`);
+	if (variant.viewport === 'desktop') expect(to - from > 50, `the desktop composer really moved from the hero to the dock (${(to - from).toFixed(1)}px)`);
+	else expect(Math.max(...tops) - Math.min(...tops) <= 2, `an already-docked composer stays put (${(Math.max(...tops) - Math.min(...tops)).toFixed(1)}px)`);
+	expect(Math.min(...tops) >= Math.min(from, to) - 2, `the composer never starts above where it was (${Math.min(...tops).toFixed(1)} vs ${from.toFixed(1)})`);
+	expect(Math.max(...tops) <= Math.max(from, to) + 2, `the composer never overshoots the dock (${Math.max(...tops).toFixed(1)} vs ${to.toFixed(1)})`);
+	expect(reversals === 0, `the composer moves in one direction (${reversals} reversals)`);
 	const revealing = frames.filter(frame => frame.transitioning);
 	expect(revealing.some(frame => frame.reveal), 'the message column must play its reveal on a first message');
-	expect(revealing.some(frame => frame.slide), 'the composer must slide down from the hero on a first message');
+	if (variant.viewport === 'desktop') expect(revealing.some(frame => frame.slide), 'the composer must slide down from the hero on a first message');
+	else expect(frames.every(frame => !frame.slide), 'an already-docked composer must not slide on a first message');
 	expect(frames.every(frame => frame.overlayAnchored), 'the column overlays must keep the message wrapper as their containing block through the reveal');
 	expect(frames.filter(frame => !frame.transitioning).every(frame => !frame.reveal && !frame.slide), 'the reveal must end with its class');
 };

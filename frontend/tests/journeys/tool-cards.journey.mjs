@@ -220,8 +220,12 @@ const nestedCompletion = {
 		const token = `nested-${uniq()}`;
 		await typeAndSend(page, `${token}\n${fakeAiTag(variant, 'tool-nested-worker')}`);
 		const root = await chatIdByToken(page, token);
-		const worker = (await waitForTaskSnapshot(page, root, tasks => tasks.find(t => t.kind === 'agent' && t.status === 'running'))).id;
-		await waitForTaskSnapshot(page, worker, tasks => tasks.some(t => t.status === 'running'));
+		// The root's task list carries every Task under it, the nested leaf
+		// included, newest first. Pick the worker by its agent: "the first
+		// running agent" is the leaf once it has started, and the leaf has no
+		// task of its own to wait for (#1248).
+		const worker = (await waitForTaskSnapshot(page, root, tasks => tasks.find(t => t.kind === 'agent' && t.agent === 'nested-worker' && t.status === 'running'))).id;
+		await waitForTaskSnapshot(page, worker, tasks => tasks.some(t => t.agent === 'nested-leaf' && t.status === 'running'));
 		await page.goto(new URL(`/?session=${worker}`, status.urls.ui).href);
 		await page.locator('.inline').filter({ hasText: 'Agents' }).waitFor({ timeout: 15_000 });
 		ctx.worker = worker;

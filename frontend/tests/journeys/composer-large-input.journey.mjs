@@ -13,8 +13,9 @@
 // or paste, and where the caret and field are afterwards.
 //
 // Cases:
-//   fill-newlines        fill the issue's input and check it; send it after the
-//                        recording (#933) and the reply settles
+//   fill-newlines        fill the issue's input and check it; send it with a
+//                        slow cache check, and the composer collapses at the
+//                        click (#933) and the reply settles
 //   paste-newlines       the same text from the clipboard with Ctrl+V
 //   plain-paste-200k     200 KB with Ctrl+Shift+V stays inline and usable
 //
@@ -123,14 +124,39 @@ await runJourney({
 				expect(filled.chars === text.length, `the whole message is in the composer (${filled.chars} of ${text.length})`);
 				expectUsable(filled, 'after the fill');
 				expect(await sendButton(page).isEnabled(), 'Send is enabled');
-			},
-			// The send is checked after the recording: the tall composer collapses
-			// only once the cold-cache check answers, which on a slow runner lands
-			// past Chrome's 500 ms input window and reads as a shift without input
-			// (known bug #933, the send flow, not this journey's input subject).
-			async verify({ page, token }) {
+				// The send is recorded too (#933): the tall composer collapsed only
+				// once the cold-cache check answered, which past Chrome's 500 ms
+				// input window read as a shift without input. The answer is held
+				// past that window here (under the check's 1.5 s cap), so the
+				// recorder catches a collapse that waits for it on any runner.
+				await page.route('**/cache-state', async (route) => {
+					await new Promise((resolve) => setTimeout(resolve, 1_000));
+					await route.continue();
+				});
+				// Read the order in the page, not by the clock: on a throttled CPU the
+				// click's own task (clearing a thousand lines) can outlast the hold.
+				await page.evaluate(() => {
+					const probe = window.__sendProbe = { asked: null, answered: null };
+					const field = document.querySelector('[role="textbox"][aria-label="Message"]');
+					const fetch = window.fetch;
+					window.fetch = async (...args) => {
+						const checking = String(args[0] instanceof Request ? args[0].url : args[0]).includes('/cache-state');
+						if (checking) probe.asked = field.editor.isEmpty;
+						const response = await fetch(...args);
+						if (checking) probe.answered = field.editor.isEmpty;
+						return response;
+					};
+				});
+				await mark('send while the cache check is slow');
 				await sendButton(page).click();
 				await waitTurnSettled(page, { messagesAtLeast: 4 });
+				await page.unroute('**/cache-state');
+				const probe = await page.evaluate(() => window.__sendProbe);
+				expect(probe.asked !== null, 'the send asked for the cache state');
+				expect(probe.asked && probe.answered,
+					`the composer is already empty when the cache check is asked and answered (${JSON.stringify(probe)})`);
+			},
+			async verify({ page, token }) {
 				expect((await countUserRows(page, token)) === 1, 'the message shows once');
 				expect((await composer(page).innerText()).trim() === '', 'the composer is empty after the send');
 			}

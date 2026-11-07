@@ -182,6 +182,35 @@ def test_elevation_includes_supervisor_and_preserves_runner_cache(monkeypatch):
     assert helper.KILL_AFTER_SECONDS == 10
 
 
+def assert_authenticated_apt_options(options):
+    # Reject the option names, not just one CLI spelling or one true value.
+    # Leaf names also catch apt's nested scope syntax and case-insensitive keys.
+    for forbidden in ("--allow-unauthenticated", "allowunauthenticated",
+                      "allowinsecurerepositories", "allowdowngradetoinsecurerepositories",
+                      "trusted"):
+        assert forbidden not in options.lower(), f"insecure apt option: {forbidden}"
+
+
+@pytest.mark.parametrize("option", [
+    '--allow-unauthenticated',
+    '-o APT::Get::AllowUnauthenticated=true',
+    'APT::Get::AllowUnauthenticated "true";',
+    'Acquire::AllowInsecureRepositories "true";',
+    'Acquire::AllowDowngradeToInsecureRepositories "true";',
+    'deb [trusted=yes] https://example.invalid stable main',
+    '--option=APT::Get::AllowUnauthenticated=1',
+    '-o Acquire::AllowInsecureRepositories=yes',
+    '-o Acquire::AllowDowngradeToInsecureRepositories=1',
+    'APT { Get { AllowUnauthenticated "true"; }; };',
+    'apt::get::allowunauthenticated "yes";',
+    'deb [Trusted=Yes] https://example.invalid stable main',
+])
+def test_authentication_guard_rejects_insecure_mutations(option):
+    helper = load_helper()
+    with pytest.raises(AssertionError):
+        assert_authenticated_apt_options(helper.APT_OPTIONS + "\n" + option)
+
+
 def test_apt_config_reuses_installed_packages_without_upgrades(tmp_path):
     helper = load_helper()
     # A non-root simulation rebuilds an unwritable system package cache from
@@ -213,8 +242,7 @@ def test_apt_config_reuses_installed_packages_without_upgrades(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
     assert "Skipping libc6, it is already installed and upgrade is not set" in result.stdout
     assert "0 upgraded, 0 newly installed" in result.stdout
-    assert '--allow-unauthenticated' not in helper.APT_OPTIONS
-    assert 'trusted' not in helper.APT_OPTIONS
+    assert_authenticated_apt_options(helper.APT_OPTIONS)
     assert 'Acquire::Languages "none"' in helper.APT_OPTIONS
 
 

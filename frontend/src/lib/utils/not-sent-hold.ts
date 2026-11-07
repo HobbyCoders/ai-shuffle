@@ -6,8 +6,9 @@
  * the work summary). A row is taller than its bubble and sits below that reply,
  * so showing rows early moves them, and any bubbles under them, while the person
  * is reading. Instead each stays a bubble of the same size until the turn ends,
- * then they all change in the one update that ends it, or, when a message sent
- * after Stop is waiting below them, when that message leaves the queue. The row is
+ * then they all change once the turn and its background tasks end (with bounded
+ * recovery if a task survives Stop), or, when a message sent after Stop waits
+ * below them, when that message leaves the queue. The row is
  * already in the transcript's data, so a reload while the turn still runs replays it and shows
  * the same bubbles. Once the turn has ended a reload shows rows at once.
  */
@@ -18,6 +19,8 @@ export interface NotSentHold {
 	messages: ChatMessage[];
 	/** Held rows as bubbles, in transcript order. */
 	bubbles: QueuedMessage[];
+	/** Re-evaluate at this deadline even if a surviving task emits no more events. */
+	recoverAt?: number;
 }
 
 const NOTHING_HELD: QueuedMessage[] = [];
@@ -43,21 +46,37 @@ export function createNotSentHold() {
 	let lastMessages: ChatMessage[] | null = null;
 	let lastTurnId: string | null | undefined;
 	let lastQueued: QueuedMessage[] | null = null;
+	let lastRunningTasks = false;
+	let recoverAt: number | null = null;
 	let heldFor: string | null = null;
 	let last: NotSentHold = { messages: [], bubbles: NOTHING_HELD };
-	return (messages: ChatMessage[], liveTurnId: string | null | undefined, queued: QueuedMessage[] = NOTHING_HELD): NotSentHold => {
-		if (messages !== lastMessages || liveTurnId !== lastTurnId || queued !== lastQueued) {
+	return (messages: ChatMessage[], liveTurnId: string | null | undefined, queued: QueuedMessage[] = NOTHING_HELD, runningTasks = false, now = Date.now()): NotSentHold => {
+		const expired = recoverAt !== null && now >= recoverAt;
+		if (messages !== lastMessages || liveTurnId !== lastTurnId || queued !== lastQueued || runningTasks !== lastRunningTasks || expired) {
 			// A message sent after Stop is still waiting below these when the turn
 			// ends. Changing them now would push it down the screen, with its own
 			// turn about to replace it anyway, so they wait for it. A hold only ever
 			// continues: rows already showing never go back to being bubbles.
-			const carriedOver = !liveTurnId && heldFor !== null && queued.some(q => !last.bubbles.some(b => b.id === q.id));
+			// Stop ends the turn and its background tasks on separate feed frames.
+			// Do not push the still-visible task list down with taller rows in the
+			// gap: release with the update that removes it, not turn end alone.
+			// A task may deliberately survive Stop or never confirm cancellation.
+			// Give its settlement the same ten-second recovery bound as Stop;
+			// feed updates cannot extend that absolute deadline.
+			const settlingTasks = !liveTurnId && heldFor !== null && runningTasks;
+			if (settlingTasks && recoverAt === null) recoverAt = now + 10_000;
+			const carriedOver = !expired && !liveTurnId && heldFor !== null && (
+				runningTasks || queued.some(q => !last.bubbles.some(b => b.id === q.id))
+			);
 			const turn = liveTurnId ?? (carriedOver ? heldFor : null);
 			last = holdNotSentRows(messages, turn);
+			if (expired || !settlingTasks || last.bubbles.length === 0) recoverAt = null;
+			if (recoverAt !== null) last = { ...last, recoverAt };
 			heldFor = last.bubbles.length > 0 ? turn ?? null : null;
 			lastMessages = messages;
 			lastTurnId = liveTurnId;
 			lastQueued = queued;
+			lastRunningTasks = runningTasks;
 		}
 		return last;
 	};

@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "fingerprint": "9fbe9c65e577a67d0637375ee2dd3101029d2ebc9fd146a65700884d40f31ced",
-  "bundle_sha256": "748a7b28272480d302bb7cf025d8244e8cc5b28630b7eceab3bf7be0f8ba41dd",
+  "fingerprint": "ccc10cf9661d34ce3cd9bcadcebd4bcd62cb08d38de6ff8e8cd08d7912a7c2f7",
+  "bundle_sha256": "b7b693937ecda38f6f0ff06d339e80f6be33849dbc8949928216b12bfc00a60f",
   "minimum_node_major": 22,
   "canonical_sources": {
     "app/api/events.py": "83fb522454a8f00ca6e139040f82b3f320904c0cc18b3e283b3ae2e2f542b40e",

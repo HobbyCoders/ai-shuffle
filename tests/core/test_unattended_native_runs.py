@@ -34,6 +34,7 @@ from app.core.automation_manager import AutomationManager
 from app.core.config import settings
 from app.core.connectors.base import BaseConnector, IncomingMessage, OutgoingMessage
 from app.db import database
+from tests._admission_cleanup import cleanup_deadline
 from tests.core.interaction_harness import (  # noqa: F401  (autouse fixtures)
     no_gateway_listener,
     no_push,
@@ -88,8 +89,21 @@ def project(tmp_path) -> Path:
     return root
 
 
+async def _wait_for_native_writes(calls):
+    from app.core.provider import session_admission
+
+    # A durable idle turn / completed automation row can precede the runtime's
+    # final executor writes. Wait for this fixture's own admissions to exit
+    # naturally, before disconnecting the pool or closing the fake provider.
+    with cleanup_deadline(asyncio.get_running_loop()):
+        for session_id in {call["session_id"] for call in calls}:
+            lease = session_admission._holders.get(session_id)
+            if lease is not None:
+                await lease.exited.wait()
+
+
 @pytest.fixture
-async def provider(mock_db, monkeypatch):
+async def provider(mock_db, monkeypatch, pump_calls):
     """The fake provider behind the app's native Anthropic leg, plus the
     scheduler seams the app installs at boot."""
     server = fps.FakeProviderServer()
@@ -113,6 +127,7 @@ async def provider(mock_db, monkeypatch):
     finally:
         from app.core.session_pool import get_session_pool
 
+        await _wait_for_native_writes(pump_calls)
         await get_session_pool().shutdown()
         turn_manager.register_kick(None)
         from app.core import session_runtime
@@ -529,6 +544,61 @@ async def test_max_cost_per_run_only_logs(provider, project, caplog):
     assert run["status"] == "completed" and run["output_status"] == "delivered"
     assert run["cost_usd"] > 0.0000001
     assert any("exceeded per-run cost" in r.getMessage() for r in caplog.records)
+
+
+async def test_native_run_cleanup_waits_for_its_own_final_write(
+    provider, project, pump_calls, monkeypatch,
+):
+    import threading
+
+    from app.core import session_runtime
+    from app.core.provider import session_admission
+    from app.db import runs as runs_db
+
+    original = session_runtime.SessionRuntime._release_lease_after_writes
+    loop = asyncio.get_running_loop()
+    started = asyncio.Event()
+    release_write = threading.Event()
+    waiting = asyncio.Event()
+    cleanup = None
+
+    async def final_write(self, recorder, renew_task, run_id, fence_token):
+        await original(self, recorder, renew_task, run_id, fence_token)
+
+        def write():
+            loop.call_soon_threadsafe(started.set)
+            assert release_write.wait(RUN_BUDGET), "final write was not released"
+            return runs_db.release_run(run_id, fence_token)
+
+        # Real executor dispatch in the native runtime's admission context:
+        # closing must retain its lease even though the automation is completed.
+        loop.run_in_executor(None, write)
+        await started.wait()
+
+    monkeypatch.setattr(session_runtime.SessionRuntime, "_release_lease_after_writes", final_write)
+    agent = _agent(project)
+    _automation(agent)
+    autos = Automations()
+
+    async def settle():
+        waiting.set()
+        await _wait_for_native_writes(pump_calls)
+
+    try:
+        run = await _run_once(autos, provider, "Recorded before the final write returns.")
+        await asyncio.wait_for(started.wait(), RUN_BUDGET)
+        assert run["status"] == "completed"
+        lease = session_admission._holders[run["session_id"]]
+        cleanup = asyncio.create_task(settle())
+        await asyncio.wait_for(waiting.wait(), RUN_BUDGET)
+        assert not cleanup.done()
+        assert not lease.exited.is_set()
+    finally:
+        release_write.set()
+        if cleanup is not None:
+            await cleanup
+
+    assert lease.exited.is_set()
 
 
 # ─── connector turns ────────────────────────────────────────────────────────

@@ -18,6 +18,7 @@ import {
 	type ModelProvider
 } from '$lib/api/model-providers';
 import { providers } from '$lib/stores/providers.svelte';
+import { randomUUID } from '$lib/utils/id';
 
 export const GROK_DEFAULT_DESCRIPTION =
 	"A reset clears your weekly usage once. Resets don't stack and expire on their date.";
@@ -152,7 +153,7 @@ export class BankedResets {
 		const attempt =
 			this.#pendingAttempt?.creditId === creditId
 				? this.#pendingAttempt
-				: { creditId, idempotencyKey: crypto.randomUUID() };
+				: { creditId, idempotencyKey: randomUUID() };
 		this.#pendingAttempt = attempt;
 		this.consumingCreditId = creditId;
 		this.consumeError = null;
