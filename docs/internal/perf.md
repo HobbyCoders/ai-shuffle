@@ -242,7 +242,7 @@ latency so a cheaper synthetic window cannot masquerade as a field win.
 The measurement-only `scripts/perf/sync_bench.py` starts the real
 `python -m scripts.devloop up --workers 2` lease with its fake AI provider,
 separate disposable databases and isolated homes. It never attaches to an
-existing worker. Linux/macOS only (`resource`, process pause/resume). First
+existing worker. Linux only (`scripts.devloop up` rejects other platforms). First
 install the documented devloop dependencies and build/stamp the desktop UI:
 
 ```sh
@@ -254,8 +254,15 @@ python -m scripts.perf.sync_bench run --runs 10 --long-seed \
 
 The JSON contains raw samples, nearest-rank p50/p75/max/n (same convention as
 `stats.mjs`), signed-operation-correlated stages, envelope bytes, seed sizes,
-per-scope SQL counts/elapsed time and thread-offload CPU. The adjacent sanitized
-log and `teardown_exit` record cleanup; interruption also shuts down the owned
+per-scope SQL counts/elapsed time and thread-offload CPU. Failed/censored attempts
+have null latency and explicit per-journey `counts` and summary failure counts;
+they are never zero-valued successes or silently omitted. A failed attempt is
+saved before its error propagates. The bounded plain-project probe records its
+censoring and continues the other journeys, but the run still exits non-zero.
+The adjacent `<output filename>.lab.log` and `teardown_exit` record cleanup;
+non-zero/signal exits and cleanup timeouts fail the command after saving diagnostics.
+URL-bearing announcements/readiness lines are dropped before any log write;
+other log lines have query tokens redacted. Interruption also shuts down the owned
 lease. Internal `lab`/`child` modes are not entrypoints for an installed worker.
 No production instrumentation, protocol, timing constant or feature flag is
 changed: all measurement hooks exist only in the disposable child process.
@@ -274,7 +281,8 @@ first chat. These are intentionally not represented as the same journey.
 Two-worker devloop currently rejects `--seed long`, so `--long-seed` loads the
 unchanged `seed_long()` fixture **after pairing**, waits for B's durable event
 counts to match, then waits 90 seconds before idle sampling. Each idle window
-has no API polling; private probe snapshots bracket it. CPU is whole app-process
+has no API polling; private probe snapshots bracket it. Full scans are assigned
+by completion time, including scans that cross a snapshot boundary. CPU is whole app-process
 CPU, with separately scoped `asyncio.to_thread` CPU (not exact async-task CPU or
 PostgreSQL CPU). SQL counts/times cover default dict cursors, not explicit cursor
 factories, PostgreSQL internals or database-server CPU. Catch-up pauses only B's
@@ -333,6 +341,15 @@ A's scan wall time was 39.2 / 47.1 / 56.2 ms (p50/p75/max); B's was
 16.5 / 17.4 / 21.8 ms on B, n=10 each. Most idle SQL is in unclassified
 maintenance, not scoped sync; do not call every app statement “sync cost”.
 The full scan is already incremental for transcripts, not a 104k-row replay.
+
+A review audit found all ten samples in every published mutation/catch-up cell,
+all ten separate native streaming runs (201 matched deltas), and one full scan
+in each of the ten idle windows on each worker. The only recorded censored cell
+is the plain-project probe described above; published percentiles are unchanged.
+The original idle JSON did not retain snapshot boundaries or unselected events,
+so an extra scan straddling the outer measurement boundary cannot be ruled out
+retroactively. New runs retain window start/end timestamps and count scans by
+completion time. No full-lab rerun was needed for these accounting fixes.
 
 ### Where latency goes
 

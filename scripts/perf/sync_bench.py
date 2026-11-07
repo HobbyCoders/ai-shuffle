@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 from collections import Counter, deque
+from contextlib import contextmanager
 import contextvars
 import functools
 import http.client
@@ -64,6 +65,67 @@ def recall_visible(store, text):
 
 def sanitize_log(text):
     return re.sub(r"((?:token|secret)=)[^&\s\"]+", r"\1[redacted]", text, flags=re.I)
+
+
+def capture_log(stream, destination):
+    """Drop URL-bearing announcements/readiness lines before any log write."""
+    for line in stream:
+        if not re.search(r"\b(?:https?|wss?)://", line, flags=re.I):
+            destination.write(sanitize_log(line))
+            destination.flush()
+
+
+@contextmanager
+def attempt(samples, save, *journeys):
+    """Keep failed attempts out of latency percentiles, not out of the report."""
+    start, first = time.monotonic(), len(samples)
+    try:
+        yield
+    except BaseException as exc:
+        samples[first:] = [dict(journey=name, status="failed", total_ms=None,
+                                failure=type(exc).__name__,
+                                observed_seconds=time.monotonic()-start)
+                           for name in journeys]
+        save()
+        raise
+
+
+def sample_summary(samples):
+    metrics, counts = {}, {}
+    for row in samples:
+        name, status = row["journey"], row.get("status", "ok")
+        counts.setdefault(name, dict(ok=0, failed=0, censored=0))[status] += 1
+        for key, value in row.items():
+            if key.endswith("_ms") or key.endswith("_per_minute"):
+                values = metrics.setdefault(name + "." + key, [])
+                if status == "ok" and isinstance(value, (int, float)):
+                    values.append(value)
+    summary = {key: dict(summarize(values),
+                         failed=counts[key.rpartition(".")[0]]["failed"],
+                         censored=counts[key.rpartition(".")[0]]["censored"])
+               for key, values in metrics.items()}
+    return summary, counts
+
+
+def completed_scans(first, last):
+    """A crossing scan belongs to the snapshot window in which it completes."""
+    return [e for e in last["events"] if e["kind"] == "scan_full"
+            and first["now"] <= e["t"] < last["now"]]
+
+
+def stop_lab(process, report, save):
+    if process.poll() is None:
+        process.terminate()
+    try:
+        process.wait(timeout=90)
+    except subprocess.TimeoutExpired as exc:
+        report.update(teardown_exit=process.poll(), teardown_error="cleanup_timeout")
+        save()
+        raise RuntimeError("devloop did not finish cleanup; inspect its owned lease") from exc
+    report["teardown_exit"] = process.returncode
+    save()
+    if process.returncode != 0:
+        raise RuntimeError(f"devloop cleanup failed: exit {process.returncode}")
 
 
 def request(port, token, path, body=None, method=None, timeout=180):
@@ -551,48 +613,48 @@ def run(args):
         "Streaming and catch-up report combined lag/convergence, not separately attributed publication/exchange/apply stages.",
     ])
     def save():
-        metrics = {}
-        for row in samples:
-            for key, value in row.items():
-                if (key.endswith("_ms") or key.endswith("_per_minute")) and isinstance(value, (int, float)):
-                    metrics.setdefault(row["journey"] + "." + key, []).append(value)
-        report["summary"] = {k: summarize(v) for k, v in metrics.items()}
+        report["summary"], report["counts"] = sample_summary(samples)
         output.write_text(json.dumps(report, indent=2))
 
     with tempfile.TemporaryDirectory(prefix="shuffle-sync-bench-") as raw:
         directory = Path(raw)
         log = (directory / "lab.log").open("w+")
         process = subprocess.Popen([sys.executable, "-m", "scripts.perf.sync_bench", "lab", raw],
-                                   cwd=ROOT, stdout=log, stderr=subprocess.STDOUT)
+                                   cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                   text=True, bufsize=1)
+        log_thread = threading.Thread(target=capture_log, args=(process.stdout, log), daemon=True)
+        log_thread.start()
         b = None
         try:
-            def ready():
-                path = directory / "status.json"
-                if process.poll() is not None:
-                    raise RuntimeError("devloop failed; see the sanitized .log beside the output")
-                try:
-                    return json.loads(path.read_text()).get("state") == "ready"
-                except (FileNotFoundError, json.JSONDecodeError):
-                    return False
-            wait_for(ready, timeout=600, interval=1)
-            a, b = [Worker(json.loads((directory / (name + ".json")).read_text()))
-                    for name in ("worker-a", "worker-b")]
-            report["setup"]["seed"] = json.loads((directory / "status.json").read_text())["seed"]
-            print("Two disposable workers paired", flush=True)
+            with attempt(samples, save, "setup"):
+                def ready():
+                    path = directory / "status.json"
+                    if process.poll() is not None:
+                        raise RuntimeError("devloop failed; see the sanitized .log beside the output")
+                    try:
+                        return json.loads(path.read_text()).get("state") == "ready"
+                    except (FileNotFoundError, json.JSONDecodeError):
+                        return False
+                wait_for(ready, timeout=600, interval=1)
+                a, b = [Worker(json.loads((directory / (name + ".json")).read_text()))
+                        for name in ("worker-a", "worker-b")]
+                report["setup"]["seed"] = json.loads((directory / "status.json").read_text())["seed"]
+                print("Two disposable workers paired", flush=True)
 
             def measure(name, action, visible, collection, record_id=None):
-                result = action()
-                _, end = wait_for(visible)
-                sm, pm = a.probe("/metrics"), b.probe("/metrics")
-                commits = [e["t"] for e in sm["events"] if e["kind"] == "commit" and e["trace"] == result["trace"]]
-                committed = min(commits) if commits else result["end"]
-                row = dict(journey=name, total_ms=(end-committed)*1000,
-                           write_ms=(result["end"]-result["start"])*1000,
-                           **stages(committed, end, sm, pm, collection, record_id))
-                samples.append(row)
-                save()
-                print(name, round(row["total_ms"], 1), "ms", flush=True)
-                return result
+                with attempt(samples, save, name):
+                    result = action()
+                    _, end = wait_for(visible)
+                    sm, pm = a.probe("/metrics"), b.probe("/metrics")
+                    commits = [e["t"] for e in sm["events"] if e["kind"] == "commit" and e["trace"] == result["trace"]]
+                    committed = min(commits) if commits else result["end"]
+                    row = dict(journey=name, total_ms=(end-committed)*1000,
+                               write_ms=(result["end"]-result["start"])*1000,
+                               **stages(committed, end, sm, pm, collection, record_id))
+                    samples.append(row)
+                    save()
+                    print(name, round(row["total_ms"], 1), "ms", flush=True)
+                    return result
 
             for i in range(0 if args.stream_only else args.runs):
                 key, value = "lastSelectedModel", f"sync-bench-{i}"
@@ -608,15 +670,17 @@ def run(args):
                 measure("settle", lambda: a.action("settle", sid=sid),
                         lambda: not any(r["id"] == sid for r in b.api("sessions?active_only=true&limit=100")), "session_active")
                 pid = "sync-bench-" + uuid.uuid4().hex[:10]
-                a.action("project", id=pid)
-                created = time.monotonic()
-                try:
-                    _, seen = wait_for(lambda: any(r["name"] == pid for r in b.api("cluster/projects")["projects"]),
-                                       timeout=3)
-                    samples.append(dict(journey="project_create", total_ms=(seen-created)*1000, visible=True))
-                except TimeoutError:
-                    samples.append(dict(journey="project_create", visible=False, observed_seconds=time.monotonic()-created))
-                save()
+                with attempt(samples, save, "project_create"):
+                    a.action("project", id=pid)
+                    created = time.monotonic()
+                    try:
+                        _, seen = wait_for(lambda: any(r["name"] == pid for r in b.api("cluster/projects")["projects"]),
+                                           timeout=3)
+                        samples.append(dict(journey="project_create", total_ms=(seen-created)*1000, visible=True))
+                    except TimeoutError:
+                        samples.append(dict(journey="project_create", status="censored", total_ms=None,
+                                            visible=False, observed_seconds=time.monotonic()-created))
+                    save()
                 measure("project_resolve", lambda: a.action("project_resolve", id=pid),
                         lambda: any(r["name"] == pid for r in b.api("cluster/projects")["projects"]), "projects_v2")
                 text = "benchmarkfruit" + uuid.uuid4().hex[:10]
@@ -624,57 +688,60 @@ def run(args):
                         lambda: b.action("recall", text=text)["result"] is True, "memory")
 
             for i in range(args.runs):
-                sid = str(uuid.uuid4())
-                a.action("new_chat", sid=sid)
-                wait_for(lambda: any(r["id"] == sid for r in b.api("sessions?limit=100")))
-                local, remote = EventReader(a, sid), EventReader(b, sid)
-                local.start()
-                remote.start()
-                started = time.monotonic()
-                a.action("stream", sid=sid)
-                local.finish()
-                remote.finish()
-                # Backfill can coalesce deltas. Match common sequence endpoints,
-                # never assume the same number of SSE frames on both workers.
-                lags = delta_lags(local.rows, remote.rows)
-                samples.append(dict(journey="stream_first_token", total_ms=(remote.rows[0]["t"]-started)*1000,
-                                    peer_behind_owner_ms=(remote.rows[0]["t"]-local.rows[0]["t"])*1000,
-                                    matched_deltas=len(lags), owner_frames=len(local.rows), peer_frames=len(remote.rows)))
-                for lag in lags:
-                    samples.append(dict(journey="stream_steady_delta", total_ms=lag))
-                save()
-                print("stream", i + 1, "matched deltas", len(lags), flush=True)
+                with attempt(samples, save, "stream_first_token", "stream_steady_delta"):
+                    sid = str(uuid.uuid4())
+                    a.action("new_chat", sid=sid)
+                    wait_for(lambda: any(r["id"] == sid for r in b.api("sessions?limit=100")))
+                    local, remote = EventReader(a, sid), EventReader(b, sid)
+                    local.start()
+                    remote.start()
+                    started = time.monotonic()
+                    a.action("stream", sid=sid)
+                    local.finish()
+                    remote.finish()
+                    # Backfill can coalesce deltas. Match common sequence endpoints,
+                    # never assume the same number of SSE frames on both workers.
+                    lags = delta_lags(local.rows, remote.rows)
+                    samples.append(dict(journey="stream_first_token", total_ms=(remote.rows[0]["t"]-started)*1000,
+                                        peer_behind_owner_ms=(remote.rows[0]["t"]-local.rows[0]["t"])*1000,
+                                        matched_deltas=len(lags), owner_frames=len(local.rows), peer_frames=len(remote.rows)))
+                    for lag in lags:
+                        samples.append(dict(journey="stream_steady_delta", total_ms=lag))
+                    save()
+                    print("stream", i + 1, "matched deltas", len(lags), flush=True)
 
             # Offline is SIGSTOP of this lab's exact B child, never an installed worker.
             for count in ([] if args.stream_only else args.catchup):
                 for i in range(args.runs):
-                    sid = str(uuid.uuid4())
-                    a.action("new_chat", sid=sid)
-                    wait_for(lambda: any(r["id"] == sid for r in b.api("sessions")))
-                    os.kill(b.receipt["pid"], signal.SIGSTOP)
-                    try:
-                        wrote = a.action("append", sid=sid, count=count)
-                        expected = wrote["result"]["events"]
-                        # Offline interval includes normal scanner publication, not just replay.
-                        time.sleep(args.offline_seconds)
-                    finally:
-                        start = time.monotonic()
-                        os.kill(b.receipt["pid"], signal.SIGCONT)
-                    _, end = wait_for(lambda: b.action("count", sid=sid)["result"] == expected,
-                                      timeout=1200, interval=.5)
-                    samples.append(dict(journey=f"catchup_{count}", total_ms=(end-start)*1000,
-                                        events=expected, offline_seconds=args.offline_seconds))
-                    save()
-                    print(f"catchup_{count}", round((end-start)*1000), "ms", flush=True)
+                    with attempt(samples, save, f"catchup_{count}"):
+                        sid = str(uuid.uuid4())
+                        a.action("new_chat", sid=sid)
+                        wait_for(lambda: any(r["id"] == sid for r in b.api("sessions")))
+                        os.kill(b.receipt["pid"], signal.SIGSTOP)
+                        try:
+                            wrote = a.action("append", sid=sid, count=count)
+                            expected = wrote["result"]["events"]
+                            # Offline interval includes normal scanner publication, not just replay.
+                            time.sleep(args.offline_seconds)
+                        finally:
+                            start = time.monotonic()
+                            os.kill(b.receipt["pid"], signal.SIGCONT)
+                        _, end = wait_for(lambda: b.action("count", sid=sid)["result"] == expected,
+                                          timeout=1200, interval=.5)
+                        samples.append(dict(journey=f"catchup_{count}", total_ms=(end-start)*1000,
+                                            events=expected, offline_seconds=args.offline_seconds))
+                        save()
+                        print(f"catchup_{count}", round((end-start)*1000), "ms", flush=True)
 
             if args.long_seed and not args.stream_only:
-                report["setup"]["long"] = a.action("long_seed")["result"]
-                # Baseline idle only after the peer has all seeded durable events.
-                for size in report["setup"]["long"]["sizes"].values():
-                    wait_for(lambda size=size: b.action("count", sid=size["id"])["result"] == size["events"],
-                             timeout=1800, interval=2)
-                print("Long seed converged; waiting for quiet scanner", flush=True)
-                time.sleep(90)
+                with attempt(samples, save, "long_seed_setup"):
+                    report["setup"]["long"] = a.action("long_seed")["result"]
+                    # Baseline idle only after the peer has all seeded durable events.
+                    for size in report["setup"]["long"]["sizes"].values():
+                        wait_for(lambda size=size: b.action("count", sid=size["id"])["result"] == size["events"],
+                                 timeout=1800, interval=2)
+                    print("Long seed converged; waiting for quiet scanner", flush=True)
+                    time.sleep(90)
             before = [w.probe("/idle") for w in (a, b)]
             report["idle"] = []
             remaining = 0 if args.stream_only else args.idle_seconds
@@ -684,8 +751,8 @@ def run(args):
                 after = [w.probe("/idle") for w in (a, b)]
                 for label, first, last in zip(("A", "B"), before, after):
                     minutes = (last["now"]-first["now"])/60
-                    scans = [e for e in last["events"] if e["kind"] == "scan_full" and first["now"] <= e["start"] < last["now"]]
-                    row = dict(worker=label, seconds=minutes*60,
+                    scans = completed_scans(first, last)
+                    row = dict(worker=label, start=first["now"], end=last["now"], seconds=minutes*60,
                                cpu_seconds_per_minute=(last["cpu"]-first["cpu"])/minutes,
                                counters_per_minute={k: (last["totals"].get(k, 0)-first["totals"].get(k, 0))/minutes
                                                     for k in last["totals"]}, full_scans=scans)
@@ -709,17 +776,20 @@ def run(args):
                     os.kill(b.receipt["pid"], signal.SIGCONT)
                 except ProcessLookupError:
                     pass
-            process.terminate()
             try:
-                process.wait(timeout=90)
-            except subprocess.TimeoutExpired:
-                raise RuntimeError("devloop did not finish cleanup; inspect its owned lease")
-            report["teardown_exit"] = process.returncode
-            save()
-            log.close()
-            text = (directory / "lab.log").read_text()
-            text = sanitize_log(text)
-            output.with_suffix(".log").write_text(text)
+                stop_lab(process, report, save)
+            finally:
+                log_thread.join(timeout=5)
+                log.flush()
+                output.with_name(output.name + ".lab.log").write_text((directory / "lab.log").read_text())
+                report["log_capture_complete"] = not log_thread.is_alive()
+                save()
+                if log_thread.is_alive():
+                    raise RuntimeError("devloop log capture did not finish")
+                log.close()
+                process.stdout.close()
+    if any(cell["failed"] or cell["censored"] for cell in report["counts"].values()):
+        raise RuntimeError("benchmark has failed/censored attempts; see saved results")
     print("Results:", output, flush=True)
 
 
