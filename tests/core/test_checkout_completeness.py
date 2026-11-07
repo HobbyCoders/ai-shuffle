@@ -1,5 +1,9 @@
 """Never bind a branch checkout left half-populated by a failed Git add."""
+import hashlib
+import os
+import signal
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -19,6 +23,15 @@ def _resolve(project, branch, **kwargs):
     return checkout_manager.ensure_checkout(
         project, branch=branch, runner_id=RUNNER, provision_runtime=False, **kwargs,
     )
+
+
+def _materializing_marker(base, path):
+    common = checkout_manager.git_service._run_git(
+        str(base), ["rev-parse", "--git-common-dir"], timeout=10,
+    )
+    assert common.returncode == 0
+    key = hashlib.sha256(os.path.normcase(os.path.realpath(path)).encode()).hexdigest()
+    return Path(base) / common.stdout.strip() / "ai-shuffle-materializing" / key
 
 
 def _failure_marker(path):
@@ -63,7 +76,17 @@ def test_failed_add_partial_checkout_is_not_adopted(
     assert str(path).replace("\\", "/") in checkout_manager.git_service._run_git(
         str(base_checkout), ["worktree", "list", "--porcelain"], timeout=10,
     ).stdout.replace("\\", "/")
-    assert checkouts_db.list_checkouts(project["id"]) == before_rows
+    after_failure_rows = checkouts_db.list_checkouts(project["id"])
+    if previously_materialized:
+        previous = {r["id"]: r for r in before_rows}
+        for row in after_failure_rows:
+            old = previous[row["id"]]
+            assert {k: v for k, v in row.items() if k not in ("status", "updated_at")} == {
+                k: v for k, v in old.items() if k not in ("status", "updated_at")
+            }
+            assert row["status"] == ("incomplete" if row["branch"] == branch else old["status"])
+    else:
+        assert after_failure_rows == before_rows
     before = _snapshot(path)
 
     assert _resolve(project, branch) is None
@@ -71,7 +94,7 @@ def test_failed_add_partial_checkout_is_not_adopted(
     with pytest.raises(WorktreeAddError, match="incomplete"):
         _resolve(project, branch, raise_add_errors=True)
     assert _snapshot(path) == before
-    assert checkouts_db.list_checkouts(project["id"]) == before_rows
+    assert checkouts_db.list_checkouts(project["id"]) == after_failure_rows
 
 
 @pytest.mark.parametrize("route", ["deterministic", "row", "legacy", "sweep"])
@@ -398,3 +421,163 @@ def test_failed_add_uses_negative_row_status_when_metadata_is_unwritable(
     with pytest.raises(WorktreeAddError, match="incomplete"):
         _resolve(project, branch, raise_add_errors=True)
     assert _snapshot(path) == before
+
+
+def test_killed_add_with_stale_active_row_is_not_adopted(
+    project, base_checkout, workspace_root,
+):
+    branch = "fix/killed-materialization"
+    _git(base_checkout, "branch", branch)
+    path = Path(_resolve(project, branch))
+    _git(base_checkout, "worktree", "remove", str(path))
+    hook = base_checkout / ".git/hooks/post-checkout"
+    hook.write_text("#!/bin/sh\nrm -- README.md\nexit 0\n")
+    hook.chmod(0o755)
+    # Kill the materializer immediately after real Git registers the replacement,
+    # before any add-result handling, validation, or DB status update can run.
+    script = f"""
+import os, signal
+from app.core.git_service import GitService
+service = GitService()
+run = service._run_git
+def interrupted(cwd, args, **kwargs):
+    result = run(cwd, args, **kwargs)
+    if args[:2] == ["worktree", "add"]:
+        if hasattr(signal, "SIGKILL"):
+            os.kill(os.getpid(), signal.SIGKILL)
+        os._exit(137)
+    return result
+service._run_git = interrupted
+service.add_worktree({str(base_checkout)!r}, {str(path)!r}, {branch!r}, fetch_base=False)
+"""
+    killed = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, timeout=15,
+        cwd=Path(__file__).resolve().parents[2],
+    )
+    expected = -signal.SIGKILL if hasattr(signal, "SIGKILL") else 137
+    assert killed.returncode == expected, killed.stderr
+    assert not (path / "README.md").exists()
+    assert checkouts_db.get_checkout(project["id"], RUNNER, branch=branch)["status"] == "active"
+    before = _snapshot(path)
+    with pytest.raises(WorktreeAddError, match="incomplete"):
+        _resolve(project, branch, raise_add_errors=True)
+    assert _snapshot(path) == before
+    assert _materializing_marker(base_checkout, path).is_file()
+
+
+@pytest.mark.parametrize("previously_materialized", [False, True])
+def test_zero_exit_hook_partial_checkout_stays_refused(
+    project, base_checkout, workspace_root, previously_materialized,
+):
+    branch = "fix/zero-exit-hook"
+    _git(base_checkout, "branch", branch)
+    path = checkout_manager._branch_checkout_path(str(base_checkout), branch)
+    if previously_materialized:
+        assert _resolve(project, branch) == str(path)
+        _git(base_checkout, "worktree", "remove", str(path))
+    hook = base_checkout / ".git/hooks/post-checkout"
+    hook.write_text("#!/bin/sh\nrm -- README.md\nexit 0\n")
+    hook.chmod(0o755)
+    with pytest.raises(WorktreeAddError, match="incomplete"):
+        _resolve(project, branch, raise_add_errors=True)
+    before = _snapshot(path)
+    with pytest.raises(WorktreeAddError, match="incomplete"):
+        _resolve(project, branch, raise_add_errors=True)
+    assert _snapshot(path) == before
+    assert _materializing_marker(base_checkout, path).is_file()
+
+
+@pytest.mark.parametrize("previously_materialized", [False, True])
+def test_successful_add_has_write_ahead_flag_then_allows_intentional_edits(
+    project, base_checkout, workspace_root, monkeypatch, previously_materialized,
+):
+    branch = "fix/write-ahead-success"
+    _git(base_checkout, "branch", branch)
+    path = checkout_manager._branch_checkout_path(str(base_checkout), branch)
+    if previously_materialized:
+        assert _resolve(project, branch) == str(path)
+        _git(base_checkout, "worktree", "remove", str(path))
+    run = checkout_manager.git_service._run_git
+    starts = []
+
+    def observed(cwd, args, **kwargs):
+        if args[:2] == ["worktree", "add"]:
+            common = run(str(base_checkout), ["rev-parse", "--git-common-dir"], timeout=10)
+            key = hashlib.sha256(os.path.normcase(os.path.realpath(path)).encode()).hexdigest()
+            marker = base_checkout / common.stdout.strip() / "ai-shuffle-materializing" / key
+            assert marker.is_file(), "add must not start without a durable flag"
+            if previously_materialized:
+                assert checkouts_db.get_checkout(
+                    project["id"], RUNNER, branch=branch,
+                )["status"] == "incomplete", "DB fallback must also precede Git"
+            starts.append(True)
+        return run(cwd, args, **kwargs)
+
+    monkeypatch.setattr(checkout_manager.git_service, "_run_git", observed)
+    assert _resolve(project, branch, raise_add_errors=True) == str(path)
+    assert starts == [True]
+    assert not _materializing_marker(base_checkout, path).exists()
+    assert checkouts_db.get_checkout(project["id"], RUNNER, branch=branch)["status"] == "active"
+    (path / "README.md").unlink()
+    before = _snapshot(path)
+    assert _resolve(project, branch, raise_add_errors=True) == str(path)
+    assert _snapshot(path) == before
+
+
+@pytest.mark.parametrize("route", ["active", "adoption"])
+def test_legacy_recreate_cannot_bypass_pending_materialization(
+    project, base_checkout, workspace_root, monkeypatch, route,
+):
+    import app.core.worktree_manager as wm
+    from app.db.base import WorktreeStatus
+
+    branch = "fix/legacy-pending"
+    _git(base_checkout, "branch", branch)
+    path = checkout_manager._branch_checkout_path(str(base_checkout), branch)
+    hook = base_checkout / ".git/hooks/post-checkout"
+    hook.write_text("#!/bin/sh\nrm -- README.md\nexit 0\n")
+    hook.chmod(0o755)
+    success, error = checkout_manager.git_service.add_worktree(
+        str(base_checkout), str(path), branch, fetch_base=False,
+    )
+    assert not success and "incomplete" in error
+    manager = wm.WorktreeManager()
+    row = {"id": "legacy-pending", "worktree_path": str(path),
+           "branch_name": branch, "status": WorktreeStatus.ACTIVE}
+    monkeypatch.setattr(wm.database, "get_worktree", lambda _: row)
+    monkeypatch.setattr(wm.database, "update_worktree",
+                        lambda *args, **kwargs: pytest.fail("partial checkout activated"))
+    before = _snapshot(path)
+    with pytest.raises(wm.WorktreeError, match="incomplete"):
+        if route == "active":
+            manager.recreate_worktree(row["id"])
+        else:
+            manager._adopt_existing_worktree(
+                row["id"], branch, {"path": str(path)}, {"path": str(base_checkout)},
+                prior_status=WorktreeStatus.ORPHANED,
+            )
+    assert _snapshot(path) == before
+    assert _materializing_marker(base_checkout, path).is_file()
+
+
+def test_unwritable_write_ahead_metadata_prevents_git_add(
+    project, base_checkout, workspace_root, monkeypatch,
+):
+    branch = "fix/blocked-write-ahead"
+    _git(base_checkout, "branch", branch)
+    path = Path(_resolve(project, branch))
+    _git(base_checkout, "worktree", "remove", str(path))
+    write_text = Path.write_text
+
+    def locked(self, *args, **kwargs):
+        if self.parent.name == "ai-shuffle-materializing":
+            raise PermissionError("write-ahead metadata locked")
+        return write_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", locked)
+    monkeypatch.setattr(checkout_manager.git_service, "_add_worktree_unlocked",
+                        lambda *args, **kwargs: pytest.fail("Git started without write-ahead state"))
+    with pytest.raises(WorktreeAddError, match="Cannot record checkout materialization"):
+        _resolve(project, branch, raise_add_errors=True)
+    assert not path.exists()
+    assert checkouts_db.get_checkout(project["id"], RUNNER, branch=branch)["status"] == "incomplete"
