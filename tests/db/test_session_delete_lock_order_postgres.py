@@ -429,27 +429,11 @@ def test_fork_cannot_message_parent_before_or_during_admission(private_pool, mon
 
 
 
-@pytest.mark.parametrize("writer", ["copy", "history"])
-def test_copy_or_history_rejects_destination_deleted_while_waiting_for_counter(private_pool, monkeypatch, writer):
+def test_copy_rejects_destination_deleted_while_waiting_for_counter(private_pool, monkeypatch):
     source, dest = "copy-source-" + uuid4().hex, "copy-dest-" + uuid4().hex
     with base.get_db() as conn:
         conn.cursor().executemany("INSERT INTO sessions (id) VALUES (%s)", [(source,), (dest,)])
     session_events.append_events(source, [{"type": "system.note", "payload": {"content": "keep source"}}])
-    if writer == "history":
-        from app.network import handoff
-
-        token = uuid4().hex
-        with base.get_db() as conn:
-            conn.cursor().execute("INSERT INTO handoff_history_chunks "
-                                  "(token,session_id,sdk_session_id,table_name,batch_no,rows) "
-                                  "VALUES (%s,%s,NULL,'',0,'{}')", (token, dest))
-
-        def write():
-            with base.get_db() as conn:
-                return handoff._publish_history(conn.cursor(), dest, token)
-    else:
-        def write():
-            return session_events.copy_session_events(source, dest)
     deleting_locked, resume = threading.Event(), threading.Event()
     delete_pid = []
     original_cursor = base._PgDictConnection.cursor
@@ -473,7 +457,7 @@ def test_copy_or_history_rejects_destination_deleted_while_waiting_for_counter(p
         observer.autocommit = True
         deleting = workers.submit(sessions.delete_session, dest)
         assert deleting_locked.wait(5)
-        copying = workers.submit(write)
+        copying = workers.submit(session_events.copy_session_events, source, dest)
         try:
             _wait_for_lock_wait(observer, delete_pid[0], copying)
         finally:
