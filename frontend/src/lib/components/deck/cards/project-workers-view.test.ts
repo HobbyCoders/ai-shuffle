@@ -15,6 +15,8 @@ import {
 	missingOnline,
 	runsOnNote,
 	seenAgo,
+	workerFilterSlot,
+	filterGeometry,
 	workerChip
 } from './project-workers-view';
 
@@ -94,5 +96,56 @@ describe('failures', () => {
 		const now = Date.parse('2026-10-31T12:00:00Z');
 		expect(seenAgo('2026-10-28T12:00:00Z', now)).toBe('seen 3d ago');
 		expect(seenAgo(null, now)).toBeNull();
+	});
+});
+
+describe('filterGeometry (#1210: the filter row never appears or vanishes under a painted list)', () => {
+	const two = [{ approved: true }, { approved: true }];
+	const none = { supported: null, overviewWorkerCount: 0, installs: null, registryFailed: false, deadlinePassed: false };
+
+	it('waits while nothing is known', () => {
+		expect(filterGeometry(none)).toBeNull();
+	});
+
+	it('follows the overview when it has answered', () => {
+		expect(filterGeometry({ ...none, supported: true, overviewWorkerCount: 3 })).toBe('row');
+		expect(filterGeometry({ ...none, supported: true, overviewWorkerCount: 1, installs: two })).toBe('none');
+		// An older worker without the overview never shows the control.
+		expect(filterGeometry({ ...none, supported: false, installs: two })).toBe('none');
+	});
+
+	it('follows the registry while the overview is out', () => {
+		expect(filterGeometry({ ...none, installs: two })).toBe('row');
+		// An older server leaves `approved` out: that means approved.
+		expect(filterGeometry({ ...none, installs: [{}, {}] })).toBe('row');
+		expect(filterGeometry({ ...none, installs: [{ approved: true }] })).toBe('none');
+		// A peer waiting for approval is not in the overview either.
+		expect(filterGeometry({ ...none, installs: [{ approved: true }, { approved: false }] })).toBe('none');
+	});
+
+	it('holds the row when the registry fails or the deadline passes with nothing known', () => {
+		// A row is the only choice a late overview can never move.
+		expect(filterGeometry({ ...none, registryFailed: true })).toBe('row');
+		expect(filterGeometry({ ...none, deadlinePassed: true })).toBe('row');
+		// An answer that is in still decides.
+		expect(filterGeometry({ ...none, deadlinePassed: true, installs: [{ approved: true }] })).toBe('none');
+	});
+});
+
+describe('workerFilterSlot', () => {
+	it('waits until the visit has decided', () => {
+		expect(workerFilterSlot(null, true, 3)).toBe('unknown');
+	});
+
+	it('never adds the row when the visit decided against it', () => {
+		expect(workerFilterSlot('none', true, 3)).toBe('hidden');
+		expect(workerFilterSlot('none', null, 0)).toBe('hidden');
+	});
+
+	it('fills the held row only when the overview reports more than one worker, else keeps it blank', () => {
+		expect(workerFilterSlot('row', true, 2)).toBe('shown');
+		expect(workerFilterSlot('row', null, 0)).toBe('reserved');
+		expect(workerFilterSlot('row', true, 1)).toBe('reserved');
+		expect(workerFilterSlot('row', false, 0)).toBe('reserved');
 	});
 });
