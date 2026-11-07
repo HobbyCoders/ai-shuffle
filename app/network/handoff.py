@@ -1618,6 +1618,7 @@ def install_history(sid, data, cwd):
     from psycopg2.extras import Json
     from app.core.cli_sessions import project_key_for_directory
     from app.db.network import _insert_rows
+    from app.db.session_locks import handoff_creation_key
 
     old_sdk = data.get("sdk_session_id")
     # New store identity prevents replacing another local session's native tree
@@ -1629,9 +1630,17 @@ def install_history(sid, data, cwd):
     facts = {}
     try:
         with get_db() as conn:
-            conn.cursor().execute("INSERT INTO handoff_history_chunks "
-                                  "(token,session_id,sdk_session_id,table_name,batch_no,rows) "
-                                  "VALUES (%s,%s,%s,'',0,'[]')", (token, sid, sdk))
+            cur = conn.cursor()
+            # X before the header (app/db/session_locks.py): a delete that has
+            # scanned this chat's headers finishes first, and this INSERT then
+            # fails on the session FK instead of racing its cascade (#1215).
+            # One statement (bulk import's round-trip budget): a volatile,
+            # materialized CTE runs before the row is inserted.
+            cur.execute("WITH creation AS MATERIALIZED (SELECT pg_advisory_xact_lock(%s)) "
+                        "INSERT INTO handoff_history_chunks "
+                        "(token,session_id,sdk_session_id,table_name,batch_no,rows) "
+                        "SELECT %s,%s,%s,'',0,'[]' FROM creation",
+                        (handoff_creation_key(sid), token, sid, sdk))
         for table, columns in TABLES.items():
             started = monotonic()
             if timing:

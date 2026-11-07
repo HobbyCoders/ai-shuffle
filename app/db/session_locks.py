@@ -7,25 +7,36 @@ back up. PostgreSQL resolves a cycle by aborting one side (DeadlockDetected).
   1. G   multi-session gate     ``lock_multi_session_mutation`` (advisory)
   2. N   ``network_state`` row  ``store.lock_state`` / ``observe_clock``;
                                 ``engine.record`` also writes it (clock bump)
-  3. W   ``handoff_wakes`` rows of one chat, by token
-  4. H   hand-off headers of one chat, by token (``lock_handoff_history``),
+  3. X   hand-off header creation of one chat (``lock_handoff_creation``,
+         advisory, by key): serializes a new header against a delete's scan
+  4. W   ``handoff_wakes`` rows of one chat, by token
+  5. H   hand-off headers of one chat, by token (``lock_handoff_history``),
          then the active hold runs of those tokens, by run id
-  5. R   ``runs`` of the chat(s), by (session id, run id)
-  6. C   ``session_event_counters``, by session id
-  7. S   ``sessions`` rows, by session id
-  8.     everything else: turns, events, admission rows, mirrors, FK children
+  6. R   ``runs`` of the chat(s), by (session id, run id)
+  7. C   ``session_event_counters``, by session id
+  8. S   ``sessions`` rows, by session id
+  9.     everything else: turns, events, admission rows, mirrors, FK children
 
 Who takes what (keep this table and the code in step):
 
-  - local delete (``sessions.delete_session``): G, H, then R/C/S of the sorted
-    family. Its FK cascade deletes the staged hand-off rows, so H must be held
-    before S: reaching H through the cascade after S deadlocks (#1215).
+  - local delete (``sessions.delete_session``): G, X, H, then R/C/S of the
+    sorted family. Its FK cascade deletes the staged hand-off rows, so H must
+    be held before S: reaching H through the cascade after S deadlocks
+    (#1215). H locks only headers that exist, so X keeps a new header from
+    committing between the scan and the cascade.
+  - header creation (``handoff.install_history``): X, then the INSERT, in its
+    own short transaction (one statement: the lock is a materialized CTE). Behind a delete it waits, then fails on the
+    session FK: a deleted chat gets no staging.
   - bulk membership / settlement: G, N, then R/C/S of the sorted sessions.
-  - incoming sync: N first. A session tombstone takes H (whole batch, before
-    any counter) and then S through its DELETE (``engine.materialize``).
+  - incoming sync: N first. A session tombstone takes X then H (whole batch,
+    sorted, before any counter) and then S through its DELETE
+    (``engine.materialize``).
     Mirror events reserve C (``engine._lock_mirror_event_counters``).
   - hand-off publication / acceptance / finalize: W, H (+ hold runs), C, S.
     Staging cleanup (``handoff._discard_history``): H (+ hold runs), S.
+    None of them creates a header, so none needs X. Chunk rows are written
+    under an existing header token; a chunk INSERT behind a delete waits on
+    the session FK and fails, holding nothing else.
   - source commit (``handoff._commit``): N, then its lease and hold runs in
     one sorted lock (``lock_handoff_holds``), then S. Its retry of an already
     transferred move and the cleanup after a refused commit lock only the
@@ -44,12 +55,17 @@ wait is the price of one acyclic order (a delete taking H before G formed a
 G -> N -> H -> G cycle with bulk membership and incoming sync deletion).
 """
 import threading
+import zlib
 from typing import Any, Iterable
 
 from app.db.compat import ph
 
 # Stable 64-bit namespace (ASCII "ASmultiS"), separate from schema/device locks.
 _MULTI_SESSION_LOCK_KEY = 4707226386630469971
+
+# High 32 bits of step X's per-chat advisory keys (ASCII "ASHh"); the low 32
+# bits are the chat id's CRC-32. Disjoint from G and from hashtext() keys.
+_HANDOFF_CREATION_LOCK_NAMESPACE = 0x41534868
 
 # Runner id prefix of a hand-off's run-slot reservation (``handoff.HOLD``).
 HANDOFF_HOLD_PREFIX = "handoff-hold:"
@@ -72,9 +88,9 @@ def lock_multi_session_mutation(cursor: Any) -> None:
 def lock_handoff_history(cursor: Any, session_id: str) -> list:
     """Lock a chat's hand-off headers (H) in token order, then their hold runs.
 
-    Taken after G/N/W and before R/C/S (module table). Deletion and incoming
-    session tombstones take it because their FK cascade deletes the staged
-    rows; publication, acceptance and finalize because they later take C/S
+    Taken after G/N/X/W and before R/C/S (module table). Deletion and
+    incoming session tombstones take it (after X) because their FK cascade
+    deletes the staged rows; publication, acceptance and finalize because they later take C/S
     and release the hold runs. A header covers its token's chunk rows:
     nothing locks a chunk without it. Returns the locked tokens.
     """
@@ -87,6 +103,29 @@ def lock_handoff_history(cursor: Any, session_id: str) -> list:
     tokens = [row["token"] for row in cursor.fetchall()]
     lock_handoff_holds(cursor, tokens)
     return tokens
+
+
+def handoff_creation_key(session_id: str) -> int:
+    """Advisory key of one chat's step X lock (``lock_handoff_creation``)."""
+    return (_HANDOFF_CREATION_LOCK_NAMESPACE << 32) | zlib.crc32(str(session_id).encode())
+
+
+def lock_handoff_creation(cursor: Any, session_ids: Iterable[str]) -> None:
+    """Serialize hand-off header creation with a delete's header scan (X).
+
+    ``lock_handoff_history`` can lock only headers that already exist. Without
+    X, ``install_history`` could commit a header after a delete scanned none;
+    a cleanup then held that header and waited for the delete's run/session
+    locks while the delete's FK cascade waited for the header (#1215, review
+    S6). Header creation and every scan that a cascade follows take X first.
+    Keys are taken in ascending order in ONE statement (left to right); a CRC
+    collision only makes two chats share a key. Transaction-scoped.
+    """
+    keys = sorted({handoff_creation_key(sid) for sid in session_ids})
+    if not keys:
+        return
+    placeholder = ph()
+    cursor.execute("SELECT " + ", ".join([f"pg_advisory_xact_lock({placeholder})"] * len(keys)), tuple(keys))
 
 
 def lock_handoff_holds(cursor: Any, tokens: Iterable[str], *, run_ids: Iterable[str] = ()) -> None:

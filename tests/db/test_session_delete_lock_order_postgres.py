@@ -1700,3 +1700,155 @@ def test_handoff_cancel_vs_deleting_the_moving_chats_parent(private_pool, monkey
         cur.execute("SELECT COUNT(*) AS n FROM runs WHERE state='active' AND (id=%s OR runner_id=%s)",
                     (token, handoff.HOLD + token))
         assert cur.fetchone()["n"] == 0
+
+
+def _wait_blocked_or_done(observer, blocker_pid, pending):
+    """Return "blocked" once ``pending`` waits on ``blocker_pid``, or "done"."""
+    deadline = time.monotonic() + 5
+    with observer.cursor() as probe:
+        while True:
+            probe.execute("SELECT pg_stat_clear_snapshot()")
+            probe.execute("SELECT pid FROM pg_stat_activity WHERE %s = ANY(pg_blocking_pids(pid))",
+                          (blocker_pid,))
+            if probe.fetchone():
+                return "blocked"
+            if pending.done():
+                return "done"
+            assert time.monotonic() < deadline, "transaction neither finished nor waited"
+            time.sleep(0.01)
+
+
+def test_header_created_after_delete_scan_cannot_deadlock_cleanup(private_pool, monkeypatch):
+    """Review S6: header creation is serialized with delete's header scan (X).
+
+    Before the fix the delete scanned no header, ``install_history`` then
+    committed one, the delete took the chat's run/counter/session locks,
+    ``_discard_history`` locked the new header and waited for the session,
+    and the delete's FK cascade waited for that header: DeadlockDetected.
+    Now the install waits for the delete (a real lock wait) and then fails on
+    the session FK, so nothing is staged for a deleted chat.
+    """
+    from app.network import handoff
+
+    sid, token = "s6-header-race-" + uuid4().hex, uuid4().hex
+    with base.get_db() as conn:
+        conn.cursor().execute("INSERT INTO sessions (id) VALUES (%s)", (sid,))
+    session_events.append_events(sid, [{"type": "system.note", "payload": {}}])
+    monkeypatch.setattr(sessions, "_cleanup_working_set_ref", lambda sid: None)
+    monkeypatch.setattr(sessions, "_cleanup_pending_wakeups", lambda sid: None)
+
+    # The delete pauses twice: after its header scan (holding G and, fixed,
+    # X), then once it holds the chat's runs, counter and session row.
+    stages = [lambda sql, params: "FROM handoff_history_chunks" in sql and "FOR UPDATE" in sql,
+              lambda sql, params: sql.startswith("DELETE FROM session_events WHERE") and params == (sid,)]
+    reached = [threading.Event() for _ in stages]
+    resume = [threading.Event() for _ in stages]
+    pids = {}
+    original_cursor = base._PgDictConnection.cursor
+
+    class StagedCursor(RealDictCursor):
+        def execute(self, sql, params=None):
+            result = super().execute(sql, params)
+            if threading.current_thread().name.startswith("delete"):
+                pids.setdefault("delete", self.connection.get_backend_pid())
+                stage = next((i for i, hit in enumerate(stages) if not reached[i].is_set()), None)
+                if stage is not None and stages[stage](sql, params):
+                    reached[stage].set()
+                    assert resume[stage].wait(10), "test never released the delete"
+            return result
+
+    def instrumented(self, *args, **kwargs):
+        kwargs["cursor_factory"] = StagedCursor
+        return original_cursor(self, *args, **kwargs)
+
+    monkeypatch.setattr(base._PgDictConnection, "cursor", instrumented)
+    data = {"history": {}, "token": token, "sdk_session_id": None, "_prepare_history": True}
+    with psycopg2.connect(**private_pool) as observer, \
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="delete") as deleter, \
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="install") as installer, \
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="discard") as cleaner:
+        observer.autocommit = True
+        deleting = deleter.submit(sessions.delete_session, sid)
+        try:
+            if not reached[0].wait(5):
+                pytest.fail(f"delete never scanned headers: {deleting.result(timeout=1)!r}")
+            installing = installer.submit(handoff.install_history, sid, data, "/tmp/handoff-lab")
+            install_state = _wait_blocked_or_done(observer, pids["delete"], installing)
+            resume[0].set()
+            if not reached[1].wait(5):
+                pytest.fail(f"delete never locked the chat: {deleting.result(timeout=1)!r}")
+            discarding = cleaner.submit(handoff._discard_history, sid, token)
+            _wait_blocked_or_done(observer, pids["delete"], discarding)
+        finally:
+            for event in resume:
+                event.set()
+        assert deleting.result(timeout=10) is True
+        assert discarding.result(timeout=10) is None
+        assert install_state == "blocked", "header creation must wait for the delete's scan"
+        with pytest.raises(psycopg2.errors.ForeignKeyViolation):
+            installing.result(timeout=10)
+    _assert_deleted(sid)
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) AS n FROM handoff_history_chunks WHERE session_id=%s", (sid,))
+        assert cur.fetchone()["n"] == 0
+
+
+@pytest.mark.parametrize("path", ["envelope", "snapshot"])
+def test_header_created_after_tombstone_scan_cannot_deadlock_cleanup(private_pool, monkeypatch, path):
+    """Review S6, incoming sync: a session tombstone takes X before its header scan.
+
+    Before the fix the tombstone scanned no header, ``install_history``
+    committed one, ``_discard_history`` locked it, the tombstone's DELETE
+    locked the session and its cascade waited for the header, and the
+    cleanup then waited for the session: DeadlockDetected.
+    """
+    from app.db import network as store
+    from app.network import engine, handoff, policy
+
+    ctx, remote = _remote_network("s6-tombstone-")
+    sid, token = "s6-tombstone-" + uuid4().hex, uuid4().hex
+    with base.get_db() as conn:
+        conn.cursor().execute("INSERT INTO sessions (id,owner_device_id) VALUES (%s,%s)", (sid, remote.device_id))
+    env = _session_tombstone(ctx, remote, sid)
+
+    def incoming():
+        with base.get_db() as conn:
+            cursor = conn.cursor()
+            if path == "snapshot":
+                item = {"record_id": sid, "record": None, "clock": 2,
+                        "origin_device_id": remote.device_id, "deleted": True, "order_seq": None}
+                return engine.apply_snapshot_items(cursor, policy.collection("sessions"), [item], ctx=ctx)[0]
+            store.lock_state(cursor)
+            return engine.apply_envelope(cursor, env, ctx=ctx)
+
+    scan = (lambda sql, params: "FROM handoff_history_chunks" in sql and "FOR UPDATE" in sql, False)
+    barriers = _Barriers(monkeypatch, {"incoming": scan, "discard": scan})
+    data = {"history": {}, "token": token, "sdk_session_id": None, "_prepare_history": True}
+    with psycopg2.connect(**private_pool) as observer, \
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="incoming") as syncing, \
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="install") as installer, \
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="discard") as cleaner:
+        observer.autocommit = True
+        applying = syncing.submit(incoming)
+        try:
+            barriers.wait("incoming", applying)
+            installing = installer.submit(handoff.install_history, sid, data, "/tmp/handoff-lab")
+            install_state = _wait_blocked_or_done(observer, barriers.pids["incoming"], installing)
+            discarding = cleaner.submit(handoff._discard_history, sid, token)
+            barriers.wait("discard", discarding)
+            barriers.resume["incoming"].set()
+            _wait_blocked_or_done(observer, barriers.pids["discard"], applying)
+        finally:
+            barriers.release_all()
+        assert applying.result(timeout=10) in ("applied", 1)
+        assert discarding.result(timeout=10) is None
+        assert install_state == "blocked", "header creation must wait for the tombstone's scan"
+        with pytest.raises(psycopg2.errors.ForeignKeyViolation):
+            installing.result(timeout=10)
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM sessions WHERE id=%s", (sid,))
+        assert cur.fetchone() is None
+        cur.execute("SELECT COUNT(*) AS n FROM handoff_history_chunks WHERE session_id=%s", (sid,))
+        assert cur.fetchone()["n"] == 0

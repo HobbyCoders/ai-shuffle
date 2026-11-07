@@ -1855,8 +1855,8 @@ def delete_session(session_id: str) -> bool:
         # Unlink touches surviving children too. Match multi-session writers'
         # sorted runtime prefixes, not parent-first then arbitrary child rows.
         from app.db.session_locks import (
-            lock_handoff_history, lock_multi_session_mutation, lock_session_runtimes,
-            mark_sessions_deleted,
+            lock_handoff_creation, lock_handoff_history, lock_multi_session_mutation,
+            lock_session_runtimes, mark_sessions_deleted,
         )
         # This optimistic read takes no row lock. The gate below is the first
         # blocking lock; re-read under it before taking any runtime prefix.
@@ -1868,7 +1868,9 @@ def delete_session(session_id: str) -> bool:
         family.update(row["id"] for row in cursor.fetchall())
         # The cascade below deletes this chat's staged hand-off rows: take
         # their headers (H) after the gate and before any run/counter/session
-        # lock, the order in app/db/session_locks.py (#1215).
+        # lock, the order in app/db/session_locks.py (#1215). X first: no
+        # header may be created between this scan and the cascade.
+        lock_handoff_creation(cursor, [session_id])
         lock_handoff_history(cursor, session_id)
         lock_session_runtimes(cursor, family)
         # Under this chat's counter: a mirror op that arrives after this

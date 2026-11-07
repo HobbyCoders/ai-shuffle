@@ -723,7 +723,9 @@ def materialize(
             # The FK cascade deletes staged hand-off rows: hold their headers
             # before this DELETE locks the session (#1215). Batch callers
             # already took them after network_state; this re-lock is free.
-            from app.db.session_locks import lock_handoff_history
+            # X first: no header may be created between the scan and DELETE.
+            from app.db.session_locks import lock_handoff_creation, lock_handoff_history
+            lock_handoff_creation(cursor, [record_id])
             lock_handoff_history(cursor, record_id)
         cursor.execute(f"DELETE FROM {coll.table} WHERE {where}", keys)
         return None
@@ -1487,18 +1489,21 @@ def _deleted_parent(cursor, ctx: NetworkContext, env: Envelope) -> Optional[str]
 
 
 def _lock_deleted_session_handoffs(cursor, items: Iterable[Mapping[str, Any]]) -> None:
-    """Lock the hand-off headers of every session this batch deletes (H).
+    """Lock the hand-off creation (X) and headers (H) of every session this batch deletes.
 
     Right after network_state, before any counter: the tombstone's FK cascade
     deletes those staged rows, and a local delete or hand-off holding H waits
     for the counter or session rows (order: app/db/session_locks.py, #1215).
     """
-    from app.db.session_locks import lock_handoff_history
+    from app.db.session_locks import lock_handoff_creation, lock_handoff_history
 
     deleted = sorted({item.get("record_id") for item in items
                       if isinstance(item, Mapping) and item.get("collection") == "sessions"
                       and (item.get("op") == OP_DELETE or bool(item.get("deleted")))
                       and isinstance(item.get("record_id"), str)})
+    # Every creation lock (X) before any header: a header created between a
+    # scan and the cascade would be locked by nobody (review S6).
+    lock_handoff_creation(cursor, deleted)
     for sid in deleted:
         lock_handoff_history(cursor, sid)
 
