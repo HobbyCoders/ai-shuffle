@@ -1684,6 +1684,12 @@ async def _write_unfenced(session_id: str, events: List[Dict[str, Any]],
                     "nothing committed, retrying in %.2fs", len(events), session_id, delay,
                 )
                 await asyncio.sleep(delay)
+    except session_events_db.SessionMissingError:
+        # Monitor/worker callbacks can finish after their chat was deleted.
+        # The writer already rolled back; this is intentional disposal, not a
+        # lost durable event or a reason to retry/recreate that chat's log.
+        logger.debug("[TurnRecorder] discarded %d between-turns event(s) for removed chat %s",
+                     len(events), session_id)
     except asyncio.CancelledError:
         logger.error("[TurnRecorder] %d between-turns event(s) for %s lost: write cancelled",
                      len(events), session_id)

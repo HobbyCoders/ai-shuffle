@@ -121,6 +121,10 @@ class FenceViolation(Exception):
     (run missing, not active, or token superseded)."""
 
 
+class SessionMissingError(ValueError):
+    """The counter-serialized writer lost admission to session deletion."""
+
+
 def _require_session(cursor: Any, session_id: str, *, events=None) -> None:
     """Recheck AFTER the counter lock, with a fresh READ COMMITTED snapshot.
 
@@ -146,7 +150,7 @@ def _require_session(cursor: Any, session_id: str, *, events=None) -> None:
                 "payload": {"subtype": "stop_incomplete", "data": _parse_payload(notice["data"])},
             }:
                 return
-    raise ValueError(f"session {session_id!r} does not exist")
+    raise SessionMissingError(f"session {session_id!r} does not exist")
 
 
 def _parse_payload(raw: Any) -> Dict[str, Any]:
