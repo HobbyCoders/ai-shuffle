@@ -37,6 +37,7 @@
 	import { attachComposerDictation, detachComposerDictation, startComposerDictation } from '$lib/services/composerDictation';
 	import { flushPendingDraft, holdPendingDraft, readDraft, releasePendingDraft, writeDraft } from '$lib/stores/session/draft-persistence';
 	import { sentRowIdsOnScreen, takeUnfinishedRestores } from '$lib/stores/session/restored-draft';
+	import { rewoundWordsKeptApart } from '$lib/stores/session/rewound-words';
 	import { trackSend } from '$lib/stores/session/message-sender';
 	import { dropPendingSend, notePendingSend, takePendingSends } from '$lib/stores/session/pending-send-note';
 	import { promptStash } from '$lib/stores/session/prompt-stash';
@@ -522,6 +523,9 @@
 		unfinishedRestoresCheckedFor = null;
 		if (!sessionId || !editorRef || !ownsComposer() || isLoadingSession || isRestoringSession || error || wsReconnectRequired || historyStall) return;
 		unfinishedRestoresCheckedFor = sessionId;
+		// What the owner had in the composer before anything is recovered: a
+		// rewind's words stay apart from words typed since its confirm (#1083).
+		const draftBeforeRecovery = getDraftJSON();
 		// Not-sent rows by their id; sent prompts by text and occurrence (#1083).
 		const onScreen = new Set([
 			...messages.map((m) => m.metadata?.not_sent_id).filter((id): id is string => typeof id === 'string'),
@@ -534,7 +538,8 @@
 			const current = getDraftJSON();
 			setComposerDraft(hasComposerDraft(current) ? joinDrafts(pending, current) : pending);
 		}
-		const notes = takeUnfinishedRestores(sessionId, onScreen);
+		const notes = takeUnfinishedRestores(sessionId, onScreen)
+			.filter((n) => !rewoundWordsKeptApart(sessionId, n.composerAtConfirm, n.prompt, n.uploadPaths, draftBeforeRecovery));
 		if (notes.length === 0) return;
 		activeSession.setPendingRestorePrompt(notes.map((n) => n.prompt).filter(Boolean).join('\n\n'), notes.flatMap((n) => n.uploadPaths));
 	});

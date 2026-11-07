@@ -3,7 +3,7 @@
  * hands the words back once this chat's history is known, and an empty history
  * counts: the restored row may have been the chat's only one.
  */
-import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import { tick } from 'svelte';
 const rewind = vi.hoisted(() => vi.fn());
@@ -14,6 +14,7 @@ import MessageActions from './MessageActions.svelte';
 import { readDraft } from '$lib/stores/session/draft-persistence';
 import { activeSession } from '$lib/stores/active-session';
 import { auth } from '$lib/stores/auth.svelte';
+import { promptStash } from '$lib/stores/session/prompt-stash';
 import '$lib/test-stubs/composer-dom';
 
 vi.hoisted(() => {
@@ -122,4 +123,35 @@ it.each([
 	expect(kept.split('first words')).toHaveLength(2);
 	expect(kept.split('second words')).toHaveLength(2);
 	expect(activeSession.current.pendingRestorePrompt).toBeNull();
+});
+
+describe('a rewound message cut off by a reload (#1083, review S3)', () => {
+	const SENT_KEY = 'restore-note:chat:sent:0:13:abc';
+	const typed = (text: string) => JSON.stringify({ type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text }] }] });
+	const leaveSentNote = (composerAtConfirm: string) => sessionStorage.setItem(SENT_KEY, JSON.stringify({
+		rowId: 'sent:0:13:abc', prompt: 'rewound words', uploadPaths: [], page: 'an-earlier-page', composerAtConfirm
+	}));
+	const stashPreviews = () => { let stash: { preview: string }[] = []; promptStash.subscribe(v => { stash = v; })(); return stash.map(e => e.preview); };
+	beforeEach(() => promptStash.setOwner('tester'));
+	afterEach(() => promptStash.setOwner(null));
+
+	it('keeps it apart from words typed after the rewind was confirmed', async () => {
+		leaveSentNote('');
+		openChat({});
+		activeSession.setDraft(typed('fresh words'));
+		const view = render(ChatInput);
+		await waitFor(() => expect(stashPreviews()).toEqual(['rewound words']));
+		expect(editorText(view)).toBe('fresh words');
+		expect(sessionStorage.getItem(SENT_KEY)).toBeNull();
+	});
+
+	it('hands it back as before when nothing changed since the rewind was confirmed', async () => {
+		leaveSentNote('draft from before');
+		openChat({});
+		activeSession.setDraft(typed('draft from before'));
+		const view = render(ChatInput);
+		await waitFor(() => expect(editorText(view)).toContain('rewound words'));
+		expect(editorText(view)).toContain('draft from before');
+		expect(stashPreviews()).toEqual([]);
+	});
 });
