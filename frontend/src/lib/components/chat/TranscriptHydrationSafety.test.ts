@@ -85,7 +85,10 @@ describe('retained transcript action lifetime', () => {
 		await tick(); await tick();
 		expect(complete).not.toHaveBeenCalled();
 		expect(screen.queryByRole('dialog')).toBeNull();
-		expect(readDraft('A')).toBeNull();
+		// The server dropped A's row, so its words wait in A's own draft (#1083),
+		// never in B's composer or draft.
+		expect(readDraft('A')).toContain('Outgoing prompt');
+		expect(readDraft('B')).toBeNull();
 	});
 
 	it('keeps a late restore in A’s own draft and away from B’s composer', async () => {
