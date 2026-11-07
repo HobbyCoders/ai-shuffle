@@ -54,6 +54,36 @@ router = APIRouter()
 # Worktree Helper Functions
 # =============================================================================
 
+def _merge_linked_worktrees(worktrees: list[dict]) -> list[dict]:
+    """One physical branch per proven identity family, current identity first.
+
+    Adopting a pre-link branch registers it on the current identity without
+    rebinding older sessions. Keep that row's ID, but combine session metadata
+    from both registrations. This is presentation only: no checkout is revived
+    or session moved, and unrelated projects never enter this union.
+    """
+    result = []
+    by_checkout = {}
+    for wt in worktrees:
+        if wt.get("resource_kind") != "checkout":
+            result.append(wt)
+            continue
+        key = (wt["runner_id"], os.path.normcase(os.path.normpath(wt["worktree_path"])), wt["branch_name"])
+        existing = by_checkout.get(key)
+        if existing is None:
+            by_checkout[key] = wt
+            result.append(wt)
+            continue
+        sessions = {s["id"]: s for s in existing.get("sessions", [])}
+        sessions.update((s["id"], s) for s in wt.get("sessions", []))
+        existing["sessions"] = list(sessions.values())
+        existing["session_count"] = len(sessions)
+        existing["active_session"] = next(
+            (s for s in sessions.values() if s.get("status") == "active"), None
+        )
+    return result
+
+
 def _convert_worktree_to_info(wt: dict) -> WorktreeInfo:
     """Convert worktree dict to WorktreeInfo model.
 
@@ -664,6 +694,8 @@ async def list_worktrees(
         # Keep stale active rows visible for diagnosis, but not records already
         # explicitly retired by lifecycle cleanup.
         worktrees = [wt for wt in worktrees if wt.get("status") not in {"completed", "deleted", "archived"}]
+    if len(read_ids) > 1:
+        worktrees = _merge_linked_worktrees(worktrees)
 
     # Optionally attach git status for each existing worktree. This serves the
     # last known statuses and refreshes hot worktrees in the background, off the

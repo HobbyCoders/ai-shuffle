@@ -101,6 +101,40 @@ async def test_workers_detail_and_worktree_list_keep_pre_link_branch(
 
 
 @pytest.mark.parametrize("use_original_id", [True, False])
+@pytest.mark.parametrize("compact", [True, False])
+async def test_linked_listing_deduplicates_adopted_checkout_without_losing_sessions(
+    project, retained_branch, use_original_id, compact
+):
+    from app.core.checkout_manager import ensure_checkout
+
+    original, folder = project
+    original_checkout, branch_folder = retained_branch
+    current = await link(original)
+    repository = database.get_git_repository_by_project("late-link")
+    database.create_worktree("legacy-topic", repository["id"], "topic/keep", str(branch_folder))
+    # Real adoption producer: the same legacy worktree is registered on the
+    # current identity when a new session resolves this already-existing branch.
+    assert ensure_checkout(current, "topic/keep", ME, provision_runtime=False) == str(branch_folder)
+    current_checkout = checkouts.get_checkout(current["id"], ME, branch="topic/keep")
+    assert current_checkout["id"] != original_checkout["id"]
+    database.create_session("current-topic", "default", project_id="late-link",
+                            project_v2_id=current["id"], worktree_branch="topic/keep")
+    project_id = original["id"] if use_original_id else current["id"]
+    request = Request({"type": "http", "method": "GET", "headers": [], "state": {"api_user": None}})
+    result = await git_worktrees.list_worktrees(
+        request, project_id, include_status=False, compact=compact, token="test"
+    )
+    assert [row.id for row in result.worktrees] == [current_checkout["id"]]
+    assert result.total == 1
+    if not compact:
+        assert {session.id for session in result.worktrees[0].sessions} == {"bound-topic", "current-topic"}
+        assert result.worktrees[0].session_count == 2
+    assert database.get_session("bound-topic")["project_v2_id"] == original["id"]
+    assert database.get_session("current-topic")["project_v2_id"] == current["id"]
+    assert checkouts.get_checkout(original["id"], ME)["status"] == "removed"
+
+
+@pytest.mark.parametrize("use_original_id", [True, False])
 @pytest.mark.parametrize("action", ["get_git_status", "list_branches", "get_diff_stats", "get_changed_files"])
 async def test_git_reads_keep_pre_link_branch(project, retained_branch, use_original_id, action):
     original, folder = project
