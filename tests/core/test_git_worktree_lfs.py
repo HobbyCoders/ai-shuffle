@@ -164,6 +164,27 @@ def test_lfs_hook_failure_keeps_registered_worktree(checkout_project, lfs_repo, 
     assert "git-lfs: not found" in hook.read_text()
 
 
+def test_hook_staged_changes_still_count_as_complete(lfs_repo, tmp_path):
+    from fluid.context.runtime_facts import lfs_fallback_warning
+
+    repo, dest = lfs_repo, tmp_path / "hook-staged"
+    git(repo, "config", "filter.lfs.process", "")
+    git(repo, "config", "filter.lfs.smudge", "")
+    git(repo, "config", "filter.lfs.required", "false")
+    # A hook that stages a generated file and a modification, then fails
+    # because LFS is unavailable, leaves every committed file in place.
+    hook = repo / ".git" / "hooks" / "post-checkout"
+    hook.write_text(
+        "#!/bin/sh\necho generated > generated.txt\necho changed >> asset.bin\n"
+        "git add generated.txt asset.bin\necho 'git-lfs: not found' >&2\nexit 2\n"
+    )
+    success, warning = GitService().add_worktree(str(repo), str(dest), "hook-staged", new_branch=True)
+    assert success, warning
+    assert "placeholders" in warning
+    assert (dest / "generated.txt").read_text() == "generated\n"
+    assert lfs_fallback_warning(str(dest)) == warning
+
+
 @pytest.mark.parametrize("damage", ["missing-file", "missing-index", "staged-deletion"])
 def test_registered_partial_checkout_fails_closed(lfs_repo, tmp_path, monkeypatch, damage):
     from pathlib import Path
