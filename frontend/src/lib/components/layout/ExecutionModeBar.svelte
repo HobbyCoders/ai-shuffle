@@ -862,12 +862,22 @@
 		margin-top: 6px;
 	}
 
+	/* One line, like the bound chat's chip row that replaces it. Between Send
+	   and the session binding, Auto turns into the generated branch name; a
+	   wrapping row then dropped Worktree to a second line and lifted the whole
+	   composer 34px for that moment. The branch chip gives way instead: its
+	   name ellipsizes (full name in its title). */
 	.mode-bar-row {
 		display: flex;
-		flex-wrap: wrap;
+		flex-wrap: nowrap;
 		align-items: center;
 		gap: 6px;
+		min-width: 0;
 		max-width: 100%;
+	}
+
+	.mode-bar-row .wt-chip {
+		flex-shrink: 0;
 	}
 
 	/* Runner chip — `.ctx-chip` (app.css) carries the look. */
