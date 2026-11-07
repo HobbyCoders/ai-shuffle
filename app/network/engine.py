@@ -2334,6 +2334,37 @@ def _wire_stream(cursor, chunk: Sequence[Mapping[str, Any]], ctx: NetworkContext
                        int(stream["highest"]), int(stream["watermark"]), int(stream["pending"]))
 
 
+def _duplicate_prefix(chunk: Sequence[Mapping[str, Any]], ctx: NetworkContext,
+                      stream: _WireStream) -> int:
+    """Verify a contiguous remote run before skipping its committed prefix.
+
+    The frontier was read while holding network_state, which serializes all
+    apply/publication writers until this chunk commits. Never infer authenticity
+    from a sequence number: every envelope still passes the ordinary shape,
+    network, member, incarnation, key and signature gates. Unusual runs retain
+    the per-envelope path, including its revocation/backup and pending evidence.
+    """
+    if (stream.first_seq > stream.watermark or stream.incarnation < stream.highest
+            or stream.pending):
+        return 0
+    member = ctx.member(stream.origin)
+    if (stream.origin == ctx.device_id or member is None
+            or member.status != membership.STATUS_ACTIVE):
+        return 0
+    try:
+        for index, data in enumerate(chunk):
+            env = Envelope.from_dict(data)
+            if (env.network_id != ctx.network_id or env.origin_device_id != stream.origin
+                    or env.origin_incarnation != stream.incarnation
+                    or env.origin_seq != stream.first_seq + index
+                    or env.key_version not in ctx.keyring
+                    or not env.verify_signature(member.signing_public)):
+                return 0
+    except (ValueError, TypeError, KeyError, crypto.CryptoError):
+        return 0
+    return min(len(chunk), stream.watermark - stream.first_seq + 1)
+
+
 def _buffer_pending_chunk(cursor, chunk: Sequence[Mapping[str, Any]], ctx: NetworkContext,
                           result: ApplyResult, stream: _WireStream) -> bool:
     """Bulk-stash only a contiguous, fully validated run beyond a real gap.
@@ -2488,7 +2519,17 @@ def _apply_chunk(chunk: Sequence[Mapping[str, Any]], ctx: NetworkContext, result
             bulk_pending = os.environ.get("AI_SHUFFLE_PERF_BULK_PENDING", "").strip().lower() not in (
                 "0", "false", "off", "no")
             stream = _wire_stream(cursor, chunk, ctx) if bulk_pending else None
-            appended = (stream is not None and _buffer_pending_chunk(cursor, chunk, ctx, part, stream))
+            skipped = _duplicate_prefix(chunk, ctx, stream) if stream is not None else 0
+            if skipped:
+                part.duplicate += skipped
+                # Duplicates must still request the normal post-commit pending
+                # readiness check, even when this locked snapshot has no buffer.
+                part._pending_drains.add((stream.origin, stream.incarnation))
+                chunk = chunk[skipped:]
+                stream = _WireStream(stream.origin, stream.incarnation,
+                                     stream.first_seq + skipped, stream.highest,
+                                     stream.watermark, stream.pending)
+            appended = not chunk or (stream is not None and _buffer_pending_chunk(cursor, chunk, ctx, part, stream))
             if not appended:
                 # Fast append reserves the whole chunk itself. Pure gap
                 # buffering needs no C; only the per-op fallback reserves here.
