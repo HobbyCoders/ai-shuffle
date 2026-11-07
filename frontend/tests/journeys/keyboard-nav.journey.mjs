@@ -41,6 +41,10 @@ async function clearComposer(page) {
 await runJourney({
 	name: 'keyboard-nav',
 	allow: [...DEV_INSTANCE_NOISE],
+	// The New-chat-after-Send case holds the cold-cache request with page.route,
+	// which cannot see API fetches once the product service worker has claimed
+	// the page (it did on a hosted phone run, so the send went straight out).
+	browser: async () => ({ context: { serviceWorkers: 'block' } }),
 	cases: [{
 		name: 'shift-enter-with-a-suggestion-menu-open-is-a-new-line',
 		viewports: ['desktop'],
@@ -100,8 +104,9 @@ await runJourney({
 			// until New chat has been pressed, so the switch lands in that window
 			// every time, as it does on a slow connection.
 			let release;
+			let held = 0;
 			const released = new Promise((resolve) => { release = resolve; });
-			await page.route('**/cache-state*', async (route) => { await released; await route.continue().catch(() => {}); });
+			await page.route('**/cache-state*', async (route) => { held += 1; await released; await route.continue().catch(() => {}); });
 			await composer(page).click();
 			await composer(page).pressSequentially(token);
 			await mark('Send, then New chat at once');
@@ -113,6 +118,7 @@ await runJourney({
 				await page.keyboard.press('Control+N');
 			}
 			await waitChat(page, { surface: 'new' }, { timeout: 10_000 });
+			expect(held > 0, 'the send was still waiting on its cold-cache check when New chat was pressed');
 			release();
 			await page.unroute('**/cache-state*');
 			await page.waitForTimeout(2000);

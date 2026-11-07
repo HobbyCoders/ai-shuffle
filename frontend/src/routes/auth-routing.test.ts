@@ -12,7 +12,7 @@ vi.mock('$lib/services/error-reporter', () => ({ installGlobalErrorHandlers: () 
 vi.mock('$lib/utils/visual-viewport', () => ({ bindVisualViewport: () => () => {} }));
 vi.mock('$lib/services/live-sync', () => ({ startLiveSync: () => () => {} }));
 vi.mock('$lib/services/watch-resources', () => ({ watchResources: vi.fn() }));
-vi.mock('$lib/services/session-navigation', () => ({ openSession: vi.fn() }));
+vi.mock('$lib/services/session-navigation', () => ({ openSession: vi.fn(), openSessionFromList: vi.fn() }));
 vi.mock('$lib/services/globalStt', () => ({ initGlobalStt: () => () => {} }));
 vi.mock('$lib/services/keyboard', () => ({ registerShortcut: () => ({ unregister() {} }) }));
 vi.mock('$lib/stores/sessionMode.svelte', () => ({ appMode: { set: vi.fn() } }));
