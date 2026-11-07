@@ -187,8 +187,8 @@
 		overflow: hidden;
 		cursor: progress;
 		color: var(--foreground);
-		border-color: color-mix(in oklch, var(--warning) 50%, var(--border));
-		background: color-mix(in oklch, var(--warning) 8%, var(--popover));
+		border-color: color-mix(in oklab, var(--warning) 55%, transparent);
+		background: color-mix(in oklab, var(--warning) 8%, var(--popover));
 	}
 	.reconnect-pill.is-busy::after { bottom: 0; }
 	.reconnect-pill.is-busy :global(.reconnect-spin) {

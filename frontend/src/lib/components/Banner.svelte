@@ -191,8 +191,8 @@
 	   banner's accent and show progress instead of a dimmed control. */
 	.banner-action.is-busy {
 		cursor: progress;
-		border-color: color-mix(in oklch, var(--banner-accent) 45%, var(--border));
-		background: color-mix(in oklch, var(--banner-accent) 12%, var(--secondary));
+		border-color: color-mix(in oklab, var(--banner-accent) 50%, transparent);
+		background: color-mix(in oklab, var(--banner-accent) 12%, var(--secondary));
 	}
 	.banner-action :global(.banner-action-spin) {
 		flex-shrink: 0;
