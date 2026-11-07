@@ -17,3 +17,12 @@ describe('restored attachment document', () => {
         expect(serialize('', ['/a.png'])).toBe('@/a.png');
     });
 });
+
+describe('restored words with a typed upload path (#1084)', () => {
+    it('keeps a path that was never attached as text, never a chip', () => {
+        const text = 'Explain @/work/uploads/private.txt without opening it';
+        const doc = restoreMessageDocument(text);
+        expect(JSON.stringify(doc)).not.toContain('fileChip');
+        expect(serialize(text, [])).toBe(text);
+    });
+});

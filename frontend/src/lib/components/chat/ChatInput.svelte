@@ -36,7 +36,7 @@
 	import { persistVoiceContext, voiceContextFor } from '$lib/services/voiceExecutionContext';
 	import { attachComposerDictation, detachComposerDictation, startComposerDictation } from '$lib/services/composerDictation';
 	import { flushPendingDraft, holdPendingDraft, readDraft, releasePendingDraft, writeDraft } from '$lib/stores/session/draft-persistence';
-	import { takeUnfinishedRestores } from '$lib/stores/session/restored-draft';
+	import { sentRowIdsOnScreen, takeUnfinishedRestores } from '$lib/stores/session/restored-draft';
 	import { promptStash } from '$lib/stores/session/prompt-stash';
 	import { promptHistory, createPromptRecall } from '$lib/stores/session/prompt-recall';
 	import { pastedTextFile } from './tiptap/large-paste';
@@ -504,7 +504,11 @@
 		unfinishedRestoresCheckedFor = null;
 		if (!sessionId || !ownsComposer() || isLoadingSession || isRestoringSession || error || wsReconnectRequired || historyStall) return;
 		unfinishedRestoresCheckedFor = sessionId;
-		const onScreen = new Set(messages.map((m) => m.metadata?.not_sent_id).filter((id): id is string => typeof id === 'string'));
+		// Not-sent rows by their id; sent prompts by text and occurrence (#1083).
+		const onScreen = new Set([
+			...messages.map((m) => m.metadata?.not_sent_id).filter((id): id is string => typeof id === 'string'),
+			...sentRowIdsOnScreen(messages),
+		]);
 		const notes = takeUnfinishedRestores(sessionId, onScreen);
 		if (notes.length === 0) return;
 		activeSession.setPendingRestorePrompt(notes.map((n) => n.prompt).filter(Boolean).join('\n\n'), notes.flatMap((n) => n.uploadPaths));

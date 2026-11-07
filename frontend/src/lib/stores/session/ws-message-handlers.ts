@@ -1111,6 +1111,13 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 					// `offer_fork`: the worker that owns this session is unreachable —
 					// the chat renders a "Fork here" action for POST /network/sessions/{id}/fork-here.
 					const forkOffer = data.offer_fork === true && erroredSessionId ? erroredSessionId : null;
+					// The banner belongs to the failed turn the log records, so the feed
+					// clears it once that failure is rewound away or a later turn
+					// finishes cleanly (turn-error-banner.ts, #1082 / #1175). The frame
+					// names that turn (#1238); one naming a turn the log has already
+					// moved past raises nothing.
+					const frameTurnId = typeof data.turn_id === 'string' && data.turn_id ? data.turn_id : null;
+					if (erroredSessionId && feedController.raiseTurnError(erroredSessionId, errMessage, frameTurnId) === 'outlived') break;
 					update(s => ({
 						...s,
 						error: errMessage,
