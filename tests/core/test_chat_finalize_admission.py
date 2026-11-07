@@ -96,3 +96,93 @@ async def test_chat_releases_admission_when_pump_ends_abnormally(mock_db, cancel
         else:
             assert await asyncio.wait_for(runtime, 5) == "aborted"
     assert SID not in admission._holders
+
+
+@pytest.mark.parametrize("blocked_step", ["persist", "persist_error", "teardown", "pending", "park_read"])
+async def test_rewind_timeout_fences_old_finalizer_from_direct_successor(mock_db, blocked_step):
+    """A's delayed cleanup must not touch B after a rewind has taken A's lease."""
+    from app.core import pending_reconcile, provider_agent_supervisor as supervisor
+
+    turn = turns.enqueue_turn(SID, "user", prompt="old turn")
+    entered, resume = asyncio.Event(), asyncio.Event()
+    worker = supervisor.WorkerRecord(
+        parent_session_id=SID, worker_session_id="new-worker", task_id="new-worker",
+        tool_use_id="new-worker", background=False,
+    )
+    stopped = []
+
+    async def barrier(*args, **kwargs):
+        entered.set()
+        await resume.wait()
+        if blocked_step == "persist_error":
+            raise RuntimeError("old persistence failed after takeover")
+        return []
+
+    async def stop(record, **kwargs):
+        stopped.append(record.task_id)
+        return {}
+
+    with _runtime_env(pump=pump) as env, patch.object(
+        supervisor, "teardown_worker", side_effect=stop,
+    ), patch.object(
+        pending_reconcile, "reconcile_engine_pending", new=AsyncMock(return_value=[]),
+    ) as reconcile, patch.object(
+        pending_reconcile, "nonterminal_agent_task_ids", return_value=[],
+    ) as park_read, patch.object(
+        admission, "_ENDING_WAIT_SECONDS", 0.01,
+    ):
+        if blocked_step in ("persist", "persist_error"):
+            blocker = patch("app.core.turn_finalize.persist_turn_end_state", side_effect=barrier)
+        elif blocked_step == "teardown":
+            blocker = patch.object(supervisor, "teardown_workers", side_effect=barrier)
+        elif blocked_step == "pending":
+            reconcile.side_effect = barrier
+            blocker = patch("app.core.turn_finalize.persist_turn_end_state", new=AsyncMock())
+        else:
+            # Use the runtime's thread seam for the durable park read so the
+            # barrier is deterministic without blocking a worker thread.
+            original_to_thread = asyncio.to_thread
+
+            async def to_thread(fn, *args, **kwargs):
+                if fn is park_read:
+                    return await barrier()
+                return await original_to_thread(fn, *args, **kwargs)
+
+            blocker = patch.object(asyncio, "to_thread", side_effect=to_thread)
+        with blocker:
+            rt = session_runtime.SessionRuntime(turn)
+            running = asyncio.create_task(rt.execute())
+            direct = None
+            try:
+                await asyncio.wait_for(entered.wait(), 5)
+                old = rt._admission_lease
+                rewind = await admission.begin_rewind(SID)
+                assert admission.take_for_rewind(rewind) is old
+                # Exercise the real takeover wait, with a shortened budget.
+                with pytest.raises(asyncio.TimeoutError):
+                    await asyncio.wait_for(old.exited.wait(), 0.01)
+                assert not old.exited.is_set()
+                admission.close(rewind)
+                direct = await admission.acquire(SID)
+                # This is the supervisor's actual live-worker lookup. Teardown
+                # is real, only the process-stop boundary is intercepted.
+                supervisor.register_worker(worker)
+                env["registry"].get_parking_background_work.reset_mock()
+                reconcile.reset_mock()
+                park_read.reset_mock()
+                resume.set()
+                outcome = await asyncio.wait_for(running, 5)
+                assert stopped == [], "A killed B's newly admitted synchronous worker"
+                assert outcome == "aborted"
+                assert admission._holders[SID] is direct
+                env["registry"].get_parking_background_work.assert_not_called()
+                reconcile.assert_not_awaited()
+                park_read.assert_not_called()
+                env["record_parked"].assert_not_awaited()
+                assert turns.get_turn(turn["id"])["state"] == "aborted"
+            finally:
+                resume.set()
+                await asyncio.wait_for(running, 5)
+                if direct is not None:
+                    admission.close(direct)
+                supervisor.unregister_worker(SID, worker.worker_session_id)
