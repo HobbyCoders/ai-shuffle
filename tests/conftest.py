@@ -192,6 +192,7 @@ def _no_session_admission_across_tests():
 from tests._admission_cleanup import (  # noqa: F401, E402
     pytest_fixture_post_finalizer,
     pytest_fixture_setup,
+    pytest_runtest_protocol,
     pytest_runtest_teardown,
 )
 

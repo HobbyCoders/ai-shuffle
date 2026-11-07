@@ -3,12 +3,14 @@ import asyncio
 import os
 import sys
 import threading
+from contextlib import contextmanager
 from functools import partial
 
 import pytest
 
 _CLEANUP_SECONDS = 5.0
 _deadlines = {}
+_current_item = None
 
 
 def _abort_cleanup(loop, nodeid, initial, seconds, capture):
@@ -32,6 +34,54 @@ def _abort_cleanup(loop, nodeid, initial, seconds, capture):
         os._exit(int(pytest.ExitCode.TESTS_FAILED))
 
 
+def _start_deadline(key, loop, nodeid, initial, capture):
+    deadline = threading.Timer(_CLEANUP_SECONDS, _abort_cleanup,
+                               args=(loop, nodeid, initial, _CLEANUP_SECONDS, capture))
+    deadline.daemon = True
+    _deadlines[key] = deadline
+    deadline.start()
+
+
+def _cancel_deadline(key):
+    deadline = _deadlines.pop(key, None)
+    if deadline is not None:
+        deadline.cancel()
+
+
+@contextmanager
+def cleanup_deadline(loop):
+    """Bound an explicit release wait, including non-fixture/TestClient loops."""
+    item = _current_item
+    nodeid = item.nodeid if item is not None else os.environ.get(
+        "PYTEST_CURRENT_TEST", "explicit admission cleanup",
+    ).rsplit(" (", 1)[0]
+    capture = item.config.pluginmanager.getplugin("capturemanager") if item is not None else None
+    key = object()
+    _start_deadline(key, loop, nodeid, (), capture)
+    try:
+        yield
+    finally:
+        _cancel_deadline(key)
+
+
+@pytest.hookimpl(wrapper=True, tryfirst=True)
+def pytest_runtest_protocol(item):
+    global _current_item
+    previous = _current_item
+    _current_item = item
+    try:
+        return (yield)
+    finally:
+        _current_item = previous
+
+
+async def wait_for_lease_release(lease):
+    from app.core.provider import session_admission
+
+    with cleanup_deadline(asyncio.get_running_loop()):
+        await session_admission.close_and_wait(lease)
+
+
 async def _drain(admission, loop):
     leaked = set()
     while owned := {task for task in tuple(admission._unattended) if task.get_loop() is loop}:
@@ -51,11 +101,7 @@ def _check_loop(loop, nodeid, fixturedef, capture):
         return
     # One wall-clock budget, not a fresh timeout per owner or cancellation. Keep
     # it armed until the fixture's Runner/loop cleanup has also finished.
-    deadline = threading.Timer(_CLEANUP_SECONDS, _abort_cleanup,
-                               args=(loop, nodeid, owned, _CLEANUP_SECONDS, capture))
-    deadline.daemon = True
-    _deadlines[fixturedef] = deadline
-    deadline.start()
+    _start_deadline(fixturedef, loop, nodeid, owned, capture)
     leaked = loop.run_until_complete(_drain(admission, loop))
     if leaked:
         names = sorted(task.get_coro().__qualname__ for task in leaked)
@@ -83,9 +129,7 @@ def pytest_fixture_setup(fixturedef, request):
 
 @pytest.hookimpl(trylast=True)
 def pytest_fixture_post_finalizer(fixturedef, request):
-    deadline = _deadlines.pop(fixturedef, None)
-    if deadline is not None:
-        deadline.cancel()
+    _cancel_deadline(fixturedef)
 
 
 @pytest.hookimpl(wrapper=True, tryfirst=True)

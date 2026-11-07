@@ -9,7 +9,9 @@ async def wait_for_rewind_release(session_id):
 
     lease = session_admission._rewinds.get(session_id)
     if lease is not None:
-        await session_admission.close_and_wait(lease)
+        from tests._admission_cleanup import wait_for_lease_release
+
+        await wait_for_lease_release(lease)
 
 
 async def execute_rewind_and_wait(session_id, request):
