@@ -1,6 +1,8 @@
 /** Authoritative snapshots, serialized per-key edits, and atomic legacy migration.
  * No store setter is called during remote application; adapters apply without echo.
  */
+import { randomUUID } from '$lib/utils/id';
+
 export interface PreferenceAdapter {
  read(): unknown;
  apply(value: unknown): void; // undefined means reset to defaults
@@ -26,13 +28,6 @@ type Edit = { value: unknown; revision: number; version?: string | null; writeId
 type Entry = { adapter: PreferenceAdapter; revision: number; request: number;
  version?: string | null; pending?: Edit; inDoubt?: Edit; running: boolean; initialized: boolean };
 const clone = (value: unknown) => JSON.parse(JSON.stringify(value));
-// A UUID v4 from getRandomValues, which works on LAN HTTP, unlike randomUUID.
-function newWriteId() {
- const b = crypto.getRandomValues(new Uint8Array(16));
- b[6] = (b[6] & 0x0f) | 0x40; b[8] = (b[8] & 0x3f) | 0x80;
- const h = Array.from(b, x => x.toString(16).padStart(2, '0')).join('');
- return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
-}
 export class PreferenceSync {
  private entries = new Map<string, Entry>();
  private prefixes = new Map<string, (key: string) => PreferenceAdapter | null>();
@@ -98,7 +93,7 @@ export class PreferenceSync {
   const e = this.entries.get(key);
   if (!e || !this.active || e.adapter.readOnly) return;
   const inDoubt = e.pending?.sent ? e.pending : e.inDoubt;
-  e.pending = { value: clone(value), revision: ++e.revision, version: e.version, writeId: newWriteId() };
+  e.pending = { value: clone(value), revision: ++e.revision, version: e.version, writeId: randomUUID() };
   e.inDoubt = inDoubt;
   void this.flush(key, e);
  }
