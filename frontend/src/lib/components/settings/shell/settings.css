@@ -252,6 +252,10 @@
 	color: var(--st-action-fg);
 	border-color: transparent;
 }
+.settings-shell .st-btn.primary:disabled {
+	opacity: var(--action-disabled-opacity, 0.4);
+	cursor: not-allowed;
+}
 .settings-shell .st-btn.primary:hover:not(:disabled) {
 	background: var(--st-action-hover);
 }

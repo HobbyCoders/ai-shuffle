@@ -28,6 +28,8 @@
 .ui-button.icon { width: 32px; padding: 0; flex: none; }
 .ui-button:active:not(:disabled) { transform: translateY(1px); }
 .ui-button:disabled { opacity: .5; cursor: not-allowed; }
+/* A disabled primary is the primary colour faded, not a solid grey (app.css token). */
+.ui-button.primary:disabled { opacity: var(--action-disabled-opacity, .4); }
 .ui-surface :focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
 .ui-field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .ui-label { font-size: 12px; font-weight: 500; color: var(--muted-foreground); }

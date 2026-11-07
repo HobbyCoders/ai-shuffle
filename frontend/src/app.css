@@ -101,6 +101,9 @@
 		--action: var(--foreground);
 		--action-foreground: var(--background);
 		--action-hover: color-mix(in oklab, var(--foreground) 88%, var(--background));
+		/* A disabled primary keeps the primary colour, faded, in both themes:
+		   never a separate solid grey that reads as a different button. */
+		--action-disabled-opacity: 0.4;
 
 		/* Secondary/Muted */
 		--secondary: oklch(0.276 0.008 265);
@@ -652,8 +655,10 @@ code {
 	transform: none;
 }
 
+.btn-primary:disabled,
 .btn-primary:disabled:hover {
 	background: var(--action);
+	opacity: var(--action-disabled-opacity);
 }
 
 .btn-secondary {
