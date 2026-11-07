@@ -27,7 +27,14 @@ Who takes what (keep this table and the code in step):
   - hand-off publication / acceptance / finalize: W, H (+ hold runs), C, S.
     Staging cleanup (``handoff._discard_history``): H (+ hold runs), S.
   - source commit (``handoff._commit``): N, then its lease and hold runs in
-    one sorted lock (``lock_handoff_holds``), then S.
+    one sorted lock (``lock_handoff_holds``), then S. Its retry of an already
+    transferred move and the cleanup after a refused commit lock only the
+    hold runs, sorted, before releasing them.
+  - source cancel (``handoff.finish`` phase "cancel"): the lease and hold runs
+    in one sorted lock, then the release. Locking the moving chat's lease
+    first and a parent's hold run later deadlocks a family delete.
+  - export failure / begin's abandoned-attempt cleanup: ``runs.release_run``
+    one run per transaction, or ``_discard_history`` (H, holds, S).
   - single-session append, turn admission, park repair: R, C, S
     (``lock_session_runtime``); never G.
 
@@ -152,7 +159,8 @@ def lock_session_runtimes(cursor: Any, session_ids):
 # an absent session row alone can also mean "not arrived yet". Deletion marks
 # the chat while it holds the chat's counter; a reservation that finds the row
 # again forgets the mark, so a rolled-back delete never hides a live chat.
-# Bounded: only ops already in flight when the chat was deleted need it.
+# Only a cache: the reservation falls back to sync_records (durable, survives
+# eviction and restart), so losing a mark costs one lookup, never correctness.
 _deleted_lock = threading.Lock()
 _DELETED: dict[str, None] = {}
 _DELETED_MAX = 1024

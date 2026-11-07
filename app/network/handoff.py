@@ -919,6 +919,9 @@ def finish(sid, target, payload):
     if payload.get("phase") == "cancel":
         with get_db() as conn:
             cur = conn.cursor()
+            # The lease and the hold runs (other chats) in one sorted lock, as
+            # _commit and a family delete take them (app/db/session_locks.py).
+            lock_handoff_holds(cur, [token], run_ids=[token])
             run = _lease(cur, sid, target, token)
             cur.execute("UPDATE runs SET state='released' WHERE id=%s", (run["id"],))
             _release_holds(cur, HOLD + run["id"])
@@ -936,6 +939,7 @@ def finish(sid, target, payload):
             cur.execute("SELECT 1 FROM runs WHERE id=%s AND session_id=%s AND runner_id=%s AND state='active'",
                         (token, sid, HANDOFF + target))
             if cur.fetchone():
+                lock_handoff_holds(cur, [token])  # sorted, like a family delete
                 _release_holds(cur, HOLD + token)
         raise
 
@@ -962,6 +966,7 @@ def _commit(sid, target, payload, token):
             cur.execute("SELECT 1 FROM runs WHERE id=%s AND session_id=%s AND runner_id=%s AND state='transferred'",
                         (token, sid, HANDOFF + target))
             if cur.fetchone():
+                lock_handoff_holds(cur, [token])  # sorted, like a family delete
                 _release_holds(cur, HOLD + token)
                 _announce_owner(sid, target, session)
                 from app.db.base import parse_jsonb

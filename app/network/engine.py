@@ -1517,8 +1517,9 @@ def _lock_mirror_event_counters(cursor, record_ids: Iterable[str], *,
     orphan events and a positive counter for a deleted chat (#1222). A chat
     counts as deleted when the fresh-snapshot cleanup sees it vanish, when
     ``existed`` (the caller saw its row earlier in this transaction) names a
-    chat now absent, or when this process deleted it (``mark_sessions_deleted``)
-    and the row has not come back. Absence alone means "not arrived yet".
+    chat now absent, or when its row is absent but ``sync_records`` knows it
+    (the durable answer; the process-local ``mark_sessions_deleted`` cache only
+    saves that lookup). Absence alone means "not arrived yet".
     """
     from app.db.session_locks import deleted_sessions, mark_sessions_deleted
 
@@ -1560,11 +1561,25 @@ def _lock_mirror_event_counters(cursor, record_ids: Iterable[str], *,
         vanished = {row["session_id"] for row in cursor.fetchall()}
         present -= vanished
         gone |= vanished
+    marked = deleted_sessions(session_ids, present=present)
+    unknown = [sid for sid in session_ids if sid not in present and sid not in gone and sid not in marked]
+    if unknown:
+        # The marks are only a cache (bounded, lost on restart). The durable
+        # answer: sync_records knows the chat but its row is gone. A tombstone,
+        # or a local delete the scan has not published yet; sessions have no
+        # undelete. No record at all means the create has not arrived yet.
+        placeholders = ", ".join(["%s"] * len(unknown))
+        cursor.execute(
+            f"SELECT record_id FROM sync_records WHERE collection = 'sessions' "
+            f"AND record_id IN ({placeholders})",
+            tuple(unknown),
+        )
+        gone |= {row["record_id"] for row in cursor.fetchall()}
     if gone:
-        # Carry the fact to a later reservation in this batch (per-op apply),
-        # which can no longer tell "deleted" from "not arrived yet".
+        # Carry the fact to a later reservation in this batch (per-op apply)
+        # without another lookup.
         mark_sessions_deleted(gone)
-    return deleted_sessions(session_ids, present=present)
+    return gone | marked
 
 
 def _apply_next(cursor, ctx: NetworkContext, env: Envelope, member: Member, result: ApplyResult) -> str:

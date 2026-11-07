@@ -1478,3 +1478,225 @@ def test_handoff_hold_runs_are_locked_before_counter_and_session(private_pool, m
         cur = conn.cursor()
         cur.execute("SELECT COUNT(*) AS n FROM runs WHERE runner_id=%s AND state='active'", (handoff.HOLD + token,))
         assert cur.fetchone()["n"] == 0
+
+
+def _late_events_for_deleted_chat(prefix, *, published):
+    """A deleted mirror chat and two valid late event envelopes for it.
+
+    ``published``: the chat's sync record is a tombstone (a peer's delete, or
+    a local delete the scan published); otherwise it is the live record of a
+    local delete the scan has not published yet. Either survives a restart.
+    """
+    from app.db import network as store
+    from app.network import engine, envelope, policy
+
+    ctx, remote = _remote_network(prefix)
+    sid = prefix + uuid4().hex
+    coll = policy.collection("session_events")
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("INSERT INTO sessions (id,owner_device_id) VALUES (%s,%s)", (sid, remote.device_id))
+        store.put_record(cur, "sessions", sid, clock=1, origin_device_id=remote.device_id,
+                         content_hash="synced", deleted=False)
+    session_events.append_events(sid, [{"type": "system.note", "payload": {"content": "local"}}])
+    with base.get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM session_events WHERE session_id=%s", (sid,))
+        template = engine.serialize_row(coll, dict(cursor.fetchone()))
+    envs, items = [], []
+    for index, seq in enumerate((2, 3), 1):
+        record = {**template, "id": "late-event-" + uuid4().hex, "seq": seq,
+                  "payload": {"content": f"remote {seq}"}}
+        rid = coll.record_id(record)
+        envs.append(envelope.build(
+            network_id=ctx.network_id, collection=coll.name, record_id=rid,
+            op="upsert", clock=2 + index, origin_device_id=remote.device_id,
+            origin_incarnation=1, origin_seq=index, schema_version=1, key_version=1,
+            network_key=ctx.network_key, signing_private=remote.signing_private,
+            record=record, order_seq=seq,
+        ).to_dict())
+        items.append({"record_id": rid, "record": record, "clock": 2 + index,
+                      "origin_device_id": remote.device_id, "deleted": False, "order_seq": seq})
+    assert sessions.delete_session(sid)
+    if published:
+        with base.get_db() as conn:
+            store.put_record(conn.cursor(), "sessions", sid, clock=2, origin_device_id=remote.device_id,
+                             content_hash="", deleted=True)
+    return ctx, remote, sid, envs, items
+
+
+def _reserve_in_fresh_process(private_pool, sid):
+    """Run the mirror reservation in a new interpreter: no in-memory marks."""
+    import json
+    import os
+    import subprocess
+    import sys
+
+    script = (
+        "import json, sys\n"
+        "from app.core.config import settings\n"
+        "from app.db import base, network as store, session_locks\n"
+        "from app.network import engine\n"
+        "kwargs, sid = json.loads(sys.argv[1]), sys.argv[2]\n"
+        "object.__setattr__(settings, 'get_database_connection', lambda: dict(kwargs))\n"
+        "base.init_pool(min_conn=1, max_conn=1)\n"
+        "assert session_locks._DELETED == {}\n"
+        "with base.get_db() as conn:\n"
+        "    cursor = conn.cursor()\n"
+        "    store.lock_state(cursor)\n"
+        "    print(json.dumps(sorted(engine._lock_mirror_event_counters(cursor, [sid + '|e']))))\n"
+        "base.close_pool()\n"
+    )
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    done = subprocess.run([sys.executable, "-c", script, json.dumps(private_pool), sid], cwd=root,
+                          capture_output=True, text=True, timeout=60, check=False)
+    assert done.returncode == 0, done.stderr[-2000:]
+    return json.loads(done.stdout.strip().splitlines()[-1])
+
+
+@pytest.mark.parametrize("path", ["envelope", "chunk", "pending", "snapshot"])
+@pytest.mark.parametrize("cause", ["evicted", "restart"])
+@pytest.mark.parametrize("published", [True, False], ids=["tombstone", "unpublished-local-delete"])
+def test_deleted_chat_late_events_rely_on_the_durable_record(private_pool, monkeypatch, path, cause, published):
+    """#1222 (review S5): the in-memory delete marks are only a cache.
+
+    Before the fix, once 1,025 newer deletions evicted the chat's mark (or a
+    restart emptied the cache), two valid late envelopes for the deleted chat
+    were applied: 0 sessions, 2 events, counter 3, tombstone still present.
+    sync_records knowing the chat while its row is gone is the durable answer.
+    (Fast append declines a chat with no row; ``chunk`` covers that fallback.)
+    """
+    from app.db import network as store
+    from app.db import session_locks
+    from app.network import engine, policy
+
+    monkeypatch.setattr(session_locks, "_DELETED", dict(session_locks._DELETED))
+    ctx, remote, sid, envs, items = _late_events_for_deleted_chat("durable-delete-", published=published)
+    assert sid in session_locks._DELETED  # delete_session marked it
+    if cause == "evicted":
+        session_locks.mark_sessions_deleted(f"evict-{index}-{uuid4().hex}"
+                                            for index in range(session_locks._DELETED_MAX + 1))
+    else:
+        # A new process starts with no marks at all, and still finds the deletion.
+        assert _reserve_in_fresh_process(private_pool, sid) == [sid]
+        monkeypatch.setattr(session_locks, "_DELETED", {})
+    assert sid not in session_locks._DELETED
+
+    result = engine.ApplyResult()
+    if path == "chunk":
+        assert engine._apply_chunk(envs, ctx, result)
+    elif path == "pending":
+        with base.get_db() as conn:
+            for env in envs:
+                store.stash_pending(conn.cursor(), env)
+        assert engine._apply_pending_chunk(remote.device_id, 1, ctx, result)
+    else:
+        with base.get_db() as conn:
+            cursor = conn.cursor()
+            if path == "snapshot":
+                assert engine.apply_snapshot_items(cursor, policy.collection("session_events"),
+                                                   items, ctx=ctx) == (0, [])
+            else:
+                store.lock_state(cursor)
+                assert [engine.apply_envelope(cursor, env, ctx=ctx, result=result)
+                        for env in envs] == ["duplicate", "duplicate"]
+    if path in ("chunk", "pending"):
+        assert (result.applied, result.duplicate, result.retry, result.rejected) == (0, 2, 0, 0)
+    _assert_deleted(sid)
+    with base.get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) AS n FROM sync_records WHERE collection='session_events' "
+                       "AND record_id LIKE %s", (sid + "|%",))
+        assert cursor.fetchone()["n"] == 0
+        if path != "snapshot":
+            assert store.get_watermark(cursor, remote.device_id, 1) == 2
+        cursor.execute("SELECT COUNT(*) AS n FROM sync_pending WHERE origin_device_id=%s", (remote.device_id,))
+        assert cursor.fetchone()["n"] == 0
+
+
+def test_absent_chat_without_a_sync_record_is_not_arrived_yet(private_pool, monkeypatch):
+    """Review S5: the durable check never refuses a chat whose create is in flight."""
+    from app.db import network as store
+    from app.db import session_locks
+    from app.network import engine
+
+    monkeypatch.setattr(session_locks, "_DELETED", {})
+    unknown, deleted = "not-arrived-" + uuid4().hex, "durably-deleted-" + uuid4().hex
+    with base.get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO network_state (id,network_id,founder_device_id) VALUES (1,%s,%s) "
+                       "ON CONFLICT(id) DO NOTHING", ("not-arrived-test", "not-arrived-device"))
+        store.put_record(cursor, "sessions", deleted, clock=2, origin_device_id="peer",
+                         content_hash="", deleted=True)
+        store.lock_state(cursor)
+        assert engine._lock_mirror_event_counters(cursor, [unknown + "|1", deleted + "|1"]) == {deleted}
+        cursor.execute("SELECT COUNT(*) AS n FROM session_event_counters WHERE session_id IN (%s,%s)",
+                       (unknown, deleted))
+        assert cursor.fetchone()["n"] == 0
+    assert session_locks._DELETED == {deleted: None}
+
+
+@pytest.mark.parametrize("first", ["cancel", "delete"])
+def test_handoff_cancel_vs_deleting_the_moving_chats_parent(private_pool, monkeypatch, first):
+    """Review S4: cancellation takes its lease and hold runs in one sorted lock.
+
+    Child z is moving and its hold run reserves parent a's run slot. Before
+    the fix cancellation locked z's lease first; deleting a then locked a's
+    runs and waited for z's; cancellation released the hold on a and waited
+    for the delete: DeadlockDetected.
+    """
+    from app.network import handoff
+
+    parent, sid = "a-cancel-parent-" + uuid4().hex, "z-cancel-child-" + uuid4().hex
+    target = "target-" + uuid4().hex
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("INSERT INTO sessions (id) VALUES (%s)", (parent,))
+        cur.execute("INSERT INTO sessions (id,parent_session_id) VALUES (%s,%s)", (sid, parent))
+    lease = runs.claim_run(sid, handoff.HANDOFF + target, 60)
+    assert lease is not None
+    token = lease["id"]
+    assert runs.claim_run(parent, handoff.HOLD + token, 60) is not None
+
+    if first == "cancel":
+        # Holding its first run lock: z's lease before the fix, both runs after.
+        rules = {"cancel": (lambda sql, params: "FROM runs WHERE" in sql and "FOR UPDATE" in sql, False)}
+    else:
+        # Holding the whole family's runs, counters and sessions.
+        rules = {"delete": (lambda sql, params: sql.startswith("DELETE FROM session_events WHERE")
+                            and params == (parent,), False)}
+    barriers = _Barriers(monkeypatch, rules)
+
+    def cancel():
+        return handoff.finish(sid, target, {"phase": "cancel", "token": token})
+
+    with psycopg2.connect(**private_pool) as observer, \
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="cancel") as cancelling, \
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="delete") as deleter:
+        observer.autocommit = True
+        if first == "cancel":
+            cancelled = cancelling.submit(cancel)
+            try:
+                barriers.wait("cancel", cancelled)
+                deleting = deleter.submit(sessions.delete_session, parent)
+                _wait_for_lock_wait(observer, barriers.pids["cancel"], deleting)
+            finally:
+                barriers.release_all()
+        else:
+            deleting = deleter.submit(sessions.delete_session, parent)
+            try:
+                barriers.wait("delete", deleting)
+                cancelled = cancelling.submit(cancel)
+                _wait_for_lock_wait(observer, barriers.pids["delete"], cancelled)
+            finally:
+                barriers.release_all()
+        assert deleting.result(timeout=10)
+        assert cancelled.result(timeout=10) == {"cancelled": True}
+    _assert_deleted(parent)
+    child = sessions.get_session(sid)
+    assert child is not None and child["parent_session_id"] is None
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) AS n FROM runs WHERE state='active' AND (id=%s OR runner_id=%s)",
+                    (token, handoff.HOLD + token))
+        assert cur.fetchone()["n"] == 0
