@@ -164,6 +164,58 @@ describe('one-time branch choice (#1528)', () => {
 		expect(activeSession.current.worktreeBranch).toBe('live/next-task');
 	});
 
+	// #1078 review: the catalog proves the project's local identity replaced
+	// while the create is in flight.
+	describe('identity replaced during the create', () => {
+		// Fresh identities per case: the top-level reset clears only the no-ID key.
+		let run = 0, LOCAL: Record<string, string>, SHARED: Record<string, string>;
+		let local: { projectId: string; projectV2Id: string }, shared: typeof local;
+		beforeEach(() => {
+			run++;
+			LOCAL = { project_v2_id: `pv2-local-${run}`, local_project_id: PROJECT, origin: `local:${PROJECT}` };
+			SHARED = { project_v2_id: `pv2-shared-${run}`, local_project_id: PROJECT, origin: `git:shared-${run}` };
+			local = { projectId: PROJECT, projectV2Id: LOCAL.project_v2_id };
+			shared = { projectId: PROJECT, projectV2Id: SHARED.project_v2_id };
+		});
+		function listCatalog(clusterProjects: unknown[]) {
+			const base = appData.current;
+			vi.spyOn(appData, 'current', 'get').mockReturnValue({ ...base, clusterProjects } as unknown as typeof appData.current);
+		}
+		async function createWhileReplaced(outcome: 'fail' | 'succeed') {
+			listCatalog([LOCAL]);
+			composerPreferences.set('project', local);
+			Object.assign(activeSession.current, { projectV2Id: local.projectV2Id });
+			stagePick();
+			const first = deferred();
+			post.mockReturnValueOnce(first.promise);
+			const pending = activeSession.createWorktree();
+			activeSession.linkDiscoveredProjects([SHARED]);
+			listCatalog([SHARED]);
+			expect(activeSession.current.projectV2Id).toBe(local.projectV2Id);
+			if (outcome === 'fail') first.reject({ status: 500, detail: 'worktree add failed' });
+			else first.resolve(created('session-c'));
+			await pending;
+		}
+
+		it('follows it once the create fails, and the retry spends the branch', async () => {
+			await createWhileReplaced('fail');
+			expect(activeSession.current).toMatchObject({ sessionId: null, project: PROJECT, projectV2Id: shared.projectV2Id, worktreeBranch: BRANCH });
+			expect(composerPreferences.worktreeForProject(shared).checkout?.branch).toBe(BRANCH);
+
+			post.mockResolvedValueOnce(created('session-r'));
+			await activeSession.createWorktree();
+			expect(activeSession.current).toMatchObject({ sessionId: 'session-r', worktreeBranch: BRANCH });
+			expect(composerPreferences.worktreeForProject(shared).checkout).toBeNull();
+			expect(composerPreferences.worktreeForProject(local).checkout).toBeNull();
+		});
+
+		it('never rewrites the chat the create bound', async () => {
+			await createWhileReplaced('succeed');
+			expect(activeSession.current).toMatchObject({ sessionId: 'session-c', projectV2Id: local.projectV2Id });
+			expect(composerPreferences.worktreeForProject(shared).checkout).toBeNull();
+		});
+	});
+
 	it('does not remember an Auto base branch across New Chats (unchanged)', () => {
 		activeSession.setWorktreeBaseBranch('develop');
 		expect(composerPreferences.current.checkout).toBeNull();

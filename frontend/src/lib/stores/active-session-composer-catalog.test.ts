@@ -167,6 +167,24 @@ it('keeps an open chat bound to its original identity when its project links', a
  active.linkDiscoveredProjects([linked]);
  expect(active.current).toMatchObject({sessionId:'bound-chat', project:'local-clone', projectV2Id:'local-identity'});
 });
+it('moves a New Chat compose parked behind an open chat, keeping its draft and branch', async () => {
+ vi.stubGlobal('fetch', vi.fn(async () => new Response('{}'))); // New Chat persists in the background.
+ const previous = { ...linked, project_v2_id: 'local-identity', origin: 'local:local-clone' };
+ mocks.catalog.projects = [{ id: 'local-clone' }]; mocks.catalog.clusterProjects = [previous]; mocks.catalogLoaded = true;
+ active.setProject('local-clone', 'local-identity', { user: true });
+ active.setDraft('parked draft'); active.setWorktreeBranch('topic/parked');
+ active.newChat(); // Caches the compose under the New Chat key.
+ Object.assign(active.current, { sessionId: 'open-chat', draft: '' }); // Another chat on the same project is open.
+ active.linkDiscoveredProjects([linked]);
+ mocks.catalog.clusterProjects = [linked];
+ expect(active.current).toMatchObject({ sessionId: 'open-chat', projectV2Id: 'local-identity' });
+ active.newChat();
+ const { sessionEphemeralCache } = await import('./session-cache');
+ expect(sessionEphemeralCache.restore('open-chat')).toMatchObject({ project: 'local-clone', projectV2Id: 'local-identity' });
+ active.applyComposerDefaults(); active.dropMissingProject();
+ expect(active.current).toMatchObject({ sessionId: null, project: 'local-clone', projectV2Id: 'repo', draft: 'parked draft', worktreeBranch: 'topic/parked' });
+ vi.unstubAllGlobals();
+});
 it('drops a deleted extra folder from a new session', async () => {
  mocks.catalog.projects = [{ id: 'local-clone' }, { id: 'extra' }]; mocks.catalog.clusterProjects = [linked]; mocks.catalogLoaded = true;
  active.setProject('local-clone', 'repo');

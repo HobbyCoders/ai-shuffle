@@ -933,6 +933,26 @@ function composerBusy() {
 	return _state.isStreaming || _state.optimisticStreaming || _state.isCreatingWorktree || _state.isRestoringSession || internal.awaitingNewSession;
 }
 
+/** A project identity the catalog proved replaced: `from` (null = none yet) became `to` (#1078). */
+type IdentitySwap = {projectId:string; from:string | null; to:string};
+/** Proven swaps a worktree create in flight kept from the compose. */
+let _swapsAfterCreate: IdentitySwap[] = [];
+function onSwappedIdentity(swap: IdentitySwap) {
+	return _state.project === swap.projectId && (_state.projectV2Id || null) === swap.from;
+}
+/** Move an idle New Chat off a proven-retired identity. An open chat keeps the identity it was bound under. */
+function followIdentitySwap(swap: IdentitySwap) {
+	if (_state.sessionId || composerBusy() || !onSwappedIdentity(swap)) return;
+	_update(s => ({...s, projectV2Id:swap.to}));
+	persistSession();
+}
+/** A create settled: a compose it left unbound follows the swaps it held back. */
+function settleSwapsAfterCreate() {
+	const swaps = _swapsAfterCreate;
+	_swapsAfterCreate = [];
+	for (const swap of swaps) followIdentitySwap(swap);
+}
+
 type CheckoutSnapshot = Pick<ActiveSessionState, 'mode' | 'project' | 'projectV2Id' | 'worktreeIntent' | 'worktreeId' | 'selectedWorktreeBranch' | 'worktreeBranch' | 'worktreeMode'>;
 /** The checkout the composer defaults set while the project catalog was still loading. */
 let _checkoutBeforeCatalog: CheckoutSnapshot | null = null;
@@ -1512,11 +1532,12 @@ export const activeSession = {
 				composerPreferences.linkWorktreeProject(pick, {projectId:pick.projectId, projectV2Id:from});
 				const selected = composerPreferences.current.project;
 				if (selected.projectId === pick.projectId && (selected.projectV2Id || null) === from) composerPreferences.set('project', pick);
-				// An open chat keeps the identity it was bound under.
-				if (!_state.sessionId && !composerBusy() && _state.project === pick.projectId && (_state.projectV2Id || null) === from) {
-					_update(s => ({...s, projectV2Id:pick.projectV2Id}));
-					persistSession();
-				}
+				// A New Chat compose parked while another chat is open follows too.
+				sessionEphemeralCache.patchProjectIdentity('__new_chat__', pick.projectId, from, pick.projectV2Id);
+				const swap = {projectId:pick.projectId, from, to:pick.projectV2Id};
+				// A create in flight owns the compose: follow once it settles unbound.
+				if (_state.isCreatingWorktree && !_state.sessionId && onSwappedIdentity(swap)) _swapsAfterCreate.push(swap);
+				else followIdentitySwap(swap);
 			}
 		}
 	},
@@ -1537,10 +1558,10 @@ export const activeSession = {
 	},
 
 	createWorktree: (prompt?: string, pendingUploadPaths?: string[]) =>
-		messageSender.createWorktree(prompt, pendingUploadPaths),
+		messageSender.createWorktree(prompt, pendingUploadPaths).finally(settleSwapsAfterCreate),
 
 	autoCreateWorktree: (prompt: string, pendingUploadPaths?: string[]) =>
-		messageSender.autoCreateWorktree(prompt, pendingUploadPaths),
+		messageSender.autoCreateWorktree(prompt, pendingUploadPaths).finally(settleSwapsAfterCreate),
 
 	/** Create the composed session with no first message (the call button). */
 	startSessionWithoutPrompt: () => messageSender.startSessionWithoutPrompt(),
