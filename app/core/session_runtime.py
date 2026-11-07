@@ -1596,12 +1596,25 @@ class SessionRuntime:
             )
             if self._abort_reason == "recording_failed":
                 return
+            from app.core import owner_confirm
+
             if not resume and not already_recorded and not awaiting_uploads:
                 # The owner's message answered an approval in words: its outcome
                 # goes right after the message it came from (#484).
-                from app.core import owner_confirm
-
                 await owner_confirm.after_owner_message(self.session_id, self.turn.get("payload"))
+            answer = turn_payload.get(owner_confirm.ANSWER_KEY)
+            if (self.source in ("user", "queue") and isinstance(answer, dict)
+                    and answer.get("decision") in ("approved", "declined")
+                    and answer.get("released") is False):
+                # Intake already delivered this reply to a permission waiter.
+                # Keep its durable answer/outcome, but do not let an undelivered
+                # steer (or an enqueue racing the final round) call the model
+                # again with a bare yes/no (#1092). Released calls are different:
+                # their reply must still reach the model to resume that work.
+                self._terminal = "done"
+                self._pending_done = {"type": "done", "metadata": {}}
+                await recorder.on_event(self._pending_done)
+                return
             completion_frames, prompt = await refresh_completion_prompt()
             if completion_frames:
                 # The wake turn is the claimed completions' delivery point, so this

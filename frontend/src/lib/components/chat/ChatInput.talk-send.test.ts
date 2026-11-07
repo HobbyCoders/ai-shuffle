@@ -108,6 +108,31 @@ describe('Talk turns into Send', () => {
 		await waitFor(() => expect(circles(container)).toEqual(['Start voice input', 'Send', 'Stop generating']));
 	});
 
+	it('keeps Send in its seat through a double click after the composer clears', async () => {
+		// Send clears the composer at the click; Talk taking the seat at once
+		// would put a call under the second click of a double click.
+		Object.assign(activeSession.current, { sessionId: 'local-idle', mode: 'code', profile: 'coding',
+			isStreaming: false, liveTurnId: null, error: null, worktreeError: null });
+		activeSession.setDraft('');
+		const sends = vi.spyOn(activeSession, 'sendMessage').mockResolvedValue(true);
+		const { container } = render(ChatInput);
+		await waitFor(() => expect(circles(container)).toEqual(['Start voice input', 'Start a call in this conversation']));
+		await type(container, 'Ship it');
+		await waitFor(() => expect(circles(container)).toEqual(['Start voice input', 'Send']));
+
+		await fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+		await waitFor(() => expect(container.querySelector('.tiptap')!.textContent).toBe(''));
+		expect(circles(container)).toEqual(['Start voice input', 'Send']);
+		const held = screen.getByRole('button', { name: 'Send' }) as HTMLButtonElement;
+		expect(held.disabled).toBe(true);
+		await fireEvent.click(held);
+
+		await waitFor(() => expect(sends).toHaveBeenCalledOnce());
+		// Past the double-click window the empty composer offers the call again.
+		await waitFor(() => expect(circles(container)).toEqual(['Start voice input', 'Start a call in this conversation']), { timeout: 2000 });
+		expect(sends).toHaveBeenCalledOnce();
+	});
+
 	it('names the agent on a new session', async () => {
 		render(VoiceCallButton, { props: { variant: 'circle', agentName: 'Overseer' } });
 		const talk = await screen.findByRole('button', { name: 'Talk to Overseer' });
