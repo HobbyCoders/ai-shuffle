@@ -187,6 +187,14 @@ def _no_session_admission_across_tests():
     yield
 
 
+# Keep admission tasks inside their loop fixture's lifetime, after dependent
+# fixture cleanup but before Runner.close() can strand a release owner.
+from tests._admission_cleanup import (  # noqa: F401, E402
+    pytest_fixture_setup,
+    pytest_runtest_teardown,
+)
+
+
 @pytest.fixture(autouse=True)
 def _no_real_claude_on_path_each_test():
     """Re-apply the session guard before every test.
