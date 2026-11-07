@@ -5,8 +5,13 @@ const server = vi.hoisted(() => {
  const rows = new Map<string, {value:unknown; version:string}>();
  let n = 0;
  const row = (key:string) => rows.get(key) ?? null;
- const write = (key:string, value:unknown) => { rows.set(key, {value:JSON.parse(JSON.stringify(value)), version:`v${++n}`}); return rows.get(key)!; };
- return {rows, row, write, reset() { rows.clear(); n = 0; }};
+ // Like the backend, a client write ID becomes the stored version.
+ const write = (key:string, value:unknown, writeId?:string) => {
+  rows.set(key, {value:JSON.parse(JSON.stringify(value)), version:writeId ?? `v${++n}`}); return rows.get(key)!;
+ };
+ // Keys whose next write commits but loses its response.
+ const lose = new Set<string>();
+ return {rows, row, write, lose, reset() { rows.clear(); lose.clear(); n = 0; }};
 });
 vi.mock('./session-owner', () => ({sessionOwnerEpoch:() => 0}));
 // A fresh sync per test: the composer store re-imports each time, the mock does not.
@@ -22,13 +27,19 @@ async function freshSync() {
   allWithVersions: async () => ({preferences:Object.fromEntries([...server.rows].map(([k, r]) => [k, r.value])),
    versions:Object.fromEntries([...server.rows].map(([k, r]) => [k, r.version]))}),
   get: async key => server.row(key),
-  // Like the backend: only_if_missing keeps any stored row (null included), and
-  // a stale expected version is a conflict.
-  put: async (key, value, onlyIfMissing, expected) => {
+  // Like the backend: only_if_missing keeps any stored row (null included), a
+  // retry of the write the row already holds is applied, and any other stale
+  // expected version is a conflict.
+  put: async (key, value, onlyIfMissing, expected, writeId) => {
    const existing = server.row(key);
    if (onlyIfMissing && existing) return existing;
-   if (expected !== undefined && (existing?.version ?? null) !== expected) throw Object.assign(new Error('conflict'), {status:409});
-   return server.write(key, value);
+   if (expected !== undefined && (existing?.version ?? null) !== expected) {
+    if (writeId && existing?.version === writeId) return existing;
+    throw Object.assign(new Error('conflict'), {status:409});
+   }
+   const saved = server.write(key, value, writeId);
+   if (server.lose.delete(key)) throw new Error('network: response lost');
+   return saved;
   },
  });
 }
@@ -77,4 +88,18 @@ it.each([
  claim.release(); await settle();
  expect(server.row(key(ids.N))?.value).toEqual(theirs);
  expect(p.worktreeForProject(ids.N)).toEqual(theirs);
+});
+
+it('keeps a held branch when the promotion commits but its response is lost', async () => {
+ const {p, key, settle, claim} = await setup();
+ p.linkWorktreeProject(ids.N, ids.O); await settle();
+ p.linkWorktreeProject(ids.M, ids.N); await settle();
+ // The save back onto N commits; reconnect retries it from the old version.
+ server.lose.add(key(ids.N));
+ p.linkWorktreeProject(ids.N, ids.M); await settle();
+ expect(server.lose.size).toBe(0);
+ claim.release(); await settle();
+ const expected = {intent:'worktree', checkout:branch('N')};
+ expect(p.worktreeForProject(ids.N)).toEqual(expected);
+ expect(server.row(key(ids.N))?.value).toEqual(expected);
 });

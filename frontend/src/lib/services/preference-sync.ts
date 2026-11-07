@@ -14,11 +14,24 @@ export interface PreferenceTransport {
  all(): Promise<Record<string, unknown>>;
  allWithVersions?(): Promise<{ preferences: Record<string, unknown>; versions: Record<string, string | null> }>;
  get(key: string): Promise<{ value: unknown; version?: string | null } | null>;
- put(key: string, value: unknown, onlyIfMissing?: boolean, expectedVersion?: string | null): Promise<{ value: unknown; version?: string | null }>;
+ /** `writeId` names one edit across its retries; the server stores it as the
+  * new version, so a retry of a write that already committed is not a conflict. */
+ put(key: string, value: unknown, onlyIfMissing?: boolean, expectedVersion?: string | null, writeId?: string): Promise<{ value: unknown; version?: string | null }>;
 }
+// `sent`: a request carried this edit and its outcome is unknown (it may have committed).
+type Edit = { value: unknown; revision: number; version?: string | null; writeId: string; sent?: boolean };
+// `inDoubt`: an earlier edit that may have committed. It is replayed (same write
+// ID) before `pending`, so a newer edit is based on this device's own write.
 type Entry = { adapter: PreferenceAdapter; revision: number; request: number;
- version?: string | null; pending?: { value: unknown; revision: number; version?: string | null }; running: boolean; initialized: boolean };
+ version?: string | null; pending?: Edit; inDoubt?: Edit; running: boolean; initialized: boolean };
 const clone = (value: unknown) => JSON.parse(JSON.stringify(value));
+// A UUID v4 from getRandomValues, which works on LAN HTTP, unlike randomUUID.
+function newWriteId() {
+ const b = crypto.getRandomValues(new Uint8Array(16));
+ b[6] = (b[6] & 0x0f) | 0x40; b[8] = (b[8] & 0x3f) | 0x80;
+ const h = Array.from(b, x => x.toString(16).padStart(2, '0')).join('');
+ return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+}
 export class PreferenceSync {
  private entries = new Map<string, Entry>();
  private prefixes = new Map<string, (key: string) => PreferenceAdapter | null>();
@@ -76,14 +89,16 @@ export class PreferenceSync {
   this.epoch++; this.active = false; this.ready = false; this.bootstrap = undefined; this.bootstrapAgain = false;
   this.earlyInvalidations.clear();
   for (const e of this.entries.values()) {
-   e.pending = undefined; e.version = undefined; e.running = false; e.initialized = false; e.request++;
+   e.pending = undefined; e.inDoubt = undefined; e.version = undefined; e.running = false; e.initialized = false; e.request++;
    if (reset) e.adapter.apply(undefined);
   }
  }
  save(key: string, value: unknown) {
   const e = this.entries.get(key);
   if (!e || !this.active || e.adapter.readOnly) return;
-  e.pending = { value: clone(value), revision: ++e.revision, version: e.version };
+  const inDoubt = e.pending?.sent ? e.pending : e.inDoubt;
+  e.pending = { value: clone(value), revision: ++e.revision, version: e.version, writeId: newWriteId() };
+  e.inDoubt = inDoubt;
   void this.flush(key, e);
  }
  /** Settle once a snapshot has applied: join the one in flight, or take one if
@@ -172,23 +187,32 @@ export class PreferenceSync {
   if (!this.ready || !this.active || e.running || !e.pending) return;
   const epoch = this.epoch;
   e.running = true;
+  let edit: Edit | undefined;
   try {
    while (e.pending && epoch === this.epoch) {
-    const edit = e.pending;
+    edit = e.inDoubt ?? e.pending;
     const expected = edit.version === undefined ? e.version : edit.version;
     const response = expected === undefined
      ? await this.transport.put(key, edit.value)
-     : await this.transport.put(key, edit.value, false, expected);
+     : await this.transport.put(key, edit.value, false, expected, edit.writeId);
     if (epoch !== this.epoch) return;
     e.version = response.version;
     this.initialized(key, e);
+    if (e.inDoubt === edit) e.inDoubt = undefined;
     if (e.pending.revision === edit.revision) e.pending = undefined;
     else e.pending.version = e.version;
    }
   } catch (error) {
    // A stale snapshot cannot overwrite another device. Reconcile conflicts;
    // retain ordinary transport failures for reconnect or the next local edit.
-   if (epoch === this.epoch && (error as { status?: number }).status === 409) { e.pending = undefined; e.adapter.conflict?.(); }
+   const status = (error as { status?: number }).status;
+   if (epoch !== this.epoch) { /* superseded */ }
+   else if (status === 409) { e.pending = undefined; e.inDoubt = undefined; e.adapter.conflict?.(); }
+   // No answer (or a server error): the write may have committed, so its retry
+   // must reuse its write ID. A 4xx answer means it did not.
+   else if (edit && edit !== e.inDoubt && (status === undefined || status >= 500)) {
+    if (edit === e.pending) edit.sent = true; else e.inDoubt = edit;
+   }
   }
   finally { if (epoch === this.epoch) e.running = false; }
   // Reconcile response/event ordering from the source of truth after the queue drains.

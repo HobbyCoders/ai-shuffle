@@ -4,6 +4,7 @@ User preferences API routes - for persisting UI state like open tabs
 
 from datetime import datetime
 from typing import Any, Optional, Union
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, Request, HTTPException
 from pydantic import BaseModel, Field, field_serializer
@@ -23,6 +24,9 @@ class PreferenceValue(BaseModel):
     key: str
     value: Any
     expected_version: Optional[str] = None
+    # Client-chosen ID for this edit, reused on its retries. It becomes the
+    # stored version, so a retry of a committed write is not a conflict.
+    write_id: Optional[UUID] = None
 
 
 class PreferenceResponse(BaseModel):
@@ -54,6 +58,13 @@ def _with_user_identity(request, operation, *args, **kwargs):
     # Identity resolution may perform synchronous account-hub requests. Keep
     # it and the DB operation in one worker hop, never on the request loop.
     return operation(*get_user_identity(request), *args, **kwargs)
+
+
+def _write_options(body: PreferenceValue) -> dict:
+    options: dict = {'expected_version': body.expected_version} if 'expected_version' in body.model_fields_set else {}
+    if body.write_id is not None:
+        options['write_id'] = str(body.write_id)
+    return options
 
 
 def require_preference_write(request: Request, token: str = Depends(require_auth)) -> str:
@@ -112,7 +123,7 @@ async def set_preference(
     token: str = Depends(require_preference_write)
 ) -> PreferenceResponse:
     """Set a preference value"""
-    options = {'expected_version': body.expected_version} if 'expected_version' in body.model_fields_set else {}
+    options = _write_options(body)
     try:
         result = await run_sync(_with_user_identity, request, database.set_user_preference, key, body.value,
                                 only_if_missing=only_if_missing, **options)
@@ -140,7 +151,7 @@ async def set_preference_post(
     Needed for navigator.sendBeacon() which only supports POST method.
     sendBeacon is used for reliable preference saves during page unload.
     """
-    options = {'expected_version': body.expected_version} if 'expected_version' in body.model_fields_set else {}
+    options = _write_options(body)
     try:
         result = await run_sync(_with_user_identity, request, database.set_user_preference, key, body.value,
                                 only_if_missing=only_if_missing, **options)
