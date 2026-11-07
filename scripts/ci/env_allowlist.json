@@ -241,6 +241,11 @@
     "reason": "Existing internal build/test protocol or source identifier (not a deployment option); conservative literal scan baseline.",
     "base_settings": false
   },
+  "AI_SHUFFLE_SYNC_MEMORY_OP_COMPACTION": {
+    "kind": "infra",
+    "reason": "Database-maintenance kill switch for early removal of superseded whole-store memory sync entries; on by default, lagging peers still pin what they need",
+    "base_settings": false
+  },
   "AI_SHUFFLE_SYNC_OP_PEER_GRACE_DAYS": {
     "kind": "infra",
     "reason": "Database-maintenance acknowledgement grace for offline worker replicas; only duplicate sync-log retention changes and returning peers use state-copy recovery",

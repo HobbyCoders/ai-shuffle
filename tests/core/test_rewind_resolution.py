@@ -23,10 +23,10 @@ from app.api.commands import (
     _load_message_events,
     _resolve_checkpoint_uuid_from_content,
     _resolve_rewind_from_seq,
-    execute_rewind,
 )
 from app.core.jsonl_rewind import Checkpoint, RewindResult
 from app.db import session_events as se
+from tests.rewind_helpers import execute_rewind_and_wait
 
 SID = "sess-rewind"
 SDK = "sdk-rewind"
@@ -453,7 +453,7 @@ async def test_execute_rewind_appends_transcript_rewound(rewind_env, monkeypatch
     ])
     _patch_checkpoints(monkeypatch, [])
 
-    resp = await execute_rewind(
+    resp = await execute_rewind_and_wait(
         SID, RewindRequestV2(target_uuid="u-2", include_response=False)
     )
     assert resp.success is True
@@ -478,7 +478,7 @@ async def test_full_rewind_clears_sdk_session_pointer(rewind_env, monkeypatch):
     se.append_events(SID, [_user_ev("first", uuid="u-1")])
     _patch_checkpoints(monkeypatch, [])
 
-    resp = await execute_rewind(
+    resp = await execute_rewind_and_wait(
         SID, RewindRequestV2(target_uuid="u-1", include_response=False)
     )
     assert resp.success is True
@@ -500,7 +500,7 @@ async def test_partial_rewind_keeps_sdk_session_pointer(rewind_env, monkeypatch)
     ])
     _patch_checkpoints(monkeypatch, [])
 
-    resp = await execute_rewind(
+    resp = await execute_rewind_and_wait(
         SID, RewindRequestV2(target_uuid="u-2", include_response=False)
     )
     assert resp.success is True
@@ -516,7 +516,7 @@ async def test_execute_rewind_refuses_before_truncating(rewind_env, monkeypatch)
     se.append_events(SID, [_user_ev("recorded content")])
     _patch_checkpoints(monkeypatch, [_cp("u-1", "different content")])
 
-    resp = await execute_rewind(
+    resp = await execute_rewind_and_wait(
         SID, RewindRequestV2(target_uuid="u-1", include_response=False)
     )
     assert resp.success is False
@@ -540,7 +540,7 @@ async def test_execute_rewind_content_payload_resolves_uuid(rewind_env, monkeypa
         _cp("u-2", "second", index=1),
     ])
 
-    resp = await execute_rewind(SID, RewindRequestV2(
+    resp = await execute_rewind_and_wait(SID, RewindRequestV2(
         target_uuid="", target_occurrence=0, target_content="second",
         include_response=False,
     ))
@@ -558,7 +558,7 @@ async def test_execute_rewind_content_guard_refuses(rewind_env, monkeypatch):
     se.append_events(SID, [_user_ev("first", uuid="u-1")])
     _patch_checkpoints(monkeypatch, [_cp("u-1", "first", index=0)])
 
-    resp = await execute_rewind(SID, RewindRequestV2(
+    resp = await execute_rewind_and_wait(SID, RewindRequestV2(
         target_uuid="", target_occurrence=0, target_content="not what is there",
         include_response=False,
     ))
@@ -575,7 +575,7 @@ async def test_execute_steer_rewind_refuses_before_any_mutation(rewind_env, monk
     se.append_events(SID, [_user_ev("normal"), steer])
     _patch_checkpoints(monkeypatch, [_cp("u-1", "normal")])
     before = se.get_events(SID)
-    resp = await execute_rewind(SID, RewindRequestV2(
+    resp = await execute_rewind_and_wait(SID, RewindRequestV2(
         target_content="mid-turn only", target_occurrence=0, include_response=False,
     ))
     assert resp.success is False
@@ -590,7 +590,7 @@ async def test_execute_rewind_missing_target_refused(rewind_env, monkeypatch):
 
     seed_session('sess-rewind')
     _patch_checkpoints(monkeypatch, [])
-    resp = await execute_rewind(SID, RewindRequestV2(target_uuid=""))
+    resp = await execute_rewind_and_wait(SID, RewindRequestV2(target_uuid=""))
     assert resp.success is False
     assert rewind_env.truncate_calls == []
 
@@ -603,7 +603,7 @@ async def test_execute_rewind_non_v2_session_unchanged(rewind_env, monkeypatch):
     rewind_env.session_row["v2_stream"] = False
     _patch_checkpoints(monkeypatch, [])
 
-    resp = await execute_rewind(
+    resp = await execute_rewind_and_wait(
         SID, RewindRequestV2(target_uuid="u-1", include_response=False)
     )
     assert resp.success is True
@@ -699,7 +699,7 @@ async def test_failed_enriched_attachment_turn_rewinds_all_stores(
     assert uuid_ is None and "content guard" in error
     assert _resolve_checkpoint_uuid_from_content(sdk, WD, prompt, 1) == (nodes[1], None)
 
-    response = await execute_rewind(SID, RewindRequestV2(
+    response = await execute_rewind_and_wait(SID, RewindRequestV2(
         target_content=prompt, target_occurrence=1, include_response=False,
     ))
     assert response.success is True
@@ -715,7 +715,7 @@ async def test_failed_enriched_attachment_turn_rewinds_all_stores(
 
     # Rewinding the first unanswered prompt empties Fluid but preserves its
     # resumable session identity, unlike the legacy JSONL full-reset path.
-    response = await execute_rewind(SID, RewindRequestV2(
+    response = await execute_rewind_and_wait(SID, RewindRequestV2(
         target_content=prompt, target_occurrence=0, include_response=False,
     ))
     assert response.success is True
@@ -908,7 +908,7 @@ async def test_native_steered_turn_rewind_keeps_native_and_replay_aligned(
             return False
     monkeypatch.setattr(cmd, "get_session_pool", lambda: Pool())
 
-    response = await execute_rewind(SID, request)
+    response = await execute_rewind_and_wait(SID, request)
     assert response.success is True and response.chat_rewound is True
     rewind = se.get_events(SID)[-1]
     assert rewind["event_type"] == "transcript.rewound"
@@ -1115,7 +1115,7 @@ async def test_real_standalone_peer_rewind_native_and_logical_boundaries(
         def contains(self, session):
             return False
     monkeypatch.setattr(cmd, "get_session_pool", lambda: Pool())
-    result = await execute_rewind(sid, request)
+    result = await execute_rewind_and_wait(sid, request)
     assert result.success and result.chat_rewound
     assert se.get_events(sid)[-1]["payload"]["from_seq"] == cut
     native, _ = fluid_live_messages(sdk, str(tmp_path))

@@ -96,7 +96,7 @@ def sample_summary(samples):
         name, status = row["journey"], row.get("status", "ok")
         counts.setdefault(name, dict(ok=0, failed=0, censored=0))[status] += 1
         for key, value in row.items():
-            if key.endswith("_ms") or key.endswith("_per_minute"):
+            if key.endswith("_ms") or key.endswith("_per_minute") or key == "envelopes":
                 values = metrics.setdefault(name + "." + key, [])
                 if status == "ok" and isinstance(value, (int, float)):
                     values.append(value)
@@ -391,6 +391,13 @@ def child():
                 entry = await run_sync(store_for_owner("local").save_memory, body["text"],
                                        scope="global", provenance="session", when="Sync benchmark")
                 result = {"id": entry.id}
+            elif kind == "memory_burst":
+                from app.core.fluid_memory import store_for_owner
+                def save_burst():
+                    store = store_for_owner("local")
+                    return [store.save_memory(text, scope="global", provenance="session",
+                                              when="Sync benchmark").id for text in body["texts"]]
+                result = await run_sync(save_burst)
             elif kind == "recall":
                 from app.core.fluid_memory import store_for_owner
                 result = await run_sync(recall_visible, store_for_owner("local"), body["text"])
@@ -656,7 +663,46 @@ def run(args):
                     print(name, round(row["total_ms"], 1), "ms", flush=True)
                     return result
 
-            for i in range(0 if args.stream_only else args.runs):
+            if args.memory_only:
+                def warm_scanner(i):
+                    value = f"memory-bench-{i}-{uuid.uuid4().hex}"
+                    a.action("preference", key="lastSelectedModel", value=value)
+                    wait_for(lambda: (b.api("preferences/lastSelectedModel") or {}).get("value") == value)
+
+                for i in range(args.runs):
+                    with attempt(samples, save, "memory"):
+                        warm_scanner(i)
+                        text = "benchmarkfruit" + uuid.uuid4().hex
+                        measure("memory", lambda: a.action("memory", text=text),
+                                lambda: b.action("recall", text=text)["result"] is True, "memory")
+
+                for i in range(args.runs):
+                    with attempt(samples, save, "memory_burst"):
+                        warm_scanner(i)
+                        texts = ["burstfruit" + uuid.uuid4().hex for _ in range(10)]
+                        result = a.action("memory_burst", texts=texts)
+                        wait_for(lambda: all(b.action("recall", text=text)["result"] for text in texts))
+                        # Include follow-up passes: count durable envelopes, not scan wakes.
+                        time.sleep(3)
+                        envelopes = [e for e in a.probe("/metrics")["events"]
+                                     if e["kind"] == "published" and e["collection"] == "memory"
+                                     and e["t"] >= result["start"]]
+                        samples.append(dict(journey="memory_burst", saves=10, envelopes=len(envelopes),
+                                            envelope_bytes=sum(e["bytes"] for e in envelopes),
+                                            write_ms=(result["end"]-result["start"])*1000))
+                        save()
+                        print("memory_burst", len(envelopes), "envelopes", flush=True)
+
+                for i in range(args.runs):
+                    with attempt(samples, save, "memory_cold"):
+                        # No polling or mutations during the scanner's idle/backoff window.
+                        print("memory_cold idle", args.memory_cold_seconds, "seconds", flush=True)
+                        time.sleep(args.memory_cold_seconds)
+                        text = "coldfruit" + uuid.uuid4().hex
+                        measure("memory_cold", lambda: a.action("memory", text=text),
+                                lambda: b.action("recall", text=text)["result"] is True, "memory")
+
+            for i in range(0 if args.stream_only or args.memory_only else args.runs):
                 key, value = "lastSelectedModel", f"sync-bench-{i}"
                 measure("preference", lambda: a.action("preference", key=key, value=value),
                         lambda: (b.api("preferences/" + key) or {}).get("value") == value,
@@ -687,7 +733,7 @@ def run(args):
                 measure("memory", lambda: a.action("memory", text=text),
                         lambda: b.action("recall", text=text)["result"] is True, "memory")
 
-            for i in range(args.runs):
+            for i in range(0 if args.memory_only else args.runs):
                 with attempt(samples, save, "stream_first_token", "stream_steady_delta"):
                     sid = str(uuid.uuid4())
                     a.action("new_chat", sid=sid)
@@ -711,7 +757,7 @@ def run(args):
                     print("stream", i + 1, "matched deltas", len(lags), flush=True)
 
             # Offline is SIGSTOP of this lab's exact B child, never an installed worker.
-            for count in ([] if args.stream_only else args.catchup):
+            for count in ([] if args.stream_only or args.memory_only else args.catchup):
                 for i in range(args.runs):
                     with attempt(samples, save, f"catchup_{count}"):
                         sid = str(uuid.uuid4())
@@ -744,7 +790,7 @@ def run(args):
                     time.sleep(90)
             before = [w.probe("/idle") for w in (a, b)]
             report["idle"] = []
-            remaining = 0 if args.stream_only else args.idle_seconds
+            remaining = 0 if args.stream_only or args.memory_only else args.idle_seconds
             while remaining > 0:
                 seconds = min(60, remaining)
                 time.sleep(seconds)
@@ -806,6 +852,8 @@ def main():
     p.add_argument("--idle-seconds", type=float, default=180)
     p.add_argument("--long-seed", action="store_true")
     p.add_argument("--stream-only", action="store_true", help="fresh paired lab; omit mutations/catch-up/idle")
+    p.add_argument("--memory-only", action="store_true", help="warm/cold facts and ten-save envelope bursts only")
+    p.add_argument("--memory-cold-seconds", type=float, default=65, help="quiet interval before each cold fact (>60s)")
     args = parser.parse_args()
     if args.mode == "child":
         child()
@@ -814,6 +862,8 @@ def main():
     else:
         if args.runs < 1 or any(n <= 0 or n % 5 for n in args.catchup) or args.idle_seconds <= 0:
             parser.error("runs/idle must be positive; catch-up counts must be positive multiples of five")
+        if args.memory_cold_seconds <= 60:
+            parser.error("memory cold interval must exceed the 60-second scanner backoff")
         run(args)
 
 

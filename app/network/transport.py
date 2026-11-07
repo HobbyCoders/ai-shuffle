@@ -1625,6 +1625,10 @@ async def prune_loop() -> None:
                                     for peer, marks in _peer_watermarks.items() if peer in _peer_watermark_at}
                     pruned += await asyncio.to_thread(store.prune_transcript_ops, ctx.device_id,
                                                      observations, stop=stop, _heads=heads)
+                    # Whole-store memory copies: keep the newest per record,
+                    # not 30 days of superseded copies (#1167).
+                    pruned += await asyncio.to_thread(store.compact_memory_ops, ctx.device_id,
+                                                     observations, stop=stop, _heads=heads)
                 # Shrink append-only history before the legacy superseded-record
                 # scan; otherwise millions of unique event ids can exhaust its
                 # statement budget before transcript retention gets a turn.
@@ -1703,6 +1707,7 @@ def request_scan(collections: Optional[List[str]] = None, *,
     with _scan_requests_lock:
         if not collections or any(
                 name not in policy.SCANNED_COLLECTIONS and name not in policy.CATALOG_COLLECTIONS
+                and name != "memory"
                 for name in collections):
             _full_scan_requested = True
         else:
