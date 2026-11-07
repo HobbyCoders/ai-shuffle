@@ -548,11 +548,12 @@ class FactStore:
             if restored:
                 self._apply_supersessions(doc, restored)
 
-    def _maintain(self, doc, keep=None):
+    def _maintain(self, doc, keep=None, arrived=frozenset()):
         """Expire, classify and bound the store. Never refuses for room.
 
         ``keep`` is a fact saved in this transaction: it is never the one
-        archived to make room for itself.
+        archived to make room for itself. ``arrived`` names IDs a merge just
+        added; dropping one of those is not a local loss (see _note_loss).
         """
         from fluid.codemode.skills import MAX_MEMORIES, MAX_ARCHIVED_MEMORIES
         before = json.dumps(doc, sort_keys=True)
@@ -581,7 +582,7 @@ class FactStore:
         if ended:
             gone = {id(e) for e in ended}
             doc["archived"] = [e for e in doc["archived"] if id(e) not in gone]
-            self._note_loss(doc, "expired_archived", len(ended), now)
+            self._note_loss(doc, "expired_archived", [e for e in ended if e["id"] not in arrived], now)
         self._repair_supersession_links(doc)
         live = doc["entries"]
         inferred = [e for e in live if tier(e) == "inferred" and not retained(e)]
@@ -601,20 +602,33 @@ class FactStore:
         explicit = [e for e in archived if retained(e)]
         rest = sorted((e for e in archived if not retained(e)),
                       key=lambda e: (tier(e) == "durable", usefulness(e) if e.get("durable") else e.get("updated_at", 0), str(e.get("id"))))
-        doc["archived"] = rest[max(0, len(rest) - MAX_ARCHIVED_MEMORIES):] + explicit
-        if len(rest) > MAX_ARCHIVED_MEMORIES:
-            self._note_loss(doc, "archive_dropped", len(rest) - MAX_ARCHIVED_MEMORIES, now)
+        cut = max(0, len(rest) - MAX_ARCHIVED_MEMORIES)
+        doc["archived"] = rest[cut:] + explicit
+        if cut:
+            self._note_loss(doc, "archive_dropped", [e for e in rest[:cut] if e["id"] not in arrived], now)
         self._repair_supersession_links(doc)
         # Compact deletion bodies; the monotonic barrier survives compaction.
         doc["tombstones"] = doc["tombstones"][-MAX_TOMBSTONES:]
         return before != json.dumps(doc, sort_keys=True)
 
     @staticmethod
-    def _note_loss(doc, kind, count, now):
+    def _note_loss(doc, kind, gone, now):
         """Count facts that left the store without a Forget (local, not
-        replicated): totals plus the time of the latest one per kind."""
+        replicated): totals plus the time of the latest one per kind.
+
+        Only facts this store already held count: callers leave out copies
+        a merge added in the same transaction. A replica replaying a copy
+        this store deleted earlier (or one it never kept) brings it back
+        only for the same trim to drop it again; that is not a new local
+        loss, so it neither adds to the total nor refreshes the time
+        (#956). The peer that held the copy counts its own loss. A copy
+        that a replay brings back into free room is held again, so losing
+        it later counts again. Nothing is remembered between transactions,
+        so the rule holds after any number of deletions and a restart."""
+        if not gone:
+            return
         losses = doc.get("losses") if isinstance(doc.get("losses"), dict) else {}
-        losses[kind] = int(losses.get(kind, 0) or 0) + int(count)
+        losses[kind] = int(losses.get(kind, 0) or 0) + len(gone)
         losses[f"last_{kind}_at"] = now
         doc["losses"] = losses
 
@@ -1479,6 +1493,7 @@ class FactStore:
             raise ValueError("Memory replica exceeds its byte budget")
         with file_transaction(self.lock):
             doc = self._prepare()
+            held = {e["id"] for e in doc["entries"] + doc["archived"]}
             # A namespace is stable across republishing. Imported records keep
             # their origin rather than acquiring every intermediate worker ID.
             def ident(e):
@@ -1624,5 +1639,5 @@ class FactStore:
                 if len({e["text"] for e in group}) > 1:
                     for e in group:
                         e["conflicted"] = True
-            self._maintain(doc)
+            self._maintain(doc, arrived={e["id"] for e in kept} - held)
             self._write(doc)
