@@ -28,8 +28,10 @@ describe('voice composer parity', () => {
 	});
 	it('restores failed sends only to the originating draft', () => {
 		const input = source('components/chat/ChatInput.svelte');
-		expect(input).toContain('$activeSession.sessionId !== sendingSessionId');
-		expect(input).toContain('writeDraft(sendingSessionId, priorDraftJSON)');
+		// The shared destination check (send-destination.ts) decides; its own
+		// tests cover where the draft goes.
+		expect(input).toContain('if (movedAwayFrom(destination, composerPlace())) {');
+		expect(input).toContain('keepUnsentDraft(destination, priorDraftJSON, true)');
 		expect(input).toContain('editorRef?.setContent(restored)');
 	});
 });
