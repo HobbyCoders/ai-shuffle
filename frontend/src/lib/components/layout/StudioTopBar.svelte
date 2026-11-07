@@ -24,6 +24,7 @@
 	import { NEW_CHAT_LABEL } from './chat-empty-state';
 	import { workerInstalls } from '$lib/stores/worker-presence';
 	import { selfWorkerName } from '$lib/components/ui/worker-name';
+	import { platform } from '$lib/stores/platform.svelte';
 
 	interface Props {
 		/** Left crumb — the project (or section) the current view belongs to. */
@@ -87,6 +88,7 @@
 			class="tb-icon"
 			onclick={onToggleSidebar}
 			class:phone={phoneWidth}
+			class:docked={!phoneWidth && !sidebarCollapsed && !platform.isMobile}
 			aria-label={phoneWidth ? ($unreadCount > 0 ? `Chats (${$unreadCount} unread notifications)` : 'Chats') : sidebarCollapsed ? 'Show sidebar' : 'Hide sidebar'}
 			title={phoneWidth ? undefined : sidebarCollapsed ? 'Show sidebar' : 'Hide sidebar'}
 			aria-pressed={!sidebarCollapsed}
@@ -164,6 +166,9 @@
 	/* The page owns its title beside the persistent desktop rail. */
 	.tb-icon:hover { background: var(--accent); color: var(--foreground); }
 	.tb-icon.phone { width: 44px; height: 48px; color: var(--foreground); }
+	/* From 768px the open panel carries its own Hide control (PanelToggle) in its
+	   header row, so the bar shows this one only as the way to reopen it. */
+	@media (min-width: 768px) { .tb-icon.docked { display: none; } }
 
 	.tb-right {
 		margin-left: auto;

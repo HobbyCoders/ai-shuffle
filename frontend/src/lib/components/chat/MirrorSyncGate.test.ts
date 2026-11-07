@@ -24,6 +24,9 @@ describe('mirrored session freshness', () => {
 		expect(withheld).not.toBeNull();
 		expect(withheld.style.visibility).toBe('hidden');
 		expect(withheld.inert).toBe(true);
+		// The "Catching up" loader carries the class that turns it (a bare
+		// LoaderCircle is a still arc).
+		expect(screen.getByRole('status').querySelector('svg')?.classList.contains('mirror-spin')).toBe(true);
 		await vi.advanceTimersByTimeAsync(2000);
 		expect(screen.getByText('2 running tasks, 2 agents')).toBe(transcript);
 		expect(withheld.inert).toBe(false);
@@ -225,6 +228,7 @@ describe('mirrored session freshness', () => {
 		// The notice floats in its own slot; the conversation node is untouched.
 		expect(screen.getByText('2 running tasks, 2 agents')).toBe(conversation);
 		expect(screen.getByRole('status').classList.contains('mirror-status-slot')).toBe(true);
+		expect(screen.getByRole('status').querySelector('svg')?.classList.contains('mirror-spin')).toBe(true);
 		// Back to current: hidden at once, and still no second reload.
 		fetch.mockImplementation(() => Promise.resolve(status('current')));
 		await vi.advanceTimersByTimeAsync(2000);

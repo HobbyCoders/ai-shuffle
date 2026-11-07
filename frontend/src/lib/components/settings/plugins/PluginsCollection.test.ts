@@ -185,15 +185,27 @@ describe('the list (from PluginsHub)', () => {
 		await waitFor(() => expect(within(detail()).getByRole('alert').textContent).toContain('Source offline'));
 	});
 
-  it('hides filtering for a small collection and cards its empty guidance', async () => {
+  it('hides filtering for a small collection and shows the shared empty state', async () => {
    m.getInstalledPlugins.mockResolvedValue([]); m.getConnectorTypes.mockResolvedValue([]);
    const view = await show();
    const list = screen.getByRole('heading', { level: 1, name: 'Plugins' }).closest('.st-lcol') as HTMLElement;
    expect(within(list).queryByRole('searchbox')).toBeNull();
-   expect(within(list).getByText('Nothing added yet.').closest('.st-card')).toBeTruthy();
+   // One empty state (icon, title, one line, one action), not a bare card.
+   const empty = within(list).getByRole('heading', { name: 'No plugins yet' }).closest('.st-empty-detail') as HTMLElement;
+   expect(empty).toBeTruthy();
+   expect(empty.closest('.st-card')).toBeNull();
+   expect(empty.querySelector('.icon svg')).toBeTruthy();
    expect(within(list).getAllByRole('button', { name: /^Explore plugins/ })).toHaveLength(1);
-   expect(within(list).getByText('Nothing added yet.').closest('.st-card')?.querySelector('button')).toBeNull();
+   await fireEvent.click(within(empty).getByRole('button', { name: 'Add plugin' }));
+   expect(settingsNav.selectedItem('plugins')).toBe('explore');
    expect(view.container.querySelector('.st-lcol .st-card [data-settings-item]')).toBeTruthy();
+  });
+
+  it('hides Add plugin from read-only viewers', async () => {
+   m.getInstalledPlugins.mockResolvedValue([]); m.getConnectorTypes.mockResolvedValue([]);
+   await show(undefined, { readOnly: true });
+   expect(screen.getByRole('heading', { name: 'No plugins yet' })).toBeTruthy();
+   expect(screen.queryByRole('button', { name: 'Add plugin' })).toBeNull();
   });
 
 	it('groups apps with accounts and installed plugins, then the catalog', async () => {

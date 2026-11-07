@@ -10,7 +10,7 @@
 	 */
 	import { onMount } from 'svelte';
  import { platform } from '$lib/stores/platform.svelte';
-	import { GitPullRequest, GitPullRequestDraft, GitMerge, GitPullRequestClosed, RefreshCw, ListFilter, Check, X, MessageSquare, CircleCheck, CircleX, LoaderCircle, ExternalLink } from 'lucide-svelte';
+	import { GitPullRequest, GitPullRequestDraft, GitMerge, GitPullRequestClosed, RefreshCw, ListFilter, Check, X, MessageSquare, CircleCheck, CircleX, ExternalLink } from 'lucide-svelte';
 	import { ViewShell, ViewPanel, PanelIconButton, ListItem, Segmented, SettingRow, SelectField, Switch, DetailPane, EmptyDetail, InlineBanner } from '$lib/components/layout/view';
 	import PanelField from '$lib/components/layout/view/PanelField.svelte';
 	import SidebarSheet from '$lib/components/layout/sidebar/SidebarSheet.svelte';
@@ -75,6 +75,16 @@
 		filters = { ...DEFAULT_FILTERS };
 	}
 
+	/** Head → base when both are known, else whichever branch there is. */
+	function branchLabel(pr: InboxPullRequest): string {
+		return pr.head_branch && pr.base_branch ? `${pr.head_branch} → ${pr.base_branch}` : pr.head_branch || pr.base_branch || '';
+	}
+
+	/** The whole meta line, for the tooltip when the row cuts it short. */
+	function metaLine(pr: InboxPullRequest): string {
+		return [branchLabel(pr), `${pr.repo}#${pr.number}`, `by ${pr.author}`, pr.projects.map((p) => p.name).join(', ')].filter(Boolean).join(' · ');
+	}
+
 	function stateLabel(pr: InboxPullRequest): string {
 		return pr.state === 'draft' ? 'Draft' : pr.state === 'merged' ? 'Merged' : pr.state === 'closed' ? 'Closed' : 'Open';
 	}
@@ -130,23 +140,23 @@
 									<a class="pri-title" href={pr.url} target="_blank" rel="noopener noreferrer">
 										<span>{pr.title}</span><span class="pri-external"><ExternalLink size={12} aria-hidden="true" /></span>
 									</a>
-									<div class="pri-meta">
-										<span class="pri-repo">{pr.repo}#{pr.number}</span>
-										<span class="pri-branch" title="{pr.head_branch} → {pr.base_branch}">{pr.head_branch} → {pr.base_branch}</span>
+									<div class="pri-meta" title={metaLine(pr)}>
+										{#if branchLabel(pr)}<span class="pri-branch" title={branchLabel(pr)}>{branchLabel(pr)}</span>{/if}
+										<span class="pri-repo" title="{pr.repo}#{pr.number}">{pr.repo}#{pr.number}</span>
 										<span class="pri-attribution"><span>by {pr.author}</span><span class="pri-projects" title={pr.projects.map((p) => p.name).join(', ')}>{pr.projects.map((p) => p.name).join(', ')}</span></span>
 									</div>
 								</div>
 								<div class="pri-badges">
-									{#if pr.review !== 'none'}
+									{#if pr.review !== 'none' && REVIEW_LABELS[pr.review]}
 										<span class="pri-chip" data-review={pr.review} title={REVIEW_LABELS[pr.review]} aria-label={REVIEW_LABELS[pr.review]}>
             {#if pr.review === 'approved'}<Check size={14} />{:else if pr.review === 'changes_requested'}<X size={14} />{:else}<MessageSquare size={14} />{/if}<span>{pr.review === 'review_required' ? 'Review pending' : REVIEW_LABELS[pr.review]}</span>
            </span>
 									{/if}
-									{#if pr.checks !== 'none'}
+									{#if pr.checks !== 'none' && CHECKS_LABELS[pr.checks]}
 										<span class="pri-checks" data-checks={pr.checks} title={CHECKS_LABELS[pr.checks]} aria-label={CHECKS_LABELS[pr.checks]}>
 											{#if pr.checks === 'passing'}<CircleCheck size={14} />
 											{:else if pr.checks === 'failing'}<CircleX size={14} />
-											{:else}<LoaderCircle size={14} />{/if}<span>{pr.checks === 'passing' ? 'Checks passed' : pr.checks === 'failing' ? 'Checks failed' : 'Checks running'}</span>
+											{:else}<span class="pri-running" aria-hidden="true"><span></span></span>{/if}<span>{pr.checks === 'passing' ? 'Checks passed' : pr.checks === 'failing' ? 'Checks failed' : 'Checks running'}</span>
 										</span>
 									{/if}
 									<span class="pri-age" title={new Date(pr.updated_at).toLocaleString()}>{activityAge(pr.updated_at, now)}</span>
@@ -203,10 +213,25 @@
  .pri-title { display: grid; grid-template-columns: minmax(0, 1fr) 20px; align-items: start; gap: 6px; width: fit-content; max-width: 100%; font-size: 14px; font-weight: 500; color: var(--st-fg); overflow-wrap: anywhere; }
  .pri-external { display: flex; justify-content: center; padding-top: 3px; }
  .pri-title:hover { color: var(--st-primary); }
- .pri-meta { display: flex; flex-wrap: wrap; gap: 4px 8px; margin-top: 4px; color: var(--sidebar-muted); font-size: 12px; overflow-wrap: anywhere; }
- .pri-attribution { display: flex; flex-wrap: wrap; gap: 4px 12px; }
- @media (max-width: 600px) { .pri-meta { display: grid; gap: 4px; } .pri-title { width: 100%; } }
- .pri-repo { color: var(--secondary-foreground); }
+ /* The second line, desktop and phone alike: "branch → base · repo#142 · by
+    author · projects" on ONE line, in the chat rows' second-line grey (12px,
+    --subtle-foreground). The branch leads and gives way last; the repository
+    path ends in an ellipsis first, then the projects, then the author. Every
+    part carries its middot in a 16px seat in front; the row starts 16px early
+    and clips that strip, so the line never starts with "·". */
+ .pri-meta { display: flex; flex-wrap: nowrap; align-items: baseline; min-width: 0; margin-top: 4px; margin-left: -16px; clip-path: inset(0 0 0 16px); color: var(--subtle-foreground); font-size: 12px; line-height: 16px; white-space: nowrap; }
+ .pri-attribution { display: contents; }
+ .pri-meta > span:not(.pri-attribution), .pri-attribution > span { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+ .pri-meta > span:not(.pri-attribution)::before, .pri-attribution > span::before { content: '·' / ''; display: inline-block; width: 16px; text-align: center; font-family: var(--font-sans); }
+ /* Shrink order: the repository path first, then projects, then the author;
+    the branch last (and never past 70% of the line). */
+ .pri-branch { flex: 0 1 auto; max-width: 70%; }
+ .pri-repo { flex: 0 1000 auto; min-width: calc(16px + 4em); }
+ .pri-attribution > span:first-child { flex: 0 10 auto; }
+ .pri-attribution > .pri-projects { flex: 0 100 auto; }
+ /* Checks running: an amber dot in the 14px icon seat, not a hollow ring that reads as "unchecked". */
+ .pri-running { display: inline-grid; place-items: center; width: 14px; height: 14px; flex: none; }
+ .pri-running span { width: 8px; height: 8px; border-radius: 50%; background: var(--st-warning); }
  .pri-branch { font-family: var(--st-mono); }
  .pri-badges { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; color: var(--st-mfg); font-size: 12px; }
  .pri-chip, .pri-checks { display: inline-flex; align-items: center; gap: 5px; color: var(--st-mfg); white-space: nowrap; }
@@ -214,5 +239,14 @@
  .pri-empty { padding: 48px 0; color: var(--st-mfg); display: grid; justify-items: center; gap: 16px; text-align: center; }
  .pri-skipped { margin-top: 24px; color: var(--st-mfg); font-size: 13px; }
  .pri-skipped summary { cursor: pointer; }
- @media (max-width:600px) { .pri-toolbar :global(.st-seg button) { min-height: 44px; padding-inline: 10px; } .pri-filter { min-height: 44px; } .pri-filter-actions button { min-height: 44px; } .pri-row { flex-wrap: wrap; } .pri-badges { width: 100%; justify-content: flex-start; padding-left: 28px; } }
+ @media (max-width:600px) { .pri-toolbar :global(.st-seg button) { min-height: 44px; padding-inline: 10px; } .pri-filter { min-height: 44px; } .pri-filter-actions button { min-height: 44px; }}
+ /* Phone card: title; the same one meta line; status on one line. */
+ @media (max-width: 600px) {
+  .pri-row { display: grid; grid-template-columns: 16px minmax(0, 1fr); column-gap: 12px; row-gap: 6px; align-items: start; }
+  .pri-state { padding-top: 2px; }
+  .pri-title { width: 100%; }
+  .pri-badges { grid-column: 2; flex-wrap: nowrap; justify-content: flex-start; min-width: 0; overflow: hidden; }
+  .pri-chip, .pri-checks { min-width: 0; }
+  .pri-chip > span, .pri-checks > span:last-child { overflow: hidden; text-overflow: ellipsis; }
+ }
 </style>

@@ -1,6 +1,6 @@
 // Regression: rail-owned overlays must not live inside the hidden/inert Chats column.
 import { runJourney } from './runner.mjs';
-import { expect, gotoApp, showSidebar } from './lib/app.mjs';
+import { expect, gotoApp, seededChatId, showSidebar } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 const mobileShell = process.argv.includes('--mobile-shell');
 
@@ -27,6 +27,25 @@ async function expectClosedPhoneSheets(page) {
 		expect(sheet.inert && sheet.pointerEvents === 'none' && sheet.focusBlocked && sheet.hitBlocked, `${sheet.label} cannot take focus or pointer hits while closed`);
 	}
 }
+// Hover a desktop rail button until its label shows, then hit-test a grid over
+// the label. The label is pointer-events:none, so it is made hit-testable only
+// for the measurement; that does not change what paints on top.
+async function railLabelOnTop(page, button) {
+	await button.hover();
+	const tip = button.locator('.tip');
+	await page.waitForFunction(el => getComputedStyle(el).opacity === '1', await tip.elementHandle());
+	return tip.evaluate(el => {
+		el.style.pointerEvents = 'auto';
+		const r = el.getBoundingClientRect();
+		const covered = [];
+		for (let x = r.left + 3; x < r.right - 2; x += 8) for (const y of [r.top + 3, r.top + r.height / 2, r.bottom - 3]) {
+			const hit = document.elementFromPoint(x, y);
+			if (!hit || !el.contains(hit)) covered.push(hit?.closest('[class]')?.className.toString().split(' ')[0] ?? null);
+		}
+		el.style.pointerEvents = '';
+		return { text: el.textContent.trim(), box: { left: r.left, top: r.top, right: r.right, bottom: r.bottom }, covered: [...new Set(covered)] };
+	});
+}
 async function openMore(page, native) {
 	if (native) {
 		await page.getByRole('button', { name: /^Open menu(?: \(\d+ unread notifications\))?$/ }).click();
@@ -48,6 +67,47 @@ await runJourney({
 		}
 	],
 	cases: [{
+		// G13: the rail's z-index scopes its hover labels, so the rail itself must
+		// sit above the list panel's sticky section header and selection bar.
+		name: 'rail-labels-above-list-1440',
+		viewports: ['desktop'],
+		async setup({ page, status }) {
+			await page.setViewportSize({ width: 1440, height: 900 });
+			await gotoApp(page, status, `/?session=${seededChatId(status, 'long')}`);
+			if (!await page.getByRole('complementary', { name: 'Chats', exact: true }).locator('.panel-plane').isVisible()) {
+				await page.getByRole('button', { name: 'Show sidebar', exact: true }).click();
+			}
+			await workspace(page).waitFor();
+			await page.locator('aside.sidebar .col .sect').first().waitFor();
+		},
+		async act({ page, mark, log }) {
+			await mark('every rail label paints over the Chats list beside it');
+			const header = await page.locator('aside.sidebar .col .sect').first().boundingBox();
+			const buttons = workspace(page).locator('.r-btn:has(.tip)');
+			let overHeader = 0;
+			for (const button of await buttons.all()) {
+				const label = await railLabelOnTop(page, button);
+				log(JSON.stringify(label));
+				if (label.box.top < header.y + header.height && label.box.bottom > header.y) overHeader++;
+				expect(label.covered.length === 0, `the "${label.text}" label is not covered by the list (${JSON.stringify(label.covered)})`);
+			}
+			expect(overHeader > 0, 'at least one label crosses the sticky section header, so the check covers it');
+			await mark('with rows selected, the New label paints over the selection bar');
+			const row = await page.locator('aside.sidebar .col .scard').first().boundingBox();
+			await page.mouse.move(row.x + 40, row.y + row.height / 2);
+			await page.mouse.down();
+			await page.locator('aside.sidebar .col.selecting').waitFor({ timeout: 3000 });
+			await page.mouse.up();
+			const selbar = page.locator('aside.sidebar .selbar');
+			await selbar.evaluate(el => Promise.all(el.getAnimations().map(a => a.finished)));
+			const bar = await selbar.boundingBox();
+			const label = await railLabelOnTop(page, workspace(page).locator('.r-new'));
+			log(JSON.stringify({ bar, label }));
+			expect(label.box.right > bar.x && label.box.top < bar.y + bar.height, 'the New label crosses the selection bar');
+			expect(label.covered.length === 0, `the New label is not covered by the selection bar (${JSON.stringify(label.covered)})`);
+			await page.getByRole('button', { name: 'Cancel selection', exact: true }).click();
+		}
+	}, {
 		name: 'medium-768-collapsed-rail',
 		viewports: ['desktop'],
 		async setup({ page, status }) {

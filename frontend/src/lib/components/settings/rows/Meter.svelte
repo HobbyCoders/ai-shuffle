@@ -42,7 +42,7 @@
 	.bar {
 		height: 5px;
 		border-radius: 3px;
-		background: var(--st-muted);
+		background: var(--st-meter-track);
 		overflow: hidden;
 	}
 	.bar i {

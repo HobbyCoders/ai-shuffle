@@ -762,6 +762,132 @@ describe('ws-connection', () => {
 			conn.destroy();
 		});
 
+		it('reports a manual attempt that closes before opening, then keeps retrying', () => {
+			const config = createMockConfig({ onManualReconnectFailed: vi.fn() });
+			const conn = createWsConnection(config);
+			conn.connect();
+			createdSockets[0].simulateClose(1006);
+			expect(conn.reconnect()).toBe(true);
+			expect(config.onManualReconnectFailed).not.toHaveBeenCalled();
+			createdSockets[1].simulateClose(1006, 'Refused');
+			expect(config.onManualReconnectFailed).toHaveBeenCalledExactlyOnceWith(1006, 'Refused');
+			// The automatic schedule picks up again from a fresh backoff.
+			vi.advanceTimersByTime(2_001);
+			expect(createdSockets).toHaveLength(3);
+			createdSockets[2].simulateClose(1006);
+			expect(config.onManualReconnectFailed).toHaveBeenCalledOnce();
+			conn.destroy();
+		});
+
+		it('reports a manual handshake that times out', () => {
+			const config = createMockConfig({ onManualReconnectFailed: vi.fn() });
+			const conn = createWsConnection(config);
+			conn.reconnect();
+			vi.spyOn(createdSockets[0], 'close').mockImplementation(() => {});
+			vi.advanceTimersByTime(14_999);
+			expect(config.onManualReconnectFailed).not.toHaveBeenCalled();
+			vi.advanceTimersByTime(2);
+			expect(config.onManualReconnectFailed).toHaveBeenCalledExactlyOnceWith(4000, 'Connection attempt timed out');
+			conn.destroy();
+		});
+
+		it('reports a manual attempt refused with 4001 and stays stopped', () => {
+			const config = createMockConfig({ onManualReconnectFailed: vi.fn() });
+			const conn = createWsConnection(config);
+			conn.reconnect();
+			createdSockets[0].simulateClose(4001, 'Authentication failed');
+			expect(config.onManualReconnectFailed).toHaveBeenCalledExactlyOnceWith(4001, 'Authentication failed');
+			vi.advanceTimersByTime(60_000);
+			expect(createdSockets).toHaveLength(1);
+			// A tap after the refusal is never a no-op: it opens a new socket.
+			conn.reconnect();
+			expect(createdSockets).toHaveLength(2);
+			conn.destroy();
+		});
+
+		it('reports a manual socket refused with 4001 after it opened (server accepts before auth)', () => {
+			const config = createMockConfig({ onManualReconnectFailed: vi.fn() });
+			const conn = createWsConnection(config);
+			conn.reconnect();
+			createdSockets[0].simulateOpen();
+			createdSockets[0].simulateClose(4001, 'Authentication failed');
+			expect(config.onManualReconnectFailed).toHaveBeenCalledExactlyOnceWith(4001, 'Authentication failed');
+			conn.destroy();
+		});
+
+		it('does not report a 4001 after the manual socket received a message', () => {
+			const config = createMockConfig({ onManualReconnectFailed: vi.fn() });
+			const conn = createWsConnection(config);
+			conn.reconnect();
+			createdSockets[0].simulateOpen();
+			createdSockets[0].simulateMessage({ type: 'ping' });
+			createdSockets[0].simulateClose(4001, 'Revoked');
+			expect(config.onManualReconnectFailed).not.toHaveBeenCalled();
+			conn.destroy();
+		});
+
+		it('does not report a manual socket that opened and later dropped', () => {
+			const config = createMockConfig({ onManualReconnectFailed: vi.fn() });
+			const conn = createWsConnection(config);
+			conn.reconnect();
+			createdSockets[0].simulateOpen();
+			expect(config.onConnected).toHaveBeenCalledOnce();
+			createdSockets[0].simulateClose(1006);
+			expect(config.onManualReconnectFailed).not.toHaveBeenCalled();
+			conn.destroy();
+		});
+
+		it('does not report a superseded or intentionally closed manual attempt', () => {
+			const config = createMockConfig({ onManualReconnectFailed: vi.fn() });
+			const conn = createWsConnection(config);
+			conn.reconnect();
+			vi.spyOn(createdSockets[0], 'close').mockImplementation(() => {});
+			conn.reconnect();
+			createdSockets[0].simulateClose(1006, 'Late close');
+			conn.disconnect();
+			vi.advanceTimersByTime(60_000);
+			expect(config.onManualReconnectFailed).not.toHaveBeenCalled();
+			conn.destroy();
+		});
+
+		it('does not report automatic attempts', () => {
+			const config = createMockConfig({ onManualReconnectFailed: vi.fn() });
+			const conn = createWsConnection(config);
+			conn.connect();
+			createdSockets[0].simulateClose(1006);
+			vi.advanceTimersByTime(2_001);
+			createdSockets[1].simulateClose(1006);
+			expect(config.onManualReconnectFailed).not.toHaveBeenCalled();
+			conn.destroy();
+		});
+
+		it('says it started nothing once destroyed', () => {
+			const conn = createWsConnection(createMockConfig());
+			conn.destroy();
+			expect(conn.reconnect()).toBe(false);
+			expect(createdSockets).toHaveLength(0);
+		});
+
+		it('replaces a stuck automatic handshake on a tap after max attempts', () => {
+			const config = createMockConfig({ onManualReconnectFailed: vi.fn() });
+			const conn = createWsConnection(config);
+			conn.connect();
+			for (let i = 0; i < 50; i++) {
+				createdSockets[createdSockets.length - 1].simulateClose(1006);
+				vi.advanceTimersByTime(31_001);
+			}
+			createdSockets[createdSockets.length - 1].simulateClose(1006);
+			expect(config.onMaxReconnectAttempts).toHaveBeenCalled();
+			const before = createdSockets.length;
+			vi.advanceTimersByTime(120_000);
+			expect(createdSockets).toHaveLength(before);
+			conn.reconnect();
+			expect(createdSockets).toHaveLength(before + 1);
+			createdSockets[before].simulateOpen();
+			expect(conn.isConnected()).toBe(true);
+			conn.destroy();
+		});
+
 		it('opens a fresh socket immediately when triggered while disconnected', () => {
 			const config = createMockConfig();
 			const conn = createWsConnection(config);

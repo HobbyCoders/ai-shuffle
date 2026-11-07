@@ -46,15 +46,15 @@ it('types literal punctuation and Unicode, with only the explicit Send click sub
 	assert.ok(!calls.some(([kind]) => kind === 'fill'));
 });
 
-it('bounds keyboard entry for large fixtures, attributing bulk growth before filling and preserving all text', async () => {
+it('bounds keyboard entry for large fixtures, attributing bulk growth before appending and preserving all text', async () => {
 	const { page, calls } = fixture();
 	const text = '😀 history\n' + 'history '.repeat(2000) + '\nfinish é';
 	await typeAndSend(page, text);
-	const fillAt = calls.findIndex(([kind]) => kind === 'fill');
-	assert.ok(fillAt > 0, 'large text must use one bulk fill rather than thousands of key events');
-	assert.equal(calls.filter(([kind]) => kind === 'fill').length, 1);
-	assert.ok(calls.slice(0, fillAt).some(([kind]) => kind === 'type'), 'real keyboard input precedes bulk growth');
-	assert.ok(calls.slice(fillAt + 1).some(([kind]) => kind === 'type'), 'finish with real keyboard input');
+	const bulkAt = calls.findIndex(([kind, value]) => kind === 'literal' && value.length > 1);
+	assert.ok(bulkAt > 0, 'large text must use one bulk insertion rather than thousands of key events');
+	assert.equal(calls.filter(([kind, value]) => kind === 'literal' && value.length > 1).length, 1);
+	assert.ok(calls.slice(0, bulkAt).some(([kind]) => kind === 'type'), 'real keyboard input precedes bulk growth');
+	assert.ok(calls.slice(bulkAt + 1).some(([kind]) => kind === 'type'), 'finish with real keyboard input');
 	assert.ok(calls.filter(([kind]) => kind === 'type').reduce((n, [, value]) => n + Array.from(value).length, 0) <= 32);
 	let actual = '';
 	for (const [kind, value] of calls) {
@@ -83,13 +83,23 @@ it('normalizes CRLF and bare CR before keyboard or bulk segmentation, with exact
 	}
 });
 
+it('appends the bulk middle instead of reselecting and replacing the typed prefix', async () => {
+	const { page, calls } = fixture();
+	const text = 'removed-unique-token [script:rewind]';
+	await typeAndSend(page, text);
+	assert.ok(!calls.some(([kind]) => kind === 'fill'), 'do not reselect the typed prefix through a separate DOM selection and insertText round trip');
+	const inserted = calls.filter(([kind]) => kind === 'type' || kind === 'literal').map(([, value]) => value).join('');
+	assert.equal(inserted, text, 'each Unicode point is inserted once, without replacing a prefix');
+	assert.equal(calls.filter(([kind]) => kind === 'send').length, 1);
+});
+
 it('bounds ordinary queued prompts before their scenario timing window expires', async () => {
 	const { page, calls, elapsed } = fixture({ perCharacterMs: 60 });
 	const text = 'waiting-0 cost-regression [script:slow tps=2]';
 	await typeAndSend(page, text);
-	const fillAt = calls.findIndex(([kind]) => kind === 'fill');
-	assert.ok(fillAt > 0, 'ordinary prompts need the bounded path too, not only paste-sized fixtures');
-	assert.ok(calls.slice(0, fillAt).some(([kind]) => kind === 'type'), 'real typing still precedes growth');
+	const bulkAt = calls.findIndex(([kind, value]) => kind === 'literal' && value.length > 1);
+	assert.ok(bulkAt > 0, 'ordinary prompts need the bounded path too, not only paste-sized fixtures');
+	assert.ok(calls.slice(0, bulkAt).some(([kind]) => kind === 'type'), 'real typing still precedes growth');
 	assert.ok(elapsed() - 700 <= 1500, 'typing must leave room for two queued sends before the unchanged 4.5s failure');
 	let actual = '';
 	for (const [kind, value] of calls) {

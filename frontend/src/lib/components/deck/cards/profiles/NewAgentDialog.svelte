@@ -92,11 +92,20 @@
 			onClose();
 		}
 	}
+
+	// The page pane is its own stacking context, so a dialog left inside it
+	// cannot dim the rail or the phone top bar. Render it on <body>, like the
+	// other modals; the host keeps the settings kit's tokens and buttons.
+	function portal(node: HTMLElement) {
+		document.body.appendChild(node);
+		return { destroy() { node.remove(); } };
+	}
 </script>
 
 <svelte:window onkeydown={onWindowKey} />
 
 {#if open}
+	<div class="settings-shell nad-host" use:portal>
 	<!-- svelte-ignore a11y_click_events_have_key_events -->
 	<div class="scrim" role="presentation" onclick={(e) => e.target === e.currentTarget && !busy && onClose()}>
 		<div class="dlg" role="dialog" aria-modal="true" aria-labelledby="new-agent-title" tabindex="-1" use:focusTrap={{ initial: '[aria-checked="true"]' }}>
@@ -158,18 +167,26 @@
 			</div>
 		</div>
 	</div>
+	</div>
 {/if}
 
 <style>
+	/* No box of its own: the host only carries the kit's tokens and button styles. */
+	.nad-host {
+		display: contents;
+	}
+	/* A modal dims the whole window, rail and list included, like every other dialog.
+	   The scrim is the container the phone sheet layout below measures. */
 	.scrim {
-		position: absolute;
+		position: fixed;
 		inset: 0;
-		z-index: 60;
+		z-index: 1000;
+		container-type: inline-size;
 		display: grid;
 		place-items: center;
 		padding: 20px;
-		background: color-mix(in oklch, var(--background) 62%, transparent);
-		backdrop-filter: blur(3px);
+		background: var(--modal-overlay);
+		backdrop-filter: blur(var(--modal-blur, 2px));
 		animation: nad-fade 0.15s ease-out;
 	}
 	.dlg {
@@ -178,7 +195,7 @@
 		overflow: auto;
 		background: var(--st-popover);
 		border-radius: calc(var(--st-radius) + 4px);
-		box-shadow: var(--st-shadow);
+		box-shadow: var(--shadow-dialog), 0 0 0 1px var(--st-border-strong);
 		animation: nad-pop 0.18s ease-out;
 	}
 	.dlg:focus {

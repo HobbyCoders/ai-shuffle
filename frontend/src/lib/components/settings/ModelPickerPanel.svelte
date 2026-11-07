@@ -98,6 +98,23 @@
 	let query = $state('');
 	let searchEl = $state<HTMLInputElement | null>(null);
 	let listEl = $state<HTMLDivElement | null>(null);
+	// True while rows continue below the visible part of the list: the list
+	// then fades its last 16px, so a row never looks cut off at the edge.
+	let moreBelow = $state(false);
+	function measureMoreBelow() {
+		if (!listEl) return;
+		moreBelow = listEl.scrollTop + listEl.clientHeight < listEl.scrollHeight - 1;
+	}
+	$effect(() => {
+		const el = listEl;
+		if (!el) return;
+		measureMoreBelow();
+		const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measureMoreBelow);
+		ro?.observe(el);
+		const mo = typeof MutationObserver === 'undefined' ? null : new MutationObserver(measureMoreBelow);
+		mo?.observe(el, { childList: true, subtree: true });
+		return () => { ro?.disconnect(); mo?.disconnect(); };
+	});
 
 	const isSearching = $derived(query.trim().length > 0);
 
@@ -565,7 +582,7 @@
 			<div class="mpp-notice">{notice}</div>
 		{/if}
 
-		<div class="mpp-list" role="listbox" aria-label={ariaLabel} bind:this={listEl}>
+		<div class="mpp-list" class:more-below={moreBelow} role="listbox" aria-label={ariaLabel} bind:this={listEl} onscroll={measureMoreBelow}>
 			{#each visibleLeading as r (r.value)}
 				{@render plainRow(r)}
 			{/each}
@@ -601,7 +618,7 @@
 								title={fav ? 'Remove from favorites' : 'Add to favorites'}
 								onclick={(e) => toggleFavorite(e, o.value)}
 							>
-								<Star size={14} strokeWidth={1.5} />
+								<Star size={16} strokeWidth={1.75} />
 							</button>
 							<span class="mpp-check" aria-hidden="true">{#if value === o.value}<Check size={16} />{/if}</span>
 						</div>
@@ -876,6 +893,8 @@
 <style>
 	.mpp {
 		--mpp-hover: color-mix(in srgb, var(--popover) 90%, var(--foreground));
+		/* A model row under the pointer: half the chosen row's tint step. */
+		--mpp-row-hover: color-mix(in srgb, var(--popover) 95%, var(--foreground));
 		display: flex;
 		flex-direction: column;
 		width: var(--mpp-width, 360px);
@@ -967,6 +986,9 @@
 		gap: 2px;
 		scrollbar-width: none;
 	}
+	.mpp-list.more-below {
+		mask-image: linear-gradient(to bottom, #000 calc(100% - 16px), transparent);
+	}
 
 	.mpp-group-name {
 		display: flex;
@@ -975,9 +997,10 @@
 		padding: 12px 8px 4px;
 		font-size: 12px;
 		font-weight: 500;
-		color: var(--secondary-foreground);
+		color: var(--muted-foreground);
 	}
-	.mpp-section:first-child .mpp-group-name { padding-top: 4px; }
+	/* The list's own 6px top padding completes the 12px above the first header. */
+	.mpp-section:first-child .mpp-group-name { padding-top: 6px; }
 	.mpp-group-name small {
 		font-size: 12px;
 		font-weight: 400;
@@ -997,12 +1020,13 @@
 		user-select: none;
 		transition: background-color 0.1s ease;
 	}
-	/* The chosen row keeps its fill and check. A hover fill needs a real pointer,
-	   so a tap on a phone never leaves a second row lit; the arrow keys draw a
-	   thin outline instead. */
+	/* The chosen row keeps its check and the stronger fill (10% foreground); the
+	   row under the pointer gets the lighter step (5%), so the two never read as
+	   the same state. A hover fill needs a real pointer, so a tap on a phone
+	   never leaves a second row lit; the arrow keys draw a thin outline instead. */
 	.mpp-row.selected { background: var(--mpp-hover); }
 	@media (hover: hover) {
-		.mpp-row:hover { background: var(--mpp-hover); }
+		.mpp-row:not(.selected):hover { background: var(--mpp-row-hover); }
 	}
 	.mpp-row.highlighted { outline: 1px solid var(--ring); outline-offset: -1px; }
 	.mpp-row.selected .mpp-row-label { font-weight: 500; }
@@ -1027,7 +1051,7 @@
 	}
 	.mpp-row-label {
 		font-size: 13px;
-		font-weight: 500;
+		font-weight: 400;
 		line-height: 1.35;
 		overflow: hidden;
 		text-overflow: ellipsis;
@@ -1045,7 +1069,8 @@
 		border: 0;
 		border-radius: 6px;
 		background: transparent;
-		color: var(--muted-foreground);
+		/* A 16px star at 40% foreground: present on hover, quieter than the label. */
+		color: color-mix(in oklab, var(--foreground) 40%, transparent);
 		opacity: 0;
 		cursor: pointer;
 		transition: opacity 0.12s ease, color 0.12s ease;
@@ -1060,10 +1085,13 @@
 	}
 	.mpp-fav:focus-visible {
 		opacity: 1;
+		color: var(--foreground);
 		outline: 2px solid var(--ring);
-		outline-offset: -1px;
+		outline-offset: -2px;
 	}
-	.mpp-fav.on {
+	/* A favourite: the accent, filled, on every row. */
+	.mpp-fav.on,
+	.mpp-fav.on:hover {
 		opacity: 1;
 		color: var(--primary);
 	}
@@ -1138,7 +1166,7 @@
 	}
 	.mpp-context-caption {
 		color: var(--muted-foreground);
-		font-size: 10.5px;
+		font-size: 11px;
 		font-weight: 400;
 	}
 	.mpp-context-toggle :global(.mpp-context-check) {
@@ -1187,7 +1215,7 @@
 	.mpp-win-note {
 		margin: 0;
 		color: var(--muted-foreground);
-		font-size: 10.5px;
+		font-size: 11px;
 		line-height: 1.4;
 	}
 	.mpp-cap-chip:disabled,
@@ -1342,7 +1370,7 @@
 			color-mix(in srgb, var(--muted-foreground) 14%, transparent) 3px 5px
 		);
 		color: var(--muted-foreground);
-		font-size: 9.5px;
+		font-size: 11px;
 		font-weight: 600;
 		font-variant-numeric: tabular-nums;
 	}
@@ -1354,7 +1382,7 @@
 		margin-top: -3px;
 		padding: 0 2px;
 		color: var(--muted-foreground);
-		font-size: 10px;
+		font-size: 11px;
 		font-variant-numeric: tabular-nums;
 	}
 
@@ -1460,7 +1488,7 @@
 	.mpp-cap-error {
 		margin: 0;
 		color: var(--destructive);
-		font-size: 10.5px;
+		font-size: 11px;
 		line-height: 1.35;
 	}
 

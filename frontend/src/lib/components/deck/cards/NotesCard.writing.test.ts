@@ -95,3 +95,17 @@ it('keeps phone metadata and save status together inside the collapsed details',
  expect(details.textContent).toContain('Saved');
  expect(screen.getByRole('region', { name: 'Note content' })).toBeTruthy();
 });
+it('starts desktop Tags & files collapsed with its count, and opens it only on request', async () => {
+ render(NotesCard);
+ await fireEvent.click(await screen.findByText(note.title));
+ const summary = screen.getByText(/^Tags & files/);
+ const details = summary.closest('details')!;
+ expect(summary.textContent).toBe('Tags & files · 1');
+ expect(details.open).toBe(false);
+ // The disclosure comes before the document, which now starts right under it.
+ expect(details.compareDocumentPosition(screen.getByRole('region', { name: 'Note content' })) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+ await fireEvent.click(summary);
+ expect(details.open).toBe(true);
+ expect(within(details).getByRole('textbox', { name: 'Add tag' })).toBeTruthy();
+ expect(within(details).getByRole('button', { name: 'Remove tag' })).toBeTruthy();
+});

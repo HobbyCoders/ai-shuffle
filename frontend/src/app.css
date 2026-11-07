@@ -101,13 +101,17 @@
 		--action: var(--foreground);
 		--action-foreground: var(--background);
 		--action-hover: color-mix(in oklab, var(--foreground) 88%, var(--background));
+		/* A disabled primary keeps the primary colour, faded, in both themes:
+		   never a separate solid grey that reads as a different button. */
+		--action-disabled-opacity: 0.4;
 
 		/* Secondary/Muted */
 		--secondary: oklch(0.276 0.008 265);
 		--secondary-foreground: oklch(0.9 0.003 265);
 		--muted: oklch(0.276 0.008 265);
 		--muted-foreground: oklch(0.715 0.008 265);
-		--subtle-foreground: oklch(0.645 0.008 265);
+		/* 4.7:1 on a selected row, 4.9:1 on --muted; still a step under --muted-foreground. */
+		--subtle-foreground: oklch(0.67 0.008 265);
 
 		/* Accent for hover states */
 		--accent: oklch(0.3 0.008 265);
@@ -147,6 +151,16 @@
 		--field-border: var(--input);
 		--field-border-focus: var(--ring);
 
+		/* The composer rises one step off the charcoal canvas, with a 14% white
+		   edge and a placeholder that clears 4.5:1 on that surface. */
+		--composer-bg: color-mix(in oklab, var(--foreground) 4%, var(--card));
+		--composer-border: var(--border-strong);
+		--composer-border-focus: color-mix(in oklab, var(--foreground) 24%, transparent);
+		--composer-placeholder: var(--muted-foreground);
+		/* The lift under the box: desktop, then the phone card. */
+		--composer-shadow: var(--shadow-s);
+		--composer-shadow-phone: var(--shadow-m);
+
 		/* Sidebar plane. The rail shares it. Row fills derive from the plane so a
 		   theme preset's sidebar keeps working. */
 		--row-hover: color-mix(in oklab, var(--sidebar-foreground) 5%, var(--sidebar));
@@ -158,6 +172,8 @@
 		--sidebar-accent: oklch(1 0 0 / 0.05);
 		--sidebar-accent-active: oklch(1 0 0 / 0.085);
 		--sidebar-muted: oklch(0.715 0.008 265);
+		/* Rail, list panel and canvas read as three layers: a hairline between rail and panel. */
+		--rail-seam: color-mix(in oklab, var(--sidebar-foreground) 8%, transparent);
 
 		/* Surface effects */
 		--code-bg: oklch(0.195 0.004 265);
@@ -241,8 +257,10 @@
 		/* Chip/badge colors - derived from theme primary */
 		--chip-primary-bg: color-mix(in srgb, var(--primary) 15%, transparent);
 
-		/* Modal overlay */
-		--modal-overlay: oklch(0 0 0 / 0.6);
+		/* Modal overlay: one dim scrim for every dialog and bottom sheet. */
+		--modal-overlay: oklch(0 0 0 / 0.55);
+		--modal-blur: 2px;
+		--shadow-dialog: 0 16px 40px oklch(0 0 0 / 0.45);
 
 		/* Input states - dark mode (derived from theme variables) */
 		--input-bg: var(--field-bg);
@@ -314,7 +332,8 @@
 		--secondary-foreground: oklch(0.28 0.006 90);
 		--muted: oklch(0.95 0.004 90);
 		--muted-foreground: oklch(0.488 0.008 90);
-		--subtle-foreground: oklch(0.525 0.008 90);
+		/* 4.6:1 on a selected row (was 4.3:1). */
+		--subtle-foreground: oklch(0.508 0.008 90);
 
 		/* Accent for hover states */
 		--accent: oklch(0.93 0.004 90);
@@ -347,6 +366,15 @@
 		--field-border: var(--input);
 		--field-border-focus: var(--ring);
 
+		/* The light composer is the white card, held off the near-white canvas
+		   by a 12% black edge and a soft lift from the dialog shadow's family. */
+		--composer-bg: var(--card);
+		--composer-border: oklch(0 0 0 / 0.12);
+		--composer-border-focus: oklch(0 0 0 / 0.2);
+		--composer-placeholder: var(--subtle-foreground);
+		--composer-shadow: 0 1px 2px oklch(0 0 0 / 0.04), 0 6px 20px oklch(0 0 0 / 0.06);
+		--composer-shadow-phone: var(--composer-shadow);
+
 		/* Sidebar plane. The rail shares it. */
 		--row-hover: color-mix(in oklab, var(--sidebar-foreground) 2.5%, var(--sidebar));
 		--row-selected: color-mix(in oklab, var(--sidebar-foreground) 4.5%, var(--sidebar));
@@ -357,6 +385,7 @@
 		--sidebar-accent: oklch(0.21 0.01 250 / 0.045);
 		--sidebar-accent-active: oklch(0.21 0.01 250 / 0.085);
 		--sidebar-muted: oklch(0.488 0.008 90);
+		--rail-seam: transparent;
 
 		/* Surface effects */
 		--code-bg: oklch(0.975 0.002 250);
@@ -430,8 +459,9 @@
 		/* Chip/badge colors - derived from theme primary */
 		--chip-primary-bg: color-mix(in srgb, var(--primary) 12%, transparent);
 
-		/* Modal overlay - light theme */
-		--modal-overlay: oklch(0 0 0 / 0.5);
+		/* Modal overlay - light theme: a dim scrim, not a white fog. */
+		--modal-overlay: oklch(0.18 0 0 / 0.4);
+		--shadow-dialog: 0 16px 40px oklch(0 0 0 / 0.25);
 
 		/* Input states - light mode (derived from theme variables) */
 		--input-bg: var(--field-bg);
@@ -625,8 +655,10 @@ code {
 	transform: none;
 }
 
+.btn-primary:disabled,
 .btn-primary:disabled:hover {
 	background: var(--action);
+	opacity: var(--action-disabled-opacity);
 }
 
 .btn-secondary {
@@ -710,6 +742,18 @@ select {
 	--menu-shadow: var(--shadow-l);
 }
 
+/* One phone action size: the buttons that are a phone screen's main actions
+   (Files' Upload and New folder, the chat controls sheet's Call, Browser,
+   Terminal and Export, a phone empty state's create button) draw at the full
+   touch height instead of the compact 32px row button. Colours stay the
+   button's own; the radius matches the phone inputs. Desktop is unchanged.
+   The settings kit's .st-btn.phone-action and the sheet's .act read these. */
+:root {
+	--phone-action-height: 44px;
+	--phone-action-radius: var(--radius, 8px);
+	--phone-action-gap: 8px;
+}
+
 select option {
 	background-color: var(--popover);
 	color: var(--popover-foreground);
@@ -760,6 +804,22 @@ select option {
 	overflow-wrap: break-word;
 	-webkit-box-decoration-break: clone;
 	box-decoration-break: clone;
+}
+
+/* Short inline code (up to 40 characters, marked by the renderer) never
+   splits into two pills; a longer span wraps as one cloned chip. A character
+   count can't prove a one-line chip fits (40 full-width characters are wider
+   than a phone column), so the short chip is one inline box capped at the
+   line: it moves to the next line whole, stays on one line while it fits, and
+   only when it is wider than the whole column wraps inside the same chip. It
+   never clips under an overflow-hidden ancestor. The tighter line-height keeps
+   the box (with its padding) inside the paragraph's line, as an inline chip. */
+.prose :where(:not(pre) > code.code-short):not(:where([class~="not-prose"] *)) {
+	display: inline-block;
+	max-width: 100%;
+	line-height: 1.4;
+	vertical-align: baseline;
+	overflow-wrap: anywhere;
 }
 
 .prose :where(pre code):not(:where([class~="not-prose"] *)) {

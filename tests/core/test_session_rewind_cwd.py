@@ -16,6 +16,7 @@ from app.core.provider.fluid_transcript import (
 )
 from app.db import checkouts, database, projects_v2, sessions
 from tests.git_repo_helpers import git, hermetic_git_env, init_repo
+from tests.rewind_helpers import execute_rewind_and_wait
 
 
 @pytest.mark.parametrize("hashed", [False, True])
@@ -142,7 +143,7 @@ async def test_only_delegated_reseed_refuses_unavailable_checkout(mock_db, monke
     # Discovery is read-only and can read the Fluid tree without a checkout.
     checkpoints = await commands.get_rewind_checkpoints("session")
     assert checkpoints.success and [cp.uuid for cp in checkpoints.checkpoints] == ["u1", "a1", "u2", "a2"]
-    result = await commands.execute_rewind("session", commands.RewindRequestV2(target_uuid="u2", include_response=False))
+    result = await execute_rewind_and_wait("session", commands.RewindRequestV2(target_uuid="u2", include_response=False))
     if kind == "delegated":
         assert not result.success and not result.chat_rewound
         assert "checkout" in result.error and "retry" in result.error

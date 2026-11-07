@@ -214,8 +214,8 @@ async function truth(viewport, touch) {
 
 	// Empty: nothing installed, no sources.
 	await open({}, 'explore');
-	await page.getByText('Nothing here yet. Add a source.').waitFor();
-	check(await page.getByText('Nothing added yet.').isVisible() || touch, 'empty list says nothing is added');
+	await page.getByText('Add a plugin source to browse its plugins here.').waitFor();
+	check(await page.getByText('No plugins yet').first().isVisible() || touch, 'empty list says nothing is added');
 	check((await noOverflow()) <= 0, 'no overflow, empty', await noOverflow());
 	await shot('1-empty');
 

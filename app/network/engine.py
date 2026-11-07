@@ -1208,6 +1208,16 @@ def scan_all(*, ctx: Optional[NetworkContext] = None, include_catalog: bool = Tr
             logger.warning("Catalog publish failed", exc_info=True)
             if strict:
                 raise
+    if selected is not None and "memory" in selected:
+        try:
+            # Stage committed files before scanning SQL, even without a catalog
+            # pass. Memory is an explicit publisher, not SCANNED_COLLECTIONS.
+            from app.network import memory_records
+            total += memory_records.publish(ctx=ctx)
+        except Exception:  # noqa: BLE001
+            logger.warning("memory_records publish failed", exc_info=True)
+            if strict:
+                raise
     if include_catalog and selected is not None and "plugins_desired" in selected:
         # Plugin mutations request a narrow pass too, not just periodic scans.
         from app.network import plugins_sync

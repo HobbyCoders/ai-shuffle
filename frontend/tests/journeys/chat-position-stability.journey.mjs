@@ -642,8 +642,8 @@ cases.push({
 			// Intended Needs-you/Active sidebar reclassification is tested separately;
 			// this extended flow sidebar-visible remains strict RED (0.120), not a
 			// global desktop pass. Existing desktop neighbors keep their sidebar.
-			// The redesign offers Hide sidebar in both the title bar and the Chats
-			// panel; either collapses the same sidebar.
+			// Hide sidebar lives in the Chats panel header; the title bar shows its
+			// toggle only as Show sidebar while the panel is collapsed.
 			await ctx.page.getByRole('button', { name: 'Hide sidebar', exact: true }).filter({ visible: true }).first().click();
 			const show = ctx.page.getByRole('button', { name: 'Show sidebar', exact: true }).filter({ visible: true }).first();
 			await show.waitFor({ state: 'visible' });
