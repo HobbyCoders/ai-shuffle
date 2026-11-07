@@ -26,6 +26,10 @@
 //   chip-sweep-*    the staged row at every width from a 480px composer to
 //                   the widest desktop, held after Send: Auto and a short or
 //                   long generated name give the same geometry at each width
+//   chip-wide-ordinary  ordinary names at the widest and a ~640px composer,
+//                   held after Send: one line, the same geometry for Auto and
+//                   the generated name, and a ~25-character generated name is
+//                   shown whole whenever the row has room for it
 import { fakeAiTag, runJourney } from './runner.mjs';
 import { pick, withChatSetup } from './lib/app.mjs';
 import { expectComposerPositions } from './lib/timeline.mjs';
@@ -253,9 +257,13 @@ const LONG = {
 	repo: 'long-repository-name-council-scrim'
 };
 
+/** The names a typical setup shows: the dev agent and repository, a short worker. */
+const ORDINARY = { agent: AGENT, worker: 'Unraid', repo: PROJECT };
+
 /**
- * Long agent, worker and repository names, a chosen generated branch name, and
- * a check of the staged chip row (Send until the session binds).
+ * Agent, worker and repository names (`names`, long by default), a chosen
+ * generated branch name, and a check of the staged chip row (Send until the
+ * session binds).
  *
  * `window.__chipGeometry()` reads the row once: which branch label it shows
  * (`auto` before the name is generated, `generated` after), a signature of
@@ -263,6 +271,8 @@ const LONG = {
  * top) and the row's height, and the rules each chip must meet: a usable
  * width, inside the composer, the element at its own centre (nothing covers
  * it), a few characters of its name showing, and no overlap with another chip.
+ * It also reports how much of the branch label is cut off (`branchLabel`) and
+ * the unused room at the end of the branch chip's line (`free`).
  * The branch label is the only thing Send changes in this row, so the two
  * signatures at one width must be the same.
  *
@@ -272,7 +282,7 @@ const LONG = {
  * showed the generated name, so neither state can be skipped. With
  * `manual: true` both wait for `release.generate` / `release.create` instead.
  */
-async function longNamesAndChipProbe(page, branch, { autoFrames = 5, generatedFrames = 5, manual = false } = {}) {
+async function chipProbe(page, branch, { names = LONG, autoFrames = 5, generatedFrames = 5, manual = false } = {}) {
 	await page.addInitScript(([long, branch, opts]) => {
 		const probe = { armed: false, sampling: true, counts: { auto: 0, generated: 0, other: 0 }, sigs: { auto: {}, generated: {}, other: {} }, problems: [], release: {} };
 		window.__chipProbe = probe;
@@ -316,7 +326,12 @@ async function longNamesAndChipProbe(page, branch, { autoFrames = 5, generatedFr
 			}
 			const inRow = chips.filter((c) => c.name !== 'agent' && c.name !== 'branch-slot');
 			const lines = new Set(inRow.map((c) => Math.round(c.r.top - rowBox.top))).size;
-			return { state, composer: r(clip.width), height: r(rowBox.height), lines, sig, problems };
+			const branchBox = trigger.getBoundingClientRect();
+			const onBranchLine = inRow.filter((c) => Math.abs(c.r.top - branchBox.top) < 1);
+			const free = r(rowBox.right - Math.max(...onBranchLine.map((c) => c.r.right)));
+			const labelEl = trigger.querySelector('.branch-name');
+			const branchLabel = labelEl ? { scroll: labelEl.scrollWidth, client: labelEl.clientWidth, text: labelEl.textContent.trim() } : null;
+			return { state, composer: r(clip.width), height: r(rowBox.height), lines, sig, problems, free, branchLabel };
 		};
 		window.__chipGeometry = geometry;
 		const check = () => {
@@ -357,16 +372,16 @@ async function longNamesAndChipProbe(page, branch, { autoFrames = 5, generatedFr
 			for (const row of body?.installs || []) if (row.is_self) row.device_name = long.worker;
 			return json(body, response);
 		};
-	}, [LONG, branch, { autoFrames, generatedFrames, manual }]);
+	}, [names, branch, { autoFrames, generatedFrames, manual }]);
 }
 
-/** Stage a new Auto worktree chat with the long names; the window is `width` wide. */
-async function stageLongNames(ctx, width) {
+/** Stage a new Auto worktree chat with `names`; the window is `width` wide. */
+async function stageNames(ctx, width, names = LONG) {
 	const { page } = ctx;
 	await page.setViewportSize({ width, height: 900 });
-	const hero = await openNewChat(ctx, LONG.agent);
-	const item = page.getByRole('button', { name: LONG.repo, exact: true });
-	await pick(hero.getByRole('button', { name: /^No project/ }), item, item, hero.getByRole('button', { name: `Workspace folders: ${LONG.repo}` }));
+	const hero = await openNewChat(ctx, names.agent);
+	const item = page.getByRole('button', { name: names.repo, exact: true });
+	await pick(hero.getByRole('button', { name: /^No project/ }), item, item, hero.getByRole('button', { name: `Workspace folders: ${names.repo}` }));
 	await worktreeOn(page, hero);
 }
 
@@ -377,8 +392,8 @@ function narrowChips(chat) {
 		viewports: ['desktop'],
 		throttles: ['fast'],
 		setup: settled(async (ctx) => {
-			await longNamesAndChipProbe(ctx.page, `fix/long-staged-branch-generated-from-message-${uniq()}`);
-			await stageLongNames(ctx, chat + 320);
+			await chipProbe(ctx.page, `fix/long-staged-branch-generated-from-message-${uniq()}`);
+			await stageNames(ctx, chat + 320);
 			const column = await ctx.page.evaluate(() => Math.round(document.querySelector('[data-ui-state="chat"]').getBoundingClientRect().width));
 			if (Math.abs(column - chat) > 24) throw new Error(`chat column is ${column}px, wanted about ${chat}px (sidebar closed?)`);
 		}),
@@ -433,8 +448,8 @@ function chipSweep(name, branch) {
 		throttles: ['fast'],
 		setup: async (ctx) => {
 			const { page } = ctx;
-			await longNamesAndChipProbe(page, branch, { manual: true });
-			await stageLongNames(ctx, 1440);
+			await chipProbe(page, branch, { manual: true });
+			await stageNames(ctx, 1440);
 			await page.waitForTimeout(1000);
 			await page.evaluate(() => { window.__chipProbe.armed = true; window.__chipProbe.sampling = false; });
 			await typeAndSend(ctx, label);
@@ -472,6 +487,88 @@ function chipSweep(name, branch) {
 			ctx.log(summary);
 			console.log(summary);
 			if (failures.length) throw new Error(`chip sweep ${label} (${failures.length} failures):\n  ${failures.slice(0, 12).join('\n  ')}`);
+			await page.setViewportSize({ width: 1440, height: 900 });
+			await page.waitForTimeout(500);
+		},
+		act: async (ctx) => {
+			await ctx.page.evaluate(() => { window.__chipProbe.release.create = true; });
+			await awaitReply(ctx, label, Date.now());
+		}
+	};
+}
+
+/**
+ * Ordinary names at wide composers: the widest desktop and one about 640px
+ * wide. The long-name sweeps squeeze the branch chip below its cap, so they
+ * cannot tell whether the cap itself leaves an ordinary generated name room.
+ * The row is held after Send (the staged row; before Send the composer shows
+ * the sentence row instead) and read at each width showing Auto, then the
+ * generated `branch`: one line, identical geometry in both, the chip rules
+ * met, and the generated name shown whole whenever its line has unused room
+ * (always, at the widest composer).
+ */
+function chipWideOrdinary(branch) {
+	const label = 'chip-wide-ordinary';
+	return {
+		name: label,
+		viewports: ['desktop'],
+		throttles: ['fast'],
+		setup: async (ctx) => {
+			const { page } = ctx;
+			await chipProbe(page, branch, { names: ORDINARY, manual: true });
+			await stageNames(ctx, 1440, ORDINARY);
+			await page.waitForTimeout(1000);
+			await page.evaluate(() => { window.__chipProbe.armed = true; window.__chipProbe.sampling = false; });
+			await typeAndSend(ctx, label);
+			await page.waitForFunction(() => window.__chipGeometry()?.state === 'auto', null, { timeout: 30_000 });
+			// The window whose composer is closest to 640px; the composer only
+			// widens with the window, so halve the 760-1440px range.
+			let lo = 760, hi = 1440;
+			while (hi - lo > 4) {
+				const mid = Math.round((lo + hi) / 8) * 4;
+				if ((await chipGeometryAt(page, mid)).composer < 640) lo = mid; else hi = mid;
+			}
+			const near = [];
+			for (const w of [lo, hi]) near.push({ w, composer: (await chipGeometryAt(page, w)).composer });
+			near.sort((a, b) => Math.abs(a.composer - 640) - Math.abs(b.composer - 640));
+			const windows = [1440, 1920, near[0].w];
+			const read = async (state) => {
+				await page.waitForFunction((s) => window.__chipGeometry()?.state === s, state, { timeout: 30_000 });
+				const out = [];
+				for (const width of windows) {
+					const g = await chipGeometryAt(page, width);
+					if (g.state !== state) throw new Error(`at a ${width}px window the branch label was ${g.state}, wanted ${state}`);
+					out.push({ width, ...g });
+				}
+				return out;
+			};
+			const auto = await read('auto');
+			await page.evaluate(() => { window.__chipProbe.release.generate = true; });
+			const generated = await read('generated');
+			const widest = Math.max(...auto.map((a) => a.composer));
+			const failures = [];
+			if (widest < 735) failures.push(`the widest composer measured was ${widest}px`);
+			if (Math.abs(auto[2].composer - 640) > 8) failures.push(`the mid width reached a ${auto[2].composer}px composer, wanted about 640px`);
+			for (let i = 0; i < windows.length; i++) {
+				const a = auto[i], g = generated[i];
+				const where = `${a.width}px window (${a.composer}px composer)`;
+				if (a.sig !== g.sig) failures.push(`${where}: geometry changed across Send\n    Auto:      ${a.sig}\n    generated: ${g.sig}`);
+				for (const [state, s] of [['Auto', a], ['generated', g]]) {
+					if (s.problems.length) failures.push(`${where}, ${state}: ${s.problems.join('; ')}`);
+					if (s.lines !== 1) failures.push(`${where}, ${state}: the row takes ${s.lines} lines: ${s.sig}`);
+				}
+				const lbl = g.branchLabel;
+				if (!lbl || !lbl.text.includes(branch)) failures.push(`${where}: the branch label reads ${JSON.stringify(lbl?.text)}, wanted ${branch}`);
+				else if (lbl.scroll > lbl.client) {
+					const cut = `the branch label shows ${lbl.client}px of its ${lbl.scroll}px name`;
+					if (g.composer === widest) failures.push(`${where}, the widest: ${cut}`);
+					else if (g.free > 1) failures.push(`${where}: ${cut} with ${g.free}px unused on its line`);
+				}
+			}
+			const summary = `${label}: ${windows.map((w, i) => `${w}px window → ${generated[i].composer}px composer, label ${generated[i].branchLabel?.client}/${generated[i].branchLabel?.scroll}px, ${generated[i].free}px free`).join('; ')}; ${failures.length} failures`;
+			ctx.log(summary);
+			console.log(summary);
+			if (failures.length) throw new Error(`${label} (${failures.length} failures):\n  ${failures.join('\n  ')}`);
 			await page.setViewportSize({ width: 1440, height: 900 });
 			await page.waitForTimeout(500);
 		},
@@ -588,7 +685,10 @@ await runJourney({
 		// Every width from a 480px composer to the widest desktop, with a short
 		// and a long generated name: the row's lines never follow the name.
 		chipSweep('short', 'fix/a'),
-		chipSweep('long', 'fix/long-staged-branch-generated-from-message-abcdef')
+		chipSweep('long', 'fix/long-staged-branch-generated-from-message-abcdef'),
+		// Ordinary names with room to spare: a typical generated name must not
+		// be cut off by the branch chip's cap.
+		chipWideOrdinary('fix/composer-layout-shift')
 	],
 	allow: [
 		{

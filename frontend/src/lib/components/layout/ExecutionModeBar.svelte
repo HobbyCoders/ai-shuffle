@@ -887,9 +887,13 @@
 		min-width: 50%;
 	}
 
+	/* The slot cap is the label's own 180px allowance (`.branch-name`) plus the
+	   chip's fixed chrome: 8px + 8px padding, the 14px branch icon, two 6px
+	   gaps and the 12px chevron pulled in by 2px = 52px. The cap only limits
+	   growth; lines break on the 88px basis, so it never moves a wrap. */
 	.mode-bar-row {
 		--chip-floor: 88px;
-		--branch-slot-max: 200px;
+		--branch-slot-max: 232px;
 		display: flex;
 		flex-wrap: wrap;
 		align-items: center;
