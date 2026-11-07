@@ -682,7 +682,8 @@ const wsConn: WsConnection = createWsConnection({
 	onMaxReconnectAttempts: () => {
 		// No connection means the restore fetch will never happen — release any
 		// pending sendMessage waiters so they fail fast instead of timing out.
-		_update(s => ({ ...s, error: 'Connection lost. Please refresh the page.', isRestoringSession: false }));
+		// Automatic retries have stopped: say so instead of "still retrying".
+		_update(s => ({ ...s, error: 'Connection lost. Please refresh the page.', wsReconnectRequired: true, isRestoringSession: false }));
 	},
 	// The SSE feed self-revives on visibilitychange/online (see sse-feed.ts), so
 	// no visibility-driven polling is wired here.

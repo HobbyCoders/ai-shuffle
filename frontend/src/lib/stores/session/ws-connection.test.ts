@@ -805,6 +805,27 @@ describe('ws-connection', () => {
 			conn.destroy();
 		});
 
+		it('reports a manual socket refused with 4001 after it opened (server accepts before auth)', () => {
+			const config = createMockConfig({ onManualReconnectFailed: vi.fn() });
+			const conn = createWsConnection(config);
+			conn.reconnect();
+			createdSockets[0].simulateOpen();
+			createdSockets[0].simulateClose(4001, 'Authentication failed');
+			expect(config.onManualReconnectFailed).toHaveBeenCalledExactlyOnceWith(4001, 'Authentication failed');
+			conn.destroy();
+		});
+
+		it('does not report a 4001 after the manual socket received a message', () => {
+			const config = createMockConfig({ onManualReconnectFailed: vi.fn() });
+			const conn = createWsConnection(config);
+			conn.reconnect();
+			createdSockets[0].simulateOpen();
+			createdSockets[0].simulateMessage({ type: 'ping' });
+			createdSockets[0].simulateClose(4001, 'Revoked');
+			expect(config.onManualReconnectFailed).not.toHaveBeenCalled();
+			conn.destroy();
+		});
+
 		it('does not report a manual socket that opened and later dropped', () => {
 			const config = createMockConfig({ onManualReconnectFailed: vi.fn() });
 			const conn = createWsConnection(config);

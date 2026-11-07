@@ -99,6 +99,10 @@ export function createWsConnection(config: WsConnectionConfig): WsConnection {
 	let destroyed = false;
 	// The socket the last manual reconnect() opened, until it opens or is lost.
 	let manualSocket: WebSocket | null = null;
+	// That socket after it opened, until its first message. /ws/chat accepts
+	// BEFORE it authenticates, so a refused login arrives as a 4001 close on an
+	// already-open socket and must still count as the manual attempt failing.
+	let manualAuthSocket: WebSocket | null = null;
 
 	// Server-side sequence tracking for delivery gap diagnostics
 	let lastSeq = 0;
@@ -161,8 +165,10 @@ export function createWsConnection(config: WsConnectionConfig): WsConnection {
 
 	function connectionLost(code: number, reason: string) {
 		const lost = retireSocket(code, reason);
-		const manualFailed = lost !== null && lost === manualSocket;
-		if (manualFailed) manualSocket = null;
+		const manualFailed = lost !== null
+			&& (lost === manualSocket || (lost === manualAuthSocket && code === 4001));
+		if (lost !== null && lost === manualSocket) manualSocket = null;
+		if (lost !== null && lost === manualAuthSocket) manualAuthSocket = null;
 		console.warn(`[WsConnection] Connection lost: code=${code}, reason=${reason || '(none)'}`);
 		if (code !== 4001) scheduleReconnect();
 		config.onDisconnected(code, reason, false);
@@ -232,7 +238,10 @@ export function createWsConnection(config: WsConnectionConfig): WsConnection {
 		ws.onopen = () => {
 			if (destroyed || socket !== ws) return;
 			stopConnectTimer();
-			if (socket === manualSocket) manualSocket = null;
+			if (socket === manualSocket) {
+				manualSocket = null;
+				manualAuthSocket = socket;
+			}
 			reconnectAttempts = 0;
 			lastSeq = 0; // Reset sequence tracking for new connection
 			startPing();
@@ -253,6 +262,8 @@ export function createWsConnection(config: WsConnectionConfig): WsConnection {
 			if (destroyed || socket !== ws) return;
 			lastMessageTime = Date.now();
 			stopVisibilityCheck();
+			// A message means the server authenticated this socket.
+			if (socket === manualAuthSocket) manualAuthSocket = null;
 			try {
 				const data = JSON.parse(event.data);
 
@@ -281,6 +292,7 @@ export function createWsConnection(config: WsConnectionConfig): WsConnection {
 	function disconnect() {
 		enabled = false;
 		manualSocket = null;
+		manualAuthSocket = null;
 		stopReconnectTimer();
 		const socket = retireSocket(1000, '');
 		if (socket && !destroyed) config.onDisconnected(1000, '', true);
@@ -293,6 +305,7 @@ export function createWsConnection(config: WsConnectionConfig): WsConnection {
 		stopReconnectTimer();
 		// A superseded manual attempt is replaced, not failed.
 		manualSocket = null;
+		manualAuthSocket = null;
 		const socket = retireSocket(4000, 'Manual reconnect');
 		if (socket) config.onDisconnected(4000, 'Manual reconnect', false);
 		connect();

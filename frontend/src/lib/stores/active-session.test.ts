@@ -19,6 +19,7 @@ const hoisted = vi.hoisted(() => ({
 	onDisconnected: null as ((code: number, reason: string, wasClean: boolean) => void) | null,
 	onConnected: null as (() => void) | null,
 	onManualReconnectFailed: null as ((code: number, reason: string) => void) | null,
+	onMaxReconnectAttempts: null as (() => void) | null,
 	connect: vi.fn(),
 	reconnect: vi.fn((): boolean => true),
 	resetReconnectAttempts: vi.fn(),
@@ -31,7 +32,9 @@ vi.mock('./session/ws-connection', () => ({
 		onDisconnected: (code: number, reason: string, wasClean: boolean) => void;
 		onConnected: () => void;
 		onManualReconnectFailed?: (code: number, reason: string) => void;
+		onMaxReconnectAttempts?: () => void;
 	}) => {
+		hoisted.onMaxReconnectAttempts = config.onMaxReconnectAttempts ?? null;
 		hoisted.onManualReconnectFailed = config.onManualReconnectFailed ?? null;
 		hoisted.onMessage = config.onMessage;
 		hoisted.onDisconnected = config.onDisconnected;
@@ -159,6 +162,15 @@ describe('manual reconnect feedback', () => {
 		activeSession.reconnect();
 		expect(activeSession.current.wsManualReconnect).toBe('failed');
 		quiet.mockRestore();
+	});
+
+	it('marks reconnect as required once automatic retries are exhausted', () => {
+		hoisted.onDisconnected!(1006, '', false);
+		expect(activeSession.current.wsReconnectRequired).toBe(false);
+		hoisted.onMaxReconnectAttempts!();
+		expect(activeSession.current.wsReconnectRequired).toBe(true);
+		hoisted.onConnected!();
+		expect(activeSession.current.wsReconnectRequired).toBe(false);
 	});
 
 	it('drops an in-flight tap on an intentional disconnect', () => {
