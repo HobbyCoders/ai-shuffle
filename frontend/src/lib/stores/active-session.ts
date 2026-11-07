@@ -129,7 +129,8 @@ export interface ActiveSessionState {
 	/** Locally admitted text-send intent, including sends with no transcript echo.
 	 * Published atomically with error dismissal; automatic queue handoff and Stop
 	 * never advance it. Session-scoped so a delayed send cannot reset another view. */
-	localSendIntent?: { sessionId: string | null; revision: number; commandId?: string };
+	/** `commandIds`: this page's recent sends in this session, oldest first (see stopGeneration). */
+	localSendIntent?: { sessionId: string | null; revision: number; commandIds?: string[] };
 	/** Whether a turn is live for this session.
 	 *
 	 *  SINGLE WRITER (finding S6): the SSE feed's reducer, folded through

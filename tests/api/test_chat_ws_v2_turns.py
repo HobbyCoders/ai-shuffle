@@ -729,10 +729,78 @@ async def test_stop_relayed_to_the_owning_worker_ends_a_parked_turns_work(mock_d
         assert reply["interrupted"] is True
 
 
+def _turn_being_stopped(busy):
+    """A leased turn an earlier Stop already moved to interrupting/draining."""
+    from app.db import runs
+    live = turns_db.enqueue_turn("sess-1", "user", prompt="p")["id"]
+    lease = runs.claim_run("sess-1", "test-runner", 60)
+    turns_db.start_turn(live, run_id=lease["id"])
+    turns_db.interrupt_turn("sess-1", "stop", turn_id=live)
+    if busy == "draining":
+        turns_db.escalate_to_draining(live)
+    assert turns_db.get_turn(live)["state"] == busy
+    return live
+
+
+@pytest.mark.parametrize("busy", ["interrupting", "draining"])
+async def test_a_repeated_stop_while_the_turn_is_still_stopping_says_nothing(mock_db, busy):
+    """Review round 1 (S1): pressing Stop again while the first Stop is still
+    interrupting or draining T must not tell the page T "already finished" —
+    that cleared the page's wait and recovery while T was still busy."""
+    _make_session("sess-1")
+    live = _turn_being_stopped(busy)
+
+    with _Patches(), patch(
+        "app.core.query_session_lifecycle.stop_all_background_tasks", new=AsyncMock(),
+    ):
+        handler = _make_handler()
+        await handler.handle_stop({"session_id": "sess-1", "turn_id": live})
+
+    assert turns_db.get_turn(live)["state"] == busy
+    assert sent_frames(handler, "stop_result") == []
+
+
+@pytest.mark.parametrize("busy", ["interrupting", "draining"])
+async def test_a_repeated_relayed_stop_while_the_turn_is_still_stopping_is_not_finished(mock_db, busy):
+    """The owner reports the same thing to a relaying page: not finished."""
+    from app.network import control
+
+    _make_session("sess-1")
+    live = _turn_being_stopped(busy)
+    with patch.object(control, "_require_owned"), patch(
+        "app.core.query_session_lifecycle.stop_all_background_tasks", new=AsyncMock(return_value=[]),
+    ):
+        reply = await control._interrupt(
+            {"session_id": "sess-1", "mode": "stop", "stop_background": True, "turn_id": live}, "other-device",
+        )
+
+    assert reply["finished"] is False
+    assert turns_db.get_turn(live)["state"] == busy
+
+
+async def test_a_relayed_stop_for_an_ended_turn_is_finished(mock_db):
+    from app.network import control
+
+    _make_session("sess-1")
+    done = turns_db.enqueue_turn("sess-1", "user", prompt="p")["id"]
+    turns_db.start_turn(done, run_id="run-1")
+    turns_db.settle_turn(done, "completed")
+    with patch.object(control, "_require_owned"), patch(
+        "app.core.query_session_lifecycle.stop_all_background_tasks", new=AsyncMock(return_value=[]),
+    ):
+        reply = await control._interrupt(
+            {"session_id": "sess-1", "mode": "stop", "stop_background": True, "turn_id": done}, "other-device",
+        )
+
+    assert reply["interrupted"] is False and reply["finished"] is True
+
+
 @pytest.mark.parametrize("reply, missed", [
-    ({"interrupted": False, "turn_id": None}, True),
-    ({"interrupted": True, "turn_id": "t-live"}, False),
-    ({"turn_id": None}, False),  # an older owner that does not say
+    ({"interrupted": False, "finished": True, "turn_id": None}, True),
+    # Not interrupted but not ended either: an earlier Stop is still at work.
+    ({"interrupted": False, "finished": False, "turn_id": None}, False),
+    ({"interrupted": True, "finished": False, "turn_id": "t-live"}, False),
+    ({"interrupted": False, "turn_id": None}, False),  # an older owner that does not say
 ])
 async def test_relayed_stop_tells_the_page_when_it_reached_nothing(mock_db, reply, missed):
     """A Stop relayed to the owning worker that matched no turn and no parked

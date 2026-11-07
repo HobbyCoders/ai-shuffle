@@ -57,7 +57,7 @@ ws.send(JSON.stringify({
 | `done` | Turn complete | `session_id`, `metadata` (`total_cost_usd`, `tokens_in`, `tokens_out`, `model`, `duration_ms`, ...) |
 | `interrupted` | Turn ended by an interrupt | `session_id`, `message` |
 | `interrupt_confirmed` / `interrupt_failed` | Reply to `interrupt_for_query` | `session_id`, `message` (on failure) |
-| `stop_result` | Reply to a `stop` whose `turn_id` names a turn that had already ended with no work still running from it, so nothing was stopped (`stopped: false`). Show the message and stop waiting for that Stop; a Stop that stopped something is answered by the turn's own end instead | `session_id`, `turn_id`, `stopped`, `message` |
+| `stop_result` | Reply to a `stop` whose `turn_id` names a turn that had already ended with no work still running from it, so nothing was stopped (`stopped: false`). Show the message and stop waiting for that Stop; a Stop that stopped something is answered by the turn's own end instead. A repeat Stop while that turn is still being stopped (interrupting or draining) gets no reply, so the page keeps waiting on the first | `session_id`, `turn_id`, `stopped`, `message` |
 | `query_queued` | The send was admitted durably (locally or by the executing worker). Correlated sends receive `client_message_id` and `turn_id`; older queued-only acknowledgements may omit them | `session_id`, `client_message_id`, `turn_id` |
 | `session_not_found` | Reply to `load_session` for an unknown session (and, for an API key, for another principal's session) | `session_id` |
 | `session_closed` | Reply to `close_session` | `session_id` (null when no session was selected) |

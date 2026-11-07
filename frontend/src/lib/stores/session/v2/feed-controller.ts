@@ -105,6 +105,10 @@ type InteractionKind = 'permission' | 'question';
 // the `caught_up` sentinel instead of repainting per backfilled frame (which
 // made the list grow one message at a time on open). Re-armed per SSE connect.
 let caughtUp = false;
+// Seq of the newest `turn.started` the reducer applied (-1: none this feed). A
+// turn's own user message is appended with its start, so a feed already past a
+// start has shown whose send began that turn (see nameRecoveryFrom).
+let turnStartedSeq = -1;
 // Whether catch-up has EVER completed for the current feed (across reconnects).
 // `onOpen` only re-arms the batch flag on the FIRST connection. Once catch-up
 // has happened, reconnect backfills (cursor = lastSeq, near-empty) keep live
@@ -539,18 +543,27 @@ function seedOptimistic(): void {
 	}
 }
 
+/** The feed's durable record of this page's send `command`, if it has shown one. */
+function receiptFor(command: string) {
+	return reducerState.messages.find(m => m.commandId === command && reducerState.messageOriginSeq.has(m.id));
+}
+
 /**
- * An unnamed Stop that timed out on the page's own send belongs to the turn that
- * send's receipt names. Any turn the feed shows before that receipt came earlier,
- * and a message with the same text can claim the optimistic row, so only the
- * send's own command id counts.
+ * THE RULE: a timed-out Stop's recovery covers exactly one turn, the turn of the
+ * send Stop was pressed on. Any other turn ends it. (Which send is chosen in
+ * stopGeneration; with no send of the page's own it is the turn the page was
+ * already showing, so the next live turn names it.)
  *
- * `ended` is a turn the feed just showed ending. History the feed had already
- * shown when Stop was pressed is older than the Stop, so a replay of it names
- * nothing (#1114). A send with no receipt by the time a turn after the Stop has
- * ended never reached the worker before it: the recovery then ends on that turn,
- * so it cannot carry over to every later one. Only a feed that was caught up
- * when Stop was pressed, and still is, can tell such a turn from older history.
+ * An unnamed recovery waits for that send's receipt; only the send's own command
+ * id counts, since a message with the same text can claim the optimistic row. A
+ * turn's own user message is appended together with its start, so:
+ * - a live turn the feed has shown past its start without that receipt was begun
+ *   by someone else (another device, a wake): the recovery ends, and that turn's
+ *   rows keep their normal hold (#1114). Until a caught-up fold, a live turn may
+ *   still be replayed history, so nothing is decided then;
+ * - a turn ending after the Stop without that receipt was not this send's either.
+ *   History the feed showed before the Stop (`stopTimedOutAfterSeq`, pinned at the
+ *   first caught-up fold when Stop was pressed mid-replay) names nothing.
  */
 function nameRecoveryFrom(
 	s: Pick<ActiveSessionState, 'stopTimedOutTurnId' | 'stopTimedOutCommandId' | 'stopTimedOutAfterSeq'>,
@@ -563,9 +576,18 @@ function nameRecoveryFrom(
 	if (after != null && reducerState.lastSeq <= after) return timedOut;
 	const command = s.stopTimedOutCommandId;
 	if (!command) return nameStopRecovery(timedOut, turnId);
-	const receipt = reducerState.messages.find(m => m.commandId === command && reducerState.messageOriginSeq.has(m.id));
+	const receipt = receiptFor(command);
 	if (receipt) return receipt.turnId || turnId || timedOut;
-	return ended && turnId && after != null && caughtUp ? turnId : timedOut;
+	if (!turnId) return timedOut;
+	if (ended) return after != null ? null : timedOut;
+	return caughtUp && reducerState.lastSeq > turnStartedSeq ? null : timedOut;
+}
+
+/** Pins where an unnamed recovery's "after the Stop" begins once the feed has caught up. */
+function pinRecoveryAfter(s: Pick<ActiveSessionState, 'stopTimedOutTurnId' | 'stopTimedOutAfterSeq'>): number | null | undefined {
+	return s.stopTimedOutTurnId === STOP_TURN_NOT_NAMED && s.stopTimedOutAfterSeq == null && caughtUp
+		? reducerState.lastSeq
+		: s.stopTimedOutAfterSeq;
 }
 
 // ─── Fold reducer state → activeSession (rAF-coalesced) ───────────────────────
@@ -700,6 +722,7 @@ function fold(hydrationComplete = false): void {
 			...patch,
 			stopRequestedTurnId: nameStoppedTurn(s.stopRequestedTurnId, reducerState.liveTurnId, patch.isStreaming === true),
 			stopTimedOutTurnId: nameRecoveryFrom(s, reducerState.liveTurnId),
+			stopTimedOutAfterSeq: pinRecoveryAfter(s),
 			queuedMessages: reconcileQueuedMessages(s.queuedMessages),
 			pendingPeerMessages: reconcilePendingPeerMessages(s.pendingPeerMessages ?? [], patch.messages ?? s.messages),
 			...(outlived ? { error: null, forkOfferSessionId: null } : {}),
@@ -914,6 +937,8 @@ export interface FeedController {
 	/** The last event seq the reducer has applied for this session, once it has
 	 *  caught up (null while it replays history or feeds another session). */
 	reducerSeq?: (sessionId: string | null) => number | null;
+	/** Whether the feed for this session has shown the durable receipt of send `commandId`. */
+	hasReceipt?: (sessionId: string | null, commandId: string) => boolean;
 
 	// ── Optimistic streaming (S6) ──────────────────────────────────
 	/**
@@ -974,6 +999,7 @@ function teardown(capture: boolean): void {
 	currentSessionId = null;
 	seededMessages = null;
 	reducerState = initialState();
+	turnStartedSeq = -1;
 	pendingQueue.reset(null);
 }
 
@@ -1025,6 +1051,7 @@ export const feedController: FeedController = {
 		const cached = readCachedTranscript(sessionId);
 		const settledFromCache = cached !== null && presentsSettled(cached, sessionId);
 		reducerState = cached ? cached.state : initialState();
+		turnStartedSeq = -1;
 		resumeFromSeq = cached ? cached.lastSeq : 0;
 		usageApplied = cached ? cached.usageApplied : false;
 
@@ -1145,6 +1172,7 @@ export const feedController: FeedController = {
 				if (ev.type === 'swarm.updated') swarms.receive(ev.swarm, sessionId);
 				if (typeof ev.command_id === 'string') clearCompactRetry(sessionId, ev.command_id);
 				reducerState = reduce(reducerState, ev);
+				if (ev.type === 'turn.started') turnStartedSeq = reducerState.lastSeq;
 				if (bannerAnchor) bannerAnchor = followTurnError(bannerAnchor, ev);
 				// A replay can end a turn before any fold saw it live: name the unnamed
 				// Stop's recovery from that end, or it would bind to the next turn.
@@ -1374,6 +1402,10 @@ export const feedController: FeedController = {
 	reducerSeq(sessionId: string | null) {
 		if (sessionId === null || currentSessionId !== sessionId || !caughtUp) return null;
 		return reducerState.lastSeq;
+	},
+
+	hasReceipt(sessionId: string | null, commandId: string) {
+		return sessionId !== null && currentSessionId === sessionId && receiptFor(commandId) !== undefined;
 	},
 
 	noteOptimisticSend(sessionId: string | null) {

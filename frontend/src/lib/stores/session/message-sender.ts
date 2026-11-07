@@ -29,6 +29,9 @@ import { sendableComposerBinding } from './composer-binding';
 import { registerReloadBlocker } from '$lib/services/app-update';
 import { claimBootSend, releaseBootSend } from './session-init';
 
+/** How many sends of one run (a turn's send plus what queues behind it) a timed-out Stop can name. */
+const RECENT_SENDS = 20;
+
 // ─── Sends in flight ─────────────────────────────────────────────────────────
 
 /**
@@ -633,12 +636,14 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					sessionId: _state.sessionId,
 					revision: (s.localSendIntent?.revision ?? 0) + 1,
 					// A Stop that times out names its turn from the receipt of the send
-					// that started it, whether or not that send has a transcript row.
-					// A message queued behind the live turn did not start it, so it
-					// keeps the earlier send's command.
-					commandId: sendWhileStreaming || options?.compactFirst
-						? (s.localSendIntent?.sessionId === _state.sessionId ? s.localSendIntent?.commandId : undefined)
-						: clientMessageId,
+					// it was pressed on, whether or not that send has a transcript row
+					// (steered, queued, pre-appended). The run is the send that starts
+					// a turn plus what queues behind it, oldest first: each queued
+					// message runs next once the one before it has (stopGeneration).
+					commandIds: sendWhileStreaming || options?.compactFirst
+						? [...(s.localSendIntent?.sessionId === _state.sessionId ? s.localSendIntent.commandIds ?? [] : []),
+							clientMessageId].slice(-RECENT_SENDS)
+						: [clientMessageId],
 				});
 
 				// Single atomic update — avoids intermediate render where streaming
@@ -798,6 +803,13 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			let recorded = false;
 			// Anything the feed has already shown came before this Stop.
 			const pressedAfterSeq = feedController.reducerSeq?.(_state.sessionId) ?? null;
+			// The send this Stop is pressed on: the oldest of the run the feed has not
+			// receipted. A message queued behind a turn the feed has shown is the one
+			// that runs once that turn ends, not the send that started it.
+			const intent = _state.localSendIntent;
+			const pressedOnCommand = intent?.sessionId === _state.sessionId
+				? intent?.commandIds?.find(id => !feedController.hasReceipt?.(_state.sessionId, id)) ?? null
+				: null;
 			if (_state.sessionId) {
 				// The interrupt is always a full stop (the query-scoped SDK interrupt
 				// tears down in-flight background sub-agents too).
@@ -851,16 +863,13 @@ export function createMessageSender(deps: MessageSenderDeps) {
 							return m.streaming ? { ...m, streaming: false } : m;
 						});
 						messages = messages.filter(m => !(m.type === 'text' && m.role === 'assistant' && !m.content));
-						// The page's latest send is the one this Stop was pressed on: a Stop
-						// still waiting for the feed to name a turn only times out while
-						// that send's turn has not shown up. Steered and row-less sends
-						// count too (#1114). Without one, a newest user row with no turn
-						// yet is that send.
-						const intent = s.localSendIntent;
+						// A Stop still waiting for the feed to name a turn only times out
+						// while the turn of the send it was pressed on has not shown up.
+						// Steered and row-less sends count too (#1114). Without one, a
+						// newest user row with no turn yet is that send.
 						const newestUser = s.messages.findLast(m => m.role === 'user');
-						const sentCommand = intent?.sessionId === s.sessionId && intent.commandId
-							? intent.commandId
-							: newestUser && !newestUser.turnId ? newestUser.commandId ?? null : null;
+						const sentCommand = pressedOnCommand
+							?? (newestUser && !newestUser.turnId ? newestUser.commandId ?? null : null);
 						return { ...s, messages, isStreaming: false, optimisticStreaming: false,
 							stopTimedOutTurnId: s.liveTurnId ?? s.stopRequestedTurnId ?? STOP_TURN_NOT_NAMED,
 							stopTimedOutCommandId: sentCommand,

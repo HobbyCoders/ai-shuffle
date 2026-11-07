@@ -981,11 +981,11 @@ describe('message-sender local-send presentation intent', () => {
 			for (const revision of [8, 9]) {
 				const start = snapshots.length;
 				expect(await sender.sendMessage('fresh local send', { skipMessageAppend: skip })).toBe(true);
-				expect(getState().localSendIntent).toEqual({ sessionId: 'intent-session', revision, commandId: streaming ? undefined : expect.any(String) });
+				expect(getState().localSendIntent).toEqual({ sessionId: 'intent-session', revision, commandIds: Array(revision - 7).fill(expect.any(String)) });
 				const cleared = snapshots.slice(start).filter(s => s.error === null);
 				expect(cleared.length).toBeGreaterThan(0);
 				for (const snapshot of cleared) {
-					expect(snapshot.localSendIntent).toEqual({ sessionId: 'intent-session', revision, commandId: streaming ? undefined : expect.any(String) });
+					expect(snapshot.localSendIntent).toEqual({ sessionId: 'intent-session', revision, commandIds: Array(revision - 7).fill(expect.any(String)) });
 				}
 			}
 			if (streaming || skip) expect(getState().messages).toBe(initial.messages);
@@ -1417,7 +1417,7 @@ describe('Stop timeout recovery', () => {
 		])('names a send %s from its receipt, not from a replayed older turn', (_label, rows) => {
 			const test = stopping(null);
 			test.deps.update(s => ({ ...s, messages: rows as ActiveSessionState['messages'],
-				localSendIntent: { sessionId: 'sess-1', revision: 1, commandId: 'cmd-1' } }));
+				localSendIntent: { sessionId: 'sess-1', revision: 1, commandIds: ['cmd-1'] } }));
 			test.sender.stopGeneration();
 			vi.advanceTimersByTime(10000);
 			expect(test.getState().stopTimedOutCommandId).toBe('cmd-1');
@@ -1437,8 +1437,9 @@ describe('Stop timeout recovery', () => {
 			expect(stopRecoveryAppliesToTurn(state.stopTimedOutTurnId, state.liveTurnId)).toBe(true);
 		});
 
-		// #1114: the stopped send never reached the worker, so no receipt comes.
-		it('ends a recovery whose send never gets a receipt on the next turn, not every later one', async () => {
+		// #1114 / review S3: the stopped send never reached the worker, so no receipt
+		// comes. Another device's turn is not this Stop's, even while it is live.
+		it('ends a recovery whose send never gets a receipt as soon as an unrelated turn is live', async () => {
 			const test = stopping(null);
 			test.deps.update(s => ({ ...s, isStreaming: false }));
 			feedController.start('sess-1');
@@ -1448,19 +1449,48 @@ describe('Stop timeout recovery', () => {
 			vi.advanceTimersByTime(10000);
 			expect(test.getState().stopTimedOutTurnId).toBe(STOP_TURN_NOT_NAMED);
 
-			// Another device's turn runs and ends; this page's send is not in it.
+			// Another device starts U with its own message, and stops it with
+			// messages queued: U keeps its normal hold while it is still live.
 			event('turn.started', 'elsewhere', 1);
 			event('message.user', 'elsewhere', 2, { command_id: 'other-device', content: 'hi' });
-			event('turn.completed', 'elsewhere', 3);
 			vi.advanceTimersByTime(300);
-			expect(test.getState().stopTimedOutTurnId).toBe('elsewhere');
-
-			event('turn.started', 'later', 4);
-			vi.advanceTimersByTime(300);
-			const state = test.getState();
-			expect(state.liveTurnId).toBe('later');
+			let state = test.getState();
+			expect(state.liveTurnId).toBe('elsewhere');
 			expect(state.stopTimedOutTurnId).toBeNull();
 			expect(stopRecoveryAppliesToTurn(state.stopTimedOutTurnId, state.liveTurnId)).toBe(false);
+			const queued = [{ id: 'q', content: 'queued', queuedAt: 0 }];
+			const notSent = { id: 'ns', role: 'user', type: 'text', content: 'queued', metadata: { not_sent: true, not_sent_during_turn: 'elsewhere' } } as ActiveSessionState['messages'][number];
+			expect(createNotSentHold()([...state.messages, notSent], state.liveTurnId, queued).bubbles).toHaveLength(1);
+
+			event('turn.completed', 'elsewhere', 3);
+			event('turn.started', 'later', 4);
+			vi.advanceTimersByTime(300);
+			state = test.getState();
+			expect(state.liveTurnId).toBe('later');
+			expect(state.stopTimedOutTurnId).toBeNull();
+		});
+
+		// Review S3: a Stop pressed before the feed caught up has no "after" yet. It
+		// is pinned when the feed catches up, so a later turn still retires it.
+		it('retires a receipt-less recovery pressed before catch-up once a later turn ends', () => {
+			const test = stopping(null);
+			test.deps.update(s => ({ ...s, localSendIntent: { sessionId: 'sess-1', revision: 1, commandIds: ['cmd-lost'] } }));
+			test.sender.stopGeneration();
+			vi.advanceTimersByTime(10000);
+			expect(test.getState().stopTimedOutAfterSeq).toBeNull();
+			feedController.start('sess-1');
+			event('turn.completed', 'older', 1);
+			feed.onEvent!({ type: 'caught_up', seq: 1 });
+			vi.advanceTimersByTime(300);
+			expect(test.getState().stopTimedOutTurnId).toBe(STOP_TURN_NOT_NAMED);
+			expect(test.getState().stopTimedOutAfterSeq).toBe(1);
+
+			// U starts and ends between two folds: never seen live, still not this Stop's.
+			event('turn.started', 'u', 2);
+			event('message.user', 'u', 3, { command_id: 'other-device', content: 'hi' });
+			event('turn.completed', 'u', 4);
+			vi.advanceTimersByTime(300);
+			expect(test.getState().stopTimedOutTurnId).toBeNull();
 		});
 
 		// A message queued behind the live turn did not start it: the turn's own
@@ -1469,11 +1499,11 @@ describe('Stop timeout recovery', () => {
 			const test = stopping(null);
 			test.deps.update(s => ({ ...s, isStreaming: false }));
 			expect(await test.sender.sendMessage('go')).toBe(true);
-			const started = test.getState().localSendIntent?.commandId;
+			const [started] = test.getState().localSendIntent?.commandIds ?? [];
 			expect(started).toEqual(expect.any(String));
 			test.deps.update(s => ({ ...s, isStreaming: true }));
 			expect(await test.sender.sendMessage('queued behind it')).toBe(true);
-			expect(test.getState().localSendIntent?.commandId).toBe(started);
+			expect(test.getState().localSendIntent?.commandIds).toEqual([started, expect.any(String)]);
 
 			test.sender.stopGeneration();
 			vi.advanceTimersByTime(10000);
@@ -1485,6 +1515,48 @@ describe('Stop timeout recovery', () => {
 			vi.advanceTimersByTime(300);
 			const state = test.getState();
 			expect(state.stopTimedOutTurnId).toBe('turn-1');
+			expect(stopRecoveryAppliesToTurn(state.stopTimedOutTurnId, state.liveTurnId)).toBe(true);
+		});
+
+		// Review S2: once A has run, the message queued behind it is what runs next.
+		// A Stop pressed as B starts (its WS start ahead of its feed) is B's.
+		it('names a queued message that has taken over from the finished send', async () => {
+			const test = stopping(null);
+			test.deps.update(s => ({ ...s, isStreaming: false }));
+			feedController.start('sess-1');
+			feed.onEvent!({ type: 'caught_up', seq: 0 });
+			expect(await test.sender.sendMessage('A')).toBe(true);
+			const [a] = test.getState().localSendIntent?.commandIds ?? [];
+			event('turn.started', 'turn-a', 1);
+			event('message.user', 'turn-a', 2, { command_id: a, content: 'A' });
+			vi.advanceTimersByTime(300);
+			expect(test.getState().liveTurnId).toBe('turn-a');
+			expect(await test.sender.sendMessage('B')).toBe(true);
+			const [, b] = test.getState().localSendIntent?.commandIds ?? [];
+			expect(b).toEqual(expect.any(String));
+			event('turn.completed', 'turn-a', 3);
+			vi.advanceTimersByTime(300);
+			expect(test.getState().liveTurnId).toBeNull();
+
+			// B's WS start: streaming again, with no turn id until its feed arrives.
+			test.deps.update(s => ({ ...s, isStreaming: true }));
+			test.sender.stopGeneration();
+			vi.advanceTimersByTime(10000);
+			expect(test.getState().stopTimedOutTurnId).toBe(STOP_TURN_NOT_NAMED);
+			expect(test.getState().stopTimedOutCommandId).toBe(b);
+
+			event('turn.started', 'turn-b', 4);
+			event('message.user', 'turn-b', 5, { command_id: b, content: 'B' });
+			vi.advanceTimersByTime(300);
+			let state = test.getState();
+			expect(state.liveTurnId).toBe('turn-b');
+			expect(state.stopTimedOutTurnId).toBe('turn-b');
+			expect(stopRecoveryAppliesToTurn(state.stopTimedOutTurnId, state.liveTurnId)).toBe(true);
+			// And it stays B's on the next fold: the Not-sent rows stay restorable.
+			event('assistant.text_delta', 'turn-b', 6, { text: 'x' });
+			vi.advanceTimersByTime(300);
+			state = test.getState();
+			expect(state.stopTimedOutTurnId).toBe('turn-b');
 			expect(stopRecoveryAppliesToTurn(state.stopTimedOutTurnId, state.liveTurnId)).toBe(true);
 		});
 	});

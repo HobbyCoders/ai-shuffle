@@ -1993,7 +1993,7 @@ class ChatWebSocketHandler:
                     if result.get("incomplete"):
                         await self.send_json({"type": "error", "session_id": session_id,
                                               "message": result.get("message") or "Stop was incomplete. Some background tasks may still be running."})
-                    elif result.get("interrupted") is False:
+                    elif result.get("finished") is True:
                         await self._send_stop_missed(session_id, target_turn_id)
                 except control.RunnerUnreachable as exc:
                     await self._forward_unreachable(session_id, exc)
@@ -2041,8 +2041,11 @@ class ChatWebSocketHandler:
                 return
             # A Stop for a turn that has already ended, with no parked work left
             # behind it, reached nothing. Say so: returning silently left the
-            # page believing it had stopped whatever runs now (#1109).
-            await self._send_stop_missed(session_id, target_turn_id)
+            # page believing it had stopped whatever runs now (#1109). A target
+            # still interrupting/draining is an earlier Stop in progress: stay
+            # quiet so the page keeps waiting on (and recovering from) it.
+            if await run_sync(turn_manager.stop_target_finished, session_id, target_turn_id):
+                await self._send_stop_missed(session_id, target_turn_id)
 
     async def _send_stop_missed(self, session_id: str, turn_id: Optional[str]) -> None:
         """Tell the page its Stop matched no running turn and ended nothing."""
