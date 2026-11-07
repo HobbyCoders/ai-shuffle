@@ -118,6 +118,19 @@
 			|| (right > listRight && stripHasContent(listRight, right, Math.max(0, bottom - RAIL_PANEL_MAX_HEIGHT), bottom));
 	}
 
+	// While the rail panel is open, the list column can change width without a
+	// window resize (a drag, a collapse, or a width synced from another device),
+	// which moves the page under the panel. Re-measure then, so the scrim never
+	// goes stale in either direction.
+	$effect(() => {
+		if (!rail || !showPanel || !bellRef) return;
+		const aside = bellRef.closest('aside');
+		if (!aside || typeof ResizeObserver === 'undefined') return;
+		const observer = new ResizeObserver(() => positionPanel());
+		observer.observe(aside);
+		return () => observer.disconnect();
+	});
+
 	let panelRef = $state<HTMLDivElement | null>(null);
 	/**
 	 * Dismiss one row and keep keyboard focus in the panel: on the next row's

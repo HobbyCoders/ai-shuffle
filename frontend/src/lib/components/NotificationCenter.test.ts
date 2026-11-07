@@ -56,6 +56,43 @@ describe('NotificationCenter', () => {
 		expect(screen.getByText('No notifications')).toBeTruthy();
 	});
 
+	it('re-measures the scrim when the list column changes width while the rail panel is open', async () => {
+		// A width synced from another device resizes the list without a window resize.
+		const observers: Array<() => void> = [];
+		const original = globalThis.ResizeObserver;
+		globalThis.ResizeObserver = class {
+			constructor(private cb: () => void) {}
+			observe() { observers.push(this.cb); }
+			unobserve() {}
+			disconnect() { const i = observers.indexOf(this.cb); if (i >= 0) observers.splice(i, 1); }
+		} as unknown as typeof ResizeObserver;
+		try {
+			const aside = document.body.appendChild(document.createElement('aside'));
+			let listRight = 440;
+			aside.getBoundingClientRect = () => ({ right: listRight } as DOMRect);
+			notify.info('Deploy finished');
+			render(NotificationCenter, { props: { rail: true }, target: aside });
+			await fireEvent.click(screen.getByRole('button', { name: /Notifications/ }));
+			// The 300px panel (x8–308 here) ends inside a 440px list: no scrim.
+			expect(screen.queryByTestId('notif-scrim')).toBeNull();
+			expect(observers).toHaveLength(1);
+
+			listRight = 200;
+			observers.forEach((cb) => cb());
+			await vi.waitFor(() => expect(screen.queryByTestId('notif-scrim')).not.toBeNull());
+
+			listRight = 440;
+			observers.forEach((cb) => cb());
+			await vi.waitFor(() => expect(screen.queryByTestId('notif-scrim')).toBeNull());
+
+			await fireEvent.keyDown(window, { key: 'Escape' });
+			await vi.waitFor(() => expect(observers).toHaveLength(0));
+			aside.remove();
+		} finally {
+			globalThis.ResizeObserver = original;
+		}
+	});
+
 	it('names each item severity for assistive tech', async () => {
 		notify.warning('Disk almost full');
 		render(NotificationCenter);
