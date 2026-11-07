@@ -263,19 +263,33 @@ def _require_branch_binding(path: str, branch: str) -> None:
 
 
 def _require_complete_checkout(path: str) -> None:
-    """Do not mistake a failed checkout for a usable branch working tree.
+    """Validate materialization once, not the user's subsequent development.
 
-    Missing files/index entries can also be intentional user deletions. Without
-    proof of ownership of that partial state, repair/reset or remove-and-readd
-    would risk user work. Keep the directory and index untouched and report it.
-    The shared check never runs LFS clean/smudge filters.
+    Keep evidence in Git's per-worktree metadata: it survives process restarts
+    but not removal/recreation of that worktree. A validated checkout may later
+    have intentional deletes/renames, so completeness must not gate every send.
+    Unvalidated partial states remain ambiguous and are never reset or repaired.
     """
+    _require_checkout_root(path)
+    result = git_service._run_git(
+        path, ["rev-parse", "--git-path", "ai-shuffle-checkout-validated"], timeout=10,
+    )
+    if result.returncode or not (result.stdout or "").strip():
+        raise WorktreeAddError(f"Cannot locate checkout validation metadata for {path!r}")
+    marker = Path(path) / result.stdout.strip()
+    if marker.is_file():
+        return
+    # This shared check never invokes LFS clean/smudge filters.
     if not git_service._checkout_is_complete(path):
         raise WorktreeAddError(
             f"Checkout {path!r} is incomplete (missing index or committed files); "
             "refusing to use or repair it because local changes may be present. "
             "Inspect and repair the checkout, then retry."
         )
+    try:
+        marker.touch()
+    except OSError as exc:
+        raise WorktreeAddError(f"Cannot record checkout validation for {path!r}: {exc}") from exc
 
 
 def _branch_plan(
@@ -769,6 +783,7 @@ def _ensure_branch_checkout(
     # Verify the materialization too: a successful add must not bind a checkout
     # that changed HEAD before it reached the session/checkout registry.
     _require_branch_binding(dest_str, branch)
+    _require_complete_checkout(dest_str)
 
     # Everything a run needs is gitignored, so the new worktree has none of it.
     # Link it from the checkout it branched off before anyone tries to build or
@@ -1451,8 +1466,8 @@ def register_unregistered_worktrees(
             continue
         try:
             _require_complete_checkout(path)
-        except WorktreeAddError as e:
-            logger.warning("checkout_manager: refusing worktree adoption: %s", e)
+        except Exception as e:  # noqa: BLE001 - one failed inspection must not fail the sweep
+            logger.warning("checkout_manager: refusing worktree adoption at %s: %s", path, e)
             continue
         try:
             checkouts_db.upsert_checkout(

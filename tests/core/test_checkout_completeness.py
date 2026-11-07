@@ -1,4 +1,5 @@
 """Never bind a branch checkout left half-populated by a failed Git add."""
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -30,24 +31,31 @@ def _snapshot(path):
     return files, index_path.read_bytes() if index_path.is_file() else None
 
 
+@pytest.mark.parametrize("previously_materialized", [False, True])
 def test_failed_add_partial_checkout_is_not_adopted(
-    project, base_checkout, workspace_root, caplog,
+    project, base_checkout, workspace_root, caplog, previously_materialized,
 ):
     branch = "fix/failed-add"
     _git(base_checkout, "branch", branch)
+    path = checkout_manager._branch_checkout_path(str(base_checkout), branch)
+    if previously_materialized:
+        assert _resolve(project, branch) == str(path)
+        # Validation belongs to this physical materialization, not its reused
+        # path/branch/row. Git removes the old evidence with its metadata.
+        _git(base_checkout, "worktree", "remove", str(path))
+    before_rows = checkouts_db.list_checkouts(project["id"])
     # Git really fails *after* registration. Removing a file in a failing hook
     # deterministically models the incomplete checkout a failed rollback leaves.
     hook = base_checkout / ".git" / "hooks" / "post-checkout"
     hook.write_text("#!/bin/sh\nrm -- README.md\necho 'checkout interrupted' >&2\nexit 1\n")
     hook.chmod(0o755)
-    path = checkout_manager._branch_checkout_path(str(base_checkout), branch)
     with pytest.raises(WorktreeAddError, match="checkout interrupted"):
         _resolve(project, branch, raise_add_errors=True)
     assert path.is_dir() and not (path / "README.md").exists()
     assert str(path).replace("\\", "/") in checkout_manager.git_service._run_git(
         str(base_checkout), ["worktree", "list", "--porcelain"], timeout=10,
     ).stdout.replace("\\", "/")
-    assert checkouts_db.get_checkout(project["id"], RUNNER, branch=branch) is None
+    assert checkouts_db.list_checkouts(project["id"]) == before_rows
     before = _snapshot(path)
 
     assert _resolve(project, branch) is None
@@ -55,7 +63,7 @@ def test_failed_add_partial_checkout_is_not_adopted(
     with pytest.raises(WorktreeAddError, match="incomplete"):
         _resolve(project, branch, raise_add_errors=True)
     assert _snapshot(path) == before
-    assert checkouts_db.get_checkout(project["id"], RUNNER, branch=branch) is None
+    assert checkouts_db.list_checkouts(project["id"]) == before_rows
 
 
 @pytest.mark.parametrize("route", ["deterministic", "row", "legacy", "sweep"])
@@ -162,3 +170,61 @@ def test_lfs_pointer_checkout_is_adopted_without_running_filters(
     assert _resolve(project, branch, raise_add_errors=True) == str(path)
     assert (repo / ".git" / "config").read_bytes() == config
     assert _snapshot(path) == before
+
+
+@pytest.mark.parametrize("materialization", ["created", "adopted"])
+@pytest.mark.parametrize("edit", ["staged-rename", "unstaged-delete", "untracked-add"])
+def test_established_checkout_continues_after_intentional_changes(
+    project, base_checkout, workspace_root, monkeypatch, materialization, edit,
+):
+    from app.core.query_options import _resolve_checkout_for_options
+
+    branch = "fix/continuation"
+    path = checkout_manager._branch_checkout_path(str(base_checkout), branch)
+    if materialization == "adopted":
+        _add_legacy_worktree(base_checkout, path, branch)
+    assert _resolve(project, branch, create_new_branch=materialization == "created") == str(path)
+    if edit == "staged-rename":
+        _git(path, "mv", "README.md", "RENAMED.md")
+    elif edit == "unstaged-delete":
+        (path / "README.md").unlink()
+    else:
+        (path / "user-work.txt").write_text("untracked user work\n")
+    before = _snapshot(path)
+    monkeypatch.setattr(
+        type(checkout_manager.settings), "effective_instance_id", property(lambda _: RUNNER),
+    )
+    session = {"id": "continuing", "project_v2_id": project["id"], "branch": branch}
+
+    assert _resolve_checkout_for_options(session) == str(path)
+    assert _snapshot(path) == before
+    # Successful materialization evidence must survive calls (not a one-call
+    # bypass). Reuse should not even inspect index/HEAD completeness again.
+    def unexpected_revalidation(path):
+        raise AssertionError("established checkout was revalidated")
+
+    monkeypatch.setattr(checkout_manager.git_service, "_checkout_is_complete", unexpected_revalidation)
+    assert _resolve_checkout_for_options(session) == str(path)
+    assert _snapshot(path) == before
+
+
+@pytest.mark.parametrize("failure", [
+    subprocess.TimeoutExpired("git ls-files", 10), RuntimeError("inspection failed"),
+])
+def test_base_resolution_survives_unrelated_worktree_inspection_error(
+    project, base_checkout, workspace_root, monkeypatch, caplog, failure,
+):
+    bad = _add_legacy_worktree(base_checkout, base_checkout / ".fluid/worktrees/a-bad", "fix/bad")
+    good = _add_legacy_worktree(base_checkout, base_checkout / ".fluid/worktrees/z-good", "fix/good")
+    original = checkout_manager.git_service._checkout_is_complete
+
+    def inspect(path):
+        if Path(path) == bad:
+            raise failure
+        return original(path)
+
+    monkeypatch.setattr(checkout_manager.git_service, "_checkout_is_complete", inspect)
+    assert checkout_manager.ensure_checkout(project, runner_id=RUNNER, branch=None) == str(base_checkout)
+    assert checkouts_db.get_checkout(project["id"], RUNNER, branch="fix/bad") is None
+    assert checkouts_db.get_checkout(project["id"], RUNNER, branch="fix/good")["path"] == str(good)
+    assert "inspection" in caplog.text.lower() or "timed out" in caplog.text.lower()
