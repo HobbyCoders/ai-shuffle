@@ -1079,12 +1079,16 @@ class ChatWebSocketHandler:
             return None
 
     async def _forward_unreachable(self, session_id: str, exc: Exception) -> None:
+        from app.network import control
         await self.send_json({
             "type": "error",
             "session_id": session_id,
             "message": f"The worker that runs this session is offline ({exc}). "
                        "You can fork the transcript into a new session on this device.",
             "offer_fork": True,
+            # The request reached the owner with the answer lost: it may still
+            # run, so this is not a refusal of the send it names.
+            **({"maybe_applied": True} if isinstance(exc, control.MaybeApplied) else {}),
         })
 
     async def _validate_target_install(

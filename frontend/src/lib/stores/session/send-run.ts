@@ -21,7 +21,9 @@
  *              or `not_found` from an older worker); `already_delivered` means
  *              delivery won the race: kept. Leaving the queue snapshot is never
  *              read as a withdrawal, since delivery removes the row too.
- * - refused:   an `error` frame naming its `client_message_id`: retired.
+ * - refused:   an `error` frame naming its `client_message_id`: retired. Not
+ *              one marked `maybe_applied` (the owner got it, its answer was
+ *              lost): that send may still run, so it is kept.
  * - failed:    only when the worker certainly did not take it: the frame never
  *              left this page, or compact-and-send was answered with a refusal
  *              (HTTP 4xx, or no queued turn): retired. A send whose fate is
@@ -32,14 +34,17 @@
  *              command a Stop needs is always there; a new run starts with the
  *              next send made while no turn is live.
  *
- * A Stop names the oldest command of the run without a receipt when pressed. If
- * that command is retired before the Stop is named, the next one in the run (the
- * send that will now run first) takes its place.
+ * A Stop is pressed on the run's commands without a receipt, from the oldest on,
+ * and names the oldest of them. If that command is retired before the Stop names
+ * its turn, the next of those takes its place (the send that will now run first);
+ * a send made after the Stop never does. When every one is retired, nothing the
+ * Stop was pressed on will run, so a recovery still waiting for a turn ends.
  *
  * Retiring goes by command id alone: ids are unique, so it is safe whichever
  * chat is open when the verdict arrives.
  */
 import type { ActiveSessionState } from '../active-session';
+import { STOP_TURN_NOT_NAMED } from '$lib/utils/not-sent-hold';
 
 type RunState = Pick<ActiveSessionState, 'localSendIntent' | 'messages'>;
 
@@ -66,27 +71,32 @@ export function runWithSend(s: RunState, sessionId: string | null, commandId: st
 	return run.includes(commandId) ? run : [...run, commandId];
 }
 
-/** The first of `pressedOn` (the run from the command a Stop was pressed on) still in the run. */
-export function stillPressedOn(s: RunState, sessionId: string | null, pressedOn: string[]): string | null {
+/** The sends of `pressedOn` (the run from the command a Stop was pressed on) still in the run. */
+export function stillPressedOn(s: RunState, sessionId: string | null, pressedOn: string[]): string[] {
 	const run = sendRunIn(s, sessionId);
-	return pressedOn.find(id => run.includes(id)) ?? null;
+	return pressedOn.filter(id => run.includes(id));
 }
 
 /**
  * The state with `commandIds` retired from the run (withdrawn, refused or
- * failed). A timed-out Stop pressed on a retired command moves to the command
- * after it in the run.
+ * failed). A timed-out Stop pressed on a retired command moves to the next send
+ * it was pressed on, never to one sent after it; when none is left, a recovery
+ * still waiting for a turn ends, since nothing it was pressed on will run.
  */
 export function retireSends<S extends Pick<ActiveSessionState, 'localSendIntent'>
-	& Partial<Pick<ActiveSessionState, 'stopTimedOutCommandId'>>>(s: S,
+	& Partial<Pick<ActiveSessionState, 'stopTimedOutCommandId' | 'stopTimedOutPressedOn' | 'stopTimedOutTurnId'>>>(s: S,
 	...commandIds: (string | null | undefined)[]): S {
-	const run = s.localSendIntent?.commandIds;
 	const gone = commandIds.filter((id): id is string => !!id);
-	if (!run?.some(id => gone.includes(id))) return s;
-	const kept = run.filter(id => !gone.includes(id));
-	const pressed = s.stopTimedOutCommandId;
-	const moved = pressed && gone.includes(pressed)
-		? { stopTimedOutCommandId: run.slice(run.indexOf(pressed) + 1).find(id => !gone.includes(id)) ?? null }
-		: {};
-	return { ...s, ...moved, localSendIntent: { ...s.localSendIntent!, commandIds: kept } };
+	const run = s.localSendIntent?.commandIds ?? [];
+	const pressedOn = s.stopTimedOutPressedOn ?? [];
+	let next = s;
+	if (run.some(id => gone.includes(id))) {
+		next = { ...next, localSendIntent: { ...s.localSendIntent!, commandIds: run.filter(id => !gone.includes(id)) } };
+	}
+	if (pressedOn.some(id => gone.includes(id))) {
+		const left = pressedOn.filter(id => !gone.includes(id));
+		next = { ...next, stopTimedOutPressedOn: left, stopTimedOutCommandId: left[0] ?? null,
+			...(!left.length && s.stopTimedOutTurnId === STOP_TURN_NOT_NAMED ? { stopTimedOutTurnId: null } : {}) };
+	}
+	return next;
 }

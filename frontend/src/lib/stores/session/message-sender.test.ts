@@ -1588,6 +1588,8 @@ describe('Stop timeout recovery', () => {
 			['refused', 'c'],
 			['failed to send', 'c'],
 			['already delivered when withdrawn', 'b'],
+			// Round 4 S5: the owner may have run it, its answer lost: not a refusal.
+			['answered "may still have been applied"', 'b'],
 		] as const)('hands a Stop past a queued message that was %s', async (outcome, expected) => {
 			const test = stopping(null);
 			const handlers = createMessageHandlers(test.deps as unknown as MessageHandlerDeps);
@@ -1606,6 +1608,10 @@ describe('Stop timeout recovery', () => {
 			expect(await test.sender.sendMessage('D')).toBe(true);
 			const [c, d] = test.getState().localSendIntent!.commandIds!.slice(-2);
 			if (outcome === 'refused') handlers.handleMessage({ type: 'error', session_id: 'sess-1', client_message_id: b, message: 'Queue is full' });
+			if (outcome === 'answered "may still have been applied"') {
+				handlers.handleMessage({ type: 'error', session_id: 'sess-1', client_message_id: b, maybe_applied: true,
+					offer_fork: true, message: 'The worker that runs this session is offline (no answer in time).' });
+			}
 			if (outcome === 'withdrawn' || outcome === 'already delivered when withdrawn') {
 				handlers.handleMessage({ type: 'queued_message_removal', session_id: 'sess-1', client_message_id: b,
 					verdict: outcome === 'withdrawn' ? 'withdrawn' : 'already_delivered' });
@@ -1673,12 +1679,88 @@ describe('Stop timeout recovery', () => {
 				expect(stopRecoveryAppliesToTurn(state.stopTimedOutTurnId, state.liveTurnId)).toBe(true);
 			});
 
+		// Review round 4 S3: a Stop pressed on A and B, both still waiting, times out
+		// before the feed names a turn. Stop then withdraws both, so no send it was
+		// pressed on will ever run: the recovery ends, and an unrelated turn U, started
+		// elsewhere, keeps its own normal Not-sent hold.
+		it.each(['after the Stop timed out', 'while the Stop waits'] as const)(
+			'ends a timed-out Stop once every send it was pressed on is withdrawn %s', async when => {
+				const test = stopping(null);
+				test.deps.update(s => ({ ...s, isStreaming: false }));
+				feedController.start('sess-1');
+				feed.onEvent!({ type: 'caught_up', seq: 0 });
+				expect(await test.sender.sendMessage('A')).toBe(true);
+				expect(await test.sender.sendMessage('B')).toBe(true);
+				const [a, b] = test.getState().localSendIntent!.commandIds!;
+				expect(b).toBeDefined();
+				test.sender.stopGeneration();
+				const withdrawBoth = () => {
+					event('queued_message.withdrawn', 'turn-queued-a', 1, { command_id: a, message_id: 'turn-queued-a' });
+					event('queued_message.withdrawn', 'turn-queued-b', 2, { command_id: b, message_id: 'turn-queued-b' });
+				};
+				if (when === 'while the Stop waits') withdrawBoth();
+				vi.advanceTimersByTime(10000);
+				if (when === 'after the Stop timed out') {
+					expect(test.getState().stopTimedOutTurnId).toBe(STOP_TURN_NOT_NAMED);
+					expect(test.getState().stopTimedOutCommandId).toBe(a);
+					withdrawBoth();
+				}
+				expect(test.getState().stopTimedOutTurnId).toBeNull();
+
+				event('turn.started', 'turn-u', 3);
+				event('message.user', 'turn-u', 4, { command_id: 'client-from-another-device', content: 'U' });
+				event('assistant.text_delta', 'turn-u', 5, { text: 'x' });
+				vi.advanceTimersByTime(300);
+				const state = test.getState();
+				expect(state.liveTurnId).toBe('turn-u');
+				expect(stopRecoveryAppliesToTurn(state.stopTimedOutTurnId, state.liveTurnId)).toBe(false);
+			});
+
+		// Review round 4 S3: after the timeout, a Stop hands off only within the sends it
+		// was pressed on, never to one sent after it.
+		it('never hands a timed-out Stop to a send made after it', async () => {
+			const test = stopping(null);
+			test.deps.update(s => ({ ...s, isStreaming: false }));
+			feedController.start('sess-1');
+			feed.onEvent!({ type: 'caught_up', seq: 0 });
+			expect(await test.sender.sendMessage('A')).toBe(true);
+			const [a] = test.getState().localSendIntent?.commandIds ?? [];
+			event('turn.started', 'turn-a', 1);
+			event('message.user', 'turn-a', 2, { command_id: a, content: 'A' });
+			vi.advanceTimersByTime(300);
+			expect(await test.sender.sendMessage('B')).toBe(true);
+			const [b] = test.getState().localSendIntent!.commandIds!;
+			event('turn.completed', 'turn-a', 3);
+			vi.advanceTimersByTime(300);
+
+			// B's WS start arrives ahead of its feed; the Stop times out against B.
+			test.deps.update(s => ({ ...s, isStreaming: true, optimisticStreaming: true }));
+			test.sender.stopGeneration();
+			vi.advanceTimersByTime(10000);
+			expect(test.getState().stopTimedOutCommandId).toBe(b);
+			expect(await test.sender.sendMessage('E')).toBe(true);
+			const e = test.getState().localSendIntent!.commandIds!.at(-1)!;
+			expect(e).not.toBe(b);
+
+			event('queued_message.withdrawn', 'turn-queued-b', 4, { command_id: b, message_id: 'turn-queued-b' });
+			let state = test.getState();
+			expect(state.stopTimedOutCommandId).toBeNull();
+			expect(state.stopTimedOutTurnId).toBeNull();
+			event('turn.started', 'turn-e', 5);
+			event('message.user', 'turn-e', 6, { command_id: e, content: 'E' });
+			vi.advanceTimersByTime(300);
+			state = test.getState();
+			expect(stopRecoveryAppliesToTurn(state.stopTimedOutTurnId, state.liveTurnId)).toBe(false);
+		});
+
 		// Review round 3 S5: a compact-and-send whose reply was lost may have been
 		// accepted, so it stays the next send to run; only a refusal retires it.
 		it.each([
 			['its reply was lost', () => apiMocks.post.mockRejectedValueOnce(new TypeError('Failed to fetch')), 'b'],
 			['its reply was unreadable', () => apiMocks.post.mockRejectedValueOnce(new SyntaxError('Unexpected end of JSON input')), 'b'],
 			['the server failed after it', () => apiMocks.post.mockRejectedValueOnce({ detail: 'Bad gateway', status: 502, body: null }), 'b'],
+			// Round 4 S5: the owning worker took it, then its answer was lost (MaybeApplied).
+			['the owner may have taken it', () => apiMocks.post.mockRejectedValueOnce({ detail: 'did not answer in time', status: 504, body: null }), 'b'],
 			['the worker refused it', () => apiMocks.post.mockRejectedValueOnce({ detail: 'No capable device online', status: 409, body: null }), 'c'],
 			['the worker queued nothing', () => apiMocks.post.mockResolvedValueOnce({ turn_id: 'compact-only', session_id: 'sess-1' }), 'c'],
 		] as const)('keeps a compact-and-send in the run unless refused: %s', async (_case, answer, expected) => {

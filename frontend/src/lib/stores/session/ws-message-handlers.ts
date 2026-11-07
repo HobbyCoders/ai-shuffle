@@ -1082,9 +1082,11 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 					// can arrive after switching away from an optimistic idle send.
 					const recovered = feedController.retractOptimisticSend(sid, data.client_message_id);
 					pendingQueue.rejectSend(sid, data.client_message_id, recovered);
-					// A refused send will never run, so a Stop cannot be pressed on it.
+					// A refused send will never run, so a Stop cannot be pressed on it. One
+					// the owner may have applied with its answer lost may still run, so
+					// it stays until its receipt or withdrawal settles it.
 					const refusedId = data.client_message_id;
-					update(s => retireSends(s, refusedId));
+					if (data.maybe_applied !== true) update(s => retireSends(s, refusedId));
 					if (sid !== getState().sessionId) break;
 					const restored = pendingQueue.takeWithdrawnDraft(sid);
 					// Idle sends echo on the transcript, not in the pending queue.

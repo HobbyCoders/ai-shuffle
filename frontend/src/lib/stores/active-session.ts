@@ -166,6 +166,9 @@ export interface ActiveSessionState {
 	stopTimedOutTurnId?: string | null;
 	/** The send a timed-out Stop was pressed on; its receipt names STOP_TURN_NOT_NAMED's turn. */
 	stopTimedOutCommandId?: string | null;
+	/** The sends that Stop was pressed on that may still run, oldest first (the first is
+	 * `stopTimedOutCommandId`). It only ever hands off within these (send-run.ts). */
+	stopTimedOutPressedOn?: string[] | null;
 	/** The feed's last seq when that Stop was pressed: history up to it is older than the Stop. */
 	stopTimedOutAfterSeq?: number | null;
 	/** The latest turn is parked on background work (v2 feed `turn.parked`,

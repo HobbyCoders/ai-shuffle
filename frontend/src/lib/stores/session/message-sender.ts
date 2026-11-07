@@ -872,12 +872,19 @@ export function createMessageSender(deps: MessageSenderDeps) {
 						// while the turn of the send it was pressed on has not shown up.
 						// Steered and row-less sends count too (#1114). Without one, a
 						// newest user row with no turn yet is that send.
+						// A Stop pressed on sends only ever hands off among them (send-run.ts).
 						const newestUser = s.messages.findLast(m => m.role === 'user');
-						const sentCommand = (pressedOn.length ? stillPressedOn(s, _state.sessionId, pressedOn) : null)
-							?? (newestUser && !newestUser.turnId ? newestUser.commandId ?? null : null);
+						const fallback = newestUser && !newestUser.turnId ? newestUser.commandId ?? null : null;
+						const left = pressedOn.length ? stillPressedOn(s, _state.sessionId, pressedOn)
+							: fallback ? [fallback] : [];
+						const turn = s.liveTurnId ?? s.stopRequestedTurnId ?? STOP_TURN_NOT_NAMED;
+						// Every send it was pressed on was retired while it waited: none of
+						// them will run, so there is no turn of this page's to recover.
+						const nothingLeft = pressedOn.length > 0 && !left.length && turn === STOP_TURN_NOT_NAMED;
 						return { ...s, messages, isStreaming: false, optimisticStreaming: false,
-							stopTimedOutTurnId: s.liveTurnId ?? s.stopRequestedTurnId ?? STOP_TURN_NOT_NAMED,
-							stopTimedOutCommandId: sentCommand,
+							stopTimedOutTurnId: nothingLeft ? null : turn,
+							stopTimedOutCommandId: left[0] ?? null,
+							stopTimedOutPressedOn: left,
 							stopTimedOutAfterSeq: pressedAfterSeq };
 					});
 				}
