@@ -807,9 +807,19 @@ select option {
 }
 
 /* Short inline code (up to 40 characters, marked by the renderer) never
-   splits into two pills; a longer span wraps as one cloned chip. */
+   splits into two pills; a longer span wraps as one cloned chip. A character
+   count can't prove a one-line chip fits (40 full-width characters are wider
+   than a phone column), so the short chip is one inline box capped at the
+   line: it moves to the next line whole, stays on one line while it fits, and
+   only when it is wider than the whole column wraps inside the same chip. It
+   never clips under an overflow-hidden ancestor. The tighter line-height keeps
+   the box (with its padding) inside the paragraph's line, as an inline chip. */
 .prose :where(:not(pre) > code.code-short):not(:where([class~="not-prose"] *)) {
-	white-space: nowrap;
+	display: inline-block;
+	max-width: 100%;
+	line-height: 1.4;
+	vertical-align: baseline;
+	overflow-wrap: anywhere;
 }
 
 .prose :where(pre code):not(:where([class~="not-prose"] *)) {

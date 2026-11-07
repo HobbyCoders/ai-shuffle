@@ -3,7 +3,9 @@
  * the chat transcript and the Notes preview.
  *
  * A short span must never break across lines into two pills, so it carries
- * `code-short` and the shared `.prose` rule keeps it on one line. A longer
+ * `code-short` and the shared `.prose` rule keeps it whole on one line while
+ * it fits the column (and wraps it inside the one chip, never clipped, when
+ * 40 wide characters can't fit a narrow column). A longer
  * span still wraps (it could not fit otherwise) and `box-decoration-break:
  * clone` draws each piece as part of one continuous chip.
  */
