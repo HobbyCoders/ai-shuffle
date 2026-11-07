@@ -13,8 +13,9 @@ import uuid
 from app.core import checkout_transfer, project_resolver, checkout_manager
 from app.core.config import settings
 from app.core.worktree_manager import WorktreeError
-from app.db import database, runs, checkouts, turns as turns_db
+from app.db import database, runs, checkouts, network as network_store, turns as turns_db
 from app.db.base import get_db
+from app.db.session_locks import HANDOFF_HOLD_PREFIX, lock_handoff_holds
 from app.db.async_database import run_sync
 from app.db.wakeups import CURRENT_STOP_SEQ
 from app.network import control, crypto, engine
@@ -505,7 +506,10 @@ def _finalize_wakes(sid, source, payload, *, recovery_reason=None, discard_all=F
         owner = session["owner_device_id"] if session else None
         if row["finalized"] and owner != device:
             return []  # A late receipt after a later move must not re-arm here.
-        if not session or owner not in (source, device):
+        if not session:
+            # Deletion won the hand-off headers and committed first.
+            raise ValueError("The chat was deleted during the hand-off; ownership was not changed.")
+        if owner not in (source, device):
             raise ValueError("This wake reservation belongs to an earlier move; ownership was not changed.")
         if not row["finalized"]:
             if recovery_reason in ("owner_discarded_wakes", "owner_resumed_wakes"):
@@ -571,7 +575,7 @@ async def _arm_moved_wakes(sid, wakes):
 
 HANDOFF = "handoff:"
 # Runner id prefix for a handoff's reservation of another session's run slot.
-HOLD = "handoff-hold:"
+HOLD = HANDOFF_HOLD_PREFIX
 BUSY_CHECKOUT = ("Another session is working in this checkout or on this branch. "
                  "Wait for it to finish before moving this session.")
 UNVERIFIED_CHECKOUT = ("Cannot verify which sessions use this checkout or branch. "
@@ -994,6 +998,12 @@ def _commit(sid, target, payload, token):
 
     with session_handoff.commit_holding(sid, target), get_db() as conn:
         cur = conn.cursor()
+        # engine.record below writes network_state: take it before the run
+        # and session rows, the order in app/db/session_locks.py.
+        network_store.lock_state(cur)
+        # The lease and the hold runs (released after the session row flips)
+        # in one sorted lock, like a family delete takes them.
+        lock_handoff_holds(cur, [token], run_ids=[token])
         _lease(cur, sid, target, token)
         _idle(cur, sid)
         moving = payload.get("wake_ids")
@@ -1452,11 +1462,12 @@ def _delete_history(cur, sid, token, sdk):
 
 
 def _lock_history_headers(cur, sid):
-    # Supersession cleans older headers at the final flip. Lock them before
-    # the session row too, so a concurrent expiry sweep cannot invert the order.
-    cur.execute("SELECT token FROM handoff_history_chunks WHERE session_id=%s "
-                "AND table_name='' AND batch_no=0 ORDER BY token FOR UPDATE", (sid,))
-    cur.fetchall()
+    # Supersession cleans older headers at the final flip, and acceptance
+    # releases hold runs. Lock headers and hold runs before the counter and
+    # session row, the order deletion also uses (app/db/session_locks.py).
+    from app.db.session_locks import lock_handoff_history
+
+    lock_handoff_history(cur, sid)
 
 
 def _discard_superseded_history(cur, sid, token):
@@ -1484,6 +1495,9 @@ def _discard_history(sid, token, *, expired_only=False):
         row = cur.fetchone()
         if not row:
             return
+        # _delete_history releases this token's hold runs: lock them with the
+        # header, before the session row (app/db/session_locks.py).
+        lock_handoff_holds(cur, [token])
         cur.execute("SELECT owner_device_id,placement FROM sessions WHERE id=%s FOR UPDATE", (sid,))
         session = cur.fetchone()
         if expired_only:
@@ -1767,6 +1781,11 @@ def _accept_owner(sid, device_id, branch=None, token=None, held_messages=None, *
         # and revalidate the owner only at the final context/ownership flip.
         cur.execute("SELECT owner_device_id,placement FROM sessions WHERE id=%s", (sid,))
         session = cur.fetchone()
+        if session is None:
+            if recovering:
+                return []
+            # Deletion won the hand-off headers and committed first.
+            raise ValueError("The chat was deleted during the hand-off; ownership was not changed.")
         receipt = (parse_jsonb(session["placement"]) or {}).get("handoff") or {}
         if recovering:
             cur.execute("SELECT rows FROM handoff_history_chunks WHERE session_id=%s AND token=%s "

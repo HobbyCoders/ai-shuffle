@@ -454,7 +454,10 @@ def apply_reply(reply: Any, source: str, asked: Dict[str, int], *, generation: i
             cursor.execute("SELECT owner_device_id, instance_id FROM sessions WHERE id = %s", (session_id,))
             local = cursor.fetchone()
             if local is not None and not _runs_here(local, ctx):
-                applied, touched = engine.apply_snapshot_items(cursor, coll, body["items"], ctx=ctx)
+                # The row read above proves the chat existed: a delete
+                # committing before the reservation drops this page (#1222).
+                applied, touched = engine.apply_snapshot_items(cursor, coll, body["items"], ctx=ctx,
+                                                               existed=[session_id])
                 events += applied
                 store.backfill_advance(cursor, session_id, after_seq=last, done=not more)
             else:

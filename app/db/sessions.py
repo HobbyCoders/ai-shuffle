@@ -1854,8 +1854,11 @@ def delete_session(session_id: str) -> bool:
         cursor = get_cursor(conn)
         # Unlink touches surviving children too. Match multi-session writers'
         # sorted runtime prefixes, not parent-first then arbitrary child rows.
-        from app.db.session_locks import lock_multi_session_mutation, lock_session_runtimes
-        # This optimistic read takes no row lock. The gate below is the FIRST
+        from app.db.session_locks import (
+            lock_handoff_history, lock_multi_session_mutation, lock_session_runtimes,
+            mark_sessions_deleted,
+        )
+        # This optimistic read takes no row lock. The gate below is the first
         # blocking lock; re-read under it before taking any runtime prefix.
         cursor.execute("SELECT id FROM sessions WHERE id=%s OR parent_session_id=%s ORDER BY id",
                        (session_id, session_id))
@@ -1863,7 +1866,14 @@ def delete_session(session_id: str) -> bool:
         lock_multi_session_mutation(cursor)
         cursor.execute("SELECT id FROM sessions WHERE parent_session_id=%s ORDER BY id", (session_id,))
         family.update(row["id"] for row in cursor.fetchall())
+        # The cascade below deletes this chat's staged hand-off rows: take
+        # their headers (H) after the gate and before any run/counter/session
+        # lock, the order in app/db/session_locks.py (#1215).
+        lock_handoff_history(cursor, session_id)
         lock_session_runtimes(cursor, family)
+        # Under this chat's counter: a mirror op that arrives after this
+        # delete commits must store nothing (#1222).
+        mark_sessions_deleted([session_id])
         cursor.execute(
             f"UPDATE sessions SET parent_session_id = NULL "
             f"WHERE parent_session_id = {_ph}",
