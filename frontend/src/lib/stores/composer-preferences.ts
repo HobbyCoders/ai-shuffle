@@ -189,7 +189,8 @@ function applyWorktree(key: string, value: unknown) {
 function worktreeAdapter(key: string) {
  registeredWorktrees.add(key);
  return {read: () => projectWorktrees[key] ?? null,
-  apply(value: unknown) { applyWorktree(key, value); notifyRemote(); }};
+  // A synced null is a retired identity: no entry, not an empty choice.
+  apply(value: unknown) { applyWorktree(key, value ?? undefined); notifyRemote(); }};
 }
 function validWorktreeKey(key: string) {
  try {
@@ -204,7 +205,12 @@ function saveWorktree(project: ProjectPick, value: WorktreePick) {
  applyWorktree(key, value);
  preferenceSync.save(key, projectWorktrees[key]);
 }
-const pendingWorktreeLinks = new Map<string, {project:ProjectPick; from:ProjectPick; revision:number}>();
+// A branch move held for an in-flight create, keyed by the identity it leaves.
+// `revision` is the target's revision the move may still land on (-1 = cancelled);
+// `held` is the source's revision when held, so a newer choice there is never cleared.
+// Retired identities are deleted, never saved as an empty pick, so any entry
+// left at a target is a real choice (an explicit Auto included).
+const pendingWorktreeLinks = new Map<string, {project:ProjectPick; from:ProjectPick; revision:number; held:number}>();
 // Git discovery can link a local project after its first compose pick, or the
 // catalog can retire the identity it was picked under for a shared one (#1078).
 // Promote only that proven pair (`from` is the identity it replaces); bootstrap
@@ -216,15 +222,16 @@ function linkWorktreeProject(project: ProjectPick, from: ProjectPick = {...proje
  const key = projectWorktreeKey(project);
  if (localKey === key) return;
  // A branch move deferred onto the identity now retired in turn ends at its
- // replacement. It lands only where nothing is saved yet (an explicit Auto
+ // replacement. It lands only where no choice is saved (an explicit Auto
  // counts), and a newer choice under the retired identity cancels it.
  for (const [heldKey, link] of pendingWorktreeLinks) {
   if (projectWorktreeKey(link.project) !== localKey) continue;
   const live = link.revision === (checkoutRevisions.get(localKey) ?? 0);
   if (key === heldKey) {
-   // Back home: nothing to move, but a cancel still drops the held branch.
+   // Back home: nothing to move, but a cancel still drops the held branch
+   // unless a newer choice replaced it there.
    pendingWorktreeLinks.delete(heldKey);
-   if (!live) composerPreferences.rememberCheckout(link.from, null);
+   if (!live && link.held === (checkoutRevisions.get(heldKey) ?? 0)) composerPreferences.rememberCheckout(link.from, null);
    continue;
   }
   pendingWorktreeLinks.set(heldKey, {...link, project, revision:live && !projectWorktrees[key] ? checkoutRevisions.get(key) ?? 0 : -1});
@@ -237,7 +244,7 @@ function linkWorktreeProject(project: ProjectPick, from: ProjectPick = {...proje
   // Intent must follow discovery immediately, even while a create owns the branch.
   applyWorktree(key, {...local, checkout:!claimed && local.checkout ? {...local.checkout, ...project} : null});
   if (!registeredWorktrees.has(key)) preferenceSync.register(key, worktreeAdapter(key));
-  if (claimed) pendingWorktreeLinks.set(localKey, {project, from, revision:checkoutRevisions.get(key) ?? 0});
+  if (claimed) pendingWorktreeLinks.set(localKey, {project, from, revision:checkoutRevisions.get(key) ?? 0, held:checkoutRevisions.get(localKey) ?? 0});
  }
  if (claimed) {
   if (promote) void preferenceSync.reconnect();
@@ -249,7 +256,7 @@ function linkWorktreeProject(project: ProjectPick, from: ProjectPick = {...proje
   && pending.revision === (checkoutRevisions.get(key) ?? 0)) {
   saveWorktree(project, {...worktreeFor(project), checkout:{...local.checkout, ...project}});
  }
- applyWorktree(localKey, null);
+ applyWorktree(localKey, undefined);
  preferenceSync.save(localKey, null);
  if (promote) void preferenceSync.reconnect();
 }
