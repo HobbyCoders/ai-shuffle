@@ -154,6 +154,9 @@
 		--composer-border: var(--border-strong);
 		--composer-border-focus: color-mix(in oklab, var(--foreground) 24%, transparent);
 		--composer-placeholder: var(--muted-foreground);
+		/* The lift under the box: desktop, then the phone card. */
+		--composer-shadow: var(--shadow-s);
+		--composer-shadow-phone: var(--shadow-m);
 
 		/* Sidebar plane. The rail shares it. Row fills derive from the plane so a
 		   theme preset's sidebar keeps working. */
@@ -360,11 +363,14 @@
 		--field-border: var(--input);
 		--field-border-focus: var(--ring);
 
-		/* The light composer is the plain card. */
+		/* The light composer is the white card, held off the near-white canvas
+		   by a 12% black edge and a soft lift from the dialog shadow's family. */
 		--composer-bg: var(--card);
-		--composer-border: var(--border);
-		--composer-border-focus: var(--border-strong);
+		--composer-border: oklch(0 0 0 / 0.12);
+		--composer-border-focus: oklch(0 0 0 / 0.2);
 		--composer-placeholder: var(--subtle-foreground);
+		--composer-shadow: 0 1px 2px oklch(0 0 0 / 0.04), 0 6px 20px oklch(0 0 0 / 0.06);
+		--composer-shadow-phone: var(--composer-shadow);
 
 		/* Sidebar plane. The rail shares it. */
 		--row-hover: color-mix(in oklab, var(--sidebar-foreground) 2.5%, var(--sidebar));

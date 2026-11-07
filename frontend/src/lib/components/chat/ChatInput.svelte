@@ -1952,7 +1952,7 @@
 		border-radius: var(--radius-composer);
 		border: 1px solid var(--composer-border, var(--border));
 		background: var(--composer-bg, var(--card));
-		box-shadow: var(--shadow-s);
+		box-shadow: var(--composer-shadow, var(--shadow-s));
 		transition: border-color 0.2s ease;
 	}
 
