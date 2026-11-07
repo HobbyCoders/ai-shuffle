@@ -146,7 +146,7 @@ describe('mobile composer drawer after send', () => {
 		const { container, trigger, editor } = await openComposer(compact);
 		if (action === 'Enter') await fireEvent.keyDown(editor, { key: 'Enter' });
 		else await fireEvent.click(screen.getByRole('button', { name: 'Send' }));
-		await waitFor(() => expect(send).toHaveBeenCalledWith(prompt, undefined));
+		await waitFor(() => expect(send).toHaveBeenCalledWith(prompt, { stillAtDestination: expect.any(Function) }));
 		await waitFor(() => expect(trigger.getAttribute('aria-expanded')).toBe('false'));
 		expect(container.querySelector('.mobile-controls-open')).toBeNull();
 		// Since #1816 the composer stays expanded with its quick bar.
