@@ -129,7 +129,9 @@ export interface ActiveSessionState {
 	/** Locally admitted text-send intent, including sends with no transcript echo.
 	 * Published atomically with error dismissal; automatic queue handoff and Stop
 	 * never advance it. Session-scoped so a delayed send cannot reset another view. */
-	localSendIntent?: { sessionId: string | null; revision: number };
+	/** `commandIds`: this page's sends in this session that may still run, oldest first
+	 *  (session/send-run.ts). Retiring one does not bump `revision`: it is not a send. */
+	localSendIntent?: { sessionId: string | null; revision: number; commandIds?: string[] };
 	/** Whether a turn is live for this session.
 	 *
 	 *  SINGLE WRITER (finding S6): the SSE feed's reducer, folded through
@@ -159,11 +161,19 @@ export interface ActiveSessionState {
 	liveTurnId: string | null;
 	/** The turn this device pressed Stop on, or STOP_TURN_NOT_NAMED before the feed names it (see not-sent-hold). */
 	stopRequestedTurnId?: string | null;
+	/** The sends that waiting Stop was pressed on that may still run, oldest first. An
+	 * unnamed Stop is named only by one of their receipts, and ends when none is left. */
+	stopRequestedPressedOn?: string[] | null;
 	/** This Stop attempt timed out: its turn id, or STOP_TURN_NOT_NAMED until the feed names it.
 	 * Reset by another Stop, a successor, a refused command, or navigation. */
 	stopTimedOutTurnId?: string | null;
 	/** The send a timed-out Stop was pressed on; its receipt names STOP_TURN_NOT_NAMED's turn. */
 	stopTimedOutCommandId?: string | null;
+	/** The sends that Stop was pressed on that may still run, oldest first (the first is
+	 * `stopTimedOutCommandId`). It only ever hands off within these (send-run.ts). */
+	stopTimedOutPressedOn?: string[] | null;
+	/** The feed's last seq when that Stop was pressed: history up to it is older than the Stop. */
+	stopTimedOutAfterSeq?: number | null;
 	/** The latest turn is parked on background work (v2 feed `turn.parked`,
 	 *  cleared by the next `turn.*`). Keeps the transcript from folding a parked
 	 *  turn in the moment between its last task finishing and the wake turn

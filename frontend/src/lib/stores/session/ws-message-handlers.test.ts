@@ -13,6 +13,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
 	createMessageHandlers,
 	SESSION_LIST_RELOAD_DEBOUNCE_MS,
+	SEND_MAYBE_APPLIED_MESSAGE,
 	type MessageHandlerDeps,
 	type InternalMutableState,
 } from './ws-message-handlers';
@@ -48,6 +49,8 @@ vi.mock('./v2/feed-controller', () => ({
 		invalidate: vi.fn(),
 		retractOptimisticSend: vi.fn(),
 		raiseTurnError: vi.fn(() => 'shown'),
+		settleRetiredSends: vi.fn(),
+		noteTurnStart: vi.fn(),
 	},
 	// Mirrors the real constant: `start` marks streaming OPTIMISTICALLY so the
 	// fold clears it once the reducer confirms the turn, instead of competing
@@ -180,6 +183,7 @@ describe('ws-message-handlers', () => {
 
 	beforeEach(() => {
 		(feedController.start as ReturnType<typeof vi.fn>).mockClear();
+		(feedController.noteTurnStart as ReturnType<typeof vi.fn>).mockClear();
 		(feedController.isFeeding as ReturnType<typeof vi.fn>).mockReturnValue(false);
 		deps = createMockDeps();
 		handlers = createMessageHandlers(deps);
@@ -752,6 +756,42 @@ describe('ws-message-handlers', () => {
 		});
 	});
 
+	// #1109: a Stop for a turn that had already ended reached nothing.
+	describe('stop_result handler', () => {
+		function waitingOn(stopRequestedTurnId: string | null, stopTimedOutTurnId: string | null = null) {
+			let state = { ...mockState(), sessionId: 'session-1', stopRequestedTurnId, stopTimedOutTurnId, error: null };
+			deps = createMockDeps({
+				getState: vi.fn(() => state),
+				update: vi.fn((fn) => { state = fn(state); }),
+			});
+			handlers = createMessageHandlers(deps);
+			return () => state;
+		}
+		const missed = { type: 'stop_result', session_id: 'session-1', turn_id: 'turn-1', stopped: false,
+			message: 'Nothing was stopped: that reply had already finished.' };
+
+		it('ends the Stop it answers, for no turn, and says why', () => {
+			const read = waitingOn('turn-1', 'turn-1');
+			handlers.handleMessage(missed);
+			expect(deps.clearStopTimeout).toHaveBeenCalled();
+			expect(read().stopRequestedTurnId).toBeNull();
+			expect(read().stopTimedOutTurnId).toBeNull();
+			expect(read().error).toBe(missed.message);
+		});
+
+		it.each([
+			['a newer Stop', { stopRequested: 'turn-2' }, {}],
+			['another session', { stopRequested: 'turn-1' }, { session_id: 'session-2' }],
+			['a Stop that stopped something', { stopRequested: 'turn-1' }, { stopped: true }],
+		])('leaves %s alone', (_label, { stopRequested }, frame) => {
+			const read = waitingOn(stopRequested);
+			handlers.handleMessage({ ...missed, ...frame });
+			expect(deps.clearStopTimeout).not.toHaveBeenCalled();
+			expect(read().stopRequestedTurnId).toBe(stopRequested);
+			expect(read().error).toBeNull();
+		});
+	});
+
 	describe('queued_message_removal handler (outcome of x on a pending message)', () => {
 		beforeEach(() => {
 			(notify.warning as ReturnType<typeof vi.fn>).mockClear();
@@ -904,6 +944,7 @@ describe('ws-message-handlers', () => {
 			// Must NOT be adopted: state untouched, feed not started, still awaiting.
 			expect(deps.update).not.toHaveBeenCalled();
 			expect(feedController.start).not.toHaveBeenCalled();
+			expect(feedController.noteTurnStart).not.toHaveBeenCalled();
 			expect(deps.internal.awaitingNewSession).toBe(true);
 			expect(deps.internal.pendingRequestId).toBe('req-mine-123');
 		});
@@ -1015,6 +1056,8 @@ describe('ws-message-handlers', () => {
 			// sessionId did NOT change → activeTasks preserved (reset is adoption-only).
 			expect(applied?.activeTasks).toHaveLength(1);
 			expect(feedController.start).toHaveBeenCalledWith('session-1');
+			// A turn the worker announced is live: retiring sends never hides it (round 6 S3).
+			expect(feedController.noteTurnStart).toHaveBeenCalledWith('session-1');
 		});
 	});
 
@@ -3042,6 +3085,58 @@ describe('queue_updated (the pending "not seen yet" bubbles)', () => {
 		expect(state.streamStartTime).toBe(123);
 	});
 
+	// Review round 5 S5: an error marked `maybe_applied` (the owner took the send, its
+	// answer lost) is not a refusal anywhere: the chip stays, unconfirmed, nothing is
+	// restored for resending, no "not sent" banner, and the owner's late queue
+	// snapshot for it still applies.
+	it('keeps a queued send the owner may have taken, unconfirmed, and lets its late snapshot through', () => {
+		vi.useFakeTimers();
+		vi.mocked(feedController.retractOptimisticSend).mockClear();
+		const b = 'client-' + 'b'.repeat(32);
+		const echo = { id: b, clientMessageId: b, content: 'B words', queuedAt: 1 };
+		const unconfirmed = vi.fn(() => {
+			state = { ...state, queuedMessages: state.queuedMessages.map(m => m.clientMessageId === b ? { ...m, unconfirmed: true } : m) };
+		});
+		pendingQueue.trackSend('session-1', echo, unconfirmed);
+		state = { ...state, queuedMessages: [echo], localSendIntent: { sessionId: 'session-1', revision: 1, commandIds: [b] } };
+
+		handlers.handleMessage({ type: 'error', session_id: 'session-1', client_message_id: b, maybe_applied: true,
+			offer_fork: true, message: 'The worker that runs this session is offline (no answer in time).' });
+		expect(unconfirmed).toHaveBeenCalledTimes(1);
+		expect(state.queuedMessages).toEqual([{ ...echo, unconfirmed: true }]);
+		expect(pendingQueue.reconcile('session-1', state.queuedMessages)).toEqual([{ ...echo, unconfirmed: true }]);
+		expect(feedController.retractOptimisticSend).not.toHaveBeenCalled();
+		expect(state.pendingRestorePrompt).toBeNull();
+		expect(pendingQueue.takeWithdrawnDraft('session-1')).toBeNull();
+		expect(state.error ?? '').not.toContain('Message not sent');
+		expect(state.localSendIntent?.commandIds).toEqual([b]);
+
+		// The owner's snapshot shows it queued: it applies, and confirms the send.
+		handlers.handleMessage(frame([{ id: 'turn-b', content: 'B words', client_message_id: b }]));
+		expect(pendingIds()).toEqual(['turn-b']);
+		expect(state.queuedMessages[0].unconfirmed).toBeFalsy();
+		vi.advanceTimersByTime(10_000);
+		expect(unconfirmed).toHaveBeenCalledTimes(1);
+		vi.useRealTimers();
+	});
+
+	it('keeps an idle send the owner may have taken on the transcript, without restoring it', () => {
+		vi.mocked(feedController.retractOptimisticSend).mockClear();
+		const sent = { id: 'user-123', role: 'user' as const, content: 'maybe running', commandId: 'client-idle' };
+		pendingQueue.trackSend('session-1', { id: sent.id, clientMessageId: 'client-idle', content: sent.content, queuedAt: 1 });
+		state = { ...state, messages: [sent], queuedMessages: [], isStreaming: true, optimisticStreaming: true,
+			liveTurnId: null, streamStartTime: 123 };
+		handlers.handleMessage({ type: 'error', session_id: 'session-1', client_message_id: 'client-idle', maybe_applied: true,
+			offer_fork: true, message: 'The worker that runs this session is offline (no answer in time).' });
+		expect(state.messages).toEqual([sent]);
+		expect(state.isStreaming).toBe(true);
+		expect(state.optimisticStreaming).toBe(true);
+		expect(state.pendingRestorePrompt).toBeNull();
+		expect(pendingQueue.takeWithdrawnDraft('session-1')).toBeNull();
+		expect(state.error).toBe(SEND_MAYBE_APPLIED_MESSAGE);
+		expect(feedController.retractOptimisticSend).not.toHaveBeenCalled();
+	});
+
 	it('uses the removal verdict durable id to suppress a delayed pre-receipt snapshot', () => {
 		const entry = { id: 'client-a', clientMessageId: 'client-a', content: 'sent', queuedAt: 1 };
 		pendingQueue.requestRemoval('session-1', entry);
@@ -3156,5 +3251,19 @@ describe('queue_updated (the pending "not seen yet" bubbles)', () => {
 		expect(pendingIds()).toHaveLength(0);
 		expect(state.pendingRestorePrompt).toBe('nope');
 		expect(deps.wsSend).not.toHaveBeenCalled();
+	});
+
+	// Review round 6 S3: a withdrawn send leaves the run, so the feed re-checks
+	// whether anything this page sent may still start a turn ("working").
+	it('has the feed settle the page once a withdrawal verdict retires a send', () => {
+		const entry = { id: 'client-a', clientMessageId: 'client-a', content: 'nope', queuedAt: 1 };
+		state = { ...state, localSendIntent: { sessionId: 'session-1', revision: 1, commandIds: ['client-a'] } };
+		pendingQueue.noteOptimistic('session-1', entry.id);
+		pendingQueue.requestRemoval('session-1', entry);
+		(feedController.settleRetiredSends as ReturnType<typeof vi.fn>).mockClear();
+		handlers.handleMessage({ type: 'queued_message_removal', session_id: 'session-1',
+			message_id: 'turn-q', client_message_id: 'client-a', verdict: 'withdrawn' });
+		expect(state.localSendIntent?.commandIds).toEqual([]);
+		expect(feedController.settleRetiredSends).toHaveBeenCalledWith('session-1');
 	});
 });

@@ -854,6 +854,19 @@ def stop_reaches_background_work(
     return bool(latest and latest["id"] == turn_id and latest["state"] == "parked")
 
 
+def stop_target_finished(session_id: str, turn_id: Optional[str]) -> bool:
+    """Whether a turn-scoped Stop that reached nothing named a turn that has ENDED.
+
+    Only then may the page hear "nothing was stopped". A target still
+    ``interrupting`` or ``draining`` is being stopped by an earlier Stop: the
+    repeat matched no row, but its page must keep waiting on that Stop (#1258).
+    """
+    if not turn_id:
+        return False
+    row = turns.get_turn(turn_id)
+    return bool(row and row.get("session_id") == session_id and row["state"] in turns.TERMINAL_STATES)
+
+
 # ---------------------------------------------------------------------------
 # Wait helpers (event-driven, with a backing-off poll as the safety net)
 # ---------------------------------------------------------------------------

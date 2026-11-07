@@ -160,7 +160,7 @@ def test_routed_no_live_session_stop_latches_but_stale_turn_stop_does_not(worker
         assert turns.get_turn(wake["id"])["state"] == "queued"
     with b.active():
         result = asyncio.run(control.interrupt(a.device_id, child, "stop", stop_background=True))
-        assert result == {"interrupted": True, "turn_id": None}
+        assert result == {"interrupted": True, "finished": False, "turn_id": None}
     with a.active():
         assert task_registry.is_user_stopped(child)
         assert turns.get_turn(wake["id"])["state"] == "aborted"

@@ -26,7 +26,7 @@ class TurnQueued(EventBase):
 
 
 class QueuedMessageWithdrawn(EventBase):
-    """Content-free receipt for a held message withdrawn before it became a turn."""
+    """Content-free receipt: an owner's queued or held message was withdrawn and will never run."""
 
     type: Literal["queued_message.withdrawn"] = "queued_message.withdrawn"
     message_id: str

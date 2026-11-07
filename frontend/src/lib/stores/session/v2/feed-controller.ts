@@ -17,6 +17,7 @@
  */
 
 import { clearCompactRetry } from '../compact-first-retry';
+import { retireSends, sendRunIn } from '../send-run';
 import {
 	reduce,
 	parseWireEvent,
@@ -105,6 +106,10 @@ type InteractionKind = 'permission' | 'question';
 // the `caught_up` sentinel instead of repainting per backfilled frame (which
 // made the list grow one message at a time on open). Re-armed per SSE connect.
 let caughtUp = false;
+// Seq of the newest `turn.started` the reducer applied (-1: none this feed). A
+// turn's own user message is appended with its start, so a feed already past a
+// start has shown whose send began that turn (see nameRecoveryFrom).
+let turnStartedSeq = -1;
 // Whether catch-up has EVER completed for the current feed (across reconnects).
 // `onOpen` only re-arms the batch flag on the FIRST connection. Once catch-up
 // has happened, reconnect backfills (cursor = lastSeq, near-empty) keep live
@@ -156,6 +161,9 @@ let usageApplied = false;
 // confirms a live turn, so a fold that lands between the two can no longer flip
 // the indicator back to false (the turn-start stutter).
 let optimisticStreaming = false;
+// The worker announced a turn start (WS `start`) the feed has not shown yet: a
+// genuine live turn, so retiring sends never withdraws the flip (settleRetiredSends).
+let turnStartAnnounced = false;
 
 // The task registry's running list from a `/live` snapshot that landed while
 // the feed was still backfilling (#320). Applied at `caught_up`, after the
@@ -539,21 +547,61 @@ function seedOptimistic(): void {
 	}
 }
 
+/** The feed's durable record of this page's send `command`, if it has shown one. */
+function receiptFor(command: string) {
+	return reducerState.messages.find(m => m.commandId === command && reducerState.messageOriginSeq.has(m.id));
+}
+
+/** The turn of the first of a waiting Stop's sends the feed has receipted; undefined without sends. */
+function turnOfPressedSends(pressedOn: string[] | null | undefined): string | null | undefined {
+	if (!pressedOn?.length) return undefined;
+	for (const command of pressedOn) {
+		const turn = receiptFor(command)?.turnId;
+		if (turn) return turn;
+	}
+	return null;
+}
+
 /**
- * An unnamed Stop that timed out on the page's own send belongs to the turn that
- * send's receipt names. Any turn the feed shows before that receipt came earlier,
- * and a message with the same text can claim the optimistic row, so only the
- * send's own command id counts.
+ * THE RULE: a timed-out Stop's recovery covers exactly one turn, the turn of the
+ * send Stop was pressed on. Any other turn ends it. (Which send is chosen in
+ * stopGeneration; with no send of the page's own it is the turn the page was
+ * already showing, so the next live turn names it.)
+ *
+ * An unnamed recovery waits for that send's receipt; only the send's own command
+ * id counts, since a message with the same text can claim the optimistic row. A
+ * turn's own user message is appended together with its start, so:
+ * - a live turn the feed has shown past its start without that receipt was begun
+ *   by someone else (another device, a wake): the recovery ends, and that turn's
+ *   rows keep their normal hold (#1114). Until a caught-up fold, a live turn may
+ *   still be replayed history, so nothing is decided then;
+ * - a turn ending after the Stop without that receipt was not this send's either.
+ *   History the feed showed before the Stop (`stopTimedOutAfterSeq`, pinned at the
+ *   first caught-up fold when Stop was pressed mid-replay) names nothing.
  */
 function nameRecoveryFrom(
-	s: Pick<ActiveSessionState, 'stopTimedOutTurnId' | 'stopTimedOutCommandId'>,
-	turnId: string | null
+	s: Pick<ActiveSessionState, 'stopTimedOutTurnId' | 'stopTimedOutCommandId' | 'stopTimedOutAfterSeq'>,
+	turnId: string | null,
+	ended = false
 ): string | null {
 	const timedOut = s.stopTimedOutTurnId;
+	if (timedOut !== STOP_TURN_NOT_NAMED) return nameStopRecovery(timedOut, turnId);
+	const after = s.stopTimedOutAfterSeq;
+	if (after != null && reducerState.lastSeq <= after) return timedOut;
 	const command = s.stopTimedOutCommandId;
-	if (timedOut !== STOP_TURN_NOT_NAMED || !command) return nameStopRecovery(timedOut, turnId);
-	const receipt = reducerState.messages.find(m => m.commandId === command && reducerState.messageOriginSeq.has(m.id));
-	return receipt ? receipt.turnId || turnId || timedOut : timedOut;
+	if (!command) return nameStopRecovery(timedOut, turnId);
+	const receipt = receiptFor(command);
+	if (receipt) return receipt.turnId || turnId || timedOut;
+	if (!turnId) return timedOut;
+	if (ended) return after != null ? null : timedOut;
+	return caughtUp && reducerState.lastSeq > turnStartedSeq ? null : timedOut;
+}
+
+/** Pins where an unnamed recovery's "after the Stop" begins once the feed has caught up. */
+function pinRecoveryAfter(s: Pick<ActiveSessionState, 'stopTimedOutTurnId' | 'stopTimedOutAfterSeq'>): number | null | undefined {
+	return s.stopTimedOutTurnId === STOP_TURN_NOT_NAMED && s.stopTimedOutAfterSeq == null && caughtUp
+		? reducerState.lastSeq
+		: s.stopTimedOutAfterSeq;
 }
 
 // ─── Fold reducer state → activeSession (rAF-coalesced) ───────────────────────
@@ -667,7 +715,7 @@ function fold(hydrationComplete = false): void {
 	});
 	// The reducer confirmed a live turn — the optimistic flip has served its
 	// purpose and must not survive into the next turn boundary.
-	if (reducerState.isStreaming) optimisticStreaming = false;
+	if (reducerState.isStreaming) { optimisticStreaming = false; turnStartAnnounced = false; }
 	// W7: from the first fold that carries `turn.usage`-derived numbers, the feed
 	// owns the usage fields and a late `/live` snapshot must not overwrite them.
 	// Set HERE, not in transcriptPatch, so a mere cache peek for another session
@@ -686,8 +734,10 @@ function fold(hydrationComplete = false): void {
 		return {
 			...s,
 			...patch,
-			stopRequestedTurnId: nameStoppedTurn(s.stopRequestedTurnId, reducerState.liveTurnId, patch.isStreaming === true),
+			stopRequestedTurnId: nameStoppedTurn(s.stopRequestedTurnId, reducerState.liveTurnId, patch.isStreaming === true,
+				turnOfPressedSends(s.stopRequestedPressedOn)),
 			stopTimedOutTurnId: nameRecoveryFrom(s, reducerState.liveTurnId),
+			stopTimedOutAfterSeq: pinRecoveryAfter(s),
 			queuedMessages: reconcileQueuedMessages(s.queuedMessages),
 			pendingPeerMessages: reconcilePendingPeerMessages(s.pendingPeerMessages ?? [], patch.messages ?? s.messages),
 			...(outlived ? { error: null, forkOfferSessionId: null } : {}),
@@ -899,6 +949,11 @@ export interface FeedController {
 	 *  flip restore the authoritative value instead of guessing `false` and
 	 *  killing the indicator for a turn that is genuinely live. */
 	isReducerStreaming: (sessionId: string | null) => boolean;
+	/** The last event seq the reducer has applied for this session, once it has
+	 *  caught up (null while it replays history or feeds another session). */
+	reducerSeq?: (sessionId: string | null) => number | null;
+	/** Whether the feed for this session has shown the durable receipt of send `commandId`. */
+	hasReceipt?: (sessionId: string | null, commandId: string) => boolean;
 
 	// ── Optimistic streaming (S6) ──────────────────────────────────
 	/**
@@ -912,6 +967,10 @@ export interface FeedController {
 	retractOptimisticSend: (sessionId: string | null, commandId: string) => string | null;
 	/** Withdraw the optimistic flip (send failed, stop confirmed, turn settled). */
 	clearOptimisticSend: (sessionId: string | null) => void;
+	/** After sends left the run: withdraws the optimistic flip if none is still waiting to run. */
+	settleRetiredSends: (sessionId: string | null) => void;
+	/** The worker's WS `start`: a turn is live even before the feed shows it. */
+	noteTurnStart: (sessionId: string | null) => void;
 }
 
 /** Reset every per-feed flag. Shared by start() and teardown(). */
@@ -956,9 +1015,11 @@ function teardown(capture: boolean): void {
 	lastFoldAt = 0;
 	resetFeedFlags();
 	optimisticStreaming = false;
+	turnStartAnnounced = false;
 	currentSessionId = null;
 	seededMessages = null;
 	reducerState = initialState();
+	turnStartedSeq = -1;
 	pendingQueue.reset(null);
 }
 
@@ -1010,6 +1071,7 @@ export const feedController: FeedController = {
 		const cached = readCachedTranscript(sessionId);
 		const settledFromCache = cached !== null && presentsSettled(cached, sessionId);
 		reducerState = cached ? cached.state : initialState();
+		turnStartedSeq = -1;
 		resumeFromSeq = cached ? cached.lastSeq : 0;
 		usageApplied = cached ? cached.usageApplied : false;
 
@@ -1129,13 +1191,22 @@ export const feedController: FeedController = {
 				if (caughtUp && sentinelPending) caughtUp = false;
 				if (ev.type === 'swarm.updated') swarms.receive(ev.swarm, sessionId);
 				if (typeof ev.command_id === 'string') clearCompactRetry(sessionId, ev.command_id);
+				// A queued send withdrawn anywhere (another tab or device too) will
+				// never run: it leaves this page's run of sends (send-run.ts).
+				if (ev.type === 'queued_message.withdrawn' && typeof ev.command_id === 'string' && ev.command_id) {
+					const withdrawn = ev.command_id;
+					pendingQueue.forgetSendUploads(withdrawn);
+					deps?.update(s => retireSends(s, withdrawn));
+					feedController.settleRetiredSends(sessionId);
+				}
 				reducerState = reduce(reducerState, ev);
+				if (ev.type === 'turn.started') turnStartedSeq = reducerState.lastSeq;
 				if (bannerAnchor) bannerAnchor = followTurnError(bannerAnchor, ev);
 				// A replay can end a turn before any fold saw it live: name the unnamed
 				// Stop's recovery from that end, or it would bind to the next turn.
 				if ((ev.type === 'turn.completed' || ev.type === 'turn.aborted') && deps?.getState().stopTimedOutTurnId) {
 					const endedTurnId = typeof ev.turn_id === 'string' ? ev.turn_id : null;
-					deps.update(s => ({ ...s, stopTimedOutTurnId: nameRecoveryFrom(s, endedTurnId) }));
+					deps.update(s => ({ ...s, stopTimedOutTurnId: nameRecoveryFrom(s, endedTurnId, true) }));
 				}
 				// A lagged mirror can replay an entire turn before the next fold.
 				// Consume optimism when the reducer confirms the turn, not only
@@ -1143,6 +1214,7 @@ export const feedController: FeedController = {
 				// leaves the compose's working flag stuck on. No history paints here.
 				if (reducerState.isStreaming && (optimisticStreaming || deps?.getState().optimisticStreaming)) {
 					optimisticStreaming = false;
+					turnStartAnnounced = false;
 					deps?.update(s => s.optimisticStreaming ? { ...s, optimisticStreaming: false } : s);
 				}
 				// An empty log learns its epoch from this first row (sse-feed).
@@ -1356,6 +1428,15 @@ export const feedController: FeedController = {
 		return reducerState.isStreaming;
 	},
 
+	reducerSeq(sessionId: string | null) {
+		if (sessionId === null || currentSessionId !== sessionId || !caughtUp) return null;
+		return reducerState.lastSeq;
+	},
+
+	hasReceipt(sessionId: string | null, commandId: string) {
+		return sessionId !== null && currentSessionId === sessionId && receiptFor(commandId) !== undefined;
+	},
+
 	noteOptimisticSend(sessionId: string | null) {
 		// Only the session being fed (or a brand-new chat with no id yet, which
 		// this feed will adopt on `start`) may raise the flag.
@@ -1383,9 +1464,30 @@ export const feedController: FeedController = {
 		return content;
 	},
 
+	/**
+	 * The optimistic flip stands for a send of this page's about to start a turn.
+	 * Once every send in the run has run (receipted) or left it (withdrawn,
+	 * refused, failed), nothing is behind it: withdraw it, or an idle chat whose
+	 * only send Stop withdrew would show "working" until a reload. A turn the feed
+	 * shows live keeps streaming (clearOptimisticSend falls back to the reducer).
+	 */
+	noteTurnStart(sessionId: string | null) {
+		if (sessionId !== null && currentSessionId !== null && sessionId !== currentSessionId) return;
+		turnStartAnnounced = true;
+	},
+
+	settleRetiredSends(sessionId: string | null) {
+		if (!deps || sessionId === null || sessionId !== currentSessionId) return;
+		const s = deps.getState();
+		if (turnStartAnnounced || s.sessionId !== sessionId || !(optimisticStreaming || s.optimisticStreaming)) return;
+		if (sendRunIn(s, sessionId).some(command => !receiptFor(command))) return;
+		this.clearOptimisticSend(sessionId);
+	},
+
 	clearOptimisticSend(sessionId: string | null) {
 		if (sessionId !== null && currentSessionId !== null && sessionId !== currentSessionId) return;
 		optimisticStreaming = false;
+		turnStartAnnounced = false;
 		// Withdraw the flip on BOTH channels — the module latch above and the
 		// state field the fold reads — or the next fold would re-raise it. The
 		// published `isStreaming` falls back to the authoritative reducer value,

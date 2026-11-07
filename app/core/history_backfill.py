@@ -11,6 +11,7 @@ full history even when queue cancellations were recorded before its first read.
 Design:
 
 - Fast path: an EXISTS check for any event other than ``queue.cancelled``
+  or ``queued_message.withdrawn``
   means history is already seeded. A 60s per-process memo suppresses repeated
   legacy loads for a genuinely-empty session.
 - Legacy history is loaded via the SAME persistent chain the ``/live`` read path

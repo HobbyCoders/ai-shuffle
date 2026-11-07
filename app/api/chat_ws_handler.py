@@ -1079,12 +1079,16 @@ class ChatWebSocketHandler:
             return None
 
     async def _forward_unreachable(self, session_id: str, exc: Exception) -> None:
+        from app.network import control
         await self.send_json({
             "type": "error",
             "session_id": session_id,
             "message": f"The worker that runs this session is offline ({exc}). "
                        "You can fork the transcript into a new session on this device.",
             "offer_fork": True,
+            # The request reached the owner with the answer lost: it may still
+            # run, so this is not a refusal of the send it names.
+            **({"maybe_applied": True} if isinstance(exc, control.MaybeApplied) else {}),
         })
 
     async def _validate_target_install(
@@ -2014,6 +2018,8 @@ class ChatWebSocketHandler:
                     if result.get("incomplete"):
                         await self.send_json({"type": "error", "session_id": session_id,
                                               "message": result.get("message") or "Stop was incomplete. Some background tasks may still be running."})
+                    elif result.get("finished") is True:
+                        await self._send_stop_missed(session_id, target_turn_id)
                 except control.RunnerUnreachable as exc:
                     await self._forward_unreachable(session_id, exc)
                 except control.ControlRefused as exc:
@@ -2057,7 +2063,25 @@ class ChatWebSocketHandler:
                 # already fired; the observe pass is a guarded no-op.
                 from app.core import turn_claim
                 await run_sync(turn_claim.notify_turns_changed, session_id)
-            return
+                return
+            # A Stop for a turn that has already ended, with no parked work left
+            # behind it, reached nothing. Say so: returning silently left the
+            # page believing it had stopped whatever runs now (#1109). A target
+            # still interrupting/draining is an earlier Stop in progress: stay
+            # quiet so the page keeps waiting on (and recovering from) it.
+            if await run_sync(turn_manager.stop_target_finished, session_id, target_turn_id):
+                await self._send_stop_missed(session_id, target_turn_id)
+
+    async def _send_stop_missed(self, session_id: str, turn_id: Optional[str]) -> None:
+        """Tell the page its Stop matched no running turn and ended nothing."""
+        await self.send_json({
+            "type": "stop_result",
+            "session_id": session_id,
+            "turn_id": turn_id,
+            "stopped": False,
+            "message": "Nothing was stopped: that reply had already finished. "
+                       "Press Stop again to stop anything still running.",
+        })
 
     # ------------------------------------------------------------------
     # handle_interrupt_for_query (two-phase: interrupt only, then confirm)

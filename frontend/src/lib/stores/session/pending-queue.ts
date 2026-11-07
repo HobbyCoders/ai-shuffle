@@ -65,8 +65,13 @@
  */
 
 import type { ChatMessage, PendingPeerMessage, QueuedMessage } from '../types';
+import type { UploadReference } from '$lib/api/rewind';
 
 /** Peer delivery uses durable turn ids ONLY, never the user's text/unsend arbiter. */
+/** A send the owner may have taken with its answer lost: it may still run. */
+export const SEND_MAYBE_APPLIED_MESSAGE =
+	'The worker that runs this chat did not answer in time. Your message may still run.';
+
 export function reconcilePendingPeerMessages(
 	rows: PendingPeerMessage[], messages: ChatMessage[]
 ): PendingPeerMessage[] {
@@ -148,13 +153,42 @@ interface CancellationState {
 	withdrawn: Set<string>;
 	deliveredRows: Set<string>;
 	terminalVerdicts: Map<string, string>;
-	drafts: string[];
+	drafts: WithdrawnDraft[];
 	timers: Map<string, ReturnType<typeof setTimeout>>;
 	sends: Map<string, PendingEntry>;
+	/** Command id → marks its send unconfirmed now (the admission timeout, run early). */
+	unconfirm: Map<string, () => void>;
 }
 // Cancellation transactions belong to a session, not its currently mounted
 // feed. A socket verdict can arrive after that feed has been torn down.
 const cancellations = new Map<string | null, CancellationState>();
+/** A withdrawn or refused send's words, with the attachments it carried. */
+interface WithdrawnDraft { content: string; uploads?: SendUploads }
+interface SendUploads { paths: string[]; references: UploadReference[] }
+/** What a confirmed withdrawal hands back to the composer. */
+export interface WithdrawnRestore { prompt: string; uploadPaths: string[]; uploadReferences: UploadReference[] }
+type RestoreSlots = { pendingRestorePrompt?: string | null; pendingRestoreUploadPaths?: string[]; pendingRestoreUploadReferences?: UploadReference[] };
+/** Adds a confirmed withdrawal's words and attachments to those not yet taken. */
+export function restoredDraftFields(s: RestoreSlots, restore: WithdrawnRestore | null): RestoreSlots {
+	if (!restore) return {};
+	const paths = [...(s.pendingRestoreUploadPaths ?? []), ...restore.uploadPaths];
+	const references = [...(s.pendingRestoreUploadReferences ?? []), ...restore.uploadReferences];
+	return { pendingRestorePrompt: [s.pendingRestorePrompt, restore.prompt].filter(Boolean).join('\n\n'),
+		...(paths.length ? { pendingRestoreUploadPaths: paths } : {}),
+		...(references.length ? { pendingRestoreUploadReferences: references } : {}) };
+}
+// A send's attachments, by command id (unique across chats), kept past admission
+// until its receipt: the chip keeps only text, and a confirmed withdrawal must hand
+// back the file chips and upload fields too, or the resend cannot transfer the file.
+// Never capped: a send still waiting to run keeps them. Every terminal outcome
+// removes its entry instead (receipt, delivery verdict, withdrawal verdict or
+// receipt, refusal, a frame that never left; see forgetSendUploads).
+const sendUploads = new Map<string, SendUploads>();
+function draftOf(key: string, content: string): WithdrawnDraft {
+	const uploads = sendUploads.get(key);
+	sendUploads.delete(key);
+	return uploads ? { content, uploads } : { content };
+}
 // Idle transcript echoes are recoverable drafts, not queue authority. The
 // command survives null -> assigned-session adoption; receipts clear it by id.
 const recoverySends = new Map<string, { sessionId: string | null; content: string; expiresAt: number }>();
@@ -172,7 +206,7 @@ function recoverySend(id: string | null, key: string) {
 function cancellationState(id: string | null): CancellationState {
 	let state = cancellations.get(id);
 	if (!state) {
-		state = { removals: new Map(), withdrawn: new Set(), deliveredRows: new Set(), terminalVerdicts: new Map(), drafts: [], timers: new Map(), sends: new Map() };
+		state = { removals: new Map(), withdrawn: new Set(), deliveredRows: new Set(), terminalVerdicts: new Map(), drafts: [], timers: new Map(), sends: new Map(), unconfirm: new Map() };
 		cancellations.set(id, state);
 	}
 	return state;
@@ -238,6 +272,7 @@ export const pendingQueue = {
 			cancellations.clear();
 			parked.clear();
 			recoverySends.clear();
+			sendUploads.clear();
 		}
 	},
 
@@ -283,8 +318,38 @@ export const pendingQueue = {
 
 	/** Consume confirmed withdrawals only when their own composer is mounted. */
 	takeWithdrawnDraft(id: string | null): string | null {
+		return this.takeWithdrawnRestore(id)?.prompt ?? null;
+	},
+
+	/** Like takeWithdrawnDraft, with the attachments the withdrawn sends carried. */
+	takeWithdrawnRestore(id: string | null): WithdrawnRestore | null {
 		const state = cancellations.get(id);
-		return state?.drafts.length ? state.drafts.splice(0).join('\n\n') : null;
+		if (!state?.drafts.length) return null;
+		const drafts = state.drafts.splice(0);
+		return { prompt: drafts.map(d => d.content).join('\n\n'),
+			uploadPaths: drafts.flatMap(d => d.uploads?.paths ?? []),
+			uploadReferences: drafts.flatMap(d => d.uploads?.references ?? []) };
+	},
+
+	/** Remember a send's attachments until its receipt or a confirmed withdrawal. */
+	noteSendUploads(key: string, paths: string[] = [], references: UploadReference[] = []): void {
+		sendUploads.delete(key);
+		if (!paths.length && !references.length) return;
+		sendUploads.set(key, { paths: [...paths], references: [...references] });
+	},
+
+	/** Test/diagnostic hook: whether a send's attachments are still kept. */
+	hasSendUploads(key: string): boolean {
+		return sendUploads.has(key);
+	},
+
+	/**
+	 * The send reached a terminal outcome with nothing to hand back here. A
+	 * withdrawal this page asked for keeps them until its own verdict takes them.
+	 */
+	forgetSendUploads(key: string): void {
+		for (const state of cancellations.values()) if (state.removals.has(key)) return;
+		sendUploads.delete(key);
 	},
 
 	/**
@@ -338,6 +403,7 @@ export const pendingQueue = {
 		if (turnId) deliveredTurnIds.add(turnId);
 		if (commandId) {
 			this.acknowledgeSend(id, commandId);
+			sendUploads.delete(commandId);
 			const removal = cancellations.get(id)?.removals.get(commandId);
 			const answeredAt = createdAt ? Date.parse(createdAt) : NaN;
 			// A replayed (or late live) receipt for an interrupted attempt must
@@ -400,11 +466,29 @@ export const pendingQueue = {
 		}
 		const state = cancellationState(id);
 		state.sends.set(key, entry);
-		state.timers.set(`send:${key}`, setTimeout(() => {
+		const unconfirm = () => {
+			clearTimeout(state.timers.get(`send:${key}`));
 			state.timers.delete(`send:${key}`);
+			state.unconfirm.delete(key);
 			state.sends.set(key, { ...entry, unconfirmed: true });
 			onTimeout();
-		}, 10_000));
+		};
+		state.unconfirm.set(key, unconfirm);
+		state.timers.set(`send:${key}`, setTimeout(unconfirm, 10_000));
+	},
+
+	/**
+	 * The worker that runs the chat may have taken this send, but its answer was
+	 * lost. That is neither a refusal nor an admission: the send is unconfirmed
+	 * now, exactly as if its admission had timed out. Its chip stays (Unsend
+	 * recovers it through a verdict), its words are not restored, and a later
+	 * owner snapshot, receipt or withdrawal settles it. False for a send with no
+	 * queued chip (an idle transcript echo), which just stays as it is.
+	 */
+	answerLost(id: string | null, key: string): boolean {
+		const unconfirm = cancellations.get(id)?.unconfirm.get(key);
+		unconfirm?.();
+		return !!unconfirm;
 	},
 
 	/** Refusals follow the command's compose, not the socket's current session. */
@@ -432,6 +516,7 @@ export const pendingQueue = {
 		const state = cancellations.get(id);
 		clearTimeout(state?.timers.get(`send:${key}`));
 		state?.timers.delete(`send:${key}`);
+		state?.unconfirm.delete(key);
 		state?.sends.delete(key);
 	},
 
@@ -440,7 +525,8 @@ export const pendingQueue = {
 		if (owner && owner.sessionId !== id) return;
 		const state = cancellationState(id);
 		const content = state.sends.get(key)?.content ?? recoverySend(id, key)?.content ?? fallback;
-		if (content != null && !state.withdrawn.has(key)) state.drafts.push(content);
+		if (content != null && !state.withdrawn.has(key)) state.drafts.push(draftOf(key, content));
+		sendUploads.delete(key);
 		state.withdrawn.add(key);
 		this.acknowledgeSend(id, key);
 		this.removalFailed(id, key, true);
@@ -455,8 +541,9 @@ export const pendingQueue = {
 			withdrawn.add(key);
 			if (entry) {
 				withdrawn.add(entry.id);
-				drafts.push(entry.content);
+				drafts.push(draftOf(key, entry.content));
 			}
+			sendUploads.delete(key);
 			this.removalFailed(id, key, true);
 			this.acknowledgeSend(id, key);
 		} else if (verdict === 'already_delivered') {
@@ -467,6 +554,7 @@ export const pendingQueue = {
 			// must not clear the newer attempt's cancellation or draft.
 			if (entry && messageId && !isOptimistic(entry) && entry.id !== messageId) return;
 			if (entry) deliveredRows.add(entry.id);
+			sendUploads.delete(key);
 			terminalVerdicts.set(key, verdict);
 			this.removalFailed(id, key, true);
 			this.acknowledgeSend(id, key);

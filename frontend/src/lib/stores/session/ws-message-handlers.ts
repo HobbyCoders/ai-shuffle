@@ -23,7 +23,7 @@ import { serverNotificationActions } from '$lib/services/error-actions';
 // The SSE-fed reducer store — the transcript authority for a session.
 import { feedController, OPTIMISTIC_STREAMING_ON } from './v2/feed-controller';
 // Arbiter of which pending ("not seen yet") bubbles survive.
-import { pendingQueue, reconcilePendingPeerMessages } from './pending-queue';
+import { pendingQueue, reconcilePendingPeerMessages, restoredDraftFields, SEND_MAYBE_APPLIED_MESSAGE } from './pending-queue';
 import { queueHydration } from './queue-hydration';
 import { composerSuggestion } from './composer-suggestion';
 import { swarms } from '../swarms';
@@ -36,6 +36,7 @@ import { sessionEphemeralCache } from '../session-cache';
 import { markBindingHydrated } from './composer-binding';
 import { unmarkQuestionSent } from './sent-questions';
 import { keepStopRecovery } from '$lib/utils/not-sent-hold';
+import { retireSends } from './send-run';
 
 // ─── Interfaces ──────────────────────────────────────────────────────────────
 
@@ -157,6 +158,8 @@ export interface MessageHandlerDeps {
  * on) and is coalesced over this window.
  */
 export const SESSION_LIST_RELOAD_DEBOUNCE_MS = 700;
+
+export { SEND_MAYBE_APPLIED_MESSAGE } from './pending-queue';
 
 /**
  * Fields of a `session_updated` / `user_session_updated` payload that can be
@@ -966,6 +969,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 					if (!feedController.isFeeding(sessionId)) {
 						feedController.start(sessionId);
 					}
+					feedController.noteTurnStart?.(sessionId);
 					onPersistSession();
 				}
 				break;
@@ -1031,6 +1035,24 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				handleStoppedOrInterrupted(data);
 				break;
 
+			case 'stop_result': {
+				// The worker says this page's Stop reached nothing: the turn it named
+				// had already ended and left no work running (#1109). The Stop is
+				// over, for no turn, so nothing below waits on it or restores for it.
+				const current = getState();
+				if (data.stopped !== false || (data.session_id && data.session_id !== current.sessionId)) break;
+				const turnId = typeof data.turn_id === 'string' ? data.turn_id : null;
+				if (!turnId || current.stopRequestedTurnId !== turnId) break;
+				clearStopTimeout();
+				update(s => ({
+					...s,
+					stopRequestedTurnId: null,
+					stopTimedOutTurnId: s.stopTimedOutTurnId === turnId ? null : s.stopTimedOutTurnId,
+					error: typeof data.message === 'string' && data.message ? data.message : s.error,
+				}));
+				break;
+			}
+
 			case 'user_message_discarded': {
 				// The user pressed Stop before any assistant output. The backend
 				// removed the orphan user message from the live store (so the
@@ -1059,23 +1081,39 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 					// Prefer command identity even when the refusal names another session.
 					const sid = owner ? owner.sessionId : refused ? current.sessionId
 						: typeof data.session_id === 'string' ? data.session_id : null;
+					// The owner may have taken it, its answer lost: not a refusal. Decide
+					// that before anything treats it as one. The send stays unconfirmed:
+					// its chip or row stays, nothing is restored for resending (that would
+					// run it twice), it stays in the run, and later owner snapshots still
+					// apply. Its receipt, a snapshot or an Unsend verdict settles it.
+					if (data.maybe_applied === true) {
+						const hadChip = pendingQueue.answerLost(sid, data.client_message_id);
+						if (sid === getState().sessionId && !hadChip) {
+							update(s => ({ ...s, error: SEND_MAYBE_APPLIED_MESSAGE }));
+						}
+						break;
+					}
 					// Retract/cache the draft before the active-session guard: a refusal
 					// can arrive after switching away from an optimistic idle send.
 					const recovered = feedController.retractOptimisticSend(sid, data.client_message_id);
 					pendingQueue.rejectSend(sid, data.client_message_id, recovered);
+					// A refused send will never run, so a Stop cannot be pressed on it.
+					const refusedId = data.client_message_id;
+					update(s => retireSends(s, refusedId));
 					if (sid !== getState().sessionId) break;
-					const restored = pendingQueue.takeWithdrawnDraft(sid);
+					const restored = pendingQueue.takeWithdrawnRestore(sid);
 					// Idle sends echo on the transcript, not in the pending queue.
 					// Only recover an unconfirmed local row, never a durable receipt.
 					update(s => {
-						const recovered = restored ?? refused?.content;
+						const recovered = restored ?? (refused?.content != null
+							? { prompt: refused.content, uploadPaths: [], uploadReferences: [] } : null);
 						const optimisticOnly = refused && s.optimisticStreaming && !s.liveTurnId;
 						return { ...s,
 							...(refused ? { messages: s.messages.filter(m => m !== refused), optimisticStreaming: false } : {}),
 							...(optimisticOnly ? { isStreaming: false, streamStartTime: null } : {}),
 							queuedMessages: pendingQueue.reconcile(s.sessionId, s.queuedMessages),
 							error: `Message not sent: ${data.message || 'Please try again.'}`,
-							...(recovered != null ? { pendingRestorePrompt: [s.pendingRestorePrompt, recovered].filter(Boolean).join('\n\n') } : {}),
+							...restoredDraftFields(s, recovered),
 						};
 					});
 					break;
@@ -1170,12 +1208,18 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				}
 				pendingQueue.applyRemovalVerdict(sid, key, rawVerdict === 'not_found' ? rawVerdict : verdict,
 					typeof data.message_id === 'string' ? data.message_id : undefined);
+				// A withdrawn message will never run, so a Stop cannot be pressed on
+				// it. One already delivered won the race and stays (send-run.ts).
+				if (verdict === 'withdrawn') {
+					update(s => retireSends(s, key, entry?.clientMessageId));
+					feedController.settleRetiredSends?.(sid);
+				}
 				if (sid !== state.sessionId) break; // retain for that session's next switch-in
-				const restored = pendingQueue.takeWithdrawnDraft(sid);
+				const restored = pendingQueue.takeWithdrawnRestore(sid);
 				update(s => ({ ...s,
 					queuedMessages: pendingQueue.reconcile(s.sessionId, s.queuedMessages),
 					error: rawVerdict === 'not_found' ? 'No pending message was found. Your text was recovered; check the conversation before resending.' : null,
-					...(restored !== null ? { pendingRestorePrompt: [s.pendingRestorePrompt, restored].filter(Boolean).join('\n\n') } : {}),
+					...restoredDraftFields(s, restored),
 				}));
 				if (verdict !== 'already_delivered') break;
 				notify.warning(

@@ -1600,6 +1600,10 @@ def _already_in_transcript(cursor: Any, row: Dict[str, Any]) -> bool:
     return cursor.fetchone() is not None
 
 
+# The queue chips an owner sends (the queue view's sources).
+_OWNER_SEND_SOURCES = ("user", "queue")
+
+
 def _lock_for_event_write(cursor: Any, session_id: str) -> None:
     """Cancellation shares deletion/settlement's run -> counter -> session order."""
     from app.db.session_locks import lock_session_runtime
@@ -1640,15 +1644,26 @@ def remove_queued_turn(
     ``keep_unsent_words`` is Stop's: the owner's words stay in the transcript as
     a restorable "Not sent" row, written in the abort's own transaction so the
     queue chip can never vanish without it. A dropped chip passes False.
+
+    An owner's send that leaves the queue here never runs, whoever removed it
+    (×, clear, Stop, the scheduler): a content-free ``queued_message.withdrawn``
+    receipt carrying its command id commits with the abort, so every page
+    watching the chat, and one that reconnects later, learns it will not run.
     """
     notify_events = False
     # A caller-owned transaction also owns the post-commit session notification.
     with (nullcontext(_conn) if _conn is not None else get_db()) as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT session_id, source FROM turns WHERE id=%s", (turn_id,))
+        cursor.execute("SELECT session_id, source, command_id FROM turns WHERE id=%s", (turn_id,))
         target = cursor.fetchone()
-        if target and (keep_unsent_words or target["source"] == "agent_message"):
+        owner_send = bool(target and target["source"] in _OWNER_SEND_SOURCES and target["command_id"])
+        if target and (keep_unsent_words or owner_send or target["source"] == "agent_message"):
             _lock_for_event_write(cursor, target["session_id"])
+        if owner_send:
+            # Chat delete takes the same lock: a row whose chat is gone has no
+            # log and no page to tell, so it is withdrawn without a receipt.
+            cursor.execute("SELECT 1 FROM sessions WHERE id=%s", (target["session_id"],))
+            owner_send = cursor.fetchone() is not None
         cursor.execute(
             "UPDATE turns SET state='aborted', stop_reason=%s, "
             "ended_at=NOW() "
@@ -1665,6 +1680,16 @@ def remove_queued_turn(
             session_events.append_events(row["session_id"], [{
                 "type": "queue.cancelled", "turn_id": row["id"],
                 "payload": {"cancelled_turn_ids": [row["id"]]},
+            }], _conn=conn)
+            notify_events = True
+        if row and owner_send:
+            from app.db import session_events
+
+            session_events.append_events(row["session_id"], [{
+                "id": "queue-withdrawal:" + row["id"],
+                "type": "queued_message.withdrawn",
+                "turn_id": row["id"], "command_id": row["command_id"],
+                "payload": {"message_id": row["id"]},
             }], _conn=conn)
             notify_events = True
         if row and keep_unsent_words and _keep_unsent_words(cursor, conn, row):

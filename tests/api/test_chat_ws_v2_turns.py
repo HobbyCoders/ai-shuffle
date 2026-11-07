@@ -515,6 +515,61 @@ async def test_handle_clear_queued_messages_aborts_only_user_chips(mock_db):
     assert cwh._v2_queue_view("sess-1") == []
 
 
+def _withdrawal_receipts(session_id):
+    from app.db import session_events
+
+    return [(e["command_id"], e["payload"]) for e in session_events.get_events(session_id)
+            if e["event_type"] == "queued_message.withdrawn"]
+
+
+@pytest.mark.parametrize("by", ["message_id", "client_message_id", "clear"])
+async def test_a_withdrawal_reaches_every_page_through_the_session_log(mock_db, by):
+    """Page 1 withdraws B; page 2 (which sent B) learns it from the session log,
+    which every page's feed reads, live or on reconnect. The receipt carries
+    B's command id and no words (#1114, review round 3 S2)."""
+    _make_session("sess-1")
+    b_cmd, c_cmd = "client-" + "b" * 32, "client-" + "c" * 32
+    b = turns_db.enqueue_turn("sess-1", "user", prompt="B words", command_id=b_cmd)["id"]
+    c = turns_db.enqueue_turn("sess-1", "queue", prompt="C words", command_id=c_cmd)["id"]
+
+    with _Patches():
+        page_1 = _make_handler()
+        if by == "clear":
+            await page_1.handle_clear_queued_messages({"session_id": "sess-1"})
+        else:
+            await page_1.handle_remove_queued_message(
+                {"session_id": "sess-1", by: b if by == "message_id" else b_cmd})
+
+    withdrawn = [(b_cmd, {"message_id": b})] + ([(c_cmd, {"message_id": c})] if by == "clear" else [])
+    assert _withdrawal_receipts("sess-1") == withdrawn
+    from app.db import session_events
+    # A content-free receipt has no transcript row: legacy history can still be imported.
+    assert session_events.can_backfill_events("sess-1")
+    # A repeated × is answered from the receipt, and writes no second one.
+    with _Patches():
+        await _make_handler().handle_remove_queued_message({"session_id": "sess-1", "client_message_id": b_cmd})
+    assert _withdrawal_receipts("sess-1") == withdrawn
+
+
+def test_every_queued_send_that_will_not_run_gets_a_receipt(mock_db):
+    """The receipt is written by the one guarded queued -> aborted transition, so
+    Stop's queue and the scheduler's removals send it too. A send that ran, a peer
+    message and a row with no command id get none."""
+    _make_session("sess-1")
+    cmd = "client-" + "d" * 32
+    stopped = turns_db.enqueue_turn("sess-1", "user", prompt="stopped words", command_id=cmd)["id"]
+    no_command = turns_db.enqueue_turn("sess-1", "user", prompt="legacy")["id"]
+    peer = turns_db.enqueue_turn("sess-1", "agent_message", prompt="peer", command_id="peer-cmd")["id"]
+    ran = turns_db.enqueue_turn("sess-1", "user", prompt="ran", command_id="client-" + "e" * 32)["id"]
+    assert turns_db.start_turn(ran) is not None
+
+    turns_db.stop_queued_turns("sess-1", [stopped, no_command])
+    turns_db.remove_queued_turn(peer)
+    assert turns_db.remove_queued_turn(ran) is None
+
+    assert _withdrawal_receipts("sess-1") == [(cmd, {"message_id": stopped})]
+
+
 # ═══ handle_stop — interrupt(stop) ════════════════════════════════════════════
 
 
@@ -608,6 +663,10 @@ async def test_handle_stop_stale_turn_id_spares_successor(mock_db):
     # Successor untouched (still running); the stale target stays completed.
     assert turns_db.get_turn(n1)["state"] == "running"
     assert turns_db.get_turn(n)["state"] == "completed"
+    # The Stop reached nothing, and the page is told so instead of nothing (#1109).
+    [missed] = sent_frames(handler, "stop_result")
+    assert missed["session_id"] == "sess-1" and missed["turn_id"] == n and missed["stopped"] is False
+    assert missed["message"]
 
 
 @contextmanager
@@ -640,11 +699,13 @@ async def test_handle_stop_on_a_parked_turn_ends_its_work(mock_db, newer):
         "app.core.query_session_lifecycle.stop_all_background_tasks",
         new=AsyncMock(return_value=[]),
     ) as stop_bg:
-        await _make_handler().handle_stop({"session_id": "sess-1", "turn_id": parked})
+        handler = _make_handler()
+        await handler.handle_stop({"session_id": "sess-1", "turn_id": parked})
 
     if newer in ("started", "completed"):
         stop_bg.assert_not_awaited()
         assert turns_db.get_turn(successor)["state"] == ("running" if newer == "started" else "completed")
+        assert [f["stopped"] for f in sent_frames(handler, "stop_result")] == [False]
     else:
         [scope] = captured
         # A parked turn has no live-row flip/owner receipt. Cleanup must bind
@@ -652,6 +713,8 @@ async def test_handle_stop_on_a_parked_turn_ends_its_work(mock_db, newer):
         assert turns_db.STOP_RECEIPT_KEY not in turns_db.get_turn(parked)["payload"]
         stop_bg.assert_awaited_once_with("sess-1", user_stop=True, scope=scope, receipt=None)
         assert stop_bg.await_args.kwargs["scope"] is scope
+        # The parked turn's work was stopped: no "nothing was stopped" notice.
+        assert sent_frames(handler, "stop_result") == []
 
 
 async def test_handle_stop_for_a_parked_turn_spares_a_later_turn(mock_db):
@@ -719,6 +782,97 @@ async def test_stop_relayed_to_the_owning_worker_ends_a_parked_turns_work(mock_d
         stop_bg.assert_awaited_once_with("sess-1", user_stop=True, scope=scope, receipt=None)
         assert stop_bg.await_args.kwargs["scope"] is scope
         assert reply["interrupted"] is True
+
+
+def _turn_being_stopped(busy):
+    """A leased turn an earlier Stop already moved to interrupting/draining."""
+    from app.db import runs
+    live = turns_db.enqueue_turn("sess-1", "user", prompt="p")["id"]
+    lease = runs.claim_run("sess-1", "test-runner", 60)
+    turns_db.start_turn(live, run_id=lease["id"])
+    turns_db.interrupt_turn("sess-1", "stop", turn_id=live)
+    if busy == "draining":
+        turns_db.escalate_to_draining(live)
+    assert turns_db.get_turn(live)["state"] == busy
+    return live
+
+
+@pytest.mark.parametrize("busy", ["interrupting", "draining"])
+async def test_a_repeated_stop_while_the_turn_is_still_stopping_says_nothing(mock_db, busy):
+    """Review round 1 (S1): pressing Stop again while the first Stop is still
+    interrupting or draining T must not tell the page T "already finished" —
+    that cleared the page's wait and recovery while T was still busy."""
+    _make_session("sess-1")
+    live = _turn_being_stopped(busy)
+
+    with _Patches(), patch(
+        "app.core.query_session_lifecycle.stop_all_background_tasks", new=AsyncMock(),
+    ):
+        handler = _make_handler()
+        await handler.handle_stop({"session_id": "sess-1", "turn_id": live})
+
+    assert turns_db.get_turn(live)["state"] == busy
+    assert sent_frames(handler, "stop_result") == []
+
+
+@pytest.mark.parametrize("busy", ["interrupting", "draining"])
+async def test_a_repeated_relayed_stop_while_the_turn_is_still_stopping_is_not_finished(mock_db, busy):
+    """The owner reports the same thing to a relaying page: not finished."""
+    from app.network import control
+
+    _make_session("sess-1")
+    live = _turn_being_stopped(busy)
+    with patch.object(control, "_require_owned"), patch(
+        "app.core.query_session_lifecycle.stop_all_background_tasks", new=AsyncMock(return_value=[]),
+    ):
+        reply = await control._interrupt(
+            {"session_id": "sess-1", "mode": "stop", "stop_background": True, "turn_id": live}, "other-device",
+        )
+
+    assert reply["finished"] is False
+    assert turns_db.get_turn(live)["state"] == busy
+
+
+async def test_a_relayed_stop_for_an_ended_turn_is_finished(mock_db):
+    from app.network import control
+
+    _make_session("sess-1")
+    done = turns_db.enqueue_turn("sess-1", "user", prompt="p")["id"]
+    turns_db.start_turn(done, run_id="run-1")
+    turns_db.settle_turn(done, "completed")
+    with patch.object(control, "_require_owned"), patch(
+        "app.core.query_session_lifecycle.stop_all_background_tasks", new=AsyncMock(return_value=[]),
+    ):
+        reply = await control._interrupt(
+            {"session_id": "sess-1", "mode": "stop", "stop_background": True, "turn_id": done}, "other-device",
+        )
+
+    assert reply["interrupted"] is False and reply["finished"] is True
+
+
+@pytest.mark.parametrize("reply, missed", [
+    ({"interrupted": False, "finished": True, "turn_id": None}, True),
+    # Not interrupted but not ended either: an earlier Stop is still at work.
+    ({"interrupted": False, "finished": False, "turn_id": None}, False),
+    ({"interrupted": True, "finished": False, "turn_id": "t-live"}, False),
+    ({"interrupted": False, "turn_id": None}, False),  # an older owner that does not say
+])
+async def test_relayed_stop_tells_the_page_when_it_reached_nothing(mock_db, reply, missed):
+    """A Stop relayed to the owning worker that matched no turn and no parked
+    work must not end silently on the page that pressed it (#1109)."""
+    from app.network import control
+
+    _make_session("sess-1")
+    with _Patches(), patch.object(control, "interrupt", new=AsyncMock(return_value=reply)) as relay:
+        handler = _make_handler()
+        handler._network_owner = AsyncMock(return_value="owner-device")
+        handler._v2_broadcast_queue = AsyncMock()
+        await handler.handle_stop({"session_id": "sess-1", "turn_id": "t-old"})
+
+    relay.assert_awaited_once()
+    frames = sent_frames(handler, "stop_result")
+    assert frames == ([{"type": "stop_result", "session_id": "sess-1", "turn_id": "t-old", "stopped": False,
+                        "message": frames[0]["message"]}] if missed else [])
 
 
 # ═══ handle_interrupt_for_query — interrupt(send_now) + confirm ══════════════

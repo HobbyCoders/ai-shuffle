@@ -21,13 +21,14 @@ import { parkedSendTurnId } from '$lib/utils/work-log';
 // V2 Phase 1: SSE-fed reducer — the transcript authority for a session.
 import { feedController, OPTIMISTIC_STREAMING_ON } from './v2/feed-controller';
 // Arbiter of which pending ("not seen yet") bubbles survive.
-import { pendingQueue, newLocalPendingId } from './pending-queue';
+import { pendingQueue, newLocalPendingId, SEND_MAYBE_APPLIED_MESSAGE } from './pending-queue';
 import { selectedContextWindow } from './context-window';
 import { getDefaultModel, getServerDefaultModel } from '$lib/constants/models';
 import { composerPreferences } from '../composer-preferences';
 import { sendableComposerBinding } from './composer-binding';
 import { registerReloadBlocker } from '$lib/services/app-update';
 import { claimBootSend, releaseBootSend } from './session-init';
+import { retireSends, runWithSend, sendRunIn, stillPressedOn } from './send-run';
 
 // ─── Sends in flight ─────────────────────────────────────────────────────────
 
@@ -631,6 +632,8 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				const queuedEcho = (sendWhileStreaming || options?.compactFirst) && !options?.skipMessageAppend;
 				// An unrelated snapshot cannot admit this newly minted command.
 				const optimisticQueuedId = queuedEcho ? clientMessageId : null;
+				// A confirmed withdrawal or refusal hands these back with the words.
+				pendingQueue.noteSendUploads(clientMessageId, options?.pendingUploadPaths, options?.pendingUploadReferences);
 
 				// A fresh local send can clear an error without adding a transcript row
 				// (queued/authoritative/pre-appended paths). Publish that intent in the
@@ -638,6 +641,12 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				const localSendIntent = (s: ActiveSessionState) => ({
 					sessionId: _state.sessionId,
 					revision: (s.localSendIntent?.revision ?? 0) + 1,
+					// A Stop that times out names its turn from the receipt of the send
+					// it was pressed on, whether or not that send has a transcript row
+					// (steered, queued, pre-appended). See send-run.ts for the run.
+					commandIds: runWithSend(s, _state.sessionId, clientMessageId,
+						sendWhileStreaming || !!options?.compactFirst,
+						id => !!feedController.hasReceipt?.(_state.sessionId, id)),
 				});
 
 				// Single atomic update — avoids intermediate render where streaming
@@ -665,7 +674,8 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					});
 					update(s => ({
 						...s,
-						queuedMessages: [...s.queuedMessages, {
+						// A compact retry reuses the command id of a send still shown unconfirmed.
+						queuedMessages: [...s.queuedMessages.filter(m => m.id !== optimisticQueuedId), {
 							id: optimisticQueuedId,
 							clientMessageId,
 							content: prompt,
@@ -736,22 +746,42 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					overrides,
 				};
 				if (options?.compactFirst) {
+					// Whether the worker answered that it did not queue this send.
+					let refused = false;
 					try {
 						const result = await compactSession(_state.sessionId!, query);
 						if (!result.queued_turn_id) {
+							refused = true;
 							throw new Error('This worker needs an update to compact and send. Your draft has been kept.');
 						}
 						pendingQueue.acknowledgeSend(_state.sessionId, clientMessageId);
 						clearCompactRetry(_state.sessionId!);
 						spendBindingPicks(_state.sessionId);
 					} catch (error) {
+						// Only a refusal proves the worker did not take it. A lost or
+						// unreadable reply, a timeout or a 5xx (504: the owner may have it)
+						// may follow acceptance: like an ambiguous WS answer, the send is
+						// unconfirmed, not refused. Its chip stays and can be unsent, its
+						// words are not handed back (a resend gets a new command id the
+						// worker cannot dedupe, so it could run twice), and it stays in the
+						// run until its receipt, a snapshot or a withdrawal settles it.
+						const status = (error as { status?: unknown } | null)?.status;
+						const notTaken = refused || (typeof status === 'number' && status >= 400 && status < 500);
+						if (!notTaken) {
+							if (!pendingQueue.answerLost(_state.sessionId, clientMessageId)) {
+								update(s => s.sessionId === _state.sessionId ? { ...s, error: SEND_MAYBE_APPLIED_MESSAGE } : s);
+							}
+							return true;
+						}
 						pendingQueue.acknowledgeSend(_state.sessionId, clientMessageId);
+						// Refused: the composer restores the draft, attachments included.
+						pendingQueue.forgetSendUploads(clientMessageId);
 						// Remove only our optimistic echo, never a newer session's draft
 						// or an authoritative queue snapshot that arrived in the meantime.
 						update(s => s.sessionId === _state.sessionId ? {
-							...s, queuedMessages: s.queuedMessages.filter(m => m.id !== optimisticQueuedId),
+							...retireSends(s, clientMessageId), queuedMessages: s.queuedMessages.filter(m => m.id !== optimisticQueuedId),
 							error: error instanceof Error ? error.message : 'Could not compact and send.',
-						} : s);
+						} : retireSends(s, clientMessageId));
 						throw error;
 					}
 					return true;
@@ -759,6 +789,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				querySent = wsConn.send(query);
 				if (!querySent) {
 					pendingQueue.acknowledgeSend(_state.sessionId, clientMessageId);
+					pendingQueue.forgetSendUploads(clientMessageId);
 					// WS dropped before the frame went out. Roll the optimistic echo back
 					// and surface an error so the caller can restore the input.
 					//
@@ -768,7 +799,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					// its indicator; nothing has to guess.
 					feedController.retractOptimisticSend(_state.sessionId, clientMessageId);
 					update(s => s.sessionId === _state.sessionId ? {
-						...s,
+						...retireSends(s, clientMessageId),
 						...(optimisticQueuedId
 							? { queuedMessages: s.queuedMessages.filter(m => m.id !== optimisticQueuedId) }
 							: {
@@ -777,7 +808,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 									isStreaming: feedController.isReducerStreaming(s.sessionId),
 								}),
 						error: 'Connection lost before the message was sent. Please try again.',
-					} : s);
+					} : retireSends(s, clientMessageId));
 					feedController.clearOptimisticSend(_state.sessionId);
 					return false;
 				}
@@ -796,6 +827,16 @@ export function createMessageSender(deps: MessageSenderDeps) {
 		stopGeneration() {
 			const _state = getState();
 			let recorded = false;
+			// Anything the feed has already shown came before this Stop.
+			const pressedAfterSeq = feedController.reducerSeq?.(_state.sessionId) ?? null;
+			// The send this Stop is pressed on: the oldest of the run the feed has not
+			// receipted. The run holds only sends that may still run (send-run.ts),
+			// so a message queued behind a turn the feed has shown is the one that
+			// runs once that turn ends, not the send that started it.
+			const pressedRun = sendRunIn(_state, _state.sessionId);
+			const pressedAt = pressedRun.findIndex(id => !feedController.hasReceipt?.(_state.sessionId, id));
+			// If it is retired before the timeout, the next send in the run takes its place.
+			const pressedOn = pressedAt < 0 ? [] : pressedRun.slice(pressedAt);
 			if (_state.sessionId) {
 				// The interrupt is always a full stop (the query-scoped SDK interrupt
 				// tears down in-flight background sub-agents too).
@@ -812,6 +853,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				if (recorded) update(s => ({
 					...s,
 					stopRequestedTurnId: s.liveTurnId ?? STOP_TURN_NOT_NAMED,
+					stopRequestedPressedOn: pressedOn,
 					stopTimedOutTurnId: keepStopRecovery(s.stopTimedOutTurnId, s.liveTurnId),
 				}));
 			} else if (internal.awaitingNewSession) {
@@ -821,7 +863,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				// can discard the orphan turn instead of silently dropping the click.
 				internal.stopRequestedBeforeSession = true;
 				recorded = true;
-				update(s => ({ ...s, stopRequestedTurnId: STOP_TURN_NOT_NAMED, stopTimedOutTurnId: null }));
+				update(s => ({ ...s, stopRequestedTurnId: STOP_TURN_NOT_NAMED, stopRequestedPressedOn: pressedOn, stopTimedOutTurnId: null }));
 			}
 
 			const current = stopTimeout.get();
@@ -844,16 +886,39 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					// re-raise isStreaming straight back to true.
 					feedController.clearOptimisticSend(getState().sessionId);
 					update(s => {
+						// A Stop pressed on sends is named only by their receipts (send-run.ts):
+						// a live turn none of them started was begun elsewhere. The feed is
+						// not cut off, and that turn and its rows are left as they are.
+						const unnamed = pressedOn.length > 0 && s.stopRequestedTurnId === STOP_TURN_NOT_NAMED;
+						const leftOn = pressedOn.length ? stillPressedOn(s, _state.sessionId, pressedOn) : [];
+						if (unnamed && s.liveTurnId) {
+							return { ...s, stopTimedOutTurnId: leftOn.length ? STOP_TURN_NOT_NAMED : null,
+								stopTimedOutCommandId: leftOn[0] ?? null, stopTimedOutPressedOn: leftOn,
+								stopTimedOutAfterSeq: pressedAfterSeq };
+						}
 						let messages = s.messages.map(m => {
 							if (m.type === 'tool_use' && m.toolStatus === 'running') return { ...m, streaming: false, toolStatus: 'error' as const };
 							return m.streaming ? { ...m, streaming: false } : m;
 						});
 						messages = messages.filter(m => !(m.type === 'text' && m.role === 'assistant' && !m.content));
-						// A newest user row with no turn yet is the send this Stop was pressed on.
+						// A Stop still waiting for the feed to name a turn only times out
+						// while the turn of the send it was pressed on has not shown up.
+						// Steered and row-less sends count too (#1114). Without one, a
+						// newest user row with no turn yet is that send.
+						// A Stop pressed on sends only ever hands off among them (send-run.ts).
 						const newestUser = s.messages.findLast(m => m.role === 'user');
+						const fallback = newestUser && !newestUser.turnId ? newestUser.commandId ?? null : null;
+						const left = pressedOn.length ? stillPressedOn(s, _state.sessionId, pressedOn)
+							: fallback ? [fallback] : [];
+						const turn = unnamed ? STOP_TURN_NOT_NAMED : s.liveTurnId ?? s.stopRequestedTurnId ?? STOP_TURN_NOT_NAMED;
+						// Every send it was pressed on was retired while it waited: none of
+						// them will run, so there is no turn of this page's to recover.
+						const nothingLeft = pressedOn.length > 0 && !left.length && turn === STOP_TURN_NOT_NAMED;
 						return { ...s, messages, isStreaming: false, optimisticStreaming: false,
-							stopTimedOutTurnId: s.liveTurnId ?? s.stopRequestedTurnId ?? STOP_TURN_NOT_NAMED,
-							stopTimedOutCommandId: newestUser && !newestUser.turnId ? newestUser.commandId ?? null : null };
+							stopTimedOutTurnId: nothingLeft ? null : turn,
+							stopTimedOutCommandId: left[0] ?? null,
+							stopTimedOutPressedOn: left,
+							stopTimedOutAfterSeq: pressedAfterSeq };
 					});
 				}
 				stopTimeout.set(null);

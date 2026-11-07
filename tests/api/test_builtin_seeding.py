@@ -65,6 +65,25 @@ async def test_retirement_preserves_key_scope_and_cancels_stored_continuations(m
     assert worker_refusal("retirement-only", "unrelated-agent") is not None
 
 
+def test_retirement_withdraws_a_queued_owner_send_with_its_receipt(mock_db):
+    """A queued owner send cancelled by retirement is withdrawn like any other:
+    every page watching the chat gets its command-id receipt (#1114)."""
+    from app.core.builtin_subagents import seed_builtin_subagents
+    from app.db import database, wakeups, turns, session_events
+
+    create_unchanged_builtin("Explore")
+    database.create_session("retirement-chat", profile_id="Explore")
+    queued = turns.enqueue_turn("retirement-chat", "user", profile_id="Explore", prompt="work",
+                                command_id="client-" + "a" * 32)
+    seed_builtin_subagents()
+
+    assert turns.get_turn(queued["id"])["state"] == "aborted"
+    assert [(e["command_id"], e["payload"]) for e in session_events.get_events("retirement-chat")
+            if e["event_type"] == "queued_message.withdrawn"] == [("client-" + "a" * 32, {"message_id": queued["id"]})]
+    assert [r["source"] for r in wakeups.get_pending_wakeups()
+            if r["session_id"] == "retirement-chat"] == ["profile_cancelled"]
+
+
 @pytest.mark.parametrize("retired_id", ["Explore", "Plan", "general-purpose", "frontend-designer"])
 async def test_retired_session_announces_the_cancelled_continuation_once(mock_db, retired_id):
     """Every background task that finishes on a cancelled retired-agent session asks

@@ -46,7 +46,10 @@ class HTTPQuerySender(ChatWebSocketHandler):
 
     async def send_json(self, data: dict) -> None:
         if data.get("type") in ("error", "runner_unreachable"):
-            raise HTTPException(status_code=400, detail=data.get("message") or "Could not send message")
+            # 4xx is a refusal: the send will not run. A request the owner may
+            # have applied with its answer lost is a 504: the send may still run.
+            raise HTTPException(status_code=504 if data.get("maybe_applied") else 400,
+                                detail=data.get("message") or "Could not send message")
 
 
 async def submit_http_query(request: Request, session_id: str, data: dict, *, compact_first: bool) -> dict:
