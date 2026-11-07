@@ -171,6 +171,9 @@ type WorktreePick = {intent: Picks['worktreeIntent']; checkout: CheckoutPick | n
 const WORKTREE_CACHE_KEY = 'ai-shuffle-composer:projectWorktrees';
 let projectWorktrees: Record<string, WorktreePick> = {};
 const registeredWorktrees = new Set<string>();
+// Keys whose account row holds a retired-identity null. A promotion onto one
+// must replace that null (version-checked), or the next sync deletes it again.
+const retiredWorktrees = new Set<string>();
 const hasProject = (project: ProjectPick) => !!(project.projectId || project.projectV2Id);
 const emptyWorktree = (): WorktreePick => ({intent:'local', checkout:null});
 function worktreeFor(project: ProjectPick): WorktreePick {
@@ -189,7 +192,14 @@ function applyWorktree(key: string, value: unknown) {
 function worktreeAdapter(key: string) {
  registeredWorktrees.add(key);
  return {read: () => projectWorktrees[key] ?? null,
-  apply(value: unknown) { applyWorktree(key, value); notifyRemote(); }};
+  // A synced null is a retired identity: no entry, not an empty choice.
+  apply(value: unknown) {
+   if (value === null) retiredWorktrees.add(key); else retiredWorktrees.delete(key);
+   applyWorktree(key, value ?? undefined); notifyRemote();
+  },
+  // Another device's choice won: a held branch move must not land over it,
+  // even when it equals ours (Auto over Auto).
+  conflict() { checkoutRevisions.set(key, (checkoutRevisions.get(key) ?? 0) + 1); }};
 }
 function validWorktreeKey(key: string) {
  try {
@@ -201,17 +211,41 @@ function saveWorktree(project: ProjectPick, value: WorktreePick) {
  if (!hasProject(project)) return;
  const key = projectWorktreeKey(project);
  if (!registeredWorktrees.has(key)) preferenceSync.register(key, worktreeAdapter(key));
+ retiredWorktrees.delete(key);
  applyWorktree(key, value);
  preferenceSync.save(key, projectWorktrees[key]);
 }
-const pendingWorktreeLinks = new Map<string, {project:ProjectPick; revision:number}>();
-// Git discovery can link a local project after its first compose pick. Promote
-// only that proven pair; bootstrap uses only_if_missing so a saved shared choice
-// on another device wins. Never move a branch while its create is in flight.
-function linkWorktreeProject(project: ProjectPick) {
- if (!project.projectId || !project.projectV2Id) return;
- const localKey = projectWorktreeKey({...project, projectV2Id:null});
+// A branch move held for an in-flight create, keyed by the identity it leaves.
+// `revision` is the target's revision the move may still land on (-1 = cancelled);
+// `held` is the source's revision when held, so a newer choice there is never cleared.
+// Retired identities are deleted, never saved as an empty pick, so any entry
+// left at a target is a real choice (an explicit Auto included).
+const pendingWorktreeLinks = new Map<string, {project:ProjectPick; from:ProjectPick; revision:number; held:number}>();
+// Git discovery can link a local project after its first compose pick, or the
+// catalog can retire the identity it was picked under for a shared one (#1078).
+// Promote only that proven pair (`from` is the identity it replaces); bootstrap
+// uses only_if_missing so a saved shared choice on another device wins. Never
+// move a branch while its create is in flight.
+function linkWorktreeProject(project: ProjectPick, from: ProjectPick = {...project, projectV2Id:null}) {
+ if (!project.projectId || !project.projectV2Id || from.projectId !== project.projectId) return;
+ const localKey = projectWorktreeKey(from);
  const key = projectWorktreeKey(project);
+ if (localKey === key) return;
+ // A branch move deferred onto the identity now retired in turn ends at its
+ // replacement. It lands only where no choice is saved (an explicit Auto
+ // counts), and a newer choice under the retired identity cancels it.
+ for (const [heldKey, link] of pendingWorktreeLinks) {
+  if (projectWorktreeKey(link.project) !== localKey) continue;
+  const live = link.revision === (checkoutRevisions.get(localKey) ?? 0);
+  if (key === heldKey) {
+   // Back home: nothing to move, but a cancel still drops the held branch
+   // unless a newer choice replaced it there.
+   pendingWorktreeLinks.delete(heldKey);
+   if (!live && link.held === (checkoutRevisions.get(heldKey) ?? 0)) composerPreferences.rememberCheckout(link.from, null);
+   continue;
+  }
+  pendingWorktreeLinks.set(heldKey, {...link, project, revision:live && !projectWorktrees[key] ? checkoutRevisions.get(key) ?? 0 : -1});
+ }
  const local = projectWorktrees[localKey];
  if (!local || (local.intent === 'local' && !local.checkout && !pendingWorktreeLinks.has(localKey))) return;
  const claimed = [...claims].some(claim => claim.key === localKey && claim.ownerEpoch === sessionOwnerEpoch());
@@ -220,7 +254,11 @@ function linkWorktreeProject(project: ProjectPick) {
   // Intent must follow discovery immediately, even while a create owns the branch.
   applyWorktree(key, {...local, checkout:!claimed && local.checkout ? {...local.checkout, ...project} : null});
   if (!registeredWorktrees.has(key)) preferenceSync.register(key, worktreeAdapter(key));
-  if (claimed) pendingWorktreeLinks.set(localKey, {project, revision:checkoutRevisions.get(key) ?? 0});
+  // Over a retired null the account must take the replacement; a concurrent
+  // choice from another device wins the version check. Otherwise bootstrap's
+  // only_if_missing keeps a choice another device already saved.
+  if (retiredWorktrees.delete(key)) preferenceSync.save(key, projectWorktrees[key]);
+  if (claimed) pendingWorktreeLinks.set(localKey, {project, from, revision:checkoutRevisions.get(key) ?? 0, held:checkoutRevisions.get(localKey) ?? 0});
  }
  if (claimed) {
   if (promote) void preferenceSync.reconnect();
@@ -232,7 +270,8 @@ function linkWorktreeProject(project: ProjectPick) {
   && pending.revision === (checkoutRevisions.get(key) ?? 0)) {
   saveWorktree(project, {...worktreeFor(project), checkout:{...local.checkout, ...project}});
  }
- applyWorktree(localKey, null);
+ applyWorktree(localKey, undefined);
+ retiredWorktrees.add(localKey);
  preferenceSync.save(localKey, null);
  if (promote) void preferenceSync.reconnect();
 }
@@ -439,12 +478,12 @@ export const composerPreferences = {
      composerPreferences.rememberCheckout(project, null);
     }
     const linked = pendingWorktreeLinks.get(key);
-    if (linked) linkWorktreeProject(linked.project);
+    if (linked) linkWorktreeProject(linked.project, linked.from);
    },
    release() {
     claims.delete(claim);
     const linked = pendingWorktreeLinks.get(key);
-    if (linked) linkWorktreeProject(linked.project);
+    if (linked) linkWorktreeProject(linked.project, linked.from);
    },
   };
  },

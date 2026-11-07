@@ -2,6 +2,7 @@
 
 import json
 import re
+from uuid import uuid4
 from contextlib import contextmanager
 from unittest.mock import patch
 
@@ -161,3 +162,33 @@ def test_preferences_preserve_json_value_types(jsonb_client, value):
     all_values = jsonb_client.get("/api/v1/preferences/all").json()["preferences"]
     assert all_values[key] == value
     assert type(all_values[key]) is type(value)
+
+
+def test_retried_write_id_is_already_applied_not_a_conflict(jsonb_client):
+    key = "composer.projectWorktree.shared%3Apv2-n"
+    url = f"/api/v1/preferences/{key}"
+    first, second, third = (str(uuid4()) for _ in range(3))
+
+    def put(value, expected, write_id=None):
+        body = {"key": key, "value": value, "expected_version": expected}
+        if write_id:
+            body["write_id"] = write_id
+        return jsonb_client.put(url, json=body)
+
+    created = put("a", None, first)
+    assert created.status_code == 200 and created.json()["version"] == first
+    # The create committed but its response was lost: the retry is that write.
+    assert put("a", None, first).json() == created.json()
+    updated = put("b", first, second)
+    assert updated.status_code == 200 and updated.json()["version"] == second
+    retried = put("b", first, second)
+    assert retried.status_code == 200
+    assert (retried.json()["value"], retried.json()["version"]) == ("b", second)
+    # A fresh edit from the same stale base is still a conflict.
+    assert put("c", first, third).status_code == 409
+    # Another device writes over it: the old retry is now a real conflict.
+    theirs = put("theirs", second)
+    assert theirs.status_code == 200 and theirs.json()["version"] not in {first, second}
+    assert put("b", first, second).status_code == 409
+    assert jsonb_client.get(url).json()["value"] == "theirs"
+    assert put("x", theirs.json()["version"], "not-a-uuid").status_code == 422
