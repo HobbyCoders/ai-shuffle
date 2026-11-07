@@ -176,7 +176,11 @@ def _create_profile_tools(is_admin: bool) -> list:
         mode_error = _tool_mode_error(args)
         if mode_error:
             return _error(mode_error)
-        if args.get("tool_selection_mode") == "allow" and not args.get("allowed_tools"):
+        # Judge the tool keys exactly as they will be stored (only truthy values
+        # are kept), so blank-only names or an inferred mode can't save "no tools".
+        stored_tools = {key: args[key] for key in ("tool_selection_mode", "allowed_tools", "disallowed_tools")
+                        if args.get(key)}
+        if _allow_list_empty(stored_tools):
             return _error(_ALLOW_EMPTY_ERROR)
 
         import re

@@ -618,12 +618,19 @@ class TestToolSelectionMode:
         assert config["allowed_tools"] == names
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("extra", [{}, {"allowed_tools": []}])
-    async def test_create_refuses_allow_mode_with_nothing_listed(self, admin_tools, extra):
+    @pytest.mark.parametrize("args", [
+        {"tool_selection_mode": "allow"},
+        {"tool_selection_mode": "allow", "allowed_tools": []},
+        # Blank names are dropped at runtime, so these also mean "no tools";
+        # the second infers allow mode from the non-empty raw list.
+        {"tool_selection_mode": "allow", "allowed_tools": ["", " "]},
+        {"allowed_tools": ["", " "]},
+    ])
+    async def test_create_refuses_allow_mode_with_nothing_listed(self, admin_tools, args):
         tool = get_tool(admin_tools, "createProfile")
         with patch("app.db.database.get_profile", return_value=None), \
              patch("app.db.database.create_profile") as mock_create:
-            result = await tool.handler({"name": "Empty", "tool_selection_mode": "allow", **extra})
+            result = await tool.handler({"name": "Empty", **args})
         assert tool_result_json(result)["success"] is False
         mock_create.assert_not_called()
 
