@@ -1413,8 +1413,10 @@
 	.mcp-close:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
 
 	/* Pages: the active one in place, the main list shifted left and dimmed
-	   under a sub-page, the rest waiting off to the right. */
-	.mcp-pages { position: relative; flex: 1; min-height: 0; overflow: hidden; }
+	   under a sub-page, the rest waiting off to the right. `clip`, not only
+	   `hidden`: a hidden box can still be scrolled by script, and focusing a
+	   control on a page that is still sliding in would push every page sideways. */
+	.mcp-pages { position: relative; flex: 1; min-height: 0; overflow: hidden; overflow: clip; }
 	.mcp-page {
 		position: absolute;
 		inset: 0;
@@ -1805,7 +1807,7 @@
 
 	/* Pages hosting a selector's own menu (Agent, "Runs on") as a full list. */
 	.mcp-page .mcp-host:empty { display: none; }
-	.mcp-page .mcp-host :global(:is(.selector-dropdown, .runner-dropdown, .mode-dropdown)) {
+	.mcp-page .mcp-host :global(:is(.selector-dropdown, .runner-dropdown, .mode-dropdown, .runs-on-menu)) {
 		position: static;
 		inset: auto;
 		translate: none;
