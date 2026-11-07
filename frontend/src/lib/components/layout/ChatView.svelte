@@ -334,6 +334,32 @@
 	// slide the composer down from the hero (#1049).
 	let previousIsEmpty = $state<boolean | null>(null);
 
+	// The composer's move from the hero to the dock (#1085, #1073). Its box is
+	// read just before the layout flips and again after, and the slide starts
+	// from where it really was: a fixed distance started it above the centred
+	// composer and an overshooting curve carried it past the dock. A composer
+	// that was already docked (phone widths, the phone shell) does not slide.
+	let inputSlot = $state<HTMLDivElement | null>(null);
+	let composerBeforeDock: DOMRect | null = null;
+	$effect.pre(() => {
+		const isEmpty = isEmptyState;
+		untrack(() => {
+			composerBeforeDock = previousIsEmpty === true && !isEmpty && inputSlot ? inputSlot.getBoundingClientRect() : null;
+		});
+	});
+	function slideComposerToDock(from: DOMRect | null): Animation | null {
+		const slot = inputSlot;
+		if (!slot || !from || typeof slot.animate !== 'function') return null;
+		if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return null;
+		const to = slot.getBoundingClientRect();
+		const travel = from.top - to.top;
+		if (Math.abs(to.bottom - from.bottom) <= 2 || Math.abs(travel) <= 2) return null;
+		return slot.animate(
+			[{ transform: `translateY(${travel}px)` }, { transform: 'translateY(0)' }],
+			{ id: 'composer-dock', duration: 380, easing: 'cubic-bezier(0.22, 1, 0.36, 1)' }
+		);
+	}
+
 	// Depends only on `isEmptyState`; reading any other store here would re-run
 	// the effect (clearing the timer via teardown) without resetting the flag.
 	$effect(() => {
@@ -345,11 +371,14 @@
 		if (wasEmpty === true && !isEmpty) {
 			// Empty → active transition: animate the reveal
 			transitioningFromEmpty = true;
+			const slide = untrack(() => slideComposerToDock(composerBeforeDock));
+			composerBeforeDock = null;
 			const timer = setTimeout(() => {
 				transitioningFromEmpty = false;
 			}, 450);
 			return () => {
 				clearTimeout(timer);
+				slide?.cancel();
 				transitioningFromEmpty = false;
 			};
 		} else {
@@ -572,7 +601,7 @@
 	     conditional strips below are siblings of ChatInput, not ancestors, so they
 	     never remount it. All three lanes keep this same editor. -->
 	{#if showComposer}
-		<div class="input-slot" bind:clientHeight={composerHeight} class:composer-overflow={surfaceHeight > 0 && composerHeight > surfaceHeight} class:input-wrapper={!showEmptyHero} class:empty-input-layout={showEmptyHero}>
+		<div class="input-slot" bind:this={inputSlot} bind:clientHeight={composerHeight} class:composer-overflow={surfaceHeight > 0 && composerHeight > surfaceHeight} class:input-wrapper={!showEmptyHero} class:empty-input-layout={showEmptyHero}>
 			{#if voiceCallActive && $activeSession.sessionId}
 				<div class="call-dock-slot" bind:clientHeight={callDockHeight}><VoiceCallPanel sessionId={$activeSession.sessionId} compact /></div>
 			{/if}
@@ -661,17 +690,6 @@
 		}
 	}
 
-	@keyframes inputSlideDown {
-		from {
-			opacity: 0.7;
-			transform: translateY(-30vh);
-		}
-		to {
-			opacity: 1;
-			transform: translateY(0);
-		}
-	}
-
 	.message-area-wrapper {
 		/* Keep the mirror/reconnect overlays anchored here before, during and
 		   after messageAreaReveal. Its temporary transform must not create then
@@ -731,15 +749,12 @@
 		animation: messageAreaReveal 350ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
 	}
 
-	/* The shared layout moves its empty composer from centre to dock.
-	   Shells that already dock the composer override this input animation. */
-	.transitioning-from-empty .input-wrapper {
-		animation: inputSlideDown 400ms cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
-	}
+	/* The composer's own move from the hero to the dock is measured and played
+	   from script (slideComposerToDock): a fixed keyframe cannot know where the
+	   hero put it, or that a phone-width hero already docks it. */
 
 	@media (prefers-reduced-motion: reduce) {
-		.transitioning-from-empty .message-area-wrapper,
-		.transitioning-from-empty .input-wrapper {
+		.transitioning-from-empty .message-area-wrapper {
 			animation: none;
 		}
 	}
