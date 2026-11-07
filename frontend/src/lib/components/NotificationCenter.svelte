@@ -68,26 +68,54 @@
 	};
 
 	// The rail's panel floats beside the rail, its bottom level with the bell,
-	// at 300px: from x=64 its right edge lands at 364, inside the list column
-	// and its gutter, 12px or more left of the page content (x=378 with the
-	// list panel open). It never covers the rail and keeps inside the window.
+	// at 300px: from x=64 its right edge lands at 364. The default list panel
+	// ends at x=319, so the panel overruns it by about 45px into the page. It
+	// never covers the rail and keeps inside the window.
 	const RAIL_PANEL_WIDTH = 300;
-	// The page's blank inline gutter right of the list column: overrunning the
-	// list panel by up to this much covers only padding, never text.
+	// Past this far over the page the panel always sits on content (the old
+	// rule, kept: a collapsed list panel always gets the scrim).
 	const CONTENT_GUTTER = 48;
+	// The panel's tallest height (its max-height), for the strip checked below.
+	const RAIL_PANEL_MAX_HEIGHT = 440;
 	let railAnchor = $state({ left: 0, bottom: 8, width: RAIL_PANEL_WIDTH, railRight: 0 });
-	// With the list panel collapsed (or a narrow window) the panel has to sit on
-	// page content, so a light scrim dims the page and no sliced words read.
+	// When the panel sits on page content (the list panel collapsed, or a chat
+	// whose transcript and composer start right of the list at 800-1000px), the
+	// dialog scrim dims the page so no sliced words read beside the card. Only
+	// a strip of blank page under it (a centred chat at 1440px) stays undimmed.
 	let coversPage = $state(false);
+
+	const CONTENT = 'button, a[href], input, textarea, select, img, svg, canvas, video, [role="button"], [contenteditable=""], [contenteditable="true"]';
+	function isContent(el: Element): boolean {
+		if (el.matches(CONTENT) || el.closest('svg')) return true;
+		for (const node of el.childNodes) if (node.nodeType === Node.TEXT_NODE && node.textContent?.trim()) return true;
+		return false;
+	}
+	/** Whether anything readable or usable lies under the page strip the panel will cover. */
+	function stripHasContent(fromX: number, toX: number, top: number, bottom: number): boolean {
+		if (typeof document.elementsFromPoint !== 'function') return true;
+		for (let x = fromX + 2; x < toX; x += 8) {
+			for (let y = top + 4; y < bottom; y += 12) {
+				// The topmost element under the point, ignoring this panel and its scrim.
+				const hit = document.elementsFromPoint(x, y).find((el) => !rootRef?.contains(el));
+				if (hit && isContent(hit)) return true;
+			}
+		}
+		return false;
+	}
+
 	function positionPanel() {
 		if (!rail || !bellRef) return;
 		const rect = bellRef.getBoundingClientRect();
 		const railRight = bellRef.closest('nav.rail')?.getBoundingClientRect().right ?? rect.right;
 		const width = Math.min(RAIL_PANEL_WIDTH, window.innerWidth - 16);
 		const left = Math.max(8, Math.min(railRight + 8, window.innerWidth - width - 8));
-		railAnchor = { left, bottom: Math.max(8, window.innerHeight - rect.bottom), width, railRight };
+		const bottomGap = Math.max(8, window.innerHeight - rect.bottom);
+		railAnchor = { left, bottom: bottomGap, width, railRight };
 		const listRight = bellRef.closest('aside')?.getBoundingClientRect().right ?? railRight;
-		coversPage = left + width > listRight + CONTENT_GUTTER;
+		const right = left + width;
+		const bottom = window.innerHeight - bottomGap;
+		coversPage = right > listRight + CONTENT_GUTTER
+			|| (right > listRight && stripHasContent(listRight, right, Math.max(0, bottom - RAIL_PANEL_MAX_HEIGHT), bottom));
 	}
 
 	function togglePanel() {
@@ -253,7 +281,9 @@
 		width: var(--notif-width);
 		max-height: min(440px, calc(100dvh - var(--notif-bottom) - var(--titlebar-height, 0px) - 8px));
 	}
-	/* Half the shared modal overlay, from the rail's edge: the rail stays lit. */
+	/* The shared modal overlay at full strength, from the rail's edge: the rail
+	   stays lit, and the page under the card dims as far as under a dialog, so
+	   its cut-off words no longer read beside the card. */
 	.notif-scrim {
 		position: fixed;
 		inset: var(--titlebar-height, 0px) 0 0 var(--notif-rail-right);
@@ -261,7 +291,8 @@
 		padding: 0;
 		border: 0;
 		cursor: default;
-		background: color-mix(in oklch, var(--modal-overlay) 50%, transparent);
+		background: var(--modal-overlay);
+		backdrop-filter: blur(var(--modal-blur, 2px));
 		animation: notif-scrim-in 120ms ease-out;
 	}
 	@keyframes notif-scrim-in { from { opacity: 0; } }
