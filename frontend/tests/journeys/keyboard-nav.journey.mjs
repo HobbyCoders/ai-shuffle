@@ -32,6 +32,29 @@ const focused = (page) => page.evaluate(() => {
 	return !el || el === document.body ? 'body' : `${el.tagName.toLowerCase()}[${el.getAttribute('aria-label') || ''}]`;
 });
 
+/**
+ * A point outside the notification panel and its bell. In order of preference:
+ * empty chat area, any other empty page, then a control. A full history covers
+ * the whole chat area but the composer (as on a shared CI instance).
+ */
+const outsideSpot = (page) => page.evaluate(() => {
+	const panel = document.querySelector('[role="dialog"][aria-label="Notifications"]');
+	const bellRoot = panel?.closest('.notif-center');
+	const control = 'button, a[href], input, textarea, select, [contenteditable="true"], [role="button"], [role="textbox"], [tabindex]:not([tabindex="-1"])';
+	const found = [];
+	for (let y = 8; y < window.innerHeight - 8; y += 16) {
+		for (let x = 12; x < window.innerWidth - 8; x += 24) {
+			const el = document.elementFromPoint(x, y);
+			if (!el || panel?.contains(el) || bellRoot?.contains(el)) continue;
+			// The composer box's padding focuses the editor, so it counts as a control.
+			const empty = !el.closest(control) && !el.closest('[data-ui-mount="ChatInput"]');
+			const rank = empty ? (el.closest('[data-ui-state="chat"]') ? 0 : 1) : 2;
+			found[rank] ??= { x, y, empty };
+		}
+	}
+	return found.find(Boolean) ?? null;
+});
+
 async function clearComposer(page) {
 	await composer(page).click();
 	await composer(page).press('ControlOrMeta+A');
@@ -173,7 +196,7 @@ await runJourney({
 			page.__keyNavNotice = id;
 			await gotoApp(page, status);
 		},
-		async act({ page, mark }) {
+		async act({ page, mark, log }) {
 			const bell = page.getByRole('button', { name: /^Notifications \(\d+ unread\)$/ }).first();
 			try {
 				for (const close of ['Escape', 'tap outside']) {
@@ -182,14 +205,22 @@ await runJourney({
 					await opener.click();
 					const panel = page.getByRole('dialog', { name: 'Notifications' });
 					await panel.waitFor();
+					let spot = null;
 					if (close === 'Escape') await page.keyboard.press('Escape');
-					else await page.locator('[data-ui-mount="MessageArea"], [data-ui-state="chat"]').first().click({ position: { x: 20, y: 300 } });
+					else {
+						// The panel grows with the history (a shared instance holds other
+						// journeys' notices), so pick a point outside it, on empty page if any.
+						spot = await outsideSpot(page);
+						expect(spot, 'some point on screen lies outside the notification panel');
+						log(`tap outside at ${spot.x},${spot.y} on ${spot.empty ? 'empty page' : 'a control'}`);
+						await page.mouse.click(spot.x, spot.y);
+					}
 					await panel.waitFor({ state: 'hidden', timeout: 5000 });
 					await page.waitForTimeout(400);
 					const now = await focused(page);
 					expect(now !== 'body', `focus stays on a control after ${close} (it is on ${now})`);
 					// A tap on a control moves focus there; Escape, or a tap on nothing, hands it to the bell.
-					if (close === 'Escape') expect(now.startsWith('button[Notifications'), `focus returns to the bell after Escape (it is on ${now})`);
+					if (close === 'Escape' || spot?.empty) expect(now.startsWith('button[Notifications'), `focus returns to the bell after ${close} (it is on ${now})`);
 				}
 			} finally {
 				await api(page, 'POST', `/notifications/${page.__keyNavNotice}/dismiss`).catch(() => {});
