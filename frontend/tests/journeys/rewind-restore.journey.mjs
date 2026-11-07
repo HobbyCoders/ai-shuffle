@@ -8,12 +8,18 @@
 //                         comes, and the owner types a new prompt in that gap;
 //                         the rewound words go to the prompt stash, never into
 //                         the new prompt, and the new prompt is sent alone.
+//   typed-then-left       (#1083, review S3) the same, but the owner opens another
+//                         chat before the answer comes; back in the first chat
+//                         its draft holds only the new words.
+//   typed-then-reloaded   (#1083, review S3) the owner types the new prompt, then
+//                         the page reloads before the answer; the reopened chat
+//                         keeps the new words alone and stashes the rewound ones.
 //   attachment-chip       (#1084) a rewound message with an attached file comes
 //                         back with its chip, not the raw upload path. The
 //                         server names the uploads; the browser never reads them
 //                         out of the text.
 import { fakeAiTag, runJourney } from './runner.mjs';
-import { PROJECT, composer, countUserRows, expect, openNewChat, typeAndSend, uniq, waitChat, waitChatOpen, waitTurnSettled } from './lib/app.mjs';
+import { PROJECT, SEEDED, api, composer, countUserRows, expect, openFromSidebar, openNewChat, typeAndSend, uniq, waitChat, waitChatOpen, waitTurnSettled } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 
 async function sendAndSettle(page, variant, words, messagesAtLeast) {
@@ -26,6 +32,38 @@ async function confirmRewindOfLastUserMessage(page) {
 	await page.keyboard.press('Enter');
 	await page.getByRole('dialog').getByRole('button', { name: 'Rewind', exact: true }).click();
 }
+
+/** A chat's sidebar title, found by a word from its first prompt. */
+async function chatTitleByToken(page, token) {
+	for (let attempt = 0; attempt < 20; attempt++) {
+		const rows = await api(page, 'GET', '/sessions?limit=50');
+		const row = rows.find((r) => (r.title || '').includes(token));
+		if (row) return row.title;
+		await page.waitForTimeout(500);
+	}
+	throw new Error(`no chat titled with ${token}`);
+}
+
+/** Two settled turns; the second is the one the case rewinds. */
+async function twoTurns(ctx) {
+	await openNewChat(ctx);
+	const kept = `kept-${uniq()}`;
+	await sendAndSettle(ctx.page, ctx.variant, kept, 2);
+	const rewound = `rewound-${uniq()}`;
+	await sendAndSettle(ctx.page, ctx.variant, rewound, 4);
+	ctx.state = { kept, rewound, fresh: `fresh-${uniq()}` };
+}
+
+/** Type the new prompt once the rewound row has left, without tapping a chip. */
+async function typeFresh(page, words) {
+	const box = composer(page);
+	await box.focus();
+	await page.keyboard.press('ControlOrMeta+End');
+	await box.pressSequentially(words);
+	return box;
+}
+
+const STASHED = 'Your rewound message is in the prompt stash';
 
 /** Hold the rewind's answer until `release()`; resolves `carriedOut` with the server's result. */
 async function holdRewindAnswer(page) {
@@ -122,6 +160,81 @@ await runJourney({
 				expect((await countUserRows(page, state.rewound)) === 0, 'the rewound words were not sent with it');
 				// They are kept: adding them back is the owner's choice.
 				await page.getByRole('button', { name: 'Add to composer', exact: true }).click();
+				await box.getByText(state.rewound).waitFor({ timeout: 10_000 });
+			}
+		},
+		{
+			name: 'typed-then-left',
+			setup: twoTurns,
+			async act({ page, mark, state }) {
+				const title = await chatTitleByToken(page, state.kept);
+				const { carriedOut, release } = await holdRewindAnswer(page);
+				await mark('confirm the rewind');
+				await confirmRewindOfLastUserMessage(page);
+				const result = await carriedOut;
+				expect(result.success && result.chat_rewound, `the server rewound: ${JSON.stringify(result)}`);
+				await waitChat(page, { messages: '2' }, { timeout: 30_000 });
+				await mark('type a new prompt before the answer');
+				await typeFresh(page, state.fresh);
+				await mark('open another chat before the answer');
+				const chatA = await page.locator('[data-ui-state="chat"]').getAttribute('data-ui-session');
+				await openFromSidebar(page, SEEDED.no_project);
+				// The first chat stays on screen until the other one has loaded.
+				await page.waitForFunction((tag) => {
+					const el = document.querySelector('[data-ui-state="chat"]');
+					return el && el.getAttribute('data-ui-session') !== tag && el.getAttribute('data-ui-loading') === 'false';
+				}, chatA, { timeout: 30_000 });
+				await waitChatOpen(page, { messagesAtLeast: 1, hold: 0 });
+				await mark('the answer arrives off screen');
+				release();
+				await page.getByText(STASHED, { exact: false }).first().waitFor({ timeout: 15_000 });
+				await page.unrouteAll({ behavior: 'ignoreErrors' });
+				await mark('back to the rewound chat');
+				await openFromSidebar(page, title);
+				await waitChat(page, { messages: '2', loading: 'false' }, { timeout: 30_000 });
+				const box = composer(page);
+				await box.getByText(state.fresh).waitFor({ timeout: 10_000 });
+				const text = (await box.innerText()).trim();
+				expect(text === state.fresh, `the draft holds only the new prompt: ${JSON.stringify(text)}`);
+			}
+		},
+		{
+			name: 'typed-then-reloaded',
+			setup: twoTurns,
+			async act({ page, mark, state }) {
+				let done;
+				const carriedOut = new Promise((resolve) => { done = resolve; });
+				await page.route('**/rewind/execute/**', async (route) => {
+					const response = await route.fetch();
+					done(await response.json());
+					// Held: the page reloads before this request is answered.
+				});
+				await mark('confirm the rewind');
+				await confirmRewindOfLastUserMessage(page);
+				const result = await carriedOut;
+				expect(result.success && result.chat_rewound, `the server rewound: ${JSON.stringify(result)}`);
+				await waitChat(page, { messages: '2' }, { timeout: 30_000 });
+				await mark('type a new prompt before the answer');
+				await typeFresh(page, state.fresh);
+				// The composer saves its draft after a 100 ms pause; an owner pauses
+				// longer than that before a reload. Wait for the saved copy.
+				await page.waitForFunction((words) => Object.keys(sessionStorage)
+					.some((k) => k.includes('draft') && (sessionStorage.getItem(k) || '').includes(words)), state.fresh, { timeout: 5_000 });
+				await mark('reload before the answer');
+				// See reload-before-answer: reload first, then drop the held route.
+				await page.reload({ waitUntil: 'domcontentloaded' });
+				await page.unrouteAll({ behavior: 'ignoreErrors' });
+				await page.evaluate(() => new Promise((ok) => requestAnimationFrame(() => requestAnimationFrame(() => ok()))));
+				await mark('page reloaded');
+				await waitChatOpen(page, { messagesAtLeast: 2 });
+				await waitChat(page, { messages: '2', loading: 'false' }, { timeout: 30_000 });
+				const box = composer(page);
+				await box.getByText(state.fresh).waitFor({ timeout: 10_000 });
+				await page.getByText(STASHED, { exact: false }).first().waitFor({ timeout: 15_000 });
+				const text = (await box.innerText()).trim();
+				expect(text === state.fresh, `the composer holds only the new prompt: ${JSON.stringify(text)}`);
+				expect((await countUserRows(page, state.rewound)) === 0, 'the rewound row is gone');
+				await page.getByRole('button', { name: 'Add to composer', exact: true }).first().click();
 				await box.getByText(state.rewound).waitFor({ timeout: 10_000 });
 			}
 		},
