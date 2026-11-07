@@ -72,40 +72,31 @@ def origin_for_legacy_project(project_row: Dict[str, Any]) -> str:
 def resolve_catalog_project(project_v2_id: str) -> Optional[Dict[str, Any]]:
     """Follow a late-linked placeholder for project-level reads, never sessions.
 
-    The exact ``local:<legacy primary key>`` origin proves the replacement;
-    names and paths cannot. A deleted legacy row is not an alias. Do not seed
-    anything here: creation/linking commits the replacement atomically, and
-    missing/removed checkouts must retain their normal 404/409 behavior.
+    The local first-link record proves the exact legacy generation and target;
+    names, paths and a reused legacy primary key cannot. Do not seed anything
+    here: creation/linking commits the proof with the replacement atomically.
     """
+    from app.db import project_catalog_aliases
+
     project = projects_v2.get_project_v2(project_v2_id)
-    origin = (project or {}).get("origin") or ""
-    if origin.startswith("local:"):
-        legacy = projects_db.get_project(origin[len("local:"):])
-        if legacy:
-            current_origin = origin_for_legacy_project(legacy)
-            if current_origin != origin:
-                return projects_v2.get_project_v2_by_origin(current_origin) or project
+    if project and (project.get("origin") or "").startswith("local:"):
+        replacement = project_catalog_aliases.replacement_for(project_v2_id)
+        if replacement:
+            return projects_v2.get_project_v2(replacement) or project
     return project
 
 
 def catalog_project_read_ids(project: Dict[str, Any]) -> list[str]:
-    """Current identity plus exact live legacy aliases that retain branch rows.
+    """Current identity plus proven, non-revoked first-link branch identities.
 
     Only project-scoped reads use this union: sessions stay bound to their
-    recorded identity, and callers must not use an alias's retired base. The
-    join proves the relationship in either direction without paths or names;
-    deleting/relinking the legacy row immediately stops sharing its branches.
+    recorded identity, and callers must not use an alias's retired base.
+    Missing historical provenance fails closed, never inferring a generation
+    from mutable legacy metadata or exposing branches after deletion/ID reuse.
     """
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT original.id FROM projects_v2 original "
-            "JOIN projects legacy ON original.origin = 'local:' || legacy.id "
-            "WHERE legacy.link_group_id = %s AND original.id <> %s "
-            "ORDER BY original.id",
-            (project["origin"], project["id"]),
-        )
-        return [project["id"], *(row["id"] for row in cursor.fetchall())]
+    from app.db import project_catalog_aliases
+
+    return [project["id"], *project_catalog_aliases.originals_for(project["id"])]
 
 
 def _persist_session_project_v2(session_id: str, project_v2_id: str) -> None:

@@ -161,16 +161,22 @@ def _seed_catalog(cursor, project: Dict[str, Any]) -> str:
     the alternate checkout id for a relinked folder. Never refresh an existing
     identity or reactivate a removed checkout merely by resolving it.
     """
-    from app.db import checkouts, projects_v2
+    from app.db import checkouts, project_catalog_aliases, projects_v2
 
     origin = _catalog_origin(project)
     project_v2_id = projects_v2.project_v2_id_for_origin(origin)
     cursor.execute(
         "INSERT INTO projects_v2 (id, origin, name, settings) "
-        "VALUES (%s, %s, %s, %s) ON CONFLICT (origin) DO NOTHING",
+        "VALUES (%s, %s, %s, %s) ON CONFLICT (origin) DO NOTHING RETURNING id",
         (project_v2_id, origin, project.get("name") or origin, "{}"),
     )
+    inserted = cursor.fetchone()
     project_v2_id = _catalog_project_v2_id(cursor, origin)
+    if origin == "local:" + str(project["id"]):
+        if inserted:
+            project_catalog_aliases.register_placeholder(cursor, project_v2_id, project["id"])
+    else:
+        project_catalog_aliases.record_first_link(cursor, project["id"], project_v2_id)
     checkouts.seed_legacy_base_checkout(
         cursor, str(project["id"]), project_v2_id,
         project.get("instance_id") or "", project.get("path"),
@@ -183,8 +189,13 @@ def seed_project_catalog(project: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     from app.db import projects_v2
 
     with get_db() as conn:
-        _seed_catalog(conn.cursor(), project)
-    return projects_v2.get_project_v2_by_origin(_catalog_origin(project))
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM projects WHERE id = %s FOR UPDATE", (project["id"],))
+        live = row_to_dict(cursor.fetchone())
+        if not live:
+            return None
+        _seed_catalog(cursor, live)
+    return projects_v2.get_project_v2_by_origin(_catalog_origin(live))
 
 
 def create_project(
@@ -195,6 +206,8 @@ def create_project(
     settings_dict: Optional[Dict[str, Any]] = None
 ) -> ProjectRow:
     """Create a new project"""
+    from app.db import project_catalog_aliases
+
     now = datetime.now(timezone.utc).isoformat()
     instance_id = settings.effective_instance_id
     with get_db() as conn:
@@ -204,6 +217,9 @@ def create_project(
                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
             (project_id, name, description, path, json.dumps(settings_dict or {}), instance_id, now, now)
         )
+        # If this ID existed in an earlier generation (including pre-upgrade
+        # deletion), its retained checkouts can never prove this new project's link.
+        project_catalog_aliases.revoke(cursor, project_id)
         project = {"id": project_id, "name": name, "path": path, "instance_id": instance_id}
         _seed_catalog(cursor, project)
         _restore_to_catalog(cursor, project)
@@ -218,10 +234,6 @@ def update_project(
     settings_dict: Optional[Dict[str, Any]] = None
 ) -> Optional[ProjectRow]:
     """Update a project"""
-    existing = get_project(project_id)
-    if not existing:
-        return None
-
     updates = []
     values = []
     if name is not None:
@@ -244,6 +256,12 @@ def update_project(
 
         with get_db() as conn:
             cursor = conn.cursor()
+            # Serialize with other moves, relinking and deletion. An earlier
+            # snapshot can describe neither the current path nor its identity.
+            cursor.execute("SELECT * FROM projects WHERE id = %s FOR UPDATE", (project_id,))
+            existing = row_to_dict(cursor.fetchone())
+            if not existing:
+                return None
             cursor.execute(
                 f"UPDATE projects SET {', '.join(updates)} WHERE id = %s",
                 values
@@ -330,11 +348,14 @@ def get_all_project_session_counts() -> Dict[str, int]:
 
 def delete_project(project_id: str) -> bool:
     """Delete a project and all associated sessions (sessions are cwd-dependent)"""
+    from app.db import project_catalog_aliases
+
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT id, instance_id, link_group_id FROM projects WHERE id = %s", (project_id,))
+        cursor.execute("SELECT id, instance_id, link_group_id FROM projects WHERE id = %s FOR UPDATE", (project_id,))
         project = row_to_dict(cursor.fetchone())
         if project:
+            project_catalog_aliases.revoke(cursor, project_id)
             _retire_from_catalog(cursor, project)
         # First delete all sessions associated with this project
         cursor.execute("DELETE FROM sessions WHERE project_id = %s", (project_id,))

@@ -2,7 +2,7 @@
 import pytest
 
 from app.core import project_resolver
-from app.db import checkouts, database, projects_v2
+from app.db import checkouts, database, projects, projects_v2
 from tests.shared_fixtures import LOCAL_ME as ME, pin_runner  # noqa: F401
 
 
@@ -63,3 +63,20 @@ def test_path_update_does_not_revive_or_move_removed_base(mock_db, tmp_path):
     base = checkouts.get_checkout(identity["id"], ME)
     assert (base["path"], base["status"]) == (str(old), "removed")
     assert not checkouts.has_active_base_checkout(identity["id"], ME)
+
+
+def test_update_missing_project_does_not_create_catalog_identity(mock_db):
+    assert database.update_project("missing", path="/private/new") is None
+    assert projects_v2.get_project_v2_by_origin("local:missing") is None
+
+
+def test_hooked_fallback_uses_live_row_not_pre_move_and_relink_snapshot(mock_db):
+    stale = database.create_project("moving", "Moving", None, "/private/A")
+    database.update_project("moving", path="/private/B")
+    database.set_project_link_group("moving", "git:example/moving")
+
+    current = projects.seed_project_catalog(stale)
+    assert current["origin"] == "git:example/moving"
+    assert checkouts.get_checkout(current["id"], ME)["path"] == "/private/B"
+    database.delete_project("moving")
+    assert projects.seed_project_catalog(stale) is None

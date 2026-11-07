@@ -134,6 +134,9 @@ async def test_branch_sharing_requires_the_live_legacy_link(project, retained_br
         database.delete_project("late-link")
     else:
         database.set_project_link_group("late-link", "git:example/relinked")
+        relinked = project_resolver.resolve_project_v2({"project_id": "late-link"})
+        assert original["id"] not in project_resolver.catalog_project_read_ids(relinked)
+        assert (await read(relinked["id"], branch="topic/keep"))["status"] == 409
     assert original["id"] not in project_resolver.catalog_project_read_ids(current)
     assert (await read(current["id"], branch="topic/keep"))["status"] in (404, 409)
     request = Request({"type": "http", "method": "GET", "headers": [], "state": {"api_user": None}})
@@ -146,6 +149,66 @@ async def test_branch_sharing_requires_the_live_legacy_link(project, retained_br
     else:
         assert session["project_v2_id"] == original["id"]
         assert project_resolver.resolve_existing_cwd(session) == str(branch_folder)
+
+
+@pytest.mark.parametrize("read_kind", ["full", "compact", "status"])
+@pytest.mark.parametrize("old_delete_without_provenance", [False, True])
+async def test_reused_legacy_id_does_not_expose_private_branch_to_new_origin_user(
+    project, retained_branch, tmp_path, read_kind, old_delete_without_provenance
+):
+    original, folder = project
+    checkout, branch_folder = retained_branch
+    await link(original)
+    # A detached/imported chat retains its exact binding when the legacy
+    # project is deleted; it must not grant access to the next generation.
+    database.create_session("retained-private", "default", project_v2_id=original["id"],
+                            worktree_branch="topic/keep")
+    database.delete_project("late-link")
+    if old_delete_without_provenance:
+        # An older install had no provenance table. Re-creation must still
+        # refuse to associate a pre-existing identity with this generation.
+        from app.db.base import get_db
+        with get_db() as conn:
+            conn.cursor().execute("DELETE FROM project_catalog_aliases WHERE original_id = %s", (original["id"],))
+    public_folder = tmp_path / "different-repository"
+    subprocess.run(["git", "init", "-q", str(public_folder)], check=True)
+    database.create_project("late-link", "New generation", None, str(public_folder))
+    database.set_project_link_group("late-link", "git:example/public")
+    current = project_resolver.resolve_project_v2({"project_id": "late-link"})
+    database.create_project("public-user", "Other project on public origin", None, str(public_folder))
+    database.set_project_link_group("public-user", "git:example/public")
+    user = {"project_id": "public-user"}
+    assert require_origin_access(project_v2_id=current["id"], api_user=user)["project_v2"]["id"] == current["id"]
+    request = Request({"type": "http", "method": "GET", "headers": [],
+                       "query_string": b"worker_id=local&checkout_branch=topic%2Fkeep",
+                       "state": {"api_user": user}})
+    if read_kind == "status":
+        with pytest.raises(HTTPException) as error:
+            await git.get_git_status(request, current["id"], token="test")
+        assert error.value.status_code == 409
+    else:
+        result = await git_worktrees.list_worktrees(
+            request, current["id"], compact=read_kind == "compact", include_status=False, token="test"
+        )
+        assert checkout["id"] not in [row.id for row in result.worktrees]
+    retained = database.get_session("retained-private")
+    assert retained["project_v2_id"] == original["id"]
+    assert project_resolver.resolve_existing_cwd(retained) == str(branch_folder)
+    assert checkouts.get_checkout(original["id"], ME, branch="topic/keep")["id"] == checkout["id"]
+    assert original["id"] not in project_resolver.catalog_project_read_ids(current)
+
+
+async def test_historical_placeholder_without_provenance_fails_closed(project, retained_branch):
+    from app.db.base import get_db
+
+    original, folder = project
+    with get_db() as conn:
+        conn.cursor().execute("DELETE FROM project_catalog_aliases WHERE original_id = %s", (original["id"],))
+    current = await link(original)
+    assert project_resolver.resolve_catalog_project(original["id"])["id"] == original["id"]
+    assert project_resolver.catalog_project_read_ids(current) == [current["id"]]
+    assert (await read(current["id"], branch="topic/keep"))["status"] == 409
+    assert project_resolver.resolve_existing_cwd(database.get_session("bound-topic")) == str(retained_branch[1])
 
 
 async def test_unrelated_scoped_user_is_not_authorized_by_alias(project):
