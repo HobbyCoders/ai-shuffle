@@ -253,11 +253,13 @@
 
      {/if}
      <!-- One Expression row for both modes, so typing a preset or a custom
-          expression into it never remounts the field under the cursor. -->
+          expression into it never remounts the field under the cursor. Typing
+          marks the expression open first: a custom one edited into a preset
+          (0 19 → 0 9) flips the mode to Preset, and the field must stay. -->
      {#if cronMode === 'custom' || advancedOpen[trigIdx]}
      <SettingRow label="Expression" hint={cronMode === 'custom' ? `Timezone: ${timezone}` : undefined}>
       <div class="cron-expression" id="cron-expression-{uid}-{trigIdx}">
-       <TextField label="Cron expression" mono value={trigger.config.expression || ''} placeholder="0 9 * * *" oninput={(value) => {updateTriggerConfig(trigIdx,{...trigger.config,expression:value});syncCronFieldsFromExpression(value);}} />
+       <TextField label="Cron expression" mono value={trigger.config.expression || ''} placeholder="0 9 * * *" oninput={(value) => {advancedOpen[trigIdx] = true;updateTriggerConfig(trigIdx,{...trigger.config,expression:value});syncCronFieldsFromExpression(value);}} />
        {#if cronMode === 'custom'}<p class="cron-summary-text st-note">{describeCron(trigger.config.expression || '')}</p>{/if}
       </div>
      </SettingRow>

@@ -90,6 +90,28 @@ describe('cron triggers', () => {
 		// The same field stayed mounted through both mode switches.
 		expect(screen.getByPlaceholderText('0 9 * * *')).toBe(raw);
 	});
+
+	it('keeps a custom expression field mounted and focused when an edit turns it into a preset', async () => {
+		// Starts in custom mode, with no "Show expression" click first.
+		const { onUpdateTriggers } = mount([{ type: 'cron', config: { expression: '0 19 * * *' } }]);
+		const raw = screen.getByLabelText('Cron expression') as HTMLInputElement;
+		raw.focus();
+		expect(document.activeElement).toBe(raw);
+		// Delete the "1" from the hour: 0 9 * * * is the daily preset.
+		await fireEvent.input(raw, { target: { value: '0 9 * * *' } });
+		expect(lastTriggers(onUpdateTriggers)[0].config.expression).toBe('0 9 * * *');
+		expect(await screen.findByDisplayValue('Every day at 9 AM')).toBeTruthy();
+		expect(screen.queryByLabelText('Minute')).toBeNull(); // the preset view now
+		expect(screen.getByLabelText('Cron expression')).toBe(raw);
+		expect(raw.isConnected).toBe(true);
+		expect(document.activeElement).toBe(raw);
+		expect(screen.getByRole('button', { name: 'Hide expression' }).getAttribute('aria-expanded')).toBe('true');
+		// Typing on back into a custom one keeps the same field too.
+		await fireEvent.input(raw, { target: { value: '0 19 * * *' } });
+		expect(await screen.findByLabelText('Minute')).toBeTruthy();
+		expect(screen.getByLabelText('Cron expression')).toBe(raw);
+		expect(document.activeElement).toBe(raw);
+	});
 });
 
 describe('trigger list editing', () => {
