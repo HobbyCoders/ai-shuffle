@@ -5,7 +5,7 @@
 	 * Turning a server on for one project stays in the Projects card.
 	 */
 	import { onMount } from 'svelte';
-	import { Cable } from 'lucide-svelte';
+	import { Cable, Plus } from 'lucide-svelte';
 	import { watchResources } from '$lib/services/watch-resources';
 	import { settingsNav } from '$lib/settings/navigation.svelte';
 	import { FORBIDDEN_TEXT } from '$lib/settings/access.svelte';
@@ -112,7 +112,9 @@
 			{:else if model.loading && !model.loaded}
 				<div class="st-card"><p class="st-empty" role="status">Loading servers…</p></div>
 			{:else if model.loaded && model.servers.length === 0 && !model.draft}
-				<div class="st-card"><p class="st-empty">No servers yet.</p></div>
+				<EmptyDetail icon={Cable} title="No servers yet" message="Add a server to give your agents its tools." full={!selected}>
+					<button type="button" class="st-btn primary" onclick={add}><Plus />Add server</button>
+				</EmptyDetail>
 			{:else if q && custom.length === 0 && builtins.length === 0 && !showDraft}
 				<EmptyDetail message="Nothing matches." actionLabel="Clear" onAction={() => filter = ''} />
 			{/if}

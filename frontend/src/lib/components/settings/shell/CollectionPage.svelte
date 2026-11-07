@@ -204,7 +204,10 @@
 		display: flex;
 		flex-direction: column;
 	}
-	.st-lhead > :global(.st-page-title) { padding-left: 12px; }
+	/* Beside the list column the title lines up with the rows' text. Stacked
+	   (phone and the native shell) it sits on the 16px page gutter with the
+	   filter, section labels and cards below it. */
+	:global(.settings-shell:not([data-stacked])) .st-lhead > :global(.st-page-title) { padding-left: 12px; }
 	.st-filter + .st-lfilters, .st-ltools + .st-filter { margin-top: 12px; }
 
 	.st-add {

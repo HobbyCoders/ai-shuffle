@@ -186,7 +186,7 @@
 		position: absolute;
 		inset: 0;
 		z-index: 30;
-		background: oklch(0 0 0 / 0.45);
+		background: var(--modal-overlay);
 		animation: veil-in 180ms ease;
 	}
 

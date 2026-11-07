@@ -79,7 +79,9 @@
 			{#if !ready && models.length === 0}
 				<div class="st-card"><p class="st-empty" role="status">Loading models…</p></div>
 			{:else if models.length === 0}
-				<div class="st-card"><p class="st-empty">No models in the picker yet. Connect a provider, then tune its models here.</p></div>
+				<EmptyDetail icon={Gauge} title="No models in the picker yet" message="Connect a provider, then tune its models here." full={!selected}>
+					<button type="button" class="st-btn primary" onclick={() => settingsNav.selectCategory('providers')}>Open Providers</button>
+				</EmptyDetail>
 			{:else if shown.length === 0}
 				<EmptyDetail message="Nothing matches." actionLabel="Clear" onAction={() => filter = ''} />
 			{:else}

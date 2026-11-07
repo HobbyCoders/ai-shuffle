@@ -459,7 +459,7 @@
 	   line paint under the controls in the responsive desktop shell (#1011). */
 	.tiptap-editor :global(.ProseMirror p.is-editor-empty:first-child::before) {
 		content: attr(data-placeholder);
-		color: var(--subtle-foreground);
+		color: var(--composer-placeholder, var(--subtle-foreground));
 		font-weight: 400;
 		pointer-events: none;
 		position: absolute;

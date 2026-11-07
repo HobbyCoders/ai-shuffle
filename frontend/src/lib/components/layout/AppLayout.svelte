@@ -16,7 +16,7 @@
 	 * wraps the same MainPanel. See docs/mobile-desktop-ui-split.md.
 	 */
 	import { onMount, onDestroy } from 'svelte';
-	import { activeView, layout, sidebarCollapsed, viewOwnsPanel } from '$lib/stores/layout.svelte';
+	import { activeView, layout, sidebarCollapsed, viewOwnsPanel, viewPanelTitles } from '$lib/stores/layout.svelte';
 	import type { ViewType } from '$lib/stores/layout.svelte';
 	import { PanelLeft } from 'lucide-svelte';
 	import { backToChats } from '$lib/services/session-navigation';
@@ -110,6 +110,9 @@
 
 	/** Every rail destination owns the same resizable column; Chats is preserved behind it. */
 	const panelOwned = $derived(rail && viewOwnsPanel($activeView?.type));
+	/** Names the hidden list on its reopen control, so a narrow window that
+	 *  opens straight on a detail still says where the list went. */
+	const panelTitle = $derived(panelOwned ? viewPanelTitles[$activeView!.type as keyof typeof viewPanelTitles] : '');
 	const showSidebar = $derived(rail || !$sidebarCollapsed);
 	/** Narrow window: the open sidebar floats over the main panel. */
 	const sidebarFloating = $derived(!$sidebarCollapsed && narrow);
@@ -174,7 +177,7 @@
 		{/if}
 
 		{#if panelOwned && $sidebarCollapsed}
-			<button class="reopen-panel" type="button" aria-label="Show sidebar" title="Show sidebar" onclick={() => layout.setSidebarCollapsed(false)}><PanelLeft size={17} /></button>
+			<button class="reopen-panel" type="button" aria-label={`Show sidebar, ${panelTitle} list`} title="Show sidebar" onclick={() => layout.setSidebarCollapsed(false)}><PanelLeft size={17} aria-hidden="true" /><span>{panelTitle}</span></button>
 		{/if}
 		<MainPanel
 			{onOpenSession}
@@ -233,7 +236,9 @@
 	.sidebar-slot.panel-overlay { z-index: 42; }
 	.sidebar-slot.panel-overlay:not(.rail-only) :global(.panel-plane) { position: absolute; left: 56px; top: 0; width: var(--panel-width); height: 100%; background: var(--sidebar); border-right: 1px solid var(--sidebar-border); }
 	.with-rail .sidebar-scrim { left: 56px; }
-	.reopen-panel { position: absolute; top: 10px; left: 66px; z-index: 40; display: grid; place-items: center; width: 28px; height: 28px; border: 0; border-radius: var(--radius-control); background: transparent; color: var(--muted-foreground); cursor: pointer; }
+	/* Icon where the bare toggle sat (x 71.5), then the list's name. */
+	.reopen-panel { position: absolute; top: 10px; left: 66px; z-index: 40; display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 9px 0 5.5px; border: 0; border-radius: var(--radius-control); background: transparent; color: var(--muted-foreground); font: inherit; font-size: var(--fs-small); font-weight: 500; white-space: nowrap; cursor: pointer; }
+	.reopen-panel :global(svg) { flex: none; }
 	.reopen-panel:hover { background: var(--accent); color: var(--foreground); }
 	.reopen-panel:active { background: var(--row-selected); }
 	.reopen-panel:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
@@ -241,7 +246,7 @@
 		position: absolute;
 		inset: 0;
 		z-index: 41;
-		background: color-mix(in oklch, black 45%, transparent);
+		background: var(--modal-overlay);
 	}
 
 	/* Drag handle on the sidebar's right edge. Slightly overhangs the border so

@@ -929,9 +929,9 @@
 	.modal-backdrop {
 		position: absolute;
 		inset: 0;
-		background: color-mix(in oklch, var(--background) 70%, transparent);
-		backdrop-filter: blur(8px);
-		-webkit-backdrop-filter: blur(8px);
+		background: var(--modal-overlay);
+		backdrop-filter: blur(var(--modal-blur, 2px));
+		-webkit-backdrop-filter: blur(var(--modal-blur, 2px));
 	}
 
 	.modal-content {
@@ -952,7 +952,7 @@
 		background: var(--card);
 		border: 1px solid var(--border);
 		border-radius: 0.75rem;
-		box-shadow: var(--shadow-l);
+		box-shadow: var(--shadow-dialog);
 		max-height: calc(100vh - 8rem);
 		overflow-y: auto;
 	}

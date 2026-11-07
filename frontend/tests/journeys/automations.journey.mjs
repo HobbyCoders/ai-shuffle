@@ -39,10 +39,12 @@ function formCase(native = false) {
    const toggleSize = await collapse.boundingBox();
    expect(toggleSize.width === (page.viewportSize().width < 600 ? 44 : 28), 'chevron keeps desktop density and a phone touch target');
    if (page.viewportSize().width < 600) {
-    const schedule = trigger.getByRole('group', { name: 'Schedule', exact: true });
+    const schedule = trigger.getByRole('group', { name: 'Timing', exact: true });
     const scheduleRow = schedule.locator('xpath=ancestor::div[contains(@class,"st-row")]');
-    expect(Math.abs((await schedule.boundingBox()).width - (await scheduleRow.locator('.st-rc').boundingBox()).width) < 1, 'Schedule spans the stacked phone control row');
+    expect(Math.abs((await schedule.boundingBox()).width - (await scheduleRow.locator('.st-rc').boundingBox()).width) < 1, 'Timing spans the stacked phone control row');
    }
+   expect(await trigger.getByRole('textbox', { name: 'Cron expression', exact: true }).count() === 0, 'a preset hides its raw expression behind Advanced');
+   await trigger.getByRole('button', { name: 'Show expression', exact: true }).click();
    await page.getByRole('textbox', { name: 'Cron expression', exact: true }).fill('*/15 * * * *');
    await trigger.getByRole('heading', { name: 'Every 15 minutes', exact: true }).waitFor();
    const actions = page.locator('details.detail-more');
@@ -57,7 +59,7 @@ function formCase(native = false) {
    if (await actions.isVisible()) await actions.locator('summary').click();
    await mark('switch trigger configurations using the shared controls');
    const types = page.getByRole('group', { name: 'Trigger type', exact: true });
-   for (const label of ['Interval', 'Event', 'Connector', 'Webhook', 'Cron']) {
+   for (const label of ['Interval', 'Event', 'Connector', 'Webhook', 'Schedule']) {
     await types.getByRole('button', { name: label, exact: true }).click();
    }
    await mark('visit limits and generation tabs and preserve the draft');

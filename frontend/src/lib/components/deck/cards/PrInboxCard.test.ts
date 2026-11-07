@@ -74,6 +74,16 @@ describe('PrInboxCard', () => {
 		expect(within(list).getByText('Changes requested')).toBeTruthy();
 		expect(within(list).getAllByText('by me')).toHaveLength(3);
 		expect(screen.getByText(/1 project or repository not included/)).toBeTruthy();
+		// Running checks: a still amber dot beside the words, not a spinner.
+		const running = within(list).getByText('Checks running').closest('.pri-checks')!;
+		expect(running.querySelector('.pri-running')).toBeTruthy();
+		expect(running.querySelector('svg')).toBeNull();
+		// The one meta line leads with the branch, then the repository, and keeps
+		// its full text in a tooltip for when the repository path is cut short.
+		const meta = list.querySelector('.pri-meta')!;
+		expect(meta.getAttribute('title')).toBe('feat → main · o/alpha#1 · by me · Alpha');
+		expect([...meta.querySelectorAll('.pri-branch, .pri-repo')].map((s) => s.className.match(/pri-(branch|repo)/)?.[1])).toEqual(['branch', 'repo']);
+		expect(meta.querySelector('.pri-repo')?.getAttribute('title')).toBe('o/alpha#1');
 
 		await fireEvent.click(screen.getByRole('button', { name: 'Filter pull requests' }));
 		await fireEvent.change(screen.getByRole('combobox', { name: 'Checks' }), { target: { value: 'failing' } });
@@ -106,6 +116,14 @@ describe('PrInboxCard', () => {
   await fireEvent.click(screen.getByRole('button', { name: 'Done' }));
   expect(screen.getByRole('button', { name: 'Filter pull requests, 1 active' })).toBeTruthy();
  });
+
+	it('shows the one branch it knows when the base is missing', async () => {
+		getPullRequestInbox.mockResolvedValueOnce({ items: [pr({ base_branch: '' })], skipped: [], repos: ['o/alpha'] });
+		render(PrInboxCard);
+		const list = await screen.findByRole('list', { name: 'Pull requests' });
+		expect(list.querySelector('.pri-branch')?.textContent).toBe('feat');
+		expect(list.querySelector('.pri-meta')?.getAttribute('title')).toBe('feat · o/alpha#1 · by me · Alpha');
+	});
 
 	it('asks the server again when the state changes', async () => {
 		render(PrInboxCard);

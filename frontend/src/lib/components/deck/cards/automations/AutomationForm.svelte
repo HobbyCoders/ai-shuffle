@@ -312,7 +312,12 @@ import AutomationModelError from './AutomationModelError.svelte';
  .notice-link:hover { color: var(--st-primary); }
  .notice-link:active { opacity: 0.7; }
  .notice-link:focus-visible { outline: 2px solid var(--ring); outline-offset: 3px; }
+ /* Basics: Description is a short two-line field, about 72px tall. */
+ .basics-description :global(textarea) { min-height: 72px; }
  @media (max-width: 600px) { .notice-link { min-height: 44px; } }
+ /* Steps are appended below the Prompt card, so the button stays after them,
+    12px clear of the card above and on its left edge. */
+ .add-step { align-self: flex-start; margin-top: 12px; }
  .automation-triggers { margin-top: 40px; }
  .automation-triggers header { margin-bottom: 16px; }
  .automation-triggers h3 { margin: 0; font-size: 14px; font-weight: 600; }
@@ -334,13 +339,14 @@ import AutomationModelError from './AutomationModelError.svelte';
 <div role="tabpanel" id="automation-form-panel" aria-labelledby="automation-form-tab-{tab}">
 {#if tab === 'setup'}
  <RowGroup title="Basics">
-  <SettingRow label="Name" hint="A label to recognize this automation."><TextField value={formName} oninput={onUpdateFormName} placeholder="e.g. Daily report generator" invalid={!!formError && !formName.trim()} /></SettingRow>
-  <SettingRow label="Description" hint="What this automation does. Optional."><TextField value={formDescription} oninput={onUpdateFormDescription} placeholder="Optional description…" /></SettingRow>
+  <!-- Label and hint first, then the field at the card's full inner width (as Prompt). -->
+  <SettingRow label="Name" hint="A label to recognize this automation.">
+   {#snippet expanded()}<TextField value={formName} oninput={onUpdateFormName} label="Name" width="full" placeholder="e.g. Daily report generator" invalid={!!formError && !formName.trim()} />{/snippet}
+  </SettingRow>
+  <SettingRow label="Description" hint="What this automation does. Optional.">
+   {#snippet expanded()}<div class="basics-description"><TextAreaField value={formDescription} oninput={onUpdateFormDescription} label="Description" rows={2} placeholder="Optional description…" /></div>{/snippet}
+  </SettingRow>
  </RowGroup>
- <section class="automation-triggers" aria-label="Triggers">
-  <header><h3>Triggers <span>{formTriggers.length}</span></h3><p>Any trigger firing will run this automation. At least one is required.</p></header>
-  <AutomationTriggerConfig triggers={formTriggers} {expandedTriggers} {connectors} {connectorTypes} {connectorsWithTriggers} {currentView} {selectedAutomationId} {timezone} onUpdateTriggers={onUpdateFormTriggers} {onToggleTriggerExpand} />
- </section>
  <RowGroup title="Prompt & actions" bare>
   <div class="st-card">
    <SettingRow label="Prompt" hint={formActionSteps.length ? 'Optional when action steps are configured. Runs before action steps.' : 'The main instruction sent to the AI agent when this automation runs.'}>
@@ -387,8 +393,13 @@ import AutomationModelError from './AutomationModelError.svelte';
     {/if}
    </RowGroup>
   {/each}
-  <button class="st-btn" onclick={() => addActionStep()}><Plus size={14} />Add action step</button>
+  <button class="st-btn add-step" onclick={() => addActionStep()}><Plus size={14} />Add action step</button>
  </RowGroup>
+ <!-- The task first: Basics, then Prompt & actions, then when it runs. -->
+ <section class="automation-triggers" aria-label="Triggers">
+  <header><h3>Triggers <span>{formTriggers.length}</span></h3><p>Any trigger firing will run this automation. At least one is required.</p></header>
+  <AutomationTriggerConfig triggers={formTriggers} {expandedTriggers} {connectors} {connectorTypes} {connectorsWithTriggers} {currentView} {selectedAutomationId} {timezone} onUpdateTriggers={onUpdateFormTriggers} {onToggleTriggerExpand} />
+ </section>
  <RowGroup title="Configuration">
   <SettingRow label="Agent" hint="The agent this automation runs under.">
    {#if !profiles.length}<button class="st-btn" onclick={() => layout.openFeaturePage('profile')}>No agents yet — create one first</button>

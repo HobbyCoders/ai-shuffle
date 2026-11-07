@@ -375,7 +375,7 @@
 		box-shadow: var(--shadow-l);
 	}
 	dialog[open] { display: flex; flex-direction: column; animation: rise .2s cubic-bezier(.2, .8, .2, 1); }
-	dialog::backdrop { background: rgb(0 0 0 / .62); backdrop-filter: blur(2px); }
+	dialog::backdrop { background: var(--modal-overlay); backdrop-filter: blur(var(--modal-blur, 2px)); }
 	@keyframes rise { from { opacity: 0; transform: translateY(6px) scale(.995); } }
 	.close {
 		display: grid;

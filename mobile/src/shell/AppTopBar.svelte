@@ -543,9 +543,9 @@
 	.drawer-overlay {
 		position: fixed;
 		inset: 0;
-		background: color-mix(in oklch, var(--background) 55%, transparent);
-		backdrop-filter: blur(2px);
-		-webkit-backdrop-filter: blur(2px);
+		background: var(--modal-overlay);
+		backdrop-filter: blur(var(--modal-blur, 2px));
+		-webkit-backdrop-filter: blur(var(--modal-blur, 2px));
 		z-index: 90;
 		transition: opacity 200ms ease;
 	}

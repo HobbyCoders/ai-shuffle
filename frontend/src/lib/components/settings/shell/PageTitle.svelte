@@ -14,4 +14,11 @@
 	.count { color: var(--st-mfg); font-size: 13px; line-height: 20px; font-variant-numeric: tabular-nums; }
 	.st-page-title :global(.st-btn) { margin-block: 0; }
 	.actions { display: flex; align-items: center; gap: 8px; margin-left: auto; flex: none; }
+	/* Phone: the header action is drawn at the 44px phone action height
+	   (settings.css .phone-action); a long title wraps above it instead of
+	   squeezing it. */
+	:global(.settings-shell[data-stacked]) .st-page-title { flex-wrap: wrap; row-gap: 8px; }
+	@media (max-width: 600px), (pointer: coarse) {
+		:global(.settings-shell) .st-page-title { flex-wrap: wrap; row-gap: 8px; }
+	}
 </style>

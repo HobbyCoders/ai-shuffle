@@ -1981,14 +1981,14 @@
 		display: flex;
 		flex-direction: column;
 		border-radius: var(--radius-composer);
-		border: 1px solid var(--border);
-		background: var(--card);
-		box-shadow: var(--shadow-s);
+		border: 1px solid var(--composer-border, var(--border));
+		background: var(--composer-bg, var(--card));
+		box-shadow: var(--composer-shadow, var(--shadow-s));
 		transition: border-color 0.2s ease;
 	}
 
 	.chat-island:focus-within {
-		border-color: var(--border-strong);
+		border-color: var(--composer-border-focus, var(--border-strong));
 	}
 
 	/* ===== THE EDITOR ROW ===== */

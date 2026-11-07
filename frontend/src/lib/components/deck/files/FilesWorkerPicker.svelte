@@ -156,7 +156,7 @@
 	.fwp { position: relative; min-width: 0; flex: 1; }
 	.fwp-chip { width: 100%; min-width: 0; justify-content: flex-start; }
 	.fwp-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
-	.fwp-tag { color: var(--st-mfg); font-size: 11px; white-space: nowrap; }
+	.fwp-tag { color: var(--st-mfg); font-size: 12px; white-space: nowrap; }
 	.fwp-chip :global(.fwp-caret) { margin-left: auto; flex: none; color: var(--st-mfg); }
 	.fwp-ic { position: relative; display: grid; place-items: center; flex: none; color: var(--st-mfg); }
 	.fwp-dot { position: absolute; right: -3px; bottom: -2px; width: 6px; height: 6px; border-radius: 50%; background: var(--st-success); }

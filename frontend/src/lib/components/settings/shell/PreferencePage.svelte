@@ -45,7 +45,8 @@
 	.st-page {
 		position: relative;
 		max-width: calc(var(--st-reading-width) + 2 * var(--st-gutter));
-		margin: 0 auto;
+		/* Starts at the shared frame's left edge, like every other page title. */
+		margin: 0 auto 0 var(--st-frame-inset);
 		padding: var(--st-page-top) var(--st-gutter) 120px;
 	}
 
