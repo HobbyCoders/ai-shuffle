@@ -12,8 +12,9 @@ exits), waits until it is ready (its ``DEVLOOP_READY`` line, then
 ``frontend/tests/journeys/run-all.mjs`` it runs that; otherwise it runs each
 ``*.journey.mjs`` of the shard, every one even after a failure. Shards split
 the journey files by measured hosted runtime, each file exactly once. Unknown
-journeys use their case count (``--list``) times the measured per-case median,
-with explicit conservative floors for new heavy producers (not measurements).
+or changed case inventories use their current case count (``--list``) times the
+measured per-case median, with conservative floors (not measurements). A stale
+measurement is also a lower bound, scaled by its per-case cost when cases grow.
 
 Outputs under ``--out``: ``devloop.log`` (the instance's whole log),
 ``logs/<journey>.log``, and the runner's per-case text timelines (and contact
@@ -78,7 +79,7 @@ def journey_files(directory: Path = JOURNEYS) -> list[Path]:
 
 
 def case_count(path: Path, *, strict: bool = False) -> int:
-    """Count all listed cases; planning falls back to 1, refresh must fail closed."""
+    """Count all listed cases; strict callers reject unreadable inventories."""
     try:
         listed = subprocess.run(["node", str(path), "--list", "--only="], cwd=FRONTEND,
                                 capture_output=True, text=True, timeout=60, check=False)
@@ -111,7 +112,7 @@ def partition(weights: dict[str, float], shards: int) -> list[list[str]]:
 
 
 def estimated_seconds(directory: Path = JOURNEYS, weights_path: Path = WEIGHTS) -> dict[str, float]:
-    """Use hosted medians; unmeasured files use per-case estimates plus budget floors."""
+    """Use matched hosted medians; stale/unknown inventories get conservative estimates."""
     files = journey_files(directory)
     if not files:
         raise SystemExit(f"No *.journey.mjs under {directory}: refusing to pass with no journeys")
@@ -121,9 +122,28 @@ def estimated_seconds(directory: Path = JOURNEYS, weights_path: Path = WEIGHTS) 
         if (isinstance(value, bool) or not isinstance(value, (int, float))
                 or not math.isfinite(value) or value <= 0):
             raise ValueError(f"{weights_path}: runtime weights must be positive finite seconds")
-    return {path.name: measured[path.name] if path.name in measured else max(
-                case_count(path) * per_case, UNMEASURED_BUDGET_FLOORS.get(path.name, 0))
-            for path in files}
+    inventory = data.get("case_counts", {})
+    if (not isinstance(inventory, dict)
+            or any(type(cases) is not int or cases <= 0 for cases in inventory.values())):
+        raise ValueError(f"{weights_path}: inventory must contain positive integer case counts")
+    weights = {}
+    for path in files:
+        name, cases = path.name, case_count(path, strict=True)
+        recorded_cases = inventory.get(name)
+        if name in measured and cases == recorded_cases:
+            weights[name] = measured[name]
+            continue
+        fallback = max(cases * per_case, UNMEASURED_BUDGET_FLOORS.get(name, 0))
+        if name in measured:
+            # Never make a grown slow file cheaper by using the global median.
+            # Nor assume removed cases were the expensive ones. Keep the old
+            # evidence intact: this is an estimate until a matched green refresh.
+            growth = max(1, cases / recorded_cases) if recorded_cases else 1
+            fallback = max(fallback, measured[name] * growth)
+            print(f"[ci] case-count fallback for {name} ({recorded_cases} -> {cases}): "
+                  f"{fallback:.2f}s; historical measurement is stale", file=sys.stderr)
+        weights[name] = fallback
+    return weights
 
 
 def shard_budget_seconds(runtime: float) -> float:
