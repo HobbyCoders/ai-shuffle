@@ -33,7 +33,7 @@ function setup() {
 
 describe('GroupedSelector panels', () => {
 	it('keeps only the visible panel reachable', async () => {
-		const { sub } = setup();
+		const { main, sub } = setup();
 		expect(isInert(main)).toBe(false);
 		expect(isInert(sub)).toBe(true);
 
