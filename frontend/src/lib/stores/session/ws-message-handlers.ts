@@ -23,7 +23,7 @@ import { serverNotificationActions } from '$lib/services/error-actions';
 // The SSE-fed reducer store — the transcript authority for a session.
 import { feedController, OPTIMISTIC_STREAMING_ON } from './v2/feed-controller';
 // Arbiter of which pending ("not seen yet") bubbles survive.
-import { pendingQueue, reconcilePendingPeerMessages, SEND_MAYBE_APPLIED_MESSAGE } from './pending-queue';
+import { pendingQueue, reconcilePendingPeerMessages, restoredDraftFields, SEND_MAYBE_APPLIED_MESSAGE } from './pending-queue';
 import { queueHydration } from './queue-hydration';
 import { composerSuggestion } from './composer-suggestion';
 import { swarms } from '../swarms';
@@ -1101,18 +1101,19 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 					const refusedId = data.client_message_id;
 					update(s => retireSends(s, refusedId));
 					if (sid !== getState().sessionId) break;
-					const restored = pendingQueue.takeWithdrawnDraft(sid);
+					const restored = pendingQueue.takeWithdrawnRestore(sid);
 					// Idle sends echo on the transcript, not in the pending queue.
 					// Only recover an unconfirmed local row, never a durable receipt.
 					update(s => {
-						const recovered = restored ?? refused?.content;
+						const recovered = restored ?? (refused?.content != null
+							? { prompt: refused.content, uploadPaths: [], uploadReferences: [] } : null);
 						const optimisticOnly = refused && s.optimisticStreaming && !s.liveTurnId;
 						return { ...s,
 							...(refused ? { messages: s.messages.filter(m => m !== refused), optimisticStreaming: false } : {}),
 							...(optimisticOnly ? { isStreaming: false, streamStartTime: null } : {}),
 							queuedMessages: pendingQueue.reconcile(s.sessionId, s.queuedMessages),
 							error: `Message not sent: ${data.message || 'Please try again.'}`,
-							...(recovered != null ? { pendingRestorePrompt: [s.pendingRestorePrompt, recovered].filter(Boolean).join('\n\n') } : {}),
+							...restoredDraftFields(s, recovered),
 						};
 					});
 					break;
@@ -1214,11 +1215,11 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 					feedController.settleRetiredSends?.(sid);
 				}
 				if (sid !== state.sessionId) break; // retain for that session's next switch-in
-				const restored = pendingQueue.takeWithdrawnDraft(sid);
+				const restored = pendingQueue.takeWithdrawnRestore(sid);
 				update(s => ({ ...s,
 					queuedMessages: pendingQueue.reconcile(s.sessionId, s.queuedMessages),
 					error: rawVerdict === 'not_found' ? 'No pending message was found. Your text was recovered; check the conversation before resending.' : null,
-					...(restored !== null ? { pendingRestorePrompt: [s.pendingRestorePrompt, restored].filter(Boolean).join('\n\n') } : {}),
+					...restoredDraftFields(s, restored),
 				}));
 				if (verdict !== 'already_delivered') break;
 				notify.warning(

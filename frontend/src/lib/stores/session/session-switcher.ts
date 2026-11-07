@@ -34,7 +34,7 @@ import { subagentChats } from '../subagent-chats';
 // V2 Phase 1: SSE-fed reducer store — the transcript authority for a session.
 import { feedController } from './v2/feed-controller';
 import { setSkipRestore } from './session-init';
-import { pendingQueue } from './pending-queue';
+import { pendingQueue, restoredDraftFields } from './pending-queue';
 import { queueHydration } from './queue-hydration';
 import { beginJourney } from '$lib/services/journey-timing';
 import { resolveNewChatProject, resolveSessionProject } from './session-project';
@@ -772,7 +772,9 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			liveRerouted: null,
 			liveRerouteReason: null,
 			liveCompaction: null,
-			pendingRestorePrompt: pendingQueue.takeWithdrawnDraft(sessionId),
+			// Words and attachments of sends withdrawn while this chat was not open.
+			pendingRestorePrompt: null, pendingRestoreUploadPaths: undefined, pendingRestoreUploadReferences: undefined,
+			...restoredDraftFields({}, pendingQueue.takeWithdrawnRestore(sessionId)),
 			isCreatingWorktree: false,
 			worktreeError: null,
 			sessionLocked: false,
@@ -1191,7 +1193,9 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			liveRerouted: null,
 			liveRerouteReason: null,
 			liveCompaction: null,
-			pendingRestorePrompt: pendingQueue.takeWithdrawnDraft(null),
+			// Words and attachments of sends withdrawn while this chat was not open.
+			pendingRestorePrompt: null, pendingRestoreUploadPaths: undefined, pendingRestoreUploadReferences: undefined,
+			...restoredDraftFields({}, pendingQueue.takeWithdrawnRestore(null)),
 			error: null,
 			title: 'New Chat',
 			totalTokensIn: 0,

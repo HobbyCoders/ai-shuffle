@@ -10,6 +10,7 @@ import { pendingQueue } from './pending-queue';
 import { STOP_TURN_NOT_NAMED, createNotSentHold, stopRecoveryAppliesToTurn } from '$lib/utils/not-sent-hold';
 import { feedController } from './v2/feed-controller';
 import { createSessionSwitcher } from './session-switcher';
+import { restoreMessageDocument } from '$lib/components/chat/tiptap/serialization';
 
 const feed = vi.hoisted(() => ({ onEvent: null as ((event: Record<string, unknown>) => void) | null }));
 // Navigation reads session-list metadata, not the real active-session singleton.
@@ -1992,6 +1993,55 @@ describe('Stop timeout recovery', () => {
 			test.sender.stopGeneration();
 			expect(test.getState().stopRequestedTurnId).toBe('turn-b');
 		});
+
+		// Review round 7 S7: a queued send keeps its attachments until a confirmed
+		// withdrawal hands them back, so the recovered resend still transfers the
+		// file: a compact-and-send whose answer was lost, and an ordinary queued send.
+		it.each(['a compact-and-send whose reply was lost', 'an ordinary queued send'] as const)(
+			'hands back the file chips and upload fields of %s once its withdrawal is confirmed', async kind => {
+				sessionStorage.clear();
+				const test = stopping(null);
+				const handlers = createMessageHandlers(test.deps as unknown as MessageHandlerDeps);
+				test.deps.update(s => ({ ...s, isStreaming: false }));
+				feedController.start('sess-1');
+				feed.onEvent!({ type: 'caught_up', seq: 0 });
+				expect(await test.sender.sendMessage('A')).toBe(true);
+				const [a] = test.getState().localSendIntent?.commandIds ?? [];
+				event('turn.started', 'turn-a', 1);
+				event('message.user', 'turn-a', 2, { command_id: a, content: 'A' });
+				vi.advanceTimersByTime(300);
+				const path = '/uploads/staged/report.pdf';
+				const reference = { owner_id: 'worker-1', event_id: 'evt-1', index: 0, path };
+				const attachments = { pendingUploadPaths: [path], pendingUploadReferences: [reference] };
+				const prompt = `Read @${path}`;
+				if (kind === 'an ordinary queued send') {
+					expect(await test.sender.sendMessage(prompt, attachments)).toBe(true);
+				} else {
+					apiMocks.post.mockRejectedValueOnce(new TypeError('Failed to fetch'));
+					expect(await test.sender.sendMessage(prompt, { compactFirst: true, ...attachments })).toBe(true);
+				}
+				const b = test.getState().localSendIntent!.commandIds!.at(-1)!;
+				const chip = test.getState().queuedMessages.find(m => m.clientMessageId === b)!;
+				// Nothing is handed back while the send may still run.
+				expect(test.getState().pendingRestoreUploadPaths ?? null).toBeNull();
+
+				test.sender.removeQueuedMessage(chip.id);
+				expect(test.getState().pendingRestoreUploadPaths ?? null).toBeNull();
+				handlers.handleMessage({ type: 'queued_message_removal', session_id: 'sess-1', client_message_id: b, verdict: 'withdrawn' });
+				const state = test.getState();
+				expect(state.pendingRestorePrompt).toBe(prompt);
+				expect(state.pendingRestoreUploadPaths).toEqual([path]);
+				expect(state.pendingRestoreUploadReferences).toEqual([reference]);
+				// The composer rebuilds the file chip, reference included...
+				const doc = restoreMessageDocument(state.pendingRestorePrompt!, state.pendingRestoreUploadPaths, state.pendingRestoreUploadReferences);
+				expect(doc.content![0].content).toContainEqual(expect.objectContaining({
+					type: 'fileChip', attrs: expect.objectContaining({ path, uploadReference: reference }) }));
+				// ...so the resend carries the upload fields the executing worker needs.
+				expect(await test.sender.sendMessage(state.pendingRestorePrompt!, {
+					pendingUploadPaths: state.pendingRestoreUploadPaths, pendingUploadReferences: state.pendingRestoreUploadReferences })).toBe(true);
+				const resend = test.wsConn.send.mock.calls.findLast(([m]) => m.type === 'query')![0];
+				expect(resend).toMatchObject({ prompt, upload_paths: [path], upload_references: [reference] });
+			});
 
 		// Review round 2 S4: nothing still waiting to run is ever dropped from the
 		// run, however many messages queue behind a turn whose feed is late.

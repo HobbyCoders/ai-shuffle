@@ -65,6 +65,7 @@
  */
 
 import type { ChatMessage, PendingPeerMessage, QueuedMessage } from '../types';
+import type { UploadReference } from '$lib/api/rewind';
 
 /** Peer delivery uses durable turn ids ONLY, never the user's text/unsend arbiter. */
 /** A send the owner may have taken with its answer lost: it may still run. */
@@ -152,7 +153,7 @@ interface CancellationState {
 	withdrawn: Set<string>;
 	deliveredRows: Set<string>;
 	terminalVerdicts: Map<string, string>;
-	drafts: string[];
+	drafts: WithdrawnDraft[];
 	timers: Map<string, ReturnType<typeof setTimeout>>;
 	sends: Map<string, PendingEntry>;
 	/** Command id → marks its send unconfirmed now (the admission timeout, run early). */
@@ -161,6 +162,31 @@ interface CancellationState {
 // Cancellation transactions belong to a session, not its currently mounted
 // feed. A socket verdict can arrive after that feed has been torn down.
 const cancellations = new Map<string | null, CancellationState>();
+/** A withdrawn or refused send's words, with the attachments it carried. */
+interface WithdrawnDraft { content: string; uploads?: SendUploads }
+interface SendUploads { paths: string[]; references: UploadReference[] }
+/** What a confirmed withdrawal hands back to the composer. */
+export interface WithdrawnRestore { prompt: string; uploadPaths: string[]; uploadReferences: UploadReference[] }
+type RestoreSlots = { pendingRestorePrompt?: string | null; pendingRestoreUploadPaths?: string[]; pendingRestoreUploadReferences?: UploadReference[] };
+/** Adds a confirmed withdrawal's words and attachments to those not yet taken. */
+export function restoredDraftFields(s: RestoreSlots, restore: WithdrawnRestore | null): RestoreSlots {
+	if (!restore) return {};
+	const paths = [...(s.pendingRestoreUploadPaths ?? []), ...restore.uploadPaths];
+	const references = [...(s.pendingRestoreUploadReferences ?? []), ...restore.uploadReferences];
+	return { pendingRestorePrompt: [s.pendingRestorePrompt, restore.prompt].filter(Boolean).join('\n\n'),
+		...(paths.length ? { pendingRestoreUploadPaths: paths } : {}),
+		...(references.length ? { pendingRestoreUploadReferences: references } : {}) };
+}
+// A send's attachments, by command id (unique across chats), kept past admission
+// until its receipt: the chip keeps only text, and a confirmed withdrawal must hand
+// back the file chips and upload fields too, or the resend cannot transfer the file.
+const sendUploads = new Map<string, SendUploads>();
+const MAX_SEND_UPLOADS = 50;
+function draftOf(key: string, content: string): WithdrawnDraft {
+	const uploads = sendUploads.get(key);
+	sendUploads.delete(key);
+	return uploads ? { content, uploads } : { content };
+}
 // Idle transcript echoes are recoverable drafts, not queue authority. The
 // command survives null -> assigned-session adoption; receipts clear it by id.
 const recoverySends = new Map<string, { sessionId: string | null; content: string; expiresAt: number }>();
@@ -289,8 +315,29 @@ export const pendingQueue = {
 
 	/** Consume confirmed withdrawals only when their own composer is mounted. */
 	takeWithdrawnDraft(id: string | null): string | null {
+		return this.takeWithdrawnRestore(id)?.prompt ?? null;
+	},
+
+	/** Like takeWithdrawnDraft, with the attachments the withdrawn sends carried. */
+	takeWithdrawnRestore(id: string | null): WithdrawnRestore | null {
 		const state = cancellations.get(id);
-		return state?.drafts.length ? state.drafts.splice(0).join('\n\n') : null;
+		if (!state?.drafts.length) return null;
+		const drafts = state.drafts.splice(0);
+		return { prompt: drafts.map(d => d.content).join('\n\n'),
+			uploadPaths: drafts.flatMap(d => d.uploads?.paths ?? []),
+			uploadReferences: drafts.flatMap(d => d.uploads?.references ?? []) };
+	},
+
+	/** Remember a send's attachments until its receipt or a confirmed withdrawal. */
+	noteSendUploads(key: string, paths: string[] = [], references: UploadReference[] = []): void {
+		sendUploads.delete(key);
+		if (!paths.length && !references.length) return;
+		sendUploads.set(key, { paths: [...paths], references: [...references] });
+		while (sendUploads.size > MAX_SEND_UPLOADS) {
+			const oldest = sendUploads.keys().next().value;
+			if (oldest === undefined) break;
+			sendUploads.delete(oldest);
+		}
 	},
 
 	/**
@@ -344,6 +391,7 @@ export const pendingQueue = {
 		if (turnId) deliveredTurnIds.add(turnId);
 		if (commandId) {
 			this.acknowledgeSend(id, commandId);
+			sendUploads.delete(commandId);
 			const removal = cancellations.get(id)?.removals.get(commandId);
 			const answeredAt = createdAt ? Date.parse(createdAt) : NaN;
 			// A replayed (or late live) receipt for an interrupted attempt must
@@ -465,7 +513,7 @@ export const pendingQueue = {
 		if (owner && owner.sessionId !== id) return;
 		const state = cancellationState(id);
 		const content = state.sends.get(key)?.content ?? recoverySend(id, key)?.content ?? fallback;
-		if (content != null && !state.withdrawn.has(key)) state.drafts.push(content);
+		if (content != null && !state.withdrawn.has(key)) state.drafts.push(draftOf(key, content));
 		state.withdrawn.add(key);
 		this.acknowledgeSend(id, key);
 		this.removalFailed(id, key, true);
@@ -480,7 +528,7 @@ export const pendingQueue = {
 			withdrawn.add(key);
 			if (entry) {
 				withdrawn.add(entry.id);
-				drafts.push(entry.content);
+				drafts.push(draftOf(key, entry.content));
 			}
 			this.removalFailed(id, key, true);
 			this.acknowledgeSend(id, key);
