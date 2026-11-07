@@ -1949,7 +1949,10 @@ function reduceInternal(
 				...(turnId ? { turnId } : {}),
 				...((startsAgentTurn || event.not_sent || uploadPaths) ? { metadata: {
 					...(startsAgentTurn ? { agent_wake: true } : {}),
-					...(uploadPaths ? { upload_paths: uploadPaths } : {}),
+					...(uploadPaths ? { upload_paths: uploadPaths,
+                            ...(str(event.upload_owner_id) && str(event.id) ? { upload_references: uploadPaths.map((path, index) => ({
+                                owner_id: str(event.upload_owner_id), event_id: str(event.id), index, path
+                            })) } : {}) } : {}),
 					...(event.not_sent ? {
 						not_sent: true, not_sent_id: event.id,
 						// The turn still running when Stop wrote this row (see not-sent-hold).

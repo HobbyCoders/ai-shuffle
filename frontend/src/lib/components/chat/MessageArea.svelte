@@ -179,7 +179,7 @@
 	 * back what the event log does not carry.
 	 * @param warning - Optional warning message for partial success (e.g., file restore failed)
 	 */
-	function handleRewindComplete(warning?: string, rewoundPrompt?: string, uploadPaths?: string[], unsentRestored = false) {
+	function handleRewindComplete(warning?: string, rewoundPrompt?: string, uploadPaths?: string[], unsentRestored = false, uploadReferences?: import('$lib/api/rewind').UploadReference[]) {
 		// A partial success says so only in this answer, and the feed's next fold
 		// replaces the store's rows, so it cannot be a transcript row.
 		if (warning) {
@@ -190,7 +190,7 @@
 		// so ChatInput refills the composer, letting the user edit or resend what
 		// they rewound away.
 		if (rewoundPrompt || uploadPaths?.length) {
-			liveActiveSession.setPendingRestorePrompt(rewoundPrompt ?? '', uploadPaths);
+			liveActiveSession.setPendingRestorePrompt(rewoundPrompt ?? '', uploadPaths, uploadReferences);
 		}
 
 		// Giving back a not-sent row changes no other message: its own feed event
@@ -205,9 +205,9 @@
 	// Capture the originating session when the callback is handed to a row, not
 	// when an async rewind later completes against a possibly different target.
 	function rewindCompleteFor(sessionId: string | null | undefined) {
-		return (warning?: string, prompt?: string, uploads?: string[], unsentRestored?: boolean) => {
+		return (warning?: string, prompt?: string, uploads?: string[], unsentRestored?: boolean, references?: import('$lib/api/rewind').UploadReference[]) => {
 			if (!sessionId || get(liveActiveSession).sessionId !== sessionId) return;
-			handleRewindComplete(warning, prompt, uploads, unsentRestored);
+			handleRewindComplete(warning, prompt, uploads, unsentRestored, references);
 		};
 	}
 
@@ -2808,6 +2808,7 @@
 			notSent={!!message.metadata?.not_sent}
 			notSentMessageId={typeof message.metadata?.not_sent_id === 'string' ? message.metadata.not_sent_id : null}
 			uploadPaths={Array.isArray(message.metadata?.upload_paths) ? message.metadata.upload_paths as string[] : []}
+            uploadReferences={Array.isArray(message.metadata?.upload_references) ? message.metadata.upload_references as import('$lib/api/rewind').UploadReference[] : []}
 			midTurn={!!message.id && midTurnUserIds.has(message.id)}
 			onRewindComplete={presentedRewindComplete}
 		/>

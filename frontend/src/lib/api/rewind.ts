@@ -20,6 +20,15 @@ export interface RewindExecuteResponse {
 	unsent_restored?: boolean;
 	restored_prompt?: string;
 	restored_upload_paths?: string[];
+	restored_upload_references?: UploadReference[];
+}
+
+/** An owner-recorded attachment, never inferred from a local path match. */
+export interface UploadReference {
+    owner_id: string;
+    event_id: string;
+    index: number;
+    path: string;
 }
 
 // ============================================================================

@@ -145,43 +145,39 @@ def _recorded_upload_events(session_id: str, event_id: Optional[str] = None) -> 
     return rows
 
 
-def partition_upload_paths(paths: List[str], session: Dict[str, Any], *, remote: bool = False) -> tuple[List[str], List[Dict[str, Any]]]:
-    """Separate local files from owner-scoped references to recorded attachments.
+def recorded_upload_references(session_id: str, event: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Mint explicit restore identities from a recorded user event, not a path guess."""
+    from app.db import database
+    metadata = event.get("payload") or {}
+    owner = upload_owner_id(metadata.get("upload_owner_id") or (database.get_session(session_id) or {}).get("instance_id"))
+    paths = metadata.get("upload_paths") or []
+    if not isinstance(paths, list):
+        return []
+    return [{"owner_id": owner, "event_id": event["id"], "index": index, "path": path}
+            for index, path in enumerate(paths) if isinstance(path, str) and path]
 
-    Rewinds retain immutable event ids even when their transcript rows disappear.
-    A viewer may select those identities, but cannot authorize reading a foreign
-    path: only the owner resolves them, rechecking its own confinement rules.
-    """
+
+def partition_upload_paths(paths: List[str], session: Dict[str, Any], *,
+                           references: Optional[List[Dict[str, Any]]] = None) -> tuple[List[str], List[Dict[str, Any]]]:
+    """Fresh paths stay fresh; only explicit owner/event/index chips are restores."""
     if not session or not session.get("id"):
         raise UploadLiftError("Attachment session is unavailable.")
+    validate_upload_paths(paths, session)
     owner = upload_owner_id(session.get("instance_id"))
-    recorded = None
-    local, references = [], []
-    for path in paths:
-        if not remote:
-            try:
-                validate_upload_paths([path], session)
-                local.append(path)
-                continue
-            except UploadLiftError:
-                pass
-        if recorded is None:
-            recorded = _recorded_upload_events(session["id"])
-        reference = None
-        for event in recorded:
-            metadata = event["payload"]
-            if upload_owner_id(metadata.get("upload_owner_id", owner)) != owner:
-                continue
-            attachments = metadata.get("upload_paths") or []
-            if path in attachments:
-                reference = {"owner_id": owner, "event_id": event["id"], "index": attachments.index(path)}
-                break
-        if reference is not None:
-            references.append(reference)
-        else:
-            validate_upload_paths([path], session)
-            local.append(path)
-    return local, references
+    checked = []
+    if not isinstance(references or [], list):
+        raise UploadLiftError("Invalid attachment references.")
+    for ref in references or []:
+        if not isinstance(ref, dict) or not isinstance(ref.get("owner_id"), str) or upload_owner_id(ref["owner_id"]) != owner:
+            raise UploadLiftError("Attachment reference belongs to another owner.")
+        events = _recorded_upload_events(session["id"], str(ref.get("event_id") or ""))
+        allowed = recorded_upload_references(session["id"], events[0]) if events else []
+        if type(ref.get("index")) is not int or ref not in allowed:
+            raise UploadLiftError("Attachment reference is not recorded in this session.")
+        if ref["path"] in paths:
+            raise UploadLiftError("Fresh and restored attachments share a path; reattach them separately.")
+        checked.append(ref)
+    return list(paths), checked
 
 
 def resolve_upload_references(payload: Dict[str, Any], session: Dict[str, Any]) -> Dict[str, Any]:
@@ -202,7 +198,7 @@ def resolve_upload_references(payload: Dict[str, Any], session: Dict[str, Any]) 
                 or type(index) is not int or index < 0 or index >= len(attachments)):
             raise UploadLiftError("Attachment reference is not recorded in this session.")
         path = attachments[index]
-        if path not in paths:
+        if path not in paths or ref.get("path") != path:
             raise UploadLiftError("Attachment reference does not match this message.")
         # A failed, not-yet-materialized send keeps its durable blob identity.
         pending = [blob for blob in upload_blobs.get_blobs(metadata.get("upload_blob_ids") or [])
@@ -352,10 +348,11 @@ def materialize_blobs_for_turn(
         filename = meta["filename"]
         data = upload_blobs_db.get_blob_data(blob_id)
         if data is None:
-            # Already delivered on an earlier attempt — accept it only if the
-            # file is genuinely still there.
-            existing = target_dir / Path(filename).name
-            if existing.is_file():
+            # Never reconstruct a consumed destination from the original name:
+            # upload() may have collision-renamed it before a later item failed.
+            recorded = meta.get("materialized_path")
+            existing = Path(recorded) if recorded else None
+            if existing is not None and existing.resolve().parent == target_dir.resolve() and existing.is_file():
                 mapping[source_path] = str(existing)
                 continue
             raise UploadLiftError(
@@ -369,7 +366,7 @@ def materialize_blobs_for_turn(
             raise UploadLiftError(
                 f"Could not write attachment '{filename}' to {target_dir}: {exc}"
             ) from exc
-        upload_blobs_db.clear_data(blob_id)
+        upload_blobs_db.clear_data(blob_id, str(dest))
         mapping[source_path] = str(dest)
     logger.info(
         "Materialized %d upload blob(s) into %s", len(mapping), target_dir

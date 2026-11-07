@@ -64,10 +64,12 @@ it('carries a not-sent row\'s uploads for a restore that gets no server answer',
 
 it('keeps sent attachment paths through a server replay', () => {
 	const state = fold([ev('message.user', {
+		id: 'owner-event', upload_owner_id: 'owner',
 		content: 'inspect @/uploads/photo.png', upload_paths: ['/uploads/photo.png'],
 	})]);
 	expect(state.messages[0].metadata?.upload_paths).toEqual(['/uploads/photo.png']);
 	expect(state.messages[0].metadata?.not_sent).toBeUndefined();
+	expect(state.messages[0].metadata?.upload_references).toEqual([{ owner_id: 'owner', event_id: 'owner-event', index: 0, path: '/uploads/photo.png' }]);
 });
 
 it.each([undefined, [], '/uploads/photo.png', [123], ['/uploads/photo.png', null]])(

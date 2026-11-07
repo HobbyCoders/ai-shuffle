@@ -15,6 +15,16 @@ const doc = (text: string) => JSON.stringify({ type: 'doc', content: [{ type: 'p
 const words = (draft: string | null) => JSON.stringify(JSON.parse(draft ?? '{}'));
 
 describe('addRestoredWordsToDraft', () => {
+    it('keeps explicit restored-chip identity in the reload note and the saved draft', () => {
+        const path = '/project/uploads/photo.png';
+        const refs = [{ owner_id: 'owner', event_id: 'event', index: 0, path }];
+        noteRestoreStarted('identity', 'row', 'read @' + path, [path], 'baseline', refs);
+        const note = takeUnfinishedRestores('identity', new Set(), 'next-page')[0];
+        expect(note.uploadReferences).toEqual(refs);
+        const draft = addRestoredWordsToDraft('identity', note.prompt, note.uploadPaths, '', note.uploadReferences);
+        expect(JSON.parse(draft).content[0].content[1].attrs.uploadReference).toEqual(refs[0]);
+        expect(readDraft('identity')).toBe(draft);
+    });
 	beforeEach(() => { cached.clear(); sessionStorage.clear(); });
 
 	it('fills an empty draft so reopening the chat finds the words', () => {

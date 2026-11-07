@@ -504,7 +504,7 @@
 		const paths = $activeSession.pendingRestoreUploadPaths ?? [];
 		if (!pending && paths.length === 0) return;
 		const current = (editorRef?.getMessage() ?? inputValue ?? '').trim();
-		const restored = JSON.stringify(restoreMessageDocument(pending ?? '', paths));
+		const restored = JSON.stringify(restoreMessageDocument(pending ?? '', paths, $activeSession.pendingRestoreUploadReferences));
 		setComposerDraft(current.length === 0 ? restored : joinDrafts(getDraftJSON(), restored));
 		recall.reset();
 		tick().then(() => editorRef?.focus());
@@ -539,9 +539,9 @@
 			setComposerDraft(hasComposerDraft(current) ? joinDrafts(pending, current) : pending);
 		}
 		const notes = takeUnfinishedRestores(sessionId, onScreen)
-			.filter((n) => !rewoundWordsKeptApart(sessionId, n.composerAtConfirm, n.prompt, n.uploadPaths, draftBeforeRecovery));
+			.filter((n) => !rewoundWordsKeptApart(sessionId, n.composerAtConfirm, n.prompt, n.uploadPaths, draftBeforeRecovery, n.uploadReferences));
 		if (notes.length === 0) return;
-		activeSession.setPendingRestorePrompt(notes.map((n) => n.prompt).filter(Boolean).join('\n\n'), notes.flatMap((n) => n.uploadPaths));
+		activeSession.setPendingRestorePrompt(notes.map((n) => n.prompt).filter(Boolean).join('\n\n'), notes.flatMap((n) => n.uploadPaths), notes.flatMap((n) => n.uploadReferences ?? []));
 	});
 
 	// Text handed over from another surface (the terminal's "Send selection to
@@ -1248,10 +1248,13 @@
 		// then — so they are always collected and the decision is made there.
 		// Extract from both uploadedFiles (legacy) and inline file chips in the editor.
 		let pendingPaths: string[] | undefined;
+        let pendingReferences: import('$lib/api/rewind').UploadReference[] = [];
 		{
-			const chipPaths = editorRef?.getEditor()
-				? extractFileChips(editorRef.getEditor()!).map(c => c.fullPath).filter(Boolean)
-				: [];
+            const chips = editorRef?.getEditor() ? extractFileChips(editorRef.getEditor()!) : [];
+            // Identity is carried by restored chips. A new chip at the same path
+            // is still a fresh upload and must lift its own bytes.
+            pendingReferences = chips.flatMap(c => c.uploadReference ? [c.uploadReference] : []);
+            const chipPaths = chips.filter(c => !c.uploadReference).map(c => c.fullPath).filter(Boolean);
 			const legacyPaths = uploadedFiles.map(f => f.full_path);
 			const allPaths = [...new Set([...chipPaths, ...legacyPaths])];
 			pendingPaths = allPaths.length ? allPaths : undefined;
@@ -1377,6 +1380,7 @@
 			}
 			const sent = await activeSession.sendMessage(finalPrompt, {
 				...(pendingPaths?.length ? { pendingUploadPaths: pendingPaths } : {}),
+                ...(pendingReferences.length ? { pendingUploadReferences: pendingReferences } : {}),
 				...(compactBeforeSend ? { compactFirst: true } : {}),
 				// Re-checked once the store knows its target (after a reload's
 				// restore wait); false sends nothing and lands in restoreOnFailure.

@@ -1250,7 +1250,15 @@ function reduceInternal(state, event, observe) {
         ...turnId2 ? { turnId: turnId2 } : {},
         ...startsAgentTurn || event.not_sent || uploadPaths ? { metadata: {
           ...startsAgentTurn ? { agent_wake: true } : {},
-          ...uploadPaths ? { upload_paths: uploadPaths } : {},
+          ...uploadPaths ? {
+            upload_paths: uploadPaths,
+            ...str(event.upload_owner_id) && str(event.id) ? { upload_references: uploadPaths.map((path, index) => ({
+              owner_id: str(event.upload_owner_id),
+              event_id: str(event.id),
+              index,
+              path
+            })) } : {}
+          } : {},
           ...event.not_sent ? {
             not_sent: true,
             not_sent_id: event.id,
@@ -2358,7 +2366,7 @@ function materializeProjection(body, records, epoch, runtime) {
 }
 
 // scripts/transcript-reducer-node.ts
-var REDUCER_FINGERPRINT = "40655c3e483549b04f248e643bcb827b24caca6769b964bdcf7f7a8ae95bd82d";
+var REDUCER_FINGERPRINT = "7a4cbed8e34c411c6305a469ec5887b3e756b9f25e223c096a92bbfc0c3716c2";
 var RPC_VERSION = 1;
 var MAX_PACKET_BYTES = 24 * 1024 * 1024;
 function dispatch(method, params) {

@@ -29,6 +29,14 @@ afterEach(() => {
 });
 
 describe('draft manager — ephemeral state', () => {
+    it('passes explicit attachment identity to the composer and clears it with the restore', () => {
+        const h = harness();
+        const refs = [{ owner_id: 'owner', event_id: 'event', index: 0, path: '/uploads/photo.png' }];
+        h.dm.setPendingRestorePrompt('read', [refs[0].path], refs);
+        expect(h.state.pendingRestoreUploadReferences).toEqual(refs);
+        h.dm.clearPendingRestorePrompt();
+        expect(h.state.pendingRestoreUploadReferences).toBeUndefined();
+    });
 	it('sets draft, scroll and restore prompt', () => {
 		const h = harness();
 		h.dm.setDraft('hello');

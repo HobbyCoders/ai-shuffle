@@ -104,7 +104,7 @@ async def test_preparation_failure_keeps_a_restorable_unsent_message(staged_uplo
     with _Patches():
         handler = _make_handler()
         await handler.handle_query({"session_id": SID, "profile": "default", "prompt": restored.restored_prompt,
-            "upload_paths": restored.restored_upload_paths})
+            "upload_references": restored.restored_upload_references})
     retry = turns.get_queued_turns(SID)[0]
     assert retry["payload"]["upload_references"]
     with _pump_env(None), ExitStack() as stack:
@@ -132,21 +132,21 @@ async def test_remote_restored_path_uses_an_owner_event_reference(staged_upload,
         handler._network_owner = AsyncMock(return_value="peer-device")
         handler._may_send_elsewhere = AsyncMock(return_value=True)
         with patch("app.network.control.submit_turn", new=AsyncMock(return_value={"id": "forwarded"})) as forward:
-            await handler.handle_query({"session_id": SID, "profile": "default", "prompt": f"inspect @{remote_path}", "upload_paths": [remote_path]})
+            await handler.handle_query({"session_id": SID, "profile": "default", "prompt": f"inspect @{remote_path}", "upload_references": [{"owner_id": owner, "event_id": "sent-owner-upload", "index": 0, "path": remote_path}]})
     forward.assert_awaited_once()
     payload = forward.call_args.kwargs["payload"]
-    assert payload["upload_references"] == [{"owner_id": owner, "event_id": "sent-owner-upload", "index": 0}]
+    assert payload["upload_references"] == [{"owner_id": owner, "event_id": "sent-owner-upload", "index": 0, "path": remote_path}]
     assert not payload.get("upload_blob_ids")
 
 
 def test_owner_resolves_only_its_own_session_attachment_references(staged_upload):
     event = {"id": "owner-attachment", "type": "message.user", "payload": {"content": "photo", "upload_paths": [str(staged_upload)], "upload_owner_id": settings.effective_instance_id}}
     session_events.append_events(SID, [event])
-    ref = {"owner_id": settings.effective_instance_id, "event_id": event["id"], "index": 0}
+    ref = {"owner_id": settings.effective_instance_id, "event_id": event["id"], "index": 0, "path": str(staged_upload)}
     payload = {"upload_paths": [str(staged_upload)], "upload_references": [ref]}
     resolved = upload_transfer.resolve_upload_references(payload, database.get_session(SID))
     assert resolved["upload_paths"] == [str(staged_upload)]
-    for bad in [{**ref, "owner_id": "wrong"}, {**ref, "event_id": "not-recorded"}, {**ref, "index": 1}]:
+    for bad in [{**ref, "owner_id": "wrong"}, {**ref, "event_id": "not-recorded"}, {**ref, "index": 1}, {**ref, "index": False}, {**ref, "path": "/other-file"}]:
         with pytest.raises(upload_transfer.UploadLiftError):
             upload_transfer.resolve_upload_references({**payload, "upload_references": [bad]}, database.get_session(SID))
 
@@ -173,13 +173,13 @@ async def test_owner_materialized_attachment_rewinds_and_resends_through_a_viewe
         with patch.object(settings, "instance_id", owner), patch.object(control, "_require_owned", return_value=database.get_session(SID)):
             return await control._submit_forwarded_turn({**body, "session_id": session_id, "uploads": parts}, "viewer-device", None)
 
-    async def send(paths, prompt):
+    async def send(paths, prompt, references=None):
         with _Patches():
             handler = _make_handler()
             handler._network_owner = AsyncMock(return_value="peer-device")
             handler._may_send_elsewhere = AsyncMock(return_value=True)
             with patch("app.network.control.submit_turn", new=AsyncMock(side_effect=relay)) as forward:
-                await handler.handle_query({"session_id": SID, "profile": "default", "project": "transport-project", "prompt": prompt, "upload_paths": paths})
+                await handler.handle_query({"session_id": SID, "profile": "default", "project": "transport-project", "prompt": prompt, "upload_paths": paths, "upload_references": references})
             assert forward.await_count == 1, handler.send_json.call_args_list
         return turns.get_queued_turns(SID)[0]
 
@@ -215,8 +215,8 @@ async def test_owner_materialized_attachment_rewinds_and_resends_through_a_viewe
     monkeypatch.setitem(config._runtime_overrides, "workspace_dir", tmp_path)
     # Checkpoint rewinds restore text from the clicked transcript message in
     # the client; the endpoint supplies provenance, not restored_prompt.
-    second = await send(restored.restored_upload_paths, user["payload"]["content"])
-    assert second["payload"]["upload_references"] == [{"owner_id": owner, "event_id": user["id"], "index": 0}]
+    second = await send([], user["payload"]["content"], restored.restored_upload_references)
+    assert second["payload"]["upload_references"] == [{"owner_id": owner, "event_id": user["id"], "index": 0, "path": str(materialized)}]
     assert not second["payload"].get("upload_blob_ids")
     monkeypatch.setattr(settings, "instance_id", owner)
     monkeypatch.setitem(config._runtime_overrides, "workspace_dir", tmp_path / "owner-workspace")
@@ -241,3 +241,64 @@ async def test_voice_text_only_paths_keep_the_preexisting_send_behavior(staged_u
     user = next(row for row in session_events.get_events(SID) if row["event_type"] == "message.user")
     assert user["payload"]["content"] == prompt
     assert not user["payload"].get("upload_paths")
+
+
+async def test_remote_fresh_upload_at_an_old_owner_path_sends_new_bytes(staged_upload, monkeypatch):
+    from types import SimpleNamespace
+    from app.core import placement
+    from app.db import upload_blobs
+    owner = "same-path-owner"
+    staged_upload.write_bytes(b"NEW viewer bytes")
+    database.create_project("same-path", "Same path", None, str(staged_upload.parent.parent))
+    database.set_session_project(SID, "same-path")
+    database.adopt_session(SID, owner)
+    session_events.append_events(SID, [{"id": "older-owner-file", "type": "message.user", "payload": {
+        "content": f"old @{staged_upload}", "upload_paths": [str(staged_upload)], "upload_owner_id": owner}}])
+    monkeypatch.setattr(placement, "resolve_placement", lambda *_a, **_k: SimpleNamespace(kind="runner", runner_id=owner, reason="test"))
+    with _Patches():
+        handler = _make_handler()
+        handler._network_owner = AsyncMock(return_value="owner-device")
+        handler._may_send_elsewhere = AsyncMock(return_value=True)
+        with patch("app.network.control.submit_turn", new=AsyncMock(return_value={"turn_id": "fresh"})) as forward:
+            await handler.handle_query({"session_id": SID, "profile": "default", "project": "same-path",
+                "prompt": f"inspect @{staged_upload}", "upload_paths": [str(staged_upload)]})
+    forward.assert_awaited_once()
+    payload = forward.call_args.kwargs["payload"]
+    assert not payload.get("upload_references"), "a fresh chip must never select an older same-path event"
+    ids = payload["upload_blob_ids"]
+    assert upload_blobs.get_blob_data(ids[0]) == b"NEW viewer bytes"
+    # Simulate the other filesystem at the identical absolute checkout path.
+    staged_upload.write_bytes(b"OLD owner bytes")
+    mapping = upload_transfer.materialize_blobs_for_turn(ids, str(staged_upload.parent.parent))
+    from pathlib import Path
+    assert Path(mapping[str(staged_upload)]).read_bytes() == b"NEW viewer bytes"
+    assert staged_upload.read_bytes() == b"OLD owner bytes"
+
+
+def test_partial_upload_failure_retries_the_actual_collision_destination(staged_upload, tmp_path):
+    from app.core import confined_files
+    from pathlib import Path
+    second = staged_upload.parent / "second.txt"
+    second.write_bytes(b"SECOND")
+    ids = upload_transfer.lift_paths_to_blobs([str(staged_upload), str(second)], {"path": str(staged_upload.parent)}, SID)
+    destination = tmp_path / "collision-owner"
+    (destination / "uploads").mkdir(parents=True)
+    (destination / "uploads" / staged_upload.name).write_bytes(b"OLD unrelated photo")
+    write = confined_files.upload
+    calls = 0
+    def fail_second(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("second file disk failure")
+        return write(*args, **kwargs)
+    with patch.object(confined_files, "upload", side_effect=fail_second):
+        with pytest.raises(upload_transfer.UploadLiftError, match="second file disk failure"):
+            upload_transfer.materialize_blobs_for_turn(ids, str(destination))
+    renamed = destination / "uploads" / "photo_1.png"
+    assert renamed.read_bytes() == b"image"
+    mapping = upload_transfer.materialize_blobs_for_turn(ids, str(destination))
+    assert Path(mapping[str(staged_upload)]).read_bytes() == b"image"
+    assert mapping[str(staged_upload)] == str(renamed)
+    assert Path(mapping[str(second)]).read_bytes() == b"SECOND"
+    assert (destination / "uploads" / staged_upload.name).read_bytes() == b"OLD unrelated photo"

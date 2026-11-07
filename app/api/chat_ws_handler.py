@@ -1752,13 +1752,15 @@ class ChatWebSocketHandler:
 
         local_upload_paths = upload_paths
         upload_references = []
-        if upload_paths:
+        if upload_paths or data.get("upload_references"):
             from app.core import upload_transfer
             try:
                 upload_session = await run_sync(database.get_session, session_id)
                 local_upload_paths, upload_references = await run_sync(
-                    upload_transfer.partition_upload_paths, upload_paths, upload_session, remote=placed_remote,
+                    upload_transfer.partition_upload_paths, upload_paths, upload_session,
+                    references=data.get("upload_references"),
                 )
+                upload_paths = local_upload_paths + [ref["path"] for ref in upload_references]
             except (upload_transfer.UploadLiftError, OSError, ValueError, RuntimeError):
                 await self.send_json({
                     "type": "error", "session_id": session_id,

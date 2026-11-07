@@ -38,19 +38,27 @@ it.each([[null, 'later', 'old'], [undefined, 'later', 'old'], ['', '', 'old'], [
 	},
 );
 
+it('keeps explicit identity when restored words go to the stash and are added later', () => {
+    const refs = [{ owner_id: 'owner', event_id: 'event', index: 0, path: '/uploads/photo.png' }];
+    expect(rewoundWordsKeptApart('open', '', 'read', [refs[0].path], 'new words', refs)).toBe(true);
+    expect(mocks.push.mock.calls[0][0]).toContain('uploadReference');
+    mocks.banner.mock.calls[0][1].action.onClick();
+    expect(mocks.restore).toHaveBeenCalledWith('read', [refs[0].path], refs);
+});
+
 it('keeps an off-screen restored message apart without changing the new draft', () => {
 	mocks.cache.set('other', 'new words');
 	expect(rewoundWordsKeptApart('other', 'before', 'old words', ['/uploads/a.png'])).toBe(true);
 	expect(mocks.cache.get('other')).toBe('new words');
 	expect(mocks.push.mock.calls[0][0]).toContain('/uploads/a.png');
 	const action = mocks.banner.mock.calls[0][1].action;
-	action.onClick(); expect(mocks.add).toHaveBeenCalledWith('other', 'old words', ['/uploads/a.png']);
+	action.onClick(); expect(mocks.add).toHaveBeenCalledWith('other', 'old words', ['/uploads/a.png'], undefined, []);
 });
 
 it('offers the same explicit add action in the open chat, once', () => {
 	expect(rewoundWordsKeptApart('open', '', 'old', [], 'new')).toBe(true);
 	const action = mocks.banner.mock.calls[0][1].action;
-	action.onClick(); expect(mocks.restore).toHaveBeenCalledWith('old', []);
+	action.onClick(); expect(mocks.restore).toHaveBeenCalledWith('old', [], []);
 	mocks.take.mockReturnValue(false); action.onClick(); expect(mocks.restore).toHaveBeenCalledTimes(1);
 });
 

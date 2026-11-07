@@ -27,11 +27,11 @@ export function composerBaseline(sessionId: string): string | null {
 
 export function rewoundWordsKeptApart(
 	sessionId: string, baseline: string | null | undefined, prompt: string,
-	uploads: string[] = [], draftNow = chatDraftNow(sessionId),
+	uploads: string[] = [], draftNow = chatDraftNow(sessionId), references: import('$lib/api/rewind').UploadReference[] = [],
 ): boolean {
 	const now = composerWordsOf(draftNow);
 	if (baseline == null || !now || now === baseline || (!prompt && uploads.length === 0)) return false;
-	const pushed = promptStash.push(JSON.stringify(restoreMessageDocument(prompt, uploads)));
+	const pushed = promptStash.push(JSON.stringify(restoreMessageDocument(prompt, uploads, references)));
 	if (!pushed?.durable) {
 		notify.banner('Your rewound message was added after what you typed. Check the composer before you send.', {
 			severity: 'warning', persist: false, duration_ms: 12000,
@@ -46,8 +46,8 @@ export function rewoundWordsKeptApart(
 			onClick: () => {
 				notify.dismissLive(banner);
 				if (!promptStash.take(entry.id)) return;
-				if (get(activeSession).sessionId === sessionId) activeSession.setPendingRestorePrompt(prompt, uploads);
-				else addRestoredWordsToDraft(sessionId, prompt, uploads);
+				if (get(activeSession).sessionId === sessionId) activeSession.setPendingRestorePrompt(prompt, uploads, references);
+				else addRestoredWordsToDraft(sessionId, prompt, uploads, undefined, references);
 			},
 		},
 	});

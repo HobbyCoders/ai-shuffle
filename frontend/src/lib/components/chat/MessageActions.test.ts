@@ -277,13 +277,14 @@ describe('MessageActions rewind', () => {
 		let answer!: (value: unknown) => void;
 		rewind.mockReturnValue(new Promise(resolve => { answer = resolve; }));
 		const onRewindComplete = vi.fn();
-		render(MessageActions, { ...base, messageContent: 'see @/work/uploads/a.txt', userPromptOccurrence: 0, uploadPaths: ['/work/uploads/a.txt'], onRewindComplete });
+		const refs = [{ owner_id: 'owner', event_id: 'sent-upload', index: 0, path: '/work/uploads/a.txt' }];
+        render(MessageActions, { ...base, messageContent: 'see @/work/uploads/a.txt', userPromptOccurrence: 0, uploadPaths: ['/work/uploads/a.txt'], uploadReferences: refs, onRewindComplete });
 		await fireEvent.click(rewindButton()!);
 		await fireEvent.click(screen.getByRole('button', { name: 'Rewind' }));
 		// A reload before the answer still has the chip, not the raw path.
-		expect(takeUnfinishedRestores('s1', new Set(), 'a-later-page').map(n => n.uploadPaths)).toEqual([['/work/uploads/a.txt']]);
+		expect(takeUnfinishedRestores('s1', new Set(), 'a-later-page')).toMatchObject([{ uploadPaths: ['/work/uploads/a.txt'], uploadReferences: refs }]);
 		answer({ success: true, chat_rewound: true });
-		await waitFor(() => expect(onRewindComplete).toHaveBeenCalledWith(undefined, 'see @/work/uploads/a.txt', ['/work/uploads/a.txt']));
+		await waitFor(() => expect(onRewindComplete).toHaveBeenCalledWith(undefined, 'see @/work/uploads/a.txt', ['/work/uploads/a.txt'], false, refs));
 	});
 
 	describe('words typed while a rewind is on its way (#1083)', () => {

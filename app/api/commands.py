@@ -268,6 +268,7 @@ class RewindResponseV2(BaseModel):
     unsent_restored: bool = False
     restored_prompt: Optional[str] = None
     restored_upload_paths: List[str] = []
+    restored_upload_references: List[dict] = []
 
 
 def _get_checkpoints(sdk_session_id: str, working_dir: str):
@@ -502,6 +503,7 @@ def _resolve_rewind_from_seq(
     include_response: bool,
     target_role: str,
     restored_upload_paths: Optional[List[str]] = None,
+    restored_upload_references: Optional[List[dict]] = None,
 ) -> tuple[Optional[int], Optional[str]]:
     """Resolve the event-log seq a chat rewind truncates from. FAIL CLOSED.
 
@@ -587,6 +589,9 @@ def _resolve_rewind_from_seq(
         paths = (events[target_idx].get("payload") or {}).get("upload_paths")
         if isinstance(paths, list):
             restored_upload_paths.extend(p for p in paths if isinstance(p, str) and p)
+    if restored_upload_references is not None:
+        from app.core.upload_transfer import recorded_upload_references
+        restored_upload_references.extend(recorded_upload_references(session_id, events[target_idx]))
     return int(events[target_idx]["seq"]), None
 
 
@@ -623,10 +628,12 @@ def _restore_unsent_message(session_id: str, message_id: str) -> RewindResponseV
             "payload": {"subtype": "unsent_restored", "data": {"message_id": message_id}},
         }], _conn=conn)
     session_events.notify_session_write(session_id, "session_events")
+    from app.core.upload_transfer import recorded_upload_references
     return RewindResponseV2(success=True, message="Unsent message restored for editing",
                             unsent_restored=True, messages_removed=1,
                             restored_prompt=payload.get("content") or "",
-                            restored_upload_paths=payload.get("upload_paths") or [])
+                            restored_upload_paths=payload.get("upload_paths") or [],
+                            restored_upload_references=recorded_upload_references(session_id, target))
 
 
 @router.post("/rewind/execute/{session_id}")
@@ -768,6 +775,7 @@ async def _execute_rewind(
     v2_session = bool(session.get("v2_stream"))
     rewound_from_seq: Optional[int] = None
     restored_upload_paths: List[str] = []
+    restored_upload_references: List[dict] = []
     if v2_session and request.restore_chat:
         from app.core.history_backfill import ensure_backfilled
         await ensure_backfilled(session_id)
@@ -800,7 +808,7 @@ async def _execute_rewind(
             _resolve_rewind_from_seq,
             session_id, sdk_session_id, working_dir,
             request.target_uuid, request.include_response, request.target_role,
-            restored_upload_paths,
+            restored_upload_paths, restored_upload_references,
         )
         if resolve_err is not None:
             return RewindResponseV2(
@@ -1294,6 +1302,7 @@ async def _execute_rewind(
         partial_success=partial_success,
         warning=warning,
         restored_upload_paths=restored_upload_paths if chat_rewound else [],
+        restored_upload_references=restored_upload_references if chat_rewound else [],
     )
 
 

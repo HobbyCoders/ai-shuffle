@@ -71,6 +71,8 @@ async def test_sent_upload_round_trip(staged_upload, rewind_env, monkeypatch,
     ))
     assert result.success, result.error
     assert result.restored_upload_paths == (paths if target_role == "user" and not include_response else [])
+    expected_refs = [{"owner_id": sent[0]["payload"]["upload_owner_id"], "event_id": sent[0]["id"], "index": 0, "path": paths[0]}] if paths and target_role == "user" and not include_response else []
+    assert result.restored_upload_references == expected_refs
 
 
 async def test_steered_message_records_upload_paths(staged_upload):
