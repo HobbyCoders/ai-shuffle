@@ -11,7 +11,11 @@ vi.mock('$lib/stores/app-data.svelte', async () => {
 });
 vi.mock('$lib/stores/projects-overview', async () => {
  const { writable } = await import('svelte/store');
- return { projectsOverview: writable([]), projectsOverviewSupported: writable(false), loadProjectsOverview: vi.fn(), patchOverviewWorker: vi.fn() };
+ return { projectsOverview: writable([]), projectsOverviewSupported: writable(false), loadProjectsOverview: vi.fn().mockResolvedValue(undefined), patchOverviewWorker: vi.fn() };
+});
+vi.mock('$lib/stores/worker-presence', async () => {
+ const { writable } = await import('svelte/store');
+ return { workerInstalls: writable(null), refreshWorkerPresence: vi.fn().mockResolvedValue([]) };
 });
 vi.mock('$lib/stores/layout.svelte', async () => {
  const { writable } = await import('svelte/store');
