@@ -2688,20 +2688,21 @@ describe('feedController turn-error banner (#1082, #1175, #1238)', () => {
 			.toEqual(['shown', 'shown', 'shown', 'shown', 'shown', 'cleared']);
 	});
 
-	it('S2 (a) by words alone (older worker): the old failure\'s success does not clear it; its own successor does', () => {
-		const { raise, live } = chat(failure('t0', 1));
+	it('round 4 S2: a frame naming no turn survives a whole-turn lag (old same-words failure, its success, then its own)', () => {
+		// Caught up, but at seq 0 when the current failure's frame arrives.
+		const { deps, raise, live } = chat();
 		raise(null);
-		expect(live([...success('tx', 3), ...failure('t1', 5), ...success('t2', 7)]))
-			.toEqual(['shown', 'shown', 'shown', 'shown', 'shown', 'cleared']);
+		expect(live([...failure('t0', 1), ...success('tx', 3), ...failure('t1', 5)]))
+			.toEqual(['shown', 'shown', 'shown', 'shown', 'shown', 'shown']);
+		expect(deps.state.error).toBe(FAILED);
 	});
 
-	it('S6 by words alone: placed at the sentinel, it follows its failure past 16 others to the clean finish', () => {
-		const { deps, raise } = chat(success('t0', 1));
-		raise(null);
+	it('round 4 S6: hydrated t0, 16 more failures and a clean finish; t0\'s delayed frame raises nothing', () => {
 		const others = Array.from({ length: 16 }, (_, i) => failure(`o${i}`, 10 + i * 2, `other ${i}`)).flat();
-		for (const e of [...failure('t1', 3), ...others, ...success('t2', 50)]) hoisted.onEvent!(e);
-		flushRaf();
-		expect(deps.state.error).toBeNull();
+		const { deps, raise, live } = chat([...failure('t0', 1), ...others, ...success('t2', 50)]);
+		raise('t0');
+		expect(deps.state.error ?? null).toBeNull();
+		expect(live([logged('stream.delta', 52, { turn_id: 't3', text: 'hi' })])).toEqual(['cleared']);
 	});
 
 	it('S2 (b) and S6: raised during hydration, then one atomic replay of its failure, 16 others and a clean finish', () => {
@@ -2733,15 +2734,14 @@ describe('feedController turn-error banner (#1082, #1175, #1238)', () => {
 		expect(live(success('t2', 3))).toEqual(['shown', 'cleared']);
 	});
 
-	it('a message-only frame (older worker) never clears on what came before a same-words failure logged after it', () => {
-		// Raised mid-gap: the gap's same-words failure and its success may be its own or not, so they decide nothing.
+	it('a frame naming no turn (older worker) stays through a reconnect gap and later outcomes until sent', () => {
 		const { deps, raise, live } = chat(success('t0', 1));
 		hoisted.onOpen!();
 		raise(null);
 		expect(live([...failure('t1', 3), ...success('t2', 5)])).toEqual(['shown', 'shown', 'shown', 'shown']);
 		hoisted.onEvent!(caughtUp(6));
+		expect(live([...failure('t3', 7), ...success('t4', 9)])).toEqual(['shown', 'shown', 'shown', 'shown']);
 		expect(deps.state.error).toBe(FAILED);
-		// Placed at the sentinel: the next same-words failure is its own, and its successor clears it.
-		expect(live([...failure('t3', 7), ...success('t4', 9)])).toEqual(['shown', 'shown', 'shown', 'cleared']);
 	});
+
 });

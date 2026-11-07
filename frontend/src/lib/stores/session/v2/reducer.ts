@@ -221,8 +221,6 @@ export interface TurnFailureFact {
 	turnId: string;
 	/** Seq of the event that ended it. */
 	seq: number;
-	/** The abort's error message ('' when it carried none, and for a failed completion). */
-	message: string;
 }
 
 /** A turn that finished cleanly: its `turn.completed` seq and turn id. */
@@ -240,14 +238,17 @@ export interface RewindCut {
 /**
  * The facts that say whether the log has moved past a failed turn: a rewind
  * cut it away, or a different turn finished cleanly after it (see
- * `failureOutlived`). Only `failures` is capped. It is only read when an
- * error frame arrives after the feed already reduced its turn's failure (the
- * feed follows a banner raised earlier event by event, see
- * turn-error-banner.ts), and whether a failure is outlived is read from
- * `finishes` and `cuts`, which stay exact for every failure ever logged.
+ * `failureOutlived`). Only `failures` is capped, at TURN_FAILURES_KEPT
+ * failed turns. It is read when an error frame arrives after the feed already
+ * reduced its turn's failure (a banner raised earlier is followed event by
+ * event, see turn-error-banner.ts): a late frame finds its turn there and,
+ * when the log has moved past it, raises nothing. Whether a failure is
+ * outlived is read from `finishes` and `cuts`, which stay exact for every
+ * failure ever logged.
  */
 export interface TurnOutcomes {
-	/** The most recent failures, oldest first, at most TURN_FAILURES_KEPT. */
+	/** The most recent failed turns, oldest first, one per turn (its first
+	 *  failed end), at most TURN_FAILURES_KEPT. */
 	failures: readonly TurnFailureFact[];
 	/** The latest clean finish, then the latest clean finish of any OTHER
 	 *  turn. Those two answer "did a turn other than T finish cleanly after
@@ -259,8 +260,10 @@ export interface TurnOutcomes {
 	cuts: readonly RewindCut[];
 }
 
-/** How many failed turns `TurnOutcomes.failures` keeps. */
-const TURN_FAILURES_KEPT = 16;
+/** How many failed turns `TurnOutcomes.failures` keeps: far more than one
+ *  chat's history usually holds, so a late `error` frame still finds its turn.
+ *  Failures are rare, so copying the list on each one stays cheap. */
+export const TURN_FAILURES_KEPT = 1024;
 
 export const NO_TURN_OUTCOMES: TurnOutcomes = { failures: [], finishes: [], cuts: [] };
 
@@ -291,6 +294,9 @@ function recordRewind(outcomes: TurnOutcomes, cut: RewindCut): TurnOutcomes {
 }
 
 function recordFailure(outcomes: TurnOutcomes, failure: TurnFailureFact): TurnOutcomes {
+	// A turn keeps its first failed end, the one its banner binds to; a failure
+	// naming no turn has no frame to match.
+	if (!failure.turnId || outcomes.failures.some((f) => f.turnId === failure.turnId)) return outcomes;
 	return { ...outcomes, failures: [...outcomes.failures, failure].slice(-TURN_FAILURES_KEPT) };
 }
 
@@ -1578,7 +1584,7 @@ function reduceInternal(
 					// and is a failure of its own turn.
 					turnOutcomes: completedCleanly(event)
 						? recordCleanFinish(state.turnOutcomes ?? NO_TURN_OUTCOMES, { seq, turnId: str(event.turn_id) })
-						: recordFailure(state.turnOutcomes ?? NO_TURN_OUTCOMES, { turnId: str(event.turn_id), seq, message: '' }),
+						: recordFailure(state.turnOutcomes ?? NO_TURN_OUTCOMES, { turnId: str(event.turn_id), seq }),
 				})
 			);
 			// A retry card left mid-count is finished business now — the turn
@@ -1648,8 +1654,7 @@ function reduceInternal(
 			let next = dismissProseThrough(closeOpen(state), seq, seq, observe);
 			if (reason === 'error') {
 				// Both returns below spread `next`, so the failure is recorded once.
-				const failure: TurnFailureFact = { turnId: str(event.turn_id), seq, message: str(event.message) };
-				next = { ...next, turnOutcomes: recordFailure(next.turnOutcomes ?? NO_TURN_OUTCOMES, failure) };
+				next = { ...next, turnOutcomes: recordFailure(next.turnOutcomes ?? NO_TURN_OUTCOMES, { turnId: str(event.turn_id), seq }) };
 			}
 			if (reason === 'interrupt') {
 				// Mark any still-running tool card as errored (mirrors the legacy

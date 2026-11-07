@@ -35,11 +35,9 @@ import { browserPanel } from '../../browser-panel.svelte';
 import { pendingQueue, reconcilePendingPeerMessages } from '../pending-queue';
 import {
 	followTurnError,
-	placeTurnError,
 	raiseTurnError,
 	unplaceTurnError,
 	type TurnErrorAnchor,
-	type TurnErrorFacts,
 } from '../turn-error-banner';
 import { nameStoppedTurn, nameStopRecovery, STOP_TURN_NOT_NAMED } from '$lib/utils/not-sent-hold';
 import { swarms } from '../../swarms';
@@ -117,10 +115,6 @@ let everCaughtUp = false;
 // this state means the backfill is flowing after all, so we RE-ENTER batch mode
 // (see onEvent) instead of repainting the rest of history frame by frame.
 let sentinelPending = false;
-// False from each connection's open until its `caught_up`: a reconnect replays
-// the gap since lastSeq at live cadence, so `caughtUp` alone does not say the
-// reduced log is the whole log. Read by the turn-error banner rule.
-let connectionCaughtUp = false;
 // The current session's turn-error banner, tied to its failed turn and stepped
 // through every reduced event (turn-error-banner.ts). Null when no banner of
 // the current session came from the socket's `error` frame.
@@ -657,14 +651,6 @@ function transcriptPatch(
 	};
 }
 
-function turnErrorFacts(): TurnErrorFacts {
-	return {
-		outcomes: reducerState.turnOutcomes,
-		lastSeq: reducerState.lastSeq,
-		caughtUp: caughtUp && !sentinelPending && connectionCaughtUp,
-	};
-}
-
 function fold(hydrationComplete = false): void {
 	if (!deps) return;
 	// Guard against a session switch that landed mid-batch.
@@ -933,7 +919,6 @@ function resetFeedFlags(): void {
 	caughtUp = false;
 	everCaughtUp = false;
 	sentinelPending = false;
-	connectionCaughtUp = false;
 	bannerAnchor = null;
 	pendingResyncDirty.clear();
 	eventsReduced = 0;
@@ -1034,7 +1019,6 @@ export const feedController: FeedController = {
 			epoch: cached ? cached.epoch : null,
 			onOpen: () => {
 				if (generation !== feedGeneration) return;
-				connectionCaughtUp = false;
 				swarms.refreshKnown(sessionId);
 				// Initial hydration remains atomic until the backend's `caught_up`
 				// sentinel, floored by the idle fallback. Reconnects after that
@@ -1066,9 +1050,6 @@ export const feedController: FeedController = {
 					caughtUp = true;
 					everCaughtUp = true;
 					sentinelPending = false;
-					connectionCaughtUp = true;
-					// A message-only banner raised mid-replay learns where it arrived.
-					if (bannerAnchor) bannerAnchor = placeTurnError(bannerAnchor, turnErrorFacts());
 					clearCatchupFallback();
 					applyPendingRegistryTasks(false);
 					fold(true);
@@ -1315,8 +1296,9 @@ export const feedController: FeedController = {
 
 	raiseTurnError(sessionId: string, message: string, turnId: string | null) {
 		if (currentSessionId === null || sessionId !== currentSessionId) return 'shown';
-		const anchor = raiseTurnError(message, turnId, turnErrorFacts());
+		const anchor = raiseTurnError(message, turnId, reducerState.turnOutcomes);
 		if (anchor === 'outlived') return 'outlived';
+		// A frame naming no turn has nothing to follow: it stays until sent or dismissed.
 		bannerAnchor = anchor;
 		return 'shown';
 	},

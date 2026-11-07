@@ -1,12 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
 	followTurnError,
-	placeTurnError,
 	raiseTurnError,
 	unplaceTurnError,
 	type TurnErrorAnchor,
 } from './turn-error-banner';
-import { reduce, reduceAll, type V2SessionState, type WireEvent } from './v2/reducer';
+import { reduce, reduceAll, TURN_FAILURES_KEPT, type V2SessionState, type WireEvent } from './v2/reducer';
 
 const ev = (type: string, seq: number, fields: Record<string, unknown> = {}): WireEvent =>
 	({ type, id: `e${seq}`, seq, session_id: 's1', created_at: '2026-11-06T00:00:00.000Z', ...fields }) as WireEvent;
@@ -31,22 +30,16 @@ type Banner = 'shown' | 'cleared';
 /**
  * One chat as the browser holds it, driven the way the feed controller drives
  * it: each event is reduced and steps the banner's anchor (`onEvent`), the
- * banner changes only at a fold (`fold`), and a `caught_up` sentinel places a
- * message-only anchor. Every intermediate fold of a replay is checked.
+ * banner changes only at a fold (`fold`). Every intermediate fold of a
+ * replay is checked.
  */
 class Chat {
 	state: V2SessionState;
-	caughtUp: boolean;
 	error: string | null = null;
 	anchor: TurnErrorAnchor | null = null;
 
-	constructor(log: WireEvent[] = [], caughtUp = true) {
+	constructor(log: WireEvent[] = []) {
 		this.state = reduceAll(log);
-		this.caughtUp = caughtUp;
-	}
-
-	private facts() {
-		return { outcomes: this.state.turnOutcomes, lastSeq: this.state.lastSeq, caughtUp: this.caughtUp };
 	}
 
 	get banner(): Banner {
@@ -55,7 +48,7 @@ class Chat {
 
 	/** The socket's `error` frame: what the chat shows right after it. */
 	raise(turnId: string | null = null, message = FAILED): Banner | 'never raised' {
-		const anchor = raiseTurnError(message, turnId, this.facts());
+		const anchor = raiseTurnError(message, turnId, this.state.turnOutcomes);
 		if (anchor === 'outlived') return 'never raised';
 		this.error = message;
 		this.anchor = anchor;
@@ -78,16 +71,9 @@ class Chat {
 		return batches.map((b) => this.fold(b));
 	}
 
-	/** The server's `caught_up` sentinel: the reduced log is complete. */
+	/** The server's `caught_up` sentinel: hydration's batch is shown. */
 	sentinel(): Banner {
-		this.caughtUp = true;
-		if (this.anchor) this.anchor = placeTurnError(this.anchor, this.facts());
 		return this.fold([]);
-	}
-
-	/** A reconnect: its gap replays until the next sentinel. */
-	reconnect(): void {
-		this.caughtUp = false;
 	}
 }
 
@@ -146,10 +132,9 @@ describe('turn-error banner, tied to its turn by the frame', () => {
 		expect(after.fold([...succeeded('t2', 7, { api_error_status: 429 }), ev('transcript.rewound', 10, { from_seq: 8 })])).toBe('shown');
 	});
 
-	it('a frame naming an outlived turn raises nothing; an outlived one by its words alone still shows', () => {
+	it('a frame naming an outlived turn raises nothing', () => {
 		const chat = new Chat([...failed('t1', 1), ...succeeded('t2', 4)]);
 		expect(chat.raise('t1')).toBe('never raised');
-		expect(chat.raise(null)).toBe('shown');
 	});
 
 	it('only its own turn: a same-words failure of another turn is not it', () => {
@@ -165,7 +150,7 @@ describe('turn-error banner, tied to its turn by the frame', () => {
 		chat.error = 'This session was taken over by another device.';
 		expect(chat.fold(succeeded('t2', 4))).toBe('shown');
 		expect(chat.anchor).toBeNull();
-		expect(raiseTurnError('', 't1', { caughtUp: true })).toBeNull();
+		expect(raiseTurnError('', 't1')).toBeNull();
 	});
 });
 
@@ -183,20 +168,8 @@ describe('turn-error banner while the feed lags or replays (review S2)', () => {
 		expect(chat.replay([success, current, successor])).toEqual(['shown', 'shown', 'cleared']);
 	});
 
-	it('(a) the same with a message-only frame: nothing before a same-words failure logged after it counts', () => {
-		const chat = new Chat(oldFailure);
-		expect(chat.raise(null)).toBe('shown');
-		expect(chat.replay([success, current, successor])).toEqual(['shown', 'shown', 'cleared']);
-		// Event by event too.
-		const perEvent = new Chat(oldFailure);
-		perEvent.raise(null);
-		const log = [...success, ...current, ...successor];
-		expect(perEvent.replay(log.map((e) => [e])).slice(0, -1)).toEqual(log.slice(0, -1).map(() => 'shown'));
-		expect(perEvent.banner).toBe('cleared');
-	});
-
 	it('(b) a timely frame during hydration, then its failure and a clean successor: cleared at the sentinel', () => {
-		const chat = new Chat([], false);
+		const chat = new Chat();
 		expect(chat.raise('t1')).toBe('shown');
 		// Hydration folds nothing on screen before its sentinel, but whatever
 		// batches it is cut into, no point before the successor clears it.
@@ -204,35 +177,16 @@ describe('turn-error banner while the feed lags or replays (review S2)', () => {
 		expect(chat.replay([successor])).toEqual(['cleared']);
 		expect(chat.sentinel()).toBe('cleared');
 
-		const atomic = new Chat([], false);
+		const atomic = new Chat();
 		atomic.raise('t1');
 		atomic.fold([...oldFailure, ...success, ...current, ...successor]);
 		expect(atomic.sentinel()).toBe('cleared');
 	});
 
-	it('(b) the same frame by its words alone stays: it may have been about any of them (older worker)', () => {
-		const chat = new Chat([], false);
-		chat.raise(null);
-		expect(chat.replay([oldFailure, success, current, successor])).toEqual(['shown', 'shown', 'shown', 'shown']);
-		expect(chat.sentinel()).toBe('shown');
-		// Placed at the sentinel: a same-words failure logged after it is its own.
-		expect(chat.anchor?.afterSeq).toBe(12);
-		expect(chat.replay([failed('t3', 13), succeeded('t4', 16)])).toEqual(['shown', 'cleared']);
-	});
-
-	it('a reconnect gap: a turn-named banner follows it fold by fold; a message-only one waits for its sentinel', () => {
+	it('a turn-named banner follows a reconnect gap fold by fold', () => {
 		const named = new Chat(prompt('t1', 1));
 		named.raise('t1');
-		named.reconnect();
 		expect(named.replay([[abort('t1', 3)], succeeded('t2', 4)])).toEqual(['shown', 'cleared']);
-
-		// Raised mid-gap: the gap's same-words failure and success came before it.
-		const words = new Chat(succeeded('t0', 1));
-		words.reconnect();
-		words.raise(null);
-		expect(words.replay([failed('t1', 4), succeeded('t2', 7)])).toEqual(['shown', 'shown']);
-		expect(words.sentinel()).toBe('shown');
-		expect(words.replay([failed('t3', 10), succeeded('t4', 13)])).toEqual(['shown', 'cleared']);
 	});
 
 	it('a restarted feed (replaced log) finds the turn-named banner\'s failure again', () => {
@@ -240,7 +194,6 @@ describe('turn-error banner while the feed lags or replays (review S2)', () => {
 		chat.raise('t1');
 		chat.anchor = unplaceTurnError(chat.anchor!);
 		chat.state = reduceAll([]);
-		chat.caughtUp = false;
 		expect(chat.replay([failed('t1', 1), []])).toEqual(['shown', 'shown']);
 		expect(chat.fold(succeeded('t2', 4))).toBe('cleared');
 	});
@@ -248,16 +201,15 @@ describe('turn-error banner while the feed lags or replays (review S2)', () => {
 
 describe('turn-error banner past the recent-failure list (review S6)', () => {
 	it('raised during hydration, then one atomic replay of its failure, 16 others, a clean finish and more', () => {
-		const chat = new Chat([], false);
+		const chat = new Chat();
 		chat.raise('t1');
 		const replay = [...failed('t1', 1), ...others(4, 16), ...succeeded('t2', 100), ...failed('t3', 103, 'later')];
 		chat.fold(replay);
-		expect(chat.state.turnOutcomes?.failures.some((f) => f.turnId === 't1')).toBe(false);
 		expect(chat.sentinel()).toBe('cleared');
 	});
 
 	it('the same replay stops short of the clean finish: still shown', () => {
-		const chat = new Chat([], false);
+		const chat = new Chat();
 		chat.raise('t1');
 		chat.fold([...failed('t1', 1), ...others(4, 17)]);
 		expect(chat.sentinel()).toBe('shown');
@@ -283,5 +235,57 @@ describe('turn-error banner past the recent-failure list (review S6)', () => {
 		chat.fold(others(4, 16));
 		expect(chat.fold([ev('turn.completed', 100, { turn_id: 't1' })])).toBe('shown');
 		expect(chat.fold(succeeded('t2', 101))).toBe('cleared');
+	});
+});
+
+describe('turn-error banner from a frame naming no turn (older workers, review round 4)', () => {
+	it('whole-turn lag: an older same-words failure and its clean successor do not clear the current one', () => {
+		// The feed is caught up but still at seq 0 when the current failure's frame
+		// arrives; then it delivers an older failure with the same words, its clean
+		// successor, and only then the current failure.
+		const chat = new Chat();
+		expect(chat.raise(null)).toBe('shown');
+		expect(chat.raise(null) && chat.anchor).toBeNull();
+		const log = [...failed('t0', 1), ...succeeded('tx', 4), ...failed('t1', 7)];
+		expect(chat.replay(log.map((e) => [e]))).toEqual(log.map(() => 'shown'));
+		expect(chat.error).toBe(FAILED);
+	});
+
+	it('nothing in the log retires it, in any batching; sending or dismissing does', () => {
+		const log = [...failed('t0', 1), ...succeeded('tx', 4), ...failed('t1', 7), ...succeeded('t2', 10),
+			ev('transcript.rewound', 13, { from_seq: 1 })];
+		for (const batches of [[log], log.map((e) => [e])]) {
+			const chat = new Chat();
+			chat.raise(null);
+			expect(chat.replay(batches).every((b) => b === 'shown')).toBe(true);
+		}
+		// A frame with no turn replaces a turn-named anchor: the new words have nothing to follow.
+		const chat = new Chat(prompt('t1', 1));
+		chat.raise('t1');
+		chat.raise(null, 'connection lost');
+		expect(chat.fold([abort('t1', 3), ...succeeded('t2', 4)])).toBe('shown');
+	});
+});
+
+describe('turn-error banner from a late frame past many failures (review round 4, S6)', () => {
+	it('hydrated: t0 failed, then 16 more failures and a clean finish; t0\'s delayed frame raises nothing', () => {
+		const chat = new Chat([...failed('t0', 1), ...others(4, 16), ...succeeded('t2', 100)]);
+		expect(chat.raise('t0')).toBe('never raised');
+		expect(chat.error).toBeNull();
+	});
+
+	it('the same with no clean finish yet: it raises, and the next clean finish clears it', () => {
+		const chat = new Chat([...failed('t0', 1), ...others(4, 16)]);
+		expect(chat.raise('t0')).toBe('shown');
+		expect(chat.anchor?.failure).toEqual({ seq: 3, turnId: 't0' });
+		expect(chat.fold(succeeded('t2', 100))).toBe('cleared');
+	});
+
+	it('the failure index keeps far more than 16 turns, one entry per turn', () => {
+		const state = reduceAll([...failed('t0', 1), ev('turn.completed', 4, { turn_id: 't0', is_error: true }), ...others(5, 40)]);
+		const failures = state.turnOutcomes?.failures ?? [];
+		expect(failures).toHaveLength(41);
+		expect(failures[0]).toEqual({ turnId: 't0', seq: 3 });
+		expect(TURN_FAILURES_KEPT).toBeGreaterThanOrEqual(1024);
 	});
 });

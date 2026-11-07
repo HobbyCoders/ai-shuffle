@@ -354,7 +354,7 @@ function parseWireEvent(value) {
   }
   return event;
 }
-var TURN_FAILURES_KEPT = 16;
+var TURN_FAILURES_KEPT = 1024;
 var NO_TURN_OUTCOMES = { failures: [], finishes: [], cuts: [] };
 function recordCleanFinish(outcomes, finish2) {
   const [latest, other] = outcomes.finishes;
@@ -367,6 +367,7 @@ function recordRewind(outcomes, cut) {
   return cuts === outcomes.cuts ? outcomes : { ...outcomes, cuts };
 }
 function recordFailure(outcomes, failure) {
+  if (!failure.turnId || outcomes.failures.some((f) => f.turnId === failure.turnId)) return outcomes;
   return { ...outcomes, failures: [...outcomes.failures, failure].slice(-TURN_FAILURES_KEPT) };
 }
 function completedCleanly(event) {
@@ -1036,7 +1037,7 @@ function reduceInternal(state, event, observe) {
           // A clean finish of another turn moves the transcript past every
           // earlier failure (#1175); a failed completion moves it past none,
           // and is a failure of its own turn.
-          turnOutcomes: completedCleanly(event) ? recordCleanFinish(state.turnOutcomes ?? NO_TURN_OUTCOMES, { seq, turnId: str(event.turn_id) }) : recordFailure(state.turnOutcomes ?? NO_TURN_OUTCOMES, { turnId: str(event.turn_id), seq, message: "" })
+          turnOutcomes: completedCleanly(event) ? recordCleanFinish(state.turnOutcomes ?? NO_TURN_OUTCOMES, { seq, turnId: str(event.turn_id) }) : recordFailure(state.turnOutcomes ?? NO_TURN_OUTCOMES, { turnId: str(event.turn_id), seq })
         })
       );
       const retrySettled = settleRetryCards(drained.messages, drained.hasRetryCards);
@@ -1082,8 +1083,7 @@ function reduceInternal(state, event, observe) {
       const reason = str(event.reason);
       let next = dismissProseThrough(closeOpen(state), seq, seq, observe);
       if (reason === "error") {
-        const failure = { turnId: str(event.turn_id), seq, message: str(event.message) };
-        next = { ...next, turnOutcomes: recordFailure(next.turnOutcomes ?? NO_TURN_OUTCOMES, failure) };
+        next = { ...next, turnOutcomes: recordFailure(next.turnOutcomes ?? NO_TURN_OUTCOMES, { turnId: str(event.turn_id), seq }) };
       }
       if (reason === "interrupt") {
         next = {
@@ -2357,7 +2357,7 @@ function materializeProjection(body, records, epoch, runtime) {
 }
 
 // scripts/transcript-reducer-node.ts
-var REDUCER_FINGERPRINT = "3106b17f531d54aacbf71bf4d35d9aa1b050aee9463968b5befcaeb0559ffa21";
+var REDUCER_FINGERPRINT = "ccc10cf9661d34ce3cd9bcadcebd4bcd62cb08d38de6ff8e8cd08d7912a7c2f7";
 var RPC_VERSION = 1;
 var MAX_PACKET_BYTES = 24 * 1024 * 1024;
 function dispatch(method, params) {
