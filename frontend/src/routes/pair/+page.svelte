@@ -8,6 +8,7 @@
 	import { getErrorMessage } from '$lib/api/client';
 	import { auth, isAdmin } from '$lib/stores/auth.svelte';
 	import { desktop } from '$lib/services/desktop';
+	import { randomUUID } from '$lib/utils/id';
 
 	const DEVICE_ID_KEY = 'shuffle-paired-device-id';
 	let code = $state('');
@@ -48,7 +49,7 @@
 	function getDeviceId(): string {
 		const existing = localStorage.getItem(DEVICE_ID_KEY);
 		if (existing) return existing;
-		const created = crypto.randomUUID();
+		const created = randomUUID();
 		localStorage.setItem(DEVICE_ID_KEY, created);
 		return created;
 	}

@@ -1,4 +1,5 @@
 import { wsUrl } from '$lib/api/runtime';
+import { randomUUID } from '$lib/utils/id';
 import { createVoiceOutput } from './voiceVolume';
 
 export interface VoiceAudioStream {
@@ -495,7 +496,7 @@ export async function openVoiceAudioStream(sessionId: string, mic: MediaStream, 
    sendText: text => {
     if (stopped || socket?.readyState !== WebSocket.OPEN) return Promise.resolve(false);
     if (!text.trim() || new TextEncoder().encode(text).length > 16000) return Promise.reject(new Error('Voice messages must contain text and be at most 16,000 bytes. Your draft has been kept.'));
-    const id = crypto.randomUUID();
+    const id = randomUUID();
     return new Promise((resolve, reject) => {
      const timer = setTimeout(() => {
       pendingText.delete(id);

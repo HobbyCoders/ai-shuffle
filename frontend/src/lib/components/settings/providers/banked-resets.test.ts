@@ -30,6 +30,8 @@ import SubscriptionUsage from './tabs/SubscriptionUsage.svelte';
 import { BankedResets } from './banked-resets.svelte';
 import { chatgptRow, grokRow } from './fixtures';
 
+const getRandomValues = crypto.getRandomValues.bind(crypto);
+
 function credit(
 	partial: Partial<{
 		id: string;
@@ -141,6 +143,26 @@ describe('inventory', () => {
 });
 
 describe('Use', () => {
+	it.each(['missing', 'throwing'])('consumes on HTTP with %s randomUUID and reuses the key on retry', async (mode) => {
+		vi.stubGlobal('crypto', {
+			getRandomValues,
+			randomUUID: mode === 'missing' ? undefined : () => { throw new Error('Insecure context'); }
+		});
+		mocks.list.mockResolvedValue({ available_count: 0, credits: [] });
+		mocks.consume
+			.mockRejectedValueOnce(new Error('Connection lost'))
+			.mockResolvedValueOnce({ outcome: 'reset', windows_reset: 1 });
+		const banked = new BankedResets(() => chatgptRow());
+		banked.arm('credit-1');
+		await banked.consume('credit-1');
+		expect(banked.consumeError).toContain('Connection lost');
+		const key = mocks.consume.mock.calls[0][1].idempotency_key;
+		expect(key).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+		await banked.consume('credit-1');
+		expect(mocks.consume).toHaveBeenCalledTimes(2);
+		expect(mocks.consume).toHaveBeenLastCalledWith('chatgpt-1', { credit_id: 'credit-1', idempotency_key: key });
+		expect(banked.consumeError).toBeNull();
+	});
 	it('asks first, and Cancel disarms without spending', async () => {
 		mocks.list.mockResolvedValue({ available_count: 1, credits: [credit()] });
 		const { getByRole, getByText, queryByText } = mount();
