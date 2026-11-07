@@ -101,6 +101,51 @@ await runJourney({
    expect(await page.getByRole('button',{name:'Filter pull requests',exact:true}).isVisible(),'filters can be cleared');
   }
  }, {
+  // Phone list rows reach into the page gutter and pad back, so the highlight
+  // keeps the desktop inset round the avatar and trailing text while every
+  // panel's title stays on the shared x.
+  name: 'phone-list-rows-inset',
+  async setup({page,status,variant}) {
+   await gotoApp(page,status,native && variant.viewport === 'phone' ? '/mobile/' : '/');
+  },
+  async act({page,mark,variant}) {
+   if(variant.viewport!=='phone')return;
+   const workspace=page.getByRole('navigation',{name:'Workspace',exact:true});
+   async function open(label) {
+    if(!await workspace.isVisible())await page.getByRole('button',{name:native?/^Open menu/:/^Chats(?: \(|$)|Show sidebar/}).first().click();
+    const target=workspace.getByRole('button',{name:label,exact:true});
+    if(await target.count())await target.click();
+    else {await workspace.getByRole('button',{name:'More',exact:true}).click();await page.getByRole('menuitem',{name:label,exact:true}).click();}
+   }
+   const titles={};
+   for(const label of ['Agents','Projects']) {
+    await mark('measure '+label+' rows');
+    await open(label);
+    await page.locator('.view-panel .st-it').filter({visible:true}).first().waitFor();
+    const m=await page.evaluate(() => {
+     const vis=e=>e.getClientRects().length>0;
+     const panel=[...document.querySelectorAll('.view-panel')].find(vis);
+     const body=panel.querySelector('.panel-body');
+     const B=e=>{const r=e.getBoundingClientRect();return {l:r.left,r:r.right};};
+     const rows=[...panel.querySelectorAll('.st-it:not(.value):not(.card)')].filter(vis).map(row=>{
+      const marks=[row.querySelector('.lead > *'),row.querySelector('.trailing')].filter(e=>e&&vis(e)&&e.getBoundingClientRect().width>0);
+      return {row:B(row),nm:B(row.querySelector('.nm')),marks:marks.map(B)};
+     });
+     return {vw:innerWidth,rows,overflow:body.scrollWidth-body.clientWidth};
+    });
+    expect(m.rows.length>0,label+' shows rows');
+    expect(m.overflow<=0,label+' list gains no sideways scroll '+m.overflow);
+    for(const r of m.rows) {
+     expect(r.row.l>=8&&r.row.r<=m.vw-8,label+' row highlight stays off the screen edges '+JSON.stringify(r.row));
+     for(const k of r.marks)expect(k.l-r.row.l>=4&&r.row.r-k.r>=8,
+      label+' avatar/trailing text sits inside the highlight with the desktop inset '+JSON.stringify({row:r.row,mark:k}));
+    }
+    titles[label]=m.rows.map(r=>Math.round(r.nm.l));
+   }
+   const xs=new Set(Object.values(titles).flat());
+   expect(xs.size===1&&xs.has(38),'Agents and Projects titles share the phone title x (38) '+JSON.stringify(titles));
+  }
+ }, {
   name: 'providers-first-snapshot',
   throttles: ['fast', 'slow'],
   async setup({page,status,variant}) {
@@ -168,14 +213,17 @@ await runJourney({
     const actions=page.locator('.fs-phone-actions');
     const upload=await actions.getByRole('button',{name:'Upload',exact:true}).boundingBox();
     const folder=await actions.getByRole('button',{name:'New folder',exact:true}).boundingBox();
-    expect(upload&&folder&&upload.y===folder.y&&upload.width>folder.width,'D4: Upload grows while New folder fits its content '+JSON.stringify({upload,folder}));
-    // R3 deliberately separates the drawn 32px box from its 44px tap area.
+    // D8: one row of two equal buttons, 8px apart, the same height.
+    expect(upload&&folder&&upload.y===folder.y&&Math.abs(upload.width-folder.width)<=1&&upload.height===folder.height&&Math.abs(folder.x-(upload.x+upload.width)-8)<=1,
+     'D8: Upload and New folder share one row at equal width with an 8px gap '+JSON.stringify({upload,folder}));
+    // Pass 3 F3: the screen's main actions use the shared phone action size, drawn
+    // the full 44px touch height (not the compact 32px row button).
     for(const label of ['Upload','New folder']) {
      const target=await actions.getByRole('button',{name:label,exact:true}).evaluate(el=>{
-      const box=el.getBoundingClientRect(), hit=getComputedStyle(el,'::after');
-      return {drawn:box.height,height:box.height-parseFloat(hit.top)-parseFloat(hit.bottom),width:box.width-parseFloat(hit.left)-parseFloat(hit.right)};
+      const box=el.getBoundingClientRect();
+      return {drawn:box.height,width:box.width,token:getComputedStyle(el).getPropertyValue('--phone-action-height').trim()};
      });
-     expect(target.drawn>=32&&target.drawn<=36&&target.height>=44&&target.width>=44,'R3: compact file action retains its 44px tap area '+JSON.stringify(target));
+     expect(target.drawn>=44&&target.drawn<=45&&target.width>=44&&target.token==='44px','F3: file action is drawn at the shared 44px phone action size '+JSON.stringify(target));
     }
     await page.getByLabel('More file actions',{exact:true}).click();
     expect(await page.getByRole('button',{name:'Open terminal here',exact:true}).isEnabled(),'R2: guarded terminal action remains reachable from the phone bar');
@@ -203,15 +251,38 @@ await runJourney({
    await page.locator('.pri-row').first().waitFor();
   },
   async act({page,mark,variant}) {
-   await mark('keep repository, branch and attribution on clean metadata lines');
+   const phone=variant.viewport==='phone';
+   await mark(phone?'phone card: title, one meta line, then the status line':'keep repository, branch and attribution on clean metadata lines');
    const rows=await page.locator('.pri-row').evaluateAll(els=>els.map(el=>{
     const box=s=>{const r=el.querySelector(s).getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height};};
-    return {repo:box('.pri-repo'),branch:box('.pri-branch'),by:box('.pri-attribution'),title:box('.pri-title'),external:box('.pri-external'),separators:[...el.querySelectorAll('.pri-meta > span')].map(s=>getComputedStyle(s,'::before').content)};
+    const meta=el.querySelector('.pri-meta');
+    return {repo:box('.pri-repo'),branch:box('.pri-branch'),by:box('.pri-attribution'),title:box('.pri-title'),external:box('.pri-external'),meta:box('.pri-meta'),badges:box('.pri-badges'),
+     metaWrap:getComputedStyle(meta).whiteSpace,metaLine:parseFloat(getComputedStyle(meta).lineHeight),metaTitle:meta.title,
+     clip:getComputedStyle(meta).clipPath,metaLeft:meta.getBoundingClientRect().left,
+     parts:[...el.querySelectorAll('.pri-repo,.pri-branch,.pri-attribution > span')].map(s=>({left:s.getBoundingClientRect().left,dot:getComputedStyle(s,'::before').content}))};
    }));
    for(const row of rows) {
-    expect(row.separators.every(s=>s==='none'||s==='normal'),'D1: wrapping metadata cannot create a leading separator');
     expect(row.external.width===20&&row.external.y===row.title.y,'D1: external icon has a fixed top-aligned trailing column');
-    if(variant.viewport==='phone')expect(row.repo.y<row.branch.y&&row.branch.y<row.by.y,'D1: phone metadata has three fixed lines '+JSON.stringify(row));
+    if(phone) {
+     // Council pass 3 (D6) replaces the three phone lines with one ellipsized
+     // meta line; it never wraps, so a " · " can't lead a line.
+     expect(row.metaWrap==='nowrap'&&row.meta.height<=row.metaLine*1.5,'D6: phone metadata is one unwrapped line '+JSON.stringify(row));
+     expect(Math.abs(row.repo.y-row.branch.y)<=2,'D6: repository and branch share the meta line');
+     expect(row.title.y<row.meta.y&&row.meta.y+row.meta.height<=row.badges.y+1,'D6: title, then meta, then status');
+     // Council pass 5 (G4) leads the line with the branch: "head → base · repo#n · by author".
+     expect(/^.+ → .+ · .+#\d+ · by /.test(row.metaTitle),'G4: the full branch-first meta stays readable in its tooltip '+row.metaTitle);
+    } else {
+     // Council pass 4 (S5) separates the desktop parts with middots too. Each part
+     // carries its dot in a 16px seat in front, and the meta row starts 16px early
+     // and clips that strip: a part that begins a wrapped line sits flush in it, so
+     // its dot is hidden and no line starts with a separator (pass 1 D1).
+     expect(row.parts.every(p=>p.dot!=='none'&&p.dot!=='normal'),'S5: desktop metadata parts are separated by middots '+JSON.stringify(row.parts));
+     expect(row.clip==='inset(0px 0px 0px 16px)'&&Math.abs(row.metaLeft+16-row.title.x)<=1,'S5: the clipped dot strip sits just left of the title edge '+JSON.stringify({clip:row.clip,metaLeft:row.metaLeft,title:row.title.x}));
+     expect(row.parts.every(p=>p.left>=row.metaLeft+16-1||Math.abs(p.left-row.metaLeft)<=1),'D1: wrapping metadata cannot create a leading separator '+JSON.stringify(row.parts));
+    }
+    // G4: two lines on every width, the branch first, the repository after it.
+    expect(row.metaWrap==='nowrap'&&row.meta.height<=row.metaLine*1.5,'G4: the meta is one line '+JSON.stringify(row.meta));
+    expect(row.branch.x<row.repo.x&&Math.abs(row.repo.y-row.branch.y)<=2,'G4: the branch leads the meta line');
    }
    if(variant.viewport==='phone')expect(rows[0].external.x===rows[1].external.x,'D1: external-link column stays in the same place');
    expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'D1: no horizontal overflow');

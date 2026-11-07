@@ -16,6 +16,7 @@ hook_service.attach_hooks_to_options() helper right after
 build_options_from_profile(); these tests pin that wiring.
 """
 
+import asyncio
 import types
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -24,6 +25,7 @@ import pytest
 import app.core.hook_service as hook_service
 import app.core.query_background as qb
 import app.core.query_engine as qe
+from tests._admission_cleanup import cleanup_deadline
 
 APP_SESSION_ID = "b19ddfa6-9357-4227-9c2f-a6b2f00c3b82"
 SENTINEL_HOOKS = {"PreToolUse": ["sentinel-matcher"], "Stop": ["sentinel-stop"]}
@@ -209,7 +211,7 @@ async def test_stream_query_attaches_hooks():
         qe, "sync_engine"
     ) as mock_sync, patch.object(
         hook_service, "build_hooks_config", return_value=SENTINEL_HOOKS
-    ) as mock_build:
+    ) as mock_build, patch.object(qe, "get_session_pool", side_effect=RuntimeError("stop after hooks")):
         mock_db.get_session.return_value = session_row
         mock_db.add_session_message.return_value = {"id": 1, "role": "user"}
         mock_sync.broadcast_message_added = _noop
@@ -220,8 +222,16 @@ async def test_stream_query_attaches_hooks():
             project_id="proj-http",
             session_id=APP_SESSION_ID,
         )
-        event = await gen.__anext__()
-        await gen.aclose()
+        # Closing the reader at init does not stop its owned producer. Stop at
+        # the next real spawn boundary and consume its completion before mocks
+        # and the test loop disappear; never launch a real provider from here.
+        with cleanup_deadline(asyncio.get_running_loop()):
+            try:
+                event = await gen.__anext__()
+                with pytest.raises(RuntimeError, match="stop after hooks"):
+                    await gen.__anext__()
+            finally:
+                await gen.aclose()
 
     assert event == {"type": "init", "session_id": APP_SESSION_ID}
     assert options.hooks == SENTINEL_HOOKS, (

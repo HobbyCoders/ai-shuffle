@@ -280,7 +280,9 @@
 				{:else}
 					<EmptyDetail title={searchQuery ? `No projects match "${searchQuery}"` : workerFilter === 'here' && allRows.length ? `No projects on ${selfName} yet` : 'No projects configured yet'} message="Projects keep your work and settings together."
 						actionLabel={searchQuery ? 'Clear search' : workerFilter === 'here' && allRows.length ? 'Show all workers' : undefined}
-						onAction={() => { searchQuery = ''; workerFilter = 'all'; }} />
+						onAction={() => { searchQuery = ''; workerFilter = 'all'; }} icon={FolderOpen}>
+						<button class="st-btn primary" onclick={() => (showAddModal = true)}><Plus />New project</button>
+					</EmptyDetail>
 				{/each}
 			</div>
 		</ViewPanel>
@@ -325,7 +327,7 @@
 				{/key}
 			</DetailPane>
 		{:else}
-			<ViewMain width="reading"><EmptyDetail title={allRows.length ? 'Choose a project' : 'No projects configured yet'} message={allRows.length ? 'Select a project to manage its settings and workers.' : 'Projects keep your work and settings together.'}>
+			<ViewMain width="reading"><EmptyDetail icon={FolderOpen} title={allRows.length ? 'Choose a project' : 'No projects configured yet'} message={allRows.length ? 'Select a project to manage its settings and workers.' : 'Projects keep your work and settings together.'}>
 				<button class="st-btn primary" onclick={() => (showAddModal = true)}><Plus />New project</button>
 			</EmptyDetail></ViewMain>
 		{/if}

@@ -572,7 +572,7 @@
 	function triggerTypeLabel(type: TriggerType): string {
 		switch (type) {
 			case 'cron':
-				return 'Cron';
+				return 'Schedule';
 			case 'interval':
 				return 'Interval';
 			case 'connector_event':
@@ -728,7 +728,7 @@
      onDelete={handleDelete} onToggleEnabled={handleToggleEnabled} onToggleRunExpanded={toggleRunExpanded}
      {formatTime} {formatCost} {formatDuration} {getStatusColor} {getRunStatusBadgeClass} {triggerTypeLabel} />
    {:else}
-    <ViewMain width="reading"><EmptyDetail title={loading ? 'Loading automations…' : automations.length ? 'Choose an automation' : 'No automations yet'}
+    <ViewMain width="reading"><EmptyDetail icon={CalendarClock} title={loading ? 'Loading automations…' : automations.length ? 'Choose an automation' : 'No automations yet'}
      message={automations.length ? 'Run AI tasks on a schedule or in response to events.' : 'Create a scheduled or event-driven task.'}>
      <button type="button" class="st-btn primary" onclick={openCreate}><Plus size={14} />New automation</button>
     </EmptyDetail></ViewMain>

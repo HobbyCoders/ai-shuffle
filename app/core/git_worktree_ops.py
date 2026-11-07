@@ -6,6 +6,8 @@ Provides worktree management: list, add, remove, and prune worktrees.
 
 import logging
 import os
+import re
+import tempfile
 import threading
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -28,6 +30,40 @@ def repo_worktree_lock(main_dir: str) -> threading.RLock:
             lock = _REPO_LOCKS[key] = threading.RLock()
         return lock
 
+
+class WorktreeAddError(RuntimeError):
+    """Git attempted a checkout and failed, rather than a missing base/branch."""
+
+
+def _is_lfs_failure(stderr: str) -> bool:
+    """Require an LFS-specific diagnostic AND a failing filter/binary/hook."""
+    # Do not classify a branch/path named "git-lfs" on Git's progress line
+    # plus an unrelated failure (or a different driver's filter-process) as LFS.
+    return any(
+        not line.startswith("preparing worktree")
+        and not re.search(r"invalid reference:|not a valid branch name|already (?:exists|used|checked out)", line)
+        and re.search(r"git-lfs(?:\.exe)?(?=$|[\s:'\"])|filter[ .]lfs|filter ['\"]lfs['\"]", line)
+        and re.search(
+            r"not found|no such file|cannot (?:run|spawn|exec)|failed|failure|"
+            r"hung up|not recognized|not installed|permission denied|exec format", line
+        )
+        for line in stderr.lower().splitlines()
+    )
+
+
+def worktree_error_detail(stderr: str) -> str:
+    """Bound Git diagnostics before exposing them to a session or durable op."""
+    from app.core.scrub import redact_url_credentials
+
+    return redact_url_credentials((stderr or "Unknown git error").strip())[-2000:]
+
+
+LFS_PASSTHROUGH_CONFIG = (
+    "-c", "filter.lfs.required=false",
+    "-c", "filter.lfs.process=",
+    "-c", "filter.lfs.smudge=",
+    "-c", "filter.lfs.clean=",
+)
 
 APP_WORKTREES_EXCLUDE = ".fluid/worktrees/"
 
@@ -227,7 +263,7 @@ class GitWorktreeMixin:
 
     def add_worktree(self, main_dir: str, path: str, branch: str, new_branch: bool = False,
                      base_branch: Optional[str] = None, *, fetch_base: bool = True) -> Tuple[bool, Optional[str]]:
-        """Add a worktree; serialised per repository (see repo_worktree_lock)."""
+        """Add a worktree; return (success, error or successful-fallback warning)."""
         with repo_worktree_lock(main_dir):
             exclude_app_worktrees(main_dir, path)
             return self._add_worktree_unlocked(main_dir, path, branch, new_branch=new_branch,
@@ -350,9 +386,13 @@ class GitWorktreeMixin:
             base_branch: Base branch for new branch (only if new_branch=True)
 
         Returns:
-            Tuple of (success: bool, error_message: Optional[str])
+            Tuple of (success, error or successful-fallback warning).
         """
         try:
+            # Never delete an existing checkout or somebody else's files on retry.
+            retry_safe = not os.path.lexists(path) or (
+                os.path.isdir(path) and not os.path.islink(path) and not os.listdir(path)
+            )
             # When creating a new branch from a base branch, fetch latest from origin first
             # This ensures the new branch includes all remote commits
             if new_branch and base_branch and fetch_base:
@@ -384,12 +424,93 @@ class GitWorktreeMixin:
                 logger.debug(f"Added worktree at {path} for branch {branch}")
                 return True, None
 
-            error_msg = result.stderr.strip() if result.stderr else "Unknown git error"
+            if retry_safe and _is_lfs_failure(result.stderr or ""):
+                original_error = worktree_error_detail(result.stderr)
+                target = os.path.normcase(os.path.abspath(path))
+                registered = any(os.path.normcase(os.path.abspath(wt["path"])) == target
+                                 for wt in self.list_worktrees(main_dir))
+                if registered:
+                    # Registration can survive a failed checkout rollback too.
+                    # Never remove/reset an adoptable checkout, and only accept
+                    # a hook-only failure with independent completeness evidence.
+                    from app.core.checkout_manager import _require_branch_binding
+
+                    _require_branch_binding(path, branch)
+                    if not self._checkout_is_complete(path):
+                        logger.warning("LFS setup failed at %s; keeping incomplete checkout: %s", path, original_error)
+                        return False, original_error
+                    logger.warning("LFS hook failed at %s; keeping completed checkout: %s", path, original_error)
+                else:
+                    logger.warning("LFS checkout failed at %s; retrying without LFS: %s", path, original_error)
+                    if not self._cleanup_failed_lfs_checkout(main_dir, path):
+                        return False, original_error + " (could not safely clean up the failed checkout)"
+                    if not self._prune_worktrees_unlocked(main_dir):
+                        return False, original_error + " (could not prune the failed checkout)"
+
+                    # -b can have created its ref even though checkout failed.
+                    # Reuse that ref rather than trying to create it again.
+                    if new_branch and self._run_git(
+                        main_dir, ["show-ref", "--verify", "--quiet", f"refs/heads/{branch}"], timeout=10
+                    ).returncode == 0:
+                        args = ["worktree", "add", "--", path, branch]
+                    with tempfile.TemporaryDirectory(prefix="shuffle-no-lfs-hooks-") as hooks:
+                        result = self._run_git(main_dir, [
+                            *LFS_PASSTHROUGH_CONFIG,
+                            "-c", f"core.hooksPath={hooks}", *args,
+                        ], timeout=30)
+                    if result.returncode != 0:
+                        # Keep both causes, but never retry a second time.
+                        return False, worktree_error_detail(
+                            original_error + "\nRetry without LFS failed: " + (result.stderr or "Unknown git error")
+                        )
+                from fluid.context.runtime_facts import LFS_FALLBACK_WARNING, record_lfs_fallback
+
+                record_lfs_fallback(path)
+                logger.warning("%s Worktree: %s", LFS_FALLBACK_WARNING, path)
+                return True, LFS_FALLBACK_WARNING
+
+            error_msg = worktree_error_detail(result.stderr)
             logger.warning(f"Failed to add worktree: {error_msg}")
             return False, error_msg
         except Exception as e:
-            logger.error(f"Error adding worktree: {e}")
-            return False, str(e)
+            error_msg = worktree_error_detail(str(e))
+            logger.error("Error adding worktree: %s", error_msg)
+            return False, error_msg
+
+    def _checkout_is_complete(self, path: str) -> bool:
+        """Check index/HEAD and missing files without invoking clean/smudge filters."""
+        index = self._run_git(path, ["rev-parse", "--git-path", "index"], timeout=10)
+        if index.returncode or not os.path.isfile(os.path.join(path, index.stdout.strip())):
+            return False
+        # Only staged deletions mean the checkout is missing committed content;
+        # a hook may legitimately stage generated or modified files. --no-renames
+        # keeps a staged rename visible as the deletion it is.
+        cached = self._run_git(
+            path, ["diff", "--cached", "--quiet", "--no-renames", "--diff-filter=D", "--no-ext-diff", "--no-textconv",
+                   "HEAD", "--"], timeout=10
+        )
+        if cached.returncode:
+            return False
+        deleted = self._run_git(path, ["ls-files", "--deleted", "-z"], timeout=10)
+        return deleted.returncode == 0 and not deleted.stdout
+
+    def _cleanup_failed_lfs_checkout(self, main_dir: str, path: str) -> bool:
+        """Clean only unregistered remnants, never an adoptable checkout."""
+        if not os.path.lexists(path):
+            return True
+        target = os.path.normcase(os.path.abspath(path))
+        if any(os.path.normcase(os.path.abspath(wt["path"])) == target
+               for wt in self.list_worktrees(main_dir)):
+            return False  # A registered checkout may already be in use.
+        # Some Git/OS failures leave files after unregistering the checkout.
+        # Still use the mount/junction preflight before removing that remnant.
+        from app.core.checkout_manager import sever_runtime_links
+        from app.core.fs_utils import force_rmtree
+
+        if sever_runtime_links(path)["errors"]:
+            return False
+        force_rmtree(path)
+        return True
 
     def _registered_worktree_path(self, main_dir: str, path: str) -> str:
         """Return the path git itself has registered for this worktree.

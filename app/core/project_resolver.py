@@ -274,7 +274,7 @@ def has_local_base_checkout(
     return bool(path and os.path.isdir(path))
 
 
-def resolve_cwd(session_row: Dict[str, Any]) -> Optional[str]:
+def resolve_cwd(session_row: Dict[str, Any], *, raise_add_errors: bool = False) -> Optional[str]:
     """The ONE working-directory resolver.
 
     Session bound to a branch → the branch checkout path; else the project's base
@@ -282,14 +282,16 @@ def resolve_cwd(session_row: Dict[str, Any]) -> Optional[str]:
     Returns ``None`` when there is no project_v2 or no materializable checkout on
     this runner — the caller falls back to the default workspace (that fallback is
     deliberately NOT baked in here so the resolver stays a pure origin/checkout
-    authority).
+    authority). Session option building can opt into detailed checkout errors
+    with ``raise_add_errors=True``; all other callers keep the None contract.
     """
     project = resolve_project_v2(session_row)
     if not project:
         return None
     branch = _effective_branch(session_row)
     if branch and str(branch).strip():
-        return checkout_manager.ensure_checkout(project, branch=branch)
+        kwargs = {"raise_add_errors": True} if raise_add_errors else {}
+        return checkout_manager.ensure_checkout(project, branch=branch, **kwargs)
     return checkout_manager.ensure_checkout(project, None)
 
 

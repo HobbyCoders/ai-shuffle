@@ -5120,11 +5120,15 @@ class NativeLoop(BackgroundLifecycleMixin):
         Best-effort: a fingerprint that cannot be computed costs a diagnostic,
         never a turn.
         """
-        if not self._cache_probe.enabled:
-            return
+        if self._cache_probe.enabled:
+            self._prefix_fingerprint, self._pending_system_text = self._compute_request_fingerprint(request)
+
+    def _compute_request_fingerprint(self, request: ProviderRequest) -> tuple[dict | None, str | None]:
+        # Compute locally so a cancelled to_thread cannot publish stale probe
+        # state over a later call. Only the awaiting loop publishes the result.
         try:
             routing_headers = self._routing_headers(request)
-            self._prefix_fingerprint = fingerprint_prefix(
+            fingerprint = fingerprint_prefix(
                 system=request.system,
                 tools=request.tools,
                 messages=request.messages,
@@ -5146,7 +5150,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             if self.provider.name == "openai_responses":
                 from fluid.context.cache_probe import fingerprint_responses_request
                 fingerprint_responses_request(
-                    request, self._prefix_fingerprint,
+                    request, fingerprint,
                     previous_count=message_count(self._prev_prefix_fingerprint),
                     endpoint=getattr(self.provider, "_base_url", None),
                     routing_headers=routing_headers,
@@ -5156,15 +5160,15 @@ class NativeLoop(BackgroundLifecycleMixin):
             # arm sends are already hashed in ``_routing_headers``.
             arm = getattr(self.provider, "routing_arm", None)
             if isinstance(arm, str):
-                self._prefix_fingerprint["_routing_arm"] = arm
-            self._prefix_fingerprint["_requested_at"] = str(time.time())
+                fingerprint["_routing_arm"] = arm
+            fingerprint["_requested_at"] = str(time.time())
             # The text behind the system hash, kept in-process so a change
             # can be diffed against the previous request's text (across a
             # park only the paragraph hashes survive, on the Usage event).
-            self._pending_system_text = system_text_of(request.system)
+            return fingerprint, system_text_of(request.system)
         except Exception:  # noqa: BLE001 — instrumentation is never fatal
             log.debug("prefix fingerprint failed", exc_info=True)
-            self._prefix_fingerprint = None
+            return None, self._pending_system_text
 
     def _routing_headers(self, request: ProviderRequest) -> dict[str, str]:
         """The provider's routing headers for ``request``, for the probe.
@@ -5417,7 +5421,10 @@ class NativeLoop(BackgroundLifecycleMixin):
         )
         if effort is not None:
             request = replace(request, effort=effort)
-        self._fingerprint_request(request)
+        if self._cache_probe.enabled:
+            self._prefix_fingerprint, self._pending_system_text = await asyncio.to_thread(
+                self._compute_request_fingerprint, request,
+            )
 
         blocks: dict[int, dict[str, Any]] = {}
         usage_totals = self._stream_usage
@@ -6007,12 +6014,11 @@ class NativeLoop(BackgroundLifecycleMixin):
         # carry only ``outcome.text``. Each is conditioned to the model-facing
         # pixel budget first (providers bill by pixels; oversized originals are
         # transport waste that also poisons the chars/4 context estimate).
-        content.extend(
-            Image(media_type=media_type, data=data_b64)
-            for media_type, data_b64 in (
-                condition_image(img.media_type, img.data) for img in outcome.images
+        for img in outcome.images:
+            media_type, data_b64 = await asyncio.to_thread(
+                condition_image, img.media_type, img.data,
             )
-        )
+            content.append(Image(media_type=media_type, data=data_b64))
         # Nested-instruction injection (instruction-file seam): when a tool
         # touches a path whose own directory carries an AGENTS-family file not
         # in the project stack, ride those instructions into context on this

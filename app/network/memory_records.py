@@ -12,7 +12,9 @@ import hashlib
 import json
 import logging
 import re
+import threading
 from pathlib import Path
+from time import monotonic
 
 from app.db.base import get_db
 from app.network import engine, prose_skills
@@ -20,6 +22,24 @@ from app.network import engine, prose_skills
 log = logging.getLogger(__name__)
 _SKILL_NAME = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,120}$")
 MAX_SKILL_BYTES = 65536
+WRITE_QUIET_SECONDS = 0.1
+WRITE_MAX_WAIT_SECONDS = 2.0
+_write_lock = threading.Lock()
+_write_window = None  # first/last committed local change; peer applies never enter it
+
+
+def _publish_due() -> bool:
+    """Collect a burst until quiet, but never starve a continuously edited store."""
+    global _write_window
+    with _write_lock:
+        if _write_window is None:
+            return True
+        first, last = _write_window
+        if monotonic() < min(last + WRITE_QUIET_SECONDS, first + WRITE_MAX_WAIT_SECONDS):
+            return False
+        # Writes during staging/publish open the next window, not a lost wake.
+        _write_window = None
+        return True
 
 
 def _root() -> Path:
@@ -52,6 +72,30 @@ def _stores():
                 yield store
         except (ValueError, KeyError, OSError):
             log.warning("Skipped invalid owner memory store")
+
+
+def install_write_hook() -> None:
+    """Bridge Fluid's post-commit hint to a coalesced targeted scanner wake."""
+    from fluid.codemode import transactions
+
+    def changed(paths):
+        global _write_window
+        root = _root().resolve()
+        for path in paths:
+            path = path.resolve()
+            # Only installation/API-owner fact stores and installation Python
+            # skills are shared. Project/standalone stores must stay local.
+            if (path.parent == root and (path.name == "memories.json" or path.suffix == ".py")) or (
+                path.name == "memories.json" and path.parent.parent == root / ".users"
+            ):
+                now = monotonic()
+                with _write_lock:
+                    _write_window = (_write_window[0] if _write_window else now, now)
+                from app.network import transport
+                transport.request_scan(["memory"])
+                return
+
+    transactions._change_callback = changed
 
 
 def refresh_from_files(*, ctx=None) -> None:
@@ -111,6 +155,13 @@ def publish(*, ctx=None) -> int:
     ctx = ctx or engine.context()
     if ctx is None or ctx.bootstrap_state != engine.BOOTSTRAP_READY:
         return 0
+    if not _publish_due():
+        # The fixed scanner wake alone can cut a slow ten-save burst into
+        # several whole-store envelopes. Retry after its next debounce instead
+        # of staging any intermediate snapshot (also on a periodic full pass).
+        from app.network import transport
+        transport.request_scan(["memory"])
+        return 0
     refresh_from_files(ctx=ctx)
     try:
         from app.network import authored_plugins
@@ -125,7 +176,8 @@ def apply_to_files(ids: list[str], *, ctx=None) -> int:
     ctx = ctx or engine.context()
     if not ctx or not ids:
         return 0
-    with prose_skills.LOCK:
+    from fluid.codemode.transactions import suppress_changes
+    with suppress_changes(), prose_skills.LOCK:
         manifest = prose_skills.load_manifest()
         before = json.dumps(manifest, sort_keys=True)
         applied = _apply(ids, ctx, manifest)

@@ -88,6 +88,22 @@ describe('ModelPickerPanel', () => {
 		}
 	});
 
+	it('fades the list bottom only while more rows wait below', async () => {
+		render(ModelPickerPanel, { props: { ...buildModelPickerCatalog(), value: '', onSelect: vi.fn() } });
+		const list = screen.getByRole('listbox');
+		const size = (scrollTop: number) => {
+			Object.defineProperty(list, 'scrollHeight', { configurable: true, value: 600 });
+			Object.defineProperty(list, 'clientHeight', { configurable: true, value: 300 });
+			list.scrollTop = scrollTop;
+		};
+		size(0);
+		await fireEvent.scroll(list);
+		expect(list.classList.contains('more-below')).toBe(true);
+		size(300);
+		await fireEvent.scroll(list);
+		expect(list.classList.contains('more-below')).toBe(false);
+	});
+
 	it('shows selectable 272K and 1M controls for Sol 6.1', async () => {
 		const onContextChoiceSelect = vi.fn();
 		render(ModelPickerPanel, { props: { ...buildModelPickerCatalog(),
@@ -157,6 +173,17 @@ describe('ModelPickerPanel', () => {
 		const row = (name: RegExp) => within(list).getByRole('option', { name });
 		expect(row(/sonnet/i).querySelector('.mpp-check svg')).not.toBeNull();
 		expect(row(/opus/i).querySelector('.mpp-check svg')).toBeNull();
+	});
+
+	it('draws a 16px star that turns on when favourited', async () => {
+		render(ModelPickerPanel, { props: { groups, options, value: 'sonnet', onSelect: vi.fn() } });
+		const star = screen.getByRole('button', { name: /add opus to favorites/i });
+		expect(star.querySelector('svg')?.getAttribute('width')).toBe('16');
+		expect(star.classList.contains('on')).toBe(false);
+		await fireEvent.click(star);
+		const on = screen.getByRole('button', { name: /remove opus from favorites/i });
+		expect(on.classList.contains('on')).toBe(true);
+		expect(on.querySelector('svg')?.getAttribute('width')).toBe('16');
 	});
 
 	it('moves through every provider from the search box with the arrow keys', async () => {

@@ -243,11 +243,13 @@ describe('dock position and drag regions (source)', () => {
 		// those two rules are the only fixed positioning it may have.
 		const userMoved = (src: string) => src.replace(/\t\.call-bounds \{[^}]*\}/, '').replace(/\t\.call-float \{[^}]*\}/, '');
 		for (const file of ['./ComputerUseBanner.svelte', './voice/ActiveVoiceCallBar.svelte', './InstallPrompt.svelte',
-			'./CredentialStorageBanner.svelte', './ClaudeReloginBanner.svelte', './layout/ChatView.svelte']) {
+			'./CredentialStorageBanner.svelte', './ClaudeReloginBanner.svelte', './layout/ConnectionNotice.svelte']) {
 			const src = read(file);
 			expect(src, file).toContain('<NotificationSlot');
-			if (file !== './layout/ChatView.svelte') expect(userMoved(src), file).not.toMatch(/position:\s*fixed|class="fixed/);
+			expect(userMoved(src), file).not.toMatch(/position:\s*fixed|class="fixed/);
 		}
+		// The chat's connection notice lives in ConnectionNotice, rendered by ChatView.
+		expect(read('./layout/ChatView.svelte')).toContain('<ConnectionNotice');
 		expect(read('./voice/ActiveVoiceCallBar.svelte')).toMatch(/\{#if position\}[\s\S]*class="call-float"[\s\S]*\{:else\}\s*<NotificationSlot order=\{DOCK_ORDER\.voiceCall\}>/);
 		const update = read('./layout/sidebar/DesktopUpdateButton.svelte');
 		expect(update).toContain('<NotificationSlot order={DOCK_ORDER.restart}>');

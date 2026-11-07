@@ -244,7 +244,7 @@ async def test_known_write_wakes_only_its_collections(monkeypatch):
     assert scan.call_args_list[2].kwargs == {}
 
 
-@pytest.mark.parametrize("collection", ["agents", "sessions"])
+@pytest.mark.parametrize("collection", ["agents", "sessions", "memory"])
 async def test_targeted_writes_during_pass_survive_and_cannot_starve_full_scan(monkeypatch, collection):
     # Compress this deadline to retain the 32-pass real-publisher fixture.
     # The default 60-second deadline has a separate continuous-wake ratchet.
@@ -263,7 +263,7 @@ async def test_targeted_writes_during_pass_survive_and_cannot_starve_full_scan(m
     assert calls[31]["collections"] == {collection}
 
 
-@pytest.mark.parametrize("collection", ["unknown", "membership", "memory", "plugins_desired"])
+@pytest.mark.parametrize("collection", ["unknown", "membership", "plugins_desired"])
 async def test_unhandled_writes_request_full_reconciliation(monkeypatch, collection):
     clock = ScanClock(monkeypatch, passes=2)
     scan = Mock(return_value=0)
@@ -274,7 +274,7 @@ async def test_unhandled_writes_request_full_reconciliation(monkeypatch, collect
     assert [call.kwargs for call in scan.call_args_list] == [{}, {}]
 
 
-@pytest.mark.parametrize("collection", ["agents", "sessions"])
+@pytest.mark.parametrize("collection", ["agents", "sessions", "memory"])
 async def test_failed_targeted_scan_retries_full_reconciliation(monkeypatch, collection):
     clock = ScanClock(monkeypatch, passes=3)
     scan = Mock(side_effect=[0, RuntimeError("failed targeted read"), 0])

@@ -416,7 +416,8 @@ class OpenAIResponsesClient:
         return owned, owned
 
     async def stream(self, request: ProviderRequest) -> AsyncIterator[StreamChunk]:
-        body = build_request_body(request)
+        # A resumed history (or an LRU eviction) can require image encoding.
+        body = await asyncio.to_thread(build_request_body, request)
         if self._is_codex_backend():
             # The ChatGPT/Codex backend is not the public Responses API and
             # answers an output ceiling with HTTP 400 (the Codex CLI never

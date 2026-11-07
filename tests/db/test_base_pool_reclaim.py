@@ -689,7 +689,7 @@ def test_shutdown_drain_is_bounded_for_stuck_borrower(retaining_pool, caplog):
 
 
 @pytest.mark.parametrize("cancel_fails", [False, True])
-def test_force_close_warns_and_cancels_all_before_close(retaining_pool, monkeypatch, caplog, cancel_fails):
+def test_force_close_warns_and_cancels_before_each_close(retaining_pool, monkeypatch, caplog, cancel_fails):
     pool, _ = retaining_pool
     borrowed = [pool.getconn(), pool.getconn()]
     cancelled = []
@@ -701,14 +701,17 @@ def test_force_close_warns_and_cancels_all_before_close(retaining_pool, monkeypa
 
     for conn in borrowed:
         monkeypatch.setattr(conn, "cancel", lambda conn=conn: cancel(conn), raising=False)
-    closeall = pool._closeall
+    # Cancellation/close happen outside the driver lock, independently per
+    # socket. A failed or stuck cancel must not serialize all socket cleanup.
+    for conn in borrowed:
+        close = conn.close
 
-    def close():
-        assert cancelled == borrowed
-        assert "2 borrowed connection" in caplog.text
-        closeall()
+        def checked_close(conn=conn, close=close):
+            assert conn in cancelled
+            assert "2 borrowed connection" in caplog.text
+            close()
 
-    monkeypatch.setattr(pool, "_closeall", close)
+        monkeypatch.setattr(conn, "close", checked_close)
     pool.shutdown(timeout=0)
     assert all(conn.closed for conn in borrowed)
     for conn in borrowed:
@@ -886,7 +889,9 @@ def test_pressure_timeout_and_cleanup_failure(retaining_pool, monkeypatch):
     assert id(conn) not in pool._rused
     stats = base.pressure_stats()
     assert stats["holds"] == stats["connections_discarded"] == 1
-    assert stats["hold_seconds_total"] == pytest.approx(1.25)
+    # Retirement releases the pool slot before socket close. Time spent
+    # closing a discarded socket is no longer time holding pool capacity.
+    assert stats["hold_seconds_total"] == pytest.approx(0.25)
     for conn in burst:
         pool.putconn(conn)
 
@@ -1197,6 +1202,35 @@ def test_fifo_fresh_arrival_cannot_bypass_paused_head(fifo_pool, monkeypatch):
     assert old_done.wait(1)
     assert fresh_done.wait(1)
     assert outcomes == [("old", "ok"), ("fresh", "ok")]
+
+
+
+
+def test_keyed_checkout_cannot_reuse_connection_during_rollback(retaining_pool, monkeypatch):
+    pool, _ = retaining_pool
+    conn = pool.getconn("returning-key")
+    conn.transaction_status = psycopg2.extensions.TRANSACTION_STATUS_INTRANS
+    entered, resume = threading.Event(), threading.Event()
+    rollback = conn.rollback
+
+    def blocked_rollback():
+        entered.set()
+        assert resume.wait(3)
+        rollback()
+
+    monkeypatch.setattr(conn, "rollback", blocked_rollback)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        returning = executor.submit(pool.putconn, conn, "returning-key")
+        try:
+            assert entered.wait(2)
+            with pytest.raises(psycopg2.pool.PoolError, match="being returned"):
+                pool.getconn("returning-key")
+        finally:
+            resume.set()
+        returning.result(timeout=2)
+    assert pool.getconn("returning-key") is conn
+    pool.putconn(conn, "returning-key")
+    assert not pool._returning
 
 
 def test_fifo_does_not_change_keyed_driver_calls(retaining_pool):

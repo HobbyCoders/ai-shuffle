@@ -1601,14 +1601,9 @@ def _already_in_transcript(cursor: Any, row: Dict[str, Any]) -> bool:
 
 
 def _lock_for_event_write(cursor: Any, session_id: str) -> None:
-    """Event writes use counter -> session -> turn lock order, including
-    cancellation, so Stop and message delivery cannot deadlock."""
-    cursor.execute("INSERT INTO session_event_counters (session_id,next_seq) VALUES (%s,0) "
-                   "ON CONFLICT (session_id) DO NOTHING", (session_id,))
-    cursor.execute("SELECT next_seq FROM session_event_counters WHERE session_id=%s FOR UPDATE", (session_id,))
-    cursor.fetchone()
-    cursor.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (session_id,))
-    cursor.fetchone()
+    """Cancellation shares deletion/settlement's run -> counter -> session order."""
+    from app.db.session_locks import lock_session_runtime
+    lock_session_runtime(cursor, session_id)
 
 
 def _keep_unsent_words(cursor: Any, conn: Any, row: Dict[str, Any]) -> bool:
@@ -2033,11 +2028,10 @@ def settle_parked_turns(
         params += (session_id,)
     with (nullcontext(_conn) if _conn is not None else get_db()) as conn:
         cursor = conn.cursor()
-        if (resolved_before is not None or only_if_idle
-                or observed_park is not None or can_settle is not None):
-            # enqueue_turn/start_turn use this same lock. The UPDATE gets a
-            # fresh snapshot after any admission/handoff we waited behind.
-            cursor.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (session_id,))
+        # Even unconditional repair may append a completion event. Acquire its
+        # run/counter prefix BEFORE admission and the parked turn UPDATE, not
+        # after holding the row a concurrent delete/recorder needs.
+        _lock_for_event_write(cursor, session_id)
         if can_settle is not None and not can_settle():
             return 0
         cursor.execute(sql + "RETURNING id, payload, position", params)

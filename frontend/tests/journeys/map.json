@@ -70,6 +70,11 @@
 			"globs": ["frontend/tests/journeys/composer-helper.journey.mjs", "frontend/src/lib/components/CommandAutocomplete.svelte", "frontend/src/lib/components/FileAutocomplete.svelte"]
 		},
 		{
+			"why": "Shift+Enter with a menu open, Ctrl+N from the editor, New chat right after Send, Back after a sidebar switch and the phone bell's focus are keyboard and navigation paths only a real browser walks",
+			"journeys": ["keyboard-nav"],
+			"globs": ["frontend/tests/journeys/keyboard-nav.journey.mjs", "frontend/src/lib/components/CommandAutocomplete.svelte", "frontend/src/lib/components/FileAutocomplete.svelte", "frontend/src/lib/components/NotificationCenter.svelte", "frontend/src/lib/services/session-navigation.ts", "frontend/src/lib/services/message-editor-key.ts", "frontend/src/lib/services/keyboard.ts", "frontend/src/lib/components/chat/ChatInput.svelte", "frontend/src/lib/components/chat/send-destination.ts", "frontend/src/lib/stores/session/message-sender.ts"]
+		},
+		{
 			"why": "steer admission, cancellation and mirror routing must not strand a pending bubble",
 			"journeys": ["steer-lifecycle"],
 			"globs": ["frontend/tests/journeys/steer-lifecycle.journey.mjs", "frontend/src/lib/stores/session/pending-queue.ts", "frontend/src/lib/stores/session/message-sender.ts", "frontend/src/lib/stores/session/ws-message-handlers.ts", "frontend/src/lib/components/chat/PendingMessages.svelte", "frontend/src/lib/components/chat/PendingStatusAnnouncer.svelte", "app/core/session_handoff.py", "app/api/chat_ws_handler.py", "app/core/message_admission.py", "app/core/turn_manager.py", "app/network/control.py"]
@@ -96,7 +101,7 @@
 		{
 			"why": "shared Settings titles and the medium desktop frame retain their geometry",
 			"journeys": ["shell-geometry"],
-			"globs": ["frontend/tests/journeys/shell-geometry.journey.mjs", "frontend/src/lib/components/settings/shell/PageTitle.svelte", "frontend/src/lib/components/settings/shell/PreferencePage.svelte", "frontend/src/lib/components/settings/shell/CollectionPage.svelte", "frontend/src/lib/components/layout/view/PanelToggle.svelte"]
+			"globs": ["frontend/tests/journeys/shell-geometry.journey.mjs", "frontend/src/lib/components/settings/shell/PageTitle.svelte", "frontend/src/lib/components/settings/shell/PreferencePage.svelte", "frontend/src/lib/components/settings/shell/CollectionPage.svelte", "frontend/src/lib/components/layout/view/PanelToggle.svelte", "frontend/src/lib/components/layout/AppLayout.svelte"]
 		},
 		{
 			"why": "Settings deep links show the requested phone detail and preserve both Back steps",
@@ -106,12 +111,17 @@
 		{
 			"why": "content-first data destinations keep their shared phone header, ranges, states and filters reachable",
 			"journeys": ["data-pages"],
-			"globs": ["frontend/tests/journeys/data-pages.journey.mjs", "frontend/src/lib/components/deck/cards/StatsCard.svelte", "frontend/src/lib/components/deck/cards/PrInboxCard.svelte", "frontend/src/lib/components/settings/shell/DetailPane.svelte", "frontend/src/lib/components/settings/shell/PreferencePage.svelte"]
+			"globs": ["frontend/tests/journeys/data-pages.journey.mjs", "frontend/src/lib/components/deck/cards/StatsCard.svelte", "frontend/src/lib/components/deck/cards/PrInboxCard.svelte", "frontend/src/lib/components/settings/shell/DetailPane.svelte", "frontend/src/lib/components/settings/shell/PreferencePage.svelte", "frontend/src/lib/components/settings/rows/ListItem.svelte"]
 		},
 		{
 			"why": "note writing, autosave, Preview and moved actions remain reachable in responsive and native shells",
 			"journeys": ["notes-writing"],
 			"globs": ["frontend/src/lib/components/deck/cards/NotesCard.svelte", "frontend/tests/journeys/notes-writing.journey.mjs"]
+		},
+		{
+			"why": "short inline code stays one chip that never clips, even when 40 wide characters can't fit a narrow column",
+			"journeys": ["inline-code-fit"],
+			"globs": ["frontend/tests/journeys/inline-code-fit.journey.mjs", "frontend/src/lib/utils/inline-code*"]
 		},
 		{
 			"why": "automation authoring, search, detail tabs and responsive Back use the shared panel grammar",
@@ -434,6 +444,8 @@
 			"why": "a new worktree chat with the native harness or Claude Code, including delegated CLI startup and session binding",
 			"journeys": ["new-worktree-session"],
 			"globs": [
+				"frontend/tests/journeys/new-worktree-session.journey.mjs",
+				"frontend/src/lib/components/layout/ExecutionModeBar.svelte",
 				"frontend/src/lib/components/layout/WorkspaceSelector*",
 				"frontend/src/lib/components/chat/BranchSelector*",
 				"frontend/src/lib/stores/git*",

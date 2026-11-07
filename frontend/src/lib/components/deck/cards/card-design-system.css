@@ -358,7 +358,7 @@
 }
 
 .card-btn-primary:disabled {
-  opacity: 0.5;
+  opacity: var(--action-disabled-opacity, 0.4);
   cursor: not-allowed;
   transform: none;
   filter: none;

@@ -72,7 +72,7 @@ def test_executor_threads_the_create_new_branch_intent(project):
     assert result == {"path": "/w/feat-x", "branch": "feat/x"}
     assert ensure.call_args.args[1] == "feat/x"
     assert ensure.call_args.kwargs == {
-        "base_branch": "main", "create_new_branch": True,
+        "base_branch": "main", "create_new_branch": True, "raise_add_errors": True,
     }
 
 

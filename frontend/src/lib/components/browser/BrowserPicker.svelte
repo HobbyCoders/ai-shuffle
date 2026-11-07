@@ -254,7 +254,7 @@
 		touch-action: none;
 	}
 	.bp-scrim.sheet {
-		background: color-mix(in oklch, var(--background) 45%, transparent);
+		background: var(--modal-overlay);
 		animation: bp-fade 180ms ease-out both;
 	}
 

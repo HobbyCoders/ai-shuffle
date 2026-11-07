@@ -20,8 +20,9 @@ from app.db import session_events as se
 
 
 @pytest.fixture(autouse=True)
-def _reset_rotation():
+def _reset_rotation(session_factory):
     """The driver's round-robin cursor is module state — isolate each test."""
+    session_factory("s1")
     se._compaction_cursor = ""
     yield
     se._compaction_cursor = ""
@@ -228,8 +229,12 @@ def test_idle_driver_skips_a_session_with_a_live_run(mock_db):
     assert len(se.get_events("old")) == 10
 
 
-def test_idle_driver_skips_sessions_with_no_sessions_row(mock_db):
+def test_idle_driver_skips_sessions_with_no_sessions_row(mock_db, session_factory):
+    session_factory("orphan")
     se.append_events("orphan", _deltas(10))
+    # Represent historical orphan data; current writers may not create it.
+    with get_db() as conn:
+        conn.cursor().execute("DELETE FROM sessions WHERE id = %s", ("orphan",))
 
     assert se.compact_idle_session_deltas(7, keep_tail_events=0)["rows"] == 0
     assert len(se.get_events("orphan")) == 10

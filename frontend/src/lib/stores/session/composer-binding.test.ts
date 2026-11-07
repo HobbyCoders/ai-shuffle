@@ -78,6 +78,7 @@ function parentState(overrides: Partial<ActiveSessionState> = {}): ActiveSession
 		liveProvider: null,
 		wsConnected: true,
 		wsReconnectRequired: false,
+		wsManualReconnect: 'idle',
 		error: null,
 		profile: 'overseer',
 		sessionProfileId: null,

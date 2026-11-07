@@ -404,12 +404,14 @@ export async function typeAndSend(page, text) {
 	if (text.length > 24) {
 		// Even ordinary queued prompts must not spend one CDP round trip per
 		// character: CPU4 entry can otherwise outlive a scenario's reply window.
-		// Type a short prefix BEFORE bulk growth, fill all but the final code
-		// point, then finish typing. Preserve Unicode and literal newlines at
-		// both boundaries; real input still precedes and follows the bulk fill.
+		// Type a short prefix BEFORE bulk growth, append the middle, then type
+		// the final code point. Do not refill the whole draft: fill() reselects
+		// through the DOM separately from insertText, so a lost selection can
+		// append the prefix twice (#1242). Keep the real typed caret instead.
+		// Unicode and literal newlines stay intact at both boundaries.
 		const chars = Array.from(text);
 		await typeText(chars.slice(0, 12).join(''));
-		await box.fill(chars.slice(0, -1).join(''));
+		await page.keyboard.insertText(chars.slice(12, -1).join(''));
 		await typeText(chars.slice(-1).join(''));
 	} else {
 		await typeText(text);

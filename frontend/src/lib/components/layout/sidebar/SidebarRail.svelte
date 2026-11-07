@@ -195,9 +195,15 @@
 </nav>
 
 <style>
+	/* The rail's z-index makes it a stacking context, so its hover labels
+	   (.tip, z 9) and the notification popover only count inside it. It must
+	   sit above every layer of the list panel beside it (the sticky section
+	   header, z 6, and the selection bar, z 8, in Sidebar.svelte), or a label
+	   slides under them. It stays below SidebarSheet (20/21), WorkspaceCustomize
+	   (30/31) and the AppLayout overlays (40-42). */
 	.rail {
 		position: relative;
-		z-index: 5;
+		z-index: 10;
 		flex: none;
 		width: 56px;
 		display: flex;
@@ -206,6 +212,7 @@
 		gap: 4px;
 		padding: 10px 0 12px;
 		background: var(--sidebar);
+		box-shadow: inset -1px 0 0 var(--rail-seam, transparent);
 	}
 	.rail-titlebar { position: absolute; top: 0; inset-inline: 0; height: var(--titlebar-height, 52px); pointer-events: none; }
 	/* On a phone this is not a desktop rail: it is the drawer's bottom row of
@@ -216,6 +223,7 @@
 		gap: 0;
 		padding: 4px 4px calc(4px + env(safe-area-inset-bottom, 0px));
 		border-top: 1px solid var(--border-subtle);
+		box-shadow: none;
 	}
 	.rail.phone .r-sep,
 	.rail.phone .grow { display: none; }

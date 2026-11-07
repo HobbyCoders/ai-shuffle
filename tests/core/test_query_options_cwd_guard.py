@@ -85,7 +85,7 @@ def test_session_spawn_cwd_from_resolver_base(tmp_path):
         )
 
     assert str(opts.cwd) == str(base)
-    rc.assert_called_once_with(session)
+    rc.assert_called_once_with(session, raise_add_errors=True)
 
 
 def test_session_spawn_cwd_from_resolver_branch(tmp_path):
@@ -104,7 +104,7 @@ def test_session_spawn_cwd_from_resolver_branch(tmp_path):
         )
 
     assert str(opts.cwd) == str(feat)
-    rc.assert_called_once_with(session)
+    rc.assert_called_once_with(session, raise_add_errors=True)
 
 
 def test_v2_project_not_materialized_here_raises(tmp_path):

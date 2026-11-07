@@ -38,6 +38,8 @@
 		wrapHint?: boolean;
 		children?: Snippet;
 		expanded?: Snippet;
+		/** A small status badge beside the label, e.g. the current plan. */
+		badge?: Snippet;
 	}
 
 	let {
@@ -53,7 +55,8 @@
 		stackOnPhone = false,
 		wrapHint = false,
 		children,
-		expanded
+		expanded,
+		badge
 	}: Props = $props();
 
 	const uid = $props.id();
@@ -107,6 +110,7 @@
 	<div class="st-rt" style:flex-basis={wrapHint ? '280px' : undefined}>
 		<div class="st-rl">
 			<span id={labelId}>{text}</span>
+			{@render badge?.()}
 			{#if helpText}<HelpTip text={helpText} about={text} />{/if}
 		</div>
 		{#if hintText}

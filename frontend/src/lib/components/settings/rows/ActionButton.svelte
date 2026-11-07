@@ -37,6 +37,7 @@
 	.st-action:focus-visible { outline: 2px solid var(--st-primary, var(--ring)); outline-offset: 2px; }
 	.st-action:active:not(:disabled) { transform: translateY(1px); }
 	.st-action:disabled { opacity: .45; cursor: not-allowed; }
+	.st-action.primary:disabled { opacity: var(--action-disabled-opacity, .4); }
 	@media (max-width: 600px), (pointer: coarse) {
 		.st-action { height: 32px; min-height: 32px; margin-block: 6px; }
 		.st-action::after { content: ""; position: absolute; inset: -6px min(0px, calc((100% - 44px) / 2)); }

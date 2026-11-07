@@ -141,6 +141,9 @@ def _tool_use(tool_use_id, turn="t1"):
 
 
 async def test_input_deltas_are_dropped_when_their_tool_use_follows(mock_db, gw):
+    from tests.shared_fixtures import seed_session
+
+    seed_session("sess-tid-drop")
     sid = "sess-tid-drop"
     se.append_events(
         sid,
@@ -161,6 +164,9 @@ async def test_input_deltas_are_dropped_when_their_tool_use_follows(mock_db, gw)
 
 async def test_orphan_input_deltas_replay_as_one_frame_per_run(mock_db, gw):
     """A background subagent launch emits input deltas and never a tool.use."""
+    from tests.shared_fixtures import seed_session
+
+    seed_session('sess-tid-orphan')
     sid = "sess-tid-orphan"
     se.append_events(
         sid,
@@ -190,6 +196,9 @@ async def test_orphan_input_deltas_replay_as_one_frame_per_run(mock_db, gw):
 
 
 async def test_orphan_runs_for_different_tools_stay_separate(mock_db, gw):
+    from tests.shared_fixtures import seed_session
+
+    seed_session("sess-tid-two-orphans")
     sid = "sess-tid-two-orphans"
     se.append_events(
         sid,
@@ -208,6 +217,9 @@ async def test_orphan_runs_for_different_tools_stay_separate(mock_db, gw):
 
 async def test_a_dropped_delta_still_separates_text_runs(mock_db, gw):
     """Dropping a delta must not merge the text on either side of it."""
+    from tests.shared_fixtures import seed_session
+
+    seed_session('sess-tid-split')
     sid = "sess-tid-split"
     se.append_events(
         sid,
@@ -227,6 +239,9 @@ async def test_a_dropped_delta_still_separates_text_runs(mock_db, gw):
 
 
 async def test_tool_use_on_a_later_page_still_drops_the_deltas(mock_db, gw, monkeypatch):
+    from tests.shared_fixtures import seed_session
+
+    seed_session('sess-tid-paged')
     monkeypatch.setattr(events_mod, "_PAGE", 3)
     sid = "sess-tid-paged"
     se.append_events(
@@ -243,6 +258,9 @@ async def test_tool_use_on_a_later_page_still_drops_the_deltas(mock_db, gw, monk
 
 async def test_resume_past_the_tool_use_does_not_lose_orphan_state(mock_db, gw):
     """Deltas after the resume cursor whose tool.use is BEFORE it replay."""
+    from tests.shared_fixtures import seed_session
+
+    seed_session('sess-tid-resume')
     sid = "sess-tid-resume"
     se.append_events(sid, [_tool_use("tu1")])
     se.append_events(sid, [_input_delta("tu1", "late")])
@@ -254,6 +272,9 @@ async def test_resume_past_the_tool_use_does_not_lose_orphan_state(mock_db, gw):
 
 
 async def test_live_tail_input_deltas_are_not_dropped(mock_db, gw, monkeypatch):
+    from tests.shared_fixtures import seed_session
+
+    seed_session('sess-tid-live')
     monkeypatch.setattr(events_mod, "KEEPALIVE_SECONDS", 0.05)
     sid = "sess-tid-live"
     se.append_events(sid, [{"type": "message.user", "payload": {}, "turn_id": "t1"}])
@@ -296,6 +317,9 @@ def _mk_session(session_id):
 
 
 async def test_caught_up_carries_the_log_epoch(mock_db, gw):
+    from tests.shared_fixtures import seed_session
+
+    seed_session("sess-ep-cu")
     sid = "sess-ep-cu"
     se.append_events(sid, [{"type": "turn.started"}, {"type": "turn.completed"}])
 
@@ -315,6 +339,9 @@ async def test_an_empty_log_still_has_an_epoch(mock_db, gw):
 
 
 async def test_resume_with_matching_epoch_is_not_reset(mock_db, gw):
+    from tests.shared_fixtures import seed_session
+
+    seed_session("sess-ep-match")
     sid = "sess-ep-match"
     se.append_events(sid, [{"type": "turn.started"}, {"type": "turn.completed"}])
     epoch = (await _until_caught_up(sid))[-1]["data"]["epoch"]
@@ -371,6 +398,9 @@ async def test_resume_without_an_epoch_behaves_as_before(mock_db, gw):
 async def test_resume_inside_a_compacted_run_is_reset(mock_db, gw):
     """A cursor that sat inside a delta run merged by compaction would
     otherwise receive the whole merged text again."""
+    from tests.shared_fixtures import seed_session
+
+    seed_session("sess-ep-compacted")
     sid = "sess-ep-compacted"
     se.append_events(
         sid,
@@ -404,6 +434,9 @@ async def test_resume_inside_a_compacted_run_is_reset(mock_db, gw):
 
 
 async def test_fresh_replay_logs_one_summary_line(mock_db, gw, caplog):
+    from tests.shared_fixtures import seed_session
+
+    seed_session('sess-measure')
     sid = "sess-measure"
     se.append_events(sid, [{"type": "turn.started"}, {"type": "turn.completed"}])
 

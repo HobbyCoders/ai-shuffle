@@ -76,6 +76,10 @@ def start(sid):
 
 @pytest.mark.parametrize("state", ["running", "interrupting", "draining"])
 def test_stop_recovers_dead_turn_but_preserves_live_peer(mock_db, state):
+    from tests.shared_fixtures import seed_session
+
+    seed_session("dead")
+    seed_session("peer")
     dead, lease = start("dead")
     peer, _ = start("peer")
     if state != "running":
@@ -137,6 +141,9 @@ async def test_close_includes_parked_background_only_session():
         stop.assert_awaited_once_with("parked", user_stop=True, respect_shell_preference=False, source="server_shutdown")
 
 async def test_async_stop_recovers_orphan_once_and_writes_terminal_event(mock_db):
+    from tests.shared_fixtures import seed_session
+
+    seed_session('orphan-async')
     turn, lease = start("orphan-async")
     turns.interrupt_turn("orphan-async", "stop")
     runs.release_run(lease["id"], lease["fence_token"])
