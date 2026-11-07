@@ -38,7 +38,7 @@
 
 {#if waiting}
 	<div class="mirror-sync" role="status" aria-live="polite">
-		<LoaderCircle size={20} aria-hidden="true" />
+		<LoaderCircle size={20} aria-hidden="true" class="mirror-spin" />
 		<strong>{mirrorSyncHeadline(syncState, deviceName)}</strong>
 		<p>Catching up before showing the current conversation, tasks and agents.</p>
 		{#if syncState === 'syncing' && pending > 0}<p>{pending} updates remaining</p>{/if}
@@ -126,14 +126,16 @@
 	.mirror-retry:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
 	.mirror-retry:disabled { opacity: 0.6; cursor: default; }
 	@media (pointer: coarse) { .mirror-retry { min-height: 2.75rem; padding-inline: 0.875rem; } }
-	.mirror-pill :global(.mirror-spin) { animation: mirror-spin 1s linear infinite; }
+	/* Both spinners turn: lucide's LoaderCircle is a still arc on its own. */
+	.mirror-sync :global(.mirror-spin),
+	.mirror-pill :global(.mirror-spin) { flex-shrink: 0; animation: mirror-spin 1s linear infinite; }
 	@keyframes mirror-spin { to { transform: rotate(360deg); } }
 	@keyframes mirror-pill-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
 	@media (max-width: 480px) {
 		.mirror-pill { white-space: normal; border-radius: var(--radius); }
 	}
 	@media (prefers-reduced-motion: reduce) {
-		.mirror-pill, .mirror-pill :global(.mirror-spin) { animation: none; }
+		.mirror-pill, .mirror-sync :global(.mirror-spin), .mirror-pill :global(.mirror-spin) { animation: none; }
 		.mirror-status-slot { transition: none; }
 	}
 </style>
