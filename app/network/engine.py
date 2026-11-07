@@ -996,6 +996,59 @@ def record(cursor, collection: str, record_id: str, row: Optional[Mapping[str, A
     return data
 
 
+def record_event_batch(cursor, rows: Sequence[Mapping[str, Any]], *, ctx: NetworkContext) -> Optional[int]:
+    """Publish a fresh transcript window, or return None for ``record`` fallback.
+
+    The catalog already checked ownership and the size cap. No other collection,
+    rewrite or deletion takes this path. Serialize/hash before locking; reserve
+    one contiguous clock/sequence range under the same state lock as ``record``.
+    The caller commits the outbox and its catalog cursor in ONE transaction.
+    """
+    if not rows:
+        return 0
+    if ctx.bootstrap_state != BOOTSTRAP_READY or ctx.key_version not in ctx.keyring or _outbox_held:
+        return None
+    from app.network.keyring import safe
+    if not safe(ctx, crypto.sha256_hex(ctx.network_key)):
+        return None
+    coll = policy.collection("session_events")
+    prepared = []
+    try:
+        for row in rows:
+            plaintext = serialize_row(coll, row, cursor=cursor)
+            if plaintext is None:
+                return None
+            prepared.append((coll.record_id(row), plaintext, content_hash(coll, plaintext), int(row["seq"])))
+    except (envelope_mod.EnvelopeError, ApplyError, ValueError, TypeError):
+        return None
+    ids = [item[0] for item in prepared]
+    if len(set(ids)) != len(ids):
+        return None
+    # Do not lock session rows/counters: this is an outbox-only write. The
+    # ordinary recorder and session deletion retain their R/C/S lock order.
+    state = store.lock_state(cursor)
+    if state is None or store.records_for_ids(cursor, coll.name, ids):
+        return None  # includes rewrites, tombstones and echoes/imported events
+    clock = max(0, int(state["clock"]))
+    seq = store.next_origin_seq(cursor, ctx.device_id, ctx.identity.incarnation)
+    envelopes = []
+    try:
+        for offset, (record_id, plaintext, digest, order_seq) in enumerate(prepared):
+            envelopes.append(envelope_mod.build(
+                network_id=ctx.network_id, collection=coll.name, record_id=record_id,
+                op=OP_UPSERT, clock=clock + offset + 1, origin_device_id=ctx.device_id,
+                origin_incarnation=ctx.identity.incarnation, origin_seq=seq + offset,
+                schema_version=coll.schema_version, key_version=ctx.key_version, network_key=ctx.network_key,
+                signing_private=ctx.identity.signing_private, record=plaintext, order_seq=order_seq).to_dict())
+    except (envelope_mod.EnvelopeError, ApplyError, ValueError, TypeError):
+        # No persistent counters/rows changed yet. Let record() retain its
+        # per-event skip semantics, including clock ticks for invalid envelopes.
+        return None
+    cursor.execute("UPDATE network_state SET clock = %s WHERE id = 1", (clock + len(envelopes),))
+    store.insert_published_events(cursor, envelopes, [item[2] for item in prepared])
+    return len(envelopes)
+
+
 def keep_local_rewrite(cursor, collection: str, record_id: str, before_row: Mapping[str, Any]) -> bool:
     """Accept a local rewrite of a row without publishing it.
 
