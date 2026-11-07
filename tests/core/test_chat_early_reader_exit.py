@@ -335,3 +335,112 @@ async def test_engine_deadline_does_not_release_issued_threaded_session_update(m
             if direct is not None:
                 admission.close(direct)
             await adapter.disconnect_transport()
+
+
+@pytest.mark.parametrize("reader", ["runtime", "direct"])
+async def test_slow_real_away_receipt_settles_before_successor(mock_db, tmp_path, monkeypatch, reader):
+    import threading
+
+    from app.core import away_mode
+    from app.core.session_pool import SessionPool
+    from app.db import database
+
+    receipt_started, release_receipt, receipt_done = threading.Event(), threading.Event(), threading.Event()
+    yielded = asyncio.Event()
+    writes = []
+
+    class CompletingProvider:
+        name = "fake"
+        caps = ProviderCaps()
+
+        async def stream(self, request):
+            yield StreamChunk("message_start", {})
+            yield StreamChunk("block_start", {"index": 0, "block_type": "text"})
+            yield StreamChunk("text_delta", {"index": 0, "text": "finished normally"})
+            yield StreamChunk("block_stop", {"index": 0})
+            yield StreamChunk("usage", {"stop_reason": "end_turn"})
+
+    database.create_session(SID, "default")
+    real_receipt = away_mode.record_context_delivery
+
+    def delayed_receipt(*args):
+        receipt_started.set()
+        assert release_receipt.wait(5), "test did not release the Away receipt thread"
+        try:
+            real_receipt(*args)
+            writes.append("A receipt")
+        finally:
+            receipt_done.set()
+
+    monkeypatch.setattr(away_mode, "record_context_delivery", delayed_receipt)
+    monkeypatch.setattr(admission, "_ABANDONED_DRAIN_SECONDS", 0.02)
+    engine = NativeLoop(provider=CompletingProvider(), store=MemoryStore(), model="m")
+    adapter = HarnessAdapter()
+    adapter._engine, adapter._connected = engine, True
+    adapter._can_use_tool = AsyncMock()
+    adapter._options = SessionOptions(model="m", include_partial_messages=True, extra={"app_session_id": SID})
+    # Drive send_query's real pending-note/TurnStarted producer, not a seeded
+    # receive_events field. Model-info is yielded before the first Away receipt.
+    monkeypatch.setattr(adapter, "_turn_context_note", lambda *args: away_mode.CONTEXT_NOTE)
+    for name in ("_refresh_task_roster", "_memory_held", "_native_scratch_held"):
+        monkeypatch.setattr(adapter, name, AsyncMock(return_value=None))
+    pool = SessionPool()
+    pool.put(SID, SessionState(adapter=adapter, is_connected=True))
+    real_pump = qe._stream_to_websocket_impl
+    turn = turns.enqueue_turn(SID, "user", prompt="hello")
+    rt = session_runtime.SessionRuntime(turn)
+
+    async def record(event):
+        if event.get("subtype") == "model_info":
+            yielded.set()
+            await asyncio.Event().wait()
+
+    direct = None
+    with ExitStack() as stack:
+        env = stack.enter_context(_runtime_env(pump=real_pump))
+        b = engine_patches(stack, cwd=str(tmp_path), session_row={"id": SID}, pool=pool)
+        b.options.include_partial_messages = True
+        env["recorder"].on_event.side_effect = record
+        stack.enter_context(patch("app.core.query_session_lifecycle.interrupt_session", new=AsyncMock()))
+        if reader == "runtime":
+            closing = asyncio.create_task(rt.execute())
+            await asyncio.wait_for(yielded.wait(), 5)
+            rt._pump_task.cancel()
+        else:
+            events = real_pump(prompt="hello", session_id=SID, profile_id="claude-code")
+            while (await asyncio.wait_for(anext(events), 5)).get("subtype") != "model_info":
+                pass
+            closing = asyncio.create_task(events.aclose())
+        origin = admission._holders[SID]
+        try:
+            assert await asyncio.to_thread(receipt_started.wait, 5)
+            await asyncio.wait_for(engine._turn_task, 5)
+            assert not engine.turn_running
+            try:
+                await asyncio.wait_for(origin.exited.wait(), 0.15)
+            except asyncio.TimeoutError:
+                pass
+            try:
+                direct = await admission.acquire(SID)
+            except admission.SessionBusyError:
+                pass
+            else:
+                database.update_session(SID, last_input_tokens=999)
+                writes.append("B successor mutation")
+            release_receipt.set()
+            assert await asyncio.to_thread(receipt_done.wait, 5)
+            await asyncio.wait_for(closing, 5)
+            await asyncio.wait_for(origin.exited.wait(), 5)
+            if direct is None:
+                direct = await admission.acquire(SID)
+                database.update_session(SID, last_input_tokens=999)
+                writes.append("B successor mutation")
+            assert writes == ["A receipt", "B successor mutation"]
+            assert not origin.abandoned, "a slow adapter app write retired a healthy engine"
+            b.persist.assert_awaited_once()
+        finally:
+            release_receipt.set()
+            await asyncio.wait_for(closing, 5)
+            if direct is not None:
+                admission.close(direct)
+            await adapter.disconnect_transport()

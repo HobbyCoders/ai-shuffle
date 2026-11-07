@@ -47,7 +47,7 @@ from fluid.context.assistant import quote_assistant_text
 from fluid.engine.delegated import ClaudeCliMissingError
 from fluid.engine.guardrail import GUARDRAIL_TOOL
 
-from app.db import database
+from app.db import async_database, database
 from app.db import turns as turns_db
 from app.db.async_database import run_sync
 from pathlib import Path
@@ -701,7 +701,7 @@ async def _execute_query_turn(
     # branch session, materializes the checkout (git fetch + git worktree add
     # via subprocess.run, up to 90s) plus several DB reads. Running it inline
     # blocked every other coroutine in the process for the whole spawn.
-    options, agents_dict = await asyncio.to_thread(
+    options, agents_dict = await async_database.run_sync(
         build_session_options,
         profile=profile,
         project=project,
@@ -1232,7 +1232,7 @@ async def _stream_query_turn(
     try:
         # Off the event loop — see execute_query: the build can run git
         # fetch/worktree add and several DB reads synchronously.
-        options, agents_dict = await asyncio.to_thread(
+        options, agents_dict = await async_database.run_sync(
             build_session_options,
             profile=profile,
             project=project,
@@ -1368,8 +1368,8 @@ async def _stream_query_turn(
         # Lane-aware: the pool's subprocess cap counts DELEGATED sessions
         # only, and deciding the leg can read the provider row, so both
         # run in the same worker thread.
-        incoming_lane = await asyncio.to_thread(memory_leg_for_options, options)
-        refusal = await asyncio.to_thread(pool.admission_check, incoming_lane)
+        incoming_lane = await async_database.run_sync(memory_leg_for_options, options)
+        refusal = await async_database.run_sync(pool.admission_check, incoming_lane)
         if refusal is not None:
             logger.warning(f"[Admission] Refusing new session {session_id}: {refusal}")
             yield {"type": "error", "message": f"Server is at capacity — {refusal}. Please retry shortly."}
@@ -1982,7 +1982,7 @@ async def _stream_to_websocket_turn(
         lane = runtime_session_mode(session, caller=turn_caller(overrides))
         return lane, lane == "chat" and is_owner_session(session)
 
-    session_mode, owner_coordinator = await asyncio.to_thread(_lane_blocking)
+    session_mode, owner_coordinator = await async_database.run_sync(_lane_blocking)
     # The owner's no-project chat got its full tools from who sent this turn
     # (#641): tell the live runtime, so a message from a caller that keeps the
     # ceiling never steers into it (``SessionRuntime._steer_refusal``).
@@ -2030,7 +2030,7 @@ async def _stream_to_websocket_turn(
     try:
         # Off the event loop — see execute_query: the build can run git
         # fetch/worktree add and several DB reads synchronously.
-        options, agents_dict = await asyncio.to_thread(
+        options, agents_dict = await async_database.run_sync(
             build_session_options,
             profile=profile,
             project=project,
@@ -2072,13 +2072,13 @@ async def _stream_to_websocket_turn(
     # subscription sign-ins (credential_gate.requester_refusal). A connector
     # message from one of the owner's own accounts on that platform is the
     # owner's (credential_gate.connector_sender_is_owner).
-    _leg = await asyncio.to_thread(credential_gate.leg_for_options, options)
+    _leg = await async_database.run_sync(credential_gate.leg_for_options, options)
     _requester = api_user_id
-    if _requester and turn_source == "connector" and await asyncio.to_thread(
+    if _requester and turn_source == "connector" and await async_database.run_sync(
         credential_gate.connector_sender_is_owner, connector_sender, _requester
     ):
         _requester = None
-    _refusal = await asyncio.to_thread(credential_gate.requester_refusal, options, _requester)
+    _refusal = await async_database.run_sync(credential_gate.requester_refusal, options, _requester)
     _refusal = _refusal or await credential_gate.turn_refusal_async(_leg)
     if _refusal:
         logger.warning(f"[WS] Turn refused for session {session_id}: {_refusal}")
@@ -2092,13 +2092,13 @@ async def _stream_to_websocket_turn(
     if turn_source in loop_guard.UNATTENDED_SOURCES:
         _guard_payload = (loop_guard_turn or {}).get("payload") or {}
         _confirmed = bool(_guard_payload.get(loop_guard.CONFIRMED_FLAG))
-        _held = await asyncio.to_thread(
+        _held = await async_database.run_sync(
             loop_guard.check, session_id, turn_source, _leg, confirmed=_confirmed,
             origin=_guard_payload.get(loop_guard.ORIGIN_KEY),
         )
         if _held:
             if loop_guard_turn:
-                await asyncio.to_thread(loop_guard.hold, loop_guard_turn, _held)
+                await async_database.run_sync(loop_guard.hold, loop_guard_turn, _held)
             yield {"type": "error", "message": _held, "code": loop_guard.HOLD_CODE}
             return
 
@@ -2107,7 +2107,7 @@ async def _stream_to_websocket_turn(
     # start (nor does a job past its job time limit).
     from app.core import orchestration_limits
 
-    _limited = await asyncio.to_thread(
+    _limited = await async_database.run_sync(
         orchestration_limits.turn_refusal, session_id, turn_source, payload=(loop_guard_turn or {}).get("payload"),
     )
     if _limited:
@@ -2126,7 +2126,7 @@ async def _stream_to_websocket_turn(
         from app.core import upload_transfer
 
         try:
-            _mapping = await asyncio.to_thread(
+            _mapping = await async_database.run_sync(
                 upload_transfer.materialize_blobs_for_turn,
                 list(upload_blob_ids),
                 str(getattr(options, "cwd", "") or ""),
@@ -2451,7 +2451,7 @@ async def _stream_to_websocket_turn(
                         try:
                             from app.core.user_question_handler import get_session_attention
 
-                            durable = await asyncio.to_thread(get_session_attention, _sid)
+                            durable = await async_database.run_sync(get_session_attention, _sid)
                         except Exception:
                             durable = None
                             logger.debug("[WS] durable attention read failed", exc_info=True)
@@ -2710,7 +2710,7 @@ async def _stream_to_websocket_turn(
                 # saved Deny, stored choice, price and spending guards remain.
                 if admission_gates_unattended(tool_name, generation_context, session_id=_sid):
                     if _perm_mode != "bypassPermissions":
-                        rule = await asyncio.to_thread(
+                        rule = await async_database.run_sync(
                             permission_handler.saved_rule, _sid, _profile_id, tool_name, tool_input,
                         )
                         if rule is not None and rule.decision == PermissionDecision.DENY:
@@ -2759,7 +2759,7 @@ async def _stream_to_websocket_turn(
                     return result
                 else:
                     if _perm_mode != "bypassPermissions":
-                        rule = await asyncio.to_thread(
+                        rule = await async_database.run_sync(
                             permission_handler.saved_rule, _sid, _profile_id, tool_name, tool_input,
                         )
                         if rule is not None and rule.decision == PermissionDecision.DENY:
@@ -2792,8 +2792,8 @@ async def _stream_to_websocket_turn(
         # Lane-aware: the pool's subprocess cap counts DELEGATED sessions
         # only, and deciding the leg can read the provider row, so both
         # run in the same worker thread.
-        incoming_lane = await asyncio.to_thread(memory_leg_for_options, options)
-        refusal = await asyncio.to_thread(pool.admission_check, incoming_lane)
+        incoming_lane = await async_database.run_sync(memory_leg_for_options, options)
+        refusal = await async_database.run_sync(pool.admission_check, incoming_lane)
         if refusal is not None:
             logger.warning(f"[Admission] Refusing new session {session_id}: {refusal}")
             yield {"type": "error", "message": f"Server is at capacity — {refusal}. Please retry shortly."}
@@ -3120,13 +3120,10 @@ async def _stream_to_websocket_turn(
             events = state.adapter.receive_events()
             try:
                 while not lease.abandoned:
-                    lease.engine_waiting.set()
                     try:
                         message = await anext(events)
                     except StopAsyncIteration:
                         return
-                    finally:
-                        lease.engine_waiting.clear()
                     # An evicted reader may ignore cancellation, but it cannot
                     # hand another frame to app-session mutation helpers.
                     if lease.abandoned:
@@ -3161,7 +3158,7 @@ async def _stream_to_websocket_turn(
                 _cli_pid = subprocess_pid(state)
                 if _cli_pid:
                     from app.core import process_ledger
-                    await asyncio.to_thread(
+                    await async_database.run_sync(
                         process_ledger.record_process, _cli_pid, "agent_cli",
                         session_id=session_id,
                     )

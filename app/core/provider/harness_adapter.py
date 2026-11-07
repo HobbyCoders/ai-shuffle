@@ -105,7 +105,8 @@ from app.core.guardrail_prompt import (
     guardrail_blocked_note,
 )
 from app.core.provider.protocol import ProviderAdapter
-from app.core.provider.session_admission import SessionReplacedError
+from app.core.provider.session_admission import SessionReplacedError, raw_engine_events
+from app.db.async_database import run_sync
 from app.core.provider.delegated_saved_rules import SAVED_RULE_DENIAL
 from app.core.session_modes import (
     bypass_refuses,
@@ -628,7 +629,7 @@ class HarnessAdapter(ProviderAdapter):
         # get them (the claude CLI ships its own).
         # Off the loop: a bound provider id without its shape fields makes this
         # read the model_providers row synchronously.
-        kind = await asyncio.to_thread(_decide_provider_kind, options)
+        kind = await run_sync(_decide_provider_kind, options)
         self._is_delegated = kind == "delegated"
         self._provider_kind = kind
         if self._is_delegated:
@@ -640,7 +641,7 @@ class HarnessAdapter(ProviderAdapter):
         options.permission_mode = effective_permission_mode(
             options.permission_mode, delegated=self._is_delegated
         )
-        options.effort = await asyncio.to_thread(
+        options.effort = await run_sync(
             _effective_effort, options, options.effort, kind, fit=True
         )
 
@@ -652,11 +653,11 @@ class HarnessAdapter(ProviderAdapter):
 
         # Read on the executing worker, including remote Task/subagent children.
         # Fixed for this connection, never inserted into the per-turn context.
-        attribution_enabled = await asyncio.to_thread(commit_attribution.read)
+        attribution_enabled = await run_sync(commit_attribution.read)
         permissions = self._build_permissions(options)
         # Which worker this is, once per connect: a session moved to another
         # worker reconnects there and renders that worker's name.
-        self._worker_identity = await asyncio.to_thread(
+        self._worker_identity = await run_sync(
             _session_identity_text, (options.extra or {}).get("session_runtime")
         )
         # A one-shot generation sends the caller's prompt alone: no system
@@ -678,7 +679,7 @@ class HarnessAdapter(ProviderAdapter):
             # The "# Workspace facts" card, as on the native leg: it carries
             # the session's preview link (owner sessions only), the agent
             # browser's one door to this worker's running UI (#1789).
-            self._workspace_card = None if one_shot else await asyncio.to_thread(
+            self._workspace_card = None if one_shot else await run_sync(
                 self._build_workspace_card, options
             )
             if one_shot:
@@ -689,7 +690,7 @@ class HarnessAdapter(ProviderAdapter):
                 # discover_agents walks .fluid/agents, .agents/agents and
                 # plugin dirs (rglob): disk IO, so it runs in a worker thread.
                 delegated_system = None
-                delegated_append = await asyncio.to_thread(
+                delegated_append = await run_sync(
                     _delegated_append_text, append_system, options, self._registry,
                     worker=self._worker_identity,
                     workspace_card=self._workspace_card,
@@ -698,7 +699,7 @@ class HarnessAdapter(ProviderAdapter):
                 # The compiled prompt already carries the merged agents index
                 # (``_compile_prompt_sections`` slots it in), so nothing is
                 # added here — that is what keeps the block un-doubled.
-                delegated_system = await asyncio.to_thread(
+                delegated_system = await run_sync(
                     self._compile_prompt, system, append_system, options,
                     self._worker_identity, self._workspace_card,
                 )
@@ -708,7 +709,7 @@ class HarnessAdapter(ProviderAdapter):
                 # model the delegation catalog: the CLI cannot know about DB
                 # agents, so without this the caller could not name a Task
                 # target at all. Same block as the native leg.
-                agents_index, _ = await asyncio.to_thread(_agent_context, options)
+                agents_index, _ = await run_sync(_agent_context, options)
                 delegated_system, delegated_append = _with_agents_index(
                     system, append_system, agents_index
                 )
@@ -720,7 +721,7 @@ class HarnessAdapter(ProviderAdapter):
                 delegated_append = "\n\n".join(
                     part for part in (
                         delegated_append,
-                        await asyncio.to_thread(
+                        await run_sync(
                             _stable_environment_block, options.cwd, self._worker_identity
                         ),
                     ) if part
@@ -731,7 +732,7 @@ class HarnessAdapter(ProviderAdapter):
                     )
             # Resolving the CLI stats PATH entries on disk. A missing CLI
             # raises ClaudeCliMissingError here, before any engine is built.
-            claude_cmd = await asyncio.to_thread(_resolve_claude_cmd)
+            claude_cmd = await run_sync(_resolve_claude_cmd)
             delegated_blocked = _delegated_disallowed(options, self._registry)
             _install_bridge_tool_filter(options)
             from app.core.usage_limits import claude_mod_usage_sink
@@ -739,16 +740,16 @@ class HarnessAdapter(ProviderAdapter):
 
             # Settings > Providers > Claude > Sessions, read on the executing
             # worker. Fixed for this connection's CLI process.
-            claude_compaction_on = await asyncio.to_thread(claude_compaction.read)
+            claude_compaction_on = await run_sync(claude_compaction.read)
             # What Fluid's compaction of this chat sizes its target and its
             # recency tail against (the window the CLI is pinned to).
-            delegated_window = await asyncio.to_thread(_delegated_context_window, options)
+            delegated_window = await run_sync(_delegated_context_window, options)
 
             # Never put Claude cloud credentials in SessionOptions.env, which
             # also feeds tools and MCPs. This private copy is for claude only.
             from app.core.environment import inject_claude_code_auth
 
-            cli_env = await asyncio.to_thread(
+            cli_env = await run_sync(
                 inject_claude_code_auth, dict(options.env or {}),
                 options.extra.get("provider_id"),
             )
@@ -1008,7 +1009,7 @@ class HarnessAdapter(ProviderAdapter):
             # The delegation catalog (CE6 + the app's own DB agents) — one
             # name+description index for the prompt, plus the matching
             # descriptors for the "Custom agents" usage row.
-            _, declared_agent_descriptors = await asyncio.to_thread(_agent_context, options)
+            _, declared_agent_descriptors = await run_sync(_agent_context, options)
             # Code-mode + the continual harness, mirroring fluid's own
             # config/loader.py wiring. ON by default for every native leg; the
             # skill store and its episodic journal live under the app's data
@@ -1125,7 +1126,7 @@ class HarnessAdapter(ProviderAdapter):
             # The "# Workspace facts" card: probed on the session's first
             # connect and persisted; every later connect reuses those bytes
             # (it lives in the cached prefix).
-            self._workspace_card = await asyncio.to_thread(
+            self._workspace_card = await run_sync(
                 self._build_workspace_card, options
             )
             self._prompt_inputs = {
@@ -1145,13 +1146,13 @@ class HarnessAdapter(ProviderAdapter):
                 "workspace_card": self._workspace_card,
                 "worker": self._worker_identity,
             }
-            compiled_prompt = await asyncio.to_thread(
+            compiled_prompt = await run_sync(
                 self._compile_prompt_sections,
                 system, append_system, options,
                 **{k: v for k, v in self._prompt_inputs.items()
                    if k not in ("system", "append_system")},
             )
-            request_extra = await asyncio.to_thread(_native_request_extra, kind, options)
+            request_extra = await run_sync(_native_request_extra, kind, options)
             from fluid.context.attribution import prompt_block
 
             self._engine = NativeLoop(
@@ -1785,7 +1786,7 @@ class HarnessAdapter(ProviderAdapter):
         from app.db import interactions
         import uuid
 
-        session_id = await asyncio.to_thread(self._resolve_app_session_id)
+        session_id = await run_sync(self._resolve_app_session_id)
         if not session_id:
             return
         questions = list(await pending())
@@ -1798,7 +1799,7 @@ class HarnessAdapter(ProviderAdapter):
             interaction_id = str(uuid.uuid5(
                 uuid.NAMESPACE_URL, f"question:{session_id}:{question.request_id}"
             ))
-            row = await asyncio.to_thread(interactions.get_interaction, interaction_id)
+            row = await run_sync(interactions.get_interaction, interaction_id)
             if row is None:
                 if self._can_use_tool and hasattr(question, "schema"):
                     for translated in self._translate(question):
@@ -1857,7 +1858,7 @@ class HarnessAdapter(ProviderAdapter):
             proactive = self._options.extra.get("assistant_proactive")
             if proactive is not None:
                 from app.core.owner_services import assert_proactive_allowed
-                await asyncio.to_thread(
+                await run_sync(
                     assert_proactive_allowed, proactive,
                     self._options.extra.get("app_session_id"),
                 )
@@ -1868,7 +1869,7 @@ class HarnessAdapter(ProviderAdapter):
             from app.core.slash_commands import expand_delegated_command, expand_native_command
 
             expand_command = expand_delegated_command if self._is_delegated else expand_native_command
-            prompt = await asyncio.to_thread(
+            prompt = await run_sync(
                 expand_command, self._options.cwd or ".", prompt,
                 setting_sources=_fluid_setting_sources(self._options),
             )
@@ -1916,9 +1917,9 @@ class HarnessAdapter(ProviderAdapter):
             task_before = self._memory_initial_task
             try:
                 if source == "user":
-                    note = await asyncio.to_thread(self._turn_context_note, prompt[:4000])
+                    note = await run_sync(self._turn_context_note, prompt[:4000])
                 else:
-                    note = await asyncio.to_thread(self._turn_context_note)
+                    note = await run_sync(self._turn_context_note)
             finally:
                 self._memory_held_for_turn = None
                 self._native_scratch_held_for_turn = None
@@ -2112,7 +2113,7 @@ class HarnessAdapter(ProviderAdapter):
             return False
         try:
             options = self._options
-            contract = await asyncio.to_thread(_native_task_contract, options)
+            contract = await run_sync(_native_task_contract, options)
             if contract is None:
                 return False
             signature = _task_roster_signature(contract)
@@ -2120,7 +2121,7 @@ class HarnessAdapter(ProviderAdapter):
                 return False
             from app.core.agent_provider_models import available_subagents
 
-            declared = await asyncio.to_thread(
+            declared = await run_sync(
                 available_subagents,
                 (options.extra or {}).get("profile_id"),
                 (options.extra or {}).get("provider_id"),
@@ -2130,7 +2131,7 @@ class HarnessAdapter(ProviderAdapter):
                 for target in declared
             ]
             _install_task_contract(self._registry, contract)
-            compiled = await asyncio.to_thread(
+            compiled = await run_sync(
                 self._compile_prompt_sections,
                 self._prompt_inputs["system"], self._prompt_inputs["append_system"],
                 options,
@@ -2338,7 +2339,7 @@ class HarnessAdapter(ProviderAdapter):
             self._scratch_put_back = None
         if _is_cli_command(text):
             return None
-        scratch = await asyncio.to_thread(self._scratch_turn_note)
+        scratch = await run_sync(self._scratch_turn_note)
         extra_scratch = scratch if scratch and scratch not in text else None
         if scratch:
             # The fresh CLI is about to read either the existing block or this
@@ -2353,7 +2354,7 @@ class HarnessAdapter(ProviderAdapter):
             return None
         section = getattr(self._memory_plan, "section", None) or self._memory_turn_section
         if section is None:
-            section = await asyncio.to_thread(self._memory_section)
+            section = await run_sync(self._memory_section)
         self._memory_full_pending = section is not None
         parts = [p for p in (extra_scratch, wrap(section) if section is not None else None) if p]
         return "\n\n".join(parts) or None
@@ -2432,7 +2433,7 @@ class HarnessAdapter(ProviderAdapter):
             from app.core.provider.fluid_transcript import _event_rows_of_class
 
             rows = [
-                row["event"] for row in await asyncio.to_thread(
+                row["event"] for row in await run_sync(
                     _event_rows_of_class, sid, ("TurnStarted", "ContextCompaction"),
                 )
             ]
@@ -2549,7 +2550,7 @@ class HarnessAdapter(ProviderAdapter):
         out is sent again with the next message."""
         head = self._event_head()
         self._memory_put_back_section = None
-        sections = await asyncio.to_thread(self._compact_note)
+        sections = await run_sync(self._compact_note)
         section = self._memory_put_back_section
         def credit_memory() -> None:
             self._memory_put_back = (section, head)
@@ -2725,7 +2726,7 @@ class HarnessAdapter(ProviderAdapter):
             raise RuntimeError("Adapter not connected")
         if self._options is not None and self._options.extra.get("assistant_proactive") is not None:
             from app.core.owner_services import assert_proactive_allowed
-            await asyncio.to_thread(assert_proactive_allowed,
+            await run_sync(assert_proactive_allowed,
                                     self._options.extra["assistant_proactive"],
                                     self._options.extra.get("app_session_id"))
         # Resume normally replays the exact saved request, without a fresh
@@ -2736,15 +2737,15 @@ class HarnessAdapter(ProviderAdapter):
         # the native loop appends it only after validating the resume head.
         from app.core.away_mode import OWNER_BACK_NOTE
 
-        note = await asyncio.to_thread(self._away_note)
+        note = await run_sync(self._away_note)
         if note and OWNER_BACK_NOTE in note:
             await self.send_query("Resume the unfinished request above, using the current Away mode.")
             return
         self._memory_held_for_turn = await self._memory_held()
         self._native_scratch_held_for_turn = await self._native_scratch_held()
         try:
-            memory_note = await asyncio.to_thread(self._memory_turn_note)
-            scratch_note = await asyncio.to_thread(
+            memory_note = await run_sync(self._memory_turn_note)
+            scratch_note = await run_sync(
                 self._scratch_turn_note if self._is_delegated else self._native_scratch_note
             )
         finally:
@@ -2864,7 +2865,7 @@ class HarnessAdapter(ProviderAdapter):
         if self._engine is None:
             raise RuntimeError("Adapter not connected")
 
-        async for event in self._engine.events(since_seq=self._event_cursor):
+        async for event in raw_engine_events(self._engine.events(since_seq=self._event_cursor)):
             # Advance the cursor even for untranslated events so the next turn
             # never replays this one.
             if getattr(event, "seq", -1) >= 0:
@@ -2916,7 +2917,7 @@ class HarnessAdapter(ProviderAdapter):
 
                     app_id = self._resolve_app_session_id()
                     if app_id:
-                        await asyncio.to_thread(
+                        await run_sync(
                             record_context_delivery, app_id,
                             self._pending_away_note, event.turn_id,
                         )
@@ -3092,7 +3093,7 @@ class HarnessAdapter(ProviderAdapter):
             app_session_id = self._resolve_app_session_id()
             if not app_session_id:
                 return None, None
-            skills, memory_project, target = await asyncio.to_thread(
+            skills, memory_project, target = await run_sync(
                 _delegated_learning_inputs, app_session_id, options,
             )
             synthesizer = engine_bus = None
@@ -3191,9 +3192,9 @@ class HarnessAdapter(ProviderAdapter):
             if inner is None:
                 denial = None
             elif inner_cwd:
-                denial = await asyncio.to_thread(inner, name, tool_input, cwd=cwd)
+                denial = await run_sync(inner, name, tool_input, cwd=cwd)
             else:
-                denial = await asyncio.to_thread(inner, name, tool_input)
+                denial = await run_sync(inner, name, tool_input)
             if inspect.isawaitable(denial):
                 denial = await denial
             if denial:
@@ -3275,7 +3276,7 @@ class HarnessAdapter(ProviderAdapter):
         if not handle:
             return "the session has history but no Claude Code conversation"
         root = fluid_transcript.cli_projects_root(options.env)
-        transcript = await asyncio.to_thread(
+        transcript = await run_sync(
             fluid_transcript.find_cli_transcript,
             handle, root, options.cwd or os.getcwd(),
         )
@@ -3283,7 +3284,7 @@ class HarnessAdapter(ProviderAdapter):
             return (
                 f"Claude Code would not find transcript {handle}.jsonl under {root}"
             )
-        cli_prompts, complete = await asyncio.to_thread(
+        cli_prompts, complete = await run_sync(
             fluid_transcript.cli_transcript_prompt_tail, transcript
         )
         if not fluid_transcript.cli_prompts_cover(
@@ -3302,7 +3303,7 @@ class HarnessAdapter(ProviderAdapter):
         if fluid_session_id not in _STEER_RESEEDED:
             from fluid.engine.delegated import bash_first_steer_in_transcript
 
-            steer = await asyncio.to_thread(
+            steer = await run_sync(
                 bash_first_steer_in_transcript, str(transcript)
             )
             if steer is not None:
@@ -3322,10 +3323,10 @@ class HarnessAdapter(ProviderAdapter):
         cwd = os.path.abspath(options.cwd) if options.cwd else os.getcwd()
         # The window the CLI is pinned to: a transcript over what it compacts
         # at is compacted before it is written (fluid_transcript._fit_window).
-        window = await asyncio.to_thread(_delegated_context_window, options)
+        window = await run_sync(_delegated_context_window, options)
         # This thread outlives a timed-out connect, so its writes carry the claim.
         claimed = getattr(self._store, "claimed_generation", None)
-        result = await asyncio.to_thread(
+        result = await run_sync(
             fluid_transcript.reseed_delegated_cli_session,
             fluid_session_id,
             cwd,
@@ -3432,13 +3433,13 @@ class HarnessAdapter(ProviderAdapter):
 
             from app.core.provider import fluid_transcript
 
-            events = await asyncio.to_thread(fluid_transcript.latest_turn_compactions, session_id)
+            events = await run_sync(fluid_transcript.latest_turn_compactions, session_id)
             if not events:
                 return
-            app_session_id = await asyncio.to_thread(self._resolve_app_session_id)
+            app_session_id = await run_sync(self._resolve_app_session_id)
             if not app_session_id:
                 return
-            recorded = await asyncio.to_thread(
+            recorded = await run_sync(
                 fluid_transcript.recorded_compaction_cards, app_session_id
             )
             have = {row["compaction_event_id"] for row in recorded if row["compaction_event_id"]}
@@ -3664,7 +3665,7 @@ class HarnessAdapter(ProviderAdapter):
                 name, tool_input or {},
             )
 
-        return await asyncio.to_thread(_lookup)
+        return await run_sync(_lookup)
 
     async def _answer_without_approver(self, ev: PermissionRequestEvent) -> None:
         """Decide a delegated prompt with no approver, in the watched order.
@@ -3781,7 +3782,7 @@ class HarnessAdapter(ProviderAdapter):
         from app.mcp.computer_use import access
 
         # The fallback leg of the id lookup is a blocking DB read.
-        access.approve_request(await asyncio.to_thread(self._resolve_app_session_id))
+        access.approve_request(await run_sync(self._resolve_app_session_id))
 
     def _permission_tool_name(self, name: str) -> str:
         """Resolve a bundled CLI alias only through this engine's registry.
@@ -3945,12 +3946,12 @@ class HarnessAdapter(ProviderAdapter):
         from app.db import database
         from app.core.usage_attribution import usage_attribution
 
-        session_id = await asyncio.to_thread(self._resolve_app_session_id)
+        session_id = await run_sync(self._resolve_app_session_id)
         if not session_id:
             raise RuntimeError("background usage has no app session")
         extra = (self._options.extra or {}) if self._options else {}
-        attribution = await asyncio.to_thread(usage_attribution, extra.get("provider_id"))
-        await asyncio.to_thread(
+        attribution = await run_sync(usage_attribution, extra.get("provider_id"))
+        await run_sync(
             database.settle_turn_usage,
             session_id=session_id,
             settlement_key=json.dumps(["fluid_auxiliary", event.session_id, event.seq]),
@@ -4039,7 +4040,7 @@ class HarnessAdapter(ProviderAdapter):
             model = _native_api_model(model, self._options) or model
         request_extra = None
         if not self._is_delegated and self._options is not None:
-            request_extra = await asyncio.to_thread(
+            request_extra = await run_sync(
                 _native_request_extra, self._provider_kind, self._options, requested
             )
         try:
@@ -4188,7 +4189,6 @@ class HarnessAdapter(ProviderAdapter):
             if not app_session_id:
                 return {}
             from app.db import database
-            from app.db.async_database import run_sync
 
             snapshot = await run_sync(
                 database.get_session_context_usage_snapshot, app_session_id
@@ -4213,11 +4213,10 @@ class HarnessAdapter(ProviderAdapter):
             return
         self._context_overhead_loaded = True
         try:
-            app_session_id = await asyncio.to_thread(self._resolve_app_session_id)
+            app_session_id = await run_sync(self._resolve_app_session_id)
             if not app_session_id:
                 return
             from app.db import database
-            from app.db.async_database import run_sync
 
             snapshot = await run_sync(
                 database.get_session_context_usage_snapshot, app_session_id
@@ -5614,7 +5613,7 @@ class HarnessAdapter(ProviderAdapter):
 
         inproc_servers = _extra_opt(options, "inproc_servers") or []
         external_mcp = (
-            await asyncio.to_thread(_native_external_mcp_servers, options)
+            await run_sync(_native_external_mcp_servers, options)
             if native else _external_mcp_servers(options.mcp_servers)
         )
 

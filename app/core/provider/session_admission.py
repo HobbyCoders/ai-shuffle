@@ -59,12 +59,14 @@ Every function runs on the event loop.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import logging
 from dataclasses import dataclass, field
 from typing import Any, AsyncGenerator, Awaitable, Callable, Dict, List, Optional, Set, TypeVar
 
 from app.core.session_pool import get_session_pool
+from app.db.async_database import TurnWork, bind_turn_work, unbind_turn_work
 
 logger = logging.getLogger(__name__)
 
@@ -147,11 +149,39 @@ class Lease:
     # The deadline applies only to engine reads, never app-session writes.
     engine_waiting: asyncio.Event = field(default_factory=asyncio.Event)
     engine_finished: asyncio.Event = field(default_factory=asyncio.Event)
+    work: TurnWork = field(default_factory=TurnWork)
+    closing: bool = False
 
     @property
     def stopped(self) -> bool:
         """A rewind took the chat: a turn still connecting must not start."""
         return self.taken_by is not None
+
+
+_current_lease: contextvars.ContextVar[Optional[Lease]] = contextvars.ContextVar("admission_lease", default=None)
+
+
+def _bind(lease: Lease) -> None:
+    _current_lease.set(lease)
+    bind_turn_work(lease.work)
+
+
+async def raw_engine_events(events: Any) -> Any:
+    """Mark only the raw engine advance, never adapter-side app work."""
+    lease = _current_lease.get()
+    while lease is None or not lease.abandoned:
+        if lease is not None:
+            lease.engine_waiting.set()
+        try:
+            event = await anext(events)
+        except StopAsyncIteration:
+            return
+        finally:
+            if lease is not None:
+                lease.engine_waiting.clear()
+        if lease is not None and lease.abandoned:
+            return
+        yield event
 
 
 _holders: Dict[str, Lease] = {}
@@ -252,6 +282,7 @@ async def acquire(session_id: str, *, stoppable: bool = True) -> Lease:
     if state is not None and not state.is_streaming:
         state.interrupt_requested = False
     _holders[session_id] = lease
+    _bind(lease)
     return lease
 
 
@@ -263,6 +294,7 @@ async def begin_rewind(session_id: str) -> Lease:
     lease = Lease(session_id, stoppable=False)
     await _wait_for_chat(lease, lambda: session_id in _rewinds)
     _rewinds[session_id] = lease
+    _bind(lease)
     _wake_waiters(session_id)
     return lease
 
@@ -297,7 +329,40 @@ def holds_chat(lease: Lease) -> bool:
 
 
 def close(lease: Lease) -> None:
-    """The route is done. Safe to repeat, and for a lease that was taken over."""
+    """Release only after every issued app thread has actually returned.
+
+    The API stays synchronous for callers, but a cancelled caller's outstanding
+    work retains its exact admission generation until the owned drain finishes.
+    """
+    if _current_lease.get() is lease:
+        _current_lease.set(None)
+    unbind_turn_work(lease.work)
+    if lease.exited.is_set() or lease.closing:
+        return
+    if lease.work.pending:
+        lease.closing = True
+        closing = _own(_close_after_writes(lease))
+
+        def completed(task: asyncio.Task) -> None:
+            # Cancellation before the coroutine's first instruction cannot run
+            # its finally. Resume the release owner; never abandon its tracker.
+            if not lease.exited.is_set():
+                lease.closing = False
+                close(lease)
+
+        closing.add_done_callback(completed)
+        return
+    _close_now(lease)
+
+
+async def _close_after_writes(lease: Lease) -> None:
+    try:
+        await finish_saving(lease.work.drain())
+    finally:
+        _close_now(lease)
+
+
+def _close_now(lease: Lease) -> None:
     if _holders.get(lease.session_id) is lease:
         del _holders[lease.session_id]
     if _rewinds.get(lease.session_id) is lease:
@@ -331,13 +396,23 @@ async def stream_turn(
         except SessionBusyError as busy:
             yield {"type": "error", "message": str(busy)}
             return
+    _bind(lease)
     events = turn(lease)
     handed_over = False
     try:
-        async for event in events:
+        while True:
+            # Async generators may be advanced by a fresh consumer task for
+            # every frame (e.g. wait_for(anext(...))); bind the exact generation
+            # at each advance, not only when the generator was first entered.
+            _bind(lease)
+            try:
+                event = await anext(events)
+            except StopAsyncIteration:
+                break
             yield event
     except GeneratorExit:
         # The reader left with the turn parked at a frame, so it is still alive.
+        _bind(lease)
         handed_over = True
         finishing = _own(_finish_turn(events, lease, release=owns_lease))
         if not owns_lease:
@@ -529,3 +604,5 @@ def clear() -> None:
     _holders.clear()
     _rewinds.clear()
     _waiting.clear()
+    _current_lease.set(None)
+    bind_turn_work(None)
