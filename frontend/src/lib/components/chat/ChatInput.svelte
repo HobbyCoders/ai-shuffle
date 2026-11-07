@@ -674,6 +674,8 @@
 	// while there is nothing to send and a call can start here, and Send once
 	// there is. Stop follows it while work runs (composer-wrap.ts).
 	let callAvailable = $state(false);
+	// Sends that still hold the Send circle's seat (holdSendCircle).
+	let sendCircleHolds = $state(0);
 	const circles = $derived(composerCircles({
 		callAvailable,
 		// A send just went from here: Send keeps its seat (holdSendCircle).
@@ -1023,7 +1025,6 @@
 	// window, and until the send has passed its checks, so the second click of
 	// a double click on Send cannot start a call.
 	const DOUBLE_ACTIVATION_MS = 500;
-	let sendCircleHolds = $state(0);
 	function holdSendCircle(): () => void {
 		sendCircleHolds += 1;
 		let windowOver = false;
