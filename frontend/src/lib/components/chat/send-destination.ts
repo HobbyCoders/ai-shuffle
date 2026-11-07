@@ -32,10 +32,13 @@ export interface SendDestination {
 	readonly navigation: number;
 	/** The leave count when the user sent (see noteLeftDraft). */
 	readonly leaves: number;
+	/** Send order, so called-off messages are kept in the order they were sent. */
+	readonly order: number;
 }
 
+export const SEND_CALLED_OFF_MESSAGE = 'Message not sent: the chat changed before it went out.';
 export const SEND_MOVED_MESSAGE =
-	'Message not sent: the chat changed before it went out. It is kept as a draft in the chat you wrote it in.';
+	`${SEND_CALLED_OFF_MESSAGE} It is kept as a draft in the chat you wrote it in.`;
 
 function chatOf(place: ComposerPlace): string | null {
 	return place.sessionId ?? place.editorOwner;
@@ -57,8 +60,10 @@ export function noteLeftDraft(chat: string | null, draft: string): void {
 	if (leftDrafts.size > LEFT_DRAFTS_KEPT) leftDrafts.delete(leftDrafts.keys().next().value!);
 }
 
+let sendOrder = 0;
+
 export function captureDestination(place: ComposerPlace): SendDestination {
-	return { chat: chatOf(place), navigation: getInitGeneration(), leaves };
+	return { chat: chatOf(place), navigation: getInitGeneration(), leaves, order: ++sendOrder };
 }
 
 /**
@@ -82,18 +87,49 @@ export function movedAwayFrom(destination: SendDestination, place: ComposerPlace
 	return !stillAtDestination(destination, place, { adoptedOwnChat: true });
 }
 
+/** What the chat's editor held when the user left it after this send, if seen. */
+function laterThan(destination: SendDestination): string | null {
+	const left = leftDrafts.get(destination.chat);
+	return left && left.at > destination.leaves ? left.draft : null;
+}
+
 /**
  * The draft to keep for the destination chat once its send is called off.
  * `cleared`: the composer had already emptied for the send, so what it held
- * when the user left is a later message to keep after the unsent one.
- * Otherwise that document already holds the unsent words plus any edits
- * made while the send waited, and wins over the text as it was at Send.
+ * when the user left is a later message to keep after the unsent one; left
+ * empty, the unsent words alone. Otherwise the composer still held the words
+ * when the user left, edits included, and that document wins over the text as
+ * it was at Send, even when the user emptied it.
  */
 export function draftToKeep(destination: SendDestination, unsent: string, cleared: boolean): string {
-	const left = leftDrafts.get(destination.chat);
-	const later = left && left.at > destination.leaves ? left.draft : null;
-	if (!later || !hasComposerDraft(later)) return unsent;
-	return cleared ? joinDrafts(unsent, later) : later;
+	const later = laterThan(destination);
+	if (!cleared) return later ?? unsent;
+	return later && hasComposerDraft(later) ? joinDrafts(unsent, later) : unsent;
+}
+
+/**
+ * Called-off sends for one chat since the user last left it. Several can be
+ * outstanding at once (Send, Send again once the composer cleared, then New
+ * chat while a reload restores), and each is kept, in send order, ahead of
+ * what the composer held.
+ */
+interface KeptForChat {
+	leave: number;
+	unsent: { order: number; draft: string }[];
+	/** The composer's document, from a send called off before it cleared. */
+	held: string | null;
+}
+const kept = new Map<string | null, KeptForChat>();
+
+function keptFor(chat: string | null): KeptForChat {
+	const leave = leftDrafts.get(chat)?.at ?? 0;
+	const current = kept.get(chat);
+	if (current?.leave === leave) return current;
+	const fresh: KeptForChat = { leave, unsent: [], held: null };
+	kept.delete(chat);
+	kept.set(chat, fresh);
+	if (kept.size > LEFT_DRAFTS_KEPT) kept.delete(kept.keys().next().value!);
+	return fresh;
 }
 
 /**
@@ -102,8 +138,17 @@ export function draftToKeep(destination: SendDestination, unsent: string, cleare
  * included, is left alone.
  */
 export function keepUnsentDraft(destination: SendDestination, unsent: string, cleared: boolean): void {
-	const draft = draftToKeep(destination, unsent, cleared);
+	const entry = keptFor(destination.chat);
+	if (cleared) {
+		entry.unsent.push({ order: destination.order, draft: unsent });
+		entry.unsent.sort((a, b) => a.order - b.order);
+	} else {
+		entry.held = draftToKeep(destination, unsent, false);
+	}
+	const tail = entry.held ?? laterThan(destination);
+	const parts = [...entry.unsent.map(u => u.draft), ...(tail && hasComposerDraft(tail) ? [tail] : [])];
+	const draft = parts.length ? parts.reduce(joinDrafts) : '';
 	activeSession.saveDraftForSession(destination.chat, draft);
 	writeDraft(destination.chat, draft, { preserveNewChat: true });
-	notify.banner(SEND_MOVED_MESSAGE, { severity: 'warning', persist: false, duration_ms: 6000 });
+	notify.banner(parts.length ? SEND_MOVED_MESSAGE : SEND_CALLED_OFF_MESSAGE, { severity: 'warning', persist: false, duration_ms: 6000 });
 }

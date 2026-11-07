@@ -106,6 +106,70 @@ describe('New chat right after Send (#1077)', () => {
 		expect(notices.mock.calls.map(([message]) => message).join(' ')).toMatch(/chat changed before it went out/);
 	});
 
+	// Review S4: two sends waiting on the restore, then New chat. Each recovery
+	// used to rebuild the draft from its own message alone, so one was lost.
+	it('keeps both messages when two sends wait on the restore and New chat lands', async () => {
+		let restored!: () => void;
+		const restore = new Promise<void>((resolve) => { restored = resolve; });
+		const sentTo: (string | null)[] = [];
+		sends.mockImplementation(async (_prompt: string, options?: { stillAtDestination?: () => boolean }) => {
+			await restore;
+			if (options?.stillAtDestination && !options.stillAtDestination()) return false;
+			sentTo.push(activeSession.current.sessionId);
+			return true;
+		});
+		const view = render(ChatInput);
+		const editor = view.container.querySelector<HTMLElement>('.tiptap')! as HTMLElement & { editor: Editor };
+		const form = view.container.querySelector('form')!;
+		await waitFor(() => expect(editor.textContent).toBe(TEXT));
+		await fireEvent.submit(form);
+		await waitFor(() => expect(gate.release).toBeTruthy());
+		gate.release!();
+		await waitFor(() => expect(sends).toHaveBeenCalledTimes(1));
+		await waitFor(() => expect(editor.textContent).toBe(''));
+
+		gate.release = null;
+		editor.editor.commands.insertContent('second message');
+		await waitFor(() => expect(editor.textContent).toBe('second message'));
+		await fireEvent.submit(form);
+		await waitFor(() => expect(gate.release).toBeTruthy());
+		gate.release!();
+		await waitFor(() => expect(sends).toHaveBeenCalledTimes(2));
+		await waitFor(() => expect(editor.textContent).toBe(''));
+
+		editor.editor.commands.insertContent('third draft');
+		await waitFor(() => expect(editor.textContent).toBe('third draft'));
+		activeSession.newChat();
+		await waitFor(() => expect(editor.textContent).toBe(''));
+		restored();
+		await new Promise((resolve) => setTimeout(resolve, 20));
+
+		expect(sentTo).toEqual([]);
+		const kept = readDraft('chat-a') ?? '';
+		const at = (text: string) => kept.indexOf(text);
+		expect(at(TEXT)).toBeGreaterThanOrEqual(0);
+		expect(at('second message')).toBeGreaterThan(at(TEXT));
+		expect(at('third draft')).toBeGreaterThan(at('second message'));
+	});
+
+	// Review S5: emptying the composer during the wait is a choice, not a gap.
+	it('keeps the composer empty when the text was deleted during the wait', async () => {
+		const view = render(ChatInput);
+		const editor = view.container.querySelector<HTMLElement>('.tiptap')! as HTMLElement & { editor: Editor };
+		await waitFor(() => expect(editor.textContent).toBe(TEXT));
+		await fireEvent.submit(view.container.querySelector('form')!);
+		await waitFor(() => expect(gate.release).toBeTruthy());
+
+		editor.editor.commands.clearContent(true);
+		await waitFor(() => expect(editor.textContent).toBe(''));
+		activeSession.newChat();
+		gate.release!();
+		await new Promise((resolve) => setTimeout(resolve, 20));
+
+		expect(sends).not.toHaveBeenCalled();
+		expect(readDraft('chat-a') ?? '').not.toContain(TEXT);
+	});
+
 	// Review S2: an edit made while the check waited is the newest draft.
 	it('keeps the edits made during the wait, not the text as it was at Send', async () => {
 		const view = render(ChatInput);

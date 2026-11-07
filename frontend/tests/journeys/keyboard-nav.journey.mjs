@@ -55,6 +55,32 @@ const outsideSpot = (page) => page.evaluate(() => {
 	return found.find(Boolean) ?? null;
 });
 
+/** Type `token`, then reload with the chat's history feed held, so the store
+ *  waits in its restore. Returns once the draft has painted and the feed is held. */
+async function reloadWithHistoryHeld(page, token, mark) {
+	await composer(page).click();
+	await composer(page).pressSequentially(token);
+	await page.waitForTimeout(500);
+	let release;
+	let held = 0;
+	const released = new Promise((resolve) => { release = resolve; });
+	// The page state names chats by a hash, and only this chat's feed is
+	// asked for after the reload, so hold any chat's.
+	const feed = (url) => /\/sessions\/[^/]+\/events$/.test(url.pathname);
+	await page.route(feed, async (route) => { held += 1; await released; await route.continue().catch(() => {}); });
+	await mark('reload with the history held');
+	await page.reload({ waitUntil: 'domcontentloaded' });
+	// A reload is an intentional document replacement, not a boot reversal.
+	await page.evaluate(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))));
+	await mark('page reloaded');
+	await composer(page).waitFor();
+	await page.waitForFunction((t) => document.querySelector('[data-message-editor]')?.textContent?.includes(t), token, { timeout: 15_000 });
+	// The draft paints from the tab's mirror before the history is asked for.
+	for (let waited = 0; held === 0 && waited < 15_000; waited += 100) await page.waitForTimeout(100);
+	expect(held > 0, 'the reloaded chat is waiting for its history');
+	return { release, feed };
+}
+
 async function clearComposer(page) {
 	await composer(page).click();
 	await composer(page).press('ControlOrMeta+A');
@@ -218,27 +244,7 @@ await runJourney({
 		async act({ page, mark, log }) {
 			const token = `kept-${uniq()}`;
 			const chatA = (await chatState(page)).session;
-			await composer(page).click();
-			await composer(page).pressSequentially(token);
-			await page.waitForTimeout(500);
-			// Hold the chat's history feed so the reload stays in its restore.
-			let release;
-			let held = 0;
-			const released = new Promise((resolve) => { release = resolve; });
-			// The page state names chats by a hash, and only this chat's feed is
-			// asked for after the reload, so hold any chat's.
-			const feed = (url) => /\/sessions\/[^/]+\/events$/.test(url.pathname);
-			await page.route(feed, async (route) => { held += 1; await released; await route.continue().catch(() => {}); });
-			await mark('reload with the history held');
-			await page.reload({ waitUntil: 'domcontentloaded' });
-			// A reload is an intentional document replacement, not a boot reversal.
-			await page.evaluate(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))));
-			await mark('page reloaded: Send');
-			await composer(page).waitFor();
-			await page.waitForFunction((t) => document.querySelector('[data-message-editor]')?.textContent?.includes(t), token, { timeout: 15_000 });
-			// The draft paints from the tab's mirror before the history is asked for.
-			for (let waited = 0; held === 0 && waited < 15_000; waited += 100) await page.waitForTimeout(100);
-			expect(held > 0, 'the reloaded chat is waiting for its history');
+			const { release, feed } = await reloadWithHistoryHeld(page, token, mark);
 			await sendButton(page).click();
 			// The cold-cache check answers; the send then waits for the restore.
 			await page.waitForTimeout(800);
@@ -260,6 +266,92 @@ await runJourney({
 			expect((await chatState(page)).session === chatA, 'the first chat is open again');
 			expect((await editorText(page)).includes(token), 'the message waits there as its draft');
 			expect((await countUserRows(page, token)) === 0, 'and it was not sent in that chat either');
+			await clearComposer(page);
+			await page.waitForTimeout(500);
+		}
+	}, {
+		// Two sends waiting on the restore, then New chat: both messages and the
+		// text typed after them stay, in order, as the chat's draft.
+		name: 'two-sends-during-a-reloaded-chats-restore-keep-both',
+		viewports: ['desktop'],
+		throttles: ['fast'],
+		async setup({ page, status }) {
+			await watchQueries(page);
+			await gotoApp(page, status);
+			await openFromSidebar(page, SEEDED.no_project);
+			await waitChatOpen(page);
+		},
+		async act({ page, mark, log }) {
+			const first = `first-${uniq()}`;
+			const second = `second-${uniq()}`;
+			const third = `third-${uniq()}`;
+			const { release, feed } = await reloadWithHistoryHeld(page, first, mark);
+			await mark('Send twice while the history is held, then type a draft');
+			await sendButton(page).click();
+			await page.waitForFunction((t) => !document.querySelector('[data-message-editor]')?.textContent?.includes(t), first, { timeout: 10_000 });
+			await composer(page).click();
+			await composer(page).pressSequentially(second);
+			await sendButton(page).click();
+			await page.waitForFunction((t) => !document.querySelector('[data-message-editor]')?.textContent?.includes(t), second, { timeout: 10_000 });
+			await composer(page).click();
+			await composer(page).pressSequentially(third);
+			await page.keyboard.press('Control+N');
+			await waitChat(page, { surface: 'new' }, { timeout: 10_000 });
+			release();
+			await page.unroute(feed);
+			await page.waitForTimeout(2000);
+			const sent = await queries(page);
+			log(`queries: ${JSON.stringify(sent)}`);
+			expect(!sent.some((q) => q.includes(first) || q.includes(second)), 'neither message was sent anywhere');
+
+			await mark('back to the chat they were written in');
+			await openFromSidebar(page, SEEDED.no_project);
+			await waitChatOpen(page);
+			const draft = await editorText(page);
+			log(`draft: ${JSON.stringify(draft)}`);
+			const at = (t) => draft.indexOf(t);
+			expect(at(first) >= 0 && at(second) > at(first) && at(third) > at(second), 'the draft holds both messages and the later text, in order');
+			await clearComposer(page);
+			await page.waitForTimeout(500);
+		}
+	}, {
+		// Emptying the composer while a send waits is the user's choice; the
+		// called-off send must not bring the words back.
+		name: 'a-draft-emptied-while-a-send-waits-stays-empty',
+		viewports: ['desktop'],
+		throttles: ['fast'],
+		async setup({ page, status }) {
+			await watchQueries(page);
+			await gotoApp(page, status);
+			await openFromSidebar(page, SEEDED.no_project);
+			await waitChatOpen(page);
+		},
+		async act({ page, mark, log }) {
+			const token = `dropped-${uniq()}`;
+			let release;
+			let held = 0;
+			const released = new Promise((resolve) => { release = resolve; });
+			await page.route('**/cache-state*', async (route) => { held += 1; await released; await route.continue().catch(() => {}); });
+			await composer(page).click();
+			await composer(page).pressSequentially(token);
+			await mark('Send, empty the composer while it waits, then New chat');
+			await sendButton(page).click();
+			await composer(page).press('Control+A');
+			await composer(page).press('Backspace');
+			await page.keyboard.press('Control+N');
+			await waitChat(page, { surface: 'new' }, { timeout: 10_000 });
+			expect(held > 0, 'the send was still waiting on its cold-cache check');
+			release();
+			await page.unroute('**/cache-state*');
+			await page.waitForTimeout(2000);
+			expect(!(await queries(page)).some((q) => q.includes(token)), 'the message was not sent anywhere');
+
+			await mark('back to the chat it was written in');
+			await openFromSidebar(page, SEEDED.no_project);
+			await waitChatOpen(page);
+			const draft = await editorText(page);
+			log(`draft: ${JSON.stringify(draft)}`);
+			expect(!draft.includes(token), 'the emptied draft stays empty');
 			await clearComposer(page);
 			await page.waitForTimeout(500);
 		}

@@ -2,11 +2,15 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { bumpInitGeneration } from '$lib/stores/session/session-init';
 import { readDraft, writeDraft } from '$lib/stores/session/draft-persistence';
 import { notify } from '$lib/stores/notifications';
+import { hasComposerDraft as hasText } from '$lib/stores/session/composer-suggestion';
 import {
 	captureDestination, draftToKeep, keepUnsentDraft, movedAwayFrom, noteLeftDraft, SEND_MOVED_MESSAGE, stillAtDestination
 } from './send-destination';
 
 const doc = (text: string) => JSON.stringify({ type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text }] }] });
+const EMPTY = JSON.stringify({ type: 'doc', content: [{ type: 'paragraph' }] });
+const texts = (draft: string | null) =>
+	JSON.parse(draft ?? '{"content":[]}').content.map((p: { content?: { text: string }[] }) => p.content?.[0]?.text ?? '');
 
 beforeEach(() => {
 	sessionStorage.clear();
@@ -59,6 +63,38 @@ describe('send destination (#1077)', () => {
 		// Left empty: the unsent words are not dropped.
 		noteLeftDraft('a', JSON.stringify({ type: 'doc', content: [{ type: 'paragraph' }] }));
 		expect(draftToKeep(at, doc('sent'), true)).toBe(doc('sent'));
+	});
+
+	// Review S4: two called-off sends for one chat share the text typed after them.
+	it('keeps every called-off message for a chat, in send order, whichever recovers first', () => {
+		for (const order of [[0, 1], [1, 0]]) {
+			sessionStorage.clear();
+			const sent = [captureDestination({ sessionId: 'a', editorOwner: 'a' }), captureDestination({ sessionId: 'a', editorOwner: 'a' })];
+			noteLeftDraft('a', doc('third draft'));
+			for (const i of order) keepUnsentDraft(sent[i], doc(i === 0 ? 'first' : 'second'), true);
+			expect(texts(readDraft('a'))).toEqual(['first', 'second', 'third draft']);
+		}
+	});
+
+	it('a later called-off send does not bring back messages already recovered', () => {
+		const first = captureDestination({ sessionId: 'a', editorOwner: 'a' });
+		noteLeftDraft('a', EMPTY);
+		keepUnsentDraft(first, doc('first'), true);
+		// Back in chat A, the recovered text was sent; a new message is called off.
+		noteLeftDraft('b', EMPTY);
+		const next = captureDestination({ sessionId: 'a', editorOwner: 'a' });
+		noteLeftDraft('a', EMPTY);
+		keepUnsentDraft(next, doc('next'), true);
+		expect(texts(readDraft('a'))).toEqual(['next']);
+	});
+
+	// Review S5: before the composer cleared, an emptied editor is what the user wants.
+	it('an editor emptied during the wait wins over the text as it was at Send', () => {
+		const at = captureDestination({ sessionId: 'a', editorOwner: 'a' });
+		noteLeftDraft('a', EMPTY);
+		expect(hasText(draftToKeep(at, doc('sent'), false))).toBe(false);
+		keepUnsentDraft(at, doc('sent'), false);
+		expect(readDraft('a')).toBeNull();
 	});
 
 	it('keeps the draft in its chat, leaves New chat\'s alone, and says so', () => {
