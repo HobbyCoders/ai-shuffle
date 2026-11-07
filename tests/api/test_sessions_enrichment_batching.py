@@ -86,7 +86,7 @@ class TestEnrichmentOutputIsUnchanged:
     """Golden shape: every field the sessions board reads, byte for byte."""
 
     def test_golden_annotated_session(self, install_settings, mock_db):
-        from app.db import database
+        from app.db import database, projects_v2
 
         database.create_project(
             project_id="proj-0",
@@ -127,6 +127,9 @@ class TestEnrichmentOutputIsUnchanged:
             "device_online": True,
             "controllable": True,
             "project_name": "Zero",
+            # Creation now supplies identity metadata before any chat resolves.
+            "origin": "local:proj-0",
+            "project_v2_id": projects_v2.project_v2_id_for_origin("local:proj-0"),
         }
 
     def test_remote_session_keeps_its_device_annotation(self, install_settings, mock_db):
