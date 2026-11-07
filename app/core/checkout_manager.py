@@ -262,6 +262,18 @@ def _require_branch_binding(path: str, branch: str) -> None:
         )
 
 
+def _require_complete_checkout(path: str, *, row: Optional[Dict[str, Any]] = None) -> None:
+    """Inspect fresh adoptions and known failed adds, not ordinary user edits.
+
+    Existing active rows remain trusted across upgrades and successful historical
+    recreations unless a later failed add flagged this physical checkout. A failed
+    add from before failure markers existed with a stale active row is unknowable.
+    """
+    _require_checkout_root(path)
+    active = bool(row and (row.get("status") or "active") == "active")
+    git_service.require_complete_worktree(path, force=not active)
+
+
 def _branch_plan(
     base_dir: str,
     branch: str,
@@ -614,6 +626,7 @@ def _adopt_legacy_worktree(
         path = cand["worktree_path"]
         if path and os.path.isdir(path) and _dir_is_worktree(path):
             _require_branch_binding(path, branch)
+            _require_complete_checkout(path)
             checkouts_db.upsert_checkout(
                 project_id, runner_id, path, branch=branch, status="active"
             )
@@ -651,6 +664,7 @@ def _ensure_branch_checkout(
         resolved = _resolve_checkout_path(path) if path else path
         if resolved and os.path.isdir(resolved):
             if _dir_is_worktree(resolved):
+                _require_complete_checkout(resolved, row=row)
                 # The row says this folder IS this branch's checkout, so a
                 # detached HEAD here is the session's own agent having left
                 # it (e.g. after merging and deleting the branch). Reattach
@@ -690,6 +704,7 @@ def _ensure_branch_checkout(
     if dest.exists():
         if _dir_is_worktree(dest_str):
             _require_branch_binding(dest_str, branch)
+            _require_complete_checkout(dest_str)
             checkouts_db.upsert_checkout(
                 project_id, runner_id, dest_str, branch=branch, status="active"
             )
@@ -728,6 +743,11 @@ def _ensure_branch_checkout(
             # Never fabricate a branch that cannot be recovered here.
             return None
         new_branch, plan_base = plan
+        # Durable write-ahead fallback for a recorded path, before Git can
+        # register it or leave partial files. Only the success upsert below
+        # restores active after post-add validation passes.
+        if row:
+            checkouts_db.set_checkout_status(row["id"], "incomplete")
         success, err = git_service.add_worktree(
             main_dir=base_path,
             path=dest_str,
@@ -737,6 +757,8 @@ def _ensure_branch_checkout(
             fetch_base=not create_new_branch,
         )
     if not success:
+        # Keep write-ahead evidence, including the recorded row's incomplete
+        # status. New failures have no row and also require validation on reuse.
         logger.warning(
             "checkout_manager: git worktree add failed for branch %r at %s: %s",
             branch,
@@ -750,6 +772,7 @@ def _ensure_branch_checkout(
     # Verify the materialization too: a successful add must not bind a checkout
     # that changed HEAD before it reached the session/checkout registry.
     _require_branch_binding(dest_str, branch)
+    _require_complete_checkout(dest_str)
 
     # Everything a run needs is gitignored, so the new worktree has none of it.
     # Link it from the checkout it branched off before anyone tries to build or
@@ -1431,6 +1454,11 @@ def register_unregistered_worktrees(
         if not os.path.isdir(path):
             continue
         try:
+            _require_complete_checkout(path)
+        except Exception as e:  # noqa: BLE001 - one failed inspection must not fail the sweep
+            logger.warning("checkout_manager: refusing worktree adoption at %s: %s", path, e)
+            continue
+        try:
             checkouts_db.upsert_checkout(
                 project_id, runner_id, path, branch=wt_branch, status="active"
             )
@@ -1649,9 +1677,10 @@ def ensure_checkout(
             create_new_branch=create_new_branch,
             provision_runtime=provision_runtime,
         )
-    except WorktreeAddError:
+    except WorktreeAddError as e:
         if raise_add_errors:
             raise
+        logger.warning("checkout_manager: refusing checkout for branch %r: %s", branch, e)
         return None
     except WorktreeError as e:
         logger.warning("checkout_manager: refusing checkout for branch %r: %s", branch, e)

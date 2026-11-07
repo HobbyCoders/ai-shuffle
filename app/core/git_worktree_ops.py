@@ -4,11 +4,13 @@ Git Worktree Operations Mixin
 Provides worktree management: list, add, remove, and prune worktrees.
 """
 
+import hashlib
 import logging
 import os
 import re
 import tempfile
 import threading
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -66,6 +68,7 @@ LFS_PASSTHROUGH_CONFIG = (
 )
 
 APP_WORKTREES_EXCLUDE = ".fluid/worktrees/"
+WORKTREE_ADD_FAILED_MARKER = "ai-shuffle-worktree-add-failed"
 
 
 def exclude_app_worktrees(main_dir: str, path: Optional[str] = None) -> None:
@@ -266,8 +269,95 @@ class GitWorktreeMixin:
         """Add a worktree; return (success, error or successful-fallback warning)."""
         with repo_worktree_lock(main_dir):
             exclude_app_worktrees(main_dir, path)
-            return self._add_worktree_unlocked(main_dir, path, branch, new_branch=new_branch,
-                                               base_branch=base_branch, fetch_base=fetch_base)
+            had_git_marker = os.path.lexists(os.path.join(path, ".git"))
+            if not had_git_marker:
+                # Write ahead in common metadata: the per-worktree admin dir
+                # does not exist yet, and a killed add cannot record its result.
+                try:
+                    marker = self._worktree_materializing_marker(main_dir, path)
+                    marker.parent.mkdir(exist_ok=True)
+                    marker.write_text("incomplete: materializing\n", encoding="utf-8")
+                except Exception as exc:
+                    return False, f"Cannot record checkout materialization: {worktree_error_detail(str(exc))}"
+            result = self._add_worktree_unlocked(main_dir, path, branch, new_branch=new_branch,
+                                                 base_branch=base_branch, fetch_base=fetch_base)
+            if result[0]:
+                try:
+                    # Git's zero exit is not proof: hooks can remove files.
+                    # All add callers, including legacy recreate and handoff,
+                    # clear write-ahead state only after this full check.
+                    self.require_complete_worktree(path, force=True)
+                except Exception as exc:
+                    return False, worktree_error_detail(str(exc))
+            elif not had_git_marker:
+                # Do not flag an existing user's checkout when Git simply
+                # refuses to add over it. Keep write-ahead state on failure.
+                self._record_worktree_add_result(main_dir, path, failed=True)
+            return result
+
+    def _worktree_materializing_marker(self, main_dir: str, path: str) -> Path:
+        result = self._run_git(main_dir, ["rev-parse", "--git-common-dir"], timeout=10)
+        if result.returncode or not (result.stdout or "").strip():
+            raise WorktreeAddError(f"Cannot locate materialization metadata for {path!r}")
+        key = hashlib.sha256(os.path.normcase(os.path.realpath(path)).encode()).hexdigest()
+        return Path(main_dir) / result.stdout.strip() / "ai-shuffle-materializing" / key
+
+    def require_complete_worktree(self, path: str, *, force: bool = False) -> None:
+        """Validate fresh/unfinished materializations, never ordinary user edits.
+
+        Path-scoped write-ahead state survives SIGKILL, even before Git creates
+        its private worktree dir. Clear negative evidence only after validation.
+        """
+        pending = self._worktree_materializing_marker(path, path)
+        result = self._run_git(path, ["rev-parse", "--git-path", WORKTREE_ADD_FAILED_MARKER], timeout=10)
+        if result.returncode or not (result.stdout or "").strip():
+            raise WorktreeAddError(f"Cannot locate checkout failure metadata for {path!r}")
+        failed = Path(path) / result.stdout.strip()
+        if not force and not pending.exists() and not failed.exists():
+            return
+        if not self._checkout_is_complete(path):
+            raise WorktreeAddError(
+                f"Checkout {path!r} is incomplete (missing index or committed files); "
+                "refusing to use or repair it because local changes may be present. "
+                "Inspect and repair the checkout, then retry."
+            )
+        try:
+            failed.unlink(missing_ok=True)
+            pending.unlink(missing_ok=True)
+        except OSError as exc:
+            raise WorktreeAddError(f"Cannot clear checkout failure for {path!r}: {exc}") from exc
+
+    def _record_worktree_add_result(self, main_dir: str, path: str, *, failed: bool) -> None:
+        """Keep failure evidence in the registered worktree's private Git dir.
+
+        Resolve through common metadata so even a registered remnant with no
+        working directory/.git file can be flagged. Never change working files.
+        """
+        try:
+            result = self._run_git(main_dir, ["rev-parse", "--git-common-dir"], timeout=10)
+            if result.returncode or not (result.stdout or "").strip():
+                return
+            metadata = Path(main_dir) / result.stdout.strip() / "worktrees"
+            if not metadata.is_dir():
+                return
+            target = os.path.normcase(os.path.abspath(os.path.join(path, ".git")))
+            for admin in metadata.iterdir():
+                if not admin.is_dir():
+                    continue
+                try:
+                    registered = (admin / "gitdir").read_text(encoding="utf-8").strip()
+                except OSError:
+                    continue
+                if os.path.normcase(os.path.abspath(registered)) != target:
+                    continue
+                marker = admin / WORKTREE_ADD_FAILED_MARKER
+                if failed:
+                    marker.write_text("incomplete: failed add\n", encoding="utf-8")
+                else:
+                    marker.unlink(missing_ok=True)
+                return
+        except Exception as exc:  # noqa: BLE001 - preserve Git's original outcome
+            logger.warning("Could not record worktree add outcome at %s: %s", path, exc)
 
     def remove_worktree(self, main_dir: str, path: str, force: bool = False) -> bool:
         """Remove a worktree; serialised per repository (see repo_worktree_lock)."""
