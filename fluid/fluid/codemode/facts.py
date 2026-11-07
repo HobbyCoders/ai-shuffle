@@ -68,11 +68,6 @@ _BRANCH_REF = re.compile(
     r"|\b[a-z0-9]+(?:-[a-z0-9]+)+\s+(?:(?:Linux|Windows)\s+)?(?:worktree|checkout)\b"
     r"|\.fluid/worktrees/[\w.-]+")
 MAX_TOMBSTONES = 256
-# Local loss accounting remembers this many recently deleted copies (a short
-# hash of origin:id and text each, ~32 KB at most) so a replica replaying a
-# copy this store already deleted is not counted as a second loss (#956).
-# Several peers' full archives fit; sync and retention are unchanged.
-MAX_LOSS_KEYS = 2048
 BLOOM_BYTES = 16 * 1024
 MAX_DOCUMENT_BYTES = 2 * 1024 * 1024
 # The # Memory snapshot (see SkillStore.memory_snapshot_plan) is one style of
@@ -624,19 +619,32 @@ class FactStore:
         already deleted (same origin:id and text) brings it back only for
         the next trim to delete it again; that is not a new loss, so it
         neither adds to the total nor refreshes the time (#956). The copy
-        still returns and is trimmed exactly as before."""
+        still returns and is trimmed exactly as before.
+
+        Counted copies go into a fixed-size bit filter built like the
+        deletion barrier (16 KiB, never compacted, persisted with the
+        store, never exported). It has no false negatives, so a replay is
+        recognised however many deletions came after it; an evicting list
+        would forget old copies and count their replays again. The cost is
+        a rare false positive, where a genuinely new copy is taken for one
+        already counted (about 1 in 200 after 10,000 distinct deletions).
+        A new text under the same ID, or the same text under a new ID, is
+        a different copy and is counted."""
         losses = doc.get("losses") if isinstance(doc.get("losses"), dict) else {}
-        seen = [k for k in losses.get("deleted_keys", []) if isinstance(k, str)]
-        known = set(seen)
+        counted = losses.get("counted") if isinstance(losses.get("counted"), str) else ""
+        try:
+            barrier_contains(counted, "validate")
+        except ValueError:
+            counted = ""  # unreadable: start a fresh record rather than fail the trim
         new = 0
         for e in gone:
-            key = hashlib.sha256(f"{global_id(e)}\0{fingerprint(e['text'])}".encode()).hexdigest()[:12]
-            if key in known:
+            key = f"loss:{global_id(e)}\0{fingerprint(e['text'])}"
+            if barrier_contains(counted, key):
                 continue
-            known.add(key)
-            seen.append(key)
+            counted = barrier_add(counted, key)
             new += 1
-        losses["deleted_keys"] = seen[-MAX_LOSS_KEYS:]
+        if counted:
+            losses["counted"] = counted
         if new:
             losses[kind] = int(losses.get(kind, 0) or 0) + new
             losses[f"last_{kind}_at"] = now
