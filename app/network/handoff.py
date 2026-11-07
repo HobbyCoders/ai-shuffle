@@ -1338,6 +1338,14 @@ def _publish_history(cur, sid, token):
     chunks = cur.fetchall()
     if not chunks:
         return
+    # Publication can prune/update existing event rows. Serialize on their
+    # counter BEFORE reconciliation, matching deletion (not event → counter).
+    # Do not take S here: staging cleanup intentionally locks headers before S.
+    cur.execute("INSERT INTO session_event_counters (session_id,next_seq) "
+                "SELECT id,0 FROM sessions WHERE id=%s "
+                "ON CONFLICT(session_id) DO UPDATE SET next_seq=session_event_counters.next_seq", (sid,))
+    from app.db.session_events import _require_session
+    _require_session(cur, sid)
     timing = _import_timing.get()
     grouped = {table: [] for table in APP_TABLES}
     for chunk in chunks:

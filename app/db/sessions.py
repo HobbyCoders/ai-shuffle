@@ -1852,9 +1852,18 @@ def delete_session(session_id: str) -> bool:
     _ph = ph()
     with get_db() as conn:
         cursor = get_cursor(conn)
-        # Share the recorder/settlement order before removing ANY runtime rows.
-        from app.db.session_locks import lock_session_runtime
-        lock_session_runtime(cursor, session_id)
+        # Unlink touches surviving children too. Match multi-session writers'
+        # sorted runtime prefixes, not parent-first then arbitrary child rows.
+        from app.db.session_locks import lock_multi_session_mutation, lock_session_runtimes
+        # This optimistic read takes no row lock. The gate below is the FIRST
+        # blocking lock; re-read under it before taking any runtime prefix.
+        cursor.execute("SELECT id FROM sessions WHERE id=%s OR parent_session_id=%s ORDER BY id",
+                       (session_id, session_id))
+        family = {session_id, *(row["id"] for row in cursor.fetchall())}
+        lock_multi_session_mutation(cursor)
+        cursor.execute("SELECT id FROM sessions WHERE parent_session_id=%s ORDER BY id", (session_id,))
+        family.update(row["id"] for row in cursor.fetchall())
+        lock_session_runtimes(cursor, family)
         cursor.execute(
             f"UPDATE sessions SET parent_session_id = NULL "
             f"WHERE parent_session_id = {_ph}",

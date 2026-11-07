@@ -15,6 +15,25 @@ from tests.db import schema_lifecycle_helpers as lifecycle
 pytestmark = requires_real_pg
 
 
+@pytest.fixture(autouse=True)
+def multi_session_gate_is_first(monkeypatch):
+    """Catch a gate acquired after ANY mutation/admission lock, not just R/C/S."""
+    from app.db import session_locks
+
+    original = session_locks.lock_multi_session_mutation
+    calls = []
+
+    def checked(cursor):
+        cursor.execute("SELECT mode FROM pg_locks WHERE pid=pg_backend_pid() AND granted "
+                       "AND mode IN ('RowShareLock','RowExclusiveLock')")
+        assert cursor.fetchall() == [], "multi-session gate must precede every row lock"
+        calls.append(True)
+        original(cursor)
+
+    monkeypatch.setattr(session_locks, "lock_multi_session_mutation", checked)
+    return calls
+
+
 @pytest.fixture(scope="module", autouse=True)
 def private_pool(tmp_path_factory):
     from app.core.config import settings
@@ -32,6 +51,8 @@ def private_pool(tmp_path_factory):
         try:
             with base.get_db() as conn:
                 create_postgres_schema(conn.cursor())
+            from app.db import mobile_tool_identity
+            mobile_tool_identity.init_schema()
             yield kwargs
         finally:
             base.close_pool()
@@ -310,7 +331,7 @@ def test_post_delete_stop_notice_delivery_drains_oldest_batch(private_pool, monk
 
 
 
-def _delete_behind_writer(private_pool, monkeypatch, sid, write, old_boundary):
+def _delete_behind_writer(private_pool, monkeypatch, sid, write, old_boundary, *, lock_session=None):
     locked, resume = threading.Event(), threading.Event()
     writer_pid = []
     original_cursor = base._PgDictConnection.cursor
@@ -320,8 +341,9 @@ def _delete_behind_writer(private_pool, monkeypatch, sid, write, old_boundary):
             result = super().execute(sql, params)
             name = threading.current_thread().name
             if name.startswith(("writer", "asyncio")) and not locked.is_set():
-                run_lock = "FROM runs WHERE session_id" in sql and "FOR UPDATE" in sql and self.rowcount > 0
-                if run_lock or old_boundary(sql):
+                text = sql.decode() if isinstance(sql, bytes) else sql
+                run_lock = "FROM runs WHERE session_id" in text and "FOR UPDATE" in text and self.rowcount > 0
+                if (run_lock or old_boundary(text)) and (lock_session is None or params == (lock_session,)):
                     writer_pid.append(self.connection.get_backend_pid())
                     locked.set()
                     assert resume.wait(10), "test never released writer"
@@ -445,3 +467,148 @@ def test_copy_rejects_destination_deleted_while_waiting_for_counter(private_pool
             copying.result(timeout=5)
     _assert_deleted(dest)
     assert len(session_events.get_events(source)) == 1
+
+
+
+def test_delete_vs_child_first_shared_active_batch(private_pool, monkeypatch):
+    from app.network import session_active
+
+    token = uuid4().hex
+    parent, child = "z-active-parent-" + token, "a-active-child-" + token
+    with base.get_db() as conn:
+        conn.cursor().execute("INSERT INTO sessions (id) VALUES (%s)", (parent,))
+        conn.cursor().execute("INSERT INTO sessions (id,parent_session_id) VALUES (%s,%s)", (child, parent))
+    for sid in (parent, child):
+        runs.claim_run(sid, "active-batch", 60)
+    write = lambda: session_active.write_shared_many([child, parent], False)
+    boundary = lambda sql: "FROM sessions WHERE id=" in sql and "FOR UPDATE" in sql
+    _delete_behind_writer(private_pool, monkeypatch, parent, write, boundary)
+    assert sessions.get_session(child)["parent_session_id"] is None
+    assert sessions.get_session(child)["is_active"] is False
+
+
+def test_delete_vs_private_history_publication(private_pool, monkeypatch):
+    from app.network import handoff
+
+    sid, token = "delete-history-" + uuid4().hex, uuid4().hex
+    with base.get_db() as conn:
+        conn.cursor().execute("INSERT INTO sessions (id) VALUES (%s)", (sid,))
+        # An empty portable snapshot deliberately prunes the destination's stale
+        # event. It is the same durable header install_history stages before
+        # publication; all reconciliation/counter/session writes remain real.
+        conn.cursor().execute("INSERT INTO handoff_history_chunks "
+                              "(token,session_id,sdk_session_id,table_name,batch_no,rows) "
+                              "VALUES (%s,%s,NULL,'',0,'{}')", (token, sid))
+    runs.claim_run(sid, "history-publisher", 60)
+    session_events.append_events(sid, [{"type": "system.note", "payload": {}}])
+
+    def publish():
+        with base.get_db() as conn:
+            return handoff._publish_history(conn.cursor(), sid, token)
+
+    boundary = lambda sql: (sql.startswith("DELETE FROM session_events WHERE")
+                            or sql.startswith("INSERT INTO session_event_counters"))
+    _delete_behind_writer(private_pool, monkeypatch, sid, publish, boundary)
+
+
+
+def test_child_inserted_after_delete_discovery_cannot_invert_batch(private_pool, monkeypatch):
+    from app.network import session_active
+
+    token = uuid4().hex
+    parent, child = "z-dynamic-parent-" + token, "a-dynamic-child-" + token
+    with base.get_db() as conn:
+        conn.cursor().execute("INSERT INTO sessions (id) VALUES (%s)", (parent,))
+    runs.claim_run(parent, "dynamic-parent", 60)
+    discovered, discovery_resume = threading.Event(), threading.Event()
+    child_locked, child_resume = threading.Event(), threading.Event()
+    writer_pid, delete_prefixes = [], []
+    original_cursor = base._PgDictConnection.cursor
+
+    class InterleavedCursor(RealDictCursor):
+        def execute(self, sql, params=None):
+            result = super().execute(sql, params)
+            name = threading.current_thread().name
+            if name.startswith("delete") and not discovered.is_set() and sql.startswith(
+                    "SELECT id FROM sessions WHERE id=%s OR parent_session_id=%s"):
+                discovered.set()  # The result set contains the parent only.
+                assert discovery_resume.wait(10)
+            if name.startswith("delete") and "FROM runs WHERE session_id" in sql and "FOR UPDATE" in sql:
+                delete_prefixes.append(params[0])
+            if name.startswith("writer") and not child_locked.is_set() and params == (child,) and (
+                    "FROM runs WHERE session_id" in sql and "FOR UPDATE" in sql):
+                writer_pid.append(self.connection.get_backend_pid())
+                child_locked.set()
+                assert child_resume.wait(10)
+            return result
+
+    def instrumented(self, *args, **kwargs):
+        kwargs["cursor_factory"] = InterleavedCursor
+        return original_cursor(self, *args, **kwargs)
+
+    monkeypatch.setattr(base._PgDictConnection, "cursor", instrumented)
+    monkeypatch.setattr(sessions, "_cleanup_working_set_ref", lambda sid: None)
+    monkeypatch.setattr(sessions, "_cleanup_pending_wakeups", lambda sid: None)
+    with psycopg2.connect(**private_pool) as observer, \
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="delete") as deleter, \
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="writer") as writer:
+        observer.autocommit = True
+        deleting = deleter.submit(sessions.delete_session, parent)
+        try:
+            assert discovered.wait(5)
+            with base.get_db() as conn:
+                conn.cursor().execute("INSERT INTO sessions (id,parent_session_id) VALUES (%s,%s)",
+                                      (child, parent))
+            runs.claim_run(child, "dynamic-child", 60)
+            writing = writer.submit(session_active.write_shared_many, [child, parent], False)
+            assert child_locked.wait(5)
+            discovery_resume.set()
+            _wait_for_lock_wait(observer, writer_pid[0], deleting)
+        finally:
+            discovery_resume.set()
+            child_resume.set()
+        writing.result(timeout=5)
+        assert deleting.result(timeout=5)
+    _assert_deleted(parent)
+    assert delete_prefixes == sorted([child, parent])  # includes the post-snapshot child
+    assert sessions.get_session(child)["parent_session_id"] is None
+    assert runs.get_active_run(child) is not None
+
+
+def test_single_session_append_turn_and_park_repair_never_take_multi_gate(
+        private_pool, multi_session_gate_is_first):
+    sid = "single-no-gate-" + uuid4().hex
+    with base.get_db() as conn:
+        conn.cursor().execute("INSERT INTO sessions (id) VALUES (%s)", (sid,))
+    run = runs.claim_run(sid, "single-session", 60)
+    session_events.append_events(sid, [{"type": "system.note", "payload": {}}])
+    turn = turns.enqueue_turn(sid, "user", prompt="one session only")
+    turns.start_turn(turn["id"], run_id=run["id"])
+    parked = turns.park_turn(turn["id"], usage={"input_tokens": 1})
+    assert turns.settle_parked_turns(
+        sid, turn_ids=[turn["id"]], only_if_idle=True, observed_park=parked,
+        can_settle=lambda: True,
+    ) == 1
+    assert multi_session_gate_is_first == []
+
+
+@pytest.mark.parametrize("deleted", ["sender", "receiver"])
+def test_delete_vs_reachable_top_level_message(private_pool, monkeypatch, deleted):
+    from app.db import database
+    from app.core import session_orchestration as orch
+
+    token = uuid4().hex
+    sender, receiver, profile = "a-peer-" + token, "z-peer-" + token, "agent-" + token
+    database.create_profile(profile, "Peer lock test", None, {"model": "sonnet"})
+    for sid in (sender, receiver):
+        sessions.create_session(sid, profile, title=sid, is_active=True, model="sonnet",
+                                permission_mode="default")
+        turn = turns.enqueue_turn(sid, "user", prompt="peer work", profile_id=profile)
+        turns.settle_turn(turn["id"], "completed")
+        runs.claim_run(sid, "peer-writer", 60)
+    monkeypatch.setattr(orch, "_principal", lambda sid: None)
+    write = lambda: orch._queue(sender, {"session_id": receiver, "message": "Review progress",
+                                        "request_id": "delete-peer-race"}, "message")
+    boundary = lambda sql: "FROM sessions WHERE id=" in sql and "FOR UPDATE" in sql
+    sid = sender if deleted == "sender" else receiver
+    _delete_behind_writer(private_pool, monkeypatch, sid, write, boundary, lock_session=sid)
