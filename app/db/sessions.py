@@ -2529,10 +2529,9 @@ def clear_session_conversation(session_id: str) -> Optional[str]:
     with get_db() as conn:
         cursor = get_cursor(conn)
 
-        cursor.execute(
-            f"SELECT sdk_session_id FROM sessions WHERE id = {_ph}", (session_id,)
-        )
-        srow = cursor.fetchone()
+        # Match delete before any event/counter/mirror mutation.
+        from app.db.session_locks import lock_session_runtime
+        srow = lock_session_runtime(cursor, session_id)
         if srow is None:
             return None
         prev_sdk_sid = srow["sdk_session_id"] if isinstance(srow, dict) else srow[0]

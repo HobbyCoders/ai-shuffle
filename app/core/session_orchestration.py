@@ -2089,12 +2089,11 @@ async def defer_started_report(starter_id, frame):
             cursor = conn.cursor()
             # Keep the durable receipt on the child, including if the starter
             # disappeared between settlement and delivery. Never recreate it.
+            from app.db.session_locks import lock_session_runtime
             receipt_session = frame.get("task_id")
-            cursor.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (receipt_session,))
-            if not cursor.fetchone():
+            if not lock_session_runtime(cursor, receipt_session):
                 receipt_session = starter_id
-                cursor.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (receipt_session,))
-                if not cursor.fetchone():
+                if not lock_session_runtime(cursor, receipt_session):
                     return False
             cursor.execute("SELECT id FROM session_events WHERE id=%s", (event_id,))
             if cursor.fetchone():

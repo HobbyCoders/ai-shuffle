@@ -307,3 +307,73 @@ def test_post_delete_stop_notice_delivery_drains_oldest_batch(private_pool, monk
     events = session_events.get_events(sid)
     assert {event["id"] for event in events} == set(notice_ids)
     assert all(event["payload"]["subtype"] == "stop_incomplete" for event in events)
+
+
+
+def _delete_behind_writer(private_pool, monkeypatch, sid, write, old_boundary):
+    locked, resume = threading.Event(), threading.Event()
+    writer_pid = []
+    original_cursor = base._PgDictConnection.cursor
+
+    class InterleavedCursor(RealDictCursor):
+        def execute(self, sql, params=None):
+            result = super().execute(sql, params)
+            name = threading.current_thread().name
+            if name.startswith(("writer", "asyncio")) and not locked.is_set():
+                run_lock = "FROM runs WHERE session_id" in sql and "FOR UPDATE" in sql and self.rowcount > 0
+                if run_lock or old_boundary(sql):
+                    writer_pid.append(self.connection.get_backend_pid())
+                    locked.set()
+                    assert resume.wait(10), "test never released writer"
+            return result
+
+    def instrumented(self, *args, **kwargs):
+        kwargs["cursor_factory"] = InterleavedCursor
+        return original_cursor(self, *args, **kwargs)
+
+    monkeypatch.setattr(base._PgDictConnection, "cursor", instrumented)
+    monkeypatch.setattr(sessions, "_cleanup_working_set_ref", lambda sid: None)
+    monkeypatch.setattr(sessions, "_cleanup_pending_wakeups", lambda sid: None)
+    with psycopg2.connect(**private_pool) as observer, \
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="writer") as writer, \
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="delete") as deleter:
+        observer.autocommit = True
+        writing = writer.submit(write)
+        try:
+            assert locked.wait(5), "writer never reached its mutation lock"
+            deleting = deleter.submit(sessions.delete_session, sid)
+            _wait_for_lock_wait(observer, writer_pid[0], deleting)
+        finally:
+            resume.set()
+        writing.result(timeout=5)
+        assert deleting.result(timeout=5)
+    _assert_deleted(sid)
+
+
+@pytest.mark.parametrize("path", ["deferred-report", "clear", "question-answer"])
+def test_delete_vs_report_clear_and_answer(private_pool, monkeypatch, path):
+    import asyncio
+    from unittest.mock import AsyncMock
+    from app.db import interactions
+    from app.core import session_orchestration
+    from app.services import notification_service
+
+    sid = "delete-mutation-" + uuid4().hex
+    with base.get_db() as conn:
+        conn.cursor().execute("INSERT INTO sessions (id) VALUES (%s)", (sid,))
+    runs.claim_run(sid, "mutation", 60)
+    session_events.append_events(sid, [{"type": "system.note", "payload": {}}])
+    if path == "deferred-report":
+        monkeypatch.setattr(notification_service, "emit_notification", AsyncMock())
+        write = lambda: asyncio.run(session_orchestration.defer_started_report(
+            "missing-starter", {"task_id": sid, "agent_message_turn_id": "finished", "status": "completed"}))
+        boundary = lambda sql: "FROM sessions WHERE id=" in sql and "FOR UPDATE" in sql
+    elif path == "clear":
+        write = lambda: sessions.clear_session_conversation(sid)
+        boundary = lambda sql: sql.startswith("DELETE FROM session_events WHERE")
+    else:
+        prompt = interactions.create_interaction(sid, "question", {}, None)
+        write = lambda: interactions.answer_question_and_enqueue(prompt, {"answer": "yes"}, None, "yes", {})
+        boundary = lambda sql: (sql.startswith("UPDATE pending_interactions SET state='answered'")
+                                or ("FROM sessions WHERE id=" in sql and "FOR UPDATE" in sql))
+    _delete_behind_writer(private_pool, monkeypatch, sid, write, boundary)
