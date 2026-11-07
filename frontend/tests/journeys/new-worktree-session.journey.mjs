@@ -18,6 +18,10 @@
 //   new-branch      "New branch..." in the branch menu (creates the git branch),
 //                   then send → createWorktree (POST without prompt, then query)
 //   existing-branch an existing branch from the branch menu → createWorktree
+//   auto-attachment / new-branch-attachment  the same two flows with a file
+//                   attached to the first message: it sends, the agent
+//                   answers, and rewinding it brings the file back as a chip
+//                   (#1084 review S1, S2)
 //   main-checkout   control: the plain new-chat send in the main checkout
 //                   → WebSocket query path
 //   narrow-chips-*  Auto with long names in a 480/600px desktop chat column:
@@ -584,6 +588,44 @@ function chipWideOrdinary(branch) {
  * would: the picks start their own loads (branches, git status of the staged
  * branch) and those belong to setup, not to the send the step judges.
  */
+/**
+ * Attach a file to the first message, send it, and wait for the reply. Then
+ * rewind it: the words and the file come back, the file as a chip, never as
+ * its upload path (#1084).
+ */
+async function sendWithAttachmentThenRewind(ctx, label) {
+	const { page, variant, mark } = ctx;
+	const words = `${label}-${uniq()}`;
+	const file = `note-${uniq()}.txt`;
+	const box = page.getByRole('textbox', { name: 'Message' });
+	// Words first: Auto names the branch from the message, so it starts with
+	// this run's own words, not the upload path every attachment shares.
+	await mark('type the first message');
+	await box.click();
+	await box.pressSequentially(`${words} ${fakeAiTag(variant)} `.trimStart());
+	await mark('attach a file');
+	await page.locator('input[type="file"]').first().setInputFiles({ name: file, mimeType: 'text/plain', buffer: Buffer.from('branch attachment\n') });
+	await box.locator('[data-file-chip]').first().waitFor({ timeout: 20_000 });
+	if ((await box.locator('[data-file-chip]').count()) !== 1) throw new Error('the chip left the composer before Send');
+	await mark('send');
+	const t0 = Date.now();
+	await page.getByRole('button', { name: 'Send', exact: true }).click();
+	await awaitReply(ctx, label, t0);
+	if (await page.getByText(/Attachments need|outside (the|this) (chat|session)|not allowed/i).first().isVisible()) {
+		throw new Error('the server refused the attachment');
+	}
+	await mark('rewind the first message');
+	await page.getByTitle('Rewind to before this message', { exact: true }).last().focus();
+	await page.keyboard.press('Enter');
+	await page.getByRole('dialog').getByRole('button', { name: 'Rewind', exact: true }).click();
+	await box.getByText(words).waitFor({ timeout: 30_000 });
+	await box.locator('[data-file-chip]').first().waitFor({ timeout: 10_000 });
+	const chips = await box.locator('[data-file-chip]').count();
+	const text = await box.innerText();
+	if (chips !== 1) throw new Error(`expected the file back as 1 chip, found ${chips}: ${JSON.stringify(text)}`);
+	if (/@\/\S*uploads\//.test(text)) throw new Error(`the upload path came back as text: ${JSON.stringify(text)}`);
+}
+
 const settled = (setup) => async (ctx) => {
 	await setup(ctx);
 	await ctx.page.waitForTimeout(1000);
@@ -653,6 +695,36 @@ await runJourney({
 				});
 			}),
 			act: (ctx) => sendFirstMessage(ctx, 'new-branch')
+		},
+		{
+			name: 'auto-attachment',
+			viewports: ['desktop', 'phone'],
+			setup: settled(async (ctx) => {
+				const hero = await openNewChat(ctx);
+				await pickProject(ctx.page, hero);
+				await worktreeOn(ctx.page, hero);
+				await expectBranch(ctx.page, hero, /^Worktree branch: (a new branch from|Auto from)/);
+			}),
+			act: (ctx) => sendWithAttachmentThenRewind(ctx, 'auto-attachment')
+		},
+		{
+			name: 'new-branch-attachment',
+			viewports: ['desktop', 'phone'],
+			setup: settled(async (ctx) => {
+				const { page } = ctx;
+				const hero = await openNewChat(ctx);
+				await pickProject(page, hero);
+				await worktreeOn(page, hero);
+				await withChatSetup(page, async () => {
+					const menu = await openBranchMenu(page, hero);
+					await menu.getByRole('button', { name: /New branch/ }).click();
+					const branch = `journey/${uniq()}`;
+					await page.getByPlaceholder('Enter a branch name').fill(branch);
+					await page.getByRole('button', { name: 'Continue', exact: true }).click();
+					await expectBranch(page, hero, `Worktree branch: ${branch}`, { timeout: 20_000 });
+				});
+			}),
+			act: (ctx) => sendWithAttachmentThenRewind(ctx, 'new-branch-attachment')
 		},
 		{
 			name: 'existing-branch',
