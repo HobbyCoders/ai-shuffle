@@ -262,6 +262,22 @@ def _require_branch_binding(path: str, branch: str) -> None:
         )
 
 
+def _require_complete_checkout(path: str) -> None:
+    """Do not mistake a failed checkout for a usable branch working tree.
+
+    Missing files/index entries can also be intentional user deletions. Without
+    proof of ownership of that partial state, repair/reset or remove-and-readd
+    would risk user work. Keep the directory and index untouched and report it.
+    The shared check never runs LFS clean/smudge filters.
+    """
+    if not git_service._checkout_is_complete(path):
+        raise WorktreeAddError(
+            f"Checkout {path!r} is incomplete (missing index or committed files); "
+            "refusing to use or repair it because local changes may be present. "
+            "Inspect and repair the checkout, then retry."
+        )
+
+
 def _branch_plan(
     base_dir: str,
     branch: str,
@@ -614,6 +630,7 @@ def _adopt_legacy_worktree(
         path = cand["worktree_path"]
         if path and os.path.isdir(path) and _dir_is_worktree(path):
             _require_branch_binding(path, branch)
+            _require_complete_checkout(path)
             checkouts_db.upsert_checkout(
                 project_id, runner_id, path, branch=branch, status="active"
             )
@@ -651,6 +668,7 @@ def _ensure_branch_checkout(
         resolved = _resolve_checkout_path(path) if path else path
         if resolved and os.path.isdir(resolved):
             if _dir_is_worktree(resolved):
+                _require_complete_checkout(resolved)
                 # The row says this folder IS this branch's checkout, so a
                 # detached HEAD here is the session's own agent having left
                 # it (e.g. after merging and deleting the branch). Reattach
@@ -690,6 +708,7 @@ def _ensure_branch_checkout(
     if dest.exists():
         if _dir_is_worktree(dest_str):
             _require_branch_binding(dest_str, branch)
+            _require_complete_checkout(dest_str)
             checkouts_db.upsert_checkout(
                 project_id, runner_id, dest_str, branch=branch, status="active"
             )
@@ -1431,6 +1450,11 @@ def register_unregistered_worktrees(
         if not os.path.isdir(path):
             continue
         try:
+            _require_complete_checkout(path)
+        except WorktreeAddError as e:
+            logger.warning("checkout_manager: refusing worktree adoption: %s", e)
+            continue
+        try:
             checkouts_db.upsert_checkout(
                 project_id, runner_id, path, branch=wt_branch, status="active"
             )
@@ -1649,9 +1673,10 @@ def ensure_checkout(
             create_new_branch=create_new_branch,
             provision_runtime=provision_runtime,
         )
-    except WorktreeAddError:
+    except WorktreeAddError as e:
         if raise_add_errors:
             raise
+        logger.warning("checkout_manager: refusing checkout for branch %r: %s", branch, e)
         return None
     except WorktreeError as e:
         logger.warning("checkout_manager: refusing checkout for branch %r: %s", branch, e)
