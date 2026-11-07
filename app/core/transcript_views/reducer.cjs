@@ -408,7 +408,9 @@ function initialState() {
     speculativelySettledCardIds: [],
     speculativelySettledTaskIds: [],
     attemptStartSeq: 0,
-    compaction: null
+    compaction: null,
+    lastCompletedTurn: null,
+    lastRewindSeq: 0
   };
 }
 function replaceById(messages, id, patch) {
@@ -1010,7 +1012,8 @@ function reduceInternal(state, event, observe) {
           pendingPumpAck: null,
           pumpAckBuffer: "",
           usage: obj(event.usage) ?? state.usage,
-          outputTokensTotal: (state.outputTokensTotal ?? 0) + turnOutputTokens(event.usage)
+          outputTokensTotal: (state.outputTokensTotal ?? 0) + turnOutputTokens(event.usage),
+          lastCompletedTurn: { id: str(event.turn_id) || "", seq }
         })
       );
       const retrySettled = settleRetryCards(drained.messages, drained.hasRetryCards);
@@ -1904,7 +1907,8 @@ function reduceInternal(state, event, observe) {
         mayHaveLiveRetry: state.mayHaveLiveRetry && hasRetryCards,
         activeTaskSummaries,
         openTextId,
-        openThinkingId
+        openThinkingId,
+        lastRewindSeq: seq
       };
     }
     // ── Approvals asked in words (#483) ─────────────────────────────
@@ -2325,7 +2329,7 @@ function materializeProjection(body, records, epoch, runtime) {
 }
 
 // scripts/transcript-reducer-node.ts
-var REDUCER_FINGERPRINT = "ba357e7b2ff3560809b4531f8aa01f4067eb00e407815946f24d9966745087d6";
+var REDUCER_FINGERPRINT = "c9cd4d5fe237117624fc0ff329efed27c4472fba01e9210a23dfca7944fc1768";
 var RPC_VERSION = 1;
 var MAX_PACKET_BYTES = 24 * 1024 * 1024;
 function dispatch(method, params) {
