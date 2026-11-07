@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 import threading
 import time
 
@@ -23,6 +24,7 @@ import app.db.base as base
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("slow_holder_setup", [False, True], ids=["ready", "delayed"])
 @pytest.mark.parametrize("engine", ["native", "delegated"])
 @pytest.mark.parametrize("phase", ["node", "terminal", "cli-id"])
 async def test_turn_writes_outlast_ordinary_pool_deadline(
@@ -30,6 +32,7 @@ async def test_turn_writes_outlast_ordinary_pool_deadline(
     monkeypatch: pytest.MonkeyPatch,
     engine: str,
     phase: str,
+    slow_holder_setup: bool,
 ) -> None:
     from app.core.provider.fluid_pg_store import (
         PgFluidStore, _append_node_sync, _set_cli_session_id_sync,
@@ -44,7 +47,7 @@ async def test_turn_writes_outlast_ordinary_pool_deadline(
     pool, physical = retaining_pool
     pool._reserved = 2
     monkeypatch.setattr(base, "get_connection", base._get_pg_connection)
-    monkeypatch.setattr(base, "_POOL_ACQUIRE_MAX_WAIT_SECONDS", 0.05)
+    ordinary_wait = 0.05
     # Room for all 45 queued writes to drain on a loaded worker; the native
     # cases alone take up to ~2 s on Windows under -n 2.
     monkeypatch.setattr(base, "_TURN_POOL_ACQUIRE_MAX_WAIT_SECONDS", 10.0)
@@ -54,13 +57,6 @@ async def test_turn_writes_outlast_ordinary_pool_deadline(
 
     monkeypatch.setattr(_PhysicalConn, "commit", commit, raising=False)
     monkeypatch.setattr(_FakeCursor, "rowcount", 1, raising=False)
-    ready = threading.Barrier(pool.maxconn - pool._reserved + 1)
-    release = threading.Event()
-
-    def holder() -> None:
-        with base.get_db():
-            ready.wait(timeout=3)
-            assert release.wait(4)
 
     async def finish(index: int) -> None:
         sid = f"turn-{index}"
@@ -89,12 +85,25 @@ async def test_turn_writes_outlast_ordinary_pool_deadline(
         finally:
             await loop.aclose()
 
-    with ThreadPoolExecutor(max_workers=pool.maxconn) as executor:
-        holders = [executor.submit(holder) for _ in range(pool.maxconn - pool._reserved)]
-        tasks: list[asyncio.Task[None]] = []
+    with ExitStack() as holders:
+        # Fill the ordinary slots synchronously, before imposing the deliberately
+        # tiny deadline. A slow checkout holds the FIFO admission ticket through
+        # its health check; concurrent holders could otherwise time out behind it
+        # with free slots, never reach the barrier, and mask the real assertion.
+        with monkeypatch.context() as setup:
+            if slow_holder_setup:
+                is_live = base._connection_is_live
+
+                def delayed_check(pool, conn):
+                    time.sleep(ordinary_wait * 2)
+                    return is_live(pool, conn)
+
+                setup.setattr(base, "_connection_is_live", delayed_check)
+            for _ in range(pool.maxconn - pool._reserved):
+                holders.enter_context(base.get_db())
+        monkeypatch.setattr(base, "_POOL_ACQUIRE_MAX_WAIT_SECONDS", ordinary_wait)
+        tasks = [asyncio.create_task(finish(index)) for index in range(45)]
         try:
-            ready.wait(timeout=3)
-            tasks = [asyncio.create_task(finish(index)) for index in range(45)]
             # Ordinary callers still time out, while turn writes stay queued.
             with pytest.raises(psycopg2.pool.PoolError, match="exhausted"):
                 await asyncio.to_thread(base._get_pg_connection)
@@ -102,10 +111,8 @@ async def test_turn_writes_outlast_ordinary_pool_deadline(
             assert not any(task.done() for task in tasks)
             assert len(physical) <= pool.maxconn - pool._reserved
         finally:
-            release.set()
+            holders.close()
             await asyncio.gather(*tasks)
-        for future in holders:
-            future.result(timeout=3)
     statements = [sql for conn in physical for sql in conn.executed]
     assert sum("INSERT INTO fluid_session_nodes" in sql for sql in statements) == 45
     assert sum("INSERT INTO fluid_session_events" in sql for sql in statements) == 45
