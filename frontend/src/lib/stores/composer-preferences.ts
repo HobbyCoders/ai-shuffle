@@ -216,11 +216,18 @@ function linkWorktreeProject(project: ProjectPick, from: ProjectPick = {...proje
  const key = projectWorktreeKey(project);
  if (localKey === key) return;
  // A branch move deferred onto the identity now retired in turn ends at its
- // replacement; one a newer choice under that identity already cancelled stays cancelled.
+ // replacement. It lands only where nothing is saved yet (an explicit Auto
+ // counts), and a newer choice under the retired identity cancels it.
  for (const [heldKey, link] of pendingWorktreeLinks) {
   if (projectWorktreeKey(link.project) !== localKey) continue;
   const live = link.revision === (checkoutRevisions.get(localKey) ?? 0);
-  pendingWorktreeLinks.set(heldKey, {...link, project, revision:live ? checkoutRevisions.get(key) ?? 0 : -1});
+  if (key === heldKey) {
+   // Back home: nothing to move, but a cancel still drops the held branch.
+   pendingWorktreeLinks.delete(heldKey);
+   if (!live) composerPreferences.rememberCheckout(link.from, null);
+   continue;
+  }
+  pendingWorktreeLinks.set(heldKey, {...link, project, revision:live && !projectWorktrees[key] ? checkoutRevisions.get(key) ?? 0 : -1});
  }
  const local = projectWorktrees[localKey];
  if (!local || (local.intent === 'local' && !local.checkout && !pendingWorktreeLinks.has(localKey))) return;

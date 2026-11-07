@@ -403,6 +403,32 @@ it('moves a branch picked under a retired identity to its replacement, after an 
  expect(p.worktreeForProject(old)).toEqual({intent:'local',checkout:null});
  expect(mocks.save).toHaveBeenCalledWith('composer.projectWorktree.shared%3Apv2-local',null);
 });
+it('drops a held branch the owner cleared when the replacement swaps back to the identity holding it', async () => {
+ const {composerPreferences:p}=await import('./composer-preferences');
+ const old={projectId:'a',projectV2Id:'pv2-local'}, next={projectId:'a',projectV2Id:'pv2-shared'};
+ p.rememberWorktreeIntent(old,'worktree');
+ p.rememberCheckout(old,{...old,kind:'branch',branch:'topic/old',baseBranch:'main',createNew:true});
+ const claim=p.claimBranchChoice(old,'topic/old',true);
+ p.linkWorktreeProject(next,old);
+ p.rememberCheckout(next,null); // The owner picks Auto under the replacement.
+ p.linkWorktreeProject(old,next);
+ claim.release();
+ expect(p.worktreeForProject(old).checkout).toBeNull();
+ expect(p.worktreeForProject(next).checkout).toBeNull();
+});
+it('never lands a held branch on a replacement that already has a saved Auto choice', async () => {
+ const {composerPreferences:p}=await import('./composer-preferences');
+ const old={projectId:'a',projectV2Id:'pv2-local'}, next={projectId:'a',projectV2Id:'pv2-shared'}, last={projectId:'a',projectV2Id:'pv2-last'};
+ p.rememberWorktreeIntent(last,'worktree'); // Explicit Auto under the final identity.
+ p.rememberWorktreeIntent(old,'worktree');
+ p.rememberCheckout(old,{...old,kind:'branch',branch:'topic/old',baseBranch:'main',createNew:true});
+ const claim=p.claimBranchChoice(old,'topic/old',true);
+ p.linkWorktreeProject(next,old);
+ p.linkWorktreeProject(last,next);
+ claim.release();
+ expect(p.worktreeForProject(last)).toEqual({intent:'worktree',checkout:null});
+ expect(p.worktreeForProject(old).checkout).toBeNull();
+});
 it('keeps a saved choice for the replacement identity, and never links across local projects', async () => {
  const {composerPreferences:p}=await import('./composer-preferences');
  const old={projectId:'a',projectV2Id:'pv2-local'}, next={projectId:'a',projectV2Id:'pv2-shared'};
