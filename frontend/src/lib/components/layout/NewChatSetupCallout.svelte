@@ -87,7 +87,7 @@
 				<p><b>{need.projectName} isn't on {need.workerName} yet.</b> We'll set it up there first, then send your message.</p>
 				<p class="ncs-sub">
 					{need.kind === 'folder'
-						? `Creates an empty ${need.projectName} folder there; files aren't copied.`
+						? `Uses an existing ${need.projectName} folder there, or creates an empty one; files aren't copied.`
 						: `${need.workerName} clones it with its own GitHub sign-in.`}
 				</p>
 			{/if}

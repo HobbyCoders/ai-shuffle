@@ -425,6 +425,13 @@ async def _spec_for(pv2: Dict[str, Any], body: SetupRequest, installs: List[Dict
                     me: str) -> Dict[str, Any]:
     """What the target needs: identity, kind, remote and folder."""
     snapshot = await run_sync(_local_snapshot)
+    if (pv2.get("origin") or "").startswith("local:"):
+        # The snapshot may just have linked a remote-less placeholder to its
+        # remote (#802): set up what it PROVABLY became, per this worker's
+        # first-link record, never by matching names or legacy ids.
+        from app.core.project_resolver import resolve_catalog_project
+
+        pv2 = await run_sync(resolve_catalog_project, pv2["id"]) or pv2
     views: Dict[str, Dict[str, Any]] = {}
     info = _project_info(pv2, snapshot, views)
     origin = pv2.get("origin") or ""
@@ -456,7 +463,7 @@ def _shared_db_enqueue(target_id: str, spec: Dict[str, Any], op_id: str) -> Dict
 async def setup_project(request: Request, body: SetupRequest,
                         token: str = Depends(require_admin)) -> Dict[str, Any]:
     """Set a project up on a worker: clone it there, adopt a same-repo folder, or
-    create its (empty) folder. Idempotent while one is in flight."""
+    use (else create) its folder. Idempotent while one is in flight."""
     from app.db import project_setup as setup_db
     from app.network import control, engine
 
@@ -470,6 +477,7 @@ async def setup_project(request: Request, body: SetupRequest,
     target = _find_install(installs, body.install_id)
     target_id = target["id"]
     spec = await _spec_for(pv2, body, installs, me)
+    pv2 = {**pv2, "id": spec["project_v2_id"]}  # the identity actually set up
     if spec["kind"] == "git" and not spec["clone_url"]:
         raise HTTPException(status_code=409, detail=(
             "Can't find this project's Git remote. Bring a worker that has the project online and try again."))

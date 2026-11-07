@@ -203,9 +203,16 @@ def create_project(
     name: str,
     description: Optional[str],
     path: str,
-    settings_dict: Optional[Dict[str, Any]] = None
+    settings_dict: Optional[Dict[str, Any]] = None,
+    link_group_id: Optional[str] = None,
 ) -> ProjectRow:
-    """Create a new project"""
+    """Create a new project.
+
+    ``link_group_id``: the logical identity the project already has (its Git
+    remote's ``git:`` id, or the origin a setup registers it under). Seeding
+    that identity from the start leaves no ``local:<id>`` placeholder behind,
+    which a later link would only supersede (a second, stale project).
+    """
     from app.db import project_catalog_aliases
 
     now = datetime.now(timezone.utc).isoformat()
@@ -213,14 +220,17 @@ def create_project(
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            """INSERT INTO projects (id, name, description, path, settings, instance_id, created_at, updated_at)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
-            (project_id, name, description, path, json.dumps(settings_dict or {}), instance_id, now, now)
+            """INSERT INTO projects (id, name, description, path, settings, instance_id, link_group_id,
+                                     created_at, updated_at)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+            (project_id, name, description, path, json.dumps(settings_dict or {}), instance_id,
+             link_group_id or None, now, now)
         )
         # If this ID existed in an earlier generation (including pre-upgrade
         # deletion), its retained checkouts can never prove this new project's link.
         project_catalog_aliases.revoke(cursor, project_id)
-        project = {"id": project_id, "name": name, "path": path, "instance_id": instance_id}
+        project = {"id": project_id, "name": name, "path": path, "instance_id": instance_id,
+                   "link_group_id": link_group_id or None}
         _seed_catalog(cursor, project)
         _restore_to_catalog(cursor, project)
     return get_project(project_id)

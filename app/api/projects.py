@@ -284,12 +284,37 @@ async def create_project_record(request: ProjectCreate) -> dict:
     return created
 
 
-def create_project_record_sync(request: ProjectCreate) -> dict:
+def remote_link_group(project_path: Path) -> Optional[str]:
+    """The ``git:`` identity of a folder that is a Git repository with a remote.
+
+    Read when the project is added, so the project is that logical project from
+    its first moment: the overview and every "set it up on" request made right
+    after creating it then send the clone, not an empty folder. None
+    for a folder without a remote (it stays ``local:<id>``) or on any error.
+    """
+    from app.core.git_service import git_service
+    from app.core.project_links import auto_link_group_id
+    from app.core.scrub import strip_url_userinfo
+
+    try:
+        if not project_path.is_dir() or not git_service.is_git_repo(str(project_path)):
+            return None
+        return auto_link_group_id(strip_url_userinfo(git_service.get_remote_url(str(project_path)) or ""))
+    except Exception:  # noqa: BLE001 - adding the folder must not fail on this read
+        logger.debug("remote read failed for %s", project_path, exc_info=True)
+        return None
+
+
+def create_project_record_sync(request: ProjectCreate, *, link_group_id: Optional[str] = None,
+                               link_locked: bool = False) -> dict:
     """The blocking body of :func:`create_project_record` (run it off the loop).
 
     Also used by cross-worker project setup (``app.core.project_setup``) so a
     project set up from another worker passes exactly the same id, path,
-    nested-repository and duplicate checks as one added here.
+    nested-repository and duplicate checks as one added here. Setup passes the
+    logical identity it registers (``link_group_id``, pinned with
+    ``link_locked`` when it is not the remote's own ``git:`` id); a folder
+    added here takes its Git remote's identity when it has one.
     """
     # Serialize local creates so concurrent REST/tool calls cannot both pass
     # the name/path checks. Filesystem and DB work stay off the event loop.
@@ -335,13 +360,37 @@ def create_project_record_sync(request: ProjectCreate) -> dict:
 
         project_path.mkdir(parents=True, exist_ok=True)
         settings_dict = request.settings.model_dump(exclude_none=True) if request.settings else None
-        return database.create_project(
+        if link_group_id and link_locked:
+            from app.core.project_links import LINK_LOCKED_KEY
+
+            settings_dict = {**(settings_dict or {}), LINK_LOCKED_KEY: True}
+        elif not link_group_id and not is_link_locked({"settings": settings_dict}):
+            link_group_id = remote_link_group(project_path)
+        created = database.create_project(
             project_id=payload.id,
             name=payload.name,
             description=payload.description,
             path=db_path,
-            settings_dict=settings_dict
+            settings_dict=settings_dict,
+            link_group_id=link_group_id,
         )
+    record_remote_repository(created, project_path)
+    return created
+
+
+def record_remote_repository(created: Optional[dict], project_path: Path) -> None:
+    """For a project created under its remote's ``git:`` identity, write the
+    repository record (and the remote stored on the replicated identity) now,
+    not on the Git panel's first poll: peers asked to set the project up read
+    the clone URL from them."""
+    if not created or not (created.get("link_group_id") or "").startswith("git:"):
+        return
+    from app.api.git_helpers import ensure_git_repository_record
+
+    try:
+        ensure_git_repository_record(created["id"], str(project_path))
+    except Exception:  # noqa: BLE001 - the next poll records it
+        logger.debug("repository record for %s failed", created["id"], exc_info=True)
 
 
 @router.put("/{project_id}", response_model=Project)

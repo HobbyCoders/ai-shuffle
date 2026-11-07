@@ -795,3 +795,210 @@ def test_progress_notices_are_capped_at_one_a_second(monkeypatch):
     clock[0] += 1.5
     project_setup._report_progress(job, 100)
     assert len(notified) == 2
+
+
+# ---------------------------------------------------------------------------
+# A folder added here, then set up on other workers (the owner's
+# "Folder on Office PC" + "Set it up on: Home Server" report)
+# ---------------------------------------------------------------------------
+
+def _local_twin(project_id: str):
+    return projects_v2.get_project_v2_by_origin(f"local:{project_id}")
+
+
+def _enqueued(op_id: str) -> dict:
+    return git_ops_db.get_op(op_id)["params"]
+
+
+def test_a_git_folder_added_here_is_its_remotes_project_from_the_start(client, ws, test_db):
+    from app.api.projects import create_project_record_sync
+    from app.core.models import ProjectCreate
+
+    remote = _bare_remote(ws)
+    git(ws, "clone", "-q", remote, "sideproject")
+    created = create_project_record_sync(ProjectCreate(id="sideproject", name="sideproject", path="sideproject"))
+
+    origin = auto_link_group_id(remote)
+    assert created["link_group_id"] == origin
+    assert _local_twin("sideproject") is None  # never seeded, so never a second project
+    assert database.get_git_repository_by_project("sideproject")["remote_url"] == remote
+
+    # The dialog asks for the other worker right after creating, by project id.
+    resp = client.post("/api/v1/projects/setup", json={"project_id": "sideproject", "install_id": PEER,
+                                                       "folder": "sideproject"})
+    assert resp.status_code == 202, resp.text
+    params = _enqueued(resp.json()["op_id"])
+    assert params["kind"] == "git" and params["clone_url"] == remote and params["origin"] == origin
+    assert git_ops_db.get_op(resp.json()["op_id"])["project_v2_id"] == projects_v2.project_v2_id_for_origin(origin)
+
+    listed = [p for p in client.get("/api/v1/projects/overview").json()["projects"] if p["name"] == "sideproject"]
+    assert len(listed) == 1 and listed[0]["kind"] == "git"
+
+
+def test_a_folder_without_a_remote_stays_a_folder_project(client, ws, test_db):
+    from app.api.projects import create_project_record_sync
+    from app.core.models import ProjectCreate
+
+    init_repo(ws / "scratch", files={"a.txt": "a\n"})  # Git, but no remote
+    (ws / "plain").mkdir()
+    assert create_project_record_sync(ProjectCreate(id="scratch", name="Scratch", path="scratch"))["link_group_id"] is None
+    assert create_project_record_sync(ProjectCreate(id="plain", name="Plain", path="plain"))["link_group_id"] is None
+    resp = client.post("/api/v1/projects/setup", json={"project_id": "plain", "install_id": PEER})
+    params = _enqueued(resp.json()["op_id"])
+    assert params["kind"] == "folder" and params["clone_url"] is None and params["origin"] == "local:plain"
+
+
+def test_setup_asked_before_the_remote_was_read_sends_the_clone(client, ws, test_db, fresh_records):
+    # A project row recorded before its remote was read (an older worker, or
+    # an import): the setup request reads it as local:late, and only the
+    # request's own repository check links it (#802). It still sends the clone.
+    remote = _bare_remote(ws)
+    git(ws, "clone", "-q", remote, "late")
+    database.create_project(project_id="late", name="Late", description=None, path="late")
+    assert database.get_project("late")["link_group_id"] is None
+
+    resp = client.post("/api/v1/projects/setup", json={"project_id": "late", "install_id": PEER})
+    assert resp.status_code == 202, resp.text
+    params = _enqueued(resp.json()["op_id"])
+    assert params["kind"] == "git" and params["clone_url"] == remote
+    assert params["origin"] == auto_link_group_id(remote)
+
+
+def test_registering_a_set_up_project_leaves_no_local_twin(client, ws, test_db):
+    remote = _bare_remote(ws)
+    git_pv2 = _peer_project(test_db, "gitproj", "GitProj", remote=remote)
+    folder_pv2 = _peer_project(test_db, "folderproj", "FolderProj")
+    op_ids = [client.post("/api/v1/projects/setup", json={"project_v2_id": pv2["id"], "install_id": ME,
+                                                          "folder": folder}).json()["op_id"]
+              for pv2, folder in ((git_pv2, "sideproject"), (folder_pv2, "notes"))]
+    _run_setups()
+
+    for op_id, pv2 in zip(op_ids, (git_pv2, folder_pv2)):
+        op = git_ops_db.get_op(op_id)
+        assert op["status"] == "done", op
+        row = database.get_project(op["result"]["project_id"])
+        assert row["link_group_id"] == pv2["origin"]
+        assert _local_twin(row["id"]) is None, row["id"]
+    origins = {row["origin"] for row in projects_v2.list_projects_v2()}
+    assert origins == {git_pv2["origin"], folder_pv2["origin"]}
+    names = [p["name"] for p in client.get("/api/v1/projects/overview").json()["projects"]]
+    assert sorted(names) == ["FolderProj", "GitProj"]
+
+
+def test_setup_of_this_workers_own_folder_under_its_old_identity_adopts_it(ws, test_db):
+    # The failed Office PC op: kind folder, mode auto, origin local:sideproject,
+    # into the folder that IS this worker's sideproject project (since linked to its remote).
+    remote = _bare_remote(ws)
+    git(ws, "clone", "-q", remote, "sideproject")
+    (ws / "sideproject" / "work.txt").write_text("mine")
+    database.create_project(project_id="sideproject", name="sideproject", description=None, path="sideproject")
+    database.set_project_link_group("sideproject", auto_link_group_id(remote))
+    old_origin = "local:sideproject"
+    row = git_ops_db.insert_op(ME, project_setup.SETUP_OP,
+                               project_v2_id=projects_v2.project_v2_id_for_origin(old_origin),
+                               params={"origin": old_origin, "name": "sideproject", "kind": "folder", "mode": "auto",
+                                       "clone_url": None, "folder": "sideproject",
+                                       "path": str(ws / "sideproject"), "requested_by": None},
+                               op_id=project_setup.new_op_id())
+    _run_setups()
+
+    op = git_ops_db.get_op(row["id"])
+    assert op["status"] == "done", op
+    assert op["result"]["project_id"] == "sideproject" and op["result"]["already"] is True
+    assert database.get_project("sideproject")["link_group_id"] == auto_link_group_id(remote)  # not relinked
+    assert (ws / "sideproject" / "work.txt").read_text() == "mine"
+
+
+def test_folder_project_uses_a_non_empty_folder_already_there(client, ws, test_db):
+    pv2 = _peer_project(test_db, "notes", "Notes")
+    (ws / "notes").mkdir()
+    (ws / "notes" / "todo.txt").write_text("keep")
+
+    op_id = client.post("/api/v1/projects/setup", json={"project_v2_id": pv2["id"], "install_id": ME}).json()["op_id"]
+    _run_setups()
+
+    op = git_ops_db.get_op(op_id)
+    assert op["status"] == "done" and op["result"]["adopted"] is True, op
+    assert sorted(p.name for p in (ws / "notes").iterdir()) == ["todo.txt"]
+    assert (ws / "notes" / "todo.txt").read_text() == "keep"
+    row = database.get_project(op["result"]["project_id"])
+    assert row["link_group_id"] == "local:notes" and row["settings"].get("link_group_locked") is True
+    assert pv2["id"] in checkouts_db.eligible_base_project_ids(ME)
+
+
+def test_existing_folders_that_are_another_project_stay_refused(client, ws, test_db):
+    # A Git project never adopts a clone of a different repository.
+    pv2 = _peer_project(test_db, "demo", "Demo", remote=_bare_remote(ws))
+    other = _bare_remote(ws, "other")
+    git(ws, "clone", "-q", other, "demo")
+    op_id = client.post("/api/v1/projects/setup", json={"project_v2_id": pv2["id"], "install_id": ME}).json()["op_id"]
+    _run_setups()
+    op = git_ops_db.get_op(op_id)
+    assert op["status"] == "error" and op["result"]["error_code"] == "folder_exists", op
+    assert auto_link_group_id(git(ws / "demo", "remote", "get-url", "origin").strip()) == auto_link_group_id(other)
+
+    # A plain folder project never takes over a folder that is this worker's other (Git) project.
+    database.create_project(project_id="mine", name="Mine", description=None, path="demo",
+                            link_group_id=auto_link_group_id(other))
+    notes = _peer_project(test_db, "notes", "Notes")
+    op_id = client.post("/api/v1/projects/setup", json={"project_v2_id": notes["id"], "install_id": ME,
+                                                        "folder": "demo"}).json()["op_id"]
+    _run_setups()
+    op = git_ops_db.get_op(op_id)
+    assert op["status"] == "error" and op["result"]["error_code"] == "folder_exists", op
+    assert database.get_project("mine")["link_group_id"] == auto_link_group_id(other)
+
+
+def test_a_peers_same_named_folder_project_is_not_this_workers_git_project(client, ws, test_db):
+    # Another worker's plain-folder ``local:demo`` and this worker's unrelated
+    # Git project ``demo`` share only a name: no first-link record proves they
+    # are one project, so setup neither redirects to it nor reports it set up.
+    remote = _bare_remote(ws)
+    git(ws, "clone", "-q", remote, "demo")
+    database.create_project(project_id="demo", name="Demo", description=None, path="demo",
+                            link_group_id=auto_link_group_id(remote))
+    peer = projects_v2.upsert_project("local:demo", name="Demo")
+
+    resp = client.post("/api/v1/projects/setup", json={"project_v2_id": peer["id"], "install_id": PEER})
+    assert resp.status_code == 202, resp.text
+    params = _enqueued(resp.json()["op_id"])
+    assert params["origin"] == "local:demo" and params["kind"] == "folder" and params["clone_url"] is None
+
+    row = git_ops_db.insert_op(ME, project_setup.SETUP_OP, project_v2_id=peer["id"],
+                               params={"origin": "local:demo", "name": "Demo", "kind": "folder", "mode": "auto",
+                                       "clone_url": None, "folder": "demo", "path": str(ws / "demo"),
+                                       "requested_by": None},
+                               op_id=project_setup.new_op_id())
+    _run_setups()
+    op = git_ops_db.get_op(row["id"])
+    assert op["status"] == "error" and op["result"]["error_code"] == "folder_exists", op
+    assert database.get_project("demo")["link_group_id"] == auto_link_group_id(remote)
+
+
+def test_a_registered_project_whose_folder_is_gone_is_set_up_again(ws, test_db):
+    remote = _bare_remote(ws)
+    origin = auto_link_group_id(remote)
+    database.create_project(project_id="demo", name="Demo", description=None, path="demo", link_group_id=origin)
+    assert not (ws / "demo").exists()
+    row = git_ops_db.insert_op(ME, project_setup.SETUP_OP, project_v2_id=projects_v2.project_v2_id_for_origin(origin),
+                               params={"origin": origin, "name": "Demo", "kind": "git", "mode": "auto",
+                                       "clone_url": remote, "folder": "demo", "path": str(ws / "demo"),
+                                       "requested_by": None},
+                               op_id=project_setup.new_op_id())
+    _run_setups()
+    op = git_ops_db.get_op(row["id"])
+    assert op["status"] == "done" and not op["result"].get("already"), op
+    assert (ws / "demo" / "README.md").read_text() == "demo\n"  # cloned, not reported "already set up"
+
+
+def test_importing_a_git_folder_from_provider_settings_leaves_no_local_twin(ws, test_db):
+    from app.core import settings_import_service
+
+    remote = _bare_remote(ws)
+    git(ws, "clone", "-q", remote, "imported")
+    result = settings_import_service._register_project(ws / "imported")
+    assert result["status"] == "imported", result
+    project_id = result["project_id"]
+    assert database.get_project(project_id)["link_group_id"] == auto_link_group_id(remote)
+    assert _local_twin(project_id) is None
+    assert database.get_git_repository_by_project(project_id)["remote_url"] == remote

@@ -78,7 +78,7 @@ One project's per-worker detail (folder, branch, changed files, setup state). Pa
 
 ### POST /api/v1/projects/setup
 
-Set a project up on a worker: clone its remote there, use a folder that already holds the same repository, or create an empty folder for a non-Git project. Returns `202` with an `op_id`. Repeating the request while a setup is in flight returns the same one. A setup for an offline worker is queued until it comes back.
+Set a project up on a worker: clone its remote there, use a folder that already holds the same repository, or, for a non-Git project, use the folder already there as it is or create an empty one. Returns `202` with an `op_id`. Repeating the request while a setup is in flight returns the same one. A setup for an offline worker is queued until it comes back.
 
 **Body:** `install_id` (the worker), `project_v2_id` or `project_id`, optional `folder` (relative to that worker's workspace), and `mode`: `auto` (default) or `adopt` (use the existing folder).
 
