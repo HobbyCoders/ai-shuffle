@@ -62,6 +62,21 @@ it('carries a not-sent row\'s uploads for a restore that gets no server answer',
 	expect(state.messages[0].metadata?.upload_paths).toEqual(['/uploads/a.png']);
 });
 
+it('keeps sent attachment paths through a server replay', () => {
+	const state = fold([ev('message.user', {
+		content: 'inspect @/uploads/photo.png', upload_paths: ['/uploads/photo.png'],
+	})]);
+	expect(state.messages[0].metadata?.upload_paths).toEqual(['/uploads/photo.png']);
+	expect(state.messages[0].metadata?.not_sent).toBeUndefined();
+});
+
+it.each([undefined, [], '/uploads/photo.png', [123], ['/uploads/photo.png', null]])(
+	'does not expose invalid upload metadata: %j', (upload_paths) => {
+		const state = fold([ev('message.user', { content: 'text', upload_paths })]);
+		expect(state.messages[0].metadata?.upload_paths).toBeUndefined();
+	},
+);
+
 it('lets a late discard remove the stopped attempt behind a not-sent row', () => {
 	const state = fold([
 		ev('message.user', { id: 'asked', content: 'real question' }),

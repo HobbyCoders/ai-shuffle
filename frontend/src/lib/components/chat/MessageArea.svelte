@@ -2807,7 +2807,7 @@
 			rewindEligible={rewindEligible[messageIndex]}
 			notSent={!!message.metadata?.not_sent}
 			notSentMessageId={typeof message.metadata?.not_sent_id === 'string' ? message.metadata.not_sent_id : null}
-			notSentUploadPaths={Array.isArray(message.metadata?.upload_paths) ? message.metadata.upload_paths as string[] : []}
+			uploadPaths={Array.isArray(message.metadata?.upload_paths) ? message.metadata.upload_paths as string[] : []}
 			midTurn={!!message.id && midTurnUserIds.has(message.id)}
 			onRewindComplete={presentedRewindComplete}
 		/>

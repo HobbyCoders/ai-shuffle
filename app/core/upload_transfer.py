@@ -78,6 +78,38 @@ def session_upload_dir(session_id: str) -> Path:
     return settings.effective_workspace_dir / "session-uploads" / key
 
 
+def validate_upload_paths(paths: List[str], session: Dict[str, Any]) -> None:
+    """Admit provenance only from this session's attachment staging areas.
+
+    Reuse the lift path's resolved containment check, even for local sends that
+    never lift bytes. A symlink or traversal must not turn arbitrary client text
+    into a trusted attachment when the message is later restored.
+    """
+    from app.core.config import settings
+    from app.core import project_resolver
+    from app.core.session_modes import chat_uploads_dir
+
+    if not paths:
+        return
+    if not session or not session.get("id"):
+        raise UploadLiftError("Attachment session is unavailable.")
+    workspace = settings.effective_workspace_dir.resolve()
+    roots = [(session_upload_dir(session["id"]), workspace)]
+    if session.get("mode") == "chat":
+        roots.append((chat_uploads_dir(), workspace))
+    elif session.get("project_id") or session.get("project_v2_id"):
+        cwd = project_resolver.resolve_existing_cwd(session)
+        if cwd:
+            base = Path(cwd).resolve()
+            roots.append((base / UPLOADS_SUBDIR, base))
+    allowed = [root.resolve() for root, base in roots
+               if _is_under(root.resolve(), base)]
+    for raw in paths:
+        path = Path(raw)
+        if not path.is_absolute() or not any(_is_under(path.resolve(), root) for root in allowed):
+            raise UploadLiftError("Attachment path is outside this session's upload area.")
+
+
 def lift_session_paths_to_blobs(paths: List[str], session: Dict[str, Any]) -> List[str]:
     """Lift only this session's staged files, never arbitrary workspace paths."""
     session_id = session["id"]

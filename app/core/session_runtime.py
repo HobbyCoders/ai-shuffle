@@ -1552,21 +1552,44 @@ class SessionRuntime:
         engine_prompt = _with_voice_note(engine_prompt, self.turn.get("payload"))
         held_peer = ""
         engine_started = False
+        turn_payload = self.turn.get("payload") or {}
+        awaiting_uploads = bool(turn_payload.get("upload_blob_ids")) and not resume and not already_recorded
+        upload_prompt = prompt
+
+        async def record_prepared_uploads(mapping: Dict[str, str]) -> None:
+            # Materialization is still owned by the pump's resolved cwd. Only
+            # then can the event and legacy row name paths on the recording disk.
+            from app.core.upload_transfer import rewrite_prompt
+            recorded_prompt = rewrite_prompt(upload_prompt, mapping)
+            paths = [mapping[path] for path in turn_payload.get("upload_paths") or [] if path in mapping]
+            await recorder.record_user_message(
+                recorded_prompt, profile_id=self.turn.get("profile_id"),
+                source=fluid_turn_source(app_source), upload_paths=paths or None,
+                accepted_input_id=turn_payload.get("accepted_input_id"),
+            )
+            if self._abort_reason == "recording_failed":
+                raise RuntimeError("Could not record the message's prepared attachments")
+            if turn_payload.get("deferred_user_record"):
+                await self._persist_user_message(recorded_prompt, source=app_source, upload_paths=paths)
+            from app.core import owner_confirm
+            await owner_confirm.after_owner_message(self.session_id, turn_payload)
+
         if (
-            not resume
+            not awaiting_uploads
+            and not resume
             and not already_recorded
             and (self.turn.get("payload") or {}).get("deferred_user_record")
         ):
-            await self._persist_user_message(prompt, source=app_source)
+            await self._persist_user_message(prompt, source=app_source, upload_paths=turn_payload.get("upload_paths"))
         done_event = None
         turn_events = None
         try:
-            turn_payload = self.turn.get("payload") or {}
             await recorder.start(
                 prompt,
                 profile_id=self.turn.get("profile_id"),
-                record_user=not resume and not already_recorded,
+                record_user=not resume and not already_recorded and not awaiting_uploads,
                 source=fluid_turn_source(app_source),
+                upload_paths=turn_payload.get("upload_paths") or None,
                 **({"continued": True} if turn_payload.get("continued_turn") else {}),
                 **({"accepted_input_id": turn_payload["accepted_input_id"]}
                    if turn_payload.get("accepted_input_id") else {}),
@@ -1575,7 +1598,7 @@ class SessionRuntime:
                 return
             from app.core import owner_confirm
 
-            if not resume and not already_recorded:
+            if not resume and not already_recorded and not awaiting_uploads:
                 # The owner's message answered an approval in words: its outcome
                 # goes right after the message it came from (#484).
                 await owner_confirm.after_owner_message(self.session_id, self.turn.get("payload"))
@@ -1704,6 +1727,7 @@ class SessionRuntime:
                 turn_source=self.source,
                 loop_guard_turn=self.turn,
                 admission_lease=self._admission_lease,
+                **({"on_uploads_prepared": record_prepared_uploads} if awaiting_uploads else {}),
                 # Who sent a connector message, for the owner's-subscription
                 # check. Only a connector turn carries one.
                 connector_sender=(
@@ -2487,6 +2511,7 @@ class SessionRuntime:
                     content,
                     profile_id=profile_id,
                     command_id=row.get("command_id"),
+                    upload_paths=(row.get("payload") or {}).get("upload_paths") or None,
                     **({"queued_turn_id": row_id, "checkpoint_backed": False,
                         "source": "agent_message"}
                        if row.get("source") == "agent_message" else {}),
@@ -2500,6 +2525,7 @@ class SessionRuntime:
                 await owner_confirm.after_owner_message(self.session_id, row.get("payload"))
                 await self._persist_user_message(
                     content, profile_id=profile_id, source=row.get("source") or "user",
+                    upload_paths=(row.get("payload") or {}).get("upload_paths"),
                 )
             if await self._absorb_delivered_row(row_id):
                 absorbed = True
@@ -2710,7 +2736,7 @@ class SessionRuntime:
 
     async def _persist_user_message(
         self, content: str, *, profile_id: Optional[str] = None,
-        source: Optional[str] = None,
+        source: Optional[str] = None, upload_paths: Optional[List[str]] = None,
     ) -> None:
         """Dual-write one user message to ``session_messages`` + fan it out.
 
@@ -2725,6 +2751,8 @@ class SessionRuntime:
 
             role = "user"
             metadata = {"source": source or self.source}
+            if upload_paths:
+                metadata["upload_paths"] = upload_paths
             if content.strip().startswith("/"):
                 parts = content.strip().split(None, 1)
                 role = "command"

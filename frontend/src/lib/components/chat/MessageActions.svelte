@@ -16,6 +16,11 @@
 	import { get, readable } from 'svelte/store';
 	import { activeSession } from '$lib/stores/active-session';
 	import { addRestoredWordsToDraft, LEAVING_MS, noteRestoreFinished, noteRestoreStarted, pageIsLeaving, sentRewindRowId } from '$lib/stores/session/restored-draft';
+	import { flushPendingDraft } from '$lib/stores/session/draft-persistence';
+	import { draftPreview, promptStash } from '$lib/stores/session/prompt-stash';
+	import { hasComposerDraft } from '$lib/stores/session/composer-suggestion';
+	import { notify } from '$lib/stores/notifications';
+	import { restoreMessageDocument } from './tiptap/serialization';
 	import { TRANSCRIPT_ACTIONS, type TranscriptActions } from './TranscriptHydrationBoundary.svelte';
 	import { Ellipsis, Flag } from 'lucide-svelte';
 	import { executeRewind } from '$lib/api/client';
@@ -29,7 +34,8 @@
 		 *  source verbatim (assistant replies, so formatting survives a paste). */
 		copyAs?: 'plain' | 'markdown';
 		notSentMessageId?: string | null;
-		notSentUploadPaths?: string[];
+		/** Uploads the server recorded on this message (never read from its text). */
+		uploadPaths?: string[];
 		messageUuid?: string | null;  // Direct UUID from JSONL - preferred for rewind
 		userPromptOccurrence?: number | null;  // 0-based occurrence among identical-content user prompts — content-anchored rewind fallback when uuid is absent
 		rewindEligible?: boolean;
@@ -48,7 +54,7 @@
 		messageRole,
 		copyAs = 'plain',
 		notSentMessageId = null,
-		notSentUploadPaths = [],
+		uploadPaths = [],
 		messageUuid = null,  // If provided, use directly for rewind (no text matching needed)
 		userPromptOccurrence = null,
 		rewindEligible = true,
@@ -189,6 +195,45 @@
 		});
 	}
 
+	/**
+	 * What the composer of `id` says right now, chips as @name, or null when
+	 * another chat is open. Its debounced save runs first, so a key pressed a
+	 * moment ago counts.
+	 */
+	function composerWords(id: string): string | null {
+		flushPendingDraft();
+		const state = get(activeSession);
+		if (state.sessionId !== id) return null;
+		return hasComposerDraft(state.draft) ? draftPreview(state.draft ?? '', Number.MAX_SAFE_INTEGER) : '';
+	}
+
+	/**
+	 * Words typed while a rewind was on its way are a new message, and the
+	 * rewound words never join them silently (#1083). They go to the prompt
+	 * stash instead, with an offer to add them. False when the stash could not
+	 * keep them: the caller then adds them to the composer and says so.
+	 */
+	function stashRewoundWords(id: string, prompt: string, uploads: string[] | undefined): boolean {
+		const pushed = promptStash.push(JSON.stringify(restoreMessageDocument(prompt, uploads ?? [])));
+		if (!pushed?.durable) return false;
+		const entry = pushed.entry;
+		const banner = notify.banner('Your rewound message is in the prompt stash, so it was kept apart from what you typed.', {
+			severity: 'info',
+			persist: false,
+			duration_ms: 12000,
+			action: {
+				label: 'Add to composer',
+				onClick: () => {
+					notify.dismissLive(banner);
+					if (!promptStash.take(entry.id)) return;
+					if (get(activeSession).sessionId === id) activeSession.setPendingRestorePrompt(prompt, uploads);
+					else addRestoredWordsToDraft(id, prompt, uploads);
+				}
+			}
+		});
+		return true;
+	}
+
 	async function handleRewindConfirm() {
 		if (!sessionId || !rewindEligible || !canAct()) return;
 
@@ -211,20 +256,23 @@
 		const complete = onRewindComplete;
 		const removedPrompt = messageRole === 'user' ? messageContent : undefined;
 		const notSentRequest = !!notSentMessageId;
-		const unsentUploads = notSentUploadPaths;
+		const recordedUploads = uploadPaths;
 		const restoringRowId = notSentMessageId;
 		// A sent prompt's words reach the browser only in this answer, while the
 		// server drops the row as it handles the request. Note them first, so a
 		// page that reloads before the answer still gets them back (#1083).
 		const sentRowId = !notSentRequest && removedPrompt && userPromptOccurrence != null
 			? sentRewindRowId(removedPrompt, userPromptOccurrence) : null;
+		// The row, and this dialog with it, can leave on the feed before the
+		// answer comes, which frees the composer while the words are on their way.
+		const composerAtConfirm = !notSentRequest && removedPrompt ? composerWords(requestedSessionId) : null;
 		let answerLost = false;
 		isRewinding = true;
 		rewindError = null;
-		if (restoringRowId) noteRestoreStarted(requestedSessionId, restoringRowId, removedPrompt ?? '', unsentUploads);
-		// No attachments: a sent row's text can mention a path that was never
-		// attached, and only the server knows what was (#1084).
-		if (sentRowId) noteRestoreStarted(requestedSessionId, sentRowId, removedPrompt ?? '');
+		if (restoringRowId) noteRestoreStarted(requestedSessionId, restoringRowId, removedPrompt ?? '', recordedUploads);
+		// Only the uploads the server recorded: a sent row's text can mention a
+		// path that was never attached (#1084).
+		if (sentRowId) noteRestoreStarted(requestedSessionId, sentRowId, removedPrompt ?? '', recordedUploads);
 
 		try {
 			// For user messages: include_response=false removes this message and everything after.
@@ -244,9 +292,10 @@
 			}
 			// The API may finish after this row unmounts or the user changes chats.
 			// Never hand an outgoing result to the incoming session's composer/store.
-			// Attachments come back as chips only when the server names them;
-			// mentions in the text stay text (#1084).
-			const sentUploadsBack = result.restored_upload_paths?.length ? result.restored_upload_paths : undefined;
+			// Attachments come back as chips only when the server names them, in
+			// this answer or on the recorded row; mentions in the text stay text (#1084).
+			const sentUploadsBack = result.restored_upload_paths?.length ? result.restored_upload_paths
+				: recordedUploads.length ? recordedUploads : undefined;
 			if (sessionId !== requestedSessionId || !canAct(requestedSessionId)) {
 				// The server dropped the row: its words go back to that chat, which
 				// takes them as it finishes loading if it is open again, or keeps
@@ -263,8 +312,19 @@
 				// Assistant-message rewinds keep their preceding prompt in the
 				// transcript, so there is nothing to restore.
 				// Pass warning to parent to show as system message (for partial success)
-				if (sentUploadsBack) complete?.(result.warning ?? undefined, removedPrompt, sentUploadsBack);
-				else complete?.(result.warning ?? undefined, removedPrompt);
+				const now = removedPrompt && composerAtConfirm != null ? composerWords(requestedSessionId) : null;
+				const typedMeanwhile = now != null && now !== '' && now !== composerAtConfirm;
+				if (typedMeanwhile && stashRewoundWords(requestedSessionId, removedPrompt!, sentUploadsBack)) {
+					complete?.(result.warning ?? undefined);
+				} else {
+					if (typedMeanwhile) {
+						notify.banner('Your rewound message was added after what you typed. Check the composer before you send.', {
+							severity: 'warning', persist: false, duration_ms: 12000
+						});
+					}
+					if (sentUploadsBack) complete?.(result.warning ?? undefined, removedPrompt, sentUploadsBack);
+					else complete?.(result.warning ?? undefined, removedPrompt);
+				}
 			} else {
 				rewindError = result.error || 'Rewind failed';
 			}
@@ -277,7 +337,7 @@
 				restored = true;
 				const handOver = () => {
 					rewindError = RESTORE_UNCONFIRMED;
-					handBackRestoredWords(requestedSessionId, complete, undefined, removedPrompt, unsentUploads);
+					handBackRestoredWords(requestedSessionId, complete, undefined, removedPrompt, recordedUploads);
 				};
 				// A reload is what cuts requests off, too, and a page that is going
 				// takes its composer with it, so a page already leaving waits: only if
@@ -308,6 +368,8 @@
 	}
 
 	function handleRewindCancel() {
+		// Like Cancel, the backdrop cannot dismiss a rewind already asked for.
+		if (isRewinding) return;
 		showRewindDialog = false;
 		rewindError = null;
 	}
