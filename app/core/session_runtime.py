@@ -1412,11 +1412,10 @@ class SessionRuntime:
                     from app.core.provider import session_admission
 
                     if self._admission_lease is not None:
-                        session_admission.close(self._admission_lease)
                         # Raw executor calls in finalization join the same
                         # tracker too. Settlement callbacks must not run before
                         # its release owner has proved those writes settled.
-                        await session_admission.finish_saving(self._admission_lease.exited.wait())
+                        await session_admission.close_and_wait(self._admission_lease)
 
             await asyncio.shield(start_detached(release()))
 

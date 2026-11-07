@@ -45,9 +45,18 @@ class TurnWork:
         if not future.cancelled():
             future.exception()  # retrieve errors even if the caller has left
 
+    def reap_done(self) -> None:
+        # Done callbacks run on the next loop step, not inline. Python 3.12's
+        # all-done gather/shield completes eagerly and cannot yield to them.
+        for future in tuple(self.pending):
+            if future.done():
+                self._settled(future)
+
     async def drain(self) -> None:
         while self.pending:
-            await asyncio.shield(asyncio.gather(*tuple(self.pending), return_exceptions=True))
+            self.reap_done()
+            if self.pending:
+                await asyncio.shield(asyncio.gather(*tuple(self.pending), return_exceptions=True))
 
 
 _turn_work: contextvars.ContextVar[TurnWork | None] = contextvars.ContextVar("turn_work", default=None)

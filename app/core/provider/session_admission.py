@@ -339,6 +339,8 @@ def close(lease: Lease) -> None:
     unbind_turn_work(lease.work)
     if lease.exited.is_set() or lease.closing:
         return
+    # Preserve synchronous release when only scheduled discard callbacks remain.
+    lease.work.reap_done()
     if lease.work.pending:
         lease.closing = True
         closing = _own(_close_after_writes(lease))
@@ -354,6 +356,12 @@ def close(lease: Lease) -> None:
         closing.add_done_callback(completed)
         return
     _close_now(lease)
+
+
+async def close_and_wait(lease: Lease) -> None:
+    """An owning route is not complete until its issued threads have settled."""
+    close(lease)
+    await finish_saving(lease.exited.wait())
 
 
 async def _close_after_writes(lease: Lease) -> None:
@@ -418,6 +426,10 @@ async def stream_turn(
                 event = await anext(events)
             except StopAsyncIteration:
                 break
+            if event.get("type") in {"done", "interrupted", "error"}:
+                # The reader may send its next message before release finishes.
+                # Queue it behind saving rather than refusing an idle-looking chat.
+                turn_ended(lease)
             yield event
     except GeneratorExit:
         # The reader left with the turn parked at a frame, so it is still alive.
@@ -438,7 +450,7 @@ async def stream_turn(
         raise
     finally:
         if not handed_over and owns_lease:
-            close(lease)
+            await close_and_wait(lease)
 
 
 async def finish_saving(work: Awaitable[T]) -> T:
@@ -510,7 +522,7 @@ async def _finish_turn(
         logger.exception("A turn nobody is reading failed for %s", lease.session_id)
     finally:
         if release:
-            close(lease)
+            await close_and_wait(lease)
 
 
 def _frame_size(frame: Dict[str, Any]) -> int:

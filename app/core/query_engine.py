@@ -594,7 +594,7 @@ async def execute_query(
             session_id, api_user_id, automation_id, persist_user_message,
         )
     finally:
-        session_admission.close(lease)
+        await session_admission.close_and_wait(lease)
 
 
 async def _execute_query_turn(
