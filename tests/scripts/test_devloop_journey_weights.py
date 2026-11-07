@@ -11,9 +11,12 @@ import pytest
 from scripts.devloop import ci, journey_retry
 
 
-def _weights(tmp_path, seconds, per_case=10.0):
+def _weights(tmp_path, seconds, per_case=10.0, *, counts=None):
     path = tmp_path / "weights.json"
-    path.write_text(json.dumps({"seconds": seconds, "seconds_per_case": per_case}))
+    path.write_text(json.dumps({
+        "seconds": seconds, "seconds_per_case": per_case,
+        "case_counts": {name: 1 for name in seconds} if counts is None else counts,
+    }))
     return path
 
 
@@ -32,15 +35,19 @@ def test_new_heavy_producer_has_an_explicit_unmeasured_budget():
     data = json.loads(ci.WEIGHTS.read_text())
     name = "chat-position-stability.journey.mjs"
     assert 42107295628 not in data["source_runs"]  # red evidence is NOT a green measurement
-    assert ci.estimated_seconds()[name] == data["seconds"].get(name, 18 * 60)
+    estimate = ci.estimated_seconds()[name]
+    if data["case_counts"].get(name) == ci.case_count(ci.JOURNEYS / name, strict=True):
+        assert estimate == data["seconds"][name]
+    else:
+        assert estimate >= 18 * 60
 
 
 def test_unmeasured_budget_never_overrides_a_green_median(tmp_path, monkeypatch):
     name = "chat-position-stability.journey.mjs"
     (tmp_path / name).touch()
-    monkeypatch.setattr(ci, "case_count", lambda path: 47)
+    monkeypatch.setattr(ci, "case_count", lambda path, *, strict=False: 47)
     assert ci.estimated_seconds(tmp_path, _weights(tmp_path, {}))[name] == 18 * 60
-    assert ci.estimated_seconds(tmp_path, _weights(tmp_path, {name: 900}))[name] == 900
+    assert ci.estimated_seconds(tmp_path, _weights(tmp_path, {name: 900}, counts={name: 47}))[name] == 900
     # It is a floor, not a cap on the ordinary per-case estimate.
     assert ci.estimated_seconds(tmp_path, _weights(tmp_path, {}, per_case=30))[name] == 1410
 
@@ -94,7 +101,9 @@ def _assert_historical_calibration(tmp_path):
     directory = tmp_path / "historical-journeys"
     directory.mkdir()
     for name in inputs["seconds"]:
-        (directory / name).touch()
+        # Replay the pinned case lists too, not today's changing implementations.
+        cases = "\n".join(f"historical-{i}" for i in range(inputs["case_counts"][name]))
+        (directory / name).write_text(f"console.log({json.dumps(cases)});\n")
     path = directory / "weights.json"
     path.write_text(json.dumps(inputs))
     weights = ci.estimated_seconds(directory, path)
@@ -133,51 +142,120 @@ def test_valid_one_percent_refresh_does_not_rewrite_historical_calibration(tmp_p
     assert fixture.read_bytes() == original
 
 
-def test_checked_in_measurements_match_actual_case_lists():
+def test_checked_in_measurements_use_matching_inventory_or_safe_fallback():
     data = json.loads(ci.WEIGHTS.read_text())
-    # Case counts for newly measured files remain attached to their timings.
-    # Full refreshes record every file, so future additions require remeasurement
-    # instead of silently keeping a short runtime for a larger case list.
+    original = ci.WEIGHTS.read_bytes()
     assert data["case_counts"]
     assert set(data["source_revisions"]) == {str(run_id) for run_id in data["source_runs"]}
-    # Every measured file needs its case inventory, not just the last file
-    # refreshed by hand: otherwise added tool-card cases keep an 8-case weight.
+    # Historical observations stay attached to their actual measured inventory.
+    # Feature PRs may add/remove cases without fabricating a new measurement.
     assert set(data["case_counts"]) == set(data["seconds"])
-    for name, cases in data["case_counts"].items():
-        assert ci.case_count(ci.JOURNEYS / name, strict=True) == cases, name
+    assert all(type(cases) is int and cases > 0 for cases in data["case_counts"].values())
+    weights = ci.estimated_seconds()
+    for path in ci.journey_files():
+        cases = ci.case_count(path, strict=True)
+        measured = data["seconds"].get(path.name)
+        recorded_cases = data["case_counts"].get(path.name)
+        if measured is not None and cases == recorded_cases:
+            assert weights[path.name] == measured
+        else:
+            fallback = max(cases * data["seconds_per_case"],
+                           ci.UNMEASURED_BUDGET_FLOORS.get(path.name, 0))
+            if measured is not None:
+                # A grown slow file must not retain its old short runtime or
+                # become cheaper merely because the global median is lower.
+                fallback = max(fallback, measured * max(1, cases / recorded_cases))
+            assert weights[path.name] == pytest.approx(fallback), path.name
+    assert ci.WEIGHTS.read_bytes() == original
 
 
-def test_plan_uses_runtime_instead_of_case_counts(tmp_path, monkeypatch):
+@pytest.mark.parametrize("current,per_case,expected", [(10, 10, 125), (10, 20, 200), (4, 10, 100)])
+def test_changed_case_inventory_uses_conservative_fallback(
+        tmp_path, monkeypatch, capsys, current, per_case, expected):
+    name = "changed.journey.mjs"
+    (tmp_path / name).touch()
+    path = _weights(tmp_path, {name: 100}, per_case, counts={name: 8})
+    original = path.read_bytes()
+    monkeypatch.setattr(ci, "case_count", lambda path, *, strict=False: current)
+    assert ci.estimated_seconds(tmp_path, path) == {name: expected}
+    assert f"8 -> {current}" in capsys.readouterr().err
+    assert path.read_bytes() == original  # never label an estimate as a measurement
+
+
+@pytest.mark.parametrize("per_case,expected", [(10, 1080), (30, 1440)])
+def test_stale_heavy_measurement_restores_the_conservative_floor(
+        tmp_path, monkeypatch, per_case, expected):
+    name = "chat-position-stability.journey.mjs"
+    (tmp_path / name).touch()
+    path = _weights(tmp_path, {name: 900}, per_case, counts={name: 47})
+    monkeypatch.setattr(ci, "case_count", lambda path, *, strict=False: 48)
+    assert ci.estimated_seconds(tmp_path, path) == {name: expected}
+
+
+@pytest.mark.parametrize("inventory", [None, {}])
+def test_measurements_without_inventory_are_not_trusted(tmp_path, monkeypatch, inventory):
+    name = "legacy.journey.mjs"
+    (tmp_path / name).touch()
+    path = _weights(tmp_path, {name: 100}, per_case=20)
+    data = json.loads(path.read_text())
+    if inventory is None:
+        del data["case_counts"]
+    else:
+        data["case_counts"] = inventory
+    path.write_text(json.dumps(data))
+    monkeypatch.setattr(ci, "case_count", lambda path, *, strict=False: 10)
+    assert ci.estimated_seconds(tmp_path, path) == {name: 200}
+
+
+@pytest.mark.parametrize("bad", [0, -1, True, 1.5, "8", None])
+def test_invalid_recorded_case_counts_are_refused(tmp_path, bad):
+    name = "bad.journey.mjs"
+    (tmp_path / name).touch()
+    path = _weights(tmp_path, {name: 100}, counts={name: bad})
+    with pytest.raises(ValueError, match="positive integer case counts"):
+        ci.estimated_seconds(tmp_path, path)
+
+
+def test_case_list_changes_take_effect_without_refresh_or_cached_counts(tmp_path):
+    name = "feature.journey.mjs"
+    path = _weights(tmp_path, {name: 100}, counts={name: 8})
+    original = path.read_bytes()
+    for count, expected in [(8, 100), (10, 125), (4, 100), (8, 100)]:
+        cases = "\n".join(f"feature-{i}" for i in range(count))
+        (tmp_path / name).write_text(f"console.log({json.dumps(cases)});\n")
+        assert ci.estimated_seconds(tmp_path, path) == {name: expected}
+    assert path.read_bytes() == original
+
+
+def test_plan_uses_runtime_when_case_inventory_matches(tmp_path, monkeypatch):
     seconds = {"many-short.journey.mjs": 10, "few-long.journey.mjs": 90,
                "other-long.journey.mjs": 80}
-    for name in seconds:
-        (tmp_path / name).touch()
-    path = _weights(tmp_path, seconds)
-
-    def no_counts(path):
-        pytest.fail(f"measured journeys must not use case count: {path}")
-
-    monkeypatch.setattr(ci, "case_count", no_counts)
-    buckets = ci.plan(2, tmp_path, path)
-    assert buckets == [["few-long.journey.mjs"], ["many-short.journey.mjs", "other-long.journey.mjs"]]
     counts = {"many-short.journey.mjs": 100, "few-long.journey.mjs": 2,
               "other-long.journey.mjs": 1}
+    for name in seconds:
+        (tmp_path / name).touch()
+    path = _weights(tmp_path, seconds, counts=counts)
+    monkeypatch.setattr(ci, "case_count", lambda path, *, strict=False: counts[path.name])
+    buckets = ci.plan(2, tmp_path, path)
+    assert buckets == [["few-long.journey.mjs"], ["many-short.journey.mjs", "other-long.journey.mjs"]]
     assert ci.partition(counts, 2) != buckets
 
 
 def test_unknown_journey_uses_case_count_times_per_case_median(tmp_path, monkeypatch):
     for name in ("known.journey.mjs", "new.journey.mjs"):
         (tmp_path / name).touch()
-    path = _weights(tmp_path, {"known.journey.mjs": 90, "removed.journey.mjs": 999}, per_case=7.5)
+    path = _weights(tmp_path, {"known.journey.mjs": 90, "removed.journey.mjs": 999},
+                    per_case=7.5, counts={"known.journey.mjs": 4, "removed.journey.mjs": 1})
     counted = []
 
-    def count(path):
+    def count(path, *, strict=False):
+        assert strict
         counted.append(path.name)
         return 4
 
     monkeypatch.setattr(ci, "case_count", count)
     assert ci.estimated_seconds(tmp_path, path) == {"known.journey.mjs": 90, "new.journey.mjs": 30}
-    assert counted == ["new.journey.mjs"]
+    assert counted == ["known.journey.mjs", "new.journey.mjs"]
 
 
 def test_case_count_lists_all_cases_without_an_inherited_filter(tmp_path, monkeypatch):
@@ -214,6 +292,29 @@ def test_strict_case_count_refuses_listing_errors(tmp_path, monkeypatch, error):
     with pytest.raises(ValueError, match=r"Cannot read case count for a\.journey\.mjs"):
         ci.case_count(path, strict=True)
     assert ci.case_count(path) == 1
+
+
+@pytest.mark.parametrize("result", [
+    (1, "case\n"), (0, ""), (0, "case\ncase\n"),
+    OSError("node missing"), ci.subprocess.TimeoutExpired("node", 60),
+], ids=["nonzero-exit", "empty-output", "duplicate-ids", "missing-node", "timeout"])
+@pytest.mark.parametrize("mode", ["estimator", "plan"])
+def test_planning_refuses_unreadable_case_inventory(tmp_path, monkeypatch, result, mode):
+    name = "send-during-init.journey.mjs"
+    (tmp_path / name).touch()
+    path = _weights(tmp_path, {name: 110.94}, counts={name: 12})
+
+    def run(command, **kwargs):
+        if isinstance(result, Exception):
+            raise result
+        return ci.subprocess.CompletedProcess(command, result[0], stdout=result[1])
+
+    monkeypatch.setattr(ci.subprocess, "run", run)
+    with pytest.raises(ValueError, match=r"Cannot read case count for send-during-init\.journey\.mjs"):
+        if mode == "estimator":
+            ci.estimated_seconds(tmp_path, path)
+        else:
+            ci.plan(1, tmp_path, path)
 
 
 @pytest.mark.parametrize("bad", [0, -1, float("nan"), float("inf"), True, "slow"])
