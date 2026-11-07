@@ -164,6 +164,29 @@ describe('NotificationCenter', () => {
 			reMeasure();
 			await vi.waitFor(() => expect(scrim()).not.toBeNull());
 		});
+
+		it('dims the page once a chat that was still loading fills the strip under the panel', async () => {
+			// The panel (x8–308) overruns a 290px list by 18px, inside the gutter,
+			// so only content in that strip decides the scrim.
+			const hits: Element[] = [];
+			const originalHit = document.elementsFromPoint;
+			document.elementsFromPoint = () => hits;
+			try {
+				mountSidebar({ aside: 290, col: 290 });
+				const bell = screen.getByRole('button', { name: /Notifications/ });
+				// jsdom lays nothing out; put the bell near the window's bottom like the rail's.
+				bell.getBoundingClientRect = () => ({ left: 0, right: 0, top: 724, bottom: 760, width: 0, height: 36 }) as DOMRect;
+				await fireEvent.click(bell);
+				expect(scrim()).toBeNull(); // the chat has not rendered yet: blank page
+
+				// The chat finishes loading after the bell was clicked.
+				const composer = document.body.appendChild(document.createElement('textarea'));
+				hits.push(composer);
+				await vi.waitFor(() => expect(scrim()).not.toBeNull());
+			} finally {
+				document.elementsFromPoint = originalHit;
+			}
+		});
 	});
 
 	it('names each item severity for assistive tech', async () => {

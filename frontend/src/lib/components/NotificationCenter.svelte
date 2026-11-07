@@ -132,7 +132,10 @@
 		const width = Math.min(RAIL_PANEL_WIDTH, window.innerWidth - 16);
 		const left = Math.max(8, Math.min(railRight + 8, window.innerWidth - width - 8));
 		const bottomGap = Math.max(8, window.innerHeight - rect.bottom);
-		railAnchor = { left, bottom: bottomGap, width, railRight };
+		const a = railAnchor;
+		if (a.left !== left || a.bottom !== bottomGap || a.width !== width || a.railRight !== railRight) {
+			railAnchor = { left, bottom: bottomGap, width, railRight };
+		}
 		const listRight = visibleListRight(railRight);
 		const right = left + width;
 		const bottom = window.innerHeight - bottomGap;
@@ -167,7 +170,26 @@
 					})
 				: null;
 		if (plane) columnsChanged?.observe(plane, { childList: true });
+		// The page under the panel can also fill in after it opens (a chat still
+		// loading when the bell is clicked), so the strip that was blank at open
+		// now holds the transcript or composer. Re-check the page on DOM changes
+		// outside this panel, at most once a frame, so the scrim follows it.
+		const body = aside.closest('.app-body') ?? document.body;
+		let frame = 0;
+		const pageChanged =
+			typeof MutationObserver !== 'undefined'
+				? new MutationObserver((records) => {
+						if (frame || records.every((r) => rootRef?.contains(r.target))) return;
+						frame = requestAnimationFrame(() => {
+							frame = 0;
+							positionPanel();
+						});
+					})
+				: null;
+		pageChanged?.observe(body, { childList: true, subtree: true, characterData: true });
 		return () => {
+			if (frame) cancelAnimationFrame(frame);
+			pageChanged?.disconnect();
 			columnsChanged?.disconnect();
 			observer.disconnect();
 		};
