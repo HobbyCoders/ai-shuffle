@@ -806,7 +806,11 @@ def copy_session_events(
             "RETURNING next_seq",
             (dest_session_id, n),
         )
-        if cursor.fetchone() is None:
+        allocated = cursor.fetchone() is not None
+        # Fork commits its destination before copying. Delete may have won the
+        # counter while we read the source: reject and roll back its recreation.
+        _require_session(cursor, dest_session_id)
+        if not allocated:
             return 0
 
         params = []

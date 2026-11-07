@@ -340,7 +340,8 @@ def _delete_behind_writer(private_pool, monkeypatch, sid, write, old_boundary):
         observer.autocommit = True
         writing = writer.submit(write)
         try:
-            assert locked.wait(5), "writer never reached its mutation lock"
+            if not locked.wait(5):
+                pytest.fail(f"writer never reached its mutation lock: {writing.result(timeout=1)!r}")
             deleting = deleter.submit(sessions.delete_session, sid)
             _wait_for_lock_wait(observer, writer_pid[0], deleting)
         finally:
@@ -377,3 +378,70 @@ def test_delete_vs_report_clear_and_answer(private_pool, monkeypatch, path):
         boundary = lambda sql: (sql.startswith("UPDATE pending_interactions SET state='answered'")
                                 or ("FROM sessions WHERE id=" in sql and "FOR UPDATE" in sql))
     _delete_behind_writer(private_pool, monkeypatch, sid, write, boundary)
+
+
+
+def test_fork_cannot_message_parent_before_or_during_admission(private_pool, monkeypatch):
+    from app.db import database
+    from app.core import session_orchestration as orch
+
+    token = uuid4().hex
+    parent, child, profile = "z-parent-" + token, "a-child-" + token, "agent-" + token
+    database.create_profile(profile, "Lock test", None, {"model": "sonnet"})
+    for sid, owner in ((parent, None), (child, parent)):
+        sessions.create_session(sid, profile, title=sid, is_active=True, model="sonnet",
+                                permission_mode="default", parent_session_id=owner)
+        turn = turns.enqueue_turn(sid, "user", prompt="work", profile_id=profile)
+        turns.settle_turn(turn["id"], "completed")
+    monkeypatch.setattr(orch, "_principal", lambda sid: None)
+    # Forks are not top-level peers: neither initial discovery nor the locked
+    # admission recheck permits the alleged child -> parent MessageSession.
+    with pytest.raises(ValueError, match="Top-level orchestration"):
+        orch._queue(child, {"session_id": parent, "message": "Report to parent",
+                            "request_id": "parent-delete-race"}, "message")
+    before = sessions.get_session(child)
+    snapshot = {**before, "parent_session_id": None}
+    with base.get_db() as conn, pytest.raises(ValueError, match="scope or permissions changed"):
+        orch._recheck(conn.cursor(), [snapshot], {child: None})
+    assert sessions.get_session(child)["parent_session_id"] == parent
+
+
+
+def test_copy_rejects_destination_deleted_while_waiting_for_counter(private_pool, monkeypatch):
+    source, dest = "copy-source-" + uuid4().hex, "copy-dest-" + uuid4().hex
+    with base.get_db() as conn:
+        conn.cursor().executemany("INSERT INTO sessions (id) VALUES (%s)", [(source,), (dest,)])
+    session_events.append_events(source, [{"type": "system.note", "payload": {"content": "keep source"}}])
+    deleting_locked, resume = threading.Event(), threading.Event()
+    delete_pid = []
+    original_cursor = base._PgDictConnection.cursor
+
+    class InterleavedCursor(RealDictCursor):
+        def execute(self, sql, params=None):
+            if sql.startswith("DELETE FROM session_events WHERE") and params == (dest,):
+                delete_pid.append(self.connection.get_backend_pid())
+                deleting_locked.set()
+                assert resume.wait(10)
+            return super().execute(sql, params)
+
+    def instrumented(self, *args, **kwargs):
+        kwargs["cursor_factory"] = InterleavedCursor
+        return original_cursor(self, *args, **kwargs)
+
+    monkeypatch.setattr(base._PgDictConnection, "cursor", instrumented)
+    monkeypatch.setattr(sessions, "_cleanup_working_set_ref", lambda sid: None)
+    monkeypatch.setattr(sessions, "_cleanup_pending_wakeups", lambda sid: None)
+    with psycopg2.connect(**private_pool) as observer, ThreadPoolExecutor(max_workers=2) as workers:
+        observer.autocommit = True
+        deleting = workers.submit(sessions.delete_session, dest)
+        assert deleting_locked.wait(5)
+        copying = workers.submit(session_events.copy_session_events, source, dest)
+        try:
+            _wait_for_lock_wait(observer, delete_pid[0], copying)
+        finally:
+            resume.set()
+        assert deleting.result(timeout=5)
+        with pytest.raises(ValueError, match="session.*does not exist"):
+            copying.result(timeout=5)
+    _assert_deleted(dest)
+    assert len(session_events.get_events(source)) == 1
