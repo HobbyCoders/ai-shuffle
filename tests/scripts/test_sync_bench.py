@@ -9,9 +9,18 @@ import pytest
 
 from scripts.perf import sync_bench
 from scripts.perf.sync_bench import (
-    attempt, capture_log, completed_scans, delta_lags, op_key, recall_visible,
+    attempt, capture_log, committed_at, completed_scans, delta_lags, op_key, recall_visible,
     sample_summary, sanitize_log, stages, stop_lab, summarize, wait_for,
 )
+
+
+def test_project_creation_starts_at_first_domain_commit_not_response_or_read():
+    result = {"trace": "create", "end": 7}
+    metrics = {"events": [{"kind": "commit", "trace": "other", "t": 1},
+                          {"kind": "commit", "trace": "create", "t": 4},
+                          {"kind": "commit", "trace": "create", "t": 3}]}
+    assert committed_at(result, metrics) == 3
+    assert committed_at(result, {"events": []}) == 7
 
 
 def test_stream_lags_match_common_seq_endpoints_not_frame_positions():

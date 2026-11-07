@@ -146,20 +146,8 @@ def _seed_pv2_from_legacy(
     Idempotent (a concurrent seed loses the race harmlessly). Returns the
     resulting projects_v2 row, or ``None`` if it somehow could not be resolved.
     """
-    pv2_id = projects_v2.project_v2_id_for_origin(origin)
     try:
-        with get_db() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "INSERT INTO projects_v2 (id, origin, name, settings) "
-                "VALUES (%s, %s, %s, %s) "
-                "ON CONFLICT (origin) DO NOTHING",
-                (pv2_id, origin, legacy.get("name") or origin, "{}"),
-            )
-            checkouts_db.seed_legacy_base_checkout(
-                cursor, str(legacy.get("id")), pv2_id,
-                legacy.get("instance_id") or "", legacy.get("path"),
-            )
+        return projects_db.seed_project_catalog(legacy)
     except Exception as e:  # pragma: no cover - best-effort self-seed
         logger.warning(
             "project_resolver: failed to self-seed project_v2 for origin %s: %s",
