@@ -316,7 +316,10 @@ await runJourney({
 		}
 	}, {
 		// Emptying the composer while a send waits is the user's choice; the
-		// called-off send must not bring the words back.
+		// called-off send must not bring that text back. Send clears the
+		// composer before the cold-cache check (#933), so the text the user can
+		// empty during the wait is what they typed after Send; the called-off
+		// message itself, which they never removed, comes back alone.
 		name: 'a-draft-emptied-while-a-send-waits-stays-empty',
 		viewports: ['desktop'],
 		throttles: ['fast'],
@@ -327,15 +330,19 @@ await runJourney({
 			await waitChatOpen(page);
 		},
 		async act({ page, mark, log }) {
-			const token = `dropped-${uniq()}`;
+			const token = `kept-${uniq()}`;
+			const dropped = `dropped-${uniq()}`;
 			let release;
 			let held = 0;
 			const released = new Promise((resolve) => { release = resolve; });
 			await page.route('**/cache-state*', async (route) => { held += 1; await released; await route.continue().catch(() => {}); });
 			await composer(page).click();
 			await composer(page).pressSequentially(token);
-			await mark('Send, empty the composer while it waits, then New chat');
+			await mark('Send, type and then empty the composer while it waits, then New chat');
 			await sendButton(page).click();
+			expect(!(await editorText(page)).includes(token), 'Send cleared the composer before the cache check answered');
+			await composer(page).click();
+			await composer(page).pressSequentially(dropped);
 			await composer(page).press('Control+A');
 			await composer(page).press('Backspace');
 			await page.keyboard.press('Control+N');
@@ -351,7 +358,9 @@ await runJourney({
 			await waitChatOpen(page);
 			const draft = await editorText(page);
 			log(`draft: ${JSON.stringify(draft)}`);
-			expect(!draft.includes(token), 'the emptied draft stays empty');
+			expect(!draft.includes(dropped), 'the text emptied during the wait stays gone');
+			expect(draft.includes(token), 'the called-off message waits as the draft');
+			expect((await countUserRows(page, token)) === 0, 'and it was not sent in that chat either');
 			await clearComposer(page);
 			await page.waitForTimeout(500);
 		}

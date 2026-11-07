@@ -25,6 +25,7 @@
  * the code, often first, so an abort waits briefly for the coded frame.
  */
 import { api, getErrorMessage, type Profile } from '$lib/api/client';
+import { randomUUID } from '$lib/utils/id';
 import type { ModelProvider } from '$lib/api/model-providers';
 import { wsUrl } from '$lib/api/runtime';
 import { providerOfRow } from '$lib/components/settings/providers/providers-model';
@@ -87,15 +88,6 @@ export async function ensureStarterAgent(): Promise<Profile> {
 	const own = Array.isArray(agents) ? agents.find((agent) => !agent.is_builtin) : undefined;
 	if (own) return own;
 	return api.post<Profile>('/agents', STARTER_AGENT);
-}
-
-function randomId(): string {
-	try {
-		if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID();
-	} catch {
-		// Fall through to the non-cryptographic id; it only matches our own frame.
-	}
-	return `setup-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
 
 function str(value: unknown): string {
@@ -205,7 +197,7 @@ interface StartOptions {
 
 export function startFirstAgentRun(options: StartOptions): FirstRunHandle {
 	const prompt = options.prompt ?? FIRST_RUN_PROMPT;
-	const requestId = randomId();
+	const requestId = randomUUID();
 	const state: FirstRunState = { phase: 'starting', text: '', sessionId: null, error: null, code: null };
 	let socket: WebSocket | null = null;
 	let feed: Pick<SseFeed, 'stop'> | null = null;

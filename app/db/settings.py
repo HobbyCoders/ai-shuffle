@@ -81,18 +81,20 @@ class PreferenceConflict(ValueError):
 
 
 def set_user_preference(user_type: str, user_id: str, key: str, value: Any, only_if_missing: bool = False,
-                        *, expected_version=_UNCONDITIONAL) -> UserPreferenceRow:
+                        *, expected_version=_UNCONDITIONAL, write_id: Optional[str] = None) -> UserPreferenceRow:
     """Upsert with optional optimistic concurrency independent of wall clock.
 
     Omitted version supports legacy clients; explicit null requires a missing
     row. A supplied UUID must match the row owned by this exact user and key.
+    A client `write_id` becomes the new revision, so a retry of a write that
+    already committed (its response lost) answers with that row, not a conflict.
     """
     key = _canonical_preference_key(key)
     with get_db() as conn:
         cursor = conn.cursor()
         now = datetime.now(timezone.utc).isoformat()
         value_json = json.dumps(value)
-        revision = str(uuid4())
+        revision = write_id or str(uuid4())
 
         insert_if_missing = (
             f"""INSERT INTO user_preferences (user_type, user_id, key, value, updated_at, revision)
@@ -119,6 +121,14 @@ def set_user_preference(user_type: str, user_id: str, key: str, value: Any, only
             )
         result = row_to_dict(cursor.fetchone())
         inserted = result is not None
+        if result is None and write_id and not only_if_missing:
+            cursor.execute(
+                f"SELECT {_PREFERENCE_COLUMNS} FROM user_preferences WHERE user_type = %s AND user_id = %s AND key = %s",
+                (user_type, user_id, key),
+            )
+            current = row_to_dict(cursor.fetchone())
+            if current is not None and current.get("revision") == write_id:
+                result = current
         if result is None:
             if not only_if_missing:
                 raise PreferenceConflict('Preference changed elsewhere; refresh before editing')

@@ -112,14 +112,20 @@ LABELS = {
 _WORD = re.compile(r"[a-z0-9]{4,}")
 
 
-def _signal(sid: str, attention: bool, reason: str, *, alert: bool = False, **detail) -> dict:
+def _signal(sid: str, attention: bool, reason: str, *, alert: bool = False, note: bool = False,
+            **detail) -> dict:
     """``alert`` marks an attention the owner is notified about: memory was
     lost or refused (user-saved facts gone, saves failing, the store full,
     conversation dropped unread). Every other attention is shown in
     Settings, System only. Raising the bell for each heuristic signal kept
-    notifying about things nobody could act on, one signal after another."""
+    notifying about things nobody could act on, one signal after another.
+
+    ``note`` marks a healthy signal whose reason the owner should still be
+    able to read (past permanent deletions, unknown earlier history), so
+    "Healthy" is not read as "nothing was lost". It never notifies."""
     return {"id": sid, "label": LABELS[sid], "state": "attention" if attention else "healthy",
-            "alert": bool(attention and alert), "reason": reason, "detail": detail}
+            "alert": bool(attention and alert), "note": bool(note and not attention),
+            "reason": reason, "detail": detail}
 
 
 def alert_signals(state: dict) -> list[dict]:
@@ -753,7 +759,7 @@ def _capacity_signal(store, live, archived, archive_loss=None, *, now=None) -> d
     reason = f"{_plural(len(live), 'live fact')}; saves have room."
     if loss_reason:
         reason += " " + loss_reason
-    return _signal("capacity", False, reason, **detail)
+    return _signal("capacity", False, reason, note=bool(loss_reason), **detail)
 
 
 def _snapshot_signal(plans) -> dict:
@@ -939,7 +945,8 @@ def summary(state: dict) -> dict:
     return {
         "state": state.get("state", "healthy"),
         "checked_at": state.get("checked_at"),
-        "signals": [{k: s.get(k) for k in ("id", "label", "state", "reason", "detail")} for s in signals],
+        "signals": [{**{k: s.get(k) for k in ("id", "label", "state", "reason", "detail")},
+                     "note": bool(s.get("note"))} for s in signals],
         "repairs": [{"kind": r.get("kind"), "count": r.get("count"), "at": r.get("at"),
                      "summary": describe_repair(r)} for r in sorted(repairs, key=lambda r: -(r.get("at") or 0))],
     }

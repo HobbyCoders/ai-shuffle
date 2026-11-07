@@ -407,10 +407,14 @@
 	/* ===== Hero sentence word (variant="sentence") ===== */
 	.sentence-variant { display: inline-flex; position: static; }
 	/* floatingMenu owns its position on desktop; mobilePopup on the phone. */
-	/* On the sheet's Project page the list fills the page instead of floating. */
-	.picker-dropdown.sheet-page {
+	/* On the sheet's Project page the list fills the page instead of floating.
+	   Three classes so it outranks the floating `.sentence-menu` width below;
+	   the page scrolls, not a capped list inside it. */
+	.picker-dropdown.sentence-menu.sheet-page {
+		--selector-scroll-height: none;
 		position: static;
 		width: 100%;
+		min-width: 0;
 		max-width: none;
 		margin: 0;
 		transform: none;

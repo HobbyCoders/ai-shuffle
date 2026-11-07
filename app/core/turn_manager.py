@@ -589,10 +589,11 @@ async def submit_async(
         # The owner's own message is the only thing that can answer a question
         # the assistant is waiting on (app/core/owner_confirm). The request
         # is settled now, so the job that asked never waits on this chat's
-        # queue. The turn still runs, so the assistant sees the reply, and it
-        # carries the outcome: session_runtime writes it right after the
-        # owner's message, so the transcript reads request, answer, outcome
-        # (#484) however long the turn waits to start.
+        # queue. The queued row carries the outcome: session_runtime writes it
+        # right after the owner's message (#484). A live turn may still hear
+        # the reply as a steer, but a reply already used by a permission waiter
+        # must not start another model call if it outlives that turn (#1092).
+        # An answer to a released call still runs to resume that work (#523).
         from app.core import owner_confirm
 
         answered = await owner_confirm.on_owner_message(session_id, prompt)
