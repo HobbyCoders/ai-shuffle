@@ -426,36 +426,45 @@ class GitWorktreeMixin:
 
             if retry_safe and _is_lfs_failure(result.stderr or ""):
                 original_error = worktree_error_detail(result.stderr)
-                logger.warning("LFS checkout failed at %s; retrying without LFS: %s", path, original_error)
-                # Failed filters normally remove the directory themselves. A failed
-                # post-checkout hook instead leaves a registered, populated checkout.
-                # Use the removal safety preflight (junctions/mounts) in either case.
-                if not self._cleanup_failed_lfs_checkout(main_dir, path):
-                    return False, original_error + " (could not safely clean up the failed checkout)"
-                if not self._prune_worktrees_unlocked(main_dir):
-                    return False, original_error + " (could not prune the failed checkout)"
+                target = os.path.normcase(os.path.abspath(path))
+                registered = any(os.path.normcase(os.path.abspath(wt["path"])) == target
+                                 for wt in self.list_worktrees(main_dir))
+                if registered:
+                    # Git rolls back a failed checkout, but not a failed
+                    # post-checkout hook. Another session may already have
+                    # adopted this complete checkout: never remove or reset it.
+                    from app.core.checkout_manager import _require_branch_binding
 
-                # -b can have created its ref even though checkout failed. Reuse
-                # that ref, never delete it or try to create it a second time.
-                if new_branch and self._run_git(
-                    main_dir, ["show-ref", "--verify", "--quiet", f"refs/heads/{branch}"], timeout=10
-                ).returncode == 0:
-                    args = ["worktree", "add", "--", path, branch]
-                with tempfile.TemporaryDirectory(prefix="shuffle-no-lfs-hooks-") as hooks:
-                    result = self._run_git(main_dir, [
-                        *LFS_PASSTHROUGH_CONFIG,
-                        "-c", f"core.hooksPath={hooks}", *args,
-                    ], timeout=30)
-                if result.returncode == 0:
-                    from fluid.context.runtime_facts import LFS_FALLBACK_WARNING, record_lfs_fallback
+                    _require_branch_binding(path, branch)
+                    logger.warning("LFS hook failed at %s; keeping completed checkout: %s", path, original_error)
+                else:
+                    logger.warning("LFS checkout failed at %s; retrying without LFS: %s", path, original_error)
+                    if not self._cleanup_failed_lfs_checkout(main_dir, path):
+                        return False, original_error + " (could not safely clean up the failed checkout)"
+                    if not self._prune_worktrees_unlocked(main_dir):
+                        return False, original_error + " (could not prune the failed checkout)"
 
-                    record_lfs_fallback(path)
-                    logger.warning("%s Worktree: %s", LFS_FALLBACK_WARNING, path)
-                    return True, LFS_FALLBACK_WARNING
-                # Keep both causes, but never retry a second time.
-                return False, worktree_error_detail(
-                    original_error + "\nRetry without LFS failed: " + (result.stderr or "Unknown git error")
-                )
+                    # -b can have created its ref even though checkout failed.
+                    # Reuse that ref rather than trying to create it again.
+                    if new_branch and self._run_git(
+                        main_dir, ["show-ref", "--verify", "--quiet", f"refs/heads/{branch}"], timeout=10
+                    ).returncode == 0:
+                        args = ["worktree", "add", "--", path, branch]
+                    with tempfile.TemporaryDirectory(prefix="shuffle-no-lfs-hooks-") as hooks:
+                        result = self._run_git(main_dir, [
+                            *LFS_PASSTHROUGH_CONFIG,
+                            "-c", f"core.hooksPath={hooks}", *args,
+                        ], timeout=30)
+                    if result.returncode != 0:
+                        # Keep both causes, but never retry a second time.
+                        return False, worktree_error_detail(
+                            original_error + "\nRetry without LFS failed: " + (result.stderr or "Unknown git error")
+                        )
+                from fluid.context.runtime_facts import LFS_FALLBACK_WARNING, record_lfs_fallback
+
+                record_lfs_fallback(path)
+                logger.warning("%s Worktree: %s", LFS_FALLBACK_WARNING, path)
+                return True, LFS_FALLBACK_WARNING
 
             error_msg = worktree_error_detail(result.stderr)
             logger.warning(f"Failed to add worktree: {error_msg}")
@@ -466,13 +475,13 @@ class GitWorktreeMixin:
             return False, error_msg
 
     def _cleanup_failed_lfs_checkout(self, main_dir: str, path: str) -> bool:
-        """Clean only the checkout this attempt created, before runtime links exist."""
+        """Clean only unregistered remnants, never an adoptable checkout."""
         if not os.path.lexists(path):
             return True
         target = os.path.normcase(os.path.abspath(path))
         if any(os.path.normcase(os.path.abspath(wt["path"])) == target
                for wt in self.list_worktrees(main_dir)):
-            return self._remove_worktree_unlocked(main_dir, path, force=True)
+            return False  # A registered checkout may already be in use.
         # Some Git/OS failures leave files after unregistering the checkout.
         # Still use the mount/junction preflight before removing that remnant.
         from app.core.checkout_manager import sever_runtime_links

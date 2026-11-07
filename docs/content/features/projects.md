@@ -59,7 +59,7 @@ A project folder inside another repository remains usable for chat. Its Git indi
 
 A chat can work on its own branch in its own copy of the project (a Git worktree). The agent works there without touching your main folder, so several chats can work on different changes at once.
 
-If Git LFS is missing or broken on a worker, AI Shuffle retries worktree creation once with LFS filters and checkout hooks disabled for that command only. Large LFS files may remain pointer-text placeholders. The warning is logged and included in the agent's workspace facts; the repository's configuration and hooks are unchanged. Install or repair `git-lfs`, then run `git lfs pull` in the worktree to fetch the files. Other Git checkout failures report the actual Git error instead of guessing that the branch is missing.
+If Git LFS is missing or broken on a worker, AI Shuffle keeps a completed worktree when only its LFS checkout hook failed, or retries a failed checkout once with LFS filters and checkout hooks disabled for that command only. It never deletes a registered checkout during this recovery. Large LFS files may remain pointer-text placeholders. The warning is logged and included in the agent's workspace facts; the repository's configuration and hooks are unchanged. Install or repair `git-lfs`, then run `git lfs pull` in the worktree to fetch the files. Other Git checkout failures report the actual Git error instead of guessing that the branch is missing.
 
 The composer remembers worktrees on or off separately for each project, including across devices. A project without a saved choice starts with worktrees off. Chats without a project and folders that are not Git repositories always use the main folder. Existing chats keep their own checkout.
 

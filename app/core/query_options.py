@@ -409,7 +409,7 @@ def _resolve_checkout_for_options(session_row: Dict[str, Any]) -> Optional[str]:
     from app.core import project_resolver
 
     try:
-        return project_resolver.resolve_cwd(session_row)
+        return project_resolver.resolve_cwd(session_row, raise_add_errors=True)
     except WorktreeAddError as exc:
         raise WorktreeUnavailableError(
             session_row.get("id"),

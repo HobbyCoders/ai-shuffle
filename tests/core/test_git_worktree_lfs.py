@@ -51,9 +51,13 @@ def test_missing_lfs_retries_once_with_pointer_files(lfs_repo, tmp_path, caplog,
         result = run(cwd, args, **kwargs)
         if "worktree" in args and "add" in args:
             adds.append((list(args), result.returncode))
-            if len(adds) == 1 and new_branch:
-                # The failed -b command really creates the ref; retry must reuse it.
-                assert git(repo, "rev-parse", "feature") == git(repo, "rev-parse", "main")
+            if len(adds) == 1:
+                # Real filter failures roll back both files and registration.
+                assert result.returncode != 0 and not dest.exists()
+                assert str(dest) not in git(repo, "worktree", "list", "--porcelain")
+                if new_branch:
+                    # The failed -b still creates its ref; retry must reuse it.
+                    assert git(repo, "rev-parse", "feature") == git(repo, "rev-parse", "main")
         return result
 
     monkeypatch.setattr(service, "_run_git", traced)
@@ -112,23 +116,35 @@ def test_lfs_failure_detector(diagnostic, expected):
     assert _is_lfs_failure(diagnostic) is expected
 
 
-def test_lfs_hook_failure_cleans_registered_worktree(lfs_repo, tmp_path, monkeypatch):
-    repo, dest = lfs_repo, tmp_path / "hook-worktree"
+def test_lfs_hook_failure_keeps_registered_worktree(checkout_project, lfs_repo, monkeypatch):
+    from app.core import checkout_manager
+
+    repo = lfs_repo
+    dest = checkout_manager._branch_checkout_path(str(repo), "hook-branch")
+    dest.parent.mkdir(parents=True, exist_ok=True)
     # Checkout itself succeeds; only the unavailable-LFS hook fails.
     git(repo, "config", "filter.lfs.process", "")
     git(repo, "config", "filter.lfs.smudge", "")
     git(repo, "config", "filter.lfs.required", "false")
     hook = repo / ".git" / "hooks" / "post-checkout"
     hook.write_text("#!/bin/sh\necho 'git-lfs: not found' >&2\nexit 2\n")
-    service, first = GitService(), []
+    service, first, mutations = checkout_manager.git_service, [], []
     run = service._run_git
 
     def traced(cwd, args, **kwargs):
         result = run(cwd, args, **kwargs)
+        if args[:2] in (["worktree", "add"], ["worktree", "remove"], ["worktree", "prune"]):
+            mutations.append(args[:2])
         if "worktree" in args and "add" in args and not first:
             assert result.returncode == 2
             assert dest.is_dir() and (dest / ".git").is_file()
             assert str(dest) in git(repo, "worktree", "list", "--porcelain")
+            # Interleave the real adoption path before the first caller handles
+            # Git's failed hook. A second session can now write into this cwd.
+            adopted = checkout_manager.ensure_checkout(checkout_project, "hook-branch", provision_runtime=False)
+            assert adopted == str(dest)
+            (dest / "agent-work.txt").write_text("work written after adoption")
+            (dest / "asset.bin").write_text("agent edit after adoption\n")
             first.append(result)
         return result
 
@@ -136,6 +152,10 @@ def test_lfs_hook_failure_cleans_registered_worktree(lfs_repo, tmp_path, monkeyp
     success, warning = service.add_worktree(str(repo), str(dest), "hook-branch", new_branch=True)
     assert success, warning
     assert first and "placeholders" in warning
+    assert (dest / "agent-work.txt").read_text() == "work written after adoption"
+    assert (dest / "asset.bin").read_text() == "agent edit after adoption\n"
+    assert mutations == [["worktree", "add"]]  # No retry, remove, or prune.
+    assert warning in runtime_facts(str(dest))
     assert git(repo, "worktree", "list", "--porcelain").count("worktree ") == 2
     assert "git-lfs: not found" in hook.read_text()
 
@@ -203,7 +223,7 @@ def checkout_project(mock_db, lfs_repo):
 
 
 def test_checkout_manager_and_executor_preserve_git_error(checkout_project, lfs_repo, tmp_path):
-    from app.core import checkout_manager, git_ops_runner
+    from app.core import checkout_manager, git_ops_runner, project_resolver
     from app.core.git_worktree_ops import WorktreeAddError
     from app.core.config import settings
     from app.db import git_ops
@@ -215,9 +235,14 @@ def test_checkout_manager_and_executor_preserve_git_error(checkout_project, lfs_
         git_ops_runner.execute_ensure_worktree(op)
     assert "exists neither locally" not in str(error.value)
     assert "Git worktree add failed" in str(error.value)
-    # An existing branch retry must keep the diagnostic too, not return None.
+    # Legacy callers retain None; session callers explicitly opt into details.
+    assert checkout_manager.ensure_checkout(checkout_project, "broken", provision_runtime=False) is None
     with pytest.raises(WorktreeAddError, match="missing-other"):
-        checkout_manager.ensure_checkout(checkout_project, "broken", provision_runtime=False)
+        checkout_manager.ensure_checkout(checkout_project, "broken", provision_runtime=False, raise_add_errors=True)
+    session = {"id": "broken-session", "project_v2_id": checkout_project["id"], "branch": "broken"}
+    assert project_resolver.resolve_cwd(session) is None
+    with pytest.raises(WorktreeAddError, match="missing-other"):
+        project_resolver.resolve_cwd(session, raise_add_errors=True)
 
 
 @pytest.mark.asyncio
@@ -264,7 +289,7 @@ def test_error_details_are_bounded_and_redacted():
 
 @pytest.mark.parametrize("existing_branch", [True, False])
 def test_checkout_transfer_uses_same_lfs_fallback(lfs_repo, tmp_path, existing_branch):
-    from app.core.checkout_transfer import import_checkout, remote_identity
+    from app.core.checkout_transfer import import_checkout, remote_identity, fingerprint
     from fluid.context.runtime_facts import lfs_fallback_warning
 
     origin = tmp_path / "origin.git"
@@ -281,6 +306,15 @@ def test_checkout_transfer_uses_same_lfs_fallback(lfs_repo, tmp_path, existing_b
     assert import_checkout(lfs_repo, dest, state) == str(dest)
     assert (dest / "asset.bin").read_text() == POINTER
     assert lfs_fallback_warning(str(dest))
+    # The handoff caller verifies again with no import-specific flags.
+    assert fingerprint(dest) == head
+    (dest / "asset.bin").write_text("agent changed the LFS file\n")
+    with pytest.raises(ValueError, match="files changed during resume"):
+        fingerprint(dest)
+    (dest / "asset.bin").write_text(POINTER)
+    (dest / "untracked.txt").write_text("agent work\n")
+    with pytest.raises(ValueError, match="files changed during resume"):
+        fingerprint(dest)
 
 
 def test_unregistered_partial_directory_is_cleaned(lfs_repo, tmp_path, monkeypatch):

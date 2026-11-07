@@ -23,10 +23,11 @@ _log = logging.getLogger(__name__)
 _RECEIPT = "fluid-runtime-provisioning.json"
 _LFS_RECEIPT = "fluid-lfs-placeholders"
 LFS_FALLBACK_WARNING = (
-    "Git LFS was unavailable or broken on this worker, so this worktree was created "
-    "without LFS and its large LFS files may still be pointer-text placeholders. "
+    "Git LFS was unavailable or broken during worktree setup on this worker; "
+    "large LFS files in this worktree may be pointer-text placeholders. "
     "Install or repair git-lfs and run `git lfs pull` in the worktree to fetch them. "
-    "Repository hooks were skipped for this checkout command only; config and hooks were not changed."
+    "LFS filters and checkout hooks are bypassed only when retrying checkout; "
+    "repository config and hooks are not changed."
 )
 _KEYS = ("linked", "installed", "synced", "skipped", "errors")
 

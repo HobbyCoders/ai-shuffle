@@ -172,6 +172,7 @@ def execute_ensure_worktree(op_row: Dict[str, Any]) -> Dict[str, Any]:
                 branch,
                 base_branch=params.get("base_branch"),
                 create_new_branch=True,
+                raise_add_errors=True,
             )
     else:
         path = checkout_manager.ensure_checkout(
@@ -179,6 +180,7 @@ def execute_ensure_worktree(op_row: Dict[str, Any]) -> Dict[str, Any]:
             branch,
             base_branch=params.get("base_branch"),
             create_new_branch=False,
+            raise_add_errors=True,
         )
     if not path:
         # Actual worktree-add failures raise WorktreeAddError from ensure_checkout;
